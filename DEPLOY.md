@@ -8,48 +8,48 @@ in; deploys straight from this folder, managed Postgres, stable URL).
 > Why not Vercel/Netlify? The firewall's background workers (auto-pause +
 > Salesforce sync) need an always-on server, not serverless functions.
 
-## One-time deploy (Railway)
+## Deploy from GitHub (recommended)
+
+Repo: `https://github.com/CDR-Shepard/spam-res-cti`. Railway reads `railway.json`
+and builds with the `Dockerfile` automatically — no build config to pick.
+
+1. **railway.com → New Project → Deploy from GitHub repo →** `CDR-Shepard/spam-res-cti`.
+   It detects the Dockerfile; let the first build run (it will crash-loop until
+   you add the DB + variables in the next steps — that's expected).
+2. **+ New → Database → Add PostgreSQL** in the same project.
+3. Generate three secrets locally and copy each value:
+   ```bash
+   openssl rand -hex 32   # TOKEN_ENCRYPTION_KEY (64 hex chars)
+   openssl rand -hex 32   # SESSION_SECRET
+   openssl rand -hex 24   # NUMBERVERIFIER_VERIFY_KEY
+   ```
+4. Open the **API service → Variables** and add:
+
+   | Variable | Value |
+   |---|---|
+   | `NODE_ENV` | `production` |
+   | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (reference the Postgres you added) |
+   | `TOKEN_ENCRYPTION_KEY` | the 64-hex value |
+   | `SESSION_SECRET` | the 32-byte value |
+   | `NUMBERVERIFIER_VERIFY_KEY` | the secret you'll also paste into NumberVerifier |
+   | `TWILIO_ACCOUNT_SID` … `TWILIO_DEFAULT_CALLER_ID` | from your Twilio console |
+   | `SALESFORCE_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` | if using Salesforce |
+
+5. **Settings → Networking → Generate Domain.** Copy `https://<name>.up.railway.app`.
+6. Add one more variable `API_PUBLIC_URL=https://<name>.up.railway.app` and let it
+   redeploy (so webhook/voice URLs use the real host). Migrations run on every boot.
+
+> The build is already validated locally (the Docker image builds and the server
+> boots to a clean "missing env" error). If the deploy logs show
+> `Invalid environment configuration`, a variable above is missing.
+
+### Alternative: deploy from this folder via the CLI
 
 ```bash
-cd /Users/cdrshepard/spam-res-cti
-
-# 1. Create a project (and link this folder to it)
-railway init                       # name it e.g. "caller-reputation-cti"
-
-# 2. Add a managed Postgres
-railway add --database postgres
-
-# 3. Generate two secrets — copy each value
-openssl rand -hex 32               # -> TOKEN_ENCRYPTION_KEY (64 hex chars)
-openssl rand -hex 32               # -> SESSION_SECRET
-openssl rand -hex 24               # -> NUMBERVERIFIER_VERIFY_KEY (any strong string)
-
-# 4. Set environment variables (or paste them in the Railway dashboard → Variables)
-railway variables \
-  --set "NODE_ENV=production" \
-  --set "TOKEN_ENCRYPTION_KEY=<paste>" \
-  --set "SESSION_SECRET=<paste>" \
-  --set "DATABASE_URL=${{Postgres.DATABASE_URL}}" \
-  --set "NUMBERVERIFIER_VERIFY_KEY=<paste>" \
-  --set "TWILIO_ACCOUNT_SID=<...>" \
-  --set "TWILIO_AUTH_TOKEN=<...>" \
-  --set "TWILIO_API_KEY_SID=<...>" \
-  --set "TWILIO_API_KEY_SECRET=<...>" \
-  --set "TWILIO_TWIML_APP_SID=<...>" \
-  --set "TWILIO_DEFAULT_CALLER_ID=+1..."
-
-# 5. Deploy from this folder, then mint a public domain
-railway up
-railway domain                     # -> https://<something>.up.railway.app
-
-# 6. Tell the app its own public URL, then redeploy so webhooks use it
-railway variables --set "API_PUBLIC_URL=https://<something>.up.railway.app"
-railway up
+railway init && railway add --database postgres
+railway variables --set "NODE_ENV=production" --set "DATABASE_URL=${{Postgres.DATABASE_URL}}" --set "..."
+railway up && railway domain
 ```
-
-`DATABASE_URL=${{Postgres.DATABASE_URL}}` is a Railway variable reference — it
-auto-fills from the Postgres you added. Migrations run automatically on each
-boot (the container's start command).
 
 ## After it's live — point everything at `https://<domain>`
 
