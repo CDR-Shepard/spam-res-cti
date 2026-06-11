@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Caller Reputation CTI — Salesforce Call Center definition.
+  Import in Salesforce Setup → Call Centers → Import.
+
+  The adapterUrl must be the EXACT hosted location of the cti-web softphone,
+  which the API serves at ${API_PUBLIC_URL}/cti/. It must be the same origin as
+  your backend (the bundle is served by the API), e.g.:
+    https://cti.yourcompany.com/cti/
+
+  Replace the placeholder below with your real API_PUBLIC_URL host and re-import.
+  Do NOT use an ephemeral tunnel host in production — Salesforce caches the
+  Call Center record and the softphone breaks when the tunnel URL rotates.
+-->
+<callCenter>
+    <section sortOrder="0" name="reqGeneralInfo" label="General Information">
+        <item sortOrder="0" name="reqInternalName" label="Internal Name">CallerReputationCTI</item>
+        <item sortOrder="1" name="reqDisplayName" label="Display Name">Caller Reputation CTI</item>
+        <item sortOrder="2" name="reqAdapterUrl" label="CTI Adapter URL">https://REPLACE_WITH_YOUR_API_PUBLIC_URL_HOST/cti/</item>
+        <item sortOrder="3" name="reqUseApi" label="Use CTI API">true</item>
+        <item sortOrder="4" name="reqSoftphoneHeight" label="Softphone Height">640</item>
+        <item sortOrder="5" name="reqSoftphoneWidth" label="Softphone Width">380</item>
+        <item sortOrder="6" name="reqSalesforceCompatibilityMode" label="Salesforce Compatibility Mode">Lightning</item>
+    </section>
+</callCenter>

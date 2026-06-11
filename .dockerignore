@@ -1,0 +1,21 @@
+# Rebuilt inside the image — never copy local artifacts in.
+node_modules
+**/node_modules
+dist
+**/dist
+apps/cti-desktop/release
+apps/cti-desktop/buildResources
+
+# Secrets & local env — must come from the host's environment variables.
+.env
+*.env
+!.env.example
+.secrets
+
+# VCS / editor / OS noise
+.git
+.gitignore
+*.log
+.DS_Store
+.vscode
+.idea

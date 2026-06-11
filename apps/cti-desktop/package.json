@@ -1,0 +1,50 @@
+{
+  "name": "@cti/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Caller Reputation CTI desktop app",
+  "main": "dist/main/main/main.js",
+  "scripts": {
+    "dev": "vite",
+    "dev:electron": "npm run build:main && cross-env ELECTRON_RENDERER_URL=http://localhost:5173 electron .",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build": "npm run build:renderer && npm run build:main",
+    "start": "electron .",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.main.json --noEmit"
+  },
+  "build": {
+    "appId": "com.callerreputation.cti",
+    "productName": "Caller Reputation CTI",
+    "files": ["dist/**/*", "assets/**/*", "package.json"],
+    "directories": { "buildResources": "buildResources", "output": "release" },
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.business",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "buildResources/entitlements.mac.plist",
+      "entitlementsInherit": "buildResources/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Caller Reputation CTI uses the microphone to place outbound calls."
+      }
+    },
+    "comment": "Code signing + notarization run automatically when CSC_LINK/CSC_KEY_PASSWORD and APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID env vars are set; without them dist:mac builds an unsigned local DMG."
+  },
+  "dependencies": {
+    "@twilio/voice-sdk": "^2.12.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

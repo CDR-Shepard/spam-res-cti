@@ -1,0 +1,28 @@
+{
+  "name": "caller-reputation-cti",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Salesforce-connected calling app that protects your caller reputation",
+  "workspaces": [
+    "services/*",
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm --workspace services/cti-api run dev",
+    "dev:web": "npm --workspace apps/cti-web run dev",
+    "dev:desktop": "npm --workspace apps/cti-desktop run dev",
+    "build:api": "npm --workspace services/cti-api run build",
+    "build:web": "npm --workspace apps/cti-web run build",
+    "build:desktop": "npm --workspace apps/cti-desktop run build",
+    "migrate": "npm --workspace services/cti-api run migrate",
+    "migrate:make": "npm --workspace services/cti-api run migrate:make",
+    "typecheck": "npm --workspaces --if-present run typecheck",
+    "lint": "npm --workspaces --if-present run lint",
+    "test": "npm --workspaces --if-present run test"
+  },
+  "engines": {
+    "node": ">=20.10.0",
+    "npm": ">=10.0.0"
+  }
+}
