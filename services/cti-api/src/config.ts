@@ -73,7 +73,16 @@ export function loadConfig(): AppConfig {
   if (cached) return cached;
   // Most hosts (Railway, Render, Fly, Heroku) inject the listen port as PORT.
   // Honor it while keeping API_PORT for local dev / explicit overrides.
-  const source = { ...process.env, API_PORT: process.env.API_PORT ?? process.env.PORT };
+  const source: Record<string, string | undefined> = {
+    ...process.env,
+    API_PORT: process.env.API_PORT ?? process.env.PORT,
+  };
+  // Treat empty-string env vars as unset. Deploy UIs (e.g. Railway's
+  // "add suggested variables") populate optional fields with "", which would
+  // otherwise fail validation on URL-typed optionals like ALERT_WEBHOOK_URL.
+  for (const key of Object.keys(source)) {
+    if (source[key] === '') delete source[key];
+  }
   const parsed = schema.safeParse(source);
   if (!parsed.success) {
     const issues = parsed.error.issues
