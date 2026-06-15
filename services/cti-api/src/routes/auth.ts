@@ -8,7 +8,7 @@
  *  - POST /auth/salesforce/disconnect
  */
 import type { FastifyInstance } from 'fastify';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb, schema } from '../db/index.js';
 import { issueSession, resolveSession } from '../auth/session.js';
@@ -87,6 +87,28 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     return { authUrl: artifacts.authUrl, handshake: artifacts.handshake };
   });
 
+  // "Sign in with Salesforce" — no existing session required. The callback
+  // find-or-creates the org+user from the SF identity and the login-status poll
+  // hands back a session. This is the primary production login (the dev-session
+  // backdoor is disabled in prod).
+  app.post('/auth/salesforce/login/start', async (_req, reply) => {
+    const db = getDb();
+    let artifacts;
+    try {
+      artifacts = buildStartArtifacts();
+    } catch (err) {
+      return reply.code(503).send({ error: (err as Error).message });
+    }
+    await db.insert(schema.salesforceOauthState).values({
+      state: artifacts.state,
+      pkceVerifier: artifacts.verifier,
+      userId: null, // null userId => callback treats this as a LOGIN
+      desktopHandshakeToken: artifacts.handshake,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+    });
+    return { authUrl: artifacts.authUrl, handshake: artifacts.handshake };
+  });
+
   const callbackQuery = z.object({
     code: z.string().optional(),
     state: z.string(),
@@ -103,9 +125,11 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     const stateRow = await db.query.salesforceOauthState.findFirst({
       where: eq(schema.salesforceOauthState.state, state),
     });
-    if (!stateRow || stateRow.consumedAt || stateRow.expiresAt < new Date() || !stateRow.userId) {
-      return reply.code(400).type('text/html').send(htmlPage('Invalid state', 'Try connecting again from the app.'));
+    if (!stateRow || stateRow.consumedAt || stateRow.expiresAt < new Date()) {
+      return reply.code(400).type('text/html').send(htmlPage('Invalid state', 'Try signing in again from the app.'));
     }
+    // Login mode (no pre-existing user) vs connect mode (augment current user).
+    const isLogin = !stateRow.userId;
 
     if (error || !code) {
       await db
@@ -119,6 +143,22 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
 
     try {
       const tok = await exchangeCodeForTokens(code, stateRow.pkceVerifier);
+
+      // Org allowlist gate (login only): only the configured Salesforce org may
+      // self-provision accounts here.
+      const allowedOrg = loadConfig().SALESFORCE_ALLOWED_ORG_ID;
+      if (isLogin && allowedOrg && tok.sfOrgId.slice(0, 15) !== allowedOrg.slice(0, 15)) {
+        await db
+          .update(schema.salesforceOauthState)
+          .set({ consumedAt: new Date() })
+          .where(eq(schema.salesforceOauthState.state, state));
+        app.log.warn({ sfOrgId: tok.sfOrgId }, 'salesforce_login_org_not_allowed');
+        return reply
+          .code(403)
+          .type('text/html')
+          .send(htmlPage('Salesforce org not authorized', 'This Salesforce organization is not authorized to use this app. Contact your administrator.'));
+      }
+
       const enc = {
         access: encryptString(tok.access_token),
         refresh: tok.refresh_token ? encryptString(tok.refresh_token) : null,
@@ -169,8 +209,36 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       }
       await fetchProfileWithRetry();
 
+      // Resolve the user this connection belongs to. In login mode, find-or-create
+      // the local org (keyed by SF org id) and the user (keyed by email).
+      let targetUserId: string;
+      if (isLogin) {
+        let org = await db.query.organizations.findFirst({
+          where: eq(schema.organizations.sfOrgId, tok.sfOrgId),
+        });
+        if (!org) {
+          const [createdOrg] = await db
+            .insert(schema.organizations)
+            .values({ name: `Salesforce Org ${tok.sfOrgId}`, sfOrgId: tok.sfOrgId })
+            .returning();
+          org = createdOrg!;
+        }
+        const email = (profile.sfUserEmail?.trim() || `sf-${tok.sfUserId}@${tok.sfOrgId}.salesforce.local`).toLowerCase();
+        let user = await db.query.users.findFirst({ where: eq(schema.users.email, email) });
+        if (!user) {
+          const [createdUser] = await db
+            .insert(schema.users)
+            .values({ orgId: org.id, email, displayName: profile.sfUserName ?? null })
+            .returning();
+          user = createdUser!;
+        }
+        targetUserId = user.id;
+      } else {
+        targetUserId = stateRow.userId!;
+      }
+
       const existing = await db.query.salesforceConnections.findFirst({
-        where: eq(schema.salesforceConnections.userId, stateRow.userId),
+        where: eq(schema.salesforceConnections.userId, targetUserId),
       });
       if (existing) {
         await db
@@ -189,7 +257,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           .where(eq(schema.salesforceConnections.id, existing.id));
       } else {
         await db.insert(schema.salesforceConnections).values({
-          userId: stateRow.userId,
+          userId: targetUserId,
           instanceUrl: tok.instance_url,
           sfUserId: tok.sfUserId,
           sfOrgId: tok.sfOrgId,
@@ -201,11 +269,11 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       }
       await db
         .update(schema.salesforceOauthState)
-        .set({ consumedAt: new Date() })
+        .set({ consumedAt: new Date(), ...(isLogin ? { loginUserId: targetUserId } : {}) })
         .where(eq(schema.salesforceOauthState.state, state));
       return reply
         .type('text/html')
-        .send(htmlPage('Salesforce connected', 'You can close this window and return to the CTI app.'));
+        .send(htmlPage(isLogin ? 'Signed in with Salesforce' : 'Salesforce connected', 'You can close this window and return to the CTI app.'));
     } catch (err) {
       app.log.error({ err }, 'salesforce_callback_failed');
       return reply
@@ -236,6 +304,46 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       where: eq(schema.salesforceConnections.userId, session.userId),
     });
     return conn ? { status: 'connected' } : { status: 'failed' };
+  });
+
+  // Login-status poll (NO session): the client polls with the handshake from
+  // /login/start. Once the OAuth callback has completed, this mints exactly one
+  // session for the resolved user and returns it. The handshake is the bearer
+  // of trust; minting is single-use (session_retrieved_at), short-lived (10m).
+  app.get('/auth/salesforce/login/status', async (req, reply) => {
+    const q = z.object({ handshake: z.string().min(8) }).safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: 'handshake required' });
+    const db = getDb();
+    const stateRow = await db.query.salesforceOauthState.findFirst({
+      where: eq(schema.salesforceOauthState.desktopHandshakeToken, q.data.handshake),
+    });
+    if (!stateRow) return { status: 'unknown' };
+    if (!stateRow.consumedAt) return { status: 'pending' };
+    if (!stateRow.loginUserId) return { status: 'failed' }; // canceled or org-gated
+    // Claim the single-use session mint atomically so concurrent polls can't
+    // each mint a session.
+    const claim = await db
+      .update(schema.salesforceOauthState)
+      .set({ sessionRetrievedAt: new Date() })
+      .where(
+        and(
+          eq(schema.salesforceOauthState.state, stateRow.state),
+          isNull(schema.salesforceOauthState.sessionRetrievedAt),
+        ),
+      )
+      .returning({ state: schema.salesforceOauthState.state });
+    if (claim.length === 0) return { status: 'done' }; // already minted once
+    const user = await db.query.users.findFirst({
+      where: eq(schema.users.id, stateRow.loginUserId),
+    });
+    if (!user) return { status: 'failed' };
+    const session = await issueSession(user.id);
+    return {
+      status: 'connected',
+      token: session.token,
+      expiresAt: session.expiresAt.toISOString(),
+      user: { id: user.id, email: user.email, displayName: user.displayName, orgId: user.orgId },
+    };
   });
 
   app.post('/auth/salesforce/refresh-profile', async (req, reply) => {

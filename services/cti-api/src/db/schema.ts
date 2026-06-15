@@ -50,6 +50,8 @@ export const syncStatusEnum = pgEnum('sync_status', ['pending', 'in_flight', 'su
 export const organizations = pgTable('organizations', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),
+  /** Salesforce org id this local org maps to (set on first SF login). */
+  sfOrgId: text('sf_org_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
@@ -121,8 +123,12 @@ export const salesforceOauthState = pgTable('salesforce_oauth_state', {
   state: text('state').primaryKey(),
   pkceVerifier: text('pkce_verifier').notNull(),
   userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
-  /** opaque token the desktop polls with */
+  /** opaque token the client polls with */
   desktopHandshakeToken: text('desktop_handshake_token').notNull(),
+  /** Login mode (userId null): the user found/created in the callback. */
+  loginUserId: uuid('login_user_id').references(() => users.id, { onDelete: 'cascade' }),
+  /** Set when the login-status poll has minted the session (single-use). */
+  sessionRetrievedAt: timestamp('session_retrieved_at', { withTimezone: true }),
   consumedAt: timestamp('consumed_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),

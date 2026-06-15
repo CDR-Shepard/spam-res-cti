@@ -56,6 +56,7 @@ interface AppContextValue {
   setToast: (t: Toast | null) => void;
   refreshMe: () => Promise<void>;
   signInDev: () => Promise<void>;
+  signInWithSalesforce: () => Promise<void>;
   signOut: () => Promise<void>;
   theme: Theme;
   setTheme: (t: Theme) => void;
@@ -116,6 +117,36 @@ export function AppProvider(props: { children: React.ReactNode }): JSX.Element {
     await refreshMe();
   }, [refreshMe]);
 
+  // Primary production login: open the SF OAuth flow in the system browser,
+  // then poll login-status until it hands back a session (no dev backdoor).
+  const signInWithSalesforce = useCallback(async () => {
+    const { authUrl, handshake } = await api<{ authUrl: string; handshake: string }>(
+      '/auth/salesforce/login/start', { method: 'POST', authed: false },
+    );
+    await window.cti.openExternal(authUrl);
+    const started = Date.now();
+    await new Promise<void>((resolve, reject) => {
+      const poll = async (): Promise<void> => {
+        if (Date.now() - started > 5 * 60 * 1000) { reject(new Error('Salesforce sign-in timed out')); return; }
+        try {
+          const r = await api<{ status: string; token?: string; user?: { id: string; email: string } }>(
+            `/auth/salesforce/login/status?handshake=${encodeURIComponent(handshake)}`, { authed: false },
+          );
+          if (r.status === 'connected' && r.token && r.user) {
+            await window.cti.saveSession(r.token, r.user.id, r.user.email);
+            setSession({ token: r.token, userId: r.user.id, email: r.user.email });
+            await refreshMe();
+            resolve();
+            return;
+          }
+          if (r.status === 'failed') { reject(new Error('Salesforce sign-in failed or org not authorized')); return; }
+        } catch { /* status momentarily unreachable — keep polling */ }
+        setTimeout(() => void poll(), 1500);
+      };
+      void poll();
+    });
+  }, [refreshMe]);
+
   const signOut = useCallback(async () => {
     await window.cti.clearSession();
     setSession({ token: null, userId: null, email: null });
@@ -151,7 +182,7 @@ export function AppProvider(props: { children: React.ReactNode }): JSX.Element {
   }, [toast]);
 
   return (
-    <Ctx.Provider value={{ session, me, ready, toast, setToast, refreshMe, signInDev, signOut, theme, setTheme, incomingTel, customDisplayName, setCustomDisplayName }}>
+    <Ctx.Provider value={{ session, me, ready, toast, setToast, refreshMe, signInDev, signInWithSalesforce, signOut, theme, setTheme, incomingTel, customDisplayName, setCustomDisplayName }}>
       {props.children}
     </Ctx.Provider>
   );

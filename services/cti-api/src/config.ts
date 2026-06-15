@@ -17,6 +17,13 @@ const schema = z.object({
   SALESFORCE_REDIRECT_URI: z.string().url().optional(),
   SALESFORCE_LOGIN_URL: z.string().url().default('https://login.salesforce.com'),
   SALESFORCE_API_VERSION: z.string().default('v60.0'),
+  /**
+   * Salesforce org id (15- or 18-char) allowed to "Sign in with Salesforce".
+   * When set, only users from THIS org can log in — prevents anyone with any
+   * Salesforce account from self-provisioning into your CTI. Strongly
+   * recommended in production; when unset, any SF org can sign in.
+   */
+  SALESFORCE_ALLOWED_ORG_ID: z.string().min(15).optional(),
 
   TELEPHONY_PROVIDER: z.enum(['twilio', 'telnyx']).default('twilio'),
 

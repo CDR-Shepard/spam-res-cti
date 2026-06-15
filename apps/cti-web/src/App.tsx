@@ -77,9 +77,54 @@ export function App(): JSX.Element {
 
   // ---- Sign in with Salesforce (OAuth popup) -------------------------------
   const [sfConnecting, setSfConnecting] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
   const refreshMe = useCallback(async () => {
     try { setMe(await api<MeResponse>('/auth/me')); } catch { /* */ }
   }, []);
+
+  // Primary production login: no pre-existing session. Opens the SF OAuth
+  // popup, then polls login-status until it hands back a session token.
+  const loginWithSalesforce = useCallback(async () => {
+    setSigningIn(true);
+    try {
+      const { authUrl, handshake } = await api<{ authUrl: string; handshake: string }>(
+        '/auth/salesforce/login/start', { method: 'POST', authed: false },
+      );
+      const popup = window.open(authUrl, 'cti-sf-login', 'width=600,height=720,noopener,noreferrer');
+      const started = Date.now();
+      const poll = async (): Promise<void> => {
+        if (Date.now() - started > 5 * 60 * 1000) {
+          setSigningIn(false);
+          setToast({ text: 'Salesforce sign-in timed out.', type: 'error' });
+          return;
+        }
+        try {
+          const r = await api<{ status: string; token?: string; user?: { id: string; email: string } }>(
+            `/auth/salesforce/login/status?handshake=${encodeURIComponent(handshake)}`, { authed: false },
+          );
+          if (r.status === 'connected' && r.token && r.user) {
+            try { popup?.close(); } catch { /* */ }
+            writeSession({ token: r.token, userId: r.user.id, email: r.user.email });
+            setSignedIn(true);
+            await refreshMe();
+            setSigningIn(false);
+            setToast({ text: 'Signed in with Salesforce.', type: 'success' });
+            return;
+          }
+          if (r.status === 'failed') {
+            setSigningIn(false);
+            setToast({ text: 'Salesforce sign-in failed or org not authorized.', type: 'error' });
+            return;
+          }
+        } catch { /* status momentarily unreachable — keep polling */ }
+        setTimeout(poll, 1500);
+      };
+      void poll();
+    } catch (e) {
+      setSigningIn(false);
+      setToast({ text: (e as Error).message, type: 'error' });
+    }
+  }, [refreshMe]);
   const connectSalesforce = useCallback(async () => {
     setSfConnecting(true);
     try {
@@ -134,7 +179,8 @@ export function App(): JSX.Element {
     void (async () => {
       try {
         let s = readSession();
-        if (!s) {
+        if (!s && import.meta.env.DEV) {
+          // Dev convenience only — /auth/dev-session is 404 in production.
           const r = await api<{ token: string; user: { id: string; email: string } }>(
             '/auth/dev-session', { method: 'POST', authed: false },
           );
@@ -142,16 +188,22 @@ export function App(): JSX.Element {
           writeSession(s);
         }
         if (cancelled) return;
-        setSignedIn(true);
-        const m = await api<MeResponse>('/auth/me');
-        if (cancelled) return;
-        setMe(m);
+        if (!s) {
+          // No session → render the "Sign in with Salesforce" gate.
+          setSignedIn(false);
+        } else {
+          setSignedIn(true);
+          const m = await api<MeResponse>('/auth/me');
+          if (cancelled) return;
+          setMe(m);
+        }
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) {
           clearSession();
           setSignedIn(false);
+        } else {
+          setToast({ text: `Sign-in failed: ${(e as Error).message}`, type: 'error' });
         }
-        setToast({ text: `Sign-in failed: ${(e as Error).message}`, type: 'error' });
       }
 
       // Init Open CTI — only does anything when running inside Salesforce.
@@ -392,8 +444,18 @@ export function App(): JSX.Element {
         <div className="signin">
           <div className="logo"><PhoneIcon /></div>
           <h2>Caller Reputation CTI</h2>
-          <p>Signing in…</p>
-          <span className="spinner lg" />
+          {signingIn ? (
+            <><p>Signing in with Salesforce…</p><span className="spinner lg" /></>
+          ) : signedIn ? (
+            <><p>Loading…</p><span className="spinner lg" /></>
+          ) : (
+            <>
+              <p>Sign in with your Salesforce account to start calling.</p>
+              <button className="btn primary full" onClick={() => void loginWithSalesforce()}>
+                Sign in with Salesforce
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
