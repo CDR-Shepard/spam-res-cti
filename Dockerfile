@@ -26,6 +26,7 @@ RUN npm run build:web && npm run build:api
 # Hosts inject the listen port via PORT (config honors it); 4000 is the default.
 EXPOSE 4000
 
-# Apply DB migrations, then start the server. If migrations fail (e.g. DB not
-# ready yet) the container exits and the platform restarts it.
-CMD ["sh", "-c", "npm --workspace services/cti-api run migrate && node services/cti-api/dist/server.js"]
+# Start the server. DB migrations run as the platform's pre-deploy step
+# (railway.json deploy.preDeployCommand) so they execute once, before the new
+# deployment goes live. This CMD is also overridden by deploy.startCommand.
+CMD ["node", "services/cti-api/dist/server.js"]
