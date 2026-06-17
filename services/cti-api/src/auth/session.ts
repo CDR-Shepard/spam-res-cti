@@ -24,6 +24,7 @@ export async function resolveSession(bearer: string | undefined): Promise<{
   userId: string;
   orgId: string;
   email: string;
+  isAdmin: boolean;
 } | null> {
   if (!bearer) return null;
   const token = bearer.startsWith('Bearer ') ? bearer.slice(7) : bearer;
@@ -40,7 +41,7 @@ export async function resolveSession(bearer: string | undefined): Promise<{
   if (!row) return null;
   const user = await db.query.users.findFirst({ where: eq(schema.users.id, row.userId) });
   if (!user) return null;
-  return { userId: user.id, orgId: user.orgId, email: user.email };
+  return { userId: user.id, orgId: user.orgId, email: user.email, isAdmin: user.isAdmin };
 }
 
 export async function revokeSession(bearer: string): Promise<void> {

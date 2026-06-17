@@ -96,10 +96,11 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
       where: and(
         eq(schema.outboundNumbers.orgId, session.orgId),
         eq(schema.outboundNumbers.e164, fromNumber),
+        eq(schema.outboundNumbers.assignedUserId, session.userId),
       ),
     });
     if (!did || !did.active)
-      return reply.code(409).send({ error: 'Approved caller ID is no longer active; re-run the check' });
+      return reply.code(409).send({ error: 'Approved caller ID is not in your assigned pool; re-run the check' });
     const daysSince = did.firstUsedAt
       ? Math.floor((Date.now() - did.firstUsedAt.getTime()) / 86_400_000)
       : null;
@@ -120,6 +121,7 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
         and(
           eq(schema.outboundNumbers.orgId, session.orgId),
           eq(schema.outboundNumbers.e164, fromNumber),
+          eq(schema.outboundNumbers.assignedUserId, session.userId),
           eq(schema.outboundNumbers.active, true),
           notInArray(schema.outboundNumbers.health, ['spam_likely', 'degraded']),
           sql`(case when ${schema.outboundNumbers.dialsTodayDate} = ${today}::date then ${schema.outboundNumbers.dialsToday} else 0 end) < ${effectiveCap}`,

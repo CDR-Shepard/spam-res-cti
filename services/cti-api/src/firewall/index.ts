@@ -321,7 +321,7 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
   let effectiveFrom = input.fromNumber ?? null;
   let fromAutoSelected = false;
   if (!effectiveFrom) {
-    effectiveFrom = await pickRotationNumber(db, input.orgId);
+    effectiveFrom = await pickRotationNumber(db, input.orgId, input.userId);
     fromAutoSelected = effectiveFrom != null;
   }
   let fromE164: string | null = null;
@@ -339,6 +339,9 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
       where: and(
         eq(schema.outboundNumbers.orgId, input.orgId),
         eq(schema.outboundNumbers.e164, effectiveFrom),
+        // Reps may only dial from their own assigned pool — not another rep's
+        // number and not a held-back reserve number.
+        eq(schema.outboundNumbers.assignedUserId, input.userId),
       ),
     });
     if (!outNum) {

@@ -16,29 +16,64 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     const s = await resolveSession(req.headers.authorization);
     if (!s) return reply.code(401).send({ error: 'Unauthorized' });
     const db = getDb();
+    // Admins see the whole org pool (active + reserve); reps see only the
+    // numbers assigned to them (powers their dialer from-picker).
+    const where = s.isAdmin
+      ? eq(schema.outboundNumbers.orgId, s.orgId)
+      : and(
+          eq(schema.outboundNumbers.orgId, s.orgId),
+          eq(schema.outboundNumbers.assignedUserId, s.userId),
+        );
     const rows = await db
       .select()
       .from(schema.outboundNumbers)
-      .where(eq(schema.outboundNumbers.orgId, s.orgId))
+      .where(where)
       .orderBy(desc(schema.outboundNumbers.createdAt));
     return { numbers: rows };
+  });
+
+  // Reps in this org (for the admin's assign-number dropdown).
+  app.get('/admin/reps', async (req, reply) => {
+    const s = await resolveSession(req.headers.authorization);
+    if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
+    const db = getDb();
+    const rows = await db
+      .select({
+        id: schema.users.id,
+        email: schema.users.email,
+        displayName: schema.users.displayName,
+        isAdmin: schema.users.isAdmin,
+      })
+      .from(schema.users)
+      .where(eq(schema.users.orgId, s.orgId));
+    return { reps: rows };
   });
 
   app.post('/admin/outbound-numbers', async (req, reply) => {
     const s = await resolveSession(req.headers.authorization);
     if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
     const parsed = z
       .object({
         e164: z.string(),
         label: z.string().optional(),
         provider: z.enum(['twilio', 'telnyx']).default(loadConfig().TELEPHONY_PROVIDER),
         active: z.boolean().optional(),
+        // The rep to assign to; omit / null = leave in the reserve pool.
+        assignedUserId: z.string().uuid().nullable().optional(),
       })
       .safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
     const norm = normalize(parsed.data.e164);
     if (!norm.ok) return reply.code(400).send({ error: 'Invalid number' });
     const db = getDb();
+    if (parsed.data.assignedUserId) {
+      const rep = await db.query.users.findFirst({
+        where: and(eq(schema.users.id, parsed.data.assignedUserId), eq(schema.users.orgId, s.orgId)),
+      });
+      if (!rep) return reply.code(400).send({ error: 'assignedUserId is not a user in this org' });
+    }
     const [row] = await db
       .insert(schema.outboundNumbers)
       .values({
@@ -47,11 +82,16 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         label: parsed.data.label,
         provider: parsed.data.provider,
         active: parsed.data.active ?? true,
+        assignedUserId: parsed.data.assignedUserId ?? null,
         health: 'unknown',
       })
       .onConflictDoUpdate({
         target: [schema.outboundNumbers.orgId, schema.outboundNumbers.e164],
-        set: { label: parsed.data.label ?? null, active: parsed.data.active ?? true },
+        set: {
+          label: parsed.data.label ?? null,
+          active: parsed.data.active ?? true,
+          ...(parsed.data.assignedUserId !== undefined ? { assignedUserId: parsed.data.assignedUserId } : {}),
+        },
       })
       .returning();
     return { number: row };
@@ -60,11 +100,14 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   app.patch('/admin/outbound-numbers/:id', async (req, reply) => {
     const s = await resolveSession(req.headers.authorization);
     if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
     const id = (req.params as { id: string }).id;
     const parsed = z
       .object({
         active: z.boolean().optional(),
         label: z.string().optional(),
+        // Assign to a rep, or null to return it to the reserve pool.
+        assignedUserId: z.string().uuid().nullable().optional(),
         health: z.enum(['healthy', 'warning', 'degraded', 'spam_likely', 'unknown']).optional(),
         inboundEnabled: z.boolean().optional(),
         inboundGreeting: z.string().max(800).nullable().optional(),
@@ -80,11 +123,18 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       where: and(eq(schema.outboundNumbers.id, id), eq(schema.outboundNumbers.orgId, s.orgId)),
     });
     if (!owned) return reply.code(404).send({ error: 'Not found' });
+    if (parsed.data.assignedUserId) {
+      const rep = await db.query.users.findFirst({
+        where: and(eq(schema.users.id, parsed.data.assignedUserId), eq(schema.users.orgId, s.orgId)),
+      });
+      if (!rep) return reply.code(400).send({ error: 'assignedUserId is not a user in this org' });
+    }
     const [row] = await db
       .update(schema.outboundNumbers)
       .set({
         ...(parsed.data.active !== undefined ? { active: parsed.data.active } : {}),
         ...(parsed.data.label !== undefined ? { label: parsed.data.label } : {}),
+        ...(parsed.data.assignedUserId !== undefined ? { assignedUserId: parsed.data.assignedUserId } : {}),
         ...(parsed.data.health
           ? { health: parsed.data.health, healthUpdatedAt: new Date() }
           : {}),
@@ -116,6 +166,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   app.post('/admin/outbound-numbers/:id/register-twilio-inbound', async (req, reply) => {
     const s = await resolveSession(req.headers.authorization);
     if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
     const id = (req.params as { id: string }).id;
     const parsed = z.object({ twilioSid: z.string().regex(/^PN[a-f0-9]{32}$/i) }).safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
@@ -250,6 +301,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   app.patch('/admin/campaigns/:key', async (req, reply) => {
     const s = await resolveSession(req.headers.authorization);
     if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
     const key = (req.params as { key: string }).key;
     const parsed = z
       .object({
@@ -287,5 +339,41 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       .returning();
     if (!row) return reply.code(404).send({ error: 'Campaign not found' });
     return { campaign: row };
+  });
+
+  // ---- DNC import ----
+  // Bulk-load Do-Not-Call numbers into the cache the firewall's `federal_dnc`
+  // gate checks. Feed it whatever list you legitimately obtain — your National
+  // DNC Registry export (per area code, via your SAN) or a paid scrub vendor.
+  // NOTE: this is NOT the FTC "DNC reported calls" complaint dataset — that's
+  // consumer complaints, not a scrub list, and must not be used for compliance.
+  app.post('/admin/dnc/import', async (req, reply) => {
+    const s = await resolveSession(req.headers.authorization);
+    if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
+    const parsed = z
+      .object({
+        numbers: z.array(z.string()).min(1).max(100000),
+        source: z.string().max(64).default('federal_dnc'),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const rows = parsed.data.numbers
+      .map((raw) => normalize(raw))
+      .filter((n) => n.ok && n.value)
+      .map((n) => ({ e164: n.value!.e164, source: parsed.data.source }));
+    if (rows.length === 0) return reply.code(400).send({ error: 'No valid numbers' });
+    const db = getDb();
+    let inserted = 0;
+    const CHUNK = 1000;
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const res = await db
+        .insert(schema.federalDncEntries)
+        .values(rows.slice(i, i + CHUNK))
+        .onConflictDoNothing()
+        .returning({ e164: schema.federalDncEntries.e164 });
+      inserted += res.length;
+    }
+    return { ok: true, received: parsed.data.numbers.length, valid: rows.length, inserted };
   });
 }

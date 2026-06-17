@@ -216,6 +216,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         let org = await db.query.organizations.findFirst({
           where: eq(schema.organizations.sfOrgId, tok.sfOrgId),
         });
+        const orgIsNew = !org;
         if (!org) {
           const [createdOrg] = await db
             .insert(schema.organizations)
@@ -224,13 +225,20 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           org = createdOrg!;
         }
         const email = (profile.sfUserEmail?.trim() || `sf-${tok.sfUserId}@${tok.sfOrgId}.salesforce.local`).toLowerCase();
+        // The first user provisioned for a brand-new org is the admin; plus any
+        // emails in ADMIN_EMAILS. Admins manage numbers/assignment/campaigns.
+        const adminEmails = (loadConfig().ADMIN_EMAILS ?? '')
+          .split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+        const shouldBeAdmin = orgIsNew || adminEmails.includes(email);
         let user = await db.query.users.findFirst({ where: eq(schema.users.email, email) });
         if (!user) {
           const [createdUser] = await db
             .insert(schema.users)
-            .values({ orgId: org.id, email, displayName: profile.sfUserName ?? null })
+            .values({ orgId: org.id, email, displayName: profile.sfUserName ?? null, isAdmin: shouldBeAdmin })
             .returning();
           user = createdUser!;
+        } else if (shouldBeAdmin && !user.isAdmin) {
+          await db.update(schema.users).set({ isAdmin: true }).where(eq(schema.users.id, user.id));
         }
         targetUserId = user.id;
       } else {

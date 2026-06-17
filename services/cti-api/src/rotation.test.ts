@@ -34,7 +34,7 @@ const row = (over: Partial<Row>): Row => ({
 
 describe('pickRotationNumber', () => {
   it('returns null (fail-closed) when the pool is empty — no default-caller fallback', async () => {
-    expect(await pickRotationNumber(fakeDb([]), 'org')).toBeNull();
+    expect(await pickRotationNumber(fakeDb([]), 'org', 'rep1')).toBeNull();
   });
 
   it('picks the DID with the most remaining warmup room', async () => {
@@ -42,7 +42,7 @@ describe('pickRotationNumber', () => {
       row({ e164: '+1A', warmupOverrideCap: 20, dialsToday: 15 }), // room 5
       row({ e164: '+1B', warmupOverrideCap: 50, dialsToday: 10 }), // room 40
     ];
-    expect(await pickRotationNumber(fakeDb(rows), 'org')).toBe('+1B');
+    expect(await pickRotationNumber(fakeDb(rows), 'org', 'rep1')).toBe('+1B');
   });
 
   it('excludes spam_likely and degraded DIDs', async () => {
@@ -51,7 +51,7 @@ describe('pickRotationNumber', () => {
       row({ e164: '+1DEG', health: 'degraded', warmupOverrideCap: 80 }),
       row({ e164: '+1OK', health: 'unknown', warmupOverrideCap: 80 }),
     ];
-    expect(await pickRotationNumber(fakeDb(rows), 'org')).toBe('+1OK');
+    expect(await pickRotationNumber(fakeDb(rows), 'org', 'rep1')).toBe('+1OK');
   });
 
   it('excludes DIDs that have hit their cap today and returns null when all are capped', async () => {
@@ -59,7 +59,7 @@ describe('pickRotationNumber', () => {
       row({ e164: '+1A', warmupOverrideCap: 5, dialsToday: 5 }),
       row({ e164: '+1B', warmupOverrideCap: 20, dialsToday: 20 }),
     ];
-    expect(await pickRotationNumber(fakeDb(rows), 'org')).toBeNull();
+    expect(await pickRotationNumber(fakeDb(rows), 'org', 'rep1')).toBeNull();
   });
 
   it('ignores stale dialsTodayDate (counts today as 0 dials)', async () => {
@@ -67,7 +67,7 @@ describe('pickRotationNumber', () => {
       row({ e164: '+1A', warmupOverrideCap: 20, dialsToday: 20, dialsTodayDate: '2000-01-01' }),
     ];
     // Yesterday's 20 dials should not count today → eligible.
-    expect(await pickRotationNumber(fakeDb(rows), 'org')).toBe('+1A');
+    expect(await pickRotationNumber(fakeDb(rows), 'org', 'rep1')).toBe('+1A');
   });
 
   it('breaks ties on equal room by least-recently-dialed (LRU)', async () => {
@@ -77,6 +77,6 @@ describe('pickRotationNumber', () => {
       row({ e164: '+1NEW', warmupOverrideCap: 20, dialsToday: 0, lastDialAt: newer }),
       row({ e164: '+1OLD', warmupOverrideCap: 20, dialsToday: 0, lastDialAt: older }),
     ];
-    expect(await pickRotationNumber(fakeDb(rows), 'org')).toBe('+1OLD');
+    expect(await pickRotationNumber(fakeDb(rows), 'org', 'rep1')).toBe('+1OLD');
   });
 });

@@ -13,7 +13,9 @@ import { warmupCapForAge } from './firewall/warmup.js';
 
 type Db = ReturnType<typeof getDb>;
 
-export async function pickRotationNumber(db: Db, orgId: string): Promise<string | null> {
+export async function pickRotationNumber(db: Db, orgId: string, userId: string): Promise<string | null> {
+  // Only the calling rep's ASSIGNED pool is dialable. Unassigned numbers are
+  // the shared reserve, held back until an admin assigns them.
   const pool = await db
     .select()
     .from(schema.outboundNumbers)
@@ -21,6 +23,7 @@ export async function pickRotationNumber(db: Db, orgId: string): Promise<string 
       and(
         eq(schema.outboundNumbers.orgId, orgId),
         eq(schema.outboundNumbers.active, true),
+        eq(schema.outboundNumbers.assignedUserId, userId),
       ),
     );
   const today = new Date().toISOString().slice(0, 10);

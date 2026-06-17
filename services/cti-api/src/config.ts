@@ -24,6 +24,11 @@ const schema = z.object({
    * recommended in production; when unset, any SF org can sign in.
    */
   SALESFORCE_ALLOWED_ORG_ID: z.string().min(15).optional(),
+  /**
+   * Comma-separated emails granted admin (manage numbers/assignment/campaigns)
+   * on Salesforce login, in addition to the first user provisioned for an org.
+   */
+  ADMIN_EMAILS: z.string().optional(),
 
   TELEPHONY_PROVIDER: z.enum(['twilio', 'telnyx']).default('twilio'),
 
