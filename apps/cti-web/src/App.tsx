@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, clearSession, readSession, writeSession } from './api';
+import { AdminPanel } from './components/AdminPanel';
 import { CallScreen } from './components/CallScreen';
 import { Dialpad } from './components/Dialpad';
 import { RecentCalls } from './components/RecentCalls';
 import { ReputationPanel } from './components/ReputationPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
-import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, ShieldIcon } from './icons';
+import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, SettingsIcon, ShieldIcon } from './icons';
 import {
   initOpenCti, notifyReady, onClickToDial as onCti, saveCallLog, setPanelVisibility,
   type ClickToDialEvent,
 } from './opencti';
 
 interface MeResponse {
-  user: { userId: string; orgId: string; email: string };
+  user: { userId: string; orgId: string; email: string; isAdmin: boolean };
   salesforce:
     | { connected: false }
     | { connected: true; name?: string | null; email?: string | null; photoDataUrl?: string | null };
@@ -26,7 +27,7 @@ interface RepSummary {
 }
 
 type Phase = 'idle' | 'preflight' | 'ringing' | 'active' | 'wrapup';
-type Tab = 'dialer' | 'recent' | 'reputation';
+type Tab = 'dialer' | 'recent' | 'reputation' | 'admin';
 
 interface ActiveCall {
   callId: string;
@@ -572,6 +573,8 @@ export function App(): JSX.Element {
     <RecentCalls />
   ) : tab === 'reputation' ? (
     <ReputationPanel />
+  ) : tab === 'admin' ? (
+    <AdminPanel />
   ) : (
     <div className="dialer">
       <Dialpad
@@ -595,6 +598,8 @@ export function App(): JSX.Element {
     { id: 'dialer', label: 'Dial', icon: <GridIcon /> },
     { id: 'recent', label: 'Recent', icon: <ClockIcon /> },
     { id: 'reputation', label: 'Reputation', icon: <ShieldIcon /> },
+    // Number-pool management — admins only (server enforces 403 regardless).
+    ...(me.user.isAdmin ? [{ id: 'admin' as Tab, label: 'Numbers', icon: <SettingsIcon /> }] : []),
   ];
 
   return (
