@@ -995,7 +995,11 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 
 /* ---- Admin: number-pool management (admins only) ---- */
 .admin { display: flex; flex-direction: column; gap: 10px; }
-.admin-head { display: flex; align-items: center; justify-content: space-between; }
+.admin-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.admin-head-actions { display: flex; gap: 6px; flex: none; }
+.admin-notice {
+  font-size: 11px; color: var(--good); line-height: 1.4; padding: 6px 2px;
+}
 .admin-title { font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px; }
 .admin-title .count,
 .admin-group-head .count {

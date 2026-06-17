@@ -152,6 +152,9 @@ export const outboundNumbers = pgTable(
     /** Rep this number is assigned to (their active dialing pool). Null = the
      *  shared reserve pool, held back until an admin assigns it. */
     assignedUserId: uuid('assigned_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** Twilio IncomingPhoneNumber SID (PN…). Set when imported from Twilio;
+     *  lets inbound-webhook registration find the carrier number by SID. */
+    twilioSid: text('twilio_sid'),
     health: numberHealthEnum('health').default('unknown').notNull(),
     healthUpdatedAt: timestamp('health_updated_at', { withTimezone: true }),
     /** Who last set `health`: 'numberverifier' | 'reputation_worker' |

@@ -10,6 +10,18 @@ import { getDb, schema } from '../db/index.js';
 import { normalize } from '../phone.js';
 import { loadConfig } from '../config.js';
 
+/** Human-readable label for an imported DID, derived from its area code so the
+ *  Numbers pool reads "San Diego (619)" / "Los Angeles (213)" at a glance. */
+const SD_AREA_CODES = new Set(['619', '858', '760']);
+const LA_AREA_CODES = new Set(['213', '323', '310', '818', '424', '747']);
+function labelForImportedNumber(e164: string): string {
+  const areaCode = e164.match(/^\+1(\d{3})/)?.[1];
+  if (!areaCode) return 'Imported';
+  if (SD_AREA_CODES.has(areaCode)) return `San Diego (${areaCode})`;
+  if (LA_AREA_CODES.has(areaCode)) return `Los Angeles (${areaCode})`;
+  return `(${areaCode})`;
+}
+
 export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   // ---- outbound numbers ----
   app.get('/admin/outbound-numbers', async (req, reply) => {
@@ -203,6 +215,79 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(502).send({ error: 'Twilio update failed', code: safeCode ?? null });
     }
     return { ok: true, voiceUrl: url, twilio: { sid: (data as { sid?: string }).sid } };
+  });
+
+  /**
+   * One-click import: pull every phone number this org owns in Twilio and
+   * register it into the pool (reserve, unassigned) so the admin never has to
+   * type numbers in by hand. Idempotent — re-running updates the Twilio SID and
+   * never clobbers an existing label/active/assignment. New numbers get an
+   * area-code-derived label (e.g. "San Diego (619)").
+   */
+  app.post('/admin/outbound-numbers/import-twilio', async (req, reply) => {
+    const s = await resolveSession(req.headers.authorization);
+    if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
+    const cfg = loadConfig();
+    if (!cfg.TWILIO_ACCOUNT_SID || !cfg.TWILIO_AUTH_TOKEN) {
+      return reply
+        .code(503)
+        .send({ error: 'Twilio not configured (need TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN)' });
+    }
+    const auth = Buffer.from(`${cfg.TWILIO_ACCOUNT_SID}:${cfg.TWILIO_AUTH_TOKEN}`).toString('base64');
+
+    interface TwilioNumber {
+      phone_number?: string;
+      friendly_name?: string;
+      sid?: string;
+    }
+    const owned: TwilioNumber[] = [];
+    let next: string | null =
+      `https://api.twilio.com/2010-04-01/Accounts/${cfg.TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers.json?PageSize=1000`;
+    // Follow Twilio's paging (next_page_uri); guard against runaway loops.
+    for (let page = 0; next && page < 25; page += 1) {
+      const res = await fetch(next, { headers: { authorization: `Basic ${auth}` } });
+      if (!res.ok) {
+        app.log.warn({ status: res.status }, 'twilio_list_numbers_failed');
+        return reply.code(502).send({ error: 'Could not list Twilio numbers', status: res.status });
+      }
+      const page_data = (await res.json()) as {
+        incoming_phone_numbers?: TwilioNumber[];
+        next_page_uri?: string | null;
+      };
+      owned.push(...(page_data.incoming_phone_numbers ?? []));
+      next = page_data.next_page_uri ? `https://api.twilio.com${page_data.next_page_uri}` : null;
+    }
+
+    const db = getDb();
+    let registered = 0;
+    let skipped = 0;
+    for (const n of owned) {
+      const norm = n.phone_number ? normalize(n.phone_number) : { ok: false as const };
+      if (!norm.ok || !norm.value) {
+        skipped += 1;
+        continue;
+      }
+      await db
+        .insert(schema.outboundNumbers)
+        .values({
+          orgId: s.orgId,
+          e164: norm.value.e164,
+          label: labelForImportedNumber(norm.value.e164),
+          provider: 'twilio',
+          active: true,
+          twilioSid: n.sid ?? null,
+          health: 'unknown',
+        })
+        .onConflictDoUpdate({
+          target: [schema.outboundNumbers.orgId, schema.outboundNumbers.e164],
+          // Refresh the carrier SID/provider but preserve any label, active
+          // flag, and rep assignment the admin already set.
+          set: { twilioSid: n.sid ?? null, provider: 'twilio' },
+        });
+      registered += 1;
+    }
+    return { ok: true, found: owned.length, registered, skipped };
   });
 
   // ---- opt-outs ----

@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import { formatE164 } from '../format';
-import { PlusIcon, ShieldIcon, UserIcon } from '../icons';
+import { CloudIcon, PlusIcon, ShieldIcon, UserIcon } from '../icons';
 
 interface NumberRow {
   id: string;
@@ -47,6 +47,8 @@ export function AdminPanel(): JSX.Element {
   const [newAssignee, setNewAssignee] = useState<string>(RESERVE);
   const [adding, setAdding] = useState(false);
   const [formErr, setFormErr] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setErr(null);
@@ -65,6 +67,28 @@ export function AdminPanel(): JSX.Element {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  // One-click: pull the org's owned numbers from Twilio into the pool.
+  const importFromTwilio = useCallback(async () => {
+    setImporting(true);
+    setErr(null);
+    setNotice(null);
+    try {
+      const r = await api<{ found: number; registered: number }>(
+        '/admin/outbound-numbers/import-twilio', { method: 'POST' },
+      );
+      await load();
+      setNotice(
+        r.registered > 0
+          ? `Imported ${r.registered} number${r.registered === 1 ? '' : 's'} from Twilio.`
+          : 'No numbers found in Twilio.',
+      );
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setImporting(false);
+    }
+  }, [load]);
 
   const repName = useCallback(
     (id: string | null): string => {
@@ -155,10 +179,17 @@ export function AdminPanel(): JSX.Element {
     <div className="admin">
       <div className="admin-head">
         <div className="admin-title">Number pool <span className="count">{numbers.length}</span></div>
-        <button className="btn primary compact" onClick={() => setShowAdd((v) => !v)}>
-          <PlusIcon /> Add
-        </button>
+        <div className="admin-head-actions">
+          <button className="btn ghost compact" disabled={importing} onClick={() => void importFromTwilio()}>
+            {importing ? <><span className="spinner" /> Importing…</> : <><CloudIcon /> Import from Twilio</>}
+          </button>
+          <button className="btn primary compact" onClick={() => setShowAdd((v) => !v)}>
+            <PlusIcon /> Add
+          </button>
+        </div>
       </div>
+
+      {notice && <div className="admin-notice">{notice}</div>}
 
       {showAdd && (
         <div className="admin-add">
