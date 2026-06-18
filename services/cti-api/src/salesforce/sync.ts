@@ -5,6 +5,7 @@
  */
 import { and, eq, isNull, lte, sql } from 'drizzle-orm';
 import { getDb, schema } from '../db/index.js';
+import { normalize } from '../phone.js';
 import { createCallTask, findByPhone, SalesforceUnauthorizedError } from './client.js';
 
 const MAX_ATTEMPTS = 8;
@@ -77,16 +78,23 @@ async function syncOne(callId: string): Promise<void> {
     ? await db.query.preCallAudits.findFirst({ where: eq(schema.preCallAudits.id, call.preCallAuditId) })
     : null;
 
-  // Resolve match if not already set
+  const inbound = call.direction === 'inbound';
+  // The other party: who we called (outbound) or who called us (inbound).
+  const counterparty = inbound
+    ? (normalize(call.fromNumber).value?.e164 ?? call.fromNumber)
+    : call.normalizedToNumber;
+
+  // Resolve a record match if the click-to-dial / inbound lookup didn't already
+  // set one. Match against the counterparty number, never our own DID.
   let whoId = call.salesforceWhoId ?? undefined;
   let whatId = call.salesforceWhatId ?? undefined;
-  if (!whoId) {
-    const match = await findByPhone(call.userId, call.normalizedToNumber);
+  if (!whoId && !whatId) {
+    const match = await findByPhone(call.userId, counterparty);
     if (match?.whoId) whoId = match.whoId;
     if (match?.whatId) whatId = match.whatId;
   }
 
-  const subject = `Outbound Call - ${call.normalizedToNumber}`;
+  const subject = `${inbound ? 'Inbound' : 'Outbound'} Call - ${counterparty}`;
   const description = buildDescription(call, audit ?? null);
 
   const customFields: Record<string, string | number | null> = {
@@ -102,11 +110,13 @@ async function syncOne(callId: string): Promise<void> {
     CTI_Provider__c: call.provider,
     Precall_Decision__c: audit?.decision ?? null,
     Precall_Block_Reason__c: audit?.blockReason ?? null,
-    Outbound_Caller_ID__c: call.fromNumber,
+    // The DID involved in the call (our caller ID outbound; the dialed line inbound).
+    Outbound_Caller_ID__c: inbound ? call.normalizedToNumber : call.fromNumber,
   };
 
   const { taskId, degradedFields } = await createCallTask(call.userId, {
     subject,
+    callType: inbound ? 'Inbound' : 'Outbound',
     callDisposition: call.disposition ?? undefined,
     callDurationInSeconds: call.durationSeconds ?? undefined,
     whoId,

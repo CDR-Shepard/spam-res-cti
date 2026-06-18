@@ -21,6 +21,7 @@ import { getDb, schema } from '../db/index.js';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { findByPhone } from '../salesforce/client.js';
+import { enqueueSyncForCall } from '../salesforce/sync.js';
 import { normalize } from '../phone.js';
 import { sha256 } from '../crypto.js';
 
@@ -106,7 +107,9 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     if (sfConn) {
       try {
         const m = await findByPhone(sfConn.userId, normFrom);
-        if (m?.whoId) matched = { whoId: m.whoId, whatId: m.whatId, name: m.name };
+        // Accept any match — findByPhone can return a Deal__c hit with only a
+        // whatId (no whoId), which we must not drop.
+        if (m && (m.whoId || m.whatId)) matched = { whoId: m.whoId, whatId: m.whatId, name: m.name };
       } catch (err) {
         app.log.warn({ err }, 'inbound_sf_lookup_failed');
       }
@@ -217,6 +220,9 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
         updatedAt: new Date(),
       })
       .where(and(eq(schema.calls.id, q.callDbId), eq(schema.calls.providerCallId, callSid)));
+    // Log this inbound call to Salesforce as a Task on the matched record
+    // (idempotent — the sync job is keyed by callId).
+    await enqueueSyncForCall(q.callDbId);
     return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response/>');
   });
 
@@ -275,6 +281,8 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
             updatedAt: new Date(),
           })
           .where(and(eq(schema.calls.id, q.callDbId), eq(schema.calls.providerCallId, callSid)));
+        // Log the (forwarded) inbound call to Salesforce as a Task.
+        await enqueueSyncForCall(q.callDbId);
       }
     }
     // No further TwiML — hang up

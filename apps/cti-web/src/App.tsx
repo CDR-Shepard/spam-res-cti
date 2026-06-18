@@ -386,21 +386,14 @@ export function App(): JSX.Element {
     if (!active) return;
     setBusy(true);
     try {
-      await api(`/calls/${active.callId}/disposition`, {
-        method: 'POST',
-        body: {
-          disposition,
-          notes,
-          durationSeconds: elapsed,
-          // When we have the click-to-dial record we log via Open CTI below;
-          // tell the backend to skip its own sync so the call isn't logged twice.
-          skipSalesforceSync: !!active.recordId,
-        },
-      });
-      // If we know the SF record from the click-to-dial event, ALSO log via
-      // Open CTI so the Task attaches to that exact record (no SOSL needed).
+      // If we know the click-to-dial record, write the Task via Open CTI FIRST
+      // (attaches to the exact record in the SF UI). Only when that succeeds do
+      // we tell the backend to skip — otherwise the backend creates and attaches
+      // the Task itself from the record we hand it, so a logged call is never lost.
+      const isWho = active.objectType === 'Lead' || active.objectType === 'Contact';
+      let loggedViaOpenCti = false;
       if (active.recordId) {
-        const ok = await saveCallLog({
+        loggedViaOpenCti = await saveCallLog({
           Subject: `Outbound Call - ${active.toNumber}`,
           Status: 'Completed',
           TaskSubtype: 'Call',
@@ -408,16 +401,30 @@ export function App(): JSX.Element {
           CallDisposition: disposition,
           CallDurationInSeconds: elapsed,
           Description: notes || '',
-          WhoId: active.objectType === 'Lead' || active.objectType === 'Contact' ? active.recordId : undefined,
-          WhatId: active.objectType !== 'Lead' && active.objectType !== 'Contact' ? active.recordId : undefined,
+          WhoId: isWho ? active.recordId : undefined,
+          WhatId: isWho ? undefined : active.recordId,
         });
-        setToast({
-          text: ok ? `Call logged · attached to ${active.recordName ?? active.objectType}` : 'Call logged locally',
-          type: 'success',
-        });
-      } else {
-        setToast({ text: 'Call logged. Salesforce sync queued.', type: 'success' });
       }
+      await api(`/calls/${active.callId}/disposition`, {
+        method: 'POST',
+        body: {
+          disposition,
+          notes,
+          durationSeconds: elapsed,
+          skipSalesforceSync: loggedViaOpenCti,
+          // Hand the backend the exact record when Open CTI didn't log it, so it
+          // attaches the Task to the right Lead/Contact/Opportunity/Deal__c.
+          ...(active.recordId && !loggedViaOpenCti
+            ? { recipientRecordId: active.recordId, recipientObjectType: active.objectType }
+            : {}),
+        },
+      });
+      setToast({
+        text: active.recordId
+          ? `Call logged · attached to ${active.recordName ?? active.objectType ?? 'record'}`
+          : 'Call logged. Salesforce sync queued.',
+        type: 'success',
+      });
       reset();
     } catch (e) {
       setToast({ text: `Could not save: ${(e as Error).message}`, type: 'error' });

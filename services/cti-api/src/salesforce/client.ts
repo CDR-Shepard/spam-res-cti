@@ -171,32 +171,38 @@ export async function findByPhone(userId: string, e164: string): Promise<Salesfo
   const wildcarded = n.length === 10
     ? `${n.slice(0, 3)}*${n.slice(3, 6)}*${n.slice(6)}`
     : n;
-  const soslQuery = `FIND {${wildcarded}} IN PHONE FIELDS RETURNING Lead(Id, Name), Contact(Id, Name, AccountId)`;
-  const res = await sfFetch(userId, '/search/', { query: { q: soslQuery } });
+  // Search Lead + Contact + the org's custom Deal__c phone fields. If Deal__c
+  // has no phone field (or doesn't exist), the SOSL errors — so we retry with
+  // just the standard objects. That way Deal__c support never breaks the
+  // baseline Lead/Contact matching.
+  const withDeal = 'RETURNING Lead(Id, Name), Contact(Id, Name, AccountId), Deal__c(Id, Name)';
+  const standard = 'RETURNING Lead(Id, Name), Contact(Id, Name, AccountId)';
+  const runSosl = (returning: string) =>
+    sfFetch(userId, '/search/', { query: { q: `FIND {${wildcarded}} IN PHONE FIELDS ${returning}` } });
+  let res = await runSosl(withDeal);
+  // A 400 means the query was rejected — almost always because Deal__c has no
+  // phone field / isn't searchable. Retry with just the standard objects so
+  // Deal__c can never break baseline Lead/Contact matching. Transient 401/5xx
+  // are left to the sync worker's retry rather than silently narrowing.
+  if (res.status === 400) res = await runSosl(standard);
   if (res.status >= 400) return null;
   const data = res.json as {
     searchRecords?: Array<{ attributes: { type: string }; Id: string; Name?: string; AccountId?: string }>;
   };
   const records = data.searchRecords ?? [];
   if (records.length === 0) return null;
-  if (records.length > 1) {
-    const first = records[0]!;
-    return {
-      whoId: first.Id,
-      name: first.Name,
-      ambiguous: true,
-    };
-  }
   const r = records[0]!;
-  if (r.attributes.type === 'Lead') return { whoId: r.Id, name: r.Name };
-  if (r.attributes.type === 'Contact') {
-    return { whoId: r.Id, whatId: r.AccountId, name: r.Name };
-  }
-  return null;
+  const ambiguous = records.length > 1;
+  // Lead/Contact attach via WhoId; everything else (Deal__c, etc.) via WhatId.
+  if (r.attributes.type === 'Lead') return { whoId: r.Id, name: r.Name, ambiguous };
+  if (r.attributes.type === 'Contact') return { whoId: r.Id, whatId: r.AccountId, name: r.Name, ambiguous };
+  return { whatId: r.Id, name: r.Name, ambiguous };
 }
 
 export interface CallTaskInput {
   subject: string;
+  /** 'Outbound' (default) or 'Inbound' — sets the Task's CallType. */
+  callType?: 'Inbound' | 'Outbound';
   callDisposition?: string;
   callDurationInSeconds?: number;
   whoId?: string;
@@ -234,7 +240,7 @@ export async function createCallTask(
     Status: 'Completed',
     Priority: 'Normal',
     TaskSubtype: 'Call',
-    CallType: 'Outbound',
+    CallType: input.callType ?? 'Outbound',
     ActivityDate: today,
   };
   if (input.callDisposition) base.CallDisposition = input.callDisposition;

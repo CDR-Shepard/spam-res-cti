@@ -240,6 +240,14 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
      * the same call.
      */
     skipSalesforceSync: z.boolean().optional(),
+    /**
+     * The click-to-dial source record + its object type (Lead / Contact /
+     * Opportunity / Deal__c / …). When Open CTI couldn't write the Task itself,
+     * we hand the backend the exact record so it attaches the Task precisely
+     * (Lead/Contact → WhoId, everything else → WhatId) instead of SOSL-guessing.
+     */
+    recipientRecordId: z.string().min(15).max(20).optional(),
+    recipientObjectType: z.string().max(64).optional(),
   });
 
   app.post('/calls/:id/disposition', async (req, reply) => {
@@ -261,6 +269,20 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     if (parsed.data.durationSeconds !== undefined) updates.durationSeconds = parsed.data.durationSeconds;
     if (!owned.endedAt) updates.endedAt = new Date();
     if (owned.status !== 'completed') updates.status = 'completed';
+    // Attach the click-to-dial record so the backend sync logs the Task to the
+    // exact record: Lead/Contact → WhoId, Opportunity/Deal__c/etc. → WhatId.
+    if (parsed.data.recipientRecordId && !owned.salesforceWhoId && !owned.salesforceWhatId) {
+      const rid = parsed.data.recipientRecordId;
+      const ot = (parsed.data.recipientObjectType ?? '').toLowerCase();
+      // Prefer the explicit object type; if it's missing, fall back to the SF
+      // ID key prefix (00Q = Lead, 003 = Contact) so a Lead/Contact record can
+      // never be mis-attached as a WhatId.
+      const isWho =
+        ot === 'lead' || ot === 'contact' ||
+        (!ot && (rid.startsWith('00Q') || rid.startsWith('003')));
+      if (isWho) updates.salesforceWhoId = rid;
+      else updates.salesforceWhatId = rid;
+    }
     const [row] = await db.update(schema.calls).set(updates).where(eq(schema.calls.id, id)).returning();
     // Single-writer rule: if the Open CTI surface already saved the Task, don't
     // enqueue a backend sync — otherwise the call is logged twice in Salesforce.
