@@ -223,6 +223,13 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
             .values({ name: `Salesforce Org ${tok.sfOrgId}`, sfOrgId: tok.sfOrgId })
             .returning();
           org = createdOrg!;
+          // Seed a default campaign config so the firewall's campaign gate
+          // passes out of the box (calling hours / attempt caps use the schema
+          // defaults: 08:00–20:00 recipient-local, Mon–Fri, 5 attempts / 14d).
+          await db
+            .insert(schema.campaignConfigs)
+            .values({ orgId: org.id, key: 'default', name: 'Default Campaign' })
+            .onConflictDoNothing();
         }
         const email = (profile.sfUserEmail?.trim() || `sf-${tok.sfUserId}@${tok.sfOrgId}.salesforce.local`).toLowerCase();
         // The first user provisioned for a brand-new org is the admin; plus any

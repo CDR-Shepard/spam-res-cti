@@ -602,12 +602,15 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
       detail: `${consent.consentType} captured ${consentDate}${consent.sourceUrl ? ` from ${new URL(consent.sourceUrl).host}` : ''}`,
     });
   } else {
-    // No consent record. For cold outbound this is fine (we rely on DNC scrub +
-    // prior-business-relationship rules); flag as REVIEW so the rep is aware.
+    // No consent record. This CTI is manual, rep-initiated click-to-dial (not an
+    // autodialer/ATDS), so cold outbound is permitted under TCPA as long as the
+    // hard gates hold — DNC scrub (block), calling hours, and frequency caps are
+    // all enforced above. So surface "no prior consent" as INFO (visible in the
+    // gate list for transparency) rather than forcing a per-call acknowledgment.
     checks.push({
       name: 'consent_record',
       passed: true,
-      severity: 'review',
+      severity: 'info',
       reasonCode: REASON.CONSENT_RECORD_MISSING,
       detail: 'No TCPA consent record — relying on DNC scrub + cold-call rules',
     });
