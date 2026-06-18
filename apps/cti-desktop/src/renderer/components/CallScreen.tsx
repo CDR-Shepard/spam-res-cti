@@ -3,7 +3,7 @@
  * cti-desktop.
  */
 import { formatE164 } from '../format';
-import { MicIcon, MicOffIcon, PhoneIcon, PhoneOffIcon, PhoneOutgoingIcon } from '../icons';
+import { MicIcon, MicOffIcon, PhoneIcon, PhoneHangupIcon, PhoneOutgoingIcon } from '../icons';
 
 interface CallScreenProps {
   phase: 'ringing' | 'active';
@@ -40,7 +40,7 @@ export function CallScreen(props: CallScreenProps): JSX.Element {
           {muted ? <MicOffIcon /> : <MicIcon />}
         </button>
         <button className="cbtn hangup" onClick={props.onHangup} title="End call">
-          <PhoneOffIcon />
+          <PhoneHangupIcon />
         </button>
       </div>
     </div>

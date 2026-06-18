@@ -36,6 +36,22 @@ export const PhoneOffIcon = (p: IconProps): JSX.Element => (
   </Svg>
 );
 
+// "End call" glyph — the standard handset rotated 135° so it points down.
+// Reuses PhoneIcon's filled path; filled (not stroked) so it stays crisp and
+// unmistakable on the small red hangup button.
+export const PhoneHangupIcon = (p: IconProps): JSX.Element => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    aria-hidden="true"
+    {...p}
+  >
+    <g transform="rotate(135 12 12)">
+      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.86 19.86 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.86 19.86 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92Z" />
+    </g>
+  </svg>
+);
+
 export const PhoneIncomingIcon = (p: IconProps): JSX.Element => (
   <Svg {...p}>
     <polyline points="16 2 16 8 22 8" />
