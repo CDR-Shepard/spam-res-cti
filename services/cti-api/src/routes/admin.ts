@@ -461,4 +461,32 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     }
     return { ok: true, received: parsed.data.numbers.length, valid: rows.length, inserted };
   });
+
+  /**
+   * Testing utility — clear this org's call history to a specific number so the
+   * firewall's per-recipient attempt counter (a rolling COUNT of calls in the
+   * window, not a stored field) resets to 0. Lets you re-test against your own
+   * number without tripping the attempt-limit cap. Admin-only, org-scoped;
+   * cascades to sync jobs / events.
+   */
+  app.post('/admin/calls/clear-recipient', async (req, reply) => {
+    const s = await resolveSession(req.headers.authorization);
+    if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
+    const parsed = z.object({ e164: z.string() }).safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const norm = normalize(parsed.data.e164);
+    if (!norm.ok || !norm.value) return reply.code(400).send({ error: 'Invalid number' });
+    const db = getDb();
+    const deleted = await db
+      .delete(schema.calls)
+      .where(
+        and(
+          eq(schema.calls.orgId, s.orgId),
+          eq(schema.calls.normalizedToNumber, norm.value.e164),
+        ),
+      )
+      .returning({ id: schema.calls.id });
+    return { ok: true, e164: norm.value.e164, cleared: deleted.length };
+  });
 }
