@@ -306,6 +306,15 @@ export function App(): JSX.Element {
       const { Device } = await import('@twilio/voice-sdk');
       const device = new Device(tok.token, { logLevel: 1 });
       deviceRef.current = device;
+      // Surface device-level errors (e.g. AccessTokenInvalid) as a toast.
+      // These fire on the Device, not the Connection, so without this handler
+      // a bad Twilio token fails silently and the UI just appears to do nothing.
+      (device as unknown as { on: (e: string, cb: (a: unknown) => void) => void }).on('error', (err) => {
+        const e = err as { message?: string; code?: number } | undefined;
+        setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'Twilio device error'}`.replace('  ', ' ').trim(), type: 'error' });
+        setPhase('preflight');
+        setBusy(false);
+      });
       await device.register();
       const connection = await device.connect({
         // CallId binds this dial to the firewall-approved call row server-side,
@@ -352,7 +361,8 @@ export function App(): JSX.Element {
         setToast({ text: `Call error ${e.code ?? ''}: ${e.message ?? 'unknown'}`, type: 'error' });
       });
     } catch (e) {
-      setToast({ text: `Could not place call: ${(e as Error).message}`, type: 'error' });
+      const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'unknown error';
+      setToast({ text: `Could not place call: ${msg}`, type: 'error' });
       setPhase('preflight');
     } finally { setBusy(false); }
   }, [firewall, raw, ctiContext]);
