@@ -488,6 +488,35 @@ export const salesforceSyncJobs = pgTable(
   }),
 );
 
+/**
+ * Sticky caller ID per (rep, lead) — the DID a rep last called a given recipient
+ * (lead) from. Future calls to the same lead reuse this number (when the rep
+ * still owns it and it's under its warmup cap), so a lead consistently sees the
+ * same number — better answer rates and reputation. Keyed per-REP because
+ * rotation only ever dials a rep's OWN pool, so a single shared row would just
+ * thrash between reps; per-rep keeps each rep stable for a lead. Last-used-wins:
+ * self-heals if the sticky DID is later paused (the next call's fallback becomes
+ * the new sticky).
+ */
+export const stickyNumbers = pgTable(
+  'sticky_numbers',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    /** The rep this sticky belongs to (the DID is from their pool). */
+    assignedUserId: uuid('assigned_user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    /** The lead / recipient number this sticky applies to. */
+    recipientE164: text('recipient_e164').notNull(),
+    /** The DID (caller ID) to reuse for this rep+recipient. */
+    e164: text('e164').notNull(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }).defaultNow().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    stickyUnique: uniqueIndex('sticky_org_user_recipient_unique').on(t.orgId, t.assignedUserId, t.recipientE164),
+  }),
+);
+
 // =============================================================================
 // Type helpers
 // =============================================================================

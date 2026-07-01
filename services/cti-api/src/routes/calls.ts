@@ -175,6 +175,27 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
         campaignKey: parsed.data.campaignKey ?? audit.campaignKey ?? null,
       })
       .returning();
+
+    // Remember the DID used for this lead so future calls to the same recipient
+    // reuse it (sticky caller ID). Last-used-wins; best-effort — a sticky write
+    // failure must never fail an already-placed call.
+    try {
+      await db
+        .insert(schema.stickyNumbers)
+        .values({
+          orgId: session.orgId,
+          assignedUserId: session.userId,
+          recipientE164: norm.value!.e164,
+          e164: fromNumber,
+        })
+        .onConflictDoUpdate({
+          target: [schema.stickyNumbers.orgId, schema.stickyNumbers.assignedUserId, schema.stickyNumbers.recipientE164],
+          set: { e164: fromNumber, lastUsedAt: new Date() },
+        });
+    } catch (err) {
+      req.log.warn({ err }, 'sticky number upsert failed');
+    }
+
     return { call: row };
   });
 

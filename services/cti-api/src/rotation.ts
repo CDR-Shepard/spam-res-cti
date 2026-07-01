@@ -87,6 +87,29 @@ export async function pickRotationNumber(
       const bT = b.n.lastDialAt?.getTime() ?? 0;
       return aT - bT;
     });
+  // Sticky caller ID: if THIS rep called this lead before from a DID they STILL
+  // own and can dial today, reuse it so the lead keeps seeing the same number.
+  // The `eligible.some(...)` membership check is the sole safety authority — the
+  // sticky DID is only ever returned when it's already in this rep's eligible
+  // dial-today set (active, healthy, assigned to them, under warmup cap), so it
+  // can never bypass a gate. Silently falls back to area-match otherwise.
+  if (toE164 && eligible.length > 0) {
+    const sticky = await db
+      .select({ e164: schema.stickyNumbers.e164 })
+      .from(schema.stickyNumbers)
+      .where(
+        and(
+          eq(schema.stickyNumbers.orgId, orgId),
+          eq(schema.stickyNumbers.assignedUserId, userId),
+          eq(schema.stickyNumbers.recipientE164, toE164),
+        ),
+      )
+      .limit(1);
+    const stickyE164 = sticky[0]?.e164;
+    if (stickyE164 && eligible.some((x) => x.n.e164 === stickyE164)) {
+      return stickyE164;
+    }
+  }
   // Fail CLOSED: if no DID is healthy AND under its warmup cap today, return
   // null so the caller surfaces "pool exhausted" instead of silently dialing an
   // unvetted, over-cap, or unhealthy number. Falling back to a default caller
