@@ -3,7 +3,7 @@
  * Idempotent: once a job has a salesforce_task_id stored on the call, we
  * mark it succeeded and skip recreation.
  */
-import { and, eq, isNull, lte, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { getDb, schema } from '../db/index.js';
 import { normalize } from '../phone.js';
 import { createCallTask, findByPhone, SalesforceUnauthorizedError } from './client.js';
@@ -15,6 +15,12 @@ const BACKOFF_BASE_MS = 30_000; // 30s, 60s, 2m, 4m, ...
 // it died (crash / Railway redeploy) and the job is orphaned — reap it back to
 // 'pending' so its call still gets a Salesforce Task.
 const STUCK_AFTER_MS = 2 * 60_000;
+// Grace period before a terminal call with no Task is auto-logged. Long enough
+// that a rep filling out a wrap-up isn't swept out from under them; short enough
+// that an abandoned (tab-closed / crashed) call still lands in Salesforce.
+const LOG_GRACE_MS = 10 * 60_000;
+// Terminal statuses that represent a real dial the rep should have a Task for.
+const LOGGABLE_TERMINAL_STATUSES: schema.Call['status'][] = ['completed', 'no_answer', 'busy', 'canceled'];
 
 export async function enqueueSyncForCall(callId: string): Promise<void> {
   const db = getDb();
@@ -42,9 +48,43 @@ async function reapStuckJobs(): Promise<void> {
     );
 }
 
+/**
+ * Guarantee every real call becomes a Salesforce Task even if the rep never
+ * dispositions it (closed the tab, crash). Any terminal call with no Task,
+ * older than the grace window, gets a default disposition (so it's labeled and
+ * the "disposition before next call" gate clears) and is queued for sync.
+ * Idempotent: enqueue no-ops if a job already exists; syncOne skips a call that
+ * already has a Task.
+ */
+async function sweepUnloggedCalls(): Promise<void> {
+  const db = getDb();
+  const cutoff = new Date(Date.now() - LOG_GRACE_MS);
+  const stale = await db
+    .select({ id: schema.calls.id, disposition: schema.calls.disposition })
+    .from(schema.calls)
+    .where(
+      and(
+        isNull(schema.calls.salesforceTaskId),
+        inArray(schema.calls.status, LOGGABLE_TERMINAL_STATUSES),
+        sql`coalesce(${schema.calls.endedAt}, ${schema.calls.updatedAt}) < ${cutoff}`,
+      ),
+    )
+    .limit(50);
+  for (const c of stale) {
+    if (!c.disposition) {
+      await db
+        .update(schema.calls)
+        .set({ disposition: 'Not dispositioned', updatedAt: new Date() })
+        .where(eq(schema.calls.id, c.id));
+    }
+    await enqueueSyncForCall(c.id);
+  }
+}
+
 export async function runSyncTick(): Promise<{ processed: number }> {
   const db = getDb();
   await reapStuckJobs();
+  await sweepUnloggedCalls();
   const now = new Date();
   const jobs = await db
     .select()

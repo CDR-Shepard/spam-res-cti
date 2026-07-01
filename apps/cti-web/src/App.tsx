@@ -177,9 +177,6 @@ export function App(): JSX.Element {
   // a stale `phase` at registration time).
   const phaseRef = useRef(phase);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
-  // Did the current call actually connect (rep answered)? Drives the "always log
-  // a connected call" safety net on discard.
-  const wasConnectedRef = useRef(false);
   // Set once the Open CTI Task has been written for the current call, so a
   // disposition retry doesn't create a duplicate Task.
   const openCtiTaskWrittenRef = useRef(false);
@@ -298,19 +295,41 @@ export function App(): JSX.Element {
     if (!firewall || firewall.decision === 'BLOCK') return;
     setBusy(true);
     try {
-      const created = await api<{ call: { id: string; fromNumber: string; toNumber: string; normalizedToNumber: string } }>(
-        '/calls', {
-          method: 'POST',
-          body: {
-            toNumber: raw,
-            auditId: firewall.auditId,
-            // Dial exactly the DID the firewall gated. Clicking "Call" on a
-            // REQUIRE_REVIEW verdict is the rep's explicit acknowledgement.
-            ...(firewall.fromNumber ? { fromNumber: firewall.fromNumber } : {}),
-            ...(firewall.decision === 'REQUIRE_REVIEW' ? { acknowledged: true } : {}),
+      let created: { call: { id: string; fromNumber: string; toNumber: string; normalizedToNumber: string } };
+      try {
+        created = await api<{ call: { id: string; fromNumber: string; toNumber: string; normalizedToNumber: string } }>(
+          '/calls', {
+            method: 'POST',
+            body: {
+              toNumber: raw,
+              auditId: firewall.auditId,
+              // Dial exactly the DID the firewall gated. Clicking "Call" on a
+              // REQUIRE_REVIEW verdict is the rep's explicit acknowledgement.
+              ...(firewall.fromNumber ? { fromNumber: firewall.fromNumber } : {}),
+              ...(firewall.decision === 'REQUIRE_REVIEW' ? { acknowledged: true } : {}),
+            },
           },
-        },
-      );
+        );
+      } catch (e) {
+        // The server blocks a new dial until the previous call is dispositioned.
+        // Reopen that call's wrap-up so the rep can log it, then dial again.
+        if (e instanceof ApiError && e.status === 409 && (e.data as { code?: string })?.code === 'DISPOSITION_REQUIRED') {
+          const pc = (e.data as { pendingCall?: { id: string; toNumber: string; fromNumber: string; durationSeconds?: number } }).pendingCall;
+          if (pc) {
+            // Reopen the un-dispositioned call's wrap-up so the rep can log it.
+            openCtiTaskWrittenRef.current = false;
+            setActive({ callId: pc.id, toNumber: pc.toNumber, fromNumber: pc.fromNumber, startedAt: Date.now() });
+            setElapsed(pc.durationSeconds ?? 0);
+            setDisposition('Connected');
+            setNotes('');
+            setPhase('wrapup');
+          }
+          setToast({ text: 'Log your previous call before making another.', type: 'error' });
+          setBusy(false);
+          return;
+        }
+        throw e;
+      }
       const callId = created.call.id;
       const tok = await api<{ token: string }>('/telephony/token', { method: 'POST' });
       const { Device } = await import('@twilio/voice-sdk');
@@ -356,7 +375,6 @@ export function App(): JSX.Element {
       };
       conn.on('accept', () => {
         persistSid();
-        wasConnectedRef.current = true;
         setPhase('active');
         setActive((s) => (s ? { ...s, startedAt: Date.now() } : s));
         void api(`/calls/${callId}`, { method: 'PATCH', body: { status: 'in_progress', answeredAt: new Date().toISOString() } });
@@ -396,24 +414,8 @@ export function App(): JSX.Element {
     setElapsed(0); setMuted(false); setDisposition('Connected'); setNotes('');
     setCtiContext(null);
     deviceRef.current = null; connectionRef.current = null;
-    wasConnectedRef.current = false; openCtiTaskWrittenRef.current = false;
+    openCtiTaskWrittenRef.current = false;
   }, []);
-
-  // Discard the wrap-up without logging — but if the call actually connected,
-  // still create the Salesforce Task (safety net) so a real conversation is
-  // never silently dropped. Idempotent server-side; fire-and-forget.
-  const discard = useCallback(() => {
-    const a = active;
-    if (a && wasConnectedRef.current && !openCtiTaskWrittenRef.current) {
-      void api(`/calls/${a.callId}/ensure-logged`, {
-        method: 'POST',
-        body: a.recordId
-          ? { recipientRecordId: a.recordId, recipientObjectType: a.objectType }
-          : {},
-      }).catch(() => { /* best-effort safety net */ });
-    }
-    reset();
-  }, [active, reset]);
 
   const submitDisposition = useCallback(async () => {
     if (!active) return;
@@ -607,7 +609,6 @@ export function App(): JSX.Element {
         onNotes={setNotes}
         busy={busy}
         onSubmit={submitDisposition}
-        onDiscard={discard}
       />
     ) : (
       <CallScreen

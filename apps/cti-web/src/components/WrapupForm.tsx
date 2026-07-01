@@ -20,7 +20,6 @@ interface WrapupFormProps {
   onNotes: (n: string) => void;
   busy: boolean;
   onSubmit: () => void;
-  onDiscard: () => void;
 }
 
 export function WrapupForm(props: WrapupFormProps): JSX.Element {
@@ -57,8 +56,8 @@ export function WrapupForm(props: WrapupFormProps): JSX.Element {
         <button className="btn primary grow" disabled={props.busy} onClick={props.onSubmit}>
           {props.busy ? <><span className="spinner" /> Logging…</> : 'Log call'}
         </button>
-        <button className="btn ghost" onClick={props.onDiscard}>Discard</button>
       </div>
+      <div className="wrapup-note">Every call is logged to Salesforce. Disposition this call to continue.</div>
     </div>
   );
 }

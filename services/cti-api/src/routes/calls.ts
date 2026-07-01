@@ -8,7 +8,7 @@
  *  GET /calls/:id
  */
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
 import { getDb, schema } from '../db/index.js';
@@ -43,6 +43,32 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     if (!norm.ok) return reply.code(400).send({ error: 'Invalid phone number' });
 
     const db = getDb();
+
+    // Require the rep to disposition their previous call before dialing again.
+    // A terminal call with no disposition is un-logged intent; block the next
+    // dial and hand the client the pending call so it can reopen its wrap-up.
+    // The sync worker auto-dispositions truly-abandoned calls after a grace
+    // window, so this can never lock a rep out permanently.
+    const pending = await db.query.calls.findFirst({
+      where: and(
+        eq(schema.calls.userId, session.userId),
+        isNull(schema.calls.disposition),
+        inArray(schema.calls.status, ['completed', 'no_answer', 'busy', 'canceled'] as schema.Call['status'][]),
+      ),
+      orderBy: desc(schema.calls.createdAt),
+    });
+    if (pending) {
+      return reply.code(409).send({
+        error: 'Disposition your previous call before dialing again.',
+        code: 'DISPOSITION_REQUIRED',
+        pendingCall: {
+          id: pending.id,
+          toNumber: pending.normalizedToNumber,
+          fromNumber: pending.fromNumber,
+          durationSeconds: pending.durationSeconds ?? 0,
+        },
+      });
+    }
     // The pre-call audit is the authority. Verify it is recent, decided, and
     // matches this rep/org/destination. The audit also pins the outbound DID
     // (fromNumberE164) the firewall evaluated its per-DID gates against — we
