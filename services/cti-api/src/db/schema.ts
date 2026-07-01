@@ -52,6 +52,16 @@ export const organizations = pgTable('organizations', {
   name: text('name').notNull(),
   /** Salesforce org id this local org maps to (set on first SF login). */
   sfOrgId: text('sf_org_id'),
+  /**
+   * How this org satisfies DNC compliance, driving the firewall's federal_dnc
+   * gate display:
+   *  - 'registry' (default): check the number against the loaded DNC cache;
+   *    honestly report "not scrubbed" when no list is loaded.
+   *  - 'external_prescrubbed': the org attests its call lists are scrubbed
+   *    offline before loading. The gate passes GREEN labeled "pre-scrubbed list
+   *    (org policy)" — but a number that IS in a loaded cache still BLOCKS.
+   */
+  dncMode: text('dnc_mode').default('registry').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
 

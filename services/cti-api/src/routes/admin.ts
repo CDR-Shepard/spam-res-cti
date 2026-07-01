@@ -462,6 +462,36 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true, received: parsed.data.numbers.length, valid: rows.length, inserted };
   });
 
+  // ---- DNC compliance mode ----
+  // 'registry' = check numbers against the loaded DNC cache; 'external_prescrubbed'
+  // = org attests lists are scrubbed offline (gate shows green "pre-scrubbed list
+  // (org policy)"; a number in a loaded cache still blocks).
+  app.get('/admin/dnc-mode', async (req, reply) => {
+    const s = await resolveSession(req.headers.authorization);
+    if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
+    const db = getDb();
+    const org = await db.query.organizations.findFirst({
+      where: eq(schema.organizations.id, s.orgId),
+      columns: { dncMode: true },
+    });
+    return { mode: org?.dncMode ?? 'registry' };
+  });
+
+  app.patch('/admin/dnc-mode', async (req, reply) => {
+    const s = await resolveSession(req.headers.authorization);
+    if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
+    const parsed = z.object({ mode: z.enum(['registry', 'external_prescrubbed']) }).safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const db = getDb();
+    await db
+      .update(schema.organizations)
+      .set({ dncMode: parsed.data.mode })
+      .where(eq(schema.organizations.id, s.orgId));
+    return { ok: true, mode: parsed.data.mode };
+  });
+
   /**
    * Testing utility — clear this org's call history to a specific number so the
    * firewall's per-recipient attempt counter (a rolling COUNT of calls in the

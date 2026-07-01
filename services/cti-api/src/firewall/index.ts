@@ -96,6 +96,7 @@ const REASON = {
   DNC_OK: 'FEDERAL_DNC_CLEAR',
   DNC_LISTED: 'FEDERAL_DNC_LISTED',
   DNC_NOT_LOADED: 'FEDERAL_DNC_NOT_LOADED',
+  DNC_PRESCRUBBED: 'FEDERAL_DNC_PRESCRUBBED',
   RND_OK: 'REASSIGNED_NUMBER_CLEAR',
   RND_REASSIGNED: 'REASSIGNED_NUMBER_DETECTED',
   RND_UNCHECKED: 'REASSIGNED_NUMBER_UNCHECKED',
@@ -571,6 +572,7 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
     where: eq(schema.federalDncEntries.e164, e164),
   });
   if (dncHit) {
+    // A number that IS in the loaded cache always blocks, regardless of org mode.
     checks.push({
       name: 'federal_dnc',
       passed: false,
@@ -578,26 +580,41 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
       reasonCode: REASON.DNC_LISTED,
       detail: `Number is on the federal DNC list (source: ${dncHit.source})`,
     });
-  } else if (await isDncListLoaded(db)) {
-    checks.push({
-      name: 'federal_dnc',
-      passed: true,
-      severity: 'info',
-      reasonCode: REASON.DNC_OK,
-      detail: 'Not on federal DNC scrub list',
-    });
   } else {
-    // No real list loaded: the number was NOT actually scrubbed. Report the
-    // truth rather than implying a clean DNC check. Non-blocking — in the
-    // pre-scrubbed-leads-only beta, DNC compliance is owned operationally, so
-    // this is an advisory, not a hard gate.
-    checks.push({
-      name: 'federal_dnc',
-      passed: true,
-      severity: 'info',
-      reasonCode: REASON.DNC_NOT_LOADED,
-      detail: 'DNC scrub list not loaded — number was NOT checked against DNC',
+    const org = await db.query.organizations.findFirst({
+      where: eq(schema.organizations.id, input.orgId),
+      columns: { dncMode: true },
     });
+    if (org?.dncMode === 'external_prescrubbed') {
+      // Org attests its call lists are scrubbed offline before loading. Pass
+      // green with a label that states that method — NOT a claim that this
+      // system checked the number against the registry.
+      checks.push({
+        name: 'federal_dnc',
+        passed: true,
+        severity: 'info',
+        reasonCode: REASON.DNC_PRESCRUBBED,
+        detail: 'Pre-scrubbed list (org policy)',
+      });
+    } else if (await isDncListLoaded(db)) {
+      checks.push({
+        name: 'federal_dnc',
+        passed: true,
+        severity: 'info',
+        reasonCode: REASON.DNC_OK,
+        detail: 'Not on federal DNC scrub list',
+      });
+    } else {
+      // No real list loaded and no pre-scrub attestation: the number was NOT
+      // actually scrubbed. Report the truth rather than implying a clean check.
+      checks.push({
+        name: 'federal_dnc',
+        passed: true,
+        severity: 'info',
+        reasonCode: REASON.DNC_NOT_LOADED,
+        detail: 'DNC scrub list not loaded — number was NOT checked against DNC',
+      });
+    }
   }
 
   // 7f. Reassigned Numbers Database (RND) — FCC safe harbor for consent-based calls.

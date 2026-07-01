@@ -50,19 +50,39 @@ export function AdminPanel(): JSX.Element {
   const [importing, setImporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // DNC compliance mode
+  type DncMode = 'registry' | 'external_prescrubbed';
+  const [dncMode, setDncMode] = useState<DncMode | null>(null);
+  const [dncBusy, setDncBusy] = useState(false);
+
   const load = useCallback(async () => {
     setErr(null);
     try {
-      const [n, r] = await Promise.all([
+      const [n, r, d] = await Promise.all([
         api<{ numbers: NumberRow[] }>('/admin/outbound-numbers'),
         api<{ reps: Rep[] }>('/admin/reps'),
+        api<{ mode: DncMode }>('/admin/dnc-mode'),
       ]);
       setNumbers(n.numbers);
       setReps(r.reps);
+      setDncMode(d.mode);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const setDnc = useCallback(async (mode: DncMode) => {
+    setDncBusy(true);
+    setErr(null);
+    try {
+      await api('/admin/dnc-mode', { method: 'PATCH', body: { mode } });
+      setDncMode(mode);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setDncBusy(false);
     }
   }, []);
 
@@ -185,6 +205,30 @@ export function AdminPanel(): JSX.Element {
           </button>
           <button className="btn primary compact" onClick={() => setShowAdd((v) => !v)}>
             <PlusIcon /> Add
+          </button>
+        </div>
+      </div>
+
+      <div className="admin-compliance">
+        <div className="admin-group-head"><ShieldIcon /> DNC compliance</div>
+        <div className="dnc-modes">
+          <button
+            type="button"
+            className={`dnc-mode ${dncMode === 'registry' ? 'selected' : ''}`}
+            disabled={dncBusy || dncMode === null}
+            onClick={() => void setDnc('registry')}
+          >
+            <span className="dnc-mode-title">Check DNC registry</span>
+            <span className="dnc-mode-desc">Scrub each number against the loaded DNC list.</span>
+          </button>
+          <button
+            type="button"
+            className={`dnc-mode ${dncMode === 'external_prescrubbed' ? 'selected' : ''}`}
+            disabled={dncBusy || dncMode === null}
+            onClick={() => void setDnc('external_prescrubbed')}
+          >
+            <span className="dnc-mode-title">Pre-scrubbed lists</span>
+            <span className="dnc-mode-desc">Lists scrubbed before loading — gate shows green “pre-scrubbed (org policy)”.</span>
           </button>
         </div>
       </div>
