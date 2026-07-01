@@ -270,15 +270,11 @@ export async function createCallTask(
         if (STANDARD_FIELDS.has(k)) stripped[k] = v;
         else degraded.push(k);
       }
-      // Fold degraded data into Description so we don't lose it.
-      stripped.Description = [
-        input.description ?? '',
-        '',
-        '--- Caller Reputation CTI: extended metadata (custom fields not present) ---',
-        ...degraded.map((k) => `${k}: ${JSON.stringify(input.customFields?.[k] ?? null)}`),
-      ]
-        .join('\n')
-        .trim();
+      // The custom fields aren't defined in this SF org — drop them and keep the
+      // lean Description (already copied above as a standard field). We do NOT
+      // fold the diagnostics into Description: the full record, including these
+      // values, is preserved in our own DB (calls.sync_detail), so nothing is
+      // lost and org Chatter automations don't repost CTI internals.
       res = await attempt(stripped);
       if (res.status >= 400) {
         throw new Error(`Salesforce Task create failed (degraded): ${JSON.stringify(res.json)}`);

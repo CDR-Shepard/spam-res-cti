@@ -161,7 +161,6 @@ async function syncOne(callId: string): Promise<void> {
   }
 
   const subject = `${inbound ? 'Inbound' : 'Outbound'} Call - ${counterparty}`;
-  const description = buildDescription(call, audit ?? null);
 
   const customFields: Record<string, string | number | null> = {
     External_Call_Id__c: call.id,
@@ -180,6 +179,12 @@ async function syncOne(callId: string): Promise<void> {
     Outbound_Caller_ID__c: inbound ? call.normalizedToNumber : call.fromNumber,
   };
 
+  // The Salesforce Task Description stays lean (rep notes + call time) so org
+  // Chatter automations that repost the disposition/description don't publish CTI
+  // diagnostics. The complete record lives in our DB (calls.sync_detail).
+  const description = buildTaskDescription(call);
+  const fullDetail = buildFullDetail(call, audit ?? null, customFields);
+
   const { taskId, degradedFields } = await createCallTask(call.userId, {
     subject,
     callType: inbound ? 'Inbound' : 'Outbound',
@@ -197,6 +202,7 @@ async function syncOne(callId: string): Promise<void> {
       salesforceTaskId: taskId,
       salesforceWhoId: whoId ?? null,
       salesforceWhatId: whatId ?? null,
+      syncDetail: fullDetail,
       updatedAt: new Date(),
       metadata: degradedFields
         ? sql`coalesce(metadata, '{}'::jsonb) || ${JSON.stringify({ salesforceDegradedFields: degradedFields })}::jsonb`
@@ -210,7 +216,44 @@ async function syncOne(callId: string): Promise<void> {
     .where(eq(schema.salesforceSyncJobs.callId, call.id));
 }
 
-function buildDescription(call: typeof schema.calls.$inferSelect, audit: typeof schema.preCallAudits.$inferSelect | null): string {
+/** Call date/time in the org's local (Pacific) zone for the Task Description. */
+function formatCallTime(when: Date | null): string | null {
+  if (!when) return null;
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(when) + ' PT';
+  } catch {
+    return when.toISOString();
+  }
+}
+
+/**
+ * LEAN Salesforce Task Description: just the rep's notes and the call date/time.
+ * This is the field org Chatter automations tend to repost, so it must not carry
+ * CTI diagnostics — those go to buildFullDetail (stored in our DB).
+ */
+export function buildTaskDescription(call: typeof schema.calls.$inferSelect): string {
+  const lines: string[] = [];
+  if (call.notes?.trim()) lines.push(call.notes.trim());
+  const when = formatCallTime(call.startedAt ?? call.endedAt ?? null);
+  if (when) lines.push(`Call: ${when}`);
+  return lines.join('\n\n');
+}
+
+/**
+ * FULL human-readable call record kept in our DB (calls.sync_detail): rep notes,
+ * numbers, provider ids, durations, the firewall decision + reasons, and the
+ * extended custom-field metadata. This is the complete detail that used to bloat
+ * the Salesforce Task Description.
+ */
+export function buildFullDetail(
+  call: typeof schema.calls.$inferSelect,
+  audit: typeof schema.preCallAudits.$inferSelect | null,
+  customFields: Record<string, string | number | null>,
+): string {
   const lines: string[] = [];
   if (call.notes) {
     lines.push('Rep notes:', call.notes, '');
@@ -227,6 +270,10 @@ function buildDescription(call: typeof schema.calls.$inferSelect, audit: typeof 
     if (audit.blockReason) lines.push(`Block reason: ${audit.blockReason}`);
     const reasons = (audit.reasons as string[]) ?? [];
     if (reasons.length) lines.push(`Reasons: ${reasons.join(', ')}`);
+  }
+  lines.push('', '--- Extended metadata ---');
+  for (const [k, v] of Object.entries(customFields)) {
+    if (v !== null && v !== undefined) lines.push(`${k}: ${v}`);
   }
   return lines.join('\n');
 }

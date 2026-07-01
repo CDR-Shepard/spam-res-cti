@@ -395,6 +395,13 @@ export const calls = pgTable(
     preCallAuditId: uuid('precall_audit_id').references(() => preCallAudits.id),
     campaignKey: text('campaign_key'),
     metadata: jsonb('metadata'),
+    /**
+     * Full human-readable call record (numbers, provider ids, durations, the
+     * firewall decision + reasons, and the extended custom-field metadata). We
+     * keep the complete detail HERE so the Salesforce Task Description can stay
+     * lean (rep notes + time) and org Chatter automations don't post diagnostics.
+     */
+    syncDetail: text('sync_detail'),
     // Inbound-only fields (populated when direction='inbound')
     inboundCallerMatched: boolean('inbound_caller_matched'),
     inboundVoicemailUrl: text('inbound_voicemail_url'),
