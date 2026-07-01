@@ -14,7 +14,7 @@ import { schema } from '../db/index.js';
 import { normalize } from '../phone.js';
 import { pickRotationNumber } from '../rotation.js';
 import { fetchRecordAddress, SalesforceUnauthorizedError } from '../salesforce/client.js';
-import { resolveTimezone } from './tz.js';
+import { resolveTimezone, timezoneForNumber } from './tz.js';
 import { warmupCapForAge } from './warmup.js';
 import { fetchDidWindowStats } from '../reputation/query.js';
 import { answerRateBreach, engagementBreach, THRESHOLDS } from '../reputation/signals.js';
@@ -146,38 +146,8 @@ async function isDncListLoaded(db: Db): Promise<boolean> {
 export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallResponse> {
   const checks: CheckResult[] = [];
 
-  // 0. Best-effort: derive recipient timezone from the SF record's address
-  //    when we have a recordId and the rep is OAuth-connected to Salesforce.
-  //    Falls through silently to the "unknown TZ" REVIEW path on any failure.
-  let resolvedTz = input.recipientTimezone;
-  let tzSource: string | undefined;
-  if (!resolvedTz && input.recipientRecordId) {
-    try {
-      const addr = await fetchRecordAddress(input.userId, input.recipientRecordId);
-      if (addr) {
-        const resolved = resolveTimezone(addr);
-        if (resolved) {
-          resolvedTz = resolved.timezone;
-          tzSource = `${addr.objectType} ${resolved.matched} via ${resolved.source}`;
-        }
-      }
-    } catch (err) {
-      // Both branches fall through to the unknown-TZ path; the difference
-      // is only diagnostic so we use stderr instead of threading a Fastify
-      // logger into the evaluator. Auth errors merit a louder signal because
-      // they typically mean the rep needs to re-connect Salesforce.
-      if (err instanceof SalesforceUnauthorizedError) {
-        // eslint-disable-next-line no-console
-        console.warn('[firewall] SF address lookup skipped: not authorized', { userId: input.userId });
-      } else {
-        // eslint-disable-next-line no-console
-        console.warn('[firewall] SF address lookup failed', { userId: input.userId, err: (err as Error).message });
-      }
-    }
-  }
-  const inputForChecks = { ...input, recipientTimezone: resolvedTz };
-
-  // 1. Parse + normalize the destination number
+  // 1. Parse + normalize the destination number (also needed for the area-code
+  //    timezone fallback below).
   const parsed = normalize(input.toNumberRaw);
   if (!parsed.ok) {
     checks.push({
@@ -197,6 +167,48 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
     reasonCode: REASON.PARSE_OK,
     detail: e164,
   });
+
+  // Resolve the recipient timezone for recipient-local calling-hours
+  // enforcement, in priority order: explicit tz → Salesforce record address →
+  // the DIALED NUMBER's area code. The area-code fallback lets us enforce hours
+  // for any US number even when the SF record has no address (or the rep isn't
+  // OAuth-connected); only a truly unmapped/international number falls through
+  // to the "unknown TZ" REVIEW path. An explicit address is preferred because a
+  // ported cell can carry an out-of-region area code.
+  let resolvedTz = input.recipientTimezone;
+  let tzSource: string | undefined;
+  if (!resolvedTz && input.recipientRecordId) {
+    try {
+      const addr = await fetchRecordAddress(input.userId, input.recipientRecordId);
+      if (addr) {
+        const resolved = resolveTimezone(addr);
+        if (resolved) {
+          resolvedTz = resolved.timezone;
+          tzSource = `${addr.objectType} ${resolved.matched} via ${resolved.source}`;
+        }
+      }
+    } catch (err) {
+      // Both branches fall through to the area-code/unknown-TZ path; the
+      // difference is only diagnostic so we use stderr instead of threading a
+      // Fastify logger into the evaluator. Auth errors merit a louder signal
+      // because they typically mean the rep needs to re-connect Salesforce.
+      if (err instanceof SalesforceUnauthorizedError) {
+        // eslint-disable-next-line no-console
+        console.warn('[firewall] SF address lookup skipped: not authorized', { userId: input.userId });
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn('[firewall] SF address lookup failed', { userId: input.userId, err: (err as Error).message });
+      }
+    }
+  }
+  if (!resolvedTz) {
+    const npa = timezoneForNumber(e164);
+    if (npa) {
+      resolvedTz = npa.timezone;
+      tzSource = `area code ${npa.matched}`;
+    }
+  }
+  const inputForChecks = { ...input, recipientTimezone: resolvedTz };
 
   // 2. Internal opt-out list
   const optOut = await db.query.optOuts.findFirst({
