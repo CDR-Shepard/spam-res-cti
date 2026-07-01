@@ -10,6 +10,11 @@ import { createCallTask, findByPhone, SalesforceUnauthorizedError } from './clie
 
 const MAX_ATTEMPTS = 8;
 const BACKOFF_BASE_MS = 30_000; // 30s, 60s, 2m, 4m, ...
+// A job sits in 'in_flight' only while a tick is actively syncing it (SF calls
+// take seconds). If it's been in_flight longer than this, the tick that owned
+// it died (crash / Railway redeploy) and the job is orphaned — reap it back to
+// 'pending' so its call still gets a Salesforce Task.
+const STUCK_AFTER_MS = 2 * 60_000;
 
 export async function enqueueSyncForCall(callId: string): Promise<void> {
   const db = getDb();
@@ -19,8 +24,27 @@ export async function enqueueSyncForCall(callId: string): Promise<void> {
     .onConflictDoNothing();
 }
 
+/**
+ * Reset orphaned 'in_flight' jobs (owner tick died) back to 'pending'. Runs at
+ * the start of every tick; ticks are single-flight so a live sync can't be
+ * mistaken for an orphan within the 2-minute window.
+ */
+async function reapStuckJobs(): Promise<void> {
+  const db = getDb();
+  await db
+    .update(schema.salesforceSyncJobs)
+    .set({ status: 'pending', updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.salesforceSyncJobs.status, 'in_flight'),
+        lte(schema.salesforceSyncJobs.updatedAt, new Date(Date.now() - STUCK_AFTER_MS)),
+      ),
+    );
+}
+
 export async function runSyncTick(): Promise<{ processed: number }> {
   const db = getDb();
+  await reapStuckJobs();
   const now = new Date();
   const jobs = await db
     .select()
@@ -37,7 +61,7 @@ export async function runSyncTick(): Promise<{ processed: number }> {
   for (const job of jobs) {
     await db
       .update(schema.salesforceSyncJobs)
-      .set({ status: 'in_flight' })
+      .set({ status: 'in_flight', updatedAt: new Date() })
       .where(eq(schema.salesforceSyncJobs.id, job.id));
 
     try {
@@ -47,6 +71,7 @@ export async function runSyncTick(): Promise<{ processed: number }> {
         .set({
           status: 'succeeded',
           completedAt: new Date(),
+          updatedAt: new Date(),
         })
         .where(eq(schema.salesforceSyncJobs.id, job.id));
     } catch (err) {
@@ -60,6 +85,7 @@ export async function runSyncTick(): Promise<{ processed: number }> {
           attempts,
           lastError: (err as Error).message.slice(0, 2000),
           nextAttemptAt: new Date(Date.now() + delayMs),
+          updatedAt: new Date(),
         })
         .where(eq(schema.salesforceSyncJobs.id, job.id));
     }
@@ -140,7 +166,7 @@ async function syncOne(callId: string): Promise<void> {
 
   await db
     .update(schema.salesforceSyncJobs)
-    .set({ salesforceTaskId: taskId })
+    .set({ salesforceTaskId: taskId, updatedAt: new Date() })
     .where(eq(schema.salesforceSyncJobs.callId, call.id));
 }
 

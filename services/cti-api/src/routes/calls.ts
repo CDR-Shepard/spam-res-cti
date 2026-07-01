@@ -292,4 +292,50 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     }
     return { call: row, salesforceSync: 'skipped_client_logged' };
   });
+
+  const EnsureLogged = z.object({
+    recipientRecordId: z.string().min(15).max(20).optional(),
+    recipientObjectType: z.string().max(64).optional(),
+  });
+
+  /**
+   * Safety net: guarantee a connected call is logged to Salesforce even when the
+   * rep never submits the wrap-up form (clicks Discard, or the tab goes away).
+   * The client calls this only for calls that actually connected. Fully
+   * idempotent and cannot double-log alongside the disposition path:
+   *   - returns early if a Task already exists,
+   *   - enqueueSyncForCall no-ops when a job row already exists (unique on callId),
+   *   - syncOne skips any call that already carries a salesforceTaskId.
+   */
+  app.post('/calls/:id/ensure-logged', async (req, reply) => {
+    const session = await resolveSession(req.headers.authorization);
+    if (!session) return reply.code(401).send({ error: 'Unauthorized' });
+    const id = (req.params as { id: string }).id;
+    const parsed = EnsureLogged.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const db = getDb();
+    const owned = await db.query.calls.findFirst({
+      where: and(eq(schema.calls.id, id), eq(schema.calls.userId, session.userId)),
+    });
+    if (!owned) return reply.code(404).send({ error: 'Not found' });
+    if (owned.salesforceTaskId) return { call: owned, salesforceSync: 'already_logged' };
+
+    // Attach the click-to-dial record (if known and not yet matched) so the
+    // safety-net Task lands on the exact record, mirroring the disposition path.
+    if (parsed.data.recipientRecordId && !owned.salesforceWhoId && !owned.salesforceWhatId) {
+      const rid = parsed.data.recipientRecordId;
+      const ot = (parsed.data.recipientObjectType ?? '').toLowerCase();
+      const isWho =
+        ot === 'lead' || ot === 'contact' ||
+        (!ot && (rid.startsWith('00Q') || rid.startsWith('003')));
+      await db
+        .update(schema.calls)
+        .set(isWho
+          ? { salesforceWhoId: rid, updatedAt: new Date() }
+          : { salesforceWhatId: rid, updatedAt: new Date() })
+        .where(eq(schema.calls.id, id));
+    }
+    await enqueueSyncForCall(id);
+    return { call: owned, salesforceSync: 'queued' };
+  });
 }

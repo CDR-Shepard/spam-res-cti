@@ -24,6 +24,15 @@ let dbInstance: ReturnType<typeof drizzle<typeof schema>> | undefined;
 export function getPool(): pg.Pool {
   if (!pool) {
     pool = new Pool({ connectionString: loadConfig().DATABASE_URL, max: 10 });
+    // node-postgres Pool is an EventEmitter. A managed Postgres (Railway)
+    // routinely closes idle connections, which emits an 'error' on the idle
+    // client. Node throws on an unhandled EventEmitter 'error' — crashing the
+    // whole API and dropping BOTH reps' in-flight calls over ordinary idle
+    // churn. Log and swallow; the pool transparently opens a fresh connection
+    // on the next query.
+    pool.on('error', (err) => {
+      console.error('[db] idle client error (recovered):', err instanceof Error ? err.message : err);
+    });
   }
   return pool;
 }

@@ -115,6 +115,19 @@ async function main(): Promise<void> {
   app.log.info({ url: cfg.API_PUBLIC_URL }, 'cti-api listening');
 }
 
+// Last-resort process guards. Hot paths intentionally fire-and-forget promises
+// (client `void api(...)`, server `setInterval` workers), and on modern Node an
+// unhandled rejection or uncaught exception terminates the process — which for a
+// live 2-rep beta means both reps' calls drop at once. Log and keep serving; an
+// isolated stray error is not worth a full outage. Startup failures still exit
+// via main().catch below.
+process.on('unhandledRejection', (reason) => {
+  console.error('[fatal-guard] unhandledRejection (kept alive):', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[fatal-guard] uncaughtException (kept alive):', err);
+});
+
 main().catch((err) => {
   console.error('Fatal startup error:', err);
   process.exit(1);

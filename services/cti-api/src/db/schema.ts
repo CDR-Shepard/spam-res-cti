@@ -460,6 +460,10 @@ export const salesforceSyncJobs = pgTable(
     completedAt: timestamp('completed_at', { withTimezone: true }),
     salesforceTaskId: text('salesforce_task_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    // Touched on every status transition. A job stuck in 'in_flight' with a stale
+    // updatedAt is an orphan from a crashed/redeployed tick and gets reaped back
+    // to 'pending' so the call's Salesforce Task is never permanently lost.
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
     callUnique: uniqueIndex('sf_sync_call_unique').on(t.callId),

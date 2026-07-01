@@ -173,6 +173,16 @@ export function App(): JSX.Element {
 
   const deviceRef = useRef<unknown>(null);
   const connectionRef = useRef<unknown>(null);
+  // Latest phase, readable from long-lived Twilio event closures (which capture
+  // a stale `phase` at registration time).
+  const phaseRef = useRef(phase);
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+  // Did the current call actually connect (rep answered)? Drives the "always log
+  // a connected call" safety net on discard.
+  const wasConnectedRef = useRef(false);
+  // Set once the Open CTI Task has been written for the current call, so a
+  // disposition retry doesn't create a duplicate Task.
+  const openCtiTaskWrittenRef = useRef(false);
 
   // ---- bootstrap: sign in to backend (dev session for MVP), then init Open CTI
   useEffect(() => {
@@ -312,7 +322,12 @@ export function App(): JSX.Element {
       (device as unknown as { on: (e: string, cb: (a: unknown) => void) => void }).on('error', (err) => {
         const e = err as { message?: string; code?: number } | undefined;
         setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'Twilio device error'}`.replace('  ', ' ').trim(), type: 'error' });
-        setPhase('preflight');
+        // Only bounce back to the dialer if we're not mid-call. A non-fatal
+        // signaling/token error during an active call or wrap-up must not wipe
+        // the in-progress call — the rep still needs to finish and log it.
+        if (phaseRef.current !== 'active' && phaseRef.current !== 'wrapup') {
+          setPhase('preflight');
+        }
         setBusy(false);
       });
       await device.register();
@@ -341,6 +356,7 @@ export function App(): JSX.Element {
       };
       conn.on('accept', () => {
         persistSid();
+        wasConnectedRef.current = true;
         setPhase('active');
         setActive((s) => (s ? { ...s, startedAt: Date.now() } : s));
         void api(`/calls/${callId}`, { method: 'PATCH', body: { status: 'in_progress', answeredAt: new Date().toISOString() } });
@@ -380,7 +396,24 @@ export function App(): JSX.Element {
     setElapsed(0); setMuted(false); setDisposition('Connected'); setNotes('');
     setCtiContext(null);
     deviceRef.current = null; connectionRef.current = null;
+    wasConnectedRef.current = false; openCtiTaskWrittenRef.current = false;
   }, []);
+
+  // Discard the wrap-up without logging — but if the call actually connected,
+  // still create the Salesforce Task (safety net) so a real conversation is
+  // never silently dropped. Idempotent server-side; fire-and-forget.
+  const discard = useCallback(() => {
+    const a = active;
+    if (a && wasConnectedRef.current && !openCtiTaskWrittenRef.current) {
+      void api(`/calls/${a.callId}/ensure-logged`, {
+        method: 'POST',
+        body: a.recordId
+          ? { recipientRecordId: a.recordId, recipientObjectType: a.objectType }
+          : {},
+      }).catch(() => { /* best-effort safety net */ });
+    }
+    reset();
+  }, [active, reset]);
 
   const submitDisposition = useCallback(async () => {
     if (!active) return;
@@ -391,8 +424,10 @@ export function App(): JSX.Element {
       // we tell the backend to skip — otherwise the backend creates and attaches
       // the Task itself from the record we hand it, so a logged call is never lost.
       const isWho = active.objectType === 'Lead' || active.objectType === 'Contact';
-      let loggedViaOpenCti = false;
-      if (active.recordId) {
+      // If a prior submit attempt already wrote the Task via Open CTI, don't
+      // write it again on retry — just re-attempt the backend disposition PATCH.
+      let loggedViaOpenCti = openCtiTaskWrittenRef.current;
+      if (active.recordId && !openCtiTaskWrittenRef.current) {
         loggedViaOpenCti = await saveCallLog({
           Subject: `Outbound Call - ${active.toNumber}`,
           Status: 'Completed',
@@ -404,6 +439,7 @@ export function App(): JSX.Element {
           WhoId: isWho ? active.recordId : undefined,
           WhatId: isWho ? undefined : active.recordId,
         });
+        if (loggedViaOpenCti) openCtiTaskWrittenRef.current = true;
       }
       await api(`/calls/${active.callId}/disposition`, {
         method: 'POST',
@@ -571,7 +607,7 @@ export function App(): JSX.Element {
         onNotes={setNotes}
         busy={busy}
         onSubmit={submitDisposition}
-        onDiscard={reset}
+        onDiscard={discard}
       />
     ) : (
       <CallScreen
