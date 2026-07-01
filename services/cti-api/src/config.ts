@@ -27,8 +27,19 @@ const schema = z.object({
   /**
    * Comma-separated emails granted admin (manage numbers/assignment/campaigns)
    * on Salesforce login, in addition to the first user provisioned for an org.
+   * Acts as an explicit operator override / break-glass on top of the
+   * profile-based rule below — keep at least the launch admin here as a safety
+   * net so a profile-name mismatch can't lock everyone out of assignment.
    */
   ADMIN_EMAILS: z.string().optional(),
+  /**
+   * Comma-separated Salesforce Profile names whose users are granted app-admin
+   * (manage + assign outbound numbers, campaigns) at login. Defaults to the
+   * standard "System Administrator" profile. Reps on any other profile can never
+   * assign numbers — including to themselves. Set this if your org's admin
+   * profile is renamed or custom (e.g. "GG Homes Admin").
+   */
+  SALESFORCE_ADMIN_PROFILES: z.string().default('System Administrator'),
 
   TELEPHONY_PROVIDER: z.enum(['twilio', 'telnyx']).default('twilio'),
 

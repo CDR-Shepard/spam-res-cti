@@ -12,7 +12,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb, schema } from '../db/index.js';
 import { issueSession, resolveSession } from '../auth/session.js';
-import { buildStartArtifacts, exchangeCodeForTokens, fetchProfilePhoto, fetchUserInfo } from '../salesforce/oauth.js';
+import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProfilePhoto, fetchUserInfo } from '../salesforce/oauth.js';
 import { encryptString } from '../crypto.js';
 import { loadConfig } from '../config.js';
 
@@ -232,20 +232,44 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
             .onConflictDoNothing();
         }
         const email = (profile.sfUserEmail?.trim() || `sf-${tok.sfUserId}@${tok.sfOrgId}.salesforce.local`).toLowerCase();
-        // The first user provisioned for a brand-new org is the admin; plus any
-        // emails in ADMIN_EMAILS. Admins manage numbers/assignment/campaigns.
-        const adminEmails = (loadConfig().ADMIN_EMAILS ?? '')
+        // App-admin (manage + ASSIGN outbound numbers) is driven by the
+        // Salesforce Profile: only users on an allowed profile (default
+        // "System Administrator") are admins. ADMIN_EMAILS is an explicit
+        // operator override, and the first user of a brand-new org bootstraps
+        // admin so nobody is locked out. A rep on any other profile is never an
+        // admin and thus can never assign numbers (the /admin routes 403 them).
+        const cfg = loadConfig();
+        const adminEmails = (cfg.ADMIN_EMAILS ?? '')
           .split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
-        const shouldBeAdmin = orgIsNew || adminEmails.includes(email);
+        const adminProfiles = (cfg.SALESFORCE_ADMIN_PROFILES ?? 'System Administrator')
+          .split(',').map((p) => p.trim().toLowerCase()).filter(Boolean);
+        const sfProfileName = await fetchProfileName(tok.access_token, tok.instance_url, tok.sfUserId);
+        const profileKnown = sfProfileName != null;
+        const isSysAdminProfile = profileKnown && adminProfiles.includes(sfProfileName!.toLowerCase());
+        const explicitAdmin = adminEmails.includes(email);
+        if (isLogin) app.log.info(
+          { email, sfProfile: sfProfileName ?? '(unknown)', isSysAdminProfile, explicitAdmin, orgIsNew },
+          'salesforce_login_admin_resolve',
+        );
         let user = await db.query.users.findFirst({ where: eq(schema.users.email, email) });
         if (!user) {
+          const shouldBeAdmin = isSysAdminProfile || explicitAdmin || orgIsNew;
           const [createdUser] = await db
             .insert(schema.users)
             .values({ orgId: org.id, email, displayName: profile.sfUserName ?? null, isAdmin: shouldBeAdmin })
             .returning();
           user = createdUser!;
-        } else if (shouldBeAdmin && !user.isAdmin) {
-          await db.update(schema.users).set({ isAdmin: true }).where(eq(schema.users.id, user.id));
+        } else {
+          // Re-sync admin rights to the CURRENT Salesforce profile on every login
+          // — promote AND demote — so a rep can never keep admin and a profile
+          // change takes effect immediately. Guardrails against lockout: never
+          // demote an explicit ADMIN_EMAILS admin, and if the profile lookup
+          // failed (profileKnown === false) leave admin status untouched rather
+          // than risk demoting the org's only admin on a transient error.
+          const target = profileKnown ? (isSysAdminProfile || explicitAdmin) : (explicitAdmin || user.isAdmin);
+          if (user.isAdmin !== target) {
+            await db.update(schema.users).set({ isAdmin: target }).where(eq(schema.users.id, user.id));
+          }
         }
         targetUserId = user.id;
       } else {

@@ -123,6 +123,38 @@ export async function fetchUserInfo(
 }
 
 /**
+ * Fetches the connected user's Salesforce Profile name via SOQL. Used to decide
+ * app-admin rights (only System Administrator-profile users may manage/assign
+ * outbound numbers). Returns null on any failure so login never hard-fails on
+ * it — the caller treats an unknown profile as "don't change admin status".
+ */
+export async function fetchProfileName(
+  accessToken: string,
+  instanceUrl: string,
+  sfUserId: string,
+): Promise<string | null> {
+  try {
+    const cfg = loadConfig();
+    // sfUserId is a Salesforce 15/18-char id (alphanumeric); strip any quote
+    // defensively before interpolating into SOQL.
+    const id = sfUserId.replace(/[^a-zA-Z0-9]/g, '');
+    const soql = `SELECT Profile.Name FROM User WHERE Id = '${id}'`;
+    const url = new URL(`/services/data/${cfg.SALESFORCE_API_VERSION}/query`, instanceUrl);
+    url.searchParams.set('q', soql);
+    const res = await request(url.toString(), {
+      method: 'GET',
+      headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' },
+    });
+    const text = await res.body.text();
+    if (res.statusCode >= 400) return null;
+    const data = JSON.parse(text) as { records?: Array<{ Profile?: { Name?: string } | null }> };
+    return data.records?.[0]?.Profile?.Name ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetches the SF profile picture and returns the raw bytes + content type.
  * SF's picture URLs require the same Bearer token.
  */
