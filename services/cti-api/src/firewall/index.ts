@@ -359,7 +359,7 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
   let effectiveFrom = input.fromNumber ?? null;
   let fromAutoSelected = false;
   if (!effectiveFrom) {
-    effectiveFrom = await pickRotationNumber(db, input.orgId, input.userId);
+    effectiveFrom = await pickRotationNumber(db, input.orgId, input.userId, e164);
     fromAutoSelected = effectiveFrom != null;
   }
   let fromE164: string | null = null;

@@ -251,6 +251,33 @@ export function timezoneForAreaCode(npa: string): ResolvedTimezone | null {
 }
 
 /**
+ * Metro grouping for local-presence caller-ID matching: when a rep dials a
+ * number, we prefer a DID in the SAME metro (e.g. an LA number for an LA lead,
+ * an SD number for an SD lead) rather than any Pacific number. Only the exact
+ * area code earns the firewall's local-presence bonus; this map is the next
+ * tier down so different-NPA-but-same-city still beats cross-metro. Area codes
+ * not listed fall back to timezone-level matching.
+ */
+const NPA_REGION_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ['san_diego', ['619', '858', '760', '442', '935']],
+  ['los_angeles', ['213', '323', '310', '424', '818', '747', '626', '661', '562']],
+  ['orange_county', ['714', '949', '657']],
+  ['inland_empire', ['909', '951', '840']],
+  ['sf_bay', ['415', '628', '510', '341', '650', '408', '669', '925', '707', '831', '820']],
+  ['sacramento', ['916', '279', '530']],
+  ['central_valley', ['559', '209']],
+];
+const NPA_TO_REGION: Record<string, string> = {};
+for (const [region, npas] of NPA_REGION_GROUPS) {
+  for (const npa of npas) NPA_TO_REGION[npa] = region;
+}
+
+/** Metro/region key for an area code (e.g. '619' → 'san_diego'), or null. */
+export function regionForAreaCode(npa: string): string | null {
+  return NPA_TO_REGION[npa] ?? null;
+}
+
+/**
  * Infer the recipient's timezone from the DIALED NUMBER's area code — the
  * fallback when we have no address. Only NANP (+1) numbers are mapped; anything
  * else (or a non-geographic area code) returns null so the firewall keeps its
