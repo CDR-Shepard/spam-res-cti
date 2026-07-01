@@ -8,7 +8,7 @@
  *
  * This DOES NOT claim legal compliance. It enforces internal guardrails.
  */
-import { and, eq, gte, sql } from 'drizzle-orm';
+import { and, eq, gte, ne, sql } from 'drizzle-orm';
 import type { getDb } from '../db/index.js';
 import { schema } from '../db/index.js';
 import { normalize } from '../phone.js';
@@ -95,6 +95,7 @@ const REASON = {
   // P0 firewall-gap closures
   DNC_OK: 'FEDERAL_DNC_CLEAR',
   DNC_LISTED: 'FEDERAL_DNC_LISTED',
+  DNC_NOT_LOADED: 'FEDERAL_DNC_NOT_LOADED',
   RND_OK: 'REASSIGNED_NUMBER_CLEAR',
   RND_REASSIGNED: 'REASSIGNED_NUMBER_DETECTED',
   RND_UNCHECKED: 'REASSIGNED_NUMBER_UNCHECKED',
@@ -116,6 +117,30 @@ function attestationRank(a: string | null | undefined): number {
   if (a === 'B') return 1;
   if (a === 'C') return 2;
   return 3; // unknown
+}
+
+// A number absent from the DNC cache is only genuinely "scrubbed" if a real
+// (non-demo) list has actually been loaded. Cache the loaded/empty state briefly
+// so we don't COUNT the table on every call; when an admin imports a list it
+// flips within the TTL. Keeps the DNC gate honest instead of implying a check
+// that never happened.
+let dncLoadedCache: { loaded: boolean; at: number } | null = null;
+const DNC_LOADED_TTL_MS = 60_000;
+async function isDncListLoaded(db: Db): Promise<boolean> {
+  const now = Date.now();
+  if (dncLoadedCache && now - dncLoadedCache.at < DNC_LOADED_TTL_MS) return dncLoadedCache.loaded;
+  let loaded = false;
+  try {
+    const row = await db.query.federalDncEntries.findFirst({
+      where: ne(schema.federalDncEntries.source, 'demo_seed'),
+      columns: { e164: true },
+    });
+    loaded = Boolean(row);
+  } catch {
+    loaded = false;
+  }
+  dncLoadedCache = { loaded, at: now };
+  return loaded;
 }
 
 export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallResponse> {
@@ -533,23 +558,35 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
   const dncHit = await db.query.federalDncEntries.findFirst({
     where: eq(schema.federalDncEntries.e164, e164),
   });
-  checks.push(
-    dncHit
-      ? {
-          name: 'federal_dnc',
-          passed: false,
-          severity: 'block',
-          reasonCode: REASON.DNC_LISTED,
-          detail: `Number is on the federal DNC list (source: ${dncHit.source})`,
-        }
-      : {
-          name: 'federal_dnc',
-          passed: true,
-          severity: 'info',
-          reasonCode: REASON.DNC_OK,
-          detail: 'Not on internal/federal DNC cache',
-        },
-  );
+  if (dncHit) {
+    checks.push({
+      name: 'federal_dnc',
+      passed: false,
+      severity: 'block',
+      reasonCode: REASON.DNC_LISTED,
+      detail: `Number is on the federal DNC list (source: ${dncHit.source})`,
+    });
+  } else if (await isDncListLoaded(db)) {
+    checks.push({
+      name: 'federal_dnc',
+      passed: true,
+      severity: 'info',
+      reasonCode: REASON.DNC_OK,
+      detail: 'Not on federal DNC scrub list',
+    });
+  } else {
+    // No real list loaded: the number was NOT actually scrubbed. Report the
+    // truth rather than implying a clean DNC check. Non-blocking — in the
+    // pre-scrubbed-leads-only beta, DNC compliance is owned operationally, so
+    // this is an advisory, not a hard gate.
+    checks.push({
+      name: 'federal_dnc',
+      passed: true,
+      severity: 'info',
+      reasonCode: REASON.DNC_NOT_LOADED,
+      detail: 'DNC scrub list not loaded — number was NOT checked against DNC',
+    });
+  }
 
   // 7f. Reassigned Numbers Database (RND) — FCC safe harbor for consent-based calls.
   // Cache vendor results 90 days per FCC. If we have consent on file, we MUST
