@@ -34,7 +34,16 @@ const schema = z.object({
 
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
-  TWILIO_API_KEY_SID: z.string().optional(),
+  /**
+   * The Voice access-token issuer MUST be a Twilio API Key SID ("SK…"), NOT the
+   * Account SID ("AC…"). Setting the Account SID here yields tokens Twilio
+   * rejects with AccessTokenInvalid (20101) only at call time — a silent,
+   * confusing failure. Fail fast at boot with a clear message instead.
+   */
+  TWILIO_API_KEY_SID: z
+    .string()
+    .regex(/^SK[0-9a-zA-Z]{32}$/, 'TWILIO_API_KEY_SID must be a Twilio API Key SID starting with "SK" (not the Account SID "AC…")')
+    .optional(),
   TWILIO_API_KEY_SECRET: z.string().optional(),
   TWILIO_TWIML_APP_SID: z.string().optional(),
   TWILIO_DEFAULT_CALLER_ID: z.string().optional(),
