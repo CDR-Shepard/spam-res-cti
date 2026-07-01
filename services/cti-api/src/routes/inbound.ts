@@ -98,11 +98,29 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
       return reply.type('text/xml').send(t.toString());
     }
 
-    // Try to match the caller in Salesforce. We pick any user in the org
-    // with an active SF connection; for MVP single-user this is just our rep.
+    // Attribute the inbound call to the DID's owner, or — for an unassigned
+    // reserve number — any user in the org. NEVER a synthetic UUID: that
+    // violates the users FK and 500s the webhook, which Twilio plays to the
+    // caller as "an application error has occurred".
+    const handlerUserId =
+      owned.assignedUserId ??
+      (await db.query.users.findFirst({
+        where: eq(schema.users.orgId, owned.orgId),
+        columns: { id: true },
+      }))?.id ??
+      null;
+    if (!handlerUserId) {
+      const t = new twilio.twiml.VoiceResponse();
+      t.say({ voice: 'Polly.Joanna' as never }, 'Thanks for calling. Please try again later.');
+      t.hangup();
+      return reply.type('text/xml').send(t.toString());
+    }
+
+    // Match the caller in Salesforce using the handler's OWN org-scoped SF
+    // connection (never a global cross-org lookup).
     let matched: { whoId?: string; whatId?: string; name?: string } | null = null;
     const sfConn = await db.query.salesforceConnections.findFirst({
-      where: undefined,
+      where: eq(schema.salesforceConnections.userId, handlerUserId),
     });
     if (sfConn) {
       try {
@@ -120,7 +138,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
       .insert(schema.calls)
       .values({
         orgId: owned.orgId,
-        userId: sfConn?.userId ?? '00000000-0000-0000-0000-00000000beef', // dev rep fallback
+        userId: handlerUserId,
         provider: provider.name,
         providerCallId: callSid,
         fromNumber: fromRaw,

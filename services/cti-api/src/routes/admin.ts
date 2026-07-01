@@ -22,6 +22,39 @@ function labelForImportedNumber(e164: string): string {
   return `(${areaCode})`;
 }
 
+/**
+ * Point a Twilio number's Voice webhook at our inbound handler so callbacks reach
+ * us (answer + record voicemail) instead of erroring on the number's old/default
+ * config. Best-effort — returns false and logs on any failure. Idempotent.
+ */
+async function setTwilioInboundVoiceUrl(
+  cfg: ReturnType<typeof loadConfig>,
+  twilioSid: string,
+  log: { warn: (obj: unknown, msg?: string) => void },
+): Promise<boolean> {
+  if (!cfg.TWILIO_ACCOUNT_SID || !cfg.TWILIO_AUTH_TOKEN) return false;
+  const url = `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound`;
+  const auth = Buffer.from(`${cfg.TWILIO_ACCOUNT_SID}:${cfg.TWILIO_AUTH_TOKEN}`).toString('base64');
+  try {
+    const res = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${cfg.TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers/${twilioSid}.json`,
+      {
+        method: 'POST',
+        headers: { authorization: `Basic ${auth}`, 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ VoiceUrl: url, VoiceMethod: 'POST' }).toString(),
+      },
+    );
+    if (!res.ok) {
+      log.warn({ status: res.status, twilioSid }, 'twilio_voiceurl_patch_failed');
+      return false;
+    }
+    return true;
+  } catch (err) {
+    log.warn({ err, twilioSid }, 'twilio_voiceurl_patch_error');
+    return false;
+  }
+}
+
 export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   // ---- outbound numbers ----
   app.get('/admin/outbound-numbers', async (req, reply) => {
@@ -218,11 +251,12 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /**
-   * One-click import: pull every phone number this org owns in Twilio and
-   * register it into the pool (reserve, unassigned) so the admin never has to
-   * type numbers in by hand. Idempotent — re-running updates the Twilio SID and
-   * never clobbers an existing label/active/assignment. New numbers get an
-   * area-code-derived label (e.g. "San Diego (619)").
+   * One-click import: pull every phone number this org owns in Twilio and fully
+   * provision it — add to the pool (reserve, unassigned), enable inbound, and
+   * point its Twilio Voice webhook at our inbound handler so callbacks are
+   * answered (voicemail) instead of erroring. Idempotent — re-running refreshes
+   * the SID + re-registers the webhook and never clobbers an existing
+   * label/active/assignment. New numbers get an area-code-derived label.
    */
   app.post('/admin/outbound-numbers/import-twilio', async (req, reply) => {
     const s = await resolveSession(req.headers.authorization);
@@ -262,6 +296,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb();
     let registered = 0;
     let skipped = 0;
+    let inboundWebhooksSet = 0;
     for (const n of owned) {
       const norm = n.phone_number ? normalize(n.phone_number) : { ok: false as const };
       if (!norm.ok || !norm.value) {
@@ -278,16 +313,22 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
           active: true,
           twilioSid: n.sid ?? null,
           health: 'unknown',
+          inboundEnabled: true,
         })
         .onConflictDoUpdate({
           target: [schema.outboundNumbers.orgId, schema.outboundNumbers.e164],
-          // Refresh the carrier SID/provider but preserve any label, active
-          // flag, and rep assignment the admin already set.
-          set: { twilioSid: n.sid ?? null, provider: 'twilio' },
+          // Refresh the carrier SID/provider and (re-)enable inbound, but
+          // preserve any label, active flag, and rep assignment the admin set.
+          set: { twilioSid: n.sid ?? null, provider: 'twilio', inboundEnabled: true },
         });
       registered += 1;
+      // Point the number's Voice webhook at our inbound handler so callbacks
+      // are answered. Best-effort — a webhook failure never aborts the import.
+      if (n.sid && (await setTwilioInboundVoiceUrl(cfg, n.sid, app.log))) {
+        inboundWebhooksSet += 1;
+      }
     }
-    return { ok: true, found: owned.length, registered, skipped };
+    return { ok: true, found: owned.length, registered, skipped, inboundWebhooksSet };
   });
 
   // ---- opt-outs ----
