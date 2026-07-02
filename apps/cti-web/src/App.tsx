@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, clearSession, readSession, writeSession } from './api';
+import { startRingback, stopRingback } from './ringback';
 import { AdminPanel } from './components/AdminPanel';
 import { CallLog } from './components/CallLog';
 import { IncomingScreen } from './components/IncomingScreen';
@@ -200,6 +201,22 @@ export function App(): JSX.Element {
   // Latest ringing inbound call, readable synchronously from place().
   const incomingRef = useRef<TwilioIncomingCall | null>(null);
   useEffect(() => { incomingRef.current = incoming; }, [incoming]);
+
+  // Auto-dismiss the status/error banner after a few seconds so it doesn't sit
+  // in the way at the bottom of the dialer.
+  useEffect(() => {
+    if (!toast) return;
+    const id = window.setTimeout(() => setToast(null), 5000);
+    return () => window.clearTimeout(id);
+  }, [toast]);
+
+  // Play a local ringback tone while an OUTBOUND call is ringing (Twilio's
+  // carrier ringback doesn't reliably reach the browser).
+  useEffect(() => {
+    if (phase === 'ringing') startRingback();
+    else stopRingback();
+    return () => stopRingback();
+  }, [phase]);
   // Set once the Open CTI Task has been written for the current call, so a
   // disposition retry doesn't create a duplicate Task.
   const openCtiTaskWrittenRef = useRef(false);
@@ -359,6 +376,9 @@ export function App(): JSX.Element {
       call.on('cancel', () => setIncoming((c) => (c === call ? null : c)));
       call.on('disconnect', () => setIncoming((c) => (c === call ? null : c)));
       setIncoming(call);
+      // Pop the softphone panel open (Salesforce utility bar) so the rep sees the
+      // ring without hunting for the tab — as long as they're in Salesforce.
+      try { setPanelVisibility(true); } catch { /* not embedded in SF */ }
     });
     await d.register();
     return device;
