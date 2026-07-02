@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, clearSession, readSession, writeSession } from './api';
 import { AdminPanel } from './components/AdminPanel';
+import { CallLog } from './components/CallLog';
 import { CallScreen } from './components/CallScreen';
 import { Dialpad } from './components/Dialpad';
 import { RecentCalls } from './components/RecentCalls';
 import { ReputationPanel } from './components/ReputationPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
-import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, SettingsIcon, ShieldIcon } from './icons';
+import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon } from './icons';
 import {
   initOpenCti, notifyReady, onClickToDial as onCti, saveCallLog, setPanelVisibility,
   type ClickToDialEvent,
@@ -27,7 +28,7 @@ interface RepSummary {
 }
 
 type Phase = 'idle' | 'preflight' | 'ringing' | 'active' | 'wrapup';
-type Tab = 'dialer' | 'recent' | 'reputation' | 'admin';
+type Tab = 'dialer' | 'recent' | 'reputation' | 'admin' | 'calls';
 
 interface ActiveCall {
   callId: string;
@@ -629,6 +630,8 @@ export function App(): JSX.Element {
     <ReputationPanel />
   ) : tab === 'admin' ? (
     <AdminPanel />
+  ) : tab === 'calls' ? (
+    <CallLog />
   ) : (
     <div className="dialer">
       <Dialpad
@@ -652,8 +655,13 @@ export function App(): JSX.Element {
     { id: 'dialer', label: 'Dial', icon: <GridIcon /> },
     { id: 'recent', label: 'Recent', icon: <ClockIcon /> },
     { id: 'reputation', label: 'Reputation', icon: <ShieldIcon /> },
-    // Number-pool management — admins only (server enforces 403 regardless).
-    ...(me.user.isAdmin ? [{ id: 'admin' as Tab, label: 'Numbers', icon: <SettingsIcon /> }] : []),
+    // Number-pool management + org call log — admins only (server 403s regardless).
+    ...(me.user.isAdmin
+      ? [
+          { id: 'admin' as Tab, label: 'Numbers', icon: <SettingsIcon /> },
+          { id: 'calls' as Tab, label: 'Calls', icon: <PhoneOutgoingIcon /> },
+        ]
+      : []),
   ];
 
   return (
