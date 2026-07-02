@@ -19,6 +19,12 @@ const STUCK_AFTER_MS = 2 * 60_000;
 // that a rep filling out a wrap-up isn't swept out from under them; short enough
 // that an abandoned (tab-closed / crashed) call still lands in Salesforce.
 const LOG_GRACE_MS = 10 * 60_000;
+// An inbound call is inserted 'in_progress' and only advances to a terminal
+// status via the /dial-result (or voicemail /recording) callback. If Twilio
+// drops that callback, the row is stranded 'in_progress' forever — never
+// terminal, so sweepUnloggedCalls (terminal-only) never logs it. Age such rows
+// to a terminal status after this window so they still reach Salesforce.
+const INBOUND_STALE_MS = 10 * 60_000;
 // Terminal statuses that represent a real dial the rep should have a Task for.
 const LOGGABLE_TERMINAL_STATUSES: schema.Call['status'][] = ['completed', 'no_answer', 'busy', 'canceled'];
 
@@ -81,9 +87,38 @@ async function sweepUnloggedCalls(): Promise<void> {
   }
 }
 
+/**
+ * Rescue inbound calls stranded in 'in_progress' by a dropped /dial-result
+ * callback. After the stale window the true outcome is unknowable, so we mark
+ * them 'no_answer' (conservative — we never confirmed a connect) and enqueue a
+ * Salesforce sync so the call is still logged. If a late dial-result/recording
+ * callback does arrive it overwrites the status + real duration, and the sync
+ * job (keyed by callId, onConflictDoNothing) stays idempotent.
+ */
+async function reapStaleInboundCalls(): Promise<void> {
+  const db = getDb();
+  const cutoff = new Date(Date.now() - INBOUND_STALE_MS);
+  // startedAt is always set at insert for inbound rows, so it's a safe cutoff key.
+  const reaped = await db
+    .update(schema.calls)
+    .set({ status: 'no_answer', endedAt: new Date(), updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.calls.direction, 'inbound'),
+        eq(schema.calls.status, 'in_progress'),
+        lte(schema.calls.startedAt, cutoff),
+      ),
+    )
+    .returning({ id: schema.calls.id });
+  for (const c of reaped) {
+    await enqueueSyncForCall(c.id);
+  }
+}
+
 export async function runSyncTick(): Promise<{ processed: number }> {
   const db = getDb();
   await reapStuckJobs();
+  await reapStaleInboundCalls();
   await sweepUnloggedCalls();
   const now = new Date();
   const jobs = await db

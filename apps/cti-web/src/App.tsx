@@ -57,6 +57,9 @@ export function App(): JSX.Element {
   const [signedIn, setSignedIn] = useState(!!readSession());
   const [toast, setToast] = useState<{ text: string; type: 'info' | 'error' | 'success' } | null>(null);
   const [ctiReady, setCtiReady] = useState(false);
+  // True when the persistent Twilio device's token refresh has exhausted its
+  // retries — inbound callbacks will stop arriving, so surface it in the header.
+  const [inboundDegraded, setInboundDegraded] = useState(false);
   const [tab, setTab] = useState<Tab>('dialer');
   const [rep, setRep] = useState<RepSummary | null>(null);
 
@@ -202,6 +205,30 @@ export function App(): JSX.Element {
   const incomingRef = useRef<TwilioIncomingCall | null>(null);
   useEffect(() => { incomingRef.current = incoming; }, [incoming]);
 
+  // Destroy + forget the persistent Twilio device. Idempotent. Stops it ringing
+  // and, crucially, stops its tokenWillExpire loop from POSTing /telephony/token.
+  const teardownDevice = useCallback(() => {
+    const d = deviceRef.current as { destroy?: () => void } | null;
+    deviceRef.current = null;
+    deviceInitRef.current = null;
+    if (d) { try { d.destroy?.(); } catch { /* already gone */ } }
+  }, []);
+
+  // Clear the local session and return to the sign-in gate. Tears down the
+  // device first so a dead session can't leave it registered (ringing with no UI
+  // to answer) or looping on token refresh.
+  const signOut = useCallback(() => {
+    teardownDevice();
+    clearSession();
+    setMe(null);
+    setSignedIn(false);
+    setInboundDegraded(false);
+  }, [teardownDevice]);
+
+  // Destroy the device on unmount (empty deps → runs only on real unmount, not
+  // on every `me` change, which would churn the device).
+  useEffect(() => () => teardownDevice(), [teardownDevice]);
+
   // Auto-dismiss the status/error banner after a few seconds so it doesn't sit
   // in the way at the bottom of the dialer.
   useEffect(() => {
@@ -247,8 +274,7 @@ export function App(): JSX.Element {
         }
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) {
-          clearSession();
-          setSignedIn(false);
+          signOut();
         } else {
           setToast({ text: `Sign-in failed: ${(e as Error).message}`, type: 'error' });
         }
@@ -353,13 +379,31 @@ export function App(): JSX.Element {
       if (phaseRef.current !== 'active' && phaseRef.current !== 'wrapup') setPhase('preflight');
       setBusy(false);
     });
-    // Refresh the token before expiry so the device stays registered for incoming.
+    // Refresh the token before expiry so the device stays registered for
+    // incoming. A single dropped refresh would let the 1h token lapse → the
+    // device unregisters → the rep silently stops receiving callbacks for the
+    // rest of the shift. Retry with backoff; a 401 means the session is dead
+    // (sign out, which also destroys this device and stops the loop); if every
+    // retry fails, surface it so degraded inbound is noticeable.
     d.on('tokenWillExpire', () => {
       void (async () => {
-        try {
-          const t = await api<{ token: string }>('/telephony/token', { method: 'POST' });
-          d.updateToken(t.token);
-        } catch { /* keep the current token */ }
+        const maxAttempts = 5;
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          try {
+            const t = await api<{ token: string }>('/telephony/token', { method: 'POST' });
+            d.updateToken(t.token);
+            setInboundDegraded(false);
+            return;
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 401) { signOut(); return; }
+            // Backoff 1s, 2s, 4s, 8s between attempts (none after the last).
+            if (attempt < maxAttempts - 1) {
+              await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+            }
+          }
+        }
+        setInboundDegraded(true);
+        setToast({ text: 'Inbound calls may be unavailable — could not refresh Twilio token. Please reload.', type: 'error' });
       })();
     });
     // An INBOUND callback dialed to this rep's client identity.
@@ -392,7 +436,7 @@ export function App(): JSX.Element {
       deviceRef.current = null;
       throw err;
     }
-  }, []);
+  }, [signOut]);
 
   // Register the device once signed in so callbacks can ring the softphone.
   useEffect(() => {
@@ -694,8 +738,10 @@ export function App(): JSX.Element {
             </div>
           )}
           <div className="status">
-            <span className={`presence-dot ${ctiReady ? '' : 'warn'}`} />
-            {ctiReady ? 'Salesforce CTI connected' : 'Standalone'}
+            <span className={`presence-dot ${inboundDegraded ? 'bad' : ctiReady ? '' : 'warn'}`} />
+            {inboundDegraded
+              ? 'Inbound unavailable — reload'
+              : ctiReady ? 'Salesforce CTI connected' : 'Standalone'}
           </div>
         </div>
       </div>
