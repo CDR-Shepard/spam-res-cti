@@ -3,7 +3,7 @@
  * MVP: every authenticated user can manage their own org. Tighten with roles later.
  */
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
 import { getDb, schema } from '../db/index.js';
@@ -450,6 +450,47 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       .orderBy(desc(schema.calls.createdAt))
       .limit(q.data.limit);
     return { calls: rows };
+  });
+
+  // One-time (idempotent) reconciliation: backfill each call's duration from the
+  // authoritative Twilio status-callback body we already stored, fixing rows
+  // where the client wrap-up timer had overwritten it. Admin-only, org-scoped.
+  app.post('/admin/calls/reconcile-durations', async (req, reply) => {
+    const s = await resolveSession(req.headers.authorization);
+    if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
+    const db = getDb();
+    const rows = await db
+      .select({ id: schema.calls.id, providerCallId: schema.calls.providerCallId })
+      .from(schema.calls)
+      .where(eq(schema.calls.orgId, s.orgId))
+      .limit(5000);
+    let scanned = 0;
+    let updated = 0;
+    for (const c of rows) {
+      if (!c.providerCallId) continue;
+      scanned += 1;
+      // The real duration lives in the stored status-callback bodies, keyed by
+      // CallSid or ParentCallSid (child-leg callbacks carry the parent sid).
+      const events = await db
+        .select({ body: schema.providerWebhookEvents.body })
+        .from(schema.providerWebhookEvents)
+        .where(sql`(body->>'CallSid' = ${c.providerCallId} or body->>'ParentCallSid' = ${c.providerCallId})`);
+      let dur: number | null = null;
+      for (const e of events) {
+        const b = (e.body ?? {}) as Record<string, unknown>;
+        const d = Number(b.CallDuration ?? b.DialCallDuration);
+        if (Number.isFinite(d)) dur = Math.max(dur ?? 0, d);
+      }
+      if (dur != null) {
+        await db
+          .update(schema.calls)
+          .set({ durationSeconds: dur, updatedAt: new Date() })
+          .where(eq(schema.calls.id, c.id));
+        updated += 1;
+      }
+    }
+    return { ok: true, scanned, updated };
   });
 
   // ---- campaign configs ----

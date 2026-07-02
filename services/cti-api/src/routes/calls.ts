@@ -270,7 +270,10 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     if (parsed.data.startedAt) updates.startedAt = new Date(parsed.data.startedAt);
     if (parsed.data.answeredAt) updates.answeredAt = new Date(parsed.data.answeredAt);
     if (parsed.data.endedAt) updates.endedAt = new Date(parsed.data.endedAt);
-    if (parsed.data.durationSeconds !== undefined) updates.durationSeconds = parsed.data.durationSeconds;
+    // Twilio's status callback is the authoritative call duration; only accept a
+    // client-supplied value as a fallback when Twilio hasn't reported one yet.
+    if (parsed.data.durationSeconds !== undefined && owned.durationSeconds == null)
+      updates.durationSeconds = parsed.data.durationSeconds;
 
     const [row] = await db.update(schema.calls).set(updates).where(eq(schema.calls.id, id)).returning();
     return { call: row };
@@ -313,7 +316,10 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
       notes: parsed.data.notes ?? owned.notes ?? null,
       updatedAt: new Date(),
     };
-    if (parsed.data.durationSeconds !== undefined) updates.durationSeconds = parsed.data.durationSeconds;
+    // Twilio's status callback is the authoritative duration; the rep's wrap-up
+    // timer is only a fallback when Twilio hasn't reported one yet.
+    if (parsed.data.durationSeconds !== undefined && owned.durationSeconds == null)
+      updates.durationSeconds = parsed.data.durationSeconds;
     if (!owned.endedAt) updates.endedAt = new Date();
     if (owned.status !== 'completed') updates.status = 'completed';
     // Attach the click-to-dial record so the backend sync logs the Task to the
