@@ -412,6 +412,46 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     return { audits: rows };
   });
 
+  // ---- calls (actual placed/received call records) ----
+  // Admin-only, org-scoped call log. Optional ?userId= filters to one rep.
+  app.get('/admin/calls', async (req, reply) => {
+    const s = await resolveSession(req.headers.authorization);
+    if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
+    const q = z
+      .object({
+        userId: z.string().uuid().optional(),
+        limit: z.coerce.number().int().min(1).max(1000).default(500),
+      })
+      .safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: q.error.flatten() });
+    const db = getDb();
+    const where = q.data.userId
+      ? and(eq(schema.calls.orgId, s.orgId), eq(schema.calls.userId, q.data.userId))
+      : eq(schema.calls.orgId, s.orgId);
+    const rows = await db
+      .select({
+        id: schema.calls.id,
+        userId: schema.calls.userId,
+        direction: schema.calls.direction,
+        fromNumber: schema.calls.fromNumber,
+        toNumber: schema.calls.toNumber,
+        normalizedToNumber: schema.calls.normalizedToNumber,
+        status: schema.calls.status,
+        disposition: schema.calls.disposition,
+        durationSeconds: schema.calls.durationSeconds,
+        startedAt: schema.calls.startedAt,
+        endedAt: schema.calls.endedAt,
+        createdAt: schema.calls.createdAt,
+        salesforceTaskId: schema.calls.salesforceTaskId,
+      })
+      .from(schema.calls)
+      .where(where)
+      .orderBy(desc(schema.calls.createdAt))
+      .limit(q.data.limit);
+    return { calls: rows };
+  });
+
   // ---- campaign configs ----
   app.get('/admin/campaigns', async (req, reply) => {
     const s = await resolveSession(req.headers.authorization);
