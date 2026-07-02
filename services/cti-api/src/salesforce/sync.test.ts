@@ -30,21 +30,18 @@ const customFields = {
   To_Number__c: '818-445-5992',
 };
 
-describe('buildTaskDescription — lean, Chatter-safe', () => {
-  it('contains only rep notes + call time, no CTI diagnostics', () => {
+describe('buildTaskDescription — rep notes only (Chatter-safe)', () => {
+  it('is exactly the rep notes, no diagnostics or call-time line', () => {
     const d = buildTaskDescription(call());
-    expect(d).toContain('STVM then NA');
-    expect(d).toMatch(/Call: .*PT/);
+    expect(d).toBe('STVM then NA');
+    expect(d).not.toContain('Call:');
     expect(d).not.toContain('Caller Reputation CTI');
-    expect(d).not.toContain('Provider');
-    expect(d).not.toContain('Reasons');
     expect(d).not.toContain('External_Call_Id__c');
   });
 
-  it('omits the notes line when there are none', () => {
-    const d = buildTaskDescription(call({ notes: null }));
-    expect(d).not.toContain('STVM');
-    expect(d).toMatch(/^Call: /);
+  it('is EMPTY when there are no notes (so the Chatter flow skips the call)', () => {
+    expect(buildTaskDescription(call({ notes: null }))).toBe('');
+    expect(buildTaskDescription(call({ notes: '   ' }))).toBe('');
   });
 });
 

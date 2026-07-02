@@ -216,31 +216,17 @@ async function syncOne(callId: string): Promise<void> {
     .where(eq(schema.salesforceSyncJobs.callId, call.id));
 }
 
-/** Call date/time in the org's local (Pacific) zone for the Task Description. */
-function formatCallTime(when: Date | null): string | null {
-  if (!when) return null;
-  try {
-    return new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/Los_Angeles',
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    }).format(when) + ' PT';
-  } catch {
-    return when.toISOString();
-  }
-}
-
 /**
- * LEAN Salesforce Task Description: just the rep's notes and the call date/time.
- * This is the field org Chatter automations tend to repost, so it must not carry
- * CTI diagnostics — those go to buildFullDetail (stored in our DB).
+ * Salesforce Task Description = ONLY the rep's notes (empty when there are none).
+ * GG Homes' "Task - After Create or Update" flow posts to Chatter only when the
+ * Description is populated, so we must NOT put anything else here (call time,
+ * diagnostics) — otherwise every no-note dial trips the flow and spams Chatter.
+ * The call time lives on the Task's ActivityDate/CallObject fields and the full
+ * record is in our DB (calls.sync_detail); createCallTask omits an empty
+ * Description so the field stays null.
  */
 export function buildTaskDescription(call: typeof schema.calls.$inferSelect): string {
-  const lines: string[] = [];
-  if (call.notes?.trim()) lines.push(call.notes.trim());
-  const when = formatCallTime(call.startedAt ?? call.endedAt ?? null);
-  if (when) lines.push(`Call: ${when}`);
-  return lines.join('\n\n');
+  return call.notes?.trim() ?? '';
 }
 
 /**
