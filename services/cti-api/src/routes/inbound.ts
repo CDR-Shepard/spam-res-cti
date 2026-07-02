@@ -66,7 +66,10 @@ function appendVoicemail(
           transcribeCallback: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/transcription?callDbId=${encodeURIComponent(callDbId)}`,
         }
       : {}),
-    action: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/recording?callDbId=${encodeURIComponent(callDbId)}`,
+    // NOTE: no `action` — the recording is persisted out-of-band via
+    // recordingStatusCallback. An `action` URL would (a) fire the recording
+    // handler a second time and (b) discard the Say/Hangup below (Twilio drops
+    // any verbs after <Record> once it hands control to the action URL).
   });
   t.say({ voice: 'Polly.Joanna' as never }, 'Thanks, your message has been received. Goodbye.');
   t.hangup();
