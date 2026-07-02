@@ -80,8 +80,7 @@ export function CallLog(): JSX.Element {
     () => Object.fromEntries(reps.map((r) => [r.id, r.displayName || r.email.split('@')[0]])),
     [reps],
   );
-  const totalTalk = useMemo(() => calls.reduce((a, c) => a + (c.durationSeconds ?? 0), 0), [calls]);
-  const connected = useMemo(() => calls.filter((c) => (c.durationSeconds ?? 0) > 0).length, [calls]);
+  const totalDuration = useMemo(() => calls.reduce((a, c) => a + (c.durationSeconds ?? 0), 0), [calls]);
 
   if (loading) return <div className="empty-state"><span className="spinner lg" /></div>;
 
@@ -102,7 +101,7 @@ export function CallLog(): JSX.Element {
       </div>
       {err && <div className="admin-err">{err}</div>}
       <div className="calllog-summary">
-        {calls.length} calls · {connected} connected · {fmtDuration(totalTalk)} total talk time
+        {calls.length} calls · {fmtDuration(totalDuration)} total (includes ring time)
       </div>
       <div className="calllog-scroll">
         <table className="calllog-table">
