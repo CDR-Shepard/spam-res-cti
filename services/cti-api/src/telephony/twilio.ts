@@ -61,7 +61,11 @@ export class TwilioProvider implements TelephonyProvider {
     );
     const grant = new VoiceGrant({
       outgoingApplicationSid: cfg.TWILIO_TWIML_APP_SID!,
-      incomingAllow: false,
+      // Allow the browser softphone to RECEIVE calls: the inbound webhook dials
+      // <Client>rep_<userId></Client>, which rings this registered identity. The
+      // per-user identity (rep_<userId>) means only the assigned rep's client
+      // rings for a callback to their DID.
+      incomingAllow: true,
     });
     accessToken.addGrant(grant);
 

@@ -52,6 +52,9 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     const pending = await db.query.calls.findFirst({
       where: and(
         eq(schema.calls.userId, session.userId),
+        // Only the rep's own OUTBOUND calls need a disposition; inbound calls
+        // auto-log, so they must not block the next dial.
+        eq(schema.calls.direction, 'outbound'),
         isNull(schema.calls.disposition),
         inArray(schema.calls.status, ['completed', 'no_answer', 'busy', 'canceled'] as schema.Call['status'][]),
       ),

@@ -35,6 +35,43 @@ function defaultGreeting(matched: boolean, name?: string | null): string {
   return 'Hi, thanks for calling. We didn\'t recognize this number — please leave a brief message describing how we can help, and someone will reach out shortly.';
 }
 
+/**
+ * Twilio Client identity for a rep's softphone. MUST match the identity minted
+ * in the Voice access token (routes/telephony.ts): `rep_<userId without dashes>`.
+ */
+function clientIdentity(userId: string): string {
+  return `rep_${userId.replace(/-/g, '')}`;
+}
+
+/** Append the greeting + voicemail-record TwiML (shared by the direct-voicemail
+ *  path and the ring-the-rep no-answer fallback). */
+function appendVoicemail(
+  t: InstanceType<typeof twilio.twiml.VoiceResponse>,
+  cfg: ReturnType<typeof loadConfig>,
+  owned: typeof schema.outboundNumbers.$inferSelect,
+  callDbId: string,
+  greeting: string,
+): void {
+  t.say({ voice: 'Polly.Joanna' as never }, greeting);
+  t.record({
+    maxLength: Math.min(Math.max(owned.inboundRecordSeconds ?? 60, 10), 600),
+    playBeep: true,
+    timeout: 5,
+    trim: 'trim-silence',
+    recordingStatusCallback: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/recording?callDbId=${encodeURIComponent(callDbId)}`,
+    recordingStatusCallbackEvent: ['completed'],
+    ...(owned.inboundTranscribe
+      ? {
+          transcribe: true,
+          transcribeCallback: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/transcription?callDbId=${encodeURIComponent(callDbId)}`,
+        }
+      : {}),
+    action: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/recording?callDbId=${encodeURIComponent(callDbId)}`,
+  });
+  t.say({ voice: 'Polly.Joanna' as never }, 'Thanks, your message has been received. Goodbye.');
+  t.hangup();
+}
+
 function sanitizeHeaders(h: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(h)) {
@@ -154,43 +191,27 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
       .returning({ id: schema.calls.id });
     const callDbId = callRow!.id;
 
-    const greeting =
-      (matched ? owned.inboundMatchedGreeting : owned.inboundGreeting) ??
-      defaultGreeting(!!matched, matched?.name ?? null);
-
     const t = new twilio.twiml.VoiceResponse();
-    t.say({ voice: 'Polly.Joanna' as never }, greeting);
 
-    // If a forward number is configured AND the caller is matched, ring it
-    // through (typical "VIP routing"). Otherwise record a voicemail.
-    if (matched && owned.inboundForwardToE164) {
+    // Ring the assigned rep's softphone (the CTI) so they can answer the callback
+    // in the app. If they don't pick up or are offline, the dial-result handler
+    // falls back to voicemail. Unassigned reserve numbers go straight to voicemail.
+    if (owned.assignedUserId) {
       const dial = t.dial({
-        callerId: owned.e164,
+        // Show the CALLER's number on the rep's softphone, not the DID, so the
+        // rep sees who's calling back.
+        callerId: normFrom || fromRaw || undefined,
         timeout: 25,
         answerOnBridge: true,
         action: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/dial-result?callDbId=${encodeURIComponent(callDbId)}`,
         method: 'POST',
       });
-      dial.number(owned.inboundForwardToE164);
+      dial.client({}, clientIdentity(owned.assignedUserId));
     } else {
-      // Record voicemail; transcribe if enabled. Twilio limits maxLength to 3600s.
-      t.record({
-        maxLength: Math.min(Math.max(owned.inboundRecordSeconds ?? 60, 10), 600),
-        playBeep: true,
-        timeout: 5,
-        trim: 'trim-silence',
-        recordingStatusCallback: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/recording?callDbId=${encodeURIComponent(callDbId)}`,
-        recordingStatusCallbackEvent: ['completed'],
-        ...(owned.inboundTranscribe
-          ? {
-              transcribe: true,
-              transcribeCallback: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/transcription?callDbId=${encodeURIComponent(callDbId)}`,
-            }
-          : {}),
-        action: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/recording?callDbId=${encodeURIComponent(callDbId)}`,
-      });
-      t.say({ voice: 'Polly.Joanna' as never }, 'Thanks, your message has been received. Goodbye.');
-      t.hangup();
+      const greeting =
+        (matched ? owned.inboundMatchedGreeting : owned.inboundGreeting) ??
+        defaultGreeting(!!matched, matched?.name ?? null);
+      appendVoicemail(t, cfg, owned, callDbId, greeting);
     }
 
     await db
@@ -273,7 +294,9 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response/>');
   });
 
-  // Dial-result callback — fires after a forwarded call (matched + VIP route).
+  // Dial-result callback — fires after we ring the rep's softphone. If the rep
+  // answered, mark the inbound call completed and log it. If they didn't answer
+  // (offline / no pickup), fall back to voicemail on the same call.
   app.post('/telephony/twilio/inbound/dial-result', async (req, reply) => {
     const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
     const url = `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/dial-result`;
@@ -283,27 +306,40 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
 
     const body = req.body as Record<string, string>;
     const q = req.query as { callDbId?: string };
-    if (q.callDbId && UUID_RE.test(q.callDbId)) {
-      const callSid = body.CallSid;
-      if (callSid && TWILIO_CALL_SID_RE.test(callSid)) {
-        const db = getDb();
-        await db
-          .update(schema.calls)
-          .set({
-            status: body.DialCallStatus === 'completed' ? 'completed'
-              : body.DialCallStatus === 'no-answer' ? 'no_answer'
-              : body.DialCallStatus === 'busy' ? 'busy'
-              : 'failed',
-            durationSeconds: body.DialCallDuration ? Number(body.DialCallDuration) : undefined,
-            endedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(and(eq(schema.calls.id, q.callDbId), eq(schema.calls.providerCallId, callSid)));
-        // Log the (forwarded) inbound call to Salesforce as a Task.
-        await enqueueSyncForCall(q.callDbId);
-      }
+    const hangup = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
+    if (!q.callDbId || !UUID_RE.test(q.callDbId)) {
+      return reply.type('text/xml').send(hangup);
     }
-    // No further TwiML — hang up
-    return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+    const db = getDb();
+    const answered = (body.DialCallStatus ?? '') === 'completed';
+
+    if (answered) {
+      await db
+        .update(schema.calls)
+        .set({
+          status: 'completed',
+          durationSeconds: body.DialCallDuration ? Number(body.DialCallDuration) : undefined,
+          endedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.calls.id, q.callDbId));
+      // Log the answered inbound call to Salesforce as a Task.
+      await enqueueSyncForCall(q.callDbId);
+      return reply.type('text/xml').send(hangup);
+    }
+
+    // Rep didn't answer / is offline → voicemail fallback on the same call.
+    const call = await db.query.calls.findFirst({ where: eq(schema.calls.id, q.callDbId) });
+    const owned = call
+      ? await db.query.outboundNumbers.findFirst({
+          where: eq(schema.outboundNumbers.e164, call.normalizedToNumber),
+        })
+      : null;
+    if (owned) {
+      const t = new twilio.twiml.VoiceResponse();
+      appendVoicemail(t, cfg, owned, q.callDbId, owned.inboundGreeting ?? defaultGreeting(false, null));
+      return reply.type('text/xml').send(t.toString());
+    }
+    return reply.type('text/xml').send(hangup);
   });
 }

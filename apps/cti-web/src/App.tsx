@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, clearSession, readSession, writeSession } from './api';
 import { AdminPanel } from './components/AdminPanel';
 import { CallLog } from './components/CallLog';
+import { IncomingScreen } from './components/IncomingScreen';
 import { CallScreen } from './components/CallScreen';
 import { Dialpad } from './components/Dialpad';
 import { RecentCalls } from './components/RecentCalls';
@@ -41,6 +42,15 @@ interface ActiveCall {
   objectType?: string;
 }
 
+/** Minimal shape of a Twilio Voice SDK incoming Call. */
+interface TwilioIncomingCall {
+  parameters?: Record<string, string>;
+  accept: () => void;
+  reject: () => void;
+  disconnect?: () => void;
+  on: (event: string, cb: (...args: unknown[]) => void) => void;
+}
+
 export function App(): JSX.Element {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [signedIn, setSignedIn] = useState(!!readSession());
@@ -59,6 +69,8 @@ export function App(): JSX.Element {
   const [disposition, setDisposition] = useState('Connected');
   const [notes, setNotes] = useState('');
   const [ctiContext, setCtiContext] = useState<ClickToDialEvent | null>(null);
+  // A ringing INBOUND call waiting for the rep to accept/decline in the CTI.
+  const [incoming, setIncoming] = useState<TwilioIncomingCall | null>(null);
 
   // Display name — persists in localStorage on this origin. Used only as a
   // fallback when SF OAuth isn't wired; the SF profile is preferred.
@@ -174,10 +186,20 @@ export function App(): JSX.Element {
 
   const deviceRef = useRef<unknown>(null);
   const connectionRef = useRef<unknown>(null);
+  // True from the first line of place() until it settles — used to reject an
+  // inbound call that races an in-flight outbound dial (which would otherwise
+  // clobber connectionRef and orphan the outbound leg).
+  const placingRef = useRef(false);
+  // In-flight device creation, so concurrent ensureDevice() callers (mount
+  // effect + place()) share ONE Device instead of each building their own.
+  const deviceInitRef = useRef<Promise<unknown> | null>(null);
   // Latest phase, readable from long-lived Twilio event closures (which capture
   // a stale `phase` at registration time).
   const phaseRef = useRef(phase);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
+  // Latest ringing inbound call, readable synchronously from place().
+  const incomingRef = useRef<TwilioIncomingCall | null>(null);
+  useEffect(() => { incomingRef.current = incoming; }, [incoming]);
   // Set once the Open CTI Task has been written for the current call, so a
   // disposition retry doesn't create a duplicate Task.
   const openCtiTaskWrittenRef = useRef(false);
@@ -292,8 +314,82 @@ export function App(): JSX.Element {
     [runFirewallNow, raw, ctiContext?.recordId],
   );
 
+  // Lazily create + register ONE persistent Twilio device, reused for both
+  // outbound dials and INBOUND calls (so callbacks ring the softphone). Idempotent.
+  const ensureDevice = useCallback(async (): Promise<unknown> => {
+    if (deviceRef.current) return deviceRef.current;
+    if (deviceInitRef.current) return deviceInitRef.current;
+    const init = (async () => {
+    const tok = await api<{ token: string }>('/telephony/token', { method: 'POST' });
+    const { Device } = await import('@twilio/voice-sdk');
+    const device = new Device(tok.token, { logLevel: 1 });
+    deviceRef.current = device;
+    const d = device as unknown as {
+      on: (e: string, cb: (a: unknown) => void) => void;
+      register: () => Promise<void>;
+      updateToken: (t: string) => void;
+    };
+    // Device-level errors (e.g. AccessTokenInvalid) → toast; never wipe a live call.
+    d.on('error', (err) => {
+      const e = err as { message?: string; code?: number } | undefined;
+      setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'Twilio device error'}`.replace('  ', ' ').trim(), type: 'error' });
+      if (phaseRef.current !== 'active' && phaseRef.current !== 'wrapup') setPhase('preflight');
+      setBusy(false);
+    });
+    // Refresh the token before expiry so the device stays registered for incoming.
+    d.on('tokenWillExpire', () => {
+      void (async () => {
+        try {
+          const t = await api<{ token: string }>('/telephony/token', { method: 'POST' });
+          d.updateToken(t.token);
+        } catch { /* keep the current token */ }
+      })();
+    });
+    // An INBOUND callback dialed to this rep's client identity.
+    d.on('incoming', (callObj) => {
+      const call = callObj as TwilioIncomingCall;
+      // Decline (→ voicemail) if the rep is busy OR an outbound dial is in
+      // flight — no call-waiting, and never race an in-progress place().
+      if (placingRef.current || (phaseRef.current !== 'idle' && phaseRef.current !== 'preflight')) {
+        try { call.reject(); } catch { /* */ }
+        return;
+      }
+      // Clear the ringing UI if the caller hangs up or the leg is cancelled
+      // (e.g. answered in another tab) before the rep picks up.
+      call.on('cancel', () => setIncoming((c) => (c === call ? null : c)));
+      call.on('disconnect', () => setIncoming((c) => (c === call ? null : c)));
+      setIncoming(call);
+    });
+    await d.register();
+    return device;
+    })();
+    deviceInitRef.current = init;
+    try {
+      return await init;
+    } catch (err) {
+      // Failed init — clear so the next call retries cleanly.
+      deviceInitRef.current = null;
+      deviceRef.current = null;
+      throw err;
+    }
+  }, []);
+
+  // Register the device once signed in so callbacks can ring the softphone.
+  useEffect(() => {
+    if (!me) return;
+    void ensureDevice().catch(() => { /* best-effort; outbound will retry on demand */ });
+  }, [me, ensureDevice]);
+
   const place = useCallback(async () => {
     if (!firewall || firewall.decision === 'BLOCK') return;
+    // Claim the outbound path synchronously so a callback that rings during the
+    // POST /calls + device.connect() awaits is declined (→ voicemail) instead of
+    // racing this dial. Also drop any ringing inbound: the rep chose to dial out.
+    placingRef.current = true;
+    if (incomingRef.current) {
+      try { incomingRef.current.reject(); } catch { /* */ }
+      setIncoming(null);
+    }
     setBusy(true);
     try {
       let created: { call: { id: string; fromNumber: string; toNumber: string; normalizedToNumber: string } };
@@ -332,26 +428,8 @@ export function App(): JSX.Element {
         throw e;
       }
       const callId = created.call.id;
-      const tok = await api<{ token: string }>('/telephony/token', { method: 'POST' });
-      const { Device } = await import('@twilio/voice-sdk');
-      const device = new Device(tok.token, { logLevel: 1 });
-      deviceRef.current = device;
-      // Surface device-level errors (e.g. AccessTokenInvalid) as a toast.
-      // These fire on the Device, not the Connection, so without this handler
-      // a bad Twilio token fails silently and the UI just appears to do nothing.
-      (device as unknown as { on: (e: string, cb: (a: unknown) => void) => void }).on('error', (err) => {
-        const e = err as { message?: string; code?: number } | undefined;
-        setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'Twilio device error'}`.replace('  ', ' ').trim(), type: 'error' });
-        // Only bounce back to the dialer if we're not mid-call. A non-fatal
-        // signaling/token error during an active call or wrap-up must not wipe
-        // the in-progress call — the rep still needs to finish and log it.
-        if (phaseRef.current !== 'active' && phaseRef.current !== 'wrapup') {
-          setPhase('preflight');
-        }
-        setBusy(false);
-      });
-      await device.register();
-      const connection = await device.connect({
+      const device = await ensureDevice();
+      const connection = await (device as unknown as { connect: (o: unknown) => Promise<unknown> }).connect({
         // CallId binds this dial to the firewall-approved call row server-side,
         // so /voice dials only the audited destination + caller ID.
         params: { To: created.call.normalizedToNumber, CallerId: created.call.fromNumber, CallId: callId },
@@ -384,11 +462,11 @@ export function App(): JSX.Element {
         persistSid();
         setPhase('wrapup');
         void api(`/calls/${callId}`, { method: 'PATCH', body: { status: 'completed', endedAt: new Date().toISOString() } });
-        try { (device as unknown as { destroy: () => void }).destroy(); } catch { /* noop */ }
+        // Keep the device registered (persistent) so it can place the next call
+        // and receive inbound callbacks.
       });
       conn.on('cancel', () => {
         persistSid(); setPhase('wrapup');
-        try { (device as unknown as { destroy: () => void }).destroy(); } catch { /* noop */ }
       });
       conn.on('error', (err) => {
         persistSid();
@@ -399,8 +477,8 @@ export function App(): JSX.Element {
       const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'unknown error';
       setToast({ text: `Could not place call: ${msg}`, type: 'error' });
       setPhase('preflight');
-    } finally { setBusy(false); }
-  }, [firewall, raw, ctiContext]);
+    } finally { setBusy(false); placingRef.current = false; }
+  }, [firewall, raw, ctiContext, ensureDevice]);
 
   const hangup = useCallback(() => {
     try { (connectionRef.current as { disconnect?: () => void } | null)?.disconnect?.(); } catch { /* */ }
@@ -414,9 +492,44 @@ export function App(): JSX.Element {
     setRaw(''); setFirewall(null); setPhase('idle'); setActive(null);
     setElapsed(0); setMuted(false); setDisposition('Connected'); setNotes('');
     setCtiContext(null);
-    deviceRef.current = null; connectionRef.current = null;
+    // Keep the persistent device registered (for the next call + inbound); only
+    // clear the per-call connection.
+    connectionRef.current = null;
+    placingRef.current = false;
     openCtiTaskWrittenRef.current = false;
   }, []);
+
+  // Answer an inbound callback in the CTI. Inbound calls auto-log server-side,
+  // so there's no wrap-up form — on hangup we just return to idle.
+  const acceptIncoming = useCallback(() => {
+    const call = incoming;
+    // Don't answer if an outbound dial just claimed the line.
+    if (!call || placingRef.current) return;
+    const from = call.parameters?.From ?? call.parameters?.from ?? '';
+    const backToIdle = (): void => {
+      setPhase('idle'); setActive(null); setElapsed(0); setIncoming(null);
+      connectionRef.current = null;
+    };
+    connectionRef.current = call;
+    setActive({ callId: '', toNumber: from, fromNumber: from, startedAt: Date.now(), recordName: 'Incoming call' });
+    setIncoming(null);
+    setMuted(false);
+    setPhase('active');
+    try { call.accept(); } catch { backToIdle(); return; }
+    call.on('disconnect', backToIdle);
+    // A media/mic failure after accept may never emit 'disconnect'; recover the
+    // UI (inbound has no wrap-up form) instead of stranding an 'active' screen.
+    call.on('error', (err) => {
+      const e = err as { message?: string; code?: number } | undefined;
+      setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'unknown'}`, type: 'error' });
+      backToIdle();
+    });
+  }, [incoming]);
+
+  const declineIncoming = useCallback(() => {
+    try { incoming?.reject(); } catch { /* */ }
+    setIncoming(null);
+  }, [incoming]);
 
   const submitDisposition = useCallback(async () => {
     if (!active) return;
@@ -598,7 +711,13 @@ export function App(): JSX.Element {
     </div>
   ) : null;
 
-  const body = inCall && active ? (
+  const body = incoming && !inCall ? (
+    <IncomingScreen
+      from={incoming.parameters?.From ?? incoming.parameters?.from}
+      onAccept={acceptIncoming}
+      onDecline={declineIncoming}
+    />
+  ) : inCall && active ? (
     phase === 'wrapup' ? (
       <WrapupForm
         toNumber={active.toNumber}
