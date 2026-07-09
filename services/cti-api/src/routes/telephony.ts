@@ -13,6 +13,13 @@ import { getDb, schema } from '../db/index.js';
 import { loadConfig } from '../config.js';
 import { sha256 } from '../crypto.js';
 import { dispatchAlert } from '../alerts.js';
+import { pushRecordingLinkToTask } from '../salesforce/sync.js';
+import {
+  UUID_RE,
+  TWILIO_CALL_SID_RE,
+  TWILIO_RECORDING_MEDIA_RE,
+  signedCallbackUrl,
+} from '../telephony/webhooks.js';
 
 export async function registerTelephonyRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
@@ -118,7 +125,11 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     const callerId = call.fromNumber;
     const dest = call.normalizedToNumber;
 
-    // Two-party recording disclosure, scoped to THIS call's org + campaign.
+    // Recording + disclosure, scoped to THIS call's org + campaign. When
+    // recording is on we ALWAYS disclose (all-party-consent by construction — we
+    // never record a leg the far party wasn't told about); a two-party campaign
+    // config also forces it independently.
+    const recordCalls = cfg.TWILIO_RECORD_CALLS;
     const campaignKey = call.campaignKey ?? 'default';
     const campaign = await db.query.campaignConfigs.findFirst({
       where: and(
@@ -126,9 +137,23 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
         eq(schema.campaignConfigs.key, campaignKey),
       ),
     });
-    const needsDisclosure = campaign?.recordingConsentMode === 'two_party';
+    const needsDisclosure = recordCalls || campaign?.recordingConsentMode === 'two_party';
 
-    const dial = twiml.dial({ callerId, answerOnBridge: true, action: statusUrl });
+    const dial = twiml.dial({
+      callerId,
+      answerOnBridge: true,
+      action: statusUrl,
+      // Dual-channel = rep and prospect on separate tracks (clean for QA). The
+      // recording is of the connected conversation only (record-from-answer).
+      ...(recordCalls
+        ? {
+            record: 'record-from-answer-dual',
+            recordingStatusCallback: `${cfg.API_PUBLIC_URL}/telephony/twilio/recording?callDbId=${call.id}`,
+            recordingStatusCallbackEvent: ['completed'],
+            recordingStatusCallbackMethod: 'POST',
+          }
+        : {}),
+    } as never);
     // Put the disclosure on the dialed (recipient) leg via the <Number url>,
     // which runs before bridging so the RECIPIENT — not the rep — hears it, as
     // all-party-consent states require. A child-leg statusCallback gives us the
@@ -137,10 +162,15 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
       {
         statusCallback: statusUrl,
         statusCallbackEvent: ['completed'],
-        ...(needsDisclosure ? { url: `${cfg.API_PUBLIC_URL}/telephony/twilio/disclosure` } : {}),
+        ...(needsDisclosure
+          ? { url: `${cfg.API_PUBLIC_URL}/telephony/twilio/disclosure?callDbId=${call.id}` }
+          : {}),
       } as never,
       dest,
     );
+    // recordingDisclosurePlayed is set by the /disclosure handler — Twilio only
+    // fetches it once the callee ANSWERS, so the flag is a real audit signal, not
+    // an optimistic guess on calls that never connect (and never record).
     return reply.type('text/xml').send(twiml.toString());
   });
 
@@ -151,11 +181,20 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
    */
   app.post('/telephony/twilio/disclosure', async (req, reply) => {
     const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
-    const url = `${cfg.API_PUBLIC_URL}/telephony/twilio/disclosure`;
+    const url = signedCallbackUrl(cfg.API_PUBLIC_URL, req);
     const provider = getProvider();
     const valid = provider.validateWebhook(req.headers as Record<string, string | string[] | undefined>, rawBody, url);
     if (!valid.valid && !cfg.TWILIO_SKIP_SIGNATURE_CHECK) {
       return reply.code(403).type('text/xml').send('<Response><Reject/></Response>');
+    }
+    // Twilio requests this ONLY once the callee answers (it runs on the recipient
+    // leg before bridging), so it's the accurate all-party-consent audit point.
+    const q = req.query as { callDbId?: string };
+    if (q.callDbId && UUID_RE.test(q.callDbId)) {
+      await getDb()
+        .update(schema.calls)
+        .set({ recordingDisclosurePlayed: true, updatedAt: new Date() })
+        .where(eq(schema.calls.id, q.callDbId));
     }
     const VoiceResponse = twilio.twiml.VoiceResponse;
     const twiml = new VoiceResponse();
@@ -164,6 +203,61 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
       'This call may be recorded for quality and training purposes.',
     );
     return reply.type('text/xml').send(twiml.toString());
+  });
+
+  /**
+   * Recording-completed callback for outbound + inbound-answered calls. Twilio
+   * POSTs when the dual-channel recording finishes. We store the media URL and
+   * attach the PUBLIC playback link (GET /recordings/:id) to the Salesforce Task.
+   * The call is keyed by our own UUID passed in the callback URL; the request is
+   * signature-validated, so that id is trustworthy.
+   */
+  app.post('/telephony/twilio/recording', async (req, reply) => {
+    const empty = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
+    const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
+    // Twilio signs the full callback URL INCLUDING the ?callDbId= query string —
+    // validate against the live request URL, not a stripped path.
+    const url = signedCallbackUrl(cfg.API_PUBLIC_URL, req);
+    const provider = getProvider();
+    const valid = provider.validateWebhook(req.headers as Record<string, string | string[] | undefined>, rawBody, url);
+    if (!valid.valid && !cfg.TWILIO_SKIP_SIGNATURE_CHECK) return reply.code(403).send('Invalid signature');
+
+    const body = req.body as Record<string, string>;
+    const q = req.query as { callDbId?: string };
+    if (!q.callDbId || !UUID_RE.test(q.callDbId)) return reply.type('text/xml').send(empty);
+    const callSid = body.CallSid;
+    if (!callSid || !TWILIO_CALL_SID_RE.test(callSid)) return reply.type('text/xml').send(empty);
+    if (body.RecordingStatus && body.RecordingStatus !== 'completed') {
+      return reply.type('text/xml').send(empty);
+    }
+    const recordingUrl =
+      body.RecordingUrl && TWILIO_RECORDING_MEDIA_RE.test(body.RecordingUrl)
+        ? `${body.RecordingUrl}.mp3`
+        : null;
+    if (!recordingUrl) return reply.type('text/xml').send(empty);
+
+    const db = getDb();
+    // Only set the recording URL — never touch status/duration (the status
+    // callback owns those). Cross-check the Twilio CallSid against the row's
+    // providerCallId as defence in depth: callDbId is NOT secret (it's embedded
+    // in the public recording link we write to Salesforce), so a harvested id
+    // must not be enough to repoint a call at an attacker-chosen recording.
+    const updated = await db
+      .update(schema.calls)
+      .set({ recordingUrl, updatedAt: new Date() })
+      .where(and(eq(schema.calls.id, q.callDbId), eq(schema.calls.providerCallId, callSid)))
+      .returning({ id: schema.calls.id });
+    if (updated.length === 0) {
+      req.log.warn({ callDbId: q.callDbId }, 'recording_callsid_mismatch');
+      return reply.type('text/xml').send(empty);
+    }
+    try {
+      const result = await pushRecordingLinkToTask(q.callDbId);
+      req.log.info({ callDbId: q.callDbId, result }, 'recording_attached');
+    } catch (err) {
+      req.log.warn({ err: (err as Error).message, callDbId: q.callDbId }, 'recording_sf_attach_failed');
+    }
+    return reply.type('text/xml').send(empty);
   });
 
   /**

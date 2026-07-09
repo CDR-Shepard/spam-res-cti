@@ -287,3 +287,27 @@ export async function createCallTask(
   const created = res.json as { id: string; success: boolean };
   return { taskId: created.id };
 }
+
+/**
+ * Patch fields onto an existing Task — used to attach the recording link, which
+ * only exists after the call ends (and often after the Task was already
+ * created). Only touches the fields passed in; throws on hard failure so the
+ * caller can log it. A missing custom field (INVALID_FIELD) is treated as a
+ * no-op so an org without the recording field doesn't error the webhook.
+ */
+export async function updateCallTask(
+  userId: string,
+  taskId: string,
+  fields: Record<string, string | number | null>,
+): Promise<{ updated: boolean }> {
+  const res = await sfFetch(userId, `/sobjects/Task/${taskId}`, { method: 'PATCH', body: fields });
+  if (res.status >= 400) {
+    const errs = res.json as Array<{ errorCode?: string }>;
+    const isInvalidField =
+      Array.isArray(errs) &&
+      errs.some((e) => typeof e.errorCode === 'string' && e.errorCode.startsWith('INVALID_FIELD'));
+    if (isInvalidField) return { updated: false };
+    throw new Error(`Salesforce Task update failed (${taskId}): ${JSON.stringify(res.json)}`);
+  }
+  return { updated: true };
+}

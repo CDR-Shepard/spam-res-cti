@@ -13,6 +13,7 @@ import { registerCtiRoutes } from './routes/cti.js';
 import { registerInboundRoutes } from './routes/inbound.js';
 import { registerReputationRoutes } from './routes/reputation.js';
 import { registerIntegrationRoutes } from './routes/integrations.js';
+import { registerRecordingRoutes } from './routes/recordings.js';
 import { startSyncLoop } from './salesforce/sync.js';
 import { startReputationWorker } from './reputation/worker.js';
 
@@ -99,6 +100,7 @@ async function main(): Promise<void> {
   await registerInboundRoutes(app);
   await registerReputationRoutes(app);
   await registerIntegrationRoutes(app);
+  await registerRecordingRoutes(app);
 
   const syncTimer = startSyncLoop(5000);
   const reputationTimer = startReputationWorker(app.log, cfg.REPUTATION_WORKER_INTERVAL_MS);

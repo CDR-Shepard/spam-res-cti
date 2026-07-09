@@ -68,6 +68,17 @@ const schema = z.object({
     .string()
     .transform((v) => v === 'true' || v === '1')
     .default('false'),
+  /**
+   * Record calls (dual-channel) and expose a public, no-login playback link.
+   * When true, EVERY recorded call also plays an all-party-consent disclosure to
+   * the far party before bridging (California §632 / all-party-consent states) —
+   * the two are intentionally coupled so we never record without disclosing.
+   * Default true; set 'false' to stop recording without a redeploy.
+   */
+  TWILIO_RECORD_CALLS: z
+    .string()
+    .transform((v) => v !== 'false' && v !== '0')
+    .default('true'),
 
   TELNYX_API_KEY: z.string().optional(),
   TELNYX_CONNECTION_ID: z.string().optional(),
