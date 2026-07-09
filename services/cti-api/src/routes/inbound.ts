@@ -24,6 +24,12 @@ import { findByPhone } from '../salesforce/client.js';
 import { enqueueSyncForCall } from '../salesforce/sync.js';
 import { normalize } from '../phone.js';
 import { sha256 } from '../crypto.js';
+import {
+  UUID_RE,
+  TWILIO_CALL_SID_RE,
+  TWILIO_RECORDING_MEDIA_RE,
+  signedCallbackUrl,
+} from '../telephony/webhooks.js';
 
 function defaultGreeting(matched: boolean, name?: string | null): string {
   if (matched && name) {
@@ -84,10 +90,6 @@ function sanitizeHeaders(h: Record<string, unknown>): Record<string, unknown> {
   }
   return out;
 }
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const TWILIO_CALL_SID_RE = /^CA[a-f0-9]{32}$/i;
-const TWILIO_RECORDING_URL_RE = /^https:\/\/api\.twilio\.com\//;
 
 export async function registerInboundRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
@@ -190,6 +192,8 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
         salesforceWhoId: matched?.whoId ?? null,
         salesforceWhatId: matched?.whatId ?? null,
         inboundCallerMatched: !!matched,
+        // The answered path (ring the rep) plays a recording disclosure below.
+        recordingDisclosurePlayed: cfg.TWILIO_RECORD_CALLS && !!owned.assignedUserId,
       })
       .returning({ id: schema.calls.id });
     const callDbId = callRow!.id;
@@ -200,6 +204,14 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     // in the app. If they don't pick up or are offline, the dial-result handler
     // falls back to voicemail. Unassigned reserve numbers go straight to voicemail.
     if (owned.assignedUserId) {
+      // All-party consent: the caller hears the disclosure before we bridge them
+      // to the rep and start recording.
+      if (cfg.TWILIO_RECORD_CALLS) {
+        t.say(
+          { voice: 'Polly.Joanna' as never },
+          'This call may be recorded for quality and training purposes.',
+        );
+      }
       const dial = t.dial({
         // Show the CALLER's number on the rep's softphone, not the DID, so the
         // rep sees who's calling back.
@@ -208,7 +220,15 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
         answerOnBridge: true,
         action: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/dial-result?callDbId=${encodeURIComponent(callDbId)}`,
         method: 'POST',
-      });
+        ...(cfg.TWILIO_RECORD_CALLS
+          ? {
+              record: 'record-from-answer-dual',
+              recordingStatusCallback: `${cfg.API_PUBLIC_URL}/telephony/twilio/recording?callDbId=${encodeURIComponent(callDbId)}`,
+              recordingStatusCallbackEvent: ['completed'],
+              recordingStatusCallbackMethod: 'POST',
+            }
+          : {}),
+      } as never);
       dial.client({}, clientIdentity(owned.assignedUserId));
     } else {
       const greeting =
@@ -228,7 +248,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
   // Recording-completed callback — Twilio POSTs after the voicemail finishes.
   app.post('/telephony/twilio/inbound/recording', async (req, reply) => {
     const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
-    const url = `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/recording`;
+    const url = signedCallbackUrl(cfg.API_PUBLIC_URL, req);
     const provider = getProvider();
     const valid = provider.validateWebhook(req.headers as Record<string, string | string[] | undefined>, rawBody, url);
     if (!valid.valid && !cfg.TWILIO_SKIP_SIGNATURE_CHECK) return reply.code(403).send('bad sig');
@@ -247,7 +267,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     if (!callSid || !TWILIO_CALL_SID_RE.test(callSid)) {
       return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response/>');
     }
-    const recordingUrl = body.RecordingUrl && TWILIO_RECORDING_URL_RE.test(body.RecordingUrl)
+    const recordingUrl = body.RecordingUrl && TWILIO_RECORDING_MEDIA_RE.test(body.RecordingUrl)
       ? `${body.RecordingUrl}.mp3`
       : null;
     const db = getDb();
@@ -271,7 +291,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
   // Transcription callback — fires asynchronously when Twilio finishes STT.
   app.post('/telephony/twilio/inbound/transcription', async (req, reply) => {
     const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
-    const url = `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/transcription`;
+    const url = signedCallbackUrl(cfg.API_PUBLIC_URL, req);
     const provider = getProvider();
     const valid = provider.validateWebhook(req.headers as Record<string, string | string[] | undefined>, rawBody, url);
     if (!valid.valid && !cfg.TWILIO_SKIP_SIGNATURE_CHECK) return reply.code(403).send('bad sig');
@@ -302,7 +322,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
   // (offline / no pickup), fall back to voicemail on the same call.
   app.post('/telephony/twilio/inbound/dial-result', async (req, reply) => {
     const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
-    const url = `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/dial-result`;
+    const url = signedCallbackUrl(cfg.API_PUBLIC_URL, req);
     const provider = getProvider();
     const valid = provider.validateWebhook(req.headers as Record<string, string | string[] | undefined>, rawBody, url);
     if (!valid.valid && !cfg.TWILIO_SKIP_SIGNATURE_CHECK) return reply.code(403).send('bad sig');

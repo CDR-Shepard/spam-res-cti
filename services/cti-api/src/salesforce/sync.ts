@@ -6,7 +6,16 @@
 import { and, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { getDb, schema } from '../db/index.js';
 import { normalize } from '../phone.js';
-import { createCallTask, findByPhone, SalesforceUnauthorizedError } from './client.js';
+import { loadConfig } from '../config.js';
+import { buildRecordingPublicUrl } from '../telephony/recording-links.js';
+import { createCallTask, findByPhone, SalesforceUnauthorizedError, updateCallTask } from './client.js';
+
+/** Public no-login recording link for a call, or null when nothing is recorded. */
+function recordingPublicUrl(call: typeof schema.calls.$inferSelect): string | null {
+  if (!call.recordingUrl) return null;
+  const cfg = loadConfig();
+  return buildRecordingPublicUrl(call.id, { apiPublicUrl: cfg.API_PUBLIC_URL, secret: cfg.SESSION_SECRET });
+}
 
 const MAX_ATTEMPTS = 8;
 const BACKOFF_BASE_MS = 30_000; // 30s, 60s, 2m, 4m, ...
@@ -203,7 +212,11 @@ async function syncOne(callId: string): Promise<void> {
     From_Number__c: call.fromNumber,
     To_Number__c: call.toNumber,
     Normalized_To_Number__c: call.normalizedToNumber,
-    Recording_URL__c: call.recordingUrl ?? null,
+    // NOTE: the recording link (tdc_cti__Recording_URL__c) is NOT set here —
+    // createCallTask blanket-strips ALL custom fields when the org is missing any
+    // of the generic ones above, which would drop a valid recording field too.
+    // It's attached via a dedicated single-field PATCH after the Task exists
+    // (see the tdc_cti__Recording_URL__c push below and pushRecordingLinkToTask).
     Transcript_URL__c: call.transcriptUrl ?? null,
     Call_Start_Time__c: call.startedAt?.toISOString() ?? null,
     Call_End_Time__c: call.endedAt?.toISOString() ?? null,
@@ -249,6 +262,51 @@ async function syncOne(callId: string): Promise<void> {
     .update(schema.salesforceSyncJobs)
     .set({ salesforceTaskId: taskId, updatedAt: new Date() })
     .where(eq(schema.salesforceSyncJobs.callId, call.id));
+
+  // Attach the recording link if it already arrived. Re-read recordingUrl FRESH
+  // (not the stale `call` snapshot from the top of this fn): the recording
+  // webhook may have written it while createCallTask was in flight. Because
+  // salesforceTaskId is now committed above, any webhook that raced us and saw no
+  // Task (returned 'pending') is covered here — closing the lost-link window.
+  const fresh = await db.query.calls.findFirst({
+    columns: { recordingUrl: true },
+    where: eq(schema.calls.id, call.id),
+  });
+  if (fresh?.recordingUrl) {
+    const cfg = loadConfig();
+    const recUrl = buildRecordingPublicUrl(call.id, {
+      apiPublicUrl: cfg.API_PUBLIC_URL,
+      secret: cfg.SESSION_SECRET,
+    });
+    try {
+      await updateCallTask(call.userId, taskId, { tdc_cti__Recording_URL__c: recUrl });
+    } catch (err) {
+      console.error('[sf-sync] recording attach failed', {
+        callId: call.id,
+        err: (err as Error).message,
+      });
+    }
+  }
+}
+
+/**
+ * Attach a call's public recording link to its Salesforce Task. Called by the
+ * recording-completed webhook once Twilio finishes the recording.
+ *   - 'patched'  → Task exists and was updated.
+ *   - 'pending'  → Task not created yet; syncOne will attach it on create.
+ *   - 'skipped'  → nothing recorded for this call.
+ */
+export async function pushRecordingLinkToTask(
+  callId: string,
+): Promise<'patched' | 'pending' | 'skipped'> {
+  const db = getDb();
+  const call = await db.query.calls.findFirst({ where: eq(schema.calls.id, callId) });
+  if (!call) return 'skipped';
+  const url = recordingPublicUrl(call);
+  if (!url) return 'skipped';
+  if (!call.salesforceTaskId) return 'pending';
+  await updateCallTask(call.userId, call.salesforceTaskId, { tdc_cti__Recording_URL__c: url });
+  return 'patched';
 }
 
 /**
