@@ -6,16 +6,27 @@ import { api } from '../api';
 import { formatDuration, formatE164, relativeTime } from '../format';
 import { CheckCircleIcon, ClockIcon, PhoneOffIcon, PhoneOutgoingIcon } from '../icons';
 
-interface CallRow {
+export interface CallRow {
   id: string;
   toNumber: string;
   normalizedToNumber: string;
   fromNumber: string;
+  direction: string;
   status: string;
   disposition: string | null;
+  notes: string | null;
   durationSeconds: number | null;
   salesforceTaskId: string | null;
+  salesforceWhoId: string | null;
+  salesforceWhatId: string | null;
   createdAt: string;
+}
+
+const TERMINAL = ['completed', 'no_answer', 'busy', 'canceled'];
+
+/** An outbound call the rep still owes a disposition for (blocks the next dial). */
+export function needsDisposition(row: CallRow): boolean {
+  return row.direction === 'outbound' && row.disposition == null && TERMINAL.includes(row.status);
 }
 
 function classify(row: CallRow): 'connected' | 'missed' | 'outgoing' {
@@ -24,7 +35,12 @@ function classify(row: CallRow): 'connected' | 'missed' | 'outgoing' {
   return 'outgoing';
 }
 
-export function RecentCalls(): JSX.Element {
+interface RecentCallsProps {
+  /** Reopen a still-un-dispositioned call's wrap-up so the rep can finish it. */
+  onReopen?: (call: CallRow) => void;
+}
+
+export function RecentCalls({ onReopen }: RecentCallsProps): JSX.Element {
   const [calls, setCalls] = useState<CallRow[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -59,8 +75,18 @@ export function RecentCalls(): JSX.Element {
       {calls.map((c) => {
         const kind = classify(c);
         const Icon = kind === 'missed' ? PhoneOffIcon : kind === 'connected' ? CheckCircleIcon : PhoneOutgoingIcon;
+        const pending = needsDisposition(c);
+        const reopenable = pending && !!onReopen;
         return (
-          <div className={`row-item ${kind}`} key={c.id}>
+          <div
+            className={`row-item ${kind} ${pending ? 'needs-disp' : ''} ${reopenable ? 'tappable' : ''}`}
+            key={c.id}
+            role={reopenable ? 'button' : undefined}
+            tabIndex={reopenable ? 0 : undefined}
+            onClick={reopenable ? () => onReopen!(c) : undefined}
+            onKeyDown={reopenable ? (e) => { if (e.key === 'Enter' || e.key === ' ') onReopen!(c); } : undefined}
+            title={reopenable ? 'Finish disposition' : undefined}
+          >
             <div className="dir"><Icon /></div>
             <div className="info">
               <div className="num">{formatE164(c.normalizedToNumber)}</div>
@@ -68,9 +94,11 @@ export function RecentCalls(): JSX.Element {
             </div>
             <div className="right">
               <span className="dur">{formatDuration(c.durationSeconds)}</span>
-              {c.salesforceTaskId
-                ? <span className="sync ok">Synced</span>
-                : <span className="sync">Local</span>}
+              {pending
+                ? <span className="sync needs">Finish →</span>
+                : c.salesforceTaskId
+                  ? <span className="sync ok">Synced</span>
+                  : <span className="sync">Local</span>}
             </div>
           </div>
         );

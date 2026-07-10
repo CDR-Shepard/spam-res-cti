@@ -71,27 +71,33 @@ async function reapStuckJobs(): Promise<void> {
  * Idempotent: enqueue no-ops if a job already exists; syncOne skips a call that
  * already has a Task.
  */
+/** Disposition stamped by the sweep on a truly-abandoned call. The disposition
+ *  endpoint treats this as the one value a rep may still return to correct. */
+export const AUTO_DISPOSITION = 'Not dispositioned';
+
 async function sweepUnloggedCalls(): Promise<void> {
   const db = getDb();
   const cutoff = new Date(Date.now() - LOG_GRACE_MS);
   const stale = await db
-    .select({ id: schema.calls.id, disposition: schema.calls.disposition })
+    .select({ id: schema.calls.id })
     .from(schema.calls)
     .where(
       and(
         isNull(schema.calls.salesforceTaskId),
+        // ONLY truly-abandoned calls (never dispositioned). A call the rep already
+        // dispositioned is either enqueued for backend sync or logged via Open CTI
+        // — sweeping it here would create a DUPLICATE Salesforce Task.
+        isNull(schema.calls.disposition),
         inArray(schema.calls.status, LOGGABLE_TERMINAL_STATUSES),
         sql`coalesce(${schema.calls.endedAt}, ${schema.calls.updatedAt}) < ${cutoff}`,
       ),
     )
     .limit(50);
   for (const c of stale) {
-    if (!c.disposition) {
-      await db
-        .update(schema.calls)
-        .set({ disposition: 'Not dispositioned', updatedAt: new Date() })
-        .where(eq(schema.calls.id, c.id));
-    }
+    await db
+      .update(schema.calls)
+      .set({ disposition: AUTO_DISPOSITION, updatedAt: new Date() })
+      .where(eq(schema.calls.id, c.id));
     await enqueueSyncForCall(c.id);
   }
 }

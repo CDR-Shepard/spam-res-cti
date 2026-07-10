@@ -11,6 +11,8 @@ export const DISPOSITIONS = [
 
 interface WrapupFormProps {
   toNumber: string;
+  /** The DID this call went out on — shown so the rep can still read it back. */
+  fromNumber?: string;
   timer: string;
   /** Salesforce record the Task will attach to, when known. */
   recordName?: string;
@@ -28,6 +30,9 @@ export function WrapupForm(props: WrapupFormProps): JSX.Element {
       <div className="summary">
         <div className="num">{formatE164(props.toNumber)}</div>
         <div className="meta"><span className="tnum">{props.timer}</span> · call ended</div>
+        {props.fromNumber && (
+          <div className="meta">Called from <strong>{formatE164(props.fromNumber)}</strong></div>
+        )}
         {props.recordName && (
           <div className="meta attach">Task will attach to {props.recordName}</div>
         )}
