@@ -125,10 +125,13 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     const callerId = call.fromNumber;
     const dest = call.normalizedToNumber;
 
-    // Recording + disclosure, scoped to THIS call's org + campaign. When
-    // recording is on we ALWAYS disclose (all-party-consent by construction — we
-    // never record a leg the far party wasn't told about); a two-party campaign
-    // config also forces it independently.
+    // Recording is on, but the automated recipient disclosure is OPT-IN per
+    // campaign (recordingConsentMode='two_party'), NOT forced by recording. A
+    // pre-bridge <Number url> disclosure plays to the callee before they're
+    // connected, which adds a multi-second dead-air delay and clips the start of
+    // the recording (esp. voicemails). For manual rep-initiated dialing the rep
+    // gives the verbal disclosure instead; enable two_party only where an
+    // automated announcement is specifically required.
     const recordCalls = cfg.TWILIO_RECORD_CALLS;
     const campaignKey = call.campaignKey ?? 'default';
     const campaign = await db.query.campaignConfigs.findFirst({
@@ -137,7 +140,7 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
         eq(schema.campaignConfigs.key, campaignKey),
       ),
     });
-    const needsDisclosure = recordCalls || campaign?.recordingConsentMode === 'two_party';
+    const needsDisclosure = campaign?.recordingConsentMode === 'two_party';
 
     const dial = twiml.dial({
       callerId,
