@@ -14,8 +14,57 @@ import { resolveSession } from '../auth/session.js';
 import { getDb, schema } from '../db/index.js';
 import { normalize } from '../phone.js';
 import { warmupCapForAge } from '../firewall/warmup.js';
-import { enqueueSyncForCall } from '../salesforce/sync.js';
+import { enqueueSyncForCall, AUTO_DISPOSITION } from '../salesforce/sync.js';
+import { updateCallTask } from '../salesforce/client.js';
 import { loadConfig } from '../config.js';
+
+/**
+ * Classify a click-to-dial source record into WhoId (Lead/Contact) vs WhatId
+ * (Opportunity/Deal__c/…). Prefer the explicit object type; fall back to the SF
+ * ID key prefix (00Q = Lead, 003 = Contact) so a Lead/Contact is never
+ * mis-attached as a WhatId.
+ */
+function recordAttach(recordId: string, objectType?: string): { whoId?: string; whatId?: string } {
+  const ot = (objectType ?? '').toLowerCase();
+  const isWho = ot === 'lead' || ot === 'contact' || (!ot && (recordId.startsWith('00Q') || recordId.startsWith('003')));
+  return isWho ? { whoId: recordId } : { whatId: recordId };
+}
+
+/**
+ * The rep's single un-dispositioned OUTBOUND terminal call, if any — the exact
+ * condition that blocks the next dial. Inbound auto-logs, so it never blocks.
+ * One shared query so the dial-gate and the "finish your last call" surface can
+ * never disagree about what still needs a disposition.
+ */
+async function findPendingDisposition(
+  userId: string,
+): Promise<typeof schema.calls.$inferSelect | undefined> {
+  const db = getDb();
+  return db.query.calls.findFirst({
+    where: and(
+      eq(schema.calls.userId, userId),
+      eq(schema.calls.direction, 'outbound'),
+      isNull(schema.calls.disposition),
+      inArray(schema.calls.status, ['completed', 'no_answer', 'busy', 'canceled'] as schema.Call['status'][]),
+    ),
+    orderBy: desc(schema.calls.createdAt),
+  });
+}
+
+/** Everything the client needs to reopen a wrap-up rehydrated (not blank). */
+function pendingDispositionPayload(c: typeof schema.calls.$inferSelect) {
+  return {
+    id: c.id,
+    toNumber: c.normalizedToNumber,
+    fromNumber: c.fromNumber,
+    durationSeconds: c.durationSeconds ?? 0,
+    status: c.status,
+    notes: c.notes ?? '',
+    whoId: c.salesforceWhoId ?? null,
+    whatId: c.salesforceWhatId ?? null,
+    createdAt: c.createdAt,
+  };
+}
 
 export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
@@ -31,6 +80,13 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
      * state registration, two-party recording disclosure) cannot be dialed.
      */
     acknowledged: z.boolean().optional(),
+    /**
+     * The click-to-dial source record + type, persisted NOW so that if the rep
+     * has to reopen this call's disposition later, the Task still attaches to the
+     * exact Lead/Contact/Opportunity/Deal__c instead of a SOSL phone-guess.
+     */
+    recipientRecordId: z.string().min(15).max(20).optional(),
+    recipientObjectType: z.string().max(64).optional(),
   });
 
   app.post('/calls', async (req, reply) => {
@@ -49,27 +105,12 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     // dial and hand the client the pending call so it can reopen its wrap-up.
     // The sync worker auto-dispositions truly-abandoned calls after a grace
     // window, so this can never lock a rep out permanently.
-    const pending = await db.query.calls.findFirst({
-      where: and(
-        eq(schema.calls.userId, session.userId),
-        // Only the rep's own OUTBOUND calls need a disposition; inbound calls
-        // auto-log, so they must not block the next dial.
-        eq(schema.calls.direction, 'outbound'),
-        isNull(schema.calls.disposition),
-        inArray(schema.calls.status, ['completed', 'no_answer', 'busy', 'canceled'] as schema.Call['status'][]),
-      ),
-      orderBy: desc(schema.calls.createdAt),
-    });
+    const pending = await findPendingDisposition(session.userId);
     if (pending) {
       return reply.code(409).send({
         error: 'Disposition your previous call before dialing again.',
         code: 'DISPOSITION_REQUIRED',
-        pendingCall: {
-          id: pending.id,
-          toNumber: pending.normalizedToNumber,
-          fromNumber: pending.fromNumber,
-          durationSeconds: pending.durationSeconds ?? 0,
-        },
+        pendingCall: pendingDispositionPayload(pending),
       });
     }
     // The pre-call audit is the authority. Verify it is recent, decided, and
@@ -164,6 +205,9 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
         fromNumber,
       });
 
+    const attach = parsed.data.recipientRecordId
+      ? recordAttach(parsed.data.recipientRecordId, parsed.data.recipientObjectType)
+      : {};
     const [row] = await db
       .insert(schema.calls)
       .values({
@@ -176,6 +220,10 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
         status: 'queued',
         preCallAuditId: audit.id,
         campaignKey: parsed.data.campaignKey ?? audit.campaignKey ?? null,
+        // Persist the click-to-dial record up front so a reopened disposition
+        // still attaches to the exact record.
+        salesforceWhoId: attach.whoId ?? null,
+        salesforceWhatId: attach.whatId ?? null,
       })
       .returning();
 
@@ -215,6 +263,18 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
       .orderBy(desc(schema.calls.createdAt))
       .limit(limit);
     return { calls: rows };
+  });
+
+  /**
+   * The rep's outstanding un-dispositioned call, if any — powers the persistent
+   * "finish your last call" banner so returning to a pending disposition is
+   * discoverable instead of only surfacing when the next dial is blocked.
+   */
+  app.get('/calls/pending-disposition', async (req, reply) => {
+    const session = await resolveSession(req.headers.authorization);
+    if (!session) return reply.code(401).send({ error: 'Unauthorized' });
+    const pending = await findPendingDisposition(session.userId);
+    return { pending: pending ? pendingDispositionPayload(pending) : null };
   });
 
   app.get('/calls/:id', async (req, reply) => {
@@ -314,6 +374,13 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
       where: and(eq(schema.calls.id, id), eq(schema.calls.userId, session.userId)),
     });
     if (!owned) return reply.code(404).send({ error: 'Not found' });
+    // Idempotency: a call already carrying a REAL disposition must not be
+    // clobbered by a stale or duplicate submit (e.g. a re-shown banner) that
+    // would replace it with a default 'Connected' + empty notes. The auto-sweep
+    // value is the one exception — the rep may still return to correct it.
+    if (owned.disposition && owned.disposition !== AUTO_DISPOSITION) {
+      return { call: owned, salesforceSync: 'already_dispositioned' };
+    }
     const updates: Partial<typeof schema.calls.$inferInsert> = {
       disposition: parsed.data.disposition,
       notes: parsed.data.notes ?? owned.notes ?? null,
@@ -328,18 +395,27 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     // Attach the click-to-dial record so the backend sync logs the Task to the
     // exact record: Lead/Contact → WhoId, Opportunity/Deal__c/etc. → WhatId.
     if (parsed.data.recipientRecordId && !owned.salesforceWhoId && !owned.salesforceWhatId) {
-      const rid = parsed.data.recipientRecordId;
-      const ot = (parsed.data.recipientObjectType ?? '').toLowerCase();
-      // Prefer the explicit object type; if it's missing, fall back to the SF
-      // ID key prefix (00Q = Lead, 003 = Contact) so a Lead/Contact record can
-      // never be mis-attached as a WhatId.
-      const isWho =
-        ot === 'lead' || ot === 'contact' ||
-        (!ot && (rid.startsWith('00Q') || rid.startsWith('003')));
-      if (isWho) updates.salesforceWhoId = rid;
-      else updates.salesforceWhatId = rid;
+      const a = recordAttach(parsed.data.recipientRecordId, parsed.data.recipientObjectType);
+      if (a.whoId) updates.salesforceWhoId = a.whoId;
+      if (a.whatId) updates.salesforceWhatId = a.whatId;
     }
     const [row] = await db.update(schema.calls).set(updates).where(eq(schema.calls.id, id)).returning();
+    // If a Task already exists (e.g. the 10-min sweep auto-logged this call as
+    // "Not dispositioned" before the rep returned to finish it), the sync worker
+    // skips it — so push the rep's correction straight onto the existing Task,
+    // otherwise their disposition/notes would silently never reach Salesforce.
+    // Skipped when the client logged via Open CTI (that path owns its own Task).
+    if (owned.salesforceTaskId && !parsed.data.skipSalesforceSync) {
+      try {
+        await updateCallTask(owned.userId, owned.salesforceTaskId, {
+          CallDisposition: parsed.data.disposition,
+          Description: parsed.data.notes ?? owned.notes ?? '',
+        });
+      } catch (err) {
+        req.log.warn({ err: (err as Error).message, callId: id }, 'disposition_task_update_failed');
+      }
+      return { call: row, salesforceSync: 'task_updated' };
+    }
     // Single-writer rule: if the Open CTI surface already saved the Task, don't
     // enqueue a backend sync — otherwise the call is logged twice in Salesforce.
     if (!parsed.data.skipSalesforceSync) {

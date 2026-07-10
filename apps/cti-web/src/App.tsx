@@ -11,6 +11,7 @@ import { ReputationPanel } from './components/ReputationPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
 import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon } from './icons';
+import { formatE164 } from './format';
 import {
   initOpenCti, notifyReady, onClickToDial as onCti, saveCallLog, setPanelVisibility,
   type ClickToDialEvent,
@@ -41,6 +42,26 @@ interface ActiveCall {
   recordId?: string;
   recordName?: string;
   objectType?: string;
+}
+
+/** A terminal outbound call still awaiting a disposition (from the server). */
+interface PendingDisposition {
+  id: string;
+  toNumber: string;
+  fromNumber: string;
+  durationSeconds: number;
+  status: string;
+  notes: string;
+  whoId?: string | null;
+  whatId?: string | null;
+}
+
+/** Sensible default disposition from how the call actually ended, so a reopened
+ *  wrap-up isn't mislabeled "Connected" for a call that never connected. */
+function defaultDispositionForStatus(status: string): string {
+  if (status === 'no_answer' || status === 'canceled') return 'No answer';
+  if (status === 'busy') return 'Busy';
+  return 'Connected';
 }
 
 /** Minimal shape of a Twilio Voice SDK incoming Call. */
@@ -75,6 +96,9 @@ export function App(): JSX.Element {
   const [ctiContext, setCtiContext] = useState<ClickToDialEvent | null>(null);
   // A ringing INBOUND call waiting for the rep to accept/decline in the CTI.
   const [incoming, setIncoming] = useState<TwilioIncomingCall | null>(null);
+  // The rep's outstanding un-dispositioned call (server truth), if any — drives
+  // the persistent "finish your last call" banner so returning is discoverable.
+  const [pendingDisp, setPendingDisp] = useState<PendingDisposition | null>(null);
 
   // Display name — persists in localStorage on this origin. Used only as a
   // fallback when SF OAuth isn't wired; the SF profile is preferred.
@@ -223,6 +247,9 @@ export function App(): JSX.Element {
     setMe(null);
     setSignedIn(false);
     setInboundDegraded(false);
+    // Never carry one rep's pending-disposition banner into the next sign-in on
+    // a shared browser (reopening it would PATCH a call they don't own).
+    setPendingDisp(null);
   }, [teardownDevice]);
 
   // Destroy the device on unmount (empty deps → runs only on real unmount, not
@@ -424,6 +451,12 @@ export function App(): JSX.Element {
       // ring without hunting for the tab — as long as they're in Salesforce.
       try { setPanelVisibility(true); } catch { /* not embedded in SF */ }
     });
+    // Reflect REAL registration state: a device that silently drops its
+    // registration means inbound callbacks stop arriving, so surface it. Guard on
+    // identity so an ORPHANED device (from a failed init/retry) can't flip the
+    // status of the current, healthy one.
+    d.on('registered', () => { if (deviceRef.current === device) setInboundDegraded(false); });
+    d.on('unregistered', () => { if (deviceRef.current === device) setInboundDegraded(true); });
     await d.register();
     return device;
     })();
@@ -431,18 +464,50 @@ export function App(): JSX.Element {
     try {
       return await init;
     } catch (err) {
-      // Failed init — clear so the next call retries cleanly.
+      // Failed init — destroy the half-built device so it stops emitting
+      // registered/unregistered events, then clear so the next call retries clean.
+      try { (deviceRef.current as { destroy?: () => void } | null)?.destroy?.(); } catch { /* */ }
       deviceInitRef.current = null;
       deviceRef.current = null;
       throw err;
     }
   }, [signOut]);
 
-  // Register the device once signed in so callbacks can ring the softphone.
+  // Reopen a still-un-dispositioned call's wrap-up, rehydrated from the server so
+  // it isn't blank or mislabeled. No recordId is set: the backend already holds
+  // the click-to-dial record (persisted at dial time), so the disposition
+  // attaches correctly without writing a second Open-CTI Task.
+  const reopenDisposition = useCallback((p: PendingDisposition) => {
+    openCtiTaskWrittenRef.current = false;
+    connectionRef.current = null;
+    setActive({ callId: p.id, toNumber: p.toNumber, fromNumber: p.fromNumber, startedAt: Date.now() });
+    setElapsed(p.durationSeconds ?? 0);
+    setDisposition(defaultDispositionForStatus(p.status));
+    setNotes(p.notes ?? '');
+    setMuted(false);
+    setPhase('wrapup');
+    setPendingDisp(p);
+  }, []);
+
+  // Server truth for "do I still owe a disposition?" — drives the banner.
+  const refreshPending = useCallback(async () => {
+    try {
+      const r = await api<{ pending: PendingDisposition | null }>('/calls/pending-disposition');
+      setPendingDisp(r.pending);
+    } catch { /* best-effort */ }
+  }, []);
+
+  // Once signed in: register the device (so callbacks ring the softphone) and
+  // check for an unfinished disposition. A registration failure is surfaced —
+  // otherwise inbound would silently never arrive and the rep wouldn't know.
   useEffect(() => {
     if (!me) return;
-    void ensureDevice().catch(() => { /* best-effort; outbound will retry on demand */ });
-  }, [me, ensureDevice]);
+    void ensureDevice().catch(() => {
+      setInboundDegraded(true);
+      setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
+    });
+    void refreshPending();
+  }, [me, ensureDevice, refreshPending]);
 
   const place = useCallback(async () => {
     if (!firewall || firewall.decision === 'BLOCK') return;
@@ -468,23 +533,20 @@ export function App(): JSX.Element {
               // REQUIRE_REVIEW verdict is the rep's explicit acknowledgement.
               ...(firewall.fromNumber ? { fromNumber: firewall.fromNumber } : {}),
               ...(firewall.decision === 'REQUIRE_REVIEW' ? { acknowledged: true } : {}),
+              // Persist the click-to-dial record now so a reopened disposition
+              // still attaches to the exact Lead/Contact/Opportunity/Deal__c.
+              ...(ctiContext?.recordId
+                ? { recipientRecordId: ctiContext.recordId, recipientObjectType: ctiContext.objectType }
+                : {}),
             },
           },
         );
       } catch (e) {
         // The server blocks a new dial until the previous call is dispositioned.
-        // Reopen that call's wrap-up so the rep can log it, then dial again.
+        // Reopen that call's wrap-up (rehydrated) so the rep can log it, then dial.
         if (e instanceof ApiError && e.status === 409 && (e.data as { code?: string })?.code === 'DISPOSITION_REQUIRED') {
-          const pc = (e.data as { pendingCall?: { id: string; toNumber: string; fromNumber: string; durationSeconds?: number } }).pendingCall;
-          if (pc) {
-            // Reopen the un-dispositioned call's wrap-up so the rep can log it.
-            openCtiTaskWrittenRef.current = false;
-            setActive({ callId: pc.id, toNumber: pc.toNumber, fromNumber: pc.fromNumber, startedAt: Date.now() });
-            setElapsed(pc.durationSeconds ?? 0);
-            setDisposition('Connected');
-            setNotes('');
-            setPhase('wrapup');
-          }
+          const pc = (e.data as { pendingCall?: PendingDisposition }).pendingCall;
+          if (pc) reopenDisposition(pc);
           setToast({ text: 'Log your previous call before making another.', type: 'error' });
           setBusy(false);
           return;
@@ -542,7 +604,7 @@ export function App(): JSX.Element {
       setToast({ text: `Could not place call: ${msg}`, type: 'error' });
       setPhase('preflight');
     } finally { setBusy(false); placingRef.current = false; }
-  }, [firewall, raw, ctiContext, ensureDevice]);
+  }, [firewall, raw, ctiContext, ensureDevice, reopenDisposition]);
 
   const hangup = useCallback(() => {
     try { (connectionRef.current as { disconnect?: () => void } | null)?.disconnect?.(); } catch { /* */ }
@@ -641,11 +703,15 @@ export function App(): JSX.Element {
           : 'Call logged. Salesforce sync queued.',
         type: 'success',
       });
+      // Clear the banner SYNCHRONOUSLY so it can't re-show (and re-open) the call
+      // that was just logged; refreshPending() then reconciles best-effort.
+      setPendingDisp(null);
       reset();
+      void refreshPending();
     } catch (e) {
       setToast({ text: `Could not save: ${(e as Error).message}`, type: 'error' });
     } finally { setBusy(false); }
-  }, [active, disposition, notes, elapsed, reset]);
+  }, [active, disposition, notes, elapsed, reset, refreshPending]);
 
   // Global keyboard input for the dialpad (only while it's visible)
   useEffect(() => {
@@ -655,8 +721,8 @@ export function App(): JSX.Element {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (/^[0-9*#+]$/.test(e.key)) { e.preventDefault(); setRaw((v) => v + e.key); setFirewall(null); setPhase('idle'); }
-      else if (e.key === 'Backspace') { e.preventDefault(); setRaw((v) => v.slice(0, -1)); setFirewall(null); setPhase('idle'); }
+      if (/^[0-9*#+]$/.test(e.key)) { e.preventDefault(); setRaw((v) => v + e.key); setFirewall(null); setPhase('idle'); setCtiContext(null); }
+      else if (e.key === 'Backspace') { e.preventDefault(); setRaw((v) => v.slice(0, -1)); setFirewall(null); setPhase('idle'); setCtiContext(null); }
       else if (e.key === 'Enter') {
         e.preventDefault();
         if (firewall && firewall.decision !== 'BLOCK') void place();
@@ -777,6 +843,16 @@ export function App(): JSX.Element {
     </div>
   ) : null;
 
+  // Persistent, discoverable way back to an un-finished disposition — so a rep
+  // who navigated away (or reloaded) isn't stuck until the next dial 409s.
+  const dispositionBanner = !inCall && pendingDisp ? (
+    <button className="disp-banner" onClick={() => reopenDisposition(pendingDisp)}>
+      <span className="disp-dot" />
+      <span className="disp-text">Finish your last call — {formatE164(pendingDisp.toNumber)} needs a disposition</span>
+      <span className="disp-cta">Finish →</span>
+    </button>
+  ) : null;
+
   const body = incoming && !inCall ? (
     <IncomingScreen
       from={incoming.parameters?.From ?? incoming.parameters?.from}
@@ -787,6 +863,7 @@ export function App(): JSX.Element {
     phase === 'wrapup' ? (
       <WrapupForm
         toNumber={active.toNumber}
+        fromNumber={active.fromNumber}
         timer={timer}
         recordName={active.recordName}
         disposition={disposition}
@@ -810,7 +887,18 @@ export function App(): JSX.Element {
       />
     )
   ) : tab === 'recent' ? (
-    <RecentCalls />
+    <RecentCalls
+      onReopen={(c) => reopenDisposition({
+        id: c.id,
+        toNumber: c.normalizedToNumber,
+        fromNumber: c.fromNumber,
+        durationSeconds: c.durationSeconds ?? 0,
+        status: c.status,
+        notes: c.notes ?? '',
+        whoId: c.salesforceWhoId,
+        whatId: c.salesforceWhatId,
+      })}
+    />
   ) : tab === 'reputation' ? (
     <ReputationPanel />
   ) : tab === 'admin' ? (
@@ -826,8 +914,8 @@ export function App(): JSX.Element {
         busy={busy}
         primaryDisabled={busy || !raw.trim() || (!!firewall && firewall.decision === 'BLOCK')}
         primaryTitle={firewall ? (firewall.decision === 'BLOCK' ? 'Blocked' : 'Call now') : 'Check & call'}
-        onAppend={(k) => { setRaw((v) => v + k); setFirewall(null); setPhase('idle'); }}
-        onBackspace={() => { setRaw((v) => v.slice(0, -1)); setFirewall(null); setPhase('idle'); }}
+        onAppend={(k) => { setRaw((v) => v + k); setFirewall(null); setPhase('idle'); setCtiContext(null); }}
+        onBackspace={() => { setRaw((v) => v.slice(0, -1)); setFirewall(null); setPhase('idle'); setCtiContext(null); }}
         onPrimary={firewall && firewall.decision !== 'BLOCK' ? () => void place() : () => void runFirewall()}
       />
       {firewall && (
@@ -853,6 +941,7 @@ export function App(): JSX.Element {
     <div className="app">
       {header}
       {sfBanner}
+      {dispositionBanner}
       <div className="body">{body}</div>
       {!inCall && (
         <div className="nav">
