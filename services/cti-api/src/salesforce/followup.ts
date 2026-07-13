@@ -60,21 +60,23 @@ export async function rolloverFollowUp(
   const task = pickFollowUpTask(tasks);
   if (!task) return { completed: null, created: null };
 
-  const complete = await sfFetch(userId, `/sobjects/Task/${task.Id}`, {
-    method: 'PATCH',
-    body: { Status: 'Completed' },
-  });
-  if (complete.status >= 400) {
-    throw new Error(`follow-up complete failed: ${JSON.stringify(complete.json)}`);
-  }
-
+  // Create the replacement FIRST so a create failure leaves the original OPEN
+  // (retryable) instead of completing it and losing the follow-up entirely.
   const due = await nextBusinessDayFor(userId, fromIsoDate);
   const created = await sfFetch(userId, '/sobjects/Task', {
     method: 'POST',
     body: followUpCopyFields(task, due),
   });
   if (created.status >= 400) {
-    throw new Error(`follow-up copy create failed: ${JSON.stringify(created.json)}`);
+    throw new Error(`follow-up copy create failed for task ${task.Id}: ${JSON.stringify(created.json)}`);
+  }
+
+  const complete = await sfFetch(userId, `/sobjects/Task/${task.Id}`, {
+    method: 'PATCH',
+    body: { Status: 'Completed' },
+  });
+  if (complete.status >= 400) {
+    throw new Error(`follow-up complete failed for task ${task.Id}: ${JSON.stringify(complete.json)}`);
   }
   return { completed: task.Id, created: (created.json as { id: string }).id };
 }
