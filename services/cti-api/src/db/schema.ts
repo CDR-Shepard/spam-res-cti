@@ -43,6 +43,8 @@ export const numberHealthEnum = pgEnum('number_health', [
 
 export const syncStatusEnum = pgEnum('sync_status', ['pending', 'in_flight', 'succeeded', 'failed']);
 
+export const numberKindEnum = pgEnum('number_kind', ['agent', 'dialer_pool']);
+
 // =============================================================================
 // Core
 // =============================================================================
@@ -170,6 +172,10 @@ export const outboundNumbers = pgTable(
     /** Who last set `health`: 'numberverifier' | 'reputation_worker' |
      *  'analytics_block' | 'manual'. Drives safe auto-restore. */
     healthSource: text('health_source'),
+    /** 'agent' = a rep's own warm number (manual click-to-dial). 'dialer_pool' =
+     *  a shared number the power dialer uses for cold volume so agent numbers
+     *  aren't stained. */
+    kind: numberKindEnum('kind').default('agent').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     // Inbound auto-answer config (drives caller-reputation hygiene against
     // anti-spam reverse-call probes).
