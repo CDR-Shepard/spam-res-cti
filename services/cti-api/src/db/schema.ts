@@ -218,18 +218,25 @@ export const dialerSessions = pgTable('dialer_sessions', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
-export const dialerQueueItems = pgTable('dialer_queue_items', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  sessionId: uuid('session_id').notNull().references(() => dialerSessions.id, { onDelete: 'cascade' }),
-  ordinal: integer('ordinal').notNull(),
-  objectType: text('object_type').notNull(),
-  recordId: text('record_id').notNull(),
-  toNumber: text('to_number'), // resolved E.164, or null when unreachable
-  status: dialerItemStatus('status').default('pending').notNull(),
-  callId: text('call_id'),
-  outcome: text('outcome'),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
-});
+export const dialerQueueItems = pgTable(
+  'dialer_queue_items',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    sessionId: uuid('session_id').notNull().references(() => dialerSessions.id, { onDelete: 'cascade' }),
+    ordinal: integer('ordinal').notNull(),
+    objectType: text('object_type').notNull(),
+    recordId: text('record_id').notNull(),
+    toNumber: text('to_number'), // resolved E.164, or null when unreachable
+    fromNumber: text('from_number'),
+    status: dialerItemStatus('status').default('pending').notNull(),
+    callId: text('call_id'),
+    outcome: text('outcome'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    callIdIdx: index('dialer_queue_items_call_id_idx').on(t.callId),
+  }),
+);
 
 export const numberHealthSnapshots = pgTable('number_health_snapshots', {
   id: uuid('id').primaryKey().defaultRandom(),
