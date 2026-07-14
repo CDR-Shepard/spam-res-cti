@@ -226,6 +226,11 @@ export function App(): JSX.Element {
   // connectionRef, so joining/leaving it never touches phase/active/inCall and
   // never collides with a normal click-to-dial or inbound call's connection.
   const dialerConnRef = useRef<unknown>(null);
+  // Generation counter for power-dialer runs: incremented at the start of each
+  // startPowerDial() and in handleDialerStop(). Used to guard against the race
+  // where an in-flight connect() resolves AFTER a stop/new-start, preventing a
+  // stale connection from overwriting the cleared ref and leaking a conference leg.
+  const dialerRunRef = useRef(0);
   // True from the first line of place() until it settles — used to reject an
   // inbound call that races an in-flight outbound dial (which would otherwise
   // clobber connectionRef and orphan the outbound leg).
@@ -489,6 +494,7 @@ export function App(): JSX.Element {
   // session. Idempotent — safe to call twice (e.g. Stop button + DialerPanel
   // unmount), since a second call just finds a null ref and a null sessionId.
   const handleDialerStop = useCallback(() => {
+    dialerRunRef.current++; // Invalidate any in-flight startPowerDial()
     const conn = dialerConnRef.current as { disconnect?: () => void } | null;
     dialerConnRef.current = null;
     if (conn) { try { conn.disconnect?.(); } catch { /* already gone */ } }
@@ -511,6 +517,9 @@ export function App(): JSX.Element {
       setToast({ text: 'Power Dial: select at least one record.', type: 'error' });
       return;
     }
+    // Capture the run generation BEFORE any await, so an in-flight start
+    // can detect if a stop or new start has superseded it.
+    const myRun = ++dialerRunRef.current;
     try {
       const { sessionId } = await startDialer(objectType as DialerObjectType, recordIds as string[]);
       setDialerSessionId(sessionId);
@@ -519,6 +528,12 @@ export function App(): JSX.Element {
       const connection = await (device as unknown as { connect: (o: unknown) => Promise<unknown> }).connect({
         params: { DialerConference: '1' },
       });
+      // Guard: if a stop or new start happened while we were awaiting, this run
+      // is superseded. Disconnect the stale leg and return — don't leak it.
+      if (dialerRunRef.current !== myRun) {
+        try { (connection as { disconnect?: () => void }).disconnect?.(); } catch { /* already gone */ }
+        return;
+      }
       dialerConnRef.current = connection;
     } catch (e) {
       const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'unknown error';
