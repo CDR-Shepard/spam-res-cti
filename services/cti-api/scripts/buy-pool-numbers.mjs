@@ -32,19 +32,23 @@ const PLAN = [
 const CONFIRM = process.env.CONFIRM_BUY === '1';
 const ACCOUNT = process.env.TWILIO_ACCOUNT_SID;
 const TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const API_PUBLIC_URL = process.env.API_PUBLIC_URL;
+// The public base the purchased DIDs' Voice webhook points at. Prefer an
+// explicit POOL_API_BASE so callers can override a dev API_PUBLIC_URL (e.g. a
+// local tunnel) from a prod .env without --env-file precedence surprises.
+const API_BASE = process.env.POOL_API_BASE || process.env.API_PUBLIC_URL;
 const DATABASE_URL = process.env.DATABASE_URL;
 
 function die(msg) {
   console.error(`ERROR: ${msg}`);
   process.exit(1);
 }
-if (!ACCOUNT || !TOKEN) die('TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not set (run via `railway run`).');
-if (!API_PUBLIC_URL) die('API_PUBLIC_URL not set.');
-if (!DATABASE_URL) die('DATABASE_URL not set (run via `railway run`).');
+if (!ACCOUNT || !TOKEN) die('TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not set.');
+if (!API_BASE) die('Set POOL_API_BASE (prod API base, e.g. https://ctiapi-production.up.railway.app) or API_PUBLIC_URL.');
+if (!/^https:\/\//.test(API_BASE)) die(`Refusing a non-HTTPS voice webhook base: ${API_BASE} (a dev tunnel? pass POOL_API_BASE=<prod url>).`);
+if (!DATABASE_URL) die('DATABASE_URL not set.');
 
 const authHeader = 'Basic ' + Buffer.from(`${ACCOUNT}:${TOKEN}`).toString('base64');
-const VOICE_URL = `${API_PUBLIC_URL}/telephony/twilio/inbound`;
+const VOICE_URL = `${API_BASE}/telephony/twilio/inbound`;
 const twBase = `https://api.twilio.com/2010-04-01/Accounts/${ACCOUNT}`;
 
 async function twGet(path) {
