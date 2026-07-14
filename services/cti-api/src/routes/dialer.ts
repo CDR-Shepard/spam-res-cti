@@ -8,18 +8,36 @@
  *  POST /dialer/sessions/:id/skip     → skip the in-flight item, then advance
  *  POST /dialer/sessions/:id/stop     → hang up + stop the session outright
  *  POST /dialer/sessions/:id/next     → rep-initiated "next" after a connected call
+ *
+ *  Twilio-facing power-dialer call webhooks (signature-validated, NOT auth'd —
+ *  Twilio calls these directly, see TwilioDialerTelephony#originate):
+ *  POST /telephony/twilio/dialer-answer → TwiML played while async AMD classifies
+ *  POST /telephony/twilio/dialer-amd    → async AMD result → hangup machine/fax, else advance
+ *  POST /telephony/twilio/dialer-status → terminal call status → no_connect (idempotent)
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
 import { getDb, schema } from '../db/index.js';
+import { loadConfig } from '../config.js';
+import { getProvider } from '../telephony/index.js';
+import { signedCallbackUrl } from '../telephony/webhooks.js';
 import { createDialerSession } from '../dialer/create-session.js';
-import { pauseSession, resumeSession, skipCurrent, stopSession, repNext, type EngineDeps } from '../dialer/engine.js';
+import {
+  pauseSession,
+  resumeSession,
+  skipCurrent,
+  stopSession,
+  repNext,
+  handleDialOutcome,
+  type EngineDeps,
+} from '../dialer/engine.js';
 import { inFlightItem } from '../dialer/state.js';
 import { sessionCounts } from '../dialer/session-store.js';
-import { noopTelephony } from '../dialer/telephony-port.js';
-import { dialerPoolNumbers } from '../dialer/pool.js';
+import { TwilioDialerTelephony } from '../dialer/twilio-telephony.js';
+import { pickPoolDid, withinCallingHours } from '../dialer/pick-did.js';
+import { mapAnsweredBy } from '../dialer/amd.js';
 import { rolloverFollowUp } from '../salesforce/followup.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
@@ -30,16 +48,79 @@ const StartBody = z.object({
   recordIds: z.array(z.string().min(15).max(20)).min(1).max(500),
 });
 
-/** Real EngineDeps for a request. Telephony/screen-pop are wired by later plans. */
+/** GG Homes operates out of America/Los_Angeles — the rollover follow-up's
+ *  "today" is computed in that org timezone, not the server's (UTC on Railway). */
+const ORG_TIMEZONE = 'America/Los_Angeles';
+
+/** `YYYY-MM-DD` for `now` in the org's timezone. `en-CA` formats as ISO order,
+ *  so no further reassembly is needed. */
+function orgTodayIso(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: ORG_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
+/** Real EngineDeps for a request. Screen-pop is wired by Plan 4. */
 function buildEngineDeps(): EngineDeps {
+  const db = getDb();
   return {
-    db: getDb(),
-    telephony: noopTelephony,
-    dialerPoolNumbers,
+    db,
+    telephony: new TwilioDialerTelephony(),
+    pickDid: (orgId, userId, toE164) => pickPoolDid(db, { orgId, userId, toE164 }),
+    withinCallingHours,
+    nowUtc: new Date(),
     rolloverFollowUp,
     onScreenPop: () => {}, // Plan 4 wires Open CTI screen-pop
-    todayIso: new Date().toISOString().slice(0, 10), // Plan 3 refines to org tz
+    todayIso: orgTodayIso(),
   };
+}
+
+const TWIML_DIALER_ANSWER_HOLD = '<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="30"/></Response>';
+const TWIML_EMPTY = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
+
+/** Terminal Twilio call statuses that mean the recipient never connected. */
+const TERMINAL_NO_CONNECT_STATUSES = new Set(['no-answer', 'busy', 'failed', 'canceled']);
+
+/**
+ * Async-AMD callback handler: classify `AnsweredBy`, hang up a machine/fax
+ * classification immediately (a human never picked up), then let the engine
+ * act on the outcome (bridge-to-rep on connect, rollover + advance on
+ * no_connect). Extracted from the route so it's unit-testable without a live
+ * Fastify request — `runHandleDialOutcome` defaults to the real
+ * `handleDialOutcome` but tests can inject a spy.
+ */
+export async function onDialerAmd(
+  body: Record<string, string>,
+  deps: EngineDeps,
+  runHandleDialOutcome: typeof handleDialOutcome = handleDialOutcome,
+): Promise<void> {
+  const callSid = body.CallSid ?? '';
+  const outcome = mapAnsweredBy(body.AnsweredBy);
+  if (outcome === 'no_connect') {
+    await deps.telephony.hangup(callSid);
+  }
+  await runHandleDialOutcome(callSid, outcome, deps);
+}
+
+/**
+ * Call-status callback handler: a terminal status without ever reaching AMD
+ * (no-answer/busy/failed/canceled) is also a no_connect. Idempotent by
+ * construction — `handleDialOutcome` no-ops for any item that isn't still
+ * 'dialing', so a call AMD already classified is a harmless no-op here.
+ */
+export async function onDialerStatus(
+  body: Record<string, string>,
+  deps: EngineDeps,
+  runHandleDialOutcome: typeof handleDialOutcome = handleDialOutcome,
+): Promise<void> {
+  const callSid = body.CallSid ?? '';
+  const status = body.CallStatus ?? body.DialCallStatus ?? '';
+  if (TERMINAL_NO_CONNECT_STATUSES.has(status)) {
+    await runHandleDialOutcome(callSid, 'no_connect', deps);
+  }
 }
 
 /** Session by id, scoped to the caller — never leaks another rep's session. */
@@ -81,6 +162,8 @@ async function requireOwnedSession(
 }
 
 export async function registerDialerRoutes(app: FastifyInstance): Promise<void> {
+  const cfg = loadConfig();
+
   app.post('/dialer/sessions', async (req, reply) => {
     const authed = await resolveSession(req.headers.authorization);
     if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
@@ -142,5 +225,56 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     if (!owned) return;
     const result = await repNext(owned.session.id, buildEngineDeps());
     return { ok: true, ...result };
+  });
+
+  /** Shared signature gate for the Twilio-facing dialer webhooks below — same
+   *  enforce-unless-explicit-local-dev-flag posture as routes/telephony.ts. */
+  function validTwilioSignature(req: FastifyRequest): boolean {
+    const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
+    const url = signedCallbackUrl(cfg.API_PUBLIC_URL, req);
+    const provider = getProvider();
+    const valid = provider.validateWebhook(req.headers as Record<string, string | string[] | undefined>, rawBody, url);
+    return valid.valid || cfg.TWILIO_SKIP_SIGNATURE_CHECK;
+  }
+
+  /**
+   * TwiML played to the recipient while async AMD classifies human vs.
+   * machine/fax off the critical path — holds the line so the callee isn't
+   * greeted with dead air before `bridgeToRep` re-points the call. See
+   * TwilioDialerTelephony#originate's `url`.
+   */
+  app.post('/telephony/twilio/dialer-answer', async (req, reply) => {
+    if (!validTwilioSignature(req)) {
+      return reply.code(403).type('text/xml').send('<Response><Reject/></Response>');
+    }
+    return reply.type('text/xml').send(TWIML_DIALER_ANSWER_HOLD);
+  });
+
+  /**
+   * Twilio async-AMD result callback (TwilioDialerTelephony#originate's
+   * `asyncAmdStatusCallback`) — classifies human vs. machine/fax and drives
+   * the dialer engine's outcome handling (hangup + no_connect, or bridge on
+   * connect).
+   */
+  app.post('/telephony/twilio/dialer-amd', async (req, reply) => {
+    if (!validTwilioSignature(req)) {
+      return reply.code(403).type('text/xml').send('<Response><Reject/></Response>');
+    }
+    await onDialerAmd(req.body as Record<string, string>, buildEngineDeps());
+    return reply.type('text/xml').send(TWIML_EMPTY);
+  });
+
+  /**
+   * Twilio call-status callback (TwilioDialerTelephony#originate's
+   * `statusCallback`) — catches terminal statuses AMD never saw (the call
+   * never rang through at all: no-answer/busy/failed/canceled). Idempotent
+   * against a call AMD already classified — see `onDialerStatus`.
+   */
+  app.post('/telephony/twilio/dialer-status', async (req, reply) => {
+    if (!validTwilioSignature(req)) {
+      return reply.code(403).type('text/xml').send('<Response><Reject/></Response>');
+    }
+    await onDialerStatus(req.body as Record<string, string>, buildEngineDeps());
+    return reply.type('text/xml').send(TWIML_EMPTY);
   });
 }

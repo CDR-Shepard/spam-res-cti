@@ -3,14 +3,18 @@ import { getDb, schema } from '../db/index.js';
 import type { DialerItem } from './session-store.js';
 import { inFlightItem, nextPendingItem } from './state.js';
 import type { DialerTelephony } from './telephony-port.js';
-import type { dialerPoolNumbers } from './pool.js';
 import type { rolloverFollowUp } from '../salesforce/followup.js';
 import { recordConnectSticky } from './sticky.js';
 
 export interface EngineDeps {
   db: ReturnType<typeof getDb>;
   telephony: DialerTelephony;
-  dialerPoolNumbers: typeof dialerPoolNumbers;
+  /** Selects the outbound DID for a (org, rep, recipient) dial; null = nothing eligible (fail closed). */
+  pickDid: (orgId: string, userId: string, toE164: string) => Promise<{ e164: string } | null>;
+  /** Is `nowUtc` within the recipient-local calling window for `toE164`? Pure predicate injected for testability. */
+  withinCallingHours: (toE164: string, nowUtc: Date) => boolean;
+  /** The "now" the engine reasons about — injected so calling-hours checks are deterministic in tests. */
+  nowUtc: Date;
   rolloverFollowUp: typeof rolloverFollowUp;
   onScreenPop: (userId: string, objectType: string, recordId: string) => void;
   todayIso: string;
@@ -47,8 +51,12 @@ export async function advanceSession(
       items = items.map((i) => (i.id === next.id ? { ...i, status: 'unreachable' } : i));
       continue;
     }
-    const pool = await deps.dialerPoolNumbers(session.orgId);
-    const did = pool[0];
+    if (!deps.withinCallingHours(next.toNumber, deps.nowUtc)) {
+      await setItem(deps, next.id, { status: 'skipped', outcome: 'out_of_hours' });
+      items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: 'out_of_hours' } : i));
+      continue;
+    }
+    const did = await deps.pickDid(session.orgId, session.userId, next.toNumber);
     if (!did) { await setSession(deps, sessionId, 'paused'); return { action: 'paused_no_numbers' }; }
 
     // Two reps' concurrent advances (or a retry racing the original call) could

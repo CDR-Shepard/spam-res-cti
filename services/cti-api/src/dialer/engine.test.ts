@@ -129,7 +129,9 @@ function makeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
   return {
     db: undefined as any,
     telephony: { originate: vi.fn(async () => ({ callId: 'CA1' })), bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}) },
-    dialerPoolNumbers: vi.fn(async () => [{ e164: '+16190000000' }]) as any,
+    pickDid: vi.fn(async () => ({ e164: '+16190000000' })) as any,
+    withinCallingHours: vi.fn(() => true) as any,
+    nowUtc: new Date(Date.UTC(2026, 6, 13, 18, 0, 0)),
     rolloverFollowUp: vi.fn(async () => ({ completed: null, created: null })) as any,
     onScreenPop: vi.fn(),
     todayIso: '2026-07-13',
@@ -167,12 +169,26 @@ describe('advanceSession', () => {
   });
   it('pauses the session and returns { action: "paused_no_numbers" } when the DID pool is empty', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
-    const deps = makeDeps({ dialerPoolNumbers: vi.fn(async () => []) as any });
+    const deps = makeDeps({ pickDid: vi.fn(async () => null) as any });
     const fdb = fakeDb(baseSession, items); deps.db = fdb;
     const r = await advanceSession('S1', deps);
     expect(r.action).toBe('paused_no_numbers');
     expect(deps.telephony.originate).not.toHaveBeenCalled();
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'paused' }) });
+  });
+  it('skips (does not dial) an item whose recipient is currently out of calling hours', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps({ withinCallingHours: vi.fn(() => false) as any });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await advanceSession('S1', deps);
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+    expect(deps.pickDid).not.toHaveBeenCalled();
+    expect(fdb._writes).toContainEqual({
+      patch: expect.objectContaining({ status: 'skipped', outcome: 'out_of_hours' }),
+    });
+    // With only one item, out-of-hours skip leaves nothing pending -> the
+    // session completes on this same advance.
+    expect(r.action).toBe('done');
   });
   it('returns "waiting" without dialing when the atomic claim loses the race (0 rows updated)', async () => {
     // Simulates a second concurrent advance (or a retry) claiming the same
