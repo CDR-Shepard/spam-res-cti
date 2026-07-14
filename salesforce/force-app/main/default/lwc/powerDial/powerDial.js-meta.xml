@@ -3,7 +3,7 @@
     <apiVersion>60.0</apiVersion>
     <isExposed>true</isExposed>
     <masterLabel>Power Dial</masterLabel>
-    <description>Hands selected Lead/Opportunity record ids to the CTI power dialer (best-effort postMessage). See the component folder&apos;s README.md for exact Setup wiring per target and the honest handoff-mechanism writeup.</description>
+    <description>Hands selected Lead/Opportunity record ids to the CTI power dialer via the PowerDialRelay Apex server relay. See the component folder&apos;s README.md for exact Setup wiring per target, the Named Credential + shared-secret setup, and the handoff-mechanism writeup.</description>
     <targets>
         <target>lightning__RecordAction</target>
         <target>lightning__FlowScreen</target>

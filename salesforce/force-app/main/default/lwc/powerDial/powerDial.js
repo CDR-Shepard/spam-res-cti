@@ -1,20 +1,22 @@
 import { LightningElement, api } from 'lwc';
+import { ShowToastEvent } from 'lightning/platformShowToastEvent';
+import sendToCti from '@salesforce/apex/PowerDialRelay.sendToCti';
 
 /**
  * Power Dial handoff component.
  *
  * Resolves a set of Lead/Opportunity record ids — supplied by a Screen Flow
  * (the realistic list-view path), a single-record Quick Action, or manual
- * design-time attributes for testing — and makes a best-effort attempt to
- * hand them to the CTI power dialer via `window.postMessage`.
+ * design-time attributes for testing — and hands them to the CTI power
+ * dialer via the `PowerDialRelay.sendToCti` Apex server relay.
  *
- * IMPORTANT — read README.md's "Handoff mechanism" section before relying on
- * this in production. The `window.postMessage` call below is very unlikely
- * to reach the CTI softphone iframe from inside Salesforce Lightning
- * Experience (Locker/LWS iframe isolation). It is included because the task
- * asked for a best-effort attempt with the exact documented message shape,
- * not because it is known to work end-to-end. The README documents the
- * recommended server-relay alternative as a separate, user-gated follow-up.
+ * Read README.md's "Handoff mechanism" section for why this uses a server
+ * relay rather than `window.postMessage`: a raw cross-iframe postMessage
+ * from an LWC cannot reliably reach the CTI softphone's utility-bar iframe
+ * under Lightning Web Security. The relay instead has Apex POST the
+ * selection to `services/cti-api` (`POST /dialer/handoffs`, shared-secret
+ * authed), and the rep's already-signed-in CTI softphone picks it up on its
+ * next poll (`GET /dialer/handoffs/pending`) and auto-starts the run.
  */
 export default class PowerDial extends LightningElement {
   /**
@@ -37,10 +39,10 @@ export default class PowerDial extends LightningElement {
    */
   @api recordId;
 
-  /** True briefly while sendToCti() runs, to guard against double-clicks. */
+  /** True while the Apex relay call is in flight, to guard against double-clicks. */
   sending = false;
 
-  /** Set if the best-effort postMessage attempt throws. */
+  /** Set if the Apex relay call throws. */
   lastError;
 
   /** Ids to dial: the multi-record list if present, else the single id. */
@@ -70,33 +72,56 @@ export default class PowerDial extends LightningElement {
     if (this.recordCount === 0) {
       return 'No records selected.';
     }
-    return `${this.recordCount} ${this.objectApiName} record(s) ready — this only queues a best-effort message, see README.md for the reliable path.`;
+    return `${this.recordCount} ${this.objectApiName} record(s) ready to send to the CTI power dialer.`;
   }
 
   handlePowerDialClick() {
-    this.sendToCti();
+    this.sendToCtiRelay();
   }
 
   /**
-   * Builds the POWER_DIAL payload and makes a best-effort attempt to deliver
-   * it via window.postMessage. See the class-level comment and README.md —
-   * this is not guaranteed (and in the real Lightning Experience embedding,
-   * is unlikely) to reach the CTI softphone iframe.
+   * Calls the PowerDialRelay.sendToCti Apex method, which POSTs the
+   * selection to services/cti-api's handoff relay endpoint. See the
+   * class-level comment and README.md for the full setup (Named Credential,
+   * shared secret) this depends on.
    */
-  sendToCti() {
+  async sendToCtiRelay() {
     this.lastError = undefined;
-    const payload = {
-      type: 'POWER_DIAL',
-      objectType: this.objectApiName,
-      recordIds: this.resolvedRecordIds,
-    };
     this.sending = true;
     try {
-      window.postMessage(payload, '*');
+      await sendToCti({
+        objectApiName: this.objectApiName,
+        recordIds: this.resolvedRecordIds,
+      });
+      this.dispatchEvent(
+        new ShowToastEvent({
+          title: 'Power Dial started',
+          message: `Sent ${this.recordCount} ${this.objectApiName} record(s) to your CTI softphone.`,
+          variant: 'success',
+        })
+      );
     } catch (err) {
-      this.lastError = err instanceof Error ? err.message : 'Unknown error sending the POWER_DIAL message.';
+      this.lastError = this.extractErrorMessage(err);
+      this.dispatchEvent(
+        new ShowToastEvent({
+          title: 'Power Dial failed',
+          message: this.lastError,
+          variant: 'error',
+        })
+      );
     } finally {
       this.sending = false;
     }
+  }
+
+  /** Normalizes an Apex/AuraHandledException error shape into a display string. */
+  extractErrorMessage(err) {
+    if (err && err.body && typeof err.body.message === 'string') {
+      return err.body.message;
+    }
+    if (err instanceof Error) {
+      return err.message;
+    }
+    return 'Unknown error sending the record ids to the CTI power dialer.';
   }
 }
