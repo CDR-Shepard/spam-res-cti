@@ -87,7 +87,7 @@ function fakeClient(): { client: TwilioDialerClient; createCalls: Record<string,
 }
 
 describe('TwilioDialerTelephony.originate', () => {
-  it('builds calls.create args with async AMD, recording, and the right callback URLs', async () => {
+  it('builds calls.create args with async AMD and the right callback URLs, without recording the screening leg', async () => {
     const { client, createCalls } = fakeClient();
     const telephony = new TwilioDialerTelephony(() => client);
 
@@ -107,7 +107,7 @@ describe('TwilioDialerTelephony.originate', () => {
     expect(args.machineDetection).toBe('Enable');
     expect(args.asyncAmd).toBe('true');
     expect(args.asyncAmdStatusCallbackMethod).toBe('POST');
-    expect(args.record).toBe(true);
+    expect(args).not.toHaveProperty('record');
     expect(args.statusCallbackEvent).toEqual(['completed']);
     expect(String(args.asyncAmdStatusCallback)).toContain('/telephony/twilio/dialer-amd?itemId=item-1');
     expect(String(args.url)).toContain('/telephony/twilio/dialer-answer');

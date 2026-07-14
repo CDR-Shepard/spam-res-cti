@@ -96,7 +96,7 @@ export class TwilioDialerTelephony implements DialerTelephony {
       url: `${cfg.API_PUBLIC_URL}/telephony/twilio/dialer-answer`,
       statusCallback: `${cfg.API_PUBLIC_URL}/telephony/twilio/dialer-status?itemId=${a.itemId}`,
       statusCallbackEvent: ['completed'],
-      record: true,
+      // NOTE: dialer recording is a separate, deliberate decision — the screening leg must NOT be recorded (prospect answers before a rep is present / disclosed to).
     } as never);
     return { callId: result.sid };
   }
