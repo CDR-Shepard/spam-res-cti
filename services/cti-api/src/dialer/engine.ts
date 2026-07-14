@@ -58,27 +58,50 @@ export async function advanceSession(
   }
 }
 
-/** Pause after any in-flight dial finishes; that dial itself is not interrupted. */
-export async function pauseSession(sessionId: string, deps: EngineDeps): Promise<{ action: 'paused' }> {
+/**
+ * Pause after any in-flight dial finishes; that dial itself is not interrupted.
+ * A stopped/done session is terminal and cannot be reactivated by pause.
+ */
+export async function pauseSession(sessionId: string, deps: EngineDeps): Promise<{ action: Session['status'] | 'idle' }> {
+  const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
+  if (!session) return { action: 'idle' };
+  if (session.status !== 'active') return { action: session.status };
   await setSession(deps, sessionId, 'paused');
   return { action: 'paused' };
 }
 
-/** Resume dialing and immediately try to advance the queue. */
-export async function resumeSession(sessionId: string, deps: EngineDeps): ReturnType<typeof advanceSession> {
+/**
+ * Resume dialing and immediately try to advance the queue.
+ * A stopped/done session is terminal and cannot be reactivated by resume.
+ */
+export async function resumeSession(
+  sessionId: string,
+  deps: EngineDeps,
+): Promise<ReturnType<typeof advanceSession> | { action: Session['status'] | 'idle' }> {
+  const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
+  if (!session) return { action: 'idle' };
+  if (session.status !== 'paused') return { action: session.status };
   await setSession(deps, sessionId, 'active');
   return advanceSession(sessionId, deps);
 }
 
 /**
- * Skip the in-flight item (rep chose not to wait/talk): hang up a still-dialing
- * call, mark the item skipped, then try to advance to the next item.
+ * Skip the in-flight item (rep chose not to wait/talk): hang up a live call
+ * regardless of whether it's still dialing or already connected (skipping a
+ * connected call without hanging up would leave it live while the next lead
+ * gets dialed), mark the item skipped, then try to advance to the next item.
  */
 export async function skipCurrent(sessionId: string, deps: EngineDeps): ReturnType<typeof advanceSession> {
   const items = await loadItems(deps, sessionId);
   const item = inFlightItem(items);
   if (item) {
-    if (item.status === 'dialing' && item.callId) await deps.telephony.hangup(item.callId);
+    if (item.callId) {
+      try {
+        await deps.telephony.hangup(item.callId);
+      } catch (err) {
+        console.error('[dialer] skip hangup failed', { itemId: item.id, err: (err as Error).message });
+      }
+    }
     await setItem(deps, item.id, { status: 'skipped' });
   }
   return advanceSession(sessionId, deps);

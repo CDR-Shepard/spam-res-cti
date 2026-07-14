@@ -9,7 +9,7 @@
  *  POST /dialer/sessions/:id/stop     → hang up + stop the session outright
  *  POST /dialer/sessions/:id/next     → rep-initiated "next" after a connected call
  */
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
@@ -53,6 +53,33 @@ async function loadOwnedSession(
   });
 }
 
+type AuthedUser = NonNullable<Awaited<ReturnType<typeof resolveSession>>>;
+
+/**
+ * Shared auth + ownership gate for the `/dialer/sessions/:id*` routes: resolves
+ * the bearer session, loads the `:id` session scoped to that caller, and sends
+ * the 401/404 itself on failure. Returns null when the caller should stop
+ * (the reply has already been sent); otherwise returns the resolved pieces.
+ */
+async function requireOwnedSession(
+  req: FastifyRequest,
+  reply: FastifyReply,
+): Promise<{ authed: AuthedUser; session: typeof schema.dialerSessions.$inferSelect } | null> {
+  const authed = await resolveSession(req.headers.authorization);
+  if (!authed) {
+    await reply.code(401).send({ error: 'Unauthorized' });
+    return null;
+  }
+  const id = (req.params as { id: string }).id;
+  const db = getDb();
+  const session = await loadOwnedSession(db, id, authed.userId);
+  if (!session) {
+    await reply.code(404).send({ error: 'Not found' });
+    return null;
+  }
+  return { authed, session };
+}
+
 export async function registerDialerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/dialer/sessions', async (req, reply) => {
     const authed = await resolveSession(req.headers.authorization);
@@ -74,68 +101,46 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
   });
 
   app.get('/dialer/sessions/:id', async (req, reply) => {
-    const authed = await resolveSession(req.headers.authorization);
-    if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
-    const id = (req.params as { id: string }).id;
+    const owned = await requireOwnedSession(req, reply);
+    if (!owned) return;
+    const { session } = owned;
     const db = getDb();
-    const session = await loadOwnedSession(db, id, authed.userId);
-    if (!session) return reply.code(404).send({ error: 'Not found' });
-    const items = await db.query.dialerQueueItems.findMany({ where: eq(schema.dialerQueueItems.sessionId, id) });
+    const items = await db.query.dialerQueueItems.findMany({ where: eq(schema.dialerQueueItems.sessionId, session.id) });
     return { session, counts: sessionCounts(items), currentItem: inFlightItem(items) };
   });
 
   app.post('/dialer/sessions/:id/pause', async (req, reply) => {
-    const authed = await resolveSession(req.headers.authorization);
-    if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
-    const id = (req.params as { id: string }).id;
-    const db = getDb();
-    const session = await loadOwnedSession(db, id, authed.userId);
-    if (!session) return reply.code(404).send({ error: 'Not found' });
-    const result = await pauseSession(id, buildEngineDeps());
+    const owned = await requireOwnedSession(req, reply);
+    if (!owned) return;
+    const result = await pauseSession(owned.session.id, buildEngineDeps());
     return { ok: true, ...result };
   });
 
   app.post('/dialer/sessions/:id/resume', async (req, reply) => {
-    const authed = await resolveSession(req.headers.authorization);
-    if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
-    const id = (req.params as { id: string }).id;
-    const db = getDb();
-    const session = await loadOwnedSession(db, id, authed.userId);
-    if (!session) return reply.code(404).send({ error: 'Not found' });
-    const result = await resumeSession(id, buildEngineDeps());
+    const owned = await requireOwnedSession(req, reply);
+    if (!owned) return;
+    const result = await resumeSession(owned.session.id, buildEngineDeps());
     return { ok: true, ...result };
   });
 
   app.post('/dialer/sessions/:id/skip', async (req, reply) => {
-    const authed = await resolveSession(req.headers.authorization);
-    if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
-    const id = (req.params as { id: string }).id;
-    const db = getDb();
-    const session = await loadOwnedSession(db, id, authed.userId);
-    if (!session) return reply.code(404).send({ error: 'Not found' });
-    const result = await skipCurrent(id, buildEngineDeps());
+    const owned = await requireOwnedSession(req, reply);
+    if (!owned) return;
+    const result = await skipCurrent(owned.session.id, buildEngineDeps());
     return { ok: true, ...result };
   });
 
   app.post('/dialer/sessions/:id/stop', async (req, reply) => {
-    const authed = await resolveSession(req.headers.authorization);
-    if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
-    const id = (req.params as { id: string }).id;
-    const db = getDb();
-    const session = await loadOwnedSession(db, id, authed.userId);
-    if (!session) return reply.code(404).send({ error: 'Not found' });
-    const result = await stopSession(id, buildEngineDeps());
+    const owned = await requireOwnedSession(req, reply);
+    if (!owned) return;
+    const result = await stopSession(owned.session.id, buildEngineDeps());
     return { ok: true, ...result };
   });
 
   app.post('/dialer/sessions/:id/next', async (req, reply) => {
-    const authed = await resolveSession(req.headers.authorization);
-    if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
-    const id = (req.params as { id: string }).id;
-    const db = getDb();
-    const session = await loadOwnedSession(db, id, authed.userId);
-    if (!session) return reply.code(404).send({ error: 'Not found' });
-    const result = await repNext(id, buildEngineDeps());
+    const owned = await requireOwnedSession(req, reply);
+    if (!owned) return;
+    const result = await repNext(owned.session.id, buildEngineDeps());
     return { ok: true, ...result };
   });
 }

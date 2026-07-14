@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { schema } from '../db/index.js';
 
 // In-memory fake DB: enough of the drizzle surface the engine uses.
 //
@@ -18,14 +19,27 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // `update(table).set(patch).where(...)`, in call order, so tests can assert
 // on the actual DB transitions the engine makes (not just its telephony /
 // rollover / screen-pop side effects).
+//
+// Adjustment 3 (test hardening for the pause/resume status guards): those
+// guards re-load the session from the DB before deciding whether to act, and
+// `resumeSession` re-loads it again inside `advanceSession` after writing
+// `status: 'active'`. A fake that always hands back the original fixture
+// object would make that second read see the pre-resume status forever, so
+// `resumeSession`'s own write would never be visible to itself. Session
+// writes are now layered into a local `sessionOverride` (never mutating the
+// shared fixture object passed in — several describe blocks below reuse the
+// same `baseSession` reference, and mutating it in place would leak status
+// changes across unrelated tests) and merged on top of the fixture for every
+// `dialerSessions.findFirst` call, scoped to this one `fakeDb(...)` instance.
 function fakeDb(session: any, items: any[]) {
   const writes: Array<{ patch: Record<string, unknown> }> = [];
+  let sessionOverride: Record<string, unknown> = {};
   return {
     _session: session,
     _items: items,
     _writes: writes,
     query: {
-      dialerSessions: { findFirst: async () => session },
+      dialerSessions: { findFirst: async () => ({ ...session, ...sessionOverride }) },
       dialerQueueItems: {
         findMany: async () => items,
         findFirst: async () => items[0] ?? null,
@@ -37,6 +51,7 @@ function fakeDb(session: any, items: any[]) {
           where: async () => {
             writes.push({ patch });
             Object.assign(_target, patch);
+            if (_tbl === schema.dialerSessions) sessionOverride = { ...sessionOverride, ...patch };
           },
         }),
       };
@@ -143,17 +158,26 @@ describe('pauseSession', () => {
 describe('resumeSession', () => {
   beforeEach(() => { _target = {}; });
   it('sets the session active then advances (dials the next pending item)', async () => {
-    // Fixture session is already 'active' (like the advanceSession tests above) —
-    // the fake DB's findFirst returns the closed-over fixture, not a value
-    // mutated by an earlier write, so advanceSession's re-read must see 'active'
-    // for this test to exercise the dial path. The write assertion below still
-    // proves resumeSession itself issues the 'active' update.
+    // Resume only proceeds from 'paused' (the terminal-status guard below), and
+    // the fake DB's session write is now visible to the subsequent re-read
+    // inside advanceSession (see fakeDb's `sessionOverride`), so this exercises
+    // the real paused → active → dial transition end to end.
+    const pausedSession = { ...baseSession, status: 'paused' };
     const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
-    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const deps = makeDeps(); const fdb = fakeDb(pausedSession, items); deps.db = fdb;
     const r = await resumeSession('S1', deps);
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'active' }) });
     expect(r.action).toBe('dialing');
     expect(deps.telephony.originate).toHaveBeenCalled();
+  });
+  it('does not reactivate a stopped session (terminal status guard)', async () => {
+    const stoppedSession = { ...baseSession, status: 'stopped' };
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps(); const fdb = fakeDb(stoppedSession, items); deps.db = fdb;
+    const r = await resumeSession('S1', deps);
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'active' }) });
+    expect(r).toEqual({ action: 'stopped' });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
   });
 });
 
@@ -168,6 +192,19 @@ describe('skipCurrent', () => {
     // advanceSession re-reads items via findMany, which the fake ignores filters
     // for and returns the same fixture (still 'dialing' in the fixture array) —
     // it still exercises the advance call without erroring.
+    expect(r).toBeDefined();
+  });
+  it('hangs up a connected (already-bridged) item too, marks it skipped, then advances', async () => {
+    // Regression test: skipping a *connected* call used to only mark it
+    // skipped without hanging up (the old guard was `status === 'dialing'`),
+    // leaving the live call up while advanceSession dialed the next lead —
+    // two simultaneous live calls. Skip must hang up on any callId, dialing
+    // or connected.
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await skipCurrent('S1', deps);
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped' }) });
     expect(r).toBeDefined();
   });
   it('is a no-op skip (still advances) when nothing is in flight', async () => {
