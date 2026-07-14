@@ -11,7 +11,7 @@ import { RecentCalls } from './components/RecentCalls';
 import { ReputationPanel } from './components/ReputationPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
-import { startDialer, type DialerObjectType } from './dialer-api';
+import { getPendingHandoff, startDialer, type DialerObjectType } from './dialer-api';
 import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
 import {
@@ -559,6 +559,31 @@ export function App(): JSX.Element {
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
   }, [startPowerDial]);
+
+  // Primary handoff intake: poll the server for a pending Salesforce→CTI
+  // handoff (relayed by Apex — see docs/superpowers/plans/2026-07-14-power-dialer-5-handoff-relay.md)
+  // and auto-start it via the existing startPowerDial. Only while signed in AND
+  // no dialer session is already active, so a poll tick can never clobber a live
+  // run; the effect re-runs (and its cleanup clears the interval) the instant a
+  // session becomes active or the app signs out. Poll errors are swallowed —
+  // never crash, just keep trying next tick. The POWER_DIAL postMessage listener
+  // above stays as-is (harmless secondary path / test seam).
+  useEffect(() => {
+    if (!signedIn || dialerSessionId !== null) return;
+    let cancelled = false;
+    const poll = async (): Promise<void> => {
+      try {
+        const { handoff } = await getPendingHandoff();
+        if (cancelled || !handoff) return;
+        void startPowerDial(handoff.objectType, handoff.recordIds);
+      } catch {
+        // best-effort — keep polling
+      }
+    };
+    void poll();
+    const id = window.setInterval(() => void poll(), 5000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [signedIn, dialerSessionId, startPowerDial]);
 
   // Reopen a still-un-dispositioned call's wrap-up, rehydrated from the server so
   // it isn't blank or mislabeled. No recordId is set: the backend already holds

@@ -33,6 +33,11 @@ export interface DialerSessionView {
 export type DialerControlAction = 'pause' | 'resume' | 'skip' | 'stop' | 'next';
 export type DialerObjectType = 'Lead' | 'Opportunity';
 
+export interface PendingHandoff {
+  objectType: DialerObjectType;
+  recordIds: string[];
+}
+
 // Pure builder functions
 export function dialerControlPath(id: string, action: DialerControlAction): string {
   return `/dialer/sessions/${id}/${action}`;
@@ -65,5 +70,14 @@ export async function dialerControl(
 ): Promise<{ ok: boolean }> {
   return api(dialerControlPath(id, action), {
     method: 'POST'
+  });
+}
+
+// Polled by App.tsx while signed in and no dialer session is active — a
+// non-null handoff means Salesforce Apex relayed a Power Dial start for this
+// rep (see services/cti-api routes/dialer.ts GET /dialer/handoffs/pending).
+export async function getPendingHandoff(): Promise<{ handoff: PendingHandoff | null }> {
+  return api('/dialer/handoffs/pending', {
+    method: 'GET'
   });
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { dialerControlPath, startBody, startDialer, getDialer, dialerControl } from './dialer-api';
+import { dialerControlPath, startBody, startDialer, getDialer, dialerControl, getPendingHandoff } from './dialer-api';
 import * as apiModule from './api';
 
 describe('dialer-api path/body builders', () => {
@@ -52,5 +52,26 @@ describe('dialer-api async functions', () => {
       method: 'POST'
     });
     expect(result).toEqual({ ok: true });
+  });
+
+  it('getPendingHandoff calls api with GET to /dialer/handoffs/pending', async () => {
+    const mockApi = vi.spyOn(apiModule, 'api').mockResolvedValue({
+      handoff: { objectType: 'Lead', recordIds: ['00Q1'] }
+    });
+
+    const result = await getPendingHandoff();
+
+    expect(mockApi).toHaveBeenCalledWith('/dialer/handoffs/pending', {
+      method: 'GET'
+    });
+    expect(result).toEqual({ handoff: { objectType: 'Lead', recordIds: ['00Q1'] } });
+  });
+
+  it('getPendingHandoff returns a null handoff as-is', async () => {
+    vi.spyOn(apiModule, 'api').mockResolvedValue({ handoff: null });
+
+    const result = await getPendingHandoff();
+
+    expect(result).toEqual({ handoff: null });
   });
 });
