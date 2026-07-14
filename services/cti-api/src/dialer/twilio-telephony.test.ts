@@ -39,21 +39,31 @@ describe('conferenceName', () => {
 });
 
 describe('bridgeTwiml', () => {
-  it('produces the exact <Dial><Conference> TwiML with the right attributes and conference name', () => {
-    const xml = bridgeTwiml('abc12345-6789-4def-a012-3456789abcde');
+  it('endOnExit=true (rep leg) produces the exact <Dial><Conference> TwiML with endConferenceOnExit="true"', () => {
+    const xml = bridgeTwiml('abc12345-6789-4def-a012-3456789abcde', true);
     expect(xml).toBe(
       '<?xml version="1.0" encoding="UTF-8"?><Response><Dial>' +
         '<Conference startConferenceOnEnter="true" endConferenceOnExit="true">pd_abc1234567894defa0123456789abcde</Conference>' +
         '</Dial></Response>',
     );
   });
+
+  it('endOnExit=false (prospect leg) produces the exact <Dial><Conference> TwiML with endConferenceOnExit="false", same conference name', () => {
+    const xml = bridgeTwiml('abc12345-6789-4def-a012-3456789abcde', false);
+    expect(xml).toBe(
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Dial>' +
+        '<Conference startConferenceOnEnter="true" endConferenceOnExit="false">pd_abc1234567894defa0123456789abcde</Conference>' +
+        '</Dial></Response>',
+    );
+  });
 });
 
 describe('dialerConferenceTwiml', () => {
-  it('valid rep identity → conference TwiML', () => {
+  it('valid rep identity → conference TwiML with endConferenceOnExit="true" (rep leaving ends the run)', () => {
     const t = dialerConferenceTwiml('client:rep_abc123');
     expect(t).toContain('pd_abc123');
     expect(t).toContain('<Conference');
+    expect(t).toContain('endConferenceOnExit="true"');
   });
 
   it('missing/malformed From → null', () => {
@@ -131,14 +141,20 @@ describe('TwilioDialerTelephony.originate', () => {
 });
 
 describe('TwilioDialerTelephony.bridgeToRep', () => {
-  it('updates the call with the bridge TwiML for the given user', async () => {
+  it('updates the call with the bridge TwiML for the given user, with endConferenceOnExit="false" so a prospect hangup does not tear down the conference the rep is waiting in', async () => {
     const { client, updateCalls } = fakeClient();
     const telephony = new TwilioDialerTelephony(() => client);
     await telephony.bridgeToRep('CA1', 'user-1');
 
     expect(updateCalls).toHaveLength(1);
     expect(updateCalls[0]!.callId).toBe('CA1');
-    expect(updateCalls[0]!.args.twiml).toBe(bridgeTwiml('user-1'));
+    const twiml = updateCalls[0]!.args.twiml as string;
+    expect(twiml).toBe(bridgeTwiml('user-1', false));
+    expect(twiml).toContain('endConferenceOnExit="false"');
+    // Same conference name (via conferenceName) as the rep's own join leg —
+    // dialerConferenceTwiml derives its conference from the same helper, so a
+    // rep joined on `pd_user1` is bridged into by this exact prospect leg.
+    expect(twiml).toContain(`>${conferenceName('user-1')}<`);
   });
 });
 
