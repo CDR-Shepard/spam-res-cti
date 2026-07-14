@@ -53,6 +53,14 @@ export function bridgeTwiml(userId: string): string {
   return twiml.toString();
 }
 
+/** The bridge TwiML for a rep joining their own dialer conference, derived from
+ *  Twilio's signed `From: client:rep_<id>` field. Returns null when From isn't a
+ *  valid rep-client identity (caller should render an error instead). */
+export function dialerConferenceTwiml(from: string): string | null {
+  const m = /^client:rep_([0-9a-f]+)$/i.exec(from);
+  return m ? bridgeTwiml(m[1]!) : null;
+}
+
 export class TwilioDialerTelephony implements DialerTelephony {
   constructor(
     private clientFactory: () => TwilioDialerClient = () => {

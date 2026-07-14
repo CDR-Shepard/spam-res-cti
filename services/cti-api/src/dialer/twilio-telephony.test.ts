@@ -13,7 +13,7 @@ vi.mock('../config.js', () => ({
   }),
 }));
 
-import { bridgeTwiml, conferenceName, TwilioDialerTelephony, type TwilioDialerClient } from './twilio-telephony.js';
+import { bridgeTwiml, conferenceName, dialerConferenceTwiml, TwilioDialerTelephony, type TwilioDialerClient } from './twilio-telephony.js';
 
 // ---------------------------------------------------------------------------
 // conferenceName / bridgeTwiml — pure
@@ -46,6 +46,20 @@ describe('bridgeTwiml', () => {
         '<Conference startConferenceOnEnter="true" endConferenceOnExit="true">pd_abc1234567894defa0123456789abcde</Conference>' +
         '</Dial></Response>',
     );
+  });
+});
+
+describe('dialerConferenceTwiml', () => {
+  it('valid rep identity → conference TwiML', () => {
+    const t = dialerConferenceTwiml('client:rep_abc123');
+    expect(t).toContain('pd_abc123');
+    expect(t).toContain('<Conference');
+  });
+
+  it('missing/malformed From → null', () => {
+    expect(dialerConferenceTwiml('')).toBeNull();
+    expect(dialerConferenceTwiml('+16195551234')).toBeNull();
+    expect(dialerConferenceTwiml('client:rep_XYZ!')).toBeNull();
   });
 });
 

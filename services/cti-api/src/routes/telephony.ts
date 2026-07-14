@@ -20,14 +20,8 @@ import {
   TWILIO_RECORDING_MEDIA_RE,
   signedCallbackUrl,
 } from '../telephony/webhooks.js';
-import { bridgeTwiml } from '../dialer/twilio-telephony.js';
+import { bridgeTwiml, dialerConferenceTwiml } from '../dialer/twilio-telephony.js';
 
-/** Matches the `client:rep_<userId-with-dashes-stripped>` identity Twilio's
- *  Voice SDK stamps into the `From` field for a call placed by a registered
- *  Client (see `/telephony/token`'s `identity: rep_${userId.replace(/-/g,'')}`).
- *  This is signed/attested by Twilio, not client-supplied — a rep's browser
- *  cannot forge another rep's identity here. */
-const REP_CLIENT_FROM_RE = /^client:rep_([0-9a-f]+)$/i;
 
 export async function registerTelephonyRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
@@ -75,14 +69,14 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     // not from anything the client supplies, so a rep can only join their own
     // conference.
     if (body.DialerConference) {
-      const match = REP_CLIENT_FROM_RE.exec(body.From ?? '');
-      if (!match) {
+      const twiml = dialerConferenceTwiml(body.From ?? '');
+      if (!twiml) {
         const VoiceResponse = twilio.twiml.VoiceResponse;
-        const twiml = new VoiceResponse();
-        twiml.say('Unable to identify rep for the dialer conference.');
-        return reply.type('text/xml').send(twiml.toString());
+        const response = new VoiceResponse();
+        response.say('Unable to identify rep for the dialer conference.');
+        return reply.type('text/xml').send(response.toString());
       }
-      return reply.type('text/xml').send(bridgeTwiml(match[1]!));
+      return reply.type('text/xml').send(twiml);
     }
 
     const callId = body.CallId ?? '';
