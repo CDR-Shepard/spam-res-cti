@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { getDb, schema } from '../db/index.js';
 import type { DialerItem } from './session-store.js';
 import { inFlightItem, nextPendingItem } from './state.js';
@@ -49,11 +49,35 @@ export async function advanceSession(
     const pool = await deps.dialerPoolNumbers(session.orgId);
     const did = pool[0];
     if (!did) { await setSession(deps, sessionId, 'paused'); return { action: 'paused_no_numbers' }; }
-    await setItem(deps, next.id, { status: 'dialing' });
-    const { callId } = await deps.telephony.originate({
-      sessionId, itemId: next.id, fromE164: did.e164, toE164: next.toNumber, userId: session.userId,
+
+    // Two reps' concurrent advances (or a retry racing the original call) could
+    // both read the same `next` pending item before either writes. Hold a
+    // per-session advisory lock for the duration of the claim so only one
+    // transaction can win, then atomically flip pending -> dialing: if the
+    // conditional UPDATE affects 0 rows, someone else already claimed this
+    // item (or it moved on) and we back off rather than double-dial it.
+    const claimed = await deps.db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${sessionId}))`);
+      const rows = await tx
+        .update(schema.dialerQueueItems)
+        .set({ status: 'dialing', updatedAt: new Date() })
+        .where(and(eq(schema.dialerQueueItems.id, next.id), eq(schema.dialerQueueItems.status, 'pending')))
+        .returning({ id: schema.dialerQueueItems.id });
+      return rows.length > 0;
     });
-    await setItem(deps, next.id, { callId });
+    if (!claimed) return { action: 'waiting' };
+
+    let callId: string;
+    try {
+      ({ callId } = await deps.telephony.originate({
+        sessionId, itemId: next.id, fromE164: did.e164, toE164: next.toNumber, userId: session.userId,
+      }));
+    } catch (err) {
+      // Roll the item back so a transient originate failure doesn't strand it 'dialing'.
+      await setItem(deps, next.id, { status: 'pending' });
+      throw err;
+    }
+    await setItem(deps, next.id, { callId, fromNumber: did.e164 });
     return { action: 'dialing', itemId: next.id };
   }
 }

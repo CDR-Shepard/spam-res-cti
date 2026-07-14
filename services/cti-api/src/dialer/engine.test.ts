@@ -31,9 +31,27 @@ import { schema } from '../db/index.js';
 // same `baseSession` reference, and mutating it in place would leak status
 // changes across unrelated tests) and merged on top of the fixture for every
 // `dialerSessions.findFirst` call, scoped to this one `fakeDb(...)` instance.
-function fakeDb(session: any, items: any[]) {
+//
+// Adjustment 4 (concurrency-safe advance): `advanceSession` now claims the
+// next item inside `deps.db.transaction(async (tx) => ...)`, where `tx`
+// exposes `.execute(sql)` (the advisory lock statement — the fake just
+// no-ops it) and `.update(...).set(...).where(...).returning(...)` (the
+// conditional pending -> dialing claim). The fake's `transaction()` hands the
+// callback a `tx` whose `update().set().where().returning()` pushes onto the
+// same shared `_writes` array as the outer (non-transactional) `update()` —
+// this is what "dialing" now goes through, so the pre-existing assertion
+// `_writes` contains a `status: 'dialing'` patch stays meaningful instead of
+// silently passing for the wrong reason. `returning()` resolves to a single
+// claimed row by default (claim succeeds), matching every existing test's
+// single-pending-item fixtures. The new `claimReturnsRows: false` option
+// (3rd `fakeDb` arg) makes it resolve to `[]` instead — simulating a
+// concurrent claimant winning the race — without writing anything, matching
+// real Postgres `UPDATE ... WHERE status = 'pending' RETURNING id` semantics
+// when 0 rows match.
+function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean } = {}) {
   const writes: Array<{ patch: Record<string, unknown> }> = [];
   let sessionOverride: Record<string, unknown> = {};
+  const claimReturnsRows = opts.claimReturnsRows ?? true;
   return {
     _session: session,
     _items: items,
@@ -55,6 +73,26 @@ function fakeDb(session: any, items: any[]) {
           },
         }),
       };
+    },
+    async transaction(fn: (tx: any) => Promise<any>) {
+      const tx = {
+        execute: async () => undefined, // pg_advisory_xact_lock(...) — no-op in the fake
+        update(_tbl: unknown) {
+          return {
+            set: (patch: any) => ({
+              where: () => ({
+                returning: async () => {
+                  if (!claimReturnsRows) return [];
+                  writes.push({ patch });
+                  Object.assign(_target, patch);
+                  return [{ id: 'claimed' }];
+                },
+              }),
+            }),
+          };
+        },
+      };
+      return fn(tx);
     },
   } as any;
 }
@@ -93,7 +131,7 @@ describe('advanceSession', () => {
     expect(r.action).toBe('dialing');
     expect((deps.telephony.originate as any)).toHaveBeenCalledWith(expect.objectContaining({ toE164: '+16195550100', fromE164: '+16190000000' }));
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'dialing' }) });
-    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ callId: 'CA1' }) });
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ callId: 'CA1', fromNumber: '+16190000000' }) });
   });
   it('waits (does not dial) while an item is in flight', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
@@ -120,6 +158,34 @@ describe('advanceSession', () => {
     expect(r.action).toBe('paused_no_numbers');
     expect(deps.telephony.originate).not.toHaveBeenCalled();
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'paused' }) });
+  });
+  it('returns "waiting" without dialing when the atomic claim loses the race (0 rows updated)', async () => {
+    // Simulates a second concurrent advance (or a retry) claiming the same
+    // item first: the conditional `UPDATE ... WHERE status = 'pending'
+    // RETURNING id` inside the per-session-locked transaction affects 0 rows,
+    // so this call must back off instead of dialing a lead someone else is
+    // already dialing.
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps();
+    const fdb = fakeDb(baseSession, items, { claimReturnsRows: false });
+    deps.db = fdb;
+    const r = await advanceSession('S1', deps);
+    expect(r).toEqual({ action: 'waiting' });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'dialing' }) });
+  });
+  it('rolls the item back to pending (and rethrows) when originate fails after the claim succeeds', async () => {
+    // A transient originate failure (Twilio 5xx, network blip) must not strand
+    // the item 'dialing' forever with no call in flight — that would wedge
+    // the whole session (inFlightItem would keep matching it) with no way to
+    // retry. The claim already committed 'dialing' via the transaction, so
+    // the rollback is a follow-up write back to 'pending'.
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps({ telephony: { originate: vi.fn(async () => { throw new Error('twilio 500'); }), bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}) } });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await expect(advanceSession('S1', deps)).rejects.toThrow('twilio 500');
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'dialing' }) }); // claim landed
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'pending' }) }); // then rolled back
   });
 });
 
