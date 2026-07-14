@@ -45,7 +45,16 @@ function fakeDb(session: any, items: any[]) {
 }
 let _target: any = {};
 
-import { advanceSession, handleDialOutcome, type EngineDeps } from './engine.js';
+import {
+  advanceSession,
+  handleDialOutcome,
+  pauseSession,
+  resumeSession,
+  skipCurrent,
+  stopSession,
+  repNext,
+  type EngineDeps,
+} from './engine.js';
 
 const baseSession = { id: 'S1', orgId: 'O1', userId: 'U1', sfOwnerId: '005', objectType: 'Lead', status: 'active' };
 function makeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
@@ -116,5 +125,94 @@ describe('handleDialOutcome', () => {
     expect(deps.onScreenPop).toHaveBeenCalledWith('U1', 'Lead', '00Q1');
     expect(deps.rolloverFollowUp).not.toHaveBeenCalled();
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'connected' }) });
+  });
+});
+
+describe('pauseSession', () => {
+  beforeEach(() => { _target = {}; });
+  it('sets the session paused and does not touch items', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await pauseSession('S1', deps);
+    expect(r).toEqual({ action: 'paused' });
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'paused' }) });
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+});
+
+describe('resumeSession', () => {
+  beforeEach(() => { _target = {}; });
+  it('sets the session active then advances (dials the next pending item)', async () => {
+    // Fixture session is already 'active' (like the advanceSession tests above) —
+    // the fake DB's findFirst returns the closed-over fixture, not a value
+    // mutated by an earlier write, so advanceSession's re-read must see 'active'
+    // for this test to exercise the dial path. The write assertion below still
+    // proves resumeSession itself issues the 'active' update.
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await resumeSession('S1', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'active' }) });
+    expect(r.action).toBe('dialing');
+    expect(deps.telephony.originate).toHaveBeenCalled();
+  });
+});
+
+describe('skipCurrent', () => {
+  beforeEach(() => { _target = {}; });
+  it('hangs up a dialing item, marks it skipped, then advances', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await skipCurrent('S1', deps);
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped' }) });
+    // advanceSession re-reads items via findMany, which the fake ignores filters
+    // for and returns the same fixture (still 'dialing' in the fixture array) —
+    // it still exercises the advance call without erroring.
+    expect(r).toBeDefined();
+  });
+  it('is a no-op skip (still advances) when nothing is in flight', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await skipCurrent('S1', deps);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    expect(r.action).toBe('done');
+  });
+});
+
+describe('stopSession', () => {
+  beforeEach(() => { _target = {}; });
+  it('hangs up a dialing item and stops the session', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await stopSession('S1', deps);
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'stopped' }) });
+    expect(r).toEqual({ action: 'stopped' });
+  });
+  it('does not hang up a connected (already-bridged) item, but still stops', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await stopSession('S1', deps);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'stopped' }) });
+    expect(r).toEqual({ action: 'stopped' });
+  });
+});
+
+describe('repNext', () => {
+  beforeEach(() => { _target = {}; });
+  it('marks the connected item done, then advances', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await repNext('S1', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+    expect(r).toBeDefined();
+  });
+  it('leaves a still-dialing item alone (rep cannot next before connect)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await repNext('S1', deps);
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+    expect(r.action).toBe('waiting');
   });
 });

@@ -58,6 +58,49 @@ export async function advanceSession(
   }
 }
 
+/** Pause after any in-flight dial finishes; that dial itself is not interrupted. */
+export async function pauseSession(sessionId: string, deps: EngineDeps): Promise<{ action: 'paused' }> {
+  await setSession(deps, sessionId, 'paused');
+  return { action: 'paused' };
+}
+
+/** Resume dialing and immediately try to advance the queue. */
+export async function resumeSession(sessionId: string, deps: EngineDeps): ReturnType<typeof advanceSession> {
+  await setSession(deps, sessionId, 'active');
+  return advanceSession(sessionId, deps);
+}
+
+/**
+ * Skip the in-flight item (rep chose not to wait/talk): hang up a still-dialing
+ * call, mark the item skipped, then try to advance to the next item.
+ */
+export async function skipCurrent(sessionId: string, deps: EngineDeps): ReturnType<typeof advanceSession> {
+  const items = await loadItems(deps, sessionId);
+  const item = inFlightItem(items);
+  if (item) {
+    if (item.status === 'dialing' && item.callId) await deps.telephony.hangup(item.callId);
+    await setItem(deps, item.id, { status: 'skipped' });
+  }
+  return advanceSession(sessionId, deps);
+}
+
+/** Hang up any in-flight dial and stop the session outright. */
+export async function stopSession(sessionId: string, deps: EngineDeps): Promise<{ action: 'stopped' }> {
+  const items = await loadItems(deps, sessionId);
+  const item = inFlightItem(items);
+  if (item && item.status === 'dialing' && item.callId) await deps.telephony.hangup(item.callId);
+  await setSession(deps, sessionId, 'stopped');
+  return { action: 'stopped' };
+}
+
+/** The rep clicking "Next" after finishing a talk: close out the connected item, then advance. */
+export async function repNext(sessionId: string, deps: EngineDeps): ReturnType<typeof advanceSession> {
+  const items = await loadItems(deps, sessionId);
+  const item = inFlightItem(items);
+  if (item && item.status === 'connected') await setItem(deps, item.id, { status: 'done' });
+  return advanceSession(sessionId, deps);
+}
+
 export async function handleDialOutcome(
   callId: string,
   outcome: 'connected' | 'no_connect',
