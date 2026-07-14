@@ -24,6 +24,7 @@ import { findByPhone } from '../salesforce/client.js';
 import { enqueueSyncForCall } from '../salesforce/sync.js';
 import { normalize } from '../phone.js';
 import { sha256 } from '../crypto.js';
+import { stickyAgentForCaller } from '../dialer/sticky.js';
 import {
   UUID_RE,
   TWILIO_CALL_SID_RE,
@@ -175,6 +176,15 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
       }
     }
 
+    // Dialer-pool DIDs are shared (not owned by one rep), so they don't route
+    // by `assignedUserId` — instead by sticky caller->agent binding, set by
+    // the power dialer's engine when a call to this lead connected on this
+    // DID (see dialer/sticky.ts). Resolved before the `calls` insert below so
+    // `recordingDisclosurePlayed` reflects whether we're actually about to
+    // ring someone. Agent-kind DIDs are unaffected: this stays null for them.
+    const poolStickyAgentId =
+      owned.kind === 'dialer_pool' ? await stickyAgentForCaller(db, owned.orgId, normFrom, owned.e164) : null;
+
     // Insert the inbound call record so we can update with recording / transcript later.
     const [callRow] = await db
       .insert(schema.calls)
@@ -193,17 +203,55 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
         salesforceWhatId: matched?.whatId ?? null,
         inboundCallerMatched: !!matched,
         // The answered path (ring the rep) plays a recording disclosure below.
-        recordingDisclosurePlayed: cfg.TWILIO_RECORD_CALLS && !!owned.assignedUserId,
+        recordingDisclosurePlayed: cfg.TWILIO_RECORD_CALLS && !!(owned.assignedUserId || poolStickyAgentId),
       })
       .returning({ id: schema.calls.id });
     const callDbId = callRow!.id;
 
     const t = new twilio.twiml.VoiceResponse();
 
-    // Ring the assigned rep's softphone (the CTI) so they can answer the callback
-    // in the app. If they don't pick up or are offline, the dial-result handler
-    // falls back to voicemail. Unassigned reserve numbers go straight to voicemail.
-    if (owned.assignedUserId) {
+    // Dialer-pool DIDs: if the caller has a sticky agent on THIS pool DID,
+    // ring them so the callback reaches the rep the lead already spoke with;
+    // otherwise fall through to voicemail. Additive branch — the agent-kind
+    // DID routing below (assignedUserId) is unchanged.
+    if (owned.kind === 'dialer_pool') {
+      if (poolStickyAgentId) {
+        // All-party consent: the caller hears the disclosure before we bridge them
+        // to the rep and start recording.
+        if (cfg.TWILIO_RECORD_CALLS) {
+          t.say(
+            { voice: 'Polly.Joanna' as never },
+            'This call may be recorded for quality and training purposes.',
+          );
+        }
+        const dial = t.dial({
+          // Show the CALLER's number on the rep's softphone, not the DID, so the
+          // rep sees who's calling back.
+          callerId: normFrom || fromRaw || undefined,
+          timeout: 25,
+          answerOnBridge: true,
+          action: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/dial-result?callDbId=${encodeURIComponent(callDbId)}`,
+          method: 'POST',
+          ...(cfg.TWILIO_RECORD_CALLS
+            ? {
+                record: 'record-from-answer-dual',
+                recordingStatusCallback: `${cfg.API_PUBLIC_URL}/telephony/twilio/recording?callDbId=${encodeURIComponent(callDbId)}`,
+                recordingStatusCallbackEvent: ['completed'],
+                recordingStatusCallbackMethod: 'POST',
+              }
+            : {}),
+        } as never);
+        dial.client({}, clientIdentity(poolStickyAgentId));
+      } else {
+        const greeting =
+          (matched ? owned.inboundMatchedGreeting : owned.inboundGreeting) ??
+          defaultGreeting(!!matched, matched?.name ?? null);
+        appendVoicemail(t, cfg, owned, callDbId, greeting);
+      }
+    } else if (owned.assignedUserId) {
+      // Ring the assigned rep's softphone (the CTI) so they can answer the callback
+      // in the app. If they don't pick up or are offline, the dial-result handler
+      // falls back to voicemail. Unassigned reserve numbers go straight to voicemail.
       // All-party consent: the caller hears the disclosure before we bridge them
       // to the rep and start recording.
       if (cfg.TWILIO_RECORD_CALLS) {

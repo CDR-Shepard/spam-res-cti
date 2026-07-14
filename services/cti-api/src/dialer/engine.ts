@@ -5,6 +5,7 @@ import { inFlightItem, nextPendingItem } from './state.js';
 import type { DialerTelephony } from './telephony-port.js';
 import type { dialerPoolNumbers } from './pool.js';
 import type { rolloverFollowUp } from '../salesforce/followup.js';
+import { recordConnectSticky } from './sticky.js';
 
 export interface EngineDeps {
   db: ReturnType<typeof getDb>;
@@ -162,6 +163,21 @@ export async function handleDialOutcome(
   if (outcome === 'connected') {
     await deps.telephony.bridgeToRep(callId, session.userId);
     deps.onScreenPop(session.userId, item.objectType, item.recordId);
+    // Sticky-on-connect: remember this (org, rep, lead) -> pool DID binding so
+    // an inbound callback from the lead rings the same rep. Best-effort — a
+    // sticky write failure must never break an already-connected call.
+    if (item.toNumber && item.fromNumber) {
+      try {
+        await recordConnectSticky(deps.db, {
+          orgId: session.orgId,
+          userId: session.userId,
+          leadE164: item.toNumber,
+          poolDid: item.fromNumber,
+        });
+      } catch (err) {
+        console.error('[dialer] sticky upsert failed', { itemId: item.id, err: (err as Error).message });
+      }
+    }
     return; // wait for the rep's `next`
   }
   try {

@@ -50,18 +50,33 @@ import { schema } from '../db/index.js';
 // when 0 rows match.
 function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean } = {}) {
   const writes: Array<{ patch: Record<string, unknown> }> = [];
+  const inserts: Array<{ values: Record<string, unknown> }> = [];
   let sessionOverride: Record<string, unknown> = {};
   const claimReturnsRows = opts.claimReturnsRows ?? true;
   return {
     _session: session,
     _items: items,
     _writes: writes,
+    _inserts: inserts,
     query: {
       dialerSessions: { findFirst: async () => ({ ...session, ...sessionOverride }) },
       dialerQueueItems: {
         findMany: async () => items,
         findFirst: async () => items[0] ?? null,
       },
+    },
+    // Used by recordConnectSticky (dialer/sticky.ts) — the engine calls this
+    // directly (not through EngineDeps) on a connected outcome. Recording
+    // into `_inserts` lets tests assert the sticky upsert fires with the
+    // right values without pulling in a real DB.
+    insert(_tbl: unknown) {
+      return {
+        values: (values: any) => ({
+          onConflictDoUpdate: async () => {
+            inserts.push({ values });
+          },
+        }),
+      };
     },
     update(_tbl: unknown) {
       return {
@@ -206,6 +221,27 @@ describe('handleDialOutcome', () => {
     expect(deps.onScreenPop).toHaveBeenCalledWith('U1', 'Lead', '00Q1');
     expect(deps.rolloverFollowUp).not.toHaveBeenCalled();
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'connected' }) });
+  });
+  it('connected records a sticky (org, rep, lead) -> pool DID binding when both numbers are known', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fromNumber: '+16190000000', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(fdb._inserts).toContainEqual({
+      values: expect.objectContaining({
+        orgId: 'O1', assignedUserId: 'U1', recipientE164: '+16195550100', e164: '+16190000000',
+      }),
+    });
+  });
+  it('connected skips the sticky write when fromNumber is missing (guard against null)', async () => {
+    // fromNumber is only set once the engine claims a pool DID for the dial;
+    // if it's somehow absent, recordConnectSticky must not be called at all
+    // (rather than upserting a bogus e164) — this also proves the guard, not
+    // just a caught error, since the fake db's `insert` would otherwise
+    // record a call with an undefined e164.
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(fdb._inserts).toEqual([]);
   });
 });
 
