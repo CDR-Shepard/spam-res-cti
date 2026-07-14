@@ -72,27 +72,40 @@ export interface UpsertHandoffArgs {
  * Write a new 'pending' handoff for `args.salesforceUserId`, first deleting
  * any earlier pending row for that same rep — so a rep who double-clicks (or
  * whose prior run never got claimed) only ever has the latest selection live.
+ *
+ * Two concurrent `POST /dialer/handoffs` for the same rep (a double-click
+ * firing two Apex callouts, or an HTTP retry) could otherwise interleave the
+ * delete-then-insert of each request — both deletes see nothing to remove,
+ * both inserts land, and the rep ends up with two 'pending' rows instead of
+ * one. Guard against that the same way `advanceSession` guards concurrent
+ * claims in engine.ts: hold a per-rep Postgres advisory lock for the
+ * duration of a transaction wrapping the delete + insert, so only one
+ * request's supersede can run at a time and the loser sees the winner's
+ * delete before it inserts.
  */
 export async function upsertPendingHandoff(db: Db, args: UpsertHandoffArgs): Promise<{ handoffId: string }> {
-  await db
-    .delete(schema.dialerHandoffs)
-    .where(
-      and(
-        eq(schema.dialerHandoffs.salesforceUserId, args.salesforceUserId),
-        eq(schema.dialerHandoffs.status, 'pending'),
-      ),
-    );
-  const [row] = await db
-    .insert(schema.dialerHandoffs)
-    .values({
-      orgId: args.orgId,
-      salesforceUserId: args.salesforceUserId,
-      objectType: args.objectType,
-      recordIds: args.recordIds,
-      status: 'pending',
-    })
-    .returning();
-  return { handoffId: row!.id };
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${args.salesforceUserId}))`);
+    await tx
+      .delete(schema.dialerHandoffs)
+      .where(
+        and(
+          eq(schema.dialerHandoffs.salesforceUserId, args.salesforceUserId),
+          eq(schema.dialerHandoffs.status, 'pending'),
+        ),
+      );
+    const [row] = await tx
+      .insert(schema.dialerHandoffs)
+      .values({
+        orgId: args.orgId,
+        salesforceUserId: args.salesforceUserId,
+        objectType: args.objectType,
+        recordIds: args.recordIds,
+        status: 'pending',
+      })
+      .returning();
+    return { handoffId: row!.id };
+  });
 }
 
 export interface ClaimedHandoff {

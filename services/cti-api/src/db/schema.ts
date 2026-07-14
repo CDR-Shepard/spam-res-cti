@@ -262,6 +262,15 @@ export const dialerHandoffs = pgTable(
   },
   (t) => ({
     sfUserStatusIdx: index('dialer_handoffs_sfuser_status_idx').on(t.salesforceUserId, t.status),
+    /**
+     * Defense in depth alongside the advisory-lock-guarded supersede in
+     * upsertPendingHandoff (dialer/handoff-store.ts): Postgres itself refuses
+     * a second 'pending' row for the same rep, even if that transactional
+     * guard were ever bypassed or raced by an out-of-band writer.
+     */
+    onePendingPerRepIdx: uniqueIndex('dialer_handoffs_one_pending_per_rep')
+      .on(t.salesforceUserId)
+      .where(sql`${t.status} = 'pending'`),
   }),
 );
 
