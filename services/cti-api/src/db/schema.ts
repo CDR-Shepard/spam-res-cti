@@ -238,6 +238,33 @@ export const dialerQueueItems = pgTable(
   }),
 );
 
+/**
+ * Salesforce → CTI "Power Dial" handoff relay. SF Apex writes one 'pending'
+ * row per rep click (superseding any earlier pending row for that rep); the
+ * rep's CTI softphone atomically claims it (see dialer/handoff-store.ts) so
+ * the list-view button starts a run without the unreliable cross-iframe
+ * postMessage.
+ */
+export const dialerHandoffs = pgTable(
+  'dialer_handoffs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** Best-effort local org id, derived server-side from the rep's Salesforce
+     *  connection at write time. Nullable — the write path must still work
+     *  even when that lookup misses (e.g. a rep who hasn't connected yet). */
+    orgId: uuid('org_id'),
+    salesforceUserId: text('salesforce_user_id').notNull(),
+    objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity'
+    recordIds: jsonb('record_ids').notNull().$type<string[]>(),
+    status: text('status').default('pending').notNull(), // 'pending' | 'claimed'
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    claimedAt: timestamp('claimed_at', { withTimezone: true }),
+  },
+  (t) => ({
+    sfUserStatusIdx: index('dialer_handoffs_sfuser_status_idx').on(t.salesforceUserId, t.status),
+  }),
+);
+
 export const numberHealthSnapshots = pgTable('number_health_snapshots', {
   id: uuid('id').primaryKey().defaultRandom(),
   outboundNumberId: uuid('outbound_number_id')
@@ -572,3 +599,4 @@ export type Organization = typeof organizations.$inferSelect;
 export type OutboundNumber = typeof outboundNumbers.$inferSelect;
 export type CampaignConfig = typeof campaignConfigs.$inferSelect;
 export type SalesforceConnection = typeof salesforceConnections.$inferSelect;
+export type DialerHandoff = typeof dialerHandoffs.$inferSelect;

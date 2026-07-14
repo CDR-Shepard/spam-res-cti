@@ -14,6 +14,10 @@
  *  POST /telephony/twilio/dialer-answer → TwiML played while async AMD classifies
  *  POST /telephony/twilio/dialer-amd    → async AMD result → hangup machine/fax, else advance
  *  POST /telephony/twilio/dialer-status → terminal call status → no_connect (idempotent)
+ *
+ *  Salesforce → CTI handoff relay (see dialer/handoff-store.ts):
+ *  POST /dialer/handoffs         → SF Apex relays a list-view selection (shared-secret auth)
+ *  GET  /dialer/handoffs/pending → the rep's softphone atomically claims it (Bearer auth)
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq } from 'drizzle-orm';
@@ -41,6 +45,12 @@ import { mapAnsweredBy } from '../dialer/amd.js';
 import { rolloverFollowUp } from '../salesforce/followup.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
+import {
+  parseHandoffInput,
+  upsertPendingHandoff,
+  claimPendingHandoff,
+  constantTimeEqual,
+} from '../dialer/handoff-store.js';
 
 // The POST /dialer/sessions body schema — pinned by src/routes/dialer.test.ts.
 const StartBody = z.object({
@@ -225,6 +235,64 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     if (!owned) return;
     const result = await repNext(owned.session.id, buildEngineDeps());
     return { ok: true, ...result };
+  });
+
+  // ---------------------------------------------------------------------
+  // Salesforce → CTI handoff relay
+  // ---------------------------------------------------------------------
+
+  /**
+   * SF Apex relays a Power Dial list-view selection here. Auth is a shared
+   * secret (never a Bearer session — Apex has no rep session token), compared
+   * in constant time. If `HANDOFF_SHARED_SECRET` is unset the route is
+   * disabled outright (503) rather than ever accepting an unauthenticated
+   * write.
+   */
+  app.post('/dialer/handoffs', async (req, reply) => {
+    const secret = cfg.HANDOFF_SHARED_SECRET;
+    if (!secret) return reply.code(503).send({ error: 'handoff relay not configured' });
+    const provided = (req.headers['x-handoff-secret'] as string | undefined) ?? '';
+    if (!constantTimeEqual(provided, secret)) return reply.code(401).send({ error: 'Unauthorized' });
+
+    const parsed = parseHandoffInput(req.body);
+    if ('error' in parsed) return reply.code(400).send({ error: parsed.error });
+
+    const db = getDb();
+    // Best-effort local org derivation from the rep's Salesforce connection —
+    // salesforce_connections has no orgId column of its own (only the SF
+    // org's OWN id, sfOrgId); the local org lives on `users`, so resolve it
+    // via the connection's userId. Nullable: the write must still succeed
+    // when the lookup misses (e.g. a rep who hasn't connected yet).
+    const conn = await db.query.salesforceConnections.findFirst({
+      where: eq(schema.salesforceConnections.sfUserId, parsed.salesforceUserId),
+    });
+    const user = conn ? await db.query.users.findFirst({ where: eq(schema.users.id, conn.userId) }) : undefined;
+    const { handoffId } = await upsertPendingHandoff(db, {
+      orgId: user?.orgId ?? null,
+      salesforceUserId: parsed.salesforceUserId,
+      objectType: parsed.objectType,
+      recordIds: parsed.recordIds,
+    });
+    return { handoffId };
+  });
+
+  /**
+   * The rep's softphone polls this to auto-start a run. Bearer-authed like
+   * every other dialer route; the Salesforce user id is ALWAYS resolved
+   * server-side from the authed rep's own `salesforce_connections` row —
+   * never trust a client-supplied SF id here (no IDOR). Claim is atomic and
+   * one-shot: a second poll after a successful claim sees `{ handoff: null }`.
+   */
+  app.get('/dialer/handoffs/pending', async (req, reply) => {
+    const authed = await resolveSession(req.headers.authorization);
+    if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
+    const db = getDb();
+    const conn = await db.query.salesforceConnections.findFirst({
+      where: eq(schema.salesforceConnections.userId, authed.userId),
+    });
+    if (!conn?.sfUserId) return { handoff: null };
+    const handoff = await claimPendingHandoff(db, conn.sfUserId);
+    return { handoff };
   });
 
   /** Shared signature gate for the Twilio-facing dialer webhooks below — same
