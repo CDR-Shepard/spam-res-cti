@@ -142,10 +142,10 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  const runControl = useCallback((action: DialerControlAction) => {
-    if (!sessionId) return;
+  const runControl = useCallback((action: DialerControlAction): Promise<void> => {
+    if (!sessionId) return Promise.resolve();
     setControlBusy(true);
-    void dialerControl(sessionId, action)
+    return dialerControl(sessionId, action)
       .then(() => pollNowRef.current())
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : `Could not ${action} the run.`);
@@ -153,9 +153,15 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
       .finally(() => setControlBusy(false));
   }, [sessionId]);
 
+  // Await the stop control request BEFORE tearing down the parent's conference
+  // leg (onStop) — calling onStop first would drop the rep's conference leg
+  // even if the backend stop request hasn't gone out (or fails) yet. The Stop
+  // button stays disabled (controlBusy) for the duration of the await.
   const handleStop = useCallback(() => {
-    runControl('stop');
-    onStop();
+    void (async () => {
+      await runControl('stop');
+      onStop();
+    })();
   }, [runControl, onStop]);
 
   if (!sessionId) {
