@@ -126,7 +126,7 @@ public with sharing class PowerDialRelay {
   }
 
   public class FlowRequest {
-    @InvocableVariable(label='Selected record ids' required=true)
+    @InvocableVariable(label='Selected record ids')
     public List<String> ids;
   }
 
