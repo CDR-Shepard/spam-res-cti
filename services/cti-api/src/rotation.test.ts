@@ -143,6 +143,48 @@ describe('pickRotationNumber', () => {
     expect(await pickRotationNumber(fakeDb(rows, '+19998887777'), 'org', 'rep1', '+16195559999')).toBe('+16195550202');
   });
 
+  // Per-customer attempt budgets: a number that has hit maxAttemptsPerNumber for
+  // THIS customer is exhausted → rotation swaps to another of the rep's numbers.
+  it('swaps to a fresh number when the preferred one is exhausted for the customer', async () => {
+    const rows = [
+      row({ e164: '+16195550101', lastDialAt: new Date(0) }),    // LRU-first → would normally win
+      row({ e164: '+16195550202', lastDialAt: new Date(1000) }),
+    ];
+    const caps = { attemptsByNumber: new Map([['+16195550101', 5]]), maxAttemptsPerNumber: 5 };
+    expect(await pickRotationNumber(fakeDb(rows), 'org', 'rep1', '+16195559999', caps)).toBe('+16195550202');
+  });
+
+  it('does not swap while the preferred number is still under its per-customer budget', async () => {
+    const rows = [
+      row({ e164: '+16195550101', lastDialAt: new Date(0) }),
+      row({ e164: '+16195550202', lastDialAt: new Date(1000) }),
+    ];
+    const caps = { attemptsByNumber: new Map([['+16195550101', 4]]), maxAttemptsPerNumber: 5 };
+    expect(await pickRotationNumber(fakeDb(rows), 'org', 'rep1', '+16195559999', caps)).toBe('+16195550101');
+  });
+
+  it('overrides a sticky DID once it is exhausted for the customer (the swap)', async () => {
+    const rows = [row({ e164: '+16195550101' }), row({ e164: '+16195550202' })];
+    const caps = { attemptsByNumber: new Map([['+16195550101', 5]]), maxAttemptsPerNumber: 5 };
+    // Sticky is ...0101 but it's exhausted for this customer → fall through to ...0202.
+    expect(await pickRotationNumber(fakeDb(rows, '+16195550101'), 'org', 'rep1', '+16195559999', caps)).toBe('+16195550202');
+  });
+
+  it('keeps the sticky DID while it is still under its per-customer budget', async () => {
+    const rows = [row({ e164: '+16195550101' }), row({ e164: '+16195550202' })];
+    const caps = { attemptsByNumber: new Map([['+16195550101', 3]]), maxAttemptsPerNumber: 5 };
+    expect(await pickRotationNumber(fakeDb(rows, '+16195550101'), 'org', 'rep1', '+16195559999', caps)).toBe('+16195550101');
+  });
+
+  it('still returns a number when every DID is exhausted (firewall gate then blocks with a clear reason)', async () => {
+    const rows = [row({ e164: '+16195550101' }), row({ e164: '+16195550202' })];
+    const caps = {
+      attemptsByNumber: new Map([['+16195550101', 5], ['+16195550202', 5]]),
+      maxAttemptsPerNumber: 5,
+    };
+    expect(await pickRotationNumber(fakeDb(rows), 'org', 'rep1', '+16195559999', caps)).not.toBeNull();
+  });
+
   it('ignores the sticky DID when it is over its warmup cap today (falls back)', async () => {
     const rows = [
       row({ e164: '+16195550101', warmupOverrideCap: 5, dialsToday: 5 }),  // sticky but capped → ineligible

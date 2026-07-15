@@ -70,6 +70,8 @@ const REASON = {
   BLOCKED: 'BLOCKED_INTERNAL',
   ATTEMPT_LIMIT_OK: 'ATTEMPT_LIMIT_OK',
   ATTEMPT_LIMIT_EXCEEDED: 'ATTEMPT_LIMIT_EXCEEDED',
+  CUSTOMER_LIMIT_OK: 'CUSTOMER_LIMIT_OK',
+  CUSTOMER_LIMIT_EXCEEDED: 'CUSTOMER_LIMIT_EXCEEDED',
   CALLING_HOURS_OK: 'CALLING_HOURS_OK',
   OUTSIDE_CALLING_HOURS: 'OUTSIDE_CALLING_HOURS',
   CALLING_HOURS_UNKNOWN_TZ: 'CALLING_HOURS_UNKNOWN_TZ',
@@ -277,11 +279,16 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
     });
   }
 
-  // 5. Attempt limits — count recent attempted calls in window
+  // 5. Attempt limits. Contacts to this customer in the window, grouped by the
+  //    number that placed them. The per-NUMBER budget is enforced after the DID
+  //    is picked (gate 5b); the map here also drives the rotation swap below.
+  //    The per-CUSTOMER ceiling (across all numbers) is the harassment backstop.
+  const attemptsByNumber = new Map<string, number>();
+  let customerAttemptsTotal = 0;
   if (campaign) {
     const windowStart = new Date(Date.now() - campaign.attemptWindowDays * 24 * 3600 * 1000);
-    const countRow = await db
-      .select({ n: sql<number>`count(*)::int` })
+    const grouped = await db
+      .select({ from: schema.calls.fromNumber, n: sql<number>`count(*)::int` })
       .from(schema.calls)
       .where(
         and(
@@ -289,23 +296,27 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
           eq(schema.calls.normalizedToNumber, e164),
           gte(schema.calls.createdAt, windowStart),
         ),
-      );
-    const attempts = countRow[0]?.n ?? 0;
-    if (attempts >= campaign.maxAttempts) {
+      )
+      .groupBy(schema.calls.fromNumber);
+    for (const r of grouped) {
+      customerAttemptsTotal += r.n;
+      if (r.from) attemptsByNumber.set(r.from, r.n);
+    }
+    if (customerAttemptsTotal >= campaign.perCustomerMaxAttempts) {
       checks.push({
-        name: 'attempt_limit',
+        name: 'customer_limit',
         passed: false,
         severity: 'block',
-        reasonCode: REASON.ATTEMPT_LIMIT_EXCEEDED,
-        detail: `${attempts} attempts in last ${campaign.attemptWindowDays}d (limit ${campaign.maxAttempts})`,
+        reasonCode: REASON.CUSTOMER_LIMIT_EXCEEDED,
+        detail: `${customerAttemptsTotal} contacts to this customer across all numbers in ${campaign.attemptWindowDays}d (ceiling ${campaign.perCustomerMaxAttempts})`,
       });
     } else {
       checks.push({
-        name: 'attempt_limit',
+        name: 'customer_limit',
         passed: true,
         severity: 'info',
-        reasonCode: REASON.ATTEMPT_LIMIT_OK,
-        detail: `${attempts}/${campaign.maxAttempts} in last ${campaign.attemptWindowDays}d`,
+        reasonCode: REASON.CUSTOMER_LIMIT_OK,
+        detail: `${customerAttemptsTotal}/${campaign.perCustomerMaxAttempts} to this customer (all numbers) in ${campaign.attemptWindowDays}d`,
       });
     }
   }
@@ -359,7 +370,13 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
   let effectiveFrom = input.fromNumber ?? null;
   let fromAutoSelected = false;
   if (!effectiveFrom) {
-    effectiveFrom = await pickRotationNumber(db, input.orgId, input.userId, e164);
+    effectiveFrom = await pickRotationNumber(
+      db,
+      input.orgId,
+      input.userId,
+      e164,
+      campaign ? { attemptsByNumber, maxAttemptsPerNumber: campaign.maxAttempts } : undefined,
+    );
     fromAutoSelected = effectiveFrom != null;
   }
   let fromE164: string | null = null;
@@ -407,6 +424,31 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
         severity: 'info',
         reasonCode: REASON.OUTBOUND_NUMBER_HEALTHY,
         detail: `${outNum.e164} · ${outNum.health}${fromAutoSelected ? ' · rotation pick' : ''}`,
+      });
+    }
+  }
+
+  // 5b. Per-number attempt budget to this customer, now that the DID is chosen.
+  //     Rotation avoids exhausted numbers, so this normally passes; it hard-stops
+  //     when every one of the rep's numbers is exhausted for this customer (or a
+  //     specific over-budget number was forced in), with a clear reason.
+  if (campaign && effectiveFrom) {
+    const perNumber = attemptsByNumber.get(effectiveFrom) ?? 0;
+    if (perNumber >= campaign.maxAttempts) {
+      checks.push({
+        name: 'attempt_limit',
+        passed: false,
+        severity: 'block',
+        reasonCode: REASON.ATTEMPT_LIMIT_EXCEEDED,
+        detail: `${effectiveFrom} → this customer: ${perNumber} in ${campaign.attemptWindowDays}d (limit ${campaign.maxAttempts}/number; all your numbers may be exhausted for this customer)`,
+      });
+    } else {
+      checks.push({
+        name: 'attempt_limit',
+        passed: true,
+        severity: 'info',
+        reasonCode: REASON.ATTEMPT_LIMIT_OK,
+        detail: `${perNumber}/${campaign.maxAttempts} from this number to this customer in ${campaign.attemptWindowDays}d`,
       });
     }
   }

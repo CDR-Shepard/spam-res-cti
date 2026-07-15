@@ -517,6 +517,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         paused: z.boolean().optional(),
         maxAttempts: z.number().int().positive().optional(),
         attemptWindowDays: z.number().int().positive().optional(),
+        perCustomerMaxAttempts: z.number().int().positive().optional(),
         callingHoursStart: z.string().regex(/^\d{2}:\d{2}$/).optional(),
         callingHoursEnd: z.string().regex(/^\d{2}:\d{2}$/).optional(),
         callingDays: z.array(z.number().int().min(1).max(7)).optional(),
@@ -533,6 +534,9 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         ...(parsed.data.maxAttempts !== undefined ? { maxAttempts: parsed.data.maxAttempts } : {}),
         ...(parsed.data.attemptWindowDays !== undefined
           ? { attemptWindowDays: parsed.data.attemptWindowDays }
+          : {}),
+        ...(parsed.data.perCustomerMaxAttempts !== undefined
+          ? { perCustomerMaxAttempts: parsed.data.perCustomerMaxAttempts }
           : {}),
         ...(parsed.data.callingHoursStart ? { callingHoursStart: parsed.data.callingHoursStart } : {}),
         ...(parsed.data.callingHoursEnd ? { callingHoursEnd: parsed.data.callingHoursEnd } : {}),

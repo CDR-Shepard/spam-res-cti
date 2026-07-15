@@ -347,9 +347,16 @@ export const campaignConfigs = pgTable(
     key: text('key').notNull(),
     name: text('name').notNull(),
     paused: boolean('paused').default(false).notNull(),
-    /** Max attempts per target per rolling window (days) */
+    /** Max attempts to a target FROM A SINGLE NUMBER per rolling window (days).
+     *  When one of a rep's numbers hits this for a customer, the rotation swaps
+     *  to another of their numbers that's still under it (protects per-DID
+     *  reputation while letting the rep keep working the customer). */
     maxAttempts: integer('max_attempts').default(5).notNull(),
     attemptWindowDays: integer('attempt_window_days').default(14).notNull(),
+    /** Overall ceiling on contacts to one customer across ALL of a rep's numbers
+     *  in the same window — the anti-harassment / spam-complaint backstop that
+     *  per-number budgets alone don't provide. */
+    perCustomerMaxAttempts: integer('per_customer_max_attempts').default(15).notNull(),
     /** Allowed calling hours, recipient-local. Stored "HH:MM" */
     callingHoursStart: text('calling_hours_start').default('08:00').notNull(),
     callingHoursEnd: text('calling_hours_end').default('20:00').notNull(),
