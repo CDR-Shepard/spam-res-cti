@@ -43,6 +43,13 @@ export const numberHealthEnum = pgEnum('number_health', [
 
 export const syncStatusEnum = pgEnum('sync_status', ['pending', 'in_flight', 'succeeded', 'failed']);
 
+export const numberKindEnum = pgEnum('number_kind', ['agent', 'dialer_pool']);
+
+export const dialerSessionStatus = pgEnum('dialer_session_status', ['active', 'paused', 'stopped', 'done']);
+export const dialerItemStatus = pgEnum('dialer_item_status', [
+  'pending', 'dialing', 'connected', 'no_connect', 'skipped', 'unreachable', 'done',
+]);
+
 // =============================================================================
 // Core
 // =============================================================================
@@ -170,6 +177,10 @@ export const outboundNumbers = pgTable(
     /** Who last set `health`: 'numberverifier' | 'reputation_worker' |
      *  'analytics_block' | 'manual'. Drives safe auto-restore. */
     healthSource: text('health_source'),
+    /** 'agent' = a rep's own warm number (manual click-to-dial). 'dialer_pool' =
+     *  a shared number the power dialer uses for cold volume so agent numbers
+     *  aren't stained. */
+    kind: numberKindEnum('kind').default('agent').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     // Inbound auto-answer config (drives caller-reputation hygiene against
     // anti-spam reverse-call probes).
@@ -192,6 +203,74 @@ export const outboundNumbers = pgTable(
   },
   (t) => ({
     orgE164Unique: uniqueIndex('outbound_numbers_org_e164_unique').on(t.orgId, t.e164),
+  }),
+);
+
+export const dialerSessions = pgTable('dialer_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  /** The rep's Salesforce User Id — needed to own Tasks in the rollover. */
+  sfOwnerId: text('sf_owner_id').notNull(),
+  objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity'
+  status: dialerSessionStatus('status').default('active').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const dialerQueueItems = pgTable(
+  'dialer_queue_items',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    sessionId: uuid('session_id').notNull().references(() => dialerSessions.id, { onDelete: 'cascade' }),
+    ordinal: integer('ordinal').notNull(),
+    objectType: text('object_type').notNull(),
+    recordId: text('record_id').notNull(),
+    toNumber: text('to_number'), // resolved E.164, or null when unreachable
+    fromNumber: text('from_number'),
+    status: dialerItemStatus('status').default('pending').notNull(),
+    callId: text('call_id'),
+    outcome: text('outcome'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    callIdIdx: index('dialer_queue_items_call_id_idx').on(t.callId),
+  }),
+);
+
+/**
+ * Salesforce → CTI "Power Dial" handoff relay. SF Apex writes one 'pending'
+ * row per rep click (superseding any earlier pending row for that rep); the
+ * rep's CTI softphone atomically claims it (see dialer/handoff-store.ts) so
+ * the list-view button starts a run without the unreliable cross-iframe
+ * postMessage.
+ */
+export const dialerHandoffs = pgTable(
+  'dialer_handoffs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** Best-effort local org id, derived server-side from the rep's Salesforce
+     *  connection at write time. Nullable — the write path must still work
+     *  even when that lookup misses (e.g. a rep who hasn't connected yet). */
+    orgId: uuid('org_id'),
+    salesforceUserId: text('salesforce_user_id').notNull(),
+    objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity'
+    recordIds: jsonb('record_ids').notNull().$type<string[]>(),
+    status: text('status').default('pending').notNull(), // 'pending' | 'claimed'
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    claimedAt: timestamp('claimed_at', { withTimezone: true }),
+  },
+  (t) => ({
+    sfUserStatusIdx: index('dialer_handoffs_sfuser_status_idx').on(t.salesforceUserId, t.status),
+    /**
+     * Defense in depth alongside the advisory-lock-guarded supersede in
+     * upsertPendingHandoff (dialer/handoff-store.ts): Postgres itself refuses
+     * a second 'pending' row for the same rep, even if that transactional
+     * guard were ever bypassed or raced by an out-of-band writer.
+     */
+    onePendingPerRepIdx: uniqueIndex('dialer_handoffs_one_pending_per_rep')
+      .on(t.salesforceUserId)
+      .where(sql`${t.status} = 'pending'`),
   }),
 );
 
@@ -529,3 +608,4 @@ export type Organization = typeof organizations.$inferSelect;
 export type OutboundNumber = typeof outboundNumbers.$inferSelect;
 export type CampaignConfig = typeof campaignConfigs.$inferSelect;
 export type SalesforceConnection = typeof salesforceConnections.$inferSelect;
+export type DialerHandoff = typeof dialerHandoffs.$inferSelect;

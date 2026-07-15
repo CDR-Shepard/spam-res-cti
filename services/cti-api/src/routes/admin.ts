@@ -153,6 +153,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         label: z.string().optional(),
         // Assign to a rep, or null to return it to the reserve pool.
         assignedUserId: z.string().uuid().nullable().optional(),
+        kind: z.enum(['agent', 'dialer_pool']).optional(),
         health: z.enum(['healthy', 'warning', 'degraded', 'spam_likely', 'unknown']).optional(),
         inboundEnabled: z.boolean().optional(),
         inboundGreeting: z.string().max(800).nullable().optional(),
@@ -180,6 +181,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         ...(parsed.data.active !== undefined ? { active: parsed.data.active } : {}),
         ...(parsed.data.label !== undefined ? { label: parsed.data.label } : {}),
         ...(parsed.data.assignedUserId !== undefined ? { assignedUserId: parsed.data.assignedUserId } : {}),
+        ...(parsed.data.kind !== undefined ? { kind: parsed.data.kind } : {}),
         ...(parsed.data.health
           ? { health: parsed.data.health, healthUpdatedAt: new Date() }
           : {}),

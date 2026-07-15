@@ -52,7 +52,7 @@ async function refreshAndPersist(userId: string): Promise<ActiveToken> {
 
 type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
-async function sfFetch(
+export async function sfFetch(
   userId: string,
   path: string,
   init: { method?: HttpMethod; body?: unknown; query?: Record<string, string> } = {},
@@ -88,6 +88,21 @@ async function sfFetch(
     }
   }
   return { status: res.statusCode, json };
+}
+
+/** Escape a value for safe interpolation into a SOQL string literal. */
+export function soqlEscape(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+/** Run a SOQL query as the given user; returns the `records` array. */
+export async function soqlQuery<T = Record<string, unknown>>(
+  userId: string,
+  soql: string,
+): Promise<T[]> {
+  const res = await sfFetch(userId, '/query', { query: { q: soql } });
+  if (res.status >= 400) throw new Error(`SOQL failed (${res.status}): ${JSON.stringify(res.json)}`);
+  return ((res.json as { records?: T[] }).records ?? []);
 }
 
 // --- High-level helpers ----------------------------------------------------

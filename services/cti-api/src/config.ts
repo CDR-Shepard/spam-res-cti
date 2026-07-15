@@ -106,6 +106,14 @@ const schema = z.object({
    * unset only in development, where all origins are reflected.
    */
   CORS_ALLOWED_ORIGINS: z.string().optional(),
+
+  /**
+   * Shared secret Salesforce Apex presents (header `x-handoff-secret`) when
+   * relaying a Power Dial list-view selection via `POST /dialer/handoffs`.
+   * Compared in constant time. When unset, that route is disabled (503) — it
+   * must NEVER accept an unauthenticated write.
+   */
+  HANDOFF_SHARED_SECRET: z.string().min(16).optional(),
 });
 
 export type AppConfig = z.infer<typeof schema>;

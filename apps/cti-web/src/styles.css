@@ -1079,6 +1079,39 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
 
+/* ============================================================================ */
+/* Power dialer                                                                 */
+/* ============================================================================ */
+
+.dialer-panel { padding-top: 2px; }
+.dp-progress-label {
+  font-size: 12.5px; font-weight: 600; color: var(--text);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 8px;
+}
+.dp-current-number { font-size: 19px; font-weight: 600; margin-top: 2px; }
+.dp-current-meta {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text-muted); margin-top: 4px;
+  text-transform: capitalize;
+}
+.dp-error {
+  font-size: 11px; color: var(--bad); line-height: 1.4;
+  padding: 6px 2px; margin-bottom: 6px;
+}
+.dp-controls { gap: 8px; margin-top: 10px; }
+.dp-controls .btn { flex: 1; padding: 10px 6px; font-size: 12px; }
+.dp-summary {
+  text-align: center;
+  padding: 20px 12px 6px;
+}
+.dp-summary-title { font-size: 15px; font-weight: 700; }
+.dp-summary-meta {
+  font-size: 12px; color: var(--text-muted); margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.dp-summary-cta { margin-top: 16px; }
+
 /* ---- Admin: number-pool management (admins only) ---- */
 .admin { display: flex; flex-direction: column; gap: 10px; }
 .admin-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

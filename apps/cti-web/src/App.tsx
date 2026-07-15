@@ -3,6 +3,7 @@ import { api, ApiError, clearSession, readSession, writeSession } from './api';
 import { startRingback, stopRingback } from './ringback';
 import { AdminPanel } from './components/AdminPanel';
 import { CallLog } from './components/CallLog';
+import { DialerPanel } from './components/DialerPanel';
 import { IncomingScreen } from './components/IncomingScreen';
 import { CallScreen } from './components/CallScreen';
 import { Dialpad } from './components/Dialpad';
@@ -10,10 +11,11 @@ import { RecentCalls } from './components/RecentCalls';
 import { ReputationPanel } from './components/ReputationPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
-import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon } from './icons';
+import { getPendingHandoff, startDialer, type DialerObjectType } from './dialer-api';
+import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
 import {
-  initOpenCti, notifyReady, onClickToDial as onCti, saveCallLog, setPanelVisibility,
+  initOpenCti, notifyReady, onClickToDial as onCti, saveCallLog, screenPopRecord, setPanelVisibility,
   type ClickToDialEvent,
 } from './opencti';
 
@@ -31,7 +33,7 @@ interface RepSummary {
 }
 
 type Phase = 'idle' | 'preflight' | 'ringing' | 'active' | 'wrapup';
-type Tab = 'dialer' | 'recent' | 'reputation' | 'admin' | 'calls';
+type Tab = 'dialer' | 'powerdial' | 'recent' | 'reputation' | 'admin' | 'calls';
 
 interface ActiveCall {
   callId: string;
@@ -99,6 +101,12 @@ export function App(): JSX.Element {
   // The rep's outstanding un-dispositioned call (server truth), if any — drives
   // the persistent "finish your last call" banner so returning is discoverable.
   const [pendingDisp, setPendingDisp] = useState<PendingDisposition | null>(null);
+
+  // Power dialer: the active session id (server truth for the run), owned here
+  // so it survives switching away from and back to the Power Dial tab. This is
+  // intentionally NOT part of `phase`/`active` — the conference leg the rep sits
+  // on spans many prospect calls, so it must never hide the nav (see `inCall`).
+  const [dialerSessionId, setDialerSessionId] = useState<string | null>(null);
 
   // Display name — persists in localStorage on this origin. Used only as a
   // fallback when SF OAuth isn't wired; the SF profile is preferred.
@@ -214,6 +222,15 @@ export function App(): JSX.Element {
 
   const deviceRef = useRef<unknown>(null);
   const connectionRef = useRef<unknown>(null);
+  // The rep's power-dialer conference leg — kept in its OWN ref, separate from
+  // connectionRef, so joining/leaving it never touches phase/active/inCall and
+  // never collides with a normal click-to-dial or inbound call's connection.
+  const dialerConnRef = useRef<unknown>(null);
+  // Generation counter for power-dialer runs: incremented at the start of each
+  // startPowerDial() and in handleDialerStop(). Used to guard against the race
+  // where an in-flight connect() resolves AFTER a stop/new-start, preventing a
+  // stale connection from overwriting the cleared ref and leaking a conference leg.
+  const dialerRunRef = useRef(0);
   // True from the first line of place() until it settles — used to reject an
   // inbound call that races an in-flight outbound dial (which would otherwise
   // clobber connectionRef and orphan the outbound leg).
@@ -472,6 +489,101 @@ export function App(): JSX.Element {
       throw err;
     }
   }, [signOut]);
+
+  // Disconnect the rep's power-dialer conference leg (if any) and clear the
+  // session. Idempotent — safe to call twice (e.g. Stop button + DialerPanel
+  // unmount), since a second call just finds a null ref and a null sessionId.
+  const handleDialerStop = useCallback(() => {
+    dialerRunRef.current++; // Invalidate any in-flight startPowerDial()
+    const conn = dialerConnRef.current as { disconnect?: () => void } | null;
+    dialerConnRef.current = null;
+    if (conn) { try { conn.disconnect?.(); } catch { /* already gone */ } }
+    setDialerSessionId(null);
+  }, []);
+
+  // Start a server-originated power-dialer run: validate the payload, create
+  // the session, switch to the Power Dial tab, then join the rep's softphone to
+  // the run's Twilio conference (mirrors place()'s device.connect() shape, but
+  // with DialerConference instead of To/CallerId/CallId — the server's /voice
+  // DialerConference branch puts this leg in the conference room instead of
+  // dialing a destination). Deliberately does NOT touch phase/active/inCall:
+  // this leg is long-lived across many prospect calls, not a single call.
+  const startPowerDial = useCallback(async (objectType: unknown, recordIds: unknown): Promise<void> => {
+    if (objectType !== 'Lead' && objectType !== 'Opportunity') {
+      setToast({ text: 'Power Dial: invalid or missing object type.', type: 'error' });
+      return;
+    }
+    if (!Array.isArray(recordIds) || recordIds.length === 0 || !recordIds.every((id) => typeof id === 'string' && id.trim())) {
+      setToast({ text: 'Power Dial: select at least one record.', type: 'error' });
+      return;
+    }
+    // Capture the run generation BEFORE any await, so an in-flight start
+    // can detect if a stop or new start has superseded it.
+    const myRun = ++dialerRunRef.current;
+    try {
+      const { sessionId } = await startDialer(objectType as DialerObjectType, recordIds as string[]);
+      setDialerSessionId(sessionId);
+      setTab('powerdial');
+      const device = await ensureDevice();
+      const connection = await (device as unknown as { connect: (o: unknown) => Promise<unknown> }).connect({
+        params: { DialerConference: '1' },
+      });
+      // Guard: if a stop or new start happened while we were awaiting, this run
+      // is superseded. Disconnect the stale leg and return — don't leak it.
+      if (dialerRunRef.current !== myRun) {
+        try { (connection as { disconnect?: () => void }).disconnect?.(); } catch { /* already gone */ }
+        return;
+      }
+      dialerConnRef.current = connection;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'unknown error';
+      setToast({ text: `Could not start power dial: ${msg}`, type: 'error' });
+    }
+  }, [ensureDevice]);
+
+  // Record intake (handoff seam): the Salesforce LWC (or a test harness) hands
+  // us a run via postMessage rather than a direct function call, since it lives
+  // in a different frame. Minimal origin sanity — only accept messages from the
+  // frame that's embedding us (or, standalone/dev, the window itself, since
+  // window.parent === window there) — and otherwise ignore silently; a stray or
+  // malformed message from an unrelated script must never throw.
+  useEffect(() => {
+    const onMessage = (event: MessageEvent): void => {
+      if (event.source !== window.parent) return;
+      const data = event.data as unknown;
+      if (!data || typeof data !== 'object') return;
+      const { type, objectType, recordIds } = data as Record<string, unknown>;
+      if (type !== 'POWER_DIAL') return;
+      void startPowerDial(objectType, recordIds);
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [startPowerDial]);
+
+  // Primary handoff intake: poll the server for a pending Salesforce→CTI
+  // handoff (relayed by Apex — see docs/superpowers/plans/2026-07-14-power-dialer-5-handoff-relay.md)
+  // and auto-start it via the existing startPowerDial. Only while signed in AND
+  // no dialer session is already active, so a poll tick can never clobber a live
+  // run; the effect re-runs (and its cleanup clears the interval) the instant a
+  // session becomes active or the app signs out. Poll errors are swallowed —
+  // never crash, just keep trying next tick. The POWER_DIAL postMessage listener
+  // above stays as-is (harmless secondary path / test seam).
+  useEffect(() => {
+    if (!signedIn || dialerSessionId !== null) return;
+    let cancelled = false;
+    const poll = async (): Promise<void> => {
+      try {
+        const { handoff } = await getPendingHandoff();
+        if (cancelled || !handoff) return;
+        void startPowerDial(handoff.objectType, handoff.recordIds);
+      } catch {
+        // best-effort — keep polling
+      }
+    };
+    void poll();
+    const id = window.setInterval(() => void poll(), 5000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [signedIn, dialerSessionId, startPowerDial]);
 
   // Reopen a still-un-dispositioned call's wrap-up, rehydrated from the server so
   // it isn't blank or mislabeled. No recordId is set: the backend already holds
@@ -905,6 +1017,13 @@ export function App(): JSX.Element {
     <AdminPanel />
   ) : tab === 'calls' ? (
     <CallLog />
+  ) : tab === 'powerdial' ? (
+    <DialerPanel
+      sessionId={dialerSessionId}
+      onScreenPop={screenPopRecord}
+      onStart={() => { /* App already owns session start (see startPowerDial) */ }}
+      onStop={handleDialerStop}
+    />
   ) : (
     <div className="dialer">
       <Dialpad
@@ -926,6 +1045,8 @@ export function App(): JSX.Element {
 
   const navItems: Array<{ id: Tab; label: string; icon: JSX.Element }> = [
     { id: 'dialer', label: 'Dial', icon: <GridIcon /> },
+    // Every signed-in rep can run a power-dialer session — not admin-gated.
+    { id: 'powerdial', label: 'Power Dial', icon: <ZapIcon /> },
     { id: 'recent', label: 'Recent', icon: <ClockIcon /> },
     { id: 'reputation', label: 'Reputation', icon: <ShieldIcon /> },
     // Number-pool management + org call log — admins only (server 403s regardless).
