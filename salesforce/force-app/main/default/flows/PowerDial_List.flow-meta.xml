@@ -52,7 +52,7 @@
         <allowPause>false</allowPause>
         <fields>
             <name>Result_Message</name>
-            <fieldText>&lt;p&gt;{!Send_To_CTI.message}&lt;/p&gt;</fieldText>
+            <fieldText>&lt;p&gt;Power Dial started. Your CTI softphone will begin dialing the selected records.&lt;/p&gt;</fieldText>
             <fieldType>DisplayText</fieldType>
         </fields>
         <showFooter>true</showFooter>
