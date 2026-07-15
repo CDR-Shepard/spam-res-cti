@@ -107,6 +107,32 @@ private class PowerDialRelayTest {
   }
 
   @isTest
+  static void powerDialFromFlow_success_returnsMessage() {
+    setSharedSecret('a-test-shared-secret-value');
+    Test.setMock(HttpCalloutMock.class, new FixedResponseMock(200, '{"handoffId":"abc-123"}'));
+    PowerDialRelay.FlowRequest fr = new PowerDialRelay.FlowRequest();
+    fr.ids = new List<String>{ UserInfo.getUserId() }; // any valid id → object type derived from it
+    Test.startTest();
+    List<PowerDialRelay.FlowResult> res = PowerDialRelay.powerDialFromFlow(
+      new List<PowerDialRelay.FlowRequest>{ fr }
+    );
+    Test.stopTest();
+    System.assertEquals(1, res.size());
+    System.assertEquals(true, res[0].success, res[0].message);
+  }
+
+  @isTest
+  static void powerDialFromFlow_noIds_returnsFailure() {
+    PowerDialRelay.FlowRequest fr = new PowerDialRelay.FlowRequest();
+    fr.ids = new List<String>();
+    List<PowerDialRelay.FlowResult> res = PowerDialRelay.powerDialFromFlow(
+      new List<PowerDialRelay.FlowRequest>{ fr }
+    );
+    System.assertEquals(false, res[0].success);
+    System.assertEquals('No records were selected.', res[0].message);
+  }
+
+  @isTest
   static void sendToCti_nonAdmin_throwsAuraHandledException() {
     // Use an existing active non-admin user (no User insert — inserting one
     // trips this org's User-creation flow). Skip cleanly if the org has none.
