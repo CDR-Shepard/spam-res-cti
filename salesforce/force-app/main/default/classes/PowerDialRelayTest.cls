@@ -98,4 +98,36 @@ private class PowerDialRelayTest {
 
     System.assert(threw, 'Expected an empty recordIds list to throw AuraHandledException.');
   }
+
+  @isTest
+  static void canUsePowerDial_trueForAdmin() {
+    // Tests run as the (admin) deploying user → the rollout gate is open.
+    System.assertEquals(true, PowerDialRelay.canUsePowerDial(),
+      'A System Administrator should be allowed to use Power Dial.');
+  }
+
+  @isTest
+  static void sendToCti_nonAdmin_throwsAuraHandledException() {
+    // Use an existing active non-admin user (no User insert — inserting one
+    // trips this org's User-creation flow). Skip cleanly if the org has none.
+    List<User> nonAdmins = [
+      SELECT Id FROM User
+      WHERE IsActive = true AND Profile.Name != 'System Administrator'
+      LIMIT 1
+    ];
+    if (nonAdmins.isEmpty()) {
+      return;
+    }
+    Boolean threw = false;
+    System.runAs(nonAdmins[0]) {
+      System.assertEquals(false, PowerDialRelay.canUsePowerDial(),
+        'A non-admin should not be allowed to use Power Dial.');
+      try {
+        PowerDialRelay.sendToCti('Lead', new List<Id>{ UserInfo.getUserId() });
+      } catch (AuraHandledException ex) {
+        threw = true;
+      }
+    }
+    System.assert(threw, 'Expected a non-admin caller to be blocked by the rollout gate.');
+  }
 }

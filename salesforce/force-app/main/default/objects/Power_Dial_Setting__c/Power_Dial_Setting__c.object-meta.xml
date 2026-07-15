@@ -4,5 +4,5 @@
     <description>Org-wide config for the Power Dial Salesforce&#8594;CTI handoff relay (PowerDialRelay.cls). Holds the shared secret sent as the x-handoff-secret header to services/cti-api&apos;s POST /dialer/handoffs. See lwc/powerDial/README.md for setup — the field value itself must be entered by an admin in Setup, never committed to source control.</description>
     <enableFeeds>false</enableFeeds>
     <label>Power Dial Setting</label>
-    <visibility>Protected</visibility>
+    <visibility>Public</visibility>
 </CustomObject>

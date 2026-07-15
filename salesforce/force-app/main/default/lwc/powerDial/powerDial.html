@@ -1,14 +1,22 @@
 <template>
   <div class="slds-box slds-theme_default">
-    <lightning-button
-      variant="brand"
-      label={buttonLabel}
-      disabled={isDisabled}
-      onclick={handlePowerDialClick}
-    ></lightning-button>
-    <p class="slds-text-body_small slds-text-color_weak slds-m-top_x-small">{helperText}</p>
-    <template if:true={lastError}>
-      <p class="slds-text-body_small slds-text-color_error slds-m-top_xx-small">{lastError}</p>
+    <!-- Rollout gate: only System Administrator profile users see the button. -->
+    <template if:true={allowed}>
+      <lightning-button
+        variant="brand"
+        label={buttonLabel}
+        disabled={isDisabled}
+        onclick={handlePowerDialClick}
+      ></lightning-button>
+      <p class="slds-text-body_small slds-text-color_weak slds-m-top_x-small">{helperText}</p>
+      <template if:true={lastError}>
+        <p class="slds-text-body_small slds-text-color_error slds-m-top_xx-small">{lastError}</p>
+      </template>
+    </template>
+    <template if:true={restricted}>
+      <p class="slds-text-body_small slds-text-color_weak">
+        Power Dial is limited to administrators during this rollout.
+      </p>
     </template>
   </div>
 </template>

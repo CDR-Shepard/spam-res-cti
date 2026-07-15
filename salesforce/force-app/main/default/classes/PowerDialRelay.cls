@@ -31,6 +31,12 @@ public with sharing class PowerDialRelay {
    */
   @AuraEnabled
   public static Integer sendToCti(String objectApiName, List<Id> recordIds) {
+    // Rollout gate: Power Dial is limited to System Administrator profile
+    // users for now. Enforced server-side so it holds even if the button is
+    // surfaced (or the Apex is called) from a non-admin context.
+    if (!isSystemAdministrator()) {
+      throw new AuraHandledException('Power Dial is limited to administrators during this rollout.');
+    }
     if (String.isBlank(objectApiName)) {
       throw new AuraHandledException('objectApiName is required.');
     }
@@ -75,6 +81,21 @@ public with sharing class PowerDialRelay {
       );
     }
     return status;
+  }
+
+  /**
+   * Whether the running user may use Power Dial. Rollout gate: limited to the
+   * System Administrator profile for now. The LWC calls this (cacheable) to
+   * hide the button for everyone else; `sendToCti` enforces it again server-side.
+   */
+  @AuraEnabled(cacheable=true)
+  public static Boolean canUsePowerDial() {
+    return isSystemAdministrator();
+  }
+
+  private static Boolean isSystemAdministrator() {
+    Profile p = [SELECT Name FROM Profile WHERE Id = :UserInfo.getProfileId() LIMIT 1];
+    return p != null && p.Name == 'System Administrator';
   }
 
   /**

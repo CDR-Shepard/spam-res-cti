@@ -1,6 +1,7 @@
-import { LightningElement, api } from 'lwc';
+import { LightningElement, api, wire } from 'lwc';
 import { ShowToastEvent } from 'lightning/platformShowToastEvent';
 import sendToCti from '@salesforce/apex/PowerDialRelay.sendToCti';
+import canUsePowerDial from '@salesforce/apex/PowerDialRelay.canUsePowerDial';
 
 /**
  * Power Dial handoff component.
@@ -38,6 +39,23 @@ export default class PowerDial extends LightningElement {
    * record (not a list-view selection).
    */
   @api recordId;
+
+  /**
+   * Rollout gate: Power Dial is limited to System Administrator profile users
+   * for now. This cacheable Apex check drives whether the button renders at
+   * all; `sendToCti` also enforces it server-side.
+   */
+  @wire(canUsePowerDial) canUse;
+
+  /** True only once we know the running user is allowed (a System Administrator). */
+  get allowed() {
+    return this.canUse && this.canUse.data === true;
+  }
+
+  /** True once we know the running user is NOT allowed (show a restricted note). */
+  get restricted() {
+    return this.canUse && this.canUse.data === false;
+  }
 
   /** True while the Apex relay call is in flight, to guard against double-clicks. */
   sending = false;

@@ -3,40 +3,28 @@
     <apiVersion>60.0</apiVersion>
     <isExposed>true</isExposed>
     <masterLabel>Power Dial</masterLabel>
-    <description>Hands selected Lead/Opportunity record ids to the CTI power dialer via the PowerDialRelay Apex server relay. See the component folder&apos;s README.md for exact Setup wiring per target, the Named Credential + shared-secret setup, and the handoff-mechanism writeup.</description>
+    <description>Hands selected Lead/Opportunity record ids to the CTI power dialer via the PowerDialRelay Apex relay. See the powerDial README for Setup wiring. Admin-only during rollout.</description>
     <targets>
         <target>lightning__RecordAction</target>
         <target>lightning__FlowScreen</target>
-        <target>lightning__AppPage</target>
-        <target>lightning__HomePage</target>
     </targets>
     <targetConfigs>
         <!--
           Single-record Quick Action (Lead or Opportunity record page).
-          NOT a list-view mass action — Salesforce auto-injects @api recordId
-          only. Object scoping happens in Setup when you create the Quick
-          Action against a specific object, not here. See README.md.
+          Salesforce auto-injects @api recordId. Object scoping happens in
+          Setup when the Quick Action is created against a specific object.
         -->
         <targetConfig targets="lightning__RecordAction">
             <actionType>ScreenAction</actionType>
         </targetConfig>
         <!--
-          The realistic multi-record ("list view") path: embed this component
-          as a Screen Flow screen component, and launch the flow from a List
-          Button that passes selected ids via GETRECORDIDS(). See README.md.
+          The multi-record ("list view") path: embed this component as a Screen
+          Flow screen component and launch the flow from a List Button that
+          passes selected ids via GETRECORDIDS(). See README.md.
         -->
         <targetConfig targets="lightning__FlowScreen">
             <property name="objectApiName" type="String" label="Object API Name" role="inputOnly" />
-            <property name="recordIds" type="{String[]}" label="Record Ids" role="inputOnly" />
-        </targetConfig>
-        <!--
-          App/Home Page placement is for manual placement and dev/QA testing
-          only (no live list-view selection reaches a page component). The
-          design-time attributes below let an admin pin a fixed test payload.
-        -->
-        <targetConfig targets="lightning__AppPage,lightning__HomePage">
-            <property name="objectApiName" type="String" label="Object API Name (manual testing only)" default="Lead" />
-            <property name="recordIds" type="{String[]}" label="Record Ids (manual testing only — see README)" />
+            <property name="recordIds" type="String[]" label="Record Ids" role="inputOnly" />
         </targetConfig>
     </targetConfigs>
 </LightningComponentBundle>
