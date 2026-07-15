@@ -108,8 +108,13 @@ const CHECK_META: Record<string, CheckMeta> = {
     category: 'compliance',
   },
   attempt_limit: {
-    label: 'Attempt limit',
-    hint: 'Under the campaign’s attempts-per-window cap for this recipient.',
+    label: 'Attempt limit (per number)',
+    hint: 'This number is under the campaign’s per-number attempts-per-window cap for this customer.',
+    category: 'compliance',
+  },
+  customer_limit: {
+    label: 'Customer contact ceiling',
+    hint: 'Total contacts to this customer across all your numbers are under the per-customer ceiling.',
     category: 'compliance',
   },
   campaign: {

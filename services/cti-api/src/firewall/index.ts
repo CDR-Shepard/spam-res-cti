@@ -146,6 +146,79 @@ async function isDncListLoaded(db: Db): Promise<boolean> {
   return loaded;
 }
 
+/**
+ * Fold a `GROUP BY from_number` count of a customer's recent calls into the
+ * per-number map (used for rotation + the per-number gate) and the total
+ * across ALL numbers (the per-customer ceiling). Rows with a null from_number
+ * (inbound/legacy) count toward the total but not any number's budget.
+ */
+export function tallyAttempts(
+  rows: ReadonlyArray<{ from: string | null; n: number }>,
+): { attemptsByNumber: Map<string, number>; customerAttemptsTotal: number } {
+  const attemptsByNumber = new Map<string, number>();
+  let customerAttemptsTotal = 0;
+  for (const r of rows) {
+    customerAttemptsTotal += r.n;
+    if (r.from) attemptsByNumber.set(r.from, r.n);
+  }
+  return { attemptsByNumber, customerAttemptsTotal };
+}
+
+/**
+ * The two attempt gates: the per-customer ceiling (across all of a rep's
+ * numbers — the anti-harassment backstop) and the per-number budget for the
+ * chosen DID (which, with rotation swapping away from exhausted numbers, only
+ * blocks when every number is exhausted or an over-budget number was forced in).
+ */
+export function attemptGateChecks(args: {
+  windowDays: number;
+  maxAttempts: number;
+  perCustomerMaxAttempts: number;
+  attemptsByNumber: Map<string, number>;
+  customerAttemptsTotal: number;
+  effectiveFrom: string | null;
+}): CheckResult[] {
+  const checks: CheckResult[] = [];
+  if (args.customerAttemptsTotal >= args.perCustomerMaxAttempts) {
+    checks.push({
+      name: 'customer_limit',
+      passed: false,
+      severity: 'block',
+      reasonCode: REASON.CUSTOMER_LIMIT_EXCEEDED,
+      detail: `${args.customerAttemptsTotal} contacts to this customer across all numbers in ${args.windowDays}d (ceiling ${args.perCustomerMaxAttempts})`,
+    });
+  } else {
+    checks.push({
+      name: 'customer_limit',
+      passed: true,
+      severity: 'info',
+      reasonCode: REASON.CUSTOMER_LIMIT_OK,
+      detail: `${args.customerAttemptsTotal}/${args.perCustomerMaxAttempts} to this customer (all numbers) in ${args.windowDays}d`,
+    });
+  }
+  if (args.effectiveFrom) {
+    const perNumber = args.attemptsByNumber.get(args.effectiveFrom) ?? 0;
+    if (perNumber >= args.maxAttempts) {
+      checks.push({
+        name: 'attempt_limit',
+        passed: false,
+        severity: 'block',
+        reasonCode: REASON.ATTEMPT_LIMIT_EXCEEDED,
+        detail: `${args.effectiveFrom} → this customer: ${perNumber} in ${args.windowDays}d (limit ${args.maxAttempts}/number; all your numbers may be exhausted for this customer)`,
+      });
+    } else {
+      checks.push({
+        name: 'attempt_limit',
+        passed: true,
+        severity: 'info',
+        reasonCode: REASON.ATTEMPT_LIMIT_OK,
+        detail: `${perNumber}/${args.maxAttempts} from this number to this customer in ${args.windowDays}d`,
+      });
+    }
+  }
+  return checks;
+}
+
 export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallResponse> {
   const checks: CheckResult[] = [];
 
@@ -283,7 +356,7 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
   //    number that placed them. The per-NUMBER budget is enforced after the DID
   //    is picked (gate 5b); the map here also drives the rotation swap below.
   //    The per-CUSTOMER ceiling (across all numbers) is the harassment backstop.
-  const attemptsByNumber = new Map<string, number>();
+  let attemptsByNumber = new Map<string, number>();
   let customerAttemptsTotal = 0;
   if (campaign) {
     const windowStart = new Date(Date.now() - campaign.attemptWindowDays * 24 * 3600 * 1000);
@@ -298,27 +371,9 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
         ),
       )
       .groupBy(schema.calls.fromNumber);
-    for (const r of grouped) {
-      customerAttemptsTotal += r.n;
-      if (r.from) attemptsByNumber.set(r.from, r.n);
-    }
-    if (customerAttemptsTotal >= campaign.perCustomerMaxAttempts) {
-      checks.push({
-        name: 'customer_limit',
-        passed: false,
-        severity: 'block',
-        reasonCode: REASON.CUSTOMER_LIMIT_EXCEEDED,
-        detail: `${customerAttemptsTotal} contacts to this customer across all numbers in ${campaign.attemptWindowDays}d (ceiling ${campaign.perCustomerMaxAttempts})`,
-      });
-    } else {
-      checks.push({
-        name: 'customer_limit',
-        passed: true,
-        severity: 'info',
-        reasonCode: REASON.CUSTOMER_LIMIT_OK,
-        detail: `${customerAttemptsTotal}/${campaign.perCustomerMaxAttempts} to this customer (all numbers) in ${campaign.attemptWindowDays}d`,
-      });
-    }
+    ({ attemptsByNumber, customerAttemptsTotal } = tallyAttempts(grouped));
+    // Gates are pushed at 5b (below), once the DID is chosen — the ceiling here
+    // also feeds the rotation swap.
   }
 
   // 6. Calling hours (recipient-local). If TZ unknown, fall back to REVIEW.
@@ -428,28 +483,21 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
     }
   }
 
-  // 5b. Per-number attempt budget to this customer, now that the DID is chosen.
-  //     Rotation avoids exhausted numbers, so this normally passes; it hard-stops
-  //     when every one of the rep's numbers is exhausted for this customer (or a
-  //     specific over-budget number was forced in), with a clear reason.
-  if (campaign && effectiveFrom) {
-    const perNumber = attemptsByNumber.get(effectiveFrom) ?? 0;
-    if (perNumber >= campaign.maxAttempts) {
-      checks.push({
-        name: 'attempt_limit',
-        passed: false,
-        severity: 'block',
-        reasonCode: REASON.ATTEMPT_LIMIT_EXCEEDED,
-        detail: `${effectiveFrom} → this customer: ${perNumber} in ${campaign.attemptWindowDays}d (limit ${campaign.maxAttempts}/number; all your numbers may be exhausted for this customer)`,
-      });
-    } else {
-      checks.push({
-        name: 'attempt_limit',
-        passed: true,
-        severity: 'info',
-        reasonCode: REASON.ATTEMPT_LIMIT_OK,
-        detail: `${perNumber}/${campaign.maxAttempts} from this number to this customer in ${campaign.attemptWindowDays}d`,
-      });
+  // 5b. Attempt gates, now that the DID is chosen: the per-customer ceiling
+  //     (all numbers — harassment backstop) and the per-number budget for the
+  //     chosen DID. Rotation avoids exhausted numbers, so the per-number gate
+  //     normally passes; it hard-stops when every number is exhausted (or a
+  //     specific over-budget number was forced in). See attemptGateChecks.
+  if (campaign) {
+    for (const c of attemptGateChecks({
+      windowDays: campaign.attemptWindowDays,
+      maxAttempts: campaign.maxAttempts,
+      perCustomerMaxAttempts: campaign.perCustomerMaxAttempts,
+      attemptsByNumber,
+      customerAttemptsTotal,
+      effectiveFrom,
+    })) {
+      checks.push(c);
     }
   }
 
