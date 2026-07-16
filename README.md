@@ -168,6 +168,31 @@ invalid signatures return 403.
 
 ---
 
+## Inbound callbacks & no-answer forwarding
+
+When a lead calls one of your DIDs back, the inbound handler
+(`services/cti-api/src/routes/inbound.ts`) rings the rep's softphone — the
+number's assigned owner, or the sticky agent for a dialer-pool DID. If the rep
+doesn't pick up, the call rolls to voicemail (greeting + recording).
+
+Reps can insert a personal **failover number** in between: *Settings → Call
+forwarding*. Once set, an unanswered callback rings the softphone for **10s**,
+then rings that number (typically the rep's mobile) before falling back to
+voicemail. The failover applies to **every** DID the rep is rung on — set it
+once, it covers all their numbers.
+
+- The rep sets it themselves via `PATCH /auth/me` (`{ noAnswerForwardE164 }`);
+  it's normalized to E.164 and rejected if it points at one of the org's own
+  DIDs (which would loop back into the inbound handler).
+- A per-DID override (`outbound_numbers.inbound_forward_to_e164`, admin-set)
+  takes precedence over the rep's number for that one DID.
+- The forwarded leg shows the **called DID** as caller ID (a number we own —
+  Twilio requires an owned/verified caller ID on a PSTN `<Dial>`), so the rep's
+  phone displays the business line. It inherits the campaign's recording
+  behavior; the "may be recorded" disclosure is played once at call start.
+
+---
+
 ## Caller Reputation Firewall
 
 Every call traverses up to 19 gates (`services/cti-api/src/firewall/index.ts`),

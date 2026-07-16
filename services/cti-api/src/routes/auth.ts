@@ -14,6 +14,7 @@ import { getDb, schema } from '../db/index.js';
 import { issueSession, resolveSession } from '../auth/session.js';
 import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProfilePhoto, fetchUserInfo } from '../salesforce/oauth.js';
 import { encryptString } from '../crypto.js';
+import { normalize } from '../phone.js';
 import { loadConfig } from '../config.js';
 
 const DEV_USER_ID = '00000000-0000-0000-0000-00000000beef';
@@ -43,11 +44,17 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     const session = await resolveSession(req.headers.authorization);
     if (!session) return reply.code(401).send({ error: 'Unauthorized' });
     const db = getDb();
-    const sfConn = await db.query.salesforceConnections.findFirst({
-      where: eq(schema.salesforceConnections.userId, session.userId),
-    });
+    const [profile, sfConn] = await Promise.all([
+      db.query.users.findFirst({
+        where: eq(schema.users.id, session.userId),
+        columns: { noAnswerForwardE164: true },
+      }),
+      db.query.salesforceConnections.findFirst({
+        where: eq(schema.salesforceConnections.userId, session.userId),
+      }),
+    ]);
     return {
-      user: session,
+      user: { ...session, noAnswerForwardE164: profile?.noAnswerForwardE164 ?? null },
       salesforce: sfConn
         ? {
             connected: true,
@@ -65,6 +72,50 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           }
         : { connected: false },
     };
+  });
+
+  /**
+   * Self-service profile update. Currently just the no-answer failover number:
+   * where an unanswered inbound callback to any DID this rep is rung on should
+   * roll over to (their cell) before voicemail. Send `null`/`""` to clear.
+   * Reps set this for themselves — no admin role required.
+   */
+  app.patch('/auth/me', async (req, reply) => {
+    const session = await resolveSession(req.headers.authorization);
+    if (!session) return reply.code(401).send({ error: 'Unauthorized' });
+    const parsed = z
+      .object({ noAnswerForwardE164: z.string().nullable() })
+      .safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+
+    const db = getDb();
+    let forwardE164: string | null = null;
+    const raw = parsed.data.noAnswerForwardE164?.trim();
+    if (raw) {
+      const norm = normalize(raw);
+      if (!norm.ok || !norm.value) return reply.code(400).send({ error: 'Invalid forwarding number' });
+      forwardE164 = norm.value.e164;
+      // Guard against a forwarding loop: refuse to point the failover at one of
+      // this org's own DIDs, which would just ring back into our inbound handler.
+      const ownDid = await db.query.outboundNumbers.findFirst({
+        where: and(
+          eq(schema.outboundNumbers.orgId, session.orgId),
+          eq(schema.outboundNumbers.e164, forwardE164),
+        ),
+        columns: { id: true },
+      });
+      if (ownDid) {
+        return reply
+          .code(400)
+          .send({ error: 'Cannot forward to one of your own calling numbers' });
+      }
+    }
+
+    await db
+      .update(schema.users)
+      .set({ noAnswerForwardE164: forwardE164 })
+      .where(eq(schema.users.id, session.userId));
+    return { ok: true, noAnswerForwardE164: forwardE164 };
   });
 
   app.post('/auth/salesforce/start', async (req, reply) => {
