@@ -9,10 +9,11 @@ import { CallScreen } from './components/CallScreen';
 import { Dialpad } from './components/Dialpad';
 import { RecentCalls } from './components/RecentCalls';
 import { ReputationPanel } from './components/ReputationPanel';
+import { SettingsPanel } from './components/SettingsPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
 import { getPendingHandoff, startDialer, type DialerObjectType } from './dialer-api';
-import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, ZapIcon } from './icons';
+import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, UserIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
 import {
   initOpenCti, notifyReady, onClickToDial as onCti, saveCallLog, screenPopRecord, setPanelVisibility,
@@ -20,7 +21,7 @@ import {
 } from './opencti';
 
 interface MeResponse {
-  user: { userId: string; orgId: string; email: string; isAdmin: boolean };
+  user: { userId: string; orgId: string; email: string; isAdmin: boolean; noAnswerForwardE164?: string | null };
   salesforce:
     | { connected: false }
     | { connected: true; name?: string | null; email?: string | null; photoDataUrl?: string | null };
@@ -33,7 +34,7 @@ interface RepSummary {
 }
 
 type Phase = 'idle' | 'preflight' | 'ringing' | 'active' | 'wrapup';
-type Tab = 'dialer' | 'powerdial' | 'recent' | 'reputation' | 'admin' | 'calls';
+type Tab = 'dialer' | 'powerdial' | 'recent' | 'reputation' | 'admin' | 'calls' | 'settings';
 
 interface ActiveCall {
   callId: string;
@@ -1017,6 +1018,12 @@ export function App(): JSX.Element {
     <AdminPanel />
   ) : tab === 'calls' ? (
     <CallLog />
+  ) : tab === 'settings' ? (
+    <SettingsPanel
+      forwardE164={me.user.noAnswerForwardE164 ?? null}
+      onSaved={refreshMe}
+      onToast={setToast}
+    />
   ) : tab === 'powerdial' ? (
     <DialerPanel
       sessionId={dialerSessionId}
@@ -1056,6 +1063,8 @@ export function App(): JSX.Element {
           { id: 'calls' as Tab, label: 'Calls', icon: <PhoneOutgoingIcon /> },
         ]
       : []),
+    // Per-rep settings (call forwarding) — every signed-in rep.
+    { id: 'settings', label: 'Settings', icon: <UserIcon /> },
   ];
 
   return (

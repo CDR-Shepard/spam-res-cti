@@ -82,6 +82,15 @@ export const users = pgTable(
     timezone: text('timezone').default('UTC').notNull(),
     /** Admins manage outbound numbers, assignment, and campaigns. */
     isAdmin: boolean('is_admin').default(false).notNull(),
+    /**
+     * Agent no-answer failover (E.164). When an inbound callback rings this
+     * rep's softphone and they don't pick up within the forward window, the
+     * call rings this number (typically their cell) before falling back to
+     * voicemail. One number per rep, applied to EVERY DID they're rung on — the
+     * rep sets it themselves via PATCH /auth/me. Null = no failover (ring the
+     * softphone the full default window, then voicemail).
+     */
+    noAnswerForwardE164: text('no_answer_forward_e164'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({

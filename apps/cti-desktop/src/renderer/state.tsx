@@ -8,7 +8,7 @@ export interface SessionState {
 }
 
 export interface MeResponse {
-  user: { userId: string; orgId: string; email: string };
+  user: { userId: string; orgId: string; email: string; noAnswerForwardE164?: string | null };
   salesforce:
     | { connected: false }
     | {

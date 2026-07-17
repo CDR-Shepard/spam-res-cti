@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import { formatE164 } from '../format';
-import { CheckCircleIcon, CloudIcon, MoonIcon, PaletteIcon, PhoneIcon, PlusIcon, SunIcon, UserIcon, ZapIcon } from '../icons';
+import { CheckCircleIcon, CloudIcon, MoonIcon, PaletteIcon, PhoneIcon, PhoneOutgoingIcon, PlusIcon, SunIcon, UserIcon, ZapIcon } from '../icons';
 import { useApp } from '../state';
 
 interface OutboundNumber {
@@ -17,6 +17,24 @@ export function SettingsView(): JSX.Element {
   const { me, refreshMe, setToast, signOut, theme, setTheme, customDisplayName, setCustomDisplayName } = useApp();
   const [nameDraft, setNameDraft] = useState(customDisplayName ?? '');
   useEffect(() => { setNameDraft(customDisplayName ?? ''); }, [customDisplayName]);
+
+  // No-answer call forwarding — the rep's personal failover number. Applies to
+  // every DID they're rung on: an unanswered callback rolls to it after 10s.
+  const forwardE164 = me?.user.noAnswerForwardE164 ?? null;
+  const [forwardDraft, setForwardDraft] = useState(forwardE164 ?? '');
+  const [savingForward, setSavingForward] = useState(false);
+  useEffect(() => { setForwardDraft(forwardE164 ?? ''); }, [forwardE164]);
+
+  const saveForward = useCallback(async (next: string | null) => {
+    setSavingForward(true);
+    try {
+      await api('/auth/me', { method: 'PATCH', body: { noAnswerForwardE164: next } });
+      await refreshMe();
+      setToast({ text: next ? 'Call forwarding updated.' : 'Call forwarding turned off.', type: 'success' });
+    } catch (e) {
+      setToast({ text: (e as Error).message, type: 'error' });
+    } finally { setSavingForward(false); }
+  }, [refreshMe, setToast]);
   const [numbers, setNumbers] = useState<OutboundNumber[]>([]);
   const [newNumber, setNewNumber] = useState('');
   const [newLabel, setNewLabel] = useState('');
@@ -187,6 +205,58 @@ export function SettingsView(): JSX.Element {
             <div className="sub">{tokenStatusText ?? 'Twilio · click to test'}</div>
           </div>
           <button className="btn ghost" style={{ padding: '6px 12px', fontSize: 12 }} onClick={checkProvider}>Test</button>
+        </div>
+      </div>
+
+      <div className="set-list">
+        <div className="set-row">
+          <div className="icon" style={{ color: forwardE164 ? 'var(--good)' : 'var(--text-muted)' }}>
+            <PhoneOutgoingIcon />
+          </div>
+          <div className="label" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div className="name">Call forwarding</div>
+            <div className="sub">
+              If you don't pick up a callback within 10s, it rings this number before
+              going to voicemail — on every number assigned to you.
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+              <input
+                className="field"
+                inputMode="tel"
+                placeholder="+1 555 010 0123 (your mobile)"
+                value={forwardDraft}
+                onChange={(e) => setForwardDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { const v = forwardDraft.trim(); if (v) void saveForward(v); }
+                }}
+                style={{ fontSize: 13, flex: 1 }}
+              />
+              <button
+                className="btn primary"
+                style={{ padding: '6px 12px', fontSize: 12 }}
+                disabled={savingForward || !forwardDraft.trim() || forwardDraft.trim() === (forwardE164 ?? '')}
+                onClick={() => void saveForward(forwardDraft.trim())}
+              >
+                {savingForward ? <span className="spinner" /> : 'Save'}
+              </button>
+            </div>
+            {forwardE164 && (
+              <div
+                className="sub"
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}
+              >
+                <span style={{ color: 'var(--good)' }}>Forwarding to {formatE164(forwardE164)}</span>
+                <button
+                  className="btn ghost"
+                  style={{ padding: '2px 10px', fontSize: 11 }}
+                  disabled={savingForward}
+                  onClick={() => { setForwardDraft(''); void saveForward(null); }}
+                >
+                  Turn off
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

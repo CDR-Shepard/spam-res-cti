@@ -26,6 +26,12 @@ import { normalize } from '../phone.js';
 import { sha256 } from '../crypto.js';
 import { stickyAgentForCaller } from '../dialer/sticky.js';
 import {
+  buildForwardDialTwiml,
+  FORWARD_LEG_FLAG,
+  inboundRingSeconds,
+  resolveForwardTarget,
+} from './inbound-forward.js';
+import {
   UUID_RE,
   TWILIO_CALL_SID_RE,
   TWILIO_RECORDING_MEDIA_RE,
@@ -211,6 +217,26 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
       .returning({ id: schema.calls.id });
     const callDbId = callRow!.id;
 
+    // No-answer failover: the rep we're about to ring (sticky pool agent, else
+    // the DID's assigned owner) may have a personal forward number, and the DID
+    // itself may carry an admin-set per-number override. When either is present
+    // we ring the softphone for a short window (10s) instead of the full 25s, so
+    // an unanswered callback rolls to that number quickly (see dial-result).
+    const ringingRepId = poolStickyAgentId ?? owned.assignedUserId ?? null;
+    let repForwardE164: string | null = null;
+    if (ringingRepId) {
+      const rep = await db.query.users.findFirst({
+        where: eq(schema.users.id, ringingRepId),
+        columns: { noAnswerForwardE164: true },
+      });
+      repForwardE164 = rep?.noAnswerForwardE164 ?? null;
+    }
+    const forwardE164 = resolveForwardTarget({
+      numberForwardE164: owned.inboundForwardToE164,
+      repForwardE164,
+    });
+    const ringSeconds = inboundRingSeconds(!!forwardE164);
+
     const t = new twilio.twiml.VoiceResponse();
 
     // Dialer-pool DIDs: if the caller has a sticky agent on THIS pool DID,
@@ -231,7 +257,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
           // Show the CALLER's number on the rep's softphone, not the DID, so the
           // rep sees who's calling back.
           callerId: normFrom || fromRaw || undefined,
-          timeout: 25,
+          timeout: ringSeconds,
           answerOnBridge: true,
           action: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/dial-result?callDbId=${encodeURIComponent(callDbId)}`,
           method: 'POST',
@@ -267,7 +293,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
         // Show the CALLER's number on the rep's softphone, not the DID, so the
         // rep sees who's calling back.
         callerId: normFrom || fromRaw || undefined,
-        timeout: 25,
+        timeout: ringSeconds,
         answerOnBridge: true,
         action: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/dial-result?callDbId=${encodeURIComponent(callDbId)}`,
         method: 'POST',
@@ -368,9 +394,11 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response/>');
   });
 
-  // Dial-result callback — fires after we ring the rep's softphone. If the rep
-  // answered, mark the inbound call completed and log it. If they didn't answer
-  // (offline / no pickup), fall back to voicemail on the same call.
+  // Dial-result callback — fires after we ring the rep's softphone (or, on the
+  // ?leg=forward pass, after we ring their no-answer failover number). If that
+  // leg answered, mark the inbound call completed and log it. If not: on the
+  // softphone leg, roll to the rep's failover number when configured; otherwise
+  // (or once the forward leg has also gone unanswered) fall back to voicemail.
   app.post('/telephony/twilio/inbound/dial-result', async (req, reply) => {
     const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
     const url = signedCallbackUrl(cfg.API_PUBLIC_URL, req);
@@ -379,7 +407,8 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     if (!valid.valid && !cfg.TWILIO_SKIP_SIGNATURE_CHECK) return reply.code(403).send('bad sig');
 
     const body = req.body as Record<string, string>;
-    const q = req.query as { callDbId?: string };
+    const q = req.query as { callDbId?: string; leg?: string };
+    const isForwardLeg = q.leg === FORWARD_LEG_FLAG;
     const hangup = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
     if (!q.callDbId || !UUID_RE.test(q.callDbId)) {
       return reply.type('text/xml').send(hangup);
@@ -402,13 +431,44 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
       return reply.type('text/xml').send(hangup);
     }
 
-    // Rep didn't answer / is offline → voicemail fallback on the same call.
     const call = await db.query.calls.findFirst({ where: eq(schema.calls.id, q.callDbId) });
     const owned = call
       ? await db.query.outboundNumbers.findFirst({
           where: eq(schema.outboundNumbers.e164, call.normalizedToNumber),
         })
       : null;
+
+    // Softphone leg went unanswered → try the rep's no-answer failover number
+    // (per-DID override, else the rung rep's own) before voicemail. The
+    // ?leg=forward guard means an unanswered failover doesn't forward again.
+    if (!isForwardLeg && call && owned) {
+      const rep = call.userId
+        ? await db.query.users.findFirst({
+            where: eq(schema.users.id, call.userId),
+            columns: { noAnswerForwardE164: true },
+          })
+        : null;
+      const forwardE164 = resolveForwardTarget({
+        numberForwardE164: owned.inboundForwardToE164,
+        repForwardE164: rep?.noAnswerForwardE164,
+      });
+      if (forwardE164) {
+        return reply.type('text/xml').send(
+          buildForwardDialTwiml({
+            apiPublicUrl: cfg.API_PUBLIC_URL,
+            callDbId: q.callDbId,
+            forwardE164,
+            // callerId must be a number we own for a PSTN <Dial>; show the
+            // called DID so the agent's phone displays the business line.
+            callerIdE164: owned.e164,
+            record: cfg.TWILIO_RECORD_CALLS,
+          }),
+        );
+      }
+    }
+
+    // No failover configured, or the failover leg also went unanswered →
+    // voicemail fallback on the same call.
     if (owned) {
       const t = new twilio.twiml.VoiceResponse();
       appendVoicemail(t, cfg, owned, q.callDbId, owned.inboundGreeting ?? defaultGreeting(false, null));
