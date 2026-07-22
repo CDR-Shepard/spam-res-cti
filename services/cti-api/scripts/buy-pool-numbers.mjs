@@ -157,7 +157,20 @@ async function doDbCheck() {
   } finally { await client.end(); }
 }
 
+async function doColCheck() {
+  if (!DB_URL) die('No DATABASE_PUBLIC_URL / DATABASE_URL (run via `railway run -s Postgres`).');
+  const client = new pg.Client({ connectionString: DB_URL, ssl: { rejectUnauthorized: false } });
+  await client.connect();
+  try {
+    const r = await client.query(
+      "select column_name from information_schema.columns where table_name='campaign_configs' and column_name='per_customer_max_attempts'",
+    );
+    console.log(r.rowCount > 0 ? 'COLUMN_PRESENT' : 'COLUMN_ABSENT');
+  } finally { await client.end(); }
+}
+
 async function main() {
+  if (MODE === 'colcheck') return doColCheck();
   if (MODE === 'dbcheck') return doDbCheck();
   if (MODE === 'buy') return doBuy();
   if (MODE === 'register') return doRegister();

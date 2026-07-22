@@ -84,6 +84,60 @@ public with sharing class PowerDialRelay {
   }
 
   /**
+   * Flow entry point — the Power Dial Screen Flow launched from a Lead/Opportunity
+   * list-view button. Salesforce passes the selected record ids in a lowercase
+   * `ids` Text collection; we derive the object type from the ids themselves and
+   * hand off to `sendToCti` (which enforces the admin gate + does the relay).
+   * Returns a status instead of throwing so the flow can show a clean message.
+   */
+  @InvocableMethod(
+    label='Power Dial selected records'
+    description='Sends selected Lead/Opportunity records to the CTI power dialer'
+  )
+  public static List<FlowResult> powerDialFromFlow(List<FlowRequest> requests) {
+    List<FlowResult> out = new List<FlowResult>();
+    for (FlowRequest req : requests) {
+      FlowResult r = new FlowResult();
+      try {
+        List<Id> recordIds = new List<Id>();
+        for (String s : (req.ids == null ? new List<String>() : req.ids)) {
+          if (String.isNotBlank(s)) {
+            recordIds.add((Id) s);
+          }
+        }
+        if (recordIds.isEmpty()) {
+          r.success = false;
+          r.message = 'No records were selected.';
+        } else {
+          String objectApiName = String.valueOf(recordIds[0].getSObjectType());
+          sendToCti(objectApiName, recordIds);
+          r.success = true;
+          r.message =
+            'Power Dial started for ' + recordIds.size() + ' ' + objectApiName +
+            ' record(s). Your CTI softphone will begin dialing.';
+        }
+      } catch (Exception e) {
+        r.success = false;
+        r.message = e.getMessage();
+      }
+      out.add(r);
+    }
+    return out;
+  }
+
+  public class FlowRequest {
+    @InvocableVariable(label='Selected record ids')
+    public List<String> ids;
+  }
+
+  public class FlowResult {
+    @InvocableVariable(label='Success')
+    public Boolean success;
+    @InvocableVariable(label='Message')
+    public String message;
+  }
+
+  /**
    * Whether the running user may use Power Dial. Rollout gate: limited to the
    * System Administrator profile for now. The LWC calls this (cacheable) to
    * hide the button for everyone else; `sendToCti` enforces it again server-side.
