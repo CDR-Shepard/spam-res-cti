@@ -1,24 +1,27 @@
 /**
- * Power dialer control panel — progress, current record, and playback
- * controls (pause/resume, skip, stop, next) for a server-originated dialer
- * session. Polls the session every ~2s while a run is active.
+ * Power dialer control panel. With no run active it shows the list-view picker
+ * (pick an object + one of the rep's Salesforce list views → dial it). During a
+ * run it shows progress, the current record, and controls (pause/resume, skip,
+ * stop, next), polling the session every ~2s.
  *
- * Screen-pop is intentionally NOT wired to Open CTI here: the panel only
- * calls `onScreenPop(recordId)` when a NEW connected record appears. The
- * caller (App) decides what that means (e.g. `screenPopRecord`).
+ * Screen-pop: the panel calls `onScreenPop(recordId)` once per record the moment
+ * it becomes the in-flight record, so the rep sees the lead/opp while it rings.
+ * The caller (App) maps that to Open CTI `screenPopRecord`.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   dialerControl,
   getDialer,
+  getSalesforceListViews,
   type DialerControlAction,
   type DialerCurrentItem,
+  type DialerObjectType,
   type DialerSession,
   type DialerSessionCounts,
   type DialerSessionView,
+  type SalesforceListView,
 } from '../dialer-api';
 import { formatE164 } from '../format';
-import { PhoneIcon } from '../icons';
 
 const POLL_INTERVAL_MS = 2000;
 const TERMINAL_STATUSES = new Set(['done', 'stopped']);
@@ -49,8 +52,13 @@ function dotClassForItemStatus(status: string): string {
 export interface DialerPanelProps {
   /** Active session id, owned by the parent — null means no run in progress. */
   sessionId: string | null;
-  /** Called when a NEW currentItem with status 'connected' appears (fires once per item). */
+  /**
+   * Called once per record the moment it becomes the in-flight record (i.e. as
+   * the dialer starts calling it), so the rep sees the lead/opp while it rings.
+   */
   onScreenPop: (recordId: string) => void;
+  /** Start a run from a Salesforce list view (parent creates the session). */
+  onStartFromListView: (object: DialerObjectType, listViewId: string) => Promise<void>;
   /** Called when the panel begins tracking a session (sessionId set). */
   onStart: () => void;
   /** Called when the rep stops the run from the Stop control. */
@@ -70,8 +78,95 @@ function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Element {
   );
 }
 
+/**
+ * The no-run state: pick an object + one of the rep's Salesforce list views and
+ * start dialing it. The CTI pulls the list's records via the rep's SF token —
+ * no Salesforce list-view button needed (the Lightning Console won't hand a
+ * custom button the row selection).
+ */
+function ListViewPicker({
+  onStart,
+}: {
+  onStart: (object: DialerObjectType, listViewId: string) => Promise<void>;
+}): JSX.Element {
+  const [object, setObject] = useState<DialerObjectType>('Lead');
+  const [listViews, setListViews] = useState<SalesforceListView[] | null>(null);
+  const [selected, setSelected] = useState<string>('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setListViews(null);
+    setSelected('');
+    getSalesforceListViews(object)
+      .then((r) => { if (!cancelled) setListViews(r.listViews); })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Could not load your list views.');
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [object]);
+
+  const dial = async (): Promise<void> => {
+    if (!selected) return;
+    setStarting(true);
+    try {
+      await onStart(object, selected);
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  return (
+    <div className="dialer-panel">
+      <div className="section dp-picker">
+        <div className="kicker">Power dial a list</div>
+        <div className="row dp-picker-obj">
+          {(['Lead', 'Opportunity'] as const).map((o) => (
+            <button
+              key={o}
+              className={`btn ${object === o ? 'active' : ''}`}
+              disabled={starting}
+              onClick={() => setObject(o)}
+            >
+              {o === 'Lead' ? 'Leads' : 'Opportunities'}
+            </button>
+          ))}
+        </div>
+        {loading && <div className="empty-hint"><span className="spinner" /> Loading your list views…</div>}
+        {error && <div className="dp-error">{error}</div>}
+        {listViews && listViews.length === 0 && (
+          <div className="empty-hint">No {object === 'Lead' ? 'Lead' : 'Opportunity'} list views found.</div>
+        )}
+        {listViews && listViews.length > 0 && (
+          <>
+            <select
+              className="dp-picker-select"
+              value={selected}
+              disabled={starting}
+              onChange={(e) => setSelected(e.target.value)}
+            >
+              <option value="">Choose a list view…</option>
+              {listViews.map((lv) => (
+                <option key={lv.id} value={lv.id}>{lv.label}</option>
+              ))}
+            </select>
+            <button className="btn primary full" disabled={!selected || starting} onClick={() => void dial()}>
+              {starting ? 'Starting…' : 'Dial this list'}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function DialerPanel(props: DialerPanelProps): JSX.Element {
-  const { sessionId, onScreenPop, onStart, onStop } = props;
+  const { sessionId, onScreenPop, onStartFromListView, onStart, onStop } = props;
   const [view, setView] = useState<DialerSessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [controlBusy, setControlBusy] = useState(false);
@@ -114,8 +209,11 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         setView(next);
         setError(null);
 
+        // Screen-pop each record as it becomes the in-flight record (dialing OR
+        // connected) — so the rep sees the lead/opp while it's ringing, not only
+        // once someone answers. Fires once per record via the last-popped ref.
         const current = next.currentItem;
-        if (current && current.status === 'connected' && lastPoppedIdRef.current !== current.id) {
+        if (current && lastPoppedIdRef.current !== current.id) {
           lastPoppedIdRef.current = current.id;
           onScreenPop(current.recordId);
         }
@@ -165,13 +263,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   }, [runControl, onStop]);
 
   if (!sessionId) {
-    return (
-      <div className="empty-state">
-        <PhoneIcon className="empty-icon" />
-        No active run
-        <span className="empty-hint">Start one from a Salesforce list view.</span>
-      </div>
-    );
+    return <ListViewPicker onStart={onStartFromListView} />;
   }
 
   if (!view) {

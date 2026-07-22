@@ -51,6 +51,8 @@ import {
   claimPendingHandoff,
   constantTimeEqual,
 } from '../dialer/handoff-store.js';
+import { sfFetch } from '../salesforce/client.js';
+import { parseListViews, parseListViewResultIds } from '../salesforce/listviews.js';
 
 // The POST /dialer/sessions body schema — pinned by src/routes/dialer.test.ts.
 const StartBody = z.object({
@@ -173,6 +175,67 @@ async function requireOwnedSession(
 
 export async function registerDialerRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
+
+  // GET /dialer/salesforce/listviews?object=Lead|Opportunity — the rep's own
+  // Salesforce list views (fetched with their token). This is how the softphone
+  // offers "dial a list" without a Salesforce list-view button — the Lightning
+  // Console won't hand a custom button the row selection, but the CTI can pull
+  // the list view directly.
+  app.get('/dialer/salesforce/listviews', async (req, reply) => {
+    const authed = await resolveSession(req.headers.authorization);
+    if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
+    const object = (req.query as { object?: string }).object;
+    if (object !== 'Lead' && object !== 'Opportunity') {
+      return reply.code(400).send({ error: 'object must be Lead or Opportunity' });
+    }
+    try {
+      const res = await sfFetch(authed.userId, `/sobjects/${object}/listviews`, { query: { limit: '200' } });
+      if (res.status < 200 || res.status >= 300) {
+        return reply.code(502).send({ error: 'Salesforce list-view fetch failed', status: res.status });
+      }
+      return { listViews: parseListViews(res.json) };
+    } catch {
+      return reply.code(502).send({ error: 'Could not reach Salesforce — is the rep signed in?' });
+    }
+  });
+
+  // POST /dialer/sessions/from-listview { object, listViewId } — pull the list
+  // view's records via the rep's token and start a dialer session over them.
+  app.post('/dialer/sessions/from-listview', async (req, reply) => {
+    const authed = await resolveSession(req.headers.authorization);
+    if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
+    const parsed = z
+      .object({
+        object: z.enum(['Lead', 'Opportunity']),
+        listViewId: z.string().regex(/^[a-zA-Z0-9]{15,18}$/),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const { object, listViewId } = parsed.data;
+    let recordIds: string[];
+    try {
+      const res = await sfFetch(
+        authed.userId,
+        `/sobjects/${object}/listviews/${listViewId}/results`,
+        { query: { limit: '200' } },
+      );
+      if (res.status < 200 || res.status >= 300) {
+        return reply.code(502).send({ error: 'Salesforce list-view results fetch failed', status: res.status });
+      }
+      recordIds = parseListViewResultIds(res.json);
+    } catch {
+      return reply.code(502).send({ error: 'Could not reach Salesforce — is the rep signed in?' });
+    }
+    if (recordIds.length === 0) {
+      return reply.code(422).send({ error: 'That list view has no records to dial.' });
+    }
+    const db = getDb();
+    const result = await createDialerSession(
+      { resolveDialNumber, salesforceUserId, db },
+      { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds },
+    );
+    return { ...result, recordCount: recordIds.length };
+  });
 
   app.post('/dialer/sessions', async (req, reply) => {
     const authed = await resolveSession(req.headers.authorization);

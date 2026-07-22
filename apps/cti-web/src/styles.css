@@ -1101,6 +1101,18 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 }
 .dp-controls { gap: 8px; margin-top: 10px; }
 .dp-controls .btn { flex: 1; padding: 10px 6px; font-size: 12px; }
+.dp-picker { display: flex; flex-direction: column; gap: 12px; }
+.dp-picker-obj { gap: 8px; }
+.dp-picker-obj .btn { flex: 1; }
+.btn.active { background: var(--accent); color: white; }
+.dp-picker-select {
+  width: 100%;
+  padding: 9px 11px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+}
 .dp-summary {
   text-align: center;
   padding: 20px 12px 6px;

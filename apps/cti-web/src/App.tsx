@@ -12,7 +12,7 @@ import { ReputationPanel } from './components/ReputationPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
-import { getPendingHandoff, startDialer, type DialerObjectType } from './dialer-api';
+import { getPendingHandoff, startDialer, startDialerFromListView, type DialerObjectType } from './dialer-api';
 import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, UserIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
 import {
@@ -509,6 +509,23 @@ export function App(): JSX.Element {
   // DialerConference branch puts this leg in the conference room instead of
   // dialing a destination). Deliberately does NOT touch phase/active/inCall:
   // this leg is long-lived across many prospect calls, not a single call.
+  // Shared tail for both start paths: once we have a sessionId, switch to the
+  // Power Dial tab and join the rep's softphone to the run's Twilio conference,
+  // guarding against a stop/new-start that superseded this one mid-await.
+  const beginRun = useCallback(async (sessionId: string, myRun: number): Promise<void> => {
+    setDialerSessionId(sessionId);
+    setTab('powerdial');
+    const device = await ensureDevice();
+    const connection = await (device as unknown as { connect: (o: unknown) => Promise<unknown> }).connect({
+      params: { DialerConference: '1' },
+    });
+    if (dialerRunRef.current !== myRun) {
+      try { (connection as { disconnect?: () => void }).disconnect?.(); } catch { /* already gone */ }
+      return;
+    }
+    dialerConnRef.current = connection;
+  }, [ensureDevice]);
+
   const startPowerDial = useCallback(async (objectType: unknown, recordIds: unknown): Promise<void> => {
     if (objectType !== 'Lead' && objectType !== 'Opportunity') {
       setToast({ text: 'Power Dial: invalid or missing object type.', type: 'error' });
@@ -518,29 +535,33 @@ export function App(): JSX.Element {
       setToast({ text: 'Power Dial: select at least one record.', type: 'error' });
       return;
     }
-    // Capture the run generation BEFORE any await, so an in-flight start
-    // can detect if a stop or new start has superseded it.
+    // Capture the run generation BEFORE any await (see beginRun's guard).
     const myRun = ++dialerRunRef.current;
     try {
       const { sessionId } = await startDialer(objectType as DialerObjectType, recordIds as string[]);
-      setDialerSessionId(sessionId);
-      setTab('powerdial');
-      const device = await ensureDevice();
-      const connection = await (device as unknown as { connect: (o: unknown) => Promise<unknown> }).connect({
-        params: { DialerConference: '1' },
-      });
-      // Guard: if a stop or new start happened while we were awaiting, this run
-      // is superseded. Disconnect the stale leg and return — don't leak it.
-      if (dialerRunRef.current !== myRun) {
-        try { (connection as { disconnect?: () => void }).disconnect?.(); } catch { /* already gone */ }
-        return;
-      }
-      dialerConnRef.current = connection;
+      await beginRun(sessionId, myRun);
     } catch (e) {
       const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'unknown error';
       setToast({ text: `Could not start power dial: ${msg}`, type: 'error' });
     }
-  }, [ensureDevice]);
+  }, [beginRun]);
+
+  // Start a run from a Salesforce list view: the CTI pulls the list's records
+  // via the rep's own SF token (no fragile SF list-view button needed).
+  const startPowerDialFromListView = useCallback(
+    async (object: DialerObjectType, listViewId: string): Promise<void> => {
+      const myRun = ++dialerRunRef.current;
+      try {
+        const { sessionId, recordCount } = await startDialerFromListView(object, listViewId);
+        await beginRun(sessionId, myRun);
+        setToast({ text: `Power Dial started — dialing ${recordCount} record(s).`, type: 'success' });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'unknown error';
+        setToast({ text: `Could not start power dial: ${msg}`, type: 'error' });
+      }
+    },
+    [beginRun],
+  );
 
   // Record intake (handoff seam): the Salesforce LWC (or a test harness) hands
   // us a run via postMessage rather than a direct function call, since it lives
@@ -1028,6 +1049,7 @@ export function App(): JSX.Element {
     <DialerPanel
       sessionId={dialerSessionId}
       onScreenPop={screenPopRecord}
+      onStartFromListView={startPowerDialFromListView}
       onStart={() => { /* App already owns session start (see startPowerDial) */ }}
       onStop={handleDialerStop}
     />

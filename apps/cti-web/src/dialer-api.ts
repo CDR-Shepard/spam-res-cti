@@ -81,3 +81,27 @@ export async function getPendingHandoff(): Promise<{ handoff: PendingHandoff | n
     method: 'GET'
   });
 }
+
+export interface SalesforceListView {
+  id: string;
+  label: string;
+  developerName: string;
+}
+
+/** The rep's Salesforce list views for the object (fetched via their token). */
+export async function getSalesforceListViews(
+  object: DialerObjectType
+): Promise<{ listViews: SalesforceListView[] }> {
+  return api('/dialer/salesforce/listviews?object=' + object, { method: 'GET' });
+}
+
+/** Pull a Salesforce list view's records and start a dialer run over them. */
+export async function startDialerFromListView(
+  object: DialerObjectType,
+  listViewId: string
+): Promise<{ sessionId: string; total: number; recordCount: number }> {
+  return api('/dialer/sessions/from-listview', {
+    method: 'POST',
+    body: { object, listViewId }
+  });
+}

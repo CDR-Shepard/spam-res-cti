@@ -52,12 +52,12 @@ describe('DialerPanel (no @testing-library available — shallow render only)', 
     vi.restoreAllMocks();
   });
 
-  it('renders the empty state when there is no active session', () => {
+  it('renders the list-view picker when there is no active session', () => {
     const html = renderToStaticMarkup(
-      <DialerPanel sessionId={null} onScreenPop={() => {}} onStart={() => {}} onStop={() => {}} />,
+      <DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={() => {}} onStop={() => {}} />,
     );
-    expect(html).toContain('No active run');
-    expect(html).toContain('Salesforce list view');
+    expect(html).toContain('Power dial a list');
+    expect(html).toContain('Opportunities');
   });
 
   it('renders a loading state before the first poll resolves, without crashing', () => {
@@ -69,7 +69,7 @@ describe('DialerPanel (no @testing-library available — shallow render only)', 
       currentItem: null,
     });
     const html = renderToStaticMarkup(
-      <DialerPanel sessionId="sess1" onScreenPop={() => {}} onStart={() => {}} onStop={() => {}} />,
+      <DialerPanel sessionId="sess1" onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={() => {}} onStop={() => {}} />,
     );
     expect(typeof html).toBe('string');
   });

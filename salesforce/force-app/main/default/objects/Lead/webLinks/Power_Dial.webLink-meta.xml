@@ -3,11 +3,10 @@
     <fullName>Power_Dial</fullName>
     <availability>online</availability>
     <displayType>massActionButton</displayType>
-    <encodingKey>UTF-8</encodingKey>
     <height>600</height>
-    <linkType>url</linkType>
+    <linkType>page</linkType>
     <masterLabel>Power Dial</masterLabel>
     <openType>noSidebar</openType>
+    <page>PowerDialListLead</page>
     <protected>false</protected>
-    <url>/flow/PowerDial_List</url>
 </WebLink>
