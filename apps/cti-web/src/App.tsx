@@ -946,7 +946,7 @@ export function App(): JSX.Element {
         </div>
       </div>
       <div className="right">
-        {rep && (
+        {rep && me.user.isAdmin && (
           <button
             className={`rep-chip grade-${rep.avgGrade.toLowerCase()} ${rep.flaggedCount > 0 ? 'flagged' : ''}`}
             title={`Caller reputation ${rep.avgComposite}/100${rep.flaggedCount > 0 ? ` · ${rep.flaggedCount} flagged` : ''}`}
