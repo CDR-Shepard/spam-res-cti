@@ -15,6 +15,7 @@ import { WrapupForm } from './components/WrapupForm';
 import { getPendingHandoff, startDialer, startDialerFromListView, type DialerObjectType } from './dialer-api';
 import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, UserIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
+import { navTabsFor, type Tab } from './nav';
 import {
   initOpenCti, notifyReady, onClickToDial as onCti, saveCallLog, screenPopRecord, setPanelVisibility,
   type ClickToDialEvent,
@@ -34,7 +35,6 @@ interface RepSummary {
 }
 
 type Phase = 'idle' | 'preflight' | 'ringing' | 'active' | 'wrapup';
-type Tab = 'dialer' | 'powerdial' | 'recent' | 'reputation' | 'admin' | 'calls' | 'settings';
 
 interface ActiveCall {
   callId: string;
@@ -1072,22 +1072,16 @@ export function App(): JSX.Element {
     </div>
   );
 
-  const navItems: Array<{ id: Tab; label: string; icon: JSX.Element }> = [
-    { id: 'dialer', label: 'Dial', icon: <GridIcon /> },
-    // Every signed-in rep can run a power-dialer session — not admin-gated.
-    { id: 'powerdial', label: 'Power Dial', icon: <ZapIcon /> },
-    { id: 'recent', label: 'Recent', icon: <ClockIcon /> },
-    { id: 'reputation', label: 'Reputation', icon: <ShieldIcon /> },
-    // Number-pool management + org call log — admins only (server 403s regardless).
-    ...(me.user.isAdmin
-      ? [
-          { id: 'admin' as Tab, label: 'Numbers', icon: <SettingsIcon /> },
-          { id: 'calls' as Tab, label: 'Calls', icon: <PhoneOutgoingIcon /> },
-        ]
-      : []),
-    // Per-rep settings (call forwarding) — every signed-in rep.
-    { id: 'settings', label: 'Settings', icon: <UserIcon /> },
-  ];
+  const iconFor: Record<Tab, JSX.Element> = {
+    dialer: <GridIcon />,
+    powerdial: <ZapIcon />,
+    recent: <ClockIcon />,
+    reputation: <ShieldIcon />,
+    admin: <SettingsIcon />,
+    calls: <PhoneOutgoingIcon />,
+    settings: <UserIcon />,
+  };
+  const navItems = navTabsFor(me.user.isAdmin).map((t) => ({ ...t, icon: iconFor[t.id] }));
 
   return (
     <div className="app">
