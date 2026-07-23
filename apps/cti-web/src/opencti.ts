@@ -19,6 +19,8 @@ interface SforceOpenCti {
   screenPop(args: { type: string; params: Record<string, unknown>; callback?: OpenCtiCallback }): void;
   saveLog(args: { value: Record<string, unknown>; callback?: OpenCtiCallback }): void;
   setSoftphonePanelVisibility?(args: { visible: boolean; callback?: OpenCtiCallback }): void;
+  /** SF's own screen-pop type enum (e.g. SCREENPOP_TYPE.SOBJECT === 'SOBJECT'). */
+  SCREENPOP_TYPE?: { SOBJECT?: string };
 }
 
 export interface ClickToDialEvent {
@@ -144,9 +146,21 @@ export function saveCallLog(value: Record<string, unknown>): Promise<boolean> {
 }
 
 export function screenPopRecord(recordId: string): void {
-  window.sforce?.opencti?.screenPop({
-    type: 'sObject',
+  const opencti = window.sforce?.opencti;
+  if (!opencti) {
+    console.error('[cti] screenPop skipped — Open CTI not available (softphone not embedded in Salesforce?)');
+    return;
+  }
+  // The Open CTI enum value is the UPPERCASE 'SOBJECT' — passing 'sObject'
+  // (camelCase) is rejected as an invalid type and the pop silently fails.
+  // Prefer SF's own constant when present, fall back to the documented literal.
+  const sobjectType = opencti.SCREENPOP_TYPE?.SOBJECT ?? 'SOBJECT';
+  opencti.screenPop({
+    type: sobjectType,
     params: { recordId },
+    callback: (res) => {
+      if (!res?.success) console.error('[cti] screenPop failed', { recordId, errors: res?.errors });
+    },
   });
 }
 

@@ -4,10 +4,19 @@ import { progressLabel, isNextEnabled, pauseResumeAction, DialerPanel } from './
 import * as dialerApi from '../dialer-api';
 
 describe('progressLabel', () => {
-  it('summarizes counts', () => {
+  it('counts every terminal disposition as done, not just connected-and-dispositioned', () => {
+    // 3 done + 5 no-connect + 2 skipped + 0 unreachable = 10 processed; 1 is
+    // connected (rep on the call), 9 still pending.
     expect(
       progressLabel({ total: 20, done: 3, connected: 1, noConnect: 5, skipped: 2, unreachable: 0, pending: 9 }),
-    ).toBe('3 of 20 done · 1 connected · 2 skipped');
+    ).toBe('10 of 20 done · 1 connected · 2 skipped');
+  });
+
+  it('shows a nobody-answered run as fully processed (regression: used to stick at "0 of N")', () => {
+    // 1 no-connect + 1 unreachable, no one connected — the run is complete.
+    expect(
+      progressLabel({ total: 2, done: 0, connected: 0, noConnect: 1, skipped: 0, unreachable: 1, pending: 0 }),
+    ).toBe('2 of 2 done · 0 connected · 0 skipped');
   });
 
   it('handles a fresh, empty run', () => {

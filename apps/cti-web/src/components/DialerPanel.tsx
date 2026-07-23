@@ -26,9 +26,20 @@ import { formatE164 } from '../format';
 const POLL_INTERVAL_MS = 2000;
 const TERMINAL_STATUSES = new Set(['done', 'stopped']);
 
+/**
+ * Records that have reached a terminal disposition — dialed-and-dispositioned
+ * (`done`), no-answer/busy/machine (`noConnect`), rep-skipped (`skipped`), or
+ * no number to dial (`unreachable`). NOT `connected` (rep is on the call) or
+ * `pending`/dialing (not finished). This is what "X of N done" should reflect —
+ * counting only `done` left the bar at "0 of N" for any run nobody answered.
+ */
+export function processedCount(counts: DialerSessionCounts): number {
+  return counts.done + counts.noConnect + counts.skipped + counts.unreachable;
+}
+
 /** Pure — "3 of 20 done · 1 connected · 2 skipped". */
 export function progressLabel(counts: DialerSessionCounts): string {
-  return `${counts.done} of ${counts.total} done · ${counts.connected} connected · ${counts.skipped} skipped`;
+  return `${processedCount(counts)} of ${counts.total} done · ${counts.connected} connected · ${counts.skipped} skipped`;
 }
 
 /** Pure — which dialerControl action the toggle button sends next. */
@@ -277,7 +288,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
 
   const isTerminal = TERMINAL_STATUSES.has(view.session.status);
   const isPaused = view.session.status === 'paused';
-  const pct = view.counts.total > 0 ? Math.round((view.counts.done / view.counts.total) * 100) : 0;
+  const pct = view.counts.total > 0 ? Math.round((processedCount(view.counts) / view.counts.total) * 100) : 0;
 
   return (
     <div className="dialer-panel">
