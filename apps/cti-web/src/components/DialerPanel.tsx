@@ -52,6 +52,19 @@ export function isNextEnabled(item: DialerCurrentItem | null): boolean {
   return item?.status === 'connected';
 }
 
+/**
+ * Pure — should this poll tick tear the run down? A run tears down exactly once,
+ * the moment it first reaches a terminal status (`done` when it finishes on its
+ * own, `stopped` when ended remotely), so the rep's long-lived conference leg is
+ * released from the single Twilio Device. Without this, a run that ENDS BY ITSELF
+ * (nobody presses Stop) leaves that leg connected and the next manual call is
+ * rejected — "a call is already in progress." `alreadyTornDown` is the caller's
+ * latch (a ref) so repeated terminal polls don't re-fire the teardown.
+ */
+export function shouldTeardownRun(status: DialerSession['status'], alreadyTornDown: boolean): boolean {
+  return !alreadyTornDown && TERMINAL_STATUSES.has(status);
+}
+
 /** Status dot color for the current record's dial outcome. */
 function dotClassForItemStatus(status: string): string {
   if (status === 'connected') return 'ok';
@@ -74,6 +87,19 @@ export interface DialerPanelProps {
   onStart: () => void;
   /** Called when the rep stops the run from the Stop control. */
   onStop: () => void;
+  /**
+   * Called once when the run reaches a terminal status without the rep pressing
+   * Stop — it finished on its own (`done`) or was ended remotely (`stopped`).
+   * The parent releases the rep's conference leg (freeing the single Twilio Device
+   * for the next call) but keeps the session, so this panel's completion summary
+   * stays on screen until the rep dismisses it via onDismiss.
+   */
+  onComplete: (result: { status: DialerSession['status']; counts: DialerSessionCounts }) => void;
+  /**
+   * Dismiss a finished/stopped run's summary and return to the list-view picker
+   * (the summary's "Start another run" CTA). Clears the parent's session id.
+   */
+  onDismiss: () => void;
 }
 
 function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Element {
@@ -177,7 +203,7 @@ function ListViewPicker({
 }
 
 export function DialerPanel(props: DialerPanelProps): JSX.Element {
-  const { sessionId, onScreenPop, onStartFromListView, onStart, onStop } = props;
+  const { sessionId, onScreenPop, onStartFromListView, onStart, onStop, onComplete, onDismiss } = props;
   const [view, setView] = useState<DialerSessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [controlBusy, setControlBusy] = useState(false);
@@ -188,10 +214,13 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // Lets a control action (pause/skip/...) trigger an immediate re-poll
   // instead of waiting up to 2s for the next tick.
   const pollNowRef = useRef<() => void>(() => {});
+  // Latch so the terminal-status teardown (onComplete) fires exactly once per run.
+  const completedRef = useRef(false);
 
   useEffect(() => {
     lastPoppedIdRef.current = null;
     pollNowRef.current = () => {};
+    completedRef.current = false;
 
     if (!sessionId) {
       setView(null);
@@ -229,7 +258,17 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
           onScreenPop(current.recordId);
         }
 
-        if (TERMINAL_STATUSES.has(next.session.status)) {
+        // The run reached a terminal status. Stop polling, and if it got there
+        // WITHOUT the rep pressing Stop (a run that finished on its own, or was
+        // ended remotely), release the rep's conference leg via onComplete — the
+        // single Twilio Device is otherwise left busy and the next call fails.
+        // The latch keeps this to exactly one fire even if a poll is already
+        // in flight when the status flips.
+        if (shouldTeardownRun(next.session.status, completedRef.current)) {
+          completedRef.current = true;
+          stopPolling();
+          onComplete({ status: next.session.status, counts: next.counts });
+        } else if (TERMINAL_STATUSES.has(next.session.status)) {
           stopPolling();
         }
       } catch (e: unknown) {
@@ -310,7 +349,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
             Run {view.session.status === 'done' ? 'complete' : 'stopped'}
           </div>
           <div className="dp-summary-meta">{progressLabel(view.counts)}</div>
-          <button className="btn primary full dp-summary-cta" onClick={onStart}>
+          <button className="btn primary full dp-summary-cta" onClick={onDismiss}>
             Start another run
           </button>
         </div>

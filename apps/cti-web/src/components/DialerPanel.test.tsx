@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { progressLabel, isNextEnabled, pauseResumeAction, DialerPanel } from './DialerPanel';
+import { progressLabel, isNextEnabled, pauseResumeAction, shouldTeardownRun, DialerPanel } from './DialerPanel';
 import * as dialerApi from '../dialer-api';
 
 describe('progressLabel', () => {
@@ -44,6 +44,26 @@ describe('control button → dialerControl action mapping', () => {
   });
 });
 
+describe('shouldTeardownRun — release the conference leg when a run ends on its own', () => {
+  it('tears down the moment a run reaches a terminal status (done or stopped)', () => {
+    // A run that finishes by itself (nobody presses Stop) must still release the
+    // rep's long-lived conference leg — otherwise the single Twilio Device stays
+    // busy and the next manual call is rejected ("a call is already in progress").
+    expect(shouldTeardownRun('done', false)).toBe(true);
+    expect(shouldTeardownRun('stopped', false)).toBe(true);
+  });
+
+  it('does not tear down while the run is still going', () => {
+    expect(shouldTeardownRun('active', false)).toBe(false);
+    expect(shouldTeardownRun('paused', false)).toBe(false);
+  });
+
+  it('fires exactly once — a repeat terminal poll after teardown is a no-op', () => {
+    expect(shouldTeardownRun('done', true)).toBe(false);
+    expect(shouldTeardownRun('stopped', true)).toBe(false);
+  });
+});
+
 describe('dialerControl is called with the mapped action', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -63,7 +83,7 @@ describe('DialerPanel (no @testing-library available — shallow render only)', 
 
   it('renders the list-view picker when there is no active session', () => {
     const html = renderToStaticMarkup(
-      <DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={() => {}} onStop={() => {}} />,
+      <DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={() => {}} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />,
     );
     expect(html).toContain('Power dial a list');
     expect(html).toContain('Opportunities');
@@ -78,7 +98,7 @@ describe('DialerPanel (no @testing-library available — shallow render only)', 
       currentItem: null,
     });
     const html = renderToStaticMarkup(
-      <DialerPanel sessionId="sess1" onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={() => {}} onStop={() => {}} />,
+      <DialerPanel sessionId="sess1" onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={() => {}} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />,
     );
     expect(typeof html).toBe('string');
   });

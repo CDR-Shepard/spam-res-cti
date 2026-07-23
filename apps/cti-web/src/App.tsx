@@ -3,7 +3,7 @@ import { api, ApiError, clearSession, readSession, writeSession } from './api';
 import { startRingback, stopRingback } from './ringback';
 import { AdminPanel } from './components/AdminPanel';
 import { CallLog } from './components/CallLog';
-import { DialerPanel } from './components/DialerPanel';
+import { DialerPanel, processedCount } from './components/DialerPanel';
 import { IncomingScreen } from './components/IncomingScreen';
 import { CallScreen } from './components/CallScreen';
 import { Dialpad } from './components/Dialpad';
@@ -12,7 +12,14 @@ import { ReputationPanel } from './components/ReputationPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
-import { getPendingHandoff, startDialer, startDialerFromListView, type DialerObjectType } from './dialer-api';
+import {
+  getPendingHandoff,
+  startDialer,
+  startDialerFromListView,
+  type DialerObjectType,
+  type DialerSession,
+  type DialerSessionCounts,
+} from './dialer-api';
 import { ClockIcon, CloudIcon, GridIcon, MoreIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, UserIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
 import { navTabsFor, NAV_OVERFLOW_IDS, type Tab } from './nav';
@@ -495,16 +502,42 @@ export function App(): JSX.Element {
     }
   }, [signOut]);
 
-  // Disconnect the rep's power-dialer conference leg (if any) and clear the
-  // session. Idempotent — safe to call twice (e.g. Stop button + DialerPanel
-  // unmount), since a second call just finds a null ref and a null sessionId.
-  const handleDialerStop = useCallback(() => {
-    dialerRunRef.current++; // Invalidate any in-flight startPowerDial()
+  // Release the rep's power-dialer conference leg from the single Twilio Device,
+  // freeing it for the next call. Does NOT clear the session (the panel may still
+  // want to show a completion summary). Idempotent — a second call finds a null
+  // ref. Bumps the run generation to invalidate any in-flight startPowerDial().
+  const dropConferenceLeg = useCallback(() => {
+    dialerRunRef.current++;
     const conn = dialerConnRef.current as { disconnect?: () => void } | null;
     dialerConnRef.current = null;
     if (conn) { try { conn.disconnect?.(); } catch { /* already gone */ } }
-    setDialerSessionId(null);
   }, []);
+
+  // Stop control: drop the conference leg AND return to the list-view picker.
+  // Idempotent — safe to call twice (e.g. Stop button + DialerPanel unmount).
+  const handleDialerStop = useCallback(() => {
+    dropConferenceLeg();
+    setDialerSessionId(null);
+  }, [dropConferenceLeg]);
+
+  // The run reached a terminal status on its own (`done`), or was ended remotely
+  // (`stopped`), without the rep pressing Stop. Release the now-idle conference
+  // leg so the Device is free for the next call — but KEEP the session so the
+  // panel's "Run complete — X of N" summary stays on screen (the rep dismisses it
+  // via "Start another run"). Confirm a natural finish with a cross-tab toast (a
+  // remote `stopped` gets the teardown but no toast — the rep didn't finish it).
+  const handleDialerComplete = useCallback(
+    ({ status, counts }: { status: DialerSession['status']; counts: DialerSessionCounts }) => {
+      dropConferenceLeg();
+      if (status === 'done') {
+        setToast({ text: `Power dial complete — ${processedCount(counts)} of ${counts.total} dialed.`, type: 'success' });
+      }
+    },
+    [dropConferenceLeg],
+  );
+
+  // Dismiss a finished/stopped run's summary and return to the list-view picker.
+  const handleDialerDismiss = useCallback(() => setDialerSessionId(null), []);
 
   // Start a server-originated power-dialer run: validate the payload, create
   // the session, switch to the Power Dial tab, then join the rep's softphone to
@@ -1056,6 +1089,8 @@ export function App(): JSX.Element {
       onStartFromListView={startPowerDialFromListView}
       onStart={() => { /* App already owns session start (see startPowerDial) */ }}
       onStop={handleDialerStop}
+      onComplete={handleDialerComplete}
+      onDismiss={handleDialerDismiss}
     />
   ) : (
     <div className="dialer">
