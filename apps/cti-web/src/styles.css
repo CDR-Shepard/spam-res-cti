@@ -376,29 +376,31 @@ label.lbl, .kicker {
 .dialpad {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 4px;
-  margin: 8px auto 12px;
+  gap: 14px;
+  margin: 8px auto 14px;
   max-width: 280px;
+  justify-items: center;
 }
 .dialpad .key {
-  height: 52px;
+  width: 74px; height: 74px;
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
   gap: 1px;
-  border-radius: var(--r-md);
+  border-radius: 50%;
+  background: var(--surface-1);
   transition: background 100ms ease, transform 60ms ease;
 }
 .dialpad .key:hover { background: var(--surface-2); }
-.dialpad .key:active { background: var(--surface-3); transform: scale(0.96); }
+.dialpad .key:active { background: var(--surface-3); transform: scale(0.95); }
 .dialpad .key .num {
-  font-size: 22px; font-weight: 500;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
+  font-size: 23px; font-weight: 550;
+  font-variant-numeric: tabular-nums; letter-spacing: 0.01em;
+  color: var(--text);
 }
 .dialpad .key .sub {
-  font-size: 9px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.12em;
-  color: var(--text-muted);
+  font-size: 8.5px; font-weight: 650;
+  text-transform: uppercase; letter-spacing: 0.16em;
+  color: var(--text-dim);
   margin-top: 1px;
 }
 
