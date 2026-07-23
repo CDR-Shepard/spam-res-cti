@@ -215,17 +215,32 @@ export const outboundNumbers = pgTable(
   }),
 );
 
-export const dialerSessions = pgTable('dialer_sessions', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
-  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  /** The rep's Salesforce User Id — needed to own Tasks in the rollover. */
-  sfOwnerId: text('sf_owner_id').notNull(),
-  objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity'
-  status: dialerSessionStatus('status').default('active').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
-});
+export const dialerSessions = pgTable(
+  'dialer_sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    /** The rep's Salesforce User Id — needed to own Tasks in the rollover. */
+    sfOwnerId: text('sf_owner_id').notNull(),
+    objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity'
+    status: dialerSessionStatus('status').default('active').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    /**
+     * One active session per rep. Session creation now originates a live call
+     * (createAndStartSession -> advanceSession), so a second 'active' row for
+     * the same rep would mean two simultaneous outbound calls — the "one call
+     * in-flight per rep" / TCPA invariant. createDialerSession catches this
+     * violation and returns the rep's existing active session instead.
+     */
+    oneActivePerUserIdx: uniqueIndex('dialer_sessions_one_active_per_user')
+      .on(t.userId)
+      .where(sql`${t.status} = 'active'`),
+  }),
+);
 
 export const dialerQueueItems = pgTable(
   'dialer_queue_items',

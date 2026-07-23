@@ -27,8 +27,9 @@ import { getDb, schema } from '../db/index.js';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { signedCallbackUrl } from '../telephony/webhooks.js';
-import { createDialerSession } from '../dialer/create-session.js';
+import { createAndStartSession } from '../dialer/create-session.js';
 import {
+  advanceSession,
   pauseSession,
   resumeSession,
   skipCurrent,
@@ -230,8 +231,8 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       return reply.code(422).send({ error: 'That list view has no records to dial.' });
     }
     const db = getDb();
-    const result = await createDialerSession(
-      { resolveDialNumber, salesforceUserId, db },
+    const result = await createAndStartSession(
+      { resolveDialNumber, salesforceUserId, db, advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()) },
       { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds },
     );
     return { ...result, recordCount: recordIds.length };
@@ -244,8 +245,8 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
 
     const db = getDb();
-    const result = await createDialerSession(
-      { resolveDialNumber, salesforceUserId, db },
+    const result = await createAndStartSession(
+      { resolveDialNumber, salesforceUserId, db, advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()) },
       {
         userId: authed.userId,
         orgId: authed.orgId,
