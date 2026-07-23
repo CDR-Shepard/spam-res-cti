@@ -19,6 +19,7 @@ interface SforceOpenCti {
   screenPop(args: { type: string; params: Record<string, unknown>; callback?: OpenCtiCallback }): void;
   saveLog(args: { value: Record<string, unknown>; callback?: OpenCtiCallback }): void;
   setSoftphonePanelVisibility?(args: { visible: boolean; callback?: OpenCtiCallback }): void;
+  setSoftphonePanelHeight?(args: { heightPX: number; callback?: OpenCtiCallback }): void;
   /** SF's own screen-pop type enum (e.g. SCREENPOP_TYPE.SOBJECT === 'SOBJECT'). */
   SCREENPOP_TYPE?: { SOBJECT?: string };
 }
@@ -170,4 +171,13 @@ export function screenPopRecord(recordId: string): void {
  */
 export function setPanelVisibility(visible: boolean): void {
   window.sforce?.opencti?.setSoftphonePanelVisibility?.({ visible });
+}
+
+/**
+ * Grow the Open CTI softphone panel to fit the full dial screen (circular pad +
+ * call button + nav) without clipping. No-op outside Salesforce; Salesforce
+ * clamps to the utility bar's allowed range.
+ */
+export function setPanelHeight(heightPX: number): void {
+  window.sforce?.opencti?.setSoftphonePanelHeight?.({ heightPX });
 }

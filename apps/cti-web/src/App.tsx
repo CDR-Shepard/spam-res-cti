@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, clearSession, readSession, writeSession } from './api';
 import { startRingback, stopRingback } from './ringback';
 import { AdminPanel } from './components/AdminPanel';
@@ -13,11 +13,11 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
 import { getPendingHandoff, startDialer, startDialerFromListView, type DialerObjectType } from './dialer-api';
-import { ClockIcon, CloudIcon, GridIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, UserIcon, ZapIcon } from './icons';
+import { ClockIcon, CloudIcon, GridIcon, MoreIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, UserIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
-import { navTabsFor, type Tab } from './nav';
+import { navTabsFor, NAV_OVERFLOW_IDS, type Tab } from './nav';
 import {
-  initOpenCti, notifyReady, onClickToDial as onCti, saveCallLog, screenPopRecord, setPanelVisibility,
+  initOpenCti, notifyReady, onClickToDial as onCti, saveCallLog, screenPopRecord, setPanelHeight, setPanelVisibility,
   type ClickToDialEvent,
 } from './opencti';
 
@@ -85,6 +85,7 @@ export function App(): JSX.Element {
   // retries — inbound callbacks will stop arriving, so surface it in the header.
   const [inboundDegraded, setInboundDegraded] = useState(false);
   const [tab, setTab] = useState<Tab>('dialer');
+  const [moreOpen, setMoreOpen] = useState(false);
   const [rep, setRep] = useState<RepSummary | null>(null);
 
   const [raw, setRaw] = useState('');
@@ -343,6 +344,9 @@ export function App(): JSX.Element {
             void runFirewallNow(evt.number, evt.recordId);
           });
           notifyReady();
+          // Grow the utility panel so the taller circular dialpad + call button
+          // + nav all fit without clipping.
+          setPanelHeight(600);
         } else if (r.reason) {
           // Standalone preview — fine, just no click-to-dial.
           console.info('Open CTI not initialized:', r.reason);
@@ -1082,6 +1086,11 @@ export function App(): JSX.Element {
     settings: <UserIcon />,
   };
   const navItems = navTabsFor(me.user.isAdmin).map((t) => ({ ...t, icon: iconFor[t.id] }));
+  // Keep the bottom bar uncrowded: the admin-only tools live under a "More"
+  // overflow (reps have none, so their bar is just the 4 primary tabs).
+  const primaryItems = navItems.filter((i) => !NAV_OVERFLOW_IDS.includes(i.id));
+  const overflowItems = navItems.filter((i) => NAV_OVERFLOW_IDS.includes(i.id));
+  const overflowActive = overflowItems.some((i) => i.id === tab);
 
   return (
     <div className="app">
@@ -1091,11 +1100,45 @@ export function App(): JSX.Element {
       <div className="body">{body}</div>
       {!inCall && (
         <div className="nav">
-          {navItems.map((i) => (
-            <button key={i.id} className={`tab ${tab === i.id ? 'active' : ''}`} onClick={() => setTab(i.id)}>
-              {i.icon}
-              <span>{i.label}</span>
-            </button>
+          {primaryItems.map((i) => (
+            <Fragment key={i.id}>
+              {i.id === 'settings' && overflowItems.length > 0 && (
+                <div className="tab-more">
+                  <button
+                    className={`tab ${overflowActive ? 'active' : ''}`}
+                    onClick={() => setMoreOpen((o) => !o)}
+                    aria-expanded={moreOpen}
+                  >
+                    <MoreIcon />
+                    <span>More</span>
+                  </button>
+                  {moreOpen && (
+                    <>
+                      <div className="nav-more-backdrop" onClick={() => setMoreOpen(false)} />
+                      <div className="nav-more-pop">
+                        {overflowItems.map((o) => (
+                          <button
+                            key={o.id}
+                            className={`more-item ${tab === o.id ? 'active' : ''}`}
+                            onClick={() => { setTab(o.id); setMoreOpen(false); }}
+                          >
+                            {o.icon}
+                            <span>{o.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+              <button
+                className={`tab ${tab === i.id ? 'active' : ''}`}
+                onClick={() => { setTab(i.id); setMoreOpen(false); }}
+              >
+                {i.icon}
+                <span>{i.label}</span>
+              </button>
+            </Fragment>
           ))}
         </div>
       )}

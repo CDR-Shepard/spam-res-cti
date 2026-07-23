@@ -83,6 +83,14 @@ export const MicOffIcon = (p: IconProps): JSX.Element => (
   </Svg>
 );
 
+export const MoreIcon = (p: IconProps): JSX.Element => (
+  <Svg {...p}>
+    <circle cx="5" cy="12" r="1.2" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none" />
+    <circle cx="19" cy="12" r="1.2" fill="currentColor" stroke="none" />
+  </Svg>
+);
+
 export const GridIcon = (p: IconProps): JSX.Element => (
   <Svg {...p}>
     <circle cx="6" cy="6" r="1" fill="currentColor" stroke="none" />

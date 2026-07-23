@@ -230,6 +230,33 @@ input, select, textarea { font: inherit; color: inherit; }
 .nav .tab:hover { color: var(--text-muted); }
 .nav .tab.active { color: var(--accent); }
 
+/* "More" overflow — admin tools tucked into a popover above the bar. */
+.nav .tab-more { position: relative; flex: 1; display: flex; }
+.nav .tab-more > .tab { flex: 1; }
+.nav-more-backdrop { position: fixed; inset: 0; z-index: 15; }
+.nav-more-pop {
+  position: absolute; z-index: 16;
+  bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  min-width: 172px;
+  background: var(--bg-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-soft);
+  padding: 6px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.nav-more-pop .more-item {
+  display: flex; align-items: center; gap: 11px;
+  width: 100%; padding: 9px 11px;
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  font-size: 13px; font-weight: 500; text-align: left;
+  transition: background 100ms ease, color 100ms ease;
+}
+.nav-more-pop .more-item svg { width: 18px; height: 18px; flex: none; }
+.nav-more-pop .more-item:hover { background: var(--surface-2); color: var(--text); }
+.nav-more-pop .more-item.active { background: var(--accent-soft); color: var(--accent); }
+
 /* ============================================================================ */
 /* Primitives                                                                   */
 /* ============================================================================ */

@@ -6,6 +6,13 @@ export interface NavTab {
 }
 
 /**
+ * Tabs tucked under the "More" overflow so the bottom bar stays uncrowded — the
+ * admin-only tools. Reps never see these (navTabsFor omits them), so their bar
+ * has no "More" at all. Order preserved from navTabsFor.
+ */
+export const NAV_OVERFLOW_IDS: readonly Tab[] = ['reputation', 'admin', 'calls'];
+
+/**
  * The bottom-nav tabs, in order, for a given rep. Reputation, Numbers (`admin`)
  * and Calls are admin-only (the corresponding endpoints also 403 non-admins);
  * every rep gets Dial, Power Dial, Recent, and Settings.
