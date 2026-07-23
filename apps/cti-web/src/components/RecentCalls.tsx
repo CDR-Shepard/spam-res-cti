@@ -4,7 +4,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { formatDuration, formatE164, relativeTime } from '../format';
-import { CheckCircleIcon, ClockIcon, PhoneOffIcon, PhoneOutgoingIcon } from '../icons';
+import { CheckCircleIcon, ClockIcon, PhoneMissedIcon, PhoneOutgoingIcon } from '../icons';
 
 export interface CallRow {
   id: string;
@@ -74,7 +74,7 @@ export function RecentCalls({ onReopen }: RecentCallsProps): JSX.Element {
     <div className="list">
       {calls.map((c) => {
         const kind = classify(c);
-        const Icon = kind === 'missed' ? PhoneOffIcon : kind === 'connected' ? CheckCircleIcon : PhoneOutgoingIcon;
+        const Icon = kind === 'missed' ? PhoneMissedIcon : kind === 'connected' ? CheckCircleIcon : PhoneOutgoingIcon;
         const pending = needsDisposition(c);
         const reopenable = pending && !!onReopen;
         return (
