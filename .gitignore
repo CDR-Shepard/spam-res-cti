@@ -54,3 +54,6 @@ services/cti-api/drizzle/meta/
 *.key
 *.p12
 .secrets/
+
+# brainstorming visual companion scratch
+.superpowers/
