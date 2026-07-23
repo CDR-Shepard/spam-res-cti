@@ -41,7 +41,7 @@ import {
 import { inFlightItem } from '../dialer/state.js';
 import { sessionCounts } from '../dialer/session-store.js';
 import { TwilioDialerTelephony } from '../dialer/twilio-telephony.js';
-import { pickPoolDid, withinCallingHours } from '../dialer/pick-did.js';
+import { pickPoolDid, withinCallingHours, parseCallingHoursExempt } from '../dialer/pick-did.js';
 import { mapAnsweredBy } from '../dialer/amd.js';
 import { rolloverFollowUp } from '../salesforce/followup.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
@@ -79,11 +79,15 @@ function orgTodayIso(): string {
 /** Real EngineDeps for a request. Screen-pop is wired by Plan 4. */
 function buildEngineDeps(): EngineDeps {
   const db = getDb();
+  const cfg = loadConfig();
+  // Owned test DIDs in the allowlist skip the calling-hours guard so a dial-flow
+  // test can run outside 8am-9pm; every other number still respects it.
+  const exempt = parseCallingHoursExempt(cfg.DIALER_CALLING_HOURS_EXEMPT);
   return {
     db,
     telephony: new TwilioDialerTelephony(),
     pickDid: (orgId, userId, toE164) => pickPoolDid(db, { orgId, userId, toE164 }),
-    withinCallingHours,
+    withinCallingHours: (toE164, nowUtc) => exempt.has(toE164) || withinCallingHours(toE164, nowUtc),
     nowUtc: new Date(),
     rolloverFollowUp,
     onScreenPop: () => {}, // Plan 4 wires Open CTI screen-pop

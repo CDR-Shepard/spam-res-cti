@@ -1,5 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
-import { pickPoolDid, withinCallingHours, type Db } from './pick-did.js';
+import { pickPoolDid, withinCallingHours, parseCallingHoursExempt, type Db } from './pick-did.js';
+
+describe('parseCallingHoursExempt', () => {
+  it('parses a comma-separated E.164 allowlist (trims, drops empties)', () => {
+    const s = parseCallingHoursExempt(' +12054303297 , +16195550100 ,');
+    expect(s.has('+12054303297')).toBe(true);
+    expect(s.has('+16195550100')).toBe(true);
+    expect(s.size).toBe(2);
+  });
+  it('is empty for undefined or blank — no exemptions by default', () => {
+    expect(parseCallingHoursExempt(undefined).size).toBe(0);
+    expect(parseCallingHoursExempt('').size).toBe(0);
+    expect(parseCallingHoursExempt('  ,  ').size).toBe(0);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // withinCallingHours

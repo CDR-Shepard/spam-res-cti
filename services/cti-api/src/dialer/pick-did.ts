@@ -58,6 +58,16 @@ export function withinCallingHours(toE164: string, nowUtc: Date): boolean {
   return hour >= CALLING_HOUR_START && hour <= CALLING_HOUR_END_INCLUSIVE;
 }
 
+/**
+ * Parse the DIALER_CALLING_HOURS_EXEMPT allowlist (comma-separated E.164) into a
+ * Set. Numbers in it skip the calling-hours guard entirely — for OWNED test DIDs
+ * only. Empty/undefined → an empty Set (no exemptions).
+ */
+export function parseCallingHoursExempt(csv: string | undefined): Set<string> {
+  if (!csv) return new Set();
+  return new Set(csv.split(',').map((s) => s.trim()).filter(Boolean));
+}
+
 function effectiveCapFor(n: Pick<OutboundNumber, 'firstUsedAt' | 'warmupOverrideCap'>): number {
   const daysSince = n.firstUsedAt ? Math.floor((Date.now() - n.firstUsedAt.getTime()) / 86_400_000) : null;
   return n.warmupOverrideCap ?? warmupCapForAge(daysSince).cap;
