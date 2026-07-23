@@ -137,20 +137,19 @@ input, select, textarea { font: inherit; color: inherit; }
   -webkit-app-region: no-drag;
 }
 .avatar {
-  width: 28px; height: 28px; border-radius: 50%;
-  background: linear-gradient(135deg, #5b8cff 0%, #22c55e 100%);
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--accent);
   display: grid; place-items: center;
-  color: white; font-weight: 700; font-size: 11px;
+  color: white; font-weight: 600; font-size: 11px;
   letter-spacing: 0.04em;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06) inset;
 }
 .avatar.photo { object-fit: cover; background: transparent; }
 .identity { display: flex; flex-direction: column; }
-.identity .name { font-size: 12px; font-weight: 600; line-height: 1.15; }
+.identity .name { font-size: 13px; font-weight: 600; line-height: 1.15; }
 .identity .name.editable { cursor: pointer; }
 .identity .name.editable:hover { color: var(--accent); }
 .identity .status {
-  font-size: 10px; color: var(--text-muted);
+  font-size: 11px; color: var(--text-muted);
   display: flex; align-items: center; gap: 4px; line-height: 1.4;
 }
 .field.name-edit { padding: 4px 8px; font-size: 12px; font-weight: 600; }
@@ -213,24 +212,23 @@ input, select, textarea { font: inherit; color: inherit; }
 .nav {
   display: flex;
   align-items: center;
-  padding: 6px 14px 10px;
+  padding: 8px 10px 12px;
   border-top: 1px solid var(--hairline);
-  background: var(--bg-2);
+  background: var(--bg-1);
 }
 .nav .tab {
   flex: 1;
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
-  padding: 6px 4px;
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 5px 4px;
   color: var(--text-dim);
   border-radius: var(--r-sm);
-  font-size: 10px; font-weight: 500;
-  letter-spacing: 0.02em;
+  font-size: 10px; font-weight: 600;
+  letter-spacing: 0.01em;
   transition: color 100ms ease;
 }
-.nav .tab svg { width: 18px; height: 18px; }
+.nav .tab svg { width: 20px; height: 20px; }
 .nav .tab:hover { color: var(--text-muted); }
 .nav .tab.active { color: var(--accent); }
-.nav .tab.active svg { filter: drop-shadow(0 0 4px var(--accent-glow)); }
 
 /* ============================================================================ */
 /* Primitives                                                                   */
