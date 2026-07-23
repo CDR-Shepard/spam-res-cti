@@ -128,7 +128,7 @@ const baseSession = { id: 'S1', orgId: 'O1', userId: 'U1', sfOwnerId: '005', obj
 function makeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
   return {
     db: undefined as any,
-    telephony: { originate: vi.fn(async () => ({ callId: 'CA1' })), bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}) },
+    telephony: { originate: vi.fn(async () => ({ callId: 'CA1' })), bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}), endConference: vi.fn(async () => {}) },
     pickDid: vi.fn(async () => ({ e164: '+16190000000' })) as any,
     withinCallingHours: vi.fn(() => true) as any,
     nowUtc: new Date(Date.UTC(2026, 6, 13, 18, 0, 0)),
@@ -156,6 +156,25 @@ describe('advanceSession', () => {
     expect((await advanceSession('S1', deps)).action).toBe('waiting');
     expect(deps.telephony.originate).not.toHaveBeenCalled();
   });
+  it('does NOT release the conference on a non-terminal advance (rep is still mid-run)', async () => {
+    // Guards against a regression that releases the conference unconditionally:
+    // dropping the rep's leg mid-run would kill the run and free the Device
+    // while calls are still being placed.
+    const dialing = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const d1 = makeDeps(); d1.db = fakeDb(baseSession, dialing);
+    expect((await advanceSession('S1', d1)).action).toBe('dialing');
+    expect(d1.telephony.endConference).not.toHaveBeenCalled();
+
+    const inFlight = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const d2 = makeDeps(); d2.db = fakeDb(baseSession, inFlight);
+    expect((await advanceSession('S1', d2)).action).toBe('waiting');
+    expect(d2.telephony.endConference).not.toHaveBeenCalled();
+
+    const noNumbers = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const d3 = makeDeps({ pickDid: vi.fn(async () => null) as any }); d3.db = fakeDb(baseSession, noNumbers);
+    expect((await advanceSession('S1', d3)).action).toBe('paused_no_numbers');
+    expect(d3.telephony.endConference).not.toHaveBeenCalled();
+  });
   it('is idle when the session is not active', async () => {
     const deps = makeDeps(); deps.db = fakeDb({ ...baseSession, status: 'paused' }, []);
     expect((await advanceSession('S1', deps)).action).toBe('idle');
@@ -163,6 +182,32 @@ describe('advanceSession', () => {
   it('marks the session done and returns { action: "done" } when no items are pending', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await advanceSession('S1', deps);
+    expect(r.action).toBe('done');
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+  });
+  it('releases the rep conference when the queue drains, so the softphone Device is freed', async () => {
+    // Server-side backstop: the rep leg joins with endConferenceOnExit=true, so
+    // normally the client's own disconnect collapses the conference. If the
+    // browser stopped polling (tab switched away, asleep), nothing would ever
+    // end it — the rep's single Twilio Device stays busy and their next call
+    // fails "a call is already in progress".
+    const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
+    const deps = makeDeps(); deps.db = fakeDb(baseSession, items);
+    await advanceSession('S1', deps);
+    expect(deps.telephony.endConference).toHaveBeenCalledWith('U1');
+  });
+  it('still completes the run when releasing the conference fails (best-effort, never throws)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
+    const deps = makeDeps({
+      telephony: {
+        originate: vi.fn(async () => ({ callId: 'CA1' })),
+        bridgeToRep: vi.fn(async () => {}),
+        hangup: vi.fn(async () => {}),
+        endConference: vi.fn(async () => { throw new Error('twilio 500'); }),
+      },
+    });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
     const r = await advanceSession('S1', deps);
     expect(r.action).toBe('done');
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
@@ -212,7 +257,7 @@ describe('advanceSession', () => {
     // retry. The claim already committed 'dialing' via the transaction, so
     // the rollback is a follow-up write back to 'pending'.
     const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
-    const deps = makeDeps({ telephony: { originate: vi.fn(async () => { throw new Error('twilio 500'); }), bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}) } });
+    const deps = makeDeps({ telephony: { originate: vi.fn(async () => { throw new Error('twilio 500'); }), bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}), endConference: vi.fn(async () => {}) } });
     const fdb = fakeDb(baseSession, items); deps.db = fdb;
     await expect(advanceSession('S1', deps)).rejects.toThrow('twilio 500');
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'dialing' }) }); // claim landed
@@ -391,6 +436,27 @@ describe('stopSession', () => {
     expect(deps.telephony.hangup).not.toHaveBeenCalled();
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'stopped' }) });
     expect(r).toEqual({ action: 'stopped' });
+  });
+  it('releases the rep conference on stop, so the softphone Device is freed', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); deps.db = fakeDb(baseSession, items);
+    await stopSession('S1', deps);
+    expect(deps.telephony.endConference).toHaveBeenCalledWith('U1');
+  });
+  it('still stops when releasing the conference fails (best-effort, never throws)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps({
+      telephony: {
+        originate: vi.fn(async () => ({ callId: 'CA1' })),
+        bridgeToRep: vi.fn(async () => {}),
+        hangup: vi.fn(async () => {}),
+        endConference: vi.fn(async () => { throw new Error('twilio 500'); }),
+      },
+    });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await stopSession('S1', deps);
+    expect(r).toEqual({ action: 'stopped' });
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'stopped' }) });
   });
 });
 

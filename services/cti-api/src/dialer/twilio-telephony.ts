@@ -27,6 +27,12 @@ export interface TwilioDialerClient {
   calls: ((callSid: string) => { update(args: Record<string, unknown>): Promise<unknown> }) & {
     create(args: Record<string, unknown>): Promise<{ sid: string }>;
   };
+  /** Same callable-plus-methods shape as `calls`, for conference teardown:
+   *  `conferences.list({...})` to resolve a friendly name to SIDs, and
+   *  `conferences(sid).update({...})` to complete one. */
+  conferences: ((conferenceSid: string) => { update(args: Record<string, unknown>): Promise<unknown> }) & {
+    list(args: Record<string, unknown>): Promise<{ sid: string }[]>;
+  };
 }
 
 /** PURE: the per-rep power-dialer conference name. Dashes are stripped so the
@@ -120,5 +126,26 @@ export class TwilioDialerTelephony implements DialerTelephony {
   async hangup(callId: string): Promise<void> {
     const client = this.clientFactory();
     await client.calls(callId).update({ status: 'completed' } as never);
+  }
+
+  /**
+   * End the rep's conference when their run ends — the server-side backstop for
+   * a client that never disconnected (tab switched away mid-run, asleep, stalled
+   * polling), which would otherwise leave the leg billing and the rep's single
+   * Twilio Device busy. The friendly name is stable per rep (`conferenceName`)
+   * but the conference SID rotates every run, so resolve it by name first.
+   * Completing every in-progress match keeps it correct even if a stale room
+   * somehow lingers alongside a new one. No matches (the usual case, since the
+   * rep's own leg already collapsed it) is a no-op.
+   */
+  async endConference(userId: string): Promise<void> {
+    const client = this.clientFactory();
+    const rooms = await client.conferences.list({
+      friendlyName: conferenceName(userId),
+      status: 'in-progress',
+    });
+    for (const room of rooms) {
+      await client.conferences(room.sid).update({ status: 'completed' } as never);
+    }
   }
 }

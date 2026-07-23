@@ -77,10 +77,20 @@ describe('dialerConferenceTwiml', () => {
 // TwilioDialerTelephony — REST calls via an injected fake client
 // ---------------------------------------------------------------------------
 
-/** Fake twilio client: records every create()/update() call it receives. */
-function fakeClient(): { client: TwilioDialerClient; createCalls: Record<string, unknown>[]; updateCalls: { callId: string; args: Record<string, unknown> }[] } {
+/** Fake twilio client: records every create()/update()/list() call it receives.
+ *  `rooms` is what `conferences.list()` resolves to (the in-progress conferences
+ *  matching the queried friendly name). */
+function fakeClient(rooms: { sid: string }[] = []): {
+  client: TwilioDialerClient;
+  createCalls: Record<string, unknown>[];
+  updateCalls: { callId: string; args: Record<string, unknown> }[];
+  conferenceListArgs: Record<string, unknown>[];
+  conferenceUpdates: { sid: string; args: Record<string, unknown> }[];
+} {
   const createCalls: Record<string, unknown>[] = [];
   const updateCalls: { callId: string; args: Record<string, unknown> }[] = [];
+  const conferenceListArgs: Record<string, unknown>[] = [];
+  const conferenceUpdates: { sid: string; args: Record<string, unknown> }[] = [];
 
   const callsFn = ((callSid: string) => ({
     update: async (args: Record<string, unknown>) => {
@@ -93,7 +103,24 @@ function fakeClient(): { client: TwilioDialerClient; createCalls: Record<string,
     return { sid: 'CA1' };
   };
 
-  return { client: { calls: callsFn }, createCalls, updateCalls };
+  const conferencesFn = ((sid: string) => ({
+    update: async (args: Record<string, unknown>) => {
+      conferenceUpdates.push({ sid, args });
+      return {};
+    },
+  })) as TwilioDialerClient['conferences'];
+  conferencesFn.list = async (args: Record<string, unknown>) => {
+    conferenceListArgs.push(args);
+    return rooms;
+  };
+
+  return {
+    client: { calls: callsFn, conferences: conferencesFn },
+    createCalls,
+    updateCalls,
+    conferenceListArgs,
+    conferenceUpdates,
+  };
 }
 
 describe('TwilioDialerTelephony.originate', () => {
@@ -167,5 +194,34 @@ describe('TwilioDialerTelephony.hangup', () => {
     expect(updateCalls).toHaveLength(1);
     expect(updateCalls[0]!.callId).toBe('CA1');
     expect(updateCalls[0]!.args).toEqual({ status: 'completed' });
+  });
+});
+
+describe('TwilioDialerTelephony.endConference', () => {
+  it('resolves the rep conference by friendly name and completes it', async () => {
+    // The friendly name is stable per rep (conferenceName) but the conference
+    // SID rotates every run, so the SID must be looked up rather than stored.
+    const { client, conferenceListArgs, conferenceUpdates } = fakeClient([{ sid: 'CF1' }]);
+    const telephony = new TwilioDialerTelephony(() => client);
+    await telephony.endConference('user-1');
+
+    expect(conferenceListArgs).toEqual([{ friendlyName: conferenceName('user-1'), status: 'in-progress' }]);
+    expect(conferenceUpdates).toEqual([{ sid: 'CF1', args: { status: 'completed' } }]);
+  });
+
+  it('is a no-op when the rep has no in-progress conference (the client leg already collapsed it)', async () => {
+    const { client, conferenceUpdates } = fakeClient([]);
+    const telephony = new TwilioDialerTelephony(() => client);
+    await telephony.endConference('user-1');
+
+    expect(conferenceUpdates).toEqual([]);
+  });
+
+  it('completes every matching in-progress conference, not just the first', async () => {
+    const { client, conferenceUpdates } = fakeClient([{ sid: 'CF1' }, { sid: 'CF2' }]);
+    const telephony = new TwilioDialerTelephony(() => client);
+    await telephony.endConference('user-1');
+
+    expect(conferenceUpdates.map((u) => u.sid)).toEqual(['CF1', 'CF2']);
   });
 });

@@ -17,6 +17,11 @@ function fakeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
       originate: vi.fn(unexpected('telephony.originate')),
       bridgeToRep: vi.fn(unexpected('telephony.bridgeToRep')),
       hangup: vi.fn(async () => {}),
+      // Only here to satisfy the DialerTelephony interface. These tests inject a
+      // fake `runHandleDialOutcome`, so the real
+      // handleDialOutcome -> advanceSession -> endConference chain never runs in
+      // this file; that path is covered in dialer/engine.test.ts.
+      endConference: vi.fn(async () => {}),
     },
     pickDid: vi.fn(unexpected('pickDid')) as unknown as EngineDeps['pickDid'],
     withinCallingHours: vi.fn(unexpected('withinCallingHours')) as unknown as EngineDeps['withinCallingHours'],

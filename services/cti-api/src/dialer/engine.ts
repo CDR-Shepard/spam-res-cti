@@ -33,6 +33,24 @@ async function setItem(deps: EngineDeps, id: string, patch: Partial<DialerItem>)
   await deps.db.update(schema.dialerQueueItems).set({ ...patch, updatedAt: new Date() }).where(eq(schema.dialerQueueItems.id, id));
 }
 
+/**
+ * Release the rep's conference now that their run is over, freeing their single
+ * Twilio Device for the next call. The rep's softphone normally does this itself
+ * (its leg joins with `endConferenceOnExit=true`); this is the backstop for when
+ * the client never disconnects — tab switched away mid-run, asleep, or polling
+ * stalled — which would otherwise leave the leg billing and the Device busy.
+ *
+ * Strictly best-effort: a Twilio failure here must never fail the run's
+ * completion, which is already committed to the DB by the time we're called.
+ */
+async function releaseRepConference(deps: EngineDeps, userId: string, sessionId: string): Promise<void> {
+  try {
+    await deps.telephony.endConference(userId);
+  } catch (err) {
+    console.error('[dialer] endConference failed', { sessionId, userId, err: (err as Error).message });
+  }
+}
+
 export async function advanceSession(
   sessionId: string,
   deps: EngineDeps,
@@ -45,7 +63,17 @@ export async function advanceSession(
   // Skip any unreachable pendings (defensive; creation already marks them).
   for (;;) {
     const next = nextPendingItem(items);
-    if (!next) { await setSession(deps, sessionId, 'done'); return { action: 'done' }; }
+    if (!next) {
+      // Release the conference BEFORE flipping the session out of 'active'. The
+      // conference friendly name is rep-scoped (`pd_<userId>`), not per-run, so a
+      // teardown that ran after the flip could resolve — and complete — the NEXT
+      // run's conference. While this session is still 'active' the
+      // one-active-session-per-rep index blocks a new run from starting, which
+      // closes that window.
+      await releaseRepConference(deps, session.userId, sessionId);
+      await setSession(deps, sessionId, 'done');
+      return { action: 'done' };
+    }
     if (!next.toNumber) {
       await setItem(deps, next.id, { status: 'unreachable' });
       items = items.map((i) => (i.id === next.id ? { ...i, status: 'unreachable' } : i));
@@ -140,11 +168,25 @@ export async function skipCurrent(sessionId: string, deps: EngineDeps): ReturnTy
   return advanceSession(sessionId, deps);
 }
 
-/** Hang up any in-flight dial and stop the session outright. */
+/**
+ * Hang up any in-flight dial and stop the session outright.
+ *
+ * A `connected` (already-bridged) call is deliberately NOT hung up by the
+ * `hangup` call below — but releasing the rep's conference ends it anyway,
+ * disconnecting every participant. That matches what the rep already sees: the
+ * softphone's Stop drops their own conference leg (which carries
+ * `endConferenceOnExit=true`) as soon as the stop request resolves, so a live
+ * conversation ends on Stop either way.
+ */
 export async function stopSession(sessionId: string, deps: EngineDeps): Promise<{ action: 'stopped' }> {
-  const items = await loadItems(deps, sessionId);
+  const [session, items] = await Promise.all([
+    deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) }),
+    loadItems(deps, sessionId),
+  ]);
   const item = inFlightItem(items);
   if (item && item.status === 'dialing' && item.callId) await deps.telephony.hangup(item.callId);
+  // Released before the status flip, for the same cross-run reason as advanceSession.
+  if (session) await releaseRepConference(deps, session.userId, sessionId);
   await setSession(deps, sessionId, 'stopped');
   return { action: 'stopped' };
 }
