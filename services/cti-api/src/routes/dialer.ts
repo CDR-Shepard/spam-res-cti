@@ -131,7 +131,11 @@ export async function onDialerStatus(
 ): Promise<void> {
   const callSid = body.CallSid ?? '';
   const status = body.CallStatus ?? body.DialCallStatus ?? '';
-  if (TERMINAL_NO_CONNECT_STATUSES.has(status)) {
+  // A TRUE no-answer (rang out) is the only miss that falls back to the record's
+  // Phone number; busy / failed / canceled are plain no-connects that do not.
+  if (status === 'no-answer') {
+    await runHandleDialOutcome(callSid, 'no_answer', deps);
+  } else if (TERMINAL_NO_CONNECT_STATUSES.has(status)) {
     await runHandleDialOutcome(callSid, 'no_connect', deps);
   }
 }

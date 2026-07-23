@@ -63,8 +63,15 @@ describe('onDialerAmd', () => {
 });
 
 describe('onDialerStatus', () => {
-  it.each(['no-answer', 'busy', 'failed', 'canceled'])(
-    'CallStatus=%s reports no_connect',
+  it('CallStatus=no-answer reports no_answer (the only fallback-eligible miss)', async () => {
+    const deps = fakeDeps();
+    const runHandleDialOutcome = vi.fn(async () => {});
+    await onDialerStatus({ CallSid: 'CA1', CallStatus: 'no-answer' }, deps, runHandleDialOutcome);
+    expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'no_answer', deps);
+  });
+
+  it.each(['busy', 'failed', 'canceled'])(
+    'CallStatus=%s reports no_connect (never falls back to the Phone)',
     async (status) => {
       const deps = fakeDeps();
       const runHandleDialOutcome = vi.fn(async () => {});
@@ -73,11 +80,11 @@ describe('onDialerStatus', () => {
     },
   );
 
-  it('falls back to DialCallStatus when CallStatus is absent', async () => {
+  it('falls back to DialCallStatus when CallStatus is absent (no-answer → no_answer)', async () => {
     const deps = fakeDeps();
     const runHandleDialOutcome = vi.fn(async () => {});
     await onDialerStatus({ CallSid: 'CA1', DialCallStatus: 'no-answer' }, deps, runHandleDialOutcome);
-    expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'no_connect', deps);
+    expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'no_answer', deps);
   });
 
   it('a non-terminal status (e.g. in-progress) is a no-op — AMD/connect owns that transition', async () => {

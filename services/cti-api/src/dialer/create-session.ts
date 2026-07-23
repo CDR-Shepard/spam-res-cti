@@ -13,10 +13,11 @@ function isActiveSessionConflict(err: unknown): boolean {
 export function buildQueueRows(
   sessionId: string,
   objectType: string,
-  resolved: Array<{ recordId: string; toNumber: string | null }>,
-): Array<{ sessionId: string; ordinal: number; objectType: string; recordId: string; toNumber: string | null; status: 'pending' | 'unreachable' }> {
+  resolved: Array<{ recordId: string; toNumber: string | null; fallbackNumber?: string | null }>,
+): Array<{ sessionId: string; ordinal: number; objectType: string; recordId: string; toNumber: string | null; fallbackNumber: string | null; status: 'pending' | 'unreachable' }> {
   return resolved.map((r, i) => ({
     sessionId, ordinal: i, objectType, recordId: r.recordId, toNumber: r.toNumber,
+    fallbackNumber: r.fallbackNumber ?? null,
     status: r.toNumber ? 'pending' : 'unreachable',
   }));
 }
@@ -32,10 +33,10 @@ export async function createDialerSession(
   args: { userId: string; orgId: string; objectType: 'Lead' | 'Opportunity'; recordIds: string[] },
 ): Promise<{ sessionId: string; total: number }> {
   const sfOwnerId = await deps.salesforceUserId(args.userId);
-  const resolved: Array<{ recordId: string; toNumber: string | null }> = [];
+  const resolved: Array<{ recordId: string; toNumber: string | null; fallbackNumber: string | null }> = [];
   for (const recordId of args.recordIds) {
     const r = await deps.resolveDialNumber(args.userId, args.objectType, recordId);
-    resolved.push({ recordId, toNumber: r?.e164 ?? null });
+    resolved.push({ recordId, toNumber: r?.e164 ?? null, fallbackNumber: r?.fallbackE164 ?? null });
   }
   let session: typeof schema.dialerSessions.$inferSelect | undefined;
   try {

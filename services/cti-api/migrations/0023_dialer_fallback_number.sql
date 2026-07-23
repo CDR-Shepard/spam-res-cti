@@ -1,0 +1,12 @@
+-- Mobile → Phone no-answer fallback.
+--
+-- Each dialer queue item can carry a second number to try when the primary
+-- (the record's Mobile) rings out with a TRUE no-answer (not busy, not
+-- voicemail/machine). `to_number` holds the number currently being dialed
+-- (Mobile first); `fallback_number` holds the record's Phone when it exists and
+-- differs from the Mobile. On a true no-answer of the Mobile, the engine swaps
+-- `to_number := fallback_number`, clears `fallback_number`, and re-queues the
+-- item so it dials the Phone next. Any other outcome (connected, busy,
+-- voicemail/machine, failed) does NOT fall back. See dialer/engine.ts
+-- handleDialOutcome and salesforce/record-phone.ts.
+ALTER TABLE "dialer_queue_items" ADD COLUMN IF NOT EXISTS "fallback_number" text;

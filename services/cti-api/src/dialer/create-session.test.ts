@@ -19,14 +19,16 @@ const noResolveDeps = {
 const args = { userId: 'u1', orgId: 'o1', objectType: 'Lead' as const, recordIds: ['00Q000000000001'] };
 
 describe('buildQueueRows', () => {
-  it('numbers rows and marks unreachable when no number resolved', () => {
+  it('numbers rows, carries the fallback number, and marks unreachable when no number resolved', () => {
     const rows = buildQueueRows('S1', 'Lead', [
-      { recordId: '00Q1', toNumber: '+16195550100' },
-      { recordId: '00Q2', toNumber: null },
+      { recordId: '00Q1', toNumber: '+16195550100', fallbackNumber: '+16195550999' },
+      { recordId: '00Q2', toNumber: '+16195550200' }, // no fallback provided
+      { recordId: '00Q3', toNumber: null },
     ]);
     expect(rows).toEqual([
-      { sessionId: 'S1', ordinal: 0, objectType: 'Lead', recordId: '00Q1', toNumber: '+16195550100', status: 'pending' },
-      { sessionId: 'S1', ordinal: 1, objectType: 'Lead', recordId: '00Q2', toNumber: null, status: 'unreachable' },
+      { sessionId: 'S1', ordinal: 0, objectType: 'Lead', recordId: '00Q1', toNumber: '+16195550100', fallbackNumber: '+16195550999', status: 'pending' },
+      { sessionId: 'S1', ordinal: 1, objectType: 'Lead', recordId: '00Q2', toNumber: '+16195550200', fallbackNumber: null, status: 'pending' },
+      { sessionId: 'S1', ordinal: 2, objectType: 'Lead', recordId: '00Q3', toNumber: null, fallbackNumber: null, status: 'unreachable' },
     ]);
   });
 });

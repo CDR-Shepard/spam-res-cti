@@ -250,7 +250,8 @@ export const dialerQueueItems = pgTable(
     ordinal: integer('ordinal').notNull(),
     objectType: text('object_type').notNull(),
     recordId: text('record_id').notNull(),
-    toNumber: text('to_number'), // resolved E.164, or null when unreachable
+    toNumber: text('to_number'), // resolved E.164 currently being dialed (Mobile first), or null when unreachable
+    fallbackNumber: text('fallback_number'), // record's Phone, dialed on a TRUE no-answer of the Mobile (else null)
     fromNumber: text('from_number'),
     status: dialerItemStatus('status').default('pending').notNull(),
     callId: text('call_id'),

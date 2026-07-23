@@ -159,7 +159,7 @@ export async function repNext(sessionId: string, deps: EngineDeps): ReturnType<t
 
 export async function handleDialOutcome(
   callId: string,
-  outcome: 'connected' | 'no_connect',
+  outcome: 'connected' | 'no_answer' | 'no_connect',
   deps: EngineDeps,
 ): Promise<void> {
   const item = await deps.db.query.dialerQueueItems.findFirst({ where: eq(schema.dialerQueueItems.callId, callId) });
@@ -167,8 +167,8 @@ export async function handleDialOutcome(
   const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, item.sessionId) });
   if (!session) return;
 
-  await setItem(deps, item.id, { status: outcome, outcome });
   if (outcome === 'connected') {
+    await setItem(deps, item.id, { status: 'connected', outcome: 'connected' });
     await deps.telephony.bridgeToRep(callId, session.userId);
     deps.onScreenPop(session.userId, item.objectType, item.recordId);
     // Sticky-on-connect: remember this (org, rep, lead) -> pool DID binding so
@@ -188,6 +188,50 @@ export async function handleDialOutcome(
     }
     return; // wait for the rep's `next`
   }
+
+  // TRUE no-answer (the Mobile rang out) with a Phone fallback still untried →
+  // dial the Phone instead of giving up. Reset THIS item to pending with the
+  // fallback number and clear it (so a second no-answer can't loop); the fallback
+  // becomes the number now being dialed. advanceSession re-dials it — the item
+  // keeps its ordinal, which is the lowest among unfinished items, so it's the
+  // very next call, through the normal pool-DID + attempt-count path. Only a
+  // 'no_answer' outcome reaches here: busy / voicemail-machine / failed are
+  // mapped to 'no_connect' by the webhook handlers and never fall back.
+  if (outcome === 'no_answer' && item.fallbackNumber) {
+    // Compare-and-swap so a duplicate/redelivered webhook for THIS same call
+    // can't reset (and therefore re-dial) the fallback twice: only the
+    // invocation that still sees this exact call 'dialing' flips it to
+    // 'pending'; a racing duplicate claims 0 rows and backs off, leaving any
+    // fallback call the winner already started untouched. Mirrors
+    // advanceSession's atomic pending->dialing claim.
+    const claimed = await deps.db.transaction(async (tx) => {
+      const rows = await tx
+        .update(schema.dialerQueueItems)
+        .set({
+          status: 'pending',
+          toNumber: item.fallbackNumber,
+          fallbackNumber: null,
+          callId: null,
+          fromNumber: null,
+          outcome: null,
+          updatedAt: new Date(),
+        })
+        .where(and(
+          eq(schema.dialerQueueItems.id, item.id),
+          eq(schema.dialerQueueItems.callId, callId),
+          eq(schema.dialerQueueItems.status, 'dialing'),
+        ))
+        .returning({ id: schema.dialerQueueItems.id });
+      return rows.length > 0;
+    });
+    if (!claimed) return; // a duplicate/redelivered webhook lost the race
+    await advanceSession(item.sessionId, deps);
+    return;
+  }
+
+  // No fallback left (or a non-no-answer miss): record the miss, roll over the
+  // rep's follow-up task, advance. The finer reason is kept in `outcome`.
+  await setItem(deps, item.id, { status: 'no_connect', outcome });
   try {
     await deps.rolloverFollowUp(session.userId, session.sfOwnerId, item.recordId, deps.todayIso);
   } catch (err) {

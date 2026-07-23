@@ -229,6 +229,46 @@ describe('handleDialOutcome', () => {
     expect(deps.rolloverFollowUp).toHaveBeenCalledWith('U1', '005', '00Q1', '2026-07-13');
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
   });
+
+  it('no_answer with a fallback number re-queues the item to dial the Phone next — no rollover, no no_connect', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: '+12135550199', fromNumber: '+16190000000', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_answer', deps);
+    // The item is reset to pending with the Phone as the number now dialed, and
+    // its fallback cleared so a second no-answer can't loop.
+    expect(fdb._writes).toContainEqual({
+      patch: expect.objectContaining({ status: 'pending', toNumber: '+12135550199', fallbackNumber: null, callId: null }),
+    });
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
+    expect(deps.rolloverFollowUp).not.toHaveBeenCalled();
+  });
+
+  it('no_answer with NO fallback number behaves like a plain no_connect (rollover, reason kept)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_answer', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect', outcome: 'no_answer' }) });
+    expect(deps.rolloverFollowUp).toHaveBeenCalledWith('U1', '005', '00Q1', '2026-07-13');
+  });
+
+  it('a plain no_connect (busy / voicemail) NEVER falls back, even when a fallback number exists', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: '+12135550199', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_connect', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'pending', toNumber: '+12135550199' }) });
+    expect(deps.rolloverFollowUp).toHaveBeenCalled();
+  });
+
+  it('a duplicate/redelivered no_answer for the same call does NOT reset or re-dial twice (compare-and-swap loses)', async () => {
+    // claimReturnsRows:false simulates the conditional reset UPDATE matching 0
+    // rows — i.e. another invocation for this same call already flipped it.
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: '+12135550199', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items, { claimReturnsRows: false }); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_answer', deps);
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'pending' }) });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
   it('connected bridges + screen-pops and does NOT roll over', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
