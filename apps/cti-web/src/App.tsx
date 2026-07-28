@@ -5,6 +5,7 @@ import { AdminPanel } from './components/AdminPanel';
 import { CallLog } from './components/CallLog';
 import { DialerPanel, processedCount } from './components/DialerPanel';
 import { IncomingScreen } from './components/IncomingScreen';
+import { InboundStatusPill, inboundPillState } from './components/InboundStatusPill';
 import { CallScreen } from './components/CallScreen';
 import { Dialpad } from './components/Dialpad';
 import { RecentCalls } from './components/RecentCalls';
@@ -1057,14 +1058,16 @@ export function App(): JSX.Element {
             </div>
           )}
           <div className="status">
-            <span className={`presence-dot ${inboundDegraded ? 'bad' : ctiReady ? '' : 'warn'}`} />
-            {inboundDegraded
-              ? 'Inbound unavailable — reload'
-              : ctiReady ? 'Salesforce CTI connected' : 'Standalone'}
+            <span className={`presence-dot ${ctiReady ? '' : 'warn'}`} />
+            {ctiReady ? 'Salesforce CTI connected' : 'Standalone'}
           </div>
         </div>
       </div>
       <div className="right">
+        <InboundStatusPill
+          state={inboundPillState({ isLeader: coordState.isLeader, registered: deviceRegistered, degraded: inboundDegraded })}
+          onUseHere={() => coordinatorRef.current?.promoteSelf()}
+        />
         {rep && me.user.isAdmin && (
           <button
             className={`rep-chip grade-${rep.avgGrade.toLowerCase()} ${rep.flaggedCount > 0 ? 'flagged' : ''}`}
