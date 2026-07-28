@@ -898,6 +898,7 @@ export function App(): JSX.Element {
     // A media/mic failure after accept may never emit 'disconnect'; recover the
     // UI (inbound has no wrap-up form) instead of stranding an 'active' screen.
     call.on('error', (err) => {
+      window.clearTimeout(noAudioTimer);
       const e = err as { message?: string; code?: number } | undefined;
       setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'unknown'}`, type: 'error' });
       backToIdle();
