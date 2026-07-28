@@ -536,7 +536,8 @@ export function App(): JSX.Element {
     const conn = dialerConnRef.current as { disconnect?: () => void } | null;
     dialerConnRef.current = null;
     if (conn) { try { conn.disconnect?.(); } catch { /* already gone */ } }
-  }, []);
+    if (pendingTeardownRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
+  }, [teardownDevice]);
 
   // Stop control: drop the conference leg AND return to the list-view picker.
   // Idempotent — safe to call twice (e.g. Stop button + DialerPanel unmount).
@@ -663,11 +664,20 @@ export function App(): JSX.Element {
           setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
         });
         void prewarmMic();
-      } else if (phaseRef.current === 'idle' || phaseRef.current === 'preflight') {
-        teardownDevice();
-      } else {
-        // Mid-call: keep the Device until the call ends (see backToIdle guard).
+      } else if (
+        phaseRef.current === 'ringing' ||
+        phaseRef.current === 'active' ||
+        incomingRef.current ||
+        dialerConnRef.current
+      ) {
+        // A live call (ringing/active or an inbound still ringing) or a power-dial
+        // run is in progress — keep the Device until it ends. Idle/preflight/wrap-up
+        // have no live media, so shed the registration immediately. The deferred
+        // teardown is flushed in reset()/backToIdle() (calls) and dropConferenceLeg()
+        // (power-dial run end).
         pendingTeardownRef.current = true;
+      } else {
+        teardownDevice();
       }
     });
     coord.start();
@@ -697,6 +707,7 @@ export function App(): JSX.Element {
     let cancelled = false;
     const poll = async (): Promise<void> => {
       try {
+        if (coordinatorRef.current && !coordinatorRef.current.isLeader()) return;
         const { handoff } = await getPendingHandoff();
         if (cancelled || !handoff) return;
         void startPowerDial(handoff.objectType, handoff.recordIds);
