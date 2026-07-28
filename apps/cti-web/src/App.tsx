@@ -5,6 +5,7 @@ import { AdminPanel } from './components/AdminPanel';
 import { CallLog } from './components/CallLog';
 import { DialerPanel, processedCount } from './components/DialerPanel';
 import { IncomingScreen } from './components/IncomingScreen';
+import { InboundStatusPill, inboundPillState } from './components/InboundStatusPill';
 import { CallScreen } from './components/CallScreen';
 import { Dialpad } from './components/Dialpad';
 import { RecentCalls } from './components/RecentCalls';
@@ -27,6 +28,8 @@ import {
   initOpenCti, notifyReady, onClickToDial as onCti, saveCallLog, screenPopRecord, setPanelHeight, setPanelVisibility,
   type ClickToDialEvent,
 } from './opencti';
+import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
+import { prewarmMic, resumeAudio, isLikelyDeadAudio, NO_AUDIO_MS } from './audio-readiness';
 
 interface MeResponse {
   user: { userId: string; orgId: string; email: string; isAdmin: boolean; noAnswerForwardE164?: string | null };
@@ -231,6 +234,9 @@ export function App(): JSX.Element {
 
   const deviceRef = useRef<unknown>(null);
   const connectionRef = useRef<unknown>(null);
+  // Shared AudioContext, resumed on accept (browsers gate audio until a user
+  // gesture) so the caller's audio isn't silently dropped on answer.
+  const audioCtxRef = useRef<AudioContext | null>(null);
   // The rep's power-dialer conference leg — kept in its OWN ref, separate from
   // connectionRef, so joining/leaving it never touches phase/active/inCall and
   // never collides with a normal click-to-dial or inbound call's connection.
@@ -255,12 +261,22 @@ export function App(): JSX.Element {
   const incomingRef = useRef<TwilioIncomingCall | null>(null);
   useEffect(() => { incomingRef.current = incoming; }, [incoming]);
 
+  // Softphone single-registration: exactly one tab is the "leader" that holds the
+  // Twilio Device. Default isLeader:true so a lone tab / unsupported-BroadcastChannel
+  // behaves like today (registers immediately, no regression).
+  const [coordState, setCoordState] = useState<CoordinatorState>({ isLeader: true, peerCount: 0 });
+  const [deviceRegistered, setDeviceRegistered] = useState(false);
+  const coordinatorRef = useRef<SoftphoneCoordinator | null>(null);
+  // Set when leadership is lost mid-call; teardown is deferred until the call ends.
+  const pendingTeardownRef = useRef(false);
+
   // Destroy + forget the persistent Twilio device. Idempotent. Stops it ringing
   // and, crucially, stops its tokenWillExpire loop from POSTing /telephony/token.
   const teardownDevice = useCallback(() => {
     const d = deviceRef.current as { destroy?: () => void } | null;
     deviceRef.current = null;
     deviceInitRef.current = null;
+    setDeviceRegistered(false);
     if (d) { try { d.destroy?.(); } catch { /* already gone */ } }
   }, []);
 
@@ -484,8 +500,17 @@ export function App(): JSX.Element {
     // registration means inbound callbacks stop arriving, so surface it. Guard on
     // identity so an ORPHANED device (from a failed init/retry) can't flip the
     // status of the current, healthy one.
-    d.on('registered', () => { if (deviceRef.current === device) setInboundDegraded(false); });
-    d.on('unregistered', () => { if (deviceRef.current === device) setInboundDegraded(true); });
+    d.on('registered', () => { if (deviceRef.current === device) { setInboundDegraded(false); setDeviceRegistered(true); } });
+    d.on('unregistered', () => {
+      if (deviceRef.current !== device) return;
+      setDeviceRegistered(false);
+      // Deliberate teardown (lost leadership) → leave it down. Still leader → recover.
+      if (!pendingTeardownRef.current && coordinatorRef.current?.isLeader()) {
+        void (device as unknown as { register: () => Promise<void> }).register().catch(() => setInboundDegraded(true));
+      } else {
+        setInboundDegraded(true);
+      }
+    });
     await d.register();
     return device;
     })();
@@ -511,7 +536,8 @@ export function App(): JSX.Element {
     const conn = dialerConnRef.current as { disconnect?: () => void } | null;
     dialerConnRef.current = null;
     if (conn) { try { conn.disconnect?.(); } catch { /* already gone */ } }
-  }, []);
+    if (pendingTeardownRef.current && !connectionRef.current && !incomingRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
+  }, [teardownDevice]);
 
   // Stop control: drop the conference leg AND return to the list-view picker.
   // Idempotent — safe to call twice (e.g. Stop button + DialerPanel unmount).
@@ -550,6 +576,7 @@ export function App(): JSX.Element {
   // Power Dial tab and join the rep's softphone to the run's Twilio conference,
   // guarding against a stop/new-start that superseded this one mid-await.
   const beginRun = useCallback(async (sessionId: string, myRun: number): Promise<void> => {
+    coordinatorRef.current?.promoteSelf();
     setDialerSessionId(sessionId);
     setTab('powerdial');
     const device = await ensureDevice();
@@ -619,6 +646,54 @@ export function App(): JSX.Element {
     return () => window.removeEventListener('message', onMessage);
   }, [startPowerDial]);
 
+  // One softphone per rep across all their tabs. The elected leader holds the
+  // Twilio Device (inbound + outbound); non-leaders hold none, so Twilio never
+  // forks a callback to a stale background tab. Leadership prefers the visible tab
+  // and follows the rep between tabs.
+  useEffect(() => {
+    const userId = me?.user?.userId;
+    if (!signedIn || !userId) return;
+    const coord = createSoftphoneCoordinator(browserCoordinatorDeps(userId));
+    coordinatorRef.current = coord;
+    coord.onStateChange((s) => setCoordState(s));
+    coord.onLeadershipChange((isLeader) => {
+      if (isLeader) {
+        pendingTeardownRef.current = false;
+        void ensureDevice().catch(() => {
+          setInboundDegraded(true);
+          setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
+        });
+        void prewarmMic();
+      } else if (
+        phaseRef.current === 'ringing' ||
+        phaseRef.current === 'active' ||
+        incomingRef.current ||
+        dialerConnRef.current
+      ) {
+        // A live call (ringing/active or an inbound still ringing) or a power-dial
+        // run is in progress — keep the Device until it ends. Idle/preflight/wrap-up
+        // have no live media, so shed the registration immediately. The deferred
+        // teardown is flushed in reset()/backToIdle() (calls) and dropConferenceLeg()
+        // (power-dial run end).
+        pendingTeardownRef.current = true;
+      } else {
+        teardownDevice();
+      }
+    });
+    coord.start();
+    const onHide = () => coord.stop();
+    // Network came back → if we're the leader, make sure the Device is registered.
+    const onOnline = () => { if (coord.isLeader()) void ensureDevice().catch(() => { /* device 'error' */ }); };
+    window.addEventListener('pagehide', onHide);
+    window.addEventListener('online', onOnline);
+    return () => {
+      window.removeEventListener('pagehide', onHide);
+      window.removeEventListener('online', onOnline);
+      coord.stop();
+      coordinatorRef.current = null;
+    };
+  }, [signedIn, me?.user?.userId, ensureDevice, teardownDevice]);
+
   // Primary handoff intake: poll the server for a pending Salesforce→CTI
   // handoff (relayed by Apex — see docs/superpowers/plans/2026-07-14-power-dialer-5-handoff-relay.md)
   // and auto-start it via the existing startPowerDial. Only while signed in AND
@@ -628,10 +703,11 @@ export function App(): JSX.Element {
   // never crash, just keep trying next tick. The POWER_DIAL postMessage listener
   // above stays as-is (harmless secondary path / test seam).
   useEffect(() => {
-    if (!signedIn || dialerSessionId !== null) return;
+    if (!signedIn || dialerSessionId !== null || !coordState.isLeader) return;
     let cancelled = false;
     const poll = async (): Promise<void> => {
       try {
+        if (coordinatorRef.current && !coordinatorRef.current.isLeader()) return;
         const { handoff } = await getPendingHandoff();
         if (cancelled || !handoff) return;
         void startPowerDial(handoff.objectType, handoff.recordIds);
@@ -642,7 +718,7 @@ export function App(): JSX.Element {
     void poll();
     const id = window.setInterval(() => void poll(), 5000);
     return () => { cancelled = true; window.clearInterval(id); };
-  }, [signedIn, dialerSessionId, startPowerDial]);
+  }, [signedIn, dialerSessionId, coordState.isLeader, startPowerDial]);
 
   // Reopen a still-un-dispositioned call's wrap-up, rehydrated from the server so
   // it isn't blank or mislabeled. No recordId is set: the backend already holds
@@ -668,19 +744,17 @@ export function App(): JSX.Element {
     } catch { /* best-effort */ }
   }, []);
 
-  // Once signed in: register the device (so callbacks ring the softphone) and
-  // check for an unfinished disposition. A registration failure is surfaced —
-  // otherwise inbound would silently never arrive and the rep wouldn't know.
+  // Once signed in: check for an unfinished disposition. Device registration is
+  // now owned by the coordinator's leadership effect (below) — only the elected
+  // leader tab calls ensureDevice(); registering unconditionally here would put
+  // a Device in every open tab and defeat single-registration-per-rep.
   useEffect(() => {
     if (!me) return;
-    void ensureDevice().catch(() => {
-      setInboundDegraded(true);
-      setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
-    });
     void refreshPending();
-  }, [me, ensureDevice, refreshPending]);
+  }, [me, refreshPending]);
 
   const place = useCallback(async () => {
+    coordinatorRef.current?.promoteSelf();
     if (!firewall || firewall.decision === 'BLOCK') return;
     // Claim the outbound path synchronously so a callback that rings during the
     // POST /calls + device.connect() awaits is declined (→ voicemail) instead of
@@ -794,7 +868,8 @@ export function App(): JSX.Element {
     connectionRef.current = null;
     placingRef.current = false;
     openCtiTaskWrittenRef.current = false;
-  }, []);
+    if (pendingTeardownRef.current && !dialerConnRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
+  }, [teardownDevice]);
 
   // Answer an inbound callback in the CTI. Inbound calls auto-log server-side,
   // so there's no wrap-up form — on hangup we just return to idle.
@@ -806,6 +881,7 @@ export function App(): JSX.Element {
     const backToIdle = (): void => {
       setPhase('idle'); setActive(null); setElapsed(0); setIncoming(null);
       connectionRef.current = null;
+      if (pendingTeardownRef.current && !dialerConnRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
     };
     connectionRef.current = call;
     setActive({ callId: '', toNumber: from, fromNumber: from, startedAt: Date.now(), recordName: 'Incoming call' });
@@ -813,15 +889,33 @@ export function App(): JSX.Element {
     setMuted(false);
     setPhase('active');
     try { call.accept(); } catch { backToIdle(); return; }
+    // Resume any suspended AudioContext (browsers gate audio until a user gesture;
+    // the accept tap IS that gesture) so the caller's audio plays.
+    if (typeof AudioContext !== 'undefined') {
+      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+      resumeAudio(audioCtxRef.current);
+    }
+    // No-audio detector: sample the inbound volume; if it never arrives, surface it
+    // instead of leaving the rep on a silent call.
+    const samples: number[] = [];
+    const volCall = call as unknown as { on: (e: string, cb: (i: number, o: number) => void) => void };
+    volCall.on('volume', (_inputVol: number, outputVol: number) => { samples.push(outputVol); });
+    const noAudioTimer = window.setTimeout(() => {
+      if (isLikelyDeadAudio(samples)) {
+        setToast({ text: 'No audio on this call — try reloading the softphone.', type: 'error' });
+      }
+    }, NO_AUDIO_MS);
+    call.on('disconnect', () => window.clearTimeout(noAudioTimer));
     call.on('disconnect', backToIdle);
     // A media/mic failure after accept may never emit 'disconnect'; recover the
     // UI (inbound has no wrap-up form) instead of stranding an 'active' screen.
     call.on('error', (err) => {
+      window.clearTimeout(noAudioTimer);
       const e = err as { message?: string; code?: number } | undefined;
       setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'unknown'}`, type: 'error' });
       backToIdle();
     });
-  }, [incoming]);
+  }, [incoming, teardownDevice]);
 
   const declineIncoming = useCallback(() => {
     try { incoming?.reject(); } catch { /* */ }
@@ -975,14 +1069,16 @@ export function App(): JSX.Element {
             </div>
           )}
           <div className="status">
-            <span className={`presence-dot ${inboundDegraded ? 'bad' : ctiReady ? '' : 'warn'}`} />
-            {inboundDegraded
-              ? 'Inbound unavailable — reload'
-              : ctiReady ? 'Salesforce CTI connected' : 'Standalone'}
+            <span className={`presence-dot ${ctiReady ? '' : 'warn'}`} />
+            {ctiReady ? 'Salesforce CTI connected' : 'Standalone'}
           </div>
         </div>
       </div>
       <div className="right">
+        <InboundStatusPill
+          state={inboundPillState({ isLeader: coordState.isLeader, registered: deviceRegistered, degraded: inboundDegraded })}
+          onUseHere={() => coordinatorRef.current?.promoteSelf()}
+        />
         {rep && me.user.isAdmin && (
           <button
             className={`rep-chip grade-${rep.avgGrade.toLowerCase()} ${rep.flaggedCount > 0 ? 'flagged' : ''}`}
