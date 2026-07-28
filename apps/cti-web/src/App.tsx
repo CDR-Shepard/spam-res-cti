@@ -536,7 +536,7 @@ export function App(): JSX.Element {
     const conn = dialerConnRef.current as { disconnect?: () => void } | null;
     dialerConnRef.current = null;
     if (conn) { try { conn.disconnect?.(); } catch { /* already gone */ } }
-    if (pendingTeardownRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
+    if (pendingTeardownRef.current && !connectionRef.current && !incomingRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
   }, [teardownDevice]);
 
   // Stop control: drop the conference leg AND return to the list-view picker.
@@ -868,7 +868,7 @@ export function App(): JSX.Element {
     connectionRef.current = null;
     placingRef.current = false;
     openCtiTaskWrittenRef.current = false;
-    if (pendingTeardownRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
+    if (pendingTeardownRef.current && !dialerConnRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
   }, [teardownDevice]);
 
   // Answer an inbound callback in the CTI. Inbound calls auto-log server-side,
@@ -881,7 +881,7 @@ export function App(): JSX.Element {
     const backToIdle = (): void => {
       setPhase('idle'); setActive(null); setElapsed(0); setIncoming(null);
       connectionRef.current = null;
-      if (pendingTeardownRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
+      if (pendingTeardownRef.current && !dialerConnRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
     };
     connectionRef.current = call;
     setActive({ callId: '', toNumber: from, fromNumber: from, startedAt: Date.now(), recordName: 'Incoming call' });
