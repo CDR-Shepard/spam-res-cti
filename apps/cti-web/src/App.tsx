@@ -28,6 +28,7 @@ import {
   type ClickToDialEvent,
 } from './opencti';
 import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
+import { prewarmMic, resumeAudio, isLikelyDeadAudio, NO_AUDIO_MS } from './audio-readiness';
 
 interface MeResponse {
   user: { userId: string; orgId: string; email: string; isAdmin: boolean; noAnswerForwardE164?: string | null };
@@ -232,6 +233,9 @@ export function App(): JSX.Element {
 
   const deviceRef = useRef<unknown>(null);
   const connectionRef = useRef<unknown>(null);
+  // Shared AudioContext, resumed on accept (browsers gate audio until a user
+  // gesture) so the caller's audio isn't silently dropped on answer.
+  const audioCtxRef = useRef<AudioContext | null>(null);
   // The rep's power-dialer conference leg — kept in its OWN ref, separate from
   // connectionRef, so joining/leaving it never touches phase/active/inCall and
   // never collides with a normal click-to-dial or inbound call's connection.
@@ -657,6 +661,7 @@ export function App(): JSX.Element {
           setInboundDegraded(true);
           setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
         });
+        void prewarmMic();
       } else if (phaseRef.current === 'idle' || phaseRef.current === 'preflight') {
         teardownDevice();
       } else {
@@ -872,6 +877,23 @@ export function App(): JSX.Element {
     setMuted(false);
     setPhase('active');
     try { call.accept(); } catch { backToIdle(); return; }
+    // Resume any suspended AudioContext (browsers gate audio until a user gesture;
+    // the accept tap IS that gesture) so the caller's audio plays.
+    if (typeof AudioContext !== 'undefined') {
+      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+      resumeAudio(audioCtxRef.current);
+    }
+    // No-audio detector: sample the inbound volume; if it never arrives, surface it
+    // instead of leaving the rep on a silent call.
+    const samples: number[] = [];
+    const volCall = call as unknown as { on: (e: string, cb: (i: number, o: number) => void) => void };
+    volCall.on('volume', (_inputVol: number, outputVol: number) => { samples.push(outputVol); });
+    const noAudioTimer = window.setTimeout(() => {
+      if (isLikelyDeadAudio(samples)) {
+        setToast({ text: 'No audio on this call — try reloading the softphone.', type: 'error' });
+      }
+    }, NO_AUDIO_MS);
+    call.on('disconnect', () => window.clearTimeout(noAudioTimer));
     call.on('disconnect', backToIdle);
     // A media/mic failure after accept may never emit 'disconnect'; recover the
     // UI (inbound has no wrap-up form) instead of stranding an 'active' screen.
