@@ -12,7 +12,7 @@ function harness() {
   const makeDeps = (id: string, visible: boolean): CoordinatorDeps => ({
     now: () => now,
     postMessage: (m) => bus.post(m),
-    subscribe: (cb) => { subscribers.push(cb); },
+    subscribe: (cb) => { subscribers.push(cb); return () => { const i = subscribers.indexOf(cb); if (i >= 0) subscribers.splice(i, 1); }; },
     getVisible: () => visible,
     onVisibilityChange: () => {},
     scheduleInterval: (cb) => { intervals.push(cb); return () => { const i = intervals.indexOf(cb); if (i >= 0) intervals.splice(i, 1); }; },
@@ -70,5 +70,34 @@ describe('createSoftphoneCoordinator', () => {
     a.start(); b.start();
     h.tick(1000); h.tick(1000);
     expect(state.peerCount).toBe(1);
+  });
+
+  it("after stop(), a peer's later presence/leaving does not flip the stopped instance's leadership or fire its callbacks", () => {
+    const h = harness();
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    const b = createSoftphoneCoordinator(h.makeDeps('b', true));
+    let leadershipCalls = 0;
+    let stateCalls = 0;
+    a.onLeadershipChange(() => { leadershipCalls += 1; });
+    a.onStateChange(() => { stateCalls += 1; });
+    a.start(); b.start();
+    h.tick(1000); h.tick(1000); // 'a' wins (smaller id, both visible)
+    expect(a.isLeader()).toBe(true);
+
+    const leadershipCallsAtStop = leadershipCalls;
+    const stateCallsAtStop = stateCalls;
+    const leaderAtStop = a.isLeader();
+
+    a.stop(); // a is torn down; caller believes it is fully inert
+
+    // 'the other' tab keeps broadcasting/leaving after a has stopped.
+    b.promoteSelf(); // presence broadcast
+    h.tick(1000);    // b's own heartbeat fires too
+    b.stop();        // leaving broadcast
+
+    expect(a.isLeader()).toBe(leaderAtStop);
+    expect(leadershipCalls).toBe(leadershipCallsAtStop);
+    // recompute() must never run on a stopped instance, even if the value doesn't change.
+    expect(stateCalls).toBe(stateCallsAtStop);
   });
 });

@@ -6,7 +6,7 @@ export const STALE_MS = 3000;
 export interface CoordinatorDeps {
   now: () => number;
   postMessage: (m: unknown) => void;
-  subscribe: (cb: (m: unknown) => void) => void;
+  subscribe: (cb: (m: unknown) => void) => () => void;
   getVisible: () => boolean;
   onVisibilityChange: (cb: () => void) => void;
   /** Schedule a repeating callback every `ms`; returns a canceller. */
@@ -37,7 +37,9 @@ export function createSoftphoneCoordinator(deps: CoordinatorDeps): SoftphoneCoor
   const peers = new Map<string, { visible: boolean; lastSeen: number }>();
   let isLeader = false;
   let started = false;
+  let stopped = false;
   let cancelInterval: (() => void) | null = null;
+  let unsubscribe: (() => void) | null = null;
   let leadershipCb: ((v: boolean) => void) | null = null;
   let stateCb: ((s: CoordinatorState) => void) | null = null;
 
@@ -56,6 +58,7 @@ export function createSoftphoneCoordinator(deps: CoordinatorDeps): SoftphoneCoor
   };
 
   const onMessage = (raw: unknown): void => {
+    if (stopped) return;
     const m = raw as Msg;
     if (!m || typeof m !== 'object') return;
     if (m.type === 'presence' && m.id !== selfId) {
@@ -68,6 +71,7 @@ export function createSoftphoneCoordinator(deps: CoordinatorDeps): SoftphoneCoor
   };
 
   const beat = (): void => {
+    if (stopped) return;
     deps.postMessage({ type: 'presence', id: selfId, visible: deps.getVisible() } satisfies Msg);
     recompute();
   };
@@ -76,7 +80,8 @@ export function createSoftphoneCoordinator(deps: CoordinatorDeps): SoftphoneCoor
     start() {
       if (started) return;
       started = true;
-      deps.subscribe(onMessage);
+      stopped = false;
+      unsubscribe = deps.subscribe(onMessage);
       deps.onVisibilityChange(beat);
       cancelInterval = deps.scheduleInterval(beat, HEARTBEAT_MS);
       beat();
@@ -84,7 +89,10 @@ export function createSoftphoneCoordinator(deps: CoordinatorDeps): SoftphoneCoor
     stop() {
       if (!started) return;
       started = false;
+      stopped = true;
       deps.postMessage({ type: 'leaving', id: selfId } satisfies Msg);
+      unsubscribe?.();
+      unsubscribe = null;
       cancelInterval?.();
       cancelInterval = null;
     },
@@ -106,7 +114,11 @@ export function browserCoordinatorDeps(userId: string): CoordinatorDeps {
   return {
     now: () => Date.now(),
     postMessage: (m) => channel?.postMessage(m),
-    subscribe: (cb) => { if (channel) channel.onmessage = (e: MessageEvent) => cb(e.data); },
+    subscribe: (cb) => {
+      if (!channel) return () => {};
+      channel.onmessage = (e: MessageEvent) => cb(e.data);
+      return () => { channel.onmessage = null; channel.close(); };
+    },
     getVisible: () => (typeof document === 'undefined' ? true : document.visibilityState === 'visible'),
     onVisibilityChange: (cb) => { if (typeof document !== 'undefined') document.addEventListener('visibilitychange', cb); },
     scheduleInterval: (cb, ms) => { const id = window.setInterval(cb, ms); return () => window.clearInterval(id); },
