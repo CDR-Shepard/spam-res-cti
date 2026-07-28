@@ -653,7 +653,10 @@ export function App(): JSX.Element {
     coord.onLeadershipChange((isLeader) => {
       if (isLeader) {
         pendingTeardownRef.current = false;
-        void ensureDevice().catch(() => { /* surfaced via device 'error' */ });
+        void ensureDevice().catch(() => {
+          setInboundDegraded(true);
+          setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
+        });
       } else if (phaseRef.current === 'idle' || phaseRef.current === 'preflight') {
         teardownDevice();
       } else {
@@ -684,7 +687,7 @@ export function App(): JSX.Element {
   // never crash, just keep trying next tick. The POWER_DIAL postMessage listener
   // above stays as-is (harmless secondary path / test seam).
   useEffect(() => {
-    if (!signedIn || dialerSessionId !== null) return;
+    if (!signedIn || dialerSessionId !== null || !coordState.isLeader) return;
     let cancelled = false;
     const poll = async (): Promise<void> => {
       try {
@@ -698,7 +701,7 @@ export function App(): JSX.Element {
     void poll();
     const id = window.setInterval(() => void poll(), 5000);
     return () => { cancelled = true; window.clearInterval(id); };
-  }, [signedIn, dialerSessionId, startPowerDial]);
+  }, [signedIn, dialerSessionId, coordState.isLeader, startPowerDial]);
 
   // Reopen a still-un-dispositioned call's wrap-up, rehydrated from the server so
   // it isn't blank or mislabeled. No recordId is set: the backend already holds
@@ -848,8 +851,8 @@ export function App(): JSX.Element {
     connectionRef.current = null;
     placingRef.current = false;
     openCtiTaskWrittenRef.current = false;
-    if (pendingTeardownRef.current && !coordState.isLeader) { pendingTeardownRef.current = false; teardownDevice(); }
-  }, [coordState.isLeader, teardownDevice]);
+    if (pendingTeardownRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
+  }, [teardownDevice]);
 
   // Answer an inbound callback in the CTI. Inbound calls auto-log server-side,
   // so there's no wrap-up form — on hangup we just return to idle.
@@ -861,7 +864,7 @@ export function App(): JSX.Element {
     const backToIdle = (): void => {
       setPhase('idle'); setActive(null); setElapsed(0); setIncoming(null);
       connectionRef.current = null;
-      if (pendingTeardownRef.current && !coordState.isLeader) { pendingTeardownRef.current = false; teardownDevice(); }
+      if (pendingTeardownRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
     };
     connectionRef.current = call;
     setActive({ callId: '', toNumber: from, fromNumber: from, startedAt: Date.now(), recordName: 'Incoming call' });
@@ -877,7 +880,7 @@ export function App(): JSX.Element {
       setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'unknown'}`, type: 'error' });
       backToIdle();
     });
-  }, [incoming, coordState.isLeader, teardownDevice]);
+  }, [incoming, teardownDevice]);
 
   const declineIncoming = useCallback(() => {
     try { incoming?.reject(); } catch { /* */ }
