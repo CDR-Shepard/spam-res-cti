@@ -119,6 +119,12 @@ export function App(): JSX.Element {
   // intentionally NOT part of `phase`/`active` — the conference leg the rep sits
   // on spans many prospect calls, so it must never hide the nav (see `inCall`).
   const [dialerSessionId, setDialerSessionId] = useState<string | null>(null);
+  // True while a power-dial run's conference leg is live (from run start until it
+  // is torn down). Locks the bottom nav to the Power Dial tab so the rep can't
+  // navigate away mid-run — leaving would unmount the panel that detects run
+  // completion, stranding the conference leg on the single Twilio Device and
+  // failing the next call with "a call is already in progress". Stop ends the run.
+  const [dialerLive, setDialerLive] = useState(false);
 
   // Display name — persists in localStorage on this origin. Used only as a
   // fallback when SF OAuth isn't wired; the SF profile is preferred.
@@ -536,6 +542,7 @@ export function App(): JSX.Element {
     const conn = dialerConnRef.current as { disconnect?: () => void } | null;
     dialerConnRef.current = null;
     if (conn) { try { conn.disconnect?.(); } catch { /* already gone */ } }
+    setDialerLive(false);
     if (pendingTeardownRef.current && !connectionRef.current && !incomingRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
   }, [teardownDevice]);
 
@@ -578,6 +585,7 @@ export function App(): JSX.Element {
   const beginRun = useCallback(async (sessionId: string, myRun: number): Promise<void> => {
     coordinatorRef.current?.promoteSelf();
     setDialerSessionId(sessionId);
+    setDialerLive(true); // lock the nav to the Power Dial tab for the whole run
     setTab('powerdial');
     const device = await ensureDevice();
     const connection = await (device as unknown as { connect: (o: unknown) => Promise<unknown> }).connect({
@@ -607,6 +615,7 @@ export function App(): JSX.Element {
     } catch (e) {
       const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'unknown error';
       setToast({ text: `Could not start power dial: ${msg}`, type: 'error' });
+      if (dialerRunRef.current === myRun) setDialerLive(false); // only if a newer run didn't supersede us
     }
   }, [beginRun]);
 
@@ -622,6 +631,7 @@ export function App(): JSX.Element {
       } catch (e) {
         const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'unknown error';
         setToast({ text: `Could not start power dial: ${msg}`, type: 'error' });
+        if (dialerRunRef.current === myRun) setDialerLive(false); // only if a newer run didn't supersede us
       }
     },
     [beginRun],
@@ -708,6 +718,12 @@ export function App(): JSX.Element {
     const poll = async (): Promise<void> => {
       try {
         if (coordinatorRef.current && !coordinatorRef.current.isLeader()) return;
+        // Don't auto-start a run while the rep is on/ringing a call — beginRun's
+        // device.connect() would throw (Device busy) yet the server session is
+        // already created + dialing, stranding a headless run. Take handoffs only
+        // when truly idle. (Manual start is already blocked: the nav is hidden
+        // during a call, so the rep can't reach the picker mid-call.)
+        if (phaseRef.current !== 'idle' || connectionRef.current || incomingRef.current) return;
         const { handoff } = await getPendingHandoff();
         if (cancelled || !handoff) return;
         void startPowerDial(handoff.objectType, handoff.recordIds);
@@ -1229,7 +1245,7 @@ export function App(): JSX.Element {
       {sfBanner}
       {dispositionBanner}
       <div className="body">{body}</div>
-      {!inCall && (
+      {!inCall && !dialerLive && (
         <div className="nav">
           {primaryItems.map((i) => (
             <Fragment key={i.id}>
