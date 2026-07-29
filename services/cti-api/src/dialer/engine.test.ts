@@ -462,9 +462,27 @@ describe('stopSession', () => {
 
 describe('repNext', () => {
   beforeEach(() => { _target = {}; });
-  it('marks the connected item done, then advances', async () => {
+  it('hangs up the connected prospect, marks the item done, then advances', async () => {
+    // The prospect must be disconnected on Next — otherwise their leg lingers in
+    // the rep's conference and the next prospect is bridged into the same room.
     const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await repNext('S1', deps);
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+    expect(r).toBeDefined();
+  });
+  it('still completes Next when the hangup fails (best-effort, does not throw)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps({
+      telephony: {
+        originate: vi.fn(async () => ({ callId: 'CA1' })),
+        bridgeToRep: vi.fn(async () => {}),
+        hangup: vi.fn(async () => { throw new Error('twilio 500'); }),
+        endConference: vi.fn(async () => {}),
+      },
+    });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
     const r = await repNext('S1', deps);
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
     expect(r).toBeDefined();

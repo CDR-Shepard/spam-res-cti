@@ -195,7 +195,20 @@ export async function stopSession(sessionId: string, deps: EngineDeps): Promise<
 export async function repNext(sessionId: string, deps: EngineDeps): ReturnType<typeof advanceSession> {
   const items = await loadItems(deps, sessionId);
   const item = inFlightItem(items);
-  if (item && item.status === 'connected') await setItem(deps, item.id, { status: 'done' });
+  if (item && item.status === 'connected') {
+    // Hang up the prospect BEFORE advancing — otherwise their leg stays in the
+    // rep's conference (prospect legs join with endConferenceOnExit=false) and
+    // the next prospect gets bridged into the SAME room: the previous caller
+    // hears the next conversation and keeps billing. Mirrors skipCurrent.
+    if (item.callId) {
+      try {
+        await deps.telephony.hangup(item.callId);
+      } catch (err) {
+        console.error('[dialer] next hangup failed', { itemId: item.id, err: (err as Error).message });
+      }
+    }
+    await setItem(deps, item.id, { status: 'done' });
+  }
   return advanceSession(sessionId, deps);
 }
 
