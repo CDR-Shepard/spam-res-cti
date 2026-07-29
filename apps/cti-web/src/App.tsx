@@ -5,7 +5,6 @@ import { AdminPanel } from './components/AdminPanel';
 import { CallLog } from './components/CallLog';
 import { DialerPanel, processedCount } from './components/DialerPanel';
 import { IncomingScreen } from './components/IncomingScreen';
-import { InboundStatusPill, inboundPillState } from './components/InboundStatusPill';
 import { CallScreen } from './components/CallScreen';
 import { Dialpad } from './components/Dialpad';
 import { RecentCalls } from './components/RecentCalls';
@@ -36,12 +35,6 @@ interface MeResponse {
   salesforce:
     | { connected: false }
     | { connected: true; name?: string | null; email?: string | null; photoDataUrl?: string | null };
-}
-
-interface RepSummary {
-  avgComposite: number;
-  avgGrade: 'A' | 'B' | 'C' | 'D' | 'F';
-  flaggedCount: number;
 }
 
 type Phase = 'idle' | 'preflight' | 'ringing' | 'active' | 'wrapup';
@@ -96,7 +89,6 @@ export function App(): JSX.Element {
   const [inboundDegraded, setInboundDegraded] = useState(false);
   const [tab, setTab] = useState<Tab>('dialer');
   const [moreOpen, setMoreOpen] = useState(false);
-  const [rep, setRep] = useState<RepSummary | null>(null);
 
   const [raw, setRaw] = useState('');
   const [firewall, setFirewall] = useState<FirewallVerdict | null>(null);
@@ -271,7 +263,6 @@ export function App(): JSX.Element {
   // Twilio Device. Default isLeader:true so a lone tab / unsupported-BroadcastChannel
   // behaves like today (registers immediately, no regression).
   const [coordState, setCoordState] = useState<CoordinatorState>({ isLeader: true, peerCount: 0 });
-  const [deviceRegistered, setDeviceRegistered] = useState(false);
   const coordinatorRef = useRef<SoftphoneCoordinator | null>(null);
   // Set when leadership is lost mid-call; teardown is deferred until the call ends.
   const pendingTeardownRef = useRef(false);
@@ -282,7 +273,6 @@ export function App(): JSX.Element {
     const d = deviceRef.current as { destroy?: () => void } | null;
     deviceRef.current = null;
     deviceInitRef.current = null;
-    setDeviceRegistered(false);
     if (d) { try { d.destroy?.(); } catch { /* already gone */ } }
   }, []);
 
@@ -388,21 +378,6 @@ export function App(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Header reputation chip — refreshed every minute, never blocks anything.
-  useEffect(() => {
-    if (!signedIn) return;
-    let alive = true;
-    const load = async (): Promise<void> => {
-      try {
-        const r = await api<{ summary: RepSummary }>('/reputation');
-        if (alive) setRep(r.summary);
-      } catch { /* chip is best-effort */ }
-    };
-    void load();
-    const t = setInterval(() => void load(), 60_000);
-    return () => { alive = false; clearInterval(t); };
-  }, [signedIn]);
-
   // Call timer
   useEffect(() => {
     if (phase !== 'active' || !active) return;
@@ -506,10 +481,9 @@ export function App(): JSX.Element {
     // registration means inbound callbacks stop arriving, so surface it. Guard on
     // identity so an ORPHANED device (from a failed init/retry) can't flip the
     // status of the current, healthy one.
-    d.on('registered', () => { if (deviceRef.current === device) { setInboundDegraded(false); setDeviceRegistered(true); } });
+    d.on('registered', () => { if (deviceRef.current === device) setInboundDegraded(false); });
     d.on('unregistered', () => {
       if (deviceRef.current !== device) return;
-      setDeviceRegistered(false);
       // Deliberate teardown (lost leadership) → leave it down. Still leader → recover.
       if (!pendingTeardownRef.current && coordinatorRef.current?.isLeader()) {
         void (device as unknown as { register: () => Promise<void> }).register().catch(() => setInboundDegraded(true));
@@ -1089,27 +1063,6 @@ export function App(): JSX.Element {
             {ctiReady ? 'Salesforce CTI connected' : 'Standalone'}
           </div>
         </div>
-      </div>
-      <div className="right">
-        <InboundStatusPill
-          state={inboundPillState({ isLeader: coordState.isLeader, registered: deviceRegistered, degraded: inboundDegraded })}
-          onUseHere={() => coordinatorRef.current?.promoteSelf()}
-        />
-        {rep && me.user.isAdmin && (
-          <button
-            className={`rep-chip grade-${rep.avgGrade.toLowerCase()} ${rep.flaggedCount > 0 ? 'flagged' : ''}`}
-            title={`Caller reputation ${rep.avgComposite}/100${rep.flaggedCount > 0 ? ` · ${rep.flaggedCount} flagged` : ''}`}
-            onClick={() => { if (!inCall) setTab('reputation'); }}
-          >
-            <ShieldIcon />
-            <span>{rep.avgGrade}</span>
-          </button>
-        )}
-        {sf && (
-          <div className="iconbtn linked" title="Salesforce linked">
-            <CloudIcon />
-          </div>
-        )}
       </div>
     </div>
   );

@@ -160,36 +160,6 @@ input, select, textarea { font: inherit; color: inherit; }
 .presence-dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
 .presence-dot.bad  { background: var(--bad);  box-shadow: 0 0 6px var(--bad); }
 
-.iconbtn {
-  width: 28px; height: 28px; border-radius: 8px;
-  display: grid; place-items: center;
-  color: var(--text-muted);
-  transition: background 100ms ease, color 100ms ease;
-}
-.iconbtn:hover { background: var(--surface-2); color: var(--text); }
-.iconbtn:active { background: var(--surface-3); }
-.iconbtn svg { width: 16px; height: 16px; }
-.iconbtn.linked { color: var(--good); cursor: default; }
-.iconbtn.linked:hover { background: transparent; }
-
-/* Live org-reputation grade in the header. */
-.rep-chip {
-  display: inline-flex; align-items: center; gap: 5px;
-  height: 26px; padding: 0 9px;
-  border-radius: var(--r-full);
-  font-size: 12px; font-weight: 800;
-  color: var(--grade);
-  background: color-mix(in srgb, var(--grade) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--grade) 28%, transparent);
-  transition: background 100ms ease;
-}
-.rep-chip:hover { background: color-mix(in srgb, var(--grade) 20%, transparent); }
-.rep-chip svg { width: 13px; height: 13px; }
-.rep-chip.flagged::after {
-  content: ''; width: 6px; height: 6px; border-radius: 50%;
-  background: var(--bad); box-shadow: 0 0 6px var(--bad);
-}
-
 /* Connect-Salesforce banner */
 .sf-banner {
   display: flex; align-items: center; gap: 10px;
@@ -1205,12 +1175,3 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 .health-dot.health-warning { background: var(--warn); }
 .health-dot.health-degraded { background: var(--orange); }
 .health-dot.health-spam_likely { background: var(--bad); box-shadow: 0 0 5px var(--bad); }
-
-/* Inbound status pill — where returning calls will ring */
-.inbound-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); }
-.inbound-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); flex: none; }
-.inbound-pill.on { color: var(--good); border-color: color-mix(in srgb, var(--good) 35%, transparent); }
-.inbound-pill.on .dot { background: var(--good); }
-.inbound-pill.reconnecting { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
-.inbound-pill.reconnecting .dot { background: var(--warn); }
-.inbound-pill .use-here { margin-left: 2px; padding: 1px 6px; font-size: 11px; font-weight: 500; border-radius: 999px; border: 1px solid var(--accent); background: transparent; color: var(--accent); cursor: pointer; }
