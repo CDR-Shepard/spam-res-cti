@@ -28,7 +28,7 @@ import {
   type ClickToDialEvent,
 } from './opencti';
 import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
-import { prewarmMic, resumeAudio, isLikelyDeadAudio, NO_AUDIO_MS } from './audio-readiness';
+import { prewarmMic, watchCallMedia, MEDIA_ISSUE_MESSAGE } from './audio-readiness';
 
 interface MeResponse {
   user: { userId: string; orgId: string; email: string; isAdmin: boolean; noAnswerForwardE164?: string | null };
@@ -234,7 +234,6 @@ export function App(): JSX.Element {
   const connectionRef = useRef<unknown>(null);
   // Shared AudioContext, resumed on accept (browsers gate audio until a user
   // gesture) so the caller's audio isn't silently dropped on answer.
-  const audioCtxRef = useRef<AudioContext | null>(null);
   // The rep's power-dialer conference leg — kept in its OWN ref, separate from
   // connectionRef, so joining/leaving it never touches phase/active/inCall and
   // never collides with a normal click-to-dial or inbound call's connection.
@@ -647,7 +646,11 @@ export function App(): JSX.Element {
           setInboundDegraded(true);
           setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
         });
-        void prewarmMic();
+        // Surface a blocked mic instead of swallowing it — otherwise the rep talks
+        // and nobody can hear them, with nothing on screen to explain why.
+        void prewarmMic().then((ok) => {
+          if (!ok) setToast({ text: MEDIA_ISSUE_MESSAGE['no-outbound-audio'], type: 'error' });
+        });
       } else if (
         phaseRef.current === 'ringing' ||
         phaseRef.current === 'active' ||
@@ -879,28 +882,21 @@ export function App(): JSX.Element {
     setMuted(false);
     setPhase('active');
     try { call.accept(); } catch { backToIdle(); return; }
-    // Resume any suspended AudioContext (browsers gate audio until a user gesture;
-    // the accept tap IS that gesture) so the caller's audio plays.
-    if (typeof AudioContext !== 'undefined') {
-      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
-      resumeAudio(audioCtxRef.current);
-    }
-    // No-audio detector: sample the inbound volume; if it never arrives, surface it
-    // instead of leaving the rep on a silent call.
-    const samples: number[] = [];
-    const volCall = call as unknown as { on: (e: string, cb: (i: number, o: number) => void) => void };
-    volCall.on('volume', (_inputVol: number, outputVol: number) => { samples.push(outputVol); });
-    const noAudioTimer = window.setTimeout(() => {
-      if (isLikelyDeadAudio(samples)) {
-        setToast({ text: 'No audio on this call — try reloading the softphone.', type: 'error' });
-      }
-    }, NO_AUDIO_MS);
-    call.on('disconnect', () => window.clearTimeout(noAudioTimer));
+    // Watch for a DEAD DIRECTION. The SDK raises low-bytes-received/-sent when RTP
+    // stops flowing but does NOT drop the call, so without this the rep just sits
+    // in silence with no idea why. The direction is the diagnosis: inbound means
+    // nothing arrived from the caller (not our fault, and not fixable by reloading).
+    watchCallMedia(
+      call,
+      (issue) => setToast({ text: MEDIA_ISSUE_MESSAGE[issue], type: 'error' }),
+      (issue) => {
+        if (issue === 'no-inbound-audio') setToast({ text: "The caller's audio came back.", type: 'success' });
+      },
+    );
     call.on('disconnect', backToIdle);
     // A media/mic failure after accept may never emit 'disconnect'; recover the
     // UI (inbound has no wrap-up form) instead of stranding an 'active' screen.
     call.on('error', (err) => {
-      window.clearTimeout(noAudioTimer);
       const e = err as { message?: string; code?: number } | undefined;
       setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'unknown'}`, type: 'error' });
       backToIdle();
