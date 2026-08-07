@@ -3,7 +3,6 @@ import {
   mediaIssueForWarning,
   MEDIA_ISSUE_MESSAGE,
   watchCallMedia,
-  prewarmMic,
   type MediaIssue,
 } from './audio-readiness';
 
@@ -80,19 +79,5 @@ describe('watchCallMedia', () => {
     expect(() => call.emit('warning', undefined)).not.toThrow();
     expect(() => call.emit('warning', { name: 'bytesReceived' })).not.toThrow();
     expect(onIssue).not.toHaveBeenCalled();
-  });
-});
-
-describe('prewarmMic', () => {
-  it('resolves true and releases the primed tracks when the mic is granted', async () => {
-    const stop = vi.fn();
-    const getMedia = vi.fn(async () => ({ getTracks: () => [{ stop }] }));
-    await expect(prewarmMic(getMedia)).resolves.toBe(true);
-    expect(stop).toHaveBeenCalledTimes(1);
-  });
-
-  it('resolves false (never throws) when the mic is denied — callers must surface this', async () => {
-    const getMedia = vi.fn(async () => { throw new Error('NotAllowedError'); });
-    await expect(prewarmMic(getMedia)).resolves.toBe(false);
   });
 });

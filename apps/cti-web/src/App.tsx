@@ -28,7 +28,7 @@ import {
   type ClickToDialEvent,
 } from './opencti';
 import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
-import { prewarmMic, watchCallMedia, MEDIA_ISSUE_MESSAGE } from './audio-readiness';
+import { watchCallMedia, MEDIA_ISSUE_MESSAGE } from './audio-readiness';
 
 interface MeResponse {
   user: { userId: string; orgId: string; email: string; isAdmin: boolean; noAnswerForwardE164?: string | null };
@@ -569,6 +569,10 @@ export function App(): JSX.Element {
       return;
     }
     dialerConnRef.current = connection;
+    // Announce "busy" NOW rather than waiting up to a heartbeat — until peers see
+    // it, a tab the rep alt-tabs to could still win the election and register a
+    // second Device on top of this live run.
+    coordinatorRef.current?.promoteSelf();
   }, [ensureDevice]);
 
   const startPowerDial = useCallback(async (objectType: unknown, recordIds: unknown): Promise<void> => {
@@ -636,7 +640,17 @@ export function App(): JSX.Element {
   useEffect(() => {
     const userId = me?.user?.userId;
     if (!signedIn || !userId) return;
-    const coord = createSoftphoneCoordinator(browserCoordinatorDeps(userId));
+    // "Busy" = this tab is holding live telephony. Read from refs so it is always
+    // current: a busy tab wins the election outright, so switching Salesforce tabs
+    // mid-call no longer moves the phone (which used to register a second Device
+    // and stall the call as if it were on hold).
+    const isBusy = (): boolean =>
+      phaseRef.current === 'ringing' ||
+      phaseRef.current === 'active' ||
+      !!incomingRef.current ||
+      !!connectionRef.current ||
+      !!dialerConnRef.current;
+    const coord = createSoftphoneCoordinator(browserCoordinatorDeps(userId, isBusy));
     coordinatorRef.current = coord;
     coord.onStateChange((s) => setCoordState(s));
     coord.onLeadershipChange((isLeader) => {
@@ -646,11 +660,11 @@ export function App(): JSX.Element {
           setInboundDegraded(true);
           setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
         });
-        // Surface a blocked mic instead of swallowing it — otherwise the rep talks
-        // and nobody can hear them, with nothing on screen to explain why.
-        void prewarmMic().then((ok) => {
-          if (!ok) setToast({ text: MEDIA_ISSUE_MESSAGE['no-outbound-audio'], type: 'error' });
-        });
+        // NOTE: we deliberately do NOT pre-acquire the microphone here. Leadership
+        // follows the visible tab, so priming the mic on every leadership change lit
+        // up the browser's "microphone in use" indicator on every Salesforce tab the
+        // rep touched. A blocked mic still surfaces on the call itself (the SDK's
+        // 31401/31402 error and the low-bytes-sent warning), which is when it matters.
       } else if (
         phaseRef.current === 'ringing' ||
         phaseRef.current === 'active' ||
@@ -799,6 +813,7 @@ export function App(): JSX.Element {
         params: { To: created.call.normalizedToNumber, CallerId: created.call.fromNumber, CallId: callId },
       });
       connectionRef.current = connection;
+      coordinatorRef.current?.promoteSelf(); // broadcast busy immediately (see beginRun)
       setActive({
         callId,
         toNumber: created.call.normalizedToNumber,
@@ -877,6 +892,7 @@ export function App(): JSX.Element {
       if (pendingTeardownRef.current && !dialerConnRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
     };
     connectionRef.current = call;
+    coordinatorRef.current?.promoteSelf(); // broadcast busy immediately (see beginRun)
     setActive({ callId: '', toNumber: from, fromNumber: from, startedAt: Date.now(), recordName: 'Incoming call' });
     setIncoming(null);
     setMuted(false);

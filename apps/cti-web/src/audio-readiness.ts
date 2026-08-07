@@ -61,25 +61,3 @@ export function watchCallMedia(
     if (issue && onCleared) onCleared(issue);
   });
 }
-
-type MediaStreamish = { getTracks(): Array<{ stop(): void }> };
-
-/**
- * Prime the microphone permission/stream so the Twilio Device's accept() has an
- * already-granted mic. Best-effort: returns false (never throws) if denied.
- * Immediately stops the primed tracks; the SDK re-acquires on accept.
- * CALLERS MUST NOT IGNORE THE RESULT — a false means the rep is inaudible.
- */
-export async function prewarmMic(
-  getMedia: () => Promise<MediaStreamish> = () => navigator.mediaDevices.getUserMedia({ audio: true }) as unknown as Promise<MediaStreamish>,
-): Promise<boolean> {
-  try {
-    const stream = await getMedia();
-    for (const t of stream.getTracks()) {
-      try { t.stop(); } catch { /* already stopped */ }
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}

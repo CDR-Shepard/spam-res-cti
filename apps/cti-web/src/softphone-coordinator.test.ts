@@ -9,11 +9,12 @@ function harness() {
   let now = 1000;
   const bus = { post: (m: unknown) => subscribers.forEach((s) => s(m)) };
   const tick = (ms: number) => { now += ms; intervals.forEach((fn) => fn()); };
-  const makeDeps = (id: string, visible: boolean): CoordinatorDeps => ({
+  const makeDeps = (id: string, visible: boolean, busy = false): CoordinatorDeps => ({
     now: () => now,
     postMessage: (m) => bus.post(m),
     subscribe: (cb) => { subscribers.push(cb); return () => { const i = subscribers.indexOf(cb); if (i >= 0) subscribers.splice(i, 1); }; },
     getVisible: () => visible,
+    getBusy: () => busy,
     onVisibilityChange: () => {},
     scheduleInterval: (cb) => { intervals.push(cb); return () => { const i = intervals.indexOf(cb); if (i >= 0) intervals.splice(i, 1); }; },
     randomId: () => id,
@@ -59,6 +60,21 @@ describe('createSoftphoneCoordinator', () => {
     a.stop();                     // broadcasts 'leaving'
     h.tick(0);                    // b recomputes on the leaving message (no time passes)
     expect(bLead).toBe(true);
+  });
+
+  it('a tab on a call keeps leadership when the rep focuses another tab', () => {
+    // The exact rep complaint: "if I switch tabs while on a call it puts it on
+    // hold". The busy tab must NOT hand the phone to the newly-visible tab.
+    const h = harness();
+    const onCall = createSoftphoneCoordinator(h.makeDeps('a-oncall', false, true)); // hidden but BUSY
+    const browsing = createSoftphoneCoordinator(h.makeDeps('b-browsing', true, false)); // visible, idle
+    let callLead = false, browseLead = false;
+    onCall.onLeadershipChange((v) => { callLead = v; });
+    browsing.onLeadershipChange((v) => { browseLead = v; });
+    onCall.start(); browsing.start();
+    h.tick(1000); h.tick(1000);
+    expect(callLead).toBe(true);
+    expect(browseLead).toBe(false);
   });
 
   it('reports peerCount via onStateChange', () => {
