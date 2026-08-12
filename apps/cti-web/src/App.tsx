@@ -29,6 +29,7 @@ import {
 } from './opencti';
 import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
 import { watchCallMedia, MEDIA_ISSUE_MESSAGE } from './audio-readiness';
+import { sendDtmfKey, type DtmfSendable } from './dtmf';
 
 interface MeResponse {
   user: { userId: string; orgId: string; email: string; isAdmin: boolean; noAnswerForwardE164?: string | null };
@@ -76,6 +77,7 @@ interface TwilioIncomingCall {
   accept: () => void;
   reject: () => void;
   disconnect?: () => void;
+  sendDigits?: (digits: string) => void;
   on: (event: string, cb: (...args: unknown[]) => void) => void;
 }
 
@@ -867,6 +869,13 @@ export function App(): JSX.Element {
     const next = !muted; c?.mute?.(next); setMuted(next);
   }, [muted]);
 
+  // Send one touch tone on the live call — for IVRs and call blockers that ask
+  // the rep to press a digit to connect. Works for both manual outbound and
+  // answered inbound calls (both keep their Call object in connectionRef).
+  const sendDigit = useCallback((key: string, sent: string): string => {
+    return sendDtmfKey(connectionRef.current as DtmfSendable | null, key, sent);
+  }, []);
+
   const reset = useCallback(() => {
     setRaw(''); setFirewall(null); setPhase('idle'); setActive(null);
     setElapsed(0); setMuted(false); setDisposition('Connected'); setNotes('');
@@ -1132,6 +1141,7 @@ export function App(): JSX.Element {
         muted={muted}
         onToggleMute={toggleMute}
         onHangup={hangup}
+        onSendDigit={sendDigit}
       />
     )
   ) : tab === 'recent' ? (

@@ -2,8 +2,10 @@
  * In-call screen (ringing / active). Identical component in cti-web and
  * cti-desktop.
  */
+import { useState } from 'react';
 import { formatE164 } from '../format';
-import { MicIcon, MicOffIcon, PhoneIcon, PhoneHangupIcon, PhoneOutgoingIcon } from '../icons';
+import { GridIcon, MicIcon, MicOffIcon, PhoneIcon, PhoneHangupIcon, PhoneOutgoingIcon, XIcon } from '../icons';
+import { DTMF_KEYS } from '../dtmf';
 
 interface CallScreenProps {
   phase: 'ringing' | 'active';
@@ -16,10 +18,44 @@ interface CallScreenProps {
   muted: boolean;
   onToggleMute: () => void;
   onHangup: () => void;
+  /**
+   * Send one touch tone, for IVRs and call blockers that ask the rep to press a
+   * digit to connect. Returns the digits to show in the readout.
+   */
+  onSendDigit: (key: string, sent: string) => string;
 }
 
 export function CallScreen(props: CallScreenProps): JSX.Element {
   const { phase, timer, muted } = props;
+  // Tones can only go somewhere once the call is connected.
+  const canSendDigits = phase === 'active';
+  const [keypadOpen, setKeypadOpen] = useState(false);
+  const [sent, setSent] = useState('');
+
+  if (keypadOpen && canSendDigits) {
+    return (
+      <div className="call-screen keypad-mode">
+        <div className="to">{formatE164(props.toNumber)}</div>
+        <div className="dtmf-sent tnum">{sent || 'Press a key to send a tone'}</div>
+        <div className="dialpad dtmf">
+          {DTMF_KEYS.map((k) => (
+            <button key={k} className="key" onClick={() => setSent(props.onSendDigit(k, sent))}>
+              <span className="num">{k}</span>
+            </button>
+          ))}
+        </div>
+        <div className="call-controls">
+          <button className="cbtn" onClick={() => setKeypadOpen(false)} title="Back to call">
+            <XIcon />
+          </button>
+          <button className="cbtn hangup" onClick={props.onHangup} title="End call">
+            <PhoneHangupIcon />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="call-screen">
       <div className={`call-avatar ${phase}`}><PhoneIcon /></div>
@@ -42,6 +78,11 @@ export function CallScreen(props: CallScreenProps): JSX.Element {
         >
           {muted ? <MicOffIcon /> : <MicIcon />}
         </button>
+        {canSendDigits && (
+          <button className="cbtn" onClick={() => setKeypadOpen(true)} title="Keypad — send touch tones">
+            <GridIcon />
+          </button>
+        )}
         <button className="cbtn hangup" onClick={props.onHangup} title="End call">
           <PhoneHangupIcon />
         </button>
