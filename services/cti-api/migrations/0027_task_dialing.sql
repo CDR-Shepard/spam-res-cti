@@ -44,3 +44,17 @@ CREATE TABLE IF NOT EXISTS "dialer_dial_attempts" (
 -- The count's exact access path: this org, this recipient, inside the window.
 CREATE INDEX IF NOT EXISTS "dialer_dial_attempts_target_idx"
   ON "dialer_dial_attempts" ("org_id", "to_number", "dialed_at");
+
+-- Carry the trailing window over. Without this the per-customer ceiling forgets
+-- every power-dial contact made before this deploy and a recipient could be
+-- rung past the cap on day one. One row per already-dialed item is all that
+-- survives there anyway (the fallback path overwrote the rest — the very loss
+-- this table fixes), so this is no worse than what the old count could see.
+-- Idempotent via NOT EXISTS: re-running cannot double-count an item.
+INSERT INTO "dialer_dial_attempts" ("org_id", "user_id", "session_id", "item_id", "to_number", "from_number", "dialed_at")
+SELECT s."org_id", s."user_id", i."session_id", i."id", i."to_number", i."from_number", i."updated_at"
+  FROM "dialer_queue_items" i
+  JOIN "dialer_sessions" s ON s."id" = i."session_id"
+ WHERE i."from_number" IS NOT NULL
+   AND i."to_number" IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM "dialer_dial_attempts" a WHERE a."item_id" = i."id");
