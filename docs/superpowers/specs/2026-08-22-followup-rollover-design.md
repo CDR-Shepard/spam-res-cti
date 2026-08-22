@@ -36,7 +36,7 @@ created through a retrying queue, and the record pops only when a human is on th
 | Spacing between attempts | A **5-minute floor**: an attempt-2 row is not dialed until 5 min after its attempt-1 ended. If only retries remain, the run waits and shows a countdown; the worker tick nudges it when due. |
 | What counts as a miss? | Anything that did not reach a human: rang out with no numbers left, busy, voicemail/machine, failed. |
 | Cap counting basis | **All** open Follow-up tasks due that day for that owner, including hand-created ones (per the "30 set → only 70 more" example). |
-| Cap value | `org_settings.followup_daily_cap`, default **100**, per-org tunable. |
+| Cap value | `campaign_configs.followup_daily_cap` (the per-org config row, key `default`), default **100**. |
 | Where the SF work runs | A **single-flight worker** draining a job table — not the webhook. |
 | Pop rule | Only when the queue item becomes `connected`. AMD hangs up machines before bridging, so `connected` ⇒ human. |
 
@@ -56,19 +56,19 @@ still equals one call ID and one outcome, which every existing webhook path assu
 ```
 id uuid pk
 org_id uuid, user_id uuid, sf_owner_id text
-record_id text, object_type text
+record_id text, object_type text, session_id uuid (nullable — for the run summary)
 from_date text            -- org-local YYYY-MM-DD of the 2nd miss (todayIso from EngineDeps)
 status enum pending|in_flight|succeeded|failed
 attempts int default 0, last_error text
 next_attempt_at timestamptz default now(), completed_at timestamptz
-completed_task_id text, created_task_id text
+completed_task_id text, created_task_id text, target_date text (the day the copy landed on)
 created_at, updated_at timestamptz
 UNIQUE (user_id, record_id, from_date)   -- duplicate webhook ⇒ onConflictDoNothing
 INDEX (status, next_attempt_at)
 ```
 
-### `org_settings` — one new column
-- `followup_daily_cap integer NOT NULL DEFAULT 100` (beside `max_attempts`, `per_customer_max_attempts`).
+### `campaign_configs` — one new column
+- `followup_daily_cap integer NOT NULL DEFAULT 100` (beside `max_attempts`, `per_customer_max_attempts`; loaded with the same `(org_id, key='default')` lookup the firewall uses).
 
 ## Engine (`services/cti-api/src/dialer/engine.ts`)
 
