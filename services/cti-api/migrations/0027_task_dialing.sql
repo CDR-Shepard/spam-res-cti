@@ -22,9 +22,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS "followup_rollover_source_unique"
 DROP INDEX IF EXISTS "followup_rollover_unique";
 
 -- The dialer half of the shared per-customer attempt count
--- (firewall/index.ts customerAttemptCounts): power-dial contacts to one
--- recipient inside the campaign window. Partial — only a row that was actually
--- originated carries a from_number, and only those count as attempts.
-CREATE INDEX IF NOT EXISTS "dialer_queue_items_dialed_target_idx"
-  ON "dialer_queue_items" ("to_number", "updated_at")
-  WHERE "from_number" IS NOT NULL;
+-- (firewall/index.ts customerAttemptCounts). It CANNOT be counted off
+-- dialer_queue_items: the no-answer -> fallback path rewrites to_number /
+-- from_number on the very same row (engine.ts handleDialOutcome), so the mobile
+-- dial silently disappears from the tally the moment the Phone is tried. One
+-- append-only row per successful originate instead — nothing here is ever
+-- updated, so an attempt cannot be erased by a later dial of the same item.
+--
+-- No FK to dialer_sessions/dialer_queue_items on purpose: those rows cascade on
+-- session delete, and a compliance tally must outlive the run it came from.
+CREATE TABLE IF NOT EXISTS "dialer_dial_attempts" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "org_id" uuid NOT NULL,
+  "user_id" uuid NOT NULL,
+  "session_id" uuid NOT NULL,
+  "item_id" uuid NOT NULL,
+  "to_number" text NOT NULL,
+  "from_number" text NOT NULL,
+  "dialed_at" timestamptz NOT NULL DEFAULT now()
+);
+-- The count's exact access path: this org, this recipient, inside the window.
+CREATE INDEX IF NOT EXISTS "dialer_dial_attempts_target_idx"
+  ON "dialer_dial_attempts" ("org_id", "to_number", "dialed_at");

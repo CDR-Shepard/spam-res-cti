@@ -8,7 +8,7 @@
  *
  * This DOES NOT claim legal compliance. It enforces internal guardrails.
  */
-import { and, eq, gte, isNotNull, ne, sql } from 'drizzle-orm';
+import { and, eq, gte, ne, sql } from 'drizzle-orm';
 import type { getDb } from '../db/index.js';
 import { schema } from '../db/index.js';
 import { normalize } from '../phone.js';
@@ -178,12 +178,17 @@ export function tallyAttempts(
  *
  * TWO sources, because the two dial paths record differently:
  *  - `calls`: written by click-to-dial (routes/calls.ts) and inbound.
- *  - dialed `dialer_queue_items`: the power dialer originates straight through
- *    the Twilio SDK (dialer/twilio-telephony.ts) and writes no `calls` row, so
+ *  - `dialer_dial_attempts`: the power dialer originates straight through the
+ *    Twilio SDK (dialer/twilio-telephony.ts) and writes no `calls` row, so
  *    counting only `calls` would leave the ceiling blind to the highest-volume
- *    dial path. A row counts once it has a `from_number`, which the engine
- *    stamps only after `originate` succeeds — pending/skipped/unreachable rows
- *    were never dialed and must not count.
+ *    dial path. One append-only row per successful originate, written inside the
+ *    engine's dialing stamp.
+ *
+ * NOT `dialer_queue_items`, which this used to count: a TRUE no-answer rewrites
+ * `to_number`/`from_number` on the SAME row to dial the record's Phone, so the
+ * mobile dial vanished from the tally the moment the fallback was tried — the
+ * recipient had been contacted twice and the ceiling could only see once.
+ *
  * The two sources are disjoint (no dialer dial ever writes a `calls` row), so
  * summing them cannot double-count.
  */
@@ -206,21 +211,16 @@ export async function customerAttemptCounts(
       )
       .groupBy(schema.calls.fromNumber),
     db
-      .select({ from: schema.dialerQueueItems.fromNumber, n: sql<number>`count(*)::int` })
-      .from(schema.dialerQueueItems)
-      .innerJoin(schema.dialerSessions, eq(schema.dialerSessions.id, schema.dialerQueueItems.sessionId))
+      .select({ from: schema.dialerDialAttempts.fromNumber, n: sql<number>`count(*)::int` })
+      .from(schema.dialerDialAttempts)
       .where(
         and(
-          eq(schema.dialerSessions.orgId, orgId),
-          eq(schema.dialerQueueItems.toNumber, toE164),
-          isNotNull(schema.dialerQueueItems.fromNumber),
-          // dialer_queue_items has no created_at; a dialed row's last write is
-          // its outcome, moments after the dial, so updated_at is the dial time
-          // for window purposes.
-          gte(schema.dialerQueueItems.updatedAt, windowStart),
+          eq(schema.dialerDialAttempts.orgId, orgId),
+          eq(schema.dialerDialAttempts.toNumber, toE164),
+          gte(schema.dialerDialAttempts.dialedAt, windowStart),
         ),
       )
-      .groupBy(schema.dialerQueueItems.fromNumber),
+      .groupBy(schema.dialerDialAttempts.fromNumber),
   ]);
   return tallyAttempts([...calls, ...dialed]);
 }

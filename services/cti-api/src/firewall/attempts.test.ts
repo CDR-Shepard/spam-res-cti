@@ -57,13 +57,13 @@ type Db = Parameters<typeof customerAttemptCounts>[0];
  * plumbing) — which rows a source is allowed to contribute is the whole point
  * of this query.
  */
-function fakeDb(rows: { calls?: GroupedRow[]; dialed?: GroupedRow[] }): { db: Db; wheres: string[] } {
+function fakeDb(rows: { calls?: GroupedRow[]; attempts?: GroupedRow[] }): { db: Db; wheres: string[] } {
   const dialect = new PgDialect();
   const wheres: string[] = [];
   const db = {
     select: () => ({
       from: (table: unknown) => {
-        const out = table === schema.calls ? rows.calls ?? [] : rows.dialed ?? [];
+        const out = table === schema.calls ? rows.calls ?? [] : rows.attempts ?? [];
         const chain = {
           innerJoin: () => chain,
           where: (w: Parameters<PgDialect['sqlToQuery']>[0]) => {
@@ -85,7 +85,8 @@ describe('customerAttemptCounts', () => {
   it('counts power-dial attempts, which write no `calls` row at all', async () => {
     // The regression this exists for: the dialer originates straight through
     // Twilio, so a `calls`-only count let a run dial one recipient forever.
-    const { db } = fakeDb({ calls: [], dialed: [{ from: '+1AGENT', n: 4 }] });
+    // The rows come from dialer_dial_attempts (one per successful originate).
+    const { db } = fakeDb({ calls: [], attempts: [{ from: '+1AGENT', n: 4 }] });
     const { attemptsByNumber, customerAttemptsTotal } = await customerAttemptCounts(db, 'O1', '+16195559999', WINDOW_START);
     expect(customerAttemptsTotal).toBe(4);
     expect(attemptsByNumber.get('+1AGENT')).toBe(4);
@@ -94,7 +95,7 @@ describe('customerAttemptCounts', () => {
   it('sums both sources, accumulating a number used by both dial paths', async () => {
     const { db } = fakeDb({
       calls: [{ from: '+1A', n: 2 }, { from: null, n: 1 }],
-      dialed: [{ from: '+1A', n: 3 }, { from: '+1POOL', n: 1 }],
+      attempts: [{ from: '+1A', n: 3 }, { from: '+1POOL', n: 1 }],
     });
     const { attemptsByNumber, customerAttemptsTotal } = await customerAttemptCounts(db, 'O1', '+16195559999', WINDOW_START);
     expect(customerAttemptsTotal).toBe(7);
@@ -102,17 +103,29 @@ describe('customerAttemptCounts', () => {
     expect(attemptsByNumber.get('+1POOL')).toBe(1);
   });
 
-  it('scopes the dialer source to this org, this recipient, the window, and rows that were actually dialed', async () => {
+  it('counts BOTH dials of a fallback pair — the row the dialer overwrites cannot', async () => {
+    // The regression this exists for: a TRUE no-answer on the Mobile rewrites
+    // to_number/from_number on the SAME dialer_queue_items row to dial the
+    // record's Phone. Counting that row saw ONE contact where the recipient had
+    // been rung twice, on two different DIDs. The append-only attempts table
+    // keeps both, attributed to the number that placed each.
+    const { db } = fakeDb({ calls: [], attempts: [{ from: '+1MOBILEDID', n: 1 }, { from: '+1FALLBACKDID', n: 1 }] });
+    const { attemptsByNumber, customerAttemptsTotal } = await customerAttemptCounts(db, 'O1', '+16195559999', WINDOW_START);
+    expect(customerAttemptsTotal).toBe(2);
+    expect(attemptsByNumber.get('+1MOBILEDID')).toBe(1);
+    expect(attemptsByNumber.get('+1FALLBACKDID')).toBe(1);
+  });
+
+  it('scopes the dialer source to this org, this recipient, and the window', async () => {
     const { db, wheres } = fakeDb({});
     await customerAttemptCounts(db, 'O1', '+16195559999', WINDOW_START);
-    const dialerWhere = wheres.find((w) => w.includes('dialer_queue_items'));
+    const dialerWhere = wheres.find((w) => w.includes('dialer_dial_attempts'));
     expect(dialerWhere).toBeDefined();
-    // A pending / skipped / unreachable row has no from_number and was never dialed.
-    expect(dialerWhere).toContain('"from_number" is not null');
+    expect(dialerWhere).toContain('"org_id" =');
     expect(dialerWhere).toContain('"to_number" =');
-    expect(dialerWhere).toContain('"updated_at" >=');
-    // Org scoping comes from the joined session row — items carry no org_id.
-    expect(dialerWhere).toContain('"dialer_sessions"."org_id" =');
+    expect(dialerWhere).toContain('"dialed_at" >=');
+    // Never dialer_queue_items: the fallback path rewrites that row's to/from.
+    expect(wheres.some((w) => w.includes('dialer_queue_items'))).toBe(false);
   });
 });
 

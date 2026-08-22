@@ -276,15 +276,39 @@ export const dialerQueueItems = pgTable(
   },
   (t) => ({
     callIdIdx: index('dialer_queue_items_call_id_idx').on(t.callId),
-    /**
-     * Power-dial contacts to one recipient in a window — the dialer half of the
-     * shared per-customer attempt count (firewall/index.ts customerAttemptCounts),
-     * which runs on every click-to-dial preflight and every dialer pick. Partial:
-     * only a row that actually got dialed carries a from_number.
-     */
-    dialedTargetIdx: index('dialer_queue_items_dialed_target_idx')
-      .on(t.toNumber, t.updatedAt)
-      .where(sql`${t.fromNumber} is not null`),
+  }),
+);
+
+/**
+ * One append-only row per successful power-dial originate — the dialer half of
+ * the shared per-customer attempt count (firewall/index.ts
+ * customerAttemptCounts).
+ *
+ * Why not count `dialer_queue_items` directly: a TRUE no-answer on the Mobile
+ * rewrites `to_number` / `from_number` on the SAME row to dial the Phone
+ * (engine.ts handleDialOutcome), which erases the mobile dial from the tally —
+ * the recipient was contacted twice and the compliance ceiling saw one. Nothing
+ * here is ever updated, so no later dial can rewrite an earlier attempt away.
+ *
+ * Deliberately FK-free: sessions and queue items cascade-delete, and a
+ * contact-frequency tally has to outlive the run that produced it.
+ */
+export const dialerDialAttempts = pgTable(
+  'dialer_dial_attempts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    sessionId: uuid('session_id').notNull(),
+    itemId: uuid('item_id').notNull(),
+    /** The number actually dialed (Mobile on attempt 1, Phone on the fallback). */
+    toNumber: text('to_number').notNull(),
+    /** The DID it was placed from. */
+    fromNumber: text('from_number').notNull(),
+    dialedAt: timestamp('dialed_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    targetIdx: index('dialer_dial_attempts_target_idx').on(t.orgId, t.toNumber, t.dialedAt),
   }),
 );
 

@@ -52,6 +52,33 @@ async function setItem(deps: EngineDeps, id: string, patch: Partial<DialerItem>)
 }
 
 /**
+ * Same write, but ONLY while the row is still 'pending' — returns the number of
+ * rows it changed. Every skip below fires after at least one await (`pickDid`
+ * alone runs three queries), so a concurrent advance can have flipped the row to
+ * 'dialing' in the meantime; an unconditional UPDATE would overwrite a LIVE dial
+ * with 'skipped'. 0 rows means that other advance owns the row now.
+ */
+async function setItemIfPending(deps: EngineDeps, id: string, patch: Partial<DialerItem>): Promise<number> {
+  const rows = await deps.db
+    .update(schema.dialerQueueItems)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(and(eq(schema.dialerQueueItems.id, id), eq(schema.dialerQueueItems.status, 'pending')))
+    .returning({ id: schema.dialerQueueItems.id });
+  return rows.length;
+}
+
+/**
+ * A guarded skip matched 0 rows: another advance claimed the row while we were
+ * deciding. Re-read the queue instead of trusting our stale copy, and return
+ * null to back off entirely if that advance is now dialing — carrying on would
+ * place a SECOND concurrent call for the same rep.
+ */
+async function reloadAfterLostSkip(deps: EngineDeps, sessionId: string): Promise<DialerItem[] | null> {
+  const fresh = await loadItems(deps, sessionId);
+  return inFlightItem(fresh) ? null : fresh;
+}
+
+/**
  * Release the rep's conference now that their run is over, freeing their single
  * Twilio Device for the next call. The rep's softphone normally does this itself
  * (its leg joins with `endConferenceOnExit=true`); this is the backstop for when
@@ -103,8 +130,13 @@ export async function advanceSession(
       continue;
     }
     if (!deps.withinCallingHours(next.toNumber, deps.nowUtc)) {
-      await setItem(deps, next.id, { status: 'skipped', outcome: 'out_of_hours' });
-      items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: 'out_of_hours' } : i));
+      if (await setItemIfPending(deps, next.id, { status: 'skipped', outcome: 'out_of_hours' })) {
+        items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: 'out_of_hours' } : i));
+        continue;
+      }
+      const fresh = await reloadAfterLostSkip(deps, sessionId);
+      if (!fresh) return { action: 'waiting' };
+      items = fresh;
       continue;
     }
     // Task runs dial the rep's own numbers; every other run kind dials the pool.
@@ -112,8 +144,13 @@ export async function advanceSession(
     const did = await deps.pickDid({ orgId: session.orgId, userId: session.userId, toE164: next.toNumber, runKind });
     if (did && 'skip' in did) {
       // Over-contacted customer: skip THIS record, keep the run going.
-      await setItem(deps, next.id, { status: 'skipped', outcome: did.skip });
-      items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: did.skip } : i));
+      if (await setItemIfPending(deps, next.id, { status: 'skipped', outcome: did.skip })) {
+        items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: did.skip } : i));
+        continue;
+      }
+      const fresh = await reloadAfterLostSkip(deps, sessionId);
+      if (!fresh) return { action: 'waiting' };
+      items = fresh;
       continue;
     }
     if (!did) { await setSession(deps, sessionId, 'paused'); return { action: 'paused_no_numbers' }; }
@@ -135,17 +172,39 @@ export async function advanceSession(
     });
     if (!claimed) return { action: 'waiting' };
 
+    // Captured before the closures below: TypeScript drops the `next.toNumber`
+    // narrowing inside a nested function, and it is non-null from the guard above.
+    const toE164 = next.toNumber;
     let callId: string;
     try {
       ({ callId } = await deps.telephony.originate({
-        sessionId, itemId: next.id, fromE164: did.e164, toE164: next.toNumber, userId: session.userId,
+        sessionId, itemId: next.id, fromE164: did.e164, toE164, userId: session.userId,
       }));
     } catch (err) {
       // Roll the item back so a transient originate failure doesn't strand it 'dialing'.
       await setItem(deps, next.id, { status: 'pending' });
       throw err;
     }
-    await setItem(deps, next.id, { callId, fromNumber: did.e164 });
+    // Stamp the dial AND record the attempt in ONE transaction. The attempt row
+    // is what the shared per-customer ceiling counts (firewall/index.ts
+    // customerAttemptCounts) and it is append-only, so a later fallback dial of
+    // this same item cannot rewrite it away the way it rewrites the item's own
+    // to_number/from_number. Atomic with the stamp so the ceiling can never
+    // disagree with what the queue says was dialed.
+    await deps.db.transaction(async (tx) => {
+      await tx
+        .update(schema.dialerQueueItems)
+        .set({ callId, fromNumber: did.e164, updatedAt: new Date() })
+        .where(eq(schema.dialerQueueItems.id, next.id));
+      await tx.insert(schema.dialerDialAttempts).values({
+        orgId: session.orgId,
+        userId: session.userId,
+        sessionId,
+        itemId: next.id,
+        toNumber: toE164,
+        fromNumber: did.e164,
+      });
+    });
     return { action: 'dialing', itemId: next.id };
   }
 }

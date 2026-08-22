@@ -1,3 +1,4 @@
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '../db/index.js';
 
@@ -110,10 +111,30 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean }
     update(_tbl: unknown) {
       return {
         set: (patch: any) => ({
-          where: async () => {
-            writes.push({ patch });
-            Object.assign(_target, patch);
-            if (_tbl === schema.dialerSessions) sessionOverride = { ...sessionOverride, ...patch };
+          where: (w: any) => {
+            const apply = () => {
+              writes.push({ patch });
+              Object.assign(_target, patch);
+              if (_tbl === schema.dialerSessions) sessionOverride = { ...sessionOverride, ...patch };
+            };
+            return {
+              // Unguarded `UPDATE ... WHERE id = $1` — awaited directly.
+              then: (res: any, rej: any) => Promise.resolve(apply()).then(res, rej),
+              // Guarded `UPDATE ... WHERE id = $1 AND status = 'pending' RETURNING id`
+              // (setItemIfPending). Honors the guard against the fake's OWN item
+              // rows, so a test can flip a row to 'dialing' mid-advance — a
+              // concurrent advance winning the claim — and assert the skip write
+              // is refused instead of clobbering the live dial.
+              returning: async () => {
+                const { sql: text, params } = new PgDialect().sqlToQuery(w);
+                if (/"status" =/.test(text)) {
+                  const target = items.find((i: any) => params.includes(i.id));
+                  if (!target || target.status !== 'pending') return [];
+                }
+                apply();
+                return [{ id: 'updated' }];
+              },
+            };
           },
         }),
       };
@@ -142,14 +163,20 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean }
         update(_tbl: unknown) {
           return {
             set: (patch: any) => ({
-              where: () => ({
-                returning: async () => {
-                  if (!claimReturnsRows) return [];
-                  writes.push({ patch });
-                  Object.assign(_target, patch);
-                  return [{ id: 'claimed' }];
-                },
-              }),
+              where: () => {
+                const apply = () => { writes.push({ patch }); Object.assign(_target, patch); };
+                return {
+                  // Plain awaited UPDATE inside a transaction (the post-originate
+                  // stamp, which rides with the dial-attempt insert).
+                  then: (res: any, rej: any) => Promise.resolve(apply()).then(res, rej),
+                  // The conditional pending -> dialing claim.
+                  returning: async () => {
+                    if (!claimReturnsRows) return [];
+                    apply();
+                    return [{ id: 'claimed' }];
+                  },
+                };
+              },
             }),
           };
         },
@@ -213,6 +240,29 @@ describe('advanceSession', () => {
     expect((deps.telephony.originate as any)).toHaveBeenCalledWith(expect.objectContaining({ toE164: '+16195550100', fromE164: '+16190000000' }));
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'dialing' }) });
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ callId: 'CA1', fromNumber: '+16190000000' }) });
+  });
+  it('records exactly one append-only dial attempt, inside the dialing write transaction', async () => {
+    // The per-customer ceiling counts these rows. It cannot count
+    // dialer_queue_items: the no-answer -> fallback path rewrites to_number /
+    // from_number on the same row, erasing the mobile dial from the tally.
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await advanceSession('S1', deps);
+    expect(fdb._txInserts).toEqual([
+      { values: expect.objectContaining({
+        orgId: 'O1', userId: 'U1', sessionId: 'S1', itemId: 'i1',
+        toNumber: '+16195550100', fromNumber: '+16190000000',
+      }) },
+    ]);
+    // ...and nothing was written outside that transaction.
+    expect(fdb._inserts).toEqual([]);
+  });
+  it('records no dial attempt when the originate itself fails', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps({ telephony: { originate: vi.fn(async () => { throw new Error('twilio 500'); }), bridgeToRep: vi.fn(), hangup: vi.fn(), endConference: vi.fn() } as any });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await expect(advanceSession('S1', deps)).rejects.toThrow(/twilio 500/);
+    expect(fdb._txInserts).toEqual([]);
   });
   it('waits (does not dial) while an item is in flight', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
@@ -305,6 +355,27 @@ describe('advanceSession', () => {
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped', outcome: 'customer_ceiling' }) });
     expect(r.action).toBe('dialing');
     expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'paused' }) });
+  });
+  it('does NOT clobber a row a concurrent advance already claimed while pickDid was running', async () => {
+    // The ceiling skip lands three queries after the row was read, so another
+    // advance can have flipped it 'pending' -> 'dialing' in between. An
+    // unconditional UPDATE would overwrite a LIVE dial with 'skipped'; the
+    // guarded write matches 0 rows instead, and we back off rather than place a
+    // second concurrent call for the same rep.
+    const items = [
+      { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null },
+    ];
+    const pickDid = vi.fn(async () => {
+      items[0]!.status = 'dialing'; // the other advance won the claim mid-pick
+      return { skip: 'customer_ceiling' };
+    });
+    const deps = makeDeps({ pickDid } as any); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await advanceSession('S1', deps);
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ outcome: 'customer_ceiling' }) });
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'paused' }) });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+    expect(r.action).toBe('waiting');
   });
   it('skips (does not dial) an item whose recipient is currently out of calling hours', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
