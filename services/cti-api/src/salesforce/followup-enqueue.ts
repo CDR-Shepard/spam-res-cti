@@ -7,7 +7,10 @@ import { getDb, schema } from '../db/index.js';
  *  rollover job INSIDE its transaction instead of after it. */
 export type RolloverDb = Pick<ReturnType<typeof getDb>, 'insert'>;
 
-/** Idempotent: a duplicated webhook's second enqueue is a no-op. Runs INSIDE
+/** Idempotent: a duplicated webhook's second enqueue is a no-op — the conflict
+ *  target is `followup_rollover_source_unique`, UNIQUE(user_id,
+ *  COALESCE(source_task_id, record_id), from_date), so on a Task run two
+ *  follow-up tasks for the SAME person still enqueue two distinct jobs. Runs INSIDE
  *  the engine's row-locked transaction (dialer/engine.ts `handleDialOutcome`),
  *  so this MUST stay a single local INSERT ... ON CONFLICT DO NOTHING — no
  *  network I/O, no retries, no extra queries; anything slower here stalls the

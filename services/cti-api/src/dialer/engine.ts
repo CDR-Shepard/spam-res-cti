@@ -28,7 +28,8 @@ export interface EngineDeps {
   /** The "now" the engine reasons about — injected so calling-hours checks are deterministic in tests. */
   nowUtc: Date;
   /** Queue the rep's follow-up rollover for this record (drained by the follow-up
-   *  worker). Idempotent on (user, record, fromDate). Called INSIDE the miss-path
+   *  worker). Idempotent on (user, sourceTaskId ?? record, fromDate) — so two
+   *  follow-up tasks on the SAME person each get their own job. Called INSIDE the miss-path
    *  transaction (handleDialOutcome) with that transaction's `tx` as the second
    *  arg, so the enqueue commits or rolls back atomically with the CAS that
    *  flips the row out of 'dialing' — no try/catch here on purpose. */

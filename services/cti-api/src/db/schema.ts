@@ -631,7 +631,7 @@ export const salesforceSyncJobs = pgTable(
  * Follow-up rollover jobs — the dialer enqueues one on a record's SECOND miss of
  * the day; salesforce/followup-worker.ts drains them single-flight (create the
  * next-day copy under the daily cap, then complete the original). Mirrors
- * salesforce_sync_jobs. UNIQUE(user, record, from_date) = duplicate-webhook safe.
+ * salesforce_sync_jobs. UNIQUE(user, task-or-record, from_date) = duplicate-webhook safe.
  */
 export const followupRolloverJobs = pgTable(
   'followup_rollover_jobs',
@@ -663,7 +663,15 @@ export const followupRolloverJobs = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    jobUnique: uniqueIndex('followup_rollover_unique').on(t.userId, t.recordId, t.fromDate),
+    // The rolled unit is the TASK when there is one: a Task run can hold two
+    // follow-up tasks for the SAME person, and both must roll. Keying on
+    // record_id alone silently swallowed the second (the enqueue is ON CONFLICT
+    // DO NOTHING), leaving that task open past its due date with no error row.
+    // COALESCE, not a plain added column: every Lead/Opp row has
+    // source_task_id NULL, and NULLs are all distinct to a unique index — that
+    // would drop the duplicate-webhook backstop on the pool path.
+    jobUnique: uniqueIndex('followup_rollover_source_unique')
+      .on(t.userId, sql`coalesce(${t.sourceTaskId}, ${t.recordId})`, t.fromDate),
     statusIdx: index('followup_rollover_status_idx').on(t.status, t.nextAttemptAt),
     sessionIdx: index('followup_rollover_session_idx').on(t.sessionId),
   }),
