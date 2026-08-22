@@ -323,6 +323,14 @@ describe('processRolloverJob', () => {
     }));
   });
 
+  it('a job pre-stamped before the create (crash between stamp and POST) still CREATES on retry — the retry keys on createdTaskId only', async () => {
+    const d = deps(); const fetch = d.sf.sfFetch as any;
+    await processRolloverJob(job({ createdTaskId: null, targetDate: '2026-08-21', nextDay: '2026-08-21', completedTaskId: '00T1', attempts: 2 }), d);
+    const methods = fetch.mock.calls.map((c: any[]) => [c[1], c[2]?.method]);
+    expect(methods).toContainEqual(['/sobjects/Task', 'POST']);              // the copy IS created
+    expect(methods.findIndex((m: any[]) => m[1] === 'POST')).toBeLessThan(methods.findIndex((m: any[]) => m[1] === 'PATCH')); // and before the complete
+  });
+
   it('treats a 201 whose body carries no id as transient, stamping no createdTaskId (L3)', async () => {
     const base = deps();
     const d = deps({

@@ -20,8 +20,10 @@
  * (UPDATE ... WHERE status = 'pending' RETURNING), so for a given pass exactly
  * one replica wins the row and the loser skips it. The only other way a second
  * replica can pick the same job up is the reaper, so STUCK_AFTER_MS is set to a
- * job's WORST-CASE wall time (every Salesforce call in it timing out) and each
- * claim stamps `updated_at` with a clock read taken at that claim — not at the
+ * job's WORST-CASE wall time — the follow-up query, the business calendar fetch,
+ * up to thirty day-counts (one per business day scanned), the create, and the
+ * complete, each timing out (≈17.5 minutes total) — and each claim stamps
+ * `updated_at` with a clock read taken at that claim — not at the
  * top of the batch, which used to make the 25th job of a tick instantly
  * reap-eligible. An in_flight job is therefore only reaped once it genuinely
  * cannot still be running, and a reaped job that IS re-run is still safe:
@@ -51,14 +53,9 @@ export const SF_CALL_TIMEOUT_MS = 30_000;
  *  call that MUTATES Salesforce, so abandoning it early risks a retry racing a
  *  create that actually landed. Give it room to finish. */
 export const SF_CREATE_TIMEOUT_MS = 60_000;
-/**
- * How long an in_flight job may sit without its claim being refreshed before the
- * reaper hands it back to the queue. This MUST exceed a job's worst case, or the
- * reaper races a claim that is still working and two replicas run the same job.
- * Worst case = every Salesforce call in the job timing out: the follow-up query,
- * one day-count per business day scanned, the create, and the complete.
- */
-export const STUCK_AFTER_MS = SF_CALL_TIMEOUT_MS * (MAX_ROLLOVER_BUSINESS_DAYS + 3);
+/** Must exceed a job's worst case: query + calendar + one count per business day scanned + create + complete,
+ *  each at its timeout. A job still running past this is reaped and re-claimed by another replica. */
+export const STUCK_AFTER_MS = SF_CALL_TIMEOUT_MS * (MAX_ROLLOVER_BUSINESS_DAYS + 3) + SF_CREATE_TIMEOUT_MS;
 /** How recently the softphone must have polled a dialer session for the retry
  *  nudge to originate a call for it. The DialerPanel polls every ~2s, so this is
  *  five missed polls — enough slack for one slow response, short enough that a
