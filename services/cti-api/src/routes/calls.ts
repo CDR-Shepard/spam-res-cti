@@ -17,7 +17,8 @@ import { warmupCapForAge } from '../firewall/warmup.js';
 import { enqueueSyncForCall, AUTO_DISPOSITION } from '../salesforce/sync.js';
 import { updateCallTask } from '../salesforce/client.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
-import { fetchOwnership, gatedIds, mayCreateTaskOn } from '../salesforce/ownership.js';
+import { fetchOwnership, gatedIds, mayCreateTaskOn, type OwnershipSnapshot } from '../salesforce/ownership.js';
+import { isValidSfId } from '../dialer/handoff-store.js';
 import { loadConfig } from '../config.js';
 
 /**
@@ -103,6 +104,37 @@ export function syncErrorForCall(
   return job.status === 'failed' ? 'failed' : null;
 }
 
+/**
+ * May the SOFTPHONE write this call's Salesforce Task itself?
+ *
+ * Answers the `taskAllowed` flag on POST /calls. `true` = the client writes the
+ * Task through Open CTI and posts `skipSalesforceSync: true`; `false` = the
+ * client leaves it alone and the backend sync worker writes it (re-applying the
+ * very same gate, with retries and a recorded reason).
+ *
+ * That asymmetry is why this fails CLOSED. A client write is the one path no
+ * server gate can see, so "we could not determine ownership" must not authorize
+ * it — handing the decision to the backend costs a few seconds of latency and
+ * loses nothing. It never affects whether the call is placed.
+ *
+ *  - no gated id (custom object, or no record at all) → `true` with no round-trip
+ *  - either dependency throws → `false`
+ */
+export async function clientTaskAllowed(
+  recipientRecordId: string | undefined,
+  resolveMe: () => Promise<string>,
+  lookup: (recordId: string) => Promise<OwnershipSnapshot>,
+  onError?: (err: unknown) => void,
+): Promise<boolean> {
+  if (gatedIds([recipientRecordId]).length === 0) return true;
+  try {
+    return await mayCreateTaskOn([recipientRecordId], await resolveMe(), lookup);
+  } catch (err) {
+    onError?.(err);
+    return false;
+  }
+}
+
 export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
 
@@ -122,7 +154,7 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
      * has to reopen this call's disposition later, the Task still attaches to the
      * exact Lead/Contact/Opportunity/Deal__c instead of a SOSL phone-guess.
      */
-    recipientRecordId: z.string().min(15).max(20).optional(),
+    recipientRecordId: z.string().refine(isValidSfId, 'invalid recipientRecordId').optional(),
     recipientObjectType: z.string().max(64).optional(),
   });
 
@@ -284,23 +316,22 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
       req.log.warn({ err }, 'sticky number upsert failed');
     }
 
-    // Will this call become a Salesforce Task? The softphone honors the answer
-    // (no wrap-up "logged to Salesforce" promise on a record the rep neither
-    // owns nor manages). Advisory only: the call is already placed, and the sync
-    // worker re-applies the same gate server-side. A lookup failure therefore
-    // defaults to `true` rather than blocking or misinforming the rep.
-    // A custom object is allowed by the rule outright, so `gatedIds` empty means
-    // the answer is already `true` — no SOQL, and no /users/me either.
-    let taskAllowed = true;
+    // May the SOFTPHONE write this call's Salesforce Task itself (Open CTI)?
+    // `false` does not mean "no Task" — it means "do not write it client-side;
+    // the backend decides". The client then posts its disposition WITHOUT
+    // `skipSalesforceSync`, so the sync worker creates the Task under the same
+    // gate, with retries. That is why unknown ownership answers `false` and not
+    // `true`: a client write bypasses the server gate entirely (it arrives as
+    // `skipSalesforceSync: true`), so a failed lookup that defaulted to `true`
+    // meant NO gate ever ran on that Task.
+    // The call itself is already placed and is never affected by this answer.
     const recipientRecordId = parsed.data.recipientRecordId;
-    if (gatedIds([recipientRecordId]).length > 0) {
-      try {
-        const me = await salesforceUserId(session.userId);
-        taskAllowed = await mayCreateTaskOn([recipientRecordId], me, (id) => fetchOwnership(session.userId, id));
-      } catch (err) {
-        req.log.warn({ err, recipientRecordId }, 'ownership lookup failed; assuming the task is allowed');
-      }
-    }
+    const taskAllowed = await clientTaskAllowed(
+      recipientRecordId,
+      () => salesforceUserId(session.userId),
+      (id) => fetchOwnership(session.userId, id),
+      (err) => req.log.warn({ err, recipientRecordId }, 'ownership lookup failed; backend will decide the Task'),
+    );
 
     return { call: row, taskAllowed };
   });
@@ -429,7 +460,7 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
      * we hand the backend the exact record so it attaches the Task precisely
      * (Lead/Contact → WhoId, everything else → WhatId) instead of SOSL-guessing.
      */
-    recipientRecordId: z.string().min(15).max(20).optional(),
+    recipientRecordId: z.string().refine(isValidSfId, 'invalid recipientRecordId').optional(),
     recipientObjectType: z.string().max(64).optional(),
   });
 
@@ -496,7 +527,7 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
   });
 
   const EnsureLogged = z.object({
-    recipientRecordId: z.string().min(15).max(20).optional(),
+    recipientRecordId: z.string().refine(isValidSfId, 'invalid recipientRecordId').optional(),
     recipientObjectType: z.string().max(64).optional(),
   });
 

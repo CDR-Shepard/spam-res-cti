@@ -46,7 +46,7 @@ import { SalesforceUnauthorizedError, sfFetch, soqlEscape, soqlQuery } from './c
 import { FOLLOWUP_DAILY_CAP_DEFAULT, MAX_ROLLOVER_BUSINESS_DAYS, followUpTasksSoql, pickRolloverDay } from './followup-day.js';
 import { countFollowUps } from './followup-subject.js';
 import { followUpCopyFields, pickFollowUpTask, type FollowUpTask } from './followup.js';
-import { callerMayCreateTaskOn, fetchOwnership, type OwnershipSnapshot } from './ownership.js';
+import { fetchOwnership, gatedIds, mayCreateTaskOn, type OwnershipSnapshot } from './ownership.js';
 
 export const MAX_ATTEMPTS = 8;
 export const BACKOFF_BASE_MS = 30_000;
@@ -127,8 +127,11 @@ async function findOpenFollowUp(deps: WorkerDeps, job: FollowupRolloverJob): Pro
         `WHERE IsClosed = false AND OwnerId = '${owner}' AND (WhoId = '${rid}' OR WhatId = '${rid}') ` +
         // No subject filter: SOQL LIKE cannot express the shared follow-up rule
         // (it would match "refund" on 'FU' and miss 'F/U'). `pickFollowUpTask`
-        // applies that rule in code over these 50.
-        'ORDER BY ActivityDate ASC NULLS LAST LIMIT 50',
+        // applies that rule in code over whatever comes back — so this LIMIT now
+        // spans ALL of the rep's open tasks on the record, not just the
+        // follow-ups. 200 leaves room for a busy record whose follow-up would
+        // otherwise fall off the end and read as "no-task".
+        'ORDER BY ActivityDate ASC NULLS LAST LIMIT 200',
     ),
     SF_CALL_TIMEOUT_MS,
     'follow-up query',
@@ -197,7 +200,18 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     // out as 'not-owner'. The SOURCE task is deliberately left OPEN — completing
     // it would erase another rep's follow-up. A lookup failure throws into the
     // catch below (transient → retry), i.e. the gate fails closed.
-    if (!callerMayCreateTaskOn(await withTimeout(deps.ownership(job.userId, job.recordId), SF_CALL_TIMEOUT_MS, 'ownership'), job.sfOwnerId)) {
+    //
+    // Gate every id the COPY will attach to, not the id the job was enqueued on:
+    // `followUpCopyFields` carries BOTH WhoId and WhatId off the source task, so
+    // a task on the rep's own lead but attached to another rep's Opportunity
+    // would otherwise write activity on that Opportunity. `mayCreateTaskOn`
+    // skips ids the rule does not name (custom objects) without a round-trip;
+    // when the task attaches to none it names, fall back to the job's record so
+    // a Lead/Opp run keeps the gate it has always had.
+    const attachIds = gatedIds([task.WhoId, task.WhatId]).length > 0 ? [task.WhoId, task.WhatId] : [job.recordId];
+    const mayRoll = await mayCreateTaskOn(attachIds, job.sfOwnerId, (id) =>
+      withTimeout(deps.ownership(job.userId, id), SF_CALL_TIMEOUT_MS, 'ownership'));
+    if (!mayRoll) {
       await patchJob(deps, job.id, { status: 'succeeded', lastError: 'not-owner', completedAt: deps.now() });
       return;
     }

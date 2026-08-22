@@ -176,6 +176,28 @@ describe('processRolloverJob', () => {
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'not-owner' }) });
   });
 
+  it('gates the WhatId too, not just the record the job was enqueued on', async () => {
+    // The copy (followUpCopyFields) carries BOTH WhoId and WhatId off the source
+    // task, so a task on the rep's OWN lead but attached to another rep's
+    // Opportunity would have written activity on that Opportunity. Gating only
+    // job.recordId (the Who, here) let it through.
+    const task = { ...openTask, WhoId: '00Q1', WhatId: '0061' };
+    const ownership = vi.fn(async (_u: string, id: string): Promise<OwnershipSnapshot> =>
+      (id === '0061'
+        ? { type: 'Opportunity', ownerId: '005OTHER', leadManagerId: null }
+        : { type: 'Lead', ownerId: '005' }));
+    const d = deps({
+      ownership,
+      sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
+        (/FROM Task WHERE OwnerId/.test(q) ? [] : [task])) as unknown as WorkerDeps['sf']['soqlQuery'] },
+    });
+    await processRolloverJob(job(), d);
+    expect((d.sf.sfFetch as any).mock.calls.filter((c: any[]) => c[2]?.method === 'POST')).toEqual([]);
+    expect(d.sf.sfFetch).not.toHaveBeenCalled();
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'not-owner' }) });
+    expect(ownership.mock.calls.map((c) => c[1])).toContain('0061');
+  });
+
   it('rolls the SOURCE task by id on a Task-run job (no search), and no-ops if it is closed/reassigned', async () => {
     const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
       (/Id = '00T9'/.test(q) ? [{ ...openTask, Id: '00T9' }] : [])) as unknown as WorkerDeps['sf']['soqlQuery'] } });

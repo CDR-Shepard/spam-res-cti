@@ -164,7 +164,7 @@ export async function runSyncTick(): Promise<{ processed: number }> {
           status: 'succeeded',
           // Why no Task exists, when that was a decision rather than a failure
           // (today: the ownership gate). GET /calls surfaces it as `syncError`.
-          lastError: result?.skipped ?? null,
+          lastError: syncJobLastError(result),
           completedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -190,12 +190,43 @@ export async function runSyncTick(): Promise<{ processed: number }> {
 }
 
 /**
+ * Everything `syncOne` reaches outside its own module. Injected so the ownership
+ * gate — the one branch that decides a call gets NO Salesforce Task — is
+ * testable without a database or a live Salesforce org. `runSyncTick` passes
+ * nothing and gets the live modules.
+ */
+export interface SyncOneDeps {
+  db: ReturnType<typeof getDb>;
+  salesforceUserId: typeof salesforceUserId;
+  fetchOwnership: typeof fetchOwnership;
+  findByPhone: typeof findByPhone;
+  createCallTask: typeof createCallTask;
+}
+
+function liveSyncOneDeps(): SyncOneDeps {
+  return { db: getDb(), salesforceUserId, fetchOwnership, findByPhone, createCallTask };
+}
+
+/**
+ * What a SUCCEEDED sync job records as its reason. A deliberate skip is not a
+ * failure — the job is done and there is nothing to retry — but the rep still
+ * has to be able to see why their call has no Task (GET /calls surfaces this as
+ * `syncError`). A normal sync leaves the column null.
+ */
+export function syncJobLastError(result: { skipped: 'not-owner' } | void): string | null {
+  return result?.skipped ?? null;
+}
+
+/**
  * Log one call to Salesforce. Resolves to `{ skipped }` when the call was
  * deliberately NOT written as a Task (the job still succeeds — there is nothing
  * to retry); `void` on a normal sync.
  */
-async function syncOne(callId: string): Promise<{ skipped: 'not-owner' } | void> {
-  const db = getDb();
+export async function syncOne(
+  callId: string,
+  deps: SyncOneDeps = liveSyncOneDeps(),
+): Promise<{ skipped: 'not-owner' } | void> {
+  const db = deps.db;
   const call = await db.query.calls.findFirst({ where: eq(schema.calls.id, callId) });
   if (!call) return;
   if (call.salesforceTaskId) return; // already synced
@@ -215,7 +246,7 @@ async function syncOne(callId: string): Promise<{ skipped: 'not-owner' } | void>
   let whoId = call.salesforceWhoId ?? undefined;
   let whatId = call.salesforceWhatId ?? undefined;
   if (!whoId && !whatId) {
-    const match = await findByPhone(call.userId, counterparty);
+    const match = await deps.findByPhone(call.userId, counterparty);
     if (match?.whoId) whoId = match.whoId;
     if (match?.whatId) whatId = match.whatId;
   }
@@ -226,8 +257,8 @@ async function syncOne(callId: string): Promise<{ skipped: 'not-owner' } | void>
   // a pair of custom objects costs no round-trip at all, not even /users/me.
   // The call stays fully logged in the CTI; the job records why no Task exists.
   if (gatedIds([whoId, whatId]).length > 0) {
-    const me = await salesforceUserId(call.userId);
-    const allowed = await mayCreateTaskOn([whoId, whatId], me, (id) => fetchOwnership(call.userId, id));
+    const me = await deps.salesforceUserId(call.userId);
+    const allowed = await mayCreateTaskOn([whoId, whatId], me, (id) => deps.fetchOwnership(call.userId, id));
     if (!allowed) return { skipped: 'not-owner' as const };
   }
 
@@ -260,7 +291,7 @@ async function syncOne(callId: string): Promise<{ skipped: 'not-owner' } | void>
   const description = buildTaskDescription(call);
   const fullDetail = buildFullDetail(call, audit ?? null, customFields);
 
-  const { taskId, degradedFields } = await createCallTask(call.userId, {
+  const { taskId, degradedFields } = await deps.createCallTask(call.userId, {
     subject,
     callType: inbound ? 'Inbound' : 'Outbound',
     callDisposition: call.disposition ?? undefined,
