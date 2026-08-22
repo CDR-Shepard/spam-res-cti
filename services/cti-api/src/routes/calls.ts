@@ -68,6 +68,23 @@ function pendingDispositionPayload(c: typeof schema.calls.$inferSelect) {
   };
 }
 
+/**
+ * Why a call has no Salesforce Task, for `GET /calls` — or `null` while that is
+ * still undecided.
+ *
+ * Only a job that has stopped moving can answer. `last_error` is also written on
+ * every failed attempt of a job that is still 'pending' (or is 'in_flight' right
+ * now) and will most likely succeed on its next retry; surfacing that would show
+ * the rep a raw Salesforce error next to a call that is about to sync fine. So a
+ * non-terminal job reports no reason at all.
+ */
+export function syncErrorForJob(
+  job: { status: typeof schema.salesforceSyncJobs.$inferSelect['status']; lastError: string | null } | undefined,
+): string | null {
+  if (!job) return null;
+  return job.status === 'succeeded' || job.status === 'failed' ? job.lastError : null;
+}
+
 export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
 
@@ -285,15 +302,20 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
       .limit(limit);
     // Why a call has no Salesforce Task, when the sync worker decided that
     // deliberately (e.g. 'not-owner') rather than failing — the call list shows
-    // it so a rep is never left guessing where their activity went.
+    // it so a rep is never left guessing where their activity went. See
+    // syncErrorForJob for why the job's status gates the answer.
     const syncJobs = rows.length
       ? await db
-          .select({ callId: schema.salesforceSyncJobs.callId, lastError: schema.salesforceSyncJobs.lastError })
+          .select({
+            callId: schema.salesforceSyncJobs.callId,
+            status: schema.salesforceSyncJobs.status,
+            lastError: schema.salesforceSyncJobs.lastError,
+          })
           .from(schema.salesforceSyncJobs)
           .where(inArray(schema.salesforceSyncJobs.callId, rows.map((r) => r.id)))
       : [];
-    const syncErrorByCall = new Map(syncJobs.map((j) => [j.callId, j.lastError]));
-    return { calls: rows.map((r) => ({ ...r, syncError: syncErrorByCall.get(r.id) ?? null })) };
+    const syncJobByCall = new Map(syncJobs.map((j) => [j.callId, j]));
+    return { calls: rows.map((r) => ({ ...r, syncError: syncErrorForJob(syncJobByCall.get(r.id)) })) };
   });
 
   /**
