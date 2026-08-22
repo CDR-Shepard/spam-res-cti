@@ -9,7 +9,8 @@ import { getDb } from '../db/index.js';
 import { loadConfig } from '../config.js';
 import type { EngineDeps } from './engine.js';
 import { TwilioDialerTelephony } from './twilio-telephony.js';
-import { pickPoolDid, withinCallingHours, parseCallingHoursExempt } from './pick-did.js';
+import { withinCallingHours, parseCallingHoursExempt } from './pick-did.js';
+import { pickDidForRun } from './pick-agent-did.js';
 import { enqueueFollowupRollover } from '../salesforce/followup-enqueue.js';
 
 /** GG Homes operates out of America/Los_Angeles — the rollover follow-up's
@@ -37,7 +38,7 @@ export function buildEngineDeps(): EngineDeps {
   return {
     db,
     telephony: new TwilioDialerTelephony(),
-    pickDid: (orgId, userId, toE164) => pickPoolDid(db, { orgId, userId, toE164 }),
+    pickDid: (args) => pickDidForRun(db, args),
     withinCallingHours: (toE164, nowUtc) => exempt.has(toE164) || withinCallingHours(toE164, nowUtc),
     nowUtc: new Date(),
     enqueueRollover: (job, handle) => enqueueFollowupRollover(handle, job),

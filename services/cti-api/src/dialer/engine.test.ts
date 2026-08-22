@@ -285,6 +285,27 @@ describe('advanceSession', () => {
     expect(deps.telephony.originate).not.toHaveBeenCalled();
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'paused' }) });
   });
+  it('asks pickDid with runKind "agent" for a Task session and "pool" otherwise', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+16195550100', secondaryNumber: null, followupEligible: true }];
+    const d1 = makeDeps(); d1.db = fakeDb({ ...baseSession, objectType: 'Task' }, items);
+    await advanceSession('S1', d1);
+    expect(d1.pickDid).toHaveBeenCalledWith(expect.objectContaining({ runKind: 'agent', toE164: '+16195550100' }));
+    const d2 = makeDeps(); d2.db = fakeDb(baseSession, items);
+    await advanceSession('S1', d2);
+    expect(d2.pickDid).toHaveBeenCalledWith(expect.objectContaining({ runKind: 'pool' }));
+  });
+  it('a customer_ceiling skip marks the item skipped and moves on without pausing', async () => {
+    const items = [
+      { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+1', secondaryNumber: null, followupEligible: true },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+2', secondaryNumber: null, followupEligible: true },
+    ];
+    const pickDid = vi.fn().mockResolvedValueOnce({ skip: 'customer_ceiling' }).mockResolvedValueOnce({ e164: '+16190000000' });
+    const deps = makeDeps({ pickDid } as any); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await advanceSession('S1', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped', outcome: 'customer_ceiling' }) });
+    expect(r.action).toBe('dialing');
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'paused' }) });
+  });
   it('skips (does not dial) an item whose recipient is currently out of calling hours', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
     const deps = makeDeps({ withinCallingHours: vi.fn(() => false) as any });

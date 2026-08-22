@@ -5,6 +5,7 @@ import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS 
 import type { DialerTelephony } from './telephony-port.js';
 import { recordConnectSticky } from './sticky.js';
 import type { RolloverDb } from '../salesforce/followup-enqueue.js';
+import type { PickDidArgs, PickDidResult } from './pick-agent-did.js';
 
 export interface RolloverEnqueue {
   orgId: string; userId: string; sfOwnerId: string; sessionId: string;
@@ -14,8 +15,10 @@ export interface RolloverEnqueue {
 export interface EngineDeps {
   db: ReturnType<typeof getDb>;
   telephony: DialerTelephony;
-  /** Selects the outbound DID for a (org, rep, recipient) dial; null = nothing eligible (fail closed). */
-  pickDid: (orgId: string, userId: string, toE164: string) => Promise<{ e164: string } | null>;
+  /** Selects the outbound DID for a dial: `{ e164 }` to dial from, `{ skip }` to
+   *  skip this recipient (over-contacted) and keep going, null = nothing
+   *  eligible (fail closed → the run pauses). */
+  pickDid: (args: PickDidArgs) => Promise<PickDidResult>;
   /** Is `nowUtc` within the recipient-local calling window for `toE164`? Pure predicate injected for testability. */
   withinCallingHours: (toE164: string, nowUtc: Date) => boolean;
   /** The "now" the engine reasons about — injected so calling-hours checks are deterministic in tests. */
@@ -99,7 +102,15 @@ export async function advanceSession(
       items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: 'out_of_hours' } : i));
       continue;
     }
-    const did = await deps.pickDid(session.orgId, session.userId, next.toNumber);
+    // Task runs dial the rep's own numbers; every other run kind dials the pool.
+    const runKind = session.objectType === 'Task' ? 'agent' : 'pool';
+    const did = await deps.pickDid({ orgId: session.orgId, userId: session.userId, toE164: next.toNumber, runKind });
+    if (did && 'skip' in did) {
+      // Over-contacted customer: skip THIS record, keep the run going.
+      await setItem(deps, next.id, { status: 'skipped', outcome: did.skip });
+      items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: did.skip } : i));
+      continue;
+    }
     if (!did) { await setSession(deps, sessionId, 'paused'); return { action: 'paused_no_numbers' }; }
 
     // Two reps' concurrent advances (or a retry racing the original call) could

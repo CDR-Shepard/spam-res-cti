@@ -68,7 +68,8 @@ export function parseCallingHoursExempt(csv: string | undefined): Set<string> {
   return new Set(csv.split(',').map((s) => s.trim()).filter(Boolean));
 }
 
-function effectiveCapFor(n: Pick<OutboundNumber, 'firstUsedAt' | 'warmupOverrideCap'>): number {
+/** This number's daily dial cap right now: an explicit override, else its warmup-age cap. */
+export function effectiveCapFor(n: Pick<OutboundNumber, 'firstUsedAt' | 'warmupOverrideCap'>): number {
   const daysSince = n.firstUsedAt ? Math.floor((Date.now() - n.firstUsedAt.getTime()) / 86_400_000) : null;
   return n.warmupOverrideCap ?? warmupCapForAge(daysSince).cap;
 }
@@ -78,8 +79,18 @@ function effectiveCapFor(n: Pick<OutboundNumber, 'firstUsedAt' | 'warmupOverride
  * velocity limit — identical eligibility+increment shape to routes/calls.ts's
  * warmup gate (see file header for the two deliberate deltas). Returns
  * whether the claim landed (false = 0 rows updated = not eligible right now).
+ *
+ * `kind` pins which sort of number may be claimed and defaults to the pool
+ * dialer's own `dialer_pool`; Task runs dial the rep's OWN numbers and pass
+ * `'agent'`, so neither path can ever burn a number of the other kind.
  */
-async function attemptIncrement(db: Db, orgId: string, e164: string, effectiveCap: number): Promise<boolean> {
+export async function attemptIncrement(
+  db: Db,
+  orgId: string,
+  e164: string,
+  effectiveCap: number,
+  kind: 'agent' | 'dialer_pool' = 'dialer_pool',
+): Promise<boolean> {
   const today = new Date().toISOString().slice(0, 10);
   const incremented = await db
     .update(schema.outboundNumbers)
@@ -96,7 +107,7 @@ async function attemptIncrement(db: Db, orgId: string, e164: string, effectiveCa
         eq(schema.outboundNumbers.orgId, orgId),
         eq(schema.outboundNumbers.e164, e164),
         eq(schema.outboundNumbers.active, true),
-        eq(schema.outboundNumbers.kind, 'dialer_pool'),
+        eq(schema.outboundNumbers.kind, kind),
         notInArray(schema.outboundNumbers.health, ['spam_likely', 'degraded']),
         sql`(case when ${schema.outboundNumbers.dialsTodayDate} = ${today}::date then ${schema.outboundNumbers.dialsToday} else 0 end) < ${effectiveCap}`,
         sql`(case when ${schema.outboundNumbers.lastMinuteWindowStart} is null or now() - ${schema.outboundNumbers.lastMinuteWindowStart} > interval '1 minute' then 0 else ${schema.outboundNumbers.lastMinuteDialCount} end) < 10`,

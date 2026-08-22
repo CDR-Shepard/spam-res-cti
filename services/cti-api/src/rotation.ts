@@ -60,6 +60,11 @@ export interface AttemptCaps {
  * @param caps per-customer attempt state; when provided, a number that has hit
  *   its per-customer budget is ranked last (and can't be the sticky pick), so
  *   rotation swaps to another of the rep's numbers for that customer.
+ * @param exclude numbers this caller must not be handed back — used by the
+ *   agent-DID pick to retry after a number's atomic warmup claim lost a race.
+ *   Excluded numbers are dropped from the pool BEFORE ranking, so they can be
+ *   neither the sticky pick (which only ever returns a member of the eligible
+ *   set) nor the fallback.
  */
 export async function pickRotationNumber(
   db: Db,
@@ -67,6 +72,7 @@ export async function pickRotationNumber(
   userId: string,
   toE164?: string,
   caps?: AttemptCaps,
+  exclude?: ReadonlySet<string>,
 ): Promise<string | null> {
   // Only the calling rep's ASSIGNED pool is dialable. Unassigned numbers are
   // the shared reserve, held back until an admin assigns them.
@@ -83,6 +89,7 @@ export async function pickRotationNumber(
   const today = new Date().toISOString().slice(0, 10);
   const calleeNpa = npaOf(toE164);
   const eligible = pool
+    .filter((n) => !exclude?.has(n.e164))
     .filter((n) => n.health !== 'spam_likely' && n.health !== 'degraded')
     .map((n) => {
       const dialsToday = n.dialsTodayDate === today ? n.dialsToday : 0;
@@ -116,8 +123,9 @@ export async function pickRotationNumber(
   // own and can dial today, reuse it so the lead keeps seeing the same number.
   // The `eligible.some(...)` membership check is the sole safety authority — the
   // sticky DID is only ever returned when it's already in this rep's eligible
-  // dial-today set (active, healthy, assigned to them, under warmup cap), so it
-  // can never bypass a gate. Silently falls back to area-match otherwise.
+  // dial-today set (active, healthy, assigned to them, under warmup cap, not
+  // excluded), so it can never bypass a gate. Silently falls back to area-match
+  // otherwise.
   if (toE164 && eligible.length > 0) {
     const sticky = await db
       .select({ e164: schema.stickyNumbers.e164 })
