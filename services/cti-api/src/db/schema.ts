@@ -276,6 +276,15 @@ export const dialerQueueItems = pgTable(
   },
   (t) => ({
     callIdIdx: index('dialer_queue_items_call_id_idx').on(t.callId),
+    /**
+     * Power-dial contacts to one recipient in a window — the dialer half of the
+     * shared per-customer attempt count (firewall/index.ts customerAttemptCounts),
+     * which runs on every click-to-dial preflight and every dialer pick. Partial:
+     * only a row that actually got dialed carries a from_number.
+     */
+    dialedTargetIdx: index('dialer_queue_items_dialed_target_idx')
+      .on(t.toNumber, t.updatedAt)
+      .where(sql`${t.fromNumber} is not null`),
   }),
 );
 

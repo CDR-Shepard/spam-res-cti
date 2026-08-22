@@ -10,14 +10,17 @@
  *
  * What both kinds now share is the per-CUSTOMER attempt ceiling — the
  * anti-harassment backstop the firewall applies at click-to-dial time
- * (firewall/index.ts gate 5). Hitting it must NOT pause the run: it is a
+ * (firewall/index.ts gate 5) — down to the same count and the same boundary
+ * (`customerAttemptCounts` + `atCustomerCeiling`), so a recipient's contacts
+ * add up across click-to-dial AND power dialing rather than each path keeping
+ * its own private tally. Hitting the ceiling must NOT pause the run: it is a
  * property of one recipient, not of the rep's numbers, so the engine skips
  * that record and dials the next one. Only "no number is dialable at all"
  * (null) pauses, which stays fail-closed.
  */
-import { and, eq, gte, sql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '../db/index.js';
-import { tallyAttempts } from '../firewall/index.js';
+import { atCustomerCeiling, customerAttemptCounts } from '../firewall/index.js';
 import { pickRotationNumber, type AttemptCaps } from '../rotation.js';
 import { attemptIncrement, effectiveCapFor, pickPoolDid, type Db } from './pick-did.js';
 
@@ -30,28 +33,42 @@ export interface AttemptState {
   campaign: { maxAttempts: number; perCustomerMaxAttempts: number } | null;
 }
 
-/** The firewall's per-customer attempt query, reused: this org's calls to `toE164` in the campaign window, by from-number. */
+/**
+ * This run's view of the customer's recent contacts: the campaign's caps plus
+ * the firewall's own attempt counts (`customerAttemptCounts` — click-to-dial
+ * `calls` AND dialed `dialer_queue_items`, one shared definition so the ceiling
+ * cannot mean two different things on the two dial paths).
+ *
+ * No campaign config = no attempt limits configured for this org: empty counts
+ * and `campaign: null`, which `atCeiling` reads as "no ceiling" (the same way
+ * the firewall pushes no attempt gates without a campaign).
+ */
 export async function customerAttemptState(db: Db, orgId: string, toE164: string): Promise<AttemptState> {
   const campaign = await db.query.campaignConfigs.findFirst({
     where: and(eq(schema.campaignConfigs.orgId, orgId), eq(schema.campaignConfigs.key, 'default')),
   });
   if (!campaign) return { attemptsByNumber: new Map(), customerAttemptsTotal: 0, campaign: null };
   const windowStart = new Date(Date.now() - campaign.attemptWindowDays * 24 * 3600 * 1000);
-  const grouped = await db
-    .select({ from: schema.calls.fromNumber, n: sql<number>`count(*)::int` })
-    .from(schema.calls)
-    .where(
-      and(
-        eq(schema.calls.orgId, orgId),
-        eq(schema.calls.normalizedToNumber, toE164),
-        gte(schema.calls.createdAt, windowStart),
-      ),
-    )
-    .groupBy(schema.calls.fromNumber);
   return {
-    ...tallyAttempts(grouped),
+    ...(await customerAttemptCounts(db, orgId, toE164, windowStart)),
     campaign: { maxAttempts: campaign.maxAttempts, perCustomerMaxAttempts: campaign.perCustomerMaxAttempts },
   };
+}
+
+/**
+ * Is this customer over the per-customer ceiling right now? One predicate for
+ * both run kinds, delegating the comparison itself to the firewall's
+ * `atCustomerCeiling` so click-to-dial and the dialer can never drift apart on
+ * the boundary. No campaign = no ceiling.
+ */
+function atCeiling(state: AttemptState): boolean {
+  return (
+    state.campaign != null &&
+    atCustomerCeiling({
+      customerAttemptsTotal: state.customerAttemptsTotal,
+      perCustomerMaxAttempts: state.campaign.perCustomerMaxAttempts,
+    })
+  );
 }
 
 export interface AgentPickDeps {
@@ -66,9 +83,7 @@ export async function pickAgentDid(
   deps: AgentPickDeps,
 ): Promise<PickDidResult> {
   const state = await deps.attemptState();
-  if (state.campaign && state.customerAttemptsTotal >= state.campaign.perCustomerMaxAttempts) {
-    return { skip: 'customer_ceiling' };
-  }
+  if (atCeiling(state)) return { skip: 'customer_ceiling' };
   // No campaign config = no attempt limits configured for this org, so rotation
   // ranks purely on warmup/presence (same as the firewall, which pushes no
   // attempt gates without a campaign).
@@ -110,9 +125,6 @@ export async function pickDidForRun(db: Db, args: PickDidArgs): Promise<PickDidR
       },
     });
   }
-  const state = await attemptState();
-  if (state.campaign && state.customerAttemptsTotal >= state.campaign.perCustomerMaxAttempts) {
-    return { skip: 'customer_ceiling' };
-  }
+  if (atCeiling(await attemptState())) return { skip: 'customer_ceiling' };
   return pickPoolDid(db, { orgId: args.orgId, userId: args.userId, toE164: args.toE164 });
 }
