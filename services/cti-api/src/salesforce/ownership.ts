@@ -38,42 +38,61 @@ const TTL_MS = 5 * 60_000;
  *  per dialed record, so an unswept Map would grow for the life of the process. */
 const CACHE_SWEEP_AT = 5_000;
 const cache = new Map<string, { at: number; snap: OwnershipSnapshot }>();
+/** Warn deduper ONLY. It must never gate the query itself: this process serves
+ *  many orgs (salesforce_connections is per user), so one org missing the field
+ *  cannot be allowed to decide what we ask every other org. */
 let warnedLeadManager = false;
 
-function remember(recordId: string, snap: OwnershipSnapshot): OwnershipSnapshot {
+/** Cache key. SOQL runs under the CALLING user's sharing rules, so the same
+ *  record id legitimately answers differently per rep — a rep who cannot see a
+ *  record gets zero rows, and serving that to its actual owner would silently
+ *  suppress their Task. */
+const cacheKey = (userId: string, recordId: string): string => `${userId}:${recordId}`;
+
+function remember(key: string, snap: OwnershipSnapshot): OwnershipSnapshot {
   if (cache.size >= CACHE_SWEEP_AT) {
     const stale = Date.now() - TTL_MS;
     for (const [k, v] of cache) if (v.at < stale) cache.delete(k);
   }
-  cache.set(recordId, { at: Date.now(), snap });
+  cache.set(key, { at: Date.now(), snap });
   return snap;
 }
 
+/** Drop the process-wide cache and the warn-once flag. Tests only. */
+export function _resetOwnershipForTests(): void {
+  cache.clear();
+  warnedLeadManager = false;
+}
+
 /**
- * Owner (and, for an Opportunity, Lead_Manager__c) of a record, cached 5 minutes.
+ * Owner (and, for an Opportunity, Lead_Manager__c) of a record, cached 5 minutes
+ * per (user, record). Zero rows → `{ ownerId: null }`: the rep cannot see the
+ * record, so no Task belongs on it.
+ *
  * Errors are NOT cached — they propagate so the caller can fail closed and retry.
  */
 export async function fetchOwnership(userId: string, recordId: string): Promise<OwnershipSnapshot> {
-  const hit = cache.get(recordId);
+  const key = cacheKey(userId, recordId);
+  const hit = cache.get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.snap;
   const type = objectTypeForId(recordId);
-  if (type === 'other') return remember(recordId, { type, ownerId: null });
-  // The org may not have Lead_Manager__c at all. That is a configuration fact,
-  // not a failure — and one we only need to learn ONCE. After the first
-  // INVALID_FIELD the flag routes every later Opportunity straight to the
-  // owner-only query below, instead of paying a guaranteed 400 (and a second
-  // round-trip) against the org's API limits on every cache miss forever.
-  if (type === 'Opportunity' && !warnedLeadManager) {
+  if (type === 'other') return remember(key, { type, ownerId: null });
+  if (type === 'Opportunity') {
     try {
       const r = await soqlQuery<{ OwnerId: string; Lead_Manager__c?: string | null }>(
         userId,
         `SELECT OwnerId, Lead_Manager__c FROM Opportunity WHERE Id = '${soqlEscape(recordId)}' LIMIT 1`,
       );
-      return remember(recordId, { type, ownerId: r[0]?.OwnerId ?? null, leadManagerId: r[0]?.Lead_Manager__c ?? null });
+      return remember(key, { type, ownerId: r[0]?.OwnerId ?? null, leadManagerId: r[0]?.Lead_Manager__c ?? null });
     } catch (err) {
+      // The org may not have Lead_Manager__c at all. That is a configuration
+      // fact, not a failure: fall through to the owner-only query for THIS
+      // lookup. The log line is deduped; the query is not.
       if (!/INVALID_FIELD/.test((err as Error).message)) throw err;
-      warnedLeadManager = true;
-      console.warn('[ownership] Lead_Manager__c not found on Opportunity — gate is owner-only');
+      if (!warnedLeadManager) {
+        warnedLeadManager = true;
+        console.warn('[ownership] Lead_Manager__c not found on Opportunity — gate is owner-only');
+      }
     }
   }
   // Owner-only: Lead/Contact/Task, and an Opportunity in an org without the field
@@ -82,5 +101,39 @@ export async function fetchOwnership(userId: string, recordId: string): Promise<
     userId,
     `SELECT OwnerId FROM ${type} WHERE Id = '${soqlEscape(recordId)}' LIMIT 1`,
   );
-  return remember(recordId, { type, ownerId: r[0]?.OwnerId ?? null });
+  return remember(key, { type, ownerId: r[0]?.OwnerId ?? null });
+}
+
+/**
+ * The ids whose ownership the rule actually names. Objects it does not name are
+ * allowed outright, so a caller can use this to skip the round-trip entirely —
+ * including the one that resolves the caller's own Salesforce user id.
+ */
+export function gatedIds(ids: Array<string | null | undefined>): string[] {
+  return ids.filter((id): id is string => !!id && objectTypeForId(id) !== 'other');
+}
+
+/**
+ * May this rep have a Task written that attaches to ALL of these records?
+ *
+ * A call Task carries a WhoId AND a WhatId, and the rule is "no Task on a record
+ * the caller does not own or manage" — so every attached id has to pass, not
+ * just the first one. Custom objects are skipped without a lookup.
+ *
+ * `lookup` is required rather than defaulted to `fetchOwnership`, which needs a
+ * userId this signature does not carry: callers bind their own, e.g.
+ * `(id) => fetchOwnership(call.userId, id)`. Tests inject a fake.
+ *
+ * Sequential on purpose: it short-circuits on the first failure, and there are
+ * at most two ids. A lookup that throws propagates — the caller fails closed.
+ */
+export async function mayCreateTaskOn(
+  ids: Array<string | null | undefined>,
+  callerSfUserId: string,
+  lookup: (recordId: string) => Promise<OwnershipSnapshot>,
+): Promise<boolean> {
+  for (const id of gatedIds(ids)) {
+    if (!callerMayCreateTaskOn(await lookup(id), callerSfUserId)) return false;
+  }
+  return true;
 }

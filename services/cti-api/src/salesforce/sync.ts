@@ -10,7 +10,7 @@ import { loadConfig } from '../config.js';
 import { buildRecordingPublicUrl } from '../telephony/recording-links.js';
 import { createCallTask, findByPhone, SalesforceUnauthorizedError, updateCallTask } from './client.js';
 import { salesforceUserId } from './current-user.js';
-import { callerMayCreateTaskOn, fetchOwnership } from './ownership.js';
+import { fetchOwnership, gatedIds, mayCreateTaskOn } from './ownership.js';
 
 /** Public no-login recording link for a call, or null when nothing is recorded. */
 function recordingPublicUrl(call: typeof schema.calls.$inferSelect): string | null {
@@ -221,11 +221,14 @@ async function syncOne(callId: string): Promise<{ skipped: 'not-owner' } | void>
   }
 
   // Ownership gate: never write a Task on a record the caller doesn't own/manage.
+  // The Task attaches to BOTH ids, so BOTH have to pass — gating only the WhoId
+  // would let an unowned Opportunity in through the WhatId. `gatedIds` first so
+  // a pair of custom objects costs no round-trip at all, not even /users/me.
   // The call stays fully logged in the CTI; the job records why no Task exists.
-  const targetId = whoId ?? whatId;
-  if (targetId) {
+  if (gatedIds([whoId, whatId]).length > 0) {
     const me = await salesforceUserId(call.userId);
-    if (!callerMayCreateTaskOn(await fetchOwnership(call.userId, targetId), me)) return { skipped: 'not-owner' as const };
+    const allowed = await mayCreateTaskOn([whoId, whatId], me, (id) => fetchOwnership(call.userId, id));
+    if (!allowed) return { skipped: 'not-owner' as const };
   }
 
   const subject = `${inbound ? 'Inbound' : 'Outbound'} Call - ${counterparty}`;

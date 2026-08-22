@@ -10,8 +10,11 @@ describe('syncErrorForCall', () => {
     expect(syncErrorForCall(NO_TASK, { status: 'succeeded', lastError: 'not-owner' })).toBe('not-owner');
   });
 
-  it('surfaces the terminal failure reason', () => {
-    expect(syncErrorForCall(NO_TASK, { status: 'failed', lastError: SOQL_DUMP })).toBe(SOQL_DUMP);
+  it('reduces a terminal failure to the token, never the Salesforce error text', () => {
+    // last_error is a SOQL/HTTP dump: org field names, record ids, API internals.
+    // The browser gets a reason code; the operator reads the detail in the job row.
+    expect(syncErrorForCall(NO_TASK, { status: 'failed', lastError: SOQL_DUMP })).toBe('failed');
+    expect(syncErrorForCall(NO_TASK, { status: 'failed', lastError: null })).toBe('failed');
   });
 
   it('says nothing while the job is still retrying or in flight', () => {
@@ -24,10 +27,16 @@ describe('syncErrorForCall', () => {
     expect(syncErrorForCall(NO_TASK, undefined)).toBeNull();
   });
 
+  it('reports nothing for a succeeded job whose lastError is not a known skip reason', () => {
+    // A stale attempt error left on a job that later succeeded is not a reason
+    // the rep can act on — and it is raw Salesforce text.
+    expect(syncErrorForCall(NO_TASK, { status: 'succeeded', lastError: SOQL_DUMP })).toBeNull();
+  });
+
   it('says nothing when the Task exists, however the job got there', () => {
     // Jobs written before the success path started clearing lastError still
     // carry the error of an attempt that later succeeded. The call has its Task.
-    expect(syncErrorForCall({ salesforceTaskId: '00T1' }, { status: 'succeeded', lastError: SOQL_DUMP })).toBeNull();
+    expect(syncErrorForCall({ salesforceTaskId: '00T1' }, { status: 'succeeded', lastError: 'not-owner' })).toBeNull();
     expect(syncErrorForCall({ salesforceTaskId: '00T1' }, { status: 'failed', lastError: SOQL_DUMP })).toBeNull();
   });
 });

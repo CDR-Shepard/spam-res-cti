@@ -17,7 +17,7 @@ import { warmupCapForAge } from '../firewall/warmup.js';
 import { enqueueSyncForCall, AUTO_DISPOSITION } from '../salesforce/sync.js';
 import { updateCallTask } from '../salesforce/client.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
-import { callerMayCreateTaskOn, fetchOwnership } from '../salesforce/ownership.js';
+import { fetchOwnership, gatedIds, mayCreateTaskOn } from '../salesforce/ownership.js';
 import { loadConfig } from '../config.js';
 
 /**
@@ -68,9 +68,16 @@ function pendingDispositionPayload(c: typeof schema.calls.$inferSelect) {
   };
 }
 
+/** The reason codes `GET /calls` may report. A closed set, never free text. */
+export type SyncErrorReason = 'not-owner' | 'failed';
+
 /**
  * Why a call has no Salesforce Task, for `GET /calls` — or `null` while that is
  * still undecided.
+ *
+ * A REASON TOKEN, never `last_error` itself. That column holds raw SOQL/HTTP
+ * dumps (org field names, record ids, API internals); the browser gets a code it
+ * can render, and an operator reads the detail in the job row.
  *
  * The call row answers first: if it carries a Task id, the Task is there and
  * there is nothing to explain. Its job's `last_error` is then the record of an
@@ -81,16 +88,19 @@ function pendingDispositionPayload(c: typeof schema.calls.$inferSelect) {
  * Otherwise only a job that has stopped moving can answer. `last_error` is also
  * written on every failed attempt of a job that is still 'pending' (or is
  * 'in_flight' right now) and will most likely succeed on its next retry;
- * surfacing that would show the rep a raw Salesforce error next to a call that
- * is about to sync fine. So a non-terminal job reports no reason at all.
+ * surfacing that would flag a call that is about to sync fine. So a non-terminal
+ * job reports no reason at all.
  */
 export function syncErrorForCall(
   call: { salesforceTaskId: string | null },
   job: { status: typeof schema.salesforceSyncJobs.$inferSelect['status']; lastError: string | null } | undefined,
-): string | null {
+): SyncErrorReason | null {
   if (call.salesforceTaskId) return null;
   if (!job) return null;
-  return job.status === 'succeeded' || job.status === 'failed' ? job.lastError : null;
+  // A succeeded job only ever has a reason if the sync deliberately skipped;
+  // anything else in last_error is a stale attempt error, not an explanation.
+  if (job.status === 'succeeded') return job.lastError === 'not-owner' ? 'not-owner' : null;
+  return job.status === 'failed' ? 'failed' : null;
 }
 
 export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
@@ -279,15 +289,14 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     // owns nor manages). Advisory only: the call is already placed, and the sync
     // worker re-applies the same gate server-side. A lookup failure therefore
     // defaults to `true` rather than blocking or misinforming the rep.
+    // A custom object is allowed by the rule outright, so `gatedIds` empty means
+    // the answer is already `true` — no SOQL, and no /users/me either.
     let taskAllowed = true;
     const recipientRecordId = parsed.data.recipientRecordId;
-    if (recipientRecordId) {
+    if (gatedIds([recipientRecordId]).length > 0) {
       try {
-        const [snapshot, sfUserId] = await Promise.all([
-          fetchOwnership(session.userId, recipientRecordId),
-          salesforceUserId(session.userId),
-        ]);
-        taskAllowed = callerMayCreateTaskOn(snapshot, sfUserId);
+        const me = await salesforceUserId(session.userId);
+        taskAllowed = await mayCreateTaskOn([recipientRecordId], me, (id) => fetchOwnership(session.userId, id));
       } catch (err) {
         req.log.warn({ err, recipientRecordId }, 'ownership lookup failed; assuming the task is allowed');
       }
