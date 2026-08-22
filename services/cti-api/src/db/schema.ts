@@ -256,6 +256,13 @@ export const dialerQueueItems = pgTable(
     status: dialerItemStatus('status').default('pending').notNull(),
     callId: text('call_id'),
     outcome: text('outcome'),
+    /** 1 or 2. A retry is a NEW row for the same record (see engine.ts). */
+    attempt: integer('attempt').default(1).notNull(),
+    /** Resolved Mobile/Phone at creation — never mutated; a retry restores from these. */
+    primaryNumber: text('primary_number'),
+    secondaryNumber: text('secondary_number'),
+    /** 5-minute floor on attempt-2 rows: not dialable before this instant. */
+    retryNotBefore: timestamp('retry_not_before', { withTimezone: true }),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
@@ -382,6 +389,9 @@ export const campaignConfigs = pgTable(
      *  in the same window — the anti-harassment / spam-complaint backstop that
      *  per-number budgets alone don't provide. */
     perCustomerMaxAttempts: integer('per_customer_max_attempts').default(15).notNull(),
+    /** Max open Follow-up tasks a rep may have due on one day; rollover overflow
+     *  walks forward business day by business day. Counted live in Salesforce. */
+    followupDailyCap: integer('followup_daily_cap').default(100).notNull(),
     /** Allowed calling hours, recipient-local. Stored "HH:MM" */
     callingHoursStart: text('calling_hours_start').default('08:00').notNull(),
     callingHoursEnd: text('calling_hours_end').default('20:00').notNull(),
@@ -598,6 +608,45 @@ export const salesforceSyncJobs = pgTable(
     statusIdx: index('sf_sync_status_idx').on(t.status, t.nextAttemptAt),
   }),
 );
+
+/**
+ * Follow-up rollover jobs — the dialer enqueues one on a record's SECOND miss of
+ * the day; salesforce/followup-worker.ts drains them single-flight (create the
+ * next-day copy under the daily cap, then complete the original). Mirrors
+ * salesforce_sync_jobs. UNIQUE(user, record, from_date) = duplicate-webhook safe.
+ */
+export const followupRolloverJobs = pgTable(
+  'followup_rollover_jobs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    sfOwnerId: text('sf_owner_id').notNull(),
+    sessionId: uuid('session_id').references(() => dialerSessions.id, { onDelete: 'set null' }),
+    recordId: text('record_id').notNull(),
+    objectType: text('object_type').notNull(),
+    /** Org-local YYYY-MM-DD of the second miss. */
+    fromDate: text('from_date').notNull(),
+    status: syncStatusEnum('status').default('pending').notNull(),
+    attempts: integer('attempts').default(0).notNull(),
+    lastError: text('last_error'),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).defaultNow().notNull(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    completedTaskId: text('completed_task_id'),
+    /** Stamped the instant the copy is created — a retry must NOT create again. */
+    createdTaskId: text('created_task_id'),
+    /** The business day the copy landed on (for the run summary). */
+    targetDate: text('target_date'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    jobUnique: uniqueIndex('followup_rollover_unique').on(t.userId, t.recordId, t.fromDate),
+    statusIdx: index('followup_rollover_status_idx').on(t.status, t.nextAttemptAt),
+    sessionIdx: index('followup_rollover_session_idx').on(t.sessionId),
+  }),
+);
+export type FollowupRolloverJob = typeof followupRolloverJobs.$inferSelect;
 
 /**
  * Sticky caller ID per (rep, lead) — the DID a rep last called a given recipient

@@ -14,10 +14,18 @@ export function buildQueueRows(
   sessionId: string,
   objectType: string,
   resolved: Array<{ recordId: string; toNumber: string | null; fallbackNumber?: string | null }>,
-): Array<{ sessionId: string; ordinal: number; objectType: string; recordId: string; toNumber: string | null; fallbackNumber: string | null; status: 'pending' | 'unreachable' }> {
+): Array<{
+  sessionId: string; ordinal: number; objectType: string; recordId: string;
+  toNumber: string | null; fallbackNumber: string | null;
+  attempt: number; primaryNumber: string | null; secondaryNumber: string | null;
+  status: 'pending' | 'unreachable';
+}> {
   return resolved.map((r, i) => ({
     sessionId, ordinal: i, objectType, recordId: r.recordId, toNumber: r.toNumber,
     fallbackNumber: r.fallbackNumber ?? null,
+    // Immutable copy of the resolved pair: the fallback later overwrites
+    // toNumber/fallbackNumber, and an attempt-2 row restores from these.
+    attempt: 1, primaryNumber: r.toNumber, secondaryNumber: r.fallbackNumber ?? null,
     status: r.toNumber ? 'pending' : 'unreachable',
   }));
 }

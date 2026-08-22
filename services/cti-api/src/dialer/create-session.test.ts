@@ -26,10 +26,23 @@ describe('buildQueueRows', () => {
       { recordId: '00Q3', toNumber: null },
     ]);
     expect(rows).toEqual([
-      { sessionId: 'S1', ordinal: 0, objectType: 'Lead', recordId: '00Q1', toNumber: '+16195550100', fallbackNumber: '+16195550999', status: 'pending' },
-      { sessionId: 'S1', ordinal: 1, objectType: 'Lead', recordId: '00Q2', toNumber: '+16195550200', fallbackNumber: null, status: 'pending' },
-      { sessionId: 'S1', ordinal: 2, objectType: 'Lead', recordId: '00Q3', toNumber: null, fallbackNumber: null, status: 'unreachable' },
+      { sessionId: 'S1', ordinal: 0, objectType: 'Lead', recordId: '00Q1', toNumber: '+16195550100', fallbackNumber: '+16195550999', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550999', status: 'pending' },
+      { sessionId: 'S1', ordinal: 1, objectType: 'Lead', recordId: '00Q2', toNumber: '+16195550200', fallbackNumber: null, attempt: 1, primaryNumber: '+16195550200', secondaryNumber: null, status: 'pending' },
+      { sessionId: 'S1', ordinal: 2, objectType: 'Lead', recordId: '00Q3', toNumber: null, fallbackNumber: null, attempt: 1, primaryNumber: null, secondaryNumber: null, status: 'unreachable' },
     ]);
+  });
+
+  describe('buildQueueRows — immutable number pair + attempt', () => {
+    it('records the resolved Mobile/Phone as primary/secondary, attempt 1, so a retry can restore them', () => {
+      const rows = buildQueueRows('S1', 'Lead', [
+        { recordId: '00Q1', toNumber: '+16195550100', fallbackNumber: '+16195550199' },
+        { recordId: '00Q2', toNumber: '+16195550200', fallbackNumber: null },
+        { recordId: '00Q3', toNumber: null },
+      ]);
+      expect(rows[0]).toMatchObject({ attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550199' });
+      expect(rows[1]).toMatchObject({ attempt: 1, primaryNumber: '+16195550200', secondaryNumber: null });
+      expect(rows[2]).toMatchObject({ attempt: 1, primaryNumber: null, secondaryNumber: null, status: 'unreachable' });
+    });
   });
 });
 
