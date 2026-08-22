@@ -38,12 +38,14 @@ import {
   handleDialOutcome,
   type EngineDeps,
 } from '../dialer/engine.js';
-import { inFlightItem } from '../dialer/state.js';
-import { sessionCounts } from '../dialer/session-store.js';
+import { inFlightItem, nextEligiblePendingItem, earliestRetryAt } from '../dialer/state.js';
+import { sessionCounts, rolloverSummary } from '../dialer/session-store.js';
 import { buildEngineDeps } from '../dialer/live-deps.js';
 import { mapAnsweredBy } from '../dialer/amd.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
+import { fetchBusinessCalendar } from '../salesforce/business-calendar.js';
+import { nextBusinessDay } from '../dialer/next-business-day.js';
 import {
   parseHandoffInput,
   upsertPendingHandoff,
@@ -234,8 +236,28 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     if (!owned) return;
     const { session } = owned;
     const db = getDb();
+
+    // Presence: the retry nudge (a server timer that ORIGINATES calls) only advances
+    // sessions a rep is actively watching. This poll is that proof.
+    try {
+      await db.update(schema.dialerSessions).set({ lastPolledAt: new Date() }).where(eq(schema.dialerSessions.id, session.id));
+    } catch (err) {
+      req.log.warn({ err }, 'dialer_session_presence_stamp_failed');
+    }
+
     const items = await db.query.dialerQueueItems.findMany({ where: eq(schema.dialerQueueItems.sessionId, session.id) });
-    return { session, counts: sessionCounts(items), currentItem: inFlightItem(items) };
+    const now = new Date();
+    const current = inFlightItem(items);
+    const nextRetry = !current && session.status === 'active' && !nextEligiblePendingItem(items, now) ? earliestRetryAt(items, now) : null;
+    const jobs = await db.query.followupRolloverJobs.findMany({ where: eq(schema.followupRolloverJobs.sessionId, session.id) });
+    const cal = await fetchBusinessCalendar(session.userId).catch(() => ({ workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays: new Set<string>() }));
+    return {
+      session,
+      counts: sessionCounts(items),
+      currentItem: current,
+      waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
+      rollovers: rolloverSummary(jobs, (d) => nextBusinessDay(d, cal.workingWeekdays, cal.holidays)),
+    };
   });
 
   app.post('/dialer/sessions/:id/pause', async (req, reply) => {

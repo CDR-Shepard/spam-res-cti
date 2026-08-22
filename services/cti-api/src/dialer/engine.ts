@@ -75,8 +75,8 @@ export async function advanceSession(
     const next = nextEligiblePendingItem(items, deps.nowUtc);
     if (!next) {
       // Pending rows may remain but all be inside their retry floor — leave the
-      // session active and tell the caller when it can advance (the follow-up
-      // worker tick nudges it then).
+      // session active and tell the caller when it can advance (the presence-gated
+      // retry-nudge loop advances it then; see salesforce/followup-worker.ts nudgeDueRetries).
       const retryAt = earliestRetryAt(items, deps.nowUtc);
       if (retryAt) return { action: 'waiting_retry', nextRetryAt: retryAt.toISOString() };
       // Release the conference BEFORE flipping the session out of 'active'. The

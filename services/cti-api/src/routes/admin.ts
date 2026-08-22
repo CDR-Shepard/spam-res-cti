@@ -3,7 +3,7 @@
  * MVP: every authenticated user can manage their own org. Tighten with roles later.
  */
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
 import { getDb, schema } from '../db/index.js';
@@ -93,6 +93,29 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       .from(schema.users)
       .where(eq(schema.users.orgId, s.orgId));
     return { reps: rows };
+  });
+
+  // Follow-up rollover health: a failed job is a task that silently did not move.
+  app.get('/admin/followup-rollovers', async (req, reply) => {
+    const s = await resolveSession(req.headers.authorization);
+    if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
+    const q = req.query as { since?: string };
+    const since = q.since && /^\d{4}-\d{2}-\d{2}$/.test(q.since) ? new Date(`${q.since}T00:00:00Z`) : new Date(Date.now() - 24 * 3600_000);
+    const db = getDb();
+    const rows = await db
+      .select({
+        status: schema.followupRolloverJobs.status, recordId: schema.followupRolloverJobs.recordId,
+        lastError: schema.followupRolloverJobs.lastError, attempts: schema.followupRolloverJobs.attempts,
+        updatedAt: schema.followupRolloverJobs.updatedAt, userEmail: schema.users.email,
+      })
+      .from(schema.followupRolloverJobs)
+      .innerJoin(schema.users, eq(schema.users.id, schema.followupRolloverJobs.userId))
+      .where(and(eq(schema.followupRolloverJobs.orgId, s.orgId), gte(schema.followupRolloverJobs.updatedAt, since)));
+    return {
+      succeeded: rows.filter((r) => r.status === 'succeeded').length,
+      failed: rows.filter((r) => r.status === 'failed').map(({ status: _s, ...r }) => r),
+    };
   });
 
   app.post('/admin/outbound-numbers', async (req, reply) => {

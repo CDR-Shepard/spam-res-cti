@@ -17,3 +17,21 @@ export function sessionCounts(items: Array<Pick<DialerItem, 'status'>>): {
   }
   return c;
 }
+
+/** Run-summary counts from a session's rollover jobs. `nextDayOf` resolves the
+ *  plain next business day so "moved" (landed there) vs "pushed" (cap sent it
+ *  later) needs no extra Salesforce call. */
+export function rolloverSummary(
+  jobs: Array<{ status: string; fromDate: string; targetDate: string | null }>,
+  nextDayOf: (fromIsoDate: string) => string,
+): { moved: number; pushed: number; failed: number; pending: number } {
+  const s = { moved: 0, pushed: 0, failed: 0, pending: 0 };
+  for (const j of jobs) {
+    if (j.status === 'failed') s.failed++;
+    else if (j.status === 'pending' || j.status === 'in_flight') s.pending++;
+    else if (j.status === 'succeeded' && j.targetDate) {
+      if (j.targetDate === nextDayOf(j.fromDate)) s.moved++; else s.pushed++;
+    }
+  }
+  return s;
+}
