@@ -142,6 +142,24 @@ describe('syncOne — the after-call ownership gate', () => {
     expect(d.createCallTask).toHaveBeenCalledTimes(1);
   });
 
+  it('EXEMPTS an inbound call: a callback from another rep\'s lead still gets its Task', async () => {
+    // The owner rule exists to stop a rep creating OUTBOUND activity on records
+    // they do not own. An inbound call is the customer contacting THIS rep —
+    // logging it is a record of what happened, not a land grab — so the gate
+    // never runs and no ownership lookup is made at all.
+    const db = fakeDb(callRow({ direction: 'inbound', salesforceWhoId: '00Q1', salesforceWhatId: '0061' }));
+    const d = syncDeps({
+      db,
+      fetchOwnership: vi.fn(async (): Promise<OwnershipSnapshot> =>
+        ({ type: 'Lead', ownerId: '005OTHER' })) as unknown as SyncOneDeps['fetchOwnership'],
+    });
+    expect(await syncOne('call-1', d)).toBeUndefined();
+    expect(d.fetchOwnership).not.toHaveBeenCalled();
+    expect(d.salesforceUserId).not.toHaveBeenCalled();
+    expect(d.createCallTask).toHaveBeenCalledTimes(1);
+    expect((d.createCallTask as any).mock.calls[0][1]).toMatchObject({ callType: 'Inbound', whoId: '00Q1', whatId: '0061' });
+  });
+
   it('fails CLOSED: an ownership lookup error propagates so the tick retries', async () => {
     const db = fakeDb(callRow({ salesforceWhoId: '00Q1' }));
     const d = syncDeps({

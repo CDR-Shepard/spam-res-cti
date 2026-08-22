@@ -251,12 +251,19 @@ export async function syncOne(
     if (match?.whatId) whatId = match.whatId;
   }
 
-  // Ownership gate: never write a Task on a record the caller doesn't own/manage.
-  // The Task attaches to BOTH ids, so BOTH have to pass — gating only the WhoId
-  // would let an unowned Opportunity in through the WhatId. `gatedIds` first so
-  // a pair of custom objects costs no round-trip at all, not even /users/me.
-  // The call stays fully logged in the CTI; the job records why no Task exists.
-  if (gatedIds([whoId, whatId]).length > 0) {
+  // Ownership gate — OUTBOUND ONLY. Never write a Task on a record the caller
+  // doesn't own/manage. The Task attaches to BOTH ids, so BOTH have to pass —
+  // gating only the WhoId would let an unowned Opportunity in through the
+  // WhatId. `gatedIds` first so a pair of custom objects costs no round-trip at
+  // all, not even /users/me. The call stays fully logged in the CTI; the job
+  // records why no Task exists.
+  //
+  // INBOUND CALLS ARE EXEMPT. The owner rule exists to stop reps creating
+  // outbound activity on records they do not own; an inbound call is the
+  // customer choosing to contact THIS rep, so logging it is a record of what
+  // actually happened, not activity the rep manufactured on someone else's
+  // record. A callback from another rep's lead still gets its Task.
+  if (!inbound && gatedIds([whoId, whatId]).length > 0) {
     const me = await deps.salesforceUserId(call.userId);
     const allowed = await mayCreateTaskOn([whoId, whatId], me, (id) => deps.fetchOwnership(call.userId, id));
     if (!allowed) return { skipped: 'not-owner' as const };
