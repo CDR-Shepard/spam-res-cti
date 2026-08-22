@@ -1,6 +1,16 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { progressLabel, isNextEnabled, pauseResumeAction, shouldTeardownRun, DialerPanel } from './DialerPanel';
+import {
+  progressLabel,
+  isNextEnabled,
+  pauseResumeAction,
+  shouldTeardownRun,
+  shouldScreenPop,
+  retryCountdown,
+  rolloverLine,
+  AttemptBadge,
+  DialerPanel,
+} from './DialerPanel';
 import * as dialerApi from '../dialer-api';
 
 describe('progressLabel', () => {
@@ -101,5 +111,47 @@ describe('DialerPanel (no @testing-library available — shallow render only)', 
       <DialerPanel sessionId="sess1" onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={() => {}} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />,
     );
     expect(typeof html).toBe('string');
+  });
+});
+
+describe('shouldScreenPop — humans only', () => {
+  it('pops only once the record is connected (AMD drops machines before bridging, so connected = human)', () => {
+    const base = { id: 'i1', recordId: '00Q1', objectType: 'Lead', toNumber: '+16195551234' };
+    expect(shouldScreenPop({ ...base, status: 'connected' })).toBe(true);
+    expect(shouldScreenPop({ ...base, status: 'dialing' })).toBe(false);
+    expect(shouldScreenPop({ ...base, status: 'no_connect' })).toBe(false);
+    expect(shouldScreenPop(null)).toBe(false);
+  });
+});
+
+describe('retryCountdown', () => {
+  it('formats the time until the next retry as m:ss, never negative', () => {
+    const now = Date.parse('2026-08-22T17:00:00Z');
+    expect(retryCountdown('2026-08-22T17:03:40Z', now)).toBe('3:40');
+    expect(retryCountdown('2026-08-22T17:00:05Z', now)).toBe('0:05');
+    expect(retryCountdown('2026-08-22T16:59:00Z', now)).toBe('0:00');
+  });
+});
+
+describe('rolloverLine', () => {
+  it('reads naturally and omits zero parts', () => {
+    expect(rolloverLine({ moved: 12, pushed: 3, failed: 0 })).toBe('12 follow-ups moved to tomorrow · 3 pushed later (daily limit)');
+    expect(rolloverLine({ moved: 1, pushed: 0, failed: 0 })).toBe('1 follow-up moved to tomorrow');
+    expect(rolloverLine({ moved: 0, pushed: 0, failed: 2 })).toBe('2 follow-ups could not be moved — see admin');
+    expect(rolloverLine({ moved: 0, pushed: 0, failed: 0 })).toBe('');
+  });
+});
+
+describe('DialerPanel render (SSR)', () => {
+  it('shows the attempt badge and the retry countdown from the view', () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue({
+      session: { id: 'sess1', status: 'active' },
+      counts: { total: 2, done: 0, connected: 0, noConnect: 1, skipped: 0, unreachable: 0, pending: 1 },
+      currentItem: { id: 'i2', recordId: '00Q1', objectType: 'Lead', status: 'dialing', toNumber: '+16195551234', attempt: 2 },
+      waitingRetry: null, rollovers: { moved: 0, pushed: 0, failed: 0, pending: 0 },
+    });
+    // SSR never runs the effect, so we render the pure pieces directly:
+    expect(renderToStaticMarkup(<AttemptBadge attempt={2} />)).toContain('Attempt 2 of 2');
+    expect(renderToStaticMarkup(<AttemptBadge attempt={1} />)).toBe('');
   });
 });

@@ -26,6 +26,10 @@ interface Rep {
   displayName: string | null;
   isAdmin: boolean;
 }
+interface RolloverHealth {
+  succeeded: number;
+  failed: Array<{ recordId: string; userEmail: string; lastError: string | null; attempts: number; updatedAt?: string }>;
+}
 
 const RESERVE = '__reserve__';
 
@@ -54,18 +58,22 @@ export function AdminPanel(): JSX.Element {
   type DncMode = 'registry' | 'external_prescrubbed';
   const [dncMode, setDncMode] = useState<DncMode | null>(null);
   const [dncBusy, setDncBusy] = useState(false);
+  const [rollovers, setRollovers] = useState<RolloverHealth | null>(null);
 
   const load = useCallback(async () => {
     setErr(null);
     try {
-      const [n, r, d] = await Promise.all([
+      const [n, r, d, rh] = await Promise.all([
         api<{ numbers: NumberRow[] }>('/admin/outbound-numbers'),
         api<{ reps: Rep[] }>('/admin/reps'),
         api<{ mode: DncMode }>('/admin/dnc-mode'),
+        // Best-effort: a failure here must not blank the rest of the Numbers panel.
+        api<RolloverHealth>('/admin/followup-rollovers').catch(() => null),
       ]);
       setNumbers(n.numbers);
       setReps(r.reps);
       setDncMode(d.mode);
+      setRollovers(rh);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -232,6 +240,22 @@ export function AdminPanel(): JSX.Element {
           </button>
         </div>
       </div>
+
+      {rollovers && (
+        <div className="admin-compliance">
+          <div className="admin-group-head"><ShieldIcon /> Follow-up rollovers (24h)</div>
+          <div className="admin-rollovers">
+            {rollovers.succeeded} ok · {rollovers.failed.length} failed
+            {rollovers.failed.length > 0 && (
+              <ul>
+                {rollovers.failed.map((f) => (
+                  <li key={`${f.recordId}-${f.userEmail}`}>{f.userEmail} · {f.recordId} — {f.lastError ?? 'unknown'} ({f.attempts}×)</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
 
       {notice && <div className="admin-notice">{notice}</div>}
 

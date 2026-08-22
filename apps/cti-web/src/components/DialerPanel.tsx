@@ -5,7 +5,7 @@
  * stop, next), polling the session every ~2s.
  *
  * Screen-pop: the panel calls `onScreenPop(recordId)` once per record the moment
- * it becomes the in-flight record, so the rep sees the lead/opp while it rings.
+ * it connects to a live human (see `shouldScreenPop`) — never for voicemail.
  * The caller (App) maps that to Open CTI `screenPopRecord`.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -52,6 +52,31 @@ export function isNextEnabled(item: DialerCurrentItem | null): boolean {
   return item?.status === 'connected';
 }
 
+/** Pure — pop the record ONLY for a live human. AMD hangs up machines before the
+ *  rep is bridged, so `connected` ⇒ a person; voicemail never pops. */
+export function shouldScreenPop(item: DialerCurrentItem | null): boolean {
+  return item?.status === 'connected';
+}
+
+/** Pure — "m:ss" until the next retry; clamps at 0:00. */
+export function retryCountdown(nextRetryAt: string, now: number): string {
+  const s = Math.max(0, Math.round((Date.parse(nextRetryAt) - now) / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** Pure — the run-summary rollover line; '' when there is nothing to say. */
+export function rolloverLine(r: { moved: number; pushed: number; failed: number }): string {
+  const parts: string[] = [];
+  if (r.moved) parts.push(`${r.moved} follow-up${r.moved === 1 ? '' : 's'} moved to tomorrow`);
+  if (r.pushed) parts.push(`${r.pushed} pushed later (daily limit)`);
+  if (!parts.length && r.failed) return `${r.failed} follow-up${r.failed === 1 ? '' : 's'} could not be moved — see admin`;
+  return parts.join(' · ');
+}
+
+export function AttemptBadge({ attempt }: { attempt?: number }): JSX.Element | null {
+  return attempt === 2 ? <span className="dp-attempt">Attempt 2 of 2</span> : null;
+}
+
 /**
  * Pure — should this poll tick tear the run down? A run tears down exactly once,
  * the moment it first reaches a terminal status (`done` when it finishes on its
@@ -77,8 +102,8 @@ export interface DialerPanelProps {
   /** Active session id, owned by the parent — null means no run in progress. */
   sessionId: string | null;
   /**
-   * Called once per record the moment it becomes the in-flight record (i.e. as
-   * the dialer starts calling it), so the rep sees the lead/opp while it rings.
+   * Called once per record the moment it connects to a human (see
+   * shouldScreenPop) — voicemail and no-connects never pop.
    */
   onScreenPop: (recordId: string) => void;
   /** Start a run from a Salesforce list view (parent creates the session). */
@@ -111,6 +136,7 @@ function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Element {
         <span className={`cdot ${dotClassForItemStatus(item.status)}`} />
         {item.objectType} · {item.status.replace(/_/g, ' ')}
       </div>
+      <AttemptBadge attempt={item.attempt} />
     </div>
   );
 }
@@ -207,6 +233,9 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const [view, setView] = useState<DialerSessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [controlBusy, setControlBusy] = useState(false);
+  // Ticks every second so the retry countdown re-renders without waiting on
+  // the ~2s poll.
+  const [now, setNow] = useState(() => Date.now());
 
   // Id of the last currentItem we screen-popped for — pop once per NEW
   // connected item, not on every ~2s poll.
@@ -216,6 +245,11 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const pollNowRef = useRef<() => void>(() => {});
   // Latch so the terminal-status teardown (onComplete) fires exactly once per run.
   const completedRef = useRef(false);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     lastPoppedIdRef.current = null;
@@ -249,11 +283,10 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         setView(next);
         setError(null);
 
-        // Screen-pop each record as it becomes the in-flight record (dialing OR
-        // connected) — so the rep sees the lead/opp while it's ringing, not only
-        // once someone answers. Fires once per record via the last-popped ref.
+        // Pop the record only for a live human (see shouldScreenPop) — not while
+        // it is still ringing, and never for voicemail. Once per item.
         const current = next.currentItem;
-        if (current && lastPoppedIdRef.current !== current.id) {
+        if (shouldScreenPop(current) && current && lastPoppedIdRef.current !== current.id) {
           lastPoppedIdRef.current = current.id;
           onScreenPop(current.recordId);
         }
@@ -349,33 +382,41 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
             Run {view.session.status === 'done' ? 'complete' : 'stopped'}
           </div>
           <div className="dp-summary-meta">{progressLabel(view.counts)}</div>
+          {view.rollovers && rolloverLine(view.rollovers) && (
+            <div className="dp-summary-meta">{rolloverLine(view.rollovers)}</div>
+          )}
           <button className="btn primary full dp-summary-cta" onClick={onDismiss}>
             Start another run
           </button>
         </div>
       ) : (
-        <div className="row dp-controls">
-          <button
-            className="btn"
-            disabled={controlBusy}
-            onClick={() => runControl(pauseResumeAction(view.session.status))}
-          >
-            {isPaused ? 'Resume' : 'Pause'}
-          </button>
-          <button className="btn" disabled={controlBusy} onClick={() => runControl('skip')}>
-            Skip
-          </button>
-          <button className="btn danger" disabled={controlBusy} onClick={handleStop}>
-            Stop
-          </button>
-          <button
-            className="btn primary"
-            disabled={controlBusy || !isNextEnabled(view.currentItem)}
-            onClick={() => runControl('next')}
-          >
-            Next
-          </button>
-        </div>
+        <>
+          {view.waitingRetry && (
+            <div className="dp-waiting">Next retry in {retryCountdown(view.waitingRetry.nextRetryAt, now)}</div>
+          )}
+          <div className="row dp-controls">
+            <button
+              className="btn"
+              disabled={controlBusy}
+              onClick={() => runControl(pauseResumeAction(view.session.status))}
+            >
+              {isPaused ? 'Resume' : 'Pause'}
+            </button>
+            <button className="btn" disabled={controlBusy} onClick={() => runControl('skip')}>
+              Skip
+            </button>
+            <button className="btn danger" disabled={controlBusy} onClick={handleStop}>
+              Stop
+            </button>
+            <button
+              className="btn primary"
+              disabled={controlBusy || !isNextEnabled(view.currentItem)}
+              onClick={() => runControl('next')}
+            >
+              Next
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
