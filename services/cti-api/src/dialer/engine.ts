@@ -4,6 +4,7 @@ import type { DialerItem } from './session-store.js';
 import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
 import type { DialerTelephony } from './telephony-port.js';
 import { recordConnectSticky } from './sticky.js';
+import type { RolloverDb } from '../salesforce/followup-worker.js';
 
 export interface RolloverEnqueue {
   orgId: string; userId: string; sfOwnerId: string; sessionId: string;
@@ -20,8 +21,11 @@ export interface EngineDeps {
   /** The "now" the engine reasons about — injected so calling-hours checks are deterministic in tests. */
   nowUtc: Date;
   /** Queue the rep's follow-up rollover for this record (drained by the follow-up
-   *  worker). Idempotent on (user, record, fromDate). Must never throw into the webhook. */
-  enqueueRollover: (job: RolloverEnqueue) => Promise<void>;
+   *  worker). Idempotent on (user, record, fromDate). Called INSIDE the miss-path
+   *  transaction (handleDialOutcome) with that transaction's `tx` as the second
+   *  arg, so the enqueue commits or rolls back atomically with the CAS that
+   *  flips the row out of 'dialing' — no try/catch here on purpose. */
+  enqueueRollover: (job: RolloverEnqueue, db: RolloverDb) => Promise<void>;
   onScreenPop: (userId: string, objectType: string, recordId: string) => void;
   todayIso: string;
 }
@@ -295,11 +299,37 @@ export async function handleDialOutcome(
     return;
   }
 
-  // No fallback left (or a non-no-answer miss) = one MISS. First miss: re-queue
-  // the record as an attempt-2 row at the END of the run (numbers restored from
-  // the immutable pair, 5-min floor). Second miss: queue the follow-up rollover.
-  // Both ride inside the same compare-and-swap that flips this row out of
-  // 'dialing', so a duplicated webhook can neither double-requeue nor double-enqueue.
+  // No fallback left (or a non-no-answer miss) = one MISS. Decide the outcome
+  // BEFORE the transaction, from a single truth table:
+  //  - requeue: this is the record's first miss, it still has a number to
+  //    retry with (the immutable pair, or — for legacy pre-0024 rows with no
+  //    primaryNumber — whatever it was last dialing), and the run is still
+  //    live (active/paused). Re-queued as an attempt-2 row at the END of the
+  //    run, 5-min floor.
+  //  - enqueue: everything else that isn't a requeue — the second miss, or a
+  //    first miss with nothing left to retry with. Queues the follow-up
+  //    rollover.
+  // A STOPPED session's first-miss webhook does NEITHER: per spec, a rep who
+  // stops after one pass leaves those tasks open, so the row just becomes
+  // 'no_connect' and nothing is queued. A stopped session's second-miss
+  // webhook still enqueues — that miss genuinely already happened.
+  const attempt = item.attempt ?? 1; // a fixture/row missing `attempt` must not silently skip both branches
+  const retryTo = item.primaryNumber ?? item.toNumber; // legacy rows (pre-0024) have no primaryNumber
+  const retryFallback = item.secondaryNumber ?? item.fallbackNumber;
+  const sessionLive = session.status === 'active' || session.status === 'paused';
+  const requeue = attempt < 2 && retryTo != null && sessionLive;
+  const enqueue = !requeue && (attempt >= 2 || (retryTo == null && sessionLive));
+
+  // The CAS, the requeue insert, and the rollover enqueue all ride inside the
+  // same transaction, so a duplicated webhook can neither double-requeue nor
+  // double-enqueue, and the enqueue commits/rolls back atomically with the
+  // CAS (a retry can't lose the race against a rollover that outlived it).
+  // The ordinal lookup uses `tx.query` (not `deps.db.query`) so it shares the
+  // transaction's pool client instead of checking out a second one — with
+  // enough concurrent misses that second checkout would deadlock the pool
+  // permanently. No try/catch around the enqueue: a failure there should roll
+  // the CAS back too, and the insert is idempotent via the unique index, so a
+  // retry after rollback just repeats the same idempotent write.
   const claimed = await deps.db.transaction(async (tx) => {
     const rows = await tx
       .update(schema.dialerQueueItems)
@@ -311,29 +341,24 @@ export async function handleDialOutcome(
       ))
       .returning({ id: schema.dialerQueueItems.id });
     if (rows.length === 0) return false;
-    if (item.attempt < 2) {
-      const all = await deps.db.query.dialerQueueItems.findMany({ where: eq(schema.dialerQueueItems.sessionId, item.sessionId) });
+    if (requeue) {
+      const all = await tx.query.dialerQueueItems.findMany({ where: eq(schema.dialerQueueItems.sessionId, item.sessionId) });
       const maxOrdinal = all.reduce((m, i) => Math.max(m, i.ordinal), -1);
       await tx.insert(schema.dialerQueueItems).values({
         sessionId: item.sessionId, ordinal: maxOrdinal + 1, objectType: item.objectType, recordId: item.recordId,
-        toNumber: item.primaryNumber, fallbackNumber: item.secondaryNumber,
+        toNumber: retryTo, fallbackNumber: retryFallback,
         primaryNumber: item.primaryNumber, secondaryNumber: item.secondaryNumber,
         attempt: 2, status: 'pending',
         retryNotBefore: new Date(deps.nowUtc.getTime() + RETRY_FLOOR_MS),
       });
+    } else if (enqueue) {
+      await deps.enqueueRollover({
+        orgId: session.orgId, userId: session.userId, sfOwnerId: session.sfOwnerId, sessionId: session.id,
+        recordId: item.recordId, objectType: item.objectType, fromDate: deps.todayIso,
+      }, tx);
     }
     return true;
   });
   if (!claimed) return; // duplicate/redelivered webhook lost the race
-  if (item.attempt >= 2) {
-    try {
-      await deps.enqueueRollover({
-        orgId: session.orgId, userId: session.userId, sfOwnerId: session.sfOwnerId, sessionId: session.id,
-        recordId: item.recordId, objectType: item.objectType, fromDate: deps.todayIso,
-      });
-    } catch (err) {
-      console.error('[dialer] rollover enqueue failed', { itemId: item.id, err: (err as Error).message });
-    }
-  }
   await advanceSession(item.sessionId, deps);
 }

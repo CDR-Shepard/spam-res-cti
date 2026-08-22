@@ -89,7 +89,7 @@ function buildEngineDeps(): EngineDeps {
     pickDid: (orgId, userId, toE164) => pickPoolDid(db, { orgId, userId, toE164 }),
     withinCallingHours: (toE164, nowUtc) => exempt.has(toE164) || withinCallingHours(toE164, nowUtc),
     nowUtc: new Date(),
-    enqueueRollover: (job) => enqueueFollowupRollover(db, job),
+    enqueueRollover: (job, handle) => enqueueFollowupRollover(handle, job),
     onScreenPop: () => {}, // Plan 4 wires Open CTI screen-pop
     todayIso: orgTodayIso(),
   };
