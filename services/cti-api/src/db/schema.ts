@@ -265,6 +265,10 @@ export const dialerQueueItems = pgTable(
     secondaryNumber: text('secondary_number'),
     /** 5-minute floor on attempt-2 rows: not dialable before this instant. */
     retryNotBefore: timestamp('retry_not_before', { withTimezone: true }),
+    /** The Task this item came from (Task runs); null on Lead/Opp runs. */
+    taskId: text('task_id'),
+    /** Decided at creation from the follow-up subject rule; only eligible items roll over. */
+    followupEligible: boolean('followup_eligible').default(true).notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
@@ -641,6 +645,8 @@ export const followupRolloverJobs = pgTable(
     targetDate: text('target_date'),
     /** The plain next business day after fromDate — lets the run summary tell "moved" from "pushed" without a Salesforce call. */
     nextDay: text('next_day'),
+    /** The exact Task to roll (Task runs); null = search the record (Lead/Opp runs). */
+    sourceTaskId: text('source_task_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },

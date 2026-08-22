@@ -1,5 +1,6 @@
 import { sfFetch, soqlEscape, soqlQuery } from './client.js';
 import { nextBusinessDayFor } from './business-calendar.js';
+import { isFollowUpSubject } from './followup-subject.js';
 
 export interface FollowUpTask {
   Id: string;
@@ -12,10 +13,8 @@ export interface FollowUpTask {
   ActivityDate: string | null;
 }
 
-const FOLLOW_UP_RE = /follow[ -]?up/i;
-
 export function pickFollowUpTask(tasks: FollowUpTask[]): FollowUpTask | null {
-  const matches = tasks.filter((t) => t.Subject != null && FOLLOW_UP_RE.test(t.Subject));
+  const matches = tasks.filter((t) => isFollowUpSubject(t.Subject));
   if (matches.length === 0) return null;
   // Earliest ActivityDate first; null dates sort last.
   matches.sort((a, b) => (a.ActivityDate ?? '9999-99-99').localeCompare(b.ActivityDate ?? '9999-99-99'));
