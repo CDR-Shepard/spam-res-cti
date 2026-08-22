@@ -31,13 +31,16 @@ export function needsDisposition(row: CallRow): boolean {
 }
 
 /**
- * Pure — what the sync status column says. A bare "Local" used to cover both
- * "not synced yet" and "the ownership gate blocked this Task from ever being
- * written" — the second case needs to say why, not just that it didn't happen.
+ * Pure — what the sync status column says. A bare "Local" used to cover three
+ * different things: "not synced yet", "the ownership gate blocked this Task
+ * from ever being written", and "the sync job gave up". Only the first is a
+ * wait; the other two are final, and reading "Local" left the rep expecting a
+ * Task that was never coming.
  */
 export function recentSyncLabel(row: Pick<CallRow, 'salesforceTaskId' | 'syncError'>): string {
   if (row.salesforceTaskId) return 'Synced';
   if (row.syncError === 'not-owner') return 'Not synced · not owner';
+  if (row.syncError === 'failed') return 'Not synced · failed';
   return 'Local';
 }
 
