@@ -225,6 +225,8 @@ export const dialerSessions = pgTable(
     sfOwnerId: text('sf_owner_id').notNull(),
     objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity'
     status: dialerSessionStatus('status').default('active').notNull(),
+    /** Last softphone poll of this session — the retry nudge's proof a rep is present. */
+    lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },

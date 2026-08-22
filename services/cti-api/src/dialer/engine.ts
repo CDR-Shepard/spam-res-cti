@@ -4,7 +4,7 @@ import type { DialerItem } from './session-store.js';
 import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
 import type { DialerTelephony } from './telephony-port.js';
 import { recordConnectSticky } from './sticky.js';
-import type { RolloverDb } from '../salesforce/followup-worker.js';
+import type { RolloverDb } from '../salesforce/followup-enqueue.js';
 
 export interface RolloverEnqueue {
   orgId: string; userId: string; sfOwnerId: string; sessionId: string;

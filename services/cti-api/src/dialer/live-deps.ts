@@ -18,7 +18,7 @@ const ORG_TIMEZONE = 'America/Los_Angeles';
 
 /** `YYYY-MM-DD` for `now` in the org's timezone. `en-CA` formats as ISO order,
  *  so no further reassembly is needed. */
-export function orgTodayIso(): string {
+function orgTodayIso(): string {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: ORG_TIMEZONE,
     year: 'numeric',
