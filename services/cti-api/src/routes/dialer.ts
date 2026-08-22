@@ -50,14 +50,20 @@ import {
   upsertPendingHandoff,
   claimPendingHandoff,
   constantTimeEqual,
+  isValidSfId,
 } from '../dialer/handoff-store.js';
 import { sfFetch } from '../salesforce/client.js';
 import { parseListViews, parseListViewResultIds } from '../salesforce/listviews.js';
 
-// The POST /dialer/sessions body schema — pinned by src/routes/dialer.test.ts.
-const StartBody = z.object({
+/**
+ * The POST /dialer/sessions body schema — exported so src/routes/dialer.test.ts
+ * pins THIS schema rather than a copy that can drift from the route.
+ * Ids go through the same `isValidSfId` shape check the handoff relay uses: a
+ * length-only rule let `'!!!!!!!!!!!!!!!'` through to a SOQL id list.
+ */
+export const StartBody = z.object({
   objectType: z.enum(['Lead', 'Opportunity', 'Task']),
-  recordIds: z.array(z.string().min(15).max(20)).min(1).max(500),
+  recordIds: z.array(z.string().refine(isValidSfId, 'invalid record id')).min(1).max(500),
 });
 
 const TWIML_DIALER_ANSWER_HOLD = '<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="30"/></Response>';
