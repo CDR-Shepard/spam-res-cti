@@ -49,6 +49,11 @@ interface ActiveCall {
   recordId?: string;
   recordName?: string;
   objectType?: string;
+  /** false when the server's ownership gate blocked writing an SF Task for this
+   *  call — the Open CTI saveCallLog write must be skipped too (see
+   *  submitDisposition). Defaults to true (see place()) when the server didn't
+   *  say otherwise. */
+  taskAllowed?: boolean;
 }
 
 /** A terminal outbound call still awaiting a disposition (from the server). */
@@ -775,9 +780,9 @@ export function App(): JSX.Element {
     }
     setBusy(true);
     try {
-      let created: { call: { id: string; fromNumber: string; toNumber: string; normalizedToNumber: string } };
+      let created: { call: { id: string; fromNumber: string; toNumber: string; normalizedToNumber: string }; taskAllowed?: boolean };
       try {
-        created = await api<{ call: { id: string; fromNumber: string; toNumber: string; normalizedToNumber: string } }>(
+        created = await api<{ call: { id: string; fromNumber: string; toNumber: string; normalizedToNumber: string }; taskAllowed?: boolean }>(
           '/calls', {
             method: 'POST',
             body: {
@@ -824,6 +829,7 @@ export function App(): JSX.Element {
         recordId: ctiContext?.recordId,
         recordName: ctiContext?.recordName,
         objectType: ctiContext?.objectType,
+        taskAllowed: created.taskAllowed ?? true,
       });
       setPhase('ringing');
 
@@ -945,7 +951,7 @@ export function App(): JSX.Element {
       // If a prior submit attempt already wrote the Task via Open CTI, don't
       // write it again on retry — just re-attempt the backend disposition PATCH.
       let loggedViaOpenCti = openCtiTaskWrittenRef.current;
-      if (active.recordId && !openCtiTaskWrittenRef.current) {
+      if (active.recordId && active.taskAllowed !== false && !openCtiTaskWrittenRef.current) {
         loggedViaOpenCti = await saveCallLog({
           Subject: `Outbound Call - ${active.toNumber}`,
           Status: 'Completed',

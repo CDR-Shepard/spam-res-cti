@@ -147,10 +147,14 @@ async function isDncListLoaded(db: Db): Promise<boolean> {
 }
 
 /**
- * Fold a `GROUP BY from_number` count of a customer's recent calls into the
+ * Fold `GROUP BY from_number` counts of a customer's recent contacts into the
  * per-number map (used for rotation + the per-number gate) and the total
  * across ALL numbers (the per-customer ceiling). Rows with a null from_number
  * (inbound/legacy) count toward the total but not any number's budget.
+ *
+ * Counts ACCUMULATE per from-number: the caller may hand us the concatenation
+ * of several grouped queries (see customerAttemptCounts), and the same number
+ * can appear once per source.
  */
 export function tallyAttempts(
   rows: ReadonlyArray<{ from: string | null; n: number }>,
@@ -159,9 +163,79 @@ export function tallyAttempts(
   let customerAttemptsTotal = 0;
   for (const r of rows) {
     customerAttemptsTotal += r.n;
-    if (r.from) attemptsByNumber.set(r.from, r.n);
+    if (r.from) attemptsByNumber.set(r.from, (attemptsByNumber.get(r.from) ?? 0) + r.n);
   }
   return { attemptsByNumber, customerAttemptsTotal };
+}
+
+/**
+ * Every contact this org made to `toE164` since `windowStart`, grouped by the
+ * number that placed it. This is the ONE definition of "an attempt", shared by
+ * the click-to-dial gate below (gate 5) and the power dialer's per-run ceiling
+ * (dialer/pick-agent-did.ts `customerAttemptState`) — a compliance backstop
+ * that counted differently depending on which button the rep pressed would be
+ * a discrepancy nobody could see.
+ *
+ * TWO sources, because the two dial paths record differently:
+ *  - `calls`: written by click-to-dial (routes/calls.ts) and inbound.
+ *  - `dialer_dial_attempts`: the power dialer originates straight through the
+ *    Twilio SDK (dialer/twilio-telephony.ts) and writes no `calls` row, so
+ *    counting only `calls` would leave the ceiling blind to the highest-volume
+ *    dial path. One append-only row per successful originate, written inside the
+ *    engine's dialing stamp.
+ *
+ * NOT `dialer_queue_items`, which this used to count: a TRUE no-answer rewrites
+ * `to_number`/`from_number` on the SAME row to dial the record's Phone, so the
+ * mobile dial vanished from the tally the moment the fallback was tried — the
+ * recipient had been contacted twice and the ceiling could only see once.
+ *
+ * The two sources are disjoint (no dialer dial ever writes a `calls` row), so
+ * summing them cannot double-count.
+ */
+export async function customerAttemptCounts(
+  db: Db,
+  orgId: string,
+  toE164: string,
+  windowStart: Date,
+): Promise<{ attemptsByNumber: Map<string, number>; customerAttemptsTotal: number }> {
+  const [calls, dialed] = await Promise.all([
+    db
+      .select({ from: schema.calls.fromNumber, n: sql<number>`count(*)::int` })
+      .from(schema.calls)
+      .where(
+        and(
+          eq(schema.calls.orgId, orgId),
+          eq(schema.calls.normalizedToNumber, toE164),
+          gte(schema.calls.createdAt, windowStart),
+        ),
+      )
+      .groupBy(schema.calls.fromNumber),
+    db
+      .select({ from: schema.dialerDialAttempts.fromNumber, n: sql<number>`count(*)::int` })
+      .from(schema.dialerDialAttempts)
+      .where(
+        and(
+          eq(schema.dialerDialAttempts.orgId, orgId),
+          eq(schema.dialerDialAttempts.toNumber, toE164),
+          gte(schema.dialerDialAttempts.dialedAt, windowStart),
+        ),
+      )
+      .groupBy(schema.dialerDialAttempts.fromNumber),
+  ]);
+  return tallyAttempts([...calls, ...dialed]);
+}
+
+/**
+ * The per-customer ceiling predicate — ONE definition, shared by the
+ * click-to-dial gate (attemptGateChecks) and the dialer's per-run skip
+ * (dialer/pick-agent-did.ts). `>=` because the ceiling counts contacts already
+ * made: at 15 of 15 the next dial would be the 16th.
+ */
+export function atCustomerCeiling(args: {
+  customerAttemptsTotal: number;
+  perCustomerMaxAttempts: number;
+}): boolean {
+  return args.customerAttemptsTotal >= args.perCustomerMaxAttempts;
 }
 
 /**
@@ -179,7 +253,7 @@ export function attemptGateChecks(args: {
   effectiveFrom: string | null;
 }): CheckResult[] {
   const checks: CheckResult[] = [];
-  if (args.customerAttemptsTotal >= args.perCustomerMaxAttempts) {
+  if (atCustomerCeiling(args)) {
     checks.push({
       name: 'customer_limit',
       passed: false,
@@ -353,25 +427,20 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
   }
 
   // 5. Attempt limits. Contacts to this customer in the window, grouped by the
-  //    number that placed them. The per-NUMBER budget is enforced after the DID
-  //    is picked (gate 5b); the map here also drives the rotation swap below.
+  //    number that placed them — click-to-dial AND power-dial contacts, via the
+  //    shared customerAttemptCounts. The per-NUMBER budget is enforced after the
+  //    DID is picked (gate 5b); the map here also drives the rotation swap below.
   //    The per-CUSTOMER ceiling (across all numbers) is the harassment backstop.
   let attemptsByNumber = new Map<string, number>();
   let customerAttemptsTotal = 0;
   if (campaign) {
     const windowStart = new Date(Date.now() - campaign.attemptWindowDays * 24 * 3600 * 1000);
-    const grouped = await db
-      .select({ from: schema.calls.fromNumber, n: sql<number>`count(*)::int` })
-      .from(schema.calls)
-      .where(
-        and(
-          eq(schema.calls.orgId, input.orgId),
-          eq(schema.calls.normalizedToNumber, e164),
-          gte(schema.calls.createdAt, windowStart),
-        ),
-      )
-      .groupBy(schema.calls.fromNumber);
-    ({ attemptsByNumber, customerAttemptsTotal } = tallyAttempts(grouped));
+    ({ attemptsByNumber, customerAttemptsTotal } = await customerAttemptCounts(
+      db,
+      input.orgId,
+      e164,
+      windowStart,
+    ));
     // Gates are pushed at 5b (below), once the DID is chosen — the ceiling here
     // also feeds the rotation swap.
   }

@@ -20,7 +20,7 @@ export function choosePhones(
 
 export async function resolveDialNumber(
   userId: string,
-  objectType: 'Lead' | 'Opportunity',
+  objectType: 'Lead' | 'Contact' | 'Opportunity',
   recordId: string,
 ): Promise<{ e164: string; fallbackE164: string | null } | null> {
   const rid = soqlEscape(recordId);
@@ -30,6 +30,12 @@ export async function resolveDialNumber(
     const rows = await soqlQuery<{ MobilePhone?: string | null; Phone?: string | null }>(
       userId,
       `SELECT MobilePhone, Phone FROM Lead WHERE Id = '${rid}' LIMIT 1`,
+    );
+    fields = rows[0] ?? null;
+  } else if (objectType === 'Contact') {
+    const rows = await soqlQuery<{ MobilePhone?: string | null; Phone?: string | null }>(
+      userId,
+      `SELECT MobilePhone, Phone FROM Contact WHERE Id = '${rid}' LIMIT 1`,
     );
     fields = rows[0] ?? null;
   } else {

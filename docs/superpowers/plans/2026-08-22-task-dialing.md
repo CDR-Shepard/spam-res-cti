@@ -537,6 +537,12 @@ git commit -m "feat(cti-api): Task runs dial from the rep's own numbers via rota
     await handleDialOutcome('CA1', 'no_connect', deps);
     expect(deps.enqueueRollover).toHaveBeenCalledWith(expect.objectContaining({ sourceTaskId: '00T1', recordId: '00Q1' }), expect.anything());
   });
+  it('the attempt-2 requeue row carries the task id and eligibility forward (else attempt 2 would roll a "Check in" as eligible)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '0031', objectType: 'Contact', callId: 'CA1', attempt: 1, primaryNumber: '+1', secondaryNumber: null, taskId: '00T2', followupEligible: false }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, objectType: 'Task' }, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_connect', deps);
+    expect(fdb._inserts).toContainEqual(expect.objectContaining({ attempt: 2, taskId: '00T2', followupEligible: false }));
+  });
   it('a Task run: a non-follow-up task is dialed twice but never enqueues a rollover', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '0031', objectType: 'Contact', callId: 'CA1', attempt: 2, primaryNumber: '+1', secondaryNumber: null, taskId: '00T2', followupEligible: false }];
     const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, objectType: 'Task' }, items); deps.db = fdb;
@@ -587,7 +593,7 @@ describe('followUpTasksSoql', () => {
 
 - [ ] **Step 3: Implement**
 
-`engine.ts`: `RolloverEnqueue` gains `sourceTaskId: string | null`. The enqueue predicate becomes `enqueue = !requeue && item.followupEligible && (attempt >= 2 || (retryTo == null && sessionLive))` and the enqueue call adds `sourceTaskId: item.taskId ?? null`.
+`engine.ts`: the attempt-2 requeue insert (the `insert(schema.dialerQueueItems)` inside `handleDialOutcome`, ~lines 344-353) must copy `taskId: item.taskId` and `followupEligible: item.followupEligible` onto the new row — without this the retry row falls back to the column defaults (`null` / `true`). If the engine test's `fakeDb` does not already record inserts, extend it with an `_inserts` array the way it records `_writes`. `RolloverEnqueue` gains `sourceTaskId: string | null`. The enqueue predicate becomes `enqueue = !requeue && item.followupEligible && (attempt >= 2 || (retryTo == null && sessionLive))` and the enqueue call adds `sourceTaskId: item.taskId ?? null`.
 
 `followup-day.ts`: replace `followUpCountSoql` with:
 

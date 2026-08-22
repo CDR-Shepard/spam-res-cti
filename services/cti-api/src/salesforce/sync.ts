@@ -9,6 +9,8 @@ import { normalize } from '../phone.js';
 import { loadConfig } from '../config.js';
 import { buildRecordingPublicUrl } from '../telephony/recording-links.js';
 import { createCallTask, findByPhone, SalesforceUnauthorizedError, updateCallTask } from './client.js';
+import { salesforceUserId } from './current-user.js';
+import { fetchOwnership, gatedIds, mayCreateTaskOn } from './ownership.js';
 
 /** Public no-login recording link for a call, or null when nothing is recorded. */
 function recordingPublicUrl(call: typeof schema.calls.$inferSelect): string | null {
@@ -155,11 +157,14 @@ export async function runSyncTick(): Promise<{ processed: number }> {
       .where(eq(schema.salesforceSyncJobs.id, job.id));
 
     try {
-      await syncOne(job.callId);
+      const result = await syncOne(job.callId);
       await db
         .update(schema.salesforceSyncJobs)
         .set({
           status: 'succeeded',
+          // Why no Task exists, when that was a decision rather than a failure
+          // (today: the ownership gate). GET /calls surfaces it as `syncError`.
+          lastError: syncJobLastError(result),
           completedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -184,8 +189,44 @@ export async function runSyncTick(): Promise<{ processed: number }> {
   return { processed };
 }
 
-async function syncOne(callId: string): Promise<void> {
-  const db = getDb();
+/**
+ * Everything `syncOne` reaches outside its own module. Injected so the ownership
+ * gate — the one branch that decides a call gets NO Salesforce Task — is
+ * testable without a database or a live Salesforce org. `runSyncTick` passes
+ * nothing and gets the live modules.
+ */
+export interface SyncOneDeps {
+  db: ReturnType<typeof getDb>;
+  salesforceUserId: typeof salesforceUserId;
+  fetchOwnership: typeof fetchOwnership;
+  findByPhone: typeof findByPhone;
+  createCallTask: typeof createCallTask;
+}
+
+function liveSyncOneDeps(): SyncOneDeps {
+  return { db: getDb(), salesforceUserId, fetchOwnership, findByPhone, createCallTask };
+}
+
+/**
+ * What a SUCCEEDED sync job records as its reason. A deliberate skip is not a
+ * failure — the job is done and there is nothing to retry — but the rep still
+ * has to be able to see why their call has no Task (GET /calls surfaces this as
+ * `syncError`). A normal sync leaves the column null.
+ */
+export function syncJobLastError(result: { skipped: 'not-owner' } | void): string | null {
+  return result?.skipped ?? null;
+}
+
+/**
+ * Log one call to Salesforce. Resolves to `{ skipped }` when the call was
+ * deliberately NOT written as a Task (the job still succeeds — there is nothing
+ * to retry); `void` on a normal sync.
+ */
+export async function syncOne(
+  callId: string,
+  deps: SyncOneDeps = liveSyncOneDeps(),
+): Promise<{ skipped: 'not-owner' } | void> {
+  const db = deps.db;
   const call = await db.query.calls.findFirst({ where: eq(schema.calls.id, callId) });
   if (!call) return;
   if (call.salesforceTaskId) return; // already synced
@@ -205,9 +246,27 @@ async function syncOne(callId: string): Promise<void> {
   let whoId = call.salesforceWhoId ?? undefined;
   let whatId = call.salesforceWhatId ?? undefined;
   if (!whoId && !whatId) {
-    const match = await findByPhone(call.userId, counterparty);
+    const match = await deps.findByPhone(call.userId, counterparty);
     if (match?.whoId) whoId = match.whoId;
     if (match?.whatId) whatId = match.whatId;
+  }
+
+  // Ownership gate — OUTBOUND ONLY. Never write a Task on a record the caller
+  // doesn't own/manage. The Task attaches to BOTH ids, so BOTH have to pass —
+  // gating only the WhoId would let an unowned Opportunity in through the
+  // WhatId. `gatedIds` first so a pair of custom objects costs no round-trip at
+  // all, not even /users/me. The call stays fully logged in the CTI; the job
+  // records why no Task exists.
+  //
+  // INBOUND CALLS ARE EXEMPT. The owner rule exists to stop reps creating
+  // outbound activity on records they do not own; an inbound call is the
+  // customer choosing to contact THIS rep, so logging it is a record of what
+  // actually happened, not activity the rep manufactured on someone else's
+  // record. A callback from another rep's lead still gets its Task.
+  if (!inbound && gatedIds([whoId, whatId]).length > 0) {
+    const me = await deps.salesforceUserId(call.userId);
+    const allowed = await mayCreateTaskOn([whoId, whatId], me, (id) => deps.fetchOwnership(call.userId, id));
+    if (!allowed) return { skipped: 'not-owner' as const };
   }
 
   const subject = `${inbound ? 'Inbound' : 'Outbound'} Call - ${counterparty}`;
@@ -239,7 +298,7 @@ async function syncOne(callId: string): Promise<void> {
   const description = buildTaskDescription(call);
   const fullDetail = buildFullDetail(call, audit ?? null, customFields);
 
-  const { taskId, degradedFields } = await createCallTask(call.userId, {
+  const { taskId, degradedFields } = await deps.createCallTask(call.userId, {
     subject,
     callType: inbound ? 'Inbound' : 'Outbound',
     callDisposition: call.disposition ?? undefined,

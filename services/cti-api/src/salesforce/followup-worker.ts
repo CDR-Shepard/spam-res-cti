@@ -1,12 +1,21 @@
 /**
  * Follow-up rollover worker — drains followup_rollover_jobs single-flight.
  *
- * Per job: find the rep's open Follow-up on the record → pick the first business
- * day under the org's daily cap (live COUNT in Salesforce) → CREATE the copy →
- * stamp created_task_id → COMPLETE the original. Create-before-complete means a
- * create failure leaves the original open (retryable) instead of lost; stamping
- * created_task_id before the PATCH means a crash in between is retried by
- * completing only — never a duplicate task.
+ * ONE ROLLOVER PER PERSON PER DAY. The job key is (user, record, day), so a Task
+ * run holding two follow-ups for the same person enqueues ONE job. Per job:
+ * find the TEMPLATE — the exact task the rep dialed when the job carries a
+ * `source_task_id` (Task runs), else the rep's earliest open Follow-up on the
+ * record → pick the first business day under the org's daily cap (the day's open
+ * tasks are fetched live and counted here) → CREATE exactly one copy → stamp
+ * created_task_id → COMPLETE the whole CLEAR SET: the template plus every other
+ * open same-day follow-up on that person. The rep gets one item tomorrow instead
+ * of a pile, and no sibling is left open past its due date.
+ *
+ * Create-before-complete means a create failure leaves the originals open
+ * (retryable) instead of lost; stamping created_task_id before the PATCHes means
+ * a crash in between is retried by completing only — never a duplicate task.
+ * The clear set itself is stamped (completed_task_ids) BEFORE the create, so the
+ * retry knows every task the copy replaced.
  *
  * Single-flight makes the cap EXACT within one process: two rollovers in the same
  * tick can't both read 99. Across processes it is a ceiling we honor, not a lock
@@ -40,9 +49,11 @@ import { buildEngineDeps } from '../dialer/live-deps.js';
 import { nextBusinessDay } from '../dialer/next-business-day.js';
 import { inFlightItem } from '../dialer/state.js';
 import { fetchBusinessCalendar } from './business-calendar.js';
-import { SalesforceUnauthorizedError, sfFetch, soqlCount, soqlEscape, soqlQuery } from './client.js';
-import { FOLLOWUP_DAILY_CAP_DEFAULT, MAX_ROLLOVER_BUSINESS_DAYS, followUpCountSoql, pickRolloverDay } from './followup-day.js';
+import { SalesforceUnauthorizedError, sfFetch, soqlEscape, soqlQuery } from './client.js';
+import { FOLLOWUP_DAILY_CAP_DEFAULT, MAX_ROLLOVER_BUSINESS_DAYS, followUpTasksSoql, pickRolloverDay } from './followup-day.js';
+import { countFollowUps, isFollowUpSubject } from './followup-subject.js';
 import { followUpCopyFields, pickFollowUpTask, type FollowUpTask } from './followup.js';
+import { fetchOwnership, gatedIds, mayCreateTaskOn, type OwnershipSnapshot } from './ownership.js';
 
 export const MAX_ATTEMPTS = 8;
 export const BACKOFF_BASE_MS = 30_000;
@@ -69,9 +80,12 @@ export const ABANDONED_AFTER_MS = 10 * 60_000;
 
 export interface WorkerDeps {
   db: ReturnType<typeof getDb>;
-  sf: { soqlQuery: typeof soqlQuery; soqlCount: typeof soqlCount; sfFetch: typeof sfFetch };
+  sf: { soqlQuery: typeof soqlQuery; sfFetch: typeof sfFetch };
   calendarFor: (userId: string) => Promise<{ workingWeekdays: ReadonlySet<number>; holidays: ReadonlySet<string> }>;
   capFor: (orgId: string) => Promise<number>;
+  /** Owner (and Opportunity lead manager) of the record this job rolls — the
+   *  ownership gate's only input. Injected so the gate is testable without SOQL. */
+  ownership: (userId: string, recordId: string) => Promise<OwnershipSnapshot>;
   now: () => Date;
   /** Advance a dialer run (the retry nudge). Injected so `nudgeDueRetries` is
    *  testable without a live engine — the real one originates a phone call. */
@@ -110,7 +124,13 @@ async function patchJob(deps: WorkerDeps, id: string, patch: Partial<FollowupRol
   await deps.db.update(schema.followupRolloverJobs).set({ ...patch, updatedAt: deps.now() }).where(eq(schema.followupRolloverJobs.id, id));
 }
 
-async function findOpenFollowUp(deps: WorkerDeps, job: FollowupRolloverJob): Promise<FollowUpTask | null> {
+/**
+ * Every OPEN task the rep owns on this job's record. One query answers two
+ * questions — which task is the template (`pickFollowUpTask`) and which same-day
+ * follow-ups have to be cleared with it (`sameDaySiblings`) — so the record path
+ * never pays for two round-trips to learn one thing.
+ */
+async function listOpenFollowUps(deps: WorkerDeps, job: FollowupRolloverJob): Promise<FollowUpTask[]> {
   const rid = soqlEscape(job.recordId);
   const owner = soqlEscape(job.sfOwnerId);
   const tasks = await withTimeout(
@@ -118,26 +138,89 @@ async function findOpenFollowUp(deps: WorkerDeps, job: FollowupRolloverJob): Pro
       job.userId,
       'SELECT Id, Subject, Type, Priority, OwnerId, WhoId, WhatId, ActivityDate FROM Task ' +
         `WHERE IsClosed = false AND OwnerId = '${owner}' AND (WhoId = '${rid}' OR WhatId = '${rid}') ` +
-        "AND (Subject LIKE '%Follow-up%' OR Subject LIKE '%Followup%' OR Subject LIKE '%Follow up%') " +
-        'ORDER BY ActivityDate ASC NULLS LAST LIMIT 50',
+        // No subject filter: SOQL LIKE cannot express the shared follow-up rule
+        // (it would match "refund" on 'FU' and miss 'F/U'). `pickFollowUpTask`
+        // applies that rule in code over whatever comes back — so this LIMIT now
+        // spans ALL of the rep's open tasks on the record, not just the
+        // follow-ups. 200 leaves room for a busy record whose follow-up would
+        // otherwise fall off the end and read as "no-task".
+        'ORDER BY ActivityDate ASC NULLS LAST LIMIT 200',
     ),
     SF_CALL_TIMEOUT_MS,
     'follow-up query',
   );
-  return pickFollowUpTask(tasks);
+  return tasks;
 }
 
-/** Complete the SOURCE task and close the job out. `sourceTaskId` is non-null by
- *  construction — a null here would PATCH `/sobjects/Task/null`, which Salesforce
- *  answers with a 404 the job would then burn all 8 retries on. */
-async function completeSource(deps: WorkerDeps, job: FollowupRolloverJob, sourceTaskId: string): Promise<void> {
-  const done = await withTimeout(
-    deps.sf.sfFetch(job.userId, `/sobjects/Task/${sourceTaskId}`, { method: 'PATCH', body: { Status: 'Completed' } }),
-    SF_CALL_TIMEOUT_MS,
-    'complete task',
-  );
-  if (done.status >= 400) throw new Error(`complete failed (${done.status}): ${JSON.stringify(done.json)}`);
-  await patchJob(deps, job.id, { status: 'succeeded', completedTaskId: sourceTaskId, completedAt: deps.now(), lastError: null });
+/**
+ * Pure — the other tasks this rollover has to clear.
+ *
+ * SAME-DAY FOLLOW-UPS ONLY. The rule the user set is one rollover per person per
+ * day: everything that was due on the missed day moves as a single copy, so
+ * every one of those has to be completed or it sits open past its due date with
+ * no job left to move it. A FUTURE-dated follow-up is work the rep has not
+ * reached yet, and an OVERDUE one belongs to an earlier day's decision — neither
+ * is touched. Non-follow-up tasks ('Check in', 'Send quote') are never touched
+ * at all, by the same shared subject rule the enqueue used.
+ */
+export function sameDaySiblings(
+  tasks: ReadonlyArray<FollowUpTask>,
+  primaryId: string,
+  fromDate: string,
+): FollowUpTask[] {
+  return tasks.filter((t) => t.Id !== primaryId && t.ActivityDate === fromDate && isFollowUpSubject(t.Subject));
+}
+
+/**
+ * The exact task the rep dialed (Task runs). Re-read rather than trusted: it may
+ * have been completed, closed, or reassigned between the miss and this job, and
+ * any of those means "nothing to roll" — never fall back to searching the
+ * record, which could roll a different follow-up the rep never called.
+ */
+async function findSourceTask(deps: WorkerDeps, job: FollowupRolloverJob, sourceTaskId: string): Promise<FollowUpTask | null> {
+  const rows = await withTimeout(deps.sf.soqlQuery<FollowUpTask>(job.userId,
+    'SELECT Id, Subject, Type, Priority, OwnerId, WhoId, WhatId, ActivityDate FROM Task ' +
+    `WHERE Id = '${soqlEscape(sourceTaskId)}' AND IsClosed = false AND OwnerId = '${soqlEscape(job.sfOwnerId)}' LIMIT 1`), SF_CALL_TIMEOUT_MS, 'source task');
+  return rows[0] ?? null;
+}
+
+/**
+ * Complete every task the copy replaced, then close the job out. `ids[0]` is the
+ * PRIMARY (the template the copy was made from); the rest are its same-day
+ * siblings. Sequential on purpose — a handful of PATCHes is not worth the
+ * concurrency, and a serial order makes a partial failure readable.
+ *
+ * Ids are non-null by construction — a null here would PATCH
+ * `/sobjects/Task/null`, which Salesforce answers with a 404 the job would then
+ * burn all 8 retries on. A genuine 404 on a SIBLING is different: the task was
+ * deleted between the stamp and this PATCH, there is nothing left to complete,
+ * and failing the job over it would strand a rollover that otherwise finished.
+ * Log and skip. The primary keeps the strict rule (a 404 there means the job's
+ * own subject vanished, which is worth a retry and a visible failure), and any
+ * other >= 400 on any id is still an error — including the 401 the auth branch
+ * in `processRolloverJob` depends on seeing.
+ *
+ * The job is marked succeeded only after the LAST PATCH, so a crash part-way
+ * through leaves it retryable with the full clear set still stamped.
+ */
+async function completeTasks(deps: WorkerDeps, job: FollowupRolloverJob, ids: ReadonlyArray<string>): Promise<void> {
+  // The copy already exists by the time we get here (fresh path stamps
+  // `createdTaskId` first; the retry path only runs with it set), so a task
+  // that vanished since the stamp — primary OR sibling — is skipped, never a
+  // failure: failing on the primary would strand every sibling in the set.
+  for (const id of ids) {
+    const done = await withTimeout(
+      deps.sf.sfFetch(job.userId, `/sobjects/Task/${id}`, { method: 'PATCH', body: { Status: 'Completed' } }),
+      SF_CALL_TIMEOUT_MS,
+      'complete task',
+    );
+    if (done.status === 404) {
+      console.warn('[followup-worker] task already gone; skipping complete', { jobId: job.id, taskId: id });
+      continue;
+    }
+    if (done.status >= 400) throw new Error(`complete failed (${done.status}): ${JSON.stringify(done.json)}`);
+  }
+  await patchJob(deps, job.id, { status: 'succeeded', completedTaskId: ids[0], completedAt: deps.now(), lastError: null });
 }
 
 function logFailed(job: FollowupRolloverJob, reason: string): void {
@@ -151,24 +234,69 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
   let createdThisAttempt = false;
   try {
     // RETRY PATH: the copy already exists, so all that's left is completing the
-    // source. Never re-resolve it — with a null-ActivityDate original the copy
+    // clear set. Never re-resolve it — with a null-ActivityDate original the copy
     // (dated) now sorts FIRST, so a fresh lookup would complete the COPY and
-    // leave the original open. completed_task_id is stamped at create time and
-    // means "the source task we are completing".
+    // leave the original open. The ids are stamped at create time and mean "the
+    // tasks this copy replaced". `completed_task_ids` is the full set;
+    // `completed_task_id` alone is what a row written by the PREVIOUS deploy has,
+    // so it is the fallback — never a second source of truth.
     if (job.createdTaskId) {
-      // Impossible via this module (both ids are stamped around the same create),
+      // Impossible via this module (the ids are stamped around the same create),
       // but a hand-edited or half-migrated row would otherwise PATCH Task/null.
       // Thrown, not logged, so the catch below treats it as transient.
-      if (!job.completedTaskId) throw new Error('job has createdTaskId but no completedTaskId');
-      await completeSource(deps, job, job.completedTaskId);
+      const retryIds = job.completedTaskIds ?? (job.completedTaskId ? [job.completedTaskId] : []);
+      if (retryIds.length === 0) throw new Error('job has createdTaskId but no completedTaskId');
+      await completeTasks(deps, job, retryIds);
       return;
     }
 
-    const task = await findOpenFollowUp(deps, job);
+    // The record's open tasks. The record path needs them to pick the template;
+    // the by-id path re-uses them for the siblings only (its template is the
+    // exact task the rep dialed, whatever a search would have preferred).
+    let onRecord = job.sourceTaskId ? null : await listOpenFollowUps(deps, job);
+    let task = job.sourceTaskId ? await findSourceTask(deps, job, job.sourceTaskId) : null;
+    if (!task) {
+      // By-id miss (closed, completed by hand, or reassigned since the dial) or
+      // the record path: fall through to the record's open follow-ups. One
+      // rollover per person per day still owes this record its same-day
+      // clearing and its single copy — closing out as no-task would strand them.
+      onRecord ??= await listOpenFollowUps(deps, job);
+      task = pickFollowUpTask(onRecord);
+    }
     if (!task) {
       await patchJob(deps, job.id, { status: 'succeeded', lastError: 'no-task', completedAt: deps.now() });
       return;
     }
+
+    // OWNERSHIP GATE. Rolling a follow-up writes a Task on someone's record; if
+    // the rep neither owns nor manages it, we create nothing and close the job
+    // out as 'not-owner'. The SOURCE task is deliberately left OPEN — completing
+    // it would erase another rep's follow-up. A lookup failure throws into the
+    // catch below (transient → retry), i.e. the gate fails closed.
+    //
+    // Gate every id the COPY will attach to, not the id the job was enqueued on:
+    // `followUpCopyFields` carries BOTH WhoId and WhatId off the source task, so
+    // a task on the rep's own lead but attached to another rep's Opportunity
+    // would otherwise write activity on that Opportunity. `mayCreateTaskOn`
+    // skips ids the rule does not name (custom objects) without a round-trip;
+    // when the task attaches to none it names, fall back to the job's record so
+    // a Lead/Opp run keeps the gate it has always had.
+    const attachIds = gatedIds([task.WhoId, task.WhatId]).length > 0 ? [task.WhoId, task.WhatId] : [job.recordId];
+    const mayRoll = await mayCreateTaskOn(attachIds, job.sfOwnerId, (id) =>
+      withTimeout(deps.ownership(job.userId, id), SF_CALL_TIMEOUT_MS, 'ownership'));
+    if (!mayRoll) {
+      await patchJob(deps, job.id, { status: 'succeeded', lastError: 'not-owner', completedAt: deps.now() });
+      return;
+    }
+
+    // THE CLEAR SET: the template plus every other same-day follow-up on this
+    // person. One rollover per person per day means one copy replaces all of
+    // them, so all of them get completed. The by-id path pays one extra SOQL for
+    // the sibling list — the price of not leaving a swallowed enqueue (the job
+    // key is per person, not per task) open past its due date.
+    const clearSet = [task.Id, ...sameDaySiblings(
+      onRecord ?? await listOpenFollowUps(deps, job), task.Id, job.fromDate,
+    ).map((t) => t.Id)];
 
     // Same reason as every other outbound call here: a hung socket in the
     // calendar fetch would pin the single-flight tick and the queue behind it.
@@ -180,7 +308,7 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     const nextDay = nextBusinessDay(job.fromDate, cal.workingWeekdays, cal.holidays);
     const targetDate = await pickRolloverDay({
       fromDate: job.fromDate, cap, workingWeekdays: cal.workingWeekdays, holidays: cal.holidays,
-      countOn: (d) => withTimeout(deps.sf.soqlCount(job.userId, followUpCountSoql(job.sfOwnerId, d)), SF_CALL_TIMEOUT_MS, 'follow-up count'),
+      countOn: async (d) => countFollowUps(await withTimeout(deps.sf.soqlQuery<{ Subject?: string | null }>(job.userId, followUpTasksSoql(job.sfOwnerId, d)), SF_CALL_TIMEOUT_MS, 'follow-up count')),
     });
     if (!targetDate) {
       logFailed(job, 'no business day with room within 30 days');
@@ -194,8 +322,10 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     // `next_day` to say "moved" vs "pushed". Writing them after the POST meant a
     // create timeout left the row blank and the rep's summary silently short.
     // `created_task_id` stays unstamped until we have the real id — it is the flag
-    // that says "the copy exists, only complete on retry".
-    await patchJob(deps, job.id, { targetDate, nextDay, completedTaskId: task.Id });
+    // that says "the copy exists, only complete on retry". The clear set rides
+    // along here for the same reason: after the POST the retry must know EVERY
+    // task the copy replaced, not just the template.
+    await patchJob(deps, job.id, { targetDate, nextDay, completedTaskId: task.Id, completedTaskIds: clearSet });
 
     const created = await withTimeout(
       deps.sf.sfFetch(job.userId, '/sobjects/Task', { method: 'POST', body: followUpCopyFields(task, targetDate) }),
@@ -210,7 +340,7 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     await patchJob(deps, job.id, { createdTaskId: createdId });
     createdThisAttempt = true;
 
-    await completeSource(deps, job, task.Id);
+    await completeTasks(deps, job, clearSet);
   } catch (err) {
     // Auth BEFORE the create is terminal: nothing exists yet and no amount of
     // retrying fixes a disconnected Salesforce, so tell the rep to reconnect.
@@ -365,7 +495,7 @@ function liveDeps(): WorkerDeps {
   const db = getDb();
   return {
     db,
-    sf: { soqlQuery, soqlCount, sfFetch },
+    sf: { soqlQuery, sfFetch },
     calendarFor: fetchBusinessCalendar,
     capFor: async (orgId) => {
       const cfg = await db.query.campaignConfigs.findFirst({
@@ -373,6 +503,7 @@ function liveDeps(): WorkerDeps {
       });
       return cfg?.followupDailyCap ?? FOLLOWUP_DAILY_CAP_DEFAULT;
     },
+    ownership: fetchOwnership,
     now: () => new Date(),
     advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()),
     stop: (sessionId) => stopSession(sessionId, buildEngineDeps()),

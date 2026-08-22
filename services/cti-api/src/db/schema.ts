@@ -223,7 +223,7 @@ export const dialerSessions = pgTable(
     userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
     /** The rep's Salesforce User Id — needed to own Tasks in the rollover. */
     sfOwnerId: text('sf_owner_id').notNull(),
-    objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity'
+    objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity' | 'Task'
     status: dialerSessionStatus('status').default('active').notNull(),
     /** Last softphone poll of this session — the retry nudge's proof a rep is present. */
     lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
@@ -250,7 +250,10 @@ export const dialerQueueItems = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     sessionId: uuid('session_id').notNull().references(() => dialerSessions.id, { onDelete: 'cascade' }),
     ordinal: integer('ordinal').notNull(),
-    objectType: text('object_type').notNull(),
+    // The row's OWN object — a Task run resolves each Task to the person it
+    // dials, so one Task session mixes these (and keeps an unresolvable Task
+    // as a 'Task' row).
+    objectType: text('object_type').notNull(), // 'Lead' | 'Contact' | 'Opportunity' | 'Task'
     recordId: text('record_id').notNull(),
     toNumber: text('to_number'), // resolved E.164 currently being dialed (Mobile first), or null when unreachable
     fallbackNumber: text('fallback_number'), // record's Phone, dialed on a TRUE no-answer of the Mobile (else null)
@@ -265,10 +268,47 @@ export const dialerQueueItems = pgTable(
     secondaryNumber: text('secondary_number'),
     /** 5-minute floor on attempt-2 rows: not dialable before this instant. */
     retryNotBefore: timestamp('retry_not_before', { withTimezone: true }),
+    /** The Task this item came from (Task runs); null on Lead/Opp runs. */
+    taskId: text('task_id'),
+    /** Decided at creation from the follow-up subject rule; only eligible items roll over. */
+    followupEligible: boolean('followup_eligible').default(true).notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
     callIdIdx: index('dialer_queue_items_call_id_idx').on(t.callId),
+  }),
+);
+
+/**
+ * One append-only row per successful power-dial originate — the dialer half of
+ * the shared per-customer attempt count (firewall/index.ts
+ * customerAttemptCounts).
+ *
+ * Why not count `dialer_queue_items` directly: a TRUE no-answer on the Mobile
+ * rewrites `to_number` / `from_number` on the SAME row to dial the Phone
+ * (engine.ts handleDialOutcome), which erases the mobile dial from the tally —
+ * the recipient was contacted twice and the compliance ceiling saw one. Nothing
+ * here is ever updated, so no later dial can rewrite an earlier attempt away.
+ *
+ * Deliberately FK-free: sessions and queue items cascade-delete, and a
+ * contact-frequency tally has to outlive the run that produced it.
+ */
+export const dialerDialAttempts = pgTable(
+  'dialer_dial_attempts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    sessionId: uuid('session_id').notNull(),
+    itemId: uuid('item_id').notNull(),
+    /** The number actually dialed (Mobile on attempt 1, Phone on the fallback). */
+    toNumber: text('to_number').notNull(),
+    /** The DID it was placed from. */
+    fromNumber: text('from_number').notNull(),
+    dialedAt: timestamp('dialed_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    targetIdx: index('dialer_dial_attempts_target_idx').on(t.orgId, t.toNumber, t.dialedAt),
   }),
 );
 
@@ -288,7 +328,7 @@ export const dialerHandoffs = pgTable(
      *  even when that lookup misses (e.g. a rep who hasn't connected yet). */
     orgId: uuid('org_id'),
     salesforceUserId: text('salesforce_user_id').notNull(),
-    objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity'
+    objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity' | 'Task'
     recordIds: jsonb('record_ids').notNull().$type<string[]>(),
     status: text('status').default('pending').notNull(), // 'pending' | 'claimed'
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
@@ -615,7 +655,7 @@ export const salesforceSyncJobs = pgTable(
  * Follow-up rollover jobs — the dialer enqueues one on a record's SECOND miss of
  * the day; salesforce/followup-worker.ts drains them single-flight (create the
  * next-day copy under the daily cap, then complete the original). Mirrors
- * salesforce_sync_jobs. UNIQUE(user, record, from_date) = duplicate-webhook safe.
+ * salesforce_sync_jobs. UNIQUE(user, task-or-record, from_date) = duplicate-webhook safe.
  */
 export const followupRolloverJobs = pgTable(
   'followup_rollover_jobs',
@@ -641,10 +681,23 @@ export const followupRolloverJobs = pgTable(
     targetDate: text('target_date'),
     /** The plain next business day after fromDate — lets the run summary tell "moved" from "pushed" without a Salesforce call. */
     nextDay: text('next_day'),
+    /** The Task the copy is templated from (Task runs); null = search the record
+     *  (Lead/Opp runs). NOT part of the job key — see `jobUnique`. */
+    sourceTaskId: text('source_task_id'),
+    /** Every task this job completed: the template plus its same-day siblings on
+     *  the same person. `completedTaskId` stays the PRIMARY (template) id, which
+     *  is all a row written by the previous deploy has. */
+    completedTaskIds: text('completed_task_ids').array(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
+    // ONE rollover per person per day. A Task run can hold two follow-ups for
+    // the SAME person; both miss and both enqueue, and this key collapses them
+    // into one job (the enqueue is ON CONFLICT DO NOTHING, so the FIRST miss's
+    // source_task_id wins and names the template). The worker then clears every
+    // same-day follow-up on that person and creates exactly one copy — the rep
+    // gets one item tomorrow, not a pile. Also the duplicate-webhook backstop.
     jobUnique: uniqueIndex('followup_rollover_unique').on(t.userId, t.recordId, t.fromDate),
     statusIdx: index('followup_rollover_status_idx').on(t.status, t.nextAttemptAt),
     sessionIdx: index('followup_rollover_session_idx').on(t.sessionId),

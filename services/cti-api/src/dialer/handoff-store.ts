@@ -24,13 +24,13 @@ export function isValidSfId(s: string): boolean {
 
 export interface HandoffInput {
   salesforceUserId: string;
-  objectType: 'Lead' | 'Opportunity';
+  objectType: 'Lead' | 'Opportunity' | 'Task';
   recordIds: string[];
 }
 
 const HandoffInputSchema = z.object({
   salesforceUserId: z.string().refine(isValidSfId, 'invalid salesforceUserId'),
-  objectType: z.enum(['Lead', 'Opportunity']),
+  objectType: z.enum(['Lead', 'Opportunity', 'Task']),
   recordIds: z
     .array(z.string().refine(isValidSfId, 'invalid record id'))
     .min(1, 'recordIds must not be empty')
@@ -64,7 +64,7 @@ export function constantTimeEqual(a: string, b: string): boolean {
 export interface UpsertHandoffArgs {
   orgId: string | null;
   salesforceUserId: string;
-  objectType: 'Lead' | 'Opportunity';
+  objectType: 'Lead' | 'Opportunity' | 'Task';
   recordIds: string[];
 }
 
@@ -109,7 +109,7 @@ export async function upsertPendingHandoff(db: Db, args: UpsertHandoffArgs): Pro
 }
 
 export interface ClaimedHandoff {
-  objectType: 'Lead' | 'Opportunity';
+  objectType: 'Lead' | 'Opportunity' | 'Task';
   recordIds: string[];
 }
 
@@ -135,7 +135,7 @@ export async function claimPendingHandoff(db: Db, salesforceUserId: string): Pro
   const row = rows[0];
   if (!row) return null;
   return {
-    objectType: row.object_type as 'Lead' | 'Opportunity',
+    objectType: row.object_type as 'Lead' | 'Opportunity' | 'Task',
     recordIds: row.record_ids as string[],
   };
 }

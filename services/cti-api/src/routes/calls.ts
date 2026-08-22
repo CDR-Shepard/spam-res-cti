@@ -16,6 +16,9 @@ import { normalize } from '../phone.js';
 import { warmupCapForAge } from '../firewall/warmup.js';
 import { enqueueSyncForCall, AUTO_DISPOSITION } from '../salesforce/sync.js';
 import { updateCallTask } from '../salesforce/client.js';
+import { salesforceUserId } from '../salesforce/current-user.js';
+import { fetchOwnership, gatedIds, mayCreateTaskOn, type OwnershipSnapshot } from '../salesforce/ownership.js';
+import { isValidSfId } from '../dialer/handoff-store.js';
 import { loadConfig } from '../config.js';
 
 /**
@@ -66,6 +69,72 @@ function pendingDispositionPayload(c: typeof schema.calls.$inferSelect) {
   };
 }
 
+/** The reason codes `GET /calls` may report. A closed set, never free text. */
+export type SyncErrorReason = 'not-owner' | 'failed';
+
+/**
+ * Why a call has no Salesforce Task, for `GET /calls` — or `null` while that is
+ * still undecided.
+ *
+ * A REASON TOKEN, never `last_error` itself. That column holds raw SOQL/HTTP
+ * dumps (org field names, record ids, API internals); the browser gets a code it
+ * can render, and an operator reads the detail in the job row.
+ *
+ * The call row answers first: if it carries a Task id, the Task is there and
+ * there is nothing to explain. Its job's `last_error` is then the record of an
+ * attempt that later succeeded — jobs that succeeded before the success write
+ * started clearing that column keep the text forever and never re-sync, so
+ * reading it would tell a rep their logged call went missing.
+ *
+ * Otherwise only a job that has stopped moving can answer. `last_error` is also
+ * written on every failed attempt of a job that is still 'pending' (or is
+ * 'in_flight' right now) and will most likely succeed on its next retry;
+ * surfacing that would flag a call that is about to sync fine. So a non-terminal
+ * job reports no reason at all.
+ */
+export function syncErrorForCall(
+  call: { salesforceTaskId: string | null },
+  job: { status: typeof schema.salesforceSyncJobs.$inferSelect['status']; lastError: string | null } | undefined,
+): SyncErrorReason | null {
+  if (call.salesforceTaskId) return null;
+  if (!job) return null;
+  // A succeeded job only ever has a reason if the sync deliberately skipped;
+  // anything else in last_error is a stale attempt error, not an explanation.
+  if (job.status === 'succeeded') return job.lastError === 'not-owner' ? 'not-owner' : null;
+  return job.status === 'failed' ? 'failed' : null;
+}
+
+/**
+ * May the SOFTPHONE write this call's Salesforce Task itself?
+ *
+ * Answers the `taskAllowed` flag on POST /calls. `true` = the client writes the
+ * Task through Open CTI and posts `skipSalesforceSync: true`; `false` = the
+ * client leaves it alone and the backend sync worker writes it (re-applying the
+ * very same gate, with retries and a recorded reason).
+ *
+ * That asymmetry is why this fails CLOSED. A client write is the one path no
+ * server gate can see, so "we could not determine ownership" must not authorize
+ * it — handing the decision to the backend costs a few seconds of latency and
+ * loses nothing. It never affects whether the call is placed.
+ *
+ *  - no gated id (custom object, or no record at all) → `true` with no round-trip
+ *  - either dependency throws → `false`
+ */
+export async function clientTaskAllowed(
+  recipientRecordId: string | undefined,
+  resolveMe: () => Promise<string>,
+  lookup: (recordId: string) => Promise<OwnershipSnapshot>,
+  onError?: (err: unknown) => void,
+): Promise<boolean> {
+  if (gatedIds([recipientRecordId]).length === 0) return true;
+  try {
+    return await mayCreateTaskOn([recipientRecordId], await resolveMe(), lookup);
+  } catch (err) {
+    onError?.(err);
+    return false;
+  }
+}
+
 export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
 
@@ -85,7 +154,7 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
      * has to reopen this call's disposition later, the Task still attaches to the
      * exact Lead/Contact/Opportunity/Deal__c instead of a SOSL phone-guess.
      */
-    recipientRecordId: z.string().min(15).max(20).optional(),
+    recipientRecordId: z.string().refine(isValidSfId, 'invalid recipientRecordId').optional(),
     recipientObjectType: z.string().max(64).optional(),
   });
 
@@ -247,7 +316,24 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
       req.log.warn({ err }, 'sticky number upsert failed');
     }
 
-    return { call: row };
+    // May the SOFTPHONE write this call's Salesforce Task itself (Open CTI)?
+    // `false` does not mean "no Task" — it means "do not write it client-side;
+    // the backend decides". The client then posts its disposition WITHOUT
+    // `skipSalesforceSync`, so the sync worker creates the Task under the same
+    // gate, with retries. That is why unknown ownership answers `false` and not
+    // `true`: a client write bypasses the server gate entirely (it arrives as
+    // `skipSalesforceSync: true`), so a failed lookup that defaulted to `true`
+    // meant NO gate ever ran on that Task.
+    // The call itself is already placed and is never affected by this answer.
+    const recipientRecordId = parsed.data.recipientRecordId;
+    const taskAllowed = await clientTaskAllowed(
+      recipientRecordId,
+      () => salesforceUserId(session.userId),
+      (id) => fetchOwnership(session.userId, id),
+      (err) => req.log.warn({ err, recipientRecordId }, 'ownership lookup failed; backend will decide the Task'),
+    );
+
+    return { call: row, taskAllowed };
   });
 
   app.get('/calls', async (req, reply) => {
@@ -262,7 +348,22 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
       .where(eq(schema.calls.userId, session.userId))
       .orderBy(desc(schema.calls.createdAt))
       .limit(limit);
-    return { calls: rows };
+    // Why a call has no Salesforce Task, when the sync worker decided that
+    // deliberately (e.g. 'not-owner') rather than failing — the call list shows
+    // it so a rep is never left guessing where their activity went. See
+    // syncErrorForCall for why the Task id and the job's status gate the answer.
+    const syncJobs = rows.length
+      ? await db
+          .select({
+            callId: schema.salesforceSyncJobs.callId,
+            status: schema.salesforceSyncJobs.status,
+            lastError: schema.salesforceSyncJobs.lastError,
+          })
+          .from(schema.salesforceSyncJobs)
+          .where(inArray(schema.salesforceSyncJobs.callId, rows.map((r) => r.id)))
+      : [];
+    const syncJobByCall = new Map(syncJobs.map((j) => [j.callId, j]));
+    return { calls: rows.map((r) => ({ ...r, syncError: syncErrorForCall(r, syncJobByCall.get(r.id)) })) };
   });
 
   /**
@@ -359,7 +460,7 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
      * we hand the backend the exact record so it attaches the Task precisely
      * (Lead/Contact → WhoId, everything else → WhatId) instead of SOSL-guessing.
      */
-    recipientRecordId: z.string().min(15).max(20).optional(),
+    recipientRecordId: z.string().refine(isValidSfId, 'invalid recipientRecordId').optional(),
     recipientObjectType: z.string().max(64).optional(),
   });
 
@@ -426,7 +527,7 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
   });
 
   const EnsureLogged = z.object({
-    recipientRecordId: z.string().min(15).max(20).optional(),
+    recipientRecordId: z.string().refine(isValidSfId, 'invalid recipientRecordId').optional(),
     recipientObjectType: z.string().max(64).optional(),
   });
 

@@ -12,6 +12,7 @@ import {
   type WorkerDeps,
 } from './followup-worker.js';
 import { SalesforceUnauthorizedError } from './client.js';
+import type { OwnershipSnapshot } from './ownership.js';
 import type { FollowupRolloverJob } from '../db/schema.js';
 
 const NOW = new Date('2026-08-22T17:00:00Z');
@@ -35,7 +36,7 @@ function job(o: Partial<FollowupRolloverJob> = {}): FollowupRolloverJob {
   return {
     id: 'J1', orgId: 'O1', userId: 'U1', sfOwnerId: '005', sessionId: 'S1', recordId: '00Q1', objectType: 'Lead',
     fromDate: '2026-08-20', status: 'in_flight', attempts: 1, lastError: null, nextAttemptAt: new Date(),
-    completedAt: null, completedTaskId: null, createdTaskId: null, targetDate: null, createdAt: new Date(), updatedAt: new Date(),
+    completedAt: null, completedTaskId: null, completedTaskIds: null, createdTaskId: null, targetDate: null, sourceTaskId: null, createdAt: new Date(), updatedAt: new Date(),
     ...o,
   } as FollowupRolloverJob;
 }
@@ -43,13 +44,21 @@ function deps(over: Partial<WorkerDeps> = {}): WorkerDeps {
   return {
     db: fakeDb(),
     sf: {
-      soqlQuery: vi.fn(async () => [openTask]) as unknown as WorkerDeps['sf']['soqlQuery'],
-      soqlCount: vi.fn(async () => 10),
+      // One fake answers both queries, dispatching on the query text: the
+      // daily-cap fetch (`followUpTasksSoql`) is the only one selecting
+      // `FROM Task WHERE OwnerId`; everything else is a task lookup. The cap
+      // list has ONE follow-up ('Refund' must not count), i.e. room to spare.
+      soqlQuery: vi.fn(async (_u: string, q: string) =>
+        (/FROM Task WHERE OwnerId/.test(q) ? [{ Subject: 'FU' }, { Subject: 'Refund' }] : [openTask])) as unknown as WorkerDeps['sf']['soqlQuery'],
       sfFetch: vi.fn(async (_u: string, path: string, init?: any) =>
         init?.method === 'POST' ? { status: 201, json: { id: '00TNEW' } } : { status: 204, json: null }),
     },
     calendarFor: vi.fn(async () => ({ workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays: new Set<string>() })),
     capFor: vi.fn(async () => 100),
+    // The fixture record is owned by the fixture job's sfOwnerId ('005'), i.e.
+    // the ownership gate passes by default and only the test that overrides this
+    // exercises the not-owner path.
+    ownership: vi.fn(async (): Promise<OwnershipSnapshot> => ({ type: 'Lead', ownerId: '005' })),
     now: () => NOW,
     advance: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
@@ -138,7 +147,9 @@ describe('processRolloverJob', () => {
   });
 
   it('pushes to a later day when the next business day is at the cap', async () => {
-    const d = deps({ sf: { ...deps().sf, soqlCount: vi.fn(async (_u: string, q: string) => (q.includes('2026-08-21') ? 100 : 3)) } });
+    const full = Array.from({ length: 100 }, () => ({ Subject: 'Follow-up' }));
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
+      (/FROM Task WHERE OwnerId/.test(q) ? (q.includes('2026-08-21') ? full : [{ Subject: 'Follow-up' }]) : [openTask])) as unknown as WorkerDeps['sf']['soqlQuery'] } });
     await processRolloverJob(job(), d);
     expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-24');
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ targetDate: '2026-08-24', nextDay: '2026-08-21' }) });
@@ -156,6 +167,199 @@ describe('processRolloverJob', () => {
     await processRolloverJob(job(), d);
     expect(d.sf.sfFetch).not.toHaveBeenCalled();
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'no-task' }) });
+  });
+
+  it('does not create the copy on a record the rep neither owns nor manages (not-owner), leaves the source open', async () => {
+    const d = deps({ ownership: vi.fn(async (): Promise<OwnershipSnapshot> => ({ type: 'Opportunity', ownerId: '005X', leadManagerId: '005Y' })) });
+    await processRolloverJob(job(), d);
+    expect(d.sf.sfFetch).not.toHaveBeenCalled();
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'not-owner' }) });
+  });
+
+  it('gates the WhatId too, not just the record the job was enqueued on', async () => {
+    // The copy (followUpCopyFields) carries BOTH WhoId and WhatId off the source
+    // task, so a task on the rep's OWN lead but attached to another rep's
+    // Opportunity would have written activity on that Opportunity. Gating only
+    // job.recordId (the Who, here) let it through.
+    const task = { ...openTask, WhoId: '00Q1', WhatId: '0061' };
+    const ownership = vi.fn(async (_u: string, id: string): Promise<OwnershipSnapshot> =>
+      (id === '0061'
+        ? { type: 'Opportunity', ownerId: '005OTHER', leadManagerId: null }
+        : { type: 'Lead', ownerId: '005' }));
+    const d = deps({
+      ownership,
+      sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
+        (/FROM Task WHERE OwnerId/.test(q) ? [] : [task])) as unknown as WorkerDeps['sf']['soqlQuery'] },
+    });
+    await processRolloverJob(job(), d);
+    expect((d.sf.sfFetch as any).mock.calls.filter((c: any[]) => c[2]?.method === 'POST')).toEqual([]);
+    expect(d.sf.sfFetch).not.toHaveBeenCalled();
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'not-owner' }) });
+    expect(ownership.mock.calls.map((c) => c[1])).toContain('0061');
+  });
+
+  it('templates the copy on the SOURCE task by id (never on whatever search would find), and no-ops if it is closed/reassigned', async () => {
+    // The record also holds an OVERDUE follow-up that a search would have picked
+    // first (earliest ActivityDate wins). The by-id task is the template anyway —
+    // that is the point of carrying the id — and the overdue one is not a
+    // same-day sibling, so it is left alone entirely.
+    const overdue = { ...openTask, Id: '00TOLD', Subject: 'Follow-up (old)', ActivityDate: '2026-08-11' };
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
+      if (/Id = '00T9'/.test(q)) return [{ ...openTask, Id: '00T9' }];
+      if (/FROM Task WHERE OwnerId/.test(q)) return [];
+      return [overdue, { ...openTask, Id: '00T9' }];
+    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    await processRolloverJob(job({ sourceTaskId: '00T9' }), d);
+    expect((d.sf.sfFetch as any).mock.calls.map((c: any[]) => c[1])).toEqual(['/sobjects/Task', '/sobjects/Task/00T9']);
+    expect((d.sf.sfFetch as any).mock.calls[0][2].body).toMatchObject({ Subject: 'Follow-up' }); // 00T9's, not 00TOLD's
+    // Closed, completed by hand, or reassigned since the miss: the by-id lookup
+    // finds nothing — but one rollover per person per day still owes the record
+    // its same-day clearing and its single copy, so the worker falls back to the
+    // record's open follow-ups instead of closing out as no-task.
+    const sameDay = { ...openTask, Id: '00T5', Subject: 'FU', ActivityDate: job().fromDate };
+    const d2 = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
+      if (/Id = '00T9'/.test(q)) return [];
+      if (/FROM Task WHERE OwnerId/.test(q)) return [];
+      return [sameDay];
+    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    await processRolloverJob(job({ sourceTaskId: '00T9' }), d2);
+    expect((d2.sf.sfFetch as any).mock.calls.map((c: any[]) => c[1])).toEqual(['/sobjects/Task', '/sobjects/Task/00T5']);
+    // Nothing open on the record either → no-task.
+    const d3 = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async () => []) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    await processRolloverJob(job({ sourceTaskId: '00T9' }), d3);
+    expect(d3.sf.sfFetch).not.toHaveBeenCalled();
+    expect(writesOf(d3)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'no-task' }) });
+  });
+
+  // -------------------------------------------------------------------------
+  // ONE ROLLOVER PER PERSON PER DAY. Two follow-ups on the same person collapse
+  // to one job (the unique key is user+record+day), so the worker has to CLEAR
+  // every same-day follow-up on that person while creating exactly ONE copy —
+  // otherwise the swallowed sibling sits open past its due date forever.
+  // -------------------------------------------------------------------------
+
+  /** The record's open tasks: the by-id source, a same-day sibling follow-up, a
+   *  FUTURE-dated follow-up, and a same-day task that is not a follow-up. */
+  const clearSetTasks = [
+    { ...openTask, Id: '00T9', Subject: 'Follow-up', ActivityDate: '2026-08-20' },
+    { ...openTask, Id: '00TSIB', Subject: 'Follow up re pricing', ActivityDate: '2026-08-20' },
+    { ...openTask, Id: '00TFUT', Subject: 'Follow-up', ActivityDate: '2026-08-26' },
+    { ...openTask, Id: '00TCHK', Subject: 'Check in', ActivityDate: '2026-08-20' },
+  ];
+  const clearSetSoql = (order?: string[]) => vi.fn(async (_u: string, q: string) => {
+    order?.push('soql');
+    if (/Id = '00T9'/.test(q)) return [clearSetTasks[0]];
+    if (/FROM Task WHERE OwnerId/.test(q)) return [];
+    return clearSetTasks;
+  }) as unknown as WorkerDeps['sf']['soqlQuery'];
+
+  it('completes the source AND its same-day sibling, creates exactly ONE copy, and leaves future / non-follow-up tasks alone', async () => {
+    const order: string[] = [];
+    const base = deps();
+    const d = deps({
+      db: orderedFakeDb(order),
+      sf: {
+        soqlQuery: clearSetSoql(),
+        sfFetch: vi.fn(async (_u: string, path: string, init?: any) => {
+          order.push(init?.method === 'POST' ? 'POST' : `PATCH ${path}`);
+          return init?.method === 'POST' ? { status: 201, json: { id: '00TNEW' } } : { status: 204, json: null };
+        }) as any,
+      },
+      calendarFor: base.calendarFor,
+    });
+    await processRolloverJob(job({ sourceTaskId: '00T9' }), d);
+    const calls = (d.sf.sfFetch as any).mock.calls.map((c: any[]) => [c[1], c[2]?.method]);
+    expect(calls.filter((c: any[]) => c[1] === 'POST')).toEqual([['/sobjects/Task', 'POST']]); // exactly one copy
+    expect(calls.filter((c: any[]) => c[1] === 'PATCH').map((c: any[]) => c[0]))
+      .toEqual(['/sobjects/Task/00T9', '/sobjects/Task/00TSIB']); // the future one and 'Check in' are untouched
+    // The whole clear set is stamped BEFORE the create, so a crash after the POST
+    // still completes every task the copy replaced (the retry path reads it).
+    const stamp = order.indexOf('write:completedTaskId,completedTaskIds,nextDay,targetDate,updatedAt');
+    expect(stamp).toBeGreaterThanOrEqual(0);
+    expect(stamp).toBeLessThan(order.indexOf('POST'));
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({
+      completedTaskId: '00T9', completedTaskIds: ['00T9', '00TSIB'],
+    }) });
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
+  });
+
+  it('record path: the earliest same-day follow-up is the template and its same-day sibling is completed too', async () => {
+    const tasks = [
+      { ...openTask, Id: '00TP', Subject: 'Follow-up call', ActivityDate: '2026-08-20' },
+      { ...openTask, Id: '00TSIB', Subject: 'F/U on quote', ActivityDate: '2026-08-20' },
+      { ...openTask, Id: '00TCHK', Subject: 'Check in', ActivityDate: '2026-08-20' },
+    ];
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
+      (/FROM Task WHERE OwnerId/.test(q) ? [] : tasks)) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    await processRolloverJob(job(), d); // no sourceTaskId — the Lead/Opp path
+    const calls = (d.sf.sfFetch as any).mock.calls.map((c: any[]) => [c[1], c[2]?.method]);
+    expect(calls[0]).toEqual(['/sobjects/Task', 'POST']);
+    expect((d.sf.sfFetch as any).mock.calls[0][2].body).toMatchObject({ Subject: 'Follow-up call' }); // 00TP is the template
+    expect(calls.slice(1).map((c: any[]) => c[0])).toEqual(['/sobjects/Task/00TP', '/sobjects/Task/00TSIB']);
+    // ...and the record was searched exactly once — the same list picks the
+    // template and its siblings, never two round-trips for one answer.
+    expect((d.sf.soqlQuery as any).mock.calls.filter((c: any[]) => /WhoId =/.test(c[1]))).toHaveLength(1);
+  });
+
+  it('retry path completes EVERY id in completedTaskIds and creates nothing', async () => {
+    const d = deps();
+    await processRolloverJob(job({ createdTaskId: '00TNEW', completedTaskId: 'a', completedTaskIds: ['a', 'b'], attempts: 2 }), d);
+    expect((d.sf.sfFetch as any).mock.calls.map((c: any[]) => [c[1], c[2]?.method]))
+      .toEqual([['/sobjects/Task/a', 'PATCH'], ['/sobjects/Task/b', 'PATCH']]);
+    expect(d.sf.soqlQuery).not.toHaveBeenCalled();
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
+  });
+
+  it('retry path on a row from the PREVIOUS deploy (no completedTaskIds) falls back to completedTaskId', async () => {
+    const d = deps();
+    await processRolloverJob(job({ createdTaskId: '00TNEW', completedTaskId: '00T1', completedTaskIds: null, attempts: 2 }), d);
+    expect((d.sf.sfFetch as any).mock.calls.map((c: any[]) => [c[1], c[2]?.method]))
+      .toEqual([['/sobjects/Task/00T1', 'PATCH']]);
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
+  });
+
+  it('a sibling that was deleted between the stamp and the PATCH (404) is logged and skipped, not a failure', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const d = deps({
+      sf: {
+        soqlQuery: clearSetSoql(),
+        sfFetch: vi.fn(async (_u: string, path: string, init?: any) => {
+          if (init?.method === 'POST') return { status: 201, json: { id: '00TNEW' } };
+          return path.endsWith('00TSIB')
+            ? { status: 404, json: [{ errorCode: 'NOT_FOUND' }] }
+            : { status: 204, json: null };
+        }) as any,
+      },
+    });
+    await processRolloverJob(job({ sourceTaskId: '00T9' }), d);
+    expect(warn).toHaveBeenCalledWith('[followup-worker] task already gone; skipping complete', expect.objectContaining({ jobId: 'J1', taskId: '00TSIB' }));
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
+    expect(writesOf(d).some((w) => w.patch.status === 'failed' || w.patch.status === 'pending')).toBe(false);
+  });
+
+  /** 8/21 holds one follow-up and one decoy ('Refund' — a bare-substring 'FU'
+   *  the shared rule must NOT count); every other day is empty. `seen` collects
+   *  the cap queries. */
+  const capDayFake = (seen: string[] = []) => vi.fn(async (_u: string, q: string) => {
+    if (/FROM Task WHERE OwnerId/.test(q)) { seen.push(q); return /2026-08-21/.test(q) ? [{ Subject: 'F/U' }, { Subject: 'Refund' }] : []; }
+    return [openTask];
+  }) as unknown as WorkerDeps['sf']['soqlQuery'];
+
+  it('counts the day\'s follow-ups in code with the shared subject rule (FU counts, Refund does not)', async () => {
+    const seen: string[] = [];
+    const d = deps({ capFor: vi.fn(async () => 1), sf: { ...deps().sf, soqlQuery: capDayFake(seen) } });
+    await processRolloverJob(job(), d);
+    expect(seen[0]).toMatch(/^SELECT Id, Subject FROM Task WHERE /); // fetched and counted here, not SELECT COUNT() in SOQL
+    expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-24'); // 8/21 had 1 FU = at cap 1 → pushed
+  });
+
+  it('a non-follow-up on the day does not eat a slot in the cap', async () => {
+    // Same day and same two tasks at cap 2: by the shared rule that day holds
+    // ONE follow-up, so the copy still lands on 8/21. Counting rows (2) — what a
+    // subject-blind COUNT() would do — would push it to 8/24.
+    const d = deps({ capFor: vi.fn(async () => 2), sf: { ...deps().sf, soqlQuery: capDayFake() } });
+    await processRolloverJob(job(), d);
+    expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-21');
   });
 
   it('fails immediately (no retry) on a Salesforce auth error', async () => {
@@ -179,7 +383,9 @@ describe('processRolloverJob', () => {
   });
 
   it('fails loudly when no business day within the bound has room', async () => {
-    const d = deps({ sf: { ...deps().sf, soqlCount: vi.fn(async () => 999) } });
+    const full = Array.from({ length: 100 }, () => ({ Subject: 'Follow-up' })); // every day is at the cap
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
+      (/FROM Task WHERE OwnerId/.test(q) ? full : [openTask])) as unknown as WorkerDeps['sf']['soqlQuery'] } });
     await processRolloverJob(job(), d);
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'failed', lastError: expect.stringMatching(/no business day with room/) }) });
   });
@@ -219,7 +425,7 @@ describe('processRolloverJob', () => {
       },
     });
     await processRolloverJob(job(), d);
-    const preStamp = order.indexOf('write:completedTaskId,nextDay,targetDate,updatedAt');
+    const preStamp = order.indexOf('write:completedTaskId,completedTaskIds,nextDay,targetDate,updatedAt');
     const post = order.indexOf('POST');
     expect(preStamp).toBeGreaterThanOrEqual(0);
     expect(post).toBeGreaterThanOrEqual(0);
@@ -542,5 +748,16 @@ describe('expireAbandonedSessions — free the one-active-session slot (C1)', ()
     const d = deps({ db: expireDb([session({ id: 'S1' }), session({ id: 'S2' })], [[], []]), stop });
     expect(await expireAbandonedSessions(d)).toBe(1);
     expect(stop).toHaveBeenCalledWith('S2');
+  });
+});
+
+describe('completeTasks — a vanished PRIMARY never strands its siblings', () => {
+  it('retry path: 404 on the primary is skipped and the sibling is still completed; job succeeds', async () => {
+    const sfFetch = vi.fn(async (_u: string, path: string) =>
+      /00TA$/.test(path) ? { status: 404, json: [{ errorCode: 'NOT_FOUND' }] } : { status: 204, json: null });
+    const d = deps({ sf: { ...deps().sf, sfFetch: sfFetch as unknown as WorkerDeps['sf']['sfFetch'] } });
+    await processRolloverJob(job({ createdTaskId: '00TNEW', completedTaskId: '00TA', completedTaskIds: ['00TA', '00TB'] }), d);
+    expect(sfFetch.mock.calls.map((c) => c[1])).toEqual(['/sobjects/Task/00TA', '/sobjects/Task/00TB']);
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
   });
 });

@@ -192,4 +192,28 @@ describe('pickRotationNumber', () => {
     ];
     expect(await pickRotationNumber(fakeDb(rows, '+16195550101'), 'org', 'rep1', '+16195559999')).toBe('+16195550202');
   });
+
+  // `exclude` is the retry lever for the agent-DID pick: a number whose atomic
+  // claim lost a race is excluded so the second rotation call can't hand back
+  // the same loser.
+  it('never returns an excluded number', async () => {
+    const rows = [
+      row({ e164: '+16195550101', warmupOverrideCap: 80 }),  // most room → would win
+      row({ e164: '+16195550202', warmupOverrideCap: 20 }),
+    ];
+    const exclude = new Set(['+16195550101']);
+    expect(await pickRotationNumber(fakeDb(rows), 'org', 'rep1', '+16195559999', undefined, exclude)).toBe('+16195550202');
+  });
+
+  it('falls back past an excluded sticky DID', async () => {
+    const rows = [row({ e164: '+16195550101' }), row({ e164: '+16195550202' })];
+    const exclude = new Set(['+16195550101']);
+    expect(await pickRotationNumber(fakeDb(rows, '+16195550101'), 'org', 'rep1', '+16195559999', undefined, exclude)).toBe('+16195550202');
+  });
+
+  it('fails closed when every DID is excluded', async () => {
+    const rows = [row({ e164: '+16195550101' })];
+    const exclude = new Set(['+16195550101']);
+    expect(await pickRotationNumber(fakeDb(rows), 'org', 'rep1', '+16195559999', undefined, exclude)).toBeNull();
+  });
 });

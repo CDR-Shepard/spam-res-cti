@@ -5,23 +5,31 @@ import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS 
 import type { DialerTelephony } from './telephony-port.js';
 import { recordConnectSticky } from './sticky.js';
 import type { RolloverDb } from '../salesforce/followup-enqueue.js';
+import type { PickDidArgs, PickDidResult } from './pick-agent-did.js';
 
 export interface RolloverEnqueue {
   orgId: string; userId: string; sfOwnerId: string; sessionId: string;
   recordId: string; objectType: string; fromDate: string;
+  /** The exact Task the rep dialed (Task runs) — the worker rolls THAT task
+   *  instead of searching the record, which on a record with several open
+   *  follow-ups could roll one the rep never called. Null on Lead/Opp runs. */
+  sourceTaskId: string | null;
 }
 
 export interface EngineDeps {
   db: ReturnType<typeof getDb>;
   telephony: DialerTelephony;
-  /** Selects the outbound DID for a (org, rep, recipient) dial; null = nothing eligible (fail closed). */
-  pickDid: (orgId: string, userId: string, toE164: string) => Promise<{ e164: string } | null>;
+  /** Selects the outbound DID for a dial: `{ e164 }` to dial from, `{ skip }` to
+   *  skip this recipient (over-contacted) and keep going, null = nothing
+   *  eligible (fail closed → the run pauses). */
+  pickDid: (args: PickDidArgs) => Promise<PickDidResult>;
   /** Is `nowUtc` within the recipient-local calling window for `toE164`? Pure predicate injected for testability. */
   withinCallingHours: (toE164: string, nowUtc: Date) => boolean;
   /** The "now" the engine reasons about — injected so calling-hours checks are deterministic in tests. */
   nowUtc: Date;
   /** Queue the rep's follow-up rollover for this record (drained by the follow-up
-   *  worker). Idempotent on (user, record, fromDate). Called INSIDE the miss-path
+   *  worker). Idempotent on (user, sourceTaskId ?? record, fromDate) — so two
+   *  follow-up tasks on the SAME person each get their own job. Called INSIDE the miss-path
    *  transaction (handleDialOutcome) with that transaction's `tx` as the second
    *  arg, so the enqueue commits or rolls back atomically with the CAS that
    *  flips the row out of 'dialing' — no try/catch here on purpose. */
@@ -41,6 +49,33 @@ async function setSession(deps: EngineDeps, id: string, status: Session['status'
 }
 async function setItem(deps: EngineDeps, id: string, patch: Partial<DialerItem>): Promise<void> {
   await deps.db.update(schema.dialerQueueItems).set({ ...patch, updatedAt: new Date() }).where(eq(schema.dialerQueueItems.id, id));
+}
+
+/**
+ * Same write, but ONLY while the row is still 'pending' — returns the number of
+ * rows it changed. Every skip below fires after at least one await (`pickDid`
+ * alone runs three queries), so a concurrent advance can have flipped the row to
+ * 'dialing' in the meantime; an unconditional UPDATE would overwrite a LIVE dial
+ * with 'skipped'. 0 rows means that other advance owns the row now.
+ */
+async function setItemIfPending(deps: EngineDeps, id: string, patch: Partial<DialerItem>): Promise<number> {
+  const rows = await deps.db
+    .update(schema.dialerQueueItems)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(and(eq(schema.dialerQueueItems.id, id), eq(schema.dialerQueueItems.status, 'pending')))
+    .returning({ id: schema.dialerQueueItems.id });
+  return rows.length;
+}
+
+/**
+ * A guarded skip matched 0 rows: another advance claimed the row while we were
+ * deciding. Re-read the queue instead of trusting our stale copy, and return
+ * null to back off entirely if that advance is now dialing — carrying on would
+ * place a SECOND concurrent call for the same rep.
+ */
+async function reloadAfterLostSkip(deps: EngineDeps, sessionId: string): Promise<DialerItem[] | null> {
+  const fresh = await loadItems(deps, sessionId);
+  return inFlightItem(fresh) ? null : fresh;
 }
 
 /**
@@ -95,11 +130,29 @@ export async function advanceSession(
       continue;
     }
     if (!deps.withinCallingHours(next.toNumber, deps.nowUtc)) {
-      await setItem(deps, next.id, { status: 'skipped', outcome: 'out_of_hours' });
-      items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: 'out_of_hours' } : i));
+      if (await setItemIfPending(deps, next.id, { status: 'skipped', outcome: 'out_of_hours' })) {
+        items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: 'out_of_hours' } : i));
+        continue;
+      }
+      const fresh = await reloadAfterLostSkip(deps, sessionId);
+      if (!fresh) return { action: 'waiting' };
+      items = fresh;
       continue;
     }
-    const did = await deps.pickDid(session.orgId, session.userId, next.toNumber);
+    // Task runs dial the rep's own numbers; every other run kind dials the pool.
+    const runKind = session.objectType === 'Task' ? 'agent' : 'pool';
+    const did = await deps.pickDid({ orgId: session.orgId, userId: session.userId, toE164: next.toNumber, runKind });
+    if (did && 'skip' in did) {
+      // Over-contacted customer: skip THIS record, keep the run going.
+      if (await setItemIfPending(deps, next.id, { status: 'skipped', outcome: did.skip })) {
+        items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: did.skip } : i));
+        continue;
+      }
+      const fresh = await reloadAfterLostSkip(deps, sessionId);
+      if (!fresh) return { action: 'waiting' };
+      items = fresh;
+      continue;
+    }
     if (!did) { await setSession(deps, sessionId, 'paused'); return { action: 'paused_no_numbers' }; }
 
     // Two reps' concurrent advances (or a retry racing the original call) could
@@ -119,17 +172,39 @@ export async function advanceSession(
     });
     if (!claimed) return { action: 'waiting' };
 
+    // Captured before the closures below: TypeScript drops the `next.toNumber`
+    // narrowing inside a nested function, and it is non-null from the guard above.
+    const toE164 = next.toNumber;
     let callId: string;
     try {
       ({ callId } = await deps.telephony.originate({
-        sessionId, itemId: next.id, fromE164: did.e164, toE164: next.toNumber, userId: session.userId,
+        sessionId, itemId: next.id, fromE164: did.e164, toE164, userId: session.userId,
       }));
     } catch (err) {
       // Roll the item back so a transient originate failure doesn't strand it 'dialing'.
       await setItem(deps, next.id, { status: 'pending' });
       throw err;
     }
-    await setItem(deps, next.id, { callId, fromNumber: did.e164 });
+    // Stamp the dial AND record the attempt in ONE transaction. The attempt row
+    // is what the shared per-customer ceiling counts (firewall/index.ts
+    // customerAttemptCounts) and it is append-only, so a later fallback dial of
+    // this same item cannot rewrite it away the way it rewrites the item's own
+    // to_number/from_number. Atomic with the stamp so the ceiling can never
+    // disagree with what the queue says was dialed.
+    await deps.db.transaction(async (tx) => {
+      await tx
+        .update(schema.dialerQueueItems)
+        .set({ callId, fromNumber: did.e164, updatedAt: new Date() })
+        .where(eq(schema.dialerQueueItems.id, next.id));
+      await tx.insert(schema.dialerDialAttempts).values({
+        orgId: session.orgId,
+        userId: session.userId,
+        sessionId,
+        itemId: next.id,
+        toNumber: toE164,
+        fromNumber: did.e164,
+      });
+    });
     return { action: 'dialing', itemId: next.id };
   }
 }
@@ -318,7 +393,11 @@ export async function handleDialOutcome(
   const retryFallback = item.secondaryNumber ?? item.fallbackNumber;
   const sessionLive = session.status === 'active' || session.status === 'paused';
   const requeue = attempt < 2 && retryTo != null && sessionLive;
-  const enqueue = !requeue && (attempt >= 2 || (retryTo == null && sessionLive));
+  // Only a follow-up rolls over. Task runs dial whatever the rep's list holds
+  // ("Check in", "Send quote"), and completing/copying one of those would
+  // rewrite work the rollover rule was never meant to touch. Lead/Opp runs and
+  // every pre-0027 row are eligible (the column defaults to true).
+  const enqueue = !requeue && item.followupEligible && (attempt >= 2 || (retryTo == null && sessionLive));
 
   // The CAS, the requeue insert, and the rollover enqueue all ride inside the
   // same transaction, so a duplicated webhook can neither double-requeue nor
@@ -348,6 +427,11 @@ export async function handleDialOutcome(
         sessionId: item.sessionId, ordinal: maxOrdinal + 1, objectType: item.objectType, recordId: item.recordId,
         toNumber: retryTo, fallbackNumber: retryFallback,
         primaryNumber: item.primaryNumber, secondaryNumber: item.secondaryNumber,
+        // Carried forward, not defaulted: without these the attempt-2 row falls
+        // back to the column defaults (null / true), so the SECOND miss would
+        // roll a "Check in" over as if it were a follow-up, and roll it by
+        // search instead of by the task the rep actually dialed.
+        taskId: item.taskId, followupEligible: item.followupEligible,
         attempt: 2, status: 'pending',
         retryNotBefore: new Date(deps.nowUtc.getTime() + RETRY_FLOOR_MS),
       });
@@ -355,6 +439,7 @@ export async function handleDialOutcome(
       await deps.enqueueRollover({
         orgId: session.orgId, userId: session.userId, sfOwnerId: session.sfOwnerId, sessionId: session.id,
         recordId: item.recordId, objectType: item.objectType, fromDate: deps.todayIso,
+        sourceTaskId: item.taskId ?? null,
       }, tx);
     }
     return true;

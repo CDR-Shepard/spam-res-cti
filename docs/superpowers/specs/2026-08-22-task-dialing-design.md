@@ -93,13 +93,19 @@ Calling hours, `DIALER_CALLING_HOURS_EXEMPT`, and AMD are unchanged.
   never enqueue; the task stays open.
 - Worker: if `source_task_id` is set → `SELECT … FROM Task WHERE Id = :id AND IsClosed = false AND OwnerId = :rep`;
   missing/closed/reassigned → `succeeded` `'no-task'`. Otherwise the existing path (pick day under
-  cap → create copy → complete source). `source_task_id` null → today's search-by-record (with the
-  widened subject rule).
+  cap → create copy → complete the cleared tasks). `source_task_id` null → today's
+  search-by-record (with the widened subject rule).
 - **Cap count reshaped:** `SELECT Id, Subject FROM Task WHERE OwnerId = :rep AND IsClosed = false AND ActivityDate = :day LIMIT 500`
   → pure `countFollowUps(tasks)` applies the subject rule in code. `soqlCount`/`followUpCountSoql`
   are replaced by `followUpTasksSoql(owner, day)` + `countFollowUps`.
-- Accepted edge: two follow-up tasks on the same record in one run share one rollover slot per
-  day (job key = rep + record + day); only one moves.
+- **One rollover per person per day** (user ruling). The job key stays rep + record + day, so two
+  follow-ups for the same person in one run collapse into ONE job — the first miss's
+  `source_task_id` wins and names the template. On that job the worker completes the **clear set**
+  — the template plus every other open follow-up on that person dated the missed day — and creates
+  **exactly one** copy. Future-dated and overdue follow-ups, and non-follow-up tasks, are never
+  touched. `completed_task_ids` records the whole set (the retry path completes it; a 404 on a
+  sibling that was deleted meanwhile is logged and skipped). A connected call never enqueues at
+  all, so nothing rolls on a connect.
 
 ## Section 4 — Ownership gate (`salesforce/ownership.ts`, new)
 
