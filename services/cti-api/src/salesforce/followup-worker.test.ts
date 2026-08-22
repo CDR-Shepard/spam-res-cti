@@ -36,7 +36,7 @@ function job(o: Partial<FollowupRolloverJob> = {}): FollowupRolloverJob {
   return {
     id: 'J1', orgId: 'O1', userId: 'U1', sfOwnerId: '005', sessionId: 'S1', recordId: '00Q1', objectType: 'Lead',
     fromDate: '2026-08-20', status: 'in_flight', attempts: 1, lastError: null, nextAttemptAt: new Date(),
-    completedAt: null, completedTaskId: null, createdTaskId: null, targetDate: null, sourceTaskId: null, createdAt: new Date(), updatedAt: new Date(),
+    completedAt: null, completedTaskId: null, completedTaskIds: null, createdTaskId: null, targetDate: null, sourceTaskId: null, createdAt: new Date(), updatedAt: new Date(),
     ...o,
   } as FollowupRolloverJob;
 }
@@ -198,14 +198,20 @@ describe('processRolloverJob', () => {
     expect(ownership.mock.calls.map((c) => c[1])).toContain('0061');
   });
 
-  it('rolls the SOURCE task by id on a Task-run job (no search), and no-ops if it is closed/reassigned', async () => {
-    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
-      (/Id = '00T9'/.test(q) ? [{ ...openTask, Id: '00T9' }] : [])) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+  it('templates the copy on the SOURCE task by id (never on whatever search would find), and no-ops if it is closed/reassigned', async () => {
+    // The record also holds an OVERDUE follow-up that a search would have picked
+    // first (earliest ActivityDate wins). The by-id task is the template anyway —
+    // that is the point of carrying the id — and the overdue one is not a
+    // same-day sibling, so it is left alone entirely.
+    const overdue = { ...openTask, Id: '00TOLD', Subject: 'Follow-up (old)', ActivityDate: '2026-08-11' };
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
+      if (/Id = '00T9'/.test(q)) return [{ ...openTask, Id: '00T9' }];
+      if (/FROM Task WHERE OwnerId/.test(q)) return [];
+      return [overdue, { ...openTask, Id: '00T9' }];
+    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
     await processRolloverJob(job({ sourceTaskId: '00T9' }), d);
     expect((d.sf.sfFetch as any).mock.calls.map((c: any[]) => c[1])).toEqual(['/sobjects/Task', '/sobjects/Task/00T9']);
-    // ...and the record was never searched for a follow-up (that is the point of
-    // carrying the id: the record may hold several, only one of which was dialed).
-    expect((d.sf.soqlQuery as any).mock.calls.map((c: any[]) => c[1]).filter((q: string) => /WhoId =/.test(q))).toEqual([]);
+    expect((d.sf.sfFetch as any).mock.calls[0][2].body).toMatchObject({ Subject: 'Follow-up' }); // 00T9's, not 00TOLD's
     // Closed, completed by hand, or reassigned since the miss: the by-id lookup
     // finds nothing and the job closes out as no-task rather than searching the
     // record (which could roll a DIFFERENT follow-up the rep never dialed).
@@ -213,6 +219,112 @@ describe('processRolloverJob', () => {
     await processRolloverJob(job({ sourceTaskId: '00T9' }), d2);
     expect(d2.sf.sfFetch).not.toHaveBeenCalled();
     expect(writesOf(d2)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'no-task' }) });
+  });
+
+  // -------------------------------------------------------------------------
+  // ONE ROLLOVER PER PERSON PER DAY. Two follow-ups on the same person collapse
+  // to one job (the unique key is user+record+day), so the worker has to CLEAR
+  // every same-day follow-up on that person while creating exactly ONE copy —
+  // otherwise the swallowed sibling sits open past its due date forever.
+  // -------------------------------------------------------------------------
+
+  /** The record's open tasks: the by-id source, a same-day sibling follow-up, a
+   *  FUTURE-dated follow-up, and a same-day task that is not a follow-up. */
+  const clearSetTasks = [
+    { ...openTask, Id: '00T9', Subject: 'Follow-up', ActivityDate: '2026-08-20' },
+    { ...openTask, Id: '00TSIB', Subject: 'Follow up re pricing', ActivityDate: '2026-08-20' },
+    { ...openTask, Id: '00TFUT', Subject: 'Follow-up', ActivityDate: '2026-08-26' },
+    { ...openTask, Id: '00TCHK', Subject: 'Check in', ActivityDate: '2026-08-20' },
+  ];
+  const clearSetSoql = (order?: string[]) => vi.fn(async (_u: string, q: string) => {
+    order?.push('soql');
+    if (/Id = '00T9'/.test(q)) return [clearSetTasks[0]];
+    if (/FROM Task WHERE OwnerId/.test(q)) return [];
+    return clearSetTasks;
+  }) as unknown as WorkerDeps['sf']['soqlQuery'];
+
+  it('completes the source AND its same-day sibling, creates exactly ONE copy, and leaves future / non-follow-up tasks alone', async () => {
+    const order: string[] = [];
+    const base = deps();
+    const d = deps({
+      db: orderedFakeDb(order),
+      sf: {
+        soqlQuery: clearSetSoql(),
+        sfFetch: vi.fn(async (_u: string, path: string, init?: any) => {
+          order.push(init?.method === 'POST' ? 'POST' : `PATCH ${path}`);
+          return init?.method === 'POST' ? { status: 201, json: { id: '00TNEW' } } : { status: 204, json: null };
+        }) as any,
+      },
+      calendarFor: base.calendarFor,
+    });
+    await processRolloverJob(job({ sourceTaskId: '00T9' }), d);
+    const calls = (d.sf.sfFetch as any).mock.calls.map((c: any[]) => [c[1], c[2]?.method]);
+    expect(calls.filter((c: any[]) => c[1] === 'POST')).toEqual([['/sobjects/Task', 'POST']]); // exactly one copy
+    expect(calls.filter((c: any[]) => c[1] === 'PATCH').map((c: any[]) => c[0]))
+      .toEqual(['/sobjects/Task/00T9', '/sobjects/Task/00TSIB']); // the future one and 'Check in' are untouched
+    // The whole clear set is stamped BEFORE the create, so a crash after the POST
+    // still completes every task the copy replaced (the retry path reads it).
+    const stamp = order.indexOf('write:completedTaskId,completedTaskIds,nextDay,targetDate,updatedAt');
+    expect(stamp).toBeGreaterThanOrEqual(0);
+    expect(stamp).toBeLessThan(order.indexOf('POST'));
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({
+      completedTaskId: '00T9', completedTaskIds: ['00T9', '00TSIB'],
+    }) });
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
+  });
+
+  it('record path: the earliest same-day follow-up is the template and its same-day sibling is completed too', async () => {
+    const tasks = [
+      { ...openTask, Id: '00TP', Subject: 'Follow-up call', ActivityDate: '2026-08-20' },
+      { ...openTask, Id: '00TSIB', Subject: 'F/U on quote', ActivityDate: '2026-08-20' },
+      { ...openTask, Id: '00TCHK', Subject: 'Check in', ActivityDate: '2026-08-20' },
+    ];
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
+      (/FROM Task WHERE OwnerId/.test(q) ? [] : tasks)) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    await processRolloverJob(job(), d); // no sourceTaskId — the Lead/Opp path
+    const calls = (d.sf.sfFetch as any).mock.calls.map((c: any[]) => [c[1], c[2]?.method]);
+    expect(calls[0]).toEqual(['/sobjects/Task', 'POST']);
+    expect((d.sf.sfFetch as any).mock.calls[0][2].body).toMatchObject({ Subject: 'Follow-up call' }); // 00TP is the template
+    expect(calls.slice(1).map((c: any[]) => c[0])).toEqual(['/sobjects/Task/00TP', '/sobjects/Task/00TSIB']);
+    // ...and the record was searched exactly once — the same list picks the
+    // template and its siblings, never two round-trips for one answer.
+    expect((d.sf.soqlQuery as any).mock.calls.filter((c: any[]) => /WhoId =/.test(c[1]))).toHaveLength(1);
+  });
+
+  it('retry path completes EVERY id in completedTaskIds and creates nothing', async () => {
+    const d = deps();
+    await processRolloverJob(job({ createdTaskId: '00TNEW', completedTaskId: 'a', completedTaskIds: ['a', 'b'], attempts: 2 }), d);
+    expect((d.sf.sfFetch as any).mock.calls.map((c: any[]) => [c[1], c[2]?.method]))
+      .toEqual([['/sobjects/Task/a', 'PATCH'], ['/sobjects/Task/b', 'PATCH']]);
+    expect(d.sf.soqlQuery).not.toHaveBeenCalled();
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
+  });
+
+  it('retry path on a row from the PREVIOUS deploy (no completedTaskIds) falls back to completedTaskId', async () => {
+    const d = deps();
+    await processRolloverJob(job({ createdTaskId: '00TNEW', completedTaskId: '00T1', completedTaskIds: null, attempts: 2 }), d);
+    expect((d.sf.sfFetch as any).mock.calls.map((c: any[]) => [c[1], c[2]?.method]))
+      .toEqual([['/sobjects/Task/00T1', 'PATCH']]);
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
+  });
+
+  it('a sibling that was deleted between the stamp and the PATCH (404) is logged and skipped, not a failure', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const d = deps({
+      sf: {
+        soqlQuery: clearSetSoql(),
+        sfFetch: vi.fn(async (_u: string, path: string, init?: any) => {
+          if (init?.method === 'POST') return { status: 201, json: { id: '00TNEW' } };
+          return path.endsWith('00TSIB')
+            ? { status: 404, json: [{ errorCode: 'NOT_FOUND' }] }
+            : { status: 204, json: null };
+        }) as any,
+      },
+    });
+    await processRolloverJob(job({ sourceTaskId: '00T9' }), d);
+    expect(warn).toHaveBeenCalledWith('[followup-worker] task already gone; skipping complete', expect.objectContaining({ jobId: 'J1', taskId: '00TSIB' }));
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
+    expect(writesOf(d).some((w) => w.patch.status === 'failed' || w.patch.status === 'pending')).toBe(false);
   });
 
   /** 8/21 holds one follow-up and one decoy ('Refund' — a bare-substring 'FU'
@@ -303,7 +415,7 @@ describe('processRolloverJob', () => {
       },
     });
     await processRolloverJob(job(), d);
-    const preStamp = order.indexOf('write:completedTaskId,nextDay,targetDate,updatedAt');
+    const preStamp = order.indexOf('write:completedTaskId,completedTaskIds,nextDay,targetDate,updatedAt');
     const post = order.indexOf('POST');
     expect(preStamp).toBeGreaterThanOrEqual(0);
     expect(post).toBeGreaterThanOrEqual(0);

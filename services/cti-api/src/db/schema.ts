@@ -681,21 +681,24 @@ export const followupRolloverJobs = pgTable(
     targetDate: text('target_date'),
     /** The plain next business day after fromDate — lets the run summary tell "moved" from "pushed" without a Salesforce call. */
     nextDay: text('next_day'),
-    /** The exact Task to roll (Task runs); null = search the record (Lead/Opp runs). */
+    /** The Task the copy is templated from (Task runs); null = search the record
+     *  (Lead/Opp runs). NOT part of the job key — see `jobUnique`. */
     sourceTaskId: text('source_task_id'),
+    /** Every task this job completed: the template plus its same-day siblings on
+     *  the same person. `completedTaskId` stays the PRIMARY (template) id, which
+     *  is all a row written by the previous deploy has. */
+    completedTaskIds: text('completed_task_ids').array(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    // The rolled unit is the TASK when there is one: a Task run can hold two
-    // follow-up tasks for the SAME person, and both must roll. Keying on
-    // record_id alone silently swallowed the second (the enqueue is ON CONFLICT
-    // DO NOTHING), leaving that task open past its due date with no error row.
-    // COALESCE, not a plain added column: every Lead/Opp row has
-    // source_task_id NULL, and NULLs are all distinct to a unique index — that
-    // would drop the duplicate-webhook backstop on the pool path.
-    jobUnique: uniqueIndex('followup_rollover_source_unique')
-      .on(t.userId, sql`coalesce(${t.sourceTaskId}, ${t.recordId})`, t.fromDate),
+    // ONE rollover per person per day. A Task run can hold two follow-ups for
+    // the SAME person; both miss and both enqueue, and this key collapses them
+    // into one job (the enqueue is ON CONFLICT DO NOTHING, so the FIRST miss's
+    // source_task_id wins and names the template). The worker then clears every
+    // same-day follow-up on that person and creates exactly one copy — the rep
+    // gets one item tomorrow, not a pile. Also the duplicate-webhook backstop.
+    jobUnique: uniqueIndex('followup_rollover_unique').on(t.userId, t.recordId, t.fromDate),
     statusIdx: index('followup_rollover_status_idx').on(t.status, t.nextAttemptAt),
     sessionIdx: index('followup_rollover_session_idx').on(t.sessionId),
   }),
