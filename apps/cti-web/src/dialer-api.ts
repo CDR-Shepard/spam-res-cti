@@ -17,6 +17,8 @@ export interface DialerCurrentItem {
   objectType: string;
   status: string;
   toNumber: string | null;
+  /** 1 or 2 — the second try of the day for this record. */
+  attempt?: number;
 }
 
 export interface DialerSession {
@@ -24,10 +26,15 @@ export interface DialerSession {
   status: 'active' | 'paused' | 'stopped' | 'done';
 }
 
+export interface DialerRollovers { moved: number; pushed: number; failed: number; pending: number }
+
 export interface DialerSessionView {
   session: DialerSession;
   counts: DialerSessionCounts;
   currentItem: DialerCurrentItem | null;
+  /** Set when the run is idle only because its retries are inside the 5-min floor. */
+  waitingRetry?: { nextRetryAt: string } | null;
+  rollovers?: DialerRollovers;
 }
 
 export type DialerControlAction = 'pause' | 'resume' | 'skip' | 'stop' | 'next';

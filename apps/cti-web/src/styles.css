@@ -1186,3 +1186,11 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 .dialpad.dtmf { margin: 0 auto 10px; }
 .dialpad.dtmf .key { height: 56px; width: 56px; }
 .dialpad.dtmf .key .num { font-size: 20px; }
+
+/* Power dialer: attempt badge + retry countdown */
+.dp-attempt { display: inline-block; margin-top: 4px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 500; color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.dp-waiting { text-align: center; font-size: 12px; color: var(--text-muted); margin: 6px 0; }
+
+/* Admin: follow-up rollover health */
+.admin-rollovers { font-size: 12px; color: var(--text-muted); }
+.admin-rollovers ul { margin: 6px 0 0 16px; color: var(--bad); }

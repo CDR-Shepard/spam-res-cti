@@ -26,7 +26,7 @@ function fakeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
     pickDid: vi.fn(unexpected('pickDid')) as unknown as EngineDeps['pickDid'],
     withinCallingHours: vi.fn(unexpected('withinCallingHours')) as unknown as EngineDeps['withinCallingHours'],
     nowUtc: new Date('2026-07-13T18:00:00Z'),
-    rolloverFollowUp: vi.fn(unexpected('rolloverFollowUp')) as unknown as EngineDeps['rolloverFollowUp'],
+    enqueueRollover: vi.fn(async () => {}),
     onScreenPop: vi.fn(unexpected('onScreenPop')),
     todayIso: '2026-07-13',
     ...over,

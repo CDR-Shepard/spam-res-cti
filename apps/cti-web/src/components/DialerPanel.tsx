@@ -5,7 +5,7 @@
  * stop, next), polling the session every ~2s.
  *
  * Screen-pop: the panel calls `onScreenPop(recordId)` once per record the moment
- * it becomes the in-flight record, so the rep sees the lead/opp while it rings.
+ * it connects to a live human (see `shouldScreenPop`) — never for voicemail.
  * The caller (App) maps that to Open CTI `screenPopRecord`.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -25,6 +25,14 @@ import { formatE164 } from '../format';
 
 const POLL_INTERVAL_MS = 2000;
 const TERMINAL_STATUSES = new Set(['done', 'stopped']);
+/**
+ * How long, after a run first goes terminal, we keep polling for its follow-up
+ * rollovers to finish. The rollover worker ticks every ~5s and then makes two or
+ * three Salesforce round-trips per job, so a rep who reaches the summary screen
+ * is always ahead of it. Bounded so a wedged or backed-off queue (retries stretch
+ * to ~63 min) can't leave the panel polling forever.
+ */
+export const ROLLOVER_SETTLE_MS = 60_000;
 
 /**
  * Records that have reached a terminal disposition — dialed-and-dispositioned
@@ -52,6 +60,62 @@ export function isNextEnabled(item: DialerCurrentItem | null): boolean {
   return item?.status === 'connected';
 }
 
+/** Pure — pop the record ONLY for a live human. AMD hangs up machines before the
+ *  rep is bridged, so `connected` ⇒ a person; voicemail never pops. */
+export function shouldScreenPop(item: DialerCurrentItem | null): boolean {
+  return item?.status === 'connected';
+}
+
+/** Pure — "m:ss" until the next retry; clamps at 0:00. */
+export function retryCountdown(nextRetryAt: string, now: number): string {
+  const s = Math.max(0, Math.round((Date.parse(nextRetryAt) - now) / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/**
+ * Pure — the run-summary rollover line; '' when there is nothing to say.
+ *
+ * Failures are ALWAYS appended, never only reported when nothing else happened:
+ * a {moved: 8, failed: 3} run used to read "8 follow-ups moved to tomorrow" and
+ * quietly drop the three the rep needs an admin to chase. The noun is carried by
+ * whichever clause comes first, so the line reads as one sentence.
+ */
+export function rolloverLine(r: { moved: number; pushed: number; failed: number }): string {
+  const parts: string[] = [];
+  if (r.moved) parts.push(`${r.moved} follow-up${r.moved === 1 ? '' : 's'} moved to tomorrow`);
+  if (r.pushed) parts.push(`${r.pushed} pushed later (daily limit)`);
+  if (r.failed) {
+    parts.push(parts.length
+      ? `${r.failed} could not be moved — see admin`
+      : `${r.failed} follow-up${r.failed === 1 ? '' : 's'} could not be moved — see admin`);
+  }
+  return parts.join(' · ');
+}
+
+/**
+ * Pure — should the poll keep running after the run has already ended?
+ *
+ * The run-summary rollover line was unreachable in practice: polling stopped the
+ * instant the session went terminal, which is seconds before the follow-up worker
+ * (5s tick + Salesforce round-trips) has processed any of the jobs — so
+ * `rollovers` was always `{pending: N}` and `rolloverLine` rendered ''. Teardown
+ * (`onComplete`) still fires exactly once at that first terminal poll; only the
+ * polling continues, until the rollovers settle or `ROLLOVER_SETTLE_MS` elapses.
+ */
+export function shouldKeepPollingForRollovers(
+  view: DialerSessionView,
+  firstTerminalAt: number,
+  now: number,
+): boolean {
+  if (!TERMINAL_STATUSES.has(view.session.status)) return false;
+  if (!view.rollovers || view.rollovers.pending <= 0) return false;
+  return now - firstTerminalAt < ROLLOVER_SETTLE_MS;
+}
+
+export function AttemptBadge({ attempt }: { attempt?: number }): JSX.Element | null {
+  return attempt === 2 ? <span className="dp-attempt">Attempt 2 of 2</span> : null;
+}
+
 /**
  * Pure — should this poll tick tear the run down? A run tears down exactly once,
  * the moment it first reaches a terminal status (`done` when it finishes on its
@@ -77,8 +141,8 @@ export interface DialerPanelProps {
   /** Active session id, owned by the parent — null means no run in progress. */
   sessionId: string | null;
   /**
-   * Called once per record the moment it becomes the in-flight record (i.e. as
-   * the dialer starts calling it), so the rep sees the lead/opp while it rings.
+   * Called once per record the moment it connects to a human (see
+   * shouldScreenPop) — voicemail and no-connects never pop.
    */
   onScreenPop: (recordId: string) => void;
   /** Start a run from a Salesforce list view (parent creates the session). */
@@ -111,6 +175,7 @@ function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Element {
         <span className={`cdot ${dotClassForItemStatus(item.status)}`} />
         {item.objectType} · {item.status.replace(/_/g, ' ')}
       </div>
+      <AttemptBadge attempt={item.attempt} />
     </div>
   );
 }
@@ -207,6 +272,9 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const [view, setView] = useState<DialerSessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [controlBusy, setControlBusy] = useState(false);
+  // Ticks every second so the retry countdown re-renders without waiting on
+  // the ~2s poll.
+  const [now, setNow] = useState(() => Date.now());
 
   // Id of the last currentItem we screen-popped for — pop once per NEW
   // connected item, not on every ~2s poll.
@@ -216,11 +284,20 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const pollNowRef = useRef<() => void>(() => {});
   // Latch so the terminal-status teardown (onComplete) fires exactly once per run.
   const completedRef = useRef(false);
+  // When this run FIRST reported a terminal status — the clock the rollover
+  // settle window is measured from. Null until then.
+  const firstTerminalAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     lastPoppedIdRef.current = null;
     pollNowRef.current = () => {};
     completedRef.current = false;
+    firstTerminalAtRef.current = null;
 
     if (!sessionId) {
       setView(null);
@@ -249,27 +326,31 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         setView(next);
         setError(null);
 
-        // Screen-pop each record as it becomes the in-flight record (dialing OR
-        // connected) — so the rep sees the lead/opp while it's ringing, not only
-        // once someone answers. Fires once per record via the last-popped ref.
+        // Pop the record only for a live human (see shouldScreenPop) — not while
+        // it is still ringing, and never for voicemail. Once per item.
         const current = next.currentItem;
-        if (current && lastPoppedIdRef.current !== current.id) {
+        if (shouldScreenPop(current) && current && lastPoppedIdRef.current !== current.id) {
           lastPoppedIdRef.current = current.id;
           onScreenPop(current.recordId);
         }
 
-        // The run reached a terminal status. Stop polling, and if it got there
-        // WITHOUT the rep pressing Stop (a run that finished on its own, or was
-        // ended remotely), release the rep's conference leg via onComplete — the
-        // single Twilio Device is otherwise left busy and the next call fails.
-        // The latch keeps this to exactly one fire even if a poll is already
-        // in flight when the status flips.
-        if (shouldTeardownRun(next.session.status, completedRef.current)) {
-          completedRef.current = true;
-          stopPolling();
-          onComplete({ status: next.session.status, counts: next.counts });
-        } else if (TERMINAL_STATUSES.has(next.session.status)) {
-          stopPolling();
+        // The run reached a terminal status. If it got there WITHOUT the rep
+        // pressing Stop (a run that finished on its own, or was ended remotely),
+        // release the rep's conference leg via onComplete — the single Twilio
+        // Device is otherwise left busy and the next call fails. The latch keeps
+        // this to exactly one fire even if a poll is already in flight when the
+        // status flips.
+        //
+        // Polling, unlike the teardown, does NOT stop here: the follow-up
+        // rollovers are still being written and the summary's rollover line
+        // depends on them (see shouldKeepPollingForRollovers).
+        if (TERMINAL_STATUSES.has(next.session.status)) {
+          if (firstTerminalAtRef.current === null) firstTerminalAtRef.current = Date.now();
+          if (shouldTeardownRun(next.session.status, completedRef.current)) {
+            completedRef.current = true;
+            onComplete({ status: next.session.status, counts: next.counts });
+          }
+          if (!shouldKeepPollingForRollovers(next, firstTerminalAtRef.current, Date.now())) stopPolling();
         }
       } catch (e: unknown) {
         if (!cancelled) {
@@ -349,33 +430,46 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
             Run {view.session.status === 'done' ? 'complete' : 'stopped'}
           </div>
           <div className="dp-summary-meta">{progressLabel(view.counts)}</div>
+          {view.rollovers && view.rollovers.pending > 0 ? (
+            // The worker hasn't finished writing the rollovers yet; the poll is
+            // still running (bounded by ROLLOVER_SETTLE_MS) and will replace this
+            // with the real line the moment they settle.
+            <div className="dp-summary-meta">Finishing follow-ups…</div>
+          ) : view.rollovers && rolloverLine(view.rollovers) ? (
+            <div className="dp-summary-meta">{rolloverLine(view.rollovers)}</div>
+          ) : null}
           <button className="btn primary full dp-summary-cta" onClick={onDismiss}>
             Start another run
           </button>
         </div>
       ) : (
-        <div className="row dp-controls">
-          <button
-            className="btn"
-            disabled={controlBusy}
-            onClick={() => runControl(pauseResumeAction(view.session.status))}
-          >
-            {isPaused ? 'Resume' : 'Pause'}
-          </button>
-          <button className="btn" disabled={controlBusy} onClick={() => runControl('skip')}>
-            Skip
-          </button>
-          <button className="btn danger" disabled={controlBusy} onClick={handleStop}>
-            Stop
-          </button>
-          <button
-            className="btn primary"
-            disabled={controlBusy || !isNextEnabled(view.currentItem)}
-            onClick={() => runControl('next')}
-          >
-            Next
-          </button>
-        </div>
+        <>
+          {view.waitingRetry && (
+            <div className="dp-waiting">Next retry in {retryCountdown(view.waitingRetry.nextRetryAt, now)}</div>
+          )}
+          <div className="row dp-controls">
+            <button
+              className="btn"
+              disabled={controlBusy}
+              onClick={() => runControl(pauseResumeAction(view.session.status))}
+            >
+              {isPaused ? 'Resume' : 'Pause'}
+            </button>
+            <button className="btn" disabled={controlBusy} onClick={() => runControl('skip')}>
+              Skip
+            </button>
+            <button className="btn danger" disabled={controlBusy} onClick={handleStop}>
+              Stop
+            </button>
+            <button
+              className="btn primary"
+              disabled={controlBusy || !isNextEnabled(view.currentItem)}
+              onClick={() => runControl('next')}
+            >
+              Next
+            </button>
+          </div>
+        </>
       )}
     </div>
   );

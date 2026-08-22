@@ -17,3 +17,21 @@ export function sessionCounts(items: Array<Pick<DialerItem, 'status'>>): {
   }
   return c;
 }
+
+/** Run-summary counts from a session's rollover jobs. The rollover worker
+ *  stamps `nextDay` (the plain next business day) when it creates the copy,
+ *  so "moved" (landed there) vs "pushed" (the daily cap sent it later) is a
+ *  pure string compare here — no Salesforce call on the softphone's poll. */
+export function rolloverSummary(
+  jobs: Array<{ status: string; targetDate: string | null; nextDay: string | null }>,
+): { moved: number; pushed: number; failed: number; pending: number } {
+  const s = { moved: 0, pushed: 0, failed: 0, pending: 0 };
+  for (const j of jobs) {
+    if (j.status === 'failed') s.failed++;
+    else if (j.status === 'pending' || j.status === 'in_flight') s.pending++;
+    else if (j.status === 'succeeded' && j.targetDate) {
+      if (j.targetDate === j.nextDay) s.moved++; else s.pushed++;
+    }
+  }
+  return s;
+}

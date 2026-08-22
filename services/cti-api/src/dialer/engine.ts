@@ -1,10 +1,15 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { getDb, schema } from '../db/index.js';
 import type { DialerItem } from './session-store.js';
-import { inFlightItem, nextPendingItem } from './state.js';
+import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
 import type { DialerTelephony } from './telephony-port.js';
-import type { rolloverFollowUp } from '../salesforce/followup.js';
 import { recordConnectSticky } from './sticky.js';
+import type { RolloverDb } from '../salesforce/followup-enqueue.js';
+
+export interface RolloverEnqueue {
+  orgId: string; userId: string; sfOwnerId: string; sessionId: string;
+  recordId: string; objectType: string; fromDate: string;
+}
 
 export interface EngineDeps {
   db: ReturnType<typeof getDb>;
@@ -15,7 +20,12 @@ export interface EngineDeps {
   withinCallingHours: (toE164: string, nowUtc: Date) => boolean;
   /** The "now" the engine reasons about — injected so calling-hours checks are deterministic in tests. */
   nowUtc: Date;
-  rolloverFollowUp: typeof rolloverFollowUp;
+  /** Queue the rep's follow-up rollover for this record (drained by the follow-up
+   *  worker). Idempotent on (user, record, fromDate). Called INSIDE the miss-path
+   *  transaction (handleDialOutcome) with that transaction's `tx` as the second
+   *  arg, so the enqueue commits or rolls back atomically with the CAS that
+   *  flips the row out of 'dialing' — no try/catch here on purpose. */
+  enqueueRollover: (job: RolloverEnqueue, db: RolloverDb) => Promise<void>;
   onScreenPop: (userId: string, objectType: string, recordId: string) => void;
   todayIso: string;
 }
@@ -54,7 +64,7 @@ async function releaseRepConference(deps: EngineDeps, userId: string, sessionId:
 export async function advanceSession(
   sessionId: string,
   deps: EngineDeps,
-): Promise<{ action: 'dialing' | 'waiting' | 'done' | 'idle' | 'paused_no_numbers'; itemId?: string }> {
+): Promise<{ action: 'dialing' | 'waiting' | 'waiting_retry' | 'done' | 'idle' | 'paused_no_numbers'; itemId?: string; nextRetryAt?: string }> {
   const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
   if (!session || session.status !== 'active') return { action: 'idle' };
   let items = await loadItems(deps, sessionId);
@@ -62,8 +72,13 @@ export async function advanceSession(
 
   // Skip any unreachable pendings (defensive; creation already marks them).
   for (;;) {
-    const next = nextPendingItem(items);
+    const next = nextEligiblePendingItem(items, deps.nowUtc);
     if (!next) {
+      // Pending rows may remain but all be inside their retry floor — leave the
+      // session active and tell the caller when it can advance (the presence-gated
+      // retry-nudge loop advances it then; see salesforce/followup-worker.ts nudgeDueRetries).
+      const retryAt = earliestRetryAt(items, deps.nowUtc);
+      if (retryAt) return { action: 'waiting_retry', nextRetryAt: retryAt.toISOString() };
       // Release the conference BEFORE flipping the session out of 'active'. The
       // conference friendly name is rep-scoped (`pd_<userId>`), not per-run, so a
       // teardown that ran after the flip could resolve — and complete — the NEXT
@@ -284,13 +299,66 @@ export async function handleDialOutcome(
     return;
   }
 
-  // No fallback left (or a non-no-answer miss): record the miss, roll over the
-  // rep's follow-up task, advance. The finer reason is kept in `outcome`.
-  await setItem(deps, item.id, { status: 'no_connect', outcome });
-  try {
-    await deps.rolloverFollowUp(session.userId, session.sfOwnerId, item.recordId, deps.todayIso);
-  } catch (err) {
-    console.error('[dialer] rollover failed', { itemId: item.id, err: (err as Error).message });
-  }
+  // No fallback left (or a non-no-answer miss) = one MISS. Decide the outcome
+  // BEFORE the transaction, from a single truth table:
+  //  - requeue: this is the record's first miss, it still has a number to
+  //    retry with (the immutable pair, or — for legacy pre-0024 rows with no
+  //    primaryNumber — whatever it was last dialing), and the run is still
+  //    live (active/paused). Re-queued as an attempt-2 row at the END of the
+  //    run, 5-min floor.
+  //  - enqueue: everything else that isn't a requeue — the second miss, or a
+  //    first miss with nothing left to retry with. Queues the follow-up
+  //    rollover.
+  // A STOPPED session's first-miss webhook does NEITHER: per spec, a rep who
+  // stops after one pass leaves those tasks open, so the row just becomes
+  // 'no_connect' and nothing is queued. A stopped session's second-miss
+  // webhook still enqueues — that miss genuinely already happened.
+  const attempt = item.attempt ?? 1; // a fixture/row missing `attempt` must not silently skip both branches
+  const retryTo = item.primaryNumber ?? item.toNumber; // legacy rows (pre-0024) have no primaryNumber
+  const retryFallback = item.secondaryNumber ?? item.fallbackNumber;
+  const sessionLive = session.status === 'active' || session.status === 'paused';
+  const requeue = attempt < 2 && retryTo != null && sessionLive;
+  const enqueue = !requeue && (attempt >= 2 || (retryTo == null && sessionLive));
+
+  // The CAS, the requeue insert, and the rollover enqueue all ride inside the
+  // same transaction, so a duplicated webhook can neither double-requeue nor
+  // double-enqueue, and the enqueue commits/rolls back atomically with the
+  // CAS (a retry can't lose the race against a rollover that outlived it).
+  // The ordinal lookup uses `tx.query` (not `deps.db.query`) so it shares the
+  // transaction's pool client instead of checking out a second one — with
+  // enough concurrent misses that second checkout would deadlock the pool
+  // permanently. No try/catch around the enqueue: a failure there should roll
+  // the CAS back too, and the insert is idempotent via the unique index, so a
+  // retry after rollback just repeats the same idempotent write.
+  const claimed = await deps.db.transaction(async (tx) => {
+    const rows = await tx
+      .update(schema.dialerQueueItems)
+      .set({ status: 'no_connect', outcome, updatedAt: new Date() })
+      .where(and(
+        eq(schema.dialerQueueItems.id, item.id),
+        eq(schema.dialerQueueItems.callId, callId),
+        eq(schema.dialerQueueItems.status, 'dialing'),
+      ))
+      .returning({ id: schema.dialerQueueItems.id });
+    if (rows.length === 0) return false;
+    if (requeue) {
+      const all = await tx.query.dialerQueueItems.findMany({ where: eq(schema.dialerQueueItems.sessionId, item.sessionId) });
+      const maxOrdinal = all.reduce((m, i) => Math.max(m, i.ordinal), -1);
+      await tx.insert(schema.dialerQueueItems).values({
+        sessionId: item.sessionId, ordinal: maxOrdinal + 1, objectType: item.objectType, recordId: item.recordId,
+        toNumber: retryTo, fallbackNumber: retryFallback,
+        primaryNumber: item.primaryNumber, secondaryNumber: item.secondaryNumber,
+        attempt: 2, status: 'pending',
+        retryNotBefore: new Date(deps.nowUtc.getTime() + RETRY_FLOOR_MS),
+      });
+    } else if (enqueue) {
+      await deps.enqueueRollover({
+        orgId: session.orgId, userId: session.userId, sfOwnerId: session.sfOwnerId, sessionId: session.id,
+        recordId: item.recordId, objectType: item.objectType, fromDate: deps.todayIso,
+      }, tx);
+    }
+    return true;
+  });
+  if (!claimed) return; // duplicate/redelivered webhook lost the race
   await advanceSession(item.sessionId, deps);
 }

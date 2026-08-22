@@ -16,6 +16,7 @@ import { registerIntegrationRoutes } from './routes/integrations.js';
 import { registerRecordingRoutes } from './routes/recordings.js';
 import { registerDialerRoutes } from './routes/dialer.js';
 import { startSyncLoop } from './salesforce/sync.js';
+import { startFollowupLoop, startRetryNudgeLoop } from './salesforce/followup-worker.js';
 import { startReputationWorker } from './reputation/worker.js';
 
 async function main(): Promise<void> {
@@ -105,10 +106,15 @@ async function main(): Promise<void> {
   await registerDialerRoutes(app);
 
   const syncTimer = startSyncLoop(5000);
+  const followupTimer = startFollowupLoop(5000);
+  // The rep-facing retry nudge runs on its own timer — never behind Salesforce.
+  const nudgeTimer = startRetryNudgeLoop(5000);
   const reputationTimer = startReputationWorker(app.log, cfg.REPUTATION_WORKER_INTERVAL_MS);
 
   const close = async () => {
     clearInterval(syncTimer);
+    clearInterval(followupTimer);
+    clearInterval(nudgeTimer);
     clearInterval(reputationTimer);
     await app.close();
   };

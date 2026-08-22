@@ -38,12 +38,10 @@ import {
   handleDialOutcome,
   type EngineDeps,
 } from '../dialer/engine.js';
-import { inFlightItem } from '../dialer/state.js';
-import { sessionCounts } from '../dialer/session-store.js';
-import { TwilioDialerTelephony } from '../dialer/twilio-telephony.js';
-import { pickPoolDid, withinCallingHours, parseCallingHoursExempt } from '../dialer/pick-did.js';
+import { inFlightItem, nextEligiblePendingItem, earliestRetryAt } from '../dialer/state.js';
+import { sessionCounts, rolloverSummary } from '../dialer/session-store.js';
+import { buildEngineDeps } from '../dialer/live-deps.js';
 import { mapAnsweredBy } from '../dialer/amd.js';
-import { rolloverFollowUp } from '../salesforce/followup.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
 import {
@@ -60,40 +58,6 @@ const StartBody = z.object({
   objectType: z.enum(['Lead', 'Opportunity']),
   recordIds: z.array(z.string().min(15).max(20)).min(1).max(500),
 });
-
-/** GG Homes operates out of America/Los_Angeles — the rollover follow-up's
- *  "today" is computed in that org timezone, not the server's (UTC on Railway). */
-const ORG_TIMEZONE = 'America/Los_Angeles';
-
-/** `YYYY-MM-DD` for `now` in the org's timezone. `en-CA` formats as ISO order,
- *  so no further reassembly is needed. */
-function orgTodayIso(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: ORG_TIMEZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-}
-
-/** Real EngineDeps for a request. Screen-pop is wired by Plan 4. */
-function buildEngineDeps(): EngineDeps {
-  const db = getDb();
-  const cfg = loadConfig();
-  // Owned test DIDs in the allowlist skip the calling-hours guard so a dial-flow
-  // test can run outside 8am-9pm; every other number still respects it.
-  const exempt = parseCallingHoursExempt(cfg.DIALER_CALLING_HOURS_EXEMPT);
-  return {
-    db,
-    telephony: new TwilioDialerTelephony(),
-    pickDid: (orgId, userId, toE164) => pickPoolDid(db, { orgId, userId, toE164 }),
-    withinCallingHours: (toE164, nowUtc) => exempt.has(toE164) || withinCallingHours(toE164, nowUtc),
-    nowUtc: new Date(),
-    rolloverFollowUp,
-    onScreenPop: () => {}, // Plan 4 wires Open CTI screen-pop
-    todayIso: orgTodayIso(),
-  };
-}
 
 const TWIML_DIALER_ANSWER_HOLD = '<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="30"/></Response>';
 const TWIML_EMPTY = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
@@ -270,8 +234,27 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     if (!owned) return;
     const { session } = owned;
     const db = getDb();
+
+    // Presence: the retry nudge (a server timer that ORIGINATES calls) only advances
+    // sessions a rep is actively watching. This poll is that proof.
+    try {
+      await db.update(schema.dialerSessions).set({ lastPolledAt: new Date() }).where(eq(schema.dialerSessions.id, session.id));
+    } catch (err) {
+      req.log.warn({ err }, 'dialer_session_presence_stamp_failed');
+    }
+
     const items = await db.query.dialerQueueItems.findMany({ where: eq(schema.dialerQueueItems.sessionId, session.id) });
-    return { session, counts: sessionCounts(items), currentItem: inFlightItem(items) };
+    const now = new Date();
+    const current = inFlightItem(items);
+    const nextRetry = !current && session.status === 'active' && !nextEligiblePendingItem(items, now) ? earliestRetryAt(items, now) : null;
+    const jobs = await db.query.followupRolloverJobs.findMany({ where: eq(schema.followupRolloverJobs.sessionId, session.id) });
+    return {
+      session,
+      counts: sessionCounts(items),
+      currentItem: current,
+      waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
+      rollovers: rolloverSummary(jobs),
+    };
   });
 
   app.post('/dialer/sessions/:id/pause', async (req, reply) => {

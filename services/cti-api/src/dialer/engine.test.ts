@@ -48,16 +48,43 @@ import { schema } from '../db/index.js';
 // concurrent claimant winning the race — without writing anything, matching
 // real Postgres `UPDATE ... WHERE status = 'pending' RETURNING id` semantics
 // when 0 rows match.
+//
+// Adjustment 5 (C1/I3 review fixes): `handleDialOutcome`'s miss-path ordinal
+// lookup now goes through `tx.query.dialerQueueItems.findMany` instead of
+// `deps.db.query...findMany` (a second lookup would check out a second pool
+// client while the transaction holds one — a real deadlock risk under
+// concurrent misses), so `tx` grew a `.query` stub. The rollover enqueue
+// (`deps.enqueueRollover`) now also runs INSIDE the transaction, receiving
+// `tx` as its second argument, so `tx.insert(...).values(...)` needs the same
+// `.onConflictDoNothing()`-bearing thenable the outer `insert` already
+// exposes (real `enqueueFollowupRollover` chains it). Inserts made through
+// `tx.insert` are recorded into a separate `_txInserts` array so tests can
+// tell "inserted" apart from "inserted inside the transaction that also did
+// the CAS".
+//
+// Adjustment 6 (M1 pin): the fake now FENCES the outer `db.query` for the
+// duration of `transaction()` — while the callback runs, `handle.query` is a
+// proxy that throws on any property access. `handleDialOutcome`'s ordinal
+// lookup must go through `tx.query` (sharing the transaction's pool client);
+// reaching for `deps.db.query` there checks out a SECOND client while the tx
+// holds one, which deadlocks the pool under concurrent misses. Before this the
+// two stubs were interchangeable and the regression would have passed silently.
 function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean } = {}) {
   const writes: Array<{ patch: Record<string, unknown> }> = [];
   const inserts: Array<{ values: Record<string, unknown> }> = [];
+  // Inserts made through `tx.insert(...)` — i.e. INSIDE `deps.db.transaction`
+  // — land here, separately from the outer (non-transactional) `_inserts`.
+  // Kept apart so a test can assert an insert rode inside the transaction
+  // (I3/I4c) rather than merely happening at some point.
+  const txInserts: Array<{ values: Record<string, unknown> }> = [];
   let sessionOverride: Record<string, unknown> = {};
   const claimReturnsRows = opts.claimReturnsRows ?? true;
-  return {
+  const handle: any = {
     _session: session,
     _items: items,
     _writes: writes,
     _inserts: inserts,
+    _txInserts: txInserts,
     query: {
       dialerSessions: { findFirst: async () => ({ ...session, ...sessionOverride }) },
       dialerQueueItems: {
@@ -71,11 +98,13 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean }
     // right values without pulling in a real DB.
     insert(_tbl: unknown) {
       return {
-        values: (values: any) => ({
-          onConflictDoUpdate: async () => {
-            inserts.push({ values });
-          },
-        }),
+        values: (values: any) => {
+          inserts.push({ values });
+          const p = Promise.resolve() as Promise<void> & { onConflictDoUpdate: () => Promise<void>; onConflictDoNothing: () => Promise<void> };
+          p.onConflictDoUpdate = async () => {};
+          p.onConflictDoNothing = async () => {};
+          return p;
+        },
       };
     },
     update(_tbl: unknown) {
@@ -92,6 +121,24 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean }
     async transaction(fn: (tx: any) => Promise<any>) {
       const tx = {
         execute: async () => undefined, // pg_advisory_xact_lock(...) — no-op in the fake
+        // C1: handleDialOutcome's ordinal lookup now reads via `tx.query`, not
+        // `deps.db.query` — that would check out a SECOND pool client while
+        // the tx already holds one. Mirrors the outer `query.dialerQueueItems`
+        // stub, ignoring the `where` filter the same way.
+        query: {
+          dialerQueueItems: { findMany: async () => items },
+        },
+        insert(_tbl: unknown) {
+          return {
+            values: (values: any) => {
+              txInserts.push({ values });
+              const p = Promise.resolve() as Promise<void> & { onConflictDoUpdate: () => Promise<void>; onConflictDoNothing: () => Promise<void> };
+              p.onConflictDoUpdate = async () => {};
+              p.onConflictDoNothing = async () => {};
+              return p;
+            },
+          };
+        },
         update(_tbl: unknown) {
           return {
             set: (patch: any) => ({
@@ -107,12 +154,26 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean }
           };
         },
       };
-      return fn(tx);
+      // Any read of `deps.db.query` from inside the transaction is a bug — fence
+      // it off for the callback's duration rather than letting it silently work.
+      const outerQuery = handle.query;
+      handle.query = new Proxy({}, {
+        get(_t, prop) {
+          throw new Error(`outer deps.db.query.${String(prop)} used inside a transaction — use tx.query`);
+        },
+      });
+      try {
+        return await fn(tx);
+      } finally {
+        handle.query = outerQuery;
+      }
     },
-  } as any;
+  };
+  return handle as any;
 }
 let _target: any = {};
 
+import { enqueueFollowupRollover } from '../salesforce/followup-enqueue.js';
 import {
   advanceSession,
   handleDialOutcome,
@@ -132,7 +193,10 @@ function makeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
     pickDid: vi.fn(async () => ({ e164: '+16190000000' })) as any,
     withinCallingHours: vi.fn(() => true) as any,
     nowUtc: new Date(Date.UTC(2026, 6, 13, 18, 0, 0)),
-    rolloverFollowUp: vi.fn(async () => ({ completed: null, created: null })) as any,
+    // Now receives (job, db) — the 2nd arg is the transaction handle (I3).
+    // Assertions on call args should match the 1st with expect.objectContaining
+    // and leave the 2nd unconstrained (expect.anything()).
+    enqueueRollover: vi.fn(async () => {}),
     onScreenPop: vi.fn(),
     todayIso: '2026-07-13',
     ...over,
@@ -263,16 +327,139 @@ describe('advanceSession', () => {
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'dialing' }) }); // claim landed
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'pending' }) }); // then rolled back
   });
+  it('returns waiting_retry (session stays active) when only floor-gated retries remain', async () => {
+    const soon = new Date(Date.UTC(2026, 6, 13, 18, 3, 0));
+    const items = [{ id: 'r1', ordinal: 3, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 2, retryNotBefore: soon }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await advanceSession('S1', deps);
+    expect(r).toEqual({ action: 'waiting_retry', nextRetryAt: soon.toISOString() });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+  });
 });
 
 describe('handleDialOutcome', () => {
   beforeEach(() => { _target = {}; });
-  it('no_connect runs the rollover then advances', async () => {
-    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+  it('a SECOND miss enqueues exactly one rollover job, then advances', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+1', secondaryNumber: null }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
     await handleDialOutcome('CA1', 'no_connect', deps);
-    expect(deps.rolloverFollowUp).toHaveBeenCalledWith('U1', '005', '00Q1', '2026-07-13');
+    expect(deps.enqueueRollover).toHaveBeenCalledTimes(1);
+    // I3: enqueueRollover now takes the transaction handle as its 2nd arg.
+    expect(deps.enqueueRollover).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: 'O1', userId: 'U1', sfOwnerId: '005', sessionId: 'S1', recordId: '00Q1', objectType: 'Lead', fromDate: '2026-07-13',
+    }), expect.anything());
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
+    // A second miss never requeues — no attempt-2 row anywhere, transactional or not.
+    expect(fdb._inserts).toHaveLength(0);
+    expect(fdb._txInserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(0);
+  });
+
+  it('the rollover enqueue writes INSIDE the miss transaction (wired to the real enqueueFollowupRollover)', async () => {
+    // M2: every other test here stubs `enqueueRollover`, so "it rides inside the
+    // transaction" was only ever asserted about the stub's call site. Wire the
+    // REAL enqueue (which does `db.insert(...).values(...).onConflictDoNothing()`)
+    // and pin that its row lands in `_txInserts` — i.e. it went through the `tx`
+    // handle — and not in the outer `_inserts`.
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+1', secondaryNumber: null, sessionId: 'S1' }];
+    const deps = makeDeps({ enqueueRollover: (jobRow, handle) => enqueueFollowupRollover(handle, jobRow) });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_connect', deps);
+    expect(fdb._txInserts).toContainEqual({ values: expect.objectContaining({
+      orgId: 'O1', userId: 'U1', sfOwnerId: '005', sessionId: 'S1', recordId: '00Q1', objectType: 'Lead',
+      fromDate: '2026-07-13', status: 'pending',
+    }) });
+    expect(fdb._inserts).toHaveLength(0);
+  });
+
+  it('the miss transaction never reaches for the outer deps.db.query (M1)', async () => {
+    // The fake throws on any outer-`query` access while the tx callback runs, so
+    // this passing at all is the assertion: the ordinal lookup used `tx.query`.
+    const items = [
+      { id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550199', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550199', sessionId: 'S1' },
+    ];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await expect(handleDialOutcome('CA1', 'no_connect', deps)).resolves.toBeUndefined();
+    expect(fdb._txInserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(1);
+  });
+
+  it('a duplicated webhook for a SECOND miss does not enqueue twice', async () => {
+    // claimReturnsRows:false simulates the conditional no_connect UPDATE
+    // matching 0 rows — another invocation for this same call already won
+    // the CAS. The rollover enqueue rides inside that same transaction, so
+    // losing the CAS must also mean losing the enqueue.
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+1', secondaryNumber: null }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items, { claimReturnsRows: false }); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_connect', deps);
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
+  });
+
+  it('a FIRST miss re-queues the record as an attempt-2 row at the end, with the original numbers and a 5-min floor — and does NOT roll over', async () => {
+    // sessionId is set explicitly on the item here (unlike most fixtures in this
+    // file) because the requeue insert below copies it verbatim via
+    // `item.sessionId` — must match baseSession.id for the assertion to mean
+    // anything.
+    const items = [
+      { id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550199', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550199', sessionId: 'S1' },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+2', secondaryNumber: null, sessionId: 'S1' },
+    ];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_connect', deps);
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
+    // I4c: the attempt-2 row lands in `_txInserts`, NOT `_inserts` — it must
+    // ride inside the same transaction as the CAS (I3), not after it.
+    expect(fdb._txInserts).toContainEqual({ values: expect.objectContaining({
+      sessionId: 'S1', recordId: '00Q1', objectType: 'Lead', attempt: 2, ordinal: 2,
+      toNumber: '+16195550100', fallbackNumber: '+16195550199',
+      primaryNumber: '+16195550100', secondaryNumber: '+16195550199', status: 'pending',
+    }) });
+    const ins = fdb._txInserts.find((x: any) => x.values.attempt === 2)!.values;
+    expect(ins.retryNotBefore.getTime() - deps.nowUtc.getTime()).toBe(5 * 60_000);
+  });
+  it('a duplicated webhook for the first miss does not insert a second attempt-2 row', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+1', secondaryNumber: null }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items, { claimReturnsRows: false }); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_connect', deps);
+    expect(fdb._txInserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(0);
+  });
+  it('a legacy row with no primaryNumber (pre-migration) enqueues the rollover instead of requeuing a null number', async () => {
+    // I1: rows created before migration 0024 have no primaryNumber/secondaryNumber.
+    // toNumber is ALSO null here (the row already exhausted its numbers) — with
+    // a real number in toNumber this would legitimately requeue using it (a
+    // legacy row mid-run still has a dialable number to retry with).
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: null, fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: null, secondaryNumber: null, sessionId: 'S1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_connect', deps);
+    expect(fdb._txInserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(0);
+    expect(deps.enqueueRollover).toHaveBeenCalledTimes(1);
+  });
+  it('a stopped run: a late first-miss webhook neither requeues nor enqueues (task stays open)', async () => {
+    // Spec: "a rep who stops after one pass leaves those tasks open" — a
+    // stopped session's belated first-miss webhook just settles the row to
+    // no_connect; it must not resurrect a dead run with a new attempt-2 row,
+    // and it hasn't genuinely had its second miss yet so it must not enqueue.
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: null, sessionId: 'S1' }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_connect', deps);
+    expect(fdb._txInserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(0);
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
+  });
+  it('a stopped run: a late SECOND-miss webhook still enqueues', async () => {
+    // Unlike the first miss above, a second miss on a stopped run already
+    // happened for real — it must still enqueue the rollover so the rep's
+    // follow-up task gets created.
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+16195550100', secondaryNumber: null, sessionId: 'S1' }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_connect', deps);
+    expect(deps.enqueueRollover).toHaveBeenCalledTimes(1);
+  });
+  it('a connect never requeues or enqueues', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+1', secondaryNumber: null, fromNumber: '+16190000000' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
+    expect(fdb._inserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(0);
   });
 
   it('no_answer with a fallback number re-queues the item to dial the Phone next — no rollover, no no_connect', async () => {
@@ -285,24 +472,30 @@ describe('handleDialOutcome', () => {
       patch: expect.objectContaining({ status: 'pending', toNumber: '+12135550199', fallbackNumber: null, callId: null }),
     });
     expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
-    expect(deps.rolloverFollowUp).not.toHaveBeenCalled();
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
   });
 
   it('no_answer with NO fallback number behaves like a plain no_connect (rollover, reason kept)', async () => {
-    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    // attempt: 2 — this is the record's SECOND miss, so the tail enqueues the
+    // rollover rather than re-queuing a third attempt.
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+16195550100', secondaryNumber: null }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
     await handleDialOutcome('CA1', 'no_answer', deps);
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect', outcome: 'no_answer' }) });
-    expect(deps.rolloverFollowUp).toHaveBeenCalledWith('U1', '005', '00Q1', '2026-07-13');
+    expect(deps.enqueueRollover).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: 'O1', userId: 'U1', sfOwnerId: '005', sessionId: 'S1', recordId: '00Q1', objectType: 'Lead', fromDate: '2026-07-13',
+    }), expect.anything());
   });
 
   it('a plain no_connect (busy / voicemail) NEVER falls back, even when a fallback number exists', async () => {
-    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: '+12135550199', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    // attempt: 2 for the same reason as above — isolates "never falls back" from
+    // the separate first-miss-requeues-instead-of-rolling-over behavior.
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: '+12135550199', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+16195550100', secondaryNumber: '+12135550199' }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
     await handleDialOutcome('CA1', 'no_connect', deps);
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
     expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'pending', toNumber: '+12135550199' }) });
-    expect(deps.rolloverFollowUp).toHaveBeenCalled();
+    expect(deps.enqueueRollover).toHaveBeenCalled();
   });
 
   it('a duplicate/redelivered no_answer for the same call does NOT reset or re-dial twice (compare-and-swap loses)', async () => {
@@ -320,7 +513,7 @@ describe('handleDialOutcome', () => {
     await handleDialOutcome('CA1', 'connected', deps);
     expect(deps.telephony.bridgeToRep).toHaveBeenCalledWith('CA1', 'U1');
     expect(deps.onScreenPop).toHaveBeenCalledWith('U1', 'Lead', '00Q1');
-    expect(deps.rolloverFollowUp).not.toHaveBeenCalled();
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'connected' }) });
   });
   it('connected records a sticky (org, rep, lead) -> pool DID binding when both numbers are known', async () => {
