@@ -105,6 +105,21 @@ export async function soqlQuery<T = Record<string, unknown>>(
   return ((res.json as { records?: T[] }).records ?? []);
 }
 
+/** `SELECT COUNT() …` responses carry the number in `totalSize` with an empty
+ *  `records` array (which `soqlQuery` would discard). Pure, so it tests without
+ *  mocking the module's own HTTP call. Throws on an HTTP error status. */
+export function parseSoqlCount(status: number, json: unknown): number {
+  if (status >= 400) throw new Error(`SOQL count failed (${status}): ${JSON.stringify(json)}`);
+  return Number((json as { totalSize?: number })?.totalSize ?? 0);
+}
+
+/** `SELECT COUNT() …` — Salesforce returns the number in `totalSize` with an
+ *  empty `records` array, which `soqlQuery` would discard. */
+export async function soqlCount(userId: string, soql: string): Promise<number> {
+  const res = await sfFetch(userId, '/query', { query: { q: soql } });
+  return parseSoqlCount(res.status, res.json);
+}
+
 // --- High-level helpers ----------------------------------------------------
 
 export interface SalesforceMatch {
