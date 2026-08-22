@@ -209,3 +209,10 @@ describe('DialerPanel render (SSR)', () => {
     expect(renderToStaticMarkup(<AttemptBadge attempt={1} />)).toBe('');
   });
 });
+
+describe('Tasks in the picker', () => {
+  it('offers Leads, Opportunities, and Tasks', () => {
+    const html = renderToStaticMarkup(<DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={() => {}} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />);
+    expect(html).toContain('Tasks');
+  });
+});

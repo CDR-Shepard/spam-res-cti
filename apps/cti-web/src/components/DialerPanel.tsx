@@ -13,6 +13,7 @@ import {
   dialerControl,
   getDialer,
   getSalesforceListViews,
+  OBJECT_LABELS,
   type DialerControlAction,
   type DialerCurrentItem,
   type DialerObjectType,
@@ -175,6 +176,7 @@ function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Element {
         <span className={`cdot ${dotClassForItemStatus(item.status)}`} />
         {item.objectType} · {item.status.replace(/_/g, ' ')}
       </div>
+      {item.fromNumber && <div className="dp-current-from">from {formatE164(item.fromNumber)}</div>}
       <AttemptBadge attempt={item.attempt} />
     </div>
   );
@@ -228,21 +230,21 @@ function ListViewPicker({
       <div className="section dp-picker">
         <div className="kicker">Power dial a list</div>
         <div className="row dp-picker-obj">
-          {(['Lead', 'Opportunity'] as const).map((o) => (
+          {(['Lead', 'Opportunity', 'Task'] as const).map((o) => (
             <button
               key={o}
               className={`btn ${object === o ? 'active' : ''}`}
               disabled={starting}
               onClick={() => setObject(o)}
             >
-              {o === 'Lead' ? 'Leads' : 'Opportunities'}
+              {OBJECT_LABELS[o]}
             </button>
           ))}
         </div>
         {loading && <div className="empty-hint"><span className="spinner" /> Loading your list views…</div>}
         {error && <div className="dp-error">{error}</div>}
         {listViews && listViews.length === 0 && (
-          <div className="empty-hint">No {object === 'Lead' ? 'Lead' : 'Opportunity'} list views found.</div>
+          <div className="empty-hint">No {OBJECT_LABELS[object]} list views found.</div>
         )}
         {listViews && listViews.length > 0 && (
           <>

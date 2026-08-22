@@ -794,6 +794,7 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 .list .row-item .right .dur { font-variant-numeric: tabular-nums; font-weight: 500; }
 .sync { font-size: 10px; font-weight: 600; color: var(--text-dim); }
 .sync.ok { color: var(--good); }
+.sync.warn { color: var(--warn); }
 
 /* ============================================================================ */
 /* Reputation                                                                   */
@@ -1092,6 +1093,7 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
   font-size: 11px; color: var(--text-muted); margin-top: 4px;
   text-transform: capitalize;
 }
+.dp-current-from { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 .dp-error {
   font-size: 11px; color: var(--bad); line-height: 1.4;
   padding: 6px 2px; margin-bottom: 6px;

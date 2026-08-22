@@ -20,6 +20,7 @@ export interface CallRow {
   salesforceWhoId: string | null;
   salesforceWhatId: string | null;
   createdAt: string;
+  syncError: string | null;
 }
 
 const TERMINAL = ['completed', 'no_answer', 'busy', 'canceled'];
@@ -27,6 +28,17 @@ const TERMINAL = ['completed', 'no_answer', 'busy', 'canceled'];
 /** An outbound call the rep still owes a disposition for (blocks the next dial). */
 export function needsDisposition(row: CallRow): boolean {
   return row.direction === 'outbound' && row.disposition == null && TERMINAL.includes(row.status);
+}
+
+/**
+ * Pure — what the sync status column says. A bare "Local" used to cover both
+ * "not synced yet" and "the ownership gate blocked this Task from ever being
+ * written" — the second case needs to say why, not just that it didn't happen.
+ */
+export function recentSyncLabel(row: Pick<CallRow, 'salesforceTaskId' | 'syncError'>): string {
+  if (row.salesforceTaskId) return 'Synced';
+  if (row.syncError === 'not-owner') return 'Not synced · not owner';
+  return 'Local';
 }
 
 function classify(row: CallRow): 'connected' | 'missed' | 'outgoing' {
@@ -77,6 +89,8 @@ export function RecentCalls({ onReopen }: RecentCallsProps): JSX.Element {
         const Icon = kind === 'missed' ? PhoneMissedIcon : kind === 'connected' ? CheckCircleIcon : PhoneOutgoingIcon;
         const pending = needsDisposition(c);
         const reopenable = pending && !!onReopen;
+        const syncLabel = recentSyncLabel(c);
+        const syncClass = syncLabel === 'Synced' ? 'sync ok' : syncLabel === 'Local' ? 'sync' : 'sync warn';
         return (
           <div
             className={`row-item ${kind} ${pending ? 'needs-disp' : ''} ${reopenable ? 'tappable' : ''}`}
@@ -96,9 +110,7 @@ export function RecentCalls({ onReopen }: RecentCallsProps): JSX.Element {
               <span className="dur">{formatDuration(c.durationSeconds)}</span>
               {pending
                 ? <span className="sync needs">Finish →</span>
-                : c.salesforceTaskId
-                  ? <span className="sync ok">Synced</span>
-                  : <span className="sync">Local</span>}
+                : <span className={syncClass}>{syncLabel}</span>}
             </div>
           </div>
         );

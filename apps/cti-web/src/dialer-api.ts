@@ -19,6 +19,8 @@ export interface DialerCurrentItem {
   toNumber: string | null;
   /** 1 or 2 — the second try of the day for this record. */
   attempt?: number;
+  /** The DID the call went out on. */
+  fromNumber?: string | null;
 }
 
 export interface DialerSession {
@@ -38,7 +40,12 @@ export interface DialerSessionView {
 }
 
 export type DialerControlAction = 'pause' | 'resume' | 'skip' | 'stop' | 'next';
-export type DialerObjectType = 'Lead' | 'Opportunity';
+export type DialerObjectType = 'Lead' | 'Opportunity' | 'Task';
+export const OBJECT_LABELS: Record<DialerObjectType, string> = {
+  Lead: 'Leads',
+  Opportunity: 'Opportunities',
+  Task: 'Tasks',
+};
 
 export interface PendingHandoff {
   objectType: DialerObjectType;
