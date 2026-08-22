@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { followUpCountSoql, pickRolloverDay } from './followup-day.js';
+import { followUpTasksSoql, pickRolloverDay } from './followup-day.js';
 
 const weekdays = new Set([1, 2, 3, 4, 5]);
 const none = new Set<string>();
@@ -30,18 +30,14 @@ describe('pickRolloverDay', () => {
   });
 });
 
-describe('followUpCountSoql', () => {
-  it('counts the owner\'s OPEN follow-ups due that day, all spellings, hand-made included', () => {
-    const q = followUpCountSoql('005ABC', '2026-08-21');
-    expect(q).toMatch(/^SELECT COUNT\(\) FROM Task WHERE /);
-    expect(q).toContain("OwnerId = '005ABC'");
-    expect(q).toContain('IsClosed = false');
-    expect(q).toContain('ActivityDate = 2026-08-21');
-    expect(q).toContain("Subject LIKE '%Follow-up%'");
-    expect(q).toContain("Subject LIKE '%Followup%'");
-    expect(q).toContain("Subject LIKE '%Follow up%'");
+describe('followUpTasksSoql', () => {
+  it('fetches the owner\'s OPEN tasks due that day (subjects are matched in code — SOQL cannot express the FU rule)', () => {
+    const q = followUpTasksSoql('005ABC', '2026-08-21');
+    expect(q).toMatch(/^SELECT Id, Subject FROM Task WHERE /);
+    expect(q).toContain("OwnerId = '005ABC'"); expect(q).toContain('IsClosed = false'); expect(q).toContain('ActivityDate = 2026-08-21');
+    expect(q).toMatch(/LIMIT 500$/); expect(q).not.toMatch(/LIKE/);
   });
   it('escapes the owner id', () => {
-    expect(followUpCountSoql("005'x", '2026-08-21')).toContain("OwnerId = '005\\'x'");
+    expect(followUpTasksSoql("005'x", '2026-08-21')).toContain("OwnerId = '005\\'x'");
   });
 });

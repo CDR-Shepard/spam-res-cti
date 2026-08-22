@@ -35,7 +35,7 @@ function job(o: Partial<FollowupRolloverJob> = {}): FollowupRolloverJob {
   return {
     id: 'J1', orgId: 'O1', userId: 'U1', sfOwnerId: '005', sessionId: 'S1', recordId: '00Q1', objectType: 'Lead',
     fromDate: '2026-08-20', status: 'in_flight', attempts: 1, lastError: null, nextAttemptAt: new Date(),
-    completedAt: null, completedTaskId: null, createdTaskId: null, targetDate: null, createdAt: new Date(), updatedAt: new Date(),
+    completedAt: null, completedTaskId: null, createdTaskId: null, targetDate: null, sourceTaskId: null, createdAt: new Date(), updatedAt: new Date(),
     ...o,
   } as FollowupRolloverJob;
 }
@@ -43,8 +43,12 @@ function deps(over: Partial<WorkerDeps> = {}): WorkerDeps {
   return {
     db: fakeDb(),
     sf: {
-      soqlQuery: vi.fn(async () => [openTask]) as unknown as WorkerDeps['sf']['soqlQuery'],
-      soqlCount: vi.fn(async () => 10),
+      // One fake answers both queries, dispatching on the query text: the
+      // daily-cap fetch (`followUpTasksSoql`) is the only one selecting
+      // `FROM Task WHERE OwnerId`; everything else is a task lookup. The cap
+      // list has ONE follow-up ('Refund' must not count), i.e. room to spare.
+      soqlQuery: vi.fn(async (_u: string, q: string) =>
+        (/FROM Task WHERE OwnerId/.test(q) ? [{ Subject: 'FU' }, { Subject: 'Refund' }] : [openTask])) as unknown as WorkerDeps['sf']['soqlQuery'],
       sfFetch: vi.fn(async (_u: string, path: string, init?: any) =>
         init?.method === 'POST' ? { status: 201, json: { id: '00TNEW' } } : { status: 204, json: null }),
     },
@@ -138,7 +142,9 @@ describe('processRolloverJob', () => {
   });
 
   it('pushes to a later day when the next business day is at the cap', async () => {
-    const d = deps({ sf: { ...deps().sf, soqlCount: vi.fn(async (_u: string, q: string) => (q.includes('2026-08-21') ? 100 : 3)) } });
+    const full = Array.from({ length: 100 }, () => ({ Subject: 'Follow-up' }));
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
+      (/FROM Task WHERE OwnerId/.test(q) ? (q.includes('2026-08-21') ? full : [{ Subject: 'Follow-up' }]) : [openTask])) as unknown as WorkerDeps['sf']['soqlQuery'] } });
     await processRolloverJob(job(), d);
     expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-24');
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ targetDate: '2026-08-24', nextDay: '2026-08-21' }) });
@@ -156,6 +162,48 @@ describe('processRolloverJob', () => {
     await processRolloverJob(job(), d);
     expect(d.sf.sfFetch).not.toHaveBeenCalled();
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'no-task' }) });
+  });
+
+  it('rolls the SOURCE task by id on a Task-run job (no search), and no-ops if it is closed/reassigned', async () => {
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
+      (/Id = '00T9'/.test(q) ? [{ ...openTask, Id: '00T9' }] : [])) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    await processRolloverJob(job({ sourceTaskId: '00T9' }), d);
+    expect((d.sf.sfFetch as any).mock.calls.map((c: any[]) => c[1])).toEqual(['/sobjects/Task', '/sobjects/Task/00T9']);
+    // ...and the record was never searched for a follow-up (that is the point of
+    // carrying the id: the record may hold several, only one of which was dialed).
+    expect((d.sf.soqlQuery as any).mock.calls.map((c: any[]) => c[1]).filter((q: string) => /WhoId =/.test(q))).toEqual([]);
+    // Closed, completed by hand, or reassigned since the miss: the by-id lookup
+    // finds nothing and the job closes out as no-task rather than searching the
+    // record (which could roll a DIFFERENT follow-up the rep never dialed).
+    const d2 = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async () => []) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    await processRolloverJob(job({ sourceTaskId: '00T9' }), d2);
+    expect(d2.sf.sfFetch).not.toHaveBeenCalled();
+    expect(writesOf(d2)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'no-task' }) });
+  });
+
+  /** 8/21 holds one follow-up and one decoy ('Refund' — a bare-substring 'FU'
+   *  the shared rule must NOT count); every other day is empty. `seen` collects
+   *  the cap queries. */
+  const capDayFake = (seen: string[] = []) => vi.fn(async (_u: string, q: string) => {
+    if (/FROM Task WHERE OwnerId/.test(q)) { seen.push(q); return /2026-08-21/.test(q) ? [{ Subject: 'F/U' }, { Subject: 'Refund' }] : []; }
+    return [openTask];
+  }) as unknown as WorkerDeps['sf']['soqlQuery'];
+
+  it('counts the day\'s follow-ups in code with the shared subject rule (FU counts, Refund does not)', async () => {
+    const seen: string[] = [];
+    const d = deps({ capFor: vi.fn(async () => 1), sf: { ...deps().sf, soqlQuery: capDayFake(seen) } });
+    await processRolloverJob(job(), d);
+    expect(seen[0]).toMatch(/^SELECT Id, Subject FROM Task WHERE /); // fetched and counted here, not SELECT COUNT() in SOQL
+    expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-24'); // 8/21 had 1 FU = at cap 1 → pushed
+  });
+
+  it('a non-follow-up on the day does not eat a slot in the cap', async () => {
+    // Same day and same two tasks at cap 2: by the shared rule that day holds
+    // ONE follow-up, so the copy still lands on 8/21. Counting rows (2) — what a
+    // subject-blind COUNT() would do — would push it to 8/24.
+    const d = deps({ capFor: vi.fn(async () => 2), sf: { ...deps().sf, soqlQuery: capDayFake() } });
+    await processRolloverJob(job(), d);
+    expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-21');
   });
 
   it('fails immediately (no retry) on a Salesforce auth error', async () => {
@@ -179,7 +227,9 @@ describe('processRolloverJob', () => {
   });
 
   it('fails loudly when no business day within the bound has room', async () => {
-    const d = deps({ sf: { ...deps().sf, soqlCount: vi.fn(async () => 999) } });
+    const full = Array.from({ length: 100 }, () => ({ Subject: 'Follow-up' })); // every day is at the cap
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
+      (/FROM Task WHERE OwnerId/.test(q) ? full : [openTask])) as unknown as WorkerDeps['sf']['soqlQuery'] } });
     await processRolloverJob(job(), d);
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'failed', lastError: expect.stringMatching(/no business day with room/) }) });
   });

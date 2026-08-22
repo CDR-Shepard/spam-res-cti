@@ -10,6 +10,10 @@ import type { PickDidArgs, PickDidResult } from './pick-agent-did.js';
 export interface RolloverEnqueue {
   orgId: string; userId: string; sfOwnerId: string; sessionId: string;
   recordId: string; objectType: string; fromDate: string;
+  /** The exact Task the rep dialed (Task runs) — the worker rolls THAT task
+   *  instead of searching the record, which on a record with several open
+   *  follow-ups could roll one the rep never called. Null on Lead/Opp runs. */
+  sourceTaskId: string | null;
 }
 
 export interface EngineDeps {
@@ -329,7 +333,11 @@ export async function handleDialOutcome(
   const retryFallback = item.secondaryNumber ?? item.fallbackNumber;
   const sessionLive = session.status === 'active' || session.status === 'paused';
   const requeue = attempt < 2 && retryTo != null && sessionLive;
-  const enqueue = !requeue && (attempt >= 2 || (retryTo == null && sessionLive));
+  // Only a follow-up rolls over. Task runs dial whatever the rep's list holds
+  // ("Check in", "Send quote"), and completing/copying one of those would
+  // rewrite work the rollover rule was never meant to touch. Lead/Opp runs and
+  // every pre-0027 row are eligible (the column defaults to true).
+  const enqueue = !requeue && item.followupEligible && (attempt >= 2 || (retryTo == null && sessionLive));
 
   // The CAS, the requeue insert, and the rollover enqueue all ride inside the
   // same transaction, so a duplicated webhook can neither double-requeue nor
@@ -359,6 +367,11 @@ export async function handleDialOutcome(
         sessionId: item.sessionId, ordinal: maxOrdinal + 1, objectType: item.objectType, recordId: item.recordId,
         toNumber: retryTo, fallbackNumber: retryFallback,
         primaryNumber: item.primaryNumber, secondaryNumber: item.secondaryNumber,
+        // Carried forward, not defaulted: without these the attempt-2 row falls
+        // back to the column defaults (null / true), so the SECOND miss would
+        // roll a "Check in" over as if it were a follow-up, and roll it by
+        // search instead of by the task the rep actually dialed.
+        taskId: item.taskId, followupEligible: item.followupEligible,
         attempt: 2, status: 'pending',
         retryNotBefore: new Date(deps.nowUtc.getTime() + RETRY_FLOOR_MS),
       });
@@ -366,6 +379,7 @@ export async function handleDialOutcome(
       await deps.enqueueRollover({
         orgId: session.orgId, userId: session.userId, sfOwnerId: session.sfOwnerId, sessionId: session.id,
         recordId: item.recordId, objectType: item.objectType, fromDate: deps.todayIso,
+        sourceTaskId: item.taskId ?? null,
       }, tx);
     }
     return true;

@@ -1,8 +1,10 @@
 /**
  * Follow-up rollover worker — drains followup_rollover_jobs single-flight.
  *
- * Per job: find the rep's open Follow-up on the record → pick the first business
- * day under the org's daily cap (live COUNT in Salesforce) → CREATE the copy →
+ * Per job: find the follow-up to roll — the exact task the rep dialed when the
+ * job carries a `source_task_id` (Task runs), else the rep's open Follow-up on
+ * the record → pick the first business day under the org's daily cap (the day's
+ * open tasks are fetched live and counted here) → CREATE the copy →
  * stamp created_task_id → COMPLETE the original. Create-before-complete means a
  * create failure leaves the original open (retryable) instead of lost; stamping
  * created_task_id before the PATCH means a crash in between is retried by
@@ -40,8 +42,9 @@ import { buildEngineDeps } from '../dialer/live-deps.js';
 import { nextBusinessDay } from '../dialer/next-business-day.js';
 import { inFlightItem } from '../dialer/state.js';
 import { fetchBusinessCalendar } from './business-calendar.js';
-import { SalesforceUnauthorizedError, sfFetch, soqlCount, soqlEscape, soqlQuery } from './client.js';
-import { FOLLOWUP_DAILY_CAP_DEFAULT, MAX_ROLLOVER_BUSINESS_DAYS, followUpCountSoql, pickRolloverDay } from './followup-day.js';
+import { SalesforceUnauthorizedError, sfFetch, soqlEscape, soqlQuery } from './client.js';
+import { FOLLOWUP_DAILY_CAP_DEFAULT, MAX_ROLLOVER_BUSINESS_DAYS, followUpTasksSoql, pickRolloverDay } from './followup-day.js';
+import { countFollowUps } from './followup-subject.js';
 import { followUpCopyFields, pickFollowUpTask, type FollowUpTask } from './followup.js';
 
 export const MAX_ATTEMPTS = 8;
@@ -69,7 +72,7 @@ export const ABANDONED_AFTER_MS = 10 * 60_000;
 
 export interface WorkerDeps {
   db: ReturnType<typeof getDb>;
-  sf: { soqlQuery: typeof soqlQuery; soqlCount: typeof soqlCount; sfFetch: typeof sfFetch };
+  sf: { soqlQuery: typeof soqlQuery; sfFetch: typeof sfFetch };
   calendarFor: (userId: string) => Promise<{ workingWeekdays: ReadonlySet<number>; holidays: ReadonlySet<string> }>;
   capFor: (orgId: string) => Promise<number>;
   now: () => Date;
@@ -118,13 +121,28 @@ async function findOpenFollowUp(deps: WorkerDeps, job: FollowupRolloverJob): Pro
       job.userId,
       'SELECT Id, Subject, Type, Priority, OwnerId, WhoId, WhatId, ActivityDate FROM Task ' +
         `WHERE IsClosed = false AND OwnerId = '${owner}' AND (WhoId = '${rid}' OR WhatId = '${rid}') ` +
-        "AND (Subject LIKE '%Follow-up%' OR Subject LIKE '%Followup%' OR Subject LIKE '%Follow up%') " +
+        // No subject filter: SOQL LIKE cannot express the shared follow-up rule
+        // (it would match "refund" on 'FU' and miss 'F/U'). `pickFollowUpTask`
+        // applies that rule in code over these 50.
         'ORDER BY ActivityDate ASC NULLS LAST LIMIT 50',
     ),
     SF_CALL_TIMEOUT_MS,
     'follow-up query',
   );
   return pickFollowUpTask(tasks);
+}
+
+/**
+ * The exact task the rep dialed (Task runs). Re-read rather than trusted: it may
+ * have been completed, closed, or reassigned between the miss and this job, and
+ * any of those means "nothing to roll" — never fall back to searching the
+ * record, which could roll a different follow-up the rep never called.
+ */
+async function findSourceTask(deps: WorkerDeps, job: FollowupRolloverJob, sourceTaskId: string): Promise<FollowUpTask | null> {
+  const rows = await withTimeout(deps.sf.soqlQuery<FollowUpTask>(job.userId,
+    'SELECT Id, Subject, Type, Priority, OwnerId, WhoId, WhatId, ActivityDate FROM Task ' +
+    `WHERE Id = '${soqlEscape(sourceTaskId)}' AND IsClosed = false AND OwnerId = '${soqlEscape(job.sfOwnerId)}' LIMIT 1`), SF_CALL_TIMEOUT_MS, 'source task');
+  return rows[0] ?? null;
 }
 
 /** Complete the SOURCE task and close the job out. `sourceTaskId` is non-null by
@@ -164,7 +182,7 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
       return;
     }
 
-    const task = await findOpenFollowUp(deps, job);
+    const task = job.sourceTaskId ? await findSourceTask(deps, job, job.sourceTaskId) : await findOpenFollowUp(deps, job);
     if (!task) {
       await patchJob(deps, job.id, { status: 'succeeded', lastError: 'no-task', completedAt: deps.now() });
       return;
@@ -180,7 +198,7 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     const nextDay = nextBusinessDay(job.fromDate, cal.workingWeekdays, cal.holidays);
     const targetDate = await pickRolloverDay({
       fromDate: job.fromDate, cap, workingWeekdays: cal.workingWeekdays, holidays: cal.holidays,
-      countOn: (d) => withTimeout(deps.sf.soqlCount(job.userId, followUpCountSoql(job.sfOwnerId, d)), SF_CALL_TIMEOUT_MS, 'follow-up count'),
+      countOn: async (d) => countFollowUps(await withTimeout(deps.sf.soqlQuery<{ Subject?: string | null }>(job.userId, followUpTasksSoql(job.sfOwnerId, d)), SF_CALL_TIMEOUT_MS, 'follow-up count')),
     });
     if (!targetDate) {
       logFailed(job, 'no business day with room within 30 days');
@@ -365,7 +383,7 @@ function liveDeps(): WorkerDeps {
   const db = getDb();
   return {
     db,
-    sf: { soqlQuery, soqlCount, sfFetch },
+    sf: { soqlQuery, sfFetch },
     calendarFor: fetchBusinessCalendar,
     capFor: async (orgId) => {
       const cfg = await db.query.campaignConfigs.findFirst({
