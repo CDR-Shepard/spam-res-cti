@@ -72,15 +72,23 @@ function pendingDispositionPayload(c: typeof schema.calls.$inferSelect) {
  * Why a call has no Salesforce Task, for `GET /calls` — or `null` while that is
  * still undecided.
  *
- * Only a job that has stopped moving can answer. `last_error` is also written on
- * every failed attempt of a job that is still 'pending' (or is 'in_flight' right
- * now) and will most likely succeed on its next retry; surfacing that would show
- * the rep a raw Salesforce error next to a call that is about to sync fine. So a
- * non-terminal job reports no reason at all.
+ * The call row answers first: if it carries a Task id, the Task is there and
+ * there is nothing to explain. Its job's `last_error` is then the record of an
+ * attempt that later succeeded — jobs that succeeded before the success write
+ * started clearing that column keep the text forever and never re-sync, so
+ * reading it would tell a rep their logged call went missing.
+ *
+ * Otherwise only a job that has stopped moving can answer. `last_error` is also
+ * written on every failed attempt of a job that is still 'pending' (or is
+ * 'in_flight' right now) and will most likely succeed on its next retry;
+ * surfacing that would show the rep a raw Salesforce error next to a call that
+ * is about to sync fine. So a non-terminal job reports no reason at all.
  */
-export function syncErrorForJob(
+export function syncErrorForCall(
+  call: { salesforceTaskId: string | null },
   job: { status: typeof schema.salesforceSyncJobs.$inferSelect['status']; lastError: string | null } | undefined,
 ): string | null {
+  if (call.salesforceTaskId) return null;
   if (!job) return null;
   return job.status === 'succeeded' || job.status === 'failed' ? job.lastError : null;
 }
@@ -303,7 +311,7 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     // Why a call has no Salesforce Task, when the sync worker decided that
     // deliberately (e.g. 'not-owner') rather than failing — the call list shows
     // it so a rep is never left guessing where their activity went. See
-    // syncErrorForJob for why the job's status gates the answer.
+    // syncErrorForCall for why the Task id and the job's status gate the answer.
     const syncJobs = rows.length
       ? await db
           .select({
@@ -315,7 +323,7 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
           .where(inArray(schema.salesforceSyncJobs.callId, rows.map((r) => r.id)))
       : [];
     const syncJobByCall = new Map(syncJobs.map((j) => [j.callId, j]));
-    return { calls: rows.map((r) => ({ ...r, syncError: syncErrorForJob(syncJobByCall.get(r.id)) })) };
+    return { calls: rows.map((r) => ({ ...r, syncError: syncErrorForCall(r, syncJobByCall.get(r.id)) })) };
   });
 
   /**

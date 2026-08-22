@@ -58,7 +58,12 @@ export async function fetchOwnership(userId: string, recordId: string): Promise<
   if (hit && Date.now() - hit.at < TTL_MS) return hit.snap;
   const type = objectTypeForId(recordId);
   if (type === 'other') return remember(recordId, { type, ownerId: null });
-  if (type === 'Opportunity') {
+  // The org may not have Lead_Manager__c at all. That is a configuration fact,
+  // not a failure — and one we only need to learn ONCE. After the first
+  // INVALID_FIELD the flag routes every later Opportunity straight to the
+  // owner-only query below, instead of paying a guaranteed 400 (and a second
+  // round-trip) against the org's API limits on every cache miss forever.
+  if (type === 'Opportunity' && !warnedLeadManager) {
     try {
       const r = await soqlQuery<{ OwnerId: string; Lead_Manager__c?: string | null }>(
         userId,
@@ -66,20 +71,13 @@ export async function fetchOwnership(userId: string, recordId: string): Promise<
       );
       return remember(recordId, { type, ownerId: r[0]?.OwnerId ?? null, leadManagerId: r[0]?.Lead_Manager__c ?? null });
     } catch (err) {
-      // The org may not have the field at all. That is a configuration fact, not
-      // a failure: fall back to owner-only and say so ONCE, not per call.
       if (!/INVALID_FIELD/.test((err as Error).message)) throw err;
-      if (!warnedLeadManager) {
-        warnedLeadManager = true;
-        console.warn('[ownership] Lead_Manager__c not found on Opportunity — gate is owner-only');
-      }
-      const r = await soqlQuery<{ OwnerId: string }>(
-        userId,
-        `SELECT OwnerId FROM Opportunity WHERE Id = '${soqlEscape(recordId)}' LIMIT 1`,
-      );
-      return remember(recordId, { type, ownerId: r[0]?.OwnerId ?? null, leadManagerId: null });
+      warnedLeadManager = true;
+      console.warn('[ownership] Lead_Manager__c not found on Opportunity — gate is owner-only');
     }
   }
+  // Owner-only: Lead/Contact/Task, and an Opportunity in an org without the field
+  // (no lead manager to consider, so the gate is the owner alone).
   const r = await soqlQuery<{ OwnerId: string }>(
     userId,
     `SELECT OwnerId FROM ${type} WHERE Id = '${soqlEscape(recordId)}' LIMIT 1`,
