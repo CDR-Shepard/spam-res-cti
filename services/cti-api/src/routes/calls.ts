@@ -16,6 +16,8 @@ import { normalize } from '../phone.js';
 import { warmupCapForAge } from '../firewall/warmup.js';
 import { enqueueSyncForCall, AUTO_DISPOSITION } from '../salesforce/sync.js';
 import { updateCallTask } from '../salesforce/client.js';
+import { salesforceUserId } from '../salesforce/current-user.js';
+import { callerMayCreateTaskOn, fetchOwnership } from '../salesforce/ownership.js';
 import { loadConfig } from '../config.js';
 
 /**
@@ -247,7 +249,26 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
       req.log.warn({ err }, 'sticky number upsert failed');
     }
 
-    return { call: row };
+    // Will this call become a Salesforce Task? The softphone honors the answer
+    // (no wrap-up "logged to Salesforce" promise on a record the rep neither
+    // owns nor manages). Advisory only: the call is already placed, and the sync
+    // worker re-applies the same gate server-side. A lookup failure therefore
+    // defaults to `true` rather than blocking or misinforming the rep.
+    let taskAllowed = true;
+    const recipientRecordId = parsed.data.recipientRecordId;
+    if (recipientRecordId) {
+      try {
+        const [snapshot, sfUserId] = await Promise.all([
+          fetchOwnership(session.userId, recipientRecordId),
+          salesforceUserId(session.userId),
+        ]);
+        taskAllowed = callerMayCreateTaskOn(snapshot, sfUserId);
+      } catch (err) {
+        req.log.warn({ err, recipientRecordId }, 'ownership lookup failed; assuming the task is allowed');
+      }
+    }
+
+    return { call: row, taskAllowed };
   });
 
   app.get('/calls', async (req, reply) => {
@@ -262,7 +283,17 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
       .where(eq(schema.calls.userId, session.userId))
       .orderBy(desc(schema.calls.createdAt))
       .limit(limit);
-    return { calls: rows };
+    // Why a call has no Salesforce Task, when the sync worker decided that
+    // deliberately (e.g. 'not-owner') rather than failing — the call list shows
+    // it so a rep is never left guessing where their activity went.
+    const syncJobs = rows.length
+      ? await db
+          .select({ callId: schema.salesforceSyncJobs.callId, lastError: schema.salesforceSyncJobs.lastError })
+          .from(schema.salesforceSyncJobs)
+          .where(inArray(schema.salesforceSyncJobs.callId, rows.map((r) => r.id)))
+      : [];
+    const syncErrorByCall = new Map(syncJobs.map((j) => [j.callId, j.lastError]));
+    return { calls: rows.map((r) => ({ ...r, syncError: syncErrorByCall.get(r.id) ?? null })) };
   });
 
   /**

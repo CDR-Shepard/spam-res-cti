@@ -46,6 +46,7 @@ import { SalesforceUnauthorizedError, sfFetch, soqlEscape, soqlQuery } from './c
 import { FOLLOWUP_DAILY_CAP_DEFAULT, MAX_ROLLOVER_BUSINESS_DAYS, followUpTasksSoql, pickRolloverDay } from './followup-day.js';
 import { countFollowUps } from './followup-subject.js';
 import { followUpCopyFields, pickFollowUpTask, type FollowUpTask } from './followup.js';
+import { callerMayCreateTaskOn, fetchOwnership, type OwnershipSnapshot } from './ownership.js';
 
 export const MAX_ATTEMPTS = 8;
 export const BACKOFF_BASE_MS = 30_000;
@@ -75,6 +76,9 @@ export interface WorkerDeps {
   sf: { soqlQuery: typeof soqlQuery; sfFetch: typeof sfFetch };
   calendarFor: (userId: string) => Promise<{ workingWeekdays: ReadonlySet<number>; holidays: ReadonlySet<string> }>;
   capFor: (orgId: string) => Promise<number>;
+  /** Owner (and Opportunity lead manager) of the record this job rolls — the
+   *  ownership gate's only input. Injected so the gate is testable without SOQL. */
+  ownership: (userId: string, recordId: string) => Promise<OwnershipSnapshot>;
   now: () => Date;
   /** Advance a dialer run (the retry nudge). Injected so `nudgeDueRetries` is
    *  testable without a live engine — the real one originates a phone call. */
@@ -185,6 +189,16 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     const task = job.sourceTaskId ? await findSourceTask(deps, job, job.sourceTaskId) : await findOpenFollowUp(deps, job);
     if (!task) {
       await patchJob(deps, job.id, { status: 'succeeded', lastError: 'no-task', completedAt: deps.now() });
+      return;
+    }
+
+    // OWNERSHIP GATE. Rolling a follow-up writes a Task on someone's record; if
+    // the rep neither owns nor manages it, we create nothing and close the job
+    // out as 'not-owner'. The SOURCE task is deliberately left OPEN — completing
+    // it would erase another rep's follow-up. A lookup failure throws into the
+    // catch below (transient → retry), i.e. the gate fails closed.
+    if (!callerMayCreateTaskOn(await withTimeout(deps.ownership(job.userId, job.recordId), SF_CALL_TIMEOUT_MS, 'ownership'), job.sfOwnerId)) {
+      await patchJob(deps, job.id, { status: 'succeeded', lastError: 'not-owner', completedAt: deps.now() });
       return;
     }
 
@@ -391,6 +405,7 @@ function liveDeps(): WorkerDeps {
       });
       return cfg?.followupDailyCap ?? FOLLOWUP_DAILY_CAP_DEFAULT;
     },
+    ownership: fetchOwnership,
     now: () => new Date(),
     advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()),
     stop: (sessionId) => stopSession(sessionId, buildEngineDeps()),

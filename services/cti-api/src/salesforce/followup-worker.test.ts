@@ -12,6 +12,7 @@ import {
   type WorkerDeps,
 } from './followup-worker.js';
 import { SalesforceUnauthorizedError } from './client.js';
+import type { OwnershipSnapshot } from './ownership.js';
 import type { FollowupRolloverJob } from '../db/schema.js';
 
 const NOW = new Date('2026-08-22T17:00:00Z');
@@ -54,6 +55,10 @@ function deps(over: Partial<WorkerDeps> = {}): WorkerDeps {
     },
     calendarFor: vi.fn(async () => ({ workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays: new Set<string>() })),
     capFor: vi.fn(async () => 100),
+    // The fixture record is owned by the fixture job's sfOwnerId ('005'), i.e.
+    // the ownership gate passes by default and only the test that overrides this
+    // exercises the not-owner path.
+    ownership: vi.fn(async (): Promise<OwnershipSnapshot> => ({ type: 'Lead', ownerId: '005' })),
     now: () => NOW,
     advance: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
@@ -162,6 +167,13 @@ describe('processRolloverJob', () => {
     await processRolloverJob(job(), d);
     expect(d.sf.sfFetch).not.toHaveBeenCalled();
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'no-task' }) });
+  });
+
+  it('does not create the copy on a record the rep neither owns nor manages (not-owner), leaves the source open', async () => {
+    const d = deps({ ownership: vi.fn(async (): Promise<OwnershipSnapshot> => ({ type: 'Opportunity', ownerId: '005X', leadManagerId: '005Y' })) });
+    await processRolloverJob(job(), d);
+    expect(d.sf.sfFetch).not.toHaveBeenCalled();
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'not-owner' }) });
   });
 
   it('rolls the SOURCE task by id on a Task-run job (no search), and no-ops if it is closed/reassigned', async () => {

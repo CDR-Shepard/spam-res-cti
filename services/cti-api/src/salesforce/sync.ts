@@ -9,6 +9,8 @@ import { normalize } from '../phone.js';
 import { loadConfig } from '../config.js';
 import { buildRecordingPublicUrl } from '../telephony/recording-links.js';
 import { createCallTask, findByPhone, SalesforceUnauthorizedError, updateCallTask } from './client.js';
+import { salesforceUserId } from './current-user.js';
+import { callerMayCreateTaskOn, fetchOwnership } from './ownership.js';
 
 /** Public no-login recording link for a call, or null when nothing is recorded. */
 function recordingPublicUrl(call: typeof schema.calls.$inferSelect): string | null {
@@ -155,11 +157,14 @@ export async function runSyncTick(): Promise<{ processed: number }> {
       .where(eq(schema.salesforceSyncJobs.id, job.id));
 
     try {
-      await syncOne(job.callId);
+      const result = await syncOne(job.callId);
       await db
         .update(schema.salesforceSyncJobs)
         .set({
           status: 'succeeded',
+          // Why no Task exists, when that was a decision rather than a failure
+          // (today: the ownership gate). GET /calls surfaces it as `syncError`.
+          lastError: result?.skipped ?? null,
           completedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -184,7 +189,12 @@ export async function runSyncTick(): Promise<{ processed: number }> {
   return { processed };
 }
 
-async function syncOne(callId: string): Promise<void> {
+/**
+ * Log one call to Salesforce. Resolves to `{ skipped }` when the call was
+ * deliberately NOT written as a Task (the job still succeeds — there is nothing
+ * to retry); `void` on a normal sync.
+ */
+async function syncOne(callId: string): Promise<{ skipped: 'not-owner' } | void> {
   const db = getDb();
   const call = await db.query.calls.findFirst({ where: eq(schema.calls.id, callId) });
   if (!call) return;
@@ -208,6 +218,14 @@ async function syncOne(callId: string): Promise<void> {
     const match = await findByPhone(call.userId, counterparty);
     if (match?.whoId) whoId = match.whoId;
     if (match?.whatId) whatId = match.whatId;
+  }
+
+  // Ownership gate: never write a Task on a record the caller doesn't own/manage.
+  // The call stays fully logged in the CTI; the job records why no Task exists.
+  const targetId = whoId ?? whatId;
+  if (targetId) {
+    const me = await salesforceUserId(call.userId);
+    if (!callerMayCreateTaskOn(await fetchOwnership(call.userId, targetId), me)) return { skipped: 'not-owner' as const };
   }
 
   const subject = `${inbound ? 'Inbound' : 'Outbound'} Call - ${counterparty}`;
