@@ -213,12 +213,22 @@ describe('processRolloverJob', () => {
     expect((d.sf.sfFetch as any).mock.calls.map((c: any[]) => c[1])).toEqual(['/sobjects/Task', '/sobjects/Task/00T9']);
     expect((d.sf.sfFetch as any).mock.calls[0][2].body).toMatchObject({ Subject: 'Follow-up' }); // 00T9's, not 00TOLD's
     // Closed, completed by hand, or reassigned since the miss: the by-id lookup
-    // finds nothing and the job closes out as no-task rather than searching the
-    // record (which could roll a DIFFERENT follow-up the rep never dialed).
-    const d2 = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async () => []) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    // finds nothing — but one rollover per person per day still owes the record
+    // its same-day clearing and its single copy, so the worker falls back to the
+    // record's open follow-ups instead of closing out as no-task.
+    const sameDay = { ...openTask, Id: '00T5', Subject: 'FU', ActivityDate: job().fromDate };
+    const d2 = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
+      if (/Id = '00T9'/.test(q)) return [];
+      if (/FROM Task WHERE OwnerId/.test(q)) return [];
+      return [sameDay];
+    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
     await processRolloverJob(job({ sourceTaskId: '00T9' }), d2);
-    expect(d2.sf.sfFetch).not.toHaveBeenCalled();
-    expect(writesOf(d2)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'no-task' }) });
+    expect((d2.sf.sfFetch as any).mock.calls.map((c: any[]) => c[1])).toEqual(['/sobjects/Task', '/sobjects/Task/00T5']);
+    // Nothing open on the record either → no-task.
+    const d3 = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async () => []) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    await processRolloverJob(job({ sourceTaskId: '00T9' }), d3);
+    expect(d3.sf.sfFetch).not.toHaveBeenCalled();
+    expect(writesOf(d3)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'no-task' }) });
   });
 
   // -------------------------------------------------------------------------
@@ -738,5 +748,16 @@ describe('expireAbandonedSessions — free the one-active-session slot (C1)', ()
     const d = deps({ db: expireDb([session({ id: 'S1' }), session({ id: 'S2' })], [[], []]), stop });
     expect(await expireAbandonedSessions(d)).toBe(1);
     expect(stop).toHaveBeenCalledWith('S2');
+  });
+});
+
+describe('completeTasks — a vanished PRIMARY never strands its siblings', () => {
+  it('retry path: 404 on the primary is skipped and the sibling is still completed; job succeeds', async () => {
+    const sfFetch = vi.fn(async (_u: string, path: string) =>
+      /00TA$/.test(path) ? { status: 404, json: [{ errorCode: 'NOT_FOUND' }] } : { status: 204, json: null });
+    const d = deps({ sf: { ...deps().sf, sfFetch: sfFetch as unknown as WorkerDeps['sf']['sfFetch'] } });
+    await processRolloverJob(job({ createdTaskId: '00TNEW', completedTaskId: '00TA', completedTaskIds: ['00TA', '00TB'] }), d);
+    expect(sfFetch.mock.calls.map((c) => c[1])).toEqual(['/sobjects/Task/00TA', '/sobjects/Task/00TB']);
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
   });
 });

@@ -204,13 +204,17 @@ async function findSourceTask(deps: WorkerDeps, job: FollowupRolloverJob, source
  * through leaves it retryable with the full clear set still stamped.
  */
 async function completeTasks(deps: WorkerDeps, job: FollowupRolloverJob, ids: ReadonlyArray<string>): Promise<void> {
-  for (const [i, id] of ids.entries()) {
+  // The copy already exists by the time we get here (fresh path stamps
+  // `createdTaskId` first; the retry path only runs with it set), so a task
+  // that vanished since the stamp — primary OR sibling — is skipped, never a
+  // failure: failing on the primary would strand every sibling in the set.
+  for (const id of ids) {
     const done = await withTimeout(
       deps.sf.sfFetch(job.userId, `/sobjects/Task/${id}`, { method: 'PATCH', body: { Status: 'Completed' } }),
       SF_CALL_TIMEOUT_MS,
       'complete task',
     );
-    if (done.status === 404 && i > 0) {
+    if (done.status === 404) {
       console.warn('[followup-worker] task already gone; skipping complete', { jobId: job.id, taskId: id });
       continue;
     }
@@ -249,10 +253,16 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     // The record's open tasks. The record path needs them to pick the template;
     // the by-id path re-uses them for the siblings only (its template is the
     // exact task the rep dialed, whatever a search would have preferred).
-    const onRecord = job.sourceTaskId ? null : await listOpenFollowUps(deps, job);
-    const task = job.sourceTaskId
-      ? await findSourceTask(deps, job, job.sourceTaskId)
-      : pickFollowUpTask(onRecord!);
+    let onRecord = job.sourceTaskId ? null : await listOpenFollowUps(deps, job);
+    let task = job.sourceTaskId ? await findSourceTask(deps, job, job.sourceTaskId) : null;
+    if (!task) {
+      // By-id miss (closed, completed by hand, or reassigned since the dial) or
+      // the record path: fall through to the record's open follow-ups. One
+      // rollover per person per day still owes this record its same-day
+      // clearing and its single copy — closing out as no-task would strand them.
+      onRecord ??= await listOpenFollowUps(deps, job);
+      task = pickFollowUpTask(onRecord);
+    }
     if (!task) {
       await patchJob(deps, job.id, { status: 'succeeded', lastError: 'no-task', completedAt: deps.now() });
       return;
