@@ -14,17 +14,20 @@ describe('sessionCounts', () => {
 });
 
 describe('rolloverSummary', () => {
-  const nextDay = (d: string) => (d === '2026-08-20' ? '2026-08-21' : 'x');
   it('splits succeeded jobs into moved (next business day) vs pushed (later, by the cap)', () => {
     const s = rolloverSummary([
-      { status: 'succeeded', fromDate: '2026-08-20', targetDate: '2026-08-21' },
-      { status: 'succeeded', fromDate: '2026-08-20', targetDate: '2026-08-24' },
-      { status: 'failed', fromDate: '2026-08-20', targetDate: null },
-      { status: 'pending', fromDate: '2026-08-20', targetDate: null },
-    ], nextDay);
+      { status: 'succeeded', targetDate: '2026-08-21', nextDay: '2026-08-21' },
+      { status: 'succeeded', targetDate: '2026-08-24', nextDay: '2026-08-21' },
+      { status: 'failed', targetDate: null, nextDay: '2026-08-21' },
+      { status: 'pending', targetDate: null, nextDay: '2026-08-21' },
+    ]);
     expect(s).toEqual({ moved: 1, pushed: 1, failed: 1, pending: 1 });
   });
+  it('counts an in_flight job as pending too', () => {
+    const s = rolloverSummary([{ status: 'in_flight', targetDate: null, nextDay: null }]);
+    expect(s).toEqual({ moved: 0, pushed: 0, failed: 0, pending: 1 });
+  });
   it('a no-task success (no targetDate) counts as neither moved nor pushed', () => {
-    expect(rolloverSummary([{ status: 'succeeded', fromDate: '2026-08-20', targetDate: null }], nextDay)).toEqual({ moved: 0, pushed: 0, failed: 0, pending: 0 });
+    expect(rolloverSummary([{ status: 'succeeded', targetDate: null, nextDay: '2026-08-21' }])).toEqual({ moved: 0, pushed: 0, failed: 0, pending: 0 });
   });
 });

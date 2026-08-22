@@ -64,7 +64,7 @@ describe('processRolloverJob', () => {
     expect(calls[0]).toEqual(['/sobjects/Task', 'POST']);          // create first
     expect(calls[1]).toEqual(['/sobjects/Task/00T1', 'PATCH']);    // then complete
     expect(fetch.mock.calls[0][2].body).toMatchObject({ ActivityDate: '2026-08-21', OwnerId: '005', Status: 'Not Started' });
-    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ createdTaskId: '00TNEW', targetDate: '2026-08-21' }) });
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ createdTaskId: '00TNEW', targetDate: '2026-08-21', nextDay: '2026-08-21' }) });
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', completedTaskId: '00T1' }) });
   });
 
@@ -72,6 +72,7 @@ describe('processRolloverJob', () => {
     const d = deps({ sf: { ...deps().sf, soqlCount: vi.fn(async (_u: string, q: string) => (q.includes('2026-08-21') ? 100 : 3)) } });
     await processRolloverJob(job(), d);
     expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-24');
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ targetDate: '2026-08-24', nextDay: '2026-08-21' }) });
   });
 
   it('is idempotent on retry: a job that already created its copy only completes (no second create)', async () => {

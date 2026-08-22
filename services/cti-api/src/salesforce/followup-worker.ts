@@ -25,6 +25,7 @@ import { getDb, schema } from '../db/index.js';
 import type { FollowupRolloverJob } from '../db/schema.js';
 import { advanceSession } from '../dialer/engine.js';
 import { buildEngineDeps } from '../dialer/live-deps.js';
+import { nextBusinessDay } from '../dialer/next-business-day.js';
 import { fetchBusinessCalendar } from './business-calendar.js';
 import { SalesforceUnauthorizedError, sfFetch, soqlCount, soqlEscape, soqlQuery } from './client.js';
 import { FOLLOWUP_DAILY_CAP_DEFAULT, followUpCountSoql, pickRolloverDay } from './followup-day.js';
@@ -130,6 +131,10 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
 
     const cal = await deps.calendarFor(job.userId);
     const cap = await deps.capFor(job.orgId);
+    // The plain next business day (no cap applied) — stamped alongside the
+    // actual target so the session-view summary can tell "moved" from
+    // "pushed" without ever calling Salesforce itself.
+    const nextDay = nextBusinessDay(job.fromDate, cal.workingWeekdays, cal.holidays);
     const targetDate = await pickRolloverDay({
       fromDate: job.fromDate, cap, workingWeekdays: cal.workingWeekdays, holidays: cal.holidays,
       countOn: (d) => withTimeout(deps.sf.soqlCount(job.userId, followUpCountSoql(job.sfOwnerId, d)), SF_CALL_TIMEOUT_MS, 'follow-up count'),
@@ -150,7 +155,7 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     const createdId = (created.json as { id?: unknown })?.id;
     if (typeof createdId !== 'string' || !createdId) throw new Error(`create returned no id (${created.status})`);
     // Stamp BEFORE completing: a crash from here on is retried by completing only.
-    await patchJob(deps, job.id, { createdTaskId: createdId, targetDate, completedTaskId: task.Id });
+    await patchJob(deps, job.id, { createdTaskId: createdId, targetDate, completedTaskId: task.Id, nextDay });
 
     await completeSource(deps, job, task.Id);
   } catch (err) {

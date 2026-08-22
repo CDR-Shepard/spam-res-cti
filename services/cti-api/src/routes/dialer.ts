@@ -44,8 +44,6 @@ import { buildEngineDeps } from '../dialer/live-deps.js';
 import { mapAnsweredBy } from '../dialer/amd.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
-import { fetchBusinessCalendar } from '../salesforce/business-calendar.js';
-import { nextBusinessDay } from '../dialer/next-business-day.js';
 import {
   parseHandoffInput,
   upsertPendingHandoff,
@@ -250,13 +248,12 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     const current = inFlightItem(items);
     const nextRetry = !current && session.status === 'active' && !nextEligiblePendingItem(items, now) ? earliestRetryAt(items, now) : null;
     const jobs = await db.query.followupRolloverJobs.findMany({ where: eq(schema.followupRolloverJobs.sessionId, session.id) });
-    const cal = await fetchBusinessCalendar(session.userId).catch(() => ({ workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays: new Set<string>() }));
     return {
       session,
       counts: sessionCounts(items),
       currentItem: current,
       waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
-      rollovers: rolloverSummary(jobs, (d) => nextBusinessDay(d, cal.workingWeekdays, cal.holidays)),
+      rollovers: rolloverSummary(jobs),
     };
   });
 

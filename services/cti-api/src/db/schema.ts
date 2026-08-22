@@ -639,6 +639,8 @@ export const followupRolloverJobs = pgTable(
     createdTaskId: text('created_task_id'),
     /** The business day the copy landed on (for the run summary). */
     targetDate: text('target_date'),
+    /** The plain next business day after fromDate — lets the run summary tell "moved" from "pushed" without a Salesforce call. */
+    nextDay: text('next_day'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
