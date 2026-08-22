@@ -40,10 +40,8 @@ import {
 } from '../dialer/engine.js';
 import { inFlightItem } from '../dialer/state.js';
 import { sessionCounts } from '../dialer/session-store.js';
-import { TwilioDialerTelephony } from '../dialer/twilio-telephony.js';
-import { pickPoolDid, withinCallingHours, parseCallingHoursExempt } from '../dialer/pick-did.js';
+import { buildEngineDeps } from '../dialer/live-deps.js';
 import { mapAnsweredBy } from '../dialer/amd.js';
-import { enqueueFollowupRollover } from '../salesforce/followup-worker.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
 import {
@@ -60,40 +58,6 @@ const StartBody = z.object({
   objectType: z.enum(['Lead', 'Opportunity']),
   recordIds: z.array(z.string().min(15).max(20)).min(1).max(500),
 });
-
-/** GG Homes operates out of America/Los_Angeles — the rollover follow-up's
- *  "today" is computed in that org timezone, not the server's (UTC on Railway). */
-const ORG_TIMEZONE = 'America/Los_Angeles';
-
-/** `YYYY-MM-DD` for `now` in the org's timezone. `en-CA` formats as ISO order,
- *  so no further reassembly is needed. */
-function orgTodayIso(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: ORG_TIMEZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-}
-
-/** Real EngineDeps for a request. Screen-pop is wired by Plan 4. */
-function buildEngineDeps(): EngineDeps {
-  const db = getDb();
-  const cfg = loadConfig();
-  // Owned test DIDs in the allowlist skip the calling-hours guard so a dial-flow
-  // test can run outside 8am-9pm; every other number still respects it.
-  const exempt = parseCallingHoursExempt(cfg.DIALER_CALLING_HOURS_EXEMPT);
-  return {
-    db,
-    telephony: new TwilioDialerTelephony(),
-    pickDid: (orgId, userId, toE164) => pickPoolDid(db, { orgId, userId, toE164 }),
-    withinCallingHours: (toE164, nowUtc) => exempt.has(toE164) || withinCallingHours(toE164, nowUtc),
-    nowUtc: new Date(),
-    enqueueRollover: (job, handle) => enqueueFollowupRollover(handle, job),
-    onScreenPop: () => {}, // Plan 4 wires Open CTI screen-pop
-    todayIso: orgTodayIso(),
-  };
-}
 
 const TWIML_DIALER_ANSWER_HOLD = '<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="30"/></Response>';
 const TWIML_EMPTY = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
