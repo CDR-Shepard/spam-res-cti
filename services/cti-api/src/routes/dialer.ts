@@ -43,7 +43,7 @@ import { sessionCounts } from '../dialer/session-store.js';
 import { TwilioDialerTelephony } from '../dialer/twilio-telephony.js';
 import { pickPoolDid, withinCallingHours, parseCallingHoursExempt } from '../dialer/pick-did.js';
 import { mapAnsweredBy } from '../dialer/amd.js';
-import { rolloverFollowUp } from '../salesforce/followup.js';
+import { enqueueFollowupRollover } from '../salesforce/followup-worker.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
 import {
@@ -89,7 +89,7 @@ function buildEngineDeps(): EngineDeps {
     pickDid: (orgId, userId, toE164) => pickPoolDid(db, { orgId, userId, toE164 }),
     withinCallingHours: (toE164, nowUtc) => exempt.has(toE164) || withinCallingHours(toE164, nowUtc),
     nowUtc: new Date(),
-    rolloverFollowUp,
+    enqueueRollover: (job) => enqueueFollowupRollover(db, job),
     onScreenPop: () => {}, // Plan 4 wires Open CTI screen-pop
     todayIso: orgTodayIso(),
   };
