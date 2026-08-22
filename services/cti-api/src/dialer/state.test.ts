@@ -1,10 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { earliestRetryAt, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
+import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
 import type { DialerItem } from './session-store.js';
 
 const now = new Date('2026-08-22T17:00:00Z');
 const row = (o: Partial<DialerItem>): DialerItem =>
   ({ id: 'x', ordinal: 0, status: 'pending', retryNotBefore: null, attempt: 1, ...o }) as DialerItem;
+
+describe('inFlightItem', () => {
+  // Load-bearing well beyond advanceSession now: the abandoned-run reaper
+  // (salesforce/followup-worker.ts expireAbandonedSessions) uses it to decide
+  // whether a stale-looking run is actually a rep mid-conversation.
+  it('is the dialing row when one is ringing', () => {
+    const r = inFlightItem([row({ id: 'a', status: 'no_connect' }), row({ id: 'b', status: 'dialing' })]);
+    expect(r?.id).toBe('b');
+  });
+  it('is the connected row when the rep is on the call', () => {
+    expect(inFlightItem([row({ id: 'c', status: 'connected' })])?.id).toBe('c');
+  });
+  it('is null when every row is pending or terminal', () => {
+    expect(inFlightItem([row({ status: 'pending' }), row({ status: 'done' }), row({ status: 'skipped' })])).toBeNull();
+    expect(inFlightItem([])).toBeNull();
+  });
+});
 
 describe('nextEligiblePendingItem', () => {
   it('is the lowest-ordinal pending row when nothing is floor-gated', () => {

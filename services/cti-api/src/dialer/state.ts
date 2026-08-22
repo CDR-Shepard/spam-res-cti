@@ -1,21 +1,9 @@
 import type { DialerItem } from './session-store.js';
 
+/** The one item a run can have live at a time — the "one call in-flight per rep"
+ *  invariant. Null when nothing is ringing or connected. */
 export function inFlightItem(items: DialerItem[]): DialerItem | null {
   return items.find((i) => i.status === 'dialing' || i.status === 'connected') ?? null;
-}
-
-export function nextPendingItem(items: DialerItem[]): DialerItem | null {
-  const pending = items.filter((i) => i.status === 'pending');
-  if (pending.length === 0) return null;
-  return pending.reduce((a, b) => (a.ordinal <= b.ordinal ? a : b));
-}
-
-export function outcomeToStatus(outcome: 'connected' | 'no_connect'): 'connected' | 'no_connect' {
-  return outcome;
-}
-
-export function allTerminal(items: DialerItem[]): boolean {
-  return !items.some((i) => i.status === 'pending' || i.status === 'dialing' || i.status === 'connected');
 }
 
 /** Attempt-2 rows are not dialable until this long after attempt 1 ended. Keeps a

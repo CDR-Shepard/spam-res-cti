@@ -13,33 +13,62 @@
  * we hold — Railway runs the old and the new container side by side on every
  * deploy, so two replicas can each read the same count for DIFFERENT jobs and
  * both land on one day. That matches the spec's stance on hand-created tasks (a
- * human can always add one; the cap never blocks them). What we DO guarantee is
- * that no job is ever processed twice: the pending → in_flight claim below is
- * conditional (UPDATE ... WHERE status = 'pending' RETURNING), so exactly one
- * replica wins the row and the loser skips it instead of creating a second task.
+ * human can always add one; the cap never blocks them).
+ *
+ * What we guarantee about double-processing is narrower than "never", and worth
+ * stating precisely. The pending → in_flight claim below is conditional
+ * (UPDATE ... WHERE status = 'pending' RETURNING), so for a given pass exactly
+ * one replica wins the row and the loser skips it. The only other way a second
+ * replica can pick the same job up is the reaper, so STUCK_AFTER_MS is set to a
+ * job's WORST-CASE wall time (every Salesforce call in it timing out) and each
+ * claim stamps `updated_at` with a clock read taken at that claim — not at the
+ * top of the batch, which used to make the 25th job of a tick instantly
+ * reap-eligible. An in_flight job is therefore only reaped once it genuinely
+ * cannot still be running, and a reaped job that IS re-run is still safe:
+ * `created_task_id` is stamped before the complete, so the rerun completes the
+ * original instead of creating a second copy.
  *
  * Mirrors salesforce/sync.ts (attempts, backoff, stuck-job reaper).
  */
-import { and, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, eq, gte, isNull, lt, lte, or, sql } from 'drizzle-orm';
 import { getDb, schema } from '../db/index.js';
 import type { FollowupRolloverJob } from '../db/schema.js';
-import { advanceSession } from '../dialer/engine.js';
+import { advanceSession, stopSession } from '../dialer/engine.js';
 import { buildEngineDeps } from '../dialer/live-deps.js';
 import { nextBusinessDay } from '../dialer/next-business-day.js';
+import { inFlightItem } from '../dialer/state.js';
 import { fetchBusinessCalendar } from './business-calendar.js';
 import { SalesforceUnauthorizedError, sfFetch, soqlCount, soqlEscape, soqlQuery } from './client.js';
-import { FOLLOWUP_DAILY_CAP_DEFAULT, followUpCountSoql, pickRolloverDay } from './followup-day.js';
+import { FOLLOWUP_DAILY_CAP_DEFAULT, MAX_ROLLOVER_BUSINESS_DAYS, followUpCountSoql, pickRolloverDay } from './followup-day.js';
 import { followUpCopyFields, pickFollowUpTask, type FollowUpTask } from './followup.js';
 
 export const MAX_ATTEMPTS = 8;
 export const BACKOFF_BASE_MS = 30_000;
-export const STUCK_AFTER_MS = 2 * 60_000;
 /** Ceiling on any single Salesforce call. Without it a hung socket pins the
  *  single-flight tick (and the whole rollover queue behind it) indefinitely. */
 export const SF_CALL_TIMEOUT_MS = 30_000;
+/** The create POST gets a longer ceiling than the reads around it: it is the one
+ *  call that MUTATES Salesforce, so abandoning it early risks a retry racing a
+ *  create that actually landed. Give it room to finish. */
+export const SF_CREATE_TIMEOUT_MS = 60_000;
+/**
+ * How long an in_flight job may sit without its claim being refreshed before the
+ * reaper hands it back to the queue. This MUST exceed a job's worst case, or the
+ * reaper races a claim that is still working and two replicas run the same job.
+ * Worst case = every Salesforce call in the job timing out: the follow-up query,
+ * one day-count per business day scanned, the create, and the complete.
+ */
+export const STUCK_AFTER_MS = SF_CALL_TIMEOUT_MS * (MAX_ROLLOVER_BUSINESS_DAYS + 3);
 /** How recently the softphone must have polled a dialer session for the retry
- *  nudge to originate a call for it. See `nudgeDueRetries`. */
-export const PRESENCE_WINDOW_MS = 30_000;
+ *  nudge to originate a call for it. The DialerPanel polls every ~2s, so this is
+ *  five missed polls — enough slack for one slow response, short enough that a
+ *  closed tab stops counting as present almost immediately. The old 30s was
+ *  fifteen missed polls, i.e. a tab that had been gone half a minute could still
+ *  get a lead dialed into an empty conference. See `nudgeDueRetries`. */
+export const PRESENCE_WINDOW_MS = 10_000;
+/** An 'active' session with no live dial that hasn't been polled this recently is
+ *  an abandoned run. See `expireAbandonedSessions`. */
+export const ABANDONED_AFTER_MS = 10 * 60_000;
 
 export interface WorkerDeps {
   db: ReturnType<typeof getDb>;
@@ -47,6 +76,11 @@ export interface WorkerDeps {
   calendarFor: (userId: string) => Promise<{ workingWeekdays: ReadonlySet<number>; holidays: ReadonlySet<string> }>;
   capFor: (orgId: string) => Promise<number>;
   now: () => Date;
+  /** Advance a dialer run (the retry nudge). Injected so `nudgeDueRetries` is
+   *  testable without a live engine — the real one originates a phone call. */
+  advance: (sessionId: string) => Promise<unknown>;
+  /** Stop a dialer run (the abandoned-run reaper). Injected for the same reason. */
+  stop: (sessionId: string) => Promise<unknown>;
 }
 
 /**
@@ -96,8 +130,10 @@ async function findOpenFollowUp(deps: WorkerDeps, job: FollowupRolloverJob): Pro
   return pickFollowUpTask(tasks);
 }
 
-/** Complete the SOURCE task and close the job out. */
-async function completeSource(deps: WorkerDeps, job: FollowupRolloverJob, sourceTaskId: string | null): Promise<void> {
+/** Complete the SOURCE task and close the job out. `sourceTaskId` is non-null by
+ *  construction — a null here would PATCH `/sobjects/Task/null`, which Salesforce
+ *  answers with a 404 the job would then burn all 8 retries on. */
+async function completeSource(deps: WorkerDeps, job: FollowupRolloverJob, sourceTaskId: string): Promise<void> {
   const done = await withTimeout(
     deps.sf.sfFetch(job.userId, `/sobjects/Task/${sourceTaskId}`, { method: 'PATCH', body: { Status: 'Completed' } }),
     SF_CALL_TIMEOUT_MS,
@@ -112,6 +148,10 @@ function logFailed(job: FollowupRolloverJob, reason: string): void {
 }
 
 export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerDeps): Promise<void> {
+  // Set the moment this attempt's create lands. Together with `job.createdTaskId`
+  // it answers "does the copy already exist?", which decides whether an auth
+  // error is terminal or retryable — see the catch.
+  let createdThisAttempt = false;
   try {
     // RETRY PATH: the copy already exists, so all that's left is completing the
     // source. Never re-resolve it — with a null-ActivityDate original the copy
@@ -119,6 +159,10 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     // leave the original open. completed_task_id is stamped at create time and
     // means "the source task we are completing".
     if (job.createdTaskId) {
+      // Impossible via this module (both ids are stamped around the same create),
+      // but a hand-edited or half-migrated row would otherwise PATCH Task/null.
+      // Thrown, not logged, so the catch below treats it as transient.
+      if (!job.completedTaskId) throw new Error('job has createdTaskId but no completedTaskId');
       await completeSource(deps, job, job.completedTaskId);
       return;
     }
@@ -129,7 +173,9 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
       return;
     }
 
-    const cal = await deps.calendarFor(job.userId);
+    // Same reason as every other outbound call here: a hung socket in the
+    // calendar fetch would pin the single-flight tick and the queue behind it.
+    const cal = await withTimeout(deps.calendarFor(job.userId), SF_CALL_TIMEOUT_MS, 'business calendar');
     const cap = await deps.capFor(job.orgId);
     // The plain next business day (no cap applied) — stamped alongside the
     // actual target so the session-view summary can tell "moved" from
@@ -145,9 +191,18 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
       return;
     }
 
+    // Pre-stamp everything we already know BEFORE the mutating call. The create
+    // is the only step whose answer we can lose (a timeout tells us nothing about
+    // whether Salesforce made the Task), and the run summary reads `target_date` /
+    // `next_day` to say "moved" vs "pushed". Writing them after the POST meant a
+    // create timeout left the row blank and the rep's summary silently short.
+    // `created_task_id` stays unstamped until we have the real id — it is the flag
+    // that says "the copy exists, only complete on retry".
+    await patchJob(deps, job.id, { targetDate, nextDay, completedTaskId: task.Id });
+
     const created = await withTimeout(
       deps.sf.sfFetch(job.userId, '/sobjects/Task', { method: 'POST', body: followUpCopyFields(task, targetDate) }),
-      SF_CALL_TIMEOUT_MS,
+      SF_CREATE_TIMEOUT_MS,
       'create task',
     );
     // The status goes in the message so `isSalesforceAuthError` can see a 401.
@@ -155,16 +210,28 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     const createdId = (created.json as { id?: unknown })?.id;
     if (typeof createdId !== 'string' || !createdId) throw new Error(`create returned no id (${created.status})`);
     // Stamp BEFORE completing: a crash from here on is retried by completing only.
-    await patchJob(deps, job.id, { createdTaskId: createdId, targetDate, completedTaskId: task.Id, nextDay });
+    await patchJob(deps, job.id, { createdTaskId: createdId });
+    createdThisAttempt = true;
 
     await completeSource(deps, job, task.Id);
   } catch (err) {
-    if (isSalesforceAuthError(err)) {
+    // Auth BEFORE the create is terminal: nothing exists yet and no amount of
+    // retrying fixes a disconnected Salesforce, so tell the rep to reconnect.
+    // Auth AFTER the create is NOT — the copy is already on tomorrow's list and
+    // the original is still open, which is the one state a rep would notice as
+    // broken (a duplicate follow-up forever). The rep reconnects on their next
+    // Salesforce action anyway, and the backoff window (~63 min over 8 attempts)
+    // is enough for that to happen; only then do we give up.
+    const copyExists = job.createdTaskId != null || createdThisAttempt;
+    const authError = isSalesforceAuthError(err);
+    if (authError && !copyExists) {
       logFailed(job, 'reconnect Salesforce');
       await patchJob(deps, job.id, { status: 'failed', lastError: 'reconnect Salesforce', completedAt: deps.now() });
       return;
     }
-    const msg = (err instanceof Error ? err.message : String(err)).slice(0, 2000);
+    const msg = authError
+      ? 'reconnect Salesforce (copy exists; will retry completing the original)'
+      : (err instanceof Error ? err.message : String(err)).slice(0, 2000);
     if (job.attempts >= MAX_ATTEMPTS) {
       logFailed(job, msg);
       await patchJob(deps, job.id, { status: 'failed', lastError: msg, completedAt: deps.now() });
@@ -173,6 +240,31 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     const delay = BACKOFF_BASE_MS * 2 ** (job.attempts - 1);
     await patchJob(deps, job.id, { status: 'pending', lastError: msg, nextAttemptAt: new Date(deps.now().getTime() + delay) });
   }
+}
+
+/** One candidate row for the retry nudge: a due pending item joined to its session. */
+export interface DueRetryRow {
+  sessionId: string;
+  status: string;
+  lastPolledAt: Date | null;
+  retryNotBefore: Date | null;
+}
+
+/**
+ * Pure — may the nudge ORIGINATE a call for this row right now?
+ *
+ * The same conditions are in the SQL below as a pre-filter (so the query stays
+ * cheap); they are re-checked here because this is the predicate that actually
+ * decides to place a phone call, and a predicate that important should be
+ * testable without a database.
+ */
+export function nudgeEligible(row: DueRetryRow, now: Date): boolean {
+  if (row.status !== 'active') return false;
+  // Never polled: no evidence a rep was ever at the phone for this run.
+  if (row.lastPolledAt == null) return false;
+  if (now.getTime() - row.lastPolledAt.getTime() > PRESENCE_WINDOW_MS) return false;
+  if (row.retryNotBefore != null && row.retryNotBefore.getTime() > now.getTime()) return false;
+  return true;
 }
 
 /**
@@ -184,26 +276,92 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
  * DialerPanel polls GET /dialer/sessions/:id every ~2s while mounted, so a recent
  * poll is the only evidence we have that a rep is actually at the phone. A closed
  * or asleep tab stops nudging instead of dialing a lead into an empty conference.
- * Sessions never polled (last_polled_at IS NULL) are excluded by the comparison —
- * correct, and the safe direction while the route write lands.
+ * Sessions never polled (last_polled_at IS NULL) are excluded — correct, and the
+ * safe direction. Runs abandoned in that state are cleaned up by
+ * `expireAbandonedSessions`, not dialed.
  */
 export async function nudgeDueRetries(deps: WorkerDeps): Promise<number> {
-  const due = await deps.db
-    .selectDistinct({ sessionId: schema.dialerQueueItems.sessionId })
+  const now = deps.now();
+  const due: DueRetryRow[] = await deps.db
+    .selectDistinct({
+      sessionId: schema.dialerQueueItems.sessionId,
+      status: schema.dialerSessions.status,
+      lastPolledAt: schema.dialerSessions.lastPolledAt,
+      retryNotBefore: schema.dialerQueueItems.retryNotBefore,
+    })
     .from(schema.dialerQueueItems)
     .innerJoin(schema.dialerSessions, eq(schema.dialerSessions.id, schema.dialerQueueItems.sessionId))
     .where(and(
       eq(schema.dialerSessions.status, 'active'),
       eq(schema.dialerQueueItems.status, 'pending'),
-      lte(schema.dialerQueueItems.retryNotBefore, deps.now()),
-      gte(schema.dialerSessions.lastPolledAt, new Date(deps.now().getTime() - PRESENCE_WINDOW_MS)),
+      lte(schema.dialerQueueItems.retryNotBefore, now),
+      gte(schema.dialerSessions.lastPolledAt, new Date(now.getTime() - PRESENCE_WINDOW_MS)),
     ));
-  for (const { sessionId } of due) {
-    try { await advanceSession(sessionId, buildEngineDeps()); } catch (err) {
+  // A session with two due retries yields two rows — nudge it once.
+  const ids = [...new Set(due.filter((r) => nudgeEligible(r, now)).map((r) => r.sessionId))];
+  for (const sessionId of ids) {
+    try { await deps.advance(sessionId); } catch (err) {
       console.error('[followup-worker] nudge failed', { sessionId, err: (err as Error).message });
     }
   }
-  return due.length;
+  return ids.length;
+}
+
+/** Pure — is this session an abandoned run? See `expireAbandonedSessions`. */
+export function isAbandoned(
+  session: { status: string; lastPolledAt: Date | null; updatedAt: Date },
+  now: Date,
+): boolean {
+  if (session.status !== 'active') return false;
+  // A run that was never polled falls back to when it was last written — that is
+  // its only evidence of life, and it is stamped at creation.
+  const lastSeen = session.lastPolledAt ?? session.updatedAt;
+  return lastSeen.getTime() < now.getTime() - ABANDONED_AFTER_MS;
+}
+
+/**
+ * Stop runs the rep walked away from.
+ *
+ * A run parked in `waiting_retry` has nothing eligible to dial and is only ever
+ * moved along by the presence-gated nudge above. So if the rep closes the tab
+ * while it waits, presence never comes back, the nudge never fires, and the
+ * session stays 'active' forever — which wedges the partial unique index
+ * `dialer_sessions_one_active_per_user`: the rep's next list start hits the
+ * conflict, `createDialerSession` hands back the STALE session, and they resume
+ * dialing yesterday's leftovers instead of the list they just picked.
+ *
+ * This NEVER originates a call — it only stops sessions. A session with a live
+ * dial ('dialing'/'connected') is left alone however stale its poll: the call
+ * itself is the presence, and hanging it up would drop a rep mid-conversation.
+ */
+export async function expireAbandonedSessions(deps: WorkerDeps): Promise<number> {
+  const now = deps.now();
+  const cutoff = new Date(now.getTime() - ABANDONED_AFTER_MS);
+  const candidates = await deps.db.query.dialerSessions.findMany({
+    where: and(
+      eq(schema.dialerSessions.status, 'active'),
+      or(
+        lt(schema.dialerSessions.lastPolledAt, cutoff),
+        and(isNull(schema.dialerSessions.lastPolledAt), lt(schema.dialerSessions.updatedAt, cutoff)),
+      ),
+    ),
+  });
+  let expired = 0;
+  for (const session of candidates) {
+    if (!isAbandoned(session, now)) continue;
+    const items = await deps.db.query.dialerQueueItems.findMany({
+      where: eq(schema.dialerQueueItems.sessionId, session.id),
+    });
+    if (inFlightItem(items)) continue; // a live dial IS presence
+    try {
+      await deps.stop(session.id);
+      expired++;
+    } catch (err) {
+      // One rep's stuck Twilio conference must not block every other rep's slot.
+      console.error('[followup-worker] expire abandoned session failed', { sessionId: session.id, err: (err as Error).message });
+    }
+  }
+  return expired;
 }
 
 function liveDeps(): WorkerDeps {
@@ -219,6 +377,8 @@ function liveDeps(): WorkerDeps {
       return cfg?.followupDailyCap ?? FOLLOWUP_DAILY_CAP_DEFAULT;
     },
     now: () => new Date(),
+    advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()),
+    stop: (sessionId) => stopSession(sessionId, buildEngineDeps()),
   };
 }
 
@@ -237,8 +397,13 @@ export async function runFollowupTick(deps: WorkerDeps = liveDeps()): Promise<{ 
   for (const j of jobs) {
     // CONDITIONAL claim: only the replica that flips pending → in_flight owns the
     // job. A blind UPDATE let a deploy overlap create the task twice.
+    // `deps.now()`, NOT the tick's `now`: the reaper measures staleness from
+    // `updated_at`, and a batch of 25 jobs can take minutes to drain. Stamping
+    // every claim with the tick's start time made the last job of a batch look
+    // minutes-stale the instant it was claimed — instantly reap-eligible on
+    // another replica, and therefore processed twice.
     const rows = await deps.db.update(schema.followupRolloverJobs)
-      .set({ status: 'in_flight', attempts: sql`${schema.followupRolloverJobs.attempts} + 1`, updatedAt: now })
+      .set({ status: 'in_flight', attempts: sql`${schema.followupRolloverJobs.attempts} + 1`, updatedAt: deps.now() })
       .where(and(eq(schema.followupRolloverJobs.id, j.id), eq(schema.followupRolloverJobs.status, 'pending')))
       .returning({ id: schema.followupRolloverJobs.id });
     if (rows.length === 0) continue; // another replica claimed it
@@ -276,7 +441,12 @@ export function startRetryNudgeLoop(intervalMs = 5000): NodeJS.Timeout {
   return setInterval(() => {
     if (running) return;
     running = true;
-    nudgeDueRetries(liveDeps())
+    const deps = liveDeps();
+    // Expire abandoned runs BEFORE nudging: an expired session is no longer
+    // 'active', so the nudge in the same tick correctly ignores it (and it never
+    // would have nudged it anyway — that is exactly why it was stuck).
+    expireAbandonedSessions(deps)
+      .then(() => nudgeDueRetries(deps))
       .catch((err) => console.error('[followup-worker] nudge tick error', err))
       .finally(() => { running = false; });
   }, intervalMs);

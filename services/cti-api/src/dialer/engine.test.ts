@@ -61,6 +61,14 @@ import { schema } from '../db/index.js';
 // `tx.insert` are recorded into a separate `_txInserts` array so tests can
 // tell "inserted" apart from "inserted inside the transaction that also did
 // the CAS".
+//
+// Adjustment 6 (M1 pin): the fake now FENCES the outer `db.query` for the
+// duration of `transaction()` — while the callback runs, `handle.query` is a
+// proxy that throws on any property access. `handleDialOutcome`'s ordinal
+// lookup must go through `tx.query` (sharing the transaction's pool client);
+// reaching for `deps.db.query` there checks out a SECOND client while the tx
+// holds one, which deadlocks the pool under concurrent misses. Before this the
+// two stubs were interchangeable and the regression would have passed silently.
 function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean } = {}) {
   const writes: Array<{ patch: Record<string, unknown> }> = [];
   const inserts: Array<{ values: Record<string, unknown> }> = [];
@@ -71,7 +79,7 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean }
   const txInserts: Array<{ values: Record<string, unknown> }> = [];
   let sessionOverride: Record<string, unknown> = {};
   const claimReturnsRows = opts.claimReturnsRows ?? true;
-  return {
+  const handle: any = {
     _session: session,
     _items: items,
     _writes: writes,
@@ -146,12 +154,26 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean }
           };
         },
       };
-      return fn(tx);
+      // Any read of `deps.db.query` from inside the transaction is a bug — fence
+      // it off for the callback's duration rather than letting it silently work.
+      const outerQuery = handle.query;
+      handle.query = new Proxy({}, {
+        get(_t, prop) {
+          throw new Error(`outer deps.db.query.${String(prop)} used inside a transaction — use tx.query`);
+        },
+      });
+      try {
+        return await fn(tx);
+      } finally {
+        handle.query = outerQuery;
+      }
     },
-  } as any;
+  };
+  return handle as any;
 }
 let _target: any = {};
 
+import { enqueueFollowupRollover } from '../salesforce/followup-enqueue.js';
 import {
   advanceSession,
   handleDialOutcome,
@@ -331,6 +353,34 @@ describe('handleDialOutcome', () => {
     // A second miss never requeues — no attempt-2 row anywhere, transactional or not.
     expect(fdb._inserts).toHaveLength(0);
     expect(fdb._txInserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(0);
+  });
+
+  it('the rollover enqueue writes INSIDE the miss transaction (wired to the real enqueueFollowupRollover)', async () => {
+    // M2: every other test here stubs `enqueueRollover`, so "it rides inside the
+    // transaction" was only ever asserted about the stub's call site. Wire the
+    // REAL enqueue (which does `db.insert(...).values(...).onConflictDoNothing()`)
+    // and pin that its row lands in `_txInserts` — i.e. it went through the `tx`
+    // handle — and not in the outer `_inserts`.
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+1', secondaryNumber: null, sessionId: 'S1' }];
+    const deps = makeDeps({ enqueueRollover: (jobRow, handle) => enqueueFollowupRollover(handle, jobRow) });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_connect', deps);
+    expect(fdb._txInserts).toContainEqual({ values: expect.objectContaining({
+      orgId: 'O1', userId: 'U1', sfOwnerId: '005', sessionId: 'S1', recordId: '00Q1', objectType: 'Lead',
+      fromDate: '2026-07-13', status: 'pending',
+    }) });
+    expect(fdb._inserts).toHaveLength(0);
+  });
+
+  it('the miss transaction never reaches for the outer deps.db.query (M1)', async () => {
+    // The fake throws on any outer-`query` access while the tx callback runs, so
+    // this passing at all is the assertion: the ordinal lookup used `tx.query`.
+    const items = [
+      { id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550199', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550199', sessionId: 'S1' },
+    ];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await expect(handleDialOutcome('CA1', 'no_connect', deps)).resolves.toBeUndefined();
+    expect(fdb._txInserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(1);
   });
 
   it('a duplicated webhook for a SECOND miss does not enqueue twice', async () => {
