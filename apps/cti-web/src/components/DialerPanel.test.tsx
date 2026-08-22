@@ -8,9 +8,12 @@ import {
   shouldScreenPop,
   retryCountdown,
   rolloverLine,
+  shouldKeepPollingForRollovers,
+  ROLLOVER_SETTLE_MS,
   AttemptBadge,
   DialerPanel,
 } from './DialerPanel';
+import type { DialerSession, DialerSessionView } from '../dialer-api';
 import * as dialerApi from '../dialer-api';
 
 describe('progressLabel', () => {
@@ -139,6 +142,57 @@ describe('rolloverLine', () => {
     expect(rolloverLine({ moved: 1, pushed: 0, failed: 0 })).toBe('1 follow-up moved to tomorrow');
     expect(rolloverLine({ moved: 0, pushed: 0, failed: 2 })).toBe('2 follow-ups could not be moved — see admin');
     expect(rolloverLine({ moved: 0, pushed: 0, failed: 0 })).toBe('');
+  });
+
+  it('always surfaces failures, even when some follow-ups did move', () => {
+    // Regression: failures were only mentioned when NOTHING moved, so a partly
+    // failed rollover told the rep "8 moved" and silently dropped the 3 that
+    // did not — the exact case an admin needs to hear about.
+    expect(rolloverLine({ moved: 8, pushed: 0, failed: 3 }))
+      .toBe('8 follow-ups moved to tomorrow · 3 could not be moved — see admin');
+    expect(rolloverLine({ moved: 2, pushed: 1, failed: 1 }))
+      .toBe('2 follow-ups moved to tomorrow · 1 pushed later (daily limit) · 1 could not be moved — see admin');
+  });
+});
+
+describe('shouldKeepPollingForRollovers', () => {
+  const T0 = 1_000_000;
+  const view = (status: DialerSession['status'], pending: number): DialerSessionView => ({
+    session: { id: 'sess1', status },
+    counts: { total: 1, done: 0, connected: 0, noConnect: 1, skipped: 0, unreachable: 0, pending: 0 },
+    currentItem: null,
+    rollovers: { moved: 0, pushed: 0, failed: 0, pending },
+  });
+
+  it('keeps polling a finished run while its rollovers are still being written', () => {
+    // The worker ticks every 5s and then talks to Salesforce, so the rep reaches
+    // the summary screen long before `rollovers` is anything but {pending: N} —
+    // which is why the rollover line used to be unreachable.
+    expect(shouldKeepPollingForRollovers(view('done', 3), T0, T0 + 4_000)).toBe(true);
+    expect(shouldKeepPollingForRollovers(view('stopped', 1), T0, T0 + 4_000)).toBe(true);
+  });
+
+  it('stops as soon as every rollover has settled', () => {
+    expect(shouldKeepPollingForRollovers(view('done', 0), T0, T0 + 4_000)).toBe(false);
+  });
+
+  it('gives up at the settle bound rather than polling a wedged queue forever', () => {
+    expect(shouldKeepPollingForRollovers(view('done', 3), T0, T0 + ROLLOVER_SETTLE_MS)).toBe(false);
+    expect(shouldKeepPollingForRollovers(view('done', 3), T0, T0 + ROLLOVER_SETTLE_MS + 1)).toBe(false);
+  });
+
+  it('is never true for a run that is still going', () => {
+    expect(shouldKeepPollingForRollovers(view('active', 3), T0, T0 + 1_000)).toBe(false);
+    expect(shouldKeepPollingForRollovers(view('paused', 3), T0, T0 + 1_000)).toBe(false);
+  });
+
+  it('is false when the view carries no rollover counts at all', () => {
+    const bare: DialerSessionView = {
+      session: { id: 'sess1', status: 'done' },
+      counts: { total: 1, done: 1, connected: 0, noConnect: 0, skipped: 0, unreachable: 0, pending: 0 },
+      currentItem: null,
+    };
+    expect(shouldKeepPollingForRollovers(bare, T0, T0 + 1_000)).toBe(false);
   });
 });
 

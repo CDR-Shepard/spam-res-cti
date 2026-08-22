@@ -25,6 +25,14 @@ import { formatE164 } from '../format';
 
 const POLL_INTERVAL_MS = 2000;
 const TERMINAL_STATUSES = new Set(['done', 'stopped']);
+/**
+ * How long, after a run first goes terminal, we keep polling for its follow-up
+ * rollovers to finish. The rollover worker ticks every ~5s and then makes two or
+ * three Salesforce round-trips per job, so a rep who reaches the summary screen
+ * is always ahead of it. Bounded so a wedged or backed-off queue (retries stretch
+ * to ~63 min) can't leave the panel polling forever.
+ */
+export const ROLLOVER_SETTLE_MS = 60_000;
 
 /**
  * Records that have reached a terminal disposition — dialed-and-dispositioned
@@ -64,13 +72,44 @@ export function retryCountdown(nextRetryAt: string, now: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-/** Pure — the run-summary rollover line; '' when there is nothing to say. */
+/**
+ * Pure — the run-summary rollover line; '' when there is nothing to say.
+ *
+ * Failures are ALWAYS appended, never only reported when nothing else happened:
+ * a {moved: 8, failed: 3} run used to read "8 follow-ups moved to tomorrow" and
+ * quietly drop the three the rep needs an admin to chase. The noun is carried by
+ * whichever clause comes first, so the line reads as one sentence.
+ */
 export function rolloverLine(r: { moved: number; pushed: number; failed: number }): string {
   const parts: string[] = [];
   if (r.moved) parts.push(`${r.moved} follow-up${r.moved === 1 ? '' : 's'} moved to tomorrow`);
   if (r.pushed) parts.push(`${r.pushed} pushed later (daily limit)`);
-  if (!parts.length && r.failed) return `${r.failed} follow-up${r.failed === 1 ? '' : 's'} could not be moved — see admin`;
+  if (r.failed) {
+    parts.push(parts.length
+      ? `${r.failed} could not be moved — see admin`
+      : `${r.failed} follow-up${r.failed === 1 ? '' : 's'} could not be moved — see admin`);
+  }
   return parts.join(' · ');
+}
+
+/**
+ * Pure — should the poll keep running after the run has already ended?
+ *
+ * The run-summary rollover line was unreachable in practice: polling stopped the
+ * instant the session went terminal, which is seconds before the follow-up worker
+ * (5s tick + Salesforce round-trips) has processed any of the jobs — so
+ * `rollovers` was always `{pending: N}` and `rolloverLine` rendered ''. Teardown
+ * (`onComplete`) still fires exactly once at that first terminal poll; only the
+ * polling continues, until the rollovers settle or `ROLLOVER_SETTLE_MS` elapses.
+ */
+export function shouldKeepPollingForRollovers(
+  view: DialerSessionView,
+  firstTerminalAt: number,
+  now: number,
+): boolean {
+  if (!TERMINAL_STATUSES.has(view.session.status)) return false;
+  if (!view.rollovers || view.rollovers.pending <= 0) return false;
+  return now - firstTerminalAt < ROLLOVER_SETTLE_MS;
 }
 
 export function AttemptBadge({ attempt }: { attempt?: number }): JSX.Element | null {
@@ -245,6 +284,9 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const pollNowRef = useRef<() => void>(() => {});
   // Latch so the terminal-status teardown (onComplete) fires exactly once per run.
   const completedRef = useRef(false);
+  // When this run FIRST reported a terminal status — the clock the rollover
+  // settle window is measured from. Null until then.
+  const firstTerminalAtRef = useRef<number | null>(null);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -255,6 +297,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     lastPoppedIdRef.current = null;
     pollNowRef.current = () => {};
     completedRef.current = false;
+    firstTerminalAtRef.current = null;
 
     if (!sessionId) {
       setView(null);
@@ -291,18 +334,23 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
           onScreenPop(current.recordId);
         }
 
-        // The run reached a terminal status. Stop polling, and if it got there
-        // WITHOUT the rep pressing Stop (a run that finished on its own, or was
-        // ended remotely), release the rep's conference leg via onComplete — the
-        // single Twilio Device is otherwise left busy and the next call fails.
-        // The latch keeps this to exactly one fire even if a poll is already
-        // in flight when the status flips.
-        if (shouldTeardownRun(next.session.status, completedRef.current)) {
-          completedRef.current = true;
-          stopPolling();
-          onComplete({ status: next.session.status, counts: next.counts });
-        } else if (TERMINAL_STATUSES.has(next.session.status)) {
-          stopPolling();
+        // The run reached a terminal status. If it got there WITHOUT the rep
+        // pressing Stop (a run that finished on its own, or was ended remotely),
+        // release the rep's conference leg via onComplete — the single Twilio
+        // Device is otherwise left busy and the next call fails. The latch keeps
+        // this to exactly one fire even if a poll is already in flight when the
+        // status flips.
+        //
+        // Polling, unlike the teardown, does NOT stop here: the follow-up
+        // rollovers are still being written and the summary's rollover line
+        // depends on them (see shouldKeepPollingForRollovers).
+        if (TERMINAL_STATUSES.has(next.session.status)) {
+          if (firstTerminalAtRef.current === null) firstTerminalAtRef.current = Date.now();
+          if (shouldTeardownRun(next.session.status, completedRef.current)) {
+            completedRef.current = true;
+            onComplete({ status: next.session.status, counts: next.counts });
+          }
+          if (!shouldKeepPollingForRollovers(next, firstTerminalAtRef.current, Date.now())) stopPolling();
         }
       } catch (e: unknown) {
         if (!cancelled) {
@@ -382,9 +430,14 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
             Run {view.session.status === 'done' ? 'complete' : 'stopped'}
           </div>
           <div className="dp-summary-meta">{progressLabel(view.counts)}</div>
-          {view.rollovers && rolloverLine(view.rollovers) && (
+          {view.rollovers && view.rollovers.pending > 0 ? (
+            // The worker hasn't finished writing the rollovers yet; the poll is
+            // still running (bounded by ROLLOVER_SETTLE_MS) and will replace this
+            // with the real line the moment they settle.
+            <div className="dp-summary-meta">Finishing follow-ups…</div>
+          ) : view.rollovers && rolloverLine(view.rollovers) ? (
             <div className="dp-summary-meta">{rolloverLine(view.rollovers)}</div>
-          )}
+          ) : null}
           <button className="btn primary full dp-summary-cta" onClick={onDismiss}>
             Start another run
           </button>
