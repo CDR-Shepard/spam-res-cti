@@ -67,4 +67,11 @@ describe('resolveDialNumber', () => {
     mockSoql.mockResolvedValue([{ Contact: { MobilePhone: null, Phone: '213-555-0199' } }]);
     expect((await resolveDialNumber('u', 'Opportunity', '006AAA'))?.fallbackE164).toBeNull();
   });
+
+  it('resolves a Contact by Mobile then Phone', async () => {
+    mockSoql.mockResolvedValueOnce([{ MobilePhone: '(619) 555-0100', Phone: '(619) 555-0199' }]);
+    const r = await resolveDialNumber('u1', 'Contact', '0031');
+    expect(mockSoql.mock.calls[0]?.[1]).toMatch(/FROM Contact WHERE Id = '0031'/);
+    expect(r).toEqual({ e164: '+16195550100', fallbackE164: '+16195550199' });
+  });
 });
