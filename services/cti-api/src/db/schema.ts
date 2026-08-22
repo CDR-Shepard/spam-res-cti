@@ -223,7 +223,7 @@ export const dialerSessions = pgTable(
     userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
     /** The rep's Salesforce User Id — needed to own Tasks in the rollover. */
     sfOwnerId: text('sf_owner_id').notNull(),
-    objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity'
+    objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity' | 'Task'
     status: dialerSessionStatus('status').default('active').notNull(),
     /** Last softphone poll of this session — the retry nudge's proof a rep is present. */
     lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
@@ -250,7 +250,10 @@ export const dialerQueueItems = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     sessionId: uuid('session_id').notNull().references(() => dialerSessions.id, { onDelete: 'cascade' }),
     ordinal: integer('ordinal').notNull(),
-    objectType: text('object_type').notNull(),
+    // The row's OWN object — a Task run resolves each Task to the person it
+    // dials, so one Task session mixes these (and keeps an unresolvable Task
+    // as a 'Task' row).
+    objectType: text('object_type').notNull(), // 'Lead' | 'Contact' | 'Opportunity' | 'Task'
     recordId: text('record_id').notNull(),
     toNumber: text('to_number'), // resolved E.164 currently being dialed (Mobile first), or null when unreachable
     fallbackNumber: text('fallback_number'), // record's Phone, dialed on a TRUE no-answer of the Mobile (else null)
@@ -292,7 +295,7 @@ export const dialerHandoffs = pgTable(
      *  even when that lookup misses (e.g. a rep who hasn't connected yet). */
     orgId: uuid('org_id'),
     salesforceUserId: text('salesforce_user_id').notNull(),
-    objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity'
+    objectType: text('object_type').notNull(), // 'Lead' | 'Opportunity' | 'Task'
     recordIds: jsonb('record_ids').notNull().$type<string[]>(),
     status: text('status').default('pending').notNull(), // 'pending' | 'claimed'
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),

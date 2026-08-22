@@ -1,7 +1,7 @@
 /**
  * Power dialer session lifecycle + engine controls.
  *
- *  POST /dialer/sessions              → start a session over a Lead/Opportunity id list
+ *  POST /dialer/sessions              → start a session over a Lead/Opportunity/Task id list
  *  GET  /dialer/sessions/:id          → session + counts + the in-flight item (if any)
  *  POST /dialer/sessions/:id/pause    → pause (in-flight dial finishes; queue stops advancing)
  *  POST /dialer/sessions/:id/resume   → resume + immediately try to advance
@@ -43,6 +43,7 @@ import { sessionCounts, rolloverSummary } from '../dialer/session-store.js';
 import { buildEngineDeps } from '../dialer/live-deps.js';
 import { mapAnsweredBy } from '../dialer/amd.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
+import { fetchTasks } from '../salesforce/task-targets.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
 import {
   parseHandoffInput,
@@ -55,7 +56,7 @@ import { parseListViews, parseListViewResultIds } from '../salesforce/listviews.
 
 // The POST /dialer/sessions body schema — pinned by src/routes/dialer.test.ts.
 const StartBody = z.object({
-  objectType: z.enum(['Lead', 'Opportunity']),
+  objectType: z.enum(['Lead', 'Opportunity', 'Task']),
   recordIds: z.array(z.string().min(15).max(20)).min(1).max(500),
 });
 
@@ -149,7 +150,7 @@ async function requireOwnedSession(
 export async function registerDialerRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
 
-  // GET /dialer/salesforce/listviews?object=Lead|Opportunity — the rep's own
+  // GET /dialer/salesforce/listviews?object=Lead|Opportunity|Task — the rep's own
   // Salesforce list views (fetched with their token). This is how the softphone
   // offers "dial a list" without a Salesforce list-view button — the Lightning
   // Console won't hand a custom button the row selection, but the CTI can pull
@@ -158,8 +159,8 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     const authed = await resolveSession(req.headers.authorization);
     if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
     const object = (req.query as { object?: string }).object;
-    if (object !== 'Lead' && object !== 'Opportunity') {
-      return reply.code(400).send({ error: 'object must be Lead or Opportunity' });
+    if (object !== 'Lead' && object !== 'Opportunity' && object !== 'Task') {
+      return reply.code(400).send({ error: 'object must be Lead, Opportunity or Task' });
     }
     try {
       const res = await sfFetch(authed.userId, `/sobjects/${object}/listviews`, { query: { limit: '200' } });
@@ -179,7 +180,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
     const parsed = z
       .object({
-        object: z.enum(['Lead', 'Opportunity']),
+        object: z.enum(['Lead', 'Opportunity', 'Task']),
         listViewId: z.string().regex(/^[a-zA-Z0-9]{15,18}$/),
       })
       .safeParse(req.body);
@@ -204,7 +205,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     }
     const db = getDb();
     const result = await createAndStartSession(
-      { resolveDialNumber, salesforceUserId, db, advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()) },
+      { resolveDialNumber, fetchTasks, salesforceUserId, db, advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()) },
       { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds },
     );
     return { ...result, recordCount: recordIds.length };
@@ -218,7 +219,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
 
     const db = getDb();
     const result = await createAndStartSession(
-      { resolveDialNumber, salesforceUserId, db, advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()) },
+      { resolveDialNumber, fetchTasks, salesforceUserId, db, advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()) },
       {
         userId: authed.userId,
         orgId: authed.orgId,
