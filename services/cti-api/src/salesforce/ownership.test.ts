@@ -35,7 +35,7 @@ describe('callerMayCreateTaskOn', () => {
     expect(callerMayCreateTaskOn({ type: 'Lead', ownerId: '005X' }, me)).toBe(false);
     expect(callerMayCreateTaskOn({ type: 'Contact', ownerId: me }, me)).toBe(true);
   });
-  it('Opportunity: owner OR Lead_Manager__c', () => {
+  it('Opportunity: owner OR LeadManager__c', () => {
     expect(callerMayCreateTaskOn({ type: 'Opportunity', ownerId: '005X', leadManagerId: me }, me)).toBe(true);
     expect(callerMayCreateTaskOn({ type: 'Opportunity', ownerId: me, leadManagerId: null }, me)).toBe(true);
     expect(callerMayCreateTaskOn({ type: 'Opportunity', ownerId: '005X', leadManagerId: '005Y' }, me)).toBe(false);
@@ -83,7 +83,7 @@ describe('fetchOwnership', () => {
   const soqlOf = (n: number): string => String(soqlQuery.mock.calls[n]?.[1] ?? '');
 
   const INVALID_FIELD = new Error(
-    'SOQL failed (400): [{"message":"No such column \'Lead_Manager__c\'","errorCode":"INVALID_FIELD"}]',
+    'SOQL failed (400): [{"message":"No such column \'LeadManager__c\'","errorCode":"INVALID_FIELD"}]',
   );
 
   it('falls back to owner-only for THIS lookup on INVALID_FIELD, and warns once per process', async () => {
@@ -93,23 +93,23 @@ describe('fetchOwnership', () => {
     soqlQuery.mockRejectedValueOnce(INVALID_FIELD).mockResolvedValueOnce([{ OwnerId: '005A' }]);
     expect(await fetchOwnership('u1', '006000000000001')).toMatchObject({ type: 'Opportunity', ownerId: '005A' });
     expect(soqlQuery).toHaveBeenCalledTimes(2);
-    expect(soqlOf(0)).toContain('Lead_Manager__c');
-    expect(soqlOf(1)).not.toContain('Lead_Manager__c');
+    expect(soqlOf(0)).toContain('LeadManager__c');
+    expect(soqlOf(1)).not.toContain('LeadManager__c');
 
     // A second, uncached Opportunity STILL asks for the field. The flag is a
     // warn deduper, not a control-flow latch: this process serves many orgs, and
-    // the next org's Opportunity may well have Lead_Manager__c.
+    // the next org's Opportunity may well have LeadManager__c.
     soqlQuery.mockRejectedValueOnce(INVALID_FIELD).mockResolvedValueOnce([{ OwnerId: '005B' }]);
     expect(await fetchOwnership('u1', '006000000000002')).toMatchObject({ type: 'Opportunity', ownerId: '005B' });
     expect(soqlQuery).toHaveBeenCalledTimes(4);
-    expect(soqlOf(2)).toContain('Lead_Manager__c');
+    expect(soqlOf(2)).toContain('LeadManager__c');
 
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
   });
 
-  it('reads Lead_Manager__c normally in an org that has it', async () => {
-    soqlQuery.mockResolvedValueOnce([{ OwnerId: '005A', Lead_Manager__c: '005ME' }]);
+  it('reads LeadManager__c normally in an org that has it', async () => {
+    soqlQuery.mockResolvedValueOnce([{ OwnerId: '005A', LeadManager__c: '005ME' }]);
     expect(await fetchOwnership('u1', '006000000000001')).toEqual({
       type: 'Opportunity',
       ownerId: '005A',

@@ -26,7 +26,7 @@ export function objectTypeForId(id: string): OwnedObject | 'other' {
   return p === '00Q' ? 'Lead' : p === '003' ? 'Contact' : p === '006' ? 'Opportunity' : p === '00T' ? 'Task' : 'other';
 }
 
-/** The rule: Lead/Contact/Task → owner; Opportunity → owner OR Lead_Manager__c; unnamed objects → allowed. */
+/** The rule: Lead/Contact/Task → owner; Opportunity → owner OR LeadManager__c; unnamed objects → allowed. */
 export function callerMayCreateTaskOn(s: OwnershipSnapshot, callerSfUserId: string): boolean {
   if (s.type === 'other') return true;
   if (s.ownerId === callerSfUserId) return true;
@@ -65,7 +65,7 @@ export function _resetOwnershipForTests(): void {
 }
 
 /**
- * Owner (and, for an Opportunity, Lead_Manager__c) of a record, cached 5 minutes
+ * Owner (and, for an Opportunity, LeadManager__c) of a record, cached 5 minutes
  * per (user, record). Zero rows → `{ ownerId: null }`: the rep cannot see the
  * record, so no Task belongs on it.
  *
@@ -79,19 +79,19 @@ export async function fetchOwnership(userId: string, recordId: string): Promise<
   if (type === 'other') return remember(key, { type, ownerId: null });
   if (type === 'Opportunity') {
     try {
-      const r = await soqlQuery<{ OwnerId: string; Lead_Manager__c?: string | null }>(
+      const r = await soqlQuery<{ OwnerId: string; LeadManager__c?: string | null }>(
         userId,
-        `SELECT OwnerId, Lead_Manager__c FROM Opportunity WHERE Id = '${soqlEscape(recordId)}' LIMIT 1`,
+        `SELECT OwnerId, LeadManager__c FROM Opportunity WHERE Id = '${soqlEscape(recordId)}' LIMIT 1`,
       );
-      return remember(key, { type, ownerId: r[0]?.OwnerId ?? null, leadManagerId: r[0]?.Lead_Manager__c ?? null });
+      return remember(key, { type, ownerId: r[0]?.OwnerId ?? null, leadManagerId: r[0]?.LeadManager__c ?? null });
     } catch (err) {
-      // The org may not have Lead_Manager__c at all. That is a configuration
+      // The org may not have LeadManager__c at all. That is a configuration
       // fact, not a failure: fall through to the owner-only query for THIS
       // lookup. The log line is deduped; the query is not.
       if (!/INVALID_FIELD/.test((err as Error).message)) throw err;
       if (!warnedLeadManager) {
         warnedLeadManager = true;
-        console.warn('[ownership] Lead_Manager__c not found on Opportunity — gate is owner-only');
+        console.warn('[ownership] LeadManager__c not found on Opportunity — gate is owner-only');
       }
     }
   }

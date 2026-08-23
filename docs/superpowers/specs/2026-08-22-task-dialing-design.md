@@ -30,7 +30,7 @@ rules; and the CTI never creates a Salesforce Task on a record the caller doesn'
 | Which task rolls over on a Task run? | **The dialed task itself**, only if its Subject matches the follow-up rule. Non-matching tasks are still dialed (two attempts, human-only pop) but never rolled. |
 | Follow-up subject rule | Whole-word, case-insensitive: `follow-up`, `follow up`, `followup`, `FU`, `F/U`, `F-U`. A bare substring `FU` is excluded (would match "refund"). One shared constant, used by the worker, the cap count, and Task-run eligibility. |
 | Ownership gate scope | **Both** rollover copies and after-call log tasks. |
-| `Lead_Manager__c` | Custom lookup(User) on **Opportunity only**. Leads: Owner only. |
+| `LeadManager__c` | Custom lookup(User) on **Opportunity only**. Leads: Owner only. |
 | Contacts (a Task's Who) | Treated like Leads: caller must be the Contact's `OwnerId`. |
 | Connect on a Task run | **Does not** auto-complete the task. The rep's existing Next/wrap-up flow is unchanged. |
 | Per-customer ceiling | Applied to **all** runs (pool and agent) as a harassment backstop — the dialer previously enforced none. Per-number rotation is agent-only. |
@@ -115,8 +115,8 @@ Pure `callerMayCreateTaskOn(snapshot, callerSfUserId): boolean` over
 - Opportunity → `ownerId === caller || leadManagerId === caller`;
 - Task → `ownerId === caller` (assignee).
 `fetchOwnership(userId, recordId)` issues one SOQL by id prefix (`00Q` Lead, `003` Contact, `006`
-Opportunity, `00T` Task); Opportunity selects `OwnerId, Lead_Manager__c`. An `INVALID_FIELD` on
-`Lead_Manager__c` → retry without it + `console.warn` once per process (owner-only). In-process
+Opportunity, `00T` Task); Opportunity selects `OwnerId, LeadManager__c`. An `INVALID_FIELD` on
+`LeadManager__c` → retry without it + `console.warn` once per process (owner-only). In-process
 cache keyed by record id, 5-minute TTL.
 
 Applied in:

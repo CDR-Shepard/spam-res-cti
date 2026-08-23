@@ -14,7 +14,7 @@
 - Follow-up subject rule (ONE shared constant): whole-word, case-insensitive match of `follow-up`, `follow up`, `followup`, `FU`, `F/U`, `F-U`. Bare substring `FU` must NOT match (`refund`, `FUEL`).
 - Task → person precedence: `WhoId` Lead → Mobile/Phone; `WhoId` Contact → Mobile/Phone; no Who + `WhatId` Opportunity → primary contact role; else `unreachable`.
 - `pickDid(args) → { e164 } | { skip: 'customer_ceiling' } | null`; `runKind = session.objectType === 'Task' ? 'agent' : 'pool'`. Pool path behavior unchanged except the shared per-customer ceiling. Fail closed (null → `paused_no_numbers`). Ceiling → item `skipped`, `outcome: 'customer_ceiling'`, run continues.
-- Ownership: Lead → `OwnerId`; Contact → `OwnerId`; Opportunity → `OwnerId` OR `Lead_Manager__c`; Task → `OwnerId`. Object types the rule does not name (e.g. `Deal__c`) are **allowed**. `Lead_Manager__c` `INVALID_FIELD` → owner-only + one `console.warn` per process. Lookup failure fails **closed** (transient → retry).
+- Ownership: Lead → `OwnerId`; Contact → `OwnerId`; Opportunity → `OwnerId` OR `LeadManager__c`; Task → `OwnerId`. Object types the rule does not name (e.g. `Deal__c`) are **allowed**. `LeadManager__c` `INVALID_FIELD` → owner-only + one `console.warn` per process. Lookup failure fails **closed** (transient → retry).
 - The gate never blocks placing a call — only writing Salesforce Tasks.
 - Connect on a Task run does NOT auto-complete the task.
 - Tests: pure logic with injected deps; `App.tsx` verified by typecheck + build. Verify each task with `npm test` + `npm run typecheck` in the package touched; the client task also `npm run build`.
@@ -632,7 +632,7 @@ git commit -m "feat(cti-api): roll the dialed task by id on Task runs; follow-up
 - Modify: `services/cti-api/src/salesforce/followup-worker.ts` (+test), `services/cti-api/src/salesforce/sync.ts`, `services/cti-api/src/routes/calls.ts`
 
 **Interfaces:**
-- Produces: `type OwnedObject = 'Lead' | 'Contact' | 'Opportunity' | 'Task'`; `objectTypeForId(id: string): OwnedObject | 'other'` (`00Q`→Lead, `003`→Contact, `006`→Opportunity, `00T`→Task); `interface OwnershipSnapshot { type: OwnedObject | 'other'; ownerId: string | null; leadManagerId?: string | null }`; `callerMayCreateTaskOn(snapshot, callerSfUserId): boolean` (pure); `fetchOwnership(userId, recordId): Promise<OwnershipSnapshot>` (cached 5 min; `INVALID_FIELD` on `Lead_Manager__c` → owner-only + one warn); `WorkerDeps.ownership: (userId, recordId) => Promise<OwnershipSnapshot>`; `POST /calls` response gains `taskAllowed: boolean`; `GET /calls` rows gain `syncError: string | null`.
+- Produces: `type OwnedObject = 'Lead' | 'Contact' | 'Opportunity' | 'Task'`; `objectTypeForId(id: string): OwnedObject | 'other'` (`00Q`→Lead, `003`→Contact, `006`→Opportunity, `00T`→Task); `interface OwnershipSnapshot { type: OwnedObject | 'other'; ownerId: string | null; leadManagerId?: string | null }`; `callerMayCreateTaskOn(snapshot, callerSfUserId): boolean` (pure); `fetchOwnership(userId, recordId): Promise<OwnershipSnapshot>` (cached 5 min; `INVALID_FIELD` on `LeadManager__c` → owner-only + one warn); `WorkerDeps.ownership: (userId, recordId) => Promise<OwnershipSnapshot>`; `POST /calls` response gains `taskAllowed: boolean`; `GET /calls` rows gain `syncError: string | null`.
 
 - [ ] **Step 1: Failing tests** — `ownership.test.ts`:
 
@@ -657,7 +657,7 @@ describe('callerMayCreateTaskOn', () => {
     expect(callerMayCreateTaskOn({ type: 'Lead', ownerId: '005X' }, me)).toBe(false);
     expect(callerMayCreateTaskOn({ type: 'Contact', ownerId: me }, me)).toBe(true);
   });
-  it('Opportunity: owner OR Lead_Manager__c', () => {
+  it('Opportunity: owner OR LeadManager__c', () => {
     expect(callerMayCreateTaskOn({ type: 'Opportunity', ownerId: '005X', leadManagerId: me }, me)).toBe(true);
     expect(callerMayCreateTaskOn({ type: 'Opportunity', ownerId: me, leadManagerId: null }, me)).toBe(true);
     expect(callerMayCreateTaskOn({ type: 'Opportunity', ownerId: '005X', leadManagerId: '005Y' }, me)).toBe(false);
@@ -698,7 +698,7 @@ export function objectTypeForId(id: string): OwnedObject | 'other' {
   return p === '00Q' ? 'Lead' : p === '003' ? 'Contact' : p === '006' ? 'Opportunity' : p === '00T' ? 'Task' : 'other';
 }
 
-/** The rule: Lead/Contact/Task → owner; Opportunity → owner OR Lead_Manager__c; unnamed objects → allowed. */
+/** The rule: Lead/Contact/Task → owner; Opportunity → owner OR LeadManager__c; unnamed objects → allowed. */
 export function callerMayCreateTaskOn(s: OwnershipSnapshot, callerSfUserId: string): boolean {
   if (s.type === 'other') return true;
   if (s.ownerId === callerSfUserId) return true;
@@ -717,11 +717,11 @@ export async function fetchOwnership(userId: string, recordId: string): Promise<
   if (type === 'other') snap = { type, ownerId: null };
   else if (type === 'Opportunity') {
     try {
-      const r = await soqlQuery<{ OwnerId: string; Lead_Manager__c?: string | null }>(userId, `SELECT OwnerId, Lead_Manager__c FROM Opportunity WHERE Id = '${soqlEscape(recordId)}' LIMIT 1`);
-      snap = { type, ownerId: r[0]?.OwnerId ?? null, leadManagerId: r[0]?.Lead_Manager__c ?? null };
+      const r = await soqlQuery<{ OwnerId: string; LeadManager__c?: string | null }>(userId, `SELECT OwnerId, LeadManager__c FROM Opportunity WHERE Id = '${soqlEscape(recordId)}' LIMIT 1`);
+      snap = { type, ownerId: r[0]?.OwnerId ?? null, leadManagerId: r[0]?.LeadManager__c ?? null };
     } catch (err) {
       if (!/INVALID_FIELD/.test((err as Error).message)) throw err;
-      if (!warnedLeadManager) { warnedLeadManager = true; console.warn('[ownership] Lead_Manager__c not found on Opportunity — gate is owner-only'); }
+      if (!warnedLeadManager) { warnedLeadManager = true; console.warn('[ownership] LeadManager__c not found on Opportunity — gate is owner-only'); }
       const r = await soqlQuery<{ OwnerId: string }>(userId, `SELECT OwnerId FROM Opportunity WHERE Id = '${soqlEscape(recordId)}' LIMIT 1`);
       snap = { type, ownerId: r[0]?.OwnerId ?? null, leadManagerId: null };
     }
