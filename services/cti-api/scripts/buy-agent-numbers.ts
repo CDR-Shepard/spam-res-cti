@@ -5,18 +5,24 @@
  * `register`/`assign` need the DB (DATABASE_PUBLIC_URL). Hand-off persisted after EVERY purchase.
  * DRY RUN unless CONFIRM_BUY=1.
  *
+ * EVERY `buy-*` count is a TARGET, never an increment. Each command reads live DB
+ * state first and subtracts both what the DB already holds and what a prior run
+ * bought into the hand-off but hasn't `register`ed yet, then buys only the
+ * shortfall — so re-running the same command (including after `register` pruned
+ * the hand-off) buys nothing further and can never double-spend.
+ *
  *   npx tsx scripts/buy-agent-numbers.ts plan                      # live DB → who needs what (always dry)
- *   CONFIRM_BUY=1 ... buy-rep --email evren@gghomessd.com          # top up one rep to 6 LA / 6 SD
- *   CONFIRM_BUY=1 ... buy-reserve --la 60 --sd 60                  # unassigned hire inventory
- *   CONFIRM_BUY=1 ... buy-pool --count 40                          # pool growth (619/951 mix)
+ *   CONFIRM_BUY=1 ... buy-rep --email evren@gghomessd.com          # top rep up TO 6 LA / 6 SD (buys the shortfall)
+ *   CONFIRM_BUY=1 ... buy-reserve --la 60 --sd 60                  # free hire reserve should REACH 60 LA / 60 SD
+ *   CONFIRM_BUY=1 ... buy-pool --count 40                          # grow pool toward 50 (619/951 mix), max 40 this run
  *   ... register                                                   # insert hand-off into outbound_numbers
  *   ... assign --email newhire@gghomessd.com                       # 6 LA + 6 SD from the reserve → rep
  */
 import pg from 'pg';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 // LA_CODES/SD_CODES come from src/fleet/plan.ts — the same policy buyPlanForRep
 // and classifyArea use, so widening one can never silently desync from the other.
-import { buyPlanForRep, LA_CODES, poolBuyCount, SD_CODES } from '../src/fleet/plan.js';
+import { buyPlanForRep, LA_CODES, POOL_TARGET, poolBuyCount, poolBuyTarget, reserveBuyTarget, SD_CODES } from '../src/fleet/plan.js';
 
 const CONFIRM = process.env.CONFIRM_BUY === '1';
 const HANDOFF = process.env.FLEET_OUTFILE || './fleet-buy.json';
@@ -45,12 +51,35 @@ type BoughtRec = { e164: string; sid: string; kind: 'agent' | 'dialer_pool'; lab
 const alreadyBought = (bought: BoughtRec[], kind: BoughtRec['kind'], assignEmail: string | null, label: string): number =>
   bought.filter((b) => b.kind === kind && b.assignEmail === assignEmail && b.label === label).length;
 
+/**
+ * Replace the hand-off atomically (write a sibling .tmp, then rename over it).
+ * The hand-off is the ONLY local record of numbers already charged to the Twilio
+ * account, so a crash mid-write must never leave it truncated.
+ */
+const writeHandoff = (recs: readonly BoughtRec[]): void => {
+  const tmp = `${HANDOFF}.tmp`;
+  writeFileSync(tmp, JSON.stringify(recs, null, 2));
+  renameSync(tmp, HANDOFF);
+};
+
+/** Print the buy/dry-run banner once per process, before the first Twilio call. */
+let bannerShown = false;
+const preflightBanner = (): void => {
+  if (bannerShown) return;
+  bannerShown = true;
+  console.log(CONFIRM ? '*** CONFIRM_BUY=1 — WILL PURCHASE ***\n' : '--- DRY RUN (no purchase). Set CONFIRM_BUY=1 to buy. ---\n');
+};
+
 /** Buy `count` numbers spreading across `codes` (first code first; falls through when an area code runs dry). */
 async function buyBatch(codes: string[], count: number, kind: BoughtRec['kind'], label: string, assignEmail: string | null, bought: BoughtRec[]): Promise<void> {
+  // Already at target: no Twilio work to do, so don't demand Twilio creds — a
+  // fully-satisfied re-run must succeed outside `railway run` too.
+  if (count <= 0) { console.log(`nothing to buy for "${label}" — already at target.`); return; }
+  preflightBanner();
   if (!ACCOUNT || !TOKEN) die('TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN not set (run via `railway run -s @cti/api`).');
   if (!API_BASE || !/^https:\/\//.test(API_BASE)) die('Set POOL_API_BASE to the https prod API base.');
   const voiceUrl = `${API_BASE}/telephony/twilio/inbound`;
-  const persist = () => { if (CONFIRM) writeFileSync(HANDOFF, JSON.stringify(bought, null, 2)); };
+  const persist = () => { if (CONFIRM) writeHandoff(bought); };
   let remaining = count;
   for (const code of codes) {
     if (remaining <= 0) break;
@@ -63,7 +92,7 @@ async function buyBatch(codes: string[], count: number, kind: BoughtRec['kind'],
       persist(); remaining--;
     }
   }
-  if (remaining > 0) console.warn(`WARN: ${remaining} of ${count} unfilled for "${label}" — area codes exhausted; re-run later or widen codes.`);
+  if (remaining > 0) console.warn(`WARN: ${remaining} of ${count} unfilled for "${label}" — area codes exhausted (or widen codes); re-run the same command later — it only buys the shortfall.`);
 }
 
 async function repHoldings(c: pg.Client, email: string) {
@@ -123,22 +152,48 @@ const existingHandoff = (): BoughtRec[] => {
   return parsed as BoughtRec[];
 };
 
+/** Free (unassigned, healthy, active) reserve numbers in one area class — the same predicate `assign` draws from. */
+async function freeReserve(c: pg.Client, codes: string[]): Promise<number> {
+  const r = await c.query(
+    `select count(*)::int n from outbound_numbers
+     where kind = 'agent' and assigned_user_id is null and active and health not in ('degraded','spam_likely')
+       and substring(e164 from 3 for 3) = any($1)`,
+    [codes],
+  );
+  return r.rows[0].n as number;
+}
+
+/** `--la`/`--sd` are the sizes the FREE reserve should reach — what's already free in the DB and unregistered in the hand-off counts toward them. */
 async function cmdBuyReserve(la: number, sd: number) {
   const bought = existingHandoff();
-  const laAlready = alreadyBought(bought, 'agent', null, 'Agent Reserve LA');
-  const sdAlready = alreadyBought(bought, 'agent', null, 'Agent Reserve SD');
-  const laToBuy = Math.max(0, la - laAlready);
-  const sdToBuy = Math.max(0, sd - sdAlready);
-  if (laAlready || sdAlready) console.log(`hand-off already holds ${laAlready} LA + ${sdAlready} SD unregistered reserve numbers → buying ${laToBuy} LA + ${sdToBuy} SD more`);
+  let laToBuy = 0;
+  let sdToBuy = 0;
+  const c = await dbClient();
+  try {
+    const freeLA = await freeReserve(c, LA_CODES);
+    const freeSD = await freeReserve(c, SD_CODES);
+    const laAlready = alreadyBought(bought, 'agent', null, 'Agent Reserve LA');
+    const sdAlready = alreadyBought(bought, 'agent', null, 'Agent Reserve SD');
+    laToBuy = reserveBuyTarget(la, freeLA, laAlready);
+    sdToBuy = reserveBuyTarget(sd, freeSD, sdAlready);
+    console.log(`reserve LA: ${freeLA} free, target ${la}, hand-off ${laAlready} → buying ${laToBuy}`);
+    console.log(`reserve SD: ${freeSD} free, target ${sd}, hand-off ${sdAlready} → buying ${sdToBuy}`);
+  } finally { await c.end(); } // released before the Twilio round-trips below
   await buyBatch(LA_CODES, laToBuy, 'agent', 'Agent Reserve LA', null, bought);
   await buyBatch(SD_CODES, sdToBuy, 'agent', 'Agent Reserve SD', null, bought);
 }
 
+/** `--count` caps THIS run; the real ceiling is the shortfall toward POOL_TARGET given the live pool + the hand-off. */
 async function cmdBuyPool(count: number) {
   const bought = existingHandoff();
-  const already = alreadyBought(bought, 'dialer_pool', null, 'Dialer Pool');
-  const toBuy = Math.max(0, count - already);
-  if (already) console.log(`hand-off already holds ${already} unregistered pool numbers → buying ${toBuy} more`);
+  let toBuy = 0;
+  const c = await dbClient();
+  try {
+    const active = (await c.query(`select count(*)::int n from outbound_numbers where kind = 'dialer_pool' and active`)).rows[0].n as number;
+    const already = alreadyBought(bought, 'dialer_pool', null, 'Dialer Pool');
+    toBuy = poolBuyTarget(count, active, already);
+    console.log(`pool: ${active} active, target ${POOL_TARGET}, hand-off ${already} → buying ${toBuy}`);
+  } finally { await c.end(); } // released before the Twilio round-trips below
   await buyBatch(POOL_CODES, toBuy, 'dialer_pool', 'Dialer Pool', null, bought);
 }
 
@@ -154,7 +209,7 @@ async function cmdRegister() {
     // purchases. Persist after EVERY record, same discipline as buyBatch, so an
     // interrupted register doesn't lose track of the remainder.
     let remaining = [...bought];
-    const persist = () => writeFileSync(HANDOFF, JSON.stringify(remaining, null, 2));
+    const persist = () => writeHandoff(remaining);
     for (const rec of bought) {
       let userId: string | null = null;
       if (rec.assignEmail) { const u = await c.query('select id from users where email = $1', [rec.assignEmail]); if (u.rowCount === 0) die(`No user ${rec.assignEmail}`); userId = u.rows[0].id; }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buyPlanForRep, classifyArea, poolBuyCount } from './plan.js';
+import { buyPlanForRep, classifyArea, poolBuyCount, poolBuyTarget, reserveBuyTarget } from './plan.js';
 
 describe('classifyArea', () => {
   it('maps LA (213/323), SD (619/858), everything else other', () => {
@@ -36,5 +36,38 @@ describe('poolBuyCount', () => {
   it('50-target minus existing, floored at 0', () => {
     expect(poolBuyCount(10)).toBe(40);
     expect(poolBuyCount(55)).toBe(0);
+  });
+});
+
+describe('poolBuyTarget — --count is a target, never an increment', () => {
+  it('first run: 10 live, empty hand-off, asked 40 → buys 40', () => {
+    expect(poolBuyTarget(40, 10, 0)).toBe(40);
+  });
+  it('mid-run resume: 40 already bought into the hand-off → buys 0 more', () => {
+    expect(poolBuyTarget(40, 10, 40)).toBe(0);
+    expect(poolBuyTarget(40, 10, 12)).toBe(28);
+  });
+  it('AFTER register (hand-off pruned, DB now holds them) a re-run buys nothing', () => {
+    expect(poolBuyTarget(40, 50, 0)).toBe(0);
+    expect(poolBuyTarget(40, 45, 0)).toBe(5); // only the remaining shortfall toward 50
+  });
+  it('never buys past the 50 target even when asked for more, and never negative', () => {
+    expect(poolBuyTarget(100, 10, 0)).toBe(40);
+    expect(poolBuyTarget(40, 60, 0)).toBe(0);
+    expect(poolBuyTarget(5, 10, 9)).toBe(0);
+  });
+});
+
+describe('reserveBuyTarget — --la/--sd are inventory targets', () => {
+  it('first run: nothing free, empty hand-off → buys the whole target', () => {
+    expect(reserveBuyTarget(60, 0, 0)).toBe(60);
+  });
+  it('subtracts free reserve already in the DB and unregistered hand-off entries', () => {
+    expect(reserveBuyTarget(60, 12, 0)).toBe(48);
+    expect(reserveBuyTarget(60, 12, 8)).toBe(40);
+  });
+  it('AFTER register the same command buys 0 — no double-spend', () => {
+    expect(reserveBuyTarget(60, 60, 0)).toBe(0);
+    expect(reserveBuyTarget(60, 70, 0)).toBe(0); // over target clamps, never negative
   });
 });

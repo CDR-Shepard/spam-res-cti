@@ -23,6 +23,30 @@ export function buyPlanForRep(holdings: ReadonlyArray<Holding>, target = { la: 6
   return { la: Math.max(0, target.la - held.LA), sd: Math.max(0, target.sd - held.SD) };
 }
 
-export function poolBuyCount(existingActivePool: number, target = 50): number {
+/** Dialer-pool size the fleet is sized for (spec 2026-08-24). */
+export const POOL_TARGET = 50;
+
+export function poolBuyCount(existingActivePool: number, target = POOL_TARGET): number {
   return Math.max(0, target - existingActivePool);
+}
+
+/**
+ * How many pool DIDs a `buy-pool --count <asked>` run should actually purchase.
+ * `asked` is a TARGET, never an increment: it is capped by the shortfall toward
+ * `target` given what is live in the DB, then reduced by what a previous run
+ * already bought into the hand-off but has not `register`ed yet. Never negative,
+ * so a re-run (including one after `register` pruned the hand-off) never re-buys.
+ */
+export function poolBuyTarget(asked: number, activePool: number, inHandoff: number, target = POOL_TARGET): number {
+  return Math.max(0, Math.min(asked, poolBuyCount(activePool, target)) - inHandoff);
+}
+
+/**
+ * How many reserve DIDs of one area class a `buy-reserve` run should purchase.
+ * `asked` is the desired size of the free (unassigned, healthy) reserve, so both
+ * what the DB already holds free and what sits unregistered in the hand-off count
+ * against it. Never negative — a satisfied re-run buys nothing.
+ */
+export function reserveBuyTarget(asked: number, freeInDb: number, inHandoff: number): number {
+  return Math.max(0, asked - freeInDb - inHandoff);
 }
