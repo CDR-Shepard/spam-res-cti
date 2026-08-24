@@ -79,7 +79,7 @@ async function soqlToleratingMissingSkipField<T>(
     if (!warnedSkipField) {
       warnedSkipField = true;
       console.warn(
-        `[record-phone] ${SKIP_FIELD} unreadable for Salesforce user ${userId} ` +
+        `[record-phone] ${SKIP_FIELD} unreadable for connection user ${userId} ` +
           `(field absent from the org, or no field-level read on it) — ` +
           `that connection's power-dial queues treat every record as unflagged`,
       );
