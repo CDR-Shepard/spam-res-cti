@@ -2,19 +2,22 @@
 
 ## Why
 
-Sub-project D+E changes the Task subject string the CTI app writes on every call log, from the old `-`-delimited form:
+Sub-project D+E changes the Task subject string the CTI app writes on every call log, from the old `-`-delimited form — which wrote the **raw e164 number, unformatted**, and carried no disposition and no record name:
 
 ```
-Outbound Call - (619) 555-1234
-Inbound Call - (619) 555-1234
+Outbound Call - +16195551234
+Inbound Call - +16195551234
 ```
 
 to the new `|`-delimited form (`services/cti-api/src/salesforce/call-subject.ts`, mirrored in `apps/cti-web/src/call-subject.ts`):
 
 ```
 Outbound Call | Voicemail | (619) 555-1234 / Jane Doe
-Inbound Call | Connected | (619) 555-1234
+Outbound Call | Not dispositioned | (619) 555-1234
+Inbound Call | (619) 555-1234 / Jane Doe
 ```
+
+Note the inbound shape. Inbound calls never receive a disposition anywhere in the system (no wrap-up form; the abandoned-call sweep is outbound-scoped), so an inbound subject **omits the middle slot entirely** rather than reading `Not dispositioned` on 100% of inbound Tasks. An inbound call that somehow does carry a disposition still shows it; outbound keeps `Not dispositioned` as its empty-disposition fallback.
 
 Before that ships, this is a read-only sweep of the production org's automation metadata (Flow, ApexClass, ApexTrigger, WorkflowRule) for anything that parses, matches, or otherwise depends on the **old** `"Outbound Call - "` / `"Inbound Call - "` prefix on `Task.Subject`. Nothing was deployed and no retrieved file was modified — this is a grep-only investigation against a scratch retrieve.
 
@@ -74,3 +77,21 @@ The retrieve manifest (`package.xml`) requested `WorkflowRule: *`, and the retri
 Report column filters (e.g., a report filtering `Task.Subject` `starts with "Outbound Call - "`) are stored as filter criteria on `Report` metadata and are not practically greppable the way Flow/Apex XML is — there isn't a cheap bulk-retrieve-and-grep path for report filter logic across an org's full report library, and a full report metadata retrieve is a much larger, noisier pull for a single string check.
 
 **Action for an admin:** manually check any Salesforce report filtering `Task Subject` `starts with "Outbound Call - "` (or `"Inbound Call - "`) and switch it to `contains "Outbound Call | "` (or `contains "Inbound Call | "`) once the new format ships — a `starts with` filter on the old literal will silently stop matching new rows the day the format flips, with no error, just quietly-empty reports. Check both Outbound and Inbound variants, and any List View filters built the same way.
+
+## Transition: mixed formats for a short window after the deploy (expected)
+
+The softphone is a long-lived tab. A rep who does not reload after the deploy keeps running the OLD bundle, and that tab keeps writing the OLD subject (`Outbound Call - +16195551234`) via Open CTI until it reloads. Meanwhile the server-side sync worker picks up the new build immediately, so the backlog it drains — including calls placed by those stale tabs — is written in the NEW format.
+
+So for roughly one shift after the deploy expect **both formats in the activity timeline at once**. This is not a bug and needs no intervention; it ends when every rep's tab has reloaded. If you want it over sooner, tell the reps to hard-reload the Salesforce page hosting the softphone.
+
+Consequence for the report/list-view fix below: switch those filters to `contains "Outbound Call"` semantics (or run both criteria) during the overlap rather than assuming every new row is `|`-delimited from the moment of the deploy.
+
+## Residual: an Open CTI retry cannot always rewrite its own Task
+
+When the softphone logs the Task itself (a click-to-dial call, via Open CTI `saveLog`) and the first wrap-up submit then fails on the backend PATCH, the rep resubmits. If they CHANGED the disposition before resubmitting, the already-written Task has to be rewritten — the disposition lives inside `Subject` now.
+
+The retry does that by re-calling `saveLog` **with the Task's `Id`**, which makes Open CTI update the record in place (`apps/cti-web/src/opencti-log.ts`). That id comes from `returnValue.recordId` on the first save's response.
+
+**The residual:** if Salesforce returns success WITHOUT a `recordId`, we have no id to update by, and we deliberately do NOT re-save — a second `saveLog` would create a DUPLICATE Task, which is worse than a stale subject. In that case the Task keeps the first attempt's `Subject` and `CallDisposition` while the CTI's own call record holds the corrected one. Rare (it needs both a backend failure and a changed disposition on retry), cosmetic, and self-evident in the timeline; the fix if it ever matters is to edit the Task in Salesforce.
+
+Note this affects only the client-written path. The server-side correction path (`POST /calls/:id/disposition` → `task_updated`) rewrites `Subject` alongside `CallDisposition` and has no such gap.

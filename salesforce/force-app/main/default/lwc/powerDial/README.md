@@ -60,9 +60,13 @@ sf project deploy start -o myorg -d \
   force-app/main/default/lwc/powerDial
 ```
 
-(Or just `sf project deploy start -o myorg -d force-app` to deploy
-everything in the package at once, once you're comfortable with the whole
-tree.) This is a **user-gated step** — nobody has run this deploy yet.
+(Do **not** deploy `-d force-app` wholesale. Since 2026-08-24 the package
+also contains `force-app/main/default/layouts/` — point-in-time snapshots of
+admin-owned org layouts — and a layout deploy is a whole-file replacement, so
+a wholesale deploy silently reverts every layout edit an admin has made in the
+org since the retrieve. Deploy the specific paths above, or the specific
+`-m "Layout:<name>"` you changed. See `salesforce/README.md`.) This is a
+**user-gated step** — nobody has run this deploy yet.
 
 ## 2. Files involved
 
