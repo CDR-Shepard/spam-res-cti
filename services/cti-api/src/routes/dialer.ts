@@ -40,7 +40,7 @@ import {
   type EngineDeps,
 } from '../dialer/engine.js';
 import { inFlightItem, nextEligiblePendingItem, earliestRetryAt } from '../dialer/state.js';
-import { sessionCounts, rolloverSummary } from '../dialer/session-store.js';
+import { sessionCounts, skipBreakdown, rolloverSummary } from '../dialer/session-store.js';
 import { buildEngineDeps } from '../dialer/live-deps.js';
 import { mapAnsweredBy } from '../dialer/amd.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
@@ -267,6 +267,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     return {
       session,
       counts: sessionCounts(items),
+      skipBreakdown: skipBreakdown(items),
       currentItem: current,
       waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
       rollovers: rolloverSummary(jobs),

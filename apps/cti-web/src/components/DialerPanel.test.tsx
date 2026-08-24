@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   progressLabel,
+  queueLine,
   isNextEnabled,
   pauseResumeAction,
   shouldTeardownRun,
@@ -36,6 +37,16 @@ describe('progressLabel', () => {
     expect(
       progressLabel({ total: 0, done: 0, connected: 0, noConnect: 0, skipped: 0, unreachable: 0, pending: 0 }),
     ).toBe('0 of 0 done · 0 connected · 0 skipped');
+  });
+});
+
+describe('queueLine', () => {
+  const counts = { total: 50, done: 0, connected: 0, noConnect: 0, skipped: 18, unreachable: 0, pending: 32 };
+  it('reads like the spec example and omits zero parts', () => {
+    expect(queueLine(counts, { already_worked: 18 })).toBe('50 records · 18 already worked today · dialing 32');
+    expect(queueLine(counts, { already_worked: 15, skip_on_dialer: 3 }))
+      .toBe('50 records · 15 already worked today · 3 skipped by flag · dialing 32');
+    expect(queueLine({ ...counts, skipped: 0, pending: 50 }, {})).toBe('50 records · dialing 50');
   });
 });
 

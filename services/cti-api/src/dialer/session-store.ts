@@ -18,6 +18,20 @@ export function sessionCounts(items: Array<Pick<DialerItem, 'status'>>): {
   return c;
 }
 
+/** Per-outcome tally of skipped rows only — what a rep inherited when the run
+ *  started (already worked today, flagged skip, out of hours, etc). Non-skipped
+ *  rows are ignored; a null/unrecognized outcome on a skipped row counts as
+ *  'other' so the total always matches `sessionCounts(items).skipped`. */
+export function skipBreakdown(items: Array<Pick<DialerItem, 'status' | 'outcome'>>): Record<string, number> {
+  const breakdown: Record<string, number> = {};
+  for (const it of items) {
+    if (it.status !== 'skipped') continue;
+    const key = it.outcome ?? 'other';
+    breakdown[key] = (breakdown[key] ?? 0) + 1;
+  }
+  return breakdown;
+}
+
 /** Run-summary counts from a session's rollover jobs. The rollover worker
  *  stamps `nextDay` (the plain next business day) when it creates the copy,
  *  so "moved" (landed there) vs "pushed" (the daily cap sent it later) is a

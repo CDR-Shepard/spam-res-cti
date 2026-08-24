@@ -37,6 +37,9 @@ export interface DialerSessionView {
   /** Set when the run is idle only because its retries are inside the 5-min floor. */
   waitingRetry?: { nextRetryAt: string } | null;
   rollovers?: DialerRollovers;
+  /** Per-outcome tally of skipped rows (see `session-store.ts#skipBreakdown`
+   *  on the server) — what the rep inherited when the run started. */
+  skipBreakdown?: Record<string, number>;
 }
 
 export type DialerControlAction = 'pause' | 'resume' | 'skip' | 'stop' | 'next';
