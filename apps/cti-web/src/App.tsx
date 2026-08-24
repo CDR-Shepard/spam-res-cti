@@ -30,6 +30,7 @@ import {
 import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
 import { watchCallMedia, MEDIA_ISSUE_MESSAGE } from './audio-readiness';
 import { sendDtmfKey, type DtmfSendable } from './dtmf';
+import { buildCallSubject } from './call-subject';
 
 interface MeResponse {
   user: { userId: string; orgId: string; email: string; isAdmin: boolean; noAnswerForwardE164?: string | null };
@@ -953,7 +954,7 @@ export function App(): JSX.Element {
       let loggedViaOpenCti = openCtiTaskWrittenRef.current;
       if (active.recordId && active.taskAllowed !== false && !openCtiTaskWrittenRef.current) {
         loggedViaOpenCti = await saveCallLog({
-          Subject: `Outbound Call - ${active.toNumber}`,
+          Subject: buildCallSubject({ inbound: false, disposition, counterpartyE164: active.toNumber, recordName: active.recordName }),
           Status: 'Completed',
           TaskSubtype: 'Call',
           CallType: 'Outbound',
