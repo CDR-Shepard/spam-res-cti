@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { schema } from '../db/index.js';
 import { buildQueueRows, createAndStartSession, createDialerSession } from './create-session.js';
+import { nextEligiblePendingItem } from './state.js';
+import type { DialerItem } from './session-store.js';
 
 /** Minimal db double: the session insert throws `insertErr`; the catch path
  *  reads back `existing` + `existingItems`. */
@@ -51,10 +53,32 @@ describe('buildQueueRows', () => {
       { recordId: '00Q3', objectType: 'Lead', toNumber: null },
     ]);
     expect(rows).toEqual([
-      { sessionId: 'S1', ordinal: 0, objectType: 'Lead', recordId: '00Q1', toNumber: '+16195550100', fallbackNumber: '+16195550999', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550999', taskId: null, followupEligible: true, status: 'pending' },
-      { sessionId: 'S1', ordinal: 1, objectType: 'Lead', recordId: '00Q2', toNumber: '+16195550200', fallbackNumber: null, attempt: 1, primaryNumber: '+16195550200', secondaryNumber: null, taskId: null, followupEligible: true, status: 'pending' },
-      { sessionId: 'S1', ordinal: 2, objectType: 'Lead', recordId: '00Q3', toNumber: null, fallbackNumber: null, attempt: 1, primaryNumber: null, secondaryNumber: null, taskId: null, followupEligible: true, status: 'unreachable' },
+      { sessionId: 'S1', ordinal: 0, objectType: 'Lead', recordId: '00Q1', toNumber: '+16195550100', fallbackNumber: '+16195550999', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550999', taskId: null, followupEligible: true, status: 'pending', outcome: null },
+      { sessionId: 'S1', ordinal: 1, objectType: 'Lead', recordId: '00Q2', toNumber: '+16195550200', fallbackNumber: null, attempt: 1, primaryNumber: '+16195550200', secondaryNumber: null, taskId: null, followupEligible: true, status: 'pending', outcome: null },
+      { sessionId: 'S1', ordinal: 2, objectType: 'Lead', recordId: '00Q3', toNumber: null, fallbackNumber: null, attempt: 1, primaryNumber: null, secondaryNumber: null, taskId: null, followupEligible: true, status: 'unreachable', outcome: null },
     ]);
+  });
+
+  describe('buildQueueRows — Skip on Dialer', () => {
+    it('marks a flagged record skipped with a visible outcome, keeping the number it resolved', () => {
+      const rows = buildQueueRows('S1', [
+        { recordId: '00Q1', objectType: 'Lead', toNumber: '+16195550100', fallbackNumber: '+16195550199', skipOnDialer: true },
+      ]);
+      expect(rows[0]).toMatchObject({
+        status: 'skipped',
+        outcome: 'skip_on_dialer',
+        // Never silently dropped: the row keeps its numbers so the panel can
+        // show WHO was skipped, and a re-run after an unchecked box has them.
+        toNumber: '+16195550100', primaryNumber: '+16195550100', secondaryNumber: '+16195550199',
+      });
+    });
+
+    it('skip beats unreachable — a flagged record with no number is still skip_on_dialer', () => {
+      const rows = buildQueueRows('S1', [
+        { recordId: '00Q1', objectType: 'Lead', toNumber: null, skipOnDialer: true },
+      ]);
+      expect(rows[0]).toMatchObject({ status: 'skipped', outcome: 'skip_on_dialer', toNumber: null });
+    });
   });
 
   describe('buildQueueRows — immutable number pair + attempt', () => {
@@ -139,5 +163,72 @@ describe('createDialerSession — Task runs', () => {
       ['0031', 'Contact', '00T2', false, 'pending'],
       ['00T3', 'Task', '00T3', true, 'unreachable'],
     ]);
+  });
+});
+
+describe('createDialerSession — Skip on Dialer', () => {
+  /** Stands in for the real resolver's contract: a Lead/Opportunity reports the
+   *  checkbox, a Contact never can (the field does not exist on Contact). */
+  function resolverFor(flagged: Set<string>, e164: string | null = '+16195550100') {
+    return vi.fn(async (_u: string, objectType: string, recordId: string) => ({
+      e164, fallbackE164: null,
+      skipOnDialer: objectType !== 'Contact' && flagged.has(recordId),
+    }));
+  }
+
+  const deps = (db: unknown, resolveDialNumber: unknown, fetchTasks: unknown = async () => []) =>
+    ({ db, resolveDialNumber, fetchTasks, salesforceUserId: async () => '005' });
+
+  it('a flagged Lead enters the queue skipped — visible, with its number still recorded', async () => {
+    const db = fakeDb();
+    await createDialerSession(deps(db, resolverFor(new Set(['00Q2']))) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] });
+
+    expect(db._itemRows.map((x) => [x.recordId, x.status, x.outcome])).toEqual([
+      ['00Q1', 'pending', null],
+      ['00Q2', 'skipped', 'skip_on_dialer'],
+    ]);
+    // Never silently dropped: it is a row in the run, with the number it resolved.
+    expect(db._itemRows[1]).toMatchObject({ toNumber: '+16195550100', primaryNumber: '+16195550100' });
+  });
+
+  it('skip beats unreachable — a flagged record with no phone reads skip_on_dialer, not unreachable', async () => {
+    const db = fakeDb();
+    await createDialerSession(deps(db, resolverFor(new Set(['00Q1']), null)) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1'] });
+
+    expect(db._itemRows[0]).toMatchObject({ status: 'skipped', outcome: 'skip_on_dialer', toNumber: null });
+  });
+
+  it('a Task run skips a flagged Opportunity target and never flags a Contact target', async () => {
+    const fetchTasks = vi.fn(async () => [
+      { Id: '00T1', Subject: 'Follow-up', OwnerId: '005', WhoId: null, WhatId: '0061', What: { Type: 'Opportunity' } },
+      { Id: '00T2', Subject: 'Follow-up', OwnerId: '005', WhoId: '0031', WhatId: null, Who: { Type: 'Contact' } },
+    ]);
+    const db = fakeDb();
+    // '0031' is in the flagged set too: a Contact target must be dialed anyway,
+    // because Skip_on_Dialer__c does not exist on Contact.
+    await createDialerSession(deps(db, resolverFor(new Set(['0061', '0031'])), fetchTasks) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Task', recordIds: ['00T1', '00T2'] });
+
+    expect(db._itemRows.map((x) => [x.recordId, x.objectType, x.status, x.outcome])).toEqual([
+      ['0061', 'Opportunity', 'skipped', 'skip_on_dialer'],
+      ['0031', 'Contact', 'pending', null],
+    ]);
+  });
+
+  it('leaves the flagged row out of what the engine\'s first advance can pick', async () => {
+    const db = fakeDb();
+    const advance = vi.fn().mockResolvedValue(undefined);
+    await createAndStartSession(
+      { ...deps(db, resolverFor(new Set(['00Q1']))), advance } as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
+    );
+
+    expect(advance).toHaveBeenCalledWith('S1');
+    // The engine only ever picks a 'pending' row, so the flagged ordinal-0 record
+    // is not what the kick dials — no engine change is needed to honor the box.
+    const next = nextEligiblePendingItem(db._itemRows as unknown as DialerItem[], new Date());
+    expect(next?.recordId).toBe('00Q2');
   });
 });
