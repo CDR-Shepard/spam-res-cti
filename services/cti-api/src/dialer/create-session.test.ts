@@ -42,6 +42,7 @@ const noResolveDeps = {
   resolveDialNumber: (async () => null) as never,
   fetchTasks: (async () => []) as never,
   salesforceUserId: (async () => 'sf1') as never,
+  workedToday: (async () => new Set<string>()) as never,
 };
 const args = { userId: 'u1', orgId: 'o1', objectType: 'Lead' as const, recordIds: ['00Q000000000001'] };
 
@@ -154,7 +155,7 @@ describe('createDialerSession — Task runs', () => {
     const resolveDialNumber = vi.fn(async (_u: string, obj: string, _id: string) =>
       obj === 'Lead' ? { e164: '+16195550100', fallbackE164: null } : obj === 'Contact' ? { e164: '+16195550200', fallbackE164: null } : null);
     const db = fakeDb();
-    const r = await createDialerSession({ db, resolveDialNumber, fetchTasks, salesforceUserId: async () => '005' } as never,
+    const r = await createDialerSession({ db, resolveDialNumber, fetchTasks, salesforceUserId: async () => '005', workedToday: async () => new Set() } as never,
       { userId: 'U1', orgId: 'O1', objectType: 'Task', recordIds: ['00T1', '00T2', '00T3'] });
     expect(r.total).toBe(3);
     expect(db._sessionInsert!.objectType).toBe('Task');
@@ -177,7 +178,7 @@ describe('createDialerSession — Skip on Dialer', () => {
   }
 
   const deps = (db: unknown, resolveDialNumber: unknown, fetchTasks: unknown = async () => []) =>
-    ({ db, resolveDialNumber, fetchTasks, salesforceUserId: async () => '005' });
+    ({ db, resolveDialNumber, fetchTasks, salesforceUserId: async () => '005', workedToday: async () => new Set() });
 
   it('a flagged Lead enters the queue skipped — visible, with its number still recorded', async () => {
     const db = fakeDb();
@@ -230,5 +231,92 @@ describe('createDialerSession — Skip on Dialer', () => {
     // is not what the kick dials — no engine change is needed to honor the box.
     const next = nextEligiblePendingItem(db._itemRows as unknown as DialerItem[], new Date());
     expect(next?.recordId).toBe('00Q2');
+  });
+});
+
+describe('createDialerSession — already-worked skip at queue build', () => {
+  /** Stands in for the real resolver: each record dials the number mapped to
+   *  its id (null = no phone), and reports the Skip on Dialer checkbox. */
+  function resolverByRecord(numbers: Record<string, string | null>, flagged: Set<string> = new Set()) {
+    return vi.fn(async (_u: string, _objectType: string, recordId: string) => ({
+      e164: numbers[recordId] ?? null, fallbackE164: null, skipOnDialer: flagged.has(recordId),
+    }));
+  }
+
+  const deps = (db: unknown, resolveDialNumber: unknown, workedToday: unknown, fetchTasks: unknown = async () => []) =>
+    ({ db, resolveDialNumber, fetchTasks, workedToday, salesforceUserId: async () => '005' });
+
+  it('a number the team dialed today enters as skipped/already_worked; the rest stay pending', async () => {
+    const db = fakeDb();
+    const workedToday = vi.fn(async () => new Set(['+16195550100']));
+    await createDialerSession(
+      deps(db, resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+16195550200' }), workedToday) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
+    );
+
+    expect(db._itemRows.map((x) => [x.recordId, x.status, x.outcome])).toEqual([
+      ['00Q1', 'skipped', 'already_worked'],
+      ['00Q2', 'pending', null],
+    ]);
+    // Never silently dropped: the skipped row keeps the number it resolved, so
+    // the panel can show WHO the day's earlier shift already reached.
+    expect(db._itemRows[0]).toMatchObject({ toNumber: '+16195550100', primaryNumber: '+16195550100' });
+    // ONE batched read for the whole run — not a query per record.
+    expect(workedToday).toHaveBeenCalledOnce();
+    expect(workedToday).toHaveBeenCalledWith('O1', ['+16195550100', '+16195550200']);
+  });
+
+  it('skip_on_dialer beats already_worked when both apply', async () => {
+    const db = fakeDb();
+    await createDialerSession(
+      deps(db, resolverByRecord({ '00Q1': '+16195550100' }, new Set(['00Q1'])), async () => new Set(['+16195550100'])) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1'] },
+    );
+
+    // The rep's own checkbox is the more specific reason — it is what the panel shows.
+    expect(db._itemRows[0]).toMatchObject({ status: 'skipped', outcome: 'skip_on_dialer' });
+  });
+
+  it('a Task-run target reached via a different record is still caught (number-keyed)', async () => {
+    const fetchTasks = vi.fn(async () => [
+      { Id: '00T1', Subject: 'Follow-up', OwnerId: '005', WhoId: '0031', WhatId: null, Who: { Type: 'Contact' } },
+    ]);
+    const db = fakeDb();
+    // The number was worked today off some other record; this Task reaches the
+    // same person through a Contact. Keyed by number, it is still a repeat.
+    await createDialerSession(
+      deps(db, resolverByRecord({ '0031': '+16195550100' }), async () => new Set(['+16195550100']), fetchTasks) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Task', recordIds: ['00T1'] },
+    );
+
+    expect(db._itemRows.map((x) => [x.recordId, x.objectType, x.status, x.outcome])).toEqual([
+      ['0031', 'Contact', 'skipped', 'already_worked'],
+    ]);
+  });
+
+  it('a phone-less record cannot be already_worked (stays unreachable)', async () => {
+    const db = fakeDb();
+    const workedToday = vi.fn(async () => new Set(['+16195550100']));
+    await createDialerSession(
+      deps(db, resolverByRecord({ '00Q1': null }), workedToday) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1'] },
+    );
+
+    expect(db._itemRows[0]).toMatchObject({ status: 'unreachable', outcome: null, toNumber: null });
+    // Nothing to look up: a null number is filtered out of the batched read.
+    expect(workedToday).toHaveBeenCalledWith('O1', []);
+  });
+
+  it('the fail-open dep returning an empty set leaves everything pending', async () => {
+    const db = fakeDb();
+    await createDialerSession(
+      deps(db, resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+16195550200' }), async () => new Set()) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
+    );
+
+    expect(db._itemRows.map((x) => [x.recordId, x.status, x.outcome])).toEqual([
+      ['00Q1', 'pending', null],
+      ['00Q2', 'pending', null],
+    ]);
   });
 });

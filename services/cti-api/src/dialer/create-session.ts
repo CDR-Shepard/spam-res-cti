@@ -34,11 +34,17 @@ type ResolvedRow = {
   followupEligible?: boolean;
   /** The rep checked Skip on Dialer on this record (Lead/Opportunity only). */
   skipOnDialer?: boolean;
+  /** The TEAM already power-dialed this number today (cross-shift dedupe). */
+  alreadyWorked?: boolean;
 };
 
 /** Outcome stamped on a record the rep has checked Skip on Dialer on, so the
  *  panel can show it was deliberately passed over rather than lost. */
 const SKIP_ON_DIALER_OUTCOME = 'skip_on_dialer';
+
+/** Outcome stamped on a number the team already power-dialed today, so the
+ *  panel can show the run inherited an earlier shift's work. */
+export const ALREADY_WORKED_OUTCOME = 'already_worked';
 
 export function buildQueueRows(
   sessionId: string,
@@ -58,11 +64,13 @@ export function buildQueueRows(
     attempt: 1, primaryNumber: r.toNumber, secondaryNumber: r.fallbackNumber ?? null,
     taskId: r.taskId ?? null, followupEligible: r.followupEligible ?? true,
     // The checkbox wins over "no number": a flagged record reads as deliberately
-    // skipped, never as unreachable. Either way the row exists and keeps its
-    // numbers — the run reports what it passed over instead of dropping it, and
-    // the engine only ever picks up a 'pending' row.
-    status: r.skipOnDialer ? 'skipped' : r.toNumber ? 'pending' : 'unreachable',
-    outcome: r.skipOnDialer ? SKIP_ON_DIALER_OUTCOME : null,
+    // skipped, never as unreachable — and over already_worked, because the rep's
+    // own box is the more specific reason. A number the team already worked today
+    // is skipped too. Either way the row exists and keeps its numbers — the run
+    // reports what it passed over instead of dropping it, and the engine only
+    // ever picks up a 'pending' row.
+    status: r.skipOnDialer || r.alreadyWorked ? 'skipped' : r.toNumber ? 'pending' : 'unreachable',
+    outcome: r.skipOnDialer ? SKIP_ON_DIALER_OUTCOME : r.alreadyWorked ? ALREADY_WORKED_OUTCOME : null,
   }));
 }
 
@@ -70,6 +78,10 @@ export interface CreateSessionDeps {
   resolveDialNumber: typeof resolveDialNumber;
   fetchTasks: typeof fetchTasks;
   salesforceUserId: typeof salesforceUserId;
+  /** Which of these numbers has the team already power-dialed today. Injected
+   *  (rather than read inline) so creation stays unit testable, and so the
+   *  live wiring can be the fail-open variant. */
+  workedToday: (orgId: string, numbers: readonly string[]) => Promise<Set<string>>;
   db: ReturnType<typeof getDb>;
 }
 
@@ -151,7 +163,10 @@ export async function createDialerSession(
     }
     throw err;
   }
-  const rows = buildQueueRows(session!.id, resolved);
+  // ONE batched read for the whole run, after the session exists (a conflicting
+  // create returns the rep's existing session above and never gets here).
+  const worked = await deps.workedToday(args.orgId, resolved.map((r) => r.toNumber).filter((n): n is string => !!n));
+  const rows = buildQueueRows(session!.id, resolved.map((r) => ({ ...r, alreadyWorked: !!r.toNumber && worked.has(r.toNumber) })));
   if (rows.length) await deps.db.insert(schema.dialerQueueItems).values(rows);
   return { sessionId: session!.id, total: rows.length };
 }
