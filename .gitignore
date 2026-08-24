@@ -55,5 +55,8 @@ services/cti-api/drizzle/meta/
 *.p12
 .secrets/
 
+# Fleet-buy hand-off (purchased SIDs, machine-local state — not a secret, not source)
+fleet-buy.json
+
 # brainstorming visual companion scratch
 .superpowers/
