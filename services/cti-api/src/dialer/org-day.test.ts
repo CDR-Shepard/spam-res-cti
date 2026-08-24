@@ -24,6 +24,13 @@ describe('orgMidnightUtc', () => {
     const now = new Date('2026-08-25T05:30:00Z'); // 22:30 PDT on Aug 24
     expect(orgMidnightUtc(now).toISOString()).toBe('2026-08-24T07:00:00.000Z');
   });
+
+  it('supports positive-offset and fractional-offset zones (general contract)', () => {
+    const tokyo = orgMidnightUtc(new Date('2026-08-24T18:00:00Z'), 'Asia/Tokyo'); // 03:00 Aug 25 JST
+    expect(tokyo.toISOString()).toBe('2026-08-24T15:00:00.000Z'); // JST midnight Aug 25 = 15:00Z Aug 24
+    const kolkata = orgMidnightUtc(new Date('2026-08-24T12:00:00Z'), 'Asia/Kolkata'); // 17:30 IST
+    expect(kolkata.toISOString()).toBe('2026-08-23T18:30:00.000Z'); // IST midnight Aug 24 = 18:30Z Aug 23
+  });
   it('is correct on both DST transition days of 2026', () => {
     for (const iso of ['2026-03-08T20:00:00Z', '2026-11-01T20:00:00Z']) {
       const m = orgMidnightUtc(new Date(iso));
