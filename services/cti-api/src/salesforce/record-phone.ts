@@ -58,8 +58,14 @@ export function _resetSkipFieldWarnForTests(): void {
  * org, and the querying user lacks field-level read on it — and the error cannot
  * tell them apart. So this also fails open for an unassigned rep, who then
  * power-dials records their manager flagged. That is the specified trade (deploy
- * order can never break dialing); the warn names the user so the second cause is
- * at least diagnosable from a log.
+ * order can never break dialing).
+ *
+ * Know the limit of the warn before you rely on it: the dedupe is process-wide,
+ * so only the FIRST affected connection is ever named. One org still missing the
+ * field burns the single line, and a later FLS denial on a different connection
+ * is then completely silent. Naming every affected connection needs per-user
+ * dedupe, which emits more than the once-per-process the brief specifies — a
+ * spec change, not a local fix.
  */
 async function soqlToleratingMissingSkipField<T>(
   userId: string,
