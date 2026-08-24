@@ -147,19 +147,30 @@ async function cmdRegister() {
   if (bought.length === 0) die(`Hand-off ${HANDOFF} empty — run a buy with CONFIRM_BUY=1 first.`);
   const c = await dbClient();
   try {
-    const org = (await c.query('select id from organizations order by created_at asc limit 1')).rows[0];
+    const org = (await c.query('select id from organizations order by created_at asc limit 1')).rows[0] ?? die('No organizations row — cannot register.');
     const summary: Array<Record<string, string>> = [];
+    // Prune the hand-off as we go (dup-skipped records included) so a re-run's
+    // idempotency guard (`alreadyBought`) only ever counts genuinely-unregistered
+    // purchases. Persist after EVERY record, same discipline as buyBatch, so an
+    // interrupted register doesn't lose track of the remainder.
+    let remaining = [...bought];
+    const persist = () => writeFileSync(HANDOFF, JSON.stringify(remaining, null, 2));
     for (const rec of bought) {
       let userId: string | null = null;
       if (rec.assignEmail) { const u = await c.query('select id from users where email = $1', [rec.assignEmail]); if (u.rowCount === 0) die(`No user ${rec.assignEmail}`); userId = u.rows[0].id; }
       const dup = await c.query('select id from outbound_numbers where e164 = $1', [rec.e164]);
-      if (dup.rowCount) { summary.push({ e164: rec.e164, registered: 'dup' }); continue; }
-      await c.query(
-        `insert into outbound_numbers (org_id, e164, label, provider, active, twilio_sid, kind, inbound_enabled, assigned_user_id)
-         values ($1,$2,$3,'twilio',true,$4,$5,true,$6)`,
-        [org.id, rec.e164, rec.label, rec.sid, rec.kind, userId],
-      );
-      summary.push({ e164: rec.e164, registered: rec.kind + (userId ? `→${rec.assignEmail}` : ' (reserve)') });
+      if (dup.rowCount) {
+        summary.push({ e164: rec.e164, registered: 'dup' });
+      } else {
+        await c.query(
+          `insert into outbound_numbers (org_id, e164, label, provider, active, twilio_sid, kind, inbound_enabled, assigned_user_id)
+           values ($1,$2,$3,'twilio',true,$4,$5,true,$6)`,
+          [org.id, rec.e164, rec.label, rec.sid, rec.kind, userId],
+        );
+        summary.push({ e164: rec.e164, registered: rec.kind + (userId ? `→${rec.assignEmail}` : ' (reserve)') });
+      }
+      remaining = remaining.filter((r) => r !== rec);
+      persist();
     }
     console.table(summary);
   } finally { await c.end(); }
