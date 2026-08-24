@@ -14,7 +14,9 @@
  */
 import pg from 'pg';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { buyPlanForRep, classifyArea, poolBuyCount } from '../src/fleet/plan.js';
+// LA_CODES/SD_CODES come from src/fleet/plan.ts — the same policy buyPlanForRep
+// and classifyArea use, so widening one can never silently desync from the other.
+import { buyPlanForRep, LA_CODES, poolBuyCount, SD_CODES } from '../src/fleet/plan.js';
 
 const CONFIRM = process.env.CONFIRM_BUY === '1';
 const HANDOFF = process.env.FLEET_OUTFILE || './fleet-buy.json';
@@ -22,8 +24,6 @@ const ACCOUNT = process.env.TWILIO_ACCOUNT_SID;
 const TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const API_BASE = process.env.POOL_API_BASE || process.env.API_PUBLIC_URL;
 const DB_URL = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
-const LA_CODES = ['213', '323'];
-const SD_CODES = ['619', '858'];
 const POOL_CODES = ['619', '951'];
 
 function die(msg: string): never { console.error(`ERROR: ${msg}`); process.exit(1); }
@@ -40,6 +40,10 @@ async function searchAvailable(areaCode: string, count: number): Promise<string[
 
 async function dbClient() { if (!DB_URL) die('No DATABASE_PUBLIC_URL / DATABASE_URL.'); const c = new pg.Client({ connectionString: DB_URL, ssl: { rejectUnauthorized: false } }); await c.connect(); return c; }
 type BoughtRec = { e164: string; sid: string; kind: 'agent' | 'dialer_pool'; label: string; assignEmail: string | null };
+
+/** Numbers already sitting in the hand-off (bought, not yet `register`ed) matching this kind/owner/label — so a re-run of a buy command tops up rather than re-buying. */
+const alreadyBought = (bought: BoughtRec[], kind: BoughtRec['kind'], assignEmail: string | null, label: string): number =>
+  bought.filter((b) => b.kind === kind && b.assignEmail === assignEmail && b.label === label).length;
 
 /** Buy `count` numbers spreading across `codes` (first code first; falls through when an area code runs dry). */
 async function buyBatch(codes: string[], count: number, kind: BoughtRec['kind'], label: string, assignEmail: string | null, bought: BoughtRec[]): Promise<void> {
@@ -92,25 +96,50 @@ async function cmdBuyRep(email: string) {
   try {
     const { holdings } = await repHoldings(c, email);
     const p = buyPlanForRep(holdings);
-    console.log(`${email}: buying ${p.la} LA + ${p.sd} SD`);
     const bought: BoughtRec[] = existingHandoff();
     const tag = email.split('@')[0];
-    await buyBatch(LA_CODES, p.la, 'agent', `Agent ${tag} LA`, email, bought);
-    await buyBatch(SD_CODES, p.sd, 'agent', `Agent ${tag} SD`, email, bought);
+    const laLabel = `Agent ${tag} LA`;
+    const sdLabel = `Agent ${tag} SD`;
+    // Subtract numbers this same command already bought into the hand-off but
+    // that `register` hasn't consumed yet, so a re-run tops up instead of re-buying.
+    const laAlready = alreadyBought(bought, 'agent', email, laLabel);
+    const sdAlready = alreadyBought(bought, 'agent', email, sdLabel);
+    const la = Math.max(0, p.la - laAlready);
+    const sd = Math.max(0, p.sd - sdAlready);
+    console.log(`${email}: buying ${la} LA + ${sd} SD` + (laAlready || sdAlready ? ` (hand-off already holds ${laAlready} LA + ${sdAlready} SD unregistered)` : ''));
+    await buyBatch(LA_CODES, la, 'agent', laLabel, email, bought);
+    await buyBatch(SD_CODES, sd, 'agent', sdLabel, email, bought);
   } finally { await c.end(); }
 }
 
-const existingHandoff = (): BoughtRec[] => { try { return JSON.parse(readFileSync(HANDOFF, 'utf8')); } catch { return []; } };
+const existingHandoff = (): BoughtRec[] => {
+  let raw: string;
+  try { raw = readFileSync(HANDOFF, 'utf8'); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []; throw e; }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); }
+  catch { die(`Hand-off ${HANDOFF} is corrupt (invalid JSON) — restore it from backup or the Twilio console before buying or registering again.`); }
+  if (!Array.isArray(parsed)) die(`Hand-off ${HANDOFF} is corrupt (not an array) — restore it from backup or the Twilio console before buying or registering again.`);
+  return parsed as BoughtRec[];
+};
 
 async function cmdBuyReserve(la: number, sd: number) {
   const bought = existingHandoff();
-  await buyBatch(LA_CODES, la, 'agent', 'Agent Reserve LA', null, bought);
-  await buyBatch(SD_CODES, sd, 'agent', 'Agent Reserve SD', null, bought);
+  const laAlready = alreadyBought(bought, 'agent', null, 'Agent Reserve LA');
+  const sdAlready = alreadyBought(bought, 'agent', null, 'Agent Reserve SD');
+  const laToBuy = Math.max(0, la - laAlready);
+  const sdToBuy = Math.max(0, sd - sdAlready);
+  if (laAlready || sdAlready) console.log(`hand-off already holds ${laAlready} LA + ${sdAlready} SD unregistered reserve numbers → buying ${laToBuy} LA + ${sdToBuy} SD more`);
+  await buyBatch(LA_CODES, laToBuy, 'agent', 'Agent Reserve LA', null, bought);
+  await buyBatch(SD_CODES, sdToBuy, 'agent', 'Agent Reserve SD', null, bought);
 }
 
 async function cmdBuyPool(count: number) {
   const bought = existingHandoff();
-  await buyBatch(POOL_CODES, count, 'dialer_pool', 'Dialer Pool', null, bought);
+  const already = alreadyBought(bought, 'dialer_pool', null, 'Dialer Pool');
+  const toBuy = Math.max(0, count - already);
+  if (already) console.log(`hand-off already holds ${already} unregistered pool numbers → buying ${toBuy} more`);
+  await buyBatch(POOL_CODES, toBuy, 'dialer_pool', 'Dialer Pool', null, bought);
 }
 
 async function cmdRegister() {

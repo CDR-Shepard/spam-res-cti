@@ -1,8 +1,10 @@
 /** Area-code policy for the inbound-team fleet (spec 2026-08-24): LA = 213/323, SD = 619/858. */
 export type AreaClass = 'LA' | 'SD' | 'other';
 
-const LA = new Set(['213', '323']);
-const SD = new Set(['619', '858']);
+export const LA_CODES = ['213', '323'];
+export const SD_CODES = ['619', '858'];
+const LA = new Set(LA_CODES);
+const SD = new Set(SD_CODES);
 
 export function classifyArea(e164: string): AreaClass {
   const ac = /^\+1(\d{3})\d{7}$/.exec(e164)?.[1];
