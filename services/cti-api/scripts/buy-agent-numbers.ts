@@ -2,7 +2,7 @@
 /**
  * Buy + register the inbound-team fleet (spec docs/superpowers/specs/2026-08-24-inbound-launch-design.md).
  * Two-phase like buy-pool-numbers.mjs: `buy-*` needs Twilio creds (railway run -s @cti/api),
- * `register`/`assign` need the DB (DATABASE_PUBLIC_URL). Hand-off persisted after EVERY purchase.
+ * `register`/`assign` need the DB (DATABASE_URL, else DATABASE_PUBLIC_URL). Hand-off persisted after EVERY purchase.
  * DRY RUN unless CONFIRM_BUY=1.
  *
  * EVERY `buy-*` count is a TARGET, never an increment. Each command reads live DB
@@ -22,18 +22,35 @@ import pg from 'pg';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 // LA_CODES/SD_CODES come from src/fleet/plan.ts — the same policy buyPlanForRep
 // and classifyArea use, so widening one can never silently desync from the other.
-import { buyPlanForRep, LA_CODES, POOL_TARGET, poolBuyCount, poolBuyTarget, reserveBuyTarget, SD_CODES } from '../src/fleet/plan.js';
+import { buyPlanForRep, LA_CODES, POOL_TARGET, poolBuyCount, poolBuyTarget, reserveBuyTarget, SD_CODES, splitEvenly } from '../src/fleet/plan.js';
 
 const CONFIRM = process.env.CONFIRM_BUY === '1';
-const HANDOFF = process.env.FLEET_OUTFILE || './fleet-buy.json';
+// Script-relative, NOT cwd-relative: the hand-off is the only local record of
+// numbers already charged to the account, so running the script from a different
+// directory must find the same file rather than silently start an empty one.
+const HANDOFF = process.env.FLEET_OUTFILE || new URL('../fleet-buy.json', import.meta.url).pathname;
 const ACCOUNT = process.env.TWILIO_ACCOUNT_SID;
 const TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const API_BASE = process.env.POOL_API_BASE || process.env.API_PUBLIC_URL;
-const DB_URL = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
-const POOL_CODES = ['619', '951'];
+// An explicitly-passed DATABASE_URL always wins over an inherited DATABASE_PUBLIC_URL:
+// every runbook command overrides DATABASE_URL, and that override must be authoritative.
+const DB_URL = process.env.DATABASE_URL || process.env.DATABASE_PUBLIC_URL;
+/** The pool is deliberately a 619/951 mix; buys split evenly between them. */
+const POOL_PRIMARY = '619';
+const POOL_SECONDARY = '951';
+/** Nobody buys more than this many billable numbers in one command. */
+const MAX_BATCH = 200;
 
 function die(msg: string): never { console.error(`ERROR: ${msg}`); process.exit(1); }
 const arg = (name: string): string | undefined => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? process.argv[i + 1] : undefined; };
+/** `--la`/`--sd`/`--count` are counts of real, billable numbers: whole, non-negative, sane. */
+const intArg = (name: string): number => {
+  const raw = arg(name);
+  if (raw === undefined) die(`--${name} required`);
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0 || n > MAX_BATCH) die(`--${name} must be a whole number between 0 and ${MAX_BATCH} (got "${raw}") — it is a count of billable numbers.`);
+  return n;
+};
 
 const authHeader = () => 'Basic ' + Buffer.from(`${ACCOUNT}:${TOKEN}`).toString('base64');
 const twBase = () => `https://api.twilio.com/2010-04-01/Accounts/${ACCOUNT}`;
@@ -44,7 +61,7 @@ async function searchAvailable(areaCode: string, count: number): Promise<string[
   return (data.available_phone_numbers ?? []).slice(0, count).map((n: any) => n.phone_number);
 }
 
-async function dbClient() { if (!DB_URL) die('No DATABASE_PUBLIC_URL / DATABASE_URL.'); const c = new pg.Client({ connectionString: DB_URL, ssl: { rejectUnauthorized: false } }); await c.connect(); return c; }
+async function dbClient() { if (!DB_URL) die('No DATABASE_URL / DATABASE_PUBLIC_URL.'); const c = new pg.Client({ connectionString: DB_URL, ssl: { rejectUnauthorized: false } }); await c.connect(); return c; }
 type BoughtRec = { e164: string; sid: string; kind: 'agent' | 'dialer_pool'; label: string; assignEmail: string | null };
 
 /** Numbers already sitting in the hand-off (bought, not yet `register`ed) matching this kind/owner/label — so a re-run of a buy command tops up rather than re-buying. */
@@ -81,8 +98,11 @@ async function buyBatch(codes: string[], count: number, kind: BoughtRec['kind'],
   const voiceUrl = `${API_BASE}/telephony/twilio/inbound`;
   const persist = () => { if (CONFIRM) writeHandoff(bought); };
   let remaining = count;
+  let prev: string | null = null;
   for (const code of codes) {
     if (remaining <= 0) break;
+    if (prev) console.warn(`WARN: area code ${prev} ran dry for "${label}" — falling through to ${code} for the last ${remaining}.`);
+    prev = code;
     const candidates = await searchAvailable(code, remaining);
     for (const cand of candidates) {
       if (!CONFIRM) { console.log(`[dry-run] would buy ${cand} (${code}) → ${label}`); remaining--; continue; }
@@ -117,6 +137,11 @@ async function cmdPlan() {
     console.log(`pool: ${pool} active → buy ${poolBuy}`);
     console.log(`reserve suggestion: 10 hires × (6 LA + 6 SD) = 60 LA + 60 SD`);
     console.log(`TOTAL (with reserve 120): ${agents + poolBuy + 120}`);
+    // Purchases sitting unregistered in the hand-off are invisible to every count
+    // above (they are not in the DB yet) — surface them so `plan` stays the honest
+    // go/no-go the runbook makes it.
+    const pending = existingHandoff().length;
+    if (pending > 0) console.log(`hand-off: ${pending} purchased awaiting register (excluded from buy targets above)`);
   } finally { await c.end(); }
 }
 
@@ -194,12 +219,18 @@ async function cmdBuyPool(count: number) {
     toBuy = poolBuyTarget(count, active, already);
     console.log(`pool: ${active} active, target ${POOL_TARGET}, hand-off ${already} → buying ${toBuy}`);
   } finally { await c.end(); } // released before the Twilio round-trips below
-  await buyBatch(POOL_CODES, toBuy, 'dialer_pool', 'Dialer Pool', null, bought);
+  // Split evenly instead of exhausting 619 first, so a 40-DID batch lands 20/20 and
+  // keeps the pool's 619/951 mix. Each half still falls through to the other area
+  // code when its own runs dry (that fall-through prints a WARN).
+  const [n619, n951] = splitEvenly(toBuy);
+  console.log(`pool split: ${n619} from ${POOL_PRIMARY} + ${n951} from ${POOL_SECONDARY}`);
+  await buyBatch([POOL_PRIMARY, POOL_SECONDARY], n619, 'dialer_pool', 'Dialer Pool', null, bought);
+  if (n951 > 0) await buyBatch([POOL_SECONDARY, POOL_PRIMARY], n951, 'dialer_pool', 'Dialer Pool', null, bought);
 }
 
 async function cmdRegister() {
   const bought = existingHandoff();
-  if (bought.length === 0) die(`Hand-off ${HANDOFF} empty — run a buy with CONFIRM_BUY=1 first.`);
+  if (bought.length === 0) die(`Hand-off ${HANDOFF} empty. If you HAVE bought numbers and lost the hand-off, do NOT re-buy — run fleet-report to reconcile (orphans are listed) and admin import-twilio to recover them.`);
   const c = await dbClient();
   try {
     const org = (await c.query('select id from organizations order by created_at asc limit 1')).rows[0] ?? die('No organizations row — cannot register.');
@@ -213,9 +244,24 @@ async function cmdRegister() {
     for (const rec of bought) {
       let userId: string | null = null;
       if (rec.assignEmail) { const u = await c.query('select id from users where email = $1', [rec.assignEmail]); if (u.rowCount === 0) die(`No user ${rec.assignEmail}`); userId = u.rows[0].id; }
-      const dup = await c.query('select id from outbound_numbers where e164 = $1', [rec.e164]);
+      // Org-scoped, matching the outbound_numbers_org_e164_unique index. A number
+      // already on this org is NOT dropped on the floor (it is charged either way):
+      // refresh the Twilio SID and fill in only the columns still null, so a human's
+      // existing classification/assignment/label is never clobbered.
+      const dup = await c.query('select id from outbound_numbers where org_id = $1 and e164 = $2', [org.id, rec.e164]);
       if (dup.rowCount) {
-        summary.push({ e164: rec.e164, registered: 'dup' });
+        await c.query(
+          `update outbound_numbers
+              set twilio_sid = $1,
+                  kind = coalesce(kind, $2),
+                  assigned_user_id = coalesce(assigned_user_id, $3),
+                  label = coalesce(label, $4)
+            where id = $5`,
+          // kind is NOT NULL in the schema, so its coalesce always keeps the existing
+          // value — deliberate: registering must never re-classify a live number.
+          [rec.sid, rec.kind, userId, rec.label, dup.rows[0].id],
+        );
+        summary.push({ e164: rec.e164, registered: 'updated (existing)' });
       } else {
         await c.query(
           `insert into outbound_numbers (org_id, e164, label, provider, active, twilio_sid, kind, inbound_enabled, assigned_user_id)
@@ -257,8 +303,8 @@ async function cmdAssign(email: string) {
 const cmd = process.argv[2];
 if (cmd === 'plan') await cmdPlan();
 else if (cmd === 'buy-rep') await cmdBuyRep(arg('email') ?? die('--email required'));
-else if (cmd === 'buy-reserve') await cmdBuyReserve(Number(arg('la') ?? die('--la required')), Number(arg('sd') ?? die('--sd required')));
-else if (cmd === 'buy-pool') await cmdBuyPool(Number(arg('count') ?? die('--count required')));
+else if (cmd === 'buy-reserve') await cmdBuyReserve(intArg('la'), intArg('sd'));
+else if (cmd === 'buy-pool') await cmdBuyPool(intArg('count'));
 else if (cmd === 'register') await cmdRegister();
 else if (cmd === 'assign') await cmdAssign(arg('email') ?? die('--email required'));
 else die('command: plan | buy-rep | buy-reserve | buy-pool | register | assign');
