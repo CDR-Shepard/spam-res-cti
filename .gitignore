@@ -55,5 +55,10 @@ services/cti-api/drizzle/meta/
 *.p12
 .secrets/
 
+# Fleet-buy hand-off (purchased SIDs, machine-local state — not a secret, not source).
+# The glob also covers the atomic-write sibling fleet-buy.json.tmp, which only
+# survives a crash mid-purchase — exactly when a stray `git add -A` is most likely.
+fleet-buy.json*
+
 # brainstorming visual companion scratch
 .superpowers/
