@@ -513,7 +513,7 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
         // correction that patched only CallDisposition would leave the timeline
         // reading "Not dispositioned" forever on precisely the calls a rep went
         // back to fix. Rebuild it from the same inputs syncOne used.
-        const target = row?.salesforceWhoId ?? row?.salesforceWhatId ?? null;
+        const target = (row ?? owned).salesforceWhoId ?? (row ?? owned).salesforceWhatId ?? null;
         // Cosmetic: a failed name lookup renders the subject number-only, it
         // never blocks the correction (fetchRecordName already swallows SF
         // errors; the catch covers a connection that throws before the query).
