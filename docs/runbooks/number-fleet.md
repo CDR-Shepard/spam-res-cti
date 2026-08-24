@@ -39,21 +39,34 @@ anywhere** — it's a live DB credential.
 PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
 ```
 
-Every `buy-agent-numbers.ts` invocation (`plan`, `buy-rep`, `buy-reserve`,
-`buy-pool`, `register`) uses the same two-phase shape: Twilio credentials come from
-`railway run -s @cti/api` (the linked service), the DB is overridden to the public
-URL since `railway run` executes locally, and `POOL_API_BASE` is the voice-webhook
-base the newly bought numbers get registered against:
+`buy-agent-numbers.ts` uses a **two-phase env pattern**, split by what each
+subcommand actually touches (the script's own header comment: "`buy-*` needs
+Twilio creds (railway run -s @cti/api), `register`/`assign` need the DB
+(DATABASE_PUBLIC_URL)"):
 
-```bash
-railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=https://ctiapi-production.up.railway.app npx tsx scripts/buy-agent-numbers.ts <cmd>
-```
+- **`plan`, `buy-rep`, `buy-reserve`, `buy-pool`** call Twilio, so Twilio
+  credentials come from `railway run -s @cti/api` (the linked service); the DB is
+  overridden to the public URL since `railway run` executes locally, and
+  `POOL_API_BASE` is the voice-webhook base the newly bought numbers get
+  registered against:
 
-A **dry run** is exactly that command. A **real buy** prefixes `CONFIRM_BUY=1`:
+  ```bash
+  railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=https://ctiapi-production.up.railway.app npx tsx scripts/buy-agent-numbers.ts <cmd>
+  ```
 
-```bash
-CONFIRM_BUY=1 railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=https://ctiapi-production.up.railway.app npx tsx scripts/buy-agent-numbers.ts <cmd>
-```
+  A **dry run** is exactly that command. A **real buy** prefixes `CONFIRM_BUY=1`:
+
+  ```bash
+  CONFIRM_BUY=1 railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=https://ctiapi-production.up.railway.app npx tsx scripts/buy-agent-numbers.ts <cmd>
+  ```
+
+- **`register`** only inserts the already-bought hand-off into Postgres — it never
+  calls Twilio — so it runs directly against the DB, with no `railway run`
+  wrapper:
+
+  ```bash
+  env DATABASE_URL="$PUB" npx tsx scripts/buy-agent-numbers.ts register
+  ```
 
 ## 2. Dry-run everything first
 
@@ -93,7 +106,7 @@ CONFIRM_BUY=1 railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=h
 Expect 7 `BOUGHT` lines (6 tagged `Agent evren LA`, 1 tagged `Agent evren SD`).
 
 ```bash
-railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=https://ctiapi-production.up.railway.app npx tsx scripts/buy-agent-numbers.ts register
+env DATABASE_URL="$PUB" npx tsx scripts/buy-agent-numbers.ts register
 ```
 
 Expect a table with 7 rows, each `registered: agent→evren@gghomessd.com`.
@@ -108,7 +121,7 @@ cat fleet-buy.json
 must print `[]`. Then run `register` again —
 
 ```bash
-railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=https://ctiapi-production.up.railway.app npx tsx scripts/buy-agent-numbers.ts register
+env DATABASE_URL="$PUB" npx tsx scripts/buy-agent-numbers.ts register
 ```
 
 must die with `ERROR: Hand-off ./fleet-buy.json empty — run a buy with
@@ -125,7 +138,7 @@ CONFIRM_BUY=1 railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=h
 Expect 7 `BOUGHT` lines (4 `Agent matt LA`, 3 `Agent matt SD`).
 
 ```bash
-railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=https://ctiapi-production.up.railway.app npx tsx scripts/buy-agent-numbers.ts register
+env DATABASE_URL="$PUB" npx tsx scripts/buy-agent-numbers.ts register
 ```
 
 Expect 7 rows, each `registered: agent→matt@sjoinvestments.com`.
@@ -139,7 +152,7 @@ CONFIRM_BUY=1 railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=h
 Expect 6 `BOUGHT` lines (3 `Agent tyler LA`, 3 `Agent tyler SD`).
 
 ```bash
-railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=https://ctiapi-production.up.railway.app npx tsx scripts/buy-agent-numbers.ts register
+env DATABASE_URL="$PUB" npx tsx scripts/buy-agent-numbers.ts register
 ```
 
 Expect 6 rows, each `registered: agent→tyler@sjoinvestments.com`.
@@ -153,7 +166,7 @@ CONFIRM_BUY=1 railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=h
 Expect 12 `BOUGHT` lines (6 `Agent jona LA`, 6 `Agent jona SD`).
 
 ```bash
-railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=https://ctiapi-production.up.railway.app npx tsx scripts/buy-agent-numbers.ts register
+env DATABASE_URL="$PUB" npx tsx scripts/buy-agent-numbers.ts register
 ```
 
 Expect 12 rows, each `registered: agent→jona@gghomessd.com`.
@@ -167,7 +180,7 @@ CONFIRM_BUY=1 railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=h
 Expect 120 `BOUGHT` lines (60 `Agent Reserve LA`, 60 `Agent Reserve SD`).
 
 ```bash
-railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=https://ctiapi-production.up.railway.app npx tsx scripts/buy-agent-numbers.ts register
+env DATABASE_URL="$PUB" npx tsx scripts/buy-agent-numbers.ts register
 ```
 
 Expect 120 rows, each `registered: agent (reserve)`.
@@ -181,7 +194,7 @@ CONFIRM_BUY=1 railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=h
 Expect 40 `BOUGHT` lines tagged `Dialer Pool`.
 
 ```bash
-railway run -s @cti/api -- env DATABASE_URL="$PUB" POOL_API_BASE=https://ctiapi-production.up.railway.app npx tsx scripts/buy-agent-numbers.ts register
+env DATABASE_URL="$PUB" npx tsx scripts/buy-agent-numbers.ts register
 ```
 
 Expect 40 rows, each `registered: dialer_pool (reserve)`.
