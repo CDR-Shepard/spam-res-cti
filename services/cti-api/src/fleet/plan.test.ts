@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buyPlanForRep, classifyArea, poolBuyCount, poolBuyTarget, reserveBuyTarget } from './plan.js';
+import { buyPlanForRep, classifyArea, poolBuyCount, poolBuyTarget, reserveBuyTarget, splitEvenly } from './plan.js';
 
 describe('classifyArea', () => {
   it('maps LA (213/323), SD (619/858), everything else other', () => {
@@ -24,6 +24,17 @@ describe('buyPlanForRep — the four real reps', () => {
   it('Tyler: 3/3 held → 3 LA + 3 SD; Jona: nothing → 6 + 6', () => {
     expect(buyPlanForRep([h('+12137147277'), h('+12137151307'), h('+12137290113'), h('+16195378265'), h('+16198641417'), h('+18584221927')])).toEqual({ la: 3, sd: 3 });
     expect(buyPlanForRep([])).toEqual({ la: 6, sd: 6 });
+  });
+  it('spam_likely holdings are excluded exactly like degraded', () => {
+    // The benched 213 is `degraded` today, but a number the reputation worker
+    // flags `spam_likely` is just as unusable: it must never satisfy a target.
+    expect(buyPlanForRep([h('+12137544220', 'spam_likely')])).toEqual({ la: 6, sd: 6 });
+    expect(buyPlanForRep([h('+16198481782', 'spam_likely')])).toEqual({ la: 6, sd: 6 });
+    // Matt's real holdings with the 323 additionally flagged spam_likely: one
+    // fewer usable LA than the degraded-only case (which buys 4 LA + 3 SD).
+    expect(
+      buyPlanForRep([h('+12137544220'), h('+12137742225', 'degraded'), h('+13235249247', 'spam_likely'), h('+16198481782'), h('+16198486573'), h('+18583585449')]),
+    ).toEqual({ la: 5, sd: 3 });
   });
   it('overshoot clamps to zero and inactive/other never count', () => {
     const seven = ['+12131110001', '+12131110002', '+12131110003', '+13231110004', '+12131110005', '+13231110006', '+12131110007'].map((e) => h(e));
@@ -69,5 +80,25 @@ describe('reserveBuyTarget — --la/--sd are inventory targets', () => {
   it('AFTER register the same command buys 0 — no double-spend', () => {
     expect(reserveBuyTarget(60, 60, 0)).toBe(0);
     expect(reserveBuyTarget(60, 70, 0)).toBe(0); // over target clamps, never negative
+  });
+});
+
+describe('splitEvenly — pool buys split across 619/951', () => {
+  it('splits an even batch down the middle', () => {
+    expect(splitEvenly(40)).toEqual([20, 20]);
+    expect(splitEvenly(0)).toEqual([0, 0]);
+  });
+  it('gives the odd number to the first area code (ceil/floor)', () => {
+    expect(splitEvenly(41)).toEqual([21, 20]);
+    expect(splitEvenly(1)).toEqual([1, 0]);
+    expect(splitEvenly(5)).toEqual([3, 2]);
+  });
+  it('never returns negatives and always sums back to the batch', () => {
+    expect(splitEvenly(-4)).toEqual([0, 0]);
+    for (const n of [0, 1, 7, 40, 119]) {
+      const [a, b] = splitEvenly(n);
+      expect(a + b).toBe(n);
+      expect(a).toBeGreaterThanOrEqual(b);
+    }
   });
 });

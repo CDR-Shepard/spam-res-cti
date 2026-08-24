@@ -50,3 +50,15 @@ export function poolBuyTarget(asked: number, activePool: number, inHandoff: numb
 export function reserveBuyTarget(asked: number, freeInDb: number, inHandoff: number): number {
   return Math.max(0, asked - freeInDb - inHandoff);
 }
+
+/**
+ * Split one pool batch evenly across the two pool area codes (619 first, 951
+ * second): `ceil(n/2)` from the first, `floor(n/2)` from the second, so a 40-DID
+ * batch lands 20/20 instead of exhausting 619 first. Never negative, and the two
+ * halves always sum back to the batch.
+ */
+export function splitEvenly(count: number): [number, number] {
+  const n = Math.max(0, count);
+  const first = Math.ceil(n / 2);
+  return [first, n - first];
+}
