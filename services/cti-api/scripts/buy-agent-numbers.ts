@@ -132,7 +132,7 @@ async function cmdPlan() {
       agents += p.la + p.sd;
       console.log(`${email}: holds ${holdings.filter((h) => h.active && h.health !== 'degraded' && h.health !== 'spam_likely').length} usable → buy ${p.la} LA + ${p.sd} SD`);
     }
-    const pool = (await c.query(`select count(*)::int n from outbound_numbers where kind = 'dialer_pool' and active`)).rows[0].n;
+    const pool = (await c.query(`select count(*)::int n from outbound_numbers where kind = 'dialer_pool' and active and health not in ('degraded','spam_likely')`)).rows[0].n;
     const poolBuy = poolBuyCount(pool);
     console.log(`pool: ${pool} active → buy ${poolBuy}`);
     console.log(`reserve suggestion: 10 hires × (6 LA + 6 SD) = 60 LA + 60 SD`);
@@ -214,7 +214,7 @@ async function cmdBuyPool(count: number) {
   let toBuy = 0;
   const c = await dbClient();
   try {
-    const active = (await c.query(`select count(*)::int n from outbound_numbers where kind = 'dialer_pool' and active`)).rows[0].n as number;
+    const active = (await c.query(`select count(*)::int n from outbound_numbers where kind = 'dialer_pool' and active and health not in ('degraded','spam_likely')`)).rows[0].n as number;
     const already = alreadyBought(bought, 'dialer_pool', null, 'Dialer Pool');
     toBuy = poolBuyTarget(count, active, already);
     console.log(`pool: ${active} active, target ${POOL_TARGET}, hand-off ${already} → buying ${toBuy}`);
