@@ -27,8 +27,16 @@ export function buildCallSubject(args: {
   counterpartyE164: string;
   recordName?: string | null;
 }): string {
-  const dispo = args.disposition?.trim() || AUTO_DISPOSITION;
+  // An INBOUND call never gets a disposition anywhere in the system (there is
+  // no wrap-up form, and the abandoned-call sweep is outbound-scoped), so the
+  // auto-disposition fallback would fire on 100% of them and every inbound
+  // Task would read as a system-wide failure to disposition. Inbound with no
+  // disposition therefore drops the middle slot entirely; an inbound call that
+  // somehow DOES carry one still shows it, and OUTBOUND keeps the fallback
+  // (where "Not dispositioned" is the true, actionable state).
+  const dispo = args.disposition?.trim() || (args.inbound ? null : AUTO_DISPOSITION);
   const name = args.recordName?.trim();
   const who = name ? `${formatNanp(args.counterpartyE164)} / ${name}` : formatNanp(args.counterpartyE164);
-  return `${args.inbound ? 'Inbound' : 'Outbound'} Call | ${dispo} | ${who}`;
+  const head = `${args.inbound ? 'Inbound' : 'Outbound'} Call`;
+  return dispo ? `${head} | ${dispo} | ${who}` : `${head} | ${who}`;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildFullDetail, buildTaskDescription, syncJobLastError, syncOne, type SyncOneDeps } from './sync.js';
+import { buildFullDetail, buildTaskDescription, counterpartyE164, syncJobLastError, syncOne, type SyncOneDeps } from './sync.js';
 import type { OwnershipSnapshot } from './ownership.js';
 
 type CallRow = Parameters<typeof buildFullDetail>[0];
@@ -178,6 +178,27 @@ describe('syncOne — the after-call ownership gate', () => {
 // into it, per the precedence: findByPhone match's name → else (whoId ??
 // whatId) via deps.recordName → else null.
 // ---------------------------------------------------------------------------
+// counterpartyE164 — shared with routes/calls.ts's late-correction rewrite, so
+// the two Subject writers can never disagree about which number they mean.
+// ---------------------------------------------------------------------------
+describe('counterpartyE164', () => {
+  it('is the number we dialed on an outbound call', () => {
+    expect(counterpartyE164({ direction: 'outbound', fromNumber: '+13235249247', normalizedToNumber: '+16195551234' }))
+      .toBe('+16195551234');
+  });
+
+  it('is the normalized caller number on an inbound call', () => {
+    expect(counterpartyE164({ direction: 'inbound', fromNumber: '(619) 555-1234', normalizedToNumber: '+13235249247' }))
+      .toBe('+16195551234');
+  });
+
+  it('falls back to the raw caller value when it cannot be normalized', () => {
+    expect(counterpartyE164({ direction: 'inbound', fromNumber: 'anonymous', normalizedToNumber: '+13235249247' }))
+      .toBe('anonymous');
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe('syncOne — the new call-log subject', () => {
   it('subject uses the new format with the matched record name', async () => {
     const db = fakeDb(callRow({ disposition: 'Voicemail', normalizedToNumber: '+16195551234' }));
@@ -194,8 +215,13 @@ describe('syncOne — the new call-log subject', () => {
     expect(d.recordName).not.toHaveBeenCalled();
   });
 
-  it('subject falls back to number-only when no name resolves', async () => {
-    const db = fakeDb(callRow({ direction: 'inbound', disposition: 'Connected', fromNumber: '+16195551234' }));
+  it('an inbound call (never dispositioned) is number-only with NO disposition slot', async () => {
+    // The realistic inbound row: routes/inbound.ts never writes a disposition
+    // and no later path sets one, so `disposition: null` is what syncOne
+    // actually sees. The middle slot is omitted rather than reading
+    // "Not dispositioned" on every inbound Task. Also covers the name
+    // fallback: no match and no record name → number only, no dangling ' / '.
+    const db = fakeDb(callRow({ direction: 'inbound', disposition: null, fromNumber: '+16195551234' }));
     const d = syncDeps({
       db,
       findByPhone: vi.fn(async () => null) as unknown as SyncOneDeps['findByPhone'],
@@ -204,7 +230,7 @@ describe('syncOne — the new call-log subject', () => {
     await syncOne('call-1', d);
     expect(d.createCallTask).toHaveBeenCalledTimes(1);
     expect((d.createCallTask as any).mock.calls[0][1]).toMatchObject({
-      subject: 'Inbound Call | Connected | (619) 555-1234',
+      subject: 'Inbound Call | (619) 555-1234',
     });
   });
 

@@ -218,6 +218,24 @@ function liveSyncOneDeps(): SyncOneDeps {
 }
 
 /**
+ * The OTHER party on a call: who we called (outbound) or who called us
+ * (inbound). Exported because the late-disposition correction in
+ * routes/calls.ts has to rebuild the same Subject this worker wrote — two
+ * copies of this derivation would be two subjects that can disagree.
+ * Inbound falls back to the raw `fromNumber` when it isn't normalizable
+ * (e.g. 'anonymous').
+ */
+export function counterpartyE164(call: {
+  direction: string;
+  fromNumber: string;
+  normalizedToNumber: string;
+}): string {
+  return call.direction === 'inbound'
+    ? (normalize(call.fromNumber).value?.e164 ?? call.fromNumber)
+    : call.normalizedToNumber;
+}
+
+/**
  * Best-effort record name for the call-log subject's "/ Name" suffix. The
  * name is purely cosmetic, so this NEVER throws — any lookup failure (record
  * type we don't recognize, the org missing Deal__c, a transient SF error)
@@ -267,10 +285,7 @@ export async function syncOne(
     : null;
 
   const inbound = call.direction === 'inbound';
-  // The other party: who we called (outbound) or who called us (inbound).
-  const counterparty = inbound
-    ? (normalize(call.fromNumber).value?.e164 ?? call.fromNumber)
-    : call.normalizedToNumber;
+  const counterparty = counterpartyE164(call);
 
   // Resolve a record match if the click-to-dial / inbound lookup didn't already
   // set one. Match against the counterparty number, never our own DID.
