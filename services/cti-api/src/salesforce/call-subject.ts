@@ -4,7 +4,17 @@
  * Mirrored byte-for-byte in apps/cti-web/src/call-subject.ts (no shared package
  * exists) — change BOTH or the two write paths drift.
  */
-import { AUTO_DISPOSITION } from './sync.js';
+
+/**
+ * Disposition stamped by the sweep on a truly-abandoned call. The disposition
+ * endpoint treats this as the one value a rep may still return to correct.
+ *
+ * Lives here (not sync.ts, where the sweep that stamps it runs) because
+ * buildCallSubject needs it too and sync.ts imports buildCallSubject from
+ * this module — importing back from sync.ts would be a cycle. sync.ts
+ * re-exports this so its existing consumers (routes/calls.ts) are unaffected.
+ */
+export const AUTO_DISPOSITION = 'Not dispositioned';
 
 /** NANP e164 → "(XXX) XXX-XXXX"; anything else passes through untouched. */
 export function formatNanp(e164: string): string {

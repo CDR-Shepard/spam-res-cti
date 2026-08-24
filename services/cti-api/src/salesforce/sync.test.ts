@@ -96,6 +96,7 @@ function syncDeps(over: Partial<SyncOneDeps> = {}): SyncOneDeps & { _db: ReturnT
     fetchOwnership: vi.fn(async (): Promise<OwnershipSnapshot> => ({ type: 'Lead', ownerId: ME })) as unknown as SyncOneDeps['fetchOwnership'],
     findByPhone: vi.fn(async () => null) as unknown as SyncOneDeps['findByPhone'],
     createCallTask: vi.fn(async () => ({ taskId: '00TNEW', degradedFields: null })) as unknown as SyncOneDeps['createCallTask'],
+    recordName: vi.fn(async () => null) as unknown as SyncOneDeps['recordName'],
     ...over,
     _db: db,
   } as SyncOneDeps & { _db: ReturnType<typeof fakeDb> };
@@ -168,6 +169,65 @@ describe('syncOne — the after-call ownership gate', () => {
     });
     await expect(syncOne('call-1', d)).rejects.toThrow(/503/);
     expect(d.createCallTask).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// syncOne — the call-log subject (launch spec D). buildCallSubject itself is
+// covered by call-subject.test.ts; these assert syncOne wires the RIGHT name
+// into it, per the precedence: findByPhone match's name → else (whoId ??
+// whatId) via deps.recordName → else null.
+// ---------------------------------------------------------------------------
+describe('syncOne — the new call-log subject', () => {
+  it('subject uses the new format with the matched record name', async () => {
+    const db = fakeDb(callRow({ disposition: 'Voicemail', normalizedToNumber: '+16195551234' }));
+    const d = syncDeps({
+      db,
+      findByPhone: vi.fn(async () => ({ whoId: '00Q1', name: 'Jane Doe' })) as unknown as SyncOneDeps['findByPhone'],
+    });
+    await syncOne('call-1', d);
+    expect(d.createCallTask).toHaveBeenCalledTimes(1);
+    expect((d.createCallTask as any).mock.calls[0][1]).toMatchObject({
+      subject: 'Outbound Call | Voicemail | (619) 555-1234 / Jane Doe',
+    });
+    // The name came straight off the match — no extra SF round-trip.
+    expect(d.recordName).not.toHaveBeenCalled();
+  });
+
+  it('subject falls back to number-only when no name resolves', async () => {
+    const db = fakeDb(callRow({ direction: 'inbound', disposition: 'Connected', fromNumber: '+16195551234' }));
+    const d = syncDeps({
+      db,
+      findByPhone: vi.fn(async () => null) as unknown as SyncOneDeps['findByPhone'],
+      recordName: vi.fn(async () => null) as unknown as SyncOneDeps['recordName'],
+    });
+    await syncOne('call-1', d);
+    expect(d.createCallTask).toHaveBeenCalledTimes(1);
+    expect((d.createCallTask as any).mock.calls[0][1]).toMatchObject({
+      subject: 'Inbound Call | Connected | (619) 555-1234',
+    });
+  });
+
+  it('a call-row-attached record (no findByPhone) resolves its name via the recordName dep', async () => {
+    // salesforceWhoId is already set on the call row, so syncOne never calls
+    // findByPhone — the name has to come from the injected recordName dep.
+    const db = fakeDb(callRow({
+      disposition: 'Connected',
+      normalizedToNumber: '+16195551234',
+      salesforceWhoId: '00Q1',
+    }));
+    const recordName = vi.fn(async () => 'Jane Doe') as unknown as SyncOneDeps['recordName'];
+    const d = syncDeps({
+      db,
+      findByPhone: vi.fn(async () => { throw new Error('must not be called'); }) as unknown as SyncOneDeps['findByPhone'],
+      recordName,
+    });
+    await syncOne('call-1', d);
+    expect(recordName).toHaveBeenCalledWith('U1', '00Q1');
+    expect(d.createCallTask).toHaveBeenCalledTimes(1);
+    expect((d.createCallTask as any).mock.calls[0][1]).toMatchObject({
+      subject: 'Outbound Call | Connected | (619) 555-1234 / Jane Doe',
+    });
   });
 });
 
