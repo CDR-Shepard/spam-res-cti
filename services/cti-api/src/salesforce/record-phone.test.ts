@@ -143,20 +143,29 @@ describe('resolveDialNumber — Skip on Dialer', () => {
     // First Lead: the flag query 400s, the field-less retry answers. Dialing an
     // org that has not got the field yet must never fail.
     mockSoql.mockRejectedValueOnce(INVALID_FIELD).mockResolvedValueOnce([{ MobilePhone: '619-555-0100', Phone: null }]);
-    expect(await resolveDialNumber('u', 'Lead', '00Q1')).toEqual({ e164: '+16195550100', fallbackE164: null, skipOnDialer: false });
+    expect(await resolveDialNumber('rep-005XYZ', 'Lead', '00Q1')).toEqual({ e164: '+16195550100', fallbackE164: null, skipOnDialer: false });
     expect(mockSoql).toHaveBeenCalledTimes(2);
     expect(soqlOf(0)).toContain('Skip_on_Dialer__c');
     expect(soqlOf(1)).not.toContain('Skip_on_Dialer__c');
 
-    // A second lookup STILL asks for the field: the flag is a log deduper, not a
-    // control-flow latch — this process serves many orgs, and the next org's
-    // Lead may well have the field (mirrors ownership.ts).
+    // A second lookup — a DIFFERENT user — still asks for the field: the flag is
+    // a log deduper, not a control-flow latch, and it is process-wide, not
+    // per-connection. This process serves many orgs, and the next org's Lead may
+    // well have the field (mirrors ownership.ts).
     mockSoql.mockRejectedValueOnce(INVALID_FIELD).mockResolvedValueOnce([{ MobilePhone: '619-555-0200', Phone: null }]);
     expect((await resolveDialNumber('u', 'Lead', '00Q2'))?.skipOnDialer).toBe(false);
     expect(mockSoql).toHaveBeenCalledTimes(4);
     expect(soqlOf(2)).toContain('Skip_on_Dialer__c');
 
     expect(warn).toHaveBeenCalledTimes(1);
+
+    // The single line is the ONLY signal an operator gets, and INVALID_FIELD also
+    // means "this rep has no field-level read" — a flagged record they then dial.
+    // So it has to name the connection it is about and admit both causes.
+    const line = String(warn.mock.calls[0]?.[0] ?? '');
+    expect(line).toContain('rep-005XYZ');
+    expect(line).toMatch(/field-level read/);
+    expect(line).toMatch(/that connection's/);
     warn.mockRestore();
   });
 

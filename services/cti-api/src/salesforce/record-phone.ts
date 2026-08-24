@@ -53,6 +53,13 @@ export function _resetSkipFieldWarnForTests(): void {
  * or prod mid-deploy) fall back to `withoutField` for THIS lookup. A missing
  * field is a configuration fact, not a failure: deploy order must never be able
  * to stop the dialer. The log line is deduped; the query is not.
+ *
+ * Salesforce answers INVALID_FIELD for BOTH causes — the field is absent from the
+ * org, and the querying user lacks field-level read on it — and the error cannot
+ * tell them apart. So this also fails open for an unassigned rep, who then
+ * power-dials records their manager flagged. That is the specified trade (deploy
+ * order can never break dialing); the warn names the user so the second cause is
+ * at least diagnosable from a log.
  */
 async function soqlToleratingMissingSkipField<T>(
   userId: string,
@@ -65,7 +72,11 @@ async function soqlToleratingMissingSkipField<T>(
     if (!/INVALID_FIELD/.test((err as Error).message)) throw err;
     if (!warnedSkipField) {
       warnedSkipField = true;
-      console.warn(`[record-phone] ${SKIP_FIELD} not found — power-dial queues treat every record as unflagged`);
+      console.warn(
+        `[record-phone] ${SKIP_FIELD} unreadable for Salesforce user ${userId} ` +
+          `(field absent from the org, or no field-level read on it) — ` +
+          `that connection's power-dial queues treat every record as unflagged`,
+      );
     }
     return await soqlQuery<T>(userId, withoutField);
   }
