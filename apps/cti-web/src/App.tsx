@@ -30,6 +30,8 @@ import {
 import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
 import { watchCallMedia, MEDIA_ISSUE_MESSAGE } from './audio-readiness';
 import { sendDtmfKey, type DtmfSendable } from './dtmf';
+import { buildCallSubject } from './call-subject';
+import { openCtiSavePlan } from './opencti-log';
 
 interface MeResponse {
   user: { userId: string; orgId: string; email: string; isAdmin: boolean; noAnswerForwardE164?: string | null };
@@ -318,6 +320,11 @@ export function App(): JSX.Element {
   // Set once the Open CTI Task has been written for the current call, so a
   // disposition retry doesn't create a duplicate Task.
   const openCtiTaskWrittenRef = useRef(false);
+  // The id Salesforce returned for that Task, when it returned one. A retry
+  // with a CHANGED disposition re-saves WITH this id so Open CTI updates the
+  // Task in place — Subject carries the disposition now, so leaving the first
+  // attempt's Task alone would strand the wrong value in the SF timeline.
+  const openCtiTaskIdRef = useRef<string | null>(null);
 
   // ---- bootstrap: sign in to backend (dev session for MVP), then init Open CTI
   useEffect(() => {
@@ -740,6 +747,7 @@ export function App(): JSX.Element {
   // attaches correctly without writing a second Open-CTI Task.
   const reopenDisposition = useCallback((p: PendingDisposition) => {
     openCtiTaskWrittenRef.current = false;
+    openCtiTaskIdRef.current = null;
     connectionRef.current = null;
     setActive({ callId: p.id, toNumber: p.toNumber, fromNumber: p.fromNumber, startedAt: Date.now() });
     setElapsed(p.durationSeconds ?? 0);
@@ -891,6 +899,7 @@ export function App(): JSX.Element {
     connectionRef.current = null;
     placingRef.current = false;
     openCtiTaskWrittenRef.current = false;
+    openCtiTaskIdRef.current = null;
     if (pendingTeardownRef.current && !dialerConnRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
   }, [teardownDevice]);
 
@@ -948,12 +957,21 @@ export function App(): JSX.Element {
       // we tell the backend to skip — otherwise the backend creates and attaches
       // the Task itself from the record we hand it, so a logged call is never lost.
       const isWho = active.objectType === 'Lead' || active.objectType === 'Contact';
-      // If a prior submit attempt already wrote the Task via Open CTI, don't
-      // write it again on retry — just re-attempt the backend disposition PATCH.
+      // First submit → create the Task. Retry → UPDATE it (by Id) so a changed
+      // disposition rewrites Subject/CallDisposition instead of leaving the
+      // first attempt's values behind; when SF never told us the Task id we
+      // must NOT re-save (that would duplicate the Task). See openCtiSavePlan.
       let loggedViaOpenCti = openCtiTaskWrittenRef.current;
-      if (active.recordId && active.taskAllowed !== false && !openCtiTaskWrittenRef.current) {
-        loggedViaOpenCti = await saveCallLog({
-          Subject: `Outbound Call - ${active.toNumber}`,
+      const plan = openCtiSavePlan({
+        recordId: active.recordId,
+        taskAllowed: active.taskAllowed,
+        alreadyWritten: openCtiTaskWrittenRef.current,
+        existingTaskId: openCtiTaskIdRef.current,
+      });
+      if (plan.write) {
+        const saved = await saveCallLog({
+          ...(plan.updateId ? { Id: plan.updateId } : {}),
+          Subject: buildCallSubject({ inbound: false, disposition, counterpartyE164: active.toNumber, recordName: active.recordName }),
           Status: 'Completed',
           TaskSubtype: 'Call',
           CallType: 'Outbound',
@@ -963,7 +981,11 @@ export function App(): JSX.Element {
           WhoId: isWho ? active.recordId : undefined,
           WhatId: isWho ? undefined : active.recordId,
         });
-        if (loggedViaOpenCti) openCtiTaskWrittenRef.current = true;
+        if (saved.saved) {
+          loggedViaOpenCti = true;
+          openCtiTaskWrittenRef.current = true;
+          if (saved.recordId) openCtiTaskIdRef.current = saved.recordId;
+        }
       }
       await api(`/calls/${active.callId}/disposition`, {
         method: 'POST',

@@ -14,7 +14,8 @@ import { resolveSession } from '../auth/session.js';
 import { getDb, schema } from '../db/index.js';
 import { normalize } from '../phone.js';
 import { warmupCapForAge } from '../firewall/warmup.js';
-import { enqueueSyncForCall, AUTO_DISPOSITION } from '../salesforce/sync.js';
+import { counterpartyE164, enqueueSyncForCall, fetchRecordName, AUTO_DISPOSITION } from '../salesforce/sync.js';
+import { buildCallSubject } from '../salesforce/call-subject.js';
 import { updateCallTask } from '../salesforce/client.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
 import { fetchOwnership, gatedIds, mayCreateTaskOn, type OwnershipSnapshot } from '../salesforce/ownership.js';
@@ -508,7 +509,29 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     // Skipped when the client logged via Open CTI (that path owns its own Task).
     if (owned.salesforceTaskId && !parsed.data.skipSalesforceSync) {
       try {
+        // Subject CARRIES the disposition (see salesforce/call-subject.ts), so a
+        // correction that patched only CallDisposition would leave the timeline
+        // reading "Not dispositioned" forever on precisely the calls a rep went
+        // back to fix. Rebuild it from the same inputs syncOne used.
+        const target = (row ?? owned).salesforceWhoId ?? (row ?? owned).salesforceWhatId ?? null;
+        // Cosmetic: a failed name lookup renders the subject number-only, it
+        // never blocks the correction (fetchRecordName already swallows SF
+        // errors; the catch covers a connection that throws before the query).
+        let recordName: string | null = null;
+        if (target) {
+          try {
+            recordName = await fetchRecordName(owned.userId, target);
+          } catch {
+            recordName = null;
+          }
+        }
         await updateCallTask(owned.userId, owned.salesforceTaskId, {
+          Subject: buildCallSubject({
+            inbound: owned.direction === 'inbound',
+            disposition: parsed.data.disposition,
+            counterpartyE164: counterpartyE164(row ?? owned),
+            recordName,
+          }),
           CallDisposition: parsed.data.disposition,
           Description: parsed.data.notes ?? owned.notes ?? '',
         });

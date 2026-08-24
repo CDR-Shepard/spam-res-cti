@@ -129,19 +129,38 @@ export function onClickToDial(handler: (e: ClickToDialEvent) => void): void {
   window.sforce.opencti.onClickToDial({ listener: handler });
 }
 
+export interface SaveCallLogResult {
+  /** Salesforce accepted the write. */
+  saved: boolean;
+  /**
+   * Id of the Task Salesforce created or updated, when it reports one
+   * (`returnValue.recordId`). Undefined means we cannot address that Task
+   * again — see opencti-log.ts for what the retry path does about it.
+   */
+  recordId?: string;
+}
+
 /**
  * After a call completes, save a Task via Open CTI. This lets Salesforce
  * attach the Task to the WhoId/WhatId we already know from the click event
  * (passed in `value`), bypassing our SOSL match. Falls back gracefully when
  * Open CTI isn't available (e.g. standalone dev page).
+ *
+ * Passing an `Id` in `value` makes Open CTI UPDATE that Task instead of
+ * creating one — how a disposition retry rewrites the Subject it already
+ * wrote (see openCtiSavePlan).
  */
-export function saveCallLog(value: Record<string, unknown>): Promise<boolean> {
+export function saveCallLog(value: Record<string, unknown>): Promise<SaveCallLogResult> {
   return new Promise((resolve) => {
     const opencti = window.sforce?.opencti;
-    if (!opencti) { resolve(false); return; }
+    if (!opencti) { resolve({ saved: false }); return; }
     opencti.saveLog({
       value: { entityApiName: 'Task', ...value },
-      callback: (res) => resolve(Boolean(res?.success)),
+      callback: (res) => {
+        const returned = res?.returnValue as { recordId?: unknown } | undefined;
+        const recordId = typeof returned?.recordId === 'string' ? returned.recordId : undefined;
+        resolve({ saved: Boolean(res?.success), recordId });
+      },
     });
   });
 }

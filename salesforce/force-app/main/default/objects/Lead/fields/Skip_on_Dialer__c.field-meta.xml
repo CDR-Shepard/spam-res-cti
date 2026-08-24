@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Skip_on_Dialer__c</fullName>
+    <label>Skip on Dialer</label>
+    <type>Checkbox</type>
+    <defaultValue>false</defaultValue>
+    <description>Checked = the CTI power dialer never auto-dials this record. Manual click-to-dial is unaffected. (CTI launch spec 2026-08-24, item 6.)</description>
+    <trackTrending>false</trackTrending>
+</CustomField>

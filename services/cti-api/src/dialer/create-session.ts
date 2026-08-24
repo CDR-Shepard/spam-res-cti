@@ -32,7 +32,13 @@ type ResolvedRow = {
   fallbackNumber?: string | null;
   taskId?: string | null;
   followupEligible?: boolean;
+  /** The rep checked Skip on Dialer on this record (Lead/Opportunity only). */
+  skipOnDialer?: boolean;
 };
+
+/** Outcome stamped on a record the rep has checked Skip on Dialer on, so the
+ *  panel can show it was deliberately passed over rather than lost. */
+const SKIP_ON_DIALER_OUTCOME = 'skip_on_dialer';
 
 export function buildQueueRows(
   sessionId: string,
@@ -42,7 +48,7 @@ export function buildQueueRows(
   toNumber: string | null; fallbackNumber: string | null;
   attempt: number; primaryNumber: string | null; secondaryNumber: string | null;
   taskId: string | null; followupEligible: boolean;
-  status: 'pending' | 'unreachable';
+  status: 'pending' | 'unreachable' | 'skipped'; outcome: string | null;
 }> {
   return resolved.map((r, i) => ({
     sessionId, ordinal: i, objectType: r.objectType, recordId: r.recordId, toNumber: r.toNumber,
@@ -51,7 +57,12 @@ export function buildQueueRows(
     // toNumber/fallbackNumber, and an attempt-2 row restores from these.
     attempt: 1, primaryNumber: r.toNumber, secondaryNumber: r.fallbackNumber ?? null,
     taskId: r.taskId ?? null, followupEligible: r.followupEligible ?? true,
-    status: r.toNumber ? 'pending' : 'unreachable',
+    // The checkbox wins over "no number": a flagged record reads as deliberately
+    // skipped, never as unreachable. Either way the row exists and keeps its
+    // numbers — the run reports what it passed over instead of dropping it, and
+    // the engine only ever picks up a 'pending' row.
+    status: r.skipOnDialer ? 'skipped' : r.toNumber ? 'pending' : 'unreachable',
+    outcome: r.skipOnDialer ? SKIP_ON_DIALER_OUTCOME : null,
   }));
 }
 
@@ -81,7 +92,10 @@ async function resolveRows(
     const out: ResolvedRow[] = [];
     for (const recordId of recordIds) {
       const r = await deps.resolveDialNumber(userId, objectType, recordId);
-      out.push({ recordId, objectType, toNumber: r?.e164 ?? null, fallbackNumber: r?.fallbackE164 ?? null });
+      out.push({
+        recordId, objectType, toNumber: r?.e164 ?? null, fallbackNumber: r?.fallbackE164 ?? null,
+        skipOnDialer: r?.skipOnDialer ?? false,
+      });
     }
     return out;
   }
@@ -100,6 +114,7 @@ async function resolveRows(
       recordId: target.recordId, objectType: target.objectType,
       toNumber: r?.e164 ?? null, fallbackNumber: r?.fallbackE164 ?? null,
       taskId, followupEligible: target.followupEligible,
+      skipOnDialer: r?.skipOnDialer ?? false,
     });
   }
   return out;

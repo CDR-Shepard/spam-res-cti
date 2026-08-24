@@ -400,3 +400,11 @@ BOUGHT +12135550199 (PN…) → Agent newhire LA
 
 Then rebuild the reserve for the next hire with `buy-reserve --la <n> --sd <n>`
 (§3 Batch 5), remembering the free-reserve semantics in §4.
+
+Also assign the Salesforce permission set (field access for the Skip on Dialer checkbox — without it the dialer cannot read the flag for that rep and silently treats records as unflagged):
+
+```bash
+cd salesforce && sf org assign permset -n Skip_On_Dialer -o _t2 -b <newhire-sf-username>
+```
+
+Note: the SF *username* may differ from the email (e.g. evren@gghomessd.com is the email; the username is evren2@gghomessd.com). Resolve it with `sf data query -q "SELECT Username FROM User WHERE Email = '<email>'" -o _t2` first.

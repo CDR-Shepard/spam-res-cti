@@ -8,9 +8,22 @@ import { getDb, schema } from '../db/index.js';
 import { normalize } from '../phone.js';
 import { loadConfig } from '../config.js';
 import { buildRecordingPublicUrl } from '../telephony/recording-links.js';
-import { createCallTask, findByPhone, SalesforceUnauthorizedError, updateCallTask } from './client.js';
+import {
+  createCallTask,
+  findByPhone,
+  SalesforceUnauthorizedError,
+  soqlEscape,
+  soqlQuery,
+  updateCallTask,
+} from './client.js';
 import { salesforceUserId } from './current-user.js';
-import { fetchOwnership, gatedIds, mayCreateTaskOn } from './ownership.js';
+import { fetchOwnership, gatedIds, mayCreateTaskOn, objectTypeForId } from './ownership.js';
+import { AUTO_DISPOSITION, buildCallSubject } from './call-subject.js';
+
+// Re-exported so routes/calls.ts's existing `import { AUTO_DISPOSITION } from
+// '../salesforce/sync.js'` keeps working — the value itself now lives in
+// call-subject.ts (see the comment there for why).
+export { AUTO_DISPOSITION };
 
 /** Public no-login recording link for a call, or null when nothing is recorded. */
 function recordingPublicUrl(call: typeof schema.calls.$inferSelect): string | null {
@@ -73,10 +86,6 @@ async function reapStuckJobs(): Promise<void> {
  * Idempotent: enqueue no-ops if a job already exists; syncOne skips a call that
  * already has a Task.
  */
-/** Disposition stamped by the sweep on a truly-abandoned call. The disposition
- *  endpoint treats this as the one value a rep may still return to correct. */
-export const AUTO_DISPOSITION = 'Not dispositioned';
-
 async function sweepUnloggedCalls(): Promise<void> {
   const db = getDb();
   const cutoff = new Date(Date.now() - LOG_GRACE_MS);
@@ -201,10 +210,50 @@ export interface SyncOneDeps {
   fetchOwnership: typeof fetchOwnership;
   findByPhone: typeof findByPhone;
   createCallTask: typeof createCallTask;
+  recordName: (userId: string, recordId: string) => Promise<string | null>;
 }
 
 function liveSyncOneDeps(): SyncOneDeps {
-  return { db: getDb(), salesforceUserId, fetchOwnership, findByPhone, createCallTask };
+  return { db: getDb(), salesforceUserId, fetchOwnership, findByPhone, createCallTask, recordName: fetchRecordName };
+}
+
+/**
+ * The OTHER party on a call: who we called (outbound) or who called us
+ * (inbound). Exported because the late-disposition correction in
+ * routes/calls.ts has to rebuild the same Subject this worker wrote — two
+ * copies of this derivation would be two subjects that can disagree.
+ * Inbound falls back to the raw `fromNumber` when it isn't normalizable
+ * (e.g. 'anonymous').
+ */
+export function counterpartyE164(call: {
+  direction: string;
+  fromNumber: string;
+  normalizedToNumber: string;
+}): string {
+  return call.direction === 'inbound'
+    ? (normalize(call.fromNumber).value?.e164 ?? call.fromNumber)
+    : call.normalizedToNumber;
+}
+
+/**
+ * Best-effort record name for the call-log subject's "/ Name" suffix. The
+ * name is purely cosmetic, so this NEVER throws — any lookup failure (record
+ * type we don't recognize, the org missing Deal__c, a transient SF error)
+ * resolves to null rather than failing the sync.
+ */
+export async function fetchRecordName(userId: string, recordId: string): Promise<string | null> {
+  const type = objectTypeForId(recordId);
+  const sobject = type === 'other' ? (recordId.startsWith('a0') ? 'Deal__c' : null) : type;
+  if (!sobject) return null;
+  try {
+    const rows = await soqlQuery<{ Name?: string | null }>(
+      userId,
+      `SELECT Name FROM ${sobject} WHERE Id = '${soqlEscape(recordId)}' LIMIT 1`,
+    );
+    return rows[0]?.Name ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -236,19 +285,20 @@ export async function syncOne(
     : null;
 
   const inbound = call.direction === 'inbound';
-  // The other party: who we called (outbound) or who called us (inbound).
-  const counterparty = inbound
-    ? (normalize(call.fromNumber).value?.e164 ?? call.fromNumber)
-    : call.normalizedToNumber;
+  const counterparty = counterpartyE164(call);
 
   // Resolve a record match if the click-to-dial / inbound lookup didn't already
   // set one. Match against the counterparty number, never our own DID.
   let whoId = call.salesforceWhoId ?? undefined;
   let whatId = call.salesforceWhatId ?? undefined;
+  // Name for the subject's "/ Name" suffix, straight off the SOSL match — no
+  // extra round-trip when we already have it.
+  let matchName: string | null = null;
   if (!whoId && !whatId) {
     const match = await deps.findByPhone(call.userId, counterparty);
     if (match?.whoId) whoId = match.whoId;
     if (match?.whatId) whatId = match.whatId;
+    matchName = match?.name ?? null;
   }
 
   // Ownership gate — OUTBOUND ONLY. Never write a Task on a record the caller
@@ -269,7 +319,28 @@ export async function syncOne(
     if (!allowed) return { skipped: 'not-owner' as const };
   }
 
-  const subject = `${inbound ? 'Inbound' : 'Outbound'} Call - ${counterparty}`;
+  // Name precedence: the SOSL match's name → else look up the attached record
+  // (a whoId/whatId that was already on the call row, so findByPhone never ran)
+  // → else no name at all. The lookup is cosmetic, so a throwing dep never
+  // fails the sync — it just means the subject renders number-only.
+  let recordName = matchName;
+  if (!recordName) {
+    const targetId = whoId ?? whatId;
+    if (targetId) {
+      try {
+        recordName = await deps.recordName(call.userId, targetId);
+      } catch {
+        recordName = null;
+      }
+    }
+  }
+
+  const subject = buildCallSubject({
+    inbound,
+    disposition: call.disposition,
+    counterpartyE164: counterparty,
+    recordName,
+  });
 
   const customFields: Record<string, string | number | null> = {
     External_Call_Id__c: call.id,
