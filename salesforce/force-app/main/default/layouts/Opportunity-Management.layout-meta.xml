@@ -67,6 +67,10 @@
                 <behavior>Readonly</behavior>
                 <field>Last_Activity_Date__c</field>
             </layoutItems>
+            <layoutItems>
+                <behavior>Edit</behavior>
+                <field>Skip_on_Dialer__c</field>
+            </layoutItems>
         </layoutColumns>
         <layoutColumns>
             <layoutItems>

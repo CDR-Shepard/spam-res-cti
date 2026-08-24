@@ -51,6 +51,10 @@
                 <behavior>Edit</behavior>
                 <field>Auditor_Name__c</field>
             </layoutItems>
+            <layoutItems>
+                <behavior>Edit</behavior>
+                <field>Skip_on_Dialer__c</field>
+            </layoutItems>
         </layoutColumns>
         <layoutColumns>
             <layoutItems>

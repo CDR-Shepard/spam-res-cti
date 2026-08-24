@@ -65,6 +65,10 @@
                 <behavior>Edit</behavior>
                 <field>Development_Units_Projected__c</field>
             </layoutItems>
+            <layoutItems>
+                <behavior>Edit</behavior>
+                <field>Skip_on_Dialer__c</field>
+            </layoutItems>
         </layoutColumns>
         <layoutColumns>
             <layoutItems>
