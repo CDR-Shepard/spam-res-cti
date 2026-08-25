@@ -38,8 +38,9 @@ export const FEED_PAGE_SIZE = 10_000;
 const MAX_CODE_GENERATION_ATTEMPTS = 5;
 
 // ---------------------------------------------------------------------------
-// Claim rate limiter: 3 attempts/min/IP, simple in-process Map (spec). This
-// app is single-instance (see server.ts) — a per-process Map is enough; a
+// Claim rate limiter: 3 attempts/min/IP, simple in-process Map (spec), plus a
+// global backstop against a spoofed-X-Forwarded-For attack. This app is
+// single-instance (see server.ts) — a per-process Map is enough; a
 // multi-instance deploy would need a shared store (e.g. Redis) instead.
 //
 // The per-IP key alone is not a real defense: server.ts sets `trustProxy:
@@ -49,6 +50,18 @@ const MAX_CODE_GENERATION_ATTEMPTS = 5;
 // (app-wide) change outside this route's scope, so instead this route adds
 // a GLOBAL backstop (`claimAttemptsGlobal`, below) that isn't keyed by
 // anything the caller controls — spoofing X-Forwarded-For cannot split it.
+//
+// The global backstop counts only FAILED claim attempts (invalid body, or a
+// code that doesn't exist / is expired / is already used) — see
+// `recordClaimFailureGlobal`. A SUCCESSFUL claim proves the caller already
+// had the right code and shouldn't spend shared budget, so any number of
+// legitimate concurrent pairings can never themselves trip the backstop and
+// lock every rep out — only a sustained flood of failed guesses can. The cap
+// (300/min) sits well above any plausible legitimate-mistake burst but still
+// bounds worst-case brute-force guessing to a low fraction of the
+// 1,000,000-value code space over any one code's 5-minute life, no matter
+// how many distinct `X-Forwarded-For` values an attacker cycles through.
+//
 // Exported so mobile.test.ts can clear them between tests (otherwise
 // attempts from one test would bleed into the next via this module state).
 // ---------------------------------------------------------------------------
@@ -56,42 +69,65 @@ const CLAIM_RATE_LIMIT = 3;
 const CLAIM_RATE_WINDOW_MS = 60_000;
 export const claimAttemptsByIp = new Map<string, number[]>();
 
-/** Global backstop: total claim attempts across every IP (real or spoofed)
- *  in the trailing window. Generous enough for a couple of reps pairing (and
- *  mistyping) concurrently, but it bounds worst-case guesses against the
- *  1,000,000-value code space to a low fraction over any one code's 5-minute
- *  life, no matter how many distinct `X-Forwarded-For` values an attacker
- *  cycles through. */
-const CLAIM_RATE_LIMIT_GLOBAL = 20;
+export const CLAIM_RATE_LIMIT_GLOBAL = 300;
 export const claimAttemptsGlobal: number[] = [];
 
-/** Not pure — mutates `map` (drops stale keys/entries, records the new
- *  attempt) as a documented side effect. True when `ip` has room for another
- *  claim attempt right now. Sweeps every key's timestamps on each call (not
- *  just `ip`'s), so a Map fed a constant stream of never-repeated keys —
- *  e.g. one spoofed `X-Forwarded-For` per request — still gets emptied back
- *  out once those entries age past the window, instead of growing forever. */
+/** Sweep timestamps keyed by MAP IDENTITY rather than one shared module
+ *  variable, so the periodic full-map sweep below is scoped to whichever
+ *  map instance is actually being used — this keeps unit tests that build
+ *  their own local Map fully isolated from each other and from the shared
+ *  production map, instead of one test's clock silently suppressing the
+ *  next test's sweep. */
+const lastSweepByMap = new WeakMap<Map<string, number[]>, number>();
+
+/** Not pure — mutates `map` (prunes stale entries, records the new attempt)
+ *  as a documented side effect. True when `ip` has room for another claim
+ *  attempt right now. Prunes the CURRENT key inline on every call — O(1)
+ *  amortized regardless of map size — and sweeps the WHOLE map at most once
+ *  per rate-limit window (not on every call), so a Map fed a constant stream
+ *  of never-repeated keys — e.g. one spoofed `X-Forwarded-For` per request —
+ *  still gets emptied back out once those entries age past the window,
+ *  without every request paying an O(map.size) filter+allocate cost that
+ *  grows with the very flood it exists to survive. */
 export function allowClaimAttempt(map: Map<string, number[]>, ip: string, now: number): boolean {
-  for (const [key, timestamps] of map) {
-    const fresh = timestamps.filter((t) => now - t < CLAIM_RATE_WINDOW_MS);
-    if (fresh.length === 0) map.delete(key);
-    else map.set(key, fresh);
+  const fresh = (map.get(ip) ?? []).filter((t) => now - t < CLAIM_RATE_WINDOW_MS);
+  if (fresh.length >= CLAIM_RATE_LIMIT) {
+    map.set(ip, fresh);
+    return false;
   }
-  const recent = map.get(ip) ?? [];
-  if (recent.length >= CLAIM_RATE_LIMIT) return false;
-  recent.push(now);
-  map.set(ip, recent);
+  fresh.push(now);
+  map.set(ip, fresh);
+
+  const lastSweep = lastSweepByMap.get(map) ?? 0;
+  if (now - lastSweep >= CLAIM_RATE_WINDOW_MS) {
+    lastSweepByMap.set(map, now);
+    for (const [key, timestamps] of map) {
+      const freshEntries = timestamps.filter((t) => now - t < CLAIM_RATE_WINDOW_MS);
+      if (freshEntries.length === 0) map.delete(key);
+      else map.set(key, freshEntries);
+    }
+  }
   return true;
 }
 
-/** Not pure — mutates `bucket` in place. The global-backstop analogue of
- *  `allowClaimAttempt`, keyed on nothing but the clock. */
-export function allowClaimAttemptGlobal(bucket: number[], now: number): boolean {
+/** Not pure — prunes stale entries out of `bucket` (mutates it) and reports
+ *  whether the global backstop still has room, WITHOUT recording this call
+ *  as an attempt. Peek-only by design: merely checking capacity must never
+ *  itself consume it — callers record separately, and only for a claim that
+ *  actually fails (see `recordClaimFailureGlobal`). */
+export function globalBudgetAvailable(bucket: number[], now: number): boolean {
   const fresh = bucket.filter((t) => now - t < CLAIM_RATE_WINDOW_MS);
   bucket.splice(0, bucket.length, ...fresh);
-  if (bucket.length >= CLAIM_RATE_LIMIT_GLOBAL) return false;
-  bucket.push(now);
-  return true;
+  return bucket.length < CLAIM_RATE_LIMIT_GLOBAL;
+}
+
+/** Not pure — mutates `bucket` in place. Records one FAILED claim attempt
+ *  against the global backstop (invalid body, or a code that doesn't exist /
+ *  is expired / is already used). Never called on a successful claim. */
+export function recordClaimFailureGlobal(bucket: number[], now: number): void {
+  const fresh = bucket.filter((t) => now - t < CLAIM_RATE_WINDOW_MS);
+  fresh.push(now);
+  bucket.splice(0, bucket.length, ...fresh);
 }
 
 /** Pure — a random 6-digit pairing code, zero-padded ("000000"–"999999"). */
@@ -232,23 +268,34 @@ export async function registerMobileRoutes(app: FastifyInstance): Promise<void> 
 
   app.post('/mobile/pair/claim', async (req, reply) => {
     // Rate-limit BEFORE touching the DB, so brute-forcing codes can't even
-    // spend a query per guess once the window is exhausted. Both limiters are
-    // always evaluated (not short-circuited) so the global backstop counts
-    // every attempt, not just the ones that also passed the per-IP bucket.
+    // spend a query per guess once a bucket is exhausted.
     const nowMs = Date.now();
-    const withinIpLimit = allowClaimAttempt(claimAttemptsByIp, req.ip, nowMs);
-    const withinGlobalLimit = allowClaimAttemptGlobal(claimAttemptsGlobal, nowMs);
-    if (!withinIpLimit || !withinGlobalLimit) {
+    // Per-IP: spec-mandated 3/min/IP, evaluated on every attempt (success or
+    // fail alike) before any DB work.
+    if (!allowClaimAttempt(claimAttemptsByIp, req.ip, nowMs)) {
       return reply.code(429).send({ error: 'Too many attempts — try again in a minute' });
     }
+    // Global backstop: checked here (not recorded) so a request is never
+    // gated by attempts it hasn't made yet — only claims that actually FAIL
+    // below record against the shared budget (see the two
+    // recordClaimFailureGlobal call sites), so a burst of legitimate
+    // successful pairings can never trip it.
+    if (!globalBudgetAvailable(claimAttemptsGlobal, nowMs)) {
+      return reply.code(429).send({ error: 'Too many attempts — try again in a minute' });
+    }
+
     const parsed = ClaimBody.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    if (!parsed.success) {
+      recordClaimFailureGlobal(claimAttemptsGlobal, nowMs);
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
 
     const db = getDb();
     const now = new Date();
     const codeHash = sha256(parsed.data.code);
     const row = await db.query.mobilePairCodes.findFirst({ where: eq(schema.mobilePairCodes.codeHash, codeHash) });
     if (!row || !pairCodeClaimable(row, now)) {
+      recordClaimFailureGlobal(claimAttemptsGlobal, nowMs);
       return reply.code(401).send({ error: 'Invalid or expired code' });
     }
     // Single-use: mark it claimed before minting the device, so a retried

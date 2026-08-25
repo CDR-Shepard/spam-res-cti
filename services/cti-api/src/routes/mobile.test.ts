@@ -40,7 +40,9 @@ vi.mock('../db/index.js', async (importOriginal) => {
 import {
   registerMobileRoutes,
   allowClaimAttempt,
-  allowClaimAttemptGlobal,
+  globalBudgetAvailable,
+  recordClaimFailureGlobal,
+  CLAIM_RATE_LIMIT_GLOBAL,
   claimAttemptsByIp,
   claimAttemptsGlobal,
   pairCodeClaimable,
@@ -237,12 +239,20 @@ describe('POST /mobile/pair/claim', () => {
   });
 
   it('the global backstop still 429s a brute-force spread across distinct IPs — the per-IP bucket alone cannot catch it', async () => {
-    state.pairCode = undefined;
+    state.pairCode = undefined; // every attempt fails, but must still count against the global backstop
+    const nowMs = Date.now();
+    // Seed the backstop to one below capacity directly — equivalent to
+    // CLAIM_RATE_LIMIT_GLOBAL - 1 prior failed guesses from distinct,
+    // unrelated IPs — instead of looping a few hundred HTTP requests for
+    // what the pure-function tests below already cover on their own.
+    for (let i = 0; i < CLAIM_RATE_LIMIT_GLOBAL - 1; i++) {
+      recordClaimFailureGlobal(claimAttemptsGlobal, nowMs);
+    }
     const results: number[] = [];
     // A fresh IP every request is exactly what a spoofed X-Forwarded-For
     // buys an attacker in production (trustProxy: true) — the per-IP
     // limiter alone would let every single one of these through.
-    for (let i = 0; i < 21; i++) {
+    for (let i = 0; i < 2; i++) {
       const res = await app.inject({
         method: 'POST',
         url: '/mobile/pair/claim',
@@ -251,8 +261,28 @@ describe('POST /mobile/pair/claim', () => {
       });
       results.push(res.statusCode);
     }
-    expect(results.slice(0, 20).every((s) => s === 401)).toBe(true);
-    expect(results[20]).toBe(429); // CLAIM_RATE_LIMIT_GLOBAL
+    // The CLAIM_RATE_LIMIT_GLOBALth failed attempt still has room (401 on
+    // the invalid code, which itself pushes the bucket to capacity); the
+    // next one is over capacity (429).
+    expect(results[0]).toBe(401);
+    expect(results[1]).toBe(429);
+  });
+
+  it('a successful claim does not consume the global backstop budget', async () => {
+    state.pairCode = { userId: USER_ID, usedAt: null, expiresAt: new Date(Date.now() + 60_000) };
+    state.user = { id: USER_ID, orgId: ORG_ID, displayName: 'Jane Rep' };
+    for (let i = 0; i < 5; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/mobile/pair/claim',
+        remoteAddress: `10.1.0.${i}`,
+        payload: { code: '123456', deviceLabel: 'Device' },
+      });
+      expect(res.statusCode).toBe(200);
+    }
+    // Five successful pairings, zero entries recorded against the shared
+    // budget — a legitimate burst can never itself trip the backstop.
+    expect(claimAttemptsGlobal.length).toBe(0);
   });
 });
 
@@ -518,19 +548,30 @@ describe('allowClaimAttempt', () => {
   });
 });
 
-describe('allowClaimAttemptGlobal', () => {
-  it('allows up to the global limit, then refuses within the same window, regardless of caller identity', () => {
+describe('globalBudgetAvailable / recordClaimFailureGlobal', () => {
+  it('has room until the cap, then reports no room within the same window, regardless of caller identity', () => {
     const bucket: number[] = [];
     const now = 1_000_000;
-    for (let i = 0; i < 20; i++) expect(allowClaimAttemptGlobal(bucket, now + i)).toBe(true);
-    expect(allowClaimAttemptGlobal(bucket, now + 20)).toBe(false);
+    for (let i = 0; i < CLAIM_RATE_LIMIT_GLOBAL; i++) {
+      expect(globalBudgetAvailable(bucket, now + i)).toBe(true);
+      recordClaimFailureGlobal(bucket, now + i);
+    }
+    expect(globalBudgetAvailable(bucket, now + CLAIM_RATE_LIMIT_GLOBAL)).toBe(false);
+  });
+
+  it('checking availability alone never consumes budget — only recordClaimFailureGlobal does', () => {
+    const bucket: number[] = [];
+    const now = 1_000_000;
+    for (let i = 0; i < 1000; i++) globalBudgetAvailable(bucket, now);
+    expect(bucket.length).toBe(0);
+    expect(globalBudgetAvailable(bucket, now)).toBe(true);
   });
 
   it('lets the bucket back in once the window has rolled past', () => {
     const bucket: number[] = [];
     const now = 1_000_000;
-    for (let i = 0; i < 20; i++) allowClaimAttemptGlobal(bucket, now + i);
-    expect(allowClaimAttemptGlobal(bucket, now + 61_000)).toBe(true);
+    for (let i = 0; i < CLAIM_RATE_LIMIT_GLOBAL; i++) recordClaimFailureGlobal(bucket, now + i);
+    expect(globalBudgetAvailable(bucket, now + 61_000)).toBe(true);
   });
 });
 
