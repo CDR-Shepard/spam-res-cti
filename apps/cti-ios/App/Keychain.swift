@@ -8,9 +8,13 @@ enum KeychainError: Error {
 /// The paired device token — the long-lived bearer the phone sends on every
 /// feed request — kept in the Keychain rather than UserDefaults.
 ///
-/// `kSecAttrAccessibleAfterFirstUnlock` so a background refresh still works
-/// while the phone is locked, but not before the user has unlocked it once
-/// since boot. The Call Directory extension never reads this: it only ever
+/// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` so a background refresh
+/// still works while the phone is locked, but not before the user has unlocked
+/// it once since boot. `ThisDeviceOnly` keeps the item out of encrypted
+/// backups and off any restore onto another handset: this token never expires
+/// and is revocable only from the softphone's device list, so a restored copy
+/// would be a second, invisible, indefinitely valid reader of the org's
+/// directory. The Call Directory extension never reads this: it only ever
 /// reads the App Group snapshot, so the item deliberately has no shared
 /// access group.
 enum DeviceTokenStore {
@@ -31,7 +35,7 @@ enum DeviceTokenStore {
 
         var query = baseQuery
         query[kSecValueData as String] = Data(token.utf8)
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else { throw KeychainError.unexpectedStatus(status) }
