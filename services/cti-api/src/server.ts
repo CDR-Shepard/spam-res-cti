@@ -18,6 +18,7 @@ import { registerDialerRoutes } from './routes/dialer.js';
 import { startSyncLoop } from './salesforce/sync.js';
 import { startFollowupLoop, startRetryNudgeLoop } from './salesforce/followup-worker.js';
 import { startReputationWorker } from './reputation/worker.js';
+import { startDirectoryLoop } from './mobile/directory-build.js';
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
@@ -110,12 +111,14 @@ async function main(): Promise<void> {
   // The rep-facing retry nudge runs on its own timer — never behind Salesforce.
   const nudgeTimer = startRetryNudgeLoop(5000);
   const reputationTimer = startReputationWorker(app.log, cfg.REPUTATION_WORKER_INTERVAL_MS);
+  const directoryTimer = startDirectoryLoop(cfg.DIRECTORY_REBUILD_INTERVAL_MS);
 
   const close = async () => {
     clearInterval(syncTimer);
     clearInterval(followupTimer);
     clearInterval(nudgeTimer);
     clearInterval(reputationTimer);
+    clearInterval(directoryTimer);
     await app.close();
   };
   process.on('SIGTERM', close);
