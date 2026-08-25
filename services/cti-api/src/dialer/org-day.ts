@@ -22,7 +22,8 @@ export function orgMidnightUtc(now: Date, tz: string = ORG_TIMEZONE): Date {
     const candidate = new Date(Date.UTC(y!, m! - 1, d!, 0, q * 15, 0));
     if (hhmmIn(tz, candidate) === '00:00' && ymdIn(tz, candidate) === ymdIn(tz, now)) return candidate;
   }
-  // Genuinely unreachable for any IANA zone (all offsets are within ±14h on
-  // quarter-hour boundaries); fail loudly rather than silently mis-bucket a day.
+  // Unreachable for zones whose local midnight always exists (every zone this
+  // product dials); a zone that skips midnight on a DST day would throw — loud
+  // beats a mis-bucketed day.
   throw new Error(`orgMidnightUtc: no midnight found for ${tz}`);
 }
