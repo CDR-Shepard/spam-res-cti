@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildDirectorySnapshot, pickActingUsers, startDirectoryLoop, sweepRawEntries, type SweepDeps } from './directory-build.js';
+import {
+  buildDirectorySnapshot,
+  CursorPagingError,
+  pickActingUsers,
+  startDirectoryLoop,
+  sweepRawEntries,
+  type SweepDeps,
+} from './directory-build.js';
 import { contentHash, mergeDirectory } from './directory-merge.js';
 import { schema } from '../db/index.js';
 
@@ -178,6 +185,50 @@ describe('sweepRawEntries', () => {
     expect(entries.filter((e) => e.stage === 'lead')).toHaveLength(1);
     expect(entries.filter((e) => e.stage === 'opp')).toHaveLength(1);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT swallow a Deal-side CURSOR fault as "no Deals" — a half-swept object must fail the whole sweep', async () => {
+    // The catch above deliberately turns a Deal QUERY failure into "skip
+    // Deals". A paging fault is a different animal: the Deal rows exist and
+    // some of them were read, so swallowing it would publish a directory
+    // missing an unknown share of Deal-stage labels AS A NEW VERSION and
+    // prune the good one — the exact partial publish the design forbids.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const soqlQuery = vi.fn(async (_u: string, q: string) => {
+      const isFirstPage = !q.includes('Id >');
+      if (/FROM Lead/.test(q)) return isFirstPage ? [{ Id: 'L1', Name: 'Jane Doe', Phone: '6195550100', MobilePhone: null }] : [];
+      // A Deal__c cursor that never advances: every page comes back with the
+      // same last Id.
+      if (/FROM Deal__c/.test(q)) return [{ Id: 'D1', Name: '123 Main St', Phone__c: '6195550400' }];
+      return [];
+    }) as unknown as SweepDeps['soqlQuery'];
+    const sfFetch = vi.fn(async (_u: string, path: string) =>
+      (path === '/sobjects/Deal__c/describe'
+        ? { status: 200, json: { fields: [{ name: 'Phone__c', type: 'phone' }] } }
+        : { status: 404, json: null })) as unknown as SweepDeps['sfFetch'];
+
+    await expect(sweepRawEntries({ soqlQuery, sfFetch }, 'U1')).rejects.toBeInstanceOf(CursorPagingError);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('publishes nothing at all when a Deal-side cursor fault aborts the sweep', async () => {
+    const soqlQuery = vi.fn(async (_u: string, q: string) => {
+      const isFirstPage = !q.includes('Id >');
+      if (/FROM Lead/.test(q)) return isFirstPage ? [{ Id: 'L1', Name: 'Jane Doe', Phone: '6195550100', MobilePhone: null }] : [];
+      if (/FROM Deal__c/.test(q)) return [{ Id: 'D1', Name: '123 Main St', Phone__c: '6195550400' }];
+      return [];
+    }) as unknown as SweepDeps['soqlQuery'];
+    const sfFetch = vi.fn(async (_u: string, path: string) =>
+      (path === '/sobjects/Deal__c/describe'
+        ? { status: 200, json: { fields: [{ name: 'Phone__c', type: 'phone' }] } }
+        : { status: 404, json: null })) as unknown as SweepDeps['sfFetch'];
+    const db = fakeDb({ latestVersion: { version: 4, contentHash: 'old', entryCount: 9 } });
+
+    await expect(
+      buildDirectorySnapshot(db, { orgId: 'O1', userId: 'U1' }, { soqlQuery, sfFetch }),
+    ).rejects.toBeInstanceOf(CursorPagingError);
+    expect(db._txInserts).toEqual([]);
+    expect(db._deletes).toEqual([]);
   });
 
   it('skips Deals (with exactly one warn) when the describe succeeds but has no phone-type fields', async () => {

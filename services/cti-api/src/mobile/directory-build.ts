@@ -38,6 +38,23 @@ const ENTRY_INSERT_CHUNK_SIZE = 1000;
  *  malfunctioning, not that the org is large. */
 const MAX_CURSOR_PAGES = 500;
 
+/**
+ * A cursor-paging invariant broke: a page whose last row carried no `Id`, a
+ * cursor that failed to advance, or the hard page bound. Its own class because
+ * `sweepDeals` deliberately swallows Deal-side QUERY failures (an unreadable
+ * field the describe still advertised is Deal's problem alone) — but a paging
+ * fault is not a "this org has no readable Deals" signal. Swallowed, it would
+ * publish a silently Deal-less directory as a NEW version and prune the good
+ * one, making the documented fail-safe posture untrue on that path. Rethrown,
+ * the org's tick fails, nothing is published, and the next tick tries again.
+ */
+export class CursorPagingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CursorPagingError';
+  }
+}
+
 /** Page a SOQL query by ascending Id, calling `buildSoql` with the last Id
  *  seen (null on the first page) until a page comes back empty. A page
  *  shorter than PAGE_SIZE does NOT mean the sweep is done — Salesforce's REST
@@ -62,20 +79,20 @@ async function pageByIdCursor<T extends { Id: string }>(
   let last: string | null = null;
   for (let page = 0; ; page++) {
     if (page >= MAX_CURSOR_PAGES) {
-      throw new Error(`Id-cursor paging hit the max page bound (${MAX_CURSOR_PAGES}) after ${out.length} rows`);
+      throw new CursorPagingError(`Id-cursor paging hit the max page bound (${MAX_CURSOR_PAGES}) after ${out.length} rows`);
     }
     const rows: T[] = await deps.soqlQuery<T>(userId, buildSoql(last));
     if (rows.length === 0) break;
     const next = rows[rows.length - 1]!.Id;
     if (typeof next !== 'string' || next === '') {
-      throw new Error('Id-cursor paging: a page came back with no Id on its last row, so the cursor cannot advance');
+      throw new CursorPagingError('Id-cursor paging: a page came back with no Id on its last row, so the cursor cannot advance');
     }
     // Salesforce Ids are ASCII and compare case-sensitively, so JS string
     // ordering matches the `ORDER BY Id` / `Id > :last` ordering the query
     // itself relies on. A non-advancing cursor therefore means overlapping or
     // repeated pages, not a collation mismatch.
     if (last !== null && next <= last) {
-      throw new Error(`Id-cursor paging: the cursor did not advance past '${last}'`);
+      throw new CursorPagingError(`Id-cursor paging: the cursor did not advance past '${last}'`);
     }
     out.push(...rows);
     last = next;
@@ -181,9 +198,16 @@ async function sweepDeals(deps: SweepDeps, userId: string): Promise<RawEntry[]> 
       `SELECT Id, Name, ${phoneFields.join(', ')} FROM Deal__c` +
       `${last ? ` WHERE Id > '${soqlEscape(last)}'` : ''} ORDER BY Id LIMIT ${PAGE_SIZE}`);
   } catch (err) {
-    // A Deal-side query failure (an unreadable field the describe still
-    // advertised, a malformed cursor page) is Deal's problem alone: skip
-    // Deals with one warn so Leads and Opportunities still publish.
+    // A cursor-paging fault is NOT "this org has no readable Deals" — it means
+    // the sweep never saw all of them. Swallowing it here would publish a
+    // silently Deal-less directory as a new version and prune the good one,
+    // downgrading every Deal-stage label in the org to Opp/Lead (or to no
+    // label at all) with nothing but a warn to show for it. Let it out: the
+    // org publishes nothing this tick and tries again on the next.
+    if (err instanceof CursorPagingError) throw err;
+    // Anything else on the Deal side (an unreadable field the describe still
+    // advertised, an INVALID_FIELD) is Deal's problem alone: skip Deals with
+    // one warn so Leads and Opportunities still publish.
     console.warn('[directory-build] Deal__c query failed; skipping Deal sweep', { err: (err as Error).message });
     return [];
   }
