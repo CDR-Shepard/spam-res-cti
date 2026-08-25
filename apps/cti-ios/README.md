@@ -11,7 +11,7 @@ Two targets plus a test bundle:
 | --- | --- | --- |
 | `CTICallerID` (app) | `com.gghomes.cti.callerid` | Pairing, syncing, status UI |
 | `CallDirectory` (extension) | `com.gghomes.cti.callerid.directory` | Streams the snapshot to CallKit |
-| `CTICallerIDTests` | — | Logic tests (paging + store) |
+| `CTICallerIDTests` | — | Logic tests (paging, store, sync engine) |
 
 They share the App Group `group.com.gghomes.cti`. iOS 17 minimum, SwiftUI, no
 third-party dependencies.
@@ -42,9 +42,14 @@ xcodebuild test -project CTICallerID.xcodeproj -scheme CTICallerIDTests \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 ```
 
-The tests are host-free on purpose. Both things worth testing are pure —
-paging over an injected transport, and a store over an injected container URL
-— so they need neither a network nor a provisioned App Group on the simulator.
+The tests are host-free on purpose. Everything under test takes its
+collaborators by injection — paging over a transport, the store over a
+container URL, and `SyncEngine` over a token store, a pull, and CallKit — so
+they need neither a network, nor the Keychain, nor a provisioned App Group on
+the simulator. `SyncEngineTests` is what keeps the engine's own inventions
+honest: the reload is retried after CallKit refuses it (and not repeated once
+it sticks), a second sync is absorbed while one is in flight, and a 401 unpairs
+the phone with a reason `PairView` can show.
 
 ## How a phone gets a directory
 

@@ -20,6 +20,29 @@ final class SyncEngine: ObservableObject {
         case failed(String)
     }
 
+    /// The device token behind three closures rather than a direct call to
+    /// `DeviceTokenStore`, so pairing and revocation can be driven from a test
+    /// without touching the real Keychain.
+    struct TokenStore {
+        var load: () -> String?
+        var save: (String) throws -> Void
+        var delete: () -> Void
+
+        static let keychain = TokenStore(
+            load: DeviceTokenStore.load,
+            save: DeviceTokenStore.save,
+            delete: DeviceTokenStore.delete
+        )
+    }
+
+    /// Pulls the whole directory; `nil` when the server says nothing changed
+    /// since `since`.
+    typealias Pull = (_ token: String, _ since: Int?) async throws -> (version: Int, entries: [DirectoryEntry])?
+    /// Asks CallKit to reload the extension with that bundle identifier.
+    typealias Reload = (_ extensionIdentifier: String) async throws -> Void
+    /// Whether the user has the extension switched on in Settings.
+    typealias EnabledStatusProbe = (_ extensionIdentifier: String) async -> CXCallDirectoryManager.EnabledStatus
+
     @Published private(set) var isPaired: Bool
     @Published private(set) var pairedUserName: String?
     @Published private(set) var status: Status = .idle
@@ -30,6 +53,10 @@ final class SyncEngine: ObservableObject {
 
     private let store: DirectoryStore?
     private let defaults: UserDefaults
+    private let tokens: TokenStore
+    private let pull: Pull
+    private let reload: Reload
+    private let enabledStatus: EnabledStatusProbe
     private let log = Logger(subsystem: "com.gghomes.cti.callerid", category: "SyncEngine")
 
     private enum Keys {
@@ -39,13 +66,26 @@ final class SyncEngine: ObservableObject {
         static let reloadedVersion = "reloadedVersion"
     }
 
+    /// Everything the sync reaches outside itself is injected — CallKit and
+    /// the Keychain included — because the invariants this engine invents (the
+    /// reload-retry key, the single-flight guard, the 401 → unpair path) are
+    /// only worth having if a test can drive them. Production calls
+    /// `SyncEngine()` and takes every default.
     init(
         store: DirectoryStore? = DirectoryStore.appGroup(),
-        defaults: UserDefaults = UserDefaults(suiteName: AppConfig.appGroupIdentifier) ?? .standard
+        defaults: UserDefaults = UserDefaults(suiteName: AppConfig.appGroupIdentifier) ?? .standard,
+        tokens: TokenStore = .keychain,
+        pull: @escaping Pull = SyncEngine.livePull,
+        reload: @escaping Reload = SyncEngine.liveReload,
+        enabledStatus: @escaping EnabledStatusProbe = SyncEngine.liveEnabledStatus
     ) {
         self.store = store
         self.defaults = defaults
-        self.isPaired = DeviceTokenStore.load() != nil
+        self.tokens = tokens
+        self.pull = pull
+        self.reload = reload
+        self.enabledStatus = enabledStatus
+        self.isPaired = tokens.load() != nil
         self.pairedUserName = defaults.string(forKey: Keys.pairedUserName)
         self.lastSyncedAt = defaults.object(forKey: Keys.lastSyncedAt) as? Date
 
@@ -55,11 +95,23 @@ final class SyncEngine: ObservableObject {
         }
     }
 
+    /// The failure worth putting in front of the user, or `nil`. Both screens
+    /// render it — StatusView inline, PairView above the code field, which is
+    /// where a revoked device lands the moment `sync()` unpairs it.
+    var failureMessage: String? {
+        if case let .failed(message) = status { return message }
+        return nil
+    }
+
     // MARK: - Pairing
 
     func pair(code: String, deviceLabel: String) async throws {
+        // A fresh attempt starts clean: otherwise the revocation message from
+        // the sync that just unpaired this phone would sit under the new code
+        // the user is typing.
+        status = .idle
         let claim = try await claimPairingCode(code: code, deviceLabel: deviceLabel)
-        try DeviceTokenStore.save(claim.deviceToken)
+        try tokens.save(claim.deviceToken)
         pairedUserName = claim.user.displayName
         defaults.set(claim.user.displayName, forKey: Keys.pairedUserName)
         isPaired = true
@@ -69,7 +121,7 @@ final class SyncEngine: ObservableObject {
     /// Drops the token AND the snapshot, then reloads the extension so the
     /// phone stops identifying this org's numbers straight away.
     func unpair() {
-        DeviceTokenStore.delete()
+        tokens.delete()
         isPaired = false
         pairedUserName = nil
         version = nil
@@ -81,7 +133,7 @@ final class SyncEngine: ObservableObject {
         defaults.removeObject(forKey: Keys.reloadedVersion)
 
         try? store?.save(version: 0, entries: [])
-        Task { try? await reloadExtension() }
+        Task { [reload] in try? await reload(AppConfig.extensionBundleIdentifier) }
     }
 
     // MARK: - Syncing
@@ -93,9 +145,18 @@ final class SyncEngine: ObservableObject {
         // Four things drive a sync (appear, foregrounding, the button, the
         // background task) and two of them can land together — foregrounding
         // onto a screen that also syncs on appear. One at a time: the second
-        // would only re-download what the first is already writing.
+        // would only re-download what the first is already writing. (The sync
+        // already in flight refreshes the extension status for both.)
         guard status != .syncing else { return }
-        guard let token = DeviceTokenStore.load() else {
+        await pullStoreAndReload()
+        // Every path lands here, refusals included — the Settings switch is
+        // the one thing on the screen that has nothing to do with whether the
+        // pull worked, and reading it only on success left it on "Unknown".
+        await refreshExtensionStatus()
+    }
+
+    private func pullStoreAndReload() async {
+        guard let token = tokens.load() else {
             status = .failed("This iPhone is not paired yet.")
             return
         }
@@ -107,7 +168,7 @@ final class SyncEngine: ObservableObject {
         status = .syncing
         do {
             let known = store.load()?.version
-            if let pulled = try await fetchAll(baseURL: AppConfig.baseURL, token: token, since: known) {
+            if let pulled = try await pull(token, known) {
                 try store.save(version: pulled.version, entries: pulled.entries)
                 // Read back rather than trusting the pull: the store is what
                 // the extension will actually publish, so its count and
@@ -128,7 +189,7 @@ final class SyncEngine: ObservableObject {
             // sit there until the next version bump, with every sync in
             // between answering "unchanged" and doing nothing.
             if let current = version, defaults.object(forKey: Keys.reloadedVersion) as? Int != current {
-                try await reloadExtension()
+                try await reload(AppConfig.extensionBundleIdentifier)
                 defaults.set(current, forKey: Keys.reloadedVersion)
                 log.info("call directory reloaded at version \(current)")
             }
@@ -137,23 +198,36 @@ final class SyncEngine: ObservableObject {
             defaults.set(lastSyncedAt, forKey: Keys.lastSyncedAt)
             status = .idle
         } catch FeedError.http(status: 401) {
-            // The device was revoked from the softphone's device list.
+            // The device was revoked from the softphone's device list. This
+            // drops the phone back to PairView, which renders `failureMessage`
+            // — without that the swap would look like the app resetting itself.
             unpair()
             status = .failed("This iPhone was unpaired. Enter a new pairing code.")
         } catch {
             log.error("sync failed: \(error.localizedDescription, privacy: .public)")
             status = .failed(Self.message(for: error))
         }
-
-        await refreshExtensionStatus()
     }
 
     // MARK: - The Call Directory extension
 
-    private func reloadExtension() async throws {
+    func refreshExtensionStatus() async {
+        extensionEnabled = await enabledStatus(AppConfig.extensionBundleIdentifier)
+    }
+
+    /// The real feed pull. `nonisolated` so its unapplied reference is a plain
+    /// async function rather than a main-actor-isolated one.
+    nonisolated static func livePull(
+        token: String,
+        since: Int?
+    ) async throws -> (version: Int, entries: [DirectoryEntry])? {
+        try await fetchAll(baseURL: AppConfig.baseURL, token: token, since: since)
+    }
+
+    nonisolated static func liveReload(_ extensionIdentifier: String) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             CXCallDirectoryManager.sharedInstance
-                .reloadExtension(withIdentifier: AppConfig.extensionBundleIdentifier) { error in
+                .reloadExtension(withIdentifier: extensionIdentifier) { error in
                     if let error {
                         continuation.resume(throwing: error)
                     } else {
@@ -163,10 +237,12 @@ final class SyncEngine: ObservableObject {
         }
     }
 
-    func refreshExtensionStatus() async {
-        extensionEnabled = await withCheckedContinuation { continuation in
+    nonisolated static func liveEnabledStatus(
+        _ extensionIdentifier: String
+    ) async -> CXCallDirectoryManager.EnabledStatus {
+        await withCheckedContinuation { continuation in
             CXCallDirectoryManager.sharedInstance
-                .getEnabledStatusForExtension(withIdentifier: AppConfig.extensionBundleIdentifier) { status, _ in
+                .getEnabledStatusForExtension(withIdentifier: extensionIdentifier) { status, _ in
                     continuation.resume(returning: status)
                 }
         }

@@ -39,9 +39,9 @@ struct PairView: View {
                         .textInputAutocapitalization(.words)
                 }
 
-                if let errorMessage {
+                if let message = displayedMessage {
                     Section {
-                        Text(errorMessage)
+                        Text(message)
                             .foregroundStyle(.red)
                     }
                 }
@@ -62,6 +62,15 @@ struct PairView: View {
             .navigationTitle("CTI Caller ID")
             .onAppear { codeFieldFocused = true }
         }
+    }
+
+    /// This attempt's own error if there is one, otherwise whatever the engine
+    /// is reporting. The engine's matters here because a revoked device is
+    /// unpaired mid-sync and dropped onto this screen: without showing its
+    /// message, an empty pairing form is all the rep would see, and it reads
+    /// as the app having reset itself.
+    private var displayedMessage: String? {
+        errorMessage ?? engine.failureMessage
     }
 
     private var canPair: Bool {
