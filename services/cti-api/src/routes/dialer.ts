@@ -268,6 +268,11 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       session,
       counts: sessionCounts(items),
       skipBreakdown: skipBreakdown(items),
+      // What the run STARTED with. `counts.total` grows mid-run (an attempt-2
+      // retry row is appended), which would make the inherited-day line drift
+      // upward while the rep watches it. Attempt-1 rows are exactly the queue
+      // creation built, so this figure is fixed for the life of the session.
+      firstPassTotal: items.filter((i) => i.attempt === 1).length,
       currentItem: current,
       waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
       rollovers: rolloverSummary(jobs),

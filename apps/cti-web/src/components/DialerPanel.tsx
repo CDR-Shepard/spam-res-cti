@@ -52,17 +52,21 @@ export function progressLabel(counts: DialerSessionCounts): string {
 }
 
 /**
- * Pure — what the rep inherited when the run started, e.g.
- * "50 records · 18 already worked today · dialing 32". Only `already_worked`
- * and `skip_on_dialer` are itemized from `breakdown`; any other skipped
- * outcome is still covered by `counts.skipped` in the "dialing" figure, just
- * not called out by name. Zero-count parts are omitted.
+ * Pure — what the rep inherited when the run STARTED, e.g.
+ * "50 records · 18 already worked today · dialing 32".
+ *
+ * Every input is creation-stamped, so the line never drifts while the rep
+ * watches it: `firstPassTotal` counts attempt-1 rows only (an attempt-2 retry
+ * row appended mid-run would inflate a live total), `unreachable` is fixed at
+ * queue build, and only the two creation-stamped breakdown keys are read —
+ * an out-of-hours skip the engine stamps at minute 40 adds a key this
+ * deliberately ignores. Zero-count parts are omitted.
  */
-export function queueLine(counts: DialerSessionCounts, breakdown?: Record<string, number>): string {
+export function queueLine(firstPassTotal: number, unreachable: number, breakdown?: Record<string, number>): string {
   const alreadyWorked = breakdown?.already_worked ?? 0;
   const skipOnDialer = breakdown?.skip_on_dialer ?? 0;
-  const dialing = counts.total - counts.skipped - counts.unreachable;
-  const parts = [`${counts.total} records`];
+  const dialing = firstPassTotal - alreadyWorked - skipOnDialer - unreachable;
+  const parts = [`${firstPassTotal} records`];
   if (alreadyWorked > 0) parts.push(`${alreadyWorked} already worked today`);
   if (skipOnDialer > 0) parts.push(`${skipOnDialer} skipped by flag`);
   parts.push(`dialing ${dialing}`);
@@ -434,7 +438,9 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     <div className="dialer-panel">
       <div className="section dp-progress">
         <div className="kicker">Power dialer</div>
-        <div className="dp-queue-line">{queueLine(view.counts, view.skipBreakdown)}</div>
+        <div className="dp-queue-line">
+          {queueLine(view.firstPassTotal ?? view.counts.total, view.counts.unreachable, view.skipBreakdown)}
+        </div>
         <div className="dp-progress-label">{progressLabel(view.counts)}</div>
         <div className="meterbar tall">
           <div className="meterfill" style={{ width: `${pct}%` }} />

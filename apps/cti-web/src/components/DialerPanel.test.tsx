@@ -41,12 +41,62 @@ describe('progressLabel', () => {
 });
 
 describe('queueLine', () => {
-  const counts = { total: 50, done: 0, connected: 0, noConnect: 0, skipped: 18, unreachable: 0, pending: 32 };
   it('reads like the spec example and omits zero parts', () => {
-    expect(queueLine(counts, { already_worked: 18 })).toBe('50 records · 18 already worked today · dialing 32');
-    expect(queueLine(counts, { already_worked: 15, skip_on_dialer: 3 }))
+    expect(queueLine(50, 0, { already_worked: 18 })).toBe('50 records · 18 already worked today · dialing 32');
+    expect(queueLine(50, 0, { already_worked: 15, skip_on_dialer: 3 }))
       .toBe('50 records · 15 already worked today · 3 skipped by flag · dialing 32');
-    expect(queueLine({ ...counts, skipped: 0, pending: 50 }, {})).toBe('50 records · dialing 50');
+    expect(queueLine(50, 0, {})).toBe('50 records · dialing 50');
+    expect(queueLine(50, 0)).toBe('50 records · dialing 50');
+  });
+
+  it('takes phone-less records out of the dialing figure', () => {
+    // 50 in the run, 18 inherited, 2 with no number → 30 will actually ring.
+    expect(queueLine(50, 2, { already_worked: 18 })).toBe('50 records · 18 already worked today · dialing 30');
+  });
+
+  /**
+   * The line means "what this run started with" and must read the same at
+   * minute 40 as at minute 0. Its three inputs are all creation-stamped, so
+   * the two things that DO move mid-run — attempt-2 retry rows (which grow
+   * counts.total and counts.pending) and out-of-hours skips stamped by the
+   * engine (which grow counts.skipped and add a breakdown key) — cannot move
+   * it: the retry rows are not attempt 1, and only already_worked and
+   * skip_on_dialer are itemized or subtracted.
+   */
+  it('does not drift mid-run: attempt-2 rows and out-of-hours skips leave it unchanged', () => {
+    // What the panel passes, mirroring the render site.
+    const line = (v: DialerSessionView) =>
+      queueLine(v.firstPassTotal ?? v.counts.total, v.counts.unreachable, v.skipBreakdown);
+
+    const atStart: DialerSessionView = {
+      session: { id: 'S1', status: 'active' },
+      counts: { total: 50, done: 0, connected: 0, noConnect: 0, skipped: 18, unreachable: 2, pending: 30 },
+      currentItem: null,
+      firstPassTotal: 50,
+      skipBreakdown: { already_worked: 15, skip_on_dialer: 3 },
+    };
+    const midRun: DialerSessionView = {
+      ...atStart,
+      // 6 no-connects have queued attempt-2 rows; the engine skipped 4 records
+      // that fell outside calling hours.
+      counts: { total: 56, done: 9, connected: 1, noConnect: 6, skipped: 22, unreachable: 2, pending: 16 },
+      firstPassTotal: 50,
+      skipBreakdown: { already_worked: 15, skip_on_dialer: 3, out_of_hours: 4 },
+    };
+
+    expect(line(atStart)).toBe('50 records · 15 already worked today · 3 skipped by flag · dialing 30');
+    expect(line(midRun)).toBe(line(atStart));
+  });
+
+  it('falls back to the live total for a server that has not shipped firstPassTotal yet', () => {
+    const legacy: DialerSessionView = {
+      session: { id: 'S1', status: 'active' },
+      counts: { total: 50, done: 0, connected: 0, noConnect: 0, skipped: 18, unreachable: 0, pending: 32 },
+      currentItem: null,
+      skipBreakdown: { already_worked: 18 },
+    };
+    expect(queueLine(legacy.firstPassTotal ?? legacy.counts.total, legacy.counts.unreachable, legacy.skipBreakdown))
+      .toBe('50 records · 18 already worked today · dialing 32');
   });
 });
 
