@@ -735,6 +735,76 @@ export const stickyNumbers = pgTable(
 );
 
 // =============================================================================
+// Mobile caller-ID app
+// =============================================================================
+
+/**
+ * A published snapshot of an org's merged caller-ID directory. The mobile app
+ * polls this by org and only pulls entries when the version has advanced —
+ * entryCount/contentHash let a client verify a sync landed intact without
+ * re-diffing every row.
+ */
+export const callerDirectoryVersions = pgTable(
+  'caller_directory_versions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    entryCount: integer('entry_count').notNull(),
+    contentHash: text('content_hash').notNull(),
+    builtAt: timestamp('built_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    orgVersionUnique: uniqueIndex('caller_directory_versions_org_version_unique').on(t.orgId, t.version),
+  }),
+);
+export type CallerDirectoryVersion = typeof callerDirectoryVersions.$inferSelect;
+
+/** One merged (deal/opp/lead) directory row for a given org + published version. */
+export const callerDirectoryEntries = pgTable(
+  'caller_directory_entries',
+  {
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    e164: text('e164').notNull(),
+    label: text('label').notNull(),
+    stage: text('stage').notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.version, t.e164] }),
+  }),
+);
+export type CallerDirectoryEntry = typeof callerDirectoryEntries.$inferSelect;
+
+/** A paired mobile device (the iPhone caller-ID app) — one row per install. */
+export const mobileDevices = pgTable(
+  'mobile_devices',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    tokenHash: text('token_hash').notNull(),
+    label: text('label').notNull(),
+    apnsToken: text('apns_token'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).defaultNow().notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  },
+  (t) => ({
+    tokenIdx: uniqueIndex('mobile_devices_token_hash_unique').on(t.tokenHash),
+  }),
+);
+export type MobileDevice = typeof mobileDevices.$inferSelect;
+
+/** Short-lived pairing code a rep enters in the mobile app to link a device. */
+export const mobilePairCodes = pgTable('mobile_pair_codes', {
+  codeHash: text('code_hash').primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  usedAt: timestamp('used_at', { withTimezone: true }),
+});
+export type MobilePairCode = typeof mobilePairCodes.$inferSelect;
+
+// =============================================================================
 // Type helpers
 // =============================================================================
 
