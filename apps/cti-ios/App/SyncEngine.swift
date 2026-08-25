@@ -254,7 +254,20 @@ final class SyncEngine: ObservableObject {
             // sit there until the next version bump, with every sync in
             // between answering "unchanged" and doing nothing.
             if let current = version, defaults.object(forKey: Keys.reloadedVersion) as? Int != current {
-                try await reload(AppConfig.extensionBundleIdentifier)
+                do {
+                    try await reload(AppConfig.extensionBundleIdentifier)
+                } catch {
+                    // A failing reload can mean CallKit is merely busy — or
+                    // that the snapshot's body is torn under a valid header
+                    // (power loss after the rename's metadata landed but
+                    // before the data blocks flushed). The header alone can't
+                    // tell them apart, and a torn snapshot wedges forever
+                    // otherwise: `loadHeader` keeps succeeding, the server
+                    // keeps answering "unchanged", and the extension keeps
+                    // refusing the same bytes.
+                    discardSnapshotIfCorrupt(store)
+                    throw error
+                }
                 defaults.set(current, forKey: Keys.reloadedVersion)
                 log.info("call directory reloaded at version \(current)")
             }
@@ -271,6 +284,21 @@ final class SyncEngine: ObservableObject {
         } catch {
             log.error("sync failed: \(error.localizedDescription, privacy: .public)")
             status = .failed(Self.message(for: error))
+        }
+    }
+
+    /// Stream-verifies the snapshot after a failed reload; a body that can't
+    /// be read end to end is discarded so the next sync starts from nothing
+    /// and pulls the full directory again. A snapshot that verifies is left
+    /// alone — the reload failure was CallKit's, not the file's.
+    private func discardSnapshotIfCorrupt(_ store: DirectoryStore) {
+        do {
+            try store.verify()
+        } catch {
+            log.error("snapshot failed verification after a reload failure; discarding: \(error.localizedDescription, privacy: .public)")
+            store.removeSnapshot()
+            version = nil
+            entryCount = 0
         }
     }
 

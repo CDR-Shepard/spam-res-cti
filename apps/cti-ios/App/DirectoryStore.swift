@@ -328,6 +328,21 @@ struct DirectoryStore {
         guard buffer.count == cursor else { throw DirectoryStoreError.trailingBytes }
     }
 
+    /// Streams the whole snapshot discarding every record — the cheapest way
+    /// to prove that the bytes the extension will read are readable end to
+    /// end. A valid header over a torn body passes `loadHeader` but fails
+    /// here.
+    func verify() throws {
+        try streamEntries { _, _ in }
+    }
+
+    /// Drops the snapshot so `loadHeader()` answers nil and the next sync
+    /// starts from nothing. Best-effort: a file that cannot be removed will
+    /// just fail verification again on the next attempt.
+    func removeSnapshot() {
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
     private static func read(_ handle: FileHandle, _ count: Int) throws -> Data? {
         do {
             return try handle.read(upToCount: count)
