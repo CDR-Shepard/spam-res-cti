@@ -26,6 +26,14 @@ const state = vi.hoisted(() => ({
   // resolving to `[]`) before an insert is allowed to "succeed".
   pairCodeInsertConflictsRemaining: 0,
   pairCodeInsertAttempts: 0,
+  // The `where` predicate the claim's atomic UPDATE was actually issued
+  // with, so a test can assert the rule lives in the SQL and not in a
+  // read-then-write window.
+  lastPairCodeClaimWhere: null as unknown,
+  // Force the claim UPDATE to match zero rows even though `pairCode` looks
+  // claimable — i.e. a concurrent claimant won the race between the two.
+  pairCodeClaimLost: false,
+  deviceInsertCount: 0,
 }));
 
 vi.mock('../auth/session.js', () => ({
@@ -37,6 +45,7 @@ vi.mock('../db/index.js', async (importOriginal) => {
   return { ...actual, getDb: () => fakeDb() };
 });
 
+import { schema } from '../db/index.js';
 import {
   registerMobileRoutes,
   allowClaimAttempt,
@@ -52,15 +61,43 @@ import {
 } from './mobile.js';
 
 /**
- * Just enough of the drizzle surface mobile.ts touches. `update(...).set().where()`
- * is fire-and-forget in every route here (no `.returning()` is ever chained),
- * so it just records what was written. `insert(...).values(...)` returns a
- * thenable (so a plain `await db.insert(...).values(...)` — the
- * `mobileDevices` insert — still works unchanged) that ALSO exposes
- * `.onConflictDoNothing().returning()` — the `mobilePairCodes` insert's
- * retry-on-collision path — resolving to `[]` for
- * `pairCodeInsertConflictsRemaining` calls (simulating a codeHash collision)
- * before "succeeding" with an inserted row.
+ * Renders a drizzle `where` predicate to readable SQL-ish text so a test can
+ * assert what the database was actually asked to match, rather than trusting
+ * a JS-side check the database never saw. Walks the same `queryChunks` shape
+ * `dialer-handoffs.test.ts` introspects for its advisory-lock assertions:
+ * a chunk is either a nested `SQL`, a literal `StringChunk` (`{ value: [...] }`),
+ * a `Column` (has `.name` + `.table`), or a bound `Param` (`{ value }`).
+ */
+function renderPredicate(node: unknown): string {
+  if (node === null || node === undefined) return '';
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(renderPredicate).join('');
+  const n = node as Record<string, unknown>;
+  if (Array.isArray(n.queryChunks)) return n.queryChunks.map(renderPredicate).join('');
+  if (Array.isArray(n.value)) return (n.value as unknown[]).map(renderPredicate).join('');
+  if (typeof n.name === 'string' && n.table) return n.name;
+  if ('value' in n) return `<param>`;
+  return '<?>';
+}
+
+/**
+ * Just enough of the drizzle surface mobile.ts touches.
+ *
+ * `update(...).set(...).where(...)` returns a thenable (so the fire-and-forget
+ * device updates — `lastSeenAt`, `apnsToken`, `revokedAt` — still work when
+ * plainly awaited) that ALSO exposes `.returning()`, which the pair-code claim
+ * chains. For `mobilePairCodes` that `.returning()` emulates what Postgres
+ * would do with the claim's WHERE: it applies `pairCodeClaimable` (the same
+ * documented rule the SQL encodes) to the configured fixture, so a used or
+ * expired fixture matches zero rows — exactly as the real single-statement
+ * claim would. `pairCodeClaimLost` forces zero rows regardless, standing in
+ * for a concurrent claimant that won the race.
+ *
+ * `insert(...).values(...)` likewise returns a thenable (the `mobileDevices`
+ * insert awaits it directly) that exposes `.onConflictDoNothing().returning()`
+ * — the `mobilePairCodes` insert's retry-on-collision path — resolving to `[]`
+ * for `pairCodeInsertConflictsRemaining` calls (simulating a codeHash
+ * collision) before "succeeding" with an inserted row.
  */
 function fakeDb() {
   return {
@@ -77,9 +114,10 @@ function fakeDb() {
     delete(_table: unknown) {
       return { where: async () => { state.deletedPairCodes = true; } };
     },
-    insert(_table: unknown) {
+    insert(table: unknown) {
       return {
         values: (values: Record<string, unknown>) => {
+          if (table === schema.mobileDevices) state.deviceInsertCount++;
           const thenable = Promise.resolve(undefined) as Promise<void> & {
             onConflictDoNothing: () => { returning: () => Promise<Array<Record<string, unknown>>> };
           };
@@ -97,12 +135,22 @@ function fakeDb() {
         },
       };
     },
-    update(_table: unknown) {
+    update(table: unknown) {
       return {
         set: (values: Record<string, unknown>) => ({
-          where: async () => {
+          where: (predicate: unknown) => {
             state.updateCallCount++;
             state.lastUpdateValues = values;
+            if (table === schema.mobilePairCodes) state.lastPairCodeClaimWhere = predicate;
+            const thenable = Promise.resolve(undefined) as Promise<void> & {
+              returning: () => Promise<Array<Record<string, unknown>>>;
+            };
+            thenable.returning = async () => {
+              if (table !== schema.mobilePairCodes) return [];
+              if (state.pairCodeClaimLost) return [];
+              return pairCodeClaimable(state.pairCode, new Date()) ? [{ ...state.pairCode }] : [];
+            };
+            return thenable;
           },
         }),
       };
@@ -128,6 +176,9 @@ beforeEach(async () => {
   state.updateCallCount = 0;
   state.pairCodeInsertConflictsRemaining = 0;
   state.pairCodeInsertAttempts = 0;
+  state.lastPairCodeClaimWhere = null;
+  state.pairCodeClaimLost = false;
+  state.deviceInsertCount = 0;
   claimAttemptsByIp.clear();
   claimAttemptsGlobal.splice(0, claimAttemptsGlobal.length);
   app = Fastify();
@@ -228,6 +279,36 @@ describe('POST /mobile/pair/claim', () => {
     expect(state.lastUpdateValues).toHaveProperty('usedAt');
   });
 
+  it('claims with ONE atomic UPDATE whose predicate carries the whole single-use rule', async () => {
+    state.pairCode = { userId: USER_ID, usedAt: null, expiresAt: new Date(Date.now() + 60_000) };
+    state.user = { id: USER_ID, orgId: ORG_ID, displayName: 'Jane Rep' };
+    const res = await claim({ code: '123456', deviceLabel: "Jane's iPhone" });
+    expect(res.statusCode).toBe(200);
+
+    // Single-use has to be enforced by the database in the same statement that
+    // marks the code used — a separate read, then a validate, then an UPDATE
+    // lets N concurrent claimants of one leaked code all pass validation and
+    // all mint a device. Assert the rule is in the SQL, not in a JS window:
+    const predicate = renderPredicate(state.lastPairCodeClaimWhere);
+    expect(predicate).toContain('code_hash =');
+    expect(predicate).toContain('used_at is null');
+    expect(predicate).toContain('expires_at >');
+  });
+
+  it('401s and mints NO device when the atomic claim matches no row (a concurrent claimant won)', async () => {
+    // The fixture would have passed a read-then-validate check — unused and
+    // unexpired — but the UPDATE matches zero rows because another in-flight
+    // request already flipped `used_at` first. Exactly the race the atomic
+    // claim exists to lose safely.
+    state.pairCode = { userId: USER_ID, usedAt: null, expiresAt: new Date(Date.now() + 60_000) };
+    state.user = { id: USER_ID, orgId: ORG_ID, displayName: 'Jane Rep' };
+    state.pairCodeClaimLost = true;
+
+    const res = await claim({ code: '123456', deviceLabel: "Jane's iPhone" });
+    expect(res.statusCode).toBe(401);
+    expect(state.deviceInsertCount).toBe(0);
+  });
+
   it('rate-limits claim attempts to 3/min/IP — the 4th within the window is 429', async () => {
     state.pairCode = undefined; // every attempt 401s on validity, but must still count against the limiter
     const results = [];
@@ -283,6 +364,27 @@ describe('POST /mobile/pair/claim', () => {
     // Five successful pairings, zero entries recorded against the shared
     // budget — a legitimate burst can never itself trip the backstop.
     expect(claimAttemptsGlobal.length).toBe(0);
+  });
+
+  it('a request refused by the global backstop never touches the per-IP map', async () => {
+    state.pairCode = undefined;
+    const nowMs = Date.now();
+    // The global backstop is already at capacity — everything below is 429.
+    for (let i = 0; i < CLAIM_RATE_LIMIT_GLOBAL; i++) recordClaimFailureGlobal(claimAttemptsGlobal, nowMs);
+
+    for (let i = 0; i < 5; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/mobile/pair/claim',
+        remoteAddress: `10.2.0.${i}`,
+        payload: { code: '000000', deviceLabel: 'Device' },
+      });
+      expect(res.statusCode).toBe(429);
+    }
+    // The global check runs FIRST, so a flood already being refused globally
+    // can neither grow the per-IP map (unbounded memory under a spoofed
+    // X-Forwarded-For per request) nor burn a legitimate IP's 3 slots.
+    expect(claimAttemptsByIp.size).toBe(0);
   });
 });
 
@@ -439,6 +541,17 @@ describe('POST /mobile/apns-token', () => {
       url: '/mobile/apns-token',
       headers: { authorization: 'Bearer devicetok' },
       payload: {},
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('400s an absurdly long token instead of storing it unbounded', async () => {
+    state.device = { id: 'dev-1', userId: USER_ID, revokedAt: null };
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mobile/apns-token',
+      headers: { authorization: 'Bearer devicetok' },
+      payload: { token: 'a'.repeat(4097) },
     });
     expect(res.statusCode).toBe(400);
   });
@@ -605,6 +718,17 @@ describe('sortEntriesByDigits', () => {
     const a = { e164: '+16195550100', tag: 'a' };
     const b = { e164: '+16195550100', tag: 'b' };
     expect(sortEntriesByDigits([a, b])).toEqual([a, b]);
+  });
+
+  it('breaks ties on the e164 text so equal digit-values page deterministically', () => {
+    // Same digits, different text — without a tiebreaker their relative order
+    // would follow whatever order the DB happened to return them in, so a
+    // client paging through the feed could see one of them twice and the
+    // other never.
+    const plus = { e164: '+16195550100' };
+    const bare = { e164: '16195550100' };
+    expect(sortEntriesByDigits([plus, bare]).map((e) => e.e164)).toEqual(['+16195550100', '16195550100']);
+    expect(sortEntriesByDigits([bare, plus]).map((e) => e.e164)).toEqual(['+16195550100', '16195550100']);
   });
 });
 

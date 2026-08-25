@@ -20,7 +20,7 @@
  */
 import { randomInt } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { and, eq, isNull, lt, or } from 'drizzle-orm';
+import { and, eq, gt, isNull, lt, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
 import { getDb, schema } from '../db/index.js';
@@ -135,9 +135,13 @@ export function generatePairCode(): string {
   return randomInt(0, 1_000_000).toString().padStart(6, '0');
 }
 
-/** Pure — single source of truth for "is this pairing-code row still
- *  claimable": exists, never used, not yet expired. Exactly at `expiresAt` is
- *  treated as expired (no grace window). */
+/** Pure — states the rule the claim's atomic `UPDATE ... WHERE` encodes: a
+ *  pairing-code row is claimable only if it exists, was never used, and has
+ *  not expired. Exactly at `expiresAt` is treated as expired (no grace
+ *  window). The route does NOT evaluate this — enforcing single-use in JS
+ *  between a read and a write is exactly the race the atomic claim closes —
+ *  it is the executable documentation of what that WHERE clause means, unit
+ *  tested here so the rule itself can't drift unnoticed. */
 export function pairCodeClaimable(
   row: { usedAt: Date | null; expiresAt: Date } | undefined,
   now: Date,
@@ -164,7 +168,17 @@ function digitsValue(e164: string): bigint {
 export function sortEntriesByDigits<T extends { e164: string }>(entries: readonly T[]): T[] {
   return entries
     .map((e, i) => ({ e, i, v: digitsValue(e.e164) }))
-    .sort((a, b) => (a.v < b.v ? -1 : a.v > b.v ? 1 : a.i - b.i))
+    .sort((a, b) => {
+      if (a.v !== b.v) return a.v < b.v ? -1 : 1;
+      // Two DIFFERENT e164 texts can share one digit value ("+1555…" vs
+      // "1555…"). Falling back to input order there would leave paging at the
+      // mercy of whatever order the database happened to return the rows in —
+      // a client could then see one of the pair twice across two page fetches
+      // and the other never. The text tiebreaker makes the total order a
+      // function of the data alone.
+      if (a.e.e164 !== b.e.e164) return a.e.e164 < b.e.e164 ? -1 : 1;
+      return a.i - b.i;
+    })
     .map(({ e }) => e);
 }
 
@@ -207,7 +221,10 @@ const ClaimBody = z.object({
 });
 
 const ApnsTokenBody = z.object({
-  token: z.string().trim().min(1),
+  // APNs device tokens are 64 hex characters today; the cap is deliberately
+  // generous room for a future format change while still refusing to persist
+  // an unbounded blob a compromised/hostile device could post.
+  token: z.string().trim().min(1).max(4096),
 });
 
 const FeedQuery = z.object({
@@ -270,17 +287,21 @@ export async function registerMobileRoutes(app: FastifyInstance): Promise<void> 
     // Rate-limit BEFORE touching the DB, so brute-forcing codes can't even
     // spend a query per guess once a bucket is exhausted.
     const nowMs = Date.now();
-    // Per-IP: spec-mandated 3/min/IP, evaluated on every attempt (success or
-    // fail alike) before any DB work.
-    if (!allowClaimAttempt(claimAttemptsByIp, req.ip, nowMs)) {
+    // Global backstop FIRST: checked here (not recorded) so a request is
+    // never gated by attempts it hasn't made yet — only claims that actually
+    // FAIL below record against the shared budget (see the two
+    // recordClaimFailureGlobal call sites), so a burst of legitimate
+    // successful pairings can never trip it. Consulting it *before* the
+    // per-IP map matters: a flood already being refused globally then can
+    // neither grow that map (its keys are attacker-controlled) nor burn a
+    // legitimate IP's three slots on requests that were never going to be
+    // served anyway.
+    if (!globalBudgetAvailable(claimAttemptsGlobal, nowMs)) {
       return reply.code(429).send({ error: 'Too many attempts — try again in a minute' });
     }
-    // Global backstop: checked here (not recorded) so a request is never
-    // gated by attempts it hasn't made yet — only claims that actually FAIL
-    // below record against the shared budget (see the two
-    // recordClaimFailureGlobal call sites), so a burst of legitimate
-    // successful pairings can never trip it.
-    if (!globalBudgetAvailable(claimAttemptsGlobal, nowMs)) {
+    // Per-IP: spec-mandated 3/min/IP, evaluated on every attempt that gets
+    // past the backstop (success or fail alike) before any DB work.
+    if (!allowClaimAttempt(claimAttemptsByIp, req.ip, nowMs)) {
       return reply.code(429).send({ error: 'Too many attempts — try again in a minute' });
     }
 
@@ -293,27 +314,38 @@ export async function registerMobileRoutes(app: FastifyInstance): Promise<void> 
     const db = getDb();
     const now = new Date();
     const codeHash = sha256(parsed.data.code);
-    const row = await db.query.mobilePairCodes.findFirst({ where: eq(schema.mobilePairCodes.codeHash, codeHash) });
-    if (!row || !pairCodeClaimable(row, now)) {
+    // SINGLE-USE, enforced by the database in one statement. The whole rule
+    // (`pairCodeClaimable`: right hash, never used, not expired) lives in this
+    // WHERE, and the row is claimed by the same UPDATE that tests it, so the
+    // claim is atomic: of N concurrent requests carrying one leaked code,
+    // exactly one gets a row back and the rest get nothing. Reading the row,
+    // validating it in JS, and then updating would let all N pass validation
+    // inside the gap and silently mint N device tokens off a single code.
+    const [claimed] = await db
+      .update(schema.mobilePairCodes)
+      .set({ usedAt: now })
+      .where(
+        and(
+          eq(schema.mobilePairCodes.codeHash, codeHash),
+          isNull(schema.mobilePairCodes.usedAt),
+          gt(schema.mobilePairCodes.expiresAt, now),
+        ),
+      )
+      .returning();
+    if (!claimed) {
+      // No row matched: unknown code, already claimed, or expired. All three
+      // are one indistinguishable answer to the caller by design.
       recordClaimFailureGlobal(claimAttemptsGlobal, nowMs);
       return reply.code(401).send({ error: 'Invalid or expired code' });
     }
-    // Single-use: mark it claimed before minting the device, so a retried
-    // request with the same code (a flaky network) can't mint two devices. A
-    // genuinely CONCURRENT double-claim of the same code is a narrow,
-    // low-severity race — both callers would already need the correct code —
-    // not guarded with an advisory lock the way dialer/handoff-store.ts's
-    // supersede is, since the worst outcome is two devices paired off one
-    // code, not an authorization bypass.
-    await db.update(schema.mobilePairCodes).set({ usedAt: now }).where(eq(schema.mobilePairCodes.codeHash, codeHash));
 
     const token = randomToken(DEVICE_TOKEN_BYTES);
     await db.insert(schema.mobileDevices).values({
-      userId: row.userId,
+      userId: claimed.userId,
       tokenHash: sha256(token),
       label: parsed.data.deviceLabel,
     });
-    const user = await db.query.users.findFirst({ where: eq(schema.users.id, row.userId) });
+    const user = await db.query.users.findFirst({ where: eq(schema.users.id, claimed.userId) });
     // The raw device token is minted ONLY here — the phone stores it in its
     // keychain and sends it as Bearer on every later request; never logged.
     return { deviceToken: token, user: { displayName: user?.displayName ?? null } };
