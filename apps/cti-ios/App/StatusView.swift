@@ -26,7 +26,13 @@ struct StatusView: View {
                 } header: {
                     Text("iPhone setting")
                 } footer: {
-                    Text("Settings → Apps → Phone → Call Blocking & Identification → CTI Caller ID.")
+                    // iOS 17 (this app's deployment target) has no "Apps"
+                    // section in Settings — the Phone entry is at the top
+                    // level. iOS 18 moved it under Apps. Both are named
+                    // because flipping this switch is the rep's one manual
+                    // step, and a path that doesn't exist on their phone is
+                    // where the rollout stalls.
+                    Text("Settings → Phone → Call Blocking & Identification → CTI Caller ID. On iOS 18 and later: Settings → Apps → Phone → Call Blocking & Identification.")
                 }
 
                 if case let .failed(message) = engine.status {

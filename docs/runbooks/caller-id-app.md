@@ -76,32 +76,40 @@ under (Account Settings → Team, in Xcode, if you need to check).
    repeat step 7–8 for it, picking the **same** team. **Both targets need a
    signing team** — the archive step below fails if either one is missing it.
    (`CTICallerIDTests` needs no signing; it never ships.)
-10. At the top of the Xcode window, click the scheme selector (next to the
+10. **First ship only — do this BEFORE archiving.** The upload in step 16
+    needs an App Store Connect app record for this bundle id to already
+    exist; without one Xcode refuses the upload with "No suitable
+    application records were found", after the several minutes the archive
+    and upload took. So create it now: go to
+    [appstoreconnect.apple.com](https://appstoreconnect.apple.com) →
+    **Apps** and check whether `CTI Caller ID` is listed. If it isn't:
+    **+** → **New App** → platform **iOS**, name `CTI Caller ID`, bundle id
+    `com.gghomes.cti.callerid` (pick it from the dropdown — it must match
+    exactly), any unique SKU, full access. If the bundle id isn't in the
+    dropdown, register it first under **Certificates, Identifiers &
+    Profiles → Identifiers**. Later builds skip this step entirely.
+11. At the top of the Xcode window, click the scheme selector (next to the
     Stop button) and confirm **CTICallerID** is selected — this scheme
     builds the app + the extension (see `project.yml`'s `schemes:` block).
-11. Next to the scheme selector, click the destination/device dropdown and
+12. Next to the scheme selector, click the destination/device dropdown and
     choose **Any iOS Device (arm64)**. Archiving is disabled while a
     Simulator destination is selected.
-12. From the menu bar: **Product → Archive**. This runs a Release build of
+13. From the menu bar: **Product → Archive**. This runs a Release build of
     both targets; it can take a few minutes. If **Archive** is greyed out,
-    you still have a Simulator destination selected — go back to step 11.
-13. When it finishes, the **Organizer** window opens with the new archive
+    you still have a Simulator destination selected — go back to step 12.
+14. When it finishes, the **Organizer** window opens with the new archive
     listed (today's date/time). If it doesn't auto-open: **Window →
     Organizer**. Select the archive and click **Distribute App**.
-14. **App Store Connect** → **Next** → **Upload** → **Next**.
-15. Leave the defaults on the remaining screens (automatically manage
+15. **App Store Connect** → **Next** → **Upload** → **Next**.
+16. Leave the defaults on the remaining screens (automatically manage
     signing, include bitcode/strip symbols options as Xcode presents them) —
     click **Next** through them, then **Upload**. This can take several
     minutes depending on your connection.
-16. Once the upload finishes, go to
-    [appstoreconnect.apple.com](https://appstoreconnect.apple.com) → **Apps**.
-    If `CTI Caller ID` isn't listed yet (first-ever upload for this bundle
-    id), create the app record first: **+** → **New App** → platform iOS,
-    name `CTI Caller ID`, bundle id `com.gghomes.cti.callerid` (must match
-    exactly), any unique SKU.
-17. Open the app record → **TestFlight** tab. Apple has to finish processing
-    the build (usually 10–30 minutes; an email arrives when it's ready, or
-    just refresh the tab until the build's status leaves "Processing").
+17. Back on [appstoreconnect.apple.com](https://appstoreconnect.apple.com),
+    open **Apps** → `CTI Caller ID` → **TestFlight** tab. Apple has to
+    finish processing the build (usually 10–30 minutes; an email arrives
+    when it's ready, or just refresh the tab until the build's status
+    leaves "Processing").
 18. First build only: TestFlight will ask an **Export Compliance** question.
     This app makes plain HTTPS calls to `AppConfig.baseURL` and stores its
     device token in the Keychain via Apple's own Security framework
@@ -137,11 +145,11 @@ under (Account Settings → Team, in Xcode, if you need to check).
 (currently `"1"`) — App Store Connect rejects re-uploading the same build
 number. Re-run `xcodegen generate` (only strictly needed if `project.yml` or
 the source-file list changed, but it's cheap and it's what regenerates the
-version into the project), then repeat steps 10–15 (scheme, destination,
-archive, upload). No need to re-invite testers already in the group or
-recreate the app record — once the new build finishes processing, attach it
-to the existing Internal Testing group as in step 20, and testers get an
-automatic update notification.
+version into the project), then repeat steps 11–16 (scheme, destination,
+archive, upload) — step 10 is first-ship only. No need to re-invite testers
+already in the group or recreate the app record — once the new build finishes
+processing, attach it to the existing Internal Testing group as in step 20,
+and testers get an automatic update notification.
 
 ## 2. Post-deploy controller checks
 
@@ -216,7 +224,26 @@ railway run -s @cti/api -- env DATABASE_URL="$PUB" npx tsx scripts/_scratch-snap
 
 Record the printed `{ version, entryCount, changed }`. `changed: false` on a
 repeat run is expected (the content hash hasn't moved) — it still confirms
-the pipeline runs end to end. Delete the scratch file when done:
+the pipeline runs end to end.
+
+**Check `entryCount` against the ceiling before rolling the app out.** The
+publish caps at 15,000 entries (§7). If `entryCount` comes back at exactly
+15,000, the org's real directory is larger than that and the tail is being
+dropped — the API logs a
+`directory exceeds the Call Directory memory ceiling` warn with the dropped
+count. That is not a blocker for the rollout (the labels that do publish are
+correct, and it beats a jetsammed extension), but it means §7's streaming
+follow-up is now load-bearing. The org's true, uncapped size is:
+
+```sql
+-- how many distinct numbers the sweep would publish without the cap:
+-- run the snapshot script above, then read the warn's `swept` field from the
+-- @cti/api logs. The published count is what's in the table:
+SELECT count(*) FROM caller_directory_entries
+WHERE org_id = '<org uuid>' AND version = <the version printed above>;
+```
+
+Delete the scratch file when done:
 
 ```bash
 rm services/cti-api/scripts/_scratch-snapshot-once.ts
@@ -278,9 +305,12 @@ Send this to each rep once section 1 and 2 are both done:
    immediately. If the entry count looks off, pull down to refresh or tap
    **Refresh now**.
 6. Turn the extension on (once, by hand — iOS requires this and there's no
-   way around it): **Settings → Apps → Phone → Call Blocking &
-   Identification → CTI Caller ID**, and toggle it on. The system switch
-   turns green when it's on.
+   way around it): **Settings → Phone → Call Blocking & Identification →
+   CTI Caller ID**, and toggle it on. On **iOS 18 and later** the same screen
+   lives under **Settings → Apps → Phone → Call Blocking & Identification**
+   (iOS 18 moved per-app settings under "Apps"; on iOS 17, this app's
+   deployment target, Phone is at the top level of Settings). The system
+   switch turns green when it's on.
 7. Back in the CTI Caller ID app, the **Caller ID** row under "iPhone
    setting" should now read **On** instead of **Off** (tap **Refresh now**
    if it hasn't caught up yet — `StatusView` also has an **Open Phone
@@ -314,7 +344,7 @@ can't verify).
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Call shows just the raw number | Extension not turned on | Settings → Apps → Phone → Call Blocking & Identification → turn CTI Caller ID on |
+| Call shows just the raw number | Extension not turned on | Settings → Phone → Call Blocking & Identification → turn CTI Caller ID on (iOS 18+: Settings → Apps → Phone → Call Blocking & Identification) |
 | Extension is on, still no label | Directory on the phone is stale | Open the app, pull to refresh, or tap **Refresh now** |
 | Refreshed, extension on, still no label | The caller's number isn't a Lead/primary-Opportunity-contact/Deal\_\_c phone in Salesforce, or it failed `normalize()` (invalid numbers are silently dropped — `services/cti-api/src/mobile/directory-build.ts`) | Confirm the number is actually on one of those records/roles |
 
@@ -354,3 +384,44 @@ To close this gap:
    the app, and have it call `POST /mobile/apns-token` after registering.
 
 Until then, this is a known, accepted limitation — not a bug to chase.
+
+## 7. Known limits
+
+### The directory is capped at 15,000 entries
+
+**The number:** `MAX_DIRECTORY_ENTRIES = 15_000` in
+`services/cti-api/src/mobile/directory-build.ts`, mirrored as
+`AppConfig.maxDirectoryEntries` on the phone
+(`apps/cti-ios/Shared/AppConfig.swift`). A published version never contains
+more; past the cap the server keeps the **lowest-numbered** entries (the merge
+is already sorted ascending, so it drops the tail) and logs
+`directory exceeds the Call Directory memory ceiling` with the dropped count.
+The phone applies the same cap when it writes and when it reads, so a snapshot
+from an older build can't get past it either.
+
+**Why 15,000.** The Call Directory extension decodes the whole snapshot into
+memory before streaming it to CallKit, and iOS runs app extensions on a ~12 MB
+budget. Measured against this exact snapshot type (a standalone `swiftc -O`
+harness, Swift 6.2's rewritten `JSONDecoder`): 20,000 entries (1.1 MB of JSON)
+→ 9.5 MB physical footprint; 50,000 → 25.7 MB; 100,000 (5.6 MB JSON) →
+49.7 MB — about **0.5 KB of footprint per entry**, ~8.5× the JSON's own size,
+most of it decoder transient held as dirty pages, which is exactly what jetsam
+bills. With the extension's own CallKit/Foundation baseline counted the breach
+point lands around 15–20k, so 15,000 is the last round number that is safely
+inside it.
+
+**What going over would have cost.** The failure is total and silent: iOS
+jetsams the extension mid-stream, `reloadExtension` comes back with an error,
+`SyncEngine` never records the reloaded version so every subsequent
+foreground/refresh/background tick relaunches and re-kills it, and **no label
+ever appears on any call**. To the rep that is indistinguishable from the
+extension being switched off. Capping publishes a partial directory instead —
+correct labels for the numbers it does carry.
+
+**The follow-up that lifts it:** make the phone's store streamable rather than
+fully decoded — a packed fixed-width binary read via
+`Data(contentsOf:options:.mappedIfSafe)` and iterated in place, or a chunked
+file set decoded one chunk at a time inside an `autoreleasepool` — and raise
+both constants together once the new format is measured. Until then, an org
+whose CRM holds more than 15,000 distinct phone numbers gets the lowest-numbered
+15,000 of them (see §2b for how to tell).

@@ -56,8 +56,9 @@ the phone with a reason `PairView` can show.
 1. **Pair.** The rep opens the softphone, chooses "Pair iPhone", and reads a
    6-digit code. The app posts it to `POST /mobile/pair/claim` and stores the
    returned device token in the **Keychain**
-   (`kSecAttrAccessibleAfterFirstUnlock`, so a background refresh still works
-   on a locked phone). The extension never reads the Keychain.
+   (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: a background refresh
+   still works on a locked phone, and the token never travels in a backup or
+   onto a restored handset). The extension never reads the Keychain.
 2. **Sync.** `SyncEngine` calls `GET /mobile/caller-directory?since=<version>`.
    `unchanged` ends it there; otherwise `fetchAll` walks pages 1..pageCount.
 3. **Store.** `DirectoryStore` writes one JSON snapshot into the App Group
@@ -73,8 +74,10 @@ refresh, and from a `BGAppRefreshTask`
 mode).
 
 The rep must switch the extension on once, by hand:
-**Settings → Apps → Phone → Call Blocking & Identification → CTI Caller ID.**
-`StatusView` reports whether iOS has it enabled and deep-links there.
+**Settings → Phone → Call Blocking & Identification → CTI Caller ID** on iOS 17
+(the deployment target), or **Settings → Apps → Phone → Call Blocking &
+Identification** on iOS 18 and later, which moved the per-app settings under
+"Apps". `StatusView` names both and deep-links there.
 
 ## Two rules that are easy to get wrong
 
