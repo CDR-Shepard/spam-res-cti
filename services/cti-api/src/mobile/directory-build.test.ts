@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildDirectorySnapshot, pickActingUsers, sweepRawEntries, type SweepDeps } from './directory-build.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildDirectorySnapshot, pickActingUsers, startDirectoryLoop, sweepRawEntries, type SweepDeps } from './directory-build.js';
 import { contentHash, mergeDirectory } from './directory-merge.js';
 import { schema } from '../db/index.js';
 
@@ -101,7 +101,7 @@ describe('sweepRawEntries', () => {
     expect(dealCall[1]).not.toContain('Fax__c');
   });
 
-  it('skips Deals (with exactly one warn) when the Deal__c describe fails, but still sweeps Leads and Opps', async () => {
+  it('skips Deals (with exactly one warn) when the Deal__c describe returns 404, but still sweeps Leads and Opps', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const soqlQuery = vi.fn(async (_u: string, q: string) => {
       const isFirstPage = !q.includes('Id >');
@@ -116,6 +116,61 @@ describe('sweepRawEntries', () => {
       return [];
     }) as unknown as SweepDeps['soqlQuery'];
     const sfFetch = vi.fn(async () => ({ status: 404, json: null })) as unknown as SweepDeps['sfFetch'];
+
+    const entries = await sweepRawEntries({ soqlQuery, sfFetch }, 'U1');
+
+    expect(entries.filter((e) => e.stage === 'deal')).toHaveLength(0);
+    expect(entries.filter((e) => e.stage === 'lead')).toHaveLength(1);
+    expect(entries.filter((e) => e.stage === 'opp')).toHaveLength(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips Deals (with exactly one warn) when the Deal__c describe returns 403 — an unreadable object never kills the whole sweep', async () => {
+    // A permanently unreadable Deal__c (the acting admin's profile has no
+    // object permission) is the same class of signal as a 404: it will not
+    // fix itself on the next tick, and it must not stop Leads/Opps from
+    // publishing every 30 minutes.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const soqlQuery = vi.fn(async (_u: string, q: string) => {
+      const isFirstPage = !q.includes('Id >');
+      if (/FROM Lead/.test(q)) return isFirstPage ? [{ Id: 'L1', Name: 'Jane Doe', Phone: '6195550100', MobilePhone: null }] : [];
+      if (/FROM OpportunityContactRole/.test(q)) {
+        return isFirstPage
+          ? [{ Id: 'R1', Opportunity: { Name: 'Big Deal', Account: {} }, Contact: { Phone: '6195550300', MobilePhone: null } }]
+          : [];
+      }
+      if (/FROM Deal__c/.test(q)) throw new Error('should not query Deal__c after a 403 describe');
+      return [];
+    }) as unknown as SweepDeps['soqlQuery'];
+    const sfFetch = vi.fn(async () => ({ status: 403, json: null })) as unknown as SweepDeps['sfFetch'];
+
+    const entries = await sweepRawEntries({ soqlQuery, sfFetch }, 'U1');
+
+    expect(entries.filter((e) => e.stage === 'deal')).toHaveLength(0);
+    expect(entries.filter((e) => e.stage === 'lead')).toHaveLength(1);
+    expect(entries.filter((e) => e.stage === 'opp')).toHaveLength(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips Deals (with exactly one warn) when the Deal__c query itself fails — Leads and Opps still publish', async () => {
+    // e.g. INVALID_FIELD on a phone field the describe advertised but the
+    // acting user cannot read. Deal__c support must never break the baseline.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const soqlQuery = vi.fn(async (_u: string, q: string) => {
+      const isFirstPage = !q.includes('Id >');
+      if (/FROM Lead/.test(q)) return isFirstPage ? [{ Id: 'L1', Name: 'Jane Doe', Phone: '6195550100', MobilePhone: null }] : [];
+      if (/FROM OpportunityContactRole/.test(q)) {
+        return isFirstPage
+          ? [{ Id: 'R1', Opportunity: { Name: 'Big Deal', Account: {} }, Contact: { Phone: '6195550300', MobilePhone: null } }]
+          : [];
+      }
+      if (/FROM Deal__c/.test(q)) throw new Error("INVALID_FIELD: No such column 'Phone__c' on entity 'Deal__c'");
+      return [];
+    }) as unknown as SweepDeps['soqlQuery'];
+    const sfFetch = vi.fn(async (_u: string, path: string) =>
+      (path === '/sobjects/Deal__c/describe'
+        ? { status: 200, json: { fields: [{ name: 'Phone__c', type: 'phone' }] } }
+        : { status: 404, json: null })) as unknown as SweepDeps['sfFetch'];
 
     const entries = await sweepRawEntries({ soqlQuery, sfFetch }, 'U1');
 
@@ -186,6 +241,44 @@ describe('sweepRawEntries', () => {
       { e164: '+16195550002', name: 'Bob', stage: 'lead' },
     ]);
   });
+
+  it('rejects instead of restarting from page one when a page\'s last row has no Id', async () => {
+    // Without a progress guard, an Id-less last row leaves the cursor at null
+    // and the loop re-issues the first page forever — an unattended worker
+    // spinning against prod. Failing loudly lets the tick's catch warn.
+    const soqlQuery = vi.fn(async (_u: string, q: string) =>
+      (/FROM Lead/.test(q) ? [{ Name: 'Jane Doe', Phone: '6195550100', MobilePhone: null }] : []),
+    ) as unknown as SweepDeps['soqlQuery'];
+    const sfFetch = vi.fn(async () => ({ status: 404, json: null })) as unknown as SweepDeps['sfFetch'];
+
+    await expect(sweepRawEntries({ soqlQuery, sfFetch }, 'U1')).rejects.toThrow(/no Id/i);
+  });
+
+  it('rejects when the Id cursor fails to advance strictly between pages', async () => {
+    const soqlQuery = vi.fn(async (_u: string, q: string) =>
+      (/FROM Lead/.test(q) ? [{ Id: 'L1', Name: 'Jane Doe', Phone: '6195550100', MobilePhone: null }] : []),
+    ) as unknown as SweepDeps['soqlQuery'];
+    const sfFetch = vi.fn(async () => ({ status: 404, json: null })) as unknown as SweepDeps['sfFetch'];
+
+    await expect(sweepRawEntries({ soqlQuery, sfFetch }, 'U1')).rejects.toThrow(/did not advance/i);
+    // The guard fires on the second page, not after an unbounded spin.
+    expect((soqlQuery as any).mock.calls.length).toBeLessThan(5);
+  });
+
+  it('rejects once paging passes the hard max-page bound', async () => {
+    // A cursor that advances forever (a pathological org, or a query whose
+    // filter never narrows) is bounded rather than left to run until the
+    // process dies.
+    let n = 0;
+    const soqlQuery = vi.fn(async (_u: string, q: string) => {
+      if (!/FROM Lead/.test(q)) return [];
+      n += 1;
+      return [{ Id: `L${String(n).padStart(8, '0')}`, Name: 'Jane Doe', Phone: '6195550100', MobilePhone: null }];
+    }) as unknown as SweepDeps['soqlQuery'];
+    const sfFetch = vi.fn(async () => ({ status: 404, json: null })) as unknown as SweepDeps['sfFetch'];
+
+    await expect(sweepRawEntries({ soqlQuery, sfFetch }, 'U1')).rejects.toThrow(/max page/i);
+  });
 });
 
 describe('buildDirectorySnapshot', () => {
@@ -211,12 +304,40 @@ describe('buildDirectorySnapshot', () => {
       table: schema.callerDirectoryEntries,
       values: [{ orgId: 'O1', version: 1, e164: '+16195550100', label: 'Lead: Jane Doe', stage: 'lead' }],
     });
+    // The stored hash is exactly the hash of the merged fixture — the value a
+    // later tick compares against to decide "nothing changed, don't bump".
+    const expectedHash = contentHash(mergeDirectory([{ e164: '+16195550100', name: 'Jane Doe', stage: 'lead' }]));
     expect(db._txInserts[1]).toMatchObject({
       table: schema.callerDirectoryVersions,
-      values: { orgId: 'O1', version: 1, entryCount: 1 },
+      values: { orgId: 'O1', version: 1, entryCount: 1, contentHash: expectedHash },
     });
     // No prior version to prune.
     expect(db._deletes).toHaveLength(0);
+  });
+
+  it('refuses to publish an empty sweep over an existing version — one anomalous sweep never blanks an org\'s caller ID', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const db = fakeDb({ latestVersion: { version: 4, contentHash: 'stale-hash', entryCount: 12 } });
+
+    const out = await buildDirectorySnapshot(db, { orgId: 'O1', userId: 'U1' }, fakeSf());
+
+    expect(out).toEqual({ version: 4, entryCount: 12, changed: false });
+    expect(db._txInserts).toHaveLength(0);
+    expect(db._deletes).toHaveLength(0);
+    expect(warn.mock.calls.some((c) => /empty/i.test(String(c[0])))).toBe(true);
+  });
+
+  it('publishes an empty first-ever build — there is no directory to blank', async () => {
+    const db = fakeDb({ latestVersion: null });
+
+    const out = await buildDirectorySnapshot(db, { orgId: 'O1', userId: 'U1' }, fakeSf());
+
+    expect(out).toEqual({ version: 1, entryCount: 0, changed: true });
+    expect(db._txInserts).toHaveLength(1);
+    expect(db._txInserts[0]).toMatchObject({
+      table: schema.callerDirectoryVersions,
+      values: { orgId: 'O1', version: 1, entryCount: 0 },
+    });
   });
 
   it('bumps the version and prunes entry rows older than the previous version when the hash changes', async () => {
@@ -336,5 +457,72 @@ describe('pickActingUsers', () => {
 
     expect(pickedAscending).toEqual([{ orgId: 'O1', userId: 'U1' }]);
     expect(pickedDescending).toEqual(pickedAscending);
+  });
+});
+
+/** A db whose only exercised surface is `fetchActingUserCandidates`' join
+ *  chain. Every candidate here is a non-admin, so no snapshot (and therefore
+ *  no Salesforce call) is ever attempted from these tests. */
+function fakeCandidateDb(rows: Array<{ orgId: string; userId: string; isAdmin: boolean }>) {
+  return {
+    select: () => ({
+      from: () => ({
+        innerJoin: () => ({ innerJoin: () => ({ where: async () => rows }) }),
+      }),
+    }),
+  } as any;
+}
+
+describe('startDirectoryLoop', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('runs an immediate kickoff tick on start instead of waiting a whole interval', async () => {
+    const dbFactory = vi.fn(() => fakeCandidateDb([]));
+    const timer = startDirectoryLoop(1_800_000, dbFactory);
+    try {
+      expect(dbFactory).toHaveBeenCalledTimes(1);
+    } finally {
+      clearInterval(timer);
+    }
+  });
+
+  it('clears the single-flight flag even when the db factory throws synchronously', async () => {
+    // Sync work outside the async tick body would escape the .catch/.finally
+    // chain, leaving `running` stuck at true — the worker silently dead for
+    // the life of the process. Invoking twice proves the flag cleared.
+    const dbFactory = vi.fn(() => { throw new Error('db unavailable'); }) as unknown as () => any;
+    const timer = startDirectoryLoop(60_000, dbFactory);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dbFactory).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(dbFactory).toHaveBeenCalledTimes(2);
+    } finally {
+      clearInterval(timer);
+    }
+  });
+
+  it('warns for an org that has connected users but no connected admin, instead of skipping it silently', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const db = fakeCandidateDb([
+      { orgId: 'O1', userId: 'U2', isAdmin: false },
+      { orgId: 'O1', userId: 'U3', isAdmin: false },
+    ]);
+    const timer = startDirectoryLoop(60_000, () => db);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]![0])).toMatch(/no connected admin/i);
+    } finally {
+      clearInterval(timer);
+    }
   });
 });

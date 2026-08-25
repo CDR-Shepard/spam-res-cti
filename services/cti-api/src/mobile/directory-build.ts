@@ -33,13 +33,26 @@ const PAGE_SIZE = 2000;
  *  Postgres's 65535-parameter statement cap even with room to spare. */
 const ENTRY_INSERT_CHUNK_SIZE = 1000;
 
+/** Hard bound on cursor pages per object. At PAGE_SIZE 2000 that is a million
+ *  records — far past any real org — so hitting it means the cursor is
+ *  malfunctioning, not that the org is large. */
+const MAX_CURSOR_PAGES = 500;
+
 /** Page a SOQL query by ascending Id, calling `buildSoql` with the last Id
  *  seen (null on the first page) until a page comes back empty. A page
  *  shorter than PAGE_SIZE does NOT mean the sweep is done — Salesforce's REST
  *  batch size can be smaller than the SOQL LIMIT for wide/relationship
  *  queries (`done: false` with fewer records than requested), so the only
  *  safe stop condition is "the cursor found nothing left to page over". The
- *  cost is one extra empty query per object per sweep. */
+ *  cost is one extra empty query per object per sweep.
+ *
+ *  Every page must make strict progress. A last row without an `Id` would
+ *  otherwise leave the cursor where it was (re-fetching page one forever),
+ *  and a cursor that repeats or moves backwards would page the same rows
+ *  forever — both of which, in an unattended 30-minute worker, mean an
+ *  ever-growing `out` array and a wedged process rather than a failed tick.
+ *  So both conditions throw, as does the max-page bound: the tick's catch
+ *  turns any of them into one warn, and the next tick tries again. */
 async function pageByIdCursor<T extends { Id: string }>(
   deps: SweepDeps,
   userId: string,
@@ -47,11 +60,25 @@ async function pageByIdCursor<T extends { Id: string }>(
 ): Promise<T[]> {
   const out: T[] = [];
   let last: string | null = null;
-  for (;;) {
+  for (let page = 0; ; page++) {
+    if (page >= MAX_CURSOR_PAGES) {
+      throw new Error(`Id-cursor paging hit the max page bound (${MAX_CURSOR_PAGES}) after ${out.length} rows`);
+    }
     const rows: T[] = await deps.soqlQuery<T>(userId, buildSoql(last));
     if (rows.length === 0) break;
+    const next = rows[rows.length - 1]!.Id;
+    if (typeof next !== 'string' || next === '') {
+      throw new Error('Id-cursor paging: a page came back with no Id on its last row, so the cursor cannot advance');
+    }
+    // Salesforce Ids are ASCII and compare case-sensitively, so JS string
+    // ordering matches the `ORDER BY Id` / `Id > :last` ordering the query
+    // itself relies on. A non-advancing cursor therefore means overlapping or
+    // repeated pages, not a collation mismatch.
+    if (last !== null && next <= last) {
+      throw new Error(`Id-cursor paging: the cursor did not advance past '${last}'`);
+    }
     out.push(...rows);
-    last = rows[rows.length - 1]!.Id;
+    last = next;
   }
   return out;
 }
@@ -110,22 +137,27 @@ interface DescribeField {
 
 /**
  * Deal__c's phone fields are org-specific (discovered via describe, not
- * hardcoded), and the object itself may not exist in every org. Per the
- * brief, only a PERMANENT "no Deal__c here" signal is tolerated: describe
- * returning 404, or a 200 with no `type === 'phone'` field. Either skips the
- * Deal sweep with exactly one warning — Leads/Opps are swept independently
- * and unaffected. Any OTHER failure — a non-404 error status (5xx, 401/403,
- * ...) or a network error/thrown rejection — is a TRANSIENT condition, not
- * "this org lacks Deal__c", so it propagates instead of being swallowed:
- * `sweepRawEntries` rejects, `buildDirectorySnapshot` publishes nothing for
- * that org this tick, and `runDirectoryTick`'s per-org catch warns and moves
- * on — never a partial snapshot with every Deal-stage contact silently
- * downgraded.
+ * hardcoded), and the object itself may not exist — or may not be readable —
+ * in every org. Deal__c support never breaks the baseline: a PERMANENT
+ * Deal-side failure skips Deals with exactly one warning while Leads/Opps
+ * publish as usual. Permanent means:
+ *   - describe 404 (the org has no Deal__c),
+ *   - describe 403 (the acting admin's profile cannot read it — this will not
+ *     fix itself on the next tick, and must not stall the org's directory),
+ *   - a 200 describe with no `type === 'phone'` field,
+ *   - the Deal SOQL query itself failing (e.g. INVALID_FIELD on a field the
+ *     describe advertised but the acting user cannot actually read).
+ * Any OTHER describe outcome — a 5xx/401, or a network error thrown by
+ * `sfFetch` — is TRANSIENT: it propagates, `buildDirectorySnapshot` publishes
+ * nothing for that org this tick, and `runDirectoryTick`'s per-org catch
+ * warns and moves on. That distinction matters because a transient blip must
+ * not silently downgrade every Deal-stage contact in a published snapshot,
+ * whereas a permanent condition must not blank the whole sweep forever.
  */
 async function sweepDeals(deps: SweepDeps, userId: string): Promise<RawEntry[]> {
   const res = await deps.sfFetch(userId, '/sobjects/Deal__c/describe');
-  if (res.status === 404) {
-    console.warn('[directory-build] Deal__c describe returned 404; skipping Deal sweep (org has no Deal__c)');
+  if (res.status === 404 || res.status === 403) {
+    console.warn(`[directory-build] Deal__c describe returned ${res.status}; skipping Deal sweep (org has no readable Deal__c)`);
     return [];
   }
   if (res.status >= 400) {
@@ -143,9 +175,18 @@ async function sweepDeals(deps: SweepDeps, userId: string): Promise<RawEntry[]> 
     return [];
   }
 
-  const rows = await pageByIdCursor<Record<string, unknown> & { Id: string }>(deps, userId, (last) =>
-    `SELECT Id, Name, ${phoneFields.join(', ')} FROM Deal__c` +
-    `${last ? ` WHERE Id > '${soqlEscape(last)}'` : ''} ORDER BY Id LIMIT ${PAGE_SIZE}`);
+  let rows: Array<Record<string, unknown> & { Id: string }>;
+  try {
+    rows = await pageByIdCursor<Record<string, unknown> & { Id: string }>(deps, userId, (last) =>
+      `SELECT Id, Name, ${phoneFields.join(', ')} FROM Deal__c` +
+      `${last ? ` WHERE Id > '${soqlEscape(last)}'` : ''} ORDER BY Id LIMIT ${PAGE_SIZE}`);
+  } catch (err) {
+    // A Deal-side query failure (an unreadable field the describe still
+    // advertised, a malformed cursor page) is Deal's problem alone: skip
+    // Deals with one warn so Leads and Opportunities still publish.
+    console.warn('[directory-build] Deal__c query failed; skipping Deal sweep', { err: (err as Error).message });
+    return [];
+  }
   const out: RawEntry[] = [];
   for (const r of rows) {
     const name = typeof r.Name === 'string' ? r.Name : '';
@@ -161,10 +202,10 @@ async function sweepDeals(deps: SweepDeps, userId: string): Promise<RawEntry[]> 
 
 /** Sweep every stage source (Lead, primary OpportunityContactRole, Deal__c)
  *  into raw entries. Every phone goes through `normalize`; invalid ones are
- *  dropped silently. A PERMANENT Deal__c describe outcome (404, or no
- *  phone-type fields) skips Deals only — Leads and Opportunities are
- *  unaffected. A TRANSIENT describe failure instead rejects the whole sweep
- *  (see `sweepDeals`). */
+ *  dropped silently. A PERMANENT Deal-side failure (describe 404/403, no
+ *  phone-type fields, or the Deal query itself failing) skips Deals only —
+ *  Leads and Opportunities are unaffected. A TRANSIENT describe failure
+ *  instead rejects the whole sweep (see `sweepDeals`). */
 export async function sweepRawEntries(deps: SweepDeps, userId: string): Promise<RawEntry[]> {
   const leads = await sweepLeads(deps, userId);
   const opps = await sweepOpportunities(deps, userId);
@@ -200,6 +241,22 @@ export async function buildDirectorySnapshot(
     orderBy: (t, { desc }) => [desc(t.version)],
   });
   if (latest && latest.contentHash === hash) {
+    return { version: latest.version, entryCount: latest.entryCount, changed: false };
+  }
+
+  // An empty merged directory on top of a live one is treated as an anomaly,
+  // never as "this org now has zero contacts": a sharing-rule change, a
+  // half-migrated object, or a Salesforce hiccup that still returned 200s
+  // would otherwise blank every rep's caller ID in one unattended tick. Keep
+  // the last good version and warn; the next tick republishes the moment the
+  // sweep comes back with rows. An empty FIRST build still publishes — there
+  // is no directory to blank, and it establishes version 1.
+  if (merged.length === 0 && latest) {
+    console.warn('[directory-build] sweep produced an empty directory but a published version exists; keeping it', {
+      orgId: opts.orgId,
+      keptVersion: latest.version,
+      keptEntryCount: latest.entryCount,
+    });
     return { version: latest.version, entryCount: latest.entryCount, changed: false };
   }
 
@@ -274,7 +331,17 @@ async function fetchActingUserCandidates(db: Db): Promise<ActingUserCandidate[]>
 
 async function runDirectoryTick(db: Db): Promise<void> {
   const candidates = await fetchActingUserCandidates(db);
-  for (const target of pickActingUsers(candidates)) {
+  const targets = pickActingUsers(candidates);
+  // An org whose only Salesforce connections are non-admins never rebuilds
+  // (see `pickActingUsers`). That is deliberate, but it used to be silent —
+  // an admin whose token was revoked looked exactly like a healthy org with
+  // a stale directory. Say so, once per affected org per tick.
+  const covered = new Set(targets.map((t) => t.orgId));
+  for (const orgId of new Set(candidates.map((c) => c.orgId))) {
+    if (covered.has(orgId)) continue;
+    console.warn('[directory-build] org has connected users but no connected admin; skipping its rebuild', { orgId });
+  }
+  for (const target of targets) {
     try {
       await buildDirectorySnapshot(db, target);
     } catch (err) {
@@ -287,16 +354,30 @@ async function runDirectoryTick(db: Db): Promise<void> {
   }
 }
 
-/** Drive from server.ts. Single-flight — a slow tick is never overlapped. */
-export function startDirectoryLoop(intervalMs = 1_800_000): NodeJS.Timeout {
+/**
+ * Drive from server.ts. Single-flight — a slow tick is never overlapped —
+ * with an immediate kickoff tick so a restart rebuilds now rather than half
+ * an hour from now (the shape `startFollowupLoop` uses, plus the kickoff).
+ *
+ * `dbFactory()` is called INSIDE the async tick body, not before it: a
+ * synchronous throw out there (a pool that fails to initialise, a config
+ * error) would escape the `.catch(...).finally(...)` chain entirely and leave
+ * `running` pinned at true — the worker silently dead for the life of the
+ * process. Inside the async body it becomes a rejected promise like any other
+ * failure: logged once, flag cleared, tried again next interval. The factory
+ * is a parameter only so tests can inject one without a live database.
+ */
+export function startDirectoryLoop(intervalMs = 1_800_000, dbFactory: () => Db = getDb): NodeJS.Timeout {
   let running = false;
-  const timer = setInterval(() => {
+  const tick = (): void => {
     if (running) return;
     running = true;
-    runDirectoryTick(getDb())
+    void (async () => runDirectoryTick(dbFactory()))()
       .catch((err) => console.error('[directory-build] tick error', err))
       .finally(() => { running = false; });
-  }, intervalMs);
+  };
+  tick();
+  const timer = setInterval(tick, intervalMs);
   if (typeof timer.unref === 'function') timer.unref();
   return timer;
 }
