@@ -43,13 +43,13 @@ const MAX_CODE_GENERATION_ATTEMPTS = 5;
 // single-instance (see server.ts) — a per-process Map is enough; a
 // multi-instance deploy would need a shared store (e.g. Redis) instead.
 //
-// The per-IP key alone is not a real defense: server.ts sets `trustProxy:
-// true`, so `req.ip` is whatever the client's leftmost `X-Forwarded-For`
-// entry says — an attacker can mint a fresh one on every request and never
-// hit the same bucket twice. Fixing trustProxy's hop-trust is a server.ts
-// (app-wide) change outside this route's scope, so instead this route adds
-// a GLOBAL backstop (`claimAttemptsGlobal`, below) that isn't keyed by
-// anything the caller controls — spoofing X-Forwarded-For cannot split it.
+// server.ts sets `trustProxy: 1` (trust exactly the one Railway edge hop), so
+// `req.ip` is the address that proxy actually observed and a spoofed
+// `X-Forwarded-For` cannot move it — the per-IP bucket is a real 3/min cap
+// again. It is still not the whole defense: a botnet, or anyone with a pool
+// of source addresses, gets three guesses per address. So this route also
+// keeps a GLOBAL backstop (`claimAttemptsGlobal`, below) that isn't keyed by
+// anything the caller controls at all.
 //
 // The global backstop counts only FAILED claim attempts (invalid body, or a
 // code that doesn't exist / is expired / is already used) — see
@@ -60,7 +60,7 @@ const MAX_CODE_GENERATION_ATTEMPTS = 5;
 // (300/min) sits well above any plausible legitimate-mistake burst but still
 // bounds worst-case brute-force guessing to a low fraction of the
 // 1,000,000-value code space over any one code's 5-minute life, no matter
-// how many distinct `X-Forwarded-For` values an attacker cycles through.
+// how many distinct source addresses an attacker spreads the guesses over.
 //
 // Exported so mobile.test.ts can clear them between tests (otherwise
 // attempts from one test would bleed into the next via this module state).

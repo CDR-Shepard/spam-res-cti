@@ -28,7 +28,14 @@ async function main(): Promise<void> {
       level: cfg.NODE_ENV === 'production' ? 'info' : 'debug',
       redact: ['req.headers.authorization', 'req.headers.cookie'],
     },
-    trustProxy: true,
+    // Trust exactly ONE hop — Railway's edge proxy, the only thing in front of
+    // this process. `true` trusts the whole X-Forwarded-For chain, which means
+    // `req.ip` is the leftmost entry the CLIENT sent: anyone can mint a fresh
+    // one per request and never land in the same bucket twice, defeating every
+    // IP-keyed limit in the app (the global rate limiter and the pairing
+    // claim's 3/min/IP cap alike). With a hop count, `req.ip` is the address
+    // the trusted proxy actually observed and a spoofed header cannot move it.
+    trustProxy: 1,
     bodyLimit: 1024 * 1024,
   });
 
