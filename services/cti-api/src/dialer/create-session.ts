@@ -40,6 +40,11 @@ type ResolvedRow = {
   /** This number is on the org's opt-out / block list, or the federal DNC
    *  cache — the same three lists click-to-dial refuses on. */
   consentBlock?: ConsentBlock | null;
+  /** The SAME three lists, checked against the fallback (the record's Phone).
+   *  Separate from `consentBlock` because the two verdicts have different
+   *  consequences: a blocked primary skips the row, a blocked fallback only
+   *  drops the fallback — the primary is still lawful to call. */
+  fallbackConsentBlock?: ConsentBlock | null;
 };
 
 /** Outcome stamped on a record the rep has checked Skip on Dialer on, so the
@@ -69,26 +74,39 @@ export function buildQueueRows(
   taskId: string | null; followupEligible: boolean;
   status: 'pending' | 'unreachable' | 'skipped'; outcome: string | null;
 }> {
-  return resolved.map((r, i) => ({
-    sessionId, ordinal: i, objectType: r.objectType, recordId: r.recordId, toNumber: r.toNumber,
-    fallbackNumber: r.fallbackNumber ?? null,
-    // Immutable copy of the resolved pair: the fallback later overwrites
-    // toNumber/fallbackNumber, and an attempt-2 row restores from these.
-    attempt: 1, primaryNumber: r.toNumber, secondaryNumber: r.fallbackNumber ?? null,
-    taskId: r.taskId ?? null, followupEligible: r.followupEligible ?? true,
-    // PRECEDENCE: consent > skip_on_dialer > already_worked > unreachable.
-    // A consent block (opt-out / block list / federal DNC) is the strongest
-    // signal there is — it is why the call is unlawful, not merely unwanted —
-    // so it outranks the rep's own checkbox, which in turn outranks "the team
-    // got there first", which in turn outranks "no number" (a flagged record
-    // reads as deliberately skipped, never as unreachable). Either way the row
-    // exists and keeps its numbers — the run reports what it passed over
-    // instead of dropping it, and the engine only ever picks a 'pending' row.
-    status: r.consentBlock || r.skipOnDialer || r.alreadyWorked ? 'skipped' : r.toNumber ? 'pending' : 'unreachable',
-    outcome: r.consentBlock
-      ? CONSENT_OUTCOME[r.consentBlock]
-      : r.skipOnDialer ? SKIP_ON_DIALER_OUTCOME : r.alreadyWorked ? ALREADY_WORKED_OUTCOME : null,
-  }));
+  return resolved.map((r, i) => {
+    // A consent-blocked FALLBACK is dropped, right here, at the one place the
+    // pair is written. The fallback is a dialed number, not decoration:
+    // `engine.ts:345` swaps `toNumber := fallbackNumber` on a true no-answer and
+    // re-dials it inside the same session, and `:428` copies `secondaryNumber`
+    // onto the attempt-2 row — neither path re-reads consent. So a record whose
+    // Mobile is clean but whose Phone is opted out / blocked / DNC-listed would
+    // otherwise be power-dialed on that Phone with no check at all. Both halves
+    // go, because `secondaryNumber` is exactly how the attempt-2 row would
+    // resurrect it. The row itself is NOT skipped — the primary is still lawful
+    // to call, and refusing it would punish a record nobody asked us to refuse.
+    const fallback = r.fallbackConsentBlock ? null : r.fallbackNumber ?? null;
+    return {
+      sessionId, ordinal: i, objectType: r.objectType, recordId: r.recordId, toNumber: r.toNumber,
+      fallbackNumber: fallback,
+      // Immutable copy of the resolved pair: the fallback later overwrites
+      // toNumber/fallbackNumber, and an attempt-2 row restores from these.
+      attempt: 1, primaryNumber: r.toNumber, secondaryNumber: fallback,
+      taskId: r.taskId ?? null, followupEligible: r.followupEligible ?? true,
+      // PRECEDENCE: consent > skip_on_dialer > already_worked > unreachable.
+      // A consent block (opt-out / block list / federal DNC) is the strongest
+      // signal there is — it is why the call is unlawful, not merely unwanted —
+      // so it outranks the rep's own checkbox, which in turn outranks "the team
+      // got there first", which in turn outranks "no number" (a flagged record
+      // reads as deliberately skipped, never as unreachable). Either way the row
+      // exists and keeps its numbers — the run reports what it passed over
+      // instead of dropping it, and the engine only ever picks a 'pending' row.
+      status: r.consentBlock || r.skipOnDialer || r.alreadyWorked ? 'skipped' : r.toNumber ? 'pending' : 'unreachable',
+      outcome: r.consentBlock
+        ? CONSENT_OUTCOME[r.consentBlock]
+        : r.skipOnDialer ? SKIP_ON_DIALER_OUTCOME : r.alreadyWorked ? ALREADY_WORKED_OUTCOME : null,
+    };
+  });
 }
 
 export interface CreateSessionDeps {
@@ -191,16 +209,27 @@ export async function createDialerSession(
   // here). Distinct: a list often carries the same person on two records, and
   // both verdicts are per NUMBER — duplicates would only bloat the IN (...)
   // binds. The two reads are independent, so they go out together.
+  //
+  // The two batches differ ON PURPOSE. Already-worked asks "did the team
+  // already dial this today", which is only ever about the number the run
+  // dials FIRST, so it stays one bind per primary. Consent asks "may we call
+  // this number at all", and the dialer calls BOTH halves of the pair — the
+  // fallback is swapped in on a true no-answer and carried onto the attempt-2
+  // row — so every fallback has to be in that batch or it is dialed unchecked.
   const numbers = [...new Set(resolved.map((r) => r.toNumber).filter((n): n is string => !!n))];
+  const consentNumbers = [...new Set(
+    resolved.flatMap((r) => [r.toNumber, r.fallbackNumber ?? null]).filter((n): n is string => !!n),
+  )];
   const [worked, consent] = await Promise.all([
     deps.workedToday(args.orgId, numbers),
-    deps.consentBlocked(args.orgId, numbers),
+    deps.consentBlocked(args.orgId, consentNumbers),
   ]);
   const rows = buildQueueRows(session!.id, resolved.map((r) => ({
     ...r,
     alreadyWorked: !!r.toNumber && worked.has(r.toNumber),
     // A row with no number can be neither: both gates are keyed by number.
     consentBlock: r.toNumber ? consent.get(r.toNumber) ?? null : null,
+    fallbackConsentBlock: r.fallbackNumber ? consent.get(r.fallbackNumber) ?? null : null,
   })));
   if (rows.length) await deps.db.insert(schema.dialerQueueItems).values(rows);
   return { sessionId: session!.id, total: rows.length };

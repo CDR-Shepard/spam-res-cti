@@ -95,6 +95,50 @@ describe('buildQueueRows', () => {
       expect(rows[2]).toMatchObject({ attempt: 1, primaryNumber: null, secondaryNumber: null, status: 'unreachable' });
     });
   });
+
+  /**
+   * The fallback is a DIALED number, not decoration: `engine.ts:345` swaps
+   * `toNumber := fallbackNumber` on a true no-answer and re-dials it inside the
+   * same session, and `:428` copies `secondaryNumber` onto the attempt-2 row.
+   * Neither path re-reads consent, so a fallback that survives queue build is
+   * dialed unchecked. Both halves of the pair are dropped here — the one place
+   * the pair is written.
+   */
+  describe('buildQueueRows — a consent-blocked fallback is dropped', () => {
+    it('drops both halves of the pair, leaving the clean primary dialable', () => {
+      const rows = buildQueueRows('S1', [
+        { recordId: '00Q1', objectType: 'Lead', toNumber: '+16195550100', fallbackNumber: '+16195550199', fallbackConsentBlock: 'opted_out' },
+      ]);
+      expect(rows[0]).toMatchObject({
+        status: 'pending', outcome: null,
+        toNumber: '+16195550100', primaryNumber: '+16195550100',
+        // Nulled, so engine.ts's `if (outcome === 'no_answer' && item.fallbackNumber)`
+        // cannot fire and the attempt-2 row inherits nothing to dial.
+        fallbackNumber: null, secondaryNumber: null,
+      });
+    });
+
+    it('keeps a clean fallback exactly as resolved', () => {
+      const rows = buildQueueRows('S1', [
+        { recordId: '00Q1', objectType: 'Lead', toNumber: '+16195550100', fallbackNumber: '+16195550199', fallbackConsentBlock: null },
+      ]);
+      expect(rows[0]).toMatchObject({ fallbackNumber: '+16195550199', secondaryNumber: '+16195550199' });
+    });
+
+    it('a blocked pair is skipped on the primary AND stripped of the fallback', () => {
+      const rows = buildQueueRows('S1', [
+        {
+          recordId: '00Q1', objectType: 'Lead', toNumber: '+16195550100', fallbackNumber: '+16195550199',
+          consentBlock: 'blocked', fallbackConsentBlock: 'dnc',
+        },
+      ]);
+      expect(rows[0]).toMatchObject({
+        status: 'skipped', outcome: 'blocked',
+        toNumber: '+16195550100', primaryNumber: '+16195550100',
+        fallbackNumber: null, secondaryNumber: null,
+      });
+    });
+  });
 });
 
 describe('createAndStartSession', () => {
@@ -519,5 +563,129 @@ describe('createDialerSession — consent gate at queue build', () => {
     // The engine only ever picks a 'pending' row, so nothing here is dialable.
     expect(nextEligiblePendingItem(db._itemRows as unknown as DialerItem[], new Date())).toBeNull();
     expect(advance).toHaveBeenCalledOnce();
+  });
+});
+
+/**
+ * The gap the re-review caught: the consent batch carried only `toNumber`, so a
+ * record whose Mobile is clean but whose Phone is on `opt_outs`,
+ * `blocked_numbers` or `federal_dnc_entries` was still power-dialed on that
+ * Phone — `engine.ts` swaps the fallback in on a true no-answer (:345) and
+ * carries it onto the attempt-2 row (:428) without ever re-checking. Both
+ * halves of the pair now go through the same one batched read.
+ */
+describe('createDialerSession — the fallback number goes through the consent gate too', () => {
+  /** Resolver that returns a Mobile/Phone PAIR per record. */
+  function resolverWithFallback(pairs: Record<string, { e164: string | null; fallbackE164: string | null }>) {
+    return vi.fn(async (_u: string, _objectType: string, recordId: string) => ({
+      e164: pairs[recordId]?.e164 ?? null,
+      fallbackE164: pairs[recordId]?.fallbackE164 ?? null,
+      skipOnDialer: false,
+    }));
+  }
+
+  /**
+   * A double that behaves like the real `blockedTargets`: it can only report on
+   * numbers it was actually ASKED about (the SQL is `... IN (numbers)`). That is
+   * what makes these tests fail if the batch ever narrows back to primaries —
+   * a stub that ignores its argument would pass a queue build that never looks
+   * the fallback up at all, which is precisely the bug being fixed.
+   */
+  function listBackedConsent(lists: Record<string, 'opted_out' | 'blocked' | 'dnc'>) {
+    return vi.fn(async (_orgId: string, numbers: readonly string[]) =>
+      new Map(numbers.filter((n) => lists[n]).map((n) => [n, lists[n]])));
+  }
+
+  const deps = (db: unknown, resolveDialNumber: unknown, consentBlocked: unknown, workedToday: unknown = async () => new Set()) =>
+    ({ db, resolveDialNumber, fetchTasks: async () => [], workedToday, consentBlocked, salesforceUserId: async () => '005' });
+
+  it('batches BOTH halves of every pair, distinct, in the one consent read', async () => {
+    const db = fakeDb();
+    const consentBlocked = vi.fn(async () => new Map());
+    await createDialerSession(
+      deps(db, resolverWithFallback({
+        '00Q1': { e164: '+16195550100', fallbackE164: '+16195550199' },
+        // Shares 00Q1's Phone as its own Mobile: one bind, not two.
+        '00Q2': { e164: '+16195550199', fallbackE164: null },
+        '00Q3': { e164: '+16195550300', fallbackE164: '+16195550399' },
+      }), consentBlocked) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2', '00Q3'] },
+    );
+
+    expect(consentBlocked).toHaveBeenCalledOnce();
+    expect(consentBlocked).toHaveBeenCalledWith(
+      'O1', ['+16195550100', '+16195550199', '+16195550300', '+16195550399'],
+    );
+  });
+
+  it('a clean Mobile with a blocked Phone still dials — but the Phone is gone from the row', async () => {
+    const db = fakeDb();
+    await createDialerSession(
+      deps(db, resolverWithFallback({ '00Q1': { e164: '+16195550100', fallbackE164: '+16195550199' } }),
+        listBackedConsent({ '+16195550199': 'opted_out' })) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1'] },
+    );
+
+    expect(db._itemRows[0]).toMatchObject({
+      status: 'pending', outcome: null,
+      toNumber: '+16195550100', primaryNumber: '+16195550100',
+      fallbackNumber: null, secondaryNumber: null,
+    });
+  });
+
+  it.each(['opted_out', 'blocked', 'dnc'] as const)('drops a %s fallback on every list', async (verdict) => {
+    const db = fakeDb();
+    await createDialerSession(
+      deps(db, resolverWithFallback({ '00Q1': { e164: '+16195550100', fallbackE164: '+16195550199' } }),
+        listBackedConsent({ '+16195550199': verdict })) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1'] },
+    );
+    expect(db._itemRows[0]).toMatchObject({ status: 'pending', fallbackNumber: null, secondaryNumber: null });
+  });
+
+  it('leaves a clean pair whole', async () => {
+    const db = fakeDb();
+    await createDialerSession(
+      deps(db, resolverWithFallback({ '00Q1': { e164: '+16195550100', fallbackE164: '+16195550199' } }),
+        listBackedConsent({ '+16195559999': 'blocked' })) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1'] },
+    );
+    expect(db._itemRows[0]).toMatchObject({
+      status: 'pending', toNumber: '+16195550100', fallbackNumber: '+16195550199', secondaryNumber: '+16195550199',
+    });
+  });
+
+  it('a blocked Mobile with a clean Phone is skipped on the Mobile, not quietly rerouted to the Phone', async () => {
+    const db = fakeDb();
+    await createDialerSession(
+      deps(db, resolverWithFallback({ '00Q1': { e164: '+16195550100', fallbackE164: '+16195550199' } }),
+        listBackedConsent({ '+16195550100': 'dnc' })) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1'] },
+    );
+    // Skipped rows are terminal — the engine only ever claims a 'pending' row —
+    // so the surviving Phone is never dialed.
+    expect(db._itemRows[0]).toMatchObject({ status: 'skipped', outcome: 'dnc_blocked', toNumber: '+16195550100' });
+    expect(nextEligiblePendingItem(db._itemRows as unknown as DialerItem[], new Date())).toBeNull();
+  });
+
+  it('the already-worked read is NOT widened to fallbacks — it stays one bind per dialed-first number', async () => {
+    const db = fakeDb();
+    const workedToday = vi.fn(async () => new Set<string>());
+    await createDialerSession(
+      deps(db, resolverWithFallback({ '00Q1': { e164: '+16195550100', fallbackE164: '+16195550199' } }),
+        async () => new Map(), workedToday) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1'] },
+    );
+    expect(workedToday).toHaveBeenCalledWith('O1', ['+16195550100']);
+  });
+
+  it('fail-open leaves the whole pair intact', async () => {
+    const db = fakeDb();
+    await createDialerSession(
+      deps(db, resolverWithFallback({ '00Q1': { e164: '+16195550100', fallbackE164: '+16195550199' } }),
+        async () => new Map()) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1'] },
+    );
+    expect(db._itemRows[0]).toMatchObject({ status: 'pending', fallbackNumber: '+16195550199', secondaryNumber: '+16195550199' });
   });
 });
