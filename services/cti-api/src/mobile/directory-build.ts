@@ -253,8 +253,10 @@ async function sweepDeals(deps: SweepDeps, userId: string): Promise<RawEntry[]> 
  *  into raw entries. Every phone goes through `normalize`; invalid ones are
  *  dropped silently. A PERMANENT Deal-side failure (describe 404/403, no
  *  phone-type fields, or the Deal query itself failing) skips Deals only —
- *  Leads and Opportunities are unaffected. A TRANSIENT describe failure
- *  instead rejects the whole sweep (see `sweepDeals`). */
+ *  Leads and Opportunities are unaffected. A TRANSIENT describe failure or a
+ *  non-advancing Deal cursor (`CursorPagingError`) instead rejects the whole
+ *  sweep, so no Deal-less snapshot is ever published as a new version (see
+ *  `sweepDeals`). */
 export async function sweepRawEntries(deps: SweepDeps, userId: string): Promise<RawEntry[]> {
   const leads = await sweepLeads(deps, userId);
   const opps = await sweepOpportunities(deps, userId);

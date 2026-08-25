@@ -119,6 +119,11 @@ final class SyncEngine: ObservableObject {
         // the user is typing.
         status = .idle
         let claimed = try await claim(code, deviceLabel)
+        // A successful pairing satisfies any wipe still pending from the last
+        // unpair: the full sync below replaces the snapshot wholesale, and a
+        // late-firing retryPendingPurge must not blank the directory we are
+        // about to install.
+        defaults.removeObject(forKey: Keys.purgePending)
         try tokens.save(claimed.deviceToken)
         pairedUserName = claimed.user.displayName
         defaults.set(claimed.user.displayName, forKey: Keys.pairedUserName)

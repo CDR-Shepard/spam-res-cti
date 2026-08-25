@@ -15,11 +15,13 @@ enum CallDirectoryError: Error {
 /// snapshot is already sorted and validated on the way in — all that is left
 /// here is to hand CallKit the entries in order.
 ///
-/// That budget is why the entry count is bounded rather than trusted:
-/// `DirectoryStore.load` returns at most `AppConfig.maxDirectoryEntries` (the
-/// server publishes no more than that either), because past roughly that many
-/// entries iOS jetsams this process mid-stream — which shows up as a failing
-/// reload, no label on any call, and nothing the rep can act on.
+/// That budget is why the entry count is bounded rather than trusted: past
+/// roughly `AppConfig.maxDirectoryEntries` entries iOS jetsams this process
+/// mid-stream — a failing reload, no label on any call, nothing the rep can
+/// act on. The bound that actually protects this process is the SERVER's
+/// publish cap (the app's write-side cap backs it up); `DirectoryStore.load`
+/// truncates too, but only after the whole file is decoded, so it cannot
+/// save an oversized snapshot from the decode cost itself.
 final class CallDirectoryHandler: CXCallDirectoryProvider, CXCallDirectoryExtensionContextDelegate {
     private let log = Logger(subsystem: AppConfig.extensionBundleIdentifier, category: "CallDirectory")
 

@@ -21,6 +21,9 @@ enum AppConfig {
     /// Keychain service for the paired device token.
     static let keychainService = "com.gghomes.cti.callerid"
 
+    /// `os.Logger` subsystem for code shared by the app and the extension.
+    static let loggingSubsystem = "com.gghomes.cti.callerid"
+
     /// How long the background scheduler should wait before the next refresh.
     static let backgroundRefreshInterval: TimeInterval = 4 * 60 * 60
 

@@ -233,12 +233,13 @@ dropped — the API logs a
 `directory exceeds the Call Directory memory ceiling` warn with the dropped
 count. That is not a blocker for the rollout (the labels that do publish are
 correct, and it beats a jetsammed extension), but it means §7's streaming
-follow-up is now load-bearing. The org's true, uncapped size is:
+follow-up is now load-bearing. The org's true, uncapped size is the warn's
+`swept` field in the `@cti/api` logs — the table only ever holds the
+published (capped) count:
 
 ```sql
--- how many distinct numbers the sweep would publish without the cap:
--- run the snapshot script above, then read the warn's `swept` field from the
--- @cti/api logs. The published count is what's in the table:
+-- the PUBLISHED count (at most 15,000) — the uncapped size is the warn's
+-- `swept` field, not this query:
 SELECT count(*) FROM caller_directory_entries
 WHERE org_id = '<org uuid>' AND version = <the version printed above>;
 ```
@@ -347,6 +348,7 @@ can't verify).
 | Call shows just the raw number | Extension not turned on | Settings → Phone → Call Blocking & Identification → turn CTI Caller ID on (iOS 18+: Settings → Apps → Phone → Call Blocking & Identification) |
 | Extension is on, still no label | Directory on the phone is stale | Open the app, pull to refresh, or tap **Refresh now** |
 | Refreshed, extension on, still no label | The caller's number isn't a Lead/primary-Opportunity-contact/Deal\_\_c phone in Salesforce, or it failed `normalize()` (invalid numbers are silently dropped — `services/cti-api/src/mobile/directory-build.ts`) | Confirm the number is actually on one of those records/roles |
+| Directory version never advances (every phone stuck on the same version for hours despite CRM edits) | The Deal sweep's Id cursor stopped advancing, so every 30-minute tick aborts the whole publish rather than ship a Deal-less snapshot — the only trace is a `CursorPagingError` warn in the `@cti/api` logs each tick | Check the logs for the warn; the cursor bug (usually a Salesforce-side query anomaly) has to be fixed server-side — the phones are behaving correctly by keeping the last good directory |
 
 **Pairing fails**
 
@@ -396,8 +398,11 @@ Until then, this is a known, accepted limitation — not a bug to chase.
 more; past the cap the server keeps the **lowest-numbered** entries (the merge
 is already sorted ascending, so it drops the tail) and logs
 `directory exceeds the Call Directory memory ceiling` with the dropped count.
-The phone applies the same cap when it writes and when it reads, so a snapshot
-from an older build can't get past it either.
+The phone applies the same cap when it writes, as a belt-and-suspenders guard
+against a server that ever forgets its own. The read-side cap in
+`DirectoryStore.load` only truncates what the extension streams — the decode
+of an oversized file has already paid the memory cost by then — so the
+server-side cap is the guarantee that matters.
 
 **Why 15,000.** The Call Directory extension decodes the whole snapshot into
 memory before streaming it to CallKit, and iOS runs app extensions on a ~12 MB

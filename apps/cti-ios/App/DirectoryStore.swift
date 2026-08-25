@@ -19,7 +19,7 @@ struct DirectoryStore {
 
     private let containerURL: URL
     private static let fileName = "caller-directory.json"
-    private static let log = Logger(subsystem: AppConfig.keychainService, category: "DirectoryStore")
+    private static let log = Logger(subsystem: AppConfig.loggingSubsystem, category: "DirectoryStore")
 
     init(containerURL: URL) {
         self.containerURL = containerURL

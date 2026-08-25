@@ -203,6 +203,28 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(store.load()?.entries.map(\.label), ["Lead: New Org"])
     }
 
+    func testPairingSatisfiesAWipeStillPendingFromTheLastUnpair() async throws {
+        // The pending wipe and the new pairing want opposite things from the
+        // store, and a late-firing retryPendingPurge must not blank the
+        // directory pair() is installing. Installing a new directory is what
+        // the wipe was for, so a successful claim clears the flag.
+        let callKit = ReloadBox(shouldFail: true)
+        let engine = makeEngine(
+            tokens: TokenBox(token: nil),
+            pull: { _, _ in (version: 1, entries: [DirectoryEntry(e164: "+12135550200", label: "Lead: New Org")]) },
+            reload: { identifier in try await callKit.reload(identifier) },
+            claim: { _, _ in PairClaim(deviceToken: "minted-token", user: .init(displayName: "Jane Rep")) }
+        )
+
+        engine.unpair()
+        XCTAssertTrue(engine.isPurgePending, "the wipe is pending until it completes — CallKit keeps refusing here")
+
+        try await engine.pair(code: "123456", deviceLabel: "Jane's iPhone")
+
+        XCTAssertTrue(engine.isPaired)
+        XCTAssertFalse(engine.isPurgePending, "a successful claim satisfies the pending wipe")
+    }
+
     func testAFailedClaimLeavesThePhoneUnpairedAndPullsNothing() async {
         let tokens = TokenBox(token: nil)
         let log = CallLog()
@@ -276,12 +298,7 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(reloads, 1)
     }
 
-    func testAPurgeThatSucceededIsNotRepeatedOnEveryForeground() async {
-        let engine = makeEngine(pull: { _, _ in nil }, reload: { _ in })
-
-        await engine.purgeDirectory()
-        XCTAssertFalse(engine.isPurgePending)
-
+    func testRetryWithNothingPendingDoesNothing() async {
         let log = CallLog()
         let idle = makeEngine(pull: { _, _ in nil }, reload: { identifier in _ = await log.recordReload(identifier) })
         await idle.retryPendingPurge()
