@@ -28,8 +28,18 @@ export interface SweepDeps {
  *  queryMore surface, so every object is paged by Id-cursor batches instead. */
 const PAGE_SIZE = 2000;
 
+/** Max rows per `INSERT ... VALUES`. `callerDirectoryEntries` has 5 notNull
+ *  columns, so 1000 rows is 5000 bind parameters — comfortably under
+ *  Postgres's 65535-parameter statement cap even with room to spare. */
+const ENTRY_INSERT_CHUNK_SIZE = 1000;
+
 /** Page a SOQL query by ascending Id, calling `buildSoql` with the last Id
- *  seen (null on the first page) until a page comes back under PAGE_SIZE. */
+ *  seen (null on the first page) until a page comes back empty. A page
+ *  shorter than PAGE_SIZE does NOT mean the sweep is done — Salesforce's REST
+ *  batch size can be smaller than the SOQL LIMIT for wide/relationship
+ *  queries (`done: false` with fewer records than requested), so the only
+ *  safe stop condition is "the cursor found nothing left to page over". The
+ *  cost is one extra empty query per object per sweep. */
 async function pageByIdCursor<T extends { Id: string }>(
   deps: SweepDeps,
   userId: string,
@@ -39,8 +49,8 @@ async function pageByIdCursor<T extends { Id: string }>(
   let last: string | null = null;
   for (;;) {
     const rows: T[] = await deps.soqlQuery<T>(userId, buildSoql(last));
+    if (rows.length === 0) break;
     out.push(...rows);
-    if (rows.length < PAGE_SIZE) break;
     last = rows[rows.length - 1]!.Id;
   }
   return out;
@@ -183,9 +193,15 @@ export async function buildDirectorySnapshot(
 
   const version = (latest?.version ?? 0) + 1;
   await db.transaction(async (tx) => {
-    if (merged.length > 0) {
+    // Chunked so an org-wide directory (which can run well past Postgres's
+    // 65535 bind-parameter cap as one multi-row INSERT) never fails the
+    // publish. Every chunk is still inside this one transaction, so the
+    // atomicity guarantee — a reader never sees a half-written version —
+    // holds regardless of how many chunks it takes.
+    for (let i = 0; i < merged.length; i += ENTRY_INSERT_CHUNK_SIZE) {
+      const chunk = merged.slice(i, i + ENTRY_INSERT_CHUNK_SIZE);
       await tx.insert(schema.callerDirectoryEntries).values(
-        merged.map((m) => ({ orgId: opts.orgId, version, e164: m.e164, label: m.label, stage: m.stage })),
+        chunk.map((m) => ({ orgId: opts.orgId, version, e164: m.e164, label: m.label, stage: m.stage })),
       );
     }
     await tx.insert(schema.callerDirectoryVersions).values({
