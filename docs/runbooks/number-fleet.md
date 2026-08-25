@@ -329,6 +329,14 @@ railway run -s @cti/api -- env DATABASE_URL="$PUB" npx tsx scripts/fleet-report.
 It prints one line per active number, then reconciles Twilio back against the DB,
 then the tallies. Expect:
 
+- Every per-number line reads
+  `<e164> | <kind> | <rep> | <area> | db✓ | twilio✓ | webhook✓ | trusthub✓ | shaken✓ | inbound✓ | nv:…`.
+  Any `✗` among those six counts toward `not fully provisioned`. `inbound✗` means
+  the row's `inbound_enabled` is false: Twilio still points the number at our
+  webhook, so it *answers*, but with the generic
+  "this line cannot accept inbound calls" decline instead of the greeting/voicemail
+  flow — which is what a carrier reverse-probe hears. Fix with
+  `PATCH /admin/outbound-numbers/:id`, then re-run.
 - `REP evren@gghomessd.com: 6/6 LA, 6/6 SD ✓` — and the same for matt, tyler, jona.
   There is one `REP` line per non-dev user in the `users` table, whether or not
   they hold any numbers, so a rep with nothing prints

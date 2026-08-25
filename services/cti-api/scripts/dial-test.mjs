@@ -21,7 +21,7 @@
 //         outcome). Cross-check the actual Twilio calls with the Twilio console
 //         or the API (from the @cti/api service, which holds the Twilio creds).
 //
-// GOTCHA: the dialer only calls during 8am-9pm in the TARGET number's timezone
+// GOTCHA: the dialer only calls during 8:00am-8:59pm in the TARGET number's timezone
 // (+1205 = Central). Outside that window every item is skipped 'out_of_hours' —
 // this is the TCPA guard working, not a bug. Run the test during business hours.
 import pg from 'pg';

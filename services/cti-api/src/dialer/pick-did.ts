@@ -31,17 +31,41 @@ import { dialerPoolNumbers as realDialerPoolNumbers } from './pool.js';
 export type Db = ReturnType<typeof getDb>;
 type OutboundNumber = typeof schema.outboundNumbers.$inferSelect;
 
-// Recipient-local calling window: 8:00 through 20:59 inclusive. This is the
-// dialer-pool default (business hours by area code); it is DELIBERATELY
-// separate from the per-campaign / per-state calling-hours windows the
-// firewall enforces at click-to-dial time (firewall/index.ts) — this is a
-// coarse pre-filter for which leads the auto-dialer will even attempt, not a
-// replacement for the firewall's authoritative per-call gate.
-const CALLING_HOUR_START = 8;
-const CALLING_HOUR_END_INCLUSIVE = 20;
+/**
+ * THE recipient-local calling window, for the whole system: dialing is allowed
+ * while the local hour is in [8, 20] — 08:00:00 through 20:59:59, i.e. 8:00am
+ * through 8:59pm. That sits inside the federal TCPA bound of 8am–9pm with a
+ * one-minute margin at the top.
+ *
+ * ONE definition, two enforcement sites. The dialer's coarse pre-filter
+ * (`withinCallingHours` below) and the firewall's authoritative click-to-dial
+ * gate (`firewall/index.ts` gate 6) used to carry independent literals — 8am–9pm
+ * here, 8am–8pm there — so a call the firewall would BLOCK at 8:10pm local
+ * could still be attempted by the power dialer at that same instant, with
+ * nothing keeping the two from drifting further (spam-defense audit §5, gap 1).
+ * The firewall now imports these constants as the outer bound its campaign
+ * window is clamped to, so neither site can move without the other.
+ *
+ * A campaign row may still NARROW the window (org business preference); it can
+ * no longer widen it past this pair.
+ */
+export const CALLING_HOUR_START = 8;
+export const CALLING_HOUR_END_INCLUSIVE = 20;
+
+/** The same window as the `HH:MM` strings `campaign_configs` stores. The end is
+ *  the EXCLUSIVE bound the firewall's minute comparator wants, so the whole of
+ *  hour `CALLING_HOUR_END_INCLUSIVE` (through :59) is inside it — exactly what
+ *  `withinCallingHours` allows. */
+const hhmm = (hour: number): string => `${String(hour).padStart(2, '0')}:00`;
+export const CALLING_HOURS_START_HHMM = hhmm(CALLING_HOUR_START);
+export const CALLING_HOURS_END_HHMM_EXCLUSIVE = hhmm(CALLING_HOUR_END_INCLUSIVE + 1);
 
 /**
  * PURE: is `nowUtc` within the recipient-local calling window for `toE164`?
+ * This is the dialer's coarse per-lead pre-filter — the firewall's per-call
+ * gate remains authoritative for click-to-dial; both now share the window
+ * constants above.
+ *
  * Timezone is inferred from the dialed number's NANP area code. An unknown
  * timezone (non-NANP, toll-free, or otherwise unmapped) FAILS OPEN (true) —
  * the firewall already gates the actual click-to-dial per-call, so the

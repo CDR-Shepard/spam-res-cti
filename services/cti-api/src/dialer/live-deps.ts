@@ -33,7 +33,7 @@ export function buildEngineDeps(): EngineDeps {
   const db = getDb();
   const cfg = loadConfig();
   // Owned test DIDs in the allowlist skip the calling-hours guard so a dial-flow
-  // test can run outside 8am-9pm; every other number still respects it.
+  // test can run outside 8:00am-8:59pm; every other number still respects it.
   const exempt = parseCallingHoursExempt(cfg.DIALER_CALLING_HOURS_EXEMPT);
   return {
     db,

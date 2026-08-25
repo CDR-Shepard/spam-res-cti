@@ -29,6 +29,7 @@ import { getProvider } from '../telephony/index.js';
 import { signedCallbackUrl } from '../telephony/webhooks.js';
 import { createAndStartSession } from '../dialer/create-session.js';
 import { workedTodaySafe } from '../dialer/already-worked.js';
+import { blockedTargetsSafe } from '../dialer/consent-check.js';
 import {
   advanceSession,
   pauseSession,
@@ -215,6 +216,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       {
         resolveDialNumber, fetchTasks, salesforceUserId, db,
         workedToday: (orgId, numbers) => workedTodaySafe(db, orgId, numbers),
+        consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
         advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()),
       },
       { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds },
@@ -233,6 +235,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       {
         resolveDialNumber, fetchTasks, salesforceUserId, db,
         workedToday: (orgId, numbers) => workedTodaySafe(db, orgId, numbers),
+        consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
         advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()),
       },
       {

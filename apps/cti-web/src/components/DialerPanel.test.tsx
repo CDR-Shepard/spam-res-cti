@@ -41,6 +41,12 @@ describe('progressLabel', () => {
 });
 
 describe('queueLine', () => {
+  it('consent skips come out of the dialing figure and are itemized', () => {
+    const counts = { total: 50, done: 0, connected: 0, noConnect: 0, skipped: 20, unreachable: 0, pending: 30 };
+    expect(queueLine(50, counts.unreachable, { already_worked: 15, opted_out: 2, dnc_blocked: 3 }))
+      .toBe('50 records · 15 already worked today · 5 blocked by consent · dialing 30');
+  });
+
   it('reads like the spec example and omits zero parts', () => {
     expect(queueLine(50, 0, { already_worked: 18 })).toBe('50 records · 18 already worked today · dialing 32');
     expect(queueLine(50, 0, { already_worked: 15, skip_on_dialer: 3 }))
