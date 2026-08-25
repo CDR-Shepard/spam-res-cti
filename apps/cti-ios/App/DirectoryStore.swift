@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The directory snapshot as it sits on disk.
 struct DirectorySnapshot: Codable, Equatable {
@@ -18,6 +19,7 @@ struct DirectoryStore {
 
     private let containerURL: URL
     private static let fileName = "caller-directory.json"
+    private static let log = Logger(subsystem: AppConfig.keychainService, category: "DirectoryStore")
 
     init(containerURL: URL) {
         self.containerURL = containerURL
@@ -42,7 +44,7 @@ struct DirectoryStore {
     /// any moment) therefore only ever opens a whole snapshot — never a
     /// half-written one.
     func save(version: Int, entries: [DirectoryEntry]) throws {
-        let ordered = Self.ascending(entries)
+        let ordered = Self.capped(Self.ascending(entries))
         // The server already publishes ascending; the sort above is defensive,
         // and this pins the invariant the whole design rests on — every
         // reader, including CallKit, requires strictly ascending numbers.
@@ -56,6 +58,7 @@ struct DirectoryStore {
         let data = try JSONEncoder().encode(DirectorySnapshot(version: version, entries: ordered))
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: containerURL, withIntermediateDirectories: true)
+        removeStrayTemporaryFiles(fileManager)
 
         let temporaryURL = containerURL.appendingPathComponent("\(Self.fileName).\(UUID().uuidString).tmp")
         try data.write(to: temporaryURL)
@@ -73,19 +76,47 @@ struct DirectoryStore {
         }
     }
 
+    /// Deletes temp files a PREVIOUS write left behind. The cleanup above only
+    /// runs when the rename itself fails; a crash, a jetsam kill, or a phone
+    /// that powers off mid-write skips it entirely, and nothing else ever
+    /// sweeps the shared container — so each interruption strands a full copy
+    /// of the directory in the App Group forever. Interrupted writes get more
+    /// likely, not less, as the directory grows.
+    ///
+    /// Only files matching this store's own temp pattern are touched, and the
+    /// sweep runs before the new temp file is created so it can never delete
+    /// the write in progress.
+    private func removeStrayTemporaryFiles(_ fileManager: FileManager) {
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: containerURL,
+            includingPropertiesForKeys: nil
+        ) else { return }
+        for url in contents where url.pathExtension == "tmp"
+            && url.lastPathComponent.hasPrefix("\(Self.fileName).") {
+            try? fileManager.removeItem(at: url)
+            Self.log.notice("removed a stray snapshot temp file left by an interrupted write")
+        }
+    }
+
     // MARK: - Reading
 
     /// The stored snapshot, or `nil` when there is nothing usable to read:
     /// no file yet, an unreadable/undecodable one, or one whose entries are
     /// not strictly ascending. Never throws and never traps — it runs inside
     /// the Call Directory extension, where a crash is a failed reload.
+    ///
+    /// Capped on the way out as well as on the way in: `save` bounds what THIS
+    /// build writes, but the extension reads whatever is in the container,
+    /// including a file an older build left there. A bounded array is what the
+    /// extension holds for the whole `addIdentificationEntry` stream, which is
+    /// the part of the budget it can still do something about.
     func load() -> (version: Int, entries: [DirectoryEntry])? {
         guard let data = try? Data(contentsOf: fileURL),
               let snapshot = try? JSONDecoder().decode(DirectorySnapshot.self, from: data),
               Self.isStrictlyAscending(snapshot.entries) else {
             return nil
         }
-        return (snapshot.version, snapshot.entries)
+        return (snapshot.version, Self.capped(snapshot.entries))
     }
 
     // MARK: - Ordering
@@ -118,6 +149,23 @@ struct DirectoryStore {
 
         var seen = Set<Int64>()
         return sorted.filter { seen.insert($0.value).inserted }.map(\.entry)
+    }
+
+    /// Trims an ascending directory to `AppConfig.maxDirectoryEntries` by
+    /// keeping its lowest-numbered prefix — the numbers the extension can
+    /// actually publish before iOS jetsams it for exceeding the extension
+    /// memory budget. Truncating a sorted list from the end keeps it sorted,
+    /// so CallKit's strictly-ascending requirement still holds.
+    ///
+    /// The server caps the same way (MAX_DIRECTORY_ENTRIES), so in practice
+    /// this never fires; it is here so a snapshot from an older build or an
+    /// un-updated server cannot take the extension down silently.
+    static func capped(_ entries: [DirectoryEntry]) -> [DirectoryEntry] {
+        guard entries.count > AppConfig.maxDirectoryEntries else { return entries }
+        log.error(
+            "directory of \(entries.count) entries exceeds the Call Directory ceiling of \(AppConfig.maxDirectoryEntries); keeping the lowest-numbered ones"
+        )
+        return Array(entries.prefix(AppConfig.maxDirectoryEntries))
     }
 
     private struct RankedEntry {

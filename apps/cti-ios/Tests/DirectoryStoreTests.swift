@@ -59,6 +59,68 @@ final class DirectoryStoreTests: XCTestCase {
         XCTAssertEqual(contents, [store.fileURL.lastPathComponent])
     }
 
+    func testSaveSweepsTempFilesAnInterruptedWriteLeftBehind() throws {
+        // The failed-rename cleanup only runs when the rename fails. A crash
+        // or a jetsam kill mid-write skips it, and nothing else sweeps the
+        // shared container — so without this each interruption strands a full
+        // copy of the directory in the App Group forever.
+        let stranded = containerURL.appendingPathComponent("caller-directory.json.\(UUID().uuidString).tmp")
+        try Data("half a directory".utf8).write(to: stranded)
+        let unrelated = containerURL.appendingPathComponent("something-else.txt")
+        try Data("keep me".utf8).write(to: unrelated)
+
+        try store.save(version: 1, entries: [DirectoryEntry(e164: "+16195550100", label: "Lead: Jane Doe")])
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stranded.path))
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: unrelated.path),
+            "only this store's own temp files may be swept — the container is shared"
+        )
+        let loaded = try XCTUnwrap(store.load())
+        XCTAssertEqual(loaded.entries.count, 1, "the sweep must not disturb the write it precedes")
+    }
+
+    // MARK: - The Call Directory memory ceiling
+
+    func testSaveRefusesToWriteMoreEntriesThanTheExtensionCanHold() throws {
+        // Past the ceiling iOS jetsams the extension mid-stream: no label ever
+        // appears and it looks exactly like the switch being off. Better a
+        // truncated directory than none at all.
+        let over = 3
+        let entries = (0..<(AppConfig.maxDirectoryEntries + over)).map {
+            DirectoryEntry(e164: "+16192\(String(format: "%06d", $0))", label: "Lead: \($0)")
+        }
+
+        try store.save(version: 1, entries: entries)
+        let loaded = try XCTUnwrap(store.load())
+
+        XCTAssertEqual(loaded.entries.count, AppConfig.maxDirectoryEntries)
+        // The prefix kept is the LOWEST-numbered entries, so what is left is
+        // still strictly ascending — CallKit rejects anything else.
+        XCTAssertEqual(loaded.entries.first?.e164, "+16192000000")
+        XCTAssertEqual(
+            loaded.entries.last?.e164,
+            "+16192\(String(format: "%06d", AppConfig.maxDirectoryEntries - 1))"
+        )
+        XCTAssertTrue(DirectoryStore.isStrictlyAscending(loaded.entries))
+    }
+
+    func testLoadCapsASnapshotAnOlderBuildMayHaveWritten() throws {
+        // `save` bounds what this build writes; the extension reads whatever is
+        // in the container. A file written before the cap existed must not be
+        // handed to CallKit in full.
+        let entries = (0..<(AppConfig.maxDirectoryEntries + 5)).map {
+            #"{"e164":"+16192\#(String(format: "%06d", $0))","label":"Lead: \#($0)"}"#
+        }
+        let json = #"{"version":9,"entries":[\#(entries.joined(separator: ","))]}"#
+        try Data(json.utf8).write(to: store.fileURL)
+
+        let loaded = try XCTUnwrap(store.load())
+
+        XCTAssertEqual(loaded.version, 9)
+        XCTAssertEqual(loaded.entries.count, AppConfig.maxDirectoryEntries)
+    }
+
     // MARK: - Ordering
 
     func testEntriesArePersistedAscendingByNumericValue() throws {
