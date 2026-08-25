@@ -43,6 +43,7 @@ const noResolveDeps = {
   fetchTasks: (async () => []) as never,
   salesforceUserId: (async () => 'sf1') as never,
   workedToday: (async () => new Set<string>()) as never,
+  consentBlocked: (async () => new Map()) as never,
 };
 const args = { userId: 'u1', orgId: 'o1', objectType: 'Lead' as const, recordIds: ['00Q000000000001'] };
 
@@ -155,7 +156,7 @@ describe('createDialerSession — Task runs', () => {
     const resolveDialNumber = vi.fn(async (_u: string, obj: string, _id: string) =>
       obj === 'Lead' ? { e164: '+16195550100', fallbackE164: null } : obj === 'Contact' ? { e164: '+16195550200', fallbackE164: null } : null);
     const db = fakeDb();
-    const r = await createDialerSession({ db, resolveDialNumber, fetchTasks, salesforceUserId: async () => '005', workedToday: async () => new Set() } as never,
+    const r = await createDialerSession({ db, resolveDialNumber, fetchTasks, salesforceUserId: async () => '005', workedToday: async () => new Set(), consentBlocked: async () => new Map() } as never,
       { userId: 'U1', orgId: 'O1', objectType: 'Task', recordIds: ['00T1', '00T2', '00T3'] });
     expect(r.total).toBe(3);
     expect(db._sessionInsert!.objectType).toBe('Task');
@@ -178,7 +179,7 @@ describe('createDialerSession — Skip on Dialer', () => {
   }
 
   const deps = (db: unknown, resolveDialNumber: unknown, fetchTasks: unknown = async () => []) =>
-    ({ db, resolveDialNumber, fetchTasks, salesforceUserId: async () => '005', workedToday: async () => new Set() });
+    ({ db, resolveDialNumber, fetchTasks, salesforceUserId: async () => '005', workedToday: async () => new Set(), consentBlocked: async () => new Map() });
 
   it('a flagged Lead enters the queue skipped — visible, with its number still recorded', async () => {
     const db = fakeDb();
@@ -244,7 +245,7 @@ describe('createDialerSession — already-worked skip at queue build', () => {
   }
 
   const deps = (db: unknown, resolveDialNumber: unknown, workedToday: unknown, fetchTasks: unknown = async () => []) =>
-    ({ db, resolveDialNumber, fetchTasks, workedToday, salesforceUserId: async () => '005' });
+    ({ db, resolveDialNumber, fetchTasks, workedToday, salesforceUserId: async () => '005', consentBlocked: async () => new Map() });
 
   it('a number the team dialed today enters as skipped/already_worked; the rest stay pending', async () => {
     const db = fakeDb();
@@ -359,5 +360,164 @@ describe('createDialerSession — already-worked skip at queue build', () => {
       ['00Q1', 'pending', null],
       ['00Q2', 'pending', null],
     ]);
+  });
+});
+
+describe('createDialerSession — consent gate at queue build', () => {
+  /** Stands in for the real resolver: each record dials the number mapped to
+   *  its id, and reports the Skip on Dialer checkbox. */
+  function resolverByRecord(numbers: Record<string, string | null>, flagged: Set<string> = new Set()) {
+    return vi.fn(async (_u: string, _objectType: string, recordId: string) => ({
+      e164: numbers[recordId] ?? null, fallbackE164: null, skipOnDialer: flagged.has(recordId),
+    }));
+  }
+
+  const deps = (
+    db: unknown,
+    resolveDialNumber: unknown,
+    consentBlocked: unknown,
+    workedToday: unknown = async () => new Set(),
+    fetchTasks: unknown = async () => [],
+  ) => ({ db, resolveDialNumber, fetchTasks, workedToday, consentBlocked, salesforceUserId: async () => '005' });
+
+  /**
+   * The headline fix: a list carrying an opted-out, manually-blocked or
+   * federally-listed number no longer dials it silently. Each list gets its OWN
+   * outcome, because "why didn't it dial?" is a compliance question.
+   */
+  it('stamps each consent list with its own visible outcome and leaves clean numbers pending', async () => {
+    const db = fakeDb();
+    const consentBlocked = vi.fn(async () => new Map([
+      ['+16195550100', 'opted_out'],
+      ['+16195550200', 'blocked'],
+      ['+16195550300', 'dnc'],
+    ]));
+    await createDialerSession(
+      deps(db, resolverByRecord({
+        '00Q1': '+16195550100', '00Q2': '+16195550200', '00Q3': '+16195550300', '00Q4': '+16195550400',
+      }), consentBlocked) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2', '00Q3', '00Q4'] },
+    );
+
+    expect(db._itemRows.map((x) => [x.recordId, x.status, x.outcome])).toEqual([
+      ['00Q1', 'skipped', 'opted_out'],
+      ['00Q2', 'skipped', 'blocked'],
+      ['00Q3', 'skipped', 'dnc_blocked'],
+      ['00Q4', 'pending', null],
+    ]);
+    // Never silently dropped: the blocked row keeps the number it resolved so
+    // the panel can show WHICH person the run refused.
+    expect(db._itemRows[0]).toMatchObject({ toNumber: '+16195550100', primaryNumber: '+16195550100' });
+    // ONE batched read for the whole run, distinct numbers only.
+    expect(consentBlocked).toHaveBeenCalledOnce();
+    expect(consentBlocked).toHaveBeenCalledWith(
+      'O1', ['+16195550100', '+16195550200', '+16195550300', '+16195550400'],
+    );
+  });
+
+  /**
+   * PRECEDENCE: consent > skip_on_dialer > already_worked > unreachable. The
+   * consent block is the strongest signal there is — it says the call would be
+   * unlawful, not merely redundant — so the rep must see THAT reason even when
+   * a weaker one also applies.
+   */
+  it('consent beats skip_on_dialer, already_worked and unreachable', async () => {
+    const db = fakeDb();
+    await createDialerSession(
+      deps(
+        db,
+        // 00Q1 also has the rep's own Skip on Dialer box checked.
+        resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+16195550200' }, new Set(['00Q1'])),
+        async () => new Map([['+16195550100', 'opted_out'], ['+16195550200', 'dnc']]),
+        // ...and both numbers were already worked today.
+        async () => new Set(['+16195550100', '+16195550200']),
+      ) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
+    );
+
+    expect(db._itemRows.map((x) => [x.recordId, x.status, x.outcome])).toEqual([
+      ['00Q1', 'skipped', 'opted_out'],
+      ['00Q2', 'skipped', 'dnc_blocked'],
+    ]);
+  });
+
+  it('the weaker reasons still apply to rows consent did not claim', async () => {
+    const db = fakeDb();
+    await createDialerSession(
+      deps(
+        db,
+        resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+16195550200', '00Q3': '+16195550300' }, new Set(['00Q2'])),
+        async () => new Map([['+16195550100', 'blocked']]),
+        async () => new Set(['+16195550300']),
+      ) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2', '00Q3'] },
+    );
+
+    expect(db._itemRows.map((x) => [x.recordId, x.outcome])).toEqual([
+      ['00Q1', 'blocked'], ['00Q2', 'skip_on_dialer'], ['00Q3', 'already_worked'],
+    ]);
+  });
+
+  it('a phone-less record cannot be consent-blocked (stays unreachable) and is not looked up', async () => {
+    const db = fakeDb();
+    const consentBlocked = vi.fn(async () => new Map());
+    await createDialerSession(
+      deps(db, resolverByRecord({ '00Q1': null }), consentBlocked) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1'] },
+    );
+
+    expect(db._itemRows[0]).toMatchObject({ status: 'unreachable', outcome: null, toNumber: null });
+    expect(consentBlocked).toHaveBeenCalledWith('O1', []);
+  });
+
+  it('a Task-run target reached through a different record is still caught (number-keyed)', async () => {
+    const fetchTasks = vi.fn(async () => [
+      { Id: '00T1', Subject: 'Follow-up', OwnerId: '005', WhoId: '0031', WhatId: null, Who: { Type: 'Contact' } },
+    ]);
+    const db = fakeDb();
+    await createDialerSession(
+      deps(db, resolverByRecord({ '0031': '+16195550100' }),
+        async () => new Map([['+16195550100', 'opted_out']]), async () => new Set(), fetchTasks) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Task', recordIds: ['00T1'] },
+    );
+
+    expect(db._itemRows.map((x) => [x.recordId, x.objectType, x.status, x.outcome])).toEqual([
+      ['0031', 'Contact', 'skipped', 'opted_out'],
+    ]);
+  });
+
+  /**
+   * The adjudicated fail-OPEN: a broken consent READ hands back an empty map,
+   * and the run proceeds. The queue must not die because a table was
+   * unreachable — click-to-dial's fail-closed firewall is still there.
+   */
+  it('the fail-open dep returning an empty map leaves everything pending', async () => {
+    const db = fakeDb();
+    await createDialerSession(
+      deps(db, resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+16195550200' }), async () => new Map()) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
+    );
+
+    expect(db._itemRows.map((x) => [x.recordId, x.status, x.outcome])).toEqual([
+      ['00Q1', 'pending', null], ['00Q2', 'pending', null],
+    ]);
+  });
+
+  it('a run whose every number is consent-blocked builds an all-skipped queue and still kicks the engine', async () => {
+    const db = fakeDb();
+    const advance = vi.fn().mockResolvedValue(undefined);
+    await createAndStartSession(
+      {
+        ...deps(db, resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+16195550200' }),
+          async () => new Map([['+16195550100', 'opted_out'], ['+16195550200', 'blocked']])),
+        advance,
+      } as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
+    );
+
+    expect(db._itemRows.every((x) => x.status === 'skipped')).toBe(true);
+    // The engine only ever picks a 'pending' row, so nothing here is dialable.
+    expect(nextEligiblePendingItem(db._itemRows as unknown as DialerItem[], new Date())).toBeNull();
+    expect(advance).toHaveBeenCalledOnce();
   });
 });

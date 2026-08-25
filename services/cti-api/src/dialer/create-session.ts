@@ -1,5 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import { getDb, schema } from '../db/index.js';
+import type { ConsentBlock } from './consent-check.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
 import { fetchTasks, resolveTaskTarget } from '../salesforce/task-targets.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
@@ -36,6 +37,9 @@ type ResolvedRow = {
   skipOnDialer?: boolean;
   /** The TEAM already power-dialed this number today (cross-shift dedupe). */
   alreadyWorked?: boolean;
+  /** This number is on the org's opt-out / block list, or the federal DNC
+   *  cache — the same three lists click-to-dial refuses on. */
+  consentBlock?: ConsentBlock | null;
 };
 
 /** Outcome stamped on a record the rep has checked Skip on Dialer on, so the
@@ -45,6 +49,15 @@ const SKIP_ON_DIALER_OUTCOME = 'skip_on_dialer';
 /** Outcome stamped on a number the team already power-dialed today, so the
  *  panel can show the run inherited an earlier shift's work. */
 const ALREADY_WORKED_OUTCOME = 'already_worked';
+
+/** Outcome per consent list, so the row states WHICH list refused the number
+ *  rather than a generic "skipped" — a rep asking "why didn't it dial?" is
+ *  asking a compliance question and deserves the compliance answer. */
+const CONSENT_OUTCOME: Record<ConsentBlock, string> = {
+  opted_out: 'opted_out',
+  blocked: 'blocked',
+  dnc: 'dnc_blocked',
+};
 
 export function buildQueueRows(
   sessionId: string,
@@ -63,14 +76,18 @@ export function buildQueueRows(
     // toNumber/fallbackNumber, and an attempt-2 row restores from these.
     attempt: 1, primaryNumber: r.toNumber, secondaryNumber: r.fallbackNumber ?? null,
     taskId: r.taskId ?? null, followupEligible: r.followupEligible ?? true,
-    // The checkbox wins over "no number": a flagged record reads as deliberately
-    // skipped, never as unreachable — and over already_worked, because the rep's
-    // own box is the more specific reason. A number the team already worked today
-    // is skipped too. Either way the row exists and keeps its numbers — the run
-    // reports what it passed over instead of dropping it, and the engine only
-    // ever picks up a 'pending' row.
-    status: r.skipOnDialer || r.alreadyWorked ? 'skipped' : r.toNumber ? 'pending' : 'unreachable',
-    outcome: r.skipOnDialer ? SKIP_ON_DIALER_OUTCOME : r.alreadyWorked ? ALREADY_WORKED_OUTCOME : null,
+    // PRECEDENCE: consent > skip_on_dialer > already_worked > unreachable.
+    // A consent block (opt-out / block list / federal DNC) is the strongest
+    // signal there is — it is why the call is unlawful, not merely unwanted —
+    // so it outranks the rep's own checkbox, which in turn outranks "the team
+    // got there first", which in turn outranks "no number" (a flagged record
+    // reads as deliberately skipped, never as unreachable). Either way the row
+    // exists and keeps its numbers — the run reports what it passed over
+    // instead of dropping it, and the engine only ever picks a 'pending' row.
+    status: r.consentBlock || r.skipOnDialer || r.alreadyWorked ? 'skipped' : r.toNumber ? 'pending' : 'unreachable',
+    outcome: r.consentBlock
+      ? CONSENT_OUTCOME[r.consentBlock]
+      : r.skipOnDialer ? SKIP_ON_DIALER_OUTCOME : r.alreadyWorked ? ALREADY_WORKED_OUTCOME : null,
   }));
 }
 
@@ -82,6 +99,12 @@ export interface CreateSessionDeps {
    *  (rather than read inline) so creation stays unit testable, and so the
    *  live wiring can be the fail-open variant. */
   workedToday: (orgId: string, numbers: readonly string[]) => Promise<Set<string>>;
+  /** Which of these numbers the org may NOT call — opt-out list, manual block
+   *  list, federal DNC cache. The gate click-to-dial has always had and the
+   *  power dialer never did (spam-defense audit §1). Injected on the same
+   *  terms as `workedToday`: unit testable, and live-wired to the fail-open
+   *  variant. */
+  consentBlocked: (orgId: string, numbers: readonly string[]) => Promise<Map<string, ConsentBlock>>;
   db: ReturnType<typeof getDb>;
 }
 
@@ -163,15 +186,22 @@ export async function createDialerSession(
     }
     throw err;
   }
-  // ONE batched read for the whole run, after the session exists (a conflicting
-  // create returns the rep's existing session above and never gets here).
-  // Distinct: a list often carries the same person on two records, and the
-  // verdict is per NUMBER — duplicates would only bloat the IN (...) binds.
-  const worked = await deps.workedToday(
-    args.orgId,
-    [...new Set(resolved.map((r) => r.toNumber).filter((n): n is string => !!n))],
-  );
-  const rows = buildQueueRows(session!.id, resolved.map((r) => ({ ...r, alreadyWorked: !!r.toNumber && worked.has(r.toNumber) })));
+  // ONE batched read per gate for the whole run, after the session exists (a
+  // conflicting create returns the rep's existing session above and never gets
+  // here). Distinct: a list often carries the same person on two records, and
+  // both verdicts are per NUMBER — duplicates would only bloat the IN (...)
+  // binds. The two reads are independent, so they go out together.
+  const numbers = [...new Set(resolved.map((r) => r.toNumber).filter((n): n is string => !!n))];
+  const [worked, consent] = await Promise.all([
+    deps.workedToday(args.orgId, numbers),
+    deps.consentBlocked(args.orgId, numbers),
+  ]);
+  const rows = buildQueueRows(session!.id, resolved.map((r) => ({
+    ...r,
+    alreadyWorked: !!r.toNumber && worked.has(r.toNumber),
+    // A row with no number can be neither: both gates are keyed by number.
+    consentBlock: r.toNumber ? consent.get(r.toNumber) ?? null : null,
+  })));
   if (rows.length) await deps.db.insert(schema.dialerQueueItems).values(rows);
   return { sessionId: session!.id, total: rows.length };
 }
