@@ -97,9 +97,12 @@ final class SyncEngine: ObservableObject {
         self.pairedUserName = defaults.string(forKey: Keys.pairedUserName)
         self.lastSyncedAt = defaults.object(forKey: Keys.lastSyncedAt) as? Date
 
-        if let snapshot = store?.load() {
-            self.version = snapshot.version
-            self.entryCount = snapshot.entries.count
+        // Header only: the app never needs the records, and reading a
+        // six-figure directory to populate two labels on a status screen is
+        // exactly the cost the binary format exists to avoid.
+        if let header = store?.loadHeader() {
+            self.version = header.version
+            self.entryCount = header.entryCount
         }
     }
 
@@ -227,15 +230,17 @@ final class SyncEngine: ObservableObject {
 
         status = .syncing
         do {
-            let known = forcingFullResync ? nil : store.load()?.version
+            let known = forcingFullResync ? nil : store.loadHeader()?.version
             if let pulled = try await pull(token, known) {
                 try store.save(version: pulled.version, entries: pulled.entries)
                 // Read back rather than trusting the pull: the store is what
                 // the extension will actually publish, so its count and
-                // version are the honest ones to show.
-                let stored = store.load()
+                // version are the honest ones to show. (Dedupe and the write
+                // ceiling both live on the write side, so the header's count
+                // is routinely smaller than the number of rows pulled.)
+                let stored = store.loadHeader()
                 version = stored?.version ?? pulled.version
-                entryCount = stored?.entries.count ?? pulled.entries.count
+                entryCount = stored?.entryCount ?? pulled.entries.count
                 log.info("stored version \(self.version ?? -1) with \(self.entryCount) entries")
             } else {
                 version = known

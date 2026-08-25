@@ -200,7 +200,7 @@ final class SyncEngineTests: XCTestCase {
 
         let pulls = await log.pulls
         XCTAssertEqual(pulls, [nil], "the first sync after pairing must ask for everything, never `since`")
-        XCTAssertEqual(store.load()?.entries.map(\.label), ["Lead: New Org"])
+        XCTAssertEqual(try labels(in: store), ["Lead: New Org"])
     }
 
     func testPairingSatisfiesAWipeStillPendingFromTheLastUnpair() async throws {
@@ -273,7 +273,11 @@ final class SyncEngineTests: XCTestCase {
         await engine.retryPendingPurge()
 
         XCTAssertTrue(engine.isPurgePending, "a wipe CallKit still refuses must stay pending")
-        XCTAssertEqual(store.load()?.entries.count, 0, "the snapshot on disk is wiped even when the reload fails")
+        XCTAssertEqual(
+            store.loadHeader()?.entryCount,
+            0,
+            "the snapshot on disk is wiped even when the reload fails"
+        )
     }
 
     func testTheNextForegroundFinishesAWipeThatFailedEarlier() async {
@@ -307,6 +311,15 @@ final class SyncEngineTests: XCTestCase {
     }
 
     // MARK: - Fixtures
+
+    /// The labels actually on disk. The store is streamed rather than loaded
+    /// whole — `loadHeader` deliberately reads no records — so a test that
+    /// cares WHICH directory was installed has to walk it.
+    private func labels(in store: DirectoryStore) throws -> [String] {
+        var out: [String] = []
+        try store.streamEntries { _, label in out.append(label) }
+        return out
+    }
 
     /// A throwaway App Group stand-in, cleaned up after the test.
     private func makeStore() -> DirectoryStore {
