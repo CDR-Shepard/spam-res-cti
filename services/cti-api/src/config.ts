@@ -86,7 +86,7 @@ const schema = z.object({
 
   /**
    * Comma-separated E.164 allowlist that the power dialer may call at ANY hour,
-   * bypassing the 8am-9pm local calling-hours guard. For OWNED test DIDs only —
+   * bypassing the 8:00am-8:59pm local calling-hours guard. For OWNED test DIDs only —
    * never real prospects — so a dial-flow test can run outside business hours.
    * The exemption is time-of-day ONLY; these numbers still pass the firewall and
    * per-number warmup/attempt caps. Empty by default (no exemptions = every

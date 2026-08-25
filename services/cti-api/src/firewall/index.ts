@@ -18,6 +18,7 @@ import { resolveTimezone, timezoneForNumber } from './tz.js';
 import { warmupCapForAge } from './warmup.js';
 import { fetchDidWindowStats } from '../reputation/query.js';
 import { answerRateBreach, engagementBreach, THRESHOLDS } from '../reputation/signals.js';
+import { CALLING_HOURS_END_HHMM_EXCLUSIVE, CALLING_HOURS_START_HHMM } from '../dialer/pick-did.js';
 
 export { warmupCapForAge } from './warmup.js';
 
@@ -458,13 +459,8 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
         detail: 'Recipient timezone unknown; rep must confirm appropriate hour.',
       });
     } else {
-      const within = isWithinCallingHours(
-        new Date(),
-        tz,
-        campaign.callingHoursStart,
-        campaign.callingHoursEnd,
-        allowedDays,
-      );
+      const window = callingWindowFor(campaign);
+      const within = isWithinCallingHours(new Date(), tz, window.start, window.end, allowedDays);
       const tzDetailSuffix = tzSource ? ` · ${tzSource}` : '';
       checks.push(
         within
@@ -473,14 +469,14 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
               passed: true,
               severity: 'info',
               reasonCode: REASON.CALLING_HOURS_OK,
-              detail: `${campaign.callingHoursStart}-${campaign.callingHoursEnd} ${tz}${tzDetailSuffix}`,
+              detail: `${window.start}-${window.end} ${tz}${tzDetailSuffix}`,
             }
           : {
               name: 'calling_hours',
               passed: false,
               severity: 'block',
               reasonCode: REASON.OUTSIDE_CALLING_HOURS,
-              detail: `Now is outside ${campaign.callingHoursStart}-${campaign.callingHoursEnd} ${tz}${tzDetailSuffix}`,
+              detail: `Now is outside ${window.start}-${window.end} ${tz}${tzDetailSuffix}`,
             },
       );
     }
@@ -1032,7 +1028,38 @@ async function persistAndReturn(
   };
 }
 
-function isWithinCallingHours(
+/**
+ * The window gate 6 actually enforces: the shared system window
+ * (`dialer/pick-did.ts` — local hour ∈ [8, 20], the SAME pair the power
+ * dialer's pre-filter uses) with the campaign row allowed to NARROW it and
+ * never to widen it.
+ *
+ * Before this, the two enforcement sites carried independent numbers — the
+ * firewall's came from `campaign_configs` (schema default 08:00–20:00,
+ * end-exclusive), the dialer's from its own literals (08:00–20:59) — so an
+ * 8:10pm call was blocked on one path and attempted on the other, with nothing
+ * keeping them in step (spam-defense audit §5). Clamping rather than replacing
+ * keeps a deliberately shorter org window (this org runs 08:00–20:00) exactly
+ * as configured, while making the outer bound one constant pair for the whole
+ * system — and a campaign row edited to 22:00 can no longer push the firewall
+ * past 8:59pm.
+ *
+ * Pure string compare: both sides are zero-padded `HH:MM`, which orders
+ * lexicographically the same as it orders chronologically.
+ */
+export function callingWindowFor(campaign: {
+  callingHoursStart?: string | null;
+  callingHoursEnd?: string | null;
+}): { start: string; end: string } {
+  const start = campaign.callingHoursStart || CALLING_HOURS_START_HHMM;
+  const end = campaign.callingHoursEnd || CALLING_HOURS_END_HHMM_EXCLUSIVE;
+  return {
+    start: start > CALLING_HOURS_START_HHMM ? start : CALLING_HOURS_START_HHMM,
+    end: end < CALLING_HOURS_END_HHMM_EXCLUSIVE ? end : CALLING_HOURS_END_HHMM_EXCLUSIVE,
+  };
+}
+
+export function isWithinCallingHours(
   now: Date,
   timezone: string,
   startHHMM: string,
