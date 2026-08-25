@@ -146,11 +146,21 @@ private func feedRequest(baseURL: URL, token: String, since: Int?, page: Int) th
 
 // MARK: - The real transport
 
-/// The only networking in the app: performs the request and turns a non-2xx
-/// status into a typed `FeedError.http` so callers never have to inspect a
-/// `URLResponse`.
+/// The only networking in the feed path: performs the request and hands the
+/// response to `feedBody` so callers never have to inspect a `URLResponse`.
 func liveTransport(_ request: URLRequest) async throws -> Data {
     let (data, response) = try await URLSession.shared.data(for: request)
+    return try feedBody(data: data, response: response)
+}
+
+/// Pure — turns one URLSession answer into either a body or a typed
+/// `FeedError`. Separate from `liveTransport` because this mapping is the sole
+/// input to the revocation path: a revoked device's feed request comes back
+/// 401, and `SyncEngine` unpairs the phone on exactly `FeedError.http(401)`.
+/// If a non-2xx ever stopped becoming that error, revocation would silently
+/// stop working — a phone removed from the softphone's device list would keep
+/// its directory and keep syncing. Pinned by FeedTests.
+func feedBody(data: Data, response: URLResponse?) throws -> Data {
     guard let http = response as? HTTPURLResponse else { throw FeedError.malformedResponse }
     guard (200..<300).contains(http.statusCode) else { throw FeedError.http(status: http.statusCode) }
     return data

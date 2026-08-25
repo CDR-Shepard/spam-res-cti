@@ -6,6 +6,7 @@ import UIKit
 /// the directory immediately.
 struct PairView: View {
     @EnvironmentObject private var engine: SyncEngine
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var code = ""
     @State private var deviceLabel = UIDevice.current.name
@@ -31,7 +32,7 @@ struct PairView: View {
                 } header: {
                     Text("Pairing code")
                 } footer: {
-                    Text("Open the softphone on your computer and choose “Pair iPhone”. The code expires after five minutes.")
+                    Text("In the softphone on your computer, open the Settings tab, find “Pair your iPhone” and tap “Get pairing code”. The code expires after five minutes.")
                 }
 
                 Section("This iPhone") {
@@ -61,6 +62,18 @@ struct PairView: View {
             }
             .navigationTitle("CTI Caller ID")
             .onAppear { codeFieldFocused = true }
+            // An unpair whose directory wipe failed (CallKit busy, the
+            // extension switched off, a write error) leaves the previous
+            // pairing's whole directory on a phone that is no longer
+            // authorized. Nothing else retries it — `sync()` returns early once
+            // unpaired — and this is the screen an unpaired phone sits on, so
+            // it finishes the job on launch and on every foreground.
+            .task { await engine.retryPendingPurge() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    Task { await engine.retryPendingPurge() }
+                }
+            }
         }
     }
 
