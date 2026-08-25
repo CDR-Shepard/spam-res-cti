@@ -277,15 +277,22 @@ struct DirectoryStore {
         /// one chunk plus one record however long the stream runs.
         func fill(toAtLeast count: Int) throws {
             while buffer.count - cursor < count && !atEndOfFile {
-                guard let chunk = try Self.read(handle, Self.readChunkSize), !chunk.isEmpty else {
-                    atEndOfFile = true
-                    break
+                // Each read hands back a Foundation `Data` that may be backed
+                // by an autoreleased object. Nothing drains this process's
+                // pool until `beginRequest` returns, so without a pool per
+                // chunk a whole directory's worth of 64 KiB buffers piles up
+                // — the O(entries) footprint this format exists to remove.
+                try autoreleasepool {
+                    guard let chunk = try Self.read(handle, Self.readChunkSize), !chunk.isEmpty else {
+                        atEndOfFile = true
+                        return
+                    }
+                    if cursor > 0 {
+                        buffer.removeFirst(cursor)
+                        cursor = 0
+                    }
+                    buffer.append(contentsOf: chunk)
                 }
-                if cursor > 0 {
-                    buffer.removeFirst(cursor)
-                    cursor = 0
-                }
-                buffer.append(contentsOf: chunk)
             }
         }
 
