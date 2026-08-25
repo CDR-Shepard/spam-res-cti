@@ -31,6 +31,18 @@ describe('orgMidnightUtc', () => {
     const kolkata = orgMidnightUtc(new Date('2026-08-24T12:00:00Z'), 'Asia/Kolkata'); // 17:30 IST
     expect(kolkata.toISOString()).toBe('2026-08-23T18:30:00.000Z'); // IST midnight Aug 24 = 18:30Z Aug 23
   });
+  /**
+   * The same-LA-day guard is load-bearing, not belt-and-braces: the scan walks
+   * candidate offsets from -14h, so in a UTC-10 zone the first instant that
+   * renders 00:00 local is the PREVIOUS local day's midnight. Without the
+   * `ymdIn(tz, candidate) === ymdIn(tz, now)` check the window would open a
+   * full day early and inherit yesterday's dials.
+   */
+  it('returns TODAY\'s midnight, not yesterday\'s, in a far-west zone (UTC-10)', () => {
+    const honolulu = orgMidnightUtc(new Date('2026-08-24T18:00:00Z'), 'Pacific/Honolulu'); // 08:00 HST Aug 24
+    expect(honolulu.toISOString()).toBe('2026-08-24T10:00:00.000Z');
+  });
+
   it('is correct on both DST transition days of 2026', () => {
     for (const iso of ['2026-03-08T20:00:00Z', '2026-11-01T20:00:00Z']) {
       const m = orgMidnightUtc(new Date(iso));
