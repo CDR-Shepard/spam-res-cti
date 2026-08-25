@@ -109,6 +109,10 @@ const schema = z.object({
   NUMBERVERIFIER_API_BASE: z.string().url().default('https://app.numberverifier.com'),
   /** How often the reputation worker recomputes per-DID health (ms). */
   REPUTATION_WORKER_INTERVAL_MS: z.coerce.number().int().positive().default(600_000),
+  /** How often the caller-ID mobile directory re-sweeps Salesforce and
+   *  publishes a new snapshot version (ms). Default 30 minutes — this is a
+   *  full org sweep (Leads, Opportunities, Deal__c), not a per-call action. */
+  DIRECTORY_REBUILD_INTERVAL_MS: z.coerce.number().int().positive().default(1_800_000),
   /**
    * Comma-separated allowlist of browser origins permitted to call the API in
    * production (the served cti-web origin + your Salesforce my-domain). The

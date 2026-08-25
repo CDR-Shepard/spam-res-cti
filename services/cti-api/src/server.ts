@@ -15,9 +15,11 @@ import { registerReputationRoutes } from './routes/reputation.js';
 import { registerIntegrationRoutes } from './routes/integrations.js';
 import { registerRecordingRoutes } from './routes/recordings.js';
 import { registerDialerRoutes } from './routes/dialer.js';
+import { registerMobileRoutes } from './routes/mobile.js';
 import { startSyncLoop } from './salesforce/sync.js';
 import { startFollowupLoop, startRetryNudgeLoop } from './salesforce/followup-worker.js';
 import { startReputationWorker } from './reputation/worker.js';
+import { startDirectoryLoop } from './mobile/directory-build.js';
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
@@ -26,7 +28,14 @@ async function main(): Promise<void> {
       level: cfg.NODE_ENV === 'production' ? 'info' : 'debug',
       redact: ['req.headers.authorization', 'req.headers.cookie'],
     },
-    trustProxy: true,
+    // Trust exactly ONE hop — Railway's edge proxy, the only thing in front of
+    // this process. `true` trusts the whole X-Forwarded-For chain, which means
+    // `req.ip` is the leftmost entry the CLIENT sent: anyone can mint a fresh
+    // one per request and never land in the same bucket twice, defeating every
+    // IP-keyed limit in the app (the global rate limiter and the pairing
+    // claim's 3/min/IP cap alike). With a hop count, `req.ip` is the address
+    // the trusted proxy actually observed and a spoofed header cannot move it.
+    trustProxy: 1,
     bodyLimit: 1024 * 1024,
   });
 
@@ -104,18 +113,21 @@ async function main(): Promise<void> {
   await registerIntegrationRoutes(app);
   await registerRecordingRoutes(app);
   await registerDialerRoutes(app);
+  await registerMobileRoutes(app);
 
   const syncTimer = startSyncLoop(5000);
   const followupTimer = startFollowupLoop(5000);
   // The rep-facing retry nudge runs on its own timer — never behind Salesforce.
   const nudgeTimer = startRetryNudgeLoop(5000);
   const reputationTimer = startReputationWorker(app.log, cfg.REPUTATION_WORKER_INTERVAL_MS);
+  const directoryTimer = startDirectoryLoop(cfg.DIRECTORY_REBUILD_INTERVAL_MS);
 
   const close = async () => {
     clearInterval(syncTimer);
     clearInterval(followupTimer);
     clearInterval(nudgeTimer);
     clearInterval(reputationTimer);
+    clearInterval(directoryTimer);
     await app.close();
   };
   process.on('SIGTERM', close);
