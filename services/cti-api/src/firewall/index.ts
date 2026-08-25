@@ -596,29 +596,7 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
   }
 
   // 7b. Per-DID velocity (>10 calls/min anti-burst).
-  if (outboundNumberRow) {
-    const windowStart = outboundNumberRow.lastMinuteWindowStart;
-    const now = new Date();
-    const inWindow = windowStart && (now.getTime() - windowStart.getTime()) < 60_000;
-    const count = inWindow ? outboundNumberRow.lastMinuteDialCount : 0;
-    if (count >= 10) {
-      checks.push({
-        name: 'velocity',
-        passed: false,
-        severity: 'block',
-        reasonCode: REASON.VELOCITY_BURST,
-        detail: `${count} calls/min from ${outboundNumberRow.e164} — autodialer fingerprint`,
-      });
-    } else {
-      checks.push({
-        name: 'velocity',
-        passed: true,
-        severity: 'info',
-        reasonCode: REASON.VELOCITY_OK,
-        detail: `${count}/10 per min`,
-      });
-    }
-  }
+  if (outboundNumberRow) checks.push(velocityGateCheck(outboundNumberRow, new Date()));
 
   // 7c. Neighbor-spoofing detector (NPA + NPA-NXX match between caller and recipient).
   if (fromE164 && e164.length >= 12 && fromE164.length >= 12) {
@@ -1047,6 +1025,48 @@ async function persistAndReturn(
  * Pure string compare: both sides are zero-padded `HH:MM`, which orders
  * lexicographically the same as it orders chronologically.
  */
+/**
+ * Ten dials a minute from one DID is not a rep working a list — it is an
+ * autodialer fingerprint, and it is what carrier analytics score. The cap is
+ * enforced atomically at dial time by the `< 10` clause inside
+ * `dialer/pick-did.ts`'s `attemptIncrement` UPDATE and its twin in
+ * `routes/calls.ts`; THIS is the advisory pre-call read of the same rule, so
+ * the rep is told before dialing rather than getting a bare 429 after.
+ *
+ * Pure and exported so the boundary is testable: gate 7b had no direct
+ * coverage at all (spam-defense audit §6), and a stale window silently
+ * resetting the count to 0 is exactly the arithmetic that broke the sibling
+ * warmup cap in prod once already.
+ */
+const VELOCITY_MAX_PER_MINUTE = 10;
+const VELOCITY_WINDOW_MS = 60_000;
+
+export function velocityGateCheck(
+  n: { e164: string; lastMinuteWindowStart: Date | null; lastMinuteDialCount: number },
+  now: Date,
+): CheckResult {
+  // A window older than a minute is spent: its count describes a burst that is
+  // already over, so it reads as 0 rather than blocking on stale data.
+  const inWindow = n.lastMinuteWindowStart !== null
+    && (now.getTime() - n.lastMinuteWindowStart.getTime()) < VELOCITY_WINDOW_MS;
+  const count = inWindow ? n.lastMinuteDialCount : 0;
+  return count >= VELOCITY_MAX_PER_MINUTE
+    ? {
+        name: 'velocity',
+        passed: false,
+        severity: 'block',
+        reasonCode: REASON.VELOCITY_BURST,
+        detail: `${count} calls/min from ${n.e164} — autodialer fingerprint`,
+      }
+    : {
+        name: 'velocity',
+        passed: true,
+        severity: 'info',
+        reasonCode: REASON.VELOCITY_OK,
+        detail: `${count}/${VELOCITY_MAX_PER_MINUTE} per min`,
+      };
+}
+
 export function callingWindowFor(campaign: {
   callingHoursStart?: string | null;
   callingHoursEnd?: string | null;

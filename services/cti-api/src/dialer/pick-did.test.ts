@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { pickPoolDid, withinCallingHours, parseCallingHoursExempt, type Db } from './pick-did.js';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { attemptIncrement, pickPoolDid, withinCallingHours, parseCallingHoursExempt, type Db } from './pick-did.js';
 
 describe('parseCallingHoursExempt', () => {
   it('parses a comma-separated E.164 allowlist (trims, drops empties)', () => {
@@ -196,5 +198,66 @@ describe('pickPoolDid', () => {
       { dialerPoolNumbers },
     );
     expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// attemptIncrement — the enforcement SQL itself
+// ---------------------------------------------------------------------------
+
+/**
+ * The `< 10` velocity clause and its window CASE are the ONLY thing that
+ * actually refuses the 11th dial in a rolling minute — and prod has never
+ * exceeded 3/min, so live telemetry proves the permit half and nothing else.
+ * Every other test in this file (and in pick-agent-did / routes-calls) mocks
+ * `attemptIncrement` or the db layer away, so the predicate had zero coverage
+ * (spam-defense audit §6). Its sibling gate in this same UPDATE — the daily
+ * warmup cap — once shipped to prod silently broken for exactly that reason.
+ *
+ * Rendering the captured WHERE to real SQL (the PgDialect trick used in
+ * already-worked.test.ts) pins the arithmetic without a database.
+ */
+function captureDb() {
+  const seen: SQL[] = [];
+  const db = {
+    _where: seen,
+    update: () => ({
+      set: () => ({
+        where: (cond: SQL) => ({ returning: async () => { seen.push(cond); return [{ id: 'row-id' }]; } }),
+      }),
+    }),
+  } as unknown as Db;
+  return db as Db & { _where: SQL[] };
+}
+
+describe('attemptIncrement — rendered WHERE clause', () => {
+  it.each(['dialer_pool', 'agent'] as const)('pins the <10-per-minute cap and the kind filter for %s DIDs', async (kind) => {
+    const db = captureDb();
+    await attemptIncrement(db, 'ORG-1', '+16195550100', 40, kind);
+
+    const { sql, params } = new PgDialect().sqlToQuery(db._where[0]!);
+
+    // The velocity clause, whole: a window older than a minute resets the
+    // effective count to 0, otherwise the stored count stands — and either way
+    // it must be UNDER ten before this dial is allowed to claim the number.
+    expect(sql).toContain(
+      "(case when \"outbound_numbers\".\"last_minute_window_start\" is null or now() - \"outbound_numbers\".\"last_minute_window_start\" > interval '1 minute' then 0 else \"outbound_numbers\".\"last_minute_dial_count\" end) < 10",
+    );
+    // Not `<=`: at a stored count of 10 the claim must fail, so the 11th dial
+    // in the minute is the one refused.
+    expect(sql).not.toContain('last_minute_dial_count end) <= 10');
+
+    // The cap only means anything alongside the rest of the claim's guards.
+    expect(sql).toContain('"outbound_numbers"."org_id" = $1');
+    expect(sql).toContain('"outbound_numbers"."e164" = $2');
+    expect(sql).toContain('"outbound_numbers"."active" = $3');
+    // kind is pinned per call so neither path can ever burn the other's DIDs.
+    expect(sql).toContain('"outbound_numbers"."kind" = $4');
+    expect(params[3]).toBe(kind);
+    expect(sql).toContain('"outbound_numbers"."health" not in ($5, $6)');
+    expect(params.slice(4, 6)).toEqual(['spam_likely', 'degraded']);
+    // ...and the sibling daily warmup cap, in the same atomic claim.
+    expect(sql).toContain('"outbound_numbers"."dials_today" else 0 end) <');
+    expect(params).toContain(40);
   });
 });
