@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildDirectorySnapshot,
+  capDirectory,
   CursorPagingError,
   MAX_DIRECTORY_ENTRIES,
   pickActingUsers,
@@ -475,6 +476,13 @@ describe('buildDirectorySnapshot', () => {
 });
 
 describe('the Call Directory entry ceiling', () => {
+  /** The ceiling these tests drive the pipeline against. The production number
+   *  is 250,000 — building a fixture that size to prove "it truncates" would
+   *  cost minutes per run and pin nothing the small ceiling does not, so the
+   *  bound is injected and `MAX_DIRECTORY_ENTRIES` gets its own assertions
+   *  below. */
+  const CEILING = 5;
+
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -487,7 +495,7 @@ describe('the Call Directory entry ceiling', () => {
       Id: `L${String(i).padStart(6, '0')}`,
       Name: `Lead ${i}`,
       // 619-2xx-xxxx ascending in i, so the "lowest-numbered prefix" the cap
-      // keeps is exactly the first MAX_DIRECTORY_ENTRIES of these.
+      // keeps is exactly the first `CEILING` of these.
       Phone: `6192${String(i).padStart(6, '0')}`,
       MobilePhone: null,
     }));
@@ -501,33 +509,37 @@ describe('the Call Directory entry ceiling', () => {
     return { soqlQuery, sfFetch: vi.fn(async () => ({ status: 404, json: null })) as unknown as SweepDeps['sfFetch'] };
   }
 
-  it('publishes at most MAX_DIRECTORY_ENTRIES rows, keeping the ascending-lowest prefix, and warns about the tail it dropped', async () => {
-    // Past this ceiling the phone extension is jetsammed mid-stream and NO
-    // label ever appears — a total, silent failure. So the server publishes
-    // what the phone can hold rather than what the CRM happens to contain.
+  it('publishes at most the ceiling, keeping the ascending-lowest prefix, and warns about the tail it dropped', async () => {
+    // The ceiling is a safety valve, not a memory bound (the phone streams the
+    // snapshot now) — but a sweep that goes wrong must still not publish an
+    // unbounded directory, and the drop has to be visible in the logs.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const over = 5;
+    const over = 3;
     const db = fakeDb({ latestVersion: null });
 
-    const out = await buildDirectorySnapshot(db, { orgId: 'O1', userId: 'U1' }, leadSweepOf(MAX_DIRECTORY_ENTRIES + over));
+    const out = await buildDirectorySnapshot(
+      db,
+      { orgId: 'O1', userId: 'U1', maxEntries: CEILING },
+      leadSweepOf(CEILING + over),
+    );
 
-    expect(out).toEqual({ version: 1, entryCount: MAX_DIRECTORY_ENTRIES, changed: true });
+    expect(out).toEqual({ version: 1, entryCount: CEILING, changed: true });
     const published = db._txInserts
       .filter((i: { table: unknown }) => i.table === schema.callerDirectoryEntries)
       .flatMap((i: { values: unknown }) => i.values as Array<{ e164: string }>);
-    expect(published).toHaveLength(MAX_DIRECTORY_ENTRIES);
+    expect(published).toHaveLength(CEILING);
     // The prefix kept is the LOWEST numbers, still ascending — the order the
     // feed pages in and CallKit requires.
     expect(published[0]!.e164).toBe('+16192000000');
-    expect(published[MAX_DIRECTORY_ENTRIES - 1]!.e164).toBe(`+16192${String(MAX_DIRECTORY_ENTRIES - 1).padStart(6, '0')}`);
+    expect(published[CEILING - 1]!.e164).toBe(`+16192${String(CEILING - 1).padStart(6, '0')}`);
     // …and the version row agrees with what was actually written.
     expect(db._txInserts[db._txInserts.length - 1]).toMatchObject({
       table: schema.callerDirectoryVersions,
-      values: { orgId: 'O1', version: 1, entryCount: MAX_DIRECTORY_ENTRIES },
+      values: { orgId: 'O1', version: 1, entryCount: CEILING },
     });
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('memory ceiling'),
-      expect.objectContaining({ orgId: 'O1', published: MAX_DIRECTORY_ENTRIES, dropped: over }),
+      expect.stringContaining('publish ceiling'),
+      expect.objectContaining({ orgId: 'O1', swept: CEILING + over, published: CEILING, dropped: over }),
     );
   });
 
@@ -537,22 +549,49 @@ describe('the Call Directory entry ceiling', () => {
     // version, pruning the previous one, and making every phone re-download
     // the whole thing for nothing.
     const first = fakeDb({ latestVersion: null });
-    await buildDirectorySnapshot(first, { orgId: 'O1', userId: 'U1' }, leadSweepOf(MAX_DIRECTORY_ENTRIES + 5));
+    await buildDirectorySnapshot(first, { orgId: 'O1', userId: 'U1', maxEntries: CEILING }, leadSweepOf(CEILING + 1));
     const versionRow = first._txInserts[first._txInserts.length - 1] as { values: { contentHash: string } };
 
     const second = fakeDb({
-      latestVersion: { version: 1, contentHash: versionRow.values.contentHash, entryCount: MAX_DIRECTORY_ENTRIES },
+      latestVersion: { version: 1, contentHash: versionRow.values.contentHash, entryCount: CEILING },
     });
-    const out = await buildDirectorySnapshot(second, { orgId: 'O1', userId: 'U1' }, leadSweepOf(MAX_DIRECTORY_ENTRIES + 50));
+    const out = await buildDirectorySnapshot(
+      second,
+      { orgId: 'O1', userId: 'U1', maxEntries: CEILING },
+      leadSweepOf(CEILING + 40),
+    );
 
-    expect(out).toEqual({ version: 1, entryCount: MAX_DIRECTORY_ENTRIES, changed: false });
+    expect(out).toEqual({ version: 1, entryCount: CEILING, changed: false });
     expect(second._txInserts).toEqual([]);
   });
 
   it('leaves a directory under the ceiling completely untouched', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const db = fakeDb({ latestVersion: null });
-    const out = await buildDirectorySnapshot(db, { orgId: 'O1', userId: 'U1' }, leadSweepOf(10));
-    expect(out).toEqual({ version: 1, entryCount: 10, changed: true });
+
+    const out = await buildDirectorySnapshot(db, { orgId: 'O1', userId: 'U1', maxEntries: CEILING }, leadSweepOf(CEILING));
+
+    expect(out).toEqual({ version: 1, entryCount: CEILING, changed: true });
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('publish ceiling'), expect.anything());
+  });
+
+  it('caps at MAX_DIRECTORY_ENTRIES when no ceiling is injected', () => {
+    // The injected ceiling above is a test convenience; what ships is the
+    // constant, and nothing may quietly substitute a smaller one for it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const rows = Array.from({ length: 3 }, (_, i) => i);
+
+    expect(capDirectory(rows, 'O1')).toEqual(rows);
+    expect(capDirectory(rows, 'O1', 2)).toEqual([0, 1]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('is set above the live org\'s published directory, so the warn stays quiet in production', () => {
+    // Measured in prod on 2026-08-25: 149,800 distinct numbers (457,726 raw).
+    // The old 15,000 cap kept the ascending-LOWEST prefix and so labelled
+    // almost none of the high area codes this org is actually called from.
+    expect(MAX_DIRECTORY_ENTRIES).toBe(250_000);
+    expect(MAX_DIRECTORY_ENTRIES).toBeGreaterThan(149_800);
   });
 });
 

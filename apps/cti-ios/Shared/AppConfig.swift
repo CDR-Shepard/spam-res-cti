@@ -27,21 +27,20 @@ enum AppConfig {
     /// How long the background scheduler should wait before the next refresh.
     static let backgroundRefreshInterval: TimeInterval = 4 * 60 * 60
 
-    /// The most entries that may reach the Call Directory extension.
+    /// The most entries the phone will write into the snapshot: a safety valve
+    /// matching the server's publish cap (`MAX_DIRECTORY_ENTRIES` in
+    /// services/cti-api/src/mobile/directory-build.ts), so a server that ever
+    /// forgets its own cap cannot hand this phone an unbounded directory.
     ///
-    /// The extension decodes the whole snapshot before streaming it, and app
-    /// extensions run on a ~12 MB budget. Measured against this snapshot type,
-    /// footprint is ~0.5 KB per entry (20,000 entries → 9.5 MB; 100,000 →
-    /// 49.7 MB), so the breach point is roughly 15–20k with the extension's own
-    /// CallKit/Foundation baseline counted. Past it the extension is jetsammed
-    /// mid-stream: no label ever appears and the rep cannot tell that from the
-    /// switch being off.
+    /// This is NOT an extension-memory bound any more. `DirectoryStore` writes
+    /// a binary snapshot the Call Directory extension STREAMS in fixed chunks,
+    /// so the extension's footprint is O(chunk) regardless of entry count
+    /// (measured: streaming 250,000 entries costs single-digit MB). What still
+    /// bounds the number is reload-time practicality — CallKit has to ingest
+    /// every entry on each reload — plus this valve. The live org publishes
+    /// 149,800, comfortably inside it.
     ///
-    /// The server enforces the same number when it publishes
-    /// (`MAX_DIRECTORY_ENTRIES` in services/cti-api/src/mobile/directory-build.ts).
-    /// This is the phone's own belt-and-braces: a snapshot written by an older
-    /// build, or by a server that has not been updated, still cannot take the
-    /// extension down. Truncation keeps the ascending-lowest prefix, which
-    /// preserves the strictly-ascending order CallKit requires.
-    static let maxDirectoryEntries = 15_000
+    /// Truncation keeps the ascending-lowest prefix, which preserves the
+    /// strictly-ascending order CallKit requires.
+    static let maxDirectoryEntries = 250_000
 }

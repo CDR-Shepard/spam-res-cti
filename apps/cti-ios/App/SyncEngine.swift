@@ -97,9 +97,12 @@ final class SyncEngine: ObservableObject {
         self.pairedUserName = defaults.string(forKey: Keys.pairedUserName)
         self.lastSyncedAt = defaults.object(forKey: Keys.lastSyncedAt) as? Date
 
-        if let snapshot = store?.load() {
-            self.version = snapshot.version
-            self.entryCount = snapshot.entries.count
+        // Header only: the app never needs the records, and reading a
+        // six-figure directory to populate two labels on a status screen is
+        // exactly the cost the binary format exists to avoid.
+        if let header = store?.loadHeader() {
+            self.version = header.version
+            self.entryCount = header.entryCount
         }
     }
 
@@ -227,15 +230,17 @@ final class SyncEngine: ObservableObject {
 
         status = .syncing
         do {
-            let known = forcingFullResync ? nil : store.load()?.version
+            let known = forcingFullResync ? nil : store.loadHeader()?.version
             if let pulled = try await pull(token, known) {
                 try store.save(version: pulled.version, entries: pulled.entries)
                 // Read back rather than trusting the pull: the store is what
                 // the extension will actually publish, so its count and
-                // version are the honest ones to show.
-                let stored = store.load()
+                // version are the honest ones to show. (Dedupe and the write
+                // ceiling both live on the write side, so the header's count
+                // is routinely smaller than the number of rows pulled.)
+                let stored = store.loadHeader()
                 version = stored?.version ?? pulled.version
-                entryCount = stored?.entries.count ?? pulled.entries.count
+                entryCount = stored?.entryCount ?? pulled.entries.count
                 log.info("stored version \(self.version ?? -1) with \(self.entryCount) entries")
             } else {
                 version = known
@@ -249,7 +254,20 @@ final class SyncEngine: ObservableObject {
             // sit there until the next version bump, with every sync in
             // between answering "unchanged" and doing nothing.
             if let current = version, defaults.object(forKey: Keys.reloadedVersion) as? Int != current {
-                try await reload(AppConfig.extensionBundleIdentifier)
+                do {
+                    try await reload(AppConfig.extensionBundleIdentifier)
+                } catch {
+                    // A failing reload can mean CallKit is merely busy — or
+                    // that the snapshot's body is torn under a valid header
+                    // (power loss after the rename's metadata landed but
+                    // before the data blocks flushed). The header alone can't
+                    // tell them apart, and a torn snapshot wedges forever
+                    // otherwise: `loadHeader` keeps succeeding, the server
+                    // keeps answering "unchanged", and the extension keeps
+                    // refusing the same bytes.
+                    discardSnapshotIfCorrupt(store)
+                    throw error
+                }
                 defaults.set(current, forKey: Keys.reloadedVersion)
                 log.info("call directory reloaded at version \(current)")
             }
@@ -266,6 +284,21 @@ final class SyncEngine: ObservableObject {
         } catch {
             log.error("sync failed: \(error.localizedDescription, privacy: .public)")
             status = .failed(Self.message(for: error))
+        }
+    }
+
+    /// Stream-verifies the snapshot after a failed reload; a body that can't
+    /// be read end to end is discarded so the next sync starts from nothing
+    /// and pulls the full directory again. A snapshot that verifies is left
+    /// alone — the reload failure was CallKit's, not the file's.
+    private func discardSnapshotIfCorrupt(_ store: DirectoryStore) {
+        do {
+            try store.verify()
+        } catch {
+            log.error("snapshot failed verification after a reload failure; discarding: \(error.localizedDescription, privacy: .public)")
+            store.removeSnapshot()
+            version = nil
+            entryCount = 0
         }
     }
 

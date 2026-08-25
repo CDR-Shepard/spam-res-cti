@@ -41,15 +41,20 @@ const MAX_CURSOR_PAGES = 500;
 /**
  * Hard ceiling on how many entries one published version may carry.
  *
- * The iPhone's Call Directory extension decodes the whole snapshot into memory
- * before streaming it to CallKit, and app extensions run on a ~12 MB budget.
- * Measured against this exact snapshot shape the footprint is ~0.5 KB per
- * entry (20,000 entries → 9.5 MB; 100,000 → 49.7 MB), putting the breach point
- * around 15–20k once the extension's own CallKit/Foundation baseline is
- * counted. Past it the failure is total and SILENT: jetsam kills the extension
- * mid-stream, the reload reports an error the rep cannot act on, and no label
- * ever appears — indistinguishable from the extension being switched off. So
- * the server refuses to publish more than the phone can hold.
+ * This used to be the phone's memory bound: the Call Directory extension
+ * decoded the whole JSON snapshot before it could publish anything, costing
+ * ~0.5 KB of footprint per entry against an app extension's ~12 MB budget, so
+ * 15,000 was the last safe round number. That bound is gone — the extension now
+ * STREAMS a binary snapshot in fixed-size chunks (`apps/cti-ios/App/
+ * DirectoryStore.swift`), making its footprint O(chunk) rather than
+ * O(entries); measured, 250,000 entries stream in single-digit MB.
+ *
+ * What the ceiling still is: reload-time practicality — CallKit ingests every
+ * entry on each `reloadExtension`, and each version bump makes every paired
+ * phone re-download the whole feed — plus a safety valve, so a sweep that goes
+ * wrong cannot publish an unbounded directory. The live org publishes 149,800,
+ * comfortably inside it, so this must NOT fire in normal operation; a warn here
+ * means the sweep or the org has changed shape and wants looking at.
  *
  * Truncation keeps the ASCENDING-LOWEST prefix of the already-sorted merge, so
  * the snapshot stays sorted, the feed's page order is unchanged, and the same
@@ -57,11 +62,10 @@ const MAX_CURSOR_PAGES = 500;
  * churn above the ceiling never bumps the version for a byte-identical
  * published directory.
  *
- * This is a gate, not the fix: lifting it needs a streaming/chunked store
- * format on the phone (mapped binary or per-chunk decode). Recorded, with this
- * number, in docs/runbooks/caller-id-app.md § "Known limits".
+ * Recorded, with the measurements, in docs/runbooks/caller-id-app.md
+ * § "Known limits".
  */
-export const MAX_DIRECTORY_ENTRIES = 15_000;
+export const MAX_DIRECTORY_ENTRIES = 250_000;
 
 /**
  * A cursor-paging invariant broke: a page whose last row carried no `Id`, a
@@ -264,20 +268,22 @@ export async function sweepRawEntries(deps: SweepDeps, userId: string): Promise<
   return [...leads, ...opps, ...deals];
 }
 
-/** Not pure — warns when it truncates. Caps a merged directory at
- *  `MAX_DIRECTORY_ENTRIES` by keeping the ascending-lowest prefix, so what is
- *  published always fits the phone extension's memory budget (see the constant
- *  for the measurements). Deterministic: the merge is already sorted, so the
- *  same sweep always drops the same tail. */
-function capDirectory<T>(merged: T[], orgId: string): T[] {
-  if (merged.length <= MAX_DIRECTORY_ENTRIES) return merged;
-  console.warn('[directory-build] directory exceeds the Call Directory memory ceiling; publishing the lowest-numbered entries only', {
+/** Not pure — warns when it truncates. Caps a merged directory at `ceiling` by
+ *  keeping the ascending-lowest prefix, so a published version stays inside
+ *  what a CallKit reload can practically ingest (see the constant). The
+ *  ceiling is a parameter with the production default so the cap's own tests
+ *  cost a handful of rows instead of a quarter of a million; every caller in
+ *  the app takes `MAX_DIRECTORY_ENTRIES`. Deterministic: the merge is already
+ *  sorted, so the same sweep always drops the same tail. */
+export function capDirectory<T>(merged: T[], orgId: string, ceiling: number = MAX_DIRECTORY_ENTRIES): T[] {
+  if (merged.length <= ceiling) return merged;
+  console.warn('[directory-build] directory exceeds the Call Directory publish ceiling; publishing the lowest-numbered entries only', {
     orgId,
     swept: merged.length,
-    published: MAX_DIRECTORY_ENTRIES,
-    dropped: merged.length - MAX_DIRECTORY_ENTRIES,
+    published: ceiling,
+    dropped: merged.length - ceiling,
   });
-  return merged.slice(0, MAX_DIRECTORY_ENTRIES);
+  return merged.slice(0, ceiling);
 }
 
 /**
@@ -296,11 +302,13 @@ function capDirectory<T>(merged: T[], orgId: string): T[] {
  */
 export async function buildDirectorySnapshot(
   db: Db,
-  opts: { orgId: string; userId: string },
+  opts: { orgId: string; userId: string; maxEntries?: number },
   sf: SweepDeps = { soqlQuery, sfFetch },
 ): Promise<{ version: number; entryCount: number; changed: boolean }> {
   const raw = await sweepRawEntries(sf, opts.userId);
-  const merged = capDirectory(mergeDirectory(raw), opts.orgId);
+  // `maxEntries` exists so the ceiling's own tests can drive this whole
+  // pipeline against a handful of rows; production never passes it.
+  const merged = capDirectory(mergeDirectory(raw), opts.orgId, opts.maxEntries ?? MAX_DIRECTORY_ENTRIES);
   const hash = contentHash(merged);
 
   const latest = await db.query.callerDirectoryVersions.findFirst({

@@ -200,7 +200,7 @@ final class SyncEngineTests: XCTestCase {
 
         let pulls = await log.pulls
         XCTAssertEqual(pulls, [nil], "the first sync after pairing must ask for everything, never `since`")
-        XCTAssertEqual(store.load()?.entries.map(\.label), ["Lead: New Org"])
+        XCTAssertEqual(try labels(in: store), ["Lead: New Org"])
     }
 
     func testPairingSatisfiesAWipeStillPendingFromTheLastUnpair() async throws {
@@ -273,7 +273,11 @@ final class SyncEngineTests: XCTestCase {
         await engine.retryPendingPurge()
 
         XCTAssertTrue(engine.isPurgePending, "a wipe CallKit still refuses must stay pending")
-        XCTAssertEqual(store.load()?.entries.count, 0, "the snapshot on disk is wiped even when the reload fails")
+        XCTAssertEqual(
+            store.loadHeader()?.entryCount,
+            0,
+            "the snapshot on disk is wiped even when the reload fails"
+        )
     }
 
     func testTheNextForegroundFinishesAWipeThatFailedEarlier() async {
@@ -306,7 +310,73 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertTrue(reloads.isEmpty, "nothing pending, nothing to do")
     }
 
+    func testATornSnapshotIsDiscardedSoTheNextSyncRepairsIt() async {
+        // A valid header over a truncated body — power loss after the
+        // rename's metadata landed but before the data blocks flushed.
+        // Without the discard this wedges forever: `loadHeader` keeps
+        // succeeding, the server keeps answering "unchanged", and the
+        // extension keeps refusing the same bytes.
+        let store = makeStore()
+        try? store.save(version: 5, entries: [
+            DirectoryEntry(e164: "+16195550100", label: "Lead: Jane Doe"),
+            DirectoryEntry(e164: "+16195550101", label: "Lead: John Doe"),
+        ])
+        let whole = (try? Data(contentsOf: store.fileURL)) ?? Data()
+        try? whole.prefix(whole.count - 3).write(to: store.fileURL)
+        XCTAssertNotNil(store.loadHeader(), "the tear must be invisible to the header for this test to mean anything")
+
+        let callKit = ReloadBox(shouldFail: true)
+        let log = CallLog()
+        let engine = makeEngine(
+            store: store,
+            pull: { _, since in
+                await log.recordPull(since: since)
+                if since == nil {
+                    return (version: 6, entries: [DirectoryEntry(e164: "+12135550200", label: "Lead: Repaired")])
+                }
+                return nil // the server rightly answers "unchanged" at version 5
+            },
+            reload: { identifier in try await callKit.reload(identifier) }
+        )
+
+        await engine.sync()
+        XCTAssertNil(store.loadHeader(), "a snapshot that fails verification after a failed reload must be discarded")
+
+        await callKit.stopFailing()
+        await engine.sync()
+
+        XCTAssertEqual(store.loadHeader()?.version, 6)
+        let pulls = await log.pulls
+        XCTAssertEqual(pulls, [5, nil], "the discard is what turns the wedged 'unchanged' answer into a full re-pull")
+    }
+
+    func testAHealthySnapshotSurvivesAReloadThatMerelyFailed() async {
+        // The discard must key on the FILE being bad, not on the reload
+        // failing — CallKit answering `.currentlyLoading` is routine.
+        let store = makeStore()
+        try? store.save(version: 5, entries: [DirectoryEntry(e164: "+16195550100", label: "Lead: Jane Doe")])
+        let callKit = ReloadBox(shouldFail: true)
+        let engine = makeEngine(
+            store: store,
+            pull: { _, _ in nil },
+            reload: { identifier in try await callKit.reload(identifier) }
+        )
+
+        await engine.sync()
+
+        XCTAssertEqual(store.loadHeader()?.version, 5, "a snapshot that verifies must be left alone")
+    }
+
     // MARK: - Fixtures
+
+    /// The labels actually on disk. The store is streamed rather than loaded
+    /// whole — `loadHeader` deliberately reads no records — so a test that
+    /// cares WHICH directory was installed has to walk it.
+    private func labels(in store: DirectoryStore) throws -> [String] {
+        var out: [String] = []
+        try store.streamEntries { _, label in out.append(label) }
+        return out
+    }
 
     /// A throwaway App Group stand-in, cleaned up after the test.
     private func makeStore() -> DirectoryStore {
