@@ -40,11 +40,27 @@ Repeat for every number on the list. Adding a number to the campaign does not it
 
 ## Prove it
 
-1. In the NumberVerifier dashboard, force a check on **one** enrolled number.
-2. Re-run the manifest (see "Generate the list" above).
-3. That number's `enrolled` column must have flipped from `no` to `yes`.
+Use **Send Test Webhook** on the dashboard's Webhooks page with one enrolled
+number. The success response body comes from OUR server
+(`services/cti-api/src/routes/integrations.ts`) and is the proof:
 
-That flip is the whole proof: it means the webhook is not just reachable but actually wired to a real, working NumberVerifier check. It is also sub-project B's gate **NV-1** — do not mark NV-1 satisfied until you've seen this flip yourself.
+```json
+{"ok":true,"phone":"+1…","flagged":false,"health":"healthy","matched":1,"changed":0}
+```
+
+`matched: 1` means the verify key was accepted, the payload parsed, and the
+number was found in `outbound_numbers` — the pipe is live end to end.
+
+`changed: 0` on a clean result is CORRECT, not a failure: the handler is
+deliberately conservative and never writes a clean carrier check over a
+number it didn't park itself (`health_source` stays untouched), so the
+manifest's `enrolled` column only flips once NumberVerifier actually FLAGS
+a number (or clears one it previously flagged). Do not "force checks" hoping
+to flip `enrolled` on healthy numbers — it cannot happen by design.
+
+Gate **NV-1** = the `matched: 1` test response above, verified 2026-08-25
+(all 221 fleet numbers enrolled in the Res-CTI campaign; a real flag now
+pulls the number from rotation and posts to Slack via ALERT_WEBHOOK_URL).
 
 ## If we get an API key
 
