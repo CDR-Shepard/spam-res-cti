@@ -28,6 +28,7 @@ import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { signedCallbackUrl } from '../telephony/webhooks.js';
 import { createAndStartSession } from '../dialer/create-session.js';
+import { workedTodaySafe } from '../dialer/already-worked.js';
 import {
   advanceSession,
   pauseSession,
@@ -39,7 +40,7 @@ import {
   type EngineDeps,
 } from '../dialer/engine.js';
 import { inFlightItem, nextEligiblePendingItem, earliestRetryAt } from '../dialer/state.js';
-import { sessionCounts, rolloverSummary } from '../dialer/session-store.js';
+import { sessionCounts, skipBreakdown, rolloverSummary } from '../dialer/session-store.js';
 import { buildEngineDeps } from '../dialer/live-deps.js';
 import { mapAnsweredBy } from '../dialer/amd.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
@@ -211,7 +212,11 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     }
     const db = getDb();
     const result = await createAndStartSession(
-      { resolveDialNumber, fetchTasks, salesforceUserId, db, advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()) },
+      {
+        resolveDialNumber, fetchTasks, salesforceUserId, db,
+        workedToday: (orgId, numbers) => workedTodaySafe(db, orgId, numbers),
+        advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()),
+      },
       { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds },
     );
     return { ...result, recordCount: recordIds.length };
@@ -225,7 +230,11 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
 
     const db = getDb();
     const result = await createAndStartSession(
-      { resolveDialNumber, fetchTasks, salesforceUserId, db, advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()) },
+      {
+        resolveDialNumber, fetchTasks, salesforceUserId, db,
+        workedToday: (orgId, numbers) => workedTodaySafe(db, orgId, numbers),
+        advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()),
+      },
       {
         userId: authed.userId,
         orgId: authed.orgId,
@@ -258,6 +267,12 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     return {
       session,
       counts: sessionCounts(items),
+      skipBreakdown: skipBreakdown(items),
+      // What the run STARTED with. `counts.total` grows mid-run (an attempt-2
+      // retry row is appended), which would make the inherited-day line drift
+      // upward while the rep watches it. Attempt-1 rows are exactly the queue
+      // creation built, so this figure is fixed for the life of the session.
+      firstPassTotal: items.filter((i) => i.attempt === 1).length,
       currentItem: current,
       waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
       rollovers: rolloverSummary(jobs),

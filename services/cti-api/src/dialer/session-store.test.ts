@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rolloverSummary, sessionCounts } from './session-store.js';
+import { rolloverSummary, sessionCounts, skipBreakdown } from './session-store.js';
 
 const item = (status: string) => ({ status } as Parameters<typeof sessionCounts>[0][number]);
 
@@ -10,6 +10,18 @@ describe('sessionCounts', () => {
       item('skipped'), item('unreachable'), item('pending'), item('dialing'),
     ]);
     expect(c).toMatchObject({ total: 8, done: 1, connected: 1, noConnect: 2, skipped: 1, unreachable: 1, pending: 1 });
+  });
+});
+
+describe('skipBreakdown', () => {
+  it('counts skipped rows per outcome and ignores non-skipped rows', () => {
+    expect(skipBreakdown([
+      { status: 'skipped', outcome: 'already_worked' },
+      { status: 'skipped', outcome: 'already_worked' },
+      { status: 'skipped', outcome: 'skip_on_dialer' },
+      { status: 'skipped', outcome: null },
+      { status: 'pending', outcome: null },
+    ])).toEqual({ already_worked: 2, skip_on_dialer: 1, other: 1 });
   });
 });
 

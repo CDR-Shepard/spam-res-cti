@@ -37,6 +37,13 @@ export interface DialerSessionView {
   /** Set when the run is idle only because its retries are inside the 5-min floor. */
   waitingRetry?: { nextRetryAt: string } | null;
   rollovers?: DialerRollovers;
+  /** Per-outcome tally of skipped rows (see `session-store.ts#skipBreakdown`
+   *  on the server) — what the rep inherited when the run started. */
+  skipBreakdown?: Record<string, number>;
+  /** Attempt-1 rows only: the size of the queue creation built. `counts.total`
+   *  grows as retries are appended, so this is what the start-of-run line
+   *  reports. Optional — an older server omits it. */
+  firstPassTotal?: number;
 }
 
 export type DialerControlAction = 'pause' | 'resume' | 'skip' | 'stop' | 'next';
