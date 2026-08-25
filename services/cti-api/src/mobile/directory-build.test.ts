@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildDirectorySnapshot, sweepRawEntries, type SweepDeps } from './directory-build.js';
+import { buildDirectorySnapshot, pickActingUsers, sweepRawEntries, type SweepDeps } from './directory-build.js';
 import { contentHash, mergeDirectory } from './directory-merge.js';
 import { schema } from '../db/index.js';
 
@@ -151,6 +151,19 @@ describe('sweepRawEntries', () => {
     expect(entries).toEqual([{ e164: '+16195550100', name: 'Jane Doe', stage: 'lead' }]);
   });
 
+  it('propagates a transient Deal__c describe failure (500) instead of skipping Deals — only a 404 is tolerated', async () => {
+    const soqlQuery = vi.fn(async (_u: string, q: string) => {
+      // A correct implementation aborts before ever issuing this query.
+      if (/FROM Deal__c/.test(q)) throw new Error('should not query Deal__c after a transient describe failure');
+      return [];
+    }) as unknown as SweepDeps['soqlQuery'];
+    const sfFetch = vi.fn(async (_u: string, path: string) =>
+      (path === '/sobjects/Deal__c/describe' ? { status: 500, json: null } : { status: 404, json: null }),
+    ) as unknown as SweepDeps['sfFetch'];
+
+    await expect(sweepRawEntries({ soqlQuery, sfFetch }, 'U1')).rejects.toThrow(/describe failed \(500\)/);
+  });
+
   it('keeps paging past a short page — a page under PAGE_SIZE does not mean the sweep is done', async () => {
     // Regression test: Salesforce's REST batch size can come back smaller
     // than the SOQL LIMIT (done: false with a short `records` array) for
@@ -227,6 +240,26 @@ describe('buildDirectorySnapshot', () => {
     expect(db._deletes).toHaveLength(0);
   });
 
+  it('aborts the snapshot — no writes at all — when the Deal__c describe fails transiently (not a 404)', async () => {
+    const db = fakeDb({ latestVersion: null });
+    const sf: SweepDeps = {
+      soqlQuery: vi.fn(async (_u: string, q: string) =>
+        (/FROM Lead/.test(q) && !q.includes('Id >')
+          ? [{ Id: 'L1', Name: 'Jane Doe', Phone: '6195550100', MobilePhone: null }]
+          : [])) as unknown as SweepDeps['soqlQuery'],
+      sfFetch: vi.fn(async (_u: string, path: string) =>
+        (path === '/sobjects/Deal__c/describe' ? { status: 503, json: null } : { status: 404, json: null }),
+      ) as unknown as SweepDeps['sfFetch'],
+    };
+
+    await expect(buildDirectorySnapshot(db, { orgId: 'O1', userId: 'U1' }, sf)).rejects.toThrow(/describe failed \(503\)/);
+    // Nothing published — not even the Lead sweep's entries, which is
+    // correct: a transient Deal__c failure must abort the WHOLE snapshot,
+    // not publish a partial one missing Deals.
+    expect(db._txInserts).toHaveLength(0);
+    expect(db._deletes).toHaveLength(0);
+  });
+
   it('chunks large inserts to stay under the bind-parameter cap, still inside the same transaction', async () => {
     // Regression test: a single multi-row INSERT for an org-wide directory
     // can exceed Postgres's 65535-bind-parameter cap. 2500 rows (with 5
@@ -265,5 +298,43 @@ describe('buildDirectorySnapshot', () => {
       table: schema.callerDirectoryVersions,
       values: { orgId: 'O1', version: 1, entryCount: N },
     });
+  });
+});
+
+describe('pickActingUsers', () => {
+  it('picks the org\'s connected admin user', () => {
+    const rows = [
+      { orgId: 'O1', userId: 'U1', isAdmin: true },
+      { orgId: 'O1', userId: 'U2', isAdmin: false },
+      { orgId: 'O2', userId: 'U3', isAdmin: false },
+    ];
+
+    expect(pickActingUsers(rows)).toEqual([{ orgId: 'O1', userId: 'U1' }]);
+  });
+
+  it('yields no acting user for an org with no connected admin — no non-admin fallback', () => {
+    // Per the brief: "resolves the org's connected admin user". A rep whose
+    // sharing rules hide most records must never become the source of truth
+    // for the whole org's caller-ID directory.
+    const rows = [
+      { orgId: 'O1', userId: 'U2', isAdmin: false },
+      { orgId: 'O2', userId: 'U3', isAdmin: true },
+    ];
+
+    expect(pickActingUsers(rows)).toEqual([{ orgId: 'O2', userId: 'U3' }]);
+  });
+
+  it('is deterministic when an org has more than one connected admin, regardless of row order', () => {
+    const rowsAscending = [
+      { orgId: 'O1', userId: 'U1', isAdmin: true },
+      { orgId: 'O1', userId: 'U2', isAdmin: true },
+    ];
+    const rowsDescending = [...rowsAscending].reverse();
+
+    const pickedAscending = pickActingUsers(rowsAscending);
+    const pickedDescending = pickActingUsers(rowsDescending);
+
+    expect(pickedAscending).toEqual([{ orgId: 'O1', userId: 'U1' }]);
+    expect(pickedDescending).toEqual(pickedAscending);
   });
 });
