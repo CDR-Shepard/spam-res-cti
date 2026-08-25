@@ -1,0 +1,212 @@
+import BackgroundTasks
+import CallKit
+import Foundation
+import os
+
+/// The app's one piece of behaviour: pull the directory, write the snapshot,
+/// tell CallKit to reload the extension — and publish enough state for the UI
+/// to show what happened.
+///
+/// A single shared instance because the SwiftUI scene's background-refresh
+/// handler and the views must drive the same sync (and because two concurrent
+/// syncs writing the same snapshot file would be pointless work).
+@MainActor
+final class SyncEngine: ObservableObject {
+    static let shared = SyncEngine()
+
+    enum Status: Equatable {
+        case idle
+        case syncing
+        case failed(String)
+    }
+
+    @Published private(set) var isPaired: Bool
+    @Published private(set) var pairedUserName: String?
+    @Published private(set) var status: Status = .idle
+    @Published private(set) var version: Int?
+    @Published private(set) var entryCount: Int = 0
+    @Published private(set) var lastSyncedAt: Date?
+    @Published private(set) var extensionEnabled: CXCallDirectoryManager.EnabledStatus = .unknown
+
+    private let store: DirectoryStore?
+    private let defaults: UserDefaults
+    private let log = Logger(subsystem: "com.gghomes.cti.callerid", category: "SyncEngine")
+
+    private enum Keys {
+        static let lastSyncedAt = "lastSyncedAt"
+        static let pairedUserName = "pairedUserName"
+        /// The snapshot version CallKit was last confirmed to have loaded.
+        static let reloadedVersion = "reloadedVersion"
+    }
+
+    init(
+        store: DirectoryStore? = DirectoryStore.appGroup(),
+        defaults: UserDefaults = UserDefaults(suiteName: AppConfig.appGroupIdentifier) ?? .standard
+    ) {
+        self.store = store
+        self.defaults = defaults
+        self.isPaired = DeviceTokenStore.load() != nil
+        self.pairedUserName = defaults.string(forKey: Keys.pairedUserName)
+        self.lastSyncedAt = defaults.object(forKey: Keys.lastSyncedAt) as? Date
+
+        if let snapshot = store?.load() {
+            self.version = snapshot.version
+            self.entryCount = snapshot.entries.count
+        }
+    }
+
+    // MARK: - Pairing
+
+    func pair(code: String, deviceLabel: String) async throws {
+        let claim = try await claimPairingCode(code: code, deviceLabel: deviceLabel)
+        try DeviceTokenStore.save(claim.deviceToken)
+        pairedUserName = claim.user.displayName
+        defaults.set(claim.user.displayName, forKey: Keys.pairedUserName)
+        isPaired = true
+        await sync()
+    }
+
+    /// Drops the token AND the snapshot, then reloads the extension so the
+    /// phone stops identifying this org's numbers straight away.
+    func unpair() {
+        DeviceTokenStore.delete()
+        isPaired = false
+        pairedUserName = nil
+        version = nil
+        entryCount = 0
+        lastSyncedAt = nil
+        status = .idle
+        defaults.removeObject(forKey: Keys.pairedUserName)
+        defaults.removeObject(forKey: Keys.lastSyncedAt)
+        defaults.removeObject(forKey: Keys.reloadedVersion)
+
+        try? store?.save(version: 0, entries: [])
+        Task { try? await reloadExtension() }
+    }
+
+    // MARK: - Syncing
+
+    /// Pull → store → reload. Safe to call from anywhere; failures land in
+    /// `status` rather than propagating, because every caller (appear,
+    /// button, background task) wants the same handling.
+    func sync() async {
+        // Four things drive a sync (appear, foregrounding, the button, the
+        // background task) and two of them can land together — foregrounding
+        // onto a screen that also syncs on appear. One at a time: the second
+        // would only re-download what the first is already writing.
+        guard status != .syncing else { return }
+        guard let token = DeviceTokenStore.load() else {
+            status = .failed("This iPhone is not paired yet.")
+            return
+        }
+        guard let store else {
+            status = .failed("The shared app group container is unavailable.")
+            return
+        }
+
+        status = .syncing
+        do {
+            let known = store.load()?.version
+            if let pulled = try await fetchAll(baseURL: AppConfig.baseURL, token: token, since: known) {
+                try store.save(version: pulled.version, entries: pulled.entries)
+                // Read back rather than trusting the pull: the store is what
+                // the extension will actually publish, so its count and
+                // version are the honest ones to show.
+                let stored = store.load()
+                version = stored?.version ?? pulled.version
+                entryCount = stored?.entries.count ?? pulled.entries.count
+                log.info("stored version \(self.version ?? -1) with \(self.entryCount) entries")
+            } else {
+                version = known
+                log.info("directory unchanged at version \(known ?? -1)")
+            }
+
+            // Reload whenever CallKit is not known to be holding what the
+            // store holds. Keyed on the version rather than on "we just
+            // pulled something", because a reload that failed last time must
+            // be retried — otherwise a stored-but-never-loaded directory would
+            // sit there until the next version bump, with every sync in
+            // between answering "unchanged" and doing nothing.
+            if let current = version, defaults.object(forKey: Keys.reloadedVersion) as? Int != current {
+                try await reloadExtension()
+                defaults.set(current, forKey: Keys.reloadedVersion)
+                log.info("call directory reloaded at version \(current)")
+            }
+
+            lastSyncedAt = Date()
+            defaults.set(lastSyncedAt, forKey: Keys.lastSyncedAt)
+            status = .idle
+        } catch FeedError.http(status: 401) {
+            // The device was revoked from the softphone's device list.
+            unpair()
+            status = .failed("This iPhone was unpaired. Enter a new pairing code.")
+        } catch {
+            log.error("sync failed: \(error.localizedDescription, privacy: .public)")
+            status = .failed(Self.message(for: error))
+        }
+
+        await refreshExtensionStatus()
+    }
+
+    // MARK: - The Call Directory extension
+
+    private func reloadExtension() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            CXCallDirectoryManager.sharedInstance
+                .reloadExtension(withIdentifier: AppConfig.extensionBundleIdentifier) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+        }
+    }
+
+    func refreshExtensionStatus() async {
+        extensionEnabled = await withCheckedContinuation { continuation in
+            CXCallDirectoryManager.sharedInstance
+                .getEnabledStatusForExtension(withIdentifier: AppConfig.extensionBundleIdentifier) { status, _ in
+                    continuation.resume(returning: status)
+                }
+        }
+    }
+
+    // MARK: - Background refresh
+
+    /// Asks the system for another background window. iOS decides when (or
+    /// whether) to grant it; a rejection is logged, never fatal — the app
+    /// still syncs on foreground and on the Refresh button.
+    func scheduleBackgroundRefresh() {
+        let request = BGAppRefreshTaskRequest(identifier: AppConfig.backgroundRefreshTaskIdentifier)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: AppConfig.backgroundRefreshInterval)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+        } catch {
+            log.notice("background refresh not scheduled: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// The body of the registered `BGAppRefreshTask`: schedule the next window
+    /// first (so a failure below cannot end the chain), then sync.
+    func runBackgroundRefresh() async {
+        scheduleBackgroundRefresh()
+        guard isPaired else { return }
+        await sync()
+    }
+
+    // MARK: - Errors
+
+    private static func message(for error: Error) -> String {
+        switch error {
+        case FeedError.http(let status):
+            return "The server refused the request (HTTP \(status))."
+        case FeedError.versionUnstable:
+            return "The directory was being republished. Try again in a moment."
+        case FeedError.malformedResponse, FeedError.invalidURL:
+            return "The server sent an unexpected response."
+        default:
+            return error.localizedDescription
+        }
+    }
+}
