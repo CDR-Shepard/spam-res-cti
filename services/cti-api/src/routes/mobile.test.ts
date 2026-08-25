@@ -34,6 +34,15 @@ const state = vi.hoisted(() => ({
   // claimable — i.e. a concurrent claimant won the race between the two.
   pairCodeClaimLost: false,
   deviceInsertCount: 0,
+  // The `where` predicates the routes actually handed the database, so the
+  // scoping tests below assert what was MATCHED rather than what the fixture
+  // happened to hold. Without these the fake returns its single fixture for
+  // any query, so dropping the token-hash lookup, the ownership scope, or the
+  // org scope would still pass every other test in this file.
+  lastDeviceFindWhere: null as unknown,
+  lastDevicesListWhere: null as unknown,
+  lastDirectoryVersionsWhere: null as unknown,
+  lastDirectoryEntriesWhere: null as unknown,
 }));
 
 vi.mock('../auth/session.js', () => ({
@@ -104,12 +113,28 @@ function fakeDb() {
     query: {
       mobilePairCodes: { findFirst: async () => state.pairCode },
       mobileDevices: {
-        findFirst: async () => state.device,
-        findMany: async () => state.devicesList,
+        findFirst: async (config?: { where?: unknown }) => {
+          state.lastDeviceFindWhere = config?.where;
+          return state.device;
+        },
+        findMany: async (config?: { where?: unknown }) => {
+          state.lastDevicesListWhere = config?.where;
+          return state.devicesList;
+        },
       },
       users: { findFirst: async () => state.user },
-      callerDirectoryVersions: { findFirst: async () => state.latestVersion },
-      callerDirectoryEntries: { findMany: async () => state.entries },
+      callerDirectoryVersions: {
+        findFirst: async (config?: { where?: unknown }) => {
+          state.lastDirectoryVersionsWhere = config?.where;
+          return state.latestVersion;
+        },
+      },
+      callerDirectoryEntries: {
+        findMany: async (config?: { where?: unknown }) => {
+          state.lastDirectoryEntriesWhere = config?.where;
+          return state.entries;
+        },
+      },
     },
     delete(_table: unknown) {
       return { where: async () => { state.deletedPairCodes = true; } };
@@ -179,6 +204,10 @@ beforeEach(async () => {
   state.lastPairCodeClaimWhere = null;
   state.pairCodeClaimLost = false;
   state.deviceInsertCount = 0;
+  state.lastDeviceFindWhere = null;
+  state.lastDevicesListWhere = null;
+  state.lastDirectoryVersionsWhere = null;
+  state.lastDirectoryEntriesWhere = null;
   claimAttemptsByIp.clear();
   claimAttemptsGlobal.splice(0, claimAttemptsGlobal.length);
   app = Fastify();
@@ -293,6 +322,12 @@ describe('POST /mobile/pair/claim', () => {
     expect(predicate).toContain('code_hash =');
     expect(predicate).toContain('used_at is null');
     expect(predicate).toContain('expires_at >');
+    // …and that the three are ANDed. Without this the same three substrings
+    // are present in an `or(...)` of them, which would let ANY random 6-digit
+    // POST match an already-used or long-expired row and mint a token bound
+    // to somebody else's account.
+    expect(predicate).toContain(' and ');
+    expect(predicate).not.toContain(' or ');
   });
 
   it('401s and mints NO device when the atomic claim matches no row (a concurrent claimant won)', async () => {
@@ -330,9 +365,10 @@ describe('POST /mobile/pair/claim', () => {
       recordClaimFailureGlobal(claimAttemptsGlobal, nowMs);
     }
     const results: number[] = [];
-    // A fresh IP every request is exactly what a spoofed X-Forwarded-For
-    // buys an attacker in production (trustProxy: true) — the per-IP
-    // limiter alone would let every single one of these through.
+    // A fresh IP every request is what a botnet (or any pool of source
+    // addresses) buys an attacker even with `trustProxy: 1` pinning req.ip
+    // to what the edge observed — the per-IP limiter alone, three guesses
+    // per address, would let every single one of these through.
     for (let i = 0; i < 2; i++) {
       const res = await app.inject({
         method: 'POST',
@@ -523,6 +559,39 @@ describe('GET /mobile/caller-directory', () => {
     expect(res.statusCode).toBe(200);
     expect(state.lastUpdateValues).toHaveProperty('lastSeenAt');
   });
+
+  it('asks the database for the device BY TOKEN HASH — the auth is in the where clause, not in the fixture', async () => {
+    // The fake returns `state.device` for any query, so every other test here
+    // would still pass if the lookup dropped its predicate entirely and
+    // authenticated the first device row in the table. Assert what the
+    // database was actually asked to match.
+    state.device = { id: 'dev-1', userId: USER_ID, revokedAt: null };
+    state.user = { id: USER_ID, orgId: ORG_ID, displayName: 'Jane Rep' };
+    const res = await feed();
+    expect(res.statusCode).toBe(200);
+    expect(renderPredicate(state.lastDeviceFindWhere)).toContain('token_hash =');
+  });
+
+  it('scopes both directory reads to the device holder\'s org (and the entries to the latest version)', async () => {
+    // Cross-tenant: a device token belongs to a user, the user to an org, and
+    // the directory is org-wide CRM data. Dropping either org_id here would
+    // serve another org's names and numbers to this phone, and every
+    // assertion above would still be green because the fake answers
+    // unconditionally.
+    state.device = { id: 'dev-1', userId: USER_ID, revokedAt: null };
+    state.user = { id: USER_ID, orgId: ORG_ID, displayName: 'Jane Rep' };
+    state.latestVersion = { version: 3, entryCount: 1 };
+    state.entries = [{ e164: '+16195550100', label: 'Lead: A' }];
+
+    const res = await feed();
+    expect(res.statusCode).toBe(200);
+
+    expect(renderPredicate(state.lastDirectoryVersionsWhere)).toContain('org_id =');
+    const entriesWhere = renderPredicate(state.lastDirectoryEntriesWhere);
+    expect(entriesWhere).toContain('org_id =');
+    expect(entriesWhere).toContain('version =');
+    expect(entriesWhere).toContain(' and ');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -590,6 +659,16 @@ describe('GET /mobile/devices', () => {
       devices: [{ id: 'dev-1', label: "Jane's iPhone", createdAt: createdAt.toISOString(), lastSeenAt: lastSeenAt.toISOString() }],
     });
   });
+
+  it('lists only the CALLER\'S still-active devices — the scope is in the where clause', async () => {
+    state.authedUser = { userId: USER_ID, orgId: ORG_ID, email: 'rep@example.com', isAdmin: false };
+    const res = await app.inject({ method: 'GET', url: '/mobile/devices', headers: { authorization: 'Bearer tok' } });
+    expect(res.statusCode).toBe(200);
+    const predicate = renderPredicate(state.lastDevicesListWhere);
+    expect(predicate).toContain('user_id =');
+    expect(predicate).toContain('revoked_at is null');
+    expect(predicate).toContain(' and ');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -615,6 +694,21 @@ describe('DELETE /mobile/devices/:id', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true });
     expect(state.lastUpdateValues).toHaveProperty('revokedAt');
+  });
+
+  it('looks the device up scoped to the caller — id AND user_id, never id alone (IDOR)', async () => {
+    // The 404 test above passes with an unscoped `where eq(id)` too, because
+    // the fake simply returns whatever fixture the test set. The ownership
+    // check only actually exists if the database is the one enforcing it:
+    // without user_id in this predicate, any rep could revoke any other rep's
+    // phone by guessing a device id.
+    state.authedUser = { userId: USER_ID, orgId: ORG_ID, email: 'rep@example.com', isAdmin: false };
+    state.device = { id: 'dev-1', userId: USER_ID, revokedAt: null };
+    await app.inject({ method: 'DELETE', url: '/mobile/devices/dev-1', headers: { authorization: 'Bearer tok' } });
+    const predicate = renderPredicate(state.lastDeviceFindWhere);
+    expect(predicate).toContain('id =');
+    expect(predicate).toContain('user_id =');
+    expect(predicate).toContain(' and ');
   });
 });
 
