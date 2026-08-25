@@ -1047,7 +1047,7 @@ export function velocityGateCheck(
 ): CheckResult {
   // A window older than a minute is spent: its count describes a burst that is
   // already over, so it reads as 0 rather than blocking on stale data.
-  const inWindow = n.lastMinuteWindowStart !== null
+  const inWindow = n.lastMinuteWindowStart != null
     && (now.getTime() - n.lastMinuteWindowStart.getTime()) < VELOCITY_WINDOW_MS;
   const count = inWindow ? n.lastMinuteDialCount : 0;
   return count >= VELOCITY_MAX_PER_MINUTE

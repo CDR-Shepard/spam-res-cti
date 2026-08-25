@@ -65,10 +65,14 @@ export function progressLabel(counts: DialerSessionCounts): string {
 export function queueLine(firstPassTotal: number, unreachable: number, breakdown?: Record<string, number>): string {
   const alreadyWorked = breakdown?.already_worked ?? 0;
   const skipOnDialer = breakdown?.skip_on_dialer ?? 0;
-  const dialing = firstPassTotal - alreadyWorked - skipOnDialer - unreachable;
+  // Consent skips are creation-stamped too (opted out / blocked list / DNC) —
+  // they must come out of the "dialing" figure or the line overstates the run.
+  const consent = (breakdown?.opted_out ?? 0) + (breakdown?.blocked ?? 0) + (breakdown?.dnc_blocked ?? 0);
+  const dialing = firstPassTotal - alreadyWorked - skipOnDialer - consent - unreachable;
   const parts = [`${firstPassTotal} records`];
   if (alreadyWorked > 0) parts.push(`${alreadyWorked} already worked today`);
   if (skipOnDialer > 0) parts.push(`${skipOnDialer} skipped by flag`);
+  if (consent > 0) parts.push(`${consent} blocked by consent`);
   parts.push(`dialing ${dialing}`);
   return parts.join(' · ');
 }
