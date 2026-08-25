@@ -21,6 +21,11 @@ const state = vi.hoisted(() => ({
   deletedPairCodes: false,
   lastUpdateValues: null as Record<string, unknown> | null,
   updateCallCount: 0,
+  // How many successive `mobilePairCodes` inserts should simulate a
+  // codeHash primary-key collision (`.onConflictDoNothing().returning()`
+  // resolving to `[]`) before an insert is allowed to "succeed".
+  pairCodeInsertConflictsRemaining: 0,
+  pairCodeInsertAttempts: 0,
 }));
 
 vi.mock('../auth/session.js', () => ({
@@ -32,12 +37,28 @@ vi.mock('../db/index.js', async (importOriginal) => {
   return { ...actual, getDb: () => fakeDb() };
 });
 
-import { registerMobileRoutes, allowClaimAttempt, claimAttemptsByIp, pairCodeClaimable, sortEntriesByDigits, paginate, generatePairCode } from './mobile.js';
+import {
+  registerMobileRoutes,
+  allowClaimAttempt,
+  allowClaimAttemptGlobal,
+  claimAttemptsByIp,
+  claimAttemptsGlobal,
+  pairCodeClaimable,
+  sortEntriesByDigits,
+  paginate,
+  generatePairCode,
+} from './mobile.js';
 
 /**
- * Just enough of the drizzle surface mobile.ts touches. `insert(...).values()`
- * and `update(...).set().where()` are fire-and-forget in every route here (no
- * `.returning()` is ever chained), so they just record what was written.
+ * Just enough of the drizzle surface mobile.ts touches. `update(...).set().where()`
+ * is fire-and-forget in every route here (no `.returning()` is ever chained),
+ * so it just records what was written. `insert(...).values(...)` returns a
+ * thenable (so a plain `await db.insert(...).values(...)` — the
+ * `mobileDevices` insert — still works unchanged) that ALSO exposes
+ * `.onConflictDoNothing().returning()` — the `mobilePairCodes` insert's
+ * retry-on-collision path — resolving to `[]` for
+ * `pairCodeInsertConflictsRemaining` calls (simulating a codeHash collision)
+ * before "succeeding" with an inserted row.
  */
 function fakeDb() {
   return {
@@ -55,7 +76,24 @@ function fakeDb() {
       return { where: async () => { state.deletedPairCodes = true; } };
     },
     insert(_table: unknown) {
-      return { values: async (_values: unknown) => undefined };
+      return {
+        values: (values: Record<string, unknown>) => {
+          const thenable = Promise.resolve(undefined) as Promise<void> & {
+            onConflictDoNothing: () => { returning: () => Promise<Array<Record<string, unknown>>> };
+          };
+          thenable.onConflictDoNothing = () => ({
+            returning: async () => {
+              state.pairCodeInsertAttempts++;
+              if (state.pairCodeInsertConflictsRemaining > 0) {
+                state.pairCodeInsertConflictsRemaining--;
+                return [];
+              }
+              return [{ ...values }];
+            },
+          });
+          return thenable;
+        },
+      };
     },
     update(_table: unknown) {
       return {
@@ -86,7 +124,10 @@ beforeEach(async () => {
   state.deletedPairCodes = false;
   state.lastUpdateValues = null;
   state.updateCallCount = 0;
+  state.pairCodeInsertConflictsRemaining = 0;
+  state.pairCodeInsertAttempts = 0;
   claimAttemptsByIp.clear();
+  claimAttemptsGlobal.splice(0, claimAttemptsGlobal.length);
   app = Fastify();
   await registerMobileRoutes(app);
   await app.ready();
@@ -117,6 +158,26 @@ describe('POST /mobile/pair/start', () => {
     expect(expiresAt - before).toBeGreaterThan(4 * 60 * 1000);
     expect(expiresAt - before).toBeLessThan(6 * 60 * 1000);
     expect(state.deletedPairCodes).toBe(true);
+  });
+
+  it('retries generation on a codeHash collision and still succeeds', async () => {
+    state.authedUser = { userId: USER_ID, orgId: ORG_ID, email: 'rep@example.com', isAdmin: false };
+    // Simulate two PRIMARY KEY collisions (another still-live code hashing
+    // the same digits) before the third randomly generated code is free.
+    state.pairCodeInsertConflictsRemaining = 2;
+    const res = await app.inject({ method: 'POST', url: '/mobile/pair/start', headers: { authorization: 'Bearer tok' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().code).toMatch(/^\d{6}$/);
+    expect(state.pairCodeInsertAttempts).toBe(3);
+  });
+
+  it('gives up with a 503 (not an unhandled 500) after exhausting retries', async () => {
+    state.authedUser = { userId: USER_ID, orgId: ORG_ID, email: 'rep@example.com', isAdmin: false };
+    // Every attempt collides — a pathological run the loop must bound.
+    state.pairCodeInsertConflictsRemaining = Number.POSITIVE_INFINITY;
+    const res = await app.inject({ method: 'POST', url: '/mobile/pair/start', headers: { authorization: 'Bearer tok' } });
+    expect(res.statusCode).toBe(503);
+    expect(state.pairCodeInsertAttempts).toBe(5); // MAX_CODE_GENERATION_ATTEMPTS
   });
 });
 
@@ -173,6 +234,25 @@ describe('POST /mobile/pair/claim', () => {
     }
     expect(results.slice(0, 3)).toEqual([401, 401, 401]);
     expect(results[3]).toBe(429);
+  });
+
+  it('the global backstop still 429s a brute-force spread across distinct IPs — the per-IP bucket alone cannot catch it', async () => {
+    state.pairCode = undefined;
+    const results: number[] = [];
+    // A fresh IP every request is exactly what a spoofed X-Forwarded-For
+    // buys an attacker in production (trustProxy: true) — the per-IP
+    // limiter alone would let every single one of these through.
+    for (let i = 0; i < 21; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/mobile/pair/claim',
+        remoteAddress: `10.0.0.${i}`,
+        payload: { code: '000000', deviceLabel: 'Device' },
+      });
+      results.push(res.statusCode);
+    }
+    expect(results.slice(0, 20).every((s) => s === 401)).toBe(true);
+    expect(results[20]).toBe(429); // CLAIM_RATE_LIMIT_GLOBAL
   });
 });
 
@@ -420,6 +500,37 @@ describe('allowClaimAttempt', () => {
     const now = 1_000_000;
     for (let i = 0; i < 3; i++) allowClaimAttempt(map, '1.2.3.4', now);
     expect(allowClaimAttempt(map, '1.2.3.4', now + 61_000)).toBe(true);
+  });
+
+  it('sweeps stale keys out of the map entirely (bounds memory against a spoofed value per request)', () => {
+    const map = new Map<string, number[]>();
+    const now = 1_000_000;
+    // Simulate an attacker cycling a fresh IP per request: each key is
+    // visited exactly once and never revisited, so nothing would ever prune
+    // it except a sweep that looks at every key, not just the current one.
+    for (let i = 0; i < 50; i++) allowClaimAttempt(map, `spoofed-${i}`, now + i);
+    expect(map.size).toBe(50);
+    // Once the whole window has rolled past, the next call — for ANY key —
+    // must sweep every stale entry out, not just record its own.
+    allowClaimAttempt(map, 'spoofed-999', now + 61_000);
+    expect(map.size).toBe(1);
+    expect(map.has('spoofed-999')).toBe(true);
+  });
+});
+
+describe('allowClaimAttemptGlobal', () => {
+  it('allows up to the global limit, then refuses within the same window, regardless of caller identity', () => {
+    const bucket: number[] = [];
+    const now = 1_000_000;
+    for (let i = 0; i < 20; i++) expect(allowClaimAttemptGlobal(bucket, now + i)).toBe(true);
+    expect(allowClaimAttemptGlobal(bucket, now + 20)).toBe(false);
+  });
+
+  it('lets the bucket back in once the window has rolled past', () => {
+    const bucket: number[] = [];
+    const now = 1_000_000;
+    for (let i = 0; i < 20; i++) allowClaimAttemptGlobal(bucket, now + i);
+    expect(allowClaimAttemptGlobal(bucket, now + 61_000)).toBe(true);
   });
 });
 

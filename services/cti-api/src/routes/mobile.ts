@@ -20,7 +20,7 @@
  */
 import { randomInt } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
 import { getDb, schema } from '../db/index.js';
@@ -33,28 +33,64 @@ const DEVICE_TOKEN_BYTES = 32;
 /** Feed pages of ≤10,000 entries (spec). Exported so `paginate` can be unit
  *  tested with a small injected size without waiting on a 10k-row fixture. */
 export const FEED_PAGE_SIZE = 10_000;
+/** Pairing-code insert retries on a `codeHash` primary-key collision before
+ *  giving up (see pair/start). */
+const MAX_CODE_GENERATION_ATTEMPTS = 5;
 
 // ---------------------------------------------------------------------------
-// Claim rate limiter: 3 attempts/min/IP, simple in-process Map. This app is
-// single-instance (see server.ts) — a per-process Map is enough; a
+// Claim rate limiter: 3 attempts/min/IP, simple in-process Map (spec). This
+// app is single-instance (see server.ts) — a per-process Map is enough; a
 // multi-instance deploy would need a shared store (e.g. Redis) instead.
-// Exported so mobile.test.ts can clear it between tests (otherwise attempts
-// from one test would bleed into the next via this module-level state).
+//
+// The per-IP key alone is not a real defense: server.ts sets `trustProxy:
+// true`, so `req.ip` is whatever the client's leftmost `X-Forwarded-For`
+// entry says — an attacker can mint a fresh one on every request and never
+// hit the same bucket twice. Fixing trustProxy's hop-trust is a server.ts
+// (app-wide) change outside this route's scope, so instead this route adds
+// a GLOBAL backstop (`claimAttemptsGlobal`, below) that isn't keyed by
+// anything the caller controls — spoofing X-Forwarded-For cannot split it.
+// Exported so mobile.test.ts can clear them between tests (otherwise
+// attempts from one test would bleed into the next via this module state).
 // ---------------------------------------------------------------------------
 const CLAIM_RATE_LIMIT = 3;
 const CLAIM_RATE_WINDOW_MS = 60_000;
 export const claimAttemptsByIp = new Map<string, number[]>();
 
-/** Pure — true when `ip` has room for another claim attempt right now;
- *  records the attempt (as a side effect on `map`) when it does. */
+/** Global backstop: total claim attempts across every IP (real or spoofed)
+ *  in the trailing window. Generous enough for a couple of reps pairing (and
+ *  mistyping) concurrently, but it bounds worst-case guesses against the
+ *  1,000,000-value code space to a low fraction over any one code's 5-minute
+ *  life, no matter how many distinct `X-Forwarded-For` values an attacker
+ *  cycles through. */
+const CLAIM_RATE_LIMIT_GLOBAL = 20;
+export const claimAttemptsGlobal: number[] = [];
+
+/** Not pure — mutates `map` (drops stale keys/entries, records the new
+ *  attempt) as a documented side effect. True when `ip` has room for another
+ *  claim attempt right now. Sweeps every key's timestamps on each call (not
+ *  just `ip`'s), so a Map fed a constant stream of never-repeated keys —
+ *  e.g. one spoofed `X-Forwarded-For` per request — still gets emptied back
+ *  out once those entries age past the window, instead of growing forever. */
 export function allowClaimAttempt(map: Map<string, number[]>, ip: string, now: number): boolean {
-  const recent = (map.get(ip) ?? []).filter((t) => now - t < CLAIM_RATE_WINDOW_MS);
-  if (recent.length >= CLAIM_RATE_LIMIT) {
-    map.set(ip, recent);
-    return false;
+  for (const [key, timestamps] of map) {
+    const fresh = timestamps.filter((t) => now - t < CLAIM_RATE_WINDOW_MS);
+    if (fresh.length === 0) map.delete(key);
+    else map.set(key, fresh);
   }
+  const recent = map.get(ip) ?? [];
+  if (recent.length >= CLAIM_RATE_LIMIT) return false;
   recent.push(now);
   map.set(ip, recent);
+  return true;
+}
+
+/** Not pure — mutates `bucket` in place. The global-backstop analogue of
+ *  `allowClaimAttempt`, keyed on nothing but the clock. */
+export function allowClaimAttemptGlobal(bucket: number[], now: number): boolean {
+  const fresh = bucket.filter((t) => now - t < CLAIM_RATE_WINDOW_MS);
+  bucket.splice(0, bucket.length, ...fresh);
+  if (bucket.length >= CLAIM_RATE_LIMIT_GLOBAL) return false;
+  bucket.push(now);
   return true;
 }
 
@@ -149,29 +185,60 @@ export async function registerMobileRoutes(app: FastifyInstance): Promise<void> 
     if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
 
     const db = getDb();
+    const now = new Date();
     // A rep who hits "pair" twice should only ever have ONE live code — prior
-    // UNUSED codes are superseded. Used codes are left alone: they're already
-    // claimed, so keeping them is harmless and preserves the audit trail.
+    // UNUSED codes of theirs are superseded. Used codes are left alone (across
+    // every user): they're already claimed, so keeping them until they expire
+    // is harmless and preserves the audit trail. Separately, ANY row (used or
+    // not, any user) that has already expired is purged here too — codeHash
+    // is the table's PRIMARY KEY with no per-user scoping, so an unreaped row
+    // still occupies part of the 1,000,000-value code space forever and its
+    // collision odds on the insert below only grow over time. Purging on
+    // every pair/start bounds the table to roughly "codes minted in the last
+    // five minutes" instead of letting it grow without limit.
     await db
       .delete(schema.mobilePairCodes)
-      .where(and(eq(schema.mobilePairCodes.userId, authed.userId), isNull(schema.mobilePairCodes.usedAt)));
+      .where(
+        or(
+          and(eq(schema.mobilePairCodes.userId, authed.userId), isNull(schema.mobilePairCodes.usedAt)),
+          lt(schema.mobilePairCodes.expiresAt, now),
+        ),
+      );
 
-    const code = generatePairCode();
-    const expiresAt = new Date(Date.now() + PAIR_CODE_TTL_MS);
-    await db.insert(schema.mobilePairCodes).values({
-      codeHash: sha256(code),
-      userId: authed.userId,
-      expiresAt,
-    });
-    // The raw code is minted ONLY here, in the response the rep reads off
-    // their screen to type into the phone — never logged, never stored.
-    return { code, expiresAt: expiresAt.toISOString() };
+    const expiresAt = new Date(now.getTime() + PAIR_CODE_TTL_MS);
+    // codeHash is the PRIMARY KEY (a shared, global key space — not scoped
+    // per user), so a genuine collision with another still-live code is
+    // possible even after the purge above. Retry with a freshly generated
+    // code instead of letting the unique-violation surface as an unhandled
+    // 500; at this table size the loop exits on the first attempt in
+    // practice; the cap only guards against a truly pathological run.
+    for (let attempt = 0; attempt < MAX_CODE_GENERATION_ATTEMPTS; attempt++) {
+      const code = generatePairCode();
+      const [inserted] = await db
+        .insert(schema.mobilePairCodes)
+        .values({ codeHash: sha256(code), userId: authed.userId, expiresAt })
+        .onConflictDoNothing()
+        .returning();
+      if (inserted) {
+        // The raw code is minted ONLY here, in the response the rep reads
+        // off their screen to type into the phone — never logged, never
+        // stored.
+        return { code, expiresAt: expiresAt.toISOString() };
+      }
+    }
+    req.log.error('mobile_pair_code_generation_exhausted');
+    return reply.code(503).send({ error: 'Could not generate a pairing code — try again' });
   });
 
   app.post('/mobile/pair/claim', async (req, reply) => {
     // Rate-limit BEFORE touching the DB, so brute-forcing codes can't even
-    // spend a query per guess once the window is exhausted.
-    if (!allowClaimAttempt(claimAttemptsByIp, req.ip, Date.now())) {
+    // spend a query per guess once the window is exhausted. Both limiters are
+    // always evaluated (not short-circuited) so the global backstop counts
+    // every attempt, not just the ones that also passed the per-IP bucket.
+    const nowMs = Date.now();
+    const withinIpLimit = allowClaimAttempt(claimAttemptsByIp, req.ip, nowMs);
+    const withinGlobalLimit = allowClaimAttemptGlobal(claimAttemptsGlobal, nowMs);
+    if (!withinIpLimit || !withinGlobalLimit) {
       return reply.code(429).send({ error: 'Too many attempts — try again in a minute' });
     }
     const parsed = ClaimBody.safeParse(req.body);

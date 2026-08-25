@@ -28,14 +28,24 @@ export function MobilePairingCard({ onToast }: Props): JSX.Element {
   const [code, setCode] = useState<PairStartResponse | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [devices, setDevices] = useState<PairedDevice[] | null>(null);
+  const [devicesError, setDevicesError] = useState(false);
   const [revokingId, setRevokingId] = useState<string | null>(null);
 
-  const refreshDevices = useCallback(async () => {
+  // Returns whether the fetch succeeded, so callers that need to know (the
+  // revoke flow below) don't have to re-derive it from state that may not
+  // have committed yet. Never throws: a failure is recorded in
+  // `devicesError` (rendered as a retry affordance below) instead of being
+  // swallowed — leaving `devices` untouched rather than clearing it, so a
+  // transient failure doesn't blank out a list that was showing correctly.
+  const refreshDevices = useCallback(async (): Promise<boolean> => {
     try {
       const r = await listPairedDevices();
       setDevices(r.devices);
+      setDevicesError(false);
+      return true;
     } catch {
-      /* best-effort — the card just shows no list */
+      setDevicesError(true);
+      return false;
     }
   }, []);
 
@@ -69,8 +79,16 @@ export function MobilePairingCard({ onToast }: Props): JSX.Element {
     setRevokingId(id);
     try {
       await revokeDevice(id);
-      await refreshDevices();
-      onToast({ text: 'Device unpaired.', type: 'success' });
+      // The revoke itself succeeded even if the follow-up list refresh
+      // fails — say so, rather than a bare "Device unpaired." success toast
+      // sitting over a list that may still show the device that was just
+      // removed.
+      const refreshed = await refreshDevices();
+      onToast(
+        refreshed
+          ? { text: 'Device unpaired.', type: 'success' }
+          : { text: 'Device unpaired, but the list could not refresh — reload to confirm.', type: 'error' },
+      );
     } catch (e) {
       onToast({ text: (e as Error).message, type: 'error' });
     } finally {
@@ -107,7 +125,19 @@ export function MobilePairingCard({ onToast }: Props): JSX.Element {
               {pairing ? <span className="spinner" /> : 'Get pairing code'}
             </button>
           )}
-          {devices && devices.length === 0 && (
+          {devicesError && (
+            <div className="sub" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span>Couldn&apos;t load your devices.</span>
+              <button
+                className="btn ghost"
+                style={{ padding: '2px 10px', fontSize: 11 }}
+                onClick={() => void refreshDevices()}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {!devicesError && devices && devices.length === 0 && (
             <div className="sub">No devices paired yet.</div>
           )}
         </div>
