@@ -307,6 +307,47 @@ describe('createDialerSession — already-worked skip at queue build', () => {
     expect(workedToday).toHaveBeenCalledWith('O1', []);
   });
 
+  it('batches each distinct number once, even when two records share it', async () => {
+    const db = fakeDb();
+    const workedToday = vi.fn(async () => new Set<string>());
+    await createDialerSession(
+      deps(db, resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+16195550100', '00Q3': '+12135550200' }), workedToday) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2', '00Q3'] },
+    );
+
+    // The same person on two records is one number to look up: a list of 200
+    // duplicates must not become 200 binds in the IN (...) clause.
+    expect(workedToday).toHaveBeenCalledWith('O1', ['+16195550100', '+12135550200']);
+    // Both rows still read the shared number's verdict (empty set here → dial).
+    expect(db._itemRows.map((x) => [x.recordId, x.status])).toEqual([
+      ['00Q1', 'pending'], ['00Q2', 'pending'], ['00Q3', 'pending'],
+    ]);
+  });
+
+  it('a run whose every number was worked today builds an all-skipped queue and still kicks the engine', async () => {
+    const db = fakeDb();
+    const advance = vi.fn().mockResolvedValue(undefined);
+    await createAndStartSession(
+      {
+        ...deps(db, resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+12135550200' }),
+          async () => new Set(['+16195550100', '+12135550200'])),
+        advance,
+      } as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
+    );
+
+    // The headline case: a second shift restarting the morning's list inherits
+    // all of it — every row visible as skipped/already_worked, nothing dropped.
+    expect(db._itemRows.map((x) => [x.recordId, x.status, x.outcome])).toEqual([
+      ['00Q1', 'skipped', 'already_worked'],
+      ['00Q2', 'skipped', 'already_worked'],
+    ]);
+    // The kick still goes out exactly once: creation always hands the engine
+    // the session, which finds nothing pending and completes the run.
+    expect(advance).toHaveBeenCalledOnce();
+    expect(advance).toHaveBeenCalledWith('S1');
+  });
+
   it('the fail-open dep returning an empty set leaves everything pending', async () => {
     const db = fakeDb();
     await createDialerSession(

@@ -44,7 +44,7 @@ const SKIP_ON_DIALER_OUTCOME = 'skip_on_dialer';
 
 /** Outcome stamped on a number the team already power-dialed today, so the
  *  panel can show the run inherited an earlier shift's work. */
-export const ALREADY_WORKED_OUTCOME = 'already_worked';
+const ALREADY_WORKED_OUTCOME = 'already_worked';
 
 export function buildQueueRows(
   sessionId: string,
@@ -165,7 +165,12 @@ export async function createDialerSession(
   }
   // ONE batched read for the whole run, after the session exists (a conflicting
   // create returns the rep's existing session above and never gets here).
-  const worked = await deps.workedToday(args.orgId, resolved.map((r) => r.toNumber).filter((n): n is string => !!n));
+  // Distinct: a list often carries the same person on two records, and the
+  // verdict is per NUMBER — duplicates would only bloat the IN (...) binds.
+  const worked = await deps.workedToday(
+    args.orgId,
+    [...new Set(resolved.map((r) => r.toNumber).filter((n): n is string => !!n))],
+  );
   const rows = buildQueueRows(session!.id, resolved.map((r) => ({ ...r, alreadyWorked: !!r.toNumber && worked.has(r.toNumber) })));
   if (rows.length) await deps.db.insert(schema.dialerQueueItems).values(rows);
   return { sessionId: session!.id, total: rows.length };
