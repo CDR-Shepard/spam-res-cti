@@ -61,11 +61,43 @@ the phone with a reason `PairView` can show.
    onto a restored handset). The extension never reads the Keychain.
 2. **Sync.** `SyncEngine` calls `GET /mobile/caller-directory?since=<version>`.
    `unchanged` ends it there; otherwise `fetchAll` walks pages 1..pageCount.
-3. **Store.** `DirectoryStore` writes one JSON snapshot into the App Group
-   container — temp file, then rename — so a reader only ever opens a whole
-   snapshot.
+3. **Store.** `DirectoryStore` writes one **binary** snapshot
+   (`caller-directory.bin`) into the App Group container — temp file, then
+   rename — so a reader only ever opens a whole snapshot.
 4. **Reload.** `CXCallDirectoryManager.reloadExtension(withIdentifier:)` asks
    iOS to run the extension, which streams the snapshot back to CallKit.
+
+### The snapshot format
+
+Little-endian throughout. A 20-byte header — magic `CTID`, `formatVersion`
+`UInt32`, `directoryVersion` `Int64`, `entryCount` `UInt32` — then exactly
+`entryCount` records, strictly ascending by number and deduped: `number`
+`Int64`, `labelLen` `UInt16`, `labelLen` bytes of UTF-8. No footer; anything
+after the last record is corruption.
+
+It is binary so the extension can **stream** it. The previous JSON snapshot had
+to be decoded whole before the first entry could be published — about 0.5 KB of
+footprint per entry against an app extension's ~12 MB budget — which is where
+the old 15,000-entry cap came from, and that cap kept the ascending-*lowest*
+numbers, i.e. mostly not the ones reps get called from. Reading splits in two:
+
+- `loadHeader()` reads 20 bytes and nothing else. It is all the app and
+  `StatusView` ever wanted (version, entry count), whatever the directory's
+  size.
+- `streamEntries` parses in 64 KiB chunks and yields one record at a time,
+  never materializing an entry array. Measured `phys_footprint` over baseline:
+  **0.42 MB at 150,000 entries, 0.39 MB at 250,000** — flat in entry count.
+
+Each chunk read runs inside its own `autoreleasepool`. That is load-bearing,
+not tidiness: `FileHandle.read(upToCount:)` returns autoreleased-backed `Data`,
+nothing drains the extension's pool until `beginRequest` returns, and without
+the pool every chunk stays live — 9.94 MB at 250,000 entries, i.e. the whole
+budget, with tests passing regardless.
+
+Anything the parser cannot vouch for throws a `DirectoryStoreError` (bad magic,
+unknown format version, truncated record, a `labelLen` past EOF, a label that
+is not UTF-8, a non-ascending number, a record count that disagrees with the
+header, trailing bytes) and the extension cancels the request.
 
 Sync runs on foreground appear, on the **Refresh now** button, on pull to
 refresh, and from a `BGAppRefreshTask`
@@ -94,8 +126,9 @@ the e164's digits as an `Int64` (`+16195550100` → `16195550100`), and ordering
 is by that number — never by the e164 text, which stops tracking magnitude the
 moment two numbers differ in digit count. The server already sorts this way;
 `DirectoryStore` sorts defensively anyway, drops rows with no usable number or
-a number an earlier row already used, and refuses to *load* a snapshot that is
-out of order. A snapshot that is missing, corrupt, or out of order makes the
+a number an earlier row already used, and checks the order again on the way
+out — `streamEntries` throws the moment a number fails to exceed its
+predecessor. A snapshot that is missing, corrupt, or out of order makes the
 extension `cancelRequest(withError:)` rather than publish a partial directory
 over a good one.
 

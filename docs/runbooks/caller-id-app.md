@@ -227,18 +227,17 @@ repeat run is expected (the content hash hasn't moved) — it still confirms
 the pipeline runs end to end.
 
 **Check `entryCount` against the ceiling before rolling the app out.** The
-publish caps at 15,000 entries (§7). If `entryCount` comes back at exactly
-15,000, the org's real directory is larger than that and the tail is being
+publish caps at 250,000 entries (§7). If `entryCount` comes back at exactly
+250,000, the org's real directory is larger than that and the tail is being
 dropped — the API logs a
-`directory exceeds the Call Directory memory ceiling` warn with the dropped
-count. That is not a blocker for the rollout (the labels that do publish are
-correct, and it beats a jetsammed extension), but it means §7's streaming
-follow-up is now load-bearing. The org's true, uncapped size is the warn's
-`swept` field in the `@cti/api` logs — the table only ever holds the
-published (capped) count:
+`directory exceeds the Call Directory publish ceiling` warn with the dropped
+count. This org publishes 149,800, so that warn firing means the sweep or the
+org has changed shape and wants investigating before the rollout continues.
+The org's true, uncapped size is the warn's `swept` field in the `@cti/api`
+logs — the table only ever holds the published (capped) count:
 
 ```sql
--- the PUBLISHED count (at most 15,000) — the uncapped size is the warn's
+-- the PUBLISHED count (at most 250,000) — the uncapped size is the warn's
 -- `swept` field, not this query:
 SELECT count(*) FROM caller_directory_entries
 WHERE org_id = '<org uuid>' AND version = <the version printed above>;
@@ -389,44 +388,73 @@ Until then, this is a known, accepted limitation — not a bug to chase.
 
 ## 7. Known limits
 
-### The directory is capped at 15,000 entries
+### The directory is capped at 250,000 entries
 
-**The number:** `MAX_DIRECTORY_ENTRIES = 15_000` in
+**The number:** `MAX_DIRECTORY_ENTRIES = 250_000` in
 `services/cti-api/src/mobile/directory-build.ts`, mirrored as
 `AppConfig.maxDirectoryEntries` on the phone
 (`apps/cti-ios/Shared/AppConfig.swift`). A published version never contains
 more; past the cap the server keeps the **lowest-numbered** entries (the merge
 is already sorted ascending, so it drops the tail) and logs
-`directory exceeds the Call Directory memory ceiling` with the dropped count.
+`directory exceeds the Call Directory publish ceiling` with the dropped count.
 The phone applies the same cap when it writes, as a belt-and-suspenders guard
-against a server that ever forgets its own. The read-side cap in
-`DirectoryStore.load` only truncates what the extension streams — the decode
-of an oversized file has already paid the memory cost by then — so the
-server-side cap is the guarantee that matters.
+against a server that ever forgets its own.
 
-**Why 15,000.** The Call Directory extension decodes the whole snapshot into
-memory before streaming it to CallKit, and iOS runs app extensions on a ~12 MB
-budget. Measured against this exact snapshot type (a standalone `swiftc -O`
-harness, Swift 6.2's rewritten `JSONDecoder`): 20,000 entries (1.1 MB of JSON)
-→ 9.5 MB physical footprint; 50,000 → 25.7 MB; 100,000 (5.6 MB JSON) →
-49.7 MB — about **0.5 KB of footprint per entry**, ~8.5× the JSON's own size,
-most of it decoder transient held as dirty pages, which is exactly what jetsam
-bills. With the extension's own CallKit/Foundation baseline counted the breach
-point lands around 15–20k, so 15,000 is the last round number that is safely
-inside it.
+**This org publishes 149,800 entries** (measured in prod 2026-08-25; 457,726
+raw rows — lead 344,205 / opp 106,386 / deal 7,135 — merged and deduped). That
+is comfortably inside the ceiling, so **the warn above should never fire**; if
+it does, the sweep or the org has changed shape and wants looking at before
+anything else.
 
-**What going over would have cost.** The failure is total and silent: iOS
-jetsams the extension mid-stream, `reloadExtension` comes back with an error,
-`SyncEngine` never records the reloaded version so every subsequent
-foreground/refresh/background tick relaunches and re-kills it, and **no label
-ever appears on any call**. To the rep that is indistinguishable from the
-extension being switched off. Capping publishes a partial directory instead —
-correct labels for the numbers it does carry.
+**Why 250,000 and not a memory number.** It is no longer a memory number. The
+extension **streams** the snapshot: `DirectoryStore` writes a little-endian
+binary file (see `apps/cti-ios/README.md` for the layout) and
+`streamEntries` parses it in 64 KiB chunks, yielding one record at a time
+without ever materializing an entry array. Measured with a standalone
+`swiftc -O` harness against the real `DirectoryStore` (`phys_footprint` via
+`task_info`, streaming in its own process the way the extension does):
 
-**The follow-up that lifts it:** make the phone's store streamable rather than
-fully decoded — a packed fixed-width binary read via
-`Data(contentsOf:options:.mappedIfSafe)` and iterated in place, or a chunked
-file set decoded one chunk at a time inside an `autoreleasepool` — and raise
-both constants together once the new format is measured. Until then, an org
-whose CRM holds more than 15,000 distinct phone numbers gets the lowest-numbered
-15,000 of them (see §2b for how to tell).
+| entries | file | footprint over baseline |
+|---|---|---|
+| 150,000 | 5.76 MB | **0.42 MB** |
+| 250,000 | 9.67 MB | **0.39 MB** |
+
+Flat in entry count, against an app extension's ~12 MB budget. The old cap was
+15,000 because the extension decoded the whole JSON snapshot first (~0.5 KB of
+footprint per entry: 20,000 → 9.5 MB, 100,000 → 49.7 MB), and because that cap
+kept the ascending-**lowest** prefix it labelled almost none of the numbers
+this org is actually called from — its traffic is 619 (34,667), 760 (13,957),
+858 (13,670), then 951, 909, 714, 310, 323, 818, 562.
+
+What still bounds the number is **reload-time practicality** — CallKit ingests
+every entry on each `reloadExtension` — plus the value of having a valve at
+all, so a sweep that goes wrong cannot publish an unbounded directory.
+
+**One gotcha worth keeping.** The per-chunk `autoreleasepool` in
+`streamEntries` is load-bearing. `FileHandle.read(upToCount:)` returns
+autoreleased-backed `Data`, and nothing drains the extension's pool until
+`beginRequest` returns, so without it every chunk stays live: measured at
+9.94 MB over baseline at 250,000 entries — the whole budget — while every unit
+test still passed, because a test that streams a few thousand records cannot
+tell O(chunk) from O(entries). Only the harness catches this. If the read path
+is ever restructured, re-run the harness rather than trusting the suite.
+
+**What going over the ceiling costs.** The server publishes a partial directory
+— correct labels for the numbers it does carry, the lowest-numbered ones. That
+is a deliberate trade, not a failure mode.
+
+### The feed is full-resync, so a version bump is not free
+
+There is no delta sync: any content change bumps the version and every paired
+phone re-downloads the **whole** directory. At 149,800 entries that is roughly
+15 feed pages (`FEED_PAGE_SIZE` is 10,000) and on the order of 8–10 MB per
+phone per bump, on the foreground / background-refresh cadence. That is
+acceptable at the current publish frequency and org size; **delta or
+incremental sync is the obvious follow-up** if either grows, or if reps start
+seeing the app work hard on cellular.
+
+Related, and accepted: the **app side still accumulates all pages in memory**
+before handing them to the streaming write, so a sync's transient is on the
+order of tens of MB (measured: ~65 MB peak while building and writing a
+250,000-entry snapshot). That is fine in the app — a foreground app has room an
+extension does not — and page-streaming the write is deliberately out of scope.
