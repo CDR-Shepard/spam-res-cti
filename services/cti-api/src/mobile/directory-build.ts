@@ -39,6 +39,31 @@ const ENTRY_INSERT_CHUNK_SIZE = 1000;
 const MAX_CURSOR_PAGES = 500;
 
 /**
+ * Hard ceiling on how many entries one published version may carry.
+ *
+ * The iPhone's Call Directory extension decodes the whole snapshot into memory
+ * before streaming it to CallKit, and app extensions run on a ~12 MB budget.
+ * Measured against this exact snapshot shape the footprint is ~0.5 KB per
+ * entry (20,000 entries → 9.5 MB; 100,000 → 49.7 MB), putting the breach point
+ * around 15–20k once the extension's own CallKit/Foundation baseline is
+ * counted. Past it the failure is total and SILENT: jetsam kills the extension
+ * mid-stream, the reload reports an error the rep cannot act on, and no label
+ * ever appears — indistinguishable from the extension being switched off. So
+ * the server refuses to publish more than the phone can hold.
+ *
+ * Truncation keeps the ASCENDING-LOWEST prefix of the already-sorted merge, so
+ * the snapshot stays sorted, the feed's page order is unchanged, and the same
+ * sweep always yields the same snapshot. The hash is taken AFTER the cap, so
+ * churn above the ceiling never bumps the version for a byte-identical
+ * published directory.
+ *
+ * This is a gate, not the fix: lifting it needs a streaming/chunked store
+ * format on the phone (mapped binary or per-chunk decode). Recorded, with this
+ * number, in docs/runbooks/caller-id-app.md § "Known limits".
+ */
+export const MAX_DIRECTORY_ENTRIES = 15_000;
+
+/**
  * A cursor-paging invariant broke: a page whose last row carried no `Id`, a
  * cursor that failed to advance, or the hard page bound. Its own class because
  * `sweepDeals` deliberately swallows Deal-side QUERY failures (an unreadable
@@ -237,8 +262,24 @@ export async function sweepRawEntries(deps: SweepDeps, userId: string): Promise<
   return [...leads, ...opps, ...deals];
 }
 
+/** Not pure — warns when it truncates. Caps a merged directory at
+ *  `MAX_DIRECTORY_ENTRIES` by keeping the ascending-lowest prefix, so what is
+ *  published always fits the phone extension's memory budget (see the constant
+ *  for the measurements). Deterministic: the merge is already sorted, so the
+ *  same sweep always drops the same tail. */
+function capDirectory<T>(merged: T[], orgId: string): T[] {
+  if (merged.length <= MAX_DIRECTORY_ENTRIES) return merged;
+  console.warn('[directory-build] directory exceeds the Call Directory memory ceiling; publishing the lowest-numbered entries only', {
+    orgId,
+    swept: merged.length,
+    published: MAX_DIRECTORY_ENTRIES,
+    dropped: merged.length - MAX_DIRECTORY_ENTRIES,
+  });
+  return merged.slice(0, MAX_DIRECTORY_ENTRIES);
+}
+
 /**
- * Sweep -> merge -> hash -> publish, for one org. Publishing is a version
+ * Sweep -> merge -> cap -> hash -> publish, for one org. Publishing is a version
  * bump ONLY when the merged content actually changed: the new hash is
  * compared against the latest `caller_directory_versions` row for the org,
  * and an unchanged hash is a no-op (`changed: false`) — no new rows, nothing
@@ -257,7 +298,7 @@ export async function buildDirectorySnapshot(
   sf: SweepDeps = { soqlQuery, sfFetch },
 ): Promise<{ version: number; entryCount: number; changed: boolean }> {
   const raw = await sweepRawEntries(sf, opts.userId);
-  const merged = mergeDirectory(raw);
+  const merged = capDirectory(mergeDirectory(raw), opts.orgId);
   const hash = contentHash(merged);
 
   const latest = await db.query.callerDirectoryVersions.findFirst({

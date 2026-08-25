@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildDirectorySnapshot,
   CursorPagingError,
+  MAX_DIRECTORY_ENTRIES,
   pickActingUsers,
   startDirectoryLoop,
   sweepRawEntries,
@@ -470,6 +471,88 @@ describe('buildDirectorySnapshot', () => {
       table: schema.callerDirectoryVersions,
       values: { orgId: 'O1', version: 1, entryCount: N },
     });
+  });
+});
+
+describe('the Call Directory entry ceiling', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  /** `count` swept Leads with strictly ascending, valid US numbers, served in
+   *  PAGE_SIZE batches the way pageByIdCursor asks for them. */
+  function leadSweepOf(count: number): SweepDeps {
+    const leads = Array.from({ length: count }, (_, i) => ({
+      Id: `L${String(i).padStart(6, '0')}`,
+      Name: `Lead ${i}`,
+      // 619-2xx-xxxx ascending in i, so the "lowest-numbered prefix" the cap
+      // keeps is exactly the first MAX_DIRECTORY_ENTRIES of these.
+      Phone: `6192${String(i).padStart(6, '0')}`,
+      MobilePhone: null,
+    }));
+    let served = 0;
+    const soqlQuery = vi.fn(async (_u: string, q: string) => {
+      if (!/FROM Lead/.test(q)) return [];
+      const batch = leads.slice(served, served + 2000);
+      served += batch.length;
+      return batch;
+    }) as unknown as SweepDeps['soqlQuery'];
+    return { soqlQuery, sfFetch: vi.fn(async () => ({ status: 404, json: null })) as unknown as SweepDeps['sfFetch'] };
+  }
+
+  it('publishes at most MAX_DIRECTORY_ENTRIES rows, keeping the ascending-lowest prefix, and warns about the tail it dropped', async () => {
+    // Past this ceiling the phone extension is jetsammed mid-stream and NO
+    // label ever appears — a total, silent failure. So the server publishes
+    // what the phone can hold rather than what the CRM happens to contain.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const over = 5;
+    const db = fakeDb({ latestVersion: null });
+
+    const out = await buildDirectorySnapshot(db, { orgId: 'O1', userId: 'U1' }, leadSweepOf(MAX_DIRECTORY_ENTRIES + over));
+
+    expect(out).toEqual({ version: 1, entryCount: MAX_DIRECTORY_ENTRIES, changed: true });
+    const published = db._txInserts
+      .filter((i: { table: unknown }) => i.table === schema.callerDirectoryEntries)
+      .flatMap((i: { values: unknown }) => i.values as Array<{ e164: string }>);
+    expect(published).toHaveLength(MAX_DIRECTORY_ENTRIES);
+    // The prefix kept is the LOWEST numbers, still ascending — the order the
+    // feed pages in and CallKit requires.
+    expect(published[0]!.e164).toBe('+16192000000');
+    expect(published[MAX_DIRECTORY_ENTRIES - 1]!.e164).toBe(`+16192${String(MAX_DIRECTORY_ENTRIES - 1).padStart(6, '0')}`);
+    // …and the version row agrees with what was actually written.
+    expect(db._txInserts[db._txInserts.length - 1]).toMatchObject({
+      table: schema.callerDirectoryVersions,
+      values: { orgId: 'O1', version: 1, entryCount: MAX_DIRECTORY_ENTRIES },
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('memory ceiling'),
+      expect.objectContaining({ orgId: 'O1', published: MAX_DIRECTORY_ENTRIES, dropped: over }),
+    );
+  });
+
+  it('hashes what it publishes, so churn ABOVE the ceiling never bumps the version', async () => {
+    // The hash has to be taken after the cap: otherwise every Lead added past
+    // the ceiling would republish a byte-identical directory, bumping the
+    // version, pruning the previous one, and making every phone re-download
+    // the whole thing for nothing.
+    const first = fakeDb({ latestVersion: null });
+    await buildDirectorySnapshot(first, { orgId: 'O1', userId: 'U1' }, leadSweepOf(MAX_DIRECTORY_ENTRIES + 5));
+    const versionRow = first._txInserts[first._txInserts.length - 1] as { values: { contentHash: string } };
+
+    const second = fakeDb({
+      latestVersion: { version: 1, contentHash: versionRow.values.contentHash, entryCount: MAX_DIRECTORY_ENTRIES },
+    });
+    const out = await buildDirectorySnapshot(second, { orgId: 'O1', userId: 'U1' }, leadSweepOf(MAX_DIRECTORY_ENTRIES + 50));
+
+    expect(out).toEqual({ version: 1, entryCount: MAX_DIRECTORY_ENTRIES, changed: false });
+    expect(second._txInserts).toEqual([]);
+  });
+
+  it('leaves a directory under the ceiling completely untouched', async () => {
+    const db = fakeDb({ latestVersion: null });
+    const out = await buildDirectorySnapshot(db, { orgId: 'O1', userId: 'U1' }, leadSweepOf(10));
+    expect(out).toEqual({ version: 1, entryCount: 10, changed: true });
   });
 });
 
