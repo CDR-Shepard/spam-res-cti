@@ -15,6 +15,7 @@ import { registerReputationRoutes } from './routes/reputation.js';
 import { registerIntegrationRoutes } from './routes/integrations.js';
 import { registerRecordingRoutes } from './routes/recordings.js';
 import { registerDialerRoutes } from './routes/dialer.js';
+import { registerMobileRoutes } from './routes/mobile.js';
 import { startSyncLoop } from './salesforce/sync.js';
 import { startFollowupLoop, startRetryNudgeLoop } from './salesforce/followup-worker.js';
 import { startReputationWorker } from './reputation/worker.js';
@@ -105,6 +106,7 @@ async function main(): Promise<void> {
   await registerIntegrationRoutes(app);
   await registerRecordingRoutes(app);
   await registerDialerRoutes(app);
+  await registerMobileRoutes(app);
 
   const syncTimer = startSyncLoop(5000);
   const followupTimer = startFollowupLoop(5000);

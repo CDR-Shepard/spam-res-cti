@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import { formatE164 } from '../format';
 import { PhoneOutgoingIcon } from '../icons';
+import { MobilePairingCard } from './MobilePairingCard';
 
 interface Props {
   /** Current failover number (E.164) or null, from /auth/me. */
@@ -35,54 +36,57 @@ export function SettingsPanel({ forwardE164, onSaved, onToast }: Props): JSX.Ele
   }, [onSaved, onToast]);
 
   return (
-    <div className="set-list">
-      <div className="set-row">
-        <div className="icon" style={{ color: forwardE164 ? 'var(--good)' : 'var(--text-muted)' }}>
-          <PhoneOutgoingIcon />
-        </div>
-        <div className="label" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div className="name">Call forwarding</div>
-          <div className="sub">
-            If you don't pick up a callback within 10s, it rings this number before
-            going to voicemail — on every number assigned to you.
+    <>
+      <div className="set-list">
+        <div className="set-row">
+          <div className="icon" style={{ color: forwardE164 ? 'var(--good)' : 'var(--text-muted)' }}>
+            <PhoneOutgoingIcon />
           </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-            <input
-              className="field"
-              inputMode="tel"
-              placeholder="+1 555 010 0123 (your mobile)"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') { const v = draft.trim(); if (v) void save(v); } }}
-              style={{ fontSize: 13, flex: 1 }}
-            />
-            <button
-              className="btn primary"
-              style={{ padding: '6px 12px', fontSize: 12 }}
-              disabled={saving || !draft.trim() || draft.trim() === (forwardE164 ?? '')}
-              onClick={() => void save(draft.trim())}
-            >
-              {saving ? <span className="spinner" /> : 'Save'}
-            </button>
-          </div>
-          {forwardE164 && (
-            <div
-              className="sub"
-              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}
-            >
-              <span style={{ color: 'var(--good)' }}>Forwarding to {formatE164(forwardE164)}</span>
+          <div className="label" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div className="name">Call forwarding</div>
+            <div className="sub">
+              If you don't pick up a callback within 10s, it rings this number before
+              going to voicemail — on every number assigned to you.
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+              <input
+                className="field"
+                inputMode="tel"
+                placeholder="+1 555 010 0123 (your mobile)"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { const v = draft.trim(); if (v) void save(v); } }}
+                style={{ fontSize: 13, flex: 1 }}
+              />
               <button
-                className="btn ghost"
-                style={{ padding: '2px 10px', fontSize: 11 }}
-                disabled={saving}
-                onClick={() => { setDraft(''); void save(null); }}
+                className="btn primary"
+                style={{ padding: '6px 12px', fontSize: 12 }}
+                disabled={saving || !draft.trim() || draft.trim() === (forwardE164 ?? '')}
+                onClick={() => void save(draft.trim())}
               >
-                Turn off
+                {saving ? <span className="spinner" /> : 'Save'}
               </button>
             </div>
-          )}
+            {forwardE164 && (
+              <div
+                className="sub"
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}
+              >
+                <span style={{ color: 'var(--good)' }}>Forwarding to {formatE164(forwardE164)}</span>
+                <button
+                  className="btn ghost"
+                  style={{ padding: '2px 10px', fontSize: 11 }}
+                  disabled={saving}
+                  onClick={() => { setDraft(''); void save(null); }}
+                >
+                  Turn off
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
-    </div>
+      <MobilePairingCard onToast={onToast} />
+    </>
   );
 }
