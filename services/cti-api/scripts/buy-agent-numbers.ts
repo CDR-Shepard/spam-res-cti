@@ -255,10 +255,16 @@ async function cmdRegister() {
               set twilio_sid = $1,
                   kind = coalesce(kind, $2),
                   assigned_user_id = coalesce(assigned_user_id, $3),
-                  label = coalesce(label, $4)
+                  label = coalesce(label, $4),
+                  inbound_enabled = true
             where id = $5`,
           // kind is NOT NULL in the schema, so its coalesce always keeps the existing
           // value — deliberate: registering must never re-classify a live number.
+          // inbound_enabled is set unconditionally (not coalesced): registering a
+          // number INTO the launch fleet means it must answer properly, and a row
+          // first created through POST /admin/outbound-numbers carried the schema
+          // default `false`. Without this, re-registering never self-healed it —
+          // the structural half of spam-defense audit §2.
           [rec.sid, rec.kind, userId, rec.label, dup.rows[0].id],
         );
         summary.push({ e164: rec.e164, registered: 'updated (existing)' });

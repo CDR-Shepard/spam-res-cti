@@ -152,6 +152,12 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         active: parsed.data.active ?? true,
         assignedUserId: parsed.data.assignedUserId ?? null,
         health: 'unknown',
+        // Explicit, matching import-twilio. The column's schema default is
+        // false, so leaving it off silently created numbers that answer every
+        // carrier reverse-probe with the generic decline instead of the
+        // greeting/voicemail flow — invisible to any "did it answer" check.
+        // Spam-defense audit §2.
+        inboundEnabled: true,
       })
       .onConflictDoUpdate({
         target: [schema.outboundNumbers.orgId, schema.outboundNumbers.e164],

@@ -4,7 +4,9 @@
  *
  * Reconciles BOTH directions, because a one-way check cannot see money already spent:
  *   DB → Twilio  every active `outbound_numbers` row must exist in Twilio, carry our
- *                inbound webhook, and sit on the business profile + SHAKEN/STIR product.
+ *                inbound webhook, sit on the business profile + SHAKEN/STIR product,
+ *                and have `inbound_enabled` — a number whose webhook is right but whose
+ *                flag is off answers carrier reverse-probes with the generic decline.
  *   Twilio → DB  every Twilio number carrying our inbound webhook must have an
  *                `outbound_numbers` row. One that doesn't is an ORPHAN: bought,
  *                billing monthly, answering on our webhook, invisible to the app.
@@ -49,7 +51,7 @@ async function all(url: string, key: string): Promise<any[]> {
 /** An explicitly-passed DATABASE_URL always wins over an inherited DATABASE_PUBLIC_URL. */
 const c = new pg.Client({ connectionString: process.env.DATABASE_URL || process.env.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } });
 await c.connect();
-const db = (await c.query(`select n.e164, n.kind, n.twilio_sid, n.health, n.health_source, u.email from outbound_numbers n left join users u on u.id = n.assigned_user_id where n.active order by n.kind, u.email nulls last, n.e164`)).rows;
+const db = (await c.query(`select n.e164, n.kind, n.twilio_sid, n.health, n.health_source, n.inbound_enabled, u.email from outbound_numbers n left join users u on u.id = n.assigned_user_id where n.active order by n.kind, u.email nulls last, n.e164`)).rows;
 /** EVERY row, active or not: a deliberately deactivated DID we still own is not an orphan. */
 const known = new Set<string>((await c.query('select e164 from outbound_numbers')).rows.map((r) => r.e164 as string));
 /** The rep roster drives the tally, so a rep holding ZERO numbers prints `0/6 ✗ SHORT` instead of vanishing. */
@@ -65,7 +67,11 @@ let provisionFail = 0;
 const perRep = new Map<string, { LA: number; SD: number }>(roster.map((email) => [email, { LA: 0, SD: 0 }]));
 for (const n of db) {
   const t: any = tw.get(n.e164);
-  const checks = { db: true, twilio: !!t, webhook: isOurWebhook(t), trusthub: !!t && inProfile.has(t.sid), shaken: !!t && inShaken.has(t.sid) };
+  // `inbound` is a provisioning check like the rest: a number that answers a
+  // carrier reverse-probe with the generic decline instead of the greeting/
+  // voicemail flow is NOT fully provisioned, and the DB↔Twilio reconciliation
+  // above cannot see it (Twilio's VoiceUrl is correct either way).
+  const checks = { db: true, twilio: !!t, webhook: isOurWebhook(t), trusthub: !!t && inProfile.has(t.sid), shaken: !!t && inShaken.has(t.sid), inbound: n.inbound_enabled === true };
   if (Object.values(checks).some((v) => !v)) provisionFail++;
   const area = classifyArea(n.e164);
   const counts = usable(n.health);
