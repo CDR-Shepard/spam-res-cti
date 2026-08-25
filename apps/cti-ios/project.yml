@@ -39,6 +39,7 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: CTI Caller ID
+        CFBundleIconName: AppIcon
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -52,9 +53,14 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gghomes.cti.callerid
         GENERATE_INFOPLIST_FILE: "NO"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # iPhone only — set per target because XcodeGen's own iOS target
         # default ("1,2") overrides anything set at project level.
         TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: CCY3R86SMX
+        "CODE_SIGN_IDENTITY[sdk=iphoneos*]": Apple Distribution
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": CTI CallerID AppStore
 
   # ---------------------------------------------------------------------------
   # The Call Directory extension: reads the App Group snapshot and streams it
@@ -80,13 +86,17 @@ targets:
       properties:
         CFBundleDisplayName: CTI Caller ID
         NSExtension:
-          NSExtensionPointIdentifier: com.apple.identitylookup.call-directory
+          NSExtensionPointIdentifier: com.apple.callkit.call-directory
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).CallDirectoryHandler
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gghomes.cti.callerid.directory
         GENERATE_INFOPLIST_FILE: "NO"
         TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: CCY3R86SMX
+        "CODE_SIGN_IDENTITY[sdk=iphoneos*]": Apple Distribution
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": CTI CallDirectory AppStore
 
   # ---------------------------------------------------------------------------
   # Logic tests. Deliberately host-free: everything under test takes its

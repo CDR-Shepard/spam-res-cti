@@ -30,6 +30,45 @@ rolling the app out to reps.
 
 ## 1. One-time TestFlight ship
 
+> **Shipped 2026-08-25 — what actually worked.** Build 1.0 (1) was uploaded
+> from the CLI, not the Xcode GUI below, because the team (SJO Investments
+> LLC, `CCY3R86SMX`) has **no registered devices**, and automatic signing
+> refuses to archive without a development profile (which needs a device).
+> The working path, all reproducible:
+>
+> 1. Portal setup (done once, already in place): Apple **Distribution
+>    certificate** from a CLI-generated CSR; App Group `group.com.gghomes.cti`
+>    registered and enabled on BOTH bundle ids; two **App Store** provisioning
+>    profiles — `CTI CallerID AppStore` / `CTI CallDirectory AppStore` —
+>    installed under `~/Library/Developer/Xcode/UserData/Provisioning Profiles`.
+> 2. `project.yml` carries manual signing scoped to device builds only
+>    (`CODE_SIGN_STYLE: Manual`, `[sdk=iphoneos*]` identity + profile
+>    specifiers), so simulator tests are untouched. `xcodegen generate`, then:
+>    `xcodebuild archive -project CTICallerID.xcodeproj -scheme CTICallerID
+>    -destination 'generic/platform=iOS' -archivePath <path>`
+> 3. Upload: `xcodebuild -exportArchive -archivePath <path>
+>    -exportOptionsPlist <plist>` with `method: app-store-connect`,
+>    `destination: upload`, `signingStyle: manual`, and the
+>    `provisioningProfiles` map for both bundle ids.
+> 4. **Verify before uploading** (the mistake this guards against is silent):
+>    `codesign -d --entitlements :- <app / appex>` must show
+>    `com.apple.security.application-groups` on BOTH binaries. An archive
+>    built unsigned and re-signed at export LOSES the App Group and the
+>    extension can never read the directory.
+>
+> Upload-validation gotchas already fixed in the repo — do not regress:
+> the extension point is `com.apple.callkit.call-directory` (the spec's
+> original `com.apple.identitylookup.*` is SMS filtering and is rejected with
+> ITMS-90349), and the app must ship an asset-catalog icon +
+> `CFBundleIconName` (ITMS-90713). If codesign prompts for keychain access on
+> every run, click **Always Allow**, or run
+> `security set-key-partition-list -S apple-tool:,apple: -s
+> ~/Library/Keychains/login.keychain-db` once.
+
+The GUI flow below remains valid as an alternative **once the team has at
+least one registered device**; with none, step 13's archive fails asking for
+a development profile.
+
 **Preconditions:** a Mac with Xcode installed, signed into Xcode with an Apple
 ID that is a member of the Apple Developer Program team this app will ship
 under (Account Settings → Team, in Xcode, if you need to check).
