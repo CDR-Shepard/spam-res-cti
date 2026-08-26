@@ -409,12 +409,19 @@ export async function syncOne(
     .set({ salesforceTaskId: taskId, updatedAt: new Date() })
     .where(eq(schema.salesforceSyncJobs.callId, call.id));
 
-  // Chatter feed post (ruling 2026-08-26): every dispositioned call ALSO gets
+  // Chatter feed post (ruling 2026-08-26): every DISPOSITIONED call ALSO gets
   // ONE Chatter feed item on its related record, additive to the Task write
   // above, never a replacement for it. whoId/whatId here are the SAME ids the
   // Task was just attached to, so "related record" means exactly what it
   // means for the Task. No related record → nothing to post to → skip
   // silently (this is normal, not an error).
+  //
+  // `call.disposition != null` gates this on "dispositioned" precisely: an
+  // inbound call (never dispositioned — no wrap-up form) or an
+  // ensure-logged outbound call synced before the rep set one must NOT post.
+  // A call later swept into AUTO_DISPOSITION and synced then DOES post with
+  // that label — by then it IS its disposition, and `call` (loaded at the
+  // top of this fn) already reflects that value.
   //
   // Idempotent across sync retries via chatter_feed_element_id: once set,
   // never posted again. This also covers late-disposition corrections — the
@@ -424,27 +431,41 @@ export async function syncOne(
   // First disposition wins; no edits or deletes here.
   //
   // Failure posture: Chatter is additive, the Task is the system of record,
-  // so a failed post must never fail the Task sync. Leave the id null (a
-  // later retry can still pick it up) and log, matching this file's existing
-  // best-effort-attach idiom below (the recording-link patch).
-  if (!call.chatterFeedElementId) {
+  // so a failed post must never fail the Task sync. The SF POST and the
+  // id-persist DB write are guarded SEPARATELY (not one try/catch) so a POST
+  // failure and a persist failure log distinct messages: a post that
+  // actually succeeded but never got its id saved needs its own diagnosis —
+  // otherwise a future retry sweep can't tell it apart from "never posted"
+  // and would double-post blind.
+  if (!call.chatterFeedElementId && call.disposition != null) {
     const chatterSubjectId = whoId ?? whatId;
     if (chatterSubjectId) {
+      let feedElementId: string | null = null;
       try {
-        const feedElementId = await deps.postChatterFeedItem(
+        feedElementId = await deps.postChatterFeedItem(
           call.userId,
           chatterSubjectId,
           buildChatterText(subject, call.notes),
         );
-        await db
-          .update(schema.calls)
-          .set({ chatterFeedElementId: feedElementId, updatedAt: new Date() })
-          .where(eq(schema.calls.id, call.id));
       } catch (err) {
         console.error('[sf-sync] chatter post failed', {
           callId: call.id,
           err: (err as Error).message,
         });
+      }
+      if (feedElementId) {
+        try {
+          await db
+            .update(schema.calls)
+            .set({ chatterFeedElementId: feedElementId, updatedAt: new Date() })
+            .where(eq(schema.calls.id, call.id));
+        } catch (err) {
+          console.error('[sf-sync] chatter posted but id persist failed', {
+            callId: call.id,
+            feedElementId,
+            err: (err as Error).message,
+          });
+        }
       }
     }
   }

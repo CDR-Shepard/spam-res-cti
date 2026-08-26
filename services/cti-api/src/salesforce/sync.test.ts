@@ -364,4 +364,62 @@ describe('syncOne — Chatter feed post', () => {
     const text = (postChatterFeedItem as any).mock.calls[0][2];
     expect(text.split('\n')).toHaveLength(1);
   });
+
+  // Finding 1 (CRITICAL, chatter-fix-findings.md): gate posting on
+  // `call.disposition != null`. "Every DISPOSITIONED call" means an
+  // undispositioned call — inbound (no wrap-up form) or an ensure-logged
+  // outbound row synced before the rep ever set a disposition — must NOT
+  // post, even when it has a related record. A call later swept into
+  // AUTO_DISPOSITION and synced then DOES post (it IS its disposition by
+  // then) — that path is exercised by the other tests in this block, which
+  // all use callRow()'s default `disposition: 'No answer'`.
+  it('an inbound call with a matched record but no disposition does not post to Chatter', async () => {
+    const db = fakeDb(callRow({ direction: 'inbound', disposition: null, salesforceWhoId: '00Q1' }));
+    const postChatterFeedItem = vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'];
+    const d = syncDeps({ db, postChatterFeedItem });
+    await syncOne('call-1', d);
+    expect(postChatterFeedItem).not.toHaveBeenCalled();
+    expect((db as any)._updates.some((u: any) => 'chatterFeedElementId' in u.patch)).toBe(false);
+  });
+
+  it('an outbound call with disposition: null (the ensure-logged shape) does not post to Chatter', async () => {
+    const db = fakeDb(callRow({ salesforceWhoId: '00Q1', disposition: null }));
+    const postChatterFeedItem = vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'];
+    const d = syncDeps({ db, postChatterFeedItem });
+    await syncOne('call-1', d);
+    expect(postChatterFeedItem).not.toHaveBeenCalled();
+    expect((db as any)._updates.some((u: any) => 'chatterFeedElementId' in u.patch)).toBe(false);
+  });
+
+  // Finding 2 (MINOR, chatter-fix-findings.md): the SF POST and the
+  // chatter_feed_element_id persist-write are separately guarded. A DB
+  // failure AFTER a successful post must log its own distinct message (not
+  // the "post failed" message) — a post that actually succeeded but whose id
+  // never got saved must be diagnosable as such, so a future retry sweep
+  // doesn't treat it as "never posted" and double-post blind.
+  it('a successful post whose id persist-write then fails logs a distinct message, and the sync still succeeds', async () => {
+    const db = fakeDb(callRow({ salesforceWhoId: '00Q1' }));
+    (db as any).update = () => ({
+      set: (patch: Record<string, unknown>) => ({
+        where: async () => {
+          if ('chatterFeedElementId' in patch) {
+            throw new Error('connection terminated');
+          }
+          (db as any)._updates.push({ patch });
+        },
+      }),
+    });
+    const postChatterFeedItem = vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const d = syncDeps({ db, postChatterFeedItem });
+    const result = await syncOne('call-1', d);
+    expect(result).toBeUndefined();
+    expect(postChatterFeedItem).toHaveBeenCalledTimes(1);
+    expect(errSpy).toHaveBeenCalledWith(
+      '[sf-sync] chatter posted but id persist failed',
+      expect.objectContaining({ callId: 'call-1', feedElementId: '0D5NEW' }),
+    );
+    expect(errSpy).not.toHaveBeenCalledWith('[sf-sync] chatter post failed', expect.anything());
+    errSpy.mockRestore();
+  });
 });
