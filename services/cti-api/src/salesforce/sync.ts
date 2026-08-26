@@ -3,7 +3,7 @@
  * Idempotent: once a job has a salesforce_task_id stored on the call, we
  * mark it succeeded and skip recreation.
  */
-import { and, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm';
 import { getDb, schema } from '../db/index.js';
 import { normalize } from '../phone.js';
 import { loadConfig } from '../config.js';
@@ -52,6 +52,11 @@ const LOG_GRACE_MS = 10 * 60_000;
 const INBOUND_STALE_MS = 10 * 60_000;
 // Terminal statuses that represent a real dial the rep should have a Task for.
 const LOGGABLE_TERMINAL_STATUSES: schema.Call['status'][] = ['completed', 'no_answer', 'busy', 'canceled'];
+// Grace period before an unstamped recording link becomes sweep-eligible.
+// Keeps sweepUnpushedRecordingLinks from racing the two live push paths
+// (the recording-completed webhook and syncOne's create-time push), both of
+// which bump `updated_at` when they touch the row.
+const RECORDING_LINK_SWEEP_GRACE_MS = 2 * 60_000;
 
 export async function enqueueSyncForCall(callId: string): Promise<void> {
   const db = getDb();
@@ -147,6 +152,7 @@ export async function runSyncTick(): Promise<{ processed: number }> {
   await reapStuckJobs();
   await reapStaleInboundCalls();
   await sweepUnloggedCalls();
+  await sweepUnpushedRecordingLinks();
   const now = new Date();
   const jobs = await db
     .select()
@@ -213,6 +219,7 @@ export interface SyncOneDeps {
   createCallTask: typeof createCallTask;
   recordName: (userId: string, recordId: string) => Promise<string | null>;
   postChatterFeedItem: typeof postChatterFeedItem;
+  updateCallTask: typeof updateCallTask;
 }
 
 function liveSyncOneDeps(): SyncOneDeps {
@@ -224,6 +231,7 @@ function liveSyncOneDeps(): SyncOneDeps {
     createCallTask,
     recordName: fetchRecordName,
     postChatterFeedItem,
+    updateCallTask,
   };
 }
 
@@ -485,15 +493,51 @@ export async function syncOne(
       apiPublicUrl: cfg.API_PUBLIC_URL,
       secret: cfg.SESSION_SECRET,
     });
+    // Stamped ONLY on a successful PATCH (2026-08-26 incident: this push was
+    // fire-and-forget with nothing recording whether it actually landed). A
+    // failed PATCH leaves recordingLinkSyncedAt null, and
+    // sweepUnpushedRecordingLinks retries it from the sync tick. The PATCH and
+    // the stamp write are guarded SEPARATELY (not one try/catch), same as the
+    // Chatter post/persist split above — a PATCH that succeeded but whose
+    // stamp failed to persist must log distinctly from a PATCH that actually
+    // failed, or a future retry can't tell "never landed" from "landed, just
+    // not marked" and would PATCH again blind (harmless, but confusing logs).
+    let patched = false;
     try {
-      await updateCallTask(call.userId, taskId, { tdc_cti__Recording_URL__c: recUrl });
+      await deps.updateCallTask(call.userId, taskId, { tdc_cti__Recording_URL__c: recUrl });
+      patched = true;
     } catch (err) {
       console.error('[sf-sync] recording attach failed', {
         callId: call.id,
         err: (err as Error).message,
       });
     }
+    if (patched) {
+      try {
+        await db
+          .update(schema.calls)
+          .set({ recordingLinkSyncedAt: new Date(), updatedAt: new Date() })
+          .where(eq(schema.calls.id, call.id));
+      } catch (err) {
+        console.error('[sf-sync] recording attached but sync-stamp persist failed', {
+          callId: call.id,
+          err: (err as Error).message,
+        });
+      }
+    }
   }
+}
+
+/** Everything `pushRecordingLinkToTask` reaches outside its own module, injected
+ *  the same way as `SyncOneDeps` so its stamp-on-success contract is testable
+ *  without a database or a live Salesforce org. Real callers pass nothing. */
+export interface PushRecordingLinkDeps {
+  db: ReturnType<typeof getDb>;
+  updateCallTask: typeof updateCallTask;
+}
+
+function livePushRecordingLinkDeps(): PushRecordingLinkDeps {
+  return { db: getDb(), updateCallTask };
 }
 
 /**
@@ -505,15 +549,81 @@ export async function syncOne(
  */
 export async function pushRecordingLinkToTask(
   callId: string,
+  deps: PushRecordingLinkDeps = livePushRecordingLinkDeps(),
 ): Promise<'patched' | 'pending' | 'skipped'> {
-  const db = getDb();
+  const db = deps.db;
   const call = await db.query.calls.findFirst({ where: eq(schema.calls.id, callId) });
   if (!call) return 'skipped';
   const url = recordingPublicUrl(call);
   if (!url) return 'skipped';
   if (!call.salesforceTaskId) return 'pending';
-  await updateCallTask(call.userId, call.salesforceTaskId, { tdc_cti__Recording_URL__c: url });
+  // A PATCH failure propagates uncaught — the caller (the recording-completed
+  // webhook, or sweepUnpushedRecordingLinks below) is the one that logs it and
+  // decides whether/when to retry. recordingLinkSyncedAt is stamped ONLY once
+  // the PATCH above has actually succeeded (2026-08-26 incident: this push used
+  // to be fire-and-forget with nothing recording whether it landed).
+  await deps.updateCallTask(call.userId, call.salesforceTaskId, { tdc_cti__Recording_URL__c: url });
+  try {
+    await db
+      .update(schema.calls)
+      .set({ recordingLinkSyncedAt: new Date(), updatedAt: new Date() })
+      .where(eq(schema.calls.id, callId));
+  } catch (err) {
+    // Same split as the PATCH/stamp write in syncOne: the PATCH already
+    // succeeded, so this must log distinctly rather than look like a failed
+    // attach — a future sweep just retries the (harmless, idempotent) PATCH.
+    console.error('[sf-sync] recording attached but sync-stamp persist failed', {
+      callId,
+      err: (err as Error).message,
+    });
+  }
   return 'patched';
+}
+
+/**
+ * Retry sweep for the recording-link PATCH (2026-08-26 incident: 29/128
+ * recorded calls' Tasks lost their link because both push paths — this
+ * sweep's `push` and syncOne's create-time push — are fire-and-forget). Picks
+ * up to 10 calls that have a recording AND a Task but are still unstamped and
+ * past the 2-minute grace (keeps this from racing the two live push paths,
+ * which both bump `updated_at` when they touch the row), and retries each
+ * through `pushRecordingLinkToTask`, which stamps `recordingLinkSyncedAt` on
+ * success. No `created_at` filter, so this also naturally repairs every
+ * historical miss (recordingLinkSyncedAt is null on every pre-existing row) —
+ * no separate backfill script needed.
+ *
+ * Per-call failures are isolated: one throw must not stop the rest of this
+ * sweep, and must not kill the tick it runs in. A call whose push keeps
+ * failing simply stays unstamped and is picked up again on the next tick.
+ */
+export async function sweepUnpushedRecordingLinks(
+  db: ReturnType<typeof getDb> = getDb(),
+  push: (callId: string) => Promise<'patched' | 'pending' | 'skipped'> = pushRecordingLinkToTask,
+  now: Date = new Date(),
+): Promise<void> {
+  const cutoff = new Date(now.getTime() - RECORDING_LINK_SWEEP_GRACE_MS);
+  const rows = await db
+    .select({ id: schema.calls.id })
+    .from(schema.calls)
+    .where(
+      and(
+        isNotNull(schema.calls.recordingUrl),
+        isNotNull(schema.calls.salesforceTaskId),
+        isNull(schema.calls.recordingLinkSyncedAt),
+        lt(schema.calls.updatedAt, cutoff),
+      ),
+    )
+    .limit(10);
+  for (const row of rows) {
+    try {
+      await push(row.id);
+    } catch (err) {
+      console.error('[sf-sync] recording link sweep failed', {
+        callId: row.id,
+        err: (err as Error).message,
+      });
+    }
+  }
 }
 
 /**

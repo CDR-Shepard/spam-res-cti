@@ -1,14 +1,26 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import {
   buildChatterText,
   buildFullDetail,
   buildTaskDescription,
   counterpartyE164,
+  pushRecordingLinkToTask,
+  sweepUnpushedRecordingLinks,
   syncJobLastError,
   syncOne,
   type SyncOneDeps,
 } from './sync.js';
 import type { OwnershipSnapshot } from './ownership.js';
+
+// pushRecordingLinkToTask / syncOne's recording-attach path both call
+// recordingPublicUrl() → loadConfig(), which throws under vitest (no real env
+// vars loaded). Fake config so those paths compute a URL instead of blowing up
+// on an unrelated env-validation error.
+vi.mock('../config.js', () => ({
+  loadConfig: () => ({ API_PUBLIC_URL: 'https://cti.example.com', SESSION_SECRET: 'test-session-secret-0123456789012345' }),
+}));
 
 type CallRow = Parameters<typeof buildFullDetail>[0];
 type AuditRow = NonNullable<Parameters<typeof buildFullDetail>[1]>;
@@ -91,7 +103,7 @@ const callRow = (over: Record<string, unknown> = {}): Record<string, unknown> =>
   id: 'call-1', userId: 'U1', direction: 'outbound', status: 'completed',
   fromNumber: '+13235249247', toNumber: '818-445-5992', normalizedToNumber: '+18184455992',
   salesforceTaskId: null, salesforceWhoId: null, salesforceWhatId: null,
-  chatterFeedElementId: null,
+  chatterFeedElementId: null, recordingLinkSyncedAt: null,
   preCallAuditId: null, recordingUrl: null, provider: 'twilio', providerCallId: 'CA1',
   disposition: 'No answer', durationSeconds: 4, notes: null, startedAt: null, endedAt: null,
   ...over,
@@ -107,6 +119,7 @@ function syncDeps(over: Partial<SyncOneDeps> = {}): SyncOneDeps & { _db: ReturnT
     createCallTask: vi.fn(async () => ({ taskId: '00TNEW', degradedFields: null })) as unknown as SyncOneDeps['createCallTask'],
     recordName: vi.fn(async () => null) as unknown as SyncOneDeps['recordName'],
     postChatterFeedItem: vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'],
+    updateCallTask: vi.fn(async () => ({ updated: true })) as unknown as SyncOneDeps['updateCallTask'],
     ...over,
     _db: db,
   } as SyncOneDeps & { _db: ReturnType<typeof fakeDb> };
@@ -420,6 +433,174 @@ describe('syncOne — Chatter feed post', () => {
       expect.objectContaining({ callId: 'call-1', feedElementId: '0D5NEW' }),
     );
     expect(errSpy).not.toHaveBeenCalledWith('[sf-sync] chatter post failed', expect.anything());
+    errSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recording-link repair (2026-08-26 prod incident): 29/128 recorded calls'
+// Tasks lost their recording link because both push paths (this create-time
+// PATCH and the webhook's pushRecordingLinkToTask) are fire-and-forget with no
+// success tracking. recording_link_synced_at is stamped ONLY on a successful
+// PATCH, and a retry sweep in the sync tick (sweepUnpushedRecordingLinks,
+// below) repairs anything still unstamped once it clears a 2-minute grace.
+// ---------------------------------------------------------------------------
+describe("syncOne — create-time recording-link push stamps recording_link_synced_at", () => {
+  it('stamps the call when the PATCH succeeds', async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3' }));
+    const updateCallTask = vi.fn(async () => ({ updated: true })) as unknown as SyncOneDeps['updateCallTask'];
+    const d = syncDeps({ db, updateCallTask });
+    await syncOne('call-1', d);
+    expect(updateCallTask).toHaveBeenCalledWith(
+      'U1',
+      '00TNEW',
+      expect.objectContaining({ tdc_cti__Recording_URL__c: expect.stringContaining('/recordings/call-1?sig=') }),
+    );
+    expect((db as any)._updates).toContainEqual({ patch: expect.objectContaining({ recordingLinkSyncedAt: expect.any(Date) }) });
+  });
+
+  it('does NOT stamp when the PATCH fails, and the Task sync still succeeds', async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3' }));
+    const updateCallTask = vi.fn(async () => {
+      throw new Error('Salesforce Task update failed (500): {}');
+    }) as unknown as SyncOneDeps['updateCallTask'];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const d = syncDeps({ db, updateCallTask });
+    const result = await syncOne('call-1', d);
+    expect(result).toBeUndefined();
+    expect((db as any)._updates.some((u: any) => 'recordingLinkSyncedAt' in u.patch)).toBe(false);
+    expect(errSpy).toHaveBeenCalledWith('[sf-sync] recording attach failed', expect.objectContaining({ callId: 'call-1' }));
+    errSpy.mockRestore();
+  });
+
+  it('never touches Salesforce or stamps when nothing has been recorded', async () => {
+    const db = fakeDb(callRow({ recordingUrl: null }));
+    const updateCallTask = vi.fn() as unknown as SyncOneDeps['updateCallTask'];
+    const d = syncDeps({ db, updateCallTask });
+    await syncOne('call-1', d);
+    expect(updateCallTask).not.toHaveBeenCalled();
+    expect((db as any)._updates.some((u: any) => 'recordingLinkSyncedAt' in u.patch)).toBe(false);
+  });
+});
+
+describe('pushRecordingLinkToTask — the webhook-side push, same stamp-on-success contract', () => {
+  it('PATCHes the Task and stamps recording_link_synced_at on success', async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3', salesforceTaskId: '00T1' }));
+    const updateCallTask = vi.fn(async () => ({ updated: true }));
+    const result = await pushRecordingLinkToTask('call-1', { db, updateCallTask } as any);
+    expect(result).toBe('patched');
+    expect(updateCallTask).toHaveBeenCalledWith(
+      'U1',
+      '00T1',
+      expect.objectContaining({ tdc_cti__Recording_URL__c: expect.stringContaining('/recordings/call-1?sig=') }),
+    );
+    expect((db as any)._updates).toContainEqual({ patch: expect.objectContaining({ recordingLinkSyncedAt: expect.any(Date) }) });
+  });
+
+  it('propagates a PATCH failure (caller retries) and does not stamp', async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3', salesforceTaskId: '00T1' }));
+    const updateCallTask = vi.fn(async () => {
+      throw new Error('Salesforce Task update failed (500): {}');
+    });
+    await expect(pushRecordingLinkToTask('call-1', { db, updateCallTask } as any)).rejects.toThrow(/500/);
+    expect((db as any)._updates.some((u: any) => 'recordingLinkSyncedAt' in u.patch)).toBe(false);
+  });
+
+  it("returns 'pending' without touching Salesforce when the call has no Task yet", async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3', salesforceTaskId: null }));
+    const updateCallTask = vi.fn();
+    expect(await pushRecordingLinkToTask('call-1', { db, updateCallTask } as any)).toBe('pending');
+    expect(updateCallTask).not.toHaveBeenCalled();
+  });
+
+  it("returns 'skipped' when nothing is recorded", async () => {
+    const db = fakeDb(callRow({ recordingUrl: null }));
+    const updateCallTask = vi.fn();
+    expect(await pushRecordingLinkToTask('call-1', { db, updateCallTask } as any)).toBe('skipped');
+    expect(updateCallTask).not.toHaveBeenCalled();
+  });
+});
+
+describe('sweepUnpushedRecordingLinks — retry sweep wired into the sync tick', () => {
+  /** Fake for the sweep's single `select().from(calls).where(cond).limit(n)`. */
+  function sweepDb(rows: Array<{ id: string }>, capture: { cond?: SQL; limit?: number } = {}) {
+    return {
+      select: () => ({
+        from: () => ({
+          where: (cond: SQL) => {
+            capture.cond = cond;
+            return { limit: async (n: number) => { capture.limit = n; return rows; } };
+          },
+        }),
+      }),
+    } as unknown as SyncOneDeps['db'];
+  }
+
+  const render = (cond: SQL) => new PgDialect().sqlToQuery(cond);
+
+  /**
+   * The predicate IS the fix: this is exactly the WHERE the brief specifies
+   * (recorded + Task attached + unstamped + past the 2-minute grace), rendered
+   * to real SQL (the PgDialect trick already used in
+   * already-worked.test.ts / consent-check.test.ts) so drift from the spec's
+   * exact clause shows up here, not just in prod.
+   */
+  it('selects on recorded + task attached + unstamped + past the 2-minute grace, capped at 10', async () => {
+    const capture: { cond?: SQL; limit?: number } = {};
+    const db = sweepDb([], capture);
+    const now = new Date('2026-08-26T12:00:00Z');
+    await sweepUnpushedRecordingLinks(db, vi.fn(), now);
+    const { sql, params } = render(capture.cond!);
+    expect(sql).toContain('"calls"."recording_url" is not null');
+    expect(sql).toContain('"calls"."salesforce_task_id" is not null');
+    expect(sql).toContain('"calls"."recording_link_synced_at" is null');
+    expect(sql).toMatch(/"calls"\."updated_at" < \$\d+/);
+    expect(params).toEqual([new Date(now.getTime() - 2 * 60_000).toISOString()]);
+    expect(capture.limit).toBe(10);
+  });
+
+  it('pushes every candidate row the query returns', async () => {
+    const db = sweepDb([{ id: 'call-1' }, { id: 'call-2' }]);
+    const push = vi.fn(async (_id: string) => 'patched' as const);
+    await sweepUnpushedRecordingLinks(db, push);
+    expect(push.mock.calls.map((c) => c[0])).toEqual(['call-1', 'call-2']);
+  });
+
+  it("stamped rows and taskless rows are the DB's job to exclude — ignores whatever it isn't handed", async () => {
+    // The sweep itself trusts its query; this just pins that it never re-filters
+    // rows locally (a stamped/taskless row simply never appears in `rows`).
+    const db = sweepDb([]);
+    const push = vi.fn();
+    await sweepUnpushedRecordingLinks(db, push);
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it('isolates a failing push: logs it, does not stamp, and the rest of the sweep still runs', async () => {
+    const db = sweepDb([{ id: 'call-1' }, { id: 'call-2' }]);
+    const push = vi.fn(async (id: string) => {
+      if (id === 'call-1') throw new Error('Salesforce Task update failed (500): {}');
+      return 'patched' as const;
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(sweepUnpushedRecordingLinks(db, push)).resolves.toBeUndefined();
+    expect(push).toHaveBeenCalledTimes(2); // call-2 still ran despite call-1's throw
+    expect(errSpy).toHaveBeenCalledWith(
+      '[sf-sync] recording link sweep failed',
+      expect.objectContaining({ callId: 'call-1' }),
+    );
+    errSpy.mockRestore();
+  });
+
+  it('a call whose push keeps failing is still a candidate on the next tick (nothing local marks it done)', async () => {
+    const db = sweepDb([{ id: 'call-1' }]);
+    const push = vi.fn(async (_id: string) => {
+      throw new Error('rate limited');
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await sweepUnpushedRecordingLinks(db, push);
+    await sweepUnpushedRecordingLinks(db, push); // same still-unstamped row, next tick
+    expect(push).toHaveBeenCalledTimes(2);
+    expect(push.mock.calls.every((c) => c[0] === 'call-1')).toBe(true);
     errSpy.mockRestore();
   });
 });

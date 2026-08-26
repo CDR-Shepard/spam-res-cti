@@ -565,6 +565,16 @@ export const calls = pgTable(
      * again — this is what makes the post idempotent across sync retries.
      */
     chatterFeedElementId: text('chatter_feed_element_id'),
+    /**
+     * When the recording-link PATCH to the Salesforce Task last SUCCEEDED.
+     * Null means either there is nothing to push yet or a push attempt
+     * failed — pushRecordingLinkToTask (sync.ts) stamps this on success, and
+     * the sweepUnpushedRecordingLinks retry sweep in the sync tick uses this
+     * column (still null, recording + Task both present, past the grace
+     * window) to find and repair calls whose recording link never made it
+     * onto their Task.
+     */
+    recordingLinkSyncedAt: timestamp('recording_link_synced_at', { withTimezone: true }),
     preCallAuditId: uuid('precall_audit_id').references(() => preCallAudits.id),
     campaignKey: text('campaign_key'),
     metadata: jsonb('metadata'),
