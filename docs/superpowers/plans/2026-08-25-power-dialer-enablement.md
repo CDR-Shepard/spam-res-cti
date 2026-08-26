@@ -46,7 +46,7 @@
 
 **Files:**
 - Create: `services/cti-api/migrations/0029_power_dialer_enabled.sql`
-- Modify: `services/cti-api/src/db/schema.ts` (users table, next to `inboundEnabled` at ~:196)
+- Modify: `services/cti-api/src/db/schema.ts` (users table, next to `isAdmin`)
 - Modify: `services/cti-api/src/auth/session.ts:23-45`
 - Modify: `services/cti-api/src/routes/dialer.ts` (imports; the five entry points)
 - Test: `services/cti-api/src/routes/dialer-handoffs.test.ts`
@@ -256,7 +256,7 @@ git commit -m "feat(cti-api): power dialing is a granted per-user capability"
 
 **Interfaces:**
 - Consumes: `resolveSession` with `powerDialerEnabled` (Task 1); `schema.users.powerDialerEnabled` (Task 1); admin.ts's existing imports (`and, eq`, `z`, `resolveSession`, `getDb, schema`) — all already imported.
-- Produces: `GET /admin/team` → `{ users: [{ id, email, displayName, isAdmin, inboundEnabled, powerDialerEnabled }] }`; `PATCH /admin/team/:userId` body `{ powerDialerEnabled: boolean }` → `{ user: { id, powerDialerEnabled } }`. Task 3's `team-api.ts` calls these.
+- Produces: `GET /admin/team` → `{ users: [{ id, email, displayName, isAdmin, powerDialerEnabled }] }`; `PATCH /admin/team/:userId` body `{ powerDialerEnabled: boolean }` → `{ user: { id, powerDialerEnabled } }`. Task 3's `team-api.ts` calls these.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -271,11 +271,11 @@ describe('GET /admin/team', () => {
     expect((await app.inject({ method: 'GET', url: '/admin/team' })).statusCode).toBe(403);
   });
 
-  it('an admin gets the org users incl. both flags, and the query is org-scoped', async () => {
+  it('an admin gets the org users incl. the flag, and the query is org-scoped', async () => {
     state.authedUser = admin;
     const res = await app.inject({ method: 'GET', url: '/admin/team' });
     expect(res.statusCode).toBe(200);
-    expect(res.json().users[0]).toMatchObject({ email: 'rep@x.com', powerDialerEnabled: false, inboundEnabled: true });
+    expect(res.json().users[0]).toMatchObject({ email: 'rep@x.com', powerDialerEnabled: false });
     expect(renderPredicate(capturedSelectWhere)).toContain('org_id');
   });
 });
@@ -324,7 +324,6 @@ Append to `registerAdminRoutes` in `services/cti-api/src/routes/admin.ts`:
         email: schema.users.email,
         displayName: schema.users.displayName,
         isAdmin: schema.users.isAdmin,
-        inboundEnabled: schema.users.inboundEnabled,
         powerDialerEnabled: schema.users.powerDialerEnabled,
       })
       .from(schema.users)
@@ -468,7 +467,6 @@ export interface TeamUser {
   email: string;
   displayName: string | null;
   isAdmin: boolean;
-  inboundEnabled: boolean;
   powerDialerEnabled: boolean;
 }
 
@@ -499,8 +497,8 @@ import * as teamApi from '../team-api';
 vi.mock('../team-api');
 
 const users = [
-  { id: 'u1', email: 'rep@x.com', displayName: 'Ada Rep', isAdmin: false, inboundEnabled: true, powerDialerEnabled: false },
-  { id: 'u2', email: 'boss@x.com', displayName: 'Bea Boss', isAdmin: true, inboundEnabled: true, powerDialerEnabled: true },
+  { id: 'u1', email: 'rep@x.com', displayName: 'Ada Rep', isAdmin: false, powerDialerEnabled: false },
+  { id: 'u2', email: 'boss@x.com', displayName: 'Bea Boss', isAdmin: true, powerDialerEnabled: true },
 ];
 
 beforeEach(() => {
@@ -579,7 +577,6 @@ export function TeamPanel() {
             <div className="sub">
               {u.email}
               {u.isAdmin ? ' · Admin' : ''}
-              {u.inboundEnabled ? ' · Inbound' : ''}
             </div>
           </div>
           <button
