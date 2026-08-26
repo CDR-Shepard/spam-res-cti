@@ -90,10 +90,15 @@ session check:
 
 ## 5. Salesforce parity note (no build)
 
-The list-view dial button (LWC/Apex) is visibility-controlled by its existing SF
-permission set. The server 403 is the authoritative gate; the runbook instructs
-admins to assign/remove that SF permission set for the same people they toggle
-in the Team panel, so nobody sees a button that errors. No automated sync — YAGNI.
+**Corrected during implementation (2026-08-26):** the original assumption that a
+permission set controls the list-view dial button was FALSE. The deployed path
+is WebLink → Visualforce → `PowerDialListController` → `PowerDialRelay`, and
+`PowerDialRelay.isSystemAdministrator()` hard-gates it to the System
+Administrator profile in Apex — no permission set is involved. So today the SF
+button works for admins only; extending it to non-admin enabled reps requires
+changing that Apex gate (a future SF deploy). The CTI server 403 remains the
+authoritative gate either way. See `docs/runbooks/cti-swap.md` §4 for the
+operational truth. No automated sync — YAGNI.
 
 ## 6. The swap (runbook + script)
 

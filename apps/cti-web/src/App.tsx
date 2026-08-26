@@ -730,6 +730,10 @@ export function App(): JSX.Element {
   // above stays as-is (harmless secondary path / test seam).
   useEffect(() => {
     if (!signedIn || dialerSessionId !== null || !coordState.isLeader) return;
+    // A rep without the power-dialer grant would just 403 every tick — the
+    // server refuses /dialer/handoffs/pending for them. Don't poll at all;
+    // the effect re-arms via the next /auth/me refresh after an admin grants.
+    if (!me?.user.powerDialerEnabled) return;
     let cancelled = false;
     const poll = async (): Promise<void> => {
       try {
@@ -750,7 +754,7 @@ export function App(): JSX.Element {
     void poll();
     const id = window.setInterval(() => void poll(), 5000);
     return () => { cancelled = true; window.clearInterval(id); };
-  }, [signedIn, dialerSessionId, coordState.isLeader, startPowerDial]);
+  }, [signedIn, dialerSessionId, coordState.isLeader, startPowerDial, me?.user.powerDialerEnabled]);
 
   // Reopen a still-un-dispositioned call's wrap-up, rehydrated from the server so
   // it isn't blank or mislabeled. No recordId is set: the backend already holds
