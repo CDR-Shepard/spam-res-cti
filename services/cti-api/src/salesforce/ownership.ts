@@ -26,9 +26,17 @@ export function objectTypeForId(id: string): OwnedObject | 'other' {
   return p === '00Q' ? 'Lead' : p === '003' ? 'Contact' : p === '006' ? 'Opportunity' : p === '00T' ? 'Task' : 'other';
 }
 
-/** The rule: Lead/Contact/Task → owner; Opportunity → owner OR LeadManager__c; unnamed objects → allowed. */
+/**
+ * The rule: Lead/Contact/Task → owner; Opportunity → owner OR LeadManager__c;
+ * a QUEUE-owned record (OwnerId prefix `00G`, a Salesforce Group id) → allowed
+ * for ANY rep, for every object type the rule covers (ruling 2026-08-26:
+ * queues aren't people, so nobody is being poached — this is the team's
+ * dominant call pattern, e.g. the LA/SD Hunt Queue leads); unnamed objects →
+ * allowed.
+ */
 export function callerMayCreateTaskOn(s: OwnershipSnapshot, callerSfUserId: string): boolean {
   if (s.type === 'other') return true;
+  if (s.ownerId?.startsWith('00G')) return true;
   if (s.ownerId === callerSfUserId) return true;
   return s.type === 'Opportunity' && !!s.leadManagerId && s.leadManagerId === callerSfUserId;
 }

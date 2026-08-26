@@ -47,6 +47,16 @@ describe('callerMayCreateTaskOn', () => {
   it('objects the rule does not name are allowed', () => {
     expect(callerMayCreateTaskOn({ type: 'other', ownerId: '005X' }, me)).toBe(true);
   });
+  it('queue-owned records (OwnerId prefix 00G) are callable by anyone — ruling 2026-08-26', () => {
+    const QUEUE = '00G8X000006aRkGUAU'; // LA Hunt Queue
+    expect(callerMayCreateTaskOn({ type: 'Lead', ownerId: QUEUE }, me)).toBe(true);
+    expect(callerMayCreateTaskOn({ type: 'Contact', ownerId: QUEUE }, me)).toBe(true);
+    expect(callerMayCreateTaskOn({ type: 'Task', ownerId: QUEUE }, me)).toBe(true);
+    expect(callerMayCreateTaskOn({ type: 'Opportunity', ownerId: QUEUE, leadManagerId: null }, me)).toBe(true);
+  });
+  it('regression pin: a Lead owned by a DIFFERENT USER id (005, not a queue) stays blocked', () => {
+    expect(callerMayCreateTaskOn({ type: 'Lead', ownerId: '005X' }, me)).toBe(false);
+  });
 });
 
 describe('mayCreateTaskOn', () => {
