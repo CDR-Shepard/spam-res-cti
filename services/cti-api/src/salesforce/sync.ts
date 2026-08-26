@@ -11,6 +11,7 @@ import { buildRecordingPublicUrl } from '../telephony/recording-links.js';
 import {
   createCallTask,
   findByPhone,
+  postChatterFeedItem,
   SalesforceUnauthorizedError,
   soqlEscape,
   soqlQuery,
@@ -211,10 +212,19 @@ export interface SyncOneDeps {
   findByPhone: typeof findByPhone;
   createCallTask: typeof createCallTask;
   recordName: (userId: string, recordId: string) => Promise<string | null>;
+  postChatterFeedItem: typeof postChatterFeedItem;
 }
 
 function liveSyncOneDeps(): SyncOneDeps {
-  return { db: getDb(), salesforceUserId, fetchOwnership, findByPhone, createCallTask, recordName: fetchRecordName };
+  return {
+    db: getDb(),
+    salesforceUserId,
+    fetchOwnership,
+    findByPhone,
+    createCallTask,
+    recordName: fetchRecordName,
+    postChatterFeedItem,
+  };
 }
 
 /**
@@ -399,6 +409,46 @@ export async function syncOne(
     .set({ salesforceTaskId: taskId, updatedAt: new Date() })
     .where(eq(schema.salesforceSyncJobs.callId, call.id));
 
+  // Chatter feed post (ruling 2026-08-26): every dispositioned call ALSO gets
+  // ONE Chatter feed item on its related record, additive to the Task write
+  // above, never a replacement for it. whoId/whatId here are the SAME ids the
+  // Task was just attached to, so "related record" means exactly what it
+  // means for the Task. No related record → nothing to post to → skip
+  // silently (this is normal, not an error).
+  //
+  // Idempotent across sync retries via chatter_feed_element_id: once set,
+  // never posted again. This also covers late-disposition corrections — the
+  // routes/calls.ts correction path patches the existing Task's
+  // Subject/Description directly and never calls back into syncOne — so a
+  // corrected call still shows only the FIRST disposition's feed item.
+  // First disposition wins; no edits or deletes here.
+  //
+  // Failure posture: Chatter is additive, the Task is the system of record,
+  // so a failed post must never fail the Task sync. Leave the id null (a
+  // later retry can still pick it up) and log, matching this file's existing
+  // best-effort-attach idiom below (the recording-link patch).
+  if (!call.chatterFeedElementId) {
+    const chatterSubjectId = whoId ?? whatId;
+    if (chatterSubjectId) {
+      try {
+        const feedElementId = await deps.postChatterFeedItem(
+          call.userId,
+          chatterSubjectId,
+          buildChatterText(subject, call.notes),
+        );
+        await db
+          .update(schema.calls)
+          .set({ chatterFeedElementId: feedElementId, updatedAt: new Date() })
+          .where(eq(schema.calls.id, call.id));
+      } catch (err) {
+        console.error('[sf-sync] chatter post failed', {
+          callId: call.id,
+          err: (err as Error).message,
+        });
+      }
+    }
+  }
+
   // Attach the recording link if it already arrived. Re-read recordingUrl FRESH
   // (not the stale `call` snapshot from the top of this fn): the recording
   // webhook may have written it while createCallTask was in flight. Because
@@ -443,6 +493,17 @@ export async function pushRecordingLinkToTask(
   if (!call.salesforceTaskId) return 'pending';
   await updateCallTask(call.userId, call.salesforceTaskId, { tdc_cti__Recording_URL__c: url });
   return 'patched';
+}
+
+/**
+ * Text for the Chatter feed item syncOne posts alongside the Task (ruling
+ * 2026-08-26): the SAME subject line the Task gets — so the feed item and the
+ * Task always agree on the disposition and the record — plus the rep's notes
+ * as a second paragraph when present. No notes → the subject line alone.
+ */
+export function buildChatterText(subject: string, notes: string | null | undefined): string {
+  const trimmedNotes = notes?.trim();
+  return trimmedNotes ? `${subject}\n\n${trimmedNotes}` : subject;
 }
 
 /**

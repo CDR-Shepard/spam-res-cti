@@ -559,6 +559,12 @@ export const calls = pgTable(
     salesforceTaskId: text('salesforce_task_id'),
     salesforceWhoId: text('salesforce_who_id'),
     salesforceWhatId: text('salesforce_what_id'),
+    /**
+     * Id of the ONE Chatter feed item posted for this call's disposition
+     * (ruling 2026-08-26). Null until posted; once set, syncOne never posts
+     * again — this is what makes the post idempotent across sync retries.
+     */
+    chatterFeedElementId: text('chatter_feed_element_id'),
     preCallAuditId: uuid('precall_audit_id').references(() => preCallAudits.id),
     campaignKey: text('campaign_key'),
     metadata: jsonb('metadata'),

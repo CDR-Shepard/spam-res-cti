@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildFullDetail, buildTaskDescription, counterpartyE164, syncJobLastError, syncOne, type SyncOneDeps } from './sync.js';
+import {
+  buildChatterText,
+  buildFullDetail,
+  buildTaskDescription,
+  counterpartyE164,
+  syncJobLastError,
+  syncOne,
+  type SyncOneDeps,
+} from './sync.js';
 import type { OwnershipSnapshot } from './ownership.js';
 
 type CallRow = Parameters<typeof buildFullDetail>[0];
@@ -83,6 +91,7 @@ const callRow = (over: Record<string, unknown> = {}): Record<string, unknown> =>
   id: 'call-1', userId: 'U1', direction: 'outbound', status: 'completed',
   fromNumber: '+13235249247', toNumber: '818-445-5992', normalizedToNumber: '+18184455992',
   salesforceTaskId: null, salesforceWhoId: null, salesforceWhatId: null,
+  chatterFeedElementId: null,
   preCallAuditId: null, recordingUrl: null, provider: 'twilio', providerCallId: 'CA1',
   disposition: 'No answer', durationSeconds: 4, notes: null, startedAt: null, endedAt: null,
   ...over,
@@ -97,6 +106,7 @@ function syncDeps(over: Partial<SyncOneDeps> = {}): SyncOneDeps & { _db: ReturnT
     findByPhone: vi.fn(async () => null) as unknown as SyncOneDeps['findByPhone'],
     createCallTask: vi.fn(async () => ({ taskId: '00TNEW', degradedFields: null })) as unknown as SyncOneDeps['createCallTask'],
     recordName: vi.fn(async () => null) as unknown as SyncOneDeps['recordName'],
+    postChatterFeedItem: vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'],
     ...over,
     _db: db,
   } as SyncOneDeps & { _db: ReturnType<typeof fakeDb> };
@@ -263,5 +273,95 @@ describe('syncJobLastError — what a succeeded job records', () => {
     // turns it into the rep-visible "Not synced · not owner".
     expect(syncJobLastError({ skipped: 'not-owner' })).toBe('not-owner');
     expect(syncJobLastError(undefined)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chatter feed post (ruling 2026-08-26): every dispositioned call also gets ONE
+// Chatter feed item on its related record, posted AFTER the Task write, never
+// failing the Task sync, and idempotent across sync retries via
+// chatter_feed_element_id.
+// ---------------------------------------------------------------------------
+describe('buildChatterText', () => {
+  it('is just the subject line when there are no notes', () => {
+    expect(buildChatterText('Outbound Call | No Answer | (619) 555-1234', undefined)).toBe(
+      'Outbound Call | No Answer | (619) 555-1234',
+    );
+    expect(buildChatterText('Outbound Call | No Answer | (619) 555-1234', '   ')).toBe(
+      'Outbound Call | No Answer | (619) 555-1234',
+    );
+  });
+
+  it('appends the rep notes as a second paragraph when present', () => {
+    expect(buildChatterText('Outbound Call | Voicemail | (619) 555-1234', 'will call back Tuesday')).toBe(
+      'Outbound Call | Voicemail | (619) 555-1234\n\nwill call back Tuesday',
+    );
+  });
+});
+
+describe('syncOne — Chatter feed post', () => {
+  it('posts one feed item on the related record and persists its id', async () => {
+    const db = fakeDb(callRow({ salesforceWhoId: '00Q1', disposition: 'No answer' }));
+    const postChatterFeedItem = vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'];
+    const d = syncDeps({ db, postChatterFeedItem });
+    await syncOne('call-1', d);
+    expect(postChatterFeedItem).toHaveBeenCalledTimes(1);
+    const [userId, subjectId, text] = (postChatterFeedItem as any).mock.calls[0];
+    expect(userId).toBe('U1');
+    expect(subjectId).toBe('00Q1');
+    expect(text).toContain('No answer');
+    expect((db as any)._updates).toContainEqual({ patch: expect.objectContaining({ chatterFeedElementId: '0D5NEW' }) });
+  });
+
+  it('skips silently when the call has no related record', async () => {
+    // No salesforceWhoId/WhatId on the row and no SOSL match — nothing to post to.
+    const db = fakeDb(callRow());
+    const postChatterFeedItem = vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'];
+    const d = syncDeps({ db, postChatterFeedItem });
+    await syncOne('call-1', d);
+    expect(postChatterFeedItem).not.toHaveBeenCalled();
+  });
+
+  it('does not post again once chatter_feed_element_id is already set (idempotent across sync retries)', async () => {
+    const db = fakeDb(callRow({ salesforceWhoId: '00Q1', chatterFeedElementId: '0D5OLD' }));
+    const postChatterFeedItem = vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'];
+    const d = syncDeps({ db, postChatterFeedItem });
+    await syncOne('call-1', d);
+    expect(postChatterFeedItem).not.toHaveBeenCalled();
+    expect((db as any)._updates.some((u: any) => 'chatterFeedElementId' in u.patch)).toBe(false);
+  });
+
+  it('a failed Chatter post does not fail the Task sync; the id stays null for a later retry', async () => {
+    const db = fakeDb(callRow({ salesforceWhoId: '00Q1' }));
+    const postChatterFeedItem = vi.fn(async () => {
+      throw new Error('Salesforce Chatter post failed (500): {}');
+    }) as unknown as SyncOneDeps['postChatterFeedItem'];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const d = syncDeps({ db, postChatterFeedItem });
+    const result = await syncOne('call-1', d);
+    expect(result).toBeUndefined();
+    expect(d.createCallTask).toHaveBeenCalledTimes(1);
+    expect((db as any)._updates).toContainEqual({ patch: expect.objectContaining({ salesforceTaskId: '00TNEW' }) });
+    expect((db as any)._updates.some((u: any) => 'chatterFeedElementId' in u.patch)).toBe(false);
+    expect(errSpy).toHaveBeenCalledWith('[sf-sync] chatter post failed', expect.objectContaining({ callId: 'call-1' }));
+    errSpy.mockRestore();
+  });
+
+  it('threads the rep notes into the posted text as a second paragraph', async () => {
+    const db = fakeDb(callRow({ salesforceWhoId: '00Q1', notes: 'will call back Tuesday' }));
+    const postChatterFeedItem = vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'];
+    const d = syncDeps({ db, postChatterFeedItem });
+    await syncOne('call-1', d);
+    const text = (postChatterFeedItem as any).mock.calls[0][2];
+    expect(text).toContain('\n\nwill call back Tuesday');
+  });
+
+  it('no notes → the posted text is a single line', async () => {
+    const db = fakeDb(callRow({ salesforceWhoId: '00Q1', notes: null }));
+    const postChatterFeedItem = vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'];
+    const d = syncDeps({ db, postChatterFeedItem });
+    await syncOne('call-1', d);
+    const text = (postChatterFeedItem as any).mock.calls[0][2];
+    expect(text.split('\n')).toHaveLength(1);
   });
 });

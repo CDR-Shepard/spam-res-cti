@@ -304,6 +304,34 @@ export async function createCallTask(
 }
 
 /**
+ * Posts ONE Chatter feed item of plain text onto a record (Lead/Contact/
+ * Opportunity/Deal__c). Used by syncOne to give every dispositioned call a
+ * feed item on its related record, in addition to (never instead of) the
+ * Task write — per the 2026-08-26 ruling. Throws on failure so the caller can
+ * decide how to handle it; syncOne treats a failed post as non-fatal to the
+ * Task sync.
+ */
+export async function postChatterFeedItem(
+  userId: string,
+  subjectId: string,
+  text: string,
+): Promise<string> {
+  const res = await sfFetch(userId, '/chatter/feed-elements', {
+    method: 'POST',
+    body: {
+      feedElementType: 'FeedItem',
+      subjectId,
+      body: { messageSegments: [{ type: 'Text', text }] },
+    },
+  });
+  if (res.status >= 400) {
+    throw new Error(`Salesforce Chatter post failed (${subjectId}): ${JSON.stringify(res.json)}`);
+  }
+  const created = res.json as { id: string };
+  return created.id;
+}
+
+/**
  * Patch fields onto an existing Task — used to attach the recording link, which
  * only exists after the call ends (and often after the Task was already
  * created). Only touches the fields passed in; throws on hard failure so the
