@@ -676,4 +676,48 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       .returning({ id: schema.calls.id });
     return { ok: true, e164: norm.value.e164, cleared: deleted.length };
   });
+
+  // ---- team: power-dialer enablement (spec 2026-08-25) ----
+  app.get('/admin/team', async (req, reply) => {
+    const s = await resolveSession(req.headers.authorization);
+    if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
+    const db = getDb();
+    const rows = await db
+      .select({
+        id: schema.users.id,
+        email: schema.users.email,
+        displayName: schema.users.displayName,
+        isAdmin: schema.users.isAdmin,
+        powerDialerEnabled: schema.users.powerDialerEnabled,
+      })
+      .from(schema.users)
+      .where(eq(schema.users.orgId, s.orgId))
+      .orderBy(schema.users.displayName);
+    return { users: rows };
+  });
+
+  app.patch('/admin/team/:userId', async (req, reply) => {
+    const s = await resolveSession(req.headers.authorization);
+    if (!s) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!s.isAdmin) return reply.code(403).send({ error: 'Admin only' });
+    const params = z.object({ userId: z.string().uuid() }).safeParse(req.params);
+    if (!params.success) return reply.code(404).send({ error: 'Not found' });
+    const body = z.object({ powerDialerEnabled: z.boolean() }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: body.error.flatten() });
+    const db = getDb();
+    // Org-scoped in the WHERE itself (IDOR-proof, same shape as the mobile
+    // device routes): an admin can only flip users in their own org.
+    const [updated] = await db
+      .update(schema.users)
+      .set({ powerDialerEnabled: body.data.powerDialerEnabled })
+      .where(and(eq(schema.users.id, params.data.userId), eq(schema.users.orgId, s.orgId)))
+      .returning({ id: schema.users.id, powerDialerEnabled: schema.users.powerDialerEnabled });
+    if (!updated) return reply.code(404).send({ error: 'Not found' });
+    req.log.info(
+      { actor: s.userId, target: updated.id, powerDialerEnabled: updated.powerDialerEnabled },
+      'power_dialer_enabled changed',
+    );
+    return { user: updated };
+  });
 }
