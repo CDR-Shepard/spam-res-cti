@@ -13,6 +13,7 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { TeamPanel } from './components/TeamPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
+import { repDialAction } from './checks';
 import {
   getPendingHandoff,
   startDialer,
@@ -21,7 +22,7 @@ import {
   type DialerSession,
   type DialerSessionCounts,
 } from './dialer-api';
-import { ClockIcon, CloudIcon, GridIcon, MoreIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, UserIcon, ZapIcon } from './icons';
+import { ClockIcon, CloudIcon, GridIcon, MoreIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, ShieldXIcon, UserIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
 import { navTabsFor, NAV_OVERFLOW_IDS, type Tab } from './nav';
 import {
@@ -890,6 +891,18 @@ export function App(): JSX.Element {
     } finally { setBusy(false); placingRef.current = false; }
   }, [firewall, raw, ctiContext, ensureDevice, reopenDisposition]);
 
+  // Ruling (user, 2026-08-26, FINAL): non-admin reps never see the pre-dial
+  // checklist (VerdictPanel). Once the firewall clears with a verdict
+  // repDialAction doesn't refuse, place the call automatically — no panel,
+  // no extra click. A refusal is left alone here; it renders as a plain
+  // inline message instead (see the dialer JSX below) and never calls
+  // place(). Admins are untouched — see the isAdmin branches in the JSX.
+  useEffect(() => {
+    if (!firewall || !me || me.user.isAdmin) return;
+    if (repDialAction(firewall) === 'refuse') return;
+    void place();
+  }, [firewall, me?.user.isAdmin, place]);
+
   const hangup = useCallback(() => {
     try { (connectionRef.current as { disconnect?: () => void } | null)?.disconnect?.(); } catch { /* */ }
   }, []);
@@ -1231,14 +1244,41 @@ export function App(): JSX.Element {
         placeholder={ctiReady ? 'Click a phone in Salesforce, or type' : 'Type a number'}
         normalized={firewall?.normalizedTo}
         busy={busy}
-        primaryDisabled={busy || !raw.trim() || (!!firewall && firewall.decision === 'BLOCK')}
-        primaryTitle={firewall ? (firewall.decision === 'BLOCK' ? 'Blocked' : 'Call now') : 'Check & call'}
+        primaryDisabled={
+          busy || !raw.trim() || (me.user.isAdmin && !!firewall && firewall.decision === 'BLOCK')
+        }
+        primaryTitle={
+          me.user.isAdmin
+            ? firewall ? (firewall.decision === 'BLOCK' ? 'Blocked' : 'Call now') : 'Check & call'
+            // Reps never see the checklist, so the button never advances past
+            // "Check & call" — the check-then-call happens in one click (see
+            // the auto-place effect above).
+            : 'Check & call'
+        }
         onAppend={(k) => { setRaw((v) => v + k); setFirewall(null); setPhase('idle'); setCtiContext(null); }}
         onBackspace={() => { setRaw((v) => v.slice(0, -1)); setFirewall(null); setPhase('idle'); setCtiContext(null); }}
-        onPrimary={firewall && firewall.decision !== 'BLOCK' ? () => void place() : () => void runFirewall()}
+        onPrimary={
+          me.user.isAdmin
+            ? firewall && firewall.decision !== 'BLOCK' ? () => void place() : () => void runFirewall()
+            : () => void runFirewall()
+        }
       />
       {firewall && (
-        <VerdictPanel verdict={firewall} busy={busy} onCancel={reset} onCall={() => void place()} />
+        me.user.isAdmin ? (
+          <VerdictPanel verdict={firewall} busy={busy} onCancel={reset} onCall={() => void place()} />
+        ) : repDialAction(firewall) === 'refuse' ? (
+          // Plain refusal — no gate names, no checklist. The rep edits the
+          // number (which clears `firewall`, see onAppend/onBackspace above)
+          // and tries another.
+          <div className="verdict bad">
+            <div className="vbanner bad">
+              <ShieldXIcon className="vicon" />
+              <div className="vtext">
+                <div className="vheadline">You can&rsquo;t call this number right now.</div>
+              </div>
+            </div>
+          </div>
+        ) : null
       )}
     </div>
   );

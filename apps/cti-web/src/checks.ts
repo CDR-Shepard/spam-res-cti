@@ -138,3 +138,30 @@ export function checkMeta(name: string): CheckMeta {
     }
   );
 }
+
+/**
+ * Ruling (user, 2026-08-26, FINAL): non-admin reps never see the pre-dial
+ * checklist (VerdictPanel). A REQUIRE_REVIEW verdict auto-acknowledges and
+ * places the call for a rep UNLESS a failing check is one of these four —
+ * the org's stated line for what still needs a human to actually look. Every
+ * other check (recording_consent, federal_dnc, calling_hours, etc.) is
+ * explicitly fine to wave through silently for reps.
+ */
+export const SENSITIVE = ['neighbor_spoof', 'attestation', 'answer_rate', 'engagement'];
+
+export type RepDialAction = 'call' | 'call-acknowledged' | 'refuse';
+
+/**
+ * Pure decision helper for the non-admin dial flow (see App.tsx). Decision is
+ * authoritative: ALLOW always calls, even if some check happens to be named
+ * in SENSITIVE and failed — the firewall already decided that didn't block.
+ */
+export function repDialAction(verdict: {
+  decision: string;
+  checks: Array<{ name: string; passed: boolean }>;
+}): RepDialAction {
+  if (verdict.decision === 'ALLOW') return 'call';
+  if (verdict.decision === 'BLOCK') return 'refuse';
+  const hasSensitiveFailure = verdict.checks.some((c) => !c.passed && SENSITIVE.includes(c.name));
+  return hasSensitiveFailure ? 'refuse' : 'call-acknowledged';
+}
