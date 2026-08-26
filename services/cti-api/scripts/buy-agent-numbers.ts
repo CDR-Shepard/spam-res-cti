@@ -233,7 +233,11 @@ async function cmdRegister() {
   if (bought.length === 0) die(`Hand-off ${HANDOFF} empty. If you HAVE bought numbers and lost the hand-off, do NOT re-buy — run fleet-report to reconcile (orphans are listed) and admin import-twilio to recover them.`);
   const c = await dbClient();
   try {
-    const org = (await c.query('select id from organizations order by created_at asc limit 1')).rows[0] ?? die('No organizations row — cannot register.');
+    // The org that owns the fleet is the one the reps live in — the Salesforce
+    // org, NOT the oldest row (the oldest is the legacy "Dev Org", and picking
+    // it stranded 192 launch numbers where org-scoped rotation couldn't see
+    // them; fixed 2026-08-26 via scripts/fix-number-org.mjs).
+    const org = (await c.query("select id from organizations where name like 'Salesforce Org %' order by created_at asc limit 1")).rows[0] ?? die('No Salesforce organizations row — cannot register.');
     const summary: Array<Record<string, string>> = [];
     // Prune the hand-off as we go (dup-skipped records included) so a re-run's
     // idempotency guard (`alreadyBought`) only ever counts genuinely-unregistered
