@@ -12,7 +12,10 @@ click-to-dial and the softphone's screen-pop start working for the whole
 team instead of whatever CTI adapter they were on before.
 
 The mechanics are handled by
-`services/cti-api/scripts/swap-call-center.mjs`: the roster is **derived
+`services/cti-api/scripts/swap-call-center.mjs`: scope is pinned to the 12-rep
+cutover roster (`scripts/cti-swap-roster.txt` — user ruling 2026-08-26: admins
+and test fixtures are NOT swapped; a roster email with no CTI user row is a
+hard error). Within that scope the roster is **derived
 from the CTI `users` table** (never hardcoded — several reps' Salesforce
 **usernames** carry a `.2`/`.3` suffix from an earlier dedup, so the script
 matches on the `Email` **field**, not `Username`), it is **idempotent**
@@ -85,7 +88,7 @@ issues `sf data query` only, never a write via `sf api request rest`):
 ```bash
 cd services/cti-api
 PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
-env DATABASE_URL="$PUB" node scripts/swap-call-center.mjs
+env DATABASE_URL="$PUB" node scripts/swap-call-center.mjs --roster scripts/cti-swap-roster.txt
 ```
 
 Expected output: one line per rep —
@@ -112,7 +115,7 @@ further — do not try to route around it with `--apply`.
 Once the dry run's plan looks right, apply it:
 
 ```bash
-env DATABASE_URL="$PUB" node scripts/swap-call-center.mjs --apply
+env DATABASE_URL="$PUB" node scripts/swap-call-center.mjs --roster scripts/cti-swap-roster.txt --apply
 ```
 
 This:
@@ -238,7 +241,7 @@ user's previous `CallCenterId` from the rollback JSON `--apply` wrote in
 
 ```bash
 cd services/cti-api
-env SF_ORG=_t2 node scripts/swap-call-center.mjs --rollback swap-rollback-<timestamp>.json
+env SF_ORG=_t2 node scripts/swap-call-center.mjs --roster scripts/cti-swap-roster.txt --rollback swap-rollback-<timestamp>.json
 ```
 
 This re-reads each row's `previousCallCenterId` and writes it straight

@@ -72,7 +72,22 @@ await c.connect();
 const { rows: ctiUsers } = await c.query('select email from users order by email');
 await c.end();
 
-const emails = ctiUsers.map((u) => u.email.toLowerCase());
+let emails = ctiUsers.map((u) => u.email.toLowerCase());
+
+// Scope ruling (user, 2026-08-26): the cutover targets EXACTLY the 12 reps on
+// the roster file — admins and test fixtures in the users table are excluded.
+// The DB stays the source of existence; --roster narrows scope. A roster email
+// with no CTI user row is a hard error (typo guard).
+const rosterIdx = process.argv.indexOf('--roster');
+if (rosterIdx !== -1) {
+  const rosterFile = process.argv[rosterIdx + 1];
+  const roster = readFileSync(rosterFile, 'utf8')
+    .split('\n').map((l) => l.trim().toLowerCase()).filter(Boolean);
+  const unknown = roster.filter((r) => !emails.includes(r));
+  if (unknown.length) throw new Error(`roster emails with no CTI user: ${unknown.join(', ')}`);
+  emails = emails.filter((e) => roster.includes(e));
+  console.log(`roster scope: ${emails.length} of ${ctiUsers.length} CTI users`);
+}
 const inList = emails.map((e) => `'${e.replace(/'/g, "\\'")}'`).join(',');
 const sfUsers = soql(`SELECT Id, Email, Name, CallCenterId FROM User WHERE IsActive = true AND Email IN (${inList})`);
 
