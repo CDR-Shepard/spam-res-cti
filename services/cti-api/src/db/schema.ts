@@ -603,6 +603,14 @@ export const calls = pgTable(
       .where(sql`${t.providerCallId} is not null`),
     orgCreatedIdx: index('calls_org_created_idx').on(t.orgId, t.createdAt),
     targetIdx: index('calls_org_target_idx').on(t.orgId, t.normalizedToNumber),
+    // Backs sweepUnpushedRecordingLinks' WHERE + ORDER BY updated_at desc
+    // (sync.ts) — partial so it only covers the small, shrinking set of
+    // unswept rows. Declared here to match the calls table's existing inline
+    // index precedent (providerIdIdx above); the ORM never queries it by
+    // name — see migrations/0032_recording_link_sweep_index.sql.
+    recordingLinkUnsyncedIdx: index('calls_recording_link_unsynced_idx')
+      .on(t.updatedAt)
+      .where(sql`${t.recordingLinkSyncedAt} is null and ${t.recordingUrl} is not null and ${t.salesforceTaskId} is not null`),
   }),
 );
 

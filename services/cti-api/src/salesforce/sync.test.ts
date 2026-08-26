@@ -7,6 +7,7 @@ import {
   buildTaskDescription,
   counterpartyE164,
   pushRecordingLinkToTask,
+  runRecordingLinkSweepSafely,
   sweepUnpushedRecordingLinks,
   syncJobLastError,
   syncOne,
@@ -446,9 +447,10 @@ describe('syncOne — Chatter feed post', () => {
 // below) repairs anything still unstamped once it clears a 2-minute grace.
 // ---------------------------------------------------------------------------
 describe("syncOne — create-time recording-link push stamps recording_link_synced_at", () => {
-  it('stamps the call when the PATCH succeeds', async () => {
+  it('stamps the call when the PATCH succeeds, with no INVALID_FIELD log', async () => {
     const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3' }));
     const updateCallTask = vi.fn(async () => ({ updated: true })) as unknown as SyncOneDeps['updateCallTask'];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const d = syncDeps({ db, updateCallTask });
     await syncOne('call-1', d);
     expect(updateCallTask).toHaveBeenCalledWith(
@@ -457,6 +459,30 @@ describe("syncOne — create-time recording-link push stamps recording_link_sync
       expect.objectContaining({ tdc_cti__Recording_URL__c: expect.stringContaining('/recordings/call-1?sig=') }),
     );
     expect((db as any)._updates).toContainEqual({ patch: expect.objectContaining({ recordingLinkSyncedAt: expect.any(Date) }) });
+    expect(errSpy).not.toHaveBeenCalledWith('[sf-sync] recording link field rejected (INVALID_FIELD)', expect.anything());
+    errSpy.mockRestore();
+  });
+
+  // Fix 1 (2026-08-26 review): updateCallTask returns { updated: false } on
+  // INVALID_FIELD instead of throwing — a rejected PATCH (field missing from
+  // the org, or hidden from this rep by field-level security) used to be
+  // discarded here and stamped as a silent success. INVALID_FIELD is a
+  // configuration fact, not a transient failure — retrying cannot fix it and
+  // leaving it unstamped would clog the sweep forever — so it's STILL
+  // stamped, but with a distinct, greppable log line so it's visible instead
+  // of silently indistinguishable from a real success.
+  it('stamps the call AND logs distinctly when the PATCH is accepted but the field is rejected (INVALID_FIELD)', async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3' }));
+    const updateCallTask = vi.fn(async () => ({ updated: false })) as unknown as SyncOneDeps['updateCallTask'];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const d = syncDeps({ db, updateCallTask });
+    await syncOne('call-1', d);
+    expect(errSpy).toHaveBeenCalledWith(
+      '[sf-sync] recording link field rejected (INVALID_FIELD)',
+      expect.objectContaining({ callId: 'call-1', taskId: '00TNEW' }),
+    );
+    expect((db as any)._updates).toContainEqual({ patch: expect.objectContaining({ recordingLinkSyncedAt: expect.any(Date) }) });
+    errSpy.mockRestore();
   });
 
   it('does NOT stamp when the PATCH fails, and the Task sync still succeeds', async () => {
@@ -484,9 +510,10 @@ describe("syncOne — create-time recording-link push stamps recording_link_sync
 });
 
 describe('pushRecordingLinkToTask — the webhook-side push, same stamp-on-success contract', () => {
-  it('PATCHes the Task and stamps recording_link_synced_at on success', async () => {
+  it('PATCHes the Task and stamps recording_link_synced_at on success, with no INVALID_FIELD log', async () => {
     const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3', salesforceTaskId: '00T1' }));
     const updateCallTask = vi.fn(async () => ({ updated: true }));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const result = await pushRecordingLinkToTask('call-1', { db, updateCallTask } as any);
     expect(result).toBe('patched');
     expect(updateCallTask).toHaveBeenCalledWith(
@@ -495,6 +522,24 @@ describe('pushRecordingLinkToTask — the webhook-side push, same stamp-on-succe
       expect.objectContaining({ tdc_cti__Recording_URL__c: expect.stringContaining('/recordings/call-1?sig=') }),
     );
     expect((db as any)._updates).toContainEqual({ patch: expect.objectContaining({ recordingLinkSyncedAt: expect.any(Date) }) });
+    expect(errSpy).not.toHaveBeenCalledWith('[sf-sync] recording link field rejected (INVALID_FIELD)', expect.anything());
+    errSpy.mockRestore();
+  });
+
+  // Fix 1, webhook-side push: same INVALID_FIELD handling as syncOne's
+  // create-time push above — still stamped, but with the distinct log line.
+  it('stamps AND logs distinctly when the PATCH is accepted but the field is rejected (INVALID_FIELD)', async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3', salesforceTaskId: '00T1' }));
+    const updateCallTask = vi.fn(async () => ({ updated: false }));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await pushRecordingLinkToTask('call-1', { db, updateCallTask } as any);
+    expect(result).toBe('patched');
+    expect(errSpy).toHaveBeenCalledWith(
+      '[sf-sync] recording link field rejected (INVALID_FIELD)',
+      expect.objectContaining({ callId: 'call-1', taskId: '00T1' }),
+    );
+    expect((db as any)._updates).toContainEqual({ patch: expect.objectContaining({ recordingLinkSyncedAt: expect.any(Date) }) });
+    errSpy.mockRestore();
   });
 
   it('propagates a PATCH failure (caller retries) and does not stamp', async () => {
@@ -522,14 +567,22 @@ describe('pushRecordingLinkToTask — the webhook-side push, same stamp-on-succe
 });
 
 describe('sweepUnpushedRecordingLinks — retry sweep wired into the sync tick', () => {
-  /** Fake for the sweep's single `select().from(calls).where(cond).limit(n)`. */
-  function sweepDb(rows: Array<{ id: string }>, capture: { cond?: SQL; limit?: number } = {}) {
+  /** Fake for the sweep's single `select().from(calls).where(cond).orderBy(ord).limit(n)`. */
+  function sweepDb(
+    rows: Array<{ id: string }>,
+    capture: { cond?: SQL; orderBy?: SQL; limit?: number } = {},
+  ) {
     return {
       select: () => ({
         from: () => ({
           where: (cond: SQL) => {
             capture.cond = cond;
-            return { limit: async (n: number) => { capture.limit = n; return rows; } };
+            return {
+              orderBy: (ord: SQL) => {
+                capture.orderBy = ord;
+                return { limit: async (n: number) => { capture.limit = n; return rows; } };
+              },
+            };
           },
         }),
       }),
@@ -546,7 +599,7 @@ describe('sweepUnpushedRecordingLinks — retry sweep wired into the sync tick',
    * exact clause shows up here, not just in prod.
    */
   it('selects on recorded + task attached + unstamped + past the 2-minute grace, capped at 10', async () => {
-    const capture: { cond?: SQL; limit?: number } = {};
+    const capture: { cond?: SQL; orderBy?: SQL; limit?: number } = {};
     const db = sweepDb([], capture);
     const now = new Date('2026-08-26T12:00:00Z');
     await sweepUnpushedRecordingLinks(db, vi.fn(), now);
@@ -557,6 +610,19 @@ describe('sweepUnpushedRecordingLinks — retry sweep wired into the sync tick',
     expect(sql).toMatch(/"calls"\."updated_at" < \$\d+/);
     expect(params).toEqual([new Date(now.getTime() - 2 * 60_000).toISOString()]);
     expect(capture.limit).toBe(10);
+  });
+
+  // Fix 2 (2026-08-26 review): without an explicit order, a stable set of
+  // permanently-failing rows (e.g. legitimate INVALID_FIELD misses — see
+  // Fix 1) can fill all 10 slots every tick and starve a fresh miss from ever
+  // being picked up. Freshest-first means a fresh miss is seen quickly even
+  // when the backlog is full of rows that will never succeed.
+  it('orders by updated_at desc so fresh misses are never starved by stable failures', async () => {
+    const capture: { cond?: SQL; orderBy?: SQL; limit?: number } = {};
+    const db = sweepDb([], capture);
+    await sweepUnpushedRecordingLinks(db, vi.fn());
+    const { sql: orderSql } = render(capture.orderBy!);
+    expect(orderSql).toMatch(/"calls"\."updated_at" desc/);
   });
 
   it('pushes every candidate row the query returns', async () => {
@@ -601,6 +667,76 @@ describe('sweepUnpushedRecordingLinks — retry sweep wired into the sync tick',
     await sweepUnpushedRecordingLinks(db, push); // same still-unstamped row, next tick
     expect(push).toHaveBeenCalledTimes(2);
     expect(push.mock.calls.every((c) => c[0] === 'call-1')).toBe(true);
+    errSpy.mockRestore();
+  });
+
+  // Fix 2 (2026-08-26 review): a 'pending' or 'skipped' result means the row
+  // changed between the sweep's select and push's re-read (e.g. the Task
+  // hadn't been created yet after all) — today those cycle forever silently.
+  // Log at warn with a distinct code so a permanently-non-patching row is
+  // visible instead of indistinguishable from "just hasn't been swept yet".
+  it("logs a warning (not an error) when a candidate returns 'pending'", async () => {
+    const db = sweepDb([{ id: 'call-1' }]);
+    const push = vi.fn(async () => 'pending' as const);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await sweepUnpushedRecordingLinks(db, push);
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[sf-sync] recording link sweep non-patched',
+      expect.objectContaining({ callId: 'call-1', result: 'pending' }),
+    );
+    expect(errSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it("logs a warning when a candidate returns 'skipped'", async () => {
+    const db = sweepDb([{ id: 'call-1' }]);
+    const push = vi.fn(async () => 'skipped' as const);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await sweepUnpushedRecordingLinks(db, push);
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[sf-sync] recording link sweep non-patched',
+      expect.objectContaining({ callId: 'call-1', result: 'skipped' }),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("does NOT warn when a candidate returns 'patched'", async () => {
+    const db = sweepDb([{ id: 'call-1' }]);
+    const push = vi.fn(async () => 'patched' as const);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await sweepUnpushedRecordingLinks(db, push);
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 3 (2026-08-26 review): the recording-link sweep makes up to 10
+// sequential Salesforce round-trips, so it must never sit in front of live
+// Task creation in runSyncTick, and a wholesale throw from the sweep (e.g.
+// the SELECT itself failing) must not skip the job drain. runRecordingLinkSweepSafely
+// is the isolation wrapper runSyncTick calls AFTER the job loop; it's unit-
+// tested directly here rather than through a new runSyncTick harness.
+// ---------------------------------------------------------------------------
+describe('runRecordingLinkSweepSafely — wholesale isolation for the recording-link sweep', () => {
+  it('runs the sweep through to completion when it succeeds', async () => {
+    const sweep = vi.fn(async () => {});
+    await runRecordingLinkSweepSafely(sweep);
+    expect(sweep).toHaveBeenCalledTimes(1);
+  });
+
+  it('swallows a wholesale throw from the sweep and logs it distinctly, instead of propagating', async () => {
+    const sweep = vi.fn(async () => {
+      throw new Error('connection terminated unexpectedly');
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(runRecordingLinkSweepSafely(sweep)).resolves.toBeUndefined();
+    expect(errSpy).toHaveBeenCalledWith(
+      '[sf-sync] recording link sweep failed wholesale',
+      expect.objectContaining({ err: 'connection terminated unexpectedly' }),
+    );
     errSpy.mockRestore();
   });
 });

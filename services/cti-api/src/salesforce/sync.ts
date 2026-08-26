@@ -3,7 +3,7 @@
  * Idempotent: once a job has a salesforce_task_id stored on the call, we
  * mark it succeeded and skip recreation.
  */
-import { and, eq, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm';
 import { getDb, schema } from '../db/index.js';
 import { normalize } from '../phone.js';
 import { loadConfig } from '../config.js';
@@ -152,7 +152,6 @@ export async function runSyncTick(): Promise<{ processed: number }> {
   await reapStuckJobs();
   await reapStaleInboundCalls();
   await sweepUnloggedCalls();
-  await sweepUnpushedRecordingLinks();
   const now = new Date();
   const jobs = await db
     .select()
@@ -202,7 +201,32 @@ export async function runSyncTick(): Promise<{ processed: number }> {
     }
     processed++;
   }
+  // Runs AFTER the job drain, never before (Fix 3, 2026-08-26 review): the
+  // recording-link sweep makes up to 10 sequential Salesforce round-trips, so
+  // repair work must never sit in front of live Task creation.
+  await runRecordingLinkSweepSafely();
   return { processed };
+}
+
+/**
+ * Isolation wrapper around `sweepUnpushedRecordingLinks` for `runSyncTick`:
+ * the sweep is repair work, not the primary job, so a wholesale throw (e.g.
+ * the SELECT itself failing) must never propagate and skip/abort the job
+ * drain that already ran this tick. Per-call failures inside the sweep are
+ * already isolated (see `sweepUnpushedRecordingLinks`); this only guards
+ * against the sweep failing as a whole. Takes the sweep as a parameter so the
+ * isolation is unit-testable without a database.
+ */
+export async function runRecordingLinkSweepSafely(
+  sweep: () => Promise<void> = sweepUnpushedRecordingLinks,
+): Promise<void> {
+  try {
+    await sweep();
+  } catch (err) {
+    console.error('[sf-sync] recording link sweep failed wholesale', {
+      err: (err as Error).message,
+    });
+  }
 }
 
 /**
@@ -504,7 +528,15 @@ export async function syncOne(
     // not marked" and would PATCH again blind (harmless, but confusing logs).
     let patched = false;
     try {
-      await deps.updateCallTask(call.userId, taskId, { tdc_cti__Recording_URL__c: recUrl });
+      const { updated } = await deps.updateCallTask(call.userId, taskId, { tdc_cti__Recording_URL__c: recUrl });
+      // INVALID_FIELD (Fix 1, 2026-08-26 review): a configuration fact, not a
+      // transient failure — retrying can't fix a field missing from the org
+      // or hidden from this rep by field-level security. Still stamped below
+      // (leaving it unstamped would clog the sweep forever), but logged
+      // distinctly so a false "success" doesn't hide silently in the stamp.
+      if (!updated) {
+        console.error('[sf-sync] recording link field rejected (INVALID_FIELD)', { callId: call.id, taskId });
+      }
       patched = true;
     } catch (err) {
       console.error('[sf-sync] recording attach failed', {
@@ -562,7 +594,16 @@ export async function pushRecordingLinkToTask(
   // decides whether/when to retry. recordingLinkSyncedAt is stamped ONLY once
   // the PATCH above has actually succeeded (2026-08-26 incident: this push used
   // to be fire-and-forget with nothing recording whether it landed).
-  await deps.updateCallTask(call.userId, call.salesforceTaskId, { tdc_cti__Recording_URL__c: url });
+  const { updated } = await deps.updateCallTask(call.userId, call.salesforceTaskId, { tdc_cti__Recording_URL__c: url });
+  // INVALID_FIELD (Fix 1, 2026-08-26 review): same handling as syncOne's
+  // create-time push above — still stamped below, but logged distinctly so a
+  // configuration-rejected PATCH doesn't look identical to a real success.
+  if (!updated) {
+    console.error('[sf-sync] recording link field rejected (INVALID_FIELD)', {
+      callId,
+      taskId: call.salesforceTaskId,
+    });
+  }
   try {
     await db
       .update(schema.calls)
@@ -613,10 +654,23 @@ export async function sweepUnpushedRecordingLinks(
         lt(schema.calls.updatedAt, cutoff),
       ),
     )
+    // Freshest misses first (Fix 2, 2026-08-26 review): without this, a
+    // stable set of rows that fail every retry (e.g. a legitimate
+    // INVALID_FIELD miss — see Fix 1) can fill all 10 slots every tick and
+    // starve a fresh miss from ever being picked up.
+    .orderBy(desc(schema.calls.updatedAt))
     .limit(10);
   for (const row of rows) {
     try {
-      await push(row.id);
+      const result = await push(row.id);
+      // 'pending'/'skipped' (Fix 2, 2026-08-26 review): the row changed
+      // between this select and push's re-read (e.g. the Task hadn't been
+      // created yet after all). Not an error, but today these cycle forever
+      // silently — warn with a distinct code so a permanently-non-patching
+      // row is visible.
+      if (result === 'pending' || result === 'skipped') {
+        console.warn('[sf-sync] recording link sweep non-patched', { callId: row.id, result });
+      }
     } catch (err) {
       console.error('[sf-sync] recording link sweep failed', {
         callId: row.id,
