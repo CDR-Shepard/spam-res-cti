@@ -66,7 +66,7 @@ try {
     console.log(`${APPLY ? 'ASSIGN' : 'PLAN  '} ${num.e164} (${num.health}) -> ${rep.email} [${label}]`);
     if (APPLY) {
       await client.query(
-        `update outbound_numbers set kind = 'agent', assigned_user_id = $1, label = $2, updated_at = now()
+        `update outbound_numbers set kind = 'agent', assigned_user_id = $1, label = $2
          where id = $3 and kind = 'dialer_pool'`,
         [rep.id, label, num.id],
       );
