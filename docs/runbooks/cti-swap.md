@@ -80,7 +80,7 @@ two relate.
 
 Everything below runs from `services/cti-api`. **Dry run first, always** —
 it is the default (no flag needed) and is read-only against Salesforce (it
-issues `sf data query` only, never `sf data update record`):
+issues `sf data query` only, never a write via `sf api request rest`):
 
 ```bash
 cd services/cti-api
@@ -97,6 +97,12 @@ Expected output: one line per rep —
   **active** Salesforce User by email. This is expected for any purely
   internal/test CTI account that was never given a Salesforce login;
   confirm it isn't a rep who's supposed to be live before proceeding.
+- `DUPLICATE EMAIL: <email> matched N users (<names>)` — more than one
+  active Salesforce User shares that email (seen live in `_t2`: a real rep
+  and a shared "Integration User" account both use the same address). Every
+  matched user gets planned and would get repointed on `--apply` — resolve
+  which one(s) should actually move before running `--apply` for that email;
+  do not assume the extra match is harmless just because it printed.
 
 then a summary line: `DRY RUN — N to change. Re-run with --apply.` and
 exit `0`. If the dry run errors instead (missing `CallerReputationCTI` Call
@@ -117,8 +123,13 @@ This:
    before making any change in Salesforce.** Each row is
    `{ sfId, email, name, previousCallCenterId, alreadyDone }` — this file
    is the only record of what every rep's Call Center was before the swap.
-3. Calls `sf data update record` only for the reps still marked `swap`
-   (the `ok` ones are left untouched — that's the idempotency).
+3. Calls `sf api request rest` (a `PATCH` on
+   `/services/data/v61.0/sobjects/User/<id>` with a JSON body) only for the
+   reps still marked `swap` (the `ok` ones are left untouched — that's the
+   idempotency). A JSON body is used rather than `sf data update record`
+   because the latter's `-v "Field=''"` syntax cannot express `null` for a
+   lookup field, which matters for rollback (§5) whenever a rep's prior
+   `CallCenterId` was null.
 4. Re-queries every affected user's `CallCenterId` and prints either
    `VERIFIED: all N users on CallerReputationCTI` or
    `VERIFY FAILED for: <emails>` if any didn't stick.
@@ -155,66 +166,68 @@ itself is a separate, per-user grant:
    stale open tab is still showing the tab, and flipping it on immediately
    unblocks the API even before the rep reloads to see the tab appear.
 
-## 4. Salesforce parity (list-view dial button visibility)
+## 4. Salesforce parity (list-view "Power Dial" button)
 
-Salesforce also has its own client-side gate: the Lead/Opportunity
-list-view "Power Dial" button (the `powerDial` LWC, launched via a List
-Button + Screen Flow — see `salesforce/force-app/main/default/lwc/powerDial/README.md`)
-is visibility-scoped to a permission set, separately from the server-side
-`power_dialer_enabled` flag. **The server 403 (§3.4) is the authoritative
-gate — this permission set only controls whether the button/flow shows up
-in the Salesforce UI.** A rep with the permset but `power_dialer_enabled =
-false` still gets a 403 if they click through; a rep without the permset
-just never sees the button, even if an admin already flipped their DB flag
-on.
+The live Lead/Opportunity list-view **Power Dial** button is a
+`massActionButton` WebLink (`objects/Lead/webLinks/Power_Dial.webLink`,
+`objects/Opportunity/webLinks/Power_Dial.webLink`) that opens a Visualforce
+page (`pages/PowerDialListLead.page` / `pages/PowerDialListOpp.page`)
+backed by `PowerDialListController.cls`, which reads the checked rows
+(via the standard set controller's server-side `getSelected()`) and calls
+`PowerDialRelay.sendToCti()`. That is the only path wired into the deployed
+org. (`salesforce/force-app/main/default/lwc/powerDial/` and
+`flows/PowerDial_List.flow-meta.xml` are an earlier LWC + Screen Flow
+design for the same button — nothing in the deployed metadata (no list
+button, page layout, or Lightning page) references either of them, so
+don't take their README as a description of what's actually live.)
 
-Because the exact permission set name isn't pinned by this runbook (it may
-be renamed or reorganized after this was written), look it up fresh at
-execution time:
+**As of 2026-08-26, this button works only for System Administrator
+profile users, and there is no permission set involved in that gate.**
+`PowerDialRelay.cls`'s private `isSystemAdministrator()` (around lines
+150–153) does a hard `Profile.Name == 'System Administrator'` check, and
+it is called from both `sendToCti()` (the rollout-gate check and comment
+around lines 34–39 — this is what actually throws for a non-admin who gets
+this far) and the cacheable `canUsePowerDial()` (around lines 145–148,
+intended for a caller to hide the button for non-admins). There is no
+permission set, custom setting, or other metadata switch anywhere in this
+gate today — a rep's profile is the only input. Assigning any permission
+set to a non-admin rep changes nothing here: `sendToCti()` still throws an
+`AuraHandledException`/error page via `isSystemAdministrator()` regardless
+of what permission sets that rep holds.
 
-```bash
-sf org list metadata -m PermissionSet -o _t2 --json \
-  | grep -vE 'postgres://|postgresql://|TOKEN|SECRET' \
-  | sed -n '/^{/,$p' \
-  | node -e "
-let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
-  const names = JSON.parse(d).result.map(r => r.fullName);
-  console.log(names.filter(n => /dial|power/i.test(n)).join('\n'));
-});
-"
-```
+Given that:
 
-Pick the one whose name and (in Setup → Permission Sets → that set →
-description) description clearly describe the list-view Power Dial button
-— **as of this writing no such permission set exists yet in `_t2`**, in
-which case create it first (Setup → Permission Sets → New; grant it "Read"
-on the `powerDial` Lightning component / the List Button; do not grant
-anything beyond visibility of that button) before assigning it below.
+- **The CTI server gate and Team panel from §3 are the operative,
+  real per-rep controls** (`power_dialer_enabled` + `requirePowerDialer`).
+  Nothing in this runbook grants or revokes SF-button access per rep,
+  because nothing per-rep currently exists on the SF side to grant.
+- **The Salesforce list-view button is not a per-user control today.** It
+  is either available (System Administrator profile) or not, independent
+  of `power_dialer_enabled`, independent of this swap, and independent of
+  anything toggled in the Team panel. An admin whose `power_dialer_enabled`
+  is off still sees the button but gets rejected server-side by the CTI API
+  when they try to actually dial; a non-admin never sees a working button
+  regardless of their `power_dialer_enabled` value.
+- **Extending the SF button to non-admin enabled reps requires changing the
+  gate in `PowerDialRelay.cls`** — replacing or supplementing
+  `isSystemAdministrator()` in both `sendToCti()` and `canUsePowerDial()`
+  with a check tied to real per-rep enablement (for example, having Apex
+  call back to the CTI API for the live `power_dialer_enabled` value, or
+  introducing an actual permission set and checking `FeatureManagement` /
+  `hasPermissionSet` against it) — and deploying that Apex change to `_t2`.
+  That is a separate, future Salesforce deploy, out of scope for this
+  runbook. **Do not try to work around it by creating or assigning a
+  permission set** — none exists in the gate as written, and one would not
+  change `isSystemAdministrator()`'s behavior.
 
-For each rep enabled in §3, assign the permset by username (not email —
-`-b` takes the Salesforce **username**, which is why the roster match in
-the swap script itself uses email instead):
-
-```bash
-sf org assign permset -n <PermSetName> -o _t2 -b <rep-sf-username>
-```
-
-To remove it from a rep who's being taken off Power Dialer, the modern
-`sf` CLI has no direct "unassign" verb — delete the
-`PermissionSetAssignment` record:
-
-```bash
-sf data query -o _t2 --json -q \
-  "SELECT Id FROM PermissionSetAssignment WHERE PermissionSet.Name = '<PermSetName>' AND Assignee.Username = '<rep-sf-username>'" \
-  | grep -vE 'postgres://|postgresql://|TOKEN|SECRET'
-# then, with the Id from the query above:
-sf data delete record -o _t2 -s PermissionSetAssignment -i <assignmentId>
-```
-
-Keep this list in sync with the Team panel roster from §3 by hand — there
-is no automated sync between the DB flag and the SF permset (a deliberate,
-documented gap; see
-`docs/superpowers/specs/2026-08-25-power-dialer-enablement-design.md` §"Non-goals").
+This SF-button-admin-only vs. CTI-server-per-rep-enablement gap is a known,
+deliberate limitation of this rollout — see
+`docs/superpowers/specs/2026-08-25-power-dialer-enablement-design.md`
+§"Out of scope" ("Automated SF permset sync for the LWC (manual parity per
+runbook)" — that line predates the discovery that the gate is a hard-coded
+profile check rather than a permset, but the conclusion still holds:
+Salesforce-side parity for this button is a manual, out-of-band concern
+this runbook does not automate).
 
 ## 5. Rollback
 
@@ -229,17 +242,34 @@ env SF_ORG=_t2 node scripts/swap-call-center.mjs --rollback swap-rollback-<times
 ```
 
 This re-reads each row's `previousCallCenterId` and writes it straight
-back via `sf data update record`, printing
-`rolled back <email> -> <previousCallCenterId or (none)>` per user — `
-(none)` means that rep had no `CallCenterId` set at all before the swap
-(new hire, or was never on any CTI), and rollback correctly clears it
-rather than leaving `CallerReputationCTI` in place. Rollback does not
-touch Power Dialer's `power_dialer_enabled` flag or the SF permset from §4
-— those are reversed separately (uncheck in the Team panel; remove the
-permset per §4) if the whole rollout is being unwound, not just the Call
-Center.
+back via `sf api request rest` (the same `PATCH`-with-JSON-body call used
+by `--apply`, which correctly expresses `null` for a rep whose prior
+`CallCenterId` was empty — `sf data update record`'s `-v` syntax cannot),
+printing `rolled back <email> -> <previousCallCenterId or (none)>` per
+user — `(none)` means that rep had no `CallCenterId` set at all before the
+swap (new hire, or was never on any CTI), and rollback correctly clears it
+rather than leaving `CallerReputationCTI` in place.
 
-There is no dry-run mode for `--rollback` — it always writes. Only run it
+**A single row's failure does not abort the rollback.** If one user's
+PATCH fails (permissions, a stale/deleted Id, a transient API error), that
+row is logged as `FAILED to roll back <email> (<sfId>): <error>` and the
+loop continues to the remaining rows — a rollback must never die mid-loop
+and leave the rest of the roster un-rolled-back. At the end, if any row
+failed, the script prints a `ROLLBACK INCOMPLETE — N of M row(s) failed:`
+summary listing every failed row and exits non-zero; re-run the same
+`--rollback` command (it's safe to retry — `ok` rows just get re-PATCHed to
+the same value) or fix the underlying issue for the specific failed row(s)
+by hand in Setup.
+
+Rollback does not touch Power Dialer's `power_dialer_enabled` flag. (There
+is currently no SF-side permission set to also reverse — see §4: SF-button
+access is gated purely by the System Administrator profile check in
+`PowerDialRelay.cls`, not by any assignable permission set.) If the whole
+rollout is being unwound, not just the Call Center, also uncheck Power
+Dialer for the affected reps in the Team panel (§3).
+
+There is no dry-run mode for `--rollback` — it always writes (per-row
+failures noted above are logged and skipped, not previewed). Only run it
 against a rollback file you trust (ideally the one this exact swap
 produced) and on the same org (`_t2`) it was generated against.
 

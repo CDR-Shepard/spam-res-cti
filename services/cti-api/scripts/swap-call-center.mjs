@@ -18,24 +18,45 @@ import pg from 'pg';
 const ORG = process.env.SF_ORG ?? '_t2';
 const APPLY = process.argv.includes('--apply');
 const ROLLBACK = process.argv.indexOf('--rollback');
+const API_VERSION = 'v61.0';
 
 function soql(q) {
   const out = execFileSync('sf', ['data', 'query', '-o', ORG, '-q', q, '--json'], { encoding: 'utf8' });
   return JSON.parse(out).result.records;
 }
+
+// REST PATCH, not `sf data update record`: that command's `-v "Field=''"`
+// syntax cannot express null for a lookup field, so a rollback of a rep
+// whose previousCallCenterId was null (never on any CTI) would crash
+// mid-loop. A JSON body expresses null natively, so this one path is used
+// uniformly for both the --apply swap and the --rollback restore. Args are
+// passed as an execFileSync array (no shell), so the JSON body needs no
+// shell-escaping regardless of what it contains.
 function sfUpdate(id, callCenterId) {
+  const body = JSON.stringify({ CallCenterId: callCenterId ?? null });
   execFileSync('sf', [
-    'data', 'update', 'record', '-o', ORG, '-s', 'User', '-i', id,
-    '-v', `CallCenterId='${callCenterId ?? ''}'`, '--json',
+    'api', 'request', 'rest', `/services/data/${API_VERSION}/sobjects/User/${id}`,
+    '-X', 'PATCH', '-b', body, '-o', ORG,
   ], { encoding: 'utf8' });
 }
 
 if (ROLLBACK !== -1) {
   const file = process.argv[ROLLBACK + 1];
   const saved = JSON.parse(readFileSync(file, 'utf8'));
+  const failures = [];
   for (const row of saved) {
-    sfUpdate(row.sfId, row.previousCallCenterId);
-    console.log(`rolled back ${row.email} -> ${row.previousCallCenterId ?? '(none)'}`);
+    try {
+      sfUpdate(row.sfId, row.previousCallCenterId);
+      console.log(`rolled back ${row.email} -> ${row.previousCallCenterId ?? '(none)'}`);
+    } catch (err) {
+      failures.push({ email: row.email, sfId: row.sfId, error: err.message });
+      console.error(`FAILED to roll back ${row.email} (${row.sfId}): ${err.message}`);
+    }
+  }
+  if (failures.length) {
+    console.error(`\nROLLBACK INCOMPLETE — ${failures.length} of ${saved.length} row(s) failed:`);
+    for (const f of failures) console.error(`  ${f.email} (${f.sfId}): ${f.error}`);
+    process.exit(1);
   }
   process.exit(0);
 }
@@ -57,6 +78,23 @@ const sfUsers = soql(`SELECT Id, Email, Name, CallCenterId FROM User WHERE IsAct
 
 const missing = emails.filter((e) => !sfUsers.some((u) => u.Email?.toLowerCase() === e));
 if (missing.length) console.log(`no active SF user for: ${missing.join(', ')}`);
+
+// Flag any email matched by more than one active SF user (e.g. a shared
+// service/integration account) before the plan summary, in both dry-run and
+// --apply — an --apply run would otherwise silently repoint every matching
+// user's CallCenterId, including ones an operator didn't mean to touch.
+const byEmail = new Map();
+for (const u of sfUsers) {
+  const key = u.Email?.toLowerCase();
+  if (!key) continue;
+  if (!byEmail.has(key)) byEmail.set(key, []);
+  byEmail.get(key).push(u);
+}
+for (const [email, users] of byEmail) {
+  if (users.length > 1) {
+    console.log(`DUPLICATE EMAIL: ${email} matched ${users.length} users (${users.map((u) => u.Name).join(', ')})`);
+  }
+}
 
 const plan = sfUsers.map((u) => ({
   sfId: u.Id, email: u.Email, name: u.Name,
