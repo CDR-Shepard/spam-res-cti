@@ -82,6 +82,10 @@ export const users = pgTable(
     timezone: text('timezone').default('UTC').notNull(),
     /** Admins manage outbound numbers, assignment, and campaigns. */
     isAdmin: boolean('is_admin').default(false).notNull(),
+    /** Power dialing is a granted capability (spec 2026-08-25): default OFF,
+     *  flipped per user by an admin from the softphone Team panel. Gated at
+     *  every dialer entry point — see routes/dialer.ts's requirePowerDialer. */
+    powerDialerEnabled: boolean('power_dialer_enabled').default(false).notNull(),
     /**
      * Agent no-answer failover (E.164). When an inbound callback rings this
      * rep's softphone and they don't pick up within the forward window, the

@@ -12,7 +12,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 // ---------------------------------------------------------------------------
 const state = vi.hoisted(() => ({
   cfg: { HANDOFF_SHARED_SECRET: undefined as string | undefined },
-  authedUser: null as { userId: string; orgId: string; email: string; isAdmin: boolean } | null,
+  authedUser: null as {
+    userId: string; orgId: string; email: string; isAdmin: boolean; powerDialerEnabled: boolean;
+  } | null,
   db: null as unknown,
 }));
 
@@ -47,6 +49,7 @@ interface FakeConn {
 interface FakeUser {
   id: string;
   orgId: string;
+  powerDialerEnabled?: boolean;
 }
 interface HandoffRow {
   id: string;
@@ -237,7 +240,7 @@ describe('POST /dialer/handoffs', () => {
 
     // The rep's poll should see the SECOND selection, proving the first was
     // actually replaced rather than merely outranked by recency.
-    state.authedUser = { userId: LOCAL_USER_ID, orgId: 'org-1', email: 'rep@example.com', isAdmin: false };
+    state.authedUser = { userId: LOCAL_USER_ID, orgId: 'org-1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true };
     (state.db as unknown as { query: { salesforceConnections: { findFirst: () => Promise<FakeConn | null> } } }).query.salesforceConnections.findFirst =
       async () => ({ userId: LOCAL_USER_ID, sfUserId: SF_USER_ID });
     const poll = await app.inject({ method: 'GET', url: '/dialer/handoffs/pending', headers: { authorization: 'Bearer tok' } });
@@ -253,7 +256,7 @@ describe('GET /dialer/handoffs/pending', () => {
   });
 
   it('returns { handoff: null } when the rep has no linked Salesforce connection', async () => {
-    state.authedUser = { userId: LOCAL_USER_ID, orgId: 'org-1', email: 'rep@example.com', isAdmin: false };
+    state.authedUser = { userId: LOCAL_USER_ID, orgId: 'org-1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true };
     state.db = makeFakeDb({ conn: null });
     const res = await app.inject({ method: 'GET', url: '/dialer/handoffs/pending', headers: { authorization: 'Bearer tok' } });
     expect(res.statusCode).toBe(200);
@@ -269,7 +272,7 @@ describe('GET /dialer/handoffs/pending', () => {
       objectType: 'Lead',
       recordIds: [RECORD_ID_1, RECORD_ID_2],
     });
-    state.authedUser = { userId: LOCAL_USER_ID, orgId: 'org-1', email: 'rep@example.com', isAdmin: false };
+    state.authedUser = { userId: LOCAL_USER_ID, orgId: 'org-1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true };
 
     const firstPoll = await app.inject({ method: 'GET', url: '/dialer/handoffs/pending', headers: { authorization: 'Bearer tok' } });
     expect(firstPoll.statusCode).toBe(200);
@@ -361,5 +364,64 @@ describe('upsertPendingHandoff concurrency', () => {
 
     expect(db._pendingCount(SF_USER_ID)).toBe(1);
     expect(db._transactionCallCount()).toBe(2);
+  });
+});
+
+describe('power dialer gate (spec 2026-08-25)', () => {
+  const disabled = {
+    userId: 'u1', orgId: 'o1', email: 'rep@x.com', isAdmin: false, powerDialerEnabled: false,
+  };
+
+  it.each([
+    ['GET', '/dialer/salesforce/listviews?object=Lead'],
+    ['POST', '/dialer/sessions'],
+    ['POST', '/dialer/sessions/from-listview'],
+    ['GET', '/dialer/handoffs/pending'],
+  ] as const)('%s %s → 403 power_dialer_disabled when the flag is off', async (method, url) => {
+    state.authedUser = disabled;
+    state.db = makeFakeDb();
+    const res = await app.inject({ method, url, payload: method === 'POST' ? {} : undefined });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: 'power_dialer_disabled' });
+  });
+
+  it('an enabled user passes the gate (listviews fails LATER, not with 403)', async () => {
+    state.authedUser = { ...disabled, powerDialerEnabled: true };
+    state.db = makeFakeDb();
+    const res = await app.inject({ method: 'GET', url: '/dialer/salesforce/listviews?object=Lead' });
+    expect(res.statusCode).not.toBe(403); // gate passed; 502 from unmocked SF is fine
+  });
+
+  it('session management is NOT gated: stop with the flag off is not a power_dialer 403', async () => {
+    state.authedUser = disabled;
+    state.db = makeFakeDb();
+    const res = await app.inject({ method: 'POST', url: '/dialer/sessions/some-id/stop' });
+    expect(res.json()).not.toEqual({ error: 'power_dialer_disabled' });
+  });
+
+  it('the SF handoff relay refuses a resolved target whose flag is off', async () => {
+    state.cfg.HANDOFF_SHARED_SECRET = 's3cret';
+    state.db = makeFakeDb({
+      conn: { userId: 'u1', sfUserId: '005000000000001' },
+      user: { id: 'u1', orgId: 'o1', powerDialerEnabled: false },
+    });
+    const res = await app.inject({
+      method: 'POST', url: '/dialer/handoffs',
+      headers: { 'x-handoff-secret': 's3cret' },
+      payload: { salesforceUserId: '005000000000001', objectType: 'Lead', recordIds: ['00Q000000000001'] },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: 'power_dialer_disabled' });
+  });
+
+  it('the relay still accepts an UNRESOLVED target (no SF connection yet) — pickup is gated instead', async () => {
+    state.cfg.HANDOFF_SHARED_SECRET = 's3cret';
+    state.db = makeFakeDb({ conn: null, user: null });
+    const res = await app.inject({
+      method: 'POST', url: '/dialer/handoffs',
+      headers: { 'x-handoff-secret': 's3cret' },
+      payload: { salesforceUserId: '005000000000001', objectType: 'Lead', recordIds: ['00Q000000000001'] },
+    });
+    expect(res.statusCode).toBe(200);
   });
 });

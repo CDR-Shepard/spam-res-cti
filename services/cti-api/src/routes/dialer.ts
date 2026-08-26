@@ -130,6 +130,18 @@ async function loadOwnedSession(
 
 type AuthedUser = NonNullable<Awaited<ReturnType<typeof resolveSession>>>;
 
+/** Power dialing is a granted capability (spec 2026-08-25): every ENTRY point
+ *  refuses users without the flag. Session management (pause/skip/stop/next)
+ *  stays ungated so a mid-run disable never strands an in-flight run. */
+function requirePowerDialer(
+  authed: { powerDialerEnabled: boolean },
+  reply: FastifyReply,
+): boolean {
+  if (authed.powerDialerEnabled) return true;
+  void reply.code(403).send({ error: 'power_dialer_disabled' });
+  return false;
+}
+
 /**
  * Shared auth + ownership gate for the `/dialer/sessions/:id*` routes: resolves
  * the bearer session, loads the `:id` session scoped to that caller, and sends
@@ -166,6 +178,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
   app.get('/dialer/salesforce/listviews', async (req, reply) => {
     const authed = await resolveSession(req.headers.authorization);
     if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!requirePowerDialer(authed, reply)) return reply;
     const object = (req.query as { object?: string }).object;
     if (object !== 'Lead' && object !== 'Opportunity' && object !== 'Task') {
       return reply.code(400).send({ error: 'object must be Lead, Opportunity or Task' });
@@ -186,6 +199,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
   app.post('/dialer/sessions/from-listview', async (req, reply) => {
     const authed = await resolveSession(req.headers.authorization);
     if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!requirePowerDialer(authed, reply)) return reply;
     const parsed = z
       .object({
         object: z.enum(['Lead', 'Opportunity', 'Task']),
@@ -227,6 +241,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
   app.post('/dialer/sessions', async (req, reply) => {
     const authed = await resolveSession(req.headers.authorization);
     if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!requirePowerDialer(authed, reply)) return reply;
     const parsed = StartBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
 
@@ -347,6 +362,12 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       where: eq(schema.salesforceConnections.sfUserId, parsed.salesforceUserId),
     });
     const user = conn ? await db.query.users.findFirst({ where: eq(schema.users.id, conn.userId) }) : undefined;
+    // Refuse a resolved target without the capability. An UNRESOLVED target
+    // (rep not SF-connected yet) is allowed through: the pickup poll and
+    // session creation are both gated, so nothing can start from it anyway.
+    if (user && !user.powerDialerEnabled) {
+      return reply.code(403).send({ error: 'power_dialer_disabled' });
+    }
     const { handoffId } = await upsertPendingHandoff(db, {
       orgId: user?.orgId ?? null,
       salesforceUserId: parsed.salesforceUserId,
@@ -366,6 +387,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
   app.get('/dialer/handoffs/pending', async (req, reply) => {
     const authed = await resolveSession(req.headers.authorization);
     if (!authed) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!requirePowerDialer(authed, reply)) return reply;
     const db = getDb();
     const conn = await db.query.salesforceConnections.findFirst({
       where: eq(schema.salesforceConnections.userId, authed.userId),
