@@ -1,0 +1,86 @@
+[
+  {
+    "sfId": "005US000002gRtwYAE",
+    "email": "danny@rethinkreteam.com",
+    "name": "Danny Arredondo",
+    "previousCallCenterId": "04vUS0000022Dw5YAE",
+    "alreadyDone": false
+  },
+  {
+    "sfId": "0058X00000F4DHSQA3",
+    "email": "deivid@rethinkreteam.com",
+    "name": "Deivid Lopez",
+    "previousCallCenterId": "04vUS0000022Dw5YAE",
+    "alreadyDone": false
+  },
+  {
+    "sfId": "005US000003xjsDYAQ",
+    "email": "edward@rethinkreteam.com",
+    "name": "Edward Jerome Maglalang",
+    "previousCallCenterId": "04vUS0000022Dw5YAE",
+    "alreadyDone": false
+  },
+  {
+    "sfId": "0055f000005qXncAAE",
+    "email": "garrettmartorello@gmail.com",
+    "name": "Garrett Martorello",
+    "previousCallCenterId": "04vUS0000022Dw5YAE",
+    "alreadyDone": false
+  },
+  {
+    "sfId": "0055f000005qXVfAAM",
+    "email": "greensethb@gmail.com",
+    "name": "Seth Boisvert",
+    "previousCallCenterId": null,
+    "alreadyDone": false
+  },
+  {
+    "sfId": "0058X00000F4DHPQA3",
+    "email": "jordyn@rethinkreteam.com",
+    "name": "Jordyn Freedman",
+    "previousCallCenterId": "04vUS0000022Dw5YAE",
+    "alreadyDone": false
+  },
+  {
+    "sfId": "0055f000005qY3EAAU",
+    "email": "matt@rethinkreteam.com",
+    "name": "Matt Penrod",
+    "previousCallCenterId": "04vUS0000022Dw5YAE",
+    "alreadyDone": false
+  },
+  {
+    "sfId": "0058X00000FstIBQAZ",
+    "email": "matt@sjoinvestments.com",
+    "name": "Matt Cook",
+    "previousCallCenterId": "04vUS000003gPoHYAU",
+    "alreadyDone": true
+  },
+  {
+    "sfId": "0055f000005qXVGAA2",
+    "email": "norahnazzaro@gmail.com",
+    "name": "Norah Nazzaro",
+    "previousCallCenterId": "04vUS0000022Dw5YAE",
+    "alreadyDone": false
+  },
+  {
+    "sfId": "0058X00000FM6a5QAD",
+    "email": "sam@rethinkreteam.com",
+    "name": "Samuel Elwood",
+    "previousCallCenterId": "04vUS0000022Dw5YAE",
+    "alreadyDone": false
+  },
+  {
+    "sfId": "0055f000005qYO6AAM",
+    "email": "thomas@rethinkreteam.com",
+    "name": "Thomas Wilkinson",
+    "previousCallCenterId": "04vUS0000022Dw5YAE",
+    "alreadyDone": false
+  },
+  {
+    "sfId": "005US000002XW6PYAW",
+    "email": "tyler@sjoinvestments.com",
+    "name": "Tyler Lizola",
+    "previousCallCenterId": "04vUS000003gPoHYAU",
+    "alreadyDone": true
+  }
+]
