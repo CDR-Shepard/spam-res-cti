@@ -1,4 +1,4 @@
-export type Tab = 'dialer' | 'powerdial' | 'recent' | 'reputation' | 'admin' | 'calls' | 'settings';
+export type Tab = 'dialer' | 'powerdial' | 'recent' | 'team' | 'reputation' | 'admin' | 'calls' | 'settings';
 
 export interface NavTab {
   id: Tab;
@@ -10,20 +10,22 @@ export interface NavTab {
  * admin-only tools. Reps never see these (navTabsFor omits them), so their bar
  * has no "More" at all. Order preserved from navTabsFor.
  */
-export const NAV_OVERFLOW_IDS: readonly Tab[] = ['reputation', 'admin', 'calls'];
+export const NAV_OVERFLOW_IDS: readonly Tab[] = ['team', 'reputation', 'admin', 'calls'];
 
 /**
- * The bottom-nav tabs, in order, for a given rep. Reputation, Numbers (`admin`)
- * and Calls are admin-only (the corresponding endpoints also 403 non-admins);
- * every rep gets Dial, Power Dial, Recent, and Settings.
+ * The bottom-nav tabs, in order, for a given rep. Power Dial is a GRANTED
+ * capability independent of admin status — the dialer endpoints 403 without
+ * it, so an admin without the grant doesn't see the tab either. Team,
+ * Reputation, Numbers (`admin`) and Calls are admin-only.
  */
-export function navTabsFor(isAdmin: boolean): NavTab[] {
+export function navTabsFor(user: { isAdmin: boolean; powerDialerEnabled: boolean }): NavTab[] {
   return [
     { id: 'dialer', label: 'Dial' },
-    { id: 'powerdial', label: 'Power Dial' },
+    ...(user.powerDialerEnabled ? ([{ id: 'powerdial', label: 'Power Dial' }] as NavTab[]) : []),
     { id: 'recent', label: 'Recent' },
-    ...(isAdmin
+    ...(user.isAdmin
       ? ([
+          { id: 'team', label: 'Team' },
           { id: 'reputation', label: 'Reputation' },
           { id: 'admin', label: 'Numbers' },
           { id: 'calls', label: 'Calls' },

@@ -10,6 +10,7 @@ import { Dialpad } from './components/Dialpad';
 import { RecentCalls } from './components/RecentCalls';
 import { ReputationPanel } from './components/ReputationPanel';
 import { SettingsPanel } from './components/SettingsPanel';
+import { TeamPanel } from './components/TeamPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
 import {
@@ -34,7 +35,7 @@ import { buildCallSubject } from './call-subject';
 import { openCtiSavePlan } from './opencti-log';
 
 interface MeResponse {
-  user: { userId: string; orgId: string; email: string; isAdmin: boolean; noAnswerForwardE164?: string | null };
+  user: { userId: string; orgId: string; email: string; isAdmin: boolean; powerDialerEnabled: boolean; noAnswerForwardE164?: string | null };
   salesforce:
     | { connected: false }
     | { connected: true; name?: string | null; email?: string | null; photoDataUrl?: string | null };
@@ -76,6 +77,18 @@ function defaultDispositionForStatus(status: string): string {
   if (status === 'no_answer' || status === 'canceled') return 'No answer';
   if (status === 'busy') return 'Busy';
   return 'Connected';
+}
+
+/** Toast text for a failed power-dial start. The server's 403 gate
+ *  (`{ error: 'power_dialer_disabled' }`) means an admin revoked the grant
+ *  since this rep's tab bar last refreshed — say so plainly instead of
+ *  surfacing the raw API error body. */
+function dialerStartErrorMessage(e: unknown): string {
+  if (e instanceof ApiError && (e.data as { error?: string } | null)?.error === 'power_dialer_disabled') {
+    return "Power dialing isn't enabled for your account.";
+  }
+  const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'unknown error';
+  return `Could not start power dial: ${msg}`;
 }
 
 /** Minimal shape of a Twilio Voice SDK incoming Call. */
@@ -604,8 +617,7 @@ export function App(): JSX.Element {
       const { sessionId } = await startDialer(objectType as DialerObjectType, recordIds as string[]);
       await beginRun(sessionId, myRun);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'unknown error';
-      setToast({ text: `Could not start power dial: ${msg}`, type: 'error' });
+      setToast({ text: dialerStartErrorMessage(e), type: 'error' });
       if (dialerRunRef.current === myRun) setDialerLive(false); // only if a newer run didn't supersede us
     }
   }, [beginRun]);
@@ -620,8 +632,7 @@ export function App(): JSX.Element {
         await beginRun(sessionId, myRun);
         setToast({ text: `Power Dial started — dialing ${recordCount} record(s).`, type: 'success' });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'unknown error';
-        setToast({ text: `Could not start power dial: ${msg}`, type: 'error' });
+        setToast({ text: dialerStartErrorMessage(e), type: 'error' });
         if (dialerRunRef.current === myRun) setDialerLive(false); // only if a newer run didn't supersede us
       }
     },
@@ -1185,6 +1196,8 @@ export function App(): JSX.Element {
         whatId: c.salesforceWhatId,
       })}
     />
+  ) : tab === 'team' ? (
+    <TeamPanel />
   ) : tab === 'reputation' ? (
     <ReputationPanel />
   ) : tab === 'admin' ? (
@@ -1230,12 +1243,13 @@ export function App(): JSX.Element {
     dialer: <GridIcon />,
     powerdial: <ZapIcon />,
     recent: <ClockIcon />,
+    team: <UserIcon />,
     reputation: <ShieldIcon />,
     admin: <SettingsIcon />,
     calls: <PhoneOutgoingIcon />,
     settings: <UserIcon />,
   };
-  const navItems = navTabsFor(me.user.isAdmin).map((t) => ({ ...t, icon: iconFor[t.id] }));
+  const navItems = navTabsFor(me.user).map((t) => ({ ...t, icon: iconFor[t.id] }));
   // Keep the bottom bar uncrowded: the admin-only tools live under a "More"
   // overflow (reps have none, so their bar is just the 4 primary tabs).
   const primaryItems = navItems.filter((i) => !NAV_OVERFLOW_IDS.includes(i.id));
