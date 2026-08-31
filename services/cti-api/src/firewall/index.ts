@@ -460,10 +460,10 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
       });
     } else {
       const window = callingWindowFor(campaign);
-      const within = isWithinCallingHours(new Date(), tz, window.start, window.end, allowedDays);
+      const verdict = callingHoursVerdict(new Date(), tz, window.start, window.end, allowedDays);
       const tzDetailSuffix = tzSource ? ` · ${tzSource}` : '';
       checks.push(
-        within
+        verdict.within
           ? {
               name: 'calling_hours',
               passed: true,
@@ -476,7 +476,7 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
               passed: false,
               severity: 'block',
               reasonCode: REASON.OUTSIDE_CALLING_HOURS,
-              detail: `Now is outside ${window.start}-${window.end} ${tz}${tzDetailSuffix}`,
+              detail: `${callingHoursBlockDetail(verdict, window, tz, allowedDays)}${tzDetailSuffix}`,
             },
       );
     }
@@ -1079,13 +1079,40 @@ export function callingWindowFor(campaign: {
   };
 }
 
-export function isWithinCallingHours(
+const WEEKDAY_ABBR: Record<number, string> = { 1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu', 5: 'Fri', 6: 'Sat', 7: 'Sun' };
+const WEEKDAY_FULL: Record<number, string> = {
+  1: 'Monday',
+  2: 'Tuesday',
+  3: 'Wednesday',
+  4: 'Thursday',
+  5: 'Friday',
+  6: 'Saturday',
+  7: 'Sunday',
+};
+
+export interface CallingHoursVerdict {
+  /** True only when both the day and the clock allow the call. */
+  within: boolean;
+  /** True when today (recipient-local) is one of the allowed ISO weekdays. */
+  dayAllowed: boolean;
+  /** Recipient-local weekday full name, e.g. "Sunday" — for messaging. */
+  weekdayName: string;
+}
+
+/**
+ * Splits what `isWithinCallingHours` used to collapse into one boolean, so a
+ * caller can tell WHY a call is blocked: wrong day vs. wrong clock. A rep
+ * blocked on a Sunday inside the 08:00-20:00 window was reading "outside
+ * 08:00-20:00" and concluding the dialer was broken — the day was the real
+ * gate, not the hour (2026-08-30 live incident).
+ */
+export function callingHoursVerdict(
   now: Date,
   timezone: string,
   startHHMM: string,
   endHHMM: string,
   allowedIsoWeekdays: number[],
-): boolean {
+): CallingHoursVerdict {
   try {
     const fmt = new Intl.DateTimeFormat('en-US', {
       timeZone: timezone,
@@ -1100,16 +1127,62 @@ export function isWithinCallingHours(
     const weekdayShort = parts.find((p) => p.type === 'weekday')?.value ?? 'Mon';
     const map: Record<string, number> = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
     const iso = map[weekdayShort] ?? 1;
-    if (!allowedIsoWeekdays.includes(iso)) return false;
+    const dayAllowed = allowedIsoWeekdays.includes(iso);
 
     const [sH, sM] = startHHMM.split(':').map(Number) as [number, number];
     const [eH, eM] = endHHMM.split(':').map(Number) as [number, number];
     const nowMins = hour * 60 + minute;
     const startMins = sH * 60 + sM;
     const endMins = eH * 60 + eM;
-    return nowMins >= startMins && nowMins < endMins;
+    const withinHours = nowMins >= startMins && nowMins < endMins;
+
+    return { within: dayAllowed && withinHours, dayAllowed, weekdayName: WEEKDAY_FULL[iso] ?? 'Monday' };
   } catch {
     // Bad tz → fail safe to REVIEW upstream
-    return false;
+    return { within: false, dayAllowed: false, weekdayName: '' };
   }
+}
+
+export function isWithinCallingHours(
+  now: Date,
+  timezone: string,
+  startHHMM: string,
+  endHHMM: string,
+  allowedIsoWeekdays: number[],
+): boolean {
+  return callingHoursVerdict(now, timezone, startHHMM, endHHMM, allowedIsoWeekdays).within;
+}
+
+/** Contiguous ISO weekday ranges render as `Mon-Fri`; anything else is a comma list. */
+export function formatAllowedDays(allowedIsoWeekdays: number[]): string {
+  const days = [...new Set(allowedIsoWeekdays)]
+    .filter((d) => d >= 1 && d <= 7)
+    .sort((a, b) => a - b);
+  const first = days[0];
+  const last = days[days.length - 1];
+  if (first === undefined || last === undefined) return '';
+  const isContiguous = days.every((d, i) => i === 0 || d === (days[i - 1] ?? NaN) + 1);
+  if (isContiguous) {
+    return days.length === 1
+      ? (WEEKDAY_ABBR[first] ?? '')
+      : `${WEEKDAY_ABBR[first] ?? ''}-${WEEKDAY_ABBR[last] ?? ''}`;
+  }
+  return days.map((d) => WEEKDAY_ABBR[d] ?? '').join(', ');
+}
+
+/**
+ * The gate-6 BLOCK detail: names the day restriction when that's the actual
+ * reason, otherwise keeps the original hours message unchanged. Callers
+ * append their own tz-source suffix (` · ${tzSource}`), matching how the
+ * PASSED branch already does it.
+ */
+export function callingHoursBlockDetail(
+  verdict: CallingHoursVerdict,
+  window: { start: string; end: string },
+  timezone: string,
+  allowedIsoWeekdays: number[],
+): string {
+  return verdict.dayAllowed
+    ? `Now is outside ${window.start}-${window.end} ${timezone}`
+    : `Calling is ${formatAllowedDays(allowedIsoWeekdays)} only (today is ${verdict.weekdayName}, recipient-local)`;
 }
