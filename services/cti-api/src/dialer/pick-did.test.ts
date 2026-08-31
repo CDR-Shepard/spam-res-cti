@@ -94,6 +94,44 @@ describe('withinCallingHours', () => {
       expect(withinCallingHours(TX_NUMBER, new Date('2026-07-12T18:00:00Z'))).toBe(true);
     });
   });
+
+  /**
+   * FIX-9: an NPA missing from the tz/state maps (e.g. NANPA assigns a new
+   * geographic area code before we add it) used to fail OPEN unconditionally
+   * — which, after the weekend-calling ruling, would let a ban-state's Sunday
+   * slip through for any number in that not-yet-mapped area code. '555' is a
+   * geographic-looking, deliberately unassigned NANP area code (never a real
+   * NPA, never toll-free) standing in for "assigned by NANPA, not yet in our
+   * map". Fix applies the conservative UNKNOWN_STATE_RULE with a central-US
+   * approximation tz: banned on Sunday, otherwise gated the same 08:00-21:00
+   * window every other NPA already gets — NOT the old unconditional `true`.
+   */
+  describe('an unmapped (but NANP-shaped) NPA fails closed on the state overlay, per FIX-9', () => {
+    const UNMAPPED_NUMBER = '+15555551234'; // 555 -> not in NPA_TZ_GROUPS / NPA_TO_STATE
+
+    it('blocks on Sunday (unknown-state rule bans Sunday, Central-US approximation)', () => {
+      // 2026-07-12 is a Sunday; 15:00Z == 10:00 CDT.
+      expect(withinCallingHours(UNMAPPED_NUMBER, new Date('2026-07-12T15:00:00Z'))).toBe(false);
+    });
+
+    it('allows Tuesday 10:00 CT (unknown-state rule permits Mon-Sat within 08:00-21:00)', () => {
+      // 2026-07-14 is a Tuesday; 15:00Z == 10:00 CDT.
+      expect(withinCallingHours(UNMAPPED_NUMBER, new Date('2026-07-14T15:00:00Z'))).toBe(true);
+    });
+
+    it('still gates the hour on an allowed day (blocked before 08:00 CT)', () => {
+      // 2026-07-14 Tuesday 07:00 CDT == 12:00Z.
+      expect(withinCallingHours(UNMAPPED_NUMBER, new Date('2026-07-14T12:00:00Z'))).toBe(false);
+    });
+
+    it('a genuinely non-geographic NANP number (toll-free) is UNCHANGED — still fails open, not treated as an unmapped NPA', () => {
+      // Toll-free ranges can never correspond to a recipient's state, unlike a
+      // simply-not-yet-mapped geographic NPA — this must keep failing open
+      // exactly as before FIX-9 (same case already covered above, re-pinned
+      // here for the direct side-by-side against the new unmapped-NPA case).
+      expect(withinCallingHours('+18005551234', new Date('2026-07-12T15:00:00Z'))).toBe(true);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

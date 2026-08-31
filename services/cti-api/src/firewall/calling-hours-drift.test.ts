@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { callingWindowFor, isWithinCallingHours } from './index.js';
+import { callingHoursGateCheck, callingWindowFor, isWithinCallingHours } from './index.js';
+import { stateForAreaCode, timezoneForNumber } from './tz.js';
 import {
   CALLING_HOURS_END_HHMM_EXCLUSIVE,
   CALLING_HOURS_START_HHMM,
@@ -40,6 +41,30 @@ function firewallSays(at: Date): boolean {
   return isWithinCallingHours(at, TZ, w.start, w.end, WEEKDAYS);
 }
 
+/**
+ * FIX-5: `firewallSays` above only interlocks the HOUR boundary (it never
+ * passes a `state`), so it couldn't have caught the two enforcement sites
+ * disagreeing about a STATE's day restriction — only about the clock. This
+ * is the state-aware counterpart: the firewall's REAL gate 6 boundary
+ * (`callingHoursGateCheck`), fed the same tz + state derivation the dialer's
+ * `withinCallingHours` uses (area code → tz, area code → state, both from
+ * `firewall/tz.ts`), over the system's own 7-day/08:00-21:00 window (the
+ * dialer has no campaign context, so it always uses the system window).
+ */
+function firewallStateSays(toE164: string, at: Date): boolean {
+  const resolved = timezoneForNumber(toE164);
+  if (!resolved) return true; // matches withinCallingHours' fail-open for an unresolvable tz
+  const state = stateForAreaCode(resolved.matched);
+  const w = callingWindowFor({ callingHoursStart: null, callingHoursEnd: null });
+  return callingHoursGateCheck({
+    now: at,
+    tz: resolved.timezone,
+    state,
+    window: w,
+    allowedDays: [1, 2, 3, 4, 5, 6, 7],
+  }).passed;
+}
+
 describe('calling window — the two enforcement sites cannot drift', () => {
   it('the exported pair is the documented TCPA-safe window: local hour in [8, 20]', () => {
     expect([CALLING_HOUR_START, CALLING_HOUR_END_INCLUSIVE]).toEqual([8, 20]);
@@ -74,6 +99,34 @@ describe('calling window — the two enforcement sites cannot drift', () => {
   });
 });
 
+describe('FIX-5: the two enforcement sites cannot drift on the per-STATE overlay either', () => {
+  const TX_NUMBER = '+12145551234'; // 214 -> America/Chicago, TX (Sunday from noon)
+
+  it('agree TX is BLOCKED Sunday 11:00 CT — before the noon start (Tex. Bus. & Com. § 304.052)', () => {
+    // 2026-07-12 is a Sunday; 11:00 CDT == 16:00Z.
+    const at = new Date('2026-07-12T16:00:00Z');
+    expect(withinCallingHours(TX_NUMBER, at)).toBe(false);
+    expect(firewallStateSays(TX_NUMBER, at)).toBe(false);
+  });
+
+  it('agree TX is ALLOWED Sunday 13:00 CT — past the noon start', () => {
+    // 2026-07-12 Sunday 13:00 CDT == 18:00Z.
+    const at = new Date('2026-07-12T18:00:00Z');
+    expect(withinCallingHours(TX_NUMBER, at)).toBe(true);
+    expect(firewallStateSays(TX_NUMBER, at)).toBe(true);
+  });
+
+  it('agree at every hour of a restricted-state Sunday, not just the boundary', () => {
+    for (let hour = 0; hour < 24; hour += 1) {
+      const utcHour = hour + 5; // CDT is UTC-5
+      const day = 12 + Math.floor(utcHour / 24);
+      const h = utcHour % 24;
+      const at = new Date(`2026-07-${String(day).padStart(2, '0')}T${String(h).padStart(2, '0')}:00:00Z`);
+      expect([hour, firewallStateSays(TX_NUMBER, at)]).toEqual([hour, withinCallingHours(TX_NUMBER, at)]);
+    }
+  });
+});
+
 describe('callingWindowFor — a campaign may narrow, never widen', () => {
   it('defaults to the shared window when the campaign has no values', () => {
     expect(callingWindowFor({ callingHoursStart: null, callingHoursEnd: null }))
@@ -90,5 +143,27 @@ describe('callingWindowFor — a campaign may narrow, never widen', () => {
     // an earlier open or a later close.
     expect(callingWindowFor({ callingHoursStart: '07:00', callingHoursEnd: '22:00' }))
       .toEqual({ start: '08:00', end: '21:00' });
+  });
+
+  it('FIX-1: an UNPADDED start ("8:00") still raises to the 08:00 floor, in minutes not lexically', () => {
+    // A plain string compare thinks "8:00" > "08:00" (since '8' > '0'
+    // character-wise), which would wrongly treat 8:00 as ALREADY past the
+    // floor and skip the clamp, when numerically they're equal.
+    expect(callingWindowFor({ callingHoursStart: '8:00', callingHoursEnd: '9:00' }))
+      .toEqual({ start: '08:00', end: '9:00' });
+  });
+
+  it('FIX-1: the clamp never WIDENS an unpadded narrower end', () => {
+    // "9:00" (540 min) is well inside the 21:00 (1260 min) cap — the clamp
+    // must pass it through unchanged, not lexically decide it's "less than"
+    // "21:00" for the wrong reason and coincidentally still work here; assert
+    // the actual minutes-equivalence explicitly.
+    const result = callingWindowFor({ callingHoursStart: '8:00', callingHoursEnd: '9:00' });
+    const toMinutes = (hhmm: string): number => {
+      const [h, m] = hhmm.split(':').map(Number) as [number, number];
+      return h * 60 + m;
+    };
+    expect(toMinutes(result.start)).toBe(8 * 60);
+    expect(toMinutes(result.end)).toBe(9 * 60);
   });
 });

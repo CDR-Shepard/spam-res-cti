@@ -15,7 +15,7 @@ import { normalize } from '../phone.js';
 import { pickRotationNumber } from '../rotation.js';
 import { fetchRecordAddress, SalesforceUnauthorizedError } from '../salesforce/client.js';
 import { resolveTimezone, stateForAreaCode, timezoneForNumber } from './tz.js';
-import { effectiveCallingWindow, resolveStateRule, todayIsoWeekday } from './state-calling-rules.js';
+import { effectiveCallingWindow, resolveStateRule, todayIsoWeekday, type IsoWeekday } from './state-calling-rules.js';
 import { warmupCapForAge } from './warmup.js';
 import { fetchDidWindowStats } from '../reputation/query.js';
 import { answerRateBreach, engagementBreach, THRESHOLDS } from '../reputation/signals.js';
@@ -295,6 +295,44 @@ export function attemptGateChecks(args: {
   return checks;
 }
 
+/**
+ * FIX-3: the area-code fallback for the recipient's STATE, applied whenever
+ * `resolvedState` is still null after both tz-resolution attempts (SF
+ * address, then the dialed number's area code) — independent of whether tz
+ * itself already resolved. Without this, a record whose SF address resolves
+ * tz via COUNTRY (state blank, country "US" — `resolveTimezone`'s
+ * US-or-unknown fallback) short-circuits the old area-code fallback, because
+ * that fallback lived inside `if (!resolvedTz)` and tz was already set. State
+ * then stayed null forever for such a record, which falls to the
+ * conservative UNKNOWN_STATE_RULE (Sunday banned) even when the dialed
+ * number's own area code plainly identifies a real state (e.g. 619 → CA).
+ * Pure and exported so it's directly testable without the whole `evaluate()`
+ * pipeline (db, SF client), same pattern as `callingWindowFor`.
+ */
+export function resolveRecipientState(resolvedState: string | null, e164: string): string | null {
+  if (resolvedState) return resolvedState;
+  const npa = /^\+1(\d{3})\d{7}$/.exec(e164)?.[1];
+  return npa ? stateForAreaCode(npa) : null;
+}
+
+/**
+ * FIX-4: gate 7d's hours label, sourced from the ENFORCED `STATE_CALLING_RULES`
+ * table (today's weekday window for `stateCode`, via the SAME
+ * `resolveStateRule`/`todayIsoWeekday` helpers gate 6 uses) — not the legacy
+ * `state_calling_rules` DB table gate 7d otherwise still reads for its
+ * frequency-cap portion. The two tables have drifted (e.g. the DB seed has OK
+ * at 08:00-20:00; the enforced code table is 09:00-20:00), so printing the
+ * DB's hours told the rep a window the firewall doesn't actually allow.
+ * Pure and exported so it's directly testable without the whole `evaluate()`
+ * pipeline (db, SF client), same pattern as `callingWindowFor`.
+ */
+export function enforcedStateHoursLabel(stateCode: string, now: Date, tz: string): string {
+  const isoWeekday = todayIsoWeekday(now, tz);
+  const rule = resolveStateRule(stateCode);
+  const window = rule.days[isoWeekday as IsoWeekday];
+  return window ? `${window.start}-${window.end}` : 'no calling today';
+}
+
 export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallResponse> {
   const checks: CheckResult[] = [];
 
@@ -369,6 +407,11 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
       resolvedState = stateForAreaCode(npa.matched);
     }
   }
+  // FIX-3: state may still be unresolved here even though tz IS resolved —
+  // e.g. the SF address matched tz via COUNTRY, not state. Fall back to the
+  // dialed number's area code regardless of how (or whether) tz resolved, so
+  // a country-matched record doesn't fall to the unknown-state rule forever.
+  resolvedState = resolveRecipientState(resolvedState, e164);
   const inputForChecks = { ...input, recipientTimezone: resolvedTz };
 
   // 2. Internal opt-out list
@@ -645,6 +688,13 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
           where: eq(schema.stateCallingRules.stateCode, stateCode),
         });
         if (rule) {
+          // FIX-4: hours come from the ENFORCED STATE_CALLING_RULES table
+          // (today's weekday window, recipient-local), not `rule`'s own
+          // calling_hours_start/end columns — those have drifted from what
+          // gate 6 actually enforces (e.g. OK: DB seed 08:00 vs enforced
+          // 09:00). The frequency-cap portion below is unchanged — it still
+          // reads `rule.maxAttemptsPer24h`/`rule.notes` from the DB table.
+          const enforcedHours = enforcedStateHoursLabel(stateCode, new Date(), inputForChecks.recipientTimezone ?? 'America/Chicago');
           // (a) per-state attempt cap
           if (rule.maxAttemptsPer24h) {
             const windowStart = new Date(Date.now() - 24 * 3600 * 1000);
@@ -673,7 +723,7 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
                 passed: true,
                 severity: 'info',
                 reasonCode: REASON.STATE_RULE_OK,
-                detail: `${stateCode}: ${n}/${rule.maxAttemptsPer24h} per 24h · ${rule.callingHoursStart}-${rule.callingHoursEnd}`,
+                detail: `${stateCode}: ${n}/${rule.maxAttemptsPer24h} per 24h · ${enforcedHours}`,
               });
             }
           } else {
@@ -682,7 +732,7 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
               passed: true,
               severity: 'info',
               reasonCode: REASON.STATE_RULE_OK,
-              detail: `${stateCode}: hours ${rule.callingHoursStart}-${rule.callingHoursEnd}${rule.notes ? ' · ' + rule.notes : ''}`,
+              detail: `${stateCode}: hours ${enforcedHours}${rule.notes ? ' · ' + rule.notes : ''}`,
             });
           }
           // (b) registration requirement (e.g. Texas)
@@ -1068,6 +1118,20 @@ export function velocityGateCheck(
       };
 }
 
+/**
+ * Parses "HH:MM" into minutes since midnight. FIX-1: `callingWindowFor`'s
+ * clamp used to compare the raw strings lexicographically — an UNPADDED
+ * value ("8:00") reads as GREATER than "09:00" character-by-character
+ * ('8' > '0') even though it's numerically earlier, which let an unpadded
+ * campaign start slip under the federal floor uncorrected AND let an
+ * unpadded campaign end get wrongly WIDENED past the cap. Minutes compare
+ * correctly regardless of padding.
+ */
+function hhmmToMinutes(hhmm: string): number {
+  const [h, m] = hhmm.split(':').map(Number) as [number, number];
+  return h * 60 + m;
+}
+
 export function callingWindowFor(campaign: {
   callingHoursStart?: string | null;
   callingHoursEnd?: string | null;
@@ -1075,8 +1139,8 @@ export function callingWindowFor(campaign: {
   const start = campaign.callingHoursStart || CALLING_HOURS_START_HHMM;
   const end = campaign.callingHoursEnd || CALLING_HOURS_END_HHMM_EXCLUSIVE;
   return {
-    start: start > CALLING_HOURS_START_HHMM ? start : CALLING_HOURS_START_HHMM,
-    end: end < CALLING_HOURS_END_HHMM_EXCLUSIVE ? end : CALLING_HOURS_END_HHMM_EXCLUSIVE,
+    start: hhmmToMinutes(start) > hhmmToMinutes(CALLING_HOURS_START_HHMM) ? start : CALLING_HOURS_START_HHMM,
+    end: hhmmToMinutes(end) < hhmmToMinutes(CALLING_HOURS_END_HHMM_EXCLUSIVE) ? end : CALLING_HOURS_END_HHMM_EXCLUSIVE,
   };
 }
 
@@ -1239,9 +1303,22 @@ export function callingHoursGateCheck(args: {
   const effectiveWindow = effectiveCallingWindow({ days: allowedDays, start: window.start, end: window.end }, stateRule, isoWeekday);
   if (!effectiveWindow) {
     const weekdayName = WEEKDAY_FULL[isoWeekday] ?? '';
-    const detail = state
-      ? `Calling ${state} is ${formatAllowedDays(Object.keys(stateRule.days).map(Number))} only (today is ${weekdayName}, recipient-local)`
-      : `${weekdayName} calling requires a known state (recipient state unresolved)`;
+    const stateDayWindow = stateRule.days[isoWeekday as IsoWeekday];
+    // FIX-2: `effectiveCallingWindow` returns null for TWO different reasons —
+    // the state bans the day outright (no entry for `isoWeekday`), or the day
+    // IS allowed but the state's window doesn't overlap the campaign's
+    // (narrower) window at all. The old code assumed the first case
+    // unconditionally, which produced a self-contradictory message on the
+    // second (e.g. "Calling FL is Mon-Sun only (today is Wednesday...)" when
+    // FL plainly allows Wednesday). Branch on whether the state actually has
+    // NO window for today.
+    const detail = stateDayWindow === undefined
+      ? (state
+          ? `Calling ${state} is ${formatAllowedDays(Object.keys(stateRule.days).map(Number))} only (today is ${weekdayName}, recipient-local)`
+          : `${weekdayName} calling requires a known state (recipient state unresolved)`)
+      : (state
+          ? `Now is outside ${stateDayWindow.start}-${stateDayWindow.end} ${tz} (${state} rule)`
+          : `Now is outside ${stateDayWindow.start}-${stateDayWindow.end} ${tz}`);
     return {
       name: 'calling_hours',
       passed: false,

@@ -70,6 +70,18 @@ describe('resolveStateRule', () => {
   it('is case-insensitive for a listed state', () => {
     expect(resolveStateRule('al')).toBe(STATE_CALLING_RULES.AL);
   });
+
+  it('FIX-8: an unrecognized/garbage code falls to UNKNOWN_STATE_RULE, not the permissive federal baseline', () => {
+    expect(resolveStateRule('ZZ')).toBe(UNKNOWN_STATE_RULE);
+  });
+
+  it('FIX-8: a lowercase known state still normalizes to its table row', () => {
+    expect(resolveStateRule('al')).toBe(STATE_CALLING_RULES.AL);
+  });
+
+  it('FIX-8: a lowercase known-but-unlisted state still normalizes to the federal baseline', () => {
+    expect(resolveStateRule('ca')).toBe(FEDERAL_BASELINE);
+  });
 });
 
 describe('effectiveCallingWindow — campaign ∩ state', () => {
@@ -101,6 +113,29 @@ describe('effectiveCallingWindow — campaign ∩ state', () => {
     // ME Monday window is 09:00-17:00 — entirely before 18:00-19:00.
     expect(effectiveCallingWindow(lateCampaign, STATE_CALLING_RULES.ME!, 1)).toBeNull();
   });
+
+  it('FIX-1: an UNPADDED campaign start ("8:00") does not defeat a state floor above 8am', () => {
+    // Reviewer repro: MO's floor is 09:00. A campaign start of "8:00"
+    // (unpadded) must still raise to MO's 09:00 floor — a naive lexicographic
+    // compare thinks "8:00" >= "09:00" (since '8' > '0' as characters) and
+    // wrongly keeps the campaign's earlier start, letting a call land at
+    // 08:30 while claiming the MO rule was applied.
+    const unpaddedCampaign = { days: [1, 2, 3, 4, 5, 6, 7], start: '8:00', end: '21:00' };
+    const result = effectiveCallingWindow(unpaddedCampaign, STATE_CALLING_RULES.MO!, 3); // Wednesday
+    expect(result).not.toBeNull();
+    expect(result!.start).toBe('09:00');
+  });
+
+  it('FIX-1: an unpadded campaign end does not defeat a state cap below the campaign end', () => {
+    // MO's Wednesday cap is 20:00. A campaign end of "21:0" is nonsensical but
+    // the realistic unpadded case is a single-digit HOUR ("9:00") — cover the
+    // general numeric-compare property with an unpadded end that is smaller
+    // than the state's cap and must still win (narrower wins).
+    const unpaddedCampaign = { days: [1, 2, 3, 4, 5, 6, 7], start: '09:00', end: '9:30' };
+    const result = effectiveCallingWindow(unpaddedCampaign, STATE_CALLING_RULES.MO!, 3);
+    expect(result).not.toBeNull();
+    expect(result!.end).toBe('9:30');
+  });
 });
 
 describe('todayIsoWeekday', () => {
@@ -111,5 +146,20 @@ describe('todayIsoWeekday', () => {
     expect(todayIsoWeekday(new Date('2026-07-12T17:00:00Z'), 'America/Los_Angeles')).toBe(7);
     // 2026-07-18 is a Saturday.
     expect(todayIsoWeekday(new Date('2026-07-18T17:00:00Z'), 'America/Los_Angeles')).toBe(6);
+  });
+
+  it('FIX-7: crosses UTC midnight into the NEXT UTC calendar day but is still the PRIOR local weekday', () => {
+    // 19:00 CDT (UTC-5) Sunday 2026-07-12 == 00:00 UTC Monday 2026-07-13. The
+    // UTC calendar date has already rolled to Monday; the recipient-local
+    // weekday has not. A naive implementation that reads the UTC date (or
+    // gets the UTC/local distinction backwards) would report Monday here and
+    // silently allow a call AL bans on Sunday (the reviewer's exact probe).
+    const crossesUtcMidnight = new Date('2026-07-13T00:00:00Z');
+    expect(todayIsoWeekday(crossesUtcMidnight, 'America/Chicago')).toBe(7); // Sunday, not Monday
+
+    // And the state rule actually blocks it: AL bans Sunday outright.
+    const alRule = resolveStateRule('AL');
+    expect(alRule.days[7]).toBeUndefined();
+    expect(effectiveCallingWindow({ days: [1, 2, 3, 4, 5, 6, 7], start: '08:00', end: '21:00' }, alRule, 7)).toBeNull();
   });
 });

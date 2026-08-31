@@ -78,6 +78,35 @@ function currentHHMM(nowUtc: Date, timezone: string): string {
 }
 
 /**
+ * NANP non-geographic ranges — toll-free (800/833/844/855/866/877/888) and
+ * premium-rate (900), the SAME set `firewall/tz.ts` documents as
+ * intentionally absent from its NPA→tz map. These can NEVER correspond to a
+ * recipient's actual state (they're not tied to any location), unlike an NPA
+ * that's simply not YET in our map (FIX-9 below) — so they keep the
+ * pre-existing fail-open behavior rather than the unknown-state
+ * approximation.
+ */
+const NON_GEOGRAPHIC_NPAS = new Set(['800', '833', '844', '855', '866', '877', '888', '900']);
+const NANP_E164 = /^\+1(\d{3})\d{7}$/;
+
+/** Applies the state overlay's effective window (system 7-day/08:00-21:00
+ *  window ∩ the resolved state's rule) and compares it to the current
+ *  recipient-local clock. Shared by both the resolved-NPA path and the
+ *  unmapped-but-NANP-shaped approximation path below. */
+function withinEffectiveWindow(tz: string, state: string | null, nowUtc: Date): boolean {
+  const stateRule = resolveStateRule(state);
+  const isoWeekday = todayIsoWeekday(nowUtc, tz);
+  const window = effectiveCallingWindow(
+    { days: [1, 2, 3, 4, 5, 6, 7], start: CALLING_HOURS_START_HHMM, end: CALLING_HOURS_END_HHMM_EXCLUSIVE },
+    stateRule,
+    isoWeekday,
+  );
+  if (!window) return false;
+  const nowHHMM = currentHHMM(nowUtc, tz); // FIX-10: was `hhmm`, shadowing the module-level formatter above.
+  return nowHHMM >= window.start && nowHHMM < window.end;
+}
+
+/**
  * PURE: is `nowUtc` within the recipient-local calling window for `toE164`,
  * once the per-state compliance overlay (weekend-calling ruling, 2026-08-31 —
  * Saturday/Sunday dialing is on globally EXCEPT where a state restricts it;
@@ -96,27 +125,36 @@ function currentHHMM(nowUtc: Date, timezone: string): string {
  * new source). When that resolves to no state at all (non-US NANP tz, e.g. a
  * Canadian number), the conservative unknown-state rule applies.
  *
- * An entirely unresolvable timezone (non-NANP, toll-free, or otherwise
- * unmapped) still FAILS OPEN (true) — unchanged from before the overlay: the
- * firewall already gates the actual click-to-dial per-call, so the dialer's
- * pre-filter erring toward "attempt it" (rather than silently starving leads
- * with unrecognized area codes out of the queue) is the safer default here.
+ * FIX-9: a NANP-shaped number whose NPA is simply missing from our tz/state
+ * maps (e.g. NANPA assigns a new geographic area code before we add it) used
+ * to fail OPEN unconditionally here — which, after the weekend-calling
+ * ruling, would let a ban-state's Sunday slip through for that NPA the
+ * moment NANPA assigns it there. It now applies the conservative
+ * UNKNOWN_STATE_RULE with `America/Chicago` as a central-US approximation
+ * timezone: conservative on day 7 (Sunday banned, like every other
+ * unresolved-state number), with Mon-Sat fail-open effectively retained —
+ * UNKNOWN_STATE_RULE's Mon-Sat window (08:00-21:00) is exactly the system
+ * window every resolvable NPA already gets, so this is no MORE restrictive
+ * than a normal number on those days, just no longer unconditionally true
+ * outside all hours.
+ *
+ * A genuinely non-geographic NANP range (toll-free/premium-rate,
+ * `NON_GEOGRAPHIC_NPAS`) or a non-NANP number (international) still FAILS
+ * OPEN (true) — unchanged: neither can ever correspond to a real state, so
+ * there's no state-overlay risk to close, and the firewall's per-call gate
+ * remains authoritative for click-to-dial.
  */
 export function withinCallingHours(toE164: string, nowUtc: Date): boolean {
   const resolved = timezoneForNumber(toE164);
-  if (!resolved) return true;
-  const { timezone: tz, matched: npa } = resolved;
-  const state = stateForAreaCode(npa);
-  const stateRule = resolveStateRule(state);
-  const isoWeekday = todayIsoWeekday(nowUtc, tz);
-  const window = effectiveCallingWindow(
-    { days: [1, 2, 3, 4, 5, 6, 7], start: CALLING_HOURS_START_HHMM, end: CALLING_HOURS_END_HHMM_EXCLUSIVE },
-    stateRule,
-    isoWeekday,
-  );
-  if (!window) return false;
-  const hhmm = currentHHMM(nowUtc, tz);
-  return hhmm >= window.start && hhmm < window.end;
+  if (resolved) {
+    const state = stateForAreaCode(resolved.matched);
+    return withinEffectiveWindow(resolved.timezone, state, nowUtc);
+  }
+  const npa = NANP_E164.exec(toE164)?.[1];
+  if (npa && !NON_GEOGRAPHIC_NPAS.has(npa)) {
+    return withinEffectiveWindow('America/Chicago', null, nowUtc);
+  }
+  return true;
 }
 
 /**

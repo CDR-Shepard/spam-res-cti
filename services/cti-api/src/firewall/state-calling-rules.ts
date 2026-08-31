@@ -110,22 +110,52 @@ export const STATE_CALLING_RULES: Record<string, StateRule> = {
 };
 
 /**
+ * The 50 US states + DC — `resolveStateRule`'s fail-safe allowlist. A code
+ * that normalizes to one of these but has no row in STATE_CALLING_RULES gets
+ * the federal baseline (permissive, all 7 days). A code that DOESN'T — a
+ * typo, a territory abbreviation, garbage input — no longer silently gets
+ * the same permissive baseline; it falls to the conservative
+ * UNKNOWN_STATE_RULE instead (FIX-8: `resolveStateRule` used to return
+ * FEDERAL_BASELINE, the MOST permissive rule, for literally anything
+ * unrecognized).
+ */
+const KNOWN_US_STATES = new Set([
+  'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA',
+  'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD',
+  'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ',
+  'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC',
+  'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY',
+  'DC',
+]);
+
+/**
  * Resolve a 2-letter state code to its rule: the table row if listed, the
- * federal baseline if it's a known state absent from the table, or the
- * conservative unknown-state rule if `state` itself couldn't be resolved.
+ * federal baseline if it's a known US state absent from the table, the
+ * conservative unknown-state rule if `state` itself couldn't be resolved OR
+ * doesn't normalize to a recognized US state code.
  */
 export function resolveStateRule(state: string | null): StateRule {
   if (!state) return UNKNOWN_STATE_RULE;
-  return STATE_CALLING_RULES[state.toUpperCase()] ?? FEDERAL_BASELINE;
+  const code = state.toUpperCase();
+  const listed = STATE_CALLING_RULES[code];
+  if (listed) return listed;
+  return KNOWN_US_STATES.has(code) ? FEDERAL_BASELINE : UNKNOWN_STATE_RULE;
 }
 
 function toMinutes(hhmm: string): number {
   const [h, m] = hhmm.split(':').map(Number) as [number, number];
   return h * 60 + m;
 }
-/** Zero-padded "HH:MM" strings order lexicographically the same as chronologically. */
-const maxHHMM = (a: string, b: string): string => (a >= b ? a : b);
-const minHHMM = (a: string, b: string): string => (a <= b ? a : b);
+/**
+ * FIX-1: compare numerically via `toMinutes`, not lexicographically. An
+ * UNPADDED "HH:MM" (e.g. campaign value "8:00") breaks a plain string
+ * compare — "8:00" >= "09:00" is true lexically ('8' > '0') even though
+ * 8:00 is numerically EARLIER than 09:00 — which let an unpadded campaign
+ * start defeat a state's floor (reviewer repro: MO Wednesday 08:30 passed
+ * with detail claiming "MO rule", MO's actual floor is 09:00).
+ */
+const maxHHMM = (a: string, b: string): string => (toMinutes(a) >= toMinutes(b) ? a : b);
+const minHHMM = (a: string, b: string): string => (toMinutes(a) <= toMinutes(b) ? a : b);
 
 export interface EffectiveCallingWindowCampaign {
   /** ISO weekdays (1=Mon..7=Sun) the campaign itself allows. */

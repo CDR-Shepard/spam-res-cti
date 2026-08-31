@@ -145,6 +145,30 @@ describe('callingHoursGateCheck — weekend calling with the per-state overlay',
     expect(result.detail).toBe('09:00-20:00 America/Chicago · TX rule · area code 214');
   });
 
+  it('FIX-2: an EMPTY INTERSECTION (day allowed, but the state window does not overlap the campaign window) does NOT claim a day ban', () => {
+    // Reviewer repro: a campaign that only opens 20:00-21:00 intersected with
+    // FL's 08:00-20:00 window on a day FL clearly allows (Wednesday) — the
+    // OLD code treated any null effectiveWindow as a day-ban and printed
+    // "Calling FL is Mon-Sun only (today is Wednesday...)", which is
+    // self-contradictory (FL allows every day). The real constraint is the
+    // clock, not the day, so the message must say so and name FL's actual
+    // window for that day.
+    const WEDNESDAY = '2026-07-15';
+    const result = callingHoursGateCheck({
+      now: easternAt(WEDNESDAY, 20, 30), // inside the campaign's 20:00-21:00 window
+      tz: 'America/New_York',
+      state: 'FL',
+      window: { start: '20:00', end: '21:00' },
+      allowedDays: ALL_7_DAYS,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.reasonCode).toBe('OUTSIDE_CALLING_HOURS');
+    expect(result.detail).not.toContain('only');
+    expect(result.detail).not.toContain('Mon-Sun');
+    expect(result.detail).toContain('08:00-20:00');
+    expect(result.detail).toContain('FL');
+  });
+
   it('a campaign that itself excludes the day still uses the ORIGINAL campaign-day message (unchanged from 779fe15)', () => {
     // A Mon-Fri-only campaign in a state (TX) that would otherwise allow Saturday.
     const SATURDAY = '2026-07-18';

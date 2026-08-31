@@ -146,7 +146,7 @@ export function resolveTimezone(addr: AddressBundle | null | undefined): Resolve
  * 866/877/888, 900, etc.) are intentionally absent so they resolve to null.
  * Saskatchewan and Arizona use their no-DST zones.
  */
-const NPA_TZ_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
+export const NPA_TZ_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['America/Los_Angeles', [
     // CA
     '209', '213', '279', '310', '323', '341', '350', '408', '415', '424', '442', '510', '530', '559',
