@@ -14,7 +14,8 @@ import { schema } from '../db/index.js';
 import { normalize } from '../phone.js';
 import { pickRotationNumber } from '../rotation.js';
 import { fetchRecordAddress, SalesforceUnauthorizedError } from '../salesforce/client.js';
-import { resolveTimezone, timezoneForNumber } from './tz.js';
+import { resolveTimezone, stateForAreaCode, timezoneForNumber } from './tz.js';
+import { effectiveCallingWindow, resolveStateRule, todayIsoWeekday } from './state-calling-rules.js';
 import { warmupCapForAge } from './warmup.js';
 import { fetchDidWindowStats } from '../reputation/query.js';
 import { answerRateBreach, engagementBreach, THRESHOLDS } from '../reputation/signals.js';
@@ -326,7 +327,14 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
   // OAuth-connected); only a truly unmapped/international number falls through
   // to the "unknown TZ" REVIEW path. An explicit address is preferred because a
   // ported cell can carry an out-of-region area code.
+  // The recipient STATE, resolved alongside the tz (same priority order, same
+  // sources — see the weekend-calling brief, gate 6): the state overlay
+  // (state-calling-rules.ts) needs a 2-letter code, not just a tz, to know
+  // whether a state bans Sunday (or narrows the window) while weekend calling
+  // is on globally elsewhere. null when it can't be resolved at all —
+  // resolveStateRule(null) is the conservative unknown-state fallback.
   let resolvedTz = input.recipientTimezone;
+  let resolvedState: string | null = null;
   let tzSource: string | undefined;
   if (!resolvedTz && input.recipientRecordId) {
     try {
@@ -336,6 +344,7 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
         if (resolved) {
           resolvedTz = resolved.timezone;
           tzSource = `${addr.objectType} ${resolved.matched} via ${resolved.source}`;
+          if (resolved.source === 'state') resolvedState = resolved.matched;
         }
       }
     } catch (err) {
@@ -357,6 +366,7 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
     if (npa) {
       resolvedTz = npa.timezone;
       tzSource = `area code ${npa.matched}`;
+      resolvedState = stateForAreaCode(npa.matched);
     }
   }
   const inputForChecks = { ...input, recipientTimezone: resolvedTz };
@@ -446,10 +456,11 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
     // also feeds the rotation swap.
   }
 
-  // 6. Calling hours (recipient-local). If TZ unknown, fall back to REVIEW.
+  // 6. Calling hours (recipient-local) ∩ the per-state compliance overlay.
+  //    If TZ unknown, fall back to REVIEW — unchanged from before the overlay.
   if (campaign) {
     const tz = inputForChecks.recipientTimezone;
-    const allowedDays = (campaign.callingDays as number[]) ?? [1, 2, 3, 4, 5];
+    const allowedDays = (campaign.callingDays as number[]) ?? [1, 2, 3, 4, 5, 6, 7];
     if (!tz) {
       checks.push({
         name: 'calling_hours',
@@ -459,25 +470,15 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
         detail: 'Recipient timezone unknown; rep must confirm appropriate hour.',
       });
     } else {
-      const window = callingWindowFor(campaign);
-      const verdict = callingHoursVerdict(new Date(), tz, window.start, window.end, allowedDays);
-      const tzDetailSuffix = tzSource ? ` · ${tzSource}` : '';
       checks.push(
-        verdict.within
-          ? {
-              name: 'calling_hours',
-              passed: true,
-              severity: 'info',
-              reasonCode: REASON.CALLING_HOURS_OK,
-              detail: `${window.start}-${window.end} ${tz}${tzDetailSuffix}`,
-            }
-          : {
-              name: 'calling_hours',
-              passed: false,
-              severity: 'block',
-              reasonCode: REASON.OUTSIDE_CALLING_HOURS,
-              detail: `${callingHoursBlockDetail(verdict, window, tz, allowedDays)}${tzDetailSuffix}`,
-            },
+        callingHoursGateCheck({
+          now: new Date(),
+          tz,
+          state: resolvedState,
+          window: callingWindowFor(campaign),
+          allowedDays,
+          tzSource,
+        }),
       );
     }
   }
@@ -1185,4 +1186,88 @@ export function callingHoursBlockDetail(
   return verdict.dayAllowed
     ? `Now is outside ${window.start}-${window.end} ${timezone}`
     : `Calling is ${formatAllowedDays(allowedIsoWeekdays)} only (today is ${verdict.weekdayName}, recipient-local)`;
+}
+
+/**
+ * Gate 6's full boundary: the campaign's own calling window (recipient-local)
+ * INTERSECTED with the per-state compliance overlay (weekend-calling ruling,
+ * 2026-08-31 — Saturday/Sunday dialing is on globally, except where a state
+ * restricts it; state-calling-rules.ts). Pure and exported so it's directly
+ * testable without standing up the whole `evaluate()` pipeline, same as
+ * `velocityGateCheck`/`attemptGateChecks`.
+ *
+ * Priority order for WHY a day is blocked (each keeps its own message):
+ *  1. The CAMPAIGN itself excludes the day → the original 779fe15 message,
+ *     unchanged (`callingHoursBlockDetail`'s day-banned branch).
+ *  2. The campaign allows the day but the STATE's rule bans it → names the
+ *     state (e.g. "Calling AL is Mon-Sat only ...").
+ *  3. The campaign allows the day but the recipient's state is unresolved and
+ *     the conservative unknown-state rule bans it (Sundays only) → a message
+ *     that says so, instead of naming a state we don't actually have.
+ * Otherwise, the clock is checked against the EFFECTIVE (campaign ∩ state)
+ * window — never the raw campaign window — for both the PASS detail and the
+ * outside-hours BLOCK detail.
+ */
+export function callingHoursGateCheck(args: {
+  now: Date;
+  tz: string;
+  /** 2-letter US state code, or null if it couldn't be resolved. */
+  state: string | null;
+  /** The campaign's own window, already clamped to the system bound (callingWindowFor). */
+  window: { start: string; end: string };
+  allowedDays: number[];
+  tzSource?: string;
+}): CheckResult {
+  const { now, tz, state, window, allowedDays, tzSource } = args;
+  const tzDetailSuffix = tzSource ? ` · ${tzSource}` : '';
+
+  // 1. Campaign-day gate first — identical priority and message to 779fe15.
+  const campaignVerdict = callingHoursVerdict(now, tz, window.start, window.end, allowedDays);
+  if (!campaignVerdict.dayAllowed) {
+    return {
+      name: 'calling_hours',
+      passed: false,
+      severity: 'block',
+      reasonCode: REASON.OUTSIDE_CALLING_HOURS,
+      detail: `${callingHoursBlockDetail(campaignVerdict, window, tz, allowedDays)}${tzDetailSuffix}`,
+    };
+  }
+
+  // 2. The state overlay's day gate.
+  const isoWeekday = todayIsoWeekday(now, tz);
+  const stateRule = resolveStateRule(state);
+  const effectiveWindow = effectiveCallingWindow({ days: allowedDays, start: window.start, end: window.end }, stateRule, isoWeekday);
+  if (!effectiveWindow) {
+    const weekdayName = WEEKDAY_FULL[isoWeekday] ?? '';
+    const detail = state
+      ? `Calling ${state} is ${formatAllowedDays(Object.keys(stateRule.days).map(Number))} only (today is ${weekdayName}, recipient-local)`
+      : `${weekdayName} calling requires a known state (recipient state unresolved)`;
+    return {
+      name: 'calling_hours',
+      passed: false,
+      severity: 'block',
+      reasonCode: REASON.OUTSIDE_CALLING_HOURS,
+      detail: `${detail}${tzDetailSuffix}`,
+    };
+  }
+
+  // 3. The clock, against the EFFECTIVE (campaign ∩ state) window.
+  const stateSuffix = state ? ` · ${state} rule` : '';
+  const verdict = callingHoursVerdict(now, tz, effectiveWindow.start, effectiveWindow.end, allowedDays);
+  if (verdict.within) {
+    return {
+      name: 'calling_hours',
+      passed: true,
+      severity: 'info',
+      reasonCode: REASON.CALLING_HOURS_OK,
+      detail: `${effectiveWindow.start}-${effectiveWindow.end} ${tz}${stateSuffix}${tzDetailSuffix}`,
+    };
+  }
+  return {
+    name: 'calling_hours',
+    passed: false,
+    severity: 'block',
+    reasonCode: REASON.OUTSIDE_CALLING_HOURS,
+    detail: `${callingHoursBlockDetail(verdict, effectiveWindow, tz, allowedDays)}${tzDetailSuffix}`,
+  };
 }

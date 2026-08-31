@@ -25,7 +25,8 @@ import { and, eq, notInArray, sql } from 'drizzle-orm';
 import type { getDb } from '../db/index.js';
 import { schema } from '../db/index.js';
 import { warmupCapForAge } from '../firewall/warmup.js';
-import { timezoneForNumber } from '../firewall/tz.js';
+import { stateForAreaCode, timezoneForNumber } from '../firewall/tz.js';
+import { effectiveCallingWindow, resolveStateRule, todayIsoWeekday } from '../firewall/state-calling-rules.js';
 import { dialerPoolNumbers as realDialerPoolNumbers } from './pool.js';
 
 export type Db = ReturnType<typeof getDb>;
@@ -60,26 +61,62 @@ const hhmm = (hour: number): string => `${String(hour).padStart(2, '0')}:00`;
 export const CALLING_HOURS_START_HHMM = hhmm(CALLING_HOUR_START);
 export const CALLING_HOURS_END_HHMM_EXCLUSIVE = hhmm(CALLING_HOUR_END_INCLUSIVE + 1);
 
+/** "HH:MM" for `nowUtc` in `timezone`, zero-padded so string compare orders
+ *  the same as chronological order (matches the firewall's comparator). */
+function currentHHMM(nowUtc: Date, timezone: string): string {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(nowUtc);
+  const hour = parts.find((p) => p.type === 'hour')?.value ?? '00';
+  const minute = parts.find((p) => p.type === 'minute')?.value ?? '00';
+  // Intl can render midnight as "24:00" for some locales/environments; normalize.
+  return hour === '24' ? `00:${minute}` : `${hour}:${minute}`;
+}
+
 /**
- * PURE: is `nowUtc` within the recipient-local calling window for `toE164`?
- * This is the dialer's coarse per-lead pre-filter — the firewall's per-call
- * gate remains authoritative for click-to-dial; both now share the window
- * constants above.
+ * PURE: is `nowUtc` within the recipient-local calling window for `toE164`,
+ * once the per-state compliance overlay (weekend-calling ruling, 2026-08-31 —
+ * Saturday/Sunday dialing is on globally EXCEPT where a state restricts it;
+ * see `firewall/state-calling-rules.ts`) is applied? This is the dialer's
+ * coarse per-lead pre-filter — the firewall's per-call gate remains
+ * authoritative for click-to-dial — but both now route through the SAME
+ * `effectiveCallingWindow` + state resolution, so the two enforcement sites
+ * cannot disagree about a state's day restriction any more than they can
+ * about the hour boundary (the constants above).
  *
- * Timezone is inferred from the dialed number's NANP area code. An unknown
- * timezone (non-NANP, toll-free, or otherwise unmapped) FAILS OPEN (true) —
- * the firewall already gates the actual click-to-dial per-call, so the
- * dialer's pre-filter erring toward "attempt it" (rather than silently
- * starving leads with unrecognized area codes out of the queue) is the safer
- * default here.
+ * The dialer has no campaign/SF context for a target — only the dialed
+ * number — so the campaign side of the intersection is the system window,
+ * all 7 days (the same relaxation the firewall's campaign default now gets
+ * via migration 0033), and the state is inferred from the SAME area code
+ * already used for tz (`stateForAreaCode`, the SAME data as the tz map — no
+ * new source). When that resolves to no state at all (non-US NANP tz, e.g. a
+ * Canadian number), the conservative unknown-state rule applies.
+ *
+ * An entirely unresolvable timezone (non-NANP, toll-free, or otherwise
+ * unmapped) still FAILS OPEN (true) — unchanged from before the overlay: the
+ * firewall already gates the actual click-to-dial per-call, so the dialer's
+ * pre-filter erring toward "attempt it" (rather than silently starving leads
+ * with unrecognized area codes out of the queue) is the safer default here.
  */
 export function withinCallingHours(toE164: string, nowUtc: Date): boolean {
-  const tz = timezoneForNumber(toE164)?.timezone;
-  if (!tz) return true;
-  const hour = Number(
-    new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hour12: false }).format(nowUtc),
+  const resolved = timezoneForNumber(toE164);
+  if (!resolved) return true;
+  const { timezone: tz, matched: npa } = resolved;
+  const state = stateForAreaCode(npa);
+  const stateRule = resolveStateRule(state);
+  const isoWeekday = todayIsoWeekday(nowUtc, tz);
+  const window = effectiveCallingWindow(
+    { days: [1, 2, 3, 4, 5, 6, 7], start: CALLING_HOURS_START_HHMM, end: CALLING_HOURS_END_HHMM_EXCLUSIVE },
+    stateRule,
+    isoWeekday,
   );
-  return hour >= CALLING_HOUR_START && hour <= CALLING_HOUR_END_INCLUSIVE;
+  if (!window) return false;
+  const hhmm = currentHHMM(nowUtc, tz);
+  return hhmm >= window.start && hhmm < window.end;
 }
 
 /**

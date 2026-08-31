@@ -251,6 +251,89 @@ export function timezoneForAreaCode(npa: string): ResolvedTimezone | null {
 }
 
 /**
+ * NANP area code (NPA) → 2-letter US state, for the weekend-calling per-state
+ * overlay (state-calling-rules.ts). SAME area codes as NPA_TZ_GROUPS above —
+ * this is not a new data source, just NPA_TZ_GROUPS' state comments made
+ * queryable at runtime, grouped by state instead of timezone. A state whose
+ * area codes straddle a timezone boundary (TX: 915 Mountain + the Central
+ * majority; IN: 219 Central + the Eastern majority) merges to the one state
+ * key here even though it spans two entries above. Non-US NANP area codes
+ * (Canada) and non-geographic ranges are intentionally absent → null.
+ */
+const NPA_STATE_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ['CA', ['209', '213', '279', '310', '323', '341', '350', '408', '415', '424', '442', '510', '530', '559',
+    '562', '619', '626', '628', '650', '657', '661', '669', '707', '714', '747', '760', '805', '818',
+    '820', '831', '837', '840', '858', '909', '916', '925', '949', '951']],
+  ['WA', ['206', '253', '360', '425', '509', '564']],
+  ['OR', ['458', '503', '541', '971']],
+  ['NV', ['702', '725', '775']],
+  ['CO', ['303', '719', '720', '970', '983']],
+  ['ID', ['208', '986']],
+  ['MT', ['406']],
+  ['NM', ['505', '575']],
+  ['UT', ['385', '435', '801']],
+  ['WY', ['307']],
+  ['AZ', ['480', '520', '602', '623', '928']],
+  ['AL', ['205', '251', '256', '334', '938']],
+  ['AR', ['479', '501', '870']],
+  ['IA', ['319', '515', '563', '641', '712']],
+  ['IL', ['217', '224', '309', '312', '331', '447', '464', '618', '630', '708', '730', '773', '779', '815', '847', '872']],
+  ['KS', ['316', '620', '785', '913']],
+  ['KY', ['270', '364', '502', '606', '859']], // west (Chicago tz) + east (New York tz)
+  ['LA', ['225', '318', '337', '504', '985']],
+  ['MN', ['218', '320', '507', '612', '651', '763', '952']],
+  ['MO', ['314', '417', '557', '573', '636', '660', '816', '975']],
+  ['MS', ['228', '601', '662', '769']],
+  ['ND', ['701']],
+  ['NE', ['308', '402', '531']],
+  ['OK', ['405', '539', '580', '918']],
+  ['SD', ['605']],
+  ['TN', ['615', '629', '731', '901', '931', '423', '865']], // central/west (Chicago tz) + east (New York tz)
+  ['TX', ['915', '210', '214', '254', '281', '325', '346', '361', '409', '430', '432',
+    '469', '512', '682', '713', '726', '737', '806', '817', '830', '832',
+    '903', '936', '940', '945', '956', '972', '979']], // 915 El Paso (Denver tz) + majority (Chicago tz)
+  ['WI', ['262', '274', '414', '534', '608', '715', '920']],
+  ['IN', ['219', '260', '317', '463', '574', '765', '812', '930']], // NW/Chicago metro (Chicago tz) + majority (New York tz)
+  ['CT', ['203', '475', '860', '959']],
+  ['DC', ['202']],
+  ['DE', ['302']],
+  ['FL', ['305', '321', '352', '386', '407', '448', '561', '656', '689', '727',
+    '754', '772', '786', '813', '850', '863', '904', '941', '954']],
+  ['GA', ['229', '404', '470', '478', '678', '706', '762', '770', '912']],
+  ['MA', ['339', '351', '413', '508', '617', '774', '781', '857', '978']],
+  ['MD', ['227', '240', '301', '410', '443', '667']],
+  ['ME', ['207']],
+  ['MI', ['231', '248', '269', '313', '517', '586', '616', '679', '734', '810', '906', '947', '989']],
+  ['NC', ['252', '336', '472', '704', '743', '828', '910', '919', '980', '984']],
+  ['NH', ['603']],
+  ['NJ', ['201', '551', '609', '640', '732', '848', '856', '862', '908', '973']],
+  ['NY', ['212', '315', '332', '347', '363', '516', '518', '585', '607', '631',
+    '646', '680', '716', '718', '838', '845', '914', '917', '929', '934']],
+  ['OH', ['216', '220', '234', '283', '326', '330', '380', '419', '440', '513', '567', '614', '740', '937']],
+  ['PA', ['215', '223', '267', '272', '412', '445', '484', '570', '582', '610', '717', '724', '814', '835', '878']],
+  ['RI', ['401']],
+  ['SC', ['803', '839', '843', '854', '864']],
+  ['VA', ['276', '434', '540', '571', '703', '757', '804', '826', '948']],
+  ['VT', ['802']],
+  ['WV', ['304', '681']],
+  ['AK', ['907']],
+  ['HI', ['808']],
+  ['PR', ['787', '939']],
+  ['VI', ['340']],
+];
+
+const NPA_TO_STATE: Record<string, string> = {};
+for (const [state, npas] of NPA_STATE_GROUPS) {
+  for (const npa of npas) NPA_TO_STATE[npa] = state;
+}
+
+/** Resolve a bare 3-digit area code to its 2-letter US state, or null when the
+ *  area code is non-US (Canada), non-geographic (toll-free), or unmapped. */
+export function stateForAreaCode(npa: string): string | null {
+  return NPA_TO_STATE[npa] ?? null;
+}
+
+/**
  * Metro grouping for local-presence caller-ID matching: when a rep dials a
  * number, we prefer a DID in the SAME metro (e.g. an LA number for an LA lead,
  * an SD number for an SD lead) rather than any Pacific number. Only the exact

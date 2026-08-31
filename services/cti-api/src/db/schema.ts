@@ -441,8 +441,10 @@ export const campaignConfigs = pgTable(
     /** Allowed calling hours, recipient-local. Stored "HH:MM" */
     callingHoursStart: text('calling_hours_start').default('08:00').notNull(),
     callingHoursEnd: text('calling_hours_end').default('20:00').notNull(),
-    /** ISO weekday numbers 1-7 (Mon-Sun) allowed */
-    callingDays: jsonb('calling_days').default(sql`'[1,2,3,4,5]'::jsonb`).notNull(),
+    /** ISO weekday numbers 1-7 (Mon-Sun) allowed. Weekend calling is on by
+     *  default (2026-08-31 ruling) — the per-state overlay (state-calling-
+     *  rules.ts) is the guard that keeps Sunday-restricted states protected. */
+    callingDays: jsonb('calling_days').default(sql`'[1,2,3,4,5,6,7]'::jsonb`).notNull(),
     /** "one_party" | "two_party" | "off" */
     recordingConsentMode: text('recording_consent_mode').default('off').notNull(),
     requiredScriptId: text('required_script_id'),

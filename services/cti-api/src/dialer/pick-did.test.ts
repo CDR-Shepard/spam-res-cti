@@ -60,6 +60,40 @@ describe('withinCallingHours', () => {
     // Toll-free (non-geographic) NANP number -> also null.
     expect(withinCallingHours('+18005551234', new Date('2026-07-14T04:00:00Z'))).toBe(true);
   });
+
+  /**
+   * Weekend-calling ruling (2026-08-31, Evren): Saturday/Sunday dialing is on
+   * globally, except where a state restricts it. The dialer's pre-filter has
+   * no campaign/SF context — only the dialed number — so it derives state from
+   * the SAME area code it already uses for tz (firewall/tz.ts stateForAreaCode)
+   * and applies the identical state-calling-rules.ts overlay the firewall gate
+   * uses, so the two enforcement sites cannot disagree about a state's Sunday
+   * rule any more than they can about the hour boundary above.
+   */
+  describe('the per-state overlay (parity with the firewall gate)', () => {
+    const AL_NUMBER = '+12055551234'; // 205 -> America/Chicago, AL (bans Sunday)
+    const TX_NUMBER = '+12145551234'; // 214 -> America/Chicago, TX (Sunday from noon)
+
+    it('blocks an AL number on Sunday (AL bans Sunday) even though the system window would allow the hour', () => {
+      // 2026-07-12 is a Sunday; 15:00Z == 10:00 CDT.
+      expect(withinCallingHours(AL_NUMBER, new Date('2026-07-12T15:00:00Z'))).toBe(false);
+    });
+
+    it('allows an AL number on Tuesday at the same local hour', () => {
+      // 2026-07-14 is a Tuesday; 15:00Z == 10:00 CDT.
+      expect(withinCallingHours(AL_NUMBER, new Date('2026-07-14T15:00:00Z'))).toBe(true);
+    });
+
+    it('blocks a TX number Sunday morning, before the noon start (Tex. Bus. & Com. § 304.052)', () => {
+      // 2026-07-12 Sunday 11:00 CDT == 16:00Z.
+      expect(withinCallingHours(TX_NUMBER, new Date('2026-07-12T16:00:00Z'))).toBe(false);
+    });
+
+    it('allows a TX number Sunday afternoon, at 13:00 local', () => {
+      // 2026-07-12 Sunday 13:00 CDT == 18:00Z.
+      expect(withinCallingHours(TX_NUMBER, new Date('2026-07-12T18:00:00Z'))).toBe(true);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
