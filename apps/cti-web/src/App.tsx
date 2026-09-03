@@ -34,6 +34,7 @@ import { watchCallMedia, MEDIA_ISSUE_MESSAGE } from './audio-readiness';
 import { sendDtmfKey, type DtmfSendable } from './dtmf';
 import { buildCallSubject } from './call-subject';
 import { openCtiSavePlan } from './opencti-log';
+import { planIncomingAccept } from './incoming-accept';
 
 interface MeResponse {
   user: { userId: string; orgId: string; email: string; isAdmin: boolean; powerDialerEnabled: boolean; noAnswerForwardE164?: string | null };
@@ -95,6 +96,11 @@ function dialerStartErrorMessage(e: unknown): string {
 /** Minimal shape of a Twilio Voice SDK incoming Call. */
 interface TwilioIncomingCall {
   parameters?: Record<string, string>;
+  /** Custom TwiML params the server attaches when the caller matched a
+   *  Salesforce record (callerName/recordId/recordType) — see
+   *  services/cti-api/src/routes/inbound-caller-params.ts. Voice JS SDK 2.12:
+   *  node_modules/@twilio/voice-sdk/es5/twilio/call.d.ts:28. */
+  customParameters?: Map<string, string>;
   accept: () => void;
   reject: () => void;
   disconnect?: () => void;
@@ -937,7 +943,7 @@ export function App(): JSX.Element {
     const call = incoming;
     // Don't answer if an outbound dial just claimed the line.
     if (!call || placingRef.current) return;
-    const from = call.parameters?.From ?? call.parameters?.from ?? '';
+    const plan = planIncomingAccept(call);
     const backToIdle = (): void => {
       setPhase('idle'); setActive(null); setElapsed(0); setIncoming(null);
       connectionRef.current = null;
@@ -945,11 +951,14 @@ export function App(): JSX.Element {
     };
     connectionRef.current = call;
     coordinatorRef.current?.promoteSelf(); // broadcast busy immediately (see beginRun)
-    setActive({ callId: '', toNumber: from, fromNumber: from, startedAt: Date.now(), recordName: 'Incoming call' });
+    setActive({ callId: '', startedAt: Date.now(), ...plan.activeCall });
     setIncoming(null);
     setMuted(false);
     setPhase('active');
     try { call.accept(); } catch { backToIdle(); return; }
+    // Screen-pop the matched Salesforce record on ACCEPT (not on ring) — a
+    // no-op when not embedded in Open CTI (screenPopRecord logs and returns).
+    if (plan.screenPopRecordId) screenPopRecord(plan.screenPopRecordId);
     // Watch for a DEAD DIRECTION. The SDK raises low-bytes-received/-sent when RTP
     // stops flowing but does NOT drop the call, so without this the rep just sits
     // in silence with no idea why. The direction is the diagnosis: inbound means
@@ -1169,6 +1178,8 @@ export function App(): JSX.Element {
   const body = incoming && !inCall ? (
     <IncomingScreen
       from={incoming.parameters?.From ?? incoming.parameters?.from}
+      callerName={incoming.customParameters?.get('callerName')}
+      recordType={incoming.customParameters?.get('recordType')}
       onAccept={acceptIncoming}
       onDecline={declineIncoming}
     />

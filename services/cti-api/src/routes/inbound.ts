@@ -25,6 +25,7 @@ import { enqueueSyncForCall } from '../salesforce/sync.js';
 import { normalize } from '../phone.js';
 import { sha256 } from '../crypto.js';
 import { stickyAgentForCaller } from '../dialer/sticky.js';
+import { attachCallerParameters } from './inbound-caller-params.js';
 import {
   buildForwardDialTwiml,
   FORWARD_LEG_FLAG,
@@ -270,7 +271,8 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
               }
             : {}),
         } as never);
-        dial.client({}, clientIdentity(poolStickyAgentId));
+        const client = dial.client({}, clientIdentity(poolStickyAgentId));
+        attachCallerParameters(client, matched);
       } else {
         const greeting =
           (matched ? owned.inboundMatchedGreeting : owned.inboundGreeting) ??
@@ -306,7 +308,8 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
             }
           : {}),
       } as never);
-      dial.client({}, clientIdentity(owned.assignedUserId));
+      const client = dial.client({}, clientIdentity(owned.assignedUserId));
+      attachCallerParameters(client, matched);
     } else {
       const greeting =
         (matched ? owned.inboundMatchedGreeting : owned.inboundGreeting) ??
