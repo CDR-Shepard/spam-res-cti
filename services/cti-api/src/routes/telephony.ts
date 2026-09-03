@@ -7,6 +7,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { and, eq, or } from 'drizzle-orm';
 import twilio from 'twilio';
+import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
 import { getProvider } from '../telephony/index.js';
 import { getDb, schema } from '../db/index.js';
@@ -26,14 +27,18 @@ import { bridgeTwiml, dialerConferenceTwiml } from '../dialer/twilio-telephony.j
 export async function registerTelephonyRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
 
+  const TokenBody = z.object({ platform: z.enum(['web', 'ios']).optional() });
   app.post('/telephony/token', async (req, reply) => {
     const session = await resolveSession(req.headers.authorization);
     if (!session) return reply.code(401).send({ error: 'Unauthorized' });
+    const body = TokenBody.safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: body.error.flatten() });
     const provider = getProvider();
     try {
       const token = await provider.createClientToken({
         userId: session.userId,
         identity: `rep_${session.userId.replace(/-/g, '')}`,
+        platform: body.data.platform,
       });
       return token;
     } catch (err) {

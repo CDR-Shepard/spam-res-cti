@@ -59,6 +59,9 @@ export class TwilioProvider implements TelephonyProvider {
       cfg.TWILIO_API_KEY_SECRET!,
       { identity: req.identity, ttl },
     );
+    if (req.platform === 'ios' && !cfg.TWILIO_IOS_PUSH_CREDENTIAL_SID) {
+      throw new Error('TWILIO_IOS_PUSH_CREDENTIAL_SID is not configured — iOS clients cannot register for VoIP push');
+    }
     const grant = new VoiceGrant({
       outgoingApplicationSid: cfg.TWILIO_TWIML_APP_SID!,
       // Allow the browser softphone to RECEIVE calls: the inbound webhook dials
@@ -66,6 +69,9 @@ export class TwilioProvider implements TelephonyProvider {
       // per-user identity (rep_<userId>) means only the assigned rep's client
       // rings for a callback to their DID.
       incomingAllow: true,
+      // A locked iPhone is reachable only through APNs VoIP push; the credential
+      // ties this token to the Apple VoIP Services certificate registered in Twilio.
+      ...(req.platform === 'ios' ? { pushCredentialSid: cfg.TWILIO_IOS_PUSH_CREDENTIAL_SID! } : {}),
     });
     accessToken.addGrant(grant);
 

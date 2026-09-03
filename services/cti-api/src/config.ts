@@ -57,6 +57,8 @@ const schema = z.object({
     .optional(),
   TWILIO_API_KEY_SECRET: z.string().optional(),
   TWILIO_TWIML_APP_SID: z.string().optional(),
+  /** Twilio Push Credential (APNs VoIP) for the Callsign iPhone app. Optional until the app ships. */
+  TWILIO_IOS_PUSH_CREDENTIAL_SID: z.string().optional(),
   TWILIO_DEFAULT_CALLER_ID: z.string().optional(),
   /**
    * Local-dev-only escape hatch to skip Twilio webhook signature validation

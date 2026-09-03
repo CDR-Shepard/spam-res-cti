@@ -20,6 +20,8 @@ export interface ClientTokenRequest {
   identity: string;
   /** TTL in seconds. */
   ttlSeconds?: number;
+  /** Which client is asking. iOS tokens carry the VoIP push credential so a locked phone can be rung. */
+  platform?: 'web' | 'ios';
 }
 
 export interface ClientTokenResponse {
