@@ -143,17 +143,22 @@ async function ring(overrides: Record<string, string> = {}) {
 
 describe('POST /telephony/twilio/inbound — caller-match parameters on <Client>', () => {
   describe('assigned-rep ring path (owned.assignedUserId)', () => {
-    it('matched caller (Lead) → TwiML carries callerName, recordId, recordType inside <Client>', async () => {
+    it('matched caller (Lead) → TwiML carries callerName, recordId, recordType inside <Client><Identity>', async () => {
       state.findByPhoneResult = { whoId: '00Q000000000001AAA', name: 'Jane Doe' };
 
       const res = await ring();
       const xml = res.body;
 
       expect(res.statusCode).toBe(200);
-      expect(xml).toContain('<Client>');
-      expect(xml).toContain('<Parameter name="callerName" value="Jane Doe"/>');
-      expect(xml).toContain('<Parameter name="recordId" value="00Q000000000001AAA"/>');
-      expect(xml).toContain('<Parameter name="recordType" value="Lead"/>');
+      // Exact nesting: Twilio only documents custom parameters alongside the
+      // `<Identity>` noun, never mixed with `<Client>` text content — pin the
+      // whole element so a regression to the undocumented shape fails here.
+      expect(xml).toContain(
+        '<Client><Identity>rep_rep1</Identity>' +
+          '<Parameter name="callerName" value="Jane Doe"/>' +
+          '<Parameter name="recordId" value="00Q000000000001AAA"/>' +
+          '<Parameter name="recordType" value="Lead"/></Client>',
+      );
     });
 
     it('a whatId-only Deal match → recordId is the whatId and recordType is the honest "Record" fallback', async () => {
@@ -166,13 +171,14 @@ describe('POST /telephony/twilio/inbound — caller-match parameters on <Client>
       expect(xml).toContain('<Parameter name="recordType" value="Record"/>');
     });
 
-    it('unmatched caller → no <Parameter> elements at all — identical TwiML to before this feature', async () => {
+    it('unmatched caller → exact <Client>rep_rep1</Client>, no <Identity>, no <Parameter> — identical TwiML to before this feature', async () => {
       state.findByPhoneResult = null;
 
       const res = await ring();
       const xml = res.body;
 
-      expect(xml).toContain('<Client>');
+      expect(xml).toContain('<Client>rep_rep1</Client>');
+      expect(xml).not.toContain('<Identity');
       expect(xml).not.toContain('<Parameter');
     });
   });
@@ -185,25 +191,28 @@ describe('POST /telephony/twilio/inbound — caller-match parameters on <Client>
       state.sfConn = { userId: 'rep-2' };
     });
 
-    it('matched caller (Lead) → TwiML carries callerName, recordId, recordType inside <Client>', async () => {
+    it('matched caller (Lead) → TwiML carries callerName, recordId, recordType inside <Client><Identity>', async () => {
       state.findByPhoneResult = { whoId: '00Q000000000002BBB', name: 'John Roe' };
 
       const res = await ring();
       const xml = res.body;
 
-      expect(xml).toContain('<Client>');
-      expect(xml).toContain('<Parameter name="callerName" value="John Roe"/>');
-      expect(xml).toContain('<Parameter name="recordId" value="00Q000000000002BBB"/>');
-      expect(xml).toContain('<Parameter name="recordType" value="Lead"/>');
+      expect(xml).toContain(
+        '<Client><Identity>rep_rep2</Identity>' +
+          '<Parameter name="callerName" value="John Roe"/>' +
+          '<Parameter name="recordId" value="00Q000000000002BBB"/>' +
+          '<Parameter name="recordType" value="Lead"/></Client>',
+      );
     });
 
-    it('unmatched caller → no <Parameter> elements at all on the pool ring path either', async () => {
+    it('unmatched caller → exact <Client>rep_rep2</Client>, no <Identity>, no <Parameter> on the pool ring path either', async () => {
       state.findByPhoneResult = null;
 
       const res = await ring();
       const xml = res.body;
 
-      expect(xml).toContain('<Client>');
+      expect(xml).toContain('<Client>rep_rep2</Client>');
+      expect(xml).not.toContain('<Identity');
       expect(xml).not.toContain('<Parameter');
     });
   });

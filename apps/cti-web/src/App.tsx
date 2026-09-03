@@ -34,7 +34,7 @@ import { watchCallMedia, MEDIA_ISSUE_MESSAGE } from './audio-readiness';
 import { sendDtmfKey, type DtmfSendable } from './dtmf';
 import { buildCallSubject } from './call-subject';
 import { openCtiSavePlan } from './opencti-log';
-import { planIncomingAccept } from './incoming-accept';
+import { acceptIncomingCall, planIncomingAccept } from './incoming-accept';
 
 interface MeResponse {
   user: { userId: string; orgId: string; email: string; isAdmin: boolean; powerDialerEnabled: boolean; noAnswerForwardE164?: string | null };
@@ -958,7 +958,10 @@ export function App(): JSX.Element {
     try { call.accept(); } catch { backToIdle(); return; }
     // Screen-pop the matched Salesforce record on ACCEPT (not on ring) — a
     // no-op when not embedded in Open CTI (screenPopRecord logs and returns).
-    if (plan.screenPopRecordId) screenPopRecord(plan.screenPopRecordId);
+    // Routed through the injectable acceptIncomingCall seam (incoming-accept.ts)
+    // so this glue — screen-pop iff matched, reading from customParameters — is
+    // unit-tested without a real Twilio Call object.
+    acceptIncomingCall(call, { screenPop: screenPopRecord });
     // Watch for a DEAD DIRECTION. The SDK raises low-bytes-received/-sent when RTP
     // stops flowing but does NOT drop the call, so without this the rep just sits
     // in silence with no idea why. The direction is the diagnosis: inbound means

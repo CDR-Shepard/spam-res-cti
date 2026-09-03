@@ -34,9 +34,46 @@ export interface ParameterAttachable {
   parameter(attributes: { name: string; value: string }): unknown;
 }
 
+/**
+ * A `<Client>` noun that can ALSO carry an `<Identity>` child — the
+ * documented way to set the client identity when `<Parameter>` children are
+ * also attached (see `dialClientWithCallerParams` below). Confirmed in the
+ * installed twilio-node types:
+ * node_modules/twilio/lib/twiml/VoiceResponse.d.ts:1776 (`Client#identity`).
+ */
+export interface ClientLike extends ParameterAttachable {
+  identity(clientIdentity: string): unknown;
+}
+
+/**
+ * Minimal shape of whatever `t.dial(...)` returns from twilio-node — real
+ * callers pass the actual `VoiceResponse.Dial`. Confirmed in the installed
+ * twilio-node types: node_modules/twilio/lib/twiml/VoiceResponse.d.ts:1918
+ * (`Dial#client`).
+ */
+export interface DialLike {
+  client(attributes?: object, identity?: string): ClientLike;
+}
+
 const LEAD_ID_PREFIX = '00Q';
 const CONTACT_ID_PREFIX = '003';
 const OPPORTUNITY_ID_PREFIX = '006';
+
+/** XML 1.0 forbids these control characters outright (everything except tab
+ *  #x9, LF #xA, and CR #xD) — Salesforce-sourced values are user-controlled,
+ *  so one of these getting through would not just look wrong, it would
+ *  break the ring's TwiML. Cap length too: these are display values for a
+ *  ring screen, not a payload. */
+const XML_ILLEGAL_CONTROL_CHARS_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
+const MAX_PARAMETER_VALUE_LENGTH = 200;
+
+function sanitizeParameterValue(value: string): string {
+  return value.replace(XML_ILLEGAL_CONTROL_CHARS_RE, '').slice(0, MAX_PARAMETER_VALUE_LENGTH);
+}
+
+function setParameter(client: ParameterAttachable, name: string, value: string): void {
+  client.parameter({ name, value: sanitizeParameterValue(value) });
+}
 
 /**
  * Salesforce id prefix -> human label for the ring screen. Custom-object
@@ -51,6 +88,11 @@ export function recordTypeForId(id: string): string {
   return 'Record';
 }
 
+/** Whether `matched` carries anything `attachCallerParameters` would actually attach. */
+function hasCallerParameters(matched: MatchedCaller | null | undefined): matched is MatchedCaller {
+  return !!matched && !!(matched.name || matched.whoId || matched.whatId);
+}
+
 /**
  * Attach `callerName` / `recordId` / `recordType` custom parameters to a
  * `<Client>` noun when the caller matched a Salesforce record. An unmatched
@@ -62,9 +104,34 @@ export function attachCallerParameters(
   matched: MatchedCaller | null | undefined,
 ): void {
   if (!matched) return;
-  if (matched.name) client.parameter({ name: 'callerName', value: matched.name });
+  if (matched.name) setParameter(client, 'callerName', matched.name);
   const recordId = matched.whoId ?? matched.whatId;
   if (!recordId) return;
-  client.parameter({ name: 'recordId', value: recordId });
-  client.parameter({ name: 'recordType', value: recordTypeForId(recordId) });
+  setParameter(client, 'recordId', recordId);
+  setParameter(client, 'recordType', recordTypeForId(recordId));
+}
+
+/**
+ * Build the ringing `<Dial><Client>` for a rep, choosing the TwiML shape
+ * Twilio actually documents. Twilio does NOT document `<Client>` text
+ * content mixed with `<Parameter>` children — when there are caller
+ * parameters to attach, the identity must instead be set via the
+ * `<Identity>` noun:
+ *   `<Client><Identity>rep_x</Identity><Parameter .../></Client>`
+ * With no Salesforce match (nothing to attach), this stays byte-identical
+ * to how the ring has always looked — identity as `<Client>` text content,
+ * no `<Identity>`, no `<Parameter>`:
+ *   `<Client>rep_x</Client>`
+ * Both ring sites in inbound.ts call this so the branch can't drift between them.
+ */
+export function dialClientWithCallerParams(
+  dial: DialLike,
+  identity: string,
+  matched: MatchedCaller | null | undefined,
+): ClientLike {
+  if (!hasCallerParameters(matched)) return dial.client({}, identity);
+  const client = dial.client({});
+  client.identity(identity);
+  attachCallerParameters(client, matched);
+  return client;
 }

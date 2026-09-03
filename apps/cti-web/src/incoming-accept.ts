@@ -40,8 +40,12 @@ export interface IncomingAcceptActiveCall {
   toNumber: string;
   fromNumber: string;
   /** The real Salesforce name when matched; the pre-existing literal
-   *  "Incoming call" placeholder otherwise — flows into the wrap-up form and
-   *  Task subject (buildCallSubject) exactly like a click-to-dial recordName. */
+   *  "Incoming call" placeholder otherwise. Inbound calls have no client
+   *  wrap-up form (App.tsx: acceptIncoming's comment — "Inbound calls
+   *  auto-log server-side, so there's no wrap-up form") and the inbound
+   *  Task subject is built server-side (salesforce/sync.ts), so this value
+   *  only feeds the in-call card UI and the screen-pop target below — never
+   *  a Task subject. */
   recordName: string;
   recordId?: string;
   objectType?: string;
@@ -67,4 +71,26 @@ export function planIncomingAccept(call: IncomingCallLike): IncomingAcceptPlan {
     },
     screenPopRecordId: info.recordId,
   };
+}
+
+export interface AcceptIncomingCallDeps {
+  /** Screen-pop the matched Salesforce record (no-op outside Open CTI). */
+  screenPop: (recordId: string) => void;
+}
+
+/**
+ * Accept-time wiring: derive the plan from the call's `customParameters`
+ * (Salesforce match, if any) and perform the screen-pop side effect —
+ * `deps.screenPop` fires exactly once, and only when the caller matched a
+ * record with an id; never for an unmatched caller. Returns the plan so the
+ * caller (App.tsx) can also drive UI state (active-call fields) from it.
+ *
+ * Extracted so App.tsx's `acceptIncoming` glue — which record (if any) to
+ * screen-pop, and that it reads from `customParameters` rather than
+ * `parameters` — is unit-testable without a real Twilio Call object.
+ */
+export function acceptIncomingCall(call: IncomingCallLike, deps: AcceptIncomingCallDeps): IncomingAcceptPlan {
+  const plan = planIncomingAccept(call);
+  if (plan.screenPopRecordId) deps.screenPop(plan.screenPopRecordId);
+  return plan;
 }

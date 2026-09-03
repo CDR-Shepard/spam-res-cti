@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { getIncomingCallerInfo, planIncomingAccept } from './incoming-accept';
+import { describe, expect, it, vi } from 'vitest';
+import { acceptIncomingCall, getIncomingCallerInfo, planIncomingAccept } from './incoming-accept';
 
 describe('getIncomingCallerInfo', () => {
   it('reads the caller number from the standard Twilio `From` parameter', () => {
@@ -81,5 +81,62 @@ describe('planIncomingAccept', () => {
     expect(plan.activeCall.recordName).toBe('Incoming call');
     expect(plan.activeCall.recordId).toBe('a0X000000000009AAA');
     expect(plan.screenPopRecordId).toBe('a0X000000000009AAA');
+  });
+
+  it('uses the real name but skips screen-pop for a matched caller with neither id (name-only match, mirrors the server\'s "Ghost" case)', () => {
+    const plan = planIncomingAccept({
+      parameters: { From: '+16195551234' },
+      customParameters: new Map([['callerName', 'Ghost']]),
+    });
+    expect(plan.activeCall.recordName).toBe('Ghost');
+    expect(plan.activeCall.recordId).toBeUndefined();
+    expect(plan.screenPopRecordId).toBeUndefined();
+  });
+});
+
+describe('acceptIncomingCall', () => {
+  it('screen-pops exactly once with the matched recordId', () => {
+    const screenPop = vi.fn();
+    const call = {
+      parameters: { From: '+16195551234' },
+      customParameters: new Map([
+        ['callerName', 'Jane Doe'],
+        ['recordId', '00Q000000000001AAA'],
+        ['recordType', 'Lead'],
+      ]),
+    };
+
+    const plan = acceptIncomingCall(call, { screenPop });
+
+    expect(screenPop).toHaveBeenCalledTimes(1);
+    expect(screenPop).toHaveBeenCalledWith('00Q000000000001AAA');
+    expect(plan.activeCall.recordName).toBe('Jane Doe');
+  });
+
+  it('never screen-pops for an unmatched caller (no recordId)', () => {
+    const screenPop = vi.fn();
+    const call = { parameters: { From: '+16195551234' } };
+
+    acceptIncomingCall(call, { screenPop });
+
+    expect(screenPop).not.toHaveBeenCalled();
+  });
+
+  it('reads callerName from `customParameters` (a Map), not from `parameters`', () => {
+    const screenPop = vi.fn();
+    // `parameters.From` exists (standard Twilio param), but the name only
+    // lives on the customParameters Map — the accept-time glue must read the
+    // Map, not `parameters`, for the caller-match fields.
+    const call = {
+      parameters: { From: '+16195551234' },
+      customParameters: new Map([
+        ['callerName', 'Jane Doe'],
+        ['recordId', '00Q000000000001AAA'],
+      ]),
+    };
+
+    const plan = acceptIncomingCall(call, { screenPop });
+
+    expect(plan.activeCall.recordName).toBe('Jane Doe');
   });
 });
