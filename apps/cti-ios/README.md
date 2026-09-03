@@ -1,4 +1,4 @@
-# CTI Caller ID (iOS)
+# Callsign (iOS)
 
 The rep's iPhone half of the caller-ID feature. It pairs with the CTI API,
 pulls the org's caller directory, and hands it to iOS as a **Call Directory
@@ -9,9 +9,9 @@ Two targets plus a test bundle:
 
 | Target | Bundle id | What it does |
 | --- | --- | --- |
-| `CTICallerID` (app) | `com.gghomes.cti.callerid` | Pairing, syncing, status UI |
-| `CallDirectory` (extension) | `com.gghomes.cti.callerid.directory` | Streams the snapshot to CallKit |
-| `CTICallerIDTests` | — | Logic tests (paging, store, sync engine) |
+| `Callsign` (app) | `com.gghomes.callsign` | Pairing, syncing, status UI |
+| `CallDirectory` (extension) | `com.gghomes.callsign.directory` | Streams the snapshot to CallKit |
+| `CallsignTests` | — | Logic tests (paging, store, sync engine) |
 
 They share the App Group `group.com.gghomes.cti`. iOS 17 minimum, SwiftUI, no
 third-party dependencies.
@@ -26,19 +26,19 @@ adding or removing a source file:
 ```sh
 brew install xcodegen        # once
 cd apps/cti-ios
-xcodegen generate            # writes CTICallerID.xcodeproj + the plists
-open CTICallerID.xcodeproj
+xcodegen generate            # writes Callsign.xcodeproj + the plists
+open Callsign.xcodeproj
 ```
 
 ## Tests
 
 ```sh
 # Everything: builds the app + extension, then runs the tests.
-xcodebuild test -project CTICallerID.xcodeproj -scheme CTICallerID \
+xcodebuild test -project Callsign.xcodeproj -scheme Callsign \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 
 # Fast inner loop: the logic tests alone, no app build.
-xcodebuild test -project CTICallerID.xcodeproj -scheme CTICallerIDTests \
+xcodebuild test -project Callsign.xcodeproj -scheme CallsignTests \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 ```
 
@@ -101,12 +101,12 @@ header, trailing bytes) and the extension cancels the request.
 
 Sync runs on foreground appear, on the **Refresh now** button, on pull to
 refresh, and from a `BGAppRefreshTask`
-(`com.gghomes.cti.callerid.refresh`, declared in
-`BGTaskSchedulerPermittedIdentifiers`; `fetch` is the app's only background
-mode).
+(`com.gghomes.callsign.refresh`, declared in
+`BGTaskSchedulerPermittedIdentifiers`; `fetch` is one of the app's background
+modes, alongside `voip`/`audio` for the softphone).
 
 The rep must switch the extension on once, by hand:
-**Settings → Phone → Call Blocking & Identification → CTI Caller ID** on iOS 17
+**Settings → Phone → Call Blocking & Identification → Callsign** on iOS 17
 (the deployment target), or **Settings → Apps → Phone → Call Blocking &
 Identification** on iOS 18 and later, which moved the per-app settings under
 "Apps". `StatusView` names both and deep-links there.

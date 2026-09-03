@@ -5,24 +5,38 @@ import Foundation
 /// a wrong App Group id makes the extension read an empty container, and a
 /// wrong extension id makes `reloadExtension` reload nothing.
 enum AppConfig {
-    /// The CTI API. Fixed — the phone is not a place to type a server URL.
-    static let baseURL = URL(string: "https://ctiapi-production.up.railway.app")!
+    /// Production API. The phone is still not a place to type a server URL —
+    /// but Mosyle can push one through Managed App Configuration
+    /// (`com.apple.configuration.managed` → `apiBaseUrl`), which is how a
+    /// staging build or a future region gets pointed elsewhere.
+    static let productionBaseURL = URL(string: "https://ctiapi-production.up.railway.app")!
+
+    static var baseURL: URL {
+        resolveBaseURL(managed: UserDefaults.standard.dictionary(forKey: "com.apple.configuration.managed"))
+    }
+
+    /// Pure: only an https URL from managed config wins; anything else is production.
+    static func resolveBaseURL(managed: [String: Any]?) -> URL {
+        guard let raw = managed?["apiBaseUrl"] as? String,
+              let url = URL(string: raw), url.scheme == "https", url.host != nil else { return productionBaseURL }
+        return url
+    }
 
     /// Shared container for the directory snapshot the extension reads.
     static let appGroupIdentifier = "group.com.gghomes.cti"
 
     /// The Call Directory extension's bundle id, for
     /// `CXCallDirectoryManager.reloadExtension(withIdentifier:)`.
-    static let extensionBundleIdentifier = "com.gghomes.cti.callerid.directory"
+    static let extensionBundleIdentifier = "com.gghomes.callsign.directory"
 
     /// Must match `BGTaskSchedulerPermittedIdentifiers` in the app's Info.plist.
-    static let backgroundRefreshTaskIdentifier = "com.gghomes.cti.callerid.refresh"
+    static let backgroundRefreshTaskIdentifier = "com.gghomes.callsign.refresh"
 
     /// Keychain service for the paired device token.
-    static let keychainService = "com.gghomes.cti.callerid"
+    static let keychainService = "com.gghomes.callsign"
 
     /// `os.Logger` subsystem for code shared by the app and the extension.
-    static let loggingSubsystem = "com.gghomes.cti.callerid"
+    static let loggingSubsystem = "com.gghomes.callsign"
 
     /// How long the background scheduler should wait before the next refresh.
     static let backgroundRefreshInterval: TimeInterval = 4 * 60 * 60
