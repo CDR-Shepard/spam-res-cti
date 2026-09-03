@@ -123,9 +123,11 @@ targets:
       - path: Shared/AppConfig.swift
       - path: Shared/Feed.swift
       - path: Shared/PairingClient.swift
+      - path: Shared/SessionClient.swift
       - path: App/DirectoryStore.swift
       - path: App/Keychain.swift
       - path: App/SyncEngine.swift
+      - path: App/SessionTokenStore.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gghomes.callsign.tests
