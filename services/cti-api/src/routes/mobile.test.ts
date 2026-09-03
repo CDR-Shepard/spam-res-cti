@@ -43,6 +43,10 @@ const state = vi.hoisted(() => ({
   lastDevicesListWhere: null as unknown,
   lastDirectoryVersionsWhere: null as unknown,
   lastDirectoryEntriesWhere: null as unknown,
+  // The exact values `/mobile/register` handed to `insert(mobileDevices).values(...)`,
+  // so tests can assert the row actually written (userId scoping, hash-at-rest)
+  // rather than trusting the response body alone.
+  lastDeviceInsertValues: null as Record<string, unknown> | null,
 }));
 
 vi.mock('../auth/session.js', () => ({
@@ -55,6 +59,7 @@ vi.mock('../db/index.js', async (importOriginal) => {
 });
 
 import { schema } from '../db/index.js';
+import { sha256 } from '../crypto.js';
 import {
   registerMobileRoutes,
   allowClaimAttempt,
@@ -142,7 +147,10 @@ function fakeDb() {
     insert(table: unknown) {
       return {
         values: (values: Record<string, unknown>) => {
-          if (table === schema.mobileDevices) state.deviceInsertCount++;
+          if (table === schema.mobileDevices) {
+            state.deviceInsertCount++;
+            state.lastDeviceInsertValues = values;
+          }
           const thenable = Promise.resolve(undefined) as Promise<void> & {
             onConflictDoNothing: () => { returning: () => Promise<Array<Record<string, unknown>>> };
             returning: (selection?: unknown) => Promise<Array<Record<string, unknown>>>;
@@ -212,6 +220,7 @@ beforeEach(async () => {
   state.lastPairCodeClaimWhere = null;
   state.pairCodeClaimLost = false;
   state.deviceInsertCount = 0;
+  state.lastDeviceInsertValues = null;
   state.lastDeviceFindWhere = null;
   state.lastDevicesListWhere = null;
   state.lastDirectoryVersionsWhere = null;
@@ -437,13 +446,22 @@ describe('POST /mobile/pair/claim', () => {
 // ---------------------------------------------------------------------------
 describe('POST /mobile/register', () => {
   it('mints a device token for the signed-in user', async () => {
-    state.authedUser = { userId: 'u1', orgId: 'o1', email: 'rep@x.com', isAdmin: false };
+    const sessionUserId = 'u1';
+    state.authedUser = { userId: sessionUserId, orgId: 'o1', email: 'rep@x.com', isAdmin: false };
     const res = await app.inject({ method: 'POST', url: '/mobile/register', headers: { authorization: 'Bearer session' }, payload: { deviceLabel: 'iPhone (Callsign)' } });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.deviceToken).toMatch(/^[A-Za-z0-9_-]{40,}$/);
     expect(body.deviceId).toBeTruthy();
     expect(state.deviceInsertCount).toBe(1);
+    // The inserted row must be scoped to the SESSION's user (not any
+    // client-suppliable value) and must store a hash of the token, never
+    // the raw token itself — otherwise a DB read (or leak) at rest would
+    // hand out live device credentials.
+    const v = state.lastDeviceInsertValues as { tokenHash: string; userId: string; label: string };
+    expect(v.userId).toBe(sessionUserId);
+    expect(v.tokenHash).not.toBe(body.deviceToken);
+    expect(v.tokenHash).toBe(sha256(body.deviceToken));
   });
   it('401 without a session', async () => {
     state.authedUser = null;
