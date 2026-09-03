@@ -145,6 +145,7 @@ function fakeDb() {
           if (table === schema.mobileDevices) state.deviceInsertCount++;
           const thenable = Promise.resolve(undefined) as Promise<void> & {
             onConflictDoNothing: () => { returning: () => Promise<Array<Record<string, unknown>>> };
+            returning: (selection?: unknown) => Promise<Array<Record<string, unknown>>>;
           };
           thenable.onConflictDoNothing = () => ({
             returning: async () => {
@@ -156,6 +157,13 @@ function fakeDb() {
               return [{ ...values }];
             },
           });
+          // `/mobile/register`'s device insert (unlike claim's, which is
+          // fire-and-forget) needs the inserted row's id back directly —
+          // no onConflictDoNothing in its path.
+          thenable.returning = async () => {
+            if (table === schema.mobileDevices) return [{ id: 'device-1', ...values }];
+            return [{ ...values }];
+          };
           return thenable;
         },
       };
@@ -425,6 +433,31 @@ describe('POST /mobile/pair/claim', () => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /mobile/register
+// ---------------------------------------------------------------------------
+describe('POST /mobile/register', () => {
+  it('mints a device token for the signed-in user', async () => {
+    state.authedUser = { userId: 'u1', orgId: 'o1', email: 'rep@x.com', isAdmin: false };
+    const res = await app.inject({ method: 'POST', url: '/mobile/register', headers: { authorization: 'Bearer session' }, payload: { deviceLabel: 'iPhone (Callsign)' } });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.deviceToken).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+    expect(body.deviceId).toBeTruthy();
+    expect(state.deviceInsertCount).toBe(1);
+  });
+  it('401 without a session', async () => {
+    state.authedUser = null;
+    const res = await app.inject({ method: 'POST', url: '/mobile/register', headers: { authorization: 'Bearer x' }, payload: { deviceLabel: 'iPhone' } });
+    expect(res.statusCode).toBe(401);
+  });
+  it('400 on a missing label', async () => {
+    state.authedUser = { userId: 'u1', orgId: 'o1', email: 'rep@x.com', isAdmin: false };
+    const res = await app.inject({ method: 'POST', url: '/mobile/register', headers: { authorization: 'Bearer session' }, payload: {} });
+    expect(res.statusCode).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // End to end: the token claim mints is the SAME token that authenticates the
 // feed — proving the header wiring between the two endpoints, not just that
 // each 200s in isolation off a canned fixture.
@@ -666,6 +699,17 @@ describe('POST /mobile/voip-token', () => {
       url: '/mobile/voip-token',
       headers: { authorization: 'Bearer devicetok' },
       payload: { token: 'a'.repeat(513) },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('400s a token shorter than a real PushKit token', async () => {
+    state.device = { id: 'dev-1', userId: USER_ID, revokedAt: null };
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mobile/voip-token',
+      headers: { authorization: 'Bearer devicetok' },
+      payload: { token: 'a'.repeat(15) },
     });
     expect(res.statusCode).toBe(400);
   });

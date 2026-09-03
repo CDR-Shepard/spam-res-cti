@@ -5,6 +5,10 @@
  *         6-digit pairing code the rep types into the phone.
  *  POST   /mobile/pair/claim          (no auth, IP rate-limited) → exchange a
  *         still-valid code for a long-lived device token.
+ *  POST   /mobile/register            (softphone session auth) → mint a
+ *         device token directly for a signed-in rep, skipping the pairing
+ *         code (the Callsign app already has a session proving who's signed
+ *         in).
  *  GET    /mobile/caller-directory    (device token auth) → the org's
  *         caller-ID directory, paged ascending, deterministic.
  *  POST   /mobile/apns-token          (device token auth) → store the
@@ -217,10 +221,21 @@ async function resolveDevice(
   return row;
 }
 
+/** A fresh device token + the hash we store; the raw token is returned to
+ *  the phone once and never persisted. Shared by /mobile/pair/claim and
+ *  /mobile/register — both mint the SAME kind of device token, just from
+ *  different auth (a pairing code vs. an already-signed-in session). */
+function mintDeviceToken(): { raw: string; hash: string } {
+  const raw = randomToken(DEVICE_TOKEN_BYTES);
+  return { raw, hash: sha256(raw) };
+}
+
 const ClaimBody = z.object({
   code: z.string().regex(/^\d{6}$/, 'code must be 6 digits'),
   deviceLabel: z.string().trim().min(1).max(120),
 });
+
+const RegisterBody = z.object({ deviceLabel: z.string().trim().min(1).max(120) });
 
 const ApnsTokenBody = z.object({
   // APNs device tokens are 64 hex characters today; the cap is deliberately
@@ -230,8 +245,9 @@ const ApnsTokenBody = z.object({
 });
 
 const VoipTokenBody = z.object({
-  // PushKit VoIP tokens are 64 hex characters today; bounded the same way
-  // ApnsTokenBody is (room for a format change, no unbounded blob accepted).
+  // PushKit VoIP tokens are 64 hex characters today. Tighter than ApnsTokenBody
+  // on purpose: nothing shorter than 16 is a real token, and 512 leaves room for
+  // a format change without accepting an unbounded blob from a hostile device.
   token: z.string().trim().min(16).max(512),
 });
 
@@ -347,16 +363,40 @@ export async function registerMobileRoutes(app: FastifyInstance): Promise<void> 
       return reply.code(401).send({ error: 'Invalid or expired code' });
     }
 
-    const token = randomToken(DEVICE_TOKEN_BYTES);
+    const { raw: token, hash: tokenHash } = mintDeviceToken();
     await db.insert(schema.mobileDevices).values({
       userId: claimed.userId,
-      tokenHash: sha256(token),
+      tokenHash,
       label: parsed.data.deviceLabel,
     });
     const user = await db.query.users.findFirst({ where: eq(schema.users.id, claimed.userId) });
     // The raw device token is minted ONLY here — the phone stores it in its
     // keychain and sends it as Bearer on every later request; never logged.
     return { deviceToken: token, user: { displayName: user?.displayName ?? null } };
+  });
+
+  app.post('/mobile/register', async (req, reply) => {
+    const session = await resolveSession(req.headers.authorization);
+    if (!session) return reply.code(401).send({ error: 'Unauthorized' });
+    const parsed = RegisterBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const { raw, hash } = mintDeviceToken();
+    const db = getDb();
+    const [row] = await db
+      .insert(schema.mobileDevices)
+      .values({ userId: session.userId, tokenHash: hash, label: parsed.data.deviceLabel })
+      .returning({ id: schema.mobileDevices.id });
+    if (!row) {
+      // Should be unreachable — a plain INSERT either returns the inserted
+      // row or throws — but TypeScript can't prove that from `.returning()`'s
+      // type alone, so fail loudly instead of dereferencing `undefined`.
+      req.log.error({ userId: session.userId }, 'mobile_device_register_insert_returned_no_row');
+      return reply.code(500).send({ error: 'Could not register device' });
+    }
+    req.log.info({ userId: session.userId, deviceId: row.id }, 'mobile device registered via session');
+    // Same kind of device token pairing mints — the raw value is returned
+    // ONLY here, once, and never persisted or logged.
+    return { deviceToken: raw, deviceId: row.id };
   });
 
   app.get('/mobile/caller-directory', async (req, reply) => {
