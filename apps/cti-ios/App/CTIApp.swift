@@ -28,13 +28,20 @@ struct CTIApp: App {
 
 /// No session yet: sign in. Signed in: the main tab UI — until Task 10 builds
 /// it, `StatusView` stands in.
+///
+/// Routes on `engine.hasSession` rather than reading `SessionTokenStore`
+/// directly, so this re-renders the instant the engine's published flag
+/// changes — a registration failure or an `unpair()` and there is nowhere for
+/// the flag to get stuck: the next redraw sends the phone straight back here.
 struct RootView: View {
+    @EnvironmentObject private var engine: SyncEngine
+
     var body: some View {
-        if SessionTokenStore.load() == nil {
-            SignInView()
-        } else {
+        if engine.hasSession {
             // TASK 10 ROUTING POINT: replace `StatusView()` with the main tab UI.
             StatusView()
+        } else {
+            SignInView()
         }
     }
 }

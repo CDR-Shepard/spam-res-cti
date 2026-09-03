@@ -125,6 +125,7 @@ targets:
       - path: Shared/PairingClient.swift
       - path: Shared/SessionClient.swift
       - path: Shared/DeviceRegistrationClient.swift
+      - path: Shared/SignInFlow.swift
       - path: App/DirectoryStore.swift
       - path: App/Keychain.swift
       - path: App/SyncEngine.swift

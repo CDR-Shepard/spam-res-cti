@@ -46,6 +46,10 @@ final class SyncEngine: ObservableObject {
     typealias Claim = (_ code: String, _ deviceLabel: String) async throws -> PairClaim
 
     @Published private(set) var isPaired: Bool
+    /// Whether a Salesforce session token is on file. `RootView` routes on
+    /// this rather than reading the Keychain itself, so it re-renders the
+    /// instant `unpair()` (or a fresh sign-in) changes the answer.
+    @Published private(set) var hasSession: Bool
     @Published private(set) var pairedUserName: String?
     @Published private(set) var status: Status = .idle
     @Published private(set) var version: Int?
@@ -56,6 +60,7 @@ final class SyncEngine: ObservableObject {
     private let store: DirectoryStore?
     private let defaults: UserDefaults
     private let tokens: TokenStore
+    private let sessions: SessionTokenStoring
     private let pull: Pull
     private let reload: Reload
     private let enabledStatus: EnabledStatusProbe
@@ -81,6 +86,7 @@ final class SyncEngine: ObservableObject {
         store: DirectoryStore? = DirectoryStore.appGroup(),
         defaults: UserDefaults = UserDefaults(suiteName: AppConfig.appGroupIdentifier) ?? .standard,
         tokens: TokenStore = .keychain,
+        sessions: SessionTokenStoring = SessionTokenStore(),
         pull: @escaping Pull = SyncEngine.livePull,
         reload: @escaping Reload = SyncEngine.liveReload,
         enabledStatus: @escaping EnabledStatusProbe = SyncEngine.liveEnabledStatus,
@@ -89,11 +95,13 @@ final class SyncEngine: ObservableObject {
         self.store = store
         self.defaults = defaults
         self.tokens = tokens
+        self.sessions = sessions
         self.pull = pull
         self.reload = reload
         self.enabledStatus = enabledStatus
         self.claim = claim
         self.isPaired = tokens.load() != nil
+        self.hasSession = sessions.load() != nil
         self.pairedUserName = defaults.string(forKey: Keys.pairedUserName)
         self.lastSyncedAt = defaults.object(forKey: Keys.lastSyncedAt) as? Date
 
@@ -153,10 +161,22 @@ final class SyncEngine: ObservableObject {
         defaults.set(displayName, forKey: Keys.pairedUserName)
         pairedUserName = displayName
         isPaired = true
+        // The session token itself was already written by `SignInFlow`
+        // (before this is ever called) — this only brings the published flag
+        // in line with what is now actually in the Keychain, so `RootView`
+        // stops showing `SignInView` the moment adoption succeeds.
+        hasSession = true
     }
 
-    /// Drops the token AND the snapshot, then reloads the extension so the
-    /// phone stops identifying this org's numbers straight away.
+    /// Drops the device token, the Salesforce session token, AND the
+    /// snapshot, then reloads the extension so the phone stops identifying
+    /// this org's numbers straight away.
+    ///
+    /// Clearing the session token (not just the device token) is what makes
+    /// this a real sign-out: without it, `RootView` would have nowhere to
+    /// route a tapped "Unpair" to — `hasSession` would still read true, and
+    /// the phone would be stuck showing a "not paired" status screen with no
+    /// way back to `SignInView`.
     ///
     /// The wipe is marked pending until it actually completes. It can fail —
     /// CallKit answers `.currentlyLoading` if a reload is already in flight,
@@ -167,7 +187,13 @@ final class SyncEngine: ObservableObject {
     /// no later sync would ever notice.
     func unpair() {
         tokens.delete()
+        // Best-effort: the concrete Keychain implementation never actually
+        // throws here (`SecItemDelete` is fire-and-forget), and a phone
+        // stuck mid-unpair with no device token but a stale session token
+        // would be a worse outcome than swallowing a hypothetical failure.
+        try? sessions.delete()
         isPaired = false
+        hasSession = false
         pairedUserName = nil
         version = nil
         entryCount = 0

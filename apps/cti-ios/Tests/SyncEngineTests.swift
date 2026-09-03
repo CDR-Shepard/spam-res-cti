@@ -195,6 +195,25 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(tokens.token, "dev_abc", "the minted token is what every later feed request carries")
         XCTAssertTrue(engine.isPaired)
         XCTAssertEqual(engine.pairedUserName, "Jane")
+        XCTAssertTrue(engine.hasSession, "adopting a device brings the published flag in line with the session SignInFlow already saved")
+    }
+
+    // MARK: - Sign-out
+
+    func testUnpairDeletesTheSessionTokenAndFlipsHasSession() {
+        // Before this fix, unpair() only dropped the device token. A tapped
+        // "Unpair" left the session token behind, `hasSession` still true,
+        // and RootView with nowhere to route back to SignInView — the phone
+        // was stuck on a "not paired" status screen with no way to sign in
+        // again short of deleting the app.
+        let sessions = SessionTokenBox(token: "sess_abc")
+        let engine = makeEngine(sessions: sessions, pull: { _, _ in nil }, reload: { _ in })
+        XCTAssertTrue(engine.hasSession)
+
+        engine.unpair()
+
+        XCTAssertNil(sessions.token, "unpair must sign the phone out of Salesforce too, not just drop the device token")
+        XCTAssertFalse(engine.hasSession)
     }
 
     func testPairingIgnoresTheSnapshotAlreadyOnDiskAndAsksForTheWholeDirectory() async throws {
@@ -414,6 +433,7 @@ final class SyncEngineTests: XCTestCase {
     private func makeEngine(
         store: DirectoryStore? = nil,
         tokens: TokenBox = TokenBox(token: "device-token"),
+        sessions: SessionTokenBox = SessionTokenBox(token: nil),
         pull: @escaping SyncEngine.Pull,
         reload: @escaping SyncEngine.Reload,
         claim: @escaping SyncEngine.Claim = { _, _ in
@@ -432,6 +452,7 @@ final class SyncEngineTests: XCTestCase {
             store: store ?? makeStore(),
             defaults: defaults,
             tokens: tokens.store,
+            sessions: sessions,
             pull: pull,
             reload: reload,
             // CallKit's real probe needs a device; the screen's copy of the
@@ -471,6 +492,21 @@ private final class TokenBox {
             delete: { self.token = nil }
         )
     }
+}
+
+/// The Salesforce session token, in memory. A plain class (not an actor): the
+/// session closures are synchronous and only ever called from the engine's
+/// main actor — same rationale as `TokenBox`.
+private final class SessionTokenBox: SessionTokenStoring {
+    var token: String?
+
+    init(token: String?) {
+        self.token = token
+    }
+
+    func load() -> String? { token }
+    func save(_ token: String) throws { self.token = token }
+    func delete() throws { token = nil }
 }
 
 /// What the engine asked of its collaborators. An actor because `Pull` and
