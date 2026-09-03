@@ -815,6 +815,7 @@ export const mobileDevices = pgTable(
     tokenHash: text('token_hash').notNull(),
     label: text('label').notNull(),
     apnsToken: text('apns_token'),
+    voipToken: text('voip_token'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).defaultNow().notNull(),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),

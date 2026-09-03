@@ -9,6 +9,8 @@
  *         caller-ID directory, paged ascending, deterministic.
  *  POST   /mobile/apns-token          (device token auth) → store the
  *         device's push token for the push fast-follow.
+ *  POST   /mobile/voip-token          (device token auth) → store the
+ *         device's PushKit VoIP token (Callsign incoming-call ring).
  *  GET    /mobile/devices             (softphone session auth) → the rep's
  *         own paired devices.
  *  DELETE /mobile/devices/:id         (softphone session auth, own devices
@@ -227,6 +229,12 @@ const ApnsTokenBody = z.object({
   token: z.string().trim().min(1).max(4096),
 });
 
+const VoipTokenBody = z.object({
+  // PushKit VoIP tokens are 64 hex characters today; bounded the same way
+  // ApnsTokenBody is (room for a format change, no unbounded blob accepted).
+  token: z.string().trim().min(16).max(512),
+});
+
 const FeedQuery = z.object({
   since: z.coerce.number().int().nonnegative().optional(),
   page: z.coerce.number().int().min(1).default(1),
@@ -418,6 +426,16 @@ export async function registerMobileRoutes(app: FastifyInstance): Promise<void> 
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
     const db = getDb();
     await db.update(schema.mobileDevices).set({ apnsToken: parsed.data.token }).where(eq(schema.mobileDevices.id, device.id));
+    return { ok: true };
+  });
+
+  app.post('/mobile/voip-token', async (req, reply) => {
+    const device = await resolveDevice(req.headers.authorization);
+    if (!device) return reply.code(401).send({ error: 'Unauthorized' });
+    const parsed = VoipTokenBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const db = getDb();
+    await db.update(schema.mobileDevices).set({ voipToken: parsed.data.token }).where(eq(schema.mobileDevices.id, device.id));
     return { ok: true };
   });
 

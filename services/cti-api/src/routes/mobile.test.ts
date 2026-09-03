@@ -640,6 +640,51 @@ describe('POST /mobile/apns-token', () => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /mobile/voip-token
+// ---------------------------------------------------------------------------
+describe('POST /mobile/voip-token', () => {
+  it('requires device auth', async () => {
+    const res = await app.inject({ method: 'POST', url: '/mobile/voip-token', payload: { token: 'voip-push-token-abcdef' } });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('400s a missing token', async () => {
+    state.device = { id: 'dev-1', userId: USER_ID, revokedAt: null };
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mobile/voip-token',
+      headers: { authorization: 'Bearer devicetok' },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('400s an absurdly long token instead of storing it unbounded', async () => {
+    state.device = { id: 'dev-1', userId: USER_ID, revokedAt: null };
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mobile/voip-token',
+      headers: { authorization: 'Bearer devicetok' },
+      payload: { token: 'a'.repeat(513) },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('stores the token for the resolved device', async () => {
+    state.device = { id: 'dev-1', userId: USER_ID, revokedAt: null };
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mobile/voip-token',
+      headers: { authorization: 'Bearer devicetok' },
+      payload: { token: 'voip-push-token-abcdef' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    expect(state.lastUpdateValues).toEqual({ voipToken: 'voip-push-token-abcdef' });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /mobile/devices
 // ---------------------------------------------------------------------------
 describe('GET /mobile/devices', () => {
