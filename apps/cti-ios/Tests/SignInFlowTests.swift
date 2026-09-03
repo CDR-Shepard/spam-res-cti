@@ -47,6 +47,42 @@ final class SignInFlowTests: XCTestCase {
         XCTAssertEqual(log.calls, ["register", "delete"], "delete must run, and only after register — saveSession never runs at all")
     }
 
+    func testADeviceTokenWriteFailureAfterTheSessionSaveDeletesTheSessionAndSurfacesAnError() async {
+        let log = CallLog()
+        let deps = SignInFlow.Deps(
+            startLogin: { self.start },
+            openWeb: { _ in try await Self.hangUntilCancelled() },
+            pollStatus: { _ in self.connected },
+            registerDevice: { _, _ in
+                log.record("register")
+                return DeviceRegistration(deviceToken: "dev_1", deviceId: "d1")
+            },
+            saveSession: { _ in log.record("save") },
+            deleteSession: { log.record("delete") },
+            adoptDevice: { _, _ in
+                log.record("adopt")
+                throw TestError.boom
+            }
+        )
+
+        do {
+            try await SignInFlow.run(label: "Jane's iPhone", deps: deps)
+            XCTFail("expected .registrationFailed")
+        } catch let error as SignInFlow.SignInFlowError {
+            guard case .registrationFailed = error else {
+                return XCTFail("expected .registrationFailed, got \(error)")
+            }
+        } catch {
+            XCTFail("expected a SignInFlowError, got \(error)")
+        }
+
+        XCTAssertEqual(
+            log.calls,
+            ["register", "save", "adopt", "delete"],
+            "a device-token write failure must delete the session that was just saved, so the next launch returns to sign-in"
+        )
+    }
+
     func testTheHappyPathRegistersSavesThenAdoptsInThatOrder() async throws {
         let log = CallLog()
         let deps = SignInFlow.Deps(

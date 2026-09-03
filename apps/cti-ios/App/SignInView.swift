@@ -89,7 +89,7 @@ struct SignInView: View {
             saveSession: { try SessionTokenStore().save($0) },
             deleteSession: { try SessionTokenStore().delete() },
             adoptDevice: { deviceToken, displayName in
-                try? engine.adoptDeviceToken(deviceToken, displayName: displayName)
+                try engine.adoptDeviceToken(deviceToken, displayName: displayName)
             }
         )
     }

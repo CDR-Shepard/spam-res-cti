@@ -36,7 +36,7 @@ enum SignInFlow {
         /// been saved yet — harmless if there is nothing to delete.
         var deleteSession: () throws -> Void
         /// Hands the minted device token to `SyncEngine`.
-        var adoptDevice: (_ deviceToken: String, _ displayName: String?) -> Void
+        var adoptDevice: (_ deviceToken: String, _ displayName: String?) throws -> Void
     }
 
     enum SignInFlowError: Error, Equatable {
@@ -68,7 +68,7 @@ enum SignInFlow {
                 // phone is allowed to use this session — is anything written
                 // to the Keychain.
                 try deps.saveSession(sessionToken)
-                deps.adoptDevice(registration.deviceToken, displayName)
+                try deps.adoptDevice(registration.deviceToken, displayName)
             } catch {
                 // A session this phone could not register with must not be
                 // left behind, whether or not `saveSession` ever ran.
