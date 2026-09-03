@@ -124,6 +124,7 @@ targets:
       - path: Shared/Feed.swift
       - path: Shared/PairingClient.swift
       - path: Shared/SessionClient.swift
+      - path: Shared/DeviceRegistrationClient.swift
       - path: App/DirectoryStore.swift
       - path: App/Keychain.swift
       - path: App/SyncEngine.swift

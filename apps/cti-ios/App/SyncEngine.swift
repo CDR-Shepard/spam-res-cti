@@ -141,6 +141,20 @@ final class SyncEngine: ObservableObject {
         await sync(forcingFullResync: true)
     }
 
+    /// Sign-in path: the app already holds a session and asked the server to
+    /// mint a device token for this phone — no 6-digit code involved.
+    ///
+    /// Deliberately does not sync, unlike `pair(code:)`: the caller
+    /// (`SignInView`) drives the first sync itself once it hands off to the
+    /// main UI, the same way a cold launch's `StatusView.task` does for a
+    /// phone that was already paired.
+    func adoptDeviceToken(_ token: String, displayName: String?) throws {
+        try tokens.save(token)
+        defaults.set(displayName, forKey: Keys.pairedUserName)
+        pairedUserName = displayName
+        isPaired = true
+    }
+
     /// Drops the token AND the snapshot, then reloads the extension so the
     /// phone stops identifying this org's numbers straight away.
     ///

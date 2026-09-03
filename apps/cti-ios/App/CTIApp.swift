@@ -26,15 +26,15 @@ struct CTIApp: App {
     }
 }
 
-/// Paired phones go straight to the status screen; everything else pairs first.
+/// No session yet: sign in. Signed in: the main tab UI — until Task 10 builds
+/// it, `StatusView` stands in.
 struct RootView: View {
-    @EnvironmentObject private var engine: SyncEngine
-
     var body: some View {
-        if engine.isPaired {
-            StatusView()
+        if SessionTokenStore.load() == nil {
+            SignInView()
         } else {
-            PairView()
+            // TASK 10 ROUTING POINT: replace `StatusView()` with the main tab UI.
+            StatusView()
         }
     }
 }

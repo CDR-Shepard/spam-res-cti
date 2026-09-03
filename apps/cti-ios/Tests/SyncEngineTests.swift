@@ -175,6 +175,28 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertNil(engine.failureMessage)
     }
 
+    func testAdoptDeviceTokenStoresTheMintedTokenWithoutASyncOrAClaim() throws {
+        // The sign-in path: the app already holds a session and asked the
+        // server to mint a device token directly — no 6-digit code, and no
+        // implicit sync the way `pair(code:)` triggers one.
+        let tokens = TokenBox(token: nil)
+        let engine = makeEngine(
+            tokens: tokens,
+            pull: { _, _ in
+                XCTFail("adoptDeviceToken must not sync")
+                return nil
+            },
+            reload: { _ in XCTFail("adoptDeviceToken must not reload the extension") }
+        )
+        XCTAssertFalse(engine.isPaired)
+
+        try engine.adoptDeviceToken("dev_abc", displayName: "Jane")
+
+        XCTAssertEqual(tokens.token, "dev_abc", "the minted token is what every later feed request carries")
+        XCTAssertTrue(engine.isPaired)
+        XCTAssertEqual(engine.pairedUserName, "Jane")
+    }
+
     func testPairingIgnoresTheSnapshotAlreadyOnDiskAndAsksForTheWholeDirectory() async throws {
         // A phone that has just changed identity must not tell the server "I
         // already have version 5". Directory versions are small per-org
