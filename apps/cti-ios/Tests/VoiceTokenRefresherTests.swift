@@ -103,9 +103,10 @@ final class VoiceTokenRefresherTests: XCTestCase {
         XCTAssertEqual(fetches, 2)
     }
 
-    /// `CallController.tokens` is synchronous — it is called on the way into
-    /// `sdk.connect` and cannot await a mint — so the cached token has to be
-    /// readable without one.
+    /// `PushRegistry.detach()`'s sign-out unregistration deliberately wants
+    /// whatever is cached rather than risking a fresh mint against a session
+    /// that has usually just been cleared — so the cached token has to be
+    /// readable without awaiting one.
     func testCachedTokenIsReadableSynchronouslyAfterARefresh() async throws {
         let refresher = VoiceTokenRefresher(
             fetch: { VoiceToken(token: "minted", expiresAt: "2026-09-04T12:00:00.000Z") },

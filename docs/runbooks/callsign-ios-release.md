@@ -282,10 +282,6 @@ chase before shipping:
   state that no longer matches the actual output route).
 - **Outbound Recents rows show the raw typed number** until the recent-calls
   API returns `toNumberE164` — a follow-up chip has been filed for this.
-- **The voice-token seam is synchronous by design**
-  (`CallController.tokens`, so nothing may `await` between the server's
-  "allowed" verdict and `sdk.connect`) — a chip has been filed to track
-  whether this constraint holds up as the token-refresh path evolves.
 - **No way to deactivate a rep (the offboarding cascade has no trigger).** The
   per-user cap now ships: a rep may hold at most `MAX_ACTIVE_DEVICES_PER_USER`
   active devices and both `/mobile/register` and `/mobile/pair/claim` refuse

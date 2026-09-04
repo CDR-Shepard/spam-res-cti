@@ -170,6 +170,70 @@ private struct FakeError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+/// A shared timeline the token-seam tests append to, so a test can assert
+/// *ordering* between two different collaborators (the token fetch, `POST
+/// /calls`) rather than just whether each was called. Plain, not an actor:
+/// every append here happens synchronously within `CallController`'s own
+/// single await chain — there is no concurrent writer the way the wrap-up
+/// re-entrancy tests have with `CallGate`.
+private final class OrderLog {
+    private(set) var events: [String] = []
+    func append(_ event: String) { events.append(event) }
+}
+
+/// A token provider that records into an `OrderLog` and can be made to fail —
+/// the fixture the seam tests use to prove the token is fetched before
+/// anything that would create a server-side call row, and that a mint
+/// failure is never a silent no-op.
+private final class OrderRecordingTokens {
+    let order: OrderLog
+    var error: Error?
+    var value = "voice_t"
+
+    init(order: OrderLog) { self.order = order }
+
+    func fetch() async throws -> String {
+        order.append("token")
+        if let error { throw error }
+        return value
+    }
+}
+
+/// Wraps a `FakeCallsAPI` to record the moment `POST /calls` (`place`) is
+/// called into the same `OrderLog` the token fixture writes to — `precall`,
+/// `disposition`, and `pendingDisposition` just forward, since only `place`
+/// is the call that creates the row this whole change exists to protect.
+private final class OrderRecordingCallsAPI: CallsAPIClient {
+    let inner: FakeCallsAPI
+    let order: OrderLog
+
+    init(inner: FakeCallsAPI, order: OrderLog) {
+        self.inner = inner
+        self.order = order
+    }
+
+    func precall(to e164: String, recipientRecordId: String?) async throws -> PrecallVerdict {
+        try await inner.precall(to: e164, recipientRecordId: recipientRecordId)
+    }
+
+    func place(to e164: String, auditId: String, acknowledged: Bool,
+               recipientRecordId: String?, recipientObjectType: String?) async throws -> PlaceCallResult {
+        order.append("place")
+        return try await inner.place(
+            to: e164, auditId: auditId, acknowledged: acknowledged,
+            recipientRecordId: recipientRecordId, recipientObjectType: recipientObjectType
+        )
+    }
+
+    func disposition(callId: String, disposition: String, notes: String) async throws {
+        try await inner.disposition(callId: callId, disposition: disposition, notes: notes)
+    }
+
+    func pendingDisposition() async throws -> CallSummary? {
+        try await inner.pendingDisposition()
+    }
+}
+
 /// A suspension the test opens by hand — the only way to hold an API call
 /// "in flight" while driving the controller forward, with no sleep and no
 /// timeout anywhere. An actor because the fakes' `async` methods run off the
@@ -597,6 +661,121 @@ final class CallControllerTests: XCTestCase {
 
         guard case .active = c.phase else { return XCTFail("the live call must be untouched") }
         XCTAssertEqual(c.lastRefusal, CallController.busyRefusal)
+    }
+
+    // MARK: - The voice token is awaited before a server-side call row can exist
+
+    /// The regression this whole change exists for. A token that cannot be
+    /// minted must never let the dial reach `POST /calls` — there is no
+    /// server-side row for the rep to be left holding a wrap-up for.
+    @MainActor func testATokenFetchFailureNeverReachesTheAuditOrPlace() async {
+        let sdk = FakeSDK(); let api = FakeCallsAPI()
+        let c = CallController(
+            sdk: sdk, system: FakeCallSystem(), api: api,
+            tokens: { throw FakeError(message: "Could not reach the voice service.") }
+        )
+
+        await c.placeCall(to: "+18585550100")
+
+        XCTAssertEqual(c.lastRefusal, "Could not reach the voice service.")
+        XCTAssertTrue(api.precalls.isEmpty, "a token that cannot be minted must never reach the audit either")
+        XCTAssertTrue(api.places.isEmpty, "and must never create a server-side call row")
+        XCTAssertEqual(sdk.connectCalls, 0)
+        guard case .idle = c.phase else { return XCTFail("expected idle") }
+    }
+
+    /// The happy path proves the ordering directly rather than trusting it:
+    /// the token must land in the log before `place` does, on every ALLOW.
+    @MainActor func testTheVoiceTokenIsFetchedBeforePOSTCalls() async {
+        let order = OrderLog()
+        let api = FakeCallsAPI()
+        api.placeResult = .allowed(callId: "c_order", fromNumber: "+12135550100")
+        let wrappedAPI = OrderRecordingCallsAPI(inner: api, order: order)
+        let tokens = OrderRecordingTokens(order: order)
+        let c = CallController(sdk: FakeSDK(), system: FakeCallSystem(), api: wrappedAPI, tokens: tokens.fetch)
+
+        await c.placeCall(to: "+18585550100")
+
+        XCTAssertEqual(order.events, ["token", "place"], "the token must be minted before POST /calls")
+        guard case .active = c.phase else { return XCTFail("expected active") }
+    }
+
+    /// `acknowledge()` re-places against a held REQUIRE_REVIEW audit, and it
+    /// has to fetch its own token in the same order — before `place`, not
+    /// reusing whatever `placeCall` fetched (and possibly never used) minutes
+    /// earlier when the rep was still reading the review reasons.
+    @MainActor func testAcknowledgeFetchesTheVoiceTokenBeforePOSTCalls() async {
+        let order = OrderLog()
+        let api = FakeCallsAPI()
+        api.precallResult = PrecallVerdict(
+            auditId: "aud_order", decision: .requireReview, reasons: ["Review first"],
+            blockReason: nil, requiredScriptId: nil
+        )
+        api.placeResult = .allowed(callId: "c_order2", fromNumber: "+12135550100")
+        let wrappedAPI = OrderRecordingCallsAPI(inner: api, order: order)
+        let tokens = OrderRecordingTokens(order: order)
+        let c = CallController(sdk: FakeSDK(), system: FakeCallSystem(), api: wrappedAPI, tokens: tokens.fetch)
+        await c.placeCall(to: "+18585550100")
+        guard case .needsAcknowledgement = c.phase else { return XCTFail("expected needsAcknowledgement") }
+
+        await c.acknowledge()
+
+        // `placeCall`'s own fetch (unused for REQUIRE_REVIEW) logged one
+        // "token" already; the pair that matters is the last two events.
+        XCTAssertEqual(order.events.suffix(2), ["token", "place"], "acknowledge must fetch before it places too")
+        guard case .active = c.phase else { return XCTFail("expected active after acknowledging") }
+    }
+
+    /// A token that fails to mint during `acknowledge()` gets exactly the
+    /// same treatment as one that fails during `placeCall`: a message the rep
+    /// can read, a return to `.idle`, and `POST /calls` never reached.
+    @MainActor func testATokenFetchFailureDuringAcknowledgeNeverReachesPlace() async {
+        let sdk = FakeSDK(); let api = FakeCallsAPI()
+        api.precallResult = PrecallVerdict(
+            auditId: "aud_tok", decision: .requireReview, reasons: ["Review first"],
+            blockReason: nil, requiredScriptId: nil
+        )
+        var tokenCalls = 0
+        let c = CallController(
+            sdk: sdk, system: FakeCallSystem(), api: api,
+            tokens: {
+                tokenCalls += 1
+                // The first fetch is `placeCall`'s own (unused for
+                // REQUIRE_REVIEW); the second is `acknowledge`'s, and that is
+                // the one this test fails.
+                if tokenCalls == 1 { return "voice_t" }
+                throw FakeError(message: "Could not reach the voice service.")
+            }
+        )
+        await c.placeCall(to: "+18585550100")
+        guard case .needsAcknowledgement = c.phase else { return XCTFail("expected needsAcknowledgement") }
+
+        await c.acknowledge()
+
+        XCTAssertEqual(c.lastRefusal, "Could not reach the voice service.")
+        XCTAssertTrue(api.places.isEmpty, "a token that cannot be minted must never reach POST /calls")
+        XCTAssertEqual(sdk.connectCalls, 0)
+        guard case .idle = c.phase else { return XCTFail("expected idle") }
+    }
+
+    /// A 401 raised through the token seam is exactly as much a suspected
+    /// expired session as one from `precall`, `place`, or the disposition
+    /// POST — it must still reach `onSessionExpired`, never bypassing it.
+    @MainActor func testA401OnTheTokenFetchReportsTheExpiredSession() async {
+        var expiries = 0
+        let api = FakeCallsAPI()
+        let c = CallController(
+            sdk: FakeSDK(), system: FakeCallSystem(), api: api,
+            tokens: { throw SessionClientError.server(status: 401) },
+            onSessionExpired: { expiries += 1 }
+        )
+
+        await c.placeCall(to: "+18585550100")
+
+        XCTAssertEqual(expiries, 1)
+        XCTAssertTrue(api.precalls.isEmpty, "never reaches the audit either")
+        guard case .idle = c.phase else { return XCTFail("expected idle") }
+        XCTAssertNotNil(c.lastRefusal, "the failure is still shown; the sign-out is what happens next")
     }
 
     // MARK: - Errors are never silent

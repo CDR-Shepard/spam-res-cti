@@ -3,13 +3,17 @@ import Foundation
 /// The Twilio Voice access token, minted on demand and reused until it is
 /// nearly spent.
 ///
-/// Two things use it and they want it differently. Registration
-/// (`PushRegistry`) can await a mint, so it takes `current()`. A dial cannot —
-/// `CallController.tokens` is a synchronous `() -> String` called on the way
-/// into `sdk.connect`, precisely so that nothing can await between the
-/// server's "allowed" and the radio — so it reads `cachedAccessToken`, which
-/// is whatever the last refresh left behind. That is why the app refreshes at
-/// launch and on every foreground rather than lazily at dial time.
+/// Registration (`PushRegistry`) awaits a mint via `current()` — and so does a
+/// dial now: `CallController.tokens` is `() async throws -> String`, awaited
+/// before the pre-call audit and before `POST /calls`, never between the
+/// server's "allowed" verdict and `sdk.connect` (see `CallController.dial`).
+/// A token that cannot be minted throws there and is reported before any
+/// server-side call row exists, rather than reaching Twilio with an empty
+/// string. The one caller left that wants the synchronous, no-await
+/// `cachedAccessToken` is `PushRegistry.detach()`'s sign-out unregistration,
+/// which deliberately avoids a fresh mint — see that property's own comment.
+/// The app still refreshes at launch and on every foreground to keep that
+/// cache warm for it.
 ///
 /// Pure by construction: the mint itself is an injected closure, so the cache
 /// rule and the expiry arithmetic are testable without a network.
@@ -43,11 +47,13 @@ final class VoiceTokenRefresher: @unchecked Sendable {
         self.now = now
     }
 
-    /// The token a dial should carry, without awaiting. Empty when nothing has
-    /// been minted yet (or the last mint failed) — `connect` will then fail
-    /// with a Twilio auth error the controller surfaces as a refusal, which is
-    /// the honest outcome: better a named failure than a dial placed with a
-    /// token the phone knows is stale.
+    /// The last token this refresher minted, read without awaiting. Empty
+    /// when nothing has been minted yet (or the last mint failed). No longer
+    /// read on a dial — `CallController` awaits `current()` instead, before
+    /// `POST /calls` — so the one remaining reader is
+    /// `PushRegistry.detach()`'s sign-out unregistration, which deliberately
+    /// wants whatever is cached rather than risking a fresh mint against a
+    /// session that has usually just been cleared.
     var cachedAccessToken: String {
         lock.withLock { token }
     }

@@ -76,7 +76,17 @@ final class CallController: ObservableObject {
     private let sdk: VoiceSDK
     private let system: CallSystem
     private let api: CallsAPIClient
-    private let tokens: () -> String
+    /// Mints (or returns the still-fresh cached) Twilio Voice access token.
+    ///
+    /// Awaited by `placeCall` and by `acknowledge` — each before it does
+    /// anything else on that dial — never inside `dial()` itself and never
+    /// between the server's `.allowed` verdict and `sdk.connect` (see
+    /// `dial`'s own comment). A token that cannot be minted throws here, the
+    /// caller's `catch` reports it through `lastRefusal` and returns to
+    /// `.idle`, and neither the audit nor `POST /calls` is ever reached — so
+    /// a dial that was never going to reach Twilio never creates a
+    /// server-side call row for the rep to wrap up.
+    private let tokens: () async throws -> String
     private let now: () -> Date
     /// Called when a session-authenticated call comes back 401 — see
     /// `isSessionExpired`. The controller does not decide what happens next
@@ -111,7 +121,7 @@ final class CallController: ObservableObject {
         sdk: VoiceSDK,
         system: CallSystem,
         api: CallsAPIClient,
-        tokens: @escaping () -> String,
+        tokens: @escaping () async throws -> String,
         now: @escaping () -> Date = Date.init,
         onSessionExpired: @escaping () -> Void = {}
     ) {
@@ -209,6 +219,13 @@ final class CallController: ObservableObject {
         phase = .dialing(info)
 
         do {
+            // Mint the voice token before anything else this dial does —
+            // including the audit. There is no point spending a compliance
+            // check on a dial that cannot reach Twilio, and a token error
+            // here is caught below exactly like any other: `lastRefusal` is
+            // set, the phase returns to `.idle`, and neither the audit nor
+            // `POST /calls` is ever reached.
+            let accessToken = try await tokens()
             let verdict = try await api.precall(to: e164, recipientRecordId: recipientRecordId)
             switch verdict.decision {
             case .block:
@@ -228,6 +245,7 @@ final class CallController: ObservableObject {
             case .allow:
                 try await dial(
                     info: info, e164: e164, auditId: verdict.auditId, acknowledged: false,
+                    accessToken: accessToken,
                     recipientRecordId: recipientRecordId, recipientObjectType: recipientObjectType
                 )
             }
@@ -250,8 +268,13 @@ final class CallController: ObservableObject {
         generation += 1
         phase = .dialing(info)
         do {
+            // Same rule as `placeCall`: the token is minted before `POST
+            // /calls`, not inside `dial()`, so a token that fails here never
+            // creates a call row either.
+            let accessToken = try await tokens()
             try await dial(
                 info: info, e164: review.e164, auditId: review.auditId, acknowledged: true,
+                accessToken: accessToken,
                 recipientRecordId: review.recipientRecordId, recipientObjectType: review.recipientObjectType
             )
         } catch {
@@ -266,8 +289,20 @@ final class CallController: ObservableObject {
 
     /// The single place `sdk.connect` is reached from — and it is reachable
     /// only with an `auditId` the server itself issued.
+    ///
+    /// `accessToken` arrives already minted: both callers (`placeCall`,
+    /// `acknowledge`) await `tokens()` themselves before invoking this
+    /// function, ahead of `POST /calls`. That is deliberate placement, not an
+    /// oversight — the one invariant this file cannot give up is that nothing
+    /// may `await` (and so fail, or suspend indefinitely) between the
+    /// server's `.allowed` verdict below and the `sdk.connect` call that
+    /// follows it. Moving the token `await` to *before* the verdict, rather
+    /// than dropping it in between, is what keeps that gap empty: from here
+    /// down `accessToken` is a plain `String` sitting in a local, passed
+    /// straight through.
     private func dial(
         info: CallerInfo, e164: String, auditId: String, acknowledged: Bool,
+        accessToken: String,
         recipientRecordId: String?, recipientObjectType: String?
     ) async throws {
         let result = try await api.place(
@@ -282,8 +317,9 @@ final class CallController: ObservableObject {
             heldReview = nil
             // `CallDbId` is what ties the media leg back to the row the server
             // just created and to the DID it pinned; the SDK is never asked to
-            // choose a caller id.
-            let call = try await sdk.connect(accessToken: tokens(), params: ["To": e164, "CallDbId": callId])
+            // choose a caller id. No `await` between the `.allowed` case above
+            // and this call — see the comment on `dial` itself.
+            let call = try await sdk.connect(accessToken: accessToken, params: ["To": e164, "CallDbId": callId])
             attach(call)
             system.reportOutgoingStarted(uuid: call.uuid, handle: e164)
             phase = .active(info, since: now())

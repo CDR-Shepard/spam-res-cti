@@ -10,7 +10,7 @@ import os
 /// LiveVoiceSDK ─┐
 /// LiveCallSystem├─→ CallController ←─weak─ LiveCallSystem.controller
 /// LiveCallsAPI ─┘         ↑
-/// VoiceTokenRefresher ────┘ (cached token, read synchronously at dial time)
+/// VoiceTokenRefresher ────┘ (awaited async, before each dial's own audit)
 /// PushRegistry ───────────┘ (pushes in, registration out)
 /// ```
 ///
@@ -59,10 +59,13 @@ final class VoiceRuntime: ObservableObject {
             sdk: sdk,
             system: system,
             api: LiveCallsAPI(baseURL: baseURL, sessionToken: session),
-            // Synchronous by contract: a dial must not be able to await
-            // between the server's "allowed" and `sdk.connect`. The cache is
-            // kept warm by `refresh()` below.
-            tokens: { refresher.cachedAccessToken },
+            // `refresher.current()` — awaited by the controller itself before
+            // its audit and before `POST /calls`, never between the server's
+            // "allowed" and `sdk.connect`. Passing the method directly (over
+            // reading a cached value here) is what closed the race where a
+            // dial landed before the very first mint finished and reached
+            // Twilio with an empty token.
+            tokens: refresher.current,
             onSessionExpired: { expiry.fire() }
         )
         system.controller = controller
