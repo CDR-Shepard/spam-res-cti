@@ -34,8 +34,7 @@ struct CTIApp: App {
     }
 }
 
-/// No session yet: sign in. Signed in: the main tab UI — until Task 10 builds
-/// it, `StatusView` stands in.
+/// No session yet: sign in. Signed in: the main tab UI.
 ///
 /// Routes on `engine.hasSession` rather than reading `SessionTokenStore`
 /// directly, so this re-renders the instant the engine's published flag
@@ -48,8 +47,14 @@ struct RootView: View {
     var body: some View {
         Group {
             if engine.hasSession {
-                // TASK 10 ROUTING POINT: replace `StatusView()` with the main tab UI.
-                StatusView()
+                // The tabs are built around the live `CallController`, which
+                // `VoiceRuntime` only has once `start()` below has run — so
+                // there is a frame or two with a session and no softphone yet.
+                if let controller = voice.controller {
+                    MainTabs().environmentObject(controller)
+                } else {
+                    SoftphoneStartingView()
+                }
             } else {
                 SignInView()
             }

@@ -12,6 +12,14 @@ struct StatusView: View {
     var body: some View {
         NavigationStack {
             List {
+                // Who the phone is signed in as. The Salesforce display name
+                // is the one the pairing claimed and the one every Task this
+                // phone writes is attributed to, so a rep looking at somebody
+                // else's name here has found a real problem.
+                Section("Account") {
+                    LabeledContent("Signed in as", value: engine.pairedUserName ?? "—")
+                }
+
                 Section("Directory") {
                     LabeledContent("Entries", value: engine.entryCount.formatted())
                     LabeledContent("Version", value: engine.version.map(String.init) ?? "—")

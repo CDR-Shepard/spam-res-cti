@@ -60,6 +60,16 @@ the server's pre-call firewall audit first, and a BLOCK, an unacknowledged
 REQUIRE_REVIEW, a refusal or a thrown error all leave `connect` untouched and a
 reason on screen.
 
+The screens follow the same split. Every decision one of them makes lives in a
+pure view-model beside the SwiftUI file that draws it — `DialViewModel` (what
+the refusal banner says and whether it is the server's words or the app's),
+`CallRoute` (which modal a call phase puts over the tabs, and why `.ringing`
+puts none: that screen is CallKit's), `WrapupViewModel` (when Save and Skip are
+live, and how a save that was superseded by the next call differs from one that
+failed), `RecentsRowModel` (which of a call row's two legs is the other party,
+and so which number a tap redials). Those compile into the test bundle; the
+`View`s themselves stay thin and untested.
+
 ## How a phone gets a directory
 
 1. **Pair.** The rep opens the softphone, chooses "Pair iPhone", and reads a

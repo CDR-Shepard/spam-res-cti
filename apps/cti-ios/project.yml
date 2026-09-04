@@ -136,6 +136,17 @@ targets:
       - path: App/CallerInfo.swift
       - path: App/VoiceProtocols.swift
       - path: App/CallController.swift
+      # Task 10's screens keep every decision in a pure view-model beside the
+      # SwiftUI file that draws it — what the refusal banner says and how it is
+      # styled, which modal covers the tabs for a phase, when Save/Skip are
+      # live, how a call row renders and redials. Those compile here; the
+      # `View`s themselves import SwiftUI/UIKit/AVFAudio and stay out.
+      - path: App/Dispositions.swift
+      - path: App/DialViewModel.swift
+      - path: App/CallRoute.swift
+      - path: App/WrapupViewModel.swift
+      - path: App/RecentsRowModel.swift
+      - path: App/CallsFeedStore.swift
       # The three pieces of the live voice stack that hold a rule rather than
       # a framework call, and so can be pinned without a simulator: the access
       # token's cache/expiry arithmetic, the early-disconnect replay, and the

@@ -1,0 +1,111 @@
+import SwiftUI
+
+/// The disposition the call is closed out with.
+///
+/// This screen is not optional politeness: the server gates a rep's *next* dial
+/// on the previous call having a disposition, so a wrap-up that is quietly lost
+/// resurfaces minutes later as a refusal on an unrelated number. Two
+/// consequences shape the screen — a failed save keeps the screen open with the
+/// rep's notes intact (rather than dismissing and discarding them), and there
+/// is always a Skip, because a rep stuck behind a broken save is worse than a
+/// call the server auto-dispositions.
+///
+/// `Dispositions.all` is the web app's list, verbatim; see that file.
+struct WrapupView: View {
+    @EnvironmentObject private var controller: CallController
+    let callId: String?
+    let info: CallerInfo
+    /// The controller moved on to another call while the save was in flight.
+    /// The screen is about to close on its own, so the note is raised by
+    /// `MainTabs` instead.
+    let onSuperseded: () -> Void
+
+    @State private var disposition: String?
+    @State private var notes = ""
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(info.displayTitle).font(.headline)
+                        if let subtitle = info.displaySubtitle {
+                            Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                Section("Disposition") {
+                    ForEach(Dispositions.all, id: \.self) { option in
+                        Button {
+                            disposition = option
+                        } label: {
+                            HStack {
+                                Text(option).foregroundStyle(.primary)
+                                Spacer()
+                                if disposition == option {
+                                    Image(systemName: "checkmark").foregroundStyle(.tint)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Section("Notes") {
+                    TextEditor(text: $notes)
+                        .frame(minHeight: 96)
+                        .accessibilityLabel("Notes")
+                }
+
+                if let error {
+                    Section {
+                        Text(error).foregroundStyle(.red)
+                    } footer: {
+                        Text("Your notes are still here. Try again, or skip and let the server close the call out.")
+                    }
+                }
+            }
+            .navigationTitle("Wrap up")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Skip") { controller.skipWrapup() }
+                        .disabled(!WrapupViewModel.canSkip(isSubmitting: controller.isSubmittingWrapup))
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if controller.isSubmittingWrapup {
+                        ProgressView()
+                    } else {
+                        Button("Save") { Task { await save() } }
+                            .fontWeight(.semibold)
+                            .disabled(!canSave)
+                    }
+                }
+            }
+        }
+    }
+
+    private var canSave: Bool {
+        WrapupViewModel.canSave(disposition: disposition, isSubmitting: controller.isSubmittingWrapup)
+    }
+
+    private func save() async {
+        guard let disposition else { return }
+        error = nil
+        await controller.finishWrapup(disposition: disposition, notes: notes)
+
+        switch WrapupViewModel.outcome(after: controller.phase, refusal: controller.lastRefusal) {
+        case .dismissed:
+            // The phase left `.wrapup`, so this screen is already on its way out.
+            break
+        case .superseded:
+            onSuperseded()
+        case let .failed(message):
+            error = message
+        }
+    }
+}
