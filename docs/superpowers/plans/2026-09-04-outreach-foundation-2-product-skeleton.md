@@ -2224,6 +2224,8 @@ process.exit(rows.length ? 0 : 1);
 ```
 Scripts are outside `src/` (not compiled by `tsc`); add `"include": ["src/**/*", "scripts/**/*"]` to `services/outreach-api/tsconfig.json` ONLY if you also set `"rootDir": "."` — do not; instead typecheck scripts with `npx tsc --noEmit -p services/outreach-api/tsconfig.scripts.json` where `tsconfig.scripts.json` is `{ "extends": "./tsconfig.json", "compilerOptions": { "rootDir": ".", "noEmit": true }, "include": ["src/**/*", "scripts/**/*"] }`, and add `"typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json"` to the service's scripts.
 
+**Amendments from the Task 7 review (applied in a fix wave):** `IdentityProvider` gains `findOrganizationByExternalId(externalId)` (WorkOS: `organizations.getOrganizationByExternalId`, 404 → null; fake: by stored externalId); `ensureWorkosOrg` reuses an org already tagged with the tenant id before creating one, and the `workos_org_id` write is conditional (`where id = … and workos_org_id is null … returning`) and fails loudly when no row matches; link failures dispatch an alert like provisioning does; `:id` is validated as a uuid (404 `TENANT_NOT_FOUND` otherwise); the test harness gains a passthrough `transaction` so `provision.test.ts` exercises the real `createTenant`, with a single `mockCreateTenant()` helper for the route test; `scripts/provision-tenant.ts` parses its input with `ProvisionTenantRequest`, `scripts/link-tenant-workos.ts` with `LinkTenantWorkosRequest` + a uuid check, and `_cli.ts` rejects unpaired or flag-like values; both POST routes have 403 tests; `GET /api/admin/tenants` is bounded (`limit: 200`); the alert-webhook failure log prints only the URL host.
+
 - [ ] **Step 4: Verify and commit**
 
 ```bash
