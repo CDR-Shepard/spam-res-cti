@@ -60,8 +60,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [tenant, queryClient]);
 
   // A 401 from any authenticated request (session expired, revoked
-  // elsewhere, etc.) drops the local session so the `_authenticated` layout's
-  // guard redirects to sign-in instead of continuing to render with a
+  // elsewhere, etc.) drops the local session, flipping `isAuthenticated` to
+  // false. That alone doesn't redirect anything — it's `main.tsx`'s
+  // `useEffect` (keyed on `isAuthenticated`, calling `router.invalidate()`)
+  // that re-runs the `_authenticated` layout's `beforeLoad` and sends the
+  // guard to sign-in instead of leaving the current page rendered with a
   // now-invalid bearer.
   useEffect(() => {
     setUnauthorizedHandler(() => {

@@ -18,7 +18,14 @@ export const apiSession = {
 
 type UnauthorizedHandler = () => void;
 let unauthorizedHandler: UnauthorizedHandler | null = null;
-/** Registered by AuthProvider so a 401 anywhere drops the local session and lets the `_authenticated` guard redirect. */
+/**
+ * Registered by `AuthProvider`: a 401 anywhere drops the local session by
+ * flipping the React auth state to signed-out. That flip is what actually
+ * triggers the redirect — `main.tsx` re-runs the `_authenticated` guard's
+ * `beforeLoad` whenever `isAuthenticated` changes (see its
+ * `router.invalidate()` effect); clearing the state here doesn't redirect
+ * anything by itself.
+ */
 export function setUnauthorizedHandler(fn: UnauthorizedHandler | null): void {
   unauthorizedHandler = fn;
 }

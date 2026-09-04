@@ -10,6 +10,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { api, ApiRequestError, json } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 
+const API_ERROR_TEXT: Record<string, string> = {
+  WORKOS_NOT_LINKED: 'This workspace is not linked to WorkOS yet.',
+  CANNOT_DEMOTE_SELF: "You can't remove your own admin access.",
+  MEMBER_NOT_FOUND: 'That team member no longer exists.',
+};
+
 export function TeamPage() {
   const auth = useAuth();
   const qc = useQueryClient();
@@ -26,11 +32,6 @@ export function TeamPage() {
     mutationFn: (m: TeamMember) => api(`/api/team/${m.id}`, TeamMember, { method: 'PATCH', body: json({ isAdmin: !m.isAdmin }) }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['team'] }),
   });
-  const API_ERROR_TEXT: Record<string, string> = {
-    WORKOS_NOT_LINKED: 'This workspace is not linked to WorkOS yet.',
-    CANNOT_DEMOTE_SELF: "You can't remove your own admin access.",
-    MEMBER_NOT_FOUND: 'That team member no longer exists.',
-  };
   const errorText = (e: unknown) => (e instanceof ApiRequestError ? (API_ERROR_TEXT[e.code] ?? e.message) : e ? 'Something went wrong.' : null);
 
   return (

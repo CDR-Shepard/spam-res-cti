@@ -5,7 +5,10 @@ import { z } from 'zod';
 import { useAuth } from '@/lib/auth';
 
 export const Route = createFileRoute('/auth/callback')({
-  validateSearch: z.object({ returnTo: z.string().refine(isSafeReturnTo).optional() }),
+  // Same fail-soft treatment as `sign-in.tsx`: `returnTo` round-trips through
+  // this URL too, so an invalid value is stripped rather than blocking the
+  // page — the handoff still completes and just lands on `/` instead.
+  validateSearch: z.object({ returnTo: z.string().refine(isSafeReturnTo).optional().catch(undefined) }),
   component: Callback,
 });
 
