@@ -60,7 +60,7 @@ struct PairView: View {
                     .disabled(!canPair)
                 }
             }
-            .navigationTitle("CTI Caller ID")
+            .navigationTitle("Callsign")
             .onAppear { codeFieldFocused = true }
             // An unpair whose directory wipe failed (CallKit busy, the
             // extension switched off, a write error) leaves the previous

@@ -133,6 +133,7 @@ targets:
       - path: App/Keychain.swift
       - path: App/SyncEngine.swift
       - path: App/SessionTokenStore.swift
+      - path: App/SignOutFlow.swift
       - path: App/CallerInfo.swift
       - path: App/VoiceProtocols.swift
       - path: App/CallController.swift

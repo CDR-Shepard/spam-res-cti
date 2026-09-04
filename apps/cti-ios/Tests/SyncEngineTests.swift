@@ -216,6 +216,47 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertFalse(engine.hasSession)
     }
 
+    // MARK: - Legacy paired device
+
+    func testALegacyPairedDeviceWithNoSessionNeedsSignInForCalling() {
+        // A device token from before Salesforce sign-in existed, and no
+        // session token: SignInView shows this rep different copy ("enable
+        // calling") than a phone that has never been paired at all.
+        let engine = makeEngine(
+            tokens: TokenBox(token: "device-token"),
+            sessions: SessionTokenBox(token: nil),
+            pull: { _, _ in nil },
+            reload: { _ in }
+        )
+
+        XCTAssertTrue(engine.isLegacyPairedDevice)
+    }
+
+    func testAFreshlySignedInDeviceIsNotALegacyPairedDevice() {
+        let engine = makeEngine(
+            tokens: TokenBox(token: "device-token"),
+            sessions: SessionTokenBox(token: "sess_abc"),
+            pull: { _, _ in nil },
+            reload: { _ in }
+        )
+
+        XCTAssertFalse(engine.isLegacyPairedDevice, "a device with a session on file needs no extra copy")
+    }
+
+    func testANeverPairedPhoneIsNotALegacyPairedDevice() {
+        // No device token at all — this is a fresh install on the ordinary
+        // sign-in path, not a legacy code-paired phone. It must get the
+        // ordinary sign-in copy, not the legacy-device one.
+        let engine = makeEngine(
+            tokens: TokenBox(token: nil),
+            sessions: SessionTokenBox(token: nil),
+            pull: { _, _ in nil },
+            reload: { _ in }
+        )
+
+        XCTAssertFalse(engine.isLegacyPairedDevice)
+    }
+
     func testPairingIgnoresTheSnapshotAlreadyOnDiskAndAsksForTheWholeDirectory() async throws {
         // A phone that has just changed identity must not tell the server "I
         // already have version 5". Directory versions are small per-org

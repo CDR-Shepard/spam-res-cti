@@ -122,6 +122,14 @@ final class SyncEngine: ObservableObject {
         return nil
     }
 
+    /// A device token from before Salesforce sign-in existed, with no session
+    /// token on file. `RootView` already routes this phone to `SignInView`
+    /// (same as a brand-new install) because `hasSession` is false either
+    /// way — this flag is only so that screen can say the truer thing to a
+    /// rep who already set calling up once: sign in again to keep using it,
+    /// rather than the fresh-install "set up this iPhone" copy.
+    var isLegacyPairedDevice: Bool { isPaired && !hasSession }
+
     // MARK: - Pairing
 
     func pair(code: String, deviceLabel: String) async throws {

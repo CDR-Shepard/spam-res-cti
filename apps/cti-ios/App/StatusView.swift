@@ -7,7 +7,10 @@ import UIKit
 /// or go turn the extension on.
 struct StatusView: View {
     @EnvironmentObject private var engine: SyncEngine
+    @EnvironmentObject private var voice: VoiceRuntime
     @Environment(\.scenePhase) private var scenePhase
+
+    @State private var isConfirmingSignOut = false
 
     var body: some View {
         NavigationStack {
@@ -18,6 +21,18 @@ struct StatusView: View {
                 // else's name here has found a real problem.
                 Section("Account") {
                     LabeledContent("Signed in as", value: engine.pairedUserName ?? "—")
+
+                    // The one sign-out path in the app: stop the softphone
+                    // (best-effort Twilio unregister, so this handset stops
+                    // being a valid destination for the org's calls) before
+                    // clearing the tokens that made that call possible —
+                    // `SignOutFlow` is what pins that order. `RootView`
+                    // observes `engine.hasSession` and returns to `SignInView`
+                    // on its own once `unpair()` flips it.
+                    Button("Sign out", role: .destructive) {
+                        isConfirmingSignOut = true
+                    }
+                    .disabled(engine.status == .syncing)
                 }
 
                 Section("Directory") {
@@ -40,7 +55,7 @@ struct StatusView: View {
                     // because flipping this switch is the rep's one manual
                     // step, and a path that doesn't exist on their phone is
                     // where the rollout stalls.
-                    Text("Settings → Phone → Call Blocking & Identification → CTI Caller ID. On iOS 18 and later: Settings → Apps → Phone → Call Blocking & Identification.")
+                    Text("Settings → Phone → Call Blocking & Identification → Callsign. On iOS 18 and later: Settings → Apps → Phone → Call Blocking & Identification.")
                 }
 
                 if case let .failed(message) = engine.status {
@@ -67,7 +82,7 @@ struct StatusView: View {
                     .disabled(engine.status == .syncing)
                 }
             }
-            .navigationTitle(engine.pairedUserName ?? "CTI Caller ID")
+            .navigationTitle(engine.pairedUserName ?? "Callsign")
             .refreshable { await engine.sync() }
             // Foreground appear: once on launch…
             .task { await engine.sync() }
@@ -76,6 +91,18 @@ struct StatusView: View {
                 if phase == .active {
                     Task { await engine.sync() }
                 }
+            }
+            .confirmationDialog(
+                "Sign out of Callsign?",
+                isPresented: $isConfirmingSignOut,
+                titleVisibility: .visible
+            ) {
+                Button("Sign out", role: .destructive) {
+                    SignOutFlow.run(stopVoice: voice.stop, unpair: engine.unpair)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("You'll need to sign in with Salesforce again before you can make or receive calls on this iPhone.")
             }
         }
     }

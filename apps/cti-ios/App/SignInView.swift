@@ -23,7 +23,7 @@ struct SignInView: View {
 
                 Text("Callsign")
                     .font(.largeTitle.bold())
-                Text("Sign in with your Salesforce account to set up this iPhone.")
+                Text(subtitle)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal)
@@ -52,6 +52,16 @@ struct SignInView: View {
             }
             .navigationTitle("Callsign")
         }
+    }
+
+    /// A legacy code-paired phone (a device token from before Salesforce
+    /// sign-in existed, no session token) already has calling set up in every
+    /// sense except this one — telling it to "set up this iPhone" would read
+    /// as a reset. `engine.isLegacyPairedDevice` is what tells the two apart.
+    private var subtitle: String {
+        engine.isLegacyPairedDevice
+            ? "Sign in with Salesforce to enable calling"
+            : "Sign in with your Salesforce account to set up this iPhone."
     }
 
     @MainActor
