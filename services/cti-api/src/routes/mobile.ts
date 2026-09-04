@@ -28,9 +28,9 @@ import { randomInt } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { and, eq, gt, isNull, lt, or } from 'drizzle-orm';
 import { z } from 'zod';
-import { resolveSession } from '../auth/session.js';
+import { resolveSession } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
-import { randomToken, sha256 } from '../crypto.js';
+import { randomToken, sha256 } from '@cti/auth';
 
 /** 6 random digits, 5-minute TTL, single-use (spec). */
 const PAIR_CODE_TTL_MS = 5 * 60 * 1000;

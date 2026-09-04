@@ -13,7 +13,7 @@
 import { request } from 'undici';
 import { z } from 'zod';
 import { loadConfig } from '../config.js';
-import { pkceVerifier, pkceChallenge, randomToken } from '../crypto.js';
+import { pkceVerifier, pkceChallenge, randomToken } from '@cti/auth';
 
 const TOKEN_RESPONSE = z.object({
   access_token: z.string(),

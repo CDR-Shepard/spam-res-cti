@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@cti/auth": "*",
     "@cti/db": "*",
     "@cti/phone": "*",
     "@fastify/cors": "^9.0.1",

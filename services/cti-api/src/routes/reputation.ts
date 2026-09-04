@@ -9,7 +9,7 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { and, eq, gte, sql } from 'drizzle-orm';
-import { resolveSession } from '../auth/session.js';
+import { resolveSession } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
 import { warmupCapForAge } from '../firewall/index.js';
 

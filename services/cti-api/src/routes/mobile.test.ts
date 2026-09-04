@@ -49,9 +49,10 @@ const state = vi.hoisted(() => ({
   lastDeviceInsertValues: null as Record<string, unknown> | null,
 }));
 
-vi.mock('../auth/session.js', () => ({
-  resolveSession: async (_bearer: string | undefined) => state.authedUser,
-}));
+vi.mock('@cti/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cti/auth')>();
+  return { ...actual, resolveSession: async (_bearer: string | undefined) => state.authedUser };
+});
 
 vi.mock('@cti/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@cti/db')>();
@@ -59,7 +60,7 @@ vi.mock('@cti/db', async (importOriginal) => {
 });
 
 import { schema } from '@cti/db';
-import { sha256 } from '../crypto.js';
+import { sha256 } from '@cti/auth';
 import {
   registerMobileRoutes,
   allowClaimAttempt,

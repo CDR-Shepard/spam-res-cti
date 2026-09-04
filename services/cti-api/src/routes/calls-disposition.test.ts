@@ -29,7 +29,7 @@ vi.mock('../config.js', () => ({
   loadConfig: () => ({ TELEPHONY_PROVIDER: 'twilio' }),
 }));
 
-vi.mock('../auth/session.js', () => ({
+vi.mock('@cti/auth', () => ({
   resolveSession: async () => state.authedUser,
 }));
 

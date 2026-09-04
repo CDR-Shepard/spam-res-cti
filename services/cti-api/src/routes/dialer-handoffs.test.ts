@@ -22,7 +22,7 @@ vi.mock('../config.js', () => ({
   loadConfig: () => state.cfg,
 }));
 
-vi.mock('../auth/session.js', () => ({
+vi.mock('@cti/auth', () => ({
   resolveSession: async (_bearer: string | undefined) => state.authedUser,
 }));
 

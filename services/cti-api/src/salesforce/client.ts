@@ -4,7 +4,7 @@
 import { request } from 'undici';
 import { eq } from 'drizzle-orm';
 import { loadConfig } from '../config.js';
-import { encryptString, decryptString } from '../crypto.js';
+import { encryptString, decryptString } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
 import { refreshAccessToken } from './oauth.js';
 

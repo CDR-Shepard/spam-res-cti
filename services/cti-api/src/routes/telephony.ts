@@ -8,11 +8,11 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { and, eq, or } from 'drizzle-orm';
 import twilio from 'twilio';
 import { z } from 'zod';
-import { resolveSession } from '../auth/session.js';
+import { resolveSession } from '@cti/auth';
 import { getProvider } from '../telephony/index.js';
 import { getDb, schema } from '@cti/db';
 import { loadConfig } from '../config.js';
-import { sha256 } from '../crypto.js';
+import { sha256 } from '@cti/auth';
 import { dispatchAlert } from '../alerts.js';
 import { pushRecordingLinkToTask } from '../salesforce/sync.js';
 import {

@@ -5,7 +5,7 @@
 import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { resolveSession } from '../auth/session.js';
+import { resolveSession } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';

@@ -7,7 +7,7 @@
  */
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
-import { randomToken, sha256 } from '../crypto.js';
+import { randomToken, sha256 } from './crypto.js';
 
 const DEFAULT_TTL_DAYS = 30;
 

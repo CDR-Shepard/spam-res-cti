@@ -11,9 +11,9 @@ import type { FastifyInstance } from 'fastify';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb, schema } from '@cti/db';
-import { issueSession, resolveSession } from '../auth/session.js';
+import { issueSession, resolveSession } from '@cti/auth';
 import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProfilePhoto, fetchUserInfo } from '../salesforce/oauth.js';
-import { encryptString } from '../crypto.js';
+import { encryptString } from '@cti/auth';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
 
@@ -447,7 +447,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     // Reuse the SF REST client's access token (auto-refreshes on 401).
     // The userinfo + photo fetchers operate with a fresh access token via
     // the same accessTokenEnc we already store.
-    const { decryptString } = await import('../crypto.js');
+    const { decryptString } = await import('@cti/auth');
     let accessToken: string;
     try {
       accessToken = decryptString(conn.accessTokenEnc);
