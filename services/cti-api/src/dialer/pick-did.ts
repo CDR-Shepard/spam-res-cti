@@ -22,8 +22,8 @@
  *     pointed at one.
  */
 import { and, eq, notInArray, sql } from 'drizzle-orm';
-import type { getDb } from '../db/index.js';
-import { schema } from '../db/index.js';
+import type { getDb } from '@cti/db';
+import { schema } from '@cti/db';
 import { warmupCapForAge } from '../firewall/warmup.js';
 import { stateForAreaCode, timezoneForNumber } from '../firewall/tz.js';
 import { effectiveCallingWindow, resolveStateRule, todayIsoWeekday } from '../firewall/state-calling-rules.js';

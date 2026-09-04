@@ -19,7 +19,7 @@
  * (null) pauses, which stays fail-closed.
  */
 import { and, eq } from 'drizzle-orm';
-import { schema } from '../db/index.js';
+import { schema } from '@cti/db';
 import { atCustomerCeiling, customerAttemptCounts } from '../firewall/index.js';
 import { pickRotationNumber, type AttemptCaps } from '../rotation.js';
 import { attemptIncrement, effectiveCapFor, pickPoolDid, type Db } from './pick-did.js';

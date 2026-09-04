@@ -13,7 +13,7 @@ import {
 } from './followup-worker.js';
 import { SalesforceUnauthorizedError } from './client.js';
 import type { OwnershipSnapshot } from './ownership.js';
-import type { FollowupRolloverJob } from '../db/schema.js';
+import type { FollowupRolloverJob } from '@cti/db';
 
 const NOW = new Date('2026-08-22T17:00:00Z');
 const openTask = { Id: '00T1', Subject: 'Follow-up', Type: 'Call', Priority: 'Normal', OwnerId: '005', WhoId: '00Q1', WhatId: null, ActivityDate: '2026-08-20' };

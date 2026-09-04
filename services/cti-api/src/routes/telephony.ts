@@ -10,7 +10,7 @@ import twilio from 'twilio';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
 import { getProvider } from '../telephony/index.js';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import { loadConfig } from '../config.js';
 import { sha256 } from '../crypto.js';
 import { dispatchAlert } from '../alerts.js';

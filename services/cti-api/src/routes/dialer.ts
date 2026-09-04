@@ -23,7 +23,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { signedCallbackUrl } from '../telephony/webhooks.js';

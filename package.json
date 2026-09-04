@@ -9,15 +9,15 @@
     "apps/*"
   ],
   "scripts": {
-    "build:packages": "npm -w packages/phone run build",
+    "build:packages": "npm -w packages/phone run build && npm -w packages/db run build",
     "dev:api": "npm run build:packages && npm --workspace services/cti-api run dev",
     "dev:web": "npm --workspace apps/cti-web run dev",
     "dev:desktop": "npm --workspace apps/cti-desktop run dev",
     "build:api": "npm run build:packages && npm --workspace services/cti-api run build",
     "build:web": "npm --workspace apps/cti-web run build",
     "build:desktop": "npm --workspace apps/cti-desktop run build",
-    "migrate": "npm --workspace services/cti-api run migrate",
-    "migrate:make": "npm --workspace services/cti-api run migrate:make",
+    "migrate": "npm --workspace packages/db run migrate",
+    "migrate:make": "npm --workspace packages/db run migrate:make",
     "typecheck": "npm run build:packages && npm --workspaces --if-present run typecheck",
     "lint": "npm --workspaces --if-present run lint",
     "test": "npm run build:packages && npm --workspaces --if-present run test"

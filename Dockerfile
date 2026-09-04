@@ -14,6 +14,8 @@ WORKDIR /app
 # Install dependencies first (cached unless a package manifest or the lockfile
 # changes). Copy every workspace manifest so npm can resolve the workspaces.
 COPY package.json package-lock.json ./
+COPY packages/phone/package.json packages/phone/package.json
+COPY packages/db/package.json packages/db/package.json
 COPY services/cti-api/package.json services/cti-api/package.json
 COPY apps/cti-web/package.json apps/cti-web/package.json
 COPY apps/cti-desktop/package.json apps/cti-desktop/package.json

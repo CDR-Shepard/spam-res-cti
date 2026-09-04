@@ -5,14 +5,28 @@
  *
  * Run with: `npm run migrate` (from services/cti-api or repo root).
  */
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { getPool } from './index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MIGRATIONS_DIR = resolve(__dirname, '../../migrations');
+
+// Env resolution: the caller's cwd `.env` first (how CI and Railway supply it),
+// then the API service's `.env` so `npm run migrate` from the repo root keeps
+// working for local dev exactly as it did before the move to packages/db.
+// `getPool()` reads DATABASE_URL lazily, so loading env after the imports is safe.
+dotenv.config();
+if (!process.env.DATABASE_URL) {
+  const apiEnv = resolve(__dirname, '../../../services/cti-api/.env');
+  if (existsSync(apiEnv)) dotenv.config({ path: apiEnv });
+}
+
+// `src/migrate.ts` and `dist/migrate.js` sit at the same depth, so this resolves
+// to packages/db/migrations from either.
+const MIGRATIONS_DIR = resolve(__dirname, '../migrations');
 
 async function ensureTable(client: import('pg').PoolClient): Promise<void> {
   await client.query(`

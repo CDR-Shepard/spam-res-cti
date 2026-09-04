@@ -29,7 +29,7 @@ import type { FastifyInstance } from 'fastify';
 import { and, eq, gt, isNull, lt, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import { randomToken, sha256 } from '../crypto.js';
 
 /** 6 random digits, 5-minute TTL, single-use (spec). */

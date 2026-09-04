@@ -1,5 +1,5 @@
 import { and, eq, sql } from 'drizzle-orm';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import type { DialerItem } from './session-store.js';
 import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
 import type { DialerTelephony } from './telephony-port.js';

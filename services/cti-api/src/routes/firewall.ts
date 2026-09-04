@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
 import { evaluate } from '../firewall/index.js';
-import { getDb } from '../db/index.js';
+import { getDb } from '@cti/db';
 import { normalize } from '@cti/phone';
 
 const Body = z.object({

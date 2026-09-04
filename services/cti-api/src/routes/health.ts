@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { loadConfig } from '../config.js';
-import { getPool } from '../db/index.js';
+import { getPool } from '@cti/db';
 
 export async function registerHealthRoutes(app: FastifyInstance): Promise<void> {
   // Liveness: cheap and never touches the DB, so a transient DB blip doesn't

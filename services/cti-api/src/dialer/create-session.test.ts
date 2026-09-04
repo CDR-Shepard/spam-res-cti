@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { schema } from '../db/index.js';
+import { schema } from '@cti/db';
 import { buildQueueRows, createAndStartSession, createDialerSession } from './create-session.js';
 import { nextEligiblePendingItem } from './state.js';
 import type { DialerItem } from './session-store.js';

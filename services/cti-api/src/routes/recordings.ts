@@ -13,7 +13,7 @@
 import { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { eq } from 'drizzle-orm';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import { loadConfig } from '../config.js';
 import { verifyRecordingSig } from '../telephony/recording-links.js';
 // Re-validate the stored URL points at Twilio before fetching — prevents this

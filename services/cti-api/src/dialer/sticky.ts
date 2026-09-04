@@ -6,7 +6,7 @@
  * triggered from the dialer engine instead of the manual-dial route.
  */
 import { and, desc, eq } from 'drizzle-orm';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 
 export interface StickyUpsertInput {
   orgId: string;

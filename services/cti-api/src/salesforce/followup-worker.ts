@@ -42,8 +42,8 @@
  * Mirrors salesforce/sync.ts (attempts, backoff, stuck-job reaper).
  */
 import { and, eq, gte, isNull, lt, lte, or, sql } from 'drizzle-orm';
-import { getDb, schema } from '../db/index.js';
-import type { FollowupRolloverJob } from '../db/schema.js';
+import { getDb, schema } from '@cti/db';
+import type { FollowupRolloverJob } from '@cti/db';
 import { advanceSession, stopSession } from '../dialer/engine.js';
 import { buildEngineDeps } from '../dialer/live-deps.js';
 import { nextBusinessDay } from '../dialer/next-business-day.js';

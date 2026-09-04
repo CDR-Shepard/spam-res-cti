@@ -10,7 +10,7 @@
 import type { FastifyInstance } from 'fastify';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import { issueSession, resolveSession } from '../auth/session.js';
 import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProfilePhoto, fetchUserInfo } from '../salesforce/oauth.js';
 import { encryptString } from '../crypto.js';

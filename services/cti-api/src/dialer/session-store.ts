@@ -1,4 +1,4 @@
-import { schema } from '../db/index.js';
+import { schema } from '@cti/db';
 
 export type DialerItem = typeof schema.dialerQueueItems.$inferSelect;
 

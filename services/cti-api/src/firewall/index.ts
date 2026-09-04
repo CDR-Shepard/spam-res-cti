@@ -9,8 +9,8 @@
  * This DOES NOT claim legal compliance. It enforces internal guardrails.
  */
 import { and, eq, gte, ne, sql } from 'drizzle-orm';
-import type { getDb } from '../db/index.js';
-import { schema } from '../db/index.js';
+import type { getDb } from '@cti/db';
+import { schema } from '@cti/db';
 import { normalize } from '@cti/phone';
 import { pickRotationNumber } from '../rotation.js';
 import { fetchRecordAddress, SalesforceUnauthorizedError } from '../salesforce/client.js';

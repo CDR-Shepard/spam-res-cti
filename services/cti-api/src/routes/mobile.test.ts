@@ -53,12 +53,12 @@ vi.mock('../auth/session.js', () => ({
   resolveSession: async (_bearer: string | undefined) => state.authedUser,
 }));
 
-vi.mock('../db/index.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../db/index.js')>();
+vi.mock('@cti/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cti/db')>();
   return { ...actual, getDb: () => fakeDb() };
 });
 
-import { schema } from '../db/index.js';
+import { schema } from '@cti/db';
 import { sha256 } from '../crypto.js';
 import {
   registerMobileRoutes,
@@ -196,7 +196,7 @@ function fakeDb() {
         }),
       };
     },
-  } as unknown as ReturnType<typeof import('../db/index.js').getDb>;
+  } as unknown as ReturnType<typeof import('@cti/db').getDb>;
 }
 
 const USER_ID = 'user-1';

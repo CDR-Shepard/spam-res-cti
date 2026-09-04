@@ -27,8 +27,8 @@
  *    mode-dependent branch to get wrong.
  */
 import { and, eq, inArray } from 'drizzle-orm';
-import type { getDb } from '../db/index.js';
-import { schema } from '../db/index.js';
+import type { getDb } from '@cti/db';
+import { schema } from '@cti/db';
 
 type Db = ReturnType<typeof getDb>;
 

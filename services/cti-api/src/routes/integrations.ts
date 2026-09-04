@@ -12,7 +12,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import { loadConfig } from '../config.js';
 import { normalize } from '@cti/phone';
 import { dispatchAlert } from '../alerts.js';

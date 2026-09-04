@@ -7,8 +7,8 @@
  * against the same number that will carry the call.
  */
 import { and, eq } from 'drizzle-orm';
-import type { getDb } from './db/index.js';
-import { schema } from './db/index.js';
+import type { getDb } from '@cti/db';
+import { schema } from '@cti/db';
 import { warmupCapForAge } from './firewall/warmup.js';
 import { regionForAreaCode, timezoneForAreaCode } from './firewall/tz.js';
 

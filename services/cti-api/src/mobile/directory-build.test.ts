@@ -10,7 +10,7 @@ import {
   type SweepDeps,
 } from './directory-build.js';
 import { contentHash, mergeDirectory } from './directory-merge.js';
-import { schema } from '../db/index.js';
+import { schema } from '@cti/db';
 
 // -----------------------------------------------------------------------
 // Fakes

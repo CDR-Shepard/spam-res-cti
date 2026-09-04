@@ -11,7 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
 import { warmupCapForAge } from '../firewall/warmup.js';
 import { counterpartyE164, enqueueSyncForCall, fetchRecordName, AUTO_DISPOSITION } from '../salesforce/sync.js';

@@ -17,7 +17,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import twilio from 'twilio';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { findByPhone } from '../salesforce/client.js';

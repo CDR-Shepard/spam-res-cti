@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { schema } from '../db/index.js';
+import { schema } from '@cti/db';
 import { pickRotationNumber } from '../rotation.js';
 import { attemptIncrement, pickPoolDid, type Db } from './pick-did.js';
 import { customerAttemptState, pickAgentDid, pickDidForRun, type AgentPickDeps } from './pick-agent-did.js';

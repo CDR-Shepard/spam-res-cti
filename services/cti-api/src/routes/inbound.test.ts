@@ -46,8 +46,8 @@ vi.mock('../dialer/sticky.js', async (importOriginal) => {
   return { ...actual, stickyAgentForCaller: state.stickyAgentForCaller };
 });
 
-vi.mock('../db/index.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../db/index.js')>();
+vi.mock('@cti/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cti/db')>();
   return { ...actual, getDb: () => fakeDb() };
 });
 
@@ -75,7 +75,7 @@ function fakeDb() {
         },
       };
     },
-  } as unknown as ReturnType<typeof import('../db/index.js').getDb>;
+  } as unknown as ReturnType<typeof import('@cti/db').getDb>;
 }
 
 const OWNED = (over: Record<string, unknown> = {}): Record<string, unknown> => ({

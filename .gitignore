@@ -42,7 +42,7 @@ coverage/
 .parcel-cache/
 
 # Drizzle generated SQL meta
-services/cti-api/drizzle/meta/
+packages/db/drizzle/meta/
 
 # Local SQLite (none — postgres only — but ignore stray dumps)
 *.sqlite
