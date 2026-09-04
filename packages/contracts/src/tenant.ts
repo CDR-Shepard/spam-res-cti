@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 export const TenantStatus = z.enum(['active', 'suspended']);
+export type TenantStatus = z.infer<typeof TenantStatus>;
 
 export const Tenant = z.object({
   id: z.string().min(1),
