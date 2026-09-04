@@ -191,7 +191,8 @@ import { z } from 'zod';
 export const TenantStatus = z.enum(['active', 'suspended']);
 
 export const Tenant = z.object({
-  id: z.string().uuid(),
+  /** Opaque id as the API renders it (a uuid in production; short ids in fixtures). */
+  id: z.string().min(1),
   name: z.string(),
   slug: z.string(),
   timezone: z.string(),
