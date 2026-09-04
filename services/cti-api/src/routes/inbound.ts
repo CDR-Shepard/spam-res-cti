@@ -22,7 +22,7 @@ import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { findByPhone } from '../salesforce/client.js';
 import { enqueueSyncForCall } from '../salesforce/sync.js';
-import { normalize } from '../phone.js';
+import { normalize } from '@cti/phone';
 import { sha256 } from '../crypto.js';
 import { stickyAgentForCaller } from '../dialer/sticky.js';
 import { dialClientWithCallerParams } from './inbound-caller-params.js';

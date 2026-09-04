@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalize, toE164 } from './phone.js';
+import { normalize, toE164 } from './index.js';
 
 describe('normalize', () => {
   it('accepts a US number with default region', () => {

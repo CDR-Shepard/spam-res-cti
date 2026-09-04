@@ -11,7 +11,7 @@
 import { and, eq, gte, ne, sql } from 'drizzle-orm';
 import type { getDb } from '../db/index.js';
 import { schema } from '../db/index.js';
-import { normalize } from '../phone.js';
+import { normalize } from '@cti/phone';
 import { pickRotationNumber } from '../rotation.js';
 import { fetchRecordAddress, SalesforceUnauthorizedError } from '../salesforce/client.js';
 import { resolveTimezone, stateForAreaCode, timezoneForNumber } from './tz.js';

@@ -14,7 +14,7 @@ import { getDb, schema } from '../db/index.js';
 import { issueSession, resolveSession } from '../auth/session.js';
 import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProfilePhoto, fetchUserInfo } from '../salesforce/oauth.js';
 import { encryptString } from '../crypto.js';
-import { normalize } from '../phone.js';
+import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
 
 const DEV_USER_ID = '00000000-0000-0000-0000-00000000beef';

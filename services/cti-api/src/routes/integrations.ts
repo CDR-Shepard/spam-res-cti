@@ -14,7 +14,7 @@ import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb, schema } from '../db/index.js';
 import { loadConfig } from '../config.js';
-import { normalize } from '../phone.js';
+import { normalize } from '@cti/phone';
 import { dispatchAlert } from '../alerts.js';
 import { classifyNumberVerifier, type NumberVerifierPayload } from '../integrations/numberverifier.js';
 

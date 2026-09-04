@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
 import { evaluate } from '../firewall/index.js';
 import { getDb } from '../db/index.js';
-import { normalize } from '../phone.js';
+import { normalize } from '@cti/phone';
 
 const Body = z.object({
   toNumber: z.string().min(1),

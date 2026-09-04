@@ -1,5 +1,5 @@
 import { soqlEscape, soqlQuery } from './client.js';
-import { normalize } from '../phone.js';
+import { normalize } from '@cti/phone';
 
 /**
  * Pick the primary (first-dialed) and fallback (dial-on-true-no-answer) raw

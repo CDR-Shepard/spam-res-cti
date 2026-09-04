@@ -7,7 +7,7 @@ import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '../auth/session.js';
 import { getDb, schema } from '../db/index.js';
-import { normalize } from '../phone.js';
+import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
 
 /** Human-readable label for an imported DID, derived from its area code so the
