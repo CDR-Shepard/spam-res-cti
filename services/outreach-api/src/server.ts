@@ -1,11 +1,13 @@
 import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { getPool } from '@cti/db';
+import { getDb, getPool } from '@cti/db';
 import { buildApp } from './app.js';
+import { WorkosIdentityProvider } from './auth/workos-provider.js';
 import { loadConfig } from './config.js';
 import { createBoss, JobRunner } from './jobs/boss.js';
 import { QUEUES } from './jobs/queues.js';
+import { registerAuthRoutes } from './routes/auth.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Where vite drops the built outreach-web bundle (src/ and dist/ sit at the same depth). */
@@ -24,10 +26,15 @@ async function main(): Promise<void> {
   const cfg = loadConfig();
   const runner = new JobRunner({ boss: createBoss(cfg), queues: QUEUES, log: console });
   await runner.start();
+  const db = getDb();
+  const idp = cfg.workosEnabled
+    ? new WorkosIdentityProvider({ apiKey: cfg.WORKOS_API_KEY!, clientId: cfg.WORKOS_CLIENT_ID!, redirectUri: cfg.WORKOS_REDIRECT_URI! })
+    : null;
   const app = await buildApp({
     cfg,
     spaDist: SPA_DIST,
     readiness: async () => ({ dbOk: await dbOk(), jobsOk: runner.isHealthy() }),
+    apiRoutes: [(scope) => registerAuthRoutes(scope, { cfg, db, idp })],
   });
   const close = async () => { await runner.stop(); await app.close(); };
   process.on('SIGTERM', close);

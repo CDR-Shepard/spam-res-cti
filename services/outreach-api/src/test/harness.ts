@@ -1,5 +1,9 @@
+import type { FastifyInstance } from 'fastify';
 import type { Db } from '@cti/db';
+import { buildApp } from '../app.js';
+import type { IdentityProvider } from '../auth/identity-provider.js';
 import { parseConfig, type AppConfig } from '../config.js';
+import { registerAuthRoutes } from '../routes/auth.js';
 
 export function testConfig(over: Record<string, string> = {}): AppConfig {
   return parseConfig({
@@ -64,4 +68,12 @@ export function fakeDb(fx: Fixtures = {}) {
     select: () => ({ from: () => ({ where: async () => [] }) }),
   };
   return { db: db as unknown as Db, writes, captured };
+}
+
+export async function buildTestApp(deps: { cfg: AppConfig; db: Db; idp: IdentityProvider | null }): Promise<FastifyInstance> {
+  return buildApp({
+    cfg: deps.cfg,
+    readiness: async () => ({ dbOk: true, jobsOk: true }),
+    apiRoutes: [(app) => registerAuthRoutes(app, deps)],
+  });
 }
