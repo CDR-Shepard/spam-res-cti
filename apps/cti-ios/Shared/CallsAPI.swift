@@ -34,6 +34,16 @@ enum PlaceCallResult: Equatable {
     case allowed(callId: String, fromNumber: String)
     case refused(reason: String)
     case reviewRequired(reasons: [String], requiredScriptId: String?)
+    /// The 409 `DISPOSITION_REQUIRED` case, and — like `.reviewRequired` — not
+    /// a refusal the rep can only read and give up on.
+    ///
+    /// The server refuses the dial because an earlier call of theirs is still
+    /// un-dispositioned, and hands back that very call so the client can
+    /// reopen its wrap-up (`pendingCall`, `calls.ts`). Treating this as a
+    /// plain refusal is what left a rep who skipped a wrap-up locked out of
+    /// dialling for the whole `LOG_GRACE_MS` window with no way forward — the
+    /// web softphone reopens the wrap-up from this payload, and so does this.
+    case dispositionRequired(pending: CallSummary)
 }
 
 /// Builds a bearer-authenticated request against the CTI API. Shared by every
@@ -168,12 +178,28 @@ private struct ReviewRequiredWire: Decodable {
     let requiredScriptId: String?
 }
 
-/// Pure — the server's answer to a dial attempt. A non-2xx with a string
-/// `blockReason` or `error` becomes `.refused` (the reason the dial screen
-/// renders inline); a 412 whose `decision` is `REQUIRE_REVIEW` becomes
-/// `.reviewRequired` instead, since that is not a refusal — the rep can
-/// re-send the exact same call with `acknowledged: true`; anything else
-/// non-2xx throws `SessionClientError.server`.
+/// The 409 disposition-gate body (`calls.ts`): `{ error, code:
+/// 'DISPOSITION_REQUIRED', pendingCall }`. Both the code and a decodable
+/// `pendingCall` are required — 409 is also the warmup-cap refusal's status,
+/// and that one has no call to reopen.
+private struct DispositionRequiredWire: Decodable {
+    let code: String
+    let pendingCall: PendingCallWire
+}
+
+/// Pure — the server's answer to a dial attempt, in the order the server's own
+/// handler decides things.
+///
+/// Two of the non-2xx replies are deliberately *not* refusals, because in both
+/// the rep has a next move and a plain "no" would hide it:
+///
+///  - **412 `REQUIRE_REVIEW`** — re-send the same call with `acknowledged: true`.
+///  - **409 `DISPOSITION_REQUIRED` carrying a `pendingCall`** — reopen that
+///    call's wrap-up, log it, and dial again.
+///
+/// Everything else non-2xx with a string `blockReason` or `error` becomes
+/// `.refused` (rendered inline, verbatim); anything left throws
+/// `SessionClientError.server`.
 func decodePlaceCall(_ data: Data, status: Int) throws -> PlaceCallResult {
     if (200..<300).contains(status) {
         guard let wire = try? JSONDecoder().decode(PlaceCallSuccessWire.self, from: data) else {
@@ -185,6 +211,11 @@ func decodePlaceCall(_ data: Data, status: Int) throws -> PlaceCallResult {
        let review = try? JSONDecoder().decode(ReviewRequiredWire.self, from: data),
        review.decision == "REQUIRE_REVIEW" {
         return .reviewRequired(reasons: review.reasons, requiredScriptId: review.requiredScriptId)
+    }
+    if status == 409,
+       let gate = try? JSONDecoder().decode(DispositionRequiredWire.self, from: data),
+       gate.code == "DISPOSITION_REQUIRED" {
+        return .dispositionRequired(pending: gate.pendingCall.callSummary)
     }
     if let refusal = try? JSONDecoder().decode(RefusalWire.self, from: data),
        let reason = refusal.blockReason ?? refusal.error {
@@ -242,41 +273,50 @@ func pendingDispositionRequest(baseURL: URL, sessionToken: String) -> URLRequest
 /// `createdAt`. Deliberately a private wire type rather than reusing
 /// `CallSummary`'s own `Decodable` conformance: the shapes disagree (no
 /// `direction`/`disposition`, and `whoId`/`whatId` instead of
-/// `salesforceWhoId`/`salesforceWhatId`), so `decodePendingDisposition` below
-/// maps this into a `CallSummary` by hand instead of renaming its properties.
-private struct PendingDispositionWire: Decodable {
-    struct Pending: Decodable {
-        let id: String
-        let toNumber: String
-        let fromNumber: String?
-        let durationSeconds: Int?
-        let createdAt: String
-        let whoId: String?
-        let whatId: String?
+/// `salesforceWhoId`/`salesforceWhatId`), so `callSummary` below maps it by
+/// hand instead of renaming `CallSummary`'s properties.
+///
+/// One type for two responses on purpose: `GET /calls/pending-disposition`
+/// and `POST /calls`' 409 `pendingCall` are the *same* server function's
+/// output, so a shape change on the server can only ever break both together.
+private struct PendingCallWire: Decodable {
+    let id: String
+    let toNumber: String
+    let fromNumber: String?
+    let durationSeconds: Int?
+    let createdAt: String
+    let whoId: String?
+    let whatId: String?
+
+    /// `direction` is hardcoded to `"outbound"` and `disposition` to `nil`:
+    /// `findPendingDisposition` (calls.ts) only ever matches un-dispositioned
+    /// OUTBOUND calls, so both are implied by the query rather than carried on
+    /// the wire.
+    var callSummary: CallSummary {
+        CallSummary(
+            id: id,
+            direction: "outbound",
+            toNumber: toNumber,
+            fromNumber: fromNumber,
+            disposition: nil,
+            durationSeconds: durationSeconds,
+            createdAt: createdAt,
+            salesforceWhoId: whoId,
+            salesforceWhatId: whatId
+        )
     }
-    let pending: Pending?
+}
+
+private struct PendingDispositionWire: Decodable {
+    let pending: PendingCallWire?
 }
 
 /// Pure — `nil` when the rep has nothing pending, otherwise the call rebuilt
-/// as a `CallSummary`. `direction` is hardcoded to `"outbound"` and
-/// `disposition` to `nil`: `findPendingDisposition` (calls.ts) only ever
-/// matches un-dispositioned OUTBOUND calls, so both are implied by the query
-/// rather than carried on the wire.
+/// as a `CallSummary`.
 func decodePendingDisposition(_ data: Data, status: Int) throws -> CallSummary? {
     guard status == 200 else { throw SessionClientError.server(status: status) }
     guard let wire = try? JSONDecoder().decode(PendingDispositionWire.self, from: data) else {
         throw SessionClientError.malformedResponse
     }
-    guard let pending = wire.pending else { return nil }
-    return CallSummary(
-        id: pending.id,
-        direction: "outbound",
-        toNumber: pending.toNumber,
-        fromNumber: pending.fromNumber,
-        disposition: nil,
-        durationSeconds: pending.durationSeconds,
-        createdAt: pending.createdAt,
-        salesforceWhoId: pending.whoId,
-        salesforceWhatId: pending.whatId
-    )
+    return wire.pending?.callSummary
 }

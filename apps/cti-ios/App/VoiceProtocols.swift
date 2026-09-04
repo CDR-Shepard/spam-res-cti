@@ -100,6 +100,14 @@ protocol CallsAPIClient {
     func place(to e164: String, auditId: String, acknowledged: Bool,
                recipientRecordId: String?, recipientObjectType: String?) async throws -> PlaceCallResult
     func disposition(callId: String, disposition: String, notes: String) async throws
+    /// The rep's outstanding un-dispositioned call.
+    ///
+    /// `CallController` deliberately does not read this: a wrap-up always
+    /// carries the id it posts against (see `Phase.wrapup`), and the call the
+    /// server considers pending is a screen-level question, not a state-machine
+    /// one. It lives here because `LiveCallsAPI` is also the `CallsFeedStore`'s
+    /// `RecentCallsReading`, and that is the surface — the Dial screen's
+    /// "finish your last call" banner — that actually asks.
     func pendingDisposition() async throws -> CallSummary?
 }
 

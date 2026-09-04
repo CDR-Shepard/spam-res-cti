@@ -16,7 +16,7 @@ enum CallRoute: Equatable {
     /// stable stops SwiftUI tearing the screen down and rebuilding it the
     /// instant the callee picks up.
     case inCall(CallerInfo, since: Date?)
-    case wrapup(callId: String?, CallerInfo)
+    case wrapup(callId: String, CallerInfo)
     case acknowledge(CallerInfo, reasons: [String], requiredScriptId: String?)
 
     @MainActor
@@ -96,7 +96,7 @@ enum CallRoute: Equatable {
 struct CallPresentation: Identifiable, Equatable {
     enum Content: Equatable {
         case inCall(CallerInfo, since: Date?)
-        case wrapup(callId: String?, CallerInfo)
+        case wrapup(callId: String, CallerInfo)
         case acknowledge(CallerInfo, reasons: [String], requiredScriptId: String?)
     }
 

@@ -80,12 +80,26 @@ struct DialView: View {
             )
         }
 
-        if let pending = DialViewModel.pendingBanner(for: feed.pending) {
-            Label(pending, systemImage: "clock.badge.exclamationmark")
-                .font(.footnote)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        // A button, not a notice. The server refuses this rep's next dial
+        // until that call is dispositioned, so the banner that names it has to
+        // be the way back into it — otherwise a skipped wrap-up reads as the
+        // app refusing to dial for ten minutes for no visible reason.
+        if let banner = DialViewModel.pendingBanner(for: feed.pending) {
+            Button {
+                controller.resumeWrapup(banner.pending)
+            } label: {
+                HStack {
+                    Label(banner.text, systemImage: "clock.badge.exclamationmark")
+                        .font(.footnote)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: "chevron.right").font(.footnote.weight(.semibold))
+                }
                 .padding(12)
                 .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                .contentShape(RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the wrap-up for that call")
         }
 
         // A pending-disposition lookup that failed is worth one quiet line: it

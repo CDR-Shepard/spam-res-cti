@@ -240,15 +240,26 @@ final class DialViewModelTests: XCTestCase {
     // MARK: - Pending disposition
 
     func testPendingBannerNamesTheCallStillOwedADisposition() {
-        let pending = CallSummary(
-            id: "call_1", direction: "outbound", toNumber: "+16198481782", fromNumber: "+18585550100",
-            disposition: nil, durationSeconds: 42, createdAt: "2026-09-03T18:04:05.000Z",
-            salesforceWhoId: nil, salesforceWhatId: nil
-        )
-        XCTAssertEqual(DialViewModel.pendingBanner(for: pending), "Finish your last call — (619) 848-1782")
+        XCTAssertEqual(DialViewModel.pendingBanner(for: pendingCall)?.text, "Finish your last call — (619) 848-1782")
+    }
+
+    /// The banner is a button, and this is what makes it one: the tap hands
+    /// `CallController.resumeWrapup` the very call the line names, so a rep
+    /// who skipped a wrap-up has a way back to it instead of being refused on
+    /// their next dial for the next ten minutes.
+    func testTheBannerCarriesTheCallItsTapResumes() {
+        XCTAssertEqual(DialViewModel.pendingBanner(for: pendingCall)?.pending, pendingCall)
     }
 
     func testNoPendingBannerWhenNothingIsOwed() {
         XCTAssertNil(DialViewModel.pendingBanner(for: nil))
+    }
+
+    private var pendingCall: CallSummary {
+        CallSummary(
+            id: "call_1", direction: "outbound", toNumber: "+16198481782", fromNumber: "+18585550100",
+            disposition: nil, durationSeconds: 42, createdAt: "2026-09-03T18:04:05.000Z",
+            salesforceWhoId: nil, salesforceWhatId: nil
+        )
     }
 }

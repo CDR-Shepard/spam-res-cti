@@ -229,6 +229,17 @@ attach — once, and once only. Without it the app sits in `.active` on dead
 media, the rep gets no wrap-up, and their next dial is refused by the server's
 disposition gate with nothing on screen to explain it.
 
+**Only outbound calls have a wrap-up, and a wrap-up always knows its call id.**
+The server logs answered inbound calls itself — `findPendingDisposition`
+(`services/cti-api/src/routes/calls.ts`) matches `direction = 'outbound'` only
+— so an inbound call ends at `.idle` and the phone posts nothing, exactly as
+the web softphone does. `Phase.wrapup` therefore carries a non-optional
+`callId`: it is either the id `POST /calls` returned, or the id the server sent
+back with a 409 `DISPOSITION_REQUIRED`. That 409 is the other half of the rule
+— a rep who skipped a wrap-up is refused until it is logged, and the refusal
+carries the call, so the dial (and the Dial screen's pending banner, which is a
+button) reopens that wrap-up rather than leaving them stuck reading a refusal.
+
 The Twilio access token is minted by `VoiceTokenRefresher` and reused until it
 has less than five minutes left. `CallController.tokens` is synchronous by
 design — nothing may await between the server's "allowed" and `sdk.connect` —

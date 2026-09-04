@@ -92,11 +92,17 @@ through an APNs VoIP push credential registered on the access token.
 - **In-call card** (over CallKit's system UI when the app is foregrounded):
   caller name · record type · number · timer · mute / speaker / keypad /
   hang up · **Open in Salesforce** (deep link; hidden when no record).
-- **Wrap-up** — presented after every outbound and answered inbound call:
-  disposition picker (same list the web softphone uses, fetched from
-  `/auth/me`/campaign config), notes, Finish → `POST /calls/:id/disposition`.
-  Skipping wrap-up leaves the call in `pending-disposition`, which the
-  existing server sweep auto-dispositions — identical to the web.
+- **Wrap-up** — presented after every **outbound** call; answered **inbound**
+  calls auto-log server-side with no wrap-up, exactly like the web softphone
+  (the server's pending-disposition sweep tracks outbound only —
+  `findPendingDisposition` in `services/cti-api/src/routes/calls.ts` filters
+  `direction = 'outbound'`). Disposition picker (same list the web softphone
+  uses, fetched from `/auth/me`/campaign config), notes, Finish → `POST
+  /calls/:id/disposition`. Skipping wrap-up leaves the call in
+  `pending-disposition`, which the existing server sweep auto-dispositions —
+  identical to the web — and until it does, the rep's next dial is refused
+  with a 409 carrying that call, which reopens its wrap-up rather than
+  reading as a dead end.
 - **Recents** — last 50 calls with outcome, tap to redial or open record.
 - **Settings/Status** — signed-in user, numbers assigned (count), Call
   Directory extension status + the existing deep link to enable it, sign out.
@@ -132,7 +138,9 @@ session bearer instead of a pairing token via the new server acceptance.
   gates apply identically to iPhone and web.
 - Inbound answering on the iPhone produces the same `calls` row, dial-result
   callback, recording, and Task sync as answering on the web — the server
-  cannot tell which client picked up.
+  cannot tell which client picked up. That row is the server's own, and the
+  server logs it: the phone shows no inbound wrap-up and posts no inbound
+  disposition, matching the web softphone exactly.
 
 ## 5. Distribution and setup
 

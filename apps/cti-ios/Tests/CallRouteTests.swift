@@ -36,12 +36,6 @@ final class CallRouteTests: XCTestCase {
         XCTAssertEqual(CallRoute.route(for: .wrapup(callId: "call_1", info)), .wrapup(callId: "call_1", info))
     }
 
-    /// An inbound call has no client-side id; the wrap-up still has to open, and
-    /// the controller resolves the row from the server.
-    func testInboundWrapupOpensWithoutACallId() {
-        XCTAssertEqual(CallRoute.route(for: .wrapup(callId: nil, info)), .wrapup(callId: nil, info))
-    }
-
     func testReviewShowsTheAcknowledgementSheet() {
         let reasons = ["STATE_SUNDAY_RESTRICTION"]
         XCTAssertEqual(

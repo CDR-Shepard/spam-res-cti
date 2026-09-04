@@ -110,8 +110,8 @@ struct CallCoverView: View {
             switch CallRoute.coverContent(for: controller.phase) {
             case let .inCall(info, since):
                 InCallView(info: info, since: since)
-            case let .wrapup(callId, info):
-                WrapupView(callId: callId, info: info, onToast: onToast)
+            case let .wrapup(_, info):
+                WrapupView(info: info, onToast: onToast)
             case let .acknowledge(info, reasons, requiredScriptId):
                 ReviewGate(
                     prompt: DialViewModel.prompt(for: info, reasons: reasons, requiredScriptId: requiredScriptId)

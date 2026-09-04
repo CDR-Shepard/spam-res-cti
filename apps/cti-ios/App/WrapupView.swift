@@ -11,9 +11,12 @@ import SwiftUI
 /// call the server auto-dispositions.
 ///
 /// `Dispositions.all` is the web app's list, verbatim; see that file.
+///
+/// Deliberately takes no call id. The id this disposition posts against is
+/// carried by `CallController.Phase.wrapup` and read there by `finishWrapup` —
+/// a second copy on the screen could only ever disagree with it.
 struct WrapupView: View {
     @EnvironmentObject private var controller: CallController
-    let callId: String?
     let info: CallerInfo
     /// Raises a toast on the surfaces that outlive this screen. Used for the
     /// one outcome that has something to say on the way out: a save superseded

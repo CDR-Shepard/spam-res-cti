@@ -119,13 +119,15 @@ final class FakeCallsAPI: CallsAPIClient {
     var precallError: Error?
     var placeResult = PlaceCallResult.allowed(callId: "call_default", fromNumber: "+12135550100")
     var placeError: Error?
+    /// What `GET /calls/pending-disposition` would answer. Set by the inbound
+    /// tests purely to prove the controller never asks: an answered inbound
+    /// call has nothing to disposition, and the row this would hand back is an
+    /// OUTBOUND one belonging to some earlier call.
     var pending: CallSummary?
-    var pendingError: Error?
     var dispositionError: Error?
-    /// Hold the disposition POST / the pending lookup in flight. Nil in every
-    /// test that does not care, so nothing else pays for them.
+    /// Holds the disposition POST in flight. Nil in every test that does not
+    /// care, so nothing else pays for it.
     fileprivate var dispositionGate: CallGate?
-    fileprivate var pendingGate: CallGate?
 
     private(set) var precalls: [PrecallRecord] = []
     private(set) var places: [PlaceRecord] = []
@@ -158,9 +160,7 @@ final class FakeCallsAPI: CallsAPIClient {
     }
 
     func pendingDisposition() async throws -> CallSummary? {
-        if let pendingGate { await pendingGate.wait() }
         pendingLookups += 1
-        if let pendingError { throw pendingError }
         return pending
     }
 }
@@ -223,7 +223,11 @@ final class CallControllerTests: XCTestCase {
 
     // MARK: - Inbound
 
-    @MainActor func testInboundRingAnswerHangupWrapup() async throws {
+    /// The whole inbound arc. It ends at `.idle`, not at a wrap-up: an answered
+    /// inbound call is auto-logged server-side (`findPendingDisposition` in
+    /// `calls.ts` matches `direction = 'outbound'` only), exactly as on the web
+    /// softphone — so there is no row on this phone's side to disposition.
+    @MainActor func testInboundRingAnswerHangupEndsAtIdleWithNoWrapup() async throws {
         let sdk = FakeSDK(); let sys = FakeCallSystem(); let api = FakeCallsAPI()
         let c = CallController(sdk: sdk, system: sys, api: api, tokens: { "voice_t" })
         let invite = FakeInvite(from: "+18585550100", params: ["callerName": "Jordyn Freedman", "recordType": "Lead", "recordId": "00Q1"])
@@ -236,11 +240,52 @@ final class CallControllerTests: XCTestCase {
         c.answer()
         guard case .active = c.phase else { return XCTFail("expected active") }
         XCTAssertTrue(invite.accepted)
+
         c.hangUp()
-        guard case let .wrapup(callId, _) = c.phase else { return XCTFail("expected wrapup") }
-        XCTAssertNil(callId) // inbound: the server owns the calls row; wrap-up resolves it via pending-disposition
+
+        guard case .idle = c.phase else { return XCTFail("an inbound call must not open a wrap-up") }
         XCTAssertTrue(invite.call.hungUp)
-        XCTAssertEqual(sys.ended, [invite.uuid])
+        XCTAssertEqual(sys.ended, [invite.uuid], "CallKit is still told the call ended, exactly once")
+        XCTAssertTrue(api.dispositions.isEmpty)
+        XCTAssertEqual(api.pendingLookups, 0, "the server auto-logs inbound; there is nothing to resolve")
+    }
+
+    /// The regression this whole rule exists for. The wrap-up used to open for
+    /// an inbound call with no call id, and `finishWrapup` then looked the row
+    /// up via `GET /calls/pending-disposition` — which only ever returns
+    /// OUTBOUND calls, so it came back nil and the rep's disposition and notes
+    /// were discarded on every answered inbound call. Both remote and local
+    /// hang-ups end the same way.
+    @MainActor func testAnAnsweredInboundCallNeverOffersAWrapup() async {
+        for endRemotely in [false, true] {
+            let sdk = FakeSDK(); let sys = FakeCallSystem(); let api = FakeCallsAPI()
+            let invite = FakeInvite(from: "+18585550100", params: [:])
+            sdk.nextInvite = invite
+            api.pending = CallSummary(
+                id: "srv_never_touch_me", direction: "outbound", toNumber: "+18585550100",
+                fromNumber: "+12135550100", disposition: nil, durationSeconds: 12,
+                createdAt: "2026-09-03T00:00:00Z", salesforceWhoId: nil, salesforceWhatId: nil
+            )
+            let c = CallController(sdk: sdk, system: sys, api: api, tokens: { "t" })
+            c.handleIncomingPush([:])
+            c.answer()
+
+            if endRemotely {
+                invite.call.onDisconnect?(nil)
+            } else {
+                c.hangUp()
+            }
+
+            guard case .idle = c.phase else {
+                return XCTFail("inbound must land at idle (endRemotely: \(endRemotely))")
+            }
+            XCTAssertEqual(sys.ended, [invite.uuid], "endRemotely: \(endRemotely)")
+            // And nothing may reach the disposition API — least of all the
+            // OUTBOUND row the pending-disposition sweep would have handed back.
+            await c.finishWrapup(disposition: "Connected", notes: "asked for a callback")
+            XCTAssertTrue(api.dispositions.isEmpty, "endRemotely: \(endRemotely)")
+            XCTAssertEqual(api.pendingLookups, 0, "endRemotely: \(endRemotely)")
+        }
     }
 
     @MainActor func testDeclineRejectsInvite() {
@@ -289,44 +334,6 @@ final class CallControllerTests: XCTestCase {
         guard case let .wrapup(callId, _) = c.phase, callId == "c8" else {
             return XCTFail("the first call must still be the one that wraps up")
         }
-    }
-
-    /// An inbound call has no client-side call id — the server made the row.
-    /// Wrap-up resolves it from `GET /calls/pending-disposition`.
-    @MainActor func testInboundWrapupResolvesTheCallIdViaPendingDisposition() async {
-        let sdk = FakeSDK(); let api = FakeCallsAPI()
-        let invite = FakeInvite(from: "+18585550100", params: [:])
-        sdk.nextInvite = invite
-        api.pending = CallSummary(
-            id: "srv_77", direction: "outbound", toNumber: "+18585550100", fromNumber: "+12135550100",
-            disposition: nil, durationSeconds: 12, createdAt: "2026-09-03T00:00:00Z",
-            salesforceWhoId: nil, salesforceWhatId: nil
-        )
-        let c = CallController(sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" })
-        c.handleIncomingPush([:]); c.answer(); c.hangUp()
-
-        await c.finishWrapup(disposition: "Connected", notes: "asked for a callback")
-
-        XCTAssertEqual(api.pendingLookups, 1)
-        XCTAssertEqual(api.dispositions, [.init(callId: "srv_77", disposition: "Connected", notes: "asked for a callback")])
-        guard case .idle = c.phase else { return XCTFail("expected idle after wrapup") }
-    }
-
-    /// Nothing pending means the server's sweep already auto-dispositioned the
-    /// call. Posting a disposition for a call id we do not have would be a
-    /// guess; the wrap-up just closes.
-    @MainActor func testInboundWrapupWithNothingPendingClosesWithoutPosting() async {
-        let sdk = FakeSDK(); let api = FakeCallsAPI()
-        sdk.nextInvite = FakeInvite(from: "+18585550100", params: [:])
-        api.pending = nil
-        let c = CallController(sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" })
-        c.handleIncomingPush([:]); c.answer(); c.hangUp()
-
-        await c.finishWrapup(disposition: "Connected", notes: "")
-
-        XCTAssertEqual(api.pendingLookups, 1)
-        XCTAssertTrue(api.dispositions.isEmpty, "no call id means nothing to post")
-        guard case .idle = c.phase else { return XCTFail("expected idle") }
     }
 
     /// The far end hanging up has to land in exactly the same wrap-up the local
@@ -520,6 +527,78 @@ final class CallControllerTests: XCTestCase {
         XCTAssertEqual(api.places.last?.acknowledged, true)
     }
 
+    // MARK: - Outbound: the disposition gate is a way back, not a wall
+
+    /// The lockout this case exists for. A rep who skipped a wrap-up is
+    /// refused by `POST /calls` for up to `LOG_GRACE_MS` — but the refusal
+    /// carries the call itself, so the dial lands on that call's wrap-up
+    /// instead of on a sentence the rep can do nothing about.
+    @MainActor func testADispositionRequiredRefusalReopensThePendingCallsWrapup() async {
+        let sdk = FakeSDK(); let api = FakeCallsAPI()
+        api.placeResult = .dispositionRequired(pending: CallSummary(
+            id: "call_stuck", direction: "outbound", toNumber: "+16195550100",
+            fromNumber: "+12135550100", disposition: nil, durationSeconds: 42,
+            createdAt: "2026-09-03T00:00:00Z", salesforceWhoId: "003xx", salesforceWhatId: nil
+        ))
+        let c = CallController(sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" })
+
+        await c.placeCall(to: "+18585550100")
+
+        guard case let .wrapup(callId, info) = c.phase else {
+            return XCTFail("the refused dial must land on the pending call's wrap-up")
+        }
+        XCTAssertEqual(callId, "call_stuck")
+        XCTAssertEqual(info.number, "+16195550100", "the wrap-up is about the PENDING call, not the one just dialled")
+        XCTAssertEqual(info.recordId, "003xx")
+        XCTAssertNil(c.lastRefusal, "there is a way forward on screen, so nothing was refused")
+        XCTAssertEqual(sdk.connectCalls, 0, "a refused dial never reaches the radio")
+
+        // And saving it posts against the server's id, which is the whole point.
+        await c.finishWrapup(disposition: "Left voicemail", notes: "logged late")
+        XCTAssertEqual(api.dispositions, [.init(callId: "call_stuck", disposition: "Left voicemail", notes: "logged late")])
+        guard case .idle = c.phase else { return XCTFail("expected idle after the wrap-up saved") }
+    }
+
+    /// The Dial screen's "finish your last call" banner: the same transition,
+    /// reached before the rep has been refused at all.
+    @MainActor func testResumeWrapupOpensThePendingCallFromIdle() async {
+        let api = FakeCallsAPI()
+        let c = makeController(api: api)
+        let pending = CallSummary(
+            id: "call_owed", direction: "outbound", toNumber: "+16195550100", fromNumber: "+12135550100",
+            disposition: nil, durationSeconds: 12, createdAt: "2026-09-03T00:00:00Z",
+            salesforceWhoId: nil, salesforceWhatId: "006xx"
+        )
+
+        c.resumeWrapup(pending)
+
+        guard case let .wrapup(callId, info) = c.phase else { return XCTFail("expected wrapup") }
+        XCTAssertEqual(callId, "call_owed")
+        XCTAssertEqual(info.recordId, "006xx", "with no whoId the wrap-up falls back to the whatId")
+
+        await c.finishWrapup(disposition: "No answer", notes: "")
+        XCTAssertEqual(api.dispositions.last?.callId, "call_owed")
+    }
+
+    /// The banner is on the Dial screen, which the call cover hides while a
+    /// call is up — but a stale tap must not replace a live call with an old
+    /// call's wrap-up.
+    @MainActor func testResumeWrapupIsRefusedWhileACallIsUp() async {
+        let api = FakeCallsAPI()
+        api.placeResult = .allowed(callId: "c_live", fromNumber: "+12135550100")
+        let c = makeController(api: api)
+        await c.placeCall(to: "+18585550100")
+
+        c.resumeWrapup(CallSummary(
+            id: "call_owed", direction: "outbound", toNumber: "+16195550100", fromNumber: nil,
+            disposition: nil, durationSeconds: nil, createdAt: "2026-09-03T00:00:00Z",
+            salesforceWhoId: nil, salesforceWhatId: nil
+        ))
+
+        guard case .active = c.phase else { return XCTFail("the live call must be untouched") }
+        XCTAssertEqual(c.lastRefusal, CallController.busyRefusal)
+    }
+
     // MARK: - Errors are never silent
 
     @MainActor func testAThrownPrecallErrorIsSurfacedAndNeverDials() async {
@@ -687,33 +766,6 @@ final class CallControllerTests: XCTestCase {
         guard case .idle = c.phase else { return XCTFail("expected idle") }
     }
 
-    /// Same for inbound, where the wrap-up costs an extra round trip: the
-    /// pending-disposition lookup must run at most once too.
-    @MainActor func testTwoConcurrentInboundWrapupsLookUpAndPostExactlyOnce() async {
-        let sdk = FakeSDK(); let api = FakeCallsAPI()
-        let gate = CallGate()
-        api.pendingGate = gate
-        sdk.nextInvite = FakeInvite(from: "+18585550100", params: [:])
-        api.pending = CallSummary(
-            id: "srv_88", direction: "outbound", toNumber: "+18585550100", fromNumber: "+12135550100",
-            disposition: nil, durationSeconds: 5, createdAt: "2026-09-03T00:00:00Z",
-            salesforceWhoId: nil, salesforceWhatId: nil
-        )
-        let c = CallController(sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" })
-        c.handleIncomingPush([:]); c.answer(); c.hangUp()
-
-        let first = Task { await c.finishWrapup(disposition: "Connected", notes: "") }
-        await gate.waitUntilEntered()
-        let second = Task { await c.finishWrapup(disposition: "Connected", notes: "") }
-        await gate.open()
-        _ = await first.value
-        _ = await second.value
-
-        XCTAssertEqual(api.pendingLookups, 1)
-        XCTAssertEqual(api.dispositions.count, 1)
-        XCTAssertEqual(api.dispositions.last?.callId, "srv_88")
-    }
-
     /// A disconnect callback carries no call identity of its own, so the
     /// controller has to check: call A's far end reporting in after A is done
     /// and B is up must not tear B down.
@@ -802,22 +854,7 @@ final class CallControllerTests: XCTestCase {
         guard case .ringing = c.phase else { return XCTFail("expected ringing") }
     }
 
-    // MARK: - Wrap-up lookup failures, and the pinned DID
-
-    @MainActor func testAFailedPendingDispositionLookupKeepsTheWrapupOpen() async {
-        let sdk = FakeSDK(); let api = FakeCallsAPI()
-        sdk.nextInvite = FakeInvite(from: "+18585550100", params: [:])
-        api.pendingError = FakeError(message: "The network connection was lost.")
-        let c = CallController(sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" })
-        c.handleIncomingPush([:]); c.answer(); c.hangUp()
-
-        await c.finishWrapup(disposition: "Connected", notes: "worth a callback")
-
-        XCTAssertEqual(c.lastRefusal, "The network connection was lost.")
-        XCTAssertTrue(api.dispositions.isEmpty)
-        guard case .wrapup = c.phase else { return XCTFail("the wrap-up must stay open to retry") }
-        XCTAssertFalse(c.isSubmittingWrapup, "a failed submit must re-enable Save")
-    }
+    // MARK: - The pinned DID
 
     /// The DID shown as "calling from" is the one the server pinned in its
     /// reply — the app never re-picks one.

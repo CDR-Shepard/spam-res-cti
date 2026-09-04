@@ -31,10 +31,15 @@ final class CallController: ObservableObject {
         /// Outbound, mid-audit/mid-connect. Blocks a second dial.
         case dialing(CallerInfo)
         case active(CallerInfo, since: Date)
-        /// The call is over and the rep owes it a disposition. `callId` is nil
-        /// for an inbound call — the server made that row, so `finishWrapup`
-        /// resolves it from `GET /calls/pending-disposition`.
-        case wrapup(callId: String?, CallerInfo)
+        /// The call is over and the rep owes it a disposition.
+        ///
+        /// `callId` is the row that disposition posts against, and it is
+        /// **never** optional: an OUTBOUND call carries the id `POST /calls`
+        /// returned, and a wrap-up reopened from the server's pending row
+        /// carries that row's id. An answered INBOUND call reaches neither —
+        /// it auto-logs server-side and goes straight back to `.idle`. See
+        /// `endCall`.
+        case wrapup(callId: String, CallerInfo)
         /// The audit came back REQUIRE_REVIEW: the rep must see `reasons` (and
         /// read `requiredScriptId`'s script) and explicitly acknowledge before
         /// this call is placed. Nothing has been dialed.
@@ -290,7 +295,51 @@ final class CallController: ObservableObject {
                 reasons: reasons, requiredScriptId: requiredScriptId,
                 recipientRecordId: recipientRecordId, recipientObjectType: recipientObjectType
             )
+
+        case let .dispositionRequired(pending):
+            // The dial is refused because an earlier call still owes a
+            // disposition — and the server handed that call back rather than
+            // just saying no. Reopening its wrap-up here is the difference
+            // between a rep who can log it and dial on, and one who reads
+            // "disposition your previous call" for the next ten minutes with
+            // no screen anywhere that lets them.
+            openWrapup(for: pending)
         }
+    }
+
+    /// The Dial screen's "finish your last call" banner, tapped.
+    ///
+    /// The same transition `.dispositionRequired` makes, reachable before the
+    /// rep has been refused: the banner already names the call, so it may as
+    /// well be the way back into it.
+    func resumeWrapup(_ pending: CallSummary) {
+        guard isIdle else {
+            lastRefusal = Self.busyRefusal
+            return
+        }
+        openWrapup(for: pending)
+    }
+
+    /// Reopens the server's pending call as a wrap-up.
+    ///
+    /// `recordId` prefers `whoId` (a Lead/Contact) over `whatId`: the wrap-up
+    /// screen shows one record, and the person is the one a rep recognizes.
+    /// The number is already the server's normalized E.164.
+    private func openWrapup(for pending: CallSummary) {
+        // A new call context: anything still awaiting on the old one is stale
+        // from here, and its continuation must not reset this wrap-up.
+        generation += 1
+        heldReview = nil
+        callId = pending.id
+        fromNumber = pending.fromNumber
+        // Not a refusal any more — the rep has somewhere to go.
+        lastRefusal = nil
+        phase = .wrapup(callId: pending.id, CallerInfo(
+            number: pending.toNumber,
+            name: nil,
+            recordId: pending.salesforceWhoId ?? pending.salesforceWhatId,
+            recordType: nil
+        ))
     }
 
     private func holdForReview(
@@ -354,19 +403,35 @@ final class CallController: ObservableObject {
     }
 
     /// The one exit from a live call, shared by the local hang-up and the
-    /// remote one so a remotely-ended call can never skip the wrap-up (and so
-    /// leave the rep's next dial blocked by the server's disposition gate with
-    /// nothing on screen explaining it).
+    /// remote one so a remotely-ended OUTBOUND call can never skip the wrap-up
+    /// (and so leave the rep's next dial blocked by the server's disposition
+    /// gate with nothing on screen explaining it).
+    ///
+    /// An INBOUND call goes straight back to `.idle` instead, because there is
+    /// nothing on this phone to post: the server made that row and its own
+    /// sweep dispositions it. `findPendingDisposition`
+    /// (`services/cti-api/src/routes/calls.ts`) matches `direction =
+    /// 'outbound'` only, so an inbound wrap-up had no id to resolve and
+    /// silently discarded the rep's disposition and notes on every answered
+    /// inbound call. The web softphone shows no wrap-up for inbound either —
+    /// this is the same rule, not a phone-specific one.
     private func endCall(info: CallerInfo) {
         // Detach before ending: this both breaks the controller ⇄ call
         // reference and stops a local hang-up from bouncing back through
         // `onDisconnect` into a second transition.
         let uuid = call?.uuid
+        let callId = self.callId
         call?.onDisconnect = nil
         call = nil
         invite = nil
         isMuted = false
         if let uuid { system.reportEnded(uuid: uuid) }
+        guard let callId else {
+            // Inbound. `reset()` keeps `lastRefusal`, so a call that *dropped*
+            // still says so on the way back to the dial pad.
+            reset()
+            return
+        }
         phase = .wrapup(callId: callId, info)
     }
 
@@ -398,35 +463,23 @@ final class CallController: ObservableObject {
 
     // MARK: - Wrap-up
 
-    /// Posts the disposition that closes the call out.
-    ///
-    /// An inbound call has no client-side id — the server created that row — so
-    /// it is resolved from `GET /calls/pending-disposition`. Nothing pending
-    /// means the server's sweep already auto-dispositioned it; there is no id
-    /// to post against and inventing one would write to the wrong call.
+    /// Posts the disposition that closes the call out, against the id the phase
+    /// is already carrying — either the one `POST /calls` returned for this
+    /// dial, or the one the server handed back with a `DISPOSITION_REQUIRED`
+    /// refusal. There is no lookup and no guess: a wrap-up without an id is a
+    /// state this controller never enters.
     func finishWrapup(disposition: String, notes: String) async {
         // A second Save while the first is still in flight would post the
-        // disposition twice (and, for an inbound call, look the pending row up
-        // twice).
-        guard case let .wrapup(existingId, _) = phase, !isSubmittingWrapup else { return }
+        // disposition twice.
+        guard case let .wrapup(callId, _) = phase, !isSubmittingWrapup else { return }
         let generation = self.generation
         isSubmittingWrapup = true
 
         do {
-            let resolved: String?
-            if let existingId {
-                resolved = existingId
-            } else {
-                resolved = try await api.pendingDisposition()?.id
-                // Critical: a lookup that lands after the rep moved on would
-                // otherwise hand back the *new* call's row and disposition it.
-                guard isCurrent(generation) else { return }
-            }
-            guard let id = resolved else {
-                reset()
-                return
-            }
-            try await api.disposition(callId: id, disposition: disposition, notes: notes)
+            try await api.disposition(callId: callId, disposition: disposition, notes: notes)
+            // Critical: a POST that lands after the rep skipped and dialed
+            // again belongs to a call that is over — resetting here would drop
+            // the live call to `.idle` with its media still up.
             guard isCurrent(generation) else { return }
             reset()
         } catch {

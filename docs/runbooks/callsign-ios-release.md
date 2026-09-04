@@ -176,7 +176,10 @@ can't verify; the same split applies here).
       permission was previously **denied**, confirm the call still connects
       (silently, with no audio) and that **Settings → Callsign → Microphone**
       is the fix, matching runbook §5.3.
-- [ ] Answer → audio flows both ways.
+- [ ] Answer → talk → hang up → audio flowed both ways and the Task appears in
+      Salesforce (auto-logged, **no wrap-up**). An answered inbound call is
+      logged server-side; the phone deliberately shows no disposition screen
+      for it, exactly as the web softphone doesn't.
 - [ ] Decline → the caller reaches voicemail (the no-answer forward path).
 - [ ] Outbound **allowed** call connects and the far end sees the rotated
       caller ID.
@@ -189,6 +192,11 @@ can't verify; the same split applies here).
       audit shows the acknowledgement, not a fresh unacknowledged attempt.
 - [ ] Wrap-up creates the Salesforce Task with disposition + a Chatter post +
       the recording link once it's ready.
+- [ ] **Skip a wrap-up, then dial again** — the dial is refused by the server's
+      disposition gate and the phone reopens *that* call's wrap-up (not an
+      error message); saving it lets the next dial through. Tapping the Dial
+      screen's orange "Finish your last call" banner does the same thing
+      without needing the refusal first.
 - [ ] **Open in Salesforce** (Recents row / in-call screen) lands on the
       correct Lead/Opportunity/Deal record in the Salesforce mobile app.
 - [ ] Web softphone and iPhone ring together for the same inbound call, and

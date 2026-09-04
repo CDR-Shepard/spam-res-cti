@@ -176,8 +176,30 @@ final class CallsAPITests: XCTestCase {
         XCTAssertEqual(result, .refused(reason: "Calling FL is Mon-Sat only (today is Sunday, recipient-local)"))
     }
 
+    /// The whole 409 body the handler actually sends (`calls.ts`: `{ error,
+    /// code: 'DISPOSITION_REQUIRED', pendingCall: pendingDispositionPayload(pending) }`).
+    /// This must NOT read as a plain refusal: the rep is locked out of dialling
+    /// until that call is dispositioned, and `pendingCall` is what reopens its
+    /// wrap-up.
+    func testDecodePlaceCall409WithAPendingCallIsARecoverableLockout() throws {
+        let data = """
+        {"error":"Disposition your previous call before dialing again.","code":"DISPOSITION_REQUIRED",
+        "pendingCall":{"id":"call_9","toNumber":"+16195550100","fromNumber":"+16195550111",
+        "durationSeconds":30,"status":"completed","notes":"","whoId":"003xx","whatId":null,
+        "createdAt":"2026-09-01T00:00:00Z"}}
+        """.data(using: .utf8)!
+        let result = try decodePlaceCall(data, status: 409)
+        XCTAssertEqual(result, .dispositionRequired(pending: CallSummary(
+            id: "call_9", direction: "outbound", toNumber: "+16195550100", fromNumber: "+16195550111",
+            disposition: nil, durationSeconds: 30, createdAt: "2026-09-01T00:00:00Z",
+            salesforceWhoId: "003xx", salesforceWhatId: nil
+        )))
+    }
+
+    /// A 409 with no `pendingCall` to reopen — the warmup-cap refusal, or an
+    /// older server — is still just a refusal the rep reads. There is nothing
+    /// to fabricate a wrap-up out of.
     func testDecodePlaceCallRefusedFallsBackToErrorWhenNoBlockReason() throws {
-        // app.post('/calls', ...)'s DISPOSITION_REQUIRED refusal carries only `error`, no blockReason.
         let data = #"{"error":"Disposition your previous call before dialing again.","code":"DISPOSITION_REQUIRED"}"#.data(using: .utf8)!
         let result = try decodePlaceCall(data, status: 409)
         XCTAssertEqual(result, .refused(reason: "Disposition your previous call before dialing again."))

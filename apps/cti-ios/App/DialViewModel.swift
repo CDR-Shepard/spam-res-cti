@@ -155,10 +155,25 @@ enum DialViewModel {
 
     private static let asciiDigits: Set<Character> = Set("0123456789")
 
-    /// The persistent "you still owe this call a disposition" line. The
-    /// pending row's `toNumber` is already the server's normalized E.164.
-    static func pendingBanner(for pending: CallSummary?) -> String? {
+    /// The persistent "you still owe this call a disposition" line, and the
+    /// call a tap on it reopens. The pending row's `toNumber` is already the
+    /// server's normalized E.164.
+    ///
+    /// The call rides along rather than just the text because the banner is a
+    /// button: naming a call the rep cannot get back to is how they end up
+    /// locked out of dialling with nothing on screen that helps.
+    static func pendingBanner(for pending: CallSummary?) -> PendingWrapupBanner? {
         guard let pending else { return nil }
-        return "Finish your last call — \(formatNANP(pending.toNumber))"
+        return PendingWrapupBanner(
+            text: "Finish your last call — \(formatNANP(pending.toNumber))",
+            pending: pending
+        )
     }
+}
+
+/// The Dial screen's pending-disposition banner: what it says, and which call
+/// `CallController.resumeWrapup` is handed when it is tapped.
+struct PendingWrapupBanner: Equatable {
+    let text: String
+    let pending: CallSummary
 }

@@ -46,7 +46,7 @@ final class WrapupViewModelTests: XCTestCase {
     /// rep looking at a sheet that silently refused to close.
     func testAFailedSaveWithNoServerTextStillSaysSomething() {
         XCTAssertEqual(
-            WrapupViewModel.outcome(after: .wrapup(callId: nil, info), refusal: nil),
+            WrapupViewModel.outcome(after: .wrapup(callId: "call_1", info), refusal: nil),
             .failed(WrapupViewModel.genericFailure)
         )
     }
