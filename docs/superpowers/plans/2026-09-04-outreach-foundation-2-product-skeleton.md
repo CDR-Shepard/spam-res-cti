@@ -2144,7 +2144,7 @@ export async function registerAdminTenantRoutes(app: FastifyInstance, deps: Admi
       const out = await linkTenantToWorkos({ db, idp, log: req.log }, params.data.id, body.data.adminEmail);
       return { tenant: toTenantDto(out.tenant), inviteId: out.inviteId };
     } catch (err) {
-      if ((err as Error).message.startsWith('Unknown tenant')) return sendError(reply, 404, 'NOT_FOUND', 'Unknown tenant');
+      if ((err as Error).message.startsWith('Unknown tenant')) return sendError(reply, 404, 'TENANT_NOT_FOUND', 'Unknown tenant');
       throw err;
     }
   });
@@ -2247,7 +2247,7 @@ Expected: outreach-api 10 files / 41 tests.
 - `GET /api/team` → `TeamResponse` (humans in the effective tenant; `signedIn = externalAuthId != null`). Any signed-in user.
 - `GET /api/team/invites` → `InvitesResponse` (admin; 409 `WORKOS_NOT_LINKED` when the tenant has no `workosOrgId`; 503 `SIGN_IN_DISABLED` when no provider).
 - `POST /api/team/invites` (`InviteRequest`) → 201 `Invite` (admin; same 409/503 rules; `inviterExternalId` = the caller's `externalAuthId` when known).
-- `PATCH /api/team/:userId` (`UpdateTeamMemberRequest`) → `TeamMember` (admin; 400 `CANNOT_CHANGE_SELF` when targeting yourself; 404 `NOT_FOUND` when the id is not a human in this tenant).
+- `PATCH /api/team/:userId` (`UpdateTeamMemberRequest`) → `TeamMember` (admin; 403 `CANNOT_DEMOTE_SELF` when demoting yourself (self-promotion is an idempotent 200); 404 `MEMBER_NOT_FOUND` for a non-uuid, unknown, foreign-tenant, or service user when the id is not a human in this tenant).
 
 - [ ] **Step 1: Failing tests**
 
@@ -2316,7 +2316,7 @@ describe('team routes', () => {
     expect(ok.json()).toMatchObject({ id: 'U2', isAdmin: true });
     const self = await app.inject({ method: 'PATCH', url: '/api/team/U1', headers: auth, payload: { isAdmin: false } });
     expect(self.statusCode).toBe(400);
-    expect(self.json()).toMatchObject({ code: 'CANNOT_CHANGE_SELF' });
+    expect(self.json()).toMatchObject({ code: 'CANNOT_DEMOTE_SELF' });
   });
 });
 ```
@@ -2409,21 +2409,24 @@ export async function registerTeamRoutes(app: FastifyInstance, deps: TeamRouteDe
   app.patch('/team/:userId', async (req, reply) => {
     const ctx = await requireContext(db, req, reply);
     if (!ctx || !requireAdmin(ctx, reply)) return;
-    const params = z.object({ userId: z.string().min(1) }).safeParse(req.params);
+    const params = z.object({ userId: z.string().uuid() }).safeParse(req.params);
+    if (!params.success) return sendError(reply, 404, 'MEMBER_NOT_FOUND', 'No such team member');
     const body = UpdateTeamMemberRequest.safeParse(req.body);
-    if (!params.success || !body.success) return sendError(reply, 400, 'VALIDATION', 'Invalid update');
-    if (params.data.userId === ctx.session.userId) return sendError(reply, 400, 'CANNOT_CHANGE_SELF', 'You cannot change your own admin flag');
+    if (!body.success) return sendError(reply, 400, 'VALIDATION', 'Invalid update', body.error.flatten());
+    if (params.data.userId === ctx.session.userId && !body.data.isAdmin) return sendError(reply, 403, 'CANNOT_DEMOTE_SELF', 'You cannot remove your own admin flag');
     const [updated] = await db
       .update(schema.users)
       .set({ isAdmin: body.data.isAdmin })
       .where(humanUserById(ctx.orgId, params.data.userId))
       .returning({ id: schema.users.id, email: schema.users.email, displayName: schema.users.displayName, isAdmin: schema.users.isAdmin, powerDialerEnabled: schema.users.powerDialerEnabled, externalAuthId: schema.users.externalAuthId });
-    if (!updated) return sendError(reply, 404, 'NOT_FOUND', 'No such team member');
+    if (!updated) return sendError(reply, 404, 'MEMBER_NOT_FOUND', 'No such team member');
     return toMember(updated);
   });
 }
 ```
 Register in `buildTestApp` and `server.ts` (`(app) => registerTeamRoutes(app, { db, idp })`).
+
+**Amendments from the Task 8 review (applied in a fix wave; the Interfaces block above governs where the Step 3 code differed):** `PATCH /team/:userId` validates `:userId` as a uuid and answers 404 `MEMBER_NOT_FOUND` for non-uuid, unknown, foreign-tenant, or service users; it refuses only a self-demotion (403 `CANNOT_DEMOTE_SELF`) and treats a self-promotion as an idempotent 200; its validation error carries `flatten()` details. The roster orders by `displayName` then `email`. Provider invites are mapped through `toInviteDto` (id, email, role narrowed with `RoleSlug`, state, expiresAt) for both the list and the 201, so no provider-internal fields reach the client. `POST /team/invites` validates the body before the provider/link gates, and the fake provider records `inviterExternalId` for tests. The harness records `where` for the `select` and `update` chains on `captured.where`, and the users `update` returns `fx.updateReturning ?? []` (no positional fixture fallback); tests render the roster and PATCH predicates with `PgDialect` and assert org, kind, and id scoping.
 
 - [ ] **Step 4: Verify and commit**
 
