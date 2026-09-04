@@ -16,13 +16,30 @@ export const apiSession = {
   set: (s: ApiSession | null): void => { current = s; },
 };
 
+type UnauthorizedHandler = () => void;
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+/** Registered by AuthProvider so a 401 anywhere drops the local session and lets the `_authenticated` guard redirect. */
+export function setUnauthorizedHandler(fn: UnauthorizedHandler | null): void {
+  unauthorizedHandler = fn;
+}
+
+/** `GET /api/auth/session` legitimately 401s before a session exists (e.g. a stale/replayed callback) — that's not "was signed in, got kicked out". */
+function isSessionBootstrap(path: string, method: string): boolean {
+  return method === 'GET' && path === '/api/auth/session';
+}
+
 async function request(path: string, init: RequestInit): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set('Accept', 'application/json');
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   if (current?.token) headers.set('Authorization', `Bearer ${current.token}`);
   if (current?.orgId) headers.set('X-Org-Id', current.orgId);
+  const method = (init.method ?? 'GET').toUpperCase();
   const res = await fetch(path, { ...init, headers, credentials: 'same-origin' });
+  if (res.status === 401 && !isSessionBootstrap(path, method)) {
+    apiSession.set(null);
+    unauthorizedHandler?.();
+  }
   if (!res.ok) {
     const body: unknown = await res.json().catch(() => null);
     const parsed = ApiError.safeParse(body);

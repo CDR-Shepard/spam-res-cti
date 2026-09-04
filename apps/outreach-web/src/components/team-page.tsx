@@ -26,7 +26,12 @@ export function TeamPage() {
     mutationFn: (m: TeamMember) => api(`/api/team/${m.id}`, TeamMember, { method: 'PATCH', body: json({ isAdmin: !m.isAdmin }) }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['team'] }),
   });
-  const errorText = (e: unknown) => (e instanceof ApiRequestError ? (e.code === 'WORKOS_NOT_LINKED' ? 'This workspace is not linked to WorkOS yet.' : e.message) : e ? 'Something went wrong.' : null);
+  const API_ERROR_TEXT: Record<string, string> = {
+    WORKOS_NOT_LINKED: 'This workspace is not linked to WorkOS yet.',
+    CANNOT_DEMOTE_SELF: "You can't remove your own admin access.",
+    MEMBER_NOT_FOUND: 'That team member no longer exists.',
+  };
+  const errorText = (e: unknown) => (e instanceof ApiRequestError ? (API_ERROR_TEXT[e.code] ?? e.message) : e ? 'Something went wrong.' : null);
 
   return (
     <div className="space-y-6">
@@ -35,6 +40,7 @@ export function TeamPage() {
         <CardContent>
           {team.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
           {team.error && <p role="alert" className="text-sm text-destructive">{errorText(team.error)}</p>}
+          {toggleAdmin.error && <p role="alert" className="text-sm text-destructive">{errorText(toggleAdmin.error)}</p>}
           {team.data && (
             <Table>
               <TableHeader><TableRow><TableHead>Email</TableHead><TableHead>Name</TableHead><TableHead>Role</TableHead><TableHead>Product</TableHead>{isAdmin && <TableHead />}</TableRow></TableHeader>

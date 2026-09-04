@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { isSafeReturnTo } from '@cti/contracts';
 
 export interface StatePayload {
   nonce: string;
@@ -20,16 +21,12 @@ export interface SignedState {
 export const STATE_TTL_SECONDS = 600;
 const b64u = (buf: Buffer): string => buf.toString('base64url');
 const hmac = (secret: string, data: string): string => b64u(createHmac('sha256', secret).update(data).digest());
-/**
- * Same-origin relative path only: one leading slash (never "//" or "/\" —
- * both are browser host-confusion tricks), and no backslash, space, or ASCII
- * control character anywhere else in the path (blocks further host-confusion
- * and header/URL-injection tricks in the eventual redirect target).
- */
-const SAFE_RETURN_TO = /^\/(?![\/\\])[^\\\x00-\x20]*$/;
-export function isSafeReturnTo(value: string): boolean {
-  return SAFE_RETURN_TO.test(value);
-}
+// The same-origin-only `returnTo` rule is shared with outreach-web's route
+// `validateSearch` (both must accept/reject exactly the same paths), so it
+// lives once in @cti/contracts. Re-exported here (rather than only imported)
+// because state.test.ts and routes/auth.ts both import `isSafeReturnTo` from
+// this module, not from @cti/contracts directly.
+export { isSafeReturnTo };
 /** Small grace window for clock skew between the process that signed and the one verifying. */
 const CLOCK_SKEW_SECONDS = 2;
 

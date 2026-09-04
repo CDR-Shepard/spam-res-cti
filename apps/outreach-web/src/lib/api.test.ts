@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { api, apiEmpty, ApiRequestError, apiSession } from './api';
+import { api, apiEmpty, ApiRequestError, apiSession, setUnauthorizedHandler } from './api';
 
-afterEach(() => { vi.unstubAllGlobals(); apiSession.set(null); });
+afterEach(() => { vi.unstubAllGlobals(); apiSession.set(null); setUnauthorizedHandler(null); });
 
 function stubFetch(status: number, body: unknown) {
   const fetchMock = vi.fn(async () => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
@@ -26,5 +26,23 @@ describe('api', () => {
   it('apiEmpty accepts 204', async () => {
     stubFetch(204, undefined);
     await expect(apiEmpty('/api/auth/logout', { method: 'POST' })).resolves.toBeUndefined();
+  });
+  it('a 401 from /api/team calls the unauthorized handler and clears the bearer', async () => {
+    apiSession.set({ token: 'tok' });
+    const handler = vi.fn();
+    setUnauthorizedHandler(handler);
+    stubFetch(401, { error: 'Session expired', code: 'UNAUTHENTICATED' });
+    await expect(api('/api/team', z.any())).rejects.toMatchObject({ status: 401 });
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(apiSession.get()).toBeNull();
+  });
+  it('a 401 from GET /api/auth/session does not clear the session or call the handler', async () => {
+    apiSession.set({ token: 'tok' });
+    const handler = vi.fn();
+    setUnauthorizedHandler(handler);
+    stubFetch(401, { error: 'no session', code: 'UNAUTHENTICATED' });
+    await expect(api('/api/auth/session', z.any())).rejects.toMatchObject({ status: 401 });
+    expect(handler).not.toHaveBeenCalled();
+    expect(apiSession.get()).toEqual({ token: 'tok' });
   });
 });
