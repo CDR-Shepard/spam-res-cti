@@ -74,6 +74,16 @@ export class WorkosIdentityProvider implements IdentityProvider {
     return { id: org.id };
   }
 
+  async findOrganizationByExternalId(externalId: string): Promise<{ id: string } | null> {
+    try {
+      const org = await this.workos.organizations.getOrganizationByExternalId(externalId);
+      return { id: org.id };
+    } catch (err) {
+      if ((err as { status?: unknown })?.status === 404) return null;
+      throw err;
+    }
+  }
+
   async invite(input: { email: string; organizationId: string; role: RoleSlug; inviterExternalId?: string }): Promise<IdentityInvite> {
     const inv = await this.workos.userManagement.sendInvitation({
       email: input.email,

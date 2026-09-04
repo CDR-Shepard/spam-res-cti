@@ -3,14 +3,27 @@ import { getDb } from '@cti/db';
 import { WorkosIdentityProvider } from '../src/auth/workos-provider.js';
 import { loadConfig } from '../src/config.js';
 
-/** `--name value` pairs → object; exits with usage when a required flag is missing. */
+/**
+ * `--name value` pairs → object; exits (2) with usage when a required flag is
+ * missing, a flag has no following value, or a value itself looks like
+ * another flag (near-certainly a missing value, e.g. `--name --admin-email x`).
+ */
 export function flags(required: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i += 2) {
     const k = argv[i]?.replace(/^--/, '');
     const v = argv[i + 1];
-    if (k && v !== undefined) out[k] = v;
+    if (!k) continue;
+    if (v === undefined) {
+      console.error(`--${k} is missing a value`);
+      process.exit(2);
+    }
+    if (v.startsWith('--')) {
+      console.error(`--${k}'s value looks like another flag: ${v}`);
+      process.exit(2);
+    }
+    out[k] = v;
   }
   const missing = required.filter((r) => !out[r]);
   if (missing.length) {

@@ -31,6 +31,8 @@ export interface IdentityProvider {
   exchangeCode(code: string): Promise<ExchangeResult>;
   listMemberships(externalUserId: string): Promise<IdentityMembership[]>;
   createOrganization(input: { name: string; externalId: string }): Promise<{ id: string }>;
+  /** Look up a WorkOS organization already tagged with `externalId` (our org id); null when none exists. */
+  findOrganizationByExternalId(externalId: string): Promise<{ id: string } | null>;
   invite(input: { email: string; organizationId: string; role: RoleSlug; inviterExternalId?: string }): Promise<IdentityInvite>;
   listInvites(organizationId: string): Promise<IdentityInvite[]>;
 }

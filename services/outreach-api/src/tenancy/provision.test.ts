@@ -2,27 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { schema } from '@cti/db';
 import { FakeIdentityProvider } from '../auth/fake-provider.js';
 import { fakeDb } from '../test/harness.js';
-
-// `createTenant` runs its work inside `db.transaction(...)` against the real
-// `Db` (see @cti/auth/tenancy.ts); the harness's `fakeDb` has no `.transaction`.
-// Mock only `createTenant`, replaying its real insert sequence directly against
-// `db` (no transaction wrapper) so `provisionTenant`'s own logic — the
-// WorkOS-linking and invite steps that come after — is what's under test here.
-vi.mock('@cti/auth', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@cti/auth')>();
-  return {
-    ...actual,
-    createTenant: async (db: { insert: (t: unknown) => { values: (v: Record<string, unknown>) => { returning: () => Promise<unknown[]>; onConflictDoNothing: () => Promise<unknown> } } }, input: { name: string; slug?: string; timezone?: string }) => {
-      const slug = actual.slugify(input.slug ?? input.name) || 'org';
-      const timezone = input.timezone ?? 'America/Los_Angeles';
-      const [org] = (await db.insert(schema.organizations).values({ name: input.name, slug, timezone }).returning()) as [Record<string, unknown>];
-      const [agent] = (await db.insert(schema.users).values({ orgId: org!.id, email: actual.aiAgentEmail(slug), displayName: actual.AI_AGENT_DISPLAY_NAME, kind: 'service', timezone }).returning()) as [{ id: string }];
-      await db.insert(schema.campaignConfigs).values({ orgId: org!.id, key: 'default', name: 'Default Campaign' }).onConflictDoNothing();
-      return { org, aiAgentUserId: agent!.id };
-    },
-  };
-});
-
 import { linkTenantToWorkos, provisionTenant } from './provision.js';
 
 const log = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
@@ -69,5 +48,21 @@ describe('linkTenantToWorkos', () => {
   it('throws for an unknown tenant', async () => {
     const { db } = fakeDb({ organizations: [] });
     await expect(linkTenantToWorkos({ db, idp: new FakeIdentityProvider(), log }, 'nope', 'a@b.co')).rejects.toThrow('Unknown tenant');
+  });
+  it('reuses a WorkOS org already tagged with the tenant id instead of creating a second one', async () => {
+    const { db, writes } = fakeDb({ organizations: [org] });
+    const idp = new FakeIdentityProvider();
+    idp.seedOrganization({ id: 'org_existing_tagged', name: 'GG Homes', externalId: 'O1' });
+    const createSpy = vi.spyOn(idp, 'createOrganization');
+    const out = await linkTenantToWorkos({ db, idp, log }, 'O1', 'you@gghomes.com');
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(out.tenant.workosOrgId).toBe('org_existing_tagged');
+    expect(writes).toEqual([expect.objectContaining({ op: 'update', values: { workosOrgId: 'org_existing_tagged' } })]);
+  });
+  it('fails loudly when the conditional update matches no row', async () => {
+    const { db } = fakeDb({ organizations: [org], updateReturning: [] });
+    const idp = new FakeIdentityProvider();
+    await expect(linkTenantToWorkos({ db, idp, log }, 'O1', 'you@gg.co')).rejects.toThrow('tenant was linked concurrently');
+    expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ alert: 'provisioning_failed' }), expect.any(String));
   });
 });

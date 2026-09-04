@@ -54,6 +54,7 @@ export async function dispatchAlert(logger: AlertLogger, event: AlertEvent): Pro
       }),
     });
   } catch (err) {
-    logger.error({ err: (err as Error).message, url: cfg.ALERT_WEBHOOK_URL }, 'alert webhook delivery failed');
+    // Host only, never the full URL — it may carry a webhook token/path secret.
+    logger.error({ err: (err as Error).message, host: new URL(cfg.ALERT_WEBHOOK_URL).host }, 'alert webhook delivery failed');
   }
 }

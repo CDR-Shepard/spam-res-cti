@@ -19,6 +19,10 @@ export class FakeIdentityProvider implements IdentityProvider {
   setNextCode(code: string, externalId: string, organizationId: string | null = null): void {
     this.codes.set(code, { externalId, organizationId });
   }
+  /** Seed a WorkOS organization directly (no `createOrganization` call), for tests of self-healing lookups. */
+  seedOrganization(input: { id: string; name: string; externalId: string }): void {
+    this.orgs.set(input.id, { ...input });
+  }
 
   authorizationUrl(input: { state: string; organizationId?: string }): string {
     const u = new URL('http://fake-idp.test/authorize');
@@ -40,6 +44,10 @@ export class FakeIdentityProvider implements IdentityProvider {
     const id = `org_fake_${++this.seq}`;
     this.orgs.set(id, { id, ...input });
     return { id };
+  }
+  async findOrganizationByExternalId(externalId: string): Promise<{ id: string } | null> {
+    for (const org of this.orgs.values()) if (org.externalId === externalId) return { id: org.id };
+    return null;
   }
   async invite(input: { email: string; organizationId: string; role: RoleSlug }): Promise<IdentityInvite> {
     const inv: IdentityInvite = { id: `inv_${++this.seq}`, email: input.email.trim().toLowerCase(), role: input.role, state: 'pending', expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString() };

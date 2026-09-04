@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { createTenant } from '@cti/auth';
 import type { ProvisionTenantRequest } from '@cti/contracts';
 import { schema, type Db, type Organization } from '@cti/db';
@@ -15,11 +15,25 @@ export interface ProvisionResult {
   inviteId: string;
 }
 
+/**
+ * Reuse a WorkOS org already tagged (by external id) with this tenant before
+ * creating a new one — a prior attempt may have created the WorkOS org but
+ * crashed before recording it (this is exactly what `linkTenantToWorkos`
+ * repairs). The DB write is conditional on `workosOrgId` still being null so
+ * two concurrent callers can't both "win" and silently clobber each other;
+ * a lost race throws rather than pretending it linked.
+ */
 async function ensureWorkosOrg(deps: ProvisionDeps, tenant: Organization): Promise<Organization> {
   if (tenant.workosOrgId) return tenant;
-  const created = await deps.idp.createOrganization({ name: tenant.name, externalId: tenant.id });
-  await deps.db.update(schema.organizations).set({ workosOrgId: created.id }).where(eq(schema.organizations.id, tenant.id));
-  return { ...tenant, workosOrgId: created.id };
+  const existing = await deps.idp.findOrganizationByExternalId(tenant.id);
+  const workosOrgId = existing ? existing.id : (await deps.idp.createOrganization({ name: tenant.name, externalId: tenant.id })).id;
+  const [row] = await deps.db
+    .update(schema.organizations)
+    .set({ workosOrgId })
+    .where(and(eq(schema.organizations.id, tenant.id), isNull(schema.organizations.workosOrgId)))
+    .returning({ id: schema.organizations.id });
+  if (!row) throw new Error('tenant was linked concurrently');
+  return { ...tenant, workosOrgId };
 }
 
 async function inviteAdmin(deps: ProvisionDeps, tenant: Organization, adminEmail: string): Promise<string> {
@@ -51,7 +65,18 @@ export async function provisionTenant(deps: ProvisionDeps, input: ProvisionTenan
 export async function linkTenantToWorkos(deps: ProvisionDeps, orgId: string, adminEmail: string): Promise<ProvisionResult> {
   const found = await deps.db.query.organizations.findFirst({ where: eq(schema.organizations.id, orgId) });
   if (!found || found.id !== orgId) throw new Error(`Unknown tenant ${orgId}`);
-  const tenant = await ensureWorkosOrg(deps, found);
-  const inviteId = await inviteAdmin(deps, tenant, adminEmail);
-  return { tenant, inviteId };
+  try {
+    const tenant = await ensureWorkosOrg(deps, found);
+    const inviteId = await inviteAdmin(deps, tenant, adminEmail);
+    return { tenant, inviteId };
+  } catch (err) {
+    await dispatchAlert(deps.log, {
+      kind: 'provisioning_failed',
+      severity: 'warning',
+      orgId: found.id,
+      message: `Linking tenant ${found.slug} to WorkOS failed: ${(err as Error).message}.`,
+      context: { adminEmail },
+    });
+    throw err;
+  }
 }

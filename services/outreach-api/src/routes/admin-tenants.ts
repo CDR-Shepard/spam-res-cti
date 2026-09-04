@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { LinkTenantWorkosRequest, ProvisionTenantRequest } from '@cti/contracts';
-import type { Db } from '@cti/db';
+import { schema, type Db } from '@cti/db';
 import type { IdentityProvider } from '../auth/identity-provider.js';
 import { sendError } from '../http/errors.js';
 import { linkTenantToWorkos, provisionTenant } from '../tenancy/provision.js';
@@ -30,7 +30,7 @@ export async function registerAdminTenantRoutes(app: FastifyInstance, deps: Admi
 
   app.get('/admin/tenants', async (req, reply) => {
     if (!(await superAdminOnly(req, reply))) return;
-    const rows = await db.query.organizations.findMany({});
+    const rows = await db.query.organizations.findMany({ limit: 200, orderBy: schema.organizations.createdAt });
     return { tenants: rows.map(toTenantDto) };
   });
 
@@ -48,14 +48,18 @@ export async function registerAdminTenantRoutes(app: FastifyInstance, deps: Admi
     if (!(await superAdminOnly(req, reply))) return;
     const idp = idpOr503(reply);
     if (!idp) return;
-    const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
+    // A non-uuid id can never match a tenant, so it's a 404 (same as a
+    // well-formed id that just isn't found below) rather than a 400 —
+    // callers shouldn't be able to distinguish "malformed" from "unknown".
+    const params = z.object({ id: z.string().uuid() }).safeParse(req.params);
+    if (!params.success) return sendError(reply, 404, 'TENANT_NOT_FOUND', 'Unknown tenant');
     const body = LinkTenantWorkosRequest.safeParse(req.body);
-    if (!params.success || !body.success) return sendError(reply, 400, 'VALIDATION', 'Invalid link request');
+    if (!body.success) return sendError(reply, 400, 'VALIDATION', 'Invalid link request');
     try {
       const out = await linkTenantToWorkos({ db, idp, log: req.log }, params.data.id, body.data.adminEmail);
       return { tenant: toTenantDto(out.tenant), inviteId: out.inviteId };
     } catch (err) {
-      if ((err as Error).message.startsWith('Unknown tenant')) return sendError(reply, 404, 'NOT_FOUND', 'Unknown tenant');
+      if ((err as Error).message.startsWith('Unknown tenant')) return sendError(reply, 404, 'TENANT_NOT_FOUND', 'Unknown tenant');
       throw err;
     }
   });

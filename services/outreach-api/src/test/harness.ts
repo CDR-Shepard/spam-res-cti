@@ -1,5 +1,8 @@
 import type { FastifyInstance } from 'fastify';
-import type { Db } from '@cti/db';
+// Type-only: erased at compile time, so this doesn't make harness.js itself a
+// runtime importer of `@cti/auth` (see `mockCreateTenant`'s doc comment).
+import type { CreatedTenant, CreateTenantInput } from '@cti/auth';
+import { schema, type Db } from '@cti/db';
 import { buildApp } from '../app.js';
 import type { IdentityProvider } from '../auth/identity-provider.js';
 import { parseConfig, type AppConfig } from '../config.js';
@@ -22,6 +25,13 @@ export interface Fixtures {
   organizations?: Array<Record<string, unknown>>;
   users?: Array<Record<string, unknown>>;
   sessions?: Array<Record<string, unknown>>;
+  /**
+   * Overrides what `update(...).where(...).returning()` yields; defaults to a
+   * single row (the update's own values). Set to `[]` to simulate a
+   * conditional update matching no row — e.g. a concurrent write already
+   * claimed it (see provision.ts's `ensureWorkosOrg`).
+   */
+  updateReturning?: Array<Record<string, unknown>>;
 }
 
 /**
@@ -63,12 +73,53 @@ export function fakeDb(fx: Fixtures = {}) {
     }),
     update: (t: unknown) => ({
       set: (values: Record<string, unknown>) => ({
-        where: async () => { writes.push({ op: 'update', table: t, values }); return { rowCount: 1 }; },
+        // `where`'s result is awaitable directly (existing callers that don't
+        // chain `.returning()`) and also carries `.returning()` for callers
+        // that need the matched row back (or `[]`, via `updateReturning`, to
+        // simulate a conditional update matching none — see `Fixtures`).
+        where: (_cond?: unknown) => {
+          writes.push({ op: 'update', table: t, values });
+          const rows = fx.updateReturning ?? [{ ...values }];
+          return { rowCount: rows.length, returning: async () => rows };
+        },
       }),
     }),
     select: () => ({ from: () => ({ where: async () => [] }) }),
+    // Passthrough: fakeDb has no real transactional isolation, so `fn` just
+    // runs against this same `db`, recording writes exactly as it would outside one.
+    transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => fn(db as unknown as Db),
   };
   return { db: db as unknown as Db, writes, captured };
+}
+
+/**
+ * A stand-in for `@cti/auth`'s `createTenant`, for tests where the route or
+ * function under test calls it but the fixture already holds an organization
+ * row (e.g. the calling super admin's own tenant) — `createTenant`'s
+ * slug-collision check runs `findFirst`, which `fakeDb` always answers with
+ * `fixture[0]` regardless of the `where` clause, so the real `createTenant`
+ * would spuriously think the new tenant's slug is taken and randomize it.
+ * This replays `createTenant`'s real insert sequence (org, AI Agent user,
+ * default campaign) directly against `db`, skipping that lookup. `slugify`
+ * and the AI Agent naming are duplicated rather than imported from
+ * `@cti/auth` as *values* — a value import from that package here would make
+ * this file a transitive importer of it, and a test's `vi.mock('@cti/auth',
+ * ...)` factory that calls this export eagerly (rather than deferring the
+ * call past its own execution) throws "before initialization"; see
+ * admin-tenants.test.ts for the deferred-call side of this. `CreateTenantInput`/
+ * `CreatedTenant` below are `import type`, which is erased at compile time and
+ * so doesn't create that runtime edge.
+ */
+export function mockCreateTenant(): (db: Db, input: CreateTenantInput) => Promise<CreatedTenant> {
+  return async (db, input) => {
+    const base = input.slug ?? input.name;
+    const slug = base.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'org';
+    const timezone = input.timezone ?? 'America/Los_Angeles';
+    const [org] = await db.insert(schema.organizations).values({ name: input.name, slug, timezone, sfOrgId: null }).returning();
+    const [agent] = await db.insert(schema.users).values({ orgId: org!.id, email: `ai-agent@${slug}.internal`, displayName: 'AI Agent', kind: 'service', timezone }).returning({ id: schema.users.id });
+    await db.insert(schema.campaignConfigs).values({ orgId: org!.id, key: 'default', name: 'Default Campaign' }).onConflictDoNothing();
+    return { org: org!, aiAgentUserId: agent!.id };
+  };
 }
 
 export async function buildTestApp(deps: { cfg: AppConfig; db: Db; idp: IdentityProvider | null }): Promise<FastifyInstance> {

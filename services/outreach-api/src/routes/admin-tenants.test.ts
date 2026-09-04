@@ -1,41 +1,41 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { schema } from '@cti/db';
 import { FakeIdentityProvider } from '../auth/fake-provider.js';
-import { buildTestApp, fakeDb, testConfig } from '../test/harness.js';
+import { buildTestApp, fakeDb, mockCreateTenant, testConfig } from '../test/harness.js';
 
 const state = vi.hoisted(() => ({ session: null as Record<string, unknown> | null }));
 // `createTenant` runs inside `db.transaction(...)` on the real `Db` and its
 // slug-collision check is meaningless against fakeDb (whose `findFirst` always
-// returns fixture[0], not a real match) — see provision.test.ts for the same
-// override, needed here because the route under test calls provisionTenant too.
+// returns fixture[0], not a real match) — the fixture here already holds one
+// organization (the super admin's own tenant), so the real `createTenant`
+// would spuriously randomize the new tenant's slug. `mockCreateTenant` (from
+// the harness) replays its real insert sequence without that lookup.
 vi.mock('@cti/auth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@cti/auth')>();
   return {
     ...actual,
     resolveSession: async () => state.session,
-    createTenant: async (
-      db: { insert: (t: unknown) => { values: (v: Record<string, unknown>) => { returning: () => Promise<unknown[]>; onConflictDoNothing: () => Promise<unknown> } } },
-      input: { name: string; slug?: string; timezone?: string },
-    ) => {
-      const slug = actual.slugify(input.slug ?? input.name) || 'org';
-      const timezone = input.timezone ?? 'America/Los_Angeles';
-      const [org] = (await db.insert(schema.organizations).values({ name: input.name, slug, timezone }).returning()) as [Record<string, unknown>];
-      const [agent] = (await db.insert(schema.users).values({ orgId: org!.id, email: actual.aiAgentEmail(slug), displayName: actual.AI_AGENT_DISPLAY_NAME, kind: 'service', timezone }).returning()) as [{ id: string }];
-      await db.insert(schema.campaignConfigs).values({ orgId: org!.id, key: 'default', name: 'Default Campaign' }).onConflictDoNothing();
-      return { org, aiAgentUserId: agent!.id };
-    },
+    // Deferred to call time (not `createTenant: mockCreateTenant()` here):
+    // this factory runs while `harness.js` — which exports `mockCreateTenant`
+    // — is still being resolved (it's a transitive importer of `@cti/auth`
+    // too), so referencing the binding eagerly throws "before initialization".
+    createTenant: (...args: Parameters<typeof actual.createTenant>) => mockCreateTenant()(...args),
   };
 });
 
 const cfg = testConfig();
-const org = { id: 'O1', name: 'GG Homes', slug: 'gg-homes', status: 'active', timezone: 'America/Los_Angeles', workosOrgId: null };
-const superAdmin = { userId: 'U1', orgId: 'O1', email: 'me@gg.co', isAdmin: true, powerDialerEnabled: false, kind: 'human', isSuperAdmin: true };
+const org = { id: '11111111-1111-4111-8111-111111111111', name: 'GG Homes', slug: 'gg-homes', status: 'active', timezone: 'America/Los_Angeles', workosOrgId: null };
+const superAdmin = { userId: 'U1', orgId: org.id, email: 'me@gg.co', isAdmin: true, powerDialerEnabled: false, kind: 'human', isSuperAdmin: true };
 let app: FastifyInstance;
+let idp: FakeIdentityProvider;
+let writes: ReturnType<typeof fakeDb>['writes'];
 afterEach(async () => { await app.close(); });
 beforeEach(async () => {
   state.session = superAdmin;
-  app = await buildTestApp({ cfg, db: fakeDb({ organizations: [org] }).db, idp: new FakeIdentityProvider() });
+  idp = new FakeIdentityProvider();
+  const fake = fakeDb({ organizations: [org] });
+  writes = fake.writes;
+  app = await buildTestApp({ cfg, db: fake.db, idp });
 });
 const auth = { authorization: 'Bearer t' };
 
@@ -43,7 +43,7 @@ describe('admin tenant routes', () => {
   it('lists tenants for a super admin and refuses everyone else', async () => {
     const ok = await app.inject({ method: 'GET', url: '/api/admin/tenants', headers: auth });
     expect(ok.statusCode).toBe(200);
-    expect(ok.json()).toEqual({ tenants: [expect.objectContaining({ id: 'O1', slug: 'gg-homes', workosLinked: false })] });
+    expect(ok.json()).toEqual({ tenants: [expect.objectContaining({ id: org.id, slug: 'gg-homes', workosLinked: false })] });
     state.session = { ...superAdmin, isSuperAdmin: false };
     const no = await app.inject({ method: 'GET', url: '/api/admin/tenants', headers: auth });
     expect(no.statusCode).toBe(403);
@@ -58,8 +58,31 @@ describe('admin tenant routes', () => {
     expect(bad.json()).toMatchObject({ code: 'VALIDATION' });
   });
   it('links an existing tenant to WorkOS and invites the admin', async () => {
-    const res = await app.inject({ method: 'POST', url: '/api/admin/tenants/O1/link-workos', headers: auth, payload: { adminEmail: 'you@gg.co' } });
+    const res = await app.inject({ method: 'POST', url: `/api/admin/tenants/${org.id}/link-workos`, headers: auth, payload: { adminEmail: 'you@gg.co' } });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({ tenant: { id: 'O1', workosLinked: true }, inviteId: expect.any(String) });
+    expect(res.json()).toMatchObject({ tenant: { id: org.id, workosLinked: true }, inviteId: expect.any(String) });
+  });
+  it('404s TENANT_NOT_FOUND for a non-uuid tenant id', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/admin/tenants/not-a-uuid/link-workos', headers: auth, payload: { adminEmail: 'you@gg.co' } });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toMatchObject({ code: 'TENANT_NOT_FOUND' });
+  });
+  it('refuses a non-super-admin from provisioning a tenant, with no side effects', async () => {
+    state.session = { ...superAdmin, isSuperAdmin: false };
+    const createSpy = vi.spyOn(idp, 'createOrganization');
+    const res = await app.inject({ method: 'POST', url: '/api/admin/tenants', headers: auth, payload: { name: 'Acme Buyers', adminEmail: 'owner@acme.com' } });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ code: 'SUPER_ADMIN_ONLY' });
+    expect(writes).toEqual([]);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+  it('refuses a non-super-admin from linking a tenant to WorkOS, with no side effects', async () => {
+    state.session = { ...superAdmin, isSuperAdmin: false };
+    const createSpy = vi.spyOn(idp, 'createOrganization');
+    const res = await app.inject({ method: 'POST', url: `/api/admin/tenants/${org.id}/link-workos`, headers: auth, payload: { adminEmail: 'you@gg.co' } });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ code: 'SUPER_ADMIN_ONLY' });
+    expect(writes).toEqual([]);
+    expect(createSpy).not.toHaveBeenCalled();
   });
 });
