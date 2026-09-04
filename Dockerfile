@@ -23,6 +23,7 @@ COPY services/cti-api/package.json services/cti-api/package.json
 COPY services/outreach-api/package.json services/outreach-api/package.json
 COPY apps/cti-web/package.json apps/cti-web/package.json
 COPY apps/cti-desktop/package.json apps/cti-desktop/package.json
+COPY apps/outreach-web/package.json apps/outreach-web/package.json
 RUN npm ci --include=dev
 
 # Build the API and the softphone bundle it serves.

@@ -14,6 +14,7 @@
     "dev:web": "npm --workspace apps/cti-web run dev",
     "dev:desktop": "npm --workspace apps/cti-desktop run dev",
     "dev:outreach": "npm run build:packages && npm --workspace services/outreach-api run dev",
+    "dev:web:outreach": "npm --workspace apps/outreach-web run dev",
     "build:api": "npm run build:packages && npm --workspace services/cti-api run build",
     "build:web": "npm --workspace apps/cti-web run build",
     "build:desktop": "npm --workspace apps/cti-desktop run build",
