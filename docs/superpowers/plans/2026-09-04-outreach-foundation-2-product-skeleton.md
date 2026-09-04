@@ -189,6 +189,7 @@ export type ApiError = z.infer<typeof ApiError>;
 import { z } from 'zod';
 
 export const TenantStatus = z.enum(['active', 'suspended']);
+export type TenantStatus = z.infer<typeof TenantStatus>;
 
 export const Tenant = z.object({
   /** Opaque id as the API renders it (a uuid in production; short ids in fixtures). */
