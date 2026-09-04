@@ -15,10 +15,10 @@ struct WrapupView: View {
     @EnvironmentObject private var controller: CallController
     let callId: String?
     let info: CallerInfo
-    /// The controller moved on to another call while the save was in flight.
-    /// The screen is about to close on its own, so the note is raised by
-    /// `MainTabs` instead.
-    let onSuperseded: () -> Void
+    /// Raises a toast on the surfaces that outlive this screen. Used for the
+    /// one outcome that has something to say on the way out: a save superseded
+    /// by the next call, where this view is already being replaced.
+    let onToast: (String) -> Void
 
     @State private var disposition: String?
     @State private var notes = ""
@@ -96,16 +96,19 @@ struct WrapupView: View {
     private func save() async {
         guard let disposition else { return }
         error = nil
-        await controller.finishWrapup(disposition: disposition, notes: notes)
+        // Trimmed here rather than at the API: `dispositionRequest` omits the
+        // field entirely when it is empty, so a `TextEditor` the rep tapped
+        // into and backed out of posts as "no notes" instead of as a
+        // Salesforce Task whose body is a blank line.
+        await controller.finishWrapup(
+            disposition: disposition, notes: WrapupViewModel.notesForPosting(notes)
+        )
 
-        switch WrapupViewModel.outcome(after: controller.phase, refusal: controller.lastRefusal) {
-        case .dismissed:
-            // The phase left `.wrapup`, so this screen is already on its way out.
-            break
-        case .superseded:
-            onSuperseded()
-        case let .failed(message):
-            error = message
-        }
+        let outcome = WrapupViewModel.outcome(after: controller.phase, refusal: controller.lastRefusal)
+        if case let .failed(message) = outcome { error = message }
+        // Anything the outcome wants said out loud goes to a surface that
+        // outlives this screen — by the time a save is superseded, this view is
+        // already being replaced by the next call's.
+        if let toast = WrapupViewModel.toast(for: outcome) { onToast(toast) }
     }
 }

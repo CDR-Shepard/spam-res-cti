@@ -72,6 +72,23 @@ enum CallRoute: Equatable {
         }
     }
 
+    /// What the cover draws right now.
+    ///
+    /// Read live from the phase on every redraw by `CallCoverView`, rather
+    /// than taken from the item `fullScreenCover(item:)` handed to its content
+    /// closure. Apple documents only the identity-*changed* case ("If `item`
+    /// changes, the system dismisses the currently presented modal view and
+    /// replaces it with a new one") and says nothing about an item whose
+    /// identity holds while its payload changes — which is precisely what
+    /// `.active → .wrapup` does here, since the identity is deliberately the
+    /// call. Rather than bet a rep's wrap-up on undocumented behaviour, the
+    /// cover hosts one view that observes the controller: the item decides
+    /// *whether* a cover is up, and this decides what is inside it.
+    @MainActor
+    static func coverContent(for phase: CallController.Phase) -> CallPresentation.Content? {
+        route(for: phase).presentation?.content
+    }
+
     private static func id(for info: CallerInfo) -> String { "call:\(info.number)" }
 }
 

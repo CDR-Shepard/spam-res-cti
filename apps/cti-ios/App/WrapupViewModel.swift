@@ -31,6 +31,31 @@ enum WrapupViewModel {
         !isSubmitting
     }
 
+    /// What, if anything, to say out loud about an outcome.
+    ///
+    /// A property of the outcome rather than of whichever surface happens to
+    /// be on screen — which matters here, because a superseded save only ever
+    /// happens *because* another call started, so the full-screen call cover
+    /// is already up by the time this is asked. Both surfaces draw the toast
+    /// from this one answer; a toast attached to only the tab bar would be
+    /// underneath the cover and never seen.
+    static func toast(for outcome: WrapupOutcome) -> String? {
+        guard case .superseded = outcome else { return nil }
+        return supersededToast
+    }
+
+    /// The notes as they should reach the server.
+    ///
+    /// `LiveCallsAPI.disposition` omits the field entirely when this is empty,
+    /// matching the server's `.optional()` — so trimming here is what turns a
+    /// `TextEditor` the rep tapped into and backed out of (leaving a newline)
+    /// into "no notes" rather than a Salesforce Task whose body is a blank
+    /// line. Only the ends are touched: a rep's own paragraph breaks are
+    /// theirs to keep.
+    static func notesForPosting(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Reads the outcome off the controller's own state rather than off a
     /// return value, because `finishWrapup` has none: it either leaves the
     /// phase in `.wrapup` (failed, retryable) or moves it on.

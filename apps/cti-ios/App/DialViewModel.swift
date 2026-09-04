@@ -56,6 +56,23 @@ enum DialViewModel {
         return RefusalBanner(text: refusal, style: refusal == CallController.busyRefusal ? .local : .server)
     }
 
+    /// How long a dismissal lasts.
+    ///
+    /// `banner` compares the refusal *text*, which is what lets one refusal be
+    /// swiped away without hiding the next — but it leaves a hole: refuse the
+    /// same number twice and the second refusal is the same string, so a stale
+    /// dismissal would swallow it. That is not hypothetical. A redial from the
+    /// Recents tab does exactly this, and the rep would tap a row and watch
+    /// nothing happen at all.
+    ///
+    /// So a dismissal is scoped to the call it was made about: the controller
+    /// leaving `.idle` is a new call starting, and it clears the dismissal.
+    @MainActor
+    static func dismissal(_ current: String?, survives phase: CallController.Phase) -> String? {
+        if case .idle = phase { return current }
+        return nil
+    }
+
     static func prompt(for info: CallerInfo, reasons: [String], requiredScriptId: String?) -> AcknowledgementPrompt {
         AcknowledgementPrompt(
             title: info.displayTitle,
@@ -90,40 +107,58 @@ enum DialViewModel {
         String(raw.dropLast())
     }
 
+    /// Sanitizes anything that arrives through the number *field* — a pasted
+    /// number out of an email or a CRM tab, or an edit made with the system
+    /// keyboard — down to the same alphabet the pad produces.
+    ///
+    /// The field shows `formatDialString(raw)`, so this is the inverse half of
+    /// a round trip: paste "+1 (619) 848-1782", store "+16198481782", and the
+    /// field reads back exactly what was pasted. A pasted number and a typed
+    /// one are indistinguishable from here on.
+    static func accept(_ typed: String) -> String {
+        String(typed.filter { dialableKeys.contains($0) }.prefix(maxDigits))
+    }
+
+    /// `"6198481782"` → `"(619) 848-1782"`, progressively, as the rep types.
+    ///
+    /// A direct port of `apps/cti-web/src/format.ts`'s `formatDialString`, so
+    /// the phone and the web dialer shape a half-typed number the same way.
+    /// Display only — the raw string is what gets sent, and the server does
+    /// the normalization it audits against.
+    ///
+    /// Deliberately gives up in three places rather than guess: anything
+    /// holding `*`/`#`, a `+` in front of a non-NANP country code, and an
+    /// overflow past ten national digits all come back exactly as typed.
+    /// Reshaping those would be a lie about which number is on the button.
+    static func formatDialString(_ raw: String) -> String {
+        if raw.isEmpty { return "" }
+        if raw.contains("*") || raw.contains("#") { return raw }
+
+        let hasPlus = raw.hasPrefix("+")
+        // ASCII only, matching the web's `\D`. `Character.isNumber` would also
+        // count an Arabic-Indic "٦", which is not a 6 to any carrier — and
+        // counting one would shift a ten-digit number into the eleven-digit
+        // branch and print a "+1" nobody typed.
+        let digits = raw.filter(asciiDigits.contains)
+        if hasPlus, !digits.hasPrefix("1") { return raw }
+
+        let isCountryCoded = digits.hasPrefix("1") && (hasPlus || digits.count > 10)
+        let national = isCountryCoded ? String(digits.dropFirst()) : digits
+        let prefix = isCountryCoded ? "+1 " : ""
+
+        if national.count > 10 { return raw }
+        if national.isEmpty { return prefix.trimmingCharacters(in: .whitespaces) }
+        if national.count <= 3 { return prefix + national }
+        if national.count <= 7 { return "\(prefix)\(national.prefix(3))-\(national.dropFirst(3))" }
+        return "\(prefix)(\(national.prefix(3))) \(national.dropFirst(3).prefix(3))-\(national.suffix(4))"
+    }
+
+    private static let asciiDigits: Set<Character> = Set("0123456789")
+
     /// The persistent "you still owe this call a disposition" line. The
     /// pending row's `toNumber` is already the server's normalized E.164.
     static func pendingBanner(for pending: CallSummary?) -> String? {
         guard let pending else { return nil }
         return "Finish your last call — \(formatNANP(pending.toNumber))"
     }
-}
-
-/// `"6198481782"` → `"(619) 848-1782"`, progressively, as the rep types.
-///
-/// A direct port of `apps/cti-web/src/format.ts`'s `formatDialString`, so the
-/// phone and the web dialer shape a half-typed number the same way. Display
-/// only — the raw string is what gets sent, and the server does the
-/// normalization it audits against.
-///
-/// Deliberately gives up in three places rather than guess: anything holding
-/// `*`/`#`, a `+` in front of a non-NANP country code, and an overflow past ten
-/// national digits all come back exactly as typed. Reshaping those would be a
-/// lie about which number is on the button.
-func formatDialString(_ raw: String) -> String {
-    if raw.isEmpty { return "" }
-    if raw.contains("*") || raw.contains("#") { return raw }
-
-    let hasPlus = raw.hasPrefix("+")
-    let digits = raw.filter(\.isNumber)
-    if hasPlus, !digits.hasPrefix("1") { return raw }
-
-    let isCountryCoded = digits.hasPrefix("1") && (hasPlus || digits.count > 10)
-    let national = isCountryCoded ? String(digits.dropFirst()) : digits
-    let prefix = isCountryCoded ? "+1 " : ""
-
-    if national.count > 10 { return raw }
-    if national.isEmpty { return prefix.trimmingCharacters(in: .whitespaces) }
-    if national.count <= 3 { return prefix + national }
-    if national.count <= 7 { return "\(prefix)\(national.prefix(3))-\(national.dropFirst(3))" }
-    return "\(prefix)(\(national.prefix(3))) \(national.dropFirst(3).prefix(3))-\(national.suffix(4))"
 }

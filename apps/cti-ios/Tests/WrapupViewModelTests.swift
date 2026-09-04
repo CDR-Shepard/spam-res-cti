@@ -82,4 +82,45 @@ final class WrapupViewModelTests: XCTestCase {
         XCTAssertFalse(WrapupViewModel.supersededToast.lowercased().contains("error"))
         XCTAssertFalse(WrapupViewModel.supersededToast.lowercased().contains("fail"))
     }
+
+    // MARK: - Which outcomes have something to say
+    //
+    // The toast is a property of the *outcome*, not of whichever surface
+    // happens to be on screen. That matters: a superseded save only happens
+    // because another call started, which means the full-screen call cover is
+    // already up — so the toast has to be drawn there as well as over the
+    // tabs, and both draw it from this one answer.
+
+    func testOnlyASupersededSaveRaisesAToast() {
+        XCTAssertEqual(WrapupViewModel.toast(for: .superseded), WrapupViewModel.supersededToast)
+    }
+
+    /// A close-out is silent, and a failure is shown inline on the wrap-up
+    /// itself — a toast would float away from the notes it concerns.
+    func testASavedOrFailedWrapupRaisesNoToast() {
+        XCTAssertNil(WrapupViewModel.toast(for: .dismissed))
+        XCTAssertNil(WrapupViewModel.toast(for: .failed("The wrap-up could not be saved.")))
+    }
+
+    // MARK: - Notes
+    //
+    // `dispositionRequest` omits `notes` entirely when nil, matching the
+    // server's `.optional()`. Whitespace the rep never meant to type must
+    // reach that as "no notes" rather than as a Task body containing a
+    // newline.
+
+    func testNotesAreTrimmedBeforePosting() {
+        XCTAssertEqual(WrapupViewModel.notesForPosting("  Left a message.  "), "Left a message.")
+    }
+
+    func testWhitespaceOnlyNotesPostAsNoNotes() {
+        XCTAssertEqual(WrapupViewModel.notesForPosting("\n"), "")
+        XCTAssertEqual(WrapupViewModel.notesForPosting("   \n\t "), "")
+        XCTAssertEqual(WrapupViewModel.notesForPosting(""), "")
+    }
+
+    /// Only the ends: a rep's own paragraph breaks are theirs to keep.
+    func testInteriorNewlinesSurvive() {
+        XCTAssertEqual(WrapupViewModel.notesForPosting("\nOne\n\nTwo\n"), "One\n\nTwo")
+    }
 }

@@ -10,6 +10,8 @@ private final class FakeFeed: RecentCallsReading, @unchecked Sendable {
     var pending: Result<CallSummary?, Error> = .success(nil)
     private(set) var recentCalls = 0
     private(set) var pendingCalls = 0
+    /// The `limit` each `recent` call asked for, in order.
+    private(set) var requestedLimits: [Int] = []
 
     init(recents: Result<[CallSummary], Error> = .success([]), pending: Result<CallSummary?, Error> = .success(nil)) {
         self.recents = recents
@@ -18,6 +20,7 @@ private final class FakeFeed: RecentCallsReading, @unchecked Sendable {
 
     func recent(limit: Int) async throws -> [CallSummary] {
         recentCalls += 1
+        requestedLimits.append(limit)
         return try recents.get()
     }
 
@@ -128,7 +131,18 @@ final class CallsFeedStoreTests: XCTestCase {
 
         await store.loadRecents(limit: 50)
 
-        XCTAssertEqual(api.recentCalls, 1)
+        XCTAssertEqual(api.requestedLimits, [50])
         XCTAssertEqual(store.recents, [])
+    }
+
+    /// The screens call `loadRecents()` bare; the default is the 50 rows the
+    /// brief asks for, not the server's own 25.
+    func testTheDefaultLimitIsFifty() async {
+        let api = FakeFeed(recents: .success([]))
+        let store = CallsFeedStore(api: api)
+
+        await store.loadRecents()
+
+        XCTAssertEqual(api.requestedLimits, [50])
     }
 }

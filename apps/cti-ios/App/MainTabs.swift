@@ -4,10 +4,10 @@ import SwiftUI
 /// them.
 ///
 /// The call UI is deliberately *not* a tab. A call can start from any tab (a
-/// redial from Recents, a VoIP push while the rep is reading Status), so the
-/// in-call screen covers the whole app and the two sheets — wrap-up and review
-/// acknowledgement — sit above whatever the rep was doing. Which one appears is
-/// `CallRoute`'s decision, pinned by `CallRouteTests`; this file only draws it.
+/// redial from Recents, a VoIP push while the rep is reading Status), so it
+/// covers the whole app, above whatever the rep was doing. Which screen it
+/// shows is `CallRoute`'s decision, pinned by `CallRouteTests`; this file only
+/// draws it.
 struct MainTabs: View {
     @EnvironmentObject private var controller: CallController
     @StateObject private var feed = CallsFeedStore.live()
@@ -43,12 +43,17 @@ struct MainTabs: View {
         // close this. A rep who could swipe the wrap-up away would leave their
         // next dial refused by the server's disposition gate with nothing on
         // screen explaining it — which is what Skip is for instead.
-        .fullScreenCover(item: .constant(route.presentation)) { item in
-            content(for: item.content)
+        .fullScreenCover(item: .constant(route.presentation)) { _ in
+            // The item decides *whether* a cover is up; `CallCoverView` reads
+            // the controller to decide what is inside it. See
+            // `CallRoute.coverContent(for:)` — the item's identity is the call,
+            // so it does not change across `.active → .wrapup`, and nothing in
+            // Apple's docs promises this closure runs again when it doesn't.
+            CallCoverView(toast: toast, onToast: show)
                 .environmentObject(controller)
                 .environmentObject(feed)
         }
-        .overlay(alignment: .top) { toastBanner }
+        .overlay(alignment: .top) { ToastBanner(text: toast) }
         // A finished call changes both of the reads the tabs show: the call
         // just made belongs in Recents, and the banner has to clear once its
         // disposition lands.
@@ -58,32 +63,6 @@ struct MainTabs: View {
                 await feed.loadPending()
                 await feed.loadRecents()
             }
-        }
-    }
-
-    @ViewBuilder
-    private func content(for content: CallPresentation.Content) -> some View {
-        switch content {
-        case let .inCall(info, since):
-            InCallView(info: info, since: since)
-        case let .wrapup(callId, info):
-            WrapupView(callId: callId, info: info) { show(WrapupViewModel.supersededToast) }
-        case let .acknowledge(info, reasons, requiredScriptId):
-            ReviewGate(prompt: DialViewModel.prompt(for: info, reasons: reasons, requiredScriptId: requiredScriptId))
-        }
-    }
-
-    @ViewBuilder
-    private var toastBanner: some View {
-        if let toast {
-            Text(toast)
-                .font(.subheadline)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(.thinMaterial, in: Capsule())
-                .shadow(radius: 8, y: 2)
-                .padding(.top, 8)
-                .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 
@@ -99,6 +78,66 @@ struct MainTabs: View {
         Task {
             try? await Task.sleep(for: .seconds(3))
             withAnimation { toast = nil }
+        }
+    }
+}
+
+/// Everything the cover shows, for as long as a call is on screen.
+///
+/// This is one view rather than three because of how it is presented. The
+/// `fullScreenCover` item's identity is the *call*, so it does not change when
+/// the call ends and the wrap-up is owed — and `fullScreenCover(item:)` only
+/// documents what happens when the item *does* change ("the system dismisses
+/// the currently presented modal view and replaces it"). Whether its content
+/// closure re-runs for an item whose identity held is not something Apple
+/// promises either way. So the closure is run for its side effect of putting
+/// *a* cover up, and what is inside it is derived here, from the observed
+/// controller, on every phase change: correct under either behaviour.
+///
+/// A cover with no content is a phase that has moved to `.idle` while the
+/// cover animates out. It draws the in-call backdrop rather than a white flash.
+struct CallCoverView: View {
+    @EnvironmentObject private var controller: CallController
+    /// The toast is drawn here *as well as* over the tabs, from the same state.
+    /// The one toast this app raises — a wrap-up superseded by the next call —
+    /// happens precisely when a new call has started, so the cover is up and an
+    /// overlay attached only to the tabs would be behind it, forever unseen.
+    let toast: String?
+    let onToast: (String) -> Void
+
+    var body: some View {
+        Group {
+            switch CallRoute.coverContent(for: controller.phase) {
+            case let .inCall(info, since):
+                InCallView(info: info, since: since)
+            case let .wrapup(callId, info):
+                WrapupView(callId: callId, info: info, onToast: onToast)
+            case let .acknowledge(info, reasons, requiredScriptId):
+                ReviewGate(
+                    prompt: DialViewModel.prompt(for: info, reasons: reasons, requiredScriptId: requiredScriptId)
+                )
+            case .none:
+                Color(uiColor: .systemGroupedBackground).ignoresSafeArea()
+            }
+        }
+        .overlay(alignment: .top) { ToastBanner(text: toast) }
+    }
+}
+
+/// One toast, drawn identically over the tabs and over the call cover.
+struct ToastBanner: View {
+    let text: String?
+
+    var body: some View {
+        if let text {
+            Text(text)
+                .font(.subheadline)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.thinMaterial, in: Capsule())
+                .shadow(radius: 8, y: 2)
+                .padding(.top, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 }

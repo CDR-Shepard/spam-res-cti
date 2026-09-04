@@ -41,10 +41,22 @@ struct InCallView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(uiColor: .systemGroupedBackground))
-        .sheet(isPresented: $showKeypad) {
-            InCallKeypad { controller.sendDigits($0) }
-                .presentationDetents([.medium])
+        // An overlay rather than a `.sheet`. A sheet here would be a
+        // presentation nested inside the call cover, and an IVR that hangs up
+        // while it is open would tear down its owner in the same update the
+        // cover's content swaps to the wrap-up — the exact nested-dismissal
+        // race the single-cover design exists to avoid. An overlay simply
+        // disappears with the view that owns it.
+        .overlay(alignment: .bottom) {
+            if showKeypad {
+                InCallKeypad(send: { controller.sendDigits($0) }, onDone: { showKeypad = false })
+                    .transition(.move(edge: .bottom))
+            }
         }
+        .animation(.snappy, value: showKeypad)
+        // Belt and braces: the pad has no meaning once this call is over, and
+        // `sendDigits` drops anything that is not `.active` anyway.
+        .onChange(of: since) { _, _ in showKeypad = false }
     }
 
     // MARK: - Who / how long
@@ -172,8 +184,8 @@ private struct CallControlButton: View {
 /// record of what the rep pressed.
 private struct InCallKeypad: View {
     let send: (String) -> Void
+    let onDone: () -> Void
     @State private var entered = ""
-    @Environment(\.dismiss) private var dismiss
 
     private static let keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"]
 
@@ -202,7 +214,11 @@ private struct InCallKeypad: View {
             }
             .padding(.horizontal, 32)
 
-            Button("Done") { dismiss() }.padding(.bottom, 16)
+            Button("Done", action: onDone).padding(.bottom, 24)
         }
+        .frame(maxWidth: .infinity)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24))
+        .shadow(radius: 12, y: -2)
     }
 }

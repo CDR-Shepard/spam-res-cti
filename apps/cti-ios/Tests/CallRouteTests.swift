@@ -109,4 +109,53 @@ final class CallRouteTests: XCTestCase {
             CallRoute.route(for: .dialing(other)).presentation?.id
         )
     }
+
+    // MARK: - What the cover draws, read live from the phase
+    //
+    // `coverContent(for:)` is what the cover's single view calls on every
+    // redraw, rather than trusting `fullScreenCover(item:)` to re-invoke its
+    // content closure when the item's *identity* has not changed. Apple
+    // documents the identity-changed case ("the system dismisses the
+    // currently presented modal view and replaces it") and says nothing about
+    // an item that stays identical while its payload changes — which is
+    // exactly what `.active → .wrapup` does here. Reading the phase through
+    // the observed controller makes the content correct either way.
+
+    func testTheCoverDrawsTheInCallScreenWhileACallIsUp() {
+        XCTAssertEqual(CallRoute.coverContent(for: .dialing(info)), .inCall(info, since: nil))
+        let since = Date(timeIntervalSince1970: 1_780_000_000)
+        XCTAssertEqual(CallRoute.coverContent(for: .active(info, since: since)), .inCall(info, since: since))
+    }
+
+    func testTheCoverDrawsTheWrapupWhenTheCallIsOver() {
+        XCTAssertEqual(
+            CallRoute.coverContent(for: .wrapup(callId: "call_1", info)),
+            .wrapup(callId: "call_1", info)
+        )
+    }
+
+    func testTheCoverDrawsTheReviewGateForAnUnacknowledgedVerdict() {
+        XCTAssertEqual(
+            CallRoute.coverContent(for: .needsAcknowledgement(info, reasons: ["X"], requiredScriptId: "s1")),
+            .acknowledge(info, reasons: ["X"], requiredScriptId: "s1")
+        )
+    }
+
+    func testTheCoverDrawsNothingWhenThereIsNoCallOfOurOwnToShow() {
+        XCTAssertNil(CallRoute.coverContent(for: .idle))
+        XCTAssertNil(CallRoute.coverContent(for: .ringing(info)))
+    }
+
+    /// The transition the whole design exists for: same identity, different
+    /// content. If these two were equal the cover would be showing a live-call
+    /// screen for a call that has already ended.
+    func testTheCoverSwapsContentAcrossActiveToWrapupWithoutChangingIdentity() {
+        let active = CallController.Phase.active(info, since: Date(timeIntervalSince1970: 1))
+        let wrapup = CallController.Phase.wrapup(callId: "call_1", info)
+        XCTAssertEqual(
+            CallRoute.route(for: active).presentation?.id,
+            CallRoute.route(for: wrapup).presentation?.id
+        )
+        XCTAssertNotEqual(CallRoute.coverContent(for: active), CallRoute.coverContent(for: wrapup))
+    }
 }

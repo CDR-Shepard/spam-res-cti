@@ -43,6 +43,13 @@ struct DialView: View {
             .navigationTitle("Callsign")
             .navigationBarTitleDisplayMode(.inline)
             .task { await feed.loadPending() }
+            // A dismissal is scoped to the call it was made about. Without
+            // this, a redial from Recents that comes back with the *same*
+            // refusal would be silently swallowed by the stale dismissal, and
+            // the rep would tap a row and watch nothing happen.
+            .onChange(of: controller.phase) { _, phase in
+                dismissedRefusal = DialViewModel.dismissal(dismissedRefusal, survives: phase)
+            }
         }
     }
 
@@ -91,21 +98,30 @@ struct DialView: View {
 
     // MARK: - Number
 
+    /// Editable, so a number copied out of an email or a CRM tab can be pasted
+    /// rather than re-keyed a digit at a time — the commonest way a rep on a
+    /// phone actually gets a number. Whatever arrives is sanitized by
+    /// `DialViewModel.accept` and shown back through the same formatter the
+    /// pad's own typing goes through, so the two are indistinguishable and the
+    /// pad keeps appending to a pasted number.
     private var numberDisplay: some View {
-        Group {
-            if raw.isEmpty {
-                Text(DialViewModel.placeholder).foregroundStyle(.tertiary)
-            } else {
-                Text(formatDialString(raw))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.5)
-            }
-        }
+        TextField(
+            DialViewModel.placeholder,
+            text: Binding(
+                get: { DialViewModel.formatDialString(raw) },
+                set: { raw = DialViewModel.accept($0) }
+            )
+        )
+        .keyboardType(.phonePad)
+        .textContentType(.telephoneNumber)
+        .autocorrectionDisabled()
+        .multilineTextAlignment(.center)
         .font(.system(size: 36, weight: .regular, design: .rounded))
         .monospacedDigit()
+        .lineLimit(1)
+        .minimumScaleFactor(0.5)
         .frame(height: 52)
-        .accessibilityLabel(raw.isEmpty ? DialViewModel.placeholder : formatDialString(raw))
+        .accessibilityLabel("Number")
     }
 
     // MARK: - Keypad
