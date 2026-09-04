@@ -412,14 +412,15 @@ the obvious extension points.
 │           ├── routes/{health,auth,firewall,calls,telephony,admin,
 │           │           reputation,inbound,cti}.ts
 │           ├── salesforce/{oauth,client,sync}.ts
-│           └── telephony/{types,twilio,index}.ts
+│           ├── telephony/{types,twilio,index}.ts
+│           └── tenancy/user-queries.ts # tenant-scoped, human-only user lookups
 ├── packages/
 │   ├── db/
 │   │   ├── src/{schema,index,migrate,migrate-runner}.ts
-│   │   ├── migrations/0001…0035               # advisory-locked runner
+│   │   ├── migrations/0001…0036               # advisory-locked runner
 │   │   └── drizzle.config.ts
 │   ├── phone/src/index.ts              # E.164 normalization
-│   ├── auth/src/{session,crypto,index}.ts
+│   ├── auth/src/{session,crypto,tenancy,index}.ts
 │   └── firewall/                       # Caller Reputation Firewall
 │       ├── src/{index,evaluate,aggregate,reasons,types,attempts,recipient,
 │       │        velocity,calling-hours,calling-window,rotation,warmup,

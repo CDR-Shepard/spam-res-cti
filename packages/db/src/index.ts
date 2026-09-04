@@ -68,4 +68,5 @@ export type {
   PreCallAudit,
   SalesforceConnection,
   User,
+  UserKind,
 } from './schema.js';

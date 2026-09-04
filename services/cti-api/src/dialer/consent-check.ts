@@ -2,10 +2,10 @@
  * The power dialer's consent gate (spam-defense audit §1): which of these
  * numbers may the dialer NOT call?
  *
- * Click-to-dial has always been fail-closed — `firewall/index.ts` checks the
- * internal opt-out list (:364), the manual block list (:379) and the federal
- * DNC cache (:728) before every dial, and `routes/calls.ts` turns a BLOCK into
- * a 403. The power dialer enforced NONE of it: `create-session.ts` /
+ * Click-to-dial has always been fail-closed — `packages/firewall/src/evaluate.ts` checks the
+ * `opt_out`, `blocklist`, and `federal_dnc` gates before every dial, and
+ * `routes/calls.ts` turns a BLOCK into a 403. The power dialer enforced NONE of
+ * it: `create-session.ts` /
  * `engine.ts` never referenced those tables. This module is that missing gate,
  * applied ONCE at queue build so a blocked target becomes a VISIBLE skipped row
  * the rep can see the reason for, instead of a call that silently goes out.
@@ -16,7 +16,7 @@
  *  - `opt_outs`        org-scoped exact e164 match → always blocks.
  *  - `blocked_numbers` org-scoped exact e164 match → always blocks.
  *  - `federal_dnc_entries` exact e164 match, NOT org-scoped and NOT filtered on
- *    `source` → always blocks, in EVERY `dnc_mode` (firewall/index.ts:730-740:
+ *    `source` → always blocks, in EVERY `dnc_mode` (the federal_dnc gate in evaluate.ts:
  *    "A number that IS in the loaded cache always blocks, regardless of org
  *    mode"). `dnc_mode` only decides how a MISS is *labeled* upstream
  *    (`DNC_PRESCRUBBED` / `DNC_OK` / `DNC_NOT_LOADED`) — a miss never blocks in

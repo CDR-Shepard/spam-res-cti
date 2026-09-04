@@ -1,6 +1,6 @@
 /**
  * Human-readable catalog of every firewall gate. The backend identifies
- * checks by snake_case name (services/cti-api/src/firewall/index.ts); this
+ * checks by snake_case name (packages/firewall/src/evaluate.ts); this
  * maps each one to rep-facing copy and a category so the verdict panel can
  * tell the story: reputation hygiene first, then delivery, then compliance.
  */

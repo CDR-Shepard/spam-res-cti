@@ -186,7 +186,7 @@ export async function advanceSession(
       throw err;
     }
     // Stamp the dial AND record the attempt in ONE transaction. The attempt row
-    // is what the shared per-customer ceiling counts (firewall/index.ts
+    // is what the shared per-customer ceiling counts (packages/firewall/src/evaluate.ts's
     // customerAttemptCounts) and it is append-only, so a later fallback dial of
     // this same item cannot rewrite it away the way it rewrites the item's own
     // to_number/from_number. Atomic with the stamp so the ceiling can never

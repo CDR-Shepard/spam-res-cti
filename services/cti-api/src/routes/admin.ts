@@ -9,6 +9,7 @@ import { resolveSession } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
+import { humanUserById, humanUsersInOrg } from '../tenancy/user-queries.js';
 
 /** Human-readable label for an imported DID, derived from its area code so the
  *  Numbers pool reads "San Diego (619)" / "Los Angeles (213)" at a glance. */
@@ -91,7 +92,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         isAdmin: schema.users.isAdmin,
       })
       .from(schema.users)
-      .where(eq(schema.users.orgId, s.orgId));
+      .where(humanUsersInOrg(s.orgId));
     return { reps: rows };
   });
 
@@ -138,7 +139,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb();
     if (parsed.data.assignedUserId) {
       const rep = await db.query.users.findFirst({
-        where: and(eq(schema.users.id, parsed.data.assignedUserId), eq(schema.users.orgId, s.orgId)),
+        where: humanUserById(s.orgId, parsed.data.assignedUserId),
       });
       if (!rep) return reply.code(400).send({ error: 'assignedUserId is not a user in this org' });
     }
@@ -200,7 +201,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     if (!owned) return reply.code(404).send({ error: 'Not found' });
     if (parsed.data.assignedUserId) {
       const rep = await db.query.users.findFirst({
-        where: and(eq(schema.users.id, parsed.data.assignedUserId), eq(schema.users.orgId, s.orgId)),
+        where: humanUserById(s.orgId, parsed.data.assignedUserId),
       });
       if (!rep) return reply.code(400).send({ error: 'assignedUserId is not a user in this org' });
     }
@@ -692,7 +693,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         powerDialerEnabled: schema.users.powerDialerEnabled,
       })
       .from(schema.users)
-      .where(eq(schema.users.orgId, s.orgId))
+      .where(humanUsersInOrg(s.orgId))
       .orderBy(schema.users.displayName);
     return { users: rows };
   });
@@ -711,7 +712,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     const [updated] = await db
       .update(schema.users)
       .set({ powerDialerEnabled: body.data.powerDialerEnabled })
-      .where(and(eq(schema.users.id, params.data.userId), eq(schema.users.orgId, s.orgId)))
+      .where(humanUserById(s.orgId, params.data.userId))
       .returning({ id: schema.users.id, powerDialerEnabled: schema.users.powerDialerEnabled });
     if (!updated) return reply.code(404).send({ error: 'Not found' });
     req.log.info(

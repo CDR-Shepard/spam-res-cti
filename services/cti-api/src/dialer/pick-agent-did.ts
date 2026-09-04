@@ -10,7 +10,7 @@
  *
  * What both kinds now share is the per-CUSTOMER attempt ceiling — the
  * anti-harassment backstop the firewall applies at click-to-dial time
- * (firewall/index.ts gate 5) — down to the same count and the same boundary
+ * (`@cti/firewall`'s evaluate.ts, gate 5) — down to the same count and the same boundary
  * (`customerAttemptCounts` + `atCustomerCeiling`), so a recipient's contacts
  * add up across click-to-dial AND power dialing rather than each path keeping
  * its own private tally. Hitting the ceiling must NOT pause the run: it is a
@@ -20,8 +20,7 @@
  */
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@cti/db';
-import { atCustomerCeiling, customerAttemptCounts } from '@cti/firewall';
-import { pickRotationNumber, type AttemptCaps } from '@cti/firewall';
+import { atCustomerCeiling, customerAttemptCounts, pickRotationNumber, type AttemptCaps } from '@cti/firewall';
 import { attemptIncrement, effectiveCapFor, pickPoolDid, type Db } from './pick-did.js';
 
 export type PickDidArgs = { orgId: string; userId: string; toE164: string; runKind: 'pool' | 'agent' };

@@ -11,11 +11,11 @@ import type { FastifyInstance } from 'fastify';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb, schema } from '@cti/db';
-import { issueSession, resolveSession } from '@cti/auth';
+import { createTenant, encryptString, issueSession, resolveSession } from '@cti/auth';
 import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProfilePhoto, fetchUserInfo } from '../salesforce/oauth.js';
-import { encryptString } from '@cti/auth';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
+import { humanUserByEmail } from '../tenancy/user-queries.js';
 
 const DEV_USER_ID = '00000000-0000-0000-0000-00000000beef';
 
@@ -269,18 +269,10 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         });
         const orgIsNew = !org;
         if (!org) {
-          const [createdOrg] = await db
-            .insert(schema.organizations)
-            .values({ name: `Salesforce Org ${tok.sfOrgId}`, sfOrgId: tok.sfOrgId })
-            .returning();
-          org = createdOrg!;
-          // Seed a default campaign config so the firewall's campaign gate
-          // passes out of the box (calling hours / attempt caps use the schema
-          // defaults: 08:00–20:00 recipient-local, Mon–Fri, 5 attempts / 14d).
-          await db
-            .insert(schema.campaignConfigs)
-            .values({ orgId: org.id, key: 'default', name: 'Default Campaign' })
-            .onConflictDoNothing();
+          // New tenant from a first Salesforce login: org + AI Agent service
+          // user + default campaign, in one transaction (see @cti/auth createTenant).
+          const created = await createTenant(db, { name: `Salesforce Org ${tok.sfOrgId}`, sfOrgId: tok.sfOrgId });
+          org = created.org;
         }
         const email = (profile.sfUserEmail?.trim() || `sf-${tok.sfUserId}@${tok.sfOrgId}.salesforce.local`).toLowerCase();
         // App-admin (manage + ASSIGN outbound numbers) is driven by the
@@ -302,7 +294,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           { email, sfProfile: sfProfileName ?? '(unknown)', isSysAdminProfile, explicitAdmin, orgIsNew },
           'salesforce_login_admin_resolve',
         );
-        let user = await db.query.users.findFirst({ where: eq(schema.users.email, email) });
+        let user = await db.query.users.findFirst({ where: humanUserByEmail(org.id, email) });
         if (!user) {
           const shouldBeAdmin = isSysAdminProfile || explicitAdmin || orgIsNew;
           const [createdUser] = await db
@@ -410,6 +402,11 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     if (!stateRow) return { status: 'unknown' };
     if (!stateRow.consumedAt) return { status: 'pending' };
     if (!stateRow.loginUserId) return { status: 'failed' }; // canceled or org-gated
+    const user = await db.query.users.findFirst({
+      where: eq(schema.users.id, stateRow.loginUserId),
+    });
+    if (!user) return { status: 'failed' };
+    if (user.kind === 'service') return { status: 'failed' }; // service users can never hold a session; don't burn the single-use claim
     // Claim the single-use session mint atomically so concurrent polls can't
     // each mint a session.
     const claim = await db
@@ -423,10 +420,6 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       )
       .returning({ state: schema.salesforceOauthState.state });
     if (claim.length === 0) return { status: 'done' }; // already minted once
-    const user = await db.query.users.findFirst({
-      where: eq(schema.users.id, stateRow.loginUserId),
-    });
-    if (!user) return { status: 'failed' };
     const session = await issueSession(user.id);
     return {
       status: 'connected',

@@ -1419,7 +1419,7 @@ for evaluate() — the first coverage of the full pipeline. No behavior change."
 ```bash
 cd /Users/cdrshepard/spam-res-cti && docker build -t cti-api-extraction-check . 2>&1 | tail -5 && docker run --rm cti-api-extraction-check node -e "import('/app/services/cti-api/dist/server.js').catch(e => { console.log('boot reached config validation:', /environment|DATABASE_URL|TOKEN_ENCRYPTION_KEY/.test(String(e)) ); process.exit(0) })" ; docker run --rm cti-api-extraction-check ls packages/db/migrations | tail -1
 ```
-Expected: build completes; the boot probe prints `boot reached config validation: true` (missing env is the expected failure, proving module resolution of `@cti/*` works in the image); last migration filename listed is `0035_mobile_voip_token.sql`.
+Expected: build completes; the boot probe prints `Fatal startup error: Invalid environment configuration …` from `server.ts`'s own `main().catch` (it exits before the wrapper's `.catch` runs; the missing env is the expected failure, and reaching it proves module resolution of `@cti/*` works in the image); last migration filename listed is `0035_mobile_voip_token.sql`.
 
 - [ ] **Step 2: README**
 
