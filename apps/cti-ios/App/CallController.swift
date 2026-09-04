@@ -1,0 +1,405 @@
+import Combine
+import Foundation
+
+/// The softphone's call state machine.
+///
+/// One rule sits above everything else in this file: **the phone never decides
+/// it is allowed to dial.** Every outbound path runs the server's pre-call
+/// firewall audit first, carries that audit's own id into `POST /calls`, and
+/// only reaches `sdk.connect` after the server has said `.allowed`. A BLOCK, a
+/// REQUIRE_REVIEW the rep has not acknowledged, a refusal, or *any* thrown
+/// error all end with the rep reading a reason and the SDK untouched — there
+/// is deliberately no code path from a dial tap to the radio that does not
+/// pass through the server.
+///
+/// The second rule: nothing fails quietly. Every refusal and every thrown
+/// error lands in `lastRefusal`, because a dial that silently does nothing is
+/// indistinguishable to a rep from a broken app.
+///
+/// Owns nothing concrete — the Twilio SDK, CallKit, and the network are all
+/// injected protocols (`VoiceSDK`, `CallSystem`, `CallsAPIClient`), so the
+/// whole machine runs in a host-free test bundle.
+@MainActor
+final class CallController: ObservableObject {
+
+    /// Where a call is. The associated values are what the screen draws, so a
+    /// view never has to reach back into the controller for "who is this".
+    enum Phase: Equatable {
+        case idle
+        /// Inbound, not yet answered.
+        case ringing(CallerInfo)
+        /// Outbound, mid-audit/mid-connect. Blocks a second dial.
+        case dialing(CallerInfo)
+        case active(CallerInfo, since: Date)
+        /// The call is over and the rep owes it a disposition. `callId` is nil
+        /// for an inbound call — the server made that row, so `finishWrapup`
+        /// resolves it from `GET /calls/pending-disposition`.
+        case wrapup(callId: String?, CallerInfo)
+        /// The audit came back REQUIRE_REVIEW: the rep must see `reasons` (and
+        /// read `requiredScriptId`'s script) and explicitly acknowledge before
+        /// this call is placed. Nothing has been dialed.
+        case needsAcknowledgement(CallerInfo, reasons: [String], requiredScriptId: String?)
+    }
+
+    /// A REQUIRE_REVIEW verdict, held while the rep reads it, so
+    /// `acknowledge()` re-places against the audit row the server already has
+    /// rather than opening a fresh one.
+    private struct HeldReview {
+        let auditId: String
+        let info: CallerInfo
+        let e164: String
+        let recipientRecordId: String?
+        let recipientObjectType: String?
+    }
+
+    @Published private(set) var phase: Phase = .idle
+    /// The last thing the server (or a failure) said, verbatim, for the screen
+    /// to show. Cleared when a new dial starts — never by a success.
+    @Published private(set) var lastRefusal: String?
+    @Published private(set) var isMuted = false
+    /// The firewall-approved DID the server pinned for the live call, as
+    /// `POST /calls` reported it. Display only — the app never chooses it.
+    @Published private(set) var fromNumber: String?
+
+    private let sdk: VoiceSDK
+    private let system: CallSystem
+    private let api: CallsAPIClient
+    private let tokens: () -> String
+    private let now: () -> Date
+
+    private var invite: IncomingInvite?
+    private var call: ActiveCall?
+    private var callId: String?
+    private var heldReview: HeldReview?
+
+    init(
+        sdk: VoiceSDK,
+        system: CallSystem,
+        api: CallsAPIClient,
+        tokens: @escaping () -> String,
+        now: @escaping () -> Date = Date.init
+    ) {
+        self.sdk = sdk
+        self.system = system
+        self.api = api
+        self.tokens = tokens
+        self.now = now
+    }
+
+    // MARK: - Inbound
+
+    /// Turns a VoIP push into a ringing call.
+    ///
+    /// Synchronous on purpose: PushKit requires the call to be reported to
+    /// CallKit before its delegate method returns, so the report is issued on
+    /// this same stack (see `CallSystem.reportIncoming`). A push that is not an
+    /// invite is simply ignored — PushKit gives us nothing to refuse with.
+    func handleIncomingPush(_ payload: [AnyHashable: Any]) {
+        guard let invite = sdk.handleIncomingPush(payload: payload) else { return }
+
+        // One call at a time. Accepting a second invite here would overwrite
+        // the live call's state and orphan it — still connected, with nothing
+        // left able to hang it up. Rejecting sends the second caller to the
+        // server's own fallback, which is what a busy line is for.
+        guard case .idle = phase else {
+            invite.reject()
+            return
+        }
+        self.invite = invite
+
+        let info = CallerInfo.from(customParameters: invite.customParameters, from: invite.from)
+        phase = .ringing(info)
+
+        // The CallKit banner gets the record type glued on ("Jordyn Freedman ·
+        // Lead") when there is a name to glue it to; "Record" mirrors the
+        // server's own fallback for a matched record of no particular type.
+        let title = info.name.map { "\($0) · \(info.recordType ?? "Record")" } ?? info.displayTitle
+        system.reportIncoming(uuid: invite.uuid, title: title, handle: info.number) { [weak self] error in
+            guard let error else { return }
+            onMainActor { self?.incomingReportFailed(invite: invite, error: error) }
+        }
+    }
+
+    /// CallKit refused the call (Do Not Disturb, blocked caller, filtered).
+    /// The invite cannot be left ringing against a call the system does not
+    /// know about, so it is rejected and the rep is told why.
+    private func incomingReportFailed(invite: IncomingInvite, error: Error) {
+        // A late refusal that arrives after the rep already answered is not
+        // allowed to tear down a live call.
+        guard case .ringing = phase, self.invite === invite else { return }
+        invite.reject()
+        lastRefusal = error.localizedDescription
+        reset()
+    }
+
+    func answer() {
+        guard case let .ringing(info) = phase, let invite else { return }
+        attach(invite.accept())
+        self.invite = nil
+        phase = .active(info, since: now())
+    }
+
+    func decline() {
+        guard case .ringing = phase, let invite else { return }
+        invite.reject()
+        // Tell CallKit too: the invite is dead, and leaving the system's call
+        // up would strand the phone in an in-call state with nothing behind it.
+        system.reportEnded(uuid: invite.uuid)
+        reset()
+    }
+
+    // MARK: - Outbound
+
+    /// Audits, then dials. Never the other way round, and never one without
+    /// the other.
+    ///
+    /// `recipientRecordId`/`recipientObjectType` identify the Lead/Contact the
+    /// rep tapped, when there was one — they ride along so the server can
+    /// attach the call to the right record.
+    func placeCall(to e164: String, recipientRecordId: String? = nil, recipientObjectType: String? = nil) async {
+        guard case .idle = phase else { return }
+        lastRefusal = nil
+        let info = CallerInfo(number: e164, name: nil, recordId: recipientRecordId, recordType: recipientObjectType)
+        phase = .dialing(info)
+
+        do {
+            let verdict = try await api.precall(to: e164, recipientRecordId: recipientRecordId)
+            switch verdict.decision {
+            case .block:
+                // The server's words, not ours. `reasons` is the fallback for a
+                // BLOCK that carries no human-readable reason: still specific,
+                // still the server's, and better than a blank refusal.
+                lastRefusal = verdict.blockReason ?? verdict.reasons.joined(separator: ", ")
+                reset()
+
+            case .requireReview:
+                holdForReview(
+                    auditId: verdict.auditId, info: info, e164: e164,
+                    reasons: verdict.reasons, requiredScriptId: verdict.requiredScriptId,
+                    recipientRecordId: recipientRecordId, recipientObjectType: recipientObjectType
+                )
+
+            case .allow:
+                try await dial(
+                    info: info, e164: e164, auditId: verdict.auditId, acknowledged: false,
+                    recipientRecordId: recipientRecordId, recipientObjectType: recipientObjectType
+                )
+            }
+        } catch {
+            fail(with: error)
+        }
+    }
+
+    /// The rep read the review reasons and chose to call anyway. Places against
+    /// the held audit with `acknowledged: true` — the only way that audit's
+    /// call is ever allowed through.
+    func acknowledge() async {
+        guard case let .needsAcknowledgement(info, _, _) = phase, let review = heldReview else { return }
+        lastRefusal = nil
+        phase = .dialing(info)
+        do {
+            try await dial(
+                info: info, e164: review.e164, auditId: review.auditId, acknowledged: true,
+                recipientRecordId: review.recipientRecordId, recipientObjectType: review.recipientObjectType
+            )
+        } catch {
+            fail(with: error)
+        }
+    }
+
+    func cancelAcknowledgement() {
+        guard case .needsAcknowledgement = phase else { return }
+        reset()
+    }
+
+    /// The single place `sdk.connect` is reached from — and it is reachable
+    /// only with an `auditId` the server itself issued.
+    private func dial(
+        info: CallerInfo, e164: String, auditId: String, acknowledged: Bool,
+        recipientRecordId: String?, recipientObjectType: String?
+    ) async throws {
+        let result = try await api.place(
+            to: e164, auditId: auditId, acknowledged: acknowledged,
+            recipientRecordId: recipientRecordId, recipientObjectType: recipientObjectType
+        )
+
+        switch result {
+        case let .allowed(callId, fromNumber):
+            self.callId = callId
+            self.fromNumber = fromNumber
+            heldReview = nil
+            // `CallDbId` is what ties the media leg back to the row the server
+            // just created and to the DID it pinned; the SDK is never asked to
+            // choose a caller id.
+            let call = try await sdk.connect(accessToken: tokens(), params: ["To": e164, "CallDbId": callId])
+            attach(call)
+            system.reportOutgoingStarted(uuid: call.uuid, handle: e164)
+            phase = .active(info, since: now())
+
+        case let .refused(reason):
+            lastRefusal = reason
+            reset()
+
+        case let .reviewRequired(reasons, requiredScriptId):
+            // The server changed its mind between the audit and the dial (a
+            // clock crossing a calling-hours edge, most often). Same stop as a
+            // REQUIRE_REVIEW verdict, against the same audit — v1 does not
+            // re-audit on its own; an expired audit comes back as a `.refused`
+            // the rep reads before tapping call again.
+            holdForReview(
+                auditId: auditId, info: info, e164: e164,
+                reasons: reasons, requiredScriptId: requiredScriptId,
+                recipientRecordId: recipientRecordId, recipientObjectType: recipientObjectType
+            )
+        }
+    }
+
+    private func holdForReview(
+        auditId: String, info: CallerInfo, e164: String,
+        reasons: [String], requiredScriptId: String?,
+        recipientRecordId: String?, recipientObjectType: String?
+    ) {
+        heldReview = HeldReview(
+            auditId: auditId, info: info, e164: e164,
+            recipientRecordId: recipientRecordId, recipientObjectType: recipientObjectType
+        )
+        phase = .needsAcknowledgement(info, reasons: reasons, requiredScriptId: requiredScriptId)
+    }
+
+    /// Anything thrown on a dial path. The server may well have created a call
+    /// row before the failure (a `connect` that fails after `POST /calls`
+    /// succeeded); that row is exactly what `GET /calls/pending-disposition`
+    /// exists to hand back, so local state is dropped rather than guessed at.
+    private func fail(with error: Error) {
+        lastRefusal = error.localizedDescription
+        reset()
+    }
+
+    // MARK: - In call
+
+    func setMuted(_ on: Bool) {
+        guard let call else { return }
+        call.setMuted(on)
+        isMuted = on
+    }
+
+    func hangUp() {
+        guard let info = liveCaller else { return }
+        call?.hangUp()
+        endCall(info: info)
+    }
+
+    /// The far end hung up, or the media died.
+    private func callDidDisconnect(_ error: Error?) {
+        guard let info = liveCaller else { return }
+        // A disconnect error is the only signal the rep gets that the call
+        // dropped rather than ended; swallowing it would leave them staring at
+        // a wrap-up for a call they think they completed.
+        if let error { lastRefusal = error.localizedDescription }
+        endCall(info: info)
+    }
+
+    /// The one exit from a live call, shared by the local hang-up and the
+    /// remote one so a remotely-ended call can never skip the wrap-up (and so
+    /// leave the rep's next dial blocked by the server's disposition gate with
+    /// nothing on screen explaining it).
+    private func endCall(info: CallerInfo) {
+        // Detach before ending: this both breaks the controller ⇄ call
+        // reference and stops a local hang-up from bouncing back through
+        // `onDisconnect` into a second transition.
+        let uuid = call?.uuid
+        call?.onDisconnect = nil
+        call = nil
+        invite = nil
+        isMuted = false
+        if let uuid { system.reportEnded(uuid: uuid) }
+        phase = .wrapup(callId: callId, info)
+    }
+
+    /// A call only ends from `.active`. `.dialing` is deliberately excluded:
+    /// the audit/place round trip is still in flight and would set `.active`
+    /// straight over any wrap-up written underneath it.
+    private var liveCaller: CallerInfo? {
+        guard case let .active(info, _) = phase else { return nil }
+        return info
+    }
+
+    private func attach(_ call: ActiveCall) {
+        self.call = call
+        call.onDisconnect = { [weak self] error in
+            // `[weak self]`: the call holds this closure and the controller
+            // holds the call, so a strong capture would be a cycle that
+            // outlives every call the app ever makes.
+            onMainActor { self?.callDidDisconnect(error) }
+        }
+    }
+
+    // MARK: - Wrap-up
+
+    /// Posts the disposition that closes the call out.
+    ///
+    /// An inbound call has no client-side id — the server created that row — so
+    /// it is resolved from `GET /calls/pending-disposition`. Nothing pending
+    /// means the server's sweep already auto-dispositioned it; there is no id
+    /// to post against and inventing one would write to the wrong call.
+    func finishWrapup(disposition: String, notes: String) async {
+        guard case let .wrapup(existingId, _) = phase else { return }
+        do {
+            let resolved: String?
+            if let existingId {
+                resolved = existingId
+            } else {
+                resolved = try await api.pendingDisposition()?.id
+            }
+            guard let id = resolved else {
+                reset()
+                return
+            }
+            try await api.disposition(callId: id, disposition: disposition, notes: notes)
+            reset()
+        } catch {
+            // Stay in wrap-up. Dropping it would throw away the rep's notes and
+            // leave their next dial refused by the disposition gate with no
+            // explanation on screen.
+            lastRefusal = error.localizedDescription
+        }
+    }
+
+    func skipWrapup() {
+        guard case .wrapup = phase else { return }
+        reset()
+    }
+
+    // MARK: -
+
+    /// Back to idle with nothing held over. Deliberately does **not** clear
+    /// `lastRefusal`: the reason a dial was refused has to outlive the
+    /// transition that refused it, or the rep never sees it. `placeCall` clears
+    /// it when the next attempt starts.
+    private func reset() {
+        invite = nil
+        call?.onDisconnect = nil
+        call = nil
+        callId = nil
+        fromNumber = nil
+        heldReview = nil
+        isMuted = false
+        phase = .idle
+    }
+}
+
+/// Runs `body` on the main actor, without a hop when it is already there.
+///
+/// Both callbacks the controller hands out (`CallSystem.reportIncoming`'s
+/// completion and `ActiveCall.onDisconnect`) are documented as main-thread, and
+/// the direct call keeps them synchronous — CallKit's refusal has to reject the
+/// invite on the same stack that reported it. The hop is the safety net for an
+/// adapter that violates the contract: a wrong thread should cost a hop, not
+/// trap `assumeIsolated` in the middle of a call.
+private func onMainActor(_ body: @escaping @MainActor () -> Void) {
+    if Thread.isMainThread {
+        MainActor.assumeIsolated { body() }
+    } else {
+        Task { @MainActor in body() }
+    }
+}

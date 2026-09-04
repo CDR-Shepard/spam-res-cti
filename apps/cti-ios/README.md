@@ -51,6 +51,14 @@ honest: the reload is retried after CallKit refuses it (and not repeated once
 it sticks), a second sync is absorbed while one is in flight, and a 401 unpairs
 the phone with a reason `PairView` can show.
 
+`CallControllerTests` covers the softphone's own state machine the same way —
+the Twilio SDK, CallKit and the calls API are all protocols, so a whole call
+runs in microseconds with no simulator permissions. What it exists to prove is
+that **the phone never dials on its own judgement**: every outbound path runs
+the server's pre-call firewall audit first, and a BLOCK, an unacknowledged
+REQUIRE_REVIEW, a refusal or a thrown error all leave `connect` untouched and a
+reason on screen.
+
 ## How a phone gets a directory
 
 1. **Pair.** The rep opens the softphone, chooses "Pair iPhone", and reads a

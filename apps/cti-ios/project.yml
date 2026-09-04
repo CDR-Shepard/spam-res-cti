@@ -112,7 +112,8 @@ targets:
   # Logic tests. Deliberately host-free: everything under test takes its
   # collaborators by injection (paging over a transport, a file-backed store
   # over a container URL, the sync engine over a token store, a pull, and
-  # CallKit), so the bundle compiles those sources directly instead of
+  # CallKit, the call controller over the voice SDK / CallKit / calls-API
+  # protocols), so the bundle compiles those sources directly instead of
   # standing up a host app and an App Group container on the simulator.
   # ---------------------------------------------------------------------------
   CallsignTests:
@@ -132,6 +133,9 @@ targets:
       - path: App/Keychain.swift
       - path: App/SyncEngine.swift
       - path: App/SessionTokenStore.swift
+      - path: App/CallerInfo.swift
+      - path: App/VoiceProtocols.swift
+      - path: App/CallController.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gghomes.callsign.tests
