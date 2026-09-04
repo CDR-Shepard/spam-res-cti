@@ -3,9 +3,9 @@
  * numbers may the dialer NOT call?
  *
  * Click-to-dial has always been fail-closed — `packages/firewall/src/evaluate.ts` checks the
- * internal opt-out list (:364), the manual block list (:379) and the federal
- * DNC cache (:728) before every dial, and `routes/calls.ts` turns a BLOCK into
- * a 403. The power dialer enforced NONE of it: `create-session.ts` /
+ * `opt_out`, `blocklist`, and `federal_dnc` gates before every dial, and
+ * `routes/calls.ts` turns a BLOCK into a 403. The power dialer enforced NONE of
+ * it: `create-session.ts` /
  * `engine.ts` never referenced those tables. This module is that missing gate,
  * applied ONCE at queue build so a blocked target becomes a VISIBLE skipped row
  * the rep can see the reason for, instead of a call that silently goes out.
