@@ -49,7 +49,7 @@ Foundation turns `spam-res-cti` from a single-org Salesforce CTI into the base o
 
 Rules for the extraction:
 - **No behavior change.** Commit boundaries: one package per commit; `cti-api` switches imports in the same commit; typecheck and the full CTI test suite green at each commit.
-- **Firewall split.** `firewall/index.ts` (1,350 lines) becomes `gates/<name>.ts` (one gate each, exporting `{ name, channels, run }`), `aggregate.ts`, `evaluate.ts`, `reasons.ts`, `types.ts`. Existing exported functions (`evaluate`, `aggregate`, `tallyAttempts`, `velocityGateCheck`, `callingHoursGateCheck`, etc.) keep their names and signatures via the package index.
+- **Firewall split, two passes.** Pass one (this plan): `firewall/index.ts` becomes `types`, `reasons`, `aggregate`, `attempts`, `recipient`, `velocity`, `calling-hours`, `calling-window`, and `evaluate` modules with every export unchanged, and the Salesforce lookup becomes an injected `FirewallDeps` port. Pass two (rollout step 5, with channel/actor): the inline gates in `evaluate` become `gates/<name>.ts` exporting `{ name, channels, run }`, which is when applicability is introduced and tested.
 - **Migrations path.** `packages/db/migrations/` becomes the single migrations directory. `cti_schema_migrations` tracking table is unchanged so already-applied files are recognized. Both services' `railway.json` `preDeployCommand` becomes `npm --workspace packages/db run migrate`.
 - **Advisory lock.** The runner wraps its run in `pg_advisory_lock(<constant>)` so two services deploying from one push serialize; the second run finds nothing to apply.
 - **Dockerfiles.** `cti-api` keeps the root Dockerfile (updated to copy `packages/*/package.json` for the install layer). `services/outreach-api/Dockerfile` builds `outreach-web` and `outreach-api`. Railway service settings point each service at its Dockerfile and `railway.json`.
@@ -311,7 +311,7 @@ Conventions match `cti-api` (vitest, fake-DB injection via `vi.mock`, TS strict)
 
 Order is chosen so the reps never notice. Foundation is one spec but several implementation plans; the natural plan boundaries are steps 1–2 (extraction and tenancy), steps 3–4 (product skeleton, lead store, import), and steps 5–6 (firewall and delivery), with step 7 closing the last plan.
 
-1. **Extraction** — `packages/db`, `packages/phone`, `packages/auth`, `packages/firewall` (split), `packages/contracts` (empty shell). Pure refactor; CTI tests green; deploy `cti-api` alone and observe a full business day.
+1. **Extraction** — `packages/db`, `packages/phone`, `packages/auth`, `packages/firewall` (split). Pure refactor; CTI tests green; deploy `cti-api` alone and observe a full business day.
 2. **Tenancy migration** — organizations/users columns, per-tenant email uniqueness, GG Homes backfill (slug, timezone, AI Agent user). Deploy `cti-api`. No visible change.
 3. **`outreach-api` + `outreach-web` skeleton** — health, WorkOS sign-in, team page, tenant switcher. New Railway service with its own domain. Invite our team.
 4. **Lead store + import pipeline + suppression** — tables, jobs, object storage, lists/contacts/suppression screens, litigator loader.

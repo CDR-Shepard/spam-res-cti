@@ -17,6 +17,11 @@ apps/
   cti-desktop/         Electron + React renderer (hardened preload bridge)
 services/
   cti-api/             Fastify backend, Postgres (via Drizzle), Twilio + Salesforce
+packages/
+  db/                  Drizzle schema, Postgres pool, SQL migrations (advisory-locked runner)
+  phone/               E.164 normalization
+  auth/                sessions, token encryption
+  firewall/            Caller Reputation Firewall, rotation, warmup, state rules, reputation signals
 ```
 
 The two frontends share one design system and one component set —
@@ -78,6 +83,9 @@ createdb cti_dev   # or use Supabase and paste its connection string into DATABA
 
 # 4. Apply migrations + seed dev rep
 npm run migrate
+# Packages build automatically before dev:api, typecheck, test, and build:api;
+# run "npm run build:packages" by hand after editing a package while
+# "tsx watch" is running.
 
 # 5. Build the Salesforce softphone bundle (the API serves it at /cti/).
 #    Required for the Salesforce phone-tab surface; re-run after web changes.
@@ -195,7 +203,7 @@ once, it covers all their numbers.
 
 ## Caller Reputation Firewall
 
-Every call traverses up to 19 gates (`services/cti-api/src/firewall/index.ts`),
+Every call traverses up to 19 gates (`packages/firewall/src/evaluate.ts`),
 grouped in the UI by what they protect:
 
 **Reputation hygiene** (keeps numbers off "Spam Likely")
@@ -233,7 +241,8 @@ grouped in the UI by what they protect:
 | Recording consent   | REVIEW (two-party) | `RECORDING_CONSENT_REVIEW`              |
 
 When the rep doesn't pin a from-number, the firewall **predicts the rotation
-pool's pick** (same selection `POST /calls` makes, see `src/rotation.ts`) so
+pool's pick** (same selection `POST /calls` makes, see
+`packages/firewall/src/rotation.ts`) so
 the per-DID gates — warmup, velocity, neighbor-spoofing, attestation — run at
 preflight instead of silently skipping. The verdict shows which caller ID
 will carry the call.
@@ -389,19 +398,27 @@ the obvious extension points.
 │       └── vite.config.ts
 ├── services/
 │   └── cti-api/
-│       ├── src/
-│       │   ├── server.ts               # Fastify entry
-│       │   ├── config.ts, crypto.ts, phone.ts
-│       │   ├── rotation.ts             # shared DID rotation pick (firewall + /calls)
-│       │   ├── auth/session.ts
-│       │   ├── db/{schema,index,migrate}.ts
-│       │   ├── firewall/{index,warmup,tz}.ts   # Caller Reputation Firewall
-│       │   ├── routes/{health,auth,firewall,calls,telephony,admin,
-│       │   │           reputation,inbound,cti}.ts
-│       │   ├── salesforce/{oauth,client,sync}.ts
-│       │   └── telephony/{types,twilio,index}.ts
-│       ├── migrations/0001…0006
-│       └── drizzle.config.ts
+│       └── src/
+│           ├── server.ts               # Fastify entry
+│           ├── config.ts
+│           ├── firewall/recipient-address.ts   # Salesforce-backed FirewallDeps port
+│           ├── reputation/worker.ts    # background Salesforce sync + number-health worker
+│           ├── routes/{health,auth,firewall,calls,telephony,admin,
+│           │           reputation,inbound,cti}.ts
+│           ├── salesforce/{oauth,client,sync}.ts
+│           └── telephony/{types,twilio,index}.ts
+├── packages/
+│   ├── db/
+│   │   ├── src/{schema,index,migrate,migrate-runner}.ts
+│   │   ├── migrations/0001…0035               # advisory-locked runner
+│   │   └── drizzle.config.ts
+│   ├── phone/src/index.ts              # E.164 normalization
+│   ├── auth/src/{session,crypto,index}.ts
+│   └── firewall/                       # Caller Reputation Firewall
+│       ├── src/{index,evaluate,aggregate,reasons,types,attempts,recipient,
+│       │        velocity,calling-hours,calling-window,rotation,warmup,
+│       │        tz,state-calling-rules}.ts
+│       └── src/reputation/{query,signals}.ts
 └── README.md, .env.example, SPAM_RESISTANCE_2026.md, FIREWALL-GAP-AUDIT.md
 ```
 
