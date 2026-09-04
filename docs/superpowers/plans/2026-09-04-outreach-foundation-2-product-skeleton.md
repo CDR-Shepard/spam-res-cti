@@ -1413,7 +1413,8 @@ export interface SignInDeps {
 /** Candidate WorkOS org ids in preference order: the one WorkOS scoped the sign-in to, then active memberships. */
 function candidateOrgIds(selected: string | null, memberships: Array<{ organizationId: string; status: string }>): string[] {
   const ids = memberships.filter((m) => m.status === 'active').map((m) => m.organizationId);
-  return [...new Set([...(selected ? [selected] : []), ...ids])];
+  // The provider-selected org counts only when the user holds an ACTIVE membership in it.
+  return [...new Set([...(selected && ids.includes(selected) ? [selected] : []), ...ids])];
 }
 
 async function pickTenant(db: Db, candidates: string[]): Promise<Organization | null> {
@@ -1454,11 +1455,13 @@ export async function completeSignIn(deps: SignInDeps, code: string): Promise<Si
   const org = await pickTenant(deps.db, candidateOrgIds(organizationId, memberships));
   if (!org) return { ok: false, reason: 'no_tenant' };
   if (org.status !== 'active') return { ok: false, reason: 'tenant_suspended' };
-  const role = memberships.find((m) => m.organizationId === org.workosOrgId)?.role;
+  const role = memberships.find((m) => m.status === 'active' && m.organizationId === org.workosOrgId)?.role;
   const userId = await linkOrCreateUser(deps.db, org, user, role === 'admin');
   return { ok: true, userId, orgId: org.id };
 }
 ```
+
+**Amendments from the Task 5 review (applied in a fix wave):** `IdentityUser.email` is documented as always lowercase/trimmed and normalized in the fake and in `linkOrCreateUser`; `FakeIdentityProvider.addUser` accepts an optional per-org `status`; `isClientError` is exported and maps only 400/401/404 to `IdentityExchangeError`; `verifyState` requires exactly two dot-separated parts, guards a non-object JSON payload, and tolerates 2 seconds of negative clock skew; the test harness records each fake table's `where` argument on `db.captured.where` so `sign-in.test.ts` can render and assert the `workos_org_id in (…)` predicate with `PgDialect`. Tests added: selected-org-without-membership, pending-admin-grants-nothing, mixed-case email links the existing row, `isClientError` matrix, state malleability/null-payload.
 
 - [ ] **Step 4: Verify and commit**
 
