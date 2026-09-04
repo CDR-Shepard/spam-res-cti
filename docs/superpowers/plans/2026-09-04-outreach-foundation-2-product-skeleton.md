@@ -1759,7 +1759,7 @@ import type { SessionUser } from '@cti/auth';
 import type { IdentityProvider } from '../auth/identity-provider.js';
 import { IdentityExchangeError } from '../auth/identity-provider.js';
 import { completeSignIn } from '../auth/sign-in.js';
-import { signState, verifyState } from '../auth/state.js';
+import { isSafeReturnTo, signState, verifyState } from '../auth/state.js';
 import type { AppConfig } from '../config.js';
 import { sendError } from '../http/errors.js';
 import { toTenantDto } from '../tenancy/scope.js';
@@ -1774,7 +1774,7 @@ export interface AuthRouteDeps {
   idp: IdentityProvider | null;
 }
 
-const StartQuery = z.object({ returnTo: z.string().regex(/^\/(?!\/)/).optional() });
+const StartQuery = z.object({ returnTo: z.string().refine(isSafeReturnTo, 'returnTo must be a same-origin path').optional() });
 const CallbackQuery = z.object({ code: z.string().optional(), state: z.string(), error: z.string().optional(), error_description: z.string().optional() });
 
 function toSessionUserDto(s: SessionUser, displayName: string | null): SessionUserDto {
@@ -1875,6 +1875,8 @@ import { registerAuthRoutes } from './routes/auth.js';
 // and pass to buildApp:
     apiRoutes: [(app) => registerAuthRoutes(app, { cfg, db, idp })],
 ```
+
+**Amendments from the Task 6 review (applied in a fix wave):** the cookie plugin is registered with `secret: cfg.SESSION_SECRET`; `/auth/workos/start` sets an `outreach_oauth_nonce` cookie (httpOnly, lax, secure in production, path `/api/auth/workos/callback`, maxAge 600) holding the signed state's nonce, and the callback requires it to match (login-CSRF binding) and clears it; the handoff cookie is `signed: true` and `/auth/session` unsigns and zod-validates `{ token, expiresAt }` (any failure → 401 `NO_HANDOFF`); `isSafeReturnTo` (exported from `auth/state.ts`) is the single `returnTo` validator — leading `/`, no second `/` or `\`, no backslashes or control characters — used by the start route and `verifyState`; `userAndTenant` refuses a tenant row whose id is not the session's org (403 `TENANT_FORBIDDEN`); an `appUrl()` helper builds both app redirects; the scope test harness has separate `/x` and `/x-admin` routes. `signState` returns `{ state, nonce }`.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -3016,7 +3018,7 @@ import { z } from 'zod';
 import { SignInPage } from '@/components/sign-in-page';
 
 export const Route = createFileRoute('/sign-in')({
-  validateSearch: z.object({ error: z.string().optional(), returnTo: z.string().regex(/^\/(?!\/)/).optional() }),
+  validateSearch: z.object({ error: z.string().optional(), returnTo: z.string().regex(/^\/(?![\/\\])[^\\\u0000-\u001f\u007f]*$/).optional() }),
   component: () => { const { error, returnTo } = Route.useSearch(); return <SignInPage error={error} returnTo={returnTo} />; },
 });
 ```
@@ -3028,7 +3030,7 @@ import { z } from 'zod';
 import { useAuth } from '@/lib/auth';
 
 export const Route = createFileRoute('/auth/callback')({
-  validateSearch: z.object({ returnTo: z.string().regex(/^\/(?!\/)/).optional() }),
+  validateSearch: z.object({ returnTo: z.string().regex(/^\/(?![\/\\])[^\\\u0000-\u001f\u007f]*$/).optional() }),
   component: Callback,
 });
 
@@ -3273,8 +3275,8 @@ Add an "Outreach product (outreach-api + outreach-web)" section after the CTI ar
 - [ ] **Step 2: Spec touch-ups** (`docs/superpowers/specs/2026-09-03-outreach-foundation-design.md`)
 
 - §3.2 deployables: add after the bullet list — "Railway configuration for both services lives in `.railway/railway.ts` (Infrastructure as Code); Railway has deprecated per-service `railway.json` with a 2026-12-01 cutoff."
-- §4.3 sign-in flow, step 2: append "The OAuth `state` is a signed, stateless token (HMAC-SHA256 with `SESSION_SECRET`, 10-minute life) so the start request sets no cookie."
-- §4.3 step 6: append "The handoff cookie carries the token and its expiry; `GET /api/auth/session` clears it on first read."
+- §4.3 sign-in flow, step 2: append "The OAuth `state` is a signed token (HMAC-SHA256 with `SESSION_SECRET`, 10-minute life) whose nonce is also set as a short-lived httpOnly cookie scoped to the callback path; the callback requires both to match, which binds the sign-in to the browser that started it."
+- §4.3 step 6: append "The handoff cookie is signed with `SESSION_SECRET`, carries the token and its expiry, and is cleared by `GET /api/auth/session` on first read."
 - §4.4 roles: append "Product invites carry a WorkOS role slug (`admin` or `member`); an `admin` membership grants `is_admin` on sign-in and never demotes an existing admin."
 
 - [ ] **Step 3: Follow-ups file** (`docs/superpowers/plans/2026-09-03-outreach-foundation-1-followups.md`)
