@@ -33,7 +33,7 @@ export default defineRailway(() => {
   // pulled. It builds from the same monorepo via Docker (RAILWAY_DOCKERFILE_PATH)
   // instead of Railpack + npm workspace scripts like the CTI services.
   const outreachApi = service("outreach-api", {
-    source: github("CDR-Shepard/spam-res-cti", { branch: "main" }),
+    source: github("CDR-Shepard/spam-res-cti", { branch: "main", checkSuites: false }),
     preDeploy: "npm --workspace packages/db run migrate",
     start: "node services/outreach-api/dist/server.js",
     healthcheck: "/healthz",

@@ -20,6 +20,8 @@ railway config plan      # expect: 1 to add (outreach-api), 0 to change, 0 to de
 railway config apply     # confirms interactively; creates the service with its build/deploy settings
 ```
 
+If `apply` refuses because a service is still Config-as-Code-managed, that service is `@cti/api` — follow §5.1 now, out of order, to migrate it, then come back and retry `apply` here.
+
 The first deploy will fail at boot with "Invalid environment configuration" until step 2 is done — that is expected.
 
 ## 2. Variables and domain
@@ -30,14 +32,22 @@ The first deploy will fail at boot with "Invalid environment configuration" unti
    - `APP_PUBLIC_URL` = the same value (the API serves the web app on its own origin)
    - `TOKEN_ENCRYPTION_KEY` and `SESSION_SECRET` = **exactly** the values on the CTI API service (copy them from `@cti/api → Variables`; sessions are shared)
    - `WORKOS_API_KEY`, `WORKOS_CLIENT_ID` from WorkOS; `WORKOS_REDIRECT_URI` = `https://<name>.up.railway.app/api/auth/workos/callback`
-3. Back in WorkOS, add that redirect URI (step 0.5). Redeploy outreach-api. Expect the pre-deploy migrate to print `0 new of 36 total` and `/healthz` → 200, `/readyz` → `{ ok: true, dbOk: true, jobsOk: true }`.
+3. Back in WorkOS, add that redirect URI (step 0.5). Redeploy outreach-api — dashboard: **outreach-api → Deployments tab → ⋯ on the latest deployment → Redeploy** (this always rebuilds, so the new variables take effect). Expect the pre-deploy migrate to print `0 new of 36 total` and `/healthz` → 200, `/readyz` → `{ ok: true, dbOk: true, jobsOk: true }`.
 
 ## 3. Link GG Homes to WorkOS and invite yourself
+
+**Local prerequisites** (all of §3 and §4 run these scripts through the CLI, which executes locally, not inside the Railway container): repo checked out on `main`, `npm ci`, `npm run build:packages`.
+
+**Public DB URL.** `railway run -s outreach-api -- ...` injects outreach-api's own variables, including `DATABASE_URL` — but that resolves to Postgres's private `*.railway.internal` host, which only resolves inside a Railway-managed container, not from a laptop. Fetch the public connection string and override `DATABASE_URL` with it for the duration of the command instead (this is the same pattern used in `docs/runbooks/numberverifier-enrollment.md` and `docs/runbooks/cti-swap.md`). `$PUB` holds a live DB credential — never print it or paste it anywhere:
+
+```bash
+PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
+```
 
 The GG Homes tenant already exists (created by Salesforce login). Link it and send the first admin invite:
 
 ```bash
-railway run -s outreach-api -- npx tsx services/outreach-api/scripts/link-tenant-workos.ts --org-slug gg-homes --admin-email <your email>
+railway run -s outreach-api -- env DATABASE_URL="$PUB" npx tsx services/outreach-api/scripts/link-tenant-workos.ts --org-slug gg-homes --admin-email <your email>
 ```
 
 Accept the invite from the email WorkOS sends, then open `https://<name>.up.railway.app` and sign in. Your user is matched by email to your existing GG Homes user and marked admin.
@@ -45,20 +55,77 @@ Accept the invite from the email WorkOS sends, then open `https://<name>.up.rail
 Optional, for platform staff who need the tenant switcher:
 
 ```bash
-railway run -s outreach-api -- npx tsx services/outreach-api/scripts/grant-super-admin.ts --org-slug gg-homes --email <your email>
+railway run -s outreach-api -- env DATABASE_URL="$PUB" npx tsx services/outreach-api/scripts/grant-super-admin.ts --org-slug gg-homes --email <your email>
 ```
 
 ## 4. New tenants
 
+Same local prerequisites and `$PUB` as §3:
+
 ```bash
-railway run -s outreach-api -- npx tsx services/outreach-api/scripts/provision-tenant.ts --name "Acme Buyers" --admin-email owner@acme.com --timezone America/Chicago
+railway run -s outreach-api -- env DATABASE_URL="$PUB" npx tsx services/outreach-api/scripts/provision-tenant.ts --name "Acme Buyers" --admin-email owner@acme.com --timezone America/Chicago
 ```
 (or `POST /api/admin/tenants` as a super admin from the app once that UI exists.)
 
 ## 5. Follow-up before 2026-12-01: retire cti-api's railway.json
 
-Railway removes Config-as-Code support on 2026-12-01. `.railway/railway.ts` now describes the CTI API too. After the outreach-api deploy is stable: in **@cti/api → Settings**, clear the config file path field, run `railway config plan` (expect no changes), then delete `railway.json` in a small PR.
+Railway removes Config-as-Code support on 2026-12-01. Root `railway.json` is still the **only** place that configures `@cti/api`'s Docker build, migration, health check, and restart policy — `.railway/railway.ts`'s `_ctiapi` block does not have them yet. `railway config pull` shows this directly: the pulled block is just `build: "npm run build --workspace=@cti/api"` (a Railpack build command) with no `preDeploy`, no `healthcheck`, and no restart policy at all. **Deleting `railway.json` before translating those settings into `.railway/railway.ts` would make `@cti/api` fall back to that pulled Railpack config** — it would build without the Dockerfile (losing the `packages/*` bundling and softphone/audio bundle the Docker image provides), skip the pre-deploy migration, and lose its health check and restart policy. Do these in order — translate and apply *before* deleting the file, not after:
+
+### 5.1. Translate railway.json into `.railway/railway.ts`
+
+Extend the `_ctiapi` block with the same settings `railway.json` supplies today:
+
+```ts
+const _ctiapi = service("@cti/api", {
+  source: spamResCti,
+  build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
+  preDeploy: "npm --workspace packages/db run migrate",
+  start: "node services/cti-api/dist/server.js",
+  healthcheck: "/healthz",
+  healthcheckTimeout: 120,
+  deploy: { restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 5 },
+  replicas: { "us-west2": 1 },
+  networking: { privateNetworkEndpoint: "ctiapi" },
+  env: { /* unchanged — leave every preserve() exactly as pulled */ },
+});
+```
+
+Field names, quoted from the installed SDK's own types (`node_modules/railway/dist/index-C3uk0ruc.d.ts`):
+- `BuildConfig.builder?: "NIXPACKS" | "DOCKERFILE" | "RAILPACK" | "HEROKU" | "PAKETO" | null` and `BuildConfig.dockerfilePath?: string | null` — the SDK's `build` field does accept this object form, not just a build-command string, so there is no need for a `RAILWAY_DOCKERFILE_PATH` env var here (unlike outreach-api, which uses the env var because Root Directory stays `/` for the whole monorepo and this is the more direct equivalent of what `railway.json` already declares).
+- `DeployConfig.restartPolicyType?: "ON_FAILURE" | "ALWAYS" | "NEVER" | null` and `DeployConfig.restartPolicyMaxRetries?: number | null` — there is no top-level shorthand for restart policy on `IntentServiceConfig`, so it goes under `deploy: {...}`, alongside (not instead of) the `preDeploy`/`start`/`healthcheck`/`healthcheckTimeout` shorthands.
+
+**Automated alternative:** `railway config migrate --apply` reads every `railway.json`/`railway.toml` in the repo and writes the equivalent fields into `.railway/railway.ts` for you — add `--delete-files` to also delete `railway.json` in the same step. Per `railway config migrate --help`, `--apply` "writes files and clears Railway Config File settings", i.e. it also clears `@cti/api`'s Config-as-Code file-path setting as part of the same operation — read its output before trusting it, and still run step 5.2 below afterward rather than assuming it worked.
+
+### 5.2. Plan, and confirm the translation actually changed something
+
+```bash
+railway config plan
+```
+
+**Expect changes to `@cti/api`** — its build, start, and healthcheck moving from railway.json-only into the graph. **If this reports `0 to change`, stop** — that means the translation didn't take (or `@cti/api`'s live settings have diverged from `railway.json` some other way) — do not proceed to delete `railway.json` in that state; re-check the `_ctiapi` block against §5.1 instead.
+
+### 5.3. Apply
+
+```bash
+railway config apply
+```
+
+### 5.4. Only now, delete railway.json
+
+Confirm in the dashboard that **@cti/api → Settings** no longer shows a config file path set (`railway config migrate --apply` clears it automatically; otherwise clear it by hand). Then delete `railway.json` from the repo in a small PR.
+
+### 5.5. Plan once more
+
+```bash
+railway config plan   # expect 0 to change, 0 to destroy — .railway/railway.ts is now the only source of truth for @cti/api
+```
 
 ## Rollback
 
-`outreach-api` is additive: nothing in cti-api depends on it. To roll back, remove the service in the dashboard (or delete it from `.railway/railway.ts` and `railway config apply`); the shared database is untouched except for the `pgboss` schema, which is inert.
+`outreach-api` is additive: nothing in cti-api depends on it. Roll back the file first, then confirm live:
+
+1. In `.railway/railway.ts`, delete the `outreachApi` block and its entry in the `project(...).resources` array.
+2. `railway config apply` — removing a service is a destructive change, so it prompts for confirmation interactively; in a non-interactive session use `railway config apply --yes --confirm-destructive`.
+3. Confirm in the Railway dashboard that the `outreach-api` service is gone.
+
+The shared database is untouched except for the `pgboss` schema, which is inert.
