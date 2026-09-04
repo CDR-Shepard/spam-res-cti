@@ -13,14 +13,29 @@ const human = { userId: 'U1', orgId: 'O1', email: 'a@b.co', isAdmin: false, powe
 const org1 = { id: 'O1', name: 'GG Homes', slug: 'gg-homes', status: 'active', timezone: 'America/Los_Angeles' };
 const org2 = { id: '11111111-1111-4111-8111-111111111111', name: 'Other', slug: 'other', status: 'active', timezone: 'UTC' };
 
-async function run(db: unknown, headers: Record<string, string> = {}) {
+/**
+ * Two routes so a test exercises exactly what it names: `/x` is requireContext
+ * alone (tenant resolution), `/x-admin` also runs requireAdmin. Both errors
+ * "send" via the reply directly — chaining them on one route would mean a
+ * non-admin session's requireAdmin() 403 always wins over whatever requireContext
+ * already answered (Fastify keeps the first reply sent and drops a handler's
+ * later return value), so a single shared route could never assert a 200 for a
+ * non-admin session even when tenant resolution itself is correct.
+ */
+async function run(db: unknown, headers: Record<string, string> = {}, path = '/x') {
   const app = Fastify();
   app.get('/x', async (req, reply) => {
     const ctx = await requireContext(db as never, req, reply);
     if (!ctx) return;
-    return { orgId: ctx.orgId, admin: requireAdmin(ctx, reply) };
+    return { orgId: ctx.orgId };
   });
-  const res = await app.inject({ method: 'GET', url: '/x', headers: { authorization: 'Bearer t', ...headers } });
+  app.get('/x-admin', async (req, reply) => {
+    const ctx = await requireContext(db as never, req, reply);
+    if (!ctx) return;
+    if (!requireAdmin(ctx, reply)) return;
+    return { orgId: ctx.orgId, admin: true };
+  });
+  const res = await app.inject({ method: 'GET', url: path, headers: { authorization: 'Bearer t', ...headers } });
   await app.close();
   return res;
 }
@@ -35,10 +50,6 @@ describe('requireContext', () => {
     expect(res.json()).toMatchObject({ code: 'UNAUTHENTICATED' });
   });
   it("resolves the session's own tenant and ignores X-Org-Id for non-super-admins", async () => {
-    // Admin, so the run() harness's own requireAdmin() call (exercised together
-    // with requireContext on every /x request) doesn't send its own 403 and
-    // clobber the 200 this test is actually checking — see report deviations.
-    state.session = { ...human, isAdmin: true };
     const res = await run(fakeDb({ organizations: [org1] }).db, { 'x-org-id': org2.id });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ orgId: 'O1' });
@@ -58,7 +69,7 @@ describe('requireContext', () => {
     expect(res.json()).toMatchObject({ code: 'TENANT_SUSPENDED' });
   });
   it('requireAdmin sends 403 ADMIN_ONLY for non-admins', async () => {
-    const res = await run(fakeDb({ organizations: [org1] }).db);
+    const res = await run(fakeDb({ organizations: [org1] }).db, {}, '/x-admin');
     expect(res.statusCode).toBe(403);
     expect(res.json()).toMatchObject({ code: 'ADMIN_ONLY' });
   });

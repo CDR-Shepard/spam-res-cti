@@ -41,7 +41,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Authorization', 'Content-Type', 'X-Request-Id', 'X-Org-Id'],
   });
-  await app.register(cookie);
+  // Signed so the auth routes can bind the OAuth nonce and the session handoff
+  // cookie to this server's secret (see routes/auth.ts): a tampered cookie value
+  // fails `unsignCookie`/`reply.setCookie({ signed: true })` before it's ever read.
+  await app.register(cookie, { secret: cfg.SESSION_SECRET });
   await registerHealthRoutes(app, deps.readiness);
   for (const plugin of deps.apiRoutes ?? []) {
     await app.register(async (scope) => plugin(scope), { prefix: '/api' });
