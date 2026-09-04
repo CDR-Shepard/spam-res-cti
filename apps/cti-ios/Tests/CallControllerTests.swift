@@ -120,6 +120,10 @@ final class FakeCallsAPI: CallsAPIClient {
     var pending: CallSummary?
     var pendingError: Error?
     var dispositionError: Error?
+    /// Hold the disposition POST / the pending lookup in flight. Nil in every
+    /// test that does not care, so nothing else pays for them.
+    fileprivate var dispositionGate: CallGate?
+    fileprivate var pendingGate: CallGate?
 
     private(set) var precalls: [PrecallRecord] = []
     private(set) var places: [PlaceRecord] = []
@@ -143,11 +147,16 @@ final class FakeCallsAPI: CallsAPIClient {
     }
 
     func disposition(callId: String, disposition: String, notes: String) async throws {
+        // Park *before* recording: while gated, the POST is in flight and has
+        // not landed — which is exactly the window the stale-continuation and
+        // double-tap tests drive the controller through.
+        if let dispositionGate { await dispositionGate.wait() }
         dispositions.append(DispositionRecord(callId: callId, disposition: disposition, notes: notes))
         if let dispositionError { throw dispositionError }
     }
 
     func pendingDisposition() async throws -> CallSummary? {
+        if let pendingGate { await pendingGate.wait() }
         pendingLookups += 1
         if let pendingError { throw pendingError }
         return pending
@@ -157,6 +166,40 @@ final class FakeCallsAPI: CallsAPIClient {
 private struct FakeError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
+}
+
+/// A suspension the test opens by hand — the only way to hold an API call
+/// "in flight" while driving the controller forward, with no sleep and no
+/// timeout anywhere. An actor because the fakes' `async` methods run off the
+/// main actor, and every waiter is resumed on `open()` so a test that is
+/// *supposed* to fail (two callers parked where one was expected) fails on its
+/// assertion instead of hanging.
+private actor CallGate {
+    private var parked: [CheckedContinuation<Void, Never>] = []
+    private var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var arrivals = 0
+    private var opened = false
+
+    /// Called from inside a fake: announces arrival, then parks until `open()`.
+    func wait() async {
+        arrivals += 1
+        arrivalWaiters.forEach { $0.resume() }
+        arrivalWaiters.removeAll()
+        guard !opened else { return }
+        await withCheckedContinuation { parked.append($0) }
+    }
+
+    /// Called from the test: returns once somebody is parked inside `wait()`.
+    func waitUntilEntered() async {
+        guard arrivals == 0 else { return }
+        await withCheckedContinuation { arrivalWaiters.append($0) }
+    }
+
+    func open() {
+        opened = true
+        parked.forEach { $0.resume() }
+        parked.removeAll()
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -552,6 +595,221 @@ final class CallControllerTests: XCTestCase {
         guard case .idle = c.phase else { return XCTFail("expected idle") }
         XCTAssertTrue(api.dispositions.isEmpty)
         XCTAssertEqual(api.pendingLookups, 0)
+    }
+
+    // MARK: - Re-entrancy: a slow wrap-up must not reach across calls
+
+    /// The probe: place c1, hang up, tap Save (the POST parks in flight), tap
+    /// Skip, dial c2 — then c1's POST finally returns. Without a generation
+    /// guard that stale continuation runs `reset()` and drops a live call to
+    /// `.idle` with c2's media still up and nothing able to hang it up.
+    @MainActor func testAStaleWrapupSubmissionCannotResetANewerCall() async {
+        let sdk = FakeSDK(); let sys = FakeCallSystem(); let api = FakeCallsAPI()
+        let gate = CallGate()
+        api.dispositionGate = gate
+        api.placeResult = .allowed(callId: "c1", fromNumber: "+12135550100")
+        let c = CallController(sdk: sdk, system: sys, api: api, tokens: { "t" })
+
+        await c.placeCall(to: "+18585550100")
+        c.hangUp()
+        let staleSubmission = Task { await c.finishWrapup(disposition: "Left voicemail", notes: "") }
+        await gate.waitUntilEntered()
+
+        // The rep gives up waiting, skips, and dials the next lead.
+        c.skipWrapup()
+        let callTwo = FakeCall()
+        sdk.nextCall = callTwo
+        api.placeResult = .allowed(callId: "c2", fromNumber: "+12135550100")
+        await c.placeCall(to: "+18585550101")
+        guard case .active = c.phase else { return XCTFail("c2 should be up") }
+
+        await gate.open()
+        _ = await staleSubmission.value
+
+        guard case .active = c.phase else {
+            return XCTFail("c1's stale wrap-up must not drop the live call to idle")
+        }
+        XCTAssertFalse(callTwo.hungUp, "c2's media must be untouched")
+        XCTAssertFalse(sys.ended.contains(callTwo.uuid), "c2 must not be reported ended")
+        c.hangUp()
+        guard case let .wrapup(callId, _) = c.phase, callId == "c2" else {
+            return XCTFail("c2 must still be the call that wraps up")
+        }
+    }
+
+    /// Two taps on Save must post one disposition, not two.
+    @MainActor func testTwoConcurrentWrapupSubmissionsPostExactlyOnce() async {
+        let api = FakeCallsAPI()
+        let gate = CallGate()
+        api.dispositionGate = gate
+        api.placeResult = .allowed(callId: "c7", fromNumber: "+12135550100")
+        let c = makeController(api: api)
+        await c.placeCall(to: "+18585550100")
+        c.hangUp()
+
+        let first = Task { await c.finishWrapup(disposition: "Left voicemail", notes: "note") }
+        await gate.waitUntilEntered()
+        XCTAssertTrue(c.isSubmittingWrapup, "the UI needs this to disable Save")
+
+        // The second tap goes in a task of its own: an unguarded controller
+        // parks it on the same gate, and awaiting it inline here would deadlock
+        // the test instead of failing it.
+        let second = Task { await c.finishWrapup(disposition: "Left voicemail", notes: "note") }
+
+        await gate.open()
+        _ = await first.value
+        _ = await second.value
+
+        XCTAssertEqual(api.dispositions.count, 1)
+        XCTAssertFalse(c.isSubmittingWrapup)
+        guard case .idle = c.phase else { return XCTFail("expected idle") }
+    }
+
+    /// Same for inbound, where the wrap-up costs an extra round trip: the
+    /// pending-disposition lookup must run at most once too.
+    @MainActor func testTwoConcurrentInboundWrapupsLookUpAndPostExactlyOnce() async {
+        let sdk = FakeSDK(); let api = FakeCallsAPI()
+        let gate = CallGate()
+        api.pendingGate = gate
+        sdk.nextInvite = FakeInvite(from: "+18585550100", params: [:])
+        api.pending = CallSummary(
+            id: "srv_88", direction: "outbound", toNumber: "+18585550100", fromNumber: "+12135550100",
+            disposition: nil, durationSeconds: 5, createdAt: "2026-09-03T00:00:00Z",
+            salesforceWhoId: nil, salesforceWhatId: nil
+        )
+        let c = CallController(sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" })
+        c.handleIncomingPush([:]); c.answer(); c.hangUp()
+
+        let first = Task { await c.finishWrapup(disposition: "Connected", notes: "") }
+        await gate.waitUntilEntered()
+        let second = Task { await c.finishWrapup(disposition: "Connected", notes: "") }
+        await gate.open()
+        _ = await first.value
+        _ = await second.value
+
+        XCTAssertEqual(api.pendingLookups, 1)
+        XCTAssertEqual(api.dispositions.count, 1)
+        XCTAssertEqual(api.dispositions.last?.callId, "srv_88")
+    }
+
+    /// A disconnect callback carries no call identity of its own, so the
+    /// controller has to check: call A's far end reporting in after A is done
+    /// and B is up must not tear B down.
+    @MainActor func testAnOldCallsDisconnectCannotEndTheCurrentOne() async {
+        let sdk = FakeSDK(); let sys = FakeCallSystem(); let api = FakeCallsAPI()
+        api.placeResult = .allowed(callId: "cA", fromNumber: "+12135550100")
+        let c = CallController(sdk: sdk, system: sys, api: api, tokens: { "t" })
+
+        let callA = sdk.nextCall
+        await c.placeCall(to: "+18585550100")
+        let disconnectA = callA.onDisconnect // A's handler, kept past its call
+        c.hangUp()
+        await c.finishWrapup(disposition: "Left voicemail", notes: "")
+
+        let callB = FakeCall()
+        sdk.nextCall = callB
+        api.placeResult = .allowed(callId: "cB", fromNumber: "+12135550100")
+        await c.placeCall(to: "+18585550101")
+        guard case .active = c.phase else { return XCTFail("B should be up") }
+
+        disconnectA?(nil)
+
+        guard case .active = c.phase else { return XCTFail("B must stay active") }
+        XCTAssertFalse(sys.ended.contains(callB.uuid), "B must not be reported ended")
+        XCTAssertNil(c.lastRefusal)
+    }
+
+    // MARK: - Saying no out loud
+
+    /// A dial refused because a call is already up used to do nothing at all,
+    /// which reads as a broken button.
+    @MainActor func testPlacingACallWhileOneIsUpTellsTheRepToFinishIt() async {
+        let sdk = FakeSDK(); let api = FakeCallsAPI()
+        let c = CallController(sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" })
+        await c.placeCall(to: "+18585550100")
+
+        await c.placeCall(to: "+18585550101")
+
+        XCTAssertEqual(c.lastRefusal, "Finish your current call first.")
+        XCTAssertEqual(api.precalls.count, 1)
+        XCTAssertEqual(sdk.connectCalls, 1)
+    }
+
+    @MainActor func testAcknowledgeWhileACallIsUpTellsTheRepToFinishIt() async {
+        let sdk = FakeSDK(); let api = FakeCallsAPI()
+        let c = CallController(sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" })
+        await c.placeCall(to: "+18585550100")
+
+        await c.acknowledge()
+
+        XCTAssertEqual(c.lastRefusal, "Finish your current call first.")
+        XCTAssertEqual(api.places.count, 1)
+    }
+
+    /// CallKit routes the rep's "end call" to the same action whether the call
+    /// is ringing or up, so both entry points have to be safe.
+    @MainActor func testHangUpWhileRingingDeclines() {
+        let sdk = FakeSDK(); let sys = FakeCallSystem()
+        let invite = FakeInvite(from: "+18585550100", params: [:])
+        sdk.nextInvite = invite
+        let c = CallController(sdk: sdk, system: sys, api: FakeCallsAPI(), tokens: { "t" })
+        c.handleIncomingPush([:])
+
+        c.hangUp()
+
+        XCTAssertTrue(invite.rejected)
+        XCTAssertFalse(invite.accepted)
+        XCTAssertEqual(sys.ended, [invite.uuid])
+        guard case .idle = c.phase else { return XCTFail("expected idle") }
+    }
+
+    @MainActor func testANewInboundRingClearsThePreviousCallsError() async {
+        let sdk = FakeSDK(); let api = FakeCallsAPI()
+        api.precallResult = PrecallVerdict(
+            auditId: "aud_x", decision: .block, reasons: [], blockReason: "Outside calling hours.",
+            requiredScriptId: nil
+        )
+        let c = CallController(sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" })
+        await c.placeCall(to: "+18585550100")
+        XCTAssertEqual(c.lastRefusal, "Outside calling hours.")
+
+        sdk.nextInvite = FakeInvite(from: "+18585550199", params: [:])
+        c.handleIncomingPush([:])
+
+        XCTAssertNil(c.lastRefusal, "a new ring must not carry the last dial's refusal")
+        guard case .ringing = c.phase else { return XCTFail("expected ringing") }
+    }
+
+    // MARK: - Wrap-up lookup failures, and the pinned DID
+
+    @MainActor func testAFailedPendingDispositionLookupKeepsTheWrapupOpen() async {
+        let sdk = FakeSDK(); let api = FakeCallsAPI()
+        sdk.nextInvite = FakeInvite(from: "+18585550100", params: [:])
+        api.pendingError = FakeError(message: "The network connection was lost.")
+        let c = CallController(sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" })
+        c.handleIncomingPush([:]); c.answer(); c.hangUp()
+
+        await c.finishWrapup(disposition: "Connected", notes: "worth a callback")
+
+        XCTAssertEqual(c.lastRefusal, "The network connection was lost.")
+        XCTAssertTrue(api.dispositions.isEmpty)
+        guard case .wrapup = c.phase else { return XCTFail("the wrap-up must stay open to retry") }
+        XCTAssertFalse(c.isSubmittingWrapup, "a failed submit must re-enable Save")
+    }
+
+    /// The DID shown as "calling from" is the one the server pinned in its
+    /// reply — the app never re-picks one.
+    @MainActor func testFromNumberReportsTheServersPinnedDID() async {
+        let api = FakeCallsAPI()
+        api.placeResult = .allowed(callId: "c10", fromNumber: "+16195550123")
+        let c = makeController(api: api)
+
+        await c.placeCall(to: "+18585550100")
+
+        XCTAssertEqual(c.fromNumber, "+16195550123")
+        c.hangUp()
+        await c.finishWrapup(disposition: "Left voicemail", notes: "")
+        XCTAssertNil(c.fromNumber, "cleared once the call is closed out")
     }
 
     /// Two taps on Call must not produce two audits and two dials.

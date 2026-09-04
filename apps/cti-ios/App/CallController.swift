@@ -60,6 +60,13 @@ final class CallController: ObservableObject {
     /// The firewall-approved DID the server pinned for the live call, as
     /// `POST /calls` reported it. Display only — the app never chooses it.
     @Published private(set) var fromNumber: String?
+    /// True while a wrap-up is being posted. Published so the wrap-up screen
+    /// can disable Save; enforced below so a second tap cannot post twice.
+    @Published private(set) var isSubmittingWrapup = false
+
+    /// What the rep is told when they try to start a call while one is already
+    /// on screen. Local wording, not the server's — no dial was attempted.
+    static let busyRefusal = "Finish your current call first."
 
     private let sdk: VoiceSDK
     private let system: CallSystem
@@ -71,6 +78,23 @@ final class CallController: ObservableObject {
     private var call: ActiveCall?
     private var callId: String?
     private var heldReview: HeldReview?
+
+    /// Bumped every time the controller starts on a *different* call — a new
+    /// ring, a new dial, or a return to idle.
+    ///
+    /// `finishWrapup` awaits the network, and the rep can walk away from that
+    /// wrap-up (Skip) and start another call before the POST comes back. The
+    /// continuation that resumes afterwards is holding state about a call that
+    /// is over: without this token it would resolve *the new call's* pending
+    /// disposition, or run `reset()` and drop a live call to `.idle` with its
+    /// media still up. Capture it before an await, check it after, and a stale
+    /// continuation becomes a no-op.
+    private var generation = 0
+
+    private var isIdle: Bool {
+        if case .idle = phase { return true }
+        return false
+    }
 
     init(
         sdk: VoiceSDK,
@@ -106,6 +130,10 @@ final class CallController: ObservableObject {
             return
         }
         self.invite = invite
+        generation += 1
+        // A fresh ring is not the place to still be showing why the *last*
+        // call was refused.
+        lastRefusal = nil
 
         let info = CallerInfo.from(customParameters: invite.customParameters, from: invite.from)
         phase = .ringing(info)
@@ -157,8 +185,13 @@ final class CallController: ObservableObject {
     /// rep tapped, when there was one — they ride along so the server can
     /// attach the call to the right record.
     func placeCall(to e164: String, recipientRecordId: String? = nil, recipientObjectType: String? = nil) async {
-        guard case .idle = phase else { return }
+        guard isIdle else {
+            // Silently doing nothing reads as a broken button.
+            lastRefusal = Self.busyRefusal
+            return
+        }
         lastRefusal = nil
+        generation += 1
         let info = CallerInfo(number: e164, name: nil, recordId: recipientRecordId, recordType: recipientObjectType)
         phase = .dialing(info)
 
@@ -194,8 +227,14 @@ final class CallController: ObservableObject {
     /// the held audit with `acknowledged: true` — the only way that audit's
     /// call is ever allowed through.
     func acknowledge() async {
-        guard case let .needsAcknowledgement(info, _, _) = phase, let review = heldReview else { return }
+        guard case let .needsAcknowledgement(info, _, _) = phase, let review = heldReview else {
+            // A stale tap after a cancel (idle) is simply nothing to do; a tap
+            // while another call is up gets the dial pad's own answer.
+            if !isIdle { lastRefusal = Self.busyRefusal }
+            return
+        }
         lastRefusal = nil
+        generation += 1
         phase = .dialing(info)
         do {
             try await dial(
@@ -284,6 +323,10 @@ final class CallController: ObservableObject {
     }
 
     func hangUp() {
+        // CallKit sends the rep's "end call" to one action whether the call is
+        // ringing or up, and both routings land here. Ending a ringing call is
+        // a decline — there is no media to hang up, only an invite to refuse.
+        if case .ringing = phase { return decline() }
         guard let info = liveCaller else { return }
         call?.hangUp()
         endCall(info: info)
@@ -326,11 +369,19 @@ final class CallController: ObservableObject {
 
     private func attach(_ call: ActiveCall) {
         self.call = call
-        call.onDisconnect = { [weak self] error in
+        call.onDisconnect = { [weak self, weak call] error in
             // `[weak self]`: the call holds this closure and the controller
             // holds the call, so a strong capture would be a cycle that
             // outlives every call the app ever makes.
-            onMainActor { self?.callDidDisconnect(error) }
+            onMainActor {
+                // The callback carries no call identity of its own, so it has
+                // to be established here — and *inside* the hop, because the
+                // current call can change while a late disconnect is crossing
+                // the actor boundary. An old call's far end reporting in must
+                // never tear down the one that replaced it.
+                guard let self, let call, self.call === call else { return }
+                self.callDidDisconnect(error)
+            }
         }
     }
 
@@ -343,26 +394,45 @@ final class CallController: ObservableObject {
     /// means the server's sweep already auto-dispositioned it; there is no id
     /// to post against and inventing one would write to the wrong call.
     func finishWrapup(disposition: String, notes: String) async {
-        guard case let .wrapup(existingId, _) = phase else { return }
+        // A second Save while the first is still in flight would post the
+        // disposition twice (and, for an inbound call, look the pending row up
+        // twice).
+        guard case let .wrapup(existingId, _) = phase, !isSubmittingWrapup else { return }
+        let generation = self.generation
+        isSubmittingWrapup = true
+
         do {
             let resolved: String?
             if let existingId {
                 resolved = existingId
             } else {
                 resolved = try await api.pendingDisposition()?.id
+                // Critical: a lookup that lands after the rep moved on would
+                // otherwise hand back the *new* call's row and disposition it.
+                guard isCurrent(generation) else { return }
             }
             guard let id = resolved else {
                 reset()
                 return
             }
             try await api.disposition(callId: id, disposition: disposition, notes: notes)
+            guard isCurrent(generation) else { return }
             reset()
         } catch {
+            guard isCurrent(generation) else { return }
+            isSubmittingWrapup = false
             // Stay in wrap-up. Dropping it would throw away the rep's notes and
             // leave their next dial refused by the disposition gate with no
             // explanation on screen.
             lastRefusal = error.localizedDescription
         }
+    }
+
+    /// Whether the work started at `generation` still concerns the call on
+    /// screen. A stale continuation returns without touching anything: the
+    /// newer call owns this state now, and `reset` already cleared the flag.
+    private func isCurrent(_ generation: Int) -> Bool {
+        generation == self.generation
     }
 
     func skipWrapup() {
@@ -384,6 +454,9 @@ final class CallController: ObservableObject {
         fromNumber = nil
         heldReview = nil
         isMuted = false
+        isSubmittingWrapup = false
+        // Whatever was awaiting on the old call is stale from here on.
+        generation += 1
         phase = .idle
     }
 }

@@ -33,6 +33,16 @@ protocol ActiveCall: AnyObject {
     /// **Delivered on the main thread.** The live adapter is responsible for
     /// hopping if its SDK delegate arrives elsewhere; `CallController` checks
     /// anyway rather than trusting it with a trap.
+    ///
+    /// **A disconnect that occurs before `onDisconnect` is attached MUST be
+    /// replayed when the handler is set.** The window is real — a call can fail
+    /// between `connect` returning and the controller wiring this up — and a
+    /// dropped disconnect strands the app in `.active` on dead media, with no
+    /// wrap-up and the next dial blocked by the server's disposition gate.
+    ///
+    /// The callback carries no identity, so the controller matches it against
+    /// the call it currently holds; an adapter must not reuse one call object
+    /// across two calls.
     var onDisconnect: ((Error?) -> Void)? { get set }
 }
 
@@ -48,6 +58,12 @@ protocol IncomingInvite: AnyObject {
 }
 
 /// CallKit, as the controller needs it.
+///
+/// Routing the provider's actions back into `CallController`:
+/// `CXAnswerCallAction` → `answer()`; **`CXEndCallAction` → `decline()` while
+/// the call is ringing and `hangUp()` while it is active** — and both are safe
+/// either way, since `hangUp()` on a ringing call declines it. `CXSetMutedCallAction`
+/// → `setMuted(_:)`.
 protocol CallSystem {
     /// Reports an inbound call to the system.
     ///
