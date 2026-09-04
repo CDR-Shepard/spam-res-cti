@@ -3,7 +3,10 @@
  * Applies *.sql files from ./migrations in lexical order, tracking applied
  * filenames in the cti_schema_migrations table.
  *
- * Run with: `npm run migrate` (from services/cti-api or repo root).
+ * Run with: `npm run migrate` (repo root) or `npm -w packages/db run migrate`.
+ * Env: `.env` in the cwd, else `services/cti-api/.env`. The actual apply/lock
+ * logic lives in `migrate-runner.ts`, which takes a Postgres advisory lock so
+ * concurrent deploys serialize instead of racing each other.
  */
 import dotenv from 'dotenv';
 import { existsSync } from 'node:fs';

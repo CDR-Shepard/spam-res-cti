@@ -309,7 +309,7 @@ export const dialerQueueItems = pgTable(
 
 /**
  * One append-only row per successful power-dial originate — the dialer half of
- * the shared per-customer attempt count (firewall/index.ts
+ * the shared per-customer attempt count (@cti/firewall's
  * customerAttemptCounts).
  *
  * Why not count `dialer_queue_items` directly: a TRUE no-answer on the Mobile

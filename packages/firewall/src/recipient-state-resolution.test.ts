@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveRecipientState } from './index.js';
-import { resolveTimezone } from './index.js';
+import { resolveRecipientState, resolveTimezone } from './index.js';
 
 /**
  * FIX-3 (weekend-calling fix wave): `evaluate()` resolves the recipient's tz

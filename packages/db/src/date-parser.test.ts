@@ -17,7 +17,7 @@ describe('pg date type parser', () => {
   it('makes the warmup same-day comparison work for the current date', () => {
     const parser = pg.types.getTypeParser(pg.types.builtins.DATE);
     const today = new Date().toISOString().slice(0, 10);
-    // This is exactly the comparison firewall/index.ts + rotation.ts make.
+    // This is exactly the comparison evaluate.ts + rotation.ts make.
     expect(parser(today) === today).toBe(true);
   });
 });

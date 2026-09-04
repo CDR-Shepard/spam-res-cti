@@ -236,7 +236,7 @@ not committed, delete it when you're done. Save it as
  *  has a connected admin, and print { version, entryCount, changed }.
  *  Delete this file after use — it isn't part of the app. */
 import { eq, isNotNull } from 'drizzle-orm';
-import { getDb, schema } from '../src/db/index.js';
+import { getDb, schema } from '@cti/db';
 import { pickActingUsers, buildDirectorySnapshot } from '../src/mobile/directory-build.js';
 
 const db = getDb();
