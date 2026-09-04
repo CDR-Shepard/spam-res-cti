@@ -4,6 +4,8 @@ import { dirname, resolve } from 'node:path';
 import { getPool } from '@cti/db';
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
+import { createBoss, JobRunner } from './jobs/boss.js';
+import { QUEUES } from './jobs/queues.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Where vite drops the built outreach-web bundle (src/ and dist/ sit at the same depth). */
@@ -20,12 +22,14 @@ async function dbOk(): Promise<boolean> {
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
+  const runner = new JobRunner({ boss: createBoss(cfg), queues: QUEUES, log: console });
+  await runner.start();
   const app = await buildApp({
     cfg,
     spaDist: SPA_DIST,
-    readiness: async () => ({ dbOk: await dbOk(), jobsOk: true }),
+    readiness: async () => ({ dbOk: await dbOk(), jobsOk: runner.isHealthy() }),
   });
-  const close = async () => { await app.close(); };
+  const close = async () => { await runner.stop(); await app.close(); };
   process.on('SIGTERM', close);
   process.on('SIGINT', close);
   await app.listen({ port: cfg.API_PORT, host: '0.0.0.0' });
