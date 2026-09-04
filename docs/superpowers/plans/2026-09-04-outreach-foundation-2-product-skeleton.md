@@ -558,11 +558,13 @@ import { join } from 'node:path';
 import staticPlugin from '@fastify/static';
 import type { FastifyInstance } from 'fastify';
 
-export const API_PREFIXES = ['/api/', '/healthz', '/readyz'];
+const NO_STORE = 'no-store, no-cache, must-revalidate, max-age=0';
 
+/** `/api` and `/api/...` by prefix; the two health paths exactly (so `/healthzone` is an app route). */
 export function isApiPath(url: string): boolean {
   const path = url.split('?')[0] ?? url;
-  return API_PREFIXES.some((p) => path === p || path.startsWith(p) || path === p.replace(/\/$/, ''));
+  if (path === '/api' || path.startsWith('/api/')) return true;
+  return path === '/healthz' || path === '/readyz';
 }
 
 export async function registerSpa(app: FastifyInstance, dist: string): Promise<void> {
@@ -580,7 +582,7 @@ export async function registerSpa(app: FastifyInstance, dist: string): Promise<v
     wildcard: false,
     decorateReply: false,
     setHeaders(reply, path: string) {
-      if (path.endsWith('.html')) reply.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+      if (path.endsWith('.html')) reply.setHeader('Cache-Control', NO_STORE);
       else if (/\.(?:js|css|woff2?|ttf|otf|png|jpg|svg|ico)$/.test(path)) reply.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     },
   });
@@ -589,7 +591,7 @@ export async function registerSpa(app: FastifyInstance, dist: string): Promise<v
     if (req.method !== 'GET' || isApiPath(req.url)) {
       return reply.code(404).send({ error: 'Not found', code: 'NOT_FOUND', requestId: req.id });
     }
-    return reply.header('Cache-Control', 'no-store').type('text/html').send(indexHtml);
+    return reply.header('Cache-Control', NO_STORE).type('text/html').send(indexHtml);
   });
 }
 ```
@@ -761,7 +763,7 @@ describe('spa fallback', () => {
     const page = await app.inject({ method: 'GET', url: '/team' });
     expect(page.statusCode).toBe(200);
     expect(page.headers['content-type']).toContain('text/html');
-    expect(page.headers['cache-control']).toBe('no-store');
+    expect(page.headers['cache-control']).toBe('no-store, no-cache, must-revalidate, max-age=0');
     expect(page.body).toContain('Outreach');
     const missing = await app.inject({ method: 'GET', url: '/api/nope' });
     expect(missing.statusCode).toBe(404);
