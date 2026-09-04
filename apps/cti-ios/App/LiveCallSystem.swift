@@ -26,12 +26,34 @@ final class LiveCallSystem: NSObject, CallSystem {
     private let calls = CXCallController()
     private let log = os.Logger(subsystem: AppConfig.loggingSubsystem, category: "CallKit")
 
-    /// Twilio's own audio device, which owns the `AVAudioSession` while a call
-    /// is up. CallKit decides *when* that session is live, so the device stays
-    /// disabled until `didActivate` says otherwise.
-    private let audioDevice = TwilioVoiceSDK.audioDevice as? DefaultAudioDevice
+    /// Twilio's own audio device — **the same instance the SDK uses**, since
+    /// toggling any other one would do nothing.
+    ///
+    /// It ships enabled: `TVODefaultAudioDevice.h` on `enabled` — "By default,
+    /// the SDK initializes this property to YES" — and, on the configuration
+    /// block, "If `TVODefaultAudioDevice` is `enabled`, the SDK executes this
+    /// block and activates the audio session while connecting to a Call". That
+    /// is Twilio activating the `AVAudioSession` ahead of CallKit, which is
+    /// CallKit's job and nobody else's: it is what decides when a call may be
+    /// heard, and it does it around the system's own ringtone, other calls,
+    /// and interruptions. So the device is switched off before anything can
+    /// connect and driven purely from `didActivate`/`didDeactivate`.
+    private let audioDevice: DefaultAudioDevice
 
     override init() {
+        // Adopt the SDK's device if it still has the default one, otherwise
+        // install ours — either way `TwilioVoiceSDK.audioDevice` and
+        // `self.audioDevice` are the same object from here on, and this runs
+        // at sign-in, before any connect or accept is possible.
+        if let existing = TwilioVoiceSDK.audioDevice as? DefaultAudioDevice {
+            audioDevice = existing
+        } else {
+            let device = DefaultAudioDevice()
+            TwilioVoiceSDK.audioDevice = device
+            audioDevice = device
+        }
+        audioDevice.isEnabled = false
+
         let configuration = CXProviderConfiguration()
         configuration.supportsVideo = false
         configuration.maximumCallsPerCallGroup = 1
@@ -44,9 +66,6 @@ final class LiveCallSystem: NSObject, CallSystem {
         // `nil` queue: delegate callbacks arrive on the main queue, which is
         // where `CallController` lives.
         provider.setDelegate(self, queue: nil)
-        if audioDevice == nil {
-            log.error("Twilio's audio device is not a DefaultAudioDevice; call audio will not follow CallKit")
-        }
     }
 
     // MARK: - CallSystem
@@ -66,10 +85,16 @@ final class LiveCallSystem: NSObject, CallSystem {
         provider.reportNewIncomingCall(with: uuid, update: update, completion: completion)
     }
 
-    /// The outbound call is already connected through Twilio by the time this
-    /// runs — the server's firewall audit and `POST /calls` both had to pass
-    /// first — so the start action is a formality that puts the call on the
-    /// system call screen, and the connect timestamp is now.
+    /// The leg is live and the callee's phone is ringing (the server dials
+    /// with `answerOnBridge: true`, so `sdk.connect` returns at ringback). The
+    /// start action is a formality — the firewall audit and `POST /calls` both
+    /// passed long before this — but it is what puts the call on the system
+    /// call screen and gives the lock screen an end button during ringback.
+    ///
+    /// `startedConnectingAt`, not `connectedAt`: the callee has not answered
+    /// yet, and claiming otherwise would start CallKit's call timer (and the
+    /// Recents duration) on the ringing. `reportOutgoingConnected` closes that
+    /// out when they actually pick up.
     func reportOutgoingStarted(uuid: UUID, handle: String) {
         let action = CXStartCallAction(call: uuid, handle: CXHandle(type: .phoneNumber, value: handle))
         calls.request(CXTransaction(action: action)) { [weak self] error in
@@ -79,10 +104,22 @@ final class LiveCallSystem: NSObject, CallSystem {
                 // the system call screen (and with it the lock-screen end
                 // button), which is worth a log line.
                 log.error("CallKit refused the outgoing call: \(error.localizedDescription, privacy: .public)")
+                // And it costs the audio, because a refused start action means
+                // no `didActivate` is coming — the one path where the app has
+                // to turn the audio on itself, or the rep sits on a connected
+                // call that is silent in both directions forever.
+                audioDevice.isEnabled = true
                 return
             }
-            provider.reportOutgoingCall(with: uuid, connectedAt: Date())
+            provider.reportOutgoingCall(with: uuid, startedConnectingAt: Date())
         }
+    }
+
+    /// The callee picked up. Starts CallKit's call timer, and is what makes
+    /// the Recents entry show the conversation's length rather than the
+    /// conversation plus however long it rang.
+    func reportOutgoingConnected(uuid: UUID) {
+        provider.reportOutgoingCall(with: uuid, connectedAt: Date())
     }
 
     /// Sign-out. `CXProvider` holds its delegate — and therefore this object,
@@ -91,7 +128,7 @@ final class LiveCallSystem: NSObject, CallSystem {
     /// breaks that ring.
     func shutDown() {
         controller = nil
-        audioDevice?.isEnabled = false
+        audioDevice.isEnabled = false
         provider.invalidate()
     }
 
@@ -112,7 +149,7 @@ extension LiveCallSystem: CXProviderDelegate {
     /// not, so the controller is brought in line rather than left holding a
     /// call CallKit no longer knows about.
     func providerDidReset(_ provider: CXProvider) {
-        audioDevice?.isEnabled = false
+        audioDevice.isEnabled = false
         onMainActor { [weak self] in self?.controller?.hangUp() }
     }
 
@@ -156,11 +193,11 @@ extension LiveCallSystem: CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
-        audioDevice?.isEnabled = true
+        audioDevice.isEnabled = true
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
-        audioDevice?.isEnabled = false
+        audioDevice.isEnabled = false
     }
 }
 

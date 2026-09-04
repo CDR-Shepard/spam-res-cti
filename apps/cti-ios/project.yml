@@ -144,6 +144,8 @@ targets:
       - path: App/VoiceTokenRefresher.swift
       - path: App/DisconnectLatch.swift
       - path: App/VoicePushPayload.swift
+      - path: App/ConnectGate.swift
+      - path: App/RingCancellation.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gghomes.callsign.tests

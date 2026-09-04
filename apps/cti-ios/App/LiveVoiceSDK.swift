@@ -30,6 +30,33 @@ final class LiveVoiceSDK: NSObject, VoiceSDK {
     /// it — which is exactly the signal the wrap-up depends on.
     private var liveCall: LiveCall?
 
+    /// Every invite handed to `CallController` and not yet accepted or
+    /// rejected.
+    ///
+    /// Retention here is required, not tidy: `TwilioVoice.h` — "To ensure that
+    /// a cancellation is reported via the [TVONotificationDelegate
+    /// cancelledCallInviteReceived:error:] callback, the TVOCallInvite must be
+    /// retained until the call is accepted or rejected." Without this
+    /// dictionary a caller who gives up leaves the phone ringing at nothing.
+    private var outstandingInvites: [UUID: CallInvite] = [:]
+
+    /// The UUIDs of `outstandingInvites`, for `shouldDeclineCancelledInvite`.
+    var outstandingInviteIDs: Set<UUID> { Set(outstandingInvites.keys) }
+
+    /// A caller gave up before the rep answered. Delivered on the main actor;
+    /// `VoiceRuntime` decides whether it concerns the ring on screen.
+    ///
+    /// This is the *only* live cancellation signal in 6.13.7 — the
+    /// `twilio.voice.cancel` push route is unsupported by this SDK version
+    /// (see `RingCancellation.swift`), so the payload branch in `PushRegistry`
+    /// is belt-and-braces and this is the belt.
+    var onCancelledInvite: ((UUID) -> Void)?
+
+    /// An **outbound** call whose callee has picked up, delivered on the main
+    /// actor. `sdk.connect` now returns at ringback, so this is the only thing
+    /// that can tell CallKit when the conversation actually started.
+    var onOutboundCallConnected: ((UUID) -> Void)?
+
     // MARK: - Registration
 
     func register(accessToken: String, deviceToken: Data) async throws {
@@ -62,6 +89,10 @@ final class LiveVoiceSDK: NSObject, VoiceSDK {
     func connect(accessToken: String, params: [String: String]) async throws -> ActiveCall {
         let uuid = UUID()
         let wrapper = LiveCall(uuid: uuid, log: log)
+        wrapper.onConnected = { [weak self] in
+            guard let self else { return }
+            onMainActor { self.onOutboundCallConnected?(uuid) }
+        }
         // Held before the SDK is touched, not after: the delegate can fire
         // while `connect` is still returning.
         liveCall = wrapper
@@ -116,6 +147,7 @@ final class LiveVoiceSDK: NSObject, VoiceSDK {
         }
         guard let invite = capturedInvite else { return nil }
         capturedInvite = nil
+        outstandingInvites[invite.uuid] = invite
         return LiveInvite(invite: invite, sdk: self, log: log)
     }
 
@@ -128,6 +160,12 @@ final class LiveVoiceSDK: NSObject, VoiceSDK {
             self.liveCall = nil
         }
     }
+
+    /// The invite is spent — accepted or rejected — so Twilio no longer owes
+    /// it a cancellation and nothing here needs to keep it alive.
+    fileprivate func retire(_ uuid: UUID) {
+        outstandingInvites[uuid] = nil
+    }
 }
 
 // MARK: - TVONotificationDelegate
@@ -137,12 +175,29 @@ extension LiveVoiceSDK: NotificationDelegate {
         capturedInvite = callInvite
     }
 
+    /// The caller gave up, or the call was answered on another device.
+    ///
+    /// `TVOCancelledCallInvite` carries no UUID of its own, only the call SID
+    /// and the numbers, so the invite is matched on `callSid` against what is
+    /// still outstanding. Hopped to the main actor because the handler ends up
+    /// in `CallController`, and because the SDK raises this out of band rather
+    /// than from a push (this SDK version does not support cancel pushes at
+    /// all — see `RingCancellation.swift`).
     func cancelledCallInviteReceived(cancelledCallInvite: CancelledCallInvite, error: Error) {
-        // Nothing to capture: the ring is over. `PushRegistry` reads the raw
-        // payload's message type and ends the CallKit call — it cannot depend
-        // on this callback, because a cancel for an invite the SDK never saw
-        // (app relaunched between the two pushes) does not raise it at all.
         log.notice("call invite cancelled: \(error.localizedDescription, privacy: .public)")
+        let sid = cancelledCallInvite.callSid
+        onMainActor { [weak self] in
+            guard let self,
+                  let uuid = self.outstandingInvites.first(where: { $0.value.callSid == sid })?.key
+            else { return }
+            self.onCancelledInvite?(uuid)
+            // Retired whether or not anything declined it. A cancelled invite
+            // can no longer be accepted or rejected, so nothing else will ever
+            // retire it — and one left behind would make the *next* ring look
+            // ambiguous to `shouldDeclineCancelledInvite`, which refuses to
+            // guess between two outstanding invites.
+            self.outstandingInvites[uuid] = nil
+        }
     }
 }
 
@@ -176,11 +231,13 @@ private final class LiveInvite: IncomingInvite {
             builder.uuid = self.invite.uuid
         }
         wrapper.adopt(invite.accept(options: options, delegate: wrapper))
+        sdk?.retire(invite.uuid)
         return wrapper
     }
 
     func reject() {
         invite.reject()
+        sdk?.retire(invite.uuid)
     }
 }
 
@@ -200,10 +257,15 @@ private final class LiveCall: NSObject, ActiveCall {
     private let log: os.Logger
     private let latch = DisconnectLatch()
     private var call: Call?
-    /// Resumed exactly once, by whichever delegate callback lands first.
-    private var connection: CheckedContinuation<Void, Error>?
+    /// Answers the outbound connect exactly once, from whichever callback
+    /// lands first — ringing included. Nil for an inbound call, which has no
+    /// connect to answer.
+    private var gate: ConnectGate?
     /// Told when this call is over, so the SDK can stop holding it.
     var onFinished: (() -> Void)?
+    /// Told when the far end picks up. Only set for an outbound call — an
+    /// inbound one was connected the moment it was answered.
+    var onConnected: (() -> Void)?
 
     init(uuid: UUID, log: os.Logger) {
         self.uuid = uuid
@@ -216,7 +278,9 @@ private final class LiveCall: NSObject, ActiveCall {
     }
 
     func awaitConnection(_ continuation: CheckedContinuation<Void, Error>) {
-        connection = continuation
+        gate = ConnectGate { error in
+            if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+        }
     }
 
     func adopt(_ call: Call) {
@@ -235,27 +299,40 @@ private final class LiveCall: NSObject, ActiveCall {
         call?.sendDigits(digits)
     }
 
-    /// Resumes the connect continuation if one is still waiting, and says
-    /// whether it did — a failure that lands before the call was ever handed
-    /// to the controller is a thrown `connect`, not a disconnect.
-    private func resumeConnection(throwing error: Error?) -> Bool {
-        guard let connection else { return false }
-        self.connection = nil
-        if let error { connection.resume(throwing: error) } else { connection.resume() }
-        return true
+    /// Answers the connect if it is still waiting, and says whether it did — a
+    /// failure that lands before the call was ever handed to the controller is
+    /// a thrown `connect`, not a disconnect.
+    @discardableResult
+    private func settleConnect(_ error: Error?) -> Bool {
+        gate?.settle(error) ?? false
     }
 }
 
 // MARK: - TVOCallDelegate
 
 extension LiveCall: CallDelegate {
+    /// The callee's phone is ringing. With the server's `answerOnBridge: true`
+    /// this is the earliest honest "the call is happening", and it is what
+    /// answers the connect — `callDidConnect` will not arrive until someone
+    /// picks up, and parking the whole ringback inside `sdk.connect` would
+    /// leave the rep with no CallKit call and no way to hang up.
+    func callDidStartRinging(call: Call) {
+        settleConnect(nil)
+    }
+
+    /// The callee answered. Ringing has normally answered the connect already,
+    /// in which case the gate says so and there is nothing left to do — the
+    /// media was already live from the rep's point of view.
     func callDidConnect(call: Call) {
-        _ = resumeConnection(throwing: nil)
+        settleConnect(nil)
+        onConnected?()
     }
 
     func callDidFailToConnect(call: Call, error: Error) {
         log.error("call failed to connect: \(error.localizedDescription, privacy: .public)")
-        if !resumeConnection(throwing: error) { latch.fire(error) }
+        // A failure *after* ringback answered the connect is a disconnect: the
+        // controller is holding this call and owes the rep a wrap-up.
+        if !settleConnect(error) { latch.fire(error) }
         onFinished?()
     }
 
@@ -263,14 +340,25 @@ extension LiveCall: CallDelegate {
         if let error {
             log.error("call disconnected: \(error.localizedDescription, privacy: .public)")
         }
-        // A disconnect can beat `callDidConnect` — the far end rejecting an
-        // outbound leg looks exactly like this. Then it is the connect that
+        // A disconnect can beat the ring — the far end rejecting an outbound
+        // leg outright looks exactly like this. Then it is the connect that
         // failed, and the controller must learn about it by `connect`
         // throwing rather than through a handler it has not attached yet.
-        if !resumeConnection(throwing: error ?? CallEndedBeforeConnecting()) {
+        // Once ringback has answered the connect, this is an ordinary
+        // disconnect and goes to the latch, and so to the wrap-up.
+        if !settleConnect(error ?? CallEndedBeforeConnecting()) {
             latch.fire(error)
         }
         onFinished?()
+    }
+}
+
+/// Runs `body` on the main actor, without a hop when it is already there.
+private func onMainActor(_ body: @escaping @MainActor () -> Void) {
+    if Thread.isMainThread {
+        MainActor.assumeIsolated { body() }
+    } else {
+        Task { @MainActor in body() }
     }
 }
 

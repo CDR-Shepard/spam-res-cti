@@ -17,13 +17,6 @@ import os
 /// register it with Twilio against the PushKit token, and tell our own server
 /// about the PushKit token so the softphone can see the device is reachable.
 final class PushRegistry: NSObject {
-    private enum Keys {
-        /// The PushKit token, kept in `UserDefaults` on purpose: it is a
-        /// routing address, not a credential — unlike the device and session
-        /// tokens, which are Keychain-only.
-        static let voipToken = "voipPushToken"
-    }
-
     private let controller: CallController
     private let system: CallSystem
     private let sdk: VoiceSDK
@@ -33,10 +26,15 @@ final class PushRegistry: NSObject {
     /// a value, so an unpair-and-repair is picked up without rebuilding this.
     private let deviceToken: () -> String?
     private let transport: PairingTransport
-    private let defaults: UserDefaults
     private let log = Logger(subsystem: AppConfig.loggingSubsystem, category: "VoIPPush")
 
     private var registry: PKPushRegistry?
+    /// In memory only, deliberately. PushKit re-delivers the credentials
+    /// through `didUpdate` every time `desiredPushTypes` is set — i.e. on
+    /// every launch, before any push can arrive — so a persisted copy would be
+    /// a second source of truth that buys nothing and can go stale.
+    /// Registering a token iOS has since invalidated is worse than waiting a
+    /// moment for the real one.
     private var pushToken: Data?
 
     init(
@@ -46,8 +44,7 @@ final class PushRegistry: NSObject {
         tokens: VoiceTokenRefresher,
         baseURL: URL,
         deviceToken: @escaping () -> String? = DeviceTokenStore.load,
-        transport: @escaping PairingTransport = livePairingTransport,
-        defaults: UserDefaults = .standard
+        transport: @escaping PairingTransport = livePairingTransport
     ) {
         self.controller = controller
         self.system = system
@@ -56,7 +53,6 @@ final class PushRegistry: NSObject {
         self.baseURL = baseURL
         self.deviceToken = deviceToken
         self.transport = transport
-        self.defaults = defaults
     }
 
     /// Starts listening for VoIP pushes. Idempotent.
@@ -73,10 +69,34 @@ final class PushRegistry: NSObject {
 
     /// Stops listening. Sign-out only: a phone that is no longer signed in
     /// must not go on ringing for the org it left.
+    ///
+    /// Twilio is told too, best effort. Without it the binding survives on
+    /// Twilio's side and this handset keeps being a valid destination for the
+    /// org's inbound calls — the pushes would simply arrive at an app that no
+    /// longer answers them.
     func stop() {
+        let stale = pushToken
+        pushToken = nil
         registry?.desiredPushTypes = []
         registry?.delegate = nil
         registry = nil
+        guard let stale else { return }
+
+        // The *cached* access token, never a fresh mint: sign-out has usually
+        // cleared the Salesforce session by the time this runs, so minting
+        // would fail and take the unregistration with it.
+        let accessToken = tokens.cachedAccessToken
+        guard !accessToken.isEmpty else { return }
+        Task { [sdk, log] in
+            do {
+                try await sdk.unregister(accessToken: accessToken, deviceToken: stale)
+            } catch {
+                // Deliberately not logging the error itself: sign-out is not a
+                // place to risk putting an account identifier in the log, and
+                // there is nothing to retry against — the session is gone.
+                log.notice("Twilio VoIP unregistration on sign-out did not complete")
+            }
+        }
     }
 
     /// Registers the PushKit token against a current voice token, minting one
@@ -129,7 +149,6 @@ extension PushRegistry: PKPushRegistryDelegate {
     func pushRegistry(_ registry: PKPushRegistry, didUpdate credentials: PKPushCredentials, for type: PKPushType) {
         guard type == .voIP else { return }
         pushToken = credentials.token
-        defaults.set(credentials.token.hexEncoded, forKey: Keys.voipToken)
         refreshRegistration()
     }
 
@@ -137,7 +156,6 @@ extension PushRegistry: PKPushRegistryDelegate {
         guard type == .voIP else { return }
         let stale = pushToken
         pushToken = nil
-        defaults.removeObject(forKey: Keys.voipToken)
         guard let stale else { return }
         Task { [sdk, tokens, log] in
             do {

@@ -581,13 +581,28 @@ final class CallControllerTests: XCTestCase {
         XCTAssertEqual(sdk.nextCall.muteCalls, [true])
         XCTAssertTrue(c.isMuted)
 
-        // DTMF rides the same live call the mute does — Task 10's in-call
-        // keypad has nowhere else to send "press 2 for accounts".
-        sdk.nextCall.sendDigits("2")
+        c.hangUp()
+        XCTAssertFalse(c.isMuted, "a new call never inherits the last one's mute")
+    }
+
+    /// Task 10's in-call keypad, and the only way through an IVR once a call
+    /// is up. Gated on `.active` for the same reason mute is: there is no leg
+    /// to tone into while dialing, ringing, or wrapping up, and a digit sent
+    /// then is silently lost rather than queued.
+    @MainActor func testDigitsAreForwardedToTheLiveCallOnly() async {
+        let sdk = FakeSDK(); let api = FakeCallsAPI()
+        let c = CallController(sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" })
+
+        c.sendDigits("1")
+        XCTAssertTrue(sdk.nextCall.sentDigits.isEmpty, "nothing to tone into while idle")
+
+        await c.placeCall(to: "+18585550100")
+        c.sendDigits("2")
         XCTAssertEqual(sdk.nextCall.sentDigits, ["2"])
 
         c.hangUp()
-        XCTAssertFalse(c.isMuted, "a new call never inherits the last one's mute")
+        c.sendDigits("3")
+        XCTAssertEqual(sdk.nextCall.sentDigits, ["2"], "the wrap-up screen has no keypad")
     }
 
     @MainActor func testSkipWrapupClosesWithoutPosting() async {

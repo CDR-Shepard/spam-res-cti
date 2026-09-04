@@ -322,6 +322,17 @@ final class CallController: ObservableObject {
         isMuted = on
     }
 
+    /// The in-call keypad, and the only way through an IVR once a call is up.
+    ///
+    /// Gated on `.active` for the same reason mute is: there is no leg to tone
+    /// into while dialing, ringing, or wrapping up, and a digit sent then is
+    /// lost rather than queued. Nothing to report back — DTMF is audio on a
+    /// connected leg, so there is no acknowledgement to wait for.
+    func sendDigits(_ digits: String) {
+        guard case .active = phase, let call else { return }
+        call.sendDigits(digits)
+    }
+
     func hangUp() {
         // CallKit sends the rep's "end call" to one action whether the call is
         // ringing or up, and both routings land here. Ending a ringing call is

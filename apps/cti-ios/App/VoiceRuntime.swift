@@ -60,6 +60,26 @@ final class VoiceRuntime: ObservableObject {
             controller: controller, system: system, sdk: sdk, tokens: refresher, baseURL: baseURL
         )
 
+        // The caller gave up before the rep answered. This is the only live
+        // cancellation signal the SDK has (`RingCancellation.swift`), and it
+        // arrives with a UUID and nothing else — hence the match here, where
+        // both the outstanding invites and the controller's phase are visible.
+        sdk.onCancelledInvite = { [weak self] uuid in
+            guard let self, let controller = self.controller else { return }
+            var isRinging = false
+            if case .ringing = controller.phase { isRinging = true }
+            guard shouldDeclineCancelledInvite(
+                uuid, outstanding: self.sdk.outstandingInviteIDs, controllerIsRinging: isRinging
+            ) else { return }
+            controller.decline()
+        }
+
+        // `sdk.connect` now returns at ringback, so CallKit has to be told
+        // separately when the callee actually picks up.
+        sdk.onOutboundCallConnected = { [weak system] uuid in
+            system?.reportOutgoingConnected(uuid: uuid)
+        }
+
         self.refresher = refresher
         self.system = system
         self.controller = controller
@@ -87,6 +107,10 @@ final class VoiceRuntime: ObservableObject {
     /// Sign-out. Drops the whole graph, including the PushKit registration —
     /// leaving it up would keep ringing this phone for an org it has left.
     func stop() {
+        sdk.onCancelledInvite = nil
+        sdk.onOutboundCallConnected = nil
+        // Before the registry is dropped: `stop()` is what tells Twilio to
+        // stop routing this org's calls to this handset.
         push?.stop()
         push = nil
         system?.shutDown()

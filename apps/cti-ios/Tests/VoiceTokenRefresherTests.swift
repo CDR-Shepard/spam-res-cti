@@ -1,5 +1,24 @@
 import XCTest
 
+/// A one-shot async signal — the alternative to a sleep when a test needs to
+/// know that something has *started* before it lets it finish.
+actor Signal {
+    private var isSet = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func send() {
+        isSet = true
+        let pending = waiters
+        waiters = []
+        pending.forEach { $0.resume() }
+    }
+
+    func wait() async {
+        if isSet { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
 /// The one testable piece of the live voice stack: when a Twilio access token
 /// is reused and when it is re-minted.
 ///
@@ -96,6 +115,38 @@ final class VoiceTokenRefresherTests: XCTestCase {
         XCTAssertEqual(refresher.cachedAccessToken, "", "nothing minted yet")
         _ = try await refresher.current()
         XCTAssertEqual(refresher.cachedAccessToken, "minted")
+    }
+
+    /// Two callers arriving while a mint is in flight — the launch warm-up and
+    /// a foreground, most often — must share it. Two mints would mean two
+    /// Twilio registrations racing to bind the same PushKit token, and the
+    /// loser silently stops the phone ringing.
+    func testConcurrentCallersShareOneMint() async throws {
+        let started = Signal()
+        let mayFinish = Signal()
+        var fetches = 0
+
+        let refresher = VoiceTokenRefresher(
+            fetch: {
+                fetches += 1
+                let minted = "t\(fetches)"
+                await started.send()
+                await mayFinish.wait()
+                return VoiceToken(token: minted, expiresAt: "2026-09-04T12:00:00.000Z")
+            },
+            now: { self.utc(11, 0) }
+        )
+
+        let first = Task { try await refresher.current() }
+        let second = Task { try await refresher.current() }
+        // No sleep: the mint parks itself and says so, and only then is it let go.
+        await started.wait()
+        await mayFinish.send()
+
+        let a = try await first.value
+        let b = try await second.value
+        XCTAssertEqual(fetches, 1)
+        XCTAssertEqual(a, b, "both callers got the same token, so only one was ever minted")
     }
 
     /// A failed mint must not be cached as a token: the next dial has to try

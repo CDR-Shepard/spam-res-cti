@@ -161,6 +161,38 @@ anyway — the phone was already on a call, or the SDK produced no invite —
 killed. A `twilio.voice.cancel` deliberately does not: there is no ring to
 report, only one to end.
 
+**A caller who gives up does not arrive by push.** The obvious route — handling
+that `twilio.voice.cancel` payload — is dead in the SDK this app ships:
+`TwilioVoice.h` lists the Insights event `unsupported-cancel-message-error`,
+"This version of the SDK does not support 'cancel' push notifications". The live
+signal is the SDK's own out-of-band `cancelledCallInviteReceived:error:`, which
+only fires if the invite is still retained ("the TVOCallInvite must be retained
+until the call is accepted or rejected") — hence
+`LiveVoiceSDK.outstandingInvites`. It carries a call SID and no UUID, and
+`CallController` keeps its invite private, so `shouldDeclineCancelledInvite`
+makes the match, and refuses to guess whenever two invites are outstanding:
+declining the wrong one drops a live conversation, while missing a cancellation
+costs a ring that stops by itself.
+
+**CallKit owns the audio session, not Twilio.** `TVODefaultAudioDevice` ships
+`enabled` and "activates the audio session while connecting to a Call", which
+would put the session up before CallKit has decided the call may be heard. So
+`LiveCallSystem` takes the SDK's own device, disables it at construction —
+before anything can connect — and drives it purely from
+`didActivate`/`didDeactivate`. The one exception is a refused
+`CXStartCallAction`: no activation is coming, so the app enables the device
+itself rather than leave the rep on a call that is silent both ways.
+
+**An outbound call returns at ringback, not at answer.** The server dials with
+`answerOnBridge: true`, so `callDidConnect` does not arrive until the callee
+picks up. Waiting for it would park the whole ringback inside `sdk.connect`:
+no `ActiveCall`, so no CallKit call and no way to give up on a phone that rings
+out. `ConnectGate` lets `callDidStartRinging` answer the connect instead —
+whichever of ringing/connect/failure lands first, exactly once — and everything
+after it is routed onward to the disconnect latch. CallKit gets
+`startedConnectingAt` then, and `connectedAt` when the callee really answers, so
+the call timer measures the conversation rather than the ringing.
+
 **A call can end before anyone is listening for the end.** `CallController`
 attaches `onDisconnect` after the SDK hands the call back, and an outbound leg
 can die inside that gap. `DisconnectLatch` remembers the end and replays it on
