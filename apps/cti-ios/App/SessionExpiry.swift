@@ -11,10 +11,19 @@ import Foundation
 // answers 401, and the rep reads whatever generic sentence that 401 happened
 // to become.
 //
-// The recovery is deliberately blunt: one 401 from a session-authenticated
-// call signs the phone out for real (revoke, stop, unpair) and drops it on
-// `SignInView` with a line saying why. Signing in again is the only fix, so
-// getting there in one step beats any amount of retrying.
+// The recovery used to be blunt: the FIRST 401 from a session-authenticated
+// call signed the phone out for real (revoke, stop, unpair) and dropped it on
+// `SignInView`. That is right for a genuine expiry and wrong for a spurious
+// one — an edge/proxy misconfiguration, a brief auth-service blip — which
+// would sign out every phone in the fleet at once, each needing a manual
+// Salesforce sign-in to recover.
+//
+// So the gate confirms before it acts: on the first qualifying 401 it sends
+// ONE cheap session-authenticated GET of its own (`confirmSessionExpired`),
+// and only signs the phone out if THAT also comes back 401. A 200, any other
+// status, or a thrown transport error all mean "don't know" — and the safe
+// default when in doubt is not to sign the rep out; the original error still
+// surfaces through its own path exactly as before.
 // -----------------------------------------------------------------------------
 
 /// Whether `error` means **the Salesforce session is gone**, as opposed to any
@@ -37,30 +46,99 @@ func isSessionExpired(_ error: Error) -> Bool {
     return false
 }
 
-/// Fires the sign-out **once**, however many calls report the expiry.
+/// Confirms a suspected expiry before it signs the phone out — see the file
+/// header for why acting on the very first 401 is not safe.
 ///
 /// An expiry never arrives alone: a dial, the recents load, the pending
 /// lookup and the voice-token mint can all be in flight together and all come
-/// back 401 within a few milliseconds of each other. Each of those would
-/// otherwise run a whole sign-out — a server revoke, a Twilio unregister, a
-/// Keychain wipe — against a phone already halfway through one, and the rep
-/// would watch the sign-in screen flicker.
+/// back 401 within a few milliseconds of each other. `fire()` treats all of
+/// those as ONE suspected expiry — a confirmation already in flight makes
+/// every later `fire()` (while it is pending) a no-op, so at most one
+/// confirmation call is ever sent for it, and at most one sign-out ever runs.
+///
+/// A rejected confirmation resets `isConfirming` but leaves `hasFired` false,
+/// so a later, genuine expiry is still caught. A confirmed one leaves
+/// `hasFired` true forever — the old latch's guarantee, preserved.
 ///
 /// Scoped to one signed-in session by construction: `VoiceRuntime` builds a
-/// fresh latch every time it starts, so the next sign-in starts unfired.
+/// fresh gate every time it starts, so the next sign-in starts unconfirmed
+/// and unfired.
 @MainActor
-final class SessionExpiryLatch {
+final class SessionExpiryGate {
+    /// Returns true only when the session is confirmed gone (the
+    /// confirmation GET itself came back 401). Never throws: a thrown
+    /// transport error is exactly as inconclusive as any other non-401, and
+    /// `confirmSessionExpired` maps both to `false` before this ever sees it.
+    private let confirm: () async -> Bool
     private let onExpired: () -> Void
     private(set) var hasFired = false
+    private(set) var isConfirming = false
 
-    init(onExpired: @escaping () -> Void) {
+    /// The one confirmation currently running, if any — `nil` once it has
+    /// resolved. Exists only so `waitUntilSettledForTest()` has something to
+    /// await; no production code reads it.
+    private var inFlight: Task<Void, Never>?
+
+    init(confirm: @escaping () async -> Bool, onExpired: @escaping () -> Void) {
+        self.confirm = confirm
         self.onExpired = onExpired
     }
 
+    /// No-op if already fired or a confirmation is already in flight.
+    /// Otherwise starts the ONE confirmation call and signs out only if it
+    /// also comes back 401. Synchronous by contract — every call site fires
+    /// it from a `@MainActor` context and never awaits it.
     func fire() {
-        guard !hasFired else { return }
+        guard !hasFired, !isConfirming else { return }
+        isConfirming = true
+        inFlight = Task { [weak self] in
+            guard let self else { return }
+            let confirmed = await self.confirm()
+            self.resolve(confirmed: confirmed)
+        }
+    }
+
+    private func resolve(confirmed: Bool) {
+        isConfirming = false
+        inFlight = nil
+        guard confirmed, !hasFired else { return }
         hasFired = true
         onExpired()
+    }
+
+    #if DEBUG
+    /// Awaits the in-flight confirmation, if any — the deterministic
+    /// alternative to a sleep for a test that needs to observe the gate
+    /// after `fire()`'s unstructured task has actually finished, rather than
+    /// racing its own continuation resumption against `resolve()`.
+    func waitUntilSettledForTest() async {
+        await inFlight?.value
+    }
+    #endif
+}
+
+/// Builds the ONE cheap call `SessionExpiryGate` sends to confirm a suspected
+/// expiry before it signs the phone out, rather than inventing an endpoint:
+/// `GET /calls?limit=1`, the lightest session-authenticated read there is.
+///
+/// Returns `true` only when that GET itself comes back 401 — the same signal
+/// `isSessionExpired` reads elsewhere. A 200, any other status, or a thrown
+/// transport error (a timeout, no connectivity, DNS) all become `false`: none
+/// of them says the session is gone, and the safe default when in doubt is
+/// NOT to sign the rep out. Never logs `sessionToken`.
+func confirmSessionExpired(
+    baseURL: URL,
+    sessionToken: String,
+    transport: @escaping PairingTransport = livePairingTransport
+) -> () async -> Bool {
+    {
+        do {
+            let request = recentCallsRequest(baseURL: baseURL, sessionToken: sessionToken, limit: 1)
+            let (_, status) = try await transport(request)
+            return status == 401
+        } catch {
+            return false
+        }
     }
 }
 

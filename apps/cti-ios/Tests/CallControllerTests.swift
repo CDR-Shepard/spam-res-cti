@@ -716,19 +716,22 @@ final class CallControllerTests: XCTestCase {
     }
 
     /// End to end with the guard the runtime actually wires in: however many
-    /// calls come back 401, the phone signs out once.
+    /// calls come back 401, the phone signs out once — after confirming, so
+    /// the confirmation here always agrees.
     @MainActor func testASecondExpiredCallDoesNotSignTheRepOutTwice() async {
         var signOuts = 0
-        let latch = SessionExpiryLatch { signOuts += 1 }
+        let gate = SessionExpiryGate(confirm: { true }, onExpired: { signOuts += 1 })
         let api = FakeCallsAPI()
         api.precallError = SessionClientError.server(status: 401)
         let c = CallController(
             sdk: FakeSDK(), system: FakeCallSystem(), api: api, tokens: { "t" },
-            onSessionExpired: { latch.fire() }
+            onSessionExpired: { gate.fire() }
         )
 
         await c.placeCall(to: "+18585550100")
+        await gate.waitUntilSettledForTest()
         await c.placeCall(to: "+18585550101")
+        await gate.waitUntilSettledForTest()
 
         XCTAssertEqual(signOuts, 1)
     }

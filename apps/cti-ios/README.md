@@ -257,16 +257,20 @@ either state, because the one thing iOS does not forgive is taking a call push
 and reporting no call. With nothing attached, the report-then-end safety net
 gives the rep a real missed call and iOS the report it requires.
 
-**An expired sign-in signs the phone out.** Session tokens last 30 days
-(`services/cti-api/src/auth/session.ts`) and device tokens never expire, so
-before this a phone whose session ran out kept syncing the directory and saying
-"Signed in" while being unable to call. Now a 401 from any session-authenticated
-call — a dial, a wrap-up, the recents/pending reads, the voice-token mint —
-runs the sign-out and lands on `SignInView` with a line saying why.
-`SessionExpiryLatch` makes that happen once however many of those 401s arrive
-together, and `isSessionExpired` is careful to exclude a 401 on a *device*-token
-call, which means something else entirely (an admin revoked this handset) and
-which `SyncEngine` already handles.
+**An expired sign-in signs the phone out — but only once confirmed.** Session
+tokens last 30 days (`services/cti-api/src/auth/session.ts`) and device tokens
+never expire, so before this a phone whose session ran out kept syncing the
+directory and saying "Signed in" while being unable to call. A 401 from any
+session-authenticated call — a dial, a wrap-up, the recents/pending reads, the
+voice-token mint — is a *suspected* expiry, not proof of one (an edge/proxy
+blip can 401 too), so `SessionExpiryGate` sends one cheap confirmation GET of
+its own first and signs out (landing on `SignInView` with a line saying why)
+only if that also comes back 401; a confirmation that comes back clean resets
+the gate for the next genuine expiry instead. However many of the original
+401s arrive together, `SessionExpiryGate` sends exactly one confirmation and
+runs the sign-out at most once. `isSessionExpired` is careful to exclude a 401
+on a *device*-token call, which means something else entirely (an admin
+revoked this handset) and which `SyncEngine` already handles.
 
 VoIP push can only be exercised on a real device. The simulator builds and runs
 everything else.

@@ -32,10 +32,10 @@ final class VoiceRuntime: ObservableObject {
 
     private var system: LiveCallSystem?
     private var refresher: VoiceTokenRefresher?
-    /// Fires the sign-out once, however many calls report the 401 — see
-    /// `SessionExpiryLatch`. Rebuilt by every `start()`, so the next sign-in
-    /// begins unfired.
-    private var expiry: SessionExpiryLatch?
+    /// Confirms a suspected 401 expiry before signing out, however many calls
+    /// report it — see `SessionExpiryGate`. Rebuilt by every `start()`, so
+    /// the next sign-in begins unconfirmed and unfired.
+    private var expiry: SessionExpiryGate?
 
     init(sessions: SessionTokenStoring = SessionTokenStore()) {
         self.sessions = sessions
@@ -46,7 +46,10 @@ final class VoiceRuntime: ObservableObject {
         guard controller == nil, let session = sessions.load() else { return }
         let baseURL = AppConfig.baseURL
 
-        let expiry = SessionExpiryLatch { [weak self] in self?.signOutAfterExpiry() }
+        let expiry = SessionExpiryGate(
+            confirm: confirmSessionExpired(baseURL: baseURL, sessionToken: session),
+            onExpired: { [weak self] in self?.signOutAfterExpiry() }
+        )
         let refresher = VoiceTokenRefresher(fetch: sessionExpiryWatching(
             { try await Self.mintVoiceToken(baseURL: baseURL) },
             onSessionExpired: { expiry.fire() }
