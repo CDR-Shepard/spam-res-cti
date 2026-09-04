@@ -37,18 +37,31 @@ final class CallsFeedStore: ObservableObject {
     @Published private(set) var pendingError: String?
 
     private let api: RecentCallsReading
+    /// Both reads here are session-authenticated and both run on tab appear,
+    /// so on a phone nobody is dialling from they are usually the first to
+    /// notice the 30-day session has expired. See `isSessionExpired`.
+    private let onSessionExpired: () -> Void
 
-    init(api: RecentCallsReading) {
+    init(api: RecentCallsReading, onSessionExpired: @escaping () -> Void = {}) {
         self.api = api
+        self.onSessionExpired = onSessionExpired
     }
 
     /// The signed-in store. `RootView` only builds the tabs behind
     /// `engine.hasSession`, so the `nil` branch is unreachable in practice —
     /// it exists so a missing session surfaces as a readable line on the
     /// screen instead of an unauthenticated request the rep can't interpret.
-    static func live(sessions: SessionTokenStoring = SessionTokenStore()) -> CallsFeedStore {
-        guard let session = sessions.load() else { return CallsFeedStore(api: SignedOutFeed()) }
-        return CallsFeedStore(api: LiveCallsAPI(baseURL: AppConfig.baseURL, sessionToken: session))
+    static func live(
+        sessions: SessionTokenStoring = SessionTokenStore(),
+        onSessionExpired: @escaping () -> Void = {}
+    ) -> CallsFeedStore {
+        guard let session = sessions.load() else {
+            return CallsFeedStore(api: SignedOutFeed(), onSessionExpired: onSessionExpired)
+        }
+        return CallsFeedStore(
+            api: LiveCallsAPI(baseURL: AppConfig.baseURL, sessionToken: session),
+            onSessionExpired: onSessionExpired
+        )
     }
 
     @MainActor
@@ -62,6 +75,7 @@ final class CallsFeedStore: ObservableObject {
             // The rows already on screen were real; only the refresh failed, so
             // they stay and the failure is shown alongside them.
             recentsError = error.localizedDescription
+            reportIfSessionExpired(error)
         }
     }
 
@@ -76,7 +90,13 @@ final class CallsFeedStore: ObservableObject {
             // dropping the banner would hide the reason their next dial gets
             // refused.
             pendingError = error.localizedDescription
+            reportIfSessionExpired(error)
         }
+    }
+
+    private func reportIfSessionExpired(_ error: Error) {
+        guard isSessionExpired(error) else { return }
+        onSessionExpired()
     }
 }
 

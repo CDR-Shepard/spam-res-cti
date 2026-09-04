@@ -28,6 +28,17 @@ struct SignInView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal)
 
+                // A rep who did not tap Sign out is owed the reason they are
+                // suddenly looking at this screen. Suppressed once a sign-in
+                // attempt has produced a failure of its own — the newer
+                // message is the one that helps.
+                if errorMessage == nil, engine.sessionExpired {
+                    Text(Self.expiredMessage)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+
                 if let errorMessage {
                     Text(errorMessage)
                         .foregroundStyle(.red)
@@ -53,6 +64,12 @@ struct SignInView: View {
             .navigationTitle("Callsign")
         }
     }
+
+    /// What a phone signed out by an expired session says, as opposed to one
+    /// the rep signed out themselves. Sessions last 30 days
+    /// (`services/cti-api/src/auth/session.ts`), so this is a monthly event,
+    /// not an incident.
+    static let expiredMessage = "Your Salesforce sign-in expired. Sign in again."
 
     /// A legacy code-paired phone (a device token from before Salesforce
     /// sign-in existed, no session token) already has calling set up in every
@@ -98,8 +115,10 @@ struct SignInView: View {
             },
             saveSession: { try SessionTokenStore().save($0) },
             deleteSession: { try SessionTokenStore().delete() },
-            adoptDevice: { deviceToken, displayName in
-                try engine.adoptDeviceToken(deviceToken, displayName: displayName)
+            adoptDevice: { registration, displayName in
+                try engine.adoptDeviceToken(
+                    registration.deviceToken, displayName: displayName, deviceId: registration.deviceId
+                )
             }
         )
     }

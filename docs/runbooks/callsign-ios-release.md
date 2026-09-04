@@ -204,9 +204,19 @@ can't verify; the same split applies here).
 - [ ] Token refresh survives an hour idle (leave the app backgrounded ~60
       minutes, then place a call — it should connect without a fresh
       sign-in).
+- [ ] **Force-quit Callsign (swipe it away), then call the phone → it rings.**
+      This is the cold-launch VoIP push: PushKit is armed in
+      `application(_:didFinishLaunchingWithOptions:)`, so iOS launches the app
+      and delivers the push. If it shows only a *missed* call instead of
+      ringing, the push arrived before the softphone attached — still correct
+      (iOS requires a CallKit report either way), but worth noting on the
+      build.
 - [ ] **Sign out on the phone → the web softphone still works.** Sign out
-      unregisters this handset from Twilio and clears its session; it must
-      not touch the rep's other sessions or devices.
+      revokes this phone's `mobile_devices` row (`DELETE /mobile/devices/:id`),
+      unregisters the handset from Twilio, and clears its session; it must not
+      touch the rep's other sessions or devices. Confirm in the softphone's
+      admin device list that this phone's row is gone and the rep's other
+      devices are not.
 - [ ] **Sign back in → inbound rings again** on this phone (confirms the
       VoIP registration re-establishes cleanly after a sign-out/sign-in
       cycle, not just after a fresh install).
@@ -235,8 +245,16 @@ chase before shipping:
   whether this constraint holds up as the token-refresh path evolves.
 - **Per-user device-token cap + session-revoke cascade** — nothing currently
   limits how many devices one rep can register, and revoking a Salesforce
-  session does not cascade to revoke that rep's mobile device tokens. Filed
-  as a follow-up chip.
+  session does not cascade to revoke that rep's mobile device tokens. Signing
+  out on the phone now revokes *that* phone's row (`DELETE
+  /mobile/devices/:id`, best effort — a sign-out with no network still signs
+  the handset out locally and leaves the row for the admin device list), so
+  rows no longer accumulate one per sign-in; the cap and the cascade are still
+  open. Filed as a follow-up chip.
+- **No server-side session logout.** `revokeSession` exists in
+  `services/cti-api/src/auth/session.ts` but no route reaches it, so signing
+  out destroys the session token locally and leaves the row to expire on its
+  own 30-day clock. Adding the route is a server change this wave did not make.
 - **`.dialing` is not cancellable from the app's own UI** — once a rep places
   a call, they can't abort it from the app before ringback starts; CallKit's
   own end-call control works once ringback has begun. Filed as a follow-up

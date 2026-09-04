@@ -646,6 +646,93 @@ final class CallControllerTests: XCTestCase {
         }
     }
 
+    // MARK: - An expired Salesforce session
+
+    /// A 401 on a dial is not a refusal to read and retry — the rep's 30-day
+    /// session has run out and nothing they do on this screen will work until
+    /// they sign in again. The controller says so upward rather than leaving
+    /// them tapping Call against a sign-in that no longer exists.
+    @MainActor func testA401OnADialReportsTheExpiredSession() async {
+        var expiries = 0
+        let sdk = FakeSDK(); let api = FakeCallsAPI()
+        api.precallError = SessionClientError.server(status: 401)
+        let c = CallController(
+            sdk: sdk, system: FakeCallSystem(), api: api, tokens: { "t" },
+            onSessionExpired: { expiries += 1 }
+        )
+
+        await c.placeCall(to: "+18585550100")
+
+        XCTAssertEqual(expiries, 1)
+        XCTAssertEqual(sdk.connectCalls, 0)
+        guard case .idle = c.phase else { return XCTFail("expected idle") }
+        XCTAssertNotNil(c.lastRefusal, "the failure is still shown; the sign-out is what happens next")
+    }
+
+    /// The same for the dial itself and for the wrap-up, so a session that
+    /// expires mid-call is caught wherever it first shows up.
+    @MainActor func testA401OnPlaceOrOnTheWrapupReportsTheExpiredSession() async {
+        var expiries = 0
+        let api = FakeCallsAPI()
+        api.placeError = SessionClientError.server(status: 401)
+        let c = CallController(
+            sdk: FakeSDK(), system: FakeCallSystem(), api: api, tokens: { "t" },
+            onSessionExpired: { expiries += 1 }
+        )
+        await c.placeCall(to: "+18585550100")
+        XCTAssertEqual(expiries, 1)
+
+        // And on the disposition POST, whose 401 arrives as its own error type.
+        var wrapupExpiries = 0
+        let wrapupApi = FakeCallsAPI()
+        wrapupApi.placeResult = .allowed(callId: "c1", fromNumber: "+12135550100")
+        wrapupApi.dispositionError = DispositionFailed(status: 401)
+        let d = CallController(
+            sdk: FakeSDK(), system: FakeCallSystem(), api: wrapupApi, tokens: { "t" },
+            onSessionExpired: { wrapupExpiries += 1 }
+        )
+        await d.placeCall(to: "+18585550100")
+        d.hangUp()
+        await d.finishWrapup(disposition: "Left voicemail", notes: "keep these")
+
+        XCTAssertEqual(wrapupExpiries, 1)
+        guard case .wrapup = d.phase else { return XCTFail("the rep's notes must survive the failure") }
+    }
+
+    /// Everything else the server refuses with is a normal outcome. Signing a
+    /// rep out over a 503 would turn a blip into an outage.
+    @MainActor func testAnyOtherFailureIsNotAnExpiredSession() async {
+        var expiries = 0
+        let api = FakeCallsAPI()
+        api.precallError = SessionClientError.server(status: 503)
+        let c = CallController(
+            sdk: FakeSDK(), system: FakeCallSystem(), api: api, tokens: { "t" },
+            onSessionExpired: { expiries += 1 }
+        )
+
+        await c.placeCall(to: "+18585550100")
+
+        XCTAssertEqual(expiries, 0)
+    }
+
+    /// End to end with the guard the runtime actually wires in: however many
+    /// calls come back 401, the phone signs out once.
+    @MainActor func testASecondExpiredCallDoesNotSignTheRepOutTwice() async {
+        var signOuts = 0
+        let latch = SessionExpiryLatch { signOuts += 1 }
+        let api = FakeCallsAPI()
+        api.precallError = SessionClientError.server(status: 401)
+        let c = CallController(
+            sdk: FakeSDK(), system: FakeCallSystem(), api: api, tokens: { "t" },
+            onSessionExpired: { latch.fire() }
+        )
+
+        await c.placeCall(to: "+18585550100")
+        await c.placeCall(to: "+18585550101")
+
+        XCTAssertEqual(signOuts, 1)
+    }
+
     // MARK: - Mute and skip
 
     @MainActor func testMuteIsForwardedToTheLiveCallOnly() async {

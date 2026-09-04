@@ -190,12 +190,49 @@ final class SyncEngineTests: XCTestCase {
         )
         XCTAssertFalse(engine.isPaired)
 
-        try engine.adoptDeviceToken("dev_abc", displayName: "Jane")
+        try engine.adoptDeviceToken("dev_abc", displayName: "Jane", deviceId: "row_1")
 
         XCTAssertEqual(tokens.token, "dev_abc", "the minted token is what every later feed request carries")
         XCTAssertTrue(engine.isPaired)
         XCTAssertEqual(engine.pairedUserName, "Jane")
         XCTAssertTrue(engine.hasSession, "adopting a device brings the published flag in line with the session SignInFlow already saved")
+    }
+
+    /// The id of THIS phone's `mobile_devices` row, kept so that signing out
+    /// can revoke it server-side (`DELETE /mobile/devices/:id`). Not a secret —
+    /// it authenticates nothing on its own — so `UserDefaults`, not the
+    /// Keychain.
+    func testTheDeviceRowIdIsRememberedAtSignInAndForgottenAtSignOut() throws {
+        let engine = makeEngine(
+            tokens: TokenBox(token: nil),
+            sessions: SessionTokenBox(token: "sess_abc"),
+            pull: { _, _ in nil },
+            reload: { _ in }
+        )
+        XCTAssertNil(engine.deviceId)
+
+        try engine.adoptDeviceToken("dev_abc", displayName: "Jane", deviceId: "row_1")
+        XCTAssertEqual(engine.deviceId, "row_1")
+
+        engine.unpair()
+
+        XCTAssertNil(engine.deviceId, "a revoked phone must not keep pointing at a row it no longer owns")
+    }
+
+    /// A phone paired with a 6-digit code predates `/mobile/register` and has
+    /// no row id of its own. Sign-out must not invent one.
+    func testACodePairedPhoneHasNoDeviceRowIdToRevoke() async throws {
+        let engine = makeEngine(
+            tokens: TokenBox(token: nil),
+            pull: { _, _ in version5 },
+            reload: { _ in },
+            claim: { _, _ in PairClaim(deviceToken: "minted-token", user: .init(displayName: "Jane Rep")) }
+        )
+
+        try await engine.pair(code: "123456", deviceLabel: "Jane's iPhone")
+
+        XCTAssertTrue(engine.isPaired)
+        XCTAssertNil(engine.deviceId)
     }
 
     // MARK: - Sign-out
@@ -214,6 +251,36 @@ final class SyncEngineTests: XCTestCase {
 
         XCTAssertNil(sessions.token, "unpair must sign the phone out of Salesforce too, not just drop the device token")
         XCTAssertFalse(engine.hasSession)
+    }
+
+    // MARK: - An expired Salesforce session
+
+    /// A rep whose 30-day session expired is signed out without touching
+    /// anything, and lands on the same `SignInView` as one who tapped Sign
+    /// out. The flag is what lets that screen tell them apart — and it has to
+    /// survive `unpair()`, which is the very next thing that runs.
+    func testAnExpiredSessionIsRememberedAcrossTheSignOutItCauses() {
+        let engine = makeEngine(
+            sessions: SessionTokenBox(token: "sess_abc"),
+            pull: { _, _ in nil },
+            reload: { _ in }
+        )
+        XCTAssertFalse(engine.sessionExpired)
+
+        engine.noteSessionExpired()
+        engine.unpair()
+
+        XCTAssertTrue(engine.sessionExpired, "SignInView still has to explain why the rep is looking at it")
+        XCTAssertFalse(engine.hasSession)
+    }
+
+    func testSigningBackInClearsTheExpiryNotice() throws {
+        let engine = makeEngine(tokens: TokenBox(token: nil), pull: { _, _ in nil }, reload: { _ in })
+        engine.noteSessionExpired()
+
+        try engine.adoptDeviceToken("dev_abc", displayName: "Jane", deviceId: "row_1")
+
+        XCTAssertFalse(engine.sessionExpired, "the session that expired has just been replaced")
     }
 
     // MARK: - Legacy paired device

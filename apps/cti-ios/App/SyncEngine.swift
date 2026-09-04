@@ -56,6 +56,11 @@ final class SyncEngine: ObservableObject {
     @Published private(set) var entryCount: Int = 0
     @Published private(set) var lastSyncedAt: Date?
     @Published private(set) var extensionEnabled: CXCallDirectoryManager.EnabledStatus = .unknown
+    /// True when the phone was signed out because its Salesforce session
+    /// expired, rather than because the rep asked. `SignInView` reads it: the
+    /// two land on the same screen, and the rep who did not tap anything is
+    /// owed the reason they are suddenly looking at it.
+    @Published private(set) var sessionExpired = false
 
     private let store: DirectoryStore?
     private let defaults: UserDefaults
@@ -75,7 +80,20 @@ final class SyncEngine: ObservableObject {
         /// Set while an unpair's directory wipe has not finished. Persisted
         /// because the retry has to survive the app being killed.
         static let purgePending = "purgePending"
+        /// This phone's own `mobile_devices` row id — see `deviceId`.
+        static let deviceId = "deviceRowId"
     }
+
+    /// The id of THIS phone's `mobile_devices` row, when it has one: what
+    /// sign-out sends to `DELETE /mobile/devices/:id` so the row is revoked
+    /// server-side rather than left live for a handset nobody is signed in to.
+    ///
+    /// `UserDefaults`, deliberately, not the Keychain: it is a row identifier,
+    /// not a credential — it authenticates nothing on its own, and the route
+    /// that takes it authenticates the *session*. `nil` for a phone paired
+    /// with a 6-digit code, which predates `/mobile/register` and never
+    /// learned its own id.
+    var deviceId: String? { defaults.string(forKey: Keys.deviceId) }
 
     /// Everything the sync reaches outside itself is injected — CallKit and
     /// the Keychain included — because the invariants this engine invents (the
@@ -130,6 +148,13 @@ final class SyncEngine: ObservableObject {
     /// rather than the fresh-install "set up this iPhone" copy.
     var isLegacyPairedDevice: Bool { isPaired && !hasSession }
 
+    /// A session-authenticated call came back 401. Recorded here (rather than
+    /// in `status`, which `unpair()` clears) so it survives the sign-out that
+    /// follows it and is still there when `SignInView` draws.
+    func noteSessionExpired() {
+        sessionExpired = true
+    }
+
     // MARK: - Pairing
 
     func pair(code: String, deviceLabel: String) async throws {
@@ -143,6 +168,9 @@ final class SyncEngine: ObservableObject {
         // late-firing retryPendingPurge must not blank the directory we are
         // about to install.
         defaults.removeObject(forKey: Keys.purgePending)
+        // A code-paired phone has no row id of its own, and the one left over
+        // from a previous sign-in points at a row this pairing does not own.
+        defaults.removeObject(forKey: Keys.deviceId)
         try tokens.save(claimed.deviceToken)
         pairedUserName = claimed.user.displayName
         defaults.set(claimed.user.displayName, forKey: Keys.pairedUserName)
@@ -164,11 +192,16 @@ final class SyncEngine: ObservableObject {
     /// (`SignInView`) drives the first sync itself once it hands off to the
     /// main UI, the same way a cold launch's `StatusView.task` does for a
     /// phone that was already paired.
-    func adoptDeviceToken(_ token: String, displayName: String?) throws {
+    /// `deviceId` is the row `/mobile/register` just inserted — kept so that
+    /// signing out can revoke it (see `deviceId`).
+    func adoptDeviceToken(_ token: String, displayName: String?, deviceId: String) throws {
         try tokens.save(token)
+        defaults.set(deviceId, forKey: Keys.deviceId)
         defaults.set(displayName, forKey: Keys.pairedUserName)
         pairedUserName = displayName
         isPaired = true
+        // Whatever expired has just been replaced.
+        sessionExpired = false
         // The session token itself was already written by `SignInFlow`
         // (before this is ever called) — this only brings the published flag
         // in line with what is now actually in the Keychain, so `RootView`
@@ -210,6 +243,9 @@ final class SyncEngine: ObservableObject {
         defaults.removeObject(forKey: Keys.pairedUserName)
         defaults.removeObject(forKey: Keys.lastSyncedAt)
         defaults.removeObject(forKey: Keys.reloadedVersion)
+        // The row this pointed at is revoked (or was already unreachable);
+        // keeping the id would only offer the next sign-in somebody else's.
+        defaults.removeObject(forKey: Keys.deviceId)
         defaults.set(true, forKey: Keys.purgePending)
 
         Task { await purgeDirectory() }

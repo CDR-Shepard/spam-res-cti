@@ -2,6 +2,10 @@ import SwiftUI
 
 @main
 struct CTIApp: App {
+    /// Only for `didFinishLaunchingWithOptions`, and only because PushKit has
+    /// to be armed there — see `AppDelegate`. Nothing else in the app routes
+    /// through UIKit's lifecycle.
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var engine = SyncEngine.shared
     @StateObject private var voice = VoiceRuntime.shared
     @Environment(\.scenePhase) private var scenePhase

@@ -38,6 +38,37 @@ func voicePushKind(of payload: [AnyHashable: Any]) -> VoicePushKind {
     }
 }
 
+/// What `PushRegistry` does with a push it has just classified.
+enum VoicePushRoute: Equatable {
+    /// Hand it to the SDK and let `CallController` decide — the normal path.
+    case ring
+    /// Nothing is wired up to ring it, but iOS is still owed a CallKit report
+    /// before `completion()`. Report it and end it: a real missed call.
+    case reportMissed
+    /// Nothing rang and nothing is owed.
+    case ignore
+}
+
+/// Where a VoIP push goes, given whether the softphone graph is attached yet.
+///
+/// This exists because PushKit is armed in
+/// `application(_:didFinishLaunchingWithOptions:)` — which is Apple's
+/// requirement and the only way a push that COLD-LAUNCHES the app (after a
+/// force-quit, or a jetsam kill) is delivered at all. A push can therefore
+/// arrive before `VoiceRuntime.start()` has built anything, and the one thing
+/// iOS does not forgive is an app that takes a call push and reports no call:
+/// it terminates the process, and repeat offenders lose the VoIP entitlement.
+///
+/// So an unattached CALL INVITE still owes CallKit a report. A cancel rang
+/// nothing in this process and a non-Twilio push is not ours; reporting either
+/// would put a phantom call on the rep's screen.
+func voicePushRoute(kind: VoicePushKind, runtimeAttached: Bool) -> VoicePushRoute {
+    guard runtimeAttached else {
+        return kind == .callInvite ? .reportMissed : .ignore
+    }
+    return .ring
+}
+
 /// The caller's number as the raw push carries it, when it carries one. Only
 /// used for the fallback CallKit report — the real ring gets its caller
 /// identity from the invite's custom parameters via `CallerInfo.from`.

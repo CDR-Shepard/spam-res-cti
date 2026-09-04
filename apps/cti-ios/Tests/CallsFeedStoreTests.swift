@@ -145,4 +145,43 @@ final class CallsFeedStoreTests: XCTestCase {
 
         XCTAssertEqual(api.requestedLimits, [50])
     }
+
+    // MARK: - An expired Salesforce session
+
+    /// These two `GET`s run on every tab appear, so on a phone nobody is
+    /// dialling from they are usually the first to notice the 30-day session
+    /// has run out — and "your session expired" shown as a line under an empty
+    /// Recents list is exactly the silence this store exists to avoid.
+    func testA401OnEitherReadReportsTheExpiredSession() async {
+        for failing in ["recents", "pending"] {
+            var expiries = 0
+            let unauthorized = SessionClientError.server(status: 401)
+            let api = FakeFeed(
+                recents: failing == "recents" ? .failure(unauthorized) : .success([]),
+                pending: failing == "pending" ? .failure(unauthorized) : .success(nil)
+            )
+            let store = CallsFeedStore(api: api, onSessionExpired: { expiries += 1 })
+
+            await store.loadRecents()
+            await store.loadPending()
+
+            XCTAssertEqual(expiries, 1, "failing: \(failing)")
+        }
+    }
+
+    /// An unreachable server is not an expired session — the rep reads the
+    /// error and pulls to refresh.
+    func testAnOrdinaryReadFailureIsNotAnExpiredSession() async {
+        var expiries = 0
+        let store = CallsFeedStore(
+            api: FakeFeed(recents: .failure(FeedFailure()), pending: .failure(FeedFailure())),
+            onSessionExpired: { expiries += 1 }
+        )
+
+        await store.loadRecents()
+        await store.loadPending()
+
+        XCTAssertEqual(expiries, 0)
+        XCTAssertEqual(store.recentsError, "The server is unreachable.")
+    }
 }

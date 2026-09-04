@@ -22,13 +22,14 @@ struct StatusView: View {
                 Section("Account") {
                     LabeledContent("Signed in as", value: engine.pairedUserName ?? "—")
 
-                    // The one sign-out path in the app: stop the softphone
-                    // (best-effort Twilio unregister, so this handset stops
-                    // being a valid destination for the org's calls) before
-                    // clearing the tokens that made that call possible —
-                    // `SignOutFlow` is what pins that order. `RootView`
-                    // observes `engine.hasSession` and returns to `SignInView`
-                    // on its own once `unpair()` flips it.
+                    // The one sign-out path in the app: revoke this phone's
+                    // device row server-side, stop the softphone (best-effort
+                    // Twilio unregister, so this handset stops being a valid
+                    // destination for the org's calls), and only then clear
+                    // the tokens both of those needed — `SignOutFlow` is what
+                    // pins that order. `RootView` observes `engine.hasSession`
+                    // and returns to `SignInView` on its own once `unpair()`
+                    // flips it.
                     Button("Sign out", role: .destructive) {
                         isConfirmingSignOut = true
                     }
@@ -78,9 +79,9 @@ struct StatusView: View {
 
                     Button("Unpair this iPhone", role: .destructive) {
                         // Same tested sequence as Sign out: since Task 6 `unpair()` also
-                        // clears the session token, so this IS a sign-out and must tear
-                        // down the Twilio binding first.
-                        SignOutFlow.run(stopVoice: voice.stop, unpair: engine.unpair)
+                        // clears the session token, so this IS a sign-out and must revoke
+                        // the device row and tear down the Twilio binding first.
+                        signOut()
                     }
                     .disabled(engine.status == .syncing)
                 }
@@ -100,13 +101,25 @@ struct StatusView: View {
                 isPresented: $isConfirmingSignOut,
                 titleVisibility: .visible
             ) {
-                Button("Sign out", role: .destructive) {
-                    SignOutFlow.run(stopVoice: voice.stop, unpair: engine.unpair)
-                }
+                Button("Sign out", role: .destructive) { signOut() }
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("You'll need to sign in with Salesforce again before you can make or receive calls on this iPhone.")
             }
+        }
+    }
+
+    /// Both destructive buttons run the one tested sequence. `Task` because
+    /// the server-side revoke is a network call — the local half of the
+    /// sign-out follows it regardless of how it goes, which is `SignOutFlow`'s
+    /// whole contract.
+    private func signOut() {
+        Task {
+            await SignOutFlow.run(
+                revokeDevice: SignOutFlow.liveDeviceRevoker(deviceId: engine.deviceId),
+                stopVoice: voice.stop,
+                unpair: engine.unpair
+            )
         }
     }
 

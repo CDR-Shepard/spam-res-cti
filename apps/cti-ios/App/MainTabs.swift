@@ -10,7 +10,13 @@ import SwiftUI
 /// draws it.
 struct MainTabs: View {
     @EnvironmentObject private var controller: CallController
-    @StateObject private var feed = CallsFeedStore.live()
+    // The two `GET`s behind these tabs are session-authenticated, and they run
+    // on every appear — so on a phone nobody is dialling from they are the
+    // first thing to notice a session that expired. That has to reach the
+    // runtime, which is what actually signs the phone out.
+    @StateObject private var feed = CallsFeedStore.live(
+        onSessionExpired: { VoiceRuntime.shared.noteSessionExpired() }
+    )
     @State private var selection: Tab = .dial
     @State private var toast: String?
 

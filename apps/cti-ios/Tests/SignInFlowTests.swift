@@ -102,8 +102,11 @@ final class SignInFlowTests: XCTestCase {
             deleteSession: {
                 XCTFail("nothing failed; the session must not be deleted")
             },
-            adoptDevice: { deviceToken, displayName in
-                XCTAssertEqual(deviceToken, "dev_1")
+            adoptDevice: { registration, displayName in
+                XCTAssertEqual(registration.deviceToken, "dev_1")
+                // The row id rides along too: sign-out needs it to revoke this
+                // phone's device server-side.
+                XCTAssertEqual(registration.deviceId, "d1")
                 XCTAssertEqual(displayName, "Jane Rep")
                 log.record("adopt")
             }

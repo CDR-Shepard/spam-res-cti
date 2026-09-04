@@ -78,6 +78,12 @@ final class CallController: ObservableObject {
     private let api: CallsAPIClient
     private let tokens: () -> String
     private let now: () -> Date
+    /// Called when a session-authenticated call comes back 401 — see
+    /// `isSessionExpired`. The controller does not decide what happens next
+    /// (that is a sign-out, which it has no business running); it only reports
+    /// that this phone's Salesforce session is gone, so nobody is left tapping
+    /// Call against a sign-in that no longer exists.
+    private let onSessionExpired: () -> Void
 
     private var invite: IncomingInvite?
     private var call: ActiveCall?
@@ -106,13 +112,15 @@ final class CallController: ObservableObject {
         system: CallSystem,
         api: CallsAPIClient,
         tokens: @escaping () -> String,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        onSessionExpired: @escaping () -> Void = {}
     ) {
         self.sdk = sdk
         self.system = system
         self.api = api
         self.tokens = tokens
         self.now = now
+        self.onSessionExpired = onSessionExpired
     }
 
     // MARK: - Inbound
@@ -360,7 +368,17 @@ final class CallController: ObservableObject {
     /// exists to hand back, so local state is dropped rather than guessed at.
     private func fail(with error: Error) {
         lastRefusal = error.localizedDescription
+        reportIfSessionExpired(error)
         reset()
+    }
+
+    /// A 401 from a session-authenticated call is not a refusal the rep can
+    /// act on: their Salesforce session has expired and every route on this
+    /// phone will answer the same way until they sign in again. The error is
+    /// still shown — this only adds the part the screen cannot say.
+    private func reportIfSessionExpired(_ error: Error) {
+        guard isSessionExpired(error) else { return }
+        onSessionExpired()
     }
 
     // MARK: - In call
@@ -489,6 +507,7 @@ final class CallController: ObservableObject {
             // leave their next dial refused by the disposition gate with no
             // explanation on screen.
             lastRefusal = error.localizedDescription
+            reportIfSessionExpired(error)
         }
     }
 

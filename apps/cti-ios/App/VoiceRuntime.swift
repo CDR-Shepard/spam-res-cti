@@ -31,8 +31,11 @@ final class VoiceRuntime: ObservableObject {
     private let log = Logger(subsystem: AppConfig.loggingSubsystem, category: "VoiceRuntime")
 
     private var system: LiveCallSystem?
-    private var push: PushRegistry?
     private var refresher: VoiceTokenRefresher?
+    /// Fires the sign-out once, however many calls report the 401 — see
+    /// `SessionExpiryLatch`. Rebuilt by every `start()`, so the next sign-in
+    /// begins unfired.
+    private var expiry: SessionExpiryLatch?
 
     init(sessions: SessionTokenStoring = SessionTokenStore()) {
         self.sessions = sessions
@@ -43,7 +46,11 @@ final class VoiceRuntime: ObservableObject {
         guard controller == nil, let session = sessions.load() else { return }
         let baseURL = AppConfig.baseURL
 
-        let refresher = VoiceTokenRefresher(fetch: { try await Self.mintVoiceToken(baseURL: baseURL) })
+        let expiry = SessionExpiryLatch { [weak self] in self?.signOutAfterExpiry() }
+        let refresher = VoiceTokenRefresher(fetch: sessionExpiryWatching(
+            { try await Self.mintVoiceToken(baseURL: baseURL) },
+            onSessionExpired: { expiry.fire() }
+        ))
         let system = LiveCallSystem()
         let controller = CallController(
             sdk: sdk,
@@ -52,13 +59,10 @@ final class VoiceRuntime: ObservableObject {
             // Synchronous by contract: a dial must not be able to await
             // between the server's "allowed" and `sdk.connect`. The cache is
             // kept warm by `refresh()` below.
-            tokens: { refresher.cachedAccessToken }
+            tokens: { refresher.cachedAccessToken },
+            onSessionExpired: { expiry.fire() }
         )
         system.controller = controller
-
-        let push = PushRegistry(
-            controller: controller, system: system, sdk: sdk, tokens: refresher, baseURL: baseURL
-        )
 
         // The caller gave up before the rep answered. This is the only live
         // cancellation signal the SDK has (`RingCancellation.swift`), and it
@@ -83,9 +87,13 @@ final class VoiceRuntime: ObservableObject {
         self.refresher = refresher
         self.system = system
         self.controller = controller
-        self.push = push
+        self.expiry = expiry
 
-        push.start()
+        // The registry itself was started at launch (see `AppDelegate`); this
+        // only hands it the graph that can actually ring a call.
+        PushRegistry.shared.attach(
+            controller: controller, system: system, sdk: sdk, tokens: refresher, baseURL: baseURL
+        )
         refresh()
     }
 
@@ -93,30 +101,58 @@ final class VoiceRuntime: ObservableObject {
     /// push. Cheap when everything is current; driven at launch and on every
     /// foreground, because both the token and Twilio's registration expire.
     func refresh() {
-        guard let refresher, let push else { return }
+        guard let refresher else { return }
         Task { [log] in
             do {
                 _ = try await refresher.current()
             } catch {
                 log.error("voice token mint failed: \(error.localizedDescription, privacy: .public)")
             }
-            push.refreshRegistration()
+            PushRegistry.shared.refreshRegistration()
         }
     }
 
-    /// Sign-out. Drops the whole graph, including the PushKit registration —
-    /// leaving it up would keep ringing this phone for an org it has left.
+    /// A session-authenticated call came back 401 — see `isSessionExpired`.
+    ///
+    /// Also reachable from `CallsFeedStore` (the Recents/pending reads), which
+    /// has no runtime of its own to report to. Safe before `start()`: with no
+    /// latch there is no signed-in graph to tear down.
+    func noteSessionExpired() {
+        expiry?.fire()
+    }
+
+    /// What an expired session actually costs: the same sequence the Sign out
+    /// button runs. Signing in again is the only fix, so the phone goes there
+    /// in one step rather than retrying a session that is gone — and
+    /// `SyncEngine.sessionExpired` is what makes that screen say why.
+    private func signOutAfterExpiry() {
+        let engine = SyncEngine.shared
+        engine.noteSessionExpired()
+        Task { [weak self] in
+            await SignOutFlow.run(
+                revokeDevice: SignOutFlow.liveDeviceRevoker(deviceId: engine.deviceId),
+                stopVoice: { self?.stop() },
+                unpair: engine.unpair
+            )
+        }
+    }
+
+    /// Sign-out. Drops the whole graph and detaches from the push registry —
+    /// leaving it attached would keep ringing this phone for an org it has
+    /// left. The registry itself stays alive and still wants `[.voIP]`: a push
+    /// that arrives for a signed-out phone must still be reported to CallKit,
+    /// or iOS terminates the app for taking it silently.
     func stop() {
         sdk.onCancelledInvite = nil
         sdk.onOutboundCallConnected = nil
-        // Before the registry is dropped: `stop()` is what tells Twilio to
-        // stop routing this org's calls to this handset.
-        push?.stop()
-        push = nil
+        // Before the graph is dropped: this is what tells Twilio to stop
+        // routing this org's calls to this handset.
+        PushRegistry.shared.detach()
         system?.shutDown()
         system = nil
         controller = nil
         refresher = nil
+        expiry = nil
     }
 
     /// `POST /telephony/token`, composed from the pure pieces Task 7 pinned.
