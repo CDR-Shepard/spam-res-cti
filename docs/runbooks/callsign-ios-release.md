@@ -286,14 +286,28 @@ chase before shipping:
   (`CallController.tokens`, so nothing may `await` between the server's
   "allowed" verdict and `sdk.connect`) — a chip has been filed to track
   whether this constraint holds up as the token-refresh path evolves.
-- **Per-user device-token cap + session-revoke cascade** — nothing currently
-  limits how many devices one rep can register, and revoking a Salesforce
-  session does not cascade to revoke that rep's mobile device tokens. Signing
-  out on the phone now revokes *that* phone's row (`DELETE
-  /mobile/devices/:id`, best effort — a sign-out with no network still signs
-  the handset out locally and leaves the row for the admin device list), so
-  rows no longer accumulate one per sign-in; the cap and the cascade are still
-  open. Filed as a follow-up chip.
+- **No way to deactivate a rep (the offboarding cascade has no trigger).** The
+  per-user cap now ships: a rep may hold at most `MAX_ACTIVE_DEVICES_PER_USER`
+  active devices and both `/mobile/register` and `/mobile/pair/claim` refuse
+  past it, and signing out on the phone revokes *that* phone's row (`DELETE
+  /mobile/devices/:id`, best effort). What is still missing is deactivation
+  itself: nothing in this codebase disables or removes a *user*, so a departing
+  rep keeps a valid session for up to 30 days and a device token that never
+  expires and reads the org's whole caller directory. The revoke logic exists
+  and is tested (`revokeDevicesForDeactivatedUser`,
+  `revokeAllSessionsForUser`) but is deliberately uncalled — see
+  `docs/superpowers/plans/2026-09-04-callsign-followups.md` §1. Until it is
+  wired, offboard by revoking each device by hand from the admin device list.
+- **Session-expiry confirmation catches a momentary fault, not a sustained
+  one.** A 401 from a session-authenticated call triggers ONE confirmation GET
+  before the phone signs itself out, which defeats a single unlucky response or
+  a brief auth blip. It does not defeat a *persistent* fault: the confirmation
+  goes out milliseconds later over the same edge with the same token, so
+  anything returning 401 to everything will still sign the fleet out. That is a
+  deliberate trade — more probes or a longer delay would leave a rep whose
+  session genuinely expired stuck on a phone that silently cannot call. If a
+  fleet-wide sign-out is ever reported, check the API's auth path before
+  suspecting the handsets.
 - **No server-side session logout.** `revokeSession` exists in
   `services/cti-api/src/auth/session.ts` but no route reaches it, so signing
   out destroys the session token locally and leaves the row to expire on its

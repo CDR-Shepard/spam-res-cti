@@ -262,7 +262,7 @@ tokens last 30 days (`services/cti-api/src/auth/session.ts`) and device tokens
 never expire, so before this a phone whose session ran out kept syncing the
 directory and saying "Signed in" while being unable to call. A 401 from any
 session-authenticated call — a dial, a wrap-up, the recents/pending reads, the
-voice-token mint — is a *suspected* expiry, not proof of one (an edge/proxy
+voice-token mint — is a *suspected* expiry, not proof of one (a momentary auth
 blip can 401 too), so `SessionExpiryGate` sends one cheap confirmation GET of
 its own first and signs out (landing on `SignInView` with a line saying why)
 only if that also comes back 401; a confirmation that comes back clean resets

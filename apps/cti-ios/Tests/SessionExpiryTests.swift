@@ -196,16 +196,55 @@ final class SessionExpiryTests: XCTestCase {
     /// A 200 (or anything else that isn't 401) means the session is fine —
     /// the original error the rep saw was something else, and this must not
     /// read as a confirmed expiry.
-    func testConfirmSessionExpiredReadsA200AsNotConfirmed() async {
+    /// Only a 401 confirms. Everything else — a success, a client error, a
+    /// rate limit, and above all the 5xx family a failing edge or gateway
+    /// returns — must read as "not confirmed", because signing the whole
+    /// fleet out on a gateway hiccup is the exact outcome this gate exists to
+    /// prevent. A `status != 200` reading would pass a 200-only test while
+    /// treating every 502 as a confirmed expiry.
+    func testOnlyA401ConfirmsAnExpiredSession() async {
+        for status in [200, 400, 403, 404, 409, 429, 500, 502, 503, 504] {
+            let confirm = confirmSessionExpired(
+                baseURL: URL(string: "https://cti.example.com")!,
+                sessionToken: "session_t",
+                transport: { _ in (Data(#"{"calls":[]}"#.utf8), status) }
+            )
+
+            let confirmed = await confirm()
+
+            XCTAssertFalse(confirmed, "status \(status) must not confirm an expired session")
+        }
+
+        let confirm401 = confirmSessionExpired(
+            baseURL: URL(string: "https://cti.example.com")!,
+            sessionToken: "session_t",
+            transport: { _ in (Data(), 401) }
+        )
+        let confirmed401 = await confirm401()
+        XCTAssertTrue(confirmed401, "401 is the one status that confirms")
+    }
+
+    /// The confirmation must be the session-authenticated recents GET. Without
+    /// this, swapping in an unauthenticated builder — which would 200 for
+    /// anyone and so never confirm — leaves the suite green.
+    func testTheConfirmationIsTheSessionAuthenticatedRecentsRequest() async {
+        var seen: URLRequest?
         let confirm = confirmSessionExpired(
             baseURL: URL(string: "https://cti.example.com")!,
             sessionToken: "session_t",
-            transport: { _ in (Data(#"{"calls":[]}"#.utf8), 200) }
+            transport: { request in
+                seen = request
+                return (Data(#"{"calls":[]}"#.utf8), 200)
+            }
         )
 
-        let confirmed = await confirm()
+        _ = await confirm()
 
-        XCTAssertFalse(confirmed)
+        XCTAssertEqual(seen?.httpMethod, "GET")
+        XCTAssertEqual(seen?.value(forHTTPHeaderField: "Authorization"), "Bearer session_t")
+        let url = seen?.url?.absoluteString ?? ""
+        XCTAssertTrue(url.contains("/calls"), "expected the recents route, got \(url)")
+        XCTAssertTrue(url.contains("limit=1"), "expected limit=1, got \(url)")
     }
 
     /// A thrown transport error (no connectivity, a timeout, DNS) is not

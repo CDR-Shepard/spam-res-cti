@@ -14,9 +14,9 @@ import Foundation
 // The recovery used to be blunt: the FIRST 401 from a session-authenticated
 // call signed the phone out for real (revoke, stop, unpair) and dropped it on
 // `SignInView`. That is right for a genuine expiry and wrong for a spurious
-// one — an edge/proxy misconfiguration, a brief auth-service blip — which
-// would sign out every phone in the fleet at once, each needing a manual
-// Salesforce sign-in to recover.
+// one — a brief auth-service blip, a single unlucky request — which would
+// sign out every phone in the fleet at once, each needing a manual Salesforce
+// sign-in to recover.
 //
 // So the gate confirms before it acts: on the first qualifying 401 it sends
 // ONE cheap session-authenticated GET of its own (`confirmSessionExpired`),
@@ -24,6 +24,15 @@ import Foundation
 // status, or a thrown transport error all mean "don't know" — and the safe
 // default when in doubt is not to sign the rep out; the original error still
 // surfaces through its own path exactly as before.
+//
+// Be honest about the size of that guarantee: the confirmation goes out
+// milliseconds later, over the same edge, to a route that can 401 for the same
+// reason, with the same token and no backoff. So this catches a MOMENTARY
+// fault, not a sustained one — a persistent misconfiguration returning 401 to
+// everything will still sign the fleet out. Widening that (a longer delay,
+// several probes) would trade away the thing that makes the sign-out useful:
+// getting a rep whose session really has expired back to the sign-in screen
+// promptly instead of leaving them on a phone that silently cannot call.
 // -----------------------------------------------------------------------------
 
 /// Whether `error` means **the Salesforce session is gone**, as opposed to any
@@ -133,7 +142,13 @@ func confirmSessionExpired(
 ) -> () async -> Bool {
     {
         do {
-            let request = recentCallsRequest(baseURL: baseURL, sessionToken: sessionToken, limit: 1)
+            var request = recentCallsRequest(baseURL: baseURL, sessionToken: sessionToken, limit: 1)
+            // While this is in flight the gate swallows every further 401, so a
+            // stalled connection would delay a genuine sign-out for URLSession's
+            // 60s default. Failing fast is safe in the direction that matters:
+            // a throw reads as "not confirmed", the gate re-arms, and the next
+            // 401 tries again.
+            request.timeoutInterval = 10
             let (_, status) = try await transport(request)
             return status == 401
         } catch {
