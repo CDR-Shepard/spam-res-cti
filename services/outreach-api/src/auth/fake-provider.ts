@@ -9,8 +9,12 @@ export class FakeIdentityProvider implements IdentityProvider {
   private invites: IdentityInvite[] = [];
   private seq = 0;
 
-  addUser(user: IdentityUser, orgs: Array<{ organizationId: string; role: string }>): void {
-    this.users.set(user.externalId, { user, memberships: orgs.map((o) => ({ ...o, status: 'active' })) });
+  addUser(user: IdentityUser, orgs: Array<{ organizationId: string; role: string; status?: IdentityMembership['status'] }>): void {
+    const normalized: IdentityUser = { ...user, email: user.email.trim().toLowerCase() };
+    this.users.set(user.externalId, {
+      user: normalized,
+      memberships: orgs.map((o) => ({ organizationId: o.organizationId, role: o.role, status: o.status ?? 'active' })),
+    });
   }
   setNextCode(code: string, externalId: string, organizationId: string | null = null): void {
     this.codes.set(code, { externalId, organizationId });
@@ -38,7 +42,7 @@ export class FakeIdentityProvider implements IdentityProvider {
     return { id };
   }
   async invite(input: { email: string; organizationId: string; role: RoleSlug }): Promise<IdentityInvite> {
-    const inv: IdentityInvite = { id: `inv_${++this.seq}`, email: input.email, role: input.role, state: 'pending', expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString() };
+    const inv: IdentityInvite = { id: `inv_${++this.seq}`, email: input.email.trim().toLowerCase(), role: input.role, state: 'pending', expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString() };
     this.invites.push({ ...inv, ...({ organizationId: input.organizationId } as object) });
     return inv;
   }

@@ -2,6 +2,7 @@ import type { RoleSlug } from '@cti/contracts';
 
 export interface IdentityUser {
   externalId: string;
+  /** Always lowercase and trimmed. Every IdentityProvider implementation must normalize before returning. */
   email: string;
   firstName: string | null;
   lastName: string | null;

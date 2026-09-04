@@ -12,10 +12,17 @@ export interface SignInDeps {
   idp: IdentityProvider;
 }
 
-/** Candidate WorkOS org ids in preference order: the one WorkOS scoped the sign-in to, then active memberships. */
+/**
+ * Candidate WorkOS org ids in preference order: the one WorkOS scoped the
+ * sign-in to, then active memberships — but only when that selected org is
+ * itself backed by an active membership. WorkOS's `organizationId` on the
+ * authentication response reflects org *selection* (e.g. from a login screen),
+ * not membership status, so a pending/inactive membership must not smuggle an
+ * org in through it.
+ */
 function candidateOrgIds(selected: string | null, memberships: Array<{ organizationId: string; status: string }>): string[] {
   const ids = memberships.filter((m) => m.status === 'active').map((m) => m.organizationId);
-  return [...new Set([...(selected ? [selected] : []), ...ids])];
+  return [...new Set([...(selected && ids.includes(selected) ? [selected] : []), ...ids])];
 }
 
 async function pickTenant(db: Db, candidates: string[]): Promise<Organization | null> {
@@ -34,7 +41,11 @@ function displayName(u: IdentityUser): string | null {
 }
 
 async function linkOrCreateUser(db: Db, org: Organization, u: IdentityUser, isAdminRole: boolean): Promise<string> {
-  const existing = await db.query.users.findFirst({ where: humanUserByEmail(org.id, u.email) });
+  // Email normalization is a port invariant (see IdentityUser.email), but this
+  // is the tenant boundary — normalize defensively rather than trust every
+  // current and future IdentityProvider implementation to have done it.
+  const email = u.email.trim().toLowerCase();
+  const existing = await db.query.users.findFirst({ where: humanUserByEmail(org.id, email) });
   if (existing) {
     await db
       .update(schema.users)
@@ -44,7 +55,7 @@ async function linkOrCreateUser(db: Db, org: Organization, u: IdentityUser, isAd
   }
   const [created] = await db
     .insert(schema.users)
-    .values({ orgId: org.id, email: u.email, displayName: displayName(u), kind: 'human', externalAuthId: u.externalId, isAdmin: isAdminRole, timezone: org.timezone })
+    .values({ orgId: org.id, email, displayName: displayName(u), kind: 'human', externalAuthId: u.externalId, isAdmin: isAdminRole, timezone: org.timezone })
     .returning({ id: schema.users.id });
   return created!.id;
 }
@@ -56,7 +67,7 @@ export async function completeSignIn(deps: SignInDeps, code: string): Promise<Si
   const org = await pickTenant(deps.db, candidateOrgIds(organizationId, memberships));
   if (!org) return { ok: false, reason: 'no_tenant' };
   if (org.status !== 'active') return { ok: false, reason: 'tenant_suspended' };
-  const role = memberships.find((m) => m.organizationId === org.workosOrgId)?.role;
+  const role = memberships.find((m) => m.status === 'active' && m.organizationId === org.workosOrgId)?.role;
   const userId = await linkOrCreateUser(deps.db, org, user, role === 'admin');
   return { ok: true, userId, orgId: org.id };
 }

@@ -24,12 +24,24 @@ export interface Fixtures {
  * `findFirst` returns the first fixture, `findMany` all of them; writes are
  * recorded. Tests that need "which row matched" put exactly one row in the
  * fixture or filter in the code under test (as completeSignIn does).
+ *
+ * Every `where` argument passed to any table's `findFirst`/`findMany` is also
+ * pushed (in call order) onto the returned `captured.where` array, so a test
+ * can render the raw drizzle `SQL` fragment (e.g. via `new PgDialect().sqlToQuery(...)`)
+ * to prove the code under test queried on the column/predicate it claims to.
  */
 export function fakeDb(fx: Fixtures = {}) {
   const writes: Array<{ op: 'insert' | 'update'; table: unknown; values: Record<string, unknown> }> = [];
+  const captured: { where: unknown[] } = { where: [] };
   const table = (rows: Array<Record<string, unknown>> = []) => ({
-    findFirst: async () => rows[0],
-    findMany: async () => rows,
+    findFirst: async (args?: { where?: unknown }) => {
+      if (args?.where !== undefined) captured.where.push(args.where);
+      return rows[0];
+    },
+    findMany: async (args?: { where?: unknown }) => {
+      if (args?.where !== undefined) captured.where.push(args.where);
+      return rows;
+    },
   });
   const db = {
     query: {
@@ -51,5 +63,5 @@ export function fakeDb(fx: Fixtures = {}) {
     }),
     select: () => ({ from: () => ({ where: async () => [] }) }),
   };
-  return { db: db as unknown as Db, writes };
+  return { db: db as unknown as Db, writes, captured };
 }

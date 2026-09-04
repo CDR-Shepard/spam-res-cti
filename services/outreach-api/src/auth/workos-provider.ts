@@ -20,9 +20,19 @@ function toInvite(i: WorkosInvitation): IdentityInvite {
   return { id: i.id, email: i.email.toLowerCase(), role: i.roleSlug, state: i.state, expiresAt: i.expiresAt };
 }
 
-function isClientError(err: unknown): boolean {
+/**
+ * Statuses that mean the sign-in CODE itself was bad (invalid, expired, already
+ * used, or the user/organization it names doesn't exist) — never a server fault,
+ * so these map to `IdentityExchangeError`. Everything else (403/408/409/429,
+ * 5xx, or no numeric status at all) propagates as-is: those are auth/rate-limit/
+ * conflict/server conditions the caller should treat as an operational error,
+ * not "please try signing in again."
+ */
+const IDENTITY_EXCHANGE_STATUSES = new Set([400, 401, 404]);
+
+export function isClientError(err: unknown): boolean {
   const status = (err as { status?: unknown })?.status;
-  return typeof status === 'number' && status >= 400 && status < 500;
+  return typeof status === 'number' && IDENTITY_EXCHANGE_STATUSES.has(status);
 }
 
 export class WorkosIdentityProvider implements IdentityProvider {

@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { signState, STATE_TTL_SECONDS, verifyState } from './state.js';
 
@@ -12,6 +13,15 @@ describe('oauth state', () => {
     expect(verifyState(secret, `${enc}x.${sig}`, now)).toBeNull();
     expect(verifyState('other-secret-that-is-long-enough', s, now)).toBeNull();
     expect(verifyState(secret, 'garbage', now)).toBeNull();
+    // A well-formed, correctly signed token with a trailing extra segment must not
+    // be accepted by silently discarding the third part.
+    expect(verifyState(secret, `${s}.junk`, now)).toBeNull();
+    // A validly signed payload that decodes to the JSON literal `null` (not an
+    // object) must not crash `verifyState` reading `.nonce` off it, and must be
+    // rejected. Signed by hand here with the same HMAC recipe as `state.ts`.
+    const encNull = Buffer.from(JSON.stringify(null), 'utf8').toString('base64url');
+    const sigForNull = createHmac('sha256', secret).update(encNull).digest('base64url');
+    expect(verifyState(secret, `${encNull}.${sigForNull}`, now)).toBeNull();
   });
   it('expires after the TTL and rejects future-dated state', () => {
     const s = signState(secret, {}, now);
