@@ -20,7 +20,7 @@
     "@fastify/rate-limit": "^9.1.0",
     "@fastify/static": "^7.0.4",
     "dotenv": "^16.4.5",
-    "drizzle-orm": "^0.36.4",
+    "drizzle-orm": "0.36.4",
     "fastify": "^4.28.1",
     "google-libphonenumber": "^3.2.40",
     "pg": "^8.13.1",
