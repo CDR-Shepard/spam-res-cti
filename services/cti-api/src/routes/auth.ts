@@ -11,7 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb, schema } from '@cti/db';
-import { issueSession, resolveSession } from '@cti/auth';
+import { createTenant, issueSession, resolveSession } from '@cti/auth';
 import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProfilePhoto, fetchUserInfo } from '../salesforce/oauth.js';
 import { encryptString } from '@cti/auth';
 import { normalize } from '@cti/phone';
@@ -269,18 +269,10 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         });
         const orgIsNew = !org;
         if (!org) {
-          const [createdOrg] = await db
-            .insert(schema.organizations)
-            .values({ name: `Salesforce Org ${tok.sfOrgId}`, sfOrgId: tok.sfOrgId })
-            .returning();
-          org = createdOrg!;
-          // Seed a default campaign config so the firewall's campaign gate
-          // passes out of the box (calling hours / attempt caps use the schema
-          // defaults: 08:00–20:00 recipient-local, Mon–Fri, 5 attempts / 14d).
-          await db
-            .insert(schema.campaignConfigs)
-            .values({ orgId: org.id, key: 'default', name: 'Default Campaign' })
-            .onConflictDoNothing();
+          // New tenant from a first Salesforce login: org + AI Agent service
+          // user + default campaign, in one transaction (see @cti/auth createTenant).
+          const created = await createTenant(db, { name: `Salesforce Org ${tok.sfOrgId}`, sfOrgId: tok.sfOrgId });
+          org = created.org;
         }
         const email = (profile.sfUserEmail?.trim() || `sf-${tok.sfUserId}@${tok.sfOrgId}.salesforce.local`).toLowerCase();
         // App-admin (manage + ASSIGN outbound numbers) is driven by the

@@ -54,23 +54,41 @@ export const dialerItemStatus = pgEnum('dialer_item_status', [
 // Core
 // =============================================================================
 
-export const organizations = pgTable('organizations', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  name: text('name').notNull(),
-  /** Salesforce org id this local org maps to (set on first SF login). */
-  sfOrgId: text('sf_org_id'),
-  /**
-   * How this org satisfies DNC compliance, driving the firewall's federal_dnc
-   * gate display:
-   *  - 'registry' (default): check the number against the loaded DNC cache;
-   *    honestly report "not scrubbed" when no list is loaded.
-   *  - 'external_prescrubbed': the org attests its call lists are scrubbed
-   *    offline before loading. The gate passes GREEN labeled "pre-scrubbed list
-   *    (org policy)" — but a number that IS in a loaded cache still BLOCKS.
-   */
-  dncMode: text('dnc_mode').default('registry').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+export const organizations = pgTable(
+  'organizations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: text('name').notNull(),
+    /** Salesforce org id this local org maps to (set on first SF login). */
+    sfOrgId: text('sf_org_id'),
+    /**
+     * How this org satisfies DNC compliance, driving the firewall's federal_dnc
+     * gate display:
+     *  - 'registry' (default): check the number against the loaded DNC cache;
+     *    honestly report "not scrubbed" when no list is loaded.
+     *  - 'external_prescrubbed': the org attests its call lists are scrubbed
+     *    offline before loading. The gate passes GREEN labeled "pre-scrubbed list
+     *    (org policy)" — but a number that IS in a loaded cache still BLOCKS.
+     */
+    dncMode: text('dnc_mode').default('registry').notNull(),
+    /** URL-safe tenant identifier; unique across the platform. */
+    slug: text('slug').notNull(),
+    timezone: text('timezone').default('America/Los_Angeles').notNull(),
+    /** Per-tenant toggles; later sub-projects add smsMode, dialRatio, botDisclosure. */
+    settings: jsonb('settings').default(sql`'{}'::jsonb`).notNull(),
+    /** 'active' | 'suspended' */
+    status: text('status').default('active').notNull(),
+    /** WorkOS organization id once the tenant is linked for product sign-in. */
+    workosOrgId: text('workos_org_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    slugUnique: uniqueIndex('organizations_slug_unique').on(t.slug),
+  }),
+);
+
+/** 'human' signs in and works leads; 'service' is the tenant's AI Agent and can never hold a session. */
+export type UserKind = 'human' | 'service';
 
 export const users = pgTable(
   'users',
@@ -86,6 +104,12 @@ export const users = pgTable(
      *  flipped per user by an admin from the softphone Team panel. Gated at
      *  every dialer entry point — see routes/dialer.ts's requirePowerDialer. */
     powerDialerEnabled: boolean('power_dialer_enabled').default(false).notNull(),
+    /** 'human' signs in and works leads; 'service' is the tenant's AI Agent and can never hold a session. */
+    kind: text('kind').$type<UserKind>().default('human').notNull(),
+    /** WorkOS user id for product sign-in; null for Salesforce-only reps and service users. */
+    externalAuthId: text('external_auth_id'),
+    /** Platform staff: may switch tenants. */
+    isSuperAdmin: boolean('is_super_admin').default(false).notNull(),
     /**
      * Agent no-answer failover (E.164). When an inbound callback rings this
      * rep's softphone and they don't pick up within the forward window, the
@@ -98,7 +122,7 @@ export const users = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    emailIdx: uniqueIndex('users_email_unique').on(t.email),
+    orgEmailUnique: uniqueIndex('users_org_email_unique').on(t.orgId, t.email),
   }),
 );
 
