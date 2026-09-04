@@ -53,6 +53,14 @@ targets:
       properties:
         CFBundleDisplayName: Callsign
         CFBundleIconName: AppIcon
+        # Both build settings above, resolved at build time. Without these two
+        # keys XcodeGen writes literal "1.0"/"1" into the generated plist and
+        # `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` are ignored — so every
+        # upload carries build 1 and App Store Connect rejects the second one.
+        # The app and the extension MUST resolve to the same pair, which they
+        # do because both settings are set once at project level.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -105,6 +113,10 @@ targets:
       path: CallDirectory/Info.plist
       properties:
         CFBundleDisplayName: Callsign
+        # Must match the app's exactly — an app extension whose version pair
+        # differs from its host's is rejected at upload.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.callkit.call-directory
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).CallDirectoryHandler

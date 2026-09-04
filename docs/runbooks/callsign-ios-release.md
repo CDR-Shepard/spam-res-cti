@@ -87,14 +87,36 @@ before assuming the path.
    Both **App Store** distribution profiles, both under the
    `CCY3R86SMX` team, installed under
    `~/Library/Developer/Xcode/UserData/Provisioning Profiles`.
-3. Regenerate and archive:
+3. **Bump the version before you archive.** In `apps/cti-ios/project.yml`,
+   under `settings.base`:
+   - `CURRENT_PROJECT_VERSION` — the build number. **Every upload needs a new
+     one**; App Store Connect rejects a build number it has already seen, and
+     there is no way to reuse one.
+   - `MARKETING_VERSION` — the version reps see. Bump it for a user-visible
+     release; leave it alone for another build of the same release.
+
+   Both are project-level settings, so the app and the extension always get
+   the same pair — which they must, or the upload is rejected for a version
+   mismatch between a host and its extension. The two `info.properties` blocks
+   reference them as `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)`;
+   nothing else in the project hardcodes a version.
+4. Regenerate and archive:
    ```bash
    cd apps/cti-ios
    xcodegen generate
    xcodebuild archive -project Callsign.xcodeproj -scheme Callsign \
      -destination 'generic/platform=iOS' -archivePath build/Callsign.xcarchive
    ```
-4. **Before uploading**, verify both binaries carry the App Group
+   Confirm the bump actually landed — the generated plists hold the *variables*,
+   so the only honest check is the built product:
+   ```bash
+   plutil -p build/Callsign.xcarchive/Products/Applications/Callsign.app/Info.plist \
+     | grep -E 'CFBundleShortVersionString|CFBundleVersion'
+   plutil -p build/Callsign.xcarchive/Products/Applications/Callsign.app/PlugIns/CallDirectory.appex/Info.plist \
+     | grep -E 'CFBundleShortVersionString|CFBundleVersion'
+   ```
+   Both must show the numbers you just set, and must match each other.
+5. **Before uploading**, verify both binaries carry the App Group
    entitlement — an archive that gets re-signed at export without it loses
    the App Group silently and the extension can never read the directory:
    ```bash
@@ -103,15 +125,15 @@ before assuming the path.
    ```
    Both must show `com.apple.security.application-groups` containing
    `group.com.gghomes.cti`.
-5. Upload (CLI, or Xcode Organizer → Distribute App → App Store Connect →
+6. Upload (CLI, or Xcode Organizer → Distribute App → App Store Connect →
    Upload — see `docs/runbooks/caller-id-app.md` §1 for the step-by-step GUI
    flow, which still applies once the team has at least one registered
    device; without one, use `xcodebuild -exportArchive`).
-6. First upload only: TestFlight asks an **Export Compliance** question —
+7. First upload only: TestFlight asks an **Export Compliance** question —
    this app makes plain HTTPS calls and uses the Twilio Voice SDK's standard
    TLS signaling, no custom cryptography, so answer standard/exempt
    encryption.
-7. **TestFlight → Internal Testing** — add the app's internal testing group
+8. **TestFlight → Internal Testing** — add the app's internal testing group
    first (reuse the existing group from `docs/runbooks/caller-id-app.md` §1
    step 19 if it already has the right roster, or create one), attach the
    processed build, and confirm testers receive the update notification.
@@ -124,7 +146,27 @@ before assuming the path.
 2. Mosyle (or whichever MDM currently manages the fleet) → **Apps & Books** →
    license the app from Apple Business Manager → assign it to the reps'
    device group for auto-install.
-3. Push **Managed App Configuration** to that device group so
+3. **Retire the old caller-ID app, in the same rollout.**
+   `com.gghomes.cti.callerid` (the pre-rename `CTICallerID` build — see
+   `docs/runbooks/caller-id-app.md`) is a *different* bundle id, so Callsign
+   installs **alongside** it rather than replacing it. Leaving both on a
+   handset means two Call Directory extensions publishing overlapping numbers
+   — iOS shows whichever it likes, and a rep who sees a stale name has no way
+   to tell which app supplied it — plus two apps syncing the same directory on
+   the same schedule, and two device tokens on the same rep's list.
+   - Mosyle → **Apps & Books** → `com.gghomes.cti.callerid` → **unassign** it
+     from the reps' device group and **remove** the app (choose the option
+     that deletes it from the device, not just the assignment; an unassigned
+     app that stays installed keeps its extension registered).
+   - Revoke the old app's device tokens so its rows stop being valid bearers
+     for the org's caller directory: the softphone's admin device list, or
+     `DELETE /mobile/devices/:id` per row. A revoked device token 401s the
+     feed, which is what makes the old app unpair itself if it is still on a
+     handset somewhere.
+   - Sequence it so Callsign is installed and signed in **first**: removing
+     the old app wipes its directory, and a gap where a rep has neither app
+     means unidentified inbound calls.
+4. Push **Managed App Configuration** to that device group so
    `AppConfig.resolveBaseURL(managed:)` (`apps/cti-ios/Shared/AppConfig.swift`)
    picks it up instead of the built-in production default:
    ```json
