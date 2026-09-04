@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({
   session: undefined as Record<string, unknown> | undefined,
   user: undefined as Record<string, unknown> | undefined,
+  org: undefined as Record<string, unknown> | undefined,
   inserted: [] as Array<Record<string, unknown>>,
 }));
 
@@ -12,6 +13,7 @@ vi.mock('@cti/db', async (importOriginal) => {
     query: {
       sessions: { findFirst: async () => state.session },
       users: { findFirst: async () => state.user },
+      organizations: { findFirst: async () => state.org },
     },
     insert: () => ({ values: async (v: Record<string, unknown>) => { state.inserted.push(v); } }),
   };
@@ -27,6 +29,7 @@ const service = { ...human, id: 'AI', email: 'ai-agent@gg-homes.internal', kind:
 beforeEach(() => {
   state.session = { userId: 'U1', tokenHash: 'h', expiresAt: new Date(Date.now() + 60_000), revokedAt: null };
   state.user = human;
+  state.org = { status: 'active' };
   state.inserted = [];
 });
 
@@ -44,6 +47,14 @@ describe('resolveSession', () => {
     await expect(resolveSession(undefined)).resolves.toBeNull();
     state.session = undefined;
     await expect(resolveSession('Bearer nope')).resolves.toBeNull();
+  });
+  it('returns null when the tenant is suspended', async () => {
+    state.org = { status: 'suspended' };
+    await expect(resolveSession('Bearer tok')).resolves.toBeNull();
+  });
+  it('returns null when the tenant row is missing', async () => {
+    state.org = undefined;
+    await expect(resolveSession('Bearer tok')).resolves.toBeNull();
   });
 });
 

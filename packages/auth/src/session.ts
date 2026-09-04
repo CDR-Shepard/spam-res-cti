@@ -2,7 +2,8 @@
  * Opaque bearer sessions. The backend issues a random token, stores only its
  * sha256, and resolves it to the owning user. Any client (softphone, desktop,
  * iOS, product web app) exchanges its own sign-in for one of these, so every
- * service authorizes the same way.
+ * service authorizes the same way. A session only resolves while its owning
+ * organization is active — a suspended or missing tenant fails closed.
  */
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { getDb, schema, type UserKind } from '@cti/db';
@@ -46,6 +47,14 @@ function bearerToken(bearer: string | undefined): string | null {
   return token || null;
 }
 
+async function tenantIsActive(orgId: string): Promise<boolean> {
+  const org = await getDb().query.organizations.findFirst({
+    where: eq(schema.organizations.id, orgId),
+    columns: { status: true },
+  });
+  return org?.status === 'active';
+}
+
 export async function resolveSession(bearer: string | undefined): Promise<SessionUser | null> {
   const token = bearerToken(bearer);
   if (!token) return null;
@@ -60,6 +69,7 @@ export async function resolveSession(bearer: string | undefined): Promise<Sessio
   if (!row) return null;
   const user = await db.query.users.findFirst({ where: eq(schema.users.id, row.userId) });
   if (!user || user.kind === 'service') return null;
+  if (!(await tenantIsActive(user.orgId))) return null;
   return {
     userId: user.id,
     orgId: user.orgId,
