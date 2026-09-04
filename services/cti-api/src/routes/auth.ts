@@ -16,6 +16,7 @@ import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProf
 import { encryptString } from '@cti/auth';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
+import { humanUserByEmail } from '../tenancy/user-queries.js';
 
 const DEV_USER_ID = '00000000-0000-0000-0000-00000000beef';
 
@@ -294,7 +295,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           { email, sfProfile: sfProfileName ?? '(unknown)', isSysAdminProfile, explicitAdmin, orgIsNew },
           'salesforce_login_admin_resolve',
         );
-        let user = await db.query.users.findFirst({ where: eq(schema.users.email, email) });
+        let user = await db.query.users.findFirst({ where: humanUserByEmail(org.id, email) });
         if (!user) {
           const shouldBeAdmin = isSysAdminProfile || explicitAdmin || orgIsNew;
           const [createdUser] = await db
@@ -402,6 +403,11 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     if (!stateRow) return { status: 'unknown' };
     if (!stateRow.consumedAt) return { status: 'pending' };
     if (!stateRow.loginUserId) return { status: 'failed' }; // canceled or org-gated
+    const user = await db.query.users.findFirst({
+      where: eq(schema.users.id, stateRow.loginUserId),
+    });
+    if (!user) return { status: 'failed' };
+    if (user.kind === 'service') return { status: 'failed' }; // service users can never hold a session; don't burn the single-use claim
     // Claim the single-use session mint atomically so concurrent polls can't
     // each mint a session.
     const claim = await db
@@ -415,10 +421,6 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       )
       .returning({ state: schema.salesforceOauthState.state });
     if (claim.length === 0) return { status: 'done' }; // already minted once
-    const user = await db.query.users.findFirst({
-      where: eq(schema.users.id, stateRow.loginUserId),
-    });
-    if (!user) return { status: 'failed' };
     const session = await issueSession(user.id);
     return {
       status: 'connected',
