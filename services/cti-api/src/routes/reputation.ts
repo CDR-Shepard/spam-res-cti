@@ -11,7 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import { and, eq, gte, sql } from 'drizzle-orm';
 import { resolveSession } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
-import { warmupCapForAge } from '../firewall/index.js';
+import { warmupCapForAge } from '@cti/firewall';
 
 interface AxisScore {
   value: number;        // 0-100

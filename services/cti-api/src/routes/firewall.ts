@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { resolveSession } from '@cti/auth';
-import { evaluate } from '../firewall/index.js';
+import { evaluate } from '@cti/firewall';
+import { firewallDeps } from '../firewall/recipient-address.js';
 import { getDb } from '@cti/db';
 import { normalize } from '@cti/phone';
 
@@ -36,7 +37,7 @@ export async function registerFirewallRoutes(app: FastifyInstance): Promise<void
       recipientTimezone: parsed.data.recipientTimezone,
       recipientRecordId: parsed.data.recipientRecordId,
       requestId,
-    });
+    }, firewallDeps);
     return result;
   });
 

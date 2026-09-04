@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { callingHoursGateCheck, callingWindowFor, isWithinCallingHours } from './index.js';
+import { callingHoursGateCheck, callingWindowFor, isWithinCallingHours } from '@cti/firewall';
 import { stateForAreaCode, timezoneForNumber } from '@cti/firewall';
 import {
   CALLING_HOURS_END_HHMM_EXCLUSIVE,
@@ -7,7 +7,7 @@ import {
   CALLING_HOUR_END_INCLUSIVE,
   CALLING_HOUR_START,
   withinCallingHours,
-} from '../dialer/pick-did.js';
+} from './pick-did.js';
 
 /**
  * The calling window has TWO enforcement sites: the firewall's per-call gate

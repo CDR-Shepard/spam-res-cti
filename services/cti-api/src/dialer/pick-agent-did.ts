@@ -20,7 +20,7 @@
  */
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@cti/db';
-import { atCustomerCeiling, customerAttemptCounts } from '../firewall/index.js';
+import { atCustomerCeiling, customerAttemptCounts } from '@cti/firewall';
 import { pickRotationNumber, type AttemptCaps } from '@cti/firewall';
 import { attemptIncrement, effectiveCapFor, pickPoolDid, type Db } from './pick-did.js';
 
