@@ -143,19 +143,22 @@ before assuming the path.
 2. Open the app. First launch shows the **sign-in screen** — tap to sign in,
    which opens a Salesforce login page in an in-app browser
    (`ASWebAuthenticationSession`). Log in with the rep's normal Salesforce
-   credentials.
-3. iOS prompts for **microphone** access (needed to place/receive calls) and
-   **notifications** (VoIP push registration) — allow both. Declining either
-   leaves the phone able to sync the directory but unable to ring or dial.
-4. The app lands on the **Dial** tab once sign-in completes and the softphone
-   finishes starting.
-5. Turn the Call Directory extension on — the one manual step iOS requires
+   credentials. The app lands on the **Dial** tab once sign-in completes and
+   the softphone finishes starting — no prompt of any kind appears at this
+   point.
+3. **On the first call** (placed or received), iOS asks for **microphone**
+   access — tap **Allow**. If it's denied (by mistake, or by a prior "Don't
+   Allow"), the call connects with no audio in either direction; fix it at
+   **Settings → Callsign → Microphone**. No notification permission is ever
+   requested: incoming calls arrive through a silent VoIP push and CallKit,
+   which need no user-facing permission to work.
+4. Turn the Call Directory extension on — the one manual step iOS requires
    and there is no way around it: **Settings → Phone → Call Blocking &
    Identification → Callsign** (iOS 17, this app's deployment target), or
    **Settings → Apps → Phone → Call Blocking & Identification** on iOS 18
    and later (iOS 18 moved per-app settings under "Apps"). `StatusView`'s
    **Open Phone settings** button deep-links here directly.
-6. Back in the app's **Status** tab, "Caller ID" should read **On** — tap
+5. Back in the app's **Status** tab, "Caller ID" should read **On** — tap
    **Refresh now** if it hasn't caught up.
 
 ## 6. Manual device checklist (TestFlight, one phone)
@@ -167,6 +170,12 @@ can't verify; the same split applies here).
 
 - [ ] Inbound ring on a **locked** phone shows "Name · Lead" (the custom
       parameters attached to the inbound `<Client>` dial).
+- [ ] **On the very first call this install ever handles**, the iOS
+      microphone prompt appears and tapping **Allow** works — audio flows
+      both ways afterward. Separately, on a phone/build where the microphone
+      permission was previously **denied**, confirm the call still connects
+      (silently, with no audio) and that **Settings → Callsign → Microphone**
+      is the fix, matching runbook §5.3.
 - [ ] Answer → audio flows both ways.
 - [ ] Decline → the caller reaches voicemail (the no-answer forward path).
 - [ ] Outbound **allowed** call connects and the far end sees the rotated

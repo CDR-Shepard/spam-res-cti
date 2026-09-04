@@ -62,6 +62,11 @@ targets:
           - voip
           - audio
           - fetch
+        # Required the moment a recording-capable AVAudioSession activates
+        # (Twilio via CallKit's didActivate, on the first call) — without
+        # this key iOS terminates the process outright instead of prompting,
+        # and App Store validation rejects the binary.
+        NSMicrophoneUsageDescription: "Callsign uses the microphone so you can talk on your calls."
         BGTaskSchedulerPermittedIdentifiers:
           - com.gghomes.callsign.refresh
     settings:
