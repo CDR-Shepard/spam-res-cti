@@ -13,8 +13,9 @@ Two targets plus a test bundle:
 | `CallDirectory` (extension) | `com.gghomes.callsign.directory` | Streams the snapshot to CallKit |
 | `CallsignTests` | — | Logic tests (paging, store, sync engine) |
 
-They share the App Group `group.com.gghomes.cti`. iOS 17 minimum, SwiftUI, no
-third-party dependencies.
+They share the App Group `group.com.gghomes.cti`. iOS 17 minimum, SwiftUI, one
+third-party dependency: the Twilio Voice iOS SDK (SPM, product `TwilioVoice`),
+used by the app target only — the Call Directory extension still has none.
 
 ## Building
 
@@ -140,8 +141,46 @@ predecessor. A snapshot that is missing, corrupt, or out of order makes the
 extension `cancelRequest(withError:)` rather than publish a partial directory
 over a good one.
 
+## The softphone's live parts
+
+`LiveVoiceSDK`, `LiveCallSystem` and `PushRegistry` are the adapters behind
+`CallController`'s protocols. Almost all of what they do is translation, and
+what is left is about *ordering*, because two deadlines run through them:
+
+**A VoIP push must produce a CallKit report before the delegate method
+returns.** iOS terminates an app that does not, and eventually revokes its VoIP
+entitlement — so `pushRegistry(_:didReceiveIncomingPushWith:for:completion:)`
+runs the whole chain on its own stack: `CallController.handleIncomingPush` →
+`LiveVoiceSDK.handleIncomingPush` (`TwilioVoiceSDK.handleNotification`, which
+Twilio's own header documents as calling the delegate "synchronously on the
+same dispatch queue") → `CallSystem.reportIncoming`
+(`CXProvider.reportNewIncomingCall`) → `completion()`. Nothing on that path
+awaits anything. When the payload is a `twilio.voice.call` and no ring results
+anyway — the phone was already on a call, or the SDK produced no invite —
+`PushRegistry` reports it as a missed call rather than letting the app be
+killed. A `twilio.voice.cancel` deliberately does not: there is no ring to
+report, only one to end.
+
+**A call can end before anyone is listening for the end.** `CallController`
+attaches `onDisconnect` after the SDK hands the call back, and an outbound leg
+can die inside that gap. `DisconnectLatch` remembers the end and replays it on
+attach — once, and once only. Without it the app sits in `.active` on dead
+media, the rep gets no wrap-up, and their next dial is refused by the server's
+disposition gate with nothing on screen to explain it.
+
+The Twilio access token is minted by `VoiceTokenRefresher` and reused until it
+has less than five minutes left. `CallController.tokens` is synchronous by
+design — nothing may await between the server's "allowed" and `sdk.connect` —
+so a dial reads the cached token, and `VoiceRuntime` keeps that cache warm at
+launch and on every foreground (which is also when the Twilio VoIP
+registration, which expires with the token that made it, is renewed).
+
+VoIP push can only be exercised on a real device. The simulator builds and runs
+everything else.
+
 ## Not here yet
 
-Silent push (`POST /mobile/apns-token`) is a deferred fast-follow: the app
-registers **no** push entitlement and no push handler, and does not post a
-token. Directory updates arrive on the next foreground or background refresh.
+Silent push for directory updates (`POST /mobile/apns-token`) is a deferred
+fast-follow: nothing posts an APNs token, and directory updates still arrive on
+the next foreground or background refresh. The **VoIP** push token
+(`POST /mobile/voip-token`) is posted — that is what makes the phone ring.

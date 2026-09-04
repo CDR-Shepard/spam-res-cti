@@ -3,12 +3,14 @@ import SwiftUI
 @main
 struct CTIApp: App {
     @StateObject private var engine = SyncEngine.shared
+    @StateObject private var voice = VoiceRuntime.shared
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(engine)
+                .environmentObject(voice)
         }
         // Registers the BGAppRefreshTask declared in
         // Info.plist/BGTaskSchedulerPermittedIdentifiers. Uses the shared
@@ -21,6 +23,12 @@ struct CTIApp: App {
             // accepts a request from a foreground or backgrounding app.
             if phase == .background {
                 engine.scheduleBackgroundRefresh()
+            }
+            // Coming back to the foreground is when a spent voice token and a
+            // decayed Twilio registration get put right — both expire on their
+            // own, and a phone that has stopped ringing gives no other sign.
+            if phase == .active {
+                voice.refresh()
             }
         }
     }
@@ -35,13 +43,22 @@ struct CTIApp: App {
 /// the flag to get stuck: the next redraw sends the phone straight back here.
 struct RootView: View {
     @EnvironmentObject private var engine: SyncEngine
+    @EnvironmentObject private var voice: VoiceRuntime
 
     var body: some View {
-        if engine.hasSession {
-            // TASK 10 ROUTING POINT: replace `StatusView()` with the main tab UI.
-            StatusView()
-        } else {
-            SignInView()
+        Group {
+            if engine.hasSession {
+                // TASK 10 ROUTING POINT: replace `StatusView()` with the main tab UI.
+                StatusView()
+            } else {
+                SignInView()
+            }
+        }
+        // The softphone is built from the session, so it can only start once
+        // there is one — and must be torn down the moment there is not, or an
+        // unpaired phone goes on ringing for the org it just left.
+        .task(id: engine.hasSession) {
+            if engine.hasSession { voice.start() } else { voice.stop() }
         }
     }
 }

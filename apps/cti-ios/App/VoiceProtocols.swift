@@ -28,6 +28,13 @@ protocol ActiveCall: AnyObject {
     var uuid: UUID { get }
     func hangUp()
     func setMuted(_ on: Bool)
+    /// Sends DTMF tones down the live leg — the in-call keypad, and the only
+    /// way through an IVR ("press 2 for accounts") once a call is up.
+    ///
+    /// Fire and forget by design: the tones are audio on a leg that is already
+    /// connected, so there is no acknowledgement to wait for and nothing
+    /// useful to report if the leg has since died.
+    func sendDigits(_ digits: String)
     /// Fired once when the far end (or the network) ends the call.
     ///
     /// **Delivered on the main thread.** The live adapter is responsible for

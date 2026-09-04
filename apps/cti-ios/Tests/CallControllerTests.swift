@@ -11,11 +11,13 @@ final class FakeCall: ActiveCall {
     let uuid: UUID
     private(set) var hungUp = false
     private(set) var muteCalls: [Bool] = []
+    private(set) var sentDigits: [String] = []
     var onDisconnect: ((Error?) -> Void)?
 
     init(uuid: UUID = UUID()) { self.uuid = uuid }
     func hangUp() { hungUp = true }
     func setMuted(_ on: Bool) { muteCalls.append(on) }
+    func sendDigits(_ digits: String) { sentDigits.append(digits) }
 }
 
 final class FakeInvite: IncomingInvite {
@@ -578,6 +580,11 @@ final class CallControllerTests: XCTestCase {
         c.setMuted(true)
         XCTAssertEqual(sdk.nextCall.muteCalls, [true])
         XCTAssertTrue(c.isMuted)
+
+        // DTMF rides the same live call the mute does — Task 10's in-call
+        // keypad has nowhere else to send "press 2 for accounts".
+        sdk.nextCall.sendDigits("2")
+        XCTAssertEqual(sdk.nextCall.sentDigits, ["2"])
 
         c.hangUp()
         XCTAssertFalse(c.isMuted, "a new call never inherits the last one's mute")

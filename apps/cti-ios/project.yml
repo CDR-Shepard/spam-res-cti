@@ -136,6 +136,14 @@ targets:
       - path: App/CallerInfo.swift
       - path: App/VoiceProtocols.swift
       - path: App/CallController.swift
+      # The three pieces of the live voice stack that hold a rule rather than
+      # a framework call, and so can be pinned without a simulator: the access
+      # token's cache/expiry arithmetic, the early-disconnect replay, and the
+      # VoIP push classifier. The adapters around them import TwilioVoice,
+      # PushKit and CallKit and are deliberately not in this bundle.
+      - path: App/VoiceTokenRefresher.swift
+      - path: App/DisconnectLatch.swift
+      - path: App/VoicePushPayload.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gghomes.callsign.tests
