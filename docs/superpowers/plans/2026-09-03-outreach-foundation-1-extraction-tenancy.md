@@ -57,7 +57,7 @@ docs/runbooks/tenancy-migration.md
 **Files:**
 - Create: `packages/phone/package.json`, `packages/phone/tsconfig.json`
 - Move: `services/cti-api/src/phone.ts` → `packages/phone/src/index.ts`; `services/cti-api/src/phone.test.ts` → `packages/phone/src/index.test.ts`
-- Modify: `package.json` (root), `services/cti-api/package.json`, and the 12 importers of `phone.js` in `services/cti-api/src` (`dialer/create-session.ts`, `firewall/index.ts`, `mobile/directory-build.ts`, `routes/admin.ts`, `routes/auth.ts`, `routes/calls.ts`, `routes/dialer.ts`, `routes/firewall.ts`, `routes/inbound.ts`, `routes/integrations.ts`, `salesforce/record-phone.ts`, `salesforce/sync.ts`)
+- Modify: `package.json` (root), `services/cti-api/package.json`, and the 10 importers of `phone.js` in `services/cti-api/src` (`firewall/index.ts`, `mobile/directory-build.ts`, `routes/admin.ts`, `routes/auth.ts`, `routes/calls.ts`, `routes/firewall.ts`, `routes/inbound.ts`, `routes/integrations.ts`, `salesforce/record-phone.ts`, `salesforce/sync.ts`). `dialer/create-session.ts` and `routes/dialer.ts` import `salesforce/record-phone.js`, a different module — do not touch them.
 
 **Interfaces:**
 - Produces: `@cti/phone` exporting `normalize(raw: string, defaultRegion = 'US'): NormalizeResult`, `toE164(raw: string, defaultRegion = 'US'): string | null`, `NormalizedPhone`, `NormalizeResult` — unchanged from `phone.ts`.
@@ -172,11 +172,11 @@ Expected: `node_modules/@cti/phone -> ../../packages/phone` symlink; `dist/index
 
 ```bash
 cd /Users/cdrshepard/spam-res-cti/services/cti-api
-perl -pi -e "s#'(\.\./)+phone\.js'#'\@cti/phone'#g" $(grep -rlE "phone\.js'" src)
-grep -rn "phone\.js'" src || echo "OK: no relative phone imports remain"
+perl -pi -e "s#'(\.\./)+phone\.js'#'\@cti/phone'#g" $(grep -rlE "'(\.\./)+phone\.js'" src)
+grep -rnE "'(\.\./)+phone\.js'" src || echo "OK: no relative phone imports remain"
 grep -rl "@cti/phone" src | wc -l
 ```
-Expected: `OK: …` and `12`.
+Expected: `OK: …` and `10`. (`record-phone.js` imports are a different module and must remain.)
 
 - [ ] **Step 5: Verify**
 
