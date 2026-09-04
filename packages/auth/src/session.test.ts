@@ -5,6 +5,9 @@ const state = vi.hoisted(() => ({
   user: undefined as Record<string, unknown> | undefined,
   org: undefined as Record<string, unknown> | undefined,
   inserted: [] as Array<Record<string, unknown>>,
+  lastUpdateTable: null as unknown,
+  lastUpdateValues: null as Record<string, unknown> | null,
+  lastUpdateWhere: null as unknown,
 }));
 
 vi.mock('@cti/db', async (importOriginal) => {
@@ -16,12 +19,46 @@ vi.mock('@cti/db', async (importOriginal) => {
       organizations: { findFirst: async () => state.org },
     },
     insert: () => ({ values: async (v: Record<string, unknown>) => { state.inserted.push(v); } }),
+    update: (table: unknown) => ({
+      set: (values: Record<string, unknown>) => ({
+        where: async (predicate: unknown) => {
+          state.lastUpdateTable = table;
+          state.lastUpdateValues = values;
+          state.lastUpdateWhere = predicate;
+        },
+      }),
+    }),
   };
   return { ...actual, getDb: () => db };
 });
 
+import { schema } from '@cti/db';
 import { sha256 } from './crypto.js';
-import { issueSession, resolveSession, ServiceUserSessionError, SuspendedTenantError } from './session.js';
+import {
+  issueSession,
+  resolveSession,
+  revokeAllSessionsForUser,
+  ServiceUserSessionError,
+  SuspendedTenantError,
+} from './session.js';
+
+/**
+ * Renders a drizzle `where` predicate to readable SQL-ish text, copied from
+ * the same helper in services/cti-api/src/routes/mobile.test.ts, so a test
+ * can assert what the database was actually asked to match rather than
+ * trusting a JS-side check the database never saw.
+ */
+function renderPredicate(node: unknown): string {
+  if (node === null || node === undefined) return '';
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(renderPredicate).join('');
+  const n = node as Record<string, unknown>;
+  if (Array.isArray(n.queryChunks)) return n.queryChunks.map(renderPredicate).join('');
+  if (Array.isArray(n.value)) return (n.value as unknown[]).map(renderPredicate).join('');
+  if (typeof n.name === 'string' && n.table) return n.name;
+  if ('value' in n) return `<param>`;
+  return '<?>';
+}
 
 const human = { id: 'U1', orgId: 'O1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true, kind: 'human', isSuperAdmin: false };
 const service = { ...human, id: 'AI', email: 'ai-agent@gg-homes.internal', kind: 'service' };
@@ -31,6 +68,9 @@ beforeEach(() => {
   state.user = human;
   state.org = { status: 'active' };
   state.inserted = [];
+  state.lastUpdateTable = null;
+  state.lastUpdateValues = null;
+  state.lastUpdateWhere = null;
 });
 
 describe('resolveSession', () => {
@@ -83,5 +123,22 @@ describe('issueSession', () => {
   it('refuses a user whose tenant row is missing', async () => {
     state.org = undefined;
     await expect(issueSession('U1')).rejects.toBeInstanceOf(SuspendedTenantError);
+  });
+});
+
+describe('revokeAllSessionsForUser', () => {
+  it('revokes with ONE update scoped to the user, not a specific token', async () => {
+    await revokeAllSessionsForUser('U1');
+    expect(state.lastUpdateTable).toBe(schema.sessions);
+    expect(state.lastUpdateValues).toHaveProperty('revokedAt');
+    expect(state.lastUpdateValues!.revokedAt).toBeInstanceOf(Date);
+    const predicate = renderPredicate(state.lastUpdateWhere);
+    // Scoped by user_id (every session, any device/browser) AND still-live
+    // (revoked_at is null) — never a single token_hash, which is what
+    // distinguishes this from the single-session revokeSession(bearer).
+    expect(predicate).toContain('user_id =');
+    expect(predicate).toContain('revoked_at is null');
+    expect(predicate).toContain(' and ');
+    expect(predicate).not.toContain('token_hash');
   });
 });

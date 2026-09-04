@@ -100,3 +100,18 @@ export async function revokeSession(bearer: string): Promise<void> {
     .set({ revokedAt: new Date() })
     .where(eq(schema.sessions.tokenHash, sha256(token)));
 }
+
+/**
+ * Bulk revoke — every still-live session belonging to one user, regardless of
+ * which browser/device minted it. Distinct from `revokeSession(bearer)`,
+ * which revokes exactly the ONE session the caller is currently holding (a
+ * routine sign-out of a single browser tab). This is for an admin-initiated
+ * event that must cut the user off everywhere at once — e.g. deactivating or
+ * removing the user's account — never for a routine logout.
+ */
+export async function revokeAllSessionsForUser(userId: string): Promise<void> {
+  await getDb()
+    .update(schema.sessions)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(schema.sessions.userId, userId), isNull(schema.sessions.revokedAt)));
+}

@@ -22,20 +22,36 @@
  *
  * Device tokens mirror auth/session.ts's pattern (random token, sha256 hash
  * at rest) but authenticate a PHONE, not a rep — resolveDevice below is the
- * device-token analogue of resolveSession.
+ * device-token analogue of resolveSession. They never expire on their own,
+ * so two things bound how many can pile up per user: MAX_ACTIVE_DEVICES_PER_USER
+ * caps how many a rep may hold at once (register/claim both 409 at the cap),
+ * and revokeDevicesForDeactivatedUser cascades an admin's user-deactivation
+ * into revoking every one of them at once (see that function's doc for why a
+ * routine web logout must never trigger the same cascade).
  */
 import { randomInt } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { and, eq, gt, isNull, lt, or } from 'drizzle-orm';
 import { z } from 'zod';
-import { resolveSession } from '@cti/auth';
-import { getDb, schema } from '@cti/db';
+import { resolveSession, revokeAllSessionsForUser } from '@cti/auth';
+import { getDb, schema, type Db } from '@cti/db';
 import { randomToken, sha256 } from '@cti/auth';
 
 /** 6 random digits, 5-minute TTL, single-use (spec). */
 const PAIR_CODE_TTL_MS = 5 * 60 * 1000;
 /** Device tokens: 32 random bytes, sha256 hash stored (spec). */
 const DEVICE_TOKEN_BYTES = 32;
+/**
+ * Hard ceiling on how many non-revoked device tokens one user may hold at
+ * once. Device tokens never expire (see the module doc), so without a cap
+ * every re-install or re-sign-in leaves one more permanently-valid credential
+ * behind and the fleet of live tokens only grows. Enforced identically in
+ * both places that mint one: POST /mobile/register (a signed-in rep
+ * re-registering) and POST /mobile/pair/claim (a fresh pairing). Revoking a
+ * device from the softphone's device list (DELETE /mobile/devices/:id) frees
+ * a slot.
+ */
+export const MAX_ACTIVE_DEVICES_PER_USER = 5;
 /** Feed pages of ≤10,000 entries (spec). Exported so `paginate` can be unit
  *  tested with a small injected size without waiting on a 10k-row fixture. */
 export const FEED_PAGE_SIZE = 10_000;
@@ -230,6 +246,47 @@ function mintDeviceToken(): { raw: string; hash: string } {
   return { raw, hash: sha256(raw) };
 }
 
+/** How many non-revoked device tokens `userId` currently holds — the value
+ *  MAX_ACTIVE_DEVICES_PER_USER caps. Shared by /mobile/register and
+ *  /mobile/pair/claim so both insert paths enforce the exact same ceiling
+ *  the exact same way. Counts by fetching the rows (rather than a SQL
+ *  `count(*)`) to match this file's existing `db.query.*.findMany` style —
+ *  the row count at this table size is trivially small either way. */
+async function countActiveDevices(db: Db, userId: string): Promise<number> {
+  const rows = await db.query.mobileDevices.findMany({
+    where: and(eq(schema.mobileDevices.userId, userId), isNull(schema.mobileDevices.revokedAt)),
+  });
+  return rows.length;
+}
+
+/**
+ * Admin-initiated user deactivation cascade: revoke every one of the user's
+ * still-active device tokens, plus (via `revokeAllSessionsForUser`) every
+ * live web-softphone session. This is the ONLY event that should ever call
+ * this function.
+ *
+ * A routine web-softphone logout revokes exactly the ONE session the browser
+ * tab was holding (`revokeSession(bearer)` in @cti/auth) and must NEVER reach
+ * here. The rep's phone is a separate, independent device — signing out of a
+ * browser tab must not brick the device token the phone relies on to receive
+ * incoming-call pushes and read the caller directory. Only an admin
+ * deactivating or removing the user's account should cut off every device
+ * and session at once.
+ *
+ * No admin route in this codebase deactivates or removes a user yet (see the
+ * accompanying report) — this is the reusable primitive that route should
+ * call once it exists, so the cascade logic isn't duplicated or reinvented
+ * at that call site. Exported and unit tested here in isolation.
+ */
+export async function revokeDevicesForDeactivatedUser(userId: string): Promise<void> {
+  const db = getDb();
+  await db
+    .update(schema.mobileDevices)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(schema.mobileDevices.userId, userId), isNull(schema.mobileDevices.revokedAt)));
+  await revokeAllSessionsForUser(userId);
+}
+
 const ClaimBody = z.object({
   code: z.string().regex(/^\d{6}$/, 'code must be 6 digits'),
   deviceLabel: z.string().trim().min(1).max(120),
@@ -363,6 +420,20 @@ export async function registerMobileRoutes(app: FastifyInstance): Promise<void> 
       return reply.code(401).send({ error: 'Invalid or expired code' });
     }
 
+    // Cap checked AFTER the code is claimed (not before): the rule the cap
+    // enforces is "insert nothing past the ceiling," and the code being
+    // single-use is a separate, already-atomic guarantee above. The tradeoff
+    // is that a rep already at the cap burns their one-time code on a claim
+    // that gets rejected — the same outcome as the code simply expiring —
+    // and must generate a fresh one after freeing a slot. Checking the cap
+    // first instead would mean reading the code's owning user before knowing
+    // whether the code itself is even valid, which buys nothing (the cap
+    // isn't a security invariant like single-use) at the cost of an extra
+    // read on every claim attempt.
+    if ((await countActiveDevices(db, claimed.userId)) >= MAX_ACTIVE_DEVICES_PER_USER) {
+      return reply.code(409).send({ error: 'Too many active devices — revoke one in the app first' });
+    }
+
     const { raw: token, hash: tokenHash } = mintDeviceToken();
     await db.insert(schema.mobileDevices).values({
       userId: claimed.userId,
@@ -380,8 +451,11 @@ export async function registerMobileRoutes(app: FastifyInstance): Promise<void> 
     if (!session) return reply.code(401).send({ error: 'Unauthorized' });
     const parsed = RegisterBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
-    const { raw, hash } = mintDeviceToken();
     const db = getDb();
+    if ((await countActiveDevices(db, session.userId)) >= MAX_ACTIVE_DEVICES_PER_USER) {
+      return reply.code(409).send({ error: 'Too many active devices — revoke one in the app first' });
+    }
+    const { raw, hash } = mintDeviceToken();
     const [row] = await db
       .insert(schema.mobileDevices)
       .values({ userId: session.userId, tokenHash: hash, label: parsed.data.deviceLabel })

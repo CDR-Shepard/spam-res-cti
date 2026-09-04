@@ -47,6 +47,13 @@ const state = vi.hoisted(() => ({
   // so tests can assert the row actually written (userId scoping, hash-at-rest)
   // rather than trusting the response body alone.
   lastDeviceInsertValues: null as Record<string, unknown> | null,
+  // The `where` predicate the last bulk UPDATE against `mobileDevices` (the
+  // deactivation cascade) or `sessions` (revokeAllSessionsForUser, exercised
+  // through the REAL @cti/auth implementation — see the vi.mock below) was
+  // issued with, keyed by table so the two don't clobber one shared slot.
+  lastMobileDeviceBulkUpdateWhere: null as unknown,
+  lastSessionUpdateWhere: null as unknown,
+  sessionUpdateCallCount: 0,
 }));
 
 vi.mock('@cti/auth', async (importOriginal) => {
@@ -73,6 +80,8 @@ import {
   sortEntriesByDigits,
   paginate,
   generatePairCode,
+  MAX_ACTIVE_DEVICES_PER_USER,
+  revokeDevicesForDeactivatedUser,
 } from './mobile.js';
 
 /**
@@ -184,6 +193,11 @@ function fakeDb() {
             state.updateCallCount++;
             state.lastUpdateValues = values;
             if (table === schema.mobilePairCodes) state.lastPairCodeClaimWhere = predicate;
+            if (table === schema.mobileDevices) state.lastMobileDeviceBulkUpdateWhere = predicate;
+            if (table === schema.sessions) {
+              state.sessionUpdateCallCount++;
+              state.lastSessionUpdateWhere = predicate;
+            }
             const thenable = Promise.resolve(undefined) as Promise<void> & {
               returning: () => Promise<Array<Record<string, unknown>>>;
             };
@@ -202,6 +216,18 @@ function fakeDb() {
 
 const USER_ID = 'user-1';
 const ORG_ID = 'org-1';
+
+/** `n` fixture rows shaped like an active (non-revoked) `mobile_devices` row,
+ *  for feeding `state.devicesList` — the fixture `countActiveDevices`'s
+ *  `findMany` call resolves to — in the per-user device-cap tests. */
+function activeDevices(n: number): Array<{ id: string; label: string; createdAt: Date; lastSeenAt: Date }> {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `dev-${i}`,
+    label: `Device ${i}`,
+    createdAt: new Date(),
+    lastSeenAt: new Date(),
+  }));
+}
 
 let app: FastifyInstance;
 
@@ -226,6 +252,9 @@ beforeEach(async () => {
   state.lastDevicesListWhere = null;
   state.lastDirectoryVersionsWhere = null;
   state.lastDirectoryEntriesWhere = null;
+  state.lastMobileDeviceBulkUpdateWhere = null;
+  state.lastSessionUpdateWhere = null;
+  state.sessionUpdateCallCount = 0;
   claimAttemptsByIp.clear();
   claimAttemptsGlobal.splice(0, claimAttemptsGlobal.length);
   app = Fastify();
@@ -362,6 +391,25 @@ describe('POST /mobile/pair/claim', () => {
     expect(state.deviceInsertCount).toBe(0);
   });
 
+  it('409s at the cap — the code is consumed but no device is inserted', async () => {
+    state.pairCode = { userId: USER_ID, usedAt: null, expiresAt: new Date(Date.now() + 60_000) };
+    state.user = { id: USER_ID, orgId: ORG_ID, displayName: 'Jane Rep' };
+    state.devicesList = activeDevices(MAX_ACTIVE_DEVICES_PER_USER);
+    const res = await claim({ code: '123456', deviceLabel: "One too many" });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: 'Too many active devices — revoke one in the app first' });
+    expect(state.deviceInsertCount).toBe(0);
+  });
+
+  it('200s one below the cap — insert happens', async () => {
+    state.pairCode = { userId: USER_ID, usedAt: null, expiresAt: new Date(Date.now() + 60_000) };
+    state.user = { id: USER_ID, orgId: ORG_ID, displayName: 'Jane Rep' };
+    state.devicesList = activeDevices(MAX_ACTIVE_DEVICES_PER_USER - 1);
+    const res = await claim({ code: '123456', deviceLabel: "Still room" });
+    expect(res.statusCode).toBe(200);
+    expect(state.deviceInsertCount).toBe(1);
+  });
+
   it('rate-limits claim attempts to 3/min/IP — the 4th within the window is 429', async () => {
     state.pairCode = undefined; // every attempt 401s on validity, but must still count against the limiter
     const results = [];
@@ -473,6 +521,48 @@ describe('POST /mobile/register', () => {
     state.authedUser = { userId: 'u1', orgId: 'o1', email: 'rep@x.com', isAdmin: false };
     const res = await app.inject({ method: 'POST', url: '/mobile/register', headers: { authorization: 'Bearer session' }, payload: {} });
     expect(res.statusCode).toBe(400);
+  });
+
+  it('409s at the cap — no insert', async () => {
+    state.authedUser = { userId: USER_ID, orgId: ORG_ID, email: 'rep@example.com', isAdmin: false };
+    state.devicesList = activeDevices(MAX_ACTIVE_DEVICES_PER_USER);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mobile/register',
+      headers: { authorization: 'Bearer session' },
+      payload: { deviceLabel: 'One too many' },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: 'Too many active devices — revoke one in the app first' });
+    expect(state.deviceInsertCount).toBe(0);
+  });
+
+  it('200s one below the cap — insert happens', async () => {
+    state.authedUser = { userId: USER_ID, orgId: ORG_ID, email: 'rep@example.com', isAdmin: false };
+    state.devicesList = activeDevices(MAX_ACTIVE_DEVICES_PER_USER - 1);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mobile/register',
+      headers: { authorization: 'Bearer session' },
+      payload: { deviceLabel: 'Still room' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(state.deviceInsertCount).toBe(1);
+  });
+
+  it('counts ONLY the signed-in user\'s non-revoked devices — scoped in the where clause', async () => {
+    state.authedUser = { userId: USER_ID, orgId: ORG_ID, email: 'rep@example.com', isAdmin: false };
+    state.devicesList = activeDevices(1);
+    await app.inject({
+      method: 'POST',
+      url: '/mobile/register',
+      headers: { authorization: 'Bearer session' },
+      payload: { deviceLabel: 'Device' },
+    });
+    const predicate = renderPredicate(state.lastDevicesListWhere);
+    expect(predicate).toContain('user_id =');
+    expect(predicate).toContain('revoked_at is null');
+    expect(predicate).toContain(' and ');
   });
 });
 
@@ -817,6 +907,35 @@ describe('DELETE /mobile/devices/:id', () => {
     expect(predicate).toContain('id =');
     expect(predicate).toContain('user_id =');
     expect(predicate).toContain(' and ');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// revokeDevicesForDeactivatedUser — the admin-deactivation cascade. No route
+// in this codebase calls it yet (there is no admin "deactivate/remove a
+// user" endpoint at all — see the accompanying report), so it's exercised
+// directly here as the reusable primitive a future one should call.
+// ---------------------------------------------------------------------------
+describe('revokeDevicesForDeactivatedUser', () => {
+  it('revokes the user\'s devices with ONE update scoped to that user AND still-active rows', async () => {
+    await revokeDevicesForDeactivatedUser(USER_ID);
+    const predicate = renderPredicate(state.lastMobileDeviceBulkUpdateWhere);
+    expect(predicate).toContain('user_id =');
+    expect(predicate).toContain('revoked_at is null');
+    expect(predicate).toContain(' and ');
+  });
+
+  it('also revokes every one of the user\'s sessions (not just this one bearer)', async () => {
+    await revokeDevicesForDeactivatedUser(USER_ID);
+    // Exercises the REAL @cti/auth revokeAllSessionsForUser (only
+    // resolveSession is stubbed by this file's vi.mock('@cti/auth', ...)),
+    // routed through the same fake db — proving the cascade actually reaches
+    // sessions, not just mobile_devices.
+    expect(state.sessionUpdateCallCount).toBe(1);
+    const predicate = renderPredicate(state.lastSessionUpdateWhere);
+    expect(predicate).toContain('user_id =');
+    expect(predicate).toContain('revoked_at is null');
+    expect(predicate).not.toContain('token_hash');
   });
 });
 
