@@ -1505,14 +1505,21 @@ const human = { userId: 'U1', orgId: 'O1', email: 'a@b.co', isAdmin: false, powe
 const org1 = { id: 'O1', name: 'GG Homes', slug: 'gg-homes', status: 'active', timezone: 'America/Los_Angeles' };
 const org2 = { id: '11111111-1111-4111-8111-111111111111', name: 'Other', slug: 'other', status: 'active', timezone: 'UTC' };
 
-async function run(db: unknown, headers: Record<string, string> = {}) {
+async function run(db: unknown, headers: Record<string, string> = {}, url = '/x') {
   const app = Fastify();
+  // Two routes so the context gate and the admin gate are tested independently.
   app.get('/x', async (req, reply) => {
     const ctx = await requireContext(db as never, req, reply);
     if (!ctx) return;
-    return { orgId: ctx.orgId, admin: requireAdmin(ctx, reply) };
+    return { orgId: ctx.orgId };
   });
-  const res = await app.inject({ method: 'GET', url: '/x', headers: { authorization: 'Bearer t', ...headers } });
+  app.get('/x-admin', async (req, reply) => {
+    const ctx = await requireContext(db as never, req, reply);
+    if (!ctx) return;
+    if (!requireAdmin(ctx, reply)) return;
+    return { orgId: ctx.orgId };
+  });
+  const res = await app.inject({ method: 'GET', url, headers: { authorization: 'Bearer t', ...headers } });
   await app.close();
   return res;
 }
@@ -1527,7 +1534,6 @@ describe('requireContext', () => {
     expect(res.json()).toMatchObject({ code: 'UNAUTHENTICATED' });
   });
   it("resolves the session's own tenant and ignores X-Org-Id for non-super-admins", async () => {
-    state.session = { ...human, isAdmin: true }; // the /x handler also calls requireAdmin
     const res = await run(fakeDb({ organizations: [org1] }).db, { 'x-org-id': org2.id });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ orgId: 'O1' });
