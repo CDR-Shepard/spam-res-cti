@@ -1,6 +1,65 @@
-import { describe, expect, it, vi } from 'vitest';
-import { clientTaskAllowed, syncErrorForCall } from './calls.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import Fastify, { type FastifyInstance } from 'fastify';
 import type { OwnershipSnapshot } from '../salesforce/ownership.js';
+
+// ---------------------------------------------------------------------------
+// GET /calls route-level harness (Fastify + fake-DB injection), following
+// calls-disposition.test.ts's idiom: hoisted `state`, `vi.mock` of
+// `../config.js` / `@cti/auth` / `@cti/db`, then `registerCallRoutes`. Only
+// these three are mocked — the route never touches Salesforce or the dialer,
+// so those modules import for real, same as calls-disposition.test.ts.
+// ---------------------------------------------------------------------------
+const routeState = vi.hoisted(() => ({
+  authedUser: null as { userId: string; orgId: string; email: string; isAdmin: boolean } | null,
+  // The fixed fixture `select().from(schema.calls).where().orderBy().limit()`
+  // resolves to. `where`/`orderBy` are recorded but not introspected for
+  // filtering (dialer-handoffs.test.ts convention) — the route's own
+  // `eq(userId, ...)` is what actually scopes calls in production.
+  callRows: [] as Array<Record<string, unknown>>,
+  // The fixture `select({...}).from(schema.salesforceSyncJobs).where(...)`
+  // resolves to.
+  syncJobRows: [] as Array<{ callId: string; status: string; lastError: string | null }>,
+}));
+
+vi.mock('../config.js', () => ({
+  loadConfig: () => ({ TELEPHONY_PROVIDER: 'twilio' }),
+}));
+
+vi.mock('@cti/auth', () => ({
+  resolveSession: async () => routeState.authedUser,
+}));
+
+vi.mock('@cti/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cti/db')>();
+  return {
+    ...actual,
+    getDb: () => ({
+      select(_cols?: unknown) {
+        return {
+          from(table: unknown) {
+            // Distinguish the two `GET /calls` queries by which table they
+            // named — the calls query chains `.where().orderBy().limit()`,
+            // the sync-jobs query resolves directly off `.where()`.
+            if (table === actual.schema.calls) {
+              return {
+                where: (_where: unknown) => ({
+                  orderBy: (_col: unknown) => ({
+                    limit: async (_n: number) => routeState.callRows,
+                  }),
+                }),
+              };
+            }
+            return {
+              where: async (_where: unknown) => routeState.syncJobRows,
+            };
+          },
+        };
+      },
+    }),
+  };
+});
+
+import { registerCallRoutes, clientTaskAllowed, syncErrorForCall, toNumberE164ForCall } from './calls.js';
 
 // The raw shape GET /calls gets back from salesforce_sync_jobs.
 const SOQL_DUMP = 'SOQL failed (400): [{"message":"No such column","errorCode":"INVALID_FIELD"}]';
@@ -85,5 +144,100 @@ describe('clientTaskAllowed', () => {
     const r = await clientTaskAllowed('00Q000000000001', async () => { throw new Error('no connection'); }, lookup);
     expect(r).toBe(false);
     expect(lookup).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// toNumberE164ForCall — the `toNumberE164` field on `GET /calls`'s rows.
+// ---------------------------------------------------------------------------
+describe('toNumberE164ForCall', () => {
+  it('returns normalizedToNumber for a call that carries an audit', () => {
+    expect(toNumberE164ForCall({ preCallAuditId: 'audit-1', normalizedToNumber: '+16198481782' }))
+      .toBe('+16198481782');
+  });
+
+  it('is null for a call with no audit, e.g. an inbound call', () => {
+    expect(toNumberE164ForCall({ preCallAuditId: null, normalizedToNumber: '+13235249247' })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /calls — recent calls carry the normalized number
+// ---------------------------------------------------------------------------
+const OUTBOUND_CALL = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  id: 'call-1',
+  orgId: 'O1',
+  userId: 'U1',
+  direction: 'outbound',
+  status: 'completed',
+  fromNumber: '+13235249247',
+  toNumber: '6198481782',
+  normalizedToNumber: '+16198481782',
+  preCallAuditId: 'audit-1',
+  disposition: 'Connected',
+  salesforceTaskId: null,
+  createdAt: new Date('2026-09-01T12:00:00Z'),
+  ...over,
+});
+
+const INBOUND_CALL = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  id: 'call-2',
+  orgId: 'O1',
+  userId: 'U1',
+  direction: 'inbound',
+  status: 'completed',
+  fromNumber: '+16195551234',
+  toNumber: '+13235249247',
+  normalizedToNumber: '+13235249247',
+  preCallAuditId: null,
+  disposition: null,
+  salesforceTaskId: null,
+  createdAt: new Date('2026-09-01T11:00:00Z'),
+  ...over,
+});
+
+describe('GET /calls', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    routeState.authedUser = { userId: 'U1', orgId: 'O1', email: 'rep@example.com', isAdmin: false };
+    routeState.callRows = [];
+    routeState.syncJobRows = [];
+    app = Fastify();
+    await registerCallRoutes(app);
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  async function recent() {
+    return app.inject({ method: 'GET', url: '/calls', headers: { authorization: 'Bearer tok' } });
+  }
+
+  it('carries the firewall-normalized destination alongside the raw typed number', async () => {
+    routeState.callRows = [OUTBOUND_CALL()];
+
+    const res = await recent();
+
+    expect(res.statusCode).toBe(200);
+    const [call] = res.json().calls;
+    expect(call.toNumber).toBe('6198481782');
+    expect(call.toNumberE164).toBe('+16198481782');
+  });
+
+  it('reports null (not a dropped row) for a call with no audit, e.g. inbound', async () => {
+    routeState.callRows = [OUTBOUND_CALL(), INBOUND_CALL()];
+
+    const res = await recent();
+
+    const calls = res.json().calls;
+    expect(calls).toHaveLength(2);
+    const inbound = calls.find((c: { id: string }) => c.id === 'call-2');
+    expect(inbound.toNumberE164).toBeNull();
+    // Still fully present — not dropped just because it has no audit.
+    expect(inbound.toNumber).toBe('+13235249247');
+    expect(inbound.direction).toBe('inbound');
   });
 });

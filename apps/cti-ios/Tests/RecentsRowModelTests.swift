@@ -20,12 +20,13 @@ final class RecentsRowModelTests: XCTestCase {
         durationSeconds: Int? = 65,
         createdAt: String = "2026-09-03T18:04:05.000Z",
         whoId: String? = nil,
-        whatId: String? = nil
+        whatId: String? = nil,
+        toNumberE164: String? = nil
     ) -> CallSummary {
         CallSummary(
             id: id, direction: direction, toNumber: toNumber, fromNumber: fromNumber,
             disposition: disposition, durationSeconds: durationSeconds, createdAt: createdAt,
-            salesforceWhoId: whoId, salesforceWhatId: whatId
+            salesforceWhoId: whoId, salesforceWhatId: whatId, toNumberE164: toNumberE164
         )
     }
 
@@ -137,5 +138,59 @@ final class RecentsRowModelTests: XCTestCase {
 
     func testACallWithNoSalesforceRecordHasNothingToOpen() {
         XCTAssertNil(RecentsRowModel.make(summary()).recordId)
+    }
+
+    // MARK: - Normalized destination (toNumberE164)
+    //
+    // `toNumber` is exactly what the rep typed — it can carry formatting
+    // `formatNANP` cannot make sense of (an international prefix, stray
+    // digits), in which case it falls back to returning the string
+    // unformatted. `toNumberE164` is the firewall-normalized E.164 for that
+    // same call; an outbound row should display it in preference to the raw
+    // value, exactly like a call whose `toNumber` had always been clean.
+
+    /// A `toNumber` `formatNANP` cannot parse (13 digits, an international
+    /// prefix) would otherwise render raw and unformatted. With a normalized
+    /// `toNumberE164` present, the row shows the clean formatted number
+    /// instead — proving the field is actually preferred, not coincidentally
+    /// identical.
+    func testAnOutboundRowPrefersTheNormalizedNumberForDisplay() {
+        let row = RecentsRowModel.make(summary(toNumber: "0016198481782", toNumberE164: "+16198481782"))
+        XCTAssertEqual(row.title, "(619) 848-1782")
+    }
+
+    /// Redialing still uses the raw value the server stored on `toNumber` —
+    /// only the display formatting changes.
+    func testAnOutboundRowStillRedialsTheRawStoredNumber() {
+        let row = RecentsRowModel.make(summary(toNumber: "0016198481782", toNumberE164: "+16198481782"))
+        XCTAssertEqual(row.redialTarget, "0016198481782")
+    }
+
+    /// No `toNumberE164` at all (an older server, or a call with no audit) —
+    /// the row must render byte-for-byte what it always has: `formatNANP`
+    /// applied to the raw `toNumber`, unformatted fallback included.
+    func testAnOutboundRowFallsBackToTheRawNumberWhenNoNormalizedNumberIsSent() {
+        let row = RecentsRowModel.make(summary(toNumber: "0016198481782", toNumberE164: nil))
+        XCTAssertEqual(row.title, "0016198481782")
+        XCTAssertEqual(row.title, formatNANP("0016198481782"), "must match today's formatter output exactly")
+    }
+
+    /// A normal, already-10-digit `toNumber` formats identically either way —
+    /// confirms the preference is additive, not a regression for the common
+    /// case.
+    func testAnOutboundRowWithAnOrdinaryNumberFormatsTheSameWithOrWithoutTheNormalizedField() {
+        let withNormalized = RecentsRowModel.make(summary(toNumberE164: "+16198481782")).title
+        let without = RecentsRowModel.make(summary(toNumberE164: nil)).title
+        XCTAssertEqual(withNormalized, without)
+        XCTAssertEqual(withNormalized, "(619) 848-1782")
+    }
+
+    /// Inbound rows are untouched: `toNumberE164` is only ever computed for
+    /// the dialed leg of an outbound call, so an inbound row ignores it
+    /// entirely and keeps showing the caller (`fromNumber`), exactly as today.
+    func testAnInboundRowIgnoresTheNormalizedFieldEntirely() {
+        let row = RecentsRowModel.make(summary(direction: "inbound", toNumberE164: "+19999999999"))
+        XCTAssertEqual(row.title, "(858) 555-0100")
+        XCTAssertEqual(row.redialTarget, "+18585550100")
     }
 }

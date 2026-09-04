@@ -280,8 +280,6 @@ chase before shipping:
   `AVAudioSession.routeChangeNotification`, so if AirPods connect or
   disconnect mid-call, the on-screen speaker state can go stale (shows a
   state that no longer matches the actual output route).
-- **Outbound Recents rows show the raw typed number** until the recent-calls
-  API returns `toNumberE164` — a follow-up chip has been filed for this.
 - **No way to deactivate a rep (the offboarding cascade has no trigger).** The
   per-user cap now ships: a rep may hold at most `MAX_ACTIVE_DEVICES_PER_USER`
   active devices and both `/mobile/register` and `/mobile/pair/claim` refuse

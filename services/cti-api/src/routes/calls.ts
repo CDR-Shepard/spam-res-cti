@@ -70,6 +70,33 @@ function pendingDispositionPayload(c: typeof schema.calls.$inferSelect) {
   };
 }
 
+/**
+ * The E.164 number the pre-call firewall audit approved for this call's
+ * destination — for `GET /calls`, so the client can render (and redial) a
+ * normalized number instead of whatever the rep happened to type into
+ * `toNumber`.
+ *
+ * `calls.normalizedToNumber` already IS that value for every outbound call:
+ * `POST /calls` refuses to insert unless `audit.toNumberE164 ===
+ * norm.value.e164` (the audit-match check above), and that same value is what
+ * gets persisted as `normalizedToNumber` — so the column and the audit can
+ * never disagree, and no join back to `pre_call_audits` is needed to read it.
+ *
+ * Inbound calls never carry a `preCallAuditId` — a rep doesn't run the
+ * firewall on a call that rings in — so their `normalizedToNumber` is the
+ * org's own DID, not a firewall-approved destination. Gating on
+ * `preCallAuditId` (rather than always returning `normalizedToNumber`) keeps
+ * this field meaning "the number the firewall approved", not "whatever
+ * normalization produced", and is why an audit-less call reports `null`
+ * here rather than its own DID.
+ */
+export function toNumberE164ForCall(call: {
+  preCallAuditId: string | null;
+  normalizedToNumber: string;
+}): string | null {
+  return call.preCallAuditId ? call.normalizedToNumber : null;
+}
+
 /** The reason codes `GET /calls` may report. A closed set, never free text. */
 export type SyncErrorReason = 'not-owner' | 'failed';
 
@@ -364,7 +391,13 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
           .where(inArray(schema.salesforceSyncJobs.callId, rows.map((r) => r.id)))
       : [];
     const syncJobByCall = new Map(syncJobs.map((j) => [j.callId, j]));
-    return { calls: rows.map((r) => ({ ...r, syncError: syncErrorForCall(r, syncJobByCall.get(r.id)) })) };
+    return {
+      calls: rows.map((r) => ({
+        ...r,
+        toNumberE164: toNumberE164ForCall(r),
+        syncError: syncErrorForCall(r, syncJobByCall.get(r.id)),
+      })),
+    };
   });
 
   /**

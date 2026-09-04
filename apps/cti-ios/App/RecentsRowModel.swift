@@ -38,12 +38,20 @@ struct RecentsRowModel: Equatable, Identifiable {
     static func make(_ call: CallSummary) -> RecentsRowModel {
         let isInbound = call.direction == "inbound"
         let counterparty = nonBlank(isInbound ? call.fromNumber : call.toNumber)
+        // Outbound rows prefer the firewall-normalized E.164 (`toNumberE164`)
+        // for DISPLAY, falling back to the raw typed `toNumber` when the
+        // server has none (no audit, or an older server that omits the
+        // field). Inbound rows are untouched: `toNumberE164` is only ever
+        // computed for the dialed leg of an outbound call, so it says nothing
+        // about who rang in. `redialTarget` below still uses `counterparty`
+        // (the raw value) — only the string handed to the formatter changes.
+        let displayNumber = isInbound ? counterparty : (nonBlank(call.toNumberE164) ?? counterparty)
 
         return RecentsRowModel(
             id: call.id,
             isInbound: isInbound,
             glyph: isInbound ? "phone.arrow.down.left" : "phone.arrow.up.right",
-            title: counterparty.map(formatNANP) ?? "Unknown caller",
+            title: displayNumber.map(formatNANP) ?? "Unknown caller",
             disposition: call.disposition ?? noDisposition,
             duration: formatDuration(call.durationSeconds),
             date: parseTimestamp(call.createdAt),

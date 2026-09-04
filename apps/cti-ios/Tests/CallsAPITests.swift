@@ -277,6 +277,24 @@ final class CallsAPITests: XCTestCase {
         ])
     }
 
+    /// `toNumberE164` (added alongside the existing raw `toNumber`) must decode
+    /// when the server sends it — the envelope test above already proves the
+    /// reverse (an older server that omits it decodes to `nil`, since the two
+    /// `CallSummary` fixtures it compares against don't pass the parameter
+    /// either).
+    func testDecodeRecentCallsParsesToNumberE164WhenPresent() throws {
+        let data = """
+        {"calls":[
+          {"id":"call_1","direction":"outbound","toNumber":"6198481782","toNumberE164":"+16198481782",
+           "fromNumber":"+16195550111","disposition":"Connected","durationSeconds":42,
+           "createdAt":"2026-09-01T12:00:00Z","salesforceWhoId":null,"salesforceWhatId":null,
+           "syncError":null}
+        ]}
+        """.data(using: .utf8)!
+        let calls = try decodeRecentCalls(data, status: 200)
+        XCTAssertEqual(calls.first?.toNumberE164, "+16198481782")
+    }
+
     func testDecodeRecentCallsThrowsServerErrorOnNon200() {
         XCTAssertThrowsError(try decodeRecentCalls(Data(), status: 401)) { error in
             XCTAssertEqual(error as? SessionClientError, .server(status: 401))

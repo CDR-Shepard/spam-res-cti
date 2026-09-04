@@ -22,6 +22,29 @@ struct CallSummary: Decodable, Identifiable, Equatable {
     let createdAt: String
     let salesforceWhoId: String?
     let salesforceWhatId: String?
+    /// The pre-call firewall audit's normalized destination (`calls.ts`'s
+    /// `toNumberE164ForCall`) — `nil` for a call with no audit (e.g. inbound,
+    /// or an older server that doesn't send this field at all). Optional so
+    /// decoding a response from a server that predates this field still
+    /// succeeds; `RecentsRowModel` falls back to `toNumber` when it's absent.
+    let toNumberE164: String?
+
+    init(
+        id: String, direction: String, toNumber: String, fromNumber: String?, disposition: String?,
+        durationSeconds: Int?, createdAt: String, salesforceWhoId: String?, salesforceWhatId: String?,
+        toNumberE164: String? = nil
+    ) {
+        self.id = id
+        self.direction = direction
+        self.toNumber = toNumber
+        self.fromNumber = fromNumber
+        self.disposition = disposition
+        self.durationSeconds = durationSeconds
+        self.createdAt = createdAt
+        self.salesforceWhoId = salesforceWhoId
+        self.salesforceWhatId = salesforceWhatId
+        self.toNumberE164 = toNumberE164
+    }
 }
 
 /// The outcome of `POST /calls` as the dial screen understands it. `.refused`
