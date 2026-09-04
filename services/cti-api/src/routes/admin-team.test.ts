@@ -2,8 +2,8 @@
  * Route-level (Fastify + fake-DB injection) tests for the admin "team" routes
  * — GET /admin/team (list org users incl. the power-dialer flag) and
  * PATCH /admin/team/:userId (flip it) — following dialer-handoffs.test.ts's
- * harness idiom (hoisted `state`, `vi.mock` of ../auth/session.js and
- * ../db/index.js, Fastify + registerAdminRoutes).
+ * harness idiom (hoisted `state`, `vi.mock` of @cti/auth and
+ * @cti/db, Fastify + registerAdminRoutes).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
