@@ -54,9 +54,12 @@ Two deploys, in this order, each followed by observation. Everything is on
 The fleet and roster scripts under `services/cti-api/scripts/` enumerate `users` without a `kind`
 filter (`redistribute-pool.mjs`, `assign-reserve-fair.mjs`, `swap-call-center.mjs`, `fleet-report.ts`,
 `buy-agent-numbers.ts`, `buy-pool-numbers.mjs`). After 0036 they will see the "AI Agent" service user
-and could assign it DIDs or count it as a rep. Before the next fleet run, add `and kind = 'human'` to
-those queries (a follow-up in `docs/superpowers/plans/2026-09-03-outreach-foundation-1-followups.md`).
-They could not be changed ahead of the deploy because `users.kind` does not exist until 0036 runs.
+and could assign it DIDs or count it as a rep — two of them hand the next number to the rep with the
+fewest, so a zero-number service user would absorb the whole reserve. The Callsign branch fixes all six
+with the column-free predicate `email not like 'ai-agent@%'` (commit 95deaa7 on `callsign-reviewed`),
+which is a no-op before 0036 and correct after. Before the next fleet run, verify that fix is on `main`;
+once 0036 is live, tighten it to `kind = 'human'` (a follow-up in
+`docs/superpowers/plans/2026-09-03-outreach-foundation-1-followups.md`).
 
 ## Rollback notes
 
