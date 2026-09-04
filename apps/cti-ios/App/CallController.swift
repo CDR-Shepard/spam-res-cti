@@ -471,19 +471,3 @@ final class CallController: ObservableObject {
         phase = .idle
     }
 }
-
-/// Runs `body` on the main actor, without a hop when it is already there.
-///
-/// Both callbacks the controller hands out (`CallSystem.reportIncoming`'s
-/// completion and `ActiveCall.onDisconnect`) are documented as main-thread, and
-/// the direct call keeps them synchronous — CallKit's refusal has to reject the
-/// invite on the same stack that reported it. The hop is the safety net for an
-/// adapter that violates the contract: a wrong thread should cost a hop, not
-/// trap `assumeIsolated` in the middle of a call.
-private func onMainActor(_ body: @escaping @MainActor () -> Void) {
-    if Thread.isMainThread {
-        MainActor.assumeIsolated { body() }
-    } else {
-        Task { @MainActor in body() }
-    }
-}

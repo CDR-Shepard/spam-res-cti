@@ -146,6 +146,10 @@ targets:
       - path: App/VoicePushPayload.swift
       - path: App/ConnectGate.swift
       - path: App/RingCancellation.swift
+      - path: App/OutgoingCallLedger.swift
+      # Not itself under test: `CallController.swift` (which is) calls
+      # `onMainActor`, so the bundle has to compile the one definition of it.
+      - path: App/MainActorHop.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gghomes.callsign.tests

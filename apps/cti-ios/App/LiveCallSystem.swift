@@ -24,6 +24,11 @@ final class LiveCallSystem: NSObject, CallSystem {
 
     private let provider: CXProvider
     private let calls = CXCallController()
+
+    /// Keeps the outgoing start/connected reports in the order CallKit needs,
+    /// however out of order Twilio delivers them. See `OutgoingCallLedger`.
+    private var ledger = OutgoingCallLedger()
+    private let ledgerLock = NSLock()
     private let log = os.Logger(subsystem: AppConfig.loggingSubsystem, category: "CallKit")
 
     /// Twilio's own audio device — **the same instance the SDK uses**, since
@@ -96,6 +101,7 @@ final class LiveCallSystem: NSObject, CallSystem {
     /// Recents duration) on the ringing. `reportOutgoingConnected` closes that
     /// out when they actually pick up.
     func reportOutgoingStarted(uuid: UUID, handle: String) {
+        withLedger { $0.startRequested(uuid) }
         let action = CXStartCallAction(call: uuid, handle: CXHandle(type: .phoneNumber, value: handle))
         calls.request(CXTransaction(action: action)) { [weak self] error in
             guard let self else { return }
@@ -109,17 +115,38 @@ final class LiveCallSystem: NSObject, CallSystem {
                 // to turn the audio on itself, or the rep sits on a connected
                 // call that is silent in both directions forever.
                 audioDevice.isEnabled = true
+                withLedger { $0.startFailed(uuid) }
                 return
             }
             provider.reportOutgoingCall(with: uuid, startedConnectingAt: Date())
+            // CallKit only knows the call from this line onwards, so an answer
+            // that arrived while the transaction was in flight has been held
+            // rather than dropped. This is the first moment it can be told.
+            if let connectedAt = withLedger({ $0.startSucceeded(uuid) }) {
+                provider.reportOutgoingCall(with: uuid, connectedAt: connectedAt)
+            }
         }
     }
 
     /// The callee picked up. Starts CallKit's call timer, and is what makes
     /// the Recents entry show the conversation's length rather than the
     /// conversation plus however long it rang.
+    ///
+    /// Held rather than reported when CallKit has not seen the call yet — an
+    /// IVR or voicemail answers on the first ring, well inside the start
+    /// transaction's round trip, and a connect reported too early is silently
+    /// discarded (leaving the system screen on "connecting…" for the whole
+    /// call). `OutgoingCallLedger` owns that decision.
     func reportOutgoingConnected(uuid: UUID) {
-        provider.reportOutgoingCall(with: uuid, connectedAt: Date())
+        guard let connectedAt = withLedger({ $0.connected(uuid, at: Date()) }) else { return }
+        provider.reportOutgoingCall(with: uuid, connectedAt: connectedAt)
+    }
+
+    /// The ledger is touched from the main actor (`onOutboundCallConnected`)
+    /// and from `CXCallController`'s completion queue, so every access goes
+    /// through here.
+    private func withLedger<T>(_ body: (inout OutgoingCallLedger) -> T) -> T {
+        ledgerLock.withLock { body(&ledger) }
     }
 
     /// Sign-out. `CXProvider` holds its delegate — and therefore this object,
@@ -133,6 +160,7 @@ final class LiveCallSystem: NSObject, CallSystem {
     }
 
     func reportEnded(uuid: UUID) {
+        withLedger { $0.ended(uuid) }
         // `.remoteEnded` covers every way the controller gets here: the far
         // end hung up, the media died, or the rep ended it in the app. When
         // the end came from CallKit's own button the action has already
@@ -198,19 +226,5 @@ extension LiveCallSystem: CXProviderDelegate {
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
         audioDevice.isEnabled = false
-    }
-}
-
-/// Runs `body` on the main actor, without a hop when it is already there.
-///
-/// The provider's delegate queue is `nil`, i.e. the main queue, so this is
-/// normally a straight call — which matters, because a CallKit action must be
-/// fulfilled promptly and a deferred `Task` would fulfil it a turn later. The
-/// async branch is the safety net for a callback that arrives elsewhere.
-private func onMainActor(_ body: @escaping @MainActor () -> Void) {
-    if Thread.isMainThread {
-        MainActor.assumeIsolated { body() }
-    } else {
-        Task { @MainActor in body() }
     }
 }

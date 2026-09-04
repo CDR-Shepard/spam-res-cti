@@ -353,15 +353,6 @@ extension LiveCall: CallDelegate {
     }
 }
 
-/// Runs `body` on the main actor, without a hop when it is already there.
-private func onMainActor(_ body: @escaping @MainActor () -> Void) {
-    if Thread.isMainThread {
-        MainActor.assumeIsolated { body() }
-    } else {
-        Task { @MainActor in body() }
-    }
-}
-
 /// A call that ended before it ever connected, with no error of Twilio's to
 /// explain it — the far end hung up, or rejected the leg outright.
 struct CallEndedBeforeConnecting: LocalizedError {

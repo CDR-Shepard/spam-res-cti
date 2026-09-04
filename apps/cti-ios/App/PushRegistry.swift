@@ -239,19 +239,6 @@ extension PushRegistry: PKPushRegistryDelegate {
         }
     }
 
-    /// Runs `body` on the main actor **without returning first**.
-    ///
-    /// `Task { @MainActor in }` would not do: it runs after this delegate
-    /// method returns, which is exactly the ordering iOS kills the app for.
-    /// The registry's queue is `nil` (the main queue), so in practice this is
-    /// always the first branch.
-    private func onMainActorSynchronously(_ body: @MainActor () -> Void) {
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { body() }
-        } else {
-            DispatchQueue.main.sync { MainActor.assumeIsolated { body() } }
-        }
-    }
 }
 
 /// Why the server would not take this phone's VoIP token. Both are worth
