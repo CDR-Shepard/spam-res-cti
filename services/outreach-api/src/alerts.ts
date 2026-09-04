@@ -34,7 +34,13 @@ export async function dispatchAlert(logger: AlertLogger, event: AlertEvent): Pro
   const logFn = event.severity === 'info' ? logger.info : logger.warn;
   logFn({ alert: event.kind, orgId: event.orgId, ...event.context }, `alert: ${event.message}`);
 
-  const cfg = loadConfig();
+  let cfg: ReturnType<typeof loadConfig>;
+  try {
+    cfg = loadConfig();
+  } catch (err) {
+    logger.error({ err: (err as Error).message }, 'alert webhook config invalid; skipping webhook delivery');
+    return;
+  }
   if (!cfg.ALERT_WEBHOOK_URL) return;
   try {
     await fetch(cfg.ALERT_WEBHOOK_URL, {

@@ -3,6 +3,7 @@ import type { Db } from '@cti/db';
 import { buildApp } from '../app.js';
 import type { IdentityProvider } from '../auth/identity-provider.js';
 import { parseConfig, type AppConfig } from '../config.js';
+import { registerAdminTenantRoutes } from '../routes/admin-tenants.js';
 import { registerAuthRoutes } from '../routes/auth.js';
 
 export function testConfig(over: Record<string, string> = {}): AppConfig {
@@ -74,6 +75,6 @@ export async function buildTestApp(deps: { cfg: AppConfig; db: Db; idp: Identity
   return buildApp({
     cfg: deps.cfg,
     readiness: async () => ({ dbOk: true, jobsOk: true }),
-    apiRoutes: [(app) => registerAuthRoutes(app, deps)],
+    apiRoutes: [(app) => registerAuthRoutes(app, deps), (app) => registerAdminTenantRoutes(app, { db: deps.db, idp: deps.idp })],
   });
 }

@@ -7,6 +7,7 @@ import { WorkosIdentityProvider } from './auth/workos-provider.js';
 import { loadConfig } from './config.js';
 import { createBoss, JobRunner } from './jobs/boss.js';
 import { QUEUES } from './jobs/queues.js';
+import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -34,7 +35,7 @@ async function main(): Promise<void> {
     cfg,
     spaDist: SPA_DIST,
     readiness: async () => ({ dbOk: await dbOk(), jobsOk: runner.isHealthy() }),
-    apiRoutes: [(scope) => registerAuthRoutes(scope, { cfg, db, idp })],
+    apiRoutes: [(scope) => registerAuthRoutes(scope, { cfg, db, idp }), (scope) => registerAdminTenantRoutes(scope, { db, idp })],
   });
   const close = async () => { await runner.stop(); await app.close(); };
   process.on('SIGTERM', close);
