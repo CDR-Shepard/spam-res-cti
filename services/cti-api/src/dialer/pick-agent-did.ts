@@ -21,7 +21,7 @@
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@cti/db';
 import { atCustomerCeiling, customerAttemptCounts } from '../firewall/index.js';
-import { pickRotationNumber, type AttemptCaps } from '../rotation.js';
+import { pickRotationNumber, type AttemptCaps } from '@cti/firewall';
 import { attemptIncrement, effectiveCapFor, pickPoolDid, type Db } from './pick-did.js';
 
 export type PickDidArgs = { orgId: string; userId: string; toE164: string; runKind: 'pool' | 'agent' };

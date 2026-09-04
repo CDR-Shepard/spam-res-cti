@@ -17,6 +17,7 @@ COPY package.json package-lock.json ./
 COPY packages/phone/package.json packages/phone/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/auth/package.json packages/auth/package.json
+COPY packages/firewall/package.json packages/firewall/package.json
 COPY services/cti-api/package.json services/cti-api/package.json
 COPY apps/cti-web/package.json apps/cti-web/package.json
 COPY apps/cti-desktop/package.json apps/cti-desktop/package.json

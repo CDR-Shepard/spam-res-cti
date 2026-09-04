@@ -13,7 +13,7 @@ import { z } from 'zod';
 import { resolveSession } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
-import { warmupCapForAge } from '../firewall/warmup.js';
+import { warmupCapForAge } from '@cti/firewall';
 import { counterpartyE164, enqueueSyncForCall, fetchRecordName, AUTO_DISPOSITION } from '../salesforce/sync.js';
 import { buildCallSubject } from '../salesforce/call-subject.js';
 import { updateCallTask } from '../salesforce/client.js';

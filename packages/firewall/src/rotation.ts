@@ -9,8 +9,8 @@
 import { and, eq } from 'drizzle-orm';
 import type { getDb } from '@cti/db';
 import { schema } from '@cti/db';
-import { warmupCapForAge } from './firewall/warmup.js';
-import { regionForAreaCode, timezoneForAreaCode } from './firewall/tz.js';
+import { warmupCapForAge } from './warmup.js';
+import { regionForAreaCode, timezoneForAreaCode } from './tz.js';
 
 type Db = ReturnType<typeof getDb>;
 

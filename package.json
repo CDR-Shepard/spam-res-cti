@@ -9,7 +9,7 @@
     "apps/*"
   ],
   "scripts": {
-    "build:packages": "npm -w packages/phone run build && npm -w packages/db run build && npm -w packages/auth run build",
+    "build:packages": "npm -w packages/phone run build && npm -w packages/db run build && npm -w packages/auth run build && npm -w packages/firewall run build",
     "dev:api": "npm run build:packages && npm --workspace services/cti-api run dev",
     "dev:web": "npm --workspace apps/cti-web run dev",
     "dev:desktop": "npm --workspace apps/cti-desktop run dev",

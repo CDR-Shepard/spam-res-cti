@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { callingHoursGateCheck, callingWindowFor, isWithinCallingHours } from './index.js';
-import { stateForAreaCode, timezoneForNumber } from './tz.js';
+import { stateForAreaCode, timezoneForNumber } from '@cti/firewall';
 import {
   CALLING_HOURS_END_HHMM_EXCLUSIVE,
   CALLING_HOURS_START_HHMM,

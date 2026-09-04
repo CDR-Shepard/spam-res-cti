@@ -24,42 +24,27 @@
 import { and, eq, notInArray, sql } from 'drizzle-orm';
 import type { getDb } from '@cti/db';
 import { schema } from '@cti/db';
-import { warmupCapForAge } from '../firewall/warmup.js';
-import { stateForAreaCode, timezoneForNumber } from '../firewall/tz.js';
-import { effectiveCallingWindow, resolveStateRule, todayIsoWeekday } from '../firewall/state-calling-rules.js';
+import {
+  CALLING_HOUR_END_INCLUSIVE,
+  CALLING_HOUR_START,
+  CALLING_HOURS_END_HHMM_EXCLUSIVE,
+  CALLING_HOURS_START_HHMM,
+  effectiveCallingWindow,
+  resolveStateRule,
+  stateForAreaCode,
+  timezoneForNumber,
+  todayIsoWeekday,
+  warmupCapForAge,
+} from '@cti/firewall';
 import { dialerPoolNumbers as realDialerPoolNumbers } from './pool.js';
+
+// The system calling window lives in @cti/firewall (calling-window.ts) so the
+// firewall gate and this pre-filter cannot drift. Re-exported here so the
+// dialer's callers and the drift interlock test keep one import site.
+export { CALLING_HOUR_END_INCLUSIVE, CALLING_HOUR_START, CALLING_HOURS_END_HHMM_EXCLUSIVE, CALLING_HOURS_START_HHMM };
 
 export type Db = ReturnType<typeof getDb>;
 type OutboundNumber = typeof schema.outboundNumbers.$inferSelect;
-
-/**
- * THE recipient-local calling window, for the whole system: dialing is allowed
- * while the local hour is in [8, 20] — 08:00:00 through 20:59:59, i.e. 8:00am
- * through 8:59pm. That sits inside the federal TCPA bound of 8am–9pm with a
- * one-minute margin at the top.
- *
- * ONE definition, two enforcement sites. The dialer's coarse pre-filter
- * (`withinCallingHours` below) and the firewall's authoritative click-to-dial
- * gate (`firewall/index.ts` gate 6) used to carry independent literals — 8am–9pm
- * here, 8am–8pm there — so a call the firewall would BLOCK at 8:10pm local
- * could still be attempted by the power dialer at that same instant, with
- * nothing keeping the two from drifting further (spam-defense audit §5, gap 1).
- * The firewall now imports these constants as the outer bound its campaign
- * window is clamped to, so neither site can move without the other.
- *
- * A campaign row may still NARROW the window (org business preference); it can
- * no longer widen it past this pair.
- */
-export const CALLING_HOUR_START = 8;
-export const CALLING_HOUR_END_INCLUSIVE = 20;
-
-/** The same window as the `HH:MM` strings `campaign_configs` stores. The end is
- *  the EXCLUSIVE bound the firewall's minute comparator wants, so the whole of
- *  hour `CALLING_HOUR_END_INCLUSIVE` (through :59) is inside it — exactly what
- *  `withinCallingHours` allows. */
-const hhmm = (hour: number): string => `${String(hour).padStart(2, '0')}:00`;
-export const CALLING_HOURS_START_HHMM = hhmm(CALLING_HOUR_START);
-export const CALLING_HOURS_END_HHMM_EXCLUSIVE = hhmm(CALLING_HOUR_END_INCLUSIVE + 1);
 
 /** "HH:MM" for `nowUtc` in `timezone`, zero-padded so string compare orders
  *  the same as chronological order (matches the firewall's comparator). */
