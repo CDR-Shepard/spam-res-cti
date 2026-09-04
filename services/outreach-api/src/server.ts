@@ -9,6 +9,7 @@ import { createBoss, JobRunner } from './jobs/boss.js';
 import { QUEUES } from './jobs/queues.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerTeamRoutes } from './routes/team.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Where vite drops the built outreach-web bundle (src/ and dist/ sit at the same depth). */
@@ -35,7 +36,11 @@ async function main(): Promise<void> {
     cfg,
     spaDist: SPA_DIST,
     readiness: async () => ({ dbOk: await dbOk(), jobsOk: runner.isHealthy() }),
-    apiRoutes: [(scope) => registerAuthRoutes(scope, { cfg, db, idp }), (scope) => registerAdminTenantRoutes(scope, { db, idp })],
+    apiRoutes: [
+      (scope) => registerAuthRoutes(scope, { cfg, db, idp }),
+      (scope) => registerAdminTenantRoutes(scope, { db, idp }),
+      (scope) => registerTeamRoutes(scope, { db, idp }),
+    ],
   });
   const close = async () => { await runner.stop(); await app.close(); };
   process.on('SIGTERM', close);

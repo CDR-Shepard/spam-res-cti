@@ -8,6 +8,7 @@ import type { IdentityProvider } from '../auth/identity-provider.js';
 import { parseConfig, type AppConfig } from '../config.js';
 import { registerAdminTenantRoutes } from '../routes/admin-tenants.js';
 import { registerAuthRoutes } from '../routes/auth.js';
+import { registerTeamRoutes } from '../routes/team.js';
 
 export function testConfig(over: Record<string, string> = {}): AppConfig {
   return parseConfig({
@@ -74,17 +75,28 @@ export function fakeDb(fx: Fixtures = {}) {
     update: (t: unknown) => ({
       set: (values: Record<string, unknown>) => ({
         // `where`'s result is awaitable directly (existing callers that don't
-        // chain `.returning()`) and also carries `.returning()` for callers
-        // that need the matched row back (or `[]`, via `updateReturning`, to
-        // simulate a conditional update matching none — see `Fixtures`).
+        // chain `.returning()` — it's thenable, resolving to the same rows)
+        // and also carries `.returning()` for callers that need the matched
+        // row back. Defaults to `updateReturning` when set (including `[]`,
+        // to simulate a conditional update matching none — see `Fixtures`);
+        // else, for `schema.users` (PATCH /api/team/:userId), the fixture's
+        // second user — index 0 is the calling admin in every team fixture —
+        // merged with `values`; else just `values` (other tables).
         where: (_cond?: unknown) => {
           writes.push({ op: 'update', table: t, values });
-          const rows = fx.updateReturning ?? [{ ...values }];
-          return { rowCount: rows.length, returning: async () => rows };
+          const fallback = t === schema.users && fx.users ? [{ ...fx.users[1], ...values }] : [{ ...values }];
+          const rows = fx.updateReturning ?? fallback;
+          return { rowCount: rows.length, returning: async () => rows, then: (resolve: (v: typeof rows) => void) => resolve(rows) };
         },
       }),
     }),
-    select: () => ({ from: () => ({ where: async () => [] }) }),
+    // Chainable + thenable: `from`/`where`/`orderBy` all return the same
+    // chain (order and count don't matter, matching `findFirst`/`findMany`'s
+    // no-filtering convention), and awaiting the chain resolves to `fx.users`.
+    select: () => {
+      const chain = { from: () => chain, where: () => chain, orderBy: () => chain, then: (resolve: (v: Array<Record<string, unknown>>) => void) => resolve(fx.users ?? []) };
+      return chain;
+    },
     // Passthrough: fakeDb has no real transactional isolation, so `fn` just
     // runs against this same `db`, recording writes exactly as it would outside one.
     transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => fn(db as unknown as Db),
@@ -126,6 +138,10 @@ export async function buildTestApp(deps: { cfg: AppConfig; db: Db; idp: Identity
   return buildApp({
     cfg: deps.cfg,
     readiness: async () => ({ dbOk: true, jobsOk: true }),
-    apiRoutes: [(app) => registerAuthRoutes(app, deps), (app) => registerAdminTenantRoutes(app, { db: deps.db, idp: deps.idp })],
+    apiRoutes: [
+      (app) => registerAuthRoutes(app, deps),
+      (app) => registerAdminTenantRoutes(app, { db: deps.db, idp: deps.idp }),
+      (app) => registerTeamRoutes(app, { db: deps.db, idp: deps.idp }),
+    ],
   });
 }
