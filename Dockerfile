@@ -20,6 +20,7 @@ COPY packages/auth/package.json packages/auth/package.json
 COPY packages/firewall/package.json packages/firewall/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY services/cti-api/package.json services/cti-api/package.json
+COPY services/outreach-api/package.json services/outreach-api/package.json
 COPY apps/cti-web/package.json apps/cti-web/package.json
 COPY apps/cti-desktop/package.json apps/cti-desktop/package.json
 RUN npm ci --include=dev
