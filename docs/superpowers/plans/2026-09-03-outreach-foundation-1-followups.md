@@ -95,3 +95,5 @@ wave. None of these blocked the rollout; all are candidates for plan 2.
   whether the migration story should consolidate onto one tool, and document
   whichever way it goes so the two don't drift further (see the schema-mirror
   follow-up above, which is a symptom of exactly this drift).
+
+- `services/cti-api/src/routes/auth.ts` login-status handler: the suspended-tenant refusal (`issueSession` → `SuspendedTenantError`) currently fires after the single-use `sessionRetrievedAt` claim, so a suspended tenant's rep gets a generic 500 and the handshake is burned. Hoist an org-status check next to the existing `user.kind === 'service'` guard so it returns the handler's `{ status: 'failed' }` shape before the claim. (Final-review nit, 2026-09-04.)
