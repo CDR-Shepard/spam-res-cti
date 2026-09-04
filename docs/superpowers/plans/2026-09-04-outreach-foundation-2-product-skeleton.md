@@ -916,7 +916,7 @@ export const QUEUES: readonly QueueDefinition[] = [];
 
 `services/outreach-api/src/jobs/boss.ts`:
 ```ts
-import PgBoss from 'pg-boss';
+import { PgBoss } from 'pg-boss';
 import type { AppConfig } from '../config.js';
 import type { QueueDefinition } from './queues.js';
 
