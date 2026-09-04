@@ -108,6 +108,10 @@ export async function revokeSession(bearer: string): Promise<void> {
  * routine sign-out of a single browser tab). This is for an admin-initiated
  * event that must cut the user off everywhere at once — e.g. deactivating or
  * removing the user's account — never for a routine logout.
+ *
+ * FOLLOW-UP(callsign-followups #1): NOT CALLED from production code yet.
+ * No user-deactivation feature exists to invoke it — see
+ * docs/superpowers/plans/2026-09-04-callsign-followups.md.
  */
 export async function revokeAllSessionsForUser(userId: string): Promise<void> {
   await getDb()

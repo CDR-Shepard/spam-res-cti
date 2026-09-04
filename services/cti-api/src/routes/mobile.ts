@@ -277,6 +277,12 @@ async function countActiveDevices(db: Db, userId: string): Promise<number> {
  * accompanying report) — this is the reusable primitive that route should
  * call once it exists, so the cascade logic isn't duplicated or reinvented
  * at that call site. Exported and unit tested here in isolation.
+ *
+ * FOLLOW-UP(callsign-followups #1): NOT CALLED from production code yet. No
+ * user-deactivation feature exists to invoke it — see
+ * docs/superpowers/plans/2026-09-04-callsign-followups.md. Do not read this
+ * as a live safeguard: today nothing revokes a departing rep's devices
+ * automatically.
  */
 export async function revokeDevicesForDeactivatedUser(userId: string): Promise<void> {
   const db = getDb();
