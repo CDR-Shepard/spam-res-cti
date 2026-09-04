@@ -22,12 +22,12 @@ vi.mock('../config.js', () => ({
   loadConfig: () => state.cfg,
 }));
 
-vi.mock('../auth/session.js', () => ({
+vi.mock('@cti/auth', () => ({
   resolveSession: async (_bearer: string | undefined) => state.authedUser,
 }));
 
-vi.mock('../db/index.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../db/index.js')>();
+vi.mock('@cti/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cti/db')>();
   return {
     ...actual,
     getDb: () => state.db,

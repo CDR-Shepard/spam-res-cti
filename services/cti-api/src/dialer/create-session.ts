@@ -1,5 +1,5 @@
 import { and, eq } from 'drizzle-orm';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import type { ConsentBlock } from './consent-check.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
 import { fetchTasks, resolveTaskTarget } from '../salesforce/task-targets.js';

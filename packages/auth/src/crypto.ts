@@ -1,12 +1,15 @@
 import { randomBytes, createCipheriv, createDecipheriv, createHash, timingSafeEqual } from 'node:crypto';
-import { loadConfig } from './config.js';
 
 const ALG = 'aes-256-gcm';
 const IV_LEN = 12;
 const TAG_LEN = 16;
 
 function key(): Buffer {
-  return Buffer.from(loadConfig().TOKEN_ENCRYPTION_KEY, 'hex');
+  const hex = process.env.TOKEN_ENCRYPTION_KEY ?? '';
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new Error('TOKEN_ENCRYPTION_KEY must be 64 hex chars (32 bytes)');
+  }
+  return Buffer.from(hex, 'hex');
 }
 
 /**

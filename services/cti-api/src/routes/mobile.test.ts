@@ -49,17 +49,18 @@ const state = vi.hoisted(() => ({
   lastDeviceInsertValues: null as Record<string, unknown> | null,
 }));
 
-vi.mock('../auth/session.js', () => ({
-  resolveSession: async (_bearer: string | undefined) => state.authedUser,
-}));
+vi.mock('@cti/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cti/auth')>();
+  return { ...actual, resolveSession: async (_bearer: string | undefined) => state.authedUser };
+});
 
-vi.mock('../db/index.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../db/index.js')>();
+vi.mock('@cti/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cti/db')>();
   return { ...actual, getDb: () => fakeDb() };
 });
 
-import { schema } from '../db/index.js';
-import { sha256 } from '../crypto.js';
+import { schema } from '@cti/db';
+import { sha256 } from '@cti/auth';
 import {
   registerMobileRoutes,
   allowClaimAttempt,
@@ -196,7 +197,7 @@ function fakeDb() {
         }),
       };
     },
-  } as unknown as ReturnType<typeof import('../db/index.js').getDb>;
+  } as unknown as ReturnType<typeof import('@cti/db').getDb>;
 }
 
 const USER_ID = 'user-1';

@@ -1,6 +1,6 @@
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { schema } from '../db/index.js';
+import { schema } from '@cti/db';
 
 // In-memory fake DB: enough of the drizzle surface the engine uses.
 //

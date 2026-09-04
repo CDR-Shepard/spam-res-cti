@@ -1,5 +1,5 @@
 import type { RolloverEnqueue } from '../dialer/engine.js';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 
 /** The subset of the DB surface `enqueueFollowupRollover` needs — satisfied by
  *  both a plain `getDb()` handle and a `PgTransaction`, so the engine's

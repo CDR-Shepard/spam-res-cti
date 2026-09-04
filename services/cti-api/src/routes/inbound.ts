@@ -17,13 +17,13 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import twilio from 'twilio';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { findByPhone } from '../salesforce/client.js';
 import { enqueueSyncForCall } from '../salesforce/sync.js';
-import { normalize } from '../phone.js';
-import { sha256 } from '../crypto.js';
+import { normalize } from '@cti/phone';
+import { sha256 } from '@cti/auth';
 import { stickyAgentForCaller } from '../dialer/sticky.js';
 import { dialClientWithCallerParams } from './inbound-caller-params.js';
 import {

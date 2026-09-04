@@ -1,5 +1,5 @@
 import { and, eq } from 'drizzle-orm';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 
 export function isDialerPoolKind(kind: string): boolean {
   return kind === 'dialer_pool';

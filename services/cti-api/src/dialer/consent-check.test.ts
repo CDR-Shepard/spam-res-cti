@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { schema } from '../db/index.js';
+import { schema } from '@cti/db';
 import { blockedTargets, blockedTargetsSafe } from './consent-check.js';
 
 type Rows = { optOuts?: string[]; blocked?: string[]; dnc?: string[] };

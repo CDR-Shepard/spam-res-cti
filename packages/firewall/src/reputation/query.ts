@@ -3,8 +3,8 @@
  * periodic auto-pause worker so both judge a DID on identical numbers.
  */
 import { and, eq, gte, sql } from 'drizzle-orm';
-import type { getDb } from '../db/index.js';
-import { schema } from '../db/index.js';
+import type { getDb } from '@cti/db';
+import { schema } from '@cti/db';
 import type { DidWindowStats } from './signals.js';
 
 type Db = ReturnType<typeof getDb>;

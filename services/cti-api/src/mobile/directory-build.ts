@@ -12,8 +12,8 @@
  * partial snapshot.
  */
 import { and, eq, isNotNull, lt } from 'drizzle-orm';
-import { getDb, schema } from '../db/index.js';
-import { normalize } from '../phone.js';
+import { getDb, schema } from '@cti/db';
+import { normalize } from '@cti/phone';
 import { sfFetch, soqlEscape, soqlQuery } from '../salesforce/client.js';
 import { contentHash, mergeDirectory, type RawEntry } from './directory-merge.js';
 

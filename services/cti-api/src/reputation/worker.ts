@@ -9,10 +9,10 @@
  * problem tomorrow" and "we stopped burning the number within minutes".
  */
 import { eq } from 'drizzle-orm';
-import { getDb, schema } from '../db/index.js';
+import { getDb, schema } from '@cti/db';
 import { dispatchAlert } from '../alerts.js';
-import { fetchDidWindowStats } from './query.js';
-import { shouldAutoPause, THRESHOLDS } from './signals.js';
+import { fetchDidWindowStats } from '@cti/firewall';
+import { shouldAutoPause, THRESHOLDS } from '@cti/firewall';
 
 interface WorkerLogger {
   warn: (obj: unknown, msg?: string) => void;

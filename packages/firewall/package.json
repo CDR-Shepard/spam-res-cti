@@ -1,0 +1,28 @@
+{
+  "name": "@cti/firewall",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Caller Reputation Firewall: pre-contact gates, rotation, warmup, state rules, reputation signals",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cti/db": "*",
+    "@cti/phone": "*",
+    "drizzle-orm": "^0.36.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}

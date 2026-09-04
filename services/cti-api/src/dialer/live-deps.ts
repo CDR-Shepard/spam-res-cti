@@ -5,7 +5,7 @@
  * on `salesforce/followup-enqueue.ts` (not `followup-worker.ts`), and
  * `followup-worker.ts` depends on this module — never the reverse.
  */
-import { getDb } from '../db/index.js';
+import { getDb } from '@cti/db';
 import { loadConfig } from '../config.js';
 import type { EngineDeps } from './engine.js';
 import { TwilioDialerTelephony } from './twilio-telephony.js';

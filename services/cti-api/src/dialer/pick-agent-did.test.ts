@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { schema } from '../db/index.js';
-import { pickRotationNumber } from '../rotation.js';
+import { schema } from '@cti/db';
+import { pickRotationNumber } from '@cti/firewall';
 import { attemptIncrement, pickPoolDid, type Db } from './pick-did.js';
 import { customerAttemptState, pickAgentDid, pickDidForRun, type AgentPickDeps } from './pick-agent-did.js';
 
@@ -8,8 +8,8 @@ import { customerAttemptState, pickAgentDid, pickDidForRun, type AgentPickDeps }
 // atomic claim to pickAgentDid, or defers to the pool path. Those two
 // collaborators are DB-bound, so they're mocked here and asserted on — the
 // arguments they receive (above all the `'agent'` kind) are the behavior.
-vi.mock('../rotation.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../rotation.js')>()),
+vi.mock('@cti/firewall', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@cti/firewall')>()),
   pickRotationNumber: vi.fn(async () => null as string | null),
 }));
 vi.mock('./pick-did.js', async (importOriginal) => ({

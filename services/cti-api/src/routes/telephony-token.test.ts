@@ -10,7 +10,10 @@ const state = vi.hoisted(() => ({
 // route under test here needs a real value, so mock it the way
 // admin-team.test.ts does to avoid real env-var parsing in tests.
 vi.mock('../config.js', () => ({ loadConfig: () => ({}) }));
-vi.mock('../auth/session.js', () => ({ resolveSession: async () => ({ userId: 'aaaa-bbbb', orgId: 'o', email: 'e', isAdmin: false, powerDialerEnabled: false }) }));
+vi.mock('@cti/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cti/auth')>();
+  return { ...actual, resolveSession: async () => ({ userId: 'aaaa-bbbb', orgId: 'o', email: 'e', isAdmin: false, powerDialerEnabled: false }) };
+});
 vi.mock('../telephony/index.js', () => ({
   getProvider: () => ({
     createClientToken: async (req: Record<string, unknown>) => {

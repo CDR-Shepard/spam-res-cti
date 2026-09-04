@@ -29,7 +29,7 @@ vi.mock('../config.js', () => ({
   loadConfig: () => ({ TELEPHONY_PROVIDER: 'twilio' }),
 }));
 
-vi.mock('../auth/session.js', () => ({
+vi.mock('@cti/auth', () => ({
   resolveSession: async () => state.authedUser,
 }));
 
@@ -45,8 +45,8 @@ vi.mock('../salesforce/sync.js', async (importOriginal) => {
   return { ...actual, fetchRecordName: state.fetchRecordName, enqueueSyncForCall: state.enqueueSyncForCall };
 });
 
-vi.mock('../db/index.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../db/index.js')>();
+vi.mock('@cti/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cti/db')>();
   return { ...actual, getDb: () => fakeDb() };
 });
 
@@ -71,7 +71,7 @@ function fakeDb() {
         },
       };
     },
-  } as unknown as ReturnType<typeof import('../db/index.js').getDb>;
+  } as unknown as ReturnType<typeof import('@cti/db').getDb>;
 }
 
 const CALL = (over: Record<string, unknown> = {}): Record<string, unknown> => ({

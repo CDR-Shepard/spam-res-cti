@@ -12,8 +12,8 @@
 import crypto from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import type { getDb } from '../db/index.js';
-import { schema } from '../db/index.js';
+import type { getDb } from '@cti/db';
+import { schema } from '@cti/db';
 
 export type Db = ReturnType<typeof getDb>;
 

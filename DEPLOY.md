@@ -37,7 +37,9 @@ and builds with the `Dockerfile` automatically — no build config to pick.
 
 5. **Settings → Networking → Generate Domain.** Copy `https://<name>.up.railway.app`.
 6. Add one more variable `API_PUBLIC_URL=https://<name>.up.railway.app` and let it
-   redeploy (so webhook/voice URLs use the real host). Migrations run on every boot.
+   redeploy (so webhook/voice URLs use the real host). Migrations run as the
+   pre-deploy step (`npm --workspace packages/db run migrate`), under an
+   advisory lock so multiple services deploying from one push serialize.
 
 > The build is already validated locally (the Docker image builds and the server
 > boots to a clean "missing env" error). If the deploy logs show

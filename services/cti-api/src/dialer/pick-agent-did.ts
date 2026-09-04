@@ -19,9 +19,9 @@
  * (null) pauses, which stays fail-closed.
  */
 import { and, eq } from 'drizzle-orm';
-import { schema } from '../db/index.js';
-import { atCustomerCeiling, customerAttemptCounts } from '../firewall/index.js';
-import { pickRotationNumber, type AttemptCaps } from '../rotation.js';
+import { schema } from '@cti/db';
+import { atCustomerCeiling, customerAttemptCounts } from '@cti/firewall';
+import { pickRotationNumber, type AttemptCaps } from '@cti/firewall';
 import { attemptIncrement, effectiveCapFor, pickPoolDid, type Db } from './pick-did.js';
 
 export type PickDidArgs = { orgId: string; userId: string; toE164: string; runKind: 'pool' | 'agent' };

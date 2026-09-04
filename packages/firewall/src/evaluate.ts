@@ -9,112 +9,21 @@
  * This DOES NOT claim legal compliance. It enforces internal guardrails.
  */
 import { and, eq, gte, ne, sql } from 'drizzle-orm';
-import type { getDb } from '../db/index.js';
-import { schema } from '../db/index.js';
-import { normalize } from '../phone.js';
-import { pickRotationNumber } from '../rotation.js';
-import { fetchRecordAddress, SalesforceUnauthorizedError } from '../salesforce/client.js';
+import { schema, type Db } from '@cti/db';
+import { normalize } from '@cti/phone';
+import { aggregate } from './aggregate.js';
+import { attemptGateChecks, customerAttemptCounts } from './attempts.js';
+import { callingHoursGateCheck, callingWindowFor } from './calling-hours.js';
+import { RecipientLookupUnauthorizedError } from './errors.js';
+import { REASON } from './reasons.js';
+import { enforcedStateHoursLabel, resolveRecipientState } from './recipient.js';
+import { fetchDidWindowStats } from './reputation/query.js';
+import { answerRateBreach, engagementBreach, THRESHOLDS } from './reputation/signals.js';
+import { pickRotationNumber } from './rotation.js';
 import { resolveTimezone, stateForAreaCode, timezoneForNumber } from './tz.js';
-import { effectiveCallingWindow, resolveStateRule, todayIsoWeekday, type IsoWeekday } from './state-calling-rules.js';
+import type { CheckResult, FirewallDeps, FirewallInput, FirewallResponse } from './types.js';
+import { velocityGateCheck } from './velocity.js';
 import { warmupCapForAge } from './warmup.js';
-import { fetchDidWindowStats } from '../reputation/query.js';
-import { answerRateBreach, engagementBreach, THRESHOLDS } from '../reputation/signals.js';
-import { CALLING_HOURS_END_HHMM_EXCLUSIVE, CALLING_HOURS_START_HHMM } from '../dialer/pick-did.js';
-
-export { warmupCapForAge } from './warmup.js';
-
-export type Decision = 'ALLOW' | 'BLOCK' | 'REQUIRE_REVIEW';
-
-export interface FirewallInput {
-  orgId: string;
-  userId: string;
-  toNumberRaw: string;
-  fromNumber?: string;
-  campaignKey?: string;
-  /** IANA tz (e.g. "America/Los_Angeles"). Used for calling-hours check. */
-  recipientTimezone?: string;
-  /**
-   * Optional Salesforce record id (Lead/Contact) the click-to-dial originated
-   * from. When supplied AND the rep has an active SF OAuth connection, we
-   * fetch the record's State / Country and derive recipientTimezone from it.
-   */
-  recipientRecordId?: string;
-  requestId?: string;
-}
-
-export interface CheckResult {
-  name: string;
-  passed: boolean;
-  severity: 'block' | 'review' | 'info';
-  reasonCode: string;
-  detail?: string;
-}
-
-export interface FirewallResponse {
-  decision: Decision;
-  reasons: string[];
-  blockReason: string | null;
-  requiredScriptId: string | null;
-  auditId: string;
-  checks: CheckResult[];
-  normalizedTo: string | null;
-  fromNumber: string | null;
-}
-
-type Db = ReturnType<typeof getDb>;
-
-const REASON = {
-  PARSE_OK: 'PHONE_PARSED',
-  PARSE_FAIL: 'PHONE_INVALID',
-  NOT_OPTED_OUT: 'NOT_OPTED_OUT',
-  OPTED_OUT: 'OPTED_OUT',
-  NOT_BLOCKED: 'NOT_BLOCKED',
-  BLOCKED: 'BLOCKED_INTERNAL',
-  ATTEMPT_LIMIT_OK: 'ATTEMPT_LIMIT_OK',
-  ATTEMPT_LIMIT_EXCEEDED: 'ATTEMPT_LIMIT_EXCEEDED',
-  CUSTOMER_LIMIT_OK: 'CUSTOMER_LIMIT_OK',
-  CUSTOMER_LIMIT_EXCEEDED: 'CUSTOMER_LIMIT_EXCEEDED',
-  CALLING_HOURS_OK: 'CALLING_HOURS_OK',
-  OUTSIDE_CALLING_HOURS: 'OUTSIDE_CALLING_HOURS',
-  CALLING_HOURS_UNKNOWN_TZ: 'CALLING_HOURS_UNKNOWN_TZ',
-  OUTBOUND_NUMBER_HEALTHY: 'OUTBOUND_NUMBER_HEALTHY',
-  OUTBOUND_NUMBER_UNHEALTHY: 'OUTBOUND_NUMBER_UNHEALTHY',
-  OUTBOUND_NUMBER_MISSING: 'OUTBOUND_NUMBER_MISSING',
-  CAMPAIGN_ACTIVE: 'CAMPAIGN_ACTIVE',
-  CAMPAIGN_PAUSED: 'CAMPAIGN_PAUSED',
-  CAMPAIGN_MISSING: 'CAMPAIGN_MISSING',
-  CONSENT_OK: 'RECORDING_CONSENT_OK',
-  CONSENT_REVIEW: 'RECORDING_CONSENT_REVIEW',
-  // 2026 spam-resistance checks
-  WARMUP_OK: 'NUMBER_WARMUP_OK',
-  WARMUP_LIMIT_EXCEEDED: 'NUMBER_WARMUP_LIMIT_EXCEEDED',
-  VELOCITY_OK: 'CALL_VELOCITY_OK',
-  VELOCITY_BURST: 'CALL_VELOCITY_BURST_DETECTED',
-  NEIGHBOR_OK: 'NEIGHBOR_SPOOFING_OK',
-  NEIGHBOR_RISK: 'NEIGHBOR_SPOOFING_RISK',
-  STATE_RULE_OK: 'STATE_RULE_OK',
-  STATE_RULE_FREQ_EXCEEDED: 'STATE_RULE_FREQUENCY_EXCEEDED',
-  STATE_RULE_HOURS: 'STATE_RULE_CALLING_HOURS_VIOLATED',
-  STATE_RULE_REGISTRATION: 'STATE_RULE_REGISTRATION_REQUIRED',
-  // P0 firewall-gap closures
-  DNC_OK: 'FEDERAL_DNC_CLEAR',
-  DNC_LISTED: 'FEDERAL_DNC_LISTED',
-  DNC_NOT_LOADED: 'FEDERAL_DNC_NOT_LOADED',
-  DNC_PRESCRUBBED: 'FEDERAL_DNC_PRESCRUBBED',
-  RND_OK: 'REASSIGNED_NUMBER_CLEAR',
-  RND_REASSIGNED: 'REASSIGNED_NUMBER_DETECTED',
-  RND_UNCHECKED: 'REASSIGNED_NUMBER_UNCHECKED',
-  ATTESTATION_OK: 'STIR_SHAKEN_ATTESTATION_OK',
-  ATTESTATION_DEGRADED: 'STIR_SHAKEN_ATTESTATION_DEGRADED',
-  ATTESTATION_UNKNOWN: 'STIR_SHAKEN_ATTESTATION_UNKNOWN',
-  CONSENT_RECORD_OK: 'TCPA_CONSENT_ON_FILE',
-  CONSENT_RECORD_MISSING: 'TCPA_CONSENT_NOT_FOUND',
-  // Behavioral kill-threshold canaries (per-DID, real-time)
-  ANSWER_RATE_OK: 'ANSWER_RATE_OK',
-  ANSWER_RATE_LOW: 'ANSWER_RATE_BELOW_FLOOR',
-  ENGAGEMENT_OK: 'ENGAGEMENT_OK',
-  ENGAGEMENT_LOW: 'ENGAGEMENT_SHORT_DURATION',
-} as const;
 
 /** STIR/SHAKEN ordering: A is best, C is worst. */
 function attestationRank(a: string | null | undefined): number {
@@ -148,192 +57,7 @@ async function isDncListLoaded(db: Db): Promise<boolean> {
   return loaded;
 }
 
-/**
- * Fold `GROUP BY from_number` counts of a customer's recent contacts into the
- * per-number map (used for rotation + the per-number gate) and the total
- * across ALL numbers (the per-customer ceiling). Rows with a null from_number
- * (inbound/legacy) count toward the total but not any number's budget.
- *
- * Counts ACCUMULATE per from-number: the caller may hand us the concatenation
- * of several grouped queries (see customerAttemptCounts), and the same number
- * can appear once per source.
- */
-export function tallyAttempts(
-  rows: ReadonlyArray<{ from: string | null; n: number }>,
-): { attemptsByNumber: Map<string, number>; customerAttemptsTotal: number } {
-  const attemptsByNumber = new Map<string, number>();
-  let customerAttemptsTotal = 0;
-  for (const r of rows) {
-    customerAttemptsTotal += r.n;
-    if (r.from) attemptsByNumber.set(r.from, (attemptsByNumber.get(r.from) ?? 0) + r.n);
-  }
-  return { attemptsByNumber, customerAttemptsTotal };
-}
-
-/**
- * Every contact this org made to `toE164` since `windowStart`, grouped by the
- * number that placed it. This is the ONE definition of "an attempt", shared by
- * the click-to-dial gate below (gate 5) and the power dialer's per-run ceiling
- * (dialer/pick-agent-did.ts `customerAttemptState`) — a compliance backstop
- * that counted differently depending on which button the rep pressed would be
- * a discrepancy nobody could see.
- *
- * TWO sources, because the two dial paths record differently:
- *  - `calls`: written by click-to-dial (routes/calls.ts) and inbound.
- *  - `dialer_dial_attempts`: the power dialer originates straight through the
- *    Twilio SDK (dialer/twilio-telephony.ts) and writes no `calls` row, so
- *    counting only `calls` would leave the ceiling blind to the highest-volume
- *    dial path. One append-only row per successful originate, written inside the
- *    engine's dialing stamp.
- *
- * NOT `dialer_queue_items`, which this used to count: a TRUE no-answer rewrites
- * `to_number`/`from_number` on the SAME row to dial the record's Phone, so the
- * mobile dial vanished from the tally the moment the fallback was tried — the
- * recipient had been contacted twice and the ceiling could only see once.
- *
- * The two sources are disjoint (no dialer dial ever writes a `calls` row), so
- * summing them cannot double-count.
- */
-export async function customerAttemptCounts(
-  db: Db,
-  orgId: string,
-  toE164: string,
-  windowStart: Date,
-): Promise<{ attemptsByNumber: Map<string, number>; customerAttemptsTotal: number }> {
-  const [calls, dialed] = await Promise.all([
-    db
-      .select({ from: schema.calls.fromNumber, n: sql<number>`count(*)::int` })
-      .from(schema.calls)
-      .where(
-        and(
-          eq(schema.calls.orgId, orgId),
-          eq(schema.calls.normalizedToNumber, toE164),
-          gte(schema.calls.createdAt, windowStart),
-        ),
-      )
-      .groupBy(schema.calls.fromNumber),
-    db
-      .select({ from: schema.dialerDialAttempts.fromNumber, n: sql<number>`count(*)::int` })
-      .from(schema.dialerDialAttempts)
-      .where(
-        and(
-          eq(schema.dialerDialAttempts.orgId, orgId),
-          eq(schema.dialerDialAttempts.toNumber, toE164),
-          gte(schema.dialerDialAttempts.dialedAt, windowStart),
-        ),
-      )
-      .groupBy(schema.dialerDialAttempts.fromNumber),
-  ]);
-  return tallyAttempts([...calls, ...dialed]);
-}
-
-/**
- * The per-customer ceiling predicate — ONE definition, shared by the
- * click-to-dial gate (attemptGateChecks) and the dialer's per-run skip
- * (dialer/pick-agent-did.ts). `>=` because the ceiling counts contacts already
- * made: at 15 of 15 the next dial would be the 16th.
- */
-export function atCustomerCeiling(args: {
-  customerAttemptsTotal: number;
-  perCustomerMaxAttempts: number;
-}): boolean {
-  return args.customerAttemptsTotal >= args.perCustomerMaxAttempts;
-}
-
-/**
- * The two attempt gates: the per-customer ceiling (across all of a rep's
- * numbers — the anti-harassment backstop) and the per-number budget for the
- * chosen DID (which, with rotation swapping away from exhausted numbers, only
- * blocks when every number is exhausted or an over-budget number was forced in).
- */
-export function attemptGateChecks(args: {
-  windowDays: number;
-  maxAttempts: number;
-  perCustomerMaxAttempts: number;
-  attemptsByNumber: Map<string, number>;
-  customerAttemptsTotal: number;
-  effectiveFrom: string | null;
-}): CheckResult[] {
-  const checks: CheckResult[] = [];
-  if (atCustomerCeiling(args)) {
-    checks.push({
-      name: 'customer_limit',
-      passed: false,
-      severity: 'block',
-      reasonCode: REASON.CUSTOMER_LIMIT_EXCEEDED,
-      detail: `${args.customerAttemptsTotal} contacts to this customer across all numbers in ${args.windowDays}d (ceiling ${args.perCustomerMaxAttempts})`,
-    });
-  } else {
-    checks.push({
-      name: 'customer_limit',
-      passed: true,
-      severity: 'info',
-      reasonCode: REASON.CUSTOMER_LIMIT_OK,
-      detail: `${args.customerAttemptsTotal}/${args.perCustomerMaxAttempts} to this customer (all numbers) in ${args.windowDays}d`,
-    });
-  }
-  if (args.effectiveFrom) {
-    const perNumber = args.attemptsByNumber.get(args.effectiveFrom) ?? 0;
-    if (perNumber >= args.maxAttempts) {
-      checks.push({
-        name: 'attempt_limit',
-        passed: false,
-        severity: 'block',
-        reasonCode: REASON.ATTEMPT_LIMIT_EXCEEDED,
-        detail: `${args.effectiveFrom} → this customer: ${perNumber} in ${args.windowDays}d (limit ${args.maxAttempts}/number; all your numbers may be exhausted for this customer)`,
-      });
-    } else {
-      checks.push({
-        name: 'attempt_limit',
-        passed: true,
-        severity: 'info',
-        reasonCode: REASON.ATTEMPT_LIMIT_OK,
-        detail: `${perNumber}/${args.maxAttempts} from this number to this customer in ${args.windowDays}d`,
-      });
-    }
-  }
-  return checks;
-}
-
-/**
- * FIX-3: the area-code fallback for the recipient's STATE, applied whenever
- * `resolvedState` is still null after both tz-resolution attempts (SF
- * address, then the dialed number's area code) — independent of whether tz
- * itself already resolved. Without this, a record whose SF address resolves
- * tz via COUNTRY (state blank, country "US" — `resolveTimezone`'s
- * US-or-unknown fallback) short-circuits the old area-code fallback, because
- * that fallback lived inside `if (!resolvedTz)` and tz was already set. State
- * then stayed null forever for such a record, which falls to the
- * conservative UNKNOWN_STATE_RULE (Sunday banned) even when the dialed
- * number's own area code plainly identifies a real state (e.g. 619 → CA).
- * Pure and exported so it's directly testable without the whole `evaluate()`
- * pipeline (db, SF client), same pattern as `callingWindowFor`.
- */
-export function resolveRecipientState(resolvedState: string | null, e164: string): string | null {
-  if (resolvedState) return resolvedState;
-  const npa = /^\+1(\d{3})\d{7}$/.exec(e164)?.[1];
-  return npa ? stateForAreaCode(npa) : null;
-}
-
-/**
- * FIX-4: gate 7d's hours label, sourced from the ENFORCED `STATE_CALLING_RULES`
- * table (today's weekday window for `stateCode`, via the SAME
- * `resolveStateRule`/`todayIsoWeekday` helpers gate 6 uses) — not the legacy
- * `state_calling_rules` DB table gate 7d otherwise still reads for its
- * frequency-cap portion. The two tables have drifted (e.g. the DB seed has OK
- * at 08:00-20:00; the enforced code table is 09:00-20:00), so printing the
- * DB's hours told the rep a window the firewall doesn't actually allow.
- * Pure and exported so it's directly testable without the whole `evaluate()`
- * pipeline (db, SF client), same pattern as `callingWindowFor`.
- */
-export function enforcedStateHoursLabel(stateCode: string, now: Date, tz: string): string {
-  const isoWeekday = todayIsoWeekday(now, tz);
-  const rule = resolveStateRule(stateCode);
-  const window = rule.days[isoWeekday as IsoWeekday];
-  return window ? `${window.start}-${window.end}` : 'no calling today';
-}
-
-export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallResponse> {
+export async function evaluate(db: Db, input: FirewallInput, deps: FirewallDeps = {}): Promise<FirewallResponse> {
   const checks: CheckResult[] = [];
 
   // 1. Parse + normalize the destination number (also needed for the area-code
@@ -374,9 +98,9 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
   let resolvedTz = input.recipientTimezone;
   let resolvedState: string | null = null;
   let tzSource: string | undefined;
-  if (!resolvedTz && input.recipientRecordId) {
+  if (!resolvedTz && input.recipientRecordId && deps.fetchRecipientAddress) {
     try {
-      const addr = await fetchRecordAddress(input.userId, input.recipientRecordId);
+      const addr = await deps.fetchRecipientAddress(input.userId, input.recipientRecordId);
       if (addr) {
         const resolved = resolveTimezone(addr);
         if (resolved) {
@@ -390,12 +114,12 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
       // difference is only diagnostic so we use stderr instead of threading a
       // Fastify logger into the evaluator. Auth errors merit a louder signal
       // because they typically mean the rep needs to re-connect Salesforce.
-      if (err instanceof SalesforceUnauthorizedError) {
+      if (err instanceof RecipientLookupUnauthorizedError) {
         // eslint-disable-next-line no-console
-        console.warn('[firewall] SF address lookup skipped: not authorized', { userId: input.userId });
+        console.warn('[firewall] recipient address lookup skipped: not authorized', { userId: input.userId });
       } else {
         // eslint-disable-next-line no-console
-        console.warn('[firewall] SF address lookup failed', { userId: input.userId, err: (err as Error).message });
+        console.warn('[firewall] recipient address lookup failed', { userId: input.userId, err: (err as Error).message });
       }
     }
   }
@@ -679,9 +403,9 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
 
   // 7d. State-specific calling rules (FL/OK/MD/NJ caps; NY/CA/TX hours).
   // Falls back gracefully if we don't have a state.
-  if (input.recipientRecordId) {
+  if (input.recipientRecordId && deps.fetchRecipientAddress) {
     try {
-      const addr = await fetchRecordAddress(input.userId, input.recipientRecordId);
+      const addr = await deps.fetchRecipientAddress(input.userId, input.recipientRecordId);
       const stateCode = addr?.state?.trim().toUpperCase();
       if (stateCode && /^[A-Z]{2}$/.test(stateCode)) {
         const rule = await db.query.stateCallingRules.findFirst({
@@ -984,41 +708,6 @@ export async function evaluate(db: Db, input: FirewallInput): Promise<FirewallRe
   return await persistAndReturn(db, input, checks, e164, fromE164 ?? effectiveFrom, campaign?.requiredScriptId ?? null);
 }
 
-export function aggregate(
-  checks: CheckResult[],
-  requiredScriptId: string | null,
-): {
-  decision: Decision;
-  reasons: string[];
-  blockReason: string | null;
-  requiredScriptId: string | null;
-} {
-  const firstBlock = checks.find((c) => !c.passed && c.severity === 'block');
-  if (firstBlock) {
-    return {
-      decision: 'BLOCK',
-      reasons: checks.map((c) => c.reasonCode),
-      blockReason: firstBlock.detail ?? firstBlock.reasonCode,
-      requiredScriptId: null,
-    };
-  }
-  const hasReview = checks.some((c) => c.severity === 'review');
-  if (hasReview) {
-    return {
-      decision: 'REQUIRE_REVIEW',
-      reasons: checks.map((c) => c.reasonCode),
-      blockReason: null,
-      requiredScriptId,
-    };
-  }
-  return {
-    decision: 'ALLOW',
-    reasons: checks.map((c) => c.reasonCode),
-    blockReason: null,
-    requiredScriptId,
-  };
-}
-
 async function persistAndReturn(
   db: Db,
   input: FirewallInput,
@@ -1054,297 +743,5 @@ async function persistAndReturn(
     checks,
     normalizedTo: e164,
     fromNumber: fromE164 ?? input.fromNumber ?? null,
-  };
-}
-
-/**
- * The window gate 6 actually enforces: the shared system window
- * (`dialer/pick-did.ts` — local hour ∈ [8, 20], the SAME pair the power
- * dialer's pre-filter uses) with the campaign row allowed to NARROW it and
- * never to widen it.
- *
- * Before this, the two enforcement sites carried independent numbers — the
- * firewall's came from `campaign_configs` (schema default 08:00–20:00,
- * end-exclusive), the dialer's from its own literals (08:00–20:59) — so an
- * 8:10pm call was blocked on one path and attempted on the other, with nothing
- * keeping them in step (spam-defense audit §5). Clamping rather than replacing
- * keeps a deliberately shorter org window (this org runs 08:00–20:00) exactly
- * as configured, while making the outer bound one constant pair for the whole
- * system — and a campaign row edited to 22:00 can no longer push the firewall
- * past 8:59pm.
- *
- * Pure string compare: both sides are zero-padded `HH:MM`, which orders
- * lexicographically the same as it orders chronologically.
- */
-/**
- * Ten dials a minute from one DID is not a rep working a list — it is an
- * autodialer fingerprint, and it is what carrier analytics score. The cap is
- * enforced atomically at dial time by the `< 10` clause inside
- * `dialer/pick-did.ts`'s `attemptIncrement` UPDATE and its twin in
- * `routes/calls.ts`; THIS is the advisory pre-call read of the same rule, so
- * the rep is told before dialing rather than getting a bare 429 after.
- *
- * Pure and exported so the boundary is testable: gate 7b had no direct
- * coverage at all (spam-defense audit §6), and a stale window silently
- * resetting the count to 0 is exactly the arithmetic that broke the sibling
- * warmup cap in prod once already.
- */
-const VELOCITY_MAX_PER_MINUTE = 10;
-const VELOCITY_WINDOW_MS = 60_000;
-
-export function velocityGateCheck(
-  n: { e164: string; lastMinuteWindowStart: Date | null; lastMinuteDialCount: number },
-  now: Date,
-): CheckResult {
-  // A window older than a minute is spent: its count describes a burst that is
-  // already over, so it reads as 0 rather than blocking on stale data.
-  const inWindow = n.lastMinuteWindowStart != null
-    && (now.getTime() - n.lastMinuteWindowStart.getTime()) < VELOCITY_WINDOW_MS;
-  const count = inWindow ? n.lastMinuteDialCount : 0;
-  return count >= VELOCITY_MAX_PER_MINUTE
-    ? {
-        name: 'velocity',
-        passed: false,
-        severity: 'block',
-        reasonCode: REASON.VELOCITY_BURST,
-        detail: `${count} calls/min from ${n.e164} — autodialer fingerprint`,
-      }
-    : {
-        name: 'velocity',
-        passed: true,
-        severity: 'info',
-        reasonCode: REASON.VELOCITY_OK,
-        detail: `${count}/${VELOCITY_MAX_PER_MINUTE} per min`,
-      };
-}
-
-/**
- * Parses "HH:MM" into minutes since midnight. FIX-1: `callingWindowFor`'s
- * clamp used to compare the raw strings lexicographically — an UNPADDED
- * value ("8:00") reads as GREATER than "09:00" character-by-character
- * ('8' > '0') even though it's numerically earlier, which let an unpadded
- * campaign start slip under the federal floor uncorrected AND let an
- * unpadded campaign end get wrongly WIDENED past the cap. Minutes compare
- * correctly regardless of padding.
- */
-function hhmmToMinutes(hhmm: string): number {
-  const [h, m] = hhmm.split(':').map(Number) as [number, number];
-  return h * 60 + m;
-}
-
-export function callingWindowFor(campaign: {
-  callingHoursStart?: string | null;
-  callingHoursEnd?: string | null;
-}): { start: string; end: string } {
-  const start = campaign.callingHoursStart || CALLING_HOURS_START_HHMM;
-  const end = campaign.callingHoursEnd || CALLING_HOURS_END_HHMM_EXCLUSIVE;
-  return {
-    start: hhmmToMinutes(start) > hhmmToMinutes(CALLING_HOURS_START_HHMM) ? start : CALLING_HOURS_START_HHMM,
-    end: hhmmToMinutes(end) < hhmmToMinutes(CALLING_HOURS_END_HHMM_EXCLUSIVE) ? end : CALLING_HOURS_END_HHMM_EXCLUSIVE,
-  };
-}
-
-const WEEKDAY_ABBR: Record<number, string> = { 1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu', 5: 'Fri', 6: 'Sat', 7: 'Sun' };
-const WEEKDAY_FULL: Record<number, string> = {
-  1: 'Monday',
-  2: 'Tuesday',
-  3: 'Wednesday',
-  4: 'Thursday',
-  5: 'Friday',
-  6: 'Saturday',
-  7: 'Sunday',
-};
-
-export interface CallingHoursVerdict {
-  /** True only when both the day and the clock allow the call. */
-  within: boolean;
-  /** True when today (recipient-local) is one of the allowed ISO weekdays. */
-  dayAllowed: boolean;
-  /** Recipient-local weekday full name, e.g. "Sunday" — for messaging. */
-  weekdayName: string;
-}
-
-/**
- * Splits what `isWithinCallingHours` used to collapse into one boolean, so a
- * caller can tell WHY a call is blocked: wrong day vs. wrong clock. A rep
- * blocked on a Sunday inside the 08:00-20:00 window was reading "outside
- * 08:00-20:00" and concluding the dialer was broken — the day was the real
- * gate, not the hour (2026-08-30 live incident).
- */
-export function callingHoursVerdict(
-  now: Date,
-  timezone: string,
-  startHHMM: string,
-  endHHMM: string,
-  allowedIsoWeekdays: number[],
-): CallingHoursVerdict {
-  try {
-    const fmt = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      hour: '2-digit',
-      minute: '2-digit',
-      weekday: 'short',
-      hour12: false,
-    });
-    const parts = fmt.formatToParts(now);
-    const hour = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
-    const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
-    const weekdayShort = parts.find((p) => p.type === 'weekday')?.value ?? 'Mon';
-    const map: Record<string, number> = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
-    const iso = map[weekdayShort] ?? 1;
-    const dayAllowed = allowedIsoWeekdays.includes(iso);
-
-    const [sH, sM] = startHHMM.split(':').map(Number) as [number, number];
-    const [eH, eM] = endHHMM.split(':').map(Number) as [number, number];
-    const nowMins = hour * 60 + minute;
-    const startMins = sH * 60 + sM;
-    const endMins = eH * 60 + eM;
-    const withinHours = nowMins >= startMins && nowMins < endMins;
-
-    return { within: dayAllowed && withinHours, dayAllowed, weekdayName: WEEKDAY_FULL[iso] ?? 'Monday' };
-  } catch {
-    // Bad tz → fail safe to REVIEW upstream
-    return { within: false, dayAllowed: false, weekdayName: '' };
-  }
-}
-
-export function isWithinCallingHours(
-  now: Date,
-  timezone: string,
-  startHHMM: string,
-  endHHMM: string,
-  allowedIsoWeekdays: number[],
-): boolean {
-  return callingHoursVerdict(now, timezone, startHHMM, endHHMM, allowedIsoWeekdays).within;
-}
-
-/** Contiguous ISO weekday ranges render as `Mon-Fri`; anything else is a comma list. */
-export function formatAllowedDays(allowedIsoWeekdays: number[]): string {
-  const days = [...new Set(allowedIsoWeekdays)]
-    .filter((d) => d >= 1 && d <= 7)
-    .sort((a, b) => a - b);
-  const first = days[0];
-  const last = days[days.length - 1];
-  if (first === undefined || last === undefined) return '';
-  const isContiguous = days.every((d, i) => i === 0 || d === (days[i - 1] ?? NaN) + 1);
-  if (isContiguous) {
-    return days.length === 1
-      ? (WEEKDAY_ABBR[first] ?? '')
-      : `${WEEKDAY_ABBR[first] ?? ''}-${WEEKDAY_ABBR[last] ?? ''}`;
-  }
-  return days.map((d) => WEEKDAY_ABBR[d] ?? '').join(', ');
-}
-
-/**
- * The gate-6 BLOCK detail: names the day restriction when that's the actual
- * reason, otherwise keeps the original hours message unchanged. Callers
- * append their own tz-source suffix (` · ${tzSource}`), matching how the
- * PASSED branch already does it.
- */
-export function callingHoursBlockDetail(
-  verdict: CallingHoursVerdict,
-  window: { start: string; end: string },
-  timezone: string,
-  allowedIsoWeekdays: number[],
-): string {
-  return verdict.dayAllowed
-    ? `Now is outside ${window.start}-${window.end} ${timezone}`
-    : `Calling is ${formatAllowedDays(allowedIsoWeekdays)} only (today is ${verdict.weekdayName}, recipient-local)`;
-}
-
-/**
- * Gate 6's full boundary: the campaign's own calling window (recipient-local)
- * INTERSECTED with the per-state compliance overlay (weekend-calling ruling,
- * 2026-08-31 — Saturday/Sunday dialing is on globally, except where a state
- * restricts it; state-calling-rules.ts). Pure and exported so it's directly
- * testable without standing up the whole `evaluate()` pipeline, same as
- * `velocityGateCheck`/`attemptGateChecks`.
- *
- * Priority order for WHY a day is blocked (each keeps its own message):
- *  1. The CAMPAIGN itself excludes the day → the original 779fe15 message,
- *     unchanged (`callingHoursBlockDetail`'s day-banned branch).
- *  2. The campaign allows the day but the STATE's rule bans it → names the
- *     state (e.g. "Calling AL is Mon-Sat only ...").
- *  3. The campaign allows the day but the recipient's state is unresolved and
- *     the conservative unknown-state rule bans it (Sundays only) → a message
- *     that says so, instead of naming a state we don't actually have.
- * Otherwise, the clock is checked against the EFFECTIVE (campaign ∩ state)
- * window — never the raw campaign window — for both the PASS detail and the
- * outside-hours BLOCK detail.
- */
-export function callingHoursGateCheck(args: {
-  now: Date;
-  tz: string;
-  /** 2-letter US state code, or null if it couldn't be resolved. */
-  state: string | null;
-  /** The campaign's own window, already clamped to the system bound (callingWindowFor). */
-  window: { start: string; end: string };
-  allowedDays: number[];
-  tzSource?: string;
-}): CheckResult {
-  const { now, tz, state, window, allowedDays, tzSource } = args;
-  const tzDetailSuffix = tzSource ? ` · ${tzSource}` : '';
-
-  // 1. Campaign-day gate first — identical priority and message to 779fe15.
-  const campaignVerdict = callingHoursVerdict(now, tz, window.start, window.end, allowedDays);
-  if (!campaignVerdict.dayAllowed) {
-    return {
-      name: 'calling_hours',
-      passed: false,
-      severity: 'block',
-      reasonCode: REASON.OUTSIDE_CALLING_HOURS,
-      detail: `${callingHoursBlockDetail(campaignVerdict, window, tz, allowedDays)}${tzDetailSuffix}`,
-    };
-  }
-
-  // 2. The state overlay's day gate.
-  const isoWeekday = todayIsoWeekday(now, tz);
-  const stateRule = resolveStateRule(state);
-  const effectiveWindow = effectiveCallingWindow({ days: allowedDays, start: window.start, end: window.end }, stateRule, isoWeekday);
-  if (!effectiveWindow) {
-    const weekdayName = WEEKDAY_FULL[isoWeekday] ?? '';
-    const stateDayWindow = stateRule.days[isoWeekday as IsoWeekday];
-    // FIX-2: `effectiveCallingWindow` returns null for TWO different reasons —
-    // the state bans the day outright (no entry for `isoWeekday`), or the day
-    // IS allowed but the state's window doesn't overlap the campaign's
-    // (narrower) window at all. The old code assumed the first case
-    // unconditionally, which produced a self-contradictory message on the
-    // second (e.g. "Calling FL is Mon-Sun only (today is Wednesday...)" when
-    // FL plainly allows Wednesday). Branch on whether the state actually has
-    // NO window for today.
-    const detail = stateDayWindow === undefined
-      ? (state
-          ? `Calling ${state} is ${formatAllowedDays(Object.keys(stateRule.days).map(Number))} only (today is ${weekdayName}, recipient-local)`
-          : `${weekdayName} calling requires a known state (recipient state unresolved)`)
-      : (state
-          ? `Now is outside ${stateDayWindow.start}-${stateDayWindow.end} ${tz} (${state} rule)`
-          : `Now is outside ${stateDayWindow.start}-${stateDayWindow.end} ${tz}`);
-    return {
-      name: 'calling_hours',
-      passed: false,
-      severity: 'block',
-      reasonCode: REASON.OUTSIDE_CALLING_HOURS,
-      detail: `${detail}${tzDetailSuffix}`,
-    };
-  }
-
-  // 3. The clock, against the EFFECTIVE (campaign ∩ state) window.
-  const stateSuffix = state ? ` · ${state} rule` : '';
-  const verdict = callingHoursVerdict(now, tz, effectiveWindow.start, effectiveWindow.end, allowedDays);
-  if (verdict.within) {
-    return {
-      name: 'calling_hours',
-      passed: true,
-      severity: 'info',
-      reasonCode: REASON.CALLING_HOURS_OK,
-      detail: `${effectiveWindow.start}-${effectiveWindow.end} ${tz}${stateSuffix}${tzDetailSuffix}`,
-    };
-  }
-  return {
-    name: 'calling_hours',
-    passed: false,
-    severity: 'block',
-    reasonCode: REASON.OUTSIDE_CALLING_HOURS,
-    detail: `${callingHoursBlockDetail(verdict, effectiveWindow, tz, allowedDays)}${tzDetailSuffix}`,
   };
 }

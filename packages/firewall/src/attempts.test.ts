@@ -1,6 +1,6 @@
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
-import { schema } from '../db/index.js';
+import { schema } from '@cti/db';
 import { atCustomerCeiling, attemptGateChecks, customerAttemptCounts, tallyAttempts } from './index.js';
 
 describe('tallyAttempts', () => {
