@@ -77,7 +77,10 @@ struct StatusView: View {
                     .disabled(engine.status == .syncing)
 
                     Button("Unpair this iPhone", role: .destructive) {
-                        engine.unpair()
+                        // Same tested sequence as Sign out: since Task 6 `unpair()` also
+                        // clears the session token, so this IS a sign-out and must tear
+                        // down the Twilio binding first.
+                        SignOutFlow.run(stopVoice: voice.stop, unpair: engine.unpair)
                     }
                     .disabled(engine.status == .syncing)
                 }
