@@ -27,24 +27,29 @@ export interface Fixtures {
   users?: Array<Record<string, unknown>>;
   sessions?: Array<Record<string, unknown>>;
   /**
-   * Overrides what `update(...).where(...).returning()` yields; defaults to a
-   * single row (the update's own values). Set to `[]` to simulate a
-   * conditional update matching no row — e.g. a concurrent write already
-   * claimed it (see provision.ts's `ensureWorkosOrg`).
+   * What `update(...).where(...).returning()` (and the bare awaited `where(...)`)
+   * yields; defaults to `[]` — a conditional/predicated update matching no
+   * row, same as a real `UPDATE ... WHERE` that filters everything out (e.g.
+   * the route's own defensive re-check, or a concurrent write that already
+   * claimed the row — see provision.ts's `ensureWorkosOrg`). A test whose
+   * route needs a matched row back must seed this explicitly; there is no
+   * fixture-guessing fallback (see below).
    */
   updateReturning?: Array<Record<string, unknown>>;
 }
 
 /**
- * Fake Drizzle handle in this repo's convention: `where` is not introspected;
- * `findFirst` returns the first fixture, `findMany` all of them; writes are
- * recorded. Tests that need "which row matched" put exactly one row in the
- * fixture or filter in the code under test (as completeSignIn does).
+ * Fake Drizzle handle in this repo's convention: `where` is not filtered
+ * against — `findFirst`/`select` return the fixture rows (or `updateReturning`
+ * for writes) regardless of the predicate. Tests that need "which row
+ * matched" put exactly one row in the fixture, seed `updateReturning`
+ * explicitly, or filter in the code under test (as completeSignIn does).
  *
- * Every `where` argument passed to any table's `findFirst`/`findMany` is also
+ * Every `where` argument — passed to any table's `findFirst`/`findMany`, to a
+ * `select(...).where(...)` chain, or to an `update(...).where(...)` — is
  * pushed (in call order) onto the returned `captured.where` array, so a test
  * can render the raw drizzle `SQL` fragment (e.g. via `new PgDialect().sqlToQuery(...)`)
- * to prove the code under test queried on the column/predicate it claims to.
+ * to prove the code under test queried/wrote on the column(s) it claims to.
  */
 export function fakeDb(fx: Fixtures = {}) {
   const writes: Array<{ op: 'insert' | 'update'; table: unknown; values: Record<string, unknown> }> = [];
@@ -74,27 +79,35 @@ export function fakeDb(fx: Fixtures = {}) {
     }),
     update: (t: unknown) => ({
       set: (values: Record<string, unknown>) => ({
-        // `where`'s result is awaitable directly (existing callers that don't
-        // chain `.returning()` — it's thenable, resolving to the same rows)
-        // and also carries `.returning()` for callers that need the matched
-        // row back. Defaults to `updateReturning` when set (including `[]`,
-        // to simulate a conditional update matching none — see `Fixtures`);
-        // else, for `schema.users` (PATCH /api/team/:userId), the fixture's
-        // second user — index 0 is the calling admin in every team fixture —
-        // merged with `values`; else just `values` (other tables).
-        where: (_cond?: unknown) => {
+        // `where`'s result carries `.returning()` for callers that need the
+        // matched row(s) back, and is itself thenable — an awaited `where(...)`
+        // with no `.returning()` chained (existing callers like sign-in.ts)
+        // resolves to that same rows array too (not a `{ rowCount, rows }`
+        // shape a real driver would give; this fake doesn't model that).
+        // Always `fx.updateReturning ?? []` — no fixture-row guessing; a test
+        // whose route needs a row back seeds `updateReturning` explicitly.
+        where: (cond?: unknown) => {
+          if (cond !== undefined) captured.where.push(cond);
           writes.push({ op: 'update', table: t, values });
-          const fallback = t === schema.users && fx.users ? [{ ...fx.users[1], ...values }] : [{ ...values }];
-          const rows = fx.updateReturning ?? fallback;
-          return { rowCount: rows.length, returning: async () => rows, then: (resolve: (v: typeof rows) => void) => resolve(rows) };
+          const rows = fx.updateReturning ?? [];
+          return { returning: async () => rows, then: (resolve: (v: typeof rows) => void) => resolve(rows) };
         },
       }),
     }),
     // Chainable + thenable: `from`/`where`/`orderBy` all return the same
     // chain (order and count don't matter, matching `findFirst`/`findMany`'s
-    // no-filtering convention), and awaiting the chain resolves to `fx.users`.
+    // no-filtering convention); `where`'s predicate is still captured, and
+    // awaiting the chain resolves to `fx.users`.
     select: () => {
-      const chain = { from: () => chain, where: () => chain, orderBy: () => chain, then: (resolve: (v: Array<Record<string, unknown>>) => void) => resolve(fx.users ?? []) };
+      const chain = {
+        from: () => chain,
+        where: (cond?: unknown) => {
+          if (cond !== undefined) captured.where.push(cond);
+          return chain;
+        },
+        orderBy: () => chain,
+        then: (resolve: (v: Array<Record<string, unknown>>) => void) => resolve(fx.users ?? []),
+      };
       return chain;
     },
     // Passthrough: fakeDb has no real transactional isolation, so `fn` just

@@ -33,7 +33,11 @@ afterEach(async () => { await app.close(); });
 beforeEach(async () => {
   state.session = superAdmin;
   idp = new FakeIdentityProvider();
-  const fake = fakeDb({ organizations: [org] });
+  // `ensureWorkosOrg` (provision.ts) does a conditional `update(...).returning()`
+  // to record the new WorkOS org id — seed a matched row so it doesn't
+  // spuriously conclude a concurrent write already claimed it (see harness.ts's
+  // `Fixtures.updateReturning`).
+  const fake = fakeDb({ organizations: [org], updateReturning: [{ id: org.id }] });
   writes = fake.writes;
   app = await buildTestApp({ cfg, db: fake.db, idp });
 });

@@ -8,7 +8,9 @@ const log = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
 
 describe('provisionTenant', () => {
   it('creates the tenant, a WorkOS organization tagged with our org id, links it, and invites the admin', async () => {
-    const { db, writes } = fakeDb({ organizations: [] });
+    // `ensureWorkosOrg`'s conditional update needs a matched row seeded — an
+    // unseeded update now yields `[]` (see harness.ts's `Fixtures.updateReturning`).
+    const { db, writes } = fakeDb({ organizations: [], updateReturning: [{ id: 'org_fake_1' }] });
     const idp = new FakeIdentityProvider();
     const out = await provisionTenant({ db, idp, log }, { name: 'Acme Buyers', timezone: 'America/Chicago', adminEmail: 'owner@acme.com' });
     expect(writes.map((w) => w.op)).toEqual(['insert', 'insert', 'insert', 'update']);
@@ -31,7 +33,7 @@ describe('provisionTenant', () => {
 describe('linkTenantToWorkos', () => {
   const org = { id: 'O1', name: 'GG Homes', slug: 'gg-homes', status: 'active', timezone: 'America/Los_Angeles', workosOrgId: null };
   it('creates and stores a WorkOS organization for an unlinked tenant, then invites the admin', async () => {
-    const { db, writes } = fakeDb({ organizations: [org] });
+    const { db, writes } = fakeDb({ organizations: [org], updateReturning: [{ id: 'O1' }] });
     const idp = new FakeIdentityProvider();
     const out = await linkTenantToWorkos({ db, idp, log }, 'O1', 'you@gghomes.com');
     expect(writes).toEqual([expect.objectContaining({ op: 'update', values: { workosOrgId: 'org_fake_1' } })]);
@@ -50,7 +52,7 @@ describe('linkTenantToWorkos', () => {
     await expect(linkTenantToWorkos({ db, idp: new FakeIdentityProvider(), log }, 'nope', 'a@b.co')).rejects.toThrow('Unknown tenant');
   });
   it('reuses a WorkOS org already tagged with the tenant id instead of creating a second one', async () => {
-    const { db, writes } = fakeDb({ organizations: [org] });
+    const { db, writes } = fakeDb({ organizations: [org], updateReturning: [{ id: 'O1' }] });
     const idp = new FakeIdentityProvider();
     idp.seedOrganization({ id: 'org_existing_tagged', name: 'GG Homes', externalId: 'O1' });
     const createSpy = vi.spyOn(idp, 'createOrganization');

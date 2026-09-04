@@ -6,7 +6,8 @@ export class FakeIdentityProvider implements IdentityProvider {
   private users = new Map<string, { user: IdentityUser; memberships: IdentityMembership[] }>();
   private codes = new Map<string, { externalId: string; organizationId: string | null }>();
   private orgs = new Map<string, { id: string; name: string; externalId: string }>();
-  private invites: IdentityInvite[] = [];
+  /** Stores the full record, including provider-internal fields no `IdentityProvider` method returns (see `listInvites`); `lastInvite()` exposes it for tests. */
+  private invites: Array<IdentityInvite & { organizationId: string; inviterExternalId?: string }> = [];
   private seq = 0;
 
   addUser(user: IdentityUser, orgs: Array<{ organizationId: string; role: string; status?: IdentityMembership['status'] }>): void {
@@ -49,12 +50,18 @@ export class FakeIdentityProvider implements IdentityProvider {
     for (const org of this.orgs.values()) if (org.externalId === externalId) return { id: org.id };
     return null;
   }
-  async invite(input: { email: string; organizationId: string; role: RoleSlug }): Promise<IdentityInvite> {
+  async invite(input: { email: string; organizationId: string; role: RoleSlug; inviterExternalId?: string }): Promise<IdentityInvite> {
     const inv: IdentityInvite = { id: `inv_${++this.seq}`, email: input.email.trim().toLowerCase(), role: input.role, state: 'pending', expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString() };
-    this.invites.push({ ...inv, ...({ organizationId: input.organizationId } as object) });
+    this.invites.push({ ...inv, organizationId: input.organizationId, ...(input.inviterExternalId ? { inviterExternalId: input.inviterExternalId } : {}) });
     return inv;
   }
   async listInvites(organizationId: string): Promise<IdentityInvite[]> {
-    return this.invites.filter((i) => (i as unknown as { organizationId: string }).organizationId === organizationId);
+    return this.invites
+      .filter((i) => i.organizationId === organizationId)
+      .map(({ organizationId: _orgId, inviterExternalId: _inviterExternalId, ...rest }) => rest);
+  }
+  /** Test-only: the most recently created invite's full stored record — including the WorkOS org id and the inviter's external id — so a test can assert routes/team.ts wired the caller through (see routes/team.test.ts). */
+  lastInvite(): (IdentityInvite & { organizationId: string; inviterExternalId?: string }) | undefined {
+    return this.invites.at(-1);
   }
 }
