@@ -166,6 +166,12 @@ In dev, expose your backend with a tunnel (e.g. `ngrok http 4000`) and set
 signatures are validated against `TWILIO_AUTH_TOKEN`; in `NODE_ENV=production`
 invalid signatures return 403.
 
+`TWILIO_IOS_PUSH_CREDENTIAL_SID` — the Twilio Push Credential (APNs **VoIP**
+type, sandbox off) backing `POST /telephony/token` for the Callsign iPhone
+app; optional until the app ships, and that route returns 503 for
+`platform:'ios'` while it's unset. See
+`docs/runbooks/callsign-ios-release.md` for how to create and set it.
+
 ---
 
 ## Inbound callbacks & no-answer forwarding

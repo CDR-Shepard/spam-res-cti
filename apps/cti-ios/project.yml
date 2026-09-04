@@ -6,7 +6,12 @@ name: Callsign
 packages:
   TwilioVoice:
     url: https://github.com/twilio/twilio-voice-ios
-    from: "6.0.0"
+    # Pinned, not a floor: 6.13.7 is the version the full test suite (incl.
+    # the manual device checklist in docs/runbooks/callsign-ios-release.md)
+    # was validated against. Bump deliberately — re-run that checklist on a
+    # real device before shipping a new pin, don't just let SPM float to
+    # whatever the next `from:` range resolves.
+    exactVersion: "6.13.7"
 
 options:
   bundleIdPrefix: com.gghomes.cti

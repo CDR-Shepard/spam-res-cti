@@ -1,21 +1,36 @@
 # Callsign (iOS)
 
-The rep's iPhone half of the caller-ID feature. It pairs with the CTI API,
-pulls the org's caller directory, and hands it to iOS as a **Call Directory
-extension** so an incoming call from a lead in the CRM shows "Lead: Jane Doe"
-instead of an unknown number.
+The rep's iPhone half of the caller-ID feature **and** a native softphone. It
+signs the rep in with Salesforce, pulls the org's caller directory, hands it
+to iOS as a **Call Directory extension** so an incoming call from a lead in
+the CRM shows "Lead: Jane Doe" instead of an unknown number, and — via a VoIP
+push and CallKit — lets the rep place and receive calls on the phone itself,
+gated by the same pre-call firewall audit the web softphone uses.
 
 Two targets plus a test bundle:
 
 | Target | Bundle id | What it does |
 | --- | --- | --- |
-| `Callsign` (app) | `com.gghomes.callsign` | Pairing, syncing, status UI |
+| `Callsign` (app) | `com.gghomes.callsign` | Sign-in, directory sync, status UI, the softphone (dial/recents/wrap-up) |
 | `CallDirectory` (extension) | `com.gghomes.callsign.directory` | Streams the snapshot to CallKit |
-| `CallsignTests` | — | Logic tests (paging, store, sync engine) |
+| `CallsignTests` | — | Logic tests (paging, store, sync engine, call controller, screens) |
 
 They share the App Group `group.com.gghomes.cti`. iOS 17 minimum, SwiftUI, one
-third-party dependency: the Twilio Voice iOS SDK (SPM, product `TwilioVoice`),
-used by the app target only — the Call Directory extension still has none.
+third-party dependency: the Twilio Voice iOS SDK (SPM, product `TwilioVoice`,
+pinned in `project.yml` to `exactVersion: "6.13.7"` — the version the test
+suite and the manual device checklist were validated against; see
+`docs/runbooks/callsign-ios-release.md` before bumping it), used by the app
+target only — the Call Directory extension still has none.
+
+**Signing in.** `SignInView` opens an `ASWebAuthenticationSession` against the
+same Salesforce login the web softphone uses (`SignInFlow`, `Shared/`); on
+success the phone registers itself via `POST /mobile/register` and gets a
+device token the same shape as a paired one, without a 6-digit code. The
+6-digit pairing flow (`PairView`, `POST /mobile/pair/claim`) still exists in
+the codebase but is no longer the primary onboarding path — it is kept only
+for the legacy case of pairing a device without going through Salesforce
+sign-in. See `docs/runbooks/callsign-ios-release.md` for the release process,
+the TestFlight/App Store distribution steps, and the manual device checklist.
 
 ## Building
 
@@ -72,9 +87,13 @@ and so which number a tap redials). Those compile into the test bundle; the
 
 ## How a phone gets a directory
 
-1. **Pair.** The rep opens the softphone, chooses "Pair iPhone", and reads a
-   6-digit code. The app posts it to `POST /mobile/pair/claim` and stores the
-   returned device token in the **Keychain**
+1. **Sign in (or pair).** The rep opens the app and signs in with Salesforce
+   (`SignInFlow`); the phone registers itself via `POST /mobile/register` and
+   gets back a device token. The legacy path — the rep opens the web
+   softphone, chooses "Pair iPhone", reads a 6-digit code, and types it into
+   the app, which posts it to `POST /mobile/pair/claim` — mints the same kind
+   of token and still works, but sign-in is the primary flow. Either way the
+   device token is stored in the **Keychain**
    (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: a background refresh
    still works on a locked phone, and the token never travels in a backup or
    onto a restored handset). The extension never reads the Keychain.
