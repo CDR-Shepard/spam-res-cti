@@ -70,7 +70,7 @@ final class SyncEngine: ObservableObject {
     private let reload: Reload
     private let enabledStatus: EnabledStatusProbe
     private let claim: Claim
-    private let log = Logger(subsystem: "com.gghomes.cti.callerid", category: "SyncEngine")
+    private let log = Logger(subsystem: AppConfig.loggingSubsystem, category: "SyncEngine")
 
     private enum Keys {
         static let lastSyncedAt = "lastSyncedAt"
@@ -133,8 +133,8 @@ final class SyncEngine: ObservableObject {
     }
 
     /// The failure worth putting in front of the user, or `nil`. Both screens
-    /// render it — StatusView inline, PairView above the code field, which is
-    /// where a revoked device lands the moment `sync()` unpairs it.
+    /// render it — `StatusView` inline, and `SignInView`, which is where a
+    /// revoked device lands the moment `sync()` unpairs it.
     var failureMessage: String? {
         if case let .failed(message) = status { return message }
         return nil
@@ -360,11 +360,14 @@ final class SyncEngine: ObservableObject {
             defaults.set(lastSyncedAt, forKey: Keys.lastSyncedAt)
             status = .idle
         } catch FeedError.http(status: 401) {
-            // The device was revoked from the softphone's device list. This
-            // drops the phone back to PairView, which renders `failureMessage`
-            // — without that the swap would look like the app resetting itself.
+            // The DEVICE token was revoked from the softphone's device list —
+            // a different event from an expired Salesforce session, which
+            // `isSessionExpired` deliberately keeps separate. `unpair()` also
+            // clears the session, so `RootView` shows `SignInView`, and this
+            // message is what that screen renders: without it the swap would
+            // look like the app resetting itself.
             unpair()
-            status = .failed("This iPhone was unpaired. Enter a new pairing code.")
+            status = .failed("Your sign-in is no longer valid. Sign in again.")
         } catch {
             log.error("sync failed: \(error.localizedDescription, privacy: .public)")
             status = .failed(Self.message(for: error))

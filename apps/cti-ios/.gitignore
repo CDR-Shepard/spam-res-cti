@@ -3,7 +3,7 @@
 # only invites the two to drift apart.
 *.xcodeproj/
 App/Info.plist
-App/CTICallerID.entitlements
+App/Callsign.entitlements
 CallDirectory/Info.plist
 CallDirectory/CallDirectory.entitlements
 # Xcode build products.

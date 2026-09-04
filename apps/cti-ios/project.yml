@@ -43,7 +43,7 @@ targets:
       - package: TwilioVoice
         product: TwilioVoice
     entitlements:
-      path: App/CTICallerID.entitlements
+      path: App/Callsign.entitlements
       properties:
         com.apple.security.application-groups:
           - group.com.gghomes.cti

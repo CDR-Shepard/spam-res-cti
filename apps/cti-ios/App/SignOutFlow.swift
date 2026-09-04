@@ -19,8 +19,10 @@ import Foundation
 /// 3. `unpair` — what actually signs the phone out. It flips `hasSession`, and
 ///    the root view swaps to sign-in on the next redraw.
 ///
-/// The first two are **best effort and nothing else in this app is**: they are
-/// the only `try?`s in the codebase, and they are deliberate. A rep who taps
+/// The first two are **best effort and no other API call in this app is**:
+/// these are the only two `try?`s on a network call, and they are deliberate
+/// (everything else that swallows an error here is a file handle or a Keychain
+/// delete, which cannot meaningfully fail). A rep who taps
 /// Sign out and lands on `SignInView` must be signed out on this handset
 /// whether or not the server and Twilio could be reached — a phone stuck
 /// signed-in because the network was down is the worse failure, and the device

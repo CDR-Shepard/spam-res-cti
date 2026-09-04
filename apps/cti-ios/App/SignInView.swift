@@ -29,11 +29,13 @@ struct SignInView: View {
                     .padding(.horizontal)
 
                 // A rep who did not tap Sign out is owed the reason they are
-                // suddenly looking at this screen. Suppressed once a sign-in
-                // attempt has produced a failure of its own — the newer
-                // message is the one that helps.
-                if errorMessage == nil, engine.sessionExpired {
-                    Text(Self.expiredMessage)
+                // suddenly looking at this screen — an expired Salesforce
+                // session, or a device this org revoked (`SyncEngine`'s 401
+                // path, whose message this renders). Suppressed once a sign-in
+                // attempt has produced a failure of its own: the newer message
+                // is the one that helps.
+                if errorMessage == nil, let reason = signedOutReason {
+                    Text(reason)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal)
@@ -70,6 +72,14 @@ struct SignInView: View {
     /// (`services/cti-api/src/auth/session.ts`), so this is a monthly event,
     /// not an incident.
     static let expiredMessage = "Your Salesforce sign-in expired. Sign in again."
+
+    /// Why this phone is signed out, when it did not choose to be. The expiry
+    /// wins over `failureMessage`: it is the specific answer, and the sync
+    /// failure underneath it is usually a consequence of the same 401.
+    private var signedOutReason: String? {
+        if engine.sessionExpired { return Self.expiredMessage }
+        return engine.failureMessage
+    }
 
     /// A legacy code-paired phone (a device token from before Salesforce
     /// sign-in existed, no session token) already has calling set up in every

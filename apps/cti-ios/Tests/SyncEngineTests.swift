@@ -106,10 +106,12 @@ final class SyncEngineTests: XCTestCase {
 
     // MARK: - Revocation
 
-    func testARevokedDeviceIsUnpairedWithAReasonThePairingScreenCanShow() async {
+    func testARevokedDeviceIsUnpairedWithAReasonTheSignInScreenCanShow() async {
         // 401 means the rep's device was removed from the softphone's device
-        // list. `failureMessage` is what PairView renders, and it is the only
-        // thing standing between the rep and an unexplained empty form.
+        // list. `unpair()` clears the session too, so `RootView` shows
+        // `SignInView` — and `failureMessage` is what that screen renders. It
+        // is the only thing standing between the rep and an app that appears
+        // to have reset itself.
         let tokens = TokenBox(token: "device-token")
         let engine = makeEngine(
             tokens: tokens,
@@ -122,7 +124,7 @@ final class SyncEngineTests: XCTestCase {
 
         XCTAssertFalse(engine.isPaired)
         XCTAssertNil(tokens.token, "a revoked token must not be left in the Keychain")
-        XCTAssertEqual(engine.failureMessage, "This iPhone was unpaired. Enter a new pairing code.")
+        XCTAssertEqual(engine.failureMessage, "Your sign-in is no longer valid. Sign in again.")
     }
 
     func testAnUnpairedPhoneSaysSoRatherThanPullingAnything() async {
