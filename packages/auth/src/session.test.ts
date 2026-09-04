@@ -21,7 +21,7 @@ vi.mock('@cti/db', async (importOriginal) => {
 });
 
 import { sha256 } from './crypto.js';
-import { issueSession, resolveSession, ServiceUserSessionError } from './session.js';
+import { issueSession, resolveSession, ServiceUserSessionError, SuspendedTenantError } from './session.js';
 
 const human = { id: 'U1', orgId: 'O1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true, kind: 'human', isSuperAdmin: false };
 const service = { ...human, id: 'AI', email: 'ai-agent@gg-homes.internal', kind: 'service' };
@@ -74,5 +74,14 @@ describe('issueSession', () => {
   it('refuses an unknown user', async () => {
     state.user = undefined;
     await expect(issueSession('nope')).rejects.toThrow('Unknown user');
+  });
+  it('refuses a user whose tenant is suspended and inserts nothing', async () => {
+    state.org = { status: 'suspended' };
+    await expect(issueSession('U1')).rejects.toBeInstanceOf(SuspendedTenantError);
+    expect(state.inserted).toHaveLength(0);
+  });
+  it('refuses a user whose tenant row is missing', async () => {
+    state.org = undefined;
+    await expect(issueSession('U1')).rejects.toBeInstanceOf(SuspendedTenantError);
   });
 });

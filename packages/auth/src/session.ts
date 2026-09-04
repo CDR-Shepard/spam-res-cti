@@ -4,9 +4,11 @@
  * iOS, product web app) exchanges its own sign-in for one of these, so every
  * service authorizes the same way. A session only resolves while its owning
  * organization is active — a suspended or missing tenant fails closed.
+ * Issuing a session enforces the same tenant-active check up front, so a
+ * suspended org's users can never mint a fresh session either.
  */
 import { and, eq, gt, isNull } from 'drizzle-orm';
-import { getDb, schema, type UserKind } from '@cti/db';
+import { getDb, schema, type Db, type UserKind } from '@cti/db';
 import { randomToken, sha256 } from './crypto.js';
 
 const DEFAULT_TTL_DAYS = 30;
@@ -29,11 +31,20 @@ export class ServiceUserSessionError extends Error {
   }
 }
 
+/** A suspended or missing tenant may not have new sessions issued for its users. */
+export class SuspendedTenantError extends Error {
+  constructor(orgId: string) {
+    super(`Tenant ${orgId} is not active`);
+    this.name = 'SuspendedTenantError';
+  }
+}
+
 export async function issueSession(userId: string, ttlDays = DEFAULT_TTL_DAYS): Promise<{ token: string; expiresAt: Date }> {
   const db = getDb();
   const user = await db.query.users.findFirst({ where: eq(schema.users.id, userId) });
   if (!user) throw new Error('Unknown user');
   if (user.kind === 'service') throw new ServiceUserSessionError(userId);
+  if (!(await tenantIsActive(db, user.orgId))) throw new SuspendedTenantError(user.orgId);
   const token = randomToken(32);
   const tokenHash = sha256(token);
   const expiresAt = new Date(Date.now() + ttlDays * 24 * 3600 * 1000);
@@ -47,8 +58,8 @@ function bearerToken(bearer: string | undefined): string | null {
   return token || null;
 }
 
-async function tenantIsActive(orgId: string): Promise<boolean> {
-  const org = await getDb().query.organizations.findFirst({
+async function tenantIsActive(db: Db, orgId: string): Promise<boolean> {
+  const org = await db.query.organizations.findFirst({
     where: eq(schema.organizations.id, orgId),
     columns: { status: true },
   });
@@ -69,7 +80,7 @@ export async function resolveSession(bearer: string | undefined): Promise<Sessio
   if (!row) return null;
   const user = await db.query.users.findFirst({ where: eq(schema.users.id, row.userId) });
   if (!user || user.kind === 'service') return null;
-  if (!(await tenantIsActive(user.orgId))) return null;
+  if (!(await tenantIsActive(db, user.orgId))) return null;
   return {
     userId: user.id,
     orgId: user.orgId,
