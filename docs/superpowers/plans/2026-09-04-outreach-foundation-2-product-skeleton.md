@@ -1527,6 +1527,7 @@ describe('requireContext', () => {
     expect(res.json()).toMatchObject({ code: 'UNAUTHENTICATED' });
   });
   it("resolves the session's own tenant and ignores X-Org-Id for non-super-admins", async () => {
+    state.session = { ...human, isAdmin: true }; // the /x handler also calls requireAdmin
     const res = await run(fakeDb({ organizations: [org1] }).db, { 'x-org-id': org2.id });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ orgId: 'O1' });
@@ -1882,7 +1883,7 @@ cd /Users/cdrshepard/spam-res-cti && npm -w services/outreach-api run test 2>&1 
 git add services/outreach-api
 git commit -m "feat(outreach-api): WorkOS sign-in routes with cookie handoff, /auth/me, logout, and tenant-scoped request context"
 ```
-Expected: outreach-api 8 files / 33 tests.
+Expected: outreach-api 9 files / 46 tests (34 after Task 5's fix wave + 5 scope + 7 auth).
 
 ---
 
