@@ -49,6 +49,15 @@ Two deploys, in this order, each followed by observation. Everything is on
 4. Smoke: softphone sign-in still works (Salesforce login path now calls createTenant only for brand-new orgs);
    Team panel lists reps only (no "AI Agent").
 
+## After deploy 2 — operator scripts
+
+The fleet and roster scripts under `services/cti-api/scripts/` enumerate `users` without a `kind`
+filter (`redistribute-pool.mjs`, `assign-reserve-fair.mjs`, `swap-call-center.mjs`, `fleet-report.ts`,
+`buy-agent-numbers.ts`, `buy-pool-numbers.mjs`). After 0036 they will see the "AI Agent" service user
+and could assign it DIDs or count it as a rep. Before the next fleet run, add `and kind = 'human'` to
+those queries (a follow-up in `docs/superpowers/plans/2026-09-03-outreach-foundation-1-followups.md`).
+They could not be changed ahead of the deploy because `users.kind` does not exist until 0036 runs.
+
 ## Rollback notes
 
 - Deploy 1: revert the merge; nothing in the database changed.

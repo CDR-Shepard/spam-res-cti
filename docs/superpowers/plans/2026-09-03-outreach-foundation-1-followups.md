@@ -97,3 +97,5 @@ wave. None of these blocked the rollout; all are candidates for plan 2.
   follow-up above, which is a symptom of exactly this drift).
 
 - `services/cti-api/src/routes/auth.ts` login-status handler: the suspended-tenant refusal (`issueSession` → `SuspendedTenantError`) currently fires after the single-use `sessionRetrievedAt` claim, so a suspended tenant's rep gets a generic 500 and the handshake is burned. Hoist an org-status check next to the existing `user.kind === 'service'` guard so it returns the handler's `{ status: 'failed' }` shape before the claim. (Final-review nit, 2026-09-04.)
+
+- Operator scripts enumerate `users` without `kind = 'human'`: `services/cti-api/scripts/{redistribute-pool.mjs,assign-reserve-fair.mjs,swap-call-center.mjs,fleet-report.ts,buy-agent-numbers.ts,buy-pool-numbers.mjs}`. Add the filter once 0036 is live (the column does not exist before). Flagged by the Callsign session's production pre-flight, 2026-09-04.
