@@ -18,6 +18,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import twilio from 'twilio';
 import { getDb, schema } from '@cti/db';
+import { humanUsersInOrg } from '../tenancy/user-queries.js';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { findByPhone } from '../salesforce/client.js';
@@ -167,7 +168,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
       poolStickyAgentId ??
       owned.assignedUserId ??
       (await db.query.users.findFirst({
-        where: eq(schema.users.orgId, owned.orgId),
+        where: humanUsersInOrg(owned.orgId),
         columns: { id: true },
       }))?.id ??
       null;
