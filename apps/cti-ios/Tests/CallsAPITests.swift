@@ -37,15 +37,115 @@ final class CallsAPITests: XCTestCase {
         }
     }
 
+    // MARK: - precallRequest / decodePrecall
+
+    func testPrecallRequestIsPostToFirewallPrecallWithBearerAndToNumber() throws {
+        let req = precallRequest(baseURL: base, sessionToken: "sess_1", toNumber: "+16195550100", recipientRecordId: nil)
+        XCTAssertEqual(req.httpMethod, "POST")
+        XCTAssertEqual(req.url?.path, "/firewall/precall")
+        XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer sess_1")
+        let body = try JSONSerialization.jsonObject(with: req.httpBody!) as! [String: Any]
+        XCTAssertEqual(body["toNumber"] as? String, "+16195550100")
+        XCTAssertNil(body["recipientRecordId"])
+    }
+
+    func testPrecallRequestIncludesRecipientRecordIdWhenPassed() throws {
+        let req = precallRequest(baseURL: base, sessionToken: "sess_1", toNumber: "+16195550100", recipientRecordId: "00Qxx0000000001AAA")
+        let body = try JSONSerialization.jsonObject(with: req.httpBody!) as! [String: Any]
+        XCTAssertEqual(body["recipientRecordId"] as? String, "00Qxx0000000001AAA")
+    }
+
+    func testDecodePrecallAllow() throws {
+        // Exact keys `FirewallResponse` carries (services/cti-api/src/firewall/index.ts:53-60).
+        let data = """
+        {"decision":"ALLOW","reasons":["PHONE_PARSED","NOT_OPTED_OUT"],"blockReason":null,
+        "requiredScriptId":null,"auditId":"aud_1","checks":[],"normalizedTo":"+16195550100",
+        "fromNumber":"+16195550111"}
+        """.data(using: .utf8)!
+        let verdict = try decodePrecall(data, status: 200)
+        XCTAssertEqual(verdict, PrecallVerdict(auditId: "aud_1", decision: .allow, reasons: ["PHONE_PARSED", "NOT_OPTED_OUT"], blockReason: nil, requiredScriptId: nil))
+    }
+
+    func testDecodePrecallBlock() throws {
+        let data = """
+        {"decision":"BLOCK","reasons":["OPTED_OUT"],"blockReason":"This number opted out",
+        "requiredScriptId":null,"auditId":"aud_2","checks":[],"normalizedTo":"+16195550100","fromNumber":null}
+        """.data(using: .utf8)!
+        let verdict = try decodePrecall(data, status: 200)
+        XCTAssertEqual(verdict.decision, .block)
+        XCTAssertEqual(verdict.blockReason, "This number opted out")
+    }
+
+    func testDecodePrecallRequireReview() throws {
+        let data = """
+        {"decision":"REQUIRE_REVIEW","reasons":["CALLING_HOURS_UNKNOWN_TZ"],"blockReason":null,
+        "requiredScriptId":"script_1","auditId":"aud_3","checks":[],"normalizedTo":"+16195550100",
+        "fromNumber":"+16195550111"}
+        """.data(using: .utf8)!
+        let verdict = try decodePrecall(data, status: 200)
+        XCTAssertEqual(verdict.decision, .requireReview)
+        XCTAssertEqual(verdict.reasons, ["CALLING_HOURS_UNKNOWN_TZ"])
+        XCTAssertEqual(verdict.requiredScriptId, "script_1")
+    }
+
+    func testDecodePrecallThrowsOnUnknownDecision() {
+        // An unrecognized decision string must never silently decode as .allow.
+        let data = """
+        {"decision":"WEIRD_FUTURE_DECISION","reasons":[],"blockReason":null,
+        "requiredScriptId":null,"auditId":"aud_4","checks":[],"normalizedTo":null,"fromNumber":null}
+        """.data(using: .utf8)!
+        XCTAssertThrowsError(try decodePrecall(data, status: 200))
+    }
+
+    func testDecodePrecallThrowsServerErrorOnNon200() {
+        XCTAssertThrowsError(try decodePrecall(Data(), status: 401)) { error in
+            XCTAssertEqual(error as? SessionClientError, .server(status: 401))
+        }
+        XCTAssertThrowsError(try decodePrecall(Data(), status: 500)) { error in
+            XCTAssertEqual(error as? SessionClientError, .server(status: 500))
+        }
+    }
+
     // MARK: - placeCallRequest / decodePlaceCall
 
     func testPlaceCallRequestIsPostToCallsWithBearerAndToNumber() throws {
-        let req = try placeCallRequest(baseURL: base, sessionToken: "sess_1", toNumber: "+16195550100")
+        let req = placeCallRequest(baseURL: base, sessionToken: "sess_1", toNumber: "+16195550100",
+                                    auditId: "aud_1", acknowledged: false, recipientRecordId: nil, recipientObjectType: nil)
         XCTAssertEqual(req.httpMethod, "POST")
         XCTAssertEqual(req.url?.path, "/calls")
         XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer sess_1")
-        let body = try JSONSerialization.jsonObject(with: req.httpBody!) as! [String: String]
-        XCTAssertEqual(body["toNumber"], "+16195550100")
+        let body = try JSONSerialization.jsonObject(with: req.httpBody!) as! [String: Any]
+        XCTAssertEqual(body["toNumber"] as? String, "+16195550100")
+        XCTAssertEqual(body["auditId"] as? String, "aud_1")
+    }
+
+    func testPlaceCallRequestOmitsAcknowledgedWhenFalse() throws {
+        let req = placeCallRequest(baseURL: base, sessionToken: "sess_1", toNumber: "+16195550100",
+                                    auditId: "aud_1", acknowledged: false, recipientRecordId: nil, recipientObjectType: nil)
+        let body = try JSONSerialization.jsonObject(with: req.httpBody!) as! [String: Any]
+        XCTAssertNil(body["acknowledged"])
+    }
+
+    func testPlaceCallRequestIncludesAcknowledgedWhenTrue() throws {
+        let req = placeCallRequest(baseURL: base, sessionToken: "sess_1", toNumber: "+16195550100",
+                                    auditId: "aud_1", acknowledged: true, recipientRecordId: nil, recipientObjectType: nil)
+        let body = try JSONSerialization.jsonObject(with: req.httpBody!) as! [String: Any]
+        XCTAssertEqual(body["acknowledged"] as? Bool, true)
+    }
+
+    func testPlaceCallRequestIncludesRecordFieldsOnlyWhenPassed() throws {
+        let withoutRecord = placeCallRequest(baseURL: base, sessionToken: "sess_1", toNumber: "+16195550100",
+                                              auditId: "aud_1", acknowledged: false, recipientRecordId: nil, recipientObjectType: nil)
+        let bodyWithout = try JSONSerialization.jsonObject(with: withoutRecord.httpBody!) as! [String: Any]
+        XCTAssertNil(bodyWithout["recipientRecordId"])
+        XCTAssertNil(bodyWithout["recipientObjectType"])
+
+        let withRecord = placeCallRequest(baseURL: base, sessionToken: "sess_1", toNumber: "+16195550100",
+                                           auditId: "aud_1", acknowledged: false,
+                                           recipientRecordId: "00Qxx0000000001AAA", recipientObjectType: "Lead")
+        let bodyWith = try JSONSerialization.jsonObject(with: withRecord.httpBody!) as! [String: Any]
+        XCTAssertEqual(bodyWith["recipientRecordId"] as? String, "00Qxx0000000001AAA")
+        XCTAssertEqual(bodyWith["recipientObjectType"] as? String, "Lead")
     }
 
     func testDecodePlaceCallAllowed() throws {
@@ -62,9 +162,17 @@ final class CallsAPITests: XCTestCase {
         XCTAssertEqual(result, .allowed(callId: "call_123", fromNumber: "+16195550111"))
     }
 
+    func testDecodePlaceCallReviewRequiredOn412() throws {
+        // calls.ts ~:205-211: audit.decision === 'REQUIRE_REVIEW' && !acknowledged.
+        let data = #"{"error":"Call requires review acknowledgement","decision":"REQUIRE_REVIEW","reasons":["UNKNOWN_TZ"],"requiredScriptId":null}"#.data(using: .utf8)!
+        let result = try decodePlaceCall(data, status: 412)
+        XCTAssertEqual(result, .reviewRequired(reasons: ["UNKNOWN_TZ"], requiredScriptId: nil))
+    }
+
     func testDecodePlaceCallRefusedPrefersBlockReasonOverError() throws {
+        // calls.ts ~:199-200: audit.decision === 'BLOCK' sends this body with 403 (not 409).
         let data = #"{"error":"Firewall blocked this call","blockReason":"Calling FL is Mon-Sat only (today is Sunday, recipient-local)"}"#.data(using: .utf8)!
-        let result = try decodePlaceCall(data, status: 409)
+        let result = try decodePlaceCall(data, status: 403)
         XCTAssertEqual(result, .refused(reason: "Calling FL is Mon-Sat only (today is Sunday, recipient-local)"))
     }
 
@@ -73,6 +181,13 @@ final class CallsAPITests: XCTestCase {
         let data = #"{"error":"Disposition your previous call before dialing again.","code":"DISPOSITION_REQUIRED"}"#.data(using: .utf8)!
         let result = try decodePlaceCall(data, status: 409)
         XCTAssertEqual(result, .refused(reason: "Disposition your previous call before dialing again."))
+    }
+
+    func testDecodePlaceCallRefusedOnAuditExpired() throws {
+        // calls.ts ~:214-215: Date.now() - audit.createdAt > 5 min → 400 { error }.
+        let data = #"{"error":"Audit expired (>5 min); re-run firewall"}"#.data(using: .utf8)!
+        let result = try decodePlaceCall(data, status: 400)
+        XCTAssertEqual(result, .refused(reason: "Audit expired (>5 min); re-run firewall"))
     }
 
     func testDecodePlaceCallThrowsServerErrorWhenRefusalBodyIsUnparseable() {

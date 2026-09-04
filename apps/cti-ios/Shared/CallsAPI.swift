@@ -26,10 +26,14 @@ struct CallSummary: Decodable, Identifiable, Equatable {
 
 /// The outcome of `POST /calls` as the dial screen understands it. `.refused`
 /// carries whatever the firewall/dispositon-gate wants the rep to read —
-/// never a raw HTTP status.
+/// never a raw HTTP status. `.reviewRequired` is the 412-only case: the
+/// pre-call audit was a REQUIRE_REVIEW verdict the rep has not yet
+/// acknowledged, so the dial screen must show the reasons/script and let the
+/// rep re-send with `acknowledged: true` rather than treating it as a refusal.
 enum PlaceCallResult: Equatable {
     case allowed(callId: String, fromNumber: String)
     case refused(reason: String)
+    case reviewRequired(reasons: [String], requiredScriptId: String?)
 }
 
 /// Builds a bearer-authenticated request against the CTI API. Shared by every
@@ -48,14 +52,87 @@ func authedRequest(baseURL: URL, path: String, sessionToken: String, method: Str
     return request
 }
 
+/// `services/cti-api/src/firewall/index.ts`'s `Decision` union, verbatim.
+/// Decoded via its raw value so an unrecognized string (a server-side
+/// decision the app doesn't know about yet) fails the decode instead of
+/// silently defaulting to `.allow` — a firewall verdict the client
+/// misreads as "allow" is worse than one it refuses to parse.
+enum FirewallDecision: String, Decodable, Equatable {
+    case allow = "ALLOW"
+    case block = "BLOCK"
+    case requireReview = "REQUIRE_REVIEW"
+}
+
+/// The fields the app needs out of `POST /firewall/precall`'s `FirewallResponse`
+/// (`services/cti-api/src/firewall/index.ts:53-60`). `checks`, `normalizedTo`,
+/// and `fromNumber` are part of the wire shape too but nothing on the phone
+/// reads them yet, so they're left off this struct and ignored by Decodable
+/// synthesis rather than modeled speculatively.
+struct PrecallVerdict: Decodable, Equatable {
+    let auditId: String
+    let decision: FirewallDecision
+    let reasons: [String]
+    let blockReason: String?
+    let requiredScriptId: String?
+}
+
+private struct PrecallBody: Encodable {
+    let toNumber: String
+    let recipientRecordId: String?
+}
+
+/// The request the app sends to run the pre-call firewall audit before
+/// `POST /calls`. `recipientRecordId` (the click-to-dial source Lead/Contact)
+/// is omitted from the body entirely when nil — same convention as
+/// `dispositionRequest`'s `notes` — rather than sent as JSON `null`.
+func precallRequest(baseURL: URL, sessionToken: String, toNumber: String, recipientRecordId: String?) -> URLRequest {
+    let body = try! JSONEncoder().encode(PrecallBody(toNumber: toNumber, recipientRecordId: recipientRecordId))
+    return authedRequest(baseURL: baseURL, path: "firewall/precall", sessionToken: sessionToken, method: "POST", body: body)
+}
+
+/// Pure — decodes `POST /firewall/precall`'s always-200 response into a
+/// `PrecallVerdict`. Unlike `POST /calls`, the firewall endpoint itself never
+/// returns a non-2xx for a BLOCK/REQUIRE_REVIEW verdict; those are ordinary
+/// 200 bodies whose `decision` field the caller must branch on. A genuine
+/// non-200 here (401 unauthenticated, 500) has no verdict to salvage.
+func decodePrecall(_ data: Data, status: Int) throws -> PrecallVerdict {
+    guard status == 200 else { throw SessionClientError.server(status: status) }
+    guard let verdict = try? JSONDecoder().decode(PrecallVerdict.self, from: data) else {
+        throw SessionClientError.malformedResponse
+    }
+    return verdict
+}
+
+/// `POST /calls`'s `Create` body (`services/cti-api/src/routes/calls.ts` ~:142-160).
+/// `acknowledged` is modeled as `Bool?` here (rather than the public
+/// function's plain `Bool`) purely so the synthesized `Encodable` can omit
+/// the key via `encodeIfPresent` when it's `false` — the server only checks
+/// `acknowledged !== true`, so an explicit `false` and an absent key are
+/// equivalent on the wire, and omitting it keeps the common (non-review)
+/// dial request body minimal.
 private struct PlaceCallBody: Encodable {
     let toNumber: String
+    let auditId: String
+    let acknowledged: Bool?
+    let recipientRecordId: String?
+    let recipientObjectType: String?
 }
 
 /// The request the app sends to place a call. Pure, so a test can assert the
-/// method, path, bearer, and body without a network.
-func placeCallRequest(baseURL: URL, sessionToken: String, toNumber: String) throws -> URLRequest {
-    let body = try JSONEncoder().encode(PlaceCallBody(toNumber: toNumber))
+/// method, path, bearer, and body without a network. `auditId` is the
+/// `PrecallVerdict.auditId` from the immediately-preceding `precallRequest`
+/// call — the server re-reads that audit row rather than trusting any
+/// client-supplied verdict. `acknowledged: true` is required when (and only
+/// when) that audit's decision was `.requireReview`.
+func placeCallRequest(baseURL: URL, sessionToken: String, toNumber: String, auditId: String,
+                       acknowledged: Bool, recipientRecordId: String?, recipientObjectType: String?) -> URLRequest {
+    let body = try! JSONEncoder().encode(PlaceCallBody(
+        toNumber: toNumber,
+        auditId: auditId,
+        acknowledged: acknowledged ? true : nil,
+        recipientRecordId: recipientRecordId,
+        recipientObjectType: recipientObjectType
+    ))
     return authedRequest(baseURL: baseURL, path: "calls", sessionToken: sessionToken, method: "POST", body: body)
 }
 
@@ -80,15 +157,34 @@ private struct RefusalWire: Decodable {
     let blockReason: String?
 }
 
+/// The 412 body's shape (`calls.ts` ~:205-211): `{ error, decision, reasons,
+/// requiredScriptId }`. `decision` is checked against the literal string
+/// (not decoded as `FirewallDecision`) so a decode failure here can never be
+/// mistaken for a malformed-response throw — it just falls through to the
+/// generic `RefusalWire` check below.
+private struct ReviewRequiredWire: Decodable {
+    let decision: String
+    let reasons: [String]
+    let requiredScriptId: String?
+}
+
 /// Pure — the server's answer to a dial attempt. A non-2xx with a string
 /// `blockReason` or `error` becomes `.refused` (the reason the dial screen
-/// renders inline); anything else non-2xx throws `SessionClientError.server`.
+/// renders inline); a 412 whose `decision` is `REQUIRE_REVIEW` becomes
+/// `.reviewRequired` instead, since that is not a refusal — the rep can
+/// re-send the exact same call with `acknowledged: true`; anything else
+/// non-2xx throws `SessionClientError.server`.
 func decodePlaceCall(_ data: Data, status: Int) throws -> PlaceCallResult {
     if (200..<300).contains(status) {
         guard let wire = try? JSONDecoder().decode(PlaceCallSuccessWire.self, from: data) else {
             throw SessionClientError.malformedResponse
         }
         return .allowed(callId: wire.call.id, fromNumber: wire.call.fromNumber)
+    }
+    if status == 412,
+       let review = try? JSONDecoder().decode(ReviewRequiredWire.self, from: data),
+       review.decision == "REQUIRE_REVIEW" {
+        return .reviewRequired(reasons: review.reasons, requiredScriptId: review.requiredScriptId)
     }
     if let refusal = try? JSONDecoder().decode(RefusalWire.self, from: data),
        let reason = refusal.blockReason ?? refusal.error {
