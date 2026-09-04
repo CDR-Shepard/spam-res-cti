@@ -700,6 +700,63 @@ final class CallControllerTests: XCTestCase {
         guard case .active = c.phase else { return XCTFail("expected active") }
     }
 
+    /// The empty gap between the server's ALLOW and `sdk.connect` used to be
+    /// enforced by the type system: `tokens` was synchronous, so an `await`
+    /// there was unwritable. It is now enforced by a comment, so pin the
+    /// consequences instead — on a successful dial the controller mints
+    /// exactly ONE token and touches no other collaborator after the verdict.
+    /// A second mint, or a pending-disposition lookup slipped into the gap,
+    /// fails here.
+    @MainActor func testAnAllowedDialTouchesNothingElseAfterTheVerdict() async {
+        let order = OrderLog()
+        let api = FakeCallsAPI()
+        api.placeResult = .allowed(callId: "c_gap", fromNumber: "+12135550100")
+        let wrappedAPI = OrderRecordingCallsAPI(inner: api, order: order)
+        let tokens = OrderRecordingTokens(order: order)
+        let c = CallController(sdk: FakeSDK(), system: FakeCallSystem(), api: wrappedAPI, tokens: tokens.fetch)
+
+        await c.placeCall(to: "+18585550100")
+
+        XCTAssertEqual(order.events.filter { $0 == "token" }.count, 1, "exactly one mint per dial")
+        XCTAssertEqual(api.pendingLookups, 0, "nothing may look up a pending disposition inside the dial")
+        XCTAssertEqual(
+            order.events,
+            ["token", "place"],
+            "a new collaborator called during the dial shows up here — if it landed after the verdict it is inside the gap that must stay empty"
+        )
+    }
+
+    /// The seam suspends now, so two dials can interleave across it in a way
+    /// the sequential test cannot see. The guard holds because `guard isIdle`
+    /// and `phase = .dialing` both run synchronously before the first await on
+    /// a `@MainActor` class — moving that assignment after the await fails
+    /// this test while the rest of the suite stays green.
+    @MainActor func testTwoDialsRacingAcrossTheTokenAwaitCannotBothProceed() async {
+        let gate = CallGate()
+        let api = FakeCallsAPI()
+        api.placeResult = .allowed(callId: "c_race", fromNumber: "+12135550100")
+        let sdk = FakeSDK()
+        var mints = 0
+        let c = CallController(
+            sdk: sdk,
+            system: FakeCallSystem(),
+            api: api,
+            tokens: {
+                mints += 1
+                await gate.wait()
+                return "voice_t"
+            }
+        )
+
+        async let first: Void = c.placeCall(to: "+18585550100")
+        async let second: Void = c.placeCall(to: "+18585550101")
+        await gate.open()
+        _ = await (first, second)
+
+        XCTAssertEqual(mints, 1, "the second dial must be refused before it ever reaches the token await")
+        XCTAssertEqual(sdk.connectCalls, 1, "exactly one call may be connected")
+    }
+
     /// `acknowledge()` re-places against a held REQUIRE_REVIEW audit, and it
     /// has to fetch its own token in the same order — before `place`, not
     /// reusing whatever `placeCall` fetched (and possibly never used) minutes

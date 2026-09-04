@@ -28,10 +28,6 @@ comment on `revokeDevicesForDeactivatedUser`.
 
 ## 2. Smaller Callsign items
 
-- Recents rows show the raw dialed string for outbound calls; the server does
-  not return a normalized E.164 in the recent-calls feed.
-- The voice-token seam on `CallController` is synchronous, so a dial racing the
-  very first token mint fails after `POST /calls` already created a row.
 - The in-call speaker button does not observe `AVAudioSession.routeChangeNotification`,
   so switching to AirPods mid-call leaves the toggle stale.
 - `.dialing` cannot be cancelled from the app's own UI; CallKit's End works

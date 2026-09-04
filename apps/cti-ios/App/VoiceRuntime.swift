@@ -66,6 +66,13 @@ final class VoiceRuntime: ObservableObject {
             // dial landed before the very first mint finished and reached
             // Twilio with an empty token.
             tokens: refresher.current,
+            // A 401 on a mint during a dial reports twice: once inside the
+            // refresher's own `sessionExpiryWatching`, once here when the
+            // controller catches the rethrown error. That is intentional and
+            // absorbed by design — `SessionExpiryGate` collapses concurrent
+            // reports into ONE confirmation and at most one sign-out, and the
+            // mint is named in its doc comment as a source it exists to
+            // coalesce.
             onSessionExpired: { expiry.fire() }
         )
         system.controller = controller
@@ -168,7 +175,15 @@ final class VoiceRuntime: ObservableObject {
     /// fail at the worst possible moment.
     private static func mintVoiceToken(baseURL: URL) async throws -> VoiceToken {
         guard let session = SessionTokenStore().load() else { throw VoiceRuntimeError.notSignedIn }
-        let request = try voiceTokenRequest(baseURL: baseURL, sessionToken: session)
+        var request = try voiceTokenRequest(baseURL: baseURL, sessionToken: session)
+        // The controller awaits this inside `.dialing`, which the app's own UI
+        // cannot cancel (`hangUp()` is a no-op until there is a live call), so
+        // URLSession's 60s default would be a full minute of frozen dial
+        // screen in front of every attempt on a stalled network — precisely
+        // the cold/stale case this await exists to handle. Fail fast instead:
+        // the throw becomes a refusal the rep can read and retry. Same bound,
+        // same reasoning, as the expiry probe in `SessionExpiry.swift`.
+        request.timeoutInterval = 10
         let (data, status) = try await livePairingTransport(request)
         return try decodeVoiceToken(data, status: status)
     }
