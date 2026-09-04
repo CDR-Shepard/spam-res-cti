@@ -6,18 +6,43 @@ import { evaluate } from './evaluate.js';
 /**
  * Minimal fake DB in the repo's convention: `where` clauses are not
  * introspected; each query returns the fixture configured for its table.
- * Shape covers exactly what `evaluate` touches when no campaign row exists,
- * which is the smallest path that still exercises the recipient-address port,
- * the DNC/consent gates, and the audit insert.
+ *
+ * Two shapes are covered here: the no-campaign path (the smallest path that
+ * still exercises the recipient-address port, the DNC/consent gates, and the
+ * audit insert) and, with `{ campaign }`, the campaign-row path that additionally
+ * walks the attempt, calling-hours, and recording-consent gates. NEITHER shape
+ * exercises the per-DID reputation gates (warmup, velocity, neighbor_spoof,
+ * attestation, answer_rate, engagement) — those only run once an outbound
+ * number is actually picked, and the fake pool here is always empty (see
+ * `select` below), so `outboundNumberRow` stays null and gate 7's block is
+ * skipped end to end. Covering those gates needs a fixture with a real
+ * `outboundNumbers` row in the pool — tracked as a follow-up.
  */
-function fakeDb() {
+function fakeDb(opts: { campaign?: Record<string, unknown> } = {}) {
   const inserted: unknown[] = [];
   const findFirst = <T,>(value: T) => async () => value;
+  // Chainable query-builder stand-in for `db.select(...)`. Every builder
+  // method returns the same chain object so callers can stop at whichever
+  // step their real query stops at (`.where()` for rotation's pool query,
+  // `.groupBy()` for customerAttemptCounts, `.orderBy().limit()` for the
+  // attestation sample) — and the chain is itself thenable, resolving to an
+  // empty row set, so `await` at any of those points just works.
+  function chain(rows: unknown[] = []) {
+    const c: Record<string, unknown> = {
+      from: () => c,
+      where: () => c,
+      groupBy: () => c,
+      orderBy: () => c,
+      limit: () => c,
+      then: (resolve: (v: unknown) => void) => resolve(rows),
+    };
+    return c;
+  }
   const db = {
     query: {
       optOuts: { findFirst: findFirst(undefined) },
       blockedNumbers: { findFirst: findFirst(undefined) },
-      campaignConfigs: { findFirst: findFirst(undefined) },
+      campaignConfigs: { findFirst: findFirst(opts.campaign) },
       outboundNumbers: { findFirst: findFirst(undefined) },
       stateCallingRules: { findFirst: findFirst(undefined) },
       federalDncEntries: { findFirst: findFirst(undefined) },
@@ -25,8 +50,7 @@ function fakeDb() {
       consentRecords: { findFirst: findFirst(undefined) },
       rndLookups: { findFirst: findFirst(undefined) },
     },
-    // rotation's pool query: db.select().from(t).where(...) awaited directly
-    select: () => ({ from: () => ({ where: async () => [] }) }),
+    select: () => chain([]),
     insert: () => ({
       values: (v: unknown) => {
         inserted.push(v);
@@ -36,6 +60,23 @@ function fakeDb() {
   };
   return { db: db as unknown as Db, inserted };
 }
+
+const CAMPAIGN = {
+  id: 'C1',
+  orgId: 'O1',
+  key: 'default',
+  name: 'Default Campaign',
+  paused: false,
+  maxAttempts: 5,
+  attemptWindowDays: 14,
+  perCustomerMaxAttempts: 15,
+  followupDailyCap: 100,
+  callingHoursStart: '08:00',
+  callingHoursEnd: '20:00',
+  callingDays: [1, 2, 3, 4, 5, 6, 7],
+  recordingConsentMode: 'two_party',
+  requiredScriptId: null,
+};
 
 const base = { orgId: 'O1', userId: 'U1' };
 
@@ -92,6 +133,42 @@ describe('evaluate — characterization', () => {
     const port = vi.fn(async () => { throw new RecipientLookupUnauthorizedError(); });
     const res = await evaluate(db, { ...base, toNumberRaw: '+16195559999', recipientRecordId: '00Q000000000001AAA' }, { fetchRecipientAddress: port });
     expect(res.decision).toBe('REQUIRE_REVIEW');
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('not authorized'), expect.objectContaining({ userId: 'U1' }));
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('recipient address lookup skipped: not authorized'),
+      expect.objectContaining({ userId: 'U1' }),
+    );
+  });
+
+  /**
+   * With a campaign row present, `evaluate` additionally walks the attempt
+   * gate (customerAttemptCounts + attemptGateChecks), the calling-hours gate,
+   * and the recording-consent gate. The outbound pool is still empty (see
+   * `fakeDb`), so this does NOT reach the per-DID gates (warmup, velocity,
+   * neighbor_spoof, attestation, answer_rate, engagement) — those need
+   * `outboundNumberRow` to be non-null, which needs an actual pool row.
+   */
+  it('with a campaign row, walks the attempt, calling-hours, and recording gates', async () => {
+    vi.useFakeTimers({ now: new Date('2026-09-09T17:00:00Z') }); // Wed 10:00 America/Los_Angeles
+    try {
+      const { db } = fakeDb({ campaign: CAMPAIGN });
+      const res = await evaluate(db, {
+        ...base,
+        toNumberRaw: '(619) 555-9999',
+        recipientTimezone: 'America/Los_Angeles',
+      });
+      expect(res.decision).toBe('REQUIRE_REVIEW');
+      const reasonCodes = res.checks.map((c) => c.reasonCode);
+      expect(reasonCodes).toEqual(
+        expect.arrayContaining([
+          'CAMPAIGN_ACTIVE',
+          'CUSTOMER_LIMIT_OK',
+          'CALLING_HOURS_OK',
+          'RECORDING_CONSENT_REVIEW',
+          'OUTBOUND_NUMBER_MISSING',
+        ]),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
