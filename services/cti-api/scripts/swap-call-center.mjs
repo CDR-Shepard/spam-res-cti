@@ -69,7 +69,7 @@ const c = new pg.Client({
   ssl: { rejectUnauthorized: false },
 });
 await c.connect();
-const { rows: ctiUsers } = await c.query('select email from users order by email');
+const { rows: ctiUsers } = await c.query(`select email from users where email not like 'ai-agent@%' order by email`);
 await c.end();
 
 let emails = ctiUsers.map((u) => u.email.toLowerCase());

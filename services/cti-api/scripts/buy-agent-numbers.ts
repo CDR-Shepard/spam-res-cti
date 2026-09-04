@@ -126,7 +126,7 @@ async function cmdPlan() {
   const c = await dbClient();
   try {
     let agents = 0;
-    for (const email of (await c.query(`select email from users where email != 'dev@example.com' order by created_at`)).rows.map((r) => r.email as string)) {
+    for (const email of (await c.query(`select email from users where email != 'dev@example.com' and email not like 'ai-agent@%' order by created_at`)).rows.map((r) => r.email as string)) {
       const { holdings } = await repHoldings(c, email);
       const p = buyPlanForRep(holdings);
       agents += p.la + p.sd;

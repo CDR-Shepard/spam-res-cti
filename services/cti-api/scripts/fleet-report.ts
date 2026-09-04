@@ -55,7 +55,7 @@ const db = (await c.query(`select n.e164, n.kind, n.twilio_sid, n.health, n.heal
 /** EVERY row, active or not: a deliberately deactivated DID we still own is not an orphan. */
 const known = new Set<string>((await c.query('select e164 from outbound_numbers')).rows.map((r) => r.e164 as string));
 /** The rep roster drives the tally, so a rep holding ZERO numbers prints `0/6 ✗ SHORT` instead of vanishing. */
-const roster = (await c.query(`select email from users where email != 'dev@example.com' order by created_at`)).rows.map((r) => r.email as string);
+const roster = (await c.query(`select email from users where email != 'dev@example.com' and email not like 'ai-agent@%' order by created_at`)).rows.map((r) => r.email as string);
 const tw = new Map((await all(`https://api.twilio.com/2010-04-01/Accounts/${ACCOUNT}/IncomingPhoneNumbers.json?PageSize=100`, 'incoming_phone_numbers')).map((n: any) => [n.phone_number, n]));
 const inProfile = new Set((await all(`https://trusthub.twilio.com/v1/CustomerProfiles/${PROFILE}/ChannelEndpointAssignments?PageSize=100`, 'results')).map((a: any) => a.channel_endpoint_sid));
 const inShaken = new Set((await all(`https://trusthub.twilio.com/v1/TrustProducts/${SHAKEN}/ChannelEndpointAssignments?PageSize=100`, 'results')).map((a: any) => a.channel_endpoint_sid));

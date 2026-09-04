@@ -54,6 +54,10 @@ try {
          count(n.id) filter (where n.active and n.health not in ('spam_likely','degraded'))::int as usable
        from users u left join outbound_numbers n on n.assigned_user_id = u.id
        where u.email != 'dev@example.com'
+         -- Service users (the per-tenant "AI Agent" that 0036_tenancy inserts)
+         -- are not reps. Matched on email rather than users.kind so this works
+         -- both before and after that migration is applied to a database.
+         and u.email not like 'ai-agent@%'
        group by u.id, u.email`,
     )
   ).rows.map((r) => ({ ...r, usable: Number(r.usable) }));

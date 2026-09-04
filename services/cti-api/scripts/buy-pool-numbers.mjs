@@ -149,7 +149,7 @@ async function doDbCheck() {
   await client.connect();
   try {
     const org = await client.query('select id, name, sf_org_id from organizations order by created_at asc limit 1');
-    const u = await client.query('select count(*)::int n from users');
+    const u = await client.query(`select count(*)::int n from users where email not like 'ai-agent@%'`);
     const reps = await client.query("select count(*)::int n from users where display_name ilike any (array['%cook%','%lizola%','%tyler%','%matt%'])");
     const nums = await client.query("select count(*)::int total, count(*) filter (where kind='dialer_pool')::int pool from outbound_numbers");
     const o = org.rows[0] || {};
