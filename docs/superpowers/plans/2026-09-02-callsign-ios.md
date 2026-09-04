@@ -41,7 +41,7 @@ struct CallSummary: Decodable, Identifiable, Equatable { let id: String; let dir
 protocol VoiceSDK { func register(accessToken: String, deviceToken: Data) async throws; func unregister(accessToken: String, deviceToken: Data) async throws; func connect(accessToken: String, params: [String: String]) async throws -> ActiveCall; func handleIncomingPush(payload: [AnyHashable: Any]) -> IncomingInvite? }
 protocol ActiveCall: AnyObject { var uuid: UUID { get }; func hangUp(); func setMuted(_ on: Bool); var onDisconnect: ((Error?) -> Void)? { get set } }
 protocol IncomingInvite: AnyObject { var uuid: UUID { get }; var from: String? { get }; var customParameters: [String: String] { get }; func accept() -> ActiveCall; func reject() }
-protocol CallSystem { func reportIncoming(uuid: UUID, title: String, handle: String) async throws; func reportOutgoingStarted(uuid: UUID, handle: String); func reportEnded(uuid: UUID) }
+protocol CallSystem { func reportIncoming(uuid: UUID, title: String, handle: String, completion: @escaping (Error?) -> Void); func reportOutgoingStarted(uuid: UUID, handle: String); func reportEnded(uuid: UUID) }  // reportIncoming is SYNCHRONOUS: CallKit must be told before the PushKit delegate returns
 ```
 
 ---
