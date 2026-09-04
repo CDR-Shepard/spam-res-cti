@@ -177,6 +177,21 @@ final class DialViewModelTests: XCTestCase {
         XCTAssertEqual(DialViewModel.formatDialString("6198481782"), "(619) 848-1782")
         XCTAssertEqual(DialViewModel.formatDialString("16198481782"), "+1 (619) 848-1782")
         XCTAssertEqual(DialViewModel.formatDialString("+16198481782"), "+1 (619) 848-1782")
+        // 8 and 9 digits: the web slices from index 6, it never pads to a full number.
+        XCTAssertEqual(DialViewModel.formatDialString("61984817"), "(619) 848-17")
+        XCTAssertEqual(DialViewModel.formatDialString("619848178"), "(619) 848-178")
+    }
+
+    /// The editable field's binding is `get: formatDialString(raw)` /
+    /// `set: raw = accept($0)`, so formatting must never add or move a digit:
+    /// re-accepting a formatted string has to give back exactly what was typed,
+    /// at every length a rep can pause at.
+    func testAcceptingAFormattedNumberGivesBackExactlyWhatWasTyped() {
+        let full = "61984817829"
+        for n in 1...full.count {
+            let raw = String(full.prefix(n))
+            XCTAssertEqual(DialViewModel.accept(DialViewModel.formatDialString(raw)), raw, "round trip broke at \(n) digits")
+        }
     }
 
     /// Three cases where reshaping the number would be a lie about who is

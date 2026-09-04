@@ -150,7 +150,7 @@ enum DialViewModel {
         if national.isEmpty { return prefix.trimmingCharacters(in: .whitespaces) }
         if national.count <= 3 { return prefix + national }
         if national.count <= 7 { return "\(prefix)\(national.prefix(3))-\(national.dropFirst(3))" }
-        return "\(prefix)(\(national.prefix(3))) \(national.dropFirst(3).prefix(3))-\(national.suffix(4))"
+        return "\(prefix)(\(national.prefix(3))) \(national.dropFirst(3).prefix(3))-\(national.dropFirst(6))"
     }
 
     private static let asciiDigits: Set<Character> = Set("0123456789")
