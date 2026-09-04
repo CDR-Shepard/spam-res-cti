@@ -253,6 +253,7 @@ can't verify; the same split applies here).
       ringing, the push arrived before the softphone attached — still correct
       (iOS requires a CallKit report either way), but worth noting on the
       build.
+- [ ] **Reboot the phone and, BEFORE unlocking it once, call it.** Expect a missed-call entry, not a ring: the session token is Keychain `AfterFirstUnlockThisDeviceOnly`, so the app cannot attach the voice runtime until the first unlock and reports the push as a missed call (by design — do not file this as the cold-launch race). Unlock once, call again → it rings.
 - [ ] **Sign out on the phone → the web softphone still works.** Sign out
       revokes this phone's `mobile_devices` row (`DELETE /mobile/devices/:id`),
       unregisters the handset from Twilio, and clears its session; it must not
