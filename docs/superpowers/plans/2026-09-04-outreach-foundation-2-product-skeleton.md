@@ -3241,7 +3241,9 @@ The first deploy will fail at boot with "Invalid environment configuration" unti
 The GG Homes tenant already exists (created by Salesforce login). Link it and send the first admin invite:
 
 ```bash
-railway run -s outreach-api -- npx tsx services/outreach-api/scripts/link-tenant-workos.ts --org-slug gg-homes --admin-email <your email>
+# `railway run` executes locally; the service's DATABASE_URL points at the private railway.internal host, so use the public URL (never echo it):
+PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
+railway run -s outreach-api -- env DATABASE_URL="$PUB" npx tsx services/outreach-api/scripts/link-tenant-workos.ts --org-slug gg-homes --admin-email <your email>
 ```
 
 Accept the invite from the email WorkOS sends, then open `https://<name>.up.railway.app` and sign in. Your user is matched by email to your existing GG Homes user and marked admin.
@@ -3249,19 +3251,25 @@ Accept the invite from the email WorkOS sends, then open `https://<name>.up.rail
 Optional, for platform staff who need the tenant switcher:
 
 ```bash
-railway run -s outreach-api -- npx tsx services/outreach-api/scripts/grant-super-admin.ts --org-slug gg-homes --email <your email>
+railway run -s outreach-api -- env DATABASE_URL="$PUB" npx tsx services/outreach-api/scripts/grant-super-admin.ts --org-slug gg-homes --email <your email>
 ```
 
 ## 4. New tenants
 
 ```bash
-railway run -s outreach-api -- npx tsx services/outreach-api/scripts/provision-tenant.ts --name "Acme Buyers" --admin-email owner@acme.com --timezone America/Chicago
+railway run -s outreach-api -- env DATABASE_URL="$PUB" npx tsx services/outreach-api/scripts/provision-tenant.ts --name "Acme Buyers" --admin-email owner@acme.com --timezone America/Chicago
 ```
 (or `POST /api/admin/tenants` as a super admin from the app once that UI exists.)
 
 ## 5. Follow-up before 2026-12-01: retire cti-api's railway.json
 
-Railway removes Config-as-Code support on 2026-12-01. `.railway/railway.ts` now describes the CTI API too. After the outreach-api deploy is stable: in **@cti/api → Settings**, clear the config file path field, run `railway config plan` (expect no changes), then delete `railway.json` in a small PR.
+Railway removes Config-as-Code support on 2026-12-01. `.railway/railway.ts` describes the CTI API too, but the pulled `@cti/api` block carries only the service-level settings — its Docker build, pre-deploy migrate, start command, and health check come from `railway.json` today, and deleting that file first would make the next cti-api deploy build with Railpack (no packages, no softphone bundle), skip migrations, and lose its health check. Order matters:
+
+1. In `.railway/railway.ts`, extend the `@cti/api` block with what `railway.json` supplies: the Dockerfile build (`build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" }` or `env.RAILWAY_DOCKERFILE_PATH: "Dockerfile"`), `preDeploy: "npm --workspace packages/db run migrate"`, `start: "node services/cti-api/dist/server.js"`, `healthcheck: "/healthz"`, `healthcheckTimeout: 120`, and the restart policy (`ON_FAILURE`, 5 retries). `railway config migrate --apply` does this translation automatically.
+2. `railway config plan` — expect changes to `@cti/api`'s build/start/healthcheck; stop if it reports none.
+3. `railway config apply`.
+4. Only now delete `railway.json` (and clear any config-file path field if one is set) in a small PR.
+5. `railway config plan` again — expect no changes.
 
 ## Rollback
 
@@ -3296,7 +3304,7 @@ Add an "Outreach product (outreach-api + outreach-web)" section after the CTI ar
 
 Add a section "Plan 2 outcomes and new follow-ups":
 - Closed by plan 2: `packages/contracts` created; human-user predicates moved to `@cti/auth`.
-- New: retire `railway.json` before 2026-12-01 (runbook §5); Railway "watch paths" are not expressible in the IaC DSL yet — both services rebuild on every push to `main`, acceptable for now; `outreach-web` keeps the bearer in memory only (spec §4.3), so a page reload re-runs the AuthKit redirect — revisit if it annoys admins (a `sessionStorage` copy is the smallest change); `apps/cti-web` and `apps/outreach-web` pin different `vitest` majors (4 vs 2 in the Node services) — align when the next Vite upgrade happens; the fake-DB harness in `outreach-api` cannot express `where` semantics — the real-Postgres lane (plan 3) should cover `requireContext` tenant isolation and `completeSignIn` against real rows; `GET /admin/tenants` has no UI for provisioning yet (CLI only).
+- New: retire `railway.json` before 2026-12-01 (runbook §5); Railway "watch paths" are not expressible in the IaC DSL yet — both services rebuild on every push to `main`, acceptable for now; `outreach-web` keeps the bearer in memory only (spec §4.3), so a page reload re-runs the AuthKit redirect — revisit if it annoys admins (a `sessionStorage` copy is the smallest change); `apps/cti-web` and `apps/outreach-web` pin different `vitest` majors (4 vs 2 in the Node services) — align when the next Vite upgrade happens; the fake-DB harness in `outreach-api` cannot express `where` semantics — the real-Postgres lane (plan 3) should cover `requireContext` tenant isolation and `completeSignIn` against real rows; `GET /admin/tenants` has no UI for provisioning yet (CLI only); `@cti/web`'s Railway start command is `npm run dev` (pre-existing, surfaced by the IaC pull) — give it a real static build/serve or fold it into `@cti/api`'s static serving; the IaC translation of `railway.json` into the `@cti/api` block (runbook §5 step 1) is the operator's step and must land before 2026-12-01; super-admin actions taken under `X-Org-Id` (invites, role changes, provisioning) have no audit trail yet — add an `admin_audit` table with plan 3's schema work; `completeSignIn` treats WorkOS 400/401/404 alike as client errors — a 401 means our API key is wrong and should alert, not read as a user sign-in failure.
 
 - [ ] **Step 4: `.env.example`** (root): add a short "outreach-api" block pointing at `services/outreach-api/.env.example` and listing the `WORKOS_*`, `APP_PUBLIC_URL`, and `PGBOSS_SCHEMA` names.
 
