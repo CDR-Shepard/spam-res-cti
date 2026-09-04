@@ -197,7 +197,7 @@ describe('PATCH /admin/team/:userId', () => {
     expect(res.statusCode).toBe(404);
   });
 
-  it('flips the flag and the WHERE pins BOTH user id AND org id (IDOR-proof)', async () => {
+  it('flips the flag and the WHERE pins user id AND org id AND kind=human (IDOR- and service-user-proof)', async () => {
     state.authedUser = admin;
     state.updateRows = [{ id: TARGET_ID, powerDialerEnabled: true }];
     const res = await app.inject({
@@ -210,13 +210,15 @@ describe('PATCH /admin/team/:userId', () => {
     expect(state.lastUpdateSet).toEqual({ powerDialerEnabled: true });
     // renderPredicate (verbatim from mobile.test.ts) renders a Column chunk
     // as its bare `.name` only — no table qualifier or quoting — so the
-    // real rendered text is `(id = <param> and org_id = <param>)`, not a
-    // `"users"."id"`-style string. Assert the exact deterministic string
-    // (rather than a loose `.toContain('id')`) so both columns AND the
-    // `and` join are unambiguously proven — a naive substring check for
-    // "id" would trivially match inside "org_id" too.
+    // real rendered text is `(id = <param> and org_id = <param> and kind =
+    // <param>)`, not a `"users"."id"`-style string. Assert the exact
+    // deterministic string (rather than a loose `.toContain('id')`) so all
+    // three columns AND the `and` joins are unambiguously proven — a naive
+    // substring check for "id" would trivially match inside "org_id" too.
+    // The `kind = 'human'` clause (humanUserById) is what keeps this route
+    // from ever flipping the AI Agent service user's power-dialer flag.
     const where = renderPredicate(state.lastUpdateWhere);
-    expect(where).toBe('(id = <param> and org_id = <param>)');
+    expect(where).toBe('(id = <param> and org_id = <param> and kind = <param>)');
   });
 
   it('404 when the target is in another org (update matches no row)', async () => {
