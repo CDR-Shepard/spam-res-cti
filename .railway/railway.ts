@@ -12,6 +12,9 @@ export default defineRailway(() => {
     replicas: { "us-west2": 1 },
     networking: { privateNetworkEndpoint: "ctidesktop" },
   });
+  // Pulled live state, not authored here. The "npm run dev" start command
+  // (rather than a production server) is pre-existing and out of scope for
+  // this work — do not change it as part of the outreach-api IaC task.
   const _ctiweb = service("@cti/web", {
     source: spamResCti,
     build: { buildCommand: "npm run build --workspace=@cti/web", buildEnvironment: "V3", builder: "RAILPACK", watchPatterns: ["/apps/cti-web/**"] },

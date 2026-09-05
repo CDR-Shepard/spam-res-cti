@@ -20,7 +20,7 @@ railway config plan      # expect: 1 to add (outreach-api), 0 to change, 0 to de
 railway config apply     # confirms interactively; creates the service with its build/deploy settings
 ```
 
-If `apply` refuses because a service is still Config-as-Code-managed, that service is `@cti/api` — follow §5.1 now, out of order, to migrate it, then come back and retry `apply` here.
+If `apply` refuses because a service is still Config-as-Code-managed, that service is `@cti/api` — translation alone (§5.1) does not lift the refusal, so follow §5 (5.1 through 5.4) now, out of order, then come back and retry `apply` here.
 
 The first deploy will fail at boot with "Invalid environment configuration" until step 2 is done — that is expected.
 
@@ -94,7 +94,7 @@ Field names, quoted from the installed SDK's own types (`node_modules/railway/di
 - `BuildConfig.builder?: "NIXPACKS" | "DOCKERFILE" | "RAILPACK" | "HEROKU" | "PAKETO" | null` and `BuildConfig.dockerfilePath?: string | null` — the SDK's `build` field does accept this object form, not just a build-command string, so there is no need for a `RAILWAY_DOCKERFILE_PATH` env var here (unlike outreach-api, which uses the env var because Root Directory stays `/` for the whole monorepo and this is the more direct equivalent of what `railway.json` already declares).
 - `DeployConfig.restartPolicyType?: "ON_FAILURE" | "ALWAYS" | "NEVER" | null` and `DeployConfig.restartPolicyMaxRetries?: number | null` — there is no top-level shorthand for restart policy on `IntentServiceConfig`, so it goes under `deploy: {...}`, alongside (not instead of) the `preDeploy`/`start`/`healthcheck`/`healthcheckTimeout` shorthands.
 
-**Automated alternative:** `railway config migrate --apply` reads every `railway.json`/`railway.toml` in the repo and writes the equivalent fields into `.railway/railway.ts` for you — add `--delete-files` to also delete `railway.json` in the same step. Per `railway config migrate --help`, `--apply` "writes files and clears Railway Config File settings", i.e. it also clears `@cti/api`'s Config-as-Code file-path setting as part of the same operation — read its output before trusting it, and still run step 5.2 below afterward rather than assuming it worked.
+**Prefer the manual edit above.** `railway config migrate` also lists `--force  Overwrite an existing '.railway/railway.ts'`. Our file already exists and already contains the hand-authored `outreach-api` block, which no `railway.json` describes — so `migrate` refuses without `--force`, and with `--force` it *regenerates the whole file from railway.json alone and discards that block*. If you use it anyway: commit the working tree first, run `railway config migrate --apply --force`, then `git diff` the regenerated `.railway/railway.ts` and manually restore the `outreachApi` block (and its `resources` entry) before moving on to §5.2 — do not skip this check. Per `railway config migrate --help`, `--apply` "writes files and clears Railway Config File settings", i.e. it also clears `@cti/api`'s Config-as-Code file-path setting as part of the same operation. Treat `--delete-files` (which additionally deletes `railway.json`) as something to avoid entirely here: it collapses steps 5.1–5.4 into one command with no chance to verify the plan in between, which is exactly the check §5.2 exists for.
 
 ### 5.2. Plan, and confirm the translation actually changed something
 
@@ -102,7 +102,7 @@ Field names, quoted from the installed SDK's own types (`node_modules/railway/di
 railway config plan
 ```
 
-**Expect changes to `@cti/api`** — its build, start, and healthcheck moving from railway.json-only into the graph. **If this reports `0 to change`, stop** — that means the translation didn't take (or `@cti/api`'s live settings have diverged from `railway.json` some other way) — do not proceed to delete `railway.json` in that state; re-check the `_ctiapi` block against §5.1 instead.
+**Expect changes to `@cti/api`** — its build, start, and healthcheck moving from railway.json-only into the graph. Also confirm the plan shows `preDeploy` and the restart policy, not just build/start/healthcheck (`railway config plan --json` shows the compiled `deploy` node — check it includes `preDeployCommand` and `restartPolicyType`/`restartPolicyMaxRetries`). **If this reports `0 to change`, or the `--json` deploy node is missing any of those fields, stop** — that means the translation didn't take, or took only partially (or `@cti/api`'s live settings have diverged from `railway.json` some other way) — do not proceed to delete `railway.json` in that state; re-check the `_ctiapi` block against §5.1 instead.
 
 ### 5.3. Apply
 
