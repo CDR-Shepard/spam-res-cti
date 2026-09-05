@@ -158,3 +158,24 @@ plan `2026-09-04-outreach-foundation-2-product-skeleton.md`).
   `invalid_code`. A 401 means *our* API key is wrong and should alert
   (`ALERT_WEBHOOK_URL`), not read as a user sign-in failure. (The plan text
   attributed the mapping to `completeSignIn`; it lives in the provider.)
+
+### From the final whole-branch review (2026-09-05)
+
+Dispositions from `.superpowers/sdd/outreach2-final-review.md` §1 (the twelve
+FOLLOW-UP rows) and §2's unfixed Minors, one line each. Items marked *closed*
+were fixed in the final review fix wave on this branch (2026-09-05) and stay
+listed so the disposition table reconciles.
+
+- *closed* — `contracts.test.ts` `SessionResponse` negative test conflated three failures; now one focused case (`kind: 'robot'` → exactly one issue at `['kind']`).
+- **Rate-limit path untested in `outreach-api`**: `app.ts`'s allowList skips loopback outside production, so the production limiter is exercised only by the new `app.test.ts` 429 case (non-loopback `remoteAddress`); a `parseConfig({ NODE_ENV: 'production' })` app should also cover the allowList being off. Fold into the real-Postgres lane. Also assert the nonce cookie's `sameSite: 'lax'` in `routes/auth.test.ts` (only `httpOnly`/`path`/`maxAge` are pinned today).
+- *closed* — `server.ts` `close()` skipped `app.close()` when the job runner's stop rejected; now `shutdown.ts` (try/finally, rethrows).
+- **`captured.where` is positional** in the fake-DB harness (`where[0]`, `where.at(-1)`): brittle to added queries; each such test names which call it indexes. Superseded by the real-Postgres lane.
+- **WorkOS 401 collapses to `invalid_code`** — already recorded above (`WorkosIdentityProvider.exchangeCode`); keep open.
+- *partly closed* — `SESSION_SECRET` keyed both `@fastify/cookie` and the OAuth state HMAC with the same wire shape (~25 % of state tokens were also valid signed cookies). `auth/state.ts` now signs with `HMAC(SESSION_SECRET, 'outreach:oauth-state:v1')`. Still open: give the cookie signer its own subkey the same way, and derive plan 3's `x-outreach-signature` webhook key (`'webhook-v1'`) rather than using the raw secret.
+- **`organizations_workos_org_id_unique` has no Drizzle representation** (`0036_tenancy.sql:26` vs `schema.ts`) — already recorded above; the review re-confirmed it is load-bearing for `pickTenant`, so keep open until mirrored.
+- **Super-admin inviter under `X-Org-Id`**: `routes/team.ts` looks the inviter up by session `userId` regardless of the acting `orgId`, so a super admin inviting into tenant B sends an `inviterUserId` that is not a member of B's WorkOS org (WorkOS may reject → now a clean 500 `INTERNAL_ERROR`, previously a raw upstream body). Omit `inviterExternalId` when `ctx.orgId !== ctx.session.orgId`.
+- **Reload needs a click** (bearer in memory only) — already recorded above; keep.
+- **`@cti/web`'s Railway start is `npm run dev`** — already recorded above; keep.
+- **`outreach-api` sets no `PORT`/`API_PORT` in `.railway/railway.ts`** (the `_ctiapi` block preserves both). Works via `config.ts`'s `PORT` fallback → 4100 and the Dockerfile's `EXPOSE 4100`, but a domain/target-port mismatch surfaces only as a 120 s healthcheck timeout. Add `API_PORT: "4100"` to the env block or one sentence in runbook §2.1.
+- **Production sourcemaps**: `apps/outreach-web/vite.config.ts` ships `sourcemap: true` (~1.8 MB of `.map`), and `routes/spa.ts`'s immutable-cache regex does not match `.map`, so they are served uncached. Same as `apps/cti-web` — house style, noted for completeness; decide once for both apps.
+- **A suspended tenant locks out platform staff living in it**: `resolveSession` returns `null` when the session user's *own* org is inactive, so suspending GG Homes would also lock every `isSuperAdmin` user out of `/api/admin/tenants` — the route used to un-suspend it. Recovery is SQL-only today. Address with plan 3's admin work (e.g. let super admins resolve a session against an inactive home org).
