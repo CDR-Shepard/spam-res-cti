@@ -29,7 +29,8 @@ vi.mock('../config.js', () => ({
   loadConfig: () => ({ TELEPHONY_PROVIDER: 'twilio' }),
 }));
 
-vi.mock('@cti/auth', () => ({
+vi.mock('@cti/auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@cti/auth')>()),
   resolveSession: async () => state.authedUser,
 }));
 

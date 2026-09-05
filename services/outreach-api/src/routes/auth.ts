@@ -68,16 +68,21 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
   });
 
   app.get('/auth/workos/callback', async (req, reply) => {
-    if (!idp) return sendError(reply, 503, 'SIGN_IN_DISABLED', 'Sign-in is not configured on this server');
-    const q = CallbackQuery.safeParse(req.query);
-    if (!q.success) return sendError(reply, 400, 'BAD_REQUEST', 'Missing state');
-    const state = verifyState(cfg.SESSION_SECRET, q.data.state);
-    if (!state) return sendError(reply, 400, 'BAD_STATE', 'Sign-in state is invalid or expired; start again');
-    // Login-CSRF binding: the browser completing the callback must be the one
-    // that started it. Clear the nonce on every callback attempt, success or not.
-    const nonceCookie = req.cookies[NONCE_COOKIE];
+    // Every exit here is a top-level browser navigation back from the provider,
+    // so failures redirect to the app's sign-in page with a reason (never a JSON
+    // body the user cannot act on). Clear the nonce on every callback attempt,
+    // success or not, before any branch can exit.
     reply.clearCookie(NONCE_COOKIE, { path: NONCE_PATH });
-    if (!nonceCookie || nonceCookie !== state.nonce) return sendError(reply, 400, 'BAD_STATE', 'Sign-in session is invalid or expired; start again');
+    if (!idp) return signInRedirect(cfg, reply, 'sign_in_disabled');
+    const q = CallbackQuery.safeParse(req.query);
+    if (!q.success) return signInRedirect(cfg, reply, 'bad_state');
+    const state = verifyState(cfg.SESSION_SECRET, q.data.state);
+    if (!state) return signInRedirect(cfg, reply, 'bad_state');
+    // Login-CSRF binding: the browser completing the callback must be the one
+    // that started it (a second tab starting sign-in overwrites the cookie, so
+    // the first tab's callback legitimately lands here too — hence a redirect).
+    const nonceCookie = req.cookies[NONCE_COOKIE];
+    if (!nonceCookie || nonceCookie !== state.nonce) return signInRedirect(cfg, reply, 'bad_state');
     if (q.data.error || !q.data.code) return signInRedirect(cfg, reply, q.data.error ?? 'missing_code');
     try {
       const outcome = await completeSignIn({ db, idp }, q.data.code);

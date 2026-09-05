@@ -19,8 +19,20 @@ export interface SignedState {
   nonce: string;
 }
 export const STATE_TTL_SECONDS = 600;
+/**
+ * Domain separation: `SESSION_SECRET` also keys `@fastify/cookie`'s signer
+ * (app.ts), whose `value.hmac` wire shape is the same as this token's. Signing
+ * with a purpose-derived subkey instead of the raw secret means a state token
+ * can never validate as a signed cookie (or vice versa), and the same recipe
+ * gives any later HMAC use of the secret (plan 3's webhook signature) its own
+ * key. Bump the version if the payload format ever changes.
+ */
+export const STATE_KEY_PURPOSE = 'outreach:oauth-state:v1';
+export function deriveStateKey(secret: string): Buffer {
+  return createHmac('sha256', secret).update(STATE_KEY_PURPOSE).digest();
+}
 const b64u = (buf: Buffer): string => buf.toString('base64url');
-const hmac = (secret: string, data: string): string => b64u(createHmac('sha256', secret).update(data).digest());
+const hmac = (secret: string, data: string): string => b64u(createHmac('sha256', deriveStateKey(secret)).update(data).digest());
 // The same-origin-only `returnTo` rule is shared with outreach-web's route
 // `validateSearch` (both must accept/reject exactly the same paths), so it
 // lives once in @cti/contracts. Re-exported here (rather than only imported)

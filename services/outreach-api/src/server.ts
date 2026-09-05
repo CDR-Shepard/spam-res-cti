@@ -10,6 +10,7 @@ import { QUEUES } from './jobs/queues.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerTeamRoutes } from './routes/team.js';
+import { shutdown } from './shutdown.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Where vite drops the built outreach-web bundle (src/ and dist/ sit at the same depth). */
@@ -42,7 +43,7 @@ async function main(): Promise<void> {
       (scope) => registerTeamRoutes(scope, { db, idp }),
     ],
   });
-  const close = async () => { await runner.stop(); await app.close(); };
+  const close = () => shutdown(runner, app);
   process.on('SIGTERM', close);
   process.on('SIGINT', close);
   await app.listen({ port: cfg.API_PORT, host: '0.0.0.0' });

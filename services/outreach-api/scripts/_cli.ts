@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { getDb } from '@cti/db';
+import { getDb, getPool } from '@cti/db';
 import { WorkosIdentityProvider } from '../src/auth/workos-provider.js';
 import { loadConfig } from '../src/config.js';
 
@@ -38,4 +38,28 @@ export function deps() {
   if (!cfg.workosEnabled) throw new Error('WORKOS_API_KEY, WORKOS_CLIENT_ID, WORKOS_REDIRECT_URI must be set');
   const idp = new WorkosIdentityProvider({ apiKey: cfg.WORKOS_API_KEY!, clientId: cfg.WORKOS_CLIENT_ID!, redirectUri: cfg.WORKOS_REDIRECT_URI! });
   return { db: getDb(), idp, log: console };
+}
+
+/**
+ * Write one line to stdout and resolve only once the bytes are handed off.
+ * Node writes to a *pipe* asynchronously (macOS; `railway run … | tee` is one),
+ * and `process.exit()` does not drain pending writes — so `console.log(json);
+ * process.exit(0)` could truncate the only printed copy of a new tenant's ids.
+ * Success paths `emit` and then let the process end on its own (`closeDb`).
+ */
+export function emit(text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(`${text}\n`, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+/** Flush `message` to stderr, then exit with `code` (1: the operation failed). Never resolves. */
+export async function fail(message: string, code = 1): Promise<never> {
+  await new Promise<void>((resolve) => process.stderr.write(`${message}\n`, () => resolve()));
+  return process.exit(code);
+}
+
+/** End the shared pool so a finished script exits naturally instead of via `process.exit`. */
+export async function closeDb(): Promise<void> {
+  await getPool().end();
 }

@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
+import { unsign } from '@fastify/cookie';
 import { describe, expect, it } from 'vitest';
-import { isSafeReturnTo, signState, STATE_TTL_SECONDS, verifyState } from './state.js';
+import { deriveStateKey, isSafeReturnTo, signState, STATE_TTL_SECONDS, verifyState } from './state.js';
 
 const secret = 's'.repeat(32);
 const now = Date.parse('2026-09-04T12:00:00Z');
@@ -18,9 +19,10 @@ describe('oauth state', () => {
     expect(verifyState(secret, `${s}.junk`, now)).toBeNull();
     // A validly signed payload that decodes to the JSON literal `null` (not an
     // object) must not crash `verifyState` reading `.nonce` off it, and must be
-    // rejected. Signed by hand here with the same HMAC recipe as `state.ts`.
+    // rejected. Signed by hand here with the same HMAC recipe as `state.ts`
+    // (the purpose-derived key, not the raw secret).
     const encNull = Buffer.from(JSON.stringify(null), 'utf8').toString('base64url');
-    const sigForNull = createHmac('sha256', secret).update(encNull).digest('base64url');
+    const sigForNull = createHmac('sha256', deriveStateKey(secret)).update(encNull).digest('base64url');
     expect(verifyState(secret, `${encNull}.${sigForNull}`, now)).toBeNull();
   });
   it('expires after the TTL and rejects future-dated state', () => {
@@ -34,6 +36,20 @@ describe('oauth state', () => {
     expect(verifyState(secret, evil, now)).toBeNull();
     const { state: proto } = signState(secret, { returnTo: '//evil.example' }, now);
     expect(verifyState(secret, proto, now)).toBeNull();
+  });
+  it('is keyed separately from the cookie signer: a signed state is never a valid @fastify/cookie value under the raw SESSION_SECRET, and still round-trips', () => {
+    // Both constructions are `value.hmac_sha256(...)`; with the raw secret as the
+    // key they collide whenever the digest has no base64/base64url-distinct byte
+    // (~25 % of tokens). 64 draws makes a shared key fail here with certainty.
+    for (let i = 0; i < 64; i++) {
+      const { state: s } = signState(secret, { returnTo: '/team' }, now);
+      expect(unsign(s, secret).valid).toBe(false);
+      expect(verifyState(secret, s, now)).toMatchObject({ returnTo: '/team' });
+    }
+    // The raw secret itself must not verify a state either (the key is derived).
+    const [enc] = signState(secret, {}, now).state.split('.') as [string, string];
+    const rawKeyed = `${enc}.${createHmac('sha256', secret).update(enc).digest('base64url')}`;
+    expect(verifyState(secret, rawKeyed, now)).toBeNull();
   });
   it('exposes the nonce it embeds in the signed state, fresh on every call', () => {
     const a = signState(secret, {}, now);

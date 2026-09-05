@@ -3,6 +3,7 @@ import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import type { AppConfig } from './config.js';
+import { rateLimitError, registerErrorHandler } from './http/errors.js';
 import { registerHealthRoutes, type Readiness } from './routes/health.js';
 import { registerSpa } from './routes/spa.js';
 
@@ -25,11 +26,15 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     trustProxy: 1,
     bodyLimit: 1024 * 1024,
   });
+  // Uncaught route errors, Fastify's own 4xx, and the limiter's 429 all answer
+  // in the ApiError envelope; the real error stays in the server log (http/errors.ts).
+  registerErrorHandler(app);
   await app.register(rateLimit, {
     global: true,
     max: 300,
     timeWindow: '1 minute',
     allowList: (req) => cfg.NODE_ENV !== 'production' && (req.ip === '127.0.0.1' || req.ip === '::1'),
+    errorResponseBuilder: rateLimitError,
   });
   const allow = (cfg.CORS_ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   await app.register(cors, {

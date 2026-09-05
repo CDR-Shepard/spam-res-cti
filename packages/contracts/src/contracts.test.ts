@@ -5,6 +5,7 @@ import {
   ProvisionTenantRequest,
   ROLE_SLUGS,
   SessionResponse,
+  SessionUser,
   TeamResponse,
   UpdateTeamMemberRequest,
 } from './index.js';
@@ -14,16 +15,25 @@ describe('contracts', () => {
     expect(ROLE_SLUGS).toEqual(['admin', 'member']);
   });
 
-  it('parses a session response and rejects a service user', () => {
-    const ok = SessionResponse.safeParse({
-      token: 't',
-      expiresAt: '2026-10-01T00:00:00.000Z',
-      user: { userId: 'U1', orgId: 'O1', email: 'a@b.co', isAdmin: false, isSuperAdmin: false, kind: 'human', displayName: null },
-      tenant: { id: 'O1', name: 'GG Homes', slug: 'gg-homes', timezone: 'America/Los_Angeles', status: 'active' },
-    });
-    expect(ok.success).toBe(true);
-    const bad = SessionResponse.safeParse({ token: 't', expiresAt: 'x', user: { kind: 'service' }, tenant: {} });
-    expect(bad.success).toBe(false);
+  const validUser = { userId: 'U1', orgId: 'O1', email: 'a@b.co', isAdmin: false, isSuperAdmin: false, kind: 'human', displayName: null };
+  const validSession = {
+    token: 't',
+    expiresAt: '2026-10-01T00:00:00.000Z',
+    user: validUser,
+    tenant: { id: 'O1', name: 'GG Homes', slug: 'gg-homes', timezone: 'America/Los_Angeles', status: 'active' },
+  };
+
+  it('parses a session response', () => {
+    expect(SessionResponse.safeParse(validSession).success).toBe(true);
+  });
+
+  it('rejects a non-human session user on exactly the kind field (the fixture differs from a valid one only there)', () => {
+    const user = SessionUser.safeParse({ ...validUser, kind: 'robot' });
+    expect(user.success).toBe(false);
+    expect(user.success ? [] : user.error.issues.map((i) => i.path)).toEqual([['kind']]);
+    const nested = SessionResponse.safeParse({ ...validSession, user: { ...validUser, kind: 'service' } });
+    expect(nested.success).toBe(false);
+    expect(nested.success ? [] : nested.error.issues.map((i) => i.path)).toEqual([['user', 'kind']]);
   });
 
   it('validates invite requests: lowercases email, defaults role to member', () => {
