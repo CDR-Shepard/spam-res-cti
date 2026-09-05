@@ -23,7 +23,7 @@ const HandoffPayload = z.object({ token: z.string().min(1), expiresAt: z.string(
 export interface AuthRouteDeps {
   cfg: AppConfig;
   db: Db;
-  /** null when WorkOS is not configured: sign-in routes answer 503. */
+  /** null when WorkOS is not configured: the browser-facing sign-in routes redirect to `/sign-in?error=sign_in_disabled`. */
   idp: IdentityProvider | null;
 }
 
@@ -41,8 +41,9 @@ function appUrl(cfg: AppConfig, path: string, params?: Record<string, string>): 
   return url;
 }
 
-function signInRedirect(cfg: AppConfig, reply: FastifyReply, error: string): FastifyReply {
-  return reply.redirect(appUrl(cfg, '/sign-in', { error }).toString());
+/** Back to the app's sign-in page with a reason; `returnTo` (only ever a *verified* one) rides along so the page's "Continue" re-targets the user's destination. */
+function signInRedirect(cfg: AppConfig, reply: FastifyReply, error: string, returnTo?: string): FastifyReply {
+  return reply.redirect(appUrl(cfg, '/sign-in', returnTo ? { error, returnTo } : { error }).toString());
 }
 
 /** Tenant guard: the resolved row must actually be the session's own org, not just fakeDb's/a bug's first row (see tenancy/scope.ts's identical guard). */
@@ -59,9 +60,11 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
   const { cfg, db, idp } = deps;
 
   app.get('/auth/workos/start', async (req, reply) => {
-    if (!idp) return sendError(reply, 503, 'SIGN_IN_DISABLED', 'Sign-in is not configured on this server');
+    // Reached by `window.location.assign(...)` — a top-level navigation, like the
+    // callback — so failures redirect to the sign-in page rather than answering JSON.
+    if (!idp) return signInRedirect(cfg, reply, 'sign_in_disabled');
     const q = StartQuery.safeParse(req.query);
-    if (!q.success) return sendError(reply, 400, 'BAD_REQUEST', 'Invalid returnTo');
+    if (!q.success) return signInRedirect(cfg, reply, 'bad_return_to');
     const { state, nonce } = signState(cfg.SESSION_SECRET, { returnTo: q.data.returnTo });
     reply.setCookie(NONCE_COOKIE, nonce, { httpOnly: true, sameSite: 'lax', secure: cfg.NODE_ENV === 'production', path: NONCE_PATH, maxAge: 600 });
     return reply.redirect(idp.authorizationUrl({ state }));
@@ -82,7 +85,7 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
     // that started it (a second tab starting sign-in overwrites the cookie, so
     // the first tab's callback legitimately lands here too — hence a redirect).
     const nonceCookie = req.cookies[NONCE_COOKIE];
-    if (!nonceCookie || nonceCookie !== state.nonce) return signInRedirect(cfg, reply, 'bad_state');
+    if (!nonceCookie || nonceCookie !== state.nonce) return signInRedirect(cfg, reply, 'bad_state', state.returnTo);
     if (q.data.error || !q.data.code) return signInRedirect(cfg, reply, q.data.error ?? 'missing_code');
     try {
       const outcome = await completeSignIn({ db, idp }, q.data.code);

@@ -73,9 +73,10 @@ npm run dev:outreach        # builds packages, then the API on http://localhost:
 npm run dev:web:outreach    # Vite on http://localhost:5175, proxying /api to :4100
 ```
 
-Open http://localhost:5175. Without WorkOS credentials the sign-in start
-route answers `503 SIGN_IN_DISABLED` (and the browser-facing callback
-redirects to `/sign-in?error=sign_in_disabled`); set all three `WORKOS_*` variables
+Open http://localhost:5175. Without WorkOS credentials the browser-facing
+sign-in routes (start and callback) redirect to
+`/sign-in?error=sign_in_disabled`, and the team invite routes answer
+`503 SIGN_IN_DISABLED`; set all three `WORKOS_*` variables
 (`WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_REDIRECT_URI`) to sign in
 locally — the config rejects a partial set.
 

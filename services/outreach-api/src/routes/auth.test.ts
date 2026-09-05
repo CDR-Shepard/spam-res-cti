@@ -47,16 +47,24 @@ describe('sign-in routes', () => {
     const nonceCookie = res.cookies.find((c) => c.name === 'outreach_oauth_nonce');
     expect(nonceCookie).toMatchObject({ httpOnly: true, path: '/api/auth/workos/callback', maxAge: 600 });
   });
-  it('start is 503 when WorkOS is not configured', async () => {
+  it('start redirects to /sign-in?error=sign_in_disabled (not a 503 JSON body) when WorkOS is not configured', async () => {
     await app.close();
     app = await buildTestApp({ cfg, db: fakeDb({ organizations: [tenant] }).db, idp: null });
     const res = await app.inject({ method: 'GET', url: '/api/auth/workos/start' });
-    expect(res.statusCode).toBe(503);
-    expect(res.json()).toMatchObject({ code: 'SIGN_IN_DISABLED' });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe('http://app.test/sign-in?error=sign_in_disabled');
+  });
+  it('start redirects to /sign-in?error=bad_return_to (not a 400 JSON body) for an unsafe returnTo, without echoing it', async () => {
+    // `window.location.assign('/api/auth/workos/start?...')` is a top-level navigation too.
+    const res = await app.inject({ method: 'GET', url: '/api/auth/workos/start?returnTo=//evil.example' });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe('http://app.test/sign-in?error=bad_return_to');
+    expect(res.cookies.find((c) => c.name === 'outreach_oauth_nonce')).toBeUndefined();
   });
   it('callback early exits redirect the browser to /sign-in with a reason (never a JSON body) and clear the oauth nonce cookie', async () => {
     const { state: fresh, nonce } = signState(cfg.SESSION_SECRET, {});
     const { state: expired } = signState(cfg.SESSION_SECRET, {}, Date.now() - 601_000);
+    const { state: withReturnTo } = signState(cfg.SESSION_SECRET, { returnTo: '/team' });
     // Every one of these is a top-level browser navigation back from AuthKit: a
     // JSON body would be a dead end with no way to "start again".
     const cases: Array<{ name: string; url: string; cookies?: Record<string, string>; error: string }> = [
@@ -65,6 +73,9 @@ describe('sign-in routes', () => {
       { name: 'expired state', url: `/api/auth/workos/callback?code=code-1&state=${expired}`, cookies: { outreach_oauth_nonce: 'n' }, error: 'bad_state' },
       { name: 'nonce cookie missing', url: `/api/auth/workos/callback?code=code-1&state=${fresh}`, error: 'bad_state' },
       { name: 'nonce cookie mismatch (second tab overwrote it)', url: `/api/auth/workos/callback?code=code-1&state=${fresh}`, cookies: { outreach_oauth_nonce: 'not-the-nonce' }, error: 'bad_state' },
+      // The state *is* verified on a nonce mismatch, so its returnTo is trustworthy
+      // and rides along: the user re-lands on their destination after "Continue".
+      { name: 'nonce cookie mismatch keeps the verified returnTo', url: `/api/auth/workos/callback?code=code-1&state=${withReturnTo}`, cookies: { outreach_oauth_nonce: 'not-the-nonce' }, error: 'bad_state&returnTo=%2Fteam' },
       { name: 'neither code nor error from the provider', url: `/api/auth/workos/callback?state=${fresh}`, cookies: { outreach_oauth_nonce: nonce }, error: 'missing_code' },
     ];
     for (const c of cases) {

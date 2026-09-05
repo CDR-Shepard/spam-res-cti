@@ -8,6 +8,7 @@ const MESSAGES: Record<string, string> = {
   tenant_suspended: 'This workspace is suspended. Contact support.',
   invalid_code: 'That sign-in link expired. Try again.',
   bad_state: 'That sign-in attempt expired or was started in another tab. Try again.',
+  bad_return_to: 'That link pointed somewhere this app cannot take you. Continue to sign in as usual.',
   missing_code: 'The sign-in provider did not return a code. Try again.',
   access_denied: 'Sign-in was cancelled.',
   handoff_failed: 'We could not finish signing you in. Try again.',

@@ -14,6 +14,7 @@ describe('SignInPage', () => {
     ['bad_state'],
     ['missing_code'],
     ['sign_in_disabled'],
+    ['bad_return_to'],
     ['no_tenant'],
   ])('maps the API reason %s to a specific message (not the generic fallback)', (error) => {
     renderWithProviders(<SignInPage error={error} />);
