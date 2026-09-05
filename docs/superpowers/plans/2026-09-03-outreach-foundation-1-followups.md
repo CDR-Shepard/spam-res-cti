@@ -99,3 +99,62 @@ wave. None of these blocked the rollout; all are candidates for plan 2.
 - `services/cti-api/src/routes/auth.ts` login-status handler: the suspended-tenant refusal (`issueSession` → `SuspendedTenantError`) currently fires after the single-use `sessionRetrievedAt` claim, so a suspended tenant's rep gets a generic 500 and the handshake is burned. Hoist an org-status check next to the existing `user.kind === 'service'` guard so it returns the handler's `{ status: 'failed' }` shape before the claim. (Final-review nit, 2026-09-04.)
 
 - Operator scripts enumerate `users` without `kind = 'human'`: `services/cti-api/scripts/{redistribute-pool.mjs,assign-reserve-fair.mjs,swap-call-center.mjs,fleet-report.ts,buy-agent-numbers.ts,buy-pool-numbers.mjs}`. The Callsign session fixed them with `email not like 'ai-agent@%'` (95deaa7 on `callsign-reviewed`; a no-op before 0036). Once 0036 is live, tighten to `kind = 'human'`. That predicate depends on the service-user email staying `ai-agent@<slug>.internal` (see `aiAgentEmail` in `packages/auth/src/tenancy.ts`) — tell the Callsign owner before changing the format. Flagged by their production pre-flight, 2026-09-04.
+
+## Plan 2 outcomes and new follow-ups
+
+Recorded while landing the product skeleton (`feat/outreach-product-skeleton`,
+plan `2026-09-04-outreach-foundation-2-product-skeleton.md`).
+
+### Closed by plan 2
+
+- **`packages/contracts` created.** `@cti/contracts` holds the zod DTOs
+  (`SessionUser`, `Tenant`, team and invite shapes, `RoleSlug`, the error
+  envelope, and the shared `isSafeReturnTo` rule) consumed by both
+  `outreach-api` and `outreach-web`.
+- **Human-user predicates moved to `@cti/auth`.**
+  `packages/auth/src/user-queries.ts` (`humanUsersInOrg`, `humanUserByEmail`,
+  `humanUserById`) replaces `services/cti-api/src/tenancy/user-queries.ts`;
+  `outreach-api` uses the same predicates at its tenant boundary.
+
+### New follow-ups
+
+- **Retire root `railway.json` before 2026-12-01**
+  (`docs/runbooks/outreach-api-deploy.md` §5). It is still the only place that
+  configures `@cti/api`'s Docker build, pre-deploy migration, health check, and
+  restart policy. The translation of those settings into the `_ctiapi` block of
+  `.railway/railway.ts` (runbook §5.1) is the operator's step and must land —
+  and be `railway config apply`'d — *before* the file is deleted.
+- **Neither API service sets Railway watch paths**, so `@cti/api` and
+  `outreach-api` rebuild on every push to `main`. Acceptable for now. (The plan
+  text said watch paths were not expressible in the IaC DSL; they are —
+  `build.watchPatterns`, as the pulled `@cti/web` and `@cti/desktop` blocks
+  show — they just are not set on the two API blocks. Add them when the
+  `@cti/api` block is translated.)
+- **`outreach-web` keeps the bearer in memory only** (spec §4.3), so a page
+  reload re-runs the AuthKit redirect. Revisit if it annoys admins — a
+  `sessionStorage` copy behind `apiSession` in `apps/outreach-web/src/lib/api.ts`
+  is the smallest change.
+- **Two `vitest` majors.** `apps/cti-web` and `apps/outreach-web` pin
+  `vitest ^4`; every Node workspace (`services/*`, `packages/*`) pins `^2`.
+  Align when the next Vite upgrade happens.
+- **The fake-DB harness cannot express `where` semantics.**
+  `services/outreach-api/src/test/harness.ts` records predicates but returns
+  fixture rows regardless of them. The real-Postgres lane (plan 3) should cover
+  `requireContext` tenant isolation and `completeSignIn` against real rows.
+- **No UI for tenant provisioning.** `POST /api/admin/tenants` and
+  `POST /api/admin/tenants/:id/link-workos` are reachable only through the CLI
+  scripts in `services/outreach-api/scripts/`; `GET /api/admin/tenants` only
+  feeds the tenant switcher.
+- **`@cti/web`'s Railway start command is `npm run dev`** (pre-existing,
+  surfaced by the IaC pull into `.railway/railway.ts`). Give it a real static
+  build/serve, or fold it into `@cti/api`'s static serving, which already hosts
+  the softphone at `/cti/*`.
+- **No audit trail for super-admin actions taken under `X-Org-Id`** (invites,
+  admin-flag changes, provisioning). Add an `admin_audit` table with plan 3's
+  schema work.
+- **WorkOS 400/401/404 are treated alike as a bad sign-in code.**
+  `WorkosIdentityProvider.exchangeCode` (`auth/workos-provider.ts`) maps all
+  three to `IdentityExchangeError`, which the callback surfaces as
+  `invalid_code`. A 401 means *our* API key is wrong and should alert
+  (`ALERT_WEBHOOK_URL`), not read as a user sign-in failure. (The plan text
+  attributed the mapping to `completeSignIn`; it lives in the provider.)

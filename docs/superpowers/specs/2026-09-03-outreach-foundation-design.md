@@ -60,6 +60,8 @@ Rules for the extraction:
 - **`services/outreach-api`** — new Fastify service. Same conventions as `cti-api`: zod-validated env in `config.ts`, `trustProxy: 1`, global rate limit with webhook allow-list, CORS allow-list, pino redaction, `unhandledRejection` guard. Serves `apps/outreach-web/dist` at `/`. Hosts the pg-boss handlers for Foundation jobs (import, scrub, lookup, delivery). A separate worker service arrives in sub-project 2.
 - **Shared env**: `DATABASE_URL`, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY` (identical values across services so sessions and encrypted tokens interoperate). `outreach-api` adds `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_REDIRECT_URI`, `ANTHROPIC_API_KEY`, `STORAGE_ENDPOINT/BUCKET/ACCESS_KEY/SECRET_KEY`, `TWILIO_ACCOUNT_SID/AUTH_TOKEN` (Lookup), `ALERT_WEBHOOK_URL`, `API_PUBLIC_URL`, `CORS_ALLOWED_ORIGINS`.
 
+Railway configuration for both services lives in `.railway/railway.ts` (Infrastructure as Code); Railway has deprecated per-service `railway.json` with a 2026-12-01 cutoff. The root `railway.json` still supplies `@cti/api`'s Docker build, pre-deploy migration, health check, and restart policy until those are translated into the `@cti/api` block of `.railway/railway.ts` and the file is retired (`docs/runbooks/outreach-api-deploy.md` §5).
+
 ### 3.3 Jobs
 
 pg-boss, schema `pgboss` in the shared database, started by `outreach-api`. Queues in Foundation: `import.parse`, `import.normalize`, `import.dedupe`, `import.scrub`, `import.lookup`, `import.report`, `delivery.send`. Every job carries `orgId` and a `requestId`. Defaults: 3 retries with exponential backoff for pipeline steps; delivery has its own schedule (§8.4). Failed jobs after retries are visible in the admin UI's Jobs panel and raise an alert.
@@ -100,17 +102,17 @@ Provisioning creates one `users` row per tenant: `kind = 'service'`, `display_na
 ### 4.3 Sign-in flow (WorkOS AuthKit)
 
 1. `outreach-web` redirects to AuthKit (hosted UI; email + password, magic link, Google; SSO available per tenant later).
-2. AuthKit redirects to `outreach-api` `GET /auth/workos/callback?code=…`.
+2. AuthKit redirects to `outreach-api` `GET /auth/workos/callback?code=…`. The OAuth `state` is a signed token (HMAC-SHA256 with `SESSION_SECRET`, 10-minute life — `STATE_TTL_SECONDS = 600` in `auth/state.ts`) whose nonce is also set as a short-lived httpOnly cookie (`outreach_oauth_nonce`, `maxAge` 600, `SameSite=Lax`, scoped to the callback path `/api/auth/workos/callback`); the callback requires both to match, which binds the sign-in to the browser that started it. The nonce cookie is cleared on every callback attempt, success or not.
 3. The route exchanges the code with the WorkOS SDK, receives the WorkOS user and organization membership.
 4. Resolve tenant by `organizations.workos_org_id`. If the user has no membership, reject with a clear message (we invite users from the team page; no self-serve tenant creation in Foundation).
 5. Find-or-create the `users` row by `(org_id, email)`; set `external_auth_id`; first user of a tenant becomes admin when the invite said so.
-6. `issueSession(userId)`; set a 60-second, httpOnly, same-site cookie carrying the token and redirect to the app. The SPA calls `GET /auth/session` once; that route reads the cookie, returns the bearer token in the JSON body, and clears the cookie. The SPA keeps the bearer in memory afterwards and re-authenticates through AuthKit when it expires.
+6. `issueSession(userId)`; set a 60-second, httpOnly, same-site cookie carrying the token and redirect to the app. The SPA calls `GET /auth/session` once; that route reads the cookie, returns the bearer token in the JSON body, and clears the cookie. The SPA keeps the bearer in memory afterwards and re-authenticates through AuthKit when it expires. The handoff cookie (`outreach_session_handoff`, path `/api/auth/session`, `maxAge` 60) is signed with `SESSION_SECRET` via `@fastify/cookie`, carries the token and its expiry as a base64url JSON payload, and is cleared by `GET /api/auth/session` on first read — before validation, so a malformed or tampered cookie is consumed too.
 
 Reps keep signing into the softphone with Salesforce exactly as today. A rep who is also invited to `outreach-web` gets one `users` row (matched by email within the tenant) with both `external_auth_id` and a `salesforce_connections` row.
 
 ### 4.4 Roles
 
-`is_admin` (existing) governs lists, suppression, numbers, CRM connections, team. Everyone else is an agent. Capability flags (`power_dialer_enabled`) stay as they are. Super admins see a tenant switcher; all their requests carry an explicit `X-Org-Id` that the API validates against `is_super_admin`.
+`is_admin` (existing) governs lists, suppression, numbers, CRM connections, team. Everyone else is an agent. Capability flags (`power_dialer_enabled`) stay as they are. Super admins see a tenant switcher; all their requests carry an explicit `X-Org-Id` that the API validates against `is_super_admin`. Product invites carry a WorkOS role slug (`admin` or `member` — `RoleSlug` in `@cti/contracts`); an `admin` membership grants `is_admin` on sign-in and never demotes an existing admin (`isAdmin: existing.isAdmin || isAdminRole` in `auth/sign-in.ts`).
 
 ### 4.5 Provisioning
 

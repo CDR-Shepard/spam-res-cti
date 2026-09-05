@@ -51,6 +51,49 @@ so Telnyx can drop in once we add a `TelnyxProvider` implementation.
 
 ---
 
+## Outreach product (outreach-api + outreach-web)
+
+A second, multi-tenant product surface that shares the CTI's Postgres and
+`packages/*` (`db`, `auth`, `phone`, `firewall`, `contracts`):
+
+```
+services/outreach-api/   Fastify API on :4100 — WorkOS AuthKit sign-in, team and tenant-admin
+                         routes under /api/*, pg-boss in-process; serves the built web app at /
+apps/outreach-web/       React + Vite + TanStack Router/Query + Tailwind/shadcn SPA
+packages/contracts/      zod DTOs shared by outreach-api and outreach-web
+.railway/railway.ts      Railway Infrastructure as Code for every service in the project
+```
+
+**Local dev** (same Postgres and migrations as the CTI API):
+
+```bash
+cp services/outreach-api/.env.example services/outreach-api/.env
+# Use the SAME TOKEN_ENCRYPTION_KEY / SESSION_SECRET / DATABASE_URL as services/cti-api/.env.
+npm run dev:outreach        # builds packages, then the API on http://localhost:4100
+npm run dev:web:outreach    # Vite on http://localhost:5175, proxying /api to :4100
+```
+
+Open http://localhost:5175. Without WorkOS credentials the sign-in routes
+answer `503 SIGN_IN_DISABLED`; set all three `WORKOS_*` variables
+(`WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_REDIRECT_URI`) to sign in
+locally — the config rejects a partial set.
+
+**Tests:** `npm -w services/outreach-api run test` and
+`npm -w apps/outreach-web run test` (after `npm run build:packages`; root
+`npm test` does that for you). `npm run build:outreach` builds the web bundle
+and then the API — until the bundle exists, the API answers `503 SPA_NOT_BUILT`
+at `/`.
+
+**Deploy:** `docs/runbooks/outreach-api-deploy.md` (WorkOS setup, first
+Railway deploy, tenant linking and provisioning, rollback). `.railway/railway.ts`
+is the source of truth for the Railway project — `outreach-api` and the CTI
+services alike. Railway has deprecated per-service `railway.json`; the root
+`railway.json` still carries `@cti/api`'s Docker build, pre-deploy migration,
+health check, and restart policy, and is retired only after those settings are
+translated into the `@cti/api` block (runbook §5, before 2026-12-01).
+
+---
+
 ## Prerequisites
 
 - Node.js 20.10+
@@ -392,6 +435,13 @@ the obvious extension points.
 │   │   │       ├── Dialpad.tsx, VerdictPanel.tsx, CallScreen.tsx
 │   │   │       ├── WrapupForm.tsx, RecentCalls.tsx, ReputationPanel.tsx
 │   │   └── CallCenter.xml              # SF Call Center definition
+│   ├── outreach-web/                   # Outreach product SPA (React + Vite + TanStack Router/Query)
+│   │   ├── src/
+│   │   │   ├── main.tsx, routeTree.gen.ts, index.css
+│   │   │   ├── routes/                 # __root, sign-in, auth.callback, _authenticated/{index,team}
+│   │   │   ├── components/             # app-shell, sign-in-page, team-page, tenant-switcher, ui/ (shadcn)
+│   │   │   └── lib/{api.ts,auth.tsx,guard.ts}   # @cti/contracts client, in-memory bearer, route guard
+│   │   └── vite.config.ts              # :5175; proxies /api to outreach-api on :4100
 │   └── cti-desktop/
 │       ├── src/
 │       │   ├── main/main.ts            # hardened Electron main
@@ -403,29 +453,41 @@ the obvious extension points.
 │       │   └── shared/ipc.ts
 │       └── vite.config.ts
 ├── services/
-│   └── cti-api/
-│       └── src/
-│           ├── server.ts               # Fastify entry
-│           ├── config.ts
-│           ├── firewall/recipient-address.ts   # Salesforce-backed FirewallDeps port
-│           ├── reputation/worker.ts    # background Salesforce sync + number-health worker
-│           ├── routes/{health,auth,firewall,calls,telephony,admin,
-│           │           reputation,inbound,cti}.ts
-│           ├── salesforce/{oauth,client,sync}.ts
-│           ├── telephony/{types,twilio,index}.ts
-│           └── tenancy/user-queries.ts # tenant-scoped, human-only user lookups
+│   ├── cti-api/
+│   │   └── src/
+│   │       ├── server.ts               # Fastify entry
+│   │       ├── config.ts
+│   │       ├── firewall/recipient-address.ts   # Salesforce-backed FirewallDeps port
+│   │       ├── reputation/worker.ts    # background Salesforce sync + number-health worker
+│   │       ├── routes/{health,auth,firewall,calls,telephony,admin,
+│   │       │           reputation,inbound,cti}.ts
+│   │       ├── salesforce/{oauth,client,sync}.ts
+│   │       └── telephony/{types,twilio,index}.ts
+│   └── outreach-api/                   # Outreach product API (multi-tenant, WorkOS AuthKit)
+│       ├── src/
+│       │   ├── server.ts, app.ts, config.ts, alerts.ts
+│       │   ├── auth/{identity-provider,workos-provider,fake-provider,sign-in,state}.ts
+│       │   ├── routes/{health,auth,team,admin-tenants,spa}.ts   # /api/* routes + SPA fallback
+│       │   ├── tenancy/{scope,provision}.ts   # requireContext (X-Org-Id), provisionTenant
+│       │   ├── jobs/{boss,queues}.ts   # pg-boss in-process; queue registry (empty until plan 3)
+│       │   └── http/errors.ts          # the one error envelope
+│       ├── scripts/{provision-tenant,link-tenant-workos,grant-super-admin}.ts
+│       └── Dockerfile
 ├── packages/
 │   ├── db/
 │   │   ├── src/{schema,index,migrate,migrate-runner}.ts
 │   │   ├── migrations/0001…0036               # advisory-locked runner
 │   │   └── drizzle.config.ts
 │   ├── phone/src/index.ts              # E.164 normalization
-│   ├── auth/src/{session,crypto,tenancy,index}.ts
+│   ├── auth/src/{session,crypto,tenancy,user-queries,index}.ts   # user-queries: human-only predicates
+│   ├── contracts/src/{session,tenant,team,error,return-to,index}.ts   # zod DTOs for outreach-api + outreach-web
 │   └── firewall/                       # Caller Reputation Firewall
 │       ├── src/{index,evaluate,aggregate,reasons,types,attempts,recipient,
 │       │        velocity,calling-hours,calling-window,rotation,warmup,
 │       │        tz,state-calling-rules}.ts
 │       └── src/reputation/{query,signals}.ts
+├── .railway/railway.ts                 # Railway Infrastructure as Code (all services; see docs/runbooks/outreach-api-deploy.md)
+├── railway.json                        # legacy Config-as-Code for @cti/api — retire per the runbook before 2026-12-01
 └── README.md, .env.example, SPAM_RESISTANCE_2026.md, FIREWALL-GAP-AUDIT.md
 ```
 
