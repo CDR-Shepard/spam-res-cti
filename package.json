@@ -9,13 +9,16 @@
     "apps/*"
   ],
   "scripts": {
-    "build:packages": "npm -w packages/phone run build && npm -w packages/db run build && npm -w packages/auth run build && npm -w packages/firewall run build",
+    "build:packages": "npm -w packages/phone run build && npm -w packages/db run build && npm -w packages/auth run build && npm -w packages/firewall run build && npm -w packages/contracts run build",
     "dev:api": "npm run build:packages && npm --workspace services/cti-api run dev",
     "dev:web": "npm --workspace apps/cti-web run dev",
     "dev:desktop": "npm --workspace apps/cti-desktop run dev",
+    "dev:outreach": "npm run build:packages && npm --workspace services/outreach-api run dev",
+    "dev:web:outreach": "npm --workspace apps/outreach-web run dev",
     "build:api": "npm run build:packages && npm --workspace services/cti-api run build",
     "build:web": "npm --workspace apps/cti-web run build",
     "build:desktop": "npm --workspace apps/cti-desktop run build",
+    "build:outreach": "npm run build:packages && npm --workspace apps/outreach-web run build --if-present && npm --workspace services/outreach-api run build",
     "migrate": "npm --workspace packages/db run migrate",
     "migrate:make": "npm --workspace packages/db run migrate:make",
     "typecheck": "npm run build:packages && npm --workspaces --if-present run typecheck",
@@ -25,5 +28,8 @@
   "engines": {
     "node": ">=20.10.0",
     "npm": ">=10.0.0"
+  },
+  "devDependencies": {
+    "railway": "^3.11.0"
   }
 }

@@ -11,11 +11,10 @@ import type { FastifyInstance } from 'fastify';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb, schema } from '@cti/db';
-import { createTenant, encryptString, issueSession, resolveSession } from '@cti/auth';
+import { createTenant, encryptString, humanUserByEmail, issueSession, resolveSession } from '@cti/auth';
 import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProfilePhoto, fetchUserInfo } from '../salesforce/oauth.js';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
-import { humanUserByEmail } from '../tenancy/user-queries.js';
 
 const DEV_USER_ID = '00000000-0000-0000-0000-00000000beef';
 

@@ -5,11 +5,10 @@
 import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { resolveSession } from '@cti/auth';
+import { humanUserById, humanUsersInOrg, resolveSession } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
-import { humanUserById, humanUsersInOrg } from '../tenancy/user-queries.js';
 
 /** Human-readable label for an imported DID, derived from its area code so the
  *  Numbers pool reads "San Diego (619)" / "Los Angeles (213)" at a glance. */

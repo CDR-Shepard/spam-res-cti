@@ -35,7 +35,8 @@ vi.mock('../config.js', () => ({
   loadConfig: () => ({}),
 }));
 
-vi.mock('@cti/auth', () => ({
+vi.mock('@cti/auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@cti/auth')>()),
   resolveSession: async (_bearer: string | undefined) => state.authedUser,
 }));
 

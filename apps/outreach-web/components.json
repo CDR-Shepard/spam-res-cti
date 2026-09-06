@@ -1,0 +1,24 @@
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "$comment": "Generated with `npx shadcn@3.8.5 init -y -d --base-color neutral` and `npx shadcn@3.8.5 add -y button card input label table badge select separator dropdown-menu` — pin to 3.8.5 to reproduce; `shadcn@latest` (4.x) replaced --base-color with an interactive preset picker that can't run non-interactively the way this project's tooling expects. NOTE: the `shadcn` package is kept as a devDependency, not removed after generation — this CLI version's generated src/index.css has a real build-time `@import \"shadcn/tailwind.css\"` (Radix data-state variants, animations, utility classes the generated components use), which @tailwindcss/vite must resolve during `vite build`/`dev`; it is never shipped to the browser or the server bundle (Tailwind inlines the resolved CSS into the built stylesheet), so it belongs in devDependencies alongside tailwindcss itself, but it cannot be deleted outright without breaking the build.",
+  "style": "new-york",
+  "rsc": false,
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "src/index.css",
+    "baseColor": "neutral",
+    "cssVariables": true,
+    "prefix": ""
+  },
+  "iconLibrary": "lucide",
+  "rtl": false,
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui",
+    "lib": "@/lib",
+    "hooks": "@/hooks"
+  },
+  "registries": {}
+}
