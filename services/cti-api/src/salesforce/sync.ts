@@ -11,6 +11,7 @@ import { buildRecordingPublicUrl } from '../telephony/recording-links.js';
 import {
   createCallTask,
   findByPhone,
+  findPrimaryOpenOpportunityId,
   postChatterFeedItem,
   SalesforceUnauthorizedError,
   soqlEscape,
@@ -240,6 +241,7 @@ export interface SyncOneDeps {
   salesforceUserId: typeof salesforceUserId;
   fetchOwnership: typeof fetchOwnership;
   findByPhone: typeof findByPhone;
+  findPrimaryOpenOpportunityId: typeof findPrimaryOpenOpportunityId;
   createCallTask: typeof createCallTask;
   recordName: (userId: string, recordId: string) => Promise<string | null>;
   postChatterFeedItem: typeof postChatterFeedItem;
@@ -252,6 +254,7 @@ function liveSyncOneDeps(): SyncOneDeps {
     salesforceUserId,
     fetchOwnership,
     findByPhone,
+    findPrimaryOpenOpportunityId,
     createCallTask,
     recordName: fetchRecordName,
     postChatterFeedItem,
@@ -348,6 +351,31 @@ export async function syncOne(
     if (match?.whoId) whoId = match.whoId;
     if (match?.whatId) whatId = match.whatId;
     matchName = match?.name ?? null;
+  }
+
+  // IMPORTANT-2 (fix wave 2): routes/inbound.ts persists whoId/whatId at
+  // webhook time using the DEFAULT (non-preferring) findByPhone, so a NEW
+  // inbound call already carries an Account WhatId by the time it reaches
+  // this worker — the `!whoId && !whatId` branch above never re-runs for it,
+  // and CRITICAL-1's `preferOpenOpportunity` only ever fired for the
+  // replayed backfill population (whose ids the replay script nulled back to
+  // empty). Without this, every new inbound Contact call would land on the
+  // Account forever while the replayed calls land on the Opportunity —
+  // recreating the exact complaint ("I don't see the record on the
+  // Opportunity") this fix exists to close. For inbound calls only, upgrade
+  // an already-attached Account WhatId (prefix '001') to the Contact's
+  // primary open Opportunity here too. Inbound is gate-exempt (below), so
+  // this carries none of the ownership risk that keeps the preference off
+  // outbound — outbound must never even issue the lookup. Degrades exactly
+  // like findByPhone's own preference: any error, timeout, or empty result
+  // leaves the Account id in place and never blocks the Task.
+  if (inbound && whoId && whatId?.startsWith('001')) {
+    try {
+      const opportunityId = await deps.findPrimaryOpenOpportunityId(call.userId, whoId);
+      if (opportunityId) whatId = opportunityId;
+    } catch {
+      // best-effort — keep the Account id already in whatId
+    }
   }
 
   // Ownership gate — OUTBOUND ONLY. Never write a Task on a record the caller

@@ -25,6 +25,15 @@
  * matches this script's selection filter on a later run — re-running is a
  * harmless no-op for already-repaired jobs.
  *
+ * IMPORTANT-1 (fix wave 2): a job selected as `pending`/`failed` can be
+ * claimed by a concurrent `runSyncTick` (flipped to `in_flight`, then parked
+ * `failed` again) between this script's SELECT and its own transaction.
+ * `replayOneJob` checks `RESET_JOB_SQL`'s rowCount and rolls back (never
+ * commits a half-repair) when that happens, reporting the row as `skipped`
+ * rather than `reset` — re-run the script to pick a skipped job back up.
+ * `--apply` also prints one audit line per row it actually resets (the old
+ * `salesforce_who_id` it destroyed), since this is a live production write.
+ *
  * IMPORTANT-3 (fix wave): a selected row's `salesforce_who_id` is not always
  * the stale Lead id — a row can already carry a non-null
  * `salesforce_what_id` (e.g. a Deal__c match from before the conversion), in
@@ -103,7 +112,12 @@ export function classifyJobs(jobs) {
     const isStaleLead = typeof who === 'string' && who.startsWith('00Q');
     if (!isStaleLead) {
       guardExcluded.push(job);
-    } else if (job.salesforce_what_id == null) {
+    } else if (!job.salesforce_what_id) {
+      // MINOR-3 (fix wave 2): falsiness, not `== null` — matches sync.ts:339's
+      // own runtime predicate (`if (!whoId && !whatId)`) exactly, so the
+      // operator's dry-run breakdown never disagrees with what the sync
+      // worker will actually do with the same row (e.g. an empty-string what
+      // id classifies as "fully re-match" here exactly as it would there).
       fullyReMatch.push(job);
     } else {
       attachWithoutPersonLink.push(job);
@@ -124,6 +138,64 @@ export async function safeRollback(client) {
   } catch (err) {
     console.error(`  rollback failed: ${err.message}`);
   }
+}
+
+/**
+ * Repairs ONE stuck job inside its own transaction: clears the stale Lead
+ * who-id, then resets the job to pending for replay. Returns which of the
+ * two real outcomes happened so `main()`'s summary line can never be a
+ * fabricated success (IMPORTANT-1, fix wave 2).
+ *
+ * Live race this closes: this script SELECTs job J as `pending`; before this
+ * transaction runs, a concurrent `runSyncTick` (sync.ts) claims J and flips
+ * it to `in_flight`. The `calls` clear (first statement below) would still
+ * apply — it targets `calls`, not the job — but `RESET_JOB_SQL`'s own
+ * `status in ('failed','pending')` re-guard now matches ZERO rows, because
+ * the job is `in_flight`. The OLD script never checked that `rowCount` and
+ * committed anyway: the call ends up half-repaired (its stale who cleared)
+ * while its job is never reset, so the in-flight `syncOne` re-reads the
+ * (now-null) who, still can't produce a Task the way the operator expects,
+ * and — once attempts exhaust — parks in `failed` forever, a status
+ * `runSyncTick` never re-selects. The operator sees `reset++` regardless:
+ * exactly the silent-success pattern this whole change exists to remove,
+ * reintroduced in the remediation tool.
+ *
+ * Fix: check `RESET_JOB_SQL`'s rowCount. Zero rows → roll back (undoing the
+ * `calls` clear too, so nothing is left half-applied) and report 'skipped'
+ * so the operator knows to re-run — the row still matches
+ * SELECT_STUCK_JOBS_SQL next time (its last_error/status are untouched by a
+ * rolled-back transaction) and picks up the ambient IN_FLIGHT/pending state
+ * cleanly then.
+ *
+ * Lock order is deliberately calls-then-jobs, matching `syncOne`'s own write
+ * order at sync.ts:432-449 — no new deadlock edge between this script and
+ * the live sync worker.
+ */
+export async function replayOneJob(client, job) {
+  await client.query('BEGIN');
+  await client.query(CLEAR_STALE_LEAD_WHO_SQL, [job.call_id]);
+  const r = await client.query(RESET_JOB_SQL, [job.id]);
+  if (r.rowCount === 0) {
+    await safeRollback(client);
+    return { status: 'skipped' };
+  }
+  await client.query('COMMIT');
+  return { status: 'reset' };
+}
+
+/**
+ * MINOR-4 (fix wave 2): one auditable line per row actually repaired by
+ * --apply. This script mutates the live production database, and the value
+ * it destroys (a dead converted-Lead pointer) should leave a record of what
+ * changed and for which job/call. Returns null — nothing to print — for a
+ * row the clear-who guard never touched (its `salesforce_who_id` didn't
+ * start with '00Q'): `CLEAR_STALE_LEAD_WHO_SQL`'s own guard is a no-op there,
+ * so nothing was actually destroyed.
+ */
+export function auditLine(job) {
+  const who = job.salesforce_who_id;
+  if (typeof who !== 'string' || !who.startsWith('00Q')) return null;
+  return `  job ${job.id} call ${job.call_id} who=${who} → null`;
 }
 
 function printSample(label, rows) {
@@ -172,21 +244,33 @@ async function main() {
     }
 
     let reset = 0;
+    let skipped = 0;
     let failed = 0;
     for (const job of jobs) {
       try {
-        await client.query('BEGIN');
-        await client.query(CLEAR_STALE_LEAD_WHO_SQL, [job.call_id]);
-        await client.query(RESET_JOB_SQL, [job.id]);
-        await client.query('COMMIT');
+        const result = await replayOneJob(client, job);
+        if (result.status === 'skipped') {
+          skipped++;
+          console.warn(
+            `  skipped job ${job.id} (call ${job.call_id}): status changed since the SELECT — re-run to pick it up`,
+          );
+          continue;
+        }
         reset++;
+        const line = auditLine(job);
+        if (line) console.log(line);
       } catch (err) {
         await safeRollback(client);
         failed++;
         console.error(`  failed to reset job ${job.id} (call ${job.call_id}): ${err.message}`);
       }
     }
-    console.log(`\nReset ${reset}/${jobs.length} job(s) to pending for replay${failed ? `, ${failed} failed` : ''}.`);
+    console.log(
+      `\nReset ${reset}/${jobs.length} job(s) to pending for replay` +
+        (skipped ? `, ${skipped} skipped (status changed since the SELECT — re-run to pick them up)` : '') +
+        (failed ? `, ${failed} failed` : '') +
+        `.`,
+    );
   } finally {
     await client.end();
   }

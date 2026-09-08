@@ -8,7 +8,10 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
+  auditLine,
   classifyJobs,
+  CLEAR_STALE_LEAD_WHO_SQL,
+  replayOneJob,
   RESET_JOB_SQL,
   safeRollback,
   SELECT_STUCK_JOBS_SQL,
@@ -58,6 +61,15 @@ describe('IMPORTANT-3 — classifyJobs three-way breakdown', () => {
     expect(attachWithoutPersonLink).toHaveLength(1);
     expect(guardExcluded).toHaveLength(1);
   });
+
+  it('MINOR-3 — treats an empty-string what id as falsy, matching sync.ts:339\'s runtime predicate (falsiness, not `== null`)', () => {
+    const jobs = [
+      { id: 'j5', call_id: 'c5', status: 'failed', salesforce_who_id: '00Q5', salesforce_what_id: '' },
+    ];
+    const { fullyReMatch, attachWithoutPersonLink } = classifyJobs(jobs);
+    expect(fullyReMatch.map((j) => j.id)).toEqual(['j5']);
+    expect(attachWithoutPersonLink).toEqual([]);
+  });
 });
 
 describe('IMPORTANT-3 — SELECT_STUCK_JOBS_SQL joins calls so who/what are visible before --apply', () => {
@@ -106,5 +118,83 @@ describe('MINOR-6 — safeRollback never throws, even when the connection is alr
     const client = { query: vi.fn().mockResolvedValue({}) };
     await safeRollback(client);
     expect(client.query).toHaveBeenCalledWith('ROLLBACK');
+  });
+});
+
+/**
+ * Fake pg client for replayOneJob: records every query in order and lets a
+ * test control RESET_JOB_SQL's rowCount — the exact seam IMPORTANT-1 is
+ * about. Every other query (BEGIN/CLEAR/COMMIT/ROLLBACK) reports rowCount 1,
+ * matching a healthy connection.
+ */
+function fakeReplayClient({ resetRowCount = 1 } = {}) {
+  const calls = [];
+  const query = vi.fn(async (sql, params) => {
+    calls.push({ sql, params });
+    if (sql === RESET_JOB_SQL) return { rowCount: resetRowCount };
+    return { rowCount: 1 };
+  });
+  return { query, calls };
+}
+
+describe('IMPORTANT-1 — replayOneJob checks RESET_JOB_SQL rowCount before ever reporting a reset', () => {
+  it('commits and reports "reset" when the job is still resettable (rowCount 1)', async () => {
+    const client = fakeReplayClient({ resetRowCount: 1 });
+    const job = { id: 'j1', call_id: 'c1', salesforce_who_id: '00QAAA000001', salesforce_what_id: null };
+    const result = await replayOneJob(client, job);
+    expect(result).toEqual({ status: 'reset' });
+    expect(client.calls.map((c) => c.sql)).toEqual(['BEGIN', CLEAR_STALE_LEAD_WHO_SQL, RESET_JOB_SQL, 'COMMIT']);
+    expect(client.calls[1].params).toEqual(['c1']);
+    expect(client.calls[2].params).toEqual(['j1']);
+  });
+
+  it('rolls back and reports "skipped" — NEVER "reset" — when a concurrent tick already claimed the job (rowCount 0)', async () => {
+    // This is the exact live sequence from the brief: the script SELECTs job J
+    // as pending; runSyncTick claims it (pending -> in_flight) before this
+    // transaction runs; the calls-clear would still apply, but RESET_JOB_SQL's
+    // `status in ('failed','pending')` re-guard now matches ZERO rows. The old
+    // script committed the calls clear anyway and still counted this as a
+    // reset — a half-repaired call, job parked forever, reported as success.
+    const client = fakeReplayClient({ resetRowCount: 0 });
+    const job = { id: 'j2', call_id: 'c2', salesforce_who_id: '00QBBB000002', salesforce_what_id: null };
+    const result = await replayOneJob(client, job);
+    expect(result).toEqual({ status: 'skipped' });
+    // ROLLBACK, not COMMIT — the calls-clear must not survive either.
+    expect(client.calls.map((c) => c.sql)).toEqual(['BEGIN', CLEAR_STALE_LEAD_WHO_SQL, RESET_JOB_SQL, 'ROLLBACK']);
+  });
+
+  it('keeps the calls-then-jobs lock order (matches syncOne at sync.ts:432-449 — no new deadlock edge)', async () => {
+    const client = fakeReplayClient({ resetRowCount: 1 });
+    await replayOneJob(client, { id: 'j3', call_id: 'c3', salesforce_who_id: '00QCCC', salesforce_what_id: null });
+    const order = client.calls.map((c) => c.sql);
+    expect(order.indexOf(CLEAR_STALE_LEAD_WHO_SQL)).toBeLessThan(order.indexOf(RESET_JOB_SQL));
+  });
+
+  it('propagates a thrown error (e.g. a dropped connection) instead of swallowing it, so the caller can rollback + count it as failed', async () => {
+    const client = {
+      query: vi.fn(async (sql) => {
+        if (sql === RESET_JOB_SQL) throw new Error('connection terminated unexpectedly');
+        return { rowCount: 1 };
+      }),
+    };
+    await expect(replayOneJob(client, { id: 'j4', call_id: 'c4', salesforce_who_id: '00Q4' })).rejects.toThrow(
+      /connection terminated/,
+    );
+  });
+});
+
+describe('MINOR-4 — auditLine records the destroyed Lead pointer for every --apply row', () => {
+  it('prints the old who id for a row whose who WAS the stale Lead id', () => {
+    expect(auditLine({ id: 'j1', call_id: 'c1', salesforce_who_id: '00QAAA000001' })).toBe(
+      '  job j1 call c1 who=00QAAA000001 → null',
+    );
+  });
+
+  it('is silent for a guard-excluded row — the clear-who guard never touched salesforce_who_id, so nothing was destroyed', () => {
+    expect(auditLine({ id: 'j3', call_id: 'c3', salesforce_who_id: '003CCC000003' })).toBeNull();
+  });
+
+  it('is silent when who was already null', () => {
+    expect(auditLine({ id: 'j4', call_id: 'c4', salesforce_who_id: null })).toBeNull();
   });
 });

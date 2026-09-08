@@ -117,6 +117,7 @@ function syncDeps(over: Partial<SyncOneDeps> = {}): SyncOneDeps & { _db: ReturnT
     salesforceUserId: vi.fn(async () => ME) as unknown as SyncOneDeps['salesforceUserId'],
     fetchOwnership: vi.fn(async (): Promise<OwnershipSnapshot> => ({ type: 'Lead', ownerId: ME })) as unknown as SyncOneDeps['fetchOwnership'],
     findByPhone: vi.fn(async () => null) as unknown as SyncOneDeps['findByPhone'],
+    findPrimaryOpenOpportunityId: vi.fn(async () => null) as unknown as SyncOneDeps['findPrimaryOpenOpportunityId'],
     createCallTask: vi.fn(async () => ({ taskId: '00TNEW', degradedFields: null })) as unknown as SyncOneDeps['createCallTask'],
     recordName: vi.fn(async () => null) as unknown as SyncOneDeps['recordName'],
     postChatterFeedItem: vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'],
@@ -217,6 +218,75 @@ describe('syncOne — CRITICAL-1 Opportunity-preference wiring', () => {
     const d = syncDeps({ db, findByPhone });
     await syncOne('call-1', d);
     expect(findByPhone).toHaveBeenCalledWith('U1', expect.any(String), { preferOpenOpportunity: false });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IMPORTANT-2 (fix wave 2) — routes/inbound.ts persists whoId/whatId at
+// webhook time using the default (non-preferring) findByPhone, so the
+// `!whoId && !whatId` branch above (and therefore CRITICAL-1's
+// preferOpenOpportunity) never runs again for a NEW inbound call — only for
+// the replayed backfill population, whose ids were nulled back to empty by
+// the replay script. Without this, every new inbound Contact call lands on
+// the Account forever while the ~55 replayed calls land on the Opportunity —
+// recreating the exact complaint ("I don't see the record on the
+// Opportunity") the whole fix exists to close. For inbound calls only, an
+// Account WhatId that's already on the call gets upgraded to the Contact's
+// primary open Opportunity here too. Inbound is gate-exempt (see the
+// ownership-gate describe block above), so this carries none of the
+// ownership risk that keeps the preference off outbound.
+// ---------------------------------------------------------------------------
+describe('syncOne — IMPORTANT-2 upgrades an already-matched inbound Account to its open Opportunity', () => {
+  it('inbound + Account whatId + an open Opportunity exists → whatId becomes the Opportunity', async () => {
+    const db = fakeDb(callRow({ direction: 'inbound', salesforceWhoId: '0031', salesforceWhatId: '0011' }));
+    const findPrimaryOpenOpportunityId = vi.fn(async () => '006OPEN') as unknown as SyncOneDeps['findPrimaryOpenOpportunityId'];
+    const d = syncDeps({ db, findPrimaryOpenOpportunityId });
+    await syncOne('call-1', d);
+    expect(findPrimaryOpenOpportunityId).toHaveBeenCalledWith('U1', '0031');
+    expect((d.createCallTask as any).mock.calls[0][1]).toMatchObject({ whoId: '0031', whatId: '006OPEN' });
+  });
+
+  it('inbound + Account whatId + no open Opportunity → unchanged, stays on the Account', async () => {
+    const db = fakeDb(callRow({ direction: 'inbound', salesforceWhoId: '0031', salesforceWhatId: '0011' }));
+    const findPrimaryOpenOpportunityId = vi.fn(async () => null) as unknown as SyncOneDeps['findPrimaryOpenOpportunityId'];
+    const d = syncDeps({ db, findPrimaryOpenOpportunityId });
+    await syncOne('call-1', d);
+    expect((d.createCallTask as any).mock.calls[0][1]).toMatchObject({ whoId: '0031', whatId: '0011' });
+  });
+
+  it('outbound + Account whatId → unchanged AND no lookup issued at all (the ownership-gate asymmetry a prior review already caught once)', async () => {
+    const db = fakeDb(callRow({ direction: 'outbound', salesforceWhoId: '0031', salesforceWhatId: '0011' }));
+    const findPrimaryOpenOpportunityId = vi.fn(async () => '006OPEN') as unknown as SyncOneDeps['findPrimaryOpenOpportunityId'];
+    const d = syncDeps({ db, findPrimaryOpenOpportunityId });
+    await syncOne('call-1', d);
+    expect(findPrimaryOpenOpportunityId).not.toHaveBeenCalled();
+    expect((d.createCallTask as any).mock.calls[0][1]).toMatchObject({ whoId: '0031', whatId: '0011' });
+  });
+
+  it('lookup throws → unchanged, and the Task still gets created (degrade, never block)', async () => {
+    const db = fakeDb(callRow({ direction: 'inbound', salesforceWhoId: '0031', salesforceWhatId: '0011' }));
+    const findPrimaryOpenOpportunityId = vi.fn(async () => {
+      throw new Error('SOQL failed (503)');
+    }) as unknown as SyncOneDeps['findPrimaryOpenOpportunityId'];
+    const d = syncDeps({ db, findPrimaryOpenOpportunityId });
+    await syncOne('call-1', d);
+    expect((d.createCallTask as any).mock.calls[0][1]).toMatchObject({ whoId: '0031', whatId: '0011' });
+  });
+
+  it('does not fire when whatId is not an Account (e.g. already an Opportunity or Deal__c) — no wasted round-trip', async () => {
+    const db = fakeDb(callRow({ direction: 'inbound', salesforceWhoId: '0031', salesforceWhatId: '006ALREADY' }));
+    const findPrimaryOpenOpportunityId = vi.fn(async () => '006OPEN') as unknown as SyncOneDeps['findPrimaryOpenOpportunityId'];
+    const d = syncDeps({ db, findPrimaryOpenOpportunityId });
+    await syncOne('call-1', d);
+    expect(findPrimaryOpenOpportunityId).not.toHaveBeenCalled();
+  });
+
+  it('does not fire when there is no whoId (nothing matched) even if whatId is somehow an Account', async () => {
+    const db = fakeDb(callRow({ direction: 'inbound', salesforceWhoId: null, salesforceWhatId: '0011' }));
+    const findPrimaryOpenOpportunityId = vi.fn(async () => '006OPEN') as unknown as SyncOneDeps['findPrimaryOpenOpportunityId'];
+    const d = syncDeps({ db, findPrimaryOpenOpportunityId });
+    await syncOne('call-1', d);
+    expect(findPrimaryOpenOpportunityId).not.toHaveBeenCalled();
   });
 });
 

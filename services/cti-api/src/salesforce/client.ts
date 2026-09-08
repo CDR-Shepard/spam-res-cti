@@ -263,18 +263,23 @@ export async function findByPhone(
 
 /**
  * The Contact's primary open Opportunity, or null if it has none / the
- * lookup fails. Only reached when a caller opts in via
- * `findByPhone(..., { preferOpenOpportunity: true })` — currently just the
- * after-call sync worker, for inbound calls (see CRITICAL-1). Failure here
- * must NEVER throw and must NEVER block the Task — a Task that lands on the
- * Account is far better than a Task that fails.
+ * lookup fails. Exported (IMPORTANT-2, fix wave 2) — it now has TWO callers:
+ * `findByPhone` above, via `opts.preferOpenOpportunity` (the after-call sync
+ * worker, for inbound calls with no stored ids yet — see CRITICAL-1); and
+ * `syncOne` (src/salesforce/sync.ts) directly, for an inbound call that
+ * ALREADY carries an Account WhatId from routes/inbound.ts's webhook-time
+ * lookup (which never opts into `preferOpenOpportunity`) — without this
+ * second call site, only the converted-lead replay population would ever
+ * land on the Opportunity, and every new inbound call would land on the
+ * Account forever. Failure here must NEVER throw and must NEVER block the
+ * Task — a Task that lands on the Account is far better than a Task that
+ * fails.
  *
- * IMPORTANT-2: bounded to 3s so a degraded Salesforce can never hang this
- * lookup indefinitely (undici's default request timeout is 300s) — the
- * catch below turns a timeout into the same AccountId fallback as any other
- * failure.
+ * Bounded to 3s so a degraded Salesforce can never hang this lookup
+ * indefinitely (undici's default request timeout is 300s) — the catch below
+ * turns a timeout into the same AccountId fallback as any other failure.
  */
-async function findPrimaryOpenOpportunityId(userId: string, contactId: string): Promise<string | null> {
+export async function findPrimaryOpenOpportunityId(userId: string, contactId: string): Promise<string | null> {
   try {
     const rows = await soqlQuery<{ OpportunityId: string }>(
       userId,
