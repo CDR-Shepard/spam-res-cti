@@ -190,8 +190,14 @@ export async function findByPhone(userId: string, e164: string): Promise<Salesfo
   // has no phone field (or doesn't exist), the SOSL errors — so we retry with
   // just the standard objects. That way Deal__c support never breaks the
   // baseline Lead/Contact matching.
-  const withDeal = 'RETURNING Lead(Id, Name), Contact(Id, Name, AccountId), Deal__c(Id, Name)';
-  const standard = 'RETURNING Lead(Id, Name), Contact(Id, Name, AccountId)';
+  //
+  // `Lead(... WHERE IsConverted = false)`: SOSL returns converted leads, and
+  // after a lead converts the phone lives on BOTH the dead Lead and the new
+  // Contact. Excluding converted leads here stops us ever attaching a Task to
+  // a Lead Salesforce will reject with CANNOT_UPDATE_CONVERTED_LEAD.
+  const withDeal =
+    'RETURNING Lead(Id, Name WHERE IsConverted = false), Contact(Id, Name, AccountId), Deal__c(Id, Name)';
+  const standard = 'RETURNING Lead(Id, Name WHERE IsConverted = false), Contact(Id, Name, AccountId)';
   const runSosl = (returning: string) =>
     sfFetch(userId, '/search/', { query: { q: `FIND {${wildcarded}} IN PHONE FIELDS ${returning}` } });
   let res = await runSosl(withDeal);
@@ -206,12 +212,46 @@ export async function findByPhone(userId: string, e164: string): Promise<Salesfo
   };
   const records = data.searchRecords ?? [];
   if (records.length === 0) return null;
-  const r = records[0]!;
   const ambiguous = records.length > 1;
+  // Preference order when several objects match the same phone: Contact,
+  // then Lead, then anything else (Deal__c etc.). After a conversion the
+  // Contact is the live record and both it and the (now-filtered) Lead can
+  // still both show up here (e.g. the Lead filter above is best-effort — an
+  // org where IsConverted isn't populated correctly could still slip one
+  // through), so picking the Contact is correct even then.
+  const r =
+    records.find((rec) => rec.attributes.type === 'Contact') ??
+    records.find((rec) => rec.attributes.type === 'Lead') ??
+    records[0]!;
   // Lead/Contact attach via WhoId; everything else (Deal__c, etc.) via WhatId.
   if (r.attributes.type === 'Lead') return { whoId: r.Id, name: r.Name, ambiguous };
-  if (r.attributes.type === 'Contact') return { whoId: r.Id, whatId: r.AccountId, name: r.Name, ambiguous };
+  if (r.attributes.type === 'Contact') {
+    // A matched Contact should land on its open Opportunity (the record the
+    // team actually works), not just the Account. Degrades to AccountId on
+    // any failure/empty result — this must never throw or block the Task.
+    const opportunityId = await findPrimaryOpenOpportunityId(userId, r.Id);
+    return { whoId: r.Id, whatId: opportunityId ?? r.AccountId, name: r.Name, ambiguous };
+  }
   return { whatId: r.Id, name: r.Name, ambiguous };
+}
+
+/**
+ * The Contact's primary open Opportunity, or null if it has none / the
+ * lookup fails. Runs on EVERY inbound call via findByPhone, so failure here
+ * must NEVER throw and must NEVER block the Task — a Task that lands on the
+ * Account is far better than a Task that fails.
+ */
+async function findPrimaryOpenOpportunityId(userId: string, contactId: string): Promise<string | null> {
+  try {
+    const rows = await soqlQuery<{ OpportunityId: string }>(
+      userId,
+      `SELECT OpportunityId FROM OpportunityContactRole WHERE ContactId = '${soqlEscape(contactId)}' ` +
+        `AND Opportunity.IsClosed = false ORDER BY IsPrimary DESC, Opportunity.CreatedDate DESC LIMIT 1`,
+    );
+    return rows[0]?.OpportunityId ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export interface CallTaskInput {
