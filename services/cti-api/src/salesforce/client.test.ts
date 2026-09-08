@@ -122,12 +122,37 @@ describe('findByPhone', () => {
     });
   });
 
-  describe('Fix 3 — Contact match lands on its open Opportunity', () => {
+  describe('CRITICAL-1 — Opportunity preference is scoped to an explicit opt-in', () => {
+    // findByPhone defaults to `preferOpenOpportunity: false` so every existing
+    // call site (notably routes/inbound.ts, the live webhook path) keeps
+    // today's behaviour byte for byte. Only sync.ts opts in, and only for
+    // inbound calls — see sync.test.ts for that wiring. An Opportunity is
+    // ownership-gated (ownership.ts) and an Account is not, so defaulting
+    // this on for outbound would silently drop outbound Tasks whose Contact's
+    // open Opportunity belongs to another rep.
+    it('does NOT consult the Opportunity by default: whatId is the AccountId and the round-trip is never issued', async () => {
+      state.mockRequest.mockResolvedValueOnce(jsonResponse(200, { searchRecords: [contactRecord] }));
+      const match = await findByPhone('u1', E164);
+      expect(match?.whoId).toBe(contactRecord.Id);
+      expect(match?.whatId).toBe(contactRecord.AccountId);
+      // Proves the round-trip is skipped outright, not just its result ignored.
+      expect(state.mockRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it('also skips the Opportunity round-trip when preferOpenOpportunity is explicitly false', async () => {
+      state.mockRequest.mockResolvedValueOnce(jsonResponse(200, { searchRecords: [contactRecord] }));
+      const match = await findByPhone('u1', E164, { preferOpenOpportunity: false });
+      expect(match?.whatId).toBe(contactRecord.AccountId);
+      expect(state.mockRequest).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Fix 3 (opted in) — Contact match lands on its open Opportunity', () => {
     it('sets whatId to the primary open Opportunity when the Contact has one', async () => {
       state.mockRequest
         .mockResolvedValueOnce(jsonResponse(200, { searchRecords: [contactRecord] }))
         .mockResolvedValueOnce(jsonResponse(200, { records: [{ OpportunityId: OPEN_OPPORTUNITY_ID }] }));
-      const match = await findByPhone('u1', E164);
+      const match = await findByPhone('u1', E164, { preferOpenOpportunity: true });
       expect(match?.whoId).toBe(contactRecord.Id);
       expect(match?.whatId).toBe(OPEN_OPPORTUNITY_ID);
       expect(soqlOf(1)).toContain('FROM OpportunityContactRole');
@@ -139,7 +164,7 @@ describe('findByPhone', () => {
       state.mockRequest
         .mockResolvedValueOnce(jsonResponse(200, { searchRecords: [contactRecord] }))
         .mockResolvedValueOnce(jsonResponse(200, { records: [] }));
-      const match = await findByPhone('u1', E164);
+      const match = await findByPhone('u1', E164, { preferOpenOpportunity: true });
       expect(match?.whatId).toBe(contactRecord.AccountId);
     });
 
@@ -147,7 +172,7 @@ describe('findByPhone', () => {
       state.mockRequest
         .mockResolvedValueOnce(jsonResponse(200, { searchRecords: [contactRecord] }))
         .mockResolvedValueOnce(jsonResponse(400, [{ message: 'no access to OpportunityContactRole' }]));
-      const match = await findByPhone('u1', E164);
+      const match = await findByPhone('u1', E164, { preferOpenOpportunity: true });
       expect(match?.whoId).toBe(contactRecord.Id);
       expect(match?.whatId).toBe(contactRecord.AccountId);
     });
@@ -156,9 +181,63 @@ describe('findByPhone', () => {
       state.mockRequest
         .mockResolvedValueOnce(jsonResponse(200, { searchRecords: [contactRecord] }))
         .mockRejectedValueOnce(new Error('socket hang up'));
-      const match = await findByPhone('u1', E164);
+      const match = await findByPhone('u1', E164, { preferOpenOpportunity: true });
       expect(match?.whoId).toBe(contactRecord.Id);
       expect(match?.whatId).toBe(contactRecord.AccountId);
+    });
+  });
+
+  describe('IMPORTANT-2 — the Opportunity lookup is bounded so it degrades instead of hanging', () => {
+    it('passes a 3s AbortSignal.timeout on the Opportunity lookup and degrades to AccountId on abort', async () => {
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+      state.mockRequest
+        .mockResolvedValueOnce(jsonResponse(200, { searchRecords: [contactRecord] }))
+        .mockRejectedValueOnce(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+      const match = await findByPhone('u1', E164, { preferOpenOpportunity: true });
+      expect(match?.whoId).toBe(contactRecord.Id);
+      expect(match?.whatId).toBe(contactRecord.AccountId);
+      expect(timeoutSpy).toHaveBeenCalledWith(3000);
+      const secondCallInit = state.mockRequest.mock.calls[1]?.[1] as { signal?: AbortSignal } | undefined;
+      expect(secondCallInit?.signal).toBeInstanceOf(AbortSignal);
+      timeoutSpy.mockRestore();
+    });
+  });
+
+  describe('IMPORTANT-4 — preference order pinned across all tiers: Contact, then Lead, then anything else', () => {
+    it.each([
+      ['Deal__c first', [dealRecord, contactRecord]],
+      ['Contact first', [contactRecord, dealRecord]],
+    ])('prefers the Contact over a Deal__c match (%s)', async (_label, records) => {
+      state.mockRequest
+        .mockResolvedValueOnce(jsonResponse(200, { searchRecords: records }))
+        .mockResolvedValueOnce(jsonResponse(200, { records: [] }));
+      const match = await findByPhone('u1', E164, { preferOpenOpportunity: true });
+      expect(match?.whoId).toBe(contactRecord.Id);
+    });
+
+    it.each([
+      ['Deal__c first', [dealRecord, leadRecord]],
+      ['Lead first', [leadRecord, dealRecord]],
+    ])('prefers the Lead over a Deal__c match when no Contact is present (%s)', async (_label, records) => {
+      state.mockRequest.mockResolvedValueOnce(jsonResponse(200, { searchRecords: records }));
+      const match = await findByPhone('u1', E164);
+      expect(match?.whoId).toBe(leadRecord.Id);
+      // Lead branch never triggers the Opportunity lookup.
+      expect(state.mockRequest).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('MINOR-5 — phone normalization actually drives the SOSL term', () => {
+    it('wildcards the 10-digit number into 3-3-4 segments for the FIND term', async () => {
+      state.mockRequest.mockResolvedValueOnce(jsonResponse(200, { searchRecords: [] }));
+      await findByPhone('u1', E164); // +18432127339 → strip '1' → 8432127339
+      expect(soqlOf(0)).toContain('FIND {843*212*7339}');
+    });
+
+    it('strips the country code before wildcarding a different 11-digit +1 input', async () => {
+      state.mockRequest.mockResolvedValueOnce(jsonResponse(200, { searchRecords: [] }));
+      await findByPhone('u1', '+14155552671'); // strip '1' → 4155552671
+      expect(soqlOf(0)).toContain('FIND {415*555*2671}');
     });
   });
 

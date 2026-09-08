@@ -197,6 +197,30 @@ describe('syncOne — the after-call ownership gate', () => {
 });
 
 // ---------------------------------------------------------------------------
+// CRITICAL-1 — sync.ts:340 must pass `{ preferOpenOpportunity: inbound }` to
+// findByPhone. `inbound` is already in scope there (used at :358 for the
+// ownership-gate exemption); this pins the wiring so the Opportunity
+// preference only ever applies on the direction where the gate is exempt.
+// ---------------------------------------------------------------------------
+describe('syncOne — CRITICAL-1 Opportunity-preference wiring', () => {
+  it('opts an inbound call into the Opportunity preference', async () => {
+    const db = fakeDb(callRow({ direction: 'inbound', salesforceWhoId: null, salesforceWhatId: null }));
+    const findByPhone = vi.fn(async () => ({ whoId: '0031', whatId: '0011', name: 'Jane Doe' })) as unknown as SyncOneDeps['findByPhone'];
+    const d = syncDeps({ db, findByPhone });
+    await syncOne('call-1', d);
+    expect(findByPhone).toHaveBeenCalledWith('U1', expect.any(String), { preferOpenOpportunity: true });
+  });
+
+  it('does NOT opt an outbound call into the Opportunity preference', async () => {
+    const db = fakeDb(callRow({ direction: 'outbound', salesforceWhoId: null, salesforceWhatId: null }));
+    const findByPhone = vi.fn(async () => ({ whoId: '0031', whatId: '0011', name: 'Jane Doe' })) as unknown as SyncOneDeps['findByPhone'];
+    const d = syncDeps({ db, findByPhone });
+    await syncOne('call-1', d);
+    expect(findByPhone).toHaveBeenCalledWith('U1', expect.any(String), { preferOpenOpportunity: false });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // syncOne — the call-log subject (launch spec D). buildCallSubject itself is
 // covered by call-subject.test.ts; these assert syncOne wires the RIGHT name
 // into it, per the precedence: findByPhone match's name → else (whoId ??

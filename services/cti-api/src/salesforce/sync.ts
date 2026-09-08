@@ -337,7 +337,14 @@ export async function syncOne(
   // extra round-trip when we already have it.
   let matchName: string | null = null;
   if (!whoId && !whatId) {
-    const match = await deps.findByPhone(call.userId, counterparty);
+    // CRITICAL-1: only ask findByPhone to prefer a Contact's open Opportunity
+    // over its Account on INBOUND calls. Opportunity is ownership-gated
+    // (ownership.ts) and Account is not, and outbound is the direction where
+    // that gate actually runs (below) — preferring it there would silently
+    // skip the Task whenever the Opportunity belongs to another rep. Inbound
+    // is gate-exempt, so the preference is free there and lands exactly
+    // where the converted-lead incident's dropped calls actually were.
+    const match = await deps.findByPhone(call.userId, counterparty, { preferOpenOpportunity: inbound });
     if (match?.whoId) whoId = match.whoId;
     if (match?.whatId) whatId = match.whatId;
     matchName = match?.name ?? null;

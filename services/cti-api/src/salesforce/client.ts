@@ -55,7 +55,7 @@ type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 export async function sfFetch(
   userId: string,
   path: string,
-  init: { method?: HttpMethod; body?: unknown; query?: Record<string, string> } = {},
+  init: { method?: HttpMethod; body?: unknown; query?: Record<string, string>; signal?: AbortSignal } = {},
   retry = true,
 ): Promise<{ status: number; json: unknown }> {
   const cfg = loadConfig();
@@ -71,6 +71,10 @@ export async function sfFetch(
         'content-type': 'application/json',
       },
       body: init.body ? JSON.stringify(init.body) : undefined,
+      // Only set by callers that explicitly opt into a bounded round-trip
+      // (see findPrimaryOpenOpportunityId / IMPORTANT-2) — undefined here is
+      // a no-op for undici, so every other call site is unaffected.
+      signal: init.signal,
     });
 
   let res = await doRequest(token.accessToken);
@@ -99,8 +103,9 @@ export function soqlEscape(value: string): string {
 export async function soqlQuery<T = Record<string, unknown>>(
   userId: string,
   soql: string,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<T[]> {
-  const res = await sfFetch(userId, '/query', { query: { q: soql } });
+  const res = await sfFetch(userId, '/query', { query: { q: soql }, signal: opts.signal });
   if (res.status >= 400) throw new Error(`SOQL failed (${res.status}): ${JSON.stringify(res.json)}`);
   return ((res.json as { records?: T[] }).records ?? []);
 }
@@ -168,8 +173,21 @@ export async function fetchRecordAddress(
 /**
  * Looks up a Lead or Contact by phone number using SOSL.
  * Returns the single match or marks ambiguous if multiple.
+ *
+ * `opts.preferOpenOpportunity` (CRITICAL-1, converted-lead fix wave):
+ * defaults to `false` so every existing call site keeps today's behaviour
+ * byte for byte — notably routes/inbound.ts's live-webhook lookup, which
+ * only needs the caller's name and must never gain a second round-trip.
+ * `sync.ts` is the only caller that opts in, and only for inbound calls
+ * (`{ preferOpenOpportunity: inbound }` — `ownership.ts` exempts inbound
+ * from the ownership gate, so preferring the Contact's open Opportunity over
+ * its Account there carries no risk of a silently-skipped outbound Task).
  */
-export async function findByPhone(userId: string, e164: string): Promise<SalesforceMatch | null> {
+export async function findByPhone(
+  userId: string,
+  e164: string,
+  opts: { preferOpenOpportunity?: boolean } = {},
+): Promise<SalesforceMatch | null> {
   // E.164 input → digits only. SOSL treats '+' as a bind-variable prefix, and
   // '-' / '(' / ')' / spaces aren't allowed unless escaped. Salesforce phone
   // fields are searched with their digits normalized — but the search term
@@ -226,6 +244,14 @@ export async function findByPhone(userId: string, e164: string): Promise<Salesfo
   // Lead/Contact attach via WhoId; everything else (Deal__c, etc.) via WhatId.
   if (r.attributes.type === 'Lead') return { whoId: r.Id, name: r.Name, ambiguous };
   if (r.attributes.type === 'Contact') {
+    if (!opts.preferOpenOpportunity) {
+      // Default / outbound behaviour, unchanged: land on the Account, no
+      // second round-trip. An Opportunity is ownership-gated (ownership.ts)
+      // and an Account is not — preferring it unconditionally would silently
+      // drop outbound Tasks whose Contact's open Opportunity belongs to
+      // another rep (CRITICAL-1).
+      return { whoId: r.Id, whatId: r.AccountId, name: r.Name, ambiguous };
+    }
     // A matched Contact should land on its open Opportunity (the record the
     // team actually works), not just the Account. Degrades to AccountId on
     // any failure/empty result — this must never throw or block the Task.
@@ -237,9 +263,16 @@ export async function findByPhone(userId: string, e164: string): Promise<Salesfo
 
 /**
  * The Contact's primary open Opportunity, or null if it has none / the
- * lookup fails. Runs on EVERY inbound call via findByPhone, so failure here
+ * lookup fails. Only reached when a caller opts in via
+ * `findByPhone(..., { preferOpenOpportunity: true })` — currently just the
+ * after-call sync worker, for inbound calls (see CRITICAL-1). Failure here
  * must NEVER throw and must NEVER block the Task — a Task that lands on the
  * Account is far better than a Task that fails.
+ *
+ * IMPORTANT-2: bounded to 3s so a degraded Salesforce can never hang this
+ * lookup indefinitely (undici's default request timeout is 300s) — the
+ * catch below turns a timeout into the same AccountId fallback as any other
+ * failure.
  */
 async function findPrimaryOpenOpportunityId(userId: string, contactId: string): Promise<string | null> {
   try {
@@ -247,6 +280,7 @@ async function findPrimaryOpenOpportunityId(userId: string, contactId: string): 
       userId,
       `SELECT OpportunityId FROM OpportunityContactRole WHERE ContactId = '${soqlEscape(contactId)}' ` +
         `AND Opportunity.IsClosed = false ORDER BY IsPrimary DESC, Opportunity.CreatedDate DESC LIMIT 1`,
+      { signal: AbortSignal.timeout(3000) },
     );
     return rows[0]?.OpportunityId ?? null;
   } catch {
