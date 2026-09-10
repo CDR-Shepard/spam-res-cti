@@ -153,9 +153,13 @@ export function itemStatusLabel(item: Pick<DialerCurrentItem, 'status' | 'outcom
  *  1. `prepare` — the softphone readies its Device and refuses if a call is
  *     up (fails fast, before anything rings);
  *  2. `control('start')` — the engine flips the run active and originates
- *     the first call; a 409/500 arrives here with NO conference leg joined,
- *     so a refused start can never drop a leg from the rep's live run in
- *     another tab (the room is rep-scoped and every rep leg ends it on exit);
+ *     the first call. A 409 proves the session is still `ready` (the rep's
+ *     other run holds the one-active-run index) — nothing was flipped, so
+ *     it's left for the confirm block, which offers to stop the other run.
+ *     Anything else proves nothing: the server may have flipped this session
+ *     `active` before failing (a first originate that threw), leaving no
+ *     conference leg joined — that would bridge the next human into an empty
+ *     room, so a non-409 failure sends a best-effort `stop` before rethrowing;
  *  3. `join` — the softphone joins the run's conference. Ring + AMD take
  *     seconds; the join takes about one, so the first human still finds the
  *     rep in the room.
@@ -169,7 +173,20 @@ export async function startDialingSequence(
   join: () => Promise<boolean>,
 ): Promise<'started' | 'superseded'> {
   await prepare();
-  await control('start');
+  try {
+    await control('start');
+  } catch (e) {
+    // A 409 proves the session is still `ready` (the rep's other run holds
+    // the one-active-run index) — leave it for the confirm block, which
+    // offers to stop the other run. Anything else proves nothing: the server
+    // may have flipped this session active before failing (a first originate
+    // that threw), and an active run with no rep leg would bridge every human
+    // into an empty room. Stop it, best effort, then surface the error.
+    if (!(e instanceof ApiError && e.status === 409)) {
+      try { await control('stop'); } catch { /* the poll shows whatever state the run is in */ }
+    }
+    throw e;
+  }
   try {
     return (await join()) ? 'started' : 'superseded';
   } catch (e) {
@@ -452,14 +469,14 @@ export function ConfirmBlock({
           {confirmLine(view.firstPassTotal ?? view.counts.total, view.counts.unreachable, view.skipBreakdown)}
         </div>
         {error && <div className="dp-error">{error}</div>}
+        <button className="btn primary full" disabled={busy} onClick={onStartDialing}>
+          {busy ? 'Starting…' : 'Start dialing'}
+        </button>
         {onStopOther && (
           <button className="btn full" disabled={busy} onClick={onStopOther}>
             Stop the other run
           </button>
         )}
-        <button className="btn primary full" disabled={busy} onClick={onStartDialing}>
-          {busy ? 'Starting…' : 'Start dialing'}
-        </button>
         <button className="btn full" disabled={busy} onClick={onChooseAnother}>
           Choose a different list
         </button>

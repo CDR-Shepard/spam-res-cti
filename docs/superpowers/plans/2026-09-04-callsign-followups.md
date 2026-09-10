@@ -50,15 +50,16 @@ comment on `revokeDevicesForDeactivatedUser`.
   reachable only through the miss line. Return the last settled item alongside
   the in-flight one, or ship the per-record list above.
 - Power dialer: a failed FIRST originate surfaces as a 500 from
-  `POST /dialer/sessions/:id/start` with the session already `active`; the run
-  screen then shows nothing in flight and a pinned "Could not start the run."
-  until the rep presses Pause → Resume (or Start again, which re-advances).
-  Add a Retry affordance and clear `controlError` when the session status
-  changes.
+  `POST /dialer/sessions/:id/start` with the session already `active`.
+  `startDialingSequence` now sends a best-effort `stop` on any non-409 Start
+  failure, so the rep sees the run stopped and starts another rather than
+  finding a pinned error on a run that secretly went active with no rep leg.
+  The remaining follow-up: a friendlier message than Fastify's `Internal
+  Server Error`, and a Retry affordance.
 - Power dialer: no route-level test covers `POST /dialer/sessions/:id/start`
   (403 without the grant, 409 on a second active run) — `routes/dialer.test.ts`
   has no Fastify inject harness; borrow the one in `routes/admin-team.test.ts`.
 - Power dialer: `apps/cti-web/src/components/DialerPanel.tsx` is ~710 lines;
   the pure helpers (`queueParts`, `confirmLine`, `missLine`, `itemStatusLabel`,
-  `startDialingSequence`, `isStartRefused`) belong in a sibling
+  `startDialingSequence`, `conflictingSessionId`) belong in a sibling
   `dialer-lines.ts`.

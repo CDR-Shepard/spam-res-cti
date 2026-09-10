@@ -371,6 +371,27 @@ describe('startDialingSequence — prepare, then start, then join the conference
     expect(await startDialingSequence(async () => {}, control, async () => false)).toBe('superseded');
     expect(control.mock.calls.map(([a]) => a)).toEqual(['start']);
   });
+  it('a 500 from start sends a best-effort stop, never joins, and rethrows — the server may have flipped the session active before failing', async () => {
+    const join = vi.fn(async () => true);
+    const control = vi.fn(async (_action: DialerControlAction) => { throw new ApiError(500, {}); });
+    await expect(startDialingSequence(async () => {}, control, join)).rejects.toBeInstanceOf(ApiError);
+    expect(control.mock.calls.map(([a]) => a)).toEqual(['start', 'stop']);
+    expect(join).not.toHaveBeenCalled();
+  });
+  it('a non-ApiError start failure (e.g. a network error) also sends a best-effort stop, never joins, and rethrows', async () => {
+    const join = vi.fn(async () => true);
+    const control = vi.fn(async (_action: DialerControlAction) => { throw new Error('network'); });
+    await expect(startDialingSequence(async () => {}, control, join)).rejects.toThrow('network');
+    expect(control.mock.calls.map(([a]) => a)).toEqual(['start', 'stop']);
+    expect(join).not.toHaveBeenCalled();
+  });
+  it('a 409 from start sends no stop — the session is still ready and the confirm block owns the next step', async () => {
+    const join = vi.fn(async () => true);
+    const control = vi.fn(async (_action: DialerControlAction) => { throw new ApiError(409, { error: 'x' }); });
+    await expect(startDialingSequence(async () => {}, control, join)).rejects.toBeInstanceOf(ApiError);
+    expect(control.mock.calls.map(([a]) => a)).toEqual(['start']);
+    expect(join).not.toHaveBeenCalled();
+  });
 });
 
 describe('conflictingSessionId — the other run the 409 named', () => {

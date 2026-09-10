@@ -616,6 +616,10 @@ export function App(): JSX.Element {
   // `start` ended that whole conference, silently cutting the other tab's run.
   const joinDialerConference = useCallback(async (): Promise<boolean> => {
     const myRun = ++dialerRunRef.current;
+    // A call can start ringing on this tab's Device during the `start` round trip; re-check the same idle predicate `prepareDialerDevice` used before touching anything else.
+    if (phaseRef.current !== 'idle' || connectionRef.current || incomingRef.current) {
+      throw new Error('A call arrived while the run was starting — the run was stopped.');
+    }
     coordinatorRef.current?.promoteSelf();
     setDialerLive(true); // lock the nav to the Power Dial tab for the whole run
     try {

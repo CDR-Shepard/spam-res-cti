@@ -1054,6 +1054,8 @@ git commit -m "feat(dialer): sessions are created ready; a new start action flip
 
 ### Task 4: Confirm block, miss line, labels (web)
 
+*Superseded by the whole-branch fix wave (00d7af8 and its follow-up): the shipped order is prepare → `start` → join (`startDialingSequence`), `onStart`/`onStartRefused` became `onPrepare`/`onJoin`, and a 409 carries `activeSessionId` with a **Stop the other run** button. Read the code, not this task, for the confirm-block flow.*
+
 **Files:**
 - Modify: `apps/cti-web/src/dialer-api.ts:14-49`
 - Modify: `apps/cti-web/src/components/DialerPanel.tsx` (helpers at `:52-73`, `dotClassForItemStatus` at `:158-163`, props at `:165-197`, `CurrentRecord` at `:196-209`, picker button at `:289`, the session effect at `:325-397`, and the render from `:426` to the end)
@@ -1639,3 +1641,5 @@ Enable the remaining fourteen when: the connect rate (`connected` + `done` over 
 **Placeholders.** None: every code step carries the code; every command carries its expected result.
 
 **Type consistency.** `DialOutcome` / `isNoConnect` are defined in Task 2 and consumed by name in Tasks 2 and 4's labels; `missBreakdown` is named identically on the server function, the route field, and the web type; `startSession` returns `{ action: 'conflict' }` and the route checks exactly that; `onStart: () => Promise<boolean>` is what `joinDialerConference` returns and what `startDialingSequence`'s `join` expects; `ConfirmBlock`'s props match the SSR test; `queueParts` feeds both `queueLine` and `confirmLine`.
+
+*Superseded by the whole-branch fix wave (00d7af8 and its follow-up): the shipped order is prepare → `start` → join (`startDialingSequence`), `onStart`/`onStartRefused` became `onPrepare`/`onJoin`, and a 409 carries `activeSessionId` with a **Stop the other run** button. Read the code, not this task, for the confirm-block flow.*
