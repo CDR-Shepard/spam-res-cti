@@ -34,3 +34,31 @@ comment on `revokeDevicesForDeactivatedUser`.
   once ringback starts.
 - Operator scripts exclude the per-tenant "AI Agent" service user by email
   pattern; tighten to `kind = 'human'` now that `0036_tenancy` is applied.
+- Power dialer (spec 2026-09-10 §Out of scope): batched phone resolution so a
+  200-record list reaches the confirm block in seconds — `create-session.ts`
+  `resolveRows` awaits `resolveDialNumber` one record at a time.
+- Power dialer: a per-record outcome list during and after a run (the panel
+  shows only the tally from `missBreakdown`).
+- Power dialer: retry policy by miss type — skip the 5-minute attempt-2 retry
+  after a `voicemail`; today every miss retries the same way.
+- Power dialer: a rep who closes the tab at the confirm block leaves a `ready`
+  session behind forever. Harmless (it can never dial; nothing polls it) but
+  worth a reaper (stop `ready` sessions older than a day) once real runs exist.
+- Power dialer: the current-record card never shows a miss reason — the
+  server's `currentItem` is `inFlightItem` (dialing/connected only), so
+  `itemStatusLabel`'s Voicemail / No answer / Busy / Bad number labels are
+  reachable only through the miss line. Return the last settled item alongside
+  the in-flight one, or ship the per-record list above.
+- Power dialer: a failed FIRST originate surfaces as a 500 from
+  `POST /dialer/sessions/:id/start` with the session already `active`; the run
+  screen then shows nothing in flight and a pinned "Could not start the run."
+  until the rep presses Pause → Resume (or Start again, which re-advances).
+  Add a Retry affordance and clear `controlError` when the session status
+  changes.
+- Power dialer: no route-level test covers `POST /dialer/sessions/:id/start`
+  (403 without the grant, 409 on a second active run) — `routes/dialer.test.ts`
+  has no Fastify inject harness; borrow the one in `routes/admin-team.test.ts`.
+- Power dialer: `apps/cti-web/src/components/DialerPanel.tsx` is ~710 lines;
+  the pure helpers (`queueParts`, `confirmLine`, `missLine`, `itemStatusLabel`,
+  `startDialingSequence`, `isStartRefused`) belong in a sibling
+  `dialer-lines.ts`.

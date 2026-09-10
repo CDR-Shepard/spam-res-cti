@@ -1618,7 +1618,7 @@ Expected: three rows, all `t`.
 
 - [ ] **Step 5 (human): live check**
 
-The admin (already enabled) opens Power Dial, picks the 2026-08-12 Opportunity list view, and confirms the confirm block reports the large majority as `will be dialed` (in August 23 of the first 24 were unreachable). Press **Start dialing** and let it run a few records; the run screen's miss line should read as voicemails and no-answers, not `bad number`.
+The admin (already enabled) opens Power Dial, picks the 2026-08-12 Opportunity list view, and confirms the confirm block reports the large majority as `will be dialed` (in August 23 of the first 24 were unreachable). Press **Start dialing** and let it run a few records; the run screen's miss line should read as voicemails and no-answers, not `bad number`. With a second Salesforce tab open, confirm the second tab does not take over the Device between picking the list and pressing **Start dialing** — the busy announcement to the other tabs now happens at Start, not at creation.
 
 - [ ] **Step 6 (human, after one to two days): rollout gate**
 
