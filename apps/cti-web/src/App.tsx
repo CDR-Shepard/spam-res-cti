@@ -581,25 +581,40 @@ export function App(): JSX.Element {
 
   // A session was created READY (queue built, nothing dialed): show the confirm
   // block on the Power Dial tab. No conference leg yet, and no nav lock — those
-  // come when the rep presses Start dialing (joinDialerConference).
+  // come when the rep presses Start dialing (prepareDialerDevice, then the
+  // engine's `start`, then joinDialerConference).
   const beginRun = useCallback((sessionId: string): void => {
     setDialerSessionId(sessionId);
     setTab('powerdial');
   }, []);
 
-  // The rep pressed Start dialing. Join the softphone to the run's Twilio
-  // conference BEFORE the engine originates the first call (the panel sends
-  // `start` only once this resolves true), so the first prospect that connects
-  // finds the rep already in the room. Mirrors place()'s device.connect()
-  // shape, but with DialerConference instead of To/CallerId/CallId — the
-  // server's /voice DialerConference branch puts this leg in the conference
-  // room instead of dialing a destination. Deliberately does NOT touch
-  // phase/active/inCall: this leg is long-lived across many prospect calls,
-  // not a single call. Resolves false — leg dropped, nothing started — when a
-  // stop or a newer run superseded it mid-await. Idempotent: a retry after a
-  // failed `start` (say, a 409) finds the leg already up and keeps it.
+  // Runs BEFORE the engine is told to dial: ready the Device and refuse while
+  // a call is up or ringing, so a softphone that cannot take the run never
+  // causes a prospect to ring into an empty room. Same idle test the handoff
+  // poll applies before it accepts a run.
+  const prepareDialerDevice = useCallback(async (): Promise<void> => {
+    if (phaseRef.current !== 'idle' || connectionRef.current || incomingRef.current) {
+      throw new Error('Finish the current call before starting a power-dial run.');
+    }
+    await ensureDevice();
+  }, [ensureDevice]);
+
+  // The rep pressed Start dialing and the engine has ALREADY accepted `start`:
+  // join the softphone to the run's Twilio conference. Mirrors place()'s
+  // device.connect() shape, but with DialerConference instead of
+  // To/CallerId/CallId — the server's /voice DialerConference branch puts this
+  // leg in the conference room instead of dialing a destination. Deliberately
+  // does NOT touch phase/active/inCall: this leg is long-lived across many
+  // prospect calls, not a single call. Resolves false — leg dropped, nothing
+  // started — when a stop or a newer run superseded it mid-await.
+  //
+  // Joining AFTER `start` is safe: ring + answering-machine detection take
+  // seconds before anyone is bridged, and this join takes about one. Joining
+  // BEFORE was not: the room name is rep-scoped (`pd_<userId>`) and every rep
+  // leg carries `endConferenceOnExit=true`, so a second tab's leg landed in
+  // the room of the rep's LIVE run elsewhere — and dropping it after a refused
+  // `start` ended that whole conference, silently cutting the other tab's run.
   const joinDialerConference = useCallback(async (): Promise<boolean> => {
-    if (dialerConnRef.current) return true;
     const myRun = ++dialerRunRef.current;
     coordinatorRef.current?.promoteSelf();
     setDialerLive(true); // lock the nav to the Power Dial tab for the whole run
@@ -1255,11 +1270,11 @@ export function App(): JSX.Element {
       sessionId={dialerSessionId}
       onScreenPop={screenPopRecord}
       onStartFromListView={startPowerDialFromListView}
-      onStart={joinDialerConference}
+      onPrepare={prepareDialerDevice}
+      onJoin={joinDialerConference}
       onStop={handleDialerStop}
       onComplete={handleDialerComplete}
       onDismiss={handleDialerDismiss}
-      onStartRefused={dropConferenceLeg}
     />
   ) : (
     <div className="dialer">

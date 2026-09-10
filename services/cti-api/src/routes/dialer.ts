@@ -103,7 +103,10 @@ const STATUS_OUTCOMES: ReadonlyMap<string, DialOutcome> = new Map([
  * the item still `dialing` and stamp `hangup` over the voicemail/fax verdict.
  * Stamped first, the backstop finds the row already settled and does nothing.
  * The hangup runs even if stamping throws: a machine left alone plays the
- * 30-second hold TwiML and bills for it.
+ * 30-second hold TwiML and bills for it. The same ordering means the engine may
+ * originate the next record a few hundred milliseconds before the machine leg
+ * is torn down — harmless: no new party is called, the machine leg is sitting
+ * on hold TwiML, and the two never share a room.
  */
 export async function onDialerAmd(
   body: Record<string, string>,
@@ -325,7 +328,10 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     if (!requirePowerDialer(owned.authed, reply)) return reply;
     const result = await startSession(owned.session.id, buildEngineDeps());
     if (result.action === 'conflict') {
-      return reply.code(409).send({ error: 'Another power-dial run is already active for you — finish or stop it first.' });
+      // `activeSessionId` names the rep's OTHER active run so the confirm block
+      // can offer to stop it — otherwise a run wedged by a closed tab is
+      // unreachable from the run screen. Null when it ended meanwhile.
+      return reply.code(409).send({ error: 'Another power-dial run is already active for you — stop it first.', activeSessionId: result.activeSessionId });
     }
     return { ok: true, ...result };
   });

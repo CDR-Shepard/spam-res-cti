@@ -45,7 +45,8 @@ export const syncStatusEnum = pgEnum('sync_status', ['pending', 'in_flight', 'su
 
 export const numberKindEnum = pgEnum('number_kind', ['agent', 'dialer_pool']);
 
-export const dialerSessionStatus = pgEnum('dialer_session_status', ['ready', 'active', 'paused', 'stopped', 'done']);
+// Order matches Postgres: `ADD VALUE` appends 'ready' LAST (migration 0037), and drizzle-kit compares enum member order.
+export const dialerSessionStatus = pgEnum('dialer_session_status', ['active', 'paused', 'stopped', 'done', 'ready']);
 export const dialerItemStatus = pgEnum('dialer_item_status', [
   'pending', 'dialing', 'connected', 'no_connect', 'skipped', 'unreachable', 'done',
 ]);

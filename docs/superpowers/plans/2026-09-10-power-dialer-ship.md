@@ -1606,6 +1606,8 @@ PUB=$(railway variables -s Postgres --kv 2>/dev/null | grep '^DATABASE_PUBLIC_UR
 
 Expected: one `0037_dialer_session_ready.sql` row, and `ready` among the labels.
 
+After the deploy, every pilot rep reloads the Salesforce console tab (or the softphone) before using Power Dial: an old bundle against the new API joins the conference and then shows a run screen for a session that never dials. And roll back the API and the web **together**, never the API alone — the new panel against the old API never joins the conference, so connected prospects would land in an empty room.
+
 - [ ] **Step 4 (human): enable the three pilot reps**
 
 Preferred: the admin Team panel in the softphone — toggle Power Dialer on for Garrett Martorello, Norah Nazzaro, and Edward Jerome Maglalang (it calls `PATCH /admin/team/:userId { powerDialerEnabled: true }`). Fallback, same effect, run by the user:
@@ -1618,7 +1620,7 @@ Expected: three rows, all `t`.
 
 - [ ] **Step 5 (human): live check**
 
-The admin (already enabled) opens Power Dial, picks the 2026-08-12 Opportunity list view, and confirms the confirm block reports the large majority as `will be dialed` (in August 23 of the first 24 were unreachable). Press **Start dialing** and let it run a few records; the run screen's miss line should read as voicemails and no-answers, not `bad number`. With a second Salesforce tab open, confirm the second tab does not take over the Device between picking the list and pressing **Start dialing** — the busy announcement to the other tabs now happens at Start, not at creation.
+The admin (already enabled) opens Power Dial, picks the 2026-08-12 Opportunity list view, and confirms the confirm block reports the large majority as `will be dialed` (in August 23 of the first 24 were unreachable). Press **Start dialing** and let it run a few records; the run screen's miss line should read as voicemails and no-answers, not `bad number`. With a second Salesforce tab open, confirm the second tab does not take over the Device between picking the list and pressing **Start dialing** — the busy announcement to the other tabs now happens at Start, not at creation. Then press **Stop** while a call is still ringing and confirm nothing dials afterwards.
 
 - [ ] **Step 6 (human, after one to two days): rollout gate**
 

@@ -795,6 +795,21 @@ describe('stopSession', () => {
     expect(deps.enqueueRollover).not.toHaveBeenCalled();
     expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'stopped' }) }]);
   });
+  it('flips the session to stopped BEFORE hanging up, so the hangup\'s terminal callback cannot originate the next record', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      deps.telephony.hangup = vi.fn(async () => {
+        expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'stopped' }) });
+      });
+      await stopSession('S1', deps);
+      expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+      expect(err).not.toHaveBeenCalled();
+    } finally {
+      err.mockRestore();
+    }
+  });
   it('does not release the rep conference for an already-stopped session (the name is rep-scoped; another run may own it)', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
     const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, items); deps.db = fdb;
@@ -930,13 +945,31 @@ describe('startSession — the rep pressed Start dialing', () => {
     expect(deps.telephony.originate).not.toHaveBeenCalled();
   });
 
-  it('reports conflict — and leaves the session ready — when the rep already has an active run', async () => {
+  const conflictViolation = (): Error => Object.assign(new Error('duplicate key value violates unique constraint'), {
+    code: '23505', constraint: 'dialer_sessions_one_active_per_user',
+  });
+
+  it('reports conflict — with the OTHER run\'s id, and leaves the session ready — when the rep already has an active run', async () => {
     const deps = makeDeps(); const fdb = fakeDb(ready, pending); deps.db = fdb;
-    const violation = Object.assign(new Error('duplicate key value violates unique constraint'), {
-      code: '23505', constraint: 'dialer_sessions_one_active_per_user',
-    });
+    const violation = conflictViolation();
     fdb.update = () => ({ set: () => ({ where: () => ({ returning: async () => { throw violation; } }) }) });
-    expect(await startSession('S1', deps)).toEqual({ action: 'conflict' });
+    // First lookup = the session being started (for its userId); second = the
+    // rep's active run, which the 409 names so the panel can offer to stop it.
+    fdb.query.dialerSessions.findFirst = vi.fn()
+      .mockResolvedValueOnce(ready)
+      .mockResolvedValueOnce({ ...baseSession, id: 'S-OTHER', status: 'active' });
+    expect(await startSession('S1', deps)).toEqual({ action: 'conflict', activeSessionId: 'S-OTHER' });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+
+  it('reports conflict with a null id when the other run ended between the refused flip and the lookup', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, pending); deps.db = fdb;
+    const violation = conflictViolation();
+    fdb.update = () => ({ set: () => ({ where: () => ({ returning: async () => { throw violation; } }) }) });
+    fdb.query.dialerSessions.findFirst = vi.fn()
+      .mockResolvedValueOnce(ready)
+      .mockResolvedValueOnce(null);
+    expect(await startSession('S1', deps)).toEqual({ action: 'conflict', activeSessionId: null });
     expect(deps.telephony.originate).not.toHaveBeenCalled();
   });
 

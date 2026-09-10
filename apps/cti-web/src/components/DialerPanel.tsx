@@ -4,8 +4,8 @@
  * run it shows progress, the current record, and controls (pause/resume, skip,
  * stop, next), polling the session every ~2s.
  * A run is created READY and shows a confirm block (ConfirmBlock) until the rep
- * presses Start dialing; only then does the softphone join the conference and
- * the engine dial.
+ * presses Start dialing; only then is the engine told to dial and the softphone
+ * joins the run's conference (in that order — see startDialingSequence).
  *
  * Screen-pop: the panel calls `onScreenPop(recordId)` once per record the moment
  * it connects to a live human (see `shouldScreenPop`) — never for voicemail.
@@ -149,20 +149,33 @@ export function itemStatusLabel(item: Pick<DialerCurrentItem, 'status' | 'outcom
 }
 
 /**
- * Pure — the Start-dialing sequence. The softphone joins the run's conference
- * FIRST (`join` is the parent's onStart) so the first prospect that connects
- * finds the rep already in the room; only then is the engine told to dial.
- * A `join` that resolves false means a stop or a newer run superseded this one
- * mid-await — nothing is sent. A `join` that throws propagates untouched.
+ * Pure — the Start-dialing sequence, in this order and no other:
+ *  1. `prepare` — the softphone readies its Device and refuses if a call is
+ *     up (fails fast, before anything rings);
+ *  2. `control('start')` — the engine flips the run active and originates
+ *     the first call; a 409/500 arrives here with NO conference leg joined,
+ *     so a refused start can never drop a leg from the rep's live run in
+ *     another tab (the room is rep-scoped and every rep leg ends it on exit);
+ *  3. `join` — the softphone joins the run's conference. Ring + AMD take
+ *     seconds; the join takes about one, so the first human still finds the
+ *     rep in the room.
+ * A `join` that throws after the engine is already dialing stops the run
+ * (best effort) and rethrows — prospects must not ring into an empty room.
+ * A `join` that resolves false means a stop or newer run superseded it.
  */
 export async function startDialingSequence(
-  join: () => Promise<boolean>,
+  prepare: () => Promise<void>,
   control: (action: DialerControlAction) => Promise<void>,
+  join: () => Promise<boolean>,
 ): Promise<'started' | 'superseded'> {
-  const joined = await join();
-  if (!joined) return 'superseded';
+  await prepare();
   await control('start');
-  return 'started';
+  try {
+    return (await join()) ? 'started' : 'superseded';
+  } catch (e) {
+    try { await control('stop'); } catch { /* the poll shows whatever state the run is in */ }
+    throw e;
+  }
 }
 
 /** The server's `{ error }` sentence when there is one; otherwise the fallback. */
@@ -174,10 +187,11 @@ function controlErrorMessage(e: unknown, fallback: string): string {
   return e instanceof Error ? e.message : fallback;
 }
 
-/** Pure — a refused `start` (409: another run is active) is the one failure
- *  that proves this session is still ready; anything else may have started it. */
-export function isStartRefused(e: unknown): boolean {
-  return e instanceof ApiError && e.status === 409;
+/** Pure — the other run's id from a 409 body, if the server named one. */
+export function conflictingSessionId(e: unknown): string | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || !e.data || typeof e.data !== 'object') return null;
+  const id = (e.data as { activeSessionId?: unknown }).activeSessionId;
+  return typeof id === 'string' && id ? id : null;
 }
 
 /** Pure — which dialerControl action the toggle button sends next. */
@@ -278,12 +292,17 @@ export interface DialerPanelProps {
   /** Start a run from a Salesforce list view (parent creates the session). */
   onStartFromListView: (object: DialerObjectType, listViewId: string) => Promise<void>;
   /**
-   * The rep pressed Start dialing on a ready run. The parent joins the
-   * softphone to the run's Twilio conference and resolves true once the leg is
-   * up (false if a stop or a newer run superseded it meanwhile). The panel
-   * sends the `start` control only on true — see startDialingSequence.
+   * The rep pressed Start dialing: ready the softphone's Device, and THROW if
+   * the softphone is on or ringing a call. Runs BEFORE `start`, so nothing
+   * rings on a softphone that cannot take the run.
    */
-  onStart: () => Promise<boolean>;
+  onPrepare: () => Promise<void>;
+  /**
+   * Join the softphone to the run's Twilio conference; resolves true once the
+   * leg is up, false if a stop or a newer run superseded it meanwhile. Runs
+   * AFTER `start` succeeded — see startDialingSequence.
+   */
+  onJoin: () => Promise<boolean>;
   /** Called when the rep stops the run from the Stop control. */
   onStop: () => void;
   /**
@@ -299,16 +318,6 @@ export interface DialerPanelProps {
    * (the summary's "Start another run" CTA). Clears the parent's session id.
    */
   onDismiss: () => void;
-  /**
-   * `start` was refused with 409 — the rep has another active run, and THIS
-   * session is still `ready` (nothing dialed, nothing will). The parent drops
-   * the conference leg it joined for Start and releases the nav lock, so the
-   * rep can go stop the other run; the confirm block stays with the message.
-   * Only on 409: any other failure leaves the leg up, because the server may
-   * have flipped the session active (a failed first originate) and the run
-   * screen will take over on the next poll.
-   */
-  onStartRefused: () => void;
 }
 
 function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Element {
@@ -424,12 +433,16 @@ export function ConfirmBlock({
   error,
   onStartDialing,
   onChooseAnother,
+  onStopOther,
 }: {
   view: DialerSessionView;
   busy: boolean;
   error: string | null;
   onStartDialing: () => void;
   onChooseAnother: () => void;
+  /** Present only when a refused Start named the rep's OTHER active run —
+   *  renders the way to stop it without leaving this screen. */
+  onStopOther?: () => void;
 }): JSX.Element {
   return (
     <div className="dialer-panel">
@@ -439,6 +452,11 @@ export function ConfirmBlock({
           {confirmLine(view.firstPassTotal ?? view.counts.total, view.counts.unreachable, view.skipBreakdown)}
         </div>
         {error && <div className="dp-error">{error}</div>}
+        {onStopOther && (
+          <button className="btn full" disabled={busy} onClick={onStopOther}>
+            Stop the other run
+          </button>
+        )}
         <button className="btn primary full" disabled={busy} onClick={onStartDialing}>
           {busy ? 'Starting…' : 'Start dialing'}
         </button>
@@ -451,7 +469,7 @@ export function ConfirmBlock({
 }
 
 export function DialerPanel(props: DialerPanelProps): JSX.Element {
-  const { sessionId, onScreenPop, onStartFromListView, onStart, onStop, onComplete, onDismiss, onStartRefused } = props;
+  const { sessionId, onScreenPop, onStartFromListView, onPrepare, onJoin, onStop, onComplete, onDismiss } = props;
   const [view, setView] = useState<DialerSessionView | null>(null);
   // The poll owns `error` (a failed refresh); control actions own
   // `controlError` (a refused pause/skip/stop/next/start), so a successful
@@ -459,6 +477,10 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
   const [controlBusy, setControlBusy] = useState(false);
+  // The id a refused Start (409) named as the rep's OTHER active run, or null.
+  // Set only by handleStartDialing's catch; cleared by every control action and
+  // by the effect's per-session reset, so it can never outlive its 409.
+  const [conflictSessionId, setConflictSessionId] = useState<string | null>(null);
   // Ticks every second so the retry countdown re-renders without waiting on
   // the ~2s poll.
   const [now, setNow] = useState(() => Date.now());
@@ -490,12 +512,14 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
       setView(null);
       setError(null);
       setControlError(null);
+      setConflictSessionId(null);
       return;
     }
 
     setView(null);
     setError(null);
     setControlError(null);
+    setConflictSessionId(null);
 
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | undefined;
@@ -563,6 +587,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     if (!sessionId) return Promise.resolve();
     setControlBusy(true);
     setControlError(null);
+    setConflictSessionId(null);
     return dialerControl(sessionId, action)
       .then(() => pollNowRef.current())
       .catch((e: unknown) => {
@@ -582,29 +607,50 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     })();
   }, [runControl, onStop]);
 
-  // Start dialing: join the softphone to the conference (onStart), THEN send
-  // `start`. busy covers the whole sequence so the button cannot double-fire;
-  // a superseded join sends nothing and shows nothing — the rep chose to leave.
+  // Start dialing: ready the softphone (onPrepare), send `start`, THEN join the
+  // conference (onJoin) — see startDialingSequence for why that order and no
+  // other. busy covers the whole sequence so the button cannot double-fire; a
+  // superseded join sends nothing and shows nothing — the rep chose to leave.
   const handleStartDialing = useCallback(() => {
     if (!sessionId) return;
     void (async () => {
       setControlBusy(true);
       setControlError(null);
+      setConflictSessionId(null);
       try {
         // On success ('started' or 'superseded') there is nothing to show here —
         // the run screen takes over on the next poll, or the rep already left.
-        await startDialingSequence(onStart, async (action) => {
+        await startDialingSequence(onPrepare, async (action) => {
           await dialerControl(sessionId, action);
           pollNowRef.current();
-        });
+        }, onJoin);
       } catch (e: unknown) {
         setControlError(controlErrorMessage(e, 'Could not start the run.'));
-        if (isStartRefused(e)) onStartRefused();
+        setConflictSessionId(conflictingSessionId(e));
       } finally {
         setControlBusy(false);
       }
     })();
-  }, [onStart, sessionId, onStartRefused]);
+  }, [onPrepare, onJoin, sessionId]);
+
+  // The 409 named the rep's other active run (another tab, or a run wedged
+  // by a closed tab). Stop THAT run, then the rep presses Start dialing again.
+  const handleStopOther = useCallback(() => {
+    if (!conflictSessionId) return;
+    const other = conflictSessionId;
+    void (async () => {
+      setControlBusy(true);
+      try {
+        await dialerControl(other, 'stop');
+        setConflictSessionId(null);
+        setControlError(null);
+      } catch (e: unknown) {
+        setControlError(controlErrorMessage(e, 'Could not stop the other run.'));
+      } finally {
+        setControlBusy(false);
+      }
+    })();
+  }, [conflictSessionId]);
 
   if (!sessionId) {
     return <ListViewPicker onStart={onStartFromListView} />;
@@ -632,6 +678,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         error={shownError}
         onStartDialing={handleStartDialing}
         onChooseAnother={handleStop}
+        onStopOther={conflictSessionId ? handleStopOther : undefined}
       />
     );
   }

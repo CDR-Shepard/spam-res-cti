@@ -135,14 +135,28 @@ async function claimReadySession(deps: EngineDeps, sessionId: string): Promise<'
  * already `active`, re-advances it rather than reporting success and doing
  * nothing. The partial unique index still enforces one active run per rep:
  * if another of the rep's sessions is active the flip is refused, THIS session
- * stays `ready`, and the caller gets `conflict` to explain to the rep.
+ * stays `ready`, and the caller gets `conflict` to explain to the rep — with
+ * the OTHER run's id, so the confirm block can offer to stop it. Without that
+ * handle a run wedged by a closed tab (its item stuck `connected`, which the
+ * abandoned-session reaper skips forever) would be unreachable: the rep would
+ * be told to "stop it first" with nothing to stop it from. `null` when the
+ * lookup finds nothing (the other run ended in the meantime) — the rep gets
+ * the sentence without the button and can simply press Start again.
  */
 export async function startSession(
   sessionId: string,
   deps: EngineDeps,
-): Promise<Awaited<ReturnType<typeof advanceSession>> | { action: Session['status'] | 'idle' | 'conflict' }> {
+): Promise<Awaited<ReturnType<typeof advanceSession>> | { action: Session['status'] | 'idle' } | { action: 'conflict'; activeSessionId: string | null }> {
   const claim = await claimReadySession(deps, sessionId);
-  if (claim === 'conflict') return { action: 'conflict' };
+  if (claim === 'conflict') {
+    const self = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
+    const active = self
+      ? await deps.db.query.dialerSessions.findFirst({
+          where: and(eq(schema.dialerSessions.userId, self.userId), eq(schema.dialerSessions.status, 'active')),
+        })
+      : null;
+    return { action: 'conflict', activeSessionId: active?.id ?? null };
+  }
   if (claim === 'lost') {
     const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
     // Already active: re-advance rather than report success and do nothing.
@@ -339,6 +353,20 @@ export async function skipCurrent(sessionId: string, deps: EngineDeps): ReturnTy
  * softphone's Stop drops their own conference leg (which carries
  * `endConferenceOnExit=true`) as soon as the stop request resolves, so a live
  * conversation ends on Stop either way.
+ *
+ * ORDER — release the conference, flip to `stopped`, hang up LAST. The hangup
+ * makes Twilio send that call's terminal status callback (`canceled` while it
+ * was still ringing; `completed` → `hangup` once it had answered). Were the
+ * hangup first, that callback could land while this function was still
+ * awaiting it: `handleDialOutcome` would find the row still `dialing` and the
+ * session still `active` (its `sessionLive` rule), so it would requeue the
+ * record as attempt 2 — or enqueue a rollover — and then `advanceSession`
+ * would ORIGINATE THE NEXT RECORD after the rep pressed Stop, into a room
+ * whose rep leg is already gone. Flipped first, the callback finds a stopped
+ * session: the row simply settles as `no_connect` (an attempt-2 miss still
+ * enqueues its rollover — that miss genuinely happened, and post-Stop
+ * enqueueing is the endorsed behavior) and `advanceSession` returns `idle`.
+ * Same reasoning as `skipCurrent`'s stamp-then-hang-up, one level up.
  */
 export async function stopSession(sessionId: string, deps: EngineDeps): Promise<{ action: 'stopped' }> {
   const [session, items] = await Promise.all([
@@ -346,7 +374,6 @@ export async function stopSession(sessionId: string, deps: EngineDeps): Promise<
     loadItems(deps, sessionId),
   ]);
   const item = inFlightItem(items);
-  if (item && item.status === 'dialing' && item.callId) await deps.telephony.hangup(item.callId);
   // Released before the status flip, for the same cross-run reason as
   // advanceSession. Only a live (active/paused) session ever joined a
   // conference — the conference name is rep-scoped, so releasing it for a
@@ -357,6 +384,13 @@ export async function stopSession(sessionId: string, deps: EngineDeps): Promise<
     await releaseRepConference(deps, session.userId, sessionId);
   }
   await setSession(deps, sessionId, 'stopped');
+  if (item && item.status === 'dialing' && item.callId) {
+    try {
+      await deps.telephony.hangup(item.callId);
+    } catch (err) {
+      console.error('[dialer] stop hangup failed', { itemId: item.id, err: (err as Error).message });
+    }
+  }
   return { action: 'stopped' };
 }
 

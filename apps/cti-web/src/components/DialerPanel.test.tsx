@@ -18,9 +18,9 @@ import {
   itemStatusLabel,
   startDialingSequence,
   ConfirmBlock,
-  isStartRefused,
+  conflictingSessionId,
 } from './DialerPanel';
-import type { DialerSession, DialerSessionView } from '../dialer-api';
+import type { DialerControlAction, DialerSession, DialerSessionView } from '../dialer-api';
 import * as dialerApi from '../dialer-api';
 import { ApiError } from '../api';
 
@@ -171,7 +171,7 @@ describe('DialerPanel (no @testing-library available — shallow render only)', 
 
   it('renders the list-view picker when there is no active session', () => {
     const html = renderToStaticMarkup(
-      <DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} onStartRefused={() => {}} />,
+      <DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onPrepare={async () => {}} onJoin={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />,
     );
     expect(html).toContain('Power dial a list');
     expect(html).toContain('Opportunities');
@@ -186,7 +186,7 @@ describe('DialerPanel (no @testing-library available — shallow render only)', 
       currentItem: null,
     });
     const html = renderToStaticMarkup(
-      <DialerPanel sessionId="sess1" onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} onStartRefused={() => {}} />,
+      <DialerPanel sessionId="sess1" onScreenPop={() => {}} onStartFromListView={async () => {}} onPrepare={async () => {}} onJoin={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />,
     );
     expect(typeof html).toBe('string');
   });
@@ -287,7 +287,7 @@ describe('DialerPanel render (SSR)', () => {
 
 describe('Tasks in the picker', () => {
   it('offers Leads, Opportunities, and Tasks', () => {
-    const html = renderToStaticMarkup(<DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} onStartRefused={() => {}} />);
+    const html = renderToStaticMarkup(<DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onPrepare={async () => {}} onJoin={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />);
     expect(html).toContain('Tasks');
   });
 });
@@ -336,33 +336,52 @@ describe('itemStatusLabel — the current record card', () => {
   });
 });
 
-describe('startDialingSequence — join the softphone first, then tell the engine', () => {
-  it('sends start only after the conference leg is up', async () => {
+describe('startDialingSequence — prepare, then start, then join the conference', () => {
+  it('runs prepare → start → join, in that order', async () => {
+    const prepare = vi.fn(async () => {});
+    const control = vi.fn(async () => {});
     const join = vi.fn(async () => true);
-    const control = vi.fn(async () => {});
-    expect(await startDialingSequence(join, control)).toBe('started');
+    expect(await startDialingSequence(prepare, control, join)).toBe('started');
     expect(control).toHaveBeenCalledWith('start');
-    expect(join.mock.invocationCallOrder[0]!).toBeLessThan(control.mock.invocationCallOrder[0]!);
+    expect(prepare.mock.invocationCallOrder[0]!).toBeLessThan(control.mock.invocationCallOrder[0]!);
+    expect(control.mock.invocationCallOrder[0]!).toBeLessThan(join.mock.invocationCallOrder[0]!);
   });
-  it('sends nothing when the join reports the run was superseded', async () => {
+  it('a refused prepare (softphone on a call) sends no start and never joins — nothing rings', async () => {
     const control = vi.fn(async () => {});
-    expect(await startDialingSequence(async () => false, control)).toBe('superseded');
+    const join = vi.fn(async () => true);
+    await expect(startDialingSequence(async () => { throw new Error('Device busy'); }, control, join))
+      .rejects.toThrow('Device busy');
     expect(control).not.toHaveBeenCalled();
+    expect(join).not.toHaveBeenCalled();
   });
-  it('sends nothing when the join throws (the error reaches the caller)', async () => {
-    const control = vi.fn(async () => {});
-    await expect(startDialingSequence(async () => { throw new Error('Device busy'); }, control)).rejects.toThrow('Device busy');
-    expect(control).not.toHaveBeenCalled();
+  it('a refused start (409) never joins, so no leg can be dropped from the rep\'s live run in another tab', async () => {
+    const join = vi.fn(async () => true);
+    const control = vi.fn(async () => { throw new ApiError(409, { error: 'x' }); });
+    await expect(startDialingSequence(async () => {}, control, join)).rejects.toBeInstanceOf(ApiError);
+    expect(join).not.toHaveBeenCalled();
+  });
+  it('a join that throws stops the run it just started, then rethrows — prospects never ring into an empty room', async () => {
+    const control = vi.fn(async (_action: DialerControlAction) => {});
+    await expect(startDialingSequence(async () => {}, control, async () => { throw new Error('Device busy'); }))
+      .rejects.toThrow('Device busy');
+    expect(control.mock.calls.map(([a]) => a)).toEqual(['start', 'stop']);
+  });
+  it('a superseded join reports superseded and sends no stop — a newer run owns the leg', async () => {
+    const control = vi.fn(async (_action: DialerControlAction) => {});
+    expect(await startDialingSequence(async () => {}, control, async () => false)).toBe('superseded');
+    expect(control.mock.calls.map(([a]) => a)).toEqual(['start']);
   });
 });
 
-describe('isStartRefused — the one start failure that proves the session is still ready', () => {
-  it('is true only for a 409 (another run is already active)', () => {
-    expect(isStartRefused(new ApiError(409, { error: 'x' }))).toBe(true);
+describe('conflictingSessionId — the other run the 409 named', () => {
+  it('returns the id from a 409 body', () => {
+    expect(conflictingSessionId(new ApiError(409, { error: 'x', activeSessionId: 'S-OTHER' }))).toBe('S-OTHER');
   });
-  it('is false for any other ApiError status or a non-ApiError failure', () => {
-    expect(isStartRefused(new ApiError(500, {}))).toBe(false);
-    expect(isStartRefused(new Error('Device busy'))).toBe(false);
+  it('is null when the 409 named no run, or for any other failure', () => {
+    expect(conflictingSessionId(new ApiError(409, { error: 'x', activeSessionId: null }))).toBeNull();
+    expect(conflictingSessionId(new ApiError(409, { error: 'x' }))).toBeNull();
+    expect(conflictingSessionId(new ApiError(500, { activeSessionId: 'S-OTHER' }))).toBeNull();
+    expect(conflictingSessionId(new Error('Device busy'))).toBeNull();
   });
 });
 
@@ -385,5 +404,15 @@ describe('ConfirmBlock (SSR)', () => {
     expect(html).toContain('Starting…');
     expect(html).toContain('Another power-dial run is already active');
     expect((html.match(/disabled=""/g) ?? []).length).toBe(2);
+  });
+  it('offers to stop the other run when the 409 named one', () => {
+    const html = renderToStaticMarkup(
+      <ConfirmBlock view={view} busy={false} error="Another power-dial run is already active for you — stop it first." onStartDialing={() => {}} onChooseAnother={() => {}} onStopOther={() => {}} />,
+    );
+    expect(html).toContain('Stop the other run');
+  });
+  it('does not offer it when the 409 named no run', () => {
+    const html = renderToStaticMarkup(<ConfirmBlock view={view} busy={false} error="Another power-dial run is already active for you — stop it first." onStartDialing={() => {}} onChooseAnother={() => {}} />);
+    expect(html).not.toContain('Stop the other run');
   });
 });
