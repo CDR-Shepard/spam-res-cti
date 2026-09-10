@@ -18,9 +18,11 @@ import {
   itemStatusLabel,
   startDialingSequence,
   ConfirmBlock,
+  isStartRefused,
 } from './DialerPanel';
 import type { DialerSession, DialerSessionView } from '../dialer-api';
 import * as dialerApi from '../dialer-api';
+import { ApiError } from '../api';
 
 describe('progressLabel', () => {
   it('counts every terminal disposition as done, not just connected-and-dispositioned', () => {
@@ -141,6 +143,7 @@ describe('shouldTeardownRun — release the conference leg when a run ends on it
   it('does not tear down while the run is still going', () => {
     expect(shouldTeardownRun('active', false)).toBe(false);
     expect(shouldTeardownRun('paused', false)).toBe(false);
+    expect(shouldTeardownRun('ready', false)).toBe(false);
   });
 
   it('fires exactly once — a repeat terminal poll after teardown is a no-op', () => {
@@ -168,7 +171,7 @@ describe('DialerPanel (no @testing-library available — shallow render only)', 
 
   it('renders the list-view picker when there is no active session', () => {
     const html = renderToStaticMarkup(
-      <DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />,
+      <DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} onStartRefused={() => {}} />,
     );
     expect(html).toContain('Power dial a list');
     expect(html).toContain('Opportunities');
@@ -183,7 +186,7 @@ describe('DialerPanel (no @testing-library available — shallow render only)', 
       currentItem: null,
     });
     const html = renderToStaticMarkup(
-      <DialerPanel sessionId="sess1" onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />,
+      <DialerPanel sessionId="sess1" onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} onStartRefused={() => {}} />,
     );
     expect(typeof html).toBe('string');
   });
@@ -284,7 +287,7 @@ describe('DialerPanel render (SSR)', () => {
 
 describe('Tasks in the picker', () => {
   it('offers Leads, Opportunities, and Tasks', () => {
-    const html = renderToStaticMarkup(<DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />);
+    const html = renderToStaticMarkup(<DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} onStartRefused={() => {}} />);
     expect(html).toContain('Tasks');
   });
 });
@@ -328,6 +331,9 @@ describe('itemStatusLabel — the current record card', () => {
     expect(itemStatusLabel({ status: 'connected' })).toBe('Connected');
     expect(itemStatusLabel({ status: 'no_connect', outcome: null })).toBe('No connect');
   });
+  it('names a failed current-item status, not the raw lowercase status', () => {
+    expect(itemStatusLabel({ status: 'failed' })).toBe('Bad number');
+  });
 });
 
 describe('startDialingSequence — join the softphone first, then tell the engine', () => {
@@ -347,6 +353,16 @@ describe('startDialingSequence — join the softphone first, then tell the engin
     const control = vi.fn(async () => {});
     await expect(startDialingSequence(async () => { throw new Error('Device busy'); }, control)).rejects.toThrow('Device busy');
     expect(control).not.toHaveBeenCalled();
+  });
+});
+
+describe('isStartRefused — the one start failure that proves the session is still ready', () => {
+  it('is true only for a 409 (another run is already active)', () => {
+    expect(isStartRefused(new ApiError(409, { error: 'x' }))).toBe(true);
+  });
+  it('is false for any other ApiError status or a non-ApiError failure', () => {
+    expect(isStartRefused(new ApiError(500, {}))).toBe(false);
+    expect(isStartRefused(new Error('Device busy'))).toBe(false);
   });
 });
 

@@ -138,6 +138,7 @@ const OUTCOME_LABELS: Record<string, string> = {
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Queued', dialing: 'Dialing', connected: 'Connected', done: 'Done',
   skipped: 'Skipped', unreachable: 'No number', no_connect: 'No connect',
+  failed: 'Bad number',
 };
 
 /** Pure — the current record's one-phrase state; a miss shows its reason. */
@@ -171,6 +172,12 @@ function controlErrorMessage(e: unknown, fallback: string): string {
     if (typeof msg === 'string') return msg;
   }
   return e instanceof Error ? e.message : fallback;
+}
+
+/** Pure — a refused `start` (409: another run is active) is the one failure
+ *  that proves this session is still ready; anything else may have started it. */
+export function isStartRefused(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 409;
 }
 
 /** Pure — which dialerControl action the toggle button sends next. */
@@ -292,6 +299,16 @@ export interface DialerPanelProps {
    * (the summary's "Start another run" CTA). Clears the parent's session id.
    */
   onDismiss: () => void;
+  /**
+   * `start` was refused with 409 — the rep has another active run, and THIS
+   * session is still `ready` (nothing dialed, nothing will). The parent drops
+   * the conference leg it joined for Start and releases the nav lock, so the
+   * rep can go stop the other run; the confirm block stays with the message.
+   * Only on 409: any other failure leaves the leg up, because the server may
+   * have flipped the session active (a failed first originate) and the run
+   * screen will take over on the next poll.
+   */
+  onStartRefused: () => void;
 }
 
 function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Element {
@@ -434,9 +451,13 @@ export function ConfirmBlock({
 }
 
 export function DialerPanel(props: DialerPanelProps): JSX.Element {
-  const { sessionId, onScreenPop, onStartFromListView, onStart, onStop, onComplete, onDismiss } = props;
+  const { sessionId, onScreenPop, onStartFromListView, onStart, onStop, onComplete, onDismiss, onStartRefused } = props;
   const [view, setView] = useState<DialerSessionView | null>(null);
+  // The poll owns `error` (a failed refresh); control actions own
+  // `controlError` (a refused pause/skip/stop/next/start), so a successful
+  // poll tick cannot erase what a control action just told the rep.
   const [error, setError] = useState<string | null>(null);
+  const [controlError, setControlError] = useState<string | null>(null);
   const [controlBusy, setControlBusy] = useState(false);
   // Ticks every second so the retry countdown re-renders without waiting on
   // the ~2s poll.
@@ -468,11 +489,13 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     if (!sessionId) {
       setView(null);
       setError(null);
+      setControlError(null);
       return;
     }
 
     setView(null);
     setError(null);
+    setControlError(null);
 
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | undefined;
@@ -539,10 +562,11 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const runControl = useCallback((action: DialerControlAction): Promise<void> => {
     if (!sessionId) return Promise.resolve();
     setControlBusy(true);
+    setControlError(null);
     return dialerControl(sessionId, action)
       .then(() => pollNowRef.current())
       .catch((e: unknown) => {
-        setError(controlErrorMessage(e, `Could not ${action} the run.`));
+        setControlError(controlErrorMessage(e, `Could not ${action} the run.`));
       })
       .finally(() => setControlBusy(false));
   }, [sessionId]);
@@ -565,19 +589,22 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     if (!sessionId) return;
     void (async () => {
       setControlBusy(true);
+      setControlError(null);
       try {
-        const result = await startDialingSequence(onStart, async (action) => {
+        // On success ('started' or 'superseded') there is nothing to show here —
+        // the run screen takes over on the next poll, or the rep already left.
+        await startDialingSequence(onStart, async (action) => {
           await dialerControl(sessionId, action);
           pollNowRef.current();
         });
-        if (result === 'started') setError(null);
       } catch (e: unknown) {
-        setError(controlErrorMessage(e, 'Could not start the run.'));
+        setControlError(controlErrorMessage(e, 'Could not start the run.'));
+        if (isStartRefused(e)) onStartRefused();
       } finally {
         setControlBusy(false);
       }
     })();
-  }, [onStart, sessionId]);
+  }, [onStart, sessionId, onStartRefused]);
 
   if (!sessionId) {
     return <ListViewPicker onStart={onStartFromListView} />;
@@ -592,12 +619,17 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     );
   }
 
+  // A successful poll tick cannot erase what a control action just told the
+  // rep — see the `error`/`controlError` split above.
+  const shownError = controlError ?? error;
+  const miss = missLine(view.missBreakdown);
+
   if (view.session.status === 'ready') {
     return (
       <ConfirmBlock
         view={view}
         busy={controlBusy}
-        error={error}
+        error={shownError}
         onStartDialing={handleStartDialing}
         onChooseAnother={handleStop}
       />
@@ -615,7 +647,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         <div className="dp-queue-line">
           {queueLine(view.firstPassTotal ?? view.counts.total, view.counts.unreachable, view.skipBreakdown)}
         </div>
-        {missLine(view.missBreakdown) && <div className="dp-queue-line">{missLine(view.missBreakdown)}</div>}
+        {miss && <div className="dp-queue-line">{miss}</div>}
         <div className="dp-progress-label">{progressLabel(view.counts)}</div>
         <div className="meterbar tall">
           <div className="meterfill" style={{ width: `${pct}%` }} />
@@ -624,7 +656,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
 
       {view.currentItem && <CurrentRecord item={view.currentItem} />}
 
-      {error && <div className="dp-error">{error}</div>}
+      {shownError && <div className="dp-error">{shownError}</div>}
 
       {isTerminal ? (
         <div className="dp-summary">
@@ -632,7 +664,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
             Run {view.session.status === 'done' ? 'complete' : 'stopped'}
           </div>
           <div className="dp-summary-meta">{progressLabel(view.counts)}</div>
-          {missLine(view.missBreakdown) && <div className="dp-summary-meta">{missLine(view.missBreakdown)}</div>}
+          {miss && <div className="dp-summary-meta">{miss}</div>}
           {view.rollovers && view.rollovers.pending > 0 ? (
             // The worker hasn't finished writing the rollovers yet; the poll is
             // still running (bounded by ROLLOVER_SETTLE_MS) and will replace this

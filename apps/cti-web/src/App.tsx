@@ -1259,6 +1259,7 @@ export function App(): JSX.Element {
       onStop={handleDialerStop}
       onComplete={handleDialerComplete}
       onDismiss={handleDialerDismiss}
+      onStartRefused={dropConferenceLeg}
     />
   ) : (
     <div className="dialer">
