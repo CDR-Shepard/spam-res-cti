@@ -131,19 +131,26 @@ async function claimReadySession(deps: EngineDeps, sessionId: string): Promise<'
  * `repNext` needs a connected item, the webhooks need a dial that started).
  *
  * Compare-and-swap on status, so a double-submitted Start (two tabs, a retry)
- * advances exactly once: the loser matches 0 rows and just reports the status
- * it finds. The partial unique index still enforces one active run per rep:
+ * advances exactly once: the loser matches 0 rows and, if the session is
+ * already `active`, re-advances it rather than reporting success and doing
+ * nothing. The partial unique index still enforces one active run per rep:
  * if another of the rep's sessions is active the flip is refused, THIS session
  * stays `ready`, and the caller gets `conflict` to explain to the rep.
  */
 export async function startSession(
   sessionId: string,
   deps: EngineDeps,
-): Promise<ReturnType<typeof advanceSession> | { action: Session['status'] | 'idle' | 'conflict' }> {
+): Promise<Awaited<ReturnType<typeof advanceSession>> | { action: Session['status'] | 'idle' | 'conflict' }> {
   const claim = await claimReadySession(deps, sessionId);
   if (claim === 'conflict') return { action: 'conflict' };
   if (claim === 'lost') {
     const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
+    // Already active: re-advance rather than report success and do nothing.
+    // With a call in flight this is a no-op (`waiting`; the pending → dialing
+    // claim is its own CAS, so two tabs pressing Start cannot double-dial).
+    // With nothing in flight it is the recovery for a first originate that
+    // failed and rolled its item back to pending — the rep presses Start again.
+    if (session?.status === 'active') return advanceSession(sessionId, deps);
     return { action: session?.status ?? 'idle' };
   }
   return advanceSession(sessionId, deps);
@@ -341,11 +348,14 @@ export async function stopSession(sessionId: string, deps: EngineDeps): Promise<
   const item = inFlightItem(items);
   if (item && item.status === 'dialing' && item.callId) await deps.telephony.hangup(item.callId);
   // Released before the status flip, for the same cross-run reason as
-  // advanceSession. A `ready` session never joined a conference — and the
-  // conference name is rep-scoped, so releasing it here could end a DIFFERENT
+  // advanceSession. Only a live (active/paused) session ever joined a
+  // conference — the conference name is rep-scoped, so releasing it for a
+  // `ready`, already-`stopped`, or `done` session here could end a DIFFERENT
   // run the rep has active in another tab (the very case that leaves a second
   // session stuck `ready`).
-  if (session && session.status !== 'ready') await releaseRepConference(deps, session.userId, sessionId);
+  if (session && (session.status === 'active' || session.status === 'paused')) {
+    await releaseRepConference(deps, session.userId, sessionId);
+  }
   await setSession(deps, sessionId, 'stopped');
   return { action: 'stopped' };
 }

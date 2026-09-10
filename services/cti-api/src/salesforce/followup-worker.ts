@@ -453,9 +453,9 @@ export function isAbandoned(
  * moved along by the presence-gated nudge above. So if the rep closes the tab
  * while it waits, presence never comes back, the nudge never fires, and the
  * session stays 'active' forever — which wedges the partial unique index
- * `dialer_sessions_one_active_per_user`: the rep's next list start hits the
- * conflict, `createDialerSession` hands back the STALE session, and they resume
- * dialing yesterday's leftovers instead of the list they just picked.
+ * `dialer_sessions_one_active_per_user`: the rep's next list start gets a 409
+ * from `POST /dialer/sessions/:id/start` ("another run is already active")
+ * until this reaper stops the wedged session.
  *
  * This NEVER originates a call — it only stops sessions. A session with a live
  * dial ('dialing'/'connected') is left alone however stale its poll: the call

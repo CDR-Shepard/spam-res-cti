@@ -180,9 +180,8 @@ export async function createDialerSession(
     .insert(schema.dialerSessions)
     .values({ orgId: args.orgId, userId: args.userId, sfOwnerId, objectType: args.objectType, status: 'ready' })
     .returning();
-  // ONE batched read per gate for the whole run, after the session exists (a
-  // conflicting create returns the rep's existing session above and never gets
-  // here). Distinct: a list often carries the same person on two records, and
+  // ONE batched read per gate for the whole run, after the session exists.
+  // Distinct: a list often carries the same person on two records, and
   // both verdicts are per NUMBER — duplicates would only bloat the IN (...)
   // binds. The two reads are independent, so they go out together.
   //

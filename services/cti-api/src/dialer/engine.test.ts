@@ -795,6 +795,13 @@ describe('stopSession', () => {
     expect(deps.enqueueRollover).not.toHaveBeenCalled();
     expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'stopped' }) }]);
   });
+  it('does not release the rep conference for an already-stopped session (the name is rep-scoped; another run may own it)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, items); deps.db = fdb;
+    expect(await stopSession('S1', deps)).toEqual({ action: 'stopped' });
+    expect(deps.telephony.endConference).not.toHaveBeenCalled();
+    expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'stopped' }) }]);
+  });
 });
 
 describe('repNext', () => {
@@ -885,11 +892,36 @@ describe('startSession — the rep pressed Start dialing', () => {
     expect(r).toMatchObject({ action: 'dialing' });
   });
 
-  it('is idempotent: a second Start finds the session active, originates nothing, and reports the status it found', async () => {
-    const deps = makeDeps(); const fdb = fakeDb(baseSession, pending); deps.db = fdb;
-    expect(await startSession('S1', deps)).toEqual({ action: 'active' });
+  it('is idempotent while a call is in flight: a second Start on an active session originates nothing', async () => {
+    const dialing = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, dialing); deps.db = fdb;
+    expect(await startSession('S1', deps)).toEqual({ action: 'waiting' });
     expect(deps.telephony.originate).not.toHaveBeenCalled();
     expect(fdb._writes).toEqual([]);
+  });
+
+  it('re-kicks an active session whose first originate failed (nothing in flight, rows still pending)', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, pending); deps.db = fdb;
+    const r = await startSession('S1', deps);
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ action: 'dialing' });
+    // No ready -> active flip was written: the session was already active.
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'active' }) });
+  });
+
+  it('two Starts against one session: the first flips and dials, the second finds it active and waits', async () => {
+    // `pending` above is `const` with a literal `callId: null`, which rejects
+    // the later `'CA1'` assignment below — declare a locally-typed fixture
+    // instead of mutating the shared one.
+    const items: Array<{ id: string; ordinal: number; status: string; toNumber: string; recordId: string; objectType: string; callId: string | null; attempt: number }> = [
+      { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 },
+    ];
+    const deps = makeDeps(); const fdb = fakeDb(ready, items); deps.db = fdb;
+    expect(await startSession('S1', deps)).toMatchObject({ action: 'dialing' });
+    // Simulate the first call now being in flight (the fake's items are static).
+    items[0]!.status = 'dialing'; items[0]!.callId = 'CA1';
+    expect(await startSession('S1', deps)).toEqual({ action: 'waiting' });
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(1);
   });
 
   it('never revives a stopped session', async () => {
