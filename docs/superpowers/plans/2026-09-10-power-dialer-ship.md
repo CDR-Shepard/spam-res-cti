@@ -1603,7 +1603,7 @@ Expected: all PASS, all clean. Then the final whole-branch review (the controlle
 The user pushes `main` (`git push origin main`); Railway's pre-deploy runs the migrations. Then confirm the enum value exists — the healthz is not proof (a runner that finds nothing still reports success):
 
 ```bash
-PUB=$(railway variables -s Postgres --kv 2>/dev/null | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-); psql "$PUB" -At -c "select name, applied_at from cti_schema_migrations where name like '0037%';" -c "select enumlabel from pg_enum where enumtypid = 'dialer_session_status'::regtype order by enumsortorder;" 2>&1 | grep -vE 'postgres://|postgresql://|TOKEN|SECRET'
+PUB=$(railway variables -s Postgres --kv 2>/dev/null | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-); psql "$PUB" -At -c "select filename, applied_at from cti_schema_migrations where filename like '0037%';" -c "select enumlabel from pg_enum where enumtypid = 'dialer_session_status'::regtype order by enumsortorder;" 2>&1 | grep -vE 'postgres://|postgresql://|TOKEN|SECRET'
 ```
 
 Expected: one `0037_dialer_session_ready.sql` row, and `ready` among the labels.
