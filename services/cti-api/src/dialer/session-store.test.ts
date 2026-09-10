@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rolloverSummary, sessionCounts, skipBreakdown } from './session-store.js';
+import { missBreakdown, rolloverSummary, sessionCounts, skipBreakdown } from './session-store.js';
 
 const item = (status: string) => ({ status } as Parameters<typeof sessionCounts>[0][number]);
 
@@ -22,6 +22,22 @@ describe('skipBreakdown', () => {
       { status: 'skipped', outcome: null },
       { status: 'pending', outcome: null },
     ])).toEqual({ already_worked: 2, skip_on_dialer: 1, other: 1 });
+  });
+});
+
+describe('missBreakdown', () => {
+  it('counts no_connect rows per reason and ignores every other status', () => {
+    expect(missBreakdown([
+      { status: 'no_connect', outcome: 'voicemail' },
+      { status: 'no_connect', outcome: 'voicemail' },
+      { status: 'no_connect', outcome: 'no_answer' },
+      { status: 'no_connect', outcome: null },
+      { status: 'skipped', outcome: 'already_worked' },
+      { status: 'done', outcome: 'connected' },
+    ])).toEqual({ voicemail: 2, no_answer: 1, other: 1 });
+  });
+  it('is empty for a run with no misses', () => {
+    expect(missBreakdown([{ status: 'pending', outcome: null }])).toEqual({});
   });
 });
 

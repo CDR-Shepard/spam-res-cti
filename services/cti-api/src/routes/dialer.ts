@@ -12,8 +12,8 @@
  *  Twilio-facing power-dialer call webhooks (signature-validated, NOT auth'd —
  *  Twilio calls these directly, see TwilioDialerTelephony#originate):
  *  POST /telephony/twilio/dialer-answer → TwiML played while async AMD classifies
- *  POST /telephony/twilio/dialer-amd    → async AMD result → hangup machine/fax, else advance
- *  POST /telephony/twilio/dialer-status → terminal call status → no_connect (idempotent)
+ *  POST /telephony/twilio/dialer-amd    → async AMD result → stamp voicemail/fax + hangup, or bridge a human
+ *  POST /telephony/twilio/dialer-status → terminal call status → stamp its reason (idempotent backstop)
  *
  *  Salesforce → CTI handoff relay (see dialer/handoff-store.ts):
  *  POST /dialer/handoffs         → SF Apex relays a list-view selection (shared-secret auth)
@@ -41,9 +41,10 @@ import {
   type EngineDeps,
 } from '../dialer/engine.js';
 import { inFlightItem, nextEligiblePendingItem, earliestRetryAt } from '../dialer/state.js';
-import { sessionCounts, skipBreakdown, rolloverSummary } from '../dialer/session-store.js';
+import { sessionCounts, skipBreakdown, missBreakdown, rolloverSummary } from '../dialer/session-store.js';
 import { buildEngineDeps } from '../dialer/live-deps.js';
 import { mapAnsweredBy } from '../dialer/amd.js';
+import { isNoConnect, type DialOutcome } from '../dialer/outcome.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
 import { fetchTasks } from '../salesforce/task-targets.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
@@ -71,16 +72,37 @@ export const StartBody = z.object({
 const TWIML_DIALER_ANSWER_HOLD = '<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="30"/></Response>';
 const TWIML_EMPTY = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
 
-/** Terminal Twilio call statuses that mean the recipient never connected. */
-const TERMINAL_NO_CONNECT_STATUSES = new Set(['no-answer', 'busy', 'failed', 'canceled']);
+/**
+ * Terminal Twilio call statuses and the reason each stamps on a still-`dialing`
+ * item. `completed` is the one that needs care: it fires for EVERY ended call.
+ * A bridged conversation the rep finished is `connected` by then, and a machine
+ * AMD hung up is `no_connect` by then (see onDialerAmd's ordering) — the engine
+ * no-ops both. What remains is a `dialing` item whose call ended: the callee
+ * answered and hung up before AMD classified. Before this mapping that item
+ * stayed `dialing` forever and the run waited on it until the rep pressed Skip.
+ */
+const STATUS_OUTCOMES: Record<string, DialOutcome> = {
+  'no-answer': 'no_answer',
+  busy: 'busy',
+  failed: 'failed',
+  canceled: 'canceled',
+  completed: 'hangup',
+};
 
 /**
- * Async-AMD callback handler: classify `AnsweredBy`, hang up a machine/fax
- * classification immediately (a human never picked up), then let the engine
- * act on the outcome (bridge-to-rep on connect, rollover + advance on
- * no_connect). Extracted from the route so it's unit-testable without a live
- * Fastify request — `runHandleDialOutcome` defaults to the real
- * `handleDialOutcome` but tests can inject a spy.
+ * Async-AMD callback handler: classify `AnsweredBy`, let the engine act on the
+ * outcome (bridge-to-rep on connect; requeue/rollover + advance on a miss), and
+ * hang up a machine/fax (a human never picked up). Extracted from the route so
+ * it is unit-testable without a live Fastify request — `runHandleDialOutcome`
+ * defaults to the real `handleDialOutcome` but tests inject a spy.
+ *
+ * The outcome is recorded BEFORE the hangup on purpose. Hanging up makes
+ * Twilio send the `completed` status callback, and if that arrived while this
+ * handler was still awaiting the hangup, the status backstop below would find
+ * the item still `dialing` and stamp `hangup` over the voicemail/fax verdict.
+ * Stamped first, the backstop finds the row already settled and does nothing.
+ * The hangup runs even if stamping throws: a machine left alone plays the
+ * 30-second hold TwiML and bills for it.
  */
 export async function onDialerAmd(
   body: Record<string, string>,
@@ -89,17 +111,18 @@ export async function onDialerAmd(
 ): Promise<void> {
   const callSid = body.CallSid ?? '';
   const outcome = mapAnsweredBy(body.AnsweredBy);
-  if (outcome === 'no_connect') {
-    await deps.telephony.hangup(callSid);
+  try {
+    await runHandleDialOutcome(callSid, outcome, deps);
+  } finally {
+    if (isNoConnect(outcome)) await deps.telephony.hangup(callSid);
   }
-  await runHandleDialOutcome(callSid, outcome, deps);
 }
 
 /**
  * Call-status callback handler: a terminal status without ever reaching AMD
- * (no-answer/busy/failed/canceled) is also a no_connect. Idempotent by
- * construction — `handleDialOutcome` no-ops for any item that isn't still
- * 'dialing', so a call AMD already classified is a harmless no-op here.
+ * stamps its reason (see STATUS_OUTCOMES). Idempotent by construction —
+ * `handleDialOutcome` no-ops for any item that isn't still 'dialing', so a
+ * call AMD already classified is a harmless no-op here and its reason stands.
  */
 export async function onDialerStatus(
   body: Record<string, string>,
@@ -108,13 +131,8 @@ export async function onDialerStatus(
 ): Promise<void> {
   const callSid = body.CallSid ?? '';
   const status = body.CallStatus ?? body.DialCallStatus ?? '';
-  // A TRUE no-answer (rang out) is the only miss that falls back to the record's
-  // Phone number; busy / failed / canceled are plain no-connects that do not.
-  if (status === 'no-answer') {
-    await runHandleDialOutcome(callSid, 'no_answer', deps);
-  } else if (TERMINAL_NO_CONNECT_STATUSES.has(status)) {
-    await runHandleDialOutcome(callSid, 'no_connect', deps);
-  }
+  const outcome = STATUS_OUTCOMES[status];
+  if (outcome) await runHandleDialOutcome(callSid, outcome, deps);
 }
 
 /** Session by id, scoped to the caller — never leaks another rep's session. */
@@ -286,6 +304,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       session,
       counts: sessionCounts(items),
       skipBreakdown: skipBreakdown(items),
+      missBreakdown: missBreakdown(items),
       // What the run STARTED with. `counts.total` grows mid-run (an attempt-2
       // retry row is appended), which would make the inherited-day line drift
       // upward while the rep watches it. Attempt-1 rows are exactly the queue

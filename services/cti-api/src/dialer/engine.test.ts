@@ -435,7 +435,7 @@ describe('handleDialOutcome', () => {
   it('a SECOND miss enqueues exactly one rollover job, then advances', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+1', secondaryNumber: null, followupEligible: true }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     expect(deps.enqueueRollover).toHaveBeenCalledTimes(1);
     // I3: enqueueRollover now takes the transaction handle as its 2nd arg.
     expect(deps.enqueueRollover).toHaveBeenCalledWith(expect.objectContaining({
@@ -456,7 +456,7 @@ describe('handleDialOutcome', () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+1', secondaryNumber: null, sessionId: 'S1', followupEligible: true }];
     const deps = makeDeps({ enqueueRollover: (jobRow, handle) => enqueueFollowupRollover(handle, jobRow) });
     const fdb = fakeDb(baseSession, items); deps.db = fdb;
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     expect(fdb._txInserts).toContainEqual({ values: expect.objectContaining({
       orgId: 'O1', userId: 'U1', sfOwnerId: '005', sessionId: 'S1', recordId: '00Q1', objectType: 'Lead',
       fromDate: '2026-07-13', status: 'pending',
@@ -471,7 +471,7 @@ describe('handleDialOutcome', () => {
       { id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550199', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550199', sessionId: 'S1' },
     ];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
-    await expect(handleDialOutcome('CA1', 'no_connect', deps)).resolves.toBeUndefined();
+    await expect(handleDialOutcome('CA1', 'busy', deps)).resolves.toBeUndefined();
     expect(fdb._txInserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(1);
   });
 
@@ -482,7 +482,7 @@ describe('handleDialOutcome', () => {
     // losing the CAS must also mean losing the enqueue.
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+1', secondaryNumber: null, followupEligible: true }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items, { claimReturnsRows: false }); deps.db = fdb;
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     expect(deps.enqueueRollover).not.toHaveBeenCalled();
   });
 
@@ -496,7 +496,7 @@ describe('handleDialOutcome', () => {
       { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+2', secondaryNumber: null, sessionId: 'S1' },
     ];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     expect(deps.enqueueRollover).not.toHaveBeenCalled();
     // I4c: the attempt-2 row lands in `_txInserts`, NOT `_inserts` — it must
     // ride inside the same transaction as the CAS (I3), not after it.
@@ -511,27 +511,27 @@ describe('handleDialOutcome', () => {
   it('a duplicated webhook for the first miss does not insert a second attempt-2 row', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+1', secondaryNumber: null }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items, { claimReturnsRows: false }); deps.db = fdb;
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     expect(fdb._txInserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(0);
   });
 
   it('a Task run: the second miss enqueues the rollover with the dialed task id', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+1', secondaryNumber: null, taskId: '00T1', followupEligible: true }];
     const deps = makeDeps(); deps.db = fakeDb({ ...baseSession, objectType: 'Task' }, items);
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     expect(deps.enqueueRollover).toHaveBeenCalledWith(expect.objectContaining({ sourceTaskId: '00T1', recordId: '00Q1' }), expect.anything());
   });
   it('the attempt-2 requeue row carries the task id and eligibility forward (else attempt 2 would roll a "Check in" as eligible)', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '0031', objectType: 'Contact', callId: 'CA1', attempt: 1, primaryNumber: '+1', secondaryNumber: null, taskId: '00T2', followupEligible: false }];
     const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, objectType: 'Task' }, items); deps.db = fdb;
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     // The requeue rides inside the miss transaction (I4c), so it lands in `_txInserts`.
     expect(fdb._txInserts).toContainEqual({ values: expect.objectContaining({ attempt: 2, taskId: '00T2', followupEligible: false }) });
   });
   it('a Task run: a non-follow-up task is dialed twice but never enqueues a rollover', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '0031', objectType: 'Contact', callId: 'CA1', attempt: 2, primaryNumber: '+1', secondaryNumber: null, taskId: '00T2', followupEligible: false }];
     const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, objectType: 'Task' }, items); deps.db = fdb;
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     expect(deps.enqueueRollover).not.toHaveBeenCalled();
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
   });
@@ -543,7 +543,7 @@ describe('handleDialOutcome', () => {
     // legacy row mid-run still has a dialable number to retry with).
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: null, fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: null, secondaryNumber: null, sessionId: 'S1', followupEligible: true }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     expect(fdb._txInserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(0);
     expect(deps.enqueueRollover).toHaveBeenCalledTimes(1);
   });
@@ -554,7 +554,7 @@ describe('handleDialOutcome', () => {
     // and it hasn't genuinely had its second miss yet so it must not enqueue.
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: null, sessionId: 'S1' }];
     const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, items); deps.db = fdb;
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     expect(fdb._txInserts.filter((x: any) => x.values.attempt === 2)).toHaveLength(0);
     expect(deps.enqueueRollover).not.toHaveBeenCalled();
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
@@ -565,7 +565,7 @@ describe('handleDialOutcome', () => {
     // follow-up task gets created.
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+16195550100', secondaryNumber: null, sessionId: 'S1', followupEligible: true }];
     const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, items); deps.db = fdb;
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     expect(deps.enqueueRollover).toHaveBeenCalledTimes(1);
   });
   it('a connect never requeues or enqueues', async () => {
@@ -606,7 +606,7 @@ describe('handleDialOutcome', () => {
     // the separate first-miss-requeues-instead-of-rolling-over behavior.
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: '+12135550199', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 2, primaryNumber: '+16195550100', secondaryNumber: '+12135550199', followupEligible: true }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
-    await handleDialOutcome('CA1', 'no_connect', deps);
+    await handleDialOutcome('CA1', 'busy', deps);
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
     expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'pending', toNumber: '+12135550199' }) });
     expect(deps.enqueueRollover).toHaveBeenCalled();
@@ -800,5 +800,44 @@ describe('repNext', () => {
     const r = await repNext('S1', deps);
     expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
     expect(r.action).toBe('waiting');
+  });
+});
+
+describe('handleDialOutcome — honest miss reasons', () => {
+  beforeEach(() => { _target = {}; });
+  const dialing = (over: Record<string, unknown> = {}) => [{
+    id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead',
+    callId: 'CA1', attempt: 2, primaryNumber: '+16195550100', secondaryNumber: null, followupEligible: true, ...over,
+  }];
+
+  it.each(['voicemail', 'fax', 'busy', 'failed', 'canceled', 'hangup'] as const)(
+    '%s settles the row as no_connect with that reason in `outcome`',
+    async (reason) => {
+      const deps = makeDeps(); const fdb = fakeDb(baseSession, dialing()); deps.db = fdb;
+      await handleDialOutcome('CA1', reason, deps);
+      expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect', outcome: reason }) });
+    },
+  );
+
+  it('a voicemail with a fallback number still untried is a MISS — only no_answer earns the fallback', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, dialing({ fallbackNumber: '+16195550200', attempt: 1 })); deps.db = fdb;
+    await handleDialOutcome('CA1', 'voicemail', deps);
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'pending', toNumber: '+16195550200' }) });
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect', outcome: 'voicemail' }) });
+  });
+
+  it('no_answer with a fallback number still swaps the fallback in (unchanged)', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, dialing({ fallbackNumber: '+16195550200', attempt: 1 })); deps.db = fdb;
+    await handleDialOutcome('CA1', 'no_answer', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'pending', toNumber: '+16195550200', fallbackNumber: null }) });
+  });
+
+  it('the status backstop never overwrites a settled row: a hangup for a call AMD already stamped writes nothing', async () => {
+    const deps = makeDeps();
+    const fdb = fakeDb(baseSession, dialing({ status: 'no_connect', outcome: 'voicemail' })); deps.db = fdb;
+    await handleDialOutcome('CA1', 'hangup', deps);
+    expect(fdb._writes).toEqual([]);
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
   });
 });

@@ -18,18 +18,33 @@ export function sessionCounts(items: Array<Pick<DialerItem, 'status'>>): {
   return c;
 }
 
-/** Per-outcome tally of skipped rows only — what a rep inherited when the run
- *  started (already worked today, flagged skip, out of hours, etc). Non-skipped
- *  rows are ignored; a null/unrecognized outcome on a skipped row counts as
- *  'other' so the total always matches `sessionCounts(items).skipped`. */
-export function skipBreakdown(items: Array<Pick<DialerItem, 'status' | 'outcome'>>): Record<string, number> {
+/** Per-outcome tally of the rows in one status. A null/unrecognized outcome
+ *  counts as 'other' so the tally's total always matches that status's count
+ *  in `sessionCounts(items)`. */
+function tallyOutcomes(
+  items: Array<Pick<DialerItem, 'status' | 'outcome'>>,
+  status: DialerItem['status'],
+): Record<string, number> {
   const breakdown: Record<string, number> = {};
   for (const it of items) {
-    if (it.status !== 'skipped') continue;
+    if (it.status !== status) continue;
     const key = it.outcome ?? 'other';
     breakdown[key] = (breakdown[key] ?? 0) + 1;
   }
   return breakdown;
+}
+
+/** Per-outcome tally of skipped rows only — what a rep inherited when the run
+ *  started (already worked today, flagged skip, consent-blocked, etc). */
+export function skipBreakdown(items: Array<Pick<DialerItem, 'status' | 'outcome'>>): Record<string, number> {
+  return tallyOutcomes(items, 'skipped');
+}
+
+/** Per-reason tally of no_connect rows — what the run's misses actually were
+ *  (voicemail, no_answer, busy, failed, …; see dialer/outcome.ts). Attempt-2
+ *  retries that miss again count as their own row, like every other miss. */
+export function missBreakdown(items: Array<Pick<DialerItem, 'status' | 'outcome'>>): Record<string, number> {
+  return tallyOutcomes(items, 'no_connect');
 }
 
 /** Run-summary counts from a session's rollover jobs. The rollover worker

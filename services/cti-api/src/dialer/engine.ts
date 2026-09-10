@@ -6,6 +6,7 @@ import type { DialerTelephony } from './telephony-port.js';
 import { recordConnectSticky } from './sticky.js';
 import type { RolloverDb } from '../salesforce/followup-enqueue.js';
 import type { PickDidArgs, PickDidResult } from './pick-agent-did.js';
+import type { DialOutcome } from './outcome.js';
 
 export interface RolloverEnqueue {
   orgId: string; userId: string; sfOwnerId: string; sessionId: string;
@@ -304,7 +305,7 @@ export async function repNext(sessionId: string, deps: EngineDeps): ReturnType<t
 
 export async function handleDialOutcome(
   callId: string,
-  outcome: 'connected' | 'no_answer' | 'no_connect',
+  outcome: DialOutcome,
   deps: EngineDeps,
 ): Promise<void> {
   const item = await deps.db.query.dialerQueueItems.findFirst({ where: eq(schema.dialerQueueItems.callId, callId) });
@@ -340,8 +341,10 @@ export async function handleDialOutcome(
   // becomes the number now being dialed. advanceSession re-dials it — the item
   // keeps its ordinal, which is the lowest among unfinished items, so it's the
   // very next call, through the normal pool-DID + attempt-count path. Only a
-  // 'no_answer' outcome reaches here: busy / voicemail-machine / failed are
-  // mapped to 'no_connect' by the webhook handlers and never fall back.
+  // 'no_answer' outcome reaches here: voicemail / fax / busy / failed /
+  // canceled / hangup are plain misses (see dialer/outcome.ts) that never
+  // fall back — the row below becomes 'no_connect' with that reason in
+  // `outcome`, and the decision here does not read the reason.
   if (outcome === 'no_answer' && item.fallbackNumber) {
     // Compare-and-swap so a duplicate/redelivered webhook for THIS same call
     // can't reset (and therefore re-dial) the fallback twice: only the

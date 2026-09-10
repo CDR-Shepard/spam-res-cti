@@ -34,20 +34,37 @@ function fakeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
 }
 
 describe('onDialerAmd', () => {
-  it('AnsweredBy=machine_start hangs up the call and reports no_connect', async () => {
+  it('AnsweredBy=machine_start stamps voicemail BEFORE hanging up, so the completed-status backstop finds the row settled', async () => {
     const deps = fakeDeps();
     const runHandleDialOutcome = vi.fn(async () => {});
     await onDialerAmd({ CallSid: 'CA1', AnsweredBy: 'machine_start' }, deps, runHandleDialOutcome);
+    expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'voicemail', deps);
     expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
-    expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'no_connect', deps);
+    const hangup = deps.telephony.hangup as unknown as { mock: { invocationCallOrder: number[] } };
+    expect(runHandleDialOutcome.mock.invocationCallOrder[0]!).toBeLessThan(hangup.mock.invocationCallOrder[0]!);
   });
 
-  it('AnsweredBy=fax hangs up the call and reports no_connect', async () => {
+  it('AnsweredBy=machine_end_beep is voicemail too (every machine_* verdict)', async () => {
+    const deps = fakeDeps();
+    const runHandleDialOutcome = vi.fn(async () => {});
+    await onDialerAmd({ CallSid: 'CA1', AnsweredBy: 'machine_end_beep' }, deps, runHandleDialOutcome);
+    expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'voicemail', deps);
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+  });
+
+  it('AnsweredBy=fax stamps fax and hangs up', async () => {
     const deps = fakeDeps();
     const runHandleDialOutcome = vi.fn(async () => {});
     await onDialerAmd({ CallSid: 'CA1', AnsweredBy: 'fax' }, deps, runHandleDialOutcome);
+    expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'fax', deps);
     expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
-    expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'no_connect', deps);
+  });
+
+  it('still hangs up a machine when stamping the outcome throws (the call must not play out its 30s hold)', async () => {
+    const deps = fakeDeps();
+    const runHandleDialOutcome = vi.fn(async () => { throw new Error('db down'); });
+    await expect(onDialerAmd({ CallSid: 'CA1', AnsweredBy: 'machine_start' }, deps, runHandleDialOutcome)).rejects.toThrow('db down');
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
   });
 
   it('AnsweredBy=human does NOT hang up and reports connected', async () => {
@@ -75,15 +92,17 @@ describe('onDialerStatus', () => {
     expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'no_answer', deps);
   });
 
-  it.each(['busy', 'failed', 'canceled'])(
-    'CallStatus=%s reports no_connect (never falls back to the Phone)',
-    async (status) => {
-      const deps = fakeDeps();
-      const runHandleDialOutcome = vi.fn(async () => {});
-      await onDialerStatus({ CallSid: 'CA1', CallStatus: status }, deps, runHandleDialOutcome);
-      expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'no_connect', deps);
-    },
-  );
+  it.each([
+    ['busy', 'busy'],
+    ['failed', 'failed'],
+    ['canceled', 'canceled'],
+    ['completed', 'hangup'],
+  ])('CallStatus=%s stamps %s (a plain miss — never falls back to the Phone)', async (status, reason) => {
+    const deps = fakeDeps();
+    const runHandleDialOutcome = vi.fn(async () => {});
+    await onDialerStatus({ CallSid: 'CA1', CallStatus: status }, deps, runHandleDialOutcome);
+    expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', reason, deps);
+  });
 
   it('falls back to DialCallStatus when CallStatus is absent (no-answer → no_answer)', async () => {
     const deps = fakeDeps();
@@ -92,14 +111,17 @@ describe('onDialerStatus', () => {
     expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'no_answer', deps);
   });
 
-  it('a non-terminal status (e.g. in-progress) is a no-op — AMD/connect owns that transition', async () => {
-    const deps = fakeDeps();
-    const runHandleDialOutcome = vi.fn(async () => {});
-    await onDialerStatus({ CallSid: 'CA1', CallStatus: 'in-progress' }, deps, runHandleDialOutcome);
-    expect(runHandleDialOutcome).not.toHaveBeenCalled();
-  });
+  it.each(['queued', 'ringing', 'in-progress', 'initiated', ''])(
+    'a non-terminal status (%s) is a no-op — AMD/connect owns that transition',
+    async (status) => {
+      const deps = fakeDeps();
+      const runHandleDialOutcome = vi.fn(async () => {});
+      await onDialerStatus({ CallSid: 'CA1', CallStatus: status }, deps, runHandleDialOutcome);
+      expect(runHandleDialOutcome).not.toHaveBeenCalled();
+    },
+  );
 
-  it('never touches telephony directly — status alone drives no_connect, no hangup needed', async () => {
+  it('never touches telephony directly — status alone drives the miss, no hangup needed', async () => {
     const deps = fakeDeps();
     const runHandleDialOutcome = vi.fn(async () => {});
     await onDialerStatus({ CallSid: 'CA1', CallStatus: 'busy' }, deps, runHandleDialOutcome);
