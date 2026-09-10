@@ -63,3 +63,15 @@ comment on `revokeDevicesForDeactivatedUser`.
   the pure helpers (`queueParts`, `confirmLine`, `missLine`, `itemStatusLabel`,
   `startDialingSequence`, `conflictingSessionId`) belong in a sibling
   `dialer-lines.ts`.
+- Power dialer: the compensating `stop` the panel sends when Start fails
+  after the server may have flipped the session active is client-side and
+  best-effort; the durable fix is server-side — roll the `ready → active` flip
+  back in `startSession` when the first `advanceSession` originate throws.
+- Power dialer: a 403 at the confirm block (grant revoked) is non-409, so the
+  panel's compensating `stop` discards a built queue that could have survived
+  for a retry. Trivial; exclude 403 if it ever matters.
+- Power dialer: `dialer_sessions_one_active_per_user` (migration 0022) covers
+  only `active`, so a rep with a PAUSED run can Start a second one, and any
+  `stopSession` on an active session releases the rep-scoped conference under
+  the paused run's leg. Widen the index to active + paused, or name conferences
+  per run instead of per rep.
