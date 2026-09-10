@@ -5,7 +5,7 @@ vi.mock('./client.js', () => ({
   soqlEscape: (v: string) => v.replace(/\\/g, '\\\\').replace(/'/g, "\\'"),
 }));
 
-import { _resetSkipFieldWarnForTests, choosePhones, resolveDialNumber } from './record-phone.js';
+import { _resetSkipFieldWarnForTests, choosePhones, opportunityPhones, resolveDialNumber } from './record-phone.js';
 import { soqlQuery } from './client.js';
 
 const mockSoql = soqlQuery as unknown as ReturnType<typeof vi.fn>;
@@ -34,8 +34,10 @@ describe('resolveDialNumber', () => {
     expect(r?.e164).toMatch(/^\+1\d{10}$/);
   });
 
-  it('resolves an Opportunity via its primary contact', async () => {
-    mockSoql.mockResolvedValue([{ Contact: { MobilePhone: null, Phone: '213-555-0199' } }]);
+  it('resolves an Opportunity via its primary contact ONLY when the Opportunity itself has no phone', async () => {
+    mockSoql
+      .mockResolvedValueOnce([{ Mobile_Phone__c: null, Phone__c: null, Other_Phone__c: null }])
+      .mockResolvedValueOnce([{ Contact: { MobilePhone: null, Phone: '213-555-0199' } }]);
     const r = await resolveDialNumber('u', 'Opportunity', '006AAA');
     expect(r?.e164).toMatch(/^\+1\d{10}$/);
   });
@@ -112,16 +114,6 @@ describe('resolveDialNumber — Skip on Dialer', () => {
     expect((await resolveDialNumber('u', 'Lead', '00Q2'))?.skipOnDialer).toBe(false);
   });
 
-  it('reads the parent Opportunity checkbox through the contact-role query', async () => {
-    mockSoql.mockResolvedValueOnce([{
-      Contact: { MobilePhone: null, Phone: '213-555-0199' },
-      Opportunity: { Skip_on_Dialer__c: true },
-    }]);
-    const r = await resolveDialNumber('u', 'Opportunity', '006AAA');
-    expect(soqlOf(0)).toMatch(/SELECT Contact\.MobilePhone, Contact\.Phone, Opportunity\.Skip_on_Dialer__c FROM OpportunityContactRole/);
-    expect(r).toEqual({ e164: '+12135550199', fallbackE164: null, skipOnDialer: true });
-  });
-
   it('NEVER asks a Contact for the checkbox — the field does not exist there', async () => {
     mockSoql.mockResolvedValueOnce([{ MobilePhone: '619-555-0100', Phone: null }]);
     const r = await resolveDialNumber('u', 'Contact', '0031');
@@ -133,7 +125,9 @@ describe('resolveDialNumber — Skip on Dialer', () => {
     mockSoql.mockResolvedValueOnce([{ MobilePhone: null, Phone: null, Skip_on_Dialer__c: true }]);
     expect(await resolveDialNumber('u', 'Lead', '00Q1')).toEqual({ e164: null, fallbackE164: null, skipOnDialer: true });
 
-    mockSoql.mockResolvedValueOnce([{ Contact: null, Opportunity: { Skip_on_Dialer__c: true } }]);
+    mockSoql
+      .mockResolvedValueOnce([{ Mobile_Phone__c: null, Phone__c: null, Other_Phone__c: null, Skip_on_Dialer__c: true }])
+      .mockResolvedValueOnce([]);
     expect(await resolveDialNumber('u', 'Opportunity', '006AAA')).toEqual({ e164: null, fallbackE164: null, skipOnDialer: true });
   });
 
@@ -173,11 +167,12 @@ describe('resolveDialNumber — Skip on Dialer', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     mockSoql
       .mockRejectedValueOnce(INVALID_FIELD)
+      .mockResolvedValueOnce([{ Mobile_Phone__c: null, Phone__c: null, Other_Phone__c: null }])
       .mockResolvedValueOnce([{ Contact: { MobilePhone: '213-555-0199', Phone: null } }]);
 
     expect(await resolveDialNumber('u', 'Opportunity', '006AAA'))
       .toEqual({ e164: '+12135550199', fallbackE164: null, skipOnDialer: false });
-    expect(soqlOf(0)).toContain('Opportunity.Skip_on_Dialer__c');
+    expect(soqlOf(0)).toContain('Skip_on_Dialer__c');
     expect(soqlOf(1)).not.toContain('Skip_on_Dialer__c');
     warn.mockRestore();
   });
@@ -186,5 +181,70 @@ describe('resolveDialNumber — Skip on Dialer', () => {
     mockSoql.mockRejectedValueOnce(new Error('SOQL failed (401): session expired'));
     await expect(resolveDialNumber('u', 'Lead', '00Q1')).rejects.toThrow('session expired');
     expect(mockSoql).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('resolveDialNumber — Opportunity phone fields (this org stores phones on the Opportunity)', () => {
+  /** The SOQL text of the nth query the module issued. */
+  const soqlOf = (n: number): string => String(mockSoql.mock.calls[n]?.[1] ?? '');
+  beforeEach(() => {
+    mockSoql.mockReset();
+    _resetSkipFieldWarnForTests();
+  });
+
+  it('opportunityPhones folds the three fields in order: primary is the first non-empty, fallback the next', () => {
+    expect(opportunityPhones({ Mobile_Phone__c: '213-555-0100', Phone__c: '213-555-0200', Other_Phone__c: '213-555-0300' }))
+      .toEqual({ MobilePhone: '213-555-0100', Phone: '213-555-0200' });
+    expect(opportunityPhones({ Mobile_Phone__c: '  ', Phone__c: null, Other_Phone__c: '213-555-0300' }))
+      .toEqual({ MobilePhone: '213-555-0300', Phone: null });
+    expect(opportunityPhones({})).toEqual({ MobilePhone: null, Phone: null });
+  });
+
+  it('dials Mobile_Phone__c and never asks the Contact Role when the Opportunity has a number', async () => {
+    mockSoql.mockResolvedValueOnce([{ Mobile_Phone__c: '(213) 555-0199', Phone__c: null, Other_Phone__c: null, Skip_on_Dialer__c: false }]);
+    const r = await resolveDialNumber('u', 'Opportunity', '006AAA');
+    expect(r).toEqual({ e164: '+12135550199', fallbackE164: null, skipOnDialer: false });
+    expect(mockSoql).toHaveBeenCalledTimes(1);
+    expect(soqlOf(0)).toBe("SELECT Mobile_Phone__c, Phone__c, Other_Phone__c, Skip_on_Dialer__c FROM Opportunity WHERE Id = '006AAA' LIMIT 1");
+  });
+
+  it('Phone__c then Other_Phone__c: the second non-empty field is the fallback', async () => {
+    mockSoql.mockResolvedValueOnce([{ Mobile_Phone__c: null, Phone__c: '213-555-0100', Other_Phone__c: '213-555-0200' }]);
+    const r = await resolveDialNumber('u', 'Opportunity', '006AAA');
+    expect(r).toEqual({ e164: '+12135550100', fallbackE164: '+12135550200', skipOnDialer: false });
+    expect(mockSoql).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the primary Contact Role only when all three Opportunity fields are empty', async () => {
+    mockSoql
+      .mockResolvedValueOnce([{ Mobile_Phone__c: null, Phone__c: '', Other_Phone__c: null, Skip_on_Dialer__c: false }])
+      .mockResolvedValueOnce([{ Contact: { MobilePhone: null, Phone: '213-555-0199' } }]);
+    const r = await resolveDialNumber('u', 'Opportunity', '006AAA');
+    expect(r).toEqual({ e164: '+12135550199', fallbackE164: null, skipOnDialer: false });
+    expect(mockSoql).toHaveBeenCalledTimes(2);
+    expect(soqlOf(1)).toBe("SELECT Contact.MobilePhone, Contact.Phone FROM OpportunityContactRole WHERE OpportunityId = '006AAA' AND IsPrimary = true LIMIT 1");
+  });
+
+  it('reads Skip on Dialer from the Opportunity query; a flagged Opportunity with no number anywhere is found-but-empty', async () => {
+    mockSoql
+      .mockResolvedValueOnce([{ Mobile_Phone__c: null, Phone__c: null, Other_Phone__c: null, Skip_on_Dialer__c: true }])
+      .mockResolvedValueOnce([]);
+    const r = await resolveDialNumber('u', 'Opportunity', '006AAA');
+    expect(r).toEqual({ e164: null, fallbackE164: null, skipOnDialer: true });
+  });
+
+  it('a missing Opportunity is null and the Contact Role is never asked', async () => {
+    mockSoql.mockResolvedValueOnce([]);
+    expect(await resolveDialNumber('u', 'Opportunity', '006AAA')).toBeNull();
+    expect(mockSoql).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries the Opportunity query without Skip_on_Dialer__c when the org has not got the field', async () => {
+    mockSoql
+      .mockRejectedValueOnce(new Error('INVALID_FIELD: No such column Skip_on_Dialer__c on entity Opportunity'))
+      .mockResolvedValueOnce([{ Mobile_Phone__c: '213-555-0199' }]);
+    const r = await resolveDialNumber('u', 'Opportunity', '006AAA');
+    expect(r).toEqual({ e164: '+12135550199', fallbackE164: null, skipOnDialer: false });
+    expect(soqlOf(1)).toBe("SELECT Mobile_Phone__c, Phone__c, Other_Phone__c FROM Opportunity WHERE Id = '006AAA' LIMIT 1");
   });
 });

@@ -105,22 +105,58 @@ async function lookupContact(userId: string, rid: string): Promise<FoundRecord |
   return row ? { fields: row, skipOnDialer: false } : null;
 }
 
-/** Primary Opportunity Contact Role → Contact phone, with the Opportunity's own
- *  checkbox read through the same parent traversal (one round trip). No primary
- *  contact role means there is nothing to dial and nothing to read. */
-async function lookupOpportunity(userId: string, rid: string): Promise<FoundRecord | null> {
-  type Row = {
-    Contact?: PhoneFields | null;
-    Opportunity?: { Skip_on_Dialer__c?: boolean | null } | null;
-  };
-  const where = `WHERE OpportunityId = '${rid}' AND IsPrimary = true LIMIT 1`;
-  const rows = await soqlToleratingMissingSkipField<Row>(
+/** The Opportunity's own phone fields, in dial order. This org stores phones
+ *  on the Opportunity — 92% of open Opportunities carry one of these, only 42%
+ *  have any Contact Role — so these come first and the Contact Role is the
+ *  fallback. Custom fields: a dev org without them fails the lookup loudly
+ *  (INVALID_FIELD on the retry too), which is the right answer for an org this
+ *  code was never configured for. */
+const OPP_PHONE_FIELDS = ['Mobile_Phone__c', 'Phone__c', 'Other_Phone__c'] as const;
+type OppPhoneRow = Partial<Record<(typeof OPP_PHONE_FIELDS)[number], string | null>> & {
+  Skip_on_Dialer__c?: boolean | null;
+};
+
+/** Fold the three Opportunity fields into the two-slot shape the rest of the
+ *  lookup dials: primary = the first non-empty in order, fallback = the next
+ *  non-empty. Exported for its tests. */
+export function opportunityPhones(row: OppPhoneRow): PhoneFields {
+  const present = OPP_PHONE_FIELDS.map((f) => row[f]?.trim()).filter((v): v is string => !!v);
+  return { MobilePhone: present[0] ?? null, Phone: present[1] ?? null };
+}
+
+/** Primary Opportunity Contact Role → Contact phone. Consulted only when the
+ *  Opportunity's own fields are all empty; the checkbox was already read from
+ *  the Opportunity, so it is not asked for again here. No primary contact role
+ *  means there is nothing to dial. */
+async function lookupOpportunityContactRole(userId: string, rid: string): Promise<PhoneFields | null> {
+  type Row = { Contact?: PhoneFields | null };
+  const rows = await soqlQuery<Row>(
     userId,
-    `SELECT Contact.MobilePhone, Contact.Phone, Opportunity.${SKIP_FIELD} FROM OpportunityContactRole ${where}`,
-    `SELECT Contact.MobilePhone, Contact.Phone FROM OpportunityContactRole ${where}`,
+    `SELECT Contact.MobilePhone, Contact.Phone FROM OpportunityContactRole WHERE OpportunityId = '${rid}' AND IsPrimary = true LIMIT 1`,
   );
   const row = rows[0];
-  return row ? { fields: row.Contact ?? {}, skipOnDialer: row.Opportunity?.Skip_on_Dialer__c === true } : null;
+  return row ? row.Contact ?? {} : null;
+}
+
+/** The Opportunity's own fields first (with its Skip on Dialer checkbox in the
+ *  same round trip, tolerating an org without the field exactly as the Lead
+ *  branch does); the primary Contact Role's phone only when all three are
+ *  empty. A missing Opportunity is null; one with no number anywhere is
+ *  found-but-empty, so the queue still honors its checkbox. */
+async function lookupOpportunity(userId: string, rid: string): Promise<FoundRecord | null> {
+  const fields = OPP_PHONE_FIELDS.join(', ');
+  const rows = await soqlToleratingMissingSkipField<OppPhoneRow>(
+    userId,
+    `SELECT ${fields}, ${SKIP_FIELD} FROM Opportunity WHERE Id = '${rid}' LIMIT 1`,
+    `SELECT ${fields} FROM Opportunity WHERE Id = '${rid}' LIMIT 1`,
+  );
+  const row = rows[0];
+  if (!row) return null;
+  const skipOnDialer = row.Skip_on_Dialer__c === true;
+  const own = opportunityPhones(row);
+  if (own.MobilePhone) return { fields: own, skipOnDialer };
+  const contact = await lookupOpportunityContactRole(userId, rid);
+  return { fields: contact ?? {}, skipOnDialer };
 }
 
 /**
