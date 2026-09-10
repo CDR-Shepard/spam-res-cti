@@ -579,34 +579,49 @@ export function App(): JSX.Element {
   // Dismiss a finished/stopped run's summary and return to the list-view picker.
   const handleDialerDismiss = useCallback(() => setDialerSessionId(null), []);
 
-  // Start a server-originated power-dialer run: validate the payload, create
-  // the session, switch to the Power Dial tab, then join the rep's softphone to
-  // the run's Twilio conference (mirrors place()'s device.connect() shape, but
-  // with DialerConference instead of To/CallerId/CallId — the server's /voice
-  // DialerConference branch puts this leg in the conference room instead of
-  // dialing a destination). Deliberately does NOT touch phase/active/inCall:
-  // this leg is long-lived across many prospect calls, not a single call.
-  // Shared tail for both start paths: once we have a sessionId, switch to the
-  // Power Dial tab and join the rep's softphone to the run's Twilio conference,
-  // guarding against a stop/new-start that superseded this one mid-await.
-  const beginRun = useCallback(async (sessionId: string, myRun: number): Promise<void> => {
-    coordinatorRef.current?.promoteSelf();
+  // A session was created READY (queue built, nothing dialed): show the confirm
+  // block on the Power Dial tab. No conference leg yet, and no nav lock — those
+  // come when the rep presses Start dialing (joinDialerConference).
+  const beginRun = useCallback((sessionId: string): void => {
     setDialerSessionId(sessionId);
-    setDialerLive(true); // lock the nav to the Power Dial tab for the whole run
     setTab('powerdial');
-    const device = await ensureDevice();
-    const connection = await (device as unknown as { connect: (o: unknown) => Promise<unknown> }).connect({
-      params: { DialerConference: '1' },
-    });
-    if (dialerRunRef.current !== myRun) {
-      try { (connection as { disconnect?: () => void }).disconnect?.(); } catch { /* already gone */ }
-      return;
-    }
-    dialerConnRef.current = connection;
-    // Announce "busy" NOW rather than waiting up to a heartbeat — until peers see
-    // it, a tab the rep alt-tabs to could still win the election and register a
-    // second Device on top of this live run.
+  }, []);
+
+  // The rep pressed Start dialing. Join the softphone to the run's Twilio
+  // conference BEFORE the engine originates the first call (the panel sends
+  // `start` only once this resolves true), so the first prospect that connects
+  // finds the rep already in the room. Mirrors place()'s device.connect()
+  // shape, but with DialerConference instead of To/CallerId/CallId — the
+  // server's /voice DialerConference branch puts this leg in the conference
+  // room instead of dialing a destination. Deliberately does NOT touch
+  // phase/active/inCall: this leg is long-lived across many prospect calls,
+  // not a single call. Resolves false — leg dropped, nothing started — when a
+  // stop or a newer run superseded it mid-await. Idempotent: a retry after a
+  // failed `start` (say, a 409) finds the leg already up and keeps it.
+  const joinDialerConference = useCallback(async (): Promise<boolean> => {
+    if (dialerConnRef.current) return true;
+    const myRun = ++dialerRunRef.current;
     coordinatorRef.current?.promoteSelf();
+    setDialerLive(true); // lock the nav to the Power Dial tab for the whole run
+    try {
+      const device = await ensureDevice();
+      const connection = await (device as unknown as { connect: (o: unknown) => Promise<unknown> }).connect({
+        params: { DialerConference: '1' },
+      });
+      if (dialerRunRef.current !== myRun) {
+        try { (connection as { disconnect?: () => void }).disconnect?.(); } catch { /* already gone */ }
+        return false;
+      }
+      dialerConnRef.current = connection;
+      // Announce "busy" NOW rather than waiting up to a heartbeat — until peers see
+      // it, a tab the rep alt-tabs to could still win the election and register a
+      // second Device on top of this live run.
+      coordinatorRef.current?.promoteSelf();
+      return true;
+    } catch (e) {
+      if (dialerRunRef.current === myRun) setDialerLive(false); // only if a newer run didn't supersede us
+      throw e;
+    }
   }, [ensureDevice]);
 
   const startPowerDial = useCallback(async (objectType: unknown, recordIds: unknown): Promise<void> => {
@@ -618,14 +633,11 @@ export function App(): JSX.Element {
       setToast({ text: 'Power Dial: select at least one record.', type: 'error' });
       return;
     }
-    // Capture the run generation BEFORE any await (see beginRun's guard).
-    const myRun = ++dialerRunRef.current;
     try {
       const { sessionId } = await startDialer(objectType as DialerObjectType, recordIds as string[]);
-      await beginRun(sessionId, myRun);
+      beginRun(sessionId);
     } catch (e) {
       setToast({ text: dialerStartErrorMessage(e), type: 'error' });
-      if (dialerRunRef.current === myRun) setDialerLive(false); // only if a newer run didn't supersede us
     }
   }, [beginRun]);
 
@@ -633,14 +645,11 @@ export function App(): JSX.Element {
   // via the rep's own SF token (no fragile SF list-view button needed).
   const startPowerDialFromListView = useCallback(
     async (object: DialerObjectType, listViewId: string): Promise<void> => {
-      const myRun = ++dialerRunRef.current;
       try {
-        const { sessionId, recordCount } = await startDialerFromListView(object, listViewId);
-        await beginRun(sessionId, myRun);
-        setToast({ text: `Power Dial started — dialing ${recordCount} record(s).`, type: 'success' });
+        const { sessionId } = await startDialerFromListView(object, listViewId);
+        beginRun(sessionId);
       } catch (e) {
         setToast({ text: dialerStartErrorMessage(e), type: 'error' });
-        if (dialerRunRef.current === myRun) setDialerLive(false); // only if a newer run didn't supersede us
       }
     },
     [beginRun],
@@ -745,11 +754,11 @@ export function App(): JSX.Element {
     const poll = async (): Promise<void> => {
       try {
         if (coordinatorRef.current && !coordinatorRef.current.isLeader()) return;
-        // Don't auto-start a run while the rep is on/ringing a call — beginRun's
-        // device.connect() would throw (Device busy) yet the server session is
-        // already created + dialing, stranding a headless run. Take handoffs only
-        // when truly idle. (Manual start is already blocked: the nav is hidden
-        // during a call, so the rep can't reach the picker mid-call.)
+        // Don't take a handoff while the rep is on/ringing a call: the confirm
+        // block would pop over the call, and Start's device.connect() would
+        // throw (Device busy). Take handoffs only when truly idle. (Manual
+        // start is already blocked: the nav is hidden during a call, so the
+        // rep can't reach the picker mid-call.)
         if (phaseRef.current !== 'idle' || connectionRef.current || incomingRef.current) return;
         const { handoff } = await getPendingHandoff();
         if (cancelled || !handoff) return;
@@ -1246,7 +1255,7 @@ export function App(): JSX.Element {
       sessionId={dialerSessionId}
       onScreenPop={screenPopRecord}
       onStartFromListView={startPowerDialFromListView}
-      onStart={() => { /* App already owns session start (see startPowerDial) */ }}
+      onStart={joinDialerConference}
       onStop={handleDialerStop}
       onComplete={handleDialerComplete}
       onDismiss={handleDialerDismiss}

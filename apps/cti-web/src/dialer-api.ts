@@ -21,11 +21,14 @@ export interface DialerCurrentItem {
   attempt?: number;
   /** The DID the call went out on. */
   fromNumber?: string | null;
+  /** Why a miss missed — voicemail, no_answer, busy, failed, … (server
+   *  `dialer/outcome.ts`). Set once the row settles; null while dialing. */
+  outcome?: string | null;
 }
 
 export interface DialerSession {
   id: string;
-  status: 'active' | 'paused' | 'stopped' | 'done';
+  status: 'ready' | 'active' | 'paused' | 'stopped' | 'done';
 }
 
 export interface DialerRollovers { moved: number; pushed: number; failed: number; pending: number }
@@ -44,9 +47,11 @@ export interface DialerSessionView {
    *  grows as retries are appended, so this is what the start-of-run line
    *  reports. Optional — an older server omits it. */
   firstPassTotal?: number;
+  /** Per-reason tally of no_connect rows (server `session-store.ts#missBreakdown`). */
+  missBreakdown?: Record<string, number>;
 }
 
-export type DialerControlAction = 'pause' | 'resume' | 'skip' | 'stop' | 'next';
+export type DialerControlAction = 'start' | 'pause' | 'resume' | 'skip' | 'stop' | 'next';
 export type DialerObjectType = 'Lead' | 'Opportunity' | 'Task';
 export const OBJECT_LABELS: Record<DialerObjectType, string> = {
   Lead: 'Leads',
@@ -69,6 +74,7 @@ export function startBody(objectType: DialerObjectType, recordIds: string[]): { 
 }
 
 // Async API functions
+/** Pull a Salesforce list view's records and create a READY run over them — nothing dials until dialerControl(id, 'start'). */
 export async function startDialer(
   objectType: DialerObjectType,
   recordIds: string[]
@@ -116,7 +122,7 @@ export async function getSalesforceListViews(
   return api('/dialer/salesforce/listviews?object=' + object, { method: 'GET' });
 }
 
-/** Pull a Salesforce list view's records and start a dialer run over them. */
+/** Pull a Salesforce list view's records and create a READY run over them — nothing dials until dialerControl(id, 'start'). */
 export async function startDialerFromListView(
   object: DialerObjectType,
   listViewId: string

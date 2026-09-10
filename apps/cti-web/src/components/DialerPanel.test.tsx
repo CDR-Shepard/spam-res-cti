@@ -13,6 +13,11 @@ import {
   ROLLOVER_SETTLE_MS,
   AttemptBadge,
   DialerPanel,
+  confirmLine,
+  missLine,
+  itemStatusLabel,
+  startDialingSequence,
+  ConfirmBlock,
 } from './DialerPanel';
 import type { DialerSession, DialerSessionView } from '../dialer-api';
 import * as dialerApi from '../dialer-api';
@@ -163,7 +168,7 @@ describe('DialerPanel (no @testing-library available — shallow render only)', 
 
   it('renders the list-view picker when there is no active session', () => {
     const html = renderToStaticMarkup(
-      <DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={() => {}} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />,
+      <DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />,
     );
     expect(html).toContain('Power dial a list');
     expect(html).toContain('Opportunities');
@@ -178,7 +183,7 @@ describe('DialerPanel (no @testing-library available — shallow render only)', 
       currentItem: null,
     });
     const html = renderToStaticMarkup(
-      <DialerPanel sessionId="sess1" onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={() => {}} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />,
+      <DialerPanel sessionId="sess1" onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />,
     );
     expect(typeof html).toBe('string');
   });
@@ -279,7 +284,90 @@ describe('DialerPanel render (SSR)', () => {
 
 describe('Tasks in the picker', () => {
   it('offers Leads, Opportunities, and Tasks', () => {
-    const html = renderToStaticMarkup(<DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={() => {}} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />);
+    const html = renderToStaticMarkup(<DialerPanel sessionId={null} onScreenPop={() => {}} onStartFromListView={async () => {}} onStart={async () => true} onStop={() => {}} onComplete={() => {}} onDismiss={() => {}} />);
     expect(html).toContain('Tasks');
+  });
+});
+
+describe('confirmLine — the confirm block before the first ring', () => {
+  it('reads like the spec example: dialable count first, then what is left out', () => {
+    expect(confirmLine(202, 4, { already_worked: 9, blocked: 2 }))
+      .toBe('187 will be dialed · 9 already worked · 4 no number · 2 blocked');
+  });
+  it('omits zero parts and folds every consent reason into "blocked"', () => {
+    expect(confirmLine(10, 0)).toBe('10 will be dialed');
+    expect(confirmLine(10, 0, { opted_out: 1, dnc_blocked: 1, skip_on_dialer: 2 }))
+      .toBe('6 will be dialed · 2 skipped by flag · 2 blocked');
+  });
+  it('shares its arithmetic with queueLine (same inputs, same dialable figure)', () => {
+    expect(queueLine(202, 4, { already_worked: 9, blocked: 2 })).toContain('dialing 187');
+  });
+});
+
+describe('missLine — what the misses were', () => {
+  it('lists known reasons in a fixed order with rep-facing words', () => {
+    expect(missLine({ failed: 2, voicemail: 12, no_answer: 4 })).toBe('12 voicemail · 4 no answer · 2 bad number');
+  });
+  it('is empty with no misses, and appends an unknown reason under its own key', () => {
+    expect(missLine(undefined)).toBe('');
+    expect(missLine({})).toBe('');
+    expect(missLine({ voicemail: 1, something_new: 2 })).toBe('1 voicemail · 2 something new');
+  });
+});
+
+describe('itemStatusLabel — the current record card', () => {
+  it('names a miss by its reason', () => {
+    expect(itemStatusLabel({ status: 'no_connect', outcome: 'voicemail' })).toBe('Voicemail');
+    expect(itemStatusLabel({ status: 'no_connect', outcome: 'no_answer' })).toBe('No answer');
+    expect(itemStatusLabel({ status: 'no_connect', outcome: 'busy' })).toBe('Busy');
+    expect(itemStatusLabel({ status: 'no_connect', outcome: 'failed' })).toBe('Bad number');
+  });
+  it('names the other statuses, with No number for unreachable', () => {
+    expect(itemStatusLabel({ status: 'unreachable', outcome: null })).toBe('No number');
+    expect(itemStatusLabel({ status: 'dialing' })).toBe('Dialing');
+    expect(itemStatusLabel({ status: 'connected' })).toBe('Connected');
+    expect(itemStatusLabel({ status: 'no_connect', outcome: null })).toBe('No connect');
+  });
+});
+
+describe('startDialingSequence — join the softphone first, then tell the engine', () => {
+  it('sends start only after the conference leg is up', async () => {
+    const join = vi.fn(async () => true);
+    const control = vi.fn(async () => {});
+    expect(await startDialingSequence(join, control)).toBe('started');
+    expect(control).toHaveBeenCalledWith('start');
+    expect(join.mock.invocationCallOrder[0]!).toBeLessThan(control.mock.invocationCallOrder[0]!);
+  });
+  it('sends nothing when the join reports the run was superseded', async () => {
+    const control = vi.fn(async () => {});
+    expect(await startDialingSequence(async () => false, control)).toBe('superseded');
+    expect(control).not.toHaveBeenCalled();
+  });
+  it('sends nothing when the join throws (the error reaches the caller)', async () => {
+    const control = vi.fn(async () => {});
+    await expect(startDialingSequence(async () => { throw new Error('Device busy'); }, control)).rejects.toThrow('Device busy');
+    expect(control).not.toHaveBeenCalled();
+  });
+});
+
+describe('ConfirmBlock (SSR)', () => {
+  const view: DialerSessionView = {
+    session: { id: 'sess1', status: 'ready' },
+    counts: { total: 202, done: 0, connected: 0, noConnect: 0, skipped: 11, unreachable: 4, pending: 187 },
+    currentItem: null,
+    skipBreakdown: { already_worked: 9, blocked: 2 },
+    firstPassTotal: 202,
+  };
+  it('shows the breakdown line, Start dialing, and the way out', () => {
+    const html = renderToStaticMarkup(<ConfirmBlock view={view} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} />);
+    expect(html).toContain('187 will be dialed · 9 already worked · 4 no number · 2 blocked');
+    expect(html).toContain('Start dialing');
+    expect(html).toContain('Choose a different list');
+  });
+  it('reads Starting… and disables both buttons while busy; shows the error when there is one', () => {
+    const html = renderToStaticMarkup(<ConfirmBlock view={view} busy={true} error="Another power-dial run is already active for you" onStartDialing={() => {}} onChooseAnother={() => {}} />);
+    expect(html).toContain('Starting…');
+    expect(html).toContain('Another power-dial run is already active');
+    expect((html.match(/disabled=""/g) ?? []).length).toBe(2);
   });
 });

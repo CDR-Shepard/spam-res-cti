@@ -3,6 +3,9 @@
  * (pick an object + one of the rep's Salesforce list views → dial it). During a
  * run it shows progress, the current record, and controls (pause/resume, skip,
  * stop, next), polling the session every ~2s.
+ * A run is created READY and shows a confirm block (ConfirmBlock) until the rep
+ * presses Start dialing; only then does the softphone join the conference and
+ * the engine dial.
  *
  * Screen-pop: the panel calls `onScreenPop(recordId)` once per record the moment
  * it connects to a live human (see `shouldScreenPop`) — never for voicemail.
@@ -23,6 +26,7 @@ import {
   type SalesforceListView,
 } from '../dialer-api';
 import { formatE164 } from '../format';
+import { ApiError } from '../api';
 
 const POLL_INTERVAL_MS = 2000;
 const TERMINAL_STATUSES = new Set(['done', 'stopped']);
@@ -52,29 +56,121 @@ export function progressLabel(counts: DialerSessionCounts): string {
 }
 
 /**
- * Pure — what the rep inherited when the run STARTED, e.g.
- * "50 records · 18 already worked today · dialing 32".
- *
- * Every input is creation-stamped, so the line never drifts while the rep
- * watches it: `firstPassTotal` counts attempt-1 rows only (an attempt-2 retry
+ * Pure — the creation-stamped arithmetic the confirm block and the run line
+ * share. Every input is fixed at queue build, so neither line drifts while the
+ * rep watches: `firstPassTotal` counts attempt-1 rows only (an attempt-2 retry
  * row appended mid-run would inflate a live total), `unreachable` is fixed at
- * queue build, and only the two creation-stamped breakdown keys are read —
- * an out-of-hours skip the engine stamps at minute 40 adds a key this
- * deliberately ignores. Zero-count parts are omitted.
+ * creation, and only the creation-stamped breakdown keys are read — an
+ * out-of-hours skip the engine stamps at minute 40 adds a key this ignores.
  */
-export function queueLine(firstPassTotal: number, unreachable: number, breakdown?: Record<string, number>): string {
+export function queueParts(firstPassTotal: number, unreachable: number, breakdown?: Record<string, number>): {
+  total: number; alreadyWorked: number; skipOnDialer: number; consent: number; unreachable: number; dialing: number;
+} {
   const alreadyWorked = breakdown?.already_worked ?? 0;
   const skipOnDialer = breakdown?.skip_on_dialer ?? 0;
-  // Consent skips are creation-stamped too (opted out / blocked list / DNC) —
-  // they must come out of the "dialing" figure or the line overstates the run.
+  // Consent skips are creation-stamped too (opted out / blocked list / DNC).
   const consent = (breakdown?.opted_out ?? 0) + (breakdown?.blocked ?? 0) + (breakdown?.dnc_blocked ?? 0);
   const dialing = firstPassTotal - alreadyWorked - skipOnDialer - consent - unreachable;
-  const parts = [`${firstPassTotal} records`];
-  if (alreadyWorked > 0) parts.push(`${alreadyWorked} already worked today`);
-  if (skipOnDialer > 0) parts.push(`${skipOnDialer} skipped by flag`);
-  if (consent > 0) parts.push(`${consent} blocked by consent`);
-  parts.push(`dialing ${dialing}`);
+  return { total: firstPassTotal, alreadyWorked, skipOnDialer, consent, unreachable, dialing };
+}
+
+/** Pure — the run line, e.g. "50 records · 18 already worked today · dialing 32". Zero parts omitted. */
+export function queueLine(firstPassTotal: number, unreachable: number, breakdown?: Record<string, number>): string {
+  const q = queueParts(firstPassTotal, unreachable, breakdown);
+  const parts = [`${q.total} records`];
+  if (q.alreadyWorked > 0) parts.push(`${q.alreadyWorked} already worked today`);
+  if (q.skipOnDialer > 0) parts.push(`${q.skipOnDialer} skipped by flag`);
+  if (q.consent > 0) parts.push(`${q.consent} blocked by consent`);
+  parts.push(`dialing ${q.dialing}`);
   return parts.join(' · ');
+}
+
+/**
+ * Pure — the confirm block's line, e.g.
+ * "187 will be dialed · 9 already worked · 4 no number · 2 blocked".
+ * Leads with the figure the rep is deciding on; zero parts omitted.
+ */
+export function confirmLine(firstPassTotal: number, unreachable: number, breakdown?: Record<string, number>): string {
+  const q = queueParts(firstPassTotal, unreachable, breakdown);
+  const parts = [`${q.dialing} will be dialed`];
+  if (q.alreadyWorked > 0) parts.push(`${q.alreadyWorked} already worked`);
+  if (q.skipOnDialer > 0) parts.push(`${q.skipOnDialer} skipped by flag`);
+  if (q.unreachable > 0) parts.push(`${q.unreachable} no number`);
+  if (q.consent > 0) parts.push(`${q.consent} blocked`);
+  return parts.join(' · ');
+}
+
+/** Miss reason → rep-facing words, in the order the miss line lists them.
+ *  Keys are the server's `DialOutcome` values (plus the legacy `no_connect`
+ *  rows written before reasons existed, and the tally's `other`). */
+const MISS_LABELS: ReadonlyArray<readonly [key: string, label: string]> = [
+  ['voicemail', 'voicemail'],
+  ['no_answer', 'no answer'],
+  ['busy', 'busy'],
+  ['failed', 'bad number'],
+  ['fax', 'fax'],
+  ['canceled', 'canceled'],
+  ['hangup', 'hung up'],
+  ['no_connect', 'no connect'],
+  ['other', 'other'],
+];
+
+/** Pure — "12 voicemail · 4 no answer · 2 bad number"; '' with no misses.
+ *  Known reasons in a fixed order; anything the server adds later trails
+ *  under its own key so it is never silently dropped. */
+export function missLine(breakdown?: Record<string, number>): string {
+  if (!breakdown) return '';
+  const known = new Set(MISS_LABELS.map(([k]) => k));
+  const named = MISS_LABELS
+    .filter(([k]) => (breakdown[k] ?? 0) > 0)
+    .map(([k, label]) => `${breakdown[k]} ${label}`);
+  const rest = Object.keys(breakdown)
+    .filter((k) => !known.has(k) && (breakdown[k] ?? 0) > 0)
+    .sort()
+    .map((k) => `${breakdown[k]} ${k.replace(/_/g, ' ')}`);
+  return [...named, ...rest].join(' · ');
+}
+
+const OUTCOME_LABELS: Record<string, string> = {
+  voicemail: 'Voicemail', no_answer: 'No answer', busy: 'Busy', failed: 'Bad number',
+  fax: 'Fax', canceled: 'Canceled', hangup: 'Hung up',
+};
+const STATUS_LABELS: Record<string, string> = {
+  pending: 'Queued', dialing: 'Dialing', connected: 'Connected', done: 'Done',
+  skipped: 'Skipped', unreachable: 'No number', no_connect: 'No connect',
+};
+
+/** Pure — the current record's one-phrase state; a miss shows its reason. */
+export function itemStatusLabel(item: Pick<DialerCurrentItem, 'status' | 'outcome'>): string {
+  const outcomeLabel = item.status === 'no_connect' && item.outcome ? OUTCOME_LABELS[item.outcome] : undefined;
+  if (outcomeLabel) return outcomeLabel;
+  return STATUS_LABELS[item.status] ?? item.status.replace(/_/g, ' ');
+}
+
+/**
+ * Pure — the Start-dialing sequence. The softphone joins the run's conference
+ * FIRST (`join` is the parent's onStart) so the first prospect that connects
+ * finds the rep already in the room; only then is the engine told to dial.
+ * A `join` that resolves false means a stop or a newer run superseded this one
+ * mid-await — nothing is sent. A `join` that throws propagates untouched.
+ */
+export async function startDialingSequence(
+  join: () => Promise<boolean>,
+  control: (action: DialerControlAction) => Promise<void>,
+): Promise<'started' | 'superseded'> {
+  const joined = await join();
+  if (!joined) return 'superseded';
+  await control('start');
+  return 'started';
+}
+
+/** The server's `{ error }` sentence when there is one; otherwise the fallback. */
+function controlErrorMessage(e: unknown, fallback: string): string {
+  if (e instanceof ApiError && e.data && typeof e.data === 'object') {
+    const msg = (e.data as { error?: unknown }).error;
+    if (typeof msg === 'string') return msg;
+  }
+  return e instanceof Error ? e.message : fallback;
 }
 
 /** Pure — which dialerControl action the toggle button sends next. */
@@ -174,8 +270,13 @@ export interface DialerPanelProps {
   onScreenPop: (recordId: string) => void;
   /** Start a run from a Salesforce list view (parent creates the session). */
   onStartFromListView: (object: DialerObjectType, listViewId: string) => Promise<void>;
-  /** Called when the panel begins tracking a session (sessionId set). */
-  onStart: () => void;
+  /**
+   * The rep pressed Start dialing on a ready run. The parent joins the
+   * softphone to the run's Twilio conference and resolves true once the leg is
+   * up (false if a stop or a newer run superseded it meanwhile). The panel
+   * sends the `start` control only on true — see startDialingSequence.
+   */
+  onStart: () => Promise<boolean>;
   /** Called when the rep stops the run from the Stop control. */
   onStop: () => void;
   /**
@@ -200,7 +301,7 @@ function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Element {
       <div className="dp-current-number tnum">{formatE164(item.toNumber) || item.toNumber || 'No number'}</div>
       <div className="dp-current-meta">
         <span className={`cdot ${dotClassForItemStatus(item.status)}`} />
-        {item.objectType} · {item.status.replace(/_/g, ' ')}
+        {item.objectType} · {itemStatusLabel(item)}
       </div>
       {item.fromNumber && <div className="dp-current-from">from {formatE164(item.fromNumber)}</div>}
       <AttemptBadge attempt={item.attempt} />
@@ -286,10 +387,47 @@ function ListViewPicker({
               ))}
             </select>
             <button className="btn primary full" disabled={!selected || starting} onClick={() => void dial()}>
-              {starting ? 'Starting…' : 'Dial this list'}
+              {starting ? 'Checking records…' : 'Dial this list'}
             </button>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The run was created READY: the queue is built, nothing has dialed. Show the
+ * rep what the list came to and let them start it — or back out, which stops
+ * the (never-started) session and returns to the picker.
+ */
+export function ConfirmBlock({
+  view,
+  busy,
+  error,
+  onStartDialing,
+  onChooseAnother,
+}: {
+  view: DialerSessionView;
+  busy: boolean;
+  error: string | null;
+  onStartDialing: () => void;
+  onChooseAnother: () => void;
+}): JSX.Element {
+  return (
+    <div className="dialer-panel">
+      <div className="section dp-picker">
+        <div className="kicker">Ready to dial</div>
+        <div className="dp-queue-line">
+          {confirmLine(view.firstPassTotal ?? view.counts.total, view.counts.unreachable, view.skipBreakdown)}
+        </div>
+        {error && <div className="dp-error">{error}</div>}
+        <button className="btn primary full" disabled={busy} onClick={onStartDialing}>
+          {busy ? 'Starting…' : 'Start dialing'}
+        </button>
+        <button className="btn full" disabled={busy} onClick={onChooseAnother}>
+          Choose a different list
+        </button>
       </div>
     </div>
   );
@@ -333,7 +471,6 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
       return;
     }
 
-    onStart();
     setView(null);
     setError(null);
 
@@ -405,7 +542,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     return dialerControl(sessionId, action)
       .then(() => pollNowRef.current())
       .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : `Could not ${action} the run.`);
+        setError(controlErrorMessage(e, `Could not ${action} the run.`));
       })
       .finally(() => setControlBusy(false));
   }, [sessionId]);
@@ -421,6 +558,27 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     })();
   }, [runControl, onStop]);
 
+  // Start dialing: join the softphone to the conference (onStart), THEN send
+  // `start`. busy covers the whole sequence so the button cannot double-fire;
+  // a superseded join sends nothing and shows nothing — the rep chose to leave.
+  const handleStartDialing = useCallback(() => {
+    if (!sessionId) return;
+    void (async () => {
+      setControlBusy(true);
+      try {
+        const result = await startDialingSequence(onStart, async (action) => {
+          await dialerControl(sessionId, action);
+          pollNowRef.current();
+        });
+        if (result === 'started') setError(null);
+      } catch (e: unknown) {
+        setError(controlErrorMessage(e, 'Could not start the run.'));
+      } finally {
+        setControlBusy(false);
+      }
+    })();
+  }, [onStart, sessionId]);
+
   if (!sessionId) {
     return <ListViewPicker onStart={onStartFromListView} />;
   }
@@ -431,6 +589,18 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         <span className="spinner lg" />
         {error && <span className="empty-hint">{error}</span>}
       </div>
+    );
+  }
+
+  if (view.session.status === 'ready') {
+    return (
+      <ConfirmBlock
+        view={view}
+        busy={controlBusy}
+        error={error}
+        onStartDialing={handleStartDialing}
+        onChooseAnother={handleStop}
+      />
     );
   }
 
@@ -445,6 +615,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         <div className="dp-queue-line">
           {queueLine(view.firstPassTotal ?? view.counts.total, view.counts.unreachable, view.skipBreakdown)}
         </div>
+        {missLine(view.missBreakdown) && <div className="dp-queue-line">{missLine(view.missBreakdown)}</div>}
         <div className="dp-progress-label">{progressLabel(view.counts)}</div>
         <div className="meterbar tall">
           <div className="meterfill" style={{ width: `${pct}%` }} />
@@ -461,6 +632,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
             Run {view.session.status === 'done' ? 'complete' : 'stopped'}
           </div>
           <div className="dp-summary-meta">{progressLabel(view.counts)}</div>
+          {missLine(view.missBreakdown) && <div className="dp-summary-meta">{missLine(view.missBreakdown)}</div>}
           {view.rollovers && view.rollovers.pending > 0 ? (
             // The worker hasn't finished writing the rollovers yet; the poll is
             // still running (bounded by ROLLOVER_SETTLE_MS) and will replace this
