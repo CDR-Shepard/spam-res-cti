@@ -81,13 +81,13 @@ const TWIML_EMPTY = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
  * answered and hung up before AMD classified. Before this mapping that item
  * stayed `dialing` forever and the run waited on it until the rep pressed Skip.
  */
-const STATUS_OUTCOMES: Record<string, DialOutcome> = {
-  'no-answer': 'no_answer',
-  busy: 'busy',
-  failed: 'failed',
-  canceled: 'canceled',
-  completed: 'hangup',
-};
+const STATUS_OUTCOMES: ReadonlyMap<string, DialOutcome> = new Map([
+  ['no-answer', 'no_answer'],
+  ['busy', 'busy'],
+  ['failed', 'failed'],
+  ['canceled', 'canceled'],
+  ['completed', 'hangup'],
+]);
 
 /**
  * Async-AMD callback handler: classify `AnsweredBy`, let the engine act on the
@@ -131,7 +131,7 @@ export async function onDialerStatus(
 ): Promise<void> {
   const callSid = body.CallSid ?? '';
   const status = body.CallStatus ?? body.DialCallStatus ?? '';
-  const outcome = STATUS_OUTCOMES[status];
+  const outcome = STATUS_OUTCOMES.get(status);
   if (outcome) await runHandleDialOutcome(callSid, outcome, deps);
 }
 
@@ -441,9 +441,10 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
 
   /**
    * Twilio async-AMD result callback (TwilioDialerTelephony#originate's
-   * `asyncAmdStatusCallback`) — classifies human vs. machine/fax and drives
-   * the dialer engine's outcome handling (hangup + no_connect, or bridge on
-   * connect).
+   * `asyncAmdStatusCallback`) — classifies human vs. machine/fax. A
+   * machine/fax verdict is stamped (voicemail/fax) BEFORE the call is hung
+   * up; a human verdict is bridged to the rep instead. See `onDialerAmd` for
+   * why the stamp comes before the hangup.
    */
   app.post('/telephony/twilio/dialer-amd', async (req, reply) => {
     if (!validTwilioSignature(req)) {
@@ -455,9 +456,10 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
 
   /**
    * Twilio call-status callback (TwilioDialerTelephony#originate's
-   * `statusCallback`) — catches terminal statuses AMD never saw (the call
-   * never rang through at all: no-answer/busy/failed/canceled). Idempotent
-   * against a call AMD already classified — see `onDialerStatus`.
+   * `statusCallback`) — stamps a terminal status's reason
+   * (no_answer/busy/failed/canceled/hangup for `completed`) as an idempotent
+   * backstop for whatever AMD/connect didn't already settle. See
+   * `onDialerStatus` and `STATUS_OUTCOMES`.
    */
   app.post('/telephony/twilio/dialer-status', async (req, reply) => {
     if (!validTwilioSignature(req)) {

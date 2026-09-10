@@ -35,13 +35,29 @@ function fakeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
 
 describe('onDialerAmd', () => {
   it('AnsweredBy=machine_start stamps voicemail BEFORE hanging up, so the completed-status backstop finds the row settled', async () => {
-    const deps = fakeDeps();
-    const runHandleDialOutcome = vi.fn(async () => {});
+    // `invocationCallOrder` alone only proves the two mocks were CALLED in
+    // order — an implementation that dropped the `await` before
+    // `runHandleDialOutcome` would still call hangup second even though the
+    // stamp hadn't finished (settled) yet. Give the assertion teeth: the
+    // outcome fake only flips `stamped` after a real tick, and the hangup fake
+    // asserts `stamped` is already true when IT runs — that only holds if
+    // `onDialerAmd` awaited the stamp to completion before hanging up.
+    let stamped = false;
+    const runHandleDialOutcome = vi.fn(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      stamped = true;
+    });
+    const deps = fakeDeps({
+      telephony: {
+        ...fakeDeps().telephony,
+        hangup: vi.fn(async () => {
+          expect(stamped).toBe(true);
+        }),
+      },
+    });
     await onDialerAmd({ CallSid: 'CA1', AnsweredBy: 'machine_start' }, deps, runHandleDialOutcome);
     expect(runHandleDialOutcome).toHaveBeenCalledWith('CA1', 'voicemail', deps);
     expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
-    const hangup = deps.telephony.hangup as unknown as { mock: { invocationCallOrder: number[] } };
-    expect(runHandleDialOutcome.mock.invocationCallOrder[0]!).toBeLessThan(hangup.mock.invocationCallOrder[0]!);
   });
 
   it('AnsweredBy=machine_end_beep is voicemail too (every machine_* verdict)', async () => {

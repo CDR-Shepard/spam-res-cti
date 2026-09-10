@@ -238,15 +238,28 @@ export async function resumeSession(
 }
 
 /**
- * Skip the in-flight item (rep chose not to wait/talk): hang up a live call
- * regardless of whether it's still dialing or already connected (skipping a
- * connected call without hanging up would leave it live while the next lead
- * gets dialed), mark the item skipped, then try to advance to the next item.
+ * Skip the in-flight item (rep chose not to wait/talk): mark the item
+ * skipped FIRST, then hang up a live call regardless of whether it's still
+ * dialing or already connected (skipping a connected call without hanging up
+ * would leave it live while the next lead gets dialed), then try to advance
+ * to the next item.
+ *
+ * The stamp runs before the hangup for the same reason `onDialerAmd` in
+ * src/routes/dialer.ts stamps before it hangs up: hanging up makes Twilio
+ * send a `completed` (or, for a still-ringing call, `canceled`) status
+ * callback, and if that lands while this function is still awaiting the
+ * hangup, `handleDialOutcome` would find the item still `dialing` and run
+ * the full miss path — an attempt-2 requeue or a Salesforce follow-up
+ * rollover, plus an `advanceSession` — before this function's own `skipped`
+ * write landed on top of it. A rep's deliberate Skip must never manufacture
+ * a follow-up. Stamped first, the callback finds the row already settled
+ * and `handleDialOutcome` no-ops.
  */
 export async function skipCurrent(sessionId: string, deps: EngineDeps): ReturnType<typeof advanceSession> {
   const items = await loadItems(deps, sessionId);
   const item = inFlightItem(items);
   if (item) {
+    await setItem(deps, item.id, { status: 'skipped' });
     if (item.callId) {
       try {
         await deps.telephony.hangup(item.callId);
@@ -254,7 +267,6 @@ export async function skipCurrent(sessionId: string, deps: EngineDeps): ReturnTy
         console.error('[dialer] skip hangup failed', { itemId: item.id, err: (err as Error).message });
       }
     }
-    await setItem(deps, item.id, { status: 'skipped' });
   }
   return advanceSession(sessionId, deps);
 }

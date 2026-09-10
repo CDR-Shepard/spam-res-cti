@@ -724,6 +724,18 @@ describe('skipCurrent', () => {
     expect(deps.telephony.hangup).not.toHaveBeenCalled();
     expect(r.action).toBe('done');
   });
+  it('stamps skipped BEFORE hanging up, so the hangup\'s completed/canceled callback finds the row settled', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    deps.telephony.hangup = vi.fn(async () => {
+      expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped' }) });
+    });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await skipCurrent('S1', deps);
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(err).not.toHaveBeenCalled();
+    err.mockRestore();
+  });
 });
 
 describe('stopSession', () => {
