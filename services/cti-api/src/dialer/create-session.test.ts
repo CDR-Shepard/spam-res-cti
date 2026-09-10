@@ -1,20 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { schema } from '@cti/db';
-import { buildQueueRows, createAndStartSession, createDialerSession } from './create-session.js';
+import { buildQueueRows, createDialerSession } from './create-session.js';
 import { nextEligiblePendingItem } from './state.js';
 import type { DialerItem } from './session-store.js';
-
-/** Minimal db double: the session insert throws `insertErr`; the catch path
- *  reads back `existing` + `existingItems`. */
-function conflictDb(existing: unknown, existingItems: unknown[], insertErr: unknown) {
-  return {
-    insert: () => ({ values: () => ({ returning: async () => { throw insertErr; } }) }),
-    query: {
-      dialerSessions: { findFirst: async () => existing },
-      dialerQueueItems: { findMany: async () => existingItems },
-    },
-  } as never;
-}
 
 /** Minimal db double for the happy path: records the session insert values and
  *  the queue-item rows so a test can assert what creation actually wrote. */
@@ -141,52 +129,12 @@ describe('buildQueueRows', () => {
   });
 });
 
-describe('createAndStartSession', () => {
-  const deps = { ...noResolveDeps, db: {} as never };
-
-  it('creates the session, then kicks the engine with the new session id', async () => {
-    const advance = vi.fn().mockResolvedValue(undefined);
-    const create = vi.fn().mockResolvedValue({ sessionId: 'S1', total: 2 });
-
-    const result = await createAndStartSession({ ...deps, advance }, args, create);
-
-    expect(create).toHaveBeenCalledOnce();
-    expect(advance).toHaveBeenCalledWith('S1');
-    expect(result).toEqual({ sessionId: 'S1', total: 2 });
-    // The kick must come AFTER creation — otherwise there is no session to advance.
-    expect(create.mock.invocationCallOrder[0]!).toBeLessThan(advance.mock.invocationCallOrder[0]!);
-  });
-
-  it('propagates a kick failure (so the route surfaces it rather than showing a dead run)', async () => {
-    const advance = vi.fn().mockRejectedValue(new Error('originate failed'));
-    const create = vi.fn().mockResolvedValue({ sessionId: 'S1', total: 1 });
-
-    await expect(createAndStartSession({ ...deps, advance }, args, create)).rejects.toThrow('originate failed');
-  });
-});
-
-describe('createDialerSession — one active session per rep', () => {
-  it('returns the rep\'s existing active session on the unique-index conflict (no second session)', async () => {
-    const conflict = Object.assign(new Error('duplicate key'), {
-      code: '23505',
-      constraint: 'dialer_sessions_one_active_per_user',
-    });
-    const db = conflictDb({ id: 'EXISTING' }, [{}, {}, {}], conflict);
-
-    const result = await createDialerSession({ ...noResolveDeps, db }, args);
-
-    // The existing active session, with its own item count — NOT a new session.
-    expect(result).toEqual({ sessionId: 'EXISTING', total: 3 });
-  });
-
-  it('rethrows a unique violation on a different constraint (never masks unrelated conflicts)', async () => {
-    const other = Object.assign(new Error('duplicate key'), {
-      code: '23505',
-      constraint: 'some_other_unique',
-    });
-    const db = conflictDb(null, [], other);
-
-    await expect(createDialerSession({ ...noResolveDeps, db }, args)).rejects.toThrow('duplicate key');
+describe('createDialerSession — nothing dials at creation', () => {
+  it('inserts the session READY: the engine ignores anything not active, so the queue sits until the rep presses Start', async () => {
+    const db = fakeDb();
+    const result = await createDialerSession({ ...noResolveDeps, db: db as never }, args);
+    expect(db._sessionInsert).toMatchObject({ userId: 'u1', orgId: 'o1', objectType: 'Lead', status: 'ready' });
+    expect(result).toEqual({ sessionId: 'S1', total: 1 });
   });
 });
 
@@ -265,13 +213,11 @@ describe('createDialerSession — Skip on Dialer', () => {
 
   it('leaves the flagged row out of what the engine\'s first advance can pick', async () => {
     const db = fakeDb();
-    const advance = vi.fn().mockResolvedValue(undefined);
-    await createAndStartSession(
-      { ...deps(db, resolverFor(new Set(['00Q1']))), advance } as never,
+    await createDialerSession(
+      deps(db, resolverFor(new Set(['00Q1']))) as never,
       { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
     );
 
-    expect(advance).toHaveBeenCalledWith('S1');
     // The engine only ever picks a 'pending' row, so the flagged ordinal-0 record
     // is not what the kick dials — no engine change is needed to honor the box.
     const next = nextEligiblePendingItem(db._itemRows as unknown as DialerItem[], new Date());
@@ -369,15 +315,11 @@ describe('createDialerSession — already-worked skip at queue build', () => {
     ]);
   });
 
-  it('a run whose every number was worked today builds an all-skipped queue and still kicks the engine', async () => {
+  it('a run whose every number was worked today builds an all-skipped queue and still creates the run', async () => {
     const db = fakeDb();
-    const advance = vi.fn().mockResolvedValue(undefined);
-    await createAndStartSession(
-      {
-        ...deps(db, resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+12135550200' }),
-          async () => new Set(['+16195550100', '+12135550200'])),
-        advance,
-      } as never,
+    await createDialerSession(
+      deps(db, resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+12135550200' }),
+        async () => new Set(['+16195550100', '+12135550200'])) as never,
       { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
     );
 
@@ -387,10 +329,6 @@ describe('createDialerSession — already-worked skip at queue build', () => {
       ['00Q1', 'skipped', 'already_worked'],
       ['00Q2', 'skipped', 'already_worked'],
     ]);
-    // The kick still goes out exactly once: creation always hands the engine
-    // the session, which finds nothing pending and completes the run.
-    expect(advance).toHaveBeenCalledOnce();
-    expect(advance).toHaveBeenCalledWith('S1');
   });
 
   it('the fail-open dep returning an empty set leaves everything pending', async () => {
@@ -547,22 +485,17 @@ describe('createDialerSession — consent gate at queue build', () => {
     ]);
   });
 
-  it('a run whose every number is consent-blocked builds an all-skipped queue and still kicks the engine', async () => {
+  it('a run whose every number is consent-blocked builds an all-skipped queue and still creates the run', async () => {
     const db = fakeDb();
-    const advance = vi.fn().mockResolvedValue(undefined);
-    await createAndStartSession(
-      {
-        ...deps(db, resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+16195550200' }),
-          async () => new Map([['+16195550100', 'opted_out'], ['+16195550200', 'blocked']])),
-        advance,
-      } as never,
+    await createDialerSession(
+      deps(db, resolverByRecord({ '00Q1': '+16195550100', '00Q2': '+16195550200' }),
+        async () => new Map([['+16195550100', 'opted_out'], ['+16195550200', 'blocked']])) as never,
       { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
     );
 
     expect(db._itemRows.every((x) => x.status === 'skipped')).toBe(true);
     // The engine only ever picks a 'pending' row, so nothing here is dialable.
     expect(nextEligiblePendingItem(db._itemRows as unknown as DialerItem[], new Date())).toBeNull();
-    expect(advance).toHaveBeenCalledOnce();
   });
 });
 

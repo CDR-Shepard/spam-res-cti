@@ -1,7 +1,8 @@
 /**
  * Power dialer session lifecycle + engine controls.
  *
- *  POST /dialer/sessions              → start a session over a Lead/Opportunity/Task id list
+ *  POST /dialer/sessions              → create a READY session over a Lead/Opportunity/Task id list (nothing dials yet)
+ *  POST /dialer/sessions/:id/start    → ready → active, then originate the first call (idempotent; 409 if another run is active)
  *  GET  /dialer/sessions/:id          → session + counts + the in-flight item (if any)
  *  POST /dialer/sessions/:id/pause    → pause (in-flight dial finishes; queue stops advancing)
  *  POST /dialer/sessions/:id/resume   → resume + immediately try to advance
@@ -27,14 +28,14 @@ import { getDb, schema } from '@cti/db';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { signedCallbackUrl } from '../telephony/webhooks.js';
-import { createAndStartSession } from '../dialer/create-session.js';
+import { createDialerSession } from '../dialer/create-session.js';
 import { workedTodaySafe } from '../dialer/already-worked.js';
 import { blockedTargetsSafe } from '../dialer/consent-check.js';
 import {
-  advanceSession,
   pauseSession,
   resumeSession,
   skipCurrent,
+  startSession,
   stopSession,
   repNext,
   handleDialOutcome,
@@ -244,12 +245,11 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       return reply.code(422).send({ error: 'That list view has no records to dial.' });
     }
     const db = getDb();
-    const result = await createAndStartSession(
+    const result = await createDialerSession(
       {
         resolveDialNumber, fetchTasks, salesforceUserId, db,
         workedToday: (orgId, numbers) => workedTodaySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
-        advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()),
       },
       { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds },
     );
@@ -264,12 +264,11 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
 
     const db = getDb();
-    const result = await createAndStartSession(
+    const result = await createDialerSession(
       {
         resolveDialNumber, fetchTasks, salesforceUserId, db,
         workedToday: (orgId, numbers) => workedTodaySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
-        advance: (sessionId) => advanceSession(sessionId, buildEngineDeps()),
       },
       {
         userId: authed.userId,
@@ -314,6 +313,21 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
       rollovers: rolloverSummary(jobs),
     };
+  });
+
+  // The rep confirmed the list. Gated like the create routes — Start is the
+  // moment calls go out, so a rep whose grant was revoked at the confirm block
+  // must not be able to dial. (pause/skip/stop/next stay ungated so a mid-run
+  // revoke never strands an in-flight run.)
+  app.post('/dialer/sessions/:id/start', async (req, reply) => {
+    const owned = await requireOwnedSession(req, reply);
+    if (!owned) return;
+    if (!requirePowerDialer(owned.authed, reply)) return reply;
+    const result = await startSession(owned.session.id, buildEngineDeps());
+    if (result.action === 'conflict') {
+      return reply.code(409).send({ error: 'Another power-dial run is already active for you — finish or stop it first.' });
+    }
+    return { ok: true, ...result };
   });
 
   app.post('/dialer/sessions/:id/pause', async (req, reply) => {

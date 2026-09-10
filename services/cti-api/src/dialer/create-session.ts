@@ -1,4 +1,3 @@
-import { and, eq } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 import type { ConsentBlock } from './consent-check.js';
 import { resolveDialNumber } from '../salesforce/record-phone.js';
@@ -12,13 +11,6 @@ import { salesforceUserId } from '../salesforce/current-user.js';
  * carrying their originating task id.
  */
 export type DialerRunObject = 'Lead' | 'Opportunity' | 'Task';
-
-/** Postgres unique-violation on the one-active-session-per-rep partial index. */
-const ACTIVE_SESSION_INDEX = 'dialer_sessions_one_active_per_user';
-function isActiveSessionConflict(err: unknown): boolean {
-  const e = err as { code?: string; constraint?: string };
-  return e?.code === '23505' && e?.constraint === ACTIVE_SESSION_INDEX;
-}
 
 /**
  * One resolved dial target. `objectType` is PER ROW, not per session: a Task
@@ -179,31 +171,15 @@ export async function createDialerSession(
 ): Promise<{ sessionId: string; total: number }> {
   const sfOwnerId = await deps.salesforceUserId(args.userId);
   const resolved = await resolveRows(deps, args.userId, args.objectType, args.recordIds);
-  let session: typeof schema.dialerSessions.$inferSelect | undefined;
-  try {
-    [session] = await deps.db
-      .insert(schema.dialerSessions)
-      .values({ orgId: args.orgId, userId: args.userId, sfOwnerId, objectType: args.objectType, status: 'active' })
-      .returning();
-  } catch (err) {
-    // The rep already has an active session (unique index). Return it rather
-    // than create a second — a second active session would let the engine
-    // originate a concurrent call for this rep (double-dial). This makes a
-    // double-submitted start idempotent, and lets the rep re-kick a session
-    // whose first originate failed (the caller advances whatever it gets back).
-    if (isActiveSessionConflict(err)) {
-      const existing = await deps.db.query.dialerSessions.findFirst({
-        where: and(eq(schema.dialerSessions.userId, args.userId), eq(schema.dialerSessions.status, 'active')),
-      });
-      if (existing) {
-        const items = await deps.db.query.dialerQueueItems.findMany({
-          where: eq(schema.dialerQueueItems.sessionId, existing.id),
-        });
-        return { sessionId: existing.id, total: items.length };
-      }
-    }
-    throw err;
-  }
+  // Created READY: the queue is built and nothing dials. `advanceSession`
+  // ignores any session that is not 'active', so a ready session cannot
+  // originate by construction; only `startSession` (the rep's Start dialing)
+  // flips it. That is also why no unique-index conflict is handled here any
+  // more — the one-active-run-per-rep index fires on the flip, not the insert.
+  const [session] = await deps.db
+    .insert(schema.dialerSessions)
+    .values({ orgId: args.orgId, userId: args.userId, sfOwnerId, objectType: args.objectType, status: 'ready' })
+    .returning();
   // ONE batched read per gate for the whole run, after the session exists (a
   // conflicting create returns the rep's existing session above and never gets
   // here). Distinct: a list often carries the same person on two records, and
@@ -233,27 +209,4 @@ export async function createDialerSession(
   })));
   if (rows.length) await deps.db.insert(schema.dialerQueueItems).values(rows);
   return { sessionId: session!.id, total: rows.length };
-}
-
-/**
- * Create a session and immediately kick the engine so the first eligible record
- * starts dialing. WITHOUT this initial advance, a freshly-created 'active'
- * session sits with every item 'pending' forever: nothing else originates the
- * first call — `resumeSession` needs status 'paused', `repNext` needs an
- * already-connected item, and the dial-outcome webhooks only fire after a dial
- * that never started. So creation is the one and only place the loop begins.
- *
- * `advance` (the engine kick) and `create` are injected so the wiring is unit
- * testable without the telephony/db singletons `buildEngineDeps` news up. A
- * kick failure propagates: the caller returns an error rather than handing the
- * rep a session that silently never dials.
- */
-export async function createAndStartSession(
-  deps: CreateSessionDeps & { advance: (sessionId: string) => Promise<unknown> },
-  args: { userId: string; orgId: string; objectType: DialerRunObject; recordIds: string[] },
-  create: typeof createDialerSession = createDialerSession,
-): Promise<{ sessionId: string; total: number }> {
-  const result = await create(deps, args);
-  await deps.advance(result.sessionId);
-  return result;
 }

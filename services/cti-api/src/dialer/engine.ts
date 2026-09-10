@@ -97,6 +97,58 @@ async function releaseRepConference(deps: EngineDeps, userId: string, sessionId:
   }
 }
 
+/** Postgres unique-violation on the one-active-session-per-rep partial index
+ *  (`dialer_sessions_one_active_per_user`, migration 0022). It fires on the
+ *  ready → active flip below, which is the only place a session becomes
+ *  'active' now that creation inserts 'ready'. */
+const ACTIVE_SESSION_INDEX = 'dialer_sessions_one_active_per_user';
+function isActiveSessionConflict(err: unknown): boolean {
+  const e = err as { code?: string; constraint?: string };
+  return e?.code === '23505' && e?.constraint === ACTIVE_SESSION_INDEX;
+}
+
+/** The `ready → active` compare-and-swap. 'lost' = 0 rows matched (the session
+ *  is not ready — a second Start, or a stopped run); 'conflict' = the rep has
+ *  another active run and the unique index refused the flip. */
+async function claimReadySession(deps: EngineDeps, sessionId: string): Promise<'claimed' | 'lost' | 'conflict'> {
+  try {
+    const rows = await deps.db
+      .update(schema.dialerSessions)
+      .set({ status: 'active', updatedAt: new Date() })
+      .where(and(eq(schema.dialerSessions.id, sessionId), eq(schema.dialerSessions.status, 'ready')))
+      .returning({ id: schema.dialerSessions.id });
+    return rows.length > 0 ? 'claimed' : 'lost';
+  } catch (err) {
+    if (isActiveSessionConflict(err)) return 'conflict';
+    throw err;
+  }
+}
+
+/**
+ * The rep pressed Start dialing on a `ready` session: flip it to `active` and
+ * originate the first call. This is the ONE place a run begins — a session is
+ * created `ready`, and nothing else moves it (`resumeSession` needs `paused`,
+ * `repNext` needs a connected item, the webhooks need a dial that started).
+ *
+ * Compare-and-swap on status, so a double-submitted Start (two tabs, a retry)
+ * advances exactly once: the loser matches 0 rows and just reports the status
+ * it finds. The partial unique index still enforces one active run per rep:
+ * if another of the rep's sessions is active the flip is refused, THIS session
+ * stays `ready`, and the caller gets `conflict` to explain to the rep.
+ */
+export async function startSession(
+  sessionId: string,
+  deps: EngineDeps,
+): Promise<ReturnType<typeof advanceSession> | { action: Session['status'] | 'idle' | 'conflict' }> {
+  const claim = await claimReadySession(deps, sessionId);
+  if (claim === 'conflict') return { action: 'conflict' };
+  if (claim === 'lost') {
+    const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
+    return { action: session?.status ?? 'idle' };
+  }
+  return advanceSession(sessionId, deps);
+}
+
 export async function advanceSession(
   sessionId: string,
   deps: EngineDeps,
@@ -288,8 +340,12 @@ export async function stopSession(sessionId: string, deps: EngineDeps): Promise<
   ]);
   const item = inFlightItem(items);
   if (item && item.status === 'dialing' && item.callId) await deps.telephony.hangup(item.callId);
-  // Released before the status flip, for the same cross-run reason as advanceSession.
-  if (session) await releaseRepConference(deps, session.userId, sessionId);
+  // Released before the status flip, for the same cross-run reason as
+  // advanceSession. A `ready` session never joined a conference — and the
+  // conference name is rep-scoped, so releasing it here could end a DIFFERENT
+  // run the rep has active in another tab (the very case that leaves a second
+  // session stuck `ready`).
+  if (session && session.status !== 'ready') await releaseRepConference(deps, session.userId, sessionId);
   await setSession(deps, sessionId, 'stopped');
   return { action: 'stopped' };
 }

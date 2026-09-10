@@ -128,8 +128,16 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean }
               returning: async () => {
                 const { sql: text, params } = new PgDialect().sqlToQuery(w);
                 if (/"status" =/.test(text)) {
-                  const target = items.find((i: any) => params.includes(i.id));
-                  if (!target || target.status !== 'pending') return [];
+                  if (_tbl === schema.dialerSessions) {
+                    // startSession's `WHERE id = $1 AND status = 'ready'` flip:
+                    // honor it against the fake's CURRENT session status so a
+                    // second Start (session already active) claims 0 rows.
+                    const current = { ...session, ...sessionOverride };
+                    if (!params.includes(current.id) || !params.includes(current.status)) return [];
+                  } else {
+                    const target = items.find((i: any) => params.includes(i.id));
+                    if (!target || target.status !== 'pending') return [];
+                  }
                 }
                 apply();
                 return [{ id: 'updated' }];
@@ -207,6 +215,7 @@ import {
   pauseSession,
   resumeSession,
   skipCurrent,
+  startSession,
   stopSession,
   repNext,
   type EngineDeps,
@@ -777,6 +786,15 @@ describe('stopSession', () => {
     expect(r).toEqual({ action: 'stopped' });
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'stopped' }) });
   });
+  it('a ready session (never started) stops with only the status written — no hangup, no conference release, no rollover', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'ready' }, items); deps.db = fdb;
+    expect(await stopSession('S1', deps)).toEqual({ action: 'stopped' });
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    expect(deps.telephony.endConference).not.toHaveBeenCalled();
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
+    expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'stopped' }) }]);
+  });
 });
 
 describe('repNext', () => {
@@ -851,5 +869,48 @@ describe('handleDialOutcome — honest miss reasons', () => {
     expect(fdb._writes).toEqual([]);
     expect(deps.enqueueRollover).not.toHaveBeenCalled();
     expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+});
+
+describe('startSession — the rep pressed Start dialing', () => {
+  beforeEach(() => { _target = {}; });
+  const ready = { ...baseSession, status: 'ready' };
+  const pending = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+
+  it('flips ready → active, then originates the first call', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, pending); deps.db = fdb;
+    const r = await startSession('S1', deps);
+    expect(fdb._writes[0]).toEqual({ patch: expect.objectContaining({ status: 'active' }) });
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ action: 'dialing' });
+  });
+
+  it('is idempotent: a second Start finds the session active, originates nothing, and reports the status it found', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, pending); deps.db = fdb;
+    expect(await startSession('S1', deps)).toEqual({ action: 'active' });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+    expect(fdb._writes).toEqual([]);
+  });
+
+  it('never revives a stopped session', async () => {
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, pending); deps.db = fdb;
+    expect(await startSession('S1', deps)).toEqual({ action: 'stopped' });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+
+  it('reports conflict — and leaves the session ready — when the rep already has an active run', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, pending); deps.db = fdb;
+    const violation = Object.assign(new Error('duplicate key value violates unique constraint'), {
+      code: '23505', constraint: 'dialer_sessions_one_active_per_user',
+    });
+    fdb.update = () => ({ set: () => ({ where: () => ({ returning: async () => { throw violation; } }) }) });
+    expect(await startSession('S1', deps)).toEqual({ action: 'conflict' });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+
+  it('rethrows any other database error', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, pending); deps.db = fdb;
+    fdb.update = () => ({ set: () => ({ where: () => ({ returning: async () => { throw new Error('connection reset'); } }) }) });
+    await expect(startSession('S1', deps)).rejects.toThrow('connection reset');
   });
 });

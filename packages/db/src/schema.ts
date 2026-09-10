@@ -45,7 +45,7 @@ export const syncStatusEnum = pgEnum('sync_status', ['pending', 'in_flight', 'su
 
 export const numberKindEnum = pgEnum('number_kind', ['agent', 'dialer_pool']);
 
-export const dialerSessionStatus = pgEnum('dialer_session_status', ['active', 'paused', 'stopped', 'done']);
+export const dialerSessionStatus = pgEnum('dialer_session_status', ['ready', 'active', 'paused', 'stopped', 'done']);
 export const dialerItemStatus = pgEnum('dialer_item_status', [
   'pending', 'dialing', 'connected', 'no_connect', 'skipped', 'unreachable', 'done',
 ]);
