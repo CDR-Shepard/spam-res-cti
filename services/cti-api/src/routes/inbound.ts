@@ -10,7 +10,7 @@
  * Twilio number config: each IncomingPhoneNumber's `VoiceUrl` should point at
  *   POST ${API_PUBLIC_URL}/telephony/twilio/inbound
  *
- * Recording done via `<Record action=…>` which POSTs us a callback when the
+ * Recording done via `<Record>` whose recordingStatusCallback POSTs us when the
  * caller hangs up. The `transcribe=true` option triggers a separate
  * transcription callback to /telephony/twilio/inbound/transcription.
  */
@@ -57,6 +57,8 @@ function clientIdentity(userId: string): string {
   return `rep_${userId.replace(/-/g, '')}`;
 }
 
+const VOICEMAIL_GOODBYE = 'Thanks, your message has been received. Goodbye.';
+
 /** Append the greeting + voicemail-record TwiML (shared by the direct-voicemail
  *  path and the ring-the-rep no-answer fallback). */
 function appendVoicemail(
@@ -80,12 +82,22 @@ function appendVoicemail(
           transcribeCallback: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/transcription?callDbId=${encodeURIComponent(callDbId)}`,
         }
       : {}),
-    // NOTE: no `action` — the recording is persisted out-of-band via
-    // recordingStatusCallback. An `action` URL would (a) fire the recording
-    // handler a second time and (b) discard the Say/Hangup below (Twilio drops
-    // any verbs after <Record> once it hands control to the action URL).
+    // `action` is REQUIRED here. Without it, Twilio re-requests the CURRENT
+    // document when the recording ends with the caller still on the line
+    // (timeout / maxLength) — POST /telephony/twilio/inbound again for the same
+    // CallSid — which re-inserted the call, hit the unique index, and 500ed:
+    // the caller heard an application error instead of a goodbye (Twilio
+    // alert 11200, 2026-09-10/11). The action route below just says goodbye and
+    // hangs up; the recording itself is still persisted out-of-band by
+    // recordingStatusCallback. Verbs after <Record> never run once an action
+    // is set, so the thank-you lives on that route, not here.
+    action: `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound/voicemail-done?callDbId=${encodeURIComponent(callDbId)}`,
+    method: 'POST',
   });
-  t.say({ voice: 'Polly.Joanna' as never }, 'Thanks, your message has been received. Goodbye.');
+  // Inert fallthrough: unreachable once the action request fires, but a
+  // safety net if Twilio ever continues in-document instead (an empty
+  // recording, say) — the caller still hears a goodbye rather than silence.
+  t.say({ voice: 'Polly.Joanna' as never }, VOICEMAIL_GOODBYE);
   t.hangup();
 }
 
@@ -97,6 +109,20 @@ function sanitizeHeaders(h: Record<string, unknown>): Record<string, unknown> {
     out[k] = v;
   }
   return out;
+}
+
+/**
+ * The call-row insert, idempotent on a replayed CallSid. `calls_provider_call_id_unique`
+ * is a PARTIAL unique index (`where provider_call_id is not null`, migration
+ * 0001), and Postgres cannot infer a partial index as the ON CONFLICT arbiter
+ * unless the statement repeats its predicate — a bare `onConflictDoNothing()`
+ * (the repo convention) arbitrates on any constraint and is the only form
+ * that works here. Passing `{ target: [...] }` without that predicate raises
+ * "no unique or exclusion constraint matching the ON CONFLICT specification"
+ * on EVERY insert, not just duplicates. inbound.test.ts pins the emitted SQL.
+ */
+export function insertInboundCall(db: ReturnType<typeof getDb>, values: typeof schema.calls.$inferInsert) {
+  return db.insert(schema.calls).values(values).onConflictDoNothing().returning({ id: schema.calls.id });
 }
 
 export async function registerInboundRoutes(app: FastifyInstance): Promise<void> {
@@ -196,13 +222,13 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     }
 
     // Insert the inbound call record so we can update with recording / transcript later.
-    const [callRow] = await db
-      .insert(schema.calls)
-      .values({
+    const [callRow] = await insertInboundCall(db, {
         orgId: owned.orgId,
         userId: handlerUserId,
         provider: provider.name,
-        providerCallId: callSid,
+        // An empty CallSid must not collide with another empty one on the
+        // (partial) unique index and merge two callers onto one row.
+        providerCallId: callSid || null,
         fromNumber: fromRaw,
         toNumber: toRaw,
         normalizedToNumber: normTo,
@@ -214,9 +240,19 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
         inboundCallerMatched: !!matched,
         // The answered path (ring the rep) plays a recording disclosure below.
         recordingDisclosurePlayed: cfg.TWILIO_RECORD_CALLS && !!(owned.assignedUserId || poolStickyAgentId),
-      })
-      .returning({ id: schema.calls.id });
-    const callDbId = callRow!.id;
+      });
+    // A replayed delivery of the same CallSid (a Twilio retry, or any TwiML
+    // path that re-requests this document) must be answered, not 500ed — the
+    // caller hears "an application error has occurred" otherwise. Reuse the
+    // row the first delivery created; everything below is keyed on its id.
+    const callDbId = callRow?.id
+      ?? (callSid
+        ? (await db.query.calls.findFirst({
+            where: and(eq(schema.calls.provider, provider.name), eq(schema.calls.providerCallId, callSid)),
+            columns: { id: true },
+          }))?.id
+        : undefined);
+    if (!callDbId) throw new Error(`inbound call row missing after insert conflict for ${callSid}`);
 
     // No-answer failover: the rep we're about to ring (sticky pool agent, else
     // the DID's assigned owner) may have a personal forward number, and the DID
@@ -324,6 +360,24 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
   });
 
   // Recording-completed callback — Twilio POSTs after the voicemail finishes.
+  // <Record action> lands here when a voicemail ends with the caller still on
+  // the line. Signature-validated like every Twilio callback; no database —
+  // the recording is persisted by /inbound/recording. Returning TwiML here is
+  // what keeps Twilio from re-requesting /inbound for the same CallSid.
+  app.post('/telephony/twilio/inbound/voicemail-done', async (req, reply) => {
+    const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
+    const url = signedCallbackUrl(cfg.API_PUBLIC_URL, req);
+    const provider = getProvider();
+    const valid = provider.validateWebhook(req.headers as Record<string, string | string[] | undefined>, rawBody, url);
+    if (!valid.valid && !cfg.TWILIO_SKIP_SIGNATURE_CHECK) return reply.code(403).send('bad sig');
+    req.log.info({ callDbId: (req.query as { callDbId?: string }).callDbId }, 'inbound_voicemail_done');
+    const VoiceResponse = twilio.twiml.VoiceResponse;
+    const t = new VoiceResponse();
+    t.say({ voice: 'Polly.Joanna' as never }, VOICEMAIL_GOODBYE);
+    t.hangup();
+    return reply.type('text/xml').send(t.toString());
+  });
+
   app.post('/telephony/twilio/inbound/recording', async (req, reply) => {
     const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
     const url = signedCallbackUrl(cfg.API_PUBLIC_URL, req);

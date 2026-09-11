@@ -341,8 +341,10 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
         body,
       });
     } catch (err) {
-      // Already processed — idempotent ack.
-      return reply.code(200).send({ ok: true, duplicate: true });
+      // Already processed — idempotent ack. Empty TwiML, not JSON: Twilio
+      // logs error 12300 (Invalid Content-Type) for an application/json
+      // acknowledgement, and duplicate status callbacks arrive daily.
+      return reply.code(200).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response/>');
     }
 
     const event = provider.normalizeWebhook(body);

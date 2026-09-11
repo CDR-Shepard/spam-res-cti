@@ -24,6 +24,12 @@ const state = vi.hoisted(() => ({
   findByPhoneResult: null as { whoId?: string; whatId?: string; name?: string } | null,
   findByPhone: vi.fn(async (_userId: string, _e164: string) => state.findByPhoneResult),
   stickyAgentForCaller: vi.fn(async () => state.stickyAgentId),
+  /** Inserts attempted into `calls` (other tables are not counted). */
+  inserts: 0,
+  // Simulates a replayed delivery: the call row already exists, the insert's
+  // ON CONFLICT DO NOTHING returns no row, and the handler must reuse this one.
+  duplicateInsert: false,
+  existingCall: null as Record<string, unknown> | null,
 }));
 
 vi.mock('../config.js', () => ({
@@ -51,7 +57,10 @@ vi.mock('@cti/db', async (importOriginal) => {
   return { ...actual, getDb: () => fakeDb() };
 });
 
-import { registerInboundRoutes } from './inbound.js';
+import { schema } from '@cti/db';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { Pool } from 'pg';
+import { insertInboundCall, registerInboundRoutes } from './inbound.js';
 
 /** Just enough drizzle for the inbound-ring handler. */
 function fakeDb() {
@@ -60,11 +69,14 @@ function fakeDb() {
       outboundNumbers: { findFirst: async () => state.owned },
       users: { findFirst: async () => state.repRow },
       salesforceConnections: { findFirst: async () => state.sfConn },
+      calls: { findFirst: async () => state.existingCall },
     },
-    insert(_table: unknown) {
+    insert(table: unknown) {
+      if (table === schema.calls) state.inserts++; // only the call row matters to these tests
       return {
         values(v: Record<string, unknown>) {
-          return { returning: async () => [{ id: 'call-db-1', ...v }] };
+          const returning = async () => (state.duplicateInsert ? [] : [{ id: 'call-db-1', ...v }]);
+          return { returning, onConflictDoNothing: () => ({ returning }) };
         },
       };
     },
@@ -104,6 +116,9 @@ beforeEach(async () => {
   state.findByPhoneResult = null;
   state.findByPhone.mockClear();
   state.stickyAgentForCaller.mockClear();
+  state.inserts = 0;
+  state.duplicateInsert = false;
+  state.existingCall = null;
   app = Fastify();
   // Mirror server.ts's raw-body capturing parser — inbound.ts reads
   // `req.rawBody` for webhook signature validation.
@@ -230,5 +245,90 @@ describe('POST /telephony/twilio/inbound — caller-match parameters on <Client>
       expect(xml).toContain('<Record');
       expect(xml).toContain('Hi Voicemail, thanks for calling back');
     });
+  });
+});
+
+describe('voicemail <Record> hands control to its own action route', () => {
+  // Without an action, Twilio re-requests the CURRENT document when a
+  // recording ends with the caller still on the line — POST /inbound again for
+  // the same CallSid — which re-inserted the call, hit the unique index, and
+  // 500ed (Twilio alert 11200 on 2026-09-10 and 09-11). The caller heard an
+  // application error instead of a goodbye.
+  it('the voicemail TwiML carries a POST action on <Record>, scoped to this call', async () => {
+    state.owned = OWNED({ assignedUserId: null, kind: 'agent' });
+    const xml = (await ring()).body;
+    expect(xml).toMatch(/<Record[^>]*action="https:\/\/api\.example\.com\/telephony\/twilio\/inbound\/voicemail-done\?callDbId=call-db-1"/);
+    expect(xml).toMatch(/<Record[^>]*method="POST"/);
+    // The goodbye also stays after <Record> as an inert fallthrough — unreachable
+    // when the action fires, a safety net if Twilio ever continues in-document.
+    expect(xml).toContain('your message has been received');
+  });
+
+  it('POST /telephony/twilio/inbound/voicemail-done thanks the caller and hangs up, and never inserts a call row', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/telephony/twilio/inbound/voicemail-done?callDbId=11111111-1111-1111-1111-111111111111',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: { CallSid: 'CA_test_1', RecordingUrl: 'https://api.twilio.com/rec/RE1', RecordingDuration: '11' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/xml');
+    expect(res.body).toContain('Thanks, your message has been received. Goodbye.');
+    expect(res.body).toContain('<Hangup/>');
+    expect(state.inserts).toBe(0);
+  });
+});
+
+describe('POST /telephony/twilio/inbound — a replayed delivery of the same CallSid', () => {
+  it('answers with the ring TwiML for the EXISTING call row instead of 500ing on the unique index', async () => {
+    state.duplicateInsert = true;
+    state.existingCall = { id: 'call-db-existing' };
+    const res = await ring();
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/xml');
+    expect(res.body).toContain('callDbId=call-db-existing');
+    expect(res.body).not.toContain('callDbId=call-db-1');
+    expect(state.inserts).toBe(1);
+  });
+});
+
+describe('POST /telephony/twilio/inbound/dial-result — no-answer fallback to voicemail', () => {
+  it('the fallback voicemail <Record> carries the action too (this path used to re-enter dial-result silently)', async () => {
+    const id = '22222222-2222-2222-2222-222222222222';
+    state.existingCall = { id, userId: 'rep-1', normalizedToNumber: '+16195550100' };
+    state.owned = OWNED({ inboundForwardToE164: null });
+    state.repRow = { id: 'rep-1', noAnswerForwardE164: null };
+    const res = await app.inject({
+      method: 'POST',
+      url: `/telephony/twilio/inbound/dial-result?callDbId=${id}`,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: { CallSid: 'CA_test_1', DialCallStatus: 'no-answer' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatch(new RegExp(`<Record[^>]*action="https://api\\.example\\.com/telephony/twilio/inbound/voicemail-done\\?callDbId=${id}"`));
+  });
+});
+
+describe('insertInboundCall — the statement Postgres actually receives', () => {
+  // The DB fake above cannot tell a usable ON CONFLICT clause from an unusable
+  // one, and `calls_provider_call_id_unique` is a PARTIAL index: a targeted
+  // `on conflict ("provider","provider_call_id")` makes Postgres reject the
+  // insert outright (42P10) on every call. Pin the bare form, which arbitrates
+  // on any constraint. No connection is opened — `pg.Pool` is lazy.
+  it('emits a bare ON CONFLICT DO NOTHING (no column target, no predicate needed)', () => {
+    const db = drizzle(new Pool({ connectionString: 'postgres://unused:unused@127.0.0.1:1/unused' }), { schema });
+    const { sql } = insertInboundCall(db, {
+      orgId: '11111111-1111-1111-1111-111111111111',
+      provider: 'twilio',
+      providerCallId: 'CA_test_1',
+      fromNumber: '+13105550002',
+      toNumber: '+16195550100',
+      normalizedToNumber: '+16195550100',
+      direction: 'inbound',
+      status: 'in_progress',
+      startedAt: new Date(),
+    } as never).toSQL();
+    expect(sql).toMatch(/on conflict do nothing returning "id"$/);
+    expect(sql).not.toMatch(/on conflict \(/);
   });
 });
