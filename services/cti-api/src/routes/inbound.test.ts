@@ -142,17 +142,24 @@ afterEach(async () => {
   await app.close();
 });
 
+/** Twilio posts application/x-www-form-urlencoded. `app.inject` serializes an
+ *  object payload as JSON regardless of the content-type header, which the
+ *  form parser above would turn into one garbage key — so encode for real. */
+function form(params: Record<string, string>): string {
+  return new URLSearchParams(params).toString();
+}
+
 async function ring(overrides: Record<string, string> = {}) {
   return app.inject({
     method: 'POST',
     url: '/telephony/twilio/inbound',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    payload: {
+    payload: form({
       From: '+13105550002',
       To: '+16195550100',
       CallSid: 'CA_test_1',
       ...overrides,
-    },
+    }),
   });
 }
 
@@ -269,7 +276,7 @@ describe('voicemail <Record> hands control to its own action route', () => {
       method: 'POST',
       url: '/telephony/twilio/inbound/voicemail-done?callDbId=11111111-1111-1111-1111-111111111111',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      payload: { CallSid: 'CA_test_1', RecordingUrl: 'https://api.twilio.com/rec/RE1', RecordingDuration: '11' },
+      payload: form({ CallSid: 'CA_test_1', RecordingUrl: 'https://api.twilio.com/rec/RE1', RecordingDuration: '11' }),
     });
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('text/xml');
@@ -302,7 +309,7 @@ describe('POST /telephony/twilio/inbound/dial-result — no-answer fallback to v
       method: 'POST',
       url: `/telephony/twilio/inbound/dial-result?callDbId=${id}`,
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      payload: { CallSid: 'CA_test_1', DialCallStatus: 'no-answer' },
+      payload: form({ CallSid: 'CA_test_1', DialCallStatus: 'no-answer' }),
     });
     expect(res.statusCode).toBe(200);
     expect(res.body).toMatch(new RegExp(`<Record[^>]*action="https://api\\.example\\.com/telephony/twilio/inbound/voicemail-done\\?callDbId=${id}"`));
