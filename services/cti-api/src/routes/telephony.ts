@@ -21,8 +21,28 @@ import {
   TWILIO_RECORDING_MEDIA_RE,
   signedCallbackUrl,
 } from '../telephony/webhooks.js';
-import { bridgeTwiml, dialerConferenceTwiml } from '../dialer/twilio-telephony.js';
+import { dialerConferenceTwiml, repUserIdFromClientIdentity } from '../dialer/twilio-telephony.js';
 
+
+/**
+ * The rep's hold-music preference for their own dialer conference leg
+ * (Settings → "Hold music during Power Dial"). Default — and any lookup
+ * failure — is music ON: a DB hiccup must never keep a rep out of their
+ * conference, and silence is the opt-in, not the fallback.
+ */
+async function repHoldMusic(from: string): Promise<boolean> {
+  const userId = repUserIdFromClientIdentity(from);
+  if (!userId) return true;
+  try {
+    const row = await getDb().query.users.findFirst({
+      where: eq(schema.users.id, userId),
+      columns: { dialerHoldMusic: true },
+    });
+    return row?.dialerHoldMusic ?? true;
+  } catch {
+    return true;
+  }
+}
 
 export async function registerTelephonyRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
@@ -74,7 +94,7 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     // not from anything the client supplies, so a rep can only join their own
     // conference.
     if (body.DialerConference) {
-      const twiml = dialerConferenceTwiml(body.From ?? '');
+      const twiml = dialerConferenceTwiml(body.From ?? '', { holdMusic: await repHoldMusic(body.From ?? '') });
       if (!twiml) {
         const VoiceResponse = twilio.twiml.VoiceResponse;
         const response = new VoiceResponse();

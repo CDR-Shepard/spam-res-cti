@@ -120,6 +120,14 @@ export const users = pgTable(
      * softphone the full default window, then voicemail).
      */
     noAnswerForwardE164: text('no_answer_forward_e164'),
+    /**
+     * Power Dial: play Twilio's hold music in the rep's headset while their
+     * conference leg waits between calls. Default on (the behavior before
+     * this column existed); a rep turns it off from Settings via
+     * PATCH /auth/me — an office with its own music finds the extra track
+     * grating. Read by routes/telephony.ts when the rep's leg joins.
+     */
+    dialerHoldMusic: boolean('dialer_hold_music').default(true).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({

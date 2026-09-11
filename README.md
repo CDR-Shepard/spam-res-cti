@@ -250,6 +250,17 @@ once, it covers all their numbers.
   phone displays the business line. It inherits the campaign's recording
   behavior; the "may be recorded" disclosure is played once at call start.
 
+### Hold music during Power Dial
+
+While a Power Dial run waits between calls, the rep's conference leg hears
+Twilio's default hold music. Reps who would rather hear the room turn it off
+under *Settings → Hold music during Power Dial* (`PATCH /auth/me`
+`{ dialerHoldMusic: false }`; column `users.dialer_hold_music`, default on).
+The rep's leg then joins the conference with `waitUrl=""` (silence). The
+prospect leg is unchanged, and a preference lookup that errors keeps music on,
+so the lookup can never be the reason a rep fails to join their run. Takes effect on the
+rep's next run — the leg joins at **Start dialing**.
+
 ---
 
 ## Caller Reputation Firewall

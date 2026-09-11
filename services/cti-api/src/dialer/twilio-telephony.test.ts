@@ -13,7 +13,7 @@ vi.mock('../config.js', () => ({
   }),
 }));
 
-import { bridgeTwiml, conferenceName, dialerConferenceTwiml, TwilioDialerTelephony, type TwilioDialerClient } from './twilio-telephony.js';
+import { bridgeTwiml, conferenceName, dialerConferenceTwiml, repUserIdFromClientIdentity, TwilioDialerTelephony, type TwilioDialerClient } from './twilio-telephony.js';
 
 // ---------------------------------------------------------------------------
 // conferenceName / bridgeTwiml — pure
@@ -223,5 +223,36 @@ describe('TwilioDialerTelephony.endConference', () => {
     await telephony.endConference('user-1');
 
     expect(conferenceUpdates.map((u) => u.sid)).toEqual(['CF1', 'CF2']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hold music per rep (Settings → "Hold music during Power Dial")
+// ---------------------------------------------------------------------------
+
+describe('hold music per rep', () => {
+  it('the rep leg waits in silence (waitUrl="") when the rep turned hold music off', () => {
+    const t = bridgeTwiml('abc123', true, { holdMusic: false });
+    expect(t).toContain('waitUrl=""');
+    expect(t).toContain('endConferenceOnExit="true"');
+  });
+
+  it('defaults to Twilio hold music: no waitUrl attribute unless the rep opted out', () => {
+    expect(bridgeTwiml('abc123', true)).not.toContain('waitUrl');
+    expect(bridgeTwiml('abc123', true, { holdMusic: true })).not.toContain('waitUrl');
+    expect(bridgeTwiml('abc123', false)).not.toContain('waitUrl');
+  });
+
+  it('dialerConferenceTwiml passes the preference through to the rep leg', () => {
+    expect(dialerConferenceTwiml('client:rep_abc123', { holdMusic: false })).toContain('waitUrl=""');
+    expect(dialerConferenceTwiml('client:rep_abc123')).not.toContain('waitUrl');
+  });
+
+  it('repUserIdFromClientIdentity restores the dashed users.id from the 32-hex identity, null for anything else', () => {
+    expect(repUserIdFromClientIdentity('client:rep_c9c459400f174c1ebb3ed084ba93eb86')).toBe('c9c45940-0f17-4c1e-bb3e-d084ba93eb86');
+    expect(repUserIdFromClientIdentity('client:rep_C9C459400F174C1EBB3ED084BA93EB86')).toBe('c9c45940-0f17-4c1e-bb3e-d084ba93eb86');
+    expect(repUserIdFromClientIdentity('client:rep_abc123')).toBeNull();
+    expect(repUserIdFromClientIdentity('+16195551234')).toBeNull();
+    expect(repUserIdFromClientIdentity('')).toBeNull();
   });
 });

@@ -18,6 +18,20 @@ import { loadConfig } from '../config.js';
 
 const DEV_USER_ID = '00000000-0000-0000-0000-00000000beef';
 
+/**
+ * The PATCH /auth/me body — exported so routes/auth.test.ts pins THIS schema.
+ * Each field is optional so a caller can change one setting without knowing
+ * the other; an empty body is refused rather than silently doing nothing.
+ */
+export const PatchMeBody = z
+  .object({
+    noAnswerForwardE164: z.string().nullable().optional(),
+    dialerHoldMusic: z.boolean().optional(),
+  })
+  .refine((b) => b.noAnswerForwardE164 !== undefined || b.dialerHoldMusic !== undefined, {
+    message: 'nothing to update',
+  });
+
 export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post('/auth/dev-session', async (_req, reply) => {
     // The dev-session backdoor issues a real 30-day session with no
@@ -46,14 +60,18 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     const [profile, sfConn] = await Promise.all([
       db.query.users.findFirst({
         where: eq(schema.users.id, session.userId),
-        columns: { noAnswerForwardE164: true },
+        columns: { noAnswerForwardE164: true, dialerHoldMusic: true },
       }),
       db.query.salesforceConnections.findFirst({
         where: eq(schema.salesforceConnections.userId, session.userId),
       }),
     ]);
     return {
-      user: { ...session, noAnswerForwardE164: profile?.noAnswerForwardE164 ?? null },
+      user: {
+        ...session,
+        noAnswerForwardE164: profile?.noAnswerForwardE164 ?? null,
+        dialerHoldMusic: profile?.dialerHoldMusic ?? true,
+      },
       salesforce: sfConn
         ? {
             connected: true,
@@ -82,12 +100,12 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
   app.patch('/auth/me', async (req, reply) => {
     const session = await resolveSession(req.headers.authorization);
     if (!session) return reply.code(401).send({ error: 'Unauthorized' });
-    const parsed = z
-      .object({ noAnswerForwardE164: z.string().nullable() })
-      .safeParse(req.body);
+    const parsed = PatchMeBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
 
     const db = getDb();
+    const patch: { noAnswerForwardE164?: string | null; dialerHoldMusic?: boolean } = {};
+    if (parsed.data.dialerHoldMusic !== undefined) patch.dialerHoldMusic = parsed.data.dialerHoldMusic;
     let forwardE164: string | null = null;
     const raw = parsed.data.noAnswerForwardE164?.trim();
     if (raw) {
@@ -110,11 +128,9 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
-    await db
-      .update(schema.users)
-      .set({ noAnswerForwardE164: forwardE164 })
-      .where(eq(schema.users.id, session.userId));
-    return { ok: true, noAnswerForwardE164: forwardE164 };
+    if (parsed.data.noAnswerForwardE164 !== undefined) patch.noAnswerForwardE164 = forwardE164;
+    await db.update(schema.users).set(patch).where(eq(schema.users.id, session.userId));
+    return { ok: true, ...patch };
   });
 
   app.post('/auth/salesforce/start', async (req, reply) => {

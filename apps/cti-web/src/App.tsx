@@ -37,7 +37,7 @@ import { openCtiSavePlan } from './opencti-log';
 import { acceptIncomingCall, planIncomingAccept } from './incoming-accept';
 
 interface MeResponse {
-  user: { userId: string; orgId: string; email: string; isAdmin: boolean; powerDialerEnabled: boolean; noAnswerForwardE164?: string | null };
+  user: { userId: string; orgId: string; email: string; isAdmin: boolean; powerDialerEnabled: boolean; noAnswerForwardE164?: string | null; dialerHoldMusic?: boolean };
   salesforce:
     | { connected: false }
     | { connected: true; name?: string | null; email?: string | null; photoDataUrl?: string | null };
@@ -1266,6 +1266,7 @@ export function App(): JSX.Element {
   ) : tab === 'settings' ? (
     <SettingsPanel
       forwardE164={me.user.noAnswerForwardE164 ?? null}
+      holdMusic={me.user.dialerHoldMusic ?? true}
       onSaved={refreshMe}
       onToast={setToast}
     />

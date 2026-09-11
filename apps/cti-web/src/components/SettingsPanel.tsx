@@ -1,25 +1,29 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import { formatE164 } from '../format';
-import { PhoneOutgoingIcon } from '../icons';
+import { PhoneOutgoingIcon, ZapIcon } from '../icons';
 import { MobilePairingCard } from './MobilePairingCard';
 
 interface Props {
   /** Current failover number (E.164) or null, from /auth/me. */
   forwardE164: string | null;
+  /** Hold music in the rep's headset while a Power Dial run waits between calls, from /auth/me. */
+  holdMusic: boolean;
   /** Re-fetch /auth/me after a change so the panel reflects server truth. */
   onSaved: () => Promise<void> | void;
   onToast: (t: { text: string; type: 'info' | 'error' | 'success' }) => void;
 }
 
 /**
- * Rep self-service settings. Currently just no-answer call forwarding: the
- * personal failover number every DID assigned to this rep rolls an unanswered
- * callback to (after a 10s softphone ring) before voicemail.
+ * Rep self-service settings: no-answer call forwarding (the personal failover
+ * number every DID assigned to this rep rolls an unanswered callback to, after
+ * a 10s softphone ring, before voicemail) and whether Power Dial plays hold
+ * music in the headset between calls.
  */
-export function SettingsPanel({ forwardE164, onSaved, onToast }: Props): JSX.Element {
+export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast }: Props): JSX.Element {
   const [draft, setDraft] = useState(forwardE164 ?? '');
   const [saving, setSaving] = useState(false);
+  const [savingMusic, setSavingMusic] = useState(false);
   useEffect(() => { setDraft(forwardE164 ?? ''); }, [forwardE164]);
 
   const save = useCallback(async (next: string | null) => {
@@ -32,6 +36,22 @@ export function SettingsPanel({ forwardE164, onSaved, onToast }: Props): JSX.Ele
       onToast({ text: (e as Error).message, type: 'error' });
     } finally {
       setSaving(false);
+    }
+  }, [onSaved, onToast]);
+
+  const saveHoldMusic = useCallback(async (next: boolean) => {
+    setSavingMusic(true);
+    try {
+      await api('/auth/me', { method: 'PATCH', body: { dialerHoldMusic: next } });
+      await onSaved();
+      onToast({
+        text: next ? 'Hold music on.' : 'Hold music off — silence between calls from your next run.',
+        type: 'success',
+      });
+    } catch (e) {
+      onToast({ text: (e as Error).message, type: 'error' });
+    } finally {
+      setSavingMusic(false);
     }
   }, [onSaved, onToast]);
 
@@ -83,6 +103,30 @@ export function SettingsPanel({ forwardE164, onSaved, onToast }: Props): JSX.Ele
                 </button>
               </div>
             )}
+          </div>
+        </div>
+        <div className="set-row">
+          <div className="icon" style={{ color: holdMusic ? 'var(--good)' : 'var(--text-muted)' }}>
+            <ZapIcon />
+          </div>
+          <div className="label" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div className="name">Hold music during Power Dial</div>
+            <div className="sub">
+              Music plays in your headset while the dialer works between calls. Turn it
+              off if you would rather hear the room. Takes effect on your next run.
+            </div>
+            <div style={{ marginTop: 4 }}>
+              <button
+                role="switch"
+                aria-checked={holdMusic}
+                className={`btn ${holdMusic ? 'primary' : 'ghost'}`}
+                style={{ padding: '6px 12px', fontSize: 12 }}
+                disabled={savingMusic}
+                onClick={() => void saveHoldMusic(!holdMusic)}
+              >
+                {savingMusic ? <span className="spinner" /> : holdMusic ? 'Hold music: On' : 'Hold music: Off'}
+              </button>
+            </div>
           </div>
         </div>
       </div>

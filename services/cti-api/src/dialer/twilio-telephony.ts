@@ -53,12 +53,25 @@ export function conferenceName(userId: string): string {
  *  `dialerConferenceTwiml` (rep leg, endOnExit=true) and `bridgeToRep`
  *  (prospect leg, endOnExit=false). Built via `twilio.twiml.VoiceResponse` so
  *  attribute escaping matches what Twilio itself expects. */
-export function bridgeTwiml(userId: string, endOnExit: boolean): string {
+/** Per-rep conference options (Settings tab). `holdMusic: false` makes the
+ *  leg wait in silence — Twilio's `waitUrl=""` — instead of the default hold
+ *  music; anything else keeps the default. Only the rep's own leg ever passes
+ *  this (routes/telephony.ts); the prospect leg joins a live conference and
+ *  never waits, so `bridgeToRep` leaves it unset. */
+export interface ConferenceOptions {
+  holdMusic?: boolean;
+}
+
+export function bridgeTwiml(userId: string, endOnExit: boolean, opts: ConferenceOptions = {}): string {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const twiml = new VoiceResponse();
   const dial = twiml.dial();
   dial.conference(
-    { startConferenceOnEnter: true, endConferenceOnExit: endOnExit },
+    {
+      startConferenceOnEnter: true,
+      endConferenceOnExit: endOnExit,
+      ...(opts.holdMusic === false ? { waitUrl: '' } : {}),
+    },
     conferenceName(userId),
   );
   return twiml.toString();
@@ -68,9 +81,25 @@ export function bridgeTwiml(userId: string, endOnExit: boolean): string {
  *  Twilio's signed `From: client:rep_<id>` field. Returns null when From isn't a
  *  valid rep-client identity (caller should render an error instead).
  *  `endOnExit: true` — the rep leaving is what ends the dialer run/conference. */
-export function dialerConferenceTwiml(from: string): string | null {
-  const m = /^client:rep_([0-9a-f]+)$/i.exec(from);
-  return m ? bridgeTwiml(m[1]!, true) : null;
+/** A rep's signed Twilio client identity, `client:rep_<hex>` — the token route
+ *  (routes/telephony.ts) mints `rep_` + the users.id with its dashes stripped.
+ *  ONE regex for both readers below, so the accepted shape can never drift. */
+const REP_IDENTITY_RE = /^client:rep_([0-9a-f]+)$/i;
+
+export function dialerConferenceTwiml(from: string, opts: ConferenceOptions = {}): string | null {
+  const m = REP_IDENTITY_RE.exec(from);
+  return m ? bridgeTwiml(m[1]!, true, opts) : null;
+}
+
+/** The `users.id` behind a signed `From: client:rep_<32 hex>` identity — the
+ *  token route (routes/telephony.ts) mints `rep_` + the uuid with its dashes
+ *  stripped, so this puts them back. Null for any other shape, so a caller can
+ *  fall back to defaults instead of querying with a malformed id. */
+export function repUserIdFromClientIdentity(from: string): string | null {
+  const m = REP_IDENTITY_RE.exec(from);
+  if (!m || m[1]!.length !== 32) return null;
+  const h = m[1]!.toLowerCase();
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
 export class TwilioDialerTelephony implements DialerTelephony {
