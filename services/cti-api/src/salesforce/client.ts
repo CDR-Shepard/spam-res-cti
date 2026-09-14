@@ -362,7 +362,10 @@ export async function createCallTask(
   // INVALID_FIELD. Drop just it and retry BEFORE falling back to stripping every
   // custom field — otherwise one invisible reporting field would cost the call
   // log its 360 CTI data (recording URL, call sid, disposition) as collateral.
-  if (res.status >= 400 && isInvalidFieldError(res.json)) {
+  const markerWasRejected = res.status >= 400 && isInvalidFieldError(res.json);
+  let firstErrorBody: unknown;
+  if (markerWasRejected) {
+    firstErrorBody = res.json;
     const retry = await attempt(withoutCtiOrigin(base));
     if (retry.status < 400) {
       const madeWithoutMarker = retry.json as { id: string; success: boolean };
@@ -373,7 +376,13 @@ export async function createCallTask(
 
   if (res.status >= 400) {
     // Still rejected → strip every custom field & retry.
-    if (isInvalidFieldError(res.json)) {
+    //
+    // `markerWasRejected` keeps the fallback reachable when the narrow retry
+    // fails for an unrelated reason (a transient 503, say). The FIRST response
+    // is what proved a field is unknown to this org/user; before the marker
+    // existed that response went straight here, and a flaky second call must
+    // not cost the caller the degraded create that used to succeed.
+    if (markerWasRejected || isInvalidFieldError(res.json)) {
       const stripped: Record<string, unknown> = {};
       const degraded: string[] = [];
       for (const [k, v] of Object.entries(base)) {
@@ -387,7 +396,14 @@ export async function createCallTask(
       // lost and org Chatter automations don't repost CTI internals.
       res = await attempt(stripped);
       if (res.status >= 400) {
-        throw new Error(`Salesforce Task create failed (degraded): ${JSON.stringify(res.json)}`);
+        // Carry the FIRST body too: it is the one that names the offending
+        // column, and it is the only diagnostic for "which field is this org
+        // missing". The stripped attempt's error rarely says.
+        const origin =
+          firstErrorBody === undefined ? '' : ` (first rejection: ${JSON.stringify(firstErrorBody)})`;
+        throw new Error(
+          `Salesforce Task create failed (degraded): ${JSON.stringify(res.json)}${origin}`,
+        );
       }
       const created = res.json as { id: string; success: boolean };
       return { taskId: created.id, degradedFields: degraded };

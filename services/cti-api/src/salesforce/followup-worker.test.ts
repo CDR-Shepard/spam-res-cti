@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ABANDONED_AFTER_MS,
   PRESENCE_WINDOW_MS,
@@ -9,7 +9,7 @@ import {
   nudgeDueRetries,
   postFollowUpCopy,
   processRolloverJob,
-  resetCtiOriginWarning,
+  _resetCtiOriginWarningForTests,
   runFollowupTick,
   type WorkerDeps,
 } from './followup-worker.js';
@@ -766,8 +766,14 @@ describe('completeTasks — a vanished PRIMARY never strands its siblings', () =
 });
 
 describe('postFollowUpCopy — the CTI marker always yields to the task', () => {
-  beforeEach(() => resetCtiOriginWarning());
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    _resetCtiOriginWarningForTests();
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => warn.mockRestore());
 
+  const U = 'user-1';
   const FIELDS = { Subject: 'Follow-up', OwnerId: '005', [CTI_ORIGIN_FIELD]: CTI_ORIGIN.followUp };
   const INVALID_FIELD = [
     { message: "No such column 'CTI_Origin__c' on entity 'Task'.", errorCode: 'INVALID_FIELD' },
@@ -775,7 +781,7 @@ describe('postFollowUpCopy — the CTI marker always yields to the task', () => 
 
   it('posts once, marker included, when Salesforce accepts it', async () => {
     const post = vi.fn(async (_body: Record<string, unknown>) => ({ status: 201, json: { id: '00TNEW' } }));
-    const res = await postFollowUpCopy(post, FIELDS);
+    const res = await postFollowUpCopy(post, FIELDS, U);
     expect(res.status).toBe(201);
     expect(post).toHaveBeenCalledTimes(1);
     expect(post.mock.calls[0]![0]).toMatchObject({ [CTI_ORIGIN_FIELD]: CTI_ORIGIN.followUp });
@@ -786,7 +792,7 @@ describe('postFollowUpCopy — the CTI marker always yields to the task', () => 
       .fn()
       .mockResolvedValueOnce({ status: 400, json: INVALID_FIELD })
       .mockResolvedValueOnce({ status: 201, json: { id: '00TNEW' } });
-    const res = await postFollowUpCopy(post, FIELDS);
+    const res = await postFollowUpCopy(post, FIELDS, U);
     expect(res).toEqual({ status: 201, json: { id: '00TNEW' } });
     expect(post).toHaveBeenCalledTimes(2);
     const retry = post.mock.calls[1]![0] as Record<string, unknown>;
@@ -797,7 +803,7 @@ describe('postFollowUpCopy — the CTI marker always yields to the task', () => 
   it('does NOT retry a 400 that is not INVALID_FIELD — the caller sees the original', async () => {
     const body = [{ errorCode: 'FIELD_CUSTOM_VALIDATION_EXCEPTION', message: 'nope' }];
     const post = vi.fn(async () => ({ status: 400, json: body }));
-    const res = await postFollowUpCopy(post, FIELDS);
+    const res = await postFollowUpCopy(post, FIELDS, U);
     expect(res).toEqual({ status: 400, json: body });
     expect(post).toHaveBeenCalledTimes(1);
   });
@@ -805,7 +811,7 @@ describe('postFollowUpCopy — the CTI marker always yields to the task', () => 
   // A 401 must reach processRolloverJob untouched so isSalesforceAuthError fires.
   it('does NOT retry a 401, so auth handling still sees it', async () => {
     const post = vi.fn(async () => ({ status: 401, json: [{ errorCode: 'INVALID_SESSION_ID' }] }));
-    const res = await postFollowUpCopy(post, FIELDS);
+    const res = await postFollowUpCopy(post, FIELDS, U);
     expect(res.status).toBe(401);
     expect(post).toHaveBeenCalledTimes(1);
   });
@@ -815,31 +821,94 @@ describe('postFollowUpCopy — the CTI marker always yields to the task', () => 
       .fn()
       .mockResolvedValueOnce({ status: 400, json: INVALID_FIELD })
       .mockResolvedValueOnce({ status: 500, json: [{ errorCode: 'SERVER_ERROR' }] });
-    const res = await postFollowUpCopy(post, FIELDS);
+    const res = await postFollowUpCopy(post, FIELDS, U);
     expect(res.status).toBe(500);
     expect(post).toHaveBeenCalledTimes(2);
   });
 
   it('never retries when the payload carries no marker to drop', async () => {
     const post = vi.fn(async () => ({ status: 400, json: INVALID_FIELD }));
-    const res = await postFollowUpCopy(post, { Subject: 'Follow-up', OwnerId: '005' });
+    const res = await postFollowUpCopy(post, { Subject: 'Follow-up', OwnerId: '005' }, U);
     expect(res.status).toBe(400);
     expect(post).toHaveBeenCalledTimes(1);
   });
 
-  it('warns once per process, not once per task', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  // The warn dedupe must gate ONLY the log line. If it ever gated the retry,
+  // the first rep to lack FLS would cost every LATER follow-up its task.
+  it('warns once per rep but retries EVERY time — dedupe never gates the retry', async () => {
     const post = vi
       .fn()
-      .mockResolvedValue({ status: 201, json: { id: '00TNEW' } })
       .mockResolvedValueOnce({ status: 400, json: INVALID_FIELD })
       .mockResolvedValueOnce({ status: 201, json: { id: '00TA' } })
       .mockResolvedValueOnce({ status: 400, json: INVALID_FIELD })
       .mockResolvedValueOnce({ status: 201, json: { id: '00TB' } });
-    await postFollowUpCopy(post, FIELDS);
-    await postFollowUpCopy(post, FIELDS);
+
+    const r1 = await postFollowUpCopy(post, FIELDS, U);
+    const r2 = await postFollowUpCopy(post, FIELDS, U);
+
+    expect(post).toHaveBeenCalledTimes(4); // both calls retried
+    expect(r1).toEqual({ status: 201, json: { id: '00TA' } });
+    expect(r2).toEqual({ status: 201, json: { id: '00TB' } }); // the SECOND task still got created
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]![0])).toContain(CTI_ORIGIN_FIELD);
+    expect(String(warn.mock.calls[0]![0])).toContain(U);
+  });
+
+  // FLS is per user, so a second rep is a separate fact worth logging.
+  it('warns again for a DIFFERENT rep', async () => {
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 400, json: INVALID_FIELD })
+      .mockResolvedValueOnce({ status: 201, json: { id: '00TA' } })
+      .mockResolvedValueOnce({ status: 400, json: INVALID_FIELD })
+      .mockResolvedValueOnce({ status: 201, json: { id: '00TB' } });
+
+    await postFollowUpCopy(post, FIELDS, 'user-1');
+    await postFollowUpCopy(post, FIELDS, 'user-2');
+
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(String(warn.mock.calls[1]![0])).toContain('user-2');
+  });
+});
+
+describe('processRolloverJob — the marker is actually wired into the create', () => {
+  // Guards the ONE line that stands between 17 reps and losing every rolled
+  // forward follow-up. Unit-testing postFollowUpCopy alone did not catch a
+  // mutation that bypassed it at the call site.
+  it('a rep without field access still gets the copy; the job succeeds', async () => {
+    _resetCtiOriginWarningForTests();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const posts: Array<Record<string, unknown>> = [];
+    const sfFetch = vi.fn(async (_u: string, _p: string, init?: { method?: string; body?: unknown }) => {
+      if (init?.method !== 'POST') return { status: 204, json: null };
+      posts.push(init.body as Record<string, unknown>);
+      return posts.length === 1
+        ? { status: 400, json: [{ errorCode: 'INVALID_FIELD', message: "No such column 'CTI_Origin__c'" }] }
+        : { status: 201, json: { id: '00TNEW' } };
+    });
+    const d = deps({ sf: { ...deps().sf, sfFetch: sfFetch as unknown as WorkerDeps['sf']['sfFetch'] } });
+
+    await processRolloverJob(job(), d);
+
+    expect(posts).toHaveLength(2);
+    expect(posts[0]![CTI_ORIGIN_FIELD]).toBe(CTI_ORIGIN.followUp);
+    expect(CTI_ORIGIN_FIELD in posts[1]!).toBe(false);
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
     warn.mockRestore();
+  });
+
+  it('stamps the marker on the create when Salesforce accepts it', async () => {
+    const posts: Array<Record<string, unknown>> = [];
+    const sfFetch = vi.fn(async (_u: string, _p: string, init?: { method?: string; body?: unknown }) => {
+      if (init?.method !== 'POST') return { status: 204, json: null };
+      posts.push(init.body as Record<string, unknown>);
+      return { status: 201, json: { id: '00TNEW' } };
+    });
+    const d = deps({ sf: { ...deps().sf, sfFetch: sfFetch as unknown as WorkerDeps['sf']['sfFetch'] } });
+
+    await processRolloverJob(job(), d);
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0]![CTI_ORIGIN_FIELD]).toBe(CTI_ORIGIN.followUp);
   });
 });

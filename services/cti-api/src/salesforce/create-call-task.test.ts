@@ -134,6 +134,32 @@ describe('createCallTask — CTI Origin marker', () => {
     expect(state.mockRequest).toHaveBeenCalledTimes(1);
   });
 
+  // Before the marker existed, the FIRST INVALID_FIELD went straight to the
+  // stripped payload. A flaky second call must not cost the caller that create.
+  it('still reaches the strip-all fallback when the marker-less retry fails transiently', async () => {
+    state.mockRequest
+      .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
+      .mockResolvedValueOnce(jsonResponse(503, [{ errorCode: 'UNABLE_TO_LOCK_ROW' }]))
+      .mockResolvedValueOnce(jsonResponse(201, { id: '00TNEW', success: true }));
+
+    const out = await createCallTask('u1', INPUT);
+
+    expect(state.mockRequest).toHaveBeenCalledTimes(3);
+    expect('tdc_cti__Recording_URL__c' in bodyOf(2)).toBe(false);
+    expect(out.taskId).toBe('00TNEW');
+  });
+
+  it('names the offending column from the FIRST rejection when the stripped attempt also fails', async () => {
+    state.mockRequest
+      .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
+      .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
+      .mockResolvedValueOnce(jsonResponse(400, [{ errorCode: 'STORAGE_LIMIT_EXCEEDED' }]));
+
+    // The stripped attempt's error rarely says which field was wrong; the first
+    // one does, and it is the only diagnostic worth having here.
+    await expect(createCallTask('u1', INPUT)).rejects.toThrow(/CTI_Origin__c/);
+  });
+
   it('throws when even the fully stripped payload is rejected', async () => {
     state.mockRequest
       .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))

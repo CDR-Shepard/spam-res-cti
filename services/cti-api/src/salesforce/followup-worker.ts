@@ -121,10 +121,18 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
   ]).finally(() => clearTimeout(timer));
 }
 
-/** Reset by tests; production flips it once and stays quiet. */
-export let warnedCtiOrigin = false;
-export function resetCtiOriginWarning(): void {
-  warnedCtiOrigin = false;
+/**
+ * Reps we have already warned about. Keyed per USER, not per process:
+ * field-level security is granted per user, so "Salesforce rejected the marker"
+ * is a fact about one rep, and a process-global flag would report the first rep
+ * and stay silent about the other sixteen. Bounded so a long-lived worker cannot
+ * grow it without limit — clearing only costs one repeated log line.
+ */
+const warnedCtiOriginUsers = new Set<string>();
+const WARNED_USERS_MAX = 200;
+
+export function _resetCtiOriginWarningForTests(): void {
+  warnedCtiOriginUsers.clear();
 }
 
 /**
@@ -141,21 +149,28 @@ export function resetCtiOriginWarning(): void {
  * Only `INVALID_FIELD` triggers the retry. Every other 4xx/5xx is returned
  * untouched so the caller's existing error handling (auth detection, backoff)
  * still sees the original status and body.
+ *
+ * The warning is deduped per `userId`, never per process: this worker serves
+ * every rep from one single-flight queue, so a process-global flag would name
+ * the first affected rep and hide the rest. Deduping must not gate the RETRY —
+ * only the log line. Each call re-decides whether to retry on its own evidence.
  */
 export async function postFollowUpCopy(
   post: (body: Record<string, unknown>) => Promise<{ status: number; json: unknown }>,
   fields: Record<string, string>,
+  userId: string,
 ): Promise<{ status: number; json: unknown }> {
   const first = await post(fields);
   if (first.status < 400) return first;
   if (!(CTI_ORIGIN_FIELD in fields)) return first;
   if (!isInvalidFieldError(first.json)) return first;
-  if (!warnedCtiOrigin) {
-    warnedCtiOrigin = true;
+  if (!warnedCtiOriginUsers.has(userId)) {
+    if (warnedCtiOriginUsers.size >= WARNED_USERS_MAX) warnedCtiOriginUsers.clear();
+    warnedCtiOriginUsers.add(userId);
     console.warn(
-      `[followup-worker] Salesforce rejected ${CTI_ORIGIN_FIELD} — follow-ups will be created ` +
-        `WITHOUT the CTI marker until the field is deployed and visible to the rep. ` +
-        `Reports filtering on it will undercount.`,
+      `[followup-worker] Salesforce rejected ${CTI_ORIGIN_FIELD} for user ${userId} — their ` +
+        `follow-ups will be created WITHOUT the CTI marker until the field is visible to them ` +
+        `(assign permission set CTI_Task_Origin). Reports filtering on it will undercount.`,
     );
   }
   return post(withoutCtiOrigin(fields));
@@ -375,6 +390,7 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
       postFollowUpCopy(
         (body) => deps.sf.sfFetch(job.userId, '/sobjects/Task', { method: 'POST', body }),
         followUpCopyFields(task, targetDate),
+        job.userId,
       ),
       SF_CREATE_TIMEOUT_MS,
       'create task',
