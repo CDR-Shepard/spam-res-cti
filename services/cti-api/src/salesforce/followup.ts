@@ -1,4 +1,5 @@
 import { isFollowUpSubject } from './followup-subject.js';
+import { CTI_ORIGIN, CTI_ORIGIN_FIELD } from './cti-origin.js';
 
 export interface FollowUpTask {
   Id: string;
@@ -25,6 +26,9 @@ export function followUpCopyFields(task: FollowUpTask, dueDate: string): Record<
     Status: 'Not Started',
     ActivityDate: dueDate,
     OwnerId: task.OwnerId,
+    // Marks the copy as ours. The caller retries without this key if Salesforce
+    // rejects it (field absent, or invisible to this rep) — see cti-origin.ts.
+    [CTI_ORIGIN_FIELD]: CTI_ORIGIN.followUp,
   };
   if (task.Type) fields.Type = task.Type;
   if (task.Priority) fields.Priority = task.Priority;

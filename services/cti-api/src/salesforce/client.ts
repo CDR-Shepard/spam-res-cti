@@ -7,6 +7,7 @@ import { loadConfig } from '../config.js';
 import { encryptString, decryptString } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
 import { refreshAccessToken } from './oauth.js';
+import { CTI_ORIGIN, CTI_ORIGIN_FIELD, isInvalidFieldError, withoutCtiOrigin } from './cti-origin.js';
 
 export class SalesforceUnauthorizedError extends Error {
   constructor() {
@@ -346,18 +347,33 @@ export async function createCallTask(
   for (const [k, v] of Object.entries(input.customFields ?? {})) {
     if (v !== null && v !== undefined) base[k] = v;
   }
+  // Stamped last so it always wins: this marker is how reports tell a CTI-written
+  // task from one a person typed, and a caller-supplied customFields entry must
+  // not be able to forge or clear it.
+  base[CTI_ORIGIN_FIELD] = CTI_ORIGIN.callLog;
 
   const attempt = async (payload: Record<string, unknown>) =>
     sfFetch(userId, '/sobjects/Task', { method: 'POST', body: payload });
 
   let res = await attempt(base);
+
+  // The marker is the newest field on this payload and the only one gated by
+  // per-rep field-level security, so it is by far the likeliest single cause of
+  // INVALID_FIELD. Drop just it and retry BEFORE falling back to stripping every
+  // custom field — otherwise one invisible reporting field would cost the call
+  // log its 360 CTI data (recording URL, call sid, disposition) as collateral.
+  if (res.status >= 400 && isInvalidFieldError(res.json)) {
+    const retry = await attempt(withoutCtiOrigin(base));
+    if (retry.status < 400) {
+      const madeWithoutMarker = retry.json as { id: string; success: boolean };
+      return { taskId: madeWithoutMarker.id, degradedFields: [CTI_ORIGIN_FIELD] };
+    }
+    res = retry;
+  }
+
   if (res.status >= 400) {
-    // Inspect for INVALID_FIELD errors → strip custom fields & retry.
-    const errs = res.json as Array<{ errorCode?: string; message?: string }>;
-    const isInvalidField =
-      Array.isArray(errs) &&
-      errs.some((e) => typeof e.errorCode === 'string' && e.errorCode.startsWith('INVALID_FIELD'));
-    if (isInvalidField) {
+    // Still rejected → strip every custom field & retry.
+    if (isInvalidFieldError(res.json)) {
       const stripped: Record<string, unknown> = {};
       const degraded: string[] = [];
       for (const [k, v] of Object.entries(base)) {

@@ -49,6 +49,7 @@ import { buildEngineDeps } from '../dialer/live-deps.js';
 import { nextBusinessDay } from '../dialer/next-business-day.js';
 import { inFlightItem } from '../dialer/state.js';
 import { fetchBusinessCalendar } from './business-calendar.js';
+import { CTI_ORIGIN_FIELD, isInvalidFieldError, withoutCtiOrigin } from './cti-origin.js';
 import { SalesforceUnauthorizedError, sfFetch, soqlEscape, soqlQuery } from './client.js';
 import { FOLLOWUP_DAILY_CAP_DEFAULT, MAX_ROLLOVER_BUSINESS_DAYS, followUpTasksSoql, pickRolloverDay } from './followup-day.js';
 import { countFollowUps, isFollowUpSubject } from './followup-subject.js';
@@ -118,6 +119,46 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
       timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
     }),
   ]).finally(() => clearTimeout(timer));
+}
+
+/** Reset by tests; production flips it once and stays quiet. */
+export let warnedCtiOrigin = false;
+export function resetCtiOriginWarning(): void {
+  warnedCtiOrigin = false;
+}
+
+/**
+ * POSTs the follow-up copy, retrying ONCE without the CTI marker when Salesforce
+ * rejects that field.
+ *
+ * Why the retry exists: the copy is created through the REP's Salesforce
+ * session, so `CTI_Origin__c` is rejected both in an org that never got the
+ * field AND for a rep whose profile cannot see it — same `INVALID_FIELD` either
+ * way. The marker is bookkeeping; the rep's follow-up is not. Losing the task to
+ * a reporting field would be a far worse bug than an unstamped task, so the
+ * marker always yields.
+ *
+ * Only `INVALID_FIELD` triggers the retry. Every other 4xx/5xx is returned
+ * untouched so the caller's existing error handling (auth detection, backoff)
+ * still sees the original status and body.
+ */
+export async function postFollowUpCopy(
+  post: (body: Record<string, unknown>) => Promise<{ status: number; json: unknown }>,
+  fields: Record<string, string>,
+): Promise<{ status: number; json: unknown }> {
+  const first = await post(fields);
+  if (first.status < 400) return first;
+  if (!(CTI_ORIGIN_FIELD in fields)) return first;
+  if (!isInvalidFieldError(first.json)) return first;
+  if (!warnedCtiOrigin) {
+    warnedCtiOrigin = true;
+    console.warn(
+      `[followup-worker] Salesforce rejected ${CTI_ORIGIN_FIELD} — follow-ups will be created ` +
+        `WITHOUT the CTI marker until the field is deployed and visible to the rep. ` +
+        `Reports filtering on it will undercount.`,
+    );
+  }
+  return post(withoutCtiOrigin(fields));
 }
 
 async function patchJob(deps: WorkerDeps, id: string, patch: Partial<FollowupRolloverJob>): Promise<void> {
@@ -327,8 +368,14 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     // task the copy replaced, not just the template.
     await patchJob(deps, job.id, { targetDate, nextDay, completedTaskId: task.Id, completedTaskIds: clearSet });
 
+    // The whole create — including the one marker-less retry — shares a single
+    // timeout budget. Giving the retry its own would double the worst case and
+    // let a wedged Salesforce pin the single-flight tick for twice as long.
     const created = await withTimeout(
-      deps.sf.sfFetch(job.userId, '/sobjects/Task', { method: 'POST', body: followUpCopyFields(task, targetDate) }),
+      postFollowUpCopy(
+        (body) => deps.sf.sfFetch(job.userId, '/sobjects/Task', { method: 'POST', body }),
+        followUpCopyFields(task, targetDate),
+      ),
       SF_CREATE_TIMEOUT_MS,
       'create task',
     );

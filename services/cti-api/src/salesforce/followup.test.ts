@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { followUpCopyFields, pickFollowUpTask, type FollowUpTask } from './followup.js';
+import { CTI_ORIGIN, CTI_ORIGIN_FIELD } from './cti-origin.js';
 
 const t = (o: Partial<FollowUpTask>): FollowUpTask => ({
   Id: 'x', Subject: 'Follow-up', Type: 'Call', Priority: 'Normal',
@@ -34,5 +35,12 @@ describe('followUpCopyFields', () => {
       WhoId: '00Q9', Status: 'Not Started', ActivityDate: '2026-07-14',
     });
     expect('WhatId' in f).toBe(false);
+  });
+
+  // The marker is how the "Power Dialer Follow-Ups" Salesforce report tells a
+  // rolled-forward copy from a follow-up someone typed by hand.
+  it('stamps the CTI Origin marker so reports can identify the copy', () => {
+    const f = followUpCopyFields(t({}), '2026-07-14');
+    expect(f[CTI_ORIGIN_FIELD]).toBe(CTI_ORIGIN.followUp);
   });
 });

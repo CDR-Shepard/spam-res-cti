@@ -7,11 +7,14 @@ import {
   expireAbandonedSessions,
   isSalesforceAuthError,
   nudgeDueRetries,
+  postFollowUpCopy,
   processRolloverJob,
+  resetCtiOriginWarning,
   runFollowupTick,
   type WorkerDeps,
 } from './followup-worker.js';
 import { SalesforceUnauthorizedError } from './client.js';
+import { CTI_ORIGIN, CTI_ORIGIN_FIELD } from './cti-origin.js';
 import type { OwnershipSnapshot } from './ownership.js';
 import type { FollowupRolloverJob } from '@cti/db';
 
@@ -759,5 +762,84 @@ describe('completeTasks — a vanished PRIMARY never strands its siblings', () =
     await processRolloverJob(job({ createdTaskId: '00TNEW', completedTaskId: '00TA', completedTaskIds: ['00TA', '00TB'] }), d);
     expect(sfFetch.mock.calls.map((c) => c[1])).toEqual(['/sobjects/Task/00TA', '/sobjects/Task/00TB']);
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
+  });
+});
+
+describe('postFollowUpCopy — the CTI marker always yields to the task', () => {
+  beforeEach(() => resetCtiOriginWarning());
+
+  const FIELDS = { Subject: 'Follow-up', OwnerId: '005', [CTI_ORIGIN_FIELD]: CTI_ORIGIN.followUp };
+  const INVALID_FIELD = [
+    { message: "No such column 'CTI_Origin__c' on entity 'Task'.", errorCode: 'INVALID_FIELD' },
+  ];
+
+  it('posts once, marker included, when Salesforce accepts it', async () => {
+    const post = vi.fn(async (_body: Record<string, unknown>) => ({ status: 201, json: { id: '00TNEW' } }));
+    const res = await postFollowUpCopy(post, FIELDS);
+    expect(res.status).toBe(201);
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0]![0]).toMatchObject({ [CTI_ORIGIN_FIELD]: CTI_ORIGIN.followUp });
+  });
+
+  it('retries WITHOUT the marker on INVALID_FIELD and keeps every other field', async () => {
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 400, json: INVALID_FIELD })
+      .mockResolvedValueOnce({ status: 201, json: { id: '00TNEW' } });
+    const res = await postFollowUpCopy(post, FIELDS);
+    expect(res).toEqual({ status: 201, json: { id: '00TNEW' } });
+    expect(post).toHaveBeenCalledTimes(2);
+    const retry = post.mock.calls[1]![0] as Record<string, unknown>;
+    expect(CTI_ORIGIN_FIELD in retry).toBe(false);
+    expect(retry).toEqual({ Subject: 'Follow-up', OwnerId: '005' });
+  });
+
+  it('does NOT retry a 400 that is not INVALID_FIELD — the caller sees the original', async () => {
+    const body = [{ errorCode: 'FIELD_CUSTOM_VALIDATION_EXCEPTION', message: 'nope' }];
+    const post = vi.fn(async () => ({ status: 400, json: body }));
+    const res = await postFollowUpCopy(post, FIELDS);
+    expect(res).toEqual({ status: 400, json: body });
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  // A 401 must reach processRolloverJob untouched so isSalesforceAuthError fires.
+  it('does NOT retry a 401, so auth handling still sees it', async () => {
+    const post = vi.fn(async () => ({ status: 401, json: [{ errorCode: 'INVALID_SESSION_ID' }] }));
+    const res = await postFollowUpCopy(post, FIELDS);
+    expect(res.status).toBe(401);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the SECOND failure when the marker-less retry also fails', async () => {
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 400, json: INVALID_FIELD })
+      .mockResolvedValueOnce({ status: 500, json: [{ errorCode: 'SERVER_ERROR' }] });
+    const res = await postFollowUpCopy(post, FIELDS);
+    expect(res.status).toBe(500);
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+
+  it('never retries when the payload carries no marker to drop', async () => {
+    const post = vi.fn(async () => ({ status: 400, json: INVALID_FIELD }));
+    const res = await postFollowUpCopy(post, { Subject: 'Follow-up', OwnerId: '005' });
+    expect(res.status).toBe(400);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns once per process, not once per task', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const post = vi
+      .fn()
+      .mockResolvedValue({ status: 201, json: { id: '00TNEW' } })
+      .mockResolvedValueOnce({ status: 400, json: INVALID_FIELD })
+      .mockResolvedValueOnce({ status: 201, json: { id: '00TA' } })
+      .mockResolvedValueOnce({ status: 400, json: INVALID_FIELD })
+      .mockResolvedValueOnce({ status: 201, json: { id: '00TB' } });
+    await postFollowUpCopy(post, FIELDS);
+    await postFollowUpCopy(post, FIELDS);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain(CTI_ORIGIN_FIELD);
+    warn.mockRestore();
   });
 });
