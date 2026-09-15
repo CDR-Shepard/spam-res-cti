@@ -48,6 +48,11 @@ function bodyOf(callIndex: number): Record<string, unknown> {
   return opts?.body ? (JSON.parse(opts.body) as Record<string, unknown>) : {};
 }
 
+/** The standard (non-custom) half of a payload — what every rung must preserve. */
+function standardFieldsOf(body: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(body).filter(([k]) => !k.endsWith('__c')));
+}
+
 const INVALID_FIELD = [
   { message: "No such column 'CTI_Origin__c' on entity 'Task'.", errorCode: 'INVALID_FIELD' },
 ];
@@ -121,7 +126,12 @@ describe('createCallTask — CTI Origin marker', () => {
     const kept = bodyOf(2);
     expect(kept[CTI_ORIGIN_FIELD]).toBe(CTI_ORIGIN.callLog);
     expect('tdc_cti__Recording_URL__c' in kept).toBe(false);
-    expect(kept.Subject).toBe('Call — Jane Doe');
+    // EVERY standard field must survive, not just Subject. Dropping WhoId here
+    // would attach the call log to nothing — invisible on the Lead — for every
+    // dispositioned call in this org, and degradedFields would still look
+    // healthy because the lost fields are standard, not custom.
+    expect(kept).toMatchObject(standardFieldsOf(bodyOf(0)));
+    expect(Object.keys(kept)).toHaveLength(Object.keys(standardFieldsOf(bodyOf(0))).length + 1);
     expect(out.taskId).toBe('00TNEW');
     // The marker survived, so it is NOT degraded; the others are.
     expect(out.degradedFields).not.toContain(CTI_ORIGIN_FIELD);
@@ -143,7 +153,7 @@ describe('createCallTask — CTI Origin marker', () => {
     const stripped = bodyOf(3);
     expect(CTI_ORIGIN_FIELD in stripped).toBe(false);
     expect('tdc_cti__Recording_URL__c' in stripped).toBe(false);
-    expect(stripped.Subject).toBe('Call — Jane Doe');
+    expect(stripped).toEqual(standardFieldsOf(bodyOf(0)));
     expect(out.taskId).toBe('00TNEW');
     expect(out.degradedFields).toEqual(
       expect.arrayContaining([CTI_ORIGIN_FIELD, 'tdc_cti__Recording_URL__c', 'tdc_cti__Call_Sid__c']),

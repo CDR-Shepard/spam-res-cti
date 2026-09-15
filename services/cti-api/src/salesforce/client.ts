@@ -323,8 +323,13 @@ const STANDARD_FIELDS = new Set([
 ]);
 
 /**
- * Creates a Task. If custom fields are not present in the org, retries with them stripped
- * (graceful degradation) and logs a warning.
+ * Creates a Task, degrading through four payloads rather than losing the task:
+ * the full one, one without the CTI marker, one with only standard fields PLUS
+ * the marker, and finally standard fields alone. Which fields were dropped is
+ * reported back as `degradedFields` and persisted by sync.ts to
+ * `calls.metadata.salesforceDegradedFields` — that column is the signal, not a
+ * log line. Nothing here logs: in an org missing the CTI custom fields EVERY
+ * call log degrades, so a warning would be pure noise at real call volume.
  */
 export async function createCallTask(
   userId: string,
@@ -383,7 +388,9 @@ export async function createCallTask(
     // is what proved a field is unknown to this org/user; before the marker
     // existed that response went straight here, and a flaky second call must
     // not cost the caller the degraded create that used to succeed.
-    if (markerWasRejected || isInvalidFieldError(res.json)) {
+    // `markerWasRejected` alone decides this: when it is false, `res` is still
+    // the FIRST response, which by construction was not an INVALID_FIELD.
+    if (markerWasRejected) {
       const stripped: Record<string, unknown> = {};
       const degraded: string[] = [];
       for (const [k, v] of Object.entries(base)) {
@@ -399,16 +406,20 @@ export async function createCallTask(
       // call, forever. This rung costs nothing in the common case: the payload
       // that used to be attempt 3 is now attempt 4, and it is only reached when
       // the marker genuinely cannot be written either.
-      const marker = base[CTI_ORIGIN_FIELD];
-      if (marker !== undefined) {
-        const keptMarker = await attempt({ ...stripped, [CTI_ORIGIN_FIELD]: marker });
-        if (keptMarker.status < 400) {
-          const made = keptMarker.json as { id: string; success: boolean };
-          return {
-            taskId: made.id,
-            degradedFields: degraded.filter((f) => f !== CTI_ORIGIN_FIELD),
-          };
-        }
+      // No `marker !== undefined` guard: the stamp above is unconditional, and
+      // a guard here would silently skip this whole rung if anyone ever made it
+      // conditional — the wrong failure direction, since that is exactly when
+      // the rest of this rung still matters.
+      const keptMarker = await attempt({ ...stripped, [CTI_ORIGIN_FIELD]: base[CTI_ORIGIN_FIELD] });
+      if (keptMarker.status < 400) {
+        const made = keptMarker.json as { id: string; success: boolean };
+        const stillDegraded = degraded.filter((f) => f !== CTI_ORIGIN_FIELD);
+        // An empty array would mark the call "degraded" with nothing degraded,
+        // in the very column used to diagnose this. Say nothing instead.
+        return {
+          taskId: made.id,
+          ...(stillDegraded.length ? { degradedFields: stillDegraded } : {}),
+        };
       }
 
       // The custom fields aren't defined in this SF org — drop them and keep the
