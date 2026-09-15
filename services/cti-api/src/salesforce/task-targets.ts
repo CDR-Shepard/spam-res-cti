@@ -1,5 +1,4 @@
 import { soqlEscape, soqlQuery } from './client.js';
-import { isFollowUpSubject } from './followup-subject.js';
 
 export type TargetObject = 'Lead' | 'Contact' | 'Opportunity';
 export interface TaskRow {
@@ -8,9 +7,20 @@ export interface TaskRow {
   Who?: { Type?: string } | null; What?: { Type?: string } | null;
 }
 
-/** Pure — the person/record a Task dials, in the agreed precedence; null = unreachable. */
+/**
+ * Pure — the person/record a Task dials, in the agreed precedence; null = unreachable.
+ *
+ * `followupEligible` gates whether the dialer may ROLL this task forward after
+ * two no-connect attempts. It used to mean "the subject is a follow-up", which
+ * left every other dialed task — 'set appt', 'reschedule' — open and going
+ * overdue no matter how often the rep called it: a rep could dial all day and
+ * watch their list not shrink. It now means "there is a subject to copy". A task
+ * with no subject is the one thing we still refuse to roll, because
+ * `followUpCopyFields` would invent the subject 'Follow-up' for it and quietly
+ * manufacture a follow-up the rep never had.
+ */
 export function resolveTaskTarget(task: TaskRow): { recordId: string; objectType: TargetObject; followupEligible: boolean } | null {
-  const eligible = isFollowUpSubject(task.Subject);
+  const eligible = !!task.Subject && task.Subject.trim() !== '';
   const whoType = task.Who?.Type;
   if (task.WhoId && (whoType === 'Lead' || whoType === 'Contact')) {
     return { recordId: task.WhoId, objectType: whoType, followupEligible: eligible };

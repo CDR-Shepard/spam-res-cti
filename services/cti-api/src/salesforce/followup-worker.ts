@@ -52,7 +52,7 @@ import { fetchBusinessCalendar } from './business-calendar.js';
 import { CTI_ORIGIN_FIELD, isInvalidFieldError, withoutCtiOrigin } from './cti-origin.js';
 import { SalesforceUnauthorizedError, sfFetch, soqlEscape, soqlQuery } from './client.js';
 import { FOLLOWUP_DAILY_CAP_DEFAULT, MAX_ROLLOVER_BUSINESS_DAYS, followUpTasksSoql, pickRolloverDay } from './followup-day.js';
-import { countFollowUps, isFollowUpSubject } from './followup-subject.js';
+import { countCtiCreated, countFollowUps, sameTaskKind } from './followup-subject.js';
 import { followUpCopyFields, pickFollowUpTask, type FollowUpTask } from './followup.js';
 import { fetchOwnership, gatedIds, mayCreateTaskOn, type OwnershipSnapshot } from './ownership.js';
 
@@ -176,6 +176,70 @@ export async function postFollowUpCopy(
   return post(withoutCtiOrigin(fields));
 }
 
+/** Reset by tests. */
+let ctiOriginUnreadable = false;
+export function _resetDayLoadFallbackForTests(): void {
+  ctiOriginUnreadable = false;
+}
+
+/**
+ * How full the rep's day already is, for the cap.
+ *
+ * Counts the tasks the CTI created (`CTI_Origin__c`), which is exactly the
+ * population the cap is meant to bound. Falls back to the old subject-based
+ * follow-up count when the field cannot be read — a rep without the
+ * CTI_Task_Origin permission set, or an org where the field was never deployed.
+ * The fallback undercounts once non-follow-ups start rolling, but an undercount
+ * is a rep getting a busier day; throwing here would fail the whole rollover and
+ * lose the task, which is far worse.
+ */
+export async function countDayLoad(
+  deps: WorkerDeps,
+  job: FollowupRolloverJob,
+  isoDate: string,
+): Promise<number> {
+  type Row = { Subject?: string | null; CTI_Origin__c?: string | null };
+  if (!ctiOriginUnreadable) {
+    try {
+      const rows = await withTimeout(
+        deps.sf.soqlQuery<Row>(job.userId, followUpTasksSoql(job.sfOwnerId, isoDate)),
+        SF_CALL_TIMEOUT_MS,
+        'day load count',
+      );
+      return countCtiCreated(rows);
+    } catch (err) {
+      // Only an unknown/invisible field falls back. Anything else — auth, a
+      // timeout, a 500 — must propagate so the job retries instead of silently
+      // sizing the day off a query that never ran.
+      if (!isInvalidFieldError(invalidFieldPayload(err))) throw err;
+      ctiOriginUnreadable = true;
+      console.warn(
+        `[followup-worker] ${CTI_ORIGIN_FIELD} unreadable for the daily cap — counting follow-ups ` +
+          `by subject instead, which undercounts once non-follow-ups roll. Assign permission set ` +
+          `CTI_Task_Origin.`,
+      );
+    }
+  }
+  const rows = await withTimeout(
+    deps.sf.soqlQuery<Row>(job.userId, followUpTasksSoql(job.sfOwnerId, isoDate, false)),
+    SF_CALL_TIMEOUT_MS,
+    'day load count',
+  );
+  return countFollowUps(rows);
+}
+
+/** soqlQuery throws an Error whose message carries the JSON body; dig it back out. */
+function invalidFieldPayload(err: unknown): unknown {
+  const msg = err instanceof Error ? err.message : String(err);
+  const start = msg.indexOf('[');
+  if (start < 0) return null;
+  try {
+    return JSON.parse(msg.slice(start));
+  } catch {
+    return null;
+  }
+}
+
 async function patchJob(deps: WorkerDeps, id: string, patch: Partial<FollowupRolloverJob>): Promise<void> {
   await deps.db.update(schema.followupRolloverJobs).set({ ...patch, updatedAt: deps.now() }).where(eq(schema.followupRolloverJobs.id, id));
 }
@@ -223,8 +287,11 @@ export function sameDaySiblings(
   tasks: ReadonlyArray<FollowUpTask>,
   primaryId: string,
   fromDate: string,
+  primarySubject: string | null,
 ): FollowUpTask[] {
-  return tasks.filter((t) => t.Id !== primaryId && t.ActivityDate === fromDate && isFollowUpSubject(t.Subject));
+  return tasks.filter(
+    (t) => t.Id !== primaryId && t.ActivityDate === fromDate && sameTaskKind(primarySubject, t.Subject),
+  );
 }
 
 /**
@@ -351,7 +418,7 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     // the sibling list — the price of not leaving a swallowed enqueue (the job
     // key is per person, not per task) open past its due date.
     const clearSet = [task.Id, ...sameDaySiblings(
-      onRecord ?? await listOpenFollowUps(deps, job), task.Id, job.fromDate,
+      onRecord ?? await listOpenFollowUps(deps, job), task.Id, job.fromDate, task.Subject,
     ).map((t) => t.Id)];
 
     // Same reason as every other outbound call here: a hung socket in the
@@ -364,7 +431,7 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     const nextDay = nextBusinessDay(job.fromDate, cal.workingWeekdays, cal.holidays);
     const targetDate = await pickRolloverDay({
       fromDate: job.fromDate, cap, workingWeekdays: cal.workingWeekdays, holidays: cal.holidays,
-      countOn: async (d) => countFollowUps(await withTimeout(deps.sf.soqlQuery<{ Subject?: string | null }>(job.userId, followUpTasksSoql(job.sfOwnerId, d)), SF_CALL_TIMEOUT_MS, 'follow-up count')),
+      countOn: (d) => countDayLoad(deps, job, d),
     });
     if (!targetDate) {
       logFailed(job, 'no business day with room within 30 days');

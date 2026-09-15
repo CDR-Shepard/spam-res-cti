@@ -154,7 +154,9 @@ describe('createDialerSession — Task runs', () => {
     expect(db._sessionInsert!.objectType).toBe('Task');
     expect(db._itemRows.map((x) => [x.recordId, x.objectType, x.taskId, x.followupEligible, x.status])).toEqual([
       ['00Q1', 'Lead', '00T1', true, 'pending'],
-      ['0031', 'Contact', '00T2', false, 'pending'],
+      // 'Check in' is eligible now: since 2026-09-15 every dialed task rolls
+      // forward, not just follow-ups.
+      ['0031', 'Contact', '00T2', true, 'pending'],
       ['00T3', 'Task', '00T3', true, 'unreachable'],
     ]);
   });

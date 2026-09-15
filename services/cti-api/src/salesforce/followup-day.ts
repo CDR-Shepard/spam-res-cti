@@ -11,8 +11,9 @@ export const FOLLOWUP_DAILY_CAP_DEFAULT = 100;
 export const MAX_ROLLOVER_BUSINESS_DAYS = 30;
 
 /** The owner's OPEN tasks due `isoDate`; subjects are matched in code (`countFollowUps`). Bounded: >500 on one day is over any cap. */
-export function followUpTasksSoql(sfOwnerId: string, isoDate: string): string {
-  return `SELECT Id, Subject FROM Task WHERE OwnerId = '${soqlEscape(sfOwnerId)}' AND IsClosed = false AND ActivityDate = ${isoDate} LIMIT 500`;
+export function followUpTasksSoql(sfOwnerId: string, isoDate: string, withCtiOrigin = true): string {
+  const origin = withCtiOrigin ? ', CTI_Origin__c' : '';
+  return `SELECT Id, Subject${origin} FROM Task WHERE OwnerId = '${soqlEscape(sfOwnerId)}' AND IsClosed = false AND ActivityDate = ${isoDate} LIMIT 500`;
 }
 
 export async function pickRolloverDay(opts: {

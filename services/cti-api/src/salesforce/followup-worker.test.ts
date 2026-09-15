@@ -10,6 +10,7 @@ import {
   postFollowUpCopy,
   processRolloverJob,
   _resetCtiOriginWarningForTests,
+  _resetDayLoadFallbackForTests,
   runFollowupTick,
   type WorkerDeps,
 } from './followup-worker.js';
@@ -150,9 +151,11 @@ describe('processRolloverJob', () => {
   });
 
   it('pushes to a later day when the next business day is at the cap', async () => {
-    const full = Array.from({ length: 100 }, () => ({ Subject: 'Follow-up' }));
+    // The cap counts what the CTI created, not what the subject says — since
+    // every dialed task rolls, subject no longer identifies the dialer's output.
+    const full = Array.from({ length: 100 }, () => ({ Subject: 'set appt', CTI_Origin__c: 'Power Dialer Follow-Up' }));
     const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
-      (/FROM Task WHERE OwnerId/.test(q) ? (q.includes('2026-08-21') ? full : [{ Subject: 'Follow-up' }]) : [openTask])) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+      (/FROM Task WHERE OwnerId/.test(q) ? (q.includes('2026-08-21') ? full : [{ Subject: 'Follow-up', CTI_Origin__c: 'Power Dialer Follow-Up' }]) : [openTask])) as unknown as WorkerDeps['sf']['soqlQuery'] } });
     await processRolloverJob(job(), d);
     expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-24');
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ targetDate: '2026-08-24', nextDay: '2026-08-21' }) });
@@ -344,25 +347,73 @@ describe('processRolloverJob', () => {
    *  the shared rule must NOT count); every other day is empty. `seen` collects
    *  the cap queries. */
   const capDayFake = (seen: string[] = []) => vi.fn(async (_u: string, q: string) => {
-    if (/FROM Task WHERE OwnerId/.test(q)) { seen.push(q); return /2026-08-21/.test(q) ? [{ Subject: 'F/U' }, { Subject: 'Refund' }] : []; }
+    // One task the CTI put there, one the rep made by hand.
+    if (/FROM Task WHERE OwnerId/.test(q)) {
+      seen.push(q);
+      return /2026-08-21/.test(q)
+        ? [{ Subject: 'set appt', CTI_Origin__c: 'Power Dialer Follow-Up' }, { Subject: 'Refund' }]
+        : [];
+    }
     return [openTask];
   }) as unknown as WorkerDeps['sf']['soqlQuery'];
 
-  it('counts the day\'s follow-ups in code with the shared subject rule (FU counts, Refund does not)', async () => {
+  it('counts what the CTI created on the day, in code rather than SELECT COUNT()', async () => {
     const seen: string[] = [];
     const d = deps({ capFor: vi.fn(async () => 1), sf: { ...deps().sf, soqlQuery: capDayFake(seen) } });
     await processRolloverJob(job(), d);
-    expect(seen[0]).toMatch(/^SELECT Id, Subject FROM Task WHERE /); // fetched and counted here, not SELECT COUNT() in SOQL
-    expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-24'); // 8/21 had 1 FU = at cap 1 → pushed
+    expect(seen[0]).toMatch(/^SELECT Id, Subject, CTI_Origin__c FROM Task WHERE /);
+    // 8/21 already holds 1 CTI-created task = at cap 1 → pushed.
+    expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-24');
   });
 
-  it('a non-follow-up on the day does not eat a slot in the cap', async () => {
-    // Same day and same two tasks at cap 2: by the shared rule that day holds
-    // ONE follow-up, so the copy still lands on 8/21. Counting rows (2) — what a
-    // subject-blind COUNT() would do — would push it to 8/24.
+  // The cap bounds what the DIALER adds to a rep's day. A rep who fills their own
+  // calendar must not thereby starve the dialer — that would silently push every
+  // rollover weeks out for the busiest reps, who need them most.
+  it("a rep's own hand-made task does not eat a slot in the cap", async () => {
     const d = deps({ capFor: vi.fn(async () => 2), sf: { ...deps().sf, soqlQuery: capDayFake() } });
     await processRolloverJob(job(), d);
     expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-21');
+  });
+
+  // Losing the task would be far worse than a busier day, so an unreadable
+  // marker field falls back to the old subject count instead of throwing.
+  it('falls back to counting follow-ups by subject when CTI_Origin__c cannot be read', async () => {
+    _resetDayLoadFallbackForTests();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const seen: string[] = [];
+    const soqlQuery = vi.fn(async (_u: string, q: string) => {
+      if (!/FROM Task WHERE OwnerId/.test(q)) return [openTask];
+      seen.push(q);
+      if (q.includes('CTI_Origin__c')) {
+        throw new Error('SOQL failed (400): [{"message":"No such column","errorCode":"INVALID_FIELD"}]');
+      }
+      return /2026-08-21/.test(q) ? [{ Subject: 'F/U' }, { Subject: 'Refund' }] : [];
+    }) as unknown as WorkerDeps['sf']['soqlQuery'];
+
+    const d = deps({ capFor: vi.fn(async () => 1), sf: { ...deps().sf, soqlQuery } });
+    await processRolloverJob(job(), d);
+
+    expect(seen[0]).toContain('CTI_Origin__c');
+    expect(seen[1]).not.toContain('CTI_Origin__c');
+    // Counted by subject: 8/21 holds one F/U = at cap 1 → pushed.
+    expect((d.sf.sfFetch as any).mock.calls[0][2].body.ActivityDate).toBe('2026-08-24');
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+    _resetDayLoadFallbackForTests();
+  });
+
+  // Auth, timeouts and 500s must NOT be swallowed as "field missing".
+  it('propagates a non-INVALID_FIELD error from the cap query instead of falling back', async () => {
+    _resetDayLoadFallbackForTests();
+    const soqlQuery = vi.fn(async (_u: string, q: string) => {
+      if (!/FROM Task WHERE OwnerId/.test(q)) return [openTask];
+      throw new Error('SOQL failed (500): [{"errorCode":"SERVER_UNAVAILABLE"}]');
+    }) as unknown as WorkerDeps['sf']['soqlQuery'];
+    const d = deps({ sf: { ...deps().sf, soqlQuery } });
+    await processRolloverJob(job({ attempts: 1 }), d);
+    // Retried, not closed out as a cap decision made on a query that never ran.
+    expect(writesOf(d)).not.toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
+    _resetDayLoadFallbackForTests();
   });
 
   it('fails immediately (no retry) on a Salesforce auth error', async () => {
@@ -386,7 +437,7 @@ describe('processRolloverJob', () => {
   });
 
   it('fails loudly when no business day within the bound has room', async () => {
-    const full = Array.from({ length: 100 }, () => ({ Subject: 'Follow-up' })); // every day is at the cap
+    const full = Array.from({ length: 100 }, () => ({ Subject: 'Follow-up', CTI_Origin__c: 'Power Dialer Follow-Up' })); // every day is at the cap
     const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) =>
       (/FROM Task WHERE OwnerId/.test(q) ? full : [openTask])) as unknown as WorkerDeps['sf']['soqlQuery'] } });
     await processRolloverJob(job(), d);

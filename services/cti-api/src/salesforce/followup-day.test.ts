@@ -31,9 +31,15 @@ describe('pickRolloverDay', () => {
 });
 
 describe('followUpTasksSoql', () => {
+  it('can omit CTI_Origin__c, for a rep who cannot read it', () => {
+    expect(followUpTasksSoql('005ABC', '2026-08-21', false)).toMatch(/^SELECT Id, Subject FROM Task WHERE /);
+  });
+
   it('fetches the owner\'s OPEN tasks due that day (subjects are matched in code — SOQL cannot express the FU rule)', () => {
     const q = followUpTasksSoql('005ABC', '2026-08-21');
-    expect(q).toMatch(/^SELECT Id, Subject FROM Task WHERE /);
+    // CTI_Origin__c is what the cap counts now that every dialed task rolls —
+    // subject no longer identifies the dialer's own output.
+    expect(q).toMatch(/^SELECT Id, Subject, CTI_Origin__c FROM Task WHERE /);
     expect(q).toContain("OwnerId = '005ABC'"); expect(q).toContain('IsClosed = false'); expect(q).toContain('ActivityDate = 2026-08-21');
     expect(q).toMatch(/LIMIT 500$/); expect(q).not.toMatch(/LIKE/);
   });
