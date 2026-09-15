@@ -218,23 +218,102 @@ describe('processRolloverJob', () => {
     await processRolloverJob(job({ sourceTaskId: '00T9' }), d);
     expect((d.sf.sfFetch as any).mock.calls.map((c: any[]) => c[1])).toEqual(['/sobjects/Task', '/sobjects/Task/00T9']);
     expect((d.sf.sfFetch as any).mock.calls[0][2].body).toMatchObject({ Subject: 'Follow-up' }); // 00T9's, not 00TOLD's
-    // Closed, completed by hand, or reassigned since the miss: the by-id lookup
-    // finds nothing — but one rollover per person per day still owes the record
-    // its same-day clearing and its single copy, so the worker falls back to the
-    // record's open follow-ups instead of closing out as no-task.
-    const sameDay = { ...openTask, Id: '00T5', Subject: 'FU', ActivityDate: job().fromDate };
-    const d2 = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
-      if (/Id = '00T9'/.test(q)) return [];
-      if (/FROM Task WHERE OwnerId/.test(q)) return [];
-      return [sameDay];
-    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
-    await processRolloverJob(job({ sourceTaskId: '00T9' }), d2);
-    expect((d2.sf.sfFetch as any).mock.calls.map((c: any[]) => c[1])).toEqual(['/sobjects/Task', '/sobjects/Task/00T5']);
     // Nothing open on the record either → no-task.
     const d3 = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async () => []) as unknown as WorkerDeps['sf']['soqlQuery'] } });
     await processRolloverJob(job({ sourceTaskId: '00T9' }), d3);
     expect(d3.sf.sfFetch).not.toHaveBeenCalled();
     expect(writesOf(d3)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'no-task' }) });
+  });
+
+  // C2. EVERY other processRolloverJob fixture uses a follow-up primary, and
+  // sameTaskKind(followUp, x) === isFollowUpSubject(x) — so on those fixtures the
+  // new kind-matching code and the old follow-up-only code are indistinguishable.
+  // Hardcoding the call site to 'Follow-up' passed the whole suite. This is the
+  // test that catches it, and it is the one path that can mark a real person's
+  // task Completed.
+  it('a set-appt rollover clears only set-appt siblings, never the follow-up beside them', async () => {
+    const day = job().fromDate;
+    const primary = { ...openTask, Id: '00TSA', Subject: 'set appt', ActivityDate: day };
+    const onRecord = [
+      primary,
+      { ...openTask, Id: '00TSA2', Subject: '  SET APPT ', ActivityDate: day }, // same kind, sloppy casing
+      { ...openTask, Id: '00TFU', Subject: 'Follow up', ActivityDate: day },    // NOT dialed — must survive
+      { ...openTask, Id: '00TRS', Subject: 'reschedule', ActivityDate: day },   // different kind — must survive
+    ];
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
+      if (/Id = '00TSA'/.test(q)) return [primary];
+      if (/FROM Task WHERE OwnerId/.test(q)) return [];
+      return onRecord;
+    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+
+    await processRolloverJob(job({ sourceTaskId: '00TSA' }), d);
+
+    const calls = (d.sf.sfFetch as any).mock.calls;
+    expect(calls[0][1]).toBe('/sobjects/Task');
+    // The copy keeps the dialed subject — it is a set appt tomorrow, not a follow-up.
+    expect(calls[0][2].body).toMatchObject({ Subject: 'set appt' });
+    // Exactly the two set-appt tasks are completed. 00TFU and 00TRS are untouched.
+    expect(calls.slice(1).map((c: any[]) => c[1]).sort()).toEqual(
+      ['/sobjects/Task/00TSA', '/sobjects/Task/00TSA2'],
+    );
+  });
+
+  // The mirror: a follow-up rollover must not sweep up the set-appt beside it.
+  it('a follow-up rollover leaves a same-day set appt alone', async () => {
+    const day = job().fromDate;
+    const primary = { ...openTask, Id: '00TFU', Subject: 'Follow-up', ActivityDate: day };
+    const onRecord = [
+      primary,
+      { ...openTask, Id: '00TFU2', Subject: 'F/U', ActivityDate: day },       // same kind
+      { ...openTask, Id: '00TSA', Subject: 'set appt', ActivityDate: day },   // must survive
+    ];
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
+      if (/Id = '00TFU'/.test(q)) return [primary];
+      if (/FROM Task WHERE OwnerId/.test(q)) return [];
+      return onRecord;
+    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+
+    await processRolloverJob(job({ sourceTaskId: '00TFU' }), d);
+
+    const patched = (d.sf.sfFetch as any).mock.calls.slice(1).map((c: any[]) => c[1]).sort();
+    expect(patched).toEqual(['/sobjects/Task/00TFU', '/sobjects/Task/00TFU2']);
+  });
+
+  // I4. For a set appt the Description IS the work — the address, the time, what
+  // was agreed. Dropping it hands the rep an empty task tomorrow while
+  // completing the one that held the detail.
+  it('carries the task body onto the copy', async () => {
+    const primary = { ...openTask, Id: '00TSA', Subject: 'set appt', Description: '123 Main St, 2pm Weds' };
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
+      if (/Id = '00TSA'/.test(q)) return [primary];
+      if (/FROM Task WHERE OwnerId/.test(q)) return [];
+      return [primary];
+    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+
+    await processRolloverJob(job({ sourceTaskId: '00TSA' }), d);
+
+    expect((d.sf.sfFetch as any).mock.calls[0][2].body).toMatchObject({
+      Subject: 'set appt',
+      Description: '123 Main St, 2pm Weds',
+    });
+  });
+
+  // The fallback this replaces retargeted the rollover at ANY open follow-up on
+  // the record. Harmless-ish while only follow-ups rolled; once every dialed
+  // task rolls it lets a 'set appt' dial complete a follow-up the rep never
+  // called — and pickFollowUpTask has no date filter, so a FUTURE-dated one.
+  it('a Task run whose dialed task is gone rolls NOTHING, instead of retargeting at another task', async () => {
+    const future = { ...openTask, Id: '00TFUT', Subject: 'Follow up re contract', ActivityDate: '2026-09-30' };
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
+      if (/Id = '00T9'/.test(q)) return []; // closed by hand since the dial
+      if (/FROM Task WHERE OwnerId/.test(q)) return [];
+      return [future];
+    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+
+    await processRolloverJob(job({ sourceTaskId: '00T9' }), d);
+
+    expect(d.sf.sfFetch).not.toHaveBeenCalled(); // nothing created, nothing completed
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ status: 'succeeded', lastError: 'no-task' }) });
   });
 
   // -------------------------------------------------------------------------
@@ -405,12 +484,19 @@ describe('processRolloverJob', () => {
   // Auth, timeouts and 500s must NOT be swallowed as "field missing".
   it('propagates a non-INVALID_FIELD error from the cap query instead of falling back', async () => {
     _resetDayLoadFallbackForTests();
+    const seen: string[] = [];
     const soqlQuery = vi.fn(async (_u: string, q: string) => {
       if (!/FROM Task WHERE OwnerId/.test(q)) return [openTask];
-      throw new Error('SOQL failed (500): [{"errorCode":"SERVER_UNAVAILABLE"}]');
+      seen.push(q);
+      // ONLY the CTI_Origin__c shape throws. If the code fell back on any error,
+      // the marker-less query below would answer and the job would proceed —
+      // which is exactly the bug this test exists to catch.
+      if (q.includes('CTI_Origin__c')) throw new Error('SOQL failed (500): [{"errorCode":"SERVER_UNAVAILABLE"}]');
+      return [];
     }) as unknown as WorkerDeps['sf']['soqlQuery'];
     const d = deps({ sf: { ...deps().sf, soqlQuery } });
     await processRolloverJob(job({ attempts: 1 }), d);
+    expect(seen).toHaveLength(1); // no fallback query was attempted
     // Retried, not closed out as a cap decision made on a query that never ran.
     expect(writesOf(d)).not.toContainEqual({ patch: expect.objectContaining({ status: 'succeeded' }) });
     _resetDayLoadFallbackForTests();

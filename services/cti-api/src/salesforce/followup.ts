@@ -6,6 +6,8 @@ export interface FollowUpTask {
   Subject: string | null;
   Type: string | null;
   Priority: string | null;
+  /** Optional: older callers and fixtures may not select it. */
+  Description?: string | null;
   OwnerId: string;
   WhoId: string | null;
   WhatId: string | null;
@@ -30,6 +32,11 @@ export function followUpCopyFields(task: FollowUpTask, dueDate: string): Record<
     // rejects it (field absent, or invisible to this rep) — see cti-origin.ts.
     [CTI_ORIGIN_FIELD]: CTI_ORIGIN.followUp,
   };
+  // The body travels with the copy. For a follow-up this was a nicety; for a
+  // 'set appt' or 'reschedule' the Description IS the work (the address, the
+  // time, what was agreed), and dropping it hands the rep an empty task
+  // tomorrow while completing the one that held the detail.
+  if (task.Description) fields.Description = task.Description;
   if (task.Type) fields.Type = task.Type;
   if (task.Priority) fields.Priority = task.Priority;
   if (task.WhoId) fields.WhoId = task.WhoId;

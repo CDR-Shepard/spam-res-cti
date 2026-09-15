@@ -176,10 +176,18 @@ export async function postFollowUpCopy(
   return post(withoutCtiOrigin(fields));
 }
 
-/** Reset by tests. */
-let ctiOriginUnreadable = false;
+/**
+ * Reps whose Salesforce session cannot read `CTI_Origin__c`. Keyed per USER for
+ * the same reason `warnedCtiOriginUsers` is: field-level security is granted per
+ * user, and this worker serves every rep from one queue. A process-global flag
+ * would let ONE rep without the permission set switch the daily cap off for all
+ * seventeen — and, being permanent, keep it off after the permission was
+ * granted, until the container restarted.
+ */
+const ctiOriginUnreadableUsers = new Set<string>();
+const UNREADABLE_USERS_MAX = 200;
 export function _resetDayLoadFallbackForTests(): void {
-  ctiOriginUnreadable = false;
+  ctiOriginUnreadableUsers.clear();
 }
 
 /**
@@ -199,7 +207,7 @@ export async function countDayLoad(
   isoDate: string,
 ): Promise<number> {
   type Row = { Subject?: string | null; CTI_Origin__c?: string | null };
-  if (!ctiOriginUnreadable) {
+  if (!ctiOriginUnreadableUsers.has(job.userId)) {
     try {
       const rows = await withTimeout(
         deps.sf.soqlQuery<Row>(job.userId, followUpTasksSoql(job.sfOwnerId, isoDate)),
@@ -212,11 +220,13 @@ export async function countDayLoad(
       // timeout, a 500 — must propagate so the job retries instead of silently
       // sizing the day off a query that never ran.
       if (!isInvalidFieldError(invalidFieldPayload(err))) throw err;
-      ctiOriginUnreadable = true;
+      if (ctiOriginUnreadableUsers.size >= UNREADABLE_USERS_MAX) ctiOriginUnreadableUsers.clear();
+      ctiOriginUnreadableUsers.add(job.userId);
       console.warn(
-        `[followup-worker] ${CTI_ORIGIN_FIELD} unreadable for the daily cap — counting follow-ups ` +
-          `by subject instead, which undercounts once non-follow-ups roll. Assign permission set ` +
-          `CTI_Task_Origin.`,
+        `[followup-worker] ${CTI_ORIGIN_FIELD} unreadable for user ${job.userId} — the daily cap ` +
+          `falls back to counting follow-up subjects, which now that every dialed task rolls is ` +
+          `close to counting nothing: for THIS rep the cap is effectively off. Assign permission ` +
+          `set CTI_Task_Origin.`,
       );
     }
   }
@@ -256,7 +266,7 @@ async function listOpenFollowUps(deps: WorkerDeps, job: FollowupRolloverJob): Pr
   const tasks = await withTimeout(
     deps.sf.soqlQuery<FollowUpTask>(
       job.userId,
-      'SELECT Id, Subject, Type, Priority, OwnerId, WhoId, WhatId, ActivityDate FROM Task ' +
+      'SELECT Id, Subject, Description, Type, Priority, OwnerId, WhoId, WhatId, ActivityDate FROM Task ' +
         `WHERE IsClosed = false AND OwnerId = '${owner}' AND (WhoId = '${rid}' OR WhatId = '${rid}') ` +
         // No subject filter: SOQL LIKE cannot express the shared follow-up rule
         // (it would match "refund" on 'FU' and miss 'F/U'). `pickFollowUpTask`
@@ -276,12 +286,15 @@ async function listOpenFollowUps(deps: WorkerDeps, job: FollowupRolloverJob): Pr
  * Pure — the other tasks this rollover has to clear.
  *
  * SAME-DAY FOLLOW-UPS ONLY. The rule the user set is one rollover per person per
- * day: everything that was due on the missed day moves as a single copy, so
- * every one of those has to be completed or it sits open past its due date with
- * no job left to move it. A FUTURE-dated follow-up is work the rep has not
- * reached yet, and an OVERDUE one belongs to an earlier day's decision — neither
- * is touched. Non-follow-up tasks ('Check in', 'Send quote') are never touched
- * at all, by the same shared subject rule the enqueue used.
+ * day: everything of the SAME KIND that was due on the missed day moves as a
+ * single copy, so every one of those has to be completed or it sits open past
+ * its due date with no job left to move it. A FUTURE-dated sibling is work the
+ * rep has not reached yet, and an OVERDUE one belongs to an earlier day's
+ * decision — neither is touched.
+ *
+ * KIND, not follow-up-ness (changed 2026-09-15, when every dialed task began
+ * rolling). A 'set appt' rollover clears other same-day 'set appt' tasks and
+ * must NEVER complete a follow-up the rep did not dial. See `sameTaskKind`.
  */
 export function sameDaySiblings(
   tasks: ReadonlyArray<FollowUpTask>,
@@ -302,7 +315,7 @@ export function sameDaySiblings(
  */
 async function findSourceTask(deps: WorkerDeps, job: FollowupRolloverJob, sourceTaskId: string): Promise<FollowUpTask | null> {
   const rows = await withTimeout(deps.sf.soqlQuery<FollowUpTask>(job.userId,
-    'SELECT Id, Subject, Type, Priority, OwnerId, WhoId, WhatId, ActivityDate FROM Task ' +
+    'SELECT Id, Subject, Description, Type, Priority, OwnerId, WhoId, WhatId, ActivityDate FROM Task ' +
     `WHERE Id = '${soqlEscape(sourceTaskId)}' AND IsClosed = false AND OwnerId = '${soqlEscape(job.sfOwnerId)}' LIMIT 1`), SF_CALL_TIMEOUT_MS, 'source task');
   return rows[0] ?? null;
 }
@@ -378,6 +391,18 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     // exact task the rep dialed, whatever a search would have preferred).
     let onRecord = job.sourceTaskId ? null : await listOpenFollowUps(deps, job);
     let task = job.sourceTaskId ? await findSourceTask(deps, job, job.sourceTaskId) : null;
+    if (!task && job.sourceTaskId) {
+      // C1. The exact task the rep dialed is closed, completed by hand, or
+      // reassigned — `findSourceTask` documents that as "nothing to roll".
+      // Falling through to `pickFollowUpTask` retargets the rollover at ANY open
+      // follow-up on the record, including a future-dated one, and completes it.
+      // That was roughly kind-preserving while only follow-ups rolled; now that
+      // every dialed task rolls it means a 'set appt' dial can complete a
+      // follow-up the rep never called and yank it to tomorrow. If the rep
+      // already closed what they dialed, they have handled it.
+      await patchJob(deps, job.id, { status: 'succeeded', lastError: 'no-task', completedAt: deps.now() });
+      return;
+    }
     if (!task) {
       // By-id miss (closed, completed by hand, or reassigned since the dial) or
       // the record path: fall through to the record's open follow-ups. One
@@ -412,9 +437,10 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
       return;
     }
 
-    // THE CLEAR SET: the template plus every other same-day follow-up on this
-    // person. One rollover per person per day means one copy replaces all of
-    // them, so all of them get completed. The by-id path pays one extra SOQL for
+    // THE CLEAR SET: the template plus every other same-day task of the SAME
+    // KIND on this person. One rollover per person per day means one copy
+    // replaces all of them, so all of them get completed. Tasks of a different
+    // kind are left alone — the rep did not dial them. The by-id path pays one extra SOQL for
     // the sibling list — the price of not leaving a swallowed enqueue (the job
     // key is per person, not per task) open past its due date.
     const clearSet = [task.Id, ...sameDaySiblings(
