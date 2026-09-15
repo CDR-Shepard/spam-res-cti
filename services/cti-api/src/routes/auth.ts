@@ -33,6 +33,37 @@ export const PatchMeBody = z
     message: 'nothing to update',
   });
 
+/**
+ * Grant the CTI permission set to a rep who has just connected Salesforce, if
+ * they are switched on for the power dialer.
+ *
+ * Extracted and exported so the gate, the org it passes, and its throw-safety
+ * are testable: this runs inside the unauthenticated OAuth callback, which has
+ * no route harness, and an untested branch there is the wrong kind of quiet.
+ *
+ * Resolves to the outcome, or to null when there was nothing to do. NEVER
+ * rejects — every caller is on a response path that must not fail because of it.
+ */
+export async function ensurePermissionSetOnConnect(
+  deps: {
+    /** Returns the target's org and dialer flag, or undefined if they vanished. */
+    findUser: (userId: string) => Promise<{ orgId: string; powerDialerEnabled: boolean } | undefined>;
+    ensure: (a: { orgId: string; targetUserId: string }) => Promise<unknown>;
+  },
+  targetUserId: string,
+): Promise<unknown | null> {
+  try {
+    const connected = await deps.findUser(targetUserId);
+    // Not enabled for the dialer means they write no Tasks through the CTI, so
+    // there is nothing for the marker field to be useful on yet. The admin
+    // toggle grants it at the moment that changes.
+    if (!connected?.powerDialerEnabled) return null;
+    return await deps.ensure({ orgId: connected.orgId, targetUserId });
+  } catch {
+    return null;
+  }
+}
+
 export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post('/auth/dev-session', async (_req, reply) => {
     // The dev-session backdoor issues a real 30-day session with no
@@ -375,20 +406,24 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       // is the common one for a new hire — switched on first, connects
       // Salesforce later. Only now do we know their Salesforce user id.
       //
-      // Best effort by construction: it never throws, and it runs AFTER the
-      // connection is committed, so a Salesforce hiccup here can never cost the
-      // rep the sign-in they just completed.
-      const connected = await db.query.users.findFirst({
-        where: eq(schema.users.id, targetUserId),
-        columns: { orgId: true, powerDialerEnabled: true },
+      // Off the response path and behind its OWN guard. The connection row and
+      // consumedAt are already committed, so the rep's sign-in has succeeded no
+      // matter what happens next; without this guard a pool blip on the user
+      // lookup would fall into the outer catch and render "Salesforce
+      // connection failed" over a sign-in that actually worked.
+      void ensurePermissionSetOnConnect(
+        {
+          findUser: (id) =>
+            db.query.users.findFirst({
+              where: eq(schema.users.id, id),
+              columns: { orgId: true, powerDialerEnabled: true },
+            }),
+          ensure: ensureCtiPermissionSetLive,
+        },
+        targetUserId,
+      ).then((outcome) => {
+        if (outcome) app.log.info({ target: targetUserId, outcome }, 'cti_permission_set_ensure_on_connect');
       });
-      if (connected?.powerDialerEnabled) {
-        const outcome = await ensureCtiPermissionSetLive({
-          orgId: connected.orgId,
-          targetUserId,
-        });
-        app.log.info({ target: targetUserId, outcome }, 'cti_permission_set_ensure_on_connect');
-      }
       return reply
         .type('text/html')
         .send(htmlPage(isLogin ? 'Signed in with Salesforce' : 'Salesforce connected', 'You can close this window and return to the CTI app.'));

@@ -4,6 +4,8 @@ import {
   ensureCtiPermissionSet,
   ensureCtiPermissionSetForUser,
   isDuplicateAssignment,
+  MAX_ADMIN_ATTEMPTS,
+  PERMISSION_SET_MISSING,
   type PermissionSetDeps,
   type PermissionSetLookup,
 } from './permission-set.js';
@@ -198,5 +200,70 @@ describe('isDuplicateAssignment', () => {
     expect(isDuplicateAssignment(null)).toBe(false);
     expect(isDuplicateAssignment('nope')).toBe(false);
     expect(isDuplicateAssignment([])).toBe(false);
+  });
+});
+
+describe('the SOQL text ensureCtiPermissionSet sends', () => {
+  it('looks the permission set up by Name, the field PermissionSet actually has', async () => {
+    const d = deps();
+    await ensureCtiPermissionSet(d, 'admin-user', TARGET_SF);
+    const first = (d.soqlQuery as ReturnType<typeof vi.fn>).mock.calls[0]![1] as string;
+    // DeveloperName does not exist on PermissionSet — that spelling makes every
+    // grant fail with a SOQL error, and no fake-DB test would notice.
+    expect(first).toMatch(/FROM PermissionSet WHERE Name = '/);
+    expect(first).not.toMatch(/DeveloperName/);
+  });
+
+  it('asks for the exact permission set the org was given', async () => {
+    const d = deps();
+    await ensureCtiPermissionSet(d, 'admin-user', TARGET_SF);
+    const first = (d.soqlQuery as ReturnType<typeof vi.fn>).mock.calls[0]![1] as string;
+    expect(first).toContain("'CTI_Task_Origin'");
+  });
+
+  it('escapes a backslash as well as a quote', async () => {
+    const d = deps();
+    await ensureCtiPermissionSet(d, 'admin-user', "005\\x'y");
+    const second = (d.soqlQuery as ReturnType<typeof vi.fn>).mock.calls[1]![1] as string;
+    expect(second).toContain("005\\\\x\\'y");
+  });
+});
+
+describe('the admin walk is bounded', () => {
+  it('gives up after MAX_ADMIN_ATTEMPTS rather than one call per admin in the org', async () => {
+    const sfFetch = vi.fn(async () => ({ status: 403, json: [{ errorCode: 'INSUFFICIENT_ACCESS' }] }));
+    const many = Array.from({ length: 12 }, (_, i) => `admin-${i}`);
+    const d = {
+      ...deps({ sfFetch }),
+      ...lookup({ adminsWithConnection: vi.fn(async () => many) }),
+    };
+
+    const out = await ensureCtiPermissionSetForUser(d, { orgId: 'o1', targetUserId: 'u1' });
+
+    expect(out.status).toBe('failed');
+    expect(sfFetch).toHaveBeenCalledTimes(MAX_ADMIN_ATTEMPTS);
+  });
+
+  // "Permission set not in org" is the same answer from every admin.
+  it('stops immediately when the permission set is missing, instead of asking each admin', async () => {
+    const soqlQuery = vi.fn(async () => []) as unknown as PermissionSetDeps['soqlQuery'];
+    const d = { ...deps({ soqlQuery }), ...lookup() };
+
+    const out = await ensureCtiPermissionSetForUser(d, { orgId: 'o1', targetUserId: 'u1' });
+
+    expect(out).toEqual({ status: 'skipped', reason: PERMISSION_SET_MISSING });
+    expect(soqlQuery).toHaveBeenCalledTimes(1);
+  });
+
+  // An admin-specific refusal IS worth asking someone else about.
+  it('still retries a per-admin refusal with the next admin', async () => {
+    const sfFetch = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 403, json: [{ errorCode: 'INSUFFICIENT_ACCESS' }] })
+      .mockResolvedValueOnce({ status: 201, json: { id: '0Pa1' } });
+    const d = { ...deps({ sfFetch }), ...lookup() };
+    expect(await ensureCtiPermissionSetForUser(d, { orgId: 'o1', targetUserId: 'u1' })).toEqual({
+      status: 'assigned',
+    });
   });
 });

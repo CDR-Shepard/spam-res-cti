@@ -22,8 +22,21 @@
  * handle by retrying without it.
  */
 
+import { soqlEscape } from './soql.js';
+
 /** DeveloperName of the permission set that grants read+edit on CTI_Origin__c. */
 export const CTI_PERMISSION_SET_NAME = 'CTI_Task_Origin';
+
+/** Skip reason that means "someone has to fix Salesforce", not "nothing to do". */
+export const PERMISSION_SET_MISSING = `permission set ${CTI_PERMISSION_SET_NAME} not in org`;
+
+/**
+ * How many admins to try before giving up. An admin-specific refusal
+ * (INSUFFICIENT_ACCESS) is worth retrying as someone else; an unbounded walk is
+ * not, because with Salesforce down one enablement would become one failed
+ * round trip per admin in the org, all inside an awaited HTTP response.
+ */
+export const MAX_ADMIN_ATTEMPTS = 3;
 
 /** What the DB lookup has to supply. Kept narrow so callers can fake it. */
 export interface PermissionSetLookup {
@@ -57,11 +70,6 @@ export type EnsureOutcome =
   /** Salesforce refused or was unreachable. Logged, never thrown. */
   | { status: 'failed'; reason: string };
 
-/** Salesforce escaping for a string inside a SOQL literal. */
-function soqlLiteral(v: string): string {
-  return v.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-}
-
 /**
  * Give `targetSfUserId` the CTI permission set, acting as `adminUserId`.
  *
@@ -77,17 +85,21 @@ export async function ensureCtiPermissionSet(
   try {
     const sets = await deps.soqlQuery<{ Id: string }>(
       adminUserId,
-      `SELECT Id FROM PermissionSet WHERE Name = '${soqlLiteral(CTI_PERMISSION_SET_NAME)}' LIMIT 1`,
+      `SELECT Id FROM PermissionSet WHERE Name = '${soqlEscape(CTI_PERMISSION_SET_NAME)}' LIMIT 1`,
     );
     const permissionSetId = sets[0]?.Id;
     if (!permissionSetId) {
-      return { status: 'skipped', reason: `permission set ${CTI_PERMISSION_SET_NAME} not in org` };
+      // A MISCONFIGURATION, not a normal precondition — the caller logs this
+      // one at warn. Without that distinction the single most likely real
+      // failure (permission set renamed or never deployed) is invisible: the
+      // feature silently no-ops for every rep, forever, at info level.
+      return { status: 'skipped', reason: PERMISSION_SET_MISSING };
     }
 
     const existing = await deps.soqlQuery<{ Id: string }>(
       adminUserId,
-      `SELECT Id FROM PermissionSetAssignment WHERE PermissionSetId = '${soqlLiteral(permissionSetId)}' ` +
-        `AND AssigneeId = '${soqlLiteral(targetSfUserId)}' LIMIT 1`,
+      `SELECT Id FROM PermissionSetAssignment WHERE PermissionSetId = '${soqlEscape(permissionSetId)}' ` +
+        `AND AssigneeId = '${soqlEscape(targetSfUserId)}' LIMIT 1`,
     );
     if (existing.length > 0) return { status: 'already' };
 
@@ -160,9 +172,12 @@ export async function ensureCtiPermissionSetForUser(
     // Sets" even though they are a CTI admin, and giving up on the first
     // failure would strand the rep for a reason another admin could fix.
     let last: EnsureOutcome = { status: 'failed', reason: 'no admin attempted' };
-    for (const adminUserId of ordered) {
+    for (const adminUserId of ordered.slice(0, MAX_ADMIN_ATTEMPTS)) {
       last = await ensureCtiPermissionSet(deps, adminUserId, targetSfUserId);
       if (last.status === 'assigned' || last.status === 'already') return last;
+      // A missing permission set is an org-global fact: every admin returns the
+      // same answer, so asking the next one only burns another round trip.
+      if (last.status === 'skipped' && last.reason === PERMISSION_SET_MISSING) return last;
     }
     return last;
   } catch (err) {

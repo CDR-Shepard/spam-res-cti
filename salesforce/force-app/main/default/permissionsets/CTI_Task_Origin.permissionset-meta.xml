@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DO NOT ADD PERMISSIONS TO THIS SET.
+
+  Any rep the CTI has switched on can cause themselves to be granted this set,
+  without an admin present: the Salesforce OAuth callback assigns it on connect
+  (services/cti-api/src/routes/auth.ts, ensurePermissionSetOnConnect). That is
+  safe only while the set grants nothing but field-level security on
+  CTI_Origin__c, which is a reporting marker with no business meaning.
+
+  The moment someone treats this as "the CTI permission set" and adds object,
+  Apex or system permissions, that self-service path becomes a privilege
+  escalation. Make a separate permission set instead.
+
+  The API name is load-bearing: services/cti-api/src/salesforce/permission-set.ts
+  looks it up by this exact Name, and a rename silently no-ops the whole feature.
+-->
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>Read and edit access to the CTI Origin field on activities, so the CTI can stamp the tasks it creates and reports can filter on it. Must never grant anything else - see the comment in this file.</description>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Activity.CTI_Origin__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <hasActivationRequired>false</hasActivationRequired>
+    <label>CTI Task Origin</label>
+</PermissionSet>

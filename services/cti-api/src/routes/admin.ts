@@ -10,7 +10,7 @@ import { getDb, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
 import { ensureCtiPermissionSetLive } from '../salesforce/permission-set-live.js';
-import type { EnsureOutcome } from '../salesforce/permission-set.js';
+import { PERMISSION_SET_MISSING, type EnsureOutcome } from '../salesforce/permission-set.js';
 
 /** Human-readable label for an imported DID, derived from its area code so the
  *  Numbers pool reads "San Diego (619)" / "Los Angeles (213)" at a glance. */
@@ -738,7 +738,13 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         targetUserId: updated.id,
         preferredAdminUserId: s.userId,
       });
-      const log = permissionSet.status === 'failed' ? req.log.warn : req.log.info;
+      // A missing permission set is a MISCONFIGURATION that silently no-ops the
+      // whole feature for every rep, forever — it belongs at warn beside a real
+      // failure, not at info beside "this rep has not connected Salesforce yet".
+      const loud =
+        permissionSet.status === 'failed' ||
+        (permissionSet.status === 'skipped' && permissionSet.reason === PERMISSION_SET_MISSING);
+      const log = loud ? req.log.warn : req.log.info;
       log.call(
         req.log,
         { target: updated.id, outcome: permissionSet },

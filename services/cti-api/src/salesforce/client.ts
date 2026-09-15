@@ -7,6 +7,7 @@ import { loadConfig } from '../config.js';
 import { encryptString, decryptString } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
 import { refreshAccessToken } from './oauth.js';
+import { soqlEscape } from './soql.js';
 import { CTI_ORIGIN, CTI_ORIGIN_FIELD, isInvalidFieldError, withoutCtiOrigin } from './cti-origin.js';
 
 export class SalesforceUnauthorizedError extends Error {
@@ -95,10 +96,10 @@ export async function sfFetch(
   return { status: res.statusCode, json };
 }
 
-/** Escape a value for safe interpolation into a SOQL string literal. */
-export function soqlEscape(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-}
+// Re-exported so the many existing `import { soqlEscape } from './client.js'`
+// call sites keep working; the implementation lives in soql.ts, which has no
+// dependencies and can be imported from anywhere.
+export { soqlEscape } from './soql.js';
 
 /** Run a SOQL query as the given user; returns the `records` array. */
 export async function soqlQuery<T = Record<string, unknown>>(

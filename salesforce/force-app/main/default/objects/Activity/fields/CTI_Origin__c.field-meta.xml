@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>CTI_Origin__c</fullName>
+    <description>Stamped by the Callsign CTI on every Task it creates, naming what created it (for example "Power Dialer Follow-Up" or "Call Log"). Blank means the task was created by a person or by another system. Do not edit by hand.</description>
+    <externalId>false</externalId>
+    <inlineHelpText>Set automatically by the CTI. Blank means a person created this task.</inlineHelpText>
+    <label>CTI Origin</label>
+    <length>64</length>
+    <required>false</required>
+    <trackTrending>false</trackTrending>
+    <type>Text</type>
+    <unique>false</unique>
+</CustomField>
