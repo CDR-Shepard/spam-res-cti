@@ -390,6 +390,27 @@ export async function createCallTask(
         if (STANDARD_FIELDS.has(k)) stripped[k] = v;
         else degraded.push(k);
       }
+      // Keep the marker if we possibly can. Reaching here means SOME custom
+      // field is unknown to this org or invisible to this rep, but not
+      // necessarily CTI_Origin__c — and in the org this runs in it is the
+      // OTHERS that are missing: the marker is the only CTI custom field that
+      // exists on Task there. Stripping everything would therefore throw away
+      // the one field that makes a call log attributable to the CTI, on every
+      // call, forever. This rung costs nothing in the common case: the payload
+      // that used to be attempt 3 is now attempt 4, and it is only reached when
+      // the marker genuinely cannot be written either.
+      const marker = base[CTI_ORIGIN_FIELD];
+      if (marker !== undefined) {
+        const keptMarker = await attempt({ ...stripped, [CTI_ORIGIN_FIELD]: marker });
+        if (keptMarker.status < 400) {
+          const made = keptMarker.json as { id: string; success: boolean };
+          return {
+            taskId: made.id,
+            degradedFields: degraded.filter((f) => f !== CTI_ORIGIN_FIELD),
+          };
+        }
+      }
+
       // The custom fields aren't defined in this SF org — drop them and keep the
       // lean Description (already copied above as a standard field). We do NOT
       // fold the diagnostics into Description: the full record, including these

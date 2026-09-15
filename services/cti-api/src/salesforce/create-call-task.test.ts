@@ -107,7 +107,9 @@ describe('createCallTask — CTI Origin marker', () => {
     expect(retry.Subject).toBe('Call — Jane Doe');
   });
 
-  it('falls back to stripping every custom field when the marker-less retry also fails', async () => {
+  // The org this runs in has CTI_Origin__c but NOT the other CTI custom fields,
+  // so this is the live path for every call log, not a corner case.
+  it('keeps the marker when it is the OTHER custom fields the org is missing', async () => {
     state.mockRequest
       .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
       .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
@@ -116,7 +118,29 @@ describe('createCallTask — CTI Origin marker', () => {
     const out = await createCallTask('u1', INPUT);
 
     expect(state.mockRequest).toHaveBeenCalledTimes(3);
-    const stripped = bodyOf(2);
+    const kept = bodyOf(2);
+    expect(kept[CTI_ORIGIN_FIELD]).toBe(CTI_ORIGIN.callLog);
+    expect('tdc_cti__Recording_URL__c' in kept).toBe(false);
+    expect(kept.Subject).toBe('Call — Jane Doe');
+    expect(out.taskId).toBe('00TNEW');
+    // The marker survived, so it is NOT degraded; the others are.
+    expect(out.degradedFields).not.toContain(CTI_ORIGIN_FIELD);
+    expect(out.degradedFields).toEqual(
+      expect.arrayContaining(['tdc_cti__Recording_URL__c', 'tdc_cti__Call_Sid__c']),
+    );
+  });
+
+  it('falls back to stripping every custom field when the marker cannot be written either', async () => {
+    state.mockRequest
+      .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
+      .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
+      .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
+      .mockResolvedValueOnce(jsonResponse(201, { id: '00TNEW', success: true }));
+
+    const out = await createCallTask('u1', INPUT);
+
+    expect(state.mockRequest).toHaveBeenCalledTimes(4);
+    const stripped = bodyOf(3);
     expect(CTI_ORIGIN_FIELD in stripped).toBe(false);
     expect('tdc_cti__Recording_URL__c' in stripped).toBe(false);
     expect(stripped.Subject).toBe('Call — Jane Doe');
@@ -135,8 +159,9 @@ describe('createCallTask — CTI Origin marker', () => {
   });
 
   // Before the marker existed, the FIRST INVALID_FIELD went straight to the
-  // stripped payload. A flaky second call must not cost the caller that create.
-  it('still reaches the strip-all fallback when the marker-less retry fails transiently', async () => {
+  // stripped payload. A flaky second call must not cost the caller that create,
+  // so the ladder keeps descending on the strength of the FIRST rejection.
+  it('keeps descending when the marker-less retry fails transiently', async () => {
     state.mockRequest
       .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
       .mockResolvedValueOnce(jsonResponse(503, [{ errorCode: 'UNABLE_TO_LOCK_ROW' }]))
@@ -147,10 +172,13 @@ describe('createCallTask — CTI Origin marker', () => {
     expect(state.mockRequest).toHaveBeenCalledTimes(3);
     expect('tdc_cti__Recording_URL__c' in bodyOf(2)).toBe(false);
     expect(out.taskId).toBe('00TNEW');
+    // A 503 on the way down must not be read as "the marker is bad".
+    expect(bodyOf(2)[CTI_ORIGIN_FIELD]).toBe(CTI_ORIGIN.callLog);
   });
 
   it('names the offending column from the FIRST rejection when the stripped attempt also fails', async () => {
     state.mockRequest
+      .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
       .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
       .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
       .mockResolvedValueOnce(jsonResponse(400, [{ errorCode: 'STORAGE_LIMIT_EXCEEDED' }]));
@@ -162,6 +190,7 @@ describe('createCallTask — CTI Origin marker', () => {
 
   it('throws when even the fully stripped payload is rejected', async () => {
     state.mockRequest
+      .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
       .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
       .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
       .mockResolvedValueOnce(jsonResponse(400, [{ errorCode: 'INVALID_FIELD' }]));
