@@ -9,6 +9,8 @@ import { humanUserById, humanUsersInOrg, resolveSession } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
+import { ensureCtiPermissionSetLive } from '../salesforce/permission-set-live.js';
+import type { EnsureOutcome } from '../salesforce/permission-set.js';
 
 /** Human-readable label for an imported DID, derived from its area code so the
  *  Numbers pool reads "San Diego (619)" / "Los Angeles (213)" at a glance. */
@@ -718,6 +720,31 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       { actor: s.userId, target: updated.id, powerDialerEnabled: updated.powerDialerEnabled },
       'power_dialer_enabled changed',
     );
-    return { user: updated };
+
+    // Switching a rep ON is the moment they start writing Tasks through their
+    // own Salesforce session, so it is the moment they need the permission set
+    // that makes CTI_Origin__c writable for them. Doing it here means nobody has
+    // to remember a Setup click for the next new hire.
+    //
+    // Deliberately awaited, not fired and forgotten: the admin should see in the
+    // response whether it landed. It cannot fail the toggle — the toggle is
+    // already committed above and `ensureCtiPermissionSetLive` never throws. A
+    // rep who has not connected Salesforce yet is skipped here and picked up by
+    // the connect callback instead.
+    let permissionSet: EnsureOutcome | undefined;
+    if (updated.powerDialerEnabled) {
+      permissionSet = await ensureCtiPermissionSetLive({
+        orgId: s.orgId,
+        targetUserId: updated.id,
+        preferredAdminUserId: s.userId,
+      });
+      const log = permissionSet.status === 'failed' ? req.log.warn : req.log.info;
+      log.call(
+        req.log,
+        { target: updated.id, outcome: permissionSet },
+        'cti_permission_set_ensure',
+      );
+    }
+    return { user: updated, permissionSet };
   });
 }

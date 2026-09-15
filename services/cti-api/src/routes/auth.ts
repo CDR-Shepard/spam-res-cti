@@ -15,6 +15,7 @@ import { createTenant, encryptString, humanUserByEmail, issueSession, resolveSes
 import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProfilePhoto, fetchUserInfo } from '../salesforce/oauth.js';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
+import { ensureCtiPermissionSetLive } from '../salesforce/permission-set-live.js';
 
 const DEV_USER_ID = '00000000-0000-0000-0000-00000000beef';
 
@@ -368,6 +369,26 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         .update(schema.salesforceOauthState)
         .set({ consumedAt: new Date(), ...(isLogin ? { loginUserId: targetUserId } : {}) })
         .where(eq(schema.salesforceOauthState.state, state));
+
+      // The other half of the automatic permission-set grant. The admin toggle
+      // covers "enabled after connecting"; this covers the reverse order, which
+      // is the common one for a new hire — switched on first, connects
+      // Salesforce later. Only now do we know their Salesforce user id.
+      //
+      // Best effort by construction: it never throws, and it runs AFTER the
+      // connection is committed, so a Salesforce hiccup here can never cost the
+      // rep the sign-in they just completed.
+      const connected = await db.query.users.findFirst({
+        where: eq(schema.users.id, targetUserId),
+        columns: { orgId: true, powerDialerEnabled: true },
+      });
+      if (connected?.powerDialerEnabled) {
+        const outcome = await ensureCtiPermissionSetLive({
+          orgId: connected.orgId,
+          targetUserId,
+        });
+        app.log.info({ target: targetUserId, outcome }, 'cti_permission_set_ensure_on_connect');
+      }
       return reply
         .type('text/html')
         .send(htmlPage(isLogin ? 'Signed in with Salesforce' : 'Salesforce connected', 'You can close this window and return to the CTI app.'));

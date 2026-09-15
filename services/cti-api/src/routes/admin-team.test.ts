@@ -25,6 +25,8 @@ const state = vi.hoisted(() => ({
   lastSelectWhere: null as unknown,
   lastUpdateSet: null as unknown,
   lastUpdateWhere: null as unknown,
+  ensureCalls: [] as Array<{ orgId: string; targetUserId: string; preferredAdminUserId?: string }>,
+  ensureOutcome: { status: 'assigned' } as { status: string; reason?: string },
 }));
 
 // admin.ts imports loadConfig at module scope (used lazily inside a couple of
@@ -33,6 +35,18 @@ const state = vi.hoisted(() => ({
 // parsing.
 vi.mock('../config.js', () => ({
   loadConfig: () => ({}),
+}));
+
+// The route's Salesforce side-effect. Mocked so these tests assert the WIRING
+// (was it called, with what, and does a failure stay non-fatal) without a
+// Salesforce org; permission-set.test.ts covers the behaviour itself.
+vi.mock('../salesforce/permission-set-live.js', () => ({
+  ensureCtiPermissionSetLive: async (args: {
+    orgId: string; targetUserId: string; preferredAdminUserId?: string;
+  }) => {
+    state.ensureCalls.push(args);
+    return state.ensureOutcome;
+  },
 }));
 
 vi.mock('@cti/auth', async (importOriginal) => ({
@@ -130,6 +144,8 @@ beforeEach(async () => {
   state.lastSelectWhere = null;
   state.lastUpdateSet = null;
   state.lastUpdateWhere = null;
+  state.ensureCalls = [];
+  state.ensureOutcome = { status: 'assigned' };
   app = Fastify();
   await registerAdminRoutes(app);
   await app.ready();
@@ -231,5 +247,74 @@ describe('PATCH /admin/team/:userId', () => {
       payload: { powerDialerEnabled: true },
     });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('PATCH /admin/team/:userId — automatic Salesforce permission set', () => {
+  // The whole point of the feature: switching a rep on must grant them the
+  // permission set, so nobody has to remember a Setup click per new hire.
+  it('grants the permission set when a rep is switched ON, acting as the admin who did it', async () => {
+    state.authedUser = admin;
+    state.updateRows = [{ id: TARGET_ID, powerDialerEnabled: true }];
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/admin/team/${TARGET_ID}`,
+      payload: { powerDialerEnabled: true },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(state.ensureCalls).toEqual([
+      { orgId: admin.orgId, targetUserId: TARGET_ID, preferredAdminUserId: admin.userId },
+    ]);
+    expect(res.json().permissionSet).toEqual({ status: 'assigned' });
+  });
+
+  // Switching someone OFF is not the moment to hand out access.
+  it('does NOT touch Salesforce when a rep is switched OFF', async () => {
+    state.authedUser = admin;
+    state.updateRows = [{ id: TARGET_ID, powerDialerEnabled: false }];
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/admin/team/${TARGET_ID}`,
+      payload: { powerDialerEnabled: false },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(state.ensureCalls).toEqual([]);
+    expect(res.json().permissionSet).toBeUndefined();
+  });
+
+  // Salesforce being down must never stop an admin enabling a rep — the CTI
+  // degrades to unstamped tasks, which both create paths already handle.
+  it('still enables the rep when the Salesforce grant fails', async () => {
+    state.authedUser = admin;
+    state.updateRows = [{ id: TARGET_ID, powerDialerEnabled: true }];
+    state.ensureOutcome = { status: 'failed', reason: 'salesforce 503' };
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/admin/team/${TARGET_ID}`,
+      payload: { powerDialerEnabled: true },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().user).toEqual({ id: TARGET_ID, powerDialerEnabled: true });
+    expect(res.json().permissionSet).toEqual({ status: 'failed', reason: 'salesforce 503' });
+  });
+
+  it('does not reach Salesforce at all when the update matched no row', async () => {
+    state.authedUser = admin;
+    state.updateRows = [];
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/admin/team/${TARGET_ID}`,
+      payload: { powerDialerEnabled: true },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(state.ensureCalls).toEqual([]);
   });
 });
