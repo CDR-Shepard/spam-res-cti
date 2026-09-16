@@ -34,7 +34,12 @@ const TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const API_BASE = process.env.POOL_API_BASE || process.env.API_PUBLIC_URL;
 // An explicitly-passed DATABASE_URL always wins over an inherited DATABASE_PUBLIC_URL:
 // every runbook command overrides DATABASE_URL, and that override must be authoritative.
-const DB_URL = process.env.DATABASE_URL || process.env.DATABASE_PUBLIC_URL;
+// CTI_DB_URL wins over both. `railway run -s @cti/api` is the only way to get
+// Twilio creds, but it also injects THAT service's DATABASE_URL — the internal
+// host, unreachable from a laptop — clobbering anything you exported. Railway
+// does not define CTI_DB_URL, so it survives, and one process can hold Twilio
+// creds AND a reachable database. That is what makes `buy-all` a single command.
+const DB_URL = process.env.CTI_DB_URL || process.env.DATABASE_URL || process.env.DATABASE_PUBLIC_URL;
 /** The pool is deliberately a 619/951 mix; buys split evenly between them. */
 const POOL_PRIMARY = '619';
 const POOL_SECONDARY = '951';
@@ -44,9 +49,11 @@ const MAX_BATCH = 200;
 function die(msg: string): never { console.error(`ERROR: ${msg}`); process.exit(1); }
 const arg = (name: string): string | undefined => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? process.argv[i + 1] : undefined; };
 /** `--la`/`--sd`/`--count` are counts of real, billable numbers: whole, non-negative, sane. */
-const intArg = (name: string): number => {
+const intArg = (name: string, fallback?: number): number => {
   const raw = arg(name);
-  if (raw === undefined) die(`--${name} required`);
+  // A fallback makes the flag OPTIONAL; without one it stays required, so no
+  // existing command can silently start defaulting a count of billable numbers.
+  if (raw === undefined) return fallback ?? die(`--${name} required`);
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 0 || n > MAX_BATCH) die(`--${name} must be a whole number between 0 and ${MAX_BATCH} (got "${raw}") — it is a count of billable numbers.`);
   return n;
@@ -310,11 +317,51 @@ async function cmdAssign(email: string) {
   } finally { await c.end(); }
 }
 
+/**
+ * The whole fleet buy in ONE command: every rep's shortfall, the pool's
+ * shortfall, an optional hire reserve, then register.
+ *
+ * Safe to re-run. It adds no new arithmetic — each step below already treats its
+ * number as a TARGET and subtracts what the DB holds plus what a previous run
+ * left unregistered in the hand-off, so a second run buys nothing. Running it
+ * twice is how you resume after a mid-batch failure.
+ */
+async function cmdBuyAll(reserveLa: number, reserveSd: number) {
+  const c = await dbClient();
+  let emails: string[];
+  try {
+    emails = (await c.query(
+      `select email from users where email != 'dev@example.com' and email not like 'ai-agent@%' order by created_at`,
+    )).rows.map((r) => r.email as string);
+  } finally { await c.end(); }
+
+  console.log(`\n=== 1/4 rep top-ups (${emails.length} reps) ===`);
+  for (const email of emails) await cmdBuyRep(email);
+
+  console.log(`\n=== 2/4 dialer pool (target ${POOL_TARGET}) ===`);
+  await cmdBuyPool(POOL_TARGET);
+
+  if (reserveLa > 0 || reserveSd > 0) {
+    console.log(`\n=== 3/4 hire reserve (${reserveLa} LA + ${reserveSd} SD) ===`);
+    await cmdBuyReserve(reserveLa, reserveSd);
+  } else {
+    console.log('\n=== 3/4 hire reserve — skipped (pass --reserve-la / --reserve-sd) ===');
+  }
+
+  if (!CONFIRM) {
+    console.log('\n=== 4/4 register — skipped on a dry run (nothing was bought) ===');
+    return;
+  }
+  console.log('\n=== 4/4 register ===');
+  await cmdRegister();
+}
+
 const cmd = process.argv[2];
 if (cmd === 'plan') await cmdPlan();
 else if (cmd === 'buy-rep') await cmdBuyRep(arg('email') ?? die('--email required'));
 else if (cmd === 'buy-reserve') await cmdBuyReserve(intArg('la'), intArg('sd'));
 else if (cmd === 'buy-pool') await cmdBuyPool(intArg('count'));
+else if (cmd === 'buy-all') await cmdBuyAll(intArg('reserve-la', 0), intArg('reserve-sd', 0));
 else if (cmd === 'register') await cmdRegister();
 else if (cmd === 'assign') await cmdAssign(arg('email') ?? die('--email required'));
 else die('command: plan | buy-rep | buy-reserve | buy-pool | register | assign');
