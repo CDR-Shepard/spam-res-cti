@@ -23,8 +23,34 @@ export function buyPlanForRep(holdings: ReadonlyArray<Holding>, target = { la: 6
   return { la: Math.max(0, target.la - held.LA), sd: Math.max(0, target.sd - held.SD) };
 }
 
-/** Dialer-pool size the fleet is sized for (spec 2026-08-24). */
-export const POOL_TARGET = 50;
+/**
+ * Dialer-pool size the fleet is sized for.
+ *
+ * Was 50, set for the 2026-08-24 spec when five pilots shared the pool. Raised
+ * to 160 on 2026-09-16 for a twenty-rep team.
+ *
+ * The arithmetic: twenty reps at 300 records a day, ~1.8 dials per record (two
+ * attempts before a rollover, minus the ones that connect or are unreachable),
+ * is ~10,800 dials a day. Lead and Opportunity runs draw on this shared pool, so
+ * in the worst case — everyone dialling Lead lists — the pool carries all of it.
+ * A mature DID is capped at 80 dials a day by the warmup curve, so that is 135
+ * running flat out. 160 leaves ~18% headroom for DIDs that get flagged
+ * spam_likely and drop out of rotation permanently.
+ *
+ * NOTE this buys steady-state capacity, NOT next-week capacity: a freshly bought
+ * DID is capped at 20/day for its first week and only reaches 80 after three
+ * weeks (see packages/firewall/src/warmup.ts). Buying more does not raise the
+ * ceiling sooner.
+ */
+export const POOL_TARGET = readPoolTarget(process.env.POOL_TARGET);
+
+/** Guarded: a typo'd env var must not turn the buy shortfall into NaN, which
+ *  would sail past every `Math.max(0, …)` clamp and be asked of Twilio. */
+export function readPoolTarget(raw: string | undefined, fallback = 160): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 1000 ? n : fallback;
+}
 
 export function poolBuyCount(existingActivePool: number, target = POOL_TARGET): number {
   return Math.max(0, target - existingActivePool);

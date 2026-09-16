@@ -45,27 +45,30 @@ describe('buyPlanForRep — the four real reps', () => {
 
 describe('poolBuyCount', () => {
   it('50-target minus existing, floored at 0', () => {
-    expect(poolBuyCount(10)).toBe(40);
-    expect(poolBuyCount(55)).toBe(0);
+    expect(poolBuyCount(10, 50)).toBe(40);
+    expect(poolBuyCount(55, 50)).toBe(0);
   });
 });
 
 describe('poolBuyTarget — --count is a target, never an increment', () => {
   it('first run: 10 live, empty hand-off, asked 40 → buys 40', () => {
-    expect(poolBuyTarget(40, 10, 0)).toBe(40);
+    expect(poolBuyTarget(40, 10, 0, 50)).toBe(40);
   });
   it('mid-run resume: 40 already bought into the hand-off → buys 0 more', () => {
-    expect(poolBuyTarget(40, 10, 40)).toBe(0);
-    expect(poolBuyTarget(40, 10, 12)).toBe(28);
+    expect(poolBuyTarget(40, 10, 40, 50)).toBe(0);
+    expect(poolBuyTarget(40, 10, 12, 50)).toBe(28);
   });
   it('AFTER register (hand-off pruned, DB now holds them) a re-run buys nothing', () => {
-    expect(poolBuyTarget(40, 50, 0)).toBe(0);
-    expect(poolBuyTarget(40, 45, 0)).toBe(5); // only the remaining shortfall toward 50
+    expect(poolBuyTarget(40, 50, 0, 50)).toBe(0);
+    expect(poolBuyTarget(40, 45, 0, 50)).toBe(5); // only the remaining shortfall
   });
-  it('never buys past the 50 target even when asked for more, and never negative', () => {
-    expect(poolBuyTarget(100, 10, 0)).toBe(40);
-    expect(poolBuyTarget(40, 60, 0)).toBe(0);
-    expect(poolBuyTarget(5, 10, 9)).toBe(0);
+  // The target is passed explicitly throughout: these pin the FUNCTION. What
+  // POOL_TARGET itself should be is a separate decision, pinned in
+  // pool-target.test.ts, so raising it never rewrites this file.
+  it('never buys past the target even when asked for more, and never negative', () => {
+    expect(poolBuyTarget(100, 10, 0, 50)).toBe(40);
+    expect(poolBuyTarget(40, 60, 0, 50)).toBe(0);
+    expect(poolBuyTarget(5, 10, 9, 50)).toBe(0);
   });
 });
 
