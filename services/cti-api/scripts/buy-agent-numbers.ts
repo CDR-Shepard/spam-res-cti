@@ -235,6 +235,53 @@ async function cmdBuyPool(count: number) {
   if (n951 > 0) await buyBatch([POOL_SECONDARY, POOL_PRIMARY], n951, 'dialer_pool', 'Dialer Pool', null, bought);
 }
 
+/**
+ * The org that owns the number fleet.
+ *
+ * This used to be `name like 'Salesforce Org %'`. The org is called "GG Homes",
+ * so it matched nothing — and it failed at REGISTER, which runs AFTER the
+ * purchases. 161 numbers were bought and charged before anyone found out. Name
+ * is not identity; a rename must never strand a paid fleet again.
+ *
+ * So ask the data: the org holding the numbers is the org numbers belong on.
+ * `FLEET_ORG_ID` overrides for the rare case that is wrong. On a genuinely empty
+ * install it falls back to the single non-Dev org, and refuses to guess when
+ * that is ambiguous rather than stranding numbers on the wrong tenant — which is
+ * the failure this same file already carries a comment about from 2026-08-26.
+ */
+async function resolveFleetOrg(c: pg.Client): Promise<{ id: string }> {
+  const rows = (await c.query(
+    `select o.id, o.name,
+            (select count(*) from outbound_numbers n where n.org_id = o.id)::int as numbers
+       from organizations o
+      order by numbers desc, o.created_at asc`,
+  )).rows as Array<{ id: string; name: string; numbers: number }>;
+  if (rows.length === 0) die('No organizations row — cannot register.');
+
+  const explicit = process.env.FLEET_ORG_ID;
+  if (explicit) {
+    const hit = rows.find((r) => r.id === explicit);
+    if (!hit) die(`FLEET_ORG_ID ${explicit} is not an organization. Known: ${rows.map((r) => `${r.name} (${r.id})`).join(', ')}`);
+    console.log(`org: ${hit.name} (${hit.id}) — from FLEET_ORG_ID`);
+    return hit;
+  }
+
+  if (rows[0].numbers > 0) {
+    console.log(`org: ${rows[0].name} (${rows[0].id}) — holds ${rows[0].numbers} numbers`);
+    return rows[0];
+  }
+
+  const real = rows.filter((r) => r.name !== 'Dev Org');
+  if (real.length === 1) {
+    console.log(`org: ${real[0]!.name} (${real[0]!.id}) — only non-dev org, fleet is empty`);
+    return real[0]!;
+  }
+  return die(
+    `Cannot tell which org owns the fleet — none holds numbers yet and there are ${real.length} candidates: ` +
+      `${rows.map((r) => `${r.name} (${r.id})`).join(', ')}. Set FLEET_ORG_ID.`,
+  );
+}
+
 async function cmdRegister() {
   const bought = existingHandoff();
   if (bought.length === 0) die(`Hand-off ${HANDOFF} empty. If you HAVE bought numbers and lost the hand-off, do NOT re-buy — run fleet-report to reconcile (orphans are listed) and admin import-twilio to recover them.`);
@@ -244,7 +291,7 @@ async function cmdRegister() {
     // org, NOT the oldest row (the oldest is the legacy "Dev Org", and picking
     // it stranded 192 launch numbers where org-scoped rotation couldn't see
     // them; fixed 2026-08-26 via scripts/fix-number-org.mjs).
-    const org = (await c.query("select id from organizations where name like 'Salesforce Org %' order by created_at asc limit 1")).rows[0] ?? die('No Salesforce organizations row — cannot register.');
+    const org = await resolveFleetOrg(c);
     const summary: Array<Record<string, string>> = [];
     // Prune the hand-off as we go (dup-skipped records included) so a re-run's
     // idempotency guard (`alreadyBought`) only ever counts genuinely-unregistered
