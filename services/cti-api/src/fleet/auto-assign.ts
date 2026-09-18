@@ -16,6 +16,10 @@
  * sign-in. It is also the SAME rule `buy-rep`, `assign` and `plan` already use
  * (`buyPlanForRep`), so there is one definition of "a usable number" everywhere.
  *
+ * BUT ONLY EVER A STARTER SET. The claim is capped so this path never takes a rep
+ * past 12 active numbers, flagged ones included — see `starterClaimPlan`. It
+ * completes a new hire's set; it does not replace numbers a carrier flagged.
+ *
  * Pure on purpose: the database lives behind `AutoAssignDeps`. Live wiring is in
  * auto-assign-live.ts.
  *
@@ -73,22 +77,52 @@ export function starterLabel(email: string, cls: 'LA' | 'SD'): string {
   return `Agent ${email.split('@')[0]} ${cls}`;
 }
 
+/**
+ * How many LA and SD numbers this sign-in may claim.
+ *
+ * Two rules, and the second is the one that keeps this from eating the reserve:
+ *
+ * 1. SHORTFALL toward 6/6 usable (`buyPlanForRep`) — so a starter set that came
+ *    up partial heals on the next sign-in.
+ * 2. CAPPED by room under the starter total, counting every ACTIVE number the
+ *    rep holds, flagged or not. This path can never take a rep past 12.
+ *
+ * Without the cap, rule 1 alone turns the product's central event into an
+ * automatic spend: a carrier flags a rep's numbers, they stop counting as
+ * usable, and the rep's next sign-in silently pulls replacements out of the hire
+ * reserve. After a sweep like 2026-08's (148 of 221 flagged) every affected
+ * rep's next login would have emptied it — and when NumberVerifier later
+ * restores those numbers the rep keeps both sets, because nothing anywhere
+ * un-assigns a number. Replacing FLAGGED numbers is a decision about spending a
+ * paid, registered resource; it stays with an operator and `assign`. This path
+ * only ever completes a STARTER set.
+ */
+export function starterClaimPlan(holdings: ReadonlyArray<Holding>): { la: number; sd: number } {
+  const need = buyPlanForRep(holdings, STARTER_NUMBERS);
+  const heldActive = holdings.filter((h) => h.active).length;
+  const room = Math.max(0, STARTER_NUMBERS.la + STARTER_NUMBERS.sd - heldActive);
+  const la = Math.min(need.la, room);
+  const sd = Math.min(need.sd, room - la);
+  return { la, sd };
+}
+
 export async function assignStarterNumbers(
   deps: AutoAssignDeps,
   who: { orgId: string; userId: string; email: string },
 ): Promise<AutoAssignOutcome> {
   try {
     return await deps.withUserLock(who, async (tx): Promise<AutoAssignOutcome> => {
-      const need = buyPlanForRep(await tx.holdings(), STARTER_NUMBERS);
-      if (need.la === 0 && need.sd === 0) return { status: 'already' };
+      const holdings = await tx.holdings();
+      const plan = starterClaimPlan(holdings);
+      if (plan.la === 0 && plan.sd === 0) return { status: 'already' };
 
-      const la = need.la > 0
-        ? await tx.claim({ codes: LA_CODES, n: need.la, label: starterLabel(who.email, 'LA') })
+      const la = plan.la > 0
+        ? await tx.claim({ codes: LA_CODES, n: plan.la, label: starterLabel(who.email, 'LA') })
         : [];
-      const sd = need.sd > 0
-        ? await tx.claim({ codes: SD_CODES, n: need.sd, label: starterLabel(who.email, 'SD') })
+      const sd = plan.sd > 0
+        ? await tx.claim({ codes: SD_CODES, n: plan.sd, label: starterLabel(who.email, 'SD') })
         : [];
-      return { status: 'assigned', la, sd, shortLa: need.la - la.length, shortSd: need.sd - sd.length };
+      return { status: 'assigned', la, sd, shortLa: plan.la - la.length, shortSd: plan.sd - sd.length };
     });
   } catch (err) {
     return { status: 'failed', reason: err instanceof Error ? err.message : String(err) };

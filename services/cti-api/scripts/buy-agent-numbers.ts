@@ -346,6 +346,8 @@ async function cmdAssign(email: string) {
   try {
     const { userId, holdings } = await repHoldings(c, email);
     const need = buyPlanForRep(holdings);
+    let assigned = 0;
+    let skipped = 0;
     for (const [cls, n] of [['LA', need.la], ['SD', need.sd]] as const) {
       if (n === 0) continue;
       const codes = cls === 'LA' ? LA_CODES : SD_CODES;
@@ -367,10 +369,12 @@ async function cmdAssign(email: string) {
           'update outbound_numbers set assigned_user_id = $1, label = $2 where id = $3 and assigned_user_id is null',
           [userId, `Agent ${email.split('@')[0]} ${cls}`, row.id],
         );
-        if (upd.rowCount === 0) { console.warn(`SKIPPED ${row.e164} — claimed by someone else a moment ago; re-run assign.`); continue; }
+        if (upd.rowCount === 0) { skipped++; console.warn(`SKIPPED ${row.e164} — claimed by someone else a moment ago; re-run assign.`); continue; }
+        assigned++;
         console.log(`ASSIGNED ${row.e164} → ${email}`);
       }
     }
+    console.log(`assign: ${assigned} assigned, ${skipped} skipped, needed ${need.la + need.sd}.`);
   } finally { await c.end(); }
 }
 

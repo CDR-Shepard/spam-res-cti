@@ -168,6 +168,20 @@ describe('GET /auth/salesforce/callback — post-sign-in hooks are actually wire
     expect(state.profileLookups).toBe(1);
   });
 
+  // undefined ("never looked up") and null ("looked up, unknown") are different
+  // facts. Login mode already tried; a second attempt would be wasted, and
+  // treating the failure as eligible would fail OPEN.
+  it('login mode: a failed profile lookup is NOT retried and does NOT claim numbers', async () => {
+    state.stateRow = { ...state.stateRow!, userId: null };
+    state.users = [];
+    state.profileName = null;
+    const res = await callback();
+    await flush();
+    expect(res.statusCode).toBe(200);
+    expect(state.profileLookups).toBe(1);
+    expect(state.assignCalls).toEqual([]);
+  });
+
   // The hooks are fire-and-forget precisely so they cannot do this.
   it('still completes the sign-in when a hook blows up', async () => {
     state.users = [];

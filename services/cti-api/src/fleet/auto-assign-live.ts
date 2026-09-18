@@ -65,6 +65,12 @@ export function claimReserveSql(args: {
  * released on commit or rollback with nothing to clean up, and it blocks only a
  * second claim for this user — two different reps still proceed in parallel and
  * SKIP LOCKED keeps them off each other's rows.
+ *
+ * DEPENDS ON READ COMMITTED (the Postgres default; nothing here changes it). The
+ * second sign-in must take a FRESH snapshot after the first commits, so its
+ * holdings read sees the numbers just claimed. Under REPEATABLE READ the lock
+ * would still serialize the two, and the second would still read stale holdings
+ * and claim a full set anyway.
  */
 export function userLockSql(userId: string): SQL {
   return sql`select pg_advisory_xact_lock(hashtext(${`starter-numbers:${userId}`}))`;

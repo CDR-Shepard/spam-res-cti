@@ -11,6 +11,7 @@ import {
   type StarterNumbersOnConnectDeps,
 } from './auth.js';
 import type { AutoAssignOutcome } from '../fleet/auto-assign.js';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 describe('PATCH /auth/me body', () => {
   it('accepts the forwarding number, the hold-music preference, or both', () => {
@@ -159,9 +160,13 @@ describe('assignStarterNumbersOnConnect', () => {
     expect(d.assign).not.toHaveBeenCalled();
   });
 
-  it('is off entirely when no profile is configured', async () => {
-    const d = connectDeps({ eligibleProfiles: [] });
+  // "Off" has to mean off: in connect mode the profile lookup is a Salesforce
+  // query, and a disabled feature must not spend one per sign-in.
+  it('is off entirely when no profile is configured — without even looking the profile up', async () => {
+    const profileName = vi.fn(async () => 'Sales');
+    const d = connectDeps({ eligibleProfiles: [], profileName });
     expect((await assignStarterNumbersOnConnect(d, 'user-1'))?.status).toBe('skipped');
+    expect(profileName).not.toHaveBeenCalled();
     expect(d.assign).not.toHaveBeenCalled();
   });
 
@@ -202,6 +207,22 @@ describe('starterNumbersOnConnectDeps — the live wiring', () => {
     expect((findFirst.mock.calls[0] as unknown[])[0]).toMatchObject({ columns: { orgId: true, email: true } });
   });
 
+  // The row this returns supplies the orgId that SCOPES the claim. Looking the
+  // user up by the wrong column is a tenancy bug, not a cosmetic one.
+  it('looks the user up by their ID, and nothing else', async () => {
+    const findFirst = vi.fn(async () => ({ orgId: 'org-1', email: 'a@b.com' }));
+    const deps = starterNumbersOnConnectDeps({
+      db: { query: { users: { findFirst } } } as never,
+      eligibleProfiles: ['Sales'],
+      profileName: async () => 'Sales',
+    });
+    await deps.findUser('user-42');
+    const where = (findFirst.mock.calls[0] as unknown as Array<{ where: unknown }>)[0]!.where;
+    const rendered = new PgDialect().sqlToQuery(where as never);
+    expect(rendered.sql.replace(/\s+/g, ' ')).toBe('"users"."id" = $1');
+    expect(rendered.params).toEqual(['user-42']);
+  });
+
   it('passes the eligibility settings straight through', () => {
     const profileName = async () => 'Sales';
     const deps = starterNumbersOnConnectDeps({ db: {} as never, eligibleProfiles: ['Sales', 'Wholesale'], profileName });
@@ -211,10 +232,15 @@ describe('starterNumbersOnConnectDeps — the live wiring', () => {
 });
 
 describe('starterNumbersLogLevel', () => {
-  it('says nothing for the ordinary outcomes — nearly every sign-in', () => {
+  it('says nothing for "already equipped" — nearly every sign-in', () => {
     expect(starterNumbersLogLevel({ status: 'already' })).toBeNull();
-    expect(starterNumbersLogLevel({ status: 'skipped', reason: 'x' })).toBeNull();
     expect(starterNumbersLogLevel(null)).toBeNull();
+  });
+
+  // A wrong STARTER_NUMBER_PROFILES makes the whole feature a silent no-op. The
+  // skip line is the only trace that explains "the new hire has no numbers".
+  it('logs a skip, so a misconfigured profile name is visible', () => {
+    expect(starterNumbersLogLevel({ status: 'skipped', reason: 'x' })).toBe('info');
   });
 
   it('is an info for a clean assignment', () => {

@@ -369,17 +369,51 @@ skipped or under-filled by a `WARN` and rerun it.
 
 ## 7. Future hires
 
-Once the reserve exists, a new rep is one command — no purchase, no Twilio
-credentials, no waiting. The normal case below needs only the DB; the
-short-reserve fallback after it spends money, so it needs the Twilio phase from §1.
+**A new rep now needs no command at all.** Since 2026-09-18 the Salesforce
+sign-in claims the starter set — 6 LA + 6 SD — out of the reserve by itself
+(`src/fleet/auto-assign.ts`, called from the OAuth callback in `src/routes/auth.ts`).
+The manual `assign` below is the fallback, and the tool for the cases sign-in
+deliberately refuses.
 
-**Normal case — take 6 LA + 6 SD from the reserve:**
+What sign-in does, and does not do:
+
+- **Who:** only users whose Salesforce profile is listed in
+  `STARTER_NUMBER_PROFILES` (default `Sales` — every dialing rep in production is
+  on it). Anyone else in the org can still sign in; they just do not cost the
+  reserve 12 billable numbers each. An unknown profile is NOT eligible: failing
+  closed costs one retry on the next sign-in, failing open costs numbers. Set it
+  to an empty string to turn the feature off.
+- **How much:** whatever the rep is short of 6/6 *usable*, so a set that came up
+  partial (the reserve had 6 LA but 2 SD) heals itself on the next sign-in.
+- **The cap — read this one:** it never takes a rep past **12 active numbers**,
+  flagged ones included. It completes a STARTER set; it does **not** replace
+  numbers a carrier flagged. After a sweep like 2026-08's (148 of 221 flagged)
+  an uncapped top-up would have let every affected rep's next login empty the
+  reserve, and they would have kept both sets once NumberVerifier restored the
+  originals — nothing anywhere un-assigns a number. Replacing flagged numbers is
+  a decision about spending a paid, registered resource: use `assign`.
+- **Safety:** one transaction behind a per-user advisory lock, so two tabs cannot
+  double-claim and a failure half way rolls back cleanly. Best effort — it can
+  never fail a sign-in.
+- **Where to look:** log line `starter_numbers_on_connect`. `info` for a clean
+  assignment or a skip (the skip line names the profile that did not match — if a
+  new hire has no numbers, look here first). `warn` when the reserve came up
+  short or the claim failed. Nothing is logged for a rep already equipped.
+
+Prerequisites sign-in cannot do for you: the rep must be in the **"Caller
+Reputation CTI" call center** or the softphone never appears in Salesforce, and
+needs a `tdc_cti` package licence or recording links silently fail to save.
+
+**Manual case — take 6 LA + 6 SD from the reserve:**
 
 ```bash
 env DATABASE_URL="$PUB" npx tsx scripts/buy-agent-numbers.ts assign --email newhire@gghomessd.com
 ```
 
-Expect 12 lines, then nothing else:
+Expect up to 12 lines. Fewer than 12 if sign-in already equipped them (then it
+may print nothing at all), and a `SKIPPED … re-run assign` line if a rep signing
+in at that moment claimed a number first — `assign` no longer takes a number off
+whoever got there first:
 
 ```
 ASSIGNED +12135550101 → newhire@gghomessd.com

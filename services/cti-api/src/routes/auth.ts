@@ -53,6 +53,11 @@ export async function assignStarterNumbersOnConnect(
   targetUserId: string,
 ): Promise<AutoAssignOutcome | null> {
   try {
+    // Off means off: with no profile configured, do not even spend the
+    // Salesforce query the profile lookup costs in connect mode.
+    if (deps.eligibleProfiles.length === 0) {
+      return { status: 'skipped', reason: 'STARTER_NUMBER_PROFILES is empty — feature disabled' };
+    }
     // Eligibility FIRST, before any database work: anyone in the Salesforce org
     // can open this app once, and only reps should cost the reserve anything.
     const profile = await deps.profileName();
@@ -103,11 +108,17 @@ export function starterNumbersOnConnectDeps(args: {
 
 /**
  * Should this outcome wake someone up? A dry reserve and a real failure need an
- * operator; a clean assignment is worth an info; "already equipped" and "not a
- * rep" are every ordinary sign-in and say nothing.
+ * operator; a clean assignment and a skip are worth an info; "already equipped"
+ * is every ordinary sign-in and says nothing.
  */
 export function starterNumbersLogLevel(o: AutoAssignOutcome | null): 'warn' | 'info' | null {
-  if (!o || o.status === 'already' || o.status === 'skipped') return null;
+  if (!o || o.status === 'already') return null;
+  // A skip IS logged. If STARTER_NUMBER_PROFILES names the wrong profile the
+  // whole feature is a silent no-op — every hire gets nothing and nothing says
+  // why. Sign-ins by non-reps are rare enough that an info line per skip is
+  // cheap, and it is the only trace that would explain "the new hire has no
+  // numbers".
+  if (o.status === 'skipped') return 'info';
   if (o.status === 'failed') return 'warn';
   return o.shortLa > 0 || o.shortSd > 0 ? 'warn' : 'info';
 }

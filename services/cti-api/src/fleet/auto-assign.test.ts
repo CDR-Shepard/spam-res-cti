@@ -4,6 +4,7 @@ import {
   isEligibleProfile,
   parseProfiles,
   STARTER_NUMBERS,
+  starterClaimPlan,
   starterLabel,
   type AutoAssignDeps,
   type AutoAssignTx,
@@ -85,10 +86,27 @@ describe('assignStarterNumbers', () => {
     ]);
   });
 
-  // One definition of "usable", shared with buy-rep / assign / plan. A rep whose
-  // whole set was flagged is the most urgent case there is.
-  it('does not count flagged or inactive numbers as held', async () => {
-    const h = harness([...la(6, 'spam_likely'), ...sd(6, 'healthy', false)]);
+  // THE CAP. A carrier flagging a rep's numbers must NOT turn their next sign-in
+  // into an automatic draw on the hire reserve. After a sweep like 2026-08's (148
+  // of 221 flagged) every affected rep's next login would have emptied it, and
+  // they would keep both sets once NumberVerifier restored the originals.
+  it('does NOT replace flagged numbers — a rep holding 12 active gets nothing', async () => {
+    const h = harness([...la(6, 'spam_likely'), ...sd(6, 'spam_likely')]);
+    expect(await assignStarterNumbers(h.deps, WHO)).toEqual({ status: 'already' });
+    expect(h.tx.claim).not.toHaveBeenCalled();
+  });
+
+  it('never takes a rep past 12 active numbers, however short of USABLE they are', async () => {
+    // 10 active, only 4 usable: shortfall says 4 LA + 4 SD, room says 2.
+    const h = harness([...la(2), ...la(3, 'spam_likely'), ...sd(2), ...sd(3, 'degraded')]);
+    await assignStarterNumbers(h.deps, WHO);
+    const n = claimsOf(h.tx).reduce((t, c) => t + c.n, 0);
+    expect(n).toBe(2);
+  });
+
+  // Deactivated numbers are genuinely gone, so they leave room.
+  it('does not count INACTIVE numbers against the cap', async () => {
+    const h = harness([...la(6, 'healthy', false), ...sd(6, 'healthy', false)]);
     await assignStarterNumbers(h.deps, WHO);
     expect(claimsOf(h.tx).map((c) => c.n)).toEqual([6, 6]);
   });
@@ -138,6 +156,25 @@ describe('assignStarterNumbers', () => {
   it('never throws — a failure to take the lock is reported, not raised', async () => {
     const deps: AutoAssignDeps = { withUserLock: async () => { throw new Error('too many connections'); } };
     expect(await assignStarterNumbers(deps, WHO)).toEqual({ status: 'failed', reason: 'too many connections' });
+  });
+});
+
+describe('starterClaimPlan', () => {
+  it('a new hire gets the full set', () => {
+    expect(starterClaimPlan([])).toEqual({ la: 6, sd: 6 });
+  });
+  it('a partial set gets exactly what is missing', () => {
+    expect(starterClaimPlan(la(6))).toEqual({ la: 0, sd: 6 });
+    expect(starterClaimPlan([...la(4), ...sd(5)])).toEqual({ la: 2, sd: 1 });
+  });
+  it('a full set gets nothing', () => {
+    expect(starterClaimPlan([...la(6), ...sd(6)])).toEqual({ la: 0, sd: 0 });
+  });
+  it('room is spent on LA first, then SD, and never goes negative', () => {
+    // 11 active but none usable: shortfall 6 + 6, room 1.
+    expect(starterClaimPlan([...la(6, 'spam_likely'), ...sd(5, 'spam_likely')])).toEqual({ la: 1, sd: 0 });
+    // Over the cap already.
+    expect(starterClaimPlan([...la(9, 'spam_likely'), ...sd(9, 'spam_likely')])).toEqual({ la: 0, sd: 0 });
   });
 });
 
