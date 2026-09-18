@@ -170,11 +170,35 @@ describe('starterClaimPlan', () => {
   it('a full set gets nothing', () => {
     expect(starterClaimPlan([...la(6), ...sd(6)])).toEqual({ la: 0, sd: 0 });
   });
-  it('room is spent on LA first, then SD, and never goes negative', () => {
+  it('never goes negative, and never past the cap', () => {
     // 11 active but none usable: shortfall 6 + 6, room 1.
-    expect(starterClaimPlan([...la(6, 'spam_likely'), ...sd(5, 'spam_likely')])).toEqual({ la: 1, sd: 0 });
+    const one = starterClaimPlan([...la(6, 'spam_likely'), ...sd(5, 'spam_likely')]);
+    expect(one.la + one.sd).toBe(1);
     // Over the cap already.
     expect(starterClaimPlan([...la(9, 'spam_likely'), ...sd(9, 'spam_likely')])).toEqual({ la: 0, sd: 0 });
+  });
+
+  // THE TRAP LA-FIRST HAD. A hire gets 6 LA + 0 SD (reserve dry on SD), then a
+  // carrier flags all six. Filling LA first spends the whole remaining room on LA
+  // again: 12 active, ZERO San Diego numbers, capped for good.
+  it('splits tight room across BOTH sides instead of filling LA first', () => {
+    expect(starterClaimPlan(la(6, 'spam_likely'))).toEqual({ la: 3, sd: 3 });
+  });
+
+  it('splits in proportion to what is missing', () => {
+    // 9 active (5 usable LA, 3 usable SD, 1 flagged LA): need 1 LA + 3 SD, room 3.
+    expect(starterClaimPlan([...la(5), ...la(1, 'spam_likely'), ...sd(3)])).toEqual({ la: 1, sd: 2 });
+  });
+
+  // The guard that keeps NaN out of the claim's LIMIT.
+  it('returns plain zeros, never NaN, when nothing is needed or there is no room', () => {
+    for (const plan of [
+      starterClaimPlan([...la(6), ...sd(6)]),
+      starterClaimPlan([...la(6, 'spam_likely'), ...sd(6, 'spam_likely')]),
+    ]) {
+      expect(plan).toEqual({ la: 0, sd: 0 });
+      expect(Number.isNaN(plan.la) || Number.isNaN(plan.sd)).toBe(false);
+    }
   });
 });
 

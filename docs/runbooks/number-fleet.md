@@ -386,11 +386,13 @@ What sign-in does, and does not do:
 - **How much:** whatever the rep is short of 6/6 *usable*, so a set that came up
   partial (the reserve had 6 LA but 2 SD) heals itself on the next sign-in.
 - **The cap — read this one:** it never takes a rep past **12 active numbers**,
-  flagged ones included. It completes a STARTER set; it does **not** replace
-  numbers a carrier flagged. After a sweep like 2026-08's (148 of 221 flagged)
+  flagged ones included. It completes a STARTER set. A rep already holding 12
+  active numbers gets nothing however many are flagged; a rep under 12 can have a
+  flagged number made up for, but only as far as 12. After a sweep like 2026-08's (148 of 221 flagged)
   an uncapped top-up would have let every affected rep's next login empty the
   reserve, and they would have kept both sets once NumberVerifier restored the
-  originals — nothing anywhere un-assigns a number. Replacing flagged numbers is
+  originals — no automatic path ever un-assigns a number (only an admin, by hand,
+  via `PATCH /admin/outbound-numbers/:id`). Replacing flagged numbers is
   a decision about spending a paid, registered resource: use `assign`.
 - **Safety:** one transaction behind a per-user advisory lock, so two tabs cannot
   double-claim and a failure half way rolls back cleanly. Best effort — it can
@@ -410,8 +412,9 @@ needs a `tdc_cti` package licence or recording links silently fail to save.
 env DATABASE_URL="$PUB" npx tsx scripts/buy-agent-numbers.ts assign --email newhire@gghomessd.com
 ```
 
-Expect up to 12 lines. Fewer than 12 if sign-in already equipped them (then it
-may print nothing at all), and a `SKIPPED … re-run assign` line if a rep signing
+Expect up to 12 `ASSIGNED` lines and then a tally (`assign: N assigned, N skipped,
+needed N.`). Fewer than 12 if sign-in already equipped them — for a rep at 6/6 it
+prints only the tally — and a `SKIPPED … re-run assign` line if a rep signing
 in at that moment claimed a number first — `assign` no longer takes a number off
 whoever got there first:
 
@@ -421,7 +424,7 @@ ASSIGNED +12135550101 → newhire@gghomessd.com
 ```
 
 `assign` moves only what the rep still needs, so re-running it for a rep already at
-6/6 prints nothing. Confirm with the acceptance gate (§5): their `REP` line must
+6/6 prints only the tally line. Confirm with the acceptance gate (§5): their `REP` line must
 read `6/6 LA, 6/6 SD ✓`.
 
 **Short-reserve case — buy for that rep directly.** If the reserve has run down,

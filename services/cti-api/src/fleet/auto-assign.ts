@@ -61,7 +61,8 @@ export interface AutoAssignDeps {
 export type AutoAssignOutcome =
   /** Claimed numbers. `short*` is what the reserve could NOT supply this time. */
   | { status: 'assigned'; la: string[]; sd: string[]; shortLa: number; shortSd: number }
-  /** Already at 6/6 usable — nothing to do. This is nearly every sign-in. */
+  /** Nothing to claim: already at 6/6 usable, OR already holding 12 active (the
+   *  cap — see `starterClaimPlan`). This is nearly every sign-in. */
   | { status: 'already' }
   /** Not eligible; says why. Expected, not an error. */
   | { status: 'skipped'; reason: string }
@@ -101,7 +102,17 @@ export function starterClaimPlan(holdings: ReadonlyArray<Holding>): { la: number
   const need = buyPlanForRep(holdings, STARTER_NUMBERS);
   const heldActive = holdings.filter((h) => h.active).length;
   const room = Math.max(0, STARTER_NUMBERS.la + STARTER_NUMBERS.sd - heldActive);
-  const la = Math.min(need.la, room);
+  const total = need.la + need.sd;
+  // Mandatory, not tidy: without it 0/0 below is NaN, Math.min(0, NaN) is NaN,
+  // and NaN would reach the claim as its LIMIT.
+  if (total === 0 || room === 0) return { la: 0, sd: 0 };
+  // Split the room IN PROPORTION to the shortfall rather than filling LA first.
+  // LA-first had a trap: a hire who got 6 LA + 0 SD (reserve dry on SD) and then
+  // had those LA flagged would spend all six remaining slots on LA again — 12
+  // active, zero San Diego numbers, and now capped for good. Local presence on
+  // BOTH sides beats a full set on one. When room covers everything this is
+  // identical to before: a new hire still gets exactly 6 + 6.
+  const la = Math.min(need.la, Math.ceil((room * need.la) / total));
   const sd = Math.min(need.sd, room - la);
   return { la, sd };
 }

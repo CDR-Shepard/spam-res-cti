@@ -58,7 +58,9 @@ beforeEach(() => {
   state.events = [];
   state.holdings = [];
   state.lastHoldingsWhere = null;
-  state.claim = async (text) => ({ rows: six(text.includes("'213'") || /\$2/.test(text) ? '213' : '619') });
+  // Codes are BOUND PARAMETERS, so the rendered text cannot tell an LA claim from
+  // an SD one. Tests that care which is which install their own call counter.
+  state.claim = async () => ({ rows: six('213') });
 });
 
 describe('assignStarterNumbersLive — wiring', () => {
