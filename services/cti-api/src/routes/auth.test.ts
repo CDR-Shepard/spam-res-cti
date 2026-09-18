@@ -2,7 +2,15 @@ import { describe, expect, it, vi } from 'vitest';
 
 // The REAL schema the route parses with — imported, never mirrored (see
 // routes/dialer.test.ts for the same rule).
-import { PatchMeBody, assignStarterNumbersOnConnect, ensurePermissionSetOnConnect } from './auth.js';
+import {
+  PatchMeBody,
+  assignStarterNumbersOnConnect,
+  ensurePermissionSetOnConnect,
+  starterNumbersLogLevel,
+  starterNumbersOnConnectDeps,
+  type StarterNumbersOnConnectDeps,
+} from './auth.js';
+import type { AutoAssignOutcome } from '../fleet/auto-assign.js';
 
 describe('PATCH /auth/me body', () => {
   it('accepts the forwarding number, the hold-music preference, or both', () => {
@@ -101,63 +109,125 @@ describe('ensurePermissionSetOnConnect', () => {
 });
 
 /**
- * Starter numbers on first sign-in. Same reasoning as the permission-set hook:
- * the OAuth callback has no route harness, so the lookup and the throw-safety
- * are pinned on the extracted helper.
+ * Starter numbers on sign-in. The OAuth callback has no route harness, so the
+ * gate, the lookup and the throw-safety are pinned on the extracted helper, and
+ * the live deps factory is pinned separately so the call site cannot rot.
  */
+const ASSIGNED: AutoAssignOutcome = { status: 'assigned', la: [], sd: [], shortLa: 0, shortSd: 0 };
+
+function connectDeps(over: Partial<StarterNumbersOnConnectDeps> = {}): StarterNumbersOnConnectDeps {
+  return {
+    profileName: async () => 'Sales',
+    eligibleProfiles: ['Sales'],
+    findUser: async () => ({ orgId: 'org-1', email: 'hudson@sjoinvestments.com' }),
+    assign: vi.fn(async () => ASSIGNED),
+    ...over,
+  };
+}
+
 describe('assignStarterNumbersOnConnect', () => {
-  const user = { orgId: 'org-1', email: 'hudson@sjoinvestments.com' };
-
   it("assigns using the USER ROW's org and email", async () => {
-    const assign = vi.fn(async () => ({ status: 'assigned' }));
-    const out = await assignStarterNumbersOnConnect({ findUser: async () => user, assign }, 'user-1');
-    expect(assign).toHaveBeenCalledWith({ orgId: 'org-1', userId: 'user-1', email: 'hudson@sjoinvestments.com' });
-    expect(out).toEqual({ status: 'assigned' });
-  });
-
-  // Unlike the permission-set hook, numbers do NOT wait for the power dialer:
-  // the softphone needs something to dial from for manual calls too.
-  it('does not depend on the power-dialer flag', async () => {
-    const assign = vi.fn(async () => ({ status: 'assigned' }));
-    await assignStarterNumbersOnConnect(
-      { findUser: async () => ({ ...user, powerDialerEnabled: false }) as typeof user, assign },
-      'user-1',
-    );
-    expect(assign).toHaveBeenCalledTimes(1);
+    const d = connectDeps();
+    const out = await assignStarterNumbersOnConnect(d, 'user-1');
+    expect(d.assign).toHaveBeenCalledWith({ orgId: 'org-1', userId: 'user-1', email: 'hudson@sjoinvestments.com' });
+    expect(out).toEqual(ASSIGNED);
   });
 
   // The org is what scopes the reserve. It must come from the row, so a sign-in
   // can never claim another tenant's numbers.
   it("passes the target's own org, whatever it is", async () => {
-    const assign = vi.fn(async () => ({ status: 'assigned' }));
-    await assignStarterNumbersOnConnect(
-      { findUser: async () => ({ orgId: 'org-OTHER', email: 'x@y.com' }), assign },
-      'user-9',
-    );
-    expect(assign).toHaveBeenCalledWith({ orgId: 'org-OTHER', userId: 'user-9', email: 'x@y.com' });
+    const d = connectDeps({ findUser: async () => ({ orgId: 'org-OTHER', email: 'x@y.com' }) });
+    await assignStarterNumbersOnConnect(d, 'user-9');
+    expect(d.assign).toHaveBeenCalledWith({ orgId: 'org-OTHER', userId: 'user-9', email: 'x@y.com' });
+  });
+
+  // Anyone in the Salesforce org can open the app once. Three of them would
+  // empty a reserve of a few dozen before the next real hire arrives.
+  it('skips a user whose Salesforce profile is not a rep profile, touching nothing', async () => {
+    const findUser = vi.fn(async () => ({ orgId: 'org-1', email: 'a@b.com' }));
+    const d = connectDeps({ profileName: async () => 'Accounting', findUser });
+    const out = await assignStarterNumbersOnConnect(d, 'user-1');
+    expect(out?.status).toBe('skipped');
+    expect(d.assign).not.toHaveBeenCalled();
+    expect(findUser).not.toHaveBeenCalled(); // eligibility is decided BEFORE any DB work
+  });
+
+  // Failing closed costs one retry next sign-in; failing open costs numbers.
+  it('skips when the profile lookup failed, rather than guessing', async () => {
+    const d = connectDeps({ profileName: async () => null });
+    expect((await assignStarterNumbersOnConnect(d, 'user-1'))?.status).toBe('skipped');
+    expect(d.assign).not.toHaveBeenCalled();
+  });
+
+  it('is off entirely when no profile is configured', async () => {
+    const d = connectDeps({ eligibleProfiles: [] });
+    expect((await assignStarterNumbersOnConnect(d, 'user-1'))?.status).toBe('skipped');
+    expect(d.assign).not.toHaveBeenCalled();
   });
 
   it('does nothing when the user cannot be found', async () => {
-    const assign = vi.fn(async () => ({ status: 'assigned' }));
-    expect(await assignStarterNumbersOnConnect({ findUser: async () => undefined, assign }, 'user-1')).toBeNull();
-    expect(assign).not.toHaveBeenCalled();
+    const d = connectDeps({ findUser: async () => undefined });
+    expect(await assignStarterNumbersOnConnect(d, 'user-1')).toBeNull();
+    expect(d.assign).not.toHaveBeenCalled();
   });
 
-  // Inside the OAuth callback's try block a rejection would render "Salesforce
-  // connection failed" over a sign-in that had already been committed.
-  it('resolves rather than rejecting when the lookup throws', async () => {
-    const out = await assignStarterNumbersOnConnect(
-      { findUser: async () => { throw new Error('pool exhausted'); }, assign: async () => ({}) },
-      'user-1',
-    );
-    expect(out).toBeNull();
+  // Inside the OAuth callback a rejection would render "Salesforce connection
+  // failed" over a sign-in that had already been committed.
+  it.each([
+    ['the profile lookup', { profileName: async () => { throw new Error('sf 503'); } }],
+    ['the user lookup', { findUser: async () => { throw new Error('pool exhausted'); } }],
+    ['the assignment', { assign: async () => { throw new Error('deadlock'); } }],
+  ] as Array<[string, Partial<StarterNumbersOnConnectDeps>]>)(
+    'resolves rather than rejecting when %s throws',
+    async (_label, over) => {
+      const out = await assignStarterNumbersOnConnect(connectDeps(over), 'user-1');
+      expect(out?.status).toBe('failed');
+    },
+  );
+});
+
+describe('starterNumbersOnConnectDeps — the live wiring', () => {
+  // Copying the permission hook's `columns` (orgId + powerDialerEnabled) would
+  // leave email undefined; the label code throws; the feature dies behind one
+  // warn that looks like any other. Deleting this whole call used to pass 854 tests.
+  it('selects exactly the columns the assignment needs', async () => {
+    const findFirst = vi.fn(async () => ({ orgId: 'org-1', email: 'a@b.com' }));
+    const deps = starterNumbersOnConnectDeps({
+      db: { query: { users: { findFirst } } } as never,
+      eligibleProfiles: ['Sales'],
+      profileName: async () => 'Sales',
+    });
+    await deps.findUser('user-1');
+    expect(findFirst).toHaveBeenCalledTimes(1);
+    expect((findFirst.mock.calls[0] as unknown[])[0]).toMatchObject({ columns: { orgId: true, email: true } });
   });
 
-  it('resolves rather than rejecting when the assignment throws', async () => {
-    const out = await assignStarterNumbersOnConnect(
-      { findUser: async () => user, assign: async () => { throw new Error('deadlock'); } },
-      'user-1',
-    );
-    expect(out).toBeNull();
+  it('passes the eligibility settings straight through', () => {
+    const profileName = async () => 'Sales';
+    const deps = starterNumbersOnConnectDeps({ db: {} as never, eligibleProfiles: ['Sales', 'Wholesale'], profileName });
+    expect(deps.eligibleProfiles).toEqual(['Sales', 'Wholesale']);
+    expect(deps.profileName).toBe(profileName);
+  });
+});
+
+describe('starterNumbersLogLevel', () => {
+  it('says nothing for the ordinary outcomes — nearly every sign-in', () => {
+    expect(starterNumbersLogLevel({ status: 'already' })).toBeNull();
+    expect(starterNumbersLogLevel({ status: 'skipped', reason: 'x' })).toBeNull();
+    expect(starterNumbersLogLevel(null)).toBeNull();
+  });
+
+  it('is an info for a clean assignment', () => {
+    expect(starterNumbersLogLevel(ASSIGNED)).toBe('info');
+  });
+
+  // A dry reserve is the one outcome someone has to ACT on: buy more.
+  it('is a warn when the reserve came up short, on either side', () => {
+    expect(starterNumbersLogLevel({ ...ASSIGNED, shortLa: 1 })).toBe('warn');
+    expect(starterNumbersLogLevel({ ...ASSIGNED, shortSd: 6 })).toBe('warn');
+  });
+
+  it('is a warn on failure', () => {
+    expect(starterNumbersLogLevel({ status: 'failed', reason: 'x' })).toBe('warn');
   });
 });

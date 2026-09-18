@@ -40,6 +40,11 @@ const schema = z.object({
    * profile is renamed or custom (e.g. "GG Homes Admin").
    */
   SALESFORCE_ADMIN_PROFILES: z.string().default('System Administrator'),
+  // Salesforce profiles whose users are handed starter numbers (6 LA + 6 SD) out
+  // of the reserve on sign-in. Comma-separated. Everyone else in the org can
+  // still sign in; they just do not cost the reserve 12 billable numbers each.
+  // Every dialing rep in production is on "Sales". Empty disables the feature.
+  STARTER_NUMBER_PROFILES: z.string().default('Sales'),
 
   TELEPHONY_PROVIDER: z.enum(['twilio', 'telnyx']).default('twilio'),
 

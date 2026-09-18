@@ -17,6 +17,7 @@ import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
 import { ensureCtiPermissionSetLive } from '../salesforce/permission-set-live.js';
 import { assignStarterNumbersLive } from '../fleet/auto-assign-live.js';
+import { isEligibleProfile, parseProfiles, type AutoAssignOutcome } from '../fleet/auto-assign.js';
 
 const DEV_USER_ID = '00000000-0000-0000-0000-00000000beef';
 
@@ -35,11 +36,11 @@ export const PatchMeBody = z
   });
 
 /**
- * Give a rep who has just signed in their starter numbers, if they hold none.
+ * Bring a rep who has just signed in up to their standard set of numbers.
  *
  * Same shape and same reason as `ensurePermissionSetOnConnect` below: it runs
  * inside the unauthenticated OAuth callback, which has no route harness, so the
- * lookup it does and its throw-safety are pinned here on an extracted helper.
+ * gate, the lookup and the throw-safety are pinned here on an extracted helper.
  *
  * Unlike the permission-set hook this does NOT wait for the power dialer to be
  * switched on. Numbers are what the softphone dials from at all — manual calls
@@ -48,21 +49,67 @@ export const PatchMeBody = z
  * Resolves to the outcome, or null if the user vanished. NEVER rejects.
  */
 export async function assignStarterNumbersOnConnect(
-  deps: {
-    findUser: (userId: string) => Promise<{ orgId: string; email: string } | undefined>;
-    assign: (who: { orgId: string; userId: string; email: string }) => Promise<unknown>;
-  },
+  deps: StarterNumbersOnConnectDeps,
   targetUserId: string,
-): Promise<unknown | null> {
+): Promise<AutoAssignOutcome | null> {
   try {
+    // Eligibility FIRST, before any database work: anyone in the Salesforce org
+    // can open this app once, and only reps should cost the reserve anything.
+    const profile = await deps.profileName();
+    if (!isEligibleProfile(profile, deps.eligibleProfiles)) {
+      return { status: 'skipped', reason: `profile "${profile ?? '(unknown)'}" is not in STARTER_NUMBER_PROFILES` };
+    }
     const user = await deps.findUser(targetUserId);
     if (!user) return null;
     // The org and email come from the USER ROW, never from the request: this is
     // what keeps a sign-in from claiming another tenant's reserve.
     return await deps.assign({ orgId: user.orgId, userId: targetUserId, email: user.email });
-  } catch {
-    return null;
+  } catch (err) {
+    return { status: 'failed', reason: err instanceof Error ? err.message : String(err) };
   }
+}
+
+export interface StarterNumbersOnConnectDeps {
+  /** The signing-in user's Salesforce profile; null when the lookup failed. */
+  profileName: () => Promise<string | null>;
+  eligibleProfiles: readonly string[];
+  findUser: (userId: string) => Promise<{ orgId: string; email: string } | undefined>;
+  assign: (who: { orgId: string; userId: string; email: string }) => Promise<AutoAssignOutcome>;
+}
+
+/**
+ * Build the live deps for `assignStarterNumbersOnConnect`. A factory rather than
+ * an inline literal so a test can pin what it selects: copying the permission
+ * hook's `columns` here (orgId + powerDialerEnabled) would leave `email`
+ * undefined, the label code would throw, and the feature would die silently
+ * behind a single warn that looks like any other.
+ */
+export function starterNumbersOnConnectDeps(args: {
+  db: ReturnType<typeof getDb>;
+  eligibleProfiles: readonly string[];
+  profileName: () => Promise<string | null>;
+}): StarterNumbersOnConnectDeps {
+  return {
+    eligibleProfiles: args.eligibleProfiles,
+    profileName: args.profileName,
+    findUser: (id) =>
+      args.db.query.users.findFirst({
+        where: eq(schema.users.id, id),
+        columns: { orgId: true, email: true },
+      }),
+    assign: assignStarterNumbersLive,
+  };
+}
+
+/**
+ * Should this outcome wake someone up? A dry reserve and a real failure need an
+ * operator; a clean assignment is worth an info; "already equipped" and "not a
+ * rep" are every ordinary sign-in and say nothing.
+ */
+export function starterNumbersLogLevel(o: AutoAssignOutcome | null): 'warn' | 'info' | null {
+  if (!o || o.status === 'already' || o.status === 'skipped') return null;
+  if (o.status === 'failed') return 'warn';
+  return o.shortLa > 0 || o.shortSd > 0 ? 'warn' : 'info';
 }
 
 /**
@@ -342,6 +389,8 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       // Resolve the user this connection belongs to. In login mode, find-or-create
       // the local org (keyed by SF org id) and the user (keyed by email).
       let targetUserId: string;
+      // undefined = not looked up (connect mode); null = looked up and unknown.
+      let knownProfileName: string | null | undefined;
       if (isLogin) {
         let org = await db.query.organizations.findFirst({
           where: eq(schema.organizations.sfOrgId, tok.sfOrgId),
@@ -366,6 +415,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         const adminProfiles = (cfg.SALESFORCE_ADMIN_PROFILES ?? 'System Administrator')
           .split(',').map((p) => p.trim().toLowerCase()).filter(Boolean);
         const sfProfileName = await fetchProfileName(tok.access_token, tok.instance_url, tok.sfUserId);
+        knownProfileName = sfProfileName ?? null;
         const profileKnown = sfProfileName != null;
         const isSysAdminProfile = profileKnown && adminProfiles.includes(sfProfileName!.toLowerCase());
         const explicitAdmin = adminEmails.includes(email);
@@ -433,6 +483,27 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         .set({ consumedAt: new Date(), ...(isLogin ? { loginUserId: targetUserId } : {}) })
         .where(eq(schema.salesforceOauthState.state, state));
 
+      // Bring the rep up to their standard set of numbers, so a new hire can dial
+      // the moment they sign in with no operator in the loop. Off the response
+      // path and self-guarding: the connection row and consumedAt are already
+      // committed, so nothing here can turn a finished sign-in into a failure.
+      void assignStarterNumbersOnConnect(
+        starterNumbersOnConnectDeps({
+          db,
+          eligibleProfiles: parseProfiles(loadConfig().STARTER_NUMBER_PROFILES),
+          // Login mode already resolved the profile for the admin check; connect
+          // mode has not, so fetch it here — off the response path either way.
+          profileName: async () =>
+            knownProfileName !== undefined
+              ? knownProfileName
+              : fetchProfileName(tok.access_token, tok.instance_url, tok.sfUserId),
+        }),
+        targetUserId,
+      ).then((outcome) => {
+        const level = starterNumbersLogLevel(outcome);
+        if (level) app.log[level]({ target: targetUserId, outcome }, 'starter_numbers_on_connect');
+      });
+
       // The other half of the automatic permission-set grant. The admin toggle
       // covers "enabled after connecting"; this covers the reverse order, which
       // is the common one for a new hire — switched on first, connects
@@ -443,28 +514,6 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       // matter what happens next; without this guard a pool blip on the user
       // lookup would fall into the outer catch and render "Salesforce
       // connection failed" over a sign-in that actually worked.
-      // Starter numbers for a rep who holds none — so a new hire can dial the
-      // moment they sign in, with no operator in the loop. Off the response path
-      // and self-guarding, exactly like the permission-set hook below.
-      void assignStarterNumbersOnConnect(
-        {
-          findUser: (id) =>
-            db.query.users.findFirst({
-              where: eq(schema.users.id, id),
-              columns: { orgId: true, email: true },
-            }),
-          assign: assignStarterNumbersLive,
-        },
-        targetUserId,
-      ).then((outcome) => {
-        const o = outcome as { status?: string; shortLa?: number; shortSd?: number } | null;
-        if (!o || o.status === 'already') return; // every sign-in but the first: stay quiet
-        // A dry reserve is the one outcome someone has to act on (buy more), so
-        // it is a warn; a clean first assignment is an info.
-        const loud = o.status === 'failed' || (o.shortLa ?? 0) > 0 || (o.shortSd ?? 0) > 0;
-        (loud ? app.log.warn : app.log.info).call(app.log, { target: targetUserId, outcome }, 'starter_numbers_on_connect');
-      });
-
       void ensurePermissionSetOnConnect(
         {
           findUser: (id) =>

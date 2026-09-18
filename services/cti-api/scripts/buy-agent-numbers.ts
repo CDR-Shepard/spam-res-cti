@@ -357,7 +357,17 @@ async function cmdAssign(email: string) {
       );
       if (free.rowCount! < n) console.warn(`WARN: reserve has ${free.rowCount}/${n} free ${cls} numbers — buy more reserve.`);
       for (const row of free.rows) {
-        await c.query('update outbound_numbers set assigned_user_id = $1, label = $2 where id = $3', [userId, `Agent ${email.split('@')[0]} ${cls}`, row.id]);
+        // `and assigned_user_id is null` matters now that sign-in claims numbers
+        // on its own (fleet/auto-assign-live.ts). This SELECT-then-UPDATE takes no
+        // lock, so a rep signing in between the two could already hold this row;
+        // a blind UPDATE would wait on their lock and then quietly take the
+        // number off them. Skipping it costs this rep one number, which `assign`
+        // picks up on a re-run.
+        const upd = await c.query(
+          'update outbound_numbers set assigned_user_id = $1, label = $2 where id = $3 and assigned_user_id is null',
+          [userId, `Agent ${email.split('@')[0]} ${cls}`, row.id],
+        );
+        if (upd.rowCount === 0) { console.warn(`SKIPPED ${row.e164} — claimed by someone else a moment ago; re-run assign.`); continue; }
         console.log(`ASSIGNED ${row.e164} → ${email}`);
       }
     }
