@@ -16,6 +16,7 @@ import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProf
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
 import { ensureCtiPermissionSetLive } from '../salesforce/permission-set-live.js';
+import { assignStarterNumbersLive } from '../fleet/auto-assign-live.js';
 
 const DEV_USER_ID = '00000000-0000-0000-0000-00000000beef';
 
@@ -32,6 +33,37 @@ export const PatchMeBody = z
   .refine((b) => b.noAnswerForwardE164 !== undefined || b.dialerHoldMusic !== undefined, {
     message: 'nothing to update',
   });
+
+/**
+ * Give a rep who has just signed in their starter numbers, if they hold none.
+ *
+ * Same shape and same reason as `ensurePermissionSetOnConnect` below: it runs
+ * inside the unauthenticated OAuth callback, which has no route harness, so the
+ * lookup it does and its throw-safety are pinned here on an extracted helper.
+ *
+ * Unlike the permission-set hook this does NOT wait for the power dialer to be
+ * switched on. Numbers are what the softphone dials from at all — manual calls
+ * included — so a rep needs them the moment they can sign in.
+ *
+ * Resolves to the outcome, or null if the user vanished. NEVER rejects.
+ */
+export async function assignStarterNumbersOnConnect(
+  deps: {
+    findUser: (userId: string) => Promise<{ orgId: string; email: string } | undefined>;
+    assign: (who: { orgId: string; userId: string; email: string }) => Promise<unknown>;
+  },
+  targetUserId: string,
+): Promise<unknown | null> {
+  try {
+    const user = await deps.findUser(targetUserId);
+    if (!user) return null;
+    // The org and email come from the USER ROW, never from the request: this is
+    // what keeps a sign-in from claiming another tenant's reserve.
+    return await deps.assign({ orgId: user.orgId, userId: targetUserId, email: user.email });
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Grant the CTI permission set to a rep who has just connected Salesforce, if
@@ -411,6 +443,28 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       // matter what happens next; without this guard a pool blip on the user
       // lookup would fall into the outer catch and render "Salesforce
       // connection failed" over a sign-in that actually worked.
+      // Starter numbers for a rep who holds none — so a new hire can dial the
+      // moment they sign in, with no operator in the loop. Off the response path
+      // and self-guarding, exactly like the permission-set hook below.
+      void assignStarterNumbersOnConnect(
+        {
+          findUser: (id) =>
+            db.query.users.findFirst({
+              where: eq(schema.users.id, id),
+              columns: { orgId: true, email: true },
+            }),
+          assign: assignStarterNumbersLive,
+        },
+        targetUserId,
+      ).then((outcome) => {
+        const o = outcome as { status?: string; shortLa?: number; shortSd?: number } | null;
+        if (!o || o.status === 'already') return; // every sign-in but the first: stay quiet
+        // A dry reserve is the one outcome someone has to act on (buy more), so
+        // it is a warn; a clean first assignment is an info.
+        const loud = o.status === 'failed' || (o.shortLa ?? 0) > 0 || (o.shortSd ?? 0) > 0;
+        (loud ? app.log.warn : app.log.info).call(app.log, { target: targetUserId, outcome }, 'starter_numbers_on_connect');
+      });
+
       void ensurePermissionSetOnConnect(
         {
           findUser: (id) =>

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 // The REAL schema the route parses with — imported, never mirrored (see
 // routes/dialer.test.ts for the same rule).
-import { PatchMeBody, ensurePermissionSetOnConnect } from './auth.js';
+import { PatchMeBody, assignStarterNumbersOnConnect, ensurePermissionSetOnConnect } from './auth.js';
 
 describe('PATCH /auth/me body', () => {
   it('accepts the forwarding number, the hold-music preference, or both', () => {
@@ -94,6 +94,68 @@ describe('ensurePermissionSetOnConnect', () => {
           throw new Error('salesforce down');
         },
       },
+      'user-1',
+    );
+    expect(out).toBeNull();
+  });
+});
+
+/**
+ * Starter numbers on first sign-in. Same reasoning as the permission-set hook:
+ * the OAuth callback has no route harness, so the lookup and the throw-safety
+ * are pinned on the extracted helper.
+ */
+describe('assignStarterNumbersOnConnect', () => {
+  const user = { orgId: 'org-1', email: 'hudson@sjoinvestments.com' };
+
+  it("assigns using the USER ROW's org and email", async () => {
+    const assign = vi.fn(async () => ({ status: 'assigned' }));
+    const out = await assignStarterNumbersOnConnect({ findUser: async () => user, assign }, 'user-1');
+    expect(assign).toHaveBeenCalledWith({ orgId: 'org-1', userId: 'user-1', email: 'hudson@sjoinvestments.com' });
+    expect(out).toEqual({ status: 'assigned' });
+  });
+
+  // Unlike the permission-set hook, numbers do NOT wait for the power dialer:
+  // the softphone needs something to dial from for manual calls too.
+  it('does not depend on the power-dialer flag', async () => {
+    const assign = vi.fn(async () => ({ status: 'assigned' }));
+    await assignStarterNumbersOnConnect(
+      { findUser: async () => ({ ...user, powerDialerEnabled: false }) as typeof user, assign },
+      'user-1',
+    );
+    expect(assign).toHaveBeenCalledTimes(1);
+  });
+
+  // The org is what scopes the reserve. It must come from the row, so a sign-in
+  // can never claim another tenant's numbers.
+  it("passes the target's own org, whatever it is", async () => {
+    const assign = vi.fn(async () => ({ status: 'assigned' }));
+    await assignStarterNumbersOnConnect(
+      { findUser: async () => ({ orgId: 'org-OTHER', email: 'x@y.com' }), assign },
+      'user-9',
+    );
+    expect(assign).toHaveBeenCalledWith({ orgId: 'org-OTHER', userId: 'user-9', email: 'x@y.com' });
+  });
+
+  it('does nothing when the user cannot be found', async () => {
+    const assign = vi.fn(async () => ({ status: 'assigned' }));
+    expect(await assignStarterNumbersOnConnect({ findUser: async () => undefined, assign }, 'user-1')).toBeNull();
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  // Inside the OAuth callback's try block a rejection would render "Salesforce
+  // connection failed" over a sign-in that had already been committed.
+  it('resolves rather than rejecting when the lookup throws', async () => {
+    const out = await assignStarterNumbersOnConnect(
+      { findUser: async () => { throw new Error('pool exhausted'); }, assign: async () => ({}) },
+      'user-1',
+    );
+    expect(out).toBeNull();
+  });
+
+  it('resolves rather than rejecting when the assignment throws', async () => {
+    const out = await assignStarterNumbersOnConnect(
+      { findUser: async () => user, assign: async () => { throw new Error('deadlock'); } },
       'user-1',
     );
     expect(out).toBeNull();
