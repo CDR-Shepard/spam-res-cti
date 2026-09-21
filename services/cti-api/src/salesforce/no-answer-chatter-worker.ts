@@ -20,10 +20,20 @@
  * AT-LEAST-ONCE. The post and the stamp that records it cannot be one atomic
  * step (one is Salesforce, one is Postgres). Posts go out in chunks of 200 and
  * each chunk's FeedItem ids are stamped IMMEDIATELY, before the next chunk is
- * sent — so a crash, a timeout whose request actually landed, or a reaped claim
- * re-posts at most ONE chunk's worth. A duplicate "No answer" is the accepted
- * failure mode; a lost one is not. The stamps are also the idempotency key: a
- * record with any stamped attempt is never selected again (`selectNoAnswerRecords`).
+ * sent — so a crash, or a timeout whose request actually landed, re-posts at most
+ * ONE chunk's worth. A duplicate "No answer" is the accepted failure mode; a lost
+ * one is not. The stamps are also the idempotency key: a record with any stamped
+ * attempt is never selected again (`selectNoAnswerRecords`).
+ *
+ * ONE OWNER PER SESSION. The claim is a timestamp, and a claim older than
+ * STUCK_AFTER_MS is up for grabs — that is how a dead worker's session gets
+ * picked up, but it also means a worker that is merely SLOW (nothing bounds a
+ * Postgres write) can have its claim taken while it is still running. So the
+ * claim stamp is carried through the sweep: it is re-checked right before every
+ * post (`assertStillClaimed`), and every later write to the session is
+ * conditional on it (`patchClaimed`). A worker that lost its claim stops before
+ * its next post and never clears, backs off, or finishes the new owner's claim.
+ * The overlap that remains is the one chunk that was already in flight.
  *
  * `dialer_sessions.updated_at` is NEVER written here. It is the only "ended at"
  * clock the run has (the engine stamps it on the status flip), and both the 24h
@@ -37,6 +47,7 @@ import { and, eq, gt, inArray, isNull, lte, or, sql, type SQL } from 'drizzle-or
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { getDb, schema } from '@cti/db';
 import type { AppConfig } from '../config.js';
+import type { DialerItem } from '../dialer/session-store.js';
 import { FEED_ITEMS_PER_REQUEST, createFeedItems, type FeedItemResult } from './client.js';
 import { isSalesforceAuthError, withTimeout } from './followup-worker.js';
 import { gateIdsFor, noAnswerText, selectNoAnswerRecords, verdictFor, type NoAnswerRecord } from './no-answer-chatter.js';
@@ -59,9 +70,11 @@ export const OWNERSHIP_TIMEOUT_MS = 120_000;
 /** Ceiling on one Collections POST. Longer than a read, as in followup-worker:
  *  it MUTATES Salesforce, and abandoning it early only buys a duplicate chunk. */
 export const SF_POST_TIMEOUT_MS = 60_000;
-/** A claim older than this belongs to a worker that died. Must exceed a session's
- *  worst case: a run is capped at 500 records (routes/dialer.ts) → the ownership
- *  lookup plus three posts, each at its timeout, is 5 minutes. Twice that. */
+/** A claim older than this is presumed dead. A run is capped at 500 records
+ *  (routes/dialer.ts), so the Salesforce side of a sweep is bounded: the ownership
+ *  lookup plus three posts, each at its timeout, is 5 minutes. This is twice
+ *  that. The Postgres side is NOT bounded, which is why a claim is also
+ *  re-checked before every post — see ONE OWNER PER SESSION in the header. */
 export const STUCK_AFTER_MS = 10 * 60_000;
 
 type Session = typeof schema.dialerSessions.$inferSelect;
@@ -77,36 +90,43 @@ export interface NoAnswerChatterDeps {
   now: () => Date;
 }
 
+/** What a successful claim hands the sweep: which attempt this is (from
+ *  RETURNING — the row's truth, not our stale read + 1) and the exact stamp that
+ *  proves the claim is still ours. */
+interface Claim {
+  attempts: number;
+  heldSince: Date;
+}
+
+/** Another worker reaped our claim. Not a failure of the session — it is theirs now. */
+class ClaimLostError extends Error {}
+
 const ENDED: Array<Session['status']> = ['done', 'stopped'];
 
-/** Ended, not yet swept, and ended inside the last 24h — the part of the
- *  candidate predicate the CLAIM re-checks, because the claim is the last gate
- *  before anything is posted. */
-function owedASweep(now: Date): SQL[] {
+/**
+ * Everything that makes a session sweepable RIGHT NOW: ended, not yet swept,
+ * ended inside the last 24h, past its backoff floor, and unclaimed — or claimed
+ * by a worker that has been gone longer than any sweep can take (this IS the
+ * stuck-claim reaper; there is no separate reset pass).
+ *
+ * One list, used by BOTH the scan and the claim. The claim is the last gate
+ * before anything is posted, and a replica holding a candidate list from a few
+ * seconds ago must not act on a session another replica has since swept, backed
+ * off, or claimed.
+ */
+function sweepableNow(now: Date): Array<SQL | undefined> {
   return [
     inArray(sessions.status, ENDED),
     isNull(sessions.noAnswerChatterAt),
     gt(sessions.updatedAt, new Date(now.getTime() - SWEEP_WINDOW_MS)),
+    or(isNull(sessions.noAnswerChatterNextAt), lte(sessions.noAnswerChatterNextAt, now)),
+    or(isNull(sessions.noAnswerChatterClaimedAt), lte(sessions.noAnswerChatterClaimedAt, new Date(now.getTime() - STUCK_AFTER_MS))),
   ];
 }
 
-/** Unclaimed, or claimed by a worker that has been gone longer than any sweep can
- *  take. This IS the stuck-claim reaper: there is no separate reset pass. */
-function unclaimedOrStuck(now: Date): SQL | undefined {
-  return or(isNull(sessions.noAnswerChatterClaimedAt), lte(sessions.noAnswerChatterClaimedAt, new Date(now.getTime() - STUCK_AFTER_MS)));
-}
-
-function candidateWhere(now: Date): SQL | undefined {
-  return and(
-    ...owedASweep(now),
-    or(isNull(sessions.noAnswerChatterNextAt), lte(sessions.noAnswerChatterNextAt, now)),
-    unclaimedOrStuck(now),
-  );
-}
-
 /**
- * Pure — the same "owed a sweep" decision as the SQL, re-made in code. The SQL is
- * a pre-filter; this is the predicate that actually stands between a session and
+ * Pure — the "owed a sweep" half of that decision, re-made in code. The SQL is a
+ * pre-filter; this is the predicate that actually stands between a session and
  * a batch of irreversible posts, so it is testable without a database (same
  * reasoning as `nudgeEligible` in followup-worker.ts).
  */
@@ -119,33 +139,69 @@ export function sweepEligible(session: Pick<Session, 'status' | 'updatedAt' | 'n
 /**
  * CONDITIONAL claim: only the replica whose UPDATE matches owns the session —
  * Railway runs the old and the new container side by side on every deploy.
- * Returns the attempt number this claim is (from RETURNING, so it is the row's
- * truth, not our stale read + 1), or null when another replica won.
+ * Null when another replica won.
  *
  * `deps.now()`, not the tick's clock: staleness is measured from this stamp, and
  * a batch can take minutes — a top-of-tick stamp would make the last session of
  * a batch look half-stuck the moment it was claimed.
  */
-async function claimSession(deps: NoAnswerChatterDeps, sessionId: string): Promise<number | null> {
+async function claimSession(deps: NoAnswerChatterDeps, sessionId: string): Promise<Claim | null> {
   const now = deps.now();
   const rows = await deps.db.update(sessions)
     .set({ noAnswerChatterClaimedAt: now, noAnswerChatterAttempts: sql`${sessions.noAnswerChatterAttempts} + 1` })
-    .where(and(eq(sessions.id, sessionId), ...owedASweep(now), unclaimedOrStuck(now)))
+    .where(and(eq(sessions.id, sessionId), ...sweepableNow(now)))
     .returning({ attempts: sessions.noAnswerChatterAttempts });
-  return rows[0]?.attempts ?? null;
+  return rows[0] ? { attempts: rows[0].attempts, heldSince: now } : null;
+}
+
+/** This session, while — and only while — our claim on it stands. */
+function claimedBy(sessionId: string, claim: Claim): SQL | undefined {
+  return and(eq(sessions.id, sessionId), eq(sessions.noAnswerChatterClaimedAt, claim.heldSince));
+}
+
+/** Called right before each irreversible step. See ONE OWNER PER SESSION. */
+async function assertStillClaimed(deps: NoAnswerChatterDeps, sessionId: string, claim: Claim): Promise<void> {
+  const mine = await deps.db.query.dialerSessions.findFirst({ columns: { id: true }, where: claimedBy(sessionId, claim) });
+  if (!mine) throw new ClaimLostError(sessionId);
 }
 
 /** A sweep-bookkeeping write. `updatedAt` is deliberately unrepresentable here —
  *  see the header: it is the run's "ended at" clock and this worker never moves it. */
 type SweepPatch = Omit<PgUpdateSetSource<typeof sessions>, 'updatedAt'>;
 
-async function patchSession(deps: NoAnswerChatterDeps, sessionId: string, patch: SweepPatch): Promise<void> {
-  await deps.db.update(sessions).set(patch).where(eq(sessions.id, sessionId));
+/** Every write after the claim goes through here: it lands only if the claim is
+ *  still ours, so a reaped worker can never clear or finish the new owner's claim. */
+async function patchClaimed(deps: NoAnswerChatterDeps, sessionId: string, claim: Claim, patch: SweepPatch): Promise<void> {
+  await deps.db.update(sessions).set(patch).where(claimedBy(sessionId, claim));
 }
 
 /** Swept — or given up on. Either way this session is never looked at again. */
 function finished(now: Date): SweepPatch {
   return { noAnswerChatterAt: now, noAnswerChatterClaimedAt: null, noAnswerChatterNextAt: null };
+}
+
+/**
+ * SETTLE CHECK. `stopSession` flips the run to `stopped` BEFORE it hangs up the
+ * in-flight dial (on purpose — see engine.ts), so for a moment an ended run still
+ * has a `dialing` item whose `no_connect` has not landed. Sweeping now would miss
+ * that attempt. Past the window a lost webhook must not wedge the sweep: proceed,
+ * and the row is simply not an attempt.
+ */
+function stillSettling(session: Pick<Session, 'updatedAt'>, items: ReadonlyArray<Pick<DialerItem, 'status'>>, now: Date): boolean {
+  return now.getTime() - session.updatedAt.getTime() < SETTLE_WINDOW_MS && items.some((i) => i.status === 'dialing');
+}
+
+/** Hand the claim back — and the attempt with it: waiting is not failing. */
+function settleRelease(now: Date): SweepPatch {
+  return {
+    noAnswerChatterClaimedAt: null,
+    noAnswerChatterAttempts: sql`greatest(${sessions.noAnswerChatterAttempts} - 1, 0)`,
+    noAnswerChatterNextAt: new Date(now.getTime() + SETTLE_RECHECK_MS),
+  };
+}
+
+async function loadItems(deps: NoAnswerChatterDeps, sessionId: string): Promise<DialerItem[]> {
+  return deps.db.query.dialerQueueItems.findMany({ where: eq(queueItems.sessionId, sessionId) });
 }
 
 /** Terminal skip for every qualifying item of these records. One UPDATE per reason. */
@@ -177,7 +233,7 @@ function chunksOf<T>(list: ReadonlyArray<T>, size: number): T[][] {
   return Array.from({ length: Math.ceil(list.length / size) }, (_, i) => list.slice(i * size, (i + 1) * size));
 }
 
-/** Records grouped by terminal skip reason, in first-seen order. */
+/** Item ids grouped by terminal skip reason, in first-seen order. */
 function groupByReason(skips: ReadonlyArray<{ reason: string; record: NoAnswerRecord }>): Map<string, string[]> {
   const byReason = new Map<string, string[]>();
   for (const { reason, record } of skips) byReason.set(reason, [...(byReason.get(reason) ?? []), ...record.itemIds]);
@@ -208,71 +264,73 @@ async function postChunk(deps: NoAnswerChatterDeps, session: Session, chunk: Rea
   if (posted.length > 0) await stampFeedItemIds(deps, session.id, posted);
 }
 
+/**
+ * Ownership for the whole run at once, THEN the posts. A lookup that throws
+ * leaves through the caller's catch with nothing posted: fail closed, never post
+ * unverified. Skips are stamped first — they are terminal and need no Salesforce
+ * write, so a later failure cannot cost them.
+ */
+async function postOwnedRecords(deps: NoAnswerChatterDeps, session: Session, claim: Claim, records: ReadonlyArray<NoAnswerRecord>): Promise<void> {
+  const gateIds = [...new Set(records.flatMap(gateIdsFor))];
+  const owners = await withTimeout(deps.ownership(session.userId, gateIds), OWNERSHIP_TIMEOUT_MS, 'ownership batch');
+  const verdicts = records.map((record) => ({ record, reason: verdictFor(record, owners, session.sfOwnerId) }));
+
+  for (const [reason, itemIds] of groupByReason(verdicts.filter((v) => v.reason !== 'post'))) {
+    await stampSkips(deps, session.id, reason, itemIds);
+  }
+  const postable = verdicts.filter((v) => v.reason === 'post').map((v) => v.record);
+  for (const chunk of chunksOf(postable, FEED_ITEMS_PER_REQUEST)) {
+    await assertStillClaimed(deps, session.id, claim);
+    await postChunk(deps, session, chunk);
+  }
+}
+
+/** How many records are STILL owed a post — read back from what is actually
+ *  stamped. Only for the give-up log, so a failure here is a null, not a throw. */
+async function recordsStillOwed(deps: NoAnswerChatterDeps, sessionId: string): Promise<number | null> {
+  try {
+    return selectNoAnswerRecords(await loadItems(deps, sessionId)).length;
+  } catch {
+    return null;
+  }
+}
+
 /** Transient failure: back off and retry — or, out of attempts, give up loudly. */
-async function failSession(deps: NoAnswerChatterDeps, session: Session, attempts: number, recordsLeft: number | null, err: unknown): Promise<void> {
+async function failSession(deps: NoAnswerChatterDeps, session: Session, claim: Claim, err: unknown): Promise<void> {
   // A dead token reads the same as any other failure here ON PURPOSE: unlike the
   // rollover, nothing is half-done and the rep may well sign back in within the
   // ~63-minute retry window. The flag is only so the log says why.
   const reason = isSalesforceAuthError(err) ? 'reconnect Salesforce' : (err instanceof Error ? err.message : String(err)).slice(0, 500);
-  if (attempts >= MAX_ATTEMPTS) {
-    console.error('[no-answer-chatter] giving up', { sessionId: session.id, userId: session.userId, recordsLeft, attempts, reason });
-    await patchSession(deps, session.id, finished(deps.now()));
+  if (claim.attempts >= MAX_ATTEMPTS) {
+    const recordsLeft = await recordsStillOwed(deps, session.id);
+    console.error('[no-answer-chatter] giving up', { sessionId: session.id, userId: session.userId, recordsLeft, attempts: claim.attempts, reason });
+    await patchClaimed(deps, session.id, claim, finished(deps.now()));
     return;
   }
-  console.warn('[no-answer-chatter] sweep failed; will retry', { sessionId: session.id, attempts, reason });
-  const delay = BACKOFF_BASE_MS * 2 ** (attempts - 1);
-  await patchSession(deps, session.id, { noAnswerChatterClaimedAt: null, noAnswerChatterNextAt: new Date(deps.now().getTime() + delay) });
+  console.warn('[no-answer-chatter] sweep failed; will retry', { sessionId: session.id, attempts: claim.attempts, reason });
+  const delay = BACKOFF_BASE_MS * 2 ** (claim.attempts - 1);
+  await patchClaimed(deps, session.id, claim, { noAnswerChatterClaimedAt: null, noAnswerChatterNextAt: new Date(deps.now().getTime() + delay) });
 }
 
 /** One claimed session, start to finish. Handles its own Salesforce failures. */
-async function sweepSession(deps: NoAnswerChatterDeps, session: Session, attempts: number): Promise<void> {
-  // How many records are still owed a post. Null until the run has been read —
-  // it is what the give-up log reports.
-  let recordsLeft: number | null = null;
+async function sweepSession(deps: NoAnswerChatterDeps, session: Session, claim: Claim): Promise<void> {
   try {
-    const items = await deps.db.query.dialerQueueItems.findMany({ where: eq(queueItems.sessionId, session.id) });
-
-    // SETTLE CHECK. `stopSession` flips the run to `stopped` BEFORE it hangs up
-    // the in-flight dial (on purpose — see engine.ts), so for a moment an ended
-    // run still has a `dialing` item whose `no_connect` has not landed. Sweeping
-    // now would miss that attempt. Hand the claim back — and the attempt with it,
-    // waiting is not failing — and look again shortly. Past the window a lost
-    // webhook must not wedge the sweep: proceed, and the row is simply not an
-    // attempt.
-    const endedAgoMs = deps.now().getTime() - session.updatedAt.getTime();
-    if (endedAgoMs < SETTLE_WINDOW_MS && items.some((i) => i.status === 'dialing')) {
-      await patchSession(deps, session.id, {
-        noAnswerChatterClaimedAt: null,
-        noAnswerChatterAttempts: sql`greatest(${sessions.noAnswerChatterAttempts} - 1, 0)`,
-        noAnswerChatterNextAt: new Date(deps.now().getTime() + SETTLE_RECHECK_MS),
-      });
+    const items = await loadItems(deps, session.id);
+    if (stillSettling(session, items, deps.now())) {
+      await patchClaimed(deps, session.id, claim, settleRelease(deps.now()));
       return;
     }
-
+    // Nothing owed (everyone answered, or the run never dialed) → finished, and
+    // not a single Salesforce call was spent finding that out.
     const records = selectNoAnswerRecords(items);
-    recordsLeft = records.length;
-    // Nothing owed (everyone answered, or the run never dialed): done, and not a
-    // single Salesforce call was spent finding that out.
-    if (records.length > 0) {
-      // OWNERSHIP FIRST, for the whole run at once. A throw here leaves through
-      // the catch with nothing posted: fail closed, never post unverified.
-      const gateIds = [...new Set(records.flatMap(gateIdsFor))];
-      const owners = await withTimeout(deps.ownership(session.userId, gateIds), OWNERSHIP_TIMEOUT_MS, 'ownership batch');
-      const verdicts = records.map((record) => ({ record, reason: verdictFor(record, owners, session.sfOwnerId) }));
-
-      const skips = verdicts.filter((v) => v.reason !== 'post');
-      for (const [reason, itemIds] of groupByReason(skips)) await stampSkips(deps, session.id, reason, itemIds);
-      recordsLeft -= skips.length;
-
-      const postable = verdicts.filter((v) => v.reason === 'post').map((v) => v.record);
-      for (const chunk of chunksOf(postable, FEED_ITEMS_PER_REQUEST)) {
-        await postChunk(deps, session, chunk);
-        recordsLeft -= chunk.length;
-      }
-    }
-    await patchSession(deps, session.id, finished(deps.now()));
+    if (records.length > 0) await postOwnedRecords(deps, session, claim, records);
+    await patchClaimed(deps, session.id, claim, finished(deps.now()));
   } catch (err) {
-    await failSession(deps, session, attempts, recordsLeft, err);
+    if (err instanceof ClaimLostError) {
+      console.warn('[no-answer-chatter] claim lost mid-sweep; another worker owns it', { sessionId: session.id });
+      return;
+    }
+    await failSession(deps, session, claim, err);
   }
 }
 
@@ -285,19 +343,18 @@ function liveDeps(): NoAnswerChatterDeps {
 export async function runNoAnswerChatterTick(deps: NoAnswerChatterDeps = liveDeps()): Promise<{ processed: number }> {
   let processed = 0;
   try {
-    const now = deps.now();
     const candidates = await deps.db.query.dialerSessions.findMany({
-      where: candidateWhere(now),
+      where: and(...sweepableNow(deps.now())),
       orderBy: (t, { asc }) => [asc(t.updatedAt)],
       limit: CANDIDATE_LIMIT,
     });
     for (const session of candidates) {
       try {
         if (!sweepEligible(session, deps.now())) continue;
-        const attempts = await claimSession(deps, session.id);
-        if (attempts == null) continue; // another replica claimed it
+        const claim = await claimSession(deps, session.id);
+        if (!claim) continue; // another replica claimed it
         processed++;
-        await sweepSession(deps, session, attempts);
+        await sweepSession(deps, session, claim);
       } catch (err) {
         // sweepSession handles Salesforce failures itself; a throw here means a
         // DB write failed. The claim it leaves behind is reaped after STUCK_AFTER_MS.

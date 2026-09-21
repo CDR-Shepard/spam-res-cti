@@ -73,6 +73,8 @@ interface Fake {
   db: NoAnswerChatterDeps['db'];
   writes: Write[];
   scans: Array<{ where: SQL; orderBy: (t: unknown, ops: unknown) => SQL[]; limit: number }>;
+  /** WHERE of every "is the claim still mine?" read. */
+  verifies: SQL[];
 }
 
 /** Names a write for the ORDER assertions. */
@@ -89,13 +91,32 @@ function fakeDb(o: {
   order?: string[];
   /** Return false to make this session's claim CAS match 0 rows. */
   wins?: (sessionId: string) => boolean;
+  /** Return false to make the "is the claim still mine?" read find nothing (it was reaped). Called once per check. */
+  holds?: (sessionId: string, nthCheck: number) => boolean;
   failWrite?: (w: Write) => boolean;
   failScan?: boolean;
 }): Fake {
   const writes: Write[] = [];
   const scans: Fake['scans'] = [];
+  const verifies: SQL[] = [];
   const order = o.order ?? [];
+  // Stamps are APPLIED to the fake's rows (on copies — the fixtures stay
+  // untouched), so a re-read sees what a real database would show.
+  let rows = [...(o.items ?? [])];
   const sessionIdIn = (where: SQL): string => String(render(where).params.find((p) => o.sessions.some((s) => s.id === p)));
+  const applyItemStamp = (w: Write): void => {
+    const ids = new Set(render(w.where).params.slice(1));
+    const feedIds = new Map<unknown, unknown>();
+    if (w.patch.noAnswerFeedItemId) {
+      const p = render(w.patch.noAnswerFeedItemId).params;
+      for (let i = 0; i < p.length; i += 2) feedIds.set(p[i], p[i + 1]);
+    }
+    rows = rows.map((r) => (!ids.has(r.id) ? r : {
+      ...r,
+      noAnswerSkipReason: typeof w.patch.noAnswerSkipReason === 'string' ? w.patch.noAnswerSkipReason : r.noAnswerSkipReason,
+      noAnswerFeedItemId: feedIds.has(r.id) ? String(feedIds.get(r.id)) : r.noAnswerFeedItemId,
+    }));
+  };
   const db = {
     query: {
       dialerSessions: {
@@ -105,12 +126,18 @@ function fakeDb(o: {
           order.push('scan');
           return o.sessions;
         },
+        findFirst: async (args: { where: SQL }) => {
+          order.push('verify');
+          verifies.push(args.where);
+          const sid = sessionIdIn(args.where);
+          return o.holds?.(sid, verifies.length) === false ? undefined : { id: sid };
+        },
       },
       dialerQueueItems: {
         findMany: async (args: { where: SQL }) => {
           order.push('items');
           const sid = sessionIdIn(args.where);
-          return (o.items ?? []).filter((i) => i.sessionId === sid);
+          return rows.filter((i) => i.sessionId === sid);
         },
       },
     },
@@ -124,6 +151,7 @@ function fakeDb(o: {
               if (o.failWrite?.(w)) throw new Error('pg write failed');
               writes.push(w);
               order.push(eventOf(w));
+              if (name === 'items') applyItemStamp(w);
               return value;
             };
             // The claim awaits `.returning()`; every other write awaits the
@@ -141,7 +169,7 @@ function fakeDb(o: {
       };
     },
   };
-  return { db: db as unknown as NoAnswerChatterDeps['db'], writes, scans };
+  return { db: db as unknown as NoAnswerChatterDeps['db'], writes, scans, verifies };
 }
 
 const owned = (ids: string[], ownerId = ME): Map<string, OwnershipSnapshot> =>
@@ -232,22 +260,26 @@ describe('sweepEligible — the 24h guard, re-made in code', () => {
 });
 
 describe('claim', () => {
-  it('is a compare-and-swap that re-checks un-swept + 24h + unclaimed-or-stuck, bumps attempts, stamps the claim clock', async () => {
+  it('is a compare-and-swap that re-checks EVERYTHING the scan checked (un-swept, 24h, due, unclaimed-or-stuck), bumps attempts, stamps the claim clock', async () => {
     const f = fakeDb({ sessions: [session()], items: [] });
     await runNoAnswerChatterTick(deps(f));
     const claim = sessionWrites(f)[0]!;
     expect(eventOf(claim)).toBe('claim');
     const { sql, params } = render(claim.where);
+    // The backoff floor is re-checked too: a replica holding a stale candidate
+    // list must not retry a session another replica JUST backed off.
     expect(sql).toBe(
       '("dialer_sessions"."id" = $1' +
         ' and "dialer_sessions"."status" in ($2, $3)' +
         ' and "dialer_sessions"."no_answer_chatter_at" is null' +
         ' and "dialer_sessions"."updated_at" > $4' +
-        ' and ("dialer_sessions"."no_answer_chatter_claimed_at" is null or "dialer_sessions"."no_answer_chatter_claimed_at" <= $5))',
+        ' and ("dialer_sessions"."no_answer_chatter_next_at" is null or "dialer_sessions"."no_answer_chatter_next_at" <= $5)' +
+        ' and ("dialer_sessions"."no_answer_chatter_claimed_at" is null or "dialer_sessions"."no_answer_chatter_claimed_at" <= $6))',
     );
     expect(params).toEqual([
       'S1', 'done', 'stopped',
       new Date(NOW.getTime() - SWEEP_WINDOW_MS).toISOString(),
+      NOW.toISOString(),
       new Date(NOW.getTime() - STUCK_AFTER_MS).toISOString(),
     ]);
     expect(claim.patch.noAnswerChatterClaimedAt).toEqual(NOW);
@@ -296,7 +328,13 @@ describe('sweep — the happy path, in order', () => {
 
     expect(await runNoAnswerChatterTick(d)).toEqual({ processed: 1 });
 
-    expect(order).toEqual(['scan', 'claim', 'items', 'ownership', 'stamp-skip:not-owner', 'stamp-skip:not-found', 'post', 'stamp-ids', 'finish']);
+    expect(order).toEqual(['scan', 'claim', 'items', 'ownership', 'stamp-skip:not-owner', 'stamp-skip:not-found', 'verify', 'post', 'stamp-ids', 'finish']);
+
+    // Right before the irreversible step: is the claim still OURS (not reaped)?
+    expect(render(f.verifies[0]!)).toEqual({
+      sql: '("dialer_sessions"."id" = $1 and "dialer_sessions"."no_answer_chatter_claimed_at" = $2)',
+      params: ['S1', NOW.toISOString()],
+    });
 
     // ONE batched lookup, as the rep, for exactly the records owed a post.
     expect(ownership).toHaveBeenCalledTimes(1);
@@ -325,10 +363,23 @@ describe('sweep — the happy path, in order', () => {
     });
     expect(render(ids!.where).params).toEqual(['S1', 'A1', 'A2']);
 
-    // Finish: swept, claim cleared.
+    // Finish: swept, claim cleared — and only while the claim is still ours, so a
+    // worker whose claim was reaped can never clear the claim of the one that took over.
     const finish = sessionWrites(f).at(-1)!;
     expect(finish.patch).toEqual({ noAnswerChatterAt: NOW, noAnswerChatterClaimedAt: null, noAnswerChatterNextAt: null });
-    expect(render(finish.where)).toEqual({ sql: '"dialer_sessions"."id" = $1', params: ['S1'] });
+    expect(render(finish.where)).toEqual({
+      sql: '("dialer_sessions"."id" = $1 and "dialer_sessions"."no_answer_chatter_claimed_at" = $2)',
+      params: ['S1', NOW.toISOString()],
+    });
+  });
+
+  it('idempotent: a second sweep over the same (now stamped) items posts nothing', async () => {
+    const f = fakeDb({ sessions: [session()], items: [item({ id: 'A1' }), item({ id: 'A2', attempt: 2 })] });
+    const d = deps(f);
+    await runNoAnswerChatterTick(d);
+    await runNoAnswerChatterTick(d); // the fake hands the same session back, as a reaped claim would
+    expect(d.createFeedItems).toHaveBeenCalledTimes(1);
+    expect(d.ownership).toHaveBeenCalledTimes(1);
   });
 
   it('NEVER bumps updated_at — on sessions it is the "ended at" clock the 24h guard and the settle window read', async () => {
@@ -398,7 +449,21 @@ describe('chunking — at-least-once', () => {
     const d = deps(f, {}, order);
     await runNoAnswerChatterTick(d);
     expect((d.createFeedItems as ReturnType<typeof vi.fn>).mock.calls.map((c) => (c[1] as unknown[]).length)).toEqual([200, 200, 50]);
-    expect(order.slice(3)).toEqual(['ownership', 'post', 'stamp-ids', 'post', 'stamp-ids', 'post', 'stamp-ids', 'finish']);
+    expect(order.slice(3)).toEqual([
+      'ownership', 'verify', 'post', 'stamp-ids', 'verify', 'post', 'stamp-ids', 'verify', 'post', 'stamp-ids', 'finish',
+    ]);
+  });
+
+  it('claim REAPED mid-sweep (another replica took over): stops before the next post and writes NOTHING more to the session', async () => {
+    const order: string[] = [];
+    const f = fakeDb({ sessions: [session()], items: many(250), order, holds: (_sid, nth) => nth < 2 });
+    const d = deps(f, {}, order);
+    await expect(runNoAnswerChatterTick(d)).resolves.toEqual({ processed: 1 });
+    // chunk 1 went out and was stamped; the check before chunk 2 found the claim gone.
+    expect(order.slice(4)).toEqual(['verify', 'post', 'stamp-ids', 'verify']);
+    expect(d.createFeedItems).toHaveBeenCalledTimes(1);
+    expect(sessionWrites(f).map(eventOf)).toEqual(['claim']); // no release, no finish: the session is someone else's now
+    expect(console.warn).toHaveBeenCalledWith('[no-answer-chatter] claim lost mid-sweep; another worker owns it', expect.objectContaining({ sessionId: 'S1' }));
   });
 
   it('chunk 2 fails → chunk 1 is ALREADY stamped (a retry re-posts at most one chunk), session released with backoff, not finished', async () => {
@@ -411,7 +476,7 @@ describe('chunking — at-least-once', () => {
       return posts.map((_, i) => ({ ok: true, id: `0D5${i}` }));
     });
     await runNoAnswerChatterTick(deps(f, { createFeedItems }, order));
-    expect(order.slice(4)).toEqual(['post', 'stamp-ids', 'post', 'release']);
+    expect(order.slice(4)).toEqual(['verify', 'post', 'stamp-ids', 'verify', 'post', 'release']);
     const release = sessionWrites(f).at(-1)!;
     expect(release.patch).toEqual({ noAnswerChatterClaimedAt: null, noAnswerChatterNextAt: new Date(NOW.getTime() + BACKOFF_BASE_MS) });
     expect(sessionWrites(f).some((w) => eventOf(w) === 'finish')).toBe(false);
@@ -431,6 +496,8 @@ describe('settle check — a Stop\'s hangup callback may not have landed yet', (
     expect(release.patch.noAnswerChatterClaimedAt).toBeNull();
     expect(release.patch.noAnswerChatterNextAt).toEqual(new Date(NOW.getTime() + SETTLE_RECHECK_MS));
     expect(render(release.patch.noAnswerChatterAttempts).sql).toBe('greatest("dialer_sessions"."no_answer_chatter_attempts" - 1, 0)');
+    // Guarded by the claim: the attempt is only handed back by the worker that took it.
+    expect(render(release.where).params).toEqual(['S1', NOW.toISOString()]);
     expect(SETTLE_RECHECK_MS).toBe(15_000);
     expect(SETTLE_WINDOW_MS).toBe(10 * 60_000);
     expect(d.ownership).not.toHaveBeenCalled();
@@ -490,8 +557,20 @@ describe('failure', () => {
     const createFeedItems = vi.fn(async () => { throw new Error('Salesforce FeedItem create failed (500): []'); });
     await runNoAnswerChatterTick(deps(f, { ownership, createFeedItems }));
     expect(sessionWrites(f).at(-1)!.patch).toEqual({ noAnswerChatterAt: NOW, noAnswerChatterClaimedAt: null, noAnswerChatterNextAt: null });
-    // lead(3) was terminally skipped before the failure; two records were left un-posted.
+    // lead(3) was terminally skipped before the failure; two records were left
+    // un-posted. Counted from a RE-READ of the run, i.e. from what is actually stamped.
     expect(console.error).toHaveBeenCalledWith('[no-answer-chatter] giving up', expect.objectContaining({ sessionId: 'S1', recordsLeft: 2, attempts: MAX_ATTEMPTS }));
+  });
+
+  it('giving up still happens when the "how many were left" re-read itself fails (count logged as null)', async () => {
+    let reads = 0;
+    const f = fakeDb({ sessions: [session({ noAnswerChatterAttempts: MAX_ATTEMPTS - 1 })], items: [item()] });
+    const db = f.db as unknown as { query: { dialerQueueItems: { findMany: (a: unknown) => Promise<unknown> } } };
+    const realFindMany = db.query.dialerQueueItems.findMany;
+    db.query.dialerQueueItems.findMany = async (a: unknown) => { if (++reads > 1) throw new Error('pg down'); return realFindMany(a); };
+    await runNoAnswerChatterTick(deps(f, { ownership: vi.fn(async () => { throw new Error('boom'); }) }));
+    expect(eventOf(sessionWrites(f).at(-1)!)).toBe('finish');
+    expect(console.error).toHaveBeenCalledWith('[no-answer-chatter] giving up', expect.objectContaining({ recordsLeft: null }));
   });
 
   it('one bad session — even one whose failure bookkeeping ALSO fails — never blocks the next', async () => {
