@@ -21,7 +21,7 @@ import {
   TWILIO_RECORDING_MEDIA_RE,
   signedCallbackUrl,
 } from '../telephony/webhooks.js';
-import { DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repUserIdFromClientIdentity } from '../dialer/twilio-telephony.js';
+import { DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repUserIdFromClientIdentity, TwilioDialerTelephony } from '../dialer/twilio-telephony.js';
 
 
 /**
@@ -65,13 +65,61 @@ async function stampRepCallSid(from: string, callSid: string | undefined, sessio
   const run = sessionId && UUID_RE.test(sessionId)
     ? and(eq(schema.dialerSessions.id, sessionId), inArray(schema.dialerSessions.status, ['active', 'paused']))
     : eq(schema.dialerSessions.status, 'active');
+  const where = and(eq(schema.dialerSessions.userId, userId), run);
+  try {
+    const db = getDb();
+    const before = await db.query.dialerSessions.findFirst({ where, columns: { repCallSid: true } });
+    await db.update(schema.dialerSessions).set({ repCallSid: callSid, updatedAt: new Date() }).where(where);
+    if (before?.repCallSid && before.repCallSid !== callSid) void hangUpReplacedLeg(userId, before.repCallSid);
+  } catch (err) {
+    console.error('[dialer] rep call sid stamp failed', { userId, err: (err as Error).message });
+  }
+}
+
+/**
+ * The run already had a leg and this join replaces it (the softphone re-joined
+ * after its leg dropped). The old leg can outlive the softphone's view of it —
+ * signalling died and Twilio has not noticed yet — and then it shares the new
+ * leg's room: two rep legs START the conference (so no hold music), and when
+ * Twilio finally reaps the old one its `endConferenceOnExit` ENDS the room,
+ * dropping whoever the rep is talking to. Hang it up now. Fire-and-forget and
+ * best-effort: it is usually gone already, and Twilio refuses a finished call.
+ */
+async function hangUpReplacedLeg(userId: string, callSid: string): Promise<void> {
+  try {
+    await new TwilioDialerTelephony().hangup(callSid);
+  } catch (err) {
+    console.warn('[dialer] replaced rep leg not hung up (usually already gone)', { userId, err: (err as Error).message });
+  }
+}
+
+/**
+ * The rep's leg has ENDED (Twilio requests the `<Dial action>` with CallStatus
+ * `completed`) while the run it was recorded on is still `active`: every human
+ * who answers from here on is bridged into an empty room. The softphone stops
+ * such a run itself when it can (apps/cti-web dialer-leg.ts) — but a closed tab
+ * or a dead network cannot, and this request is the only time the server hears
+ * about it. PAUSE rather than stop: nothing is lost, the run frees the rep's
+ * one-active-run slot, and a rep who comes back presses Resume.
+ *
+ * Matched on THIS leg's sid, so a leg the softphone already replaced pauses
+ * nothing; and only `active`, so the normal run end is untouched — there the
+ * server hangs the leg up itself and then writes `done`/`stopped` regardless.
+ */
+async function pauseRunThatLostItsLeg(from: string, callSid: string | undefined): Promise<void> {
+  const userId = repUserIdFromClientIdentity(from);
+  if (!userId || !callSid || !TWILIO_CALL_SID_RE.test(callSid)) return;
   try {
     await getDb()
       .update(schema.dialerSessions)
-      .set({ repCallSid: callSid, updatedAt: new Date() })
-      .where(and(eq(schema.dialerSessions.userId, userId), run));
+      .set({ status: 'paused', updatedAt: new Date() })
+      .where(and(
+        eq(schema.dialerSessions.userId, userId),
+        eq(schema.dialerSessions.repCallSid, callSid),
+        eq(schema.dialerSessions.status, 'active'),
+      ));
   } catch (err) {
-    console.error('[dialer] rep call sid stamp failed', { userId, err: (err as Error).message });
+    console.error('[dialer] pause after lost rep leg failed', { userId, err: (err as Error).message });
   }
 }
 
@@ -161,8 +209,9 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
    * survives past the first connect. It is one continuous call to the
    * softphone, which never notices.
    *
-   * Twilio also requests the action when the rep hangs up (CallStatus
-   * `completed`): the call is over, so answer with nothing and touch nothing.
+   * Twilio also requests the action when the rep's leg has ENDED (CallStatus
+   * `completed`): there is nothing to rejoin, so answer with nothing — after
+   * pausing the run if it is still dialing (`pauseRunThatLostItsLeg`).
    */
   app.post(DIALER_REJOIN_PATH, async (req, reply) => {
     const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
@@ -174,6 +223,7 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     const body = (req.body ?? {}) as Record<string, string>;
     const VoiceResponse = twilio.twiml.VoiceResponse;
     if (body.CallStatus === 'completed') {
+      await orDefaultAfter(pauseRunThatLostItsLeg(body.From ?? '', body.CallSid), undefined);
       return reply.type('text/xml').send(new VoiceResponse().toString());
     }
     const hangup = (): string => {

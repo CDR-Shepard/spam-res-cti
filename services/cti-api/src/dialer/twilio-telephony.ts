@@ -220,14 +220,15 @@ export class TwilioDialerTelephony implements DialerTelephony {
   async endConference(userId: string): Promise<void> {
     const client = this.clientFactory();
     const friendlyName = conferenceName(userId);
-    const rooms: { sid: string }[] = [];
-    for (const status of ['in-progress', 'init'] as const) {
-      try {
-        rooms.push(...(await client.conferences.list({ friendlyName, status })));
-      } catch (err) {
-        console.error('[dialer] conference lookup failed', { userId, status, err: (err as Error).message });
-      }
-    }
+    // Both lookups at once: this runs BEFORE the session leaves `active`, and the
+    // softphone's dropped-leg recovery is timed against that gap.
+    const statuses = ['in-progress', 'init'] as const;
+    const lookups = await Promise.allSettled(statuses.map((status) => client.conferences.list({ friendlyName, status })));
+    const rooms = lookups.flatMap((found, i) => {
+      if (found.status === 'fulfilled') return found.value;
+      console.error('[dialer] conference lookup failed', { userId, status: statuses[i], err: (found.reason as Error).message });
+      return [];
+    });
     for (const room of rooms) {
       let callSids: string[] = [];
       try {
@@ -240,7 +241,12 @@ export class TwilioDialerTelephony implements DialerTelephony {
           await client.calls(callSid).update({ status: 'completed' } as never);
         } catch { /* already gone — the common case */ }
       }
-      await client.conferences(room.sid).update({ status: 'completed' } as never);
+      try {
+        await client.conferences(room.sid).update({ status: 'completed' } as never);
+      } catch (err) {
+        // Routine once every participant has been hung up: the room already ended.
+        console.error('[dialer] conference completion failed', { userId, room: room.sid, err: (err as Error).message });
+      }
     }
   }
 }

@@ -24,7 +24,7 @@ import {
   type DialerSession,
   type DialerSessionCounts,
 } from './dialer-api';
-import { dialerJoinParams, recoverDroppedLeg, watchDialerLeg } from './dialer-leg';
+import { dialerJoinParams, legRecoveryToast, recentRejoins, recoverDroppedLeg, watchDialerLeg } from './dialer-leg';
 import { ClockIcon, CloudIcon, GridIcon, MoreIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, ShieldXIcon, UserIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
 import { navTabsFor, NAV_OVERFLOW_IDS, type Tab } from './nav';
@@ -278,8 +278,9 @@ export function App(): JSX.Element {
   // The run the conference leg belongs to, readable from inside callbacks that
   // outlive a render (the join, and the leg's disconnect handler).
   const dialerSessionIdRef = useRef<string | null>(null);
-  // How many times THIS run's leg has been brought back after dropping on its own.
-  const legRecoveriesRef = useRef(0);
+  // When THIS run's leg was brought back after dropping on its own — the recovery
+  // cap counts the recent ones (dialer-leg.ts `recentRejoins`).
+  const legRejoinedAtRef = useRef<number[]>([]);
   // True from the first line of place() until it settles — used to reject an
   // inbound call that races an in-flight outbound dial (which would otherwise
   // clobber connectionRef and orphan the outbound leg).
@@ -624,17 +625,27 @@ export function App(): JSX.Element {
   // leg carries `endConferenceOnExit=true`, so a second tab's leg landed in
   // the room of the rep's LIVE run elsewhere — and dropping it after a refused
   // `start` ended that whole conference, silently cutting the other tab's run.
-  const joinLegRef = useRef<(isRecovery: boolean) => Promise<boolean>>(async () => false);
-  const joinLeg = useCallback(async (isRecovery: boolean): Promise<boolean> => {
+  const joinLegRef = useRef<(recoveringSessionId?: string | null) => Promise<boolean>>(async () => false);
+  // `recoveringSessionId` is set (to the run's id) only when dialer-leg.ts is
+  // bringing back a leg that dropped on its own; a fresh Start passes nothing.
+  const joinLeg = useCallback(async (recoveringSessionId?: string | null): Promise<boolean> => {
+    const isRecovery = recoveringSessionId !== undefined;
     const myRun = ++dialerRunRef.current;
-    if (!isRecovery) legRecoveriesRef.current = 0;
+    if (!isRecovery) legRejoinedAtRef.current = [];
     // A call can start ringing on this tab's Device during the `start` round trip; re-check the same idle predicate `prepareDialerDevice` used before touching anything else.
-    if (phaseRef.current !== 'idle' || connectionRef.current || incomingRef.current) {
+    // A recovery also accepts `preflight`: a Twilio signalling blip reaches the
+    // Device `error` handler, which parks the phone there for the rest of the run
+    // — and a blip is exactly what a recovery is for. Same "free enough" test the
+    // `incoming` handler applies.
+    const phaseFree = phaseRef.current === 'idle' || (isRecovery && phaseRef.current === 'preflight');
+    if (!phaseFree || connectionRef.current || incomingRef.current) {
       throw new Error('A call arrived while the run was starting — the run was stopped.');
     }
     coordinatorRef.current?.promoteSelf();
     setDialerLive(true); // lock the nav to the Power Dial tab for the whole run
-    const sessionId = dialerSessionIdRef.current;
+    // A recovery names the run it was started for, not whatever the ref holds
+    // now: the Salesforce handoff seam can change that mid-run.
+    const sessionId = isRecovery ? recoveringSessionId : dialerSessionIdRef.current;
     try {
       const device = await ensureDevice();
       const connection = await (device as unknown as { connect: (o: unknown) => Promise<unknown> }).connect({
@@ -648,23 +659,39 @@ export function App(): JSX.Element {
       // The leg now survives each prospect leaving only via a server round trip
       // (see dialer-leg.ts). If it dies while the run is live, get the rep back
       // in — or stop the run: it must never keep dialing into an empty room.
+      let dropped = false;
       watchDialerLeg(connection, {
-        isOurs: () => dialerConnRef.current === connection,
+        isOurs: () => !dropped && dialerConnRef.current === connection,
         onDropped: () => {
-          dialerConnRef.current = null;
-          const recoveries = legRecoveriesRef.current++;
+          // The ref is left pointing at the dead leg on purpose: it keeps this tab
+          // "busy", so the softphone election cannot move the Device to another
+          // tab in the middle of the recovery. `dropped` absorbs a second event.
+          dropped = true;
+          // The run generation this recovery owns. Its own rejoin bumps the
+          // counter (synchronously, at the top of joinLeg), so follow it.
+          let gen = myRun;
+          const isCurrent = (): boolean => dialerRunRef.current === gen;
           void recoverDroppedLeg({
-            isCurrent: () => dialerRunRef.current === myRun,
+            isCurrent,
             wait: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
             fetchStatus: async () => (sessionId ? (await getDialer(sessionId)).session.status : 'stopped'),
-            rejoin: () => joinLegRef.current(true),
+            rejoin: () => {
+              const joining = joinLegRef.current(sessionId ?? null);
+              gen = dialerRunRef.current;
+              return joining;
+            },
             stop: async () => { if (sessionId) await dialerControl(sessionId, 'stop'); },
-          }, recoveries).then((outcome) => {
-            if (outcome === 'rejoined' || outcome === 'superseded') return;
-            dropConferenceLeg();
-            if (outcome === 'stopped') {
-              setToast({ text: 'Power Dial lost its audio connection, so the run was stopped. Start it again to continue.', type: 'error' });
-            }
+          }, recentRejoins(legRejoinedAtRef.current, Date.now())).then((outcome) => {
+            if (outcome === 'rejoined') legRejoinedAtRef.current = [...legRejoinedAtRef.current, Date.now()];
+            // A Stop or a newer run got there first: its state is not ours to touch
+            // (dropping here would bump the generation under a join in flight).
+            if (outcome === 'superseded' || !isCurrent()) return;
+            // `stop-failed`: the run may still be live. Keep the nav locked on the
+            // Power Dial tab, where the Stop button is.
+            if (outcome === 'run-over' || outcome === 'stopped') dropConferenceLeg();
+            else if (outcome === 'stop-failed') setDialerLive(true); // the failed rejoin unlocked it
+            const toast = legRecoveryToast(outcome);
+            if (toast) setToast(toast);
           });
         },
       });
@@ -679,7 +706,7 @@ export function App(): JSX.Element {
     }
   }, [ensureDevice, dropConferenceLeg]);
   joinLegRef.current = joinLeg;
-  const joinDialerConference = useCallback((): Promise<boolean> => joinLeg(false), [joinLeg]);
+  const joinDialerConference = useCallback((): Promise<boolean> => joinLeg(), [joinLeg]);
 
   const startPowerDial = useCallback(async (objectType: unknown, recordIds: unknown): Promise<void> => {
     if (objectType !== 'Lead' && objectType !== 'Opportunity') {

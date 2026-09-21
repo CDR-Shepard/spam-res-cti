@@ -137,6 +137,7 @@ function fakeClient(
 
   const conferencesFn = ((sid: string) => ({
     update: async (args: Record<string, unknown>) => {
+      if (fails(`room:${sid}`)) throw new Error('Conference is not in-progress');
       conferenceUpdates.push({ sid, args });
       events.push(`room:${sid}`);
       return {};
@@ -296,6 +297,22 @@ describe('TwilioDialerTelephony.endConference', () => {
     const { client, conferenceUpdates } = fakeClient([{ sid: 'CF1' }], { fail: ['list:init'] });
     await new TwilioDialerTelephony(() => client).endConference('user-1');
     expect(conferenceUpdates.map((u) => u.sid)).toEqual(['CF1']);
+  });
+
+  // The direction that matters more: at run end the rep is usually in the
+  // UN-started room, so losing the `in-progress` lookup must not lose that one.
+  it('a failed started-room lookup does not lose the un-started rooms', async () => {
+    const { client, conferenceUpdates } = fakeClient([{ sid: 'CF1' }], { initRooms: [{ sid: 'CF0' }], fail: ['list:in-progress'] });
+    await new TwilioDialerTelephony(() => client).endConference('user-1');
+    expect(conferenceUpdates.map((u) => u.sid)).toEqual(['CF0']);
+  });
+
+  // Completing a room whose participants were all just hung up can be refused —
+  // it has already ended. That must not skip the next room.
+  it('a room that cannot be completed does not save the next one', async () => {
+    const { client, conferenceUpdates } = fakeClient([{ sid: 'CF1' }, { sid: 'CF2' }], { fail: ['room:CF1'] });
+    await new TwilioDialerTelephony(() => client).endConference('user-1');
+    expect(conferenceUpdates.map((u) => u.sid)).toEqual(['CF2']);
   });
 
   it('is a no-op when the rep has no conference (the client leg already collapsed it)', async () => {

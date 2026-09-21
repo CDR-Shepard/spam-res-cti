@@ -40,11 +40,23 @@ export function watchDialerLeg(connection: unknown, opts: { isOurs: () => boolea
 }
 
 /** The server hangs the leg up BEFORE flipping a finished run out of `active`
- *  (dialer/engine.ts `releaseRepConference`); look too soon and a run that is
- *  over still reads as live. */
+ *  (dialer/engine.ts `releaseRepConference`), and that teardown is up to five
+ *  sequential Twilio REST calls; look too soon and a run that is over still
+ *  reads as live. Too-soon self-heals (the poll drops the rejoined leg), so this
+ *  buys a quiet run end, not correctness. */
 export const LEG_RECOVERY_DELAY_MS = 1500;
-/** A leg that keeps dying is not going to be fixed by a fourth attempt. */
+/** A leg that keeps dying is not going to be fixed by a fourth attempt… */
 export const MAX_LEG_RECOVERIES = 3;
+/** …within ten minutes. Three drops across a four-hour shift mean nothing. */
+export const LEG_RECOVERY_WINDOW_MS = 10 * 60_000;
+/** Waits between attempts to stop a run whose leg could not be brought back. The
+ *  usual cause is the network being down, which fails the stop as well. */
+export const STOP_RETRY_DELAYS_MS: readonly number[] = [2000, 5000, 10_000, 20_000];
+
+/** How many of these rejoin times still count against the cap at `now`. */
+export function recentRejoins(rejoinedAt: readonly number[], now: number): number {
+  return rejoinedAt.filter((t) => now - t < LEG_RECOVERY_WINDOW_MS).length;
+}
 
 export interface LegRecoveryDeps {
   /** False once a Stop or a newer run superseded the run whose leg dropped. */
@@ -56,14 +68,16 @@ export interface LegRecoveryDeps {
   stop: () => Promise<void>;
 }
 
-export type LegRecovery = 'superseded' | 'run-over' | 'rejoined' | 'stopped';
+/** `stop-failed` is NOT `stopped`: the run may still be active on the server. */
+export type LegRecovery = 'superseded' | 'run-over' | 'rejoined' | 'stopped' | 'stop-failed';
 
 /**
  * The leg dropped on its own. Get the rep back into the room if the run is still
  * live; if that cannot be done, STOP the run — a live run with no rep leg bridges
- * every human who answers into an empty room. Never throws.
+ * every human who answers into an empty room. `recentRejoinCount` is
+ * `recentRejoins(...)`. Never throws.
  */
-export async function recoverDroppedLeg(deps: LegRecoveryDeps, recoveriesSoFar: number): Promise<LegRecovery> {
+export async function recoverDroppedLeg(deps: LegRecoveryDeps, recentRejoinCount: number): Promise<LegRecovery> {
   await deps.wait(LEG_RECOVERY_DELAY_MS);
   if (!deps.isCurrent()) return 'superseded';
 
@@ -71,16 +85,45 @@ export async function recoverDroppedLeg(deps: LegRecoveryDeps, recoveriesSoFar: 
   // poll tears it down), assuming a live run is over leaves it dialing unattended.
   let status: DialerSession['status'] | null = null;
   try { status = await deps.fetchStatus(); } catch { /* treated as live below */ }
+  // That read was a round trip; a Stop may have landed while it was out.
+  if (!deps.isCurrent()) return 'superseded';
   if (status !== null && status !== 'active' && status !== 'paused') return 'run-over';
 
-  const stop = async (): Promise<'stopped'> => {
-    try { await deps.stop(); } catch { /* the poll shows whatever state the run is in */ }
-    return 'stopped';
-  };
-  if (recoveriesSoFar >= MAX_LEG_RECOVERIES) return stop();
-  try {
-    return (await deps.rejoin()) ? 'rejoined' : 'superseded';
-  } catch {
-    return stop();
+  if (recentRejoinCount < MAX_LEG_RECOVERIES) {
+    try {
+      return (await deps.rejoin()) ? 'rejoined' : 'superseded';
+    } catch { /* fall through: the run must not keep dialing */ }
+  }
+  return stopForCertain(deps);
+}
+
+/** One failed stop is not the end of it: whatever broke the rejoin (usually the
+ *  network) breaks the stop too, and giving up leaves the run ACTIVE with nobody
+ *  in the room. Retry on a backoff; report honestly if it never lands. */
+async function stopForCertain(deps: LegRecoveryDeps): Promise<LegRecovery> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await deps.stop();
+      return 'stopped';
+    } catch { /* retried below */ }
+    if (!deps.isCurrent()) return 'superseded'; // the rep pressed Stop, or started another run
+    const delay = STOP_RETRY_DELAYS_MS[attempt];
+    if (delay === undefined) return 'stop-failed';
+    await deps.wait(delay);
+    if (!deps.isCurrent()) return 'superseded';
+  }
+}
+
+/** What to tell the rep. `stop-failed` must never read as "stopped". */
+export function legRecoveryToast(outcome: LegRecovery): { text: string; type: 'success' | 'error' } | null {
+  switch (outcome) {
+    case 'rejoined':
+      return { type: 'success', text: 'Power Dial audio reconnected. If the run shows Paused, press Resume.' };
+    case 'stopped':
+      return { type: 'error', text: 'Power Dial lost its audio connection, so the run was stopped. Start it again to continue.' };
+    case 'stop-failed':
+      return { type: 'error', text: 'Power Dial lost its audio connection and the run could not be stopped. Press Stop as soon as you are back online.' };
+    default:
+      return null;
   }
 }

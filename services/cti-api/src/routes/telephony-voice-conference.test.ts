@@ -18,6 +18,11 @@ const state = vi.hoisted(() => ({
   /** Fallback: does the rep have any live run (lookup by user + status). */
   liveSession: null as { id: string } | null,
   sessionLookupHangs: false,
+  userLookupHangs: false,
+  /** What the stamp's read-before-write finds on the run (the leg it replaces). */
+  stampedBefore: null as { repCallSid: string | null } | null,
+  hangups: [] as string[],
+  hangupThrows: false,
   sessionLookupThrows: false,
   sessionLookups: [] as Array<{ where: unknown }>,
   updates: [] as Array<{ set: Record<string, unknown>; where: unknown }>,
@@ -37,6 +42,15 @@ vi.mock('../telephony/index.js', () => ({
     },
   }),
 }));
+vi.mock('../dialer/twilio-telephony.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../dialer/twilio-telephony.js')>()),
+  TwilioDialerTelephony: class {
+    async hangup(callSid: string): Promise<void> {
+      if (state.hangupThrows) throw new Error('Call is not in-progress');
+      state.hangups.push(callSid);
+    }
+  },
+}));
 vi.mock('@cti/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@cti/auth')>()),
   resolveSession: async () => null,
@@ -51,6 +65,7 @@ vi.mock('@cti/db', async (importOriginal) => {
           findFirst: async (args: { where: unknown; columns?: unknown }) => {
             state.lastFindFirst = args;
             if (state.findFirstThrows) throw new Error('pool exhausted');
+            if (state.userLookupHangs) return new Promise(() => {});
             return state.userRow;
           },
         },
@@ -59,6 +74,7 @@ vi.mock('@cti/db', async (importOriginal) => {
             state.sessionLookups.push(args);
             if (state.sessionLookupThrows) throw new Error('pool exhausted');
             if (state.sessionLookupHangs) return new Promise(() => {});
+            if ((args as { columns?: Record<string, boolean> }).columns?.repCallSid) return state.stampedBefore;
             return paramValues(args.where).flat().includes(REP_CALL_SID) ? state.legSession : state.liveSession;
           },
         },
@@ -100,6 +116,10 @@ beforeEach(async () => {
   state.legSession = { status: 'active' };
   state.liveSession = { id: 'sess-1' };
   state.sessionLookupHangs = false;
+  state.userLookupHangs = false;
+  state.stampedBefore = null;
+  state.hangups = [];
+  state.hangupThrows = false;
   _setRejoinDbTimeoutForTests(3000);
   state.sessionLookupThrows = false;
   state.sessionLookups = [];
@@ -207,6 +227,39 @@ describe('POST /telephony/twilio/voice — DialerConference join', () => {
     expect(bound.filter((v) => ['active', 'paused'].includes(v as string))).toEqual(['active']);
   });
 
+  // A leg the softphone gave up on can outlive it on Twilio's side (signalling
+  // died; Twilio has not noticed yet). Left alone it shares the new leg's room:
+  // two rep legs START the conference (no music), and when Twilio finally reaps
+  // the old one it ENDS the room — dropping whoever the rep is talking to.
+  it('re-joining a run hangs up the leg it replaces', async () => {
+    const OLD = 'CAffffffffffffffffffffffffffffffff';
+    state.stampedBefore = { repCallSid: OLD };
+    const res = await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    expect(res.body).toContain('<Conference');
+    await new Promise((r) => setImmediate(r));
+    expect(state.hangups).toEqual([OLD]);
+  });
+
+  it('…but never the leg that is joining (Twilio retried the webhook), and nothing on a first join', async () => {
+    state.stampedBefore = { repCallSid: REP_CALL_SID };
+    await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    state.stampedBefore = { repCallSid: null };
+    await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    state.stampedBefore = null;
+    await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    await new Promise((r) => setImmediate(r));
+    expect(state.hangups).toEqual([]);
+  });
+
+  it('a stale leg that cannot be hung up (already gone — the usual case) changes nothing', async () => {
+    state.stampedBefore = { repCallSid: 'CAffffffffffffffffffffffffffffffff' };
+    state.hangupThrows = true;
+    const res = await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<Conference');
+    expect(state.updates).toHaveLength(1);
+  });
+
   it('a failed stamp never keeps the rep out of their conference', async () => {
     state.updateThrows = true;
     const res = await join();
@@ -312,6 +365,14 @@ describe('POST /telephony/twilio/dialer-conference-rejoin — the rep leg after 
     expect(state.sessionLookups).toEqual([]);
   });
 
+  it('a hold-music lookup that HANGS falls back to music on, and still sends the rep back in', async () => {
+    _setRejoinDbTimeoutForTests(30);
+    state.userLookupHangs = true;
+    const res = await rejoin();
+    expect(res.body).toContain('<Conference');
+    expect(res.body).not.toContain('waitUrl');
+  });
+
   // Twilio requests the action when the rep hangs up too. The call is over:
   // nothing to rejoin, and no reason to touch the database.
   it('the rep hung up themselves (CallStatus=completed): empty response, no lookups', async () => {
@@ -320,6 +381,33 @@ describe('POST /telephony/twilio/dialer-conference-rejoin — the rep leg after 
     expect(res.body).not.toContain('<Conference');
     expect(state.sessionLookups).toEqual([]);
     expect(state.lastFindFirst).toBeNull();
+  });
+
+  // The rep's leg is GONE and the run is still dialing: every human who answers
+  // is bridged into an empty room. The softphone stops the run itself when it
+  // can — but a closed tab or a dead network cannot, and this is the only place
+  // the server ever hears that the leg ended. Pause, never stop: nothing is lost,
+  // and a rep who comes back presses Resume.
+  it('…and if that leg belonged to a run that is still ACTIVE, the run is paused so it stops dialing into an empty room', async () => {
+    await rejoin({ CallStatus: 'completed' });
+    expect(state.updates).toHaveLength(1);
+    expect(state.updates[0]!.set).toMatchObject({ status: 'paused' });
+    const bound = paramValues(state.updates[0]!.where).flat();
+    expect(bound).toContain(REP_ID);
+    expect(bound).toContain(REP_CALL_SID); // THIS leg's run only — a leg already replaced pauses nothing
+    expect(bound.filter((v) => ['active', 'paused', 'ready', 'done', 'stopped'].includes(v as string))).toEqual(['active']);
+  });
+
+  it('a failed pause still answers Twilio', async () => {
+    state.updateThrows = true;
+    const res = await rejoin({ CallStatus: 'completed' });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('a completed call with no usable identity or sid pauses nothing', async () => {
+    await rejoin({ CallStatus: 'completed', From: '+16195551234' });
+    await rejoin({ CallStatus: 'completed', CallSid: 'nope' });
+    expect(state.updates).toEqual([]);
   });
 
   it('a From that is not a rep identity is hung up and never queries', async () => {

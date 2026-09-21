@@ -2,8 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   dialerJoinParams,
   LEG_RECOVERY_DELAY_MS,
+  LEG_RECOVERY_WINDOW_MS,
+  legRecoveryToast,
   MAX_LEG_RECOVERIES,
+  recentRejoins,
   recoverDroppedLeg,
+  STOP_RETRY_DELAYS_MS,
   watchDialerLeg,
   type LegRecoveryDeps,
 } from './dialer-leg';
@@ -66,6 +70,13 @@ describe('recoverDroppedLeg', () => {
     expect(d.stop).not.toHaveBeenCalled();
   });
 
+  // Run end costs the server up to five sequential Twilio REST calls between
+  // hanging the leg up and flipping the status. Shorter than this and a finished
+  // run reads as live.
+  it('the wait is long enough to outlast the server\'s run-end teardown', () => {
+    expect(LEG_RECOVERY_DELAY_MS).toBeGreaterThanOrEqual(1500);
+  });
+
   it('a paused run keeps its rep in the room too', async () => {
     const d = deps({ fetchStatus: vi.fn(async () => 'paused' as const) });
     expect(await recoverDroppedLeg(d, 0)).toBe('rejoined');
@@ -86,6 +97,15 @@ describe('recoverDroppedLeg', () => {
     expect(await recoverDroppedLeg(d, 0)).toBe('superseded');
     expect(d.fetchStatus).not.toHaveBeenCalled();
     expect(d.rejoin).not.toHaveBeenCalled();
+  });
+
+  // The status read is a network round trip: a Stop can land while it is out.
+  it('…and checked AGAIN after the status read, so a run stopped meanwhile is not rejoined', async () => {
+    let current = true;
+    const d = deps({ isCurrent: () => current, fetchStatus: vi.fn(async () => { current = false; return 'active' as const; }) });
+    expect(await recoverDroppedLeg(d, 0)).toBe('superseded');
+    expect(d.rejoin).not.toHaveBeenCalled();
+    expect(d.stop).not.toHaveBeenCalled();
   });
 
   // A live run with no rep leg bridges every human who answers into an empty
@@ -115,8 +135,62 @@ describe('recoverDroppedLeg', () => {
     expect(d.stop).not.toHaveBeenCalled();
   });
 
-  it('never throws, even when the stop fails as well', async () => {
-    const d = deps({ rejoin: vi.fn(async () => { throw new Error('x'); }), stop: vi.fn(async () => { throw new Error('y'); }) });
+  // The usual reason a rejoin fails is that the network is down — and then the
+  // stop fails too. One attempt would leave the run ACTIVE with no rep leg while
+  // telling the rep it had been stopped.
+  it('keeps trying to stop, on a backoff, until it lands', async () => {
+    const waits: number[] = [];
+    let calls = 0;
+    const d = deps({
+      rejoin: vi.fn(async () => { throw new Error('offline'); }),
+      wait: vi.fn(async (ms: number) => { waits.push(ms); }),
+      stop: vi.fn(async () => { if (++calls < 3) throw new Error('offline'); }),
+    });
     expect(await recoverDroppedLeg(d, 0)).toBe('stopped');
+    expect(d.stop).toHaveBeenCalledTimes(3);
+    expect(waits).toEqual([LEG_RECOVERY_DELAY_MS, STOP_RETRY_DELAYS_MS[0], STOP_RETRY_DELAYS_MS[1]]);
+  });
+
+  it('says so — never "stopped" — when the run could not be stopped, and never throws', async () => {
+    const d = deps({ rejoin: vi.fn(async () => { throw new Error('x'); }), stop: vi.fn(async () => { throw new Error('y'); }) });
+    expect(await recoverDroppedLeg(d, 0)).toBe('stop-failed');
+    expect(d.stop).toHaveBeenCalledTimes(STOP_RETRY_DELAYS_MS.length + 1);
+  });
+
+  it('gives up retrying the stop once the rep has dealt with it themselves', async () => {
+    let current = true;
+    const d = deps({
+      isCurrent: () => current,
+      rejoin: vi.fn(async () => { throw new Error('x'); }),
+      stop: vi.fn(async () => { current = false; throw new Error('y'); }),
+    });
+    expect(await recoverDroppedLeg(d, 0)).toBe('superseded');
+    expect(d.stop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('recentRejoins — the cap decays', () => {
+  // Three drops in a bad ten minutes means the connection is not coming back.
+  // Three drops across a four-hour shift means nothing.
+  it('counts only the rejoins inside the window', () => {
+    const now = 10_000_000;
+    expect(recentRejoins([], now)).toBe(0);
+    expect(recentRejoins([now - 1, now - LEG_RECOVERY_WINDOW_MS + 1], now)).toBe(2);
+    expect(recentRejoins([now - LEG_RECOVERY_WINDOW_MS, now - LEG_RECOVERY_WINDOW_MS - 1], now)).toBe(0);
+  });
+});
+
+describe('legRecoveryToast', () => {
+  it('is honest about what happened', () => {
+    expect(legRecoveryToast('rejoined')).toEqual({ type: 'success', text: expect.stringContaining('reconnected') });
+    expect(legRecoveryToast('stopped')).toEqual({ type: 'error', text: expect.stringContaining('was stopped') });
+    const failed = legRecoveryToast('stop-failed');
+    expect(failed?.type).toBe('error');
+    expect(failed?.text).toContain('could not be stopped');
+    expect(failed?.text).not.toContain('was stopped');
+  });
+  it('says nothing when there is nothing to tell', () => {
+    expect(legRecoveryToast('superseded')).toBeNull();
+    expect(legRecoveryToast('run-over')).toBeNull();
   });
 });
