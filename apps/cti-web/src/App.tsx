@@ -15,6 +15,8 @@ import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
 import { repDialAction } from './checks';
 import {
+  dialerControl,
+  getDialer,
   getPendingHandoff,
   startDialer,
   startDialerFromListView,
@@ -22,6 +24,7 @@ import {
   type DialerSession,
   type DialerSessionCounts,
 } from './dialer-api';
+import { dialerJoinParams, recoverDroppedLeg, watchDialerLeg } from './dialer-leg';
 import { ClockIcon, CloudIcon, GridIcon, MoreIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, ShieldXIcon, UserIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
 import { navTabsFor, NAV_OVERFLOW_IDS, type Tab } from './nav';
@@ -272,6 +275,11 @@ export function App(): JSX.Element {
   // where an in-flight connect() resolves AFTER a stop/new-start, preventing a
   // stale connection from overwriting the cleared ref and leaking a conference leg.
   const dialerRunRef = useRef(0);
+  // The run the conference leg belongs to, readable from inside callbacks that
+  // outlive a render (the join, and the leg's disconnect handler).
+  const dialerSessionIdRef = useRef<string | null>(null);
+  // How many times THIS run's leg has been brought back after dropping on its own.
+  const legRecoveriesRef = useRef(0);
   // True from the first line of place() until it settles — used to reject an
   // inbound call that races an in-flight outbound dial (which would otherwise
   // clobber connectionRef and orphan the outbound leg).
@@ -576,6 +584,8 @@ export function App(): JSX.Element {
     [dropConferenceLeg],
   );
 
+  useEffect(() => { dialerSessionIdRef.current = dialerSessionId; }, [dialerSessionId]);
+
   // Dismiss a finished/stopped run's summary and return to the list-view picker.
   const handleDialerDismiss = useCallback(() => setDialerSessionId(null), []);
 
@@ -614,24 +624,50 @@ export function App(): JSX.Element {
   // leg carries `endConferenceOnExit=true`, so a second tab's leg landed in
   // the room of the rep's LIVE run elsewhere — and dropping it after a refused
   // `start` ended that whole conference, silently cutting the other tab's run.
-  const joinDialerConference = useCallback(async (): Promise<boolean> => {
+  const joinLegRef = useRef<(isRecovery: boolean) => Promise<boolean>>(async () => false);
+  const joinLeg = useCallback(async (isRecovery: boolean): Promise<boolean> => {
     const myRun = ++dialerRunRef.current;
+    if (!isRecovery) legRecoveriesRef.current = 0;
     // A call can start ringing on this tab's Device during the `start` round trip; re-check the same idle predicate `prepareDialerDevice` used before touching anything else.
     if (phaseRef.current !== 'idle' || connectionRef.current || incomingRef.current) {
       throw new Error('A call arrived while the run was starting — the run was stopped.');
     }
     coordinatorRef.current?.promoteSelf();
     setDialerLive(true); // lock the nav to the Power Dial tab for the whole run
+    const sessionId = dialerSessionIdRef.current;
     try {
       const device = await ensureDevice();
       const connection = await (device as unknown as { connect: (o: unknown) => Promise<unknown> }).connect({
-        params: { DialerConference: '1' },
+        params: dialerJoinParams(sessionId),
       });
       if (dialerRunRef.current !== myRun) {
         try { (connection as { disconnect?: () => void }).disconnect?.(); } catch { /* already gone */ }
         return false;
       }
       dialerConnRef.current = connection;
+      // The leg now survives each prospect leaving only via a server round trip
+      // (see dialer-leg.ts). If it dies while the run is live, get the rep back
+      // in — or stop the run: it must never keep dialing into an empty room.
+      watchDialerLeg(connection, {
+        isOurs: () => dialerConnRef.current === connection,
+        onDropped: () => {
+          dialerConnRef.current = null;
+          const recoveries = legRecoveriesRef.current++;
+          void recoverDroppedLeg({
+            isCurrent: () => dialerRunRef.current === myRun,
+            wait: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+            fetchStatus: async () => (sessionId ? (await getDialer(sessionId)).session.status : 'stopped'),
+            rejoin: () => joinLegRef.current(true),
+            stop: async () => { if (sessionId) await dialerControl(sessionId, 'stop'); },
+          }, recoveries).then((outcome) => {
+            if (outcome === 'rejoined' || outcome === 'superseded') return;
+            dropConferenceLeg();
+            if (outcome === 'stopped') {
+              setToast({ text: 'Power Dial lost its audio connection, so the run was stopped. Start it again to continue.', type: 'error' });
+            }
+          });
+        },
+      });
       // Announce "busy" NOW rather than waiting up to a heartbeat — until peers see
       // it, a tab the rep alt-tabs to could still win the election and register a
       // second Device on top of this live run.
@@ -641,7 +677,9 @@ export function App(): JSX.Element {
       if (dialerRunRef.current === myRun) setDialerLive(false); // only if a newer run didn't supersede us
       throw e;
     }
-  }, [ensureDevice]);
+  }, [ensureDevice, dropConferenceLeg]);
+  joinLegRef.current = joinLeg;
+  const joinDialerConference = useCallback((): Promise<boolean> => joinLeg(false), [joinLeg]);
 
   const startPowerDial = useCallback(async (objectType: unknown, recordIds: unknown): Promise<void> => {
     if (objectType !== 'Lead' && objectType !== 'Opportunity') {

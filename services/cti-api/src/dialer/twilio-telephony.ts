@@ -30,7 +30,10 @@ export interface TwilioDialerClient {
   /** Same callable-plus-methods shape as `calls`, for conference teardown:
    *  `conferences.list({...})` to resolve a friendly name to SIDs, and
    *  `conferences(sid).update({...})` to complete one. */
-  conferences: ((conferenceSid: string) => { update(args: Record<string, unknown>): Promise<unknown> }) & {
+  conferences: ((conferenceSid: string) => {
+    update(args: Record<string, unknown>): Promise<unknown>;
+    participants: { list(): Promise<{ callSid: string }[]> };
+  }) & {
     list(args: Record<string, unknown>): Promise<{ sid: string }[]>;
   };
 }
@@ -195,19 +198,48 @@ export class TwilioDialerTelephony implements DialerTelephony {
    * End the rep's conference when their run ends — the server-side backstop for
    * a client that never disconnected (tab switched away mid-run, asleep, stalled
    * polling), which would otherwise leave the leg billing and the rep's single
-   * Twilio Device busy. The friendly name is stable per rep (`conferenceName`)
-   * but the conference SID rotates every run, so resolve it by name first.
-   * Completing every in-progress match keeps it correct even if a stale room
-   * somehow lingers alongside a new one. No matches (the usual case, since the
-   * rep's own leg already collapsed it) is a no-op.
+   * Twilio Device busy. The engine hangs the rep's leg up by sid FIRST
+   * (dialer/engine.ts `releaseRepConference`); this is what is left for a run
+   * with no recorded leg, and a harmless no-op after it.
+   *
+   * The friendly name is stable per rep (`conferenceName`) but the conference
+   * SID rotates — every run, and now every time a prospect leaves — so resolve
+   * it by name. Both states: `in-progress`, and `init`, the UN-started room the
+   * rep waits in alone between prospects (where a run usually ends).
+   *
+   * For each room, hang up every participant's CALL before completing the room.
+   * Completing it alone no longer ends the rep's leg: its `<Dial action>` asks
+   * the rejoin route, and while the session is still `active` (the engine
+   * releases before the status flip, on purpose) a leg recorded on no run is
+   * sent straight back in. A call ended over REST runs no more TwiML.
+   *
+   * Every step is best-effort and independent: a participant that is already
+   * gone, or a listing that fails, must not save the rest. No matches (the usual
+   * case, since the rep's own leg already collapsed the room) is a no-op.
    */
   async endConference(userId: string): Promise<void> {
     const client = this.clientFactory();
-    const rooms = await client.conferences.list({
-      friendlyName: conferenceName(userId),
-      status: 'in-progress',
-    });
+    const friendlyName = conferenceName(userId);
+    const rooms: { sid: string }[] = [];
+    for (const status of ['in-progress', 'init'] as const) {
+      try {
+        rooms.push(...(await client.conferences.list({ friendlyName, status })));
+      } catch (err) {
+        console.error('[dialer] conference lookup failed', { userId, status, err: (err as Error).message });
+      }
+    }
     for (const room of rooms) {
+      let callSids: string[] = [];
+      try {
+        callSids = (await client.conferences(room.sid).participants.list()).map((p) => p.callSid);
+      } catch (err) {
+        console.error('[dialer] participant lookup failed', { userId, room: room.sid, err: (err as Error).message });
+      }
+      for (const callSid of callSids) {
+        try {
+          await client.calls(callSid).update({ status: 'completed' } as never);
+        } catch { /* already gone — the common case */ }
+      }
       await client.conferences(room.sid).update({ status: 'completed' } as never);
     }
   }

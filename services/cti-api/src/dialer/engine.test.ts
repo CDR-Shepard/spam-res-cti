@@ -325,19 +325,21 @@ describe('advanceSession', () => {
   // end it is usually in NO started conference (or between rooms): completing a
   // room by name finds nothing, or just sends the leg round the rejoin loop.
   // Hanging up the leg itself is the only teardown that cannot miss.
-  it('hangs up the rep\'s own leg by sid when the queue drains — before the conference teardown and before the session leaves active', async () => {
+  // ORDER is asserted on snapshots taken INSIDE the mocks and checked AFTER the
+  // call. An `expect` inside the mock proves nothing here: releaseRepConference
+  // wraps both Twilio calls in try/catch, so a failing assertion is swallowed and
+  // logged, and "release after the flip" passed the whole suite.
+  it('hangs up the rep\'s own leg by sid when the queue drains — before the conference teardown, and BOTH before the session leaves active', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
     const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, repCallSid: REP_LEG }, items); deps.db = fdb;
-    const order: string[] = [];
-    deps.telephony.hangup = vi.fn(async () => {
-      order.push('hangup');
-      expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
-    });
-    deps.telephony.endConference = vi.fn(async () => { order.push('endConference'); });
+    const seen: Array<{ step: string; flipped: boolean }> = [];
+    const flipped = () => fdb._writes.some((w: any) => w.patch.status === 'done');
+    deps.telephony.hangup = vi.fn(async () => { seen.push({ step: 'hangup', flipped: flipped() }); });
+    deps.telephony.endConference = vi.fn(async () => { seen.push({ step: 'endConference', flipped: flipped() }); });
     await advanceSession('S1', deps);
     expect(deps.telephony.hangup).toHaveBeenCalledWith(REP_LEG);
-    expect(order).toEqual(['hangup', 'endConference']);
-    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+    expect(seen).toEqual([{ step: 'hangup', flipped: false }, { step: 'endConference', flipped: false }]);
+    expect(flipped()).toBe(true);
   });
   it('a failed rep-leg hangup (the leg is usually already gone) still tears the room down and completes the run', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
@@ -817,16 +819,19 @@ describe('stopSession', () => {
     await stopSession('S1', deps);
     expect(deps.telephony.endConference).toHaveBeenCalledWith('U1');
   });
-  it('hangs up the rep\'s own leg on stop — active or paused — before the session leaves its live status', async () => {
+  it('hangs up the rep\'s own leg on stop — active or paused — and releases BEFORE the session leaves its live status', async () => {
     for (const status of ['active', 'paused']) {
       const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
       const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status, repCallSid: REP_LEG }, items); deps.db = fdb;
-      deps.telephony.hangup = vi.fn(async () => {
-        expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'stopped' }) });
-      });
+      const seen: Array<{ step: string; flipped: boolean }> = [];
+      const flipped = () => fdb._writes.some((w: any) => w.patch.status === 'stopped');
+      deps.telephony.hangup = vi.fn(async () => { seen.push({ step: 'hangup', flipped: flipped() }); });
+      deps.telephony.endConference = vi.fn(async () => { seen.push({ step: 'endConference', flipped: flipped() }); });
       await stopSession('S1', deps);
       expect(deps.telephony.hangup).toHaveBeenCalledTimes(1);
       expect(deps.telephony.hangup).toHaveBeenCalledWith(REP_LEG);
+      expect(seen).toEqual([{ step: 'hangup', flipped: false }, { step: 'endConference', flipped: false }]);
+      expect(flipped()).toBe(true);
     }
   });
   // Same cross-run rule as the conference: a ready / stopped / done session has

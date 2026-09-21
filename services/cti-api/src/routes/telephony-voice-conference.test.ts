@@ -13,7 +13,11 @@ const state = vi.hoisted(() => ({
   userRow: null as { dialerHoldMusic: boolean } | null,
   findFirstThrows: false,
   lastFindFirst: null as { where: unknown; columns?: unknown } | null,
+  /** The run this LEG is recorded on (lookup by rep_call_sid), if any. */
+  legSession: null as { status: string } | null,
+  /** Fallback: does the rep have any live run (lookup by user + status). */
   liveSession: null as { id: string } | null,
+  sessionLookupHangs: false,
   sessionLookupThrows: false,
   sessionLookups: [] as Array<{ where: unknown }>,
   updates: [] as Array<{ set: Record<string, unknown>; where: unknown }>,
@@ -54,7 +58,8 @@ vi.mock('@cti/db', async (importOriginal) => {
           findFirst: async (args: { where: unknown }) => {
             state.sessionLookups.push(args);
             if (state.sessionLookupThrows) throw new Error('pool exhausted');
-            return state.liveSession;
+            if (state.sessionLookupHangs) return new Promise(() => {});
+            return paramValues(args.where).flat().includes(REP_CALL_SID) ? state.legSession : state.liveSession;
           },
         },
       },
@@ -70,7 +75,7 @@ vi.mock('@cti/db', async (importOriginal) => {
   };
 });
 
-import { registerTelephonyRoutes } from './telephony.js';
+import { _setRejoinDbTimeoutForTests, registerTelephonyRoutes } from './telephony.js';
 
 /** Bound parameter values inside a drizzle predicate — which id the query asked for. */
 function paramValues(node: unknown, out: unknown[] = []): unknown[] {
@@ -82,6 +87,8 @@ function paramValues(node: unknown, out: unknown[] = []): unknown[] {
   return out;
 }
 
+const REP_CALL_SID = 'CA0123456789abcdef0123456789abcdef';
+const SESSION_ID = '7b0e5c1a-2f4d-4c3b-9a8e-1d2c3b4a5f60';
 const REP_ID = 'c9c45940-0f17-4c1e-bb3e-d084ba93eb86';
 const REP_FROM = 'client:rep_c9c459400f174c1ebb3ed084ba93eb86';
 
@@ -90,7 +97,10 @@ beforeEach(async () => {
   state.userRow = { dialerHoldMusic: true };
   state.findFirstThrows = false;
   state.lastFindFirst = null;
+  state.legSession = { status: 'active' };
   state.liveSession = { id: 'sess-1' };
+  state.sessionLookupHangs = false;
+  _setRejoinDbTimeoutForTests(3000);
   state.sessionLookupThrows = false;
   state.sessionLookups = [];
   state.updates = [];
@@ -103,11 +113,14 @@ beforeEach(async () => {
 });
 afterEach(async () => { await app.close(); });
 
-const REP_CALL_SID = 'CA0123456789abcdef0123456789abcdef';
 const REJOIN_ACTION = '<Dial action="https://api.test/telephony/twilio/dialer-conference-rejoin" method="POST">';
 
-const join = (from = REP_FROM, callSid: string | null = REP_CALL_SID) =>
-  app.inject({ method: 'POST', url: '/telephony/twilio/voice', payload: { DialerConference: '1', From: from, ...(callSid ? { CallSid: callSid } : {}) } });
+const join = (from = REP_FROM, callSid: string | null = REP_CALL_SID, sessionId: string | null = null) =>
+  app.inject({
+    method: 'POST',
+    url: '/telephony/twilio/voice',
+    payload: { DialerConference: '1', From: from, ...(callSid ? { CallSid: callSid } : {}), ...(sessionId ? { DialerSessionId: sessionId } : {}) },
+  });
 
 const rejoin = (payload: Record<string, string> = {}) =>
   app.inject({
@@ -163,14 +176,35 @@ describe('POST /telephony/twilio/voice — DialerConference join', () => {
   // The run-end backstop hangs up THIS call by sid. A friendly-name lookup cannot
   // do it any more: between conferences the rep is in no room at all, and a room
   // completed by name would just send the leg round the rejoin loop.
-  it("stamps the rep leg's CallSid on the rep's ACTIVE session only", async () => {
+  // The softphone names its run. That is the only way a run that came up PAUSED
+  // (no numbers free at Start) gets its leg recorded: "the rep's one active run"
+  // cannot see it, and guessing among paused runs could pick an abandoned one.
+  it("stamps the rep leg's CallSid on the run the softphone NAMED — the rep's own, active or paused", async () => {
+    await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    expect(state.updates).toHaveLength(1);
+    expect(state.updates[0]!.set).toMatchObject({ repCallSid: REP_CALL_SID });
+    const bound = paramValues(state.updates[0]!.where).flat();
+    expect(bound).toContain(SESSION_ID);
+    expect(bound).toContain(REP_ID); // never another rep's run, whatever id is sent
+    expect(bound.filter((v) => ['active', 'paused', 'ready', 'done', 'stopped'].includes(v as string)).sort()).toEqual(['active', 'paused']);
+  });
+
+  // An older softphone (a tab open since before the deploy) names nothing.
+  it("with no run named, stamps the rep's ACTIVE session only — never a paused one, which may be abandoned", async () => {
     await join();
     expect(state.updates).toHaveLength(1);
     expect(state.updates[0]!.set).toMatchObject({ repCallSid: REP_CALL_SID });
-    const bound = paramValues(state.updates[0]!.where);
+    const bound = paramValues(state.updates[0]!.where).flat();
     expect(bound).toContain(REP_ID);
-    expect(bound).toContain('active');
-    expect(bound).not.toContain('paused');
+    expect(bound.filter((v) => ['active', 'paused', 'ready', 'done', 'stopped'].includes(v as string))).toEqual(['active']);
+  });
+
+  it('a run id that is not a uuid is ignored, not interpolated: falls back to the active-session stamp', async () => {
+    await join(REP_FROM, REP_CALL_SID, "x' or '1'='1");
+    expect(state.updates).toHaveLength(1);
+    const bound = paramValues(state.updates[0]!.where).flat();
+    expect(bound).not.toContain("x' or '1'='1");
+    expect(bound.filter((v) => ['active', 'paused'].includes(v as string))).toEqual(['active']);
   });
 
   it('a failed stamp never keeps the rep out of their conference', async () => {
@@ -198,13 +232,40 @@ describe('POST /telephony/twilio/dialer-conference-rejoin — the rep leg after 
     expect(res.body).not.toContain('waitUrl');
   });
 
-  it("looks for the rep's own ACTIVE or PAUSED session — a paused run still has its rep in the room", async () => {
-    await rejoin();
-    expect(state.sessionLookups).toHaveLength(1);
-    const bound = paramValues(state.sessionLookups[0]!.where).flat();
+  // Keyed on the LEG, not the rep. Nothing ever ends an abandoned PAUSED run, so
+  // "does this rep have a live run?" can stay true for ever — and a finished
+  // run's leg would loop back in, on hold music, with the Device busy.
+  it('a leg recorded on a FINISHED run is hung up even though the rep has another live run', async () => {
+    for (const status of ['done', 'stopped', 'ready']) {
+      state.legSession = { status };
+      state.liveSession = { id: 'an-abandoned-paused-run' };
+      const res = await rejoin();
+      expect(res.body).toContain('<Hangup');
+      expect(res.body).not.toContain('<Conference');
+    }
+  });
+
+  it('a leg recorded on a live run — active or paused — goes back in, and the rep-level lookup is never needed', async () => {
+    for (const status of ['active', 'paused']) {
+      state.sessionLookups = [];
+      state.legSession = { status };
+      state.liveSession = null;
+      expect((await rejoin()).body).toContain('<Conference');
+      expect(state.sessionLookups).toHaveLength(1);
+      const bound = paramValues(state.sessionLookups[0]!.where).flat();
+      expect(bound).toContain(REP_CALL_SID);
+      expect(bound).toContain(REP_ID);
+    }
+  });
+
+  // The stamp failed, or an older softphone joined a run that came up paused.
+  it("a leg recorded on NO run falls back to the rep's own ACTIVE or PAUSED session — exactly those two", async () => {
+    state.legSession = null;
+    expect((await rejoin()).body).toContain('<Conference');
+    expect(state.sessionLookups).toHaveLength(2);
+    const bound = paramValues(state.sessionLookups[1]!.where).flat();
     expect(bound).toContain(REP_ID);
-    expect(bound).toContain('active');
-    expect(bound).toContain('paused');
+    expect(bound.filter((v) => ['active', 'paused', 'ready', 'done', 'stopped'].includes(v as string)).sort()).toEqual(['active', 'paused']);
   });
 
   it('keeps the rep\'s hold-music preference on the way back in', async () => {
@@ -215,6 +276,7 @@ describe('POST /telephony/twilio/dialer-conference-rejoin — the rep leg after 
   // The run ended (done / stopped) and the room was completed by the backstop:
   // looping back in would strand the leg on hold music with the Device busy.
   it('a rep with NO live run is hung up instead of being sent round again', async () => {
+    state.legSession = null;
     state.liveSession = null;
     const res = await rejoin();
     expect(res.statusCode).toBe(200);
@@ -229,6 +291,25 @@ describe('POST /telephony/twilio/dialer-conference-rejoin — the rep leg after 
     const res = await rejoin();
     expect(res.body).toContain('<Conference');
     expect(res.body).not.toContain('<Hangup');
+  });
+
+  // Twilio gives a webhook ~15s and then FAILS the call. A hung pool must cost the
+  // rep a few seconds of silence, not their run.
+  it('a session lookup that HANGS gives up and sends the rep back in', async () => {
+    _setRejoinDbTimeoutForTests(30);
+    state.sessionLookupHangs = true;
+    const res = await rejoin();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<Conference');
+  });
+
+  // A room that cannot be entered at all would otherwise spin: fail → action →
+  // rejoin → fail, as fast as Twilio can ask, for as long as the run is live.
+  it('a <Dial> that FAILED is not retried: the leg is hung up', async () => {
+    const res = await rejoin({ DialCallStatus: 'failed' });
+    expect(res.body).toContain('<Hangup');
+    expect(res.body).not.toContain('<Conference');
+    expect(state.sessionLookups).toEqual([]);
   });
 
   // Twilio requests the action when the rep hangs up too. The call is over:

@@ -101,23 +101,32 @@ describe('dialerConferenceTwiml', () => {
 // ---------------------------------------------------------------------------
 
 /** Fake twilio client: records every create()/update()/list() call it receives.
- *  `rooms` is what `conferences.list()` resolves to (the in-progress conferences
- *  matching the queried friendly name). */
-function fakeClient(rooms: { sid: string }[] = []): {
+ *  `rooms` is what `conferences.list()` resolves to for the `in-progress` query;
+ *  `opts.initRooms` for the `init` (un-started) one; `opts.participants` maps a
+ *  conference sid to the call sids in it. `opts.fail` names operations that throw. */
+function fakeClient(
+  rooms: { sid: string }[] = [],
+  opts: { initRooms?: { sid: string }[]; participants?: Record<string, string[]>; fail?: string[] } = {},
+): {
   client: TwilioDialerClient;
   createCalls: Record<string, unknown>[];
   updateCalls: { callId: string; args: Record<string, unknown> }[];
   conferenceListArgs: Record<string, unknown>[];
   conferenceUpdates: { sid: string; args: Record<string, unknown> }[];
+  events: string[];
 } {
   const createCalls: Record<string, unknown>[] = [];
   const updateCalls: { callId: string; args: Record<string, unknown> }[] = [];
   const conferenceListArgs: Record<string, unknown>[] = [];
   const conferenceUpdates: { sid: string; args: Record<string, unknown> }[] = [];
+  const events: string[] = [];
+  const fails = (op: string): boolean => (opts.fail ?? []).includes(op);
 
   const callsFn = ((callSid: string) => ({
     update: async (args: Record<string, unknown>) => {
+      if (fails(`call:${callSid}`)) throw new Error('Call is not in-progress');
       updateCalls.push({ callId: callSid, args });
+      events.push(`call:${callSid}`);
       return {};
     },
   })) as TwilioDialerClient['calls'];
@@ -129,12 +138,20 @@ function fakeClient(rooms: { sid: string }[] = []): {
   const conferencesFn = ((sid: string) => ({
     update: async (args: Record<string, unknown>) => {
       conferenceUpdates.push({ sid, args });
+      events.push(`room:${sid}`);
       return {};
+    },
+    participants: {
+      list: async () => {
+        if (fails(`participants:${sid}`)) throw new Error('twilio 500');
+        return (opts.participants?.[sid] ?? []).map((callSid) => ({ callSid }));
+      },
     },
   })) as TwilioDialerClient['conferences'];
   conferencesFn.list = async (args: Record<string, unknown>) => {
     conferenceListArgs.push(args);
-    return rooms;
+    if (fails(`list:${String(args.status)}`)) throw new Error('twilio 500');
+    return args.status === 'init' ? (opts.initRooms ?? []) : rooms;
   };
 
   return {
@@ -143,6 +160,7 @@ function fakeClient(rooms: { sid: string }[] = []): {
     updateCalls,
     conferenceListArgs,
     conferenceUpdates,
+    events,
   };
 }
 
@@ -233,26 +251,63 @@ describe('TwilioDialerTelephony.hangup', () => {
 });
 
 describe('TwilioDialerTelephony.endConference', () => {
-  it('resolves the rep conference by friendly name and completes it', async () => {
+  it('resolves the rep conference by friendly name — started AND un-started rooms — and completes it', async () => {
     // The friendly name is stable per rep (conferenceName) but the conference
     // SID rotates every run, so the SID must be looked up rather than stored.
-    const { client, conferenceListArgs, conferenceUpdates } = fakeClient([{ sid: 'CF1' }]);
+    // Since the rep's leg re-enters a fresh room after every prospect, the room
+    // at run end is usually UN-started (the rep alone, on hold music).
+    const { client, conferenceListArgs, conferenceUpdates } = fakeClient([{ sid: 'CF1' }], { initRooms: [{ sid: 'CF0' }] });
     const telephony = new TwilioDialerTelephony(() => client);
     await telephony.endConference('user-1');
 
-    expect(conferenceListArgs).toEqual([{ friendlyName: conferenceName('user-1'), status: 'in-progress' }]);
-    expect(conferenceUpdates).toEqual([{ sid: 'CF1', args: { status: 'completed' } }]);
+    expect(conferenceListArgs).toEqual([
+      { friendlyName: conferenceName('user-1'), status: 'in-progress' },
+      { friendlyName: conferenceName('user-1'), status: 'init' },
+    ]);
+    expect(conferenceUpdates).toEqual([
+      { sid: 'CF1', args: { status: 'completed' } },
+      { sid: 'CF0', args: { status: 'completed' } },
+    ]);
   });
 
-  it('is a no-op when the rep has no in-progress conference (the client leg already collapsed it)', async () => {
-    const { client, conferenceUpdates } = fakeClient([]);
+  // Completing a room does not END the rep's leg any more: its <Dial action>
+  // sends it to the rejoin route, which — for a leg recorded on no run, while the
+  // session is still `active` (callers release before the flip) — sends it
+  // straight back in. Hanging the calls up is what cannot be undone.
+  it("hangs up every participant's call BEFORE completing the room", async () => {
+    const { client, events } = fakeClient([{ sid: 'CF1' }], { participants: { CF1: ['CArep', 'CAprospect'] } });
+    await new TwilioDialerTelephony(() => client).endConference('user-1');
+    expect(events).toEqual(['call:CArep', 'call:CAprospect', 'room:CF1']);
+  });
+
+  it('one participant that cannot be hung up (already gone) does not save the others, or the room', async () => {
+    const { client, events } = fakeClient([{ sid: 'CF1' }], { participants: { CF1: ['CAgone', 'CArep'] }, fail: ['call:CAgone'] });
+    await new TwilioDialerTelephony(() => client).endConference('user-1');
+    expect(events).toEqual(['call:CArep', 'room:CF1']);
+  });
+
+  it('still completes the room when its participants cannot be listed', async () => {
+    const { client, events } = fakeClient([{ sid: 'CF1' }], { fail: ['participants:CF1'] });
+    await new TwilioDialerTelephony(() => client).endConference('user-1');
+    expect(events).toEqual(['room:CF1']);
+  });
+
+  it('a failed un-started-room lookup does not lose the started rooms', async () => {
+    const { client, conferenceUpdates } = fakeClient([{ sid: 'CF1' }], { fail: ['list:init'] });
+    await new TwilioDialerTelephony(() => client).endConference('user-1');
+    expect(conferenceUpdates.map((u) => u.sid)).toEqual(['CF1']);
+  });
+
+  it('is a no-op when the rep has no conference (the client leg already collapsed it)', async () => {
+    const { client, conferenceUpdates, updateCalls } = fakeClient([]);
     const telephony = new TwilioDialerTelephony(() => client);
     await telephony.endConference('user-1');
 
     expect(conferenceUpdates).toEqual([]);
+    expect(updateCalls).toEqual([]);
   });
 
-  it('completes every matching in-progress conference, not just the first', async () => {
+  it('completes every matching conference, not just the first', async () => {
     const { client, conferenceUpdates } = fakeClient([{ sid: 'CF1' }, { sid: 'CF2' }]);
     const telephony = new TwilioDialerTelephony(() => client);
     await telephony.endConference('user-1');

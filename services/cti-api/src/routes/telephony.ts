@@ -46,43 +46,86 @@ async function repHoldMusic(from: string): Promise<boolean> {
 
 /**
  * Remember which Twilio call is the rep's conference leg, on the run it belongs
- * to. The softphone joins only after the engine accepted `start`, so that run
- * is the rep's one ACTIVE session (unique index) — never a paused one, which
- * could be an abandoned run whose later teardown would hang up this live leg.
- * Best-effort: the stamp only feeds the run-end backstop, and a failure here
- * must never keep a rep out of their conference.
+ * to. The softphone NAMES the run (`DialerSessionId`, apps/cti-web dialer-leg.ts):
+ * that is the only way a run which came up `paused` — no numbers free at Start —
+ * gets its leg recorded. The id is only ever a filter beside the rep's own
+ * user id (from Twilio's signed `From`), so naming someone else's run matches
+ * nothing.
+ *
+ * An older softphone (a tab open since before this shipped) names nothing; then
+ * the run is the rep's one ACTIVE session (unique index) — never a paused one,
+ * which could be an abandoned run whose later teardown would hang up this leg.
+ *
+ * Best-effort: the stamp feeds the run-end backstop and the rejoin decision, and
+ * a failure here must never keep a rep out of their conference.
  */
-async function stampRepCallSid(from: string, callSid: string | undefined): Promise<void> {
+async function stampRepCallSid(from: string, callSid: string | undefined, sessionId: string | undefined): Promise<void> {
   const userId = repUserIdFromClientIdentity(from);
   if (!userId || !callSid || !TWILIO_CALL_SID_RE.test(callSid)) return;
+  const run = sessionId && UUID_RE.test(sessionId)
+    ? and(eq(schema.dialerSessions.id, sessionId), inArray(schema.dialerSessions.status, ['active', 'paused']))
+    : eq(schema.dialerSessions.status, 'active');
   try {
     await getDb()
       .update(schema.dialerSessions)
       .set({ repCallSid: callSid, updatedAt: new Date() })
-      .where(and(eq(schema.dialerSessions.userId, userId), eq(schema.dialerSessions.status, 'active')));
+      .where(and(eq(schema.dialerSessions.userId, userId), run));
   } catch (err) {
     console.error('[dialer] rep call sid stamp failed', { userId, err: (err as Error).message });
   }
 }
 
+/** Twilio gives a webhook ~15s and then fails the CALL. The rejoin route's
+ *  lookups get a fraction of that; past it they answer with their safe default. */
+let rejoinDbTimeoutMs = 3000;
+export function _setRejoinDbTimeoutForTests(ms: number): void { rejoinDbTimeoutMs = ms; }
+
+function orDefaultAfter<T>(work: Promise<T>, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<T>((resolve) => { timer = setTimeout(() => resolve(fallback), rejoinDbTimeoutMs); });
+  return Promise.race([work, deadline]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+const isLiveRun = (status: string): boolean => status === 'active' || status === 'paused';
+
 /**
- * Does this rep still have a run that wants them in the room? Active or paused —
- * a paused run keeps its rep leg up. A lookup that FAILS answers yes: a database
- * hiccup must never end a live run, and the opposite mistake (looping a finished
- * run's leg back in) is already covered by the backstop hanging the leg up by sid.
+ * Should this leg go back into the room? Decided by the LEG where possible: the
+ * run it was recorded on is live (active, or paused — a paused run keeps its rep
+ * in the room) → yes; that run has ended → no. It must not be decided by "does
+ * this rep have a live run": nothing ever ends an abandoned PAUSED run, so that
+ * can stay true for ever, and a finished run's leg would loop back in — on hold
+ * music, holding the rep's one Device — with nothing left to hang it up.
+ *
+ * Only a leg recorded on NO run (the stamp failed, or an older softphone joined
+ * a run that came up paused) falls back to the rep-level question.
+ *
+ * A lookup that FAILS or HANGS answers yes: a database hiccup must never end a
+ * live run, and the opposite mistake is covered by the backstop hanging the leg
+ * up by sid (dialer/engine.ts `releaseRepConference`).
  */
-async function repHasLiveRun(userId: string): Promise<boolean> {
-  try {
-    const row = await getDb().query.dialerSessions.findFirst({
+async function legShouldRejoin(userId: string, callSid: string | undefined): Promise<boolean> {
+  const decide = async (): Promise<boolean> => {
+    const db = getDb();
+    if (callSid && TWILIO_CALL_SID_RE.test(callSid)) {
+      const own = await db.query.dialerSessions.findFirst({
+        where: and(eq(schema.dialerSessions.userId, userId), eq(schema.dialerSessions.repCallSid, callSid)),
+        columns: { status: true },
+      });
+      if (own) return isLiveRun(own.status);
+    }
+    const live = await db.query.dialerSessions.findFirst({
       where: and(
         eq(schema.dialerSessions.userId, userId),
         inArray(schema.dialerSessions.status, ['active', 'paused']),
       ),
       columns: { id: true },
     });
-    return !!row;
+    return !!live;
+  };
+  try {
+    return await orDefaultAfter(decide(), true);
   } catch (err) {
-    console.error('[dialer] live-run lookup failed; rejoining', { userId, err: (err as Error).message });
+    console.error('[dialer] rejoin lookup failed; rejoining', { userId, err: (err as Error).message });
     return true;
   }
 }
@@ -133,14 +176,20 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     if (body.CallStatus === 'completed') {
       return reply.type('text/xml').send(new VoiceResponse().toString());
     }
-    const from = body.From ?? '';
-    const userId = repUserIdFromClientIdentity(from);
-    if (!userId || !(await repHasLiveRun(userId))) {
+    const hangup = (): string => {
       const response = new VoiceResponse();
       response.hangup();
-      return reply.type('text/xml').send(response.toString());
+      return response.toString();
+    };
+    // A room that could not be entered at all must not be retried: fail → action
+    // → rejoin → fail would spin as fast as Twilio can ask, for the whole run.
+    if (body.DialCallStatus === 'failed') return reply.type('text/xml').send(hangup());
+    const from = body.From ?? '';
+    const userId = repUserIdFromClientIdentity(from);
+    if (!userId || !(await legShouldRejoin(userId, body.CallSid))) {
+      return reply.type('text/xml').send(hangup());
     }
-    const twiml = dialerConferenceTwiml(from, { holdMusic: await repHoldMusic(from), rejoinUrl: dialerRejoinUrl() });
+    const twiml = dialerConferenceTwiml(from, { holdMusic: await orDefaultAfter(repHoldMusic(from), true), rejoinUrl: dialerRejoinUrl() });
     return reply.type('text/xml').send(twiml);
   });
 
@@ -182,7 +231,7 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
         response.say('Unable to identify rep for the dialer conference.');
         return reply.type('text/xml').send(response.toString());
       }
-      await stampRepCallSid(body.From ?? '', body.CallSid);
+      await stampRepCallSid(body.From ?? '', body.CallSid, body.DialerSessionId);
       return reply.type('text/xml').send(twiml);
     }
 
