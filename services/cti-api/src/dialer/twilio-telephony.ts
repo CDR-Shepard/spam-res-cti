@@ -42,30 +42,61 @@ export function conferenceName(userId: string): string {
   return `pd_${userId.replace(/-/g, '')}`;
 }
 
-/** PURE: TwiML that bridges whichever leg it's applied to into the rep's
- *  power-dialer conference. `startConferenceOnEnter` so the conference goes
- *  live as soon as either party (prospect or rep) joins. `endOnExit` controls
- *  `endConferenceOnExit` and MUST differ per leg: the rep leg ends the
- *  conference when the rep leaves (that's what ends the dialer run), but the
- *  prospect leg must NOT end it when the prospect hangs up — otherwise the
- *  very first prospect to hang up destroys the conference out from under the
- *  rep, who only joins once and has no rejoin-on-connect. See
- *  `dialerConferenceTwiml` (rep leg, endOnExit=true) and `bridgeToRep`
- *  (prospect leg, endOnExit=false). Built via `twilio.twiml.VoiceResponse` so
- *  attribute escaping matches what Twilio itself expects. */
-/** Per-rep conference options (Settings tab). `holdMusic: false` makes the
- *  leg wait in silence — Twilio's `waitUrl=""` — instead of the default hold
- *  music; anything else keeps the default. Only the rep's own leg ever passes
- *  this (routes/telephony.ts); the prospect leg joins a live conference and
- *  never waits, so `bridgeToRep` leaves it unset. */
+/**
+ * PURE: TwiML that puts whichever leg it's applied to into the rep's
+ * power-dialer conference. `startConferenceOnEnter` so the room goes live as
+ * soon as the second party joins. `endOnExit` is `endConferenceOnExit`.
+ *
+ * The rep leg always ends the room when it leaves — that is what ends the run,
+ * and any prospect still on the line with it.
+ *
+ * The PROSPECT leg ending the room is what keeps the hold music playing across
+ * a run. Twilio plays a conference's wait music only BEFORE the conference has
+ * started, and it starts when the first prospect is bridged. A prospect leg
+ * that left the room standing (`endOnExit=false`, the only behavior until
+ * 2026-09) left the rep alone in a STARTED conference — silence from the first
+ * connect to the end of the run. With `endOnExit=true` the prospect leaving
+ * ends the room, and the rep's leg does not end with it: its `<Dial>` carries
+ * `action` = `rejoinUrl`, so Twilio asks the rejoin route (routes/telephony.ts)
+ * what to do next and the rep walks straight into a fresh, un-started room of
+ * the same name — hearing the music again. The softphone sees none of this; it
+ * is one continuous call.
+ *
+ * So the two must agree: a prospect leg may end the room ONLY under a rep leg
+ * that carries the action. Under one that does not (a run in flight across the
+ * deploy that added it) the room ending would end the rep's call — see
+ * `bridgeToRep`'s `repRejoins`.
+ *
+ * The prospect leg never gets an action: when the room ends (the rep left, or
+ * the run was stopped) its `<Dial>` falls off the end of the TwiML and the call
+ * hangs up, exactly as before.
+ *
+ * Built via `twilio.twiml.VoiceResponse` so attribute escaping matches what
+ * Twilio itself expects.
+ */
+/** Per-leg conference options.
+ *  - `holdMusic: false` makes the leg wait in silence — Twilio's `waitUrl=""` —
+ *    instead of the default hold music (Settings tab); anything else keeps the
+ *    default. Only the rep's own leg ever waits, so only it passes this.
+ *  - `rejoinUrl` is the rep leg's `<Dial action>`; see `bridgeTwiml`. Never set
+ *    on the prospect leg. */
 export interface ConferenceOptions {
   holdMusic?: boolean;
+  rejoinUrl?: string;
+}
+
+/** The route Twilio requests when the rep leg's conference ends. One constant
+ *  for the TwiML that names it and the route that validates its signature. */
+export const DIALER_REJOIN_PATH = '/telephony/twilio/dialer-conference-rejoin';
+
+export function dialerRejoinUrl(): string {
+  return `${loadConfig().API_PUBLIC_URL}${DIALER_REJOIN_PATH}`;
 }
 
 export function bridgeTwiml(userId: string, endOnExit: boolean, opts: ConferenceOptions = {}): string {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const twiml = new VoiceResponse();
-  const dial = twiml.dial();
+  const dial = twiml.dial(opts.rejoinUrl ? { action: opts.rejoinUrl, method: 'POST' } : {});
   dial.conference(
     {
       startConferenceOnEnter: true,
@@ -79,8 +110,8 @@ export function bridgeTwiml(userId: string, endOnExit: boolean, opts: Conference
 
 /** The bridge TwiML for a rep joining their own dialer conference, derived from
  *  Twilio's signed `From: client:rep_<id>` field. Returns null when From isn't a
- *  valid rep-client identity (caller should render an error instead).
- *  `endOnExit: true` — the rep leaving is what ends the dialer run/conference. */
+ *  valid rep-client identity (caller should render an error instead). The rep
+ *  leaving ends the room — and with it any prospect still on the line. */
 /** A rep's signed Twilio client identity, `client:rep_<hex>` — the token route
  *  (routes/telephony.ts) mints `rep_` + the users.id with its dashes stripped.
  *  ONE regex for both readers below, so the accepted shape can never drift. */
@@ -143,12 +174,15 @@ export class TwilioDialerTelephony implements DialerTelephony {
   }
 
   /** Re-point the already-live call at the rep's conference once AMD confirms a
-   *  human. `endOnExit: false` — the prospect hanging up must NOT tear down the
-   *  conference; the rep is waiting there across the whole run and only the
-   *  rep leaving (dialerConferenceTwiml, endOnExit=true) should end it. */
-  async bridgeToRep(callId: string, userId: string): Promise<void> {
+   *  human. `repRejoins` = the rep's leg is known to carry the rejoin action
+   *  (the engine passes whether the run has a stamped `repCallSid`): only then
+   *  may the prospect end the room on its way out, which is what brings the
+   *  hold music back. Omitted/false is the safe legacy shape — the room stays
+   *  up, silent, but the rep's call survives. No conference options: the
+   *  prospect never waits (the rep is already in the room) and never rejoins. */
+  async bridgeToRep(callId: string, userId: string, opts: { repRejoins?: boolean } = {}): Promise<void> {
     const client = this.clientFactory();
-    await client.calls(callId).update({ twiml: bridgeTwiml(userId, false) } as never);
+    await client.calls(callId).update({ twiml: bridgeTwiml(userId, opts.repRejoins === true) } as never);
   }
 
   /** Hang up (skip/stop): end the call outright rather than routing it anywhere. */

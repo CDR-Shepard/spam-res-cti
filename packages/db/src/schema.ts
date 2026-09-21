@@ -264,6 +264,12 @@ export const dialerSessions = pgTable(
     status: dialerSessionStatus('status').default('active').notNull(),
     /** Last softphone poll of this session — the retry nudge's proof a rep is present. */
     lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
+    /** Twilio CallSid of the rep's own conference leg, stamped when the softphone
+     *  joins (routes/telephony.ts). The run-end backstop hangs up THIS call: the
+     *  leg re-enters a fresh conference every time a prospect leaves, so a
+     *  lookup by conference name can find nothing (between rooms) or merely send
+     *  the leg round again. Null until the rep joins, and on pre-0039 rows. */
+    repCallSid: text('rep_call_sid'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },

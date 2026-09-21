@@ -221,6 +221,7 @@ import {
   type EngineDeps,
 } from './engine.js';
 
+const REP_LEG = 'CA00000000000000000000000000000rep';
 const baseSession = { id: 'S1', orgId: 'O1', userId: 'U1', sfOwnerId: '005', objectType: 'Lead', status: 'active' };
 function makeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
   return {
@@ -318,6 +319,41 @@ describe('advanceSession', () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
     const deps = makeDeps(); deps.db = fakeDb(baseSession, items);
     await advanceSession('S1', deps);
+    expect(deps.telephony.endConference).toHaveBeenCalledWith('U1');
+  });
+  // The rep's leg re-enters a fresh room every time a prospect leaves, so at run
+  // end it is usually in NO started conference (or between rooms): completing a
+  // room by name finds nothing, or just sends the leg round the rejoin loop.
+  // Hanging up the leg itself is the only teardown that cannot miss.
+  it('hangs up the rep\'s own leg by sid when the queue drains — before the conference teardown and before the session leaves active', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, repCallSid: REP_LEG }, items); deps.db = fdb;
+    const order: string[] = [];
+    deps.telephony.hangup = vi.fn(async () => {
+      order.push('hangup');
+      expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+    });
+    deps.telephony.endConference = vi.fn(async () => { order.push('endConference'); });
+    await advanceSession('S1', deps);
+    expect(deps.telephony.hangup).toHaveBeenCalledWith(REP_LEG);
+    expect(order).toEqual(['hangup', 'endConference']);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+  });
+  it('a failed rep-leg hangup (the leg is usually already gone) still tears the room down and completes the run', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, repCallSid: REP_LEG }, items); deps.db = fdb;
+    deps.telephony.hangup = vi.fn(async () => { throw new Error('Call is not in-progress'); });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect((await advanceSession('S1', deps)).action).toBe('done');
+      expect(deps.telephony.endConference).toHaveBeenCalledWith('U1');
+    } finally { err.mockRestore(); }
+  });
+  it('a run whose rep never joined (no stamped leg) hangs up nothing', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
+    const deps = makeDeps(); deps.db = fakeDb(baseSession, items);
+    await advanceSession('S1', deps);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
     expect(deps.telephony.endConference).toHaveBeenCalledWith('U1');
   });
   it('still completes the run when releasing the conference fails (best-effort, never throws)', async () => {
@@ -634,10 +670,20 @@ describe('handleDialOutcome', () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
     await handleDialOutcome('CA1', 'connected', deps);
-    expect(deps.telephony.bridgeToRep).toHaveBeenCalledWith('CA1', 'U1');
+    expect(deps.telephony.bridgeToRep).toHaveBeenCalledWith('CA1', 'U1', { repRejoins: false });
     expect(deps.onScreenPop).toHaveBeenCalledWith('U1', 'Lead', '00Q1');
     expect(deps.enqueueRollover).not.toHaveBeenCalled();
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'connected' }) });
+  });
+  // The stamp is proof the rep's leg carries the rejoin action (only the join
+  // that adds the action writes it). Without that proof the prospect must leave
+  // the room standing: ending it under a leg that cannot rejoin ends the rep's
+  // call — a run in flight across the deploy would die after one conversation.
+  it('connected lets the prospect leg end the room ONLY when the run has a stamped rep leg', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); deps.db = fakeDb({ ...baseSession, repCallSid: REP_LEG }, items);
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(deps.telephony.bridgeToRep).toHaveBeenCalledWith('CA1', 'U1', { repRejoins: true });
   });
   it('connected records a sticky (org, rep, lead) -> pool DID binding when both numbers are known', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fromNumber: '+16190000000', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
@@ -770,6 +816,28 @@ describe('stopSession', () => {
     const deps = makeDeps(); deps.db = fakeDb(baseSession, items);
     await stopSession('S1', deps);
     expect(deps.telephony.endConference).toHaveBeenCalledWith('U1');
+  });
+  it('hangs up the rep\'s own leg on stop — active or paused — before the session leaves its live status', async () => {
+    for (const status of ['active', 'paused']) {
+      const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+      const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status, repCallSid: REP_LEG }, items); deps.db = fdb;
+      deps.telephony.hangup = vi.fn(async () => {
+        expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'stopped' }) });
+      });
+      await stopSession('S1', deps);
+      expect(deps.telephony.hangup).toHaveBeenCalledTimes(1);
+      expect(deps.telephony.hangup).toHaveBeenCalledWith(REP_LEG);
+    }
+  });
+  // Same cross-run rule as the conference: a ready / stopped / done session has
+  // no leg of its own, and a stale sid must never be hung up on its behalf.
+  it('never hangs up a rep leg for a session that is not live', async () => {
+    for (const status of ['ready', 'stopped', 'done']) {
+      const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+      const deps = makeDeps(); deps.db = fakeDb({ ...baseSession, status, repCallSid: REP_LEG }, items);
+      await stopSession('S1', deps);
+      expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    }
   });
   it('still stops when releasing the conference fails (best-effort, never throws)', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];

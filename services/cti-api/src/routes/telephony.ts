@@ -5,7 +5,7 @@
  *   POST /telephony/twilio/status      → status callback receiver (called by Twilio)
  */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { and, eq, or } from 'drizzle-orm';
+import { and, eq, inArray, or } from 'drizzle-orm';
 import twilio from 'twilio';
 import { z } from 'zod';
 import { resolveSession } from '@cti/auth';
@@ -21,7 +21,7 @@ import {
   TWILIO_RECORDING_MEDIA_RE,
   signedCallbackUrl,
 } from '../telephony/webhooks.js';
-import { dialerConferenceTwiml, repUserIdFromClientIdentity } from '../dialer/twilio-telephony.js';
+import { DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repUserIdFromClientIdentity } from '../dialer/twilio-telephony.js';
 
 
 /**
@@ -40,6 +40,49 @@ async function repHoldMusic(from: string): Promise<boolean> {
     });
     return row?.dialerHoldMusic ?? true;
   } catch {
+    return true;
+  }
+}
+
+/**
+ * Remember which Twilio call is the rep's conference leg, on the run it belongs
+ * to. The softphone joins only after the engine accepted `start`, so that run
+ * is the rep's one ACTIVE session (unique index) — never a paused one, which
+ * could be an abandoned run whose later teardown would hang up this live leg.
+ * Best-effort: the stamp only feeds the run-end backstop, and a failure here
+ * must never keep a rep out of their conference.
+ */
+async function stampRepCallSid(from: string, callSid: string | undefined): Promise<void> {
+  const userId = repUserIdFromClientIdentity(from);
+  if (!userId || !callSid || !TWILIO_CALL_SID_RE.test(callSid)) return;
+  try {
+    await getDb()
+      .update(schema.dialerSessions)
+      .set({ repCallSid: callSid, updatedAt: new Date() })
+      .where(and(eq(schema.dialerSessions.userId, userId), eq(schema.dialerSessions.status, 'active')));
+  } catch (err) {
+    console.error('[dialer] rep call sid stamp failed', { userId, err: (err as Error).message });
+  }
+}
+
+/**
+ * Does this rep still have a run that wants them in the room? Active or paused —
+ * a paused run keeps its rep leg up. A lookup that FAILS answers yes: a database
+ * hiccup must never end a live run, and the opposite mistake (looping a finished
+ * run's leg back in) is already covered by the backstop hanging the leg up by sid.
+ */
+async function repHasLiveRun(userId: string): Promise<boolean> {
+  try {
+    const row = await getDb().query.dialerSessions.findFirst({
+      where: and(
+        eq(schema.dialerSessions.userId, userId),
+        inArray(schema.dialerSessions.status, ['active', 'paused']),
+      ),
+      columns: { id: true },
+    });
+    return !!row;
+  } catch (err) {
+    console.error('[dialer] live-run lookup failed; rejoining', { userId, err: (err as Error).message });
     return true;
   }
 }
@@ -64,6 +107,41 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     } catch (err) {
       return reply.code(503).send({ error: (err as Error).message });
     }
+  });
+
+  /**
+   * The rep leg's `<Dial action>` (dialer/twilio-telephony.ts `bridgeTwiml`):
+   * Twilio asks this when the rep's conference ENDS — a prospect hung up, the
+   * rep pressed Next, or the run was torn down. A live run sends the rep
+   * straight back into a fresh room of the same name, which is un-started and
+   * so plays the hold music again; this loop is the whole reason the music
+   * survives past the first connect. It is one continuous call to the
+   * softphone, which never notices.
+   *
+   * Twilio also requests the action when the rep hangs up (CallStatus
+   * `completed`): the call is over, so answer with nothing and touch nothing.
+   */
+  app.post(DIALER_REJOIN_PATH, async (req, reply) => {
+    const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
+    const provider = getProvider();
+    const valid = provider.validateWebhook(req.headers as Record<string, string | string[] | undefined>, rawBody, dialerRejoinUrl());
+    if (!valid.valid && !cfg.TWILIO_SKIP_SIGNATURE_CHECK) {
+      return reply.code(403).type('text/xml').send('<Response><Reject/></Response>');
+    }
+    const body = (req.body ?? {}) as Record<string, string>;
+    const VoiceResponse = twilio.twiml.VoiceResponse;
+    if (body.CallStatus === 'completed') {
+      return reply.type('text/xml').send(new VoiceResponse().toString());
+    }
+    const from = body.From ?? '';
+    const userId = repUserIdFromClientIdentity(from);
+    if (!userId || !(await repHasLiveRun(userId))) {
+      const response = new VoiceResponse();
+      response.hangup();
+      return reply.type('text/xml').send(response.toString());
+    }
+    const twiml = dialerConferenceTwiml(from, { holdMusic: await repHoldMusic(from), rejoinUrl: dialerRejoinUrl() });
+    return reply.type('text/xml').send(twiml);
   });
 
   /**
@@ -94,13 +172,17 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     // not from anything the client supplies, so a rep can only join their own
     // conference.
     if (body.DialerConference) {
-      const twiml = dialerConferenceTwiml(body.From ?? '', { holdMusic: await repHoldMusic(body.From ?? '') });
+      const twiml = dialerConferenceTwiml(body.From ?? '', {
+        holdMusic: await repHoldMusic(body.From ?? ''),
+        rejoinUrl: dialerRejoinUrl(),
+      });
       if (!twiml) {
         const VoiceResponse = twilio.twiml.VoiceResponse;
         const response = new VoiceResponse();
         response.say('Unable to identify rep for the dialer conference.');
         return reply.type('text/xml').send(response.toString());
       }
+      await stampRepCallSid(body.From ?? '', body.CallSid);
       return reply.type('text/xml').send(twiml);
     }
 

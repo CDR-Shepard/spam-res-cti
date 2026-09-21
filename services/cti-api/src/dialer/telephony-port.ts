@@ -1,6 +1,8 @@
 export interface DialerTelephony {
   originate(a: { sessionId: string; itemId: string; fromE164: string; toE164: string; userId: string }): Promise<{ callId: string }>;
-  bridgeToRep(callId: string, userId: string): Promise<void>;
+  /** `repRejoins`: the rep's leg carries the rejoin action, so the prospect leg
+   *  may end the room when it leaves (hold music resumes). See twilio-telephony.ts. */
+  bridgeToRep(callId: string, userId: string, opts?: { repRejoins?: boolean }): Promise<void>;
   hangup(callId: string): Promise<void>;
   /**
    * End the rep's power-dialer conference when their run ends. Normally the

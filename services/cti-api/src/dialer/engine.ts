@@ -80,20 +80,41 @@ async function reloadAfterLostSkip(deps: EngineDeps, sessionId: string): Promise
 }
 
 /**
- * Release the rep's conference now that their run is over, freeing their single
- * Twilio Device for the next call. The rep's softphone normally does this itself
- * (its leg joins with `endConferenceOnExit=true`); this is the backstop for when
- * the client never disconnects — tab switched away mid-run, asleep, or polling
- * stalled — which would otherwise leave the leg billing and the Device busy.
+ * Release the rep's conference leg now that their run is over, freeing their
+ * single Twilio Device for the next call. The rep's softphone normally does this
+ * itself (it drops its own leg); this is the backstop for when the client never
+ * disconnects — tab switched away mid-run, asleep, or polling stalled — which
+ * would otherwise leave the leg billing and the Device busy.
+ *
+ * Two steps, in this order:
+ *  1. Hang up the rep's OWN leg by the sid stamped when it joined. This is the
+ *     one that cannot miss. The leg re-enters a fresh room every time a
+ *     prospect leaves (that is what keeps the hold music playing — see
+ *     twilio-telephony.ts `bridgeTwiml`), so at run end the rep is usually
+ *     alone in an un-started room, or between rooms, where a lookup by name
+ *     finds nothing. And completing a room by name would not END the leg: its
+ *     `<Dial action>` would send it round again while this session is still
+ *     active (the callers release BEFORE the status flip, on purpose).
+ *  2. Complete any in-progress conference of the rep's name — all there is for
+ *     a run with no stamped leg (it started before the stamp existed, or the
+ *     stamp failed), and harmless after step 1.
  *
  * Strictly best-effort: a Twilio failure here must never fail the run's
- * completion, which is already committed to the DB by the time we're called.
+ * completion. The leg hangup in particular fails routinely — the client has
+ * normally dropped the leg already, and Twilio refuses to update a finished call.
  */
-async function releaseRepConference(deps: EngineDeps, userId: string, sessionId: string): Promise<void> {
+async function releaseRepConference(deps: EngineDeps, session: Session): Promise<void> {
+  if (session.repCallSid) {
+    try {
+      await deps.telephony.hangup(session.repCallSid);
+    } catch (err) {
+      console.error('[dialer] rep leg hangup failed', { sessionId: session.id, userId: session.userId, err: (err as Error).message });
+    }
+  }
   try {
-    await deps.telephony.endConference(userId);
+    await deps.telephony.endConference(session.userId);
   } catch (err) {
-    console.error('[dialer] endConference failed', { sessionId, userId, err: (err as Error).message });
+    console.error('[dialer] endConference failed', { sessionId: session.id, userId: session.userId, err: (err as Error).message });
   }
 }
 
@@ -194,7 +215,7 @@ export async function advanceSession(
       // run's conference. While this session is still 'active' the
       // one-active-session-per-rep index blocks a new run from starting, which
       // closes that window.
-      await releaseRepConference(deps, session.userId, sessionId);
+      await releaseRepConference(deps, session);
       await setSession(deps, sessionId, 'done');
       return { action: 'done' };
     }
@@ -381,7 +402,7 @@ export async function stopSession(sessionId: string, deps: EngineDeps): Promise<
   // run the rep has active in another tab (the very case that leaves a second
   // session stuck `ready`).
   if (session && (session.status === 'active' || session.status === 'paused')) {
-    await releaseRepConference(deps, session.userId, sessionId);
+    await releaseRepConference(deps, session);
   }
   await setSession(deps, sessionId, 'stopped');
   if (item && item.status === 'dialing' && item.callId) {
@@ -400,9 +421,9 @@ export async function repNext(sessionId: string, deps: EngineDeps): ReturnType<t
   const item = inFlightItem(items);
   if (item && item.status === 'connected') {
     // Hang up the prospect BEFORE advancing — otherwise their leg stays in the
-    // rep's conference (prospect legs join with endConferenceOnExit=false) and
-    // the next prospect gets bridged into the SAME room: the previous caller
-    // hears the next conversation and keeps billing. Mirrors skipCurrent.
+    // rep's conference (nothing else removes it) and the next prospect gets
+    // bridged into the SAME room: the previous caller hears the next
+    // conversation and keeps billing. Mirrors skipCurrent.
     if (item.callId) {
       try {
         await deps.telephony.hangup(item.callId);
@@ -427,7 +448,12 @@ export async function handleDialOutcome(
 
   if (outcome === 'connected') {
     await setItem(deps, item.id, { status: 'connected', outcome: 'connected' });
-    await deps.telephony.bridgeToRep(callId, session.userId);
+    // The prospect may end the room on its way out — which is what brings the
+    // rep's hold music back — only when the rep's leg is KNOWN to carry the
+    // rejoin action: the stamp is written by the same join that adds it. A run
+    // in flight across that deploy (no stamp) keeps the old standing room;
+    // ending it would end the rep's call after this one conversation.
+    await deps.telephony.bridgeToRep(callId, session.userId, { repRejoins: !!session.repCallSid });
     deps.onScreenPop(session.userId, item.objectType, item.recordId);
     // Sticky-on-connect: remember this (org, rep, lead) -> pool DID binding so
     // an inbound callback from the lead rings the same rep. Best-effort — a

@@ -13,7 +13,7 @@ vi.mock('../config.js', () => ({
   }),
 }));
 
-import { bridgeTwiml, conferenceName, dialerConferenceTwiml, repUserIdFromClientIdentity, TwilioDialerTelephony, type TwilioDialerClient } from './twilio-telephony.js';
+import { bridgeTwiml, conferenceName, DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repUserIdFromClientIdentity, TwilioDialerTelephony, type TwilioDialerClient } from './twilio-telephony.js';
 
 // ---------------------------------------------------------------------------
 // conferenceName / bridgeTwiml — pure
@@ -39,7 +39,12 @@ describe('conferenceName', () => {
 });
 
 describe('bridgeTwiml', () => {
-  it('endOnExit=true (rep leg) produces the exact <Dial><Conference> TwiML with endConferenceOnExit="true"', () => {
+  // Twilio plays a conference's wait music only BEFORE it starts, and it starts
+  // when the first prospect is bridged — so a room that outlived its prospect
+  // left the rep alone in a STARTED conference: silence for the rest of the run.
+  // A prospect leg that ENDS the room is what lets the rep's leg re-enter a
+  // fresh, un-started one (see `rejoinUrl`) and hear the music again.
+  it('prospect leg, room-ending: exact TwiML with endConferenceOnExit="true" and NO action — when the room ends the prospect hangs up, it never loops back in', () => {
     const xml = bridgeTwiml('abc12345-6789-4def-a012-3456789abcde', true);
     expect(xml).toBe(
       '<?xml version="1.0" encoding="UTF-8"?><Response><Dial>' +
@@ -48,11 +53,24 @@ describe('bridgeTwiml', () => {
     );
   });
 
-  it('endOnExit=false (prospect leg) produces the exact <Dial><Conference> TwiML with endConferenceOnExit="false", same conference name', () => {
+  // Still needed: a rep leg that joined BEFORE the rejoin action existed (a run
+  // in flight across the deploy) or whose join could not be stamped has no way
+  // back in — ending its room would end the rep's call after one conversation.
+  it('prospect leg, legacy: endConferenceOnExit="false" leaves the room standing, same conference name', () => {
     const xml = bridgeTwiml('abc12345-6789-4def-a012-3456789abcde', false);
     expect(xml).toBe(
       '<?xml version="1.0" encoding="UTF-8"?><Response><Dial>' +
         '<Conference startConferenceOnEnter="true" endConferenceOnExit="false">pd_abc1234567894defa0123456789abcde</Conference>' +
+        '</Dial></Response>',
+    );
+  });
+
+  it('rep leg: the <Dial> carries the rejoin action so a finished conference sends the rep back into the room instead of ending their call', () => {
+    const xml = bridgeTwiml('abc12345-6789-4def-a012-3456789abcde', true, { rejoinUrl: 'https://api.test.example/telephony/twilio/dialer-conference-rejoin' });
+    expect(xml).toBe(
+      '<?xml version="1.0" encoding="UTF-8"?><Response>' +
+        '<Dial action="https://api.test.example/telephony/twilio/dialer-conference-rejoin" method="POST">' +
+        '<Conference startConferenceOnEnter="true" endConferenceOnExit="true">pd_abc1234567894defa0123456789abcde</Conference>' +
         '</Dial></Response>',
     );
   });
@@ -64,6 +82,11 @@ describe('dialerConferenceTwiml', () => {
     expect(t).toContain('pd_abc123');
     expect(t).toContain('<Conference');
     expect(t).toContain('endConferenceOnExit="true"');
+  });
+
+  it('passes the rejoin action through to the rep leg', () => {
+    const t = dialerConferenceTwiml('client:rep_abc123', { rejoinUrl: 'https://api.test.example/rejoin' });
+    expect(t).toContain('<Dial action="https://api.test.example/rejoin" method="POST">');
   });
 
   it('missing/malformed From → null', () => {
@@ -168,20 +191,32 @@ describe('TwilioDialerTelephony.originate', () => {
 });
 
 describe('TwilioDialerTelephony.bridgeToRep', () => {
-  it('updates the call with the bridge TwiML for the given user, with endConferenceOnExit="false" so a prospect hangup does not tear down the conference the rep is waiting in', async () => {
+  it('repRejoins=true: the prospect leg ENDS the room on exit (so the rep gets hold music again) and has no rejoin action of its own', async () => {
     const { client, updateCalls } = fakeClient();
     const telephony = new TwilioDialerTelephony(() => client);
-    await telephony.bridgeToRep('CA1', 'user-1');
+    await telephony.bridgeToRep('CA1', 'user-1', { repRejoins: true });
 
     expect(updateCalls).toHaveLength(1);
     expect(updateCalls[0]!.callId).toBe('CA1');
     const twiml = updateCalls[0]!.args.twiml as string;
-    expect(twiml).toBe(bridgeTwiml('user-1', false));
-    expect(twiml).toContain('endConferenceOnExit="false"');
+    expect(twiml).toBe(bridgeTwiml('user-1', true));
+    expect(twiml).toContain('endConferenceOnExit="true"');
+    expect(twiml).not.toContain('action=');
     // Same conference name (via conferenceName) as the rep's own join leg —
     // dialerConferenceTwiml derives its conference from the same helper, so a
     // rep joined on `pd_user1` is bridged into by this exact prospect leg.
     expect(twiml).toContain(`>${conferenceName('user-1')}<`);
+  });
+
+  // The safe default. Ending the room under a rep leg that cannot rejoin ends
+  // the rep's CALL: the run dies after one conversation.
+  it('repRejoins=false, or omitted: the prospect leg leaves the room standing', async () => {
+    for (const opts of [{ repRejoins: false }, undefined]) {
+      const { client, updateCalls } = fakeClient();
+      await new TwilioDialerTelephony(() => client).bridgeToRep('CA1', 'user-1', opts);
+      expect(updateCalls[0]!.args.twiml).toBe(bridgeTwiml('user-1', false));
+      expect(updateCalls[0]!.args.twiml).toContain('endConferenceOnExit="false"');
+    }
   });
 });
 
@@ -246,6 +281,11 @@ describe('hold music per rep', () => {
   it('dialerConferenceTwiml passes the preference through to the rep leg', () => {
     expect(dialerConferenceTwiml('client:rep_abc123', { holdMusic: false })).toContain('waitUrl=""');
     expect(dialerConferenceTwiml('client:rep_abc123')).not.toContain('waitUrl');
+  });
+
+  it('dialerRejoinUrl is the public URL of the rejoin route — the one string Twilio signs and the route validates', () => {
+    expect(DIALER_REJOIN_PATH).toBe('/telephony/twilio/dialer-conference-rejoin');
+    expect(dialerRejoinUrl()).toBe('https://api.test.example/telephony/twilio/dialer-conference-rejoin');
   });
 
   it('repUserIdFromClientIdentity restores the dashed users.id from the 32-hex identity, null for anything else', () => {
