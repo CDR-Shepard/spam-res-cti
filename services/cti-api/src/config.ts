@@ -135,6 +135,15 @@ const schema = z.object({
    * must NEVER accept an unauthenticated write.
    */
   HANDOFF_SHARED_SECRET: z.string().min(16).optional(),
+
+  /**
+   * Kill switch for the end-of-run "No answer" Chatter posts
+   * (salesforce/no-answer-chatter-worker.ts). `off` = the worker loop is never
+   * started: no scan, no claim, no post. Default `on`. A strict enum on purpose —
+   * `false` / `0` fail the boot instead of being quietly read as "on".
+   * Turning it back on sweeps only the runs that ended in the last 24h.
+   */
+  NO_ANSWER_CHATTER: z.enum(['on', 'off']).default('on'),
 });
 
 export type AppConfig = z.infer<typeof schema>;
