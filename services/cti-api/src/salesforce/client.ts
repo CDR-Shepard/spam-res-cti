@@ -475,6 +475,94 @@ export async function postChatterFeedItem(
   return created.id;
 }
 
+/** sObject Collections takes at most 200 records per request (a Salesforce limit). */
+export const FEED_ITEMS_PER_REQUEST = 200;
+
+export interface FeedItemPost {
+  /** The record the post lands on (FeedItem.ParentId). */
+  parentId: string;
+  /** Plain text (FeedItem.Body). */
+  body: string;
+}
+
+/** One post's fate. A failure here is PER RECORD and final — Salesforce looked at
+ *  this record and said no (no access, locked, deleted). Retrying cannot help. */
+export type FeedItemResult =
+  | { ok: true; id: string }
+  | { ok: false; statusCode: string; message: string };
+
+interface CollectionsSaveResult {
+  id?: unknown;
+  success?: unknown;
+  errors?: Array<{ statusCode?: unknown; message?: unknown }> | null;
+}
+
+function feedItemResultOf(raw: CollectionsSaveResult): FeedItemResult {
+  if (raw.success === true) {
+    // A success we cannot name is still reported as terminal: the post exists,
+    // so "try again" would duplicate it, and an id-less stamp would read as
+    // "never handled" on the next pass and duplicate it then instead.
+    return typeof raw.id === 'string' && raw.id ? { ok: true, id: raw.id } : { ok: false, statusCode: 'NO_ID_RETURNED', message: '' };
+  }
+  const first = raw.errors?.[0];
+  return {
+    ok: false,
+    statusCode: typeof first?.statusCode === 'string' && first.statusCode ? first.statusCode : 'UNKNOWN_ERROR',
+    message: typeof first?.message === 'string' ? first.message : '',
+  };
+}
+
+/**
+ * Posts MANY plain-text Chatter feed items in ONE request, through the sObject
+ * Collections API (`POST /composite/sobjects`, `allOrNone: false`).
+ *
+ * Why not `postChatterFeedItem` in a loop: that is the Connect API — one HTTP
+ * call per post, metered by a per-user HOURLY Connect rate limit. The
+ * end-of-run "No answer" sweep posts up to ~300 at once as one rep, which is
+ * exactly the shape that limit exists to stop. Collections rides the ordinary
+ * REST allocation and is 1–2 calls for a whole run.
+ *
+ * Authored by the rep: the request is made on `userId`'s own OAuth token, so
+ * CreatedBy — what Chatter shows as the author — is the rep.
+ *
+ * The answer is aligned BY INDEX with `posts`. Two kinds of failure, kept apart:
+ *  - the REQUEST failed (non-2xx, or a body that is not an index-aligned array):
+ *    THROWS. Nothing is known about any post in it; the caller treats the whole
+ *    chunk as transient. The status is in the message (`(401)`, `(503)`) for the
+ *    same reason followup-worker puts it there — `isSalesforceAuthError` reads it.
+ *  - one RECORD failed (`success: false`): returned, not thrown, with the first
+ *    error's `statusCode`. The other posts in the request still went through.
+ *
+ * At most `FEED_ITEMS_PER_REQUEST` posts. Chunking is the caller's job on
+ * purpose: it must persist each chunk's ids before sending the next.
+ */
+export async function createFeedItems(
+  userId: string,
+  posts: ReadonlyArray<FeedItemPost>,
+): Promise<FeedItemResult[]> {
+  if (posts.length === 0) return [];
+  if (posts.length > FEED_ITEMS_PER_REQUEST) {
+    throw new Error(`createFeedItems takes at most ${FEED_ITEMS_PER_REQUEST} posts per request (got ${posts.length})`);
+  }
+  const res = await sfFetch(userId, '/composite/sobjects', {
+    method: 'POST',
+    body: {
+      allOrNone: false,
+      records: posts.map((p) => ({ attributes: { type: 'FeedItem' }, ParentId: p.parentId, Body: p.body })),
+    },
+  });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Salesforce FeedItem create failed (${res.status}): ${JSON.stringify(res.json)}`);
+  }
+  if (!Array.isArray(res.json)) {
+    throw new Error(`Salesforce FeedItem create answered with a body that is not an array (${res.status})`);
+  }
+  if (res.json.length !== posts.length) {
+    throw new Error(`Salesforce FeedItem create returned ${res.json.length} results for ${posts.length} records`);
+  }
+  return (res.json as CollectionsSaveResult[]).map((raw) => feedItemResultOf(raw ?? {}));
+}
+
 /**
  * Patch fields onto an existing Task — used to attach the recording link, which
  * only exists after the call ends (and often after the Task was already
