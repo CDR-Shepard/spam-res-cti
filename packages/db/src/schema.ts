@@ -270,10 +270,29 @@ export const dialerSessions = pgTable(
      *  lookup by conference name can find nothing (between rooms) or merely send
      *  the leg round again. Null until the rep joins, and on pre-0039 rows. */
     repCallSid: text('rep_call_sid'),
+    /** "No answer" Chatter sweep (salesforce/no-answer-chatter-worker.ts, migration
+     *  0040). Set once the ended run's sweep is FINISHED — every qualifying record
+     *  posted or terminally skipped — or given up on after MAX_ATTEMPTS. NULL on an
+     *  ended session means "still owed a sweep"; 0040 stamped every session that
+     *  ended before the feature existed so none of those is ever swept. */
+    noAnswerChatterAt: timestamp('no_answer_chatter_at', { withTimezone: true }),
+    /** Claim held by a worker replica; reaped once older than the worker's STUCK_AFTER_MS. */
+    noAnswerChatterClaimedAt: timestamp('no_answer_chatter_claimed_at', { withTimezone: true }),
+    /** Claims that consumed an attempt (a settle-check release gives its attempt back). */
+    noAnswerChatterAttempts: integer('no_answer_chatter_attempts').default(0).notNull(),
+    /** Backoff floor after a transient failure — not swept before this instant. */
+    noAnswerChatterNextAt: timestamp('no_answer_chatter_next_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
+    // Backs the no-answer Chatter worker's candidate scan (ended + un-swept,
+    // ordered by updated_at). Partial, so it only ever covers the few sessions
+    // still owed a sweep. The ORM never queries it by name — see
+    // migrations/0040_no_answer_chatter.sql.
+    noAnswerChatterScanIdx: index('dialer_sessions_no_answer_chatter_scan_idx')
+      .on(t.updatedAt)
+      .where(sql`${t.noAnswerChatterAt} is null and ${t.status} in ('done','stopped')`),
     /**
      * One active session per rep. Session creation now originates a live call
      * (createAndStartSession -> advanceSession), so a second 'active' row for
@@ -315,6 +334,13 @@ export const dialerQueueItems = pgTable(
     taskId: text('task_id'),
     /** Decided at creation from the follow-up subject rule; only eligible items roll over. */
     followupEligible: boolean('followup_eligible').default(true).notNull(),
+    /** The "No answer" Chatter FeedItem posted on this item's record when the run
+     *  ended (migration 0040). Stamped on EVERY qualifying item of the record —
+     *  this, with `noAnswerSkipReason`, is the sweep's idempotency key. */
+    noAnswerFeedItemId: text('no_answer_feed_item_id'),
+    /** Why the record got NO post, terminally: 'not-owner', 'not-found', or the
+     *  Salesforce statusCode that rejected it. Never retried once set. */
+    noAnswerSkipReason: text('no_answer_skip_reason'),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
