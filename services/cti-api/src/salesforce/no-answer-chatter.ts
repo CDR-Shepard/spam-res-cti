@@ -5,14 +5,15 @@
  * call, at the end of the power dial session, it should post in Chatter 'no
  * answer', from the user that is power dialing" — on records they own, only.
  *
- * This file decides WHICH records of an ended run are owed a post and WHAT the
- * post says. It reads nothing and writes nothing: the worker
- * (no-answer-chatter-worker.ts) hands it the run's queue items and acts on the
- * answer. Ownership is NOT decided here — that is `callerMayCreateTaskOn`
+ * This file decides WHICH records of an ended run are owed a post, whether the
+ * rep may post on each, and WHAT the post says. It reads nothing and writes
+ * nothing: the worker (no-answer-chatter-worker.ts) hands it the run's queue
+ * items and one batched ownership lookup, and acts on the answers. The ownership
+ * RULE is not re-stated here — `verdictFor` only applies `callerMayCreateTaskOn`
  * (ownership.ts), the one rule every Salesforce write in this service shares.
  */
 import type { DialerItem } from '../dialer/session-store.js';
-import { objectTypeForId } from './ownership.js';
+import { callerMayCreateTaskOn, objectTypeForId, type OwnershipSnapshot } from './ownership.js';
 
 /**
  * The `no_connect` outcomes that are a REAL attempt: the phone was dialed and
@@ -123,6 +124,33 @@ export function selectNoAnswerRecords(items: ReadonlyArray<SweepItem>): NoAnswer
  */
 export function gateIdsFor(record: NoAnswerRecord): string[] {
   return [record.recordId, ...record.taskIds];
+}
+
+/** What the sweep does with one record. The two skips are TERMINAL — they are
+ *  stamped as `no_answer_skip_reason` and never looked at again. */
+export type SweepVerdict = 'post' | 'not-owner' | 'not-found';
+
+/**
+ * "Only the ones that they own." Applies the shared rule to every id the record
+ * is gated on; the first id that fails decides.
+ *
+ * `owners` is one batched lookup for the whole run (`fetchOwnershipBatch`). An id
+ * ABSENT from it was not returned by Salesforce — deleted, or the rep cannot
+ * read it — and an unverifiable record is never posted on: `not-found`, not a
+ * benefit of the doubt. (A lookup that FAILED never gets this far: it throws,
+ * and the worker retries the whole session.)
+ */
+export function verdictFor(
+  record: NoAnswerRecord,
+  owners: ReadonlyMap<string, OwnershipSnapshot>,
+  callerSfUserId: string,
+): SweepVerdict {
+  for (const id of gateIdsFor(record)) {
+    const snapshot = owners.get(id);
+    if (!snapshot) return 'not-found';
+    if (!callerMayCreateTaskOn(snapshot, callerSfUserId)) return 'not-owner';
+  }
+  return 'post';
 }
 
 /**

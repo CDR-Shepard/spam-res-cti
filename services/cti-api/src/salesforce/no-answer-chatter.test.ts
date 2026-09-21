@@ -4,8 +4,11 @@ import {
   gateIdsFor,
   noAnswerText,
   selectNoAnswerRecords,
+  verdictFor,
+  type NoAnswerRecord,
   type SweepItem,
 } from './no-answer-chatter.js';
+import type { OwnershipSnapshot } from './ownership.js';
 
 const LEAD = '00Q8X00000AbCdEUAV';
 const LEAD_2 = '00Q8X00000AbCdFUAV';
@@ -154,5 +157,52 @@ describe('gateIdsFor', () => {
   });
   it('Task run: the record AND the Task(s) — mayCreateTaskOn([recordId, taskId]) semantics', () => {
     expect(gateIdsFor({ recordId: LEAD, itemIds: ['x'], reasons: ['busy'], taskIds: [TASK, TASK_2] })).toEqual([LEAD, TASK, TASK_2]);
+  });
+});
+
+describe('verdictFor', () => {
+  const ME = '0058X00000RepMeQAV';
+  const OTHER = '0058X00000OtherQAV';
+  const mine: OwnershipSnapshot = { type: 'Lead', ownerId: ME, ownerName: 'Me' };
+  const theirs: OwnershipSnapshot = { type: 'Lead', ownerId: OTHER, ownerName: 'Matt Penrod' };
+  const rec = (o: Partial<NoAnswerRecord> = {}): NoAnswerRecord => ({ recordId: LEAD, itemIds: ['x'], reasons: ['busy'], taskIds: [], ...o });
+
+  it('post — the rep owns the record', () => {
+    expect(verdictFor(rec(), new Map([[LEAD, mine]]), ME)).toBe('post');
+  });
+
+  it('not-owner — someone else\'s record', () => {
+    expect(verdictFor(rec(), new Map([[LEAD, theirs]]), ME)).toBe('not-owner');
+  });
+
+  it('not-found — Salesforce did not return the record (deleted / no read access): never post unverified', () => {
+    expect(verdictFor(rec(), new Map(), ME)).toBe('not-found');
+  });
+
+  it('uses the ONE shared rule: queue-owned is postable, and an Opportunity lead manager is an owner', () => {
+    const queue: OwnershipSnapshot = { type: 'Lead', ownerId: '00G8X000006aRkGUAU', ownerName: 'LA Hunt Queue' };
+    const pseudoQueue: OwnershipSnapshot = { type: 'Opportunity', ownerId: '0058X00000FsyjzQAB', ownerName: 'Opportunity Hunt Queue', leadManagerId: null };
+    const managed: OwnershipSnapshot = { type: 'Opportunity', ownerId: OTHER, ownerName: 'Matt Penrod', leadManagerId: ME };
+    expect(verdictFor(rec(), new Map([[LEAD, queue]]), ME)).toBe('post');
+    expect(verdictFor(rec({ recordId: OPP }), new Map([[OPP, pseudoQueue]]), ME)).toBe('post');
+    expect(verdictFor(rec({ recordId: OPP }), new Map([[OPP, managed]]), ME)).toBe('post');
+  });
+
+  it('Task run: BOTH the record and the Task must pass', () => {
+    const myTask: OwnershipSnapshot = { type: 'Task', ownerId: ME, ownerName: 'Me' };
+    const theirTask: OwnershipSnapshot = { type: 'Task', ownerId: OTHER, ownerName: 'Matt Penrod' };
+    const r = rec({ taskIds: [TASK] });
+    expect(verdictFor(r, new Map([[LEAD, mine], [TASK, myTask]]), ME)).toBe('post');
+    expect(verdictFor(r, new Map([[LEAD, mine], [TASK, theirTask]]), ME)).toBe('not-owner');
+    expect(verdictFor(r, new Map([[LEAD, theirs], [TASK, myTask]]), ME)).toBe('not-owner');
+    expect(verdictFor(r, new Map([[LEAD, mine]]), ME)).toBe('not-found'); // the Task is gone
+  });
+
+  it('one person dialed off two Tasks: every Task must pass', () => {
+    const myTask: OwnershipSnapshot = { type: 'Task', ownerId: ME };
+    const theirTask: OwnershipSnapshot = { type: 'Task', ownerId: OTHER };
+    const r = rec({ taskIds: [TASK, TASK_2] });
+    expect(verdictFor(r, new Map([[LEAD, mine], [TASK, myTask], [TASK_2, theirTask]]), ME)).toBe('not-owner');
+    expect(verdictFor(r, new Map([[LEAD, mine], [TASK, myTask], [TASK_2, myTask]]), ME)).toBe('post');
   });
 });
