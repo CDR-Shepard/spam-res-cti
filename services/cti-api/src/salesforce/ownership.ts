@@ -153,6 +153,110 @@ export async function fetchOwnership(userId: string, recordId: string): Promise<
   return remember(key, { type, ownerId: r[0]?.OwnerId ?? null, ownerName: r[0]?.Owner?.Name ?? null });
 }
 
+/** Ids per batched ownership query. Our number, not a Salesforce limit: 200 ids
+ *  keeps the `/query?q=` URL (~27 encoded chars per id) far below the 16k URI
+ *  ceiling and the answer inside one 2,000-row page, so nothing ever paginates. */
+export const OWNERSHIP_BATCH_SIZE = 200;
+
+/**
+ * A 15- or 18-character alphanumeric Salesforce id — the ONLY shape allowed into
+ * the `IN (…)` list below. Ids come from our own database, but they were written
+ * there from request bodies; `soqlEscape` makes a bad one harmless, this makes it
+ * absent.
+ */
+export function isSalesforceId(id: string): boolean {
+  return /^(?:[a-zA-Z0-9]{15}|[a-zA-Z0-9]{18})$/.test(id);
+}
+
+/** Pure — the batched ownership query for one object type. Exported for its pin. */
+export function ownershipBatchSoql(type: OwnedObject, ids: ReadonlyArray<string>, withLeadManager: boolean): string {
+  const fields = withLeadManager ? 'Id, OwnerId, Owner.Name, LeadManager__c' : 'Id, OwnerId, Owner.Name';
+  return `SELECT ${fields} FROM ${type} WHERE Id IN (${ids.map((id) => `'${soqlEscape(id)}'`).join(',')})`;
+}
+
+interface OwnershipRow {
+  Id: string;
+  OwnerId?: string | null;
+  Owner?: { Name?: string | null } | null;
+  LeadManager__c?: string | null;
+}
+
+/** One chunk of one object type. The Opportunity `INVALID_FIELD` fallback is the
+ *  same configuration fact `fetchOwnership` handles: an org without
+ *  `LeadManager__c` is gated on the owner alone, for THIS chunk only. */
+async function queryOwnershipChunk(userId: string, type: OwnedObject, ids: ReadonlyArray<string>): Promise<OwnershipRow[]> {
+  if (type !== 'Opportunity') return soqlQuery<OwnershipRow>(userId, ownershipBatchSoql(type, ids, false));
+  try {
+    return await soqlQuery<OwnershipRow>(userId, ownershipBatchSoql(type, ids, true));
+  } catch (err) {
+    if (!/INVALID_FIELD/.test((err as Error).message)) throw err;
+    if (!warnedLeadManager) {
+      warnedLeadManager = true;
+      console.warn('[ownership] LeadManager__c not found on Opportunity — gate is owner-only');
+    }
+    return soqlQuery<OwnershipRow>(userId, ownershipBatchSoql(type, ids, false));
+  }
+}
+
+function snapshotOf(type: OwnedObject, row: OwnershipRow): OwnershipSnapshot {
+  const base = { type, ownerId: row.OwnerId ?? null, ownerName: row.Owner?.Name ?? null };
+  return type === 'Opportunity' ? { ...base, leadManagerId: row.LeadManager__c ?? null } : base;
+}
+
+function chunksOf<T>(list: ReadonlyArray<T>, size: number): T[][] {
+  return Array.from({ length: Math.ceil(list.length / size) }, (_, i) => list.slice(i * size, (i + 1) * size));
+}
+
+/**
+ * `fetchOwnership` for a whole run at once: one SOQL per object type per 200 ids,
+ * instead of one per record (a power-dial run is up to ~300 records). Same
+ * answers, same sharing (the query runs as `userId`), same Opportunity fallback —
+ * and the snapshots feed the same single rule, `callerMayCreateTaskOn`.
+ *
+ * What the map's ABSENCES mean is the contract: an id that is missing was either
+ * not returned by Salesforce (deleted, or the rep cannot read it) or is not a
+ * well-formed id and was never asked about. Either way nothing may be written on
+ * it. Objects the rule does not name come back as the same `other` snapshot
+ * `fetchOwnership` gives them, without a query.
+ *
+ * Any query failure PROPAGATES. There is no partial answer: the caller must fail
+ * closed and retry rather than act on the ids that happened to resolve first.
+ *
+ * Bypasses the 5-minute single-record cache in both directions. The cache exists
+ * to spare a round-trip per dialed record; a batch has no such cost to amortize,
+ * and its one caller (the end-of-run "No answer" sweep) wants the owner as of now.
+ */
+export async function fetchOwnershipBatch(userId: string, ids: ReadonlyArray<string>): Promise<Map<string, OwnershipSnapshot>> {
+  const distinct = [...new Set(ids)];
+  const wellFormed = distinct.filter(isSalesforceId);
+  if (wellFormed.length < distinct.length) {
+    console.warn('[ownership] malformed Salesforce ids dropped from the batch lookup', { userId, dropped: distinct.length - wellFormed.length });
+  }
+
+  const out = new Map<string, OwnershipSnapshot>();
+  const byType = new Map<OwnedObject, string[]>();
+  for (const id of wellFormed) {
+    const type = objectTypeForId(id);
+    if (type === 'other') out.set(id, { type, ownerId: null });
+    else byType.set(type, [...(byType.get(type) ?? []), id]);
+  }
+
+  for (const [type, typeIds] of byType) {
+    for (const chunk of chunksOf(typeIds, OWNERSHIP_BATCH_SIZE)) {
+      const rows = await queryOwnershipChunk(userId, type, chunk);
+      // Salesforce always answers with the 18-char id; a 15-char request id is
+      // its case-sensitive prefix (the last three are a checksum). Key on that so
+      // either form finds its row.
+      const byPrefix = new Map(rows.map((row) => [row.Id.slice(0, 15), row]));
+      for (const id of chunk) {
+        const row = byPrefix.get(id.slice(0, 15));
+        if (row) out.set(id, snapshotOf(type, row));
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * The ids whose ownership the rule actually names. Objects it does not name are
  * allowed outright, so a caller can use this to skip the round-trip entirely —
