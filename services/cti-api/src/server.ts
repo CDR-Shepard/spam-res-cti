@@ -18,6 +18,7 @@ import { registerDialerRoutes } from './routes/dialer.js';
 import { registerMobileRoutes } from './routes/mobile.js';
 import { startSyncLoop } from './salesforce/sync.js';
 import { startFollowupLoop, startRetryNudgeLoop } from './salesforce/followup-worker.js';
+import { maybeStartNoAnswerChatterLoop } from './salesforce/no-answer-chatter-worker.js';
 import { startReputationWorker } from './reputation/worker.js';
 import { startDirectoryLoop } from './mobile/directory-build.js';
 
@@ -119,6 +120,8 @@ async function main(): Promise<void> {
   const followupTimer = startFollowupLoop(5000);
   // The rep-facing retry nudge runs on its own timer — never behind Salesforce.
   const nudgeTimer = startRetryNudgeLoop(5000);
+  // End-of-run "No answer" Chatter posts. Null when NO_ANSWER_CHATTER=off.
+  const noAnswerChatterTimer = maybeStartNoAnswerChatterLoop(cfg);
   const reputationTimer = startReputationWorker(app.log, cfg.REPUTATION_WORKER_INTERVAL_MS);
   const directoryTimer = startDirectoryLoop(cfg.DIRECTORY_REBUILD_INTERVAL_MS);
 
@@ -126,6 +129,7 @@ async function main(): Promise<void> {
     clearInterval(syncTimer);
     clearInterval(followupTimer);
     clearInterval(nudgeTimer);
+    if (noAnswerChatterTimer) clearInterval(noAnswerChatterTimer);
     clearInterval(reputationTimer);
     clearInterval(directoryTimer);
     await app.close();
