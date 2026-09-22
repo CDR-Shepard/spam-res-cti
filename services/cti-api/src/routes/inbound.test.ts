@@ -16,16 +16,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 
+type LastDialerForCaller = typeof import('../dialer/sticky.js')['lastDialerForCaller'];
+
 const state = vi.hoisted(() => ({
   owned: null as Record<string, unknown> | null,
   repRow: null as Record<string, unknown> | null,
   sfConn: null as Record<string, unknown> | null,
   stickyAgentId: null as string | null,
+  /** What `lastDialerForCaller` answers — the rep who last power-dialed the caller. */
+  lastDialerId: null as string | null,
   findByPhoneResult: null as { whoId?: string; whatId?: string; name?: string } | null,
   findByPhone: vi.fn(async (_userId: string, _e164: string) => state.findByPhoneResult),
   stickyAgentForCaller: vi.fn(async () => state.stickyAgentId),
+  lastDialerForCaller: vi.fn(async (..._args: Parameters<LastDialerForCaller>) => state.lastDialerId),
+  /** The un-mocked lookup, for the one test that needs its caller-shape guard. */
+  realLastDialerForCaller: null as LastDialerForCaller | null,
   /** Inserts attempted into `calls` (other tables are not counted). */
   inserts: 0,
+  /** The values of every `calls` insert, in order. */
+  callValues: [] as Record<string, unknown>[],
+  /** Any `db.select(...)` — the inbound handler never issues one itself. */
+  selects: vi.fn(),
   // Simulates a replayed delivery: the call row already exists, the insert's
   // ON CONFLICT DO NOTHING returns no row, and the handler must reuse this one.
   duplicateInsert: false,
@@ -51,7 +62,12 @@ vi.mock('../salesforce/client.js', async (importOriginal) => {
 
 vi.mock('../dialer/sticky.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../dialer/sticky.js')>();
-  return { ...actual, stickyAgentForCaller: state.stickyAgentForCaller };
+  state.realLastDialerForCaller = actual.lastDialerForCaller;
+  return {
+    ...actual,
+    stickyAgentForCaller: state.stickyAgentForCaller,
+    lastDialerForCaller: state.lastDialerForCaller,
+  };
 });
 
 vi.mock('@cti/db', async (importOriginal) => {
@@ -74,13 +90,21 @@ function fakeDb() {
       calls: { findFirst: async () => state.existingCall },
     },
     insert(table: unknown) {
-      if (table === schema.calls) state.inserts++; // only the call row matters to these tests
+      const isCall = table === schema.calls; // only the call row matters to these tests
+      if (isCall) state.inserts++;
       return {
         values(v: Record<string, unknown>) {
+          if (isCall) state.callValues.push(v);
           const returning = async () => (state.duplicateInsert ? [] : [{ id: 'call-db-1', ...v }]);
           return { returning, onConflictDoNothing: () => ({ returning }) };
         },
       };
+    },
+    // Tripwire: nothing on this route builds a select. A real (un-mocked)
+    // `lastDialerForCaller` that reaches the table lands here and fails the test.
+    select(...args: unknown[]) {
+      state.selects(...args);
+      throw new Error('unexpected db.select on the inbound route');
     },
     update(_table: unknown) {
       return {
@@ -116,10 +140,15 @@ beforeEach(async () => {
   state.repRow = { id: 'rep-1', noAnswerForwardE164: null };
   state.sfConn = { userId: 'rep-1' };
   state.stickyAgentId = null;
+  state.lastDialerId = null;
   state.findByPhoneResult = null;
   state.findByPhone.mockClear();
   state.stickyAgentForCaller.mockClear();
+  state.lastDialerForCaller.mockReset();
+  state.lastDialerForCaller.mockImplementation(async () => state.lastDialerId);
+  state.selects.mockClear();
   state.inserts = 0;
+  state.callValues = [];
   state.duplicateInsert = false;
   state.existingCall = null;
   state.updates = [];
@@ -256,6 +285,87 @@ describe('POST /telephony/twilio/inbound — caller-match parameters on <Client>
       expect(xml).toContain('<Record');
       expect(xml).toContain('Hi Voicemail, thanks for calling back');
     });
+  });
+});
+
+describe('POST /telephony/twilio/inbound — a callback to a pool DID rings the rep who last power-dialed the caller', () => {
+  // 2026-09-22: 25 callbacks to pool numbers in a day, 18 from people we had
+  // power-dialed from that very DID, only 7 with a sticky (a sticky is written
+  // on a CONNECT only). The other 11 were attributed to "any user in the org"
+  // and went to a voicemail box nobody owns. The rep who last dialed them is
+  // who they are calling back.
+  beforeEach(() => {
+    state.owned = OWNED({ kind: 'dialer_pool', assignedUserId: null });
+    state.stickyAgentId = null;
+    state.repRow = { id: 'rep-3', noAnswerForwardE164: null };
+    state.sfConn = null;
+  });
+
+  it('no sticky, a last dial attempt by rep-3 → <Dial><Client> rings rep-3 AND the call row is attributed to rep-3', async () => {
+    state.lastDialerId = 'rep-3';
+
+    const res = await ring();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<Dial');
+    expect(res.body).toContain('<Client>rep_rep3</Client>');
+    expect(res.body).not.toContain('<Record');
+    // Attribution, not just the ring: the call lands in rep-3's Recent list
+    // and syncs through rep-3's Salesforce connection.
+    expect(state.callValues).toHaveLength(1);
+    expect(state.callValues[0]!.userId).toBe('rep-3');
+    // The lookup is keyed on the DID's org, the NORMALIZED caller, and the
+    // very DID they rang back (same-DID rows win inside the lookup).
+    expect(state.lastDialerForCaller).toHaveBeenCalledTimes(1);
+    expect(state.lastDialerForCaller.mock.calls[0]!.slice(1)).toEqual(['org-1', '+13105550002', '+16195550100']);
+  });
+
+  it('a raw From that only normalizes to E.164 reaches the lookup normalized', async () => {
+    state.lastDialerId = 'rep-3';
+    await ring({ From: '(310) 555-0002' });
+    expect(state.lastDialerForCaller.mock.calls[0]!.slice(1)).toEqual(['org-1', '+13105550002', '+16195550100']);
+  });
+
+  it('sticky present → the sticky rep wins even though a different rep dialed later, and the attempt log is not consulted', async () => {
+    state.stickyAgentId = 'rep-2';
+    state.lastDialerId = 'rep-3';
+    state.repRow = { id: 'rep-2', noAnswerForwardE164: null };
+
+    const res = await ring();
+
+    expect(res.body).toContain('<Client>rep_rep2</Client>');
+    expect(res.body).not.toContain('rep_rep3');
+    expect(state.callValues[0]!.userId).toBe('rep-2');
+    // A connect is the stronger signal; the fallback query is skipped outright.
+    expect(state.lastDialerForCaller).not.toHaveBeenCalled();
+  });
+
+  it('neither sticky nor a dial attempt → today\'s voicemail path, attributed to the org-fallback user', async () => {
+    state.lastDialerId = null;
+    state.repRow = { id: 'org-user-jona', noAnswerForwardE164: null };
+
+    const res = await ring();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain('<Client');
+    expect(res.body).toContain('<Record');
+    expect(state.lastDialerForCaller).toHaveBeenCalledTimes(1);
+    expect(state.callValues[0]!.userId).toBe('org-user-jona');
+  });
+
+  it('an anonymous caller → no attempt lookup hits the table; voicemail as before', async () => {
+    // Run the REAL lookup against this route's DB fake: its caller-shape guard
+    // must answer null before building a select (the fake's select throws).
+    state.lastDialerForCaller.mockImplementation((...args) => state.realLastDialerForCaller!(...args));
+    state.repRow = { id: 'org-user-jona', noAnswerForwardE164: null };
+
+    const res = await ring({ From: 'anonymous' });
+
+    expect(res.statusCode).toBe(200);
+    expect(state.selects).not.toHaveBeenCalled();
+    expect(res.body).not.toContain('<Client');
+    expect(res.body).toContain('<Record');
+    expect(state.callValues[0]!.userId).toBe('org-user-jona');
   });
 });
 

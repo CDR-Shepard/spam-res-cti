@@ -24,7 +24,7 @@ import { getProvider } from '../telephony/index.js';
 import { findByPhone } from '../salesforce/client.js';
 import { enqueueSyncForCall } from '../salesforce/sync.js';
 import { normalize } from '@cti/phone';
-import { stickyAgentForCaller } from '../dialer/sticky.js';
+import { lastDialerForCaller, stickyAgentForCaller } from '../dialer/sticky.js';
 import { dialClientWithCallerParams } from './inbound-caller-params.js';
 import {
   buildForwardDialTwiml,
@@ -184,20 +184,27 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     // Dialer-pool DIDs are shared (not owned by one rep), so they don't route
     // by `assignedUserId` — instead by sticky caller->agent binding, set by
     // the power dialer's engine when a call to this lead connected on this
-    // DID (see dialer/sticky.ts). Resolved FIRST — before `handlerUserId` —
-    // so the sticky agent (not some arbitrary org user) is who gets credited
-    // with the call, sees it in their CTI, and whose SF connection is used
-    // for the sync below. Agent-kind DIDs are unaffected: this stays null.
-    const poolStickyAgentId =
-      owned.kind === 'dialer_pool' ? await stickyAgentForCaller(db, owned.orgId, normFrom, owned.e164) : null;
+    // DID (see dialer/sticky.ts). A sticky exists only for a CONNECT, and the
+    // prospect ringing back is usually returning a MISSED call — so with no
+    // sticky, fall back to the rep who last power-dialed them (every dial is
+    // in dialer_dial_attempts; 14-day window; the DID they rang back wins).
+    // Sticky first: a real conversation beats a dial. Resolved FIRST — before
+    // `handlerUserId` — so that rep (not some arbitrary org user) is who gets
+    // credited with the call, sees it in their CTI, and whose SF connection
+    // is used for the sync below. Agent-kind DIDs are unaffected: stays null.
+    const poolRepId =
+      owned.kind === 'dialer_pool'
+        ? (await stickyAgentForCaller(db, owned.orgId, normFrom, owned.e164)) ??
+          (await lastDialerForCaller(db, owned.orgId, normFrom, owned.e164))
+        : null;
 
-    // Attribute the inbound call to: the sticky agent (dialer-pool callback),
+    // Attribute the inbound call to: the pool rep (dialer-pool callback),
     // else the DID's owner, or — for an unassigned reserve number — any user
     // in the org. NEVER a synthetic UUID: that violates the users FK and 500s
     // the webhook, which Twilio plays to the caller as "an application error
     // has occurred".
     const handlerUserId =
-      poolStickyAgentId ??
+      poolRepId ??
       owned.assignedUserId ??
       (await db.query.users.findFirst({
         where: humanUsersInOrg(owned.orgId),
@@ -246,7 +253,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
         salesforceWhatId: matched?.whatId ?? null,
         inboundCallerMatched: !!matched,
         // The answered path (ring the rep) plays a recording disclosure below.
-        recordingDisclosurePlayed: cfg.TWILIO_RECORD_CALLS && !!(owned.assignedUserId || poolStickyAgentId),
+        recordingDisclosurePlayed: cfg.TWILIO_RECORD_CALLS && !!(owned.assignedUserId || poolRepId),
       });
     // A replayed delivery of the same CallSid (a Twilio retry, or any TwiML
     // path that re-requests this document) must be answered, not 500ed — the
@@ -261,12 +268,12 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
         : undefined);
     if (!callDbId) throw new Error(`inbound call row missing after insert conflict for ${callSid}`);
 
-    // No-answer failover: the rep we're about to ring (sticky pool agent, else
-    // the DID's assigned owner) may have a personal forward number, and the DID
+    // No-answer failover: the rep we're about to ring (pool rep, else the
+    // DID's assigned owner) may have a personal forward number, and the DID
     // itself may carry an admin-set per-number override. When either is present
     // we ring the softphone for a short window (10s) instead of the full 25s, so
     // an unanswered callback rolls to that number quickly (see dial-result).
-    const ringingRepId = poolStickyAgentId ?? owned.assignedUserId ?? null;
+    const ringingRepId = poolRepId ?? owned.assignedUserId ?? null;
     let repForwardE164: string | null = null;
     if (ringingRepId) {
       const rep = await db.query.users.findFirst({
@@ -283,12 +290,17 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
 
     const t = new twilio.twiml.VoiceResponse();
 
-    // Dialer-pool DIDs: if the caller has a sticky agent on THIS pool DID,
-    // ring them so the callback reaches the rep the lead already spoke with;
-    // otherwise fall through to voicemail. Additive branch — the agent-kind
-    // DID routing below (assignedUserId) is unchanged.
+    // Dialer-pool DIDs: if the caller has a sticky agent on THIS pool DID, or
+    // a rep power-dialed them recently, ring that rep so the callback reaches
+    // the person they are calling back; otherwise fall through to voicemail.
+    // No presence check on purpose — ring exactly as the sticky path always
+    // has: an offline softphone simply does not answer, dial-result then
+    // rolls to their forward number or voicemail, and the call is still
+    // ATTRIBUTED to the right rep (their Recent list, their SF sync) instead
+    // of an org-wide voicemail box nobody owns. Additive branch — the
+    // agent-kind DID routing below (assignedUserId) is unchanged.
     if (owned.kind === 'dialer_pool') {
-      if (poolStickyAgentId) {
+      if (poolRepId) {
         // All-party consent: the caller hears the disclosure before we bridge them
         // to the rep and start recording.
         if (cfg.TWILIO_RECORD_CALLS) {
@@ -314,7 +326,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
               }
             : {}),
         } as never);
-        dialClientWithCallerParams(dial, clientIdentity(poolStickyAgentId), matched);
+        dialClientWithCallerParams(dial, clientIdentity(poolRepId), matched);
       } else {
         const greeting =
           (matched ? owned.inboundMatchedGreeting : owned.inboundGreeting) ??
