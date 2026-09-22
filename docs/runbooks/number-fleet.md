@@ -453,3 +453,39 @@ cd salesforce && sf org assign permset -n Skip_On_Dialer -o _t2 -b <newhire-sf-u
 ```
 
 Note: the SF *username* may differ from the email (e.g. evren@gghomessd.com is the email; the username is evren2@gghomessd.com). Resolve it with `sf data query -q "SELECT Username FROM User WHERE Email = '<email>'" -o _t2` first.
+
+## 8. Callbacks to pool numbers
+
+Pool DIDs (`kind = 'dialer_pool'`) belong to no rep, so an inbound call to one is
+routed by who the caller was talking to, not by `assigned_user_id`
+(`services/cti-api/src/routes/inbound.ts`, lookups in `src/dialer/sticky.ts`).
+Two lookups, in order: first the **sticky** binding (`sticky_numbers`, written by
+the dialer engine when a power-dial to that person *connected* on that DID — a
+real conversation always wins); if there is none, the **last dialer** — the rep
+whose `dialer_dial_attempts` row for that caller is the most recent within the
+last **14 days** (`LAST_DIAL_WINDOW_MS`), preferring a dial placed *from the very
+DID they rang back* over one from any other pool number. A prospect returning a
+missed call therefore reaches the rep who called them. Whichever rep is found is
+rung on their softphone and, ring answered or not, is who the call is attributed
+to (their Recent list, their Salesforce sync); no presence check — an offline
+softphone just rolls through dial-result to their forward number or voicemail.
+Only when neither lookup finds anyone (never dialed by the dialer, or more than
+14 days ago, or a withheld caller ID such as `anonymous`) does the call take
+the greeting/voicemail path, attributed to the org's first human user. To see
+who a callback from `<caller>` to pool DID `<did>` would ring, run the same two
+reads by hand:
+
+```sql
+-- 1. sticky (a connect) — a row here wins outright
+select assigned_user_id, last_used_at from sticky_numbers
+ where org_id = '<org>' and recipient_e164 = '<caller>' and e164 = '<did>'
+ order by last_used_at desc limit 1;
+-- 2. otherwise the last dialer, same-DID rows first, then newest
+select user_id, from_number, dialed_at from dialer_dial_attempts
+ where org_id = '<org>' and to_number = '<caller>'
+   and dialed_at >= now() - interval '14 days'
+ order by (from_number = '<did>') desc, dialed_at desc limit 1;
+```
+
+If both return nothing, `calls.user_id` on that inbound row will be the fallback
+user, and the fix is a dialer run that dials the person — not a manual sticky.
