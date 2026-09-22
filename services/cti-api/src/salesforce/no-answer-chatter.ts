@@ -28,6 +28,19 @@ import { callerMayCreateTaskOn, objectTypeForId, type OwnershipSnapshot } from '
 export const ATTEMPT_OUTCOMES = ['no_answer', 'voicemail', 'busy', 'fax', 'hangup', 'failed'] as const;
 export type AttemptOutcome = (typeof ATTEMPT_OUTCOMES)[number];
 
+/**
+ * An attempt older than this is never posted on — the second half of the
+ * no-historical-backfill guard (the first is migration 0040's pre-stamp).
+ *
+ * Measured on the ATTEMPT, not the session. `dialer_sessions.updated_at` moves
+ * on every status flip: a run paused on the 1st and stopped on the 20th (a rep
+ * pressing Stop on a stale summary, an admin cleanup) has a fresh session clock
+ * and 19-day-old dials. The item's `updated_at` is stamped when the attempt
+ * settles (`setItem` / the miss CAS in dialer/engine.ts) and moves for nothing
+ * else, so it is the only clock that says when the dial actually happened.
+ */
+export const SWEEP_WINDOW_MS = 24 * 60 * 60_000;
+
 /** How each attempt outcome reads to a human in the feed. */
 const OUTCOME_LABEL: Readonly<Record<AttemptOutcome, string>> = {
   no_answer: 'no answer',
@@ -47,7 +60,8 @@ const POSTABLE_TYPES: ReadonlySet<string> = new Set(['Lead', 'Contact', 'Opportu
 /** The columns of a queue item this decision reads. */
 export type SweepItem = Pick<
   DialerItem,
-  'id' | 'recordId' | 'objectType' | 'status' | 'outcome' | 'attempt' | 'ordinal' | 'taskId' | 'noAnswerFeedItemId' | 'noAnswerSkipReason'
+  | 'id' | 'recordId' | 'objectType' | 'status' | 'outcome' | 'attempt' | 'ordinal' | 'taskId'
+  | 'noAnswerFeedItemId' | 'noAnswerSkipReason' | 'updatedAt'
 >;
 
 /** One record owed a "No answer" post, with everything the worker needs. */
@@ -66,10 +80,21 @@ function isAttemptOutcome(outcome: string | null): outcome is AttemptOutcome {
   return outcome != null && (ATTEMPT_OUTCOMES as readonly string[]).includes(outcome);
 }
 
+/**
+ * Did this attempt settle inside the sweep window? Strict: an item at exactly
+ * NOW-24h is out. Exported so the boundary is pinned on its own — it is the
+ * predicate that stands between a stale dial and an irreversible post.
+ */
+export function attemptedWithinWindow(item: Pick<SweepItem, 'updatedAt'>, now: Date): boolean {
+  return item.updatedAt.getTime() > now.getTime() - SWEEP_WINDOW_MS;
+}
+
 /** STATUS decides, then outcome: a `skipped` row can carry any text in `outcome`
- *  ('out_of_hours', a DID-skip reason…) and is never an attempt. */
-function isAttempt(item: SweepItem): boolean {
-  return item.status === 'no_connect' && isAttemptOutcome(item.outcome);
+ *  ('out_of_hours', a DID-skip reason…) and is never an attempt. Nor is a miss
+ *  that settled outside the window — it is simply not counted, and needs no
+ *  stamp: a run whose misses are all stale finishes with nothing to post. */
+function isAttempt(item: SweepItem, now: Date): boolean {
+  return item.status === 'no_connect' && isAttemptOutcome(item.outcome) && attemptedWithinWindow(item, now);
 }
 
 const isStamped = (item: SweepItem): boolean => item.noAnswerFeedItemId != null || item.noAnswerSkipReason != null;
@@ -91,8 +116,10 @@ const byAttemptThenOrdinal = (a: SweepItem, b: SweepItem): number =>
  *
  * Returned in run order (each record's first qualifying ordinal), so the worker's
  * 200-record chunks are the same on a retry as they were the first time.
+ *
+ * `now` bounds which misses count at all — see `SWEEP_WINDOW_MS`.
  */
-export function selectNoAnswerRecords(items: ReadonlyArray<SweepItem>): NoAnswerRecord[] {
+export function selectNoAnswerRecords(items: ReadonlyArray<SweepItem>, now: Date): NoAnswerRecord[] {
   const byRecord = new Map<string, SweepItem[]>();
   for (const item of items) byRecord.set(item.recordId, [...(byRecord.get(item.recordId) ?? []), item]);
 
@@ -100,7 +127,7 @@ export function selectNoAnswerRecords(items: ReadonlyArray<SweepItem>): NoAnswer
   for (const [recordId, group] of byRecord) {
     if (!POSTABLE_TYPES.has(objectTypeForId(recordId))) continue;
     if (group.some(wasReached)) continue;
-    const attempts = group.filter(isAttempt).sort(byAttemptThenOrdinal);
+    const attempts = group.filter((i) => isAttempt(i, now)).sort(byAttemptThenOrdinal);
     if (attempts.length === 0 || attempts.some(isStamped)) continue;
     selected.push({
       recordId,

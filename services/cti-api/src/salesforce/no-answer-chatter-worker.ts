@@ -10,12 +10,18 @@
  * dry, the abandoned-run reaper), and dialer/engine.ts does not know this exists.
  *
  * NO HISTORICAL BACKFILL — two independent guards, both required:
- *  1. migration 0040 stamps every session that ended before the feature existed;
- *  2. the scan, the claim, and `sweepEligible` each refuse a session that ended
- *     more than SWEEP_WINDOW_MS (24h) ago.
- * Either alone would do. Together, a bad deploy order, a restored backup, or a
- * long stretch with the kill switch off cannot turn into thousands of posts on
- * months-old records, authored by reps, that nobody can take back.
+ *  1. migration 0040 stamps every session that ended before the feature existed,
+ *     and every session — whatever its status — not touched in 24h;
+ *  2. `selectNoAnswerRecords` counts only misses that SETTLED inside
+ *     SWEEP_WINDOW_MS (24h), by the item's own `updated_at`.
+ * The scan, the claim, and `sweepEligible` also refuse a session whose
+ * `updated_at` is older than 24h, but that is a pre-filter (and the index key),
+ * not the guard: `stopSession` stamps the session clock on a paused/ready run
+ * too, so a run paused weeks ago and stopped today looks fresh. Only the
+ * attempt's clock says when the dial happened. Together, a bad deploy order, a
+ * restored backup, a stale run stopped late, or a long stretch with the kill
+ * switch off cannot turn into thousands of posts on old records, authored by
+ * reps, that nobody can take back.
  *
  * AT-LEAST-ONCE. The post and the stamp that records it cannot be one atomic
  * step (one is Salesforce, one is Postgres). Posts go out in chunks of 200 and
@@ -35,10 +41,11 @@
  * its next post and never clears, backs off, or finishes the new owner's claim.
  * The overlap that remains is the one chunk that was already in flight.
  *
- * `dialer_sessions.updated_at` is NEVER written here. It is the only "ended at"
- * clock the run has (the engine stamps it on the status flip), and both the 24h
- * guard and the settle window read it — bumping it on a claim would slide a
- * session forward in time forever.
+ * `dialer_sessions.updated_at` is NEVER written here. It is the run's
+ * last-status-flip clock (the engine stamps it on every flip), and the scan
+ * pre-filter and the settle window read it — bumping it on a claim would slide
+ * a session forward in time forever. Nor is `dialer_queue_items.updated_at`:
+ * that is the attempt's settle time, the clock the 24h guard actually reads.
  *
  * Mirrors salesforce/followup-worker.ts (deps injection, CAS claim, backoff,
  * stuck-claim reaping, single-flight loop).
@@ -50,15 +57,17 @@ import type { AppConfig } from '../config.js';
 import type { DialerItem } from '../dialer/session-store.js';
 import { FEED_ITEMS_PER_REQUEST, createFeedItems, type FeedItemResult } from './client.js';
 import { isSalesforceAuthError, withTimeout } from './followup-worker.js';
-import { gateIdsFor, noAnswerText, selectNoAnswerRecords, verdictFor, type NoAnswerRecord } from './no-answer-chatter.js';
+import { SWEEP_WINDOW_MS, gateIdsFor, noAnswerText, selectNoAnswerRecords, verdictFor, type NoAnswerRecord } from './no-answer-chatter.js';
 import { fetchOwnershipBatch, type OwnershipSnapshot } from './ownership.js';
+
+/** Defined beside the predicate that reads it (no-answer-chatter.ts); re-exported
+ *  because it is part of this worker's contract too (scan, claim, `sweepEligible`). */
+export { SWEEP_WINDOW_MS };
 
 export const MAX_ATTEMPTS = 8;
 /** Doubling: 30s, 1m, 2m … ≈63 minutes over 8 attempts — long enough for a rep
  *  whose Salesforce token died to sign back in. */
 export const BACKOFF_BASE_MS = 30_000;
-/** Sessions that ended longer ago than this are never swept. See the header. */
-export const SWEEP_WINDOW_MS = 24 * 60 * 60_000;
 /** How long after a run ends we keep waiting for a still-`dialing` item to settle. */
 export const SETTLE_WINDOW_MS = 10 * 60_000;
 /** …and how soon we look again while waiting. */
@@ -105,9 +114,13 @@ const ENDED: Array<Session['status']> = ['done', 'stopped'];
 
 /**
  * Everything that makes a session sweepable RIGHT NOW: ended, not yet swept,
- * ended inside the last 24h, past its backoff floor, and unclaimed — or claimed
- * by a worker that has been gone longer than any sweep can take (this IS the
- * stuck-claim reaper; there is no separate reset pass).
+ * last flipped inside the last 24h, past its backoff floor, and unclaimed — or
+ * claimed by a worker that has been gone longer than any sweep can take (this
+ * IS the stuck-claim reaper; there is no separate reset pass).
+ *
+ * The 24h clause here is a PRE-FILTER (it is what the partial index covers),
+ * not the no-backfill guard — see the header: `updated_at` is a status-flip
+ * clock, and the guard that counts is on each attempt's own clock.
  *
  * One list, used by BOTH the scan and the claim. The claim is the last gate
  * before anything is posted, and a replica holding a candidate list from a few
@@ -125,10 +138,10 @@ function sweepableNow(now: Date): Array<SQL | undefined> {
 }
 
 /**
- * Pure — the "owed a sweep" half of that decision, re-made in code. The SQL is a
- * pre-filter; this is the predicate that actually stands between a session and
- * a batch of irreversible posts, so it is testable without a database (same
- * reasoning as `nudgeEligible` in followup-worker.ts).
+ * Pure — the "owed a sweep" half of that decision, re-made in code so it is
+ * testable without a database (same reasoning as `nudgeEligible` in
+ * followup-worker.ts). A session that passes still posts nothing unless its
+ * misses settled inside the window (`attemptedWithinWindow`).
  */
 export function sweepEligible(session: Pick<Session, 'status' | 'updatedAt' | 'noAnswerChatterAt'>, now: Date): boolean {
   if (!ENDED.includes(session.status)) return false;
@@ -289,7 +302,7 @@ async function postOwnedRecords(deps: NoAnswerChatterDeps, session: Session, cla
  *  stamped. Only for the give-up log, so a failure here is a null, not a throw. */
 async function recordsStillOwed(deps: NoAnswerChatterDeps, sessionId: string): Promise<number | null> {
   try {
-    return selectNoAnswerRecords(await loadItems(deps, sessionId)).length;
+    return selectNoAnswerRecords(await loadItems(deps, sessionId), deps.now()).length;
   } catch {
     return null;
   }
@@ -320,9 +333,10 @@ async function sweepSession(deps: NoAnswerChatterDeps, session: Session, claim: 
       await patchClaimed(deps, session.id, claim, settleRelease(deps.now()));
       return;
     }
-    // Nothing owed (everyone answered, or the run never dialed) → finished, and
-    // not a single Salesforce call was spent finding that out.
-    const records = selectNoAnswerRecords(items);
+    // Nothing owed (everyone answered, the run never dialed, or every miss is
+    // older than the window) → finished, and not a single Salesforce call was
+    // spent finding that out.
+    const records = selectNoAnswerRecords(items, deps.now());
     if (records.length > 0) await postOwnedRecords(deps, session, claim, records);
     await patchClaimed(deps, session.id, claim, finished(deps.now()));
   } catch (err) {

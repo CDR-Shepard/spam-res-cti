@@ -19,7 +19,7 @@ Code: `services/cti-api/src/salesforce/no-answer-chatter.ts` (pure rules), `no-a
 | `dialer_queue_items.no_answer_feed_item_id` | FeedItem id, on every counted attempt of the record |
 | `dialer_queue_items.no_answer_skip_reason` | terminal skip: `not-owner`, `not-found`, or a Salesforce `statusCode` |
 
-**No historical backfill:** 0040 marks every already-ended session swept, and the worker never touches a run that ended >24h ago (`updated_at`, which the worker never writes). Delivery is **at-least-once**: a crash mid-run can duplicate at most one 200-record chunk; it never loses one.
+**No historical backfill:** 0040 marks swept every already-ended session and every session (any status) not touched in 24h, and the worker only counts a miss whose `dialer_queue_items.updated_at` (the attempt's settle time) is <24h old. `dialer_sessions.updated_at` is a status-flip clock, not an "ended at" — `stopSession` refreshes it on a stale paused run too — so it is only the scan's pre-filter; the worker never writes either column. A run paused weeks ago and stopped today finishes with nothing to post. Delivery is **at-least-once**: a crash mid-run can duplicate at most one 200-record chunk; it never loses one.
 
 ## Kill switch
 

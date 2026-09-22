@@ -64,6 +64,7 @@ function item(o: Partial<SweepItem> & { sessionId?: string } = {}): SweepItem & 
   return {
     id: `I${seq}`, sessionId: 'S1', recordId: lead(1), objectType: 'Lead', status: 'no_connect', outcome: 'voicemail',
     attempt: 1, ordinal: seq, taskId: null, noAnswerFeedItemId: null, noAnswerSkipReason: null,
+    updatedAt: new Date(NOW.getTime() - 60_000),
     ...o,
   };
 }
@@ -256,6 +257,35 @@ describe('sweepEligible — the 24h guard, re-made in code', () => {
     expect(f.writes).toEqual([]);
     expect(d.ownership).not.toHaveBeenCalled();
     expect(d.createFeedItems).not.toHaveBeenCalled();
+  });
+
+  it('TICK: a run paused weeks ago and stopped just now (fresh session updated_at, 3-day-old misses) finishes with ZERO Salesforce calls and no stamps', async () => {
+    // `stopSession` stamps updated_at = now() on a paused/ready run too, so the
+    // session clock alone would sweep 19-day-old dials. The attempt's own settle
+    // time (item.updated_at) is the clock that counts.
+    const order: string[] = [];
+    const stale = new Date(NOW.getTime() - 3 * 24 * 60 * 60_000);
+    const items = [item({ id: 'A1', updatedAt: stale }), item({ id: 'A2', attempt: 2, updatedAt: stale }), item({ id: 'B1', recordId: lead(2), updatedAt: stale })];
+    const f = fakeDb({ sessions: [session({ status: 'stopped', updatedAt: new Date(NOW.getTime() - 60_000) })], items, order });
+    const d = deps(f, {}, order);
+    expect(await runNoAnswerChatterTick(d)).toEqual({ processed: 1 });
+    expect(order).toEqual(['scan', 'claim', 'items', 'finish']);
+    expect(d.ownership).not.toHaveBeenCalled();
+    expect(d.createFeedItems).not.toHaveBeenCalled();
+    expect(itemWrites(f)).toEqual([]);
+    expect(sessionWrites(f).at(-1)!.patch.noAnswerChatterAt).toEqual(NOW);
+  });
+
+  it('TICK: the boundary is the item — NOW-24h+1s is posted on, NOW-24h is not', async () => {
+    const items = [
+      item({ id: 'IN', recordId: lead(1), updatedAt: new Date(NOW.getTime() - SWEEP_WINDOW_MS + 1000) }),
+      item({ id: 'OUT', recordId: lead(2), updatedAt: new Date(NOW.getTime() - SWEEP_WINDOW_MS) }),
+    ];
+    const f = fakeDb({ sessions: [session({ status: 'stopped' })], items });
+    const d = deps(f);
+    await runNoAnswerChatterTick(d);
+    expect((d.createFeedItems as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toEqual([{ parentId: lead(1), body: 'No answer (Power Dialer) — 1 attempt: voicemail' }]);
+    expect(itemWrites(f).map((w) => render(w.where).params)).toEqual([['S1', 'IN']]);
   });
 });
 
