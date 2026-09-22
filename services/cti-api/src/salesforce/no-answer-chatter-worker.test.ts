@@ -290,6 +290,18 @@ describe('sweepEligible — the 24h guard, re-made in code', () => {
   });
 });
 
+describe('timeouts vs the stuck-claim reaper', () => {
+  it('a claim is only presumed dead after every Salesforce call a 500-record sweep can make has timed out', () => {
+    // Ownership lookup + three 200-record posts, each at its ceiling. If the
+    // reaper fired sooner, a slow-but-alive worker would be reaped mid-sweep and
+    // a second worker would post the same chunks.
+    expect(OWNERSHIP_TIMEOUT_MS).toBe(120_000);
+    expect(SF_POST_TIMEOUT_MS).toBe(60_000);
+    expect(STUCK_AFTER_MS).toBe(600_000);
+    expect(STUCK_AFTER_MS).toBeGreaterThanOrEqual(OWNERSHIP_TIMEOUT_MS + 3 * SF_POST_TIMEOUT_MS);
+  });
+});
+
 describe('claim', () => {
   it('is a compare-and-swap that re-checks EVERYTHING the scan checked (un-swept, 24h, due, unclaimed-or-stuck), bumps attempts, stamps the claim clock', async () => {
     const f = fakeDb({ sessions: [session()], items: [] });
@@ -455,6 +467,27 @@ describe('sweep — the happy path, in order', () => {
     await runNoAnswerChatterTick(d);
     expect(order).toEqual(['scan', 'claim', 'items', 'stamp-skip:not-owner', 'finish']);
     expect(d.createFeedItems).not.toHaveBeenCalled();
+  });
+
+  it('TWO records skipped for the same reason are BOTH stamped, in one UPDATE (a last-one-wins grouping would leave the first un-stamped and re-checked forever)', async () => {
+    const items = [
+      item({ id: 'A1', recordId: lead(1) }), item({ id: 'A2', recordId: lead(1), attempt: 2 }),
+      item({ id: 'B1', recordId: lead(2) }),
+      item({ id: 'C1', recordId: lead(3) }),
+    ];
+    const f = fakeDb({ sessions: [session()], items });
+    const ownership = vi.fn(async (_u: string, ids: ReadonlyArray<string>) => {
+      const m = owned([...ids]);
+      m.set(lead(1), { type: 'Lead', ownerId: OTHER, ownerName: 'Matt Penrod' });
+      m.set(lead(3), { type: 'Lead', ownerId: OTHER, ownerName: 'Matt Penrod' });
+      return m;
+    });
+    const d = deps(f, { ownership });
+    await runNoAnswerChatterTick(d);
+    const skips = itemWrites(f).filter((w) => eventOf(w) === 'stamp-skip:not-owner');
+    expect(skips).toHaveLength(1);
+    expect(render(skips[0]!.where).params).toEqual(['S1', 'A1', 'A2', 'C1']);
+    expect((d.createFeedItems as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toEqual([{ parentId: lead(2), body: 'No answer (Power Dialer) — 1 attempt: voicemail' }]);
   });
 
   it('Task run: the Task is gated with the record, and someone else\'s Task means no post', async () => {

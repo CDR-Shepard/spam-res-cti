@@ -58,13 +58,19 @@ describe('noAnswerText', () => {
 
 describe('selectNoAnswerRecords', () => {
   it('groups a record\'s attempts into ONE post, ordered by attempt then ordinal', () => {
-    // Inserted out of order on purpose: attempt 2 first, and a lower ordinal
-    // later, so a selector that trusted input order would get the text wrong.
-    const a2 = item({ id: 'A2', attempt: 2, ordinal: 9, outcome: 'voicemail' });
-    const a1 = item({ id: 'A1', attempt: 1, ordinal: 0, outcome: 'no_answer' });
+    // Adversarial on purpose: attempt 2 comes FIRST in the input AND carries
+    // the LOWER ordinal, so a selector that trusted input order, or sorted by
+    // ordinal alone, would both put the voicemail before the no-answer.
+    const a2 = item({ id: 'A2', attempt: 2, ordinal: 0, outcome: 'voicemail' });
+    const a1 = item({ id: 'A1', attempt: 1, ordinal: 9, outcome: 'no_answer' });
     expect(select([a2, a1])).toEqual([
       { recordId: LEAD, itemIds: ['A1', 'A2'], reasons: ['no_answer', 'voicemail'], taskIds: [] },
     ]);
+  });
+
+  it('does NOT de-duplicate reasons: a record that went to voicemail twice selects both attempts', () => {
+    const got = select([item({ id: 'V1', attempt: 1, outcome: 'voicemail' }), item({ id: 'V2', attempt: 2, outcome: 'voicemail' })]);
+    expect(got).toEqual([{ recordId: LEAD, itemIds: ['V1', 'V2'], reasons: ['voicemail', 'voicemail'], taskIds: [] }]);
   });
 
   it('orders same-attempt items by ordinal (a Task run dialing one person off two tasks)', () => {
