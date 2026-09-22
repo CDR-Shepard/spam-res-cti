@@ -333,6 +333,19 @@ describe('claim', () => {
     const claims = sessionWrites(f).filter((w) => eventOf(w) === 'claim').map((w) => (w.patch.noAnswerChatterClaimedAt as Date).getTime());
     expect(claims[1]!).toBeGreaterThan(claims[0]!);
   });
+
+  it('under a TICKING clock, every later write binds exactly the Date that was WRITTEN in the claim — a second clock read would never match a row', async () => {
+    let t = NOW.getTime();
+    const f = fakeDb({ sessions: [session({ id: 'S1' })], items: [] });
+    await runNoAnswerChatterTick(deps(f, { now: () => new Date((t += 1000)) }));
+    const [claim, finish] = sessionWrites(f);
+    expect(eventOf(claim!)).toBe('claim');
+    expect(eventOf(finish!)).toBe('finish');
+    const written = claim!.patch.noAnswerChatterClaimedAt as Date;
+    expect(render(finish!.where).params).toEqual(['S1', written.toISOString()]);
+    // The finish stamp itself is a later tick — so the two clocks are provably different reads.
+    expect((finish!.patch.noAnswerChatterAt as Date).getTime()).toBeGreaterThan(written.getTime());
+  });
 });
 
 describe('sweep — the happy path, in order', () => {
@@ -484,6 +497,31 @@ describe('chunking — at-least-once', () => {
     ]);
   });
 
+  it('every chunk\'s id stamp lists EVERY item of EVERY record in it — the stamps are the idempotency key', async () => {
+    // Record 0 was dialed twice (both attempts missed): 200 records, 201 items
+    // in chunk 1. A stamp that covered only the first record would leave the
+    // other 199 unstamped, and a retry would re-post nearly the whole chunk.
+    const items = [...many(450), item({ id: 'I-0b', recordId: lead(0), attempt: 2, ordinal: 450 })];
+    const f = fakeDb({ sessions: [session()], items });
+    const d = deps(f);
+    await runNoAnswerChatterTick(d);
+
+    const chunks = (d.createFeedItems as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1] as FeedItemPost[]);
+    const stamps = itemWrites(f).filter((w) => eventOf(w) === 'stamp-ids');
+    expect(stamps).toHaveLength(3);
+    for (const [i, w] of stamps.entries()) {
+      const chunkItemIds = chunks[i]!.flatMap((p) => items.filter((it) => it.recordId === p.parentId).map((it) => it.id));
+      expect(chunkItemIds.length).toBe(i === 0 ? 201 : chunks[i]!.length);
+      // session id + every item id of the chunk, in post order
+      expect(render(w.where).params).toEqual(['S1', ...chunkItemIds]);
+      expect(render(w.patch.noAnswerFeedItemId).params).toHaveLength(2 * chunkItemIds.length);
+    }
+    // Both attempts of record 0 carry the SAME FeedItem id, inside a 200-record chunk.
+    const caseParams = render(stamps[0]!.patch.noAnswerFeedItemId).params;
+    expect(caseParams.slice(0, 4)).toEqual(['I-0', '0D5-00000', 'I-0b', '0D5-00000']);
+    expect(chunks[0]![0]).toEqual({ parentId: lead(0), body: 'No answer (Power Dialer) — 2 attempts: voicemail, voicemail' });
+  });
+
   it('claim REAPED mid-sweep (another replica took over): stops before the next post and writes NOTHING more to the session', async () => {
     const order: string[] = [];
     const f = fakeDb({ sessions: [session()], items: many(250), order, holds: (_sid, nth) => nth < 2 });
@@ -553,11 +591,14 @@ describe('failure', () => {
     expect(sessionWrites(f).at(-1)!.patch).toEqual({ noAnswerChatterClaimedAt: null, noAnswerChatterNextAt: new Date(NOW.getTime() + BACKOFF_BASE_MS) });
   });
 
-  it('backoff doubles per attempt: 30s × 2^(attempts-1)', async () => {
+  it('backoff doubles per attempt: 30s × 2^(attempts-1) — and the release lands only while the claim is still ours', async () => {
     const f = fakeDb({ sessions: [session({ noAnswerChatterAttempts: 3 })], items: [item()] }); // this claim makes it attempt 4
     await runNoAnswerChatterTick(deps(f, { ownership: vi.fn(async () => { throw new Error('boom'); }) }));
-    expect(sessionWrites(f).at(-1)!.patch.noAnswerChatterNextAt).toEqual(new Date(NOW.getTime() + BACKOFF_BASE_MS * 8));
+    const release = sessionWrites(f).at(-1)!;
+    expect(release.patch.noAnswerChatterNextAt).toEqual(new Date(NOW.getTime() + BACKOFF_BASE_MS * 8));
     expect(BACKOFF_BASE_MS).toBe(30_000);
+    // A reaped worker must not back off (or clear the claim of) the new owner.
+    expect(render(release.where).params).toEqual(['S1', NOW.toISOString()]);
   });
 
   it('a hung Salesforce call times out instead of pinning the single-flight tick', async () => {
@@ -586,7 +627,11 @@ describe('failure', () => {
     const ownership = vi.fn(async (_u: string, ids: ReadonlyArray<string>) => { const m = owned([...ids]); m.delete(lead(3)); return m; });
     const createFeedItems = vi.fn(async () => { throw new Error('Salesforce FeedItem create failed (500): []'); });
     await runNoAnswerChatterTick(deps(f, { ownership, createFeedItems }));
-    expect(sessionWrites(f).at(-1)!.patch).toEqual({ noAnswerChatterAt: NOW, noAnswerChatterClaimedAt: null, noAnswerChatterNextAt: null });
+    const giveUp = sessionWrites(f).at(-1)!;
+    expect(giveUp.patch).toEqual({ noAnswerChatterAt: NOW, noAnswerChatterClaimedAt: null, noAnswerChatterNextAt: null });
+    // Only while the claim is still ours: a reaped worker giving up must not
+    // mark the new owner's sweep finished.
+    expect(render(giveUp.where).params).toEqual(['S1', NOW.toISOString()]);
     // lead(3) was terminally skipped before the failure; two records were left
     // un-posted. Counted from a RE-READ of the run, i.e. from what is actually stamped.
     expect(console.error).toHaveBeenCalledWith('[no-answer-chatter] giving up', expect.objectContaining({ sessionId: 'S1', recordsLeft: 2, attempts: MAX_ATTEMPTS }));
