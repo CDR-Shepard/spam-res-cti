@@ -324,6 +324,19 @@ describe('POST /telephony/twilio/inbound — a callback to a pool DID rings the 
     expect(state.lastDialerForCaller.mock.calls[0]!.slice(1)).toEqual(['org-1', '+13105550002', '+16195550100']);
   });
 
+  // A database hiccup in the FALLBACK lookup must not cost the caller the
+  // call: without this the webhook 500s and Twilio plays "an application error
+  // has occurred". Degrade to what happened before the lookup existed —
+  // voicemail, attributed to the org fallback user.
+  it('the last-dialer lookup THROWS → the caller still gets voicemail (no 500), attributed to the org fallback', async () => {
+    state.lastDialerForCaller.mockRejectedValueOnce(new Error('pool exhausted'));
+    const res = await ring();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<Record');
+    expect(res.body).not.toContain('<Dial');
+    expect(state.callValues[0]!.userId).toBe('org-user-jona');
+  });
+
   it('a raw From that only normalizes to E.164 reaches the lookup normalized', async () => {
     state.lastDialerId = 'rep-3';
     await ring({ From: '(310) 555-0002' });

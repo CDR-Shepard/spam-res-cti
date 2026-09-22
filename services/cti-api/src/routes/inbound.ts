@@ -132,6 +132,24 @@ export function answeredAtFrom(endedAt: Date, dialCallDuration: string | undefin
   return Number.isFinite(seconds) && seconds >= 0 ? new Date(endedAt.getTime() - seconds * 1000) : endedAt;
 }
 
+/** The fallback lookup, degraded to "nobody" on a database error: a hiccup here
+ *  must cost the caller a rep, never the call (a thrown error 500s the webhook
+ *  and Twilio plays "an application error has occurred"). */
+async function lastDialerOrNone(
+  db: Parameters<typeof lastDialerForCaller>[0],
+  orgId: string,
+  callerE164: string,
+  dialedPoolDid: string,
+  onError: (err: unknown) => void,
+): Promise<string | null> {
+  try {
+    return await lastDialerForCaller(db, orgId, callerE164, dialedPoolDid);
+  } catch (err) {
+    onError(err);
+    return null;
+  }
+}
+
 export async function registerInboundRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
 
@@ -195,7 +213,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     const poolRepId =
       owned.kind === 'dialer_pool'
         ? (await stickyAgentForCaller(db, owned.orgId, normFrom, owned.e164)) ??
-          (await lastDialerForCaller(db, owned.orgId, normFrom, owned.e164))
+          (await lastDialerOrNone(db, owned.orgId, normFrom, owned.e164, (err) => app.log.warn({ err }, 'inbound_last_dialer_lookup_failed')))
         : null;
 
     // Attribute the inbound call to: the pool rep (dialer-pool callback),
