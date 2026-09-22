@@ -17,6 +17,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTableColumns } from 'drizzle-orm';
+import { PgDialect, getTableConfig } from 'drizzle-orm/pg-core';
 import { dialerQueueItems, dialerSessions } from './schema.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -68,5 +69,26 @@ describe('migration 0040_no_answer_chatter', () => {
       'no_answer_chatter_at', 'no_answer_chatter_claimed_at', 'no_answer_chatter_attempts', 'no_answer_chatter_next_at',
     ]));
     expect(itemCols).toEqual(expect.arrayContaining(['no_answer_feed_item_id', 'no_answer_skip_reason']));
+  });
+
+  it('the schema agrees with the SQL that attempts is NOT NULL DEFAULT 0 — the claim does `attempts + 1`, and null + 1 is null forever', () => {
+    const { noAnswerChatterAttempts: attempts } = getTableColumns(dialerSessions);
+    expect(attempts.notNull).toBe(true);
+    expect(attempts.hasDefault).toBe(true);
+    expect(attempts.default).toBe(0);
+    // The other three are nullable on purpose: null IS the "unclaimed / not swept / no floor" state.
+    for (const c of [dialerSessions.noAnswerChatterAt, dialerSessions.noAnswerChatterClaimedAt, dialerSessions.noAnswerChatterNextAt]) {
+      expect(c.notNull).toBe(false);
+    }
+  });
+
+  it('the schema declares the same partial scan index as the SQL: on (updated_at), where un-swept and ended', () => {
+    const idx = getTableConfig(dialerSessions).indexes.find((i) => i.config.name === 'dialer_sessions_no_answer_chatter_scan_idx');
+    expect(idx).toBeDefined();
+    expect(idx!.config.columns.map((c) => (c as { name: string }).name)).toEqual(['updated_at']);
+    expect(idx!.config.unique).toBe(false);
+    expect(new PgDialect().sqlToQuery(idx!.config.where!).sql).toBe(
+      '"dialer_sessions"."no_answer_chatter_at" is null and "dialer_sessions"."status" in (\'done\',\'stopped\')',
+    );
   });
 });
