@@ -18,9 +18,20 @@ import { App } from './App';
 import * as opencti from './opencti';
 import * as coordinator from './softphone-coordinator';
 
+class FakeTrack {
+  private handlers = new Map<string, Array<() => void>>();
+  addEventListener(event: string, cb: () => void): void {
+    this.handlers.set(event, [...(this.handlers.get(event) ?? []), cb]);
+  }
+  fire(event: string): void { for (const cb of this.handlers.get(event) ?? []) cb(); }
+}
+
 class FakeConnection {
   private handlers = new Map<string, Array<() => void>>();
   disconnect = vi.fn(() => { this.emit('disconnect'); });
+  /** The local mic track the app watches (audio-readiness.ts watchLocalMic). */
+  micTrack = new FakeTrack();
+  getLocalStream(): { getAudioTracks: () => FakeTrack[] } { return { getAudioTracks: () => [this.micTrack] }; }
   on(event: string, cb: () => void): void {
     this.handlers.set(event, [...(this.handlers.get(event) ?? []), cb]);
   }
@@ -33,6 +44,13 @@ class FakeDevice {
   /** connect() rejects once this many legs have been handed out. */
   static failConnectsAfter = Infinity;
   private listeners = new Map<string, Array<(a?: unknown) => void>>();
+  /** device.audio — the AudioHelper surface the mic re-pin uses. */
+  audio = {
+    availableInputDevices: new Map([['default', { deviceId: 'default' }]]),
+    inputDevice: null as { deviceId: string } | null,
+    setInputDevice: vi.fn(async (id: string) => { FakeDevice.instances[0]!.audio.inputDevice = { deviceId: id }; }),
+    on: vi.fn(),
+  };
   constructor(_token: string, _opts: unknown) { FakeDevice.instances.push(this); }
   on(event: string, cb: (a?: unknown) => void): void {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), cb]);
@@ -322,5 +340,16 @@ describe('App — power-dialer conference leg wiring', () => {
     expect(state.isBusy!()).toBe(true);
     await waitFor(() => expect(state.controls).toEqual(['start', 'stop']), { timeout: 4000 });
     await waitFor(() => expect(state.isBusy!()).toBe(false));
+  });
+
+  // The mic that died mid-run (2026-09-22): the leg keeps receiving audio but
+  // its local track ended with the old headset, and nothing re-acquired it.
+  it("re-pins the microphone when the dialer leg's local track ends, and says so", async () => {
+    await startRun();
+    const device = FakeDevice.instances[0]!;
+    act(() => { FakeDevice.connects[0]!.connection.micTrack.fire('ended'); });
+    await waitFor(() => expect(device.audio.setInputDevice).toHaveBeenCalledWith('default'));
+    expect(await screen.findByText('Microphone reconnected.')).toBeTruthy();
+    expect(FakeDevice.connects.length).toBe(1); // the leg itself is untouched
   });
 });

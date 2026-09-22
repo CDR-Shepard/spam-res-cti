@@ -61,3 +61,100 @@ export function watchCallMedia(
     if (issue && onCleared) onCleared(issue);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Local mic re-pinning.
+//
+// 2026-09-22: two reps reported "I can hear them but they can't hear me" after
+// swapping headsets mid-shift. Voice Insights on one rep's conference leg
+// showed 9,334 packets received against 1,796 sent — the microphone stream
+// died and nothing re-acquired it. The Twilio SDK re-runs getUserMedia on a
+// device change ONLY in browsers that expose Chrome's 'default' pseudo-device
+// (and only via a silent setTimeout), so this watches the thing that actually
+// goes wrong — the call's local audio track ending or muting — and re-pins the
+// input to the current default. The SDK swaps the new track into the live call
+// (`setInputDevice` during a call is supported; `unsetInputDevice` is not).
+// ---------------------------------------------------------------------------
+
+/** The subset of `device.audio` (Twilio AudioHelper) this needs. */
+export interface AudioHelperLike {
+  availableInputDevices: Map<string, { deviceId: string }>;
+  inputDevice: { deviceId: string } | null;
+  setInputDevice(deviceId: string): Promise<void>;
+  on(event: string, listener: (...args: unknown[]) => void): void;
+}
+
+/** A call that may expose its local media (Twilio Call#getLocalStream). */
+export interface LocalMicCall {
+  getLocalStream?(): { getAudioTracks(): Array<{ addEventListener(e: string, cb: () => void): void }> } | null;
+}
+
+export type MicRepinTrigger = 'track-ended' | 'track-muted' | 'device-change';
+export type MicRepinResult = 'repinned' | 'no-device' | 'failed';
+
+/** Pure — the input to pin: Chrome's 'default' (it follows the OS default) when
+ *  present, else the first real device, else nothing. */
+export function pickInputDevice(available: Map<string, { deviceId: string }>): string | null {
+  if (available.has('default')) return 'default';
+  const first = available.keys().next();
+  return first.done ? null : first.value;
+}
+
+/**
+ * Re-acquire the microphone. The public `setInputDevice` returns early when
+ * the SAME device is already pinned and a stream object exists — even one
+ * whose track is dead — so a second re-pin needs a way past that: the SDK's
+ * own forced variant (what its device-change path calls), or, failing that, a
+ * hop through another device and back. Never throws.
+ */
+export async function repinInputDevice(audio: AudioHelperLike): Promise<MicRepinResult> {
+  const target = pickInputDevice(audio.availableInputDevices);
+  if (!target) return 'no-device';
+  try {
+    if (audio.inputDevice?.deviceId !== target) {
+      await audio.setInputDevice(target);
+      return 'repinned';
+    }
+    const forced = (audio as { _setInputDevice?: (id: string, force: boolean) => Promise<void> })._setInputDevice;
+    if (typeof forced === 'function') {
+      await forced.call(audio, target, true);
+      return 'repinned';
+    }
+    const other = [...audio.availableInputDevices.keys()].find((id) => id !== target);
+    if (!other) return 'failed';
+    await audio.setInputDevice(other);
+    await audio.setInputDevice(target);
+    return 'repinned';
+  } catch {
+    return 'failed';
+  }
+}
+
+/** Re-pins at most this often: a headset swap fires several events at once. */
+const REPIN_COOLDOWN_MS = 1000;
+
+/**
+ * Watch a live call's microphone and re-pin it the moment it goes dead:
+ * the local audio track ends or mutes, or the device list changes. `onRepin`
+ * reports what happened so the UI can say "microphone reconnected".
+ */
+export function watchLocalMic(
+  call: LocalMicCall,
+  audio: AudioHelperLike,
+  onRepin: (trigger: MicRepinTrigger, result: MicRepinResult) => void,
+  now: () => number = Date.now,
+): void {
+  let lastAt = -Infinity;
+  const repin = (trigger: MicRepinTrigger): void => {
+    const t = now();
+    if (t - lastAt < REPIN_COOLDOWN_MS) return;
+    lastAt = t;
+    void repinInputDevice(audio).then((result) => onRepin(trigger, result));
+  };
+  const tracks = call.getLocalStream?.()?.getAudioTracks() ?? [];
+  for (const track of tracks) {
+    track.addEventListener('ended', () => repin('track-ended'));
+    track.addEventListener('mute', () => repin('track-muted'));
+  }
+  audio.on('deviceChange', () => repin('device-change'));
+}

@@ -33,7 +33,7 @@ import {
   type ClickToDialEvent,
 } from './opencti';
 import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
-import { watchCallMedia, MEDIA_ISSUE_MESSAGE } from './audio-readiness';
+import { repinInputDevice, watchCallMedia, watchLocalMic, MEDIA_ISSUE_MESSAGE, type AudioHelperLike, type LocalMicCall } from './audio-readiness';
 import { sendDtmfKey, type DtmfSendable } from './dtmf';
 import { buildCallSubject } from './call-subject';
 import { openCtiSavePlan } from './opencti-log';
@@ -452,6 +452,27 @@ export function App(): JSX.Element {
     [runFirewallNow, raw, ctiContext?.recordId],
   );
 
+  /** `device.audio` of the live Device, when it has one (the fake in tests may not). */
+  const deviceAudio = (): AudioHelperLike | null =>
+    (deviceRef.current as { audio?: AudioHelperLike } | null)?.audio ?? null;
+
+  // Keep the microphone alive for the length of a call. A headset swapped
+  // mid-shift leaves the browser capturing from a device that is gone — the
+  // rep hears the seller, the seller hears silence (2026-09-22, two reps in an
+  // afternoon). The SDK only re-acquires the default mic by itself in browsers
+  // with Chrome's 'default' pseudo-device; this re-pins on the track actually
+  // dying, on a device change, and on the SDK's own "nothing being sent"
+  // warning. See audio-readiness.ts.
+  const keepMicAlive = useCallback((call: LocalMicCall & { on: (e: string, cb: (...a: unknown[]) => void) => void }) => {
+    const audio = deviceAudio();
+    if (!audio) return;
+    watchLocalMic(call, audio, (trigger, result) => {
+      if (result === 'repinned' && trigger !== 'device-change') setToast({ text: 'Microphone reconnected.', type: 'success' });
+      if (result === 'failed') setToast({ text: 'Your microphone stopped and could not be reconnected — reload the softphone.', type: 'error' });
+    });
+    watchCallMedia(call, (issue) => { if (issue === 'no-outbound-audio') void repinInputDevice(audio); });
+  }, []);
+
   // Lazily create + register ONE persistent Twilio device, reused for both
   // outbound dials and INBOUND calls (so callbacks ring the softphone). Idempotent.
   const ensureDevice = useCallback(async (): Promise<unknown> => {
@@ -656,6 +677,7 @@ export function App(): JSX.Element {
         return false;
       }
       dialerConnRef.current = connection;
+      keepMicAlive(connection as Parameters<typeof keepMicAlive>[0]);
       // The leg now survives each prospect leaving only via a server round trip
       // (see dialer-leg.ts). If it dies while the run is live, get the rep back
       // in — or stop the run: it must never keep dialing into an empty room.
@@ -943,6 +965,7 @@ export function App(): JSX.Element {
         params: { To: created.call.normalizedToNumber, CallerId: created.call.fromNumber, CallId: callId },
       });
       connectionRef.current = connection;
+      keepMicAlive(connection as Parameters<typeof keepMicAlive>[0]);
       coordinatorRef.current?.promoteSelf(); // broadcast busy immediately (see beginRun)
       setActive({
         callId,
@@ -1043,6 +1066,7 @@ export function App(): JSX.Element {
       if (pendingTeardownRef.current && !dialerConnRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
     };
     connectionRef.current = call;
+    keepMicAlive(call as unknown as Parameters<typeof keepMicAlive>[0]);
     coordinatorRef.current?.promoteSelf(); // broadcast busy immediately (see beginRun)
     setActive({ callId: '', startedAt: Date.now(), ...plan.activeCall });
     setIncoming(null);
