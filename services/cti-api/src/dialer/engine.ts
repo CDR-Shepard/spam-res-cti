@@ -622,7 +622,7 @@ export async function handleDialOutcome(
         // back to the column defaults (null / true), so the SECOND miss would
         // roll a "Check in" over as if it were a follow-up, and roll it by
         // search instead of by the task the rep actually dialed.
-        taskId: item.taskId, followupEligible: item.followupEligible,
+        taskId: item.taskId, followupEligible: item.followupEligible, displayName: item.displayName,
         attempt: 2, status: 'pending',
         retryNotBefore: new Date(deps.nowUtc.getTime() + RETRY_FLOOR_MS),
       });

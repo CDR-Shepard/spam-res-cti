@@ -590,6 +590,14 @@ describe('handleDialOutcome', () => {
     // The requeue rides inside the miss transaction (I4c), so it lands in `_txInserts`.
     expect(fdb._txInserts).toContainEqual({ values: expect.objectContaining({ attempt: 2, taskId: '00T2', followupEligible: false }) });
   });
+  it('the attempt-2 requeue row carries the display name forward (else the retry rings with a nameless card)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+1', secondaryNumber: null, sessionId: 'S1', displayName: 'Ada Lovelace' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'busy', deps);
+    // Carried, not defaulted: the column is nullable, so a requeue that forgot
+    // it would silently write null and the second ring would show only the number.
+    expect(fdb._txInserts).toContainEqual({ values: expect.objectContaining({ attempt: 2, recordId: '00Q1', displayName: 'Ada Lovelace' }) });
+  });
   it('a Task run: a non-follow-up task is dialed twice but never enqueues a rollover', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '0031', objectType: 'Contact', callId: 'CA1', attempt: 2, primaryNumber: '+1', secondaryNumber: null, taskId: '00T2', followupEligible: false }];
     const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, objectType: 'Task' }, items); deps.db = fdb;
