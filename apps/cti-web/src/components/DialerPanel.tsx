@@ -2,7 +2,7 @@
  * Power dialer control panel. With no run active it shows the list-view picker
  * (pick an object + one of the rep's Salesforce list views → dial it). During a
  * run it shows progress, the current record, and controls (pause/resume, skip,
- * stop, next), polling the session every ~2s — every 1s while a dial is in
+ * stop, next), polling the session every ~2 s (1 s while a dial is ringing) — every 1s while a dial is in
  * flight (see pollDelayMs).
  * A run is created READY and shows a confirm block (ConfirmBlock) until the rep
  * presses Start dialing; only then is the engine told to dial and the softphone
@@ -36,16 +36,25 @@ const POLL_INTERVAL_MS = 2000;
 const POLL_INTERVAL_IN_FLIGHT_MS = 1000;
 const TERMINAL_STATUSES = new Set(['done', 'stopped']);
 /** The current-item statuses during which the NEXT poll can flip the pop. */
-const IN_FLIGHT_ITEM_STATUSES = new Set(['dialing', 'connected']);
+/** The fast cadence is for the RING: the pop is decided by the first poll that
+ *  sees `connected`, and after that the rep talks for minutes with nothing to
+ *  learn until Next (which re-polls on its own). Holding 1 s through the
+ *  conversation would double the load for the whole run and buy nothing. */
+const FAST_POLL_ITEM_STATUSES = new Set(['dialing']);
+/** A poll that never settles — a laptop that slept mid-poll wakes with a
+ *  half-open socket Chrome can hold for minutes — must not freeze the loop:
+ *  the next poll is armed only when this one settles. Abort it, and let the
+ *  usual error path re-arm. */
+export const POLL_TIMEOUT_MS = 10_000;
 
 /**
  * Pure — how long to wait before the next poll, given the view the last one
- * fetched. 1s while the current record is dialing or connected; today's 2s
- * everywhere else (no view yet, idle, a settled miss, a terminal run).
+ * fetched. 1s while the current record is dialing; 2s everywhere else (no view
+ * yet, idle, connected, a settled miss, a terminal run).
  */
 export function pollDelayMs(view: DialerSessionView | null): number {
   const status = view?.currentItem?.status;
-  return status !== undefined && IN_FLIGHT_ITEM_STATUSES.has(status) ? POLL_INTERVAL_IN_FLIGHT_MS : POLL_INTERVAL_MS;
+  return status !== undefined && FAST_POLL_ITEM_STATUSES.has(status) ? POLL_INTERVAL_IN_FLIGHT_MS : POLL_INTERVAL_MS;
 }
 /**
  * How long, after a run first goes terminal, we keep polling for its follow-up
@@ -360,7 +369,7 @@ export function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Elemen
   // record pops on `connected` — so the rep knows who is about to say hello.
   // Without one (a row from before migration 0041, or a record with no Name)
   // the number keeps exactly the layout it always had.
-  const name = item.displayName || null;
+  const name = item.displayName?.trim() || null;
   return (
     <div className="section dp-current">
       <div className="kicker">Current record</div>
@@ -523,11 +532,11 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // by the effect's per-session reset, so it can never outlive its 409.
   const [conflictSessionId, setConflictSessionId] = useState<string | null>(null);
   // Ticks every second so the retry countdown re-renders without waiting on
-  // the ~2s poll.
+  // the ~2 s (1 s while a dial is ringing) poll.
   const [now, setNow] = useState(() => Date.now());
 
   // Id of the last currentItem we screen-popped for — pop once per NEW
-  // connected item, not on every ~2s poll.
+  // connected item, not on every ~2 s (1 s while a dial is ringing) poll.
   const lastPoppedIdRef = useRef<string | null>(null);
   // Lets a control action (pause/skip/...) trigger an immediate re-poll
   // instead of waiting up to 2s for the next tick.
@@ -589,8 +598,10 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     /** One poll: fetch and apply the view, and hand it back (null when the
      *  poll failed or the panel went away) so the caller can pace the next. */
     const pollOnce = async (): Promise<DialerSessionView | null> => {
+      const abort = new AbortController();
+      const deadline = setTimeout(() => abort.abort(), POLL_TIMEOUT_MS);
       try {
-        const next = await getDialer(sessionId);
+        const next = await getDialer(sessionId, { signal: abort.signal });
         if (cancelled) return null;
         setView(next);
         setError(null);
@@ -627,6 +638,8 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
           setError(e instanceof Error ? e.message : 'Could not refresh the dialer session.');
         }
         return null;
+      } finally {
+        clearTimeout(deadline);
       }
     };
 

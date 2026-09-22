@@ -90,9 +90,10 @@ export async function startDialer(
   });
 }
 
-export async function getDialer(id: string): Promise<DialerSessionView> {
+export async function getDialer(id: string, opts: { signal?: AbortSignal } = {}): Promise<DialerSessionView> {
   return api('/dialer/sessions/' + id, {
-    method: 'GET'
+    method: 'GET',
+    signal: opts.signal,
   });
 }
 

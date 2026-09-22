@@ -125,6 +125,13 @@ export function insertInboundCall(db: ReturnType<typeof getDb>, values: typeof s
   return db.insert(schema.calls).values(values).onConflictDoNothing().returning({ id: schema.calls.id });
 }
 
+/** PURE: when the rep picked up, given when the leg ended and how long it
+ *  lasted (Twilio's DialCallDuration, seconds). Unknown duration = the end. */
+export function answeredAtFrom(endedAt: Date, dialCallDuration: string | undefined): Date {
+  const seconds = dialCallDuration ? Number(dialCallDuration) : NaN;
+  return Number.isFinite(seconds) && seconds >= 0 ? new Date(endedAt.getTime() - seconds * 1000) : endedAt;
+}
+
 export async function registerInboundRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
 
@@ -470,6 +477,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     }
     const db = getDb();
     const answered = (body.DialCallStatus ?? '') === 'completed';
+    const now = new Date();
 
     if (answered) {
       await db
@@ -478,10 +486,12 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
           status: 'completed',
           // The one reliable "the rep picked up" signal. A finished voicemail
           // also ends `completed`, so without this stamp the Recent list cannot
-          // tell an answered call from one that rolled to voicemail.
-          answeredAt: new Date(),
+          // tell an answered call from one that rolled to voicemail. This
+          // callback fires when the leg ENDS: the answer time is the end minus
+          // the talk time Twilio reports, not "now".
+          answeredAt: answeredAtFrom(now, body.DialCallDuration),
           durationSeconds: body.DialCallDuration ? Number(body.DialCallDuration) : undefined,
-          endedAt: new Date(),
+          endedAt: now,
           updatedAt: new Date(),
         })
         .where(eq(schema.calls.id, q.callDbId));

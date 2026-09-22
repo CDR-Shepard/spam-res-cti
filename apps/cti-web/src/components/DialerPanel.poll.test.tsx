@@ -9,8 +9,8 @@
  * polled every second and everything else keeps today's 2 s.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render } from '@testing-library/react';
-import { DialerPanel } from './DialerPanel';
+import { act, cleanup, fireEvent, render } from '@testing-library/react';
+import { DialerPanel, POLL_TIMEOUT_MS } from './DialerPanel';
 import * as dialerApi from '../dialer-api';
 import type { DialerSessionView } from '../dialer-api';
 
@@ -48,11 +48,60 @@ describe('DialerPanel poll cadence', () => {
     expect(pollsAfterMount(pending)).toBe(1);
   });
 
-  it('a connected view polls every second too (the pop is decided on this poll)', async () => {
+  // The pop is decided on the FIRST poll that sees `connected`; after that the
+  // rep is talking for minutes and nothing changes until they press Next, which
+  // re-polls on its own. 1 s here would hold the fast cadence for the whole
+  // conversation and buy nothing.
+  it('a connected view is back at 2 s — the fast cadence is for the ring, not the conversation', async () => {
     const spy = vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view('connected'));
     mount();
-    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
-    expect(pollsAfterMount(spy)).toBe(3);
+    await act(async () => { await vi.advanceTimersByTimeAsync(4100); });
+    expect(pollsAfterMount(spy)).toBe(2);
+  });
+
+  // A fetch that never settles — a laptop that slept mid-poll wakes with a
+  // half-open socket Chrome can hold for minutes — used to be harmless: the
+  // interval fired regardless. A self-rescheduling loop arms the next poll only
+  // when this one settles, so the panel would freeze on its last view with no
+  // error and the next connect would never pop.
+  it('a poll that never settles is abandoned after the timeout and the loop carries on', async () => {
+    const spy = vi.spyOn(dialerApi, 'getDialer').mockImplementation((_id, opts) =>
+      new Promise<DialerSessionView>((_resolve, reject) => {
+        opts?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      }));
+    mount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS - 100); });
+    expect(spy).toHaveBeenCalledTimes(1);
+    // timeout → rejection → the usual 2 s re-arm
+    await act(async () => { await vi.advanceTimersByTimeAsync(100 + 2100); });
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it('a poll that FAILS (503, network blip) re-arms at 2 s instead of ending the loop', async () => {
+    const spy = vi.spyOn(dialerApi, 'getDialer')
+      .mockRejectedValueOnce(new Error('503'))
+      .mockResolvedValue(view('pending'));
+    mount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+    expect(pollsAfterMount(spy)).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(pollsAfterMount(spy)).toBe(2);
+  });
+
+  // Every control action re-polls immediately. That re-poll must REPLACE the
+  // pending tick, not run beside it: otherwise each click adds a permanent
+  // parallel chain and the poll rate doubles per click for the rest of the run.
+  it("a control action's immediate re-poll replaces the pending tick rather than forking a second chain", async () => {
+    const spy = vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view('pending'));
+    vi.spyOn(dialerApi, 'dialerControl').mockResolvedValue({ ok: true });
+    const r = mount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(spy).toHaveBeenCalledTimes(1);
+    await act(async () => { fireEvent.click(r.getByText('Pause')); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(spy).toHaveBeenCalledTimes(2); // the re-poll
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(spy).toHaveBeenCalledTimes(4); // two more ticks, not four
   });
 
   it('the cadence follows the LATEST view: a dial that settles drops back to 2 s', async () => {

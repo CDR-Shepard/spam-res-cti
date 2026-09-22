@@ -309,7 +309,7 @@ describe('CurrentRecord (SSR) — the name is the headline the moment it dials',
   });
 
   it('without a name: exactly today\'s layout — the number is the headline and no empty name element is rendered', () => {
-    for (const nameless of [{ ...item }, { ...item, displayName: null }, { ...item, displayName: '' }]) {
+    for (const nameless of [{ ...item }, { ...item, displayName: null }, { ...item, displayName: '' }, { ...item, displayName: '   ' }]) {
       const html = renderToStaticMarkup(<CurrentRecord item={nameless} />);
       expect(html).toContain('class="dp-current-number tnum"');
       expect(html).not.toContain('dp-current-name');
@@ -332,9 +332,12 @@ describe('pollDelayMs — faster while a dial is in flight', () => {
     currentItem: itemStatus ? { id: 'i1', recordId: '00Q1', objectType: 'Lead', status: itemStatus, toNumber: '+16195551234' } : null,
   });
 
-  it('is 1 s while the current record is dialing or connected', () => {
+  it('is 1 s while the current record is dialing — the ring is when the next poll can flip the pop', () => {
     expect(pollDelayMs(view('dialing'))).toBe(1000);
-    expect(pollDelayMs(view('connected'))).toBe(1000);
+  });
+
+  it('is back at 2 s once connected: the pop already fired, and Next re-polls on its own', () => {
+    expect(pollDelayMs(view('connected'))).toBe(2000);
   });
 
   it('is today\'s 2 s everywhere else: before the first poll, no current record, pending, a settled miss, a terminal run', () => {

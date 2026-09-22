@@ -657,6 +657,10 @@ describe('handleDialOutcome', () => {
     });
     expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
     expect(deps.enqueueRollover).not.toHaveBeenCalled();
+    // A partial UPDATE: the name shown on the card must survive the fallback
+    // re-dial. `objectContaining` above would let a `displayName: null` slip in.
+    const reset = fdb._writes.find((w: any) => w.patch.status === 'pending');
+    expect(reset!.patch).not.toHaveProperty('displayName');
   });
 
   it('no_answer with NO fallback number behaves like a plain no_connect (rollover, reason kept)', async () => {

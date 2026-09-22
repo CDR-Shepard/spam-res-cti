@@ -1093,7 +1093,7 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 .dp-current-number { font-size: 19px; font-weight: 600; margin-top: 2px; }
 /* With a name on the card, the name takes the headline slot the number had
    and the number sits beneath it, smaller. Without one, the number is unchanged. */
-.dp-current-name { font-size: 19px; font-weight: 600; margin-top: 2px; }
+.dp-current-name { font-size: 19px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
 .dp-current-number-sub { font-size: 13px; font-weight: 500; color: var(--text-muted); margin-top: 1px; }
 .dp-current-meta {
   display: flex; align-items: center; gap: 6px;

@@ -33,7 +33,7 @@ export function clearSession(): void {
 
 export async function api<T = unknown>(
   path: string,
-  init?: { method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'; body?: unknown; authed?: boolean },
+  init?: { method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'; body?: unknown; authed?: boolean; signal?: AbortSignal },
 ): Promise<T> {
   const headers: Record<string, string> = {};
   if (init?.authed !== false) {
@@ -45,6 +45,7 @@ export async function api<T = unknown>(
     method: init?.method ?? 'GET',
     headers,
     body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
+    signal: init?.signal,
   });
   let data: unknown = null;
   const text = await res.text();

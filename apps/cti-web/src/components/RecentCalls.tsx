@@ -100,7 +100,8 @@ function classifyInbound(row: ClassifiableRow): CallKind {
   if (row.answeredAt) return 'connected';
   if (row.inboundVoicemailUrl) return 'voicemail';
   if (INBOUND_MISSED_STATUSES.includes(row.status)) return 'missed';
-  // Still on the line: `answeredAt` lands only when the leg ends.
+  // Live (ringing, or on the line): `answeredAt` lands only when the leg ends.
+  // Rendered as "In progress", never as a miss.
   if (row.status === 'in_progress') return 'connected';
   // Legacy fallback: a `completed` row written before the server stamped
   // `answeredAt`, with no voicemail. Duration is the only evidence left — a
@@ -123,6 +124,8 @@ const INBOUND_SUBTITLE: Record<Exclude<CallKind, 'outgoing'>, string> = {
 
 /** The `meta` line after the relative time: what happened, in the rep's words. */
 function subtitle(row: CallRow, kind: CallKind): string {
+  // Ringing or being talked to right now — either way not yet "Answered".
+  if (row.direction === 'inbound' && row.status === 'in_progress') return 'In progress';
   if (row.direction === 'inbound' && kind !== 'outgoing') return INBOUND_SUBTITLE[kind];
   return row.disposition ?? row.status.replace(/_/g, ' ');
 }

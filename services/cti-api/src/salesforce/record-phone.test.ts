@@ -206,18 +206,21 @@ describe('fetchContactNames — ONE batched read of the primary contacts\' names
     expect(soqlOf(1)).toContain(`'${contactId(201)}'`);
   });
 
-  it('interpolates only 15/18-char alphanumeric ids — anything else never reaches the query, escaped or not', async () => {
+  // 18 only: the names come back keyed by the 18-char `Id`, so a 15-char input
+  // could never match its own result — it would silently fall back to the
+  // Opportunity Name. The REST API never sends 15-char ids anyway.
+  it('interpolates only 18-char alphanumeric ids — anything else never reaches the query, escaped or not', async () => {
     mockSoql.mockResolvedValue([]);
-    const fifteen = '003000000000001';
     await fetchContactNames('u', [
-      contactId(1), fifteen,
+      contactId(1),
+      '003000000000001',    // 15 chars — could never match the 18-char key it would come back under
       "003000000000001AA'", // 18 chars, but a quote — not an id
-      '003000000000001',    // duplicate of `fifteen`
+      contactId(1),         // duplicate
       '0030000000000012',   // 16 chars
       '', "' OR 1=1 --",
     ]);
     expect(mockSoql).toHaveBeenCalledTimes(1);
-    expect(soqlOf(0)).toBe(`SELECT Id, Name FROM Contact WHERE Id IN ('${contactId(1)}','${fifteen}')`);
+    expect(soqlOf(0)).toBe(`SELECT Id, Name FROM Contact WHERE Id IN ('${contactId(1)}')`);
   });
 
   it('with no valid ids, issues no query at all', async () => {

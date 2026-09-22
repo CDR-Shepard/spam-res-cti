@@ -352,6 +352,18 @@ describe('POST /telephony/twilio/inbound/dial-result — answeredAt is the "rep 
     expect(patch?.durationSeconds).toBe(500);
   });
 
+  // dial-result fires when the leg ENDS. Stamping "now" would make answered_at
+  // equal ended_at on every inbound row — a column that lies about a 500 s
+  // conversation. The answer time is the end minus the talk time Twilio reports.
+  it('answeredAt is when the rep picked up: the end minus DialCallDuration', async () => {
+    const before = Date.now();
+    await dialResult({ DialCallStatus: 'completed', DialCallDuration: '500' });
+    const patch = state.updates.find((u) => u.status === 'completed');
+    const answeredAt = (patch?.answeredAt as Date).getTime();
+    expect(answeredAt).toBeLessThanOrEqual(before - 500_000 + 5_000);
+    expect(answeredAt).toBeGreaterThanOrEqual(before - 500_000 - 5_000);
+  });
+
   it('DialCallStatus=no-answer → nothing writes answeredAt (the row stays unanswered for the voicemail / missed rendering)', async () => {
     const res = await dialResult({ DialCallStatus: 'no-answer' });
     expect(res.statusCode).toBe(200);

@@ -188,10 +188,13 @@ async function lookupOpportunity(userId: string, rid: string): Promise<FoundReco
   return { fields: contact ?? {}, skipOnDialer, ...naming };
 }
 
-/** A Salesforce record id as the API hands them out: 15 or 18 case-sensitive
+/** A Salesforce record id as the REST API hands them out: 18 case-sensitive
  *  alphanumerics. Anything else is not an id and is never interpolated — the
- *  escape below is the belt, this is the braces. */
-const SF_ID = /^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/;
+ *  escape below is the belt, this is the braces. 18 only, on purpose: the
+ *  names come back keyed by the 18-char `Id`, so a 15-char input could never
+ *  match its own result and would silently fall back to the Opportunity Name.
+ *  The API never sends 15-char ids; refusing them makes that explicit. */
+const SF_ID = /^[A-Za-z0-9]{18}$/;
 
 /** SOQL's practical IN (...) bound, shared with `task-targets.ts`. */
 const CONTACT_CHUNK = 200;
