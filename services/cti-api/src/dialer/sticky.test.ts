@@ -51,6 +51,23 @@ describe('lastDialerForCaller', () => {
    * number a year ago, and a dropped same-DID preference rings the wrong rep
    * when two reps dialed the same prospect from different pool numbers.
    */
+  // A rep who has left (sessions revoked; `users` has no disabled flag — the
+  // offboarding checklist flips the dialer OFF) or whose dialer an admin
+  // switched off keeps their dial log for 14 days. Choosing them would ring a
+  // dead client and then forward the prospect to an ex-employee's personal
+  // cell. Only a rep who may power-dial may receive a dialer callback.
+  it('never picks a rep whose power dialer is off — the query is gated on users.power_dialer_enabled', async () => {
+    const { db, captured } = fakeDb([]);
+    await lastDialerForCaller(db, 'ORG-1', '+13105550002', '+16195550100', new Date('2026-09-22T18:00:00Z'));
+    const { sql, params } = render(captured.where!);
+    expect(sql.replace(/\s+/g, ' ')).toContain(
+      'exists (select 1 from "users" where "users"."id" = "dialer_dial_attempts"."user_id" and "users"."kind" = $',
+    );
+    expect(sql.replace(/\s+/g, ' ')).toContain('and "users"."power_dialer_enabled" = $');
+    expect(params).toContain('human');
+    expect(params).toContain(true);
+  });
+
   it('one query: org-scoped, this caller, inside the window, same-DID rows first then newest, limit 1', async () => {
     const { db, select, captured } = fakeDb([]);
     const now = new Date('2026-09-22T18:00:00Z');
@@ -62,7 +79,8 @@ describe('lastDialerForCaller', () => {
     expect(where.sql).toContain('"dialer_dial_attempts"."org_id" = $1');
     expect(where.sql).toContain('"dialer_dial_attempts"."to_number" = $2');
     expect(where.sql).toContain('"dialer_dial_attempts"."dialed_at" >= $3');
-    expect(where.params).toEqual([ORG, CALLER, new Date(now.getTime() - LAST_DIAL_WINDOW_MS).toISOString()]);
+    // …then the two values the power-dialer gate binds (pinned in its own test).
+    expect(where.params).toEqual([ORG, CALLER, new Date(now.getTime() - LAST_DIAL_WINDOW_MS).toISOString(), 'human', true]);
     // Spelled out so the boundary is readable without running the helper.
     expect(where.params[2]).toBe('2026-09-08T18:00:00.000Z');
 

@@ -33,7 +33,7 @@ import {
   type ClickToDialEvent,
 } from './opencti';
 import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
-import { repinInputDevice, watchCallMedia, watchLocalMic, MEDIA_ISSUE_MESSAGE, type AudioHelperLike, type LocalMicCall } from './audio-readiness';
+import { watchCallMedia, watchLocalMic, MEDIA_ISSUE_MESSAGE, type AudioHelperLike, type LocalMicCall } from './audio-readiness';
 import { sendDtmfKey, type DtmfSendable } from './dtmf';
 import { buildCallSubject } from './call-subject';
 import { openCtiSavePlan } from './opencti-log';
@@ -466,11 +466,11 @@ export function App(): JSX.Element {
   const keepMicAlive = useCallback((call: LocalMicCall & { on: (e: string, cb: (...a: unknown[]) => void) => void }) => {
     const audio = deviceAudio();
     if (!audio) return;
-    watchLocalMic(call, audio, (trigger, result) => {
+    const mic = watchLocalMic(call, audio, (trigger, result) => {
       if (result === 'repinned' && trigger !== 'device-change') setToast({ text: 'Microphone reconnected.', type: 'success' });
       if (result === 'failed') setToast({ text: 'Your microphone stopped and could not be reconnected — reload the softphone.', type: 'error' });
     });
-    watchCallMedia(call, (issue) => { if (issue === 'no-outbound-audio') void repinInputDevice(audio); });
+    watchCallMedia(call, (issue) => { if (issue === 'no-outbound-audio') mic.repin('no-outbound-audio'); });
   }, []);
 
   // Lazily create + register ONE persistent Twilio device, reused for both
@@ -1066,13 +1066,15 @@ export function App(): JSX.Element {
       if (pendingTeardownRef.current && !dialerConnRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
     };
     connectionRef.current = call;
-    keepMicAlive(call as unknown as Parameters<typeof keepMicAlive>[0]);
     coordinatorRef.current?.promoteSelf(); // broadcast busy immediately (see beginRun)
     setActive({ callId: '', startedAt: Date.now(), ...plan.activeCall });
     setIncoming(null);
     setMuted(false);
     setPhase('active');
     try { call.accept(); } catch { backToIdle(); return; }
+    // After accept(): the local stream is attached asynchronously and the SDK
+    // emits 'accept' once media is open — keepMicAlive listens for that.
+    keepMicAlive(call as unknown as Parameters<typeof keepMicAlive>[0]);
     // Screen-pop the matched Salesforce record on ACCEPT (not on ring) — a
     // no-op when not embedded in Open CTI (screenPopRecord logs and returns).
     // Routed through the injectable acceptIncomingCall seam (incoming-accept.ts)

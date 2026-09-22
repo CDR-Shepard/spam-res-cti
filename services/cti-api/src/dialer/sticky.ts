@@ -5,7 +5,7 @@
  * — same shape as the click-to-dial sticky write in `routes/calls.ts`, just
  * triggered from the dialer engine instead of the manual-dial route.
  */
-import { and, desc, eq, gte } from 'drizzle-orm';
+import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 
 /**
@@ -116,6 +116,11 @@ export async function lastDialerForCaller(
         eq(schema.dialerDialAttempts.orgId, orgId),
         eq(schema.dialerDialAttempts.toNumber, callerE164),
         gte(schema.dialerDialAttempts.dialedAt, new Date(now.getTime() - LAST_DIAL_WINDOW_MS)),
+        // Only a rep who may power-dial may receive a dialer callback. A rep who
+        // has left keeps their dial log for 14 days (`users` has no disabled
+        // flag; offboarding flips the dialer off), and choosing them would ring
+        // a dead client and then forward the prospect to an ex-employee's cell.
+        sql`exists (select 1 from "users" where "users"."id" = ${schema.dialerDialAttempts.userId} and "users"."kind" = ${'human'} and "users"."power_dialer_enabled" = ${true})`,
       ),
     )
     // Postgres sorts true after false, so DESC on the boolean puts the rows

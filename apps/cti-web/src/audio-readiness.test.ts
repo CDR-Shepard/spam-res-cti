@@ -137,10 +137,12 @@ describe('repinInputDevice', () => {
     expect(audio.setInputDevice).not.toHaveBeenCalled();
   });
 
-  it('when already pinned and no forced variant exists, swaps to another real device and back (two getUserMedia calls)', async () => {
+  // The SDK is pinned (2.18.3 ships the forced variant). Hopping through another
+  // device and back could strand the rep on a webcam mic if the hop-back failed.
+  it('when already pinned and no forced variant exists, reports failed rather than hopping through another mic', async () => {
     const audio = fakeAudio({ inputDevice: { deviceId: 'default' } });
-    expect(await repinInputDevice(audio)).toBe('repinned');
-    expect(vi.mocked(audio.setInputDevice).mock.calls.map((c) => c[0])).toEqual(['abc', 'default']);
+    expect(await repinInputDevice(audio)).toBe('failed');
+    expect(audio.setInputDevice).not.toHaveBeenCalled();
   });
 
   it('reports no-device when nothing is available, and failed (never throws) when the SDK rejects', async () => {
@@ -181,6 +183,47 @@ describe('watchLocalMic', () => {
     audio.emit('deviceChange', []);
     await Promise.resolve(); await Promise.resolve();
     expect(onRepin).toHaveBeenCalledWith('device-change', 'repinned');
+  });
+
+  // Twilio attaches the local stream AFTER connect() resolves — media opens
+  // asynchronously and the SDK emits 'accept' once it has. Listeners attached
+  // at connect time bind to nothing; the real track must be found on 'accept'.
+  it("attaches to the track that appears on the call's 'accept' event", async () => {
+    const track = fakeTrack(); const audio = fakeAudio(); const onRepin = vi.fn();
+    const listeners: Record<string, Array<() => void>> = {};
+    let stream: { getAudioTracks: () => typeof track[] } | null = null;
+    const call = {
+      getLocalStream: () => stream,
+      on: (e: string, cb: () => void) => { (listeners[e] ??= []).push(cb); },
+    };
+    watchLocalMic(call, audio, onRepin);
+    stream = { getAudioTracks: () => [track] };
+    (listeners.accept ?? []).forEach((cb) => cb());
+    track.fire('ended');
+    await Promise.resolve(); await Promise.resolve();
+    expect(onRepin).toHaveBeenCalledWith('track-ended', 'repinned');
+  });
+
+  it('watches the NEW track after a re-pin (the swapped-in track is a different object)', async () => {
+    const first = fakeTrack(); const second = fakeTrack(); const onRepin = vi.fn();
+    let current = first;
+    // The SDK swaps the track in during setInputDevice; the watcher must find it afterwards.
+    const audio = fakeAudio({ setInputDevice: vi.fn(async () => { current = second; }) });
+    watchLocalMic({ getLocalStream: () => ({ getAudioTracks: () => [current] }) }, audio, onRepin, (() => { let t = 0; return () => (t += 5000); })());
+    first.fire('ended');
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    second.fire('ended');
+    await Promise.resolve(); await Promise.resolve();
+    expect(onRepin).toHaveBeenCalledTimes(2);
+  });
+
+  it("exposes a throttled re-pin for the SDK's own 'nothing being sent' warning", async () => {
+    const audio = fakeAudio(); const onRepin = vi.fn();
+    const handle = watchLocalMic(callWith(fakeTrack()), audio, onRepin, () => 1000);
+    handle.repin('no-outbound-audio'); handle.repin('no-outbound-audio');
+    await Promise.resolve(); await Promise.resolve();
+    expect(audio.setInputDevice).toHaveBeenCalledTimes(1);
+    expect(onRepin).toHaveBeenCalledWith('no-outbound-audio', 'repinned');
   });
 
   it('a call with no local stream (not connected yet, or an SDK without getLocalStream) still watches device changes', () => {
