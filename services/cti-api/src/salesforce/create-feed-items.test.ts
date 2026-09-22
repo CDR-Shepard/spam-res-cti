@@ -7,16 +7,21 @@
  * './client.js' is mocked — it is the thing under test.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 const state = vi.hoisted(() => ({
   sfConn: {
     id: 'conn-1',
     userId: 'u1',
     accessTokenEnc: 'rep-access-token',
-    refreshTokenEnc: null,
+    refreshTokenEnc: null as string | null,
     instanceUrl: 'https://example.my.salesforce.com',
   } as Record<string, unknown> | null,
   mockRequest: vi.fn(),
+  /** The connection lookup, recorded: it must be keyed on the rep, not on "whoever". */
+  findFirst: vi.fn(),
+  refresh: vi.fn(),
 }));
 
 vi.mock('../config.js', () => ({ loadConfig: () => ({ SALESFORCE_API_VERSION: 'v60.0' }) }));
@@ -24,19 +29,32 @@ vi.mock('@cti/auth', () => ({
   encryptString: (s: string) => s,
   decryptString: (s: string) => s,
 }));
+vi.mock('./oauth.js', () => ({ refreshAccessToken: (...args: unknown[]) => state.refresh(...args) }));
 vi.mock('@cti/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@cti/db')>();
   return {
     ...actual,
     getDb: () =>
       ({
-        query: { salesforceConnections: { findFirst: async () => state.sfConn } },
+        query: { salesforceConnections: { findFirst: (...args: unknown[]) => state.findFirst(...args) } },
+        // refreshAndPersist writes the refreshed token back; nothing here reads it.
+        update: () => ({ set: () => ({ where: async () => undefined }) }),
       }) as unknown as ReturnType<typeof import('@cti/db').getDb>,
   };
 });
 vi.mock('undici', () => ({ request: (...args: unknown[]) => state.mockRequest(...args) }));
 
 import { FEED_ITEMS_PER_REQUEST, createFeedItems } from './client.js';
+
+const dialect = new PgDialect();
+const paramsOf = (where: unknown): unknown[] => dialect.sqlToQuery(where as SQL).params;
+/** The rep's row comes back ONLY for a lookup keyed on the rep's user id — the
+ *  way a real database would answer. A fake that ignored `where` would hand
+ *  u1's token to any caller and prove nothing about "as the rep". */
+function connectionsKeyedOnUser(): void {
+  state.findFirst.mockImplementation(async (args: { where: unknown }) =>
+    (paramsOf(args.where).includes('u1') ? state.sfConn : undefined));
+}
 
 function jsonResponse(statusCode: number, body: unknown) {
   return { statusCode, body: { text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) } };
@@ -52,6 +70,10 @@ const TEXT = 'No answer (Power Dialer) — 1 attempt: voicemail';
 
 beforeEach(() => {
   state.mockRequest.mockReset();
+  state.findFirst.mockReset();
+  state.refresh.mockReset();
+  state.sfConn!.refreshTokenEnc = null;
+  connectionsKeyedOnUser();
 });
 
 describe('createFeedItems', () => {
@@ -68,6 +90,9 @@ describe('createFeedItems', () => {
     expect(call.method).toBe('POST');
     // Authored by the rep = sent on the rep's own token, not an integration user's.
     expect(call.headers?.authorization).toBe('Bearer rep-access-token');
+    // …and that token was looked up BY the rep's user id, not by "whoever".
+    expect(state.findFirst).toHaveBeenCalledTimes(1);
+    expect(paramsOf((state.findFirst.mock.calls[0] as [{ where: unknown }])[0].where)).toEqual(['u1']);
     expect(call.body).toEqual({
       allOrNone: false,
       records: [
@@ -76,6 +101,12 @@ describe('createFeedItems', () => {
       ],
     });
     expect(got).toEqual([{ ok: true, id: '0D5A' }, { ok: true, id: '0D5B' }]);
+  });
+
+  it('another user id does NOT get u1\'s token: no connection for them → SalesforceUnauthorizedError, and no request', async () => {
+    await expect(createFeedItems('u2', [{ parentId: LEAD, body: TEXT }])).rejects.toThrow(/missing or revoked/);
+    expect(paramsOf((state.findFirst.mock.calls[0] as [{ where: unknown }])[0].where)).toEqual(['u2']);
+    expect(state.mockRequest).not.toHaveBeenCalled();
   });
 
   it('never touches the Connect API (per-user hourly rate limit, one call per post)', async () => {
@@ -120,6 +151,24 @@ describe('createFeedItems', () => {
   it('a non-2xx response THROWS (transient for the whole chunk), status in the message', async () => {
     state.mockRequest.mockResolvedValueOnce(jsonResponse(503, [{ errorCode: 'SERVER_UNAVAILABLE', message: 'try later' }]));
     await expect(createFeedItems('u1', [{ parentId: LEAD, body: 'a' }])).rejects.toThrow(/\(503\)/);
+  });
+
+  it('a 400 whose body is a 1-element error array for a 1-post request is a THROW with (400) — never a per-record stamp', async () => {
+    // Salesforce's request-level error body is `[{message, errorCode}]`: an
+    // array, and for a single post one of the same length as the request. Only
+    // the status keeps it from being read as an index-aligned per-record answer.
+    state.mockRequest.mockResolvedValueOnce(jsonResponse(400, [{ message: 'Cannot deserialize instance', errorCode: 'JSON_PARSER_ERROR' }]));
+    await expect(createFeedItems('u1', [{ parentId: LEAD, body: 'a' }])).rejects.toThrow(/\(400\)/);
+  });
+
+  it('a 401 that survives the refresh is a THROW with (401) in the message, so isSalesforceAuthError can see it', async () => {
+    state.sfConn!.refreshTokenEnc = 'rt';
+    state.refresh.mockResolvedValueOnce({ access_token: 'refreshed-token' });
+    const dead = jsonResponse(401, [{ message: 'Session expired or invalid', errorCode: 'INVALID_SESSION_ID' }]);
+    state.mockRequest.mockResolvedValueOnce(dead).mockResolvedValueOnce(dead);
+    await expect(createFeedItems('u1', [{ parentId: LEAD, body: 'a' }])).rejects.toThrow(/\(401\)/);
+    expect(state.mockRequest).toHaveBeenCalledTimes(2);
+    expect(callOf(1).headers?.authorization).toBe('Bearer refreshed-token');
   });
 
   it('a dead connection propagates as SalesforceUnauthorizedError (the worker\'s isSalesforceAuthError knows it)', async () => {
