@@ -297,7 +297,11 @@ describe('POST /telephony/twilio/inbound — a callback to a pool DID rings the 
   beforeEach(() => {
     state.owned = OWNED({ kind: 'dialer_pool', assignedUserId: null });
     state.stickyAgentId = null;
-    state.repRow = { id: 'rep-3', noAnswerForwardE164: null };
+    // `users.findFirst` doubles as the org-fallback ("any user") read, so it
+    // must answer someone who is NEITHER the sticky rep nor the last dialer —
+    // otherwise an attribution that silently fell through to the fallback
+    // would still look right.
+    state.repRow = { id: 'org-user-jona', noAnswerForwardE164: null };
     state.sfConn = null;
   });
 
@@ -329,7 +333,6 @@ describe('POST /telephony/twilio/inbound — a callback to a pool DID rings the 
   it('sticky present → the sticky rep wins even though a different rep dialed later, and the attempt log is not consulted', async () => {
     state.stickyAgentId = 'rep-2';
     state.lastDialerId = 'rep-3';
-    state.repRow = { id: 'rep-2', noAnswerForwardE164: null };
 
     const res = await ring();
 
@@ -342,7 +345,6 @@ describe('POST /telephony/twilio/inbound — a callback to a pool DID rings the 
 
   it('neither sticky nor a dial attempt → today\'s voicemail path, attributed to the org-fallback user', async () => {
     state.lastDialerId = null;
-    state.repRow = { id: 'org-user-jona', noAnswerForwardE164: null };
 
     const res = await ring();
 
@@ -357,7 +359,6 @@ describe('POST /telephony/twilio/inbound — a callback to a pool DID rings the 
     // Run the REAL lookup against this route's DB fake: its caller-shape guard
     // must answer null before building a select (the fake's select throws).
     state.lastDialerForCaller.mockImplementation((...args) => state.realLastDialerForCaller!(...args));
-    state.repRow = { id: 'org-user-jona', noAnswerForwardE164: null };
 
     const res = await ring({ From: 'anonymous' });
 
