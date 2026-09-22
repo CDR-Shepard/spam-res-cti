@@ -19,10 +19,12 @@ export function choosePhones(
 }
 
 type PhoneFields = { MobilePhone?: string | null; Phone?: string | null };
+type NameField = { Name?: string | null };
 
-/** A record the lookup actually found: its phone fields (possibly empty) and
- *  whether Skip on Dialer is checked. Null from a lookup means "no such record". */
-type FoundRecord = { fields: PhoneFields; skipOnDialer: boolean };
+/** A record the lookup actually found: its phone fields (possibly empty),
+ *  whether Skip on Dialer is checked, and what to headline for it. Null from a
+ *  lookup means "no such record". */
+type FoundRecord = { fields: PhoneFields; skipOnDialer: boolean; displayName: string | null; contactId: string | null };
 
 /** What one record answers about being dialed. `e164` is null when the record
  *  exists but has no dialable number — `resolveDialNumber` returns null only
@@ -32,6 +34,24 @@ export interface DialTarget {
   e164: string | null;
   fallbackE164: string | null;
   skipOnDialer: boolean;
+  /** What the panel headlines from the first ring: a Lead's or Contact's
+   *  `Name`; for an Opportunity its own `Name`, which the caller swaps for the
+   *  primary contact's once `contactId` resolves (see `fetchContactNames`).
+   *  Null when the record has no name — never "". */
+  displayName: string | null;
+  /** Opportunity only — `Opportunity.ContactId`, so the caller can look every
+   *  contact's name up in ONE batched query for the whole run instead of one
+   *  per record. `Contact.Name` is not traversable from Opportunity in SOQL,
+   *  which is why this is an id and not a name. Null on Lead/Contact. */
+  contactId: string | null;
+}
+
+/** Salesforce's `Name` as the card should show it: trimmed, and null rather
+ *  than "" so the card can fall back to the number instead of headlining
+ *  nothing. */
+function cleanName(raw: string | null | undefined): string | null {
+  const name = raw?.trim();
+  return name ? name : null;
 }
 
 /** The rep-facing "don't power-dial this one" checkbox. It lives on Lead and
@@ -89,20 +109,22 @@ async function soqlToleratingMissingSkipField<T>(
 }
 
 async function lookupLead(userId: string, rid: string): Promise<FoundRecord | null> {
-  const rows = await soqlToleratingMissingSkipField<PhoneFields & { Skip_on_Dialer__c?: boolean | null }>(
+  const rows = await soqlToleratingMissingSkipField<PhoneFields & NameField & { Skip_on_Dialer__c?: boolean | null }>(
     userId,
-    `SELECT MobilePhone, Phone, ${SKIP_FIELD} FROM Lead WHERE Id = '${rid}' LIMIT 1`,
-    `SELECT MobilePhone, Phone FROM Lead WHERE Id = '${rid}' LIMIT 1`,
+    `SELECT Name, MobilePhone, Phone, ${SKIP_FIELD} FROM Lead WHERE Id = '${rid}' LIMIT 1`,
+    `SELECT Name, MobilePhone, Phone FROM Lead WHERE Id = '${rid}' LIMIT 1`,
   );
   const row = rows[0];
-  return row ? { fields: row, skipOnDialer: row.Skip_on_Dialer__c === true } : null;
+  return row
+    ? { fields: row, skipOnDialer: row.Skip_on_Dialer__c === true, displayName: cleanName(row.Name), contactId: null }
+    : null;
 }
 
 async function lookupContact(userId: string, rid: string): Promise<FoundRecord | null> {
   // No skip field on Contact — never ask for it, never flag one.
-  const rows = await soqlQuery<PhoneFields>(userId, `SELECT MobilePhone, Phone FROM Contact WHERE Id = '${rid}' LIMIT 1`);
+  const rows = await soqlQuery<PhoneFields & NameField>(userId, `SELECT Name, MobilePhone, Phone FROM Contact WHERE Id = '${rid}' LIMIT 1`);
   const row = rows[0];
-  return row ? { fields: row, skipOnDialer: false } : null;
+  return row ? { fields: row, skipOnDialer: false, displayName: cleanName(row.Name), contactId: null } : null;
 }
 
 /** The Opportunity's own phone fields, in dial order. This org stores phones
@@ -112,8 +134,12 @@ async function lookupContact(userId: string, rid: string): Promise<FoundRecord |
  *  (INVALID_FIELD on the retry too), which is the right answer for an org this
  *  code was never configured for. */
 const OPP_PHONE_FIELDS = ['Mobile_Phone__c', 'Phone__c', 'Other_Phone__c'] as const;
-type OppPhoneRow = Partial<Record<(typeof OPP_PHONE_FIELDS)[number], string | null>> & {
+type OppPhoneRow = Partial<Record<(typeof OPP_PHONE_FIELDS)[number], string | null>> & NameField & {
   Skip_on_Dialer__c?: boolean | null;
+  /** The primary contact — filled on ~42% of open Opportunities here, and NOT
+   *  traversable (`Contact.Name` fails "Didn't understand relationship"), so
+   *  the name is resolved later, batched, by `fetchContactNames`. */
+  ContactId?: string | null;
 };
 
 /** Fold the three Opportunity fields into the two-slot shape the rest of the
@@ -144,7 +170,7 @@ async function lookupOpportunityContactRole(userId: string, rid: string): Promis
  *  empty. A missing Opportunity is null; one with no number anywhere is
  *  found-but-empty, so the queue still honors its checkbox. */
 async function lookupOpportunity(userId: string, rid: string): Promise<FoundRecord | null> {
-  const fields = OPP_PHONE_FIELDS.join(', ');
+  const fields = `Name, ContactId, ${OPP_PHONE_FIELDS.join(', ')}`;
   const rows = await soqlToleratingMissingSkipField<OppPhoneRow>(
     userId,
     `SELECT ${fields}, ${SKIP_FIELD} FROM Opportunity WHERE Id = '${rid}' LIMIT 1`,
@@ -153,10 +179,42 @@ async function lookupOpportunity(userId: string, rid: string): Promise<FoundReco
   const row = rows[0];
   if (!row) return null;
   const skipOnDialer = row.Skip_on_Dialer__c === true;
+  // The Opportunity's own Name is the headline until the caller's batched
+  // contact lookup replaces it; the id rides along so that lookup can happen.
+  const naming = { displayName: cleanName(row.Name), contactId: row.ContactId || null };
   const own = opportunityPhones(row);
-  if (own.MobilePhone) return { fields: own, skipOnDialer };
+  if (own.MobilePhone) return { fields: own, skipOnDialer, ...naming };
   const contact = await lookupOpportunityContactRole(userId, rid);
-  return { fields: contact ?? {}, skipOnDialer };
+  return { fields: contact ?? {}, skipOnDialer, ...naming };
+}
+
+/** A Salesforce record id as the API hands them out: 15 or 18 case-sensitive
+ *  alphanumerics. Anything else is not an id and is never interpolated — the
+ *  escape below is the belt, this is the braces. */
+const SF_ID = /^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/;
+
+/** SOQL's practical IN (...) bound, shared with `task-targets.ts`. */
+const CONTACT_CHUNK = 200;
+
+/**
+ * The names of these Contacts, `Id → Name`, in ONE query per 200 ids for the
+ * whole run — never one per record. Blank names are left out, so a caller can
+ * `get()` and fall back on a miss. Invalid ids are dropped rather than escaped
+ * and sent: the escape guards the quote, the shape check guards everything
+ * else. A failed query is THROWN — whether a name is worth failing a queue
+ * build over is the caller's call (it is not: see create-session.ts).
+ */
+export async function fetchContactNames(userId: string, contactIds: readonly string[]): Promise<Map<string, string>> {
+  const ids = [...new Set(contactIds.filter((id) => SF_ID.test(id)))];
+  const rows: Array<{ Id: string } & NameField> = [];
+  for (let i = 0; i < ids.length; i += CONTACT_CHUNK) {
+    const list = ids.slice(i, i + CONTACT_CHUNK).map((id) => `'${soqlEscape(id)}'`).join(',');
+    rows.push(...await soqlQuery<{ Id: string } & NameField>(userId, `SELECT Id, Name FROM Contact WHERE Id IN (${list})`));
+  }
+  return new Map(rows.flatMap((row) => {
+    const name = cleanName(row.Name);
+    return name ? [[row.Id, name] as const] : [];
+  }));
 }
 
 /**
@@ -181,10 +239,10 @@ export async function resolveDialNumber(
       : await lookupOpportunity(userId, rid);
   if (!found) return null;
 
-  const { skipOnDialer } = found;
+  const { skipOnDialer, displayName, contactId } = found;
   const { primaryRaw, fallbackRaw } = choosePhones(found.fields.MobilePhone, found.fields.Phone);
   const primary = primaryRaw ? normalize(primaryRaw) : null;
-  if (!primary?.ok || !primary.value) return { e164: null, fallbackE164: null, skipOnDialer };
+  if (!primary?.ok || !primary.value) return { e164: null, fallbackE164: null, skipOnDialer, displayName, contactId };
   const e164 = primary.value.e164;
 
   let fallbackE164: string | null = null;
@@ -194,5 +252,5 @@ export async function resolveDialNumber(
     // Mobile (common) would just re-dial the same line.
     if (fb.ok && fb.value && fb.value.e164 !== e164) fallbackE164 = fb.value.e164;
   }
-  return { e164, fallbackE164, skipOnDialer };
+  return { e164, fallbackE164, skipOnDialer, displayName, contactId };
 }
