@@ -71,6 +71,16 @@ export const PhoneOutgoingIcon = (p: IconProps): JSX.Element => (
   </Svg>
 );
 
+// The standard voicemail glyph — two reels joined by a bar. Marks an inbound
+// call that reached voicemail, next to the missed-✕ and incoming-arrow handsets.
+export const VoicemailIcon = (p: IconProps): JSX.Element => (
+  <Svg {...p}>
+    <circle cx="6" cy="12" r="4" />
+    <circle cx="18" cy="12" r="4" />
+    <line x1="6" y1="16" x2="18" y2="16" />
+  </Svg>
+);
+
 export const MicIcon = (p: IconProps): JSX.Element => (
   <Svg {...p}>
     <rect x="9" y="3" width="6" height="11" rx="3" />

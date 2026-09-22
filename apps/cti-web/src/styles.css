@@ -780,7 +780,9 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 }
 .list .row-item .dir svg { width: 14px; height: 14px; }
 .list .row-item.connected .dir { color: var(--good); background: color-mix(in srgb, var(--good) 12%, transparent); }
-.list .row-item.missed .dir { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+/* A voicemail is a call the rep did not take — same muted-red badge as missed. */
+.list .row-item.missed .dir,
+.list .row-item.voicemail .dir { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
 .list .row-item .info { flex: 1; min-width: 0; }
 .list .row-item .info .num { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .list .row-item .info .meta {
