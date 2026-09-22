@@ -24,6 +24,11 @@ export interface DialerCurrentItem {
   /** Why a miss missed — voicemail, no_answer, busy, failed, … (server
    *  `dialer/outcome.ts`). Set once the row settles; null while dialing. */
   outcome?: string | null;
+  /** The person's name, resolved at queue build (a Lead's or Contact's Name;
+   *  an Opportunity's primary contact, else its own Name) — the card's
+   *  headline from the first ring. Null when the record has none; absent
+   *  from an older server or a row written before migration 0041. */
+  displayName?: string | null;
 }
 
 export interface DialerSession {

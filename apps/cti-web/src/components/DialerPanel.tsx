@@ -2,7 +2,8 @@
  * Power dialer control panel. With no run active it shows the list-view picker
  * (pick an object + one of the rep's Salesforce list views → dial it). During a
  * run it shows progress, the current record, and controls (pause/resume, skip,
- * stop, next), polling the session every ~2s.
+ * stop, next), polling the session every ~2s — every 1s while a dial is in
+ * flight (see pollDelayMs).
  * A run is created READY and shows a confirm block (ConfirmBlock) until the rep
  * presses Start dialing; only then is the engine told to dial and the softphone
  * joins the run's conference (in that order — see startDialingSequence).
@@ -29,7 +30,23 @@ import { formatE164 } from '../format';
 import { ApiError } from '../api';
 
 const POLL_INTERVAL_MS = 2000;
+/** While a dial is in flight. The panel only LEARNS a record connected by
+ *  polling, so the poll cadence is a floor on how late the screen-pop can be —
+ *  and a rep hearing "hello?" before the name is the complaint this answers. */
+const POLL_INTERVAL_IN_FLIGHT_MS = 1000;
 const TERMINAL_STATUSES = new Set(['done', 'stopped']);
+/** The current-item statuses during which the NEXT poll can flip the pop. */
+const IN_FLIGHT_ITEM_STATUSES = new Set(['dialing', 'connected']);
+
+/**
+ * Pure — how long to wait before the next poll, given the view the last one
+ * fetched. 1s while the current record is dialing or connected; today's 2s
+ * everywhere else (no view yet, idle, a settled miss, a terminal run).
+ */
+export function pollDelayMs(view: DialerSessionView | null): number {
+  const status = view?.currentItem?.status;
+  return status !== undefined && IN_FLIGHT_ITEM_STATUSES.has(status) ? POLL_INTERVAL_IN_FLIGHT_MS : POLL_INTERVAL_MS;
+}
 /**
  * How long, after a run first goes terminal, we keep polling for its follow-up
  * rollovers to finish. The rollover worker ticks every ~5s and then makes two or
@@ -337,11 +354,18 @@ export interface DialerPanelProps {
   onDismiss: () => void;
 }
 
-function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Element {
+export function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Element {
+  const number = formatE164(item.toNumber) || item.toNumber || 'No number';
+  // The name is the headline from the moment the row is dialing — before the
+  // record pops on `connected` — so the rep knows who is about to say hello.
+  // Without one (a row from before migration 0041, or a record with no Name)
+  // the number keeps exactly the layout it always had.
+  const name = item.displayName || null;
   return (
     <div className="section dp-current">
       <div className="kicker">Current record</div>
-      <div className="dp-current-number tnum">{formatE164(item.toNumber) || item.toNumber || 'No number'}</div>
+      {name && <div className="dp-current-name">{name}</div>}
+      <div className={name ? 'dp-current-number dp-current-number-sub tnum' : 'dp-current-number tnum'}>{number}</div>
       <div className="dp-current-meta">
         <span className={`cdot ${dotClassForItemStatus(item.status)}`} />
         {item.objectType} · {itemStatusLabel(item)}
@@ -539,19 +563,35 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     setConflictSessionId(null);
 
     let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
+    // ONE slot for the next poll. Self-rescheduled rather than an interval so
+    // each tick's delay can follow the view the last tick fetched (see
+    // pollDelayMs), and so a control action's immediate re-poll cannot fork a
+    // second chain of ticks: arming replaces whatever was pending.
+    let timerId: ReturnType<typeof setTimeout> | undefined;
+    // Latched by stopPolling: a stopped loop never re-arms — not even from the
+    // immediate re-poll a control action fires after the stop.
+    let stopped = false;
 
     const stopPolling = (): void => {
-      if (intervalId !== undefined) {
-        clearInterval(intervalId);
-        intervalId = undefined;
+      stopped = true;
+      if (timerId !== undefined) {
+        clearTimeout(timerId);
+        timerId = undefined;
       }
     };
 
-    const poll = async (): Promise<void> => {
+    const armNextPoll = (delayMs: number): void => {
+      if (cancelled || stopped) return;
+      if (timerId !== undefined) clearTimeout(timerId);
+      timerId = setTimeout(() => { void poll(); }, delayMs);
+    };
+
+    /** One poll: fetch and apply the view, and hand it back (null when the
+     *  poll failed or the panel went away) so the caller can pace the next. */
+    const pollOnce = async (): Promise<DialerSessionView | null> => {
       try {
         const next = await getDialer(sessionId);
-        if (cancelled) return;
+        if (cancelled) return null;
         setView(next);
         setError(null);
 
@@ -581,16 +621,21 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
           }
           if (!shouldKeepPollingForRollovers(next, firstTerminalAtRef.current, Date.now())) stopPolling();
         }
+        return next;
       } catch (e: unknown) {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : 'Could not refresh the dialer session.');
         }
+        return null;
       }
+    };
+
+    const poll = async (): Promise<void> => {
+      armNextPoll(pollDelayMs(await pollOnce()));
     };
 
     pollNowRef.current = () => { void poll(); };
     void poll();
-    intervalId = setInterval(() => { void poll(); }, POLL_INTERVAL_MS);
 
     return () => {
       cancelled = true;

@@ -19,8 +19,10 @@ import {
   startDialingSequence,
   ConfirmBlock,
   conflictingSessionId,
+  CurrentRecord,
+  pollDelayMs,
 } from './DialerPanel';
-import type { DialerControlAction, DialerSession, DialerSessionView } from '../dialer-api';
+import type { DialerControlAction, DialerCurrentItem, DialerSession, DialerSessionView } from '../dialer-api';
 import * as dialerApi from '../dialer-api';
 import { ApiError } from '../api';
 
@@ -282,6 +284,68 @@ describe('DialerPanel render (SSR)', () => {
     // SSR never runs the effect, so we render the pure pieces directly:
     expect(renderToStaticMarkup(<AttemptBadge attempt={2} />)).toContain('Attempt 2 of 2');
     expect(renderToStaticMarkup(<AttemptBadge attempt={1} />)).toBe('');
+  });
+});
+
+/**
+ * The rep's complaint: "when a lead connects there is a delay until we can see
+ * the record including the seller's name — an awkward start to the call." The
+ * name now rides on the queue row, so the card can headline it from the first
+ * poll after the dial, well before the record pops on `connected`.
+ */
+describe('CurrentRecord (SSR) — the name is the headline the moment it dials', () => {
+  const item: DialerCurrentItem = { id: 'i1', recordId: '00Q1', objectType: 'Lead', status: 'dialing', toNumber: '+16195551234' };
+
+  it('with a name: the name comes first, then the number beneath it', () => {
+    const html = renderToStaticMarkup(<CurrentRecord item={{ ...item, displayName: 'Ada Lovelace' }} />);
+    const name = html.indexOf('Ada Lovelace');
+    const number = html.indexOf('(619) 555-1234');
+    expect(name).toBeGreaterThan(-1);
+    expect(number).toBeGreaterThan(-1);
+    expect(name).toBeLessThan(number);
+    expect(html).toContain('class="dp-current-name"');
+    // The number keeps its tabular digits, but is no longer the headline.
+    expect(html).toMatch(/class="dp-current-number dp-current-number-sub tnum"/);
+  });
+
+  it('without a name: exactly today\'s layout — the number is the headline and no empty name element is rendered', () => {
+    for (const nameless of [{ ...item }, { ...item, displayName: null }, { ...item, displayName: '' }]) {
+      const html = renderToStaticMarkup(<CurrentRecord item={nameless} />);
+      expect(html).toContain('class="dp-current-number tnum"');
+      expect(html).not.toContain('dp-current-name');
+      expect(html).not.toContain('dp-current-number-sub');
+      expect(html.indexOf('(619) 555-1234')).toBeLessThan(html.indexOf('Lead'));
+    }
+  });
+});
+
+/**
+ * The other half of the fix: the panel only LEARNS a record connected by
+ * polling, so a 2 s cadence adds up to 2 s before the pop. While a dial is in
+ * flight — the only time the next poll can flip the pop — poll every second.
+ */
+describe('pollDelayMs — faster while a dial is in flight', () => {
+  /** A view whose current record is in `itemStatus` (null = no current record). */
+  const view = (itemStatus: string | null, sessionStatus: DialerSession['status'] = 'active'): DialerSessionView => ({
+    session: { id: 'sess1', status: sessionStatus },
+    counts: { total: 1, done: 0, connected: 0, noConnect: 0, skipped: 0, unreachable: 0, pending: 1 },
+    currentItem: itemStatus ? { id: 'i1', recordId: '00Q1', objectType: 'Lead', status: itemStatus, toNumber: '+16195551234' } : null,
+  });
+
+  it('is 1 s while the current record is dialing or connected', () => {
+    expect(pollDelayMs(view('dialing'))).toBe(1000);
+    expect(pollDelayMs(view('connected'))).toBe(1000);
+  });
+
+  it('is today\'s 2 s everywhere else: before the first poll, no current record, pending, a settled miss, a terminal run', () => {
+    expect(pollDelayMs(null)).toBe(2000);
+    expect(pollDelayMs(view(null))).toBe(2000);
+    expect(pollDelayMs(view('pending'))).toBe(2000);
+    expect(pollDelayMs(view('no_connect'))).toBe(2000);
+    expect(pollDelayMs(view('done'))).toBe(2000);
+    expect(pollDelayMs(view(null, 'done'))).toBe(2000);
+    expect(pollDelayMs(view(null, 'stopped'))).toBe(2000);
+    expect(pollDelayMs(view(null, 'ready'))).toBe(2000);
   });
 });
 
