@@ -59,9 +59,9 @@ function connectionsKeyedOnUser(): void {
 function jsonResponse(statusCode: number, body: unknown) {
   return { statusCode, body: { text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) } };
 }
-function callOf(n: number): { url: string; method?: string; headers?: Record<string, string>; body: Record<string, unknown> } {
-  const [url, opts] = state.mockRequest.mock.calls[n] as [string, { method?: string; headers?: Record<string, string>; body?: string }];
-  return { url, method: opts.method, headers: opts.headers, body: opts.body ? JSON.parse(opts.body) : {} };
+function callOf(n: number): { url: string; method?: string; headers?: Record<string, string>; body: Record<string, unknown>; signal?: AbortSignal } {
+  const [url, opts] = state.mockRequest.mock.calls[n] as [string, { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }];
+  return { url, method: opts.method, headers: opts.headers, body: opts.body ? JSON.parse(opts.body) : {}, signal: opts.signal };
 }
 
 const LEAD = '00Q8X00000AbCdEUAV';
@@ -206,5 +206,36 @@ describe('createFeedItems', () => {
   it('no posts → no request', async () => {
     expect(await createFeedItems('u1', [])).toEqual([]);
     expect(state.mockRequest).not.toHaveBeenCalled();
+  });
+
+  describe('abort — a timed-out request must not linger and land late (the duplicate chunk)', () => {
+    it('the caller\'s AbortSignal reaches the HTTP request', async () => {
+      const controller = new AbortController();
+      state.mockRequest.mockResolvedValueOnce(jsonResponse(200, [{ id: '0D5A', success: true, errors: [] }]));
+      await createFeedItems('u1', [{ parentId: LEAD, body: 'a' }], { signal: controller.signal });
+      expect(callOf(0).signal).toBe(controller.signal);
+    });
+
+    it('without one, no signal is attached (undici treats undefined as a no-op)', async () => {
+      state.mockRequest.mockResolvedValueOnce(jsonResponse(200, [{ id: '0D5A', success: true, errors: [] }]));
+      await createFeedItems('u1', [{ parentId: LEAD, body: 'a' }]);
+      expect(callOf(0).signal).toBeUndefined();
+    });
+
+    it('an aborted request REJECTS — it is never read as a per-record terminal answer', async () => {
+      const controller = new AbortController();
+      // What undici does: reject at once on an already-aborted signal, or when
+      // it fires mid-flight. Never a response body.
+      state.mockRequest.mockImplementationOnce((_url: string, opts: { signal: AbortSignal }) =>
+        new Promise((_, reject) => {
+          const abort = () => reject(new DOMException('This operation was aborted', 'AbortError'));
+          if (opts.signal.aborted) abort(); else opts.signal.addEventListener('abort', abort);
+        }));
+      const p = createFeedItems('u1', [{ parentId: LEAD, body: 'a' }], { signal: controller.signal });
+      const settled = expect(p).rejects.toThrow(/aborted/);
+      await vi.waitFor(() => expect(state.mockRequest).toHaveBeenCalledTimes(1)); // in flight
+      controller.abort();
+      await settled;
+    });
   });
 });

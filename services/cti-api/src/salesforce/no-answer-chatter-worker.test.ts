@@ -23,6 +23,7 @@ import {
   OWNERSHIP_TIMEOUT_MS,
   SETTLE_RECHECK_MS,
   SETTLE_WINDOW_MS,
+  SF_POST_TIMEOUT_MS,
   STUCK_AFTER_MS,
   SWEEP_WINDOW_MS,
   maybeStartNoAnswerChatterLoop,
@@ -383,11 +384,15 @@ describe('sweep — the happy path, in order', () => {
     expect(ownership).toHaveBeenCalledTimes(1);
     expect(ownership.mock.calls[0]).toEqual(['U1', [lead(1), lead(2), lead(3)]]);
 
-    // ONE post, as the rep, only on the record they own, with the exact text.
+    // ONE post, as the rep, only on the record they own, with the exact text —
+    // and with an AbortSignal, so a timed-out request is torn down, not left to land late.
     expect(d.createFeedItems).toHaveBeenCalledTimes(1);
-    expect((d.createFeedItems as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+    const [postUser, postBody, postOpts] = (d.createFeedItems as ReturnType<typeof vi.fn>).mock.calls[0] as [string, FeedItemPost[], { signal?: AbortSignal }];
+    expect([postUser, postBody]).toEqual([
       'U1', [{ parentId: lead(1), body: 'No answer (Power Dialer) — 2 attempts: no answer, voicemail' }],
     ]);
+    expect(postOpts.signal).toBeInstanceOf(AbortSignal);
+    expect(postOpts.signal!.aborted).toBe(false);
 
     // Skip stamps: terminal, scoped to the session, on exactly that record's items.
     const [notOwner, notFound, ids] = itemWrites(f);
@@ -610,6 +615,22 @@ describe('failure', () => {
     await tick;
     expect(eventOf(sessionWrites(f).at(-1)!)).toBe('release');
     expect(d.createFeedItems).not.toHaveBeenCalled();
+  });
+
+  it('a hung createFeedItems times out the same way (retry path, not a hang) — and its request is ABORTED, nothing stamped', async () => {
+    vi.useFakeTimers();
+    const f = fakeDb({ sessions: [session()], items: [item()] });
+    const createFeedItems = vi.fn((_u: string, _p: ReadonlyArray<FeedItemPost>, _o?: { signal?: AbortSignal }) => new Promise<FeedItemResult[]>(() => {}));
+    const d = deps(f, { createFeedItems });
+    const tick = runNoAnswerChatterTick(d);
+    await vi.advanceTimersByTimeAsync(SF_POST_TIMEOUT_MS + 1);
+    await tick;
+    const release = sessionWrites(f).at(-1)!;
+    expect(eventOf(release)).toBe('release');
+    expect(release.patch.noAnswerChatterNextAt).toEqual(new Date(NOW.getTime() + BACKOFF_BASE_MS));
+    expect((createFeedItems.mock.calls[0]![2] as { signal: AbortSignal }).signal.aborted).toBe(true);
+    expect(itemWrites(f)).toEqual([]);
+    expect(console.warn).toHaveBeenCalledWith('[no-answer-chatter] sweep failed; will retry', expect.objectContaining({ reason: expect.stringMatching(/feed item create timed out/) }));
   });
 
   it('a dead Salesforce token is NOT terminal — the rep may sign back in; it rides the normal backoff', async () => {

@@ -68,6 +68,25 @@ export function groupByReason(skips: ReadonlyArray<{ reason: string; record: NoA
 }
 
 /**
+ * `withTimeout` only stops WAITING: the request it raced keeps running, and one
+ * that lands minutes later — after the chunk has been retried — is the
+ * duplicate post the header calls "accepted". Accepted, not welcome: this hands
+ * the request a signal and fires it the moment the wait is given up, so the
+ * socket is torn down too. (Fired on any rejection — on a request that already
+ * answered, aborting is a no-op.) A controller rather than
+ * `AbortSignal.timeout` so the one timer `withTimeout` owns is the only clock.
+ */
+async function withAbortingTimeout<T>(ms: number, label: string, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  try {
+    return await withTimeout(run(controller.signal), ms, label);
+  } catch (err) {
+    controller.abort();
+    throw err;
+  }
+}
+
+/**
  * Post one chunk and stamp its outcome before returning. A thrown request leaves
  * the chunk untouched (transient — the caller backs off); a per-record rejection
  * is Salesforce's final word on that record and is stamped as a skip.
@@ -77,11 +96,9 @@ export async function postChunk(
   session: { id: string; userId: string },
   chunk: ReadonlyArray<NoAnswerRecord>,
 ): Promise<void> {
-  const results: FeedItemResult[] = await withTimeout(
-    deps.createFeedItems(session.userId, chunk.map((r) => ({ parentId: r.recordId, body: noAnswerText(r.reasons) }))),
-    SF_POST_TIMEOUT_MS,
-    'feed item create',
-  );
+  const posts = chunk.map((r) => ({ parentId: r.recordId, body: noAnswerText(r.reasons) }));
+  const results: FeedItemResult[] = await withAbortingTimeout(SF_POST_TIMEOUT_MS, 'feed item create', (signal) =>
+    deps.createFeedItems(session.userId, posts, { signal }));
   // `createFeedItems` guarantees index alignment (it throws otherwise).
   const outcomes = chunk.map((record, i) => ({ record, result: results[i]! }));
   const rejected = outcomes.flatMap(({ record, result }) => (result.ok ? [] : [{ reason: result.statusCode, record, message: result.message }]));

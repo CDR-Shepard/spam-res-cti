@@ -147,15 +147,32 @@ describe('postChunk', () => {
     expect(f.writes).toEqual([]);
   });
 
-  it(`a hung request times out after ${SF_POST_TIMEOUT_MS}ms and rejects — nothing is stamped`, async () => {
+  it(`a hung request times out after ${SF_POST_TIMEOUT_MS}ms, rejects, and ABORTS the request — nothing is stamped`, async () => {
+    // A timeout that only stops waiting leaves the socket up; the request can
+    // land minutes later, after a retry has re-posted the chunk: the documented
+    // duplicate. The signal handed to createFeedItems must fire.
     vi.useFakeTimers();
     const f = fakeDb();
-    const createFeedItems = vi.fn((_u: string, _p: ReadonlyArray<FeedItemPost>) => new Promise<FeedItemResult[]>(() => {}));
+    const createFeedItems = vi.fn((_u: string, _p: ReadonlyArray<FeedItemPost>, _o?: { signal?: AbortSignal }) => new Promise<FeedItemResult[]>(() => {}));
     const p = postChunk({ db: f.db, createFeedItems }, SESSION, chunk);
     const settled = expect(p).rejects.toThrow(/feed item create timed out/);
+    const signal = (createFeedItems.mock.calls[0]![2] as { signal?: AbortSignal } | undefined)?.signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal!.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(SF_POST_TIMEOUT_MS + 1);
     await settled;
+    expect(signal!.aborted).toBe(true);
     expect(f.writes).toEqual([]);
     expect(SF_POST_TIMEOUT_MS).toBe(60_000);
+  });
+
+  it('a request that finishes in time is never aborted, and each chunk gets its own fresh signal', async () => {
+    const f = fakeDb();
+    const createFeedItems = vi.fn(async (_u: string, _p: ReadonlyArray<FeedItemPost>, _o?: { signal?: AbortSignal }): Promise<FeedItemResult[]> => [ok('0D5A'), ok('0D5B'), ok('0D5C')]);
+    await postChunk({ db: f.db, createFeedItems }, SESSION, chunk);
+    await postChunk({ db: f.db, createFeedItems }, SESSION, chunk);
+    const signals = createFeedItems.mock.calls.map((c) => (c[2] as { signal: AbortSignal }).signal);
+    expect(signals.map((s) => s.aborted)).toEqual([false, false]);
+    expect(signals[0]).not.toBe(signals[1]);
   });
 });

@@ -535,10 +535,16 @@ function feedItemResultOf(raw: CollectionsSaveResult): FeedItemResult {
  *
  * At most `FEED_ITEMS_PER_REQUEST` posts. Chunking is the caller's job on
  * purpose: it must persist each chunk's ids before sending the next.
+ *
+ * `signal` aborts the HTTP request itself. A caller that merely stops WAITING
+ * (a Promise.race timeout) leaves the request in flight, and one that lands
+ * minutes later — after the chunk was retried — is a duplicate post. An
+ * aborted request rejects; it is never an index-aligned per-record answer.
  */
 export async function createFeedItems(
   userId: string,
   posts: ReadonlyArray<FeedItemPost>,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<FeedItemResult[]> {
   if (posts.length === 0) return [];
   if (posts.length > FEED_ITEMS_PER_REQUEST) {
@@ -550,6 +556,7 @@ export async function createFeedItems(
       allOrNone: false,
       records: posts.map((p) => ({ attributes: { type: 'FeedItem' }, ParentId: p.parentId, Body: p.body })),
     },
+    signal: opts.signal,
   });
   if (res.status < 200 || res.status >= 300) {
     throw new Error(`Salesforce FeedItem create failed (${res.status}): ${JSON.stringify(res.json)}`);
