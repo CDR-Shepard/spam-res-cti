@@ -322,13 +322,18 @@ export async function runNoAnswerChatterTick(deps: NoAnswerChatterDeps = liveDep
 }
 
 /** Drive from server.ts (via `maybeStartNoAnswerChatterLoop`). Single-flight — a
- *  slow tick is never overlapped. */
-export function startNoAnswerChatterLoop(intervalMs = LOOP_INTERVAL_MS): NodeJS.Timeout {
+ *  slow tick is never overlapped: two ticks at once would race the same
+ *  candidates, and the claim CAS only makes that safe, not free. `tick` is a
+ *  seam for the fake-timer test; production never passes it. */
+export function startNoAnswerChatterLoop(
+  intervalMs = LOOP_INTERVAL_MS,
+  tick: () => Promise<{ processed: number }> = runNoAnswerChatterTick,
+): NodeJS.Timeout {
   let running = false;
   return setInterval(() => {
     if (running) return;
     running = true;
-    runNoAnswerChatterTick()
+    tick()
       .catch((err) => console.error('[no-answer-chatter] tick error', err))
       .finally(() => { running = false; });
   }, intervalMs);

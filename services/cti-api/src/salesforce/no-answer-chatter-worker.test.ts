@@ -28,6 +28,7 @@ import {
   SWEEP_WINDOW_MS,
   maybeStartNoAnswerChatterLoop,
   runNoAnswerChatterTick,
+  startNoAnswerChatterLoop,
   sweepEligible,
   type NoAnswerChatterDeps,
 } from './no-answer-chatter-worker.js';
@@ -713,6 +714,43 @@ describe('failure', () => {
     await expect(runNoAnswerChatterTick(d)).resolves.toEqual({ processed: 2 });
     expect((d.createFeedItems as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual(['UGOOD']);
     expect(console.error).toHaveBeenCalledWith('[no-answer-chatter] session crashed', expect.objectContaining({ sessionId: 'BAD' }));
+  });
+});
+
+describe('the loop — single-flight', () => {
+  it('a tick that is still running is NOT overlapped by the next interval; the next tick starts once it settles', async () => {
+    vi.useFakeTimers();
+    let finishFirst: () => void = () => {};
+    const tick = vi.fn<() => Promise<{ processed: number }>>()
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = () => resolve({ processed: 0 }); }))
+      .mockResolvedValue({ processed: 0 });
+    const timer = startNoAnswerChatterLoop(1000, tick);
+    try {
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(tick).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5000); // five more intervals while tick 1 hangs
+      expect(tick).toHaveBeenCalledTimes(1);   // …and not one of them overlapped it
+      finishFirst();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(tick).toHaveBeenCalledTimes(2);
+    } finally {
+      clearInterval(timer);
+    }
+  });
+
+  it('a tick that REJECTS is logged and does not stop the loop', async () => {
+    vi.useFakeTimers();
+    const tick = vi.fn<() => Promise<{ processed: number }>>()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue({ processed: 0 });
+    const timer = startNoAnswerChatterLoop(1000, tick);
+    try {
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(tick).toHaveBeenCalledTimes(2);
+      expect(console.error).toHaveBeenCalledWith('[no-answer-chatter] tick error', expect.any(Error));
+    } finally {
+      clearInterval(timer);
+    }
   });
 });
 
