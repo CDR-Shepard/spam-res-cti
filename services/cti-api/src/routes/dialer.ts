@@ -46,7 +46,7 @@ import { sessionCounts, skipBreakdown, missBreakdown, rolloverSummary } from '..
 import { buildEngineDeps } from '../dialer/live-deps.js';
 import { mapAnsweredBy } from '../dialer/amd.js';
 import { isNoConnect, type DialOutcome } from '../dialer/outcome.js';
-import { resolveDialNumber } from '../salesforce/record-phone.js';
+import { fetchContactNames, resolveDialNumber } from '../salesforce/record-phone.js';
 import { fetchTasks } from '../salesforce/task-targets.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
 import {
@@ -250,7 +250,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     const db = getDb();
     const result = await createDialerSession(
       {
-        resolveDialNumber, fetchTasks, salesforceUserId, db,
+        resolveDialNumber, fetchTasks, fetchContactNames, salesforceUserId, db,
         workedToday: (orgId, numbers) => workedTodaySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
       },
@@ -269,7 +269,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     const db = getDb();
     const result = await createDialerSession(
       {
-        resolveDialNumber, fetchTasks, salesforceUserId, db,
+        resolveDialNumber, fetchTasks, fetchContactNames, salesforceUserId, db,
         workedToday: (orgId, numbers) => workedTodaySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
       },

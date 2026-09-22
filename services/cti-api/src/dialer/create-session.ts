@@ -1,6 +1,6 @@
 import { getDb, schema } from '@cti/db';
 import type { ConsentBlock } from './consent-check.js';
-import { resolveDialNumber } from '../salesforce/record-phone.js';
+import { fetchContactNames, resolveDialNumber } from '../salesforce/record-phone.js';
 import { fetchTasks, resolveTaskTarget } from '../salesforce/task-targets.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
 
@@ -37,6 +37,13 @@ type ResolvedRow = {
    *  consequences: a blocked primary skips the row, a blocked fallback only
    *  drops the fallback — the primary is still lawful to call. */
   fallbackConsentBlock?: ConsentBlock | null;
+  /** What the panel headlines from the first ring (migration 0041). A Lead or
+   *  Contact's own Name; an Opportunity's primary contact once `withContactNames`
+   *  has run, else the Opportunity's own Name. */
+  displayName?: string | null;
+  /** Opportunity rows only: the primary contact whose name should replace the
+   *  Opportunity's, resolved for the whole run in one batched read. */
+  contactId?: string | null;
 };
 
 /** Outcome stamped on a record the rep has checked Skip on Dialer on, so the
@@ -63,7 +70,7 @@ export function buildQueueRows(
   sessionId: string; ordinal: number; objectType: string; recordId: string;
   toNumber: string | null; fallbackNumber: string | null;
   attempt: number; primaryNumber: string | null; secondaryNumber: string | null;
-  taskId: string | null; followupEligible: boolean;
+  taskId: string | null; followupEligible: boolean; displayName: string | null;
   status: 'pending' | 'unreachable' | 'skipped'; outcome: string | null;
 }> {
   return resolved.map((r, i) => {
@@ -85,6 +92,9 @@ export function buildQueueRows(
       // toNumber/fallbackNumber, and an attempt-2 row restores from these.
       attempt: 1, primaryNumber: r.toNumber, secondaryNumber: fallback,
       taskId: r.taskId ?? null, followupEligible: r.followupEligible ?? true,
+      // Written on EVERY status: a skipped or unreachable row says WHO was
+      // passed over, not just which number.
+      displayName: r.displayName ?? null,
       // PRECEDENCE: consent > skip_on_dialer > already_worked > unreachable.
       // A consent block (opt-out / block list / federal DNC) is the strongest
       // signal there is — it is why the call is unlawful, not merely unwanted —
@@ -104,6 +114,10 @@ export function buildQueueRows(
 export interface CreateSessionDeps {
   resolveDialNumber: typeof resolveDialNumber;
   fetchTasks: typeof fetchTasks;
+  /** The primary contacts' names for the run's Opportunity rows, ONE batched
+   *  read for the whole run (see `withContactNames`). Injected so creation
+   *  stays unit testable and a Lead run can be pinned to never call it. */
+  fetchContactNames: typeof fetchContactNames;
   salesforceUserId: typeof salesforceUserId;
   /** Which of these numbers has the team already power-dialed today. Injected
    *  (rather than read inline) so creation stays unit testable, and so the
@@ -140,6 +154,7 @@ async function resolveRows(
       out.push({
         recordId, objectType, toNumber: r?.e164 ?? null, fallbackNumber: r?.fallbackE164 ?? null,
         skipOnDialer: r?.skipOnDialer ?? false,
+        displayName: r?.displayName ?? null, contactId: r?.contactId ?? null,
       });
     }
     return out;
@@ -160,9 +175,49 @@ async function resolveRows(
       toNumber: r?.e164 ?? null, fallbackNumber: r?.fallbackE164 ?? null,
       taskId, followupEligible: target.followupEligible,
       skipOnDialer: r?.skipOnDialer ?? false,
+      displayName: r?.displayName ?? null, contactId: r?.contactId ?? null,
     });
   }
   return out;
+}
+
+/** The batched read, made safe: a name is decoration, so a lookup that fails
+ *  (expired token, a SOQL limit, an org quirk) logs and yields nothing — the
+ *  rows keep the Opportunity's own Name and the run is still created. */
+async function contactNamesOrNone(
+  deps: CreateSessionDeps,
+  userId: string,
+  contactIds: readonly string[],
+): Promise<Map<string, string>> {
+  try {
+    return await deps.fetchContactNames(userId, contactIds);
+  } catch (err) {
+    console.warn(
+      `[create-session] contact-name lookup failed for ${contactIds.length} Opportunity contact(s) — ` +
+        `those rows keep the Opportunity Name: ${(err as Error).message}`,
+    );
+    return new Map();
+  }
+}
+
+/**
+ * Put the PERSON's name on each Opportunity row that has a primary contact, in
+ * ONE batched read for the whole run — never a query per record (the id is on
+ * the row precisely because `Contact.Name` cannot be traversed from
+ * Opportunity in SOQL). Distinct ids: a list often carries the same person on
+ * two Opportunities. A run with no Opportunity contacts makes no query at all.
+ * A contact the read did not name keeps the Opportunity's own Name.
+ */
+async function withContactNames(deps: CreateSessionDeps, userId: string, rows: ResolvedRow[]): Promise<ResolvedRow[]> {
+  const contactIds = [...new Set(
+    rows.filter((r) => r.objectType === 'Opportunity').map((r) => r.contactId).filter((id): id is string => !!id),
+  )];
+  if (contactIds.length === 0) return rows;
+  const names = await contactNamesOrNone(deps, userId, contactIds);
+  return rows.map((r) => {
+    const name = r.contactId ? names.get(r.contactId) : undefined;
+    return name ? { ...r, displayName: name } : r;
+  });
 }
 
 export async function createDialerSession(
@@ -170,7 +225,9 @@ export async function createDialerSession(
   args: { userId: string; orgId: string; objectType: DialerRunObject; recordIds: string[] },
 ): Promise<{ sessionId: string; total: number }> {
   const sfOwnerId = await deps.salesforceUserId(args.userId);
-  const resolved = await resolveRows(deps, args.userId, args.objectType, args.recordIds);
+  const resolved = await withContactNames(
+    deps, args.userId, await resolveRows(deps, args.userId, args.objectType, args.recordIds),
+  );
   // Created READY: the queue is built and nothing dials. `advanceSession`
   // ignores any session that is not 'active', so a ready session cannot
   // originate by construction; only `startSession` (the rep's Start dialing)

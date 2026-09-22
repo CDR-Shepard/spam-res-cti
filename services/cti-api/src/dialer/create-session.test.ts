@@ -29,6 +29,7 @@ function fakeDb() {
 const noResolveDeps = {
   resolveDialNumber: (async () => null) as never,
   fetchTasks: (async () => []) as never,
+  fetchContactNames: (async () => new Map<string, string>()) as never,
   salesforceUserId: (async () => 'sf1') as never,
   workedToday: (async () => new Set<string>()) as never,
   consentBlocked: (async () => new Map()) as never,
@@ -43,9 +44,20 @@ describe('buildQueueRows', () => {
       { recordId: '00Q3', objectType: 'Lead', toNumber: null },
     ]);
     expect(rows).toEqual([
-      { sessionId: 'S1', ordinal: 0, objectType: 'Lead', recordId: '00Q1', toNumber: '+16195550100', fallbackNumber: '+16195550999', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550999', taskId: null, followupEligible: true, status: 'pending', outcome: null },
-      { sessionId: 'S1', ordinal: 1, objectType: 'Lead', recordId: '00Q2', toNumber: '+16195550200', fallbackNumber: null, attempt: 1, primaryNumber: '+16195550200', secondaryNumber: null, taskId: null, followupEligible: true, status: 'pending', outcome: null },
-      { sessionId: 'S1', ordinal: 2, objectType: 'Lead', recordId: '00Q3', toNumber: null, fallbackNumber: null, attempt: 1, primaryNumber: null, secondaryNumber: null, taskId: null, followupEligible: true, status: 'unreachable', outcome: null },
+      { sessionId: 'S1', ordinal: 0, objectType: 'Lead', recordId: '00Q1', toNumber: '+16195550100', fallbackNumber: '+16195550999', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550999', taskId: null, followupEligible: true, displayName: null, status: 'pending', outcome: null },
+      { sessionId: 'S1', ordinal: 1, objectType: 'Lead', recordId: '00Q2', toNumber: '+16195550200', fallbackNumber: null, attempt: 1, primaryNumber: '+16195550200', secondaryNumber: null, taskId: null, followupEligible: true, displayName: null, status: 'pending', outcome: null },
+      { sessionId: 'S1', ordinal: 2, objectType: 'Lead', recordId: '00Q3', toNumber: null, fallbackNumber: null, attempt: 1, primaryNumber: null, secondaryNumber: null, taskId: null, followupEligible: true, displayName: null, status: 'unreachable', outcome: null },
+    ]);
+  });
+
+  it('writes the display name onto the row — on every status, so a skipped/unreachable row still says WHO', () => {
+    const rows = buildQueueRows('S1', [
+      { recordId: '00Q1', objectType: 'Lead', toNumber: '+16195550100', displayName: 'Ada Lovelace' },
+      { recordId: '00Q2', objectType: 'Lead', toNumber: null, displayName: 'Grace Hopper' },
+      { recordId: '00Q3', objectType: 'Lead', toNumber: '+16195550300', displayName: 'Mary Jackson', skipOnDialer: true },
+    ]);
+    expect(rows.map((r) => [r.displayName, r.status])).toEqual([
+      ['Ada Lovelace', 'pending'], ['Grace Hopper', 'unreachable'], ['Mary Jackson', 'skipped'],
     ]);
   });
 
@@ -135,6 +147,124 @@ describe('createDialerSession — nothing dials at creation', () => {
     const result = await createDialerSession({ ...noResolveDeps, db: db as never }, args);
     expect(db._sessionInsert).toMatchObject({ userId: 'u1', orgId: 'o1', objectType: 'Lead', status: 'ready' });
     expect(result).toEqual({ sessionId: 'S1', total: 1 });
+  });
+});
+
+/**
+ * The name the panel headlines from the first ring. A Lead/Contact brings its
+ * own; an Opportunity brings its own Name plus a ContactId, and the person's
+ * name is swapped in by ONE batched Contact read for the whole run — never a
+ * query per record, and never a reason to fail the run.
+ */
+describe('createDialerSession — display names', () => {
+  type Target = { e164: string | null; displayName: string | null; contactId?: string | null };
+  /** Stands in for the real resolver: each record answers with its number,
+   *  its name, and (Opportunities) its primary contact's id. */
+  function resolverByRecord(targets: Record<string, Target>) {
+    return vi.fn(async (_u: string, _objectType: string, recordId: string) => {
+      const t = targets[recordId];
+      return t ? { e164: t.e164, fallbackE164: null, skipOnDialer: false, displayName: t.displayName, contactId: t.contactId ?? null } : null;
+    });
+  }
+  const deps = (db: unknown, resolveDialNumber: unknown, fetchContactNames: unknown, fetchTasks: unknown = async () => []) => ({
+    db, resolveDialNumber, fetchTasks, fetchContactNames,
+    salesforceUserId: async () => '005', workedToday: async () => new Set(), consentBlocked: async () => new Map(),
+  });
+  const C1 = '003000000000001AAA';
+  const C2 = '003000000000002AAA';
+
+  it('a Lead run writes each Lead\'s own name and makes NO Contact query', async () => {
+    const db = fakeDb();
+    const fetchContactNames = vi.fn(async () => new Map<string, string>());
+    await createDialerSession(
+      deps(db, resolverByRecord({ '00Q1': { e164: '+16195550100', displayName: 'Ada Lovelace' }, '00Q2': { e164: '+16195550200', displayName: null } }), fetchContactNames) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
+    );
+    expect(db._itemRows.map((x) => [x.recordId, x.displayName])).toEqual([['00Q1', 'Ada Lovelace'], ['00Q2', null]]);
+    expect(fetchContactNames).not.toHaveBeenCalled();
+  });
+
+  it('an Opportunity run resolves the primary contacts\' names in ONE batched read, distinct ids only, and headlines the person', async () => {
+    const db = fakeDb();
+    const fetchContactNames = vi.fn(async () => new Map([[C1, 'Ada Lovelace'], [C2, 'Grace Hopper']]));
+    await createDialerSession(
+      deps(db, resolverByRecord({
+        '0061': { e164: '+16195550100', displayName: '123 Main St', contactId: C1 },
+        // Two Opportunities for the same person: one bind, not two.
+        '0062': { e164: '+16195550200', displayName: '456 Oak Ave', contactId: C1 },
+        '0063': { e164: '+16195550300', displayName: '789 Elm Rd', contactId: C2 },
+      }), fetchContactNames) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Opportunity', recordIds: ['0061', '0062', '0063'] },
+    );
+    expect(fetchContactNames).toHaveBeenCalledOnce();
+    expect(fetchContactNames).toHaveBeenCalledWith('U1', [C1, C2]);
+    expect(db._itemRows.map((x) => [x.recordId, x.displayName])).toEqual([
+      ['0061', 'Ada Lovelace'], ['0062', 'Ada Lovelace'], ['0063', 'Grace Hopper'],
+    ]);
+  });
+
+  it('an Opportunity keeps its own Name when it has no ContactId, or when the contact\'s name did not come back', async () => {
+    const db = fakeDb();
+    // C2 is asked for but the Contact is gone / unnamed / invisible to this rep.
+    const fetchContactNames = vi.fn(async () => new Map([[C1, 'Ada Lovelace']]));
+    await createDialerSession(
+      deps(db, resolverByRecord({
+        '0061': { e164: '+16195550100', displayName: '123 Main St', contactId: null },
+        '0062': { e164: '+16195550200', displayName: '456 Oak Ave', contactId: C2 },
+        '0063': { e164: '+16195550300', displayName: '789 Elm Rd', contactId: C1 },
+        '0064': { e164: '+16195550400', displayName: null, contactId: null },
+      }), fetchContactNames) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Opportunity', recordIds: ['0061', '0062', '0063', '0064'] },
+    );
+    // Only the rows that HAVE a contact go into the batch.
+    expect(fetchContactNames).toHaveBeenCalledWith('U1', [C2, C1]);
+    expect(db._itemRows.map((x) => [x.recordId, x.displayName])).toEqual([
+      ['0061', '123 Main St'], ['0062', '456 Oak Ave'], ['0063', 'Ada Lovelace'], ['0064', null],
+    ]);
+  });
+
+  it('a FAILED contact-name lookup never fails the run: it warns, and every Opportunity keeps its own Name', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const db = fakeDb();
+    const fetchContactNames = vi.fn(async () => { throw new Error('SOQL failed (401): session expired'); });
+    const r = await createDialerSession(
+      deps(db, resolverByRecord({
+        '0061': { e164: '+16195550100', displayName: '123 Main St', contactId: C1 },
+        '0062': { e164: '+16195550200', displayName: '456 Oak Ave', contactId: C2 },
+      }), fetchContactNames) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Opportunity', recordIds: ['0061', '0062'] },
+    );
+    expect(r).toEqual({ sessionId: 'S1', total: 2 });
+    expect(db._itemRows.map((x) => [x.recordId, x.displayName, x.status])).toEqual([
+      ['0061', '123 Main St', 'pending'], ['0062', '456 Oak Ave', 'pending'],
+    ]);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/session expired/);
+    warn.mockRestore();
+  });
+
+  it('a Task run batches its Opportunity targets\' contacts too, and leaves Lead/Contact targets their own names', async () => {
+    const fetchTasks = vi.fn(async () => [
+      { Id: '00T1', Subject: 'Follow-up', OwnerId: '005', WhoId: null, WhatId: '0061', What: { Type: 'Opportunity' } },
+      { Id: '00T2', Subject: 'Follow-up', OwnerId: '005', WhoId: '0031', WhatId: null, Who: { Type: 'Contact' } },
+      { Id: '00T3', Subject: 'FU', OwnerId: '005', WhoId: null, WhatId: '0011', What: { Type: 'Account' } },
+    ]);
+    const db = fakeDb();
+    const fetchContactNames = vi.fn(async () => new Map([[C1, 'Ada Lovelace']]));
+    await createDialerSession(
+      deps(db, resolverByRecord({
+        '0061': { e164: '+16195550100', displayName: '123 Main St', contactId: C1 },
+        '0031': { e164: '+16195550200', displayName: 'Grace Hopper' },
+      }), fetchContactNames, fetchTasks) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Task', recordIds: ['00T1', '00T2', '00T3'] },
+    );
+    expect(fetchContactNames).toHaveBeenCalledWith('U1', [C1]);
+    expect(db._itemRows.map((x) => [x.recordId, x.objectType, x.displayName])).toEqual([
+      ['0061', 'Opportunity', 'Ada Lovelace'],
+      ['0031', 'Contact', 'Grace Hopper'],
+      // An unresolvable Task has no record to name.
+      ['00T3', 'Task', null],
+    ]);
   });
 });
 
