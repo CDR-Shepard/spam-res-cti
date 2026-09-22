@@ -29,7 +29,8 @@
  * sent — so a crash, or a timeout whose request actually landed, re-posts at most
  * ONE chunk's worth. A duplicate "No answer" is the accepted failure mode; a lost
  * one is not. The stamps are also the idempotency key: a record with any stamped
- * attempt is never selected again (`selectNoAnswerRecords`).
+ * attempt is never selected again (`selectNoAnswerRecords`). The posting and
+ * stamping of one chunk live in no-answer-chatter-stamps.ts.
  *
  * ONE OWNER PER SESSION. The claim is a timestamp, and a claim older than
  * STUCK_AFTER_MS is up for grabs — that is how a dead worker's session gets
@@ -55,14 +56,15 @@ import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { getDb, schema } from '@cti/db';
 import type { AppConfig } from '../config.js';
 import type { DialerItem } from '../dialer/session-store.js';
-import { FEED_ITEMS_PER_REQUEST, createFeedItems, type FeedItemResult } from './client.js';
+import { FEED_ITEMS_PER_REQUEST, createFeedItems } from './client.js';
 import { isSalesforceAuthError, withTimeout } from './followup-worker.js';
-import { SWEEP_WINDOW_MS, gateIdsFor, noAnswerText, selectNoAnswerRecords, verdictFor, type NoAnswerRecord } from './no-answer-chatter.js';
+import { SWEEP_WINDOW_MS, gateIdsFor, selectNoAnswerRecords, verdictFor, type NoAnswerRecord } from './no-answer-chatter.js';
+import { SF_POST_TIMEOUT_MS, groupByReason, postChunk, stampSkips, type StampDeps } from './no-answer-chatter-stamps.js';
 import { fetchOwnershipBatch, type OwnershipSnapshot } from './ownership.js';
 
-/** Defined beside the predicate that reads it (no-answer-chatter.ts); re-exported
- *  because it is part of this worker's contract too (scan, claim, `sweepEligible`). */
-export { SWEEP_WINDOW_MS };
+/** Defined beside the code that reads them (no-answer-chatter.ts, -stamps.ts);
+ *  re-exported because they are part of this worker's contract too. */
+export { SF_POST_TIMEOUT_MS, SWEEP_WINDOW_MS };
 
 export const MAX_ATTEMPTS = 8;
 /** Doubling: 30s, 1m, 2m … ≈63 minutes over 8 attempts — long enough for a rep
@@ -76,9 +78,6 @@ export const CANDIDATE_LIMIT = 5;
 export const LOOP_INTERVAL_MS = 15_000;
 /** Ceiling on the whole batched ownership lookup (a handful of SOQL queries). */
 export const OWNERSHIP_TIMEOUT_MS = 120_000;
-/** Ceiling on one Collections POST. Longer than a read, as in followup-worker:
- *  it MUTATES Salesforce, and abandoning it early only buys a duplicate chunk. */
-export const SF_POST_TIMEOUT_MS = 60_000;
 /** A claim older than this is presumed dead. A run is capped at 500 records
  *  (routes/dialer.ts), so the Salesforce side of a sweep is bounded: the ownership
  *  lookup plus three posts, each at its timeout, is 5 minutes. This is twice
@@ -90,12 +89,9 @@ type Session = typeof schema.dialerSessions.$inferSelect;
 const sessions = schema.dialerSessions;
 const queueItems = schema.dialerQueueItems;
 
-export interface NoAnswerChatterDeps {
-  db: ReturnType<typeof getDb>;
+export interface NoAnswerChatterDeps extends StampDeps {
   /** Batched owner lookup, run as the rep. Absent id = not returned by Salesforce. */
   ownership: (userId: string, ids: ReadonlyArray<string>) => Promise<Map<string, OwnershipSnapshot>>;
-  /** One Collections POST (≤200), on the rep's own token — the rep is the author. */
-  createFeedItems: typeof createFeedItems;
   now: () => Date;
 }
 
@@ -217,64 +213,8 @@ async function loadItems(deps: NoAnswerChatterDeps, sessionId: string): Promise<
   return deps.db.query.dialerQueueItems.findMany({ where: eq(queueItems.sessionId, sessionId) });
 }
 
-/** Terminal skip for every qualifying item of these records. One UPDATE per reason. */
-async function stampSkips(deps: NoAnswerChatterDeps, sessionId: string, reason: string, itemIds: ReadonlyArray<string>): Promise<void> {
-  await deps.db.update(queueItems)
-    .set({ noAnswerSkipReason: reason })
-    .where(and(eq(queueItems.sessionId, sessionId), inArray(queueItems.id, [...itemIds])));
-}
-
-/**
- * The posted FeedItem ids for one chunk, in ONE statement: every qualifying item
- * of a record (both attempts) gets that record's id. One statement, so the chunk
- * is stamped entirely or not at all — never a half-stamped chunk that a retry
- * would half re-post.
- */
-async function stampFeedItemIds(
-  deps: NoAnswerChatterDeps,
-  sessionId: string,
-  posted: ReadonlyArray<{ record: NoAnswerRecord; feedItemId: string }>,
-): Promise<void> {
-  const whens = posted.flatMap(({ record, feedItemId }) =>
-    record.itemIds.map((itemId) => sql`when ${itemId}::uuid then ${feedItemId}::text`));
-  await deps.db.update(queueItems)
-    .set({ noAnswerFeedItemId: sql`case ${queueItems.id} ${sql.join(whens, sql` `)} end` })
-    .where(and(eq(queueItems.sessionId, sessionId), inArray(queueItems.id, posted.flatMap((p) => p.record.itemIds))));
-}
-
 function chunksOf<T>(list: ReadonlyArray<T>, size: number): T[][] {
   return Array.from({ length: Math.ceil(list.length / size) }, (_, i) => list.slice(i * size, (i + 1) * size));
-}
-
-/** Item ids grouped by terminal skip reason, in first-seen order. */
-function groupByReason(skips: ReadonlyArray<{ reason: string; record: NoAnswerRecord }>): Map<string, string[]> {
-  const byReason = new Map<string, string[]>();
-  for (const { reason, record } of skips) byReason.set(reason, [...(byReason.get(reason) ?? []), ...record.itemIds]);
-  return byReason;
-}
-
-/**
- * Post one chunk and stamp its outcome before returning. A thrown request leaves
- * the chunk untouched (transient — the caller backs off); a per-record rejection
- * is Salesforce's final word on that record and is stamped as a skip.
- */
-async function postChunk(deps: NoAnswerChatterDeps, session: Session, chunk: ReadonlyArray<NoAnswerRecord>): Promise<void> {
-  const results: FeedItemResult[] = await withTimeout(
-    deps.createFeedItems(session.userId, chunk.map((r) => ({ parentId: r.recordId, body: noAnswerText(r.reasons) }))),
-    SF_POST_TIMEOUT_MS,
-    'feed item create',
-  );
-  // `createFeedItems` guarantees index alignment (it throws otherwise).
-  const outcomes = chunk.map((record, i) => ({ record, result: results[i]! }));
-  const rejected = outcomes.flatMap(({ record, result }) => (result.ok ? [] : [{ reason: result.statusCode, record, message: result.message }]));
-  const posted = outcomes.flatMap(({ record, result }) => (result.ok ? [{ record, feedItemId: result.id }] : []));
-
-  for (const r of rejected) {
-    console.warn('[no-answer-chatter] post rejected', { sessionId: session.id, recordId: r.record.recordId, statusCode: r.reason, message: r.message });
-  }
-  for (const [reason, itemIds] of groupByReason(rejected)) await stampSkips(deps, session.id, reason, itemIds);
-  // IMMEDIATELY, before the next chunk goes out — see AT-LEAST-ONCE in the header.
-  if (posted.length > 0) await stampFeedItemIds(deps, session.id, posted);
 }
 
 /**
