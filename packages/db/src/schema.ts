@@ -334,6 +334,11 @@ export const dialerQueueItems = pgTable(
     taskId: text('task_id'),
     /** Decided at creation from the follow-up subject rule; only eligible items roll over. */
     followupEligible: boolean('followup_eligible').default(true).notNull(),
+    /** The person's name, resolved at queue build (a Lead's or Contact's Name;
+     *  an Opportunity's primary contact, else its own Name), so the panel can
+     *  headline WHO is ringing from the first poll — before the record pops
+     *  (migration 0041). Null: no name, or a row from before the migration. */
+    displayName: text('display_name'),
     /** The "No answer" Chatter FeedItem posted on this item's record when the run
      *  ended (migration 0040). Stamped on EVERY qualifying item of the record —
      *  this, with `noAnswerSkipReason`, is the sweep's idempotency key. */
