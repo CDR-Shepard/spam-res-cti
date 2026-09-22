@@ -476,6 +476,10 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
         .update(schema.calls)
         .set({
           status: 'completed',
+          // The one reliable "the rep picked up" signal. A finished voicemail
+          // also ends `completed`, so without this stamp the Recent list cannot
+          // tell an answered call from one that rolled to voicemail.
+          answeredAt: new Date(),
           durationSeconds: body.DialCallDuration ? Number(body.DialCallDuration) : undefined,
           endedAt: new Date(),
           updatedAt: new Date(),

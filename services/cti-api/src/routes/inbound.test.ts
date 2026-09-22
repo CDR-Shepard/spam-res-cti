@@ -30,6 +30,8 @@ const state = vi.hoisted(() => ({
   // ON CONFLICT DO NOTHING returns no row, and the handler must reuse this one.
   duplicateInsert: false,
   existingCall: null as Record<string, unknown> | null,
+  /** Every `update(...).set(patch)` a handler issued, in order. */
+  updates: [] as Record<string, unknown>[],
 }));
 
 vi.mock('../config.js', () => ({
@@ -82,7 +84,8 @@ function fakeDb() {
     },
     update(_table: unknown) {
       return {
-        set(_values: Record<string, unknown>) {
+        set(values: Record<string, unknown>) {
+          state.updates.push(values);
           return { where: async () => {} };
         },
       };
@@ -119,6 +122,7 @@ beforeEach(async () => {
   state.inserts = 0;
   state.duplicateInsert = false;
   state.existingCall = null;
+  state.updates = [];
   app = Fastify();
   // Mirror server.ts's raw-body capturing parser — inbound.ts reads
   // `req.rawBody` for webhook signature validation.
@@ -313,6 +317,46 @@ describe('POST /telephony/twilio/inbound/dial-result — no-answer fallback to v
     });
     expect(res.statusCode).toBe(200);
     expect(res.body).toMatch(new RegExp(`<Record[^>]*action="https://api\\.example\\.com/telephony/twilio/inbound/voicemail-done\\?callDbId=${id}"`));
+  });
+});
+
+describe('POST /telephony/twilio/inbound/dial-result — answeredAt is the "rep picked up" signal', () => {
+  // `answered_at` was NULL on every one of a week's 257 production inbound
+  // rows: nothing ever wrote it. Both "the rep answered" and "the caller
+  // finished voicemail" end with status `completed`, so without this stamp the
+  // Recent list cannot tell a 30-second voicemail from a 30-second conversation.
+  const id = '33333333-3333-3333-3333-333333333333';
+
+  async function dialResult(params: Record<string, string>) {
+    return app.inject({
+      method: 'POST',
+      url: `/telephony/twilio/inbound/dial-result?callDbId=${id}`,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: form({ CallSid: 'CA_test_1', ...params }),
+    });
+  }
+
+  beforeEach(() => {
+    state.existingCall = { id, userId: 'rep-1', normalizedToNumber: '+16195550100' };
+    state.owned = OWNED({ inboundForwardToE164: null });
+    state.repRow = { id: 'rep-1', noAnswerForwardE164: null };
+  });
+
+  it('DialCallStatus=completed → the row is patched with status completed AND an answeredAt Date', async () => {
+    const res = await dialResult({ DialCallStatus: 'completed', DialCallDuration: '500' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<Hangup/>');
+    const patch = state.updates.find((u) => u.status === 'completed');
+    expect(patch).toBeDefined();
+    expect(patch?.answeredAt).toBeInstanceOf(Date);
+    expect(patch?.durationSeconds).toBe(500);
+  });
+
+  it('DialCallStatus=no-answer → nothing writes answeredAt (the row stays unanswered for the voicemail / missed rendering)', async () => {
+    const res = await dialResult({ DialCallStatus: 'no-answer' });
+    expect(res.statusCode).toBe(200);
+    expect(state.updates.some((u) => 'answeredAt' in u)).toBe(false);
+    expect(state.updates.some((u) => u.status === 'completed')).toBe(false);
   });
 });
 
