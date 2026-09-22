@@ -328,10 +328,11 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     if (!requirePowerDialer(owned.authed, reply)) return reply;
     const result = await startSession(owned.session.id, buildEngineDeps());
     if (result.action === 'conflict') {
-      // `activeSessionId` names the rep's OTHER active run so the confirm block
-      // can offer to stop it — otherwise a run wedged by a closed tab is
-      // unreachable from the run screen. Null when it ended meanwhile.
-      return reply.code(409).send({ error: 'Another power-dial run is already active for you — stop it first.', activeSessionId: result.activeSessionId });
+      // `activeSessionId` names the rep's OTHER live run — active, or paused
+      // with a dial still out — so the confirm block can offer to stop it;
+      // otherwise a run wedged by a closed tab is unreachable from the run
+      // screen. Null when it ended meanwhile.
+      return reply.code(409).send({ error: 'Another power-dial run of yours is still live — stop it first.', activeSessionId: result.activeSessionId });
     }
     return { ok: true, ...result };
   });

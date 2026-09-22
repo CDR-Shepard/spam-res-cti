@@ -41,7 +41,7 @@
  *
  * Mirrors salesforce/sync.ts (attempts, backoff, stuck-job reaper).
  */
-import { and, eq, gte, isNull, lt, lte, or, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 import type { FollowupRolloverJob } from '@cti/db';
 import { advanceSession, stopSession } from '../dialer/engine.js';
@@ -595,7 +595,10 @@ export function isAbandoned(
   session: { status: string; lastPolledAt: Date | null; updatedAt: Date },
   now: Date,
 ): boolean {
-  if (session.status !== 'active') return false;
+  // Paused too: a run the server paused because its rep leg ended (a dead tab —
+  // routes/telephony.ts pauseRunThatLostItsLeg) would otherwise live for ever.
+  // A rep-paused run keeps polling from its open tab, so presence protects it.
+  if (session.status !== 'active' && session.status !== 'paused') return false;
   // A run that was never polled falls back to when it was last written — that is
   // its only evidence of life, and it is stamped at creation.
   const lastSeen = session.lastPolledAt ?? session.updatedAt;
@@ -613,6 +616,12 @@ export function isAbandoned(
  * from `POST /dialer/sessions/:id/start` ("another run is already active")
  * until this reaper stops the wedged session.
  *
+ * Paused runs too, since 2026-09: a run the server paused because its rep leg
+ * ended is unreachable from a reloaded softphone, never ends on its own, and
+ * never gets its end-of-run "No answer" sweep. Stopping it while the rep has a
+ * NEW active run is safe — `stopSession` hangs up only the paused run's own leg
+ * then (engine.ts releaseRepConference).
+ *
  * This NEVER originates a call — it only stops sessions. A session with a live
  * dial ('dialing'/'connected') is left alone however stale its poll: the call
  * itself is the presence, and hanging it up would drop a rep mid-conversation.
@@ -622,7 +631,7 @@ export async function expireAbandonedSessions(deps: WorkerDeps): Promise<number>
   const cutoff = new Date(now.getTime() - ABANDONED_AFTER_MS);
   const candidates = await deps.db.query.dialerSessions.findMany({
     where: and(
-      eq(schema.dialerSessions.status, 'active'),
+      inArray(schema.dialerSessions.status, ['active', 'paused']),
       or(
         lt(schema.dialerSessions.lastPolledAt, cutoff),
         and(isNull(schema.dialerSessions.lastPolledAt), lt(schema.dialerSessions.updatedAt, cutoff)),

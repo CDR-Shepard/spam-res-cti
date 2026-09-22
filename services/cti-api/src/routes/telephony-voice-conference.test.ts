@@ -27,6 +27,7 @@ const state = vi.hoisted(() => ({
   sessionLookups: [] as Array<{ where: unknown }>,
   updates: [] as Array<{ set: Record<string, unknown>; where: unknown }>,
   updateThrows: false,
+  updateHangs: false,
   signatureValid: true,
   validatedUrls: [] as string[],
 }));
@@ -74,7 +75,12 @@ vi.mock('@cti/db', async (importOriginal) => {
             state.sessionLookups.push(args);
             if (state.sessionLookupThrows) throw new Error('pool exhausted');
             if (state.sessionLookupHangs) return new Promise(() => {});
-            if ((args as { columns?: Record<string, boolean> }).columns?.repCallSid) return state.stampedBefore;
+            // Order-aware: a read made AFTER the stamp sees the stamp, so a
+            // read-after-write mutant hangs up the leg that just joined.
+            if ((args as { columns?: Record<string, boolean> }).columns?.repCallSid) {
+              const written = state.updates.find((u) => 'repCallSid' in u.set);
+              return written ? { repCallSid: written.set.repCallSid as string } : state.stampedBefore;
+            }
             return paramValues(args.where).flat().includes(REP_CALL_SID) ? state.legSession : state.liveSession;
           },
         },
@@ -83,6 +89,7 @@ vi.mock('@cti/db', async (importOriginal) => {
         set: (set: Record<string, unknown>) => ({
           where: async (where: unknown) => {
             if (state.updateThrows) throw new Error('pool exhausted');
+            if (state.updateHangs) return new Promise(() => {});
             state.updates.push({ set, where });
           },
         }),
@@ -125,6 +132,7 @@ beforeEach(async () => {
   state.sessionLookups = [];
   state.updates = [];
   state.updateThrows = false;
+  state.updateHangs = false;
   state.signatureValid = true;
   state.validatedUrls = [];
   app = Fastify();
@@ -397,6 +405,20 @@ describe('POST /telephony/twilio/dialer-conference-rejoin — the rep leg after 
     expect(bound).toContain(REP_CALL_SID); // THIS leg's run only — a leg already replaced pauses nothing
     expect(bound.filter((v) => ['active', 'paused', 'ready', 'done', 'stopped'].includes(v as string))).toEqual(['active']);
   });
+
+  // A pause on every action request would pause the run after EVERY prospect.
+  it('a leg that is merely between rooms (CallStatus in-progress) is never paused', async () => {
+    const res = await rejoin();
+    expect(res.body).toContain('<Conference');
+    expect(state.updates).toEqual([]);
+  });
+
+  it('a pause that HANGS still answers Twilio in time', async () => {
+    _setRejoinDbTimeoutForTests(30);
+    state.updateHangs = true;
+    const res = await rejoin({ CallStatus: 'completed' });
+    expect(res.statusCode).toBe(200);
+  }, 2000);
 
   it('a failed pause still answers Twilio', async () => {
     state.updateThrows = true;

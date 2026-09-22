@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 import type { DialerItem } from './session-store.js';
 import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
@@ -111,11 +111,54 @@ async function releaseRepConference(deps: EngineDeps, session: Session): Promise
       console.error('[dialer] rep leg hangup failed', { sessionId: session.id, userId: session.userId, err: (err as Error).message });
     }
   }
+  // The room name is rep-scoped, not per-run, so the by-name teardown is only
+  // safe when THIS session is the one in the room. An active session is (the
+  // one-active-run index makes it the rep's only one). A PAUSED session is not
+  // when the rep already has a new active run — that is the zombie a dead tab
+  // left behind (routes/telephony.ts pauseRunThatLostItsLeg), being reaped or
+  // stopped from the new run's "Stop the other run" — and finding the room by
+  // name would drop the new run's rep leg and whoever they are talking to.
+  if (session.status !== 'active' && await repHasAnotherActiveRun(deps, session)) return;
   try {
     await deps.telephony.endConference(session.userId);
   } catch (err) {
     console.error('[dialer] endConference failed', { sessionId: session.id, userId: session.userId, err: (err as Error).message });
   }
+}
+
+async function repHasAnotherActiveRun(deps: EngineDeps, session: Session): Promise<boolean> {
+  const others = await deps.db.query.dialerSessions.findMany({
+    where: and(
+      eq(schema.dialerSessions.userId, session.userId),
+      ne(schema.dialerSessions.id, session.id),
+      eq(schema.dialerSessions.status, 'active'),
+    ),
+  });
+  return others.length > 0;
+}
+
+/**
+ * A PAUSED run of the same rep's with a dial still in flight — the one thing
+ * that must block a new Start although it does not hold the one-active-run
+ * slot. It is what a dead tab leaves behind: the server pauses a run whose rep
+ * leg ended (routes/telephony.ts pauseRunThatLostItsLeg), but the dial that
+ * was ringing at that moment is still out, and when it answers
+ * `handleDialOutcome` bridges the human into the rep's room — which would by
+ * then be the NEW run's, mid-conversation. The rep's own user id comes from
+ * the session being started, in the same query.
+ */
+async function pausedRunWithDialInFlight(deps: EngineDeps, sessionId: string): Promise<Session | null> {
+  const paused = await deps.db.query.dialerSessions.findMany({
+    where: and(
+      ne(schema.dialerSessions.id, sessionId),
+      eq(schema.dialerSessions.status, 'paused'),
+      eq(schema.dialerSessions.userId, sql`(select user_id from dialer_sessions where id = ${sessionId})`),
+    ),
+  });
+  for (const run of paused) {
+    if (inFlightItem(await loadItems(deps, run.id))) return run;
+  }
+  return null;
 }
 
 /** Postgres unique-violation on the one-active-session-per-rep partial index
@@ -162,12 +205,19 @@ async function claimReadySession(deps: EngineDeps, sessionId: string): Promise<'
  * abandoned-session reaper skips forever) would be unreachable: the rep would
  * be told to "stop it first" with nothing to stop it from. `null` when the
  * lookup finds nothing (the other run ended in the meantime) — the rep gets
- * the sentence without the button and can simply press Start again.
+ * the sentence without the button and can simply press Start again. A PAUSED
+ * run with a dial still in flight is refused the same way, before the flip —
+ * see `pausedRunWithDialInFlight`.
  */
 export async function startSession(
   sessionId: string,
   deps: EngineDeps,
 ): Promise<Awaited<ReturnType<typeof advanceSession>> | { action: Session['status'] | 'idle' } | { action: 'conflict'; activeSessionId: string | null }> {
+  // Same `conflict` as the index refusal below, so the confirm block offers to
+  // stop the paused run exactly as it would an active one — and stopping it
+  // hangs that dial up (stopSession) before this run's first originate.
+  const blocker = await pausedRunWithDialInFlight(deps, sessionId);
+  if (blocker) return { action: 'conflict', activeSessionId: blocker.id };
   const claim = await claimReadySession(deps, sessionId);
   if (claim === 'conflict') {
     const self = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });

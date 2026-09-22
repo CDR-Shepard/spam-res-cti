@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App } from './App';
 import * as opencti from './opencti';
+import * as coordinator from './softphone-coordinator';
 
 class FakeConnection {
   private handlers = new Map<string, Array<() => void>>();
@@ -49,7 +50,17 @@ class FakeDevice {
 }
 vi.mock('@twilio/voice-sdk', () => ({ Device: FakeDevice }));
 
-const state = { status: 'ready' as 'ready' | 'active' | 'stopped', controls: [] as string[], stopChangesStatus: true };
+const state = {
+  status: 'ready' as 'ready' | 'active' | 'stopped',
+  controls: [] as string[],
+  stopChangesStatus: true,
+  /** Device `error` fired during the start round trip (parks the phone in preflight). */
+  errorDuringStart: false,
+  /** The next POST /dialer/sessions answers with this run. */
+  nextSessionId: 'sess-1',
+  /** The tab's "busy" predicate, as handed to the softphone election. */
+  isBusy: null as null | (() => boolean),
+};
 
 function jsonResponse(body: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) } as Response;
@@ -67,7 +78,12 @@ beforeEach(() => {
   FakeDevice.connects.length = 0;
   FakeDevice.failConnectsAfter = Infinity;
   state.stopChangesStatus = true;
+  state.errorDuringStart = false;
+  state.nextSessionId = 'sess-1';
+  state.isBusy = null;
   state.status = 'ready';
+  const realDeps = coordinator.browserCoordinatorDeps;
+  vi.spyOn(coordinator, 'browserCoordinatorDeps').mockImplementation((userId, getBusy) => { state.isBusy = getBusy; return realDeps(userId, getBusy); });
   state.controls = [];
   localStorage.clear();
   localStorage.setItem('cti.session.v1', JSON.stringify({ token: 'tok', userId: 'u1', email: 'rep@example.com' }));
@@ -85,12 +101,16 @@ beforeEach(() => {
     const control = /\/dialer\/sessions\/sess-1\/(start|stop|pause|resume|skip|next)/.exec(url);
     if (control) {
       state.controls.push(control[1]!);
-      if (control[1] === 'start') state.status = 'active';
+      if (control[1] === 'start') {
+        state.status = 'active';
+        if (state.errorDuringStart) FakeDevice.instances[0]?.emit('error', { code: 31005, message: 'websocket closed' });
+      }
       if (control[1] === 'stop' && state.stopChangesStatus) state.status = 'stopped';
       return jsonResponse({ ok: true });
     }
     if (url.includes('/dialer/sessions/sess-1')) return jsonResponse(VIEW());
-    if (url.includes('/dialer/sessions') && init?.method === 'POST') return jsonResponse({ sessionId: 'sess-1', total: 1 });
+    if (url.includes('/dialer/sessions/sess-2')) return jsonResponse({ ...VIEW(), session: { id: 'sess-2', status: 'ready' } });
+    if (url.includes('/dialer/sessions') && init?.method === 'POST') return jsonResponse({ sessionId: state.nextSessionId, total: 1 });
     return jsonResponse({});
   }));
   vi.spyOn(opencti, 'screenPopRecord').mockImplementation(() => {});
@@ -103,16 +123,21 @@ afterEach(() => {
   localStorage.clear();
 });
 
-/** Hand the app a run the way Salesforce does (postMessage), then press Start. */
-async function startRun(): Promise<void> {
-  render(<App />);
-  await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+/** Hand the app a run the way Salesforce does (postMessage). */
+function handOverRun(): void {
   act(() => {
     window.dispatchEvent(new MessageEvent('message', {
       source: window.parent,
       data: { type: 'POWER_DIAL', objectType: 'Lead', recordIds: ['00Q000000000001'] },
     }));
   });
+}
+
+/** Render, hand the app a run, press Start, and wait for the leg to join. */
+async function startRun(): Promise<void> {
+  render(<App />);
+  await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+  handOverRun();
   fireEvent.click(await screen.findByText('Start dialing'));
   await waitFor(() => expect(FakeDevice.connects.length).toBe(1));
 }
@@ -220,5 +245,82 @@ describe('App — power-dialer conference leg wiring', () => {
     await waitFor(() => expect(FakeDevice.connects.length).toBe(2), { timeout: 4000 });
     await new Promise((r) => setTimeout(r, 1800));
     expect(FakeDevice.connects.length).toBe(2);
+  });
+
+  // Only a RECOVERY may join from `preflight`. A fresh Start from there means a
+  // Device error is outstanding: the run is stopped rather than joined.
+  it('a fresh Start does not join from preflight — a Device error during start stops the run', async () => {
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    state.errorDuringStart = true;
+    handOverRun();
+    fireEvent.click(await screen.findByText('Start dialing'));
+    await waitFor(() => expect(state.controls).toEqual(['start', 'stop']));
+    expect(FakeDevice.connects.length).toBe(0);
+  });
+
+  // The Salesforce handoff seam can hand the app ANOTHER run mid-run (it lands
+  // on the confirm block, ready, un-started). A recovery must name the run its
+  // leg belongs to, not whatever the app is looking at now.
+  it('a recovery names the run it was started for, not a newer ready run the app was handed meanwhile', async () => {
+    await startRun();
+    state.nextSessionId = 'sess-2';
+    handOverRun();
+    await screen.findByText('Start dialing');
+    act(() => { FakeDevice.connects[0]!.connection.emit('disconnect'); });
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(2), { timeout: 4000 });
+    expect(FakeDevice.connects[1]!.params).toEqual({ DialerConference: '1', DialerSessionId: 'sess-1' });
+  });
+
+  it('the recovery cap is per run: two re-joins in one run do not count against the next', async () => {
+    await startRun();
+    for (let leg = 0; leg < 2; leg++) {
+      act(() => { FakeDevice.connects[leg]!.connection.emit('disconnect'); });
+      await waitFor(() => expect(FakeDevice.connects.length).toBe(leg + 2), { timeout: 4000 });
+    }
+    fireEvent.click(await screen.findByText('Stop'));
+    await waitFor(() => expect(state.controls).toEqual(['start', 'stop']));
+    // Stop returns the panel to the list picker; hand it a fresh run.
+    state.status = 'ready';
+    handOverRun();
+    fireEvent.click(await screen.findByText('Start dialing'));
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(4));
+    for (let leg = 3; leg < 6; leg++) {
+      act(() => { FakeDevice.connects[leg]!.connection.emit('disconnect'); });
+      await waitFor(() => expect(FakeDevice.connects.length).toBe(leg + 2), { timeout: 4000 });
+    }
+    expect(state.controls).toEqual(['start', 'stop', 'start']);
+  }, 30_000);
+
+  it('…and decays: three re-joins spread over more than ten minutes do not exhaust it', async () => {
+    await startRun();
+    const realNow = Date.now;
+    let offset = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offset);
+    try {
+      for (let leg = 0; leg < 3; leg++) {
+        act(() => { FakeDevice.connects[leg]!.connection.emit('disconnect'); });
+        await waitFor(() => expect(FakeDevice.connects.length).toBe(leg + 2), { timeout: 4000 });
+        offset += 11 * 60_000;
+      }
+      act(() => { FakeDevice.connects[3]!.connection.emit('disconnect'); });
+      await waitFor(() => expect(FakeDevice.connects.length).toBe(5), { timeout: 4000 });
+      expect(state.controls).toEqual(['start']);
+    } finally {
+      vi.mocked(Date.now).mockRestore();
+    }
+  }, 25_000);
+
+  // While the recovery works, this tab must keep the Device: the softphone
+  // election would otherwise move it to another visible tab mid-recovery.
+  it('the tab stays "busy" for the softphone election during a recovery, and frees once the run is over', async () => {
+    await startRun();
+    expect(state.isBusy!()).toBe(true);
+    FakeDevice.failConnectsAfter = 1;
+    act(() => { FakeDevice.connects[0]!.connection.emit('disconnect'); });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(state.isBusy!()).toBe(true);
+    await waitFor(() => expect(state.controls).toEqual(['start', 'stop']), { timeout: 4000 });
+    await waitFor(() => expect(state.isBusy!()).toBe(false));
   });
 });

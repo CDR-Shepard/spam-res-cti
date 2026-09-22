@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import {
   ABANDONED_AFTER_MS,
   PRESENCE_WINDOW_MS,
@@ -863,10 +865,34 @@ describe('expireAbandonedSessions — free the one-active-session slot (C1)', ()
     expect(d.stop).not.toHaveBeenCalled();
   });
 
-  it('leaves paused and done runs alone — they do not hold the active slot', async () => {
-    const d = deps({ db: expireDb([session({ status: 'paused' }), session({ id: 'S2', status: 'done' })], [[], []]) });
+  // A run the server PAUSED because its rep leg ended (routes/telephony.ts
+  // pauseRunThatLostItsLeg — a dead tab, a dead network) would otherwise live
+  // for ever: nothing else ends a paused run, it is unreachable from a reloaded
+  // softphone, and it never gets its end-of-run "No answer" sweep. Presence
+  // still protects a rep-paused run: its open tab keeps polling.
+  it('stops a paused run whose softphone stopped polling, just like an active one', async () => {
+    const d = deps({ db: expireDb([session({ status: 'paused' })], [[{ status: 'no_connect' }]]) });
+    expect(await expireAbandonedSessions(d)).toBe(1);
+    expect(d.stop).toHaveBeenCalledWith('S1');
+  });
+
+  it('leaves a freshly polled paused run alone — the rep is there, they pressed Pause', async () => {
+    const d = deps({ db: expireDb([session({ status: 'paused', lastPolledAt: new Date(NOW.getTime() - 1_000) })], [[]]) });
+    expect(await expireAbandonedSessions(d)).toBe(0);
+  });
+
+  it('leaves done, stopped and ready runs alone', async () => {
+    const d = deps({ db: expireDb([session({ status: 'done' }), session({ id: 'S2', status: 'stopped' }), session({ id: 'S3', status: 'ready' })], [[], [], []]) });
     expect(await expireAbandonedSessions(d)).toBe(0);
     expect(d.stop).not.toHaveBeenCalled();
+  });
+
+  it('asks the database for active AND paused runs only', async () => {
+    const db = expireDb([], []);
+    const spy = vi.spyOn(db.query.dialerSessions, 'findMany');
+    await expireAbandonedSessions(deps({ db }));
+    const { params } = new PgDialect().sqlToQuery((spy.mock.calls[0]![0] as { where: SQL }).where);
+    expect(params.filter((p) => ['active', 'paused', 'ready', 'done', 'stopped'].includes(p as string)).sort()).toEqual(['active', 'paused']);
   });
 
   it('expires a run that was never polled at all, falling back to updated_at', async () => {

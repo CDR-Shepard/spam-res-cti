@@ -1,4 +1,5 @@
 import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@cti/db';
 
@@ -70,7 +71,11 @@ import { schema } from '@cti/db';
 // reaching for `deps.db.query` there checks out a SECOND client while the tx
 // holds one, which deadlocks the pool under concurrent misses. Before this the
 // two stubs were interchangeable and the regression would have passed silently.
-function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean } = {}) {
+/** `opts.otherSessions`: the rep's OTHER runs (with their items), for the
+ *  cross-run checks — a paused run with a dial in flight blocks a new Start, and
+ *  a paused run's teardown must not touch a live run's room. Filtered by the
+ *  status the query binds, and never containing the session under test. */
+function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; otherSessions?: Array<{ session: any; items: any[] }> } = {}) {
   const writes: Array<{ patch: Record<string, unknown> }> = [];
   const inserts: Array<{ values: Record<string, unknown> }> = [];
   // Inserts made through `tx.insert(...)` — i.e. INSIDE `deps.db.transaction`
@@ -87,9 +92,19 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean }
     _inserts: inserts,
     _txInserts: txInserts,
     query: {
-      dialerSessions: { findFirst: async () => ({ ...session, ...sessionOverride }) },
+      dialerSessions: {
+        findFirst: async () => ({ ...session, ...sessionOverride }),
+        findMany: async (args: { where: any }) => {
+          const { params } = new PgDialect().sqlToQuery(args.where);
+          return (opts.otherSessions ?? []).map((o) => o.session).filter((o) => params.includes(o.status));
+        },
+      },
       dialerQueueItems: {
-        findMany: async () => items,
+        findMany: async (args?: { where?: any }) => {
+          if (!opts.otherSessions || !args?.where) return items;
+          const { params } = new PgDialect().sqlToQuery(args.where);
+          return opts.otherSessions.find((o) => params.includes(o.session.id))?.items ?? items;
+        },
         findFirst: async () => items[0] ?? null,
       },
     },
@@ -834,6 +849,40 @@ describe('stopSession', () => {
       expect(flipped()).toBe(true);
     }
   });
+  // The room name is rep-scoped. Stopping a PAUSED run while the rep has a NEW
+  // active run (the paused one is a zombie from a dead tab, being reaped, or
+  // stopped from the new run's "Stop the other run") must hang up the zombie's
+  // own leg only: a by-name teardown would find the NEW run's room and drop the
+  // rep and whoever they are talking to.
+  it('stopping a paused run hangs up its own leg but leaves the room alone when another run of the rep\'s is active', async () => {
+    const live = { session: { ...baseSession, id: 'S-LIVE', status: 'active' }, items: [] };
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'paused', repCallSid: REP_LEG }, items, { otherSessions: [live] }); deps.db = fdb;
+    await stopSession('S1', deps);
+    expect(deps.telephony.hangup).toHaveBeenCalledWith(REP_LEG);
+    expect(deps.telephony.endConference).not.toHaveBeenCalled();
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'stopped' }) });
+  });
+
+  it('…but does tear the room down when the rep has no other active run (only a ready or paused one)', async () => {
+    for (const status of ['ready', 'paused']) {
+      const other = { session: { ...baseSession, id: 'S-OTHER', status }, items: [] };
+      const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+      const deps = makeDeps(); deps.db = fakeDb({ ...baseSession, status: 'paused', repCallSid: REP_LEG }, items, { otherSessions: [other] });
+      await stopSession('S1', deps);
+      expect(deps.telephony.endConference).toHaveBeenCalledWith('U1');
+    }
+  });
+
+  it('an ACTIVE run always owns the room (the index makes it the rep\'s only one): no cross-run lookup', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, repCallSid: REP_LEG }, items, { otherSessions: [] }); deps.db = fdb;
+    const spy = vi.spyOn(fdb.query.dialerSessions, 'findMany');
+    await stopSession('S1', deps);
+    expect(deps.telephony.endConference).toHaveBeenCalledWith('U1');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   // Same cross-run rule as the conference: a ready / stopped / done session has
   // no leg of its own, and a stale sid must never be hung up on its behalf.
   it('never hangs up a rep leg for a session that is not live', async () => {
@@ -1016,6 +1065,45 @@ describe('startSession — the rep pressed Start dialing', () => {
     const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, pending); deps.db = fdb;
     expect(await startSession('S1', deps)).toEqual({ action: 'stopped' });
     expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+
+  // A run PAUSED with a dial still ringing (the rep's tab died and the server
+  // paused it — see routes/telephony.ts pauseRunThatLostItsLeg) does not hold
+  // the one-active-run slot, so nothing stopped a new run from starting while
+  // that dial was out. When it answered, `handleDialOutcome` bridged the human
+  // into the rep's room — which by then was the NEW run's. Refuse, naming the
+  // paused run, so the confirm block offers "Stop the other run" exactly as it
+  // does for an active one (and stopping it hangs that dial up).
+  it('refuses to start while a PAUSED run of the rep\'s still has a dial in flight, naming that run', async () => {
+    const zombie = { session: { ...baseSession, id: 'S-PAUSED', status: 'paused' }, items: [{ id: 'z1', ordinal: 0, status: 'dialing', callId: 'CAz', toNumber: '+1', recordId: '00Q9', objectType: 'Lead' }] };
+    const deps = makeDeps(); const fdb = fakeDb(ready, pending, { otherSessions: [zombie] }); deps.db = fdb;
+    expect(await startSession('S1', deps)).toEqual({ action: 'conflict', activeSessionId: 'S-PAUSED' });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+    expect(fdb._writes).toEqual([]); // still ready — Start again once the other run is stopped
+  });
+
+  it('…and a connected call counts as in flight too', async () => {
+    const zombie = { session: { ...baseSession, id: 'S-PAUSED', status: 'paused' }, items: [{ id: 'z1', ordinal: 0, status: 'connected', callId: 'CAz', toNumber: '+1', recordId: '00Q9', objectType: 'Lead' }] };
+    const deps = makeDeps(); deps.db = fakeDb(ready, pending, { otherSessions: [zombie] });
+    expect(await startSession('S1', deps)).toMatchObject({ action: 'conflict', activeSessionId: 'S-PAUSED' });
+  });
+
+  it('a paused run with nothing in flight does not block a new Start', async () => {
+    const idle = { session: { ...baseSession, id: 'S-PAUSED', status: 'paused' }, items: [{ id: 'z1', ordinal: 0, status: 'no_connect', callId: 'CAz', toNumber: '+1', recordId: '00Q9', objectType: 'Lead' }, { id: 'z2', ordinal: 1, status: 'pending', callId: null, toNumber: '+1', recordId: '00Q8', objectType: 'Lead' }] };
+    const deps = makeDeps(); deps.db = fakeDb(ready, pending, { otherSessions: [idle] });
+    expect(await startSession('S1', deps)).toMatchObject({ action: 'dialing' });
+  });
+
+  it('the paused-run check is scoped to the rep, excludes the session being started, and asks for paused runs only', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, pending, { otherSessions: [] }); deps.db = fdb;
+    const spy = vi.spyOn(fdb.query.dialerSessions, 'findMany');
+    await startSession('S1', deps);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const { sql: text, params } = new PgDialect().sqlToQuery((spy.mock.calls[0]![0] as { where: SQL }).where);
+    expect(text.replace(/\s+/g, ' ')).toContain('"dialer_sessions"."id" <> ');
+    expect(text.replace(/\s+/g, ' ')).toContain('"dialer_sessions"."status" = ');
+    expect(text).toContain('select user_id from dialer_sessions where id = ');
+    expect(params).toEqual(['S1', 'paused', 'S1']);
   });
 
   const conflictViolation = (): Error => Object.assign(new Error('duplicate key value violates unique constraint'), {
