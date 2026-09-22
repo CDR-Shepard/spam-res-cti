@@ -100,6 +100,8 @@ function classifyInbound(row: ClassifiableRow): CallKind {
   if (row.answeredAt) return 'connected';
   if (row.inboundVoicemailUrl) return 'voicemail';
   if (INBOUND_MISSED_STATUSES.includes(row.status)) return 'missed';
+  // Still on the line: `answeredAt` lands only when the leg ends.
+  if (row.status === 'in_progress') return 'connected';
   // Legacy fallback: a `completed` row written before the server stamped
   // `answeredAt`, with no voicemail. Duration is the only evidence left — a
   // few seconds is a hang-up, anything longer was a conversation.

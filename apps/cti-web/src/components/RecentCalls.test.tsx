@@ -129,6 +129,12 @@ describe('classify — inbound rows', () => {
     delete legacyLong.inboundVoicemailUrl;
     expect(classify(legacyLong)).toBe('connected');
   });
+  // The rep is on the call right now: `answeredAt` is stamped only when the leg
+  // ends (dial-result), so an in-progress row has no evidence yet except its
+  // status. Opening Recent mid-call must not label the live call "Missed".
+  it('an inbound call still in progress is connected, not missed', () => {
+    expect(classify({ direction: 'inbound', status: 'in_progress', disposition: null, durationSeconds: null, answeredAt: null, inboundVoicemailUrl: null })).toBe('connected');
+  });
 });
 
 describe("classify — outbound rows keep exactly today's rule", () => {
