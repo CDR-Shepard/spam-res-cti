@@ -31,9 +31,13 @@ const statements = raw
   .filter((s) => s.length > 0);
 
 describe('migration 0040_no_answer_chatter', () => {
-  it('ENDS by marking every already-ended session as swept — no historical backfill', () => {
+  it('ENDS by marking swept every already-ended session AND every session (any status) not touched in 24h — no historical backfill', () => {
+    // The second clause covers a run paused/ready for weeks and stopped after
+    // the deploy: `stopSession` refreshes updated_at, so without this pre-stamp
+    // the scan's 24h pre-filter would let it through.
     expect(statements[statements.length - 1]).toBe(
-      "UPDATE dialer_sessions SET no_answer_chatter_at = now() WHERE status IN ('done','stopped') AND no_answer_chatter_at IS NULL",
+      'UPDATE dialer_sessions SET no_answer_chatter_at = now() WHERE no_answer_chatter_at IS NULL ' +
+        "AND (status IN ('done','stopped') OR updated_at < now() - interval '24 hours')",
     );
   });
 

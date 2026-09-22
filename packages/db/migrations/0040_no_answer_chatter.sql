@@ -24,10 +24,14 @@
 --
 -- NO HISTORICAL BACKFILL — the closing UPDATE is load-bearing. Every session that
 -- ended before this migration has no_answer_chatter_at IS NULL and would be swept
--- on first boot: thousands of "No answer" posts on months-old records. Marking
--- them swept here is one half of a belt-and-braces pair; the worker's candidate
--- query independently refuses any session older than 24h. Keep both.
--- (Pinned by packages/db/src/migration-0040.test.ts.)
+-- on first boot: thousands of "No answer" posts on months-old records. It also
+-- pre-stamps every session, WHATEVER its status, not touched in 24h: a run
+-- paused or left `ready` weeks ago and stopped after the deploy gets a fresh
+-- updated_at from stopSession (it is a status-flip clock, not an "ended at"),
+-- and must already be swept when that happens. Marking them here is one half of
+-- a belt-and-braces pair; the worker independently counts only misses whose
+-- dialer_queue_items.updated_at (the attempt's settle time) is inside 24h. Keep
+-- both. (Pinned by packages/db/src/migration-0040.test.ts.)
 -- =============================================================================
 
 ALTER TABLE dialer_queue_items ADD COLUMN IF NOT EXISTS no_answer_feed_item_id text;
@@ -44,6 +48,8 @@ CREATE INDEX IF NOT EXISTS dialer_sessions_no_answer_chatter_scan_idx
   ON dialer_sessions (updated_at)
   WHERE no_answer_chatter_at IS NULL AND status IN ('done','stopped');
 
--- MUST stay the last statement (see the header): no historical backfill.
+-- MUST stay the last statement (see the header): no historical backfill —
+-- already ended, or (any status) stale for 24h and liable to be stopped later.
 UPDATE dialer_sessions SET no_answer_chatter_at = now()
-  WHERE status IN ('done','stopped') AND no_answer_chatter_at IS NULL;
+  WHERE no_answer_chatter_at IS NULL
+    AND (status IN ('done','stopped') OR updated_at < now() - interval '24 hours');
