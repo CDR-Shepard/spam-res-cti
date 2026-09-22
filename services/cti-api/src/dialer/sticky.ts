@@ -5,8 +5,21 @@
  * — same shape as the click-to-dial sticky write in `routes/calls.ts`, just
  * triggered from the dialer engine instead of the manual-dial route.
  */
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, gte } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
+
+/**
+ * How far back a power-dial still counts as "we called them" when routing a
+ * callback. Two weeks covers a prospect returning a missed call after a
+ * holiday week; past that, a number re-dialed by a different rep should not
+ * keep ringing the old one.
+ */
+export const LAST_DIAL_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** A `+1` E.164 number — the only shape the dialer ever writes to
+ *  `dialer_dial_attempts.to_number`. Twilio reports a withheld caller ID as
+ *  `anonymous`, `Restricted` or `+266696687`, none of which can have been dialed. */
+const US_E164_RE = /^\+1\d{10}$/;
 
 export interface StickyUpsertInput {
   orgId: string;
@@ -75,4 +88,39 @@ export async function stickyAgentForCaller(
     .orderBy(desc(schema.stickyNumbers.lastUsedAt))
     .limit(1);
   return rows[0]?.assignedUserId ?? null;
+}
+
+/**
+ * The fallback behind `stickyAgentForCaller` for callbacks to a pool DID: a
+ * sticky is written only on a CONNECT, but the prospect ringing back is
+ * usually the one who saw a MISSED call from us — so ring the rep who last
+ * power-dialed them (the append-only `dialer_dial_attempts` log, which
+ * records every dial, connected or not). Same-DID rows come first — the
+ * number they rang back is the strongest signal of which rep it was — then
+ * the most recent dial; one query, `limit 1`, on the (org, to_number,
+ * dialed_at) index.
+ */
+export async function lastDialerForCaller(
+  db: ReturnType<typeof getDb>,
+  orgId: string,
+  callerE164: string,
+  dialedPoolDid: string,
+  now: Date = new Date(),
+): Promise<string | null> {
+  if (!US_E164_RE.test(callerE164)) return null;
+  const rows = await db
+    .select({ userId: schema.dialerDialAttempts.userId })
+    .from(schema.dialerDialAttempts)
+    .where(
+      and(
+        eq(schema.dialerDialAttempts.orgId, orgId),
+        eq(schema.dialerDialAttempts.toNumber, callerE164),
+        gte(schema.dialerDialAttempts.dialedAt, new Date(now.getTime() - LAST_DIAL_WINDOW_MS)),
+      ),
+    )
+    // Postgres sorts true after false, so DESC on the boolean puts the rows
+    // dialed FROM the number they are calling back ahead of any other DID.
+    .orderBy(desc(eq(schema.dialerDialAttempts.fromNumber, dialedPoolDid)), desc(schema.dialerDialAttempts.dialedAt))
+    .limit(1);
+  return rows[0]?.userId ?? null;
 }
