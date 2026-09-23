@@ -270,6 +270,9 @@ export const dialerSessions = pgTable(
      *  lookup by conference name can find nothing (between rooms) or merely send
      *  the leg round again. Null until the rep joins, and on pre-0039 rows. */
     repCallSid: text('rep_call_sid'),
+    /** Which list view a run came from, so a second run on the same list starts
+     *  where the first has got to (shared position). */
+    listViewId: text('list_view_id'),
     /** "No answer" Chatter sweep (salesforce/no-answer-chatter-worker.ts, migration
      *  0040). Set once the ended run's sweep is FINISHED — every qualifying record
      *  posted or terminally skipped — or given up on after MAX_ATTEMPTS. NULL on an
@@ -339,6 +342,13 @@ export const dialerQueueItems = pgTable(
      *  headline WHO is ringing from the first poll — before the record pops
      *  (migration 0041). Null: no name, or a row from before the migration. */
     displayName: text('display_name'),
+    /** The record's index in the list view at pull time — NOT the queue ordinal,
+     *  which rotation changes. */
+    listPosition: integer('list_position'),
+    /** The prospect hung up on a connected call; the rep chooses Redial or Resume. */
+    prospectEndedAt: timestamp('prospect_ended_at', { withTimezone: true }),
+    /** The item a rep-requested redial copies. */
+    redialOf: uuid('redial_of'),
     /** The "No answer" Chatter FeedItem posted on this item's record when the run
      *  ended (migration 0040). Stamped on EVERY qualifying item of the record —
      *  this, with `noAnswerSkipReason`, is the sweep's idempotency key. */
@@ -379,10 +389,17 @@ export const dialerDialAttempts = pgTable(
     toNumber: text('to_number').notNull(),
     /** The DID it was placed from. */
     fromNumber: text('from_number').notNull(),
+    /** The record dialed (the log was keyed by number only); the 3-hour rule
+     *  matches on either. */
+    recordId: text('record_id'),
+    /** Stamped on a human connect — the number that reached the person is the one
+     *  every later run leads with. */
+    connectedAt: timestamp('connected_at', { withTimezone: true }),
     dialedAt: timestamp('dialed_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
     targetIdx: index('dialer_dial_attempts_target_idx').on(t.orgId, t.toNumber, t.dialedAt),
+    recordIdx: index('dialer_dial_attempts_record_idx').on(t.orgId, t.recordId, t.dialedAt),
   }),
 );
 
@@ -683,6 +700,9 @@ export const calls = pgTable(
     recordingLinkUnsyncedIdx: index('calls_recording_link_unsynced_idx')
       .on(t.updatedAt)
       .where(sql`${t.recordingLinkSyncedAt} is null and ${t.recordingUrl} is not null and ${t.salesforceTaskId} is not null`),
+    outboundTargetIdx: index('calls_outbound_target_idx')
+      .on(t.orgId, t.normalizedToNumber, t.createdAt)
+      .where(sql`${t.direction} = 'outbound'`),
   }),
 );
 
