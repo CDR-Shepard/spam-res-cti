@@ -31,6 +31,10 @@ export const REASON = {
   STATE_RULE_FREQ_EXCEEDED: 'STATE_RULE_FREQUENCY_EXCEEDED',
   STATE_RULE_HOURS: 'STATE_RULE_CALLING_HOURS_VIOLATED',
   STATE_RULE_REGISTRATION: 'STATE_RULE_REGISTRATION_REQUIRED',
+  // Daily dial cap (FL/OK/WA/MD: 3 dials per rolling 24h to the same number,
+  // every dial by anyone counts — see state-calling-rules.ts DAILY_DIAL_CAP_STATES).
+  DAILY_CAP: 'DAILY_CAP',
+  DAILY_CAP_OK: 'DAILY_CAP_OK',
   // P0 firewall-gap closures
   DNC_OK: 'FEDERAL_DNC_CLEAR',
   DNC_LISTED: 'FEDERAL_DNC_LISTED',

@@ -14,12 +14,14 @@ import { normalize } from '@cti/phone';
 import { aggregate } from './aggregate.js';
 import { attemptGateChecks, customerAttemptCounts } from './attempts.js';
 import { callingHoursGateCheck, callingWindowFor } from './calling-hours.js';
+import { dailyCapCheck, dailyDialCount } from './daily-cap.js';
 import { RecipientLookupUnauthorizedError } from './errors.js';
 import { REASON } from './reasons.js';
 import { enforcedStateHoursLabel, resolveRecipientState } from './recipient.js';
 import { fetchDidWindowStats } from './reputation/query.js';
 import { answerRateBreach, engagementBreach, THRESHOLDS } from './reputation/signals.js';
 import { pickRotationNumber } from './rotation.js';
+import { isDailyCapped } from './state-calling-rules.js';
 import { resolveTimezone, stateForAreaCode, timezoneForNumber } from './tz.js';
 import type { CheckResult, FirewallDeps, FirewallInput, FirewallResponse } from './types.js';
 import { velocityGateCheck } from './velocity.js';
@@ -169,6 +171,35 @@ export async function evaluate(db: Db, input: FirewallInput, deps: FirewallDeps 
         }
       : { name: 'blocklist', passed: true, severity: 'info', reasonCode: REASON.NOT_BLOCKED },
   );
+
+  // 3b. Daily dial cap — law in a handful of states (3 per 24h, every dial by
+  // anyone counts: power-dial attempts + outbound click-to-dial calls). Runs
+  // here, after resolvedState is FINAL (see the FIX-3 fallback above), and
+  // before the call is placed — routes/calls.ts inserts the `calls` row only
+  // after this evaluation returns, so a BLOCK here is never counted against
+  // itself and "3 prior dials -> block the 4th" is exactly right.
+  // Fail CLOSED: a read we cannot make in a capped state is a call we do not
+  // place — an unverifiable count is not evidence the cap wasn't hit.
+  if (isDailyCapped(resolvedState)) {
+    const now = new Date();
+    let count: number | null = null;
+    try {
+      count = await dailyDialCount(db, input.orgId, e164, now);
+    } catch {
+      count = null;
+    }
+    checks.push(
+      count === null
+        ? {
+            name: 'daily_cap',
+            passed: false,
+            severity: 'block',
+            reasonCode: REASON.DAILY_CAP,
+            detail: 'The daily call count could not be verified; state law limits calls to 3 per day.',
+          }
+        : dailyCapCheck(resolvedState, count),
+    );
+  }
 
   // 4. Campaign config (drives attempt limits + calling hours + consent mode)
   const campaignKey = input.campaignKey ?? 'default';

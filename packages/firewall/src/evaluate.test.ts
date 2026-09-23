@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Db } from '@cti/db';
+import { schema, type Db } from '@cti/db';
 import { RecipientLookupUnauthorizedError } from './errors.js';
 import { evaluate } from './evaluate.js';
 
@@ -17,9 +17,19 @@ import { evaluate } from './evaluate.js';
  * `select` below), so `outboundNumberRow` stays null and gate 7's block is
  * skipped end to end. Covering those gates needs a fixture with a real
  * `outboundNumbers` row in the pool — tracked as a follow-up.
+ *
+ * `dailyCap` configures the two daily-cap count queries (dialer_dial_attempts,
+ * calls) by table identity — see `select` below — so the daily-cap tests don't
+ * need a real DID pool or campaign to exercise gate 3b. `dailyCapError`
+ * simulates a failed read on both legs (evaluate.ts must fail CLOSED).
  */
-function fakeDb(opts: { campaign?: Record<string, unknown> } = {}) {
+function fakeDb(opts: {
+  campaign?: Record<string, unknown>;
+  dailyCap?: { attempts?: number; calls?: number };
+  dailyCapError?: boolean;
+} = {}) {
   const inserted: unknown[] = [];
+  const selectedTables: unknown[] = [];
   const findFirst = <T,>(value: T) => async () => value;
   // Chainable query-builder stand-in for `db.select(...)`. Every builder
   // method returns the same chain object so callers can stop at whichever
@@ -27,14 +37,15 @@ function fakeDb(opts: { campaign?: Record<string, unknown> } = {}) {
   // `.groupBy()` for customerAttemptCounts, `.orderBy().limit()` for the
   // attestation sample) — and the chain is itself thenable, resolving to an
   // empty row set, so `await` at any of those points just works.
-  function chain(rows: unknown[] = []) {
+  function chain(rows: unknown[] = [], shouldError = false) {
     const c: Record<string, unknown> = {
       from: () => c,
       where: () => c,
       groupBy: () => c,
       orderBy: () => c,
       limit: () => c,
-      then: (resolve: (v: unknown) => void) => resolve(rows),
+      then: (resolve: (v: unknown) => void, reject?: (e: unknown) => void) =>
+        shouldError ? reject!(new Error('daily-cap read failed')) : resolve(rows),
     };
     return c;
   }
@@ -50,7 +61,18 @@ function fakeDb(opts: { campaign?: Record<string, unknown> } = {}) {
       consentRecords: { findFirst: findFirst(undefined) },
       rndLookups: { findFirst: findFirst(undefined) },
     },
-    select: () => chain([]),
+    select: () => ({
+      from: (table: unknown) => {
+        selectedTables.push(table);
+        if (table === schema.dialerDialAttempts) {
+          return chain(opts.dailyCap ? [{ n: opts.dailyCap.attempts ?? 0 }] : [], opts.dailyCapError);
+        }
+        if (table === schema.calls) {
+          return chain(opts.dailyCap ? [{ n: opts.dailyCap.calls ?? 0 }] : [], opts.dailyCapError);
+        }
+        return chain([]);
+      },
+    }),
     insert: () => ({
       values: (v: unknown) => {
         inserted.push(v);
@@ -58,7 +80,7 @@ function fakeDb(opts: { campaign?: Record<string, unknown> } = {}) {
       },
     }),
   };
-  return { db: db as unknown as Db, inserted };
+  return { db: db as unknown as Db, inserted, selectedTables };
 }
 
 const CAMPAIGN = {
@@ -170,5 +192,43 @@ describe('evaluate — characterization', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * Gate 3b — the daily dial cap. `(305) 555-9999` resolves to FL (a capped
+ * state, via the area-code fallback — same mechanism the existing `(619)
+ * 555-9999` → CA tests above rely on); `(619) 555-9999` stays the uncapped
+ * control. No campaign is needed: the gate runs at step 3b, before the
+ * campaign is even loaded.
+ */
+describe('evaluate — daily dial cap (gate 3b)', () => {
+  it('BLOCKs the 4th dial in 24h to a number in a daily-capped state', async () => {
+    const { db } = fakeDb({ dailyCap: { attempts: 2, calls: 1 } }); // 3 prior dials
+    const res = await evaluate(db, { ...base, toNumberRaw: '(305) 555-9999' });
+    expect(res.decision).toBe('BLOCK');
+    expect(res.reasons).toContain('DAILY_CAP');
+  });
+
+  it('passes below the cap in a capped state', async () => {
+    const { db } = fakeDb({ dailyCap: { attempts: 1, calls: 0 } }); // 1 prior dial
+    const res = await evaluate(db, { ...base, toNumberRaw: '(305) 555-9999' });
+    expect(res.reasons).toContain('DAILY_CAP_OK');
+    expect(res.decision).not.toBe('BLOCK');
+  });
+
+  it('BLOCKs, fail-closed, when the daily-cap read fails in a capped state', async () => {
+    const { db } = fakeDb({ dailyCapError: true });
+    const res = await evaluate(db, { ...base, toNumberRaw: '(305) 555-9999' });
+    expect(res.decision).toBe('BLOCK');
+    expect(res.reasons).toContain('DAILY_CAP');
+    expect(res.blockReason).toContain('could not be verified');
+  });
+
+  it('never queries the daily-cap read for an uncapped state', async () => {
+    const { db, selectedTables } = fakeDb();
+    await evaluate(db, { ...base, toNumberRaw: '(619) 555-9999' });
+    expect(selectedTables).not.toContain(schema.dialerDialAttempts);
+    expect(selectedTables).not.toContain(schema.calls);
   });
 });

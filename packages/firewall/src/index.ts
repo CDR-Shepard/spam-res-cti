@@ -3,6 +3,7 @@ export { RecipientLookupUnauthorizedError } from './errors.js';
 export { REASON } from './reasons.js';
 export { aggregate } from './aggregate.js';
 export { atCustomerCeiling, attemptGateChecks, customerAttemptCounts, tallyAttempts } from './attempts.js';
+export { DAILY_CAP_DETAIL, dailyCapCheck, dailyDialCount } from './daily-cap.js';
 export { enforcedStateHoursLabel, resolveRecipientState } from './recipient.js';
 export { evaluate } from './evaluate.js';
 export { velocityGateCheck } from './velocity.js';
