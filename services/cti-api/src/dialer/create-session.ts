@@ -74,22 +74,26 @@ export function buildQueueRows(
   status: 'pending' | 'unreachable' | 'skipped'; outcome: string | null;
 }> {
   return resolved.map((r, i) => {
-    // A consent-blocked FALLBACK is dropped, right here, at the one place the
-    // pair is written. The fallback is a dialed number, not decoration:
-    // `engine.ts:345` swaps `toNumber := fallbackNumber` on a true no-answer and
-    // re-dials it inside the same session, and `:428` copies `secondaryNumber`
-    // onto the attempt-2 row — neither path re-reads consent. So a record whose
-    // Mobile is clean but whose Phone is opted out / blocked / DNC-listed would
-    // otherwise be power-dialed on that Phone with no check at all. Both halves
-    // go, because `secondaryNumber` is exactly how the attempt-2 row would
-    // resurrect it. The row itself is NOT skipped — the primary is still lawful
-    // to call, and refusing it would punish a record nobody asked us to refuse.
+    // A consent-blocked SECOND NUMBER is dropped, right here, at the one place
+    // the pair is written. It is still a dialed number, not decoration: the
+    // engine's end-of-run retry (`handleDialOutcome` in engine.ts) inserts the
+    // attempt-2 row straight from `secondaryNumber` — no path re-reads consent
+    // before that dial. So a record whose Mobile is clean but whose Phone is
+    // opted out / blocked / DNC-listed would otherwise be power-dialed on that
+    // Phone with no check at all. The row itself is NOT skipped — the primary
+    // is still lawful to call, and refusing it would punish a record nobody
+    // asked us to refuse.
     const fallback = r.fallbackConsentBlock ? null : r.fallbackNumber ?? null;
     return {
       sessionId, ordinal: i, objectType: r.objectType, recordId: r.recordId, toNumber: r.toNumber,
-      fallbackNumber: fallback,
-      // Immutable copy of the resolved pair: the fallback later overwrites
-      // toNumber/fallbackNumber, and an attempt-2 row restores from these.
+      // Attempt-1 rows never carry a fallback: the immediate Mobile→Phone
+      // retry this field once fed was removed — the engine now settles every
+      // miss as one attempt and requeues the OTHER number, if any, in a fresh
+      // attempt-2 row at the end of the run, reading it from `secondaryNumber`
+      // alone. Nothing reads `fallbackNumber` from a live row any more.
+      fallbackNumber: null,
+      // Immutable copy of the resolved pair: `secondaryNumber` is what the
+      // attempt-2 row (built in engine.ts) restores from.
       attempt: 1, primaryNumber: r.toNumber, secondaryNumber: fallback,
       taskId: r.taskId ?? null, followupEligible: r.followupEligible ?? true,
       // Written on EVERY status: a skipped or unreachable row says WHO was
@@ -119,16 +123,24 @@ export interface CreateSessionDeps {
    *  stays unit testable and a Lead run can be pinned to never call it. */
   fetchContactNames: typeof fetchContactNames;
   salesforceUserId: typeof salesforceUserId;
-  /** Which of these numbers has the team already power-dialed today. Injected
-   *  (rather than read inline) so creation stays unit testable, and so the
-   *  live wiring can be the fail-open variant. */
-  workedToday: (orgId: string, numbers: readonly string[]) => Promise<Set<string>>;
+  /** Which of these numbers has the team already power-dialed in the last
+   *  three hours (the courtesy cooldown's own window, `COOLDOWN_MS` in
+   *  contact-history.ts). Injected (rather than read inline) so creation
+   *  stays unit testable, and so the live wiring can be the fail-open variant. */
+  workedRecently: (orgId: string, numbers: readonly string[]) => Promise<Set<string>>;
   /** Which of these numbers the org may NOT call — opt-out list, manual block
    *  list, federal DNC cache. The gate click-to-dial has always had and the
    *  power dialer never did (spam-defense audit §1). Injected on the same
-   *  terms as `workedToday`: unit testable, and live-wired to the fail-open
+   *  terms as `workedRecently`: unit testable, and live-wired to the fail-open
    *  variant. */
   consentBlocked: (orgId: string, numbers: readonly string[]) => Promise<Map<string, ConsentBlock>>;
+  /** One number per pass (2026-09-23 ruling): of a record's Mobile/Phone
+   *  pair, the number that has ever CONNECTED for this person becomes the
+   *  only number the run dials — see `withPreferredNumbers`. Injected on the
+   *  same fail-open terms as the two gates above: a broken read must never
+   *  stop the run, it just leaves the rows at the resolved Mobile-then-Phone
+   *  order. */
+  preferredNumbers: (orgId: string, pairs: ReadonlyArray<readonly [string, string]>) => Promise<Map<string, string>>;
   db: ReturnType<typeof getDb>;
 }
 
@@ -220,14 +232,52 @@ async function withContactNames(deps: CreateSessionDeps, userId: string, rows: R
   });
 }
 
+/**
+ * One number per pass (2026-09-23 ruling): a record whose person has ever
+ * ANSWERED on one of their two numbers leads with that number, and the run
+ * gets no second number for it — the OTHER number is dropped outright, not
+ * kept as a fallback, since falling back to a number the person did not
+ * answer on defeats the point of remembering which one worked. Only rows with
+ * BOTH numbers are asked about (a single-number row has nothing to prefer
+ * between); a run with no such pairs makes no query at all.
+ *
+ * Fails OPEN: a broken read leaves every row exactly as `resolveDialNumber`
+ * returned it — worst case is the usual Mobile-then-Phone order, never a dead
+ * queue. Applied before the already-worked/consent gates below, so those
+ * checks run against the number the run will actually dial first.
+ */
+async function withPreferredNumbers(deps: CreateSessionDeps, orgId: string, rows: ResolvedRow[]): Promise<ResolvedRow[]> {
+  const pairs: ReadonlyArray<readonly [string, string]> = [...new Map(
+    rows
+      .filter((r): r is ResolvedRow & { toNumber: string; fallbackNumber: string } => !!r.toNumber && !!r.fallbackNumber)
+      .map((r): [string, readonly [string, string]] => [`${r.toNumber}|${r.fallbackNumber}`, [r.toNumber, r.fallbackNumber]]),
+  ).values()];
+  if (pairs.length === 0) return rows;
+  let preferred: Map<string, string>;
+  try {
+    preferred = await deps.preferredNumbers(orgId, pairs);
+  } catch (err) {
+    console.warn(
+      `[create-session] preferred-number lookup failed — leaving ${pairs.length} pair(s) at the resolved Mobile/Phone order: ${(err as Error).message}`,
+    );
+    return rows;
+  }
+  return rows.map((r) => {
+    const pref = r.toNumber ? preferred.get(r.toNumber) : undefined;
+    // No fallback to carry: the number nobody answered on is simply gone.
+    return pref ? { ...r, toNumber: pref, fallbackNumber: null } : r;
+  });
+}
+
 export async function createDialerSession(
   deps: CreateSessionDeps,
   args: { userId: string; orgId: string; objectType: DialerRunObject; recordIds: string[] },
 ): Promise<{ sessionId: string; total: number }> {
   const sfOwnerId = await deps.salesforceUserId(args.userId);
-  const resolved = await withContactNames(
+  const named = await withContactNames(
     deps, args.userId, await resolveRows(deps, args.userId, args.objectType, args.recordIds),
   );
+  const resolved = await withPreferredNumbers(deps, args.orgId, named);
   // Created READY: the queue is built and nothing dials. `advanceSession`
   // ignores any session that is not 'active', so a ready session cannot
   // originate by construction; only `startSession` (the rep's Start dialing)
@@ -243,17 +293,20 @@ export async function createDialerSession(
   // binds. The two reads are independent, so they go out together.
   //
   // The two batches differ ON PURPOSE. Already-worked asks "did the team
-  // already dial this today", which is only ever about the number the run
-  // dials FIRST, so it stays one bind per primary. Consent asks "may we call
-  // this number at all", and the dialer calls BOTH halves of the pair — the
-  // fallback is swapped in on a true no-answer and carried onto the attempt-2
-  // row — so every fallback has to be in that batch or it is dialed unchecked.
+  // already dial this in the last three hours" (an estimate — the engine's
+  // own dial-time gate is authoritative), which is only ever about the number
+  // the run dials FIRST, so it stays one bind per primary. Consent asks "may
+  // we call this number at all", and the dialer can still dial BOTH halves of
+  // the pair over the life of the run — not on attempt 1 any more, but the
+  // engine's end-of-run retry inserts its attempt-2 row straight from
+  // `secondaryNumber` with no consent re-check — so every second number has
+  // to be in this batch or it is dialed unchecked.
   const numbers = [...new Set(resolved.map((r) => r.toNumber).filter((n): n is string => !!n))];
   const consentNumbers = [...new Set(
     resolved.flatMap((r) => [r.toNumber, r.fallbackNumber ?? null]).filter((n): n is string => !!n),
   )];
   const [worked, consent] = await Promise.all([
-    deps.workedToday(args.orgId, numbers),
+    deps.workedRecently(args.orgId, numbers),
     deps.consentBlocked(args.orgId, consentNumbers),
   ]);
   const rows = buildQueueRows(session!.id, resolved.map((r) => ({

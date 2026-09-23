@@ -74,7 +74,7 @@ export async function blockedTargets(
 }
 
 /**
- * Fail OPEN, the same calculus `workedTodaySafe` already accepted: a broken
+ * Fail OPEN, the same calculus `workedRecentlySafe` already accepted: a broken
  * consent READ must not leave the team with a dead queue. The protection that
  * matters is not lost when this errors — click-to-dial still runs the firewall
  * fail-closed, and the sync/rollover gates are untouched — so a repeat dial

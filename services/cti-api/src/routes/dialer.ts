@@ -29,8 +29,9 @@ import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { signedCallbackUrl } from '../telephony/webhooks.js';
 import { createDialerSession } from '../dialer/create-session.js';
-import { workedTodaySafe } from '../dialer/already-worked.js';
+import { workedRecentlySafe } from '../dialer/already-worked.js';
 import { blockedTargetsSafe } from '../dialer/consent-check.js';
+import { preferredNumbersFor } from '../dialer/contact-history-live.js';
 import {
   pauseSession,
   resumeSession,
@@ -251,8 +252,9 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     const result = await createDialerSession(
       {
         resolveDialNumber, fetchTasks, fetchContactNames, salesforceUserId, db,
-        workedToday: (orgId, numbers) => workedTodaySafe(db, orgId, numbers),
+        workedRecently: (orgId, numbers) => workedRecentlySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
+        preferredNumbers: (orgId, pairs) => preferredNumbersFor(db, orgId, pairs),
       },
       { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds },
     );
@@ -270,8 +272,9 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     const result = await createDialerSession(
       {
         resolveDialNumber, fetchTasks, fetchContactNames, salesforceUserId, db,
-        workedToday: (orgId, numbers) => workedTodaySafe(db, orgId, numbers),
+        workedRecently: (orgId, numbers) => workedRecentlySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
+        preferredNumbers: (orgId, pairs) => preferredNumbersFor(db, orgId, pairs),
       },
       {
         userId: authed.userId,

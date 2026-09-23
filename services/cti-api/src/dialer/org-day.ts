@@ -1,5 +1,7 @@
-/** GG Homes operates out of America/Los_Angeles — "today" for the already-worked
- *  skip means the LA calendar day, not the server's (UTC on Railway). */
+/** GG Homes operates out of America/Los_Angeles — "today" for the per-day,
+ *  per-owner follow-up rollover means the LA calendar day, not the server's
+ *  (UTC on Railway). The queue-build already-worked check no longer uses this:
+ *  it moved to a rolling 3-hour window (see `already-worked.ts`). */
 export const ORG_TIMEZONE = 'America/Los_Angeles';
 
 const ymdIn = (tz: string, d: Date): string =>
