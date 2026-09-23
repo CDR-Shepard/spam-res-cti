@@ -1206,9 +1206,35 @@ describe('advanceSession — contact cadence gate', () => {
   });
   it('skips as in_progress_elsewhere when another live run is ringing the person', async () => {
     const deps = makeDeps({ inFlightElsewhere: vi.fn(async () => true) }); const fdb = fakeDb(baseSession, pending); deps.db = fdb;
+    // Capture the handle the claim transaction hands the engine, to prove the
+    // check rides IT and not the outer db.
+    let claimTx: unknown;
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => realTx(async (tx: any) => { claimTx ??= tx; return fn(tx); });
     await advanceSession('S1', deps);
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped', outcome: 'in_progress_elsewhere' }) });
-    expect(deps.inFlightElsewhere).toHaveBeenCalledWith('O1', { numbers: ['+16195550100', '+12135550199'], recordId: '00Q1' }, 'S1');
+    expect(deps.inFlightElsewhere).toHaveBeenCalledWith(expect.anything(), 'O1', { numbers: ['+16195550100', '+12135550199'], recordId: '00Q1' }, 'S1');
+    // The first argument is the TRANSACTION's handle. Asking through the outer
+    // db would check out a SECOND pool client while the claim transaction holds
+    // one — the deadlock `enqueueRollover` takes `tx` to avoid.
+    const handle = (deps.inFlightElsewhere as any).mock.calls[0][0];
+    expect(handle).toBe(claimTx);
+    expect(handle).not.toBe(fdb);
+  });
+  it('a lost race on the elsewhere skip never clobbers the live dial the winner started', async () => {
+    // The skip lands after the claim transaction committed and released the
+    // per-session lock, so a concurrent advance can own the row by then. The
+    // guarded write must match 0 rows and back off — not overwrite a LIVE dial
+    // with 'skipped'. Mirrors the ceiling-skip race above.
+    const rows = [{ ...pending[0]! }];
+    const deps = makeDeps({
+      inFlightElsewhere: vi.fn(async () => { rows[0]!.status = 'dialing'; return true; }), // the other advance won it mid-check
+    });
+    const fdb = fakeDb(baseSession, rows); deps.db = fdb;
+    const r = await advanceSession('S1', deps);
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ outcome: 'in_progress_elsewhere' }) });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+    expect(r.action).toBe('waiting');
   });
   it('the in-flight check runs INSIDE the claim transaction, after the per-number lock', async () => {
     const order: string[] = [];

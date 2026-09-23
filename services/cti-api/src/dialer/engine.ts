@@ -42,8 +42,12 @@ export interface EngineDeps {
   todayIso: string;
   /** The person's contact history since `since`, both sources. */
   contactHistory: (orgId: string, person: Person, since: Date) => Promise<Dial[]>;
-  /** Ringing/connected in another live run of the org. */
-  inFlightElsewhere: (orgId: string, person: Person, sessionId: string) => Promise<boolean>;
+  /** Ringing/connected in another live run of the org. Takes the CALLER'S db
+   *  handle: the engine asks from inside the claim transaction and passes `tx`,
+   *  so the read shares that transaction's pool client instead of checking out
+   *  a second one — with enough concurrent claims that second checkout would
+   *  deadlock the pool permanently. Same rule as `enqueueRollover`. */
+  inFlightElsewhere: (db: Pick<ReturnType<typeof getDb>, 'select'>, orgId: string, person: Person, sessionId: string) => Promise<boolean>;
   /** Is the number's state daily-capped? Pure, from the area code. */
   isDailyCapped: (toE164: string) => boolean;
 }
@@ -352,8 +356,12 @@ export async function advanceSession(
       // Per-PERSON lock + in-flight check, inside the claim: two runs advancing
       // in the same instant on the same person serialise here, and the loser
       // sees the winner's `dialing` row and skips instead of double-dialing.
+      // Keying the lock on the dialed NUMBER is enough: the check it guards
+      // matches the person by record id AND both their numbers, so a run coming
+      // at the same person on their other number is still seen.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'dial:' + toE164}))`);
-      if (await deps.inFlightElsewhere(session.orgId, person, sessionId)) return 'elsewhere' as const;
+      // `tx`, not `deps.db` — see the dep's doc comment.
+      if (await deps.inFlightElsewhere(tx, session.orgId, person, sessionId)) return 'elsewhere' as const;
       const rows = await tx
         .update(schema.dialerQueueItems)
         .set({ status: 'dialing', updatedAt: new Date() })
@@ -361,12 +369,19 @@ export async function advanceSession(
         .returning({ id: schema.dialerQueueItems.id });
       return rows.length > 0;
     });
-    // Another live run owns this person right now. The CAS never ran, so the row
-    // is still pending and an unguarded stamp is safe (and correct: nothing else
-    // has claimed it).
+    // Another live run owns this person right now. Guarded like every other skip
+    // in this loop: our claim transaction has already committed and released the
+    // per-session lock, so a concurrent advance can have claimed this row in the
+    // meantime, and an unconditional UPDATE would overwrite that LIVE dial with
+    // 'skipped'.
     if (claimed === 'elsewhere') {
-      await setItem(deps, next.id, { status: 'skipped', outcome: 'in_progress_elsewhere' });
-      items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: 'in_progress_elsewhere' } : i));
+      if (await setItemIfPending(deps, next.id, { status: 'skipped', outcome: 'in_progress_elsewhere' })) {
+        items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: 'in_progress_elsewhere' } : i));
+        continue;
+      }
+      const fresh = await reloadAfterLostSkip(deps, sessionId);
+      if (!fresh) return { action: 'waiting' };
+      items = fresh;
       continue;
     }
     if (!claimed) return { action: 'waiting' };

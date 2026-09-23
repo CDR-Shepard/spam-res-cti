@@ -46,8 +46,10 @@ export async function dialsToPerson(db: Db, orgId: string, person: Person, since
   ];
 }
 
-/** Is this person ringing or on a call in ANOTHER live run of the org right now? */
-export async function inFlightElsewhere(db: Db, orgId: string, person: Person, sessionId: string): Promise<boolean> {
+/** Is this person ringing or on a call in ANOTHER live run of the org right now?
+ *  Takes any handle that can `select` — the engine passes the claim
+ *  transaction's `tx`, so the read rides that transaction's pool client. */
+export async function inFlightElsewhere(db: Pick<Db, 'select'>, orgId: string, person: Person, sessionId: string): Promise<boolean> {
   const i = schema.dialerQueueItems;
   const s = schema.dialerSessions;
   const arms: SQL[] = [];

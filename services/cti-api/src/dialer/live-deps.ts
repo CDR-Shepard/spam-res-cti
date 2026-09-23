@@ -47,7 +47,9 @@ export function buildEngineDeps(): EngineDeps {
     onScreenPop: () => {}, // Plan 4 wires Open CTI screen-pop
     todayIso: orgTodayIso(),
     contactHistory: (orgId, person, since) => dialsToPerson(db, orgId, person, since),
-    inFlightElsewhere: (orgId, person, sessionId) => inFlightElsewhere(db, orgId, person, sessionId),
+    // The handle is the engine's — the claim transaction's `tx` — not the `db`
+    // above: a second pool checkout inside that transaction deadlocks the pool.
+    inFlightElsewhere: (handle, orgId, person, sessionId) => inFlightElsewhere(handle, orgId, person, sessionId),
     // `stateForAreaCode` takes the 3-digit NPA: for +1XXXYYYZZZZ that is chars 2-4.
     isDailyCapped: (toE164) => isDailyCapped(stateForAreaCode(toE164.slice(2, 5))),
   };
