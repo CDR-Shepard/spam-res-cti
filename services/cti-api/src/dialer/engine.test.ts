@@ -83,6 +83,12 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
   // Kept apart so a test can assert an insert rode inside the transaction
   // (I3/I4c) rather than merely happening at some point.
   const txInserts: Array<{ values: Record<string, unknown> }> = [];
+  // Transactional updates, with the `where` they were guarded by — the outer
+  // `_writes` deliberately records the patch ALONE (dozens of assertions match
+  // `{ patch }` exactly), so the predicate gets its own array. Needed to pin
+  // that the connect stamp is scoped to the number that connected, not to every
+  // attempt row the item owns.
+  const txWrites: Array<{ patch: Record<string, unknown>; where: unknown }> = [];
   let sessionOverride: Record<string, unknown> = {};
   const claimReturnsRows = opts.claimReturnsRows ?? true;
   const handle: any = {
@@ -91,6 +97,7 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
     _writes: writes,
     _inserts: inserts,
     _txInserts: txInserts,
+    _txWrites: txWrites,
     query: {
       dialerSessions: {
         findFirst: async () => ({ ...session, ...sessionOverride }),
@@ -189,8 +196,8 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
         update(_tbl: unknown) {
           return {
             set: (patch: any) => ({
-              where: () => {
-                const apply = () => { writes.push({ patch }); Object.assign(_target, patch); };
+              where: (w?: any) => {
+                const apply = () => { writes.push({ patch }); txWrites.push({ patch, where: w }); Object.assign(_target, patch); };
                 return {
                   // Plain awaited UPDATE inside a transaction (the post-originate
                   // stamp, which rides with the dial-attempt insert).
@@ -1254,9 +1261,37 @@ describe('advanceSession — contact cadence gate', () => {
 
 describe('handleDialOutcome — connect stamps the dial log', () => {
   it('connected writes connected_at on the attempt row in the same transaction as the status', async () => {
-    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    // Both writes must ride ONE transaction: a connect that settled the row but
+    // lost the stamp would leave every later run leading with the wrong number.
+    // Capture the handle each update went through, as the claim tests do.
+    let txCount = 0; let connectTx: unknown; const through: unknown[] = [];
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => realTx(async (tx: any) => {
+      txCount++; connectTx = tx;
+      const realUpdate = tx.update.bind(tx);
+      tx.update = (tbl: any) => { through.push(tx); return realUpdate(tbl); };
+      return fn(tx);
+    });
     await handleDialOutcome('CA1', 'connected', deps);
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ connectedAt: expect.any(Date) }) });
+    expect(txCount).toBe(1);
+    expect(through).toHaveLength(2); // the status write and the stamp, both transactional
+    expect(through[0]).toBe(connectTx);
+    expect(through[1]).toBe(connectTx);
+  });
+  it('the stamp is scoped to the number THIS call dialed, not every attempt row the item owns', async () => {
+    // A no-answer rolls the same item onto its Phone, so one item can own two
+    // attempt rows. Stamping by item alone would mark the number that rang out
+    // as connected too — wrecking preferredNumbersFor and the cadence history.
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+12135550199', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    const stamp = fdb._txWrites.find((w: any) => 'connectedAt' in w.patch)!;
+    const { sql: text, params } = new PgDialect().sqlToQuery(stamp.where as SQL);
+    expect(text).toContain('"item_id" =');
+    expect(text).toContain('"to_number" =');
+    expect(params).toEqual(['i1', '+12135550199']);
   });
 });

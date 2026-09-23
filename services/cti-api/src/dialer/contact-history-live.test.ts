@@ -64,12 +64,22 @@ describe('inFlightElsewhere', () => {
 });
 
 describe('stampConnected', () => {
-  it('sets connected_at on the attempt row for the item', async () => {
-    const set = vi.fn(() => ({ where: vi.fn(async () => undefined) }));
+  it('sets connected_at on the attempt row for the item AND ONLY the number that connected', async () => {
+    // One item can own several attempt rows: a true no-answer rolls the same
+    // item onto its Phone and that re-dial appends a second row. An item-only
+    // predicate would stamp the number that rang out as connected as well,
+    // which then feeds a false connect to preferredNumbersFor and the cadence
+    // history — so the rendered WHERE, not just the patch, is pinned here.
+    const wheres: SQL[] = [];
+    const set = vi.fn(() => ({ where: vi.fn(async (w: SQL) => { wheres.push(w); }) }));
     const tx = { update: vi.fn(() => ({ set })) } as any;
     const at = new Date('2026-09-23T18:00:00Z');
-    await stampConnected(tx, 'item-1', at);
+    await stampConnected(tx, 'item-1', '+16195550100', at);
     expect(set).toHaveBeenCalledWith({ connectedAt: at });
+    const w = render(wheres[0]!);
+    expect(w.sql).toContain('"item_id" =');
+    expect(w.sql).toContain('"to_number" =');
+    expect(w.params).toEqual(['item-1', '+16195550100']);
   });
 });
 

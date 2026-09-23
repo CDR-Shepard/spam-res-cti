@@ -307,14 +307,18 @@ export async function advanceSession(
     // (fail closed on a broken read); `cooldown` is courtesy (fail open).
     const person = personOf(next);
     const capped = deps.isDailyCapped(next.toNumber);
-    let verdict: 'ok' | 'cooldown' | 'daily_cap' | 'daily_cap_unverified' = 'ok';
+    // Only the READ may fail open/closed, so the try wraps nothing else: a bug
+    // inside the pure `cadenceVerdict` must surface as a crash, not get logged
+    // as a failed read and silently converted into a dial.
+    let history: Dial[] | null = null;
     try {
-      const history = await deps.contactHistory(session.orgId, person, new Date(deps.nowUtc.getTime() - DAILY_CAP_WINDOW_MS));
-      verdict = cadenceVerdict(history, deps.nowUtc, { sessionId, capped });
+      history = await deps.contactHistory(session.orgId, person, new Date(deps.nowUtc.getTime() - DAILY_CAP_WINDOW_MS));
     } catch (err) {
       console.error('[dialer] contact history read failed', { sessionId, itemId: next.id, err: (err as Error).message });
-      verdict = capped ? 'daily_cap_unverified' : 'ok';
     }
+    const verdict: 'ok' | 'cooldown' | 'daily_cap' | 'daily_cap_unverified' = history === null
+      ? (capped ? 'daily_cap_unverified' : 'ok')
+      : cadenceVerdict(history, deps.nowUtc, { sessionId, capped });
     if (verdict !== 'ok') {
       if (await setItemIfPending(deps, next.id, { status: 'skipped', outcome: verdict })) {
         items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: verdict } : i));
@@ -358,7 +362,9 @@ export async function advanceSession(
       // sees the winner's `dialing` row and skips instead of double-dialing.
       // Keying the lock on the dialed NUMBER is enough: the check it guards
       // matches the person by record id AND both their numbers, so a run coming
-      // at the same person on their other number is still seen.
+      // at the same person on their other number is still seen — once that run
+      // has committed its claim. Two claims on the person's two DIFFERENT
+      // numbers in the very same instant do not serialise on this key.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'dial:' + toE164}))`);
       // `tx`, not `deps.db` — see the dep's doc comment.
       if (await deps.inFlightElsewhere(tx, session.orgId, person, sessionId)) return 'elsewhere' as const;
@@ -566,13 +572,20 @@ export async function handleDialOutcome(
   const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, item.sessionId) });
   if (!session) return;
 
+  // The number THIS call dialed — read before the branches below, which reset
+  // the item's own `to_number` when a no-answer rolls it onto the Phone.
+  const dialedNumber = item.toNumber;
+
   if (outcome === 'connected') {
     // Settle the row AND stamp the dial log in one transaction: the stamp is
     // what every later run reads to lead with the number that actually reached
     // this person, so it must never survive (or be lost by) a partial write.
+    // The stamp is scoped to `dialedNumber` because the item can own more than
+    // one attempt row — see stampConnected. A row with no number to match is
+    // nothing the log could have recorded, so there is nothing to stamp.
     await deps.db.transaction(async (tx) => {
       await tx.update(schema.dialerQueueItems).set({ status: 'connected', outcome: 'connected', updatedAt: new Date() }).where(eq(schema.dialerQueueItems.id, item.id));
-      await stampConnected(tx, item.id, deps.nowUtc);
+      if (dialedNumber) await stampConnected(tx, item.id, dialedNumber, deps.nowUtc);
     });
     // The prospect may end the room on its way out — which is what brings the
     // rep's hold music back — only when the rep's leg is KNOWN to carry the

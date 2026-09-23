@@ -65,9 +65,21 @@ export async function inFlightElsewhere(db: Pick<Db, 'select'>, orgId: string, p
   return rows.length > 0;
 }
 
-/** The connect, on the log: the number that reached them is the one to lead with. */
-export async function stampConnected(tx: Pick<Db, 'update'>, itemId: string, at: Date): Promise<void> {
-  await tx.update(schema.dialerDialAttempts).set({ connectedAt: at }).where(eq(schema.dialerDialAttempts.itemId, itemId));
+/**
+ * The connect, on the log: the number that reached them is the one to lead with.
+ *
+ * Scoped to `toNumber`, not just the item: ONE item can own several attempt rows
+ * — a true no-answer rolls the same item onto its Phone (engine.ts
+ * handleDialOutcome) and that re-dial appends a second row. Stamping by item
+ * alone would mark the number that RANG OUT as connected too, which then makes
+ * `preferredNumbersFor` pick between two equally-"connected" numbers and tells
+ * the cadence history the person answered on a number they never did.
+ */
+export async function stampConnected(tx: Pick<Db, 'update'>, itemId: string, toNumber: string, at: Date): Promise<void> {
+  await tx
+    .update(schema.dialerDialAttempts)
+    .set({ connectedAt: at })
+    .where(and(eq(schema.dialerDialAttempts.itemId, itemId), eq(schema.dialerDialAttempts.toNumber, toNumber)));
 }
 
 /** For queue creation: one read for every pair's two numbers → primary → preferred. */
