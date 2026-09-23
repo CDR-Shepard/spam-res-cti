@@ -201,3 +201,19 @@ export function todayIsoWeekday(now: Date, timezone: string): number {
     return 1;
   }
 }
+
+/**
+ * States whose telemarketing law caps calls to the same person at three per
+ * 24 hours on the same subject (FL Stat. 501.059, OK Telephone Solicitation
+ * Act, WA RCW 80.36, MD Stop the Spam Calls Act). Unanswered calls count.
+ * Counsel owns this list; a state is added here and nowhere else.
+ */
+export const DAILY_DIAL_CAP_STATES: ReadonlySet<string> = new Set(['FL', 'OK', 'WA', 'MD']);
+export const DAILY_DIAL_CAP = 3;
+/** Rolling, not calendar: a calendar day would allow 3 at 23:00 and 3 more at 01:00. */
+export const DAILY_CAP_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Unknown state = not capped: the cap is a known law, not a precaution. */
+export function isDailyCapped(state: string | null): boolean {
+  return state != null && DAILY_DIAL_CAP_STATES.has(state.toUpperCase());
+}

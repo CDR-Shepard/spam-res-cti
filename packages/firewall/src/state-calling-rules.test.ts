@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DAILY_DIAL_CAP,
+  DAILY_CAP_WINDOW_MS,
+  DAILY_DIAL_CAP_STATES,
   FEDERAL_BASELINE,
   STATE_CALLING_RULES,
   UNKNOWN_STATE_RULE,
   effectiveCallingWindow,
+  isDailyCapped,
   resolveStateRule,
   todayIsoWeekday,
 } from './state-calling-rules.js';
@@ -161,5 +165,21 @@ describe('todayIsoWeekday', () => {
     const alRule = resolveStateRule('AL');
     expect(alRule.days[7]).toBeUndefined();
     expect(effectiveCallingWindow({ days: [1, 2, 3, 4, 5, 6, 7], start: '08:00', end: '21:00' }, alRule, 7)).toBeNull();
+  });
+});
+
+describe('daily dial cap (state law: 3 calls per 24 h on the same subject)', () => {
+  it('starts with the four states counsel confirmed', () => {
+    expect([...DAILY_DIAL_CAP_STATES].sort()).toEqual(['FL', 'MD', 'OK', 'WA']);
+  });
+  it('is 3 per rolling 24 hours', () => {
+    expect(DAILY_DIAL_CAP).toBe(3);
+    expect(DAILY_CAP_WINDOW_MS).toBe(24 * 60 * 60 * 1000);
+  });
+  it('isDailyCapped: capped states only; unknown state is NOT capped (the cap is a known law, not a guess)', () => {
+    expect(isDailyCapped('FL')).toBe(true);
+    expect(isDailyCapped('fl')).toBe(true);
+    expect(isDailyCapped('CA')).toBe(false);
+    expect(isDailyCapped(null)).toBe(false);
   });
 });
