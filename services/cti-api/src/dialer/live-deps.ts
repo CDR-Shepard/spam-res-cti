@@ -10,6 +10,7 @@ import { isDailyCapped, stateForAreaCode } from '@cti/firewall';
 import { loadConfig } from '../config.js';
 import { dialsToPerson, inFlightElsewhere } from './contact-history-live.js';
 import type { EngineDeps } from './engine.js';
+import { orgMidnightUtc } from './org-day.js';
 import { TwilioDialerTelephony } from './twilio-telephony.js';
 import { withinCallingHours, parseCallingHoursExempt } from './pick-did.js';
 import { pickDidForRun } from './pick-agent-did.js';
@@ -52,5 +53,7 @@ export function buildEngineDeps(): EngineDeps {
     inFlightElsewhere: (handle, orgId, person, sessionId) => inFlightElsewhere(handle, orgId, person, sessionId),
     // `stateForAreaCode` takes the 3-digit NPA: for +1XXXYYYZZZZ that is chars 2-4.
     isDailyCapped: (toE164) => isDailyCapped(stateForAreaCode(toE164.slice(2, 5))),
+    // Built per request (like `nowUtc`/`todayIso`), so it is always today's.
+    orgDayStart: orgMidnightUtc(new Date()),
   };
 }

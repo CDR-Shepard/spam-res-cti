@@ -34,6 +34,7 @@ function fakeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
     contactHistory: vi.fn(unexpected('contactHistory')) as unknown as EngineDeps['contactHistory'],
     inFlightElsewhere: vi.fn(unexpected('inFlightElsewhere')) as unknown as EngineDeps['inFlightElsewhere'],
     isDailyCapped: vi.fn(unexpected('isDailyCapped')) as unknown as EngineDeps['isDailyCapped'],
+    orgDayStart: new Date('2026-07-13T07:00:00Z'),
     ...over,
   };
 }

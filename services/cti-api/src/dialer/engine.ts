@@ -2,7 +2,7 @@ import { and, eq, ne, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 import { DAILY_CAP_WINDOW_MS } from '@cti/firewall';
 import type { DialerItem } from './session-store.js';
-import { cadenceVerdict, type Dial, type Person } from './contact-history.js';
+import { cadenceVerdict, rolloverDue, type Dial, type Person } from './contact-history.js';
 import { stampConnected } from './contact-history-live.js';
 import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
 import type { DialerTelephony } from './telephony-port.js';
@@ -12,7 +12,9 @@ import type { PickDidArgs, PickDidResult } from './pick-agent-did.js';
 import type { DialOutcome } from './outcome.js';
 
 export interface RolloverEnqueue {
-  orgId: string; userId: string; sfOwnerId: string; sessionId: string;
+  /** `sessionId` is null when the trigger is not a power-dial run (a
+   *  click-to-dial miss); the jobs table's `session_id` is nullable. */
+  orgId: string; userId: string; sfOwnerId: string; sessionId: string | null;
   recordId: string; objectType: string; fromDate: string;
   /** The exact Task the rep dialed (Task runs) — the worker rolls THAT task
    *  instead of searching the record, which on a record with several open
@@ -50,6 +52,9 @@ export interface EngineDeps {
   inFlightElsewhere: (db: Pick<ReturnType<typeof getDb>, 'select'>, orgId: string, person: Person, sessionId: string) => Promise<boolean>;
   /** Is the number's state daily-capped? Pure, from the area code. */
   isDailyCapped: (toE164: string) => boolean;
+  /** The UTC instant the org's calendar day began (LA midnight for `nowUtc`) —
+   *  the window the per-day rollover rule counts the owner's dials in. */
+  orgDayStart: Date;
 }
 
 /** The person a queue item dials: both of the record's numbers, and the record. */
@@ -404,10 +409,10 @@ export async function advanceSession(
     }
     // Stamp the dial AND record the attempt in ONE transaction. The attempt row
     // is what the shared per-customer ceiling counts (packages/firewall/src/evaluate.ts's
-    // customerAttemptCounts) and it is append-only, so a later fallback dial of
-    // this same item cannot rewrite it away the way it rewrites the item's own
-    // to_number/from_number. Atomic with the stamp so the ceiling can never
-    // disagree with what the queue says was dialed.
+    // customerAttemptCounts) and the contact history reads (cadence gate, per-day
+    // rollover), and it is append-only: nothing that later rewrites the item's
+    // own to_number/from_number can erase a dial from the tally. Atomic with the
+    // stamp so the ceiling can never disagree with what the queue says was dialed.
     await deps.db.transaction(async (tx) => {
       await tx
         .update(schema.dialerQueueItems)
@@ -507,13 +512,14 @@ export async function skipCurrent(sessionId: string, deps: EngineDeps): ReturnTy
  * hangup first, that callback could land while this function was still
  * awaiting it: `handleDialOutcome` would find the row still `dialing` and the
  * session still `active` (its `sessionLive` rule), so it would requeue the
- * record as attempt 2 — or enqueue a rollover — and then `advanceSession`
- * would ORIGINATE THE NEXT RECORD after the rep pressed Stop, into a room
- * whose rep leg is already gone. Flipped first, the callback finds a stopped
- * session: the row simply settles as `no_connect` (an attempt-2 miss still
- * enqueues its rollover — that miss genuinely happened, and post-Stop
- * enqueueing is the endorsed behavior) and `advanceSession` returns `idle`.
- * Same reasoning as `skipCurrent`'s stamp-then-hang-up, one level up.
+ * record as attempt 2, and then `advanceSession` would ORIGINATE THE NEXT
+ * RECORD after the rep pressed Stop, into a room whose rep leg is already
+ * gone. Flipped first, the callback finds a stopped session: the row simply
+ * settles as `no_connect` (nothing requeues; the rollover still enqueues when
+ * this miss is the owner's second dial of the day — that miss genuinely
+ * happened, and the per-day rule ignores run status) and `advanceSession`
+ * returns `idle`. Same reasoning as `skipCurrent`'s stamp-then-hang-up, one
+ * level up.
  */
 export async function stopSession(sessionId: string, deps: EngineDeps): Promise<{ action: 'stopped' }> {
   const [session, items] = await Promise.all([
@@ -572,8 +578,7 @@ export async function handleDialOutcome(
   const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, item.sessionId) });
   if (!session) return;
 
-  // The number THIS call dialed — read before the branches below, which reset
-  // the item's own `to_number` when a no-answer rolls it onto the Phone.
+  // The number THIS call dialed — what the connect stamp below is scoped to.
   const dialedNumber = item.toNumber;
 
   if (outcome === 'connected') {
@@ -612,72 +617,50 @@ export async function handleDialOutcome(
     return; // wait for the rep's `next`
   }
 
-  // TRUE no-answer (the Mobile rang out) with a Phone fallback still untried →
-  // dial the Phone instead of giving up. Reset THIS item to pending with the
-  // fallback number and clear it (so a second no-answer can't loop); the fallback
-  // becomes the number now being dialed. advanceSession re-dials it — the item
-  // keeps its ordinal, which is the lowest among unfinished items, so it's the
-  // very next call, through the normal pool-DID + attempt-count path. Only a
-  // 'no_answer' outcome reaches here: voicemail / fax / busy / failed /
-  // canceled / hangup are plain misses (see dialer/outcome.ts) that never
-  // fall back — the row below becomes 'no_connect' with that reason in
-  // `outcome`, and the decision here does not read the reason.
-  if (outcome === 'no_answer' && item.fallbackNumber) {
-    // Compare-and-swap so a duplicate/redelivered webhook for THIS same call
-    // can't reset (and therefore re-dial) the fallback twice: only the
-    // invocation that still sees this exact call 'dialing' flips it to
-    // 'pending'; a racing duplicate claims 0 rows and backs off, leaving any
-    // fallback call the winner already started untouched. Mirrors
-    // advanceSession's atomic pending->dialing claim.
-    const claimed = await deps.db.transaction(async (tx) => {
-      const rows = await tx
-        .update(schema.dialerQueueItems)
-        .set({
-          status: 'pending',
-          toNumber: item.fallbackNumber,
-          fallbackNumber: null,
-          callId: null,
-          fromNumber: null,
-          outcome: null,
-          updatedAt: new Date(),
-        })
-        .where(and(
-          eq(schema.dialerQueueItems.id, item.id),
-          eq(schema.dialerQueueItems.callId, callId),
-          eq(schema.dialerQueueItems.status, 'dialing'),
-        ))
-        .returning({ id: schema.dialerQueueItems.id });
-      return rows.length > 0;
-    });
-    if (!claimed) return; // a duplicate/redelivered webhook lost the race
-    await advanceSession(item.sessionId, deps);
-    return;
-  }
-
-  // No fallback left (or a non-no-answer miss) = one MISS. Decide the outcome
-  // BEFORE the transaction, from a single truth table:
-  //  - requeue: this is the record's first miss, it still has a number to
-  //    retry with (the immutable pair, or — for legacy pre-0024 rows with no
-  //    primaryNumber — whatever it was last dialing), and the run is still
-  //    live (active/paused). Re-queued as an attempt-2 row at the END of the
-  //    run, 5-min floor.
-  //  - enqueue: everything else that isn't a requeue — the second miss, or a
-  //    first miss with nothing left to retry with. Queues the follow-up
-  //    rollover.
-  // A STOPPED session's first-miss webhook does NEITHER: per spec, a rep who
-  // stops after one pass leaves those tasks open, so the row just becomes
-  // 'no_connect' and nothing is queued. A stopped session's second-miss
-  // webhook still enqueues — that miss genuinely already happened.
-  const attempt = item.attempt ?? 1; // a fixture/row missing `attempt` must not silently skip both branches
-  const retryTo = item.primaryNumber ?? item.toNumber; // legacy rows (pre-0024) have no primaryNumber
-  const retryFallback = item.secondaryNumber ?? item.fallbackNumber;
+  // Every non-connect outcome is one MISS — no_answer included: there is no
+  // immediate Mobile→Phone re-dial any more (voicemail / fax / busy / failed /
+  // canceled / hangup / no_answer all settle the row as 'no_connect' with that
+  // reason in `outcome`; the decisions below do not read the reason). The
+  // other number waits for the end-of-run retry.
+  //
+  // Two independent questions, decided before the transaction:
+  //  - requeue: first miss in a LIVE run (active/paused) → an attempt-2 row at
+  //    the END of the run (5-minute floor) dialing the record's OTHER number
+  //    when it has one; the same number again when it has only one (legacy
+  //    pre-0024 rows with no pair retry whatever they were last dialing).
+  //  - rollover: the rule is per DAY, per OWNER, not per run. This rep has now
+  //    dialed the person twice today (any run, any source — the row for THIS
+  //    dial is already on the log, written at originate) and never connected
+  //    → the follow-up rolls. Whether the run is live or stopped is
+  //    irrelevant: a rep who stops after one pass and dials the person again
+  //    three hours later rolls it then. One dial in a day leaves it open.
+  // Both may happen for one miss: the retry is queued AND the task rolls.
+  const attempt = item.attempt ?? 1; // a fixture/row missing `attempt` must not silently read as a second miss
+  const retryTo = item.secondaryNumber ?? item.primaryNumber ?? item.toNumber;
   const sessionLive = session.status === 'active' || session.status === 'paused';
   const requeue = attempt < 2 && retryTo != null && sessionLive;
   // Only a follow-up rolls over. Task runs dial whatever the rep's list holds
   // ("Check in", "Send quote"), and completing/copying one of those would
   // rewrite work the rollover rule was never meant to touch. Lead/Opp runs and
   // every pre-0027 row are eligible (the column defaults to true).
-  const enqueue = !requeue && item.followupEligible && (attempt >= 2 || (retryTo == null && sessionLive));
+  //
+  // The history read is on the OUTER db and happens here, before the
+  // transaction opens — never inside it: a second pool checkout while the
+  // transaction holds a client is the deadlock every `tx` handle in this file
+  // exists to avoid. Only the READ may fail closed, so the try wraps nothing
+  // else: a bug inside the pure `rolloverDue` must surface as a crash.
+  let enqueue = false;
+  if (item.followupEligible) {
+    let today: Dial[] | null = null;
+    try {
+      today = await deps.contactHistory(session.orgId, personOf(item), deps.orgDayStart);
+    } catch (err) {
+      // Fail closed for the courtesy here: a missing rollover is a task that
+      // stays open, which the rep sees; a spurious one rewrites their work.
+      console.error('[dialer] rollover history read failed', { itemId: item.id, err: (err as Error).message });
+    }
+    enqueue = today !== null && rolloverDue(today, session.userId, deps.orgDayStart);
+  }
 
   // The CAS, the requeue insert, and the rollover enqueue all ride inside the
   // same transaction, so a duplicated webhook can neither double-requeue nor
@@ -705,7 +688,8 @@ export async function handleDialOutcome(
       const maxOrdinal = all.reduce((m, i) => Math.max(m, i.ordinal), -1);
       await tx.insert(schema.dialerQueueItems).values({
         sessionId: item.sessionId, ordinal: maxOrdinal + 1, objectType: item.objectType, recordId: item.recordId,
-        toNumber: retryTo, fallbackNumber: retryFallback,
+        // One number per pass: the retry dials `retryTo` and nothing else.
+        toNumber: retryTo, fallbackNumber: null,
         primaryNumber: item.primaryNumber, secondaryNumber: item.secondaryNumber,
         // Carried forward, not defaulted: without these the attempt-2 row falls
         // back to the column defaults (null / true), so the SECOND miss would
@@ -715,7 +699,8 @@ export async function handleDialOutcome(
         attempt: 2, status: 'pending',
         retryNotBefore: new Date(deps.nowUtc.getTime() + RETRY_FLOOR_MS),
       });
-    } else if (enqueue) {
+    }
+    if (enqueue) {
       await deps.enqueueRollover({
         orgId: session.orgId, userId: session.userId, sfOwnerId: session.sfOwnerId, sessionId: session.id,
         recordId: item.recordId, objectType: item.objectType, fromDate: deps.todayIso,
