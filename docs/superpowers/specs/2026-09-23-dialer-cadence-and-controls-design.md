@@ -56,6 +56,7 @@ An inbound call pops the person's Opportunity, Deal or Lead — never the Accoun
 | 5 | Two reps on one list **work it together**: one shared position, never the same person at once. |
 | 6 | Prospect hangs up → **Redial / Resume**, never automatic. **End call** = hang up and pause on the record. |
 | 7 | Inbound pop precedence: open **Opportunity → Deal → Lead → Contact**; never the Account. |
+| 8 | (2026-09-23, added) A **Skip** does not count toward the owner's two dials for the rollover: a power-dial item the rep skipped or stopped while it rang (item `skipped` / outcome `canceled`) and a click-to-dial call the rep abandoned while ringing (`calls.status = 'canceled'`). It still counts for the 3-hour spacing and the 3-per-24h cap — the phone rang. |
 
 Not legal advice; the capped-state list and the "every dial counts" reading go
 to counsel with the weekend-calling rules already on their desk.
