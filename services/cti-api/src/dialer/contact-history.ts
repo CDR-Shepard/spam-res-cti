@@ -74,3 +74,18 @@ export function preferredNumber(dials: readonly Dial[], numbers: readonly string
   const connects = dials.filter((d) => d.connected && mine.has(d.toNumber)).sort((a, b) => b.at.getTime() - a.at.getTime());
   return connects[0]?.toNumber ?? null;
 }
+
+/**
+ * A stable key for ONE record's own Mobile/Phone pair. `preferredNumbersFor`
+ * uses it to key its output map, and `create-session.ts` uses it to look a
+ * row's preference back up — by the row's OWN two numbers, not by the primary
+ * alone. Keying by primary only collapses two different records that share
+ * one number: (P, S1) and (P, S2) would overwrite each other in the map, and
+ * a THIRD record that dials only P (no fallback at all) would incorrectly
+ * inherit whichever pair's preference happened to win. Order matters (it is
+ * not sorted) — that is fine, because both sides of every lookup build the
+ * key from the same (toNumber, fallbackNumber) order for a given row.
+ */
+export function pairKey(primary: string, secondary: string): string {
+  return `${primary}|${secondary}`;
+}

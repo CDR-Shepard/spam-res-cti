@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { dialsToPerson, inFlightElsewhere, preferredNumbersFor, stampConnected } from './contact-history-live.js';
+import { pairKey } from './contact-history.js';
 
 const render = (s: SQL) => new PgDialect().sqlToQuery(s);
 function fakeDb(results: unknown[][]) {
@@ -109,14 +110,41 @@ describe('stampConnected', () => {
 });
 
 describe('preferredNumbersFor', () => {
-  it('one query for every number of every pair, keyed back to the pair\'s primary; no query with no pairs', async () => {
+  it('one query for every number of every pair, keyed back to the pair itself (not the bare primary); no query with no pairs', async () => {
     const { db, wheres } = fakeDb([[{ toNumber: '+12135550199', connectedAt: SINCE }, { toNumber: '+13105550000', connectedAt: null }]]);
     const m = await preferredNumbersFor(db, 'org-1', [['+16195550100', '+12135550199'], ['+13105550000', '+13105550001']]);
-    expect(m.get('+16195550100')).toBe('+12135550199');
-    expect(m.has('+13105550000')).toBe(false);
+    expect(m.get(pairKey('+16195550100', '+12135550199'))).toBe('+12135550199');
+    // Never keyed by the bare primary — a caller that looks it up that way
+    // must not find anything.
+    expect(m.has('+16195550100')).toBe(false);
+    expect(m.has(pairKey('+13105550000', '+13105550001'))).toBe(false);
     const w = render(wheres[0]!);
     expect(w.sql).toContain('"dialer_dial_attempts"."connected_at" is not null');
     expect(w.params).toEqual(expect.arrayContaining(['+16195550100', '+12135550199', '+13105550000', '+13105550001']));
     expect(await preferredNumbersFor(db, 'org-1', [])).toEqual(new Map());
+  });
+
+  /**
+   * The collision this key format exists to prevent: two pairs that share a
+   * primary but differ in their second number. Keying by primary alone would
+   * have the second pair's `out.set(primary, ...)` either overwrite the
+   * first's entry or (as here) leave it alone only by accident of ordering —
+   * either way a caller keyed by primary could not tell the two preferences
+   * apart. Keyed by pair, both entries — and their absence — are exact.
+   */
+  it('two pairs sharing a primary get independent entries — no cross-pair overwrite', async () => {
+    const { db } = fakeDb([[
+      { toNumber: '+12135550199', connectedAt: SINCE }, // connected on pair 1's second number
+      { toNumber: '+16195550100', connectedAt: null }, // the shared primary never connected
+      { toNumber: '+19995550300', connectedAt: null }, // pair 2's second number never connected either
+    ]]);
+    const m = await preferredNumbersFor(db, 'org-1', [
+      ['+16195550100', '+12135550199'],
+      ['+16195550100', '+19995550300'],
+    ]);
+    expect(m.get(pairKey('+16195550100', '+12135550199'))).toBe('+12135550199');
+    // Pair 2 has no connect on either of ITS two numbers — its absence must
+    // not be filled in by pair 1's result just because they share a primary.
+    expect(m.has(pairKey('+16195550100', '+19995550300'))).toBe(false);
   });
 });

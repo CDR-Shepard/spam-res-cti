@@ -3,6 +3,7 @@ import { schema } from '@cti/db';
 import { buildQueueRows, createDialerSession } from './create-session.js';
 import { nextEligiblePendingItem } from './state.js';
 import type { DialerItem } from './session-store.js';
+import { pairKey } from './contact-history.js';
 
 /** Minimal db double for the happy path: records the session insert values and
  *  the queue-item rows so a test can assert what creation actually wrote. */
@@ -767,10 +768,15 @@ describe('createDialerSession — the fallback number goes through the consent g
 describe('createDialerSession — one number per pass (preferred number)', () => {
   const pairResolver = (e164: string, fallbackE164: string | null) =>
     vi.fn(async () => ({ e164, fallbackE164 }));
+  /** Stands in for the real resolver: each record dials the (Mobile, Phone)
+   *  pair mapped to its id — used for the multi-record collision tests below. */
+  function pairResolverByRecord(byRecord: Record<string, { e164: string; fallbackE164: string | null }>) {
+    return vi.fn(async (_u: string, _objectType: string, recordId: string) => byRecord[recordId] ?? null);
+  }
 
   it('a record the person once answered on the Phone leads with the Phone and has no second number', async () => {
     const db = fakeDb();
-    const preferredNumbers = vi.fn(async () => new Map([['+16195550100', '+12135550199']]));
+    const preferredNumbers = vi.fn(async () => new Map([[pairKey('+16195550100', '+12135550199'), '+12135550199']]));
     await createDialerSession(
       {
         ...noResolveDeps, db: db as never,
@@ -828,7 +834,7 @@ describe('createDialerSession — one number per pass (preferred number)', () =>
 
   it('a preferred number applies only when it is one of the record\'s two numbers: a single-number record is never even sent to the read', async () => {
     const db = fakeDb();
-    const preferredNumbers = vi.fn(async () => new Map([['+16195550100', '+19995559999']]));
+    const preferredNumbers = vi.fn(async () => new Map([[pairKey('+16195550100', '+19995559999'), '+19995559999']]));
     await createDialerSession(
       {
         ...noResolveDeps, db: db as never,
@@ -842,5 +848,110 @@ describe('createDialerSession — one number per pass (preferred number)', () =>
     // between.
     expect(preferredNumbers).not.toHaveBeenCalled();
     expect(db._itemRows[0]).toMatchObject({ toNumber: '+16195550100', primaryNumber: '+16195550100', secondaryNumber: null });
+  });
+
+  it('a preference that is not one of the row\'s own two numbers is ignored, and the row stays as resolved', async () => {
+    const db = fakeDb();
+    // A malformed/mismatched read: the map's value is neither of this pair's
+    // own two numbers.
+    const preferredNumbers = vi.fn(async () => new Map([[pairKey('+16195550100', '+12135550199'), '+19995559999']]));
+    await createDialerSession(
+      {
+        ...noResolveDeps, db: db as never,
+        resolveDialNumber: pairResolver('+16195550100', '+12135550199') as never,
+        preferredNumbers: preferredNumbers as never,
+      },
+      args,
+    );
+    expect(db._itemRows[0]).toMatchObject({
+      toNumber: '+16195550100', primaryNumber: '+16195550100', secondaryNumber: '+12135550199', fallbackNumber: null,
+    });
+  });
+
+  /**
+   * The bug this whole block exists to close: `withPreferredNumbers` used to
+   * look a row's preference up by `toNumber` alone, so a THIRD record dialing
+   * only the shared primary — never queried, never part of any pair — could
+   * still be redirected to a number that is not one of ITS two numbers,
+   * simply because some OTHER record's pair happened to share that primary
+   * and connect on its own second number. Keying (and looking up) by
+   * `pairKey(toNumber, fallbackNumber)` closes it: a row not in the queried
+   * pairs is never matched at all.
+   */
+  it('a shared primary does not lend its preference to a record that has no fallback of its own', async () => {
+    const db = fakeDb();
+    const preferredNumbers = vi.fn(async () => new Map([[pairKey('+16195550100', '+12135550199'), '+12135550199']]));
+    await createDialerSession(
+      {
+        ...noResolveDeps, db: db as never,
+        resolveDialNumber: pairResolverByRecord({
+          '00Q1': { e164: '+16195550100', fallbackE164: '+12135550199' }, // this pair connected on its second number
+          '00Q2': { e164: '+16195550100', fallbackE164: null }, // shares the primary; has no pair of its own
+        }) as never,
+        preferredNumbers: preferredNumbers as never,
+      },
+      { userId: 'u1', orgId: 'o1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
+    );
+    expect(db._itemRows[0]).toMatchObject({
+      toNumber: '+12135550199', primaryNumber: '+12135550199', secondaryNumber: null, fallbackNumber: null,
+    });
+    // 00Q2 dials only ONE number, period — it must never be redirected to a
+    // number that is not its own just because it shares a primary with 00Q1.
+    expect(db._itemRows[1]).toMatchObject({
+      toNumber: '+16195550100', primaryNumber: '+16195550100', secondaryNumber: null, fallbackNumber: null,
+    });
+  });
+
+  /** The other half of the same bug: `preferredNumbersFor`'s output used to be
+   *  keyed by bare primary too, so a second pair sharing that primary would
+   *  overwrite (or be shadowed by) the first pair's entry in the map itself —
+   *  before create-session.ts even gets a chance to misapply it. */
+  it('two pairs sharing a primary but different second numbers get independent preferences', async () => {
+    const db = fakeDb();
+    const preferredNumbers = vi.fn(async () => new Map([
+      [pairKey('+16195550100', '+12135550199'), '+12135550199'], // pair 1 connected
+      // No entry for pair 2 — its own two numbers never connected.
+    ]));
+    await createDialerSession(
+      {
+        ...noResolveDeps, db: db as never,
+        resolveDialNumber: pairResolverByRecord({
+          '00Q1': { e164: '+16195550100', fallbackE164: '+12135550199' },
+          '00Q2': { e164: '+16195550100', fallbackE164: '+19995550300' }, // same primary, different second number
+        }) as never,
+        preferredNumbers: preferredNumbers as never,
+      },
+      { userId: 'u1', orgId: 'o1', objectType: 'Lead', recordIds: ['00Q1', '00Q2'] },
+    );
+    expect(db._itemRows[0]).toMatchObject({
+      toNumber: '+12135550199', primaryNumber: '+12135550199', secondaryNumber: null, fallbackNumber: null,
+    });
+    // Unaffected by pair 1's result: its OWN pair has no entry, so it keeps
+    // the resolved Mobile-then-Phone order in full.
+    expect(db._itemRows[1]).toMatchObject({
+      toNumber: '+16195550100', primaryNumber: '+16195550100', secondaryNumber: '+19995550300', fallbackNumber: null,
+    });
+  });
+
+  it('never gives the engine\'s end-of-run retry a way back to the number the person did not answer on', async () => {
+    const db = fakeDb();
+    const preferredNumbers = vi.fn(async () => new Map([[pairKey('+16195550100', '+12135550199'), '+12135550199']]));
+    await createDialerSession(
+      {
+        ...noResolveDeps, db: db as never,
+        resolveDialNumber: pairResolver('+16195550100', '+12135550199') as never,
+        preferredNumbers: preferredNumbers as never,
+      },
+      args,
+    );
+    // engine.ts's end-of-run retry (`handleDialOutcome`) reads ONLY
+    // `secondaryNumber`, falling back to `primaryNumber`/`toNumber` when it is
+    // null — it never reads `fallbackNumber`. Both are null on this row, so a
+    // miss on attempt 1 can only requeue the SAME preferred number (see
+    // engine.test.ts: "…and the same number again when it has only one"),
+    // never the number the person did not answer on.
+    expect(db._itemRows[0]).toMatchObject({
+      toNumber: '+12135550199', primaryNumber: '+12135550199', secondaryNumber: null, fallbackNumber: null,
+    });
   });
 });

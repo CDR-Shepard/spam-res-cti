@@ -9,7 +9,7 @@
 import { and, desc, eq, gte, inArray, isNotNull, ne, or, type Column, type SQL } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 import type { Dial, Person } from './contact-history.js';
-import { preferredNumber } from './contact-history.js';
+import { pairKey, preferredNumber } from './contact-history.js';
 
 type Db = ReturnType<typeof getDb>;
 
@@ -119,7 +119,17 @@ export async function stampConnected(tx: Pick<Db, 'update'>, itemId: string, toN
     .where(and(eq(schema.dialerDialAttempts.itemId, itemId), eq(schema.dialerDialAttempts.toNumber, toNumber)));
 }
 
-/** For queue creation: one read for every pair's two numbers → primary → preferred. */
+/**
+ * For queue creation: one read for every pair's two numbers → keyed by the
+ * PAIR (`pairKey`, not the bare primary) → preferred.
+ *
+ * Keying by primary alone would collapse two different pairs that happen to
+ * share one number: (P, S1) and (P, S2) would overwrite each other's entry,
+ * and a third record that dials only P (no fallback of its own) would
+ * inherit whichever pair's preference won the overwrite. Each pair's
+ * preference is computed from THAT pair's own two numbers only, so the
+ * caller must look its answer up by the same pair it asked about.
+ */
 export async function preferredNumbersFor(db: Db, orgId: string, pairs: ReadonlyArray<readonly [string, string]>): Promise<Map<string, string>> {
   if (pairs.length === 0) return new Map();
   const a = schema.dialerDialAttempts;
@@ -140,7 +150,7 @@ export async function preferredNumbersFor(db: Db, orgId: string, pairs: Readonly
   const out = new Map<string, string>();
   for (const [primary, secondary] of pairs) {
     const pref = preferredNumber(dials, [primary, secondary]);
-    if (pref) out.set(primary, pref);
+    if (pref) out.set(pairKey(primary, secondary), pref);
   }
   return out;
 }

@@ -1,5 +1,6 @@
 import { getDb, schema } from '@cti/db';
 import type { ConsentBlock } from './consent-check.js';
+import { pairKey } from './contact-history.js';
 import { fetchContactNames, resolveDialNumber } from '../salesforce/record-phone.js';
 import { fetchTasks, resolveTaskTarget } from '../salesforce/task-targets.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
@@ -241,6 +242,23 @@ async function withContactNames(deps: CreateSessionDeps, userId: string, rows: R
  * BOTH numbers are asked about (a single-number row has nothing to prefer
  * between); a run with no such pairs makes no query at all.
  *
+ * Looked up by `pairKey(toNumber, fallbackNumber)` — the row's OWN pair — not
+ * by `toNumber` alone. Two different records can share one number (the same
+ * Phone with two different Mobiles, say): keying by the bare number would let
+ * a preference computed from ONE record's pair leak onto another record that
+ * merely dials the same number, including a record with no fallback at all
+ * (never queried, and now provably never matched either). A value the map
+ * returns that is neither of THIS row's own two numbers is ignored — the map
+ * is built from our own pair-scoped query, so that should never happen, but
+ * the row's own two numbers are the only thing the ruling is about.
+ *
+ * Either way a preference wins, the second number is dropped: once the
+ * person has answered on one of their two numbers, the run never dials the
+ * other. That holds even when the preference IS the already-primary number
+ * — `fallbackNumber` still goes to null, or the engine's end-of-run retry
+ * (which reads `secondaryNumber`, carried from `fallbackNumber` in
+ * `buildQueueRows`) would still have the dropped number to fall onto.
+ *
  * Fails OPEN: a broken read leaves every row exactly as `resolveDialNumber`
  * returned it — worst case is the usual Mobile-then-Phone order, never a dead
  * queue. Applied before the already-worked/consent gates below, so those
@@ -250,7 +268,7 @@ async function withPreferredNumbers(deps: CreateSessionDeps, orgId: string, rows
   const pairs: ReadonlyArray<readonly [string, string]> = [...new Map(
     rows
       .filter((r): r is ResolvedRow & { toNumber: string; fallbackNumber: string } => !!r.toNumber && !!r.fallbackNumber)
-      .map((r): [string, readonly [string, string]] => [`${r.toNumber}|${r.fallbackNumber}`, [r.toNumber, r.fallbackNumber]]),
+      .map((r): [string, readonly [string, string]] => [pairKey(r.toNumber, r.fallbackNumber), [r.toNumber, r.fallbackNumber]]),
   ).values()];
   if (pairs.length === 0) return rows;
   let preferred: Map<string, string>;
@@ -263,9 +281,13 @@ async function withPreferredNumbers(deps: CreateSessionDeps, orgId: string, rows
     return rows;
   }
   return rows.map((r) => {
-    const pref = r.toNumber ? preferred.get(r.toNumber) : undefined;
-    // No fallback to carry: the number nobody answered on is simply gone.
-    return pref ? { ...r, toNumber: pref, fallbackNumber: null } : r;
+    if (!r.toNumber || !r.fallbackNumber) return r; // nothing to prefer between
+    const pref = preferred.get(pairKey(r.toNumber, r.fallbackNumber));
+    // Ignore anything that isn't one of THIS row's own two numbers.
+    if (pref === undefined || (pref !== r.toNumber && pref !== r.fallbackNumber)) return r;
+    // No fallback to carry: the number nobody answered on is simply gone,
+    // whether the preference was the primary or the secondary.
+    return { ...r, toNumber: pref, fallbackNumber: null };
   });
 }
 
