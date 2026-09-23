@@ -21,7 +21,7 @@ import { enforcedStateHoursLabel, resolveRecipientState } from './recipient.js';
 import { fetchDidWindowStats } from './reputation/query.js';
 import { answerRateBreach, engagementBreach, THRESHOLDS } from './reputation/signals.js';
 import { pickRotationNumber } from './rotation.js';
-import { isDailyCapped } from './state-calling-rules.js';
+import { DAILY_DIAL_CAP, isDailyCapped } from './state-calling-rules.js';
 import { resolveTimezone, stateForAreaCode, timezoneForNumber } from './tz.js';
 import type { CheckResult, FirewallDeps, FirewallInput, FirewallResponse } from './types.js';
 import { velocityGateCheck } from './velocity.js';
@@ -195,7 +195,7 @@ export async function evaluate(db: Db, input: FirewallInput, deps: FirewallDeps 
             passed: false,
             severity: 'block',
             reasonCode: REASON.DAILY_CAP,
-            detail: 'The daily call count could not be verified; state law limits calls to 3 per day.',
+            detail: `The daily call count could not be verified; state law limits calls to ${DAILY_DIAL_CAP} per day.`,
           }
         : dailyCapCheck(resolvedState, count),
     );
