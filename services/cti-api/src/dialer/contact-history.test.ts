@@ -4,7 +4,7 @@ import { DAILY_CAP_WINDOW_MS } from '@cti/firewall';
 
 const NOW = new Date('2026-09-23T18:00:00Z');
 const ago = (ms: number) => new Date(NOW.getTime() - ms);
-const dial = (o: Partial<Dial>): Dial => ({ userId: 'rep-1', sessionId: 'S1', toNumber: '+16195550100', at: ago(60_000), connected: false, source: 'dialer', ...o });
+const dial = (o: Partial<Dial>): Dial => ({ userId: 'rep-1', sessionId: 'S1', toNumber: '+16195550100', at: ago(60_000), connected: false, source: 'dialer', skipped: false, ...o });
 const H = 60 * 60_000;
 
 describe('cadenceVerdict — 3 hours between dials to a person, power dialer only', () => {
@@ -51,6 +51,26 @@ describe("rolloverDue — the task owner's second miss of the org day", () => {
   });
   it("yesterday's dials do not count", () => {
     expect(rolloverDue([dial({ at: new Date(DAY.getTime() - 1000) }), dial({ at: ago(H) })], 'rep-1', DAY)).toBe(false);
+  });
+});
+
+describe('rolloverDue — a Skip is not a dial for the rollover', () => {
+  const DAY = new Date('2026-09-23T07:00:00Z');
+  it('a skipped dial plus one real miss does NOT roll', () => {
+    expect(rolloverDue([dial({ at: ago(5 * H), skipped: true }), dial({ at: ago(H) })], 'rep-1', DAY)).toBe(false);
+  });
+  it('two real misses roll even with a skip in between', () => {
+    expect(rolloverDue([dial({ at: ago(5 * H) }), dial({ at: ago(3 * H), skipped: true }), dial({ at: ago(H) })], 'rep-1', DAY)).toBe(true);
+  });
+});
+
+describe('cadenceVerdict — a skipped dial still rang the phone', () => {
+  it('counts for the 3-hour courtesy', () => {
+    expect(cadenceVerdict([dial({ sessionId: 'S-other', at: ago(H), skipped: true })], NOW, { sessionId: 'S1', capped: false })).toBe('cooldown');
+  });
+  it('counts toward the legal daily cap', () => {
+    const d = [dial({ at: ago(20 * H), skipped: true }), dial({ at: ago(10 * H) }), dial({ at: ago(5 * H), sessionId: 'S1' })];
+    expect(cadenceVerdict(d, NOW, { sessionId: 'S1', capped: true })).toBe('daily_cap');
   });
 });
 

@@ -219,6 +219,7 @@ describe("syncOne — a click-to-dial miss counts toward the owner's two dials o
     at: new Date(DAY.getTime() + (12 - hoursAgo) * 3_600_000),
     connected,
     source: 'manual' as const,
+    skipped: false,
   });
   // The hook only runs when the call has a record to roll (whoId ?? whatId).
   // The harness's default row has neither, so every case here overrides the

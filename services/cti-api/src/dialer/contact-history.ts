@@ -16,6 +16,10 @@ export interface Dial {
   at: Date;
   connected: boolean;
   source: 'dialer' | 'manual';
+  /** The rep ended it while it rang — a Skip, or Stop / hang-up before an
+   *  answer. Still rang the phone, so it counts for `cadenceVerdict`'s courtesy
+   *  and legal cap; `rolloverDue` (ruling 2026-09-23) ignores it entirely. */
+  skipped: boolean;
 }
 
 export interface Person {
@@ -53,9 +57,14 @@ export function cadenceVerdict(
  * twice since the org day began, and none of those dials connected. Nobody
  * else's dials count: the task is theirs to work. Runs do not matter: two short
  * runs, a run's retry pass, or a power dial plus a manual call all read alike.
+ *
+ * A Skip is not a dial for this rule (ruling 2026-09-23): the rep chose not to
+ * wait, so it neither counts toward the two nor as a connect. It still counts
+ * for `cadenceVerdict` above — the phone rang, which is what that rule cares
+ * about.
  */
 export function rolloverDue(dials: readonly Dial[], ownerUserId: string, dayStart: Date): boolean {
-  const own = dials.filter((d) => d.userId === ownerUserId && d.at.getTime() >= dayStart.getTime());
+  const own = dials.filter((d) => d.userId === ownerUserId && d.at.getTime() >= dayStart.getTime() && !d.skipped);
   return own.length >= 2 && own.every((d) => !d.connected);
 }
 

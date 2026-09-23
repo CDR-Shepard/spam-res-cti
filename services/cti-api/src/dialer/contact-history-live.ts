@@ -27,12 +27,26 @@ export async function dialsToPerson(db: Db, orgId: string, person: Person, since
   if (person.numbers.length === 0 && !person.recordId) return [];
   const a = schema.dialerDialAttempts;
   const c = schema.calls;
+  const i = schema.dialerQueueItems;
   const attempts = await db
-    .select({ userId: a.userId, sessionId: a.sessionId, toNumber: a.toNumber, at: a.dialedAt, connectedAt: a.connectedAt })
+    .select({
+      userId: a.userId,
+      sessionId: a.sessionId,
+      toNumber: a.toNumber,
+      at: a.dialedAt,
+      connectedAt: a.connectedAt,
+      // The item this attempt came from — LEFT joined because an attempt can
+      // outlive its item's row in nothing but appearance: it never does today,
+      // but a left join means a future orphaned attempt (e.g. a purge) reads
+      // as "not a skip" instead of vanishing from the history entirely.
+      itemStatus: i.status,
+      itemOutcome: i.outcome,
+    })
     .from(a)
+    .leftJoin(i, eq(i.id, a.itemId))
     .where(and(eq(a.orgId, orgId), personMatch(a.toNumber, [a.recordId], person), gte(a.dialedAt, since)));
   const calls = await db
-    .select({ userId: c.userId, normalizedToNumber: c.normalizedToNumber, createdAt: c.createdAt, disposition: c.disposition })
+    .select({ userId: c.userId, normalizedToNumber: c.normalizedToNumber, createdAt: c.createdAt, disposition: c.disposition, status: c.status })
     .from(c)
     .where(and(
       eq(c.orgId, orgId),
@@ -41,8 +55,31 @@ export async function dialsToPerson(db: Db, orgId: string, person: Person, since
       gte(c.createdAt, since),
     ));
   return [
-    ...attempts.map((r): Dial => ({ userId: r.userId, sessionId: r.sessionId, toNumber: r.toNumber, at: r.at, connected: r.connectedAt != null, source: 'dialer' })),
-    ...calls.filter((r): r is typeof r & { userId: string } => r.userId != null).map((r): Dial => ({ userId: r.userId, sessionId: null, toNumber: r.normalizedToNumber, at: r.createdAt, connected: r.disposition === 'Connected', source: 'manual' })),
+    // Skip (ruling 2026-09-23): the rep ended the dial while it rang — a Skip
+    // button stamps the item 'skipped', a Stop/hangup before answer lands the
+    // attempt's item at outcome 'canceled'. Either way the phone rang (still
+    // counts for cadenceVerdict) but it is not one of the owner's two dials
+    // for rolloverDue.
+    ...attempts.map((r): Dial => ({
+      userId: r.userId,
+      sessionId: r.sessionId,
+      toNumber: r.toNumber,
+      at: r.at,
+      connected: r.connectedAt != null,
+      source: 'dialer',
+      skipped: r.itemStatus === 'skipped' || r.itemOutcome === 'canceled',
+    })),
+    ...calls.filter((r): r is typeof r & { userId: string } => r.userId != null).map((r): Dial => ({
+      userId: r.userId,
+      sessionId: null,
+      toNumber: r.normalizedToNumber,
+      at: r.createdAt,
+      connected: r.disposition === 'Connected',
+      source: 'manual',
+      // Click-to-dial's Skip is a Stop/hangup before answer, logged as the
+      // call itself going 'canceled' — there is no separate item row to read.
+      skipped: r.status === 'canceled',
+    })),
   ];
 }
 
@@ -97,7 +134,9 @@ export async function preferredNumbersFor(db: Db, orgId: string, pairs: Readonly
   // arrives without one (a stale mock, a relaxed query) never counts as a connect.
   const dials: Dial[] = rows
     .filter((r): r is typeof r & { connectedAt: Date } => r.connectedAt != null)
-    .map((r) => ({ userId: '', sessionId: null, toNumber: r.toNumber, at: r.connectedAt, connected: true, source: 'dialer' }));
+    // Connects only — a skip never connects, so `skipped` here is always
+    // false and preferredNumber (which ignores it) never sees the field.
+    .map((r) => ({ userId: '', sessionId: null, toNumber: r.toNumber, at: r.connectedAt, connected: true, source: 'dialer', skipped: false }));
   const out = new Map<string, string>();
   for (const [primary, secondary] of pairs) {
     const pref = preferredNumber(dials, [primary, secondary]);

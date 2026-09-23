@@ -278,7 +278,7 @@ function makeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
 // since its attempt row is written at originate — reach two, none connected.
 // `twoOwnMissesToday` is the history a miss that SHOULD roll reads.
 const ownDial = (hoursAgo: number, connected = false) =>
-  ({ userId: 'U1', sessionId: 'S1', toNumber: '+1', at: new Date(Date.UTC(2026, 6, 13, 18 - hoursAgo)), connected, source: 'dialer' as const });
+  ({ userId: 'U1', sessionId: 'S1', toNumber: '+1', at: new Date(Date.UTC(2026, 6, 13, 18 - hoursAgo)), connected, source: 'dialer' as const, skipped: false });
 const twoOwnMissesToday = () => vi.fn(async () => [ownDial(3), ownDial(0)]);
 const oneOwnDialToday = () => vi.fn(async () => [ownDial(0)]);
 
@@ -1071,7 +1071,7 @@ describe('handleDialOutcome — rollover is per day, per owner', () => {
   beforeEach(() => { _target = {}; });
   const DAY = new Date(Date.UTC(2026, 6, 13, 7, 0, 0));
   const miss = (over: Record<string, unknown> = {}) => [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', primaryNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, followupEligible: true, taskId: null, ...over }];
-  const d = (userId: string, hoursAgo: number, connected = false) => ({ userId, sessionId: 'S-x', toNumber: '+1', at: new Date(Date.UTC(2026, 6, 13, 18 - hoursAgo)), connected, source: 'dialer' as const });
+  const d = (userId: string, hoursAgo: number, connected = false) => ({ userId, sessionId: 'S-x', toNumber: '+1', at: new Date(Date.UTC(2026, 6, 13, 18 - hoursAgo)), connected, source: 'dialer' as const, skipped: false });
 
   it("first miss of the day (only this dial on the log): requeue, no rollover — even on a STOPPED run", async () => {
     const deps = makeDeps({ orgDayStart: DAY, contactHistory: vi.fn(async () => [d('U1', 0)]) }); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, miss()); deps.db = fdb;
@@ -1278,7 +1278,7 @@ describe('advanceSession — contact cadence gate', () => {
   beforeEach(() => { _target = {}; });
   const pending = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', primaryNumber: '+16195550100', secondaryNumber: '+12135550199', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
   const recent = (sessionId: string | null, hoursAgo: number, over: Record<string, unknown> = {}) =>
-    ({ userId: 'U9', sessionId, toNumber: '+16195550100', at: new Date(Date.UTC(2026, 6, 13, 18 - hoursAgo, 0, 0)), connected: false, source: 'dialer', ...over });
+    ({ userId: 'U9', sessionId, toNumber: '+16195550100', at: new Date(Date.UTC(2026, 6, 13, 18 - hoursAgo, 0, 0)), connected: false, source: 'dialer', skipped: false, ...over });
 
   it('skips as cooldown when another run dialed the person in the last 3 h — and asks with BOTH numbers and the record', async () => {
     const deps = makeDeps({ contactHistory: vi.fn(async () => [recent('S-other', 1)]) as any }); const fdb = fakeDb(baseSession, pending); deps.db = fdb;
