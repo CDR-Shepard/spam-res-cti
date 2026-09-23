@@ -164,7 +164,10 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
     },
     async transaction(fn: (tx: any) => Promise<any>) {
       const tx = {
-        execute: async () => undefined, // pg_advisory_xact_lock(...) — no-op in the fake
+        // pg_advisory_xact_lock(...) — no-op in the fake, but it must ACCEPT the
+        // query: the claim now takes a second (per-person) lock, and the
+        // ordering test below wraps this to read each statement's params.
+        execute: async (_q?: unknown) => undefined,
         // C1: handleDialOutcome's ordinal lookup now reads via `tx.query`, not
         // `deps.db.query` — that would check out a SECOND pool client while
         // the tx already holds one. Mirrors the outer `query.dialerQueueItems`
@@ -251,6 +254,12 @@ function makeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
     enqueueRollover: vi.fn(async () => {}),
     onScreenPop: vi.fn(),
     todayIso: '2026-07-13',
+    // Contact-cadence defaults: no history, nobody in flight, no capped state —
+    // so every test above this line reads exactly as it did before the gate
+    // existed, and only the tests that opt in exercise it.
+    contactHistory: vi.fn(async () => []),
+    inFlightElsewhere: vi.fn(async () => false),
+    isDailyCapped: vi.fn(() => false),
     ...over,
   };
 }
@@ -1150,5 +1159,78 @@ describe('startSession — the rep pressed Start dialing', () => {
     const deps = makeDeps(); const fdb = fakeDb(ready, pending); deps.db = fdb;
     fdb.update = () => ({ set: () => ({ where: () => ({ returning: async () => { throw new Error('connection reset'); } }) }) });
     await expect(startSession('S1', deps)).rejects.toThrow('connection reset');
+  });
+});
+
+describe('advanceSession — contact cadence gate', () => {
+  beforeEach(() => { _target = {}; });
+  const pending = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', primaryNumber: '+16195550100', secondaryNumber: '+12135550199', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+  const recent = (sessionId: string | null, hoursAgo: number, over: Record<string, unknown> = {}) =>
+    ({ userId: 'U9', sessionId, toNumber: '+16195550100', at: new Date(Date.UTC(2026, 6, 13, 18 - hoursAgo, 0, 0)), connected: false, source: 'dialer', ...over });
+
+  it('skips as cooldown when another run dialed the person in the last 3 h — and asks with BOTH numbers and the record', async () => {
+    const deps = makeDeps({ contactHistory: vi.fn(async () => [recent('S-other', 1)]) as any }); const fdb = fakeDb(baseSession, pending); deps.db = fdb;
+    const r = await advanceSession('S1', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped', outcome: 'cooldown' }) });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+    expect(deps.contactHistory).toHaveBeenCalledWith('O1', { numbers: ['+16195550100', '+12135550199'], recordId: '00Q1' }, expect.any(Date));
+    expect(r.action).toBe('done');
+  });
+  it("dials when the only recent dial is this run's own (end-of-run retry)", async () => {
+    const deps = makeDeps({ contactHistory: vi.fn(async () => [recent('S1', 1)]) as any }); deps.db = fakeDb(baseSession, pending);
+    expect((await advanceSession('S1', deps)).action).toBe('dialing');
+  });
+  it('skips as daily_cap in a capped state with three dials in 24 h', async () => {
+    const deps = makeDeps({ isDailyCapped: vi.fn(() => true), contactHistory: vi.fn(async () => [recent(null, 20), recent('S1', 10), recent('S1', 5)]) as any });
+    const fdb = fakeDb(baseSession, pending); deps.db = fdb;
+    await advanceSession('S1', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped', outcome: 'daily_cap' }) });
+    expect(deps.isDailyCapped).toHaveBeenCalledWith('+16195550100');
+  });
+  it('the history window is 24 h back from nowUtc (the longest any rule needs)', async () => {
+    const deps = makeDeps(); deps.db = fakeDb(baseSession, pending);
+    await advanceSession('S1', deps);
+    const since = (deps.contactHistory as any).mock.calls[0][2] as Date;
+    expect(deps.nowUtc.getTime() - since.getTime()).toBe(24 * 60 * 60_000);
+  });
+  it('a failed history read: capped state → skip as daily_cap_unverified; not capped → dial (fail open)', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const capped = makeDeps({ isDailyCapped: vi.fn(() => true), contactHistory: vi.fn(async () => { throw new Error('pool'); }) as any });
+      const f1 = fakeDb(baseSession, pending); capped.db = f1;
+      await advanceSession('S1', capped);
+      expect(f1._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped', outcome: 'daily_cap_unverified' }) });
+      const open = makeDeps({ contactHistory: vi.fn(async () => { throw new Error('pool'); }) as any }); open.db = fakeDb(baseSession, pending);
+      expect((await advanceSession('S1', open)).action).toBe('dialing');
+    } finally { err.mockRestore(); }
+  });
+  it('skips as in_progress_elsewhere when another live run is ringing the person', async () => {
+    const deps = makeDeps({ inFlightElsewhere: vi.fn(async () => true) }); const fdb = fakeDb(baseSession, pending); deps.db = fdb;
+    await advanceSession('S1', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped', outcome: 'in_progress_elsewhere' }) });
+    expect(deps.inFlightElsewhere).toHaveBeenCalledWith('O1', { numbers: ['+16195550100', '+12135550199'], recordId: '00Q1' }, 'S1');
+  });
+  it('the in-flight check runs INSIDE the claim transaction, after the per-number lock', async () => {
+    const order: string[] = [];
+    const deps = makeDeps({ inFlightElsewhere: vi.fn(async () => { order.push('inflight'); return false; }) });
+    const fdb = fakeDb(baseSession, pending); deps.db = fdb;
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => realTx(async (tx: any) => { const exec = tx.execute; tx.execute = async (q: any) => { const s = new PgDialect().sqlToQuery(q); order.push(`lock:${s.params.join(',')}`); return exec(q); }; order.push('tx'); return fn(tx); });
+    await advanceSession('S1', deps);
+    expect(order.slice(0, 4)).toEqual(['tx', 'lock:S1', 'lock:dial:+16195550100', 'inflight']);
+  });
+  it('the attempt row carries record_id', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, pending); deps.db = fdb;
+    await advanceSession('S1', deps);
+    expect(fdb._txInserts[0]!.values).toEqual(expect.objectContaining({ recordId: '00Q1' }));
+  });
+});
+
+describe('handleDialOutcome — connect stamps the dial log', () => {
+  it('connected writes connected_at on the attempt row in the same transaction as the status', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ connectedAt: expect.any(Date) }) });
   });
 });

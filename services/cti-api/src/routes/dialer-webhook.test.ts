@@ -29,6 +29,11 @@ function fakeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
     enqueueRollover: vi.fn(async () => {}),
     onScreenPop: vi.fn(unexpected('onScreenPop')),
     todayIso: '2026-07-13',
+    // Contact-cadence deps: the webhook handler forwards them unread, like the
+    // rest, so they are throwing stubs too.
+    contactHistory: vi.fn(unexpected('contactHistory')) as unknown as EngineDeps['contactHistory'],
+    inFlightElsewhere: vi.fn(unexpected('inFlightElsewhere')) as unknown as EngineDeps['inFlightElsewhere'],
+    isDailyCapped: vi.fn(unexpected('isDailyCapped')) as unknown as EngineDeps['isDailyCapped'],
     ...over,
   };
 }

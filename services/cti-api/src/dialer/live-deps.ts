@@ -6,7 +6,9 @@
  * `followup-worker.ts` depends on this module — never the reverse.
  */
 import { getDb } from '@cti/db';
+import { isDailyCapped, stateForAreaCode } from '@cti/firewall';
 import { loadConfig } from '../config.js';
+import { dialsToPerson, inFlightElsewhere } from './contact-history-live.js';
 import type { EngineDeps } from './engine.js';
 import { TwilioDialerTelephony } from './twilio-telephony.js';
 import { withinCallingHours, parseCallingHoursExempt } from './pick-did.js';
@@ -44,5 +46,9 @@ export function buildEngineDeps(): EngineDeps {
     enqueueRollover: (job, handle) => enqueueFollowupRollover(handle, job),
     onScreenPop: () => {}, // Plan 4 wires Open CTI screen-pop
     todayIso: orgTodayIso(),
+    contactHistory: (orgId, person, since) => dialsToPerson(db, orgId, person, since),
+    inFlightElsewhere: (orgId, person, sessionId) => inFlightElsewhere(db, orgId, person, sessionId),
+    // `stateForAreaCode` takes the 3-digit NPA: for +1XXXYYYZZZZ that is chars 2-4.
+    isDailyCapped: (toE164) => isDailyCapped(stateForAreaCode(toE164.slice(2, 5))),
   };
 }

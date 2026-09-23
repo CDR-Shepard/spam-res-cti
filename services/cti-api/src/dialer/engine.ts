@@ -1,6 +1,9 @@
 import { and, eq, ne, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
+import { DAILY_CAP_WINDOW_MS } from '@cti/firewall';
 import type { DialerItem } from './session-store.js';
+import { cadenceVerdict, type Dial, type Person } from './contact-history.js';
+import { stampConnected } from './contact-history-live.js';
 import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
 import type { DialerTelephony } from './telephony-port.js';
 import { recordConnectSticky } from './sticky.js';
@@ -37,6 +40,18 @@ export interface EngineDeps {
   enqueueRollover: (job: RolloverEnqueue, db: RolloverDb) => Promise<void>;
   onScreenPop: (userId: string, objectType: string, recordId: string) => void;
   todayIso: string;
+  /** The person's contact history since `since`, both sources. */
+  contactHistory: (orgId: string, person: Person, since: Date) => Promise<Dial[]>;
+  /** Ringing/connected in another live run of the org. */
+  inFlightElsewhere: (orgId: string, person: Person, sessionId: string) => Promise<boolean>;
+  /** Is the number's state daily-capped? Pure, from the area code. */
+  isDailyCapped: (toE164: string) => boolean;
+}
+
+/** The person a queue item dials: both of the record's numbers, and the record. */
+export function personOf(item: Pick<DialerItem, 'toNumber' | 'primaryNumber' | 'secondaryNumber' | 'fallbackNumber' | 'recordId'>): Person {
+  const numbers = [...new Set([item.primaryNumber ?? item.toNumber, item.secondaryNumber ?? item.fallbackNumber].filter((n): n is string => !!n))];
+  return { numbers, recordId: item.recordId };
 }
 
 type Session = typeof schema.dialerSessions.$inferSelect;
@@ -284,6 +299,28 @@ export async function advanceSession(
       items = fresh;
       continue;
     }
+    // Contact cadence: the PERSON is the unit, not this run. `daily_cap` is law
+    // (fail closed on a broken read); `cooldown` is courtesy (fail open).
+    const person = personOf(next);
+    const capped = deps.isDailyCapped(next.toNumber);
+    let verdict: 'ok' | 'cooldown' | 'daily_cap' | 'daily_cap_unverified' = 'ok';
+    try {
+      const history = await deps.contactHistory(session.orgId, person, new Date(deps.nowUtc.getTime() - DAILY_CAP_WINDOW_MS));
+      verdict = cadenceVerdict(history, deps.nowUtc, { sessionId, capped });
+    } catch (err) {
+      console.error('[dialer] contact history read failed', { sessionId, itemId: next.id, err: (err as Error).message });
+      verdict = capped ? 'daily_cap_unverified' : 'ok';
+    }
+    if (verdict !== 'ok') {
+      if (await setItemIfPending(deps, next.id, { status: 'skipped', outcome: verdict })) {
+        items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: verdict } : i));
+        continue;
+      }
+      const fresh = await reloadAfterLostSkip(deps, sessionId);
+      if (!fresh) return { action: 'waiting' };
+      items = fresh;
+      continue;
+    }
     // Task runs dial the rep's own numbers; every other run kind dials the pool.
     const runKind = session.objectType === 'Task' ? 'agent' : 'pool';
     const did = await deps.pickDid({ orgId: session.orgId, userId: session.userId, toE164: next.toNumber, runKind });
@@ -306,8 +343,17 @@ export async function advanceSession(
     // transaction can win, then atomically flip pending -> dialing: if the
     // conditional UPDATE affects 0 rows, someone else already claimed this
     // item (or it moved on) and we back off rather than double-dial it.
+    //
+    // Captured before the closures below: TypeScript drops the `next.toNumber`
+    // narrowing inside a nested function, and it is non-null from the guard above.
+    const toE164 = next.toNumber;
     const claimed = await deps.db.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${sessionId}))`);
+      // Per-PERSON lock + in-flight check, inside the claim: two runs advancing
+      // in the same instant on the same person serialise here, and the loser
+      // sees the winner's `dialing` row and skips instead of double-dialing.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'dial:' + toE164}))`);
+      if (await deps.inFlightElsewhere(session.orgId, person, sessionId)) return 'elsewhere' as const;
       const rows = await tx
         .update(schema.dialerQueueItems)
         .set({ status: 'dialing', updatedAt: new Date() })
@@ -315,11 +361,16 @@ export async function advanceSession(
         .returning({ id: schema.dialerQueueItems.id });
       return rows.length > 0;
     });
+    // Another live run owns this person right now. The CAS never ran, so the row
+    // is still pending and an unguarded stamp is safe (and correct: nothing else
+    // has claimed it).
+    if (claimed === 'elsewhere') {
+      await setItem(deps, next.id, { status: 'skipped', outcome: 'in_progress_elsewhere' });
+      items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: 'in_progress_elsewhere' } : i));
+      continue;
+    }
     if (!claimed) return { action: 'waiting' };
 
-    // Captured before the closures below: TypeScript drops the `next.toNumber`
-    // narrowing inside a nested function, and it is non-null from the guard above.
-    const toE164 = next.toNumber;
     let callId: string;
     try {
       ({ callId } = await deps.telephony.originate({
@@ -348,6 +399,10 @@ export async function advanceSession(
         itemId: next.id,
         toNumber: toE164,
         fromNumber: did.e164,
+        // The record dialed: the contact-history read matches a person by either
+        // number OR record id, so a Lead and the Opportunity it became still
+        // read as one person.
+        recordId: next.recordId,
       });
     });
     return { action: 'dialing', itemId: next.id };
@@ -497,7 +552,13 @@ export async function handleDialOutcome(
   if (!session) return;
 
   if (outcome === 'connected') {
-    await setItem(deps, item.id, { status: 'connected', outcome: 'connected' });
+    // Settle the row AND stamp the dial log in one transaction: the stamp is
+    // what every later run reads to lead with the number that actually reached
+    // this person, so it must never survive (or be lost by) a partial write.
+    await deps.db.transaction(async (tx) => {
+      await tx.update(schema.dialerQueueItems).set({ status: 'connected', outcome: 'connected', updatedAt: new Date() }).where(eq(schema.dialerQueueItems.id, item.id));
+      await stampConnected(tx, item.id, deps.nowUtc);
+    });
     // The prospect may end the room on its way out — which is what brings the
     // rep's hold music back — only when the rep's leg is KNOWN to carry the
     // rejoin action: the stamp is written by the same join that adds it. A run
