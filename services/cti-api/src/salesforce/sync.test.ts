@@ -305,6 +305,48 @@ describe("syncOne — a click-to-dial miss counts toward the owner's two dials o
       errSpy.mockRestore();
     }
   });
+
+  // Mutation-testing finding (Task 7 review, Important): removing the
+  // `(whoId || whatId)` guard survived — nothing drove an outbound,
+  // non-Connected call with NO record attached. Without the guard, this call
+  // would read contact history and could enqueue a rollover against a null
+  // recordId, which is meaningless (there is no record to roll a follow-up
+  // task on). The guard must short-circuit before the history read even when
+  // the rest of the gate (direction, disposition) would otherwise let it run.
+  it('no record attached (no whoId/whatId) never rolls, even with two same-day misses', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const db = fakeDb(callRow({ userId: 'user-1', salesforceWhoId: null, salesforceWhatId: null }));
+      const contactHistory = vi.fn(async () => [d(3), d(0)]); // would roll if the guard didn't short-circuit first
+      const deps = syncDeps({ db, contactHistory, orgDayStart: () => DAY });
+      await syncOne('call-1', deps);
+      expect(contactHistory).not.toHaveBeenCalled();
+      expect(deps.enqueueRollover).not.toHaveBeenCalled();
+      expect(errSpy).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  // Companion to "second miss of the day": pins that the guard is `whoId ??
+  // whatId`, not whoId alone — a call matched only to a WhatId (e.g. an
+  // Opportunity, with no Contact/Lead WhoId) still rolls, keyed on that id.
+  it('a record attached only via whatId rolls, keyed on the whatId', async () => {
+    const OPP_ID = '006000000000000001'; // 18-char Opportunity id
+    const db = fakeDb(callRow({ userId: 'user-1', salesforceWhoId: null, salesforceWhatId: OPP_ID }));
+    const deps = syncDeps({ db, contactHistory: vi.fn(async () => [d(3), d(0)]), orgDayStart: () => DAY });
+    await syncOne('call-1', deps);
+    expect(deps.enqueueRollover).toHaveBeenCalledWith({
+      orgId: 'org-1',
+      userId: 'user-1',
+      sfOwnerId: ME,
+      sessionId: null,
+      recordId: OPP_ID,
+      objectType: 'Opportunity',
+      fromDate: '2026-08-26',
+      sourceTaskId: null,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
