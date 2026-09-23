@@ -145,7 +145,9 @@ describe('processRolloverJob', () => {
     const calls = fetch.mock.calls.map((c: any[]) => [c[1], c[2]?.method]);
     expect(calls[0]).toEqual(['/sobjects/Task', 'POST']);          // create first
     expect(calls[1]).toEqual(['/sobjects/Task/00T1', 'PATCH']);    // then complete
-    expect(fetch.mock.calls[0][2].body).toMatchObject({ ActivityDate: '2026-08-21', OwnerId: '005', Status: 'Not Started' });
+    expect(fetch.mock.calls[0][2].body).toMatchObject({ ActivityDate: '2026-08-21', OwnerId: '005' });
+    // No Status: the org default (Open) applies — 'Not Started' hid every copy.
+    expect(fetch.mock.calls[0][2].body).not.toHaveProperty('Status');
     // I10: the day fields are pre-stamped before the POST; createdTaskId lands alone after it.
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ targetDate: '2026-08-21', nextDay: '2026-08-21', completedTaskId: '00T1' }) });
     expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ createdTaskId: '00TNEW' }) });

@@ -25,7 +25,10 @@ export function pickFollowUpTask(tasks: FollowUpTask[]): FollowUpTask | null {
 export function followUpCopyFields(task: FollowUpTask, dueDate: string): Record<string, string> {
   const fields: Record<string, string> = {
     Subject: task.Subject ?? 'Follow-up',
-    Status: 'Not Started',
+    // No Status on purpose: Salesforce applies the org's default open status
+    // (Task.Status is defaultedOnCreate). A hard-coded 'Not Started' — not a
+    // value in this org's Open/Completed picklist — hid every copy from the
+    // reps' Status = 'Open' views and from the dialer's own Task-list runs.
     ActivityDate: dueDate,
     OwnerId: task.OwnerId,
     // Marks the copy as ours. The caller retries without this key if Salesforce
