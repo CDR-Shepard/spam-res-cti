@@ -7,6 +7,15 @@ const ymdIn = (tz: string, d: Date): string =>
 const hhmmIn = (tz: string, d: Date): string =>
   new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).format(d);
 
+/** `YYYY-MM-DD` for `now` in the org's timezone (`en-CA` formats in ISO order,
+ *  so no further reassembly is needed). Extracted from `dialer/live-deps.ts`
+ *  (formerly a private `orgTodayIso()` there) so `salesforce/sync.ts`'s
+ *  per-day rollover check and the dialer engine's live deps compute "today"
+ *  with the exact same rule. */
+export function orgTodayIso(now: Date = new Date(), tz: string = ORG_TIMEZONE): string {
+  return ymdIn(tz, now);
+}
+
 /**
  * The UTC instant of the most recent local midnight in `tz`. Tries every
  * plausible UTC offset for that calendar day and keeps the candidate that

@@ -101,7 +101,7 @@ function fakeDb(callRow: Record<string, unknown>) {
 }
 
 const callRow = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-  id: 'call-1', userId: 'U1', direction: 'outbound', status: 'completed',
+  id: 'call-1', orgId: 'org-1', userId: 'U1', direction: 'outbound', status: 'completed',
   fromNumber: '+13235249247', toNumber: '818-445-5992', normalizedToNumber: '+18184455992',
   salesforceTaskId: null, salesforceWhoId: null, salesforceWhatId: null,
   chatterFeedElementId: null, recordingLinkSyncedAt: null,
@@ -122,6 +122,9 @@ function syncDeps(over: Partial<SyncOneDeps> = {}): SyncOneDeps & { _db: ReturnT
     recordName: vi.fn(async () => null) as unknown as SyncOneDeps['recordName'],
     postChatterFeedItem: vi.fn(async () => '0D5NEW') as unknown as SyncOneDeps['postChatterFeedItem'],
     updateCallTask: vi.fn(async () => ({ updated: true })) as unknown as SyncOneDeps['updateCallTask'],
+    contactHistory: vi.fn(async () => []) as unknown as SyncOneDeps['contactHistory'],
+    orgDayStart: (() => new Date('2026-08-26T07:00:00Z')) as unknown as SyncOneDeps['orgDayStart'],
+    enqueueRollover: vi.fn(async () => {}) as unknown as SyncOneDeps['enqueueRollover'],
     ...over,
     _db: db,
   } as SyncOneDeps & { _db: ReturnType<typeof fakeDb> };
@@ -194,6 +197,113 @@ describe('syncOne — the after-call ownership gate', () => {
     });
     await expect(syncOne('call-1', d)).rejects.toThrow(/503/);
     expect(d.createCallTask).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 7 — a click-to-dial miss counts toward the task owner's two dials of
+// the day (spec §2.3): the SAME per-day rollover rule the power dialer's
+// engine applies (dialer/contact-history.ts rolloverDue) also fires out of
+// syncOne, so a rep who dials a person manually twice in a day — or once by
+// hand and once via the dialer — rolls the follow-up exactly like two
+// power-dial misses would. Outbound only, never on a Connected disposition,
+// and only when the call has a record to roll (whoId ?? whatId). Best effort:
+// a failure anywhere in the check must never fail the sync itself.
+// ---------------------------------------------------------------------------
+describe("syncOne — a click-to-dial miss counts toward the owner's two dials of the day", () => {
+  const DAY = new Date('2026-08-26T07:00:00Z'); // org-day start used by syncDeps()'s default orgDayStart
+  const d = (hoursAgo: number, connected = false) => ({
+    userId: 'user-1',
+    sessionId: null,
+    toNumber: '+16195550100',
+    at: new Date(DAY.getTime() + (12 - hoursAgo) * 3_600_000),
+    connected,
+    source: 'manual' as const,
+  });
+  // The hook only runs when the call has a record to roll (whoId ?? whatId).
+  // The harness's default row has neither, so every case here overrides the
+  // row to attach one — '00Q1' is a Lead (see ownership.test.ts's id
+  // conventions), matching the owner user-1 the `d(...)` dials belong to.
+  const rollableRow = (over: Record<string, unknown> = {}) =>
+    callRow({ userId: 'user-1', salesforceWhoId: '00Q1', ...over });
+
+  it("second miss of the day → enqueues a record-keyed rollover for this rep", async () => {
+    const db = fakeDb(rollableRow());
+    const deps = syncDeps({ db, contactHistory: vi.fn(async () => [d(3), d(0)]), orgDayStart: () => DAY });
+    await syncOne('call-1', deps);
+    expect(deps.enqueueRollover).toHaveBeenCalledWith({
+      orgId: 'org-1',
+      userId: 'user-1',
+      sfOwnerId: ME,
+      sessionId: null,
+      recordId: '00Q1',
+      objectType: 'Lead',
+      fromDate: '2026-08-26',
+      sourceTaskId: null,
+    });
+  });
+
+  it('a first miss of the day never rolls (the owner needs a SECOND dial)', async () => {
+    const db = fakeDb(rollableRow());
+    const deps = syncDeps({ db, contactHistory: vi.fn(async () => [d(0)]), orgDayStart: () => DAY });
+    await syncOne('call-1', deps);
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
+  });
+
+  it('a Connected disposition never rolls, even with two prior misses', async () => {
+    const db = fakeDb(rollableRow({ disposition: 'Connected' }));
+    const deps = syncDeps({ db, contactHistory: vi.fn(async () => [d(3), d(0)]), orgDayStart: () => DAY });
+    await syncOne('call-1', deps);
+    expect(deps.contactHistory).not.toHaveBeenCalled();
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
+  });
+
+  it('inbound never rolls, even with two prior misses', async () => {
+    const db = fakeDb(rollableRow({ direction: 'inbound' }));
+    const deps = syncDeps({ db, contactHistory: vi.fn(async () => [d(3), d(0)]), orgDayStart: () => DAY });
+    await syncOne('call-1', deps);
+    expect(deps.contactHistory).not.toHaveBeenCalled();
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
+  });
+
+  it('a contactHistory failure never fails the sync (logged, not enqueued)', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const db = fakeDb(rollableRow());
+      const deps = syncDeps({
+        db,
+        contactHistory: vi.fn(async () => { throw new Error('pool'); }),
+        orgDayStart: () => DAY,
+      });
+      await expect(syncOne('call-1', deps)).resolves.toBeUndefined();
+      expect(deps.enqueueRollover).not.toHaveBeenCalled();
+      expect(errSpy).toHaveBeenCalledWith(
+        '[sf-sync] per-day rollover check failed',
+        expect.objectContaining({ callId: 'call-1', err: 'pool' }),
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('an enqueueRollover failure never fails the sync (logged)', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const db = fakeDb(rollableRow());
+      const deps = syncDeps({
+        db,
+        contactHistory: vi.fn(async () => [d(3), d(0)]),
+        orgDayStart: () => DAY,
+        enqueueRollover: vi.fn(async () => { throw new Error('unique violation'); }),
+      });
+      await expect(syncOne('call-1', deps)).resolves.toBeUndefined();
+      expect(errSpy).toHaveBeenCalledWith(
+        '[sf-sync] per-day rollover check failed',
+        expect.objectContaining({ callId: 'call-1', err: 'unique violation' }),
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
 

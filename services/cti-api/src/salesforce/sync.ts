@@ -8,6 +8,10 @@ import { getDb, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
 import { buildRecordingPublicUrl } from '../telephony/recording-links.js';
+import { rolloverDue, type Dial, type Person } from '../dialer/contact-history.js';
+import { dialsToPerson } from '../dialer/contact-history-live.js';
+import { orgMidnightUtc, orgTodayIso } from '../dialer/org-day.js';
+import type { RolloverEnqueue } from '../dialer/engine.js';
 import {
   createCallTask,
   findByPhone,
@@ -21,6 +25,7 @@ import {
 import { salesforceUserId } from './current-user.js';
 import { fetchOwnership, gatedIds, mayCreateTaskOn, objectTypeForId } from './ownership.js';
 import { AUTO_DISPOSITION, buildCallSubject } from './call-subject.js';
+import { enqueueFollowupRollover } from './followup-enqueue.js';
 
 // Re-exported so routes/calls.ts's existing `import { AUTO_DISPOSITION } from
 // '../salesforce/sync.js'` keeps working — the value itself now lives in
@@ -246,11 +251,24 @@ export interface SyncOneDeps {
   recordName: (userId: string, recordId: string) => Promise<string | null>;
   postChatterFeedItem: typeof postChatterFeedItem;
   updateCallTask: typeof updateCallTask;
+  /** The task owner's contact history for the per-day rollover check (spec
+   *  §2.3): every dial to this person since `since`, from either source (a
+   *  power-dial run or a click-to-dial call). */
+  contactHistory: (orgId: string, person: Person, since: Date) => Promise<Dial[]>;
+  /** The UTC instant of the current org day's start (America/Los_Angeles
+   *  midnight) — the SAME clock the dialer engine's per-day rollover check
+   *  uses, so a click-to-dial miss and a power-dial miss count toward the
+   *  same day's two-dial threshold. */
+  orgDayStart: () => Date;
+  /** Best-effort: enqueue (or idempotently no-op) the next-day follow-up
+   *  rollover job for this owner/record/day. */
+  enqueueRollover: (job: RolloverEnqueue) => Promise<void>;
 }
 
 function liveSyncOneDeps(): SyncOneDeps {
+  const db = getDb();
   return {
-    db: getDb(),
+    db,
     salesforceUserId,
     fetchOwnership,
     findByPhone,
@@ -259,6 +277,9 @@ function liveSyncOneDeps(): SyncOneDeps {
     recordName: fetchRecordName,
     postChatterFeedItem,
     updateCallTask,
+    contactHistory: (orgId, person, since) => dialsToPerson(db, orgId, person, since),
+    orgDayStart: () => orgMidnightUtc(new Date()),
+    enqueueRollover: (job) => enqueueFollowupRollover(db, job),
   };
 }
 
@@ -475,6 +496,32 @@ export async function syncOne(
     .update(schema.salesforceSyncJobs)
     .set({ salesforceTaskId: taskId, updatedAt: new Date() })
     .where(eq(schema.salesforceSyncJobs.callId, call.id));
+
+  // The per-day rollover counts THIS call too (spec §2.3): the task owner's
+  // second dial of the day to the person, from any run or a manual call,
+  // rolls the follow-up when it misses. Best effort — a failure here is a
+  // task that stays open, which the rep can see; it must never fail the sync.
+  if (call.direction === 'outbound' && call.disposition !== 'Connected' && (whoId || whatId)) {
+    try {
+      const person: Person = { numbers: [call.normalizedToNumber], recordId: whoId ?? whatId ?? null };
+      const dayStart = deps.orgDayStart();
+      const own = await deps.contactHistory(call.orgId, person, dayStart);
+      if (rolloverDue(own, call.userId, dayStart)) {
+        await deps.enqueueRollover({
+          orgId: call.orgId,
+          userId: call.userId,
+          sfOwnerId: await deps.salesforceUserId(call.userId),
+          sessionId: null,
+          recordId: whoId ?? whatId!,
+          objectType: objectTypeForId(whoId ?? whatId!),
+          fromDate: orgTodayIso(dayStart),
+          sourceTaskId: null,
+        });
+      }
+    } catch (err) {
+      console.error('[sf-sync] per-day rollover check failed', { callId: call.id, err: (err as Error).message });
+    }
+  }
 
   // Chatter feed post (ruling 2026-08-26): every DISPOSITIONED call ALSO gets
   // ONE Chatter feed item on its related record, additive to the Task write

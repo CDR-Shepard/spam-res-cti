@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { orgMidnightUtc } from './org-day.js';
+import { orgMidnightUtc, orgTodayIso } from './org-day.js';
 
 const laClock = (d: Date) =>
   new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit', hour12: false }).format(d);
@@ -49,5 +49,24 @@ describe('orgMidnightUtc', () => {
       expect(laClock(m)).toBe('00:00');
       expect(laDate(m)).toBe(laDate(new Date(iso)));
     }
+  });
+});
+
+describe('orgTodayIso', () => {
+  it('is the en-CA (ISO order) LA calendar date for the given instant', () => {
+    expect(orgTodayIso(new Date('2026-08-26T07:00:00Z'))).toBe('2026-08-26'); // 00:00 PDT
+    expect(orgTodayIso(new Date('2026-08-26T06:59:00Z'))).toBe('2026-08-25'); // 23:59 PDT the day before
+  });
+
+  it('defaults to the current instant when no date is passed', () => {
+    expect(orgTodayIso()).toBe(
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(
+        new Date(),
+      ),
+    );
+  });
+
+  it('supports an explicit timezone override, same rule as orgMidnightUtc', () => {
+    expect(orgTodayIso(new Date('2026-08-24T18:00:00Z'), 'Asia/Tokyo')).toBe('2026-08-25');
   });
 });

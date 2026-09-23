@@ -10,26 +10,11 @@ import { isDailyCapped, stateForAreaCode } from '@cti/firewall';
 import { loadConfig } from '../config.js';
 import { dialsToPerson, inFlightElsewhere } from './contact-history-live.js';
 import type { EngineDeps } from './engine.js';
-import { orgMidnightUtc } from './org-day.js';
+import { orgMidnightUtc, orgTodayIso } from './org-day.js';
 import { TwilioDialerTelephony } from './twilio-telephony.js';
 import { withinCallingHours, parseCallingHoursExempt } from './pick-did.js';
 import { pickDidForRun } from './pick-agent-did.js';
 import { enqueueFollowupRollover } from '../salesforce/followup-enqueue.js';
-
-/** GG Homes operates out of America/Los_Angeles — the rollover follow-up's
- *  "today" is computed in that org timezone, not the server's (UTC on Railway). */
-const ORG_TIMEZONE = 'America/Los_Angeles';
-
-/** `YYYY-MM-DD` for `now` in the org's timezone. `en-CA` formats as ISO order,
- *  so no further reassembly is needed. */
-function orgTodayIso(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: ORG_TIMEZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-}
 
 /** Real EngineDeps for a request. Screen-pop is wired by Plan 4. */
 export function buildEngineDeps(): EngineDeps {
@@ -38,22 +23,26 @@ export function buildEngineDeps(): EngineDeps {
   // Owned test DIDs in the allowlist skip the calling-hours guard so a dial-flow
   // test can run outside 8:00am-8:59pm; every other number still respects it.
   const exempt = parseCallingHoursExempt(cfg.DIALER_CALLING_HOURS_EXEMPT);
+  // ONE clock for this request: `todayIso` and `orgDayStart` both derive from
+  // it (a reviewer found the two separate `new Date()` calls this used to be
+  // could disagree across the org's midnight, e.g. one ticking over to the
+  // next day a moment before the other).
+  const now = new Date();
   return {
     db,
     telephony: new TwilioDialerTelephony(),
     pickDid: (args) => pickDidForRun(db, args),
     withinCallingHours: (toE164, nowUtc) => exempt.has(toE164) || withinCallingHours(toE164, nowUtc),
-    nowUtc: new Date(),
+    nowUtc: now,
     enqueueRollover: (job, handle) => enqueueFollowupRollover(handle, job),
     onScreenPop: () => {}, // Plan 4 wires Open CTI screen-pop
-    todayIso: orgTodayIso(),
+    todayIso: orgTodayIso(now),
     contactHistory: (orgId, person, since) => dialsToPerson(db, orgId, person, since),
     // The handle is the engine's — the claim transaction's `tx` — not the `db`
     // above: a second pool checkout inside that transaction deadlocks the pool.
     inFlightElsewhere: (handle, orgId, person, sessionId) => inFlightElsewhere(handle, orgId, person, sessionId),
     // `stateForAreaCode` takes the 3-digit NPA: for +1XXXYYYZZZZ that is chars 2-4.
     isDailyCapped: (toE164) => isDailyCapped(stateForAreaCode(toE164.slice(2, 5))),
-    // Built per request (like `nowUtc`/`todayIso`), so it is always today's.
-    orgDayStart: orgMidnightUtc(new Date()),
+    orgDayStart: orgMidnightUtc(now),
   };
 }
