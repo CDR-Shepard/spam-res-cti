@@ -4,7 +4,6 @@ import {
   progressLabel,
   queueLine,
   queueParts,
-  isNextEnabled,
   pauseResumeAction,
   shouldTeardownRun,
   shouldScreenPop,
@@ -23,9 +22,11 @@ import {
   conflictingSessionId,
   CurrentRecord,
   ItemControls,
+  SessionToggle,
   controlsFor,
   actionsFor,
   runSequence,
+  runControlsSequence,
   pollDelayMs,
 } from './DialerPanel';
 import type { DialerControlAction, DialerCurrentItem, DialerSession, DialerSessionView } from '../dialer-api';
@@ -59,20 +60,20 @@ describe('queueLine', () => {
   it('consent skips come out of the dialing figure and are itemized', () => {
     const counts = { total: 50, done: 0, connected: 0, noConnect: 0, skipped: 20, unreachable: 0, pending: 30 };
     expect(queueLine(50, counts.unreachable, { already_worked: 15, opted_out: 2, dnc_blocked: 3 }))
-      .toBe('50 records · 15 already worked today · 5 blocked by consent · dialing 30');
+      .toBe('50 records · 15 called in the last 3 h · 5 blocked by consent · dialing 30');
   });
 
   it('reads like the spec example and omits zero parts', () => {
-    expect(queueLine(50, 0, { already_worked: 18 })).toBe('50 records · 18 already worked today · dialing 32');
+    expect(queueLine(50, 0, { already_worked: 18 })).toBe('50 records · 18 called in the last 3 h · dialing 32');
     expect(queueLine(50, 0, { already_worked: 15, skip_on_dialer: 3 }))
-      .toBe('50 records · 15 already worked today · 3 skipped by flag · dialing 32');
+      .toBe('50 records · 15 called in the last 3 h · 3 skipped by flag · dialing 32');
     expect(queueLine(50, 0, {})).toBe('50 records · dialing 50');
     expect(queueLine(50, 0)).toBe('50 records · dialing 50');
   });
 
   it('takes phone-less records out of the dialing figure', () => {
     // 50 in the run, 18 inherited, 2 with no number → 30 will actually ring.
-    expect(queueLine(50, 2, { already_worked: 18 })).toBe('50 records · 18 already worked today · dialing 30');
+    expect(queueLine(50, 2, { already_worked: 18 })).toBe('50 records · 18 called in the last 3 h · dialing 30');
   });
 
   /**
@@ -81,8 +82,9 @@ describe('queueLine', () => {
    * the two things that DO move mid-run — attempt-2 retry rows (which grow
    * counts.total and counts.pending) and out-of-hours skips stamped by the
    * engine (which grow counts.skipped and add a breakdown key) — cannot move
-   * it: the retry rows are not attempt 1, and only already_worked and
-   * skip_on_dialer are itemized or subtracted.
+   * it: the retry rows are not attempt 1, and only already_worked (folded
+   * into "called in the last 3 h") and skip_on_dialer are itemized or
+   * subtracted.
    */
   it('does not drift mid-run: attempt-2 rows and out-of-hours skips leave it unchanged', () => {
     // What the panel passes, mirroring the render site.
@@ -105,7 +107,7 @@ describe('queueLine', () => {
       skipBreakdown: { already_worked: 15, skip_on_dialer: 3, out_of_hours: 4 },
     };
 
-    expect(line(atStart)).toBe('50 records · 15 already worked today · 3 skipped by flag · dialing 30');
+    expect(line(atStart)).toBe('50 records · 15 called in the last 3 h · 3 skipped by flag · dialing 30');
     expect(line(midRun)).toBe(line(atStart));
   });
 
@@ -117,27 +119,38 @@ describe('queueLine', () => {
       skipBreakdown: { already_worked: 18 },
     };
     expect(queueLine(legacy.firstPassTotal ?? legacy.counts.total, legacy.counts.unreachable, legacy.skipBreakdown))
-      .toBe('50 records · 18 already worked today · dialing 32');
+      .toBe('50 records · 18 called in the last 3 h · dialing 32');
   });
 
-  it('also names the three cadence skip reasons, folding daily_cap_unverified into the daily limit', () => {
+  it('also names the other two cadence skip reasons, folding daily_cap_unverified into the daily limit', () => {
     expect(queueLine(10, 0, { cooldown: 2, daily_cap: 1, daily_cap_unverified: 1, in_progress_elsewhere: 1 }))
       .toBe('10 records · 2 called in the last 3 h · 2 daily limit (state law) · 1 in progress in another run · dialing 5');
+  });
+
+  it('folds already_worked (the queue-build estimate) and cooldown (the dial-time gate) into one count — same 3-hour rule, one number', () => {
+    expect(queueLine(10, 0, { already_worked: 2, cooldown: 1 })).toBe('10 records · 3 called in the last 3 h · dialing 7');
   });
 });
 
 describe('queueParts — the cadence skip reasons (spec §5)', () => {
   it('folds daily_cap_unverified into dailyCap and subtracts all three cadence reasons from dialing', () => {
     expect(queueParts(10, 0, { cooldown: 2, daily_cap: 1, daily_cap_unverified: 1, in_progress_elsewhere: 1 })).toEqual({
-      total: 10, alreadyWorked: 0, skipOnDialer: 0, consent: 0, unreachable: 0,
+      total: 10, skipOnDialer: 0, consent: 0, unreachable: 0,
       cooldown: 2, dailyCap: 2, inProgressElsewhere: 1, dialing: 5,
     });
   });
 
   it('with no cadence keys, the new fields are zero and dialing is unaffected', () => {
     expect(queueParts(50, 0, { already_worked: 18 })).toEqual({
-      total: 50, alreadyWorked: 18, skipOnDialer: 0, consent: 0, unreachable: 0,
-      cooldown: 0, dailyCap: 0, inProgressElsewhere: 0, dialing: 32,
+      total: 50, skipOnDialer: 0, consent: 0, unreachable: 0,
+      cooldown: 18, dailyCap: 0, inProgressElsewhere: 0, dialing: 32,
+    });
+  });
+
+  it('already_worked (queue-build estimate) and cooldown (dial-time gate) are the same 3-hour rule — one folded count', () => {
+    expect(queueParts(10, 0, { already_worked: 2, cooldown: 1 })).toEqual({
+      total: 10, skipOnDialer: 0, consent: 0, unreachable: 0,
+      cooldown: 3, dailyCap: 0, inProgressElsewhere: 0, dialing: 7,
     });
   });
 });
@@ -151,12 +164,6 @@ describe('control button → dialerControl action mapping', () => {
   it('Pause/Resume toggles on session status', () => {
     expect(pauseResumeAction('active')).toBe('pause');
     expect(pauseResumeAction('paused')).toBe('resume');
-  });
-
-  it('Next is only enabled once the current record is connected', () => {
-    expect(isNextEnabled({ id: 'i1', recordId: '00Q1', objectType: 'Lead', status: 'connected', toNumber: '+16195551234' })).toBe(true);
-    expect(isNextEnabled({ id: 'i1', recordId: '00Q1', objectType: 'Lead', status: 'dialing', toNumber: '+16195551234' })).toBe(false);
-    expect(isNextEnabled(null)).toBe(false);
   });
 });
 
@@ -407,6 +414,32 @@ describe('controls', () => {
 });
 
 /**
+ * Fix round 1, finding 2: the session-level Pause/Resume button must not
+ * render while the hung-up choice (Redial/Resume, see `ItemControls`) is
+ * showing — otherwise the panel shows two buttons that could both say
+ * "Resume". A mutation that always rendered this button passed the full
+ * suite at 80/80, because the old inline `{!hungUp && ...}` in `DialerPanel`
+ * was never exercised directly. `SessionToggle` fixes that: it is its own
+ * prop-only component, so this is a direct, renderToStaticMarkup-testable
+ * assertion.
+ */
+describe('SessionToggle — hidden while the hung-up choice is showing', () => {
+  const noop = () => {};
+
+  it('present, labeled by session status, when nothing is hung up', () => {
+    expect(renderToStaticMarkup(<SessionToggle status="active" hungUp={false} busy={false} onClick={noop} />))
+      .toContain('Pause');
+    expect(renderToStaticMarkup(<SessionToggle status="paused" hungUp={false} busy={false} onClick={noop} />))
+      .toContain('Resume');
+  });
+
+  it('absent once the prospect has hung up, whether the session is active or paused', () => {
+    expect(renderToStaticMarkup(<SessionToggle status="active" hungUp={true} busy={false} onClick={noop} />)).toBe('');
+    expect(renderToStaticMarkup(<SessionToggle status="paused" hungUp={true} busy={false} onClick={noop} />)).toBe('');
+  });
+});
+
+/**
  * The paused-run chain (spec §5.3): `redialCurrent`/`repNext` both no-op the
  * actual dial on a paused session, so Redial and Next ("Resume") must also
  * send `resume` there — the rep should never need a second click. `actionsFor`
@@ -455,6 +488,48 @@ describe('runSequence — stops the chain at the first failure', () => {
 });
 
 /**
+ * Fix round 1, finding 3: `controlBusy` must be held for the WHOLE chained
+ * request (e.g. Redial → `resume` on a paused run), not toggled false→true
+ * between the two — that gap let a second click double-fire mid-chain. This
+ * proves the ownership with a fake `send`/`setBusy` pair: `setBusy` must be
+ * called exactly twice — true once before anything sends, false once after
+ * the whole chain settles — never in between, regardless of how many
+ * actions run or whether one of them fails.
+ */
+describe('runControlsSequence — busy is held across the whole chain, not toggled per action', () => {
+  it('sets busy true once before the chain and false once after — never in between', async () => {
+    const busyCalls: boolean[] = [];
+    const sendCalls: DialerControlAction[] = [];
+    const send = async (a: DialerControlAction): Promise<boolean> => { sendCalls.push(a); return true; };
+    const setBusy = (b: boolean) => busyCalls.push(b);
+
+    expect(await runControlsSequence(['redial', 'resume'], send, setBusy)).toBe(true);
+    expect(busyCalls).toEqual([true, false]);
+    expect(sendCalls).toEqual(['redial', 'resume']);
+  });
+
+  it('still clears busy exactly once when the first action fails — no second send, no busy flicker', async () => {
+    const busyCalls: boolean[] = [];
+    const sendCalls: DialerControlAction[] = [];
+    const send = async (a: DialerControlAction): Promise<boolean> => { sendCalls.push(a); return false; };
+    const setBusy = (b: boolean) => busyCalls.push(b);
+
+    expect(await runControlsSequence(['redial', 'resume'], send, setBusy)).toBe(false);
+    expect(busyCalls).toEqual([true, false]);
+    expect(sendCalls).toEqual(['redial']);
+  });
+
+  it('a single-action chain (an active run) still holds busy for that one request', async () => {
+    const busyCalls: boolean[] = [];
+    const send = async () => true;
+    const setBusy = (b: boolean) => busyCalls.push(b);
+
+    expect(await runControlsSequence(['skip'], send, setBusy)).toBe(true);
+    expect(busyCalls).toEqual([true, false]);
+  });
+});
+
+/**
  * The other half of the fix: the panel only LEARNS a record connected by
  * polling, so a 2 s cadence adds up to 2 s before the pop. While a dial is in
  * flight — the only time the next poll can flip the pop — poll every second.
@@ -497,7 +572,7 @@ describe('Tasks in the picker', () => {
 describe('confirmLine — the confirm block before the first ring', () => {
   it('reads like the spec example: dialable count first, then what is left out', () => {
     expect(confirmLine(202, 4, { already_worked: 9, blocked: 2 }))
-      .toBe('187 will be dialed · 9 already worked · 4 no number · 2 blocked');
+      .toBe('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
   });
   it('omits zero parts and folds every consent reason into "blocked"', () => {
     expect(confirmLine(10, 0)).toBe('10 will be dialed');
@@ -517,6 +592,9 @@ describe('skip labels for the cadence rules', () => {
   it('folds daily_cap_unverified into the same "daily limit (state law)" figure', () => {
     expect(confirmLine(10, 0, { daily_cap: 1, daily_cap_unverified: 2 }))
       .toBe('7 will be dialed · 3 daily limit (state law)');
+  });
+  it('folds already_worked and cooldown into one "called in the last 3 h" figure — same 3-hour rule, one number', () => {
+    expect(confirmLine(10, 0, { already_worked: 2, cooldown: 1 })).toBe('7 will be dialed · 3 called in the last 3 h');
   });
 });
 
@@ -629,7 +707,7 @@ describe('ConfirmBlock (SSR)', () => {
   };
   it('shows the breakdown line, Start dialing, and the way out', () => {
     const html = renderToStaticMarkup(<ConfirmBlock view={view} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} />);
-    expect(html).toContain('187 will be dialed · 9 already worked · 4 no number · 2 blocked');
+    expect(html).toContain('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
     expect(html).toContain('Start dialing');
     expect(html).toContain('Choose a different list');
   });
