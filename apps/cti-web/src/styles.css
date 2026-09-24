@@ -323,6 +323,9 @@ label.lbl, .kicker {
 .cdot.warn { background: var(--warn); }
 .cdot.bad { background: var(--bad); }
 .cdot.dim { background: var(--text-dim); }
+/* The prospect hung up (dialer "They hung up" card) — a decision waiting on
+ * the rep, not a failure, so it reads as red but softer than `.cdot.bad`. */
+.cdot.hangup { background: color-mix(in srgb, var(--bad) 55%, var(--text-dim)); }
 
 /* Empty / loading states */
 .empty-state {

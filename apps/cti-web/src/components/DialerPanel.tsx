@@ -82,22 +82,31 @@ export function progressLabel(counts: DialerSessionCounts): string {
 }
 
 /**
- * Pure — the creation-stamped arithmetic the confirm block and the run line
- * share. Every input is fixed at queue build, so neither line drifts while the
- * rep watches: `firstPassTotal` counts attempt-1 rows only (an attempt-2 retry
- * row appended mid-run would inflate a live total), `unreachable` is fixed at
- * creation, and only the creation-stamped breakdown keys are read — an
- * out-of-hours skip the engine stamps at minute 40 adds a key this ignores.
+ * Pure — the arithmetic the confirm block and the run line share.
+ * `firstPassTotal` counts attempt-1 rows only (an attempt-2 retry row
+ * appended mid-run would inflate a live total) and `unreachable` is fixed at
+ * creation. Most breakdown keys read here are creation-stamped (already
+ * worked, the skip-on-dialer flag, consent), so neither line drifts mid-run —
+ * an out-of-hours skip the engine stamps at minute 40 adds a key this
+ * ignores. The three cadence reasons — `cooldown`, `daily_cap` (folded
+ * together with the unverified estimate `daily_cap_unverified` — the rep
+ * needs one number, not two), and `in_progress_elsewhere` — are the
+ * exception: the engine can stamp them mid-run too, and the rep is meant to
+ * see them the moment they show up (spec §5, skip labels).
  */
 export function queueParts(firstPassTotal: number, unreachable: number, breakdown?: Record<string, number>): {
-  total: number; alreadyWorked: number; skipOnDialer: number; consent: number; unreachable: number; dialing: number;
+  total: number; alreadyWorked: number; skipOnDialer: number; consent: number; unreachable: number;
+  cooldown: number; dailyCap: number; inProgressElsewhere: number; dialing: number;
 } {
   const alreadyWorked = breakdown?.already_worked ?? 0;
   const skipOnDialer = breakdown?.skip_on_dialer ?? 0;
   // Consent skips are creation-stamped too (opted out / blocked list / DNC).
   const consent = (breakdown?.opted_out ?? 0) + (breakdown?.blocked ?? 0) + (breakdown?.dnc_blocked ?? 0);
-  const dialing = firstPassTotal - alreadyWorked - skipOnDialer - consent - unreachable;
-  return { total: firstPassTotal, alreadyWorked, skipOnDialer, consent, unreachable, dialing };
+  const cooldown = breakdown?.cooldown ?? 0;
+  const dailyCap = (breakdown?.daily_cap ?? 0) + (breakdown?.daily_cap_unverified ?? 0);
+  const inProgressElsewhere = breakdown?.in_progress_elsewhere ?? 0;
+  const dialing = firstPassTotal - alreadyWorked - skipOnDialer - consent - unreachable - cooldown - dailyCap - inProgressElsewhere;
+  return { total: firstPassTotal, alreadyWorked, skipOnDialer, consent, unreachable, cooldown, dailyCap, inProgressElsewhere, dialing };
 }
 
 /** Pure — the run line, e.g. "50 records · 18 already worked today · dialing 32". Zero parts omitted. */
@@ -107,6 +116,9 @@ export function queueLine(firstPassTotal: number, unreachable: number, breakdown
   if (q.alreadyWorked > 0) parts.push(`${q.alreadyWorked} already worked today`);
   if (q.skipOnDialer > 0) parts.push(`${q.skipOnDialer} skipped by flag`);
   if (q.consent > 0) parts.push(`${q.consent} blocked by consent`);
+  if (q.cooldown > 0) parts.push(`${q.cooldown} called in the last 3 h`);
+  if (q.dailyCap > 0) parts.push(`${q.dailyCap} daily limit (state law)`);
+  if (q.inProgressElsewhere > 0) parts.push(`${q.inProgressElsewhere} in progress in another run`);
   parts.push(`dialing ${q.dialing}`);
   return parts.join(' · ');
 }
@@ -123,6 +135,9 @@ export function confirmLine(firstPassTotal: number, unreachable: number, breakdo
   if (q.skipOnDialer > 0) parts.push(`${q.skipOnDialer} skipped by flag`);
   if (q.unreachable > 0) parts.push(`${q.unreachable} no number`);
   if (q.consent > 0) parts.push(`${q.consent} blocked`);
+  if (q.cooldown > 0) parts.push(`${q.cooldown} called in the last 3 h`);
+  if (q.dailyCap > 0) parts.push(`${q.dailyCap} daily limit (state law)`);
+  if (q.inProgressElsewhere > 0) parts.push(`${q.inProgressElsewhere} in progress in another run`);
   return parts.join(' · ');
 }
 
@@ -276,6 +291,54 @@ export function isNextEnabled(item: DialerCurrentItem | null): boolean {
   return item?.status === 'connected';
 }
 
+/**
+ * Pure — which controls the current item's row offers (spec §5). `null`,
+ * `pending` or `dialing` (nothing connected yet): Skip, same as always. A
+ * live connected call, prospect still on the line: End call or Next. Once
+ * the prospect has hung up (`prospectEndedAt` stamped by the engine's
+ * `handleDialOutcome`) the item stays `connected` and the run waits on the
+ * rep's choice: Redial or Resume (Next, relabeled — see `ItemControls`).
+ */
+export function controlsFor(item: DialerCurrentItem | null): Array<'skip' | 'end' | 'next' | 'redial'> {
+  if (item?.status !== 'connected') return ['skip'];
+  return item.prospectEndedAt ? ['redial', 'next'] : ['end', 'next'];
+}
+
+/**
+ * Pure — which dialerControl actions a control-set button sends, given the
+ * run's status. `redialCurrent` and `repNext` both no-op the actual dial on a
+ * paused session (the inserted copy, or the closed-out item, just sits
+ * `pending` — see engine.ts) so Redial and Next ("Resume") must also send
+ * `resume` on a paused run: the rep should never need a second click to get
+ * dialing again. Every other button — and these two on an already-active
+ * run — is a single action.
+ */
+export function actionsFor(
+  button: 'skip' | 'end' | 'next' | 'redial',
+  sessionStatus: DialerSession['status'],
+): DialerControlAction[] {
+  if (sessionStatus === 'paused' && (button === 'next' || button === 'redial')) {
+    return [button, 'resume'];
+  }
+  return [button];
+}
+
+/**
+ * Pure — run `actions` through `run` in order, stopping at the first
+ * failure: `run` (the panel's `runControl`) already shows that failure's
+ * error, so nothing after it should fire. Resolves true only when every
+ * action succeeded.
+ */
+export async function runSequence(
+  actions: DialerControlAction[],
+  run: (action: DialerControlAction) => Promise<boolean>,
+): Promise<boolean> {
+  for (const action of actions) {
+    if (!(await run(action))) return false;
+  }
+  return true;
+}
+
 /** Pure — pop the record ONLY for a live human. AMD hangs up machines before the
  *  rep is bridged, so `connected` ⇒ a person; voicemail never pops. */
 export function shouldScreenPop(item: DialerCurrentItem | null): boolean {
@@ -405,19 +468,63 @@ export function CurrentRecord({ item, listTotal }: { item: DialerCurrentItem; li
   const listLine = item.listPosition != null && listTotal != null
     ? `record ${item.listPosition + 1} of ${listTotal}`
     : null;
+  // The prospect hung up on a connected call (spec §5): name it plainly. A
+  // muted-red dot, not the sharp red `dotClassForItemStatus` gives a genuine
+  // miss (busy/failed/no_connect) — this isn't a failure, it's a decision
+  // (Redial or Resume) waiting on the rep.
+  const hungUp = Boolean(item.prospectEndedAt);
   return (
     <div className="section dp-current">
       <div className="kicker">Current record</div>
       {name && <div className="dp-current-name">{name}</div>}
       <div className={name ? 'dp-current-number dp-current-number-sub tnum' : 'dp-current-number tnum'}>{number}</div>
       <div className="dp-current-meta">
-        <span className={`cdot ${dotClassForItemStatus(item.status)}`} />
-        {item.objectType} · {itemStatusLabel(item)}
+        <span className={`cdot ${hungUp ? 'hangup' : dotClassForItemStatus(item.status)}`} />
+        {hungUp ? 'They hung up' : `${item.objectType} · ${itemStatusLabel(item)}`}
       </div>
       {listLine && <div className="dp-current-list-position">{listLine}</div>}
       {item.fromNumber && <div className="dp-current-from">from {formatE164(item.fromNumber)}</div>}
       <AttemptBadge attempt={item.attempt} />
     </div>
+  );
+}
+
+export interface ItemControlsProps {
+  /** The run's current item — null and every non-connected status render Skip. */
+  item: DialerCurrentItem | null;
+  busy: boolean;
+  onSkip: () => void;
+  onEnd: () => void;
+  onNext: () => void;
+  onRedial: () => void;
+}
+
+/**
+ * The current item's control buttons, chosen by `controlsFor` (spec §5):
+ * Skip while nothing is connected; End call + Next on a live call; Redial +
+ * Resume (Next, relabeled) once the prospect has hung up. Session-level
+ * Pause/Resume and Stop are rendered by the caller (`DialerPanel`), not
+ * here — the caller also hides Pause/Resume while the hung-up choice is
+ * showing, so "Resume" never appears twice.
+ */
+export function ItemControls({ item, busy, onSkip, onEnd, onNext, onRedial }: ItemControlsProps): JSX.Element {
+  const controls = controlsFor(item);
+  const hungUp = Boolean(item?.prospectEndedAt);
+  return (
+    <>
+      {controls.includes('skip') && (
+        <button className="btn" disabled={busy} onClick={onSkip}>Skip</button>
+      )}
+      {controls.includes('end') && (
+        <button className="btn" disabled={busy} onClick={onEnd}>End call</button>
+      )}
+      {controls.includes('redial') && (
+        <button className="btn" disabled={busy} onClick={onRedial}>Redial</button>
+      )}
+      {controls.includes('next') && (
+        <button className="btn primary" disabled={busy} onClick={onNext}>{hungUp ? 'Resume' : 'Next'}</button>
+      )}
+    </>
   );
 }
 
@@ -696,18 +803,30 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  const runControl = useCallback((action: DialerControlAction): Promise<void> => {
-    if (!sessionId) return Promise.resolve();
+  // Reports success/failure (not just void) so a chained press — see
+  // runControls/runSequence, decision §5.3 — can stop at the first failure
+  // instead of firing the next action into a run that just refused the last.
+  const runControl = useCallback((action: DialerControlAction): Promise<boolean> => {
+    if (!sessionId) return Promise.resolve(false);
     setControlBusy(true);
     setControlError(null);
     setConflictSessionId(null);
     return dialerControl(sessionId, action)
-      .then(() => pollNowRef.current())
+      .then(() => { pollNowRef.current(); return true; })
       .catch((e: unknown) => {
         setControlError(controlErrorMessage(e, `Could not ${action} the run.`));
+        return false;
       })
       .finally(() => setControlBusy(false));
   }, [sessionId]);
+
+  // A control-set button that may need more than one request on a paused run
+  // (Redial/Resume — see actionsFor) — runs them through runSequence so a
+  // refused first action shows its error and never fires the second.
+  const runControls = useCallback(
+    (actions: DialerControlAction[]): Promise<boolean> => runSequence(actions, runControl),
+    [runControl],
+  );
 
   // Await the stop control request BEFORE tearing down the parent's conference
   // leg (onStop) — calling onStop first would drop the rep's conference leg
@@ -799,6 +918,10 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const isTerminal = TERMINAL_STATUSES.has(view.session.status);
   const isPaused = view.session.status === 'paused';
   const pct = view.counts.total > 0 ? Math.round((processedCount(view.counts) / view.counts.total) * 100) : 0;
+  // The hung-up choice is showing (spec §5): hide the session Pause/Resume
+  // button (decision — no two buttons with the same label) so "Resume" can
+  // only mean the rep's choice, never a second, redundant control.
+  const hungUp = Boolean(view.currentItem?.prospectEndedAt);
 
   return (
     <div className="dialer-panel">
@@ -843,25 +966,25 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
             <div className="dp-waiting">Next retry in {retryCountdown(view.waitingRetry.nextRetryAt, now)}</div>
           )}
           <div className="row dp-controls">
-            <button
-              className="btn"
-              disabled={controlBusy}
-              onClick={() => runControl(pauseResumeAction(view.session.status))}
-            >
-              {isPaused ? 'Resume' : 'Pause'}
-            </button>
-            <button className="btn" disabled={controlBusy} onClick={() => runControl('skip')}>
-              Skip
-            </button>
+            {!hungUp && (
+              <button
+                className="btn"
+                disabled={controlBusy}
+                onClick={() => runControl(pauseResumeAction(view.session.status))}
+              >
+                {isPaused ? 'Resume' : 'Pause'}
+              </button>
+            )}
+            <ItemControls
+              item={view.currentItem}
+              busy={controlBusy}
+              onSkip={() => runControls(actionsFor('skip', view.session.status))}
+              onEnd={() => runControls(actionsFor('end', view.session.status))}
+              onNext={() => runControls(actionsFor('next', view.session.status))}
+              onRedial={() => runControls(actionsFor('redial', view.session.status))}
+            />
             <button className="btn danger" disabled={controlBusy} onClick={handleStop}>
               Stop
-            </button>
-            <button
-              className="btn primary"
-              disabled={controlBusy || !isNextEnabled(view.currentItem)}
-              onClick={() => runControl('next')}
-            >
-              Next
             </button>
           </div>
         </>

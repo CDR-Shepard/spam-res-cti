@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   progressLabel,
   queueLine,
+  queueParts,
   isNextEnabled,
   pauseResumeAction,
   shouldTeardownRun,
@@ -21,6 +22,10 @@ import {
   ConfirmBlock,
   conflictingSessionId,
   CurrentRecord,
+  ItemControls,
+  controlsFor,
+  actionsFor,
+  runSequence,
   pollDelayMs,
 } from './DialerPanel';
 import type { DialerControlAction, DialerCurrentItem, DialerSession, DialerSessionView } from '../dialer-api';
@@ -113,6 +118,27 @@ describe('queueLine', () => {
     };
     expect(queueLine(legacy.firstPassTotal ?? legacy.counts.total, legacy.counts.unreachable, legacy.skipBreakdown))
       .toBe('50 records · 18 already worked today · dialing 32');
+  });
+
+  it('also names the three cadence skip reasons, folding daily_cap_unverified into the daily limit', () => {
+    expect(queueLine(10, 0, { cooldown: 2, daily_cap: 1, daily_cap_unverified: 1, in_progress_elsewhere: 1 }))
+      .toBe('10 records · 2 called in the last 3 h · 2 daily limit (state law) · 1 in progress in another run · dialing 5');
+  });
+});
+
+describe('queueParts — the cadence skip reasons (spec §5)', () => {
+  it('folds daily_cap_unverified into dailyCap and subtracts all three cadence reasons from dialing', () => {
+    expect(queueParts(10, 0, { cooldown: 2, daily_cap: 1, daily_cap_unverified: 1, in_progress_elsewhere: 1 })).toEqual({
+      total: 10, alreadyWorked: 0, skipOnDialer: 0, consent: 0, unreachable: 0,
+      cooldown: 2, dailyCap: 2, inProgressElsewhere: 1, dialing: 5,
+    });
+  });
+
+  it('with no cadence keys, the new fields are zero and dialing is unaffected', () => {
+    expect(queueParts(50, 0, { already_worked: 18 })).toEqual({
+      total: 50, alreadyWorked: 18, skipOnDialer: 0, consent: 0, unreachable: 0,
+      cooldown: 0, dailyCap: 0, inProgressElsewhere: 0, dialing: 32,
+    });
   });
 });
 
@@ -318,6 +344,114 @@ describe('CurrentRecord (SSR) — the name is the headline the moment it dials',
       expect(html.indexOf('(619) 555-1234')).toBeLessThan(html.indexOf('Lead'));
     }
   });
+
+  it('once the prospect hangs up: the meta line reads "They hung up" with the muted-red dot, not the object/status line', () => {
+    const html = renderToStaticMarkup(
+      <CurrentRecord item={{ ...item, status: 'connected', prospectEndedAt: '2026-09-23T18:00:00Z' }} />,
+    );
+    expect(html).toContain('They hung up');
+    expect(html).toContain('cdot hangup');
+    expect(html).not.toContain('Lead ·');
+  });
+});
+
+/**
+ * The rep's decision point once a connected call ends: End call/Next while
+ * the prospect is still live, Redial/Resume once they've hung up (spec §5).
+ * `ItemControls` is a pure, prop-only component — same idiom as
+ * `ConfirmBlock` — so it renders via `renderToStaticMarkup` without needing
+ * to mount the whole panel or run its effects.
+ */
+describe('controls', () => {
+  const item: DialerCurrentItem = { id: 'i1', recordId: '00Q1', objectType: 'Lead', status: 'pending', toNumber: '+16195551234' };
+  const connected: DialerCurrentItem = { ...item, status: 'connected' };
+  const noop = () => {};
+  const render = renderToStaticMarkup;
+  const view = (currentItem: DialerCurrentItem) => (
+    <>
+      <CurrentRecord item={currentItem} />
+      <ItemControls item={currentItem} busy={false} onSkip={noop} onEnd={noop} onNext={noop} onRedial={noop} />
+    </>
+  );
+
+  it('on a live connected call: End call and Next', () => {
+    const html = render(view(connected));
+    expect(html).toContain('End call');
+    expect(html).toContain('>Next<');
+    expect(html).not.toContain('Redial');
+  });
+
+  it('after the prospect hung up: the card says so and the controls are Redial and Resume', () => {
+    const html = render(view({ ...connected, prospectEndedAt: '2026-09-23T18:00:00Z' }));
+    expect(html).toContain('They hung up');
+    expect(html).toContain('Redial');
+    expect(html).toContain('Resume');
+    expect(html).not.toContain('End call');
+  });
+
+  it('nothing connected yet (pending/dialing/null): Skip only', () => {
+    const dialingHtml = render(<ItemControls item={{ ...item, status: 'dialing' }} busy={false} onSkip={noop} onEnd={noop} onNext={noop} onRedial={noop} />);
+    expect(dialingHtml).toContain('Skip');
+    expect(dialingHtml).not.toContain('End call');
+    expect(dialingHtml).not.toContain('Redial');
+    expect(dialingHtml).not.toContain('>Next<');
+    expect(render(<ItemControls item={null} busy={false} onSkip={noop} onEnd={noop} onNext={noop} onRedial={noop} />)).toContain('Skip');
+  });
+
+  it('controlsFor is pure: dialing → [skip], connected → [end, next], hung up → [redial, next]', () => {
+    expect(controlsFor({ ...item, status: 'dialing' })).toEqual(['skip']);
+    expect(controlsFor(null)).toEqual(['skip']);
+    expect(controlsFor(connected)).toEqual(['end', 'next']);
+    expect(controlsFor({ ...connected, prospectEndedAt: 'x' })).toEqual(['redial', 'next']);
+  });
+});
+
+/**
+ * The paused-run chain (spec §5.3): `redialCurrent`/`repNext` both no-op the
+ * actual dial on a paused session, so Redial and Next ("Resume") must also
+ * send `resume` there — the rep should never need a second click. `actionsFor`
+ * is the pure planner; `runSequence` is what runs its output in order,
+ * stopping at the first failure (tested here with a fake `run`, since the
+ * file has no jsdom/click harness — see the file-level comment above).
+ */
+describe('actionsFor — the paused-run chain', () => {
+  it('chains next/redial with resume only on a paused run', () => {
+    expect(actionsFor('next', 'paused')).toEqual(['next', 'resume']);
+    expect(actionsFor('redial', 'paused')).toEqual(['redial', 'resume']);
+  });
+
+  it('is a single action on an active run', () => {
+    expect(actionsFor('next', 'active')).toEqual(['next']);
+    expect(actionsFor('redial', 'active')).toEqual(['redial']);
+  });
+
+  it('end and skip are always a single action, even on a paused run — End already pauses, and Skip never resumes anything', () => {
+    expect(actionsFor('end', 'paused')).toEqual(['end']);
+    expect(actionsFor('end', 'active')).toEqual(['end']);
+    expect(actionsFor('skip', 'paused')).toEqual(['skip']);
+  });
+});
+
+describe('runSequence — stops the chain at the first failure', () => {
+  it('runs every action in order when each succeeds', async () => {
+    const calls: DialerControlAction[] = [];
+    const fakeRun = async (a: DialerControlAction): Promise<boolean> => { calls.push(a); return true; };
+    expect(await runSequence(['redial', 'resume'], fakeRun)).toBe(true);
+    expect(calls).toEqual(['redial', 'resume']);
+  });
+
+  it('stops after the first failure and never sends what follows', async () => {
+    const calls: DialerControlAction[] = [];
+    const fakeRun = async (a: DialerControlAction): Promise<boolean> => { calls.push(a); return false; };
+    expect(await runSequence(['redial', 'resume'], fakeRun)).toBe(false);
+    expect(calls).toEqual(['redial']);
+  });
+
+  it('an empty action list trivially succeeds without calling run', async () => {
+    const fakeRun = vi.fn(async () => true);
+    expect(await runSequence([], fakeRun)).toBe(true);
+    expect(fakeRun).not.toHaveBeenCalled();
+  });
 });
 
 /**
@@ -372,6 +506,17 @@ describe('confirmLine — the confirm block before the first ring', () => {
   });
   it('shares its arithmetic with queueLine (same inputs, same dialable figure)', () => {
     expect(queueLine(202, 4, { already_worked: 9, blocked: 2 })).toContain('dialing 187');
+  });
+});
+
+describe('skip labels for the cadence rules', () => {
+  it('confirm line names the three new reasons', () => {
+    expect(confirmLine(10, 0, { cooldown: 2, daily_cap: 1, in_progress_elsewhere: 1 }))
+      .toBe('6 will be dialed · 2 called in the last 3 h · 1 daily limit (state law) · 1 in progress in another run');
+  });
+  it('folds daily_cap_unverified into the same "daily limit (state law)" figure', () => {
+    expect(confirmLine(10, 0, { daily_cap: 1, daily_cap_unverified: 2 }))
+      .toBe('7 will be dialed · 3 daily limit (state law)');
   });
 });
 
