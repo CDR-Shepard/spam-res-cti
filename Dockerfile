@@ -26,9 +26,10 @@ COPY apps/cti-desktop/package.json apps/cti-desktop/package.json
 COPY apps/outreach-web/package.json apps/outreach-web/package.json
 RUN npm ci --include=dev
 
-# Build the API and the softphone bundle it serves.
+# Build the API and the softphone bundle it serves. Packages first: cti-web
+# now imports @cti/contracts, so its dist must exist before the web build.
 COPY . .
-RUN npm run build:web && npm run build:api
+RUN npm run build:packages && npm run build:web && npm run build:api
 
 # Hosts inject the listen port via PORT (config honors it); 4000 is the default.
 EXPOSE 4000

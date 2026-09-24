@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@cti/auth": "*",
+    "@cti/contracts": "*",
     "@cti/db": "*",
     "@cti/firewall": "*",
     "@cti/phone": "*",
