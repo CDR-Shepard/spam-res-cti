@@ -1,4 +1,4 @@
-import { and, eq, ne, sql } from 'drizzle-orm';
+import { and, eq, isNull, ne, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 import { DAILY_CAP_WINDOW_MS } from '@cti/firewall';
 import type { DialerItem } from './session-store.js';
@@ -580,12 +580,101 @@ export async function repNext(sessionId: string, deps: EngineDeps): ReturnType<t
   return advanceSession(sessionId, deps);
 }
 
+/**
+ * Rep-requested redial: the prospect hung up (or the rep chooses to try them
+ * again) on a CONNECTED item. Closes that item out and queues a fresh copy of
+ * the same person to dial NEXT — sharing the item's ordinal so
+ * `nextEligiblePendingItem` picks it before the rest of the queue — dialing
+ * the number that just connected (`item.toNumber`), linked back by
+ * `redialOf` for the run history.
+ *
+ * Goes through `advanceSession`, so the redial copy still passes every dial-
+ * time gate: the 24-hour legal cap and `in_progress_elsewhere`. It is exempt
+ * from the 3-hour cooldown by construction (same session, same live run) —
+ * not by any special-casing here.
+ *
+ * A no-op (delegates straight to `advanceSession`, no insert) when nothing is
+ * connected — a still-`dialing` item, or nothing in flight at all. The rep's
+ * Redial button only appears on a connected call, but a race (the prospect's
+ * leg ending a beat before the click lands) must never originate a stray
+ * dial.
+ */
+export async function redialCurrent(sessionId: string, deps: EngineDeps): ReturnType<typeof advanceSession> {
+  const items = await loadItems(deps, sessionId);
+  const item = inFlightItem(items);
+  if (!item || item.status !== 'connected') return advanceSession(sessionId, deps);
+  await setItem(deps, item.id, { status: 'done' });
+  await deps.db.insert(schema.dialerQueueItems).values({
+    sessionId,
+    ordinal: item.ordinal,
+    objectType: item.objectType,
+    recordId: item.recordId,
+    toNumber: item.toNumber,
+    fallbackNumber: null,
+    primaryNumber: item.primaryNumber,
+    secondaryNumber: item.secondaryNumber,
+    taskId: item.taskId,
+    followupEligible: item.followupEligible,
+    displayName: item.displayName,
+    listPosition: item.listPosition,
+    attempt: item.attempt,
+    status: 'pending',
+    redialOf: item.id,
+  });
+  return advanceSession(sessionId, deps);
+}
+
+/**
+ * Rep-requested End call: hang up the prospect who is still on the line and
+ * pause the run — the rep chose to stop rather than Redial or let the queue
+ * continue. A no-op (returns the session's current status, originates
+ * nothing) on a session that is not `active`, matching `pauseSession`'s
+ * terminal-status guard.
+ *
+ * ORDER — settle the item done BEFORE hanging up (skipCurrent's rule, same as
+ * `repNext` above): the terminal callback from the hangup must find a
+ * settled row, not a `connected` one it would stamp as a prospect hang-up.
+ */
+export async function endCurrent(sessionId: string, deps: EngineDeps): Promise<{ action: Session['status'] | 'idle' }> {
+  const [session, items] = await Promise.all([
+    deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) }),
+    loadItems(deps, sessionId),
+  ]);
+  if (!session) return { action: 'idle' };
+  if (session.status !== 'active') return { action: session.status };
+  const item = inFlightItem(items);
+  if (item && item.status === 'connected') {
+    await setItem(deps, item.id, { status: 'done' });
+    if (item.callId) {
+      try {
+        await deps.telephony.hangup(item.callId);
+      } catch (err) {
+        console.error('[dialer] end hangup failed', { itemId: item.id, err: (err as Error).message });
+      }
+    }
+  }
+  await setSession(deps, sessionId, 'paused');
+  return { action: 'paused' };
+}
+
 export async function handleDialOutcome(
   callId: string,
   outcome: DialOutcome,
   deps: EngineDeps,
 ): Promise<void> {
   const item = await deps.db.query.dialerQueueItems.findFirst({ where: eq(schema.dialerQueueItems.callId, callId) });
+  // The prospect's leg ended on a CONNECTED call: the person hung up. Stamp it
+  // and stop — the rep chooses Redial or Resume (spec §5). Never advance, never
+  // dial. `outcome !== 'connected'` excludes the duplicate async-AMD 'human'
+  // re-delivery for the same call, which arrives as `connected`, not a hangup.
+  // Only a null stamp is written (JS guard AND the WHERE's `isNull`), so a
+  // redelivered terminal callback for an already-stamped item is a no-op.
+  if (item?.status === 'connected' && item.prospectEndedAt == null && outcome !== 'connected') {
+    await deps.db.update(schema.dialerQueueItems)
+      .set({ prospectEndedAt: deps.nowUtc, updatedAt: new Date() })
+      .where(and(eq(schema.dialerQueueItems.id, item.id), isNull(schema.dialerQueueItems.prospectEndedAt)));
+    return;
+  }
   if (!item || item.status !== 'dialing') return;
   const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, item.sessionId) });
   if (!session) return;

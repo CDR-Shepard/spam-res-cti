@@ -153,3 +153,76 @@ describe('GET /dialer/sessions/:id — listContext', () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+/**
+ * Task 11's new session controls. `redialCurrent`/`endCurrent` themselves —
+ * the ordering (settle-before-hangup), the redial insert's fields, the
+ * connected-only guard — are pinned exhaustively in `dialer/engine.test.ts`;
+ * this harness only proves the ROUTE wires them up behind the same ownership
+ * gate as `/next` (`requireOwnedSession`). Each scenario below picks a
+ * non-`active` session status (or an empty queue) so the engine call resolves
+ * without ever reaching `deps.db.transaction` or `deps.telephony` — neither of
+ * which this file's minimal `@cti/db` mock or `buildEngineDeps()`'s real
+ * `TwilioDialerTelephony` can serve in a unit test.
+ */
+describe('POST /dialer/sessions/:id/redial', () => {
+  const REP = { userId: 'U-ME', orgId: 'O1', email: 'me@x.com', isAdmin: false, powerDialerEnabled: true };
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    state.authedUser = REP;
+    state.jobs = [];
+    state.positionRows = [];
+    app = Fastify();
+    await registerDialerRoutes(app);
+    await app.ready();
+  });
+  afterEach(async () => { await app.close(); });
+
+  const post = (id: string) => app.inject({ method: 'POST', url: `/dialer/sessions/${id}/redial`, headers: { authorization: 'Bearer t' } });
+
+  it('an owned session with nothing connected calls through to the engine (redialCurrent -> advanceSession)', async () => {
+    state.session = { id: 'S1', orgId: 'O1', userId: 'U-ME', status: 'ready' };
+    state.items = [];
+    const res = await post('S1');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, action: 'idle' });
+  });
+
+  it('a session belonging to someone else 404s', async () => {
+    state.session = null; // loadOwnedSession's scoped lookup finds nothing
+    const res = await post('S-OTHER');
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('POST /dialer/sessions/:id/end', () => {
+  const REP = { userId: 'U-ME', orgId: 'O1', email: 'me@x.com', isAdmin: false, powerDialerEnabled: true };
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    state.authedUser = REP;
+    state.jobs = [];
+    state.positionRows = [];
+    app = Fastify();
+    await registerDialerRoutes(app);
+    await app.ready();
+  });
+  afterEach(async () => { await app.close(); });
+
+  const post = (id: string) => app.inject({ method: 'POST', url: `/dialer/sessions/${id}/end`, headers: { authorization: 'Bearer t' } });
+
+  it('an owned, non-active session calls through to the engine and reports its status (no-op guard)', async () => {
+    state.session = { id: 'S1', orgId: 'O1', userId: 'U-ME', status: 'ready' };
+    state.items = [];
+    const res = await post('S1');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, action: 'ready' });
+  });
+
+  it('a session belonging to someone else 404s', async () => {
+    state.session = null; // loadOwnedSession's scoped lookup finds nothing
+    const res = await post('S-OTHER');
+    expect(res.statusCode).toBe(404);
+  });
+});

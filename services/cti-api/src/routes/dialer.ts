@@ -9,6 +9,8 @@
  *  POST /dialer/sessions/:id/skip     → skip the in-flight item, then advance
  *  POST /dialer/sessions/:id/stop     → hang up + stop the session outright
  *  POST /dialer/sessions/:id/next     → rep-initiated "next" after a connected call
+ *  POST /dialer/sessions/:id/redial   → rep-requested redial of the person on a connected call
+ *  POST /dialer/sessions/:id/end      → rep-requested End call: hang up the prospect, pause the run
  *
  *  Twilio-facing power-dialer call webhooks (signature-validated, NOT auth'd —
  *  Twilio calls these directly, see TwilioDialerTelephony#originate):
@@ -40,6 +42,8 @@ import {
   startSession,
   stopSession,
   repNext,
+  redialCurrent,
+  endCurrent,
   handleDialOutcome,
   type EngineDeps,
 } from '../dialer/engine.js';
@@ -383,6 +387,25 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     const owned = await requireOwnedSession(req, reply);
     if (!owned) return;
     const result = await repNext(owned.session.id, buildEngineDeps());
+    return { ok: true, ...result };
+  });
+
+  // The prospect hung up (or the rep wants another shot) on a connected call:
+  // queue the same person to dial again next. Gated like every other session
+  // control above — see requireOwnedSession.
+  app.post('/dialer/sessions/:id/redial', async (req, reply) => {
+    const owned = await requireOwnedSession(req, reply);
+    if (!owned) return;
+    const result = await redialCurrent(owned.session.id, buildEngineDeps());
+    return { ok: true, ...result };
+  });
+
+  // The rep chose to end the call while the prospect is still on the line:
+  // hang up and pause the run.
+  app.post('/dialer/sessions/:id/end', async (req, reply) => {
+    const owned = await requireOwnedSession(req, reply);
+    if (!owned) return;
+    const result = await endCurrent(owned.session.id, buildEngineDeps());
     return { ok: true, ...result };
   });
 

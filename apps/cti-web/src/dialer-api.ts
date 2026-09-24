@@ -33,6 +33,11 @@ export interface DialerCurrentItem {
    *  view it came from — NOT the queue ordinal, which rotation changes. Null
    *  or absent: not a list-view run, or an older server. */
   listPosition?: number | null;
+  /** Set the instant the prospect's leg ended on a connected call — the rep
+   *  never auto-redials; they choose Redial or Resume (spec §5). Null while
+   *  the call is still live, or the run hasn't reached this item; absent on
+   *  an older server. */
+  prospectEndedAt?: string | null;
 }
 
 export interface DialerSession {
@@ -66,7 +71,7 @@ export interface DialerSessionView {
   listContext?: { total: number; startedFrom: number; workedBy: string[] } | null;
 }
 
-export type DialerControlAction = 'start' | 'pause' | 'resume' | 'skip' | 'stop' | 'next';
+export type DialerControlAction = 'start' | 'pause' | 'resume' | 'skip' | 'stop' | 'next' | 'redial' | 'end';
 export type DialerObjectType = 'Lead' | 'Opportunity' | 'Task';
 export const OBJECT_LABELS: Record<DialerObjectType, string> = {
   Lead: 'Leads',

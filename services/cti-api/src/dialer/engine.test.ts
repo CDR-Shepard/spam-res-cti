@@ -243,6 +243,8 @@ import {
   startSession,
   stopSession,
   repNext,
+  redialCurrent,
+  endCurrent,
   type EngineDeps,
 } from './engine.js';
 
@@ -1041,6 +1043,109 @@ describe('repNext', () => {
     await repNext('S1', deps);
     expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
     expect(seen).toEqual([true]);
+  });
+});
+
+describe('handleDialOutcome — the prospect hangs up on a connected call', () => {
+  beforeEach(() => { _target = {}; });
+  it('stamps prospect_ended_at, does NOT advance, does NOT redial', async () => {
+    const items = [
+      { id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null },
+    ];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'hangup', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ prospectEndedAt: expect.any(Date) }) });
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+  it('a duplicate callback does not stamp twice (only a null prospect_ended_at is written)', async () => {
+    // The item is already stamped (a first callback already ran) but still
+    // `connected` — the rep hasn't chosen Redial/Resume yet. A redelivered
+    // terminal callback for the same call must be a total no-op: the JS guard
+    // (`prospectEndedAt == null`) refuses to re-enter the stamp branch, and
+    // falls into the `status !== 'dialing'` early return below it.
+    const items = [
+      { id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', prospectEndedAt: new Date() },
+    ];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'hangup', deps);
+    expect(fdb._writes).toEqual([]);
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+  it('a duplicate async-AMD "human" for the same call arrives as connected outcome and is not treated as a hang-up', async () => {
+    // Verified fact from the brief: a duplicate async-AMD human classification
+    // re-delivers as the `connected` outcome, never `hangup`. The stamp branch
+    // explicitly excludes `outcome === 'connected'` so this never mis-stamps a
+    // still-live call as ended.
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ prospectEndedAt: expect.any(Date) }) });
+  });
+});
+
+describe('redialCurrent', () => {
+  beforeEach(() => { _target = {}; });
+  it('closes the connected item as done and dials the same person again next, on the number that connected, linked by redial_of', async () => {
+    const items = [{
+      id: 'i1', ordinal: 3, status: 'connected', toNumber: '+12135550199',
+      primaryNumber: '+16195550100', secondaryNumber: '+12135550199',
+      recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1,
+      prospectEndedAt: new Date(), displayName: 'Ada', taskId: null,
+      followupEligible: true, listPosition: 42,
+    }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await redialCurrent('S1', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+    expect(fdb._inserts).toContainEqual({ values: expect.objectContaining({
+      recordId: '00Q1', toNumber: '+12135550199', ordinal: 3, attempt: 1,
+      redialOf: 'i1', displayName: 'Ada', status: 'pending', listPosition: 42,
+    }) });
+  });
+  it('is a no-op (returns the session status) when nothing is connected', async () => {
+    // Nothing connected — a still-`dialing` item counts as in-flight but is
+    // not eligible for redial, so this delegates straight to advanceSession,
+    // which finds the in-flight item and waits. No insert either way.
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await redialCurrent('S1', deps);
+    expect(r).toEqual({ action: 'waiting' });
+    expect(fdb._inserts).toEqual([]);
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+});
+
+describe('endCurrent', () => {
+  beforeEach(() => { _target = {}; });
+  it('stamps the item done BEFORE hanging up, then pauses the run and does not advance', async () => {
+    const items = [
+      { id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null },
+    ];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const seen: boolean[] = [];
+    deps.telephony.hangup = vi.fn(async () => { seen.push(fdb._writes.some((w: any) => w.patch.status === 'done')); });
+    expect(await endCurrent('S1', deps)).toEqual({ action: 'paused' });
+    expect(seen).toEqual([true]);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'paused' }) });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+  it('is a no-op on a session that is not active (ready, paused, stopped, or done) — never originates', async () => {
+    for (const status of ['ready', 'paused', 'stopped', 'done']) {
+      const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+      const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status }, items); deps.db = fdb;
+      expect(await endCurrent('S1', deps)).toEqual({ action: status });
+      expect(deps.telephony.hangup).not.toHaveBeenCalled();
+      expect(fdb._writes).toEqual([]);
+    }
+  });
+  it('is a no-op (still pauses the run, hangs up nothing) when no item is connected', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    expect(await endCurrent('S1', deps)).toEqual({ action: 'paused' });
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'paused' }) }]);
   });
 });
 
