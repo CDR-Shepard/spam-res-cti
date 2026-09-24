@@ -932,6 +932,17 @@ describe('expireAbandonedSessions — free the one-active-session slot (C1)', ()
     const d = deps({ db: expireDb([session()], [[{ status: 'connected', prospectEndedAt: null }]]) });
     expect(await expireAbandonedSessions(d)).toBe(0);
   });
+
+  it('a dialing item with a very old prospectEndedAt does NOT get reaped (status guard is mandatory)', async () => {
+    const d = deps({ db: expireDb([session()], [[{ status: 'dialing', prospectEndedAt: new Date(NOW.getTime() - 11 * 60_000) }]]) });
+    expect(await expireAbandonedSessions(d)).toBe(0);
+    expect(d.stop).not.toHaveBeenCalled();
+  });
+
+  it('a connected item whose prospect hung up exactly 10 minutes ago still counts as presence (boundary is >)', async () => {
+    const d = deps({ db: expireDb([session()], [[{ status: 'connected', prospectEndedAt: new Date(NOW.getTime() - 10 * 60_000) }]]) });
+    expect(await expireAbandonedSessions(d)).toBe(0);
+  });
 });
 
 describe('completeTasks — a vanished PRIMARY never strands its siblings', () => {
