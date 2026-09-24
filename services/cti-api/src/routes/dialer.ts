@@ -80,13 +80,18 @@ const TWIML_DIALER_ANSWER_HOLD = '<?xml version="1.0" encoding="UTF-8"?><Respons
 const TWIML_EMPTY = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
 
 /**
- * Terminal Twilio call statuses and the reason each stamps on a still-`dialing`
- * item. `completed` is the one that needs care: it fires for EVERY ended call.
- * A bridged conversation the rep finished is `connected` by then, and a machine
- * AMD hung up is `no_connect` by then (see onDialerAmd's ordering) — the engine
- * no-ops both. What remains is a `dialing` item whose call ended: the callee
- * answered and hung up before AMD classified. Before this mapping that item
- * stayed `dialing` forever and the run waited on it until the rep pressed Skip.
+ * Terminal Twilio call statuses and the reason each stamps on a still-
+ * `dialing` item — or, since Task 11, the hang-up stamp on a still-`connected`
+ * one. `completed` is the one that needs care: it fires for EVERY ended call.
+ * A machine AMD hung up is `no_connect` by then (see onDialerAmd's ordering) —
+ * the engine no-ops that. A bridged conversation the rep is STILL ON stays
+ * `connected` until Next/Redial/End settles it, so its `completed` callback is
+ * NOT a no-op any more: it is what stamps `prospect_ended_at`
+ * (handleDialOutcome's hang-up-stamp branch) when the prospect is the one who
+ * hangs up. What else remains is a `dialing` item whose call ended: the callee
+ * answered and hung up before AMD classified. Before the original mapping
+ * existed that item stayed `dialing` forever and the run waited on it until
+ * the rep pressed Skip.
  */
 const STATUS_OUTCOMES: ReadonlyMap<string, DialOutcome> = new Map([
   ['no-answer', 'no_answer'],
@@ -131,8 +136,11 @@ export async function onDialerAmd(
 /**
  * Call-status callback handler: a terminal status without ever reaching AMD
  * stamps its reason (see STATUS_OUTCOMES). Idempotent by construction —
- * `handleDialOutcome` no-ops for any item that isn't still 'dialing', so a
- * call AMD already classified is a harmless no-op here and its reason stands.
+ * `handleDialOutcome` only acts on a `dialing` item (settles the miss/connect)
+ * or a `connected` one not yet stamped (the hang-up stamp); every item it
+ * finds already settled — no matter which of those two paths got there first,
+ * AMD or this backstop — is a harmless no-op here and whatever already landed
+ * (reason or stamp) stands.
  */
 export async function onDialerStatus(
   body: Record<string, string>,
@@ -321,10 +329,11 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       skipBreakdown: skipBreakdown(items),
       missBreakdown: missBreakdown(items),
       // What the run STARTED with. `counts.total` grows mid-run (an attempt-2
-      // retry row is appended), which would make the inherited-day line drift
-      // upward while the rep watches it. Attempt-1 rows are exactly the queue
-      // creation built, so this figure is fixed for the life of the session.
-      firstPassTotal: items.filter((i) => i.attempt === 1).length,
+      // retry row, or a rep-requested Redial copy, is appended), which would
+      // make the inherited-day line drift upward while the rep watches it.
+      // Attempt-1 rows with no `redialOf` are exactly the queue creation
+      // built, so this figure is fixed for the life of the session.
+      firstPassTotal: items.filter((i) => i.attempt === 1 && i.redialOf == null).length,
       currentItem: current,
       waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
       rollovers: rolloverSummary(jobs),

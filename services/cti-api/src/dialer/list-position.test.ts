@@ -119,6 +119,14 @@ describe('listContextFor', () => {
     expect(readShared).toHaveBeenCalledOnce();
   });
 
+  it('a redial copy (attempt 1, redialOf set) is excluded from `total` — Task 11 fix-round-1 Minor: it is not part of the queue creation built, same as an attempt-2 retry', async () => {
+    const withRedial = [...items, { attempt: 1, ordinal: 4, listPosition: 87, redialOf: 'i1' }];
+    const got = await listContextFor(
+      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready' }, withRedial, 'U-ME', new Date(), vi.fn(async () => null),
+    );
+    expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
+  });
+
   /**
    * The controller decision this whole function exists to satisfy: the panel
    * polls every 1-2s, and `workedBy`'s join is org-wide across every session

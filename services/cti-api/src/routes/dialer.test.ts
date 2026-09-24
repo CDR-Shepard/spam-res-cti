@@ -129,6 +129,20 @@ describe('GET /dialer/sessions/:id — listContext', () => {
     expect(res.json().listContext).toBeNull();
   });
 
+  it('firstPassTotal excludes a redial copy — Task 11 fix-round-1 Minor: a rep-requested Redial is not part of the queue creation built, same as an attempt-2 retry', async () => {
+    state.session = { id: 'S5', orgId: 'O1', userId: 'U-ME', status: 'active', listViewId: null };
+    state.items = [
+      { attempt: 1, ordinal: 0, listPosition: null, status: 'done' },
+      // The redial copy: attempt 1 (it is not a no-answer retry), but `redialOf`
+      // set — must not inflate the start-of-run count the rep sees.
+      { attempt: 1, ordinal: 0, listPosition: null, status: 'pending', redialOf: 'i0' },
+    ];
+
+    const res = await get('S5');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().firstPassTotal).toBe(1);
+  });
+
   /**
    * The controller decision this test exists to enforce: the panel polls this
    * route every 1-2s for the life of a run, and the grouped join is org-wide

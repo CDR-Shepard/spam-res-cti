@@ -71,6 +71,14 @@ import { schema } from '@cti/db';
 // reaching for `deps.db.query` there checks out a SECOND client while the tx
 // holds one, which deadlocks the pool under concurrent misses. Before this the
 // two stubs were interchangeable and the regression would have passed silently.
+//
+// Adjustment 7 (Task 11 fix-round-1 M3): the outer (non-transactional)
+// `update().set().where()` now also records `{ patch, where }` into
+// `_updateWheres`, the same way `txWrites` already does for transactional
+// updates. `_writes` stays patch-only (dozens of assertions match `{ patch }`
+// exactly) so this rides in its own array — needed to pin the hang-up stamp's
+// `isNull(prospect_ended_at)` guard as rendered SQL rather than only the
+// JS-level dedup check.
 /** `opts.otherSessions`: the rep's OTHER runs (with their items), for the
  *  cross-run checks — a paused run with a dial in flight blocks a new Start, and
  *  a paused run's teardown must not touch a live run's room. Filtered by the
@@ -89,6 +97,12 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
   // that the connect stamp is scoped to the number that connected, not to every
   // attempt row the item owns.
   const txWrites: Array<{ patch: Record<string, unknown>; where: unknown }> = [];
+  // OUTER (non-transactional) updates, with the `where` they were guarded by —
+  // mirrors `txWrites` but for `deps.db.update(...)` calls made outside a
+  // transaction. Needed to pin the hang-up stamp's `isNull(prospect_ended_at)`
+  // WHERE guard as rendered SQL, not just the JS-level `prospectEndedAt == null`
+  // dedup check (Task 11 fix-round-1 M3).
+  const updateWheres: Array<{ patch: Record<string, unknown>; where: unknown }> = [];
   let sessionOverride: Record<string, unknown> = {};
   const claimReturnsRows = opts.claimReturnsRows ?? true;
   const handle: any = {
@@ -98,6 +112,7 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
     _inserts: inserts,
     _txInserts: txInserts,
     _txWrites: txWrites,
+    _updateWheres: updateWheres,
     query: {
       dialerSessions: {
         findFirst: async () => ({ ...session, ...sessionOverride }),
@@ -136,6 +151,7 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
           where: (w: any) => {
             const apply = () => {
               writes.push({ patch });
+              updateWheres.push({ patch, where: w });
               Object.assign(_target, patch);
               if (_tbl === schema.dialerSessions) sessionOverride = { ...sessionOverride, ...patch };
             };
@@ -1058,6 +1074,24 @@ describe('handleDialOutcome — the prospect hangs up on a connected call', () =
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ prospectEndedAt: expect.any(Date) }) });
     expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
     expect(deps.telephony.originate).not.toHaveBeenCalled();
+    // M4c: the stamp branch must never insert anything either — not the
+    // pending item i2 (unaffected), not a redial copy, not a dial-attempt row.
+    expect(fdb._inserts).toEqual([]);
+    expect(fdb._txInserts).toEqual([]);
+  });
+  it('the WHERE guard is isNull(prospect_ended_at) — pinned as rendered SQL, not just the JS-level dedup check', async () => {
+    // M3: `item.prospectEndedAt == null` above already stops a second JS-level
+    // entry into this branch, but the WHERE clause is the real defense against
+    // two nearly-simultaneous callbacks racing each other in Postgres. Pin it
+    // as rendered SQL so a future refactor can't silently drop it while the
+    // JS guard keeps every existing test green.
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'hangup', deps);
+    const stampWrite = fdb._updateWheres.find((w: any) => 'prospectEndedAt' in w.patch);
+    expect(stampWrite).toBeDefined();
+    const { sql: text } = new PgDialect().sqlToQuery(stampWrite.where);
+    expect(text).toContain('"prospect_ended_at" is null');
   });
   it('a duplicate callback does not stamp twice (only a null prospect_ended_at is written)', async () => {
     // The item is already stamped (a first callback already ran) but still
@@ -1087,21 +1121,29 @@ describe('handleDialOutcome — the prospect hangs up on a connected call', () =
 
 describe('redialCurrent', () => {
   beforeEach(() => { _target = {}; });
-  it('closes the connected item as done and dials the same person again next, on the number that connected, linked by redial_of', async () => {
-    const items = [{
-      id: 'i1', ordinal: 3, status: 'connected', toNumber: '+12135550199',
-      primaryNumber: '+16195550100', secondaryNumber: '+12135550199',
-      recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1,
-      prospectEndedAt: new Date(), displayName: 'Ada', taskId: null,
-      followupEligible: true, listPosition: 42,
-    }];
-    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+  const redialable = (over: Record<string, unknown> = {}) => [{
+    id: 'i1', ordinal: 3, status: 'connected', toNumber: '+12135550199',
+    primaryNumber: '+16195550100', secondaryNumber: '+12135550199',
+    recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1,
+    prospectEndedAt: new Date(), displayName: 'Ada', taskId: null,
+    followupEligible: true, listPosition: 42, ...over,
+  }];
+  it('closes the connected item as done and dials the same person again next, on the number that connected, linked by redial_of — atomically, inside one transaction', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, redialable()); deps.db = fdb;
     await redialCurrent('S1', deps);
+    // Both the settle and the copy insert ride through the conditional-update
+    // transaction (the Minor "make the redial atomic" fix). The fake's `tx`
+    // update pushes onto the SAME shared `_writes` array the outer handle uses
+    // (by design — see the fakeDb doc comment), so `_txWrites` is the one that
+    // proves this specific write rode INSIDE the transaction rather than on
+    // the plain outer db handle; `_inserts` stays outer-only and must be empty.
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
-    expect(fdb._inserts).toContainEqual({ values: expect.objectContaining({
+    expect(fdb._txWrites).toContainEqual({ patch: expect.objectContaining({ status: 'done' }), where: expect.anything() });
+    expect(fdb._txInserts).toContainEqual({ values: expect.objectContaining({
       recordId: '00Q1', toNumber: '+12135550199', ordinal: 3, attempt: 1,
       redialOf: 'i1', displayName: 'Ada', status: 'pending', listPosition: 42,
     }) });
+    expect(fdb._inserts).toEqual([]);
   });
   it('is a no-op (returns the session status) when nothing is connected', async () => {
     // Nothing connected — a still-`dialing` item counts as in-flight but is
@@ -1112,27 +1154,92 @@ describe('redialCurrent', () => {
     const r = await redialCurrent('S1', deps);
     expect(r).toEqual({ action: 'waiting' });
     expect(fdb._inserts).toEqual([]);
+    expect(fdb._txInserts).toEqual([]);
     expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+  it('refuses a still-live connected call: a stale tab pressing Redial before the hang-up stamp lands must never end a live conversation', async () => {
+    // Same fixture as the happy path, minus `prospectEndedAt` — the prospect
+    // is still on the line. Without this guard, redialCurrent would mark a
+    // LIVE call 'done' and queue a copy while the prospect's leg is still in
+    // the rep's conference.
+    const items = redialable({ prospectEndedAt: null });
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await redialCurrent('S1', deps);
+    // advanceSession sees the item still `connected` (in flight) and waits.
+    expect(r).toEqual({ action: 'waiting' });
+    expect(fdb._writes).toEqual([]);
+    expect(fdb._txWrites).toEqual([]);
+    expect(fdb._inserts).toEqual([]);
+    expect(fdb._txInserts).toEqual([]);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+  it('refuses on a session that is not active or paused (e.g. stopped) — no copy is ever inserted', async () => {
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, redialable()); deps.db = fdb;
+    await redialCurrent('S1', deps);
+    expect(fdb._inserts).toEqual([]);
+    expect(fdb._txInserts).toEqual([]);
+  });
+  it('on a PAUSED session (Pause is available mid-conversation): inserts the copy and leaves the run paused — advanceSession never dials a non-active session', async () => {
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'paused' }, redialable()); deps.db = fdb;
+    const r = await redialCurrent('S1', deps);
+    expect(r).toEqual({ action: 'idle' });
+    expect(fdb._txInserts).toContainEqual({ values: expect.objectContaining({ redialOf: 'i1', status: 'pending' }) });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+  it('is atomic: a double-submitted Redial only ever inserts ONE copy (the conditional update guards it)', async () => {
+    // `claimReturnsRows: false` simulates the SAME conditional update losing
+    // the race — Postgres semantics for `UPDATE ... WHERE status = 'connected'
+    // AND prospect_ended_at IS NOT NULL RETURNING id` matching 0 rows because
+    // the first submission already flipped the item to 'done'. A paused
+    // session keeps advanceSession's OWN claim transaction out of the picture
+    // entirely, isolating this to redialCurrent's transaction alone.
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'paused' }, redialable(), { claimReturnsRows: false }); deps.db = fdb;
+    await redialCurrent('S1', deps);
+    expect(fdb._txInserts).toEqual([]);
   });
 });
 
 describe('endCurrent', () => {
   beforeEach(() => { _target = {}; });
-  it('stamps the item done BEFORE hanging up, then pauses the run and does not advance', async () => {
+  it('flips the session to PAUSED first, then settles the item done, then hangs up — closing the race with the 5s retry nudge', async () => {
+    // Fix-round-1 #1: between the item's done-write and the hangup, the OLD
+    // order left the session 'active' with nothing "in flight" (the item was
+    // already 'done', not 'connected'/'dialing') — exactly the window
+    // followup-worker.ts's startRetryNudgeLoop (or a concurrent advance) could
+    // dial the NEXT record into. Paused first closes it, mirroring
+    // stopSession's "flip first, hang up last" rule.
     const items = [
       { id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' },
       { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null },
     ];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
-    const seen: boolean[] = [];
-    deps.telephony.hangup = vi.fn(async () => { seen.push(fdb._writes.some((w: any) => w.patch.status === 'done')); });
+    const seen: Array<{ paused: boolean; done: boolean }> = [];
+    deps.telephony.hangup = vi.fn(async () => {
+      seen.push({
+        paused: fdb._writes.some((w: any) => w.patch.status === 'paused'),
+        done: fdb._writes.some((w: any) => w.patch.status === 'done'),
+      });
+    });
     expect(await endCurrent('S1', deps)).toEqual({ action: 'paused' });
-    expect(seen).toEqual([true]);
+    expect(seen).toEqual([{ paused: true, done: true }]);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'paused' }) });
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+  it('works on a PAUSED run too — Pause is available mid-conversation, so End must too: settles done, hangs up, stays paused', async () => {
+    // Fix-round-1 #2: a session can be `paused` with a `connected` item since
+    // Pause doesn't hang up the prospect. End must still work there, not just
+    // on `active`.
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'paused' }, items); deps.db = fdb;
+    expect(await endCurrent('S1', deps)).toEqual({ action: 'paused' });
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'paused' }) });
     expect(deps.telephony.originate).not.toHaveBeenCalled();
   });
-  it('is a no-op on a session that is not active (ready, paused, stopped, or done) — never originates', async () => {
-    for (const status of ['ready', 'paused', 'stopped', 'done']) {
+  it('is a no-op on a session that is not active or paused (ready, stopped, or done) — never originates', async () => {
+    for (const status of ['ready', 'stopped', 'done']) {
       const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
       const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status }, items); deps.db = fdb;
       expect(await endCurrent('S1', deps)).toEqual({ action: status });
@@ -1140,9 +1247,16 @@ describe('endCurrent', () => {
       expect(fdb._writes).toEqual([]);
     }
   });
-  it('is a no-op (still pauses the run, hangs up nothing) when no item is connected', async () => {
+  it('is a no-op write-wise (still pauses the run, hangs up nothing) when no item is connected — active session', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    expect(await endCurrent('S1', deps)).toEqual({ action: 'paused' });
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'paused' }) }]);
+  });
+  it('…and the same when the session is already paused with nothing connected (the pause write is a harmless no-op)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'paused' }, items); deps.db = fdb;
     expect(await endCurrent('S1', deps)).toEqual({ action: 'paused' });
     expect(deps.telephony.hangup).not.toHaveBeenCalled();
     expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'paused' }) }]);
@@ -1231,6 +1345,29 @@ describe('handleDialOutcome — rollover is per day, per owner', () => {
     await handleDialOutcome('CA1', 'voicemail', deps);
     expect(fdb._txInserts).toContainEqual({ values: expect.objectContaining({ attempt: 2, recordId: '00Q1' }) });
     expect(deps.enqueueRollover).toHaveBeenCalledTimes(1);
+  });
+  // Fix-round-1 #4 (controller ruling): a redial copy (redialOf set) must
+  // never get its own end-of-run retry. Without this exclusion, a missed
+  // redial would queue an attempt-2 row and the person who hung up would get
+  // an automatic THIRD dial — contradicting "a hang-up never auto-redials".
+  it('a missed REDIAL copy never gets its own attempt-2 requeue', async () => {
+    const deps = makeDeps({ orgDayStart: DAY, contactHistory: vi.fn(async () => [d('U1', 0)]) });
+    const fdb = fakeDb(baseSession, miss({ redialOf: 'i0' })); deps.db = fdb;
+    await handleDialOutcome('CA1', 'voicemail', deps);
+    expect(fdb._txInserts).toEqual([]);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect', outcome: 'voicemail' }) });
+  });
+  it('a missed redial copy still reads correctly for rollover: the ORIGINAL call connected, so the per-day rule (never connected) correctly does not roll — redialOf only blocks the requeue, not the rollover check', async () => {
+    // `d('U1', 3, true)` is the original call that connected before the
+    // prospect hung up; `d('U1', 0)` is the redial copy's own miss. Two dials
+    // today, but NOT "every one of them a miss" — rolloverDue requires that —
+    // so this must not enqueue, for the ordinary per-day reason, not because
+    // of anything redial-specific.
+    const deps = makeDeps({ orgDayStart: DAY, contactHistory: vi.fn(async () => [d('U1', 3, true), d('U1', 0)]) });
+    const fdb = fakeDb(baseSession, miss({ redialOf: 'i0' })); deps.db = fdb;
+    await handleDialOutcome('CA1', 'voicemail', deps);
+    expect(fdb._txInserts).toEqual([]); // still no requeue
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
   });
   it('ORDER: the history read (the person, since the org day) lands BEFORE the transaction opens; inside it, CAS → requeue insert → enqueue', async () => {
     // The read must never ride inside the transaction: it is two queries on the

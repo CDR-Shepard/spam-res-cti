@@ -1,4 +1,4 @@
-import { and, eq, isNull, ne, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 import { DAILY_CAP_WINDOW_MS } from '@cti/firewall';
 import type { DialerItem } from './session-store.js';
@@ -581,45 +581,81 @@ export async function repNext(sessionId: string, deps: EngineDeps): ReturnType<t
 }
 
 /**
- * Rep-requested redial: the prospect hung up (or the rep chooses to try them
- * again) on a CONNECTED item. Closes that item out and queues a fresh copy of
+ * Rep-requested redial: the prospect hung up on a CONNECTED item and the rep
+ * chose to try them again. Closes that item out and queues a fresh copy of
  * the same person to dial NEXT — sharing the item's ordinal so
  * `nextEligiblePendingItem` picks it before the rest of the queue — dialing
  * the number that just connected (`item.toNumber`), linked back by
  * `redialOf` for the run history.
  *
- * Goes through `advanceSession`, so the redial copy still passes every dial-
- * time gate: the 24-hour legal cap and `in_progress_elsewhere`. It is exempt
- * from the 3-hour cooldown by construction (same session, same live run) —
- * not by any special-casing here.
+ * Eligibility, all required:
+ *  - The in-flight item is `connected` AND already stamped `prospectEndedAt`
+ *    (by `handleDialOutcome`'s hang-up branch). Without the stamp check, a
+ *    stale tab pressing Redial while the NEXT record is live would mark that
+ *    still-connected call 'done' and queue a copy while the prospect's leg is
+ *    still in the rep's conference (fix-round-1 #3).
+ *  - The session is `active` OR `paused` — Pause doesn't hang up the
+ *    prospect, so a paused run can still have a connected item worth
+ *    redialing. A stopped/done/ready session must never gain a new row
+ *    (Minor d).
+ * Any other case is a no-op: delegates straight to `advanceSession`, which
+ * itself no-ops (no insert, no originate) for a non-eligible in-flight item
+ * or a non-active session.
  *
- * A no-op (delegates straight to `advanceSession`, no insert) when nothing is
- * connected — a still-`dialing` item, or nothing in flight at all. The rep's
- * Redial button only appears on a connected call, but a race (the prospect's
- * leg ending a beat before the click lands) must never originate a stray
- * dial.
+ * ATOMIC (Minor): the conditional update — matching the SAME facts just
+ * checked in JS — and the copy insert ride in ONE transaction, and the copy
+ * is inserted only if the update actually claimed the row. Belt-and-
+ * suspenders against a double-submitted Redial (two clicks, a retried
+ * request) inserting two copies of the same person.
+ *
+ * Goes through `advanceSession` at the end regardless, so the redial copy
+ * still passes every dial-time gate on an ACTIVE session: the 24-hour legal
+ * cap and `in_progress_elsewhere`. It is exempt from the 3-hour cooldown by
+ * construction (same session, same live run) — not by any special-casing
+ * here. On a PAUSED session `advanceSession` returns `{ action: 'idle' }`
+ * without dialing anything — the copy sits `pending` until the rep presses
+ * Resume.
  */
 export async function redialCurrent(sessionId: string, deps: EngineDeps): ReturnType<typeof advanceSession> {
-  const items = await loadItems(deps, sessionId);
+  const [session, items] = await Promise.all([
+    deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) }),
+    loadItems(deps, sessionId),
+  ]);
   const item = inFlightItem(items);
-  if (!item || item.status !== 'connected') return advanceSession(sessionId, deps);
-  await setItem(deps, item.id, { status: 'done' });
-  await deps.db.insert(schema.dialerQueueItems).values({
-    sessionId,
-    ordinal: item.ordinal,
-    objectType: item.objectType,
-    recordId: item.recordId,
-    toNumber: item.toNumber,
-    fallbackNumber: null,
-    primaryNumber: item.primaryNumber,
-    secondaryNumber: item.secondaryNumber,
-    taskId: item.taskId,
-    followupEligible: item.followupEligible,
-    displayName: item.displayName,
-    listPosition: item.listPosition,
-    attempt: item.attempt,
-    status: 'pending',
-    redialOf: item.id,
+  if (
+    !item || item.status !== 'connected' || item.prospectEndedAt == null ||
+    !session || (session.status !== 'active' && session.status !== 'paused')
+  ) {
+    return advanceSession(sessionId, deps);
+  }
+  await deps.db.transaction(async (tx) => {
+    const rows = await tx
+      .update(schema.dialerQueueItems)
+      .set({ status: 'done', updatedAt: new Date() })
+      .where(and(
+        eq(schema.dialerQueueItems.id, item.id),
+        eq(schema.dialerQueueItems.status, 'connected'),
+        isNotNull(schema.dialerQueueItems.prospectEndedAt),
+      ))
+      .returning({ id: schema.dialerQueueItems.id });
+    if (rows.length === 0) return; // lost the race to a double-submit — nothing to copy
+    await tx.insert(schema.dialerQueueItems).values({
+      sessionId,
+      ordinal: item.ordinal,
+      objectType: item.objectType,
+      recordId: item.recordId,
+      toNumber: item.toNumber,
+      fallbackNumber: null,
+      primaryNumber: item.primaryNumber,
+      secondaryNumber: item.secondaryNumber,
+      taskId: item.taskId,
+      followupEligible: item.followupEligible,
+      displayName: item.displayName,
+      listPosition: item.listPosition,
+      attempt: item.attempt,
+      status: 'pending',
+      redialOf: item.id,
+    });
   });
   return advanceSession(sessionId, deps);
 }
@@ -628,12 +664,22 @@ export async function redialCurrent(sessionId: string, deps: EngineDeps): Return
  * Rep-requested End call: hang up the prospect who is still on the line and
  * pause the run — the rep chose to stop rather than Redial or let the queue
  * continue. A no-op (returns the session's current status, originates
- * nothing) on a session that is not `active`, matching `pauseSession`'s
- * terminal-status guard.
+ * nothing) on a session that is neither `active` nor `paused` — Pause is
+ * available mid-conversation (it doesn't hang up the prospect), so a paused
+ * run can still have a connected item and End must work there too
+ * (fix-round-1 #2).
  *
- * ORDER — settle the item done BEFORE hanging up (skipCurrent's rule, same as
- * `repNext` above): the terminal callback from the hangup must find a
- * settled row, not a `connected` one it would stamp as a prospect hang-up.
+ * ORDER — pause the session FIRST, before touching the item or hanging up
+ * (mirrors `stopSession`'s "flip first, hang up last"). The OLD order
+ * (settle-then-hangup, session flipped last) left the session `active` with
+ * nothing yet "in flight" for the length of the item write and the awaited
+ * Twilio hangup — the item was already `done`, not `connected`/`dialing` —
+ * which is exactly the window the 5-second retry nudge
+ * (salesforce/followup-worker.ts `startRetryNudgeLoop` → `nudgeDueRetries` →
+ * `advanceSession`) or a concurrent advance could dial the NEXT record into
+ * (fix-round-1 #1). Paused first closes it: `advanceSession` no-ops for any
+ * non-active session. The pause write is a harmless no-op when the session
+ * was already `paused`.
  */
 export async function endCurrent(sessionId: string, deps: EngineDeps): Promise<{ action: Session['status'] | 'idle' }> {
   const [session, items] = await Promise.all([
@@ -641,7 +687,8 @@ export async function endCurrent(sessionId: string, deps: EngineDeps): Promise<{
     loadItems(deps, sessionId),
   ]);
   if (!session) return { action: 'idle' };
-  if (session.status !== 'active') return { action: session.status };
+  if (session.status !== 'active' && session.status !== 'paused') return { action: session.status };
+  await setSession(deps, sessionId, 'paused');
   const item = inFlightItem(items);
   if (item && item.status === 'connected') {
     await setItem(deps, item.id, { status: 'done' });
@@ -653,7 +700,6 @@ export async function endCurrent(sessionId: string, deps: EngineDeps): Promise<{
       }
     }
   }
-  await setSession(deps, sessionId, 'paused');
   return { action: 'paused' };
 }
 
@@ -736,10 +782,19 @@ export async function handleDialOutcome(
   //    irrelevant: a rep who stops after one pass and dials the person again
   //    three hours later rolls it then. One dial in a day leaves it open.
   // Both may happen for one miss: the retry is queued AND the task rolls.
+  //
+  // Fix-round-1 #4 (controller ruling): a REDIAL copy (`redialOf` set) never
+  // gets its own end-of-run retry. It already exists BECAUSE the person hung
+  // up on a connected call — requeuing a missed redial would give that same
+  // person an automatic THIRD dial, contradicting "a hang-up never
+  // auto-redials". The rollover check below is untouched: it reads the day's
+  // actual dial history, which already carries the earlier CONNECT, so
+  // `rolloverDue`'s "never connected" requirement correctly keeps it from
+  // rolling on its own.
   const attempt = item.attempt ?? 1; // a fixture/row missing `attempt` must not silently read as a second miss
   const retryTo = item.secondaryNumber ?? item.primaryNumber ?? item.toNumber;
   const sessionLive = session.status === 'active' || session.status === 'paused';
-  const requeue = attempt < 2 && retryTo != null && sessionLive;
+  const requeue = attempt < 2 && retryTo != null && sessionLive && item.redialOf == null;
   // Only a follow-up rolls over. Task runs dial whatever the rep's list holds
   // ("Check in", "Send quote"), and completing/copying one of those would
   // rewrite work the rollover rule was never meant to touch. Lead/Opp runs and

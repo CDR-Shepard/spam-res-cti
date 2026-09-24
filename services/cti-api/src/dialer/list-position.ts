@@ -106,13 +106,16 @@ export async function listStartPosition(
 export async function listContextFor(
   db: Db,
   session: { orgId: string; listViewId: string | null; status: string },
-  items: ReadonlyArray<{ attempt: number; ordinal: number; listPosition: number | null }>,
+  items: ReadonlyArray<{ attempt: number; ordinal: number; listPosition: number | null; redialOf?: string | null }>,
   requestingUserId: string,
   now: Date = new Date(),
   readShared: typeof listStartPosition = listStartPosition,
 ): Promise<{ total: number; startedFrom: number; workedBy: string[] } | null> {
   if (!session.listViewId) return null;
-  const total = items.filter((it) => it.attempt === 1).length;
+  // A redial copy is also excluded, same as an attempt-2 retry: it is a
+  // rep-requested extra dial, not part of the queue creation built from the
+  // list view (Task 11 fix-round-1 Minor).
+  const total = items.filter((it) => it.attempt === 1 && it.redialOf == null).length;
   const first = items.find((it) => it.ordinal === 0);
   const startedFrom = first?.listPosition ?? 0;
   let workedBy: string[] = [];
