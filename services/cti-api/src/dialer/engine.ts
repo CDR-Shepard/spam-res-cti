@@ -547,15 +547,28 @@ export async function stopSession(sessionId: string, deps: EngineDeps): Promise<
   return { action: 'stopped' };
 }
 
-/** The rep clicking "Next" after finishing a talk: close out the connected item, then advance. */
+/**
+ * The rep clicking "Next" after finishing a talk: close out the connected
+ * item, then advance.
+ *
+ * ORDER — settle the row BEFORE hanging up, then advance. Hanging up makes
+ * Twilio send that call's terminal `completed` status callback, which maps to
+ * the `hangup` outcome — the same one `handleDialOutcome`'s connected-hangup
+ * stamp reads as "the prospect hung up" and stamps `prospect_ended_at` for.
+ * Were the item still `connected` when that callback lands, the rep's own
+ * deliberate Next would be mis-stamped as a prospect hang-up. Settled first,
+ * the callback finds a `done` row and no-ops — same reasoning as
+ * `skipCurrent`'s stamp-then-hang-up.
+ */
 export async function repNext(sessionId: string, deps: EngineDeps): ReturnType<typeof advanceSession> {
   const items = await loadItems(deps, sessionId);
   const item = inFlightItem(items);
   if (item && item.status === 'connected') {
-    // Hang up the prospect BEFORE advancing — otherwise their leg stays in the
+    await setItem(deps, item.id, { status: 'done' });
+    // The prospect's leg must still be hung up — otherwise it stays in the
     // rep's conference (nothing else removes it) and the next prospect gets
     // bridged into the SAME room: the previous caller hears the next
-    // conversation and keeps billing. Mirrors skipCurrent.
+    // conversation and keeps billing.
     if (item.callId) {
       try {
         await deps.telephony.hangup(item.callId);
@@ -563,7 +576,6 @@ export async function repNext(sessionId: string, deps: EngineDeps): ReturnType<t
         console.error('[dialer] next hangup failed', { itemId: item.id, err: (err as Error).message });
       }
     }
-    await setItem(deps, item.id, { status: 'done' });
   }
   return advanceSession(sessionId, deps);
 }

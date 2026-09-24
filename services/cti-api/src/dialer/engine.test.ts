@@ -1027,6 +1027,21 @@ describe('repNext', () => {
     expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
     expect(r.action).toBe('waiting');
   });
+  it('settles the item done BEFORE hanging up — the hang-up stamp must not fire on the rep\'s own Next', async () => {
+    // Regression guard for the ORDER fix: hanging up makes Twilio send the
+    // `completed` status callback, which now maps to `hangup` in
+    // handleDialOutcome's connected-hangup stamp. If the item were still
+    // `connected` when that callback lands, it would read as "the prospect
+    // hung up" and stamp `prospect_ended_at` on a call the REP ended via
+    // Next. Settled first, the callback finds a `done` row and no-ops.
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const seen: boolean[] = [];
+    deps.telephony.hangup = vi.fn(async () => { seen.push(fdb._writes.some((w: any) => w.patch.status === 'done')); });
+    await repNext('S1', deps);
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(seen).toEqual([true]);
+  });
 });
 
 describe('handleDialOutcome — honest miss reasons', () => {
