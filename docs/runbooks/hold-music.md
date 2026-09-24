@@ -35,6 +35,23 @@ SELECT display_name, dialer_hold_music_choice, dialer_youtube_list_id, dialer_yo
   FROM users WHERE kind = 'human' ORDER BY 1;
 ```
 
+## Deploying (first release, migration 0043)
+
+1. Deploy off-hours. `preDeployCommand` runs 0043 while the old code still serves; the migration is additive, so the old code is unaffected.
+2. After the new deployment is live, run this once to close the overlap gap. A rep who switched hold music off in an old tab between the migration and go-live would otherwise hear Classical. The statement is idempotent.
+   ```sql
+   UPDATE users SET dialer_hold_music_choice = 'off' WHERE dialer_hold_music = false AND dialer_hold_music_choice = 'classical';
+   ```
+3. Check: the count of `choice = 'off'` equals the count of `dialer_hold_music = false`.
+4. Roll back by redeploying the previous image only. Never roll back the migration; the boolean is kept in step, so the old image works unchanged.
+
+Live checks, one rep, off-hours:
+- A preset other than Classical plays on the line and stops on answer.
+- YouTube in the standalone `/cti/` tab: it pauses on answer, stays paused on "They hung up", and resumes on the next ring. End call keeps it paused.
+- YouTube inside the Salesforce utility bar: does it resume by itself, or show "Press play to resume"?
+- Start a second run in the same tab and press play during the first ring. If it pauses by itself, the rep's own join beep is the cause. The fix is a short grace after each leg join, or `beep: false` on the rep leg.
+- Shuffle takes effect.
+
 ## Adding a preset
 
 It must be one of Twilio's `com.twilio.music.*` twimlet buckets. Three places change:
