@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import type { HoldMusicSetting } from '@cti/contracts';
 import { api, ApiError, clearSession, readSession, writeSession } from './api';
 import { holdMusicFromMe } from './hold-music-from-me';
+import { createLineAudio, watchLineVolume, type LineAudio } from './line-audio';
 import { startRingback, stopRingback } from './ringback';
 import { AdminPanel } from './components/AdminPanel';
 import { CallLog } from './components/CallLog';
@@ -283,6 +284,12 @@ export function App(): JSX.Element {
   // connectionRef, so joining/leaving it never touches phase/active/inCall and
   // never collides with a normal click-to-dial or inbound call's connection.
   const dialerConnRef = useRef<unknown>(null);
+  // One LineAudio for the whole App mount, not per-leg — a rejoin (recovery,
+  // or a fresh run) must keep whatever "was it quiet" state the player is
+  // mid-decision on. useRef only ever KEEPS the first call's result (later
+  // renders' createLineAudio() calls are discarded), so this never recreates
+  // the tracker on a re-render even though the expression runs every time.
+  const lineAudioRef = useRef<LineAudio>(createLineAudio());
   // Generation counter for power-dialer runs: incremented at the start of each
   // startPowerDial() and in handleDialerStop(). Used to guard against the race
   // where an in-flight connect() resolves AFTER a stop/new-start, preventing a
@@ -690,6 +697,11 @@ export function App(): JSX.Element {
         return false;
       }
       dialerConnRef.current = connection;
+      // In YouTube mode the line is silent while waiting, so the first sound on
+      // it means someone was connected — the player pauses on it. Every join
+      // (a fresh start AND a dropped-leg recovery) passes through here, so this
+      // is the one place that can wire every leg the run ever holds.
+      watchLineVolume(connection, lineAudioRef.current);
       keepMicAlive(connection as Parameters<typeof keepMicAlive>[0]);
       // The leg now survives each prospect leaving only via a server round trip
       // (see dialer-leg.ts). If it dies while the run is live, get the rep back
@@ -1384,6 +1396,8 @@ export function App(): JSX.Element {
       onStop={handleDialerStop}
       onComplete={handleDialerComplete}
       onDismiss={handleDialerDismiss}
+      holdMusic={holdMusicFromMe(me.user)}
+      lineAudio={lineAudioRef.current}
     />
   ) : (
     <div className="dialer">

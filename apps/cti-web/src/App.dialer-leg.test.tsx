@@ -36,6 +36,10 @@ class FakeConnection {
     this.handlers.set(event, [...(this.handlers.get(event) ?? []), cb]);
   }
   emit(event: string): void { for (const cb of this.handlers.get(event) ?? []) cb(); }
+  /** Task 8: pins that `joinLeg` wires `watchLineVolume` onto every leg it
+   *  hands out (a fresh join and a recovered one alike) — see App.tsx's
+   *  `on('volume', …)` registration right after `dialerConnRef.current = connection`. */
+  hasListenerFor(event: string): boolean { return (this.handlers.get(event)?.length ?? 0) > 0; }
 }
 
 class FakeDevice {
@@ -167,12 +171,29 @@ describe('App — power-dialer conference leg wiring', () => {
     expect(FakeDevice.connects[0]!.params).toEqual({ DialerConference: '1', DialerSessionId: 'sess-1' });
   });
 
+  // Task 8: in YouTube hold-music mode the line is silent while waiting, so the
+  // first sound on it means someone was connected — watchLineVolume feeds that
+  // signal to the player. It must be attached to every leg this tab ever holds,
+  // not just the first, so it has to happen at the one place all of them pass
+  // through: joinLeg, right after `dialerConnRef.current = connection`.
+  it('feeds the dialer leg to watchLineVolume, so it gets a volume listener', async () => {
+    await startRun();
+    expect(FakeDevice.connects[0]!.connection.hasListenerFor('volume')).toBe(true);
+  });
+
   it('re-joins when the leg drops on its own while the run is still live', async () => {
     await startRun();
     act(() => { FakeDevice.connects[0]!.connection.emit('disconnect'); });
     await waitFor(() => expect(FakeDevice.connects.length).toBe(2), { timeout: 4000 });
     expect(FakeDevice.connects[1]!.params).toEqual({ DialerConference: '1', DialerSessionId: 'sess-1' });
     expect(state.controls).toEqual(['start']); // recovered — the run was NOT stopped
+  });
+
+  it('a recovered leg also gets a volume listener, not just the first', async () => {
+    await startRun();
+    act(() => { FakeDevice.connects[0]!.connection.emit('disconnect'); });
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(2), { timeout: 4000 });
+    expect(FakeDevice.connects[1]!.connection.hasListenerFor('volume')).toBe(true);
   });
 
   it('does not re-join a run the server already ended (that disconnect was the server tidying up)', async () => {

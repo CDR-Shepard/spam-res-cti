@@ -1,5 +1,12 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+// The real YouTubeHoldPlayer mounts a live iframe via the YouTube IFrame API —
+// far outside what an SSR test needs to exercise here. HoldMusicPlayer's own
+// mount/no-mount decision is the thing this file pins; the player's internal
+// play/pause/caption logic already has its own suite (YouTubeHoldPlayer.test.tsx).
+vi.mock('./YouTubeHoldPlayer', () => ({
+  YouTubeHoldPlayer: () => <div data-testid="yt-player" />,
+}));
 import {
   progressLabel,
   queueLine,
@@ -21,6 +28,7 @@ import {
   ConfirmBlock,
   conflictingSessionId,
   CurrentRecord,
+  HoldMusicPlayer,
   ItemControls,
   SessionToggle,
   controlsFor,
@@ -32,6 +40,7 @@ import {
 import type { DialerControlAction, DialerCurrentItem, DialerSession, DialerSessionView } from '../dialer-api';
 import * as dialerApi from '../dialer-api';
 import { ApiError } from '../api';
+import type { HoldMusicSetting } from '@cti/contracts';
 
 describe('progressLabel', () => {
   it('counts every terminal disposition as done, not just connected-and-dispositioned', () => {
@@ -802,5 +811,60 @@ describe('CurrentRecord — the list-position line', () => {
     expect(renderToStaticMarkup(<CurrentRecord item={item} />)).not.toMatch(noListLine);
     expect(renderToStaticMarkup(<CurrentRecord item={{ ...item, listPosition: 87 }} />)).not.toMatch(noListLine);
     expect(renderToStaticMarkup(<CurrentRecord item={{ ...item, listPosition: null }} listTotal={220} />)).not.toMatch(noListLine);
+  });
+});
+
+/**
+ * Task 8: the YouTube hold player rides the run, mounted right under the
+ * current-record card. `HoldMusicPlayer` is pulled out as its own prop-only
+ * piece — like `CurrentRecord`/`ConfirmBlock` above — because `DialerPanel`
+ * itself never runs its data-fetching effect under `renderToStaticMarkup`
+ * (see the `controls` describe block's comment on this file's SSR-only
+ * testing strategy), so the mount decision has to be directly renderable.
+ */
+describe('HoldMusicPlayer (SSR) — mounts the YouTube player after the current-record card', () => {
+  const currentItem: DialerCurrentItem = { id: 'i1', recordId: '00Q1', objectType: 'Lead', status: 'dialing', toNumber: '+16195551234' };
+  const viewWith = (status: DialerSession['status']): DialerSessionView => ({
+    session: { id: 'sess1', status },
+    counts: { total: 1, done: 0, connected: 0, noConnect: 0, skipped: 0, unreachable: 0, pending: 1 },
+    currentItem,
+  });
+  const youtubeChoice: HoldMusicSetting = { choice: 'youtube', youtube: { listId: 'PL123', videoId: null } };
+
+  // Mirrors the real render site: the current-record card, then the slot the
+  // player mounts into — see DialerPanel.tsx just after `{view.currentItem
+  // && <CurrentRecord .../>}`.
+  const renderRunning = (view: DialerSessionView, holdMusic?: HoldMusicSetting): string => renderToStaticMarkup(
+    <>
+      <CurrentRecord item={view.currentItem as DialerCurrentItem} />
+      <HoldMusicPlayer view={view} holdMusic={holdMusic} />
+    </>,
+  );
+
+  it('YouTube choice + stored ids + an active session: the player mounts after the current-record card', () => {
+    const html = renderRunning(viewWith('active'), youtubeChoice);
+    expect(html.indexOf('dp-current')).toBeGreaterThan(-1);
+    expect(html.indexOf('data-testid="yt-player"')).toBeGreaterThan(html.indexOf('dp-current'));
+  });
+
+  it('a paused session: the player is still mounted — it pauses, it does not vanish', () => {
+    expect(renderRunning(viewWith('paused'), youtubeChoice)).toContain('data-testid="yt-player"');
+  });
+
+  it('a preset (non-YouTube) choice: no player', () => {
+    expect(renderRunning(viewWith('active'), { choice: 'classical', youtube: null })).not.toContain('yt-player');
+  });
+
+  it('YouTube chosen but no stored ids yet: no player', () => {
+    expect(renderRunning(viewWith('active'), { choice: 'youtube', youtube: null })).not.toContain('yt-player');
+  });
+
+  it('a done or stopped session: no player, even with YouTube chosen', () => {
+    expect(renderRunning(viewWith('done'), youtubeChoice)).not.toContain('yt-player');
+    expect(renderRunning(viewWith('stopped'), youtubeChoice)).not.toContain('yt-player');
+  });
+
+  it('no holdMusic prop at all (an older /auth/me, or the fetch not settled yet): no player', () => {
+    expect(renderRunning(viewWith('active'), undefined)).not.toContain('yt-player');
   });
 });

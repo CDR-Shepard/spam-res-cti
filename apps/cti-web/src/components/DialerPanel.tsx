@@ -13,6 +13,7 @@
  * The caller (App) maps that to Open CTI `screenPopRecord`.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { HoldMusicSetting } from '@cti/contracts';
 import {
   dialerControl,
   getDialer,
@@ -28,6 +29,8 @@ import {
 } from '../dialer-api';
 import { formatE164 } from '../format';
 import { ApiError } from '../api';
+import type { LineAudio } from '../line-audio';
+import { YouTubeHoldPlayer } from './YouTubeHoldPlayer';
 
 const POLL_INTERVAL_MS = 2000;
 /** While a dial is in flight. The panel only LEARNS a record connected by
@@ -476,6 +479,41 @@ export interface DialerPanelProps {
    * (the summary's "Start another run" CTA). Clears the parent's session id.
    */
   onDismiss: () => void;
+  /** The rep's hold-music choice (from `/auth/me`, via `holdMusicFromMe` in
+   *  App.tsx) — drives whether the YouTube player mounts (see HoldMusicPlayer). */
+  holdMusic?: HoldMusicSetting;
+  /** The dialer leg's line-audio tracker (App.tsx's `lineAudioRef`) — handed
+   *  straight through to the YouTube player so it can pause the instant the
+   *  line stops being silent (see line-audio.ts). */
+  lineAudio?: LineAudio;
+}
+
+/**
+ * The YouTube hold player, mounted right under the current-record card for a
+ * run's whole active/paused stretch — one player per run (`key={session.id}`)
+ * so the ~1-2 s poll re-renders never tear it down and restart it. Pulled out
+ * as its own prop-only piece (like CurrentRecord/ConfirmBlock above) because
+ * DialerPanel's data-fetching effect never runs under `renderToStaticMarkup`,
+ * so this mount decision needs to be directly renderable in the SSR tests.
+ */
+export function HoldMusicPlayer({ view, holdMusic, lineAudio }: {
+  view: Pick<DialerSessionView, 'session' | 'currentItem'>;
+  holdMusic?: HoldMusicSetting;
+  lineAudio?: LineAudio;
+}): JSX.Element | null {
+  const youtube = holdMusic?.choice === 'youtube' ? holdMusic.youtube : null;
+  if (!youtube) return null; // preset choice, off, or YouTube with no stored ids yet
+  const { status } = view.session;
+  if (status !== 'active' && status !== 'paused') return null; // ready/done/stopped: nothing to hold for
+  return (
+    <YouTubeHoldPlayer
+      key={view.session.id}
+      youtube={youtube}
+      sessionStatus={status}
+      currentItem={view.currentItem}
+      lineAudio={lineAudio}
+    />
+  );
 }
 
 export function CurrentRecord({ item, listTotal }: { item: DialerCurrentItem; listTotal?: number | null }): JSX.Element {
@@ -714,7 +752,7 @@ export function ConfirmBlock({
 }
 
 export function DialerPanel(props: DialerPanelProps): JSX.Element {
-  const { sessionId, onScreenPop, onStartFromListView, onPrepare, onJoin, onStop, onComplete, onDismiss } = props;
+  const { sessionId, onScreenPop, onStartFromListView, onPrepare, onJoin, onStop, onComplete, onDismiss, holdMusic, lineAudio } = props;
   const [view, setView] = useState<DialerSessionView | null>(null);
   // The poll owns `error` (a failed refresh); control actions own
   // `controlError` (a refused pause/skip/stop/next/start), so a successful
@@ -999,6 +1037,8 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
       </div>
 
       {view.currentItem && <CurrentRecord item={view.currentItem} listTotal={view.listContext?.total ?? null} />}
+
+      <HoldMusicPlayer view={view} holdMusic={holdMusic} lineAudio={lineAudio} />
 
       {shownError && <div className="dp-error">{shownError}</div>}
 
