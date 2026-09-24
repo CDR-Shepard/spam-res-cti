@@ -79,12 +79,24 @@ export function loadYouTubeApi(timeoutMs = 15_000): Promise<YTNamespace> {
     const previous = w.onYouTubeIframeAPIReady;
     w.onYouTubeIframeAPIReady = () => {
       clearTimeout(timer);
-      previous?.();
+      try {
+        previous?.();
+      } catch {
+        // Someone else's handler misbehaving must not strand OUR promise.
+      }
       if (w.YT) resolve(w.YT);
     };
     const script = document.createElement('script');
     script.src = 'https://www.youtube.com/iframe_api';
     script.async = true;
+    // A network error or CSP block never calls onYouTubeIframeAPIReady —
+    // without this, every caller would wait out the full timeout for a load
+    // that was never going to happen.
+    script.onerror = () => {
+      clearTimeout(timer);
+      loading = null;
+      reject(new Error('Failed to load the YouTube player script'));
+    };
     document.head.appendChild(script);
   });
   return loading;

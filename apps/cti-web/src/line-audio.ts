@@ -29,8 +29,16 @@ export function createLineAudio(now: () => number = Date.now): LineAudio {
       }
       // Snapshot before notifying: a listener that unsubscribes itself (or
       // another listener) mid-loop must not skip or crash the remaining ones.
+      // Twilio calls this synchronously and schedules the NEXT sample only
+      // once it returns, so a throwing listener (e.g. a YouTube player whose
+      // methods aren't live yet) must never propagate — that would silently
+      // stop volume sampling for the rest of the call.
       for (const listener of [...listeners]) {
-        listener(level);
+        try {
+          listener(level);
+        } catch {
+          // Swallowed — see the comment above.
+        }
       }
     },
     subscribe(listener) {

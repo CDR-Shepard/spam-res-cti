@@ -18,9 +18,15 @@ const CAPTION_FIRST_TIME = 'Press play once — after that it pauses and resumes
 const CAPTION_STUCK = 'Press play to resume';
 const CAPTION_ERROR = "Couldn't load your YouTube playlist";
 
-type CurrentItem = Pick<DialerCurrentItem, 'status' | 'prospectEndedAt'>;
+type CurrentItem = Pick<DialerCurrentItem, 'id' | 'status' | 'prospectEndedAt'>;
 
-const item = (status: string, prospectEndedAt: string | null = null): CurrentItem => ({ status, prospectEndedAt });
+// `id` defaults to a stable value so most call sites (which don't care about
+// it) don't need to pass one; the heard-latch tests pass a distinct id.
+const item = (status: string, prospectEndedAt: string | null = null, id = 'item-1'): CurrentItem => ({
+  id,
+  status,
+  prospectEndedAt,
+});
 
 /** A pure playlist (no starting video) — the case that also gets shuffle+loop. */
 const PLAYLIST_REF: YouTubeRef = { listId: 'PLx1234567', videoId: null };
@@ -103,6 +109,10 @@ describe('YouTubeHoldPlayer', () => {
     rerender(<YouTubeHoldPlayer {...baseProps({ currentItem: item('dialing') }, ns)} />);
     rerender(<YouTubeHoldPlayer {...baseProps({ currentItem: item('dialing') }, ns)} />);
     rerender(<YouTubeHoldPlayer {...baseProps({ currentItem: item('dialing') }, ns)} />);
+    // Flush again: if a mutant re-ran the mount effect on a prop change, its
+    // async `loadApi().then(...)` might not have resolved yet at this point —
+    // checking `created.length` without this would miss it.
+    await flush();
 
     expect(created.length).toBe(1);
     expect(created[0]?.opts).toMatchObject({
@@ -289,5 +299,281 @@ describe('YouTubeHoldPlayer', () => {
     expect(() => {
       rerender(<YouTubeHoldPlayer {...baseProps({ currentItem: item('dialing') }, ns)} />);
     }).not.toThrow();
+  });
+
+  // M4 — the stuck timer must only ever be armed after the FIRST PLAYING
+  // (see `evaluate()`'s `everPlayedLocal` guard). Before that, no amount of
+  // waiting should ever produce the stuck caption — only the first-time one.
+  it('never shows the stuck caption before the first PLAYING, no matter how long playback is blocked', async () => {
+    const { ns, created } = fakeYT({ blockAutoplay: true });
+    render(<YouTubeHoldPlayer {...baseProps({}, ns)} />);
+    await flush();
+    expect(created[0]?.player.calls).toContain('play');
+    expect(screen.getByText(CAPTION_FIRST_TIME)).toBeTruthy();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); }); // > STUCK_AFTER_MS
+    expect(screen.getByText(CAPTION_FIRST_TIME)).toBeTruthy();
+    expect(screen.queryByText(CAPTION_STUCK)).toBeNull();
+  });
+
+  // X6 — a prospectEndedAt-only change (no status/id change) must still
+  // re-evaluate immediately via the prop-change effect, not wait for the
+  // 500ms tick.
+  it('a prospectEndedAt change alone pauses immediately, before any timer tick', async () => {
+    const { ns, created } = fakeYT();
+    const { rerender } = render(<YouTubeHoldPlayer {...baseProps({}, ns)} />);
+    await flush();
+    const player = created[0]!.player;
+    expect(player.calls).toContain('play');
+
+    rerender(<YouTubeHoldPlayer {...baseProps({ currentItem: item('dialing', '2026-01-01T00:00:00Z') }, ns)} />);
+    expect(player.calls.at(-1)).toBe('pause');
+  });
+
+  // The brief's missing case: prospectEndedAt set from the very start (the
+  // rep hasn't chosen Redial/Resume yet) must never play at all, even though
+  // status is still 'dialing'.
+  it('stays paused for as long as prospectEndedAt is set, even though status is dialing', async () => {
+    const { ns, created } = fakeYT();
+    render(<YouTubeHoldPlayer {...baseProps({ currentItem: item('dialing', '2026-01-01T00:00:00Z') }, ns)} />);
+    await flush();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(created[0]?.player.calls).not.toContain('play');
+  });
+
+  // Issue #2 — a heard-latch: once the line-audio signal has heard someone,
+  // a merely-quiet line must not resume music while the poll still reports
+  // the SAME ringing item — a real conversation could easily still be going,
+  // and the poll (up to POLL_TIMEOUT_MS + POLL_INTERVAL_MS behind) simply
+  // hasn't caught up yet.
+  // A real Twilio call keeps sending 'volume' events continuously, not just
+  // when something is loud — so "quiet" in practice means new LOW samples
+  // keep arriving, which is what actually slides `heardSomeone`'s window back
+  // to false. Pushing these (rather than merely advancing the clock) isolates
+  // the heard-LATCH as the thing under test, instead of conflating it with
+  // `recentLevels` simply never having been refreshed.
+  const settleQuiet = (lineAudio: ReturnType<typeof createLineAudio>): void => {
+    act(() => { lineAudio.push(0); lineAudio.push(0); });
+  };
+
+  it('does not resume from quiet alone while the poll still reports the same item it did when someone was heard', async () => {
+    const { ns, created } = fakeYT();
+    const lineAudio = createLineAudio();
+    render(<YouTubeHoldPlayer {...baseProps({ lineAudio }, ns)} />); // item-1, dialing
+    await flush();
+    const player = created[0]!.player;
+    expect(player.calls).toContain('play');
+
+    act(() => { lineAudio.push(0.05); lineAudio.push(0.05); }); // latches item-1/dialing
+    expect(player.calls.at(-1)).toBe('pause');
+    const callsAfterHeard = player.calls.length;
+    settleQuiet(lineAudio);
+
+    // Well past the 1.5s quiet window — but the poll hasn't moved on, so the
+    // latch alone must still block a resume.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(player.calls.length).toBe(callsAfterHeard);
+  });
+
+  it('resumes once the poll moves to a NEW item — the latch, not the quiet window, was blocking it', async () => {
+    const { ns, created } = fakeYT();
+    const lineAudio = createLineAudio();
+    const { rerender } = render(<YouTubeHoldPlayer {...baseProps({ lineAudio }, ns)} />); // item-1, dialing
+    await flush();
+    const player = created[0]!.player;
+    expect(player.calls).toContain('play');
+
+    act(() => { lineAudio.push(0.05); lineAudio.push(0.05); }); // latches item-1/dialing
+    expect(player.calls.at(-1)).toBe('pause');
+    const callsAfterHeard = player.calls.length;
+    settleQuiet(lineAudio);
+
+    // Plenty quiet now (well past 1.5s) but the poll still reports item-1 —
+    // still latched (this alone repeats the previous test's guarantee).
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(player.calls.length).toBe(callsAfterHeard);
+
+    // The poll finally reports a brand-new item, still dialing, line already
+    // quiet — the latch no longer applies, so it resumes right away (the
+    // id is in the re-evaluate effect's deps, so no need to wait for a tick).
+    rerender(<YouTubeHoldPlayer {...baseProps({ lineAudio, currentItem: item('dialing', null, 'item-2') }, ns)} />);
+    expect(player.calls.at(-1)).toBe('play');
+  });
+
+  it('the heard-latch expires on its own after 12s even if the poll never confirms anything changed', async () => {
+    const { ns, created } = fakeYT();
+    const lineAudio = createLineAudio();
+    render(<YouTubeHoldPlayer {...baseProps({ lineAudio }, ns)} />); // item-1, dialing
+    await flush();
+    const player = created[0]!.player;
+    expect(player.calls).toContain('play');
+
+    act(() => { lineAudio.push(0.05); lineAudio.push(0.05); }); // latches
+    expect(player.calls.at(-1)).toBe('pause');
+    const callsAfterHeard = player.calls.length;
+    settleQuiet(lineAudio);
+
+    // Short of the 12s cap — still latched.
+    await act(async () => { await vi.advanceTimersByTimeAsync(9000); });
+    expect(player.calls.length).toBe(callsAfterHeard);
+
+    // Past the 12s cap — the latch releases on its own (the line has been
+    // quiet the whole time, so it resumes as soon as it's released).
+    await act(async () => { await vi.advanceTimersByTimeAsync(3500); });
+    expect(player.calls.at(-1)).toBe('play');
+  });
+
+  // Issue #1 — a REALISTIC fake: the real IFrame API's methods genuinely
+  // don't exist on the returned object until onReady fires (the iframe is
+  // still loading). Two loud samples in that window must not throw out of
+  // the line-audio subscriber — that would break the Twilio SDK's volume
+  // loop for the rest of the call (see line-audio.test.ts).
+  function realisticFakeYT() {
+    const created: Array<{ opts: YTPlayerOptions; player: YTPlayer & { calls: string[] } }> = [];
+    class RealisticPlayer {
+      calls: string[] = [];
+      private state = -1;
+      private o: YTPlayerOptions;
+      constructor(_el: HTMLElement, o: YTPlayerOptions) {
+        this.o = o;
+        created.push({ opts: o, player: this as never });
+        // The iframe "loads" 50ms later — only THEN do the real methods
+        // become callable, exactly like the genuine YT.Player.
+        setTimeout(() => {
+          Object.assign(this, {
+            playVideo: () => {
+              this.calls.push('play');
+              this.state = 1;
+              this.o.events.onStateChange?.({ data: 1 });
+            },
+            pauseVideo: () => {
+              this.calls.push('pause');
+              this.state = 2;
+              this.o.events.onStateChange?.({ data: 2 });
+            },
+            getPlayerState: () => this.state,
+          });
+          o.events.onReady?.({ target: this as never });
+        }, 50);
+      }
+      setShuffle() { this.calls.push('shuffle'); }
+      setLoop() { this.calls.push('loop'); }
+      destroy() { this.calls.push('destroy'); }
+    }
+    return { ns: { Player: RealisticPlayer } as unknown as YTNamespace, created };
+  }
+
+  it('two loud line samples before the player is ready do not throw (the real API is not live until onReady)', async () => {
+    const { ns, created } = realisticFakeYT();
+    const lineAudio = createLineAudio();
+    render(<YouTubeHoldPlayer {...baseProps({ lineAudio }, ns)} />);
+    // Flush only the loadApi microtask chain — the fake's onReady is behind a
+    // REAL 50ms timer we deliberately have not advanced yet, so the player
+    // exists but its methods (per the fake) are not live.
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(created.length).toBe(1);
+
+    expect(() => {
+      act(() => { lineAudio.push(0.05); lineAudio.push(0.05); });
+    }).not.toThrow();
+
+    // A real call keeps sending samples — quiet ones follow, well before the
+    // iframe finishes loading, so recentLevels reflects "quiet" by the time
+    // it's ready (otherwise this proves nothing beyond "didn't throw").
+    act(() => { lineAudio.push(0); lineAudio.push(0); });
+
+    // Once ready (at 50ms) AND the line has been quiet long enough (1.5s),
+    // the next evaluate (the periodic tick catches it) works normally.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(created[0]!.player.calls).toContain('play');
+  });
+
+  it('pauses immediately when PLAYING arrives while a heard-latch is active, rather than waiting for the next tick', async () => {
+    const { ns, created } = fakeYT({ blockAutoplay: true });
+    const lineAudio = createLineAudio();
+    render(<YouTubeHoldPlayer {...baseProps({ lineAudio }, ns)} />);
+    await flush();
+    const entry = created[0]!;
+    expect(entry.player.calls).toContain('play'); // attempted, but blocked (first-time)
+
+    // Two loud samples: latches, and (a no-op call-wise on state, but still
+    // invoked) pauses — this is what happens while the video is still
+    // trying to start.
+    act(() => { lineAudio.push(0.05); lineAudio.push(0.05); });
+    const pauseCallsBefore = entry.player.calls.filter((c) => c === 'pause').length;
+
+    // The player's own async start finally lands late, racing the latch —
+    // simulate the real state catching up alongside the event.
+    entry.player.state = YT_PLAYING;
+    act(() => { entry.opts.events.onStateChange?.({ data: YT_PLAYING }); });
+
+    // Must pause AT ONCE (synchronously with the event), not on some later tick.
+    expect(entry.player.calls.at(-1)).toBe('pause');
+    expect(entry.player.calls.filter((c) => c === 'pause').length).toBe(pauseCallsBefore + 1);
+  });
+
+  it('clears the error caption once PLAYING actually arrives (one unembeddable playlist video still lets the rest play)', async () => {
+    const { ns, created } = fakeYT({ blockAutoplay: true });
+    render(<YouTubeHoldPlayer {...baseProps({}, ns)} />);
+    await flush();
+
+    act(() => { created[0]?.opts.events.onError?.({ data: 2 }); });
+    expect(screen.getByText(CAPTION_ERROR)).toBeTruthy();
+
+    act(() => { created[0]?.opts.events.onStateChange?.({ data: YT_PLAYING }); });
+    expect(screen.queryByText(CAPTION_ERROR)).toBeNull();
+    expect(screen.getByText(CAPTION_NORMAL)).toBeTruthy();
+  });
+
+  it('shows the error caption if the player never becomes ready within 15s of the API loading', async () => {
+    class NeverReadyPlayer {
+      setShuffle() {}
+      setLoop() {}
+      playVideo() {}
+      pauseVideo() {}
+      getPlayerState() { return -1; }
+      destroy() {}
+    }
+    const ns = { Player: NeverReadyPlayer } as unknown as YTNamespace;
+    render(
+      <YouTubeHoldPlayer youtube={PLAYLIST_REF} sessionStatus="active" currentItem={item('dialing')} loadApi={() => Promise.resolve(ns)} />,
+    );
+    await flush(); // lets the player get constructed (still never calls onReady)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(screen.getByText(CAPTION_ERROR)).toBeTruthy();
+  });
+
+  it('loops a video-in-a-playlist too, but does not shuffle it (shuffle is only for a pure playlist)', async () => {
+    const { ns, created } = fakeYT();
+    const ref: YouTubeRef = { listId: 'PLx1234567', videoId: 'dQw4w9WgXcQ' };
+    render(<YouTubeHoldPlayer {...baseProps({ youtube: ref }, ns)} />);
+    await flush();
+
+    expect(created[0]?.player.calls).toContain('loop');
+    expect(created[0]?.player.calls).not.toContain('shuffle');
+  });
+
+  it('mounts the player on a child div it creates itself, not the React-owned host node', async () => {
+    let capturedEl: HTMLElement | null = null;
+    class CapturingPlayer {
+      constructor(el: HTMLElement) { capturedEl = el; }
+      setShuffle() {}
+      setLoop() {}
+      playVideo() {}
+      pauseVideo() {}
+      getPlayerState() { return -1; }
+      destroy() {}
+    }
+    const ns = { Player: CapturingPlayer } as unknown as YTNamespace;
+    const { container } = render(<YouTubeHoldPlayer {...baseProps({}, ns)} />);
+    await flush();
+
+    const host = container.querySelector('.dp-youtube > div');
+    expect(host).toBeTruthy();
+    expect(capturedEl).not.toBeNull();
+    expect(capturedEl).not.toBe(host); // React never owns the node YouTube replaces
+    expect(host?.contains(capturedEl)).toBe(true); // but it IS a child of the host
   });
 });

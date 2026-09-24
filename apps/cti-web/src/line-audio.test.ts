@@ -38,4 +38,17 @@ describe('createLineAudio', () => {
     expect(() => watchLineVolume({}, createLineAudio())).not.toThrow();
     expect(() => watchLineVolume(null, createLineAudio())).not.toThrow();
   });
+
+  // The Twilio SDK calls our 'volume' handler synchronously and only
+  // schedules the NEXT sample once it returns — so a throwing subscriber
+  // (e.g. a player not ready yet) must never propagate out of push(), or it
+  // silently stops volume sampling for the rest of the call.
+  it("a throwing subscriber doesn't break push — the next subscriber still gets the sample", () => {
+    const a = createLineAudio();
+    const seen: number[] = [];
+    a.subscribe(() => { throw new Error('boom'); });
+    a.subscribe((l) => seen.push(l));
+    expect(() => a.push(0.5)).not.toThrow();
+    expect(seen).toEqual([0.5]);
+  });
 });
