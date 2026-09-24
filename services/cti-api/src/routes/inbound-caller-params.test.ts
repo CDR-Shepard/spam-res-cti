@@ -84,3 +84,37 @@ describe('attachCallerParameters', () => {
     expect(xml).not.toContain('x'.repeat(201));
   });
 });
+
+// Task 14: inbound pop precedence — the ring screen (and screen-pop on
+// accept) must reflect the record popRecordFor() actually chose (Opportunity
+// / Deal / Lead), not just whoId ?? whatId, and recordType must follow it.
+describe('attachCallerParameters — popRecordId wins over whoId/whatId, and recordType follows the popped id', () => {
+  it('a Contact match with an open-Opportunity popRecordId pops the Opportunity, not the Contact or its Account', () => {
+    const xml = dialClientXml({
+      whoId: '003000000000001AAA',
+      whatId: '001000000000001AAA', // the Contact's Account — must never win
+      popRecordId: '006000000000002BBB',
+      name: 'Jane Doe',
+    });
+    expect(xml).toContain('<Parameter name="recordId" value="006000000000002BBB"/>');
+    expect(xml).toContain('<Parameter name="recordType" value="Opportunity"/>');
+    expect(xml).not.toContain('value="003000000000001AAA"');
+    expect(xml).not.toContain('value="001000000000001AAA"');
+  });
+
+  it('a Contact match with a Deal (custom-prefix) popRecordId gets the honest "Record" recordType fallback', () => {
+    const xml = dialClientXml({
+      whoId: '003000000000001AAA',
+      popRecordId: 'a0X000000000009AAA',
+      name: 'Jane Doe',
+    });
+    expect(xml).toContain('<Parameter name="recordId" value="a0X000000000009AAA"/>');
+    expect(xml).toContain('<Parameter name="recordType" value="Record"/>');
+  });
+
+  it('no popRecordId → falls back to whoId exactly as before this feature', () => {
+    const xml = dialClientXml({ whoId: '00Q000000000001AAA', name: 'Jane Doe' });
+    expect(xml).toContain('<Parameter name="recordId" value="00Q000000000001AAA"/>');
+    expect(xml).toContain('<Parameter name="recordType" value="Lead"/>');
+  });
+});

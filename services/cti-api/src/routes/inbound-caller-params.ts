@@ -15,11 +15,18 @@
  * the `<Parameter>` XML ourselves.
  */
 
-/** The caller-match shape produced by `findByPhone` (services/cti-api/src/salesforce/client.ts). */
+/** The caller-match shape produced by `findByPhone` (services/cti-api/src/salesforce/client.ts),
+ *  plus the Task-14 pop precedence: `popRecordId` — computed by
+ *  `popRecordFor` (salesforce/inbound-pop.ts) from whoId/whatId and the
+ *  caller's open Opportunity, when found — is what actually pops on the ring
+ *  screen. `whoId`/`whatId` themselves stay exactly what Salesforce matched
+ *  (they're also what gets stamped on the call row), so `popRecordId` is a
+ *  separate, optional field rather than a mutation of either. */
 export interface MatchedCaller {
   whoId?: string;
   whatId?: string;
   name?: string;
+  popRecordId?: string;
 }
 
 /**
@@ -90,7 +97,7 @@ export function recordTypeForId(id: string): string {
 
 /** Whether `matched` carries anything `attachCallerParameters` would actually attach. */
 function hasCallerParameters(matched: MatchedCaller | null | undefined): matched is MatchedCaller {
-  return !!matched && !!(matched.name || matched.whoId || matched.whatId);
+  return !!matched && !!(matched.name || matched.whoId || matched.whatId || matched.popRecordId);
 }
 
 /**
@@ -105,7 +112,11 @@ export function attachCallerParameters(
 ): void {
   if (!matched) return;
   if (matched.name) setParameter(client, 'callerName', matched.name);
-  const recordId = matched.whoId ?? matched.whatId;
+  // Task 14: the Opportunity/Deal/Lead popRecordFor picked (never the
+  // Account) wins over the raw whoId/whatId Salesforce matched — recordType
+  // below is derived from whichever id actually wins, so it always describes
+  // what's about to pop, not what was merely matched.
+  const recordId = matched.popRecordId ?? matched.whoId ?? matched.whatId;
   if (!recordId) return;
   setParameter(client, 'recordId', recordId);
   setParameter(client, 'recordType', recordTypeForId(recordId));

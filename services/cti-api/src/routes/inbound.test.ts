@@ -27,6 +27,12 @@ const state = vi.hoisted(() => ({
   lastDialerId: null as string | null,
   findByPhoneResult: null as { whoId?: string; whatId?: string; name?: string } | null,
   findByPhone: vi.fn(async (_userId: string, _e164: string) => state.findByPhoneResult),
+  /** What the Task-14 open-Opportunity pop lookup answers (or throws). */
+  findPrimaryOpenOpportunityIdResult: null as string | null,
+  findPrimaryOpenOpportunityId: vi.fn(
+    async (_userId: string, _contactId: string, _opts?: { timeoutMs?: number }) =>
+      state.findPrimaryOpenOpportunityIdResult,
+  ),
   stickyAgentForCaller: vi.fn(async () => state.stickyAgentId),
   lastDialerForCaller: vi.fn(async (..._args: Parameters<LastDialerForCaller>) => state.lastDialerId),
   /** The un-mocked lookup, for the one test that needs its caller-shape guard. */
@@ -57,7 +63,11 @@ vi.mock('../config.js', () => ({
 
 vi.mock('../salesforce/client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../salesforce/client.js')>();
-  return { ...actual, findByPhone: state.findByPhone };
+  return {
+    ...actual,
+    findByPhone: state.findByPhone,
+    findPrimaryOpenOpportunityId: state.findPrimaryOpenOpportunityId,
+  };
 });
 
 vi.mock('../dialer/sticky.js', async (importOriginal) => {
@@ -143,6 +153,8 @@ beforeEach(async () => {
   state.lastDialerId = null;
   state.findByPhoneResult = null;
   state.findByPhone.mockClear();
+  state.findPrimaryOpenOpportunityIdResult = null;
+  state.findPrimaryOpenOpportunityId.mockClear();
   state.stickyAgentForCaller.mockClear();
   state.lastDialerForCaller.mockReset();
   state.lastDialerForCaller.mockImplementation(async () => state.lastDialerId);
@@ -284,6 +296,109 @@ describe('POST /telephony/twilio/inbound — caller-match parameters on <Client>
       expect(xml).not.toContain('<Parameter');
       expect(xml).toContain('<Record');
       expect(xml).toContain('Hi Voicemail, thanks for calling back');
+    });
+  });
+});
+
+// Task 14: inbound pop precedence — the softphone pops the caller's
+// Opportunity, Deal or Lead, never the Account. `matched` (whoId/whatId
+// stamped on the call row and used for the greeting) must stay exactly what
+// findByPhone returned; only the `recordId` on the ring's <Client> parameters
+// — driven by the separate `pop` object — changes.
+describe('POST /telephony/twilio/inbound — inbound pop precedence (Task 14)', () => {
+  describe('assigned-rep ring path', () => {
+    it('a Contact match with an open Opportunity → recordId is the Opportunity, but the call row keeps the Contact/Account ids', async () => {
+      state.findByPhoneResult = { whoId: '0033A000000000AAA', whatId: '0013A000000000AAA', name: 'Jane Doe' };
+      state.findPrimaryOpenOpportunityIdResult = '0063A000000000BBB';
+
+      const res = await ring();
+      const xml = res.body;
+
+      expect(res.statusCode).toBe(200);
+      expect(xml).toContain('<Parameter name="recordId" value="0063A000000000BBB"/>');
+      expect(xml).toContain('<Parameter name="recordType" value="Opportunity"/>');
+      // The row itself (Task sync, Recent list) is untouched by the pop.
+      expect(state.callValues[0]!.salesforceWhoId).toBe('0033A000000000AAA');
+      expect(state.callValues[0]!.salesforceWhatId).toBe('0013A000000000AAA');
+      // The lookup runs on the handler's own SF connection and the matched Contact.
+      expect(state.findPrimaryOpenOpportunityId).toHaveBeenCalledWith('rep-1', '0033A000000000AAA', { timeoutMs: 1500 });
+    });
+
+    it('a Lead match never calls the open-Opportunity lookup, and pops the Lead itself', async () => {
+      state.findByPhoneResult = { whoId: '00Q000000000001AAA', name: 'Lead Larry' };
+
+      const res = await ring();
+      const xml = res.body;
+
+      expect(state.findPrimaryOpenOpportunityId).not.toHaveBeenCalled();
+      expect(xml).toContain('<Parameter name="recordId" value="00Q000000000001AAA"/>');
+      expect(xml).toContain('<Parameter name="recordType" value="Lead"/>');
+    });
+
+    it('a Deal (whatId-only, no whoId) match never calls the open-Opportunity lookup, and pops the Deal', async () => {
+      state.findByPhoneResult = { whatId: 'a0X000000000009AAA', name: 'Acme Deal' };
+
+      const res = await ring();
+      const xml = res.body;
+
+      expect(state.findPrimaryOpenOpportunityId).not.toHaveBeenCalled();
+      expect(xml).toContain('<Parameter name="recordId" value="a0X000000000009AAA"/>');
+    });
+
+    it('a Contact match that already carries a 006 whatId never re-runs the lookup, and pops that Opportunity directly', async () => {
+      state.findByPhoneResult = { whoId: '0033A000000000AAA', whatId: '0063A000000000ZZZ', name: 'Jane Doe' };
+
+      const res = await ring();
+      const xml = res.body;
+
+      expect(state.findPrimaryOpenOpportunityId).not.toHaveBeenCalled();
+      expect(xml).toContain('<Parameter name="recordId" value="0063A000000000ZZZ"/>');
+      expect(xml).toContain('<Parameter name="recordType" value="Opportunity"/>');
+    });
+
+    it('a slow/failing lookup still rings and pops the Contact, not the Account — never blocks or 500s the webhook', async () => {
+      state.findByPhoneResult = { whoId: '0033A000000000AAA', whatId: '0013A000000000AAA', name: 'Jane Doe' };
+      state.findPrimaryOpenOpportunityId.mockRejectedValueOnce(new Error('timed out'));
+
+      const res = await ring();
+      const xml = res.body;
+
+      expect(res.statusCode).toBe(200);
+      expect(xml).toContain('<Dial');
+      expect(xml).toContain('<Parameter name="recordId" value="0033A000000000AAA"/>');
+      expect(xml).toContain('<Parameter name="recordType" value="Contact"/>');
+      expect(xml).not.toContain('value="0013A000000000AAA"');
+    });
+  });
+
+  describe('dialer-pool sticky-agent ring path — same pop object as the assigned-rep path', () => {
+    beforeEach(() => {
+      state.owned = OWNED({ kind: 'dialer_pool', assignedUserId: null });
+      state.stickyAgentId = 'rep-2';
+      state.repRow = { id: 'rep-2', noAnswerForwardE164: null };
+      state.sfConn = { userId: 'rep-2' };
+    });
+
+    it('a Contact match with an open Opportunity → recordId is the Opportunity on the pool ring path too', async () => {
+      state.findByPhoneResult = { whoId: '0033A000000000CCC', whatId: '0013A000000000CCC', name: 'John Roe' };
+      state.findPrimaryOpenOpportunityIdResult = '0063A000000000DDD';
+
+      const res = await ring();
+      const xml = res.body;
+
+      expect(xml).toContain('<Client><Identity>rep_rep2</Identity>');
+      expect(xml).toContain('<Parameter name="recordId" value="0063A000000000DDD"/>');
+      expect(xml).toContain('<Parameter name="recordType" value="Opportunity"/>');
+      expect(state.findPrimaryOpenOpportunityId).toHaveBeenCalledWith('rep-2', '0033A000000000CCC', { timeoutMs: 1500 });
+    });
+
+    it('a Lead match never calls the lookup on the pool ring path either', async () => {
+      state.findByPhoneResult = { whoId: '00Q000000000002DDD', name: 'John Roe' };
+
+      const res = await ring();
+
+      expect(state.findPrimaryOpenOpportunityId).not.toHaveBeenCalled();
+      expect(res.body).toContain('<Parameter name="recordId" value="00Q000000000002DDD"/>');
     });
   });
 });

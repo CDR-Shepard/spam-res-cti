@@ -21,11 +21,12 @@ import { getDb, schema } from '@cti/db';
 import { humanUsersInOrg, sha256 } from '@cti/auth';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
-import { findByPhone } from '../salesforce/client.js';
+import { findByPhone, findPrimaryOpenOpportunityId } from '../salesforce/client.js';
 import { enqueueSyncForCall } from '../salesforce/sync.js';
 import { normalize } from '@cti/phone';
 import { lastDialerForCaller, stickyAgentForCaller } from '../dialer/sticky.js';
 import { dialClientWithCallerParams } from './inbound-caller-params.js';
+import { INBOUND_POP_LOOKUP_MS, popRecordFor } from '../salesforce/inbound-pop.js';
 import {
   buildForwardDialTwiml,
   FORWARD_LEG_FLAG,
@@ -253,6 +254,27 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
       }
     }
 
+    // Task 14 — inbound pop precedence: the softphone should pop the
+    // caller's live deal (Opportunity, then Deal), then the Lead, then the
+    // Contact — never the Account, even though the Contact's Account is what
+    // `matched.whatId` carries above (unchanged, and still what's stamped on
+    // the call row below). Only a Contact match with no already-known
+    // Opportunity needs the extra lookup — a Lead or Deal match never does.
+    // This runs on the live ring path, BEFORE the rep's phone rings, so it's
+    // bounded far tighter (1.5s) than findPrimaryOpenOpportunityId's normal
+    // 3s default; findPrimaryOpenOpportunityId itself never throws, but the
+    // .catch is a second line of defense — a hiccup here must cost the
+    // caller a pop preference, never the call.
+    const openOpp =
+      matched?.whoId?.startsWith('003') && !matched.whatId?.startsWith('006')
+        ? await findPrimaryOpenOpportunityId(handlerUserId, matched.whoId, { timeoutMs: INBOUND_POP_LOOKUP_MS }).catch(
+            () => null,
+          )
+        : null;
+    const pop = matched
+      ? { ...matched, popRecordId: popRecordFor({ ...matched, openOpportunityId: openOpp }) ?? undefined }
+      : null;
+
     // Insert the inbound call record so we can update with recording / transcript later.
     const [callRow] = await insertInboundCall(db, {
         orgId: owned.orgId,
@@ -344,7 +366,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
               }
             : {}),
         } as never);
-        dialClientWithCallerParams(dial, clientIdentity(poolRepId), matched);
+        dialClientWithCallerParams(dial, clientIdentity(poolRepId), pop);
       } else {
         const greeting =
           (matched ? owned.inboundMatchedGreeting : owned.inboundGreeting) ??
@@ -380,7 +402,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
             }
           : {}),
       } as never);
-      dialClientWithCallerParams(dial, clientIdentity(owned.assignedUserId), matched);
+      dialClientWithCallerParams(dial, clientIdentity(owned.assignedUserId), pop);
     } else {
       const greeting =
         (matched ? owned.inboundMatchedGreeting : owned.inboundGreeting) ??

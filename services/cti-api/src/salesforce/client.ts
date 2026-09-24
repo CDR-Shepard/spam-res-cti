@@ -277,17 +277,26 @@ export async function findByPhone(
  * Task — a Task that lands on the Account is far better than a Task that
  * fails.
  *
- * Bounded to 3s so a degraded Salesforce can never hang this lookup
- * indefinitely (undici's default request timeout is 300s) — the catch below
- * turns a timeout into the same AccountId fallback as any other failure.
+ * Bounded to 3s by default so a degraded Salesforce can never hang this
+ * lookup indefinitely (undici's default request timeout is 300s) — the catch
+ * below turns a timeout into the same AccountId fallback as any other
+ * failure. `opts.timeoutMs` lets a caller on a tighter budget shrink that
+ * bound without changing anyone else's behaviour — routes/inbound.ts's live
+ * ring path (Task 14) passes `INBOUND_POP_LOOKUP_MS` (1.5s) because this
+ * lookup runs BEFORE the rep's phone starts ringing, and every existing
+ * caller (findByPhone above, sync.ts) omits it and keeps the 3s default.
  */
-export async function findPrimaryOpenOpportunityId(userId: string, contactId: string): Promise<string | null> {
+export async function findPrimaryOpenOpportunityId(
+  userId: string,
+  contactId: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<string | null> {
   try {
     const rows = await soqlQuery<{ OpportunityId: string }>(
       userId,
       `SELECT OpportunityId FROM OpportunityContactRole WHERE ContactId = '${soqlEscape(contactId)}' ` +
         `AND Opportunity.IsClosed = false ORDER BY IsPrimary DESC, Opportunity.CreatedDate DESC LIMIT 1`,
-      { signal: AbortSignal.timeout(3000) },
+      { signal: AbortSignal.timeout(opts.timeoutMs ?? 3000) },
     );
     return rows[0]?.OpportunityId ?? null;
   } catch {
