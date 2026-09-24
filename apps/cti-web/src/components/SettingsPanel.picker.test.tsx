@@ -7,7 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import type { HoldMusicSetting } from '@cti/contracts';
+import { youtubeLinkFor, type HoldMusicSetting, type YouTubeRef } from '@cti/contracts';
 import { SettingsPanel } from './SettingsPanel';
 import { api } from '../api';
 
@@ -155,5 +155,30 @@ describe('SettingsPanel picker — PATCH shapes, toasts, YouTube link errors', (
       body: { holdMusic: { choice: 'youtube' } },
     }));
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  });
+
+  it('the select re-syncs when the holdMusic prop changes underneath it (e.g. after onSaved refetches)', () => {
+    const { rerender } = render(
+      <SettingsPanel forwardE164={null} holdMusic={{ choice: 'ambient', youtube: null }} onSaved={noop} onToast={noop} />,
+    );
+    expect((screen.getByLabelText('Hold music') as HTMLSelectElement).value).toBe('ambient');
+    rerender(
+      <SettingsPanel forwardE164={null} holdMusic={{ choice: 'rock', youtube: null }} onSaved={noop} onToast={noop} />,
+    );
+    expect((screen.getByLabelText('Hold music') as HTMLSelectElement).value).toBe('rock');
+  });
+
+  it('the YouTube link box re-syncs when the saved playlist changes underneath it', () => {
+    const listA: YouTubeRef = { listId: 'PLAAAAAAAAAAAAAAAAAA', videoId: null };
+    const listB: YouTubeRef = { listId: 'PLBBBBBBBBBBBBBBBBBB', videoId: null };
+    const { rerender } = render(
+      <SettingsPanel forwardE164={null} holdMusic={{ choice: 'youtube', youtube: listA }} onSaved={noop} onToast={noop} />,
+    );
+    const input = () => screen.getByPlaceholderText('Paste a YouTube playlist or video link') as HTMLInputElement;
+    expect(input().value).toBe(youtubeLinkFor(listA));
+    rerender(
+      <SettingsPanel forwardE164={null} holdMusic={{ choice: 'youtube', youtube: listB }} onSaved={noop} onToast={noop} />,
+    );
+    expect(input().value).toBe(youtubeLinkFor(listB));
   });
 });

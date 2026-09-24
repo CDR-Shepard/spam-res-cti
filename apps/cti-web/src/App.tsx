@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HoldMusicSetting } from '@cti/contracts';
 import { api, ApiError, clearSession, readSession, writeSession } from './api';
+import { holdMusicFromMe } from './hold-music-from-me';
 import { startRingback, stopRingback } from './ringback';
 import { AdminPanel } from './components/AdminPanel';
 import { CallLog } from './components/CallLog';
@@ -53,13 +54,10 @@ interface MeResponse {
     | { connected: true; name?: string | null; email?: string | null; photoDataUrl?: string | null };
 }
 
-/** The hold-music setting to render, from `/auth/me`'s `user` — the new
- *  `holdMusic` object when the API sends it, else derived from the legacy
- *  on/off `dialerHoldMusic` flag so an older API (or a stale cached session)
- *  still shows something sensible. Shared with DialerPanel. */
-export function holdMusicFromMe(user: MeResponse['user']): HoldMusicSetting {
-  return user.holdMusic ?? { choice: user.dialerHoldMusic === false ? 'off' : 'classical', youtube: null };
-}
+// holdMusicFromMe lives in ./hold-music-from-me (its own pure, dependency-light
+// module — see its unit test); re-exported here since Task 8's DialerPanel
+// wiring imports it from App.tsx alongside the other softphone plumbing.
+export { holdMusicFromMe };
 
 type Phase = 'idle' | 'preflight' | 'ringing' | 'active' | 'wrapup';
 
