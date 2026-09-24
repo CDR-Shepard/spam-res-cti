@@ -456,6 +456,8 @@ Note: the SF *username* may differ from the email (e.g. evren@gghomessd.com is t
 
 ## 8. Callbacks to pool numbers
 
+(How often one person may be dialed, the state-law daily cap, and the follow-up rollover are covered in `docs/runbooks/dialer-cadence.md`.)
+
 Pool DIDs (`kind = 'dialer_pool'`) belong to no rep, so an inbound call to one is
 routed by who the caller was talking to, not by `assigned_user_id`
 (`services/cti-api/src/routes/inbound.ts`, lookups in `src/dialer/sticky.ts`).
