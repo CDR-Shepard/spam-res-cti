@@ -606,7 +606,11 @@ export async function repNext(sessionId: string, deps: EngineDeps): ReturnType<t
  * checked in JS — and the copy insert ride in ONE transaction, and the copy
  * is inserted only if the update actually claimed the row. Belt-and-
  * suspenders against a double-submitted Redial (two clicks, a retried
- * request) inserting two copies of the same person.
+ * request) inserting two copies of the same person. The predicate ALSO
+ * re-checks the session is still active/paused via an `exists` subquery
+ * (fix-round-2 optional fix): the JS-level session-status check above and
+ * this transaction are two separate round-trips, so a Stop landing in that
+ * gap must not let a copy slip in for a run that is no longer live.
  *
  * Goes through `advanceSession` at the end regardless, so the redial copy
  * still passes every dial-time gate on an ACTIVE session: the 24-hour legal
@@ -636,9 +640,13 @@ export async function redialCurrent(sessionId: string, deps: EngineDeps): Return
         eq(schema.dialerQueueItems.id, item.id),
         eq(schema.dialerQueueItems.status, 'connected'),
         isNotNull(schema.dialerQueueItems.prospectEndedAt),
+        // Closes the stopped-run gap: without this, a Stop landing between
+        // the eligibility read above and this transaction opening could
+        // still let a copy in for a run that just ended.
+        sql`exists (select 1 from dialer_sessions where id = ${sessionId} and status in ('active', 'paused'))`,
       ))
       .returning({ id: schema.dialerQueueItems.id });
-    if (rows.length === 0) return; // lost the race to a double-submit — nothing to copy
+    if (rows.length === 0) return; // lost the race to a double-submit, or the session ended in the gap — nothing to copy
     await tx.insert(schema.dialerQueueItems).values({
       sessionId,
       ordinal: item.ordinal,

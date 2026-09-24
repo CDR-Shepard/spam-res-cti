@@ -1138,7 +1138,26 @@ describe('redialCurrent', () => {
     // proves this specific write rode INSIDE the transaction rather than on
     // the plain outer db handle; `_inserts` stays outer-only and must be empty.
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
-    expect(fdb._txWrites).toContainEqual({ patch: expect.objectContaining({ status: 'done' }), where: expect.anything() });
+    // Fix-round-2 f2: the fake's `tx.update().returning()` ignores its WHERE
+    // clause entirely (it only honours the `claimReturnsRows` flag), so
+    // `where: expect.anything()` here would pass even if the predicate were
+    // shrunk to `eq(id)` alone. Render it for real and pin its actual shape:
+    // the row must still be `connected`, and `prospect_ended_at` must still
+    // be non-null, or a stale/duplicate submission could claim a row it must
+    // not touch.
+    const doneTxWrite = fdb._txWrites.find((w: any) => w.patch.status === 'done');
+    expect(doneTxWrite).toBeDefined();
+    const { sql: doneWhereSql, params: doneWhereParams } = new PgDialect().sqlToQuery(doneTxWrite.where);
+    expect(doneWhereSql).toContain('"status" = ');
+    expect(doneWhereParams).toContain('connected');
+    expect(doneWhereSql).toContain('"prospect_ended_at" is not null');
+    // Fix-round-2 optional fix: the predicate also re-checks the SESSION is
+    // still active/paused at transaction time — closing the gap where a Stop
+    // could land between redialCurrent's own eligibility read and this
+    // transaction opening.
+    expect(doneWhereSql).toContain("exists (select 1 from dialer_sessions where id =");
+    expect(doneWhereSql).toContain("status in ('active', 'paused')");
+    expect(doneWhereParams).toContain('S1');
     expect(fdb._txInserts).toContainEqual({ values: expect.objectContaining({
       recordId: '00Q1', toNumber: '+12135550199', ordinal: 3, attempt: 1,
       redialOf: 'i1', displayName: 'Ada', status: 'pending', listPosition: 42,
@@ -1225,6 +1244,20 @@ describe('endCurrent', () => {
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'paused' }) });
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
     expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+  it('fix-round-2 a2: the FULL order is pinned — the paused write lands strictly before the done write (not just "both before hangup")', async () => {
+    // The `seen` check above only proves both writes happened before the
+    // hangup; it does not rule out settling `done` BEFORE pausing (the two
+    // could be swapped and that assertion would still hold). Record every
+    // write's position and compare indices directly.
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await endCurrent('S1', deps);
+    const pausedIdx = fdb._writes.findIndex((w: any) => w.patch.status === 'paused');
+    const doneIdx = fdb._writes.findIndex((w: any) => w.patch.status === 'done');
+    expect(pausedIdx).toBeGreaterThanOrEqual(0);
+    expect(doneIdx).toBeGreaterThanOrEqual(0);
+    expect(pausedIdx).toBeLessThan(doneIdx);
   });
   it('works on a PAUSED run too — Pause is available mid-conversation, so End must too: settles done, hangs up, stays paused', async () => {
     // Fix-round-1 #2: a session can be `paused` with a `connected` item since
