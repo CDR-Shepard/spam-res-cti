@@ -6,6 +6,11 @@ import {
 
 const V = 'dQw4w9WgXcQ';
 const L = 'PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf';
+// Off-by-one lengths for the id regexes: video must be exactly 11, list 10-64.
+const V10 = 'dQw4w9WgXc';
+const V12 = 'dQw4w9WgXcQQ';
+const L9 = 'A'.repeat(9);
+const L65 = 'A'.repeat(65);
 
 describe('hold-music choices', () => {
   it('eight choices in picker order, with labels, default Classical', () => {
@@ -41,6 +46,11 @@ describe('parseYouTubeLink', () => {
     `javascript:alert(1)//youtube.com/watch?v=${V}`, 'https://www.youtube.com/watch?v=short',
     'https://www.youtube.com/playlist?list=bad!chars', 'https://www.youtube.com/playlist',
     `ftp://youtube.com/watch?v=${V}`, 'https://www.youtube.com/',
+    // Video id must be exactly 11 chars — 10 and 12 are both invalid, not "close enough".
+    `https://www.youtube.com/watch?v=${V10}`, `https://www.youtube.com/watch?v=${V12}`,
+    `https://youtu.be/${V10}`, `https://youtu.be/${V12}`,
+    // Playlist id must be 10-64 chars — 9 and 65 are both invalid.
+    `https://www.youtube.com/playlist?list=${L9}`, `https://www.youtube.com/playlist?list=${L65}`,
   ])('rejects %s', (input) => { expect(parseYouTubeLink(input)).toBeNull(); });
 });
 
