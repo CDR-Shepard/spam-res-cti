@@ -813,8 +813,16 @@ export async function handleDialOutcome(
   // transaction holds a client is the deadlock every `tx` handle in this file
   // exists to avoid. Only the READ may fail closed, so the try wraps nothing
   // else: a bug inside the pure `rolloverDue` must surface as a crash.
+  //
+  // `outcome !== 'canceled'` (ruling 2026-09-23): a Stop/hangup before answer
+  // is not one of the owner's two dials. The history read below happens
+  // BEFORE this CAS commits `outcome`, so the current dial's own row still
+  // reads back with `skipped: false` (dialsToPerson keys `skipped` off the
+  // COMMITTED itemOutcome, which is still null at read time) — without this
+  // gate, a rep who presses Stop on the ringing 2nd dial of the day would
+  // roll the follow-up exactly like a real miss.
   let enqueue = false;
-  if (item.followupEligible) {
+  if (item.followupEligible && outcome !== 'canceled') {
     let today: Dial[] | null = null;
     try {
       today = await deps.contactHistory(session.orgId, personOf(item), deps.orgDayStart);

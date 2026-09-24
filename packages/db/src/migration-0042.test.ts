@@ -23,6 +23,10 @@ describe('0042_dialer_cadence', () => {
     expect(sql).toContain('CREATE INDEX IF NOT EXISTS dialer_dial_attempts_record_idx ON dialer_dial_attempts (org_id, record_id, dialed_at);');
     expect(sql).toContain("CREATE INDEX IF NOT EXISTS calls_outbound_target_idx ON calls (org_id, normalized_to_number, created_at) WHERE direction = 'outbound';");
   });
+  it('adds the two indexes the shared-list lookup needs (fix 2: session_id was unindexed on dialer_dial_attempts)', () => {
+    expect(sql).toContain('CREATE INDEX IF NOT EXISTS dialer_dial_attempts_session_idx ON dialer_dial_attempts (session_id, dialed_at);');
+    expect(sql).toContain('CREATE INDEX IF NOT EXISTS dialer_sessions_list_view_idx ON dialer_sessions (org_id, list_view_id) WHERE list_view_id IS NOT NULL;');
+  });
   it('the Drizzle schema matches: nullable, no defaults', () => {
     const s = getTableColumns(dialerSessions); const i = getTableColumns(dialerQueueItems); const a = getTableColumns(dialerDialAttempts);
     expect(s.listViewId.name).toBe('list_view_id'); expect(s.listViewId.notNull).toBe(false);

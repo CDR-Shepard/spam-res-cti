@@ -29,3 +29,9 @@ ALTER TABLE dialer_dial_attempts ADD COLUMN IF NOT EXISTS connected_at timestamp
 
 CREATE INDEX IF NOT EXISTS dialer_dial_attempts_record_idx ON dialer_dial_attempts (org_id, record_id, dialed_at);
 CREATE INDEX IF NOT EXISTS calls_outbound_target_idx ON calls (org_id, normalized_to_number, created_at) WHERE direction = 'outbound';
+
+-- listStartPosition (dialer/list-position.ts) joins dialer_dial_attempts ->
+-- dialer_queue_items -> dialer_sessions, filtered on list_view_id and a
+-- 12h dialed_at window. Nothing indexed dialer_dial_attempts.session_id.
+CREATE INDEX IF NOT EXISTS dialer_dial_attempts_session_idx ON dialer_dial_attempts (session_id, dialed_at);
+CREATE INDEX IF NOT EXISTS dialer_sessions_list_view_idx ON dialer_sessions (org_id, list_view_id) WHERE list_view_id IS NOT NULL;

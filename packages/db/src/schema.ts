@@ -306,6 +306,15 @@ export const dialerSessions = pgTable(
     oneActivePerUserIdx: uniqueIndex('dialer_sessions_one_active_per_user')
       .on(t.userId)
       .where(sql`${t.status} = 'active'`),
+    /**
+     * Backs listStartPosition's (dialer/list-position.ts) join to
+     * dialer_dial_attempts / dialer_queue_items, filtered on org + list view.
+     * Partial: only sessions that came from a list view (most Task/manual
+     * runs never set it) need to be found by this lookup.
+     */
+    listViewIdx: index('dialer_sessions_list_view_idx')
+      .on(t.orgId, t.listViewId)
+      .where(sql`list_view_id IS NOT NULL`),
   }),
 );
 
@@ -400,6 +409,9 @@ export const dialerDialAttempts = pgTable(
   (t) => ({
     targetIdx: index('dialer_dial_attempts_target_idx').on(t.orgId, t.toNumber, t.dialedAt),
     recordIdx: index('dialer_dial_attempts_record_idx').on(t.orgId, t.recordId, t.dialedAt),
+    // Backs listStartPosition's join to dialer_queue_items/dialer_sessions —
+    // nothing indexed session_id before this.
+    sessionIdx: index('dialer_dial_attempts_session_idx').on(t.sessionId, t.dialedAt),
   }),
 );
 

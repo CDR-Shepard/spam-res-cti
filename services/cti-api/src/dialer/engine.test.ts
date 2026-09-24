@@ -1437,6 +1437,32 @@ describe('handleDialOutcome — rollover is per day, per owner', () => {
       expect(err).toHaveBeenCalledWith('[dialer] rollover history read failed', expect.objectContaining({ itemId: 'i1', err: 'pool' }));
     } finally { err.mockRestore(); }
   });
+
+  // Ruling: a Skip does not count toward rollover, and neither does a Stop
+  // while the phone is still ringing. A Stop/hangup before answer settles the
+  // row with outcome 'canceled' — but the rollover history read happens
+  // BEFORE the CAS writes that outcome, so the current dial's own row still
+  // reads back as `skipped: false` (dialsToPerson keys `skipped` off the
+  // ALREADY-COMMITTED itemOutcome, which is still null at read time). Without
+  // gating on the outcome itself, a rep who presses Stop on the ringing 2nd
+  // dial of the day would rollover the follow-up exactly like a real miss.
+  it.each([
+    ['canceled', false],
+    ['no_answer', true],
+    ['voicemail', true],
+  ] as const)('outcome %s with one prior same-day miss (history says rollover is due): enqueues=%s', async (outcome, shouldEnqueue) => {
+    // `d('U1', 0)` stands in for the CURRENT dial's own attempt row, which the
+    // pre-CAS read finds still `skipped: false` regardless of what `outcome`
+    // this call eventually settles on.
+    const deps = makeDeps({ orgDayStart: DAY, contactHistory: vi.fn(async () => [d('U1', 3), d('U1', 0)]) });
+    const fdb = fakeDb(baseSession, miss()); deps.db = fdb;
+    await handleDialOutcome('CA1', outcome, deps);
+    if (shouldEnqueue) {
+      expect(deps.enqueueRollover).toHaveBeenCalledWith(expect.objectContaining({ userId: 'U1', recordId: '00Q1' }), expect.anything());
+    } else {
+      expect(deps.enqueueRollover).not.toHaveBeenCalled();
+    }
+  });
 });
 
 describe('startSession — the rep pressed Start dialing', () => {
