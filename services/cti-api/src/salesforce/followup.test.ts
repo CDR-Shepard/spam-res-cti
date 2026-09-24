@@ -28,13 +28,24 @@ describe('pickFollowUpTask', () => {
 });
 
 describe('followUpCopyFields', () => {
-  it('copies core fields, drops null Who/What, sets due date + open status', () => {
+  it('copies core fields, drops null Who/What, sets the due date', () => {
     const f = followUpCopyFields(t({ WhatId: null, WhoId: '00Q9' }), '2026-07-14');
     expect(f).toMatchObject({
       Subject: 'Follow-up', Type: 'Call', Priority: 'Normal', OwnerId: '005',
-      WhoId: '00Q9', Status: 'Not Started', ActivityDate: '2026-07-14',
+      WhoId: '00Q9', ActivityDate: '2026-07-14',
     });
     expect('WhatId' in f).toBe(false);
+  });
+
+  // 2026-09-23: the copy said Status 'Not Started', a value this org's Task
+  // picklist doesn't have (Open / Completed only, not restricted, so Salesforce
+  // saved it anyway). Every "Today" / "Future" / "Overdue + Today" view filters
+  // Status = 'Open', so 203 rolled follow-ups vanished from the rep's lists —
+  // and from the power dialer's own Task-list runs. Sending no Status lets
+  // Salesforce apply the org's default open status (Status is defaultedOnCreate).
+  it('never sends a Status: Salesforce applies the org default (Open here)', () => {
+    const f = followUpCopyFields(t({}), '2026-07-14');
+    expect('Status' in f).toBe(false);
   });
 
   // The marker is how the "Power Dialer Follow-Ups" Salesforce report tells a
