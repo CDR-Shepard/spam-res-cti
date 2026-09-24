@@ -78,6 +78,10 @@ export const PRESENCE_WINDOW_MS = 10_000;
 /** An 'active' session with no live dial that hasn't been polled this recently is
  *  an abandoned run. See `expireAbandonedSessions`. */
 export const ABANDONED_AFTER_MS = 10 * 60_000;
+/** A connected item whose prospect hung up this long ago no longer counts as presence.
+ *  The rep may be choosing Redial or Resume, but if they closed the tab, the run
+ *  should be reaped once the prospect has been gone long enough. */
+export const HUNG_UP_PRESENCE_MS = 10 * 60_000;
 
 export interface WorkerDeps {
   db: ReturnType<typeof getDb>;
@@ -644,7 +648,11 @@ export async function expireAbandonedSessions(deps: WorkerDeps): Promise<number>
     const items = await deps.db.query.dialerQueueItems.findMany({
       where: eq(schema.dialerQueueItems.sessionId, session.id),
     });
-    if (inFlightItem(items)) continue; // a live dial IS presence
+    const live = inFlightItem(items);
+    // A live dial IS presence — unless it is a connected call whose prospect
+    // hung up long ago: that is a rep who closed the tab mid-conversation.
+    const hungUpLongAgo = live?.status === 'connected' && live.prospectEndedAt != null && now.getTime() - live.prospectEndedAt.getTime() > HUNG_UP_PRESENCE_MS;
+    if (live && !hungUpLongAgo) continue;
     try {
       await deps.stop(session.id);
       expired++;

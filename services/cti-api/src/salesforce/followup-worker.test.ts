@@ -917,6 +917,21 @@ describe('expireAbandonedSessions — free the one-active-session slot (C1)', ()
     expect(await expireAbandonedSessions(d)).toBe(1);
     expect(stop).toHaveBeenCalledWith('S2');
   });
+
+  it('a connected item whose prospect hung up more than 10 minutes ago no longer counts as presence', async () => {
+    const d = deps({ db: expireDb([session()], [[{ status: 'connected', prospectEndedAt: new Date(NOW.getTime() - 11 * 60_000) }]]) });
+    expect(await expireAbandonedSessions(d)).toBe(1);
+  });
+
+  it('…but within 10 minutes it still does (the rep may be choosing Redial)', async () => {
+    const d = deps({ db: expireDb([session()], [[{ status: 'connected', prospectEndedAt: new Date(NOW.getTime() - 5 * 60_000) }]]) });
+    expect(await expireAbandonedSessions(d)).toBe(0);
+  });
+
+  it('a connected item with NO prospectEndedAt (a live conversation) still counts as presence', async () => {
+    const d = deps({ db: expireDb([session()], [[{ status: 'connected', prospectEndedAt: null }]]) });
+    expect(await expireAbandonedSessions(d)).toBe(0);
+  });
 });
 
 describe('completeTasks — a vanished PRIMARY never strands its siblings', () => {
