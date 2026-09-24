@@ -128,6 +128,12 @@ export const users = pgTable(
      * grating. Read by routes/telephony.ts when the rep's leg joins.
      */
     dialerHoldMusic: boolean('dialer_hold_music').default(true).notNull(),
+    /** Hold music between Power Dial calls (migration 0043) — one of
+     *  `HOLD_MUSIC_CHOICES` in @cti/contracts; read it with `toHoldMusicChoice`. */
+    dialerHoldMusicChoice: text('dialer_hold_music_choice').default('classical').notNull(),
+    /** The rep's YouTube playlist / video id when the choice is `youtube` (ids only). */
+    dialerYoutubeListId: text('dialer_youtube_list_id'),
+    dialerYoutubeVideoId: text('dialer_youtube_video_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
