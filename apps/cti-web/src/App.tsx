@@ -125,6 +125,16 @@ interface TwilioIncomingCall {
   on: (event: string, cb: (...args: unknown[]) => void) => void;
 }
 
+// Grace period after hangup() calls disconnect() before the UI forces
+// itself back to idle/wrap-up on its own. WHY: proven via Twilio Voice
+// Insights (2026-09-24) — a rep answered an inbound callback 12s into the
+// ring, right as the caller hung up (16s): `get-user-media succeeded` at
+// 13:17:40, then Twilio's `connection cancel` a second later at 13:17:41.
+// disconnect() called on an already-closed connection gets no event back
+// from the SDK, so without this fallback the rep is stuck on the in-call
+// screen until they reload the page.
+export const HANGUP_FALLBACK_MS = 1500;
+
 export function App(): JSX.Element {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [signedIn, setSignedIn] = useState(!!readSession());
@@ -284,6 +294,13 @@ export function App(): JSX.Element {
   // connectionRef, so joining/leaving it never touches phase/active/inCall and
   // never collides with a normal click-to-dial or inbound call's connection.
   const dialerConnRef = useRef<unknown>(null);
+  // The idempotent "this call has ended" cleanup for whichever call is
+  // CURRENTLY on connectionRef — set when an inbound call is accepted (its
+  // backToIdle) and when an outbound call is placed (the disconnect
+  // handler's work: persist the SID, wrap up, PATCH completed). hangup()'s
+  // fallback calls this directly when the SDK never emits an event back for
+  // a connection that was already closed (see HANGUP_FALLBACK_MS above).
+  const callEndRef = useRef<(() => void) | null>(null);
   // One LineAudio for the whole App mount, not per-leg — a rejoin (recovery,
   // or a fresh run) must keep whatever "was it quiet" state the player is
   // mid-decision on. useState's lazy initializer runs createLineAudio() only
@@ -912,6 +929,7 @@ export function App(): JSX.Element {
     openCtiTaskWrittenRef.current = false;
     openCtiTaskIdRef.current = null;
     connectionRef.current = null;
+    callEndRef.current = null;
     setActive({ callId: p.id, toNumber: p.toNumber, fromNumber: p.fromNumber, startedAt: Date.now() });
     setElapsed(p.durationSeconds ?? 0);
     setDisposition(defaultDispositionForStatus(p.status));
@@ -1011,21 +1029,33 @@ export function App(): JSX.Element {
         const sid = conn.parameters?.CallSid;
         if (sid) void api(`/calls/${callId}`, { method: 'PATCH', body: { providerCallId: sid } });
       };
+      // Idempotent — guards against hangup()'s HANGUP_FALLBACK_MS fallback
+      // re-running this after 'disconnect' already has, and against
+      // 'disconnect' firing after the fallback already forced wrap-up.
+      // Remembered on callEndRef so hangup() can reach it without an event.
+      let outboundEnded = false;
+      const endOutbound = (): void => {
+        if (outboundEnded) return;
+        outboundEnded = true;
+        persistSid();
+        setPhase('wrapup');
+        void api(`/calls/${callId}`, { method: 'PATCH', body: { status: 'completed', endedAt: new Date().toISOString() } });
+        // Keep the device registered (persistent) so it can place the next call
+        // and receive inbound callbacks.
+      };
+      callEndRef.current = endOutbound;
       conn.on('accept', () => {
         persistSid();
         setPhase('active');
         setActive((s) => (s ? { ...s, startedAt: Date.now() } : s));
         void api(`/calls/${callId}`, { method: 'PATCH', body: { status: 'in_progress', answeredAt: new Date().toISOString() } });
       });
-      conn.on('disconnect', () => {
-        persistSid();
-        setPhase('wrapup');
-        void api(`/calls/${callId}`, { method: 'PATCH', body: { status: 'completed', endedAt: new Date().toISOString() } });
-        // Keep the device registered (persistent) so it can place the next call
-        // and receive inbound callbacks.
-      });
+      conn.on('disconnect', endOutbound);
       conn.on('cancel', () => {
         persistSid(); setPhase('wrapup');
+        // No PATCH here — unchanged from before. Just block endOutbound from
+        // running a second time (with its PATCH) if the fallback fires later.
+        outboundEnded = true;
       });
       conn.on('error', (err) => {
         persistSid();
@@ -1052,7 +1082,21 @@ export function App(): JSX.Element {
   }, [firewall, me?.user.isAdmin, place]);
 
   const hangup = useCallback(() => {
-    try { (connectionRef.current as { disconnect?: () => void } | null)?.disconnect?.(); } catch { /* */ }
+    const call = connectionRef.current;
+    if (!call) return;
+    try { (call as { disconnect?: () => void }).disconnect?.(); } catch { /* */ }
+    // Fallback for the 2026-09-24 incident: disconnect() on a connection
+    // that's already closed (e.g. the caller hung up the instant the rep
+    // answered) gets no event back from the SDK — 'disconnect' never fires,
+    // so the in-call screen would otherwise never clear and the rep has to
+    // reload. Only acts if this is STILL the live call and we're still on
+    // an in-call phase by then — a real event in the meantime (which flips
+    // the phase itself) makes this a no-op.
+    window.setTimeout(() => {
+      if (connectionRef.current === call && (phaseRef.current === 'active' || phaseRef.current === 'ringing')) {
+        callEndRef.current?.();
+      }
+    }, HANGUP_FALLBACK_MS);
   }, []);
   const toggleMute = useCallback(() => {
     const c = connectionRef.current as { mute?: (b: boolean) => void } | null;
@@ -1073,6 +1117,7 @@ export function App(): JSX.Element {
     // Keep the persistent device registered (for the next call + inbound); only
     // clear the per-call connection.
     connectionRef.current = null;
+    callEndRef.current = null;
     placingRef.current = false;
     openCtiTaskWrittenRef.current = false;
     openCtiTaskIdRef.current = null;
@@ -1089,15 +1134,28 @@ export function App(): JSX.Element {
     const backToIdle = (): void => {
       setPhase('idle'); setActive(null); setElapsed(0); setIncoming(null);
       connectionRef.current = null;
+      callEndRef.current = null;
       if (pendingTeardownRef.current && !dialerConnRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
     };
+    // Idempotent — guards against 'cancel'/'disconnect'/'error' more than
+    // one of them firing for the same call (or hangup()'s HANGUP_FALLBACK_MS
+    // fallback firing after one of them already has) from double-running
+    // backToIdle or tearing the Device down twice. Remembered on callEndRef
+    // so hangup() can reach it without an event.
+    let inboundEnded = false;
+    const endInbound = (): void => {
+      if (inboundEnded) return;
+      inboundEnded = true;
+      backToIdle();
+    };
     connectionRef.current = call;
+    callEndRef.current = endInbound;
     coordinatorRef.current?.promoteSelf(); // broadcast busy immediately (see beginRun)
     setActive({ callId: '', startedAt: Date.now(), ...plan.activeCall });
     setIncoming(null);
     setMuted(false);
     setPhase('active');
-    try { call.accept(); } catch { backToIdle(); return; }
+    try { call.accept(); } catch { endInbound(); return; }
     // After accept(): the local stream is attached asynchronously and the SDK
     // emits 'accept' once media is open — keepMicAlive listens for that.
     keepMicAlive(call as unknown as Parameters<typeof keepMicAlive>[0]);
@@ -1118,13 +1176,23 @@ export function App(): JSX.Element {
         if (issue === 'no-inbound-audio') setToast({ text: "The caller's audio came back.", type: 'success' });
       },
     );
-    call.on('disconnect', backToIdle);
+    // The caller can hang up the INSTANT the rep clicks Answer — proven via
+    // Twilio Voice Insights 2026-09-24 (get-user-media succeeded 13:17:40,
+    // Twilio cancelled the call 13:17:41). By then the ring screen had
+    // already been replaced by the active call screen, and nothing listened
+    // for 'cancel', so the rep was left staring at silence with no way back
+    // except reloading the page.
+    call.on('cancel', () => {
+      setToast({ text: 'The caller hung up before you answered.', type: 'info' });
+      endInbound();
+    });
+    call.on('disconnect', endInbound);
     // A media/mic failure after accept may never emit 'disconnect'; recover the
     // UI (inbound has no wrap-up form) instead of stranding an 'active' screen.
     call.on('error', (err) => {
       const e = err as { message?: string; code?: number } | undefined;
       setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'unknown'}`, type: 'error' });
-      backToIdle();
+      endInbound();
     });
   }, [incoming, teardownDevice]);
 

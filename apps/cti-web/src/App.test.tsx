@@ -27,24 +27,51 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { App } from './App';
+import { App, HANGUP_FALLBACK_MS } from './App';
 import * as opencti from './opencti';
 import type { IncomingCallLike } from './incoming-accept';
 
-/** Minimal fake incoming call: matches what App.tsx's TwilioIncomingCall needs. */
+/** Minimal fake incoming call: matches what App.tsx's TwilioIncomingCall needs.
+ *  `on`/`emit` are a REAL (if tiny) event emitter — not just a spy — so tests
+ *  can simulate the SDK firing 'cancel'/'disconnect'/'error' on a call that's
+ *  already been accepted (see acceptIncoming's listeners in App.tsx). */
 interface FakeIncomingCall extends IncomingCallLike {
   accept: () => void;
   reject: () => void;
+  disconnect: () => void;
   on: (event: string, cb: (...args: unknown[]) => void) => void;
+  emit: (event: string, ...args: unknown[]) => void;
 }
 
 function fakeCall(overrides: Pick<IncomingCallLike, 'parameters' | 'customParameters'>): FakeIncomingCall {
+  const listeners = new Map<string, Array<(...args: unknown[]) => void>>();
   return {
     ...overrides,
     accept: vi.fn(),
     reject: vi.fn(),
-    on: vi.fn(),
+    disconnect: vi.fn(),
+    on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
+      listeners.set(event, [...(listeners.get(event) ?? []), cb]);
+    }),
+    emit: (event: string, ...args: unknown[]) => {
+      for (const cb of listeners.get(event) ?? []) cb(...args);
+    },
   };
+}
+
+/** Fake outbound Twilio Call (device.connect()'s return value) — same real
+ *  on/emit shape as FakeIncomingCall, for the same reason: tests need to
+ *  simulate 'disconnect' firing (or NOT firing) after hangup(). */
+class FakeOutboundConnection {
+  private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+  disconnect = vi.fn();
+  parameters: Record<string, string> = { CallSid: 'CA_test_1' };
+  on(event: string, cb: (...args: unknown[]) => void): void {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), cb]);
+  }
+  emit(event: string, ...args: unknown[]): void {
+    for (const cb of this.listeners.get(event) ?? []) cb(...args);
+  }
 }
 
 /** Fake Twilio Device — captures the `on('incoming', ...)` handler App.tsx's
@@ -54,6 +81,8 @@ function fakeCall(overrides: Pick<IncomingCallLike, 'parameters' | 'customParame
  *  it), mirroring the real @twilio/voice-sdk Device shape App.tsx relies on. */
 class FakeDevice {
   static instances: FakeDevice[] = [];
+  /** Outbound legs handed out by connect() — one per place() call. */
+  static connects: FakeOutboundConnection[] = [];
   private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
   constructor(_token: string, _opts: unknown) {
     FakeDevice.instances.push(this);
@@ -69,6 +98,11 @@ class FakeDevice {
   register(): Promise<void> { return Promise.resolve(); }
   updateToken(): void { /* not exercised */ }
   destroy(): void { /* not exercised */ }
+  connect(_opts: unknown): Promise<FakeOutboundConnection> {
+    const connection = new FakeOutboundConnection();
+    FakeDevice.connects.push(connection);
+    return Promise.resolve(connection);
+  }
 }
 
 vi.mock('@twilio/voice-sdk', () => ({ Device: FakeDevice }));
@@ -84,6 +118,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   FakeDevice.instances.length = 0;
+  FakeDevice.connects.length = 0;
   localStorage.clear();
   // Seed a signed-in session so App.tsx's bootstrap effect skips straight to
   // fetching /auth/me instead of the dev-session fallback.
@@ -107,6 +142,9 @@ afterEach(() => {
   // once per test — leftover DOM from a prior test would make the next
   // `getByTitle('Answer')` ambiguous. Unmount explicitly between tests.
   cleanup();
+  // Safety net: a test that enables fake timers and fails before switching
+  // back must not poison every test that runs after it.
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   localStorage.clear();
@@ -209,5 +247,185 @@ describe('App — accepting an inbound call screen-pops via acceptIncomingCall',
     fireEvent.click(screen.getByTitle('Answer'));
 
     expect(opencti.screenPopRecord).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Pins the fix for the 2026-09-24 incident: Twilio Voice Insights showed a
+ * rep answering an inbound callback 12s into the ring, right as the caller
+ * hung up (16s) — `get-user-media succeeded` at 13:17:40, then
+ * `connection cancel` at 13:17:41. acceptIncoming() had already flipped the
+ * UI to the active call screen and only listened for 'disconnect'/'error',
+ * never 'cancel', so the rep was stuck staring at silence until they
+ * reloaded the page. Separately, hangup() called disconnect() on a
+ * connection that (in this exact scenario, and more generally whenever the
+ * SDK doesn't emit anything for an already-closed call) never fires an
+ * event back, so the in-call screen never cleared even when the rep pressed
+ * the hang-up button themselves.
+ */
+describe('App — a cancelled inbound call and a hangup that never gets an event both return to idle', () => {
+  it("a caller who hangs up WHILE the rep is answering returns the rep to idle, with the exact toast", async () => {
+    const call = fakeCall({ parameters: { From: '+16195551234' }, customParameters: new Map() });
+    await ring(call);
+    fireEvent.click(screen.getByTitle('Answer'));
+    await waitFor(() => expect(call.accept).toHaveBeenCalledTimes(1));
+    await screen.findByTitle('End call');
+
+    act(() => { call.emit('cancel'); });
+
+    expect(screen.getByText('The caller hung up before you answered.')).toBeTruthy();
+    // Back on the idle dial pad — the in-call screen is gone.
+    expect(screen.queryByTitle('End call')).toBeNull();
+    await screen.findByTitle('Check & call');
+  });
+
+  it('hang up with NO event ever firing still clears the screen, via the fallback', async () => {
+    const call = fakeCall({ parameters: { From: '+16195551234' }, customParameters: new Map() });
+    await ring(call);
+    fireEvent.click(screen.getByTitle('Answer'));
+    await waitFor(() => expect(call.accept).toHaveBeenCalledTimes(1));
+    await screen.findByTitle('End call');
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTitle('End call'));
+    expect(call.disconnect).toHaveBeenCalledTimes(1);
+    // Nothing has happened yet — the fallback hasn't fired.
+    expect(screen.queryByTitle('End call')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(HANGUP_FALLBACK_MS); });
+    vi.useRealTimers();
+
+    expect(screen.queryByTitle('End call')).toBeNull();
+    await screen.findByTitle('Check & call');
+    expect(call.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("hang up followed IMMEDIATELY by a real 'disconnect' event goes idle once — the fallback is a no-op", async () => {
+    const call = fakeCall({ parameters: { From: '+16195551234' }, customParameters: new Map() });
+    await ring(call);
+    fireEvent.click(screen.getByTitle('Answer'));
+    await waitFor(() => expect(call.accept).toHaveBeenCalledTimes(1));
+    await screen.findByTitle('End call');
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTitle('End call'));
+    act(() => { call.emit('disconnect'); });
+    // Synchronous check — the DOM is already updated inside act(), and
+    // findBy*'s internal polling can't advance while fake timers are frozen.
+    expect(screen.queryByTitle('End call')).toBeNull();
+    expect(screen.getByTitle('Check & call')).toBeTruthy();
+
+    // Advance well past the fallback window — it must be a complete no-op:
+    // no second toast, no error, the dial pad stays exactly as it is.
+    await act(async () => { await vi.advanceTimersByTimeAsync(HANGUP_FALLBACK_MS + 500); });
+    vi.useRealTimers();
+
+    expect(screen.queryByText('The caller hung up before you answered.')).toBeNull();
+    expect(screen.queryByText(/Call error/)).toBeNull();
+    expect(call.disconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** Click a digit key (0-9, *, #) on the idle dial pad by its visible label. */
+function dialDigit(d: string): void {
+  const btn = Array.from(document.querySelectorAll('.dialpad .key')).find(
+    (b) => b.querySelector('.num')?.textContent === d,
+  );
+  if (!btn) throw new Error(`no dial pad key for "${d}"`);
+  fireEvent.click(btn);
+}
+
+const ALLOW_VERDICT = {
+  decision: 'ALLOW',
+  reasons: [],
+  blockReason: null,
+  requiredScriptId: null,
+  auditId: 'audit-1',
+  checks: [],
+  normalizedTo: '+16195551234',
+  fromNumber: '+16195559999',
+};
+
+const OUTBOUND_CALL = {
+  id: 'call-1',
+  fromNumber: '+16195559999',
+  toNumber: '+16195551234',
+  normalizedToNumber: '+16195551234',
+};
+
+/** Same routes as the default beforeEach fetch stub, plus the firewall +
+ *  call-creation + call-PATCH routes an outbound dial needs. Returns the
+ *  mock so tests can inspect exactly which PATCHes went out. */
+function stubOutboundFetch(): ReturnType<typeof vi.fn> {
+  const fn = vi.fn(async (input: unknown, init?: { method?: string; body?: string }): Promise<Response> => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    if (url.includes('/auth/me')) return jsonResponse(ME_RESPONSE);
+    if (url.includes('/calls/pending-disposition')) return jsonResponse({ pending: null });
+    if (url.includes('/telephony/token')) return jsonResponse({ token: 'device-token' });
+    if (url.includes('/firewall/precall')) return jsonResponse(ALLOW_VERDICT);
+    if (method === 'POST' && url.endsWith('/calls')) return jsonResponse({ call: OUTBOUND_CALL, taskAllowed: true });
+    if (method === 'PATCH' && url.includes('/calls/')) return jsonResponse({});
+    return jsonResponse({});
+  });
+  vi.stubGlobal('fetch', fn);
+  return fn;
+}
+
+/** Render the app, dial a number, and drive it through the non-admin
+ *  auto-place flow (ME_RESPONSE has isAdmin: false, so clearing the
+ *  firewall dials immediately — see App.tsx's auto-place effect) until the
+ *  outbound call screen is up. Returns the fake connection device.connect()
+ *  handed back, so the test can drive its events. */
+async function placeOutboundCall(): Promise<FakeOutboundConnection> {
+  render(<App />);
+  await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+  for (const d of ['5', '5', '5', '1', '2', '3', '4']) dialDigit(d);
+  fireEvent.click(screen.getByTitle('Check & call'));
+  await waitFor(() => expect(FakeDevice.connects.length).toBe(1));
+  await screen.findByTitle('End call');
+  return FakeDevice.connects[0]!;
+}
+
+/** Same incident fix, on the OUTBOUND leg: hangup() must always clear the
+ *  in-call screen, whether or not the SDK ever emits 'disconnect'. The
+ *  power-dialer conference leg (dialerConnRef) is untouched by any of this —
+ *  hangup() only ever acts on connectionRef. */
+describe('App — outbound hang up always reaches wrap-up', () => {
+  it("hang up plus a normal 'disconnect' event reaches wrap-up exactly as before (unchanged PATCH)", async () => {
+    const fetchMock = stubOutboundFetch();
+    const connection = await placeOutboundCall();
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTitle('End call'));
+    act(() => { connection.emit('disconnect'); });
+    expect(document.querySelector('.wrapup')).toBeTruthy();
+
+    // The fallback must be a no-op after a real event already ran.
+    await act(async () => { await vi.advanceTimersByTimeAsync(HANGUP_FALLBACK_MS + 500); });
+    vi.useRealTimers();
+
+    const completedPatches = fetchMock.mock.calls.filter(([u, i]) => {
+      const opts = i as { method?: string; body?: string } | undefined;
+      if (!String(u).includes('/calls/call-1')) return false;
+      if (opts?.method !== 'PATCH') return false;
+      const body = opts.body ? (JSON.parse(opts.body) as { status?: string }) : {};
+      return body.status === 'completed';
+    });
+    expect(completedPatches).toHaveLength(1);
+    expect(connection.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('hang up with NO event reaches wrap-up after the fallback', async () => {
+    stubOutboundFetch();
+    const connection = await placeOutboundCall();
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTitle('End call'));
+    expect(document.querySelector('.wrapup')).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(HANGUP_FALLBACK_MS); });
+    vi.useRealTimers();
+
+    expect(document.querySelector('.wrapup')).toBeTruthy();
+    expect(connection.disconnect).toHaveBeenCalledTimes(1);
   });
 });
