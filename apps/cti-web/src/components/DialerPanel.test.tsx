@@ -14,6 +14,7 @@ import {
   AttemptBadge,
   DialerPanel,
   confirmLine,
+  confirmContextLine,
   missLine,
   itemStatusLabel,
   startDialingSequence,
@@ -502,5 +503,81 @@ describe('ConfirmBlock (SSR)', () => {
   it('does not offer it when the 409 named no run', () => {
     const html = renderToStaticMarkup(<ConfirmBlock view={view} busy={false} error="Another power-dial run is already active for you — stop it first." onStartDialing={() => {}} onChooseAnother={() => {}} />);
     expect(html).not.toContain('Stop the other run');
+  });
+  it('shows the shared-list line under the breakdown line when listContext names another rep', () => {
+    const html = renderToStaticMarkup(
+      <ConfirmBlock
+        view={{ ...view, listContext: { total: 220, startedFrom: 87, workedBy: ['Garrett'] } }}
+        busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}}
+      />,
+    );
+    // renderToStaticMarkup HTML-escapes the apostrophe as `&#x27;`.
+    expect(html).toContain('Garrett is on this list (record 87 of 220) — you&#x27;ll start from 88.');
+    expect(html.indexOf('187 will be dialed')).toBeLessThan(html.indexOf('Garrett is on this list'));
+  });
+  it('omits the shared-list line with no listContext, or when startedFrom is 0 (wrapped to the top)', () => {
+    expect(renderToStaticMarkup(<ConfirmBlock view={view} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} />))
+      .not.toContain('is on this list');
+    const wrapped = { ...view, listContext: { total: 220, startedFrom: 0, workedBy: ['Garrett'] } };
+    expect(renderToStaticMarkup(<ConfirmBlock view={wrapped} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} />))
+      .not.toContain('is on this list');
+  });
+});
+
+/**
+ * Two reps, one list (spec §4): the confirm block's extra line naming who
+ * else (or just this rep) has dialed the list, and where the run will start.
+ * `startedFrom`/`total` are 0-based/plain counts straight off the server —
+ * the rep-facing copy is 1-based ("record 87 of 220" = index 86 is the 87th
+ * record), so every arithmetic case below is deliberately off-by-one from
+ * its inputs.
+ */
+describe('confirmContextLine', () => {
+  it('one other rep: "Garrett is on this list (record 87 of 220) — you\'ll start from 88."', () => {
+    expect(confirmContextLine({ total: 220, startedFrom: 87, workedBy: ['Garrett'] }))
+      .toBe("Garrett is on this list (record 87 of 220) — you'll start from 88.");
+  });
+
+  it('two other reps: "Garrett and Danny are on this list …"', () => {
+    expect(confirmContextLine({ total: 220, startedFrom: 87, workedBy: ['Garrett', 'Danny'] }))
+      .toBe("Garrett and Danny are on this list (record 87 of 220) — you'll start from 88.");
+  });
+
+  it('three or more: a comma list with "and" before the last name', () => {
+    expect(confirmContextLine({ total: 220, startedFrom: 87, workedBy: ['Garrett', 'Danny', 'Priya'] }))
+      .toBe("Garrett, Danny and Priya are on this list (record 87 of 220) — you'll start from 88.");
+    expect(confirmContextLine({ total: 220, startedFrom: 87, workedBy: ['Garrett', 'Danny', 'Priya', 'Sam'] }))
+      .toBe("Garrett, Danny, Priya and Sam are on this list (record 87 of 220) — you'll start from 88.");
+  });
+
+  it('only the requesting rep has dialed it (workedBy empty, startedFrom > 0): the self-only copy', () => {
+    expect(confirmContextLine({ total: 50, startedFrom: 12, workedBy: [] }))
+      .toBe("You're on this list (record 12 of 50) — you'll start from 13.");
+  });
+
+  it('startedFrom 0 (wrapped to the top, or nobody has dialed it): no line', () => {
+    expect(confirmContextLine({ total: 50, startedFrom: 0, workedBy: ['Garrett'] })).toBeNull();
+    expect(confirmContextLine({ total: 50, startedFrom: 0, workedBy: [] })).toBeNull();
+  });
+
+  it('no listContext (not a list-view run, or an older server): no line', () => {
+    expect(confirmContextLine(null)).toBeNull();
+    expect(confirmContextLine(undefined)).toBeNull();
+  });
+});
+
+describe('CurrentRecord — the list-position line', () => {
+  const item: DialerCurrentItem = { id: 'i1', recordId: '00Q1', objectType: 'Lead', status: 'dialing', toNumber: '+16195551234' };
+
+  it('listPosition + listTotal present: "record 88 of 220" (1-based from a 0-based index)', () => {
+    const html = renderToStaticMarkup(<CurrentRecord item={{ ...item, listPosition: 87 }} listTotal={220} />);
+    expect(html).toContain('record 88 of 220');
+  });
+
+  it('no listPosition, or no listTotal: no "record N of M" line (the "Current record" kicker is unaffected)', () => {
+    const noListLine = /record \d+ of \d+/;
+    expect(renderToStaticMarkup(<CurrentRecord item={item} />)).not.toMatch(noListLine);
+    expect(renderToStaticMarkup(<CurrentRecord item={{ ...item, listPosition: 87 }} />)).not.toMatch(noListLine);
+    expect(renderToStaticMarkup(<CurrentRecord item={{ ...item, listPosition: null }} listTotal={220} />)).not.toMatch(noListLine);
   });
 });

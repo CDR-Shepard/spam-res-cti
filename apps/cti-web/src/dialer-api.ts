@@ -29,6 +29,10 @@ export interface DialerCurrentItem {
    *  headline from the first ring. Null when the record has none; absent
    *  from an older server or a row written before migration 0041. */
   displayName?: string | null;
+  /** Two reps, one list (spec §4): the record's index in the Salesforce list
+   *  view it came from — NOT the queue ordinal, which rotation changes. Null
+   *  or absent: not a list-view run, or an older server. */
+  listPosition?: number | null;
 }
 
 export interface DialerSession {
@@ -54,6 +58,12 @@ export interface DialerSessionView {
   firstPassTotal?: number;
   /** Per-reason tally of no_connect rows (server `session-store.ts#missBreakdown`). */
   missBreakdown?: Record<string, number>;
+  /** Two reps, one list (spec §4): set only when the run came from a list
+   *  view. `workedBy` names OTHER reps (never the caller) who dialed this
+   *  list in the last 12h — empty even when `startedFrom` is nonzero if only
+   *  this rep dialed it before. Null/absent: not a list-view run, or an
+   *  older server. */
+  listContext?: { total: number; startedFrom: number; workedBy: string[] } | null;
 }
 
 export type DialerControlAction = 'start' | 'pause' | 'resume' | 'skip' | 'stop' | 'next';

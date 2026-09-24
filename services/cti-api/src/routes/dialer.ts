@@ -32,6 +32,7 @@ import { createDialerSession } from '../dialer/create-session.js';
 import { workedRecentlySafe } from '../dialer/already-worked.js';
 import { blockedTargetsSafe } from '../dialer/consent-check.js';
 import { preferredNumbersFor } from '../dialer/contact-history-live.js';
+import { listContextFor, listStartPosition } from '../dialer/list-position.js';
 import {
   pauseSession,
   resumeSession,
@@ -255,8 +256,9 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
         workedRecently: (orgId, numbers) => workedRecentlySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
         preferredNumbers: (orgId, pairs) => preferredNumbersFor(db, orgId, pairs),
+        listStartPosition: (orgId, listViewIdArg, now) => listStartPosition(db, orgId, listViewIdArg, now),
       },
-      { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds },
+      { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds, listViewId },
     );
     return { ...result, recordCount: recordIds.length };
   });
@@ -275,12 +277,16 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
         workedRecently: (orgId, numbers) => workedRecentlySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
         preferredNumbers: (orgId, pairs) => preferredNumbersFor(db, orgId, pairs),
+        listStartPosition: (orgId, listViewIdArg, now) => listStartPosition(db, orgId, listViewIdArg, now),
       },
       {
         userId: authed.userId,
         orgId: authed.orgId,
         objectType: parsed.data.objectType,
         recordIds: parsed.data.recordIds,
+        // No list view here: this route serves the raw record-id selection
+        // (and the Salesforce handoff relay) — never a list view pull, so it
+        // never rotates. Only /from-listview below carries a listViewId.
       },
     );
     return result;
@@ -289,7 +295,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
   app.get('/dialer/sessions/:id', async (req, reply) => {
     const owned = await requireOwnedSession(req, reply);
     if (!owned) return;
-    const { session } = owned;
+    const { authed, session } = owned;
     const db = getDb();
 
     // Presence: the retry nudge (a server timer that ORIGINATES calls) only advances
@@ -318,6 +324,11 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       currentItem: current,
       waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
       rollovers: rolloverSummary(jobs),
+      // Two reps, one list (spec §4): null for a run not created from a list
+      // view. `listContextFor` runs the grouped cross-session join ONLY while
+      // `status` is 'ready' (the confirm block) — never on the 1-2s polls of
+      // an active run.
+      listContext: await listContextFor(db, session, items, authed.userId, now),
     };
   });
 

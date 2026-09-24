@@ -4,6 +4,7 @@ import { buildQueueRows, createDialerSession } from './create-session.js';
 import { nextEligiblePendingItem } from './state.js';
 import type { DialerItem } from './session-store.js';
 import { pairKey } from './contact-history.js';
+import { rotateAfter } from './list-position.js';
 
 /** Minimal db double for the happy path: records the session insert values and
  *  the queue-item rows so a test can assert what creation actually wrote. */
@@ -35,6 +36,7 @@ const noResolveDeps = {
   workedRecently: (async () => new Set<string>()) as never,
   consentBlocked: (async () => new Map()) as never,
   preferredNumbers: (async () => new Map<string, string>()) as never,
+  listStartPosition: (async () => null) as never,
 };
 const args = { userId: 'u1', orgId: 'o1', objectType: 'Lead' as const, recordIds: ['00Q000000000001'] };
 
@@ -46,9 +48,9 @@ describe('buildQueueRows', () => {
       { recordId: '00Q3', objectType: 'Lead', toNumber: null },
     ]);
     expect(rows).toEqual([
-      { sessionId: 'S1', ordinal: 0, objectType: 'Lead', recordId: '00Q1', toNumber: '+16195550100', fallbackNumber: null, attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550999', taskId: null, followupEligible: true, displayName: null, status: 'pending', outcome: null },
-      { sessionId: 'S1', ordinal: 1, objectType: 'Lead', recordId: '00Q2', toNumber: '+16195550200', fallbackNumber: null, attempt: 1, primaryNumber: '+16195550200', secondaryNumber: null, taskId: null, followupEligible: true, displayName: null, status: 'pending', outcome: null },
-      { sessionId: 'S1', ordinal: 2, objectType: 'Lead', recordId: '00Q3', toNumber: null, fallbackNumber: null, attempt: 1, primaryNumber: null, secondaryNumber: null, taskId: null, followupEligible: true, displayName: null, status: 'unreachable', outcome: null },
+      { sessionId: 'S1', ordinal: 0, objectType: 'Lead', recordId: '00Q1', toNumber: '+16195550100', fallbackNumber: null, attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550999', taskId: null, followupEligible: true, displayName: null, status: 'pending', outcome: null, listPosition: null },
+      { sessionId: 'S1', ordinal: 1, objectType: 'Lead', recordId: '00Q2', toNumber: '+16195550200', fallbackNumber: null, attempt: 1, primaryNumber: '+16195550200', secondaryNumber: null, taskId: null, followupEligible: true, displayName: null, status: 'pending', outcome: null, listPosition: null },
+      { sessionId: 'S1', ordinal: 2, objectType: 'Lead', recordId: '00Q3', toNumber: null, fallbackNumber: null, attempt: 1, primaryNumber: null, secondaryNumber: null, taskId: null, followupEligible: true, displayName: null, status: 'unreachable', outcome: null, listPosition: null },
     ]);
   });
 
@@ -953,5 +955,115 @@ describe('createDialerSession — one number per pass (preferred number)', () =>
     expect(db._itemRows[0]).toMatchObject({
       toNumber: '+12135550199', primaryNumber: '+12135550199', secondaryNumber: null, fallbackNumber: null,
     });
+  });
+});
+
+/**
+ * Two reps, one list (2026-09-23 ruling, spec §4): a run created over the
+ * SAME Salesforce list view as an earlier run (any rep, in the last 12h)
+ * starts the queue right after the furthest position that earlier run
+ * reached — the records before that spot go to the end. `listStartPosition`
+ * is injected RAW (not pre-wrapped fail-open), like `preferredNumbers`: a
+ * broken read is caught right here, in `createDialerSession`, never inside
+ * the live wiring — see the fail-open test below.
+ */
+describe('createDialerSession — two reps, one list (rotation)', () => {
+  /** Each record dials the number mapped to its id — order-preserving, like
+   *  the other resolver stands-ins in this file. */
+  function resolverByRecord(numbers: Record<string, string>) {
+    return vi.fn(async (_u: string, _objectType: string, recordId: string) => ({
+      e164: numbers[recordId] ?? null, fallbackE164: null, skipOnDialer: false,
+    }));
+  }
+
+  const FIVE = ['00Q1', '00Q2', '00Q3', '00Q4', '00Q5'];
+  const numbers: Record<string, string> = {
+    '00Q1': '+16195550101', '00Q2': '+16195550102', '00Q3': '+16195550103',
+    '00Q4': '+16195550104', '00Q5': '+16195550105',
+  };
+
+  const deps = (db: unknown, resolveDialNumber: unknown, listStartPosition: unknown) => ({
+    db, resolveDialNumber, fetchTasks: async () => [], fetchContactNames: async () => new Map<string, string>(),
+    salesforceUserId: async () => 'sf1', workedRecently: async () => new Set<string>(),
+    consentBlocked: async () => new Map(), preferredNumbers: async () => new Map<string, string>(),
+    listStartPosition,
+  });
+
+  it('rotates the queue to start right after the furthest position, stamping each row with its ORIGINAL list index', async () => {
+    const db = fakeDb();
+    const listStartPosition = vi.fn(async () => ({
+      position: 1, workedBy: [{ userId: 'U-GARRETT', name: 'Garrett' }],
+    }));
+    const result = await createDialerSession(
+      deps(db, resolverByRecord(numbers), listStartPosition) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: FIVE, listViewId: '00B1' },
+    );
+    // rotateAfter(FIVE, 1) → ordered [00Q3,00Q4,00Q5,00Q1,00Q2], positions [2,3,4,0,1].
+    expect(db._itemRows.map((x) => [x.recordId, x.ordinal, x.listPosition])).toEqual([
+      ['00Q3', 0, 2], ['00Q4', 1, 3], ['00Q5', 2, 4], ['00Q1', 3, 0], ['00Q2', 4, 1],
+    ]);
+    // Dialed order follows the rotation too — not just the stamped position.
+    expect(db._itemRows.map((x) => x.toNumber)).toEqual([
+      '+16195550103', '+16195550104', '+16195550105', '+16195550101', '+16195550102',
+    ]);
+    expect(db._sessionInsert).toMatchObject({ listViewId: '00B1' });
+    expect(listStartPosition).toHaveBeenCalledWith('O1', '00B1', expect.any(Date));
+    expect(result).toEqual({ sessionId: 'S1', total: 5 });
+  });
+
+  it('cross-checks against rotateAfter itself, so the two never drift apart', () => {
+    expect(rotateAfter(FIVE, 1)).toEqual({
+      ordered: ['00Q3', '00Q4', '00Q5', '00Q1', '00Q2'], positions: [2, 3, 4, 0, 1], startedFrom: 2,
+    });
+  });
+
+  it('no rotation needed (position null): list order is dial order, and listPosition is the identity mapping', async () => {
+    const db = fakeDb();
+    const listStartPosition = vi.fn(async () => null);
+    await createDialerSession(
+      deps(db, resolverByRecord(numbers), listStartPosition) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: FIVE, listViewId: '00B1' },
+    );
+    expect(db._itemRows.map((x) => [x.recordId, x.ordinal, x.listPosition])).toEqual([
+      ['00Q1', 0, 0], ['00Q2', 1, 1], ['00Q3', 2, 2], ['00Q4', 3, 3], ['00Q5', 4, 4],
+    ]);
+  });
+
+  it('a run without a list id writes null positions on every row and never calls listStartPosition', async () => {
+    const db = fakeDb();
+    const listStartPosition = vi.fn(async () => ({ position: 1, workedBy: [] }));
+    await createDialerSession(
+      deps(db, resolverByRecord(numbers), listStartPosition) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: FIVE },
+    );
+    expect(db._itemRows.every((x) => x.listPosition === null)).toBe(true);
+    expect(db._itemRows.map((x) => x.recordId)).toEqual(FIVE); // untouched order
+    expect(listStartPosition).not.toHaveBeenCalled();
+    expect(db._sessionInsert).toMatchObject({ listViewId: null });
+  });
+
+  /**
+   * The adjudicated fail-open (controller decision #5): a thrown
+   * `listStartPosition` read must mean "run from the top", exactly like a
+   * `position: null` result — never a dead queue, never a thrown run.
+   */
+  it('a thrown listStartPosition read fails OPEN: the run starts from the top and warns, rather than failing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const db = fakeDb();
+      const listStartPosition = vi.fn(async () => { throw new Error('pg down'); });
+      const result = await createDialerSession(
+        deps(db, resolverByRecord(numbers), listStartPosition) as never,
+        { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: FIVE, listViewId: '00B1' },
+      );
+      expect(result).toEqual({ sessionId: 'S1', total: 5 });
+      expect(db._itemRows.map((x) => [x.recordId, x.listPosition])).toEqual([
+        ['00Q1', 0], ['00Q2', 1], ['00Q3', 2], ['00Q4', 3], ['00Q5', 4],
+      ]);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/list-position|00B1/);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

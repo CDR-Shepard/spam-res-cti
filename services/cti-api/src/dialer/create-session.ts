@@ -1,6 +1,7 @@
 import { getDb, schema } from '@cti/db';
 import type { ConsentBlock } from './consent-check.js';
 import { pairKey } from './contact-history.js';
+import { rotateAfter, type ListWorker } from './list-position.js';
 import { fetchContactNames, resolveDialNumber } from '../salesforce/record-phone.js';
 import { fetchTasks, resolveTaskTarget } from '../salesforce/task-targets.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
@@ -45,6 +46,10 @@ type ResolvedRow = {
   /** Opportunity rows only: the primary contact whose name should replace the
    *  Opportunity's, resolved for the whole run in one batched read. */
   contactId?: string | null;
+  /** Two reps, one list (spec §4): the record's ORIGINAL index in the
+   *  Salesforce list view — not the (possibly rotated) queue ordinal. Set
+   *  only on a run created from a list view; undefined otherwise. */
+  listPosition?: number | null;
 };
 
 /** Outcome stamped on a record the rep has checked Skip on Dialer on, so the
@@ -73,6 +78,7 @@ export function buildQueueRows(
   attempt: number; primaryNumber: string | null; secondaryNumber: string | null;
   taskId: string | null; followupEligible: boolean; displayName: string | null;
   status: 'pending' | 'unreachable' | 'skipped'; outcome: string | null;
+  listPosition: number | null;
 }> {
   return resolved.map((r, i) => {
     // A consent-blocked SECOND NUMBER is dropped, right here, at the one place
@@ -100,6 +106,10 @@ export function buildQueueRows(
       // Written on EVERY status: a skipped or unreachable row says WHO was
       // passed over, not just which number.
       displayName: r.displayName ?? null,
+      // The record's place in the SALESFORCE list, not the (possibly
+      // rotated) queue ordinal above — see list-position.ts. Null on a run
+      // with no list view.
+      listPosition: r.listPosition ?? null,
       // PRECEDENCE: consent > skip_on_dialer > already_worked > unreachable.
       // A consent block (opt-out / block list / federal DNC) is the strongest
       // signal there is — it is why the call is unlawful, not merely unwanted —
@@ -142,6 +152,19 @@ export interface CreateSessionDeps {
    *  stop the run, it just leaves the rows at the resolved Mobile-then-Phone
    *  order. */
   preferredNumbers: (orgId: string, pairs: ReadonlyArray<readonly [string, string]>) => Promise<Map<string, string>>;
+  /** Two reps, one list (spec §4): the furthest position any rep reached
+   *  dialing this SAME Salesforce list view in the last 12h (see
+   *  `list-position.ts#listStartPosition`), so a second run over it rotates
+   *  to start right after that spot instead of re-dialing the top. Injected
+   *  RAW, on the same fail-open terms as `preferredNumbers` above: a broken
+   *  read is caught right here (`resolveListStartPosition`), not inside the
+   *  live wiring — worst case is a run that starts from the top, never a
+   *  dead queue. Only called when the run carries a `listViewId`. */
+  listStartPosition: (
+    orgId: string,
+    listViewId: string,
+    now: Date,
+  ) => Promise<{ position: number; workedBy: ReadonlyArray<ListWorker> } | null>;
   db: ReturnType<typeof getDb>;
 }
 
@@ -291,15 +314,55 @@ async function withPreferredNumbers(deps: CreateSessionDeps, orgId: string, rows
   });
 }
 
+/**
+ * The fail-open boundary for the shared-list read (controller decision #5): a
+ * thrown read must mean "no rotation, a normal run from the top" — the same
+ * posture `withPreferredNumbers` takes on its own lookup, and for the same
+ * reason: a broken join must never turn into a dead queue.
+ */
+async function resolveListStartPosition(
+  deps: CreateSessionDeps,
+  orgId: string,
+  listViewId: string,
+): Promise<number | null> {
+  try {
+    const shared = await deps.listStartPosition(orgId, listViewId, new Date());
+    return shared?.position ?? null;
+  } catch (err) {
+    console.warn(
+      `[create-session] list-position lookup failed for list "${listViewId}" — starting from the top: ${(err as Error).message}`,
+    );
+    return null;
+  }
+}
+
 export async function createDialerSession(
   deps: CreateSessionDeps,
-  args: { userId: string; orgId: string; objectType: DialerRunObject; recordIds: string[] },
+  args: { userId: string; orgId: string; objectType: DialerRunObject; recordIds: string[]; listViewId?: string },
 ): Promise<{ sessionId: string; total: number }> {
   const sfOwnerId = await deps.salesforceUserId(args.userId);
+
+  // Two reps, one list (spec §4): rotate the RECORD ORDER before anything is
+  // resolved, so every later step (name lookup, number resolution, the
+  // consent/already-worked batches) runs on the queue's actual dial order —
+  // never the list's original order with positions patched on afterward.
+  // `positions[i]` is the ORIGINAL list index of the i-th (now reordered)
+  // record id; it becomes that row's `listPosition` below. No list view, or
+  // nobody has dialed it in the share window: `rotation` is null and the
+  // list's own order is the dial order, exactly as before this feature.
+  const startPosition = args.listViewId
+    ? await resolveListStartPosition(deps, args.orgId, args.listViewId)
+    : null;
+  const rotation = args.listViewId ? rotateAfter(args.recordIds, startPosition) : null;
+  const orderedRecordIds = rotation ? rotation.ordered : args.recordIds;
+
   const named = await withContactNames(
-    deps, args.userId, await resolveRows(deps, args.userId, args.objectType, args.recordIds),
+    deps, args.userId, await resolveRows(deps, args.userId, args.objectType, orderedRecordIds),
   );
-  const resolved = await withPreferredNumbers(deps, args.orgId, named);
+  const withListPositions = rotation
+    ? named.map((r, i) => ({ ...r, listPosition: rotation.positions[i] }))
+    : named;
+  const resolved = await withPreferredNumbers(deps, args.orgId, withListPositions);
   // Created READY: the queue is built and nothing dials. `advanceSession`
   // ignores any session that is not 'active', so a ready session cannot
   // originate by construction; only `startSession` (the rep's Start dialing)
@@ -307,7 +370,10 @@ export async function createDialerSession(
   // more — the one-active-run-per-rep index fires on the flip, not the insert.
   const [session] = await deps.db
     .insert(schema.dialerSessions)
-    .values({ orgId: args.orgId, userId: args.userId, sfOwnerId, objectType: args.objectType, status: 'ready' })
+    .values({
+      orgId: args.orgId, userId: args.userId, sfOwnerId, objectType: args.objectType, status: 'ready',
+      listViewId: args.listViewId ?? null,
+    })
     .returning();
   // ONE batched read per gate for the whole run, after the session exists.
   // Distinct: a list often carries the same person on two records, and

@@ -126,6 +126,35 @@ export function confirmLine(firstPassTotal: number, unreachable: number, breakdo
   return parts.join(' · ');
 }
 
+/** Pure — "A, B and C" (no Oxford comma); "A and B" for two; the bare name for
+ *  one. Shared by `confirmContextLine`'s "who else is on this list" clause. */
+function joinNames(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? '';
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+/**
+ * Pure — the confirm block's "two reps, one list" line (spec §4), e.g.
+ * "Garrett is on this list (record 87 of 220) — you'll start from 88." Shown
+ * only when a start position exists (`startedFrom > 0` — a wrap to the top,
+ * or no list-view run at all, means nothing to say). `startedFrom`/`total`
+ * are the 0-based figures the server counts with; the rep-facing copy is
+ * 1-based throughout ("record 87" = the 88th record is next).
+ */
+export function confirmContextLine(
+  ctx: { total: number; startedFrom: number; workedBy: string[] } | null | undefined,
+): string | null {
+  if (!ctx || ctx.startedFrom <= 0) return null;
+  const { total, startedFrom, workedBy } = ctx;
+  const nextRecord = startedFrom + 1;
+  if (workedBy.length === 0) {
+    return `You're on this list (record ${startedFrom} of ${total}) — you'll start from ${nextRecord}.`;
+  }
+  const verb = workedBy.length === 1 ? 'is' : 'are';
+  return `${joinNames(workedBy)} ${verb} on this list (record ${startedFrom} of ${total}) — you'll start from ${nextRecord}.`;
+}
+
 /** Miss reason → rep-facing words, in the order the miss line lists them.
  *  Keys are the server's `DialOutcome` values (plus the legacy `no_connect`
  *  rows written before reasons existed, and the tally's `other`). */
@@ -363,13 +392,19 @@ export interface DialerPanelProps {
   onDismiss: () => void;
 }
 
-export function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Element {
+export function CurrentRecord({ item, listTotal }: { item: DialerCurrentItem; listTotal?: number | null }): JSX.Element {
   const number = formatE164(item.toNumber) || item.toNumber || 'No number';
   // The name is the headline from the moment the row is dialing — before the
   // record pops on `connected` — so the rep knows who is about to say hello.
   // Without one (a row from before migration 0041, or a record with no Name)
   // the number keeps exactly the layout it always had.
   const name = item.displayName?.trim() || null;
+  // Two reps, one list (spec §4): 1-based from the 0-based `listPosition` —
+  // shown only when BOTH the item's own position and the run's list total are
+  // known (a non-list-view run, or an older server, has neither).
+  const listLine = item.listPosition != null && listTotal != null
+    ? `record ${item.listPosition + 1} of ${listTotal}`
+    : null;
   return (
     <div className="section dp-current">
       <div className="kicker">Current record</div>
@@ -379,6 +414,7 @@ export function CurrentRecord({ item }: { item: DialerCurrentItem }): JSX.Elemen
         <span className={`cdot ${dotClassForItemStatus(item.status)}`} />
         {item.objectType} · {itemStatusLabel(item)}
       </div>
+      {listLine && <div className="dp-current-list-position">{listLine}</div>}
       {item.fromNumber && <div className="dp-current-from">from {formatE164(item.fromNumber)}</div>}
       <AttemptBadge attempt={item.attempt} />
     </div>
@@ -494,6 +530,7 @@ export function ConfirmBlock({
    *  renders the way to stop it without leaving this screen. */
   onStopOther?: () => void;
 }): JSX.Element {
+  const contextLine = confirmContextLine(view.listContext);
   return (
     <div className="dialer-panel">
       <div className="section dp-picker">
@@ -501,6 +538,7 @@ export function ConfirmBlock({
         <div className="dp-queue-line">
           {confirmLine(view.firstPassTotal ?? view.counts.total, view.counts.unreachable, view.skipBreakdown)}
         </div>
+        {contextLine && <div className="dp-queue-line dp-list-context">{contextLine}</div>}
         {error && <div className="dp-error">{error}</div>}
         <button className="btn primary full" disabled={busy} onClick={onStartDialing}>
           {busy ? 'Starting…' : 'Start dialing'}
@@ -776,7 +814,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         </div>
       </div>
 
-      {view.currentItem && <CurrentRecord item={view.currentItem} />}
+      {view.currentItem && <CurrentRecord item={view.currentItem} listTotal={view.listContext?.total ?? null} />}
 
       {shownError && <div className="dp-error">{shownError}</div>}
 
