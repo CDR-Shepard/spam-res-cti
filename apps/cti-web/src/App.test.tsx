@@ -41,6 +41,9 @@ interface FakeIncomingCall extends IncomingCallLike {
   disconnect: () => void;
   on: (event: string, cb: (...args: unknown[]) => void) => void;
   emit: (event: string, ...args: unknown[]) => void;
+  /** Unset by default (matches every existing test) — set on a per-call
+   *  basis to exercise App.tsx's post-accept() status() === 'closed' check. */
+  status?: () => string;
 }
 
 function fakeCall(overrides: Pick<IncomingCallLike, 'parameters' | 'customParameters'>): FakeIncomingCall {
@@ -427,5 +430,97 @@ describe('App — outbound hang up always reaches wrap-up', () => {
 
     expect(document.querySelector('.wrapup')).toBeTruthy();
     expect(connection.disconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Reviewer-verified probes (final review round before ship). Each one pins a
+ * race the earlier round's identity/idempotency guards were SUPPOSED to
+ * cover but weren't directly tested:
+ *   - PROBE-b: hangup()'s fallback must never act on a call that isn't the
+ *     CURRENT one anymore — the rep can hang up A and answer a new call B
+ *     inside A's HANGUP_FALLBACK_MS window.
+ *   - PROBE-a: the outbound fallback and a LATE real 'disconnect' for the
+ *     same call must never both send a "completed" PATCH.
+ *   - PROBE-d: the toast is scoped to a cancel AFTER Answer was clicked —
+ *     a cancel that lands on a still-ringing (never accepted) call must
+ *     stay silent, exactly like before this fix.
+ */
+describe('PROBE — reviewer race checks', () => {
+  it("PROBE-b: the OLD call's fallback never clears a NEW inbound call accepted within HANGUP_FALLBACK_MS", async () => {
+    const callA = fakeCall({ parameters: { From: '+16195551234' }, customParameters: new Map() });
+    // Real SDK: disconnect() on an open call emits 'disconnect' synchronously.
+    callA.disconnect = vi.fn(() => callA.emit('disconnect'));
+    await ring(callA);
+    fireEvent.click(screen.getByTitle('Answer'));
+    await screen.findByTitle('End call');
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTitle('End call'));
+    expect(screen.queryByTitle('End call')).toBeNull();
+
+    // A callback rings and the rep answers it 500 ms later — inside A's window.
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    const callB = fakeCall({ parameters: { From: '+16195550000' }, customParameters: new Map() });
+    act(() => { FakeDevice.instances[0]!.emit('incoming', callB); });
+    fireEvent.click(screen.getByTitle('Answer'));
+    expect(callB.accept).toHaveBeenCalledTimes(1);
+    expect(screen.getByTitle('End call')).toBeTruthy();
+
+    // A's timer fires now. B must still be on screen.
+    await act(async () => { await vi.advanceTimersByTimeAsync(HANGUP_FALLBACK_MS); });
+    vi.useRealTimers();
+    expect(screen.getByTitle('End call')).toBeTruthy();
+  });
+
+  it("PROBE-a: outbound fallback forces wrap-up, then a LATE 'disconnect' sends NO second completed PATCH", async () => {
+    const fetchMock = stubOutboundFetch();
+    const connection = await placeOutboundCall();
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTitle('End call'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(HANGUP_FALLBACK_MS); });
+    expect(document.querySelector('.wrapup')).toBeTruthy();
+    act(() => { connection.emit('disconnect'); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    vi.useRealTimers();
+
+    const completed = fetchMock.mock.calls.filter(([u, i]) => {
+      const o = i as { method?: string; body?: string } | undefined;
+      return String(u).includes('/calls/call-1') && o?.method === 'PATCH'
+        && (o.body ? (JSON.parse(o.body) as { status?: string }).status === 'completed' : false);
+    });
+    expect(completed).toHaveLength(1);
+  });
+
+  it('PROBE-d: a cancel BEFORE answering (e.g. picked up on another copy) clears the ring with NO toast', async () => {
+    const call = fakeCall({ parameters: { From: '+16195551234' }, customParameters: new Map() });
+    await ring(call);
+    act(() => { call.emit('cancel'); });
+    expect(screen.queryByTitle('Answer')).toBeNull();
+    expect(screen.queryByText('The caller hung up before you answered.')).toBeNull();
+  });
+});
+
+/**
+ * Closes the last few-millisecond window: the caller can hang up between
+ * the ring screen being drawn and the rep's click landing — before ANY
+ * listener (even one registered ahead of accept(), per acceptIncoming's
+ * ordering above) gets attached to catch it. The SDK's call.status() lets
+ * App.tsx detect that synchronously right after accept() and take the same
+ * path the 'cancel' listener would have.
+ */
+describe('App — a cancel that beats even the pre-accept() listener is caught via status()', () => {
+  it("call.status() === 'closed' right after accept() shows the toast and returns to idle, exactly like a 'cancel' event", async () => {
+    const call = fakeCall({ parameters: { From: '+16195551234' }, customParameters: new Map() });
+    call.status = vi.fn(() => 'closed');
+    await ring(call);
+
+    fireEvent.click(screen.getByTitle('Answer'));
+
+    expect(call.accept).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('The caller hung up before you answered.')).toBeTruthy();
+    expect(screen.queryByTitle('End call')).toBeNull();
+    expect(screen.getByTitle('Check & call')).toBeTruthy();
   });
 });

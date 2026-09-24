@@ -123,6 +123,11 @@ interface TwilioIncomingCall {
   disconnect?: () => void;
   sendDigits?: (digits: string) => void;
   on: (event: string, cb: (...args: unknown[]) => void) => void;
+  /** 'pending' | 'ringing' | 'open' | 'closed', per the SDK — used right
+   *  after accept() to catch a caller who hung up in the few ms before the
+   *  rep's click, when even a listener attached ahead of accept() is too
+   *  late (the SDK already closed the call and won't re-fire 'cancel'). */
+  status?: () => string;
 }
 
 // Grace period after hangup() calls disconnect() before the UI forces
@@ -1084,6 +1089,15 @@ export function App(): JSX.Element {
   const hangup = useCallback(() => {
     const call = connectionRef.current;
     if (!call) return;
+    // Capture the end-of-call cleanup NOW, at click time — not inside the
+    // timer below. By the time the fallback fires, callEndRef.current may
+    // already be null (this call ended normally in the meantime) or, worse,
+    // pointing at a DIFFERENT call's cleanup (the rep hung up A and then
+    // accepted a new inbound call B within HANGUP_FALLBACK_MS). The
+    // connectionRef.current === call check below still guards whether `end`
+    // runs at all, but reading callEndRef.current fresh at fire time would
+    // let a lucky reassignment race feed us the wrong cleanup function.
+    const end = callEndRef.current;
     try { (call as { disconnect?: () => void }).disconnect?.(); } catch { /* */ }
     // Fallback for the 2026-09-24 incident: disconnect() on a connection
     // that's already closed (e.g. the caller hung up the instant the rep
@@ -1094,7 +1108,7 @@ export function App(): JSX.Element {
     // the phase itself) makes this a no-op.
     window.setTimeout(() => {
       if (connectionRef.current === call && (phaseRef.current === 'active' || phaseRef.current === 'ringing')) {
-        callEndRef.current?.();
+        end?.();
       }
     }, HANGUP_FALLBACK_MS);
   }, []);
@@ -1155,7 +1169,43 @@ export function App(): JSX.Element {
     setIncoming(null);
     setMuted(false);
     setPhase('active');
+    // Register these BEFORE accept() — not after. The caller can hang up in
+    // the few milliseconds around the click; accept() itself can trigger a
+    // synchronous 'cancel'/'disconnect' when the SDK discovers the call is
+    // already dead, and a listener attached AFTER accept() would miss it
+    // entirely (events aren't replayed to late listeners).
+    //
+    // The caller can hang up the INSTANT the rep clicks Answer — proven via
+    // Twilio Voice Insights 2026-09-24 (get-user-media succeeded 13:17:40,
+    // Twilio cancelled the call 13:17:41). By then the ring screen had
+    // already been replaced by the active call screen, and nothing listened
+    // for 'cancel', so the rep was left staring at silence with no way back
+    // except reloading the page.
+    call.on('cancel', () => {
+      setToast({ text: 'The caller hung up before you answered.', type: 'info' });
+      endInbound();
+    });
+    call.on('disconnect', endInbound);
+    // A media/mic failure after accept may never emit 'disconnect'; recover the
+    // UI (inbound has no wrap-up form) instead of stranding an 'active' screen.
+    call.on('error', (err) => {
+      const e = err as { message?: string; code?: number } | undefined;
+      setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'unknown'}`, type: 'error' });
+      endInbound();
+    });
     try { call.accept(); } catch { endInbound(); return; }
+    // Close the last few-millisecond window: the caller could have hung up
+    // between the ring screen being drawn and this click landing — BEFORE
+    // any of the listeners just above were attached. The SDK already closed
+    // the call and won't fire 'cancel' again for it, so a listener (however
+    // early it's registered) can never catch it. status() lets us detect
+    // that synchronously right here instead of leaving the rep on a silent
+    // "active" screen. Mirrors the 'cancel' listener above exactly.
+    if (call.status?.() === 'closed') {
+      setToast({ text: 'The caller hung up before you answered.', type: 'info' });
+      endInbound();
+      return;
+    }
     // After accept(): the local stream is attached asynchronously and the SDK
     // emits 'accept' once media is open — keepMicAlive listens for that.
     keepMicAlive(call as unknown as Parameters<typeof keepMicAlive>[0]);
@@ -1176,24 +1226,6 @@ export function App(): JSX.Element {
         if (issue === 'no-inbound-audio') setToast({ text: "The caller's audio came back.", type: 'success' });
       },
     );
-    // The caller can hang up the INSTANT the rep clicks Answer — proven via
-    // Twilio Voice Insights 2026-09-24 (get-user-media succeeded 13:17:40,
-    // Twilio cancelled the call 13:17:41). By then the ring screen had
-    // already been replaced by the active call screen, and nothing listened
-    // for 'cancel', so the rep was left staring at silence with no way back
-    // except reloading the page.
-    call.on('cancel', () => {
-      setToast({ text: 'The caller hung up before you answered.', type: 'info' });
-      endInbound();
-    });
-    call.on('disconnect', endInbound);
-    // A media/mic failure after accept may never emit 'disconnect'; recover the
-    // UI (inbound has no wrap-up form) instead of stranding an 'active' screen.
-    call.on('error', (err) => {
-      const e = err as { message?: string; code?: number } | undefined;
-      setToast({ text: `Call error ${e?.code ?? ''}: ${e?.message ?? 'unknown'}`, type: 'error' });
-      endInbound();
-    });
   }, [incoming, teardownDevice]);
 
   const declineIncoming = useCallback(() => {
