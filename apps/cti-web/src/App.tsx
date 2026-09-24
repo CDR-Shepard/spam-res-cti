@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { HoldMusicSetting } from '@cti/contracts';
 import { api, ApiError, clearSession, readSession, writeSession } from './api';
 import { startRingback, stopRingback } from './ringback';
 import { AdminPanel } from './components/AdminPanel';
@@ -40,10 +41,24 @@ import { openCtiSavePlan } from './opencti-log';
 import { acceptIncomingCall, planIncomingAccept } from './incoming-accept';
 
 interface MeResponse {
-  user: { userId: string; orgId: string; email: string; isAdmin: boolean; powerDialerEnabled: boolean; noAnswerForwardE164?: string | null; dialerHoldMusic?: boolean };
+  user: {
+    userId: string; orgId: string; email: string; isAdmin: boolean; powerDialerEnabled: boolean;
+    noAnswerForwardE164?: string | null;
+    /** Legacy on/off flag — still read while an older API/session may still send it. */
+    dialerHoldMusic?: boolean;
+    holdMusic?: HoldMusicSetting;
+  };
   salesforce:
     | { connected: false }
     | { connected: true; name?: string | null; email?: string | null; photoDataUrl?: string | null };
+}
+
+/** The hold-music setting to render, from `/auth/me`'s `user` — the new
+ *  `holdMusic` object when the API sends it, else derived from the legacy
+ *  on/off `dialerHoldMusic` flag so an older API (or a stale cached session)
+ *  still shows something sensible. Shared with DialerPanel. */
+export function holdMusicFromMe(user: MeResponse['user']): HoldMusicSetting {
+  return user.holdMusic ?? { choice: user.dialerHoldMusic === false ? 'off' : 'classical', youtube: null };
 }
 
 type Phase = 'idle' | 'preflight' | 'ringing' | 'active' | 'wrapup';
@@ -1357,7 +1372,7 @@ export function App(): JSX.Element {
   ) : tab === 'settings' ? (
     <SettingsPanel
       forwardE164={me.user.noAnswerForwardE164 ?? null}
-      holdMusic={me.user.dialerHoldMusic ?? true}
+      holdMusic={holdMusicFromMe(me.user)}
       onSaved={refreshMe}
       onToast={setToast}
     />
