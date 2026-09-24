@@ -286,10 +286,11 @@ export function App(): JSX.Element {
   const dialerConnRef = useRef<unknown>(null);
   // One LineAudio for the whole App mount, not per-leg — a rejoin (recovery,
   // or a fresh run) must keep whatever "was it quiet" state the player is
-  // mid-decision on. useRef only ever KEEPS the first call's result (later
-  // renders' createLineAudio() calls are discarded), so this never recreates
-  // the tracker on a re-render even though the expression runs every time.
-  const lineAudioRef = useRef<LineAudio>(createLineAudio());
+  // mid-decision on. useState's lazy initializer runs createLineAudio() only
+  // on the FIRST render — unlike `useRef(createLineAudio())`, which builds and
+  // immediately discards a fresh tracker on every re-render before useRef
+  // keeps just the first one.
+  const [lineAudio] = useState<LineAudio>(() => createLineAudio());
   // Generation counter for power-dialer runs: incremented at the start of each
   // startPowerDial() and in handleDialerStop(). Used to guard against the race
   // where an in-flight connect() resolves AFTER a stop/new-start, preventing a
@@ -701,7 +702,7 @@ export function App(): JSX.Element {
       // it means someone was connected — the player pauses on it. Every join
       // (a fresh start AND a dropped-leg recovery) passes through here, so this
       // is the one place that can wire every leg the run ever holds.
-      watchLineVolume(connection, lineAudioRef.current);
+      watchLineVolume(connection, lineAudio);
       keepMicAlive(connection as Parameters<typeof keepMicAlive>[0]);
       // The leg now survives each prospect leaving only via a server round trip
       // (see dialer-leg.ts). If it dies while the run is live, get the rep back
@@ -1397,7 +1398,7 @@ export function App(): JSX.Element {
       onComplete={handleDialerComplete}
       onDismiss={handleDialerDismiss}
       holdMusic={holdMusicFromMe(me.user)}
-      lineAudio={lineAudioRef.current}
+      lineAudio={lineAudio}
     />
   ) : (
     <div className="dialer">

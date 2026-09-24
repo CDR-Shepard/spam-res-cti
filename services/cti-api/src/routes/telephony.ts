@@ -271,8 +271,12 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     // not from anything the client supplies, so a rep can only join their own
     // conference.
     if (body.DialerConference) {
+      // Same deadline as the rejoin branch (~242): Twilio fails the whole call
+      // ~15s after this webhook is asked, so a hung DB pool on the FIRST join
+      // must fall back to Classical rather than strand the rep before their
+      // run even starts.
       const twiml = dialerConferenceTwiml(body.From ?? '', {
-        holdMusic: await repHoldMusicChoice(body.From ?? ''),
+        holdMusic: await orDefaultAfter(repHoldMusicChoice(body.From ?? ''), DEFAULT_HOLD_MUSIC),
         rejoinUrl: dialerRejoinUrl(),
       });
       if (!twiml) {

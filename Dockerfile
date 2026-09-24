@@ -28,8 +28,10 @@ RUN npm ci --include=dev
 
 # Build the API and the softphone bundle it serves. Packages first: cti-web
 # now imports @cti/contracts, so its dist must exist before the web build.
+# Build the API workspace directly (not `npm run build:api`, which re-runs
+# build:packages itself) so the shared packages compile exactly once.
 COPY . .
-RUN npm run build:packages && npm run build:web && npm run build:api
+RUN npm run build:packages && npm run build:web && npm -w services/cti-api run build
 
 # Hosts inject the listen port via PORT (config honors it); 4000 is the default.
 EXPOSE 4000

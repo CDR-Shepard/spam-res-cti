@@ -206,6 +206,19 @@ describe('POST /telephony/twilio/voice — DialerConference join', () => {
     expect(res.body).not.toContain('waitUrl');
   });
 
+  // Twilio gives this webhook ~15s and then FAILS the call outright — the same
+  // deadline the rejoin route already enforces on this lookup (~242). A hung
+  // DB pool on the FIRST join must cost the rep a few seconds of silence, not
+  // the whole run before it even starts.
+  it('a hold-music lookup that HANGS still joins the rep, falling back to Classical', async () => {
+    _setRejoinDbTimeoutForTests(30);
+    state.userLookupHangs = true;
+    const res = await join();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<Conference');
+    expect(res.body).not.toContain('waitUrl');
+  });
+
   it('a missing profile row falls back to Classical', async () => {
     state.userRow = null;
     expect((await join()).body).not.toContain('waitUrl');

@@ -107,7 +107,12 @@ export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast }: Prop
   const pickHoldMusic = useCallback(async (c: HoldMusicChoice) => {
     setPicked(c);
     if (c !== 'youtube') {
-      await patchHoldMusic({ choice: c });
+      // The re-sync effect only fires when `holdMusic.choice` changes — which it
+      // doesn't on a failed PATCH, since the server never applied the new value.
+      // Reset `picked` here so a rejected preset/Off never leaves the select
+      // showing a choice the server doesn't actually have.
+      const ok = await patchHoldMusic({ choice: c });
+      if (!ok) setPicked(holdMusic.choice);
       return;
     }
     setLinkError(null);
@@ -115,7 +120,7 @@ export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast }: Prop
     // rather than making the rep re-paste a link they already gave us.
     if (holdMusic.youtube) await patchHoldMusic({ choice: 'youtube' });
     // Otherwise wait for the rep to paste a link and hit Save.
-  }, [holdMusic.youtube, patchHoldMusic]);
+  }, [holdMusic.choice, holdMusic.youtube, patchHoldMusic]);
 
   const saveYouTube = useCallback(async () => {
     const parsed = parseYouTubeLink(link);

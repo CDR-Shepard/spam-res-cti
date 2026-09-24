@@ -157,6 +157,27 @@ describe('SettingsPanel picker — PATCH shapes, toasts, YouTube link errors', (
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
   });
 
+  it('a failed preset PATCH un-picks: the select falls back to the prop choice, not the rejected one', async () => {
+    mockedApi.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/auth/me' && init?.method === 'PATCH') throw new Error('network error');
+      return { ok: true };
+    });
+    render(
+      <SettingsPanel
+        forwardE164={null}
+        holdMusic={{ choice: 'classical', youtube: null }}
+        onSaved={noop}
+        onToast={noop}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('Hold music'), { target: { value: 'rock' } });
+    await waitFor(() => expect(mockedApi).toHaveBeenCalledWith('/auth/me', {
+      method: 'PATCH',
+      body: { holdMusic: { choice: 'rock' } },
+    }));
+    await waitFor(() => expect((screen.getByLabelText('Hold music') as HTMLSelectElement).value).toBe('classical'));
+  });
+
   it('the select re-syncs when the holdMusic prop changes underneath it (e.g. after onSaved refetches)', () => {
     const { rerender } = render(
       <SettingsPanel forwardE164={null} holdMusic={{ choice: 'ambient', youtube: null }} onSaved={noop} onToast={noop} />,

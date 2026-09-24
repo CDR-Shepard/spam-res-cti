@@ -482,7 +482,7 @@ export interface DialerPanelProps {
   /** The rep's hold-music choice (from `/auth/me`, via `holdMusicFromMe` in
    *  App.tsx) — drives whether the YouTube player mounts (see HoldMusicPlayer). */
   holdMusic?: HoldMusicSetting;
-  /** The dialer leg's line-audio tracker (App.tsx's `lineAudioRef`) — handed
+  /** The dialer leg's line-audio tracker (App.tsx's `lineAudio`) — handed
    *  straight through to the YouTube player so it can pause the instant the
    *  line stops being silent (see line-audio.ts). */
   lineAudio?: LineAudio;
