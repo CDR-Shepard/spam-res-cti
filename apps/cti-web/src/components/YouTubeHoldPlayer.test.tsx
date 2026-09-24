@@ -10,7 +10,7 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import type { YouTubeRef } from '@cti/contracts';
 import type { DialerCurrentItem } from '../dialer-api';
 import { createLineAudio } from '../line-audio';
-import { YT_PLAYING, type YTNamespace, type YTPlayer, type YTPlayerOptions } from '../youtube-api';
+import { YT_BUFFERING, YT_PLAYING, type YTNamespace, type YTPlayer, type YTPlayerOptions } from '../youtube-api';
 import { YouTubeHoldPlayer, type YouTubeHoldPlayerProps } from './YouTubeHoldPlayer';
 
 const CAPTION_NORMAL = 'Pauses automatically when someone answers.';
@@ -146,6 +146,56 @@ describe('YouTubeHoldPlayer', () => {
     expect(player.calls.filter((c) => c === 'pause')).toHaveLength(0);
 
     act(() => { lineAudio.push(0.05); });
+    expect(player.calls).toContain('pause');
+  });
+
+  // Fix round 2, item 1 — while the prospect talks, Twilio fires ~19 volume
+  // samples/sec, and every one of them satisfies heardSomeone (recentLevels
+  // stays "loud"). Calling pauseVideo() on every single one is pause spam
+  // into the iframe; it should only ever call it while the player is
+  // actually PLAYING or BUFFERING.
+  it('does not call pauseVideo on every loud sample while the player is already paused', async () => {
+    const { ns, created } = fakeYT();
+    const lineAudio = createLineAudio();
+    const { rerender } = render(<YouTubeHoldPlayer {...baseProps({ lineAudio }, ns)} />);
+    await flush();
+    const player = created[0]!.player;
+    expect(player.calls).toContain('play');
+
+    rerender(<YouTubeHoldPlayer {...baseProps({ lineAudio, currentItem: item('connected') }, ns)} />);
+    expect(player.calls.at(-1)).toBe('pause'); // genuinely paused now (state = 2)
+    const pauseCallsBefore = player.calls.filter((c) => c === 'pause').length;
+
+    // ~1s of continuous loud audio while already paused.
+    act(() => {
+      for (let i = 0; i < 20; i++) lineAudio.push(0.05);
+    });
+
+    expect(player.calls.filter((c) => c === 'pause').length).toBe(pauseCallsBefore);
+  });
+
+  it('pauses exactly once for the first pair of loud samples while actually playing', async () => {
+    const { ns, created } = fakeYT();
+    const lineAudio = createLineAudio();
+    render(<YouTubeHoldPlayer {...baseProps({ lineAudio }, ns)} />);
+    await flush();
+    const player = created[0]!.player;
+    expect(player.calls).toContain('play'); // state is YT_PLAYING (autoplay allowed)
+
+    act(() => { lineAudio.push(0.05); lineAudio.push(0.05); });
+    expect(player.calls.filter((c) => c === 'pause').length).toBe(1);
+  });
+
+  it('pauses when the player is BUFFERING, not only when fully PLAYING', async () => {
+    const { ns, created } = fakeYT();
+    const lineAudio = createLineAudio();
+    render(<YouTubeHoldPlayer {...baseProps({ lineAudio }, ns)} />);
+    await flush();
+    const player = created[0]!.player;
+    expect(player.calls).toContain('play');
+
+    player.state = YT_BUFFERING; // simulate buffering rather than fully playing
+    act(() => { lineAudio.push(0.05); lineAudio.push(0.05); });
     expect(player.calls).toContain('pause');
   });
 
@@ -424,6 +474,33 @@ describe('YouTubeHoldPlayer', () => {
     expect(player.calls.at(-1)).toBe('play');
   });
 
+  // Fix round 2, item 2 — pins the latch's session clause (a prior mutation
+  // that dropped `sessionStatus !== 'active'` from the "poll moved on" check
+  // survived review). A session pause-then-resume, with the SAME item id and
+  // status throughout, must still release the latch: otherwise a rep who
+  // pauses and resumes the run mid-latch would stay silently stuck.
+  it("a session pause-then-resume releases the heard-latch even with the same item id and status", async () => {
+    const { ns, created } = fakeYT();
+    const lineAudio = createLineAudio();
+    const { rerender } = render(<YouTubeHoldPlayer {...baseProps({ lineAudio }, ns)} />); // item-1, dialing, active
+    await flush();
+    const player = created[0]!.player;
+    expect(player.calls).toContain('play');
+
+    act(() => { lineAudio.push(0.05); lineAudio.push(0.05); }); // latches item-1/dialing
+    expect(player.calls.at(-1)).toBe('pause');
+    settleQuiet(lineAudio);
+
+    // Session pauses, then resumes — id and status never change.
+    rerender(<YouTubeHoldPlayer {...baseProps({ lineAudio, sessionStatus: 'paused' }, ns)} />);
+    rerender(<YouTubeHoldPlayer {...baseProps({ lineAudio, sessionStatus: 'active' }, ns)} />);
+
+    // Quiet for >= 1.5s — resumes, because the session change (not the item
+    // id or status, which never moved) released the latch.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(player.calls.at(-1)).toBe('play');
+  });
+
   // Issue #1 — a REALISTIC fake: the real IFrame API's methods genuinely
   // don't exist on the returned object until onReady fires (the iframe is
   // still loading). Two loud samples in that window must not throw out of
@@ -487,6 +564,43 @@ describe('YouTubeHoldPlayer', () => {
     // the next evaluate (the periodic tick catches it) works normally.
     await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     expect(created[0]!.player.calls).toContain('play');
+  });
+
+  // Fix round 2, item 3 (optional) — pins evaluate()'s `!ready` gate itself
+  // (mutation X4). `realisticFakeYT`'s methods are simply ABSENT pre-ready,
+  // so a call there throws (already caught by our own try/catches) rather
+  // than being observable as a call — that's not sensitive enough to prove
+  // the gate exists. This fake instead keeps the methods always present but
+  // counts any invocation made before its own onReady fires, which is
+  // observable regardless of how the caller handles a throw.
+  function countingReadyGateYT() {
+    let readyFired = false;
+    let callsBeforeReady = 0;
+    class Player {
+      private state = -1;
+      constructor(_el: HTMLElement, o: YTPlayerOptions) {
+        setTimeout(() => {
+          readyFired = true;
+          o.events.onReady?.({ target: this as never });
+        }, 50);
+      }
+      playVideo() { if (!readyFired) callsBeforeReady++; this.state = 1; }
+      pauseVideo() { if (!readyFired) callsBeforeReady++; this.state = 2; }
+      getPlayerState() { if (!readyFired) callsBeforeReady++; return this.state; }
+      setShuffle() { if (!readyFired) callsBeforeReady++; }
+      setLoop() { if (!readyFired) callsBeforeReady++; }
+      destroy() {}
+    }
+    return { ns: { Player } as unknown as YTNamespace, callsBeforeReady: () => callsBeforeReady };
+  }
+
+  it('makes zero player method calls before onReady fires, even from a prop-triggered re-evaluation', async () => {
+    const { ns, callsBeforeReady } = countingReadyGateYT();
+    const { rerender } = render(<YouTubeHoldPlayer {...baseProps({}, ns)} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // constructed, not yet ready (fires at +50ms)
+
+    rerender(<YouTubeHoldPlayer {...baseProps({ currentItem: item('dialing', null, 'item-2') }, ns)} />);
+    expect(callsBeforeReady()).toBe(0);
   });
 
   it('pauses immediately when PLAYING arrives while a heard-latch is active, rather than waiting for the next tick', async () => {

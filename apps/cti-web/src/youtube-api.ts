@@ -7,6 +7,7 @@
 import type { YouTubeRef } from '@cti/contracts';
 
 export const YT_PLAYING = 1;
+export const YT_BUFFERING = 3;
 
 export interface YTPlayer {
   playVideo(): void;

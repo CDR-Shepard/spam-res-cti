@@ -17,7 +17,7 @@ import type { YouTubeRef } from '@cti/contracts';
 import type { DialerCurrentItem, DialerSession } from '../dialer-api';
 import { HEARD_SAMPLES, heardSomeone, shouldPlay } from '../hold-music-rules';
 import type { LineAudio } from '../line-audio';
-import { YT_PLAYING, loadYouTubeApi, playerOptionsFor, type YTNamespace, type YTPlayer } from '../youtube-api';
+import { YT_BUFFERING, YT_PLAYING, loadYouTubeApi, playerOptionsFor, type YTNamespace, type YTPlayer } from '../youtube-api';
 
 /** How often we re-check play/pause outside of the direct triggers (prop
  *  changes, the line-audio subscription) — this is what lets a resume happen
@@ -301,13 +301,19 @@ export function YouTubeHoldPlayer(props: YouTubeHoldPlayerProps): JSX.Element {
       // line of defense, so a bug here can never stop the SDK's volume loop.
       if (!ready || !player) return;
       if (!heardSomeone(recentLevels)) return;
+      // Latch on every heard event regardless of player state — a voice on
+      // the line is true whether or not we're currently playing.
       const p = propsRef.current;
       heardLatch = { itemId: p.currentItem?.id ?? null, status: p.currentItem?.status ?? null, at: Date.now() };
-      // Pause regardless of the player's current state — pausing twice (or
-      // while merely BUFFERING) is harmless, and checking for exactly
-      // YT_PLAYING first was the actual bug: a rep hears the room the moment
-      // it's audible, not only once our own state read says PLAYING.
-      pause();
+      // But only actually PAUSE while playing or buffering: once PLAYING
+      // triggers its own evaluate() (see handleStateChange), the ONLY reason
+      // to pause from here is a player that's already audible. Twilio fires
+      // ~19 volume samples/sec while the prospect talks, and recentLevels
+      // stays "heard" for all of them — pausing unconditionally on each one
+      // was pause-spamming the iframe with ~19 pauseVideo() calls/sec for the
+      // whole conversation.
+      const s = safeGetPlayerState();
+      if (s === YT_PLAYING || s === YT_BUFFERING) pause();
     });
 
     const intervalId = setInterval(evaluate, RE_EVALUATE_MS);
