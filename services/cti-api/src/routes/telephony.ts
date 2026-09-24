@@ -9,6 +9,7 @@ import { and, eq, inArray, or } from 'drizzle-orm';
 import twilio from 'twilio';
 import { z } from 'zod';
 import { resolveSession } from '@cti/auth';
+import { DEFAULT_HOLD_MUSIC, toHoldMusicChoice, type HoldMusicChoice } from '@cti/contracts';
 import { getProvider } from '../telephony/index.js';
 import { getDb, schema } from '@cti/db';
 import { loadConfig } from '../config.js';
@@ -25,22 +26,21 @@ import { DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repUserIdFr
 
 
 /**
- * The rep's hold-music preference for their own dialer conference leg
- * (Settings → "Hold music during Power Dial"). Default — and any lookup
- * failure — is music ON: a DB hiccup must never keep a rep out of their
- * conference, and silence is the opt-in, not the fallback.
+ * The rep's hold-music choice for their own dialer conference leg (Settings →
+ * "Hold music during Power Dial"). A missing row, an unknown value, or a lookup
+ * that fails is Classical: a DB hiccup must never keep a rep out of their room.
  */
-async function repHoldMusic(from: string): Promise<boolean> {
+async function repHoldMusicChoice(from: string): Promise<HoldMusicChoice> {
   const userId = repUserIdFromClientIdentity(from);
-  if (!userId) return true;
+  if (!userId) return DEFAULT_HOLD_MUSIC;
   try {
     const row = await getDb().query.users.findFirst({
       where: eq(schema.users.id, userId),
-      columns: { dialerHoldMusic: true },
+      columns: { dialerHoldMusicChoice: true },
     });
-    return row?.dialerHoldMusic ?? true;
+    return toHoldMusicChoice(row?.dialerHoldMusicChoice);
   } catch {
-    return true;
+    return DEFAULT_HOLD_MUSIC;
   }
 }
 
@@ -239,7 +239,7 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     if (!userId || !(await legShouldRejoin(userId, body.CallSid))) {
       return reply.type('text/xml').send(hangup());
     }
-    const twiml = dialerConferenceTwiml(from, { holdMusic: await orDefaultAfter(repHoldMusic(from), true), rejoinUrl: dialerRejoinUrl() });
+    const twiml = dialerConferenceTwiml(from, { holdMusic: await orDefaultAfter(repHoldMusicChoice(from), DEFAULT_HOLD_MUSIC), rejoinUrl: dialerRejoinUrl() });
     return reply.type('text/xml').send(twiml);
   });
 
@@ -272,7 +272,7 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     // conference.
     if (body.DialerConference) {
       const twiml = dialerConferenceTwiml(body.From ?? '', {
-        holdMusic: await repHoldMusic(body.From ?? ''),
+        holdMusic: await repHoldMusicChoice(body.From ?? ''),
         rejoinUrl: dialerRejoinUrl(),
       });
       if (!twiml) {

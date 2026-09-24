@@ -12,6 +12,7 @@
  * `bridgeTwiml` for that rep's own conference — see routes/telephony.ts.
  */
 import twilio from 'twilio';
+import type { HoldMusicChoice } from '@cti/contracts';
 import { loadConfig } from '../config.js';
 import type { DialerTelephony } from './telephony-port.js';
 
@@ -78,14 +79,27 @@ export function conferenceName(userId: string): string {
  * Twilio itself expects.
  */
 /** Per-leg conference options.
- *  - `holdMusic: false` makes the leg wait in silence — Twilio's `waitUrl=""` —
- *    instead of the default hold music (Settings tab); anything else keeps the
- *    default. Only the rep's own leg ever waits, so only it passes this.
+ *  - `holdMusic` is the rep's hold-music CHOICE (Settings tab), turned into the
+ *    leg's `waitUrl` by `waitUrlFor`. Only the rep's own leg ever waits, so only
+ *    it passes this; omitted is treated the same as Classical.
  *  - `rejoinUrl` is the rep leg's `<Dial action>`; see `bridgeTwiml`. Never set
  *    on the prospect leg. */
 export interface ConferenceOptions {
-  holdMusic?: boolean;
+  holdMusic?: HoldMusicChoice;
   rejoinUrl?: string;
+}
+
+/**
+ * The rep leg's conference waitUrl for a hold-music choice. Classical is
+ * Twilio's own default, so the attribute is omitted and the TwiML is exactly
+ * what every rep got before choices existed. Off and YouTube wait in silence —
+ * YouTube plays in the browser instead (YouTubeHoldPlayer). The other five are
+ * Twilio's royalty-free sets, served by its holdmusic twimlet.
+ */
+export function waitUrlFor(choice: HoldMusicChoice): string | undefined {
+  if (choice === 'classical') return undefined;
+  if (choice === 'off' || choice === 'youtube') return '';
+  return `https://twimlets.com/holdmusic?Bucket=com.twilio.music.${choice}`;
 }
 
 /** The route Twilio requests when the rep leg's conference ends. One constant
@@ -100,11 +114,12 @@ export function bridgeTwiml(userId: string, endOnExit: boolean, opts: Conference
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const twiml = new VoiceResponse();
   const dial = twiml.dial(opts.rejoinUrl ? { action: opts.rejoinUrl, method: 'POST' } : {});
+  const waitUrl = opts.holdMusic ? waitUrlFor(opts.holdMusic) : undefined;
   dial.conference(
     {
       startConferenceOnEnter: true,
       endConferenceOnExit: endOnExit,
-      ...(opts.holdMusic === false ? { waitUrl: '' } : {}),
+      ...(waitUrl !== undefined ? { waitUrl } : {}),
     },
     conferenceName(userId),
   );

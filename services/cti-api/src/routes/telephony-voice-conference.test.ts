@@ -1,16 +1,18 @@
 /**
  * Route-level test for the power-dialer conference-join branch of
- * POST /telephony/twilio/voice: the rep's leg gets waitUrl="" (silence) only
- * when that rep turned hold music off, looked up by their own users.id, and a
- * lookup that fails keeps music on and still joins them. Harness idiom:
- * routes/admin-team.test.ts (hoisted state, vi.mock of @cti/auth / @cti/db /
- * ../config.js, Fastify + register).
+ * POST /telephony/twilio/voice: the rep's leg's waitUrl follows their stored
+ * hold-music CHOICE, looked up by their own users.id — Classical omits the
+ * attribute, Off/YouTube are silent (waitUrl=""), the other five are Twilio's
+ * holdmusic twimlet sets — and a lookup that fails, hangs, or finds an unknown
+ * value falls back to Classical. Harness idiom: routes/admin-team.test.ts
+ * (hoisted state, vi.mock of @cti/auth / @cti/db / ../config.js, Fastify +
+ * register).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 const state = vi.hoisted(() => ({
-  userRow: null as { dialerHoldMusic: boolean } | null,
+  userRow: null as { dialerHoldMusicChoice: string } | null,
   findFirstThrows: false,
   lastFindFirst: null as { where: unknown; columns?: unknown } | null,
   /** The run this LEG is recorded on (lookup by rep_call_sid), if any. */
@@ -117,7 +119,7 @@ const REP_FROM = 'client:rep_c9c459400f174c1ebb3ed084ba93eb86';
 
 let app: FastifyInstance;
 beforeEach(async () => {
-  state.userRow = { dialerHoldMusic: true };
+  state.userRow = { dialerHoldMusicChoice: 'classical' };
   state.findFirstThrows = false;
   state.lastFindFirst = null;
   state.legSession = { status: 'active' };
@@ -158,7 +160,7 @@ const rejoin = (payload: Record<string, string> = {}) =>
   });
 
 describe('POST /telephony/twilio/voice — DialerConference join', () => {
-  it('a rep with hold music on (the default) joins with Twilio hold music: no waitUrl', async () => {
+  it('a rep with Classical (the default) joins with Twilio hold music: no waitUrl', async () => {
     const res = await join();
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('<Conference');
@@ -166,16 +168,37 @@ describe('POST /telephony/twilio/voice — DialerConference join', () => {
     expect(res.body).not.toContain('waitUrl');
   });
 
-  it('a rep who turned hold music off joins in silence (waitUrl=""), looked up by their own users.id', async () => {
-    state.userRow = { dialerHoldMusic: false };
+  it('a rep who chose Ambient joins to that Twilio set, looked up by their own users.id', async () => {
+    state.userRow = { dialerHoldMusicChoice: 'ambient' };
     const res = await join();
     expect(res.statusCode).toBe(200);
-    expect(res.body).toContain('waitUrl=""');
-    expect(state.lastFindFirst?.columns).toEqual({ dialerHoldMusic: true });
+    expect(res.body).toContain('waitUrl="https://twimlets.com/holdmusic?Bucket=com.twilio.music.ambient"');
+    expect(state.lastFindFirst?.columns).toEqual({ dialerHoldMusicChoice: true });
     expect(paramValues(state.lastFindFirst?.where)).toContain(REP_ID);
   });
 
-  it('a failed lookup keeps music on and still joins the rep', async () => {
+  it('a rep who turned hold music off joins in silence (waitUrl="")', async () => {
+    state.userRow = { dialerHoldMusicChoice: 'off' };
+    const res = await join();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('waitUrl=""');
+  });
+
+  it('a rep who chose YouTube also gets silence on the phone line — the browser plays it instead', async () => {
+    state.userRow = { dialerHoldMusicChoice: 'youtube' };
+    const res = await join();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('waitUrl=""');
+  });
+
+  it('an unknown stored value falls back to Classical: no waitUrl', async () => {
+    state.userRow = { dialerHoldMusicChoice: 'jazz' };
+    const res = await join();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain('waitUrl');
+  });
+
+  it('a failed lookup falls back to Classical and still joins the rep', async () => {
     state.findFirstThrows = true;
     const res = await join();
     expect(res.statusCode).toBe(200);
@@ -183,7 +206,7 @@ describe('POST /telephony/twilio/voice — DialerConference join', () => {
     expect(res.body).not.toContain('waitUrl');
   });
 
-  it('a missing profile row keeps music on', async () => {
+  it('a missing profile row falls back to Classical', async () => {
     state.userRow = null;
     expect((await join()).body).not.toContain('waitUrl');
   });
@@ -329,9 +352,9 @@ describe('POST /telephony/twilio/dialer-conference-rejoin — the rep leg after 
     expect(bound.filter((v) => ['active', 'paused', 'ready', 'done', 'stopped'].includes(v as string)).sort()).toEqual(['active', 'paused']);
   });
 
-  it('keeps the rep\'s hold-music preference on the way back in', async () => {
-    state.userRow = { dialerHoldMusic: false };
-    expect((await rejoin()).body).toContain('waitUrl=""');
+  it('keeps the rep\'s hold-music choice on the way back in', async () => {
+    state.userRow = { dialerHoldMusicChoice: 'guitars' };
+    expect((await rejoin()).body).toContain('waitUrl="https://twimlets.com/holdmusic?Bucket=com.twilio.music.guitars"');
   });
 
   // The run ended (done / stopped) and the room was completed by the backstop:
@@ -373,7 +396,7 @@ describe('POST /telephony/twilio/dialer-conference-rejoin — the rep leg after 
     expect(state.sessionLookups).toEqual([]);
   });
 
-  it('a hold-music lookup that HANGS falls back to music on, and still sends the rep back in', async () => {
+  it('a hold-music lookup that HANGS falls back to Classical, and still sends the rep back in', async () => {
     _setRejoinDbTimeoutForTests(30);
     state.userLookupHangs = true;
     const res = await rejoin();

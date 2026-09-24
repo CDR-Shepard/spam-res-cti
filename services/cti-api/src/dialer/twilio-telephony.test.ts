@@ -13,7 +13,7 @@ vi.mock('../config.js', () => ({
   }),
 }));
 
-import { bridgeTwiml, conferenceName, DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repUserIdFromClientIdentity, TwilioDialerTelephony, type TwilioDialerClient } from './twilio-telephony.js';
+import { bridgeTwiml, conferenceName, DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repUserIdFromClientIdentity, TwilioDialerTelephony, waitUrlFor, type TwilioDialerClient } from './twilio-telephony.js';
 
 // ---------------------------------------------------------------------------
 // conferenceName / bridgeTwiml — pure
@@ -337,22 +337,34 @@ describe('TwilioDialerTelephony.endConference', () => {
 // Hold music per rep (Settings → "Hold music during Power Dial")
 // ---------------------------------------------------------------------------
 
-describe('hold music per rep', () => {
-  it('the rep leg waits in silence (waitUrl="") when the rep turned hold music off', () => {
-    const t = bridgeTwiml('abc123', true, { holdMusic: false });
-    expect(t).toContain('waitUrl=""');
-    expect(t).toContain('endConferenceOnExit="true"');
+describe('hold music per rep — the choice becomes the rep leg\'s waitUrl', () => {
+  it('waitUrlFor: Classical omits it, Off/YouTube are silent, the other five are Twilio\'s sets', () => {
+    expect(waitUrlFor('classical')).toBeUndefined();
+    expect(waitUrlFor('off')).toBe('');
+    expect(waitUrlFor('youtube')).toBe('');
+    for (const set of ['ambient', 'electronica', 'guitars', 'rock', 'softrock'] as const) {
+      expect(waitUrlFor(set)).toBe(`https://twimlets.com/holdmusic?Bucket=com.twilio.music.${set}`);
+    }
   });
 
-  it('defaults to Twilio hold music: no waitUrl attribute unless the rep opted out', () => {
+  it('the rep leg carries it exactly', () => {
+    expect(bridgeTwiml('abc123', true, { holdMusic: 'ambient' })).toContain('waitUrl="https://twimlets.com/holdmusic?Bucket=com.twilio.music.ambient"');
+    expect(bridgeTwiml('abc123', true, { holdMusic: 'off' })).toContain('waitUrl=""');
+    expect(bridgeTwiml('abc123', true, { holdMusic: 'youtube' })).toContain('waitUrl=""');
+  });
+
+  it('Classical — and no choice at all — is byte-for-byte today\'s TwiML (no waitUrl attribute)', () => {
+    expect(bridgeTwiml('abc123', true, { holdMusic: 'classical' })).toBe(bridgeTwiml('abc123', true));
     expect(bridgeTwiml('abc123', true)).not.toContain('waitUrl');
-    expect(bridgeTwiml('abc123', true, { holdMusic: true })).not.toContain('waitUrl');
-    expect(bridgeTwiml('abc123', false)).not.toContain('waitUrl');
   });
 
-  it('dialerConferenceTwiml passes the preference through to the rep leg', () => {
-    expect(dialerConferenceTwiml('client:rep_abc123', { holdMusic: false })).toContain('waitUrl=""');
-    expect(dialerConferenceTwiml('client:rep_abc123')).not.toContain('waitUrl');
+  it('the prospect leg never waits, so never carries waitUrl', () => {
+    expect(bridgeTwiml('abc123', false)).not.toContain('waitUrl');
+    expect(bridgeTwiml('abc123', true)).not.toContain('waitUrl');
+  });
+
+  it('dialerConferenceTwiml passes the choice through', () => {
+    expect(dialerConferenceTwiml('client:rep_abc123', { holdMusic: 'rock' })).toContain('com.twilio.music.rock');
   });
 
   it('dialerRejoinUrl is the public URL of the rejoin route — the one string Twilio signs and the route validates', () => {
