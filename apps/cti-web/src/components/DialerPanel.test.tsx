@@ -855,6 +855,25 @@ describe('HoldMusicPlayer (SSR) — mounts the YouTube player after the current-
     expect(renderRunning(viewWith('active'), { choice: 'classical', youtube: null })).not.toContain('yt-player');
   });
 
+  // A rep who once used YouTube and then switched to a preset (or Off) keeps
+  // their stored playlist ids server-side — switching back later shouldn't
+  // require re-pasting the link. That means `youtube` being non-null is NOT
+  // by itself enough to mount the player: `choice` must ALSO say 'youtube'.
+  // (Regression guard: a mutant that read `holdMusic?.youtube ?? null` —
+  // ignoring `choice` entirely — passed every other case in this file because
+  // they all paired 'youtube' with ids and every preset here with `youtube:
+  // null`. These two are the only cases that pair a NON-youtube choice with
+  // stored ids, so they're the only ones that mutant fails.)
+  it('switched to a preset (Rock) but the YouTube ids are still stored: no player', () => {
+    const html = renderRunning(viewWith('active'), { choice: 'rock', youtube: { listId: 'PL123', videoId: null } });
+    expect(html).not.toContain('yt-player');
+  });
+
+  it('switched to Off but the YouTube ids are still stored: no player', () => {
+    const html = renderRunning(viewWith('active'), { choice: 'off', youtube: { listId: 'PL123', videoId: null } });
+    expect(html).not.toContain('yt-player');
+  });
+
   it('YouTube chosen but no stored ids yet: no player', () => {
     expect(renderRunning(viewWith('active'), { choice: 'youtube', youtube: null })).not.toContain('yt-player');
   });
