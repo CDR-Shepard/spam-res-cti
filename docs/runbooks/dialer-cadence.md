@@ -17,6 +17,21 @@ The rules are org-wide and have no kill switch. Change a constant and redeploy.
 
 Adding a capped state: add its code to `DAILY_DIAL_CAP_STATES`, which is used by both the dialer gate and the click-to-dial firewall. Then redeploy. Get counsel's sign-off first.
 
+## Two cap checks, two scopes
+
+Same law, same state list, two different enforcement points — and they don't count or resolve "capped" the same way:
+
+| | Dialer gate (`dialer/live-deps.ts` `isDailyCapped`) | Click-to-dial firewall (`firewall/evaluate.ts`) |
+|---|---|---|
+| Counts per | **PERSON** — both of the record's numbers plus dials logged against the record itself | **NUMBER** — the exact number dialed (`daily-cap.ts` `dailyDialCount`) |
+| "Capped" decided by | the **dialed number's area code** | the **Salesforce State**, falling back to the area code when there is none |
+
+Two consequences:
+- A FL person capped by the dialer on their Mobile can still be reached a 4th time by click-to-dial to their OTHER number — the firewall counts that number alone, and it hasn't hit 3 yet.
+- A FL resident's out-of-state cell (e.g. a NY area code) is blocked by the click-to-dial firewall (SF State = FL) but NOT by the dialer gate (the area code resolves to NY, which isn't capped).
+
+Counsel to confirm whether FL §501.059's limit is per person; if so, the firewall needs the person's other number.
+
 ## Skip outcomes (`dialer_queue_items.outcome`, status `skipped`)
 
 | Outcome | Panel label | Meaning |

@@ -298,8 +298,12 @@ No backfill. Rows without `record_id` match by number only; the 3-hour and
 - The firewall's daily-cap read failing → BLOCK with the same reason (fail
   closed; the rep sees why and can retry).
 - Rollover enqueue stays inside the miss transaction (unchanged); the
-  click-to-dial trigger is best-effort in the sync worker (logged, retried on
-  the job's normal schedule).
+  click-to-dial trigger is best-effort in the sync worker: logged, **not**
+  retried. `salesforceTaskId` is committed before the enqueue's try/catch
+  runs, and the sync job early-returns once that column is set (`if
+  (call.salesforceTaskId) return; // already synced`) — so a later run of the
+  same job never reaches the rollover check again. A failed enqueue here is a
+  task that stays open, which the rep can still see and dial manually.
 - `redial`/`end` on a session that is not `active`, or with no connected item,
   return the session's status like `pause` does; the panel re-polls.
 

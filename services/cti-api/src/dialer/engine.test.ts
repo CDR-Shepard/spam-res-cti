@@ -1340,7 +1340,7 @@ describe('handleDialOutcome — rollover is per day, per owner', () => {
   const miss = (over: Record<string, unknown> = {}) => [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', primaryNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, followupEligible: true, taskId: null, ...over }];
   const d = (userId: string, hoursAgo: number, connected = false) => ({ userId, sessionId: 'S-x', toNumber: '+1', at: new Date(Date.UTC(2026, 6, 13, 18 - hoursAgo)), connected, source: 'dialer' as const, skipped: false });
 
-  it("first miss of the day (only this dial on the log): requeue, no rollover — even on a STOPPED run", async () => {
+  it("first miss of the day (only this dial on the log) does not roll — on a STOPPED run, which does not requeue either", async () => {
     const deps = makeDeps({ orgDayStart: DAY, contactHistory: vi.fn(async () => [d('U1', 0)]) }); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, miss()); deps.db = fdb;
     await handleDialOutcome('CA1', 'voicemail', deps);
     expect(deps.enqueueRollover).not.toHaveBeenCalled();

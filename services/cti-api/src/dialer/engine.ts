@@ -34,11 +34,13 @@ export interface EngineDeps {
   /** The "now" the engine reasons about — injected so calling-hours checks are deterministic in tests. */
   nowUtc: Date;
   /** Queue the rep's follow-up rollover for this record (drained by the follow-up
-   *  worker). Idempotent on (user, sourceTaskId ?? record, fromDate) — so two
-   *  follow-up tasks on the SAME person each get their own job. Called INSIDE the miss-path
-   *  transaction (handleDialOutcome) with that transaction's `tx` as the second
-   *  arg, so the enqueue commits or rolls back atomically with the CAS that
-   *  flips the row out of 'dialing' — no try/catch here on purpose. */
+   *  worker). Idempotent on (user, record, fromDate) — the unique index
+   *  `followup_rollover_unique` is keyed by RECORD, not by task, so two
+   *  follow-up tasks on the SAME person on the same day collapse into ONE job
+   *  (see followup-enqueue.ts). Called INSIDE the miss-path transaction
+   *  (handleDialOutcome) with that transaction's `tx` as the second arg, so
+   *  the enqueue commits or rolls back atomically with the CAS that flips the
+   *  row out of 'dialing' — no try/catch here on purpose. */
   enqueueRollover: (job: RolloverEnqueue, db: RolloverDb) => Promise<void>;
   onScreenPop: (userId: string, objectType: string, recordId: string) => void;
   todayIso: string;
@@ -740,9 +742,11 @@ export async function handleDialOutcome(
     // Settle the row AND stamp the dial log in one transaction: the stamp is
     // what every later run reads to lead with the number that actually reached
     // this person, so it must never survive (or be lost by) a partial write.
-    // The stamp is scoped to `dialedNumber` because the item can own more than
-    // one attempt row — see stampConnected. A row with no number to match is
-    // nothing the log could have recorded, so there is nothing to stamp.
+    // The stamp also matches on `dialedNumber`, not just the item id — see
+    // stampConnected's doc for why (defensive; one item owns exactly one
+    // attempt row today, a retry being a new row on a new item). A row with
+    // no number to match is nothing the log could have recorded, so there is
+    // nothing to stamp.
     await deps.db.transaction(async (tx) => {
       await tx.update(schema.dialerQueueItems).set({ status: 'connected', outcome: 'connected', updatedAt: new Date() }).where(eq(schema.dialerQueueItems.id, item.id));
       if (dialedNumber) await stampConnected(tx, item.id, dialedNumber, deps.nowUtc);

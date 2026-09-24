@@ -105,12 +105,14 @@ export async function inFlightElsewhere(db: Pick<Db, 'select'>, orgId: string, p
 /**
  * The connect, on the log: the number that reached them is the one to lead with.
  *
- * Scoped to `toNumber`, not just the item: ONE item can own several attempt rows
- * — a true no-answer rolls the same item onto its Phone (engine.ts
- * handleDialOutcome) and that re-dial appends a second row. Stamping by item
- * alone would mark the number that RANG OUT as connected too, which then makes
- * `preferredNumbersFor` pick between two equally-"connected" numbers and tells
- * the cadence history the person answered on a number they never did.
+ * Scoped to `toNumber` as well as the item id, even though each item owns
+ * exactly one attempt row today — the immediate Mobile→Phone re-dial onto the
+ * SAME item is gone; a retry is a NEW row, on a NEW item (engine.ts's
+ * end-of-run requeue). The extra filter is defensive, not load-bearing: if
+ * the number passed in ever disagreed with what the item actually dialed — a
+ * bug upstream, or a stale caller — the update would match zero rows and
+ * stamp nothing, instead of silently marking whatever number the item
+ * happens to hold as the one that connected.
  */
 export async function stampConnected(tx: Pick<Db, 'update'>, itemId: string, toNumber: string, at: Date): Promise<void> {
   await tx
