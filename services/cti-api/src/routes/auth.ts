@@ -11,6 +11,15 @@ import type { FastifyInstance } from 'fastify';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb, schema } from '@cti/db';
+import {
+  DEFAULT_HOLD_MUSIC,
+  HOLD_MUSIC_CHOICES,
+  YOUTUBE_LINK_ERROR,
+  parseYouTubeLink,
+  toHoldMusicChoice,
+  type HoldMusicChoice,
+  type HoldMusicSetting,
+} from '@cti/contracts';
 import { createTenant, encryptString, humanUserByEmail, issueSession, resolveSession } from '@cti/auth';
 import { buildStartArtifacts, exchangeCodeForTokens, fetchProfileName, fetchProfilePhoto, fetchUserInfo } from '../salesforce/oauth.js';
 import { normalize } from '@cti/phone';
@@ -29,11 +38,27 @@ const DEV_USER_ID = '00000000-0000-0000-0000-00000000beef';
 export const PatchMeBody = z
   .object({
     noAnswerForwardE164: z.string().nullable().optional(),
+    /** Legacy (softphone tabs from before hold-music choices): on/off. */
     dialerHoldMusic: z.boolean().optional(),
+    holdMusic: z.object({ choice: z.enum(HOLD_MUSIC_CHOICES), youtubeLink: z.string().max(500).optional() }).optional(),
   })
-  .refine((b) => b.noAnswerForwardE164 !== undefined || b.dialerHoldMusic !== undefined, {
+  .refine((b) => b.noAnswerForwardE164 !== undefined || b.dialerHoldMusic !== undefined || b.holdMusic !== undefined, {
     message: 'nothing to update',
   });
+
+/**
+ * The picker's truth, derived from the stored columns. A bad/retired stored
+ * value reads as Classical (see `toHoldMusicChoice`) rather than breaking the
+ * rep's room; YouTube ids are surfaced together so the picker can offer
+ * "switch back" without a second round trip.
+ */
+function holdMusicSettingFor(
+  row: { dialerHoldMusicChoice?: string | null; dialerYoutubeListId?: string | null; dialerYoutubeVideoId?: string | null } | undefined,
+): HoldMusicSetting {
+  const listId = row?.dialerYoutubeListId ?? null;
+  const videoId = row?.dialerYoutubeVideoId ?? null;
+  return { choice: toHoldMusicChoice(row?.dialerHoldMusicChoice), youtube: listId || videoId ? { listId, videoId } : null };
+}
 
 /**
  * Bring a rep who has just signed in up to their standard set of numbers.
@@ -182,7 +207,13 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     const [profile, sfConn] = await Promise.all([
       db.query.users.findFirst({
         where: eq(schema.users.id, session.userId),
-        columns: { noAnswerForwardE164: true, dialerHoldMusic: true },
+        columns: {
+          noAnswerForwardE164: true,
+          dialerHoldMusic: true,
+          dialerHoldMusicChoice: true,
+          dialerYoutubeListId: true,
+          dialerYoutubeVideoId: true,
+        },
       }),
       db.query.salesforceConnections.findFirst({
         where: eq(schema.salesforceConnections.userId, session.userId),
@@ -192,7 +223,10 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       user: {
         ...session,
         noAnswerForwardE164: profile?.noAnswerForwardE164 ?? null,
-        dialerHoldMusic: profile?.dialerHoldMusic ?? true,
+        // `holdMusic` is the picker's truth; `dialerHoldMusic` keeps tabs from
+        // before choices existed showing the right On/Off.
+        holdMusic: holdMusicSettingFor(profile),
+        dialerHoldMusic: holdMusicSettingFor(profile).choice !== 'off',
       },
       salesforce: sfConn
         ? {
@@ -226,8 +260,52 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
 
     const db = getDb();
-    const patch: { noAnswerForwardE164?: string | null; dialerHoldMusic?: boolean } = {};
-    if (parsed.data.dialerHoldMusic !== undefined) patch.dialerHoldMusic = parsed.data.dialerHoldMusic;
+    const patch: {
+      noAnswerForwardE164?: string | null;
+      dialerHoldMusic?: boolean;
+      dialerHoldMusicChoice?: HoldMusicChoice;
+      dialerYoutubeListId?: string | null;
+      dialerYoutubeVideoId?: string | null;
+    } = {};
+
+    // Hold music. The new picker sends `holdMusic`; a tab from before it sends
+    // the legacy boolean, which must never overwrite a preset or YouTube.
+    if (parsed.data.holdMusic) {
+      const { choice, youtubeLink } = parsed.data.holdMusic;
+      if (choice === 'youtube') {
+        if (youtubeLink !== undefined) {
+          const ref = parseYouTubeLink(youtubeLink);
+          if (!ref) return reply.code(400).send({ error: YOUTUBE_LINK_ERROR });
+          patch.dialerYoutubeListId = ref.listId;
+          patch.dialerYoutubeVideoId = ref.videoId;
+        } else {
+          const stored = await db.query.users.findFirst({
+            where: eq(schema.users.id, session.userId),
+            columns: { dialerYoutubeListId: true, dialerYoutubeVideoId: true },
+          });
+          if (!stored?.dialerYoutubeListId && !stored?.dialerYoutubeVideoId) {
+            return reply.code(400).send({ error: YOUTUBE_LINK_ERROR });
+          }
+        }
+      }
+      patch.dialerHoldMusicChoice = choice;
+      patch.dialerHoldMusic = choice !== 'off';
+    } else if (parsed.data.dialerHoldMusic !== undefined) {
+      patch.dialerHoldMusic = parsed.data.dialerHoldMusic;
+      if (!parsed.data.dialerHoldMusic) {
+        patch.dialerHoldMusicChoice = 'off';
+      } else {
+        const current = await db.query.users.findFirst({
+          where: eq(schema.users.id, session.userId),
+          columns: { dialerHoldMusicChoice: true },
+        });
+        // Only Off comes back on as Classical; a preset or YouTube stays put.
+        if (current?.dialerHoldMusicChoice === 'off') {
+          patch.dialerHoldMusicChoice = DEFAULT_HOLD_MUSIC;
+        }
+      }
+    }
+
     let forwardE164: string | null = null;
     const raw = parsed.data.noAnswerForwardE164?.trim();
     if (raw) {

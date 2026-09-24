@@ -26,6 +26,22 @@ describe('PATCH /auth/me body', () => {
     expect(PatchMeBody.safeParse({ dialerHoldMusic: 'no' }).success).toBe(false);
     expect(PatchMeBody.safeParse({ dialerHoldMusic: null }).success).toBe(false);
   });
+
+  it('accepts a hold-music choice, with or without a YouTube link', () => {
+    expect(PatchMeBody.safeParse({ holdMusic: { choice: 'ambient' } }).success).toBe(true);
+    expect(
+      PatchMeBody.safeParse({ holdMusic: { choice: 'youtube', youtubeLink: 'https://youtu.be/dQw4w9WgXcQ' } })
+        .success,
+    ).toBe(true);
+  });
+
+  it('rejects an unknown choice, a choice-less holdMusic object, and an oversized YouTube link', () => {
+    expect(PatchMeBody.safeParse({ holdMusic: { choice: 'jazz' } }).success).toBe(false);
+    expect(PatchMeBody.safeParse({ holdMusic: {} }).success).toBe(false);
+    expect(
+      PatchMeBody.safeParse({ holdMusic: { choice: 'youtube', youtubeLink: 'x'.repeat(501) } }).success,
+    ).toBe(false);
+  });
 });
 
 /**
