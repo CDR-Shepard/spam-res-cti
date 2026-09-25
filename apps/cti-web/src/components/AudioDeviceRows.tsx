@@ -28,7 +28,7 @@ const MISSING_NOTE = 'Saved device not connected — using system default';
 const NEEDS_PERMISSION = 'Allow microphone access to see device names';
 const MIC_STAYS_OPEN = 'Choosing a specific microphone keeps it open while the softphone runs (Chrome shows the recording dot; '
   + "Bluetooth headsets stay in call mode). Leave System default unless callers can't hear you.";
-const OUTPUT_UNSUPPORTED ="Your browser picks the speaker (change it in your computer's sound settings)";
+const OUTPUT_UNSUPPORTED = "Your browser picks the speaker (change it in your computer's sound settings)";
 const NOUN: Record<AudioDeviceKind, string> = { audioinput: 'microphone', audiooutput: 'speaker' };
 
 interface RowState {
