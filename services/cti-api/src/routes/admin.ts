@@ -25,17 +25,22 @@ function labelForImportedNumber(e164: string): string {
 }
 
 /**
- * Point a Twilio number's Voice webhook at our inbound handler so callbacks reach
- * us (answer + record voicemail) instead of erroring on the number's old/default
- * config. Best-effort — returns false and logs on any failure. Idempotent.
+ * Point a Twilio number's Voice AND SMS webhooks at our handlers, in the SAME
+ * request: Voice so callbacks reach us (answer + record voicemail) instead of
+ * erroring on the number's old/default config, SMS so an inbound text reaches
+ * POST /telephony/twilio/sms instead of disappearing (Twilio accepts a text
+ * with no SmsUrl and never shows it to us — the whole reason inbound texts
+ * used to be invisible; design docs/superpowers/specs/2026-09-25-inbound-texts-design.md
+ * task 7). Best-effort — returns false and logs on any failure. Idempotent.
  */
-async function setTwilioInboundVoiceUrl(
+async function setTwilioInboundWebhooks(
   cfg: ReturnType<typeof loadConfig>,
   twilioSid: string,
   log: { warn: (obj: unknown, msg?: string) => void },
 ): Promise<boolean> {
   if (!cfg.TWILIO_ACCOUNT_SID || !cfg.TWILIO_AUTH_TOKEN) return false;
-  const url = `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound`;
+  const voiceUrl = `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound`;
+  const smsUrl = `${cfg.API_PUBLIC_URL}/telephony/twilio/sms`;
   const auth = Buffer.from(`${cfg.TWILIO_ACCOUNT_SID}:${cfg.TWILIO_AUTH_TOKEN}`).toString('base64');
   try {
     const res = await fetch(
@@ -43,16 +48,16 @@ async function setTwilioInboundVoiceUrl(
       {
         method: 'POST',
         headers: { authorization: `Basic ${auth}`, 'content-type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ VoiceUrl: url, VoiceMethod: 'POST' }).toString(),
+        body: new URLSearchParams({ VoiceUrl: voiceUrl, VoiceMethod: 'POST', SmsUrl: smsUrl, SmsMethod: 'POST' }).toString(),
       },
     );
     if (!res.ok) {
-      log.warn({ status: res.status, twilioSid }, 'twilio_voiceurl_patch_failed');
+      log.warn({ status: res.status, twilioSid }, 'twilio_webhooks_patch_failed');
       return false;
     }
     return true;
   } catch (err) {
-    log.warn({ err, twilioSid }, 'twilio_voiceurl_patch_error');
+    log.warn({ err, twilioSid }, 'twilio_webhooks_patch_error');
     return false;
   }
 }
@@ -236,10 +241,12 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /**
-   * Register the Twilio webhook on the underlying carrier number so inbound
-   * calls hit our /telephony/twilio/inbound endpoint. Idempotent — safe to call
-   * any time the tunnel URL changes. Caller must supply twilioSid (PN…) since
-   * we don't store the SID on outbound_numbers yet.
+   * Register the Twilio webhooks on the underlying carrier number so inbound
+   * calls hit our /telephony/twilio/inbound endpoint AND inbound texts hit
+   * /telephony/twilio/sms (design docs/superpowers/specs/2026-09-25-inbound-texts-design.md
+   * task 7 — texts silently disappeared with no SmsUrl set). Idempotent — safe
+   * to call any time the tunnel URL changes. Caller must supply twilioSid (PN…)
+   * since we don't store the SID on outbound_numbers yet.
    */
   app.post('/admin/outbound-numbers/:id/register-twilio-inbound', async (req, reply) => {
     const s = await resolveSession(req.headers.authorization);
@@ -257,10 +264,13 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     if (!cfg.TWILIO_ACCOUNT_SID || !cfg.TWILIO_AUTH_TOKEN) {
       return reply.code(503).send({ error: 'Twilio not configured' });
     }
-    const url = `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound`;
+    const voiceUrl = `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound`;
+    const smsUrl = `${cfg.API_PUBLIC_URL}/telephony/twilio/sms`;
     const body = new URLSearchParams({
-      VoiceUrl: url,
+      VoiceUrl: voiceUrl,
       VoiceMethod: 'POST',
+      SmsUrl: smsUrl,
+      SmsMethod: 'POST',
     });
     const auth = Buffer.from(`${cfg.TWILIO_ACCOUNT_SID}:${cfg.TWILIO_AUTH_TOKEN}`).toString('base64');
     const res = await fetch(
@@ -280,7 +290,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       const safeCode = (data as { code?: number; status?: number })?.code;
       return reply.code(502).send({ error: 'Twilio update failed', code: safeCode ?? null });
     }
-    return { ok: true, voiceUrl: url, twilio: { sid: (data as { sid?: string }).sid } };
+    return { ok: true, voiceUrl, smsUrl, twilio: { sid: (data as { sid?: string }).sid } };
   });
 
   /**
@@ -355,9 +365,10 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
           set: { twilioSid: n.sid ?? null, provider: 'twilio', inboundEnabled: true },
         });
       registered += 1;
-      // Point the number's Voice webhook at our inbound handler so callbacks
-      // are answered. Best-effort — a webhook failure never aborts the import.
-      if (n.sid && (await setTwilioInboundVoiceUrl(cfg, n.sid, app.log))) {
+      // Point the number's Voice AND SMS webhooks at our handlers so callbacks
+      // are answered and texts stop disappearing. Best-effort — a webhook
+      // failure never aborts the import.
+      if (n.sid && (await setTwilioInboundWebhooks(cfg, n.sid, app.log))) {
         inboundWebhooksSet += 1;
       }
     }
