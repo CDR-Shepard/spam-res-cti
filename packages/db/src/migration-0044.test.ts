@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTableColumns } from 'drizzle-orm';
 import { getTableConfig } from 'drizzle-orm/pg-core';
-import { INBOUND_MESSAGE_STATUSES, inboundMessages, inboundTextDigests } from './schema.js';
+import { INBOUND_MESSAGE_STATUSES, INBOUND_TEXT_DIGEST_STATUSES, inboundMessages, inboundTextDigests } from './schema.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(resolve(here, '../migrations/0044_inbound_messages.sql'), 'utf8');
@@ -131,25 +131,57 @@ describe('migration 0044_inbound_messages', () => {
   });
 });
 
-describe('migration 0044 — inbound_text_digests (the once-only guard for a backfill batch digest)', () => {
+describe('migration 0044 — inbound_text_digests (I2: a small state machine, not just a once-only guard)', () => {
   const create = statements.find((s) => s.startsWith('CREATE TABLE IF NOT EXISTS "inbound_text_digests"'));
 
-  it('creates the table idempotently, keyed on batch_id so a batch can never be digested twice', () => {
+  it('creates the table idempotently, keyed on batch_id, with every state-machine column', () => {
     expect(create).toBeDefined();
     for (const col of [
       '"batch_id" uuid PRIMARY KEY',
       '"user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE CASCADE',
-      '"sent_at" timestamptz NOT NULL DEFAULT now()',
+      '"status" text NOT NULL DEFAULT \'pending\'',
+      '"attempts" integer NOT NULL DEFAULT 0',
+      '"next_attempt_at" timestamptz NOT NULL DEFAULT now()',
+      '"last_error" text',
+      '"sent_at" timestamptz',
+      '"created_at" timestamptz NOT NULL DEFAULT now()',
+      '"updated_at" timestamptz NOT NULL DEFAULT now()',
     ]) {
       expect(create).toContain(col);
     }
   });
 
-  it('the Drizzle schema matches: batch_id primary key, user_id + sent_at not null', () => {
+  it('refuses any status the worker does not know (sending is the claim; unknown is terminal)', () => {
+    expect(raw).toContain(
+      "CONSTRAINT \"inbound_text_digests_status_check\" CHECK (\"status\" IN ('pending','sending','sent','failed','unknown'))",
+    );
+    expect([...INBOUND_TEXT_DIGEST_STATUSES]).toEqual(['pending', 'sending', 'sent', 'failed', 'unknown']);
+  });
+
+  it("indexes the worker's due-digest scan: (status, next_attempt_at)", () => {
+    expect(statements).toContain(
+      'CREATE INDEX IF NOT EXISTS "inbound_text_digests_status_idx" ON "inbound_text_digests" ("status", "next_attempt_at")',
+    );
+  });
+
+  it('the Drizzle schema matches every column, default and nullability', () => {
     const c = getTableColumns(inboundTextDigests);
-    expect(Object.values(c).map((col) => col.name).sort()).toEqual(['batch_id', 'sent_at', 'user_id']);
+    expect(Object.values(c).map((col) => col.name).sort()).toEqual([
+      'attempts', 'batch_id', 'created_at', 'last_error', 'next_attempt_at', 'sent_at', 'status', 'updated_at', 'user_id',
+    ]);
     expect(c.batchId.primary).toBe(true);
     expect(c.userId.notNull).toBe(true);
-    expect(c.sentAt.notNull).toBe(true);
+    expect(c.status.default).toBe('pending');
+    expect(c.attempts.default).toBe(0);
+    // Nullable on purpose: null IS "no failure yet" / "never sent".
+    expect(c.lastError.notNull).toBe(false);
+    expect(c.sentAt.notNull).toBe(false);
+    for (const col of [c.status, c.attempts, c.nextAttemptAt, c.createdAt, c.updatedAt]) expect(col.notNull).toBe(true);
+  });
+
+  it('the Drizzle schema declares the same status index', () => {
+    const { indexes } = getTableConfig(inboundTextDigests);
+    const idx = indexes.find((i) => i.config.name === 'inbound_text_digests_status_idx');
+    expect(idx?.config.columns.map((col) => (col as { name: string }).name)).toEqual(['status', 'next_attempt_at']);
   });
 });

@@ -63,6 +63,7 @@ export type {
   InboundMessage,
   InboundMessageStatus,
   InboundTextDigest,
+  InboundTextDigestStatus,
   MobileDevice,
   MobilePairCode,
   NewCall,

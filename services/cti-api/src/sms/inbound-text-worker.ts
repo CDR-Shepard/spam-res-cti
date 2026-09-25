@@ -47,9 +47,9 @@
  * The message body never reaches a log line (see `redactBody`).
  * Design: docs/superpowers/specs/2026-09-25-inbound-texts-design.md.
  */
-import { and, asc, eq, gte, isNotNull, lt, lte, notInArray, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, isNotNull, lt, lte, notExists, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
-import type { InboundMessage, InboundMessageStatus } from '@cti/db';
+import type { InboundMessage, InboundMessageStatus, InboundTextDigest } from '@cti/db';
 import type { AppConfig } from '../config.js';
 import { findByPhone, sfFetch, soqlEscape, soqlQuery } from '../salesforce/client.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
@@ -103,6 +103,16 @@ export const SF_CREATE_TIMEOUT_MS = 60_000;
  *  still be running, so the reaper hands it back (or, on its last try, fails it). */
 export const STUCK_AFTER_MS = SF_CALL_TIMEOUT_MS * 3 + SF_CREATE_TIMEOUT_MS * 2 + 60_000;
 export const BATCH_LIMIT = 25;
+/**
+ * A digest's worst case in `sending`: the ONE mutating call (the emailSimple
+ * POST) at its timeout, plus a minute for our own database writes. Unlike
+ * `STUCK_AFTER_MS`, this does NOT include the Salesforce reads — I2 moved
+ * every read to BEFORE the claim, so a digest only enters `sending` once the
+ * email is already built and ready to POST. A digest stuck past this can only
+ * still be that one POST, or already dead — either way its outcome is
+ * unknown, never a retry (see `reapStuckSendingDigests`).
+ */
+export const DIGEST_STUCK_AFTER_MS = SF_CREATE_TIMEOUT_MS + 60_000;
 /** Salesforce's Task.Description limit. A text is far shorter; this only keeps a
  *  STRING_TOO_LONG error (which quotes the value) impossible. */
 const DESCRIPTION_MAX = 32_000;
@@ -293,10 +303,40 @@ function emailLink(instanceUrl: string | null, match: SenderMatch | null, taskId
 }
 
 /**
+ * A DEFINITE Salesforce refusal of an emailSimple POST — a 4xx response, or a
+ * 200 whose answer says `isSuccess: false`. Either way, Salesforce looked at
+ * the request and said no: it never sent the email, so retrying is safe.
+ * `status` is the HTTP status when there was one (a synchronous refusal is
+ * always a real response), used only for `isDefiniteEmailRefusal`'s check —
+ * `postEmailSimple` never throws this for a 5xx or for a network/timeout
+ * error (those propagate UNCHANGED, so `isSalesforceAuthError` still sees a
+ * real `SalesforceUnauthorizedError` instance and a timeout's plain message);
+ * the digest worker treats anything that ISN'T this as ambiguous (I2).
+ */
+class EmailSendError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = 'EmailSendError';
+  }
+}
+
+/** True for a send Salesforce definitely refused (never sent) — safe to
+ *  retry. False for everything else: a timeout, a network error, or a 5xx
+ *  (genuinely ambiguous — Salesforce may have sent it anyway). Auth errors
+ *  are checked separately, earlier, via `isSalesforceAuthError`. */
+function isDefiniteEmailRefusal(err: unknown): boolean {
+  return err instanceof EmailSendError;
+}
+
+/**
  * `emailSimple` answers an array of per-input results; a 200 can still carry
  * `isSuccess: false`, which means nothing was sent. Shared by the per-text
  * alert (`sendTextEmail`, `what: 'email'` — its exact wording is pinned by
- * existing tests) and the backfill digest (`sendDigest`, `what: 'digest email'`).
+ * existing tests) and the backfill digest (`processPendingDigest`,
+ * `what: 'digest email'`). A definite refusal ALSO throws `EmailSendError`
+ * (message unchanged) so the digest can tell it apart from an ambiguous
+ * failure (I2); the per-text alert ignores that distinction (any failure
+ * backs off the same way, see `processInboundText`).
  */
 async function postEmailSimple(
   deps: InboundTextDeps,
@@ -306,6 +346,10 @@ async function postEmailSimple(
   body: string,
   what: string,
 ): Promise<void> {
+  // No try/catch here on purpose: a network error, a timeout, or a thrown
+  // SalesforceUnauthorizedError must propagate UNCHANGED — `isSalesforceAuthError`
+  // relies on `instanceof SalesforceUnauthorizedError`, and the digest's
+  // "ambiguous" bucket relies on this NOT being an EmailSendError.
   const res = await withTimeout(
     deps.sf.sfFetch(userId, '/actions/standard/emailSimple', {
       method: 'POST',
@@ -316,11 +360,17 @@ async function postEmailSimple(
     SF_CREATE_TIMEOUT_MS,
     what,
   );
-  if (res.status >= 400) throw new Error(`${what} failed (${res.status}): ${JSON.stringify(res.json)}`);
+  if (res.status >= 400) {
+    const msg = `${what} failed (${res.status}): ${JSON.stringify(res.json)}`;
+    // A 4xx is Salesforce answering "no" — definite. A 5xx (or anything this
+    // codebase hasn't seen) is treated as ambiguous, same as no response at all.
+    if (res.status < 500) throw new EmailSendError(res.status, msg);
+    throw new Error(msg);
+  }
   const refused = (Array.isArray(res.json) ? res.json : []).find(
     (r) => (r as { isSuccess?: unknown } | null)?.isSuccess === false,
   ) as { errors?: unknown } | undefined;
-  if (refused) throw new Error(`${what} refused: ${JSON.stringify(refused.errors ?? null)}`);
+  if (refused) throw new EmailSendError(res.status, `${what} refused: ${JSON.stringify(refused.errors ?? null)}`);
 }
 
 /** Step 3. `taskId` is null when the Task could not be created — the email then
@@ -568,61 +618,80 @@ export function claimInboundText(db: Db, id: string, at: Date) {
 }
 
 // =============================================================================
-// The backfill digest — ONE email per finished backfill batch (design task 6).
+// The backfill digest — ONE email per finished backfill batch (design task 6;
+// state machine per review finding I2).
 //
 // A backfill row never gets an individual alert (`owesAlert` excludes
 // `backfill` rows above), so without this step a backfilled rep would see new
-// Tasks appear with no notice at all. Instead, once EVERY row in a
-// `backfill_batch` has reached a terminal status (done/failed/skipped — never
-// while one is still pending/in_flight), the tick sends that rep one email
-// listing every text, oldest first, and records the batch in
-// `inbound_text_digests` so it can never be sent twice.
+// Tasks appear with no notice at all. Once EVERY row in a `backfill_batch` has
+// reached a terminal status (done/failed/skipped — never while one is still
+// pending/in_flight), the tick queues that batch's digest as a `pending` row
+// in `inbound_text_digests` (`queueReadyDigests`). A SEPARATE step then works
+// through due `pending` digests (`processDueDigests`), one small state machine
+// per digest:
 //
-// CLAIM BEFORE SEND, deliberately the opposite order from the Task/email
-// stamps above: inserting the digest row is the ONLY guard here (there is no
-// per-row stamp a digest can check), so if the claim landed and the send then
-// failed, the batch stays claimed and is never retried — a rare, silent
-// miss, versus the alternative (stamp after send) which can double-send
-// across two racing replicas. "Never twice" is the harder requirement the
-// design names explicitly; a stuck batch is a one-line manual fix (delete its
-// inbound_text_digests row) if it ever happens. See runbook.
+//   pending --(claim)--> sending --(success)--> sent
+//      ^                    |
+//      |                    +--(definite refusal: 4xx, isSuccess:false)--> pending (backoff) or failed (MAX_TRIES)
+//      |                                         `--(ambiguous: timeout/network/5xx)--> unknown (terminal, NEVER retried)
+//      +--(a READ failed before the claim)-------------------------------> pending (backoff) or failed (MAX_TRIES)
+//      `--(a Salesforce AUTH failure, at any point)-----------------------> failed, immediately ("reconnect Salesforce")
+//
+// THE READS COME BEFORE THE CLAIM, deliberately the opposite of the row
+// worker above: the old design claimed FIRST (an insert that only one caller
+// could win) and only then did the Salesforce reads and sent the email. A
+// read failing right after that claim landed left the batch permanently
+// claimed with no email ever sent — a silent, unrecoverable miss, because
+// there is no OTHER guard once the claim exists. Doing every read first (the
+// rep's Salesforce user, their email, their instance URL, and the batch's
+// Task names) and building the whole email BEFORE claiming means a read
+// failure leaves the digest `pending` — genuinely retryable, not lost.
+//
+// The claim itself (`claimDigestForSending`) is a compare-and-swap exactly
+// like a row's claim: pending -> sending, re-checking `next_attempt_at`, so
+// a digest still backing off cannot be claimed early and two replicas racing
+// the same digest can never both win it.
+//
+// AMBIGUOUS NEVER RETRIES. Once the claim lands, the ONE thing that follows is
+// the emailSimple POST — and unlike a Task create, there is nothing to check
+// afterward to learn whether it actually went out. A definite Salesforce
+// refusal (4xx, or a 200 saying `isSuccess: false`) proves nothing was sent,
+// so THAT case is safe to retry. Anything else — a timeout, a network error, a
+// 5xx — is ambiguous: Salesforce may have received and sent the email even
+// though we never saw a clean answer, so retrying could double-send. Those go
+// straight to `unknown`, terminal, logged loudly for a human to check the
+// rep's inbox before ever re-queuing it (see the runbook).
+//
+// The reaper (`reapStuckSendingDigests`) mirrors this: a digest stuck in
+// `sending` past `DIGEST_STUCK_AFTER_MS` is ALSO ambiguous by the same logic
+// (we cannot tell whether that in-flight POST landed), so it becomes
+// `unknown`, never handed back to `pending` for another try.
 // =============================================================================
 
 const TERMINAL_INBOUND_STATUSES: ReadonlySet<InboundMessageStatus> = new Set(['done', 'failed', 'skipped']);
-
-/** Every batch id already recorded in inbound_text_digests — excluded from the
- *  digest scan below so a finished batch is never re-considered. */
-export function selectDigestedBatchIds(db: Db) {
-  return db.select({ batchId: schema.inboundTextDigests.batchId }).from(schema.inboundTextDigests);
-}
+const DIGEST_STUCK_UNKNOWN = 'stuck sending past the reaper window — outcome unknown, never retried';
 
 /** Every backfill row not yet digested, oldest first — `readyDigestBatches`'
- *  candidate pool. `excludeBatchIds` is `selectDigestedBatchIds`' result. */
-export function selectUndigestedBackfillRows(db: Db, excludeBatchIds: string[]) {
-  const notYetDigested = and(eq(schema.inboundMessages.backfill, true), isNotNull(schema.inboundMessages.backfillBatch));
+ *  candidate pool. NOT EXISTS (a batch's digest row, once inserted, excludes
+ *  it here for good — its own state machine owns it from then on) rather than
+ *  loading and diffing every digested batch id each tick. */
+export function selectUndigestedBackfillRows(db: Db) {
   return db
     .select()
     .from(schema.inboundMessages)
     .where(
-      excludeBatchIds.length > 0
-        ? and(notYetDigested, notInArray(schema.inboundMessages.backfillBatch, excludeBatchIds))
-        : notYetDigested,
+      and(
+        eq(schema.inboundMessages.backfill, true),
+        isNotNull(schema.inboundMessages.backfillBatch),
+        notExists(
+          db
+            .select({ one: sql`1` })
+            .from(schema.inboundTextDigests)
+            .where(eq(schema.inboundTextDigests.batchId, schema.inboundMessages.backfillBatch)),
+        ),
+      ),
     )
     .orderBy(asc(schema.inboundMessages.receivedAt));
-}
-
-/**
- * The once-only claim: an insert that only ONE caller can win (ON CONFLICT (batch_id)
- * DO NOTHING). `sendDigestForBatch` sends the email ONLY when this returns a row —
- * an empty result means some other tick (this replica or another) already claimed
- * (and is sending, or already sent) this batch.
- */
-export function claimDigest(db: Db, batchId: string, userId: string, at: Date) {
-  return db
-    .insert(schema.inboundTextDigests)
-    .values({ batchId, userId, sentAt: at })
-    .onConflictDoNothing()
-    .returning({ batchId: schema.inboundTextDigests.batchId });
 }
 
 export interface DigestBatch {
@@ -656,6 +725,79 @@ export function readyDigestBatches(rows: InboundMessage[]): DigestBatch[] {
   return ready;
 }
 
+/** Queues one ready batch's digest as `pending`. Bare `onConflictDoNothing()`
+ *  — no target — matching the repo convention (`batch_id` is a FULL, non-
+ *  partial primary key, so the bare form can never regress into 42P10).
+ *  Belt-and-suspenders: `selectUndigestedBackfillRows`'s NOT EXISTS already
+ *  keeps an already-queued batch from reaching here twice. */
+export function insertPendingDigest(db: Db, batchId: string, userId: string, at: Date) {
+  return db
+    .insert(schema.inboundTextDigests)
+    .values({ batchId, userId, status: 'pending', nextAttemptAt: at })
+    .onConflictDoNothing()
+    .returning({ batchId: schema.inboundTextDigests.batchId });
+}
+
+/** Every `pending` digest whose `next_attempt_at` has passed — the same shape
+ *  as `selectDueInboundTexts`. */
+export function selectDuePendingDigests(db: Db, now: Date) {
+  return db
+    .select()
+    .from(schema.inboundTextDigests)
+    .where(and(eq(schema.inboundTextDigests.status, 'pending'), lte(schema.inboundTextDigests.nextAttemptAt, now)))
+    .orderBy(asc(schema.inboundTextDigests.createdAt))
+    .limit(BATCH_LIMIT);
+}
+
+/**
+ * The compare-and-swap claim, run ONLY after every read has already
+ * succeeded and the email is already built (see the module doc above). Mirrors
+ * `claimInboundText`: only the caller that flips pending -> sending owns the
+ * digest, and the `next_attempt_at` re-check means a digest still backing off
+ * cannot be claimed early by a second replica scanning at the same moment.
+ */
+export function claimDigestForSending(db: Db, batchId: string, at: Date) {
+  return db
+    .update(schema.inboundTextDigests)
+    .set({ status: 'sending', updatedAt: at })
+    .where(
+      and(
+        eq(schema.inboundTextDigests.batchId, batchId),
+        eq(schema.inboundTextDigests.status, 'pending'),
+        lte(schema.inboundTextDigests.nextAttemptAt, at),
+      ),
+    )
+    .returning();
+}
+
+/** Rows a dead tick left in `sending` are AMBIGUOUS, never handed back for a
+ *  retry — the one call `sending` covers is the emailSimple POST itself, and
+ *  a hung tick cannot prove whether it landed. Mirrors `reapStuckInboundTexts`'
+ *  shape, not its "hand back with a try left" behavior. */
+export function reapStuckSendingDigests(db: Db, now: Date) {
+  return db
+    .update(schema.inboundTextDigests)
+    .set({ status: 'unknown', lastError: DIGEST_STUCK_UNKNOWN, updatedAt: now })
+    .where(
+      and(
+        eq(schema.inboundTextDigests.status, 'sending'),
+        lte(schema.inboundTextDigests.updatedAt, new Date(now.getTime() - DIGEST_STUCK_AFTER_MS)),
+      ),
+    )
+    .returning();
+}
+
+/** A batch's rows, re-read fresh at send time (never carried across ticks in
+ *  memory) — the same rows `readyDigestBatches` saw when the digest was
+ *  queued, now used to build the actual email content. */
+export function selectBatchRows(db: Db, batchId: string) {
+  return db
+    .select()
+    .from(schema.inboundMessages)
+    .where(eq(schema.inboundMessages.backfillBatch, batchId))
+    .orderBy(asc(schema.inboundMessages.receivedAt));
+}
+
 /** One batched SOQL read for every Task the batch created, so the digest shows
  *  the SAME sender name the Task itself was linked to (not a fresh, possibly
  *  different, phone re-match). A row whose Task creation failed (no sf_task_id)
@@ -673,45 +815,175 @@ async function taskNamesByTaskId(deps: InboundTextDeps, userId: string, taskIds:
   return names;
 }
 
-/** Claims, then sends, ONE batch's digest. Returns true when this call actually
- *  sent it (false = another caller already owns the batch). */
-async function sendDigestForBatch(deps: InboundTextDeps, batch: DigestBatch): Promise<boolean> {
-  const [claimed] = await claimDigest(deps.db, batch.batchId, batch.userId, deps.now());
-  if (!claimed) return false;
-  const ownerId = await withTimeout(deps.sf.salesforceUserId(batch.userId), SF_CALL_TIMEOUT_MS, 'salesforce user');
-  const to = await repEmail(deps, batch.userId, ownerId);
-  const instanceUrl = await deps.instanceUrlFor(batch.userId);
-  const taskIds = [...new Set(batch.rows.map((r) => r.sfTaskId).filter((id): id is string => id !== null))];
-  const names = await taskNamesByTaskId(deps, batch.userId, taskIds);
-  const entries: DigestEntry[] = batch.rows.map((r) => ({
-    name: (r.sfTaskId && names.get(r.sfTaskId)) ?? null,
-    fromE164: r.fromE164,
-    receivedAt: r.receivedAt,
-    body: r.body,
-    numMedia: r.numMedia,
-    recordUrl: !instanceUrl ? null : r.sfTaskId ? salesforceRecordUrl(instanceUrl, r.sfTaskId) : salesforceHomeUrl(instanceUrl),
-  }));
-  const email = textDigestEmail(entries);
-  await postEmailSimple(deps, batch.userId, to, email.subject, email.body, 'digest email');
-  return true;
+async function patchDigest(deps: InboundTextDeps, batchId: string, patch: Partial<InboundTextDigest>): Promise<void> {
+  await deps.db
+    .update(schema.inboundTextDigests)
+    .set({ ...patch, updatedAt: deps.now() })
+    .where(eq(schema.inboundTextDigests.batchId, batchId));
 }
 
-/** The tick's digest step: every batch that finished since the last tick gets
- *  its ONE email. A batch whose send throws is logged and NOT retried — the
- *  claim already landed (see the module doc above: claim-before-send is what
- *  makes "never twice" absolute), so the batch is now excluded from the next
- *  tick's scan even though no email went out. Rare; recoverable by deleting
- *  its inbound_text_digests row (see the runbook) to let it be re-claimed. */
-export async function sendReadyDigests(deps: InboundTextDeps): Promise<number> {
-  const digested = (await selectDigestedBatchIds(deps.db)).map((r) => r.batchId);
-  const rows = await selectUndigestedBackfillRows(deps.db, digested);
-  let sent = 0;
-  for (const batch of readyDigestBatches(rows)) {
-    try {
-      if (await sendDigestForBatch(deps, batch)) sent++;
-    } catch (err) {
-      console.error(`${LOG} digest failed`, { batchId: batch.batchId, userId: batch.userId, err: errorText(err) });
+function logDigestFailed(digestRow: InboundTextDigest, reason: string): void {
+  console.error(`${LOG} digest failed`, { batchId: digestRow.batchId, userId: digestRow.userId, reason });
+}
+
+/** Every text body in the batch, so a digest failure log (or its stored
+ *  `last_error`) can never quote one back — Salesforce's error payloads echo
+ *  the rejected value, and the digest's rejected value IS the concatenation
+ *  of every text in the batch. */
+function redactAgainstRows(text: string, rows: readonly InboundMessage[]): string {
+  return rows.reduce((acc, r) => redactBody(acc, r.body), text);
+}
+
+/**
+ * A retryable failure — either a read that failed BEFORE the claim, or a
+ * DEFINITE Salesforce refusal of the send (after the claim). Both back off
+ * the same way rows do: `RETRY_DELAYS_MS[attempts]`, MAX_TRIES total, then
+ * terminal `failed`. `digestRow.attempts` is always the PRE-claim value —
+ * the claim itself never bumps attempts (see the module doc: unlike a row's
+ * claim, this claim happens AFTER the work that can fail is already done),
+ * so a pre-claim and a post-claim failure both bump the SAME counter once.
+ */
+async function retryOrFailDigest(
+  deps: InboundTextDeps,
+  digestRow: InboundTextDigest,
+  err: unknown,
+  rows: readonly InboundMessage[],
+): Promise<'pending' | 'failed'> {
+  const nextAttempts = digestRow.attempts + 1;
+  const msg = redactAgainstRows(errorText(err), rows).slice(0, 2000);
+  const delay = RETRY_DELAYS_MS[nextAttempts - 1];
+  if (delay === undefined) {
+    await patchDigest(deps, digestRow.batchId, { status: 'failed', attempts: nextAttempts, lastError: msg });
+    logDigestFailed(digestRow, msg);
+    return 'failed';
+  }
+  await patchDigest(deps, digestRow.batchId, {
+    status: 'pending',
+    attempts: nextAttempts,
+    lastError: msg,
+    nextAttemptAt: new Date(deps.now().getTime() + delay),
+  });
+  return 'pending';
+}
+
+/** A Salesforce auth failure, at any point (a read OR the send): terminal at
+ *  once, matching the row worker's rule — no retry fixes a disconnected rep,
+ *  and the email is sent AS the rep, so it cannot go either. */
+async function failDigestAuth(deps: InboundTextDeps, digestRow: InboundTextDigest): Promise<void> {
+  await patchDigest(deps, digestRow.batchId, { status: 'failed', lastError: RECONNECT });
+  logDigestFailed(digestRow, RECONNECT);
+}
+
+/** An AMBIGUOUS send outcome (timeout, network error, or a 5xx) — Salesforce
+ *  may have sent the email anyway, so this is terminal and NEVER retried
+ *  (retrying could double-send). Logged loudly: a human needs to check the
+ *  rep's inbox before ever re-queuing this batch (see the runbook). */
+async function markDigestUnknown(
+  deps: InboundTextDeps,
+  digestRow: InboundTextDigest,
+  err: unknown,
+  rows: readonly InboundMessage[],
+): Promise<void> {
+  const msg = redactAgainstRows(errorText(err), rows).slice(0, 2000);
+  await patchDigest(deps, digestRow.batchId, { status: 'unknown', lastError: msg });
+  console.error(`${LOG} digest send outcome unknown — Salesforce may have sent it anyway; NOT retrying`, {
+    batchId: digestRow.batchId,
+    userId: digestRow.userId,
+    reason: msg,
+  });
+}
+
+/**
+ * One pending digest's full attempt: read everything and build the email
+ * FIRST, claim SECOND, send THIRD (see the module doc above for why this
+ * order is the whole point of I2). Returns the outcome for the tick's count;
+ * `'skipped'` means another replica (or a not-yet-due backoff) already owns
+ * this digest and nothing here changed.
+ */
+export async function processPendingDigest(
+  deps: InboundTextDeps,
+  digestRow: InboundTextDigest,
+): Promise<'sent' | 'retried' | 'failed' | 'unknown' | 'skipped'> {
+  const { batchId, userId } = digestRow;
+  let rows: InboundMessage[] = [];
+  let to: string;
+  let email: { subject: string; body: string };
+  try {
+    rows = await selectBatchRows(deps.db, batchId);
+    const ownerId = await withTimeout(deps.sf.salesforceUserId(userId), SF_CALL_TIMEOUT_MS, 'salesforce user');
+    to = await repEmail(deps, userId, ownerId);
+    const instanceUrl = await deps.instanceUrlFor(userId);
+    const taskIds = [...new Set(rows.map((r) => r.sfTaskId).filter((id): id is string => id !== null))];
+    const names = await taskNamesByTaskId(deps, userId, taskIds);
+    const entries: DigestEntry[] = rows.map((r) => ({
+      name: (r.sfTaskId && names.get(r.sfTaskId)) ?? null,
+      fromE164: r.fromE164,
+      receivedAt: r.receivedAt,
+      body: r.body,
+      numMedia: r.numMedia,
+      recordUrl: !instanceUrl ? null : r.sfTaskId ? salesforceRecordUrl(instanceUrl, r.sfTaskId) : salesforceHomeUrl(instanceUrl),
+    }));
+    email = textDigestEmail(entries);
+  } catch (err) {
+    if (isSalesforceAuthError(err)) {
+      await failDigestAuth(deps, digestRow);
+      return 'failed';
     }
+    const outcome = await retryOrFailDigest(deps, digestRow, err, rows);
+    return outcome === 'failed' ? 'failed' : 'retried';
+  }
+
+  // Every read succeeded and the email is ready — ONLY NOW claim.
+  const [claimed] = await claimDigestForSending(deps.db, batchId, deps.now());
+  if (!claimed) return 'skipped'; // another replica already owns it, or it is no longer due
+
+  try {
+    await postEmailSimple(deps, userId, to, email.subject, email.body, 'digest email');
+  } catch (err) {
+    if (isSalesforceAuthError(err)) {
+      await failDigestAuth(deps, digestRow);
+      return 'failed';
+    }
+    if (isDefiniteEmailRefusal(err)) {
+      const outcome = await retryOrFailDigest(deps, digestRow, err, rows);
+      return outcome === 'failed' ? 'failed' : 'retried';
+    }
+    // Ambiguous — timeout, network error, or a 5xx. Never retried.
+    await markDigestUnknown(deps, digestRow, err, rows);
+    return 'unknown';
+  }
+  await patchDigest(deps, batchId, { status: 'sent', sentAt: deps.now() });
+  return 'sent';
+}
+
+/** One digest's work must never abort the tick. A throw here is a failed DB
+ *  write; the reaper deals with whatever state it left. */
+async function guardedDigest(digestRow: InboundTextDigest, work: () => Promise<string>): Promise<string | null> {
+  try {
+    return await work();
+  } catch (err) {
+    console.error(`${LOG} digest row crashed`, { batchId: digestRow.batchId, userId: digestRow.userId, err: errorText(err) });
+    return null;
+  }
+}
+
+/** Step 1 of the tick's digest work: every batch that just finished (or
+ *  finished on an earlier tick but was never queued) gets its digest queued
+ *  as `pending`. Queuing is NOT sending — `processDueDigests` does that. */
+export async function queueReadyDigests(deps: InboundTextDeps): Promise<void> {
+  const rows = await selectUndigestedBackfillRows(deps.db);
+  for (const batch of readyDigestBatches(rows)) {
+    await insertPendingDigest(deps.db, batch.batchId, batch.userId, deps.now());
+  }
+}
+
+/** Step 2: every `pending` digest due for a try gets one. */
+export async function processDueDigests(deps: InboundTextDeps): Promise<number> {
+  const due = await selectDuePendingDigests(deps.db, deps.now());
+  let sent = 0;
+  for (const digestRow of due) {
+    const outcome = await guardedDigest(digestRow, () => processPendingDigest(deps, digestRow));
+    if (outcome === 'sent') sent++;
   }
   return sent;
 }
@@ -770,9 +1042,12 @@ export async function runInboundTextTick(
     await guarded(claimed, () => processInboundText(claimed, deps));
     processed++;
   }
-  // After the ordinary rows: a batch only becomes digest-ready once every one
-  // of its rows just went terminal above (or on an earlier tick).
-  const digestsSent = await sendReadyDigests(deps);
+  // Digests: reap any 'sending' digest a dead tick left ambiguous, queue any
+  // batch that just went (or already went) fully terminal above, then give
+  // every due 'pending' digest one try.
+  await reapStuckSendingDigests(deps.db, deps.now());
+  await queueReadyDigests(deps);
+  const digestsSent = await processDueDigests(deps);
   return { processed, gaveUp, digestsSent };
 }
 

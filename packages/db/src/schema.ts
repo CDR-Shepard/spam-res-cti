@@ -898,18 +898,36 @@ export const inboundMessages = pgTable(
 );
 export type InboundMessage = typeof inboundMessages.$inferSelect;
 
+/** Every status a backfill batch's digest can hold (migration 0044's CHECK).
+ *  `sending` is the worker's claim; `unknown` is terminal (an ambiguous send
+ *  outcome — Salesforce may have sent it anyway — is never retried). */
+export const INBOUND_TEXT_DIGEST_STATUSES = ['pending', 'sending', 'sent', 'failed', 'unknown'] as const;
+export type InboundTextDigestStatus = (typeof INBOUND_TEXT_DIGEST_STATUSES)[number];
+
 /**
- * Once-only guard for a backfill batch's digest email (migration 0044). A row
- * here means that batch_id's ONE digest already went out — the worker inserts
- * it (ON CONFLICT (batch_id) DO NOTHING) BEFORE sending and only sends when the
- * insert actually landed, so two replicas racing the same batch can never both
- * send it. No FK to inbound_messages — a batch, not a single row.
+ * One row per backfill batch, tracking its ONE digest email through a small
+ * state machine (migration 0044; review finding I2). No FK to
+ * inbound_messages — a batch, not a single row. See the migration's own
+ * column-by-column comment for the state machine itself.
  */
-export const inboundTextDigests = pgTable('inbound_text_digests', {
-  batchId: uuid('batch_id').primaryKey(),
-  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  sentAt: timestamp('sent_at', { withTimezone: true }).defaultNow().notNull(),
-});
+export const inboundTextDigests = pgTable(
+  'inbound_text_digests',
+  {
+    batchId: uuid('batch_id').primaryKey(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    status: text('status').$type<InboundTextDigestStatus>().default('pending').notNull(),
+    attempts: integer('attempts').default(0).notNull(),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).defaultNow().notNull(),
+    lastError: text('last_error'),
+    /** Stamped only on a genuine 'sent' outcome; null otherwise. */
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    statusIdx: index('inbound_text_digests_status_idx').on(t.status, t.nextAttemptAt),
+  }),
+);
 export type InboundTextDigest = typeof inboundTextDigests.$inferSelect;
 
 /**

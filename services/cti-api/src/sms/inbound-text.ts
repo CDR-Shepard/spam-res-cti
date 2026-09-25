@@ -287,7 +287,7 @@ export function textDigestEmail(entries: readonly DigestEntry[]): { subject: str
   const n = entries.length;
   const since = entries.length > 0 ? pacificDateOnly(entries[0]!.receivedAt) : pacificDateOnly(new Date());
   return {
-    subject: `${n} texts you missed (${since} – today)`,
+    subject: `${n} text${n === 1 ? '' : 's'} you missed (${since} – today)`,
     body: entries.map(digestEntryBlock).join('\n\n'),
   };
 }

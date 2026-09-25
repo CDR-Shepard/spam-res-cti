@@ -68,14 +68,35 @@ CREATE INDEX IF NOT EXISTS "inbound_messages_alert_idx" ON "inbound_messages" ("
 -- The digest's batch scan: every row belonging to one backfill run.
 CREATE INDEX IF NOT EXISTS "inbound_messages_backfill_batch_idx" ON "inbound_messages" ("backfill_batch");
 
--- One row per backfill batch that has been digested — a batch_id in here means
--- its ONE digest email already went out, so the worker's tick can never send it
--- twice (the insert is a claim: ON CONFLICT (batch_id) DO NOTHING, checked by
--- rowcount BEFORE sending, so two ticks racing on the same batch can never both
--- win). No FK to inbound_messages (a batch, not a single row) — user_id is who
--- it was sent to, so a support query needs no join back to inbound_messages.
+-- One row per backfill batch, tracking its ONE digest email through a small
+-- state machine (review finding I2 — the original "claim then send" design
+-- could lose a digest forever when a Salesforce read failed right after the
+-- claim landed, since the claim itself was the only guard). No FK to
+-- inbound_messages (a batch, not a single row) — user_id is who it goes to.
+--
+-- status       pending (queued, not yet tried) -> sending (claimed, a send is
+--              in flight) -> sent (done) | failed (gave up) | unknown (the
+--              send's outcome could not be determined — NEVER retried, since
+--              Salesforce may have sent it anyway; see inbound-text-worker.ts).
+-- attempts     bumped on every failed try (read OR send), never on success.
+-- next_attempt_at  when this digest becomes claimable again after a retryable
+--              failure; also what the claim's compare-and-swap re-checks, the
+--              same way a row's claim does.
+-- last_error   the most recent failure, redacted (never a quoted text body).
+-- sent_at      stamped only on a genuine 'sent' outcome; NULL otherwise.
 CREATE TABLE IF NOT EXISTS "inbound_text_digests" (
   "batch_id" uuid PRIMARY KEY,
   "user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
-  "sent_at" timestamptz NOT NULL DEFAULT now()
+  "status" text NOT NULL DEFAULT 'pending',
+  "attempts" integer NOT NULL DEFAULT 0,
+  "next_attempt_at" timestamptz NOT NULL DEFAULT now(),
+  "last_error" text,
+  "sent_at" timestamptz,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  "updated_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "inbound_text_digests_status_check" CHECK ("status" IN ('pending','sending','sent','failed','unknown'))
 );
+
+-- The worker's two scans: pending digests due for a try, and (via status
+-- alone) a stuck-in-'sending' scan for the reaper.
+CREATE INDEX IF NOT EXISTS "inbound_text_digests_status_idx" ON "inbound_text_digests" ("status", "next_attempt_at");

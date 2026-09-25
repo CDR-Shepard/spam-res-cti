@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
-import { schema, type InboundMessage } from '@cti/db';
+import { schema, type InboundMessage, type InboundTextDigest } from '@cti/db';
 import { SalesforceUnauthorizedError } from '../salesforce/client.js';
 import {
   BATCH_LIMIT,
+  DIGEST_STUCK_AFTER_MS,
   EMAIL_WINDOW_MS,
   LOOP_INTERVAL_MS,
   MAX_TRIES,
@@ -12,19 +13,24 @@ import {
   SF_CALL_TIMEOUT_MS,
   SF_CREATE_TIMEOUT_MS,
   STUCK_AFTER_MS,
-  claimDigest,
+  claimDigestForSending,
   claimInboundText,
   failExhaustedStuckInboundTexts,
+  insertPendingDigest,
   maybeStartInboundTextLoop,
+  processDueDigests,
   processInboundText,
+  processPendingDigest,
+  queueReadyDigests,
   reapStuckInboundTexts,
+  reapStuckSendingDigests,
   readyDigestBatches,
   runInboundTextTick,
-  selectDigestedBatchIds,
+  selectBatchRows,
   selectDueInboundTexts,
+  selectDuePendingDigests,
   selectRecentAlert,
   selectUndigestedBackfillRows,
-  sendReadyDigests,
   type InboundTextDeps,
 } from './inbound-text-worker.js';
 
@@ -60,6 +66,21 @@ function row(o: Partial<InboundMessage> = {}): InboundMessage {
     backfillBatch: null,
     // 05:00 UTC on the 26th is still the 25th in Los Angeles.
     receivedAt: new Date('2026-09-26T05:00:00Z'),
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...o,
+  };
+}
+
+function digestRow(o: Partial<InboundTextDigest> = {}): InboundTextDigest {
+  return {
+    batchId: 'batch-1',
+    userId: 'rep-1',
+    status: 'pending',
+    attempts: 0,
+    nextAttemptAt: NOW,
+    lastError: null,
+    sentAt: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...o,
@@ -749,27 +770,42 @@ describe('runInboundTextTick', () => {
     failWrite?: () => Error | null;
     /** Shared, ordered log of writes (`write:<status or keys>`) for order assertions. */
     log?: string[];
-    /** Batch ids already recorded in inbound_text_digests (selectDigestedBatchIds). */
-    digestedBatchIds?: string[];
-    /** Undigested backfill rows the digest scan sees (selectUndigestedBackfillRows). */
+    /** Undigested backfill rows the digest queue step sees (selectUndigestedBackfillRows). */
     undigestedBackfillRows?: InboundMessage[];
-    /** What claimDigest's `.returning()` yields for a given (batchId, userId) —
-     *  a non-empty array means this call won the claim. Defaults to "always wins". */
-    claimDigest?: (batchId: string, userId: string) => InboundMessage[] | Array<Record<string, unknown>>;
+    /** Pending digests due for a try this tick (selectDuePendingDigests). */
+    dueDigests?: InboundTextDigest[];
+    /** What a digest's claim (pending -> sending) yields — false = another
+     *  caller already owns it. Defaults to "always wins". */
+    digestClaimWins?: boolean;
+    /** Every write this tick made to inbound_text_digests, in order. */
+    digestWrites?: Patch[];
   }
 
   /** A fake handle for the tick: the reapers and the claim are `update`s (the
-   *  capped reaper and the claim await `.returning()`), the scan is a `select`. */
+   *  capped reaper and the claim await `.returning()`), the scan is a `select`.
+   *  Branches by the TABLE each call targets (`inboundMessages` vs
+   *  `inboundTextDigests`) rather than guessing from the patch shape — the two
+   *  tables' `status` values overlap ('pending', 'failed'), so table identity
+   *  is the only reliable signal. */
   function tickDb(f: TickFake) {
     const writes: Patch[] = [];
+    const digestWrites = f.digestWrites ?? [];
     let exhausted = f.exhausted ?? [];
     /** A value that resolves like a Promise AND still offers further chained
      *  methods — drizzle's query builder is thenable at every step. */
     const chainable = <T,>(value: T, extra: Record<string, unknown> = {}) => Object.assign(Promise.resolve(value), extra);
     const db = {
-      update: (_t: unknown) => ({
+      update: (table: unknown) => ({
         set: (patch: Patch) => ({
           where: (_w: unknown) => {
+            if (table === schema.inboundTextDigests) {
+              digestWrites.push(patch);
+              const isClaim = patch.status === 'sending';
+              return chainable(undefined, {
+                returning: async () =>
+                  isClaim ? (f.digestClaimWins ?? true ? [{ batchId: 'batch-x', userId: 'rep-1', attempts: 0 }] : []) : [],
+              });
+            }
             writes.push(patch);
             const label =
               typeof patch.status === 'string'
@@ -798,14 +834,19 @@ describe('runInboundTextTick', () => {
           },
         }),
       }),
-      // Three shapes share this one fake, discriminated by target table:
-      //  - selectDueInboundTexts:          select().from(inboundMessages).where().orderBy().limit()
-      //  - selectUndigestedBackfillRows:   select().from(inboundMessages).where().orderBy()        (no .limit())
-      //  - selectDigestedBatchIds:         select({batchId}).from(inboundTextDigests)               (no .where())
+      // Discriminated by target table:
+      //  - selectDueInboundTexts:         select().from(inboundMessages).where().orderBy().limit()
+      //  - selectUndigestedBackfillRows:  select().from(inboundMessages).where().orderBy()   (no .limit())
+      //  - the NOT EXISTS subquery:       select({one}).from(inboundTextDigests).where(...)  (never awaited standalone)
+      //  - selectDuePendingDigests:       select().from(inboundTextDigests).where().orderBy().limit()
       select: (_cols?: unknown) => ({
         from: (table: unknown) =>
           table === schema.inboundTextDigests
-            ? Promise.resolve((f.digestedBatchIds ?? []).map((batchId) => ({ batchId })))
+            ? {
+                where: (_w: unknown) => ({
+                  orderBy: (_o: unknown) => chainable(f.dueDigests ?? [], { limit: async (_n: number) => f.dueDigests ?? [] }),
+                }),
+              }
             : {
                 where: (_w: unknown) => ({
                   orderBy: (_o: unknown) =>
@@ -814,14 +855,13 @@ describe('runInboundTextTick', () => {
               },
       }),
       insert: (_table: unknown) => ({
-        values: (v: { batchId: string; userId: string; sentAt: Date }) => ({
-          onConflictDoNothing: () => ({
-            returning: async (_cols?: unknown) => f.claimDigest?.(v.batchId, v.userId) ?? [{ batchId: v.batchId }],
-          }),
-        }),
+        values: (v: { batchId: string; userId: string; status: string; nextAttemptAt: Date }) => {
+          digestWrites.push(v);
+          return { onConflictDoNothing: () => ({ returning: async (_cols?: unknown) => [{ batchId: v.batchId }] }) };
+        },
       }),
     };
-    return { writes, db: db as unknown as InboundTextDeps['db'] };
+    return { writes, digestWrites, db: db as unknown as InboundTextDeps['db'] };
   }
 
   it('reaps stuck rows, then skips a row whose conditional claim lost to another replica', async () => {
@@ -981,6 +1021,45 @@ describe('runInboundTextTick', () => {
       expect(t.writes.filter((w) => w.status === 'pending')).toHaveLength(1); // only the ordinary reaper's write
     });
   });
+
+  describe('the digest steps are wired in (reap, queue, process)', () => {
+    it('a ready batch is queued AND processed within the same tick, end to end', async () => {
+      const readyRows = [row({ id: 'r1', backfill: true, backfillBatch: 'batch-x', status: 'done', userId: 'rep-1' })];
+      const t = tickDb({ undigestedBackfillRows: readyRows, dueDigests: [digestRow({ batchId: 'batch-x', userId: 'rep-1' })] });
+      const h = harness({ db: t.db });
+      withEmail(h, EMAIL_OK);
+
+      const out = await runInboundTextTick(h.deps);
+
+      expect(out.digestsSent).toBe(1);
+      expect(t.digestWrites.some((w) => (w as { status?: string }).status === 'pending' && 'batchId' in w)).toBe(true); // queued
+      expect(t.digestWrites.some((w) => (w as { status?: string }).status === 'sending')).toBe(true); // claimed
+      expect(t.digestWrites.some((w) => (w as { status?: string }).status === 'sent')).toBe(true); // sent
+      expect(h.calls('/actions/standard/emailSimple')).toHaveLength(1);
+    });
+
+    it('no backfill/digest activity: the digest steps run (reaper + queue scan) but touch nothing and send nothing', async () => {
+      const t = tickDb({});
+      const h = harness({ db: t.db });
+      const out = await runInboundTextTick(h.deps);
+      expect(out.digestsSent).toBe(0);
+      expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    });
+
+    it("a digest whose claim loses (digestClaimWins: false) is not counted as sent, and nothing is emailed", async () => {
+      const readyRows = [row({ id: 'r1', backfill: true, backfillBatch: 'batch-x', status: 'done', userId: 'rep-1' })];
+      const t = tickDb({
+        undigestedBackfillRows: readyRows,
+        dueDigests: [digestRow({ batchId: 'batch-x', userId: 'rep-1' })],
+        digestClaimWins: false,
+      });
+      const h = harness({ db: t.db });
+      withEmail(h, EMAIL_OK);
+      const out = await runInboundTextTick(h.deps);
+      expect(out.digestsSent).toBe(0);
+      expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    });
+  });
 });
 
 describe('INBOUND_TEXTS kill switch — the loop', () => {
@@ -1048,73 +1127,231 @@ describe('readyDigestBatches — groups undigested backfill rows by batch, waiti
   });
 });
 
-describe('sendReadyDigests — the ONE email per finished backfill batch, never twice', () => {
-  /** Minimal fake db for just the digest step's three calls: the two selects
-   *  (digested batch ids, undigested rows) and the claim insert. */
-  function digestDb(opts: {
-    digestedBatchIds?: string[];
-    undigestedRows?: InboundMessage[];
-    /** false = the claim insert returns zero rows (another caller already owns the batch). */
-    claims?: boolean | ((batchId: string) => boolean);
-  }) {
-    const claimed: Array<{ batchId: string; userId: string }> = [];
-    const claimWins = typeof opts.claims === 'function' ? opts.claims : () => opts.claims ?? true;
-    const db = {
-      select: (_cols?: unknown) => ({
-        from: (table: unknown) =>
-          table === schema.inboundTextDigests
-            ? Promise.resolve((opts.digestedBatchIds ?? []).map((batchId) => ({ batchId })))
-            : { where: (_w: unknown) => ({ orderBy: async (_o: unknown) => opts.undigestedRows ?? [] }) },
-      }),
-      insert: (_t: unknown) => ({
-        values: (v: { batchId: string; userId: string; sentAt: Date }) => ({
-          onConflictDoNothing: () => ({
-            returning: async () => {
-              claimed.push({ batchId: v.batchId, userId: v.userId });
-              return claimWins(v.batchId) ? [{ batchId: v.batchId }] : [];
-            },
+/** Fake db for processPendingDigest-level tests: selectBatchRows/selectDuePendingDigests
+ *  (select-from-where-orderBy[-limit]), claimDigestForSending (update-set-where-returning),
+ *  and patchDigest's own update (update-set-where, awaited bare — no .returning() call). */
+function digestProcessDb(opts: { batchRows?: InboundMessage[]; claimWins?: boolean; due?: InboundTextDigest[] } = {}) {
+  const patches: Patch[] = [];
+  const db = {
+    select: (_cols?: unknown) => ({
+      from: (_table: unknown) => ({
+        where: (_w: unknown) =>
+          Object.assign(Promise.resolve(opts.batchRows ?? []), {
+            orderBy: (_o: unknown) =>
+              Object.assign(Promise.resolve(opts.batchRows ?? []), { limit: async (_n: number) => opts.due ?? [] }),
           }),
-        }),
       }),
-    };
-    return { db: db as unknown as InboundTextDeps['db'], claimed };
-  }
+    }),
+    update: (_t: unknown) => ({
+      set: (patch: Patch) => ({
+        where: (_w: unknown) => {
+          patches.push(patch);
+          const claiming = patch.status === 'sending';
+          return Object.assign(Promise.resolve(undefined), {
+            returning: async () => (claiming ? (opts.claimWins ?? true ? [{ ...digestRow(), status: 'sending' }] : []) : []),
+          });
+        },
+      }),
+    }),
+  };
+  return { db: db as unknown as InboundTextDeps['db'], patches };
+}
 
-  it('does nothing when no batch is ready (still pending rows)', async () => {
-    const d = digestDb({ undigestedRows: [row({ backfill: true, backfillBatch: 'b1', status: 'pending' })] });
+/** Every emailSimple call's Salesforce answer shape, for pinning definite vs
+ *  ambiguous send outcomes in the tests below. */
+const EMAIL_REFUSED_4XX = { status: 400, json: [{ errorCode: 'INVALID_EMAIL_ADDRESS', message: 'bad address' }] };
+const EMAIL_REFUSED_ISSUCCESS_FALSE = { status: 200, json: [{ isSuccess: false, errors: [{ statusCode: 'NO_MASS_MAIL_PERMISSION' }] }] };
+const EMAIL_5XX = { status: 503, json: { message: 'busy' } };
+
+function withEmail(h: ReturnType<typeof harness>, taskAnswer: { status: number; json: unknown }): void {
+  (h.deps.sf.soqlQuery as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, q: string) =>
+    q.includes('FROM Task') ? [{ Id: '00T000000000001', Who: { Name: 'Jane Doe' } }] : [{ Email: 'garrett@gghomes.org' }],
+  );
+  (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => taskAnswer);
+}
+
+describe('processPendingDigest — the state machine (review finding I2), one outcome per test', () => {
+  const batchRows = [
+    row({
+      id: 'r1', backfill: true, backfillBatch: 'batch-1', status: 'done', sfTaskId: '00T000000000001',
+      fromE164: '+16195550100', body: 'first text', receivedAt: new Date('2026-09-18T21:05:00Z'),
+    }),
+  ];
+
+  it('success: builds the email from fresh reads, THEN claims, THEN sends — "sent", sentAt stamped, claim precedes the send patch', async () => {
+    const d = digestProcessDb({ batchRows });
     const h = harness({ db: d.db });
-    expect(await sendReadyDigests(h.deps)).toBe(0);
-    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
-    expect(d.claimed).toEqual([]);
+    withEmail(h, EMAIL_OK);
+
+    const outcome = await processPendingDigest(h.deps, digestRow());
+
+    expect(outcome).toBe('sent');
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(1);
+    const statuses = d.patches.map((p) => p.status);
+    expect(statuses.indexOf('sending')).toBeLessThan(statuses.indexOf('sent'));
+    expect(d.patches.find((p) => p.status === 'sent')).toMatchObject({ status: 'sent', sentAt: NOW });
   });
 
-  it('claims the batch, sends ONE emailSimple with the pinned subject/body, and returns 1', async () => {
-    const rows = [
+  it('the claim loses (already claimed, or not yet due): "skipped", no send attempted', async () => {
+    const d = digestProcessDb({ batchRows, claimWins: false });
+    const h = harness({ db: d.db });
+    withEmail(h, EMAIL_OK);
+
+    const outcome = await processPendingDigest(h.deps, digestRow());
+
+    expect(outcome).toBe('skipped');
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+  });
+
+  it('a read failure BEFORE the claim (not auth) retries with backoff — the claim is never attempted', async () => {
+    const d = digestProcessDb({ batchRows });
+    const h = harness({ db: d.db });
+    (h.deps.sf.salesforceUserId as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('SOQL read timed out'));
+
+    const outcome = await processPendingDigest(h.deps, digestRow({ attempts: 0 }));
+
+    expect(outcome).toBe('retried');
+    expect(d.patches.find((p) => p.status === 'sending')).toBeUndefined();
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    expect(d.patches[0]).toMatchObject({
+      status: 'pending',
+      attempts: 1,
+      nextAttemptAt: new Date(NOW.getTime() + RETRY_DELAYS_MS[0]),
+      lastError: expect.stringContaining('SOQL read timed out'),
+    });
+  });
+
+  it('a read failure on the LAST try (attempts already MAX_TRIES-1) fails the digest permanently and logs loudly', async () => {
+    const d = digestProcessDb({ batchRows });
+    const h = harness({ db: d.db });
+    (h.deps.sf.salesforceUserId as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('SOQL read timed out'));
+
+    const outcome = await processPendingDigest(h.deps, digestRow({ attempts: MAX_TRIES - 1 }));
+
+    expect(outcome).toBe('failed');
+    expect(d.patches[0]).toMatchObject({ status: 'failed', attempts: MAX_TRIES });
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('digest failed'), expect.anything());
+  });
+
+  it('a Salesforce AUTH failure during a READ is terminal at once, regardless of attempts — "reconnect Salesforce"', async () => {
+    const d = digestProcessDb({ batchRows });
+    const h = harness({ db: d.db });
+    (h.deps.sf.salesforceUserId as ReturnType<typeof vi.fn>).mockRejectedValue(new SalesforceUnauthorizedError());
+
+    const outcome = await processPendingDigest(h.deps, digestRow({ attempts: 0 }));
+
+    expect(outcome).toBe('failed');
+    expect(d.patches[0]).toMatchObject({ status: 'failed', lastError: 'reconnect Salesforce' });
+    expect(d.patches[0]).not.toHaveProperty('attempts'); // never even counted as a try
+  });
+
+  it('a DEFINITE refusal of the send (4xx) retries with backoff, using the PRE-claim attempts value', async () => {
+    const d = digestProcessDb({ batchRows });
+    const h = harness({ db: d.db });
+    withEmail(h, EMAIL_REFUSED_4XX);
+
+    const outcome = await processPendingDigest(h.deps, digestRow({ attempts: 0 }));
+
+    expect(outcome).toBe('retried');
+    const finalPatch = d.patches.at(-1)!;
+    expect(finalPatch).toMatchObject({
+      status: 'pending',
+      attempts: 1,
+      nextAttemptAt: new Date(NOW.getTime() + RETRY_DELAYS_MS[0]),
+    });
+    expect(String(finalPatch.lastError)).toContain('digest email failed (400)');
+  });
+
+  it('an isSuccess:false answer is ALSO a definite refusal, not ambiguous', async () => {
+    const d = digestProcessDb({ batchRows });
+    const h = harness({ db: d.db });
+    withEmail(h, EMAIL_REFUSED_ISSUCCESS_FALSE);
+
+    const outcome = await processPendingDigest(h.deps, digestRow({ attempts: 0 }));
+
+    expect(outcome).toBe('retried');
+    expect(String(d.patches.at(-1)!.lastError)).toContain('NO_MASS_MAIL_PERMISSION');
+  });
+
+  it('a definite refusal on the LAST try fails the digest permanently', async () => {
+    const d = digestProcessDb({ batchRows });
+    const h = harness({ db: d.db });
+    withEmail(h, EMAIL_REFUSED_4XX);
+
+    const outcome = await processPendingDigest(h.deps, digestRow({ attempts: MAX_TRIES - 1 }));
+
+    expect(outcome).toBe('failed');
+    expect(d.patches.at(-1)).toMatchObject({ status: 'failed', attempts: MAX_TRIES });
+  });
+
+  it('a Salesforce AUTH failure during the SEND is terminal at once — never counted as a retryable try', async () => {
+    const d = digestProcessDb({ batchRows });
+    const h = harness({ db: d.db });
+    (h.deps.sf.soqlQuery as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, q: string) =>
+      q.includes('FROM Task') ? [] : [{ Email: 'garrett@gghomes.org' }],
+    );
+    (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      throw new SalesforceUnauthorizedError();
+    });
+
+    const outcome = await processPendingDigest(h.deps, digestRow({ attempts: 0 }));
+
+    expect(outcome).toBe('failed');
+    expect(d.patches.at(-1)).toMatchObject({ status: 'failed', lastError: 'reconnect Salesforce' });
+  });
+
+  it('an AMBIGUOUS send outcome (5xx) is "unknown" and is NEVER retried, even on the first try', async () => {
+    const d = digestProcessDb({ batchRows });
+    const h = harness({ db: d.db });
+    withEmail(h, EMAIL_5XX);
+
+    const outcome = await processPendingDigest(h.deps, digestRow({ attempts: 0 }));
+
+    expect(outcome).toBe('unknown');
+    expect(d.patches.at(-1)).toMatchObject({ status: 'unknown' });
+    expect(d.patches.at(-1)).not.toHaveProperty('nextAttemptAt'); // no retry is ever scheduled
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining('digest send outcome unknown'),
+      expect.objectContaining({ batchId: 'batch-1' }),
+    );
+  });
+
+  it('an AMBIGUOUS send outcome (a network/timeout error, not an EmailSendError at all) is ALSO "unknown"', async () => {
+    const d = digestProcessDb({ batchRows });
+    const h = harness({ db: d.db });
+    (h.deps.sf.soqlQuery as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, q: string) =>
+      q.includes('FROM Task') ? [] : [{ Email: 'garrett@gghomes.org' }],
+    );
+    (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      throw new Error('network error: socket hang up');
+    });
+
+    const outcome = await processPendingDigest(h.deps, digestRow({ attempts: 0 }));
+
+    expect(outcome).toBe('unknown');
+  });
+
+  it('the sender label comes from the batch\'s own Tasks (Who.Name), and the sent email is subject/body-pinned', async () => {
+    const twoRows = [
       row({
-        id: 'r1', backfill: true, backfillBatch: 'b1', status: 'done', sfTaskId: '00T000000000001',
+        id: 'r1', backfill: true, backfillBatch: 'batch-1', status: 'done', sfTaskId: '00T000000000001',
         fromE164: '+16195550100', body: 'first text', receivedAt: new Date('2026-09-18T21:05:00Z'),
       }),
       row({
-        id: 'r2', backfill: true, backfillBatch: 'b1', status: 'done', sfTaskId: '00T000000000002',
+        id: 'r2', backfill: true, backfillBatch: 'batch-1', status: 'done', sfTaskId: '00T000000000002',
         fromE164: '+18585550199', body: 'second text', receivedAt: new Date('2026-09-20T15:00:00Z'),
       }),
     ];
-    const d = digestDb({ undigestedRows: rows });
+    const d = digestProcessDb({ batchRows: twoRows });
     const h = harness({ db: d.db });
-    (h.deps.sf.soqlQuery as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, q: string) => {
-      if (q.includes('FROM Task')) {
-        return [
-          { Id: '00T000000000001', Who: { Name: 'Jane Doe' } },
-          { Id: '00T000000000002', Who: null },
-        ];
-      }
-      return [{ Email: 'garrett@gghomes.org' }];
-    });
+    (h.deps.sf.soqlQuery as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, q: string) =>
+      q.includes('FROM Task')
+        ? [{ Id: '00T000000000001', Who: { Name: 'Jane Doe' } }, { Id: '00T000000000002', Who: null }]
+        : [{ Email: 'garrett@gghomes.org' }],
+    );
 
-    const sent = await sendReadyDigests(h.deps);
+    await processPendingDigest(h.deps, digestRow());
 
-    expect(sent).toBe(1);
-    expect(d.claimed).toEqual([{ batchId: 'b1', userId: 'rep-1' }]);
     const [input] = emailInputs(h);
     expect(input!.emailSubject).toBe('2 texts you missed (Sep 18, 2026 – today)');
     expect(input!.emailBody).toBe(
@@ -1135,40 +1372,90 @@ describe('sendReadyDigests — the ONE email per finished backfill batch, never 
   });
 
   it('a row whose Task creation never succeeded (no sf_task_id) shows the formatted number and no link', async () => {
-    const rows = [row({ id: 'r1', backfill: true, backfillBatch: 'b1', status: 'failed', sfTaskId: null, fromE164: '+16195550100' })];
-    const d = digestDb({ undigestedRows: rows });
+    const noTaskRows = [row({ id: 'r1', backfill: true, backfillBatch: 'batch-1', status: 'failed', sfTaskId: null, fromE164: '+16195550100' })];
+    const d = digestProcessDb({ batchRows: noTaskRows });
     const h = harness({ db: d.db, instanceUrlFor: vi.fn(async () => null) });
-    await sendReadyDigests(h.deps);
+    withEmail(h, EMAIL_OK);
+    await processPendingDigest(h.deps, digestRow());
     const [input] = emailInputs(h);
     expect(input!.emailBody).toContain('From: (619) 555-0100');
     expect(input!.emailBody).not.toContain('Open in Salesforce');
   });
 
-  it('NEVER sends twice: a batch whose claim insert lands zero rows (already claimed) sends nothing', async () => {
-    const rows = [row({ id: 'r1', backfill: true, backfillBatch: 'b1', status: 'done' })];
-    const d = digestDb({ undigestedRows: rows, claims: false });
+  it('the message body never reaches the stored last_error or the crash log, even when Salesforce echoes it back', async () => {
+    const d = digestProcessDb({ batchRows: [row({ ...batchRows[0], body: TRICKY, backfillBatch: 'batch-1' })] });
     const h = harness({ db: d.db });
-    const sent = await sendReadyDigests(h.deps);
-    expect(sent).toBe(0);
-    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
-    // The claim was still attempted — that IS the once-only guard.
-    expect(d.claimed).toEqual([{ batchId: 'b1', userId: 'rep-1' }]);
+    (h.deps.sf.soqlQuery as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, q: string) =>
+      q.includes('FROM Task') ? [] : [{ Email: 'garrett@gghomes.org' }],
+    );
+    (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+      status: 400,
+      json: [{ errorCode: 'STRING_TOO_LONG', message: `bad: ${TRICKY}` }],
+    }));
+
+    await processPendingDigest(h.deps, digestRow({ attempts: 0 }));
+
+    expect(loggedStrings()).not.toContain(SECRET);
+    expect(JSON.stringify(d.patches)).not.toContain(SECRET);
+  });
+});
+
+describe('queueReadyDigests — queues a ready batch as pending; does NOT send (I2 splits queue from send)', () => {
+  it('inserts a pending digest row for a batch whose every row is terminal, and nothing for one that is not', async () => {
+    const inserted: Array<{ batchId: string; userId: string; status: string; nextAttemptAt: Date }> = [];
+    const undigestedRows = [
+      row({ id: 'r1', backfill: true, backfillBatch: 'batch-ready', status: 'done', userId: 'rep-1' }),
+      row({ id: 'r2', backfill: true, backfillBatch: 'batch-not-ready', status: 'pending', userId: 'rep-2' }),
+    ];
+    const db = {
+      select: (_cols?: unknown) => ({
+        from: (_t: unknown) => ({ where: (_w: unknown) => ({ orderBy: async (_o: unknown) => undigestedRows }) }),
+      }),
+      insert: (_t: unknown) => ({
+        values: (v: { batchId: string; userId: string; status: string; nextAttemptAt: Date }) => {
+          inserted.push(v);
+          return { onConflictDoNothing: () => ({ returning: async () => [{ batchId: v.batchId }] }) };
+        },
+      }),
+    } as unknown as InboundTextDeps['db'];
+    const h = harness({ db });
+
+    await queueReadyDigests(h.deps);
+
+    expect(inserted).toEqual([{ batchId: 'batch-ready', userId: 'rep-1', status: 'pending', nextAttemptAt: NOW }]);
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0); // queuing never sends
+  });
+});
+
+describe('processDueDigests — drains due pending digests through processPendingDigest', () => {
+  it('sends every due digest that is ready, counts only the ones that actually sent', async () => {
+    const due = [digestRow({ batchId: 'b1', userId: 'rep-1' }), digestRow({ batchId: 'b2', userId: 'rep-2' })];
+    const d = digestProcessDb({ batchRows: [row({ backfill: true, backfillBatch: 'b1' })], due });
+    const h = harness({ db: d.db });
+    withEmail(h, EMAIL_OK);
+
+    const sent = await processDueDigests(h.deps);
+
+    expect(sent).toBe(2);
   });
 
-  it('one batch failing to send does not stop another batch in the same tick', async () => {
-    const rows = [
-      row({ id: 'r1', backfill: true, backfillBatch: 'b1', status: 'done', userId: 'rep-1' }),
-      row({ id: 'r2', backfill: true, backfillBatch: 'b2', status: 'done', userId: 'rep-2' }),
-    ];
-    const d = digestDb({ undigestedRows: rows });
+  it('one crashing digest does not stop another in the same tick', async () => {
+    const due = [digestRow({ batchId: 'b1', userId: 'rep-1' }), digestRow({ batchId: 'b2', userId: 'rep-2' })];
+    const d = digestProcessDb({ batchRows: [row({ backfill: true, backfillBatch: 'b1' })], due });
     const h = harness({ db: d.db });
-    (h.deps.sf.salesforceUserId as ReturnType<typeof vi.fn>).mockImplementation(async (userId: string) => {
-      if (userId === 'rep-1') throw new Error('salesforce down for rep-1');
+    let n = 0;
+    (h.deps.sf.salesforceUserId as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      n++;
+      if (n === 1) throw new Error('boom');
       return '005REP000000002';
     });
-    const sent = await sendReadyDigests(h.deps);
+    (h.deps.sf.soqlQuery as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, q: string) =>
+      q.includes('FROM Task') ? [] : [{ Email: 'garrett@gghomes.org' }],
+    );
+
+    const sent = await processDueDigests(h.deps);
+
     expect(sent).toBe(1);
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('digest failed'), expect.objectContaining({ batchId: 'b1' }));
   });
 });
 
@@ -1232,36 +1519,76 @@ describe('the worker SQL, rendered', () => {
     expect(params).toEqual(['rep-1', '+16195550100', since.toISOString(), 1]);
   });
 
-  it('selectDigestedBatchIds reads every already-digested batch id, unfiltered', () => {
-    const { sql, params } = selectDigestedBatchIds(db).toSQL();
-    expect(sql).toBe('select "batch_id" from "inbound_text_digests"');
-    expect(params).toEqual([]);
-  });
+  const DIGEST_RETURNING =
+    ' returning "batch_id", "user_id", "status", "attempts", "next_attempt_at", "last_error", "sent_at", "created_at", "updated_at"';
 
-  it('selectUndigestedBackfillRows takes backfill rows with a batch id, oldest first, with no exclusion when nothing is digested yet', () => {
-    const { sql, params } = selectUndigestedBackfillRows(db, []).toSQL();
+  it('selectUndigestedBackfillRows takes backfill rows with a batch id, oldest first, excluded by NOT EXISTS (a digest row of its own) — never a loaded id list (I3)', () => {
+    const { sql, params } = selectUndigestedBackfillRows(db).toSQL();
     expect(sql).toBe(
       'select "id", "org_id", "message_sid", "from_e164", "to_e164", "body", "num_media", "user_id", "status", "attempts", ' +
         '"next_attempt_at", "last_error", "sf_task_id", "emailed_at", "email_skip_reason", "backfill", "backfill_batch", ' +
         '"received_at", "created_at", "updated_at" from "inbound_messages" ' +
-        'where ("inbound_messages"."backfill" = $1 and "inbound_messages"."backfill_batch" is not null) ' +
+        'where ("inbound_messages"."backfill" = $1 and "inbound_messages"."backfill_batch" is not null ' +
+        'and not exists (select 1 from "inbound_text_digests" where "inbound_text_digests"."batch_id" = "inbound_messages"."backfill_batch")) ' +
         'order by "inbound_messages"."received_at" asc',
     );
     expect(params).toEqual([true]);
   });
 
-  it('selectUndigestedBackfillRows excludes every already-digested batch id when given some', () => {
-    const { sql, params } = selectUndigestedBackfillRows(db, ['b1', 'b2']).toSQL();
-    expect(sql).toContain('"inbound_messages"."backfill_batch" not in ($2, $3)');
-    expect(params).toEqual([true, 'b1', 'b2']);
+  it('insertPendingDigest queues a digest as pending, due at the given time, bare ON CONFLICT DO NOTHING (batch_id is a FULL primary key)', () => {
+    const { sql, params } = insertPendingDigest(db, 'batch-1', 'rep-1', NOW).toSQL();
+    expect(sql).toBe(
+      'insert into "inbound_text_digests" ("batch_id", "user_id", "status", "attempts", "next_attempt_at", "last_error", "sent_at", "created_at", "updated_at") ' +
+        'values ($1, $2, $3, default, $4, default, default, default, default) on conflict do nothing returning "batch_id"',
+    );
+    expect(params).toEqual(['batch-1', 'rep-1', 'pending', NOW.toISOString()]);
   });
 
-  it("claimDigest is the once-only insert — ON CONFLICT (batch_id) DO NOTHING, checked by the caller's rowcount", () => {
-    const { sql, params } = claimDigest(db, 'batch-1', 'rep-1', NOW).toSQL();
-    expect(sql).toBe(
-      'insert into "inbound_text_digests" ("batch_id", "user_id", "sent_at") values ($1, $2, $3) ' +
-        'on conflict do nothing returning "batch_id"',
+  it('selectDuePendingDigests takes due pending digests, oldest first, a bounded batch', () => {
+    const { sql, params } = selectDuePendingDigests(db, NOW).toSQL();
+    expect(sql).toMatch(
+      /from "inbound_text_digests" where \("inbound_text_digests"\."status" = \$1 and "inbound_text_digests"\."next_attempt_at" <= \$2\) order by "inbound_text_digests"\."created_at" asc limit \$3$/,
     );
-    expect(params).toEqual(['batch-1', 'rep-1', NOW.toISOString()]);
+    expect(params).toEqual(['pending', NOW.toISOString(), BATCH_LIMIT]);
+  });
+
+  it('claimDigestForSending is a compare-and-swap pending → sending, DUE by the claim time — attempts is NOT bumped here (I2: the claim happens after every read already succeeded)', () => {
+    const { sql, params } = claimDigestForSending(db, 'batch-1', NOW).toSQL();
+    expect(sql).toBe(
+      'update "inbound_text_digests" set "status" = $1, "updated_at" = $2 ' +
+        'where ("inbound_text_digests"."batch_id" = $3 and "inbound_text_digests"."status" = $4 and "inbound_text_digests"."next_attempt_at" <= $5)' +
+        DIGEST_RETURNING,
+    );
+    expect(params).toEqual(['sending', NOW.toISOString(), 'batch-1', 'pending', NOW.toISOString()]);
+    // Only 2 params are SET (status, updated_at) — "attempts" appears in the
+    // trailing RETURNING column list, never in the SET clause itself.
+    expect(sql.split(' where ')[0]).not.toContain('attempts');
+  });
+
+  it('reapStuckSendingDigests turns a stuck-in-sending digest straight to unknown — never handed back for a retry', () => {
+    const { sql, params } = reapStuckSendingDigests(db, NOW).toSQL();
+    expect(sql).toBe(
+      'update "inbound_text_digests" set "status" = $1, "last_error" = $2, "updated_at" = $3 ' +
+        'where ("inbound_text_digests"."status" = $4 and "inbound_text_digests"."updated_at" <= $5)' +
+        DIGEST_RETURNING,
+    );
+    expect(params).toEqual([
+      'unknown',
+      'stuck sending past the reaper window — outcome unknown, never retried',
+      NOW.toISOString(),
+      'sending',
+      new Date(NOW.getTime() - DIGEST_STUCK_AFTER_MS).toISOString(),
+    ]);
+  });
+
+  it("selectBatchRows re-reads one batch's rows fresh, oldest first", () => {
+    const { sql, params } = selectBatchRows(db, 'batch-1').toSQL();
+    expect(sql).toBe(
+      'select "id", "org_id", "message_sid", "from_e164", "to_e164", "body", "num_media", "user_id", "status", "attempts", ' +
+        '"next_attempt_at", "last_error", "sf_task_id", "emailed_at", "email_skip_reason", "backfill", "backfill_batch", ' +
+        '"received_at", "created_at", "updated_at" from "inbound_messages" ' +
+        'where "inbound_messages"."backfill_batch" = $1 order by "inbound_messages"."received_at" asc',
+    );
+    expect(params).toEqual(['batch-1']);
   });
 });

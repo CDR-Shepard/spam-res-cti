@@ -372,6 +372,10 @@ describe('textDigestEmail — the backfill batch digest, sent once per rep (desi
     expect(textDigestEmail(entries).subject).toBe('2 texts you missed (Sep 18, 2026 – today)');
   });
 
+  it('subject reads "1 text" (singular) for exactly one text — review minor fix', () => {
+    expect(textDigestEmail([entries[0]!]).subject).toBe('1 text you missed (Sep 18, 2026 – today)');
+  });
+
   it('body lists one entry per text, OLDEST FIRST, each with sender, Pacific time, the quoted message, and the link', () => {
     expect(textDigestEmail(entries).body).toBe(
       [
