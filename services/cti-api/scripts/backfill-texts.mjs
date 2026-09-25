@@ -11,19 +11,32 @@
  * Pulls history ONLY for the rep's own agent DIDs (never the shared dialer
  * pool — a pool number's texts belong to whichever rep the callback rules
  * would route them to at the time, which this script cannot reconstruct).
+ * Pick --since AFTER the number's last reassignment to a different rep, or
+ * this credits texts to whoever holds the number today even if they arrived
+ * while someone else owned it.
+ *
  * Every row is stamped backfill=true and a batch_id shared by this run, and
- * inserted with bare ON CONFLICT DO NOTHING — safe to re-run; an already-
- * stored MessageSid is a no-op.
+ * ALL of a run's rows are inserted in ONE transaction (insertBackfillBatch) —
+ * the worker must never see a half-inserted batch: if it did, it could see
+ * every row it has so far as terminal and send the digest before the rest of
+ * the batch even exists, and a backfilled row never gets an individual
+ * alert, so those later texts would get their Task but no notice at all.
+ * Idempotent regardless: ON CONFLICT DO NOTHING (bare — the unique index on
+ * message_sid is FULL, see migration 0044) means a re-run after a failed
+ * attempt only inserts what's still missing.
  *
  * DRY RUN BY DEFAULT: counts only — how many inbound texts Twilio has for
  * this rep's numbers since the date, how many are already stored, how many
- * are new. NEVER prints a message body, in a dry run or otherwise.
+ * are new. NEVER prints a message body, in a dry run, on success, or on an
+ * error (see `safeErrorMessage` — an unexpected Postgres error's `detail`
+ * can quote the failing row, so only `.message`/`.code` are ever surfaced).
  *
  * Usage (needs BOTH a reachable Postgres AND Twilio creds — run via the API
  * service, which holds both):
- *   railway run -s @cti/api node scripts/backfill-texts.mjs --email garrett@gghomes.org --since 2026-09-01
- *   railway run -s @cti/api node scripts/backfill-texts.mjs --email garrett@gghomes.org --since 2026-09-01 --apply
- *   railway run -s @cti/api node scripts/backfill-texts.mjs --user-id <uuid> --since 2026-09-01 --apply
+ *   railway run -s @cti/api -- env DATABASE_URL=$DATABASE_PUBLIC_URL \
+ *     node scripts/backfill-texts.mjs --email garrett@gghomes.org --since 2026-09-01
+ *   railway run -s @cti/api -- env DATABASE_URL=$DATABASE_PUBLIC_URL \
+ *     node scripts/backfill-texts.mjs --email garrett@gghomes.org --since 2026-09-01 --apply
  *
  * Env: DATABASE_PUBLIC_URL (preferred) or DATABASE_URL — see set-sms-webhooks.mjs's
  * header for why DATABASE_PUBLIC_URL is preferred when run via `railway run`.
@@ -41,8 +54,8 @@ function argValue(argv, name) {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
-/** Parses and validates argv. Throws (never `process.exit`s) so `main()` alone
- *  owns the exit code — keeps this directly unit-testable. */
+/** Parses and validates argv. Throws (never `process.exit`s) so `run()` alone
+ *  decides how to report it — keeps this directly unit-testable. */
 export function parseArgs(argv) {
   const apply = argv.includes('--apply');
   const email = argValue(argv, 'email') ?? null;
@@ -61,7 +74,7 @@ export function isInboundMessage(message) {
 }
 
 /** Pure transform: one Twilio Message resource -> one inbound_messages row's
- *  values, ready for insertBackfillRow. Never touches the network or the DB. */
+ *  values, ready for insertBackfillBatch. Never touches the network or the DB. */
 export function toInsertRow(message, ctx) {
   const numMedia = Number.parseInt(message.numMedia ?? '', 10);
   return {
@@ -77,6 +90,8 @@ export function toInsertRow(message, ctx) {
   };
 }
 
+/** Only THIS rep's OWN agent DIDs — never the shared dialer pool (see the
+ *  module doc comment for why). */
 export const SELECT_AGENT_DIDS_SQL = `select id, e164, org_id from outbound_numbers
    where kind = 'agent' and assigned_user_id = $1`;
 
@@ -87,106 +102,161 @@ export const INSERT_ROW_SQL = `insert into inbound_messages
 
 export const SELECT_EXISTING_SIDS_SQL = `select message_sid from inbound_messages where message_sid = any($1)`;
 
+/** Reduces an error to what is safe to print: never `.detail` (a Postgres
+ *  constraint violation quotes the failing row — the private message body,
+ *  here) and never the whole error object. */
+export function safeErrorMessage(err) {
+  const message = err?.message ?? String(err);
+  const code = err?.code;
+  return code ? `${message} (code ${code})` : message;
+}
+
 /** Resolves the target rep by email or id — never both (parseArgs already
  *  enforces that). Throws a clear, named error on a miss so a typo'd email
- *  never silently backfills nothing. */
-export async function resolveRep(client, { email, userId }) {
+ *  never silently backfills nobody. */
+export async function resolveRep(db, { email, userId }) {
   const { rows } = email
-    ? await client.query('select id, email from users where email = $1', [email])
-    : await client.query('select id, email from users where id = $1', [userId]);
+    ? await db.query('select id, email from users where email = $1', [email])
+    : await db.query('select id, email from users where id = $1', [userId]);
   if (!rows[0]) throw new Error(`No user ${email ?? userId}`);
   return rows[0];
 }
 
-/** This rep's OWN agent DIDs — never the shared dialer pool (see the module
- *  doc comment for why). */
-export async function agentDidsForRep(client, repId) {
-  return (await client.query(SELECT_AGENT_DIDS_SQL, [repId])).rows;
-}
-
-/** Idempotent insert. Returns true only when THIS call's row actually landed
- *  (rowCount 1) — false means the MessageSid was already stored, a safe no-op
- *  on a re-run. */
-export async function insertBackfillRow(client, row) {
-  const r = await client.query(INSERT_ROW_SQL, [
-    row.orgId, row.messageSid, row.fromE164, row.toE164, row.body, row.numMedia, row.userId, row.backfillBatch, row.receivedAt,
-  ]);
-  return r.rowCount > 0;
+/** This rep's OWN agent DIDs. */
+export async function agentDidsForRep(db, repId) {
+  return (await db.query(SELECT_AGENT_DIDS_SQL, [repId])).rows;
 }
 
 /** Which of these message_sids are already stored — for an accurate dry-run
  *  count without writing anything. */
-export async function existingSids(client, sids) {
+export async function existingSids(db, sids) {
   if (sids.length === 0) return new Set();
-  const { rows } = await client.query(SELECT_EXISTING_SIDS_SQL, [sids]);
+  const { rows } = await db.query(SELECT_EXISTING_SIDS_SQL, [sids]);
   return new Set(rows.map((r) => r.message_sid));
 }
 
-function die(msg) {
-  console.error(`ERROR: ${msg}`);
-  process.exit(1);
+/**
+ * I1: all of a run's new rows, inserted in ONE transaction. Returns the
+ * number actually inserted (a row ON CONFLICT DO NOTHING skipped doesn't
+ * count). On ANY failure mid-loop, rolls back — the caller must never see or
+ * report a partial count, and the worker must never see a half-inserted
+ * batch (see the module doc comment for why that matters: an early digest
+ * that permanently skips the still-uninserted rows' individual alerts,
+ * because backfilled rows never get one).
+ */
+export async function insertBackfillBatch(db, rows) {
+  await db.query('BEGIN');
+  try {
+    let inserted = 0;
+    for (const row of rows) {
+      const r = await db.query(INSERT_ROW_SQL, [
+        row.orgId, row.messageSid, row.fromE164, row.toE164, row.body,
+        row.numMedia, row.userId, row.backfillBatch, row.receivedAt,
+      ]);
+      if (r.rowCount > 0) inserted++;
+    }
+    await db.query('COMMIT');
+    return inserted;
+  } catch (err) {
+    await db.query('ROLLBACK');
+    throw err;
+  }
+}
+
+/**
+ * The whole run, deps-injected so it's testable without a real database or
+ * Twilio account (I3). `deps.db` is a connected pg-client-shaped object
+ * (`.query(sql, params)`); `deps.twilio` is a Twilio SDK client
+ * (`.messages.list(...)`); `deps.stdout`/`deps.stderr` default to
+ * console.log/console.error; `deps.newBatchId` defaults to `randomUUID`
+ * (overridable so a test can assert on a known batch id).
+ */
+export async function run(argv, deps) {
+  const stdout = deps.stdout ?? console.log;
+  const stderr = deps.stderr ?? console.error;
+  const newBatchId = deps.newBatchId ?? randomUUID;
+
+  let args;
+  try {
+    args = parseArgs(argv);
+  } catch (err) {
+    stderr(`ERROR: ${err.message}`);
+    stderr('Usage: node scripts/backfill-texts.mjs --email <rep email> | --user-id <id> --since YYYY-MM-DD [--apply]');
+    return { exitCode: 1 };
+  }
+
+  stdout(args.apply ? '*** --apply — WILL INSERT ROWS ***' : '--- DRY RUN (no writes). Pass --apply to insert. ---');
+
+  const rep = await resolveRep(deps.db, args);
+  const dids = await agentDidsForRep(deps.db, rep.id);
+  if (dids.length === 0) {
+    stdout(`${rep.email} has no agent numbers — nothing to backfill.`);
+    return { exitCode: 0 };
+  }
+  stdout(`${rep.email}: ${dids.length} agent DID(s), pulling inbound texts since ${args.since}...`);
+
+  const batchId = newBatchId();
+  const dateSentAfter = new Date(`${args.since}T00:00:00Z`);
+  const rows = [];
+  for (const did of dids) {
+    const messages = await deps.twilio.messages.list({ to: did.e164, dateSentAfter });
+    const inbound = messages.filter(isInboundMessage);
+    for (const m of inbound) rows.push(toInsertRow(m, { orgId: did.org_id, userId: rep.id, batchId }));
+    stdout(`  ${did.e164}: ${inbound.length} inbound text(s)`);
+  }
+
+  const sids = rows.map((r) => r.messageSid);
+  const already = await existingSids(deps.db, sids);
+  const newRows = rows.filter((r) => !already.has(r.messageSid));
+  stdout(`\n${rows.length} inbound text(s) found total, ${already.size} already stored, ${newRows.length} new.`);
+
+  if (!args.apply) {
+    stdout(
+      newRows.length > 0
+        ? `\nDRY RUN — re-run with --apply to insert ${newRows.length} row(s). A new batch id is assigned on --apply.`
+        : '\nDRY RUN — nothing new to insert.',
+    );
+    return { exitCode: 0 };
+  }
+  if (newRows.length === 0) {
+    stdout('\nNothing new to insert.');
+    return { exitCode: 0 };
+  }
+
+  let inserted;
+  try {
+    inserted = await insertBackfillBatch(deps.db, newRows);
+  } catch (err) {
+    stderr(`ERROR: insert failed, rolled back — nothing from this run was stored: ${safeErrorMessage(err)}`);
+    return { exitCode: 1 };
+  }
+  stdout(`\nInserted ${inserted}/${newRows.length} row(s), batch ${batchId}.`);
+  stdout('The worker creates each Task on its next tick, then sends ONE digest email once the whole batch is done.');
+  return { exitCode: 0 };
 }
 
 async function main() {
-  let args;
-  try {
-    args = parseArgs(process.argv.slice(2));
-  } catch (err) {
-    die(`${err.message}\n\nUsage: node scripts/backfill-texts.mjs --email <rep email> | --user-id <id> --since YYYY-MM-DD [--apply]`);
-    return;
-  }
   const DB_URL = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
   const ACCOUNT = process.env.TWILIO_ACCOUNT_SID;
   const TOKEN = process.env.TWILIO_AUTH_TOKEN;
-  if (!DB_URL) die('No DATABASE_PUBLIC_URL / DATABASE_URL (run via `railway run -s @cti/api`, or export DATABASE_PUBLIC_URL from the Postgres service).');
-  if (!ACCOUNT || !TOKEN) die('TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not set (run via `railway run -s @cti/api`).');
+  if (!DB_URL) {
+    console.error('ERROR: No DATABASE_PUBLIC_URL / DATABASE_URL (run via `railway run -s @cti/api`, or export DATABASE_PUBLIC_URL from the Postgres service).');
+    process.exitCode = 1;
+    return;
+  }
+  if (!ACCOUNT || !TOKEN) {
+    console.error('ERROR: TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not set (run via `railway run -s @cti/api`).');
+    process.exitCode = 1;
+    return;
+  }
 
-  console.log(args.apply ? '*** --apply — WILL INSERT ROWS ***' : '--- DRY RUN (no writes). Pass --apply to insert. ---');
-
-  const client = new pg.Client({ connectionString: DB_URL, ssl: { rejectUnauthorized: false } });
-  await client.connect();
+  const db = new pg.Client({ connectionString: DB_URL, ssl: { rejectUnauthorized: false } });
+  await db.connect();
   try {
-    const rep = await resolveRep(client, args);
-    const dids = await agentDidsForRep(client, rep.id);
-    if (dids.length === 0) {
-      console.log(`${rep.email} has no agent numbers — nothing to backfill.`);
-      return;
-    }
-    console.log(`${rep.email}: ${dids.length} agent DID(s), pulling inbound texts since ${args.since}...`);
-
-    const twilioClient = twilio(ACCOUNT, TOKEN);
-    const batchId = randomUUID();
-    const dateSentAfter = new Date(`${args.since}T00:00:00Z`);
-    const rows = [];
-    for (const did of dids) {
-      const messages = await twilioClient.messages.list({ to: did.e164, dateSentAfter });
-      const inbound = messages.filter(isInboundMessage);
-      for (const m of inbound) rows.push(toInsertRow(m, { orgId: did.org_id, userId: rep.id, batchId }));
-      console.log(`  ${did.e164}: ${inbound.length} inbound text(s)`);
-    }
-
-    const sids = rows.map((r) => r.messageSid);
-    const already = await existingSids(client, sids);
-    const newRows = rows.filter((r) => !already.has(r.messageSid));
-    console.log(`\n${rows.length} inbound text(s) found total, ${already.size} already stored, ${newRows.length} new.`);
-
-    if (!args.apply) {
-      console.log(`\nDRY RUN — re-run with --apply to insert ${newRows.length} row(s) (batch would be ${batchId}).`);
-      return;
-    }
-    if (newRows.length === 0) {
-      console.log('\nNothing new to insert.');
-      return;
-    }
-
-    let inserted = 0;
-    for (const row of newRows) {
-      if (await insertBackfillRow(client, row)) inserted++;
-    }
-    console.log(`\nInserted ${inserted}/${newRows.length} row(s), batch ${batchId}.`);
-    console.log('The worker creates each Task on its next tick, then sends ONE digest email once the whole batch is done.');
+    const result = await run(process.argv.slice(2), { db, twilio: twilio(ACCOUNT, TOKEN) });
+    process.exitCode = result?.exitCode ?? 0;
   } finally {
-    await client.end();
+    await db.end();
   }
 }
 
@@ -196,7 +266,9 @@ async function main() {
 const isMain = process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   main().catch((err) => {
-    console.error(err);
-    process.exit(1);
+    // Top-level catch: only .message/.code ever reach the terminal, never
+    // `.detail` (which can quote a failing row) or the raw error object.
+    console.error(`ERROR: ${safeErrorMessage(err)}`);
+    process.exitCode = 1;
   });
 }

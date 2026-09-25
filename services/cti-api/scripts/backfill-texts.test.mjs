@@ -1,10 +1,11 @@
 /**
- * Tests for the pure, DB/Twilio-free pieces of backfill-texts.mjs (design
- * docs/superpowers/specs/2026-09-25-inbound-texts-design.md, task 6). The
- * script's `main()` connects to a real Postgres database and calls the real
- * Twilio API, gated behind an `isMain` check (see the module's bottom) —
- * importing this module for its exported helpers never touches either, and
- * never logs a message body.
+ * Tests for backfill-texts.mjs (design docs/superpowers/specs/
+ * 2026-09-25-inbound-texts-design.md, task 6). `main()` connects to a real
+ * Postgres database and calls the real Twilio API, gated behind an `isMain`
+ * check (see the module's bottom) — importing this module never touches
+ * either. `run(argv, deps)` is the deps-injected entry point `main()` wraps
+ * (review finding I3): every test below drives `run()` directly with fakes,
+ * so nothing here needs DATABASE_URL, Twilio creds, or a live DB/API.
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -12,12 +13,20 @@ import {
   SELECT_AGENT_DIDS_SQL,
   SELECT_EXISTING_SIDS_SQL,
   existingSids,
-  insertBackfillRow,
+  insertBackfillBatch,
   isInboundMessage,
   parseArgs,
   resolveRep,
+  run,
+  safeErrorMessage,
   toInsertRow,
 } from './backfill-texts.mjs';
+
+/** Collapses SQL to single-spaced text so a pin doesn't care about the
+ *  source's own line breaks/indentation — an exact match, not a regex
+ *  (review I3: "the scope SQL is pinned with a whitespace-normalized exact
+ *  match instead of regexes"). */
+const norm = (sql) => sql.replace(/\s+/g, ' ').trim();
 
 describe('parseArgs', () => {
   const SINCE = ['--since', '2026-09-01'];
@@ -103,99 +112,278 @@ describe('toInsertRow — pure transform from a Twilio Message resource to an in
   });
 });
 
-describe('SELECT_AGENT_DIDS_SQL — only this rep\'s OWN agent numbers, never the shared dialer pool', () => {
-  it('filters to kind=agent and this rep', () => {
-    expect(SELECT_AGENT_DIDS_SQL).toMatch(/kind\s*=\s*'agent'/);
-    expect(SELECT_AGENT_DIDS_SQL).toMatch(/assigned_user_id\s*=\s*\$1/);
+describe('SELECT_AGENT_DIDS_SQL — only this rep\'s OWN agent numbers, never the shared dialer pool (I3: exact, not regex)', () => {
+  it('is exactly this, whitespace-normalized', () => {
+    expect(norm(SELECT_AGENT_DIDS_SQL)).toBe(
+      "select id, e164, org_id from outbound_numbers where kind = 'agent' and assigned_user_id = $1",
+    );
   });
 });
 
 describe('INSERT_ROW_SQL — bare ON CONFLICT DO NOTHING (the unique index on message_sid is FULL, per migration 0044)', () => {
-  it('inserts as backfill=true, status pending, with the batch id', () => {
-    expect(INSERT_ROW_SQL).toMatch(/insert into inbound_messages/i);
-    expect(INSERT_ROW_SQL).toMatch(/'pending'/);
-    expect(INSERT_ROW_SQL).toMatch(/true/);
-    expect(INSERT_ROW_SQL).toMatch(/on conflict do nothing/i);
-    // Bare form — no explicit target/predicate, matching the repo convention
-    // that keeps this working even if the unique index shape ever changes.
-    expect(INSERT_ROW_SQL).not.toMatch(/on conflict\s*\(/i);
+  it('is exactly this, whitespace-normalized', () => {
+    expect(norm(INSERT_ROW_SQL)).toBe(
+      "insert into inbound_messages " +
+        "(org_id, message_sid, from_e164, to_e164, body, num_media, user_id, status, backfill, backfill_batch, received_at) " +
+        "values ($1, $2, $3, $4, $5, $6, $7, 'pending', true, $8, $9) " +
+        "on conflict do nothing",
+    );
   });
 });
 
 describe('SELECT_EXISTING_SIDS_SQL', () => {
-  it('checks message_sid against an array', () => {
-    expect(SELECT_EXISTING_SIDS_SQL).toMatch(/message_sid\s*=\s*any\(\$1\)/i);
+  it('is exactly this, whitespace-normalized', () => {
+    expect(norm(SELECT_EXISTING_SIDS_SQL)).toBe('select message_sid from inbound_messages where message_sid = any($1)');
   });
 });
 
-/** A tiny fake pg client: records queries, answers by exact SQL string match. */
-function fakeClient(answers) {
+describe('safeErrorMessage — never leaks Postgres .detail (which can quote a failing row) or the raw error object', () => {
+  it('is just the message when there is no code', () => {
+    expect(safeErrorMessage(new Error('boom'))).toBe('boom');
+  });
+
+  it('appends the code, never .detail, even when detail is set', () => {
+    const err = new Error('duplicate key value violates unique constraint');
+    err.code = '23505';
+    err.detail = 'Key (message_sid)=(SM1) already exists, body was "SUPER SECRET TEXT".';
+    expect(safeErrorMessage(err)).toBe('duplicate key value violates unique constraint (code 23505)');
+    expect(safeErrorMessage(err)).not.toContain('SUPER SECRET TEXT');
+  });
+
+  it('handles a non-Error thrown value', () => {
+    expect(safeErrorMessage('just a string')).toBe('just a string');
+  });
+});
+
+/** A tiny fake pg client: records queries in order, answers by exact SQL
+ *  string match (or a function of the params, for a query whose answer
+ *  depends on which call it is — e.g. "fail on the 2nd insert"). */
+function fakeDb(answers) {
   const calls = [];
   const query = vi.fn(async (sql, params) => {
     calls.push({ sql, params });
     const answer = answers[sql];
-    if (answer === undefined) throw new Error(`fakeClient: no answer configured for ${JSON.stringify(sql)}`);
-    return typeof answer === 'function' ? answer(params) : answer;
+    if (answer === undefined) return { rows: [], rowCount: 0 };
+    return typeof answer === 'function' ? answer(params, calls) : answer;
   });
   return { query, calls };
 }
 
 describe('resolveRep — looks the rep up by email OR by id, never both, and fails loudly on a miss', () => {
   it('looks up by email when given one', async () => {
-    const client = fakeClient({
+    const db = fakeDb({
       'select id, email from users where email = $1': { rows: [{ id: 'rep-1', email: 'garrett@gghomes.org' }] },
     });
-    const rep = await resolveRep(client, { email: 'garrett@gghomes.org', userId: null });
+    const rep = await resolveRep(db, { email: 'garrett@gghomes.org', userId: null });
     expect(rep).toEqual({ id: 'rep-1', email: 'garrett@gghomes.org' });
-    expect(client.calls[0].params).toEqual(['garrett@gghomes.org']);
+    expect(db.calls[0].params).toEqual(['garrett@gghomes.org']);
   });
 
   it('looks up by id when given one', async () => {
-    const client = fakeClient({
+    const db = fakeDb({
       'select id, email from users where id = $1': { rows: [{ id: 'rep-1', email: 'garrett@gghomes.org' }] },
     });
-    const rep = await resolveRep(client, { email: null, userId: 'rep-1' });
+    const rep = await resolveRep(db, { email: null, userId: 'rep-1' });
     expect(rep.id).toBe('rep-1');
   });
 
   it('throws a clear error when no user matches — never silently backfills nobody', async () => {
-    const client = fakeClient({ 'select id, email from users where email = $1': { rows: [] } });
-    await expect(resolveRep(client, { email: 'nobody@gghomes.org', userId: null })).rejects.toThrow(/nobody@gghomes.org/);
-  });
-});
-
-describe('insertBackfillRow — reports whether THIS call actually inserted (idempotency check)', () => {
-  const row = {
-    orgId: 'org-1', messageSid: 'SM1', fromE164: '+1a', toE164: '+1b', body: 'hi',
-    numMedia: 0, userId: 'rep-1', backfillBatch: 'batch-1', receivedAt: new Date('2026-09-18T21:05:00Z'),
-  };
-
-  it('returns true when the insert landed (rowCount 1)', async () => {
-    const client = fakeClient({ [INSERT_ROW_SQL]: { rowCount: 1 } });
-    expect(await insertBackfillRow(client, row)).toBe(true);
-    expect(client.calls[0].params).toEqual([
-      'org-1', 'SM1', '+1a', '+1b', 'hi', 0, 'rep-1', 'batch-1', row.receivedAt,
-    ]);
-  });
-
-  it('returns false when the row already existed (ON CONFLICT DO NOTHING, rowCount 0) — a re-run is a no-op', async () => {
-    const client = fakeClient({ [INSERT_ROW_SQL]: { rowCount: 0 } });
-    expect(await insertBackfillRow(client, row)).toBe(false);
+    const db = fakeDb({ 'select id, email from users where email = $1': { rows: [] } });
+    await expect(resolveRep(db, { email: 'nobody@gghomes.org', userId: null })).rejects.toThrow(/nobody@gghomes.org/);
   });
 });
 
 describe('existingSids — which of these message_sids are already stored (for an accurate dry-run count)', () => {
   it('returns an empty set without querying when there are no sids', async () => {
-    const client = fakeClient({});
-    const result = await existingSids(client, []);
+    const db = fakeDb({});
+    const result = await existingSids(db, []);
     expect(result).toEqual(new Set());
-    expect(client.calls).toEqual([]);
+    expect(db.calls).toEqual([]);
   });
 
   it('queries and returns the matched sids as a Set', async () => {
-    const client = fakeClient({ [SELECT_EXISTING_SIDS_SQL]: { rows: [{ message_sid: 'SM1' }, { message_sid: 'SM2' }] } });
-    const result = await existingSids(client, ['SM1', 'SM2', 'SM3']);
+    const db = fakeDb({ [SELECT_EXISTING_SIDS_SQL]: { rows: [{ message_sid: 'SM1' }, { message_sid: 'SM2' }] } });
+    const result = await existingSids(db, ['SM1', 'SM2', 'SM3']);
     expect(result).toEqual(new Set(['SM1', 'SM2']));
-    expect(client.calls[0].params).toEqual([['SM1', 'SM2', 'SM3']]);
+    expect(db.calls[0].params).toEqual([['SM1', 'SM2', 'SM3']]);
+  });
+});
+
+describe('insertBackfillBatch — I1: one transaction for the whole run, never a half-inserted batch', () => {
+  const rows = [
+    { orgId: 'org-1', messageSid: 'SM1', fromE164: '+1a', toE164: '+1b', body: 'first', numMedia: 0, userId: 'rep-1', backfillBatch: 'batch-1', receivedAt: new Date('2026-09-18T00:00:00Z') },
+    { orgId: 'org-1', messageSid: 'SM2', fromE164: '+1a', toE164: '+1b', body: 'second', numMedia: 0, userId: 'rep-1', backfillBatch: 'batch-1', receivedAt: new Date('2026-09-19T00:00:00Z') },
+    { orgId: 'org-1', messageSid: 'SM3', fromE164: '+1a', toE164: '+1b', body: 'third', numMedia: 0, userId: 'rep-1', backfillBatch: 'batch-1', receivedAt: new Date('2026-09-20T00:00:00Z') },
+  ];
+
+  it('BEGINs, inserts every row, then COMMITs — returns the count actually inserted', async () => {
+    const db = fakeDb({ BEGIN: {}, COMMIT: {}, [INSERT_ROW_SQL]: { rowCount: 1 } });
+    const inserted = await insertBackfillBatch(db, rows);
+    expect(inserted).toBe(3);
+    const sqlOrder = db.calls.map((c) => c.sql);
+    expect(sqlOrder).toEqual(['BEGIN', INSERT_ROW_SQL, INSERT_ROW_SQL, INSERT_ROW_SQL, 'COMMIT']);
+  });
+
+  it('a row already present (ON CONFLICT DO NOTHING, rowCount 0) is not counted, but does not fail the transaction', async () => {
+    let n = 0;
+    const db = fakeDb({
+      BEGIN: {},
+      COMMIT: {},
+      [INSERT_ROW_SQL]: () => (++n === 2 ? { rowCount: 0 } : { rowCount: 1 }),
+    });
+    expect(await insertBackfillBatch(db, rows)).toBe(2);
+  });
+
+  it('a failure on the 2nd insert ROLLBACKs and never COMMITs — the review\'s exact scenario (I1)', async () => {
+    let n = 0;
+    const db = fakeDb({
+      BEGIN: {},
+      ROLLBACK: {},
+      [INSERT_ROW_SQL]: () => {
+        n++;
+        if (n === 2) throw new Error('connection reset');
+        return { rowCount: 1 };
+      },
+    });
+    await expect(insertBackfillBatch(db, rows)).rejects.toThrow('connection reset');
+    const sqlOrder = db.calls.map((c) => c.sql);
+    expect(sqlOrder).toEqual(['BEGIN', INSERT_ROW_SQL, INSERT_ROW_SQL, 'ROLLBACK']);
+    expect(sqlOrder).not.toContain('COMMIT');
+  });
+
+  it('passes every column in the documented order, including the shared batch id', async () => {
+    const db = fakeDb({ BEGIN: {}, COMMIT: {}, [INSERT_ROW_SQL]: { rowCount: 1 } });
+    await insertBackfillBatch(db, [rows[0]]);
+    const insertCall = db.calls.find((c) => c.sql === INSERT_ROW_SQL);
+    expect(insertCall.params).toEqual([
+      'org-1', 'SM1', '+1a', '+1b', 'first', 0, 'rep-1', 'batch-1', rows[0].receivedAt,
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// run(argv, deps) — I3: the whole CLI, deps-injected.
+// ---------------------------------------------------------------------------
+
+const SENTINEL = 'THE SECRET MESSAGE BODY SHOULD NEVER BE PRINTED 4471';
+
+/** A fake Twilio SDK client whose `messages.list` returns the given messages
+ *  for every DID (good enough for these tests — one DID per rep fixture). */
+function fakeTwilio(messages) {
+  const list = vi.fn(async () => messages);
+  return { messages: { list } };
+}
+
+function outputSink() {
+  const lines = [];
+  return { stdout: (s) => lines.push(String(s)), stderr: (s) => lines.push(String(s)), lines };
+}
+
+const REP_ROW = { rows: [{ id: 'rep-1', email: 'garrett@gghomes.org' }] };
+const DIDS_ROW = { rows: [{ id: 'n1', e164: '+16195550100', org_id: 'org-1' }] };
+
+function baseDb(overrides = {}) {
+  return fakeDb({
+    'select id, email from users where email = $1': REP_ROW,
+    [SELECT_AGENT_DIDS_SQL]: DIDS_ROW,
+    [SELECT_EXISTING_SIDS_SQL]: { rows: [] },
+    ...overrides,
+  });
+}
+
+describe('run — dry run makes ZERO database writes (no INSERT, no BEGIN/COMMIT)', () => {
+  it('a dry run with new texts found never calls insertBackfillBatch\'s SQL', async () => {
+    const db = baseDb();
+    const twilioClient = fakeTwilio([{ sid: 'SM1', from: '+1a', to: '+1b', direction: 'inbound', body: 'hi', dateSent: new Date() }]);
+    const out = outputSink();
+    const result = await run(['--email', 'garrett@gghomes.org', '--since', '2026-09-01'], { db, twilio: twilioClient, ...out });
+    expect(result.exitCode).toBe(0);
+    expect(db.calls.map((c) => c.sql)).not.toContain(INSERT_ROW_SQL);
+    expect(db.calls.map((c) => c.sql)).not.toContain('BEGIN');
+    expect(db.calls.map((c) => c.sql)).not.toContain('COMMIT');
+  });
+
+  it('--apply actually inserts (contrast case, proving the dry-run assertion above is meaningful)', async () => {
+    const db = baseDb();
+    const twilioClient = fakeTwilio([{ sid: 'SM1', from: '+1a', to: '+1b', direction: 'inbound', body: 'hi', dateSent: new Date() }]);
+    const out = outputSink();
+    const result = await run(['--email', 'garrett@gghomes.org', '--since', '2026-09-01', '--apply'], { db, twilio: twilioClient, ...out });
+    expect(result.exitCode).toBe(0);
+    expect(db.calls.map((c) => c.sql)).toContain(INSERT_ROW_SQL);
+    expect(db.calls.map((c) => c.sql)).toContain('COMMIT');
+  });
+
+  it('the dry run does not print a batch id (one is not assigned until --apply actually needs it)', async () => {
+    const db = baseDb();
+    const twilioClient = fakeTwilio([{ sid: 'SM1', from: '+1a', to: '+1b', direction: 'inbound', body: 'hi', dateSent: new Date() }]);
+    const out = outputSink();
+    await run(['--email', 'garrett@gghomes.org', '--since', '2026-09-01'], { db, twilio: twilioClient, ...out });
+    const joined = out.lines.join('\n');
+    expect(joined).toContain('A new batch id is assigned on --apply');
+    expect(joined).not.toMatch(/batch would be/);
+  });
+});
+
+describe('run — a sentinel message body never reaches stdout or stderr, on the dry-run path or the error path', () => {
+  it('dry-run path: the body is never printed even though it is right there in the fetched message', async () => {
+    const db = baseDb();
+    const twilioClient = fakeTwilio([{ sid: 'SM1', from: '+1a', to: '+1b', direction: 'inbound', body: SENTINEL, dateSent: new Date() }]);
+    const out = outputSink();
+    await run(['--email', 'garrett@gghomes.org', '--since', '2026-09-01'], { db, twilio: twilioClient, ...out });
+    expect(out.lines.join('\n')).not.toContain(SENTINEL);
+  });
+
+  it('error path: a Postgres error whose .detail quotes the sentinel body never reaches output', async () => {
+    let n = 0;
+    const db = baseDb({
+      [INSERT_ROW_SQL]: () => {
+        n++;
+        if (n === 1) {
+          const err = new Error('duplicate key value violates unique constraint "inbound_messages_message_sid_unique"');
+          err.code = '23505';
+          err.detail = `Key (message_sid)=(SM1) already exists, body was "${SENTINEL}".`;
+          throw err;
+        }
+        return { rowCount: 1 };
+      },
+    });
+    const twilioClient = fakeTwilio([{ sid: 'SM1', from: '+1a', to: '+1b', direction: 'inbound', body: SENTINEL, dateSent: new Date() }]);
+    const out = outputSink();
+    const result = await run(['--email', 'garrett@gghomes.org', '--since', '2026-09-01', '--apply'], { db, twilio: twilioClient, ...out });
+    expect(result.exitCode).toBe(1);
+    expect(out.lines.join('\n')).not.toContain(SENTINEL);
+    expect(out.lines.join('\n')).toContain('duplicate key value violates unique constraint');
+  });
+});
+
+describe('run — other behavior', () => {
+  it('a bad --since is reported via stderr and exits 1, never throwing out of run()', async () => {
+    const out = outputSink();
+    const result = await run(['--email', 'a@b.com'], { db: baseDb(), twilio: fakeTwilio([]), ...out });
+    expect(result.exitCode).toBe(1);
+    expect(out.lines.join('\n')).toContain('--since');
+  });
+
+  it('a rep with no agent DIDs backfills nothing and never calls Twilio', async () => {
+    const db = baseDb({ [SELECT_AGENT_DIDS_SQL]: { rows: [] } });
+    const twilioClient = fakeTwilio([]);
+    const out = outputSink();
+    const result = await run(['--email', 'garrett@gghomes.org', '--since', '2026-09-01'], { db, twilio: twilioClient, ...out });
+    expect(result.exitCode).toBe(0);
+    expect(twilioClient.messages.list).not.toHaveBeenCalled();
+  });
+
+  it('filters to inbound only and skips already-stored sids before deciding what is new', async () => {
+    const db = baseDb({ [SELECT_EXISTING_SIDS_SQL]: { rows: [{ message_sid: 'SM1' }] } });
+    const twilioClient = fakeTwilio([
+      { sid: 'SM1', from: '+1a', to: '+1b', direction: 'inbound', body: 'already stored', dateSent: new Date() },
+      { sid: 'SM2', from: '+1a', to: '+1b', direction: 'inbound', body: 'new', dateSent: new Date() },
+      { sid: 'SM3', from: '+1a', to: '+1b', direction: 'outbound-reply', body: 'ours', dateSent: new Date() },
+    ]);
+    const out = outputSink();
+    await run(['--email', 'garrett@gghomes.org', '--since', '2026-09-01', '--apply'], { db, twilio: twilioClient, ...out });
+    const insertCalls = db.calls.filter((c) => c.sql === INSERT_ROW_SQL);
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0].params[1]).toBe('SM2');
   });
 });
