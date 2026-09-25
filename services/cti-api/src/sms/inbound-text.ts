@@ -107,6 +107,48 @@ export function salesforceRecordUrl(instanceUrl: string, recordId: string): stri
   return `${instanceUrl.replace(/\/+$/, '')}/lightning/r/${recordId}/view`;
 }
 
+/** The rep's Salesforce home — the link when there is no record to point at
+ *  (nobody matched AND the Task could not be created). */
+export function salesforceHomeUrl(instanceUrl: string): string {
+  return `${instanceUrl.replace(/\/+$/, '')}/lightning/page/home`;
+}
+
+/**
+ * Which record the email's link opens. The Opportunity first — for a Contact,
+ * texts link like inbound calls (findByPhone's `preferOpenOpportunity`), and
+ * the open deal is what the team actually works. Then the Lead or Contact,
+ * never an Account; then a What-only match (Deal__c); then the Task itself
+ * when nobody matched. Null = nothing to open (no match, no Task): the caller
+ * links the Salesforce home page instead.
+ */
+export function textEmailLinkTarget(links: { WhoId?: string; WhatId?: string }, taskId: string | null): string | null {
+  if (links.WhatId?.startsWith('006')) return links.WhatId;
+  if (links.WhoId) return links.WhoId;
+  if (links.WhatId && !links.WhatId.startsWith('001')) return links.WhatId;
+  return taskId;
+}
+
+/** Salesforce error codes that clear on their own: row-lock contention and the org's API limit. */
+const TRANSIENT_ERROR_CODES: ReadonlySet<string> = new Set(['UNABLE_TO_LOCK_ROW', 'REQUEST_LIMIT_EXCEEDED', 'SERVER_UNAVAILABLE']);
+
+/**
+ * Is a failed Task create worth another try? A 400 or 403 is Salesforce looking
+ * at the Task and saying no (a validation rule, a required field, no access):
+ * it will say no again, so the worker stops retrying and alerts the rep at once
+ * instead of three retries (about 12 minutes) later. Server errors,
+ * throttling, timeouts and the codes in TRANSIENT_ERROR_CODES do clear.
+ * A 401 never gets here — auth is terminal before this is asked.
+ */
+export function taskFailureIsRetryable(status: number, json: unknown): boolean {
+  const entries = Array.isArray(json) ? json : [json];
+  const transientCode = entries.some((e) => {
+    const code = (e as { errorCode?: unknown } | null)?.errorCode;
+    return typeof code === 'string' && TRANSIENT_ERROR_CODES.has(code);
+  });
+  if (transientCode) return true;
+  return !(status >= 400 && status < 500) || status === 408 || status === 409 || status === 429;
+}
+
 const PACIFIC = new Intl.DateTimeFormat('en-US', {
   timeZone: ORG_TIMEZONE,
   weekday: 'short',
@@ -134,6 +176,8 @@ export interface TextEmailInput {
   /** The matched record (or the Task) in Salesforce; null leaves the line out. */
   recordUrl: string | null;
   optOut: boolean;
+  /** The Task could not be created — the email is the only trace of the text. */
+  notLogged?: boolean;
 }
 
 /** The rep's alert. Plain text on purpose: emailSimple sends it as-is, and a
@@ -146,6 +190,7 @@ export function textEmail(input: TextEmailInput): { subject: string; body: strin
     `To your number: ${formatUsNumber(input.toE164)}`,
     `Received: ${pacificTime(input.receivedAt)}`,
     ...(input.optOut ? ['They asked to STOP.'] : []),
+    ...(input.notLogged ? ['This text could not be logged to Salesforce — there is no Task for it.'] : []),
     '',
     textTaskDescription(input.body, input.numMedia),
     ...(input.recordUrl ? ['', `Open in Salesforce: ${input.recordUrl}`] : []),

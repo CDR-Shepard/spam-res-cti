@@ -5,6 +5,7 @@ import { schema, type InboundMessage } from '@cti/db';
 import { SalesforceUnauthorizedError } from '../salesforce/client.js';
 import {
   BATCH_LIMIT,
+  MAX_TRIES,
   RETRY_DELAYS_MS,
   SF_CALL_TIMEOUT_MS,
   SF_CREATE_TIMEOUT_MS,
@@ -23,6 +24,9 @@ const LEAD = '00Q000000000001AAA';
 const CONTACT = '003000000000001AAA';
 const ACCOUNT = '001000000000001AAA';
 const DEAL = 'a0X000000000001AAA';
+const OPP = '006000000000001AAA';
+const HOME = 'https://gghomes.my.salesforce.com/lightning/page/home';
+const NOT_LOGGED = 'This text could not be logged to Salesforce — there is no Task for it.';
 const EMAIL_OK = { status: 200, json: [{ actionName: 'emailSimple', errors: null, isSuccess: true, outputValues: null }] };
 
 function row(o: Partial<InboundMessage> = {}): InboundMessage {
@@ -100,6 +104,23 @@ function taskBodies(h: ReturnType<typeof harness>): Array<Record<string, unknown
   return h.calls('/sobjects/Task').map(([, , init]) => init!.body as Record<string, unknown>);
 }
 
+function emailInputs(h: ReturnType<typeof harness>): Array<{ emailSubject: string; emailBody: string }> {
+  return h
+    .calls('/actions/standard/emailSimple')
+    .map(([, , init]) => (init!.body as { inputs: Array<{ emailSubject: string; emailBody: string }> }).inputs[0]!);
+}
+
+/** Salesforce answers the Task create with `task`; the email succeeds. */
+function taskAnswers(h: ReturnType<typeof harness>, task: { status: number; json: unknown }): void {
+  (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, path: string) => {
+    h.order.push(`sf:${path}`);
+    return path === '/sobjects/Task' ? task : EMAIL_OK;
+  });
+}
+
+const VALIDATION_ERROR = { status: 400, json: [{ errorCode: 'FIELD_CUSTOM_VALIDATION_EXCEPTION', message: 'Type is required' }] };
+const SERVER_BUSY = { status: 503, json: { message: 'busy' } };
+
 let warn: ReturnType<typeof vi.spyOn>;
 let error: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
@@ -130,7 +151,20 @@ describe('processInboundText — the Salesforce Task', () => {
     expect(h.calls('/sobjects/Task')[0]![0]).toBe('rep-1');
   });
 
-  it('a Contact is the Who and its Account the What; a Deal__c is the What only', async () => {
+  it('matches the sender like an inbound call: the rep connection, preferring a Contact’s open Opportunity', async () => {
+    const h = harness();
+    await processInboundText(row(), h.deps);
+    expect(h.deps.sf.findByPhone).toHaveBeenCalledWith('rep-1', '+16195550100', { preferOpenOpportunity: true });
+  });
+
+  it('a Contact with an open Opportunity is the Who, the Opportunity the What', async () => {
+    const h = harness();
+    (h.deps.sf.findByPhone as ReturnType<typeof vi.fn>).mockResolvedValue({ whoId: CONTACT, whatId: OPP, name: 'Ann' });
+    await processInboundText(row(), h.deps);
+    expect(taskBodies(h)[0]).toMatchObject({ WhoId: CONTACT, WhatId: OPP });
+  });
+
+  it('a Contact without one falls back to its Account as the What; a Deal__c is the What only', async () => {
     const contact = harness();
     (contact.deps.sf.findByPhone as ReturnType<typeof vi.fn>).mockResolvedValue({ whoId: CONTACT, whatId: ACCOUNT, name: 'Ann' });
     await processInboundText(row(), contact.deps);
@@ -218,16 +252,13 @@ describe('processInboundText — the Salesforce Task', () => {
     }
   });
 
-  it('INVALID_FIELD on an UNLINKED Task is not retried (nothing to drop) — it backs off', async () => {
+  it('INVALID_FIELD on an UNLINKED Task gets no unlinked retry (nothing to drop) — it is a permanent failure', async () => {
     const h = harness();
     (h.deps.sf.findByPhone as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-    (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
-      status: 400,
-      json: [{ errorCode: 'INVALID_FIELD', message: 'Priority' }],
-    }));
+    taskAnswers(h, { status: 400, json: [{ errorCode: 'INVALID_FIELD', message: 'Priority' }] });
     await processInboundText(row(), h.deps);
     expect(taskBodies(h)).toHaveLength(1);
-    expect(h.writes.at(-1)).toMatchObject({ status: 'pending' });
+    expect(h.writes.at(-1)).toMatchObject({ status: 'failed', lastError: expect.stringContaining('INVALID_FIELD') });
   });
 });
 
@@ -266,8 +297,20 @@ describe('processInboundText — the email alert', () => {
     const h = harness();
     (h.deps.sf.findByPhone as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     await processInboundText(row(), h.deps);
-    const body = (h.calls('/actions/standard/emailSimple')[0]![2]!.body as { inputs: Array<{ emailBody: string }> }).inputs[0]!.emailBody;
-    expect(body).toContain('https://gghomes.my.salesforce.com/lightning/r/00TNEW000000001/view');
+    expect(emailInputs(h)[0]!.emailBody).toContain('https://gghomes.my.salesforce.com/lightning/r/00TNEW000000001/view');
+  });
+
+  it("links to the Contact's open Opportunity when there is one, else to the Contact — never the Account", async () => {
+    const withOpp = harness();
+    (withOpp.deps.sf.findByPhone as ReturnType<typeof vi.fn>).mockResolvedValue({ whoId: CONTACT, whatId: OPP, name: 'Ann' });
+    await processInboundText(row(), withOpp.deps);
+    expect(emailInputs(withOpp)[0]!.emailBody).toContain(`/lightning/r/${OPP}/view`);
+
+    const noOpp = harness();
+    (noOpp.deps.sf.findByPhone as ReturnType<typeof vi.fn>).mockResolvedValue({ whoId: CONTACT, whatId: ACCOUNT, name: 'Ann' });
+    await processInboundText(row(), noOpp.deps);
+    expect(emailInputs(noOpp)[0]!.emailBody).toContain(`/lightning/r/${CONTACT}/view`);
+    expect(emailInputs(noOpp)[0]!.emailBody).not.toContain(ACCOUNT);
   });
 
   it('carries the STOP suffix on the subject for an opt-out', async () => {
@@ -365,6 +408,91 @@ describe('processInboundText — once-only guards', () => {
   });
 });
 
+describe('processInboundText — the alert does not depend on the Task', () => {
+  it('a retryable Task error on an early try does NOT email yet — it backs off and retries', async () => {
+    for (const attempts of [1, 2, 3]) {
+      const h = harness();
+      taskAnswers(h, SERVER_BUSY);
+      await processInboundText(row({ attempts }), h.deps);
+      expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+      expect(h.writes.some((w) => 'emailedAt' in w)).toBe(false);
+      expect(h.writes.at(-1)).toMatchObject({ status: 'pending', lastError: expect.stringContaining('503') });
+    }
+  });
+
+  it('a Task error on the FINAL try still emails once, says it was not logged, and fails the row with the Task error', async () => {
+    const h = harness();
+    taskAnswers(h, SERVER_BUSY);
+    await processInboundText(row({ attempts: MAX_TRIES }), h.deps);
+    const emails = emailInputs(h);
+    expect(emails).toHaveLength(1);
+    expect(emails[0]!.emailSubject).toBe('New text from Jane Doe');
+    expect(emails[0]!.emailBody).toContain(NOT_LOGGED);
+    // No Task to open: the link is the matched Lead.
+    expect(emails[0]!.emailBody).toContain(`/lightning/r/${LEAD}/view`);
+    expect(h.order.slice(-3)).toEqual(['sf:/actions/standard/emailSimple', 'write:emailedAt', 'write:lastError,status']);
+    expect(h.writes.at(-1)).toEqual({ status: 'failed', lastError: expect.stringContaining('task create failed (503)'), updatedAt: NOW });
+    expect(h.writes.at(-1)).not.toHaveProperty('nextAttemptAt');
+    expect(h.writes.some((w) => 'sfTaskId' in w)).toBe(false);
+  });
+
+  it('a permanent Task error (validation rule) emails at once, on the FIRST try, and fails the row — no retries', async () => {
+    const h = harness();
+    taskAnswers(h, VALIDATION_ERROR);
+    await processInboundText(row({ attempts: 1 }), h.deps);
+    expect(emailInputs(h)).toHaveLength(1);
+    expect(emailInputs(h)[0]!.emailBody).toContain(NOT_LOGGED);
+    expect(h.writes).toContainEqual(expect.objectContaining({ emailedAt: NOW }));
+    expect(h.writes.at(-1)).toMatchObject({ status: 'failed', lastError: expect.stringContaining('FIELD_CUSTOM_VALIDATION_EXCEPTION') });
+    expect(h.writes.at(-1)).not.toHaveProperty('nextAttemptAt');
+  });
+
+  it('a Task that failed for a sender nobody matched links the rep’s Salesforce home', async () => {
+    const h = harness();
+    (h.deps.sf.findByPhone as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    taskAnswers(h, VALIDATION_ERROR);
+    await processInboundText(row(), h.deps);
+    expect(emailInputs(h)[0]!.emailBody).toContain(`Open in Salesforce: ${HOME}`);
+  });
+
+  it('once-only still holds: a failed-Task row already emailed never emails again', async () => {
+    const h = harness();
+    taskAnswers(h, VALIDATION_ERROR);
+    await processInboundText(row({ emailedAt: new Date('2026-09-25T21:06:00Z') }), h.deps);
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    expect(h.writes.at(-1)).toMatchObject({ status: 'failed', lastError: expect.stringContaining('FIELD_CUSTOM_VALIDATION_EXCEPTION') });
+  });
+
+  it('a backfill row whose Task fails permanently fails without emailing (the digest covers it)', async () => {
+    const h = harness();
+    taskAnswers(h, VALIDATION_ERROR);
+    await processInboundText(row({ backfill: true }), h.deps);
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    expect(h.writes.at(-1)).toMatchObject({ status: 'failed' });
+  });
+
+  it('when the fallback email itself fails transiently, the row backs off with BOTH errors recorded', async () => {
+    const h = harness();
+    (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, path: string) =>
+      path === '/sobjects/Task' ? VALIDATION_ERROR : SERVER_BUSY,
+    );
+    await processInboundText(row({ attempts: 1 }), h.deps);
+    expect(h.writes.some((w) => 'emailedAt' in w)).toBe(false);
+    expect(h.writes.at(-1)).toMatchObject({
+      status: 'pending',
+      lastError: expect.stringMatching(/FIELD_CUSTOM_VALIDATION_EXCEPTION[\s\S]*email: email failed \(503\)/),
+    });
+  });
+
+  it('an AUTH failure on the Task stays terminal and sends nothing — we cannot send as the rep', async () => {
+    const h = harness();
+    taskAnswers(h, { status: 401, json: [{ errorCode: 'INVALID_SESSION_ID' }] });
+    await processInboundText(row({ attempts: MAX_TRIES }), h.deps);
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    expect(h.writes.at(-1)).toMatchObject({ status: 'failed', lastError: 'reconnect Salesforce' });
+  });
+});
+
 describe('processInboundText — failures', () => {
   it('a Salesforce auth failure is terminal: failed, "reconnect Salesforce", no retry scheduled', async () => {
     const h = harness();
@@ -382,14 +510,17 @@ describe('processInboundText — failures', () => {
     }));
     await processInboundText(row({ attempts: 1 }), h.deps);
     expect(h.writes.at(-1)).toMatchObject({ status: 'failed', lastError: 'reconnect Salesforce' });
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
   });
 
-  it('any other failure backs off 30 s, 2 min, 10 min — then fails', async () => {
+  it('a row gets one try plus three retries: backs off 30 s, 2 min, 10 min — then fails', async () => {
     expect([...RETRY_DELAYS_MS]).toEqual([30_000, 120_000, 600_000]);
+    expect(MAX_TRIES).toBe(4);
     const outcomes: Patch[] = [];
     for (const attempts of [1, 2, 3, 4]) {
       const h = harness();
-      (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ status: 503, json: { message: 'busy' } }));
+      // A failure that is not the Task's: resolving the rep's Salesforce id.
+      (h.deps.sf.salesforceUserId as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('chatter/users/me 503'));
       await processInboundText(row({ attempts }), h.deps);
       outcomes.push(h.writes.at(-1)!);
     }
@@ -416,6 +547,7 @@ describe('processInboundText — failures', () => {
 
   it('never writes the message body to the log, even when Salesforce echoes it back', async () => {
     const h = harness();
+    // Both the Task AND the fallback email are refused with the body quoted back.
     (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
       status: 400,
       json: [{ errorCode: 'STRING_TOO_LONG', message: `Description: data value too large: ${BODY}` }],

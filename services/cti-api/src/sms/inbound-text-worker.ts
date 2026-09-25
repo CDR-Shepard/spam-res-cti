@@ -5,15 +5,26 @@
  *
  * Per row, in order, each step guarded by its own stamp so a retry never
  * repeats one that finished:
- *  1. match the sender (`findByPhone`) — an error or no match is fine: the Task
- *     is created unlinked, never lost;
+ *  1. match the sender (`findByPhone`, preferring a Contact's open Opportunity
+ *     exactly like an inbound call in salesforce/sync.ts) — an error or no match
+ *     is fine: the Task is created unlinked, never lost;
  *  2. create the Task, unless `sf_task_id` is set, and stamp it at once;
  *  3. email the rep via `emailSimple`, unless `emailed_at` is set or the row is
  *     a backfill (backfills get ONE digest instead — see the ops task), and stamp;
  *  4. mark the row done.
- * A Salesforce auth failure is terminal (`failed`, "reconnect Salesforce"): no
- * retry fixes a disconnected rep, and the stamps make a later manual requeue
- * safe. Anything else backs off 30 s, 2 min, 10 min, then fails.
+ *
+ * THE ALERT DOES NOT DEPEND ON THE TASK. The email is how the rep learns a
+ * customer texted; a Task that cannot be written must not silence it. When the
+ * create fails for good — a permanent error (a validation rule, no access), or
+ * any error on the row's last try — the email still goes out, saying the text
+ * was not logged, and the row ends `failed` with the Task's error and
+ * `emailed_at` set. A retryable Task error on an earlier try emails nothing yet:
+ * the retry will probably log it, and the email then links the Task.
+ *
+ * A Salesforce auth failure is terminal (`failed`, "reconnect Salesforce") and
+ * sends nothing: no retry fixes a disconnected rep, and the email is sent AS the
+ * rep, so it cannot go either. The stamps make a later manual requeue safe.
+ * Anything else backs off 30 s, 2 min, 10 min, then fails (MAX_TRIES).
  *
  * Mirrors salesforce/followup-worker.ts: injected deps, a conditional
  * pending → in_flight claim stamped with a fresh clock read, a reaper for rows
@@ -34,8 +45,11 @@ import { isSalesforceAuthError, withTimeout } from '../salesforce/followup-worke
 import { orgTodayIso } from '../dialer/org-day.js';
 import {
   isOptOutText,
+  salesforceHomeUrl,
   salesforceRecordUrl,
+  taskFailureIsRetryable,
   textEmail,
+  textEmailLinkTarget,
   textTaskDescription,
   textTaskLinks,
   textTaskSubject,
@@ -44,8 +58,16 @@ import {
 
 type Db = ReturnType<typeof getDb>;
 
-/** Waits before retry 1, 2 and 3. A fourth failure is final. */
+/** Waits before retry 1, 2 and 3. */
 export const RETRY_DELAYS_MS = [30_000, 120_000, 600_000] as const;
+/**
+ * A row gets ONE TRY PLUS THREE RETRIES — four in all — so every delay above is
+ * used: ~12.5 minutes end to end, long enough to ride out a Salesforce blip, short
+ * enough that the rep's alert (which on the last try goes out even without a
+ * Task) is not an hour late. `attempts` counts tries (the claim bumps it first),
+ * so the try whose number is MAX_TRIES is the last.
+ */
+export const MAX_TRIES = RETRY_DELAYS_MS.length + 1;
 /** Ceiling on each Salesforce read. A hung socket must not pin the single-flight tick. */
 export const SF_CALL_TIMEOUT_MS = 30_000;
 /** The two MUTATING calls (Task create, email) get longer: abandoning one early
@@ -103,10 +125,21 @@ async function patchRow(deps: InboundTextDeps, id: string, patch: Partial<Inboun
     .where(eq(schema.inboundMessages.id, id));
 }
 
-/** Step 1. Never throws: a failed or empty match only costs the Task its link. */
+/**
+ * Step 1. Never throws: a failed or empty match only costs the Task its link.
+ * `preferOpenOpportunity` links a Contact's text to its primary OPEN Opportunity
+ * (else its Account), exactly as salesforce/sync.ts links an inbound call — the
+ * deal is what the team works, and a text is inbound, so the outbound ownership
+ * gate that keeps the preference off outbound calls does not apply. The extra
+ * lookup is self-bounded (3 s) and degrades to the Account on any failure.
+ */
 async function matchSender(deps: InboundTextDeps, row: InboundMessage, userId: string): Promise<SenderMatch | null> {
   try {
-    const m = await withTimeout(deps.sf.findByPhone(userId, row.fromE164), SF_CALL_TIMEOUT_MS, 'sender match');
+    const m = await withTimeout(
+      deps.sf.findByPhone(userId, row.fromE164, { preferOpenOpportunity: true }),
+      SF_CALL_TIMEOUT_MS,
+      'sender match',
+    );
     return m && (m.whoId || m.whatId) ? m : null;
   } catch (err) {
     console.warn(`${LOG} sender match failed; the Task will be unlinked`, {
@@ -127,8 +160,20 @@ function isLinkRejection(json: unknown): boolean {
   });
 }
 
-/** Step 2. Returns the new Task's id; throws with the HTTP status in the message
- *  so `isSalesforceAuthError` can recognise a 401. */
+/** A Task create Salesforce answered with an error status. Carries the answer so
+ *  the worker can tell a permanent refusal from a retryable one; the status stays
+ *  in the message so `isSalesforceAuthError` still recognises a 401. */
+class TaskCreateError extends Error {
+  constructor(
+    readonly status: number,
+    readonly json: unknown,
+  ) {
+    super(`task create failed (${status}): ${JSON.stringify(json)}`);
+    this.name = 'TaskCreateError';
+  }
+}
+
+/** Step 2. Returns the new Task's id; throws a TaskCreateError on an error status. */
 async function createTextTask(
   deps: InboundTextDeps,
   row: InboundMessage,
@@ -170,10 +215,36 @@ async function createTextTask(
     SF_CREATE_TIMEOUT_MS,
     'create task',
   );
-  if (res.status >= 400) throw new Error(`task create failed (${res.status}): ${JSON.stringify(res.json)}`);
+  if (res.status >= 400) throw new TaskCreateError(res.status, res.json);
   const id = (res.json as { id?: unknown } | null)?.id;
   if (typeof id !== 'string' || !id) throw new Error(`task create returned no id (${res.status})`);
   return id;
+}
+
+/**
+ * Step 2 plus the decision about what its failure means. A Task that is LOST
+ * FOR GOOD — a permanent refusal, or any failure on the row's last try — comes
+ * back as `{ error }` instead of throwing, so the caller still sends the alert.
+ * Everything else throws: auth is terminal and sends nothing, and a retryable
+ * error on an earlier try waits for the retry, which will probably log the Task
+ * and then email a link to it. A timeout, a network error or a 2xx with no id
+ * is not a TaskCreateError and counts as retryable.
+ */
+async function createTaskOrGiveUp(
+  deps: InboundTextDeps,
+  row: InboundMessage,
+  userId: string,
+  ownerId: string,
+  match: SenderMatch | null,
+): Promise<{ taskId: string } | { error: unknown }> {
+  try {
+    return { taskId: await createTextTask(deps, row, userId, ownerId, match) };
+  } catch (err) {
+    if (isSalesforceAuthError(err)) throw err;
+    const retryable = err instanceof TaskCreateError ? taskFailureIsRetryable(err.status, err.json) : true;
+    if (retryable && row.attempts < MAX_TRIES) throw err;
+    return { error: err };
+  }
 }
 
 /** The rep's own address — `User.Email` in Salesforce, the spec's source of truth. */
@@ -188,18 +259,27 @@ async function repEmail(deps: InboundTextDeps, userId: string, ownerId: string):
   return email;
 }
 
+/** Where the email's link goes: the record `textEmailLinkTarget` picks (the open
+ *  Opportunity, else the Lead/Contact, else the Task), else the Salesforce home
+ *  page when there is neither a match nor a Task. Null when the instance is unknown. */
+function emailLink(instanceUrl: string | null, match: SenderMatch | null, taskId: string | null): string | null {
+  if (!instanceUrl) return null;
+  const target = textEmailLinkTarget(textTaskLinks(match), taskId);
+  return target ? salesforceRecordUrl(instanceUrl, target) : salesforceHomeUrl(instanceUrl);
+}
+
 /** Step 3. `emailSimple` answers an array of per-input results; a 200 can still
- *  carry `isSuccess: false`, which means nothing was sent. */
+ *  carry `isSuccess: false`, which means nothing was sent. `taskId` is null when
+ *  the Task could not be created — the email then says the text was not logged. */
 async function sendTextEmail(
   deps: InboundTextDeps,
   row: InboundMessage,
   userId: string,
   ownerId: string,
   match: SenderMatch | null,
-  taskId: string,
+  taskId: string | null,
 ): Promise<void> {
   const to = await repEmail(deps, userId, ownerId);
-  const links = textTaskLinks(match);
   const instanceUrl = await deps.instanceUrlFor(userId);
   const email = textEmail({
     name: match?.name ?? null,
@@ -208,8 +288,9 @@ async function sendTextEmail(
     receivedAt: row.receivedAt,
     body: row.body,
     numMedia: row.numMedia,
-    recordUrl: instanceUrl ? salesforceRecordUrl(instanceUrl, links.WhoId ?? links.WhatId ?? taskId) : null,
+    recordUrl: emailLink(instanceUrl, match, taskId),
     optOut: isOptOutText(row.body),
+    notLogged: taskId === null,
   });
   const res = await withTimeout(
     deps.sf.sfFetch(userId, '/actions/standard/emailSimple', {
@@ -243,6 +324,9 @@ export async function processInboundText(row: InboundMessage, deps: InboundTextD
     await patchRow(deps, row.id, { status: 'skipped', lastError: 'no rep' });
     return;
   }
+  // Set when the Task is lost for good (see createTaskOrGiveUp). The alert still
+  // goes out; the row then ends `failed` with this error.
+  let taskError: unknown = null;
   try {
     const needTask = !row.sfTaskId;
     const needEmail = !row.emailedAt && !row.backfill;
@@ -251,14 +335,25 @@ export async function processInboundText(row: InboundMessage, deps: InboundTextD
       const ownerId = await withTimeout(deps.sf.salesforceUserId(userId), SF_CALL_TIMEOUT_MS, 'salesforce user');
       let taskId = row.sfTaskId;
       if (!taskId) {
-        taskId = await createTextTask(deps, row, userId, ownerId, match);
-        // Stamped BEFORE the email: a failure from here on retries the email only.
-        await patchRow(deps, row.id, { sfTaskId: taskId });
+        const created = await createTaskOrGiveUp(deps, row, userId, ownerId, match);
+        if ('taskId' in created) {
+          taskId = created.taskId;
+          // Stamped BEFORE the email: a failure from here on retries the email only.
+          await patchRow(deps, row.id, { sfTaskId: taskId });
+        } else {
+          taskError = created.error;
+        }
       }
       if (needEmail) {
         await sendTextEmail(deps, row, userId, ownerId, match, taskId);
         await patchRow(deps, row.id, { emailedAt: deps.now() });
       }
+    }
+    if (taskError !== null) {
+      const msg = errorText(taskError);
+      logFailed(row, redactBody(msg, row.body));
+      await patchRow(deps, row.id, { status: 'failed', lastError: msg });
+      return;
     }
     await patchRow(deps, row.id, { status: 'done', lastError: null });
   } catch (err) {
@@ -267,7 +362,8 @@ export async function processInboundText(row: InboundMessage, deps: InboundTextD
       await patchRow(deps, row.id, { status: 'failed', lastError: RECONNECT });
       return;
     }
-    const msg = errorText(err);
+    // A Task given up on AND a failed alert: keep both, the Task's error first.
+    const msg = (taskError !== null ? `${errorText(taskError)}; email: ${errorText(err)}` : errorText(err)).slice(0, 2000);
     const delay = RETRY_DELAYS_MS[row.attempts - 1];
     if (delay === undefined) {
       logFailed(row, redactBody(msg, row.body));

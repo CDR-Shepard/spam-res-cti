@@ -5,8 +5,11 @@ import {
   formatUsNumber,
   isOptOutText,
   pacificTime,
+  salesforceHomeUrl,
   salesforceRecordUrl,
+  taskFailureIsRetryable,
   textEmail,
+  textEmailLinkTarget,
   textTaskDescription,
   textTaskLinks,
   textTaskSubject,
@@ -143,6 +146,60 @@ describe('salesforceRecordUrl', () => {
   });
 });
 
+describe('salesforceHomeUrl', () => {
+  it('is the Lightning home page — the link when there is no record to point at', () => {
+    expect(salesforceHomeUrl('https://gghomes.my.salesforce.com/')).toBe('https://gghomes.my.salesforce.com/lightning/page/home');
+  });
+});
+
+describe('textEmailLinkTarget', () => {
+  const OPP = '006000000000001AAA';
+  const CONTACT = '003000000000001AAA';
+  const ACCOUNT = '001000000000001AAA';
+  const LEAD = '00Q000000000001AAA';
+  const DEAL = 'a0X000000000001AAA';
+  const TASK = '00T000000000001AAA';
+
+  it("points at the Contact's open Opportunity when the text linked one", () => {
+    expect(textEmailLinkTarget({ WhoId: CONTACT, WhatId: OPP }, TASK)).toBe(OPP);
+  });
+
+  it('otherwise at the Lead or Contact — never at the Account', () => {
+    expect(textEmailLinkTarget({ WhoId: CONTACT, WhatId: ACCOUNT }, TASK)).toBe(CONTACT);
+    expect(textEmailLinkTarget({ WhoId: LEAD }, TASK)).toBe(LEAD);
+  });
+
+  it('at a What-only match (Deal__c)', () => {
+    expect(textEmailLinkTarget({ WhatId: DEAL }, TASK)).toBe(DEAL);
+  });
+
+  it('at the Task when nobody matched, and at nothing (home) when there is no Task either', () => {
+    expect(textEmailLinkTarget({}, TASK)).toBe(TASK);
+    expect(textEmailLinkTarget({}, null)).toBeNull();
+  });
+});
+
+describe('taskFailureIsRetryable', () => {
+  it('a 400 (validation rule, required field, too long, bad field) is permanent — retrying fails the same way', () => {
+    for (const errorCode of ['FIELD_CUSTOM_VALIDATION_EXCEPTION', 'REQUIRED_FIELD_MISSING', 'STRING_TOO_LONG', 'INVALID_FIELD']) {
+      expect(taskFailureIsRetryable(400, [{ errorCode }])).toBe(false);
+    }
+  });
+
+  it('a 403 is permanent (no access) unless it is the API limit, which resets', () => {
+    expect(taskFailureIsRetryable(403, [{ errorCode: 'INSUFFICIENT_ACCESS_OR_READONLY' }])).toBe(false);
+    expect(taskFailureIsRetryable(403, [{ errorCode: 'REQUEST_LIMIT_EXCEEDED' }])).toBe(true);
+  });
+
+  it('server errors, throttling, timeouts and lock contention are worth retrying', () => {
+    expect(taskFailureIsRetryable(500, null)).toBe(true);
+    expect(taskFailureIsRetryable(503, { message: 'busy' })).toBe(true);
+    expect(taskFailureIsRetryable(429, null)).toBe(true);
+    expect(taskFailureIsRetryable(408, null)).toBe(true);
+    expect(taskFailureIsRetryable(400, [{ errorCode: 'UNABLE_TO_LOCK_ROW' }])).toBe(true);
+  });
+});
+
 describe('pacificTime', () => {
   it('renders the instant in Pacific time with the zone named', () => {
     // 21:05 UTC on 2026-09-25 is 2:05 PM PDT.
@@ -183,6 +240,23 @@ describe('textEmail', () => {
         'Is the house still available?',
         '',
         'Open in Salesforce: https://gghomes.my.salesforce.com/lightning/r/00Q000000000001/view',
+      ].join('\n'),
+    );
+  });
+
+  it('says so when the text could not be logged to Salesforce', () => {
+    const out = textEmail({ ...base, notLogged: true, recordUrl: 'https://gghomes.my.salesforce.com/lightning/page/home' });
+    expect(out.subject).toBe('New text from Jane Doe');
+    expect(out.body).toBe(
+      [
+        'From: Jane Doe (619) 555-0100',
+        'To your number: (858) 555-0199',
+        'Received: Fri, Sep 25, 2026, 2:05 PM PDT',
+        'This text could not be logged to Salesforce — there is no Task for it.',
+        '',
+        'Is the house still available?',
+        '',
+        'Open in Salesforce: https://gghomes.my.salesforce.com/lightning/page/home',
       ].join('\n'),
     );
   });
