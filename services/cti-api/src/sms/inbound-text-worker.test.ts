@@ -582,6 +582,38 @@ describe('processInboundText — one alert per rep per sender per hour (flood gu
     expect(h.calls('/sobjects/Task')).toHaveLength(1);
   });
 
+  it('a "could not be logged" alert BYPASSES the guard — it is the only trace of the text — and still sends once', async () => {
+    const { run, alertedRecently } = sharedAlerts();
+    await run(row({ id: 'row-a' }), NOW); // the hour's normal alert for this sender
+    alertedRecently.mockClear();
+    const tenMinLater = new Date(NOW.getTime() + 10 * 60_000);
+    const h = harness({ alertedRecently, now: () => tenMinLater });
+    taskAnswers(h, VALIDATION_ERROR); // the second text's Task fails for good
+    await processInboundText(row({ id: 'row-b' }), h.deps);
+    expect(emailInputs(h)).toHaveLength(1);
+    expect(emailInputs(h)[0]!.emailBody).toContain(NOT_LOGGED);
+    expect(h.writes).toContainEqual(expect.objectContaining({ emailedAt: tenMinLater }));
+    expect(h.writes.some((w) => 'emailSkipReason' in w)).toBe(false);
+    expect(h.writes.at(-1)).toMatchObject({ status: 'failed' });
+    expect(alertedRecently).not.toHaveBeenCalled(); // the guard is not even consulted
+  });
+
+  it('…but never twice: a not-logged row already emailed does not email again, guard or no guard', async () => {
+    const h = harness({ alertedRecently: vi.fn(async () => true) });
+    taskAnswers(h, VALIDATION_ERROR);
+    await processInboundText(row({ emailedAt: new Date('2026-09-25T21:06:00Z') }), h.deps);
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    expect(h.writes.at(-1)).toMatchObject({ status: 'failed' });
+  });
+
+  it('a normal alert (the Task WAS created) inside the hour is still suppressed', async () => {
+    const h = harness({ alertedRecently: vi.fn(async () => true) });
+    await processInboundText(row(), h.deps);
+    expect(h.calls('/sobjects/Task')).toHaveLength(1);
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    expect(h.writes).toContainEqual(expect.objectContaining({ emailSkipReason: expect.stringMatching(/one alert per sender/) }));
+  });
+
   it('a backfill row never even asks (it never emails individually)', async () => {
     const h = harness();
     await processInboundText(row({ backfill: true }), h.deps);
@@ -862,12 +894,21 @@ describe('runInboundTextTick', () => {
       expect(emailInputs(h)[0]!.emailBody).toContain('/lightning/r/00TOLD000000001/view');
     });
 
-    it('the final alert obeys the flood guard too', async () => {
-      const t = tickDb({ exhausted: [row({ status: 'failed', attempts: MAX_TRIES })] });
+    it('the final alert obeys the flood guard when the row HAS its Task', async () => {
+      const t = tickDb({ exhausted: [row({ status: 'failed', attempts: MAX_TRIES, sfTaskId: '00TOLD000000001' })] });
       const h = harness({ db: t.db, alertedRecently: vi.fn(async () => true) });
       await runInboundTextTick(h.deps);
       expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
       expect(t.writes).toContainEqual(expect.objectContaining({ emailSkipReason: expect.stringMatching(/one alert per sender/) }));
+    });
+
+    it('…and bypasses it when the text was never logged (no Task) — the email is its only trace', async () => {
+      const t = tickDb({ exhausted: [row({ status: 'failed', attempts: MAX_TRIES, sfTaskId: null })] });
+      const h = harness({ db: t.db, alertedRecently: vi.fn(async () => true) });
+      await runInboundTextTick(h.deps);
+      expect(emailInputs(h)).toHaveLength(1);
+      expect(emailInputs(h)[0]!.emailBody).toContain(NOT_LOGGED);
+      expect(t.writes.some((w) => 'emailSkipReason' in w)).toBe(false);
     });
 
     it('a pending row RE-CLAIMED past its last try is failed at once — no fresh try — then alerted', async () => {

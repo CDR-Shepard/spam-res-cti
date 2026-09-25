@@ -337,6 +337,12 @@ async function sendTextEmail(
  * also makes the decision once-only (a retry of this row never asks again). Two
  * replicas can each pass the check for the same sender at the same moment — two
  * emails, rarely; the guard bounds floods, it is not a lock.
+ *
+ * A text that could NOT be logged (no Task — `taskId` null) bypasses the guard:
+ * that email is the rep's only sign the text exists, and suppressing it would
+ * lose the text entirely. Once-only still holds — the caller only gets here
+ * while `emailed_at` is unset — and permanent Task failures are rare enough that
+ * this cannot become the flood the guard exists to stop.
  */
 async function alertRep(
   deps: InboundTextDeps,
@@ -347,7 +353,8 @@ async function alertRep(
   taskId: string | null,
 ): Promise<void> {
   const since = new Date(deps.now().getTime() - EMAIL_WINDOW_MS);
-  if (await deps.alertedRecently(userId, row.fromE164, since)) {
+  const logged = taskId !== null;
+  if (logged && (await deps.alertedRecently(userId, row.fromE164, since))) {
     await patchRow(deps, row.id, { emailSkipReason: FLOOD_SKIP_REASON });
     return;
   }
