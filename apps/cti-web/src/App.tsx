@@ -570,7 +570,9 @@ export function App(): JSX.Element {
     const applyAudioPrefs = sdkAudio
       ? keepSavedAudioPrefs(sdkAudio, {
         loadPrefs: loadAudioPrefs,
-        isCallUp: () => !!connectionRef.current || !!dialerConnRef.current,
+        // Also while a dial is being placed or a call is ringing in: a mic
+        // switch (getUserMedia + track swap) must not race a call opening its media.
+        isCallUp: () => !!connectionRef.current || !!dialerConnRef.current || placingRef.current || !!incomingRef.current,
         isCurrent: () => deviceRef.current === device,
         onFailed: (r) => setToast({ text: audioApplyFailureText(r), type: 'error' }),
       })

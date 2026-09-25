@@ -597,6 +597,36 @@ describe('App — the chosen microphone and speaker reach the Twilio Device', ()
     await waitFor(() => expect(audio.setInputDevice).toHaveBeenCalledWith('mic-usb'));
   });
 
+  // A mic switch is a getUserMedia + track swap: it must not race the call
+  // that is opening its media. The keeper still applies the speaker, which
+  // proves it ran; only the mic is left to the call (and watchLocalMic).
+  async function deviceChangeWithSavedChoices(audio: ReturnType<typeof fakeDeviceAudio>): Promise<void> {
+    localStorage.setItem('cti.audio.input', 'mic-jabra');
+    localStorage.setItem('cti.audio.output', 'spk-jabra');
+    act(() => { audio.emit('deviceChange', []); });
+    await waitFor(() => expect(audio.speakerDevices.set).toHaveBeenCalledWith('spk-jabra'));
+  }
+
+  it('does not switch the mic while a call is ringing in', async () => {
+    await ring(fakeCall({ parameters: { From: '+16195551234' }, customParameters: new Map() }));
+    const audio = FakeDevice.instances[0]!.audio;
+    await deviceChangeWithSavedChoices(audio);
+    expect(audio.setInputDevice).not.toHaveBeenCalled();
+  });
+
+  it('does not switch the mic while an outbound call is being placed', async () => {
+    stubOutboundFetch();
+    // connect() never settles: the dial stays "being placed" (placingRef), with
+    // no connection yet.
+    const connect = vi.spyOn(FakeDevice.prototype, 'connect').mockImplementation(() => new Promise(() => {}));
+    const audio = await mountDevice();
+    for (const d of ['5', '5', '5', '1', '2', '3', '4']) dialDigit(d);
+    fireEvent.click(screen.getByTitle('Check & call'));
+    await waitFor(() => expect(connect).toHaveBeenCalled());
+    await deviceChangeWithSavedChoices(audio);
+    expect(audio.setInputDevice).not.toHaveBeenCalled();
+  });
+
   // Settings can be changed in a tab that isn't the softphone leader; the
   // leader (the tab holding the Device) hears it through the storage event.
   it("a choice made in another tab is applied to this tab's Device", async () => {
