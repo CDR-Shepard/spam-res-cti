@@ -23,6 +23,12 @@
  */
 import pg from 'pg';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+// Same URL builder set-sms-webhooks.mjs uses, so a newly-bought number's
+// SmsUrl is byte-for-byte the URL Twilio's signature check expects — a
+// number bought here would otherwise sit with no SmsUrl at all until someone
+// remembers to re-run that script (review minor).
+import { smsWebhookUrl } from './set-sms-webhooks.mjs';
 
 const PLAN = [
   { areaCode: '619', count: 5 }, // San Diego
@@ -64,6 +70,14 @@ async function twPost(path, form) {
   return data;
 }
 
+/** The Twilio purchase request body — pure, so the SmsUrl/SmsMethod
+ *  inclusion (review minor: newly-bought numbers must be covered from the
+ *  start, not just by re-running set-sms-webhooks.mjs afterward) is directly
+ *  testable without touching Twilio. */
+export function purchaseFields(phoneNumber, voiceUrl, smsUrl, label) {
+  return { PhoneNumber: phoneNumber, VoiceUrl: voiceUrl, VoiceMethod: 'POST', SmsUrl: smsUrl, SmsMethod: 'POST', FriendlyName: label };
+}
+
 async function searchAvailable(areaCode, count) {
   const data = await twGet(
     `/AvailablePhoneNumbers/US/Local.json?AreaCode=${areaCode}&VoiceEnabled=true&PageSize=${Math.max(count, 10)}`,
@@ -76,7 +90,9 @@ async function doBuy() {
   if (!API_BASE) die('Set POOL_API_BASE (prod API base) or API_PUBLIC_URL.');
   if (!/^https:\/\//.test(API_BASE)) die(`Refusing a non-HTTPS voice webhook base: ${API_BASE}.`);
   const VOICE_URL = `${API_BASE}/telephony/twilio/inbound`;
+  const SMS_URL = smsWebhookUrl(API_BASE);
   console.log(`Voice webhook for purchased DIDs: ${VOICE_URL}`);
+  console.log(`Sms webhook for purchased DIDs: ${SMS_URL}`);
   console.log(CONFIRM ? '*** CONFIRM_BUY=1 — WILL PURCHASE ***\n' : '--- DRY RUN (no purchase). Set CONFIRM_BUY=1 to buy. ---\n');
 
   const bought = [];
@@ -92,12 +108,10 @@ async function doBuy() {
           console.log(`[dry-run] ${areaCode}: would buy ${cand}`);
           continue;
         }
-        const data = await twPost(`/IncomingPhoneNumbers.json`, {
-          PhoneNumber: cand,
-          VoiceUrl: VOICE_URL,
-          VoiceMethod: 'POST',
-          FriendlyName: `Dialer Pool ${areaCode}`,
-        });
+        const data = await twPost(
+          `/IncomingPhoneNumbers.json`,
+          purchaseFields(cand, VOICE_URL, SMS_URL, `Dialer Pool ${areaCode}`),
+        );
         const rec = { e164: data.phone_number, sid: data.sid, areaCode, label: `Dialer Pool ${areaCode}` };
         console.log(`BOUGHT: ${rec.e164} (${rec.sid}) [${areaCode}]`);
         bought.push(rec);
@@ -178,4 +192,11 @@ async function main() {
   await doBuy();
   if (CONFIRM) await doRegister();
 }
-main().catch((e) => die(e.message));
+
+// Only run against real Twilio/Postgres when this file is executed directly
+// (`node scripts/buy-pool-numbers.mjs`) — never on import, so purchaseFields
+// can be unit-tested without Twilio creds, a live DB, or triggering a buy.
+const isMain = process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  main().catch((e) => die(e.message));
+}

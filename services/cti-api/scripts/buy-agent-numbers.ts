@@ -20,9 +20,16 @@
  */
 import pg from 'pg';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 // LA_CODES/SD_CODES come from src/fleet/plan.ts — the same policy buyPlanForRep
 // and classifyArea use, so widening one can never silently desync from the other.
 import { buyPlanForRep, LA_CODES, POOL_TARGET, poolBuyCount, poolBuyTarget, reserveBuyTarget, SD_CODES, splitEvenly } from '../src/fleet/plan.js';
+// Same URL builder set-sms-webhooks.mjs uses, so a newly-bought number's
+// SmsUrl is byte-for-byte the URL Twilio's signature check expects — a
+// number bought here would otherwise sit with no SmsUrl at all until someone
+// remembers to re-run that script (review: buy-agent-numbers.ts / buy-pool-
+// numbers.mjs minor).
+import { smsWebhookUrl } from './set-sms-webhooks.mjs';
 
 const CONFIRM = process.env.CONFIRM_BUY === '1';
 // Script-relative, NOT cwd-relative: the hand-off is the only local record of
@@ -63,6 +70,14 @@ const authHeader = () => 'Basic ' + Buffer.from(`${ACCOUNT}:${TOKEN}`).toString(
 const twBase = () => `https://api.twilio.com/2010-04-01/Accounts/${ACCOUNT}`;
 async function twGet(path: string) { const res = await fetch(`${twBase()}${path}`, { headers: { authorization: authHeader() } }); const data = await res.json(); if (!res.ok) throw new Error(`Twilio GET ${path} → ${res.status} ${JSON.stringify(data)}`); return data as any; }
 async function twPost(path: string, form: Record<string, string>) { const res = await fetch(`${twBase()}${path}`, { method: 'POST', headers: { authorization: authHeader(), 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(form).toString() }); const data = await res.json(); if (!res.ok) throw new Error(`Twilio POST ${path} → ${res.status} ${JSON.stringify(data)}`); return data as any; }
+/** The Twilio purchase request body — pure, so the SmsUrl/SmsMethod
+ *  inclusion (review minor: a newly-bought number must be covered from the
+ *  start, not just by re-running set-sms-webhooks.mjs afterward) is directly
+ *  testable without touching Twilio. */
+export function purchaseFields(phoneNumber: string, voiceUrl: string, smsUrl: string, label: string): Record<string, string> {
+  return { PhoneNumber: phoneNumber, VoiceUrl: voiceUrl, VoiceMethod: 'POST', SmsUrl: smsUrl, SmsMethod: 'POST', FriendlyName: label };
+}
+
 async function searchAvailable(areaCode: string, count: number): Promise<string[]> {
   const data = await twGet(`/AvailablePhoneNumbers/US/Local.json?AreaCode=${areaCode}&VoiceEnabled=true&PageSize=${Math.max(count, 10)}`);
   return (data.available_phone_numbers ?? []).slice(0, count).map((n: any) => n.phone_number);
@@ -103,6 +118,7 @@ async function buyBatch(codes: string[], count: number, kind: BoughtRec['kind'],
   if (!ACCOUNT || !TOKEN) die('TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN not set (run via `railway run -s @cti/api`).');
   if (!API_BASE || !/^https:\/\//.test(API_BASE)) die('Set POOL_API_BASE to the https prod API base.');
   const voiceUrl = `${API_BASE}/telephony/twilio/inbound`;
+  const smsUrl = smsWebhookUrl(API_BASE);
   const persist = () => { if (CONFIRM) writeHandoff(bought); };
   let remaining = count;
   let prev: string | null = null;
@@ -113,7 +129,7 @@ async function buyBatch(codes: string[], count: number, kind: BoughtRec['kind'],
     const candidates = await searchAvailable(code, remaining);
     for (const cand of candidates) {
       if (!CONFIRM) { console.log(`[dry-run] would buy ${cand} (${code}) → ${label}`); remaining--; continue; }
-      const data = await twPost('/IncomingPhoneNumbers.json', { PhoneNumber: cand, VoiceUrl: voiceUrl, VoiceMethod: 'POST', FriendlyName: label });
+      const data = await twPost('/IncomingPhoneNumbers.json', purchaseFields(cand, voiceUrl, smsUrl, label));
       bought.push({ e164: data.phone_number, sid: data.sid, kind, label, assignEmail });
       console.log(`BOUGHT ${data.phone_number} (${data.sid}) → ${label}`);
       persist(); remaining--;
@@ -417,12 +433,19 @@ async function cmdBuyAll(reserveLa: number, reserveSd: number) {
   await cmdRegister();
 }
 
-const cmd = process.argv[2];
-if (cmd === 'plan') await cmdPlan();
-else if (cmd === 'buy-rep') await cmdBuyRep(arg('email') ?? die('--email required'));
-else if (cmd === 'buy-reserve') await cmdBuyReserve(intArg('la'), intArg('sd'));
-else if (cmd === 'buy-pool') await cmdBuyPool(intArg('count'));
-else if (cmd === 'buy-all') await cmdBuyAll(intArg('reserve-la', 0), intArg('reserve-sd', 0));
-else if (cmd === 'register') await cmdRegister();
-else if (cmd === 'assign') await cmdAssign(arg('email') ?? die('--email required'));
-else die('command: plan | buy-rep | buy-reserve | buy-pool | register | assign');
+// Only run against real Twilio/Postgres when this file is executed directly
+// (`npx tsx scripts/buy-agent-numbers.ts <cmd>`) — never on import, so
+// purchaseFields/smsWebhookUrl usage can be unit-tested without Twilio
+// creds, a live DB, or triggering a buy.
+const isMain = process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  const cmd = process.argv[2];
+  if (cmd === 'plan') await cmdPlan();
+  else if (cmd === 'buy-rep') await cmdBuyRep(arg('email') ?? die('--email required'));
+  else if (cmd === 'buy-reserve') await cmdBuyReserve(intArg('la'), intArg('sd'));
+  else if (cmd === 'buy-pool') await cmdBuyPool(intArg('count'));
+  else if (cmd === 'buy-all') await cmdBuyAll(intArg('reserve-la', 0), intArg('reserve-sd', 0));
+  else if (cmd === 'register') await cmdRegister();
+  else if (cmd === 'assign') await cmdAssign(arg('email') ?? die('--email required'));
+  else die('command: plan | buy-rep | buy-reserve | buy-pool | register | assign');
+}
