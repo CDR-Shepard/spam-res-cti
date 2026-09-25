@@ -176,6 +176,15 @@ export function keepSavedAudioPrefs(audio: DeviceAudioLike, hooks: KeepPrefsHook
   const apply = (): void => {
     if (!hooks.isCurrent()) return;
     void applySavedAudioPrefs(audio, hooks.loadPrefs(), { includeInput: !hooks.isCallUp() }).then((result) => {
+      // teardownDevice ran while getUserMedia was pending (lost leadership →
+      // a hidden tab): the SDK finished on the destroyed AudioHelper and would
+      // hold the mic open until reload. Release it.
+      if (!hooks.isCurrent() && result.input === 'applied') {
+        audio.unsetInputDevice?.().catch(() => {
+          // The helper is already destroyed; nothing to tell the rep — this
+          // Device is gone and the live one is unaffected.
+        });
+      }
       if (result.input === 'failed' || result.output === 'failed') hooks.onFailed(result);
     });
   };

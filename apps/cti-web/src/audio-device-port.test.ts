@@ -219,6 +219,30 @@ describe('keepSavedAudioPrefs (wired once per Device)', () => {
     expect(audio.speakerDevices.set).not.toHaveBeenCalled();
   });
 
+  // teardownDevice (lost leadership → hidden tab) can run while the keeper's
+  // getUserMedia is still pending. The SDK then finishes on the destroyed
+  // AudioHelper and holds the mic until reload — release it.
+  it('a switch that finishes after the Device was torn down releases the mic', async () => {
+    const { audio } = withEmitter();
+    let finish: () => void = () => {};
+    audio.setInputDevice = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    audio.unsetInputDevice = vi.fn(async () => { throw new Error('destroyed'); });
+    let current = true;
+    keepSavedAudioPrefs(audio, hooks({ isCurrent: () => current }))();
+    await vi.waitFor(() => expect(audio.setInputDevice).toHaveBeenCalledWith('jabra'));
+    current = false; // teardownDevice ran
+    finish();
+    await vi.waitFor(() => expect(audio.unsetInputDevice).toHaveBeenCalled());
+  });
+
+  it('a switch that finishes while the Device is still current keeps the mic', async () => {
+    const { audio } = withEmitter();
+    keepSavedAudioPrefs(audio, hooks())();
+    await vi.waitFor(() => expect(audio.setInputDevice).toHaveBeenCalledWith('jabra'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(audio.unsetInputDevice).not.toHaveBeenCalled();
+  });
+
   it('reports a refused device so the app can tell the rep', async () => {
     const { audio } = withEmitter();
     vi.mocked(audio.setInputDevice).mockRejectedValueOnce(new Error('NotReadableError'));
