@@ -1096,7 +1096,17 @@ export async function runInboundTextTick(
   // Digests: reap any 'sending' digest a dead tick left ambiguous, queue any
   // batch that just went (or already went) fully terminal above, then give
   // every due 'pending' digest one try.
-  await reapStuckSendingDigests(deps.db, deps.now());
+  for (const reaped of await reapStuckSendingDigests(deps.db, deps.now())) {
+    // Same logger, level, and wording as `markDigestUnknown` — a reaped digest
+    // is just as ambiguous (Salesforce may have sent it anyway) and just as
+    // loud a signal a human must check the rep's inbox before ever re-queuing
+    // it. Batch id and rep id only: the reaper never saw the send error that
+    // stalled this digest, so there is no message body to (accidentally) log.
+    console.error(`${LOG} digest send outcome unknown — Salesforce may have sent it anyway; NOT retrying`, {
+      batchId: reaped.batchId,
+      userId: reaped.userId,
+    });
+  }
   await queueReadyDigests(deps);
   const digestsSent = await processDueDigests(deps);
   return { processed, gaveUp, digestsSent };

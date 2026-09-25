@@ -780,6 +780,9 @@ describe('runInboundTextTick', () => {
     digestClaimWins?: boolean;
     /** Every write this tick made to inbound_text_digests, in order. */
     digestWrites?: Patch[];
+    /** What reapStuckSendingDigests' `.returning()` yields: digests a dead
+     *  tick left stuck in `sending`, now turned `unknown`. */
+    reapedDigests?: InboundTextDigest[];
   }
 
   /** A fake handle for the tick: the reapers and the claim are `update`s (the
@@ -802,9 +805,13 @@ describe('runInboundTextTick', () => {
             if (table === schema.inboundTextDigests) {
               digestWrites.push(patch);
               const isClaim = patch.status === 'sending';
+              const isReap = patch.status === 'unknown';
               return chainable(undefined, {
-                returning: async () =>
-                  isClaim ? (f.digestClaimWins ?? true ? [{ batchId: 'batch-x', userId: 'rep-1', attempts: 0 }] : []) : [],
+                returning: async () => {
+                  if (isClaim) return f.digestClaimWins ?? true ? [{ batchId: 'batch-x', userId: 'rep-1', attempts: 0 }] : [];
+                  if (isReap) return f.reapedDigests ?? [];
+                  return [];
+                },
               });
             }
             writes.push(patch);
@@ -1059,6 +1066,19 @@ describe('runInboundTextTick', () => {
       const out = await runInboundTextTick(h.deps);
       expect(out.digestsSent).toBe(0);
       expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    });
+
+    it('logs every digest the reaper turns into unknown — same wording as markDigestUnknown, batch id and rep id only, never a message body', async () => {
+      const reaped = digestRow({ batchId: 'batch-stuck', userId: 'rep-stuck', status: 'unknown' });
+      const t = tickDb({ reapedDigests: [reaped] });
+      const h = harness({ db: t.db });
+
+      await runInboundTextTick(h.deps);
+
+      expect(error).toHaveBeenCalledWith(
+        expect.stringContaining('digest send outcome unknown — Salesforce may have sent it anyway; NOT retrying'),
+        { batchId: 'batch-stuck', userId: 'rep-stuck' },
+      );
     });
   });
 });
