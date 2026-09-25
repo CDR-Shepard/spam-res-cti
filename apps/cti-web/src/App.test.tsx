@@ -640,6 +640,29 @@ describe('App — the chosen microphone and speaker reach the Twilio Device', ()
     await waitFor(() => expect(audio.unsetInputDevice).toHaveBeenCalled());
   });
 
+  // A tab without the Device (not the softphone leader, or not built yet) sees
+  // every storage event; it must ignore ours quietly.
+  it('a cti.audio.* storage event in a tab with no Device throws nothing and shows no toast', async () => {
+    const errors: unknown[] = [];
+    const onError = (e: ErrorEvent): void => { errors.push(e.error); };
+    window.addEventListener('error', onError);
+    try {
+      render(<App />);
+      expect(FakeDevice.instances.length).toBe(0); // the Device isn't built yet
+      localStorage.setItem('cti.audio.input', 'mic-jabra');
+      localStorage.setItem('cti.audio.output', 'spk-jabra');
+      expect(() => act(() => {
+        window.dispatchEvent(new StorageEvent('storage', { key: 'cti.audio.input', newValue: 'mic-jabra' }));
+        window.dispatchEvent(new StorageEvent('storage', { key: 'cti.audio.output', newValue: 'spk-jabra' }));
+      })).not.toThrow();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(screen.queryByText(/Couldn't switch/)).toBeNull();
+      expect(errors).toEqual([]);
+    } finally {
+      window.removeEventListener('error', onError);
+    }
+  });
+
   it('choosing a mic in Settings switches the live Device and saves it', async () => {
     Object.defineProperty(navigator, 'mediaDevices', {
       configurable: true,
