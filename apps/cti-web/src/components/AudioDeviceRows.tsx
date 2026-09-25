@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  AUDIO_INPUT_KEY,
+  AUDIO_OUTPUT_KEY,
   SYSTEM_DEFAULT,
   deviceIds,
   deviceOptions,
@@ -93,9 +95,22 @@ export function AudioDeviceRows({ port, onToast }: Props): JSX.Element {
   const output = rowState(devices, 'audiooutput', prefs.output);
   const canChooseOutput = port.canChooseOutput();
 
+  // A choice made in another tab (the storage event only fires in the OTHER
+  // tabs): show it here too, so no tab claims a device that isn't in use.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent): void => {
+      if (e.key === AUDIO_INPUT_KEY || e.key === AUDIO_OUTPUT_KEY) setPrefs(loadAudioPrefs());
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   const choose = useCallback(async (kind: AudioDeviceKind, value: string, options: DeviceOption[]) => {
+    const previous = prefs;
     const choice = value === SYSTEM_DEFAULT ? null : value;
     const next: AudioPrefs = kind === 'audioinput' ? { ...prefs, input: choice } : { ...prefs, output: choice };
+    // Saved BEFORE the switch so a device-change re-apply racing it (App's
+    // keepSavedAudioPrefs) re-applies the new choice, not the old one.
     setPrefs(next);
     const remembered = saveAudioPrefs(next);
     const label = options.find((o) => o.value === value)?.label ?? 'System default';
@@ -107,6 +122,10 @@ export function AudioDeviceRows({ port, onToast }: Props): JSX.Element {
         ? { text: `${capitalize(NOUN[kind])}: ${label}.`, type: 'success' }
         : { text: `${capitalize(NOUN[kind])}: ${label} — this browser won't remember it after a reload.`, type: 'info' });
     } catch (e) {
+      // The Device refused it and is still on the previous device: put the
+      // select and the saved choice back so neither claims otherwise.
+      setPrefs(previous);
+      saveAudioPrefs(previous);
       onToast({ text: `Couldn't switch to that ${NOUN[kind]}: ${errorText(e)}`, type: 'error' });
     } finally {
       setBusy(false);

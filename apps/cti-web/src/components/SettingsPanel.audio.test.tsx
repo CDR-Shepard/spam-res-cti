@@ -157,6 +157,37 @@ describe('SettingsPanel — microphone and speaker', () => {
     }));
   });
 
+  // The select must never claim a device the softphone isn't using — that is
+  // the exact confusion this feature exists to end.
+  it('a refused switch puts the select AND the saved choice back', async () => {
+    localStorage.setItem('cti.audio.input', 'mac');
+    const { port } = fakePort({ setInputDevice: vi.fn(async () => { throw new Error('Could not start audio source'); }) });
+    renderPanel(port);
+    await waitFor(() => expect(mic().value).toBe('mac'));
+    fireEvent.change(mic(), { target: { value: 'jabra' } });
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith(expect.objectContaining({ type: 'error' })));
+    expect(mic().value).toBe('mac');
+    expect(localStorage.getItem('cti.audio.input')).toBe('mac');
+  });
+
+  it('a refused speaker switch is put back too', async () => {
+    const { port } = fakePort({ setOutputDevice: vi.fn(async () => { throw new Error('NotAllowedError'); }) });
+    renderPanel(port);
+    await waitFor(() => expect(speaker().options.length).toBe(3));
+    fireEvent.change(speaker(), { target: { value: 'spk-jabra' } });
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith(expect.objectContaining({ type: 'error' })));
+    expect(speaker().value).toBe('default');
+    expect(localStorage.getItem('cti.audio.output')).toBeNull();
+  });
+
+  it('a choice made in another tab updates these rows', async () => {
+    renderPanel(fakePort().port);
+    await waitFor(() => expect(mic().options.length).toBe(3));
+    localStorage.setItem('cti.audio.input', 'jabra');
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'cti.audio.input', newValue: 'jabra' })); });
+    await waitFor(() => expect(mic().value).toBe('jabra'));
+  });
+
   it('"Play test sound" plays on the selected speaker', async () => {
     localStorage.setItem('cti.audio.output', 'spk-jabra');
     const { port } = fakePort();
