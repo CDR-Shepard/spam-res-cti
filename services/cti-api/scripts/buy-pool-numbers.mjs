@@ -85,7 +85,14 @@ async function searchAvailable(areaCode, count) {
   return (data.available_phone_numbers ?? []).slice(0, count).map((n) => n.phone_number);
 }
 
-async function doBuy() {
+// Exported (not just for isMain) so a test can drive the REAL purchase call
+// site directly — review round 2, B1/B4: a test that only exercises
+// purchaseFields() in isolation never catches a regression at the CALL
+// SITE (e.g. reverting to an inline body, or passing VOICE_URL where
+// SMS_URL belongs). Module-level ACCOUNT/TOKEN/API_BASE/CONFIRM/HANDOFF are
+// read from process.env at import time, so a test must set them and
+// `vi.resetModules()` before a fresh dynamic import.
+export async function doBuy() {
   if (!ACCOUNT || !TOKEN) die('TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not set (run via `railway run -s @cti/api`).');
   if (!API_BASE) die('Set POOL_API_BASE (prod API base) or API_PUBLIC_URL.');
   if (!/^https:\/\//.test(API_BASE)) die(`Refusing a non-HTTPS voice webhook base: ${API_BASE}.`);

@@ -8,15 +8,17 @@
  * directly with fakes, so nothing here needs DATABASE_URL, Twilio creds, a
  * live DB/API, or the real filesystem.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ROLLBACK_KIND,
   ROLLBACK_VERSION,
   SELECT_NUMBERS_SQL,
+  applyTwilioNumber,
   buildRollbackFile,
   buildRollbackRecords,
   classifyNumbers,
   defaultRollbackFilePath,
+  fetchTwilioNumber,
   ignoresSmsUrl,
   parseArgs,
   run,
@@ -302,6 +304,105 @@ describe('buildRollbackFile / validateRollbackFile — the round-trip envelope (
 });
 
 // ---------------------------------------------------------------------------
+// fetchTwilioNumber / applyTwilioNumber — the actual Twilio HTTP calls.
+// Everywhere else, `run()` is tested through the injected `deps.twilio`
+// abstraction, which never exercises these two functions at all — the
+// review's own mutation table (S6/S7/S8) found they had NO coverage: a
+// mutation dropping `sms_application_sid`/`phone_number` from the GET
+// mapping, or adding a field to the POST body, survived every existing test.
+// ---------------------------------------------------------------------------
+
+describe('fetchTwilioNumber — the Twilio GET mapping (review round 2, S6/S7)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('maps every field classifyNumbers/buildRollbackRecords depend on, including sms_application_sid and phone_number', async () => {
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url, init });
+      return new Response(
+        JSON.stringify({
+          sms_url: 'https://old.example.com/sms',
+          sms_method: 'POST',
+          sms_application_sid: 'AP00000000000000000000000000000000',
+          phone_number: '+16195550100',
+          // Fields this script must NEVER read or act on:
+          voice_url: 'https://old.example.com/voice',
+          auth_token: 'should-never-be-touched',
+        }),
+        { status: 200 },
+      );
+    }));
+
+    const result = await fetchTwilioNumber('ACtest', 'test-token', 'PN00000000000000000000000000000000');
+
+    expect(result).toEqual({
+      smsUrl: 'https://old.example.com/sms',
+      smsMethod: 'POST',
+      smsApplicationSid: 'AP00000000000000000000000000000000',
+      phoneNumber: '+16195550100',
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe('https://api.twilio.com/2010-04-01/Accounts/ACtest/IncomingPhoneNumbers/PN00000000000000000000000000000000.json');
+    expect(calls[0].init?.method).toBeUndefined(); // GET
+  });
+
+  it('a missing sms_application_sid or phone_number maps to null, never undefined (classifyNumbers depends on this)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({}), { status: 200 })));
+    const result = await fetchTwilioNumber('ACtest', 'test-token', 'PN1');
+    expect(result).toEqual({ smsUrl: null, smsMethod: null, smsApplicationSid: null, phoneNumber: null });
+  });
+
+  it('a non-2xx response throws with the status, never the full body', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ message: 'not found' }), { status: 404 })));
+    await expect(fetchTwilioNumber('ACtest', 'test-token', 'PN1')).rejects.toThrow('Twilio GET PN1 -> 404');
+  });
+});
+
+describe('applyTwilioNumber — the Twilio POST body, exactly (review round 2, S8)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sends EXACTLY the given fields as a POST, form-encoded, and nothing else', async () => {
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url, init });
+      return new Response(JSON.stringify({ sid: 'PN00000000000000000000000000000000' }), { status: 200 });
+    }));
+
+    await applyTwilioNumber('ACtest', 'test-token', 'PN00000000000000000000000000000000', { SmsUrl: 'https://ctiapi-production.up.railway.app/telephony/twilio/sms', SmsMethod: 'POST' });
+
+    expect(calls).toHaveLength(1);
+    const [{ url, init }] = calls;
+    expect(url).toBe('https://api.twilio.com/2010-04-01/Accounts/ACtest/IncomingPhoneNumbers/PN00000000000000000000000000000000.json');
+    expect(init.method).toBe('POST');
+    expect(init.headers['content-type']).toBe('application/x-www-form-urlencoded');
+    expect(init.headers.authorization).toBe(`Basic ${Buffer.from('ACtest:test-token').toString('base64')}`);
+    // Exact body — no VoiceUrl, no extra field, this exact order.
+    expect(init.body).toBe('SmsUrl=https%3A%2F%2Fctiapi-production.up.railway.app%2Ftelephony%2Ftwilio%2Fsms&SmsMethod=POST');
+  });
+
+  it('a restore call with an empty SmsUrl sends SmsUrl= literally, not "null" or omitted', async () => {
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url, init });
+      return new Response(JSON.stringify({ sid: 'PN1' }), { status: 200 });
+    }));
+    await applyTwilioNumber('ACtest', 'test-token', 'PN1', { SmsUrl: '', SmsMethod: 'POST' });
+    expect(calls[0].init.body).toBe('SmsUrl=&SmsMethod=POST');
+  });
+
+  it('a non-2xx response throws with only the Twilio error message/code, never the full JSON body', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ code: 21211, message: 'Invalid phone number', more_info: 'https://...' }), { status: 400 })));
+    await expect(applyTwilioNumber('ACtest', 'test-token', 'PN1', { SmsUrl: 'x', SmsMethod: 'POST' })).rejects.toThrow(
+      'Twilio POST PN1 -> 400: Invalid phone number',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // run(argv, deps) — I3 + I4: the whole CLI, deps-injected.
 // ---------------------------------------------------------------------------
 
@@ -413,6 +514,23 @@ describe('run — I4: rollback file is written BEFORE any Twilio write, and reco
       db: fakeDb([N1]), twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...outputSink(),
     });
     expect(fs.writeFile.mock.calls[0][0]).toBe('./custom.json');
+  });
+
+  // Review round 2, S3: an unwritable rollback file must abort the whole run
+  // — the rollback file is the ONLY record of what --apply is about to
+  // overwrite, so writing it is a precondition for any Twilio write at all.
+  it('an unwritable rollback file aborts with 0 Twilio POSTs, exit 1, never throwing out of run()', async () => {
+    const configBySid = new Map([[N1.twilio_sid, { smsUrl: null, smsMethod: null, phoneNumber: N1.e164 }]]);
+    const twilio = fakeTwilio(configBySid);
+    const fs = fakeFs();
+    const err = new Error('ENOENT: no such file or directory, open');
+    err.code = 'ENOENT';
+    fs.writeFile.mockRejectedValue(err);
+    const out = outputSink();
+    const result = await run(['--apply'], { db: fakeDb([N1]), twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...out });
+    expect(result.exitCode).toBe(1);
+    expect(twilio.updateNumber).not.toHaveBeenCalled();
+    expect(out.lines.join('\n')).toContain('ENOENT');
   });
 });
 

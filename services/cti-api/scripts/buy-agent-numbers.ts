@@ -109,8 +109,14 @@ const preflightBanner = (): void => {
   console.log(CONFIRM ? '*** CONFIRM_BUY=1 — WILL PURCHASE ***\n' : '--- DRY RUN (no purchase). Set CONFIRM_BUY=1 to buy. ---\n');
 };
 
-/** Buy `count` numbers spreading across `codes` (first code first; falls through when an area code runs dry). */
-async function buyBatch(codes: string[], count: number, kind: BoughtRec['kind'], label: string, assignEmail: string | null, bought: BoughtRec[]): Promise<void> {
+/** Buy `count` numbers spreading across `codes` (first code first; falls through when an area code runs dry).
+ *  Exported so a test can drive the REAL purchase call site directly (review
+ *  round 2, B2: a test that only exercises purchaseFields() in isolation
+ *  never catches a regression at the call site itself). It touches only
+ *  Twilio, never the database — ACCOUNT/TOKEN/API_BASE/CONFIRM/HANDOFF are
+ *  read from process.env at module load, so a test must set them and
+ *  `vi.resetModules()` before a fresh dynamic import. */
+export async function buyBatch(codes: string[], count: number, kind: BoughtRec['kind'], label: string, assignEmail: string | null, bought: BoughtRec[]): Promise<void> {
   // Already at target: no Twilio work to do, so don't demand Twilio creds — a
   // fully-satisfied re-run must succeed outside `railway run` too.
   if (count <= 0) { console.log(`nothing to buy for "${label}" — already at target.`); return; }

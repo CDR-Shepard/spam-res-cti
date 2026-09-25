@@ -239,7 +239,7 @@ const twBase = (sid) => `https://api.twilio.com/2010-04-01/Accounts/${sid}`;
 
 /** Reads ONLY the fields this script cares about — never logs the rest of
  *  the Twilio response (it can carry other config we must not touch). */
-async function fetchTwilioNumber(accountSid, authToken, numberSid) {
+export async function fetchTwilioNumber(accountSid, authToken, numberSid) {
   const res = await fetch(`${twBase(accountSid)}/IncomingPhoneNumbers/${numberSid}.json`, {
     headers: { authorization: authHeader(accountSid, authToken) },
   });
@@ -257,7 +257,7 @@ async function fetchTwilioNumber(accountSid, authToken, numberSid) {
  *  leaves every field not included in the body untouched, so VoiceUrl/
  *  VoiceApplicationSid/etc. are never at risk here. Reused by --restore with
  *  the PREVIOUS value as `fields`. */
-async function applyTwilioNumber(accountSid, authToken, numberSid, fields) {
+export async function applyTwilioNumber(accountSid, authToken, numberSid, fields) {
   const res = await fetch(`${twBase(accountSid)}/IncomingPhoneNumbers/${numberSid}.json`, {
     method: 'POST',
     headers: { authorization: authHeader(accountSid, authToken), 'content-type': 'application/x-www-form-urlencoded' },
@@ -416,10 +416,20 @@ export async function run(argv, deps) {
     return { exitCode: 0 };
   }
 
-  // I4: the rollback file is written BEFORE the first Twilio write.
+  // I4: the rollback file is written BEFORE the first Twilio write — it is
+  // the ONLY record of what --apply is about to overwrite, so writing it is
+  // a precondition for any write at all (review round 2, S3: this used to
+  // rely on an UNCAUGHT rejection reaching main()'s top-level catch, which
+  // happened to abort correctly but was untested and easy to regress).
   const rollbackPath = args.rollbackFile ?? defaultRollbackFilePath(now());
   const rollbackRecords = buildRollbackRecords(wouldChange, configBySid);
-  await writeFile(rollbackPath, JSON.stringify(buildRollbackFile(rollbackRecords), null, 2));
+  try {
+    await writeFile(rollbackPath, JSON.stringify(buildRollbackFile(rollbackRecords), null, 2));
+  } catch (err) {
+    stderr(`ERROR: could not write rollback file ${rollbackPath}: ${safeErrorMessage(err)}`);
+    stderr('Aborting — nothing was written to Twilio.');
+    return { exitCode: 1 };
+  }
   stdout(`\nRollback file written: ${rollbackPath} (${rollbackRecords.length} record(s)). Restore with:`);
   stdout(`  node scripts/set-sms-webhooks.mjs --restore ${rollbackPath} --apply`);
 
