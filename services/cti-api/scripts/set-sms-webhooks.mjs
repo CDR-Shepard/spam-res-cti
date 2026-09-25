@@ -165,6 +165,66 @@ export function buildRollbackRecords(wouldChangeNumbers, configBySid) {
   });
 }
 
+/** The rollback file's envelope. Bumping ROLLBACK_VERSION is a breaking
+ *  change to the file format — `validateRollbackFile` refuses anything else,
+ *  on purpose: --restore replays a Twilio write, so a file this script
+ *  didn't write itself (review round 2, Important #1 — a `fleet-buy.json`-
+ *  shaped file blanked a live SmsUrl) must never be accepted by accident. */
+export const ROLLBACK_KIND = 'sms-webhooks-rollback';
+export const ROLLBACK_VERSION = 1;
+const TWILIO_SID_RE = /^PN[0-9a-f]{32}$/;
+const SMS_METHODS = new Set(['GET', 'POST']);
+
+/** Wraps buildRollbackRecords' output for writing — the shape
+ *  validateRollbackFile requires on the way back in. */
+export function buildRollbackFile(records) {
+  return { kind: ROLLBACK_KIND, version: ROLLBACK_VERSION, records };
+}
+
+/** One record's shape: a real-looking Twilio sid, a string e164, and
+ *  previousSmsUrl/previousSmsMethod either their real value or null (never
+ *  undefined, never any other type). */
+function isValidRollbackRecord(r) {
+  if (r === null || typeof r !== 'object') return false;
+  if (typeof r.sid !== 'string' || !TWILIO_SID_RE.test(r.sid)) return false;
+  if (typeof r.e164 !== 'string') return false;
+  if (!(r.previousSmsUrl === null || typeof r.previousSmsUrl === 'string')) return false;
+  if (!(r.previousSmsMethod === null || SMS_METHODS.has(r.previousSmsMethod))) return false;
+  return true;
+}
+
+/**
+ * Refuses the WHOLE file unless the envelope matches (kind/version) AND
+ * EVERY record is well-formed — never restores a partial file, and never
+ * guesses at a record that's merely close (a fleet-buy.json hand-off file
+ * has `sid`/`e164` fields too, but no `kind`/`version`/`previousSmsUrl` at
+ * all, which is exactly the file the review fed this and got "Restored 2/2"
+ * back). Returns `{ ok: true, records }` or `{ ok: false, reason }`.
+ */
+export function validateRollbackFile(parsed) {
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, reason: `expected an object with "kind", "version" and "records" — got ${Array.isArray(parsed) ? 'an array' : typeof parsed}` };
+  }
+  if (parsed.kind !== ROLLBACK_KIND) {
+    return { ok: false, reason: `unexpected "kind" (${JSON.stringify(parsed.kind)}) — expected ${JSON.stringify(ROLLBACK_KIND)}` };
+  }
+  if (parsed.version !== ROLLBACK_VERSION) {
+    return { ok: false, reason: `unexpected "version" (${JSON.stringify(parsed.version)}) — expected ${ROLLBACK_VERSION}` };
+  }
+  if (!Array.isArray(parsed.records)) {
+    return { ok: false, reason: '"records" is not an array' };
+  }
+  const badIndex = parsed.records.findIndex((r) => !isValidRollbackRecord(r));
+  if (badIndex !== -1) {
+    return {
+      ok: false,
+      reason: `record ${badIndex} is malformed — needs sid matching PN + 32 hex chars, a string e164, ` +
+        'previousSmsUrl (string or null), and previousSmsMethod (GET, POST, or null)',
+    };
+  }
+  return { ok: true, records: parsed.records };
+}
+
 /** Reduces an error to what is safe to print: never `.detail` (a Postgres
  *  constraint violation can quote a row) or the raw Twilio response, and
  *  never the whole error object. */
@@ -221,17 +281,20 @@ async function runRestore(args, deps) {
     stderr(`ERROR: could not read restore file ${args.restoreFile}: ${safeErrorMessage(err)}`);
     return { exitCode: 1 };
   }
-  let records;
+  let parsed;
   try {
-    records = JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch {
     stderr(`ERROR: restore file ${args.restoreFile} is not valid JSON.`);
     return { exitCode: 1 };
   }
-  if (!Array.isArray(records)) {
-    stderr(`ERROR: restore file ${args.restoreFile} must contain a JSON array.`);
+  const validated = validateRollbackFile(parsed);
+  if (!validated.ok) {
+    stderr(`ERROR: restore file ${args.restoreFile} is not a valid rollback file: ${validated.reason}.`);
+    stderr('Refusing the whole file — nothing was written to Twilio.');
     return { exitCode: 1 };
   }
+  const records = validated.records;
 
   stdout(args.apply ? '*** --apply --restore — WILL WRITE TO TWILIO ***' : '--- DRY RUN --restore (no writes). Pass --apply to restore. ---');
   stdout(`${records.length} number(s) in the rollback file.`);
@@ -356,7 +419,7 @@ export async function run(argv, deps) {
   // I4: the rollback file is written BEFORE the first Twilio write.
   const rollbackPath = args.rollbackFile ?? defaultRollbackFilePath(now());
   const rollbackRecords = buildRollbackRecords(wouldChange, configBySid);
-  await writeFile(rollbackPath, JSON.stringify(rollbackRecords, null, 2));
+  await writeFile(rollbackPath, JSON.stringify(buildRollbackFile(rollbackRecords), null, 2));
   stdout(`\nRollback file written: ${rollbackPath} (${rollbackRecords.length} record(s)). Restore with:`);
   stdout(`  node scripts/set-sms-webhooks.mjs --restore ${rollbackPath} --apply`);
 

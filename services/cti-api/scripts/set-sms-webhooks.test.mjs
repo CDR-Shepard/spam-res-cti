@@ -10,7 +10,10 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
+  ROLLBACK_KIND,
+  ROLLBACK_VERSION,
   SELECT_NUMBERS_SQL,
+  buildRollbackFile,
   buildRollbackRecords,
   classifyNumbers,
   defaultRollbackFilePath,
@@ -21,6 +24,7 @@ import {
   smsWebhookUrl,
   summarizeHosts,
   urlHost,
+  validateRollbackFile,
 } from './set-sms-webhooks.mjs';
 
 const norm = (sql) => sql.replace(/\s+/g, ' ').trim();
@@ -228,6 +232,75 @@ describe('buildRollbackRecords — sid -> previous sms_url/sms_method, for every
   });
 });
 
+describe('buildRollbackFile / validateRollbackFile — the round-trip envelope (review round 2, Important #1)', () => {
+  const VALID_SID = 'PN00000000000000000000000000000000';
+  const validRecord = { sid: VALID_SID, e164: '+16195550100', previousSmsUrl: 'https://old.example.com/sms', previousSmsMethod: 'POST' };
+
+  it('buildRollbackFile wraps records in {kind, version, records}', () => {
+    expect(buildRollbackFile([validRecord])).toEqual({ kind: ROLLBACK_KIND, version: ROLLBACK_VERSION, records: [validRecord] });
+  });
+
+  it('validateRollbackFile accepts exactly what buildRollbackFile produces', () => {
+    expect(validateRollbackFile(buildRollbackFile([validRecord]))).toEqual({ ok: true, records: [validRecord] });
+  });
+
+  it('accepts a record with null previousSmsUrl/previousSmsMethod, and GET as well as POST', () => {
+    const file = buildRollbackFile([
+      { sid: VALID_SID, e164: '+16195550100', previousSmsUrl: null, previousSmsMethod: null },
+      { ...validRecord, previousSmsMethod: 'GET' },
+    ]);
+    expect(validateRollbackFile(file).ok).toBe(true);
+  });
+
+  it('rejects a non-object, an array, and null', () => {
+    expect(validateRollbackFile(null).ok).toBe(false);
+    expect(validateRollbackFile('a string').ok).toBe(false);
+    expect(validateRollbackFile([validRecord]).ok).toBe(false);
+    expect(validateRollbackFile(42).ok).toBe(false);
+  });
+
+  it('rejects the wrong kind or version', () => {
+    expect(validateRollbackFile({ kind: 'wrong', version: 1, records: [] }).ok).toBe(false);
+    expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: 999, records: [] }).ok).toBe(false);
+    expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: '1', records: [] }).ok).toBe(false); // string "1" != number 1
+  });
+
+  it('rejects records that is missing, null, or not an array', () => {
+    expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: 1 }).ok).toBe(false);
+    expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: 1, records: null }).ok).toBe(false);
+    expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: 1, records: {} }).ok).toBe(false);
+  });
+
+  it('rejects a null entry, or any entry missing required fields, inside records', () => {
+    expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: 1, records: [null] }).ok).toBe(false);
+    expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: 1, records: [{}] }).ok).toBe(false);
+    expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: 1, records: [{ sid: VALID_SID }] }).ok).toBe(false);
+  });
+
+  it('rejects a sid that is not PN + 32 lowercase hex characters', () => {
+    for (const badSid of [
+      'PN1', // too short
+      'AC00000000000000000000000000000000', // wrong prefix (Account sid, not a Number sid)
+      'PN0000000000000000000000000000000G', // 'G' is not hex
+      'PN0123456789ABCDEF0123456789ABCDEF', // uppercase hex — Twilio sids are lowercase
+    ]) {
+      expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: 1, records: [{ ...validRecord, sid: badSid }] }).ok).toBe(false);
+    }
+  });
+
+  it('rejects a non-string e164, a non-string/non-null previousSmsUrl, and a previousSmsMethod outside GET/POST/null', () => {
+    expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: 1, records: [{ ...validRecord, e164: 12345 }] }).ok).toBe(false);
+    expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: 1, records: [{ ...validRecord, previousSmsUrl: 42 }] }).ok).toBe(false);
+    expect(validateRollbackFile({ kind: ROLLBACK_KIND, version: 1, records: [{ ...validRecord, previousSmsMethod: 'PATCH' }] }).ok).toBe(false);
+  });
+
+  it('a file shaped like the buy scripts\' fleet-buy.json hand-off is rejected (no kind/version, wrong record shape)', () => {
+    // buy-agent-numbers.ts / buy-pool-numbers.mjs write exactly this shape.
+    const fleetBuyShaped = [{ e164: '+16195550100', sid: VALID_SID, kind: 'agent', label: 'Agent evren LA', assignEmail: 'evren@gghomessd.com' }];
+    expect(validateRollbackFile(fleetBuyShaped).ok).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // run(argv, deps) — I3 + I4: the whole CLI, deps-injected.
 // ---------------------------------------------------------------------------
@@ -323,9 +396,13 @@ describe('run — I4: rollback file is written BEFORE any Twilio write, and reco
     expect(order).toEqual(['write-rollback', 'twilio-update']);
     const [[path, content]] = fs.writeFile.mock.calls;
     expect(path).toBe('./sms-webhooks-rollback-2026-09-25T21-05-00.000Z.json');
-    expect(JSON.parse(content)).toEqual([
-      { sid: 'PN1', e164: '+16195550100', previousSmsUrl: 'https://old.example.com/sms', previousSmsMethod: 'POST' },
-    ]);
+    // I2 (2nd review): wrapped in a kind/version envelope, not a bare array —
+    // restore refuses anything else (see the "run --restore" describe block).
+    expect(JSON.parse(content)).toEqual({
+      kind: 'sms-webhooks-rollback',
+      version: 1,
+      records: [{ sid: 'PN1', e164: '+16195550100', previousSmsUrl: 'https://old.example.com/sms', previousSmsMethod: 'POST' }],
+    });
   });
 
   it('--rollback-file overrides the default path', async () => {
@@ -407,11 +484,17 @@ describe('run — per-number Twilio errors never abort the run, and never print 
 
 describe('run --restore — dry run by default, writes only with --apply', () => {
   const rollbackFile = './rollback.json';
-  const records = [{ sid: 'PN1', e164: '+16195550100', previousSmsUrl: 'https://old.example.com/sms', previousSmsMethod: 'POST' }];
+  const VALID_SID = 'PN00000000000000000000000000000000';
+  const VALID_SID_2 = 'PN00000000000000000000000000000001';
+  const validFile = () => ({
+    kind: 'sms-webhooks-rollback',
+    version: 1,
+    records: [{ sid: VALID_SID, e164: '+16195550100', previousSmsUrl: 'https://old.example.com/sms', previousSmsMethod: 'POST' }],
+  });
 
   it('--restore alone (no --apply) makes zero Twilio writes', async () => {
     const twilio = fakeTwilio(new Map());
-    const fs = fakeFs({ [rollbackFile]: JSON.stringify(records) });
+    const fs = fakeFs({ [rollbackFile]: JSON.stringify(validFile()) });
     const out = outputSink();
     const result = await run(['--restore', rollbackFile], { db: fakeDb([]), twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...out });
     expect(result.exitCode).toBe(0);
@@ -419,21 +502,21 @@ describe('run --restore — dry run by default, writes only with --apply', () =>
     expect(out.lines.join('\n')).toContain('DRY RUN');
   });
 
-  it('--restore --apply writes back the EXACT previous values from the file', async () => {
+  it('--restore --apply writes back the EXACT previous values from the file (a valid file restores)', async () => {
     const twilio = fakeTwilio(new Map());
-    const fs = fakeFs({ [rollbackFile]: JSON.stringify(records) });
+    const fs = fakeFs({ [rollbackFile]: JSON.stringify(validFile()) });
     const out = outputSink();
     const result = await run(['--restore', rollbackFile, '--apply'], { db: fakeDb([]), twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...out });
     expect(result.exitCode).toBe(0);
     expect(twilio.updateCalls).toEqual([
-      { sid: 'PN1', fields: { SmsUrl: 'https://old.example.com/sms', SmsMethod: 'POST' } },
+      { sid: VALID_SID, fields: { SmsUrl: 'https://old.example.com/sms', SmsMethod: 'POST' } },
     ]);
   });
 
   it('restore never touches the database', async () => {
     const db = fakeDb([]);
     const twilio = fakeTwilio(new Map());
-    const fs = fakeFs({ [rollbackFile]: JSON.stringify(records) });
+    const fs = fakeFs({ [rollbackFile]: JSON.stringify(validFile()) });
     await run(['--restore', rollbackFile, '--apply'], { db, twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...outputSink() });
     expect(db.query).not.toHaveBeenCalled();
   });
@@ -444,5 +527,123 @@ describe('run --restore — dry run by default, writes only with --apply', () =>
     const result = await run(['--restore', './does-not-exist.json'], { db: fakeDb([]), twilio: fakeTwilio(new Map()), apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...out });
     expect(result.exitCode).toBe(1);
     expect(out.lines.join('\n')).toContain('does-not-exist.json');
+  });
+
+  // Review round 2, Important #1: --restore must refuse a malformed file —
+  // it used to check only "is this valid JSON" and "is it an array", so a
+  // completely wrong file could blank an SmsUrl or crash mid-run.
+  describe('malformed files are refused — exit 1, before any Twilio write, with a clear reason', () => {
+    async function expectRefused(fileContents) {
+      const twilio = fakeTwilio(new Map());
+      const fs = fakeFs({ [rollbackFile]: typeof fileContents === 'string' ? fileContents : JSON.stringify(fileContents) });
+      const out = outputSink();
+      const result = await run(['--restore', rollbackFile, '--apply'], {
+        db: fakeDb([]), twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...out,
+      });
+      expect(result.exitCode).toBe(1);
+      expect(twilio.updateNumber).not.toHaveBeenCalled();
+      return out;
+    }
+
+    it('a file shaped like fleet-buy.json (the BUY hand-off format, not a rollback file) is refused', async () => {
+      // The exact shape buy-agent-numbers.ts / buy-pool-numbers.mjs write: a
+      // bare array of {e164, sid, kind, label, assignEmail}, no kind/version
+      // envelope at all — this is the review's own reproduction.
+      const out = await expectRefused([
+        { e164: '+16195550100', sid: VALID_SID, kind: 'agent', label: 'Agent evren LA', assignEmail: 'evren@gghomessd.com' },
+      ]);
+      expect(out.lines.join('\n')).toMatch(/not a valid rollback file|kind|version/i);
+    });
+
+    it('a bare array with no envelope at all is refused, even if shaped like valid records', async () => {
+      const out = await expectRefused([{ sid: VALID_SID, e164: '+16195550100', previousSmsUrl: null, previousSmsMethod: null }]);
+      expect(out.lines.join('\n')).toMatch(/not a valid rollback file/i);
+    });
+
+    it('wrong kind is refused', async () => {
+      await expectRefused({ kind: 'something-else', version: 1, records: [] });
+    });
+
+    it('wrong version is refused', async () => {
+      await expectRefused({ kind: 'sms-webhooks-rollback', version: 2, records: [] });
+    });
+
+    it('records is not an array (a single object) is refused', async () => {
+      const out = await expectRefused({
+        kind: 'sms-webhooks-rollback', version: 1,
+        records: { sid: VALID_SID, e164: '+16195550100', previousSmsUrl: null, previousSmsMethod: null },
+      });
+      expect(out.lines.join('\n')).toMatch(/records/i);
+    });
+
+    it('a null entry among the records is refused', async () => {
+      await expectRefused({ kind: 'sms-webhooks-rollback', version: 1, records: [null] });
+    });
+
+    it('a record with a malformed sid (not PN + 32 hex) is refused', async () => {
+      await expectRefused({
+        kind: 'sms-webhooks-rollback', version: 1,
+        records: [{ sid: 'not-a-real-sid', e164: '+16195550100', previousSmsUrl: null, previousSmsMethod: null }],
+      });
+    });
+
+    it('a record whose e164 is not a string is refused', async () => {
+      await expectRefused({
+        kind: 'sms-webhooks-rollback', version: 1,
+        records: [{ sid: VALID_SID, e164: 16195550100, previousSmsUrl: null, previousSmsMethod: null }],
+      });
+    });
+
+    it('a record whose previousSmsUrl is neither a string nor null is refused', async () => {
+      await expectRefused({
+        kind: 'sms-webhooks-rollback', version: 1,
+        records: [{ sid: VALID_SID, e164: '+16195550100', previousSmsUrl: 12345, previousSmsMethod: null }],
+      });
+    });
+
+    it('a record whose previousSmsMethod is not GET/POST/null is refused', async () => {
+      await expectRefused({
+        kind: 'sms-webhooks-rollback', version: 1,
+        records: [{ sid: VALID_SID, e164: '+16195550100', previousSmsUrl: null, previousSmsMethod: 'PATCH' }],
+      });
+    });
+
+    it('previousSmsMethod of GET is accepted (not just POST) — a valid file with two records restores both', async () => {
+      const fs = fakeFs({
+        [rollbackFile]: JSON.stringify({
+          kind: 'sms-webhooks-rollback', version: 1,
+          records: [
+            { sid: VALID_SID, e164: '+16195550100', previousSmsUrl: 'https://old.example.com/a', previousSmsMethod: 'POST' },
+            { sid: VALID_SID_2, e164: '+16195550101', previousSmsUrl: 'https://old.example.com/b', previousSmsMethod: 'GET' },
+          ],
+        }),
+      });
+      const twilio = fakeTwilio(new Map());
+      const result = await run(['--restore', rollbackFile, '--apply'], {
+        db: fakeDb([]), twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...outputSink(),
+      });
+      expect(result.exitCode).toBe(0);
+      expect(twilio.updateCalls).toEqual([
+        { sid: VALID_SID, fields: { SmsUrl: 'https://old.example.com/a', SmsMethod: 'POST' } },
+        { sid: VALID_SID_2, fields: { SmsUrl: 'https://old.example.com/b', SmsMethod: 'GET' } },
+      ]);
+    });
+  });
+
+  // Review round 2, S10: a null previousSmsUrl restores as an EMPTY SmsUrl,
+  // never the literal string "null" (which is what `${null}` would produce).
+  it('a null previousSmsUrl restores as an empty SmsUrl, not the string "null"', async () => {
+    const fs = fakeFs({
+      [rollbackFile]: JSON.stringify({
+        kind: 'sms-webhooks-rollback', version: 1,
+        records: [{ sid: VALID_SID, e164: '+16195550100', previousSmsUrl: null, previousSmsMethod: null }],
+      }),
+    });
+    const twilio = fakeTwilio(new Map());
+    await run(['--restore', rollbackFile, '--apply'], {
+      db: fakeDb([]), twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...outputSink(),
+    });
+    expect(twilio.updateCalls).toEqual([{ sid: VALID_SID, fields: { SmsUrl: '', SmsMethod: 'POST' } }]);
+    expect(twilio.updateCalls[0].fields.SmsUrl).not.toBe('null');
   });
 });
