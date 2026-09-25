@@ -11,6 +11,7 @@ import { registerTelephonyRoutes } from './routes/telephony.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerCtiRoutes } from './routes/cti.js';
 import { registerInboundRoutes } from './routes/inbound.js';
+import { registerInboundSmsRoutes } from './routes/inbound-sms.js';
 import { registerReputationRoutes } from './routes/reputation.js';
 import { registerIntegrationRoutes } from './routes/integrations.js';
 import { registerRecordingRoutes } from './routes/recordings.js';
@@ -19,6 +20,7 @@ import { registerMobileRoutes } from './routes/mobile.js';
 import { startSyncLoop } from './salesforce/sync.js';
 import { startFollowupLoop, startRetryNudgeLoop } from './salesforce/followup-worker.js';
 import { maybeStartNoAnswerChatterLoop } from './salesforce/no-answer-chatter-worker.js';
+import { startInboundTextLoop } from './sms/inbound-text-worker.js';
 import { startReputationWorker } from './reputation/worker.js';
 import { startDirectoryLoop } from './mobile/directory-build.js';
 
@@ -110,6 +112,7 @@ async function main(): Promise<void> {
   await registerAdminRoutes(app);
   await registerCtiRoutes(app);
   await registerInboundRoutes(app);
+  await registerInboundSmsRoutes(app);
   await registerReputationRoutes(app);
   await registerIntegrationRoutes(app);
   await registerRecordingRoutes(app);
@@ -122,6 +125,8 @@ async function main(): Promise<void> {
   const nudgeTimer = startRetryNudgeLoop(5000);
   // End-of-run "No answer" Chatter posts. Null when NO_ANSWER_CHATTER=off.
   const noAnswerChatterTimer = maybeStartNoAnswerChatterLoop(cfg);
+  // Inbound texts → Salesforce Task + email alert (rows stored by /telephony/twilio/sms).
+  const inboundTextTimer = startInboundTextLoop(5000);
   const reputationTimer = startReputationWorker(app.log, cfg.REPUTATION_WORKER_INTERVAL_MS);
   const directoryTimer = startDirectoryLoop(cfg.DIRECTORY_REBUILD_INTERVAL_MS);
 
@@ -130,6 +135,7 @@ async function main(): Promise<void> {
     clearInterval(followupTimer);
     clearInterval(nudgeTimer);
     if (noAnswerChatterTimer) clearInterval(noAnswerChatterTimer);
+    clearInterval(inboundTextTimer);
     clearInterval(reputationTimer);
     clearInterval(directoryTimer);
     await app.close();

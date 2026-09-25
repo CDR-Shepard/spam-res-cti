@@ -1,0 +1,203 @@
+import { describe, expect, it } from 'vitest';
+import {
+  OPT_OUT_WORDS,
+  chooseTextRecipient,
+  formatUsNumber,
+  isOptOutText,
+  pacificTime,
+  salesforceRecordUrl,
+  textEmail,
+  textTaskDescription,
+  textTaskLinks,
+  textTaskSubject,
+} from './inbound-text.js';
+
+describe('isOptOutText', () => {
+  it.each(OPT_OUT_WORDS.map((w) => [w]))('%s is an opt-out, in any case and with surrounding whitespace', (word) => {
+    expect(isOptOutText(word)).toBe(true);
+    expect(isOptOutText(word.toLowerCase())).toBe(true);
+    expect(isOptOutText(`  ${word[0]}${word.slice(1).toLowerCase()} \n`)).toBe(true);
+  });
+
+  it('covers exactly the six carrier opt-out words', () => {
+    expect([...OPT_OUT_WORDS]).toEqual(['STOP', 'STOPALL', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT']);
+  });
+
+  it.each([
+    ['stop calling me'],
+    ['Stopped'],
+    ['please stop'],
+    ['STOP STOP'],
+    ['unsubscribed'],
+    ['the END of the month works'],
+    ['cancel my appointment'],
+    [''],
+    ['   '],
+  ])('%j is NOT an opt-out — only the whole message counts', (body) => {
+    expect(isOptOutText(body)).toBe(false);
+  });
+
+  it('is false for a missing body (an MMS with no text)', () => {
+    expect(isOptOutText(null)).toBe(false);
+    expect(isOptOutText(undefined)).toBe(false);
+  });
+});
+
+describe('formatUsNumber', () => {
+  it('formats a US E.164 number the way a rep reads it', () => {
+    expect(formatUsNumber('+16195550100')).toBe('(619) 555-0100');
+  });
+
+  it('leaves anything that is not a +1 ten-digit number as it came', () => {
+    expect(formatUsNumber('+442071838750')).toBe('+442071838750');
+    expect(formatUsNumber('anonymous')).toBe('anonymous');
+    expect(formatUsNumber('+1619555010')).toBe('+1619555010');
+  });
+});
+
+describe('textTaskSubject', () => {
+  it('names the sender when Salesforce knows them', () => {
+    expect(textTaskSubject('Jane Doe', '+16195550100', false)).toBe('Text from Jane Doe');
+  });
+
+  it('falls back to the formatted number when nobody matched', () => {
+    expect(textTaskSubject(null, '+16195550100', false)).toBe('Text from (619) 555-0100');
+    expect(textTaskSubject('   ', '+16195550100', false)).toBe('Text from (619) 555-0100');
+  });
+
+  it('says they asked to STOP when the text is an opt-out', () => {
+    expect(textTaskSubject('Jane Doe', '+16195550100', true)).toBe('Text from Jane Doe — asked to STOP');
+    expect(textTaskSubject(null, '+16195550100', true)).toBe('Text from (619) 555-0100 — asked to STOP');
+  });
+
+  it('never exceeds the 255 characters Salesforce allows in Task.Subject', () => {
+    expect(textTaskSubject('x'.repeat(400), '+16195550100', true).length).toBeLessThanOrEqual(255);
+  });
+});
+
+describe('textTaskDescription', () => {
+  it('is the message itself', () => {
+    expect(textTaskDescription('Is the house still available?', 0)).toBe('Is the house still available?');
+  });
+
+  it('notes attachments, which only Twilio can show', () => {
+    expect(textTaskDescription('Here is the photo', 1)).toBe('Here is the photo\n\n(1 attachment — open Twilio to view)');
+    expect(textTaskDescription('Pics', 3)).toBe('Pics\n\n(3 attachments — open Twilio to view)');
+  });
+
+  it('is just the note for a picture with no words', () => {
+    expect(textTaskDescription('', 2)).toBe('(2 attachments — open Twilio to view)');
+  });
+});
+
+describe('chooseTextRecipient', () => {
+  it("routes an agent number to the rep it's assigned to — never to the pool rules", () => {
+    expect(chooseTextRecipient({ kind: 'agent', assignedUserId: 'rep-1' }, 'sticky', 'dialer')).toBe('rep-1');
+  });
+
+  it('routes nothing for an unassigned agent (reserve) number', () => {
+    expect(chooseTextRecipient({ kind: 'agent', assignedUserId: null }, 'sticky', 'dialer')).toBeNull();
+  });
+
+  it('routes a pool number like a callback: sticky rep first, then the last rep to dial them', () => {
+    expect(chooseTextRecipient({ kind: 'dialer_pool', assignedUserId: null }, 'sticky', 'dialer')).toBe('sticky');
+    expect(chooseTextRecipient({ kind: 'dialer_pool', assignedUserId: null }, null, 'dialer')).toBe('dialer');
+    expect(chooseTextRecipient({ kind: 'dialer_pool', assignedUserId: null }, null, null)).toBeNull();
+  });
+});
+
+describe('textTaskLinks', () => {
+  it('puts a Lead in WhoId and nothing in WhatId (Salesforce refuses a WhatId beside a Lead)', () => {
+    expect(textTaskLinks({ whoId: '00Q000000000001', name: 'L' })).toEqual({ WhoId: '00Q000000000001' });
+  });
+
+  it('puts a Contact in WhoId and its Account in WhatId', () => {
+    expect(textTaskLinks({ whoId: '003000000000001', whatId: '001000000000001' })).toEqual({
+      WhoId: '003000000000001',
+      WhatId: '001000000000001',
+    });
+  });
+
+  it('puts any other record (Deal__c) in WhatId only', () => {
+    expect(textTaskLinks({ whatId: 'a0X000000000001' })).toEqual({ WhatId: 'a0X000000000001' });
+  });
+
+  it('never uses an Account (or anything not a Lead/Contact) as WhoId', () => {
+    expect(textTaskLinks({ whoId: '001000000000001' })).toEqual({ WhatId: '001000000000001' });
+  });
+
+  it('is empty when nothing matched', () => {
+    expect(textTaskLinks(null)).toEqual({});
+    expect(textTaskLinks({})).toEqual({});
+  });
+});
+
+describe('salesforceRecordUrl', () => {
+  it('builds a Lightning record link on the connection instance', () => {
+    expect(salesforceRecordUrl('https://gghomes.my.salesforce.com', '00Q000000000001')).toBe(
+      'https://gghomes.my.salesforce.com/lightning/r/00Q000000000001/view',
+    );
+    expect(salesforceRecordUrl('https://gghomes.my.salesforce.com/', '00T000000000001')).toBe(
+      'https://gghomes.my.salesforce.com/lightning/r/00T000000000001/view',
+    );
+  });
+});
+
+describe('pacificTime', () => {
+  it('renders the instant in Pacific time with the zone named', () => {
+    // 21:05 UTC on 2026-09-25 is 2:05 PM PDT.
+    expect(pacificTime(new Date('2026-09-25T21:05:00Z'))).toBe('Fri, Sep 25, 2026, 2:05 PM PDT');
+    // Winter: PST.
+    expect(pacificTime(new Date('2026-12-01T17:30:00Z'))).toBe('Tue, Dec 1, 2026, 9:30 AM PST');
+  });
+});
+
+describe('textEmail', () => {
+  const base = {
+    name: 'Jane Doe',
+    fromE164: '+16195550100',
+    toE164: '+18585550199',
+    receivedAt: new Date('2026-09-25T21:05:00Z'),
+    body: 'Is the house still available?',
+    numMedia: 0,
+    recordUrl: 'https://gghomes.my.salesforce.com/lightning/r/00Q000000000001/view',
+    optOut: false,
+  };
+
+  it('subject names the sender', () => {
+    expect(textEmail(base).subject).toBe('New text from Jane Doe');
+    expect(textEmail({ ...base, name: null }).subject).toBe('New text from (619) 555-0100');
+  });
+
+  it('subject carries the STOP suffix for an opt-out', () => {
+    expect(textEmail({ ...base, optOut: true, body: 'STOP' }).subject).toBe('New text from Jane Doe — asked to STOP');
+  });
+
+  it('body says who, which of the rep numbers, when (Pacific), what, and where in Salesforce', () => {
+    expect(textEmail(base).body).toBe(
+      [
+        'From: Jane Doe (619) 555-0100',
+        'To your number: (858) 555-0199',
+        'Received: Fri, Sep 25, 2026, 2:05 PM PDT',
+        '',
+        'Is the house still available?',
+        '',
+        'Open in Salesforce: https://gghomes.my.salesforce.com/lightning/r/00Q000000000001/view',
+      ].join('\n'),
+    );
+  });
+
+  it('body for an unmatched sender, an attachment, an opt-out, and no link', () => {
+    const out = textEmail({ ...base, name: null, body: 'STOP', numMedia: 1, optOut: true, recordUrl: null });
+    expect(out.body).toBe(
+      [
+        'From: (619) 555-0100',
+        'To your number: (858) 555-0199',
+        'Received: Fri, Sep 25, 2026, 2:05 PM PDT',
+        'They asked to STOP.',
+        '',
+        'STOP\n\n(1 attachment — open Twilio to view)',
+      ].join('\n'),
+    );
+  });
+});
