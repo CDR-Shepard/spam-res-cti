@@ -46,6 +46,16 @@ describe('SettingsPanel — microphone and speaker', () => {
     expect(html).toContain('Play test sound');
   });
 
+  // setInputDevice keeps the chosen mic captured for the whole shift — reps
+  // must know before they pick one.
+  it('the Microphone row warns that a specific mic stays open', () => {
+    const html = renderToStaticMarkup(<SettingsPanel {...props} audioDevices={port(true)} />);
+    expect(html).toContain(
+      'Choosing a specific microphone keeps it open while the softphone runs (Chrome shows the recording dot; '
+      + 'Bluetooth headsets stay in call mode). Leave System default unless callers can&#x27;t hear you.',
+    );
+  });
+
   it("a browser that can't choose the speaker gets a disabled row that says where to change it", () => {
     const html = renderToStaticMarkup(<SettingsPanel {...props} audioDevices={port(false)} />);
     expect(html).toMatch(/<select aria-label="Speaker"[^>]*disabled=""/);
