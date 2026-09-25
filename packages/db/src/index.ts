@@ -62,6 +62,7 @@ export type {
   FollowupRolloverJob,
   InboundMessage,
   InboundMessageStatus,
+  InboundTextDigest,
   MobileDevice,
   MobilePairCode,
   NewCall,

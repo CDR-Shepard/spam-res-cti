@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTableColumns } from 'drizzle-orm';
 import { getTableConfig } from 'drizzle-orm/pg-core';
-import { INBOUND_MESSAGE_STATUSES, inboundMessages } from './schema.js';
+import { INBOUND_MESSAGE_STATUSES, inboundMessages, inboundTextDigests } from './schema.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(resolve(here, '../migrations/0044_inbound_messages.sql'), 'utf8');
@@ -53,6 +53,7 @@ describe('migration 0044_inbound_messages', () => {
       '"emailed_at" timestamptz',
       '"email_skip_reason" text',
       '"backfill" boolean NOT NULL DEFAULT false',
+      '"backfill_batch" uuid',
       '"received_at" timestamptz NOT NULL DEFAULT now()',
       '"created_at" timestamptz NOT NULL DEFAULT now()',
       '"updated_at" timestamptz NOT NULL DEFAULT now()',
@@ -88,26 +89,34 @@ describe('migration 0044_inbound_messages', () => {
     );
   });
 
+  it("indexes the digest's batch scan: (backfill_batch)", () => {
+    expect(statements).toContain(
+      'CREATE INDEX IF NOT EXISTS "inbound_messages_backfill_batch_idx" ON "inbound_messages" ("backfill_batch")',
+    );
+  });
+
   it('the Drizzle schema names the same columns, defaults and nullability as the SQL', () => {
     const c = getTableColumns(inboundMessages);
     expect(Object.values(c).map((col) => col.name).sort()).toEqual([
-      'attempts', 'backfill', 'body', 'created_at', 'email_skip_reason', 'emailed_at', 'from_e164', 'id', 'last_error',
-      'message_sid', 'next_attempt_at', 'num_media', 'org_id', 'received_at', 'sf_task_id', 'status', 'to_e164',
-      'updated_at', 'user_id',
+      'attempts', 'backfill', 'backfill_batch', 'body', 'created_at', 'email_skip_reason', 'emailed_at', 'from_e164', 'id',
+      'last_error', 'message_sid', 'next_attempt_at', 'num_media', 'org_id', 'received_at', 'sf_task_id', 'status',
+      'to_e164', 'updated_at', 'user_id',
     ]);
     expect(c.status.default).toBe('pending');
     expect(c.attempts.default).toBe(0);
     expect(c.numMedia.default).toBe(0);
     expect(c.backfill.default).toBe(false);
     expect(c.body.default).toBe('');
-    // Nullable on purpose: null IS "no rep", "not created yet", "not emailed yet".
-    for (const col of [c.userId, c.sfTaskId, c.emailedAt, c.emailSkipReason, c.lastError]) expect(col.notNull).toBe(false);
+    // Nullable on purpose: null IS "no rep", "not created yet", "not emailed yet", "not a backfill row".
+    for (const col of [c.userId, c.sfTaskId, c.emailedAt, c.emailSkipReason, c.lastError, c.backfillBatch]) {
+      expect(col.notNull).toBe(false);
+    }
     for (const col of [c.messageSid, c.fromE164, c.toE164, c.status, c.attempts, c.backfill, c.receivedAt]) {
       expect(col.notNull).toBe(true);
     }
   });
 
-  it('the Drizzle schema declares the same full unique index and scan index', () => {
+  it('the Drizzle schema declares the same full unique index, scan index and backfill-batch index', () => {
     const { indexes } = getTableConfig(inboundMessages);
     const sid = indexes.find((i) => i.config.name === 'inbound_messages_message_sid_unique');
     expect(sid?.config.unique).toBe(true);
@@ -117,5 +126,30 @@ describe('migration 0044_inbound_messages', () => {
     expect(scan?.config.columns.map((col) => (col as { name: string }).name)).toEqual(['status', 'next_attempt_at']);
     const alert = indexes.find((i) => i.config.name === 'inbound_messages_alert_idx');
     expect(alert?.config.columns.map((col) => (col as { name: string }).name)).toEqual(['user_id', 'from_e164', 'emailed_at']);
+    const batch = indexes.find((i) => i.config.name === 'inbound_messages_backfill_batch_idx');
+    expect(batch?.config.columns.map((col) => (col as { name: string }).name)).toEqual(['backfill_batch']);
+  });
+});
+
+describe('migration 0044 — inbound_text_digests (the once-only guard for a backfill batch digest)', () => {
+  const create = statements.find((s) => s.startsWith('CREATE TABLE IF NOT EXISTS "inbound_text_digests"'));
+
+  it('creates the table idempotently, keyed on batch_id so a batch can never be digested twice', () => {
+    expect(create).toBeDefined();
+    for (const col of [
+      '"batch_id" uuid PRIMARY KEY',
+      '"user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE CASCADE',
+      '"sent_at" timestamptz NOT NULL DEFAULT now()',
+    ]) {
+      expect(create).toContain(col);
+    }
+  });
+
+  it('the Drizzle schema matches: batch_id primary key, user_id + sent_at not null', () => {
+    const c = getTableColumns(inboundTextDigests);
+    expect(Object.values(c).map((col) => col.name).sort()).toEqual(['batch_id', 'sent_at', 'user_id']);
+    expect(c.batchId.primary).toBe(true);
+    expect(c.userId.notNull).toBe(true);
+    expect(c.sentAt.notNull).toBe(true);
   });
 });

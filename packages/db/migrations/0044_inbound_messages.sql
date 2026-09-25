@@ -24,6 +24,10 @@
 --               emailed_at NULL on a done row means backfill (digest instead).
 -- backfill      Pulled from Twilio history, not live: the worker creates the
 --               Task but never emails it individually (one digest instead).
+-- backfill_batch  One id shared by every row a single backfill-texts.mjs run
+--               inserted. NULL for a live text. The worker groups by this id
+--               to find a batch whose rows are ALL terminal and send it one
+--               digest email (see inbound_text_digests below).
 -- received_at   When Twilio received it (live: webhook time; backfill: Twilio's
 --               date). Drives the Task's ActivityDate and the email's time.
 -- =============================================================================
@@ -45,6 +49,7 @@ CREATE TABLE IF NOT EXISTS "inbound_messages" (
   "emailed_at" timestamptz,
   "email_skip_reason" text,
   "backfill" boolean NOT NULL DEFAULT false,
+  "backfill_batch" uuid,
   "received_at" timestamptz NOT NULL DEFAULT now(),
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "updated_at" timestamptz NOT NULL DEFAULT now(),
@@ -59,3 +64,18 @@ CREATE INDEX IF NOT EXISTS "inbound_messages_status_idx" ON "inbound_messages" (
 -- The flood guard's lookup, once per alert: has this rep been emailed about
 -- this sender in the last hour?
 CREATE INDEX IF NOT EXISTS "inbound_messages_alert_idx" ON "inbound_messages" ("user_id", "from_e164", "emailed_at");
+
+-- The digest's batch scan: every row belonging to one backfill run.
+CREATE INDEX IF NOT EXISTS "inbound_messages_backfill_batch_idx" ON "inbound_messages" ("backfill_batch");
+
+-- One row per backfill batch that has been digested — a batch_id in here means
+-- its ONE digest email already went out, so the worker's tick can never send it
+-- twice (the insert is a claim: ON CONFLICT (batch_id) DO NOTHING, checked by
+-- rowcount BEFORE sending, so two ticks racing on the same batch can never both
+-- win). No FK to inbound_messages (a batch, not a single row) — user_id is who
+-- it was sent to, so a support query needs no join back to inbound_messages.
+CREATE TABLE IF NOT EXISTS "inbound_text_digests" (
+  "batch_id" uuid PRIMARY KEY,
+  "user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+  "sent_at" timestamptz NOT NULL DEFAULT now()
+);

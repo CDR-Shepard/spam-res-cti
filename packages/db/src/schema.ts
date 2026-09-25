@@ -880,6 +880,10 @@ export const inboundMessages = pgTable(
     emailSkipReason: text('email_skip_reason'),
     /** Pulled from Twilio history: Task yes, individual email never (one digest). */
     backfill: boolean('backfill').default(false).notNull(),
+    /** One id shared by every row a single backfill-texts.mjs run inserted; null
+     *  for a live text. The worker groups by this to find a batch that is
+     *  entirely terminal and send ONE digest (see inboundTextDigests below). */
+    backfillBatch: uuid('backfill_batch'),
     receivedAt: timestamp('received_at', { withTimezone: true }).defaultNow().notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
@@ -889,9 +893,24 @@ export const inboundMessages = pgTable(
     messageSidUnique: uniqueIndex('inbound_messages_message_sid_unique').on(t.messageSid),
     statusIdx: index('inbound_messages_status_idx').on(t.status, t.nextAttemptAt),
     alertIdx: index('inbound_messages_alert_idx').on(t.userId, t.fromE164, t.emailedAt),
+    backfillBatchIdx: index('inbound_messages_backfill_batch_idx').on(t.backfillBatch),
   }),
 );
 export type InboundMessage = typeof inboundMessages.$inferSelect;
+
+/**
+ * Once-only guard for a backfill batch's digest email (migration 0044). A row
+ * here means that batch_id's ONE digest already went out — the worker inserts
+ * it (ON CONFLICT (batch_id) DO NOTHING) BEFORE sending and only sends when the
+ * insert actually landed, so two replicas racing the same batch can never both
+ * send it. No FK to inbound_messages — a batch, not a single row.
+ */
+export const inboundTextDigests = pgTable('inbound_text_digests', {
+  batchId: uuid('batch_id').primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  sentAt: timestamp('sent_at', { withTimezone: true }).defaultNow().notNull(),
+});
+export type InboundTextDigest = typeof inboundTextDigests.$inferSelect;
 
 /**
  * Sticky caller ID per (rep, lead) — the DID a rep last called a given recipient
