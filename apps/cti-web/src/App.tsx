@@ -36,7 +36,15 @@ import {
   type ClickToDialEvent,
 } from './opencti';
 import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
-import { watchCallMedia, watchLocalMic, MEDIA_ISSUE_MESSAGE, type AudioHelperLike, type LocalMicCall } from './audio-readiness';
+import { watchCallMedia, watchLocalMic, MEDIA_ISSUE_MESSAGE, type LocalMicCall } from './audio-readiness';
+import { loadAudioPrefs } from './audio-devices';
+import {
+  applyChoiceFromStorage,
+  createAudioDevicePort,
+  keepSavedAudioPrefs,
+  type AudioApplyResult,
+  type DeviceAudioLike,
+} from './audio-device-port';
 import { sendDtmfKey, type DtmfSendable } from './dtmf';
 import { buildCallSubject } from './call-subject';
 import { openCtiSavePlan } from './opencti-log';
@@ -139,6 +147,13 @@ interface TwilioIncomingCall {
 // from the SDK, so without this fallback the rep is stuck on the in-call
 // screen until they reload the page.
 export const HANGUP_FALLBACK_MS = 1500;
+
+/** The toast when a Device can't take the mic/speaker saved in Settings. */
+function audioApplyFailureText(r: AudioApplyResult): string {
+  const which = r.input === 'failed' && r.output === 'failed' ? 'microphone and speaker'
+    : r.input === 'failed' ? 'microphone' : 'speaker';
+  return `Couldn't switch to the ${which} chosen in Settings — check it's plugged in, or choose another in Settings.`;
+}
 
 export function App(): JSX.Element {
   const [me, setMe] = useState<MeResponse | null>(null);
@@ -496,8 +511,29 @@ export function App(): JSX.Element {
   );
 
   /** `device.audio` of the live Device, when it has one (the fake in tests may not). */
-  const deviceAudio = (): AudioHelperLike | null =>
-    (deviceRef.current as { audio?: AudioHelperLike } | null)?.audio ?? null;
+  const deviceAudio = (): DeviceAudioLike | null =>
+    (deviceRef.current as { audio?: DeviceAudioLike } | null)?.audio ?? null;
+
+  // The microphone / speaker chosen in Settings (2026-09-25: a rep heard
+  // nothing and wasn't heard — Voice Insights showed his mic capturing silence
+  // and the call playing to a device he wasn't wearing). One port over the
+  // persistent Device, read lazily since the Device comes and goes.
+  const audioPort = useMemo(() => createAudioDevicePort(deviceAudio), []);
+
+  // Settings changed in ANOTHER tab: only the leader tab holds the Device, so
+  // the storage event is how a choice made elsewhere reaches it right away.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent): void => {
+      const audio = deviceAudio();
+      if (!audio) return;
+      applyChoiceFromStorage(audio, e.key, loadAudioPrefs())?.catch((err: unknown) => {
+        const why = err instanceof Error && err.message ? err.message : 'the browser refused it';
+        setToast({ text: `Couldn't switch to the device chosen in Settings: ${why}`, type: 'error' });
+      });
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   // Keep the microphone alive for the length of a call. A headset swapped
   // mid-shift leaves the browser capturing from a device that is gone — the
@@ -509,10 +545,11 @@ export function App(): JSX.Element {
   const keepMicAlive = useCallback((call: LocalMicCall & { on: (e: string, cb: (...a: unknown[]) => void) => void }) => {
     const audio = deviceAudio();
     if (!audio) return;
+    // Re-pins land on the mic chosen in Settings while it is connected.
     const mic = watchLocalMic(call, audio, (trigger, result) => {
       if (result === 'repinned' && trigger !== 'device-change') setToast({ text: 'Microphone reconnected.', type: 'success' });
       if (result === 'failed') setToast({ text: 'Your microphone stopped and could not be reconnected — reload the softphone.', type: 'error' });
-    });
+    }, Date.now, () => loadAudioPrefs().input);
     watchCallMedia(call, (issue) => { if (issue === 'no-outbound-audio') mic.repin('no-outbound-audio'); });
   }, []);
 
@@ -526,6 +563,18 @@ export function App(): JSX.Element {
     const { Device } = await import('@twilio/voice-sdk');
     const device = new Device(tok.token, { logLevel: 1 });
     deviceRef.current = device;
+    // Every new Device (first load, or re-created after a leadership change)
+    // gets the mic/speaker chosen in Settings — the power-dialer conference
+    // leg runs on this same Device, so it gets them too.
+    const sdkAudio = (device as unknown as { audio?: DeviceAudioLike | null }).audio;
+    const applyAudioPrefs = sdkAudio
+      ? keepSavedAudioPrefs(sdkAudio, {
+        loadPrefs: loadAudioPrefs,
+        isCallUp: () => !!connectionRef.current || !!dialerConnRef.current,
+        isCurrent: () => deviceRef.current === device,
+        onFailed: (r) => setToast({ text: audioApplyFailureText(r), type: 'error' }),
+      })
+      : () => {};
     const d = device as unknown as {
       on: (e: string, cb: (a: unknown) => void) => void;
       register: () => Promise<void>;
@@ -598,6 +647,7 @@ export function App(): JSX.Element {
       }
     });
     await d.register();
+    applyAudioPrefs();
     return device;
     })();
     deviceInitRef.current = init;
@@ -1486,6 +1536,7 @@ export function App(): JSX.Element {
       holdMusic={holdMusicFromMe(me.user)}
       onSaved={refreshMe}
       onToast={setToast}
+      audioDevices={audioPort}
     />
   ) : tab === 'powerdial' ? (
     <DialerPanel

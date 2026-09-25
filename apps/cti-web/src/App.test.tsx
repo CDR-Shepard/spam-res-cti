@@ -82,10 +82,39 @@ class FakeOutboundConnection {
  *  Device/WebRTC stack. Constructed the moment ensureDevice() runs (this
  *  instance becomes the softphone leader on mount, with no peers to contest
  *  it), mirroring the real @twilio/voice-sdk Device shape App.tsx relies on. */
+/** A Twilio OutputDeviceCollection fake (`speakerDevices` / `ringtoneDevices`). */
+function fakeOutputs() {
+  let active = new Set([{ deviceId: 'default' }]);
+  return {
+    get: () => active,
+    set: vi.fn(async (id: string) => { active = new Set([{ deviceId: id }]); }),
+  };
+}
+
+/** `device.audio` — a Twilio AudioHelper fake with a Jabra headset plugged in
+ *  both ways. The mic/speaker chosen in Settings is applied through this. */
+function fakeDeviceAudio() {
+  const listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+  const audio = {
+    availableInputDevices: new Map([['default', { deviceId: 'default' }], ['mic-jabra', { deviceId: 'mic-jabra' }]]),
+    availableOutputDevices: new Map([['default', { deviceId: 'default' }], ['spk-jabra', { deviceId: 'spk-jabra' }]]),
+    inputDevice: null as { deviceId: string } | null,
+    isOutputSelectionSupported: true,
+    setInputDevice: vi.fn(async (id: string) => { audio.inputDevice = { deviceId: id }; }),
+    unsetInputDevice: vi.fn(async () => { audio.inputDevice = null; }),
+    speakerDevices: fakeOutputs(),
+    ringtoneDevices: fakeOutputs(),
+    on: (event: string, cb: (...args: unknown[]) => void) => { listeners.set(event, [...(listeners.get(event) ?? []), cb]); },
+    emit: (event: string, ...args: unknown[]) => { for (const cb of listeners.get(event) ?? []) cb(...args); },
+  };
+  return audio;
+}
+
 class FakeDevice {
   static instances: FakeDevice[] = [];
   /** Outbound legs handed out by connect() — one per place() call. */
   static connects: FakeOutboundConnection[] = [];
+  audio = fakeDeviceAudio();
   private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
   constructor(_token: string, _opts: unknown) {
     FakeDevice.instances.push(this);
@@ -522,5 +551,87 @@ describe('App — a cancel that beats even the pre-accept() listener is caught v
     expect(screen.getByText('The caller hung up before you answered.')).toBeTruthy();
     expect(screen.queryByTitle('End call')).toBeNull();
     expect(screen.getByTitle('Check & call')).toBeTruthy();
+  });
+});
+
+/**
+ * 2026-09-25: a rep's softphone captured from, and played to, a different
+ * device than his headset (Voice Insights: constant-audio-input-level +
+ * constant-audio-output-level). Reps choose both in Settings; the choice is
+ * saved in localStorage and must land on the ONE persistent Device whenever it
+ * is created, when its device list changes, and when another tab changes it.
+ */
+describe('App — the chosen microphone and speaker reach the Twilio Device', () => {
+  async function mountDevice(): Promise<ReturnType<typeof fakeDeviceAudio>> {
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    return FakeDevice.instances[0]!.audio;
+  }
+
+  it('saved choices are applied when the Device is created (mic, speaker AND ringtone)', async () => {
+    localStorage.setItem('cti.audio.input', 'mic-jabra');
+    localStorage.setItem('cti.audio.output', 'spk-jabra');
+    const audio = await mountDevice();
+    await waitFor(() => expect(audio.setInputDevice).toHaveBeenCalledWith('mic-jabra'));
+    await waitFor(() => expect(audio.speakerDevices.set).toHaveBeenCalledWith('spk-jabra'));
+    expect(audio.ringtoneDevices.set).toHaveBeenCalledWith('spk-jabra');
+  });
+
+  it('no saved choice leaves the Device exactly as the SDK set it up', async () => {
+    const audio = await mountDevice();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(audio.setInputDevice).not.toHaveBeenCalled();
+    expect(audio.unsetInputDevice).not.toHaveBeenCalled();
+    expect(audio.speakerDevices.set).not.toHaveBeenCalled();
+  });
+
+  // The SDK lists devices asynchronously after the Device is built, and a
+  // headset can be plugged in later: its 'deviceChange' re-applies the choice.
+  it('a saved device that shows up later is applied on the SDK deviceChange', async () => {
+    localStorage.setItem('cti.audio.input', 'mic-usb');
+    const audio = await mountDevice();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(audio.setInputDevice).not.toHaveBeenCalled(); // not connected yet
+    audio.availableInputDevices.set('mic-usb', { deviceId: 'mic-usb' });
+    act(() => { audio.emit('deviceChange', []); });
+    await waitFor(() => expect(audio.setInputDevice).toHaveBeenCalledWith('mic-usb'));
+  });
+
+  // Settings can be changed in a tab that isn't the softphone leader; the
+  // leader (the tab holding the Device) hears it through the storage event.
+  it("a choice made in another tab is applied to this tab's Device", async () => {
+    const audio = await mountDevice();
+    localStorage.setItem('cti.audio.output', 'spk-jabra');
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'cti.audio.output', newValue: 'spk-jabra' })); });
+    await waitFor(() => expect(audio.speakerDevices.set).toHaveBeenCalledWith('spk-jabra'));
+    localStorage.removeItem('cti.audio.input');
+    audio.inputDevice = { deviceId: 'mic-jabra' };
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'cti.audio.input', newValue: null })); });
+    await waitFor(() => expect(audio.unsetInputDevice).toHaveBeenCalled());
+  });
+
+  it('choosing a mic in Settings switches the live Device and saves it', async () => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        enumerateDevices: async () => [
+          { kind: 'audioinput', deviceId: 'default', label: 'Default - MacBook Pro Microphone' },
+          { kind: 'audioinput', deviceId: 'mic-jabra', label: 'Jabra Evolve2 65' },
+        ],
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      },
+    });
+    try {
+      const audio = await mountDevice();
+      fireEvent.click(screen.getByText('Settings'));
+      const mic = await screen.findByLabelText('Microphone') as HTMLSelectElement;
+      await waitFor(() => expect(mic.options.length).toBe(2));
+      fireEvent.change(mic, { target: { value: 'mic-jabra' } });
+      await waitFor(() => expect(audio.setInputDevice).toHaveBeenCalledWith('mic-jabra'));
+      expect(localStorage.getItem('cti.audio.input')).toBe('mic-jabra');
+    } finally {
+      Reflect.deleteProperty(navigator, 'mediaDevices');
+    }
   });
 });

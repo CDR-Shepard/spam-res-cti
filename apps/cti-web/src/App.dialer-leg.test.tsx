@@ -373,4 +373,16 @@ describe('App — power-dialer conference leg wiring', () => {
     expect(await screen.findByText('Microphone reconnected.')).toBeTruthy();
     expect(FakeDevice.connects.length).toBe(1); // the leg itself is untouched
   });
+
+  // 2026-09-25: the mic chosen in Settings. The leg runs on the same Device, so
+  // a re-pin must land on the chosen headset, not the system default.
+  it('re-pins the dialer leg to the microphone chosen in Settings', async () => {
+    localStorage.setItem('cti.audio.input', 'mic-jabra');
+    await startRun();
+    const device = FakeDevice.instances[0]!;
+    device.audio.availableInputDevices.set('mic-jabra', { deviceId: 'mic-jabra' });
+    act(() => { FakeDevice.connects[0]!.connection.micTrack.fire('ended'); });
+    await waitFor(() => expect(device.audio.setInputDevice).toHaveBeenCalledWith('mic-jabra'));
+    expect(device.audio.setInputDevice).not.toHaveBeenCalledWith('default');
+  });
 });
