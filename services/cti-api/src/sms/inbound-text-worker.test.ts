@@ -18,6 +18,7 @@ import {
   failExhaustedStuckInboundTexts,
   insertPendingDigest,
   maybeStartInboundTextLoop,
+  patchDigestPreClaim,
   processDueDigests,
   processInboundText,
   processPendingDigest,
@@ -1127,10 +1128,34 @@ describe('readyDigestBatches — groups undigested backfill rows by batch, waiti
   });
 });
 
+/** A throwaway real drizzle instance (never connects — see "the worker SQL,
+ *  rendered" below) used ONLY to render an opaque WHERE condition object back
+ *  to SQL text, so `digestProcessDb` can tell a GUARDED pre-claim write
+ *  (patchDigestPreClaim: status AND attempts in the WHERE) apart from an
+ *  unconditional one (patchDigest: batch_id only) without hand-parsing
+ *  drizzle internals. */
+const whereRenderDb = drizzle(new Pool({ connectionString: 'postgres://unused:unused@127.0.0.1:1/unused' }), { schema });
+function isGuardedDigestWhere(w: unknown): boolean {
+  const { sql } = whereRenderDb.select().from(schema.inboundTextDigests).where(w as never).toSQL();
+  return sql.includes('"status" = ') && sql.includes('"attempts" = ');
+}
+
 /** Fake db for processPendingDigest-level tests: selectBatchRows/selectDuePendingDigests
  *  (select-from-where-orderBy[-limit]), claimDigestForSending (update-set-where-returning),
  *  and patchDigest's own update (update-set-where, awaited bare — no .returning() call). */
-function digestProcessDb(opts: { batchRows?: InboundMessage[]; claimWins?: boolean; due?: InboundTextDigest[] } = {}) {
+function digestProcessDb(
+  opts: {
+    batchRows?: InboundMessage[];
+    claimWins?: boolean;
+    due?: InboundTextDigest[];
+    /** A pre-claim guarded write (patchDigestPreClaim) lands only when this is
+     *  NOT false — false simulates another replica having since claimed, sent,
+     *  or had the reaper touch this digest, so the conditional UPDATE
+     *  (status='pending' AND attempts=<seen>) matches zero rows and nothing
+     *  changes. Never affects the claim write itself or a post-claim write. */
+    preClaimWriteWins?: boolean;
+  } = {},
+) {
   const patches: Patch[] = [];
   const db = {
     select: (_cols?: unknown) => ({
@@ -1145,8 +1170,15 @@ function digestProcessDb(opts: { batchRows?: InboundMessage[]; claimWins?: boole
     update: (_t: unknown) => ({
       set: (patch: Patch) => ({
         where: (_w: unknown) => {
-          patches.push(patch);
           const claiming = patch.status === 'sending';
+          if (!claiming && opts.preClaimWriteWins === false && isGuardedDigestWhere(_w)) {
+            // A REAL guarded WHERE (status='pending' AND attempts=<seen>) that
+            // no longer matches anything — the row moved on (sent/sending/
+            // reaped) since this worker read it. An UNGUARDED where (plain
+            // batch_id=$1, today's unfixed patchDigest) is never blocked here.
+            return Object.assign(Promise.resolve(undefined), { returning: async () => [] });
+          }
+          patches.push(patch);
           return Object.assign(Promise.resolve(undefined), {
             returning: async () => (claiming ? (opts.claimWins ?? true ? [{ ...digestRow(), status: 'sending' }] : []) : []),
           });
@@ -1219,6 +1251,35 @@ describe('processPendingDigest — the state machine (review finding I2), one ou
       nextAttemptAt: new Date(NOW.getTime() + RETRY_DELAYS_MS[0]),
       lastError: expect.stringContaining('SOQL read timed out'),
     });
+  });
+
+  it('a pre-claim read failure when another replica already SENT the digest leaves it sent — the guarded write matches nothing, and no email goes out', async () => {
+    // Worker A won the claim, sent, and marked the digest `sent` while worker
+    // B's own pre-claim read was still in flight and then failed. B's failure
+    // write must not clobber A's `sent` back to `pending` — a second send.
+    const d = digestProcessDb({ batchRows, preClaimWriteWins: false });
+    const h = harness({ db: d.db });
+    (h.deps.sf.salesforceUserId as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('SOQL read timed out'));
+
+    await processPendingDigest(h.deps, digestRow({ attempts: 0 }));
+
+    expect(d.patches).toHaveLength(0); // the guarded write landed on nothing
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+  });
+
+  it('a pre-claim read failure when another replica is still SENDING the digest leaves it sending — hidden from the reaper', async () => {
+    // Same race, caught mid-send instead of after: worker A is between its own
+    // claim and the emailSimple POST (status still `sending`) when worker B's
+    // read fails. B's write must not reset it to `pending`, which would hide
+    // the in-flight send from `reapStuckSendingDigests`.
+    const d = digestProcessDb({ batchRows, preClaimWriteWins: false });
+    const h = harness({ db: d.db });
+    (h.deps.sf.salesforceUserId as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('SOQL read timed out'));
+
+    await processPendingDigest(h.deps, digestRow({ attempts: 0 }));
+
+    expect(d.patches).toHaveLength(0);
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
   });
 
   it('a read failure on the LAST try (attempts already MAX_TRIES-1) fails the digest permanently and logs loudly', async () => {
@@ -1563,6 +1624,21 @@ describe('the worker SQL, rendered', () => {
     // Only 2 params are SET (status, updated_at) — "attempts" appears in the
     // trailing RETURNING column list, never in the SET clause itself.
     expect(sql.split(' where ')[0]).not.toContain('attempts');
+  });
+
+  it('patchDigestPreClaim guards a pre-claim failure write: it only lands if the digest is STILL pending at the SAME attempts this worker saw', () => {
+    const { sql, params } = patchDigestPreClaim(
+      db,
+      'batch-1',
+      2,
+      { status: 'failed', attempts: 3, lastError: 'boom' },
+      NOW,
+    ).toSQL();
+    expect(sql).toBe(
+      'update "inbound_text_digests" set "status" = $1, "attempts" = $2, "last_error" = $3, "updated_at" = $4 ' +
+        'where ("inbound_text_digests"."batch_id" = $5 and "inbound_text_digests"."status" = $6 and "inbound_text_digests"."attempts" = $7)',
+    );
+    expect(params).toEqual(['failed', 3, 'boom', NOW.toISOString(), 'batch-1', 'pending', 2]);
   });
 
   it('reapStuckSendingDigests turns a stuck-in-sending digest straight to unknown — never handed back for a retry', () => {

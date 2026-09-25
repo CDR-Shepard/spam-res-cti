@@ -822,6 +822,41 @@ async function patchDigest(deps: InboundTextDeps, batchId: string, patch: Partia
     .where(eq(schema.inboundTextDigests.batchId, batchId));
 }
 
+/**
+ * The pre-claim failure writes' own compare-and-swap. A READ that fails
+ * BEFORE the claim means this worker never held the digest, so its write
+ * must prove the digest is still the SAME pending row it read —
+ * `status = 'pending' AND attempts = <what this worker saw>` — or touch
+ * nothing. Two workers can read the SAME pending digest during a deploy
+ * overlap; if worker A goes on to claim, send, and mark it `sent` (or the
+ * reaper marks a `sending` row `unknown`) while worker B's read then fails,
+ * B's write must not clobber that — an unconditional `patchDigest` here
+ * would flip `sent` back to `pending` (a second send) or hide a `sending`
+ * row from the reaper. When zero rows match, this simply does nothing.
+ *
+ * A write issued AFTER a successful claim uses `patchDigest` directly and
+ * unconditionally: this worker IS the owner then, and its write is allowed
+ * to correct even a premature reaper `unknown` with the true outcome.
+ */
+export function patchDigestPreClaim(
+  db: Db,
+  batchId: string,
+  attemptsSeen: number,
+  patch: Partial<InboundTextDigest>,
+  at: Date,
+) {
+  return db
+    .update(schema.inboundTextDigests)
+    .set({ ...patch, updatedAt: at })
+    .where(
+      and(
+        eq(schema.inboundTextDigests.batchId, batchId),
+        eq(schema.inboundTextDigests.status, 'pending'),
+        eq(schema.inboundTextDigests.attempts, attemptsSeen),
+      ),
+    );
+}
+
 function logDigestFailed(digestRow: InboundTextDigest, reason: string): void {
   console.error(`${LOG} digest failed`, { batchId: digestRow.batchId, userId: digestRow.userId, reason });
 }
@@ -842,22 +877,33 @@ function redactAgainstRows(text: string, rows: readonly InboundMessage[]): strin
  * the claim itself never bumps attempts (see the module doc: unlike a row's
  * claim, this claim happens AFTER the work that can fail is already done),
  * so a pre-claim and a post-claim failure both bump the SAME counter once.
+ *
+ * `preClaim` selects the write itself: true (a read failure) goes through
+ * `patchDigestPreClaim` — this worker never held the claim, so the write is
+ * guarded and may land on nothing; false (a definite send refusal, always
+ * after a successful claim) uses the unconditional `patchDigest` — this
+ * worker IS the owner.
  */
 async function retryOrFailDigest(
   deps: InboundTextDeps,
   digestRow: InboundTextDigest,
   err: unknown,
   rows: readonly InboundMessage[],
+  preClaim: boolean,
 ): Promise<'pending' | 'failed'> {
   const nextAttempts = digestRow.attempts + 1;
   const msg = redactAgainstRows(errorText(err), rows).slice(0, 2000);
   const delay = RETRY_DELAYS_MS[nextAttempts - 1];
+  const write = (patch: Partial<InboundTextDigest>) =>
+    preClaim
+      ? patchDigestPreClaim(deps.db, digestRow.batchId, digestRow.attempts, patch, deps.now())
+      : patchDigest(deps, digestRow.batchId, patch);
   if (delay === undefined) {
-    await patchDigest(deps, digestRow.batchId, { status: 'failed', attempts: nextAttempts, lastError: msg });
+    await write({ status: 'failed', attempts: nextAttempts, lastError: msg });
     logDigestFailed(digestRow, msg);
     return 'failed';
   }
-  await patchDigest(deps, digestRow.batchId, {
+  await write({
     status: 'pending',
     attempts: nextAttempts,
     lastError: msg,
@@ -868,9 +914,14 @@ async function retryOrFailDigest(
 
 /** A Salesforce auth failure, at any point (a read OR the send): terminal at
  *  once, matching the row worker's rule — no retry fixes a disconnected rep,
- *  and the email is sent AS the rep, so it cannot go either. */
-async function failDigestAuth(deps: InboundTextDeps, digestRow: InboundTextDigest): Promise<void> {
-  await patchDigest(deps, digestRow.batchId, { status: 'failed', lastError: RECONNECT });
+ *  and the email is sent AS the rep, so it cannot go either. `preClaim`
+ *  selects the guarded vs. unconditional write, same as `retryOrFailDigest`. */
+async function failDigestAuth(deps: InboundTextDeps, digestRow: InboundTextDigest, preClaim: boolean): Promise<void> {
+  if (preClaim) {
+    await patchDigestPreClaim(deps.db, digestRow.batchId, digestRow.attempts, { status: 'failed', lastError: RECONNECT }, deps.now());
+  } else {
+    await patchDigest(deps, digestRow.batchId, { status: 'failed', lastError: RECONNECT });
+  }
   logDigestFailed(digestRow, RECONNECT);
 }
 
@@ -926,10 +977,10 @@ export async function processPendingDigest(
     email = textDigestEmail(entries);
   } catch (err) {
     if (isSalesforceAuthError(err)) {
-      await failDigestAuth(deps, digestRow);
+      await failDigestAuth(deps, digestRow, true);
       return 'failed';
     }
-    const outcome = await retryOrFailDigest(deps, digestRow, err, rows);
+    const outcome = await retryOrFailDigest(deps, digestRow, err, rows, true);
     return outcome === 'failed' ? 'failed' : 'retried';
   }
 
@@ -941,11 +992,11 @@ export async function processPendingDigest(
     await postEmailSimple(deps, userId, to, email.subject, email.body, 'digest email');
   } catch (err) {
     if (isSalesforceAuthError(err)) {
-      await failDigestAuth(deps, digestRow);
+      await failDigestAuth(deps, digestRow, false);
       return 'failed';
     }
     if (isDefiniteEmailRefusal(err)) {
-      const outcome = await retryOrFailDigest(deps, digestRow, err, rows);
+      const outcome = await retryOrFailDigest(deps, digestRow, err, rows, false);
       return outcome === 'failed' ? 'failed' : 'retried';
     }
     // Ambiguous — timeout, network error, or a 5xx. Never retried.
