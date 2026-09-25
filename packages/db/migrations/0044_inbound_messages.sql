@@ -1,0 +1,53 @@
+-- =============================================================================
+-- 0044_inbound_messages.sql — texts to our numbers become a Salesforce Task and
+-- an email alert for the rep (design: docs/superpowers/specs/
+-- 2026-09-25-inbound-texts-design.md, option A).
+--
+-- One row per inbound text. POST /telephony/twilio/sms inserts it and answers
+-- Twilio at once; services/cti-api/src/sms/inbound-text-worker.ts drains it
+-- single-flight (match the sender, create the Task once, email the rep once).
+--
+-- message_sid   Twilio's id. UNIQUE, and a FULL index on purpose: Twilio
+--               retries an un-acked webhook and the backfill re-reads history,
+--               so the same text arrives twice and the insert is ON CONFLICT DO
+--               NOTHING. A PARTIAL unique index cannot arbitrate ON CONFLICT
+--               without repeating its predicate (42P10 on every insert).
+-- body          The message. Never logged anywhere — only stored here.
+-- user_id       The rep it routed to (agent DID owner, else the pool callback
+--               rules). NULL = nobody, and the row is 'skipped'.
+-- status        pending → in_flight (the worker's claim) → done | failed;
+--               skipped when there was no rep. Text + CHECK, house style (0043).
+-- sf_task_id    Stamped the moment the Task exists — a retry never creates twice.
+-- emailed_at    Stamped the moment the alert is sent — a retry never re-emails.
+-- backfill      Pulled from Twilio history, not live: the worker creates the
+--               Task but never emails it individually (one digest instead).
+-- received_at   When Twilio received it (live: webhook time; backfill: Twilio's
+--               date). Drives the Task's ActivityDate and the email's time.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS "inbound_messages" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "org_id" uuid NOT NULL REFERENCES "organizations"("id") ON DELETE CASCADE,
+  "message_sid" text NOT NULL,
+  "from_e164" text NOT NULL,
+  "to_e164" text NOT NULL,
+  "body" text NOT NULL DEFAULT '',
+  "num_media" integer NOT NULL DEFAULT 0,
+  "user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
+  "status" text NOT NULL DEFAULT 'pending',
+  "attempts" integer NOT NULL DEFAULT 0,
+  "next_attempt_at" timestamptz NOT NULL DEFAULT now(),
+  "last_error" text,
+  "sf_task_id" text,
+  "emailed_at" timestamptz,
+  "backfill" boolean NOT NULL DEFAULT false,
+  "received_at" timestamptz NOT NULL DEFAULT now(),
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  "updated_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "inbound_messages_status_check" CHECK ("status" IN ('pending','in_flight','done','skipped','failed'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "inbound_messages_message_sid_unique" ON "inbound_messages" ("message_sid");
+
+-- The worker's scan: pending rows whose next_attempt_at has passed.
+CREATE INDEX IF NOT EXISTS "inbound_messages_status_idx" ON "inbound_messages" ("status", "next_attempt_at");

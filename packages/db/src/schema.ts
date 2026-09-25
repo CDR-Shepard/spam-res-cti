@@ -843,6 +843,52 @@ export const followupRolloverJobs = pgTable(
 );
 export type FollowupRolloverJob = typeof followupRolloverJobs.$inferSelect;
 
+/** Every status an inbound text row can hold (migration 0044's CHECK). `in_flight`
+ *  is the worker's claim; `skipped` means the text routed to nobody. */
+export const INBOUND_MESSAGE_STATUSES = ['pending', 'in_flight', 'done', 'skipped', 'failed'] as const;
+export type InboundMessageStatus = (typeof INBOUND_MESSAGE_STATUSES)[number];
+
+/**
+ * Inbound texts to our numbers (migration 0044). POST /telephony/twilio/sms
+ * inserts one row per MessageSid and answers Twilio immediately; the inbound-text
+ * worker turns it into a Salesforce Task and an email alert for the rep, each
+ * stamped (`sfTaskId`, `emailedAt`) so a retry never repeats a finished step.
+ * `body` is stored here and nowhere else — it is never logged.
+ */
+export const inboundMessages = pgTable(
+  'inbound_messages',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    messageSid: text('message_sid').notNull(),
+    fromE164: text('from_e164').notNull(),
+    toE164: text('to_e164').notNull(),
+    body: text('body').default('').notNull(),
+    numMedia: integer('num_media').default(0).notNull(),
+    /** The rep it routed to; null = nobody (status 'skipped'). */
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    status: text('status').$type<InboundMessageStatus>().default('pending').notNull(),
+    attempts: integer('attempts').default(0).notNull(),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).defaultNow().notNull(),
+    lastError: text('last_error'),
+    /** Stamped the moment the Task exists — a retry must NOT create again. */
+    sfTaskId: text('sf_task_id'),
+    /** Stamped the moment the alert is sent — a retry must NOT email again. */
+    emailedAt: timestamp('emailed_at', { withTimezone: true }),
+    /** Pulled from Twilio history: Task yes, individual email never (one digest). */
+    backfill: boolean('backfill').default(false).notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).defaultNow().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    // FULL, never partial: the insert's ON CONFLICT DO NOTHING arbitrates on it.
+    messageSidUnique: uniqueIndex('inbound_messages_message_sid_unique').on(t.messageSid),
+    statusIdx: index('inbound_messages_status_idx').on(t.status, t.nextAttemptAt),
+  }),
+);
+export type InboundMessage = typeof inboundMessages.$inferSelect;
+
 /**
  * Sticky caller ID per (rep, lead) — the DID a rep last called a given recipient
  * (lead) from. Future calls to the same lead reuse this number (when the rep

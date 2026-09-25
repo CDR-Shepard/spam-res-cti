@@ -60,6 +60,8 @@ export type {
   CampaignConfig,
   DialerHandoff,
   FollowupRolloverJob,
+  InboundMessage,
+  InboundMessageStatus,
   MobileDevice,
   MobilePairCode,
   NewCall,
