@@ -1214,6 +1214,13 @@ function digestProcessDb(
 const EMAIL_REFUSED_4XX = { status: 400, json: [{ errorCode: 'INVALID_EMAIL_ADDRESS', message: 'bad address' }] };
 const EMAIL_REFUSED_ISSUCCESS_FALSE = { status: 200, json: [{ isSuccess: false, errors: [{ statusCode: 'NO_MASS_MAIL_PERMISSION' }] }] };
 const EMAIL_5XX = { status: 503, json: { message: 'busy' } };
+/** What sfFetch itself RETURNS (never throws) when the session is invalid even
+ *  after its own internal refresh-and-retry — the second attempt came back
+ *  401 too. A 401 is < 500, so `postEmailSimple` throws it as an
+ *  EmailSendError (isDefiniteEmailRefusal is true) whose message ALSO
+ *  contains "(401)" (isSalesforceAuthError is ALSO true) — the one shape
+ *  that makes the auth-vs-refusal check ORDER matter. */
+const EMAIL_REFUSED_401_AUTH = { status: 401, json: [{ errorCode: 'INVALID_SESSION_ID', message: 'Session expired or invalid' }] };
 
 function withEmail(h: ReturnType<typeof harness>, taskAnswer: { status: number; json: unknown }): void {
   (h.deps.sf.soqlQuery as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, q: string) =>
@@ -1379,6 +1386,25 @@ describe('processPendingDigest — the state machine (review finding I2), one ou
 
     expect(outcome).toBe('failed');
     expect(d.patches.at(-1)).toMatchObject({ status: 'failed', lastError: 'reconnect Salesforce' });
+  });
+
+  it('a 401 from the SEND (still invalid after sfFetch\'s own refresh-and-retry) is classified as AUTH, not a definite refusal — terminal, "reconnect Salesforce", never retried', async () => {
+    // This response is BOTH things at once: status 401 < 500 makes
+    // postEmailSimple throw EmailSendError (isDefiniteEmailRefusal → true),
+    // AND its message embeds "(401)" (isSalesforceAuthError → true). Only the
+    // CHECK ORDER in processPendingDigest decides which branch runs — auth
+    // must be checked first, exactly like the row worker and the pre-claim
+    // read-failure path already do.
+    const d = digestProcessDb({ batchRows });
+    const h = harness({ db: d.db });
+    withEmail(h, EMAIL_REFUSED_401_AUTH);
+
+    const outcome = await processPendingDigest(h.deps, digestRow({ attempts: 0 }));
+
+    expect(outcome).toBe('failed');
+    expect(d.patches.at(-1)).toMatchObject({ status: 'failed', lastError: 'reconnect Salesforce' });
+    expect(d.patches.at(-1)).not.toHaveProperty('nextAttemptAt'); // never scheduled for a retry
+    expect(d.patches).toHaveLength(2); // just the claim (sending) + this terminal write — no retry write
   });
 
   it('an AMBIGUOUS send outcome (5xx) is "unknown" and is NEVER retried, even on the first try', async () => {
