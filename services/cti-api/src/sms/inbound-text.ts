@@ -18,6 +18,25 @@ import { ORG_TIMEZONE } from '../dialer/org-day.js';
 export const OPT_OUT_WORDS = ['STOP', 'STOPALL', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT'] as const;
 const OPT_OUT_SET: ReadonlySet<string> = new Set(OPT_OUT_WORDS);
 
+/** Shorter bodies ("ok", "hi") are ordinary words; redacting them would shred
+ *  unrelated log text while protecting nothing. */
+const REDACT_MIN_LENGTH = 4;
+
+/**
+ * Removes the message body from text bound for a log line. Salesforce quotes a
+ * rejected value back in its error payload, and we JSON.stringify that payload
+ * into error messages — so the body arrives JSON-ESCAPED (quotes, backslashes,
+ * newlines, tabs), and once more escaped when such a message is itself
+ * stringified. All three forms are removed, longest first so a shorter form
+ * never splits a longer one.
+ */
+export function redactBody(text: string, body: string): string {
+  if (body.trim().length < REDACT_MIN_LENGTH) return text;
+  const once = JSON.stringify(body).slice(1, -1);
+  const twice = JSON.stringify(once).slice(1, -1);
+  return [twice, once, body].reduce((acc, form) => acc.split(form).join('[message]'), text);
+}
+
 /** Salesforce's limit on Task.Subject; a longer one fails the whole create. */
 const SUBJECT_MAX = 255;
 const STOP_SUFFIX = ' — asked to STOP';
@@ -180,11 +199,23 @@ export interface TextEmailInput {
   notLogged?: boolean;
 }
 
+/**
+ * The texter's words, every line prefixed "> ". A text is written by a stranger:
+ * quoting it keeps anything it says — including a line that reads exactly like
+ * our own "Open in Salesforce: <link>" — visibly theirs, never ours.
+ */
+function quotedMessage(body: string): string[] {
+  if (!body.trim()) return ['> (no text)'];
+  return body.split(/\r\n|\r|\n/).map((line) => (line ? `> ${line}` : '>'));
+}
+
 /** The rep's alert. Plain text on purpose: emailSimple sends it as-is, and a
- *  text message is plain text anyway. */
+ *  text message is plain text anyway. Our own lines (the header, the attachment
+ *  note, the link) are never quoted; the texter's always are. */
 export function textEmail(input: TextEmailInput): { subject: string; body: string } {
   const name = input.name?.trim() || null;
   const number = formatUsNumber(input.fromE164);
+  const note = attachmentNote(input.numMedia);
   const lines = [
     `From: ${name ? `${name} ${number}` : number}`,
     `To your number: ${formatUsNumber(input.toE164)}`,
@@ -192,7 +223,9 @@ export function textEmail(input: TextEmailInput): { subject: string; body: strin
     ...(input.optOut ? ['They asked to STOP.'] : []),
     ...(input.notLogged ? ['This text could not be logged to Salesforce — there is no Task for it.'] : []),
     '',
-    textTaskDescription(input.body, input.numMedia),
+    'Message:',
+    ...quotedMessage(input.body),
+    ...(note ? [note] : []),
     ...(input.recordUrl ? ['', `Open in Salesforce: ${input.recordUrl}`] : []),
   ];
   return {

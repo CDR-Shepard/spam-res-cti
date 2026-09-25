@@ -19,6 +19,9 @@
 --               skipped when there was no rep. Text + CHECK, house style (0043).
 -- sf_task_id    Stamped the moment the Task exists — a retry never creates twice.
 -- emailed_at    Stamped the moment the alert is sent — a retry never re-emails.
+-- email_skip_reason  Why a live text got its Task but NO alert (the flood guard:
+--               one email per rep per sender number per 60 minutes). NULL with
+--               emailed_at NULL on a done row means backfill (digest instead).
 -- backfill      Pulled from Twilio history, not live: the worker creates the
 --               Task but never emails it individually (one digest instead).
 -- received_at   When Twilio received it (live: webhook time; backfill: Twilio's
@@ -40,6 +43,7 @@ CREATE TABLE IF NOT EXISTS "inbound_messages" (
   "last_error" text,
   "sf_task_id" text,
   "emailed_at" timestamptz,
+  "email_skip_reason" text,
   "backfill" boolean NOT NULL DEFAULT false,
   "received_at" timestamptz NOT NULL DEFAULT now(),
   "created_at" timestamptz NOT NULL DEFAULT now(),
@@ -51,3 +55,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "inbound_messages_message_sid_unique" ON "inbo
 
 -- The worker's scan: pending rows whose next_attempt_at has passed.
 CREATE INDEX IF NOT EXISTS "inbound_messages_status_idx" ON "inbound_messages" ("status", "next_attempt_at");
+
+-- The flood guard's lookup, once per alert: has this rep been emailed about
+-- this sender in the last hour?
+CREATE INDEX IF NOT EXISTS "inbound_messages_alert_idx" ON "inbound_messages" ("user_id", "from_e164", "emailed_at");

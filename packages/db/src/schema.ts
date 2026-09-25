@@ -875,6 +875,9 @@ export const inboundMessages = pgTable(
     sfTaskId: text('sf_task_id'),
     /** Stamped the moment the alert is sent — a retry must NOT email again. */
     emailedAt: timestamp('emailed_at', { withTimezone: true }),
+    /** Why a live text got NO alert (the one-per-sender-per-hour flood guard).
+     *  Set = the email decision is made; a retry never revisits it. */
+    emailSkipReason: text('email_skip_reason'),
     /** Pulled from Twilio history: Task yes, individual email never (one digest). */
     backfill: boolean('backfill').default(false).notNull(),
     receivedAt: timestamp('received_at', { withTimezone: true }).defaultNow().notNull(),
@@ -885,6 +888,7 @@ export const inboundMessages = pgTable(
     // FULL, never partial: the insert's ON CONFLICT DO NOTHING arbitrates on it.
     messageSidUnique: uniqueIndex('inbound_messages_message_sid_unique').on(t.messageSid),
     statusIdx: index('inbound_messages_status_idx').on(t.status, t.nextAttemptAt),
+    alertIdx: index('inbound_messages_alert_idx').on(t.userId, t.fromE164, t.emailedAt),
   }),
 );
 export type InboundMessage = typeof inboundMessages.$inferSelect;

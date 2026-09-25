@@ -5,6 +5,7 @@ import {
   formatUsNumber,
   isOptOutText,
   pacificTime,
+  redactBody,
   salesforceHomeUrl,
   salesforceRecordUrl,
   taskFailureIsRetryable,
@@ -200,6 +201,33 @@ describe('taskFailureIsRetryable', () => {
   });
 });
 
+describe('redactBody', () => {
+  const tricky = 'He said "call me"\nat C:\\office\\desk\ttonight';
+
+  it('removes the body as-is', () => {
+    expect(redactBody(`boom: ${tricky} (end)`, tricky)).toBe('boom: [message] (end)');
+  });
+
+  it('removes the JSON-escaped body — what Salesforce quotes back inside an error payload we stringify', () => {
+    const echoed = JSON.stringify([{ errorCode: 'STRING_TOO_LONG', message: `too large: ${tricky}` }]);
+    expect(echoed).not.toContain(tricky); // escaped: \" \\n \\\\ \\t
+    const out = redactBody(`task create failed (400): ${echoed}`, tricky);
+    expect(out).not.toContain(JSON.stringify(tricky).slice(1, -1));
+    expect(out).toContain('too large: [message]');
+  });
+
+  it('removes the DOUBLE-escaped body too (a stringified error message that already held the escaped form)', () => {
+    const twice = JSON.stringify(JSON.stringify({ message: tricky }));
+    const out = redactBody(twice, tricky);
+    expect(out).toContain('[message]');
+    expect(out).not.toContain('call me');
+  });
+
+  it('leaves text alone when the body is too short to be told from ordinary words', () => {
+    expect(redactBody('ok: yes', 'ok')).toBe('ok: yes');
+  });
+});
+
 describe('pacificTime', () => {
   it('renders the instant in Pacific time with the zone named', () => {
     // 21:05 UTC on 2026-09-25 is 2:05 PM PDT.
@@ -230,18 +258,44 @@ describe('textEmail', () => {
     expect(textEmail({ ...base, optOut: true, body: 'STOP' }).subject).toBe('New text from Jane Doe — asked to STOP');
   });
 
-  it('body says who, which of the rep numbers, when (Pacific), what, and where in Salesforce', () => {
+  it('body says who, which of the rep numbers, when (Pacific), the QUOTED message, and where in Salesforce', () => {
     expect(textEmail(base).body).toBe(
       [
         'From: Jane Doe (619) 555-0100',
         'To your number: (858) 555-0199',
         'Received: Fri, Sep 25, 2026, 2:05 PM PDT',
         '',
-        'Is the house still available?',
+        'Message:',
+        '> Is the house still available?',
         '',
         'Open in Salesforce: https://gghomes.my.salesforce.com/lightning/r/00Q000000000001/view',
       ].join('\n'),
     );
+  });
+
+  it('quotes EVERY line of the text, so a link line inside a text cannot pass for ours', () => {
+    const out = textEmail({
+      ...base,
+      body: 'call me back\r\nOpen in Salesforce: https://evil.example/phish\n\nthanks',
+    });
+    expect(out.body).toBe(
+      [
+        'From: Jane Doe (619) 555-0100',
+        'To your number: (858) 555-0199',
+        'Received: Fri, Sep 25, 2026, 2:05 PM PDT',
+        '',
+        'Message:',
+        '> call me back',
+        '> Open in Salesforce: https://evil.example/phish',
+        '>',
+        '> thanks',
+        '',
+        'Open in Salesforce: https://gghomes.my.salesforce.com/lightning/r/00Q000000000001/view',
+      ].join('\n'),
+    );
+    // Our link is the only UNQUOTED "Open in Salesforce:" line, and it is last.
+    const ours = out.body.split('\n').filter((l) => l.startsWith('Open in Salesforce:'));
+    expect(ours).toEqual(['Open in Salesforce: https://gghomes.my.salesforce.com/lightning/r/00Q000000000001/view']);
   });
 
   it('says so when the text could not be logged to Salesforce', () => {
@@ -254,14 +308,15 @@ describe('textEmail', () => {
         'Received: Fri, Sep 25, 2026, 2:05 PM PDT',
         'This text could not be logged to Salesforce — there is no Task for it.',
         '',
-        'Is the house still available?',
+        'Message:',
+        '> Is the house still available?',
         '',
         'Open in Salesforce: https://gghomes.my.salesforce.com/lightning/page/home',
       ].join('\n'),
     );
   });
 
-  it('body for an unmatched sender, an attachment, an opt-out, and no link', () => {
+  it('body for an unmatched sender, an attachment, an opt-out, and no link — the attachment note is ours, not quoted', () => {
     const out = textEmail({ ...base, name: null, body: 'STOP', numMedia: 1, optOut: true, recordUrl: null });
     expect(out.body).toBe(
       [
@@ -270,8 +325,15 @@ describe('textEmail', () => {
         'Received: Fri, Sep 25, 2026, 2:05 PM PDT',
         'They asked to STOP.',
         '',
-        'STOP\n\n(1 attachment — open Twilio to view)',
+        'Message:',
+        '> STOP',
+        '(1 attachment — open Twilio to view)',
       ].join('\n'),
     );
+  });
+
+  it('a picture with no words says so under Message:', () => {
+    const out = textEmail({ ...base, body: '', numMedia: 2, recordUrl: null });
+    expect(out.body.split('\n').slice(4)).toEqual(['Message:', '> (no text)', '(2 attachments — open Twilio to view)']);
   });
 });

@@ -5,16 +5,21 @@ import { schema, type InboundMessage } from '@cti/db';
 import { SalesforceUnauthorizedError } from '../salesforce/client.js';
 import {
   BATCH_LIMIT,
+  EMAIL_WINDOW_MS,
+  LOOP_INTERVAL_MS,
   MAX_TRIES,
   RETRY_DELAYS_MS,
   SF_CALL_TIMEOUT_MS,
   SF_CREATE_TIMEOUT_MS,
   STUCK_AFTER_MS,
   claimInboundText,
+  failExhaustedStuckInboundTexts,
+  maybeStartInboundTextLoop,
   processInboundText,
   reapStuckInboundTexts,
   runInboundTextTick,
   selectDueInboundTexts,
+  selectRecentAlert,
   type InboundTextDeps,
 } from './inbound-text-worker.js';
 
@@ -45,6 +50,7 @@ function row(o: Partial<InboundMessage> = {}): InboundMessage {
     lastError: null,
     sfTaskId: null,
     emailedAt: null,
+    emailSkipReason: null,
     backfill: false,
     // 05:00 UTC on the 26th is still the 25th in Los Angeles.
     receivedAt: new Date('2026-09-26T05:00:00Z'),
@@ -92,6 +98,7 @@ function harness(over: Partial<InboundTextDeps> = {}) {
       sfFetch: sfFetch as unknown as InboundTextDeps['sf']['sfFetch'],
     },
     instanceUrlFor: vi.fn(async () => 'https://gghomes.my.salesforce.com'),
+    alertedRecently: vi.fn(async () => false),
     now: () => NOW,
     ...over,
   };
@@ -120,6 +127,25 @@ function taskAnswers(h: ReturnType<typeof harness>, task: { status: number; json
 
 const VALIDATION_ERROR = { status: 400, json: [{ errorCode: 'FIELD_CUSTOM_VALIDATION_EXCEPTION', message: 'Type is required' }] };
 const SERVER_BUSY = { status: 503, json: { message: 'busy' } };
+
+/** A body with every character JSON escapes, around a fragment that survives
+ *  escaping unchanged — so one `includes(SECRET)` catches the raw, the escaped
+ *  and the double-escaped forms alike. */
+const SECRET = 'gate code 4471';
+const TRICKY = `He said "call me"\nmy ${SECRET}\tat C:\\office`;
+
+/** Every string handed to console.warn / console.error, however deeply nested. */
+function loggedStrings(): string {
+  const out: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === 'string') out.push(v);
+    else if (v instanceof Error) out.push(v.message);
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  [...warn.mock.calls, ...error.mock.calls].forEach(walk);
+  return out.join('\n');
+}
 
 let warn: ReturnType<typeof vi.spyOn>;
 let error: ReturnType<typeof vi.spyOn>;
@@ -237,8 +263,13 @@ describe('processInboundText — the Salesforce Task', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('without WhoId/WhatId'), expect.objectContaining({ rowId: 'row-1' }));
   });
 
-  it('a Salesforce rejection of the LINK (converted lead, bad cross-reference) also falls back to unlinked', async () => {
-    for (const errorCode of ['CANNOT_UPDATE_CONVERTED_LEAD', 'INVALID_CROSS_REFERENCE_KEY', 'FIELD_INTEGRITY_EXCEPTION']) {
+  it('a Salesforce rejection of the LINK (converted lead, bad cross-reference, no access to the record) also falls back to unlinked', async () => {
+    for (const errorCode of [
+      'CANNOT_UPDATE_CONVERTED_LEAD',
+      'INVALID_CROSS_REFERENCE_KEY',
+      'FIELD_INTEGRITY_EXCEPTION',
+      'INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY',
+    ]) {
       const h = harness();
       let n = 0;
       (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, path: string) => {
@@ -283,7 +314,8 @@ describe('processInboundText — the email alert', () => {
             'To your number: (858) 555-0199',
             'Received: Fri, Sep 25, 2026, 10:00 PM PDT',
             '',
-            BODY,
+            'Message:',
+            `> ${BODY}`,
             '',
             `Open in Salesforce: https://gghomes.my.salesforce.com/lightning/r/${LEAD}/view`,
           ].join('\n'),
@@ -410,7 +442,7 @@ describe('processInboundText — once-only guards', () => {
 
 describe('processInboundText — the alert does not depend on the Task', () => {
   it('a retryable Task error on an early try does NOT email yet — it backs off and retries', async () => {
-    for (const attempts of [1, 2, 3]) {
+    for (const attempts of [1, 2]) {
       const h = harness();
       taskAnswers(h, SERVER_BUSY);
       await processInboundText(row({ attempts }), h.deps);
@@ -493,6 +525,70 @@ describe('processInboundText — the alert does not depend on the Task', () => {
   });
 });
 
+describe('processInboundText — one alert per rep per sender per hour (flood guard)', () => {
+  /** A tiny stand-in for inbound_messages' emailed_at stamps: every alert the
+   *  worker records lands here, and `alertedRecently` reads it back exactly as
+   *  the SQL does — same rep, same sender, emailed_at at or after `since`. */
+  function sharedAlerts() {
+    const sent: Array<{ userId: string; from: string; at: Date }> = [];
+    const alertedRecently = vi.fn(async (userId: string, from: string, since: Date) =>
+      sent.some((s) => s.userId === userId && s.from === from && s.at.getTime() >= since.getTime()),
+    );
+    const run = async (r: InboundMessage, at: Date) => {
+      const h = harness({ alertedRecently, now: () => at });
+      await processInboundText(r, h.deps);
+      const stamp = h.writes.find((w) => w.emailedAt instanceof Date);
+      if (stamp) sent.push({ userId: r.userId!, from: r.fromE164, at: stamp.emailedAt as Date });
+      return h;
+    };
+    return { run, alertedRecently };
+  }
+
+  it('a second text 10 minutes later gets its Task but NO email, and the row says why; 61 minutes later emails again', async () => {
+    expect(EMAIL_WINDOW_MS).toBe(60 * 60_000);
+    const { run } = sharedAlerts();
+    const first = await run(row({ id: 'row-a' }), NOW);
+    expect(first.calls('/actions/standard/emailSimple')).toHaveLength(1);
+
+    const second = await run(row({ id: 'row-b' }), new Date(NOW.getTime() + 10 * 60_000));
+    expect(second.calls('/sobjects/Task')).toHaveLength(1);
+    expect(second.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    expect(second.writes.some((w) => w.emailedAt instanceof Date)).toBe(false);
+    expect(second.writes).toContainEqual(expect.objectContaining({ emailSkipReason: expect.stringMatching(/one alert per sender per hour/) }));
+    expect(second.writes.at(-1)).toMatchObject({ status: 'done', lastError: null });
+
+    const third = await run(row({ id: 'row-c' }), new Date(NOW.getTime() + 61 * 60_000));
+    expect(third.calls('/actions/standard/emailSimple')).toHaveLength(1);
+  });
+
+  it('asks about THIS rep and THIS sender over the last 60 minutes', async () => {
+    const { run, alertedRecently } = sharedAlerts();
+    await run(row(), NOW);
+    expect(alertedRecently).toHaveBeenCalledWith('rep-1', '+16195550100', new Date(NOW.getTime() - EMAIL_WINDOW_MS));
+  });
+
+  it('another sender inside the window is still emailed', async () => {
+    const { run } = sharedAlerts();
+    await run(row({ id: 'row-a' }), NOW);
+    const other = await run(row({ id: 'row-b', fromE164: '+16195550111' }), new Date(NOW.getTime() + 60_000));
+    expect(other.calls('/actions/standard/emailSimple')).toHaveLength(1);
+  });
+
+  it('the decision is once-only: a retried row that was suppressed never asks again or emails', async () => {
+    const h = harness();
+    await processInboundText(row({ emailSkipReason: 'one alert per sender per hour', sfTaskId: null }), h.deps);
+    expect(h.deps.alertedRecently).not.toHaveBeenCalled();
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    expect(h.calls('/sobjects/Task')).toHaveLength(1);
+  });
+
+  it('a backfill row never even asks (it never emails individually)', async () => {
+    const h = harness();
+    await processInboundText(row({ backfill: true }), h.deps);
+    expect(h.deps.alertedRecently).not.toHaveBeenCalled();
+  });
+});
+
 describe('processInboundText — failures', () => {
   it('a Salesforce auth failure is terminal: failed, "reconnect Salesforce", no retry scheduled', async () => {
     const h = harness();
@@ -513,11 +609,11 @@ describe('processInboundText — failures', () => {
     expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
   });
 
-  it('a row gets one try plus three retries: backs off 30 s, 2 min, 10 min — then fails', async () => {
-    expect([...RETRY_DELAYS_MS]).toEqual([30_000, 120_000, 600_000]);
-    expect(MAX_TRIES).toBe(4);
+  it('a row gets three tries in all (one try plus two retries): backs off 30 s, 2 min — then fails', async () => {
+    expect([...RETRY_DELAYS_MS]).toEqual([30_000, 120_000]);
+    expect(MAX_TRIES).toBe(3);
     const outcomes: Patch[] = [];
-    for (const attempts of [1, 2, 3, 4]) {
+    for (const attempts of [1, 2, 3]) {
       const h = harness();
       // A failure that is not the Task's: resolving the rep's Salesforce id.
       (h.deps.sf.salesforceUserId as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('chatter/users/me 503'));
@@ -526,9 +622,8 @@ describe('processInboundText — failures', () => {
     }
     expect(outcomes[0]).toMatchObject({ status: 'pending', nextAttemptAt: new Date(NOW.getTime() + 30_000) });
     expect(outcomes[1]).toMatchObject({ status: 'pending', nextAttemptAt: new Date(NOW.getTime() + 120_000) });
-    expect(outcomes[2]).toMatchObject({ status: 'pending', nextAttemptAt: new Date(NOW.getTime() + 600_000) });
-    expect(outcomes[3]).toMatchObject({ status: 'failed', lastError: expect.stringContaining('503') });
-    expect(outcomes[3]).not.toHaveProperty('nextAttemptAt');
+    expect(outcomes[2]).toMatchObject({ status: 'failed', lastError: expect.stringContaining('503') });
+    expect(outcomes[2]).not.toHaveProperty('nextAttemptAt');
   });
 
   it('a hung Salesforce call times out instead of pinning the tick', async () => {
@@ -545,17 +640,56 @@ describe('processInboundText — failures', () => {
     }
   });
 
-  it('never writes the message body to the log, even when Salesforce echoes it back', async () => {
+});
+
+/**
+ * The message body never reaches a log line — one test per log site, each
+ * proving the site FIRED (so the test cannot pass vacuously) and that what it
+ * wrote holds no trace of the body in any form: raw, JSON-escaped (Salesforce
+ * quoting it back inside a payload we stringify) or double-escaped.
+ */
+describe('the message body never reaches a log line', () => {
+  const quoting = (status: number, errorCode: string) => ({ status, json: [{ errorCode, message: `bad value: ${TRICKY}` }] });
+
+  it('the sender-match warning, when the SOSL error quotes the body', async () => {
     const h = harness();
-    // Both the Task AND the fallback email are refused with the body quoted back.
-    (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
-      status: 400,
-      json: [{ errorCode: 'STRING_TOO_LONG', message: `Description: data value too large: ${BODY}` }],
-    }));
-    await processInboundText(row({ attempts: 4 }), h.deps);
-    const logged = JSON.stringify([...warn.mock.calls, ...error.mock.calls]);
-    expect(error).toHaveBeenCalled();
-    expect(logged).not.toContain(BODY);
+    (h.deps.sf.findByPhone as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error(`SOSL failed (500): ${JSON.stringify([{ message: TRICKY }])}`),
+    );
+    await processInboundText(row({ body: TRICKY }), h.deps);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('sender match failed'), expect.anything());
+    expect(loggedStrings()).not.toContain(SECRET);
+  });
+
+  it('the link-rejection warning, when Salesforce quotes the body in the refusal', async () => {
+    const h = harness();
+    let n = 0;
+    (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, path: string) => {
+      if (path !== '/sobjects/Task') return EMAIL_OK;
+      n++;
+      return n === 1 ? quoting(400, 'INVALID_CROSS_REFERENCE_KEY') : { status: 201, json: { id: '00TNEW000000009' } };
+    });
+    await processInboundText(row({ body: TRICKY }), h.deps);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('without WhoId/WhatId'), expect.anything());
+    expect(loggedStrings()).not.toContain(SECRET);
+  });
+
+  it('the "task given up" failure, after a permanent Task error that quotes the body and a SUCCESSFUL alert', async () => {
+    const h = harness();
+    taskAnswers(h, quoting(400, 'STRING_TOO_LONG'));
+    await processInboundText(row({ body: TRICKY, attempts: 1 }), h.deps);
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(1);
+    expect(h.writes.at(-1)).toMatchObject({ status: 'failed' });
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('text failed'), expect.anything());
+    expect(loggedStrings()).not.toContain(SECRET);
+  });
+
+  it('the final failure, when BOTH the Task and the alert are refused with the body quoted back', async () => {
+    const h = harness();
+    (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => quoting(400, 'STRING_TOO_LONG'));
+    await processInboundText(row({ body: TRICKY, attempts: MAX_TRIES }), h.deps);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('text failed'), expect.anything());
+    expect(loggedStrings()).not.toContain(SECRET);
   });
 });
 
@@ -567,40 +701,66 @@ describe('the reaper budget', () => {
 });
 
 describe('runInboundTextTick', () => {
-  /** A fake handle for the tick: reaper + claim are `update`s (the claim awaits
-   *  `.returning()`), the scan is a `select`. Every write lands in `writes`;
-   *  `failWrite` makes a processing write (never the claim) reject. */
-  function tickDb(due: InboundMessage[], claim: () => InboundMessage | null, failWrite: () => boolean = () => false) {
-    const writes: Array<{ patch: Patch }> = [];
+  interface TickFake {
+    due?: InboundMessage[];
+    /** What each claim's `.returning()` yields — null = another replica won the row. */
+    claim?: () => InboundMessage | null;
+    /** What the capped reaper's `.returning()` yields: stuck rows already at MAX_TRIES. */
+    exhausted?: InboundMessage[];
+    /** Make a processing write reject (never a claim or a reaper write). */
+    failWrite?: () => Error | null;
+    /** Shared, ordered log of writes (`write:<status or keys>`) for order assertions. */
+    log?: string[];
+  }
+
+  /** A fake handle for the tick: the reapers and the claim are `update`s (the
+   *  capped reaper and the claim await `.returning()`), the scan is a `select`. */
+  function tickDb(f: TickFake) {
+    const writes: Patch[] = [];
+    let exhausted = f.exhausted ?? [];
     const db = {
       update: (_t: unknown) => ({
         set: (patch: Patch) => ({
           where: (_w: unknown) => {
-            writes.push({ patch });
-            const fail = patch.status !== 'in_flight' && failWrite();
-            const done = (fail ? Promise.reject(new Error('db write exploded')) : Promise.resolve([])) as Promise<unknown> & {
+            writes.push(patch);
+            const label =
+              typeof patch.status === 'string'
+                ? `status=${patch.status}`
+                : Object.keys(patch).filter((k) => k !== 'updatedAt').sort().join(',');
+            f.log?.push(`write:${label}`);
+            const reapOrClaim =
+              patch.status === 'in_flight' ||
+              (patch.status === 'pending' && !('lastError' in patch)) ||
+              (patch.status === 'failed' && typeof patch.lastError === 'object');
+            const err = reapOrClaim ? null : (f.failWrite?.() ?? null);
+            const done = (err ? Promise.reject(err) : Promise.resolve([])) as Promise<unknown> & {
               returning: () => Promise<InboundMessage[]>;
             };
             done.catch(() => {}); // awaited by the caller; this only silences the unhandled-rejection probe
             done.returning = async () => {
-              const r = claim();
-              return r ? [r] : [];
+              if (patch.status === 'in_flight') {
+                const r = f.claim?.() ?? null;
+                return r ? [r] : [];
+              }
+              const out = exhausted;
+              exhausted = [];
+              return out;
             };
             return done;
           },
         }),
       }),
-      select: () => ({ from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => due }) }) }) }),
+      select: () => ({ from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => f.due ?? [] }) }) }) }),
     };
     return { writes, db: db as unknown as InboundTextDeps['db'] };
   }
 
   it('reaps stuck rows, then skips a row whose conditional claim lost to another replica', async () => {
-    const t = tickDb([row({ status: 'pending', attempts: 0 })], () => null);
+    const t = tickDb({ due: [row({ status: 'pending', attempts: 0 })], claim: () => null });
     const h = harness({ db: t.db });
     const out = await runInboundTextTick(h.deps);
     expect(out.processed).toBe(0);
-    expect(t.writes[0]!.patch).toMatchObject({ status: 'pending' }); // the reaper
+    expect(t.writes[0]).toMatchObject({ status: 'pending' }); // the reaper
     expect(h.deps.sf.findByPhone).not.toHaveBeenCalled();
     expect(h.calls('/sobjects/Task')).toHaveLength(0);
   });
@@ -608,50 +768,174 @@ describe('runInboundTextTick', () => {
   it('processes the row AS CLAIMED (fresh stamps, bumped attempts), stamping the claim with a fresh clock', async () => {
     let t0 = NOW.getTime();
     const claimed = row({ status: 'in_flight', attempts: 2, sfTaskId: '00TOLD000000001' });
-    const t = tickDb([row({ status: 'pending', attempts: 1 })], () => claimed);
+    const t = tickDb({ due: [row({ status: 'pending', attempts: 1 })], claim: () => claimed });
     const h = harness({ db: t.db, now: () => new Date((t0 += 1_000)) });
     const out = await runInboundTextTick(h.deps);
     expect(out.processed).toBe(1);
     // The claimed row already has its Task: only the email goes out.
     expect(h.calls('/sobjects/Task')).toHaveLength(0);
     expect(h.calls('/actions/standard/emailSimple')).toHaveLength(1);
-    const claimWrite = t.writes.find((w) => w.patch.status === 'in_flight')!;
+    const claimWrite = t.writes.find((w) => w.status === 'in_flight')!;
     const reapWrite = t.writes[0]!;
-    expect((claimWrite.patch.updatedAt as Date).getTime()).toBeGreaterThan((reapWrite.patch.updatedAt as Date).getTime());
+    expect((claimWrite.updatedAt as Date).getTime()).toBeGreaterThan((reapWrite.updatedAt as Date).getTime());
   });
 
-  it('keeps draining the batch when one row throws out of processing', async () => {
+  it('each claim reads the clock AFTER the previous row finished — a stale claim stamp would be reaped and run twice', async () => {
+    // One clock read per tick would stamp row 2's claim with the time row 1 was
+    // claimed; in a 25-row batch that stamp can be minutes old the moment it is
+    // written, and another replica's reaper takes the row while this one works on it.
+    let t0 = NOW.getTime();
     const rows = [row({ id: 'row-1', status: 'pending' }), row({ id: 'row-2', status: 'pending' })];
     let n = 0;
+    const t = tickDb({ due: rows, claim: () => rows[n++] ?? null });
+    const h = harness({ db: t.db, now: () => new Date((t0 += 1_000)) });
+    await runInboundTextTick(h.deps);
+    const claims = t.writes.map((w, i) => ({ w, i })).filter(({ w }) => w.status === 'in_flight');
+    expect(claims).toHaveLength(2);
+    const [c1, c2] = claims as [{ w: Patch; i: number }, { w: Patch; i: number }];
+    const row1Writes = t.writes.slice(c1.i + 1, c2.i);
+    expect(row1Writes.at(-1)).toMatchObject({ status: 'done' }); // row 1 really finished in between
+    const row1Last = Math.max(...row1Writes.map((w) => (w.updatedAt as Date).getTime()));
+    expect((c2.w.updatedAt as Date).getTime()).toBeGreaterThan(row1Last);
+  });
+
+  it('keeps draining the batch when one row throws out of processing — and the crash log never holds the body', async () => {
+    const rows = [row({ id: 'row-1', status: 'pending', body: TRICKY }), row({ id: 'row-2', status: 'pending' })];
+    let n = 0;
     let current: InboundMessage | null = null;
-    // row-1's writes explode (the DB went away mid-row) — including the backoff
-    // write in its catch — so the throw escapes processInboundText. row-2 must still run.
-    const t = tickDb(
-      rows,
-      () => (current = rows[n++] ?? null),
-      () => current?.id === 'row-1',
-    );
+    // row-1's writes explode with an error that QUOTES the body (a database error
+    // can quote the failing row) — including the backoff write in its catch — so
+    // the throw escapes processInboundText. row-2 must still run.
+    const t = tickDb({
+      due: rows,
+      claim: () => (current = rows[n++] ?? null),
+      failWrite: () => (current?.id === 'row-1' ? new Error(`write failed for row (${JSON.stringify(TRICKY)})`) : null),
+    });
     const h = harness({ db: t.db });
     const out = await runInboundTextTick(h.deps);
     expect(out.processed).toBe(2);
     expect(error).toHaveBeenCalledWith(expect.stringContaining('row crashed'), expect.objectContaining({ rowId: 'row-1' }));
+    expect(loggedStrings()).not.toContain(SECRET);
     expect(h.calls('/actions/standard/emailSimple')).toHaveLength(1); // row-2 went all the way through
-    expect(t.writes.at(-1)!.patch).toMatchObject({ status: 'done' });
+    expect(t.writes.at(-1)).toMatchObject({ status: 'done' });
+  });
+
+  describe('attempts are capped — a row can never loop forever', () => {
+    it('a stuck row already on its LAST try is failed by the reaper (not handed back), then its rep is alerted once', async () => {
+      const log: string[] = [];
+      const stuck = row({ id: 'row-stuck', status: 'failed', attempts: MAX_TRIES });
+      const t = tickDb({ exhausted: [stuck], log });
+      const h = harness({ db: t.db });
+      (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, path: string) => {
+        log.push(`sf:${path}`);
+        return EMAIL_OK;
+      });
+      const out = await runInboundTextTick(h.deps);
+      expect(out.gaveUp).toBe(1);
+      // The capped reaper wrote `failed` (in SQL, before any Salesforce call); then the alert, then its stamp.
+      expect(log).toEqual(['write:status=pending', 'write:status=failed', 'sf:/actions/standard/emailSimple', 'write:emailedAt']);
+      expect(h.calls('/sobjects/Task')).toHaveLength(0);
+      expect(emailInputs(h)[0]!.emailBody).toContain(NOT_LOGGED);
+    });
+
+    it('no alert for a given-up row already emailed, suppressed, backfilled, or with no rep', async () => {
+      const cases: Array<Partial<InboundMessage>> = [
+        { emailedAt: NOW },
+        { emailSkipReason: 'one alert per sender per hour' },
+        { backfill: true },
+        { userId: null },
+      ];
+      for (const o of cases) {
+        const t = tickDb({ exhausted: [row({ status: 'failed', attempts: MAX_TRIES, ...o })] });
+        const h = harness({ db: t.db });
+        await runInboundTextTick(h.deps);
+        expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+      }
+    });
+
+    it('a given-up row that has its Task links it and does not say "not logged"', async () => {
+      const t = tickDb({ exhausted: [row({ status: 'failed', attempts: MAX_TRIES, sfTaskId: '00TOLD000000001' })] });
+      const h = harness({ db: t.db });
+      (h.deps.sf.findByPhone as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      await runInboundTextTick(h.deps);
+      expect(emailInputs(h)[0]!.emailBody).not.toContain(NOT_LOGGED);
+      expect(emailInputs(h)[0]!.emailBody).toContain('/lightning/r/00TOLD000000001/view');
+    });
+
+    it('the final alert obeys the flood guard too', async () => {
+      const t = tickDb({ exhausted: [row({ status: 'failed', attempts: MAX_TRIES })] });
+      const h = harness({ db: t.db, alertedRecently: vi.fn(async () => true) });
+      await runInboundTextTick(h.deps);
+      expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+      expect(t.writes).toContainEqual(expect.objectContaining({ emailSkipReason: expect.stringMatching(/one alert per sender/) }));
+    });
+
+    it('a pending row RE-CLAIMED past its last try is failed at once — no fresh try — then alerted', async () => {
+      const log: string[] = [];
+      const claimed = row({ status: 'in_flight', attempts: MAX_TRIES + 1, lastError: 'task create failed (503)' });
+      const t = tickDb({ due: [row({ status: 'pending', attempts: MAX_TRIES })], claim: () => claimed, log });
+      const h = harness({ db: t.db });
+      (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, path: string) => {
+        log.push(`sf:${path}`);
+        return EMAIL_OK;
+      });
+      const out = await runInboundTextTick(h.deps);
+      expect(out).toEqual({ processed: 0, gaveUp: 1 });
+      expect(h.calls('/sobjects/Task')).toHaveLength(0);
+      // (The capped reaper also writes `failed`, with a SQL expression; this is the re-claim's own write.)
+      const failedWrite = t.writes.find((w) => w.status === 'failed' && typeof w.lastError === 'string')!;
+      expect(failedWrite.lastError).toBe(`gave up: already tried ${MAX_TRIES} times; task create failed (503)`);
+      // failed BEFORE the email: a crash while emailing must not leave the row claimable.
+      expect(log.slice(-4)).toEqual(['write:status=in_flight', 'write:status=failed', 'sf:/actions/standard/emailSimple', 'write:emailedAt']);
+    });
+
+    it('a failed final alert is logged (without the body) and never retried — the row is already failed', async () => {
+      const t = tickDb({ exhausted: [row({ status: 'failed', attempts: MAX_TRIES, body: TRICKY })] });
+      const h = harness({ db: t.db });
+      (h.deps.sf.sfFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+        status: 400,
+        json: [{ errorCode: 'STRING_TOO_LONG', message: `bad: ${TRICKY}` }],
+      }));
+      await runInboundTextTick(h.deps);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('final alert failed'), expect.anything());
+      expect(loggedStrings()).not.toContain(SECRET);
+      expect(t.writes.some((w) => w.emailedAt instanceof Date)).toBe(false);
+      expect(t.writes.filter((w) => w.status === 'pending')).toHaveLength(1); // only the ordinary reaper's write
+    });
+  });
+});
+
+describe('INBOUND_TEXTS kill switch — the loop', () => {
+  it('off → the worker loop is NOT started', () => {
+    const start = vi.fn();
+    expect(maybeStartInboundTextLoop({ INBOUND_TEXTS: 'off' }, start)).toBeNull();
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('on → started at the 5 s interval, and the timer handed back for close()', () => {
+    const timer = setTimeout(() => {}, 0);
+    clearTimeout(timer);
+    const start = vi.fn(() => timer);
+    expect(maybeStartInboundTextLoop({ INBOUND_TEXTS: 'on' }, start)).toBe(timer);
+    expect(start).toHaveBeenCalledWith(LOOP_INTERVAL_MS);
+    expect(LOOP_INTERVAL_MS).toBe(5_000);
   });
 });
 
 describe('the worker SQL, rendered', () => {
   const db = drizzle(new Pool({ connectionString: 'postgres://unused:unused@127.0.0.1:1/unused' }), { schema });
+  const RETURNING =
+    ' returning "id", "org_id", "message_sid", "from_e164", "to_e164", "body", "num_media", "user_id", "status", "attempts", ' +
+    '"next_attempt_at", "last_error", "sf_task_id", "emailed_at", "email_skip_reason", "backfill", "received_at", "created_at", "updated_at"';
 
-  it('the claim is a compare-and-swap pending → in_flight that bumps attempts and stamps updated_at', () => {
+  it('the claim is a compare-and-swap pending → in_flight, DUE by the claim time, that bumps attempts and stamps updated_at', () => {
     const { sql, params } = claimInboundText(db, 'row-1', NOW).toSQL();
     expect(sql).toBe(
       'update "inbound_messages" set "status" = $1, "attempts" = "inbound_messages"."attempts" + 1, "updated_at" = $2 ' +
-        'where ("inbound_messages"."id" = $3 and "inbound_messages"."status" = $4) returning ' +
-        '"id", "org_id", "message_sid", "from_e164", "to_e164", "body", "num_media", "user_id", "status", "attempts", ' +
-        '"next_attempt_at", "last_error", "sf_task_id", "emailed_at", "backfill", "received_at", "created_at", "updated_at"',
+        'where ("inbound_messages"."id" = $3 and "inbound_messages"."status" = $4 and "inbound_messages"."next_attempt_at" <= $5)' +
+        RETURNING,
     );
-    expect(params).toEqual(['in_flight', NOW.toISOString(), 'row-1', 'pending']);
+    expect(params).toEqual(['in_flight', NOW.toISOString(), 'row-1', 'pending', NOW.toISOString()]);
   });
 
   it('the scan takes due pending rows, oldest first, a bounded batch', () => {
@@ -662,12 +946,39 @@ describe('the worker SQL, rendered', () => {
     expect(params).toEqual(['pending', NOW.toISOString(), BATCH_LIMIT]);
   });
 
-  it('the reaper returns only in_flight rows untouched for longer than the worst case', () => {
+  it('the reaper hands back only stuck in_flight rows with a try LEFT', () => {
     const { sql, params } = reapStuckInboundTexts(db, NOW).toSQL();
     expect(sql).toBe(
       'update "inbound_messages" set "status" = $1, "updated_at" = $2 ' +
-        'where ("inbound_messages"."status" = $3 and "inbound_messages"."updated_at" <= $4)',
+        'where ("inbound_messages"."status" = $3 and "inbound_messages"."updated_at" <= $4 and "inbound_messages"."attempts" < $5)',
     );
-    expect(params).toEqual(['pending', NOW.toISOString(), 'in_flight', new Date(NOW.getTime() - STUCK_AFTER_MS).toISOString()]);
+    expect(params).toEqual(['pending', NOW.toISOString(), 'in_flight', new Date(NOW.getTime() - STUCK_AFTER_MS).toISOString(), MAX_TRIES]);
+  });
+
+  it('the capped reaper FAILS stuck rows with no try left, keeping their last error, and returns them for the alert', () => {
+    const { sql, params } = failExhaustedStuckInboundTexts(db, NOW).toSQL();
+    expect(sql).toBe(
+      'update "inbound_messages" set "status" = $1, "last_error" = concat_ws(\'; \', $2::text, "inbound_messages"."last_error"), "updated_at" = $3 ' +
+        'where ("inbound_messages"."status" = $4 and "inbound_messages"."updated_at" <= $5 and "inbound_messages"."attempts" >= $6)' +
+        RETURNING,
+    );
+    expect(params).toEqual([
+      'failed',
+      'gave up: stuck in flight on its last try',
+      NOW.toISOString(),
+      'in_flight',
+      new Date(NOW.getTime() - STUCK_AFTER_MS).toISOString(),
+      MAX_TRIES,
+    ]);
+  });
+
+  it("the flood guard asks: an alert to this rep about this sender since the window's start", () => {
+    const since = new Date(NOW.getTime() - EMAIL_WINDOW_MS);
+    const { sql, params } = selectRecentAlert(db, 'rep-1', '+16195550100', since).toSQL();
+    expect(sql).toBe(
+      'select "id" from "inbound_messages" where ("inbound_messages"."user_id" = $1 and "inbound_messages"."from_e164" = $2 ' +
+        'and "inbound_messages"."emailed_at" >= $3) limit $4',
+    );
+    expect(params).toEqual(['rep-1', '+16195550100', since.toISOString(), 1]);
   });
 });

@@ -144,6 +144,17 @@ const schema = z.object({
    * Turning it back on sweeps only the runs that ended in the last 24h.
    */
   NO_ANSWER_CHATTER: z.enum(['on', 'off']).default('on'),
+
+  /**
+   * Kill switch for inbound texts (routes/inbound-sms.ts +
+   * sms/inbound-text-worker.ts). `off` = the webhook still answers Twilio an
+   * empty `<Response/>` but stores nothing, and the worker loop is never started:
+   * no Salesforce Task, no email. Nothing is stored while off ON PURPOSE — turning
+   * it back on must not burst a backlog of alerts; the texts stay in Twilio and
+   * the backfill script can recover them. Default `on`; strict enum like
+   * NO_ANSWER_CHATTER, so `false` / `0` fail the boot instead of reading as "on".
+   */
+  INBOUND_TEXTS: z.enum(['on', 'off']).default('on'),
 });
 
 export type AppConfig = z.infer<typeof schema>;

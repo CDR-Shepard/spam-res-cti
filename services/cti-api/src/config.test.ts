@@ -41,3 +41,25 @@ describe('NO_ANSWER_CHATTER — the end-of-run "No answer" Chatter kill switch',
     await expect(loadWith({ NO_ANSWER_CHATTER: 'false' })).rejects.toThrow(/NO_ANSWER_CHATTER/);
   });
 });
+
+describe('INBOUND_TEXTS — the inbound-texts (Task + email alert) kill switch', () => {
+  const saved = { ...process.env };
+  beforeEach(() => { delete process.env.INBOUND_TEXTS; });
+  afterEach(() => { process.env = { ...saved }; });
+
+  it('defaults to ON — the variable exists to turn it OFF', async () => {
+    expect((await loadWith({ INBOUND_TEXTS: undefined })).INBOUND_TEXTS).toBe('on');
+  });
+
+  it('an empty value is treated as unset → on', async () => {
+    expect((await loadWith({ INBOUND_TEXTS: '' })).INBOUND_TEXTS).toBe('on');
+  });
+
+  it('off turns it off', async () => {
+    expect((await loadWith({ INBOUND_TEXTS: 'off' })).INBOUND_TEXTS).toBe('off');
+  });
+
+  it('anything else fails the boot loudly', async () => {
+    await expect(loadWith({ INBOUND_TEXTS: 'false' })).rejects.toThrow(/INBOUND_TEXTS/);
+  });
+});

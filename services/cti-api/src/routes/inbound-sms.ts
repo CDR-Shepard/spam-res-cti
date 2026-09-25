@@ -155,6 +155,13 @@ export async function registerInboundSmsRoutes(app: FastifyInstance): Promise<vo
       return reply.code(403).send('Invalid signature');
     }
     const body = (req.body ?? {}) as Record<string, string>;
+    // Kill switch (config.ts INBOUND_TEXTS): answer as usual, store nothing, so
+    // turning it back on never bursts a backlog of alerts. Twilio keeps the text;
+    // the backfill script can recover it.
+    if (cfg.INBOUND_TEXTS === 'off') {
+      req.log.info({ messageSid: (body.MessageSid ?? '').slice(0, 64) }, 'inbound_sms_disabled');
+      return reply.type('text/xml').send(EMPTY_TWIML);
+    }
     try {
       await storeInboundText(getDb(), body, req.log);
     } catch (err) {

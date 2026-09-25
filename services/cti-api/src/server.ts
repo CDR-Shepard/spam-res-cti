@@ -20,7 +20,7 @@ import { registerMobileRoutes } from './routes/mobile.js';
 import { startSyncLoop } from './salesforce/sync.js';
 import { startFollowupLoop, startRetryNudgeLoop } from './salesforce/followup-worker.js';
 import { maybeStartNoAnswerChatterLoop } from './salesforce/no-answer-chatter-worker.js';
-import { startInboundTextLoop } from './sms/inbound-text-worker.js';
+import { maybeStartInboundTextLoop } from './sms/inbound-text-worker.js';
 import { startReputationWorker } from './reputation/worker.js';
 import { startDirectoryLoop } from './mobile/directory-build.js';
 
@@ -126,7 +126,8 @@ async function main(): Promise<void> {
   // End-of-run "No answer" Chatter posts. Null when NO_ANSWER_CHATTER=off.
   const noAnswerChatterTimer = maybeStartNoAnswerChatterLoop(cfg);
   // Inbound texts → Salesforce Task + email alert (rows stored by /telephony/twilio/sms).
-  const inboundTextTimer = startInboundTextLoop(5000);
+  // Null when INBOUND_TEXTS=off.
+  const inboundTextTimer = maybeStartInboundTextLoop(cfg);
   const reputationTimer = startReputationWorker(app.log, cfg.REPUTATION_WORKER_INTERVAL_MS);
   const directoryTimer = startDirectoryLoop(cfg.DIRECTORY_REBUILD_INTERVAL_MS);
 
@@ -135,7 +136,7 @@ async function main(): Promise<void> {
     clearInterval(followupTimer);
     clearInterval(nudgeTimer);
     if (noAnswerChatterTimer) clearInterval(noAnswerChatterTimer);
-    clearInterval(inboundTextTimer);
+    if (inboundTextTimer) clearInterval(inboundTextTimer);
     clearInterval(reputationTimer);
     clearInterval(directoryTimer);
     await app.close();

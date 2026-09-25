@@ -14,6 +14,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 
 const state = vi.hoisted(() => ({
+  inboundTexts: 'on' as 'on' | 'off',
   skipSig: false,
   sigValid: true,
   signedUrls: [] as string[],
@@ -36,6 +37,9 @@ vi.mock('../config.js', () => ({
     TELEPHONY_PROVIDER: 'twilio',
     get TWILIO_SKIP_SIGNATURE_CHECK() {
       return state.skipSig;
+    },
+    get INBOUND_TEXTS() {
+      return state.inboundTexts;
     },
   }),
 }));
@@ -111,6 +115,7 @@ let app: FastifyInstance;
 let logLines: string[];
 
 beforeEach(async () => {
+  state.inboundTexts = 'on';
   state.skipSig = false;
   state.sigValid = true;
   state.signedUrls = [];
@@ -197,6 +202,24 @@ describe('POST /telephony/twilio/sms — signature', () => {
     state.skipSig = true;
     expectEmptyTwiml(await text());
     expect(state.rows.size).toBe(1);
+  });
+});
+
+describe('POST /telephony/twilio/sms — INBOUND_TEXTS kill switch', () => {
+  it('off: still answers <Response/> (never an error a texter could see) but stores and looks up nothing', async () => {
+    state.inboundTexts = 'off';
+    expectEmptyTwiml(await text());
+    expect(state.rows.size).toBe(0);
+    expect(state.ownedWheres).toHaveLength(0);
+    const line = logLines.find((l) => l.includes('inbound_sms_disabled'));
+    expect(line).toContain(SID_1);
+    expect(logLines.join('\n')).not.toContain(SECRET_BODY);
+  });
+
+  it('off: an unsigned request is still refused', async () => {
+    state.inboundTexts = 'off';
+    state.sigValid = false;
+    expect((await text()).statusCode).toBe(403);
   });
 });
 
