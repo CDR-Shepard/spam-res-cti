@@ -33,8 +33,9 @@ function fakeAudio(over: Partial<DeviceAudioLike> = {}) {
     isOutputSelectionSupported: true,
     setInputDevice: vi.fn(async (id: string) => { audio.inputDevice = { deviceId: id }; }),
     unsetInputDevice: vi.fn(async () => { audio.inputDevice = null; }),
-    speakerDevices: fakeOutputs(['default']),
-    ringtoneDevices: fakeOutputs(['default']),
+    // Empty, like the real SDK before its first device listing.
+    speakerDevices: fakeOutputs(),
+    ringtoneDevices: fakeOutputs(),
     on: vi.fn(),
     ...over,
   };
@@ -148,6 +149,7 @@ describe('applySavedAudioPrefs (Device created, or its device list changed)', ()
     expect(audio.unsetInputDevice).not.toHaveBeenCalled();
     expect(audio.setInputDevice).not.toHaveBeenCalled();
     expect(audio.speakerDevices.set).not.toHaveBeenCalled();
+    expect(audio.ringtoneDevices.set).not.toHaveBeenCalled();
   });
 
   // During a call the mic watcher owns re-pinning (it honours the saved mic).

@@ -82,9 +82,10 @@ class FakeOutboundConnection {
  *  Device/WebRTC stack. Constructed the moment ensureDevice() runs (this
  *  instance becomes the softphone leader on mount, with no peers to contest
  *  it), mirroring the real @twilio/voice-sdk Device shape App.tsx relies on. */
-/** A Twilio OutputDeviceCollection fake (`speakerDevices` / `ringtoneDevices`). */
+/** A Twilio OutputDeviceCollection fake (`speakerDevices` / `ringtoneDevices`).
+ *  Starts EMPTY, like the real SDK before its first device listing. */
 function fakeOutputs() {
-  let active = new Set([{ deviceId: 'default' }]);
+  let active = new Set<{ deviceId: string }>();
   return {
     get: () => active,
     set: vi.fn(async (id: string) => { active = new Set([{ deviceId: id }]); }),
@@ -583,6 +584,7 @@ describe('App — the chosen microphone and speaker reach the Twilio Device', ()
     expect(audio.setInputDevice).not.toHaveBeenCalled();
     expect(audio.unsetInputDevice).not.toHaveBeenCalled();
     expect(audio.speakerDevices.set).not.toHaveBeenCalled();
+    expect(audio.ringtoneDevices.set).not.toHaveBeenCalled();
   });
 
   // The SDK lists devices asynchronously after the Device is built, and a
