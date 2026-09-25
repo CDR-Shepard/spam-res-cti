@@ -15,6 +15,7 @@
  *   low-bytes-received → nothing is arriving FROM the far end (they sound silent)
  *   low-bytes-sent     → nothing is leaving OUR mic (they can't hear us)
  */
+import { resolveDeviceId, systemDefaultDeviceId } from './audio-devices';
 
 /** Which side of the call has no media. */
 export type MediaIssue = 'no-inbound-audio' | 'no-outbound-audio';
@@ -97,9 +98,7 @@ export type MicRepinResult = 'repinned' | 'no-device' | 'failed';
 /** Pure — the input to pin: Chrome's 'default' (it follows the OS default) when
  *  present, else the first real device, else nothing. */
 export function pickInputDevice(available: Map<string, { deviceId: string }>): string | null {
-  if (available.has('default')) return 'default';
-  const first = available.keys().next();
-  return first.done ? null : first.value;
+  return systemDefaultDeviceId([...available.keys()]);
 }
 
 /**
@@ -107,9 +106,13 @@ export function pickInputDevice(available: Map<string, { deviceId: string }>): s
  * the SAME device is already pinned and a stream object exists — even one
  * whose track is dead — so a second re-pin goes through the SDK's own forced
  * variant (what its device-change path calls). Never throws.
+ *
+ * `preferred` is the mic the rep chose in Settings (2026-09-25: a softphone
+ * capturing silence from the wrong device). It wins while it is connected;
+ * when it isn't, this pins the system default, as before.
  */
-export async function repinInputDevice(audio: AudioHelperLike): Promise<MicRepinResult> {
-  const target = pickInputDevice(audio.availableInputDevices);
+export async function repinInputDevice(audio: AudioHelperLike, preferred: string | null = null): Promise<MicRepinResult> {
+  const target = resolveDeviceId(preferred, [...audio.availableInputDevices.keys()]);
   if (!target) return 'no-device';
   try {
     if (audio.inputDevice?.deviceId !== target) {
@@ -142,12 +145,17 @@ const REPIN_COOLDOWN_MS = 1000;
  * asynchronously and the SDK emits 'accept' once it has — so the track is
  * looked for now AND on 'accept'; and again after every re-pin, since the
  * swapped-in track is a new object nobody is watching yet.
+ *
+ * `preferredInput` returns the mic chosen in Settings, read at each re-pin so
+ * a choice made mid-call counts; a re-pin lands on it whenever it is connected
+ * (including when it is plugged back in), else on the system default.
  */
 export function watchLocalMic(
   call: LocalMicCall,
   audio: AudioHelperLike,
   onRepin: (trigger: MicRepinTrigger, result: MicRepinResult) => void,
   now: () => number = Date.now,
+  preferredInput: () => string | null = () => null,
 ): { repin: (trigger: MicRepinTrigger) => void } {
   let lastAt = -Infinity;
   const watched = new WeakSet<object>();
@@ -163,7 +171,7 @@ export function watchLocalMic(
     const t = now();
     if (t - lastAt < REPIN_COOLDOWN_MS) return;
     lastAt = t;
-    void repinInputDevice(audio).then((result) => {
+    void repinInputDevice(audio, preferredInput()).then((result) => {
       attach();
       onRepin(trigger, result);
     });

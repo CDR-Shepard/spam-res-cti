@@ -240,3 +240,67 @@ describe('watchLocalMic', () => {
     expect(audio.setInputDevice).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-25: reps choose their mic in Settings (a rep's softphone captured
+// silence from the wrong device). A re-pin must go back to THAT mic, not jump
+// to the system default the rep deliberately moved away from.
+// ---------------------------------------------------------------------------
+describe('re-pinning honours the mic chosen in Settings', () => {
+  const withJabra = () => fakeAudio({
+    availableInputDevices: new Map([['default', { deviceId: 'default' }], ['jabra', { deviceId: 'jabra' }]]),
+  });
+  const liveCall = (track: ReturnType<typeof fakeTrack>) => ({ getLocalStream: () => ({ getAudioTracks: () => [track] }) });
+
+  it('repinInputDevice pins the chosen device when it is connected', async () => {
+    const audio = withJabra();
+    expect(await repinInputDevice(audio, 'jabra')).toBe('repinned');
+    expect(audio.setInputDevice).toHaveBeenCalledWith('jabra');
+  });
+
+  it('repinInputDevice falls back to the default when the chosen device is gone (headset unplugged)', async () => {
+    const audio = fakeAudio(); // no 'jabra' in the list
+    expect(await repinInputDevice(audio, 'jabra')).toBe('repinned');
+    expect(audio.setInputDevice).toHaveBeenCalledWith('default');
+  });
+
+  it('already pinned to the chosen device: forces a fresh getUserMedia on THAT device', async () => {
+    const forced = vi.fn(async () => {});
+    const audio = withJabra();
+    audio.inputDevice = { deviceId: 'jabra' };
+    (audio as unknown as { _setInputDevice: typeof forced })._setInputDevice = forced;
+    expect(await repinInputDevice(audio, 'jabra')).toBe('repinned');
+    expect(forced).toHaveBeenCalledWith('jabra', true);
+  });
+
+  it('watchLocalMic re-pins a dead track to the chosen device, read at re-pin time', async () => {
+    const track = fakeTrack(); const audio = withJabra(); const onRepin = vi.fn();
+    let chosen: string | null = null;
+    watchLocalMic(liveCall(track), audio, onRepin, () => 5000, () => chosen);
+    chosen = 'jabra'; // chosen AFTER the call started — the watcher must see it
+    track.fire('ended');
+    await Promise.resolve(); await Promise.resolve();
+    expect(audio.setInputDevice).toHaveBeenCalledWith('jabra');
+    expect(onRepin).toHaveBeenCalledWith('track-ended', 'repinned');
+  });
+
+  it('watchLocalMic re-pins to the default when the chosen device is missing', async () => {
+    const track = fakeTrack(); const audio = fakeAudio(); const onRepin = vi.fn();
+    watchLocalMic(liveCall(track), audio, onRepin, () => 5000, () => 'jabra');
+    track.fire('ended');
+    await Promise.resolve(); await Promise.resolve();
+    expect(audio.setInputDevice).toHaveBeenCalledWith('default');
+  });
+
+  // The chosen headset comes back mid-call: the device-change re-pin moves the
+  // call onto it (the choice was kept while it was away).
+  it('a device change brings the call back to the chosen device when it returns', async () => {
+    const audio = fakeAudio(); const onRepin = vi.fn();
+    audio.inputDevice = { deviceId: 'default' };
+    watchLocalMic(liveCall(fakeTrack()), audio, onRepin, () => 5000, () => 'jabra');
+    audio.availableInputDevices.set('jabra', { deviceId: 'jabra' });
+    audio.emit('deviceChange', []);
+    await Promise.resolve(); await Promise.resolve();
+    expect(audio.setInputDevice).toHaveBeenCalledWith('jabra');
+  });
+});

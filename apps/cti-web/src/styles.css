@@ -1011,6 +1011,7 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 .set-select:focus, .set-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .set-youtube { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .set-error { font-size: 11px; color: var(--bad); }
+.set-note { font-size: 11px; color: var(--warn); }
 
 .segmented {
   display: inline-flex;

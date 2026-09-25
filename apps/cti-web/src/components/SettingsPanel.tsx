@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   HOLD_MUSIC_CHOICES,
   HOLD_MUSIC_LABELS,
@@ -9,8 +9,10 @@ import {
   type HoldMusicSetting,
 } from '@cti/contracts';
 import { api } from '../api';
+import { createAudioDevicePort, type AudioDevicePort } from '../audio-device-port';
 import { formatE164 } from '../format';
 import { PhoneOutgoingIcon, ZapIcon } from '../icons';
+import { AudioDeviceRows } from './AudioDeviceRows';
 import { MobilePairingCard } from './MobilePairingCard';
 
 interface Props {
@@ -21,6 +23,10 @@ interface Props {
   /** Re-fetch /auth/me after a change so the panel reflects server truth. */
   onSaved: () => Promise<void> | void;
   onToast: (t: { text: string; type: 'info' | 'error' | 'success' }) => void;
+  /** The browser + live Twilio Device audio API the Microphone / Speaker rows
+   *  drive (App passes one over its persistent Device). Without it the rows
+   *  still list and save choices; the next Device picks them up. */
+  audioDevices?: AudioDevicePort;
 }
 
 /** The link box's saved-selection line, or null when nothing is stored yet. */
@@ -50,11 +56,12 @@ function patchErrorMessage(e: unknown): string | null {
 /**
  * Rep self-service settings: no-answer call forwarding (the personal failover
  * number every DID assigned to this rep rolls an unanswered callback to, after
- * a 10s softphone ring, before voicemail) and what hold music, if any, Power
+ * a 10s softphone ring, before voicemail), what hold music, if any, Power
  * Dial plays in the headset between calls — six styles, Off, or the rep's own
- * YouTube playlist/video.
+ * YouTube playlist/video — and which microphone and speaker the softphone uses.
  */
-export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast }: Props): JSX.Element {
+export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast, audioDevices }: Props): JSX.Element {
+  const audioPort = useMemo(() => audioDevices ?? createAudioDevicePort(() => null), [audioDevices]);
   const [draft, setDraft] = useState(forwardE164 ?? '');
   const [saving, setSaving] = useState(false);
   const [savingMusic, setSavingMusic] = useState(false);
@@ -215,6 +222,7 @@ export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast }: Prop
             )}
           </div>
         </div>
+        <AudioDeviceRows port={audioPort} onToast={onToast} />
       </div>
       <MobilePairingCard onToast={onToast} />
     </>
