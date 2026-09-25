@@ -32,14 +32,17 @@
  * can quote the failing row, so only `.message`/`.code` are ever surfaced).
  *
  * Usage (needs BOTH a reachable Postgres AND Twilio creds — run via the API
- * service, which holds both):
- *   railway run -s @cti/api -- env DATABASE_URL=$DATABASE_PUBLIC_URL \
- *     node scripts/backfill-texts.mjs --email garrett@gghomes.org --since 2026-09-01
- *   railway run -s @cti/api -- env DATABASE_URL=$DATABASE_PUBLIC_URL \
- *     node scripts/backfill-texts.mjs --email garrett@gghomes.org --since 2026-09-01 --apply
+ * service, which holds both). `railway run -s @cti/api` injects that
+ * service's own PRIVATE DATABASE_URL, whose host only resolves inside
+ * Railway's network, so pull the PUBLIC one from the Postgres service first
+ * and pass it explicitly (matches docs/runbooks/inbound-texts.md and the
+ * sibling runbooks, e.g. number-fleet.md):
+ *   cd services/cti-api
+ *   PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
+ *   railway run -s @cti/api -- env DATABASE_URL="$PUB" node scripts/backfill-texts.mjs --email garrett@gghomes.org --since 2026-09-01
+ *   railway run -s @cti/api -- env DATABASE_URL="$PUB" node scripts/backfill-texts.mjs --email garrett@gghomes.org --since 2026-09-01 --apply
  *
- * Env: DATABASE_PUBLIC_URL (preferred) or DATABASE_URL — see set-sms-webhooks.mjs's
- * header for why DATABASE_PUBLIC_URL is preferred when run via `railway run`.
+ * Env: DATABASE_PUBLIC_URL (preferred) or DATABASE_URL — see above.
  * TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN — the @cti/api service's own variables.
  */
 import { randomUUID } from 'node:crypto';

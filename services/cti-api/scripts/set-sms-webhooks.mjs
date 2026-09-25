@@ -32,17 +32,20 @@
  * default; add --apply to actually write the restore).
  *
  * Usage — this needs BOTH a reachable Postgres AND Twilio creds, so run it via
- * the API service (which holds both):
- *   railway run -s @cti/api -- env DATABASE_URL=$DATABASE_PUBLIC_URL node scripts/set-sms-webhooks.mjs           # dry run
- *   railway run -s @cti/api -- env DATABASE_URL=$DATABASE_PUBLIC_URL node scripts/set-sms-webhooks.mjs --apply   # writes
- *   railway run -s @cti/api -- env DATABASE_URL=$DATABASE_PUBLIC_URL node scripts/set-sms-webhooks.mjs --restore ./sms-webhooks-rollback-....json --apply
+ * the API service (which holds both). `railway run -s @cti/api` injects that
+ * service's own PRIVATE DATABASE_URL, whose host only resolves inside
+ * Railway's network, so pull the PUBLIC one from the Postgres service first
+ * and pass it explicitly (matches docs/runbooks/inbound-texts.md and the
+ * sibling runbooks, e.g. number-fleet.md):
+ *   cd services/cti-api
+ *   PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
+ *   railway run -s @cti/api -- env DATABASE_URL="$PUB" node scripts/set-sms-webhooks.mjs           # dry run
+ *   railway run -s @cti/api -- env DATABASE_URL="$PUB" node scripts/set-sms-webhooks.mjs --apply   # writes
+ *   railway run -s @cti/api -- env DATABASE_URL="$PUB" node scripts/set-sms-webhooks.mjs --restore ./sms-webhooks-rollback-....json --apply
  *
  * Env:
- *   DATABASE_PUBLIC_URL (preferred) or DATABASE_URL — `railway run -s @cti/api`
- *     injects that service's PRIVATE DATABASE_URL, whose host only resolves
- *     inside Railway's network. DATABASE_PUBLIC_URL (from the Postgres
- *     service's own variables) resolves from a laptop; prefer it here.
- *     Not needed at all in --restore mode.
+ *   DATABASE_PUBLIC_URL (preferred) or DATABASE_URL — see above; not needed
+ *     at all in --restore mode.
  *   TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / API_PUBLIC_URL — the @cti/api
  *     service's own variables; `railway run -s @cti/api` sets these for you.
  *
@@ -124,7 +127,10 @@ export function classifyNumbers(numbers, configBySid, desiredUrl) {
       fetchFailed.push(n);
       continue;
     }
-    if (cfg.phoneNumber && cfg.phoneNumber !== n.e164) {
+    // Fails CLOSED: a missing phone_number (never expected from Twilio in
+    // practice, but never trusted blindly either — review round 2 minor) is
+    // treated the same as a mismatch, not silently passed through.
+    if (!cfg.phoneNumber || cfg.phoneNumber !== n.e164) {
       mismatched.push(n);
       continue;
     }
@@ -301,7 +307,9 @@ async function runRestore(args, deps) {
 
   if (!args.apply) {
     for (const r of records.slice(0, 20)) {
-      stdout(`  would restore ${r.e164} (${r.sid}) -> ${r.previousSmsUrl ?? '(none)'} / ${r.previousSmsMethod ?? '(none)'}`);
+      // Host only, never the full URL — review round 2 minor: the full
+      // previous URL can carry a token or path, same reasoning as summarizeHosts.
+      stdout(`  would restore ${r.e164} (${r.sid}) -> ${urlHost(r.previousSmsUrl)} / ${r.previousSmsMethod ?? '(none)'}`);
     }
     if (records.length > 20) stdout(`  … and ${records.length - 20} more`);
     stdout('\nDRY RUN — re-run with --apply to restore these on Twilio.');
@@ -424,14 +432,18 @@ export async function run(argv, deps) {
   const rollbackPath = args.rollbackFile ?? defaultRollbackFilePath(now());
   const rollbackRecords = buildRollbackRecords(wouldChange, configBySid);
   try {
-    await writeFile(rollbackPath, JSON.stringify(buildRollbackFile(rollbackRecords), null, 2));
+    // 'wx': fails (EEXIST) instead of overwriting — a reused --rollback-file
+    // path across a partial run and its retry must never lose the first
+    // run's records (review round 2 minor). The default timestamped path
+    // never collides.
+    await writeFile(rollbackPath, JSON.stringify(buildRollbackFile(rollbackRecords), null, 2), { flag: 'wx' });
   } catch (err) {
     stderr(`ERROR: could not write rollback file ${rollbackPath}: ${safeErrorMessage(err)}`);
     stderr('Aborting — nothing was written to Twilio.');
     return { exitCode: 1 };
   }
   stdout(`\nRollback file written: ${rollbackPath} (${rollbackRecords.length} record(s)). Restore with:`);
-  stdout(`  node scripts/set-sms-webhooks.mjs --restore ${rollbackPath} --apply`);
+  stdout(`  railway run -s @cti/api -- env DATABASE_URL="$PUB" node scripts/set-sms-webhooks.mjs --restore ${rollbackPath} --apply`);
 
   let updated = 0;
   let failed = 0;

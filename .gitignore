@@ -60,5 +60,11 @@ packages/db/drizzle/meta/
 # survives a crash mid-purchase — exactly when a stray `git add -A` is most likely.
 fleet-buy.json*
 
+# set-sms-webhooks.mjs rollback file (services/cti-api/, where the runbook
+# has you `cd` before running it) — holds every number's PREVIOUS SmsUrl,
+# which can carry a token. Machine-local recovery state, never source; keep
+# the file on disk (see the runbook), just never commit it.
+sms-webhooks-rollback-*.json
+
 # brainstorming visual companion scratch
 .superpowers/

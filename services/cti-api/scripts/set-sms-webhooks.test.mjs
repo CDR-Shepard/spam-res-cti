@@ -170,6 +170,21 @@ describe('classifyNumbers — already-set / would-change / fetch-failed / not-co
     expect(r.notCovered).toEqual([]);
   });
 
+  // Review round 2, Minor: a MISSING phone_number used to fall through the
+  // `cfg.phoneNumber &&` guard entirely (short-circuiting past the mismatch
+  // check), so it could be silently classified as already-set/would-change.
+  // Twilio always returns phone_number in practice, but this must fail
+  // closed rather than assume the best.
+  it('a MISSING phone_number (null/undefined) fails closed — treated as mismatched, never already-set/would-change', () => {
+    for (const phoneNumber of [null, undefined, '']) {
+      const configBySid = new Map([[n1.twilio_sid, { smsUrl: DESIRED, smsMethod: 'POST', phoneNumber }]]);
+      const r = classifyNumbers([n1], configBySid, DESIRED);
+      expect(r.mismatched).toEqual([n1]);
+      expect(r.alreadySet).toEqual([]);
+      expect(r.wouldChange).toEqual([]);
+    }
+  });
+
   it('a mixed batch splits into all five groups independently', () => {
     const configBySid = new Map([
       [n1.twilio_sid, { smsUrl: DESIRED, smsMethod: 'POST', phoneNumber: n1.e164 }],
@@ -516,6 +531,19 @@ describe('run — I4: rollback file is written BEFORE any Twilio write, and reco
     expect(fs.writeFile.mock.calls[0][0]).toBe('./custom.json');
   });
 
+  // Review round 2, Minor: the printed restore hint used to be a bare `node
+  // …` command with no `railway run` wrapper — it needs Twilio credentials,
+  // so it must show the same invocation form as the runbook.
+  it('the printed restore hint includes the railway run wrapper, not a bare node command', async () => {
+    const configBySid = new Map([[N1.twilio_sid, { smsUrl: null, smsMethod: null, phoneNumber: N1.e164 }]]);
+    const twilio = fakeTwilio(configBySid);
+    const fs = fakeFs();
+    const out = outputSink();
+    await run(['--apply'], { db: fakeDb([N1]), twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...out });
+    const joined = out.lines.join('\n');
+    expect(joined).toContain('railway run -s @cti/api -- env DATABASE_URL="$PUB" node scripts/set-sms-webhooks.mjs --restore');
+  });
+
   // Review round 2, S3: an unwritable rollback file must abort the whole run
   // — the rollback file is the ONLY record of what --apply is about to
   // overwrite, so writing it is a precondition for any Twilio write at all.
@@ -531,6 +559,33 @@ describe('run — I4: rollback file is written BEFORE any Twilio write, and reco
     expect(result.exitCode).toBe(1);
     expect(twilio.updateNumber).not.toHaveBeenCalled();
     expect(out.lines.join('\n')).toContain('ENOENT');
+  });
+
+  // Review round 2, Minor: the rollback file is opened with the 'wx' flag —
+  // never overwrites an existing file (a reused --rollback-file path across
+  // a partial run and its retry must not lose the first run's records).
+  it("opens the rollback file with the 'wx' flag, so a colliding path is refused rather than silently overwritten", async () => {
+    const configBySid = new Map([[N1.twilio_sid, { smsUrl: null, smsMethod: null, phoneNumber: N1.e164 }]]);
+    const twilio = fakeTwilio(configBySid);
+    const fs = fakeFs();
+    await run(['--apply'], { db: fakeDb([N1]), twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...outputSink() });
+    expect(fs.writeFile).toHaveBeenCalledWith(expect.any(String), expect.any(String), { flag: 'wx' });
+  });
+
+  it('a colliding rollback path (EEXIST, as wx would raise) aborts with 0 Twilio POSTs — never silently overwritten', async () => {
+    const configBySid = new Map([[N1.twilio_sid, { smsUrl: null, smsMethod: null, phoneNumber: N1.e164 }]]);
+    const twilio = fakeTwilio(configBySid);
+    const fs = fakeFs();
+    const err = new Error('EEXIST: file already exists, open');
+    err.code = 'EEXIST';
+    fs.writeFile.mockRejectedValue(err);
+    const out = outputSink();
+    const result = await run(['--apply', '--rollback-file', './already-there.json'], {
+      db: fakeDb([N1]), twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...out,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(twilio.updateNumber).not.toHaveBeenCalled();
+    expect(out.lines.join('\n')).toContain('EEXIST');
   });
 });
 
@@ -618,6 +673,25 @@ describe('run --restore — dry run by default, writes only with --apply', () =>
     expect(result.exitCode).toBe(0);
     expect(twilio.updateNumber).not.toHaveBeenCalled();
     expect(out.lines.join('\n')).toContain('DRY RUN');
+  });
+
+  // Review round 2, Minor: the restore dry run used to print the FULL
+  // previous URL (token and all) — it must print the host only, same as the
+  // forward run's summarizeHosts.
+  it('the dry run prints only the HOST of the previous SmsUrl, never the full URL (which can carry a token)', async () => {
+    const twilio = fakeTwilio(new Map());
+    const fs = fakeFs({
+      [rollbackFile]: JSON.stringify({
+        kind: 'sms-webhooks-rollback', version: 1,
+        records: [{ sid: VALID_SID, e164: '+16195550100', previousSmsUrl: 'https://old-tunnel.ngrok.io/telephony/twilio/sms?token=SECRET_TOKEN_123', previousSmsMethod: 'POST' }],
+      }),
+    });
+    const out = outputSink();
+    await run(['--restore', rollbackFile], { db: fakeDb([]), twilio, apiPublicUrl: API_PUBLIC_URL, now: () => new Date(), ...fs, ...out });
+    const joined = out.lines.join('\n');
+    expect(joined).toContain('old-tunnel.ngrok.io');
+    expect(joined).not.toContain('SECRET_TOKEN_123');
+    expect(joined).not.toContain('/telephony/twilio/sms');
   });
 
   it('--restore --apply writes back the EXACT previous values from the file (a valid file restores)', async () => {
