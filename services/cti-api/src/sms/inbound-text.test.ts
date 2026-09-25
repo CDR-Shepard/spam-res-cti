@@ -4,11 +4,13 @@ import {
   chooseTextRecipient,
   formatUsNumber,
   isOptOutText,
+  pacificDateOnly,
   pacificTime,
   redactBody,
   salesforceHomeUrl,
   salesforceRecordUrl,
   taskFailureIsRetryable,
+  textDigestEmail,
   textEmail,
   textEmailLinkTarget,
   textTaskDescription,
@@ -335,5 +337,65 @@ describe('textEmail', () => {
   it('a picture with no words says so under Message:', () => {
     const out = textEmail({ ...base, body: '', numMedia: 2, recordUrl: null });
     expect(out.body.split('\n').slice(4)).toEqual(['Message:', '> (no text)', '(2 attachments — open Twilio to view)']);
+  });
+});
+
+describe('pacificDateOnly', () => {
+  it('renders just the date in Pacific time (no time-of-day)', () => {
+    expect(pacificDateOnly(new Date('2026-09-25T21:05:00Z'))).toBe('Sep 25, 2026');
+    // 05:00 UTC on the 26th is still the 25th in Los Angeles.
+    expect(pacificDateOnly(new Date('2026-09-26T05:00:00Z'))).toBe('Sep 25, 2026');
+  });
+});
+
+describe('textDigestEmail — the backfill batch digest, sent once per rep (design task 6)', () => {
+  const entries = [
+    {
+      name: 'Jane Doe',
+      fromE164: '+16195550100',
+      receivedAt: new Date('2026-09-18T21:05:00Z'),
+      body: 'Is the house still available?',
+      numMedia: 0,
+      recordUrl: 'https://gghomes.my.salesforce.com/lightning/r/00T000000000001/view',
+    },
+    {
+      name: null,
+      fromE164: '+18585550199',
+      receivedAt: new Date('2026-09-20T15:00:00Z'),
+      body: 'call me',
+      numMedia: 1,
+      recordUrl: null,
+    },
+  ];
+
+  it('subject counts the texts and spans the earliest text through today', () => {
+    expect(textDigestEmail(entries).subject).toBe('2 texts you missed (Sep 18, 2026 – today)');
+  });
+
+  it('body lists one entry per text, OLDEST FIRST, each with sender, Pacific time, the quoted message, and the link', () => {
+    expect(textDigestEmail(entries).body).toBe(
+      [
+        'From: Jane Doe (619) 555-0100',
+        'Received: Fri, Sep 18, 2026, 2:05 PM PDT',
+        'Message:',
+        '> Is the house still available?',
+        'Open in Salesforce: https://gghomes.my.salesforce.com/lightning/r/00T000000000001/view',
+        '',
+        'From: (858) 555-0199',
+        'Received: Sun, Sep 20, 2026, 8:00 AM PDT',
+        'Message:',
+        '> call me',
+        '(1 attachment — open Twilio to view)',
+      ].join('\n'),
+    );
+  });
+
+  it('an unnamed sender falls back to the formatted number, exactly like the single-text email', () => {
+    expect(textDigestEmail([entries[1]!]).body).toContain('From: (858) 555-0199');
+  });
+
+  it('a text with no link (no matched record, no Task) omits the "Open in Salesforce" line entirely', () => {
+    const out = textDigestEmail([entries[1]!]).body;
+    expect(out).not.toContain('Open in Salesforce');
   });
 });

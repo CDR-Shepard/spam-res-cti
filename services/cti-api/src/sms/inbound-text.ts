@@ -202,9 +202,10 @@ export interface TextEmailInput {
 /**
  * The texter's words, every line prefixed "> ". A text is written by a stranger:
  * quoting it keeps anything it says — including a line that reads exactly like
- * our own "Open in Salesforce: <link>" — visibly theirs, never ours.
+ * our own "Open in Salesforce: <link>" — visibly theirs, never ours. Exported
+ * for `textDigestEmail`, which quotes each of its entries the same way.
  */
-function quotedMessage(body: string): string[] {
+export function quotedMessage(body: string): string[] {
   if (!body.trim()) return ['> (no text)'];
   return body.split(/\r\n|\r|\n/).map((line) => (line ? `> ${line}` : '>'));
 }
@@ -231,5 +232,62 @@ export function textEmail(input: TextEmailInput): { subject: string; body: strin
   return {
     subject: withStop(`New text from ${senderLabel(name, input.fromE164)}`, input.optOut),
     body: lines.join('\n'),
+  };
+}
+
+const PACIFIC_DATE_ONLY = new Intl.DateTimeFormat('en-US', {
+  timeZone: ORG_TIMEZONE,
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+});
+
+/** "Sep 25, 2026" — the digest subject's "since" anchor (the batch's earliest text). */
+export function pacificDateOnly(at: Date): string {
+  return PACIFIC_DATE_ONLY.format(at);
+}
+
+export interface DigestEntry {
+  /** The Salesforce name when the sender matched (a Lead/Contact); null shows the formatted number instead. */
+  name: string | null;
+  fromE164: string;
+  receivedAt: Date;
+  body: string;
+  numMedia: number;
+  /** The rep's Task (or matched record) for THIS text; null leaves the link line out entirely. */
+  recordUrl: string | null;
+}
+
+/** One digest entry: sender, Pacific time, the quoted message, the attachment
+ *  note when there is one, then the record link — mirrors `textEmail`'s single-
+ *  text layout, minus the "To your number" line (a digest spans many numbers). */
+function digestEntryBlock(entry: DigestEntry): string {
+  const note = attachmentNote(entry.numMedia);
+  const name = entry.name?.trim() || null;
+  const number = formatUsNumber(entry.fromE164);
+  const lines = [
+    // Same "Name (number)" / bare-number convention as textEmail's From: line.
+    `From: ${name ? `${name} ${number}` : number}`,
+    `Received: ${pacificTime(entry.receivedAt)}`,
+    'Message:',
+    ...quotedMessage(entry.body),
+    ...(note ? [note] : []),
+    ...(entry.recordUrl ? [`Open in Salesforce: ${entry.recordUrl}`] : []),
+  ];
+  return lines.join('\n');
+}
+
+/**
+ * The ONE email a rep gets for a whole backfill batch (design task 6), instead
+ * of an individual alert per text — see inbound-text-worker.ts's digest step.
+ * Entries must already be oldest-first (the worker's SQL orders by
+ * `received_at`); this function does not re-sort them.
+ */
+export function textDigestEmail(entries: readonly DigestEntry[]): { subject: string; body: string } {
+  const n = entries.length;
+  const since = entries.length > 0 ? pacificDateOnly(entries[0]!.receivedAt) : pacificDateOnly(new Date());
+  return {
+    subject: `${n} texts you missed (${since} – today)`,
+    body: entries.map(digestEntryBlock).join('\n\n'),
   };
 }

@@ -12,14 +12,19 @@ import {
   SF_CALL_TIMEOUT_MS,
   SF_CREATE_TIMEOUT_MS,
   STUCK_AFTER_MS,
+  claimDigest,
   claimInboundText,
   failExhaustedStuckInboundTexts,
   maybeStartInboundTextLoop,
   processInboundText,
   reapStuckInboundTexts,
+  readyDigestBatches,
   runInboundTextTick,
+  selectDigestedBatchIds,
   selectDueInboundTexts,
   selectRecentAlert,
+  selectUndigestedBackfillRows,
+  sendReadyDigests,
   type InboundTextDeps,
 } from './inbound-text-worker.js';
 
@@ -52,6 +57,7 @@ function row(o: Partial<InboundMessage> = {}): InboundMessage {
     emailedAt: null,
     emailSkipReason: null,
     backfill: false,
+    backfillBatch: null,
     // 05:00 UTC on the 26th is still the 25th in Los Angeles.
     receivedAt: new Date('2026-09-26T05:00:00Z'),
     createdAt: NOW,
@@ -743,6 +749,13 @@ describe('runInboundTextTick', () => {
     failWrite?: () => Error | null;
     /** Shared, ordered log of writes (`write:<status or keys>`) for order assertions. */
     log?: string[];
+    /** Batch ids already recorded in inbound_text_digests (selectDigestedBatchIds). */
+    digestedBatchIds?: string[];
+    /** Undigested backfill rows the digest scan sees (selectUndigestedBackfillRows). */
+    undigestedBackfillRows?: InboundMessage[];
+    /** What claimDigest's `.returning()` yields for a given (batchId, userId) —
+     *  a non-empty array means this call won the claim. Defaults to "always wins". */
+    claimDigest?: (batchId: string, userId: string) => InboundMessage[] | Array<Record<string, unknown>>;
   }
 
   /** A fake handle for the tick: the reapers and the claim are `update`s (the
@@ -750,6 +763,9 @@ describe('runInboundTextTick', () => {
   function tickDb(f: TickFake) {
     const writes: Patch[] = [];
     let exhausted = f.exhausted ?? [];
+    /** A value that resolves like a Promise AND still offers further chained
+     *  methods — drizzle's query builder is thenable at every step. */
+    const chainable = <T,>(value: T, extra: Record<string, unknown> = {}) => Object.assign(Promise.resolve(value), extra);
     const db = {
       update: (_t: unknown) => ({
         set: (patch: Patch) => ({
@@ -782,7 +798,28 @@ describe('runInboundTextTick', () => {
           },
         }),
       }),
-      select: () => ({ from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => f.due ?? [] }) }) }) }),
+      // Three shapes share this one fake, discriminated by target table:
+      //  - selectDueInboundTexts:          select().from(inboundMessages).where().orderBy().limit()
+      //  - selectUndigestedBackfillRows:   select().from(inboundMessages).where().orderBy()        (no .limit())
+      //  - selectDigestedBatchIds:         select({batchId}).from(inboundTextDigests)               (no .where())
+      select: (_cols?: unknown) => ({
+        from: (table: unknown) =>
+          table === schema.inboundTextDigests
+            ? Promise.resolve((f.digestedBatchIds ?? []).map((batchId) => ({ batchId })))
+            : {
+                where: (_w: unknown) => ({
+                  orderBy: (_o: unknown) =>
+                    chainable(f.undigestedBackfillRows ?? [], { limit: async (_n: number) => f.due ?? [] }),
+                }),
+              },
+      }),
+      insert: (_table: unknown) => ({
+        values: (v: { batchId: string; userId: string; sentAt: Date }) => ({
+          onConflictDoNothing: () => ({
+            returning: async (_cols?: unknown) => f.claimDigest?.(v.batchId, v.userId) ?? [{ batchId: v.batchId }],
+          }),
+        }),
+      }),
     };
     return { writes, db: db as unknown as InboundTextDeps['db'] };
   }
@@ -921,7 +958,7 @@ describe('runInboundTextTick', () => {
         return EMAIL_OK;
       });
       const out = await runInboundTextTick(h.deps);
-      expect(out).toEqual({ processed: 0, gaveUp: 1 });
+      expect(out).toEqual({ processed: 0, gaveUp: 1, digestsSent: 0 });
       expect(h.calls('/sobjects/Task')).toHaveLength(0);
       // (The capped reaper also writes `failed`, with a SQL expression; this is the re-claim's own write.)
       const failedWrite = t.writes.find((w) => w.status === 'failed' && typeof w.lastError === 'string')!;
@@ -963,11 +1000,183 @@ describe('INBOUND_TEXTS kill switch — the loop', () => {
   });
 });
 
+describe('readyDigestBatches — groups undigested backfill rows by batch, waiting for EVERY row to be terminal', () => {
+  it('a batch with a still-pending row is NOT ready', () => {
+    const rows = [
+      row({ id: 'r1', backfill: true, backfillBatch: 'b1', status: 'done' }),
+      row({ id: 'r2', backfill: true, backfillBatch: 'b1', status: 'pending' }),
+    ];
+    expect(readyDigestBatches(rows)).toEqual([]);
+  });
+
+  it('an in_flight row also blocks the batch (mid-claim, not finished)', () => {
+    const rows = [
+      row({ id: 'r1', backfill: true, backfillBatch: 'b1', status: 'done' }),
+      row({ id: 'r2', backfill: true, backfillBatch: 'b1', status: 'in_flight' }),
+    ];
+    expect(readyDigestBatches(rows)).toEqual([]);
+  });
+
+  it('a batch whose every row is done/failed/skipped is ready, rows kept in the given (oldest-first) order', () => {
+    const rows = [
+      row({ id: 'r1', backfill: true, backfillBatch: 'b1', status: 'done', receivedAt: new Date('2026-09-18T00:00:00Z') }),
+      row({ id: 'r2', backfill: true, backfillBatch: 'b1', status: 'failed', receivedAt: new Date('2026-09-19T00:00:00Z') }),
+      row({ id: 'r3', backfill: true, backfillBatch: 'b1', status: 'skipped', receivedAt: new Date('2026-09-20T00:00:00Z') }),
+    ];
+    const ready = readyDigestBatches(rows);
+    expect(ready).toHaveLength(1);
+    expect(ready[0]).toMatchObject({ batchId: 'b1', userId: 'rep-1' });
+    expect(ready[0]!.rows.map((r) => r.id)).toEqual(['r1', 'r2', 'r3']);
+  });
+
+  it('groups multiple batches independently — one ready, one not', () => {
+    const rows = [
+      row({ id: 'r1', backfill: true, backfillBatch: 'b1', status: 'done' }),
+      row({ id: 'r2', backfill: true, backfillBatch: 'b2', status: 'pending' }),
+    ];
+    expect(readyDigestBatches(rows).map((b) => b.batchId)).toEqual(['b1']);
+  });
+
+  it('a batch with no rep left (user_id SET NULL on every row) has nobody to email — excluded, not crashed', () => {
+    const rows = [row({ id: 'r1', backfill: true, backfillBatch: 'b1', status: 'skipped', userId: null })];
+    expect(readyDigestBatches(rows)).toEqual([]);
+  });
+
+  it('a non-backfill row (backfillBatch null) is never grouped', () => {
+    const rows = [row({ id: 'r1', backfill: false, backfillBatch: null, status: 'done' })];
+    expect(readyDigestBatches(rows)).toEqual([]);
+  });
+});
+
+describe('sendReadyDigests — the ONE email per finished backfill batch, never twice', () => {
+  /** Minimal fake db for just the digest step's three calls: the two selects
+   *  (digested batch ids, undigested rows) and the claim insert. */
+  function digestDb(opts: {
+    digestedBatchIds?: string[];
+    undigestedRows?: InboundMessage[];
+    /** false = the claim insert returns zero rows (another caller already owns the batch). */
+    claims?: boolean | ((batchId: string) => boolean);
+  }) {
+    const claimed: Array<{ batchId: string; userId: string }> = [];
+    const claimWins = typeof opts.claims === 'function' ? opts.claims : () => opts.claims ?? true;
+    const db = {
+      select: (_cols?: unknown) => ({
+        from: (table: unknown) =>
+          table === schema.inboundTextDigests
+            ? Promise.resolve((opts.digestedBatchIds ?? []).map((batchId) => ({ batchId })))
+            : { where: (_w: unknown) => ({ orderBy: async (_o: unknown) => opts.undigestedRows ?? [] }) },
+      }),
+      insert: (_t: unknown) => ({
+        values: (v: { batchId: string; userId: string; sentAt: Date }) => ({
+          onConflictDoNothing: () => ({
+            returning: async () => {
+              claimed.push({ batchId: v.batchId, userId: v.userId });
+              return claimWins(v.batchId) ? [{ batchId: v.batchId }] : [];
+            },
+          }),
+        }),
+      }),
+    };
+    return { db: db as unknown as InboundTextDeps['db'], claimed };
+  }
+
+  it('does nothing when no batch is ready (still pending rows)', async () => {
+    const d = digestDb({ undigestedRows: [row({ backfill: true, backfillBatch: 'b1', status: 'pending' })] });
+    const h = harness({ db: d.db });
+    expect(await sendReadyDigests(h.deps)).toBe(0);
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    expect(d.claimed).toEqual([]);
+  });
+
+  it('claims the batch, sends ONE emailSimple with the pinned subject/body, and returns 1', async () => {
+    const rows = [
+      row({
+        id: 'r1', backfill: true, backfillBatch: 'b1', status: 'done', sfTaskId: '00T000000000001',
+        fromE164: '+16195550100', body: 'first text', receivedAt: new Date('2026-09-18T21:05:00Z'),
+      }),
+      row({
+        id: 'r2', backfill: true, backfillBatch: 'b1', status: 'done', sfTaskId: '00T000000000002',
+        fromE164: '+18585550199', body: 'second text', receivedAt: new Date('2026-09-20T15:00:00Z'),
+      }),
+    ];
+    const d = digestDb({ undigestedRows: rows });
+    const h = harness({ db: d.db });
+    (h.deps.sf.soqlQuery as ReturnType<typeof vi.fn>).mockImplementation(async (_u: string, q: string) => {
+      if (q.includes('FROM Task')) {
+        return [
+          { Id: '00T000000000001', Who: { Name: 'Jane Doe' } },
+          { Id: '00T000000000002', Who: null },
+        ];
+      }
+      return [{ Email: 'garrett@gghomes.org' }];
+    });
+
+    const sent = await sendReadyDigests(h.deps);
+
+    expect(sent).toBe(1);
+    expect(d.claimed).toEqual([{ batchId: 'b1', userId: 'rep-1' }]);
+    const [input] = emailInputs(h);
+    expect(input!.emailSubject).toBe('2 texts you missed (Sep 18, 2026 – today)');
+    expect(input!.emailBody).toBe(
+      [
+        'From: Jane Doe (619) 555-0100',
+        'Received: Fri, Sep 18, 2026, 2:05 PM PDT',
+        'Message:',
+        '> first text',
+        'Open in Salesforce: https://gghomes.my.salesforce.com/lightning/r/00T000000000001/view',
+        '',
+        'From: (858) 555-0199',
+        'Received: Sun, Sep 20, 2026, 8:00 AM PDT',
+        'Message:',
+        '> second text',
+        'Open in Salesforce: https://gghomes.my.salesforce.com/lightning/r/00T000000000002/view',
+      ].join('\n'),
+    );
+  });
+
+  it('a row whose Task creation never succeeded (no sf_task_id) shows the formatted number and no link', async () => {
+    const rows = [row({ id: 'r1', backfill: true, backfillBatch: 'b1', status: 'failed', sfTaskId: null, fromE164: '+16195550100' })];
+    const d = digestDb({ undigestedRows: rows });
+    const h = harness({ db: d.db, instanceUrlFor: vi.fn(async () => null) });
+    await sendReadyDigests(h.deps);
+    const [input] = emailInputs(h);
+    expect(input!.emailBody).toContain('From: (619) 555-0100');
+    expect(input!.emailBody).not.toContain('Open in Salesforce');
+  });
+
+  it('NEVER sends twice: a batch whose claim insert lands zero rows (already claimed) sends nothing', async () => {
+    const rows = [row({ id: 'r1', backfill: true, backfillBatch: 'b1', status: 'done' })];
+    const d = digestDb({ undigestedRows: rows, claims: false });
+    const h = harness({ db: d.db });
+    const sent = await sendReadyDigests(h.deps);
+    expect(sent).toBe(0);
+    expect(h.calls('/actions/standard/emailSimple')).toHaveLength(0);
+    // The claim was still attempted — that IS the once-only guard.
+    expect(d.claimed).toEqual([{ batchId: 'b1', userId: 'rep-1' }]);
+  });
+
+  it('one batch failing to send does not stop another batch in the same tick', async () => {
+    const rows = [
+      row({ id: 'r1', backfill: true, backfillBatch: 'b1', status: 'done', userId: 'rep-1' }),
+      row({ id: 'r2', backfill: true, backfillBatch: 'b2', status: 'done', userId: 'rep-2' }),
+    ];
+    const d = digestDb({ undigestedRows: rows });
+    const h = harness({ db: d.db });
+    (h.deps.sf.salesforceUserId as ReturnType<typeof vi.fn>).mockImplementation(async (userId: string) => {
+      if (userId === 'rep-1') throw new Error('salesforce down for rep-1');
+      return '005REP000000002';
+    });
+    const sent = await sendReadyDigests(h.deps);
+    expect(sent).toBe(1);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('digest failed'), expect.objectContaining({ batchId: 'b1' }));
+  });
+});
+
 describe('the worker SQL, rendered', () => {
   const db = drizzle(new Pool({ connectionString: 'postgres://unused:unused@127.0.0.1:1/unused' }), { schema });
   const RETURNING =
     ' returning "id", "org_id", "message_sid", "from_e164", "to_e164", "body", "num_media", "user_id", "status", "attempts", ' +
-    '"next_attempt_at", "last_error", "sf_task_id", "emailed_at", "email_skip_reason", "backfill", "received_at", "created_at", "updated_at"';
+    '"next_attempt_at", "last_error", "sf_task_id", "emailed_at", "email_skip_reason", "backfill", "backfill_batch", "received_at", "created_at", "updated_at"';
 
   it('the claim is a compare-and-swap pending → in_flight, DUE by the claim time, that bumps attempts and stamps updated_at', () => {
     const { sql, params } = claimInboundText(db, 'row-1', NOW).toSQL();
@@ -1021,5 +1230,38 @@ describe('the worker SQL, rendered', () => {
         'and "inbound_messages"."emailed_at" >= $3) limit $4',
     );
     expect(params).toEqual(['rep-1', '+16195550100', since.toISOString(), 1]);
+  });
+
+  it('selectDigestedBatchIds reads every already-digested batch id, unfiltered', () => {
+    const { sql, params } = selectDigestedBatchIds(db).toSQL();
+    expect(sql).toBe('select "batch_id" from "inbound_text_digests"');
+    expect(params).toEqual([]);
+  });
+
+  it('selectUndigestedBackfillRows takes backfill rows with a batch id, oldest first, with no exclusion when nothing is digested yet', () => {
+    const { sql, params } = selectUndigestedBackfillRows(db, []).toSQL();
+    expect(sql).toBe(
+      'select "id", "org_id", "message_sid", "from_e164", "to_e164", "body", "num_media", "user_id", "status", "attempts", ' +
+        '"next_attempt_at", "last_error", "sf_task_id", "emailed_at", "email_skip_reason", "backfill", "backfill_batch", ' +
+        '"received_at", "created_at", "updated_at" from "inbound_messages" ' +
+        'where ("inbound_messages"."backfill" = $1 and "inbound_messages"."backfill_batch" is not null) ' +
+        'order by "inbound_messages"."received_at" asc',
+    );
+    expect(params).toEqual([true]);
+  });
+
+  it('selectUndigestedBackfillRows excludes every already-digested batch id when given some', () => {
+    const { sql, params } = selectUndigestedBackfillRows(db, ['b1', 'b2']).toSQL();
+    expect(sql).toContain('"inbound_messages"."backfill_batch" not in ($2, $3)');
+    expect(params).toEqual([true, 'b1', 'b2']);
+  });
+
+  it("claimDigest is the once-only insert — ON CONFLICT (batch_id) DO NOTHING, checked by the caller's rowcount", () => {
+    const { sql, params } = claimDigest(db, 'batch-1', 'rep-1', NOW).toSQL();
+    expect(sql).toBe(
+      'insert into "inbound_text_digests" ("batch_id", "user_id", "sent_at") values ($1, $2, $3) ' +
+        'on conflict do nothing returning "batch_id"',
+    );
+    expect(params).toEqual(['batch-1', 'rep-1', NOW.toISOString()]);
   });
 });

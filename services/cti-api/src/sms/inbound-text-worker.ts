@@ -47,9 +47,9 @@
  * The message body never reaches a log line (see `redactBody`).
  * Design: docs/superpowers/specs/2026-09-25-inbound-texts-design.md.
  */
-import { and, asc, eq, gte, lt, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, isNotNull, lt, lte, notInArray, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
-import type { InboundMessage } from '@cti/db';
+import type { InboundMessage, InboundMessageStatus } from '@cti/db';
 import type { AppConfig } from '../config.js';
 import { findByPhone, sfFetch, soqlEscape, soqlQuery } from '../salesforce/client.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
@@ -62,11 +62,13 @@ import {
   salesforceHomeUrl,
   salesforceRecordUrl,
   taskFailureIsRetryable,
+  textDigestEmail,
   textEmail,
   textEmailLinkTarget,
   textTaskDescription,
   textTaskLinks,
   textTaskSubject,
+  type DigestEntry,
   type SenderMatch,
 } from './inbound-text.js';
 
@@ -290,9 +292,39 @@ function emailLink(instanceUrl: string | null, match: SenderMatch | null, taskId
   return target ? salesforceRecordUrl(instanceUrl, target) : salesforceHomeUrl(instanceUrl);
 }
 
-/** Step 3. `emailSimple` answers an array of per-input results; a 200 can still
- *  carry `isSuccess: false`, which means nothing was sent. `taskId` is null when
- *  the Task could not be created — the email then says the text was not logged. */
+/**
+ * `emailSimple` answers an array of per-input results; a 200 can still carry
+ * `isSuccess: false`, which means nothing was sent. Shared by the per-text
+ * alert (`sendTextEmail`, `what: 'email'` — its exact wording is pinned by
+ * existing tests) and the backfill digest (`sendDigest`, `what: 'digest email'`).
+ */
+async function postEmailSimple(
+  deps: InboundTextDeps,
+  userId: string,
+  to: string,
+  subject: string,
+  body: string,
+  what: string,
+): Promise<void> {
+  const res = await withTimeout(
+    deps.sf.sfFetch(userId, '/actions/standard/emailSimple', {
+      method: 'POST',
+      body: {
+        inputs: [{ emailAddresses: to, emailSubject: subject, emailBody: body, senderType: 'CurrentUser' }],
+      },
+    }),
+    SF_CREATE_TIMEOUT_MS,
+    what,
+  );
+  if (res.status >= 400) throw new Error(`${what} failed (${res.status}): ${JSON.stringify(res.json)}`);
+  const refused = (Array.isArray(res.json) ? res.json : []).find(
+    (r) => (r as { isSuccess?: unknown } | null)?.isSuccess === false,
+  ) as { errors?: unknown } | undefined;
+  if (refused) throw new Error(`${what} refused: ${JSON.stringify(refused.errors ?? null)}`);
+}
+
+/** Step 3. `taskId` is null when the Task could not be created — the email then
+ *  says the text was not logged. */
 async function sendTextEmail(
   deps: InboundTextDeps,
   row: InboundMessage,
@@ -314,21 +346,7 @@ async function sendTextEmail(
     optOut: isOptOutText(row.body),
     notLogged: taskId === null,
   });
-  const res = await withTimeout(
-    deps.sf.sfFetch(userId, '/actions/standard/emailSimple', {
-      method: 'POST',
-      body: {
-        inputs: [{ emailAddresses: to, emailSubject: email.subject, emailBody: email.body, senderType: 'CurrentUser' }],
-      },
-    }),
-    SF_CREATE_TIMEOUT_MS,
-    'email',
-  );
-  if (res.status >= 400) throw new Error(`email failed (${res.status}): ${JSON.stringify(res.json)}`);
-  const refused = (Array.isArray(res.json) ? res.json : []).find(
-    (r) => (r as { isSuccess?: unknown } | null)?.isSuccess === false,
-  ) as { errors?: unknown } | undefined;
-  if (refused) throw new Error(`email refused: ${JSON.stringify(refused.errors ?? null)}`);
+  await postEmailSimple(deps, userId, to, email.subject, email.body, 'email');
 }
 
 /**
@@ -549,6 +567,155 @@ export function claimInboundText(db: Db, id: string, at: Date) {
     .returning();
 }
 
+// =============================================================================
+// The backfill digest — ONE email per finished backfill batch (design task 6).
+//
+// A backfill row never gets an individual alert (`owesAlert` excludes
+// `backfill` rows above), so without this step a backfilled rep would see new
+// Tasks appear with no notice at all. Instead, once EVERY row in a
+// `backfill_batch` has reached a terminal status (done/failed/skipped — never
+// while one is still pending/in_flight), the tick sends that rep one email
+// listing every text, oldest first, and records the batch in
+// `inbound_text_digests` so it can never be sent twice.
+//
+// CLAIM BEFORE SEND, deliberately the opposite order from the Task/email
+// stamps above: inserting the digest row is the ONLY guard here (there is no
+// per-row stamp a digest can check), so if the claim landed and the send then
+// failed, the batch stays claimed and is never retried — a rare, silent
+// miss, versus the alternative (stamp after send) which can double-send
+// across two racing replicas. "Never twice" is the harder requirement the
+// design names explicitly; a stuck batch is a one-line manual fix (delete its
+// inbound_text_digests row) if it ever happens. See runbook.
+// =============================================================================
+
+const TERMINAL_INBOUND_STATUSES: ReadonlySet<InboundMessageStatus> = new Set(['done', 'failed', 'skipped']);
+
+/** Every batch id already recorded in inbound_text_digests — excluded from the
+ *  digest scan below so a finished batch is never re-considered. */
+export function selectDigestedBatchIds(db: Db) {
+  return db.select({ batchId: schema.inboundTextDigests.batchId }).from(schema.inboundTextDigests);
+}
+
+/** Every backfill row not yet digested, oldest first — `readyDigestBatches`'
+ *  candidate pool. `excludeBatchIds` is `selectDigestedBatchIds`' result. */
+export function selectUndigestedBackfillRows(db: Db, excludeBatchIds: string[]) {
+  const notYetDigested = and(eq(schema.inboundMessages.backfill, true), isNotNull(schema.inboundMessages.backfillBatch));
+  return db
+    .select()
+    .from(schema.inboundMessages)
+    .where(
+      excludeBatchIds.length > 0
+        ? and(notYetDigested, notInArray(schema.inboundMessages.backfillBatch, excludeBatchIds))
+        : notYetDigested,
+    )
+    .orderBy(asc(schema.inboundMessages.receivedAt));
+}
+
+/**
+ * The once-only claim: an insert that only ONE caller can win (ON CONFLICT (batch_id)
+ * DO NOTHING). `sendDigestForBatch` sends the email ONLY when this returns a row —
+ * an empty result means some other tick (this replica or another) already claimed
+ * (and is sending, or already sent) this batch.
+ */
+export function claimDigest(db: Db, batchId: string, userId: string, at: Date) {
+  return db
+    .insert(schema.inboundTextDigests)
+    .values({ batchId, userId, sentAt: at })
+    .onConflictDoNothing()
+    .returning({ batchId: schema.inboundTextDigests.batchId });
+}
+
+export interface DigestBatch {
+  batchId: string;
+  userId: string;
+  /** Oldest first — the order `selectUndigestedBackfillRows` returns them in. */
+  rows: InboundMessage[];
+}
+
+/**
+ * Groups undigested backfill rows by batch, keeping only a batch whose EVERY
+ * row has reached a terminal status — the digest's "wait until the whole
+ * batch is done" gate. Pure and DB-free. `rows` must already be grouped
+ * sensibly (oldest-first per the SQL above); this never re-sorts them.
+ */
+export function readyDigestBatches(rows: InboundMessage[]): DigestBatch[] {
+  const byBatch = new Map<string, InboundMessage[]>();
+  for (const row of rows) {
+    if (!row.backfillBatch) continue;
+    const list = byBatch.get(row.backfillBatch);
+    if (list) list.push(row);
+    else byBatch.set(row.backfillBatch, [row]);
+  }
+  const ready: DigestBatch[] = [];
+  for (const [batchId, batchRows] of byBatch) {
+    if (batchRows.some((r) => !TERMINAL_INBOUND_STATUSES.has(r.status))) continue;
+    const userId = batchRows[0]!.userId;
+    if (!userId) continue; // the rep is gone (user_id SET NULL) — nobody to email
+    ready.push({ batchId, userId, rows: batchRows });
+  }
+  return ready;
+}
+
+/** One batched SOQL read for every Task the batch created, so the digest shows
+ *  the SAME sender name the Task itself was linked to (not a fresh, possibly
+ *  different, phone re-match). A row whose Task creation failed (no sf_task_id)
+ *  is simply absent — its digest entry falls back to the formatted number. */
+async function taskNamesByTaskId(deps: InboundTextDeps, userId: string, taskIds: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  if (taskIds.length === 0) return names;
+  const ids = taskIds.map((id) => `'${soqlEscape(id)}'`).join(',');
+  const rows = await withTimeout(
+    deps.sf.soqlQuery<{ Id: string; Who: { Name?: string } | null }>(userId, `SELECT Id, Who.Name FROM Task WHERE Id IN (${ids})`),
+    SF_CALL_TIMEOUT_MS,
+    'digest task names',
+  );
+  for (const r of rows) if (r.Who?.Name) names.set(r.Id, r.Who.Name);
+  return names;
+}
+
+/** Claims, then sends, ONE batch's digest. Returns true when this call actually
+ *  sent it (false = another caller already owns the batch). */
+async function sendDigestForBatch(deps: InboundTextDeps, batch: DigestBatch): Promise<boolean> {
+  const [claimed] = await claimDigest(deps.db, batch.batchId, batch.userId, deps.now());
+  if (!claimed) return false;
+  const ownerId = await withTimeout(deps.sf.salesforceUserId(batch.userId), SF_CALL_TIMEOUT_MS, 'salesforce user');
+  const to = await repEmail(deps, batch.userId, ownerId);
+  const instanceUrl = await deps.instanceUrlFor(batch.userId);
+  const taskIds = [...new Set(batch.rows.map((r) => r.sfTaskId).filter((id): id is string => id !== null))];
+  const names = await taskNamesByTaskId(deps, batch.userId, taskIds);
+  const entries: DigestEntry[] = batch.rows.map((r) => ({
+    name: (r.sfTaskId && names.get(r.sfTaskId)) ?? null,
+    fromE164: r.fromE164,
+    receivedAt: r.receivedAt,
+    body: r.body,
+    numMedia: r.numMedia,
+    recordUrl: !instanceUrl ? null : r.sfTaskId ? salesforceRecordUrl(instanceUrl, r.sfTaskId) : salesforceHomeUrl(instanceUrl),
+  }));
+  const email = textDigestEmail(entries);
+  await postEmailSimple(deps, batch.userId, to, email.subject, email.body, 'digest email');
+  return true;
+}
+
+/** The tick's digest step: every batch that finished since the last tick gets
+ *  its ONE email. A batch whose send throws is logged and NOT retried — the
+ *  claim already landed (see the module doc above: claim-before-send is what
+ *  makes "never twice" absolute), so the batch is now excluded from the next
+ *  tick's scan even though no email went out. Rare; recoverable by deleting
+ *  its inbound_text_digests row (see the runbook) to let it be re-claimed. */
+export async function sendReadyDigests(deps: InboundTextDeps): Promise<number> {
+  const digested = (await selectDigestedBatchIds(deps.db)).map((r) => r.batchId);
+  const rows = await selectUndigestedBackfillRows(deps.db, digested);
+  let sent = 0;
+  for (const batch of readyDigestBatches(rows)) {
+    try {
+      if (await sendDigestForBatch(deps, batch)) sent++;
+    } catch (err) {
+      console.error(`${LOG} digest failed`, { batchId: batch.batchId, userId: batch.userId, err: errorText(err) });
+    }
+  }
+  return sent;
+}
+
 function liveDeps(): InboundTextDeps {
   const db = getDb();
   return {
@@ -578,7 +745,7 @@ async function guarded(row: InboundMessage, work: () => Promise<void>): Promise<
 
 export async function runInboundTextTick(
   deps: InboundTextDeps = liveDeps(),
-): Promise<{ processed: number; gaveUp: number }> {
+): Promise<{ processed: number; gaveUp: number; digestsSent: number }> {
   await reapStuckInboundTexts(deps.db, deps.now());
   let gaveUp = 0;
   for (const stuck of await failExhaustedStuckInboundTexts(deps.db, deps.now())) {
@@ -603,7 +770,10 @@ export async function runInboundTextTick(
     await guarded(claimed, () => processInboundText(claimed, deps));
     processed++;
   }
-  return { processed, gaveUp };
+  // After the ordinary rows: a batch only becomes digest-ready once every one
+  // of its rows just went terminal above (or on an earlier tick).
+  const digestsSent = await sendReadyDigests(deps);
+  return { processed, gaveUp, digestsSent };
 }
 
 /** Drive from server.ts (via `maybeStartInboundTextLoop`). Single-flight — a
