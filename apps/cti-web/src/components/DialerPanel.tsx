@@ -1083,6 +1083,9 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const hungUp = Boolean(view.currentItem?.prospectEndedAt);
   // No leg in the room (the rep left it for a callback): Resume re-joins first.
   const legDown = (): boolean => needsRejoin?.() ?? false;
+  // Pause & answer in flight (the banner is busy): a plain Pause/Resume/Skip
+  // must not race its take-callback. Stop is not included.
+  const controlsBusy = controlBusy || !!callback?.busy;
 
   return (
     <div className="dialer-panel">
@@ -1143,12 +1146,12 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
             <SessionToggle
               status={view.session.status}
               hungUp={hungUp}
-              busy={controlBusy}
+              busy={controlsBusy}
               onClick={() => runControls(withRejoin([pauseResumeAction(view.session.status)], legDown()))}
             />
             <ItemControls
               item={view.currentItem}
-              busy={controlBusy}
+              busy={controlsBusy}
               onSkip={() => runControls(actionsFor('skip', view.session.status))}
               onEnd={() => runControls(actionsFor('end', view.session.status))}
               onNext={() => runControls(withRejoin(actionsFor('next', view.session.status), legDown()))}

@@ -44,8 +44,11 @@ class FakeDevice {
   /** Hold connect() open this long — so a callback can ring while the leg joins. */
   static connectDelayMs = 0;
   private listeners = new Map<string, Listener[]>();
-  /** Calls rung on this Device and not yet dealt with — the SDK's `_calls`. */
-  calls: FakeCall[] = [];
+  /** Every call rung on this Device. */
+  rung: FakeCall[] = [];
+  /** The SDK's `calls`: those still pending — it drops a call once accepted,
+   *  cancelled, rejected or disconnected, and connect() ignore()s the rest. */
+  get calls(): FakeCall[] { return this.rung.filter((c) => c.status() === 'pending'); }
   destroyed = 0;
   audio = {
     availableInputDevices: new Map([['default', { deviceId: 'default' }]]),
@@ -68,9 +71,7 @@ class FakeDevice {
     FakeDevice.connects.push({ params: opts.params, connection });
     // As the real SDK does (voice-sdk device.ts connect): every call still
     // ringing on the Device is ignore()d — closed, with no event.
-    // (Filtered to pending ones here so `ignore` being called means a live
-    // callback was swallowed; the SDK's ignore() is a no-op on the others.)
-    for (const call of this.calls.splice(0)) if (call.status() === 'pending') call.ignore();
+    for (const call of this.calls) call.ignore();
     return connection;
   }
 }
@@ -244,7 +245,7 @@ async function startRun(): Promise<void> {
 }
 
 function ring(call: FakeCall): void {
-  FakeDevice.instances[0]!.calls.push(call);
+  FakeDevice.instances[0]!.rung.push(call);
   act(() => { FakeDevice.instances[0]!.emit('incoming', call); });
 }
 
@@ -981,5 +982,15 @@ describe('App — Resume after a callback (Task 3 review)', () => {
     fireEvent.click(screen.getByText('Pause & answer'));
     await waitFor(() => expect(second.accept).toHaveBeenCalledTimes(1));
     expect(leg.disconnect).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it('minor 6: Resume with a callback still being invited on the Device (not yet shown) does not join — connect() would swallow it', async () => {
+    await takeAndFinish(await callbackOnBanner());
+    const resume = await screen.findByText('Resume');
+    FakeDevice.instances[0]!.rung.push(callbackCall(2)); // the SDK has it; 'incoming' not yet emitted
+    fireEvent.click(resume);
+    expect(await screen.findByText('Finish the current call before resuming the run.')).toBeTruthy();
+    expect(FakeDevice.connects.length).toBe(1);
+    expect(state.controls).not.toContain('resume');
   }, 15_000);
 });

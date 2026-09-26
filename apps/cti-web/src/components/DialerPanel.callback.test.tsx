@@ -105,6 +105,27 @@ describe('DialerPanel — the callback banner (Task 3)', () => {
     expect(c.onIgnore).toHaveBeenCalledTimes(1);
   });
 
+  // Task 3 review, minor 6: a plain Pause/Resume/Skip must not race a
+  // take-callback in flight. Stop stays — ending the run is always allowed.
+  it('while Pause & answer is in flight, Pause/Resume and the item controls are disabled; Stop is not', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view());
+    mount({ callback: cb({ busy: true }) });
+    const button = (label: string): HTMLButtonElement => screen.getByText(label).closest('button') as HTMLButtonElement;
+    await screen.findByText('Pause');
+    expect(button('Pause').disabled).toBe(true);
+    expect(button('Skip').disabled).toBe(true);
+    expect(button('Stop').disabled).toBe(false);
+  });
+
+  it('…and enabled again once it settles', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view());
+    mount({ callback: cb({ busy: false }) });
+    const button = (label: string): HTMLButtonElement => screen.getByText(label).closest('button') as HTMLButtonElement;
+    await screen.findByText('Pause');
+    expect(button('Pause').disabled).toBe(false);
+    expect(button('Skip').disabled).toBe(false);
+  });
+
   it('is not shown once the run is over', async () => {
     vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view({ sessionStatus: 'done', item: null }));
     mount({ callback: cb() });

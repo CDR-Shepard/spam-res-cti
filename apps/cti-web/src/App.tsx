@@ -1100,7 +1100,10 @@ export function App(): JSX.Element {
     const sessionId = parkedRunIdRef.current ?? dialerSessionIdRef.current;
     if (!sessionId) return false;
     const phaseFree = phaseRef.current === 'idle' || phaseRef.current === 'preflight';
-    if (!phaseFree || connectionRef.current || incomingRef.current) {
+    // `calls`: a callback the SDK is still inviting (on the Device, 'incoming'
+    // not yet emitted) — the join's connect() would silently ignore() it.
+    const invitePending = ((deviceRef.current as { calls?: unknown[] } | null)?.calls?.length ?? 0) > 0;
+    if (!phaseFree || connectionRef.current || incomingRef.current || callbackWaitingRef.current || takingCallbackRef.current || invitePending) {
       throw new Error('Finish the current call before resuming the run.');
     }
     try {
