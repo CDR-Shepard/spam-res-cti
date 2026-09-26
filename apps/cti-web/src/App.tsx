@@ -778,7 +778,10 @@ export function App(): JSX.Element {
       const route = routeIncoming({
         // A manual call still up counts as busy whatever the phase: a Device
         // error drops a ringing one to `preflight` with the call still live.
-        placing: placingRef.current || !!connectionRef.current,
+        // Only a LIVE one: the ref outlives the call (it is cleared by reset,
+        // backToIdle, reopenDisposition or the next place(), not on hangup).
+        placing: placingRef.current
+          || (!!connectionRef.current && (connectionRef.current as { status?: () => string }).status?.() !== 'closed'),
         phase: phaseRef.current,
         legLive: !!dialerConnRef.current,
         legSessionId: legSessionIdRef.current,

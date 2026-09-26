@@ -1286,4 +1286,36 @@ describe('App — a manual call the Device error left in preflight (final review
     expect(call.accept).not.toHaveBeenCalled();
     expect(FakeDevice.connects[0]!.connection.disconnect).not.toHaveBeenCalled();
   });
+
+  // Re-review of c020bb8: connectionRef is not cleared when a call ends — only
+  // by reset(), backToIdle, reopenDisposition or the next place(). A closed
+  // call must not keep the phone "busy" for every callback after it.
+  it("…but a manual call that has ENDED is not busy: wrap-up, then a click-to-dial whose firewall fails — a callback rings (reviewer probe)", async () => {
+    let clickToDial: ((e: opencti.ClickToDialEvent) => void) | null = null;
+    vi.spyOn(opencti, 'initOpenCti').mockResolvedValue({ ready: true });
+    vi.spyOn(opencti, 'onClickToDial').mockImplementation((h) => { clickToDial = h; });
+    vi.spyOn(opencti, 'notifyReady').mockImplementation(() => {});
+    vi.spyOn(opencti, 'setPanelHeight').mockImplementation(() => {});
+    vi.spyOn(opencti, 'setPanelVisibility').mockImplementation(() => {});
+    state.manualDial = true;
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    for (const d of ['5', '5', '5', '1', '2', '3', '4']) {
+      const key = Array.from(document.querySelectorAll('.dialpad .key')).find((b) => b.querySelector('.num')?.textContent === d);
+      fireEvent.click(key!);
+    }
+    fireEvent.click(screen.getByTitle('Check & call'));
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(1));
+    await screen.findByTitle('End call');
+    const manual = FakeDevice.connects[0]!.connection;
+    act(() => { manual.emit('accept'); });
+    act(() => { manual.emit('disconnect'); });
+    await waitFor(() => expect(document.querySelector('.wrapup')).not.toBeNull());
+    state.manualDial = false; // the firewall is down (503)
+    act(() => { clickToDial!({ number: '+16195550123' }); });
+    await screen.findByText(/Firewall error/);
+    const call = callbackCall();
+    ring(call);
+    expect({ rejected: call.reject.mock.calls.length, ringScreen: screen.queryByTitle('Answer') !== null }).toEqual({ rejected: 0, ringScreen: true });
+  });
 });
