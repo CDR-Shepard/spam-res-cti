@@ -422,11 +422,24 @@ export async function advanceSession(
     // rollover), and it is append-only: nothing that later rewrites the item's
     // own to_number/from_number can erase a dial from the tally. Atomic with the
     // stamp so the ceiling can never disagree with what the queue says was dialed.
-    await deps.db.transaction(async (tx) => {
-      await tx
+    //
+    // The callId stamp is a guarded compare-and-swap: `originate` awaited above,
+    // and a take-callback (settles the row, pauses the session) or a Stop
+    // (ends the session; the item itself has no sid yet, so Stop cannot hang it
+    // up) can both land while it was in flight. Guarding on BOTH the row still
+    // being `dialing` AND the session still `active` catches every such race —
+    // a take-callback leaves neither true, a Stop leaves only the row true. The
+    // attempt row is inserted regardless: the phone did ring either way.
+    const stamped = await deps.db.transaction(async (tx) => {
+      const rows = await tx
         .update(schema.dialerQueueItems)
         .set({ callId, fromNumber: did.e164, updatedAt: new Date() })
-        .where(eq(schema.dialerQueueItems.id, next.id));
+        .where(and(
+          eq(schema.dialerQueueItems.id, next.id),
+          eq(schema.dialerQueueItems.status, 'dialing'),
+          sql`exists (select 1 from dialer_sessions where id = ${sessionId} and status = 'active')`,
+        ))
+        .returning({ status: schema.dialerQueueItems.status });
       await tx.insert(schema.dialerDialAttempts).values({
         orgId: session.orgId,
         userId: session.userId,
@@ -439,7 +452,9 @@ export async function advanceSession(
         // read as one person.
         recordId: next.recordId,
       });
+      return rows.length > 0;
     });
+    if (!stamped) { await hangUpUnbridged(deps, callId, next.id); return { action: 'waiting' }; }
     return { action: 'dialing', itemId: next.id };
   }
 }

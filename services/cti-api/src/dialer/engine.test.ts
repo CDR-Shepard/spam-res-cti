@@ -342,6 +342,69 @@ describe('advanceSession', () => {
     await expect(advanceSession('S1', deps)).rejects.toThrow(/twilio 500/);
     expect(fdb._txInserts).toEqual([]);
   });
+  // Review round 2 (Important #1): a take-callback or a Stop can land WHILE
+  // `deps.telephony.originate` is still in flight — after the pending -> dialing
+  // claim committed, before the post-originate stamp transaction opens. Both
+  // races leave the claimed row un-stampable (settled away from `dialing`, or
+  // the session no longer `active`), and both must ring-then-hang-up rather
+  // than silently bridge a person into a room nobody is watching.
+  it('a take-callback lands mid-originate: the row is settled `skipped` under us, so the callId stamp is refused — hang up AFTER commit, keep the attempt (the phone did ring), and report `waiting`, not `dialing`', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps();
+    deps.telephony.originate = vi.fn(async () => {
+      // take-callback's own transaction commits while this call is in flight.
+      items[0]!.status = 'skipped';
+      return { callId: 'CA1' };
+    });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    let txCount = 0;
+    let committed = false;
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => {
+      txCount++;
+      if (txCount === 1) { const r = await realTx(fn); committed = true; return r; } // the claim: unaffected
+      // The post-originate stamp transaction: its guarded update matches 0
+      // rows, exactly as real Postgres would once the row is no longer
+      // `dialing` under an `active` session.
+      const rigged = { update: () => ({ set: () => ({ where: () => ({ then: (res: any) => Promise.resolve().then(res), returning: async () => [] }) }) }) };
+      const r = await realTx(async (tx: any) => fn({ ...tx, ...rigged }));
+      committed = true;
+      return r;
+    };
+    const committedAtHangup: boolean[] = [];
+    deps.telephony.hangup = vi.fn(async () => { committedAtHangup.push(committed); });
+    const r = await advanceSession('S1', deps);
+    expect(r).toEqual({ action: 'waiting' });
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(committedAtHangup).toEqual([true]);
+    expect(fdb._txInserts).toHaveLength(1); // the attempt still recorded — the phone did ring
+  });
+  it('a Stop lands mid-originate: the session is `stopped` under us (the item stays `dialing`, uncalled — Stop has no sid to hang up yet), so the callId stamp is refused the same way — hang up AFTER commit, keep the attempt, report `waiting`', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const session = { ...baseSession };
+    const deps = makeDeps();
+    deps.telephony.originate = vi.fn(async () => {
+      // stopSession's own (unlocked, un-transacted) write commits while this
+      // call is in flight; the item itself is untouched (no callId to hang up).
+      session.status = 'stopped';
+      return { callId: 'CA1' };
+    });
+    const fdb = fakeDb(session, items); deps.db = fdb;
+    let txCount = 0;
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => {
+      txCount++;
+      if (txCount === 1) return realTx(fn);
+      return realTx(async (tx: any) => {
+        const rigged = { ...tx, update: () => ({ set: () => ({ where: () => ({ then: (res: any) => Promise.resolve().then(res), returning: async () => [] }) }) }) };
+        return fn(rigged);
+      });
+    };
+    const r = await advanceSession('S1', deps);
+    expect(r).toEqual({ action: 'waiting' });
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(fdb._txInserts).toHaveLength(1);
+  });
   it('waits (does not dial) while an item is in flight', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
     const deps = makeDeps(); deps.db = fakeDb(baseSession, items);
