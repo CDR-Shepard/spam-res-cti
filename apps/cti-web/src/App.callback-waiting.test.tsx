@@ -1000,6 +1000,33 @@ describe('App — Resume after a callback (Task 3 review)', () => {
     expect(state.controls).not.toContain('resume');
   }, 15_000);
 
+  it('E6: a successful re-join un-parks the run — its heartbeat stops', async () => {
+    const realStart = heartbeat.startParkedHeartbeat;
+    const stops: Array<Mock<() => void>> = [];
+    vi.spyOn(heartbeat, 'startParkedHeartbeat').mockImplementation((id, deps) => {
+      const stop = vi.fn(realStart(id, deps));
+      stops.push(stop);
+      return stop;
+    });
+    const leg = await resumeJoining();
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).not.toHaveBeenCalled();
+    act(() => { leg.emit('accept'); });
+    await waitFor(() => expect(state.controls).toContain('resume'));
+    expect(stops[0]).toHaveBeenCalled();
+  }, 15_000);
+
+  it('E12: while Pause & answer is out, the banner says so and both its buttons are disabled', async () => {
+    await callbackOnBanner();
+    const release = holdTakeCallback();
+    fireEvent.click(screen.getByText('Pause & answer'));
+    const pausing = await screen.findByText('Pausing…');
+    expect((pausing as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByText('Ignore') as HTMLButtonElement).disabled).toBe(true);
+    release();
+    await waitFor(() => expect(screen.queryByText('Pausing…')).toBeNull());
+  });
+
   it('minor 3: Stop pressed during the join — the run stops, the leg is hung up when answered, nothing resumes', async () => {
     const leg = await resumeJoining();
     fireEvent.click(screen.getByText('Stop'));

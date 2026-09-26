@@ -126,6 +126,24 @@ describe('DialerPanel — the callback banner (Task 3)', () => {
     expect(button('Skip').disabled).toBe(false);
   });
 
+  // Task 3 review, minor 8 (D10): each callback gets its own banner, so a new
+  // one chimes even when it replaces another without a render in between.
+  it('D10: a different callback is a new banner — it chimes again', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view());
+    const props: DialerPanelProps = {
+      sessionId: 'sess1', onScreenPop: noop, onStartFromListView: async () => {}, onPrepare: async () => {},
+      onJoin: async () => true, onStop: noop, onComplete: noop, onDismiss: noop,
+    };
+    const { rerender } = render(<DialerPanel {...props} callback={cb({ id: 'CA1' })} />);
+    await screen.findByText('Callback: Jane Doe · Lead');
+    expect(chime.playCallbackChime).toHaveBeenCalledTimes(1);
+    rerender(<DialerPanel {...props} callback={cb({ id: 'CA1', busy: true })} />);
+    expect(chime.playCallbackChime).toHaveBeenCalledTimes(1);
+    rerender(<DialerPanel {...props} callback={cb({ id: 'CA2', callerLabel: 'John Roe' })} />);
+    await screen.findByText('Callback: John Roe · Lead');
+    expect(chime.playCallbackChime).toHaveBeenCalledTimes(2);
+  });
+
   it('is not shown once the run is over', async () => {
     vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view({ sessionStatus: 'done', item: null }));
     mount({ callback: cb() });
@@ -246,6 +264,25 @@ describe('DialerPanel — Resume after a callback (Task 3)', () => {
     const button = (label: string): HTMLButtonElement => screen.getByText(label).closest('button') as HTMLButtonElement;
     await waitFor(() => expect(button('Pause').disabled).toBe(true));
     expect(button('Stop').disabled).toBe(true);
+  });
+
+  it('D13: Redial on a paused run with no leg re-joins first, then redials, then resumes', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view({ sessionStatus: 'paused', item: { status: 'connected', prospectEndedAt: '2026-09-26T17:00:00.000Z' } }));
+    const order: string[] = [];
+    recordControls(order);
+    mount({ needsRejoin: () => true, onRejoin: async () => { order.push('join'); return true; } });
+    fireEvent.click(await screen.findByText('Redial'));
+    await waitFor(() => expect(order).toEqual(['join', 'redial', 'resume']));
+  });
+
+  it('D14: with no way to re-join (no onRejoin), a Resume that needs one sends nothing', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view({ sessionStatus: 'paused', item: null }));
+    const order: string[] = [];
+    recordControls(order);
+    mount({ needsRejoin: () => true });
+    fireEvent.click(await screen.findByText('Resume'));
+    await new Promise((r) => { setTimeout(r, 30); });
+    expect(order).toEqual([]);
   });
 
   it('Pause never re-joins', async () => {
