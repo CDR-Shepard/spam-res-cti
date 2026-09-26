@@ -66,10 +66,20 @@ export interface LegRecoveryDeps {
   /** Re-join the conference; resolves false when superseded mid-join. */
   rejoin: () => Promise<boolean>;
   stop: () => Promise<void>;
+  /**
+   * Asked right before the rejoin. `device.connect()` silently ignore()s a call
+   * still ringing on the Device (voice-sdk device.ts `connect`, no event), so a
+   * callback waiting for the rep must be dealt with first (spec 2026-09-26
+   * decision 9). Resolves true when it was — the run is parked, or the
+   * callback's own sequence now owns the leg — and the leg must NOT be
+   * re-joined; false to rejoin as usual. Never rejects.
+   */
+  handOffCallback?: () => Promise<boolean>;
 }
 
-/** `stop-failed` is NOT `stopped`: the run may still be active on the server. */
-export type LegRecovery = 'superseded' | 'run-over' | 'rejoined' | 'stopped' | 'stop-failed';
+/** `stop-failed` is NOT `stopped`: the run may still be active on the server.
+ *  `handed-off`: a waiting callback took the rejoin's place (see handOffCallback). */
+export type LegRecovery = 'superseded' | 'run-over' | 'rejoined' | 'handed-off' | 'stopped' | 'stop-failed';
 
 /**
  * The leg dropped on its own. Get the rep back into the room if the run is still
@@ -90,6 +100,11 @@ export async function recoverDroppedLeg(deps: LegRecoveryDeps, recentRejoinCount
   if (status !== null && status !== 'active' && status !== 'paused') return 'run-over';
 
   if (recentRejoinCount < MAX_LEG_RECOVERIES) {
+    if (deps.handOffCallback) {
+      if (await deps.handOffCallback()) return 'handed-off';
+      // The hand-off can be a round trip too.
+      if (!deps.isCurrent()) return 'superseded';
+    }
     try {
       return (await deps.rejoin()) ? 'rejoined' : 'superseded';
     } catch { /* fall through: the run must not keep dialing */ }

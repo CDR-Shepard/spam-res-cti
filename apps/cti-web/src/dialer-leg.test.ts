@@ -170,6 +170,46 @@ describe('recoverDroppedLeg', () => {
     expect(await recoverDroppedLeg(d, 0)).toBe('superseded');
     expect(d.stop).toHaveBeenCalledTimes(1);
   });
+
+  // Spec 2026-09-26 decision 9: device.connect() silently ignore()s a call
+  // still ringing on the Device (voice-sdk device.ts connect, no event). A
+  // callback that started waiting during the recovery wait must be dealt with
+  // BEFORE the rejoin, never swallowed by it.
+  it('a callback waiting when the rejoin comes round is handed off instead — the leg is never re-joined over it', async () => {
+    const order: string[] = [];
+    const d = deps({
+      fetchStatus: vi.fn(async () => { order.push('status'); return 'active' as const; }),
+      handOffCallback: vi.fn(async () => { order.push('handOff'); return true; }),
+      rejoin: vi.fn(async () => { order.push('rejoin'); return true; }),
+    });
+    expect(await recoverDroppedLeg(d, 0)).toBe('handed-off');
+    expect(order).toEqual(['status', 'handOff']);
+    expect(d.stop).not.toHaveBeenCalled();
+  });
+
+  it('nothing to hand off (or it could not be done) → rejoins as usual', async () => {
+    const order: string[] = [];
+    const d = deps({
+      handOffCallback: vi.fn(async () => { order.push('handOff'); return false; }),
+      rejoin: vi.fn(async () => { order.push('rejoin'); return true; }),
+    });
+    expect(await recoverDroppedLeg(d, 0)).toBe('rejoined');
+    expect(order).toEqual(['handOff', 'rejoin']);
+  });
+
+  it('…re-checked for a Stop after the hand-off round trip, so a run stopped meanwhile is not rejoined', async () => {
+    let current = true;
+    const d = deps({ isCurrent: () => current, handOffCallback: vi.fn(async () => { current = false; return false; }) });
+    expect(await recoverDroppedLeg(d, 0)).toBe('superseded');
+    expect(d.rejoin).not.toHaveBeenCalled();
+    expect(d.stop).not.toHaveBeenCalled();
+  });
+
+  it('a leg that keeps dropping is still stopped: the hand-off is asked only right before a rejoin', async () => {
+    const d = deps({ handOffCallback: vi.fn(async () => true) });
+    expect(await recoverDroppedLeg(d, MAX_LEG_RECOVERIES)).toBe('stopped');
+    expect(d.handOffCallback).not.toHaveBeenCalled();
+  });
 });
 
 describe('recentRejoins — the cap decays', () => {
@@ -195,6 +235,8 @@ describe('legRecoveryToast', () => {
   it('says nothing when there is nothing to tell', () => {
     expect(legRecoveryToast('superseded')).toBeNull();
     expect(legRecoveryToast('run-over')).toBeNull();
+    // The callback now rings on its own screen; the run is parked, not reconnected.
+    expect(legRecoveryToast('handed-off')).toBeNull();
   });
 });
 
