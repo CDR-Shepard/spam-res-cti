@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   dialerJoinParams,
   LEG_ACCEPT_TIMEOUT_MS,
+  LEG_JOIN_FAILED_MESSAGE,
   LEG_RECOVERY_DELAY_MS,
   LEG_RECOVERY_WINDOW_MS,
   LEG_REFUSED_MESSAGE,
@@ -242,9 +243,14 @@ describe('legRecoveryToast', () => {
 
 describe('legAccepted — Resume waits for Twilio to ANSWER the re-joined leg before the run dials', () => {
   class Conn {
-    private h = new Map<string, Array<() => void>>();
-    on(e: string, cb: () => void): void { this.h.set(e, [...(this.h.get(e) ?? []), cb]); }
-    emit(e: string): void { for (const cb of this.h.get(e) ?? []) cb(); }
+    private h = new Map<string, Array<(arg?: unknown) => void>>();
+    closed = false;
+    on(e: string, cb: (arg?: unknown) => void): void { this.h.set(e, [...(this.h.get(e) ?? []), cb]); }
+    emit(e: string, arg?: unknown): void {
+      if (e === 'disconnect' || e === 'cancel' || e === 'reject') this.closed = true;
+      for (const cb of this.h.get(e) ?? []) cb(arg);
+    }
+    status(): string { return this.closed ? 'closed' : 'open'; }
   }
 
   it('resolves on accept', async () => {
@@ -254,10 +260,35 @@ describe('legAccepted — Resume waits for Twilio to ANSWER the re-joined leg be
     await expect(joined).resolves.toBeUndefined();
   });
 
-  it.each(['disconnect', 'error', 'cancel', 'reject'])("rejects when the leg ends first (%s) — the /voice guard's <Reject/> never answers", async (event) => {
+  // Task 3 review, minor 5: three outcomes, and only a refusal blames another run.
+  it.each(['disconnect', 'cancel', 'reject'])("refused when the leg ends unanswered (%s) — the /voice guard's <Reject/>", async (event) => {
     const c = new Conn();
     const joined = legAccepted(c);
     c.emit(event);
+    await expect(joined).rejects.toThrow(LEG_REFUSED_MESSAGE);
+    await expect(joined).rejects.toMatchObject({ reason: 'refused' });
+  });
+
+  it('an error on the leg (network, microphone) is a failed join, with its own message', async () => {
+    const c = new Conn();
+    const joined = legAccepted(c);
+    c.emit('error', { code: 31005, message: 'ConnectionError (31005): transport' });
+    await expect(joined).rejects.toThrow(LEG_JOIN_FAILED_MESSAGE);
+    await expect(joined).rejects.toMatchObject({ reason: 'failed' });
+  });
+
+  // A TwiML <Reject/> reaches a client-made call as a gateway HANGUP carrying a
+  // SIP decline/busy code: 31603/31486/31480 directly with improved precision,
+  // else wrapped in a 31005 ConnectionError (voice-sdk call.ts _onHangup).
+  it.each([
+    [{ code: 31603 }],
+    [{ code: 31486 }],
+    [{ code: 31005, originalError: { code: 31603 } }],
+    [{ code: 31005, originalError: { code: 31480 } }],
+  ])('…but an error carrying a SIP decline (%o) is the refusal it reports', async (err) => {
+    const c = new Conn();
+    const joined = legAccepted(c);
+    c.emit('error', err);
     await expect(joined).rejects.toThrow(LEG_REFUSED_MESSAGE);
   });
 
@@ -269,12 +300,22 @@ describe('legAccepted — Resume waits for Twilio to ANSWER the re-joined leg be
     await expect(joined).rejects.toThrow(LEG_REFUSED_MESSAGE);
   });
 
-  it('rejects when nothing happens in time (default ten seconds)', async () => {
+  // Task 3 review, minor 4: answered and hung up in the same tick — by the
+  // time anyone could adopt it, the leg is already closed.
+  it('accepted then closed in the same tick is refused, not a live leg', async () => {
+    const c = new Conn();
+    const joined = legAccepted(c);
+    c.emit('accept');
+    c.emit('disconnect');
+    await expect(joined).rejects.toThrow(LEG_REFUSED_MESSAGE);
+  });
+
+  it('a timeout (default ten seconds) is a failed join, not a refusal', async () => {
     expect(LEG_ACCEPT_TIMEOUT_MS).toBe(10_000);
     vi.useFakeTimers();
     try {
       const joined = legAccepted(new Conn(), 1000);
-      const settled = expect(joined).rejects.toThrow(LEG_REFUSED_MESSAGE);
+      const settled = expect(joined).rejects.toThrow(LEG_JOIN_FAILED_MESSAGE);
       await vi.advanceTimersByTimeAsync(1000);
       await settled;
     } finally {
@@ -282,7 +323,7 @@ describe('legAccepted — Resume waits for Twilio to ANSWER the re-joined leg be
     }
   });
 
-  it('a connection with no events cannot be confirmed: rejects', async () => {
-    await expect(legAccepted({})).rejects.toThrow(LEG_REFUSED_MESSAGE);
+  it('a connection with no events cannot be confirmed: a failed join', async () => {
+    await expect(legAccepted({})).rejects.toThrow(LEG_JOIN_FAILED_MESSAGE);
   });
 });

@@ -32,8 +32,13 @@ class FakeConnection {
   disconnect = vi.fn(() => { state.events.push('leg-disconnect'); this.emit('disconnect'); });
   micTrack = new FakeTrack();
   getLocalStream(): { getAudioTracks: () => FakeTrack[] } { return { getAudioTracks: () => [this.micTrack] }; }
+  private closed = false;
   on(event: string, cb: Listener): void { this.handlers.set(event, [...(this.handlers.get(event) ?? []), cb]); }
-  emit(event: string): void { for (const cb of this.handlers.get(event) ?? []) cb(); }
+  emit(event: string): void {
+    if (event === 'disconnect') this.closed = true;
+    for (const cb of this.handlers.get(event) ?? []) cb();
+  }
+  status(): string { return this.closed ? 'closed' : 'open'; }
   hasListenerFor(event: string): boolean { return (this.handlers.get(event)?.length ?? 0) > 0; }
 }
 
@@ -982,6 +987,25 @@ describe('App — Resume after a callback (Task 3 review)', () => {
     fireEvent.click(screen.getByText('Pause & answer'));
     await waitFor(() => expect(second.accept).toHaveBeenCalledTimes(1));
     expect(leg.disconnect).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it('minor 4: answered and hung up in the same tick — refused, never adopted: no resume, and Resume again re-joins', async () => {
+    const leg = await resumeJoining();
+    act(() => { leg.emit('accept'); leg.emit('disconnect'); });
+    expect(await screen.findByText(dialerLeg.LEG_REFUSED_MESSAGE)).toBeTruthy();
+    expect(state.controls).not.toContain('resume');
+    fireEvent.click(screen.getByText('Resume'));
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(3));
+  }, 15_000);
+
+  it('minor 5 / P2: a join Twilio never answers — no resume, the leg hung up, "check your connection and microphone", the phone stays on Power Dial', async () => {
+    const realLegAccepted = dialerLeg.legAccepted;
+    vi.spyOn(dialerLeg, 'legAccepted').mockImplementation((c) => realLegAccepted(c, 300));
+    const leg = await resumeJoining();
+    expect(await screen.findByText(dialerLeg.LEG_JOIN_FAILED_MESSAGE)).toBeTruthy();
+    expect(leg.disconnect).toHaveBeenCalledTimes(1);
+    expect(state.controls).not.toContain('resume');
+    expect(document.querySelector('.nav')).toBeNull();
   }, 15_000);
 
   it('minor 6: Resume with a callback still being invited on the Device (not yet shown) does not join — connect() would swallow it', async () => {

@@ -143,33 +143,68 @@ export function legRecoveryToast(outcome: LegRecovery): { text: string; type: 's
   }
 }
 
-/** How long a re-join may take to be answered before it counts as refused. */
+/** How long a re-join may take to be answered before it counts as failed. */
 export const LEG_ACCEPT_TIMEOUT_MS = 10_000;
+/** Twilio ended the re-join unanswered — the API's /voice guard answers a join
+ *  of a run that is not the rep's newest live one with <Reject/>. */
 export const LEG_REFUSED_MESSAGE = "Couldn't rejoin the run — if another power-dial run of yours is live, stop it first.";
+/** No answer in time, or an error on the leg: the rep's connection or mic. */
+export const LEG_JOIN_FAILED_MESSAGE = "Couldn't reconnect you to the run — check your connection and microphone, then press Resume again.";
+
+/** Why a re-join was not answered. */
+export type LegJoinFailure = 'refused' | 'failed';
+
+export class LegJoinError extends Error {
+  constructor(readonly reason: LegJoinFailure) {
+    super(reason === 'refused' ? LEG_REFUSED_MESSAGE : LEG_JOIN_FAILED_MESSAGE);
+    this.name = 'LegJoinError';
+  }
+}
+
+/** SIP decline / busy / unavailable: how a TwiML <Reject/> reaches a call the
+ *  client placed (voice-sdk call.ts `_onHangup`). With the SDK's default
+ *  signalling precision they arrive wrapped in a 31005 ConnectionError whose
+ *  `originalError` carries the code. */
+const DECLINE_CODES: ReadonlySet<number> = new Set([31480, 31486, 31603]);
+
+function isDecline(err: unknown): boolean {
+  const e = err as { code?: unknown; originalError?: { code?: unknown } } | null | undefined;
+  const code = typeof e?.code === 'number' && DECLINE_CODES.has(e.code) ? e.code : e?.originalError?.code;
+  return typeof code === 'number' && DECLINE_CODES.has(code);
+}
 
 /**
  * Resolves once Twilio has ANSWERED this leg (`accept`) — the room is really
- * joined. Rejects if the leg ends first (`disconnect`/`error`/`cancel`/
- * `reject`: the API's /voice guard answers a stale run's join with <Reject/>,
- * which never answers) or nothing happens within `timeoutMs`. Resume after a
- * callback waits on this before it POSTs resume (spec 2026-09-26 decision 6):
- * the server must not start dialing a paused run until its rep is back in the
- * room.
+ * joined. Resume after a callback waits on this before it POSTs resume (spec
+ * 2026-09-26 decision 6): the server must not start dialing a paused run until
+ * its rep is back in the room. Otherwise rejects with a LegJoinError:
+ *  - `refused`: the leg ended unanswered (`disconnect`/`cancel`/`reject`, or an
+ *    `error` carrying a SIP decline) — the /voice guard's <Reject/>; or it was
+ *    answered and closed in the same tick, so there is no live leg to adopt;
+ *  - `failed`: any other `error` on the leg, or no answer within `timeoutMs`.
  */
 export function legAccepted(connection: unknown, timeoutMs: number = LEG_ACCEPT_TIMEOUT_MS): Promise<void> {
-  const on = (connection as { on?: (event: string, cb: () => void) => void } | null)?.on;
-  if (typeof on !== 'function') return Promise.reject(new Error(LEG_REFUSED_MESSAGE));
-  return new Promise<void>((resolve, reject) => {
+  const conn = connection as { on?: (event: string, cb: (arg?: unknown) => void) => void; status?: () => string } | null;
+  const on = conn?.on;
+  if (typeof on !== 'function') return Promise.reject(new LegJoinError('failed'));
+  const answered = new Promise<void>((resolve, reject) => {
     let settled = false;
-    const settle = (answered: boolean): void => {
+    const settle = (failure: LegJoinFailure | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (answered) resolve();
-      else reject(new Error(LEG_REFUSED_MESSAGE));
+      if (failure) reject(new LegJoinError(failure));
+      else resolve();
     };
-    const timer = setTimeout(() => settle(false), timeoutMs);
-    on.call(connection, 'accept', () => settle(true));
-    for (const event of ['disconnect', 'error', 'cancel', 'reject']) on.call(connection, event, () => settle(false));
+    const timer = setTimeout(() => settle('failed'), timeoutMs);
+    on.call(connection, 'accept', () => settle(null));
+    for (const event of ['disconnect', 'cancel', 'reject']) on.call(connection, event, () => settle('refused'));
+    on.call(connection, 'error', (err) => settle(isDecline(err) ? 'refused' : 'failed'));
+  });
+  // Answered and hung up in the same tick (Task 3 review, minor 4): by the time
+  // anyone could adopt the leg it is closed, and its 'disconnect' has already
+  // gone unheard — adopting it would strand the run with a dead leg.
+  return answered.then(() => {
+    if (conn?.status?.() === 'closed') throw new LegJoinError('refused');
   });
 }
