@@ -41,7 +41,7 @@ Counsel to confirm whether FL §501.059's limit is per person; if so, the firewa
 | `daily_cap` | daily limit (state law) | 3 dials in 24 h in a capped state |
 | `daily_cap_unverified` | daily limit (state law) | The history read failed in a capped state, so it fails closed |
 | `in_progress_elsewhere` | in progress in another run | Another active or paused run is dialing or talking to this person |
-| `canceled` | counted in "N skipped" | The rep took a callback (Pause & answer) while this record was ringing. The call was hung up and the person requeued at the same ordinal with a 5-min floor. Not a dial for the follow-up rollover. The phone rang, so it still counts for the per-customer ceiling, the 3 h courtesy, and the state-law cap. |
+| `canceled` | not counted — the person is counted once, on the requeued copy | The rep took a callback (Pause & answer) while this record was ringing. The call was hung up and the person requeued at the same ordinal with a 5-min floor. Not a dial for the follow-up rollover. The phone rang, so it still counts for the per-customer ceiling, the 3 h courtesy, and the state-law cap. |
 
 ## Callbacks during a run
 
