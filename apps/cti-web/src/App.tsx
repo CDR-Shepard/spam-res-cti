@@ -63,7 +63,7 @@ import {
   type ToastSpec,
   type WaitingCallback,
 } from './callback-waiting';
-import { HEARTBEAT_UNREACHABLE_TEXT, startParkedHeartbeat } from './parked-heartbeat';
+import { HEARTBEAT_UNREACHABLE_TEXT, parkedRunOverAction, startParkedHeartbeat } from './parked-heartbeat';
 
 interface MeResponse {
   user: {
@@ -827,15 +827,21 @@ export function App(): JSX.Element {
   // the run, and let the callback ring the ordinary way; Resume re-joins later.
   // Resolves false — the callback rejected, with a toast — when the run could
   // not be paused; the caller then recovers the leg as usual, because a live
-  // run must never keep dialing into an empty room.
+  // run must never keep dialing into an empty room. Resolves true, touching
+  // nothing, when a Stop, a finished run or a newer run superseded this one
+  // during the round trip: dropConferenceLeg already re-rang the callback, and
+  // parking a run that is over would start a heartbeat that later drops
+  // whatever leg is live.
   const handOffCallbackAfterDrop = useCallback(async (sessionId: string | null): Promise<boolean> => {
     const waiting = callbackWaitingRef.current;
     if (!waiting || !sessionId || takingCallbackRef.current) return false;
+    const gen = dialerRunRef.current;
     takingCallbackRef.current = true;
     setTakingCallback(true);
     try {
       await takeDialerCallback(sessionId);
     } catch (e) {
+      if (dialerRunRef.current !== gen) return true;
       const reason = takeCallbackRefusal(e) === 'talking' ? 'on-call' : 'not-paused';
       rejectWaitingCallback(waiting, missedCallbackToast(waiting.callerLabel, forwardE164Ref.current, reason));
       return false;
@@ -843,6 +849,7 @@ export function App(): JSX.Element {
       takingCallbackRef.current = false;
       setTakingCallback(false);
     }
+    if (dialerRunRef.current !== gen) return true;
     dialerRunRef.current++;       // nothing may act for the dropped leg any more
     setParked(sessionId);          // before the dead ref goes: the tab stays busy
     dialerConnRef.current = null;
@@ -1613,10 +1620,16 @@ export function App(): JSX.Element {
     if (!parkedRunId) return undefined;
     return startParkedHeartbeat(parkedRunId, {
       poll: (id) => getDialer(id),
-      onRunOver: () => dropConferenceLeg(),
+      // A beat that lands late must never drop a leg that a Resume (or a
+      // newer run) now holds — parked-heartbeat.ts parkedRunOverAction.
+      onRunOver: () => {
+        const action = parkedRunOverAction(parkedRunId, parkedRunIdRef.current, !!dialerConnRef.current);
+        if (action === 'release') dropConferenceLeg();
+        else if (action === 'unpark') setParked(null);
+      },
       onUnreachable: () => setToast({ text: HEARTBEAT_UNREACHABLE_TEXT, type: 'error' }),
     });
-  }, [parkedRunId, dropConferenceLeg]);
+  }, [parkedRunId, dropConferenceLeg, setParked]);
 
   const submitDisposition = useCallback(async () => {
     if (!active) return;

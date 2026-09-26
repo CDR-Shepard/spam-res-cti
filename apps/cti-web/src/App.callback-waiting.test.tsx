@@ -661,3 +661,80 @@ describe('App — recovery never re-joins over a callback (review I-1)', () => {
     expect(screen.queryByTitle('Answer')).toBeNull();
   });
 });
+
+describe('App — the dropped-leg hand-off yields to a Stop (review I-2)', () => {
+  beforeEach(() => { vi.spyOn(chime, 'playCallbackChime').mockResolvedValue(undefined); });
+
+  it("Stop lands while the hand-off's take-callback is out: the late 200 parks nothing — no heartbeat, no toast — and the callback keeps ringing", async () => {
+    const beat = vi.spyOn(heartbeat, 'startParkedHeartbeat');
+    const call = await callbackOnBanner();
+    const release = holdTakeCallback();
+    dropLeg();
+    await waitFor(() => expect(state.controls).toContain('take-callback'));
+    fireEvent.click(screen.getByText('Stop'));
+    await waitFor(() => expect(state.controls).toContain('stop'));
+    expect(await screen.findByTitle('Answer')).toBeTruthy(); // the run ended under it: rings the ordinary way
+    release();
+    await sleep(300);
+    expect(beat).not.toHaveBeenCalled();
+    expect(screen.queryByText(/lost its audio connection/)).toBeNull();
+    expect(screen.getByTitle('Answer')).toBeTruthy();
+    expect(call.reject).not.toHaveBeenCalled();
+  });
+
+  it('…and a late failure does not reject the callback now on the ring screen', async () => {
+    const call = await callbackOnBanner();
+    state.takeCallback = 'error';
+    const release = holdTakeCallback();
+    dropLeg();
+    await waitFor(() => expect(state.controls).toContain('take-callback'));
+    fireEvent.click(screen.getByText('Stop'));
+    await waitFor(() => expect(state.controls).toContain('stop'));
+    await screen.findByTitle('Answer');
+    release();
+    await sleep(300);
+    expect(call.reject).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Missed callback/)).toBeNull();
+    expect(screen.getByTitle('Answer')).toBeTruthy();
+  });
+
+  it("a parked run's heartbeat reading \"over\" releases it — nav back — while it is still the run parked here with no leg", async () => {
+    const beat = vi.spyOn(heartbeat, 'startParkedHeartbeat');
+    await takeAndFinish(await callbackOnBanner());
+    await screen.findByText('Resume');
+    expect(document.querySelector('.nav')).toBeNull();
+    state.status = 'stopped';
+    act(() => { beat.mock.calls[0]![1].onRunOver(); });
+    await waitFor(() => expect(document.querySelector('.nav')).not.toBeNull());
+  }, 15_000);
+
+  it('…but a beat that lands after Resume re-joined never drops the live leg', async () => {
+    const beat = vi.spyOn(heartbeat, 'startParkedHeartbeat');
+    await takeAndFinish(await callbackOnBanner());
+    fireEvent.click(await screen.findByText('Resume'));
+    await waitFor(() => expect(FakeDevice.connects[1]?.connection.hasListenerFor('accept')).toBe(true));
+    act(() => { FakeDevice.connects[1]!.connection.emit('accept'); });
+    await waitFor(() => expect(state.controls).toContain('resume'));
+    act(() => { beat.mock.calls[0]![1].onRunOver(); });
+    expect(FakeDevice.connects[1]!.connection.disconnect).not.toHaveBeenCalled();
+    expect(document.querySelector('.nav')).toBeNull();
+  }, 15_000);
+
+  it('…nor the leg of a NEW run that is joining after the parked one was stopped', async () => {
+    const beat = vi.spyOn(heartbeat, 'startParkedHeartbeat');
+    await takeAndFinish(await callbackOnBanner());
+    fireEvent.click(await screen.findByText('Stop'));
+    await waitFor(() => expect(state.controls).toContain('stop'));
+    state.status = 'ready';
+    state.currentItem = null;
+    FakeDevice.connectDelayMs = 300;
+    handOverRun();
+    fireEvent.click(await screen.findByText('Start dialing'));
+    await waitFor(() => expect(state.controls.filter((c) => c === 'start')).toHaveLength(2));
+    act(() => { beat.mock.calls[0]![1].onRunOver(); }); // the stopped run's late beat, mid-join
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(2));
+    await sleep(50);
+    expect(FakeDevice.connects[1]!.connection.disconnect).not.toHaveBeenCalled();
+    expect(document.querySelector('.nav')).toBeNull();
+  }, 15_000);
+});

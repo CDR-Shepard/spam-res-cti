@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { HEARTBEAT_FAILURES_BEFORE_WARNING, PARKED_HEARTBEAT_MS, startParkedHeartbeat, type ParkedHeartbeatDeps } from './parked-heartbeat';
+import { HEARTBEAT_FAILURES_BEFORE_WARNING, PARKED_HEARTBEAT_MS, parkedRunOverAction, startParkedHeartbeat, type ParkedHeartbeatDeps } from './parked-heartbeat';
 import type { DialerSession } from './dialer-api';
 
 type Status = DialerSession['status'];
@@ -71,5 +71,19 @@ describe('startParkedHeartbeat — keeps a run parked for a callback from being 
     land({ session: { status: 'done' } });
     await vi.advanceTimersByTimeAsync(0);
     expect(d.onRunOver).not.toHaveBeenCalled();
+  });
+});
+
+describe('parkedRunOverAction — what "the parked run is over" may touch (review I-2)', () => {
+  it('releases the run (drop the leg, unlock the nav) while it is still the run parked here and no leg is live', () => {
+    expect(parkedRunOverAction('sess-1', 'sess-1', false)).toBe('release');
+  });
+  it('with a leg live (a Resume re-joined), only stops beating — never drops that leg', () => {
+    expect(parkedRunOverAction('sess-1', 'sess-1', true)).toBe('unpark');
+  });
+  it('a run no longer parked here is none of its business', () => {
+    expect(parkedRunOverAction('sess-1', null, false)).toBe('ignore');
+    expect(parkedRunOverAction('sess-1', 'sess-2', false)).toBe('ignore');
+    expect(parkedRunOverAction('sess-1', null, true)).toBe('ignore');
   });
 });

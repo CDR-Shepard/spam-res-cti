@@ -22,6 +22,21 @@ export interface ParkedHeartbeatDeps {
   onUnreachable: () => void;
 }
 
+/** What App does when the heartbeat's run reads as over. */
+export type ParkedRunOverAction = 'release' | 'unpark' | 'ignore';
+
+/**
+ * The run this heartbeat keeps alive (`heartbeatRunId`) reads as over. Release
+ * it — drop the leg and unlock the nav — only while it is still the run parked
+ * here (`parkedRunId`) and no leg is live. With a leg live (Resume re-joined)
+ * just stop beating: that leg is not this heartbeat's to drop. A run no longer
+ * parked here is none of its business.
+ */
+export function parkedRunOverAction(heartbeatRunId: string, parkedRunId: string | null, legLive: boolean): ParkedRunOverAction {
+  if (parkedRunId !== heartbeatRunId) return 'ignore';
+  return legLive ? 'unpark' : 'release';
+}
+
 /** Beat every PARKED_HEARTBEAT_MS until the returned stop() is called or the
  *  run reads as over. A single failed beat is retried by the next one. */
 export function startParkedHeartbeat(sessionId: string, deps: ParkedHeartbeatDeps): () => void {
