@@ -2318,3 +2318,73 @@ describe('handleDialOutcome — a connect never bridges into a room the run gave
     expect(fdb._txInserts).toEqual([]);
   });
 });
+
+// Final whole-branch review (server hardening): a person answering a dial of a
+// run that is no longer live — Stop landed while its originate was out (no sid
+// to hang up yet), or a resume slipped in during stopSession's Twilio calls —
+// is never bridged into the rep's rep-scoped room. The row is settled first
+// (a Stop's cut: `no_connect` + `canceled`), THEN the call is hung up.
+describe('handleDialOutcome — a human answering a run that is over is hung up, never bridged', () => {
+  beforeEach(() => { _target = {}; });
+  const dialingItem = () => [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fromNumber: '+16190000000', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', sessionId: 'S1' }];
+
+  it.each(['stopped', 'done'] as const)('a %s run: the row is settled, then the call hung up — no bridge, no pop, no sticky, no connect stamp, no next dial', async (status) => {
+    const items = dialingItem();
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status }, items); deps.db = fdb;
+    const order: string[] = [];
+    deps.telephony.hangup = vi.fn(async () => { order.push(`hangup:${fdb._writes.length}`); });
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'no_connect', outcome: 'canceled' }) }]);
+    expect(order).toEqual(['hangup:1']); // after the settle, never before it
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(deps.telephony.bridgeToRep).not.toHaveBeenCalled();
+    expect(deps.onScreenPop).not.toHaveBeenCalled();
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+    expect(fdb._inserts).toEqual([]);
+    expect(fdb._txWrites).toEqual([]);
+  });
+
+  it('the settle is a compare-and-swap on THIS call still `dialing` (rendered SQL)', async () => {
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, dialingItem()); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    const settle = fdb._updateWheres.find((w: any) => w.patch.status === 'no_connect')!;
+    const q = new PgDialect().sqlToQuery(settle.where as SQL);
+    expect(q.sql).toBe('("dialer_queue_items"."id" = $1 and "dialer_queue_items"."call_id" = $2 and "dialer_queue_items"."status" = $3)');
+    expect(q.params).toEqual(['i1', 'CA1', 'dialing']);
+  });
+
+  it('the run is gone altogether: still hung up, never bridged', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, dialingItem()); deps.db = fdb;
+    fdb.query.dialerSessions.findFirst = async () => undefined;
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'no_connect', outcome: 'canceled' }) }]);
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(deps.telephony.bridgeToRep).not.toHaveBeenCalled();
+  });
+
+  it('a settle that loses the swap (the row moved under it) leaves the call to whoever settled it', async () => {
+    const items = dialingItem();
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'stopped' }, items); deps.db = fdb;
+    const realFirst = fdb.query.dialerQueueItems.findFirst;
+    fdb.query.dialerQueueItems.findFirst = async (args: unknown) => {
+      const row = await realFirst(args);
+      const snapshot = { ...row };
+      items[0]!.status = 'no_connect'; // a duplicate delivery settled it first
+      return snapshot;
+    };
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(fdb._writes).toEqual([]);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    expect(deps.telephony.bridgeToRep).not.toHaveBeenCalled();
+  });
+
+  it.each(['active', 'paused'] as const)('the run is %s: it bridges exactly as before — a plain Pause keeps the rep in the room', async (status) => {
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status, repCallSid: REP_LEG }, dialingItem()); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(deps.telephony.bridgeToRep).toHaveBeenCalledWith('CA1', 'U1', { repRejoins: true });
+    expect(deps.onScreenPop).toHaveBeenCalledWith('U1', 'Lead', '00Q1');
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'connected', outcome: 'connected' }) });
+    expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
+  });
+});

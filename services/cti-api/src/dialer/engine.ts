@@ -921,6 +921,30 @@ export async function handleDialOutcome(
     return;
   }
   const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, item.sessionId) });
+  const sessionLive = session?.status === 'active' || session?.status === 'paused';
+  if (outcome === 'connected' && !sessionLive) {
+    // A person answered a dial of a run that is over (stopped, done, or gone):
+    // a Stop that landed while this originate was out had no sid to hang up,
+    // or a resume slipped in during stopSession's Twilio calls. The room is
+    // rep-scoped, so bridging would put them in whatever the rep is in now, or
+    // leave them on the hold. A paused run still bridges below — a plain Pause
+    // keeps the rep in the room. Settle the row FIRST, as the Stop's cut it is
+    // (`no_connect` + `canceled`: no rollover, no Chatter), compare-and-swapped
+    // on this call still `dialing`, and hang up only once that has committed —
+    // its `completed` callback then finds a settled row and no-ops. A lost swap
+    // means another handler settled the row and owns the call.
+    const settled = await deps.db
+      .update(schema.dialerQueueItems)
+      .set({ status: 'no_connect', outcome: 'canceled', updatedAt: new Date() })
+      .where(and(
+        eq(schema.dialerQueueItems.id, item.id),
+        eq(schema.dialerQueueItems.callId, callId),
+        eq(schema.dialerQueueItems.status, 'dialing'),
+      ))
+      .returning({ id: schema.dialerQueueItems.id });
+    if (settled.length > 0) await hangUpUnbridged(deps, callId, item.id);
+    return;
+  }
   if (!session) return;
 
   // The number THIS call dialed — what the connect stamp below is scoped to.
@@ -1014,7 +1038,6 @@ export async function handleDialOutcome(
   // rolling on its own.
   const attempt = item.attempt ?? 1; // a fixture/row missing `attempt` must not silently read as a second miss
   const retryTo = item.secondaryNumber ?? item.primaryNumber ?? item.toNumber;
-  const sessionLive = session.status === 'active' || session.status === 'paused';
   const requeue = attempt < 2 && retryTo != null && sessionLive && item.redialOf == null;
   // Only a follow-up rolls over. Task runs dial whatever the rep's list holds
   // ("Check in", "Send quote"), and completing/copying one of those would
