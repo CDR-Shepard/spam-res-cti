@@ -10,6 +10,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 const state = vi.hoisted(() => ({
   userRow: null as { dialerHoldMusicChoice: string } | null,
@@ -537,6 +539,17 @@ describe('POST /telephony/twilio/voice — a named join must be the run that own
     const bound = paramValues(state.liveRunLookups[0]!.where).flat();
     expect(bound).toContain(REP_ID);
     expect(bound.filter((v) => ['active', 'paused', 'ready', 'done', 'stopped'].includes(v as string)).sort()).toEqual(['active', 'paused']);
+  });
+
+  // Review round 2 (Important #3, mutation M48): the exact rendered predicate,
+  // not just which values are bound. `and` became `or` would still bind the
+  // SAME params — every rep's join would then be refused whenever ANY rep is
+  // dialing, because "status in (active, paused)" alone is true almost always.
+  it('the live-runs lookup is an AND of user id and status — not an OR (rendered SQL)', async () => {
+    await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    const q = new PgDialect().sqlToQuery(state.liveRunLookups[0]!.where as SQL);
+    expect(q.sql).toBe('("dialer_sessions"."user_id" = $1 and "dialer_sessions"."status" in ($2, $3))');
+    expect(q.params).toEqual([REP_ID, 'active', 'paused']);
   });
 
   it('no run named (an older softphone): no lookup, joins exactly as before', async () => {

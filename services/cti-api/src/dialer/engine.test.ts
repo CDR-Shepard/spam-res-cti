@@ -103,6 +103,12 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
   // WHERE guard as rendered SQL, not just the JS-level `prospectEndedAt == null`
   // dedup check (Task 11 fix-round-1 M3).
   const updateWheres: Array<{ patch: Record<string, unknown>; where: unknown }> = [];
+  // Review round 2 (Important #3): every `tx.query.*` call's `where`, in call
+  // order — so a test can pin the EXACT rendered SQL of takeCallback's own
+  // session/item reads, not just that a value SOMEWHERE in the fake got
+  // returned. `_txQueryReads` is table-tagged so a test can filter to just the
+  // read it cares about.
+  const txQueryReads: Array<{ table: 'dialerSessions' | 'dialerQueueItems'; where: unknown }> = [];
   let sessionOverride: Record<string, unknown> = {};
   const claimReturnsRows = opts.claimReturnsRows ?? true;
   const handle: any = {
@@ -113,6 +119,7 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
     _txInserts: txInserts,
     _txWrites: txWrites,
     _updateWheres: updateWheres,
+    _txQueryReads: txQueryReads,
     query: {
       dialerSessions: {
         findFirst: async () => ({ ...session, ...sessionOverride }),
@@ -196,9 +203,19 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
         // the tx already holds one. Mirrors the outer `query.dialerQueueItems`
         // stub, ignoring the `where` filter the same way.
         query: {
-          dialerQueueItems: { findMany: async () => items },
+          dialerQueueItems: {
+            findMany: async (args?: { where?: unknown }) => {
+              txQueryReads.push({ table: 'dialerQueueItems', where: args?.where });
+              return items;
+            },
+          },
           // takeCallback reads the session under its advisory lock.
-          dialerSessions: { findFirst: async () => ({ ...session, ...sessionOverride }) },
+          dialerSessions: {
+            findFirst: async (args?: { where?: unknown }) => {
+              txQueryReads.push({ table: 'dialerSessions', where: args?.where });
+              return { ...session, ...sessionOverride };
+            },
+          },
         },
         insert(_tbl: unknown) {
           return {
@@ -1864,6 +1881,23 @@ describe('takeCallback — Pause & answer on a callback during a run', () => {
     });
     await takeCallback('S1', deps);
     expect(order.slice(0, 3)).toEqual(['lock:S1', 'session', 'items']);
+  });
+
+  // Review round 2 (Important #3, mutations M49/M50): the session and item
+  // reads themselves, pinned as rendered SQL — not just that SOME value came
+  // back, which a broken predicate (e.g. matching on the wrong column) could
+  // still satisfy by accident.
+  it('reads the session by exactly its id, and the run\'s items by exactly its sessionId (rendered SQL)', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing()]); deps.db = fdb;
+    await takeCallback('S1', deps);
+    const sessionRead = fdb._txQueryReads.find((r: any) => r.table === 'dialerSessions')!;
+    const s = new PgDialect().sqlToQuery(sessionRead.where as SQL);
+    expect(s.sql).toBe('"dialer_sessions"."id" = $1');
+    expect(s.params).toEqual(['S1']);
+    const itemsRead = fdb._txQueryReads.find((r: any) => r.table === 'dialerQueueItems')!;
+    const i = new PgDialect().sqlToQuery(itemsRead.where as SQL);
+    expect(i.sql).toBe('"dialer_queue_items"."session_id" = $1');
+    expect(i.params).toEqual(['S1']);
   });
 
   it('nothing ringing (between dials, or waiting on a retry): pauses and cancels nothing', async () => {
