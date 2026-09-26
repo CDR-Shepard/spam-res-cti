@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HEARTBEAT_FAILURES_BEFORE_WARNING, PARKED_HEARTBEAT_MS, parkedRunOverAction, startParkedHeartbeat, type ParkedHeartbeatDeps } from './parked-heartbeat';
 import type { DialerSession } from './dialer-api';
+import { ApiError } from './api';
 
 type Status = DialerSession['status'];
 const ok = (status: Status) => async () => ({ session: { status } });
@@ -60,6 +61,28 @@ describe('startParkedHeartbeat — keeps a run parked for a callback from being 
     startParkedHeartbeat('sess-2', d2);
     await vi.advanceTimersByTimeAsync(PARKED_HEARTBEAT_MS * 9); // fail ×4, ok, fail ×4
     expect(d2.onUnreachable).not.toHaveBeenCalled();
+  });
+
+  // Review m4: these never heal on a retry — the run is gone, or no longer the
+  // rep's. Beating on for ever would keep the nav locked on a dead run.
+  it('a 403 or 404 means the run is gone (or not the rep\'s): released at once, not retried as a network failure', async () => {
+    for (const status of [403, 404]) {
+      const d = deps(async () => { throw new ApiError(status, { error: 'x' }); });
+      startParkedHeartbeat('sess-1', d);
+      await vi.advanceTimersByTimeAsync(PARKED_HEARTBEAT_MS * 6);
+      expect(d.poll).toHaveBeenCalledTimes(1);
+      expect(d.onRunOver).toHaveBeenCalledTimes(1);
+      expect(d.onUnreachable).not.toHaveBeenCalled();
+    }
+  });
+
+  it('any other failure (a 500, the network) is still retried', async () => {
+    const d = deps(async () => { throw new ApiError(500, { error: 'x' }); });
+    const stop = startParkedHeartbeat('sess-1', d);
+    await vi.advanceTimersByTimeAsync(PARKED_HEARTBEAT_MS * 3);
+    expect(d.poll).toHaveBeenCalledTimes(3);
+    expect(d.onRunOver).not.toHaveBeenCalled();
+    stop();
   });
 
   it('a beat still in flight when stop() is called does nothing when it lands', async () => {

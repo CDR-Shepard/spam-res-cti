@@ -6,6 +6,7 @@
  * nobody has polled for ten minutes. A GET of the session is the poll that
  * counts (it stamps `last_polled_at`).
  */
+import { ApiError } from './api';
 import type { DialerSession } from './dialer-api';
 
 export const PARKED_HEARTBEAT_MS = 60_000;
@@ -16,7 +17,8 @@ export const HEARTBEAT_UNREACHABLE_TEXT = "Can't reach the server — your pause
 
 export interface ParkedHeartbeatDeps {
   poll: (sessionId: string) => Promise<{ session: Pick<DialerSession, 'status'> }>;
-  /** The run reads as done or stopped: release it (App's dropConferenceLeg). */
+  /** The run reads as done or stopped, or the server says it is gone (404) or
+   *  not the rep's (403): release it (App's dropConferenceLeg). */
   onRunOver: () => void;
   /** HEARTBEAT_FAILURES_BEFORE_WARNING beats in a row failed — once per streak. */
   onUnreachable: () => void;
@@ -56,7 +58,15 @@ export function startParkedHeartbeat(sessionId: string, deps: ParkedHeartbeatDep
         stop();
         deps.onRunOver();
       }
-    } catch {
+    } catch (e) {
+      // 404 (gone) / 403 (no longer the rep's run): a retry never heals these,
+      // and beating on would keep the phone locked on a dead run.
+      if (e instanceof ApiError && (e.status === 403 || e.status === 404)) {
+        if (stopped) return;
+        stop();
+        deps.onRunOver();
+        return;
+      }
       failures++;
       if (!stopped && failures === HEARTBEAT_FAILURES_BEFORE_WARNING) deps.onUnreachable();
     }
