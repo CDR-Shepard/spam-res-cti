@@ -66,6 +66,7 @@ A `409 { reason: 'connected' }` means a prospect answered in the race: the callb
 - The `/voice` conference join answers `<Reject/>` when the run it names isn't live or another of the rep's runs is `active` (`dialer/join-guard.ts`).
 - The `pending → dialing` claim re-checks that the run is `active`.
 - A connect is a compare-and-swap on `dialing`: a person answering a call whose row was already settled is hung up, never bridged.
+- A person answering a dial of a run that is `stopped` or `done` is never bridged: the row is settled `no_connect`/`canceled` first, then the call is hung up.
 
 **Known limitation:** reps paired with the Callsign iPhone app share the rep's Twilio identity, so a callback during a run may also ring the iPhone. If the rep answers it there, the web banner disappears but the run keeps dialing — they should Pause first. The iPhone app isn't rolled out to reps yet.
 
