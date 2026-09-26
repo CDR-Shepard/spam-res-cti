@@ -109,6 +109,10 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
   // returned. `_txQueryReads` is table-tagged so a test can filter to just the
   // read it cares about.
   const txQueryReads: Array<{ table: 'dialerSessions' | 'dialerQueueItems'; where: unknown }> = [];
+  // Review round 3 (R2-3): same idea as `_txQueryReads`, but for the OUTER
+  // (non-transactional) `deps.db.query.*` reads — needed to pin
+  // handleDialOutcome's lost-swap re-read (the I2 fix) as exact rendered SQL.
+  const outerQueryReads: Array<{ table: 'dialerQueueItems'; where: unknown }> = [];
   let sessionOverride: Record<string, unknown> = {};
   const claimReturnsRows = opts.claimReturnsRows ?? true;
   const handle: any = {
@@ -120,6 +124,7 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
     _txWrites: txWrites,
     _updateWheres: updateWheres,
     _txQueryReads: txQueryReads,
+    _outerQueryReads: outerQueryReads,
     query: {
       dialerSessions: {
         findFirst: async () => ({ ...session, ...sessionOverride }),
@@ -134,7 +139,10 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
           const { params } = new PgDialect().sqlToQuery(args.where);
           return opts.otherSessions.find((o) => params.includes(o.session.id))?.items ?? items;
         },
-        findFirst: async () => items[0] ?? null,
+        findFirst: async (args?: { where?: unknown }) => {
+          outerQueryReads.push({ table: 'dialerQueueItems', where: args?.where });
+          return items[0] ?? null;
+        },
       },
     },
     // Used by recordConnectSticky (dialer/sticky.ts) — the engine calls this
@@ -2133,6 +2141,23 @@ describe('takeCallback — Pause & answer on a callback during a run', () => {
     expect(deps.telephony.hangup).not.toHaveBeenCalled();
   });
 
+  // Review round 3 (R2-3, mutation N7c): the Stop-wins-the-race re-read
+  // itself, pinned as rendered SQL.
+  it("the Stop-wins-the-race re-read is by exactly the session's id (rendered SQL)", async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing()]); deps.db = fdb;
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => realTx(async (tx: any) => {
+      const rigged = { ...tx, update: (tbl: any) => (tbl === schema.dialerSessions ? { set: () => ({ where: () => ({ returning: async () => [] }) }) } : tx.update(tbl)) };
+      return fn(rigged);
+    });
+    await takeCallback('S1', deps);
+    const sessionReads = fdb._txQueryReads.filter((r: any) => r.table === 'dialerSessions');
+    expect(sessionReads).toHaveLength(2); // the initial read, then the re-read after the lost pause
+    const q = new PgDialect().sqlToQuery(sessionReads[1]!.where as SQL);
+    expect(q.sql).toBe('"dialer_sessions"."id" = $1');
+    expect(q.params).toEqual(['S1']);
+  });
+
   it('a dial whose originate has not returned yet (no call sid) is still settled and requeued — there is just nothing to hang up here', async () => {
     const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing({ callId: null })]); deps.db = fdb;
     expect(await takeCallback('S1', deps)).toEqual({ action: 'paused', canceledItemId: 'i1' });
@@ -2213,6 +2238,21 @@ describe('handleDialOutcome — a connect never bridges into a room the run gave
     expect(deps.telephony.bridgeToRep).not.toHaveBeenCalled();
     expect(deps.onScreenPop).not.toHaveBeenCalled();
     expect(fdb._inserts).toEqual([]);
+  });
+
+  // Review round 3 (R2-3, mutation N2c): the lost-swap re-read itself, pinned
+  // as rendered SQL — not just that a value came back that happened to work.
+  it('the lost-swap re-read is by exactly the item id (rendered SQL)', async () => {
+    const items = [{ ...dialing[0]! }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items, { claimReturnsRows: false }); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    // Two reads: the initial lookup by callId, then the lost-swap re-read by
+    // id — this test pins the SECOND, not the first.
+    const reads = fdb._outerQueryReads.filter((r: any) => r.table === 'dialerQueueItems');
+    expect(reads).toHaveLength(2);
+    const q = new PgDialect().sqlToQuery(reads[1]!.where as SQL);
+    expect(q.sql).toBe('"dialer_queue_items"."id" = $1');
+    expect(q.params).toEqual(['i1']);
   });
 
   it('a person answering a call whose row is already `skipped` (cancelled while its originate was in flight) is hung up', async () => {
