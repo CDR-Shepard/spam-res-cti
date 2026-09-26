@@ -115,7 +115,12 @@ export async function listContextFor(
   // A redial copy is also excluded, same as an attempt-2 retry: it is a
   // rep-requested extra dial, not part of the queue creation built from the
   // list view (Task 11 fix-round-1 Minor).
-  const total = items.filter((it) => it.attempt === 1 && it.redialOf == null).length;
+  //
+  // Counted by ORDINAL, not by row (review round 2, Minor #5a — same fix as
+  // routes/dialer.ts `firstPassTotal`): a take-callback requeue copy
+  // (engine.ts `callbackRequeue`) is an attempt-1, non-redial row that reuses
+  // its cancelled original's ordinal, and must not inflate "record N of M".
+  const total = new Set(items.filter((it) => it.attempt === 1 && it.redialOf == null).map((it) => it.ordinal)).size;
   const first = items.find((it) => it.ordinal === 0);
   const startedFrom = first?.listPosition ?? 0;
   let workedBy: string[] = [];

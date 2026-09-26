@@ -127,6 +127,19 @@ describe('listContextFor', () => {
     expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
   });
 
+  // Review round 2 (Minor #5a): a take-callback requeue copy shares its
+  // cancelled original's ordinal (engine.ts `callbackRequeue`) — counted by
+  // ROW it would inflate `total`, so "record 12 of 50" would drift after
+  // Pause & answer the same way `firstPassTotal` (routes/dialer.ts) already
+  // guards against.
+  it('a take-callback requeue copy shares its ordinal with its cancelled original — counted once, not twice', async () => {
+    const withCallback = [...items, { attempt: 1, ordinal: 2, listPosition: 0, outcome: 'canceled' }];
+    const got = await listContextFor(
+      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready' }, withCallback, 'U-ME', new Date(), vi.fn(async () => null),
+    );
+    expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
+  });
+
   /**
    * The controller decision this whole function exists to satisfy: the panel
    * polls every 1-2s, and `workedBy`'s join is org-wide across every session

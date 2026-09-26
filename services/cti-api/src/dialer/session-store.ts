@@ -2,12 +2,31 @@ import { schema } from '@cti/db';
 
 export type DialerItem = typeof schema.dialerQueueItems.$inferSelect;
 
-export function sessionCounts(items: Array<Pick<DialerItem, 'status'>>): {
+/**
+ * A take-callback cancel (`skipped` + `canceled`, engine.ts `takeCallback`)
+ * shares its ordinal with the `pending` copy that requeues the same person
+ * (`callbackRequeue`) — one person, still counted once, as whichever row now
+ * speaks for them. Excluded here ONLY when a sibling row at that ordinal
+ * actually exists: a lone cancelled row (defensive; shouldn't normally
+ * happen, since `callbackRequeue` inserts the copy in the same transaction)
+ * still counts rather than silently vanishing from the total.
+ */
+function excludeCallbackCancels<T extends Pick<DialerItem, 'status'> & Partial<Pick<DialerItem, 'outcome' | 'ordinal'>>>(items: readonly T[]): T[] {
+  const ordinalCounts = new Map<number, number>();
+  for (const it of items) {
+    if (it.ordinal == null) continue;
+    ordinalCounts.set(it.ordinal, (ordinalCounts.get(it.ordinal) ?? 0) + 1);
+  }
+  return items.filter((it) => !(it.status === 'skipped' && it.outcome === 'canceled' && it.ordinal != null && (ordinalCounts.get(it.ordinal) ?? 0) > 1));
+}
+
+export function sessionCounts(items: Array<Pick<DialerItem, 'status'> & Partial<Pick<DialerItem, 'outcome' | 'ordinal'>>>): {
   total: number; done: number; connected: number; noConnect: number;
   skipped: number; unreachable: number; pending: number;
 } {
-  const c = { total: items.length, done: 0, connected: 0, noConnect: 0, skipped: 0, unreachable: 0, pending: 0 };
-  for (const it of items) {
+  const counted = excludeCallbackCancels(items);
+  const c = { total: counted.length, done: 0, connected: 0, noConnect: 0, skipped: 0, unreachable: 0, pending: 0 };
+  for (const it of counted) {
     if (it.status === 'done') c.done++;
     else if (it.status === 'connected') c.connected++;
     else if (it.status === 'no_connect') c.noConnect++;
@@ -35,9 +54,12 @@ function tallyOutcomes(
 }
 
 /** Per-outcome tally of skipped rows only — what a rep inherited when the run
- *  started (already worked today, flagged skip, consent-blocked, etc). */
-export function skipBreakdown(items: Array<Pick<DialerItem, 'status' | 'outcome'>>): Record<string, number> {
-  return tallyOutcomes(items, 'skipped');
+ *  started (already worked today, flagged skip, consent-blocked, etc). A
+ *  take-callback cancel with its requeue copy still present is excluded the
+ *  same way `sessionCounts` excludes it, so this bucket's total keeps
+ *  matching `sessionCounts(items).skipped`. */
+export function skipBreakdown(items: Array<Pick<DialerItem, 'status' | 'outcome'> & Partial<Pick<DialerItem, 'ordinal'>>>): Record<string, number> {
+  return tallyOutcomes(excludeCallbackCancels(items), 'skipped');
 }
 
 /** Per-reason tally of no_connect rows — what the run's misses actually were
