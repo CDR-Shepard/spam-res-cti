@@ -38,6 +38,21 @@ describe('sessionCounts', () => {
     ] as unknown as Parameters<typeof sessionCounts>[0]);
     expect(c).toMatchObject({ total: 1, skipped: 1 });
   });
+
+  // Review round 3 (R2-4, mutation N5b): the `outcome === 'canceled'` clause
+  // in `excludeCallbackCancels` must actually gate the exclusion — a redial
+  // copy (redialCurrent.ts) shares its `done` original's ordinal too, and if
+  // the rep then Skips it while it's ringing, that Skip's outcome is null
+  // (skipCurrent sets ONLY `status`), never 'canceled'. Without the outcome
+  // check, this pairing would be mistaken for a take-callback cancel and
+  // vanish from the total, even though nothing here is a callback at all.
+  it("a Skip on a ringing REDIAL copy (shares its `done` original's ordinal, but its own outcome is not 'canceled') still counts as its own skip", () => {
+    const c = sessionCounts([
+      { status: 'done', ordinal: 0, outcome: 'connected' }, // the original, closed out by Redial
+      { status: 'skipped', ordinal: 0, outcome: null }, // the redial copy, Skipped while ringing
+    ] as unknown as Parameters<typeof sessionCounts>[0]);
+    expect(c).toMatchObject({ total: 2, done: 1, skipped: 1 });
+  });
 });
 
 describe('skipBreakdown', () => {
