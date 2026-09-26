@@ -917,7 +917,17 @@ export async function handleDialOutcome(
       if (dialedNumber) await stampConnected(tx, item.id, dialedNumber, deps.nowUtc);
       return true;
     });
-    if (!claimed) { await hangUpUnbridged(deps, callId, item.id); return; }
+    if (!claimed) {
+      // Someone else's transaction committed first. A Skip or take-callback
+      // settled the row to `skipped` — hang up (nobody will bridge them). A
+      // duplicate AMD "human" re-delivery for the SAME call may instead have
+      // already bridged it (item now `connected`) — that leg is live, so do
+      // nothing: hanging it up would drop a prospect the rep is talking to,
+      // and re-bridging would double-bridge the same call.
+      const fresh = await deps.db.query.dialerQueueItems.findFirst({ where: eq(schema.dialerQueueItems.id, item.id) });
+      if (fresh?.status === 'skipped') await hangUpUnbridged(deps, callId, item.id);
+      return;
+    }
     // The prospect may end the room on its way out — which is what brings the
     // rep's hold music back — only when the rep's leg is KNOWN to carry the
     // rejoin action: the stamp is written by the same join that adds it. A run

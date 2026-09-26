@@ -1998,12 +1998,38 @@ describe('handleDialOutcome — a connect never bridges into a room the run gave
     expect(q.params).toEqual(['i1', 'dialing']);
   });
 
-  it('a connect that loses the swap (take-callback or Skip settled the row) is hung up — never bridged, never popped, no sticky', async () => {
-    const deps = makeDeps(); const fdb = fakeDb(baseSession, dialing, { claimReturnsRows: false }); deps.db = fdb;
+  // Review round 2 (Important #2): a lost swap must re-read the row rather than
+  // always hanging up — a duplicate AMD "human" re-delivery can have already
+  // bridged the SAME call (dialer/amd.ts's async classification is not
+  // idempotent by sid alone), and hanging up THAT leg would drop a live
+  // prospect the rep is already talking to.
+  it('a connect that loses the swap because take-callback or Skip settled the row FIRST (the fresh read shows `skipped`) is hung up — never bridged, never popped, no sticky', async () => {
+    const items = [{ ...dialing[0]! }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items, { claimReturnsRows: false }); deps.db = fdb;
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => realTx(async (tx: any) => {
+      items[0]!.status = 'skipped'; // take-callback or Skip committed first
+      return fn(tx);
+    });
     await handleDialOutcome('CA1', 'connected', deps);
     expect(deps.telephony.bridgeToRep).not.toHaveBeenCalled();
     expect(deps.onScreenPop).not.toHaveBeenCalled();
     expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(fdb._inserts).toEqual([]);
+  });
+
+  it('…but a connect that loses the swap because a duplicate AMD "human" already bridged it FIRST (the fresh read shows `connected`) is left alone entirely — no hangup, no re-bridge, no sticky, no double pop', async () => {
+    const items = [{ ...dialing[0]! }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items, { claimReturnsRows: false }); deps.db = fdb;
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => realTx(async (tx: any) => {
+      items[0]!.status = 'connected'; // the duplicate delivery's own transaction committed first
+      return fn(tx);
+    });
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    expect(deps.telephony.bridgeToRep).not.toHaveBeenCalled();
+    expect(deps.onScreenPop).not.toHaveBeenCalled();
     expect(fdb._inserts).toEqual([]);
   });
 
