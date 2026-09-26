@@ -1161,4 +1161,25 @@ describe('App — a dead callback never lingers on the banner (Task 2 re-review 
     await waitFor(() => expect(FakeDevice.connects.length).toBe(2), { timeout: 4000 });
     expect(state.controls).not.toContain('take-callback');
   }, 15_000);
+
+  it('2: Pause & answer pressed during the recovery wait owns the leg — however long take-callback takes, recovery never connect()s over it', async () => {
+    state.currentItem = { status: 'dialing', prospectEndedAt: null };
+    await startRun();
+    await screen.findByText(/Dialing/);
+    dropLeg();
+    const call = callbackCall();
+    ring(call); // during the 1.5 s wait
+    await screen.findByText('Callback: Jane Doe · Lead');
+    const release = holdTakeCallback();
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(state.controls).toContain('take-callback'));
+    await sleep(2500); // well past the rejoin
+    expect(FakeDevice.connectsStarted).toBe(1);
+    expect(call.ignore).not.toHaveBeenCalled();
+    release();
+    await waitFor(() => expect(call.accept).toHaveBeenCalledTimes(1));
+    await sleep(300);
+    expect(FakeDevice.connectsStarted).toBe(1);
+    expect(state.controls).not.toContain('stop');
+  }, 15_000);
 });
