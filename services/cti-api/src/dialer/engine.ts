@@ -412,8 +412,17 @@ export async function advanceSession(
         sessionId, itemId: next.id, fromE164: did.e164, toE164, userId: session.userId,
       }));
     } catch (err) {
-      // Roll the item back so a transient originate failure doesn't strand it 'dialing'.
-      await setItem(deps, next.id, { status: 'pending' });
+      // Roll the item back so a transient originate failure doesn't strand it
+      // 'dialing' — but ONLY if it is still exactly that: a take-callback that
+      // settled the row (skipped/canceled + requeued) while this originate call
+      // was in flight must not be revived, or the person gets dialed twice —
+      // once for whatever originate actually did, once more when the run
+      // advances onto a resurrected 'pending' row.
+      await deps.db
+        .update(schema.dialerQueueItems)
+        .set({ status: 'pending', updatedAt: new Date() })
+        .where(and(eq(schema.dialerQueueItems.id, next.id), eq(schema.dialerQueueItems.status, 'dialing')))
+        .returning({ id: schema.dialerQueueItems.id });
       throw err;
     }
     // Stamp the dial AND record the attempt in ONE transaction. The attempt row

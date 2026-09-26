@@ -165,11 +165,14 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
             return {
               // Unguarded `UPDATE ... WHERE id = $1` — awaited directly.
               then: (res: any, rej: any) => Promise.resolve(apply()).then(res, rej),
-              // Guarded `UPDATE ... WHERE id = $1 AND status = 'pending' RETURNING id`
-              // (setItemIfPending). Honors the guard against the fake's OWN item
-              // rows, so a test can flip a row to 'dialing' mid-advance — a
-              // concurrent advance winning the claim — and assert the skip write
-              // is refused instead of clobbering the live dial.
+              // Guarded `UPDATE ... WHERE id = $1 AND status = '<required>' RETURNING id`
+              // (setItemIfPending's 'pending', and — review round 2, Minor #4 —
+              // the originate-failure rollback's 'dialing'). Honors the guard
+              // against the fake's OWN item rows by checking whether the item's
+              // CURRENT status is among the bound params, whatever that required
+              // status is, so a test can flip a row away from EITHER status —
+              // a concurrent claim, or a take-callback settling it mid-originate
+              // — and assert the write is refused instead of clobbering it.
               returning: async () => {
                 const { sql: text, params } = new PgDialect().sqlToQuery(w);
                 if (/"status" =/.test(text)) {
@@ -181,7 +184,7 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
                     if (!params.includes(current.id) || !params.includes(current.status)) return [];
                   } else {
                     const target = items.find((i: any) => params.includes(i.id));
-                    if (!target || target.status !== 'pending') return [];
+                    if (!target || !params.includes(target.status)) return [];
                   }
                 }
                 apply();
@@ -358,6 +361,27 @@ describe('advanceSession', () => {
     const fdb = fakeDb(baseSession, items); deps.db = fdb;
     await expect(advanceSession('S1', deps)).rejects.toThrow(/twilio 500/);
     expect(fdb._txInserts).toEqual([]);
+  });
+  // Review round 2 (Minor #4): the originate-failure rollback must not revive
+  // a row a take-callback already settled while `originate` was in flight —
+  // reviving it would leave the person dialed twice: once for real (the
+  // originate that "failed" locally may still have placed the call), and once
+  // more when the run advances again onto the resurrected 'pending' row.
+  it('an originate failure only rolls the item back to `pending` if it is still `dialing` — a take-callback that settled it first is not revived', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps({
+      telephony: {
+        originate: vi.fn(async () => {
+          // take-callback's own transaction commits while this call is in flight.
+          items[0]!.status = 'skipped';
+          throw new Error('twilio 500');
+        }),
+        bridgeToRep: vi.fn(), hangup: vi.fn(), endConference: vi.fn(),
+      } as any,
+    });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await expect(advanceSession('S1', deps)).rejects.toThrow(/twilio 500/);
+    expect(fdb._writes.some((w: any) => w.patch.status === 'pending')).toBe(false);
   });
   // Review round 2 (Important #1): a take-callback or a Stop can land WHILE
   // `deps.telephony.originate` is still in flight — after the pending -> dialing
@@ -610,6 +634,16 @@ describe('advanceSession', () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
     const deps = makeDeps({ telephony: { originate: vi.fn(async () => { throw new Error('twilio 500'); }), bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}), endConference: vi.fn(async () => {}) } });
     const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    // The claim transaction commits 'dialing' — reflected onto the fixture
+    // itself (the fake's own `_target`/`_writes` bookkeeping does not mutate
+    // `items`) so the guarded rollback below (Minor #4) sees the row it would
+    // really see: still exactly `dialing`, nothing else having settled it.
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => realTx(async (tx: any) => {
+      const r = await fn(tx);
+      items[0]!.status = 'dialing';
+      return r;
+    });
     await expect(advanceSession('S1', deps)).rejects.toThrow('twilio 500');
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'dialing' }) }); // claim landed
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'pending' }) }); // then rolled back
