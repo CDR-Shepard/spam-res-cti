@@ -70,7 +70,12 @@ A `409 { reason: 'connected' }` means a prospect answered in the race: the callb
 **Known limitation:** reps paired with the Callsign iPhone app share the rep's Twilio identity, so a callback during a run may also ring the iPhone. If the rep answers it there, the web banner disappears but the run keeps dialing — they should Pause first. The iPhone app isn't rolled out to reps yet.
 
 **"A callback never rang me."** Look up the child leg: `Calls.json?ParentCallSid=<calls.provider_call_id>`.
-- `busy`, 0 s: the softphone rejected it. The rep was talking (there was a toast), or pressed Ignore.
+- `busy`, 0 s: the softphone rejected it. Any of:
+  - the rep was talking to a prospect (toast "… you were on a call");
+  - the rep pressed Ignore;
+  - the rep was on a manual call, placing one, or in wrap-up (no toast; today's busy rule);
+  - a second callback arrived while one was already waiting on the banner (no toast; one at a time);
+  - the leg dropped with the callback on the banner and take-callback failed (toast "… Power Dial couldn't pause your run").
 - `no-answer`, ~25 s: the banner was up and nobody chose.
 - `completed`: answered.
 
