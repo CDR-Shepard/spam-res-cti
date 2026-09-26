@@ -687,6 +687,16 @@ export function App(): JSX.Element {
     return w;
   }, [setWaiting]);
 
+  // A callback on the ring screen while this tab's dialer leg is live: answering
+  // it there would let the SDK's beforeAccept disconnect the leg, so it moves to
+  // the run's banner (Pause & answer leaves the room first) — or, with one
+  // already waiting there, goes where a busy rep's callback always went.
+  const moveRingToBanner = useCallback((call: TwilioIncomingCall): void => {
+    setIncoming((c) => (c === call ? null : c));
+    if (liveWaitingCallback()) { try { call.reject(); } catch { /* already gone */ } }
+    else waitOnCallback(call);
+  }, [liveWaitingCallback, waitOnCallback]);
+
   // Lazily create + register ONE persistent Twilio device, reused for both
   // outbound dials and INBOUND calls (so callbacks ring the softphone). Idempotent.
   const ensureDevice = useCallback(async (): Promise<unknown> => {
@@ -1095,13 +1105,25 @@ export function App(): JSX.Element {
     }
     try {
       const joined = await joinLeg(sessionId, { awaitAccept: true });
-      if (joined) setParked(null); // back in the room: the heartbeat stops
-      return joined;
+      if (!joined) return false;
+      setParked(null); // back in the room: the heartbeat stops
+      // The phone was free when Resume was pressed, but the join is a round
+      // trip: a callback may have reached the ring screen meanwhile (the leg
+      // was not ours yet), or a call been placed or taken. The run must not
+      // start dialing now. Keep the leg — the rep is in the room of the paused
+      // run — and put a ringing callback on the banner, where Pause & answer or
+      // Ignore deal with it. Resume stays for the rep to press again.
+      if (incomingRef.current || connectionRef.current || placingRef.current || callbackWaitingRef.current || takingCallbackRef.current) {
+        const ringing = incomingRef.current;
+        if (ringing && !connectionRef.current) moveRingToBanner(ringing);
+        return false;
+      }
+      return true;
     } catch (e) {
       if (parkedRunIdRef.current) setDialerLive(true); // joinLeg's failure path unlocked the nav
       throw e;
     }
-  }, [joinLeg, setParked]);
+  }, [joinLeg, setParked, moveRingToBanner]);
   // Read at click time: is this tab's leg out of the room?
   const legIsDown = useCallback((): boolean => !dialerConnRef.current, []);
 
@@ -1483,9 +1505,7 @@ export function App(): JSX.Element {
     // that join's connect() already closed it (ignore(), no event): then it
     // just goes (waitOnCallback skips a closed call).
     if (dialerConnRef.current) {
-      setIncoming((c) => (c === call ? null : c));
-      if (liveWaitingCallback()) { try { call.reject(); } catch { /* already gone */ } }
-      else waitOnCallback(call);
+      moveRingToBanner(call);
       return;
     }
     const plan = planIncomingAccept(call);
@@ -1570,7 +1590,7 @@ export function App(): JSX.Element {
         if (issue === 'no-inbound-audio') setToast({ text: "The caller's audio came back.", type: 'success' });
       },
     );
-  }, [teardownDevice, waitOnCallback, liveWaitingCallback]);
+  }, [teardownDevice, moveRingToBanner]);
   const acceptIncoming = useCallback(() => acceptCall(incoming), [acceptCall, incoming]);
 
   const declineIncoming = useCallback(() => {

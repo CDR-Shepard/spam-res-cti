@@ -952,3 +952,34 @@ describe('App — the Task 2 wiring, pinned (review I-5)', () => {
     expect(FakeDevice.instances[0]!.destroyed).toBe(0);
   }, 15_000);
 });
+
+/** Task 3 review fixes (2026-09-26): Resume after a callback. */
+describe('App — Resume after a callback (Task 3 review)', () => {
+  beforeEach(() => { vi.spyOn(chime, 'playCallbackChime').mockResolvedValue(undefined); });
+
+  /** After a callback: Resume pressed, the re-join's connect() done, its accept pending. */
+  async function resumeJoining(): Promise<FakeConnection> {
+    await takeAndFinish(await callbackOnBanner());
+    fireEvent.click(await screen.findByText('Resume'));
+    await waitFor(() => expect(FakeDevice.connects[1]?.connection.hasListenerFor('accept')).toBe(true));
+    return FakeDevice.connects[1]!.connection;
+  }
+
+  it('Important 1: a callback that reaches the ring screen during the join — resume is NOT posted; the rep keeps the leg and the callback waits on the banner', async () => {
+    const leg = await resumeJoining();
+    const second = callbackCall(2);
+    ring(second); // the leg is not adopted yet → the ring screen
+    await screen.findByTitle('Answer');
+    act(() => { leg.emit('accept'); });
+    expect(await screen.findByText('Callback: Jane Doe · Lead')).toBeTruthy();
+    await sleep(300);
+    expect(state.controls).not.toContain('resume');
+    expect(leg.disconnect).not.toHaveBeenCalled();
+    expect(second.reject).not.toHaveBeenCalled();
+    expect(screen.queryByTitle('Answer')).toBeNull();
+    // …and it can be taken from there: back out of the room, then answered.
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(second.accept).toHaveBeenCalledTimes(1));
+    expect(leg.disconnect).toHaveBeenCalledTimes(1);
+  }, 15_000);
+});
