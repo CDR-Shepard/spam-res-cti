@@ -1217,6 +1217,16 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 .dp-attempt { display: inline-block; margin-top: 4px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 500; color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
 .dp-waiting { text-align: center; font-size: 12px; color: var(--text-muted); margin: 6px 0; }
 
+/* Power dialer: a callback ringing during the run (CallbackBanner) — green,
+   the house colour for "a call". */
+.dp-callback {
+  border: 1px solid color-mix(in srgb, var(--good) 45%, transparent);
+  background: color-mix(in srgb, var(--good) 10%, transparent);
+}
+.dp-callback-text { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.dp-callback-actions { gap: 8px; margin-top: 8px; }
+.dp-callback-actions .btn { flex: 1; padding: 9px 6px; font-size: 12px; }
+
 /* Power dialer: YouTube hold player — YouTube's own embedded iframe, so this
    only frames it (fixed 200px height, full width) and styles the caption
    underneath; the player chrome itself is YouTube's, not ours to restyle. */

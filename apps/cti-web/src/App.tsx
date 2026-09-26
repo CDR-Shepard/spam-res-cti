@@ -6,7 +6,7 @@ import { createLineAudio, watchLineVolume, type LineAudio } from './line-audio';
 import { startRingback, stopRingback } from './ringback';
 import { AdminPanel } from './components/AdminPanel';
 import { CallLog } from './components/CallLog';
-import { DialerPanel, processedCount } from './components/DialerPanel';
+import { DialerPanel, processedCount, type PopLedger } from './components/DialerPanel';
 import { IncomingScreen } from './components/IncomingScreen';
 import { CallScreen } from './components/CallScreen';
 import { Dialpad } from './components/Dialpad';
@@ -28,7 +28,7 @@ import {
   type DialerSession,
   type DialerSessionCounts,
 } from './dialer-api';
-import { dialerJoinParams, legRecoveryToast, recentRejoins, recoverDroppedLeg, watchDialerLeg } from './dialer-leg';
+import { dialerJoinParams, legAccepted, legRecoveryToast, recentRejoins, recoverDroppedLeg, watchDialerLeg } from './dialer-leg';
 import { ClockIcon, CloudIcon, GridIcon, MoreIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, ShieldXIcon, UserIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
 import { navTabsFor, NAV_OVERFLOW_IDS, type Tab } from './nav';
@@ -162,6 +162,11 @@ interface TwilioIncomingCall {
 // screen until they reload the page.
 export const HANGUP_FALLBACK_MS = 1500;
 
+/** joinLeg options. `awaitAccept` (Resume after a callback): adopt the leg only
+ *  once Twilio has answered it, so a refused join is never taken for a live
+ *  leg — nor "recovered". */
+interface JoinLegOptions { awaitAccept?: boolean }
+
 /** The toast when a Device can't take the mic/speaker saved in Settings. */
 function audioApplyFailureText(r: AudioApplyResult): string {
   const which = r.input === 'failed' && r.output === 'failed' ? 'microphone and speaker'
@@ -236,6 +241,9 @@ export function App(): JSX.Element {
   // DialerPanel's latest poll, lifted (decision 3): what "is the rep talking?"
   // is judged by when a callback rings.
   const runSnapshotRef = useRef<RunSnapshot | null>(null);
+  // The last screen-popped power-dial item, per run — owned here so the panel,
+  // which the ring and call screens unmount, never pops it twice (decision 8).
+  const popLedgerRef = useRef<PopLedger>({ sessionId: null, itemId: null });
   // The rep's no-answer forward (Settings): where a rejected callback goes.
   const forwardE164Ref = useRef<string | null>(null);
 
@@ -894,10 +902,11 @@ export function App(): JSX.Element {
   // leg carries `endConferenceOnExit=true`, so a second tab's leg landed in
   // the room of the rep's LIVE run elsewhere — and dropping it after a refused
   // `start` ended that whole conference, silently cutting the other tab's run.
-  const joinLegRef = useRef<(recoveringSessionId?: string | null) => Promise<boolean>>(async () => false);
-  // `recoveringSessionId` is set (to the run's id) only when dialer-leg.ts is
-  // bringing back a leg that dropped on its own; a fresh Start passes nothing.
-  const joinLeg = useCallback(async (recoveringSessionId?: string | null): Promise<boolean> => {
+  const joinLegRef = useRef<(recoveringSessionId?: string | null, opts?: JoinLegOptions) => Promise<boolean>>(async () => false);
+  // `recoveringSessionId` is set (to the run's id) when dialer-leg.ts is
+  // bringing back a leg that dropped on its own, or when Resume re-joins a run
+  // parked for a callback; a fresh Start passes nothing.
+  const joinLeg = useCallback(async (recoveringSessionId?: string | null, opts: JoinLegOptions = {}): Promise<boolean> => {
     const isRecovery = recoveringSessionId !== undefined;
     const myRun = ++dialerRunRef.current;
     if (!isRecovery) legRejoinedAtRef.current = [];
@@ -923,6 +932,21 @@ export function App(): JSX.Element {
       if (dialerRunRef.current !== myRun) {
         try { (connection as { disconnect?: () => void }).disconnect?.(); } catch { /* already gone */ }
         return false;
+      }
+      if (opts.awaitAccept) {
+        // Resume: the server may dial as soon as this resolves, so the leg must
+        // really be in the room. A refusal (<Reject/> from the /voice guard) or
+        // a timeout throws, and nothing adopts or watches this leg.
+        try {
+          await legAccepted(connection);
+        } catch (e) {
+          try { (connection as { disconnect?: () => void }).disconnect?.(); } catch { /* already gone */ }
+          throw e;
+        }
+        if (dialerRunRef.current !== myRun) {
+          try { (connection as { disconnect?: () => void }).disconnect?.(); } catch { /* already gone */ }
+          return false;
+        }
       }
       dialerConnRef.current = connection;
       legSessionIdRef.current = sessionId ?? null;
@@ -993,6 +1017,29 @@ export function App(): JSX.Element {
   }, [ensureDevice, dropConferenceLeg, handOffCallbackAfterDrop]);
   joinLegRef.current = joinLeg;
   const joinDialerConference = useCallback((): Promise<boolean> => joinLeg(), [joinLeg]);
+
+  // Resume after a callback (spec decision 6): this tab has no leg in the room,
+  // so join it — naming the run, and waiting until Twilio has answered the leg —
+  // before DialerPanel POSTs resume. A refused join rejects and nothing resumes;
+  // the phone stays on the Power Dial tab, where Resume and Stop are.
+  const rejoinRun = useCallback(async (): Promise<boolean> => {
+    const sessionId = parkedRunIdRef.current ?? dialerSessionIdRef.current;
+    if (!sessionId) return false;
+    const phaseFree = phaseRef.current === 'idle' || phaseRef.current === 'preflight';
+    if (!phaseFree || connectionRef.current || incomingRef.current) {
+      throw new Error('Finish the current call before resuming the run.');
+    }
+    try {
+      const joined = await joinLeg(sessionId, { awaitAccept: true });
+      if (joined) setParked(null); // back in the room: the heartbeat stops
+      return joined;
+    } catch (e) {
+      if (parkedRunIdRef.current) setDialerLive(true); // joinLeg's failure path unlocked the nav
+      throw e;
+    }
+  }, [joinLeg, setParked]);
+  // Read at click time: is this tab's leg out of the room?
+  const legIsDown = useCallback((): boolean => !dialerConnRef.current, []);
 
   const startPowerDial = useCallback(async (objectType: unknown, recordIds: unknown): Promise<void> => {
     if (objectType !== 'Lead' && objectType !== 'Opportunity') {
@@ -1793,6 +1840,17 @@ export function App(): JSX.Element {
       holdMusic={holdMusicFromMe(me.user)}
       lineAudio={lineAudio}
       onRunSnapshot={handleRunSnapshot}
+      callback={callbackWaiting ? {
+        id: callbackWaiting.id,
+        callerLabel: callbackWaiting.callerLabel,
+        recordType: callbackWaiting.recordType,
+        busy: takingCallback,
+        onAnswer: () => { void pauseAndAnswer(); },
+        onIgnore: ignoreCallback,
+      } : null}
+      needsRejoin={legIsDown}
+      onRejoin={rejoinRun}
+      popLedger={popLedgerRef}
     />
   ) : (
     <div className="dialer">

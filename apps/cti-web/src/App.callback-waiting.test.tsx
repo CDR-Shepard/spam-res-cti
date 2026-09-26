@@ -13,6 +13,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { App } from './App';
 import * as opencti from './opencti';
 import * as heartbeat from './parked-heartbeat';
+import * as chime from './callback-chime';
 
 type Listener = (...args: unknown[]) => void;
 
@@ -332,5 +333,116 @@ describe('App — callbacks during a power-dial run (Task 2 wiring)', () => {
     await waitFor(() => expect(call.reject).toHaveBeenCalledTimes(1));
     expect(await screen.findByText(/Missed callback from Jane Doe — you were on a call/)).toBeTruthy();
     await waitFor(() => expect(FakeDevice.connects.length).toBe(2), { timeout: 4000 });
+  }, 15_000);
+});
+
+describe('App — the banner, Pause & answer, and Resume (Task 3)', () => {
+  beforeEach(() => { vi.spyOn(chime, 'playCallbackChime').mockResolvedValue(undefined); });
+
+  /** A run on screen (a dial ringing by default), with a callback on the banner. */
+  async function callbackOnBanner(item: { status: string; prospectEndedAt: string | null } = { status: 'dialing', prospectEndedAt: null }): Promise<FakeCall> {
+    state.currentItem = item;
+    await startRun();
+    await screen.findByText(item.prospectEndedAt ? 'They hung up' : /Dialing/);
+    const call = callbackCall();
+    ring(call);
+    await screen.findByText('Callback: Jane Doe · Lead');
+    return call;
+  }
+
+  /** Pause & answer, then the callback ends: the paused run is back on screen. */
+  async function takeAndFinish(call: FakeCall): Promise<void> {
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(call.accept).toHaveBeenCalledTimes(1));
+    act(() => { call.emit('disconnect'); });
+  }
+
+  it('shows the banner above the current record, and chimes once', async () => {
+    await callbackOnBanner();
+    expect(screen.getByText('Pause & answer')).toBeTruthy();
+    expect(screen.getByText('Ignore')).toBeTruthy();
+    const banner = document.querySelector('.dp-callback')!;
+    const card = document.querySelector('.dp-current')!;
+    expect(banner.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(chime.playCallbackChime).toHaveBeenCalledTimes(1);
+  });
+
+  it('Ignore rejects the callback (forward/voicemail as today) and leaves the run alone', async () => {
+    const call = await callbackOnBanner();
+    fireEvent.click(screen.getByText('Ignore'));
+    expect(call.reject).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('Callback: Jane Doe · Lead')).toBeNull();
+    expect(state.controls).not.toContain('take-callback');
+    expect(FakeDevice.connects[0]!.connection.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('the caller hanging up first takes the banner down', async () => {
+    const call = await callbackOnBanner();
+    act(() => { call.emit('cancel'); });
+    expect(screen.queryByText('Callback: Jane Doe · Lead')).toBeNull();
+    expect(call.reject).not.toHaveBeenCalled();
+  });
+
+  it('Pause & answer: the server pauses FIRST, then the rep leaves the room, then the callback is answered — and the dropped leg is never recovered', async () => {
+    const call = await callbackOnBanner();
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(call.accept).toHaveBeenCalledTimes(1));
+    expect(state.events).toEqual(['take-callback', 'leg-disconnect', 'accept']);
+    expect(opencti.screenPopRecord).toHaveBeenCalledWith('00QCALLBACK000001');
+    expect(await screen.findByTitle('End call')).toBeTruthy();
+    await new Promise((r) => { setTimeout(r, 2200); });
+    expect(FakeDevice.connects.length).toBe(1);
+    expect(state.controls).not.toContain('stop');
+    expect(document.querySelector('.nav')).toBeNull();
+  }, 15_000);
+
+  it('409 — a prospect answered in the race: the callback is rejected with the toast, and the rep stays in the room', async () => {
+    const call = await callbackOnBanner();
+    state.takeCallback = 'connected';
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(call.reject).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('Missed callback from Jane Doe — you were on a call. It went to voicemail.')).toBeTruthy();
+    expect(call.accept).not.toHaveBeenCalled();
+    expect(FakeDevice.connects[0]!.connection.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('a pause that fails keeps the banner up (try again, or Ignore) and says why', async () => {
+    const call = await callbackOnBanner();
+    state.takeCallback = 'error';
+    fireEvent.click(screen.getByText('Pause & answer'));
+    expect(await screen.findByText("Couldn't pause the run to answer: database unavailable")).toBeTruthy();
+    expect(screen.getByText('Callback: Jane Doe · Lead')).toBeTruthy();
+    expect(call.accept).not.toHaveBeenCalled();
+    expect(FakeDevice.connects[0]!.connection.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('after the callback: back on the paused run; Resume joins the room, waits for Twilio to answer the leg, THEN resumes', async () => {
+    await takeAndFinish(await callbackOnBanner());
+    fireEvent.click(await screen.findByText('Resume'));
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(2));
+    expect(FakeDevice.connects[1]!.params).toEqual({ DialerConference: '1', DialerSessionId: 'sess-1' });
+    await waitFor(() => expect(FakeDevice.connects[1]!.connection.hasListenerFor('accept')).toBe(true));
+    expect(state.controls).not.toContain('resume');
+    act(() => { FakeDevice.connects[1]!.connection.emit('accept'); });
+    await waitFor(() => expect(state.controls).toContain('resume'));
+  }, 15_000);
+
+  it("a refused re-join (another run of the rep's owns the room) resumes nothing, says so, keeps the phone on Power Dial, and is not recovered", async () => {
+    await takeAndFinish(await callbackOnBanner());
+    fireEvent.click(await screen.findByText('Resume'));
+    await waitFor(() => expect(FakeDevice.connects[1]?.connection.hasListenerFor('accept')).toBe(true));
+    act(() => { FakeDevice.connects[1]!.connection.emit('disconnect'); });
+    expect(await screen.findByText(/Couldn't rejoin the run/)).toBeTruthy();
+    expect(state.controls).not.toContain('resume');
+    expect(document.querySelector('.nav')).toBeNull();
+    await new Promise((r) => { setTimeout(r, 2200); });
+    expect(FakeDevice.connects.length).toBe(2);
+  }, 15_000);
+
+  it('the prospect card that popped before the callback does not pop again when the panel comes back', async () => {
+    await takeAndFinish(await callbackOnBanner({ status: 'connected', prospectEndedAt: '2026-09-26T17:00:00.000Z' }));
+    await screen.findByText('Redial');
+    await new Promise((r) => { setTimeout(r, 2500); });
+    expect(vi.mocked(opencti.screenPopRecord).mock.calls.map(([id]) => id)).toEqual(['00QPROSPECT000001', '00QCALLBACK000001']);
   }, 15_000);
 });

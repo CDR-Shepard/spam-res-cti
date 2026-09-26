@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   dialerJoinParams,
+  LEG_ACCEPT_TIMEOUT_MS,
   LEG_RECOVERY_DELAY_MS,
   LEG_RECOVERY_WINDOW_MS,
+  LEG_REFUSED_MESSAGE,
+  legAccepted,
   legRecoveryToast,
   MAX_LEG_RECOVERIES,
   recentRejoins,
@@ -192,5 +195,52 @@ describe('legRecoveryToast', () => {
   it('says nothing when there is nothing to tell', () => {
     expect(legRecoveryToast('superseded')).toBeNull();
     expect(legRecoveryToast('run-over')).toBeNull();
+  });
+});
+
+describe('legAccepted — Resume waits for Twilio to ANSWER the re-joined leg before the run dials', () => {
+  class Conn {
+    private h = new Map<string, Array<() => void>>();
+    on(e: string, cb: () => void): void { this.h.set(e, [...(this.h.get(e) ?? []), cb]); }
+    emit(e: string): void { for (const cb of this.h.get(e) ?? []) cb(); }
+  }
+
+  it('resolves on accept', async () => {
+    const c = new Conn();
+    const joined = legAccepted(c);
+    c.emit('accept');
+    await expect(joined).resolves.toBeUndefined();
+  });
+
+  it.each(['disconnect', 'error', 'cancel', 'reject'])("rejects when the leg ends first (%s) — the /voice guard's <Reject/> never answers", async (event) => {
+    const c = new Conn();
+    const joined = legAccepted(c);
+    c.emit(event);
+    await expect(joined).rejects.toThrow(LEG_REFUSED_MESSAGE);
+  });
+
+  it('settles once: an accept after a refusal changes nothing', async () => {
+    const c = new Conn();
+    const joined = legAccepted(c);
+    c.emit('disconnect');
+    c.emit('accept');
+    await expect(joined).rejects.toThrow(LEG_REFUSED_MESSAGE);
+  });
+
+  it('rejects when nothing happens in time (default ten seconds)', async () => {
+    expect(LEG_ACCEPT_TIMEOUT_MS).toBe(10_000);
+    vi.useFakeTimers();
+    try {
+      const joined = legAccepted(new Conn(), 1000);
+      const settled = expect(joined).rejects.toThrow(LEG_REFUSED_MESSAGE);
+      await vi.advanceTimersByTimeAsync(1000);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a connection with no events cannot be confirmed: rejects', async () => {
+    await expect(legAccepted({})).rejects.toThrow(LEG_REFUSED_MESSAGE);
   });
 });

@@ -127,3 +127,34 @@ export function legRecoveryToast(outcome: LegRecovery): { text: string; type: 's
       return null;
   }
 }
+
+/** How long a re-join may take to be answered before it counts as refused. */
+export const LEG_ACCEPT_TIMEOUT_MS = 10_000;
+export const LEG_REFUSED_MESSAGE = "Couldn't rejoin the run — if another power-dial run of yours is live, stop it first.";
+
+/**
+ * Resolves once Twilio has ANSWERED this leg (`accept`) — the room is really
+ * joined. Rejects if the leg ends first (`disconnect`/`error`/`cancel`/
+ * `reject`: the API's /voice guard answers a stale run's join with <Reject/>,
+ * which never answers) or nothing happens within `timeoutMs`. Resume after a
+ * callback waits on this before it POSTs resume (spec 2026-09-26 decision 6):
+ * the server must not start dialing a paused run until its rep is back in the
+ * room.
+ */
+export function legAccepted(connection: unknown, timeoutMs: number = LEG_ACCEPT_TIMEOUT_MS): Promise<void> {
+  const on = (connection as { on?: (event: string, cb: () => void) => void } | null)?.on;
+  if (typeof on !== 'function') return Promise.reject(new Error(LEG_REFUSED_MESSAGE));
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const settle = (answered: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (answered) resolve();
+      else reject(new Error(LEG_REFUSED_MESSAGE));
+    };
+    const timer = setTimeout(() => settle(false), timeoutMs);
+    on.call(connection, 'accept', () => settle(true));
+    for (const event of ['disconnect', 'error', 'cancel', 'reject']) on.call(connection, event, () => settle(false));
+  });
+}

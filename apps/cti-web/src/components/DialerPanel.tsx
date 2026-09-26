@@ -12,7 +12,7 @@
  * it connects to a live human (see `shouldScreenPop`) — never for voicemail.
  * The caller (App) maps that to Open CTI `screenPopRecord`.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
 import type { HoldMusicSetting } from '@cti/contracts';
 import {
   dialerControl,
@@ -32,6 +32,7 @@ import { ApiError } from '../api';
 import type { LineAudio } from '../line-audio';
 import { YouTubeHoldPlayer } from './YouTubeHoldPlayer';
 import { runSnapshotOf, type RunSnapshot } from '../callback-waiting';
+import { CallbackBanner, type CallbackBannerProps } from './CallbackBanner';
 
 const POLL_INTERVAL_MS = 2000;
 /** While a dial is in flight. The panel only LEARNS a record connected by
@@ -332,12 +333,12 @@ export function actionsFor(
  * error, so nothing after it should fire. Resolves true only when every
  * action succeeded.
  */
-export async function runSequence(
-  actions: DialerControlAction[],
-  run: (action: DialerControlAction) => Promise<boolean>,
+export async function runSequence<S>(
+  steps: readonly S[],
+  run: (step: S) => Promise<boolean>,
 ): Promise<boolean> {
-  for (const action of actions) {
-    if (!(await run(action))) return false;
+  for (const step of steps) {
+    if (!(await run(step))) return false;
   }
   return true;
 }
@@ -353,17 +354,42 @@ export async function runSequence(
  * per-action network call (`sendControl` in the panel) — it must NOT touch
  * busy itself, or this guarantee breaks.
  */
-export async function runControlsSequence(
-  actions: DialerControlAction[],
-  send: (action: DialerControlAction) => Promise<boolean>,
+export async function runControlsSequence<S>(
+  steps: readonly S[],
+  send: (step: S) => Promise<boolean>,
   setBusy: (busy: boolean) => void,
 ): Promise<boolean> {
   setBusy(true);
   try {
-    return await runSequence(actions, send);
+    return await runSequence(steps, send);
   } finally {
     setBusy(false);
   }
+}
+
+/** A step of a control-set request: a server action, or getting this tab's leg
+ *  back into the run's room first. */
+export type ControlStep = DialerControlAction | 'join';
+
+/**
+ * Pure — Resume after a callback (spec 2026-09-26 decision 6). The rep left the
+ * room to take the call, so any request that ends in `resume` gets a `join` in
+ * FRONT when this tab has no live leg: "never join the rep-scoped conference
+ * before start is accepted", extended — for a paused run, join first, then
+ * POST resume, so the server never dials into an empty room. Joining before
+ * anything else also means a refused join changes nothing on the server.
+ */
+export function withRejoin(actions: DialerControlAction[], legDown: boolean): ControlStep[] {
+  return legDown && actions.includes('resume') ? ['join', ...actions] : actions;
+}
+
+/** Which connected item was last screen-popped, per run (decision 8). */
+export interface PopLedger { sessionId: string | null; itemId: string | null }
+
+/** Pure — pop a live human's record once per run: not again for the same item,
+ *  even if the panel was unmounted in between (ring and call screens replace it). */
+export function shouldPopItem(ledger: PopLedger, sessionId: string, item: DialerCurrentItem | null): boolean {
+  return shouldScreenPop(item) && item !== null && !(ledger.sessionId === sessionId && ledger.itemId === item.id);
 }
 
 /** Pure — pop the record ONLY for a live human. AMD hangs up machines before the
@@ -490,6 +516,18 @@ export interface DialerPanelProps {
   /** Every successful poll, as the slice App keeps (spec 2026-09-26 decision
    *  3): App decides whether a callback that rings now finds the rep talking. */
   onRunSnapshot?: (snapshot: RunSnapshot) => void;
+  /** A callback waiting on this run (App.tsx): the banner above the current
+   *  record. Null or absent: no banner. `id` keys it — one chime per callback. */
+  callback?: (CallbackBannerProps & { id: string }) | null;
+  /** True when this tab holds no live dialer leg — Resume must re-join the
+   *  room first (decision 6). Absent: never. */
+  needsRejoin?: () => boolean;
+  /** Re-join the run's room; true once Twilio answered the leg, false when a
+   *  Stop superseded it; rejects when the join was refused. */
+  onRejoin?: () => Promise<boolean>;
+  /** App-owned record of the last screen-popped item, so a remount never pops
+   *  the same record again (decision 8). Absent: the panel keeps its own. */
+  popLedger?: MutableRefObject<PopLedger>;
 }
 
 /**
@@ -756,7 +794,10 @@ export function ConfirmBlock({
 }
 
 export function DialerPanel(props: DialerPanelProps): JSX.Element {
-  const { sessionId, onScreenPop, onStartFromListView, onPrepare, onJoin, onStop, onComplete, onDismiss, holdMusic, lineAudio, onRunSnapshot } = props;
+  const {
+    sessionId, onScreenPop, onStartFromListView, onPrepare, onJoin, onStop, onComplete, onDismiss, holdMusic, lineAudio,
+    onRunSnapshot, callback, needsRejoin, onRejoin, popLedger: sharedPopLedger,
+  } = props;
   const [view, setView] = useState<DialerSessionView | null>(null);
   // The poll owns `error` (a failed refresh); control actions own
   // `controlError` (a refused pause/skip/stop/next/start), so a successful
@@ -772,9 +813,12 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // the ~2 s (1 s while a dial is ringing) poll.
   const [now, setNow] = useState(() => Date.now());
 
-  // Id of the last currentItem we screen-popped for — pop once per NEW
-  // connected item, not on every ~2 s (1 s while a dial is ringing) poll.
-  const lastPoppedIdRef = useRef<string | null>(null);
+  // Which connected item was last screen-popped, per run — pop once per NEW
+  // connected item, not on every ~2 s (1 s while a dial is ringing) poll. App
+  // owns it when it can (decision 8): the ring and call screens unmount this
+  // panel, and a panel-local ref would pop the same record again on remount.
+  const ownPopLedger = useRef<PopLedger>({ sessionId: null, itemId: null });
+  const popLedger = sharedPopLedger ?? ownPopLedger;
   // Lets a control action (pause/skip/...) trigger an immediate re-poll
   // instead of waiting up to 2s for the next tick.
   const pollNowRef = useRef<() => void>(() => {});
@@ -790,7 +834,6 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   }, []);
 
   useEffect(() => {
-    lastPoppedIdRef.current = null;
     pollNowRef.current = () => {};
     completedRef.current = false;
     firstTerminalAtRef.current = null;
@@ -847,8 +890,8 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         // Pop the record only for a live human (see shouldScreenPop) — not while
         // it is still ringing, and never for voicemail. Once per item.
         const current = next.currentItem;
-        if (shouldScreenPop(current) && current && lastPoppedIdRef.current !== current.id) {
-          lastPoppedIdRef.current = current.id;
+        if (shouldPopItem(popLedger.current, sessionId, current) && current) {
+          popLedger.current = { sessionId, itemId: current.id };
           onScreenPop(current.recordId);
         }
 
@@ -902,15 +945,23 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // Deliberately does NOT touch controlBusy: that's owned by whichever
   // caller below wraps it (runControl for one action, runControls for a
   // chain that must hold busy across all of them — fix round 1, finding 3).
-  const sendControl = useCallback((action: DialerControlAction): Promise<boolean> => {
+  const sendControl = useCallback((step: ControlStep): Promise<boolean> => {
     if (!sessionId) return Promise.resolve(false);
-    return dialerControl(sessionId, action)
-      .then(() => { pollNowRef.current(); return true; })
-      .catch((e: unknown) => {
-        setControlError(controlErrorMessage(e, `Could not ${action} the run.`));
+    if (step === 'join') {
+      // Resume after a callback: back into the room BEFORE the server dials.
+      if (!onRejoin) return Promise.resolve(false);
+      return onRejoin().catch((e: unknown) => {
+        setControlError(controlErrorMessage(e, "Couldn't rejoin the run."));
         return false;
       });
-  }, [sessionId]);
+    }
+    return dialerControl(sessionId, step)
+      .then(() => { pollNowRef.current(); return true; })
+      .catch((e: unknown) => {
+        setControlError(controlErrorMessage(e, `Could not ${step} the run.`));
+        return false;
+      });
+  }, [sessionId, onRejoin]);
 
   // A single control action — Pause/Resume (session), Stop — owns its own
   // busy window: true for the one request, false once it settles.
@@ -927,10 +978,10 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // false→true gap there let a second click double-fire mid-chain (fix
   // round 1, finding 3). A refused first action shows its error and the
   // chain never fires the second (runSequence stops at the first failure).
-  const runControls = useCallback((actions: DialerControlAction[]): Promise<boolean> => {
+  const runControls = useCallback((steps: ControlStep[]): Promise<boolean> => {
     setControlError(null);
     setConflictSessionId(null);
-    return runControlsSequence(actions, sendControl, setControlBusy);
+    return runControlsSequence(steps, sendControl, setControlBusy);
   }, [sendControl]);
 
   // Await the stop control request BEFORE tearing down the parent's conference
@@ -1026,6 +1077,8 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // (decision — no two buttons with the same label) so "Resume" can only
   // mean the rep's choice, never a second, redundant control.
   const hungUp = Boolean(view.currentItem?.prospectEndedAt);
+  // No leg in the room (the rep left it for a callback): Resume re-joins first.
+  const legDown = (): boolean => needsRejoin?.() ?? false;
 
   return (
     <div className="dialer-panel">
@@ -1040,6 +1093,17 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
           <div className="meterfill" style={{ width: `${pct}%` }} />
         </div>
       </div>
+
+      {callback && !isTerminal && (
+        <CallbackBanner
+          key={callback.id}
+          callerLabel={callback.callerLabel}
+          recordType={callback.recordType}
+          busy={callback.busy}
+          onAnswer={callback.onAnswer}
+          onIgnore={callback.onIgnore}
+        />
+      )}
 
       {view.currentItem && <CurrentRecord item={view.currentItem} listTotal={view.listContext?.total ?? null} />}
 
@@ -1076,15 +1140,15 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
               status={view.session.status}
               hungUp={hungUp}
               busy={controlBusy}
-              onClick={() => runControl(pauseResumeAction(view.session.status))}
+              onClick={() => runControls(withRejoin([pauseResumeAction(view.session.status)], legDown()))}
             />
             <ItemControls
               item={view.currentItem}
               busy={controlBusy}
               onSkip={() => runControls(actionsFor('skip', view.session.status))}
               onEnd={() => runControls(actionsFor('end', view.session.status))}
-              onNext={() => runControls(actionsFor('next', view.session.status))}
-              onRedial={() => runControls(actionsFor('redial', view.session.status))}
+              onNext={() => runControls(withRejoin(actionsFor('next', view.session.status), legDown()))}
+              onRedial={() => runControls(withRejoin(actionsFor('redial', view.session.status), legDown()))}
             />
             <button className="btn danger" disabled={controlBusy} onClick={handleStop}>
               Stop
