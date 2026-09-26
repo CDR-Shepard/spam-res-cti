@@ -7,7 +7,7 @@
  * the SDK plays no ringtone for a call that arrives while another is up.
  */
 import { useEffect, useRef } from 'react';
-import { playCallbackChime } from '../callback-chime';
+import { browserChimeDeps, playCallbackChime } from '../callback-chime';
 
 export interface CallbackBannerProps {
   /** The matched Salesforce name, else the formatted number. */
@@ -21,15 +21,21 @@ export interface CallbackBannerProps {
 
 export function CallbackBanner({ callerLabel, recordType, busy, onAnswer, onIgnore }: CallbackBannerProps): JSX.Element {
   // Once per banner: a re-render (busy flipping) must not chime again, nor
-  // React's development double-mount.
+  // React's development double-mount. The second beep is skipped once the
+  // banner is really gone (unmounted) — `mounted` is set again by the
+  // double-mount's second run, so that alone never cancels it.
   const chimed = useRef(false);
+  const mounted = useRef(false);
   useEffect(() => {
-    if (chimed.current) return;
-    chimed.current = true;
-    playCallbackChime().catch((err: unknown) => {
-      // Not actionable for the rep, and the banner itself is the signal.
-      console.warn('[callback] chime did not play', err);
-    });
+    mounted.current = true;
+    if (!chimed.current) {
+      chimed.current = true;
+      playCallbackChime({ ...browserChimeDeps(), cancelled: () => !mounted.current }).catch((err: unknown) => {
+        // Not actionable for the rep, and the banner itself is the signal.
+        console.warn('[callback] chime did not play', err);
+      });
+    }
+    return () => { mounted.current = false; };
   }, []);
   return (
     <div className="section dp-callback" role="alert">

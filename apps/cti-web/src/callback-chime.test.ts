@@ -35,6 +35,35 @@ describe('playCallbackChime — the SDK plays no ringtone while the rep is on th
     await expect(playCallbackChime({ createAudioElement: () => e, outputDeviceId: () => 'default', wait: async () => {} })).rejects.toThrow('NotAllowedError');
   });
 
+  // Task 3 review, minor 7.
+  it('stops before the second beep once cancelled — the banner came down in the gap', async () => {
+    const els = [el(), el()];
+    let i = 0;
+    let cancelled = false;
+    await playCallbackChime({
+      createAudioElement: () => els[i++]!, outputDeviceId: () => 'default',
+      wait: async () => { cancelled = true; }, cancelled: () => cancelled,
+    });
+    expect(els[0]!.play).toHaveBeenCalledTimes(1);
+    expect(els[1]!.play).not.toHaveBeenCalled();
+  });
+
+  it('a saved speaker that has gone away (setSinkId rejects) falls back to the default output — it still beeps', async () => {
+    const gone = () => ({ src: '', play: vi.fn(async () => {}), setSinkId: vi.fn(async () => { throw new DOMException('Requested device not found', 'NotFoundError'); }) });
+    const els = [gone(), gone()];
+    let i = 0;
+    await playCallbackChime({ createAudioElement: () => els[i++]!, outputDeviceId: () => 'spk-unplugged', wait: async () => {} });
+    for (const e of els) {
+      expect(e.setSinkId).toHaveBeenCalledWith('spk-unplugged');
+      expect(e.play).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('…and rejects only when the default output fails too', async () => {
+    const e = { src: '', play: vi.fn(async () => { throw new Error('NotAllowedError'); }), setSinkId: vi.fn(async () => { throw new Error('NotFoundError'); }) };
+    await expect(playCallbackChime({ createAudioElement: () => e, outputDeviceId: () => 'spk-unplugged', wait: async () => {} })).rejects.toThrow('NotAllowedError');
+  });
+
   it('the browser deps read the speaker saved in Settings, else the default', () => {
     expect(browserChimeDeps().outputDeviceId()).toBe('default');
     localStorage.setItem('cti.audio.output', 'spk-jabra');
