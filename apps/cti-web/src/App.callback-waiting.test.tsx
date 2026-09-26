@@ -141,6 +141,8 @@ const state = {
   takeCallbackHold: null as Promise<void> | null,
   /** While set, POST stop waits for it before answering (recorded on arrival). */
   stopHold: null as Promise<void> | null,
+  /** The firewall clears a manual dial (ALLOW) and POST /calls creates it. */
+  manualDial: false,
   /** App's softphone-election busy test, captured. */
   isBusy: null as null | (() => boolean),
   /** App's leadership handler, captured — call it with false to lose leadership. */
@@ -189,6 +191,7 @@ beforeEach(() => {
   state.forward = null;
   state.takeCallbackHold = null;
   state.stopHold = null;
+  state.manualDial = false;
   state.isBusy = null;
   state.leadership = null;
   const realDeps = coordinator.browserCoordinatorDeps;
@@ -210,7 +213,13 @@ beforeEach(() => {
     }
     if (url.includes('/calls/pending-disposition')) return jsonResponse({ pending: null });
     if (url.includes('/telephony/token')) return jsonResponse({ token: 'device-token' });
-    if (url.includes('/firewall/precall')) return jsonResponse({ error: 'unavailable' }, 503);
+    if (url.includes('/firewall/precall')) {
+      if (!state.manualDial) return jsonResponse({ error: 'unavailable' }, 503);
+      return jsonResponse({ decision: 'ALLOW', reasons: [], blockReason: null, requiredScriptId: null, auditId: 'audit-1', checks: [], normalizedTo: '+16195551234', fromNumber: '+16195559999' });
+    }
+    if (state.manualDial && init?.method === 'POST' && url.endsWith('/calls')) {
+      return jsonResponse({ call: { id: 'call-1', fromNumber: '+16195559999', toNumber: '+16195551234', normalizedToNumber: '+16195551234' }, taskAllowed: true });
+    }
     if (url.includes('/dialer/handoffs/pending')) return jsonResponse({ handoff: null });
     if (url.includes('/dialer/sessions/sess-1/take-callback')) {
       state.controls.push('take-callback');
@@ -1254,4 +1263,27 @@ describe('App — a dead callback never lingers on the banner (Task 2 re-review 
     expect(FakeDevice.connectsStarted).toBe(1);
     expect(state.controls).not.toContain('stop');
   }, 15_000);
+});
+
+describe('App — a manual call the Device error left in preflight (final review M-1)', () => {
+  it('a callback during a manual outbound call, after a Device error moved the phase to preflight, is rejected — never the ring screen over the live call', async () => {
+    state.manualDial = true;
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    for (const d of ['5', '5', '5', '1', '2', '3', '4']) {
+      const key = Array.from(document.querySelectorAll('.dialpad .key')).find((b) => b.querySelector('.num')?.textContent === d);
+      fireEvent.click(key!);
+    }
+    fireEvent.click(screen.getByTitle('Check & call'));
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(1));
+    await screen.findByTitle('End call'); // the manual call is ringing out
+    act(() => { FakeDevice.instances[0]!.emit('error', { code: 31005, message: 'Connection error' }); });
+    await waitFor(() => expect(screen.queryByTitle('End call')).toBeNull()); // the phone reads preflight now
+    const call = callbackCall();
+    ring(call);
+    expect(call.reject).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTitle('Answer')).toBeNull();
+    expect(call.accept).not.toHaveBeenCalled();
+    expect(FakeDevice.connects[0]!.connection.disconnect).not.toHaveBeenCalled();
+  });
 });

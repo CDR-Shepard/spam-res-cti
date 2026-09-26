@@ -776,7 +776,9 @@ export function App(): JSX.Element {
     d.on('incoming', (callObj) => {
       const call = callObj as TwilioIncomingCall;
       const route = routeIncoming({
-        placing: placingRef.current,
+        // A manual call still up counts as busy whatever the phase: a Device
+        // error drops a ringing one to `preflight` with the call still live.
+        placing: placingRef.current || !!connectionRef.current,
         phase: phaseRef.current,
         legLive: !!dialerConnRef.current,
         legSessionId: legSessionIdRef.current,
