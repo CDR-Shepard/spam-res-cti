@@ -1000,6 +1000,17 @@ describe('App — Resume after a callback (Task 3 review)', () => {
     expect(state.controls).not.toContain('resume');
   }, 15_000);
 
+  it('minor 3: Stop pressed during the join — the run stops, the leg is hung up when answered, nothing resumes', async () => {
+    const leg = await resumeJoining();
+    fireEvent.click(screen.getByText('Stop'));
+    await waitFor(() => expect(state.controls).toContain('stop'));
+    act(() => { leg.emit('accept'); });
+    await waitFor(() => expect(leg.disconnect).toHaveBeenCalledTimes(1));
+    await sleep(100);
+    expect(state.controls).not.toContain('resume');
+    expect(document.querySelector('.nav')).not.toBeNull();
+  }, 15_000);
+
   it('P6: with the leg live, Pause and Resume are plain POSTs — no join', async () => {
     state.currentItem = { status: 'dialing', prospectEndedAt: null };
     await startRun();

@@ -207,6 +207,47 @@ describe('DialerPanel — Resume after a callback (Task 3)', () => {
     await waitFor(() => expect(order).toEqual(['join', 'next', 'resume']));
   });
 
+  // Task 3 review, minor 3: a join can take up to ten seconds; the rep must be
+  // able to end the run meanwhile. App's Stop bumps the run generation, so the
+  // pending join then returns false and nothing resumes.
+  it('while the step in flight is the join, Stop stays enabled — the other controls do not', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view({ sessionStatus: 'paused', item: null }));
+    const order: string[] = [];
+    recordControls(order);
+    let finishJoin: (joined: boolean) => void = () => {};
+    const onStop = vi.fn();
+    mount({ needsRejoin: () => true, onRejoin: () => new Promise<boolean>((r) => { finishJoin = r; }), onStop });
+    fireEvent.click(await screen.findByText('Resume'));
+    const button = (label: string): HTMLButtonElement => screen.getByText(label).closest('button') as HTMLButtonElement;
+    await waitFor(() => expect(button('Resume').disabled).toBe(true));
+    expect(button('Stop').disabled).toBe(false);
+    fireEvent.click(button('Stop'));
+    await waitFor(() => expect(onStop).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(['stop']);
+    finishJoin(false);
+    await new Promise((r) => { setTimeout(r, 20); });
+    expect(order).toEqual(['stop']);
+  });
+
+  it('…and once the join is done, Stop waits for the resume that follows it', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view({ sessionStatus: 'paused', item: null }));
+    const control = vi.spyOn(dialerApi, 'dialerControl').mockImplementation(() => new Promise(() => {}));
+    mount({ needsRejoin: () => true, onRejoin: async () => true });
+    fireEvent.click(await screen.findByText('Resume'));
+    await waitFor(() => expect(control).toHaveBeenCalledWith('sess1', 'resume'));
+    expect((screen.getByText('Stop').closest('button') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('…but while a plain control is in flight, Stop waits like the rest', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view());
+    vi.spyOn(dialerApi, 'dialerControl').mockImplementation(() => new Promise(() => {}));
+    mount();
+    fireEvent.click(await screen.findByText('Pause'));
+    const button = (label: string): HTMLButtonElement => screen.getByText(label).closest('button') as HTMLButtonElement;
+    await waitFor(() => expect(button('Pause').disabled).toBe(true));
+    expect(button('Stop').disabled).toBe(true);
+  });
+
   it('Pause never re-joins', async () => {
     vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view());
     const order: string[] = [];

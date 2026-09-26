@@ -805,6 +805,10 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
   const [controlBusy, setControlBusy] = useState(false);
+  // The step in flight is Resume's re-join (up to LEG_ACCEPT_TIMEOUT_MS): Stop
+  // stays usable — App's Stop bumps the run generation, so the pending join
+  // then returns false and nothing resumes.
+  const [joining, setJoining] = useState(false);
   // The id a refused Start (409) named as the rep's OTHER active run, or null.
   // Set only by handleStartDialing's catch; cleared by every control action and
   // by the effect's per-session reset, so it can never outlive its 409.
@@ -954,10 +958,13 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     if (step === 'join') {
       // Resume after a callback: back into the room BEFORE the server dials.
       if (!onRejoin) return Promise.resolve(false);
-      return onRejoin().catch((e: unknown) => {
-        setControlError(controlErrorMessage(e, "Couldn't rejoin the run."));
-        return false;
-      });
+      setJoining(true);
+      return onRejoin()
+        .catch((e: unknown) => {
+          setControlError(controlErrorMessage(e, "Couldn't rejoin the run."));
+          return false;
+        })
+        .finally(() => setJoining(false));
     }
     return dialerControl(sessionId, step)
       .then(() => { pollNowRef.current(); return true; })
@@ -1157,7 +1164,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
               onNext={() => runControls(withRejoin(actionsFor('next', view.session.status), legDown()))}
               onRedial={() => runControls(withRejoin(actionsFor('redial', view.session.status), legDown()))}
             />
-            <button className="btn danger" disabled={controlBusy} onClick={handleStop}>
+            <button className="btn danger" disabled={controlBusy && !joining} onClick={handleStop}>
               Stop
             </button>
           </div>
