@@ -503,17 +503,26 @@ describe('advanceSession', () => {
       return { callId: 'CA1' };
     });
     const fdb = fakeDb(session, items); deps.db = fdb;
-    const realTx = fdb.transaction.bind(fdb);
+    let committed = false;
     let txCount = 0;
+    const realTx = fdb.transaction.bind(fdb);
     fdb.transaction = async (fn: any) => {
       txCount++;
+      // Review round 4: reset on the SECOND (stamp) transaction, same as the
+      // take-callback test above — the claim's own completion must not be
+      // what satisfies the "after commit" check below.
+      if (txCount === 2) committed = false;
       const r = await realTx(fn);
       if (txCount === 1) items[0]!.status = 'dialing';
+      committed = true;
       return r;
     };
+    const committedAtHangup: boolean[] = [];
+    deps.telephony.hangup = vi.fn(async () => { committedAtHangup.push(committed); });
     const r = await advanceSession('S1', deps);
     expect(r).toEqual({ action: 'waiting' });
     expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(committedAtHangup).toEqual([true]);
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ callId: 'CA1' }) }); // stamped despite the hangup
   });
   // Review round 3 (R2-2): the stamp's WHERE, pinned exactly — `status =
@@ -527,6 +536,18 @@ describe('advanceSession', () => {
     const q = new PgDialect().sqlToQuery(stamp.where as SQL);
     expect(q.sql).toBe('("dialer_queue_items"."id" = $1 and "dialer_queue_items"."status" = $2)');
     expect(q.params).toEqual(['i1', 'dialing']);
+  });
+  // Review round 4: the stamp transaction's session re-read, pinned as exact
+  // rendered SQL — the decision of whether to hang up after commit depends on
+  // THIS read finding the right row.
+  it('the stamp transaction reads the session by exactly its id (rendered SQL)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await advanceSession('S1', deps);
+    const sessionRead = fdb._txQueryReads.find((r: any) => r.table === 'dialerSessions')!;
+    const q = new PgDialect().sqlToQuery(sessionRead.where as SQL);
+    expect(q.sql).toBe('"dialer_sessions"."id" = $1');
+    expect(q.params).toEqual(['S1']);
   });
   it('waits (does not dial) while an item is in flight', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
