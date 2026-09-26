@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
+import { earliestRetryAt, inFlightItem, isTalking, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
 import type { DialerItem } from './session-store.js';
 
 const now = new Date('2026-08-22T17:00:00Z');
@@ -53,5 +53,18 @@ describe('earliestRetryAt', () => {
   it('ignores rows that are no longer pending', () => {
     const done = row({ id: 'd', status: 'no_connect', attempt: 2, retryNotBefore: new Date(now.getTime() + 30_000) });
     expect(earliestRetryAt([done], now)).toBeNull();
+  });
+});
+
+describe('isTalking — the rep is on the phone with a prospect (take-callback 409s on exactly this)', () => {
+  it('a connected item whose prospect is still on the line', () => {
+    expect(isTalking(row({ status: 'connected', prospectEndedAt: null }))).toBe(true);
+  });
+  it('not once the prospect hung up — Redial/Resume is waiting on the rep, who is free', () => {
+    expect(isTalking(row({ status: 'connected', prospectEndedAt: new Date('2026-08-22T16:59:00Z') }))).toBe(false);
+  });
+  it('not while a dial only rings, and not between dials', () => {
+    expect(isTalking(row({ status: 'dialing' }))).toBe(false);
+    expect(isTalking(null)).toBe(false);
   });
 });

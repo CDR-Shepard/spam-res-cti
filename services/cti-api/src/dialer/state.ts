@@ -31,3 +31,12 @@ export function earliestRetryAt(items: DialerItem[], now: Date): Date | null {
   }
   return best;
 }
+
+/** The rep is talking to a prospect: the in-flight item is connected and the
+ *  prospect has not hung up. take-callback refuses (409) on exactly this, and
+ *  the softphone applies the same rule to its own poll (apps/cti-web
+ *  callback-waiting.ts `isTalking`). A connected item whose prospect already
+ *  hung up is NOT talking — the rep is choosing Redial or Resume. */
+export function isTalking(item: Pick<DialerItem, 'status' | 'prospectEndedAt'> | null): boolean {
+  return item?.status === 'connected' && item.prospectEndedAt == null;
+}

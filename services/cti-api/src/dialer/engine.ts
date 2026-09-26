@@ -1,10 +1,10 @@
-import { and, eq, isNotNull, isNull, ne, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 import { DAILY_CAP_WINDOW_MS } from '@cti/firewall';
 import type { DialerItem } from './session-store.js';
 import { cadenceVerdict, rolloverDue, type Dial, type Person } from './contact-history.js';
 import { stampConnected } from './contact-history-live.js';
-import { earliestRetryAt, inFlightItem, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
+import { earliestRetryAt, inFlightItem, isTalking, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
 import type { DialerTelephony } from './telephony-port.js';
 import { recordConnectSticky } from './sticky.js';
 import type { RolloverDb } from '../salesforce/followup-enqueue.js';
@@ -378,7 +378,14 @@ export async function advanceSession(
       const rows = await tx
         .update(schema.dialerQueueItems)
         .set({ status: 'dialing', updatedAt: new Date() })
-        .where(and(eq(schema.dialerQueueItems.id, next.id), eq(schema.dialerQueueItems.status, 'pending')))
+        .where(and(
+          eq(schema.dialerQueueItems.id, next.id),
+          eq(schema.dialerQueueItems.status, 'pending'),
+          // Re-checked under the per-session lock: a run paused after this
+          // advance read `active` (take-callback, Pause, a lost rep leg) must
+          // not start a dial — the rep may already have left the room.
+          sql`exists (select 1 from dialer_sessions where id = ${sessionId} and status = 'active')`,
+        ))
         .returning({ id: schema.dialerQueueItems.id });
       return rows.length > 0;
     });
@@ -713,6 +720,132 @@ export async function endCurrent(sessionId: string, deps: EngineDeps): Promise<{
   return { action: 'paused' };
 }
 
+/** What `takeCallback` did. `connected` — a prospect is on the line — is the
+ *  route's 409, and nothing was changed. */
+export type TakeCallbackResult =
+  | { action: 'paused'; canceledItemId: string | null }
+  | { action: 'connected' }
+  | { action: 'ready' | 'stopped' | 'done' | 'idle' };
+
+/** Thrown inside takeCallback's transaction to roll it back (the pause too):
+ *  the dial it was cancelling connected under it. */
+class ProspectConnectedUnderUs extends Error {}
+
+/**
+ * The requeued copy of a dial cancelled to take a callback: the same person on
+ * the same number, at the SAME ordinal (the run's first-pass total counts
+ * ordinals — routes/dialer.ts — so it does not grow) and the same attempt (the
+ * cancel is not one of the person's tries), not dialable for RETRY_FLOOR_MS so
+ * nobody is rung twice inside five minutes. A cancelled redial copy stays one
+ * (`redialOf`), so it still gets no end-of-run retry of its own.
+ */
+function callbackRequeue(item: DialerItem, now: Date): typeof schema.dialerQueueItems.$inferInsert {
+  return {
+    sessionId: item.sessionId,
+    ordinal: item.ordinal,
+    objectType: item.objectType,
+    recordId: item.recordId,
+    toNumber: item.toNumber,
+    fallbackNumber: null,
+    primaryNumber: item.primaryNumber,
+    secondaryNumber: item.secondaryNumber,
+    taskId: item.taskId,
+    followupEligible: item.followupEligible,
+    displayName: item.displayName,
+    listPosition: item.listPosition,
+    attempt: item.attempt,
+    redialOf: item.redialOf,
+    status: 'pending',
+    retryNotBefore: new Date(now.getTime() + RETRY_FLOOR_MS),
+  };
+}
+
+/**
+ * Pause & answer: a callback rang while the rep was on this run and they chose
+ * to take it (spec docs/superpowers/specs/2026-09-26-callback-waiting-design.md).
+ * The softphone leaves the run's room right after this returns, so the run must
+ * be left unable to put anyone in that room: paused, with no dial ringing.
+ *
+ * ONE transaction, holding the same per-session advisory lock as
+ * advanceSession's claim: a claim already in progress has committed before we
+ * read (its `dialing` row is visible below), and a claim that starts after we
+ * pause re-checks the status in its compare-and-swap and backs off.
+ *
+ * ORDER — pause the session FIRST, before touching the item; settle the row
+ * BEFORE hanging up; hang up LAST, after the commit:
+ *  1. A prospect on the line (`isTalking`) → `connected`, nothing written.
+ *  2. Pause — only a live run: the WHERE refuses to resurrect a Stop that
+ *     landed since the read. A harmless re-write on an already-paused run.
+ *  3. A ringing dial → `skipped` + `canceled`, compare-and-swapped on
+ *     `dialing`, and its person requeued (`callbackRequeue`). That pair is
+ *     written by nothing else: the rollover rule already ignores it
+ *     (contact-history-live.ts `skipped`), the no-answer Chatter never posts on
+ *     it. It STILL COUNTS toward the per-customer ceiling (@cti/firewall
+ *     attempts.ts is deliberately unchanged — controller ruling: the person's
+ *     phone did ring, so the cancel is one of their attempts) as well as the
+ *     state-law cap and the 3 h courtesy. If the swap loses, the dial settled
+ *     under us: connected → roll everything back (the pause too) and answer
+ *     `connected`; a miss → nothing left to cancel, the run stays paused.
+ *  4. After commit, hang the cancelled call up. Its `canceled` status callback
+ *     then finds a settled row and `handleDialOutcome` no-ops. A dial whose
+ *     originate had not returned yet has no sid to hang up here; if that
+ *     person answers, `handleDialOutcome` hangs them up (the row is `skipped`).
+ *
+ * Idempotent: on a paused run with nothing ringing it writes the same pause
+ * and answers `{ action: 'paused', canceledItemId: null }`.
+ */
+export async function takeCallback(sessionId: string, deps: EngineDeps): Promise<TakeCallbackResult> {
+  let outcome: { result: TakeCallbackResult; hangUp: string | null };
+  try {
+    outcome = await deps.db.transaction(async (tx): Promise<{ result: TakeCallbackResult; hangUp: string | null }> => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${sessionId}))`);
+      const session = await tx.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
+      if (!session) return { result: { action: 'idle' }, hangUp: null };
+      if (session.status !== 'active' && session.status !== 'paused') return { result: { action: session.status }, hangUp: null };
+      const ofRun = eq(schema.dialerQueueItems.sessionId, sessionId);
+      const item = inFlightItem(await tx.query.dialerQueueItems.findMany({ where: ofRun }));
+      if (isTalking(item)) return { result: { action: 'connected' }, hangUp: null };
+      await tx
+        .update(schema.dialerSessions)
+        .set({ status: 'paused', updatedAt: new Date() })
+        .where(and(eq(schema.dialerSessions.id, sessionId), inArray(schema.dialerSessions.status, ['active', 'paused'])));
+      if (!item || item.status !== 'dialing') return { result: { action: 'paused', canceledItemId: null }, hangUp: null };
+      const settled = await tx
+        .update(schema.dialerQueueItems)
+        .set({ status: 'skipped', outcome: 'canceled', updatedAt: new Date() })
+        .where(and(eq(schema.dialerQueueItems.id, item.id), eq(schema.dialerQueueItems.status, 'dialing')))
+        .returning({ id: schema.dialerQueueItems.id });
+      if (settled.length === 0) {
+        if (isTalking(inFlightItem(await tx.query.dialerQueueItems.findMany({ where: ofRun })))) throw new ProspectConnectedUnderUs();
+        return { result: { action: 'paused', canceledItemId: null }, hangUp: null };
+      }
+      await tx.insert(schema.dialerQueueItems).values(callbackRequeue(item, deps.nowUtc));
+      return { result: { action: 'paused', canceledItemId: item.id }, hangUp: item.callId };
+    });
+  } catch (err) {
+    if (err instanceof ProspectConnectedUnderUs) return { action: 'connected' };
+    throw err;
+  }
+  if (outcome.hangUp) {
+    try {
+      await deps.telephony.hangup(outcome.hangUp);
+    } catch (err) {
+      console.error('[dialer] take-callback hangup failed', { sessionId, err: (err as Error).message });
+    }
+  }
+  return outcome.result;
+}
+
+/** Best-effort hang-up of an answered call nobody will be bridged to. Usually
+ *  succeeds; "already gone" is the other common answer, so it only warns. */
+async function hangUpUnbridged(deps: EngineDeps, callId: string, itemId: string): Promise<void> {
+  try {
+    await deps.telephony.hangup(callId);
+  } catch (err) {
+    console.warn('[dialer] unbridged call not hung up (usually already gone)', { itemId, err: (err as Error).message });
+  }
+}
+
 export async function handleDialOutcome(
   callId: string,
   outcome: DialOutcome,
@@ -731,7 +864,15 @@ export async function handleDialOutcome(
       .where(and(eq(schema.dialerQueueItems.id, item.id), isNull(schema.dialerQueueItems.prospectEndedAt)));
     return;
   }
-  if (!item || item.status !== 'dialing') return;
+  if (!item) return;
+  if (item.status !== 'dialing') {
+    // A person answered a call whose row a rep action already settled — a Skip,
+    // or take-callback while this dial's originate was still in flight, so
+    // nothing held its sid to hang up. Nobody will bridge them: hang up rather
+    // than leave them listening to the dialer-answer hold.
+    if (outcome === 'connected' && item.status === 'skipped') await hangUpUnbridged(deps, callId, item.id);
+    return;
+  }
   const session = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, item.sessionId) });
   if (!session) return;
 
@@ -747,10 +888,21 @@ export async function handleDialOutcome(
     // attempt row today, a retry being a new row on a new item). A row with
     // no number to match is nothing the log could have recorded, so there is
     // nothing to stamp.
-    await deps.db.transaction(async (tx) => {
-      await tx.update(schema.dialerQueueItems).set({ status: 'connected', outcome: 'connected', updatedAt: new Date() }).where(eq(schema.dialerQueueItems.id, item.id));
+    //
+    // A compare-and-swap on `dialing` — the read above is not a lock. A Skip or
+    // take-callback that settled the row since then owns it, and bridging now
+    // would put this person in a room the rep may already have left.
+    const claimed = await deps.db.transaction(async (tx) => {
+      const rows = await tx
+        .update(schema.dialerQueueItems)
+        .set({ status: 'connected', outcome: 'connected', updatedAt: new Date() })
+        .where(and(eq(schema.dialerQueueItems.id, item.id), eq(schema.dialerQueueItems.status, 'dialing')))
+        .returning({ id: schema.dialerQueueItems.id });
+      if (rows.length === 0) return false;
       if (dialedNumber) await stampConnected(tx, item.id, dialedNumber, deps.nowUtc);
+      return true;
     });
+    if (!claimed) { await hangUpUnbridged(deps, callId, item.id); return; }
     // The prospect may end the room on its way out — which is what brings the
     // rep's hold music back — only when the rep's leg is KNOWN to carry the
     // rejoin action: the stamp is written by the same join that adds it. A run

@@ -197,6 +197,8 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
         // stub, ignoring the `where` filter the same way.
         query: {
           dialerQueueItems: { findMany: async () => items },
+          // takeCallback reads the session under its advisory lock.
+          dialerSessions: { findFirst: async () => ({ ...session, ...sessionOverride }) },
         },
         insert(_tbl: unknown) {
           return {
@@ -213,7 +215,11 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
           return {
             set: (patch: any) => ({
               where: (w?: any) => {
-                const apply = () => { writes.push({ patch }); txWrites.push({ patch, where: w }); Object.assign(_target, patch); };
+                const apply = () => {
+                  writes.push({ patch }); txWrites.push({ patch, where: w }); Object.assign(_target, patch);
+                  // takeCallback pauses the run inside its transaction.
+                  if (_tbl === schema.dialerSessions) sessionOverride = { ...sessionOverride, ...patch };
+                };
                 return {
                   // Plain awaited UPDATE inside a transaction (the post-originate
                   // stamp, which rides with the dial-attempt insert).
@@ -261,6 +267,7 @@ import {
   repNext,
   redialCurrent,
   endCurrent,
+  takeCallback,
   type EngineDeps,
 } from './engine.js';
 
@@ -1715,5 +1722,250 @@ describe('handleDialOutcome — connect stamps the dial log', () => {
     expect(text).toContain('"item_id" =');
     expect(text).toContain('"to_number" =');
     expect(params).toEqual(['i1', '+12135550199']);
+  });
+});
+
+describe('takeCallback — Pause & answer on a callback during a run', () => {
+  beforeEach(() => { _target = {}; });
+  const ringing = (o: Record<string, unknown> = {}) => ({
+    id: 'i1', sessionId: 'S1', ordinal: 3, status: 'dialing', toNumber: '+16195550100',
+    primaryNumber: '+16195550100', secondaryNumber: '+16195550111', recordId: '00Q1', objectType: 'Lead',
+    callId: 'CA1', attempt: 1, redialOf: null, taskId: null, followupEligible: true,
+    displayName: 'Jane Doe', listPosition: 7, prospectEndedAt: null, ...o,
+  });
+  const queued = { id: 'i2', sessionId: 'S1', ordinal: 4, status: 'pending', toNumber: '+16195550200', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1 };
+
+  it('pauses FIRST, then settles the ringing dial skipped/canceled, and hangs it up LAST — after the transaction committed', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing(), queued]); deps.db = fdb;
+    let committed = false;
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => { const r = await realTx(fn); committed = true; return r; };
+    const committedAtHangup: boolean[] = [];
+    deps.telephony.hangup = vi.fn(async () => { committedAtHangup.push(committed); });
+    expect(await takeCallback('S1', deps)).toEqual({ action: 'paused', canceledItemId: 'i1' });
+    const pausedIdx = fdb._writes.findIndex((w: any) => w.patch.status === 'paused');
+    const settledIdx = fdb._writes.findIndex((w: any) => w.patch.status === 'skipped');
+    expect(pausedIdx).toBeGreaterThanOrEqual(0);
+    expect(settledIdx).toBeGreaterThan(pausedIdx);
+    expect(fdb._writes[settledIdx].patch).toEqual(expect.objectContaining({ status: 'skipped', outcome: 'canceled' }));
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(committedAtHangup).toEqual([true]);
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+  });
+
+  it('requeues the same person inside the same transaction: same number, same ordinal and attempt, not dialable for five minutes', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing(), queued]); deps.db = fdb;
+    await takeCallback('S1', deps);
+    expect(fdb._inserts).toEqual([]);
+    expect(fdb._txInserts).toEqual([{ values: {
+      sessionId: 'S1', ordinal: 3, objectType: 'Lead', recordId: '00Q1',
+      toNumber: '+16195550100', fallbackNumber: null,
+      primaryNumber: '+16195550100', secondaryNumber: '+16195550111',
+      taskId: null, followupEligible: true, displayName: 'Jane Doe', listPosition: 7,
+      attempt: 1, redialOf: null, status: 'pending',
+      retryNotBefore: new Date(Date.UTC(2026, 6, 13, 18, 5, 0)),
+    } }]);
+  });
+
+  it('a cancelled REDIAL copy stays one (redialOf carried), so it still gets no end-of-run retry of its own', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing({ redialOf: 'i0', attempt: 2 })]); deps.db = fdb;
+    await takeCallback('S1', deps);
+    expect(fdb._txInserts[0]!.values).toEqual(expect.objectContaining({ redialOf: 'i0', attempt: 2 }));
+  });
+
+  it('the settle is a compare-and-swap on `dialing`, and the pause cannot resurrect a stopped run (rendered SQL)', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing()]); deps.db = fdb;
+    await takeCallback('S1', deps);
+    const settle = fdb._txWrites.find((w: any) => w.patch.status === 'skipped')!;
+    const s = new PgDialect().sqlToQuery(settle.where as SQL);
+    expect(s.sql).toBe('("dialer_queue_items"."id" = $1 and "dialer_queue_items"."status" = $2)');
+    expect(s.params).toEqual(['i1', 'dialing']);
+    const pause = fdb._txWrites.find((w: any) => w.patch.status === 'paused')!;
+    const p = new PgDialect().sqlToQuery(pause.where as SQL);
+    expect(p.sql).toBe('("dialer_sessions"."id" = $1 and "dialer_sessions"."status" in ($2, $3))');
+    expect(p.params).toEqual(['S1', 'active', 'paused']);
+  });
+
+  it("takes advanceSession's per-session lock before it reads anything, and reads through the transaction", async () => {
+    const order: string[] = [];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing()]); deps.db = fdb;
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => realTx(async (tx: any) => {
+      const exec = tx.execute;
+      tx.execute = async (q: any) => { order.push(`lock:${new PgDialect().sqlToQuery(q).params.join(',')}`); return exec(q); };
+      const findSession = tx.query.dialerSessions.findFirst;
+      tx.query.dialerSessions.findFirst = async (a: any) => { order.push('session'); return findSession(a); };
+      const findItems = tx.query.dialerQueueItems.findMany;
+      tx.query.dialerQueueItems.findMany = async (a: any) => { order.push('items'); return findItems(a); };
+      return fn(tx);
+    });
+    await takeCallback('S1', deps);
+    expect(order.slice(0, 3)).toEqual(['lock:S1', 'session', 'items']);
+  });
+
+  it('nothing ringing (between dials, or waiting on a retry): pauses and cancels nothing', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [queued]); deps.db = fdb;
+    expect(await takeCallback('S1', deps)).toEqual({ action: 'paused', canceledItemId: null });
+    expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'paused' }) }]);
+    expect(fdb._txInserts).toEqual([]);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+
+  it('is idempotent: on a run already paused, with the dial already cancelled, it writes the same pause and nothing else', async () => {
+    const deps = makeDeps();
+    const fdb = fakeDb({ ...baseSession, status: 'paused' }, [ringing({ status: 'skipped', outcome: 'canceled' }), { ...queued, id: 'i1b', ordinal: 3 }]);
+    deps.db = fdb;
+    expect(await takeCallback('S1', deps)).toEqual({ action: 'paused', canceledItemId: null });
+    expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'paused' }) }]);
+    expect(fdb._txInserts).toEqual([]);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+
+  it('the 409 case — a prospect is on the line: answers `connected` and writes NOTHING, not even the pause', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing({ status: 'connected' })]); deps.db = fdb;
+    expect(await takeCallback('S1', deps)).toEqual({ action: 'connected' });
+    expect(fdb._writes).toEqual([]);
+    expect(fdb._txInserts).toEqual([]);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+
+  it('a prospect who already hung up is not "talking": pauses and leaves the connected item for Redial/Resume', async () => {
+    const deps = makeDeps();
+    const fdb = fakeDb(baseSession, [ringing({ status: 'connected', prospectEndedAt: new Date(Date.UTC(2026, 6, 13, 17, 59, 0)) })]);
+    deps.db = fdb;
+    expect(await takeCallback('S1', deps)).toEqual({ action: 'paused', canceledItemId: null });
+    expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'paused' }) }]);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+
+  it('the dial connects UNDER us (the swap loses; the fresh read shows a live prospect): `connected`, and the transaction rolls back — the pause with it', async () => {
+    const items = [ringing()];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items, { claimReturnsRows: false }); deps.db = fdb;
+    let rolledBack = false;
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => {
+      try {
+        return await realTx(async (tx: any) => {
+          const update = tx.update.bind(tx);
+          // handleDialOutcome's connect commits between our read and our swap.
+          tx.update = (tbl: any) => { if (tbl === schema.dialerQueueItems) items[0]!.status = 'connected'; return update(tbl); };
+          return fn(tx);
+        });
+      } catch (err) { rolledBack = true; throw err; }
+    };
+    expect(await takeCallback('S1', deps)).toEqual({ action: 'connected' });
+    expect(rolledBack).toBe(true);
+    expect(fdb._txInserts).toEqual([]);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+
+  it('the dial settles itself as a miss under us: nothing left to cancel, the run stays paused', async () => {
+    const items = [ringing()];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items, { claimReturnsRows: false }); deps.db = fdb;
+    let rolledBack = false;
+    const realTx = fdb.transaction.bind(fdb);
+    fdb.transaction = async (fn: any) => {
+      try {
+        return await realTx(async (tx: any) => {
+          const update = tx.update.bind(tx);
+          tx.update = (tbl: any) => { if (tbl === schema.dialerQueueItems) items[0]!.status = 'no_connect'; return update(tbl); };
+          return fn(tx);
+        });
+      } catch (err) { rolledBack = true; throw err; }
+    };
+    expect(await takeCallback('S1', deps)).toEqual({ action: 'paused', canceledItemId: null });
+    expect(rolledBack).toBe(false);
+    expect(fdb._txInserts).toEqual([]);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+
+  it('leaves a run that is not live alone (stopped, done, ready): answers its status, writes nothing', async () => {
+    for (const status of ['stopped', 'done', 'ready'] as const) {
+      const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status }, [ringing()]); deps.db = fdb;
+      expect(await takeCallback('S1', deps)).toEqual({ action: status });
+      expect(fdb._writes).toEqual([]);
+      expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    }
+  });
+
+  it('a dial whose originate has not returned yet (no call sid) is still settled and requeued — there is just nothing to hang up here', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing({ callId: null })]); deps.db = fdb;
+    expect(await takeCallback('S1', deps)).toEqual({ action: 'paused', canceledItemId: 'i1' });
+    expect(fdb._txInserts).toHaveLength(1);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+
+  it('a failed hangup after the commit is logged, not thrown: the run is paused and the person requeued', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing()]); deps.db = fdb;
+      deps.telephony.hangup = vi.fn(async () => { throw new Error('Call is not in-progress'); });
+      expect(await takeCallback('S1', deps)).toEqual({ action: 'paused', canceledItemId: 'i1' });
+      expect(fdb._txInserts).toHaveLength(1);
+      expect(logged).toHaveBeenCalledWith('[dialer] take-callback hangup failed', expect.objectContaining({ sessionId: 'S1' }));
+    } finally {
+      logged.mockRestore();
+    }
+  });
+});
+
+describe('advanceSession — a paused run never starts a dial', () => {
+  beforeEach(() => { _target = {}; });
+  it('the pending → dialing claim re-checks, inside the locked transaction, that the run is still active (rendered SQL)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await advanceSession('S1', deps);
+    const claim = fdb._txWrites.find((w: any) => w.patch.status === 'dialing')!;
+    const q = new PgDialect().sqlToQuery(claim.where as SQL);
+    expect(q.sql).toBe(`("dialer_queue_items"."id" = $1 and "dialer_queue_items"."status" = $2 and exists (select 1 from dialer_sessions where id = $3 and status = 'active'))`);
+    expect(q.params).toEqual(['i1', 'pending', 'S1']);
+  });
+});
+
+describe('handleDialOutcome — a connect never bridges into a room the run gave up', () => {
+  beforeEach(() => { _target = {}; });
+  const dialing = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fromNumber: '+16190000000', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+
+  it('the connect is a compare-and-swap on `dialing` (rendered SQL)', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, dialing); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    const swap = fdb._txWrites.find((w: any) => w.patch.status === 'connected')!;
+    const q = new PgDialect().sqlToQuery(swap.where as SQL);
+    expect(q.sql).toBe('("dialer_queue_items"."id" = $1 and "dialer_queue_items"."status" = $2)');
+    expect(q.params).toEqual(['i1', 'dialing']);
+  });
+
+  it('a connect that loses the swap (take-callback or Skip settled the row) is hung up — never bridged, never popped, no sticky', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, dialing, { claimReturnsRows: false }); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(deps.telephony.bridgeToRep).not.toHaveBeenCalled();
+    expect(deps.onScreenPop).not.toHaveBeenCalled();
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(fdb._inserts).toEqual([]);
+  });
+
+  it('a person answering a call whose row is already `skipped` (cancelled while its originate was in flight) is hung up', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'skipped', outcome: 'canceled', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
+    expect(deps.telephony.bridgeToRep).not.toHaveBeenCalled();
+    expect(fdb._writes).toEqual([]);
+  });
+
+  it('…but nothing is hung up for a duplicate "human" on a call that is already connected (the rep is talking)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', prospectEndedAt: null, toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); deps.db = fakeDb(baseSession, items);
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+
+  it('…nor for the late `canceled` status callback of the cancelled dial', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'skipped', outcome: 'canceled', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await handleDialOutcome('CA1', 'canceled', deps);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    expect(fdb._writes).toEqual([]);
+    expect(fdb._txInserts).toEqual([]);
   });
 });
