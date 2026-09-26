@@ -2110,6 +2110,23 @@ describe('handleDialOutcome — a connect never bridges into a room the run gave
     expect(fdb._writes).toEqual([]);
   });
 
+  // Review round 2 (Minor #6, mutation M41): `hangUpUnbridged`'s own try/catch
+  // must actually hold — this is the AMD webhook's call path
+  // (routes/dialer.ts onDialerAmd -> handleDialOutcome), which is not itself
+  // wrapped in anything that would save it from a rethrow.
+  it('a hang-up failure for an unbridged call (already `skipped`) is logged, not thrown — handleDialOutcome resolves, so the AMD webhook is never failed by it', async () => {
+    const logged = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const items = [{ id: 'i1', ordinal: 0, status: 'skipped', outcome: 'canceled', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+      const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+      deps.telephony.hangup = vi.fn(async () => { throw new Error('Call is not in-progress'); });
+      await expect(handleDialOutcome('CA1', 'connected', deps)).resolves.toBeUndefined();
+      expect(logged).toHaveBeenCalledWith('[dialer] unbridged call not hung up (usually already gone)', expect.objectContaining({ itemId: 'i1' }));
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
   it('…but nothing is hung up for a duplicate "human" on a call that is already connected (the rep is talking)', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'connected', prospectEndedAt: null, toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
     const deps = makeDeps(); deps.db = fakeDb(baseSession, items);
