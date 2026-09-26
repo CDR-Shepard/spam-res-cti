@@ -23,6 +23,7 @@ import {
   getPendingHandoff,
   startDialer,
   startDialerFromListView,
+  takeDialerCallback,
   type DialerObjectType,
   type DialerSession,
   type DialerSessionCounts,
@@ -49,6 +50,19 @@ import { sendDtmfKey, type DtmfSendable } from './dtmf';
 import { buildCallSubject } from './call-subject';
 import { openCtiSavePlan } from './opencti-log';
 import { acceptIncomingCall, planIncomingAccept } from './incoming-accept';
+import {
+  callerLabelOf,
+  isTalking,
+  missedCallbackToast,
+  PARKED_AFTER_DROP_TEXT,
+  routeIncoming,
+  runPauseAndAnswer,
+  takeCallbackRefusal,
+  type RunSnapshot,
+  type ToastSpec,
+  type WaitingCallback,
+} from './callback-waiting';
+import { HEARTBEAT_UNREACHABLE_TEXT, startParkedHeartbeat } from './parked-heartbeat';
 
 interface MeResponse {
   user: {
@@ -193,6 +207,37 @@ export function App(): JSX.Element {
   // completion, stranding the conference leg on the single Twilio Device and
   // failing the next call with "a call is already in progress". Stop ends the run.
   const [dialerLive, setDialerLive] = useState(false);
+
+  // A callback that rang while this tab's dialer leg was up and the rep was
+  // not talking to a prospect (spec 2026-09-26-callback-waiting-design.md): it
+  // waits on the Power Dial banner, NOT the ring screen — answering it the
+  // normal way would let the SDK's beforeAccept disconnect the leg. State for
+  // the banner; the ref for synchronous reads in SDK handlers.
+  const [callbackWaiting, setCallbackWaitingState] = useState<WaitingCallback<TwilioIncomingCall> | null>(null);
+  const callbackWaitingRef = useRef<WaitingCallback<TwilioIncomingCall> | null>(null);
+  const setWaiting = useCallback((w: WaitingCallback<TwilioIncomingCall> | null): void => {
+    callbackWaitingRef.current = w;
+    setCallbackWaitingState(w);
+  }, []);
+  // True while Pause & answer (or the dropped-leg hand-off) is in flight.
+  const [takingCallback, setTakingCallback] = useState(false);
+  const takingCallbackRef = useRef(false);
+  // The paused run the rep left the room of to take a callback. While set, the
+  // tab stays "busy" for the softphone election, the heartbeat keeps the run
+  // from being reaped, and Resume re-joins the room before it resumes.
+  const [parkedRunId, setParkedRunIdState] = useState<string | null>(null);
+  const parkedRunIdRef = useRef<string | null>(null);
+  const setParked = useCallback((id: string | null): void => {
+    parkedRunIdRef.current = id;
+    setParkedRunIdState(id);
+  }, []);
+  // The run THIS tab's dialer leg belongs to — set when the leg is adopted.
+  const legSessionIdRef = useRef<string | null>(null);
+  // DialerPanel's latest poll, lifted (decision 3): what "is the rep talking?"
+  // is judged by when a callback rings.
+  const runSnapshotRef = useRef<RunSnapshot | null>(null);
+  // The rep's no-answer forward (Settings): where a rejected callback goes.
+  const forwardE164Ref = useRef<string | null>(null);
 
   // Display name — persists in localStorage on this origin. Used only as a
   // fallback when SF OAuth isn't wired; the SF profile is preferred.
@@ -353,6 +398,7 @@ export function App(): JSX.Element {
   // Latest ringing inbound call, readable synchronously from place().
   const incomingRef = useRef<TwilioIncomingCall | null>(null);
   useEffect(() => { incomingRef.current = incoming; }, [incoming]);
+  useEffect(() => { forwardE164Ref.current = me?.user.noAnswerForwardE164 ?? null; }, [me]);
 
   // Softphone single-registration: exactly one tab is the "leader" that holds the
   // Twilio Device. Default isLeader:true so a lone tab / unsupported-BroadcastChannel
@@ -383,7 +429,9 @@ export function App(): JSX.Element {
     // Never carry one rep's pending-disposition banner into the next sign-in on
     // a shared browser (reopening it would PATCH a call they don't own).
     setPendingDisp(null);
-  }, [teardownDevice]);
+    setParked(null);
+    setWaiting(null);
+  }, [teardownDevice, setParked, setWaiting]);
 
   // Destroy the device on unmount (empty deps → runs only on real unmount, not
   // on every `me` change, which would churn the device).
@@ -553,6 +601,45 @@ export function App(): JSX.Element {
     watchCallMedia(call, (issue) => { if (issue === 'no-outbound-audio') mic.repin('no-outbound-audio'); });
   }, []);
 
+  // Today's ring screen for an incoming callback — used when no dialer leg is
+  // on the line (spec: a rep with no run in progress sees exactly this).
+  const ringNormally = useCallback((call: TwilioIncomingCall): void => {
+    // Clear the ringing UI if the caller hangs up or the leg is cancelled
+    // (e.g. answered in another tab) before the rep picks up.
+    call.on('cancel', () => setIncoming((c) => (c === call ? null : c)));
+    call.on('disconnect', () => setIncoming((c) => (c === call ? null : c)));
+    setIncoming(call);
+    // Pop the softphone panel open (Salesforce utility bar) so the rep sees the
+    // ring without hunting for the tab — as long as they're in Salesforce.
+    try { setPanelVisibility(true); } catch { /* not embedded in SF */ }
+  }, []);
+
+  // A callback during a run while the rep is not talking: it waits on the
+  // Power Dial banner (DialerPanel) for Pause & answer or Ignore.
+  const waitOnCallback = useCallback((call: TwilioIncomingCall): void => {
+    setWaiting({
+      id: call.parameters?.CallSid ?? `callback-${Date.now()}`,
+      call,
+      callerLabel: callerLabelOf(call),
+      recordType: call.customParameters?.get('recordType'),
+    });
+    // The caller hung up, or the rep answered on their iPhone (same identity):
+    // the banner goes and the run is untouched.
+    const clear = (): void => { if (callbackWaitingRef.current?.call === call) setWaiting(null); };
+    call.on('cancel', clear);
+    call.on('disconnect', clear);
+    try { setPanelVisibility(true); } catch { /* not embedded in SF */ }
+  }, [setWaiting]);
+
+  // Reject a waiting callback — Twilio forwards it or takes a voicemail, exactly
+  // as a busy rep's callback always went — take the banner down, and optionally
+  // tell the rep.
+  const rejectWaitingCallback = useCallback((w: WaitingCallback<TwilioIncomingCall>, notice?: ToastSpec): void => {
+    if (callbackWaitingRef.current?.call === w.call) setWaiting(null);
+    try { w.call.reject(); } catch { /* already gone */ }
+    if (notice) setToast(notice);
+  }, [setWaiting]);
+
   // Lazily create + register ONE persistent Twilio device, reused for both
   // outbound dials and INBOUND calls (so callbacks ring the softphone). Idempotent.
   const ensureDevice = useCallback(async (): Promise<unknown> => {
@@ -561,7 +648,12 @@ export function App(): JSX.Element {
     const init = (async () => {
     const tok = await api<{ token: string }>('/telephony/token', { method: 'POST' });
     const { Device } = await import('@twilio/voice-sdk');
-    const device = new Device(tok.token, { logLevel: 1 });
+    // allowIncomingWhileBusy: a callback must reach the app while the rep sits
+    // on a power-dial run's conference leg — the default drops it silently
+    // (busy in 0 s). Set here, never via updateOptions(), which rebuilds the
+    // sound cache and loses the ringtone speaker chosen in Settings. The
+    // 'incoming' handler below decides what a busy rep's callback does.
+    const device = new Device(tok.token, { logLevel: 1, allowIncomingWhileBusy: true });
     deviceRef.current = device;
     // Every new Device (first load, or re-created after a leadership change)
     // gets the mic/speaker chosen in Settings — the power-dialer conference
@@ -616,23 +708,24 @@ export function App(): JSX.Element {
         setToast({ text: 'Inbound calls may be unavailable — could not refresh Twilio token. Please reload.', type: 'error' });
       })();
     });
-    // An INBOUND callback dialed to this rep's client identity.
+    // An INBOUND callback dialed to this rep's client identity. Where it goes is
+    // callback-waiting.ts `routeIncoming`; with no dialer leg on the line it is
+    // exactly today's rule (busy or dialing out → reject, else ring).
     d.on('incoming', (callObj) => {
       const call = callObj as TwilioIncomingCall;
-      // Decline (→ voicemail) if the rep is busy OR an outbound dial is in
-      // flight — no call-waiting, and never race an in-progress place().
-      if (placingRef.current || (phaseRef.current !== 'idle' && phaseRef.current !== 'preflight')) {
-        try { call.reject(); } catch { /* */ }
-        return;
-      }
-      // Clear the ringing UI if the caller hangs up or the leg is cancelled
-      // (e.g. answered in another tab) before the rep picks up.
-      call.on('cancel', () => setIncoming((c) => (c === call ? null : c)));
-      call.on('disconnect', () => setIncoming((c) => (c === call ? null : c)));
-      setIncoming(call);
-      // Pop the softphone panel open (Salesforce utility bar) so the rep sees the
-      // ring without hunting for the tab — as long as they're in Salesforce.
-      try { setPanelVisibility(true); } catch { /* not embedded in SF */ }
+      const route = routeIncoming({
+        placing: placingRef.current,
+        phase: phaseRef.current,
+        legLive: !!dialerConnRef.current,
+        legSessionId: legSessionIdRef.current,
+        waiting: !!callbackWaitingRef.current,
+        snapshot: runSnapshotRef.current,
+      });
+      if (route === 'ring') { ringNormally(call); return; }
+      if (route === 'wait') { waitOnCallback(call); return; }
+      // Forward or voicemail, as today; say so when a prospect call is why.
+      try { call.reject(); } catch { /* */ }
+      if (route === 'reject-talking') setToast(missedCallbackToast(callerLabelOf(call), forwardE164Ref.current));
     });
     // Reflect REAL registration state: a device that silently drops its
     // registration means inbound callbacks stop arriving, so surface it. Guard on
@@ -663,7 +756,7 @@ export function App(): JSX.Element {
       deviceRef.current = null;
       throw err;
     }
-  }, [signOut]);
+  }, [signOut, ringNormally, waitOnCallback]);
 
   // Release the rep's power-dialer conference leg from the single Twilio Device,
   // freeing it for the next call. Does NOT clear the session (the panel may still
@@ -673,10 +766,70 @@ export function App(): JSX.Element {
     dialerRunRef.current++;
     const conn = dialerConnRef.current as { disconnect?: () => void } | null;
     dialerConnRef.current = null;
+    legSessionIdRef.current = null;
     if (conn) { try { conn.disconnect?.(); } catch { /* already gone */ } }
     setDialerLive(false);
-    if (pendingTeardownRef.current && !connectionRef.current && !incomingRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
-  }, [teardownDevice]);
+    setParked(null);
+    // A callback still waiting on the banner outlives the run: with no leg
+    // left to lose, it rings the ordinary way.
+    const waiting = callbackWaitingRef.current;
+    if (waiting) { setWaiting(null); ringNormally(waiting.call); }
+    if (pendingTeardownRef.current && !connectionRef.current && !incomingRef.current && !waiting) { pendingTeardownRef.current = false; teardownDevice(); }
+  }, [teardownDevice, setParked, setWaiting, ringNormally]);
+
+  // Pause & answer's step 2 (spec decision 5): leave the run's room so the
+  // callback can be answered on this Device. Unlike dropConferenceLeg the run is
+  // PARKED, not over: the nav stays locked on Power Dial, the deferred Device
+  // teardown is not flushed (the callback is about to use the Device), and the
+  // run id is kept for the heartbeat and Resume. The ref is cleared BEFORE
+  // disconnect(), so watchDialerLeg never reads this as a drop; the generation
+  // bump supersedes a join or recovery in flight. Twilio then asks the rejoin
+  // route with `completed`, which pauses a run take-callback already paused.
+  const leaveRoomForCallback = useCallback((sessionId: string): void => {
+    dialerRunRef.current++;
+    setParked(sessionId); // first: the tab stays "busy" for the election throughout
+    const conn = dialerConnRef.current as { disconnect?: () => void } | null;
+    dialerConnRef.current = null;
+    legSessionIdRef.current = null;
+    if (conn) { try { conn.disconnect?.(); } catch { /* already gone */ } }
+  }, [setParked]);
+
+  // Spec decision 9: the leg dropped on its own while a callback waited on the
+  // banner. Re-joining now would call device.connect(), which silently
+  // ignore()s the pending call. So: take-callback (the run pauses and a dial
+  // still ringing is cancelled — nobody is in the room to bridge it to), park
+  // the run, and let the callback ring the ordinary way; Resume re-joins later.
+  // Resolves false — the callback rejected, with a toast — when the run could
+  // not be paused; the caller then recovers the leg as usual, because a live
+  // run must never keep dialing into an empty room.
+  const handOffCallbackAfterDrop = useCallback(async (sessionId: string | null): Promise<boolean> => {
+    const waiting = callbackWaitingRef.current;
+    if (!waiting || !sessionId || takingCallbackRef.current) return false;
+    takingCallbackRef.current = true;
+    setTakingCallback(true);
+    try {
+      await takeDialerCallback(sessionId);
+    } catch (e) {
+      const reason = takeCallbackRefusal(e) === 'talking' ? 'on-call' : 'not-paused';
+      rejectWaitingCallback(waiting, missedCallbackToast(waiting.callerLabel, forwardE164Ref.current, reason));
+      return false;
+    } finally {
+      takingCallbackRef.current = false;
+      setTakingCallback(false);
+    }
+    dialerRunRef.current++;       // nothing may act for the dropped leg any more
+    setParked(sessionId);          // before the dead ref goes: the tab stays busy
+    dialerConnRef.current = null;
+    legSessionIdRef.current = null;
+    const stillRinging = callbackWaitingRef.current?.call === waiting.call && waiting.call.status?.() !== 'closed';
+    setWaiting(null);
+    if (!stillRinging) {
+      setToast({ text: PARKED_AFTER_DROP_TEXT, type: 'info' });
+      return true;
+    }
+    ringNormally(waiting.call);
+    return true;
+  }, [rejectWaitingCallback, ringNormally, setParked, setWaiting]);
 
   // Stop control: drop the conference leg AND return to the list-view picker.
   // Idempotent — safe to call twice (e.g. Stop button + DialerPanel unmount).
@@ -772,6 +925,7 @@ export function App(): JSX.Element {
         return false;
       }
       dialerConnRef.current = connection;
+      legSessionIdRef.current = sessionId ?? null;
       // In YouTube mode the line is silent while waiting, so the first sound on
       // it means someone was connected — the player pauses on it. Every join
       // (a fresh start AND a dropped-leg recovery) passes through here, so this
@@ -789,32 +943,42 @@ export function App(): JSX.Element {
           // "busy", so the softphone election cannot move the Device to another
           // tab in the middle of the recovery. `dropped` absorbs a second event.
           dropped = true;
-          // The run generation this recovery owns. Its own rejoin bumps the
-          // counter (synchronously, at the top of joinLeg), so follow it.
-          let gen = myRun;
-          const isCurrent = (): boolean => dialerRunRef.current === gen;
-          void recoverDroppedLeg({
-            isCurrent,
-            wait: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
-            fetchStatus: async () => (sessionId ? (await getDialer(sessionId)).session.status : 'stopped'),
-            rejoin: () => {
-              const joining = joinLegRef.current(sessionId ?? null);
-              gen = dialerRunRef.current;
-              return joining;
-            },
-            stop: async () => { if (sessionId) await dialerControl(sessionId, 'stop'); },
-          }, recentRejoins(legRejoinedAtRef.current, Date.now())).then((outcome) => {
-            if (outcome === 'rejoined') legRejoinedAtRef.current = [...legRejoinedAtRef.current, Date.now()];
-            // A Stop or a newer run got there first: its state is not ours to touch
-            // (dropping here would bump the generation under a join in flight).
-            if (outcome === 'superseded' || !isCurrent()) return;
-            // `stop-failed`: the run may still be live. Keep the nav locked on the
-            // Power Dial tab, where the Stop button is.
-            if (outcome === 'run-over' || outcome === 'stopped') dropConferenceLeg();
-            else if (outcome === 'stop-failed') setDialerLive(true); // the failed rejoin unlocked it
-            const toast = legRecoveryToast(outcome);
-            if (toast) setToast(toast);
-          });
+          const recover = (): void => {
+            // The run generation this recovery owns. Its own rejoin bumps the
+            // counter (synchronously, at the top of joinLeg), so follow it.
+            let gen = myRun;
+            const isCurrent = (): boolean => dialerRunRef.current === gen;
+            void recoverDroppedLeg({
+              isCurrent,
+              wait: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+              fetchStatus: async () => (sessionId ? (await getDialer(sessionId)).session.status : 'stopped'),
+              rejoin: () => {
+                const joining = joinLegRef.current(sessionId ?? null);
+                gen = dialerRunRef.current;
+                return joining;
+              },
+              stop: async () => { if (sessionId) await dialerControl(sessionId, 'stop'); },
+            }, recentRejoins(legRejoinedAtRef.current, Date.now())).then((outcome) => {
+              if (outcome === 'rejoined') legRejoinedAtRef.current = [...legRejoinedAtRef.current, Date.now()];
+              // A Stop or a newer run got there first: its state is not ours to touch
+              // (dropping here would bump the generation under a join in flight).
+              if (outcome === 'superseded' || !isCurrent()) return;
+              // `stop-failed`: the run may still be live. Keep the nav locked on the
+              // Power Dial tab, where the Stop button is.
+              if (outcome === 'run-over' || outcome === 'stopped') dropConferenceLeg();
+              else if (outcome === 'stop-failed') setDialerLive(true); // the failed rejoin unlocked it
+              const toast = legRecoveryToast(outcome);
+              if (toast) setToast(toast);
+            });
+          };
+          // Decision 9: a callback is waiting on the banner. Re-joining would
+          // call device.connect(), which silently ignore()s it — hand it to the
+          // ring screen instead, and recover only if that could not be done.
+          if (callbackWaitingRef.current) {
+            void handOffCallbackAfterDrop(sessionId ?? null).then((handedOff) => { if (!handedOff) recover(); });
+            return;
+          }
+          recover();
         },
       });
       // Announce "busy" NOW rather than waiting up to a heartbeat — until peers see
@@ -826,7 +990,7 @@ export function App(): JSX.Element {
       if (dialerRunRef.current === myRun) setDialerLive(false); // only if a newer run didn't supersede us
       throw e;
     }
-  }, [ensureDevice, dropConferenceLeg]);
+  }, [ensureDevice, dropConferenceLeg, handOffCallbackAfterDrop]);
   joinLegRef.current = joinLeg;
   const joinDialerConference = useCallback((): Promise<boolean> => joinLeg(), [joinLeg]);
 
@@ -896,7 +1060,11 @@ export function App(): JSX.Element {
       phaseRef.current === 'active' ||
       !!incomingRef.current ||
       !!connectionRef.current ||
-      !!dialerConnRef.current;
+      !!dialerConnRef.current ||
+      // A callback on the banner is ringing on this Device, and a run parked for
+      // a callback is coming back to it.
+      !!callbackWaitingRef.current ||
+      !!parkedRunIdRef.current;
     const coord = createSoftphoneCoordinator(browserCoordinatorDeps(userId, isBusy));
     coordinatorRef.current = coord;
     coord.onStateChange((s) => setCoordState(s));
@@ -916,7 +1084,9 @@ export function App(): JSX.Element {
         phaseRef.current === 'ringing' ||
         phaseRef.current === 'active' ||
         incomingRef.current ||
-        dialerConnRef.current
+        dialerConnRef.current ||
+        callbackWaitingRef.current ||
+        parkedRunIdRef.current
       ) {
         // A live call (ringing/active or an inbound still ringing) or a power-dial
         // run is in progress — keep the Device until it ends. Idle/preflight/wrap-up
@@ -1187,21 +1357,30 @@ export function App(): JSX.Element {
     placingRef.current = false;
     openCtiTaskWrittenRef.current = false;
     openCtiTaskIdRef.current = null;
-    if (pendingTeardownRef.current && !dialerConnRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
+    if (pendingTeardownRef.current && !dialerConnRef.current && !parkedRunIdRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
   }, [teardownDevice]);
 
   // Answer an inbound callback in the CTI. Inbound calls auto-log server-side,
   // so there's no wrap-up form — on hangup we just return to idle.
-  const acceptIncoming = useCallback(() => {
-    const call = incoming;
+  const acceptCall = useCallback((call: TwilioIncomingCall | null) => {
     // Don't answer if an outbound dial just claimed the line.
     if (!call || placingRef.current) return;
+    // Never over a live dialer leg: accept() would make the SDK disconnect it
+    // (beforeAccept), and the leg's recovery would then stop the whole run. A
+    // callback that reached the ring screen before the leg joined goes to the
+    // run's banner instead, whose Pause & answer leaves the room first.
+    if (dialerConnRef.current) {
+      setIncoming((c) => (c === call ? null : c));
+      if (callbackWaitingRef.current) { try { call.reject(); } catch { /* already gone */ } }
+      else waitOnCallback(call);
+      return;
+    }
     const plan = planIncomingAccept(call);
     const backToIdle = (): void => {
       setPhase('idle'); setActive(null); setElapsed(0); setIncoming(null);
       connectionRef.current = null;
       callEndRef.current = null;
-      if (pendingTeardownRef.current && !dialerConnRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
+      if (pendingTeardownRef.current && !dialerConnRef.current && !parkedRunIdRef.current) { pendingTeardownRef.current = false; teardownDevice(); }
     };
     // Idempotent — guards against 'cancel'/'disconnect'/'error' more than
     // one of them firing for the same call (or hangup()'s HANGUP_FALLBACK_MS
@@ -1278,12 +1457,73 @@ export function App(): JSX.Element {
         if (issue === 'no-inbound-audio') setToast({ text: "The caller's audio came back.", type: 'success' });
       },
     );
-  }, [incoming, teardownDevice]);
+  }, [teardownDevice, waitOnCallback]);
+  const acceptIncoming = useCallback(() => acceptCall(incoming), [acceptCall, incoming]);
 
   const declineIncoming = useCallback(() => {
     try { incoming?.reject(); } catch { /* */ }
     setIncoming(null);
   }, [incoming]);
+
+  // Pause & answer (spec "What the rep sees", decisions 4-5), in the order
+  // callback-waiting.ts runPauseAndAnswer pins: the server pauses the run FIRST
+  // (cancelling a dial still ringing); only then does the rep leave the room;
+  // only then is the callback answered through the normal inbound path
+  // (screen-pop, recording, caller ID).
+  const pauseAndAnswer = useCallback(async (): Promise<void> => {
+    const waiting = callbackWaitingRef.current;
+    const sessionId = legSessionIdRef.current;
+    if (!waiting || !sessionId || takingCallbackRef.current) return;
+    takingCallbackRef.current = true;
+    setTakingCallback(true);
+    try {
+      await runPauseAndAnswer({
+        takeCallback: () => takeDialerCallback(sessionId),
+        stillRinging: () => callbackWaitingRef.current?.call === waiting.call && waiting.call.status?.() !== 'closed',
+        leaveRoom: () => leaveRoomForCallback(sessionId),
+        clear: () => { if (callbackWaitingRef.current?.call === waiting.call) setWaiting(null); },
+        reject: () => rejectWaitingCallback(waiting),
+        accept: () => acceptCall(waiting.call),
+        toast: setToast,
+        missedToast: () => missedCallbackToast(waiting.callerLabel, forwardE164Ref.current),
+      });
+    } finally {
+      takingCallbackRef.current = false;
+      setTakingCallback(false);
+    }
+  }, [acceptCall, leaveRoomForCallback, rejectWaitingCallback, setWaiting]);
+
+  // Ignore: the callback forwards or goes to voicemail, exactly as today.
+  const ignoreCallback = useCallback((): void => {
+    const waiting = callbackWaitingRef.current;
+    if (!waiting || takingCallbackRef.current) return;
+    rejectWaitingCallback(waiting);
+  }, [rejectWaitingCallback]);
+
+  // DialerPanel hands every poll here (the lifted run snapshot, decision 3). A
+  // callback already on the banner when the prospect answers — the snapshot it
+  // was judged by can be up to two seconds old — is rejected now, with the
+  // toast: the rep is talking, and Pause & answer would only 409.
+  const handleRunSnapshot = useCallback((snapshot: RunSnapshot): void => {
+    runSnapshotRef.current = snapshot;
+    const waiting = callbackWaitingRef.current;
+    if (!waiting || takingCallbackRef.current) return;
+    if (snapshot.sessionId !== legSessionIdRef.current || !isTalking(snapshot)) return;
+    rejectWaitingCallback(waiting, missedCallbackToast(waiting.callerLabel, forwardE164Ref.current));
+  }, [rejectWaitingCallback]);
+
+  // While a run is parked for a callback, the Power Dial panel — its usual
+  // poller — is off screen, and the reaper stops a paused run nobody has
+  // polled for ten minutes (decision 7). Beat once a minute until the run is
+  // un-parked (Resume re-joined, Stop, run over) or the app unmounts.
+  useEffect(() => {
+    if (!parkedRunId) return undefined;
+    return startParkedHeartbeat(parkedRunId, {
+      poll: (id) => getDialer(id),
+      onRunOver: () => dropConferenceLeg(),
+      onUnreachable: () => setToast({ text: HEARTBEAT_UNREACHABLE_TEXT, type: 'error' }),
+    });
+  }, [parkedRunId, dropConferenceLeg]);
 
   const submitDisposition = useCallback(async () => {
     if (!active) return;
@@ -1552,6 +1792,7 @@ export function App(): JSX.Element {
       onDismiss={handleDialerDismiss}
       holdMusic={holdMusicFromMe(me.user)}
       lineAudio={lineAudio}
+      onRunSnapshot={handleRunSnapshot}
     />
   ) : (
     <div className="dialer">

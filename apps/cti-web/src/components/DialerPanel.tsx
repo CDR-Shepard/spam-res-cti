@@ -31,6 +31,7 @@ import { formatE164 } from '../format';
 import { ApiError } from '../api';
 import type { LineAudio } from '../line-audio';
 import { YouTubeHoldPlayer } from './YouTubeHoldPlayer';
+import { runSnapshotOf, type RunSnapshot } from '../callback-waiting';
 
 const POLL_INTERVAL_MS = 2000;
 /** While a dial is in flight. The panel only LEARNS a record connected by
@@ -486,6 +487,9 @@ export interface DialerPanelProps {
    *  straight through to the YouTube player so it can pause the instant the
    *  line stops being silent (see line-audio.ts). */
   lineAudio?: LineAudio;
+  /** Every successful poll, as the slice App keeps (spec 2026-09-26 decision
+   *  3): App decides whether a callback that rings now finds the rep talking. */
+  onRunSnapshot?: (snapshot: RunSnapshot) => void;
 }
 
 /**
@@ -752,7 +756,7 @@ export function ConfirmBlock({
 }
 
 export function DialerPanel(props: DialerPanelProps): JSX.Element {
-  const { sessionId, onScreenPop, onStartFromListView, onPrepare, onJoin, onStop, onComplete, onDismiss, holdMusic, lineAudio } = props;
+  const { sessionId, onScreenPop, onStartFromListView, onPrepare, onJoin, onStop, onComplete, onDismiss, holdMusic, lineAudio, onRunSnapshot } = props;
   const [view, setView] = useState<DialerSessionView | null>(null);
   // The poll owns `error` (a failed refresh); control actions own
   // `controlError` (a refused pause/skip/stop/next/start), so a successful
@@ -838,6 +842,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         if (cancelled) return null;
         setView(next);
         setError(null);
+        onRunSnapshot?.(runSnapshotOf(next));
 
         // Pop the record only for a live human (see shouldScreenPop) — not while
         // it is still ringing, and never for voicemail. Once per item.

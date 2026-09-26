@@ -690,3 +690,18 @@ describe('App — the chosen microphone and speaker reach the Twilio Device', ()
     }
   });
 });
+
+/** allowIncomingWhileBusy (spec 2026-09-26) now lets a callback reach the app
+ *  during a manual call, where the SDK used to drop it. Spec decision 2: the
+ *  outcome must stay exactly what it was — rejected (forward/voicemail). */
+describe('App — a callback during a manual call', () => {
+  it('is rejected at once — no ring screen, no toast — exactly as when the SDK dropped it', async () => {
+    stubOutboundFetch();
+    await placeOutboundCall();
+    const call = fakeCall({ parameters: { From: '+16195550000' }, customParameters: new Map() });
+    act(() => { FakeDevice.instances[0]!.emit('incoming', call); });
+    expect(call.reject).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTitle('Answer')).toBeNull();
+    expect(screen.queryByText(/Missed callback/)).toBeNull();
+  });
+});

@@ -1,0 +1,51 @@
+/**
+ * The heartbeat for a run parked while the rep takes a callback (spec
+ * 2026-09-26 decision 7). The Power Dial panel — the run's usual poller — is
+ * off screen during the call, and the reaper (services/cti-api
+ * salesforce/followup-worker.ts `expireAbandonedSessions`) stops a paused run
+ * nobody has polled for ten minutes. A GET of the session is the poll that
+ * counts (it stamps `last_polled_at`).
+ */
+import type { DialerSession } from './dialer-api';
+
+export const PARKED_HEARTBEAT_MS = 60_000;
+/** Consecutive failed beats before the rep is told: five minutes of silence is
+ *  half the reaper's window. */
+export const HEARTBEAT_FAILURES_BEFORE_WARNING = 5;
+export const HEARTBEAT_UNREACHABLE_TEXT = "Can't reach the server — your paused Power Dial run may be stopped if this goes on. Check your connection.";
+
+export interface ParkedHeartbeatDeps {
+  poll: (sessionId: string) => Promise<{ session: Pick<DialerSession, 'status'> }>;
+  /** The run reads as done or stopped: release it (App's dropConferenceLeg). */
+  onRunOver: () => void;
+  /** HEARTBEAT_FAILURES_BEFORE_WARNING beats in a row failed — once per streak. */
+  onUnreachable: () => void;
+}
+
+/** Beat every PARKED_HEARTBEAT_MS until the returned stop() is called or the
+ *  run reads as over. A single failed beat is retried by the next one. */
+export function startParkedHeartbeat(sessionId: string, deps: ParkedHeartbeatDeps): () => void {
+  let stopped = false;
+  let failures = 0;
+  const stop = (): void => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+  };
+  const beat = async (): Promise<void> => {
+    try {
+      const view = await deps.poll(sessionId);
+      failures = 0;
+      if (stopped) return;
+      if (view.session.status === 'done' || view.session.status === 'stopped') {
+        stop();
+        deps.onRunOver();
+      }
+    } catch {
+      failures++;
+      if (!stopped && failures === HEARTBEAT_FAILURES_BEFORE_WARNING) deps.onUnreachable();
+    }
+  };
+  const timer = setInterval(() => { void beat(); }, PARKED_HEARTBEAT_MS);
+  return stop;
+}

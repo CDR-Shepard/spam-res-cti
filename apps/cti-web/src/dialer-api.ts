@@ -153,3 +153,11 @@ export async function startDialerFromListView(
     body: { object, listViewId }
   });
 }
+
+/** Pause & answer (spec 2026-09-26-callback-waiting-design.md): the server
+ *  pauses the run — cancelling a dial still ringing — before the softphone
+ *  leaves the room. Throws ApiError 409 `{ reason: 'connected' }` when a
+ *  prospect is on the line (nothing was changed). */
+export async function takeDialerCallback(id: string): Promise<{ ok: true; action: string; canceledItemId?: string | null }> {
+  return api(`/dialer/sessions/${id}/take-callback`, { method: 'POST' });
+}
