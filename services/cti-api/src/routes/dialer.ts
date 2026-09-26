@@ -11,6 +11,7 @@
  *  POST /dialer/sessions/:id/next     → rep-initiated "next" after a connected call
  *  POST /dialer/sessions/:id/redial   → rep-requested redial of the person on a connected call
  *  POST /dialer/sessions/:id/end      → rep-requested End call: hang up the prospect, pause the run
+ *  POST /dialer/sessions/:id/take-callback → a callback rang mid-run: pause FIRST, cancel + requeue a ringing dial (409 if a prospect is on the line)
  *
  *  Twilio-facing power-dialer call webhooks (signature-validated, NOT auth'd —
  *  Twilio calls these directly, see TwilioDialerTelephony#originate):
@@ -44,6 +45,7 @@ import {
   repNext,
   redialCurrent,
   endCurrent,
+  takeCallback,
   handleDialOutcome,
   type EngineDeps,
 } from '../dialer/engine.js';
@@ -333,7 +335,10 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       // make the inherited-day line drift upward while the rep watches it.
       // Attempt-1 rows with no `redialOf` are exactly the queue creation
       // built, so this figure is fixed for the life of the session.
-      firstPassTotal: items.filter((i) => i.attempt === 1 && i.redialOf == null).length,
+      // Counted by ORDINAL: a take-callback requeue copy (engine.ts
+      // `callbackRequeue`) is an attempt-1, non-redial row that reuses its
+      // cancelled original's ordinal, and must not grow this either.
+      firstPassTotal: new Set(items.filter((i) => i.attempt === 1 && i.redialOf == null).map((i) => i.ordinal)).size,
       currentItem: current,
       waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
       rollovers: rolloverSummary(jobs),
@@ -415,6 +420,21 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     const owned = await requireOwnedSession(req, reply);
     if (!owned) return;
     const result = await endCurrent(owned.session.id, buildEngineDeps());
+    return { ok: true, ...result };
+  });
+
+  // A callback rang while the rep is on this run and they chose Pause & answer
+  // (spec 2026-09-26-callback-waiting-design.md). The softphone leaves the room
+  // only after this succeeds. 409 — nothing changed — when a prospect is on the
+  // line: the softphone then leaves the call alone and the callback forwards.
+  // Ungated like every mid-run control (see requirePowerDialer).
+  app.post('/dialer/sessions/:id/take-callback', async (req, reply) => {
+    const owned = await requireOwnedSession(req, reply);
+    if (!owned) return;
+    const result = await takeCallback(owned.session.id, buildEngineDeps());
+    if (result.action === 'connected') {
+      return reply.code(409).send({ error: 'You are talking to a prospect — finish that call first.', reason: 'connected' });
+    }
     return { ok: true, ...result };
   });
 

@@ -19,6 +19,8 @@ const state = vi.hoisted(() => ({
   // chain below. Set to rows that WOULD leak into `workedBy` if the join ever
   // ran when it shouldn't (the active-session test relies on this).
   positionRows: [] as Array<{ position: number | null; userId: string; name: string | null }>,
+  takeCallbackResult: { action: 'paused', canceledItemId: null } as Record<string, unknown>,
+  takeCallbackCalls: [] as string[],
 }));
 
 vi.mock('../config.js', () => ({ loadConfig: () => ({}) }));
@@ -55,6 +57,16 @@ vi.mock('@cti/db', async (importOriginal) => {
     }),
   };
 });
+
+// The route is what this file pins; takeCallback itself is pinned in
+// dialer/engine.test.ts. Every other engine function stays real.
+vi.mock('../dialer/engine.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../dialer/engine.js')>()),
+  takeCallback: async (sessionId: string) => {
+    state.takeCallbackCalls.push(sessionId);
+    return state.takeCallbackResult;
+  },
+}));
 
 // The REAL schema the route parses with — imported, never mirrored. A local copy
 // pinned a contract the route had already moved past ('Task' runs were missing).
@@ -141,6 +153,19 @@ describe('GET /dialer/sessions/:id — listContext', () => {
     const res = await get('S5');
     expect(res.statusCode).toBe(200);
     expect(res.json().firstPassTotal).toBe(1);
+  });
+
+  it("firstPassTotal counts ordinals, not rows: a take-callback requeue copy shares its original's ordinal and never inflates it", async () => {
+    state.session = { id: 'S6', orgId: 'O1', userId: 'U-ME', status: 'paused', listViewId: null };
+    state.items = [
+      { attempt: 1, ordinal: 0, listPosition: null, status: 'done' },
+      // Cancelled to take a callback, and its requeued copy at the same ordinal.
+      { attempt: 1, ordinal: 1, listPosition: null, status: 'skipped', outcome: 'canceled' },
+      { attempt: 1, ordinal: 1, listPosition: null, status: 'pending' },
+    ];
+    const res = await get('S6');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().firstPassTotal).toBe(2);
   });
 
   /**
@@ -238,5 +263,64 @@ describe('POST /dialer/sessions/:id/end', () => {
     state.session = null; // loadOwnedSession's scoped lookup finds nothing
     const res = await post('S-OTHER');
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('POST /dialer/sessions/:id/take-callback', () => {
+  const REP = { userId: 'U-ME', orgId: 'O1', email: 'me@x.com', isAdmin: false, powerDialerEnabled: true };
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    state.authedUser = REP;
+    state.session = { id: 'S1', orgId: 'O1', userId: 'U-ME', status: 'active' };
+    state.takeCallbackCalls = [];
+    state.takeCallbackResult = { action: 'paused', canceledItemId: 'i1' };
+    app = Fastify();
+    await registerDialerRoutes(app);
+    await app.ready();
+  });
+  afterEach(async () => { await app.close(); });
+
+  const post = (id: string) => app.inject({ method: 'POST', url: `/dialer/sessions/${id}/take-callback`, headers: { authorization: 'Bearer t' } });
+
+  it('pauses the owned run through the engine and reports what it cancelled', async () => {
+    const res = await post('S1');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, action: 'paused', canceledItemId: 'i1' });
+    expect(state.takeCallbackCalls).toEqual(['S1']);
+  });
+
+  it('409 { reason: "connected" } when a prospect is on the line — the softphone keys on exactly this', async () => {
+    state.takeCallbackResult = { action: 'connected' };
+    const res = await post('S1');
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: 'You are talking to a prospect — finish that call first.', reason: 'connected' });
+  });
+
+  it('a run that already ended answers 200 with its status — there is nothing to pause', async () => {
+    state.takeCallbackResult = { action: 'stopped' };
+    const res = await post('S1');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, action: 'stopped' });
+  });
+
+  it("someone else's run 404s and never reaches the engine", async () => {
+    state.session = null; // loadOwnedSession's scoped lookup finds nothing
+    const res = await post('S-OTHER');
+    expect(res.statusCode).toBe(404);
+    expect(state.takeCallbackCalls).toEqual([]);
+  });
+
+  it('no session token → 401, never reaches the engine', async () => {
+    state.authedUser = null;
+    const res = await post('S1');
+    expect(res.statusCode).toBe(401);
+    expect(state.takeCallbackCalls).toEqual([]);
+  });
+
+  it('stays open to a rep whose power-dialer grant was revoked mid-run — a mid-run control, like pause', async () => {
+    state.authedUser = { ...REP, powerDialerEnabled: false };
+    const res = await post('S1');
+    expect(res.statusCode).toBe(200);
   });
 });
