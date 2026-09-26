@@ -635,6 +635,11 @@ export function App(): JSX.Element {
     call.on('cancel', () => setIncoming((c) => (c === call ? null : c)));
     call.on('disconnect', () => setIncoming((c) => (c === call ? null : c)));
     call.on('reject', () => setIncoming((c) => (c === call ? null : c)));
+    // The ref now, not only in the render effect: dropConferenceLeg clears
+    // every other "busy" signal just before it re-rings a callback here, and a
+    // leadership loss in that render-long gap would tear the Device down
+    // under the ringing call.
+    incomingRef.current = call;
     setIncoming(call);
     // Pop the softphone panel open (Salesforce utility bar) so the rep sees the
     // ring without hunting for the tab — as long as they're in Salesforce.

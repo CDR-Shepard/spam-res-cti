@@ -816,6 +816,17 @@ describe('App — a callback re-rung on the ring screen (review m1, m2)', () => 
     expect(chime.playCallbackChime).toHaveBeenCalledTimes(2);
   });
 
+  it('m2: re-rung because the run ended, the tab reads "busy" at once — no render-long gap in which a leadership loss tears the Device down under the ringing call', async () => {
+    const busyWhenRung: boolean[] = [];
+    // setPanelVisibility is the last thing ringNormally does, synchronously.
+    vi.spyOn(opencti, 'setPanelVisibility').mockImplementation(() => { busyWhenRung.push(state.isBusy!()); });
+    await callbackOnBanner();
+    busyWhenRung.length = 0; // the banner's own
+    fireEvent.click(screen.getByText('Stop'));
+    await screen.findByTitle('Answer');
+    expect(busyWhenRung).toEqual([true]);
+  });
+
   it('m1: a callback with no run rings exactly as today — the SDK plays its own ringtone, no chime', async () => {
     render(<App />);
     await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
