@@ -184,6 +184,7 @@ beforeEach(() => {
     }
     if (url.includes('/calls/pending-disposition')) return jsonResponse({ pending: null });
     if (url.includes('/telephony/token')) return jsonResponse({ token: 'device-token' });
+    if (url.includes('/firewall/precall')) return jsonResponse({ error: 'unavailable' }, 503);
     if (url.includes('/dialer/handoffs/pending')) return jsonResponse({ handoff: null });
     if (url.includes('/dialer/sessions/sess-1/take-callback')) {
       state.controls.push('take-callback');
@@ -795,4 +796,121 @@ describe('App — Pause & answer yields to a run that ended under it (review I-3
     act(() => { call.reject(); });
     await waitFor(() => expect(screen.queryByTitle('Answer')).toBeNull());
   });
+});
+
+/** Pins for mutants the Task 2 review found surviving (M17-M33). */
+describe('App — the Task 2 wiring, pinned (review I-5)', () => {
+  beforeEach(() => { vi.spyOn(chime, 'playCallbackChime').mockResolvedValue(undefined); });
+
+  it('M17: Pause & answer leaves the room without the leg ever reading as dropped — the ref is cleared BEFORE disconnect()', async () => {
+    const realWatch = dialerLeg.watchDialerLeg;
+    const dropped = vi.fn();
+    vi.spyOn(dialerLeg, 'watchDialerLeg').mockImplementation((conn, opts) => realWatch(conn, { ...opts, onDropped: () => { dropped(); opts.onDropped(); } }));
+    const call = await callbackOnBanner();
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(call.accept).toHaveBeenCalledTimes(1));
+    expect(FakeDevice.connects[0]!.connection.disconnect).toHaveBeenCalledTimes(1);
+    expect(dropped).not.toHaveBeenCalled();
+  });
+
+  it('M18: Pause & answer parks the run — the heartbeat keeps it from being reaped while the callback is up', async () => {
+    const beat = vi.spyOn(heartbeat, 'startParkedHeartbeat');
+    const call = await callbackOnBanner();
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(call.accept).toHaveBeenCalledTimes(1));
+    expect(beat).toHaveBeenCalledWith('sess-1', expect.anything());
+  });
+
+  it('M19: a callback closed with no event during the pause round trip is not answered, and the rep stays in the room', async () => {
+    const call = await callbackOnBanner();
+    const release = holdTakeCallback();
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(state.controls).toContain('take-callback'));
+    act(() => { call.ignore(); });
+    release();
+    expect(await screen.findByText('The caller hung up before you answered.')).toBeTruthy();
+    expect(call.accept).not.toHaveBeenCalled();
+    expect(FakeDevice.connects[0]!.connection.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('M24: after the dropped-leg hand-off the dead leg is gone — the callback can be answered, and Resume re-joins before it resumes', async () => {
+    const call = await callbackOnBanner();
+    dropLeg();
+    fireEvent.click(await screen.findByTitle('Answer', undefined, { timeout: 4000 }));
+    expect(call.accept).toHaveBeenCalledTimes(1);
+    act(() => { call.emit('disconnect'); });
+    fireEvent.click(await screen.findByText('Resume'));
+    await waitFor(() => expect(FakeDevice.connects[1]?.connection.hasListenerFor('accept')).toBe(true));
+    expect(state.controls).not.toContain('resume');
+    act(() => { FakeDevice.connects[1]!.connection.emit('accept'); });
+    await waitFor(() => expect(state.controls).toContain('resume'));
+  }, 15_000);
+
+  it('M27: the polls that follow a callback waiting while a dial rings do not reject it — only a prospect on the line does', async () => {
+    const call = await callbackOnBanner();
+    await sleep(2600); // several polls (one a second while a dial rings)
+    expect(call.reject).not.toHaveBeenCalled();
+    expect(screen.getByText('Callback: Jane Doe · Lead')).toBeTruthy();
+  }, 15_000);
+
+  it('M28: a poll showing the prospect talking while Pause & answer is out does not pull the callback from under it — the server has the last word', async () => {
+    const call = await callbackOnBanner();
+    const release = holdTakeCallback();
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(state.controls).toContain('take-callback'));
+    state.currentItem = { status: 'connected', prospectEndedAt: null };
+    await sleep(2200); // polls see the prospect talking
+    expect(call.reject).not.toHaveBeenCalled();
+    state.currentItem = { status: 'connected', prospectEndedAt: '2026-09-26T17:00:00.000Z' }; // …who hung up before the pause landed
+    release();
+    await waitFor(() => expect(call.accept).toHaveBeenCalledTimes(1));
+    expect(call.reject).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('M29: Stop with a callback on the banner — it rings the ordinary way instead of being lost', async () => {
+    const call = await callbackOnBanner();
+    fireEvent.click(screen.getByText('Stop'));
+    expect(await screen.findByTitle('Answer')).toBeTruthy();
+    expect(call.reject).not.toHaveBeenCalled();
+  });
+
+  it('M31: a run parked for a callback keeps this tab "busy" for the softphone election — it is coming back to this Device', async () => {
+    await takeAndFinish(await callbackOnBanner());
+    await screen.findByText('Resume');
+    expect(state.isBusy!()).toBe(true);
+  }, 15_000);
+
+  it('M32: losing leadership while parked (phone idle) defers the Device teardown instead of destroying it', async () => {
+    await takeAndFinish(await callbackOnBanner());
+    await screen.findByText('Resume');
+    act(() => { state.leadership!(false); });
+    expect(FakeDevice.instances[0]!.destroyed).toBe(0);
+  }, 15_000);
+
+  it("M33: leadership lost during the parked run's callback — the Device is kept when the callback ends", async () => {
+    const call = await callbackOnBanner();
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(call.accept).toHaveBeenCalledTimes(1));
+    act(() => { state.leadership!(false); });
+    expect(FakeDevice.instances[0]!.destroyed).toBe(0);
+    act(() => { call.emit('disconnect'); });
+    await screen.findByText('Resume');
+    expect(FakeDevice.instances[0]!.destroyed).toBe(0);
+  }, 15_000);
+
+  it("M33: …and the dial pad's reset keeps it too (click-to-dial while parked, then Escape)", async () => {
+    let clickToDial: ((e: opencti.ClickToDialEvent) => void) | null = null;
+    vi.spyOn(opencti, 'initOpenCti').mockResolvedValue({ ready: true });
+    vi.spyOn(opencti, 'onClickToDial').mockImplementation((h) => { clickToDial = h; });
+    vi.spyOn(opencti, 'notifyReady').mockImplementation(() => {});
+    vi.spyOn(opencti, 'setPanelHeight').mockImplementation(() => {});
+    vi.spyOn(opencti, 'setPanelVisibility').mockImplementation(() => {});
+    await takeAndFinish(await callbackOnBanner());
+    await screen.findByText('Resume');
+    act(() => { state.leadership!(false); });
+    act(() => { clickToDial!({ number: '+16195550123' }); });
+    await screen.findByText(/Firewall error/);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(FakeDevice.instances[0]!.destroyed).toBe(0);
+  }, 15_000);
 });
