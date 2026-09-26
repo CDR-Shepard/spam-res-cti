@@ -137,9 +137,12 @@ export interface PauseAndAnswerDeps {
   accept: () => void;
   toast: (t: ToastSpec) => void;
   missedToast: () => ToastSpec;
+  /** A Stop, the run ending, or a newer run landed while take-callback was
+   *  out — the callback has been handed to the ring screen already. */
+  superseded: () => boolean;
 }
 
-export type PauseAndAnswerOutcome = 'answered' | 'talking' | 'caller-gone' | 'failed';
+export type PauseAndAnswerOutcome = 'answered' | 'talking' | 'caller-gone' | 'failed' | 'superseded';
 
 /**
  * Pause & answer, in this order and no other (spec decisions 4-5):
@@ -151,11 +154,15 @@ export type PauseAndAnswerOutcome = 'answered' | 'talking' | 'caller-gone' | 'fa
  * callback is rejected with the toast and the leg is never touched. Any other
  * failure touches nothing and says why; the banner stays up. A caller who hung
  * up during the round trip leaves the rep in the room of the now-paused run.
+ * Superseded during the round trip (a Stop, the run ended): whatever the
+ * server said, touch nothing and say nothing — the callback is on the ring
+ * screen now, and is the rep's to answer there.
  */
 export async function runPauseAndAnswer(deps: PauseAndAnswerDeps): Promise<PauseAndAnswerOutcome> {
   try {
     await deps.takeCallback();
   } catch (e) {
+    if (deps.superseded()) return 'superseded';
     if (takeCallbackRefusal(e) === 'talking') {
       deps.reject();
       deps.toast(deps.missedToast());
@@ -164,6 +171,7 @@ export async function runPauseAndAnswer(deps: PauseAndAnswerDeps): Promise<Pause
     deps.toast({ text: `Couldn't pause the run to answer: ${failureText(e)}`, type: 'error' });
     return 'failed';
   }
+  if (deps.superseded()) return 'superseded';
   if (!deps.stillRinging()) {
     deps.clear();
     deps.toast({ text: CALLER_HUNG_UP_TEXT, type: 'info' });

@@ -619,9 +619,11 @@ export function App(): JSX.Element {
   // on the line (spec: a rep with no run in progress sees exactly this).
   const ringNormally = useCallback((call: TwilioIncomingCall): void => {
     // Clear the ringing UI if the caller hangs up or the leg is cancelled
-    // (e.g. answered in another tab) before the rep picks up.
+    // (e.g. answered in another tab) before the rep picks up — or if any path
+    // rejects it, so the ring screen never stays up on a dead call.
     call.on('cancel', () => setIncoming((c) => (c === call ? null : c)));
     call.on('disconnect', () => setIncoming((c) => (c === call ? null : c)));
+    call.on('reject', () => setIncoming((c) => (c === call ? null : c)));
     setIncoming(call);
     // Pop the softphone panel open (Salesforce utility bar) so the rep sees the
     // ring without hunting for the tab — as long as they're in Salesforce.
@@ -650,9 +652,12 @@ export function App(): JSX.Element {
 
   // Reject a waiting callback — Twilio forwards it or takes a voicemail, exactly
   // as a busy rep's callback always went — take the banner down, and optionally
-  // tell the rep.
+  // tell the rep. Only while it is STILL the one on the banner: once a Stop or
+  // the run's end has moved it to the ring screen, it is the rep's to answer
+  // there, and a late decision about the banner must not reject it.
   const rejectWaitingCallback = useCallback((w: WaitingCallback<TwilioIncomingCall>, notice?: ToastSpec): void => {
-    if (callbackWaitingRef.current?.call === w.call) setWaiting(null);
+    if (callbackWaitingRef.current?.call !== w.call) return;
+    setWaiting(null);
     try { w.call.reject(); } catch { /* already gone */ }
     if (notice) setToast(notice);
   }, [setWaiting]);
@@ -1566,12 +1571,16 @@ export function App(): JSX.Element {
     const waiting = callbackWaitingRef.current;
     const sessionId = legSessionIdRef.current;
     if (!waiting || !sessionId || takingCallbackRef.current) return;
+    // A Stop or the run's end (dropConferenceLeg) bumps this and moves the
+    // callback to the ring screen; a newer run's join bumps it too.
+    const gen = dialerRunRef.current;
     takingCallbackRef.current = true;
     setTakingCallback(true);
     let outcome: PauseAndAnswerOutcome = 'failed';
     try {
       outcome = await runPauseAndAnswer({
         takeCallback: () => takeDialerCallback(sessionId),
+        superseded: () => dialerRunRef.current !== gen,
         stillRinging: () => callbackWaitingRef.current?.call === waiting.call && waiting.call.status?.() !== 'closed',
         leaveRoom: () => leaveRoomForCallback(sessionId),
         clear: () => { if (callbackWaitingRef.current?.call === waiting.call) setWaiting(null); },

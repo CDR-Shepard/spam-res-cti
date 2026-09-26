@@ -125,9 +125,28 @@ describe('runPauseAndAnswer — pause first, then leave the room, then answer', 
       accept: () => { calls.push('accept'); },
       toast: (t) => { toasts.push(t); },
       missedToast: () => missedCallbackToast('Jane Doe', null),
+      superseded: () => false,
       ...o,
     };
   }
+
+  // A Stop, or the run ending on its own, while take-callback was out: the
+  // callback has already been handed to the ring screen (App's
+  // dropConferenceLeg). Whatever the server says now, it is not ours to touch.
+  it('superseded while take-callback was out: touches nothing and says nothing — whatever the server answered', async () => {
+    const answers: Array<() => Promise<unknown>> = [
+      async () => ({ ok: true }),
+      async () => { throw new ApiError(409, { error: 'x', reason: 'connected' }); },
+      async () => { throw new ApiError(500, { error: 'database unavailable' }); },
+    ];
+    for (const takeCallback of answers) {
+      const calls: string[] = []; const toasts: ToastSpec[] = [];
+      const d = make(calls, toasts, { takeCallback: async () => { calls.push('takeCallback'); return takeCallback(); }, superseded: () => true });
+      expect(await runPauseAndAnswer(d)).toBe('superseded');
+      expect(calls).toEqual(['takeCallback']);
+      expect(toasts).toEqual([]);
+    }
+  });
 
   it('in this order and no other: server pause, still ringing?, leave the room, banner down, answer', async () => {
     const calls: string[] = []; const toasts: ToastSpec[] = [];

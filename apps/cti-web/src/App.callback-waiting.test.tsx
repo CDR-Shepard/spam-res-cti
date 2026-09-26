@@ -80,11 +80,11 @@ vi.mock('@twilio/voice-sdk', () => ({ Device: FakeDevice }));
 interface FakeCall {
   parameters: Record<string, string>;
   customParameters: Map<string, string>;
-  accept: ReturnType<typeof vi.fn>;
-  reject: ReturnType<typeof vi.fn>;
+  accept: Mock<() => void>;
+  reject: Mock<() => void>;
   /** The SDK's ignore(): closes a pending call with NO event. */
   ignore: Mock<() => void>;
-  disconnect: ReturnType<typeof vi.fn>;
+  disconnect: Mock<() => void>;
   status: () => string;
   on: (event: string, cb: Listener) => void;
   emit: (event: string, ...args: unknown[]) => void;
@@ -737,4 +737,62 @@ describe('App — the dropped-leg hand-off yields to a Stop (review I-2)', () =>
     expect(FakeDevice.connects[1]!.connection.disconnect).not.toHaveBeenCalled();
     expect(document.querySelector('.nav')).toBeNull();
   }, 15_000);
+});
+
+describe('App — Pause & answer yields to a run that ended under it (review I-3)', () => {
+  beforeEach(() => { vi.spyOn(chime, 'playCallbackChime').mockResolvedValue(undefined); });
+
+  /** Pause & answer with take-callback held; the run is stopped remotely meanwhile,
+   *  so the poll ends it and the callback moves to the ring screen. */
+  async function runEndsDuringPauseAndAnswer(): Promise<{ call: FakeCall; release: () => void }> {
+    const call = await callbackOnBanner();
+    const release = holdTakeCallback();
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(state.controls).toContain('take-callback'));
+    state.status = 'stopped';
+    expect(await screen.findByTitle('Answer', undefined, { timeout: 4000 })).toBeTruthy();
+    return { call, release };
+  }
+
+  it('a late 409 does not reject the callback now on the ring screen, nor claim it was missed', async () => {
+    state.takeCallback = 'connected';
+    const { call, release } = await runEndsDuringPauseAndAnswer();
+    release();
+    await sleep(300);
+    expect(call.reject).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Missed callback/)).toBeNull();
+    expect(screen.getByTitle('Answer')).toBeTruthy();
+  }, 15_000);
+
+  it('a late 200 neither answers it behind the ring screen nor says the caller hung up', async () => {
+    const { call, release } = await runEndsDuringPauseAndAnswer();
+    release();
+    await sleep(300);
+    expect(call.accept).not.toHaveBeenCalled();
+    expect(screen.queryByText('The caller hung up before you answered.')).toBeNull();
+    expect(screen.getByTitle('Answer')).toBeTruthy();
+  }, 15_000);
+
+  it('a callback no longer on the banner is not rejected after the fact (the caller hung up, then the 409 landed)', async () => {
+    const call = await callbackOnBanner();
+    state.takeCallback = 'connected';
+    const release = holdTakeCallback();
+    fireEvent.click(screen.getByText('Pause & answer'));
+    await waitFor(() => expect(state.controls).toContain('take-callback'));
+    act(() => { call.emit('cancel'); });
+    release();
+    await waitFor(() => expect(screen.queryByText('Pausing…')).toBeNull());
+    await sleep(100);
+    expect(call.reject).not.toHaveBeenCalled();
+  });
+
+  it('a callback on the ring screen that is rejected by any path takes the ring screen down', async () => {
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    const call = callbackCall();
+    ring(call);
+    await screen.findByTitle('Answer');
+    act(() => { call.reject(); });
+    await waitFor(() => expect(screen.queryByTitle('Answer')).toBeNull());
+  });
 });
