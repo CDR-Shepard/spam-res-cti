@@ -32,6 +32,11 @@ const state = vi.hoisted(() => ({
   updateHangs: false,
   signatureValid: true,
   validatedUrls: [] as string[],
+  /** The rep's live runs, as the named-join guard reads them (user + status). */
+  liveRuns: [] as Array<{ id: string; status: string }>,
+  liveRunsThrows: false,
+  liveRunsHang: false,
+  liveRunLookups: [] as Array<{ where: unknown; columns?: unknown }>,
 }));
 
 vi.mock('../config.js', () => ({
@@ -85,6 +90,13 @@ vi.mock('@cti/db', async (importOriginal) => {
             }
             return paramValues(args.where).flat().includes(REP_CALL_SID) ? state.legSession : state.liveSession;
           },
+          // The named-join guard's read of the rep's live runs.
+          findMany: async (args: { where: unknown; columns?: unknown }) => {
+            state.liveRunLookups.push(args);
+            if (state.liveRunsThrows) throw new Error('pool exhausted');
+            if (state.liveRunsHang) return new Promise(() => {});
+            return state.liveRuns;
+          },
         },
       },
       update: () => ({
@@ -137,6 +149,10 @@ beforeEach(async () => {
   state.updateHangs = false;
   state.signatureValid = true;
   state.validatedUrls = [];
+  state.liveRuns = [{ id: SESSION_ID, status: 'active' }];
+  state.liveRunsThrows = false;
+  state.liveRunsHang = false;
+  state.liveRunLookups = [];
   app = Fastify();
   await registerTelephonyRoutes(app);
   await app.ready();
@@ -481,5 +497,61 @@ describe('POST /telephony/twilio/dialer-conference-rejoin — the rep leg after 
     expect(res.body).not.toContain('<Conference');
     expect(state.validatedUrls).toEqual(['https://api.test/telephony/twilio/dialer-conference-rejoin']);
     expect(state.sessionLookups).toEqual([]);
+  });
+});
+
+describe('POST /telephony/twilio/voice — a named join must be the run that owns the room', () => {
+  const OTHER_ID = '0d6f2e1b-3c5a-4e7d-8f90-a1b2c3d4e5f6';
+  const REJECT = '<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>';
+
+  it('a paused run with no other active run joins — the Resume-after-callback case — and its leg is stamped', async () => {
+    state.liveRuns = [{ id: SESSION_ID, status: 'paused' }];
+    const res = await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    expect(res.body).toContain('<Conference');
+    expect(state.updates).toHaveLength(1);
+  });
+
+  it("a stale tab naming a paused run while ANOTHER run of the rep's is active gets <Reject/> — never answered, nothing stamped", async () => {
+    state.liveRuns = [{ id: SESSION_ID, status: 'paused' }, { id: OTHER_ID, status: 'active' }];
+    const res = await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe(REJECT);
+    expect(state.updates).toEqual([]);
+    expect(state.hangups).toEqual([]);
+  });
+
+  it('a run that has ended (not among the live runs) is refused the same way', async () => {
+    state.liveRuns = [{ id: OTHER_ID, status: 'active' }];
+    expect((await join(REP_FROM, REP_CALL_SID, SESSION_ID)).body).toBe(REJECT);
+  });
+
+  it('the active run joins even when an older abandoned paused run exists', async () => {
+    state.liveRuns = [{ id: SESSION_ID, status: 'active' }, { id: OTHER_ID, status: 'paused' }];
+    expect((await join(REP_FROM, REP_CALL_SID, SESSION_ID)).body).toContain('<Conference');
+  });
+
+  it("reads the rep's own live runs only (their user id, active or paused)", async () => {
+    await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    expect(state.liveRunLookups).toHaveLength(1);
+    expect(state.liveRunLookups[0]!.columns).toEqual({ id: true, status: true });
+    const bound = paramValues(state.liveRunLookups[0]!.where).flat();
+    expect(bound).toContain(REP_ID);
+    expect(bound.filter((v) => ['active', 'paused', 'ready', 'done', 'stopped'].includes(v as string)).sort()).toEqual(['active', 'paused']);
+  });
+
+  it('no run named (an older softphone): no lookup, joins exactly as before', async () => {
+    const res = await join();
+    expect(res.body).toContain('<Conference');
+    expect(state.liveRunLookups).toEqual([]);
+  });
+
+  it('a lookup that fails or hangs lets the rep in — a DB hiccup must never keep a rep out of their room', async () => {
+    state.liveRuns = [{ id: OTHER_ID, status: 'active' }]; // would refuse, if read
+    state.liveRunsThrows = true;
+    expect((await join(REP_FROM, REP_CALL_SID, SESSION_ID)).body).toContain('<Conference');
+    state.liveRunsThrows = false;
+    state.liveRunsHang = true;
+    _setRejoinDbTimeoutForTests(30);
+    expect((await join(REP_FROM, REP_CALL_SID, SESSION_ID)).body).toContain('<Conference');
   });
 });

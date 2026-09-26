@@ -23,6 +23,7 @@ import {
   signedCallbackUrl,
 } from '../telephony/webhooks.js';
 import { DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repUserIdFromClientIdentity, TwilioDialerTelephony } from '../dialer/twilio-telephony.js';
+import { mayJoinNamedRun } from '../dialer/join-guard.js';
 
 
 /**
@@ -178,6 +179,32 @@ async function legShouldRejoin(userId: string, callSid: string | undefined): Pro
   }
 }
 
+/**
+ * The named-join guard (spec 2026-09-26 decision 6; see dialer/join-guard.ts):
+ * read the rep's live runs and ask `mayJoinNamedRun`. A leg that names no run
+ * (an older softphone) is let in exactly as before. A read that fails or hangs
+ * lets the rep in — a database hiccup must never keep a rep out of their room
+ * (the same rule as `legShouldRejoin`); the mistake that guards against needs a
+ * stale tab AND a database outage at once.
+ */
+async function dialerJoinAllowed(from: string, sessionId: string | undefined): Promise<boolean> {
+  const userId = repUserIdFromClientIdentity(from);
+  if (!userId || !sessionId || !UUID_RE.test(sessionId)) return true;
+  const decide = async (): Promise<boolean> => {
+    const live = await getDb().query.dialerSessions.findMany({
+      where: and(eq(schema.dialerSessions.userId, userId), inArray(schema.dialerSessions.status, ['active', 'paused'])),
+      columns: { id: true, status: true },
+    });
+    return mayJoinNamedRun(sessionId, live);
+  };
+  try {
+    return await orDefaultAfter(decide(), true);
+  } catch (err) {
+    console.error('[dialer] join guard lookup failed; letting the rep in', { userId, err: (err as Error).message });
+    return true;
+  }
+}
+
 export async function registerTelephonyRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
 
@@ -283,6 +310,16 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
         const VoiceResponse = twilio.twiml.VoiceResponse;
         const response = new VoiceResponse();
         response.say('Unable to identify rep for the dialer conference.');
+        return reply.type('text/xml').send(response.toString());
+      }
+      // A leg that names a run must be joining the run that owns the rep's room
+      // — never a stale tab's paused or finished run while another is live.
+      // <Reject/> never answers, so the softphone (apps/cti-web dialer-leg.ts
+      // `legAccepted`) sees the join fail instead of a live leg; nothing is
+      // stamped, so the live run's recorded leg is untouched.
+      if (!(await dialerJoinAllowed(body.From ?? '', body.DialerSessionId))) {
+        const response = new twilio.twiml.VoiceResponse();
+        response.reject();
         return reply.type('text/xml').send(response.toString());
       }
       await stampRepCallSid(body.From ?? '', body.CallSid, body.DialerSessionId);
