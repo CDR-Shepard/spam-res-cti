@@ -806,9 +806,15 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const [controlError, setControlError] = useState<string | null>(null);
   const [controlBusy, setControlBusy] = useState(false);
   // The step in flight is Resume's re-join (up to LEG_ACCEPT_TIMEOUT_MS): Stop
-  // stays usable — App's Stop bumps the run generation, so the pending join
-  // then returns false and nothing resumes.
+  // stays usable. Nothing after the join may go once Stop is pressed — see
+  // stopRequestedRef.
   const [joining, setJoining] = useState(false);
+  // Set the moment Stop is pressed, BEFORE its request goes out; cleared per
+  // run. App's generation bump (onStop) only runs once the stop RESPONSE is
+  // back, and the server's stopSession makes Twilio REST calls before it writes
+  // `stopped` — so a re-join's leg can be answered first and the join resolve
+  // true. This latch keeps that chain's next/redial/resume from ever going.
+  const stopRequestedRef = useRef(false);
   // The id a refused Start (409) named as the rep's OTHER active run, or null.
   // Set only by handleStartDialing's catch; cleared by every control action and
   // by the effect's per-session reset, so it can never outlive its 409.
@@ -845,6 +851,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     pollNowRef.current = () => {};
     completedRef.current = false;
     firstTerminalAtRef.current = null;
+    stopRequestedRef.current = false;
 
     if (!sessionId) {
       setView(null);
@@ -955,6 +962,8 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // chain that must hold busy across all of them — fix round 1, finding 3).
   const sendControl = useCallback((step: ControlStep): Promise<boolean> => {
     if (!sessionId) return Promise.resolve(false);
+    // Stop was pressed: whatever a chain still had queued behind it is void.
+    if (stopRequestedRef.current && step !== 'stop') return Promise.resolve(false);
     if (step === 'join') {
       // Resume after a callback: back into the room BEFORE the server dials.
       if (!onRejoin) return Promise.resolve(false);
@@ -1000,6 +1009,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // even if the backend stop request hasn't gone out (or fails) yet. The Stop
   // button stays disabled (controlBusy) for the duration of the await.
   const handleStop = useCallback(() => {
+    stopRequestedRef.current = true; // before the request: see stopRequestedRef
     void (async () => {
       await runControl('stop');
       onStop();

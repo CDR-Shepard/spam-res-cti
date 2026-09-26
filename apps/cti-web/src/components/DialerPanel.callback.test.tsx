@@ -247,6 +247,46 @@ describe('DialerPanel — Resume after a callback (Task 3)', () => {
     expect(order).toEqual(['stop']);
   });
 
+  // Final review I-1: App's generation bump waits on the stop RESPONSE, so a
+  // join can still resolve true after Stop was pressed. Nothing after it may go.
+  it.each([
+    ['Resume', 'plain Resume', null],
+    ['Resume', 'join → next → resume', { status: 'connected', prospectEndedAt: '2026-09-26T17:00:00.000Z' }],
+    ['Redial', 'join → redial → resume', { status: 'connected', prospectEndedAt: '2026-09-26T17:00:00.000Z' }],
+  ] as const)('final I-1: %s (%s) — Stop pressed during the join, which then succeeds before the stop answers: nothing after the join is sent', async (label, _chain, item) => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view({ sessionStatus: 'paused', item }));
+    const order: string[] = [];
+    vi.spyOn(dialerApi, 'dialerControl').mockImplementation((_id: string, action: DialerControlAction) => {
+      order.push(action);
+      return action === 'stop' ? new Promise(() => {}) : Promise.resolve({ ok: true });
+    });
+    let finishJoin: (joined: boolean) => void = () => {};
+    mount({ needsRejoin: () => true, onRejoin: () => { order.push('join'); return new Promise<boolean>((r) => { finishJoin = r; }); } });
+    fireEvent.click(await screen.findByText(label));
+    await waitFor(() => expect(order).toEqual(['join']));
+    fireEvent.click(screen.getByText('Stop'));
+    await waitFor(() => expect(order).toEqual(['join', 'stop']));
+    finishJoin(true);
+    await new Promise((r) => { setTimeout(r, 30); });
+    expect(order).toEqual(['join', 'stop']);
+  });
+
+  it('final I-1: …the Stop latch is per run — the next run\'s controls go out as always', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view());
+    const sent: string[] = [];
+    vi.spyOn(dialerApi, 'dialerControl').mockImplementation(async (id: string, action: DialerControlAction) => {
+      sent.push(`${id}:${action}`);
+      return { ok: true };
+    });
+    const props = { onScreenPop: noop, onStartFromListView: async () => {}, onPrepare: async () => {}, onJoin: async () => true, onStop: noop, onComplete: noop, onDismiss: noop };
+    const { rerender } = render(<DialerPanel sessionId="sess1" {...props} />);
+    fireEvent.click(await screen.findByText('Stop'));
+    await waitFor(() => expect(sent).toEqual(['sess1:stop']));
+    rerender(<DialerPanel sessionId="sess2" {...props} />);
+    fireEvent.click(await screen.findByText('Pause'));
+    await waitFor(() => expect(sent).toEqual(['sess1:stop', 'sess2:pause']));
+  });
+
   it('…and once the join is done, Stop waits for the resume that follows it', async () => {
     vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view({ sessionStatus: 'paused', item: null }));
     const control = vi.spyOn(dialerApi, 'dialerControl').mockImplementation(() => new Promise(() => {}));

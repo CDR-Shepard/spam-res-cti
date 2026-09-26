@@ -139,6 +139,8 @@ const state = {
   forward: null as string | null,
   /** While set, POST take-callback waits for it before answering. */
   takeCallbackHold: null as Promise<void> | null,
+  /** While set, POST stop waits for it before answering (recorded on arrival). */
+  stopHold: null as Promise<void> | null,
   /** App's softphone-election busy test, captured. */
   isBusy: null as null | (() => boolean),
   /** App's leadership handler, captured — call it with false to lose leadership. */
@@ -150,6 +152,14 @@ function holdTakeCallback(): () => void {
   let release: () => void = () => {};
   state.takeCallbackHold = new Promise<void>((r) => { release = r; });
   return () => { state.takeCallbackHold = null; release(); };
+}
+
+/** Hold every stop until the returned release() is called — the server's
+ *  stopSession makes two Twilio REST calls before it writes `stopped`. */
+function holdStop(): () => void {
+  let release: () => void = () => {};
+  state.stopHold = new Promise<void>((r) => { release = r; });
+  return () => { state.stopHold = null; release(); };
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -178,6 +188,7 @@ beforeEach(() => {
   state.takeCallback = 'ok';
   state.forward = null;
   state.takeCallbackHold = null;
+  state.stopHold = null;
   state.isBusy = null;
   state.leadership = null;
   const realDeps = coordinator.browserCoordinatorDeps;
@@ -217,6 +228,7 @@ beforeEach(() => {
     if (control) {
       const action = control[1]!;
       state.controls.push(action);
+      if (action === 'stop' && state.stopHold) await state.stopHold;
       if (action === 'start' || action === 'resume') state.status = 'active';
       if (action === 'pause') state.status = 'paused';
       if (action === 'stop') state.status = 'stopped';
@@ -1056,6 +1068,25 @@ describe('App — Resume after a callback (Task 3 review)', () => {
     await waitFor(() => expect(leg.disconnect).toHaveBeenCalledTimes(1));
     await sleep(100);
     expect(state.controls).not.toContain('resume');
+    expect(document.querySelector('.nav')).not.toBeNull();
+  }, 15_000);
+
+  // Final review I-1: App's generation bump (onStop) waits on the stop
+  // response, which waits on stopSession's Twilio REST calls — so the leg's
+  // accept can land first and the join resolve true. Probe before the fix:
+  // start, take-callback, stop sent, resume, stop answered.
+  it('final I-1: Stop pressed during the join, its response slow — the leg is answered first, and resume is still never sent', async () => {
+    const leg = await resumeJoining();
+    const release = holdStop();
+    fireEvent.click(screen.getByText('Stop'));
+    await waitFor(() => expect(state.controls).toContain('stop'));
+    act(() => { leg.emit('accept'); });
+    await sleep(200);
+    expect(state.controls).not.toContain('resume');
+    release();
+    await waitFor(() => expect(leg.disconnect).toHaveBeenCalledTimes(1));
+    await sleep(100);
+    expect(state.controls).toEqual(['start', 'take-callback', 'stop']);
     expect(document.querySelector('.nav')).not.toBeNull();
   }, 15_000);
 
