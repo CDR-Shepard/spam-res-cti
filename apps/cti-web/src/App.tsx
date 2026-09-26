@@ -169,6 +169,11 @@ export const HANGUP_FALLBACK_MS = 1500;
  *  leg — nor "recovered". */
 interface JoinLegOptions { awaitAccept?: boolean }
 
+/** The Voice SDK Device's `isBusy` (`!!_activeCall`), read without trusting the shape. */
+function deviceIsBusy(device: unknown): boolean {
+  return (device as { isBusy?: unknown } | null)?.isBusy === true;
+}
+
 /** The toast when a Device can't take the mic/speaker saved in Settings. */
 function audioApplyFailureText(r: AudioApplyResult): string {
   const which = r.input === 'failed' && r.output === 'failed' ? 'microphone and speaker'
@@ -778,7 +783,11 @@ export function App(): JSX.Element {
         waiting: !!liveWaitingCallback(),
         snapshot: runSnapshotRef.current,
       });
-      if (route === 'ring') { ringNormally(call); return; }
+      // The SDK plays its ringtone only when it was not busy at invite time
+      // (device.ts `_onSignalingInvite`); mid-join, the joining leg is its
+      // active call, so chime instead. With no call up this is false — the
+      // ring is exactly today's.
+      if (route === 'ring') { ringNormally(call, { chime: deviceIsBusy(device) }); return; }
       if (route === 'wait') { waitOnCallback(call); return; }
       // Forward or voicemail, as today; say so when a prospect call is why.
       try { call.reject(); } catch { /* */ }

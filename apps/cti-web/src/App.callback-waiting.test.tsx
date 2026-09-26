@@ -56,6 +56,11 @@ class FakeDevice {
   /** The SDK's `calls`: those still pending — it drops a call once accepted,
    *  cancelled, rejected or disconnected, and connect() ignore()s the rest. */
   get calls(): FakeCall[] { return this.rung.filter((c) => c.status() === 'pending'); }
+  /** The SDK's `isBusy` (`!!_activeCall`): an outgoing leg connect() returned
+   *  that has not closed, or an accepted call still open. */
+  get isBusy(): boolean {
+    return FakeDevice.connects.some((c) => c.connection.status() !== 'closed') || this.rung.some((c) => c.status() === 'open');
+  }
   destroyed = 0;
   audio = {
     availableInputDevices: new Map([['default', { deviceId: 'default' }]]),
@@ -1160,6 +1165,30 @@ describe('App — a dead callback never lingers on the banner (Task 2 re-review 
     act(() => { call.ignore(); });
     await waitFor(() => expect(FakeDevice.connects.length).toBe(2), { timeout: 4000 });
     expect(state.controls).not.toContain('take-callback');
+  }, 15_000);
+
+  // The SDK plays no ringtone for a call invited while `_activeCall` is set
+  // (device.ts `_onSignalingInvite`) — during a join that is the joining leg.
+  it('3: a callback that reaches the ring screen mid-join (the Device busy with the joining leg) chimes — the SDK rang it silently', async () => {
+    await takeAndFinish(await callbackOnBanner());
+    fireEvent.click(await screen.findByText('Resume'));
+    await waitFor(() => expect(FakeDevice.connects[1]?.connection.hasListenerFor('accept')).toBe(true));
+    vi.mocked(chime.playCallbackChime).mockClear();
+    ring(callbackCall(2));
+    await screen.findByTitle('Answer');
+    expect(chime.playCallbackChime).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it('3: …but with no call up — no run, or a run that has ended — the Device is idle and a callback rings exactly as today: no chime', async () => {
+    const call = await callbackOnBanner();
+    fireEvent.click(screen.getByText('Ignore'));
+    fireEvent.click(screen.getByText('Stop'));
+    await waitFor(() => expect(document.querySelector('.nav')).not.toBeNull());
+    vi.mocked(chime.playCallbackChime).mockClear();
+    ring(callbackCall(2));
+    await screen.findByTitle('Answer');
+    expect(chime.playCallbackChime).not.toHaveBeenCalled();
+    expect(call.accept).not.toHaveBeenCalled();
   }, 15_000);
 
   it('2: Pause & answer pressed during the recovery wait owns the leg — however long take-callback takes, recovery never connect()s over it', async () => {
