@@ -432,22 +432,22 @@ export async function advanceSession(
     // own to_number/from_number can erase a dial from the tally. Atomic with the
     // stamp so the ceiling can never disagree with what the queue says was dialed.
     //
-    // The callId stamp is a guarded compare-and-swap: `originate` awaited above,
-    // and a take-callback (settles the row, pauses the session) or a Stop
-    // (ends the session; the item itself has no sid yet, so Stop cannot hang it
-    // up) can both land while it was in flight. Guarding on BOTH the row still
-    // being `dialing` AND the session still `active` catches every such race —
-    // a take-callback leaves neither true, a Stop leaves only the row true. The
-    // attempt row is inserted regardless: the phone did ring either way.
-    const stamped = await deps.db.transaction(async (tx) => {
+    // The callId stamp is a guarded compare-and-swap on the ROW ONLY: `originate`
+    // awaited above, and a take-callback, a Skip, a Stop, or a plain PAUSE can
+    // all land while it was in flight. Guarding on the session too (round 2's
+    // original fix) stranded the row un-stamped on a plain Pause: no sid ever
+    // lands on it, Twilio's callbacks then find nothing to settle, and the row
+    // sits `dialing` forever — blocking Resume, the reaper, the next Start, and
+    // the person org-wide. `callId` must land whenever the row is still exactly
+    // the one this advance claimed, whatever the run around it is doing; the
+    // session's status is read in the SAME transaction and decided on AFTER the
+    // commit instead. The attempt row is inserted regardless: the phone did
+    // ring either way.
+    const { stamped, sessionStatus } = await deps.db.transaction(async (tx) => {
       const rows = await tx
         .update(schema.dialerQueueItems)
         .set({ callId, fromNumber: did.e164, updatedAt: new Date() })
-        .where(and(
-          eq(schema.dialerQueueItems.id, next.id),
-          eq(schema.dialerQueueItems.status, 'dialing'),
-          sql`exists (select 1 from dialer_sessions where id = ${sessionId} and status = 'active')`,
-        ))
+        .where(and(eq(schema.dialerQueueItems.id, next.id), eq(schema.dialerQueueItems.status, 'dialing')))
         .returning({ status: schema.dialerQueueItems.status });
       await tx.insert(schema.dialerDialAttempts).values({
         orgId: session.orgId,
@@ -461,9 +461,18 @@ export async function advanceSession(
         // read as one person.
         recordId: next.recordId,
       });
-      return rows.length > 0;
+      const fresh = await tx.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
+      return { stamped: rows.length > 0, sessionStatus: fresh?.status };
     });
-    if (!stamped) { await hangUpUnbridged(deps, callId, next.id); return { action: 'waiting' }; }
+    // Not stamped (a take-callback or a Skip already settled the row) OR the
+    // session has ended (stopped/done — Stop's own hang-up had nothing to hang
+    // up while `callId` was still null; this is that hang-up, now that it
+    // exists). A live session (active/paused) with a stamped row is left
+    // ringing: a plain Pause keeps the rep in the room exactly as today.
+    if (!stamped || sessionStatus === 'stopped' || sessionStatus === 'done') {
+      await hangUpUnbridged(deps, callId, next.id);
+      return { action: 'waiting' };
+    }
     return { action: 'dialing', itemId: next.id };
   }
 }

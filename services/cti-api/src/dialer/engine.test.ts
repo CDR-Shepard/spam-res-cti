@@ -252,7 +252,29 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
                   // succeeding; a test simulating a Stop winning THAT race
                   // overrides `tx.update` for `dialerSessions` directly instead.
                   returning: async () => {
-                    if (_tbl !== schema.dialerSessions && !claimReturnsRows) return [];
+                    if (_tbl !== schema.dialerSessions) {
+                      if (!claimReturnsRows) return [];
+                      // Review round 3 (R2-2): an `exists (select ... from
+                      // dialer_sessions where id = $N and status = '...'/in
+                      // (...))` predicate riding alongside the item guard (the
+                      // advanceSession claim's re-check, redialCurrent's
+                      // eligibility check, or the pre-R2-1 stamp) is honored
+                      // against the fake's REAL session state, not just the
+                      // blunt flag above — so a test that mutates the session
+                      // mid-flight (a Pause/Stop landing mid-originate)
+                      // actually exercises whatever the production WHERE
+                      // currently contains, rather than always succeeding
+                      // regardless of it. The allowed status(es) are inlined
+                      // SQL TEXT here, never a bound param, so they're parsed
+                      // out of the rendered text itself.
+                      const { sql: text } = new PgDialect().sqlToQuery(w);
+                      const existsMatch = /exists \(select 1 from dialer_sessions where id = \$\d+ and status (?:= '(\w+)'|in \(([^)]+)\))\)/.exec(text);
+                      if (existsMatch) {
+                        const allowed = existsMatch[1] ? [existsMatch[1]] : existsMatch[2]!.split(',').map((s) => s.trim().replace(/'/g, ''));
+                        const current = { ...session, ...sessionOverride };
+                        if (!allowed.includes(current.status as string)) return [];
+                      }
+                    }
                     apply();
                     return [{ id: 'claimed' }];
                   },
@@ -389,13 +411,44 @@ describe('advanceSession', () => {
     await expect(advanceSession('S1', deps)).rejects.toThrow(/twilio 500/);
     expect(fdb._writes.some((w: any) => w.patch.status === 'pending')).toBe(false);
   });
-  // Review round 2 (Important #1): a take-callback or a Stop can land WHILE
-  // `deps.telephony.originate` is still in flight — after the pending -> dialing
-  // claim committed, before the post-originate stamp transaction opens. Both
-  // races leave the claimed row un-stampable (settled away from `dialing`, or
-  // the session no longer `active`), and both must ring-then-hang-up rather
-  // than silently bridge a person into a room nobody is watching.
-  it('a take-callback lands mid-originate: the row is settled `skipped` under us, so the callId stamp is refused — hang up AFTER commit, keep the attempt (the phone did ring), and report `waiting`, not `dialing`', async () => {
+  // Review round 3 (R2-1): a take-callback, a Stop, OR A PLAIN PAUSE can land
+  // WHILE `deps.telephony.originate` is still in flight. The stamp guards on
+  // the ROW ONLY (`status = 'dialing'`) — never on the session — so `callId`
+  // is ALWAYS written onto a row that is still exactly the one this advance
+  // claimed. The session's status is read in the SAME transaction and decided
+  // on AFTER commit: not stamped (take-callback/Skip already settled the row)
+  // OR the session is stopped/done -> hang up; a live (active/paused) session
+  // with a stamped row is left ringing untouched — a plain Pause must keep the
+  // rep in the room exactly as it does today, and stranding the row unstamped
+  // there (the original round-2 bug) would have blocked Resume, the reaper,
+  // the next Start, and the person org-wide, forever.
+  it("a Pause lands mid-originate: the row is still stamped (it never stopped being `dialing`) — no hangup, the rep stays in the room, today's Pause behaviour", async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const session = { ...baseSession };
+    const deps = makeDeps();
+    deps.telephony.originate = vi.fn(async () => {
+      // pauseSession's own write commits while this call is in flight.
+      session.status = 'paused';
+      return { callId: 'CA1' };
+    });
+    const fdb = fakeDb(session, items); deps.db = fdb;
+    const realTx = fdb.transaction.bind(fdb);
+    let txCount = 0;
+    fdb.transaction = async (fn: any) => {
+      txCount++;
+      const r = await realTx(fn);
+      // The claim's own effect, reflected onto the fixture (the fake's
+      // `_target`/`_writes` bookkeeping does not mutate `items`) — by the time
+      // the stamp transaction runs, the row really is `dialing`.
+      if (txCount === 1) items[0]!.status = 'dialing';
+      return r;
+    };
+    const r = await advanceSession('S1', deps);
+    expect(r).toEqual({ action: 'dialing', itemId: 'i1' });
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ callId: 'CA1', fromNumber: '+16190000000' }) });
+  });
+  it('a take-callback settles the row mid-originate (still `skipped`): not stamped, hung up AFTER commit, and the attempt row is kept — the phone did ring', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
     const deps = makeDeps();
     deps.telephony.originate = vi.fn(async () => {
@@ -404,15 +457,20 @@ describe('advanceSession', () => {
       return { callId: 'CA1' };
     });
     const fdb = fakeDb(baseSession, items); deps.db = fdb;
-    let txCount = 0;
     let committed = false;
+    let txCount = 0;
     const realTx = fdb.transaction.bind(fdb);
     fdb.transaction = async (fn: any) => {
       txCount++;
       if (txCount === 1) { const r = await realTx(fn); committed = true; return r; } // the claim: unaffected
-      // The post-originate stamp transaction: its guarded update matches 0
-      // rows, exactly as real Postgres would once the row is no longer
-      // `dialing` under an `active` session.
+      // The stamp transaction's guarded update matches 0 rows, exactly as real
+      // Postgres would once the row is no longer `dialing` — the fake's own
+      // item-table guard is a blunt flag (`claimReturnsRows`) that does not
+      // track this test's mid-flight mutation, so the stamp is rigged
+      // directly instead. R2-2: `committed` is reset here (NOT set by the
+      // first transaction alone), so a hangup that fires WHILE this second
+      // transaction is still open would correctly fail the assertion below.
+      committed = false;
       const rigged = { update: () => ({ set: () => ({ where: () => ({ then: (res: any) => Promise.resolve().then(res), returning: async () => [] }) }) }) };
       const r = await realTx(async (tx: any) => fn({ ...tx, ...rigged }));
       committed = true;
@@ -426,7 +484,7 @@ describe('advanceSession', () => {
     expect(committedAtHangup).toEqual([true]);
     expect(fdb._txInserts).toHaveLength(1); // the attempt still recorded — the phone did ring
   });
-  it('a Stop lands mid-originate: the session is `stopped` under us (the item stays `dialing`, uncalled — Stop has no sid to hang up yet), so the callId stamp is refused the same way — hang up AFTER commit, keep the attempt, report `waiting`', async () => {
+  it("a Stop lands mid-originate: the row is still stamped (Stop had no sid to hang up while `callId` was still null) — hung up AFTER commit since the session is now `stopped`", async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
     const session = { ...baseSession };
     const deps = makeDeps();
@@ -437,20 +495,30 @@ describe('advanceSession', () => {
       return { callId: 'CA1' };
     });
     const fdb = fakeDb(session, items); deps.db = fdb;
-    let txCount = 0;
     const realTx = fdb.transaction.bind(fdb);
+    let txCount = 0;
     fdb.transaction = async (fn: any) => {
       txCount++;
-      if (txCount === 1) return realTx(fn);
-      return realTx(async (tx: any) => {
-        const rigged = { ...tx, update: () => ({ set: () => ({ where: () => ({ then: (res: any) => Promise.resolve().then(res), returning: async () => [] }) }) }) };
-        return fn(rigged);
-      });
+      const r = await realTx(fn);
+      if (txCount === 1) items[0]!.status = 'dialing';
+      return r;
     };
     const r = await advanceSession('S1', deps);
     expect(r).toEqual({ action: 'waiting' });
     expect(deps.telephony.hangup).toHaveBeenCalledWith('CA1');
-    expect(fdb._txInserts).toHaveLength(1);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ callId: 'CA1' }) }); // stamped despite the hangup
+  });
+  // Review round 3 (R2-2): the stamp's WHERE, pinned exactly — `status =
+  // 'dialing'` ALONE. No session predicate any more; the session is read
+  // separately, in the same transaction, and decided on after commit.
+  it("the callId stamp's guard is status = 'dialing' alone, with no session predicate (rendered SQL)", async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550100', recordId: '00Q1', objectType: 'Lead', callId: null }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await advanceSession('S1', deps);
+    const stamp = fdb._txWrites.find((w: any) => 'callId' in w.patch)!;
+    const q = new PgDialect().sqlToQuery(stamp.where as SQL);
+    expect(q.sql).toBe('("dialer_queue_items"."id" = $1 and "dialer_queue_items"."status" = $2)');
+    expect(q.params).toEqual(['i1', 'dialing']);
   });
   it('waits (does not dial) while an item is in flight', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
