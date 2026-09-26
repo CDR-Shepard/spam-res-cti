@@ -54,6 +54,24 @@ describe('DialerPanel — the lifted run snapshot (Task 2)', () => {
     await new Promise((r) => { setTimeout(r, 20); });
     expect(onRunSnapshot).not.toHaveBeenCalled();
   });
+
+  // Review m3: the poll loop is set up once per sessionId; it must not keep
+  // the handler it started with.
+  it('a new onRunSnapshot handed down mid-run is the one the next poll calls', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(view());
+    const first = vi.fn();
+    const second = vi.fn();
+    const props: DialerPanelProps = {
+      sessionId: 'sess1', onScreenPop: noop, onStartFromListView: async () => {}, onPrepare: async () => {},
+      onJoin: async () => true, onStop: noop, onComplete: noop, onDismiss: noop,
+    };
+    const { rerender } = render(<DialerPanel {...props} onRunSnapshot={first} />);
+    await waitFor(() => expect(first).toHaveBeenCalled());
+    rerender(<DialerPanel {...props} onRunSnapshot={second} />);
+    const before = first.mock.calls.length;
+    await waitFor(() => expect(second).toHaveBeenCalled(), { timeout: 3000 });
+    expect(first.mock.calls.length).toBe(before);
+  });
 });
 
 describe('DialerPanel — the callback banner (Task 3)', () => {

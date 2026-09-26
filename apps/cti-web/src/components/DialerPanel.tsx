@@ -822,6 +822,10 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // Lets a control action (pause/skip/...) trigger an immediate re-poll
   // instead of waiting up to 2s for the next tick.
   const pollNowRef = useRef<() => void>(() => {});
+  // The poll loop is set up once per sessionId; read App's snapshot handler
+  // through this so a new one handed down mid-run is the one that is called.
+  const onRunSnapshotRef = useRef(onRunSnapshot);
+  onRunSnapshotRef.current = onRunSnapshot;
   // Latch so the terminal-status teardown (onComplete) fires exactly once per run.
   const completedRef = useRef(false);
   // When this run FIRST reported a terminal status — the clock the rollover
@@ -885,7 +889,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         if (cancelled) return null;
         setView(next);
         setError(null);
-        onRunSnapshot?.(runSnapshotOf(next));
+        onRunSnapshotRef.current?.(runSnapshotOf(next));
 
         // Pop the record only for a live human (see shouldScreenPop) — not while
         // it is still ringing, and never for voicemail. Once per item.
