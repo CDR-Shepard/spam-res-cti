@@ -34,9 +34,9 @@ class FakeConnection {
   getLocalStream(): { getAudioTracks: () => FakeTrack[] } { return { getAudioTracks: () => [this.micTrack] }; }
   private closed = false;
   on(event: string, cb: Listener): void { this.handlers.set(event, [...(this.handlers.get(event) ?? []), cb]); }
-  emit(event: string): void {
+  emit(event: string, arg?: unknown): void {
     if (event === 'disconnect') this.closed = true;
-    for (const cb of this.handlers.get(event) ?? []) cb();
+    for (const cb of this.handlers.get(event) ?? []) cb(arg);
   }
   status(): string { return this.closed ? 'closed' : 'open'; }
   hasListenerFor(event: string): boolean { return (this.handlers.get(event)?.length ?? 0) > 0; }
@@ -987,6 +987,42 @@ describe('App — Resume after a callback (Task 3 review)', () => {
     fireEvent.click(screen.getByText('Pause & answer'));
     await waitFor(() => expect(second.accept).toHaveBeenCalledTimes(1));
     expect(leg.disconnect).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  // Important 2: joinLeg's ordering guards for Resume, pinned.
+  it('P3: the run is stopped remotely mid-join — when the leg is answered it is hung up, and nothing resumes', async () => {
+    const leg = await resumeJoining();
+    state.status = 'stopped';
+    await screen.findByText('Run stopped', undefined, { timeout: 4000 });
+    act(() => { leg.emit('accept'); });
+    await waitFor(() => expect(leg.disconnect).toHaveBeenCalledTimes(1));
+    await sleep(100);
+    expect(state.controls).not.toContain('resume');
+  }, 15_000);
+
+  it('P6: with the leg live, Pause and Resume are plain POSTs — no join', async () => {
+    state.currentItem = { status: 'dialing', prospectEndedAt: null };
+    await startRun();
+    fireEvent.click(await screen.findByText('Pause'));
+    await waitFor(() => expect(state.controls).toContain('pause'));
+    fireEvent.click(await screen.findByText('Resume'));
+    await waitFor(() => expect(state.controls).toContain('resume'));
+    expect(FakeDevice.connects.length).toBe(1);
+  }, 15_000);
+
+  it('a refused join (<Reject/> as a SIP decline) hangs its leg up and never adopts it: no recovery, no resume — and Resume again re-joins', async () => {
+    const leg = await resumeJoining();
+    act(() => { leg.emit('error', { code: 31005, originalError: { code: 31603 } }); });
+    expect(await screen.findByText(dialerLeg.LEG_REFUSED_MESSAGE)).toBeTruthy();
+    expect(leg.disconnect).toHaveBeenCalledTimes(1);
+    await sleep(2200); // past the recovery wait: a leg never adopted is never "recovered"
+    expect(FakeDevice.connects.length).toBe(2);
+    expect(state.controls).not.toContain('resume');
+    fireEvent.click(screen.getByText('Resume'));
+    await waitFor(() => expect(FakeDevice.connects[2]?.connection.hasListenerFor('accept')).toBe(true));
+    expect(state.controls).not.toContain('resume');
+    act(() => { FakeDevice.connects[2]!.connection.emit('accept'); });
+    await waitFor(() => expect(state.controls).toContain('resume'));
   }, 15_000);
 
   it('minor 4: answered and hung up in the same tick — refused, never adopted: no resume, and Resume again re-joins', async () => {
