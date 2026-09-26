@@ -798,6 +798,33 @@ describe('App — Pause & answer yields to a run that ended under it (review I-3
   });
 });
 
+describe('App — a callback re-rung on the ring screen (review m1, m2)', () => {
+  beforeEach(() => { vi.spyOn(chime, 'playCallbackChime').mockResolvedValue(undefined); });
+
+  it('m1: re-rung after the dropped-leg hand-off, it chimes — the SDK rang it silently, as the Device was busy when it arrived', async () => {
+    await callbackOnBanner();
+    expect(chime.playCallbackChime).toHaveBeenCalledTimes(1); // the banner's
+    dropLeg();
+    await screen.findByTitle('Answer', undefined, { timeout: 4000 });
+    expect(chime.playCallbackChime).toHaveBeenCalledTimes(2);
+  });
+
+  it('m1: …and when re-rung because the run ended under it (Stop)', async () => {
+    await callbackOnBanner();
+    fireEvent.click(screen.getByText('Stop'));
+    await screen.findByTitle('Answer');
+    expect(chime.playCallbackChime).toHaveBeenCalledTimes(2);
+  });
+
+  it('m1: a callback with no run rings exactly as today — the SDK plays its own ringtone, no chime', async () => {
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    ring(callbackCall());
+    await screen.findByTitle('Answer');
+    expect(chime.playCallbackChime).not.toHaveBeenCalled();
+  });
+});
+
 /** Pins for mutants the Task 2 review found surviving (M17-M33). */
 describe('App — the Task 2 wiring, pinned (review I-5)', () => {
   beforeEach(() => { vi.spyOn(chime, 'playCallbackChime').mockResolvedValue(undefined); });

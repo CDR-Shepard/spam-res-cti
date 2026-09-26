@@ -64,6 +64,7 @@ import {
   type WaitingCallback,
 } from './callback-waiting';
 import { HEARTBEAT_UNREACHABLE_TEXT, parkedRunOverAction, startParkedHeartbeat } from './parked-heartbeat';
+import { playCallbackChime } from './callback-chime';
 
 interface MeResponse {
   user: {
@@ -617,7 +618,17 @@ export function App(): JSX.Element {
 
   // Today's ring screen for an incoming callback — used when no dialer leg is
   // on the line (spec: a rep with no run in progress sees exactly this).
-  const ringNormally = useCallback((call: TwilioIncomingCall): void => {
+  // `chime`: a callback that waited on the banner and is re-rung here (the run
+  // ended under it, or its leg dropped) arrived while the Device was busy, so
+  // the SDK decided then to play no ringtone for it (device.ts
+  // `_onSignalingInvite`, `!wasBusy`) — the ring screen would be silent.
+  const ringNormally = useCallback((call: TwilioIncomingCall, opts: { chime?: boolean } = {}): void => {
+    if (opts.chime) {
+      playCallbackChime().catch((err: unknown) => {
+        // Not actionable for the rep; the ring screen itself is the signal.
+        console.warn('[callback] chime did not play', err);
+      });
+    }
     // Clear the ringing UI if the caller hangs up or the leg is cancelled
     // (e.g. answered in another tab) before the rep picks up — or if any path
     // rejects it, so the ring screen never stays up on a dead call.
@@ -804,7 +815,7 @@ export function App(): JSX.Element {
     // A callback still waiting on the banner outlives the run: with no leg
     // left to lose, it rings the ordinary way (a closed one is just cleared).
     const waiting = liveWaitingCallback();
-    if (waiting) { setWaiting(null); ringNormally(waiting.call); }
+    if (waiting) { setWaiting(null); ringNormally(waiting.call, { chime: true }); }
     if (pendingTeardownRef.current && !connectionRef.current && !incomingRef.current && !waiting) { pendingTeardownRef.current = false; teardownDevice(); }
   }, [teardownDevice, setParked, setWaiting, ringNormally, liveWaitingCallback]);
 
@@ -865,7 +876,7 @@ export function App(): JSX.Element {
       setToast({ text: PARKED_AFTER_DROP_TEXT, type: 'info' });
       return true;
     }
-    ringNormally(waiting.call);
+    ringNormally(waiting.call, { chime: true });
     return true;
   }, [rejectWaitingCallback, ringNormally, setParked, setWaiting]);
 
