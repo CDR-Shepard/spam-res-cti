@@ -829,10 +829,24 @@ export async function takeCallback(sessionId: string, deps: EngineDeps): Promise
       const ofRun = eq(schema.dialerQueueItems.sessionId, sessionId);
       const item = inFlightItem(await tx.query.dialerQueueItems.findMany({ where: ofRun }));
       if (isTalking(item)) return { result: { action: 'connected' }, hangUp: null };
-      await tx
+      // Guarded, not a blind write: a Stop takes no advisory lock of its own
+      // (it writes the session status directly), so it can land in the gap
+      // between our read above and this write. 0 rows means Stop (or
+      // whatever else) already moved the session out of active/paused —
+      // report its REAL status, and never settle or requeue a dial for a run
+      // we did not actually pause.
+      const paused = await tx
         .update(schema.dialerSessions)
         .set({ status: 'paused', updatedAt: new Date() })
-        .where(and(eq(schema.dialerSessions.id, sessionId), inArray(schema.dialerSessions.status, ['active', 'paused'])));
+        .where(and(eq(schema.dialerSessions.id, sessionId), inArray(schema.dialerSessions.status, ['active', 'paused'])))
+        .returning({ status: schema.dialerSessions.status });
+      if (paused.length === 0) {
+        const fresh = await tx.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
+        // The WHERE just refused active/paused, so the real status here is
+        // one of the terminal/pre-start ones — the cast is exhaustiveness,
+        // not a guess.
+        return { result: { action: fresh?.status ?? 'idle' } as TakeCallbackResult, hangUp: null };
+      }
       if (!item || item.status !== 'dialing') return { result: { action: 'paused', canceledItemId: null }, hangUp: null };
       const settled = await tx
         .update(schema.dialerQueueItems)

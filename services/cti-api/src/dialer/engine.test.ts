@@ -244,9 +244,15 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
                   // Plain awaited UPDATE inside a transaction (the post-originate
                   // stamp, which rides with the dial-attempt insert).
                   then: (res: any, rej: any) => Promise.resolve(apply()).then(res, rej),
-                  // The conditional pending -> dialing claim.
+                  // The conditional pending -> dialing claim, the settle/connect
+                  // CAS, and similar item-level guards. `claimReturnsRows` models
+                  // ONLY the item-table race (another claim/settle/connect
+                  // winning) — takeCallback's session-level pause guard (review
+                  // round 2, Minor #7) is a separate dimension that defaults to
+                  // succeeding; a test simulating a Stop winning THAT race
+                  // overrides `tx.update` for `dialerSessions` directly instead.
                   returning: async () => {
-                    if (!claimReturnsRows) return [];
+                    if (_tbl !== schema.dialerSessions && !claimReturnsRows) return [];
                     apply();
                     return [{ id: 'claimed' }];
                   },
@@ -2017,6 +2023,46 @@ describe('takeCallback — Pause & answer on a callback during a run', () => {
       expect(fdb._writes).toEqual([]);
       expect(deps.telephony.hangup).not.toHaveBeenCalled();
     }
+  });
+
+  // Review round 2 (Minor #7): a Stop is not itself lock-holding (it writes
+  // the session status directly, no advisory lock), so it can win the race
+  // between our OWN read (session still active/paused) and our own pause
+  // write, landing in that gap. The pause write must then be a guarded
+  // compare-and-swap too — reporting Stop's real status and touching nothing
+  // else, rather than lying that the run paused and settling/requeuing a dial
+  // that belongs to a session which just ended.
+  it('a Stop wins the race between the read and the pause write: reports the real status, and settles or requeues nothing', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [ringing()]); deps.db = fdb;
+    const realTx = fdb.transaction.bind(fdb);
+    let sessionReadCount = 0;
+    fdb.transaction = async (fn: any) => realTx(async (tx: any) => {
+      const rigged = {
+        ...tx,
+        // Stop's own (unlocked, separate) write already committed by the time
+        // ours runs: the guarded pause matches 0 rows.
+        update: (tbl: any) => (tbl === schema.dialerSessions
+          ? { set: () => ({ where: () => ({ returning: async () => [] }) }) }
+          : tx.update(tbl)),
+        query: {
+          ...tx.query,
+          dialerSessions: {
+            findFirst: async (a: any) => {
+              sessionReadCount++;
+              const base = await tx.query.dialerSessions.findFirst(a);
+              // The FIRST read (before the pause attempt) still sees the live
+              // session; only takeCallback's OWN re-read after the lost pause
+              // sees Stop's real, already-committed status.
+              return sessionReadCount === 1 ? base : { ...base, status: 'stopped' };
+            },
+          },
+        },
+      };
+      return fn(rigged);
+    });
+    expect(await takeCallback('S1', deps)).toEqual({ action: 'stopped' });
+    expect(fdb._txInserts).toEqual([]);
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
   });
 
   it('a dial whose originate has not returned yet (no call sid) is still settled and requeued — there is just nothing to hang up here', async () => {
