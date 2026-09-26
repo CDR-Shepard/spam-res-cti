@@ -41,6 +41,48 @@ Counsel to confirm whether FL §501.059's limit is per person; if so, the firewa
 | `daily_cap` | daily limit (state law) | 3 dials in 24 h in a capped state |
 | `daily_cap_unverified` | daily limit (state law) | The history read failed in a capped state, so it fails closed |
 | `in_progress_elsewhere` | in progress in another run | Another active or paused run is dialing or talking to this person |
+| `canceled` | counted in "N skipped" | The rep took a callback (Pause & answer) while this record was ringing. The call was hung up and the person requeued at the same ordinal with a 5-min floor. Not a dial for the follow-up rollover. The phone rang, so it still counts for the per-customer ceiling, the 3 h courtesy, and the state-law cap. |
+
+## Callbacks during a run
+
+Spec: `docs/superpowers/specs/2026-09-26-callback-waiting-design.md`. Until this change, a rep's softphone dropped every callback while they power dialed (Twilio child leg `busy`, 0 s). The Voice SDK now takes the call (`allowIncomingWhileBusy`), and the softphone decides what happens:
+
+| The rep is… | What happens |
+|---|---|
+| talking to a prospect (current record connected, prospect still on the line) | Rejected at once, so it forwards or goes to voicemail as before. Toast: "Missed callback from … — you were on a call. It went to your cell / voicemail." |
+| in a run but not talking (a dial ringing, between dials, paused, or the prospect hung up) | A green banner above the current record, "Callback: <name or number> · <type>", with **Pause & answer** and **Ignore**, plus a two-beep chime on the speaker chosen in Settings. The 25 s ring window applies. |
+| not in a run | Today's ring screen, unchanged. |
+
+**Pause & answer, in order:**
+1. `POST /dialer/sessions/:id/take-callback`. This pauses the run first. A dial still ringing is settled `skipped`/`canceled` and its person requeued; the call is hung up after the commit.
+2. The softphone leaves the run's room.
+3. The callback is answered as a normal inbound call: screen-pop, recording, caller ID.
+
+A `409 { reason: 'connected' }` means a prospect answered in the race: the callback is rejected with the toast, and the rep stays in the room.
+
+**Afterwards** the run is paused. **Resume** first re-joins the room and waits for Twilio to answer the leg, then POSTs `resume`. While the rep is on the callback, the softphone GETs the run every 60 s so the 10-min reaper leaves it alone. If the leg drops on its own while a callback is on the banner, the softphone doesn't reconnect: it pauses the run the same way and lets the callback ring normally.
+
+**Server guards added with it:**
+- The `/voice` conference join answers `<Reject/>` when the run it names isn't live or another of the rep's runs is `active` (`dialer/join-guard.ts`).
+- The `pending → dialing` claim re-checks that the run is `active`.
+- A connect is a compare-and-swap on `dialing`: a person answering a call whose row was already settled is hung up, never bridged.
+
+**Known limitation:** reps paired with the Callsign iPhone app share the rep's Twilio identity, so a callback during a run may also ring the iPhone. If the rep answers it there, the web banner disappears but the run keeps dialing — they should Pause first. The iPhone app isn't rolled out to reps yet.
+
+**"A callback never rang me."** Look up the child leg: `Calls.json?ParentCallSid=<calls.provider_call_id>`.
+- `busy`, 0 s: the softphone rejected it. The rep was talking (there was a toast), or pressed Ignore.
+- `no-answer`, ~25 s: the banner was up and nobody chose.
+- `completed`: answered.
+
+A run's callback cancels and their requeued copies:
+```sql
+SELECT i.ordinal, i.record_id, i.status, i.outcome, i.retry_not_before, i.updated_at
+  FROM dialer_queue_items i
+ WHERE i.session_id = '<uuid>'
+   AND i.ordinal IN (SELECT ordinal FROM dialer_queue_items
+                      WHERE session_id = '<uuid>' AND status = 'skipped' AND outcome = 'canceled')
+ ORDER BY i.ordinal, i.updated_at;
+```
 
 ## SQL (read-only; use the `$PUB` pattern from the number-fleet runbook)
 
