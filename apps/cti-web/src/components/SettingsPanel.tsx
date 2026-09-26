@@ -56,7 +56,7 @@ function patchErrorMessage(e: unknown): string | null {
 /**
  * Rep self-service settings: no-answer call forwarding (the personal failover
  * number every DID assigned to this rep rolls an unanswered callback to, after
- * a 10s softphone ring, before voicemail), what hold music, if any, Power
+ * a 25-second softphone ring, before voicemail), what hold music, if any, Power
  * Dial plays in the headset between calls — six styles, Off, or the rep's own
  * YouTube playlist/video — and which microphone and speaker the softphone uses.
  */
@@ -147,7 +147,7 @@ export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast, audioD
           <div className="label" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <div className="name">Call forwarding</div>
             <div className="sub">
-              If you don't pick up a callback within 10s, it rings this number before
+              If you don't pick up a callback within 25 seconds, it rings this number before
               going to voicemail — on every number assigned to you.
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>

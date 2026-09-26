@@ -19,7 +19,7 @@ export function SettingsView(): JSX.Element {
   useEffect(() => { setNameDraft(customDisplayName ?? ''); }, [customDisplayName]);
 
   // No-answer call forwarding — the rep's personal failover number. Applies to
-  // every DID they're rung on: an unanswered callback rolls to it after 10s.
+  // every DID they're rung on: an unanswered callback rolls to it after 25 seconds.
   const forwardE164 = me?.user.noAnswerForwardE164 ?? null;
   const [forwardDraft, setForwardDraft] = useState(forwardE164 ?? '');
   const [savingForward, setSavingForward] = useState(false);
@@ -216,7 +216,7 @@ export function SettingsView(): JSX.Element {
           <div className="label" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <div className="name">Call forwarding</div>
             <div className="sub">
-              If you don't pick up a callback within 10s, it rings this number before
+              If you don't pick up a callback within 25 seconds, it rings this number before
               going to voicemail — on every number assigned to you.
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>

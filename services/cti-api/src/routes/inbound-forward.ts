@@ -11,8 +11,10 @@
  */
 import twilio from 'twilio';
 
-/** How long the rep's softphone rings before we forward (per the feature spec). */
-export const NO_ANSWER_FORWARD_SECONDS = 10;
+/** How long the rep's softphone rings before we forward. Was 10 s; raised to
+ *  25 s (2026-09-26, user ruling) — 17 of 40 callbacks on 09-25 rang out
+ *  unanswered, and 10 s left a rep no time to pick up. */
+export const NO_ANSWER_FORWARD_SECONDS = 25;
 
 /** Softphone ring window when NO failover number is configured (unchanged). */
 export const DEFAULT_INBOUND_RING_SECONDS = 25;

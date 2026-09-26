@@ -37,7 +37,7 @@ describe('resolveForwardTarget', () => {
 describe('inboundRingSeconds', () => {
   it('rings the short (10s) window when a failover number exists', () => {
     expect(inboundRingSeconds(true)).toBe(NO_ANSWER_FORWARD_SECONDS);
-    expect(NO_ANSWER_FORWARD_SECONDS).toBe(10);
+    expect(NO_ANSWER_FORWARD_SECONDS).toBe(25);
   });
 
   it('rings the full default window when there is no failover', () => {
