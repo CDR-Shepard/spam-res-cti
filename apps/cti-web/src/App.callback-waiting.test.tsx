@@ -981,12 +981,24 @@ describe('App — Resume after a callback (Task 3 review)', () => {
   }
 
   it('Important 1: a callback that reaches the ring screen during the join — resume is NOT posted; the rep keeps the leg and the callback waits on the banner', async () => {
+    const realStart = heartbeat.startParkedHeartbeat;
+    const stops: Array<Mock<() => void>> = [];
+    vi.spyOn(heartbeat, 'startParkedHeartbeat').mockImplementation((id, deps) => {
+      const stop = vi.fn(realStart(id, deps));
+      stops.push(stop);
+      return stop;
+    });
     const leg = await resumeJoining();
     const second = callbackCall(2);
     ring(second); // the leg is not adopted yet → the ring screen
     await screen.findByTitle('Answer');
+    expect(stops[0]).not.toHaveBeenCalled();
     act(() => { leg.emit('accept'); });
     expect(await screen.findByText('Callback: Jane Doe · Lead')).toBeTruthy();
+    // Back in the room, so no longer parked: the heartbeat stops even though
+    // nothing resumed.
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toHaveBeenCalled();
     await sleep(300);
     expect(state.controls).not.toContain('resume');
     expect(leg.disconnect).not.toHaveBeenCalled();
