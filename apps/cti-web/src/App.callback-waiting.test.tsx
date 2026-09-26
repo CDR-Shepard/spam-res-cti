@@ -48,6 +48,8 @@ class FakeDevice {
   static lastOpts: Record<string, unknown> | null = null;
   /** Hold connect() open this long — so a callback can ring while the leg joins. */
   static connectDelayMs = 0;
+  /** connect() calls begun — a join still in flight is counted here before `connects`. */
+  static connectsStarted = 0;
   private listeners = new Map<string, Listener[]>();
   /** Every call rung on this Device. */
   rung: FakeCall[] = [];
@@ -71,6 +73,7 @@ class FakeDevice {
   updateToken(): void { /* not exercised */ }
   destroy(): void { this.destroyed++; }
   async connect(opts: { params: Record<string, string> }): Promise<FakeConnection> {
+    FakeDevice.connectsStarted++;
     if (FakeDevice.connectDelayMs) await new Promise((r) => { setTimeout(r, FakeDevice.connectDelayMs); });
     const connection = new FakeConnection();
     FakeDevice.connects.push({ params: opts.params, connection });
@@ -162,6 +165,7 @@ beforeEach(() => {
   FakeDevice.connects.length = 0;
   FakeDevice.lastOpts = null;
   FakeDevice.connectDelayMs = 0;
+  FakeDevice.connectsStarted = 0;
   state.status = 'ready';
   state.currentItem = null;
   state.controls = [];
@@ -1090,5 +1094,71 @@ describe('App — Resume after a callback (Task 3 review)', () => {
     expect(await screen.findByText('Finish the current call before resuming the run.')).toBeTruthy();
     expect(FakeDevice.connects.length).toBe(1);
     expect(state.controls).not.toContain('resume');
+  }, 15_000);
+});
+
+/** Follow-ups from the Task 2 re-review (2026-09-26). */
+describe('App — a dead callback never lingers on the banner (Task 2 re-review follow-ups)', () => {
+  beforeEach(() => { vi.spyOn(chime, 'playCallbackChime').mockResolvedValue(undefined); });
+
+  /** A run whose leg dropped with nothing waiting; recovery's re-join connect() is in flight. */
+  async function rejoinConnecting(): Promise<void> {
+    state.currentItem = { status: 'dialing', prospectEndedAt: null };
+    await startRun();
+    await screen.findByText(/Dialing/);
+    FakeDevice.connectDelayMs = 400;
+    dropLeg();
+    await waitFor(() => expect(FakeDevice.connectsStarted).toBe(2), { timeout: 4000 });
+    expect(FakeDevice.connects.length).toBe(1);
+  }
+
+  it("1: a callback that rings during the recovery re-join's own connect() — which the SDK ignore()s — does not stay on the banner as a dead call", async () => {
+    await rejoinConnecting();
+    const call = callbackCall();
+    ring(call); // the dead ref still reads as a live leg → the banner
+    await screen.findByText('Callback: Jane Doe · Lead');
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(2)); // connect() resolved, and ignore()d it
+    expect(call.ignore).toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByText('Callback: Jane Doe · Lead')).toBeNull());
+    expect(screen.queryByText('Pause & answer')).toBeNull();
+    const next = callbackCall(2); // …and the slot is free again
+    ring(next);
+    expect(next.reject).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('1: …and a Start whose connect() swallows a ringing callback takes the dead ring screen down at once', async () => {
+    FakeDevice.connectDelayMs = 300;
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    handOverRun();
+    fireEvent.click(await screen.findByText('Start dialing'));
+    await waitFor(() => expect(state.controls).toContain('start'));
+    const call = callbackCall();
+    ring(call); // no leg yet → the ring screen
+    await screen.findByTitle('Answer');
+    await waitFor(() => expect(call.ignore).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByTitle('Answer')).toBeNull());
+  });
+
+  it('1: a leg that drops with a dead (closed, no event) callback on the banner re-joins — the dead call does not park the run', async () => {
+    const call = await callbackOnBanner();
+    act(() => { call.ignore(); });
+    dropLeg();
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(2), { timeout: 4000 });
+    expect(state.controls).not.toContain('take-callback');
+    expect(screen.queryByText(/lost its audio connection/)).toBeNull();
+  }, 15_000);
+
+  it('1: …nor does one that died during the recovery wait', async () => {
+    state.currentItem = { status: 'dialing', prospectEndedAt: null };
+    await startRun();
+    await screen.findByText(/Dialing/);
+    dropLeg();
+    const call = callbackCall();
+    ring(call);
+    await screen.findByText('Callback: Jane Doe · Lead');
+    act(() => { call.ignore(); });
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(2), { timeout: 4000 });
+    expect(state.controls).not.toContain('take-callback');
   }, 15_000);
 });

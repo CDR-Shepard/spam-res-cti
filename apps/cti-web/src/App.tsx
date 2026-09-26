@@ -985,6 +985,17 @@ export function App(): JSX.Element {
       const connection = await (device as unknown as { connect: (o: unknown) => Promise<unknown> }).connect({
         params: dialerJoinParams(sessionId),
       });
+      // connect() just ignore()d every call still ringing on the Device — with
+      // no event. One that rang while it was in flight may be on the banner (a
+      // recovery's dead leg ref still reads as live) or on the ring screen (a
+      // Start). Take them down now rather than leave a dead call offered.
+      liveWaitingCallback();
+      // (Widened: TS keeps the idle check's narrowing to null across the await.)
+      const ringing = incomingRef.current as TwilioIncomingCall | null;
+      if (ringing?.status?.() === 'closed') {
+        incomingRef.current = null;
+        setIncoming((c) => (c === ringing ? null : c));
+      }
       if (dialerRunRef.current !== myRun) {
         try { (connection as { disconnect?: () => void }).disconnect?.(); } catch { /* already gone */ }
         return false;
@@ -1031,7 +1042,8 @@ export function App(): JSX.Element {
             // Pause & answer began meanwhile: it owns the callback, and runs
             // this drop again once it settles.
             if (takingCallbackRef.current) { droppedLegRef.current = afterDrop; return true; }
-            return callbackWaitingRef.current ? handOffCallbackAfterDrop(sessionId ?? null) : false;
+            // A dead (closed, no event) call on the banner is cleared, never parks the run.
+            return liveWaitingCallback() ? handOffCallbackAfterDrop(sessionId ?? null) : false;
           },
           rejoin: () => {
             const joining = joinLegRef.current(sessionId ?? null);
@@ -1063,7 +1075,7 @@ export function App(): JSX.Element {
       //  - otherwise: recover.
       const afterDrop = (): void => {
         if (takingCallbackRef.current) { droppedLegRef.current = afterDrop; return; }
-        if (callbackWaitingRef.current) {
+        if (liveWaitingCallback()) {
           void handOffCallbackAfterDrop(sessionId ?? null).then((handedOff) => { if (!handedOff) recover(); });
           return;
         }
@@ -1088,7 +1100,7 @@ export function App(): JSX.Element {
       if (dialerRunRef.current === myRun) setDialerLive(false); // only if a newer run didn't supersede us
       throw e;
     }
-  }, [ensureDevice, dropConferenceLeg, handOffCallbackAfterDrop]);
+  }, [ensureDevice, dropConferenceLeg, handOffCallbackAfterDrop, liveWaitingCallback]);
   joinLegRef.current = joinLeg;
   const joinDialerConference = useCallback((): Promise<boolean> => joinLeg(), [joinLeg]);
 
