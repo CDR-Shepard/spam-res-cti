@@ -100,6 +100,9 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
   // that the connect stamp is scoped to the number that connected, not to every
   // attempt row the item owns.
   const txWrites: Array<{ patch: Record<string, unknown>; where: unknown }> = [];
+  // Deletes made through `tx.delete(...)` — the run-size trim inside the Start
+  // claim (run-settings.ts) — with the `where` they were guarded by.
+  const txDeletes: Array<{ table: unknown; where: unknown }> = [];
   // OUTER (non-transactional) updates, with the `where` they were guarded by —
   // mirrors `txWrites` but for `deps.db.update(...)` calls made outside a
   // transaction. Needed to pin the hang-up stamp's `isNull(prospect_ended_at)`
@@ -125,6 +128,7 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
     _inserts: inserts,
     _txInserts: txInserts,
     _txWrites: txWrites,
+    _txDeletes: txDeletes,
     _updateWheres: updateWheres,
     _txQueryReads: txQueryReads,
     _outerQueryReads: outerQueryReads,
@@ -242,6 +246,9 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
             },
           };
         },
+        delete(_tbl: unknown) {
+          return { where: async (w: unknown) => { txDeletes.push({ table: _tbl, where: w }); } };
+        },
         update(_tbl: unknown) {
           return {
             set: (patch: any) => ({
@@ -263,6 +270,19 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
                   // succeeding; a test simulating a Stop winning THAT race
                   // overrides `tx.update` for `dialerSessions` directly instead.
                   returning: async () => {
+                    if (_tbl === schema.dialerSessions && w) {
+                      // startSession's ready → active claim runs in a transaction
+                      // now (the run settings ride with it — run-settings.ts).
+                      // Honor its `status = 'ready'` guard against the CURRENT
+                      // session exactly as the outer fake does, and hand back the
+                      // user id the claim returns. takeCallback's pause guard
+                      // renders as `status in (...)`, which this does not match.
+                      const { sql: text, params } = new PgDialect().sqlToQuery(w);
+                      const current = { ...session, ...sessionOverride };
+                      if (/"status" = /.test(text) && (!params.includes(current.id) || !params.includes(current.status))) return [];
+                      apply();
+                      return [{ id: current.id, userId: current.userId }];
+                    }
                     if (_tbl !== schema.dialerSessions) {
                       if (!claimReturnsRows) return [];
                       // Review round 3 (R2-2): an `exists (select ... from
@@ -1795,7 +1815,7 @@ describe('startSession — the rep pressed Start dialing', () => {
   it('reports conflict — with the OTHER run\'s id, and leaves the session ready — when the rep already has an active run', async () => {
     const deps = makeDeps(); const fdb = fakeDb(ready, pending); deps.db = fdb;
     const violation = conflictViolation();
-    fdb.update = () => ({ set: () => ({ where: () => ({ returning: async () => { throw violation; } }) }) });
+    fdb.transaction = async () => { throw violation; };
     // First lookup = the session being started (for its userId); second = the
     // rep's active run, which the 409 names so the panel can offer to stop it.
     fdb.query.dialerSessions.findFirst = vi.fn()
@@ -1808,7 +1828,7 @@ describe('startSession — the rep pressed Start dialing', () => {
   it('reports conflict with a null id when the other run ended between the refused flip and the lookup', async () => {
     const deps = makeDeps(); const fdb = fakeDb(ready, pending); deps.db = fdb;
     const violation = conflictViolation();
-    fdb.update = () => ({ set: () => ({ where: () => ({ returning: async () => { throw violation; } }) }) });
+    fdb.transaction = async () => { throw violation; };
     fdb.query.dialerSessions.findFirst = vi.fn()
       .mockResolvedValueOnce(ready)
       .mockResolvedValueOnce(null);
@@ -1818,7 +1838,7 @@ describe('startSession — the rep pressed Start dialing', () => {
 
   it('rethrows any other database error', async () => {
     const deps = makeDeps(); const fdb = fakeDb(ready, pending); deps.db = fdb;
-    fdb.update = () => ({ set: () => ({ where: () => ({ returning: async () => { throw new Error('connection reset'); } }) }) });
+    fdb.transaction = async () => { throw new Error('connection reset'); };
     await expect(startSession('S1', deps)).rejects.toThrow('connection reset');
   });
 });
@@ -2460,5 +2480,107 @@ describe('handleDialOutcome — Calls per person (session.passes)', () => {
       expect(fdb._txInserts).toEqual([]);
       expect(deps.enqueueRollover).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe('startSession — run settings ride the ready → active claim', () => {
+  beforeEach(() => { _target = {}; });
+  const ready = { ...baseSession, status: 'ready' };
+  const row = (ordinal: number, status: string) => ({
+    id: `i${ordinal}`, ordinal, status, toNumber: status === 'unreachable' ? null : `+1619555010${ordinal}`,
+    recordId: `00Q${ordinal}`, objectType: 'Lead', callId: null, attempt: 1,
+  });
+  // Pending (dialable) ordinals: 1, 3, 4, 6. Settled at build: 0, 2, 5.
+  const queue = () => [row(0, 'skipped'), row(1, 'pending'), row(2, 'unreachable'), row(3, 'pending'), row(4, 'pending'), row(5, 'skipped'), row(6, 'pending')];
+  const rendered = (w: unknown) => {
+    const { sql, params } = new PgDialect().sqlToQuery(w as SQL);
+    return { sql, params };
+  };
+  const once2: DialerRunSettings = { passes: 1, maxRecords: 2, rolloverBusinessDays: 2 };
+
+  it('writes the settings onto the session in the SAME guarded update that flips it active', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, queue()); deps.db = fdb;
+    expect(await startSession('S1', deps, { passes: 1, maxRecords: null, rolloverBusinessDays: 2 })).toMatchObject({ action: 'dialing' });
+    expect(fdb._txWrites[0].patch).toEqual(expect.objectContaining({ status: 'active', passes: 1, maxRecords: null, rolloverBusinessDays: 2 }));
+    expect(rendered(fdb._txWrites[0].where)).toEqual({
+      sql: '("dialer_sessions"."id" = $1 and "dialer_sessions"."status" = $2)', params: ['S1', 'ready'],
+    });
+  });
+
+  // Controller ruling S2: "How many" is remembered too — saveRunDefaultsQuery
+  // now writes THREE columns onto users, not two.
+  it("saves Calls per person, How many, and Missed tasks as the rep's next defaults", async () => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, queue()); deps.db = fdb;
+    await startSession('S1', deps, once2);
+    const saved = fdb._txWrites.filter((w: any) => 'dialerPasses' in w.patch);
+    expect(saved).toHaveLength(1);
+    expect(saved[0].patch).toEqual({ dialerPasses: 1, dialerMaxRecords: 2, dialerRolloverBusinessDays: 2 });
+    expect(rendered(saved[0].where)).toEqual({ sql: '"users"."id" = $1', params: ['U1'] });
+  });
+
+  // Controller ruling S2: null round-trips — a rep who ran with All keeps
+  // reading All back, never a stray number from a previous run.
+  it('saving All (maxRecords null) writes null for dialerMaxRecords — null round-trips', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, queue()); deps.db = fdb;
+    await startSession('S1', deps, { passes: 2, maxRecords: null, rolloverBusinessDays: 1 });
+    const saved = fdb._txWrites.filter((w: any) => 'dialerPasses' in w.patch);
+    expect(saved[0].patch).toEqual({ dialerPasses: 2, dialerMaxRecords: null, dialerRolloverBusinessDays: 1 });
+  });
+
+  it('trims the queue after the N-th DIALABLE row: settled rows before it stay, every row after it goes', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, queue()); deps.db = fdb;
+    await startSession('S1', deps, once2);
+    // The run's rows were read INSIDE the claim transaction, scoped to this run.
+    const read = fdb._txQueryReads.find((r: any) => r.table === 'dialerQueueItems');
+    expect(rendered(read.where)).toEqual({ sql: '"dialer_queue_items"."session_id" = $1', params: ['S1'] });
+    // Pending ordinals 1, 3, 4, 6 → the 2nd is ordinal 3: keep 0–3, delete 4–6.
+    expect(fdb._txDeletes).toHaveLength(1);
+    expect(fdb._txDeletes[0].table).toBe(schema.dialerQueueItems);
+    expect(rendered(fdb._txDeletes[0].where)).toEqual({
+      sql: '("dialer_queue_items"."session_id" = $1 and "dialer_queue_items"."ordinal" > $2)', params: ['S1', 3],
+    });
+  });
+
+  it.each([null, 4, 50])('maxRecords %s keeps every row — All, or no more dialable rows than asked for', async (maxRecords) => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, queue()); deps.db = fdb;
+    await startSession('S1', deps, { passes: 2, maxRecords, rolloverBusinessDays: 1 });
+    expect(fdb._txDeletes).toEqual([]);
+  });
+
+  it('ORDER: flip → trim → save defaults inside ONE transaction, and only then the first call', async () => {
+    const order: string[] = [];
+    const deps = makeDeps(); const fdb = fakeDb(ready, queue()); deps.db = fdb;
+    const realTx = fdb.transaction.bind(fdb);
+    let txn = 0;
+    fdb.transaction = async (fn: any) => realTx(async (tx: any) => {
+      const n = ++txn;
+      const realUpdate = tx.update.bind(tx); const realDelete = tx.delete.bind(tx);
+      tx.update = (tbl: any) => {
+        order.push(`tx${n}:update:${tbl === schema.users ? 'users' : tbl === schema.dialerSessions ? 'sessions' : 'items'}`);
+        return realUpdate(tbl);
+      };
+      tx.delete = (tbl: any) => { order.push(`tx${n}:delete`); return realDelete(tbl); };
+      return fn(tx);
+    });
+    (deps.telephony.originate as any).mockImplementation(async () => { order.push('originate'); return { callId: 'CA1' }; });
+    await startSession('S1', deps, once2);
+    expect(order.slice(0, 3)).toEqual(['tx1:update:sessions', 'tx1:delete', 'tx1:update:users']);
+    expect(order.indexOf('originate')).toBeGreaterThan(2);
+  });
+
+  it('a second Start on a run already going changes nothing: no settings, no trim, no saved defaults', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, [{ ...row(1, 'dialing'), callId: 'CA1' }]); deps.db = fdb;
+    expect(await startSession('S1', deps, once2)).toEqual({ action: 'waiting' });
+    expect(fdb._writes).toEqual([]);
+    expect(fdb._txDeletes).toEqual([]);
+  });
+
+  it("a Start with no settings (a tab from before this release) flips the status only — today's run, nothing saved", async () => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, queue()); deps.db = fdb;
+    await startSession('S1', deps);
+    expect(fdb._txWrites[0].patch).toEqual({ status: 'active', updatedAt: expect.any(Date) });
+    expect(fdb._txWrites.some((w: any) => 'dialerPasses' in w.patch)).toBe(false);
+    expect(fdb._txDeletes).toEqual([]);
+    expect(fdb._txQueryReads.filter((r: any) => r.table === 'dialerQueueItems')).toEqual([]);
   });
 });

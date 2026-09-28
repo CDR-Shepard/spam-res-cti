@@ -204,17 +204,46 @@ function isActiveSessionConflict(err: unknown): boolean {
   return e?.code === '23505' && e?.constraint === ACTIVE_SESSION_INDEX;
 }
 
-/** The `ready → active` compare-and-swap. 'lost' = 0 rows matched (the session
- *  is not ready — a second Start, or a stopped run); 'conflict' = the rep has
- *  another active run and the unique index refused the flip. */
-async function claimReadySession(deps: EngineDeps, sessionId: string): Promise<'claimed' | 'lost' | 'conflict'> {
+/**
+ * The `ready → active` compare-and-swap and — in the SAME transaction — the
+ * run's settings (spec 2026-09-28): written onto the session by the flip's own
+ * UPDATE, the already-built queue cut to the run size (`runSizeCutoff`), and
+ * the rep's Calls per person / How many / Missed tasks saved as their next
+ * defaults (controller ruling S2: How many is remembered too).
+ *
+ * 'lost' = 0 rows matched (the session is not ready — a second Start, or a
+ * stopped run): nothing else is written, so a second Start never re-trims or
+ * changes a live run's settings. 'conflict' = the rep has another active run
+ * and the unique index refused the flip: the transaction rolls back whole, so
+ * the queue and the saved defaults are untouched and the rep can press Start
+ * again with other choices. `settings` null (a tab from before run settings)
+ * flips the status only — the columns keep their defaults, today's run.
+ *
+ * A ready session has nothing in flight and no dial attempts, so the rows past
+ * the cutoff are only queue — never a call, never a dial on anyone's log. The
+ * rows are read through `tx.query`, never `deps.db.query`: a second pool
+ * checkout while the transaction holds one is the deadlock every `tx` handle
+ * in this file exists to avoid.
+ */
+async function claimReadySession(
+  deps: EngineDeps,
+  sessionId: string,
+  settings: DialerRunSettings | null,
+): Promise<'claimed' | 'lost' | 'conflict'> {
   try {
-    const rows = await deps.db
-      .update(schema.dialerSessions)
-      .set({ status: 'active', updatedAt: new Date() })
-      .where(and(eq(schema.dialerSessions.id, sessionId), eq(schema.dialerSessions.status, 'ready')))
-      .returning({ id: schema.dialerSessions.id });
-    return rows.length > 0 ? 'claimed' : 'lost';
+    return await deps.db.transaction(async (tx) => {
+      const [claimed] = await claimReadySessionQuery(tx, sessionId, settings, new Date());
+      if (!claimed) return 'lost' as const;
+      if (settings) {
+        if (settings.maxRecords !== null) {
+          const items = await tx.query.dialerQueueItems.findMany({ where: eq(schema.dialerQueueItems.sessionId, sessionId) });
+          const cutoff = runSizeCutoff(items, settings.maxRecords);
+          if (cutoff !== null) await trimQueueQuery(tx, sessionId, cutoff);
+        }
+        await saveRunDefaultsQuery(tx, claimed.userId, settings);
+      }
+      return 'claimed' as const;
+    });
   } catch (err) {
     if (isActiveSessionConflict(err)) return 'conflict';
     throw err;
@@ -241,17 +270,23 @@ async function claimReadySession(deps: EngineDeps, sessionId: string): Promise<'
  * the sentence without the button and can simply press Start again. A PAUSED
  * run with a dial still in flight is refused the same way, before the flip —
  * see `pausedRunWithDialInFlight`.
+ *
+ * `settings` are the rep's Ready-to-dial choices (spec 2026-09-28). They ride
+ * the flip itself — see `claimReadySession` — so they are on the session
+ * before the first originate, and only a Start that actually flips the run
+ * applies them.
  */
 export async function startSession(
   sessionId: string,
   deps: EngineDeps,
+  settings: DialerRunSettings | null = null,
 ): Promise<Awaited<ReturnType<typeof advanceSession>> | { action: Session['status'] | 'idle' } | { action: 'conflict'; activeSessionId: string | null }> {
   // Same `conflict` as the index refusal below, so the confirm block offers to
   // stop the paused run exactly as it would an active one — and stopping it
   // hangs that dial up (stopSession) before this run's first originate.
   const blocker = await pausedRunWithDialInFlight(deps, sessionId);
   if (blocker) return { action: 'conflict', activeSessionId: blocker.id };
-  const claim = await claimReadySession(deps, sessionId);
+  const claim = await claimReadySession(deps, sessionId, settings);
   if (claim === 'conflict') {
     const self = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
     const active = self
