@@ -2589,6 +2589,22 @@ describe('startSession — run settings ride the ready → active claim', () => 
     expect(fdb._txDeletes).toEqual([]);
   });
 
+  // F16 (re-review): the previous test's queue has nothing PENDING at all, so
+  // it can't prove the lost-claim short-circuit actually discards the run_size
+  // computation rather than merely finding nothing to trim. This one gives the
+  // claim a limit that WOULD trim (maxRecords 1 against 2 pending rows) if it
+  // ever ran — claimReadySessionQuery's WHERE requires status = 'ready', so
+  // the claim UPDATE matches 0 rows on an already-active session, and nothing
+  // past it (the trim, the run_size write) executes at all.
+  it('F16: a second Start on an active run with a limit that WOULD trim makes no delete and writes no run_size', async () => {
+    const deps = makeDeps();
+    const items = [{ ...row(0, 'dialing'), callId: 'CA1' }, row(1, 'pending'), row(2, 'pending')];
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    expect(await startSession('S1', deps, { passes: 1, maxRecords: 1, rolloverBusinessDays: 2 })).toEqual({ action: 'waiting' });
+    expect(fdb._writes).toEqual([]);
+    expect(fdb._txDeletes).toEqual([]);
+  });
+
   it("a Start with no settings (a tab from before this release) flips the status only — today's run, nothing saved", async () => {
     const deps = makeDeps(); const fdb = fakeDb(ready, queue()); deps.db = fdb;
     await startSession('S1', deps);
