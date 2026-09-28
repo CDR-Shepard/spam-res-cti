@@ -82,15 +82,28 @@ export function runSettingsFor(draft: RunDraft): DialerRunSettings | null {
   return { passes: draft.passes, maxRecords: howMany.maxRecords, rolloverBusinessDays: draft.rolloverBusinessDays };
 }
 
-/** The line under a run's progress, e.g. "Once · first 100 · missed → next
- *  business day". Null when the server sent no settings (an older API). */
+/**
+ * The line under a run's progress, e.g. "Once · first 100 · missed → next
+ * business day". Null when the server sent no settings (an older API).
+ *
+ * Review fix (Minor, item 3a): the chosen limit (`maxRecords`) can be bigger
+ * than what the list actually gave (`runSize`) — a saved 100 on a 45-person
+ * list. Shows what's true of THIS run (45) then, matching the confirm
+ * screen's own "— the whole list" framing (Important 1) rather than the
+ * number the rep once typed. An older server that omits `runSize` falls back
+ * to `maxRecords` unchanged.
+ */
 export function runSettingsLine(session: {
   passes?: DialerPasses;
   maxRecords?: number | null;
+  runSize?: number | null;
   rolloverBusinessDays?: RolloverBusinessDays;
 }): string | null {
   if (session.passes === undefined || session.rolloverBusinessDays === undefined) return null;
-  const size = session.maxRecords == null ? 'all' : `first ${session.maxRecords}`;
+  const effectiveLimit = session.maxRecords != null && session.runSize != null && session.runSize < session.maxRecords
+    ? session.runSize
+    : session.maxRecords;
+  const size = effectiveLimit == null ? 'all' : `first ${effectiveLimit}`;
   const missed = session.rolloverBusinessDays === 2 ? 'in 2 business days' : 'next business day';
   return `${PASS_LABELS[session.passes]} · ${size} · missed → ${missed}`;
 }
@@ -118,7 +131,9 @@ export function recordPositionLine(
   if (ctx.runSize !== null) {
     if (item.runPosition != null) return `record ${Math.min(item.runPosition, ctx.runSize)} of ${ctx.runSize}`;
     if (item.attempt === 2 || item.ordinal === undefined) return null;
-    return `record ${item.ordinal + 1} of ${ctx.runSize}`;
+    // Review fix (Minor, item 3b): the fallback also never shows X > N, same
+    // as the runPosition branch above.
+    return `record ${Math.min(item.ordinal + 1, ctx.runSize)} of ${ctx.runSize}`;
   }
   if (item.listPosition != null && ctx.listTotal !== null) return `record ${item.listPosition + 1} of ${ctx.listTotal}`;
   return null;

@@ -195,16 +195,34 @@ describe('Ready to dial — run settings', () => {
     mount();
     expect(await screen.findByText('Once · first 100 · missed → next business day')).toBeTruthy();
   });
+
+  // Review fix (Minor, item 3a): a saved 100 on what turned out to be a
+  // 45-person list — the run line shows what actually dialed, not the number
+  // once typed.
+  it('a running run whose list gave fewer than the chosen limit shows the actual count', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue({
+      ...READY,
+      session: { id: 'sess1', status: 'active', passes: 1, maxRecords: 100, runSize: 45, rolloverBusinessDays: 1 },
+      counts: { total: 45, done: 3, connected: 0, noConnect: 3, skipped: 0, unreachable: 0, pending: 42 },
+      firstPassTotal: 45,
+      skipBreakdown: {},
+    });
+    mount();
+    expect(await screen.findByText('Once · first 45 · missed → next business day')).toBeTruthy();
+  });
 });
 
-// Important 3 (spec 2026-09-28 review): wiring tests that kill mutations
-// M8/M9 (the reseed effect's dependency array), M10 (a new session DOES
-// reseed), M18/M19 (the runSize prop reaching CurrentRecord for an active
-// limited run).
+// Important 3 (spec 2026-09-28 review): wiring tests for the reseed effect's
+// dependency array (a same-session runDefaults change must NOT reseed — kills
+// M8; a new session MUST reseed — kills M10) and for the runSize prop
+// reaching CurrentRecord for an active limited run (re-review: this test's
+// original "kills M18/M19" attribution wasn't accurate — those mutants were
+// already dead from runSizeForCurrentRecord's own pure-function tests — so
+// it is kept here as plain wiring coverage with no mutation-id claim).
 describe('Ready to dial — run settings wiring (review fix, Important 3)', () => {
   afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-  it('a re-render with a NEW runDefaults object does not overwrite what the rep already picked (kills M8/M9)', async () => {
+  it('a re-render with a NEW runDefaults object does not overwrite what the rep already picked (kills M8)', async () => {
     vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(READY);
     const { rerender } = render(
       <DialerPanel
@@ -255,7 +273,7 @@ describe('Ready to dial — run settings wiring (review fix, Important 3)', () =
     expect(pressed('In 2 business days')).toBe('true');
   });
 
-  it('an active limited run with a current item gets the runSize prop (kills M18/M19)', async () => {
+  it('an active limited run with a current item gets the runSize prop', async () => {
     vi.spyOn(dialerApi, 'getDialer').mockResolvedValue({
       ...READY,
       session: { id: 'sess1', status: 'active', passes: 1, maxRecords: 100, rolloverBusinessDays: 1, runSize: 100 },

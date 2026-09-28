@@ -66,12 +66,33 @@ describe('run settings on Ready to dial (spec 2026-09-28)', () => {
     expect(runSettingsLine({})).toBeNull();
   });
 
+  // Review fix (Minor, item 3a): a chosen limit (maxRecords) can be bigger
+  // than what the list actually gave (runSize) — a saved 100 on a 45-person
+  // list. Show what's true of THIS run, matching the confirm screen's own
+  // "— the whole list" framing (Important 1), not the number once typed.
+  it('runSettingsLine shows what the list actually gave when it is less than the chosen limit (review fix)', () => {
+    expect(runSettingsLine({ passes: 1, maxRecords: 100, runSize: 45, rolloverBusinessDays: 1 })).toBe('Once · first 45 · missed → next business day');
+    // runSize >= maxRecords: the chosen limit is what shows, as before.
+    expect(runSettingsLine({ passes: 1, maxRecords: 100, runSize: 100, rolloverBusinessDays: 1 })).toBe('Once · first 100 · missed → next business day');
+    // No limit (All): runSize is ignored — the whole list, always "all".
+    expect(runSettingsLine({ passes: 2, maxRecords: null, runSize: 45, rolloverBusinessDays: 2 })).toBe('Twice · all · missed → in 2 business days');
+    // An older server that omits runSize: unchanged, uses maxRecords as-is.
+    expect(runSettingsLine({ passes: 1, maxRecords: 100, rolloverBusinessDays: 1 })).toBe('Once · first 100 · missed → next business day');
+  });
+
   it('recordPositionLine: a limited run counts its own queue; a retry has no place in it; a full run keeps the list position', () => {
     expect(recordPositionLine({ ordinal: 2, attempt: 1, listPosition: 150 }, { runSize: 100, listTotal: 100 })).toBe('record 3 of 100');
     expect(recordPositionLine({ ordinal: 100, attempt: 2, listPosition: null }, { runSize: 100, listTotal: 100 })).toBeNull();
     expect(recordPositionLine({ attempt: 1, listPosition: 86 }, { runSize: 100, listTotal: 100 })).toBeNull(); // older server: no ordinal
     expect(recordPositionLine({ ordinal: 2, attempt: 1, listPosition: 86 }, { runSize: null, listTotal: 220 })).toBe('record 87 of 220');
     expect(recordPositionLine({ ordinal: 2, attempt: 1, listPosition: null }, { runSize: null, listTotal: 220 })).toBeNull();
+  });
+
+  // Review fix (Minor, item 3b): the ordinal-based FALLBACK (no runPosition —
+  // an older server) never showed X > N either, unlike the runPosition
+  // branch's own clamp. Same clamp here.
+  it('recordPositionLine: the ordinal fallback also never shows X > N', () => {
+    expect(recordPositionLine({ ordinal: 150, attempt: 1 }, { runSize: 100, listTotal: null })).toBe('record 100 of 100');
   });
 
   // Minor fix 1 (spec 2026-09-28 review): the server now sends its own
