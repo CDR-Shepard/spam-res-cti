@@ -105,6 +105,8 @@ SELECT s.id, s.created_at, s.expires_at, (u.cti_reset_requested_at > s.created_a
 
 1. The migration is additive (three nullable columns). `preDeployCommand` runs it while the old code still serves.
 2. Open softphone tabs keep the old build until they reload, and an old tab blocks every reset in that browser (see "pending", item 3). Tell reps to reload before anyone uses Reset CTI.
+   - An old tab also **ignores the reset broadcast**. When a new tab in the same browser resets, the old tab stays up with no session (the new tab wiped it). It can then take the softphone leadership and fail to build its Twilio Device — so **no tab holds a Device, and callbacks don't ring**, until the rep switches to the new tab or reloads.
+   - So: **have every rep reload their softphone once after the deploy** (the Salesforce utility-bar panel and any standalone `/cti/` tab).
 3. To roll back, redeploy the previous image. Never roll back the migration: the old code ignores the columns.
 
 Live checks (one test rep, off-hours):
