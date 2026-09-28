@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createSoftphoneCoordinator, type CoordinatorDeps } from './softphone-coordinator';
+import { createSoftphoneCoordinator, STALE_MS, type CoordinatorDeps } from './softphone-coordinator';
 
 // A shared in-memory bus so two coordinators can "see" each other, plus a
 // controllable clock and a manual interval pump — no DOM needed.
@@ -9,17 +9,22 @@ function harness() {
   let now = 1000;
   const bus = { post: (m: unknown) => subscribers.forEach((s) => s(m)) };
   const tick = (ms: number) => { now += ms; intervals.forEach((fn) => fn()); };
-  const makeDeps = (id: string, visible: boolean, busy = false): CoordinatorDeps => ({
+  const makeDeps = (id: string, visible: boolean, busy = false, resetBusy?: () => boolean): CoordinatorDeps => ({
     now: () => now,
     postMessage: (m) => bus.post(m),
     subscribe: (cb) => { subscribers.push(cb); return () => { const i = subscribers.indexOf(cb); if (i >= 0) subscribers.splice(i, 1); }; },
     getVisible: () => visible,
     getBusy: () => busy,
+    ...(resetBusy ? { getResetBusy: resetBusy } : {}),
     onVisibilityChange: () => {},
     scheduleInterval: (cb) => { intervals.push(cb); return () => { const i = intervals.indexOf(cb); if (i >= 0) intervals.splice(i, 1); }; },
     randomId: () => id,
   });
-  return { tick, makeDeps };
+  /** Put a raw message on the bus, as another (maybe older) build would. */
+  const post = (m: unknown) => bus.post(m);
+  /** Hear every message on the bus. */
+  const listen = (cb: (m: unknown) => void) => { subscribers.push(cb); };
+  return { tick, makeDeps, post, listen };
 }
 
 describe('createSoftphoneCoordinator', () => {
@@ -115,5 +120,119 @@ describe('createSoftphoneCoordinator', () => {
     expect(leadershipCalls).toBe(leadershipCallsAtStop);
     // recompute() must never run on a stopped instance, even if the value doesn't change.
     expect(stateCalls).toBe(stateCallsAtStop);
+  });
+});
+
+describe('createSoftphoneCoordinator — Reset CTI support', () => {
+  it('presence carries resetBusy beside (not instead of) the election busy flag', () => {
+    const h = harness();
+    const seen: unknown[] = [];
+    h.listen((m) => seen.push(m));
+    createSoftphoneCoordinator(h.makeDeps('a', true, false, () => true)).start();
+    expect(seen).toContainEqual({ type: 'presence', id: 'a', visible: true, busy: false, resetBusy: true });
+  });
+
+  it('without getResetBusy a tab reports its election busy flag — never less cautious', () => {
+    const h = harness();
+    const seen: unknown[] = [];
+    h.listen((m) => seen.push(m));
+    createSoftphoneCoordinator(h.makeDeps('a', true, true)).start();
+    expect(seen).toContainEqual({ type: 'presence', id: 'a', visible: true, busy: true, resetBusy: true });
+  });
+
+  it('alone, no peer is busy', () => {
+    const h = harness();
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    a.start();
+    h.tick(1000);
+    expect(a.peersBusyForReset()).toBe(false);
+  });
+
+  it('peersBusyForReset follows a peer in wrap-up — and wrap-up never moves the phone', () => {
+    const h = harness();
+    let wrapUp = true;
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    const b = createSoftphoneCoordinator(h.makeDeps('b', true, false, () => wrapUp));
+    a.start(); b.start();
+    h.tick(1000); h.tick(1000);
+    expect(a.isLeader()).toBe(true); // smaller id, both visible: wrap-up is not "busy" for the election
+    expect(a.peersBusyForReset()).toBe(true);
+    wrapUp = false;
+    h.tick(1000);
+    expect(a.peersBusyForReset()).toBe(false);
+  });
+
+  // R1/R4 (controller ruling, overrides the brief): a peer from a build before
+  // resets carries no `resetBusy` in its presence. It falls back to its legacy
+  // `busy` flag — it must never count as always-busy regardless of that flag.
+  it('a legacy peer (no resetBusy in its presence) with busy=false lets the reset proceed', () => {
+    const h = harness();
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    a.start();
+    h.post({ type: 'presence', id: 'old-tab', visible: false, busy: false });
+    expect(a.peersBusyForReset()).toBe(false);
+  });
+
+  it('a legacy peer (no resetBusy in its presence) with busy=true defers the reset', () => {
+    const h = harness();
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    a.start();
+    h.post({ type: 'presence', id: 'old-tab', visible: false, busy: true });
+    expect(a.peersBusyForReset()).toBe(true);
+  });
+
+  it('a peer that went silent (closed or crashed) stops blocking after STALE_MS', () => {
+    const h = harness();
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    a.start();
+    h.post({ type: 'presence', id: 'ghost', visible: false, busy: false, resetBusy: true });
+    expect(a.peersBusyForReset()).toBe(true);
+    h.tick(STALE_MS);
+    expect(a.peersBusyForReset()).toBe(false);
+  });
+
+  it('settled() only once it has listened for a full STALE_MS, and not after stop()', () => {
+    const h = harness();
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    expect(a.settled()).toBe(false);
+    a.start();
+    expect(a.settled()).toBe(false);
+    h.tick(STALE_MS - 1);
+    expect(a.settled()).toBe(false);
+    h.tick(1);
+    expect(a.settled()).toBe(true);
+    a.stop();
+    expect(a.settled()).toBe(false);
+  });
+
+  it("broadcastReset reaches every peer's onReset — never the sender's own", () => {
+    const h = harness();
+    const got: string[] = [];
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    const b = createSoftphoneCoordinator(h.makeDeps('b', true));
+    const c = createSoftphoneCoordinator(h.makeDeps('c', false));
+    a.onReset(() => got.push('a'));
+    b.onReset(() => got.push('b'));
+    c.onReset(() => got.push('c'));
+    a.start(); b.start(); c.start();
+    a.broadcastReset();
+    expect(got.sort()).toEqual(['b', 'c']);
+  });
+
+  it('a stopped coordinator neither hears nor sends a reset', () => {
+    const h = harness();
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    const b = createSoftphoneCoordinator(h.makeDeps('b', true));
+    let heard = 0;
+    b.onReset(() => { heard += 1; });
+    a.start(); b.start();
+    b.stop();
+    a.broadcastReset();
+    expect(heard).toBe(0);
+    a.stop();
+    const seen: unknown[] = [];
+    h.listen((m) => seen.push(m));
+    a.broadcastReset();
+    expect(seen).toEqual([]);
   });
 });
