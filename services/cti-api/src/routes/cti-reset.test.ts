@@ -295,6 +295,17 @@ describe('the poll has its own rate-limit bucket', () => {
     expect(resetSignalRateKey({ headers: {}, ip: '203.0.113.9' })).toBe('reset-signal-ip:203.0.113.9');
   });
 
+  // M1 (review fix): a client that sends the bare token without the "Bearer "
+  // scheme prefix must land in the SAME bucket as one that sends it properly
+  // prefixed — otherwise the two effectively split what should be one rep's
+  // budget in half (or, worse, let a caller dodge the bucket by varying the
+  // prefix on purpose).
+  it('M1: strips the "Bearer " prefix before hashing, so "Bearer X" and "X" share one bucket', () => {
+    const withPrefix = resetSignalRateKey({ headers: { authorization: 'Bearer tok-123' }, ip: '203.0.113.9' });
+    const withoutPrefix = resetSignalRateKey({ headers: { authorization: 'tok-123' }, ip: '203.0.113.9' });
+    expect(withPrefix).toBe(withoutPrefix);
+  });
+
   it("is not counted in the global per-IP limit, and caps each token at RESET_SIGNAL_RATE_MAX a minute", async () => {
     const limited = Fastify();
     await limited.register(rateLimit, { global: true, max: 1, timeWindow: '1 minute' });

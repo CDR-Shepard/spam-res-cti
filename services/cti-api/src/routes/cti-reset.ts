@@ -38,10 +38,15 @@ import { getDb, schema } from '@cti/db';
 export const RESET_SIGNAL_RATE_MAX = 60;
 
 /** The poll's rate-limit key: a hash of the session token (never the token
- *  itself), else the IP for a request that has none. */
+ *  itself), else the IP for a request that has none. Strips the "Bearer "
+ *  scheme prefix before hashing (M1) so "Bearer X" and a bare "X" land in
+ *  the same bucket — a client varying the prefix must not split one rep's
+ *  budget across two buckets, whether by accident or on purpose. */
 export function resetSignalRateKey(req: Pick<FastifyRequest, 'headers' | 'ip'>): string {
   const auth = req.headers.authorization;
-  return auth ? `reset-signal:${sha256(auth)}` : `reset-signal-ip:${req.ip}`;
+  if (!auth) return `reset-signal-ip:${req.ip}`;
+  const token = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : auth;
+  return `reset-signal:${sha256(token)}`;
 }
 
 const TargetParams = z.object({ userId: z.string().uuid() });
