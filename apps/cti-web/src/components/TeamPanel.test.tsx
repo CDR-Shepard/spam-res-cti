@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { TeamPanel } from './TeamPanel';
 import * as teamApi from '../team-api';
-import { formatClock } from '../reset-status';
+import { formatStamp } from '../reset-status';
 
 vi.mock('../team-api');
 
@@ -59,15 +59,15 @@ describe('TeamPanel — Reset CTI', () => {
       ],
     });
     render(<TeamPanel />);
-    expect(await screen.findByText(`Reset pending since ${formatClock(REQUESTED)}`)).toBeTruthy();
-    expect(screen.getByText(`Reset done ${formatClock(DONE)}`)).toBeTruthy();
+    expect(await screen.findByText(`Reset requested ${formatStamp(REQUESTED)}`)).toBeTruthy();
+    expect(screen.getByText(`Reset done ${formatStamp(DONE)}`)).toBeTruthy();
   });
 
   it('Reset CTI on a row resets that person and shows it pending', async () => {
     render(<TeamPanel />);
     fireEvent.click(await screen.findByRole('button', { name: 'Reset CTI for Ada Rep' }));
     expect(teamApi.resetCti).toHaveBeenCalledWith('u1');
-    expect(await screen.findByText(`Reset pending since ${formatClock(REQUESTED)}`)).toBeTruthy();
+    expect(await screen.findByText(`Reset requested ${formatStamp(REQUESTED)}`)).toBeTruthy();
   });
 
   it('a failed reset says so and shows no status', async () => {
@@ -75,7 +75,7 @@ describe('TeamPanel — Reset CTI', () => {
     render(<TeamPanel />);
     fireEvent.click(await screen.findByRole('button', { name: 'Reset CTI for Ada Rep' }));
     expect(await screen.findByText('Could not reset Ada Rep.')).toBeTruthy();
-    expect(screen.queryByText(/Reset pending since/)).toBeNull();
+    expect(screen.queryByText(/Reset requested/)).toBeNull();
   });
 
   it('Reset everyone asks first; Cancel sends nothing', async () => {
@@ -95,7 +95,7 @@ describe('TeamPanel — Reset CTI', () => {
     expect(await screen.findByText('Reset sent to 1 person.')).toBeTruthy();
     expect(teamApi.resetCtiEveryone).toHaveBeenCalledTimes(1);
     expect(teamApi.listTeam).toHaveBeenCalledTimes(2);
-    expect(await screen.findByText(`Reset pending since ${formatClock(REQUESTED)}`)).toBeTruthy();
+    expect(await screen.findByText(`Reset requested ${formatStamp(REQUESTED)}`)).toBeTruthy();
   });
 
   it('a failed "reset everyone" says so', async () => {
@@ -104,5 +104,77 @@ describe('TeamPanel — Reset CTI', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Reset everyone' }));
     fireEvent.click(screen.getByRole('button', { name: 'Yes, reset everyone' }));
     expect(await screen.findByText('Could not reset everyone.')).toBeTruthy();
+  });
+});
+
+// Task 3 review M-a, M-b, M-c.
+describe('TeamPanel — Reset CTI buttons, status, refresh and errors', () => {
+  it("another row's click never re-enables a row whose reset is still in flight", async () => {
+    const answers = new Map<string, () => void>();
+    vi.mocked(teamApi.resetCti).mockImplementation((id) => new Promise((resolve) => {
+      answers.set(id, () => resolve({ user: { id, ctiResetRequestedAt: REQUESTED, ctiResetCompletedAt: null } }));
+    }));
+    render(<TeamPanel />);
+    const ada = await screen.findByRole('button', { name: 'Reset CTI for Ada Rep' }) as HTMLButtonElement;
+    const bea = screen.getByRole('button', { name: 'Reset CTI for Bea Boss' }) as HTMLButtonElement;
+    fireEvent.click(ada);
+    fireEvent.click(bea);
+    expect(ada.disabled).toBe(true);
+    expect(bea.disabled).toBe(true);
+    answers.get('u2')!();
+    await waitFor(() => expect(bea.disabled).toBe(false));
+    expect(ada.disabled).toBe(true); // still in flight
+    answers.get('u1')!();
+    await waitFor(() => expect(ada.disabled).toBe(false));
+  });
+
+  it('while "Reset everyone" is in flight, no row can be reset on its own', async () => {
+    let finish: () => void = () => {};
+    vi.mocked(teamApi.resetCtiEveryone).mockImplementation(() => new Promise((resolve) => { finish = () => resolve({ count: 1 }); }));
+    render(<TeamPanel />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Reset everyone' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, reset everyone' }));
+    for (const name of ['Reset CTI for Ada Rep', 'Reset CTI for Bea Boss']) {
+      expect((screen.getByRole('button', { name }) as HTMLButtonElement).disabled).toBe(true);
+    }
+    finish();
+    await screen.findByText('Reset sent to 1 person.');
+    expect((screen.getByRole('button', { name: 'Reset CTI for Ada Rep' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a pending row says it is waiting for the rep; a done row does not', async () => {
+    vi.mocked(teamApi.listTeam).mockResolvedValue({
+      users: [
+        { ...users[0]!, ctiResetRequestedAt: REQUESTED },
+        { ...users[1]!, ctiResetRequestedAt: REQUESTED, ctiResetCompletedAt: DONE },
+      ],
+    });
+    render(<TeamPanel />);
+    await screen.findByText(`Reset requested ${formatStamp(REQUESTED)}`);
+    expect(screen.getAllByText('Waiting for them to open the softphone')).toHaveLength(1);
+  });
+
+  it('Refresh re-fetches the team and shows the latest status', async () => {
+    render(<TeamPanel />);
+    await screen.findByText('Ada Rep');
+    vi.mocked(teamApi.listTeam).mockResolvedValue({ users: [{ ...users[0]!, ctiResetRequestedAt: REQUESTED, ctiResetCompletedAt: DONE }, users[1]!] });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText(`Reset done ${formatStamp(DONE)}`)).toBeTruthy();
+    expect(teamApi.listTeam).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed Refresh says so', async () => {
+    render(<TeamPanel />);
+    await screen.findByText('Ada Rep');
+    vi.mocked(teamApi.listTeam).mockRejectedValue(new Error('nope'));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('Could not refresh the team.');
+  });
+
+  it('the error line is announced (role="alert")', async () => {
+    vi.mocked(teamApi.resetCti).mockRejectedValue(new Error('nope'));
+    render(<TeamPanel />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Reset CTI for Ada Rep' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('Could not reset Ada Rep.');
   });
 });

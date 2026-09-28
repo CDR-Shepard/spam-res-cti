@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { listTeam, resetCti, resetCtiEveryone, setPowerDialer, type TeamUser } from '../team-api';
-import { resetStatusLine } from '../reset-status';
+import { resetPending, resetStatusLine } from '../reset-status';
 
 const nameOf = (u: TeamUser): string => u.displayName ?? u.email;
 
@@ -12,14 +12,16 @@ const nameOf = (u: TeamUser): string => u.displayName ?? u.email;
  * It also holds Reset CTI (spec 2026-09-28), for one rep or for everyone but
  * you. A reset signs the rep's web softphone out and clears its sound
  * settings the next time they're not on a call; their iPhone app stays signed
- * in. The status line says whether it has happened yet. Re-open the tab to
- * refresh it.
+ * in. The status line says whether it has happened yet; Refresh re-reads it.
  */
 export function TeamPanel(): JSX.Element {
   const [users, setUsers] = useState<TeamUser[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [resetting, setResetting] = useState<string | null>(null);
+  // Every row whose own reset is in flight (another row's click must never
+  // re-enable one that is still going — Task 3 review M-a).
+  const [resetting, setResetting] = useState<ReadonlySet<string>>(() => new Set());
+  const [refreshing, setRefreshing] = useState(false);
   const [confirmAll, setConfirmAll] = useState(false);
   const [resettingAll, setResettingAll] = useState(false);
 
@@ -39,8 +41,20 @@ export function TeamPanel(): JSX.Element {
     }
   }
 
+  async function refresh(): Promise<void> {
+    setRefreshing(true);
+    setError(null);
+    try {
+      await load();
+    } catch {
+      setError('Could not refresh the team.');
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   async function resetOne(u: TeamUser): Promise<void> {
-    setResetting(u.id);
+    setResetting((prev) => new Set(prev).add(u.id));
     setError(null);
     setNotice(null);
     try {
@@ -51,7 +65,11 @@ export function TeamPanel(): JSX.Element {
     } catch {
       setError(`Could not reset ${nameOf(u)}.`);
     } finally {
-      setResetting(null);
+      setResetting((prev) => {
+        const next = new Set(prev);
+        next.delete(u.id);
+        return next;
+      });
     }
   }
 
@@ -71,7 +89,7 @@ export function TeamPanel(): JSX.Element {
     }
   }
 
-  if (error && !users) return <div className="set-list"><div className="set-row"><div className="sub">{error}</div></div></div>;
+  if (error && !users) return <div className="set-list"><div className="set-row"><div className="sub" role="alert">{error}</div></div></div>;
   if (!users) return <div className="set-list"><div className="set-row"><div className="sub">Loading…</div></div></div>;
 
   return (
@@ -84,6 +102,7 @@ export function TeamPanel(): JSX.Element {
             Their iPhone app stays signed in.
           </div>
         </div>
+        <button className="btn ghost" disabled={refreshing} onClick={() => void refresh()}>Refresh</button>
         {!confirmAll && <button className="btn ghost" onClick={() => setConfirmAll(true)}>Reset everyone</button>}
       </div>
       {confirmAll && (
@@ -94,7 +113,7 @@ export function TeamPanel(): JSX.Element {
         </div>
       )}
       {notice ? <div className="set-row"><div className="sub">{notice}</div></div> : null}
-      {error ? <div className="set-row"><div className="sub">{error}</div></div> : null}
+      {error ? <div className="set-row"><div className="sub" role="alert">{error}</div></div> : null}
       {users.map((u) => {
         const status = resetStatusLine(u);
         return (
@@ -106,6 +125,9 @@ export function TeamPanel(): JSX.Element {
                 {u.isAdmin ? ' · Admin' : ''}
               </div>
               {status && <div className="sub">{status}</div>}
+              {/* Includes iPhone-only reps and anyone who signs in fresh: it
+                  happens the next time a softphone tab of theirs is open. */}
+              {resetPending(u) && <div className="sub">Waiting for them to open the softphone</div>}
             </div>
             <button
               role="switch"
@@ -119,7 +141,7 @@ export function TeamPanel(): JSX.Element {
             <button
               className="btn ghost"
               aria-label={`Reset CTI for ${nameOf(u)}`}
-              disabled={resetting === u.id}
+              disabled={resetting.has(u.id) || resettingAll}
               onClick={() => void resetOne(u)}
             >
               Reset CTI
