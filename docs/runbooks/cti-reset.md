@@ -34,7 +34,7 @@ Code: `services/cti-api/src/routes/cti-reset.ts` (API); `apps/cti-web/src/cti-re
 
 ## What the admin sees
 
-- *Reset requested 2:41 PM*: still pending — the request is later than the last completion. A stamp from another day shows its date (*Reset requested Sep 27, 2:41 PM*).
+- *Reset requested 2:41 PM*: still pending — the request is later than the last completion. A stamp from another day shows its date (*Reset requested Sep 27, 2:41 PM*). Under it: *Happens the next time their softphone is open and idle.*
 - *Reset done 2:43 PM*: a softphone tab finished it (`POST /auth/reset-complete`).
 - To refresh, press **Refresh** at the top of the Team list.
 

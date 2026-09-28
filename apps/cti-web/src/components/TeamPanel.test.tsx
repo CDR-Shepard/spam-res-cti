@@ -142,7 +142,7 @@ describe('TeamPanel — Reset CTI buttons, status, refresh and errors', () => {
     expect((screen.getByRole('button', { name: 'Reset CTI for Ada Rep' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it('a pending row says it is waiting for the rep; a done row does not', async () => {
+  it('a pending row says when it will happen; a done row does not', async () => {
     vi.mocked(teamApi.listTeam).mockResolvedValue({
       users: [
         { ...users[0]!, ctiResetRequestedAt: REQUESTED },
@@ -151,7 +151,8 @@ describe('TeamPanel — Reset CTI buttons, status, refresh and errors', () => {
     });
     render(<TeamPanel />);
     await screen.findByText(`Reset requested ${formatStamp(REQUESTED)}`);
-    expect(screen.getAllByText('Waiting for them to open the softphone')).toHaveLength(1);
+    expect(screen.getAllByText('Happens the next time their softphone is open and idle.')).toHaveLength(1);
+    expect(screen.queryByText(/Waiting for them/)).toBeNull();
   });
 
   it('Refresh re-fetches the team and shows the latest status', async () => {

@@ -125,9 +125,10 @@ export function TeamPanel(): JSX.Element {
                 {u.isAdmin ? ' · Admin' : ''}
               </div>
               {status && <div className="sub">{status}</div>}
-              {/* Includes iPhone-only reps and anyone who signs in fresh: it
-                  happens the next time a softphone tab of theirs is open. */}
-              {resetPending(u) && <div className="sub">Waiting for them to open the softphone</div>}
+              {/* It waits for an open AND idle softphone: a rep on a call, in
+                  wrap-up or mid-run is pending too — not only a closed one.
+                  iPhone-only reps stay pending until they open the web one. */}
+              {resetPending(u) && <div className="sub">Happens the next time their softphone is open and idle.</div>}
             </div>
             <button
               role="switch"
