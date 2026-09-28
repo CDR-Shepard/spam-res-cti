@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { dialerControlPath, startBody, startDialer, getDialer, dialerControl, getPendingHandoff, takeDialerCallback } from './dialer-api';
+import { dialerControlPath, startBody, startDialer, startDialerRun, getDialer, dialerControl, getPendingHandoff, takeDialerCallback } from './dialer-api';
 import * as apiModule from './api';
 
 describe('dialer-api path/body builders', () => {
@@ -79,5 +79,18 @@ describe('dialer-api async functions', () => {
     const mockApi = vi.spyOn(apiModule, 'api').mockResolvedValue({ ok: true, action: 'paused', canceledItemId: null });
     expect(await takeDialerCallback('sess1')).toEqual({ ok: true, action: 'paused', canceledItemId: null });
     expect(mockApi).toHaveBeenCalledWith('/dialer/sessions/sess1/take-callback', { method: 'POST' });
+  });
+});
+
+describe('startDialerRun (spec 2026-09-28)', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('POSTs the run settings to /dialer/sessions/:id/start', async () => {
+    const mockApi = vi.spyOn(apiModule, 'api').mockResolvedValue({ ok: true });
+    await startDialerRun('abc', { passes: 1, maxRecords: 100, rolloverBusinessDays: 2 });
+    expect(mockApi).toHaveBeenCalledWith('/dialer/sessions/abc/start', {
+      method: 'POST',
+      body: { passes: 1, maxRecords: 100, rolloverBusinessDays: 2 },
+    });
   });
 });

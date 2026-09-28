@@ -1,3 +1,4 @@
+import type { DialerPasses, DialerRunSettings, RolloverBusinessDays } from '@cti/contracts';
 import { api } from './api';
 
 // Type definitions
@@ -38,11 +39,19 @@ export interface DialerCurrentItem {
    *  the call is still live, or the run hasn't reached this item; absent on
    *  an older server. */
   prospectEndedAt?: string | null;
+  /** The row's place in THIS run's queue (0-based). A limited run counts its
+   *  "record X of N" by it (spec 2026-09-28 decision 5). Absent: an older server. */
+  ordinal?: number;
 }
 
 export interface DialerSession {
   id: string;
   status: 'ready' | 'active' | 'paused' | 'stopped' | 'done';
+  /** Run settings (spec 2026-09-28) — what the run line under the progress
+   *  shows. Absent: an older server. */
+  passes?: DialerPasses;
+  maxRecords?: number | null;
+  rolloverBusinessDays?: RolloverBusinessDays;
 }
 
 export interface DialerRollovers { moved: number; pushed: number; failed: number; pending: number }
@@ -151,6 +160,16 @@ export async function startDialerFromListView(
   return api('/dialer/sessions/from-listview', {
     method: 'POST',
     body: { object, listViewId }
+  });
+}
+
+/** Start dialing with the Ready-to-dial choices (spec 2026-09-28). The server
+ *  applies them in the same step that flips the run active, and saves Calls
+ *  per person / Missed tasks as the rep's next defaults. */
+export async function startDialerRun(id: string, settings: DialerRunSettings): Promise<{ ok: boolean }> {
+  return api(dialerControlPath(id, 'start'), {
+    method: 'POST',
+    body: settings,
   });
 }
 
