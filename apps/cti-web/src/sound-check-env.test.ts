@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AudioContextLike, MicStreamLike } from './level-meter';
 import {
   browserSoundCheckEnv,
+  MAC_MIC_BLOCKED_TEXT,
   micConstraints,
   micErrorText,
   stopStream,
@@ -32,6 +33,18 @@ describe('the pure pieces', () => {
     expect(micErrorText(named('NotReadableError'))).toBe('Another app is using the microphone. Close it and try again.');
     expect(micErrorText(new Error('boom'))).toBe("Couldn't open the microphone: boom");
     expect(micErrorText('x')).toBe("Couldn't open the microphone: the browser refused it");
+  });
+
+  // Task 3 review I4: Chrome says Allowed, but macOS blocks Chrome itself —
+  // getUserMedia throws NotAllowedError ("Permission denied by system").
+  // Chrome's site settings can't fix that, so don't send the rep there.
+  it('micErrorText: a macOS privacy block gets the System Settings steps', () => {
+    const mac = MAC_MIC_BLOCKED_TEXT;
+    expect(mac).toBe("Your Mac is blocking Chrome's microphone: System Settings → Privacy & Security → Microphone → turn on Google Chrome, then quit and reopen Chrome.");
+    expect(micErrorText(named('NotAllowedError', 'Permission denied by system'))).toBe(mac);
+    expect(micErrorText(named('NotAllowedError', 'Permission denied'), 'granted')).toBe(mac);
+    expect(micErrorText(named('NotAllowedError', 'Permission denied'), 'prompt')).toBe("Chrome didn't allow the microphone. Click Allow microphone, then choose Allow.");
+    expect(micErrorText(named('NotFoundError'), 'granted')).toBe('No microphone found. Plug in your headset.');
   });
 
   it('stopStream stops every track', () => {

@@ -58,10 +58,24 @@ export function stopStream(stream: MicStreamLike): void {
   }
 }
 
-/** The sentence the rep sees when the mic could not be opened. */
-export function micErrorText(e: unknown): string {
+/** macOS is blocking Chrome itself (Task 3 review I4): Chrome's site
+ *  settings can't fix that, so the rep is sent to System Settings instead. */
+export const MAC_MIC_BLOCKED_TEXT =
+  "Your Mac is blocking Chrome's microphone: System Settings → Privacy & Security → Microphone → turn on Google Chrome, then quit and reopen Chrome.";
+
+/**
+ * The sentence the rep sees when the mic could not be opened. `permission` is
+ * Chrome's own setting for the site at the time: a refusal while it reads
+ * Allowed — or one Chrome words "Permission denied by system" — comes from
+ * the operating system, not from Chrome.
+ */
+export function micErrorText(e: unknown, permission?: MicPermission): string {
   const name = (e as { name?: unknown } | null)?.name;
-  if (name === 'NotAllowedError') return "Chrome didn't allow the microphone. Click Allow microphone, then choose Allow.";
+  if (name === 'NotAllowedError') {
+    const message = e instanceof Error ? e.message : '';
+    if (permission === 'granted' || /by system/i.test(message)) return MAC_MIC_BLOCKED_TEXT;
+    return "Chrome didn't allow the microphone. Click Allow microphone, then choose Allow.";
+  }
   if (name === 'NotFoundError') return 'No microphone found. Plug in your headset.';
   if (name === 'NotReadableError') return 'Another app is using the microphone. Close it and try again.';
   const msg = e instanceof Error && e.message ? e.message : 'the browser refused it';

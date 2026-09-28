@@ -126,7 +126,8 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
         setMicError(null);
         timer = setInterval(() => setLevel(meter.read()), METER_INTERVAL_MS);
       },
-      (e: unknown) => { if (live) setMicError(micErrorText(e)); },
+      // Chrome reads Allowed here, so a refusal is the operating system's.
+      (e: unknown) => { if (live) setMicError(micErrorText(e, 'granted')); },
     );
     return () => {
       live = false;

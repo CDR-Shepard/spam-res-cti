@@ -11,7 +11,7 @@ import { SoundCheck, SOUND_CHECK_TEXT } from './SoundCheck';
 import type { AudioDevicePort } from '../audio-device-port';
 import type { MediaDeviceLike } from '../audio-devices';
 import type { LevelSource, MicStreamLike } from '../level-meter';
-import type { MicPermission, SoundCheckEnv } from '../sound-check-env';
+import { MAC_MIC_BLOCKED_TEXT, type MicPermission, type SoundCheckEnv } from '../sound-check-env';
 
 const DEVICES: MediaDeviceLike[] = [
   { kind: 'audioinput', deviceId: 'default', label: 'Default - MacBook Pro Microphone' },
@@ -111,6 +111,23 @@ describe('SoundCheck — Chrome has not decided (prompt)', () => {
     expect((await screen.findByRole('alert')).textContent).toBe("Chrome didn't allow the microphone. Click Allow microphone, then choose Allow.");
     expect(screen.getByRole('button', { name: SOUND_CHECK_TEXT.allow })).toBeTruthy();
     expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+});
+
+describe('SoundCheck — macOS blocks Chrome itself (Task 3 review I4)', () => {
+  it('Chrome says Allowed but the mic is refused: the System Settings steps, not the address-bar ones', async () => {
+    const f = fakeEnv('granted');
+    f.s.openError = Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' });
+    renderCheck(f.env);
+    expect((await screen.findByRole('alert')).textContent).toBe(MAC_MIC_BLOCKED_TEXT);
+  });
+
+  it('the Allow click is refused "by system": the same steps', async () => {
+    const f = fakeEnv('prompt');
+    f.s.openError = Object.assign(new Error('Permission denied by system'), { name: 'NotAllowedError' });
+    renderCheck(f.env);
+    fireEvent.click(await screen.findByRole('button', { name: SOUND_CHECK_TEXT.allow }));
+    expect((await screen.findByRole('alert')).textContent).toBe(MAC_MIC_BLOCKED_TEXT);
   });
 });
 
