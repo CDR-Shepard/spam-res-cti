@@ -9,8 +9,8 @@ The rules are org-wide and have no kill switch. Change a constant and redeploy.
 |---|---|---|
 | Courtesy spacing: a person is not power-dialed again within 3 h of any dial, by anyone. The same run's own redials are exempt. | `dialer/contact-history.ts` `COOLDOWN_MS` | 3 h |
 | State law: no 4th call to a number in a rolling 24 h. Every dial by anyone counts, click-to-dial included, and so does a Skip (the phone rang). | `packages/firewall/src/state-calling-rules.ts` `DAILY_DIAL_CAP_STATES`, `DAILY_DIAL_CAP` | FL, OK, WA, MD; 3 per 24 h |
-| Follow-up rollover: the task owner's 2nd dial of the org day that doesn't connect rolls the follow-up to the next business day. It counts power dial and click-to-dial, but only the owner's own dials. A Skip does not count. | `dialer/contact-history.ts` `rolloverDue`; `salesforce/sync.ts` hook | 2 per LA day |
-| One number per pass: attempt 1 dials the lead number and the other is tried once, at the end-of-run retry. A number the person once answered on leads, and the other is never dialed. | `dialer/create-session.ts` | — |
+| Follow-up rollover: the task owner's Nth dial of the org day that doesn't connect rolls the follow-up. For a power-dial miss N is the run's Calls per person (Once = 1st, Twice = 2nd); for click-to-dial it is always 2. It counts power dial and click-to-dial, but only the owner's own dials. A Skip does not count. Where it lands: see Run settings below. | `dialer/contact-history.ts` `rolloverDue`; `salesforce/sync.ts` hook (`CLICK_TO_DIAL_ROLLOVER_MISSES`) | 1 or 2 per LA day |
+| One number per pass: attempt 1 dials the lead number and the other is tried once, at the end-of-run retry (Twice runs only; a Once run has no retry). A number the person once answered on leads, and the other is never dialed. | `dialer/create-session.ts` | — |
 | Two reps, one list: a new run from a list view starts after the furthest record dialed on that list in 12 h. | `dialer/list-position.ts` `LIST_SHARE_WINDOW_MS` | 12 h |
 | A hang-up never auto-redials. The rep chooses Redial or Resume, and a missed Redial is not retried. End call hangs up and pauses. | `dialer/engine.ts` `redialCurrent` / `endCurrent` | — |
 | A run whose prospect hung up more than 10 min ago, with no panel poll, is reaped. | `salesforce/followup-worker.ts` `HUNG_UP_PRESENCE_MS` | 10 min |
@@ -88,6 +88,46 @@ SELECT i.ordinal, i.record_id, i.status, i.outcome, i.retry_not_before, i.update
    AND i.ordinal IN (SELECT ordinal FROM dialer_queue_items
                       WHERE session_id = '<uuid>' AND status = 'skipped' AND outcome = 'canceled')
  ORDER BY i.ordinal, i.updated_at;
+```
+
+## Run settings (Ready to dial)
+
+Spec: `docs/superpowers/specs/2026-09-28-run-settings-design.md`. Three choices sit above **Start dialing**. They arrive with `POST /dialer/sessions/:id/start` and are applied in the one transaction that flips the run `ready → active` (`dialer/engine.ts` `claimReadySession`, `dialer/run-settings.ts`). A refused Start (another run holds the one-active-run slot) changes nothing.
+
+| Setting | Values | Stored on | What it changes |
+|---|---|---|---|
+| Calls per person | Once · Twice (default) | `dialer_sessions.passes` (1/2) | Once: no end-of-run retry, and a follow-up rolls on the owner's 1st non-connect of the day (voicemail or no-answer counts the same as any other miss). Twice: today's single retry, and it rolls on the 2nd. |
+| How many | All (default) · first N | `dialer_sessions.max_records` (NULL = all) | At Start the queue is cut after the N-th dialable (`pending`) row, and every row after it is deleted. Rows the build already settled (no number, flag, consent, called in the last 3 h) don't count toward N. The panel then reads "record X of N" from the run's own queue. |
+| Missed tasks move to | Next business day (default) · In 2 business days | `dialer_sessions.rollover_business_days` (1/2) → `followup_rollover_jobs.business_days` | The copy lands 1 or 2 business days after the LATER of the dial day (`from_date`) and the task's own due date. Then the 100/day cap pushes it on as before. `next_day` is that uncapped day. |
+
+- Starting saves all three choices to the rep's account: Calls per person and Missed tasks to `users.dialer_passes` and `users.dialer_rollover_business_days`, and How many to `users.dialer_max_records` (nullable, NULL = All). `GET /auth/me` returns them as `dialerRunDefaults: { passes, rolloverBusinessDays, maxRecords }`, and the remembered How many number prefills the Ready screen's box every time — in any tab or in Salesforce.
+- Click-to-dial keeps the 2-miss rule and lands where the rep's saved Missed-tasks choice says.
+- A Start with no body (a tab from before this release) is today's run: Twice, All, next business day. Nothing is saved.
+- The end-of-run summary says follow-ups were "moved to a later day" — it never names a specific day like "tomorrow" — whatever the choice.
+- Unchanged:
+  - nothing rolls for a person reached today;
+  - Skip, Stop and a take-callback cancel are not non-connects;
+  - one rollover per person per day;
+  - the 3 h courtesy, the state-law cap and the per-customer ceiling;
+  - the 100/day cap and the 30-business-day bound.
+
+  A redial copy never gets its own retry.
+- Known edges:
+  - The shared list position is the furthest `list_position` DIALED on the list in 12 h. After a full first-N run, the next run starts at N+1, and a run stopped early resumes where it stopped. A run that wraps past the end of the list sets the position to the last record, so the next run starts at the top. Anyone called in the last 3 h is skipped there anyway.
+  - A rolled task's same-day siblings are matched on the EFFECTIVE day — the later of the dial day and the task's own due date — not the dial day alone. For a worked-ahead task that's the due date, so its same-kind follow-ups due that day are cleared too. Unchanged for a task due today or overdue, where the effective day already equals the dial day.
+
+A run's settings, and what its rollovers did:
+```sql
+SELECT s.id, s.passes, s.max_records, s.rollover_business_days, s.status, s.created_at
+  FROM dialer_sessions s WHERE s.id = '<uuid>';
+
+SELECT j.record_id, j.from_date, j.business_days, j.next_day, j.target_date, j.status, j.last_error
+  FROM followup_rollover_jobs j WHERE j.session_id = '<uuid>' ORDER BY j.created_at;
+```
+
+A rep's saved choices:
+```sql
+SELECT email, dialer_passes, dialer_rollover_business_days, dialer_max_records FROM users WHERE email = '<rep email>';
 ```
 
 ## SQL (read-only; use the `$PUB` pattern from the number-fleet runbook)
