@@ -288,11 +288,22 @@ async function listOpenFollowUps(deps: WorkerDeps, job: FollowupRolloverJob): Pr
 /**
  * Pure — the other tasks this rollover has to clear.
  *
- * SAME-DAY FOLLOW-UPS ONLY. The rule the user set is one rollover per person per
- * day: everything of the SAME KIND that was due on the missed day moves as a
- * single copy, so every one of those has to be completed or it sits open past
- * its due date with no job left to move it. A FUTURE-dated sibling is work the
- * rep has not reached yet, and an OVERDUE one belongs to an earlier day's
+ * SAME-DAY FOLLOW-UPS ONLY — but "same day" means EITHER of two dates (review
+ * M2, spec 2026-09-28 S7): the EFFECTIVE day (the later of the dial day and
+ * the primary's own due date — `rolloverBase`, the same value the landing
+ * rule uses) OR the raw dial day itself. Effective-day-only (S7 alone) missed
+ * a real case: one person can carry BOTH a follow-up worked ahead of its due
+ * date (which clears via the effective day) AND a SEPARATE same-kind
+ * follow-up genuinely due on the day the rep dialed (which only the dial day
+ * catches) — both were missed by this rollover and both belong in the clear
+ * set. When the primary is due today or overdue, effective day == dial day,
+ * so `dates` collapses to one value and this is exactly today's behaviour.
+ *
+ * The rule the user set is one rollover per person per day: everything of the
+ * SAME KIND due on either of those days moves as a single copy, so every one
+ * of those has to be completed or it sits open with no job left to move it. A
+ * FUTURE-dated sibling (relative to both candidate days) is work the rep has
+ * not reached yet, and one due strictly earlier belongs to an earlier day's
  * decision — neither is touched.
  *
  * KIND, not follow-up-ness (changed 2026-09-15, when every dialed task began
@@ -302,11 +313,11 @@ async function listOpenFollowUps(deps: WorkerDeps, job: FollowupRolloverJob): Pr
 export function sameDaySiblings(
   tasks: ReadonlyArray<FollowUpTask>,
   primaryId: string,
-  fromDate: string,
+  dates: ReadonlySet<string>,
   primarySubject: string | null,
 ): FollowUpTask[] {
   return tasks.filter(
-    (t) => t.Id !== primaryId && t.ActivityDate === fromDate && sameTaskKind(primarySubject, t.Subject),
+    (t) => t.Id !== primaryId && t.ActivityDate !== null && dates.has(t.ActivityDate) && sameTaskKind(primarySubject, t.Subject),
   );
 }
 
@@ -450,14 +461,15 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     // this is exactly job.fromDate, so both rules read as they always have.
     const base = rolloverBase(job.fromDate, task.ActivityDate);
 
-    // THE CLEAR SET: the template plus every other same-day task of the SAME
-    // KIND on this person. One rollover per person per day means one copy
-    // replaces all of them, so all of them get completed. Tasks of a different
-    // kind are left alone — the rep did not dial them. The by-id path pays one extra SOQL for
-    // the sibling list — the price of not leaving a swallowed enqueue (the job
+    // THE CLEAR SET: the template plus every other same-KIND task on this
+    // person due on EITHER the effective day OR the raw dial day (review M2).
+    // One rollover per person per day means one copy replaces all of them, so
+    // all of them get completed. Tasks of a different kind are left alone —
+    // the rep did not dial them. The by-id path pays one extra SOQL for the
+    // sibling list — the price of not leaving a swallowed enqueue (the job
     // key is per person, not per task) open past its due date.
     const clearSet = [task.Id, ...sameDaySiblings(
-      onRecord ?? await listOpenFollowUps(deps, job), task.Id, base, task.Subject,
+      onRecord ?? await listOpenFollowUps(deps, job), task.Id, new Set([base, job.fromDate]), task.Subject,
     ).map((t) => t.Id)];
 
     // Same reason as every other outbound call here: a hung socket in the

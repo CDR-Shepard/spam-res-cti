@@ -1183,26 +1183,32 @@ describe('processRolloverJob — where the copy lands', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Controller ruling S7: the sibling clear set keys on the EFFECTIVE day — the
-// same landing base the new landing rule uses (the later of the dial day and
-// the source task's own due date), not the raw dial day. A task worked AHEAD
-// of its due date (Garrett, 2026-09-27: Monday tasks dialed on Sunday) must
-// clear its TRUE same-day siblings — the ones due the SAME effective day —
-// not whatever happened to be due on the calendar day it was dialed. For a
-// task due today or overdue, the effective day IS the dial day, so this is
-// exactly today's behaviour (see the other tests in this file, which all use
-// same-day-as-dialed fixtures and are pinned unchanged).
+// Controller ruling S7, refined by review M2: the sibling clear set keys on
+// the SAME KIND due on EITHER the EFFECTIVE day (the later of the dial day
+// and the source task's own due date — the same landing base the new landing
+// rule uses) OR the raw dial day itself. S7 alone (effective day only) missed
+// a real case (M2): a person can carry BOTH a follow-up worked ahead of its
+// due date AND a SEPARATE same-kind follow-up genuinely due on the day the
+// rep dialed — both were missed by this rollover, so both belong in the clear
+// set, not just whichever one matches the effective day. For a task due today
+// or overdue, effective day == dial day, so the OR is a no-op and this is
+// exactly today's behaviour (see "a due-today task clears exactly as before").
 // ---------------------------------------------------------------------------
-describe('sameDaySiblings clear set — keyed on the effective day (spec 2026-09-28 controller ruling S7)', () => {
-  it("Garrett's Sunday: a Monday task dialed on Sunday also clears its Monday same-kind siblings — never Sunday's", async () => {
+describe('sameDaySiblings clear set — the effective day OR the dial day (spec 2026-09-28 S7, review M2)', () => {
+  it("Garrett's Sunday: a Monday task dialed on Sunday clears its Monday same-kind sibling AND a separate same-kind follow-up genuinely due Sunday (the dial day) — a true decoy on neither day survives", async () => {
     const monday = '2026-09-28';
     const sunday = '2026-09-27';
     const primary = { ...openTask, Id: '00TMON', Subject: 'Follow-up', ActivityDate: monday };
     const mondaySibling = { ...openTask, Id: '00TMONSIB', Subject: 'F/U re quote', ActivityDate: monday };
-    // A decoy due on the DIAL day (Sunday) — the old (buggy) key would have
-    // cleared this instead. It must survive: it is not due the effective day.
-    const sundayDecoy = { ...openTask, Id: '00TSUN', Subject: 'Follow-up', ActivityDate: sunday };
-    const onRecord = [primary, mondaySibling, sundayDecoy];
+    // A SEPARATE same-kind follow-up genuinely due the dial day (Sunday) — not
+    // reached via the primary's own due date, but still a real same-kind miss
+    // on this person the same day the rep dialed. Review M2: this clears too,
+    // alongside the Monday sibling — S7 alone (effective-day only) wrongly
+    // left it open.
+    const sundaySibling = { ...openTask, Id: '00TSUN', Subject: 'Follow-up', ActivityDate: sunday };
+    // A true decoy: due on NEITHER candidate day. Must survive regardless.
+    const decoy = { ...openTask, Id: '00TDECOY', Subject: 'Follow-up', ActivityDate: '2026-09-26' };
+    const onRecord = [primary, mondaySibling, sundaySibling, decoy];
     const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
       if (/Id = '00TMON'/.test(q)) return [primary];
       if (/FROM Task WHERE OwnerId/.test(q)) return [];
@@ -1210,7 +1216,27 @@ describe('sameDaySiblings clear set — keyed on the effective day (spec 2026-09
     }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
     await processRolloverJob(job({ fromDate: sunday, sourceTaskId: '00TMON', businessDays: 1 }), d);
     const patched = (d.sf.sfFetch as any).mock.calls.slice(1).map((c: any[]) => c[1]).sort();
-    expect(patched).toEqual(['/sobjects/Task/00TMON', '/sobjects/Task/00TMONSIB']);
+    expect(patched).toEqual(['/sobjects/Task/00TMON', '/sobjects/Task/00TMONSIB', '/sobjects/Task/00TSUN']);
+  });
+
+  // Review M2's exact scenario, isolated to the minimum fixture: ONE person
+  // with a worked-ahead follow-up (due later than the dial day) and a
+  // SEPARATE same-kind follow-up due exactly on the dial day — both clear
+  // together as one job, one copy.
+  it('M2: a worked-ahead follow-up and a same-kind follow-up due on the dial day both clear as one job', async () => {
+    const dialDay = '2026-09-27'; // Sunday
+    const dueDay = '2026-09-28'; // Monday — worked ahead of its due date
+    const workedAhead = { ...openTask, Id: '00TAHEAD', Subject: 'Follow-up', ActivityDate: dueDay };
+    const dueOnDial = { ...openTask, Id: '00TDIAL', Subject: 'F/U re invoice', ActivityDate: dialDay };
+    const onRecord = [workedAhead, dueOnDial];
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
+      if (/Id = '00TAHEAD'/.test(q)) return [workedAhead];
+      if (/FROM Task WHERE OwnerId/.test(q)) return [];
+      return onRecord;
+    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    await processRolloverJob(job({ fromDate: dialDay, sourceTaskId: '00TAHEAD', businessDays: 1 }), d);
+    const patched = (d.sf.sfFetch as any).mock.calls.slice(1).map((c: any[]) => c[1]).sort();
+    expect(patched).toEqual(['/sobjects/Task/00TAHEAD', '/sobjects/Task/00TDIAL']);
   });
 
   it('a due-today task clears exactly as before: siblings due the same calendar day as the dial', async () => {
