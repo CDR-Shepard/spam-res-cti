@@ -8,6 +8,12 @@
  *        as every authed route (session + user). It has its own rate-limit
  *        bucket, keyed per session token, so an office of reps behind one IP
  *        never spends the global per-IP budget on it.
+ *        M4: can also answer 429 (its own per-token bucket, or the per-IP
+ *        failed-lookup ceiling below) or a 5xx (an ordinary infra hiccup —
+ *        note the R2 self-heal below is caught and never the cause of one).
+ *        Neither means anything about whether a reset is due: the web MUST
+ *        treat both as "try again on the next poll," never as resetDue:
+ *        false and never as a reason to sign the rep out.
  *  - POST /auth/reset-complete           Sent by the tab that reset: stamp the
  *        user "done" and revoke THIS session only. Never every session: the
  *        iPhone and desktop apps share the sessions table.
