@@ -1515,12 +1515,14 @@ export function App(): JSX.Element {
     // A reset is under way (C1(a)): no call — the banner already says why.
     // Before anything else, so no POST /calls creates a row nobody dials.
     if (resettingRef.current) return;
-    coordinatorRef.current?.promoteSelf();
     if (!firewall || firewall.decision === 'BLOCK') return;
     // Claim the outbound path synchronously so a callback that rings during the
     // POST /calls + device.connect() awaits is declined (→ voicemail) instead of
     // racing this dial. Also drop any ringing inbound: the rep chose to dial out.
     placingRef.current = true;
+    // Announce it now, AFTER the claim (M2): this beat's resetBusy must already
+    // say "placing", or a peer leader could start a reset under the dial.
+    coordinatorRef.current?.promoteSelf();
     if (incomingRef.current) {
       try { incomingRef.current.reject(); } catch { /* */ }
       setIncoming(null);

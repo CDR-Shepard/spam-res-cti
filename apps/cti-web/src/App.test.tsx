@@ -29,6 +29,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App, HANGUP_FALLBACK_MS } from './App';
 import * as opencti from './opencti';
+import * as coordinator from './softphone-coordinator';
 import type { IncomingCallLike } from './incoming-accept';
 
 /** Minimal fake incoming call: matches what App.tsx's TwilioIncomingCall needs.
@@ -788,5 +789,24 @@ describe('App — a dead session never kills a live call (M1)', () => {
     act(() => { FakeDevice.instances[0]!.emit('tokenWillExpire'); });
     await screen.findByText('Sign in with Salesforce');
     expect(FakeDevice.instances[0]!.destroyed).toBe(true);
+  });
+});
+
+/** M2 (Task 2 review): place() announces itself to peer tabs at once
+ *  (promoteSelf), so the beat must already say `placing` — a peer leader
+ *  judging whether a reset may start reads exactly that beat. */
+describe('App — the beat place() sends at once says the tab is placing (M2)', () => {
+  it("the first presence place() posts carries resetBusy: true", async () => {
+    stubOutboundFetch();
+    const beats: unknown[] = [];
+    const realCreate = coordinator.createSoftphoneCoordinator;
+    vi.spyOn(coordinator, 'createSoftphoneCoordinator').mockImplementation((deps) => {
+      let last: unknown = null;
+      const c = realCreate({ ...deps, postMessage: (m) => { last = m; deps.postMessage(m); } });
+      return { ...c, promoteSelf: () => { c.promoteSelf(); beats.push(last); } };
+    });
+    await placeOutboundCall();
+    expect(beats.length).toBeGreaterThan(0);
+    expect(beats[0]).toMatchObject({ type: 'presence', resetBusy: true });
   });
 });
