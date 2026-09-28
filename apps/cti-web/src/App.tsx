@@ -459,7 +459,12 @@ export function App(): JSX.Element {
     dialerConn: dialerConnRef.current !== null,
     dialerLive: dialerLiveRef.current,
     dialerSessionId: dialerSessionIdRef.current,
-    dialerRunStatus: runSnapshotRef.current?.sessionStatus ?? null,
+    // Only a snapshot of the run this tab still shows. Stop clears the session
+    // before the panel's post-stop poll can land (the panel discards it), so an
+    // older run's last `active` must never hold a reset back forever.
+    dialerRunStatus: runSnapshotRef.current !== null && runSnapshotRef.current.sessionId === dialerSessionIdRef.current
+      ? runSnapshotRef.current.sessionStatus
+      : null,
     callbackWaiting: callbackWaitingRef.current !== null,
     parkedRunId: parkedRunIdRef.current,
   }), []);
@@ -979,7 +984,11 @@ export function App(): JSX.Element {
     [dropConferenceLeg],
   );
 
-  useEffect(() => { dialerSessionIdRef.current = dialerSessionId; }, [dialerSessionId]);
+  useEffect(() => {
+    dialerSessionIdRef.current = dialerSessionId;
+    // No run on screen: its last poll is history (Reset CTI reads the status).
+    if (dialerSessionId === null) runSnapshotRef.current = null;
+  }, [dialerSessionId]);
 
   // Dismiss a finished/stopped run's summary and return to the list-view picker.
   const handleDialerDismiss = useCallback(() => setDialerSessionId(null), []);
