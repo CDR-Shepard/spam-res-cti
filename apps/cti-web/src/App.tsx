@@ -65,6 +65,8 @@ import {
 } from './callback-waiting';
 import { HEARTBEAT_UNREACHABLE_TEXT, parkedRunOverAction, startParkedHeartbeat } from './parked-heartbeat';
 import { playCallbackChime } from './callback-chime';
+import { clearFlag, isBusyForReset, readFlag, RESET_NOTICE_KEY, RESET_NOTICE_TEXT } from './cti-reset';
+import { useCtiReset } from './use-cti-reset';
 
 interface MeResponse {
   user: {
@@ -279,6 +281,8 @@ export function App(): JSX.Element {
   // ---- Sign in with Salesforce (OAuth popup) -------------------------------
   const [sfConnecting, setSfConnecting] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
+  // Written by a reset just before its reload (cti-reset.ts); cleared by signing in.
+  const [resetNotice, setResetNotice] = useState(() => readFlag(RESET_NOTICE_KEY));
   const refreshMe = useCallback(async () => {
     try { setMe(await api<MeResponse>('/auth/me')); } catch { /* */ }
   }, []);
@@ -306,6 +310,9 @@ export function App(): JSX.Element {
           if (r.status === 'connected' && r.token && r.user) {
             try { popup?.close(); } catch { /* */ }
             writeSession({ token: r.token, userId: r.user.id, email: r.user.email });
+            // A new session ends a reset (its created_at is newer than the request).
+            clearFlag(RESET_NOTICE_KEY);
+            setResetNotice(false);
             setSignedIn(true);
             await refreshMe();
             setSigningIn(false);
@@ -419,6 +426,32 @@ export function App(): JSX.Element {
   const incomingRef = useRef<TwilioIncomingCall | null>(null);
   useEffect(() => { incomingRef.current = incoming; }, [incoming]);
   useEffect(() => { forwardE164Ref.current = me?.user.noAnswerForwardE164 ?? null; }, [me]);
+  // Reset CTI (spec 2026-09-28, controller ruling R1): the two pieces of state
+  // isBusyForReset needs that App keeps only as React state, mirrored for
+  // synchronous reads.
+  const pendingDispRef = useRef<PendingDisposition | null>(null);
+  useEffect(() => { pendingDispRef.current = pendingDisp; }, [pendingDisp]);
+  const dialerLiveRef = useRef(false);
+  useEffect(() => { dialerLiveRef.current = dialerLive; }, [dialerLive]);
+  // Would a reset interrupt anything in THIS tab? Also broadcast to peer tabs
+  // as `resetBusy` in the coordinator's presence. Per R1, an old
+  // pendingDisposition (not the open wrap-up form) and a terminal (stopped or
+  // done) run's dialerSessionId/summary screen do NOT block a reset — only
+  // the dialer run's latest snapshot status (active/paused) does.
+  const resetBusy = useCallback((): boolean => isBusyForReset({
+    phase: phaseRef.current,
+    pendingDisposition: pendingDispRef.current !== null,
+    placing: placingRef.current,
+    takingCallback: takingCallbackRef.current,
+    incoming: incomingRef.current !== null,
+    connection: connectionRef.current as { status?: () => string } | null,
+    dialerConn: dialerConnRef.current !== null,
+    dialerLive: dialerLiveRef.current,
+    dialerSessionId: dialerSessionIdRef.current,
+    dialerRunStatus: runSnapshotRef.current?.sessionStatus ?? null,
+    callbackWaiting: callbackWaitingRef.current !== null,
+    parkedRunId: parkedRunIdRef.current,
+  }), []);
 
   // Softphone single-registration: exactly one tab is the "leader" that holds the
   // Twilio Device. Default isLeader:true so a lone tab / unsupported-BroadcastChannel
@@ -534,6 +567,9 @@ export function App(): JSX.Element {
           // Grow the utility panel so the taller circular dialpad + call button
           // + nav all fit without clipping.
           setPanelHeight(600);
+          // After a reset the softphone reloads to the sign-in screen: surface
+          // the panel so the rep sees why (spec decision 7).
+          if (readFlag(RESET_NOTICE_KEY)) setPanelVisibility(true);
         } else if (r.reason) {
           // Standalone preview — fine, just no click-to-dial.
           console.info('Open CTI not initialized:', r.reason);
@@ -1206,6 +1242,10 @@ export function App(): JSX.Element {
     return () => window.removeEventListener('message', onMessage);
   }, [startPowerDial]);
 
+  // Reset CTI: every signed-in tab polls. Only the leader acts, and only when
+  // this tab AND every peer is idle (use-cti-reset.ts).
+  const { onPeerReset } = useCtiReset({ enabled: signedIn && !!me, coordinatorRef, isBusy: resetBusy, teardownDevice });
+
   // One softphone per rep across all their tabs. The elected leader holds the
   // Twilio Device (inbound + outbound); non-leaders hold none, so Twilio never
   // forks a callback to a stale background tab. Leadership prefers the visible tab
@@ -1227,7 +1267,7 @@ export function App(): JSX.Element {
       // a callback is coming back to it.
       !!callbackWaitingRef.current ||
       !!parkedRunIdRef.current;
-    const coord = createSoftphoneCoordinator(browserCoordinatorDeps(userId, isBusy));
+    const coord = createSoftphoneCoordinator(browserCoordinatorDeps(userId, isBusy, resetBusy));
     coordinatorRef.current = coord;
     coord.onStateChange((s) => setCoordState(s));
     coord.onLeadershipChange((isLeader) => {
@@ -1260,6 +1300,8 @@ export function App(): JSX.Element {
         teardownDevice();
       }
     });
+    // A peer tab reset the CTI: finish it here too, once this tab is idle.
+    coord.onReset(onPeerReset);
     coord.start();
     const onHide = () => coord.stop();
     // Network came back → if we're the leader, make sure the Device is registered.
@@ -1272,7 +1314,7 @@ export function App(): JSX.Element {
       coord.stop();
       coordinatorRef.current = null;
     };
-  }, [signedIn, me?.user?.userId, ensureDevice, teardownDevice]);
+  }, [signedIn, me?.user?.userId, ensureDevice, teardownDevice, resetBusy, onPeerReset]);
 
   // Primary handoff intake: poll the server for a pending Salesforce→CTI
   // handoff (relayed by Apex — see docs/superpowers/plans/2026-07-14-power-dialer-5-handoff-relay.md)
@@ -1811,6 +1853,7 @@ export function App(): JSX.Element {
             <><p>Loading…</p><span className="spinner lg" /></>
           ) : (
             <>
+              {resetNotice && <p className="signin-notice" role="status">{RESET_NOTICE_TEXT}</p>}
               <p>Sign in with your Salesforce account to start calling.</p>
               <button className="btn primary full" onClick={() => void loginWithSalesforce()}>
                 Sign in with Salesforce

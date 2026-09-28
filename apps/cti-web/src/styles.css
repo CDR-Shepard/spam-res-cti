@@ -1053,6 +1053,14 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 .signin .logo svg { width: 28px; height: 28px; }
 .signin h2 { font-size: 17px; font-weight: 700; margin-bottom: 4px; }
 .signin p { font-size: 12px; color: var(--text-muted); margin-bottom: 22px; line-height: 1.5; }
+/* Reset CTI: why the rep is back at sign-in. */
+.signin .signin-notice {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
 
 /* ============================================================================ */
 /* Toast / spinner                                                              */
