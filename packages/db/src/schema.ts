@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   index,
   primaryKey,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
@@ -134,6 +135,14 @@ export const users = pgTable(
     /** The rep's YouTube playlist / video id when the choice is `youtube` (ids only). */
     dialerYoutubeListId: text('dialer_youtube_list_id'),
     dialerYoutubeVideoId: text('dialer_youtube_video_id'),
+    /** Reset CTI (migration 0045; docs/superpowers/specs/2026-09-28-cti-reset-design.md).
+     *  A web session is due for a reset while this is later than its
+     *  `sessions.created_at`. Written with the database's now(), never app time. */
+    ctiResetRequestedAt: timestamp('cti_reset_requested_at', { withTimezone: true }),
+    /** The admin who asked for the reset (audit). */
+    ctiResetRequestedBy: uuid('cti_reset_requested_by').references((): AnyPgColumn => users.id, { onDelete: 'set null' }),
+    /** When a softphone tab last finished a reset (POST /auth/reset-complete). */
+    ctiResetCompletedAt: timestamp('cti_reset_completed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
