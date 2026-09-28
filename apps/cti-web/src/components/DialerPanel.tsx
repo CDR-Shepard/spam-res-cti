@@ -13,7 +13,7 @@
  * The caller (App) maps that to Open CTI `screenPopRecord`.
  */
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
-import { DEFAULT_DIALER_RUN_DEFAULTS, type DialerRunDefaults, type HoldMusicSetting } from '@cti/contracts';
+import { DEFAULT_DIALER_RUN_DEFAULTS, type DialerRunDefaults, type DialerRunSettings, type HoldMusicSetting } from '@cti/contracts';
 import {
   dialerControl,
   getDialer,
@@ -605,9 +605,11 @@ export interface DialerPanelProps {
    *  `runDefaultsFromMe` in App.tsx) — what Ready to dial starts from. Absent:
    *  today's run (Twice, next business day). */
   runDefaults?: DialerRunDefaults;
-  /** Called once a Start the server accepted has saved the choices, so App can
-   *  re-read `/auth/me` and the next run starts from them. */
-  onRunDefaultsSaved?: () => void;
+  /** Called once a Start the server accepted has saved the choices — WITH the
+   *  settings themselves (review fix, Minor 2, spec 2026-09-28) — so App can
+   *  merge them into `me` immutably right away (this tab is correct even if
+   *  the follow-up `/auth/me` refresh fails) and then re-read `/auth/me`. */
+  onRunDefaultsSaved?: (settings: DialerRunSettings) => void;
 }
 
 /**
@@ -1181,7 +1183,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
       } finally {
         setControlBusy(false);
         onStartingChange?.(false);
-        if (startAccepted) onRunDefaultsSaved?.();
+        if (startAccepted) onRunDefaultsSaved?.(settings);
       }
     })();
   }, [onPrepare, onJoin, onStartingChange, onRunDefaultsSaved, sessionId, view, runDraft]);

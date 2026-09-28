@@ -126,7 +126,7 @@ describe('Ready to dial — run settings', () => {
     expect(startButton().disabled).toBe(false);
   });
 
-  it('Start sends exactly what is on screen, then tells App the choices were saved', async () => {
+  it('Start sends exactly what is on screen, then tells App the choices were saved — WITH the settings (review fix, Minor 2)', async () => {
     vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(READY);
     const start = vi.spyOn(dialerApi, 'startDialerRun').mockResolvedValue({ ok: true });
     const saved = vi.fn();
@@ -136,7 +136,11 @@ describe('Ready to dial — run settings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'In 2 business days' }));
     fireEvent.click(startButton());
     await waitFor(() => expect(start).toHaveBeenCalledWith('sess1', { passes: 1, maxRecords: 100, rolloverBusinessDays: 2 }));
-    await waitFor(() => expect(saved).toHaveBeenCalledTimes(1));
+    // Minor fix 2 (spec 2026-09-28 review): App needs the settings themselves
+    // so it can merge them into `me` immutably before the network refresh
+    // even lands — not just a bare "something changed" signal.
+    await waitFor(() => expect(saved).toHaveBeenCalledWith({ passes: 1, maxRecords: 100, rolloverBusinessDays: 2 }));
+    expect(saved).toHaveBeenCalledTimes(1);
   });
 
   it("a rep who never touches the settings sends Twice / All / Next business day — today's run", async () => {

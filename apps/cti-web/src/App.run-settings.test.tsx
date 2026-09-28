@@ -73,14 +73,21 @@ const state = {
    *  wiring from fetch response to the DialerPanel prop is unambiguous. */
   dialerRunDefaults: { passes: 1, maxRecords: 50, rolloverBusinessDays: 2 } as
     { passes: 1 | 2; maxRecords: number | null; rolloverBusinessDays: 1 | 2 },
+  /** Which session id POST /dialer/sessions hands back next — toggled to
+   *  'sess-2' to start a SECOND run in the merge-survives-a-failed-refresh
+   *  test below. */
+  nextSessionId: 'sess-1',
+  /** True for exactly one /auth/me call: it rejects instead of answering, so
+   *  a test can prove a merge survives a refresh that fails. */
+  failNextAuthMe: false,
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) } as Response;
 }
 
-const VIEW = () => ({
-  session: { id: 'sess-1', status: state.status },
+const VIEW = (id: string) => ({
+  session: { id, status: id === 'sess-1' ? state.status : 'ready' },
   counts: { total: 1, done: 0, connected: 0, noConnect: 0, skipped: 0, unreachable: 0, pending: 1 },
   currentItem: null,
   firstPassTotal: 1,
@@ -94,6 +101,8 @@ beforeEach(() => {
   state.controls = [];
   state.status = 'ready';
   state.dialerRunDefaults = { passes: 1, maxRecords: 50, rolloverBusinessDays: 2 };
+  state.nextSessionId = 'sess-1';
+  state.failNextAuthMe = false;
   const realDeps = coordinator.browserCoordinatorDeps;
   vi.spyOn(coordinator, 'browserCoordinatorDeps').mockImplementation((userId, getBusy) => realDeps(userId, getBusy));
   localStorage.clear();
@@ -101,6 +110,7 @@ beforeEach(() => {
   fetchMock = vi.fn(async (input: unknown, init?: { method?: string }): Promise<Response> => {
     const url = String(input);
     if (url.includes('/auth/me')) {
+      if (state.failNextAuthMe) { state.failNextAuthMe = false; throw new Error('network hiccup'); }
       return jsonResponse({
         user: {
           userId: 'u1', orgId: 'org1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true,
@@ -118,8 +128,9 @@ beforeEach(() => {
       if (control[1] === 'start') state.status = 'active';
       return jsonResponse({ ok: true });
     }
-    if (url.includes('/dialer/sessions/sess-1')) return jsonResponse(VIEW());
-    if (url.includes('/dialer/sessions') && init?.method === 'POST') return jsonResponse({ sessionId: 'sess-1', total: 1 });
+    if (url.includes('/dialer/sessions/sess-2')) return jsonResponse(VIEW('sess-2'));
+    if (url.includes('/dialer/sessions/sess-1')) return jsonResponse(VIEW('sess-1'));
+    if (url.includes('/dialer/sessions') && init?.method === 'POST') return jsonResponse({ sessionId: state.nextSessionId, total: 1 });
     return jsonResponse({});
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -133,11 +144,11 @@ afterEach(() => {
   localStorage.clear();
 });
 
-function handOverRun(): void {
+function handOverRun(recordId = '00Q000000000001'): void {
   act(() => {
     window.dispatchEvent(new MessageEvent('message', {
       source: window.parent,
-      data: { type: 'POWER_DIAL', objectType: 'Lead', recordIds: ['00Q000000000001'] },
+      data: { type: 'POWER_DIAL', objectType: 'Lead', recordIds: [recordId] },
     }));
   });
 }
@@ -169,5 +180,41 @@ describe('App — run-settings wiring (review fix, Important 3d)', () => {
     // Give any stray extra call a moment to show up, then confirm there isn't one.
     await new Promise((r) => setTimeout(r, 200));
     expect(authMeCallCount()).toBe(before + 1);
+  });
+
+  // Review fix (Minor 2): the accepted settings are merged into `me`
+  // immutably BEFORE the follow-up /auth/me refresh — so this tab is right
+  // even when that refresh fails outright.
+  it('merges the accepted settings into `me` immutably, so a SECOND run starts from them even though the refresh after Start failed', async () => {
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    handOverRun();
+    // Change every setting away from state.dialerRunDefaults (1 / 50 / 2).
+    fireEvent.click(await screen.findByRole('button', { name: 'Twice' }));
+    fireEvent.change(screen.getByLabelText('How many'), { target: { value: '75' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Next business day' }));
+    state.failNextAuthMe = true; // the refresh Start triggers will reject
+    fireEvent.click(screen.getByText('Start dialing'));
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(1));
+    await waitFor(() => expect(state.failNextAuthMe).toBe(false)); // the failing call happened
+    // A second, independent run — its Ready screen must reflect what was
+    // just accepted (Twice / 75 / Next business day), not the ORIGINAL
+    // state.dialerRunDefaults (1 / 50 / 2) the failed refresh never updated.
+    state.nextSessionId = 'sess-2';
+    handOverRun('00Q000000000002');
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Twice' })[0]?.getAttribute('aria-pressed')).toBe('true'));
+    expect((screen.getByLabelText('How many') as HTMLInputElement).value).toBe('75');
+    expect(screen.getByRole('button', { name: 'Next business day' }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  // Review fix (Minor 2): a new run also refreshes /auth/me on its own
+  // (beginRun), so a limit remembered from ANOTHER tab is picked up too.
+  it('also refreshes /auth/me when a run begins', async () => {
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    const before = authMeCallCount();
+    handOverRun();
+    await screen.findByText('Start dialing');
+    await waitFor(() => expect(authMeCallCount()).toBeGreaterThan(before));
   });
 });

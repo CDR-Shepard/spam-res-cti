@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { DialerRunDefaults, HoldMusicSetting } from '@cti/contracts';
+import type { DialerRunDefaults, DialerRunSettings, HoldMusicSetting } from '@cti/contracts';
 import { api, ApiError, clearSession, readSession, SESSION_KEY, writeSession } from './api';
 import { holdMusicFromMe } from './hold-music-from-me';
 import { runDefaultsFromMe } from './run-settings';
@@ -322,6 +322,18 @@ export function App(): JSX.Element {
   const refreshMe = useCallback(async () => {
     try { setMe(await api<MeResponse>('/auth/me')); } catch { /* */ }
   }, []);
+
+  // A Start the server accepted has saved Calls per person / How many /
+  // Missed tasks as the rep's next defaults (review fix, Minor 2, spec
+  // 2026-09-28). Merge them into `me` immutably FIRST — a new object, not a
+  // mutation — so this tab already has them the instant Start is accepted,
+  // even if the follow-up /auth/me refresh below fails outright (a network
+  // hiccup must not leave the remembered choices stale here). Then refresh,
+  // so any other field the server may also have changed still lands.
+  const handleRunDefaultsSaved = useCallback((settings: DialerRunSettings) => {
+    setMe((prev) => (prev ? { ...prev, user: { ...prev.user, dialerRunDefaults: settings } } : prev));
+    void refreshMe();
+  }, [refreshMe]);
 
   // Primary production login: no pre-existing session. Opens the SF OAuth
   // popup, then polls login-status until it hands back a session token.
@@ -1110,11 +1122,15 @@ export function App(): JSX.Element {
   // A session was created READY (queue built, nothing dialed): show the confirm
   // block on the Power Dial tab. No conference leg yet, and no nav lock — those
   // come when the rep presses Start dialing (prepareDialerDevice, then the
-  // engine's `start`, then joinDialerConference).
+  // engine's `start`, then joinDialerConference). Also refresh /auth/me
+  // (review fix, Minor 2, spec 2026-09-28) — a limit remembered from ANOTHER
+  // tab since this one last read it should be what the Ready screen starts
+  // from, not what this tab happened to have cached.
   const beginRun = useCallback((sessionId: string): void => {
     setDialerSessionId(sessionId);
     setTab('powerdial');
-  }, []);
+    void refreshMe();
+  }, [refreshMe]);
 
   // Runs BEFORE the engine is told to dial: ready the Device and refuse while
   // a call is up or ringing, so a softphone that cannot take the run never
@@ -2229,7 +2245,7 @@ export function App(): JSX.Element {
       holdMusic={holdMusicFromMe(me.user)}
       lineAudio={lineAudio}
       runDefaults={runDefaultsFromMe(me.user)}
-      onRunDefaultsSaved={refreshMe}
+      onRunDefaultsSaved={handleRunDefaultsSaved}
       onRunSnapshot={handleRunSnapshot}
       callback={callbackWaiting ? {
         id: callbackWaiting.id,
