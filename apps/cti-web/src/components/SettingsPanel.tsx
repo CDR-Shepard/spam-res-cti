@@ -11,7 +11,7 @@ import {
 import { api } from '../api';
 import { createAudioDevicePort, type AudioDevicePort } from '../audio-device-port';
 import { formatE164 } from '../format';
-import { PhoneOutgoingIcon, ZapIcon } from '../icons';
+import { MicIcon, PhoneOutgoingIcon, ZapIcon } from '../icons';
 import { AudioDeviceRows } from './AudioDeviceRows';
 import { MobilePairingCard } from './MobilePairingCard';
 
@@ -27,6 +27,11 @@ interface Props {
    *  drive (App passes one over its persistent Device). Without it the rows
    *  still list and save choices; the next Device picks them up. */
   audioDevices?: AudioDevicePort;
+  /** Opens the sound check (App's overlay). Without it the button is hidden. */
+  onRunSoundCheck?: () => void;
+  /** Reset my audio (App): System default for both, a fresh Device when idle,
+   *  then the sound check. Never signs the rep out. */
+  onResetAudio?: () => void;
 }
 
 /** The link box's saved-selection line, or null when nothing is stored yet. */
@@ -60,7 +65,7 @@ function patchErrorMessage(e: unknown): string | null {
  * Dial plays in the headset between calls — six styles, Off, or the rep's own
  * YouTube playlist/video — and which microphone and speaker the softphone uses.
  */
-export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast, audioDevices }: Props): JSX.Element {
+export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast, audioDevices, onRunSoundCheck, onResetAudio }: Props): JSX.Element {
   const audioPort = useMemo(() => audioDevices ?? createAudioDevicePort(() => null), [audioDevices]);
   const [draft, setDraft] = useState(forwardE164 ?? '');
   const [saving, setSaving] = useState(false);
@@ -223,6 +228,30 @@ export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast, audioD
           </div>
         </div>
         <AudioDeviceRows port={audioPort} onToast={onToast} />
+        {(onRunSoundCheck || onResetAudio) && (
+          <div className="set-row">
+            <div className="icon"><MicIcon /></div>
+            <div className="label" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div className="name">Sound check</div>
+              <div className="sub">
+                Test your microphone and speaker. Reset my audio puts both back to System default and restarts
+                the phone. It never signs you out.
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {onRunSoundCheck && (
+                  <button className="btn ghost" style={{ padding: '2px 10px', fontSize: 11 }} onClick={onRunSoundCheck}>
+                    Run sound check
+                  </button>
+                )}
+                {onResetAudio && (
+                  <button className="btn ghost" style={{ padding: '2px 10px', fontSize: 11 }} onClick={onResetAudio}>
+                    Reset my audio
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       <MobilePairingCard onToast={onToast} />
     </>

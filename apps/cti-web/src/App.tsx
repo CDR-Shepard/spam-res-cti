@@ -13,6 +13,7 @@ import { Dialpad } from './components/Dialpad';
 import { RecentCalls } from './components/RecentCalls';
 import { ReputationPanel } from './components/ReputationPanel';
 import { SettingsPanel } from './components/SettingsPanel';
+import { SoundCheck } from './components/SoundCheck';
 import { TeamPanel } from './components/TeamPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
@@ -38,7 +39,7 @@ import {
 } from './opencti';
 import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
 import { watchCallMedia, watchLocalMic, MEDIA_ISSUE_MESSAGE, type LocalMicCall } from './audio-readiness';
-import { loadAudioPrefs } from './audio-devices';
+import { loadAudioPrefs, saveAudioPrefs, SYSTEM_DEFAULT } from './audio-devices';
 import {
   applyChoiceFromStorage,
   createAudioDevicePort,
@@ -65,7 +66,7 @@ import {
 } from './callback-waiting';
 import { HEARTBEAT_UNREACHABLE_TEXT, parkedRunOverAction, startParkedHeartbeat } from './parked-heartbeat';
 import { playCallbackChime } from './callback-chime';
-import { clearFlag, isBusyForReset, readFlag, RESET_NOTICE_KEY, RESET_NOTICE_TEXT } from './cti-reset';
+import { clearFlag, isBusyForReset, readFlag, RESET_NOTICE_KEY, RESET_NOTICE_TEXT, SOUND_CHECK_DUE_KEY } from './cti-reset';
 import { useCtiReset } from './use-cti-reset';
 
 interface MeResponse {
@@ -283,6 +284,16 @@ export function App(): JSX.Element {
   const [signingIn, setSigningIn] = useState(false);
   // Written by a reset just before its reload (cti-reset.ts); cleared by signing in.
   const [resetNotice, setResetNotice] = useState(() => readFlag(RESET_NOTICE_KEY));
+  // The sound check (spec decision 6): due after a reset until "Looks good",
+  // and also opened from Settings. `audioEpoch` re-mounts Settings after it
+  // closes, so its Microphone/Speaker rows show what was chosen in the check.
+  const [soundCheckOpen, setSoundCheckOpen] = useState(() => readFlag(SOUND_CHECK_DUE_KEY));
+  const [audioEpoch, setAudioEpoch] = useState(0);
+  const closeSoundCheck = useCallback((finished: boolean): void => {
+    if (finished) clearFlag(SOUND_CHECK_DUE_KEY);
+    setSoundCheckOpen(false);
+    setAudioEpoch((n) => n + 1);
+  }, []);
   const refreshMe = useCallback(async () => {
     try { setMe(await api<MeResponse>('/auth/me')); } catch { /* */ }
   }, []);
@@ -1246,6 +1257,34 @@ export function App(): JSX.Element {
   // this tab AND every peer is idle (use-cti-reset.ts).
   const { onPeerReset } = useCtiReset({ enabled: signedIn && !!me, coordinatorRef, isBusy: resetBusy, teardownDevice });
 
+  // Settings → Reset my audio. It's self-serve and never signs out: System
+  // default for both, a fresh Device when nothing is live here, then the
+  // sound check.
+  const resetMyAudio = useCallback((): void => {
+    saveAudioPrefs({ input: null, output: null });
+    if (deviceRef.current) {
+      if (!resetBusy()) {
+        teardownDevice();
+        if (coordinatorRef.current?.isLeader() ?? true) {
+          void ensureDevice().catch(() => {
+            setInboundDegraded(true);
+            setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
+          });
+        }
+      } else {
+        // Something is live or owed here, so no rebuild. Put the live Device
+        // back on the defaults, exactly as picking "System default" in
+        // Settings does (safe mid-call).
+        void Promise.all([audioPort.unsetInputDevice(), audioPort.setOutputDevice(SYSTEM_DEFAULT)]).catch((err: unknown) => {
+          const why = err instanceof Error && err.message ? err.message : 'the browser refused it';
+          setToast({ text: `Couldn't switch back to System default: ${why}`, type: 'error' });
+        });
+      }
+    }
+    setToast({ text: 'Microphone and speaker are back to System default.', type: 'success' });
+    setSoundCheckOpen(true);
+  }, [resetBusy, teardownDevice, ensureDevice, audioPort]);
+
   // One softphone per rep across all their tabs. The elected leader holds the
   // Twilio Device (inbound + outbound); non-leaders hold none, so Twilio never
   // forks a callback to a stale background tab. Leadership prefers the visible tab
@@ -1873,6 +1912,9 @@ export function App(): JSX.Element {
   const photo = sf?.photoDataUrl ?? null;
   const nameIsEditable = !sf; // SF owns the identity when connected
   const inCall = phase === 'ringing' || phase === 'active' || phase === 'wrapup';
+  // Never over a ring, a call, wrap-up, a waiting callback or a run. It
+  // unmounts (releasing the mic) and comes back when the rep is free.
+  const soundCheckVisible = soundCheckOpen && !inCall && !incoming && !dialerLive && !callbackWaiting && parkedRunId === null;
 
   const header = (
     <div className="header">
@@ -1997,11 +2039,14 @@ export function App(): JSX.Element {
     <CallLog />
   ) : tab === 'settings' ? (
     <SettingsPanel
+      key={audioEpoch}
       forwardE164={me.user.noAnswerForwardE164 ?? null}
       holdMusic={holdMusicFromMe(me.user)}
       onSaved={refreshMe}
       onToast={setToast}
       audioDevices={audioPort}
+      onRunSoundCheck={() => setSoundCheckOpen(true)}
+      onResetAudio={resetMyAudio}
     />
   ) : tab === 'powerdial' ? (
     <DialerPanel
@@ -2140,6 +2185,14 @@ export function App(): JSX.Element {
             </Fragment>
           ))}
         </div>
+      )}
+      {soundCheckVisible && (
+        <SoundCheck
+          port={audioPort}
+          onToast={setToast}
+          onDone={() => closeSoundCheck(true)}
+          onLater={() => closeSoundCheck(false)}
+        />
       )}
       {toast && <div className={`toast ${toast.type}`}>{toast.text}</div>}
     </div>
