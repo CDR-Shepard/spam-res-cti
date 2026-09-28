@@ -3,7 +3,7 @@
  * VITE_API_BASE_URL, or — when served by our own API behind the same origin —
  * defaults to the current page's origin so relative paths Just Work.
  */
-const SESSION_KEY = 'cti.session.v1';
+export const SESSION_KEY = 'cti.session.v1';
 
 export const API_BASE_URL: string =
   (import.meta.env.VITE_API_BASE_URL as string | undefined) ??

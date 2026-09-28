@@ -46,7 +46,7 @@ export interface StorageLike {
 }
 
 /** window.localStorage, or null where even touching it throws (blocked site data). */
-function browserStorage(): StorageLike | null {
+export function browserStorage(): StorageLike | null {
   try {
     return typeof localStorage === 'undefined' ? null : localStorage;
   } catch {
