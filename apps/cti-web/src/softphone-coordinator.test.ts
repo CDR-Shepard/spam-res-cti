@@ -155,7 +155,11 @@ describe('createSoftphoneCoordinator — Reset CTI support', () => {
     const b = createSoftphoneCoordinator(h.makeDeps('b', true, false, () => wrapUp));
     a.start(); b.start();
     h.tick(1000); h.tick(1000);
-    expect(a.isLeader()).toBe(true); // smaller id, both visible: wrap-up is not "busy" for the election
+    // Smaller id, both visible: wrap-up is not "busy" for the election. Assert
+    // BOTH sides — the wrap-up tab must not elect ITSELF on its reset flag
+    // either (that would register a second Device beside a's).
+    expect(a.isLeader()).toBe(true);
+    expect(b.isLeader()).toBe(false);
     expect(a.peersBusyForReset()).toBe(true);
     wrapUp = false;
     h.tick(1000);
