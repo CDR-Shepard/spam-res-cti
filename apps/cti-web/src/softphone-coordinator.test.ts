@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createSoftphoneCoordinator, STALE_MS, type CoordinatorDeps } from './softphone-coordinator';
+import { createSoftphoneCoordinator, RESET_BUSY_MEMORY_MS, STALE_MS, type CoordinatorDeps } from './softphone-coordinator';
 
 // A shared in-memory bus so two coordinators can "see" each other, plus a
 // controllable clock and a manual interval pump — no DOM needed.
@@ -185,13 +185,91 @@ describe('createSoftphoneCoordinator — Reset CTI support', () => {
     expect(a.peersBusyForReset()).toBe(true);
   });
 
-  it('a peer that went silent (closed or crashed) stops blocking after STALE_MS', () => {
+  it('a peer that went silent (closed or crashed) while idle stops counting after STALE_MS', () => {
     const h = harness();
     const a = createSoftphoneCoordinator(h.makeDeps('a', true));
     a.start();
-    h.post({ type: 'presence', id: 'ghost', visible: false, busy: false, resetBusy: true });
-    expect(a.peersBusyForReset()).toBe(true);
+    h.post({ type: 'presence', id: 'ghost', visible: false, busy: false, resetBusy: false });
+    expect(a.peersBusyForReset()).toBe(false);
     h.tick(STALE_MS);
+    expect(a.peersBusyForReset()).toBe(false);
+  });
+});
+
+// Follow-up 1 (final review): Chrome throttles a tab hidden 5+ minutes to about
+// one timer a minute, so its 1 s heartbeat goes stale and it is pruned — yet
+// its wrap-up form is still open. What it last said about a reset outlives the
+// staleness: only `leaving`, a later resetBusy:false, or the cap clears it.
+describe('createSoftphoneCoordinator — a busy peer is remembered past staleness', () => {
+  /** Tab a (leader) hears a hidden peer say resetBusy=true, then nothing more. */
+  function hiddenBusyPeer() {
+    const h = harness();
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    let peers = -1;
+    a.onStateChange((s) => { peers = s.peerCount; });
+    a.start();
+    h.post({ type: 'presence', id: 'hidden-wrapup', visible: false, busy: false, resetBusy: true });
+    return { h, a, peerCount: () => peers };
+  }
+
+  it('a peer that said busy and then went stale still blocks — and stays out of the election', () => {
+    const { h, a, peerCount } = hiddenBusyPeer();
+    h.tick(STALE_MS + 5_000);
+    expect(peerCount()).toBe(0); // pruned: the election forgot it…
+    expect(a.isLeader()).toBe(true);
+    expect(a.peersBusyForReset()).toBe(true); // …the reset did not
+    h.tick(RESET_BUSY_MEMORY_MS - STALE_MS - 5_000 - 1);
+    expect(a.peersBusyForReset()).toBe(true);
+  });
+
+  it('a throttled peer that keeps saying busy (once a minute) keeps blocking past the cap', () => {
+    const { h, a } = hiddenBusyPeer();
+    for (let m = 0; m < 15; m++) {
+      h.tick(60_000);
+      h.post({ type: 'presence', id: 'hidden-wrapup', visible: false, busy: false, resetBusy: true });
+    }
+    h.tick(59_000);
+    expect(a.peersBusyForReset()).toBe(true);
+  });
+
+  it('a stale busy peer that sends `leaving` no longer blocks', () => {
+    const { h, a } = hiddenBusyPeer();
+    h.tick(STALE_MS + 5_000);
+    h.post({ type: 'leaving', id: 'hidden-wrapup' });
+    expect(a.peersBusyForReset()).toBe(false);
+  });
+
+  it('a stale busy peer that later says resetBusy:false no longer blocks — even once it goes stale again', () => {
+    const { h, a } = hiddenBusyPeer();
+    h.tick(STALE_MS + 5_000);
+    h.post({ type: 'presence', id: 'hidden-wrapup', visible: false, busy: false, resetBusy: false });
+    expect(a.peersBusyForReset()).toBe(false);
+    h.tick(STALE_MS + 5_000);
+    expect(a.peersBusyForReset()).toBe(false);
+  });
+
+  it('past the cap, a busy peer that never spoke again (crashed) no longer blocks', () => {
+    const { h, a } = hiddenBusyPeer();
+    h.tick(RESET_BUSY_MEMORY_MS);
+    expect(a.peersBusyForReset()).toBe(false);
+  });
+
+  it("one peer's leaving never clears another's busy memory", () => {
+    const { h, a } = hiddenBusyPeer();
+    h.post({ type: 'presence', id: 'other', visible: false, busy: false, resetBusy: false });
+    h.tick(STALE_MS + 5_000);
+    h.post({ type: 'leaving', id: 'other' });
+    expect(a.peersBusyForReset()).toBe(true);
+  });
+
+  it('a legacy peer (no resetBusy) whose busy=true went stale is remembered the same way (R4 fallback)', () => {
+    const h = harness();
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    a.start();
+    h.post({ type: 'presence', id: 'old-tab', visible: false, busy: true });
+    h.tick(STALE_MS + 5_000);
+    expect(a.peersBusyForReset()).toBe(true);
+    h.post({ type: 'presence', id: 'old-tab', visible: false, busy: false });
     expect(a.peersBusyForReset()).toBe(false);
   });
 

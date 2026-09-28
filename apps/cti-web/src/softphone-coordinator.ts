@@ -2,6 +2,12 @@ import { shouldBeLeader, type Peer } from './leader-election';
 
 export const HEARTBEAT_MS = 1000;
 export const STALE_MS = 3000;
+/** How long a peer's last "resetBusy=true" holds a reset back after the peer
+ *  goes quiet. Chrome throttles a tab hidden 5+ minutes to about one timer a
+ *  minute, so its heartbeat looks stale and the election prunes it — while its
+ *  wrap-up form may still be open. Only `leaving`, a later resetBusy:false from
+ *  that peer, or this cap (a tab that crashed while busy) clears it. */
+export const RESET_BUSY_MEMORY_MS = 10 * 60_000;
 
 export interface CoordinatorDeps {
   now: () => number;
@@ -36,9 +42,11 @@ export interface SoftphoneCoordinator {
   promoteSelf(): void;
   /** Synchronous leadership read (used to decide whether to re-register a dropped Device). */
   isLeader(): boolean;
-  /** True while any live peer would be interrupted by a reset — or runs a build
+  /** True while any peer would be interrupted by a reset — or runs a build
    *  from before resets, whose presence carries no `resetBusy` and falls back
-   *  to its legacy election `busy` flag instead (R4: never always-busy). */
+   *  to its legacy election `busy` flag instead (R4: never always-busy). A peer
+   *  that last said busy still counts after it goes stale, for up to
+   *  RESET_BUSY_MEMORY_MS (a hidden, throttled tab in wrap-up). */
   peersBusyForReset(): boolean;
   /** True once this instance has listened for a full STALE_MS since start():
    *  every live peer (1 s heartbeat) has announced itself by then. */
@@ -54,12 +62,15 @@ type Msg =
   | { type: 'leaving'; id: string }
   | { type: 'reset'; id: string };
 
-interface PeerState { visible: boolean; busy: boolean; resetBusy: boolean; lastSeen: number }
+interface PeerState { visible: boolean; busy: boolean; lastSeen: number }
 
 export function createSoftphoneCoordinator(deps: CoordinatorDeps): SoftphoneCoordinator {
   const selfId = deps.randomId();
   const getResetBusy = deps.getResetBusy ?? deps.getBusy;
   const peers = new Map<string, PeerState>();
+  // Kept apart from `peers`, which the election prunes on staleness: when each
+  // peer last said a reset would interrupt it (RESET_BUSY_MEMORY_MS).
+  const lastResetBusyAt = new Map<string, number>();
   let isLeader = false;
   let started = false;
   let stopped = false;
@@ -76,6 +87,7 @@ export function createSoftphoneCoordinator(deps: CoordinatorDeps): SoftphoneCoor
     const now = deps.now();
     // prune stale peers so peerCount and election stay honest
     for (const [id, p] of peers) if (p.lastSeen <= now - STALE_MS) peers.delete(id);
+    for (const [id, at] of lastResetBusyAt) if (at <= now - RESET_BUSY_MEMORY_MS) lastResetBusyAt.delete(id);
     const nextLeader = shouldBeLeader({ selfId, selfVisible: deps.getVisible(), selfBusy: deps.getBusy(), peers: peerList(), now, staleMs: STALE_MS });
     if (nextLeader !== isLeader) {
       isLeader = nextLeader;
@@ -90,18 +102,18 @@ export function createSoftphoneCoordinator(deps: CoordinatorDeps): SoftphoneCoor
     if (!m || typeof m !== 'object') return;
     if (m.type === 'presence' && m.id !== selfId) {
       const busy = !!m.busy;
-      peers.set(m.id, {
-        visible: m.visible,
-        busy,
-        // R4 (controller ruling): a build from before resets doesn't report
-        // resetBusy — fall back to its legacy election busy flag. It must
-        // never count as always-busy just because it's silent on the field.
-        resetBusy: typeof m.resetBusy === 'boolean' ? m.resetBusy : busy,
-        lastSeen: deps.now(),
-      });
+      const now = deps.now();
+      peers.set(m.id, { visible: m.visible, busy, lastSeen: now });
+      // R4 (controller ruling): a build from before resets doesn't report
+      // resetBusy — fall back to its legacy election busy flag. It must
+      // never count as always-busy just because it's silent on the field.
+      const resetBusy = typeof m.resetBusy === 'boolean' ? m.resetBusy : busy;
+      if (resetBusy) lastResetBusyAt.set(m.id, now);
+      else lastResetBusyAt.delete(m.id);
       recompute();
     } else if (m.type === 'leaving' && m.id !== selfId) {
       peers.delete(m.id);
+      lastResetBusyAt.delete(m.id);
       recompute();
     } else if (m.type === 'reset' && m.id !== selfId) {
       resetCb?.();
@@ -140,8 +152,10 @@ export function createSoftphoneCoordinator(deps: CoordinatorDeps): SoftphoneCoor
     promoteSelf() { beat(); },
     isLeader() { return isLeader; },
     peersBusyForReset() {
-      const cutoff = deps.now() - STALE_MS;
-      for (const p of peers.values()) if (p.lastSeen > cutoff && p.resetBusy) return true;
+      // Not `peers`: a busy peer that went stale (hidden and throttled) still
+      // counts until it leaves, says it's free, or the cap passes.
+      const cutoff = deps.now() - RESET_BUSY_MEMORY_MS;
+      for (const at of lastResetBusyAt.values()) if (at > cutoff) return true;
       return false;
     },
     settled() { return started && deps.now() - startedAt >= STALE_MS; },
