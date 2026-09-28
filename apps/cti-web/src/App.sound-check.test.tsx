@@ -492,6 +492,30 @@ describe('App — the sound check around the rest of the softphone', () => {
     expect(await screen.findByRole('dialog', { name: 'Sound check' })).toBeTruthy();
   });
 
+  // Re-review item 3 (M13w): wrap-up is reachable with a due check open —
+  // click-to-dial hides it, the rep calls, then hangs up.
+  it('never covers the wrap-up form: hidden through the call and its wrap-up, back once the call is logged', async () => {
+    let clickToDial: (e: opencti.ClickToDialEvent) => void = () => {};
+    vi.spyOn(opencti, 'initOpenCti').mockResolvedValue({ ready: true });
+    vi.spyOn(opencti, 'onClickToDial').mockImplementation((handler) => { clickToDial = handler; });
+    vi.spyOn(opencti, 'notifyReady').mockImplementation(() => {});
+    vi.spyOn(opencti, 'setPanelHeight').mockImplementation(() => {});
+    vi.spyOn(opencti, 'setPanelVisibility').mockImplementation(() => {});
+    signedIn();
+    localStorage.setItem('cti.soundCheck.due', '1');
+    render(<App />);
+    await screen.findByRole('dialog', { name: 'Sound check' });
+    await waitFor(() => expect(opencti.onClickToDial).toHaveBeenCalled());
+    await act(async () => { clickToDial({ number: '+16195551234' }); }); // ALLOW: a rep's call is placed at once
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(1));
+    expect(dialog()).toBeNull();
+    act(() => { FakeDevice.connects[0]!.emit('disconnect'); }); // the call ends: wrap-up
+    await screen.findByText('Log call');
+    expect(dialog()).toBeNull();
+    fireEvent.click(screen.getByText('Log call'));
+    expect(await screen.findByRole('dialog', { name: 'Sound check' })).toBeTruthy();
+  });
+
   it('closing the check never throws away an unsaved Settings draft', async () => {
     signedIn();
     render(<App />);
