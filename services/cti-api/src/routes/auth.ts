@@ -16,6 +16,7 @@ import {
   HOLD_MUSIC_CHOICES,
   YOUTUBE_LINK_ERROR,
   parseYouTubeLink,
+  toDialerRunDefaults,
   toHoldMusicChoice,
   type HoldMusicChoice,
   type HoldMusicSetting,
@@ -213,6 +214,9 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           dialerHoldMusicChoice: true,
           dialerYoutubeListId: true,
           dialerYoutubeVideoId: true,
+          dialerPasses: true,
+          dialerMaxRecords: true,
+          dialerRolloverBusinessDays: true,
         },
       }),
       db.query.salesforceConnections.findFirst({
@@ -227,6 +231,15 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         // before choices existed showing the right On/Off.
         holdMusic: holdMusicSettingFor(profile),
         dialerHoldMusic: holdMusicSettingFor(profile).choice !== 'off',
+        // Power Dial run settings (spec 2026-09-28): the choices the rep last
+        // STARTED a run with — Ready to dial's defaults. Controller ruling S2:
+        // maxRecords ("How many") is remembered too. A missing profile row
+        // reads as today's run.
+        dialerRunDefaults: toDialerRunDefaults(
+          profile
+            ? { passes: profile.dialerPasses, maxRecords: profile.dialerMaxRecords, rolloverBusinessDays: profile.dialerRolloverBusinessDays }
+            : null,
+        ),
       },
       salesforce: sfConn
         ? {

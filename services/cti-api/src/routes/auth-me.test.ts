@@ -19,6 +19,9 @@ const state = vi.hoisted(() => ({
     dialerHoldMusicChoice: string;
     dialerYoutubeListId: string | null;
     dialerYoutubeVideoId: string | null;
+    dialerPasses?: number;
+    dialerMaxRecords?: number | null;
+    dialerRolloverBusinessDays?: number;
   } | null,
   lastUpdateSet: null as unknown,
 }));
@@ -223,5 +226,27 @@ describe('GET /auth/me', () => {
     me = (await app.inject({ method: 'GET', url: '/auth/me' })).json();
     expect(me.user.holdMusic).toEqual({ choice: 'classical', youtube: null });
     expect(me.user.dialerHoldMusic).toBe(true);
+  });
+});
+
+describe('GET /auth/me — Power Dial run defaults (spec 2026-09-28)', () => {
+  it('returns the saved Calls per person, How many, and Missed tasks choices as dialerRunDefaults (controller ruling S2)', async () => {
+    state.userRow = { ...state.userRow!, dialerPasses: 1, dialerMaxRecords: 100, dialerRolloverBusinessDays: 2 };
+    const me = (await app.inject({ method: 'GET', url: '/auth/me' })).json();
+    expect(me.user.dialerRunDefaults).toEqual({ passes: 1, maxRecords: 100, rolloverBusinessDays: 2 });
+  });
+
+  // Controller ruling S2: null round-trips — a rep who last ran with All
+  // reads it back as null, never a stray number.
+  it('a saved All (maxRecords null) round-trips as null', async () => {
+    state.userRow = { ...state.userRow!, dialerPasses: 2, dialerMaxRecords: null, dialerRolloverBusinessDays: 1 };
+    const me = (await app.inject({ method: 'GET', url: '/auth/me' })).json();
+    expect(me.user.dialerRunDefaults).toEqual({ passes: 2, maxRecords: null, rolloverBusinessDays: 1 });
+  });
+
+  it("a missing profile row is today's run: Twice, All, next business day", async () => {
+    state.userRow = null;
+    const me = (await app.inject({ method: 'GET', url: '/auth/me' })).json();
+    expect(me.user.dialerRunDefaults).toEqual({ passes: 2, maxRecords: null, rolloverBusinessDays: 1 });
   });
 });

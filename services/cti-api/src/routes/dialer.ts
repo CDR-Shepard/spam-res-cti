@@ -2,7 +2,7 @@
  * Power dialer session lifecycle + engine controls.
  *
  *  POST /dialer/sessions              → create a READY session over a Lead/Opportunity/Task id list (nothing dials yet)
- *  POST /dialer/sessions/:id/start    → ready → active, then originate the first call (idempotent; 409 if another run is active)
+ *  POST /dialer/sessions/:id/start    → ready → active with the run settings, then originate the first call (idempotent; 409 if another run is active)
  *  GET  /dialer/sessions/:id          → session + counts + the in-flight item (if any)
  *  POST /dialer/sessions/:id/pause    → pause (in-flight dial finishes; queue stops advancing)
  *  POST /dialer/sessions/:id/resume   → resume + immediately try to advance
@@ -28,6 +28,7 @@ import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '@cti/auth';
 import { getDb, schema } from '@cti/db';
+import { MAX_RUN_RECORDS, type DialerRunSettings } from '@cti/contracts';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { signedCallbackUrl } from '../telephony/webhooks.js';
@@ -77,6 +78,45 @@ export const StartBody = z.object({
   objectType: z.enum(['Lead', 'Opportunity', 'Task']),
   recordIds: z.array(z.string().refine(isValidSfId, 'invalid record id')).min(1).max(500),
 });
+
+/**
+ * The POST /dialer/sessions/:id/start body — the run settings chosen on Ready
+ * to dial (spec docs/superpowers/specs/2026-09-28-run-settings-design.md).
+ * Exported so routes/dialer.test.ts pins THIS schema. Strict: an unknown key is
+ * a 400 too, so a typo can never quietly start a run with a default the rep
+ * did not pick. `maxRecords` absent or null = the whole list; the cap is the
+ * most records a run can hold.
+ */
+export const RunSettingsBody = z
+  .object({
+    passes: z.union([z.literal(1), z.literal(2)]),
+    maxRecords: z.number().int().min(1).max(MAX_RUN_RECORDS).nullable().optional(),
+    rolloverBusinessDays: z.union([z.literal(1), z.literal(2)]),
+  })
+  .strict();
+
+/** The first field a bad run-settings body trips on — what the 400 names. */
+function firstInvalidField(err: z.ZodError): string {
+  const issue = err.issues[0];
+  if (issue?.code === 'unrecognized_keys') return issue.keys[0] ?? 'body';
+  const key = issue?.path[0];
+  return typeof key === 'string' ? key : 'body';
+}
+
+/**
+ * Start's body → the run's settings. No body at all is a softphone tab loaded
+ * before run settings existed: `null`, which starts today's run and saves
+ * nothing. Any body must be complete and valid.
+ */
+export function parseRunSettings(body: unknown):
+  | { ok: true; settings: DialerRunSettings | null }
+  | { ok: false; field: string } {
+  if (body === undefined || body === null) return { ok: true, settings: null };
+  const parsed = RunSettingsBody.safeParse(body);
+  if (!parsed.success) return { ok: false, field: firstInvalidField(parsed.error) };
+  const { passes, maxRecords, rolloverBusinessDays } = parsed.data;
+  return { ok: true, settings: { passes, maxRecords: maxRecords ?? null, rolloverBusinessDays } };
+}
 
 const TWIML_DIALER_ANSWER_HOLD = '<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="30"/></Response>';
 const TWIML_EMPTY = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
@@ -358,7 +398,11 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     const owned = await requireOwnedSession(req, reply);
     if (!owned) return;
     if (!requirePowerDialer(owned.authed, reply)) return reply;
-    const result = await startSession(owned.session.id, buildEngineDeps());
+    // The run settings ride the ready → active claim, so a bad one is refused
+    // BEFORE anything flips or dials.
+    const run = parseRunSettings(req.body);
+    if (!run.ok) return reply.code(400).send({ error: `Invalid ${run.field}`, field: run.field });
+    const result = await startSession(owned.session.id, buildEngineDeps(), run.settings);
     if (result.action === 'conflict') {
       // `activeSessionId` names the rep's OTHER live run — active, or paused
       // with a dial still out — so the confirm block can offer to stop it;

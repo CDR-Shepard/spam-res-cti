@@ -21,6 +21,7 @@ const state = vi.hoisted(() => ({
   positionRows: [] as Array<{ position: number | null; userId: string; name: string | null }>,
   takeCallbackResult: { action: 'paused', canceledItemId: null } as Record<string, unknown>,
   takeCallbackCalls: [] as string[],
+  startCalls: [] as Array<{ sessionId: string; settings: unknown }>,
 }));
 
 vi.mock('../config.js', () => ({ loadConfig: () => ({}) }));
@@ -66,11 +67,17 @@ vi.mock('../dialer/engine.js', async (importOriginal) => ({
     state.takeCallbackCalls.push(sessionId);
     return state.takeCallbackResult;
   },
+  // The Start route's own job is parsing and forwarding the run settings;
+  // what the engine does with them is pinned in dialer/engine.test.ts.
+  startSession: async (sessionId: string, _deps: unknown, settings: unknown) => {
+    state.startCalls.push({ sessionId, settings });
+    return { action: 'dialing', itemId: 'i1' };
+  },
 }));
 
 // The REAL schema the route parses with — imported, never mirrored. A local copy
 // pinned a contract the route had already moved past ('Task' runs were missing).
-import { StartBody, registerDialerRoutes } from './dialer.js';
+import { RunSettingsBody, StartBody, parseRunSettings, registerDialerRoutes } from './dialer.js';
 
 describe('POST /dialer/sessions body validation', () => {
   it('accepts a Lead/Opportunity/Task list of SF ids and rejects junk', () => {
@@ -322,5 +329,117 @@ describe('POST /dialer/sessions/:id/take-callback', () => {
     state.authedUser = { ...REP, powerDialerEnabled: false };
     const res = await post('S1');
     expect(res.statusCode).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Run settings (spec docs/superpowers/specs/2026-09-28-run-settings-design.md):
+// the Start body, validated at the boundary, and the session view the run line
+// reads. The engine side (claim, trim, saved defaults) is pinned in
+// dialer/engine.test.ts; this file proves the ROUTE parses and forwards.
+// ---------------------------------------------------------------------------
+describe('parseRunSettings', () => {
+  it("no body is a tab from before run settings: null — today's run, nothing saved", () => {
+    expect(parseRunSettings(undefined)).toEqual({ ok: true, settings: null });
+    expect(parseRunSettings(null)).toEqual({ ok: true, settings: null });
+  });
+
+  it('a full body parses; maxRecords absent or null is the whole list', () => {
+    expect(parseRunSettings({ passes: 1, maxRecords: 100, rolloverBusinessDays: 2 }))
+      .toEqual({ ok: true, settings: { passes: 1, maxRecords: 100, rolloverBusinessDays: 2 } });
+    expect(parseRunSettings({ passes: 2, rolloverBusinessDays: 1 }))
+      .toEqual({ ok: true, settings: { passes: 2, maxRecords: null, rolloverBusinessDays: 1 } });
+    expect(parseRunSettings({ passes: 2, maxRecords: null, rolloverBusinessDays: 1 }))
+      .toEqual({ ok: true, settings: { passes: 2, maxRecords: null, rolloverBusinessDays: 1 } });
+    expect(parseRunSettings({ passes: 2, maxRecords: 500, rolloverBusinessDays: 1 }).ok).toBe(true);
+  });
+
+  it.each([
+    [{ passes: 3, rolloverBusinessDays: 1 }, 'passes'],
+    [{ passes: '1', rolloverBusinessDays: 1 }, 'passes'],
+    [{ rolloverBusinessDays: 1 }, 'passes'],
+    [{ passes: 2, rolloverBusinessDays: 3 }, 'rolloverBusinessDays'],
+    [{ passes: 2 }, 'rolloverBusinessDays'],
+    [{ passes: 2, rolloverBusinessDays: 1, maxRecords: 0 }, 'maxRecords'],
+    [{ passes: 2, rolloverBusinessDays: 1, maxRecords: 1.5 }, 'maxRecords'],
+    [{ passes: 2, rolloverBusinessDays: 1, maxRecords: '100' }, 'maxRecords'],
+    [{ passes: 2, rolloverBusinessDays: 1, maxRecords: 501 }, 'maxRecords'],
+    [{ passes: 2, rolloverBusinessDays: 1, maxRecord: 5 }, 'maxRecord'],
+    [[1, 2], 'body'],
+  ] as const)('%j is refused, naming %s', (body, field) => {
+    expect(parseRunSettings(body)).toEqual({ ok: false, field });
+  });
+
+  it('RunSettingsBody is strict: an unknown key never starts a run with a default the rep did not pick', () => {
+    expect(RunSettingsBody.safeParse({ passes: 1, rolloverBusinessDays: 2, extra: true }).success).toBe(false);
+  });
+});
+
+describe('POST /dialer/sessions/:id/start — run settings', () => {
+  const REP = { userId: 'U-ME', orgId: 'O1', email: 'me@x.com', isAdmin: false, powerDialerEnabled: true };
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    state.authedUser = REP;
+    state.session = { id: 'S1', orgId: 'O1', userId: 'U-ME', status: 'ready' };
+    state.startCalls = [];
+    app = Fastify();
+    await registerDialerRoutes(app);
+    await app.ready();
+  });
+  afterEach(async () => { await app.close(); });
+
+  const start = (payload?: Record<string, unknown>) => app.inject({
+    method: 'POST', url: '/dialer/sessions/S1/start', headers: { authorization: 'Bearer t' },
+    ...(payload === undefined ? {} : { payload }),
+  });
+
+  it('forwards the chosen settings to the engine and answers with its result', async () => {
+    const res = await start({ passes: 1, maxRecords: 100, rolloverBusinessDays: 2 });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, action: 'dialing', itemId: 'i1' });
+    expect(state.startCalls).toEqual([{ sessionId: 'S1', settings: { passes: 1, maxRecords: 100, rolloverBusinessDays: 2 } }]);
+  });
+
+  it("no body (a tab from before this release) starts today's run: settings null", async () => {
+    expect((await start()).statusCode).toBe(200);
+    expect(state.startCalls).toEqual([{ sessionId: 'S1', settings: null }]);
+  });
+
+  it('a bad value is a 400 naming the field, and nothing starts', async () => {
+    const res = await start({ passes: 3, rolloverBusinessDays: 1 });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: 'Invalid passes', field: 'passes' });
+    expect(state.startCalls).toEqual([]);
+  });
+
+  it('a rep without the grant is refused before the body is read (403), and nothing starts', async () => {
+    state.authedUser = { ...REP, powerDialerEnabled: false };
+    const res = await start({ passes: 3 });
+    expect(res.statusCode).toBe(403);
+    expect(state.startCalls).toEqual([]);
+  });
+});
+
+describe('GET /dialer/sessions/:id — run settings', () => {
+  const REP = { userId: 'U-ME', orgId: 'O1', email: 'me@x.com', isAdmin: false, powerDialerEnabled: true };
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    state.authedUser = REP;
+    state.items = [];
+    state.jobs = [];
+    state.positionRows = [];
+    app = Fastify();
+    await registerDialerRoutes(app);
+    await app.ready();
+  });
+  afterEach(async () => { await app.close(); });
+
+  it('exposes passes, maxRecords and rolloverBusinessDays on the session — what the run line reads', async () => {
+    state.session = { id: 'S1', orgId: 'O1', userId: 'U-ME', status: 'active', listViewId: null, passes: 1, maxRecords: 100, rolloverBusinessDays: 2 };
+    const res = await app.inject({ method: 'GET', url: '/dialer/sessions/S1', headers: { authorization: 'Bearer t' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().session).toMatchObject({ passes: 1, maxRecords: 100, rolloverBusinessDays: 2 });
   });
 });
