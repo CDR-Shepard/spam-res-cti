@@ -1507,6 +1507,9 @@ export function App(): JSX.Element {
     let cancelled = false;
     const poll = async (): Promise<void> => {
       try {
+        // A reset is under way (C1(a)): take no handoff — the run would start
+        // on a softphone about to reload. The GET claims it, so leave it unclaimed.
+        if (resettingRef.current) return;
         if (coordinatorRef.current && !coordinatorRef.current.isLeader()) return;
         // Don't take a handoff while the rep is on/ringing a call: the confirm
         // block would pop over the call, and Start's device.connect() would

@@ -56,6 +56,8 @@ const state = {
   nextSessionId: 'sess-1',
   /** When set, POST /auth/reset-complete waits on this before answering. */
   holdResetComplete: null as Promise<void> | null,
+  /** What GET /dialer/handoffs/pending answers: a run Salesforce relayed, or none. */
+  handoff: null as { objectType: string; recordIds: string[] } | null,
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -81,6 +83,7 @@ beforeEach(() => {
   state.holdStart = null;
   state.nextSessionId = 'sess-1';
   state.holdResetComplete = null;
+  state.handoff = null;
   localStorage.clear();
   localStorage.setItem('cti.session.v1', JSON.stringify({ token: 'tok', userId: 'u1', email: 'rep@example.com' }));
   fetchMock = vi.fn(async (input: unknown, init?: { method?: string }): Promise<Response> => {
@@ -98,7 +101,7 @@ beforeEach(() => {
     }
     if (url.includes('/calls/pending-disposition')) return jsonResponse({ pending: null });
     if (url.includes('/telephony/token')) return jsonResponse({ token: 'device-token' });
-    if (url.includes('/dialer/handoffs/pending')) return jsonResponse({ handoff: null });
+    if (url.includes('/dialer/handoffs/pending')) return jsonResponse({ handoff: state.handoff });
     const control = /\/dialer\/sessions\/sess-1\/(start|stop|pause|resume|skip|next)/.exec(url);
     if (control) {
       state.controls.push(control[1]!);
@@ -262,5 +265,32 @@ describe('App — reset vs a power-dial run (I1: Stop must not leave a stale "ac
     await advance(6_000);
     await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
     expect(callsTo('/auth/reset-complete')).toBe(1);
+  });
+});
+
+// Follow-up 4 (final review): the Salesforce handoff poll respects the reset
+// latch. A handoff taken now would start a run on a softphone about to reload.
+describe('App — the handoff poll during a reset', () => {
+  it('asks for no handoff while a reset is under way, so none is taken and no run starts', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    state.resetDue = true;
+    let openPost: () => void = () => {};
+    state.holdResetComplete = new Promise<void>((resolve) => { openPost = resolve; });
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    await waitFor(() => expect(callsTo('/dialer/handoffs/pending')).toBeGreaterThan(0)); // idle: it polls
+    await advance(8_000);
+    await waitFor(() => expect(FakeDevice.instances[0]!.destroyed).toBe(true)); // latched; the POST waits
+    expect(callsTo('/auth/reset-complete')).toBe(1);
+
+    const polled = callsTo('/dialer/handoffs/pending');
+    state.handoff = { objectType: 'Lead', recordIds: ['00Q000000000001'] };
+    await advance(12_000); // two poll ticks
+    expect(callsTo('/dialer/handoffs/pending')).toBe(polled);
+    const runsCreated = fetchMock.mock.calls.filter(([u, init]) => String(u).endsWith('/dialer/sessions') && (init as { method?: string } | undefined)?.method === 'POST');
+    expect(runsCreated).toEqual([]);
+
+    act(() => { openPost(); });
+    await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
   });
 });
