@@ -16,10 +16,10 @@ A website can't make Chrome show its microphone popup again once the site is **A
 
 In **More → Team** (`TeamPanel`), each rep's row gets a **Reset CTI** button and a status line:
 
-- "Reset pending since 2:41 PM", or
+- "Reset requested 2:41 PM" (still pending), or
 - "Reset done 2:43 PM".
 
-The header gets a **Reset everyone** button, behind a confirm. It covers every human user in the org except the admin who clicks it.
+The header gets a **Refresh** button, which re-reads these statuses, and a **Reset everyone** button, behind a confirm. It covers every human user in the org except the admin who clicks it.
 
 ## What the rep sees
 

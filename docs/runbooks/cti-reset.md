@@ -34,9 +34,9 @@ Code: `services/cti-api/src/routes/cti-reset.ts` (API); `apps/cti-web/src/cti-re
 
 ## What the admin sees
 
-- *Reset pending since 2:41 PM*: the request is later than the last completion.
+- *Reset requested 2:41 PM*: still pending — the request is later than the last completion. A stamp from another day shows its date (*Reset requested Sep 27, 2:41 PM*).
 - *Reset done 2:43 PM*: a softphone tab finished it (`POST /auth/reset-complete`).
-- To refresh, switch to another tab and back to Team.
+- To refresh, press **Refresh** at the top of the Team list.
 
 ## Why a reset stays "pending"
 
