@@ -140,6 +140,24 @@ describe('App — the sound check after a reset', () => {
     expect(await screen.findByRole('dialog', { name: 'Sound check' })).toBeTruthy();
   });
 
+  // Task 3 review I2: the dialpad's global keyboard shortcuts used to run
+  // behind the overlay — digits, then Enter (check), then Enter (POST /calls).
+  it('is modal for the keyboard: digits and Enter behind it dial nothing, and Enter on its buttons is not swallowed', async () => {
+    const fetchMock = vi.mocked(fetch);
+    signedIn();
+    localStorage.setItem('cti.soundCheck.due', '1');
+    render(<App />);
+    const later = await screen.findByRole('button', { name: 'Not now' });
+    for (const key of ['5', '5', '5', '1', '2', '3', '4', 'Enter', 'Enter']) fireEvent.keyDown(window, { key });
+    await act(async () => { await Promise.resolve(); });
+    const dialed = fetchMock.mock.calls.filter(([u]) => /\/firewall\/precall|\/calls$/.test(String(u)));
+    expect(dialed).toEqual([]);
+    expect(fireEvent.keyDown(later, { key: 'Enter' })).toBe(true); // default action (click) not prevented
+    fireEvent.keyDown(later, { key: 'Escape' }); // Escape = "Not now"
+    expect(dialog()).toBeNull();
+    expect(localStorage.getItem('cti.soundCheck.due')).toBe('1');
+  });
+
   it('"Not now" closes it and keeps it due for the next load', async () => {
     signedIn();
     localStorage.setItem('cti.soundCheck.due', '1');

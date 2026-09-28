@@ -1948,9 +1948,12 @@ export function App(): JSX.Element {
     } finally { setBusy(false); }
   }, [active, disposition, notes, elapsed, reset, refreshPending]);
 
-  // Global keyboard input for the dialpad (only while it's visible)
+  // Global keyboard input for the dialpad (only while it's visible — never
+  // behind the sound check, which is modal: Task 3 review I2).
+  const soundCheckVisibleRef = useRef(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      if (soundCheckVisibleRef.current) return;
       if (tab !== 'dialer') return;
       if (phase !== 'idle' && phase !== 'preflight') return;
       const t = e.target as HTMLElement | null;
@@ -1980,6 +1983,7 @@ export function App(): JSX.Element {
     && !incoming && !dialerLive && !callbackWaiting && parkedRunId === null;
   // A due check opened on its own: surface the Salesforce panel so the rep
   // sees it (Task 3 review I1(b)).
+  soundCheckVisibleRef.current = soundCheckVisible;
   const dueCheckShown = soundCheckVisible && soundCheck === 'due';
   useEffect(() => {
     if (!dueCheckShown) return;

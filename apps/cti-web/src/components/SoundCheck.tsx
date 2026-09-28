@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { AudioDevicePort } from '../audio-device-port';
 import { loadAudioPrefs, type AudioPrefs } from '../audio-devices';
 import { METER_INTERVAL_MS, type LevelSource, type MicStreamLike } from '../level-meter';
@@ -40,6 +40,9 @@ export const SOUND_CHECK_TEXT = {
   later: 'Not now',
 } as const;
 
+/** What Tab cycles through inside the dialog. */
+const FOCUSABLE = 'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+
 /**
  * The sound check (spec decision 6): one screen for whichever of Chrome's
  * three microphone states applies. App mounts it as a full-screen overlay,
@@ -76,6 +79,32 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
     );
     return () => { live = false; stop(); };
   }, [env]);
+
+  // Modal for the keyboard too (Task 3 review I2): focus moves in on open —
+  // onto the primary button (autoFocus) once one renders, the dialog itself
+  // until then — and goes back to whatever had it on close.
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const before = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.contains(document.activeElement)) dialog.focus();
+    return () => { if (before?.isConnected) before.focus(); };
+  }, []);
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onLater();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const controls = [...(dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])];
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (!first || !last) { e.preventDefault(); return; }
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || active === dialogRef.current)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+  };
 
   // A hidden tab never holds the mic: stop the meter; back on screen the rep
   // presses Start again — nothing re-opens by itself.
@@ -126,14 +155,14 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
 
   const pct = Math.round(level * 100);
   return (
-    <div className="sound-check" role="dialog" aria-modal="true" aria-label="Sound check">
+    <div className="sound-check" role="dialog" aria-modal="true" aria-label="Sound check" ref={dialogRef} tabIndex={-1} onKeyDown={onKeyDown}>
       <div className="sound-check-card">
         {permission === 'checking' && <p className="sub">{SOUND_CHECK_TEXT.checking}</p>}
         {permission === 'prompt' && (
           <>
             <h2>{SOUND_CHECK_TEXT.promptTitle}</h2>
             <p className="sub">{SOUND_CHECK_TEXT.promptBody}</p>
-            <button className="btn primary full" disabled={asking} onClick={() => void allow()}>{SOUND_CHECK_TEXT.allow}</button>
+            <button className="btn primary full" autoFocus disabled={asking} onClick={() => void allow()}>{SOUND_CHECK_TEXT.allow}</button>
           </>
         )}
         {permission === 'denied' && (
@@ -163,13 +192,13 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
             ) : (
               <>
                 <p className="sub">{SOUND_CHECK_TEXT.startHint}</p>
-                <button className="btn primary full" onClick={() => setStarted(true)}>{SOUND_CHECK_TEXT.start}</button>
+                <button className="btn primary full" autoFocus onClick={() => setStarted(true)}>{SOUND_CHECK_TEXT.start}</button>
               </>
             )}
             <div className="set-list">
               <AudioDeviceRows port={port} onToast={onToast} onChange={(p: AudioPrefs) => setMicId(p.input)} />
             </div>
-            {started && <button className="btn primary full" onClick={onDone}>{SOUND_CHECK_TEXT.done}</button>}
+            {started && <button className="btn primary full" autoFocus onClick={onDone}>{SOUND_CHECK_TEXT.done}</button>}
           </>
         )}
         {micError && <p className="set-error" role="alert">{micError}</p>}

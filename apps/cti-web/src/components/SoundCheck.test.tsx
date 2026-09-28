@@ -239,6 +239,53 @@ describe('SoundCheck — an auto-opened check waits for a click', () => {
   });
 });
 
+// Task 3 review I2: the overlay is modal for the keyboard too.
+describe('SoundCheck — keyboard: focus in, Tab trapped, Escape closes, focus restored', () => {
+  it('focus moves into the dialog, onto its primary button', async () => {
+    const f = fakeEnv('granted');
+    renderCheck(f.env, { startNow: false });
+    const start = await screen.findByRole('button', { name: SOUND_CHECK_TEXT.start });
+    await waitFor(() => expect(document.activeElement).toBe(start));
+  });
+
+  it('with no primary button (blocked), focus is still inside the dialog', async () => {
+    renderCheck(fakeEnv('denied').env, { startNow: false });
+    await screen.findByText(SOUND_CHECK_TEXT.deniedTitle);
+    expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
+  });
+
+  it('Tab from the last control wraps to the first; Shift+Tab from the first wraps to the last', async () => {
+    renderCheck(fakeEnv('prompt').env, { startNow: false });
+    const allow = await screen.findByRole('button', { name: SOUND_CHECK_TEXT.allow });
+    const later = screen.getByRole('button', { name: SOUND_CHECK_TEXT.later });
+    later.focus();
+    fireEvent.keyDown(later, { key: 'Tab' });
+    expect(document.activeElement).toBe(allow);
+    fireEvent.keyDown(allow, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(later);
+  });
+
+  it('Escape is "Not now"', async () => {
+    const onLater = vi.fn();
+    renderCheck(fakeEnv('granted').env, { startNow: false, onLater });
+    const start = await screen.findByRole('button', { name: SOUND_CHECK_TEXT.start });
+    fireEvent.keyDown(start, { key: 'Escape' });
+    expect(onLater).toHaveBeenCalledTimes(1);
+  });
+
+  it('closing gives focus back to whatever had it before', async () => {
+    const opener = document.createElement('button');
+    opener.textContent = 'Run sound check';
+    document.body.appendChild(opener);
+    opener.focus();
+    const view = renderCheck(fakeEnv('granted').env, { startNow: false });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: SOUND_CHECK_TEXT.start })));
+    view.unmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+});
+
 describe('SoundCheck — a hidden tab never holds the mic', () => {
   it('the tab goes hidden: the stream stops; back on screen it offers Start again and opens nothing by itself', async () => {
     const f = fakeEnv('granted');
