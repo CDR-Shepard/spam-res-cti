@@ -17,7 +17,10 @@ const state = vi.hoisted(() => ({
   // NOT introspected for filtering, only recorded for assertion below).
   selectRows: [] as Array<{
     id: string; email: string; displayName: string | null; isAdmin: boolean; powerDialerEnabled: boolean;
+    ctiResetRequestedAt: Date | null; ctiResetCompletedAt: Date | null;
   }>,
+  // The column map `select({...})` was called with — pins which DB columns feed each field.
+  lastSelectCols: null as unknown,
   // Configurable row array `update().set().where().returning()` resolves to
   // — an empty array simulates the UPDATE matching zero rows (target in
   // another org, or a target that doesn't exist).
@@ -93,7 +96,8 @@ function renderPredicate(node: unknown): string {
  */
 function fakeDb() {
   return {
-    select(_cols?: unknown) {
+    select(cols?: unknown) {
+      state.lastSelectCols = cols;
       return {
         from(_table: unknown) {
           return {
@@ -138,10 +142,14 @@ const TARGET_ID = '22222222-2222-2222-2222-222222222222';
 beforeEach(async () => {
   state.authedUser = null;
   state.selectRows = [
-    { id: 'rep-1', email: 'rep@x.com', displayName: 'Rep One', isAdmin: false, powerDialerEnabled: false },
+    {
+      id: 'rep-1', email: 'rep@x.com', displayName: 'Rep One', isAdmin: false, powerDialerEnabled: false,
+      ctiResetRequestedAt: new Date('2026-09-28T21:41:00.000Z'), ctiResetCompletedAt: null,
+    },
   ];
   state.updateRows = [{ id: TARGET_ID, powerDialerEnabled: true }];
   state.lastSelectWhere = null;
+  state.lastSelectCols = null;
   state.lastUpdateSet = null;
   state.lastUpdateWhere = null;
   state.ensureCalls = [];
@@ -169,6 +177,15 @@ describe('GET /admin/team', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().users[0]).toMatchObject({ email: 'rep@x.com', powerDialerEnabled: false });
     expect(renderPredicate(state.lastSelectWhere)).toContain('org_id');
+  });
+
+  it('each user carries the Reset CTI stamps, read from the right columns', async () => {
+    state.authedUser = admin;
+    const res = await app.inject({ method: 'GET', url: '/admin/team' });
+    expect(res.json().users[0]).toMatchObject({ ctiResetRequestedAt: '2026-09-28T21:41:00.000Z', ctiResetCompletedAt: null });
+    const cols = state.lastSelectCols as Record<string, { name: string }>;
+    expect(cols.ctiResetRequestedAt?.name).toBe('cti_reset_requested_at');
+    expect(cols.ctiResetCompletedAt?.name).toBe('cti_reset_completed_at');
   });
 });
 

@@ -703,6 +703,9 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         displayName: schema.users.displayName,
         isAdmin: schema.users.isAdmin,
         powerDialerEnabled: schema.users.powerDialerEnabled,
+        // Reset CTI status (migration 0045): the Team panel shows pending / done.
+        ctiResetRequestedAt: schema.users.ctiResetRequestedAt,
+        ctiResetCompletedAt: schema.users.ctiResetCompletedAt,
       })
       .from(schema.users)
       .where(humanUsersInOrg(s.orgId))
