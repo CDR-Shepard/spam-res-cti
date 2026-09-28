@@ -1122,15 +1122,17 @@ export function App(): JSX.Element {
   // A session was created READY (queue built, nothing dialed): show the confirm
   // block on the Power Dial tab. No conference leg yet, and no nav lock — those
   // come when the rep presses Start dialing (prepareDialerDevice, then the
-  // engine's `start`, then joinDialerConference). Also refresh /auth/me
-  // (review fix, Minor 2, spec 2026-09-28) — a limit remembered from ANOTHER
-  // tab since this one last read it should be what the Ready screen starts
-  // from, not what this tab happened to have cached.
+  // engine's `start`, then joinDialerConference). The caller has ALREADY
+  // awaited a fresh /auth/me (re-review safety fix — see startPowerDial /
+  // startPowerDialFromListView) before calling this, so DialerPanel's
+  // per-session reseed effect — which reads runDefaults SYNCHRONOUSLY the
+  // instant this new sessionId lands, and deliberately ignores a same-session
+  // runDefaults change (Important 3) — picks up a limit remembered from
+  // ANOTHER tab, not whatever this tab had cached when the run began.
   const beginRun = useCallback((sessionId: string): void => {
     setDialerSessionId(sessionId);
     setTab('powerdial');
-    void refreshMe();
-  }, [refreshMe]);
+  }, []);
 
   // Runs BEFORE the engine is told to dial: ready the Device and refuse while
   // a call is up or ringing, so a softphone that cannot take the run never
@@ -1361,25 +1363,37 @@ export function App(): JSX.Element {
       return;
     }
     try {
-      const { sessionId } = await startDialer(objectType as DialerObjectType, recordIds as string[]);
+      // Await the /auth/me refresh ALONGSIDE session creation (re-review
+      // safety fix) — not after beginRun, which used to fire it and forget:
+      // that refresh usually landed too late to affect the very run it was
+      // meant to freshen. refreshMe never rejects, so this adds no new
+      // failure mode for startDialer's own errors to get lost behind.
+      const [{ sessionId }] = await Promise.all([
+        startDialer(objectType as DialerObjectType, recordIds as string[]),
+        refreshMe(),
+      ]);
       beginRun(sessionId);
     } catch (e) {
       setToast({ text: dialerStartErrorMessage(e), type: 'error' });
     }
-  }, [beginRun]);
+  }, [beginRun, refreshMe]);
 
   // Start a run from a Salesforce list view: the CTI pulls the list's records
   // via the rep's own SF token (no fragile SF list-view button needed).
   const startPowerDialFromListView = useCallback(
     async (object: DialerObjectType, listViewId: string): Promise<void> => {
       try {
-        const { sessionId } = await startDialerFromListView(object, listViewId);
+        // See startPowerDial's comment — same reasoning, same fix.
+        const [{ sessionId }] = await Promise.all([
+          startDialerFromListView(object, listViewId),
+          refreshMe(),
+        ]);
         beginRun(sessionId);
       } catch (e) {
         setToast({ text: dialerStartErrorMessage(e), type: 'error' });
       }
     },
-    [beginRun],
+    [beginRun, refreshMe],
   );
 
   // Record intake (handoff seam): the Salesforce LWC (or a test harness) hands

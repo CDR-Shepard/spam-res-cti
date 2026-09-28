@@ -80,6 +80,11 @@ const state = {
   /** True for exactly one /auth/me call: it rejects instead of answering, so
    *  a test can prove a merge survives a refresh that fails. */
   failNextAuthMe: false,
+  /** Milliseconds the NEXT /auth/me call is delayed before answering (then
+   *  reset to 0) — proves a refresh is truly AWAITED before beginRun, not
+   *  fired-and-forgotten (re-review fix, Minor: the refresh must land before
+   *  the run it begins renders, not sometime after). */
+  delayNextAuthMeMs: 0,
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -103,14 +108,20 @@ beforeEach(() => {
   state.dialerRunDefaults = { passes: 1, maxRecords: 50, rolloverBusinessDays: 2 };
   state.nextSessionId = 'sess-1';
   state.failNextAuthMe = false;
+  state.delayNextAuthMeMs = 0;
   const realDeps = coordinator.browserCoordinatorDeps;
   vi.spyOn(coordinator, 'browserCoordinatorDeps').mockImplementation((userId, getBusy) => realDeps(userId, getBusy));
   localStorage.clear();
   localStorage.setItem('cti.session.v1', JSON.stringify({ token: 'tok', userId: 'u1', email: 'rep@example.com' }));
-  fetchMock = vi.fn(async (input: unknown, init?: { method?: string }): Promise<Response> => {
+  fetchMock = vi.fn(async (input: unknown, init?: { method?: string; body?: string }): Promise<Response> => {
     const url = String(input);
     if (url.includes('/auth/me')) {
       if (state.failNextAuthMe) { state.failNextAuthMe = false; throw new Error('network hiccup'); }
+      if (state.delayNextAuthMeMs > 0) {
+        const ms = state.delayNextAuthMeMs;
+        state.delayNextAuthMeMs = 0;
+        await new Promise((r) => setTimeout(r, ms));
+      }
       return jsonResponse({
         user: {
           userId: 'u1', orgId: 'org1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true,
@@ -122,10 +133,21 @@ beforeEach(() => {
     if (url.includes('/calls/pending-disposition')) return jsonResponse({ pending: null });
     if (url.includes('/telephony/token')) return jsonResponse({ token: 'device-token' });
     if (url.includes('/dialer/handoffs/pending')) return jsonResponse({ handoff: null });
+    if (url.includes('/dialer/salesforce/listviews')) return jsonResponse({ listViews: [{ id: 'lv1', label: 'My Leads', developerName: 'My_Leads' }] });
     const control = /\/dialer\/sessions\/sess-1\/(start|stop|pause|resume|skip|next)/.exec(url);
     if (control) {
       state.controls.push(control[1]!);
-      if (control[1] === 'start') state.status = 'active';
+      if (control[1] === 'start') {
+        state.status = 'active';
+        // The real server saves Calls per person / How many / Missed tasks as
+        // the rep's next defaults in the SAME request that flips the run
+        // active (spec 2026-09-28) — mirrored here so a beginRun-triggered
+        // refresh right after Start sees what was just accepted, not stale
+        // mock state.
+        if (init?.body) {
+          try { state.dialerRunDefaults = JSON.parse(init.body); } catch { /* leave state.dialerRunDefaults as-is */ }
+        }
+      }
       return jsonResponse({ ok: true });
     }
     if (url.includes('/dialer/sessions/sess-2')) return jsonResponse(VIEW('sess-2'));
@@ -207,14 +229,43 @@ describe('App — run-settings wiring (review fix, Important 3d)', () => {
     expect(screen.getByRole('button', { name: 'Next business day' }).getAttribute('aria-pressed')).toBe('true');
   });
 
-  // Review fix (Minor 2): a new run also refreshes /auth/me on its own
-  // (beginRun), so a limit remembered from ANOTHER tab is picked up too.
-  it('also refreshes /auth/me when a run begins', async () => {
+  // Review fix (Minor 2), STRENGTHENED by a re-review safety finding: a new
+  // run refreshes /auth/me too, so a limit remembered from ANOTHER tab is
+  // picked up. But the refresh used to be fire-and-forget inside beginRun
+  // (`void refreshMe()`) — it usually landed too late to affect the very run
+  // it was meant to freshen, since the per-session reseed effect reads
+  // runDefaults SYNCHRONOUSLY the instant the new sessionId lands, and a
+  // same-session runDefaults change is deliberately ignored (Important 3).
+  // Pinned with a slow (150 ms) /auth/me: the run must still start from what
+  // it returns, not whatever this tab had cached when the run began.
+  it('a run begins from a fresh /auth/me, even a slow one — not what this tab had cached', async () => {
     render(<App />);
     await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    // "Another tab saved 75" on the server, moments before this tab starts a
+    // run — and this /auth/me round trip is slow.
+    state.dialerRunDefaults = { passes: 1, maxRecords: 75, rolloverBusinessDays: 2 };
+    state.delayNextAuthMeMs = 150;
     const before = authMeCallCount();
     handOverRun();
     await screen.findByText('Start dialing');
-    await waitFor(() => expect(authMeCallCount()).toBeGreaterThan(before));
+    expect(authMeCallCount()).toBeGreaterThan(before);
+    expect((screen.getByLabelText('How many') as HTMLInputElement).value).toBe('75');
+  });
+
+  // Same fix, same reasoning, the OTHER call site: starting from a picked
+  // Salesforce list view (startPowerDialFromListView) rather than a
+  // postMessage handoff (startPowerDial).
+  it('starting from a Salesforce list view also awaits the /auth/me refresh before beginRun', async () => {
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    fireEvent.click(screen.getByText('Power Dial'));
+    await screen.findByText('Power dial a list');
+    const select = await screen.findByRole('combobox');
+    fireEvent.change(select, { target: { value: 'lv1' } });
+    state.dialerRunDefaults = { passes: 1, maxRecords: 75, rolloverBusinessDays: 2 };
+    state.delayNextAuthMeMs = 150;
+    fireEvent.click(screen.getByText('Dial this list'));
+    await screen.findByText('Start dialing');
+    expect((screen.getByLabelText('How many') as HTMLInputElement).value).toBe('75');
   });
 });
