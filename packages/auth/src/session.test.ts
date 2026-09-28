@@ -106,14 +106,16 @@ describe('resolveSession', () => {
 });
 
 describe('resolveSessionDetail — what Reset CTI needs, from the same two rows', () => {
-  it("returns the user plus this session's created_at and the user's reset request", async () => {
+  it("returns the user plus this session's created_at and the user's reset request and completion", async () => {
     const requested = new Date('2026-09-28T21:00:00.000Z');
+    const completed = new Date('2026-09-28T21:05:00.000Z');
     state.session = { ...state.session, createdAt: ISSUED };
-    state.user = { ...human, ctiResetRequestedAt: requested };
+    state.user = { ...human, ctiResetRequestedAt: requested, ctiResetCompletedAt: completed };
     await expect(resolveSessionDetail('Bearer tok')).resolves.toEqual({
       user: { userId: 'U1', orgId: 'O1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true, kind: 'human', isSuperAdmin: false },
       sessionCreatedAt: ISSUED,
       ctiResetRequestedAt: requested,
+      ctiResetCompletedAt: completed,
     });
   });
   it('a user nobody ever reset reads null', async () => {

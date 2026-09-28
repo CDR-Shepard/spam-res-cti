@@ -50,6 +50,11 @@ export interface SessionDetail {
   sessionCreatedAt: Date;
   /** users.cti_reset_requested_at; null when no admin ever reset this user. */
   ctiResetRequestedAt: Date | null;
+  /** users.cti_reset_completed_at; null when this user has never completed a
+   *  reset. Lets a caller tell "never reset" apart from "reset, already
+   *  completed" without a second query — GET /auth/reset-signal's R2
+   *  self-heal needs exactly that to stay a rare, guarded write. */
+  ctiResetCompletedAt: Date | null;
 }
 
 export async function issueSession(userId: string, ttlDays = DEFAULT_TTL_DAYS): Promise<{ token: string; expiresAt: Date }> {
@@ -106,6 +111,7 @@ export async function resolveSessionDetail(bearer: string | undefined): Promise<
     },
     sessionCreatedAt: row.createdAt,
     ctiResetRequestedAt: user.ctiResetRequestedAt ?? null,
+    ctiResetCompletedAt: user.ctiResetCompletedAt ?? null,
   };
 }
 

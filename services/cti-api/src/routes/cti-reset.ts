@@ -59,16 +59,28 @@ export async function registerCtiResetRoutes(app: FastifyInstance): Promise<void
        * whose POST /auth/reset-complete never landed (e.g. it failed). Only
        * a session created AFTER the request could exist at all — that is
        * exactly "not due" — so pair that with "a reset is outstanding"
-       * (requested_at newer than completed_at) and stamp completed_at here
-       * too, so the Team panel never shows "pending" forever for a rep who
-       * already signed back in. A single guarded UPDATE: the SQL WHERE is
-       * what makes it a true no-op once completed_at already covers the
-       * request (the ordinary case right after a clean reset-complete),
-       * and it is never even attempted for the vastly common case of a
-       * user who was never reset — this branch only runs when there IS an
-       * outstanding request AND this session is fresh.
+       * (requested_at newer than or equal to completed_at) and stamp
+       * completed_at here too, so the Team panel never shows "pending"
+       * forever for a rep who already signed back in.
+       *
+       * I1 (review fix): ctiResetRequestedAt never goes back to null — there
+       * is no flag to clear (see migration 0045) — so a gate keyed on just
+       * "requestedAt !== null" stays true for the rest of every session ever
+       * created after a user's FIRST reset, attempting this UPDATE on every
+       * single poll forever, not rarely. Checking ctiResetCompletedAt here
+       * (free: it came back on the same SessionDetail, no extra query) is
+       * what keeps the attempt itself rare — restricted to the narrow window
+       * between a session going fresh and completed_at catching up. The SQL
+       * WHERE's `coalesce` comparison stays as the race backstop: it can
+       * still legitimately no-op if a concurrent request/complete raced this
+       * read, but it is no longer the ONLY thing keeping this off the hot
+       * path.
        */
-      if (!resetDue && detail.ctiResetRequestedAt !== null) {
+      const resetOutstanding =
+        detail.ctiResetRequestedAt !== null &&
+        (detail.ctiResetCompletedAt === null ||
+          detail.ctiResetRequestedAt.getTime() >= detail.ctiResetCompletedAt.getTime());
+      if (!resetDue && resetOutstanding) {
         await getDb()
           .update(schema.users)
           .set({ ctiResetCompletedAt: sql`now()` })

@@ -26,6 +26,7 @@ const state = vi.hoisted(() => ({
     user: { userId: string; orgId: string; email: string; isAdmin: boolean; powerDialerEnabled: boolean; kind: 'human'; isSuperAdmin: boolean };
     sessionCreatedAt: Date;
     ctiResetRequestedAt: Date | null;
+    ctiResetCompletedAt: Date | null;
   },
   authedUser: null as null | { userId: string; orgId: string; email: string; isAdmin: boolean; powerDialerEnabled: boolean },
   updates: [] as Array<{ table: unknown; set: Record<string, unknown>; where: unknown }>,
@@ -104,8 +105,20 @@ const ADMIN = { userId: 'a1', orgId: 'o1', email: 'admin@x.com', isAdmin: true, 
 const REP = { userId: 'u1', orgId: 'o1', email: 'rep@x.com', isAdmin: false, powerDialerEnabled: true, kind: 'human' as const, isSuperAdmin: false };
 const TARGET_ID = '22222222-2222-2222-2222-222222222222';
 const ISSUED = new Date('2026-09-28T20:00:00.000Z');
-const dueDetail = () => ({ user: REP, sessionCreatedAt: ISSUED, ctiResetRequestedAt: new Date('2026-09-28T21:41:00.000Z') });
-const staleRequest = () => ({ user: REP, sessionCreatedAt: ISSUED, ctiResetRequestedAt: new Date('2026-09-28T19:00:00.000Z') });
+const dueDetail = () => ({ user: REP, sessionCreatedAt: ISSUED, ctiResetRequestedAt: new Date('2026-09-28T21:41:00.000Z'), ctiResetCompletedAt: null });
+const staleRequest = () => ({ user: REP, sessionCreatedAt: ISSUED, ctiResetRequestedAt: new Date('2026-09-28T19:00:00.000Z'), ctiResetCompletedAt: null });
+// (d) A reset that already fully completed — requested_at at or before
+// completed_at — held by a session created after both. Distinct from
+// staleRequest(), which has never been completed (ctiResetCompletedAt: null):
+// this is the "nothing outstanding, but there IS reset history" case I1
+// worried the old gate (requestedAt !== null alone) would treat as
+// outstanding forever, issuing a guarded-but-still-sent UPDATE on every poll.
+const alreadyCompleted = () => ({
+  user: REP,
+  sessionCreatedAt: ISSUED,
+  ctiResetRequestedAt: new Date('2026-09-28T19:00:00.000Z'),
+  ctiResetCompletedAt: new Date('2026-09-28T19:05:00.000Z'),
+});
 
 beforeEach(async () => {
   state.detail = null;
@@ -343,6 +356,24 @@ describe('GET /auth/reset-signal — self-heals a session that already reset (R2
 
   it('(c) nothing outstanding — nobody ever asked: no UPDATE is even issued', async () => {
     state.detail = { ...staleRequest(), ctiResetRequestedAt: null };
+    const res = await signal();
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ resetDue: false });
+    expect(state.updates).toEqual([]);
+  });
+
+  /**
+   * I1 (review fix): once a user has ever been reset, ctiResetRequestedAt
+   * stays non-null forever (there is no flag to clear — see the migration's
+   * doc comment), so a JS gate keyed on "requestedAt !== null" alone would
+   * re-attempt this UPDATE on EVERY poll of every session created after that
+   * FIRST reset, for the rest of that session's life — not rare at all. The
+   * gate must also know whether completedAt already covers the request, so
+   * a reset that finished cleanly (the overwhelming steady state) issues no
+   * UPDATE at all, not merely a SQL-guarded no-op one.
+   */
+  it('(d) requested ≤ completed — already fully completed: no UPDATE is even issued', async () => {
+    state.detail = alreadyCompleted();
     const res = await signal();
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ resetDue: false });
