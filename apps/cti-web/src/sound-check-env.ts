@@ -22,6 +22,8 @@ export interface SoundCheckEnv {
   /** Open the mic (null = System default). The caller must stopStream() it. */
   openMic(deviceId: string | null): Promise<MicStreamLike>;
   createLevelSource(stream: MicStreamLike): LevelSource;
+  /** The tab went hidden (visibilitychange). Returns the unsubscribe. */
+  onHidden(cb: () => void): () => void;
 }
 
 export interface PermissionStatusLike {
@@ -101,5 +103,11 @@ export function browserSoundCheckEnv(
       }
     },
     createLevelSource: (stream) => createLevelSource(stream, createContext()),
+    onHidden(cb) {
+      if (typeof document === 'undefined') return () => {};
+      const onChange = (): void => { if (document.visibilityState === 'hidden') cb(); };
+      document.addEventListener('visibilitychange', onChange);
+      return () => document.removeEventListener('visibilitychange', onChange);
+    },
   };
 }

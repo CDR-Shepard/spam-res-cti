@@ -150,11 +150,30 @@ describe('App — the sound check after a reset', () => {
     expect(localStorage.getItem('cti.soundCheck.due')).toBe('1');
   });
 
+  // Task 3 review I1: a due check opens on its own, in any softphone load —
+  // a background tab, a collapsed utility panel. It never opens the mic by
+  // itself, and it surfaces the panel so the rep sees it.
+  it('never opens the mic by itself: nothing until "Start sound check"; and it pops the Salesforce panel open', async () => {
+    const mic = grantMic();
+    const panel = vi.spyOn(opencti, 'setPanelVisibility').mockImplementation(() => {});
+    signedIn();
+    localStorage.setItem('cti.soundCheck.due', '1');
+    render(<App />);
+    const start = await screen.findByRole('button', { name: 'Start sound check' });
+    expect(panel).toHaveBeenCalledWith(true);
+    await act(async () => { await Promise.resolve(); });
+    expect(mic.opened()).toBe(0);
+    fireEvent.click(start);
+    await screen.findByRole('progressbar', { name: 'Microphone level' });
+    await waitFor(() => expect(mic.opened()).toBe(1));
+  });
+
   it('"Looks good" finishes it: the flag is cleared and the microphone released', async () => {
     const mic = grantMic();
     signedIn();
     localStorage.setItem('cti.soundCheck.due', '1');
     render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Start sound check' }));
     await screen.findByRole('progressbar', { name: 'Microphone level' });
     await waitFor(() => expect(mic.opened()).toBe(1));
     fireEvent.click(screen.getByRole('button', { name: 'Looks good' }));
@@ -163,12 +182,13 @@ describe('App — the sound check after a reset', () => {
     await waitFor(() => expect(mic.stopped()).toBe(1));
   });
 
-  it('a ringing callback hides it and releases the mic; it comes back once the call is gone', async () => {
+  it('a ringing callback hides it and releases the mic; it comes back once the call is gone — asking to Start again', async () => {
     const mic = grantMic();
     signedIn();
     localStorage.setItem('cti.soundCheck.due', '1');
     render(<App />);
     await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    fireEvent.click(await screen.findByRole('button', { name: 'Start sound check' }));
     await waitFor(() => expect(mic.opened()).toBe(1));
     const call = { parameters: { From: '+16195551234' }, customParameters: new Map<string, string>(), accept: vi.fn(), reject: vi.fn(), on: vi.fn() };
     act(() => { FakeDevice.instances[0]!.emit('incoming', call); });
@@ -177,18 +197,24 @@ describe('App — the sound check after a reset', () => {
     await waitFor(() => expect(mic.stopped()).toBe(1));
     fireEvent.click(screen.getByTitle('Decline'));
     expect(await screen.findByRole('dialog', { name: 'Sound check' })).toBeTruthy();
-    await waitFor(() => expect(mic.opened()).toBe(2));
+    expect(await screen.findByRole('button', { name: 'Start sound check' })).toBeTruthy();
+    await act(async () => { await Promise.resolve(); });
+    expect(mic.opened()).toBe(1); // nothing re-opened by itself
   });
 });
 
 describe('App — Settings', () => {
-  it('Run sound check opens it without making it due', async () => {
+  it('Run sound check opens it without making it due — and, being a click, starts the meter at once', async () => {
+    const mic = grantMic();
     signedIn();
     render(<App />);
     await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Run sound check' }));
     expect(await screen.findByRole('dialog', { name: 'Sound check' })).toBeTruthy();
+    await screen.findByRole('progressbar', { name: 'Microphone level' });
+    await waitFor(() => expect(mic.opened()).toBe(1));
+    expect(screen.queryByRole('button', { name: 'Start sound check' })).toBeNull();
     expect(localStorage.getItem('cti.soundCheck.due')).toBeNull();
   });
 

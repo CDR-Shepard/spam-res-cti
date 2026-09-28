@@ -284,14 +284,17 @@ export function App(): JSX.Element {
   const [signingIn, setSigningIn] = useState(false);
   // Written by a reset just before its reload (cti-reset.ts); cleared by signing in.
   const [resetNotice, setResetNotice] = useState(() => readFlag(RESET_NOTICE_KEY));
-  // The sound check (spec decision 6): due after a reset until "Looks good",
-  // and also opened from Settings. `audioEpoch` re-mounts Settings after it
-  // closes, so its Microphone/Speaker rows show what was chosen in the check.
-  const [soundCheckOpen, setSoundCheckOpen] = useState(() => readFlag(SOUND_CHECK_DUE_KEY));
+  // The sound check (spec decision 6). 'due': after a reset, until "Looks
+  // good" — it opens on its own in any softphone load, so it never opens the
+  // mic until the rep clicks Start (Task 3 review I1). 'asked': opened with a
+  // click from Settings, so the meter may start at once. `audioEpoch`
+  // re-mounts Settings after it closes, so its Microphone/Speaker rows show
+  // what was chosen in the check.
+  const [soundCheck, setSoundCheck] = useState<'due' | 'asked' | null>(() => (readFlag(SOUND_CHECK_DUE_KEY) ? 'due' : null));
   const [audioEpoch, setAudioEpoch] = useState(0);
   const closeSoundCheck = useCallback((finished: boolean): void => {
     if (finished) clearFlag(SOUND_CHECK_DUE_KEY);
-    setSoundCheckOpen(false);
+    setSoundCheck(null);
     setAudioEpoch((n) => n + 1);
   }, []);
   const refreshMe = useCallback(async () => {
@@ -1370,7 +1373,7 @@ export function App(): JSX.Element {
       }
     }
     setToast({ text: 'Microphone and speaker are back to System default.', type: 'success' });
-    setSoundCheckOpen(true);
+    setSoundCheck('asked');
   }, [resetBusy, teardownDevice, ensureDevice, audioPort, onDeviceBuildFailed]);
 
   // One softphone per rep across all their tabs. The elected leader holds the
@@ -1970,6 +1973,19 @@ export function App(): JSX.Element {
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }, [elapsed]);
 
+  // Never over a ring, a call, wrap-up, a waiting callback or a run. It
+  // unmounts (releasing the mic) and comes back when the rep is free.
+  const soundCheckVisible = signedIn && !!me && soundCheck !== null
+    && phase !== 'ringing' && phase !== 'active' && phase !== 'wrapup'
+    && !incoming && !dialerLive && !callbackWaiting && parkedRunId === null;
+  // A due check opened on its own: surface the Salesforce panel so the rep
+  // sees it (Task 3 review I1(b)).
+  const dueCheckShown = soundCheckVisible && soundCheck === 'due';
+  useEffect(() => {
+    if (!dueCheckShown) return;
+    try { setPanelVisibility(true); } catch { /* not embedded in Salesforce */ }
+  }, [dueCheckShown]);
+
   if (!signedIn || !me) {
     return (
       <div className="app">
@@ -2002,9 +2018,6 @@ export function App(): JSX.Element {
   const photo = sf?.photoDataUrl ?? null;
   const nameIsEditable = !sf; // SF owns the identity when connected
   const inCall = phase === 'ringing' || phase === 'active' || phase === 'wrapup';
-  // Never over a ring, a call, wrap-up, a waiting callback or a run. It
-  // unmounts (releasing the mic) and comes back when the rep is free.
-  const soundCheckVisible = soundCheckOpen && !inCall && !incoming && !dialerLive && !callbackWaiting && parkedRunId === null;
 
   const header = (
     <div className="header">
@@ -2135,7 +2148,7 @@ export function App(): JSX.Element {
       onSaved={refreshMe}
       onToast={setToast}
       audioDevices={audioPort}
-      onRunSoundCheck={() => setSoundCheckOpen(true)}
+      onRunSoundCheck={() => setSoundCheck('asked')}
       onResetAudio={resetMyAudio}
     />
   ) : tab === 'powerdial' ? (
@@ -2284,6 +2297,7 @@ export function App(): JSX.Element {
           onToast={setToast}
           onDone={() => closeSoundCheck(true)}
           onLater={() => closeSoundCheck(false)}
+          startNow={soundCheck === 'asked'}
         />
       )}
       {toast && <div className={`toast ${toast.type}`}>{toast.text}</div>}

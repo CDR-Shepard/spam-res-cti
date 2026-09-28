@@ -38,6 +38,7 @@ interface FakeSource extends LevelSource { closed: boolean }
 function fakeEnv(initial: MicPermission) {
   const s = {
     change: null as ((p: MicPermission) => void) | null,
+    hidden: null as (() => void) | null,
     watchStopped: false,
     streams: [] as FakeStream[],
     sources: [] as FakeSource[],
@@ -60,13 +61,30 @@ function fakeEnv(initial: MicPermission) {
       s.sources.push(src);
       return src;
     },
+    onHidden: (cb) => { s.hidden = cb; return () => { s.hidden = null; }; },
   };
-  return { env, s, flip: (p: MicPermission): void => { act(() => { s.change?.(p); }); } };
+  return {
+    env,
+    s,
+    flip: (p: MicPermission): void => { act(() => { s.change?.(p); }); },
+    hide: (): void => { act(() => { s.hidden?.(); }); },
+  };
 }
 
 const noop = (): void => {};
-function renderCheck(env: SoundCheckEnv, props: { onDone?: () => void; onLater?: () => void } = {}) {
-  return render(<SoundCheck port={fakePort()} onToast={noop} onDone={props.onDone ?? noop} onLater={props.onLater ?? noop} env={env} />);
+/** `startNow` defaults to true here — a check the rep opened with a click
+ *  (Settings). An auto-opened check (due after a reset) passes false. */
+function renderCheck(env: SoundCheckEnv, props: { onDone?: () => void; onLater?: () => void; startNow?: boolean } = {}) {
+  return render(
+    <SoundCheck
+      port={fakePort()}
+      onToast={noop}
+      onDone={props.onDone ?? noop}
+      onLater={props.onLater ?? noop}
+      startNow={props.startNow ?? true}
+      env={env}
+    />,
+  );
 }
 
 beforeEach(() => { localStorage.clear(); });
@@ -181,5 +199,58 @@ describe('SoundCheck — the mic is never left open', () => {
       expect(onLater).toHaveBeenCalledTimes(1);
       view.unmount();
     }
+  });
+});
+
+// Task 3 review I1: a check that opened on its own (due after a reset, in any
+// softphone load — a background tab, a collapsed utility panel) must never
+// open the mic by itself: a hidden recording dot, and a Bluetooth headset
+// forced into call mode. Only a click starts the meter.
+describe('SoundCheck — an auto-opened check waits for a click', () => {
+  it('allowed: no getUserMedia until "Start sound check" is clicked; then the meter runs', async () => {
+    const f = fakeEnv('granted');
+    renderCheck(f.env, { startNow: false });
+    const start = await screen.findByRole('button', { name: SOUND_CHECK_TEXT.start });
+    await act(async () => { await Promise.resolve(); });
+    expect(f.env.openMic).not.toHaveBeenCalled();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    fireEvent.click(start);
+    await screen.findByRole('progressbar', { name: 'Microphone level' });
+    await waitFor(() => expect(f.s.streams).toHaveLength(1));
+  });
+
+  it('blocked, then allowed in Chrome (no click here): the ✓ shows, the mic stays shut until Start', async () => {
+    const f = fakeEnv('denied');
+    renderCheck(f.env, { startNow: false });
+    await screen.findByText(SOUND_CHECK_TEXT.deniedTitle);
+    f.flip('granted');
+    expect(await screen.findByText(SOUND_CHECK_TEXT.allowed)).toBeTruthy();
+    expect(screen.getByRole('button', { name: SOUND_CHECK_TEXT.start })).toBeTruthy();
+    expect(f.env.openMic).not.toHaveBeenCalled();
+  });
+
+  it('not decided: the "Allow microphone" click is the gesture — the meter starts right after it', async () => {
+    const f = fakeEnv('prompt');
+    renderCheck(f.env, { startNow: false });
+    expect(f.env.openMic).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button', { name: SOUND_CHECK_TEXT.allow }));
+    await screen.findByRole('progressbar', { name: 'Microphone level' });
+    await waitFor(() => expect(f.s.streams).toHaveLength(2));
+  });
+});
+
+describe('SoundCheck — a hidden tab never holds the mic', () => {
+  it('the tab goes hidden: the stream stops; back on screen it offers Start again and opens nothing by itself', async () => {
+    const f = fakeEnv('granted');
+    renderCheck(f.env); // opened from Settings: the meter starts at once
+    await waitFor(() => expect(f.s.sources).toHaveLength(1));
+    f.hide();
+    expect(f.s.streams[0]!.stopped).toBe(true);
+    expect(f.s.sources[0]!.closed).toBe(true);
+    expect(await screen.findByRole('button', { name: SOUND_CHECK_TEXT.start })).toBeTruthy();
+    await act(async () => { await Promise.resolve(); });
+    expect(f.s.streams).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: SOUND_CHECK_TEXT.start }));
+    await waitFor(() => expect(f.s.streams).toHaveLength(2));
   });
 });

@@ -14,6 +14,11 @@ interface Props {
   onDone: () => void;
   /** "Not now": closed for now; a due check comes back on the next load. */
   onLater: () => void;
+  /** The rep opened it with a click (Settings): the meter may open the mic
+   *  right away. Otherwise — due after a reset, opened on its own in any
+   *  softphone load, maybe a background tab or a collapsed utility panel — the
+   *  mic stays shut until "Start sound check" (Task 3 review I1). */
+  startNow?: boolean;
   /** The browser (tests hand in a fake). */
   env?: SoundCheckEnv;
 }
@@ -28,6 +33,8 @@ export const SOUND_CHECK_TEXT = {
   deniedBody: 'Chrome is blocking the microphone for the softphone. Click the icon left of the address bar → Microphone → Allow. This screen updates by itself.',
   allowed: '✓ Microphone allowed',
   grantedTitle: 'Sound check',
+  start: 'Start sound check',
+  startHint: 'Your microphone stays off until you start.',
   speak: 'Say something — the bar should move.',
   done: 'Looks good',
   later: 'Not now',
@@ -39,9 +46,12 @@ export const SOUND_CHECK_TEXT = {
  * both after a reset's sign-in and from Settings, and unmounts it whenever a
  * call rings. Unmounting stops the stream, so the mic is never left open.
  */
-export function SoundCheck({ port, onToast, onDone, onLater, env: injected }: Props): JSX.Element {
+export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, env: injected }: Props): JSX.Element {
   const env = useMemo(() => injected ?? browserSoundCheckEnv(), [injected]);
   const [permission, setPermission] = useState<MicPermission | 'checking'>('checking');
+  // The meter runs only once a click started it: "Start sound check", "Allow
+  // microphone", or the Settings click that opened this check (startNow).
+  const [started, setStarted] = useState(startNow);
   const [justAllowed, setJustAllowed] = useState(false);
   const [micId, setMicId] = useState<string | null>(() => loadAudioPrefs().input);
   const [level, setLevel] = useState(0);
@@ -67,9 +77,13 @@ export function SoundCheck({ port, onToast, onDone, onLater, env: injected }: Pr
     return () => { live = false; stop(); };
   }, [env]);
 
-  // The meter: the chosen mic is open only while Allowed and on screen.
+  // A hidden tab never holds the mic: stop the meter; back on screen the rep
+  // presses Start again — nothing re-opens by itself.
+  useEffect(() => env.onHidden(() => setStarted(false)), [env]);
+
+  // The meter: the chosen mic is open only while Allowed, started and on screen.
   useEffect(() => {
-    if (permission !== 'granted') return;
+    if (permission !== 'granted' || !started) return;
     let live = true;
     let stream: MicStreamLike | null = null;
     let source: LevelSource | null = null;
@@ -91,7 +105,7 @@ export function SoundCheck({ port, onToast, onDone, onLater, env: injected }: Pr
       source?.close();
       if (stream) stopStream(stream);
     };
-  }, [permission, micId, env]);
+  }, [permission, started, micId, env]);
 
   // "Allow microphone": the click is the user gesture Chrome's popup needs.
   const allow = async (): Promise<void> => {
@@ -101,6 +115,7 @@ export function SoundCheck({ port, onToast, onDone, onLater, env: injected }: Pr
       // Only asking for permission here; the meter opens the chosen mic next.
       stopStream(await env.openMic(null));
       setJustAllowed(true);
+      setStarted(true);
       setPermission('granted');
     } catch (e) {
       setMicError(micErrorText(e));
@@ -131,21 +146,30 @@ export function SoundCheck({ port, onToast, onDone, onLater, env: injected }: Pr
           <>
             <h2>{SOUND_CHECK_TEXT.grantedTitle}</h2>
             {justAllowed && <p className="sound-check-ok">{SOUND_CHECK_TEXT.allowed}</p>}
-            <p className="sub">{SOUND_CHECK_TEXT.speak}</p>
-            <div
-              className="sound-check-meter"
-              role="progressbar"
-              aria-label="Microphone level"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={pct}
-            >
-              <div className="sound-check-meter-fill" style={{ width: `${pct}%` }} />
-            </div>
+            {started ? (
+              <>
+                <p className="sub">{SOUND_CHECK_TEXT.speak}</p>
+                <div
+                  className="sound-check-meter"
+                  role="progressbar"
+                  aria-label="Microphone level"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={pct}
+                >
+                  <div className="sound-check-meter-fill" style={{ width: `${pct}%` }} />
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="sub">{SOUND_CHECK_TEXT.startHint}</p>
+                <button className="btn primary full" onClick={() => setStarted(true)}>{SOUND_CHECK_TEXT.start}</button>
+              </>
+            )}
             <div className="set-list">
               <AudioDeviceRows port={port} onToast={onToast} onChange={(p: AudioPrefs) => setMicId(p.input)} />
             </div>
-            <button className="btn primary full" onClick={onDone}>{SOUND_CHECK_TEXT.done}</button>
+            {started && <button className="btn primary full" onClick={onDone}>{SOUND_CHECK_TEXT.done}</button>}
           </>
         )}
         {micError && <p className="set-error" role="alert">{micError}</p>}
