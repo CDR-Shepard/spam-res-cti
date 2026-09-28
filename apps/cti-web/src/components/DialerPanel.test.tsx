@@ -697,6 +697,18 @@ describe('startDialingSequence — prepare, then start, then join the conference
     expect(control.mock.calls.map(([a]) => a)).toEqual(['start']);
     expect(join).not.toHaveBeenCalled();
   });
+  // Review fix (Minor 3, spec 2026-09-28): a 400 from start is refused
+  // validation (an out-of-range maxRecords, say) — it happens BEFORE the
+  // claim transaction, so nothing was ever flipped active. Treat it like the
+  // 409: no stop, never joins, and the server's own message surfaces via
+  // controlErrorMessage in the caller.
+  it('a 400 from start sends no stop, like a 409 — it happens before the claim, so there is nothing to stop', async () => {
+    const join = vi.fn(async () => true);
+    const control = vi.fn(async (_action: DialerControlAction) => { throw new ApiError(400, { error: 'Enter a whole number from 1 to 500, or leave it blank for all.' }); });
+    await expect(startDialingSequence(async () => {}, control, join)).rejects.toBeInstanceOf(ApiError);
+    expect(control.mock.calls.map(([a]) => a)).toEqual(['start']);
+    expect(join).not.toHaveBeenCalled();
+  });
 });
 
 describe('conflictingSessionId — the other run the 409 named', () => {

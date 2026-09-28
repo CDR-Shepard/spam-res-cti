@@ -163,6 +163,22 @@ describe('Ready to dial — run settings', () => {
     expect(saved).not.toHaveBeenCalled();
   });
 
+  // Review fix (Minor 3, spec 2026-09-28): a 400 happens before the claim, so
+  // there is nothing to stop — the Ready screen stays up with the server's
+  // own message, exactly like a 409.
+  it('a refused Start (400) shows the server\'s message and leaves the Ready screen up', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(READY);
+    vi.spyOn(dialerApi, 'startDialerRun').mockRejectedValue(
+      new ApiError(400, { error: 'Enter a whole number from 1 to 500, or leave it blank for all.' }),
+    );
+    const saved = vi.fn();
+    mount({ onRunDefaultsSaved: saved });
+    fireEvent.click(await screen.findByRole('button', { name: 'Start dialing' }));
+    expect(await screen.findByText('Enter a whole number from 1 to 500, or leave it blank for all.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Start dialing' })).toBeTruthy(); // still the Ready screen
+    expect(saved).not.toHaveBeenCalled();
+  });
+
   it('a running run shows its settings under the progress', async () => {
     vi.spyOn(dialerApi, 'getDialer').mockResolvedValue({
       ...READY,

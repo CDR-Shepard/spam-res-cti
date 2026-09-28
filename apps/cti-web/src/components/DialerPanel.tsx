@@ -293,11 +293,15 @@ export function itemStatusLabel(item: Pick<DialerCurrentItem, 'status' | 'outcom
  *  2. `control('start')` — the engine flips the run active and originates
  *     the first call. A 409 proves the session is still `ready` (the rep's
  *     other run holds the one-active-run index) — nothing was flipped, so
- *     it's left for the confirm block, which offers to stop the other run.
- *     Anything else proves nothing: the server may have flipped this session
- *     `active` before failing (a first originate that threw), leaving no
- *     conference leg joined — that would bridge the next human into an empty
- *     room, so a non-409 failure sends a best-effort `stop` before rethrowing;
+ *     it's left for the confirm block, which offers to stop the other run. A
+ *     400 (review fix, Minor 3) is refused validation — the server checks the
+ *     run settings before the claim transaction, so nothing was ever flipped
+ *     active — same treatment as the 409: no stop. Anything else proves
+ *     nothing: the server may have flipped this session `active` before
+ *     failing (a first originate that threw), leaving no conference leg
+ *     joined — that would bridge the next human into an empty room, so a
+ *     failure past those two known-safe cases sends a best-effort `stop`
+ *     before rethrowing;
  *  3. `join` — the softphone joins the run's conference. Ring + AMD take
  *     seconds; the join takes about one, so the first human still finds the
  *     rep in the room.
@@ -316,11 +320,16 @@ export async function startDialingSequence(
   } catch (e) {
     // A 409 proves the session is still `ready` (the rep's other run holds
     // the one-active-run index) — leave it for the confirm block, which
-    // offers to stop the other run. Anything else proves nothing: the server
-    // may have flipped this session active before failing (a first originate
-    // that threw), and an active run with no rep leg would bridge every human
-    // into an empty room. Stop it, best effort, then surface the error.
-    if (!(e instanceof ApiError && e.status === 409)) {
+    // offers to stop the other run. A 400 (review fix, Minor 3) proves the
+    // same thing from the other direction: refused validation happens BEFORE
+    // the claim transaction, so the session was never flipped active either —
+    // there is nothing to stop, and the server's own message (surfaced by the
+    // caller's controlErrorMessage) is what the rep needs to see. Anything
+    // else proves nothing: the server may have flipped this session active
+    // before failing (a first originate that threw), and an active run with
+    // no rep leg would bridge every human into an empty room. Stop it, best
+    // effort, then surface the error.
+    if (!(e instanceof ApiError && (e.status === 409 || e.status === 400))) {
       try { await control('stop'); } catch { /* the poll shows whatever state the run is in */ }
     }
     throw e;
