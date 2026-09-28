@@ -43,14 +43,19 @@ describe('createSoftphoneCoordinator', () => {
     const h = harness();
     const visible = createSoftphoneCoordinator(h.makeDeps('z', true));   // hidden-id-larger but visible
     const hidden = createSoftphoneCoordinator(h.makeDeps('a', false));   // smaller id but hidden
-    let vLead = false, hLead = true;
+    let vLead = false;
+    const hChanges: boolean[] = [];
     visible.onLeadershipChange((v) => { vLead = v; });
-    hidden.onLeadershipChange((v) => { hLead = v; });
+    hidden.onLeadershipChange((v) => { hChanges.push(v); });
     visible.start(); hidden.start();
     h.tick(1000); // exchange presence
     h.tick(1000); // recompute with peers known
     expect(vLead).toBe(true);
-    expect(hLead).toBe(false);
+    // This bus delivers synchronously, so the visible tab's answer to the
+    // newcomer lands before the hidden one's first election: it may never
+    // lead at all (no callback) — whatever it went through, it ends a follower.
+    expect(hidden.isLeader()).toBe(false);
+    expect(hChanges.at(-1) ?? false).toBe(false);
   });
 
   it('when the leader leaves, the other re-elects immediately (no stale wait)', () => {
@@ -316,5 +321,34 @@ describe('createSoftphoneCoordinator — a busy peer is remembered past stalenes
     h.listen((m) => seen.push(m));
     a.broadcastReset();
     expect(seen).toEqual([]);
+  });
+});
+
+// Follow-up 1, the other half: a tab that STARTS after a peer was throttled
+// never had anything to remember. The throttled peer answers a newcomer's
+// first presence at once (message events are not throttled, only its timers),
+// so the newcomer knows it is busy well before it settles and may act.
+describe('createSoftphoneCoordinator — a newcomer hears a throttled peer at once', () => {
+  it("a new tab learns a throttled peer's wrap-up before it settles", () => {
+    const h = harness();
+    // The hidden tab's heartbeat never fires (throttled): it spoke once, long ago.
+    const throttled = createSoftphoneCoordinator({ ...h.makeDeps('hidden-wrapup', false, false, () => true), scheduleInterval: () => () => {} });
+    throttled.start();
+    h.tick(5 * 60_000);
+    const fresh = createSoftphoneCoordinator(h.makeDeps('new-tab', true));
+    fresh.start();
+    expect(fresh.settled()).toBe(false);
+    expect(fresh.peersBusyForReset()).toBe(true);
+  });
+
+  it('a known peer is not answered — no presence echo on every beat (hidden or not)', () => {
+    const h = harness();
+    const a = createSoftphoneCoordinator(h.makeDeps('a', true));
+    const b = createSoftphoneCoordinator(h.makeDeps('b', false, false, () => true));
+    a.start(); b.start();
+    let presences = 0;
+    h.listen((m) => { if ((m as { type?: string }).type === 'presence') presences += 1; });
+    h.tick(1000); // one heartbeat each, and nothing more
+    expect(presences).toBe(2);
   });
 });

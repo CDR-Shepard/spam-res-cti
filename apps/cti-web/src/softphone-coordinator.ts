@@ -103,6 +103,7 @@ export function createSoftphoneCoordinator(deps: CoordinatorDeps): SoftphoneCoor
     if (m.type === 'presence' && m.id !== selfId) {
       const busy = !!m.busy;
       const now = deps.now();
+      const newcomer = !peers.has(m.id);
       peers.set(m.id, { visible: m.visible, busy, lastSeen: now });
       // R4 (controller ruling): a build from before resets doesn't report
       // resetBusy — fall back to its legacy election busy flag. It must
@@ -111,6 +112,11 @@ export function createSoftphoneCoordinator(deps: CoordinatorDeps): SoftphoneCoor
       if (resetBusy) lastResetBusyAt.set(m.id, now);
       else lastResetBusyAt.delete(m.id);
       recompute();
+      // Answer a peer we don't know yet at once, not on our next heartbeat: a
+      // hidden, throttled tab's is up to a minute away (only its timers are
+      // throttled, not this message), long after the newcomer has settled and
+      // may start a reset over our wrap-up. Known peers are never answered.
+      if (newcomer) beat();
     } else if (m.type === 'leaving' && m.id !== selfId) {
       peers.delete(m.id);
       lastResetBusyAt.delete(m.id);
