@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HoldMusicSetting } from '@cti/contracts';
-import { api, ApiError, clearSession, readSession, writeSession } from './api';
+import { api, ApiError, clearSession, readSession, SESSION_KEY, writeSession } from './api';
 import { holdMusicFromMe } from './hold-music-from-me';
 import { createLineAudio, watchLineVolume, type LineAudio } from './line-audio';
 import { startRingback, stopRingback } from './ringback';
@@ -66,7 +66,7 @@ import {
 } from './callback-waiting';
 import { HEARTBEAT_UNREACHABLE_TEXT, parkedRunOverAction, startParkedHeartbeat } from './parked-heartbeat';
 import { playCallbackChime } from './callback-chime';
-import { clearFlag, DeviceRefusedError, isBusyForReset, readFlag, RESET_NOTICE_KEY, RESET_NOTICE_TEXT, RESETTING_TEXT, SOUND_CHECK_DUE_KEY } from './cti-reset';
+import { clearFlag, DeviceRefusedError, isBusyForReset, pageReloader, readFlag, RESET_NOTICE_KEY, RESET_NOTICE_TEXT, RESETTING_TEXT, SOUND_CHECK_DUE_KEY } from './cti-reset';
 import { useCtiReset } from './use-cti-reset';
 
 interface MeResponse {
@@ -297,6 +297,24 @@ export function App(): JSX.Element {
     setSoundCheck(null);
     setAudioEpoch((n) => n + 1);
   }, []);
+  // After a reset every tab has the check due, and "Looks good" in any one of
+  // them finishes it. So a due check that another tab finished is done here
+  // too: read the flag again once /auth/me is in (it may have gone while this
+  // tab loaded or sat on the sign-in gate), and drop it the moment another tab
+  // clears it. A check the rep opened from Settings is theirs, and stays.
+  const dropFinishedDueCheck = useCallback((): void => {
+    if (!readFlag(SOUND_CHECK_DUE_KEY)) setSoundCheck((s) => (s === 'due' ? null : s));
+  }, []);
+  useEffect(() => {
+    if (me) dropFinishedDueCheck();
+  }, [me, dropFinishedDueCheck]);
+  useEffect(() => {
+    const onStorage = (e: StorageEvent): void => {
+      if (e.key === SOUND_CHECK_DUE_KEY || e.key === null) dropFinishedDueCheck();
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [dropFinishedDueCheck]);
   const refreshMe = useCallback(async () => {
     try { setMe(await api<MeResponse>('/auth/me')); } catch { /* */ }
   }, []);
@@ -557,6 +575,26 @@ export function App(): JSX.Element {
     pendingTeardownRef.current = false;
     teardownDevice();
   }, [signedIn, phase, incoming, callbackWaiting, parkedRunId, dialerLive, holdsLiveTelephony, teardownDevice]);
+
+  // On the sign-in gate, another tab signed in: after a reset every tab of the
+  // rep lands here, and one sign-in should bring them all back. Reload to pick
+  // the new session up — but never under a call still up behind the gate (a
+  // refresh 401 mid-call, M1): the reload waits until nothing is live.
+  const [sessionAppeared, setSessionAppeared] = useState(false);
+  useEffect(() => {
+    if (signedIn) return;
+    const onStorage = (e: StorageEvent): void => {
+      if (e.key === SESSION_KEY && e.newValue) setSessionAppeared(true);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [signedIn]);
+  useEffect(() => {
+    if (signedIn || !sessionAppeared || holdsLiveTelephony()) return;
+    // Signed out again in the other tab meanwhile: nothing to pick up.
+    if (!readSession()) { setSessionAppeared(false); return; }
+    pageReloader.reload();
+  }, [signedIn, sessionAppeared, phase, incoming, callbackWaiting, parkedRunId, dialerLive, holdsLiveTelephony]);
 
   // Auto-dismiss the status/error banner after a few seconds so it doesn't sit
   // in the way at the bottom of the dialer.

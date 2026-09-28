@@ -470,6 +470,80 @@ describe('App — the sound check and Reset my audio never touch a live call', (
   });
 });
 
+// Follow-up 2 (final review): after a reset every tab of the rep has the check
+// due. "Looks good" in one tab finishes it for all of them.
+describe('App — a sound check finished in another tab', () => {
+  /** Another tab clears the flag: this tab hears a storage event. */
+  const otherTabFinishes = (): void => {
+    act(() => {
+      localStorage.removeItem('cti.soundCheck.due');
+      window.dispatchEvent(new StorageEvent('storage', { key: 'cti.soundCheck.due', newValue: null }));
+    });
+  };
+
+  it('is not shown when the flag is gone by the time /auth/me loads', async () => {
+    const base = vi.mocked(fetch).getMockImplementation()!;
+    let meIn: () => void = () => {};
+    const meGate = new Promise<void>((resolve) => { meIn = resolve; });
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      if (String(input).includes('/auth/me')) await meGate;
+      return base(input, init);
+    });
+    signedIn();
+    localStorage.setItem('cti.soundCheck.due', '1');
+    render(<App />);
+    await screen.findByText('Loading…');
+    localStorage.removeItem('cti.soundCheck.due'); // "Looks good" elsewhere, while this tab loads
+    await act(async () => { meIn(); });
+    await screen.findByRole('button', { name: 'Settings' });
+    await act(async () => { await Promise.resolve(); });
+    expect(dialog()).toBeNull();
+  });
+
+  it('closes a due check the moment another tab finishes it', async () => {
+    signedIn();
+    localStorage.setItem('cti.soundCheck.due', '1');
+    render(<App />);
+    await screen.findByRole('dialog', { name: 'Sound check' });
+    otherTabFinishes();
+    expect(dialog()).toBeNull();
+  });
+
+  it('closes it too when another tab clears all of storage', async () => {
+    signedIn();
+    localStorage.setItem('cti.soundCheck.due', '1');
+    render(<App />);
+    await screen.findByRole('dialog', { name: 'Sound check' });
+    act(() => {
+      localStorage.removeItem('cti.soundCheck.due');
+      window.dispatchEvent(new StorageEvent('storage', { key: null }));
+    });
+    expect(dialog()).toBeNull();
+  });
+
+  it('a check the rep opened from Settings stays open', async () => {
+    signedIn();
+    localStorage.setItem('cti.soundCheck.due', '1');
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Not now' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Run sound check' }));
+    await screen.findByRole('dialog', { name: 'Sound check' });
+    otherTabFinishes();
+    expect(dialog()).not.toBeNull();
+  });
+
+  it('another tab setting the flag, or another key, leaves a due check alone', async () => {
+    signedIn();
+    localStorage.setItem('cti.soundCheck.due', '1');
+    render(<App />);
+    await screen.findByRole('dialog', { name: 'Sound check' });
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'cti.soundCheck.due', newValue: '1' })); });
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'cti.audio.input', newValue: 'mic-jabra' })); });
+    expect(dialog()).not.toBeNull();
+  });
+});
+
 // Task 3 review M-e and M-h.
 describe('App — the sound check around the rest of the softphone', () => {
   it("hides while a click-to-dial verdict is on screen (preflight), and comes back after", async () => {

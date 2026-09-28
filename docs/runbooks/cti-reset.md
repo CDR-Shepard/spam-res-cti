@@ -12,6 +12,8 @@ Code: `services/cti-api/src/routes/cti-reset.ts` (API); `apps/cti-web/src/cti-re
   - the softphone reloads to "Sign in with Salesforce" with *Your admin reset your phone. Sign in again to reconnect.*
   - Inside Salesforce only the softphone panel reloads, and it pops open. The `?sf=` stays, so click-to-dial works after sign-in.
 - **After sign-in**, the sound check runs once.
+  - One sign-in is enough: the rep's other softphone tabs in that browser, still on the sign-in screen, reload and pick the new session up (a tab with a call still up behind that screen waits for the call to end).
+  - **Looks good** in any one tab finishes the check in all of them.
 - **Other clients:** the iPhone app and the desktop app are never signed out. Only the web tab's own session is revoked.
 
 ## When it happens

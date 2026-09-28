@@ -367,3 +367,88 @@ describe('App — after a reset, the sign-in screen says why', () => {
     expect(JSON.parse(localStorage.getItem('cti.session.v1')!).token).toBe('tok2');
   });
 });
+
+// Follow-up 2 (final review): after a reset every tab of the rep lands on the
+// sign-in gate. Signing in on one must bring the others back with it.
+describe('App — on the sign-in gate, another tab signs in', () => {
+  const OTHER_SESSION = JSON.stringify({ token: 'tok2', userId: 'u1', email: 'rep@example.com' });
+  /** Another tab writes (or removes) the session: this tab hears a storage event. */
+  const otherTabWrites = (value: string | null): void => {
+    act(() => {
+      if (value === null) localStorage.removeItem('cti.session.v1');
+      else localStorage.setItem('cti.session.v1', value);
+      window.dispatchEvent(new StorageEvent('storage', { key: 'cti.session.v1', newValue: value }));
+    });
+  };
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); });
+  };
+
+  it('reloads this tab, so it picks the new session up', async () => {
+    render(<App />);
+    await screen.findByText('Sign in with Salesforce');
+    otherTabWrites(OTHER_SESSION);
+    await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
+  });
+
+  it('a session going away, another key, or a clear() never reloads it', async () => {
+    render(<App />);
+    await screen.findByText('Sign in with Salesforce');
+    otherTabWrites(null);
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'cti.audio.input', newValue: 'mic-jabra' })); });
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: null })); });
+    await settle();
+    expect(pageReloader.reload).not.toHaveBeenCalled();
+  });
+
+  it('a session that came and went again (signed in, then out) does not reload it', async () => {
+    render(<App />);
+    await screen.findByText('Sign in with Salesforce');
+    act(() => {
+      localStorage.setItem('cti.session.v1', OTHER_SESSION);
+      window.dispatchEvent(new StorageEvent('storage', { key: 'cti.session.v1', newValue: OTHER_SESSION }));
+      localStorage.removeItem('cti.session.v1');
+      window.dispatchEvent(new StorageEvent('storage', { key: 'cti.session.v1', newValue: null }));
+    });
+    await settle();
+    expect(pageReloader.reload).not.toHaveBeenCalled();
+  });
+
+  it('a signed-in tab never reloads on it', async () => {
+    signedIn();
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    otherTabWrites(OTHER_SESSION);
+    await settle();
+    expect(pageReloader.reload).not.toHaveBeenCalled();
+  });
+
+  // A refresh 401 mid-call signs out but keeps the call (M1): the reload must
+  // wait for it, or it would cut the call.
+  it('never under a call still ringing behind the gate: it reloads once the call is gone', async () => {
+    signedIn();
+    tokenStatuses = [200, 401]; // the mount's Device gets a token; its refresh is refused
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    const listeners = new Map<string, Array<() => void>>();
+    const call = {
+      parameters: { From: '+16195551234' },
+      customParameters: new Map<string, string>(),
+      accept: vi.fn(),
+      reject: vi.fn(),
+      on: (event: string, cb: () => void) => { listeners.set(event, [...(listeners.get(event) ?? []), cb]); },
+    };
+    act(() => { FakeDevice.instances[0]!.emit('incoming', call); });
+    await screen.findByTitle('Decline');
+    act(() => { FakeDevice.instances[0]!.emit('tokenWillExpire'); });
+    await screen.findByText('Sign in with Salesforce'); // signed out; the ring is still up
+    otherTabWrites(OTHER_SESSION);
+    await settle();
+    expect(pageReloader.reload).not.toHaveBeenCalled();
+    expect(events).not.toContain('device destroyed');
+
+    act(() => { for (const cb of listeners.get('cancel') ?? []) cb(); }); // the caller hangs up
+    await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
+    expect(events).toContain('device destroyed');
+  });
+});
