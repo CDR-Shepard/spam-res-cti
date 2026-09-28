@@ -1,0 +1,96 @@
+/**
+ * Power Dial run settings, server side (spec
+ * docs/superpowers/specs/2026-09-28-run-settings-design.md).
+ *
+ * The rep chooses on Ready to dial — AFTER the queue was built — and the
+ * choices arrive with Start dialing, so everything here runs inside the
+ * ready → active claim (engine.ts `claimReadySession`): the settings land on
+ * the session in the flip's own UPDATE, the queue is cut to the run size, and
+ * the rep's choices are saved as their next defaults. One transaction, so a
+ * refused Start (the rep's other run holds the one-active-run slot) changes
+ * nothing.
+ *
+ * Every write is a builder returned unawaited, so its rendered SQL is pinned
+ * in run-settings.test.ts.
+ */
+import { and, eq, gt } from 'drizzle-orm';
+import { schema, type Db } from '@cti/db';
+import { toRolloverBusinessDays, type DialerRunSettings, type RolloverBusinessDays } from '@cti/contracts';
+import type { DialerItem } from './session-store.js';
+
+/**
+ * The ordinal of the last row a run of `maxRecords` people keeps: the
+ * `maxRecords`-th PENDING row in queue order. The queue order is already the
+ * list's rotated order (create-session.ts), so this is "the next N people from
+ * where the list stands". Rows the build already settled — no number, Skip on
+ * Dialer, consent, called in the last 3 h — are not people this run will dial,
+ * so they do not count toward N; the ones in front of the cutoff stay so the
+ * run still reports them. Null = keep every row: no limit, or no more
+ * dialable rows than the limit.
+ */
+export function runSizeCutoff(
+  items: ReadonlyArray<Pick<DialerItem, 'ordinal' | 'status'>>,
+  maxRecords: number | null,
+): number | null {
+  if (maxRecords === null) return null;
+  const pending = items.filter((i) => i.status === 'pending').map((i) => i.ordinal).sort((a, b) => a - b);
+  if (pending.length <= maxRecords) return null;
+  return pending[maxRecords - 1] ?? null;
+}
+
+/** The ready → active compare-and-swap, carrying the run's settings when the
+ *  Start sent them. Returns the rep's id so the defaults can be saved in the
+ *  same transaction without another read. */
+export function claimReadySessionQuery(
+  db: Pick<Db, 'update'>,
+  sessionId: string,
+  settings: DialerRunSettings | null,
+  now: Date,
+) {
+  const s = schema.dialerSessions;
+  return db
+    .update(s)
+    .set({
+      status: 'active',
+      updatedAt: now,
+      ...(settings
+        ? { passes: settings.passes, maxRecords: settings.maxRecords, rolloverBusinessDays: settings.rolloverBusinessDays }
+        : {}),
+    })
+    .where(and(eq(s.id, sessionId), eq(s.status, 'ready')))
+    .returning({ id: s.id, userId: s.userId });
+}
+
+/** Drop every row of this run past the run size (the cutoff row itself stays). */
+export function trimQueueQuery(db: Pick<Db, 'delete'>, sessionId: string, cutoffOrdinal: number) {
+  const i = schema.dialerQueueItems;
+  return db.delete(i).where(and(eq(i.sessionId, sessionId), gt(i.ordinal, cutoffOrdinal)));
+}
+
+/** The rep's next defaults — all three: Calls per person, How many
+ *  (controller ruling S2), and Missed tasks. */
+export function saveRunDefaultsQuery(db: Pick<Db, 'update'>, userId: string, settings: DialerRunSettings) {
+  return db
+    .update(schema.users)
+    .set({
+      dialerPasses: settings.passes,
+      dialerMaxRecords: settings.maxRecords,
+      dialerRolloverBusinessDays: settings.rolloverBusinessDays,
+    })
+    .where(eq(schema.users.id, userId));
+}
+
+export function savedRolloverBusinessDaysQuery(db: Pick<Db, 'select'>, userId: string) {
+  return db
+    .select({ businessDays: schema.users.dialerRolloverBusinessDays })
+    .from(schema.users)
+    .where(eq(schema.users.id, userId))
+    .limit(1);
+}
+
+/** The rep's saved "Missed tasks move to" — what a click-to-dial rollover lands
+ *  by. A missing row is today's rule (next business day). */
+export async function savedRolloverBusinessDays(db: Pick<Db, 'select'>, userId: string): Promise<RolloverBusinessDays> {
+  const [row] = await savedRolloverBusinessDaysQuery(db, userId);
+  return toRolloverBusinessDays(row?.businessDays);
+}
