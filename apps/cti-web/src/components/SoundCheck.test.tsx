@@ -41,6 +41,8 @@ function fakeEnv(initial: MicPermission) {
   const s = {
     change: null as ((p: MicPermission) => void) | null,
     hidden: null as (() => void) | null,
+    /** The tab is on screen (isVisible()). */
+    visible: true,
     watchStopped: false,
     streams: [] as FakeStream[],
     sources: [] as FakeSource[],
@@ -75,6 +77,7 @@ function fakeEnv(initial: MicPermission) {
       return src;
     },
     onHidden: (cb) => { s.hidden = cb; return () => { s.hidden = null; }; },
+    isVisible: () => s.visible,
   };
   return {
     env,
@@ -317,6 +320,20 @@ describe('SoundCheck — keyboard: focus in, Tab trapped, Escape closes, focus r
 });
 
 describe('SoundCheck — a hidden tab never holds the mic', () => {
+  // Re-review item 2: a check opened from Settings re-mounts (a call hid it,
+  // then ended) while the tab is in the background — the click that opened
+  // it is long gone, so it must not start the mic by itself.
+  it('opened from Settings but mounting while the tab is hidden: nothing opens until Start', async () => {
+    const f = fakeEnv('granted');
+    f.s.visible = false;
+    renderCheck(f.env, { startNow: true });
+    const start = await screen.findByRole('button', { name: SOUND_CHECK_TEXT.start });
+    await act(async () => { await Promise.resolve(); });
+    expect(f.env.openMic).not.toHaveBeenCalled();
+    fireEvent.click(start);
+    await waitFor(() => expect(f.s.streams).toHaveLength(1));
+  });
+
   it('the tab goes hidden: the stream stops; back on screen it offers Start again and opens nothing by itself', async () => {
     const f = fakeEnv('granted');
     renderCheck(f.env); // opened from Settings: the meter starts at once

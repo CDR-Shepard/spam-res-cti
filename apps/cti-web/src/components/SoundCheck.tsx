@@ -58,8 +58,10 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
   const env = useMemo(() => injected ?? browserSoundCheckEnv(), [injected]);
   const [permission, setPermission] = useState<MicPermission | 'checking'>('checking');
   // The meter runs only once a click started it: "Start sound check", "Allow
-  // microphone", or the Settings click that opened this check (startNow).
-  const [started, setStarted] = useState(startNow);
+  // microphone", or the Settings click that opened this check (startNow) —
+  // and only if the tab is on screen as it mounts: a check re-mounting in a
+  // background tab (a call hid it, then ended) waits for Start.
+  const [started, setStarted] = useState(() => startNow && env.isVisible());
   const [justAllowed, setJustAllowed] = useState(false);
   const [micId, setMicId] = useState<string | null>(() => loadAudioPrefs().input);
   const [level, setLevel] = useState(0);

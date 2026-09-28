@@ -22,3 +22,13 @@ describe('browserSoundCheckEnv — onHidden (Task 3 review I1)', () => {
     expect(cb).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('browserSoundCheckEnv — isVisible (re-review item 2)', () => {
+  it('reads the tab\'s visibility now', () => {
+    const env = browserSoundCheckEnv({});
+    setVisibility('hidden');
+    expect(env.isVisible()).toBe(false);
+    setVisibility('visible');
+    expect(env.isVisible()).toBe(true);
+  });
+});

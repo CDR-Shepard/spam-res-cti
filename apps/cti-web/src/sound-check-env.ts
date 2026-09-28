@@ -24,6 +24,8 @@ export interface SoundCheckEnv {
   createLevelSource(stream: MicStreamLike): LevelSource;
   /** The tab went hidden (visibilitychange). Returns the unsubscribe. */
   onHidden(cb: () => void): () => void;
+  /** Is the tab on screen right now? */
+  isVisible(): boolean;
 }
 
 export interface PermissionStatusLike {
@@ -123,5 +125,6 @@ export function browserSoundCheckEnv(
       document.addEventListener('visibilitychange', onChange);
       return () => document.removeEventListener('visibilitychange', onChange);
     },
+    isVisible: () => typeof document === 'undefined' || document.visibilityState !== 'hidden',
   };
 }
