@@ -102,12 +102,21 @@ export function runSettingsLine(session: {
  * position ("two reps, one list", spec 2026-09-23 §4). An attempt-2 retry sits
  * past the end of the queue, so it gets no count; nor does a row an older
  * server sent without an ordinal.
+ *
+ * Minor fix 1 (spec 2026-09-28 review): a limited run now prefers the
+ * server's own authoritative fields — `item.runPosition` (already 1-based)
+ * against `ctx.runSize` — over the client's ordinal estimate. Never computed
+ * here from a dialable-only count (the web side has no such data); an older
+ * server that omits `runPosition` falls back to the ordinal-based estimate
+ * this always used. Clamped so X can never exceed N even if the server ever
+ * sent something inconsistent.
  */
 export function recordPositionLine(
-  item: { listPosition?: number | null; ordinal?: number; attempt?: number },
+  item: { listPosition?: number | null; runPosition?: number | null; ordinal?: number; attempt?: number },
   ctx: { listTotal: number | null; runSize: number | null },
 ): string | null {
   if (ctx.runSize !== null) {
+    if (item.runPosition != null) return `record ${Math.min(item.runPosition, ctx.runSize)} of ${ctx.runSize}`;
     if (item.attempt === 2 || item.ordinal === undefined) return null;
     return `record ${item.ordinal + 1} of ${ctx.runSize}`;
   }

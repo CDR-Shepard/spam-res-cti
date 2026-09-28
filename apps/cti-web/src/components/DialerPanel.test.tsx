@@ -29,6 +29,7 @@ import {
   ConfirmBlock,
   conflictingSessionId,
   CurrentRecord,
+  runSizeForCurrentRecord,
   HoldMusicPlayer,
   ItemControls,
   SessionToggle,
@@ -980,5 +981,25 @@ describe('CurrentRecord — a limited run counts its own queue (spec 2026-09-28)
   });
   it('a full run keeps the list position, as today', () => {
     expect(renderToStaticMarkup(<CurrentRecord item={item} listTotal={220} />)).toContain('record 151 of 220');
+  });
+  // Minor fix 1 (spec 2026-09-28 review): prefers the server's own
+  // runPosition (already 1-based) over the ordinal estimate.
+  it('prefers the server\'s own runPosition when the item has one', () => {
+    const withRunPosition: DialerCurrentItem = { ...item, runPosition: 3 };
+    expect(renderToStaticMarkup(<CurrentRecord item={withRunPosition} listTotal={104} runSize={104} />)).toContain('record 3 of 104');
+  });
+});
+
+describe('runSizeForCurrentRecord — the runSize prop for "record X of N" (spec 2026-09-28 review fix, minor 1)', () => {
+  it("prefers the server's own session.runSize whenever the field is present, including an explicit null", () => {
+    expect(runSizeForCurrentRecord({ maxRecords: 100, runSize: 60 }, 202)).toBe(60);
+    // An explicit runSize: null is authoritative even when maxRecords still
+    // holds a number — distinguishes "field present" from "field truthy".
+    expect(runSizeForCurrentRecord({ maxRecords: 100, runSize: null }, 202)).toBeNull();
+  });
+  it('an older server that omits runSize entirely falls back to the maxRecords/firstPassTotal estimate', () => {
+    expect(runSizeForCurrentRecord({ maxRecords: 100 }, 202)).toBe(202);
+    expect(runSizeForCurrentRecord({ maxRecords: null }, 202)).toBeNull();
+    expect(runSizeForCurrentRecord({}, 202)).toBeNull();
   });
 });

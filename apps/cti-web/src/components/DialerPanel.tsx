@@ -638,6 +638,22 @@ export function HoldMusicPlayer({ view, holdMusic, lineAudio }: {
   );
 }
 
+/**
+ * Pure — the `runSize` prop `CurrentRecord` needs for "record X of N" (spec
+ * 2026-09-28 review fix, minor 1). Prefers the server's own authoritative
+ * `session.runSize` whenever the field is present at all (including
+ * explicitly `null`, for an unlimited run); an older server that omits the
+ * field entirely falls back to the maxRecords/firstPassTotal estimate this
+ * build used before `runSize` existed.
+ */
+export function runSizeForCurrentRecord(
+  session: { maxRecords?: number | null; runSize?: number | null },
+  firstPassTotal?: number | null,
+): number | null {
+  if (session.runSize !== undefined) return session.runSize;
+  return session.maxRecords != null ? (firstPassTotal ?? null) : null;
+}
+
 export function CurrentRecord({ item, listTotal, runSize }: {
   item: DialerCurrentItem;
   listTotal?: number | null;
@@ -1266,7 +1282,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         <CurrentRecord
           item={view.currentItem}
           listTotal={view.listContext?.total ?? null}
-          runSize={view.session.maxRecords != null ? (view.firstPassTotal ?? null) : null}
+          runSize={runSizeForCurrentRecord(view.session, view.firstPassTotal)}
         />
       )}
 

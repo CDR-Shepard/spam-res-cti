@@ -73,4 +73,17 @@ describe('run settings on Ready to dial (spec 2026-09-28)', () => {
     expect(recordPositionLine({ ordinal: 2, attempt: 1, listPosition: 86 }, { runSize: null, listTotal: 220 })).toBe('record 87 of 220');
     expect(recordPositionLine({ ordinal: 2, attempt: 1, listPosition: null }, { runSize: null, listTotal: 220 })).toBeNull();
   });
+
+  // Minor fix 1 (spec 2026-09-28 review): the server now sends its own
+  // authoritative rank (`currentItem.runPosition`, already 1-based) for a
+  // limited run — preferred over the client's ordinal estimate whenever it's
+  // present. Never client-computed; an older server that omits it falls back
+  // to the existing ordinal-based estimate above.
+  it('recordPositionLine: prefers the server\'s own runPosition when present', () => {
+    expect(recordPositionLine({ runPosition: 3, ordinal: 2, attempt: 1, listPosition: 150 }, { runSize: 100, listTotal: 100 })).toBe('record 3 of 100');
+    // Never shows X > N, even if the server sent something inconsistent.
+    expect(recordPositionLine({ runPosition: 105, ordinal: 2, attempt: 1, listPosition: 150 }, { runSize: 100, listTotal: 100 })).toBe('record 100 of 100');
+    // No runSize (unlimited run): runPosition is ignored, list position rules as before.
+    expect(recordPositionLine({ runPosition: 3, listPosition: 86 }, { runSize: null, listTotal: 220 })).toBe('record 87 of 220');
+  });
 });

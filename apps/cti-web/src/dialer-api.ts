@@ -42,6 +42,11 @@ export interface DialerCurrentItem {
   /** The row's place in THIS run's queue (0-based). A limited run counts its
    *  "record X of N" by it (spec 2026-09-28 decision 5). Absent: an older server. */
   ordinal?: number;
+  /** The item's 1-based rank among the people a LIMITED run actually dials
+   *  (spec 2026-09-28 review fix, minor 1) — authoritative, preferred over
+   *  `ordinal` whenever present. Null/absent for an unlimited run, or an
+   *  older server that has not added the field yet. */
+  runPosition?: number | null;
 }
 
 export interface DialerSession {
@@ -52,6 +57,11 @@ export interface DialerSession {
   passes?: DialerPasses;
   maxRecords?: number | null;
   rolloverBusinessDays?: RolloverBusinessDays;
+  /** For a limited run, the number of people it actually dials —
+   *  `min(maxRecords, pending at build)` — the "of N" a limited run's
+   *  `currentItem.runPosition` counts against (spec 2026-09-28 review fix,
+   *  minor 1). Null for an unlimited run. Absent: an older server. */
+  runSize?: number | null;
 }
 
 export interface DialerRollovers { moved: number; pushed: number; failed: number; pending: number }
