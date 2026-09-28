@@ -13,10 +13,11 @@
  * The caller (App) maps that to Open CTI `screenPopRecord`.
  */
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
-import type { HoldMusicSetting } from '@cti/contracts';
+import { DEFAULT_DIALER_RUN_DEFAULTS, type DialerRunDefaults, type HoldMusicSetting } from '@cti/contracts';
 import {
   dialerControl,
   getDialer,
+  startDialerRun,
   getSalesforceListViews,
   OBJECT_LABELS,
   type DialerControlAction,
@@ -33,6 +34,8 @@ import type { LineAudio } from '../line-audio';
 import { YouTubeHoldPlayer } from './YouTubeHoldPlayer';
 import { runSnapshotOf, type RunSnapshot } from '../callback-waiting';
 import { CallbackBanner, type CallbackBannerProps } from './CallbackBanner';
+import { RunSettingsBlock } from './RunSettingsBlock';
+import { draftFromDefaults, parseHowMany, recordPositionLine, runSettingsFor, runSettingsLine, type RunDraft } from '../run-settings';
 
 const POLL_INTERVAL_MS = 2000;
 /** While a dial is in flight. The panel only LEARNS a record connected by
@@ -136,11 +139,19 @@ export function queueLine(firstPassTotal: number, unreachable: number, breakdown
 /**
  * Pure — the confirm block's line, e.g.
  * "187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked".
- * Leads with the figure the rep is deciding on; zero parts omitted.
+ * Leads with the figure the rep is deciding on; zero parts omitted. A run size
+ * (`maxRecords`, spec 2026-09-28) caps the lead figure at what the list can
+ * actually give: asking for 195 of a list with 187 dialable reads "187".
  */
-export function confirmLine(firstPassTotal: number, unreachable: number, breakdown?: Record<string, number>): string {
+export function confirmLine(
+  firstPassTotal: number,
+  unreachable: number,
+  breakdown?: Record<string, number>,
+  maxRecords: number | null = null,
+): string {
   const q = queueParts(firstPassTotal, unreachable, breakdown);
-  const parts = [`${q.dialing} will be dialed`];
+  const dialing = maxRecords === null ? q.dialing : Math.min(q.dialing, maxRecords);
+  const parts = [`${dialing} will be dialed`];
   if (q.cooldown > 0) parts.push(`${q.cooldown} called in the last 3 h`);
   if (q.skipOnDialer > 0) parts.push(`${q.skipOnDialer} skipped by flag`);
   if (q.unreachable > 0) parts.push(`${q.unreachable} no number`);
@@ -411,10 +422,17 @@ export function retryCountdown(nextRetryAt: string, now: number): string {
  * a {moved: 8, failed: 3} run used to read "8 follow-ups moved to tomorrow" and
  * quietly drop the three the rep needs an admin to chase. The noun is carried by
  * whichever clause comes first, so the line reads as one sentence.
+ *
+ * Controller ruling S6 (spec 2026-09-28): never say "tomorrow" — a run whose
+ * Missed tasks setting is "in 2 business days" (or whose landing day isn't
+ * known here) would make that false. This function only sees a moved/pushed/
+ * failed tally, not the run's rolloverBusinessDays or the actual landing day,
+ * so the simplest correct copy — and the one the ruling endorses — is to
+ * always say "a later day".
  */
 export function rolloverLine(r: { moved: number; pushed: number; failed: number }): string {
   const parts: string[] = [];
-  if (r.moved) parts.push(`${r.moved} follow-up${r.moved === 1 ? '' : 's'} moved to tomorrow`);
+  if (r.moved) parts.push(`${r.moved} follow-up${r.moved === 1 ? '' : 's'} moved to a later day`);
   if (r.pushed) parts.push(`${r.pushed} pushed later (daily limit)`);
   if (r.failed) {
     parts.push(parts.length
@@ -535,6 +553,13 @@ export interface DialerPanelProps {
   /** App-owned record of the last screen-popped item, so a remount never pops
    *  the same record again (decision 8). Absent: the panel keeps its own. */
   popLedger?: MutableRefObject<PopLedger>;
+  /** The rep's saved run settings (`/auth/me` `dialerRunDefaults`, via
+   *  `runDefaultsFromMe` in App.tsx) — what Ready to dial starts from. Absent:
+   *  today's run (Twice, next business day). */
+  runDefaults?: DialerRunDefaults;
+  /** Called once a Start the server accepted has saved the choices, so App can
+   *  re-read `/auth/me` and the next run starts from them. */
+  onRunDefaultsSaved?: () => void;
 }
 
 /**
@@ -565,7 +590,13 @@ export function HoldMusicPlayer({ view, holdMusic, lineAudio }: {
   );
 }
 
-export function CurrentRecord({ item, listTotal }: { item: DialerCurrentItem; listTotal?: number | null }): JSX.Element {
+export function CurrentRecord({ item, listTotal, runSize }: {
+  item: DialerCurrentItem;
+  listTotal?: number | null;
+  /** A limited run's queue size (spec 2026-09-28): "record X of N" then counts
+   *  THIS run's queue, not the Salesforce list. Null/absent: a full run. */
+  runSize?: number | null;
+}): JSX.Element {
   const number = formatE164(item.toNumber) || item.toNumber || 'No number';
   // The name is the headline from the moment the row is dialing — before the
   // record pops on `connected` — so the rep knows who is about to say hello.
@@ -574,10 +605,9 @@ export function CurrentRecord({ item, listTotal }: { item: DialerCurrentItem; li
   const name = item.displayName?.trim() || null;
   // Two reps, one list (spec §4): 1-based from the 0-based `listPosition` —
   // shown only when BOTH the item's own position and the run's list total are
-  // known (a non-list-view run, or an older server, has neither).
-  const listLine = item.listPosition != null && listTotal != null
-    ? `record ${item.listPosition + 1} of ${listTotal}`
-    : null;
+  // known (a non-list-view run, or an older server, has neither). A limited
+  // run counts its own queue instead — see `recordPositionLine`.
+  const listLine = recordPositionLine(item, { listTotal: listTotal ?? null, runSize: runSize ?? null });
   // The prospect hung up on a connected call (spec §5): name it plainly. A
   // muted-red dot, not the sharp red `dotClassForItemStatus` gives a genuine
   // miss (busy/failed/no_connect) — this isn't a failure, it's a decision
@@ -752,10 +782,15 @@ function ListViewPicker({
   );
 }
 
+/** Today's run — what Ready to dial shows when the parent passes no draft. */
+const TODAYS_DRAFT: RunDraft = draftFromDefaults(DEFAULT_DIALER_RUN_DEFAULTS);
+
 /**
  * The run was created READY: the queue is built, nothing has dialed. Show the
- * rep what the list came to and let them start it — or back out, which stops
- * the (never-started) session and returns to the picker.
+ * rep what the list came to, let them choose the run settings (spec
+ * 2026-09-28 — above Start dialing, prefilled from their saved defaults), and
+ * start it — or back out, which stops the (never-started) session and returns
+ * to the picker. "N will be dialed" follows the How many box as it changes.
  */
 export function ConfirmBlock({
   view,
@@ -764,6 +799,8 @@ export function ConfirmBlock({
   onStartDialing,
   onChooseAnother,
   onStopOther,
+  draft = TODAYS_DRAFT,
+  onDraftChange = () => {},
 }: {
   view: DialerSessionView;
   busy: boolean;
@@ -773,18 +810,24 @@ export function ConfirmBlock({
   /** Present only when a refused Start named the rep's OTHER active run —
    *  renders the way to stop it without leaving this screen. */
   onStopOther?: () => void;
+  /** The run settings on screen; absent renders today's run. */
+  draft?: RunDraft;
+  onDraftChange?: (draft: RunDraft) => void;
 }): JSX.Element {
   const contextLine = confirmContextLine(view.listContext);
+  const listSize = view.firstPassTotal ?? view.counts.total;
+  const howMany = parseHowMany(draft.howMany, listSize);
   return (
     <div className="dialer-panel">
       <div className="section dp-picker">
         <div className="kicker">Ready to dial</div>
         <div className="dp-queue-line">
-          {confirmLine(view.firstPassTotal ?? view.counts.total, view.counts.unreachable, view.skipBreakdown)}
+          {confirmLine(listSize, view.counts.unreachable, view.skipBreakdown, howMany.ok ? howMany.maxRecords : null)}
         </div>
         {contextLine && <div className="dp-queue-line dp-list-context">{contextLine}</div>}
+        <RunSettingsBlock draft={draft} listSize={listSize} busy={busy} onChange={onDraftChange} />
         {error && <div className="dp-error">{error}</div>}
-        <button className="btn primary full" disabled={busy} onClick={onStartDialing}>
+        <button className="btn primary full" disabled={busy || !howMany.ok} onClick={onStartDialing}>
           {busy ? 'Starting…' : 'Start dialing'}
         </button>
         {onStopOther && (
@@ -804,6 +847,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const {
     sessionId, onScreenPop, onStartFromListView, onPrepare, onJoin, onStartingChange, onStop, onComplete, onDismiss, holdMusic,
     lineAudio, onRunSnapshot, callback, needsRejoin, onRejoin, popLedger: sharedPopLedger,
+    runDefaults, onRunDefaultsSaved,
   } = props;
   const [view, setView] = useState<DialerSessionView | null>(null);
   // The poll owns `error` (a failed refresh); control actions own
@@ -829,6 +873,12 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // Ticks every second so the retry countdown re-renders without waiting on
   // the ~2 s (1 s while a dial is ringing) poll.
   const [now, setNow] = useState(() => Date.now());
+  // The Ready-to-dial choices (spec 2026-09-28). Re-seeded from the rep's saved
+  // defaults for every new run (the per-session effect below), read through a
+  // ref so an `/auth/me` refresh mid-choice never overwrites what the rep picked.
+  const runDefaultsRef = useRef(runDefaults);
+  runDefaultsRef.current = runDefaults;
+  const [runDraft, setRunDraft] = useState<RunDraft>(() => draftFromDefaults(runDefaults ?? DEFAULT_DIALER_RUN_DEFAULTS));
 
   // Which connected item was last screen-popped, per run — pop once per NEW
   // connected item, not on every ~2 s (1 s while a dial is ringing) poll. App
@@ -859,6 +909,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     completedRef.current = false;
     firstTerminalAtRef.current = null;
     stopRequestedRef.current = false;
+    setRunDraft(draftFromDefaults(runDefaultsRef.current ?? DEFAULT_DIALER_RUN_DEFAULTS));
 
     if (!sessionId) {
       setView(null);
@@ -1023,23 +1074,34 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
     })();
   }, [runControl, onStop]);
 
-  // Start dialing: ready the softphone (onPrepare), send `start`, THEN join the
-  // conference (onJoin) — see startDialingSequence for why that order and no
-  // other. busy covers the whole sequence so the button cannot double-fire; a
-  // superseded join sends nothing and shows nothing — the rep chose to leave.
+  // Start dialing: ready the softphone (onPrepare), send `start` WITH the run
+  // settings (spec 2026-09-28), THEN join the conference (onJoin) — see
+  // startDialingSequence for why that order and no other. busy covers the whole
+  // sequence so the button cannot double-fire; a superseded join sends nothing
+  // and shows nothing — the rep chose to leave. Once the server has accepted
+  // `start` it has also saved Calls per person / Missed tasks as the rep's
+  // defaults, so App re-reads them (a refused Start saved nothing).
   const handleStartDialing = useCallback(() => {
-    if (!sessionId) return;
+    if (!sessionId || !view) return;
+    const settings = runSettingsFor(runDraft, view.firstPassTotal ?? view.counts.total);
+    if (!settings) return; // the box holds something Start must not send — the button is disabled too
     // Synchronously, before the first await: from the click on, a reset waits.
     onStartingChange?.(true);
     void (async () => {
       setControlBusy(true);
       setControlError(null);
       setConflictSessionId(null);
+      let startAccepted = false;
       try {
         // On success ('started' or 'superseded') there is nothing to show here —
         // the run screen takes over on the next poll, or the rep already left.
         await startDialingSequence(onPrepare, async (action) => {
-          await dialerControl(sessionId, action);
+          if (action === 'start') {
+            await startDialerRun(sessionId, settings);
+            startAccepted = true;
+          } else {
+            await dialerControl(sessionId, action);
+          }
           pollNowRef.current();
         }, onJoin);
       } catch (e: unknown) {
@@ -1048,9 +1110,10 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
       } finally {
         setControlBusy(false);
         onStartingChange?.(false);
+        if (startAccepted) onRunDefaultsSaved?.();
       }
     })();
-  }, [onPrepare, onJoin, onStartingChange, sessionId]);
+  }, [onPrepare, onJoin, onStartingChange, onRunDefaultsSaved, sessionId, view, runDraft]);
 
   // The 409 named the rep's other active run (another tab, or a run wedged
   // by a closed tab). Stop THAT run, then the rep presses Start dialing again.
@@ -1098,11 +1161,15 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         onStartDialing={handleStartDialing}
         onChooseAnother={handleStop}
         onStopOther={conflictSessionId ? handleStopOther : undefined}
+        draft={runDraft}
+        onDraftChange={setRunDraft}
       />
     );
   }
 
   const isTerminal = TERMINAL_STATUSES.has(view.session.status);
+  // The choices this run started with (spec 2026-09-28), under the progress.
+  const settingsLine = runSettingsLine(view.session);
   const pct = view.counts.total > 0 ? Math.round((processedCount(view.counts) / view.counts.total) * 100) : 0;
   // The hung-up choice is showing (spec §5): SessionToggle hides itself
   // (decision — no two buttons with the same label) so "Resume" can only
@@ -1126,6 +1193,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         <div className="meterbar tall">
           <div className="meterfill" style={{ width: `${pct}%` }} />
         </div>
+        {settingsLine && <div className="dp-queue-line dp-run-line">{settingsLine}</div>}
       </div>
 
       {callback && !isTerminal && (
@@ -1139,7 +1207,13 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         />
       )}
 
-      {view.currentItem && <CurrentRecord item={view.currentItem} listTotal={view.listContext?.total ?? null} />}
+      {view.currentItem && (
+        <CurrentRecord
+          item={view.currentItem}
+          listTotal={view.listContext?.total ?? null}
+          runSize={view.session.maxRecords != null ? (view.firstPassTotal ?? null) : null}
+        />
+      )}
 
       <HoldMusicPlayer view={view} holdMusic={holdMusic} lineAudio={lineAudio} />
 

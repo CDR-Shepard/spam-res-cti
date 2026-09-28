@@ -258,8 +258,11 @@ describe('retryCountdown', () => {
 
 describe('rolloverLine', () => {
   it('reads naturally and omits zero parts', () => {
-    expect(rolloverLine({ moved: 12, pushed: 3, failed: 0 })).toBe('12 follow-ups moved to tomorrow · 3 pushed later (daily limit)');
-    expect(rolloverLine({ moved: 1, pushed: 0, failed: 0 })).toBe('1 follow-up moved to tomorrow');
+    // Controller ruling S6 (spec 2026-09-28): never claim "tomorrow" — a
+    // rolloverBusinessDays of 2 (or an unknown landing day) makes that false.
+    // The simplest correct copy is "a later day", always.
+    expect(rolloverLine({ moved: 12, pushed: 3, failed: 0 })).toBe('12 follow-ups moved to a later day · 3 pushed later (daily limit)');
+    expect(rolloverLine({ moved: 1, pushed: 0, failed: 0 })).toBe('1 follow-up moved to a later day');
     expect(rolloverLine({ moved: 0, pushed: 0, failed: 2 })).toBe('2 follow-ups could not be moved — see admin');
     expect(rolloverLine({ moved: 0, pushed: 0, failed: 0 })).toBe('');
   });
@@ -269,9 +272,9 @@ describe('rolloverLine', () => {
     // failed rollover told the rep "8 moved" and silently dropped the 3 that
     // did not — the exact case an admin needs to hear about.
     expect(rolloverLine({ moved: 8, pushed: 0, failed: 3 }))
-      .toBe('8 follow-ups moved to tomorrow · 3 could not be moved — see admin');
+      .toBe('8 follow-ups moved to a later day · 3 could not be moved — see admin');
     expect(rolloverLine({ moved: 2, pushed: 1, failed: 1 }))
-      .toBe('2 follow-ups moved to tomorrow · 1 pushed later (daily limit) · 1 could not be moved — see admin');
+      .toBe('2 follow-ups moved to a later day · 1 pushed later (daily limit) · 1 could not be moved — see admin');
   });
 });
 
@@ -724,7 +727,11 @@ describe('ConfirmBlock (SSR)', () => {
     const html = renderToStaticMarkup(<ConfirmBlock view={view} busy={true} error="Another power-dial run is already active for you" onStartDialing={() => {}} onChooseAnother={() => {}} />);
     expect(html).toContain('Starting…');
     expect(html).toContain('Another power-dial run is already active');
-    expect((html.match(/disabled=""/g) ?? []).length).toBe(2);
+    // Start and the way out — and, while a Start is in flight, the settings too
+    // (four choices and the How many box: 7 in all).
+    expect(html).toMatch(/<button class="btn primary full" disabled="">Starting…<\/button>/);
+    expect(html).toMatch(/<button class="btn full" disabled="">Choose a different list<\/button>/);
+    expect((html.match(/disabled=""/g) ?? []).length).toBe(7);
   });
   it('offers to stop the other run when the 409 named one', () => {
     const html = renderToStaticMarkup(
@@ -735,6 +742,28 @@ describe('ConfirmBlock (SSR)', () => {
   it('does not offer it when the 409 named no run', () => {
     const html = renderToStaticMarkup(<ConfirmBlock view={view} busy={false} error="Another power-dial run is already active for you — stop it first." onStartDialing={() => {}} onChooseAnother={() => {}} />);
     expect(html).not.toContain('Stop the other run');
+  });
+  it("shows the run settings above Start dialing, prefilled with today's run", () => {
+    const html = renderToStaticMarkup(<ConfirmBlock view={view} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} />);
+    expect(html).toMatch(/aria-pressed="true">Twice<\/button>/);
+    expect(html).toMatch(/aria-pressed="true">Next business day<\/button>/);
+    expect(html).toContain('<span>of 202</span>');
+    expect(html.indexOf('Calls per person')).toBeLessThan(html.indexOf('Start dialing'));
+  });
+  it('"N will be dialed" follows the box, capped at what the list can dial', () => {
+    const at = (howMany: string) => renderToStaticMarkup(
+      <ConfirmBlock view={view} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} draft={{ passes: 2, rolloverBusinessDays: 1, howMany }} />,
+    );
+    expect(at('100')).toContain('100 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
+    expect(at('195')).toContain('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
+    expect(at('')).toContain('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
+  });
+  it('an out-of-range number holds Start dialing back', () => {
+    const html = renderToStaticMarkup(
+      <ConfirmBlock view={view} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} draft={{ passes: 2, rolloverBusinessDays: 1, howMany: '203' }} />,
+    );
+    expect(html).toContain('Enter a whole number from 1 to 202, or leave it blank for all.');
+    expect(html).toMatch(/<button class="btn primary full" disabled="">Start dialing<\/button>/);
   });
   it('shows the shared-list line under the breakdown line when listContext names another rep', () => {
     const html = renderToStaticMarkup(
@@ -885,5 +914,26 @@ describe('HoldMusicPlayer (SSR) — mounts the YouTube player after the current-
 
   it('no holdMusic prop at all (an older /auth/me, or the fetch not settled yet): no player', () => {
     expect(renderRunning(viewWith('active'), undefined)).not.toContain('yt-player');
+  });
+});
+
+describe('confirmLine — a run size (spec 2026-09-28)', () => {
+  it('leads with the run size, never more than the list can dial', () => {
+    const b = { already_worked: 9, blocked: 2 };
+    expect(confirmLine(202, 4, b, 100)).toBe('100 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
+    expect(confirmLine(202, 4, b, 195)).toBe('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
+    expect(confirmLine(202, 4, b, null)).toBe('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
+  });
+});
+
+describe('CurrentRecord — a limited run counts its own queue (spec 2026-09-28)', () => {
+  const item: DialerCurrentItem = {
+    id: 'i3', recordId: '00Q3', objectType: 'Lead', status: 'dialing', toNumber: '+16195551234', ordinal: 2, attempt: 1, listPosition: 150,
+  };
+  it('reads "record X of N" from the run\'s queue, not the Salesforce list', () => {
+    expect(renderToStaticMarkup(<CurrentRecord item={item} listTotal={104} runSize={104} />)).toContain('record 3 of 104');
+  });
+  it('a full run keeps the list position, as today', () => {
+    expect(renderToStaticMarkup(<CurrentRecord item={item} listTotal={220} />)).toContain('record 151 of 220');
   });
 });
