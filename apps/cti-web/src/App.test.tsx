@@ -69,6 +69,9 @@ class FakeOutboundConnection {
   private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
   disconnect = vi.fn();
   parameters: Record<string, string> = { CallSid: 'CA_test_1' };
+  /** Unset by default (a connection that can't say reads as live); a test
+   *  sets it to report 'closed' once its call has ended. */
+  status?: () => string;
   on(event: string, cb: (...args: unknown[]) => void): void {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), cb]);
   }
@@ -116,6 +119,7 @@ class FakeDevice {
   /** Outbound legs handed out by connect() — one per place() call. */
   static connects: FakeOutboundConnection[] = [];
   audio = fakeDeviceAudio();
+  destroyed = false;
   private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
   constructor(_token: string, _opts: unknown) {
     FakeDevice.instances.push(this);
@@ -130,7 +134,7 @@ class FakeDevice {
   }
   register(): Promise<void> { return Promise.resolve(); }
   updateToken(): void { /* not exercised */ }
-  destroy(): void { /* not exercised */ }
+  destroy(): void { this.destroyed = true; }
   connect(_opts: unknown): Promise<FakeOutboundConnection> {
     const connection = new FakeOutboundConnection();
     FakeDevice.connects.push(connection);
@@ -703,5 +707,86 @@ describe('App — a callback during a manual call', () => {
     expect(call.reject).toHaveBeenCalledTimes(1);
     expect(screen.queryByTitle('Answer')).toBeNull();
     expect(screen.queryByText(/Missed callback/)).toBeNull();
+  });
+});
+
+/** M1 (Task 2 review): a session that dies mid-call (the SDK's token refresh
+ *  comes back 401) signs the rep out — but the Device holding the live call is
+ *  kept until that call ends, then torn down (the sign-in gate has no UI to
+ *  answer a ring with). */
+describe('App — a dead session never kills a live call (M1)', () => {
+  /** Outbound routes, plus /telephony/token answering 401 once `dead` is set. */
+  function stubFetchWithDeadSession(): { kill: () => void } {
+    let dead = false;
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: { method?: string }): Promise<Response> => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.includes('/auth/me')) return jsonResponse(ME_RESPONSE);
+      if (url.includes('/calls/pending-disposition')) return jsonResponse({ pending: null });
+      if (url.includes('/telephony/token')) return dead ? jsonResponse({ error: 'Unauthorized' }, 401) : jsonResponse({ token: 'device-token' });
+      if (url.includes('/firewall/precall')) return jsonResponse(ALLOW_VERDICT);
+      if (method === 'POST' && url.endsWith('/calls')) return jsonResponse({ call: OUTBOUND_CALL, taskAllowed: true });
+      return jsonResponse({});
+    }));
+    return { kill: () => { dead = true; } };
+  }
+
+  it('outbound call up: the 401 signs out, the Device and the call stay; the call ends, THEN the Device goes', async () => {
+    const session = stubFetchWithDeadSession();
+    const connection = await placeOutboundCall();
+    act(() => { connection.emit('accept'); });
+    session.kill();
+    act(() => { FakeDevice.instances[0]!.emit('tokenWillExpire'); });
+    await screen.findByText('Sign in with Salesforce');
+    expect(FakeDevice.instances[0]!.destroyed).toBe(false);
+    expect(connection.disconnect).not.toHaveBeenCalled();
+
+    connection.status = () => 'closed';
+    act(() => { connection.emit('disconnect'); }); // the other side hangs up
+    await waitFor(() => expect(FakeDevice.instances[0]!.destroyed).toBe(true));
+  });
+
+  it('inbound call up: kept through the 401, torn down once the caller hangs up', async () => {
+    const session = stubFetchWithDeadSession();
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    const call = fakeCall({ parameters: { From: '+16195551234' }, customParameters: new Map() });
+    act(() => { FakeDevice.instances[0]!.emit('incoming', call); });
+    fireEvent.click(await screen.findByTitle('Answer'));
+    session.kill();
+    act(() => { FakeDevice.instances[0]!.emit('tokenWillExpire'); });
+    await screen.findByText('Sign in with Salesforce');
+    expect(FakeDevice.instances[0]!.destroyed).toBe(false);
+    expect(call.disconnect).not.toHaveBeenCalled();
+
+    act(() => { call.emit('disconnect'); });
+    await waitFor(() => expect(FakeDevice.instances[0]!.destroyed).toBe(true));
+  });
+
+  // A Device `error` drops a ringing outbound call's phase to `preflight`
+  // while the call itself is still up: the connection, not the phase, says so.
+  it('a call still up after a Device error dropped it to preflight: kept through the 401 too', async () => {
+    const session = stubFetchWithDeadSession();
+    const connection = await placeOutboundCall();
+    act(() => { FakeDevice.instances[0]!.emit('error', { code: 31005, message: 'websocket closed' }); });
+    connection.status = () => 'open';
+    session.kill();
+    act(() => { FakeDevice.instances[0]!.emit('tokenWillExpire'); });
+    await screen.findByText('Sign in with Salesforce');
+    expect(FakeDevice.instances[0]!.destroyed).toBe(false);
+
+    connection.status = () => 'closed';
+    act(() => { connection.emit('disconnect'); });
+    await waitFor(() => expect(FakeDevice.instances[0]!.destroyed).toBe(true));
+  });
+
+  it('nothing live: the 401 tears the Device down at once, exactly as before', async () => {
+    const session = stubFetchWithDeadSession();
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    session.kill();
+    act(() => { FakeDevice.instances[0]!.emit('tokenWillExpire'); });
+    await screen.findByText('Sign in with Salesforce');
+    expect(FakeDevice.instances[0]!.destroyed).toBe(true);
   });
 });

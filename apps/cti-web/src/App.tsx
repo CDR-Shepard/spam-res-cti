@@ -507,11 +507,26 @@ export function App(): JSX.Element {
     if (d) { try { d.destroy?.(); } catch { /* already gone */ } }
   }, []);
 
+  // Live media on this tab's Device right now: a call ringing or up (or still
+  // open after a Device error dropped the phase to preflight), a ring on the
+  // screen or the banner, a dialer leg, or a run parked for a callback.
+  const holdsLiveTelephony = useCallback((): boolean =>
+    phaseRef.current === 'ringing' ||
+    phaseRef.current === 'active' ||
+    (!!connectionRef.current && (connectionRef.current as { status?: () => string }).status?.() !== 'closed') ||
+    !!incomingRef.current ||
+    !!dialerConnRef.current ||
+    !!callbackWaitingRef.current ||
+    !!parkedRunIdRef.current, []);
+
   // Clear the local session and return to the sign-in gate. Tears down the
   // device first so a dead session can't leave it registered (ringing with no UI
-  // to answer) or looping on token refresh.
+  // to answer) or looping on token refresh — except under a live call (M1): a
+  // token-refresh 401 mid-call must not cut it. Then the teardown waits, and
+  // the effect below runs it the moment the call is over.
   const signOut = useCallback(() => {
-    teardownDevice();
+    if (holdsLiveTelephony()) pendingTeardownRef.current = true;
+    else teardownDevice();
     clearSession();
     setMe(null);
     setSignedIn(false);
@@ -521,11 +536,21 @@ export function App(): JSX.Element {
     setPendingDisp(null);
     setParked(null);
     setWaiting(null);
-  }, [teardownDevice, setParked, setWaiting]);
+  }, [teardownDevice, holdsLiveTelephony, setParked, setWaiting]);
 
   // Destroy the device on unmount (empty deps → runs only on real unmount, not
   // on every `me` change, which would churn the device).
   useEffect(() => () => teardownDevice(), [teardownDevice]);
+
+  // Signed out mid-call (M1): the Device stayed up for that call. The moment
+  // nothing is live any more, finish the sign-out — the sign-in gate has no UI
+  // to answer a ring with. (While signed in, reset()/backToIdle()/
+  // dropConferenceLeg() flush a teardown deferred by a leadership change.)
+  useEffect(() => {
+    if (signedIn || !pendingTeardownRef.current || holdsLiveTelephony()) return;
+    pendingTeardownRef.current = false;
+    teardownDevice();
+  }, [signedIn, phase, incoming, callbackWaiting, parkedRunId, dialerLive, holdsLiveTelephony, teardownDevice]);
 
   // Auto-dismiss the status/error banner after a few seconds so it doesn't sit
   // in the way at the bottom of the dialer.
