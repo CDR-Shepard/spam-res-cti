@@ -260,20 +260,15 @@ describe('listContextFor', () => {
     expect(readShared).toHaveBeenCalledOnce();
   });
 
-  // Review M1 (ruling: fix it): for a LIMITED run, `total` must agree with
-  // `session.runSize` — the count of PEOPLE this run will actually dial —
-  // not the row-based ordinal count, which also includes settled-at-build
-  // rows (skip, unreachable, consent-blocked) kept in front of the cutoff.
-  it("a limited run's total is session.runSize, not the row-based ordinal count", async () => {
+  // Review R2 (re-review, ruling: fix it): M1 made `total` agree with
+  // `session.runSize` for a limited run, but the web computes "dialing" as
+  // firstPassTotal/total minus the skip breakdown, which still includes the
+  // settled-at-build rows — "first 100" showed "dialing 92" (and could go
+  // negative). N comes ONLY from `session.runSize` now; `total` reverts to
+  // the plain row-based ordinal count, limited run or not.
+  it("total stays the row-based ordinal count, even when the session carries a runSize", async () => {
     const got = await listContextFor(
       {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', runSize: 2 }, items, 'U-ME', new Date(), vi.fn(async () => null),
-    );
-    expect(got).toEqual({ total: 2, startedFrom: 87, workedBy: [] });
-  });
-
-  it('an unlimited run (runSize null) is unchanged: total is the row-based ordinal count', async () => {
-    const got = await listContextFor(
-      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', runSize: null }, items, 'U-ME', new Date(), vi.fn(async () => null),
     );
     expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
   });

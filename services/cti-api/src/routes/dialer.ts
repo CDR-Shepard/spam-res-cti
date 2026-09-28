@@ -380,17 +380,17 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       // `callbackRequeue`) is an attempt-1, non-redial row that reuses its
       // cancelled original's ordinal, and must not grow this either.
       //
-      // For a LIMITED run, `session.runSize` (review M1) — min(maxRecords,
-      // pending rows) at the claim — IS this figure: the row-based ordinal
-      // count also includes settled-at-build rows (skip, unreachable,
-      // consent-blocked) the queue keeps in front of the cutoff, which must
-      // not count toward N in "record X of N". Unlimited (`runSize` null):
-      // unchanged.
-      firstPassTotal: session.runSize ??
-        new Set(items.filter((i) => i.attempt === 1 && i.redialOf == null).map((i) => i.ordinal)).size,
-      // `runPosition` (review M1): the in-flight item's 1-based rank among
-      // this run's dialable rows — null for an unlimited run, where the
-      // figure above already means the same thing it always has.
+      // Deliberately NOT `session.runSize` (review R2, reverting M1's
+      // override): the web computes "dialing" as this total minus the skip
+      // breakdown, and the settled-at-build rows are still in THAT
+      // breakdown — swapping in runSize here double-subtracted them, so
+      // "first 100" showed "dialing 92" and could go negative. N (the "of N"
+      // the run line shows) comes ONLY from `session.runSize` directly; this
+      // figure is unrelated to it.
+      firstPassTotal: new Set(items.filter((i) => i.attempt === 1 && i.redialOf == null).map((i) => i.ordinal)).size,
+      // `runPosition` (review M1, fixed by R1): the in-flight item's 1-based
+      // rank among this run's dialable PEOPLE — null for an unlimited run, or
+      // for an attempt-2 retry (a second lap has no "record X of N").
       currentItem: current ? { ...current, runPosition: runPosition(items, current, session.runSize) } : null,
       waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
       rollovers: rolloverSummary(jobs),

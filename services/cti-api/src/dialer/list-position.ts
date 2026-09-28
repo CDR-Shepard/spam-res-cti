@@ -148,14 +148,13 @@ export async function listContextFor(
   // (engine.ts `callbackRequeue`) is an attempt-1, non-redial row that reuses
   // its cancelled original's ordinal, and must not inflate "record N of M".
   //
-  // For a LIMITED run, `session.runSize` (review M1) — min(maxRecords,
-  // pending rows) at the claim — is the true count of PEOPLE this run will
-  // dial; the row-based count also includes settled-at-build rows (skip,
-  // unreachable, consent-blocked) the queue keeps in front of the cutoff, and
-  // those must not count toward N. Unlimited (`runSize` null/undefined):
-  // unchanged.
-  const total = session.runSize ??
-    new Set(items.filter((it) => it.attempt === 1 && it.redialOf == null).map((it) => it.ordinal)).size;
+  // Deliberately NOT `session.runSize` (review R2, reverting M1's override):
+  // the web computes "dialing" as this total minus the skip breakdown, and
+  // the settled-at-build rows are still in THAT breakdown — swapping in
+  // runSize here double-subtracted them, so "first 100" showed "dialing 92"
+  // and could go negative. N (the "of N" the run line shows) comes ONLY from
+  // `session.runSize` directly; this figure is unrelated to it.
+  const total = new Set(items.filter((it) => it.attempt === 1 && it.redialOf == null).map((it) => it.ordinal)).size;
   const first = items.find((it) => it.ordinal === 0);
   const startedFrom = first?.listPosition ?? 0;
   let workedBy: string[] = [];

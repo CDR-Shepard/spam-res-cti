@@ -183,11 +183,13 @@ describe('GET /dialer/sessions/:id — listContext', () => {
     expect(res.json().firstPassTotal).toBe(2);
   });
 
-  // Review M1 (ruling: fix it): for a LIMITED run, firstPassTotal must agree
-  // with session.runSize — the count of PEOPLE this run will actually dial —
-  // not the row-based ordinal count, which also includes settled-at-build
-  // rows (skip, unreachable, consent-blocked) kept in front of the cutoff.
-  it('firstPassTotal is session.runSize for a limited run, not the row-based ordinal count', async () => {
+  // Review R2 (re-review, ruling: fix it): M1 made firstPassTotal agree with
+  // session.runSize for a limited run, but the web computes "dialing" as
+  // firstPassTotal minus the skip breakdown — and the settled-at-build rows
+  // are still in that breakdown, so "first 100" showed "dialing 92" (and
+  // could go negative). N comes ONLY from session.runSize now; firstPassTotal
+  // reverts to the plain row-based count, limited run or not.
+  it('firstPassTotal stays the row-based ordinal count, even for a limited run with settled-at-build rows in front of the cutoff', async () => {
     state.session = { id: 'S7', orgId: 'O1', userId: 'U-ME', status: 'active', listViewId: null, runSize: 2 };
     state.items = [
       { attempt: 1, ordinal: 0, listPosition: null, status: 'skipped', outcome: 'skip_on_dialer' },
@@ -196,10 +198,10 @@ describe('GET /dialer/sessions/:id — listContext', () => {
     ];
     const res = await get('S7');
     expect(res.statusCode).toBe(200);
-    expect(res.json().firstPassTotal).toBe(2);
+    expect(res.json().firstPassTotal).toBe(3);
   });
 
-  it("an unlimited run's firstPassTotal is unchanged: the row-based ordinal count", async () => {
+  it("an unlimited run's firstPassTotal is unaffected either way: the row-based ordinal count", async () => {
     state.session = { id: 'S8', orgId: 'O1', userId: 'U-ME', status: 'active', listViewId: null, runSize: null };
     state.items = [
       { attempt: 1, ordinal: 0, listPosition: null, status: 'done' },
