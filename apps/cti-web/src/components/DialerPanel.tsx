@@ -136,6 +136,21 @@ export function queueLine(firstPassTotal: number, unreachable: number, breakdown
   return parts.join(' · ');
 }
 
+/** Pure — the shared "left out" clauses (called recently / no number /
+ *  blocked / …) both confirmLine and wholeListLine append, in the confirm
+ *  block's order. Zero parts omitted. Factored out so the two lines can never
+ *  drift apart on what "left out" means. */
+function leftOutParts(q: ReturnType<typeof queueParts>): string[] {
+  const parts: string[] = [];
+  if (q.cooldown > 0) parts.push(`${q.cooldown} called in the last 3 h`);
+  if (q.skipOnDialer > 0) parts.push(`${q.skipOnDialer} skipped by flag`);
+  if (q.unreachable > 0) parts.push(`${q.unreachable} no number`);
+  if (q.consent > 0) parts.push(`${q.consent} blocked`);
+  if (q.dailyCap > 0) parts.push(`${q.dailyCap} daily limit (state law)`);
+  if (q.inProgressElsewhere > 0) parts.push(`${q.inProgressElsewhere} in progress in another run`);
+  return parts;
+}
+
 /**
  * Pure — the confirm block's line, e.g.
  * "187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked".
@@ -148,6 +163,13 @@ export function queueLine(firstPassTotal: number, unreachable: number, breakdown
  * must not look like an arbitrary coincidence. Say plainly that this is the
  * whole list, so a rep who remembers "I asked for 100" is not left wondering
  * why only 60 are about to be dialed.
+ *
+ * Review fix (Important 2, ruling S9): a limit that DOES shrink the run gets
+ * no breakdown here at all — those "left out" figures describe the WHOLE
+ * list, not the run, and reading them right after "20 will be dialed" made
+ * them look like the run's own reasons. See `wholeListLine` for where they
+ * moved. The unlimited line (`maxRecords === null`) is untouched, byte for
+ * byte, and so is the "whole list" no-op-limit line from Important 1.
  */
 export function confirmLine(
   firstPassTotal: number,
@@ -156,16 +178,35 @@ export function confirmLine(
   maxRecords: number | null = null,
 ): string {
   const q = queueParts(firstPassTotal, unreachable, breakdown);
-  const dialing = maxRecords === null ? q.dialing : Math.min(q.dialing, maxRecords);
-  const wholeListSuffix = maxRecords !== null && maxRecords >= q.dialing ? ' — the whole list' : '';
-  const parts = [`${dialing} will be dialed${wholeListSuffix}`];
-  if (q.cooldown > 0) parts.push(`${q.cooldown} called in the last 3 h`);
-  if (q.skipOnDialer > 0) parts.push(`${q.skipOnDialer} skipped by flag`);
-  if (q.unreachable > 0) parts.push(`${q.unreachable} no number`);
-  if (q.consent > 0) parts.push(`${q.consent} blocked`);
-  if (q.dailyCap > 0) parts.push(`${q.dailyCap} daily limit (state law)`);
-  if (q.inProgressElsewhere > 0) parts.push(`${q.inProgressElsewhere} in progress in another run`);
+  if (maxRecords !== null && maxRecords < q.dialing) {
+    // The limit actually shrinks the run: this line is ONLY the run's own
+    // count — see wholeListLine for the list-wide breakdown.
+    return `${maxRecords} will be dialed`;
+  }
+  const wholeListSuffix = maxRecords !== null ? ' — the whole list' : '';
+  const parts = [`${q.dialing} will be dialed${wholeListSuffix}`, ...leftOutParts(q)];
   return parts.join(' · ');
+}
+
+/**
+ * Pure — the confirm block's SECOND line (review fix, Important 2 / ruling
+ * S9), shown only when a limit actually shrinks the run below what the list
+ * can dial: "Whole list: 187 dialable · 9 called in the last 3 h · 4 no
+ * number · 2 blocked". Clearly labelled "Whole list:" so these figures never
+ * read as if they belong to the run confirmLine just named. Null whenever
+ * confirmLine already says it all on one line (no limit, or a limit that
+ * doesn't reduce anything — see Important 1).
+ */
+export function wholeListLine(
+  firstPassTotal: number,
+  unreachable: number,
+  breakdown: Record<string, number> | undefined,
+  maxRecords: number | null,
+): string | null {
+  if (maxRecords === null) return null;
+  const q = queueParts(firstPassTotal, unreachable, breakdown);
+  if (maxRecords >= q.dialing) return null;
+  return [`Whole list: ${q.dialing} dialable`, ...leftOutParts(q)].join(' · ');
 }
 
 /** Pure — "A, B and C" (no Oxford comma); "A and B" for two; the bare name for
@@ -824,13 +865,20 @@ export function ConfirmBlock({
   const contextLine = confirmContextLine(view.listContext);
   const listSize = view.firstPassTotal ?? view.counts.total;
   const howMany = parseHowMany(draft.howMany);
+  const maxRecordsForLines = howMany.ok ? howMany.maxRecords : null;
+  // Review fix (Important 2, ruling S9): the list-wide breakdown gets its OWN
+  // line, clearly labelled, only when a limit actually shrinks the run — see
+  // wholeListLine. Never present for the unlimited line or Important 1's
+  // "whole list" no-op-limit line, which already say it all on one line.
+  const secondLine = wholeListLine(listSize, view.counts.unreachable, view.skipBreakdown, maxRecordsForLines);
   return (
     <div className="dialer-panel">
       <div className="section dp-picker">
         <div className="kicker">Ready to dial</div>
         <div className="dp-queue-line">
-          {confirmLine(listSize, view.counts.unreachable, view.skipBreakdown, howMany.ok ? howMany.maxRecords : null)}
+          {confirmLine(listSize, view.counts.unreachable, view.skipBreakdown, maxRecordsForLines)}
         </div>
+        {secondLine && <div className="dp-queue-line dp-whole-list">{secondLine}</div>}
         {contextLine && <div className="dp-queue-line dp-list-context">{contextLine}</div>}
         <RunSettingsBlock draft={draft} listSize={listSize} busy={busy} onChange={onDraftChange} />
         {error && <div className="dp-error">{error}</div>}

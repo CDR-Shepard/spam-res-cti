@@ -21,6 +21,7 @@ import {
   AttemptBadge,
   DialerPanel,
   confirmLine,
+  wholeListLine,
   confirmContextLine,
   missLine,
   itemStatusLabel,
@@ -754,11 +755,21 @@ describe('ConfirmBlock (SSR)', () => {
     const at = (howMany: string) => renderToStaticMarkup(
       <ConfirmBlock view={view} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} draft={{ passes: 2, rolloverBusinessDays: 1, howMany }} />,
     );
-    expect(at('100')).toContain('100 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
+    // Review fix (Important 2, ruling S9): a limit that DOES shrink the run
+    // gets its own line — "100 will be dialed" alone, with the list-wide
+    // breakdown on a second, clearly labelled line (not folded together, so
+    // it never reads as if it belongs to the run).
+    expect(at('100')).toContain('100 will be dialed');
+    expect(at('100')).not.toContain('100 will be dialed · 9 called');
+    expect(at('100')).toContain('Whole list: 187 dialable · 9 called in the last 3 h · 4 no number · 2 blocked');
     // Review fix (Important 1): a limit that does NOT shrink the run (it's >=
-    // what the list can dial) reads plainly as the whole list.
+    // what the list can dial) reads plainly as the whole list, on one line —
+    // no second "Whole list:" line (it would just repeat the first).
     expect(at('195')).toContain('187 will be dialed — the whole list · 9 called in the last 3 h · 4 no number · 2 blocked');
+    expect(at('195')).not.toContain('Whole list:');
+    // The unlimited line stays byte-for-byte as it always has been.
     expect(at('')).toContain('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
+    expect(at('')).not.toContain('Whole list:');
   });
   it('an out-of-range number holds Start dialing back', () => {
     const html = renderToStaticMarkup(
@@ -932,16 +943,31 @@ describe('HoldMusicPlayer (SSR) — mounts the YouTube player after the current-
 });
 
 describe('confirmLine — a run size (spec 2026-09-28)', () => {
-  it('leads with the run size, never more than the list can dial', () => {
+  it('leads with the run size ALONE when a limit actually shrinks the run (ruling S9, Important 2) — the breakdown moves to wholeListLine', () => {
     const b = { already_worked: 9, blocked: 2 };
-    expect(confirmLine(202, 4, b, 100)).toBe('100 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
-    // Review fix (Important 1): a limit >= what the list can dial has no
-    // effect — say so plainly rather than let it read as a coincidence.
+    expect(confirmLine(202, 4, b, 100)).toBe('100 will be dialed');
+  });
+  it('a limit >= what the list can dial has no effect — says so plainly, on one line (Important 1)', () => {
+    const b = { already_worked: 9, blocked: 2 };
     expect(confirmLine(202, 4, b, 195)).toBe('187 will be dialed — the whole list · 9 called in the last 3 h · 4 no number · 2 blocked');
     expect(confirmLine(202, 4, b, null)).toBe('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
   });
   it('a limit exactly equal to what the list can dial also reads as the whole list', () => {
     expect(confirmLine(202, 4, { already_worked: 9, blocked: 2 }, 187)).toBe('187 will be dialed — the whole list · 9 called in the last 3 h · 4 no number · 2 blocked');
+  });
+});
+
+describe('wholeListLine — the list-wide breakdown, on its own line (ruling S9, Important 2)', () => {
+  const b = { already_worked: 9, blocked: 2 };
+  it('shown only when a limit actually shrinks the run, clearly labelled "Whole list:"', () => {
+    expect(wholeListLine(202, 4, b, 100)).toBe('Whole list: 187 dialable · 9 called in the last 3 h · 4 no number · 2 blocked');
+  });
+  it('null when there is no limit — confirmLine already says it all', () => {
+    expect(wholeListLine(202, 4, b, null)).toBeNull();
+  });
+  it('null when the limit does not reduce anything (>= what the list can dial) — Important 1 already says it all', () => {
+    expect(wholeListLine(202, 4, b, 195)).toBeNull();
+    expect(wholeListLine(202, 4, b, 187)).toBeNull();
   });
 });
 

@@ -74,12 +74,18 @@ describe('Ready to dial — run settings', () => {
     mount();
     const box = await screen.findByLabelText('How many');
     expect(screen.getByText(/^187 will be dialed/)).toBeTruthy();
+    expect(screen.queryByText(/^Whole list:/)).toBeNull();
     fireEvent.change(box, { target: { value: '100' } });
-    expect(screen.getByText(/^100 will be dialed/)).toBeTruthy();
+    // Review fix (Important 2, ruling S9): a limit that shrinks the run shows
+    // its own line, plus a second, clearly labelled list-wide line.
+    expect(screen.getByText('100 will be dialed')).toBeTruthy();
+    expect(screen.getByText(/^Whole list: 187 dialable/)).toBeTruthy();
     fireEvent.change(box, { target: { value: '195' } });
-    expect(screen.getByText(/^187 will be dialed/)).toBeTruthy();
+    expect(screen.getByText(/^187 will be dialed — the whole list/)).toBeTruthy();
+    expect(screen.queryByText(/^Whole list:/)).toBeNull();
     fireEvent.change(box, { target: { value: '' } });
     expect(screen.getByText(/^187 will be dialed/)).toBeTruthy();
+    expect(screen.queryByText(/^Whole list:/)).toBeNull();
   });
 
   it('the box keeps digits only, and an out-of-range number holds Start back with the reason', async () => {
