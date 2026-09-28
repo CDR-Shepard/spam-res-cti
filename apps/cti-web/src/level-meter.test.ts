@@ -36,6 +36,25 @@ describe('createLevelSource', () => {
     expect(meter.read()).toBeCloseTo(0.4);
   });
 
+  // Task 3 review I5: Chrome creates an AudioContext suspended when the page
+  // has had no user gesture — the meter would sit dead at 0. Resume it.
+  it('a suspended AudioContext is resumed; a running one is left alone; a refused resume is harmless', async () => {
+    const suspended = { ...fakeCtx(0.1).ctx, state: 'suspended', resume: vi.fn(async () => {}) };
+    createLevelSource(stream, suspended);
+    expect(suspended.resume).toHaveBeenCalledTimes(1);
+
+    const running = { ...fakeCtx(0.1).ctx, state: 'running', resume: vi.fn(async () => {}) };
+    createLevelSource(stream, running);
+    expect(running.resume).not.toHaveBeenCalled();
+
+    const refused = Promise.reject(new Error('not allowed'));
+    const handled = vi.spyOn(refused, 'catch');
+    const refusing = { ...fakeCtx(0.1).ctx, state: 'suspended', resume: vi.fn(() => refused) };
+    expect(() => createLevelSource(stream, refusing)).not.toThrow();
+    expect(handled).toHaveBeenCalledTimes(1); // the refusal is handled: never an unhandled rejection
+    await refused.catch(() => {});
+  });
+
   it('close() disconnects and closes the AudioContext once; reads after close are 0', () => {
     const f = fakeCtx(0.1);
     const meter = createLevelSource(stream, f.ctx);

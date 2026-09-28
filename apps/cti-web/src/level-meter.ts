@@ -18,6 +18,9 @@ export interface AudioContextLike {
   createMediaStreamSource(stream: MicStreamLike): MediaSourceLike;
   createAnalyser(): AnalyserLike;
   close(): Promise<void>;
+  /** 'suspended' | 'running' | 'closed' (real AudioContexts always have it). */
+  state?: string;
+  resume?(): Promise<void>;
 }
 export interface LevelSource {
   /** 0..1, the bar's fill right now. */
@@ -44,6 +47,14 @@ export function levelFromRms(value: number): number {
 }
 
 export function createLevelSource(stream: MicStreamLike, ctx: AudioContextLike): LevelSource {
+  // Chrome starts a context suspended until the page has had a user gesture,
+  // and a suspended analyser reads silence forever (Task 3 review I5). The
+  // meter now starts on a click, so resuming here is allowed.
+  if (ctx.state === 'suspended') {
+    ctx.resume?.().catch(() => {
+      // Still suspended (no gesture yet): the bar stays at 0 until one.
+    });
+  }
   const source = ctx.createMediaStreamSource(stream);
   const analyser = ctx.createAnalyser();
   analyser.fftSize = METER_FFT_SIZE;
