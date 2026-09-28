@@ -239,6 +239,40 @@ describe('App — the sound check after a reset', () => {
     await waitFor(() => expect(mic.opened()).toBe(1));
   });
 
+  // Re-review item 1: the real load order. /auth/me lands first (the check
+  // comes on screen, and its effect finds no window.sforce yet); Open CTI's
+  // script loads after. The panel must still be surfaced — once Open CTI is up.
+  it('inside Salesforce, the panel pops for a due check although Open CTI loads after /auth/me', async () => {
+    const setSoftphonePanelVisibility = vi.fn();
+    let loadOpenCti: () => void = () => {};
+    vi.spyOn(opencti, 'initOpenCti').mockImplementation(() => new Promise((resolve) => {
+      loadOpenCti = () => {
+        (window as unknown as { sforce: unknown }).sforce = {
+          opencti: {
+            setSoftphonePanelVisibility,
+            setSoftphonePanelHeight: vi.fn(),
+            notifyInitializationComplete: vi.fn(),
+            enableClickToDial: vi.fn(),
+            onClickToDial: vi.fn(),
+          },
+        };
+        resolve({ ready: true });
+      };
+    }));
+    try {
+      signedIn();
+      localStorage.setItem('cti.soundCheck.due', '1');
+      render(<App />);
+      await screen.findByRole('dialog', { name: 'Sound check' }); // /auth/me is in; Open CTI is not
+      await waitFor(() => expect(opencti.initOpenCti).toHaveBeenCalled());
+      expect(setSoftphonePanelVisibility).not.toHaveBeenCalled();
+      await act(async () => { loadOpenCti(); });
+      await waitFor(() => expect(setSoftphonePanelVisibility).toHaveBeenCalledWith({ visible: true }));
+    } finally {
+      delete (window as unknown as { sforce?: unknown }).sforce;
+    }
+  });
+
   it('"Looks good" finishes it: the flag is cleared and the microphone released', async () => {
     const mic = grantMic();
     signedIn();

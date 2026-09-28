@@ -636,8 +636,10 @@ export function App(): JSX.Element {
           // + nav all fit without clipping.
           setPanelHeight(600);
           // After a reset the softphone reloads to the sign-in screen: surface
-          // the panel so the rep sees why (spec decision 7).
-          if (readFlag(RESET_NOTICE_KEY)) setPanelVisibility(true);
+          // the panel so the rep sees why (spec decision 7) — and for a due
+          // sound check too. This is the first moment Open CTI exists: the
+          // due check's own effect ran on /auth/me, before it was loaded.
+          if (readFlag(RESET_NOTICE_KEY) || readFlag(SOUND_CHECK_DUE_KEY)) setPanelVisibility(true);
         } else if (r.reason) {
           // Standalone preview — fine, just no click-to-dial.
           console.info('Open CTI not initialized:', r.reason);
