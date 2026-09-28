@@ -46,12 +46,11 @@ import { getDb, schema } from '@cti/db';
 import type { FollowupRolloverJob } from '@cti/db';
 import { advanceSession, stopSession } from '../dialer/engine.js';
 import { buildEngineDeps } from '../dialer/live-deps.js';
-import { nextBusinessDay } from '../dialer/next-business-day.js';
 import { inFlightItem } from '../dialer/state.js';
 import { fetchBusinessCalendar } from './business-calendar.js';
 import { CTI_ORIGIN_FIELD, isInvalidFieldError, withoutCtiOrigin } from './cti-origin.js';
 import { SalesforceUnauthorizedError, sfFetch, soqlEscape, soqlQuery } from './client.js';
-import { FOLLOWUP_DAILY_CAP_DEFAULT, MAX_ROLLOVER_BUSINESS_DAYS, followUpTasksSoql, pickRolloverDay } from './followup-day.js';
+import { FOLLOWUP_DAILY_CAP_DEFAULT, MAX_ROLLOVER_BUSINESS_DAYS, firstLandingDay, followUpTasksSoql, pickRolloverDay, rolloverBase } from './followup-day.js';
 import { countCtiCreated, countFollowUps, sameTaskKind } from './followup-subject.js';
 import { followUpCopyFields, pickFollowUpTask, type FollowUpTask } from './followup.js';
 import { fetchOwnership, gatedIds, mayCreateTaskOn, type OwnershipSnapshot } from './ownership.js';
@@ -441,6 +440,16 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
       return;
     }
 
+    // THE EFFECTIVE DAY (spec 2026-09-28 §5, controller ruling S7): the LATER
+    // of the dial day and this task's own due date. Both the clear set AND the
+    // landing day key on this SAME value — a task worked AHEAD of its due date
+    // (Garrett, 2026-09-27: Monday tasks dialed on Sunday) must clear its TRUE
+    // same-day siblings (the ones due the same day IT is), not whatever
+    // happened to be due on the calendar day it was dialed, and must not
+    // "roll" onto the date it already had. For a task due today or overdue
+    // this is exactly job.fromDate, so both rules read as they always have.
+    const base = rolloverBase(job.fromDate, task.ActivityDate);
+
     // THE CLEAR SET: the template plus every other same-day task of the SAME
     // KIND on this person. One rollover per person per day means one copy
     // replaces all of them, so all of them get completed. Tasks of a different
@@ -448,19 +457,22 @@ export async function processRolloverJob(job: FollowupRolloverJob, deps: WorkerD
     // the sibling list — the price of not leaving a swallowed enqueue (the job
     // key is per person, not per task) open past its due date.
     const clearSet = [task.Id, ...sameDaySiblings(
-      onRecord ?? await listOpenFollowUps(deps, job), task.Id, job.fromDate, task.Subject,
+      onRecord ?? await listOpenFollowUps(deps, job), task.Id, base, task.Subject,
     ).map((t) => t.Id)];
 
     // Same reason as every other outbound call here: a hung socket in the
     // calendar fetch would pin the single-flight tick and the queue behind it.
     const cal = await withTimeout(deps.calendarFor(job.userId), SF_CALL_TIMEOUT_MS, 'business calendar');
     const cap = await deps.capFor(job.orgId);
-    // The plain next business day (no cap applied) — stamped alongside the
-    // actual target so the session-view summary can tell "moved" from
-    // "pushed" without ever calling Salesforce itself.
-    const nextDay = nextBusinessDay(job.fromDate, cal.workingWeekdays, cal.holidays);
+    // Where the copy may land (spec 2026-09-28 §5): `business_days` (the run's
+    // "Missed tasks move to", or the rep's saved choice for click-to-dial)
+    // business days after the effective day (`base`, above). `nextDay` is that
+    // uncapped day, stamped alongside the actual target so the session-view
+    // summary can still tell "moved" from "pushed by the cap" without ever
+    // calling Salesforce itself.
+    const nextDay = firstLandingDay(base, job.businessDays, cal.workingWeekdays, cal.holidays);
     const targetDate = await pickRolloverDay({
-      fromDate: job.fromDate, cap, workingWeekdays: cal.workingWeekdays, holidays: cal.holidays,
+      fromDate: base, businessDays: job.businessDays, cap, workingWeekdays: cal.workingWeekdays, holidays: cal.holidays,
       countOn: (d) => countDayLoad(deps, job, d),
     });
     if (!targetDate) {

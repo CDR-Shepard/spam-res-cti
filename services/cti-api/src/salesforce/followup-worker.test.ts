@@ -42,7 +42,7 @@ function job(o: Partial<FollowupRolloverJob> = {}): FollowupRolloverJob {
   return {
     id: 'J1', orgId: 'O1', userId: 'U1', sfOwnerId: '005', sessionId: 'S1', recordId: '00Q1', objectType: 'Lead',
     fromDate: '2026-08-20', status: 'in_flight', attempts: 1, lastError: null, nextAttemptAt: new Date(),
-    completedAt: null, completedTaskId: null, completedTaskIds: null, createdTaskId: null, targetDate: null, sourceTaskId: null, createdAt: new Date(), updatedAt: new Date(),
+    completedAt: null, completedTaskId: null, completedTaskIds: null, createdTaskId: null, targetDate: null, sourceTaskId: null, businessDays: 1, createdAt: new Date(), updatedAt: new Date(),
     ...o,
   } as FollowupRolloverJob;
 }
@@ -1101,5 +1101,130 @@ describe('processRolloverJob — the marker is actually wired into the create', 
 
     expect(posts).toHaveLength(1);
     expect(posts[0]![CTI_ORIGIN_FIELD]).toBe(CTI_ORIGIN.followUp);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Where the copy lands (spec 2026-09-28 §5): `business_days` business days
+// after the LATER of the dial day (the job's from_date) and the template's own
+// due date — read off the task the job already reads, never a second query.
+// The fixture's dial day, 2026-08-20, is a Thursday.
+// ---------------------------------------------------------------------------
+describe('processRolloverJob — where the copy lands', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  /** Deps whose task reads return ONE open follow-up due `due`; the cap query
+   *  says every day in `fullDays` is at the cap and every other day is empty. */
+  function dueDeps(due: string | null, fullDays: ReadonlySet<string> = new Set(), over: Partial<WorkerDeps> = {}): WorkerDeps {
+    const full = Array.from({ length: 100 }, () => ({ Subject: 'Follow-up', CTI_Origin__c: 'Power Dialer Follow-Up' }));
+    return deps({
+      sf: {
+        ...deps().sf,
+        soqlQuery: vi.fn(async (_u: string, q: string) => {
+          if (/FROM Task WHERE OwnerId/.test(q)) return [...fullDays].some((day) => q.includes(day)) ? full : [];
+          return [{ ...openTask, ActivityDate: due }];
+        }) as unknown as WorkerDeps['sf']['soqlQuery'],
+      },
+      ...over,
+    });
+  }
+  const landed = (d: WorkerDeps): unknown =>
+    (d.sf.sfFetch as any).mock.calls.find((c: any[]) => c[2]?.method === 'POST')[2].body.ActivityDate;
+
+  it.each([
+    ["due today, next business day (today's run)", '2026-08-20', 1, '2026-08-21'],
+    ['due today, in 2 business days (over the weekend)', '2026-08-20', 2, '2026-08-24'],
+    ["overdue, next business day — counted from the dial day (today's run)", '2026-08-11', 1, '2026-08-21'],
+    ['overdue, in 2 business days', '2026-08-11', 2, '2026-08-24'],
+    ['due in the future (Mon), next business day → the day AFTER its due date', '2026-08-24', 1, '2026-08-25'],
+    ['due in the future (Mon), in 2 business days', '2026-08-24', 2, '2026-08-26'],
+    ['no due date → counted from the dial day', null, 1, '2026-08-21'],
+  ] as const)('%s', async (_label, due, businessDays, expected) => {
+    const d = dueDeps(due);
+    await processRolloverJob(job({ businessDays }), d);
+    expect(landed(d)).toBe(expected);
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ targetDate: expected, nextDay: expected }) });
+  });
+
+  it("Garrett's Sunday: a Monday task dialed on Sunday lands Tuesday (next) or Wednesday (in 2) — never back on Monday", async () => {
+    for (const [businessDays, expected] of [[1, '2026-09-29'], [2, '2026-09-30']] as const) {
+      const d = dueDeps('2026-09-28');
+      await processRolloverJob(job({ fromDate: '2026-09-27', businessDays }), d);
+      expect(landed(d)).toBe(expected);
+    }
+  });
+
+  it('skips a holiday on the way (Thu dial, Fri holiday, 2 business days → Tue)', async () => {
+    const d = dueDeps('2026-08-20', new Set(), {
+      calendarFor: vi.fn(async () => ({ workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays: new Set(['2026-08-21']) })),
+    });
+    await processRolloverJob(job({ businessDays: 2 }), d);
+    expect(landed(d)).toBe('2026-08-25');
+  });
+
+  it('the daily cap still pushes it on from the new start day, and nextDay stays the uncapped day (so the summary reads "pushed")', async () => {
+    const d = dueDeps('2026-08-24', new Set(['2026-08-25']));
+    await processRolloverJob(job({ businessDays: 1 }), d);
+    expect(landed(d)).toBe('2026-08-26');
+    expect(writesOf(d)).toContainEqual({ patch: expect.objectContaining({ targetDate: '2026-08-26', nextDay: '2026-08-25' }) });
+  });
+
+  it('a Task run reads the due date off the task it dialed — no extra Salesforce query', async () => {
+    const d = dueDeps('2026-08-24');
+    await processRolloverJob(job({ sourceTaskId: '00T1', businessDays: 1 }), d);
+    expect(landed(d)).toBe('2026-08-25');
+    // The by-id read plus the sibling listing — exactly what a Task-run job read before.
+    const taskReads = (d.sf.soqlQuery as any).mock.calls.filter((c: any[]) => !/FROM Task WHERE OwnerId/.test(c[1]));
+    expect(taskReads).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Controller ruling S7: the sibling clear set keys on the EFFECTIVE day — the
+// same landing base the new landing rule uses (the later of the dial day and
+// the source task's own due date), not the raw dial day. A task worked AHEAD
+// of its due date (Garrett, 2026-09-27: Monday tasks dialed on Sunday) must
+// clear its TRUE same-day siblings — the ones due the SAME effective day —
+// not whatever happened to be due on the calendar day it was dialed. For a
+// task due today or overdue, the effective day IS the dial day, so this is
+// exactly today's behaviour (see the other tests in this file, which all use
+// same-day-as-dialed fixtures and are pinned unchanged).
+// ---------------------------------------------------------------------------
+describe('sameDaySiblings clear set — keyed on the effective day (spec 2026-09-28 controller ruling S7)', () => {
+  it("Garrett's Sunday: a Monday task dialed on Sunday also clears its Monday same-kind siblings — never Sunday's", async () => {
+    const monday = '2026-09-28';
+    const sunday = '2026-09-27';
+    const primary = { ...openTask, Id: '00TMON', Subject: 'Follow-up', ActivityDate: monday };
+    const mondaySibling = { ...openTask, Id: '00TMONSIB', Subject: 'F/U re quote', ActivityDate: monday };
+    // A decoy due on the DIAL day (Sunday) — the old (buggy) key would have
+    // cleared this instead. It must survive: it is not due the effective day.
+    const sundayDecoy = { ...openTask, Id: '00TSUN', Subject: 'Follow-up', ActivityDate: sunday };
+    const onRecord = [primary, mondaySibling, sundayDecoy];
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
+      if (/Id = '00TMON'/.test(q)) return [primary];
+      if (/FROM Task WHERE OwnerId/.test(q)) return [];
+      return onRecord;
+    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    await processRolloverJob(job({ fromDate: sunday, sourceTaskId: '00TMON', businessDays: 1 }), d);
+    const patched = (d.sf.sfFetch as any).mock.calls.slice(1).map((c: any[]) => c[1]).sort();
+    expect(patched).toEqual(['/sobjects/Task/00TMON', '/sobjects/Task/00TMONSIB']);
+  });
+
+  it('a due-today task clears exactly as before: siblings due the same calendar day as the dial', async () => {
+    const day = job().fromDate; // 2026-08-20 — the effective day equals the dial day when due today
+    const primary = { ...openTask, Id: '00TDT', Subject: 'Follow-up', ActivityDate: day };
+    const sibling = { ...openTask, Id: '00TDTSIB', Subject: 'F/U re pricing', ActivityDate: day };
+    const onRecord = [primary, sibling];
+    const d = deps({ sf: { ...deps().sf, soqlQuery: vi.fn(async (_u: string, q: string) => {
+      if (/Id = '00TDT'/.test(q)) return [primary];
+      if (/FROM Task WHERE OwnerId/.test(q)) return [];
+      return onRecord;
+    }) as unknown as WorkerDeps['sf']['soqlQuery'] } });
+    await processRolloverJob(job({ sourceTaskId: '00TDT' }), d);
+    const patched = (d.sf.sfFetch as any).mock.calls.slice(1).map((c: any[]) => c[1]).sort();
+    expect(patched).toEqual(['/sobjects/Task/00TDT', '/sobjects/Task/00TDTSIB']);
   });
 });
