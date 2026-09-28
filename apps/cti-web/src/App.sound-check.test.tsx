@@ -40,8 +40,21 @@ function fakeDeviceAudio() {
   return audio;
 }
 
+class FakeConnection {
+  private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+  disconnect = vi.fn();
+  parameters: Record<string, string> = { CallSid: 'CA_1' };
+  on(event: string, cb: (...args: unknown[]) => void): void {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), cb]);
+  }
+  emit(event: string, ...args: unknown[]): void {
+    for (const cb of this.listeners.get(event) ?? []) cb(...args);
+  }
+}
+
 class FakeDevice {
   static instances: FakeDevice[] = [];
+  static connects: FakeConnection[] = [];
   /** register() for the n-th Device built (0-based); resolved when unset. */
   static registerFor: ((n: number) => Promise<void>) | null = null;
   audio = fakeDeviceAudio();
@@ -58,6 +71,11 @@ class FakeDevice {
   register(): Promise<void> { return FakeDevice.registerFor?.(this.n) ?? Promise.resolve(); }
   updateToken(): void { /* not exercised */ }
   destroy(): void { this.destroyed = true; }
+  async connect(): Promise<FakeConnection> {
+    const c = new FakeConnection();
+    FakeDevice.connects.push(c);
+    return c;
+  }
 }
 vi.mock('@twilio/voice-sdk', () => ({ Device: FakeDevice }));
 
@@ -96,18 +114,43 @@ function grantMic(): { opened: () => number; stopped: () => number } {
   return { opened: () => opened, stopped: () => stopped };
 }
 
+const ALLOW_VERDICT = {
+  decision: 'ALLOW', reasons: [], blockReason: null, requiredScriptId: null, auditId: 'audit-1',
+  checks: [], normalizedTo: '+16195551234', fromNumber: '+16195559999',
+};
+/** The run's server status: `ready` until Start dialing sends `start`. */
+let runStatus: 'ready' | 'active' = 'ready';
+const runView = () => ({
+  session: { id: 'sess-1', status: runStatus },
+  counts: { total: 1, done: 0, connected: 0, noConnect: 0, skipped: 0, unreachable: 0, pending: 1 },
+  currentItem: null,
+  firstPassTotal: 1,
+});
+
 beforeEach(() => {
   FakeDevice.instances.length = 0;
+  FakeDevice.connects.length = 0;
   FakeDevice.registerFor = null;
   localStorage.clear();
   pending = null;
-  vi.stubGlobal('fetch', vi.fn(async (input: unknown): Promise<Response> => {
+  runStatus = 'ready';
+  vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: { method?: string }): Promise<Response> => {
     const url = String(input);
+    const method = init?.method ?? 'GET';
     if (url.includes('/auth/dev-session')) return jsonResponse({ error: 'Not found' }, 404);
     if (url.includes('/auth/me')) return jsonResponse(ME);
     if (url.includes('/calls/pending-disposition')) return jsonResponse({ pending });
     if (url.includes('/telephony/token')) return jsonResponse({ token: 'device-token' });
     if (url.includes('/mobile/devices')) return jsonResponse({ devices: [] });
+    if (url.includes('/firewall/precall')) return jsonResponse(ALLOW_VERDICT);
+    if (method === 'POST' && url.endsWith('/calls')) {
+      return jsonResponse({ call: { id: 'call-1', fromNumber: '+16195559999', toNumber: '+16195551234', normalizedToNumber: '+16195551234' } });
+    }
+    if (url.includes('/dialer/handoffs/pending')) return jsonResponse({ handoff: null });
+    if (url.includes('/dialer/sessions/sess-1/start')) { runStatus = 'active'; return jsonResponse({ ok: true }); }
+    if (/\/dialer\/sessions\/sess-1\/\w+/.test(url)) return jsonResponse({ ok: true });
+    if (url.includes('/dialer/sessions/sess-1')) return jsonResponse(runView());
+    if (method === 'POST' && url.includes('/dialer/sessions')) return jsonResponse({ sessionId: 'sess-1', total: 1 });
     return jsonResponse({});
   }));
   vi.spyOn(opencti, 'screenPopRecord').mockImplementation(() => {});
@@ -306,5 +349,79 @@ describe('App — Settings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Reset my audio' }));
     await waitFor(() => expect(FakeDevice.instances.length).toBe(3));
     expect(FakeDevice.instances[1]!.destroyed).toBe(true);
+  });
+});
+
+/** Dial a number on the pad; a rep's ALLOW verdict places the call at once. */
+function dialDigits(digits: string): void {
+  for (const d of digits) {
+    const key = Array.from(document.querySelectorAll('.dialpad .key')).find((b) => b.querySelector('.num')?.textContent === d);
+    if (!key) throw new Error(`no dial pad key for "${d}"`);
+    fireEvent.click(key);
+  }
+}
+
+// Task 3 review I3: the guards that keep the sound check and Reset my audio
+// off a live call.
+describe('App — the sound check and Reset my audio never touch a live call', () => {
+  it('Reset my audio with a call still up (a Device error dropped it to preflight): no second Device, nothing hung up — the live Device goes to System default', async () => {
+    signedIn();
+    localStorage.setItem('cti.audio.input', 'mic-jabra');
+    localStorage.setItem('cti.audio.output', 'spk-jabra');
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    const device = FakeDevice.instances[0]!;
+    dialDigits('6195551234');
+    fireEvent.click(screen.getByTitle('Check & call'));
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(1));
+    const call = FakeDevice.connects[0]!;
+    act(() => { device.emit('error', { code: 31005, message: 'websocket closed' }); }); // ringing → preflight, call still up
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' })); // the nav is back: Settings is reachable
+    device.audio.unsetInputDevice.mockClear();
+    fireEvent.click(await screen.findByRole('button', { name: 'Reset my audio' }));
+    await waitFor(() => expect(device.audio.unsetInputDevice).toHaveBeenCalled());
+    await waitFor(() => expect(device.audio.speakerDevices.set).toHaveBeenCalledWith('default'));
+    expect(device.audio.ringtoneDevices.set).toHaveBeenCalledWith('default');
+    expect(FakeDevice.instances.length).toBe(1);
+    expect(device.destroyed).toBe(false);
+    expect(call.disconnect).not.toHaveBeenCalled();
+    expect(localStorage.getItem('cti.audio.input')).toBeNull();
+  });
+
+  it('an answered call hides the check (not only a ringing one); it comes back once the call ends', async () => {
+    signedIn();
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Run sound check' }));
+    await screen.findByRole('dialog', { name: 'Sound check' });
+    const listeners = new Map<string, Array<() => void>>();
+    const call = {
+      parameters: { From: '+16195551234' }, customParameters: new Map<string, string>(), accept: vi.fn(), reject: vi.fn(),
+      on: (e: string, cb: () => void) => { listeners.set(e, [...(listeners.get(e) ?? []), cb]); },
+    };
+    act(() => { FakeDevice.instances[0]!.emit('incoming', call); });
+    fireEvent.click(await screen.findByTitle('Answer'));
+    await screen.findByTitle('End call');
+    expect(dialog()).toBeNull();
+    act(() => { for (const cb of listeners.get('disconnect') ?? []) cb(); });
+    expect(await screen.findByRole('dialog', { name: 'Sound check' })).toBeTruthy();
+  });
+
+  it('a live power-dial run hides the check', async () => {
+    signedIn();
+    localStorage.setItem('cti.soundCheck.due', '1');
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    await screen.findByRole('dialog', { name: 'Sound check' });
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', {
+        source: window.parent,
+        data: { type: 'POWER_DIAL', objectType: 'Lead', recordIds: ['00Q000000000001'] },
+      }));
+    });
+    fireEvent.click(await screen.findByText('Start dialing'));
+    await waitFor(() => expect(FakeDevice.connects.length).toBe(1)); // the leg joined: the run is live
+    await waitFor(() => expect(dialog()).toBeNull());
   });
 });

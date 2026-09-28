@@ -109,6 +109,27 @@ async function advance(ms: number): Promise<void> {
   await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 }
 
+// Task 3 review I3 (M17): only the softphone tab holds the Device.
+describe('App × 2 tabs — Reset my audio in the tab that is not the softphone', () => {
+  it("builds no Device there and never touches the leader's", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    state.pending = null;
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1)); // tab a: the leader's Device
+    const tabB = render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(2)); // b, alone for a moment, built one
+    await advance(4_000); // b heard a and stood down
+    const built = FakeDevice.instances.length;
+    expect(FakeDevice.instances.filter((d) => !d.destroyed)).toEqual([FakeDevice.instances[0]]);
+
+    fireEvent.click(within(tabB.container).getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await within(tabB.container).findByRole('button', { name: 'Reset my audio' }));
+    await advance(1_000);
+    expect(FakeDevice.instances.length).toBe(built);
+    expect(FakeDevice.instances[0]!.destroyed).toBe(false);
+  });
+});
+
 describe('App × 2 tabs — a peer in wrap-up holds the leader back; then both reset', () => {
   it('the leader waits out the peer\'s wrap-up, then resets, and the peer finishes on the broadcast', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
