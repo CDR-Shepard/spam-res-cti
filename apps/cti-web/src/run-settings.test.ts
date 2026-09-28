@@ -86,4 +86,12 @@ describe('run settings on Ready to dial (spec 2026-09-28)', () => {
     // No runSize (unlimited run): runPosition is ignored, list position rules as before.
     expect(recordPositionLine({ runPosition: 3, listPosition: 86 }, { runSize: null, listTotal: 220 })).toBe('record 87 of 220');
   });
+
+  // Coordinator update to Minor fix 1: runPosition counts PEOPLE and is null
+  // on a retry (attempt 2) — a limited run must never show "N of N" then. The
+  // AttemptBadge ("Attempt 2 of 2") is the retry label; recordPositionLine
+  // shows nothing, exactly like today's ordinal-based attempt-2 case.
+  it('recordPositionLine: never "N of N" for a retry — a limited run\'s runPosition is null on attempt 2', () => {
+    expect(recordPositionLine({ runPosition: null, ordinal: 5, attempt: 2 }, { runSize: 100, listTotal: 100 })).toBeNull();
+  });
 });

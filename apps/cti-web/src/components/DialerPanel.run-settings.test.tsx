@@ -264,4 +264,24 @@ describe('Ready to dial — run settings wiring (review fix, Important 3)', () =
     mount();
     expect(await screen.findByText('record 4 of 100')).toBeTruthy();
   });
+
+  // Coordinator update to Minor fix 1: runPosition counts PEOPLE and is null
+  // on a retry (attempt 2) — a limited run must never show "N of N" for one.
+  // The AttemptBadge ("Attempt 2 of 2") is the retry label; no record-count
+  // line, same as today's ordinal-based attempt-2 case.
+  it('a retry (attempt 2) in a limited run shows the Attempt 2 badge, never "N of N"', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue({
+      ...READY,
+      session: { id: 'sess1', status: 'active', passes: 2, maxRecords: 100, rolloverBusinessDays: 1, runSize: 100 },
+      counts: { total: 100, done: 3, connected: 0, noConnect: 3, skipped: 0, unreachable: 0, pending: 97 },
+      currentItem: {
+        id: 'i2', recordId: '00Q2', objectType: 'Lead', status: 'dialing', toNumber: '+16195551235', attempt: 2, runPosition: null,
+      },
+      firstPassTotal: 100,
+      skipBreakdown: {},
+    });
+    mount();
+    expect(await screen.findByText('Attempt 2 of 2')).toBeTruthy();
+    expect(screen.queryByText(/^record \d+ of \d+$/)).toBeNull();
+  });
 });
