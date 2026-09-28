@@ -135,6 +135,16 @@ export const users = pgTable(
     /** The rep's YouTube playlist / video id when the choice is `youtube` (ids only). */
     dialerYoutubeListId: text('dialer_youtube_list_id'),
     dialerYoutubeVideoId: text('dialer_youtube_video_id'),
+    /** Power Dial run settings the rep last STARTED a run with (migration 0046;
+     *  spec docs/superpowers/specs/2026-09-28-run-settings-design.md) — the next
+     *  run's defaults. Calls per person: 1 (Once) or 2 (Twice, today's run). */
+    dialerPasses: integer('dialer_passes').$type<1 | 2>().default(2).notNull(),
+    /** The rep's saved "How many" (controller ruling S2, migration 0046):
+     *  remembered like the other two defaults. null = All. */
+    dialerMaxRecords: integer('dialer_max_records'),
+    /** Missed tasks move to: 1 (next business day, today's rule) or 2 business
+     *  days out. Also what a click-to-dial rollover lands by. */
+    dialerRolloverBusinessDays: integer('dialer_rollover_business_days').$type<1 | 2>().default(1).notNull(),
     /** Reset CTI (migration 0045; docs/superpowers/specs/2026-09-28-cti-reset-design.md).
      *  A web session is due for a reset while this is later than its
      *  `sessions.created_at`. Written with the database's now(), never app time. */
@@ -288,6 +298,14 @@ export const dialerSessions = pgTable(
     /** Which list view a run came from, so a second run on the same list starts
      *  where the first has got to (shared position). */
     listViewId: text('list_view_id'),
+    /** Run settings chosen on Ready to dial (migration 0046), written by the
+     *  ready → active claim (engine.ts `claimReadySession`). A Start that sends
+     *  none keeps these defaults, which are today's run. 1 = Once, 2 = Twice. */
+    passes: integer('passes').$type<1 | 2>().default(2).notNull(),
+    /** How many dialable people the run queued; null = the whole list. */
+    maxRecords: integer('max_records'),
+    /** Missed tasks move to: 1 = next business day, 2 = in 2 business days. */
+    rolloverBusinessDays: integer('rollover_business_days').$type<1 | 2>().default(1).notNull(),
     /** "No answer" Chatter sweep (salesforce/no-answer-chatter-worker.ts, migration
      *  0040). Set once the ended run's sweep is FINISHED — every qualifying record
      *  posted or terminally skipped — or given up on after MAX_ATTEMPTS. NULL on an
@@ -826,7 +844,9 @@ export const followupRolloverJobs = pgTable(
     createdTaskId: text('created_task_id'),
     /** The business day the copy landed on (for the run summary). */
     targetDate: text('target_date'),
-    /** The plain next business day after fromDate — lets the run summary tell "moved" from "pushed" without a Salesforce call. */
+    /** The uncapped landing day — `business_days` business days after the later
+     *  of fromDate and the task's own due date — so the run summary can tell
+     *  "moved" from "pushed by the cap" without a Salesforce call. */
     nextDay: text('next_day'),
     /** The Task the copy is templated from (Task runs); null = search the record
      *  (Lead/Opp runs). NOT part of the job key — see `jobUnique`. */
@@ -835,6 +855,11 @@ export const followupRolloverJobs = pgTable(
      *  the same person. `completedTaskId` stays the PRIMARY (template) id, which
      *  is all a row written by the previous deploy has. */
     completedTaskIds: text('completed_task_ids').array(),
+    /** Missed tasks move to (migration 0046): the copy starts at the 1st or 2nd
+     *  business day after the landing base. Captured at enqueue — the run's
+     *  setting for power dial, the rep's saved choice for click-to-dial — so the
+     *  worker needs no session lookup. */
+    businessDays: integer('business_days').$type<1 | 2>().default(1).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
