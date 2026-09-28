@@ -1001,10 +1001,10 @@ describe('createDialerSession — two reps, one list (rotation)', () => {
     listStartPosition,
   });
 
-  it('rotates the queue to start right after the furthest position, stamping each row with its ORIGINAL list index', async () => {
+  it('rotates the queue to start right after the last dialed record, stamping each row with its ORIGINAL list index', async () => {
     const db = fakeDb();
     const listStartPosition = vi.fn(async () => ({
-      position: 1, workedBy: [{ userId: 'U-GARRETT', name: 'Garrett' }],
+      position: 1, key: '00Q2', earlier: [{ position: 0, key: '00Q1' }],
     }));
     const result = await createDialerSession(
       deps(db, resolverByRecord(numbers), listStartPosition) as never,
@@ -1043,7 +1043,7 @@ describe('createDialerSession — two reps, one list (rotation)', () => {
 
   it('a run without a list id writes null positions on every row and never calls listStartPosition', async () => {
     const db = fakeDb();
-    const listStartPosition = vi.fn(async () => ({ position: 1, workedBy: [] }));
+    const listStartPosition = vi.fn(async () => ({ position: 1, key: '00Q2', earlier: [] }));
     await createDialerSession(
       deps(db, resolverByRecord(numbers), listStartPosition) as never,
       { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: FIVE },
@@ -1077,5 +1077,54 @@ describe('createDialerSession — two reps, one list (rotation)', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  /**
+   * I1 follow-up (final review, 2026-09-28): the start is anchored on the
+   * RECORD of the most recent dial, resolved against the list as fetched NOW —
+   * not on that dial's index into the list as it was fetched THEN.
+   */
+  it('a Lead list whose last-dialed record has moved up (records in front of it left) → starts right after THAT record', async () => {
+    const db = fakeDb();
+    // 00Q4 was at position 3 when it was dialed; 00Q1 and 00Q2 have since left.
+    const listStartPosition = vi.fn(async () => ({
+      position: 3, key: '00Q4', earlier: [{ position: 2, key: '00Q3' }, { position: 1, key: '00Q2' }, { position: 0, key: '00Q1' }],
+    }));
+    await createDialerSession(
+      deps(db, resolverByRecord(numbers), listStartPosition) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: ['00Q3', '00Q4', '00Q5'], listViewId: '00B1' },
+    );
+    // The index rule (after index 3 of a 3-record list) would have wrapped to 00Q3.
+    expect(db._itemRows.map((x) => [x.recordId, x.ordinal, x.listPosition])).toEqual([
+      ['00Q5', 0, 2], ['00Q3', 1, 0], ['00Q4', 2, 1],
+    ]);
+  });
+
+  it('Garrett: a Task run over a view that lost 80 of the last run\'s 100 → the queue starts at the task that was #100, matched by TASK id', async () => {
+    const TASKS = Array.from({ length: 200 }, (_, n) => `00T${String(n).padStart(3, '0')}`);
+    const fresh = TASKS.filter((_, n) => n >= 100 || n % 5 === 0); // 20 of the first 100 still open
+    const db = fakeDb();
+    // What list-position.ts#listRunStart reads for run 1's last dial (#99, rolled).
+    const listStartPosition = vi.fn(async () => ({
+      position: 99,
+      key: TASKS[99]!,
+      earlier: TASKS.slice(0, 99).map((key, position) => ({ position, key })).reverse(),
+    }));
+    const fetchTasks = vi.fn(async (_u: string, taskIds: string[]) => taskIds.map((id) => ({
+      Id: id, Subject: 'Follow-up', OwnerId: '005', WhoId: `00Q-FOR-${id}`, WhatId: null, Who: { Type: 'Lead' },
+    })));
+    await createDialerSession(
+      { ...deps(db, vi.fn(async () => ({ e164: '+16195550100', fallbackE164: null })), listStartPosition), fetchTasks } as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Task', recordIds: fresh, listViewId: '00B1' },
+    );
+    expect(listStartPosition).toHaveBeenCalledWith('O1', '00B1', expect.any(Date));
+    const rows = db._itemRows;
+    expect(rows[0]).toMatchObject({ taskId: TASKS[100], recordId: `00Q-FOR-${TASKS[100]}`, ordinal: 0, listPosition: 20 });
+    expect(rows.slice(0, 100).map((x) => x.taskId)).toEqual(TASKS.slice(100));
+    expect(rows.slice(100).map((x) => x.taskId)).toEqual(fresh.slice(0, 20));
+    // Each row still carries its index in THIS pull, for the next run's fallback.
+    expect(rows.map((x) => x.listPosition)).toEqual([
+      ...Array.from({ length: 100 }, (_, i) => i + 20), ...Array.from({ length: 20 }, (_, i) => i),
+    ]);
   });
 });

@@ -15,8 +15,17 @@
  * waiting for its turn. Ordering by `dialed_at` instead tracks the ACTUAL
  * current frontier — whichever rep dialed most recently — which is what "two
  * reps work the list together" was always meant to mean.
+ *
+ * I1 follow-up (final review, 2026-09-28): the start is anchored on that
+ * dial's RECORD, not its index. A position is an index into the list AS IT
+ * WAS FETCHED for that run; a Task view that hides completed tasks loses every
+ * task the run rolled, so the next fetch is shorter and the old index lands
+ * past where the run really stopped (80 of the first 100 rolled → the next run
+ * began at #180, not #100). `listRunStart` reads the anchor record plus that
+ * same run's records below it, and `listStartIndex` finds the first of them
+ * still in the FRESH list and starts right after it.
  */
-import { and, desc, eq, gte, isNotNull } from 'drizzle-orm';
+import { and, desc, eq, gte, isNotNull, lt, type SQL } from 'drizzle-orm';
 import type { getDb } from '@cti/db';
 import { schema } from '@cti/db';
 
@@ -54,17 +63,90 @@ export interface ListWorker {
 }
 
 /**
- * The `list_position` of the MOST RECENT dial any rep made on THIS list view
- * in the last `LIST_SHARE_WINDOW_MS`, plus who they were — org-wide, not scoped to
- * one rep, because the whole point is noticing ANOTHER rep's run (or this
- * same rep's own earlier one). `null` when nobody has dialed it in the
- * window: the queue starts at the top, today's behaviour.
+ * A queue row's identity IN THE LIST VIEW — the id the view itself returns,
+ * which is what `createDialerSession`'s `recordIds` holds. A Lead/Opportunity
+ * row dials the record itself, so that's `record_id`. A Task run's row dials
+ * the Task's PERSON (`record_id` is a Lead/Contact/Opportunity) and carries the
+ * Task on `task_id` — and the Task is what a Task view lists. Keyed on the
+ * SESSION's object type, never the row's own (a Task run's rows are 'Lead',
+ * 'Contact', 'Opportunity', or 'Task' only when unresolvable). A Task row with
+ * no task id has no key: its person id is never in a Task view.
+ */
+export function listRecordKey(
+  sessionObjectType: string,
+  row: { recordId: string; taskId: string | null },
+): string | null {
+  return sessionObjectType === 'Task' ? row.taskId : row.recordId;
+}
+
+/** Dials on THIS list view, by any rep, inside the share window. */
+function listScope(orgId: string, listViewId: string, now: Date): SQL | undefined {
+  const a = schema.dialerDialAttempts;
+  const s = schema.dialerSessions;
+  return and(
+    eq(s.orgId, orgId),
+    eq(s.listViewId, listViewId),
+    gte(a.dialedAt, new Date(now.getTime() - LIST_SHARE_WINDOW_MS)),
+  );
+}
+
+/**
+ * The frontier: the MOST RECENT dial in the window (I1) — `dialed_at DESC`,
+ * then `id DESC` as a stable tiebreak so two dials in the same instant still
+ * resolve to one deterministic row — with the run that made it, that run's
+ * object type, and the row's record and task ids (its identity in the list,
+ * `listRecordKey`). `list_position IS NOT NULL` mirrors the old MAX read's
+ * null filter: a row with no stamped position (an end-of-run retry, a run
+ * with no list view) was never part of a list-view build and cannot anchor.
+ */
+export function listFrontierQuery(db: Pick<Db, 'select'>, orgId: string, listViewId: string, now: Date) {
+  const a = schema.dialerDialAttempts;
+  const i = schema.dialerQueueItems;
+  const s = schema.dialerSessions;
+  return db
+    .select({ position: i.listPosition, sessionId: s.id, objectType: s.objectType, recordId: i.recordId, taskId: i.taskId })
+    .from(a)
+    .innerJoin(i, eq(i.id, a.itemId))
+    .innerJoin(s, eq(s.id, a.sessionId))
+    .where(and(listScope(orgId, listViewId, now), isNotNull(i.listPosition)))
+    .orderBy(desc(a.dialedAt), desc(a.id))
+    .limit(1);
+}
+
+/** The run whose dial is the frontier, and that dial's record in the list. */
+export interface ListAnchor {
+  sessionId: string;
+  objectType: string;
+  /** `listRecordKey` of the dialed row. */
+  key: string | null;
+}
+
+async function readFrontier(
+  db: Pick<Db, 'select'>,
+  orgId: string,
+  listViewId: string,
+  now: Date,
+): Promise<{ position: number; anchor: ListAnchor } | null> {
+  const [row] = await listFrontierQuery(db, orgId, listViewId, now);
+  if (!row || row.position == null) return null;
+  return {
+    position: row.position,
+    anchor: { sessionId: row.sessionId, objectType: row.objectType, key: listRecordKey(row.objectType, row) },
+  };
+}
+
+/**
+ * The MOST RECENT dial any rep made on THIS list view in the last
+ * `LIST_SHARE_WINDOW_MS` — its `list_position`, its record (`anchor`), and
+ * who has worked the list — org-wide, not scoped to one rep, because the
+ * whole point is noticing ANOTHER rep's run (or this same rep's own earlier
+ * one). `null` when nobody has dialed it in the window: the queue starts at
+ * the top, today's behaviour.
  *
  * `workedBy` carries EVERY rep who dialed the list in the window (not just
- * whoever set the furthest position) together with their user id — the
- * confirm line excludes the REQUESTING rep from that list, and that has to
- * match on id, never on display name (two reps can share a name; an id
- * cannot collide).
+ * whoever made the last dial) together with their user id — the confirm line
+ * excludes the REQUESTING rep from that list, and that has to match on id,
+ * never on display name (two reps can share a name; an id cannot collide).
  *
  * Not fail-open itself — callers each decide what "the read failed" means
  * for them (create-session.ts: no rotation; the GET route: no `workedBy`)
@@ -72,35 +154,17 @@ export interface ListWorker {
  * caught by `withPreferredNumbers` rather than by itself.
  */
 export async function listStartPosition(
-  db: Db,
+  db: Pick<Db, 'select'>,
   orgId: string,
   listViewId: string,
   now: Date,
-): Promise<{ position: number; workedBy: ListWorker[] } | null> {
+): Promise<{ position: number; anchor: ListAnchor; workedBy: ListWorker[] } | null> {
+  const frontier = await readFrontier(db, orgId, listViewId, now);
+  if (!frontier) return null;
   const a = schema.dialerDialAttempts;
   const i = schema.dialerQueueItems;
   const s = schema.dialerSessions;
   const u = schema.users;
-  const scope = and(
-    eq(s.orgId, orgId),
-    eq(s.listViewId, listViewId),
-    gte(a.dialedAt, new Date(now.getTime() - LIST_SHARE_WINDOW_MS)),
-  );
-  // The frontier: the position of the MOST RECENT dial in the window (I1) —
-  // `dialed_at DESC`, then `id DESC` as a stable tiebreak so two dials in the
-  // same instant still resolve to one deterministic row. `list_position IS
-  // NOT NULL` mirrors the old MAX read's null filter: a row with no stamped
-  // position was never part of a rotated list-view build and cannot anchor a
-  // frontier.
-  const latest = await db
-    .select({ position: i.listPosition })
-    .from(a)
-    .innerJoin(i, eq(i.id, a.itemId))
-    .innerJoin(s, eq(s.id, a.sessionId))
-    .where(and(scope, isNotNull(i.listPosition)))
-    .orderBy(desc(a.dialedAt), desc(a.id))
-    .limit(1);
-  if (latest.length === 0 || latest[0]!.position == null) return null;
   // Who worked it: every rep with a dial in the window, independent of the
   // frontier lookup above — unchanged shape from before this fix.
   const workers = await db
@@ -109,12 +173,93 @@ export async function listStartPosition(
     .innerJoin(i, eq(i.id, a.itemId))
     .innerJoin(s, eq(s.id, a.sessionId))
     .innerJoin(u, eq(u.id, s.userId))
-    .where(scope)
+    .where(listScope(orgId, listViewId, now))
     .groupBy(u.id, u.displayName);
   return {
-    position: latest[0]!.position,
+    ...frontier,
     workedBy: workers.map((r) => ({ userId: r.userId, name: r.name ?? 'Someone' })),
   };
+}
+
+/**
+ * The anchor run's records strictly BELOW the anchor's position, one per
+ * record (a redial or take-callback copy repeats its original's position and
+ * record), nearest first. Positions are indices into THAT run's own fetch, so
+ * this never mixes in another run's rows. `<` also drops unpositioned rows
+ * (an end-of-run retry carries none).
+ */
+export function listTrailQuery(db: Pick<Db, 'selectDistinct'>, sessionId: string, position: number) {
+  const i = schema.dialerQueueItems;
+  return db
+    .selectDistinct({ position: i.listPosition, recordId: i.recordId, taskId: i.taskId })
+    .from(i)
+    .where(and(eq(i.sessionId, sessionId), lt(i.listPosition, position)))
+    .orderBy(desc(i.listPosition));
+}
+
+/** One record of the anchor run, by its position in that run's fetch. */
+export interface ListTrailEntry {
+  position: number;
+  key: string | null;
+}
+
+/** What a NEW run needs to decide where it starts (see `listStartIndex`). */
+export interface ListRunStart {
+  /** `list_position` of the most recent dial — the index fallback. */
+  position: number;
+  /** That dial's record (`listRecordKey`). */
+  key: string | null;
+  /** The same run's records below it, nearest first. */
+  earlier: ReadonlyArray<ListTrailEntry>;
+}
+
+/**
+ * The frontier plus the walk `listStartIndex` needs, for `createDialerSession`.
+ * Skips the who-worked-it join: run creation never shows it. Not fail-open
+ * itself (see `listStartPosition`) — `resolveListStartPosition` catches.
+ */
+export async function listRunStart(
+  db: Pick<Db, 'select' | 'selectDistinct'>,
+  orgId: string,
+  listViewId: string,
+  now: Date,
+): Promise<ListRunStart | null> {
+  const frontier = await readFrontier(db, orgId, listViewId, now);
+  if (!frontier) return null;
+  const { anchor, position } = frontier;
+  const rows = await listTrailQuery(db, anchor.sessionId, position);
+  const earlier = rows
+    .filter((r): r is typeof r & { position: number } => r.position != null)
+    .map((r) => ({ position: r.position, key: listRecordKey(anchor.objectType, r) }));
+  return { position, key: anchor.key, earlier };
+}
+
+/**
+ * Which index of `recordIds` — the list as fetched NOW — the new run rotates
+ * after (`rotateAfter`'s `position`); null = start at the top.
+ *
+ *  1. The anchor record, wherever it now sits.
+ *  2. Gone (rolled out of a Task view, converted, …): the nearest earlier
+ *     record of the same run that is still in the list. Everything between it
+ *     and the anchor has left too, so the record right after it is the one
+ *     the last run would have dialed next.
+ *  3. Nothing from that run is still there: the old index, less one slot for
+ *     the anchor and one for every earlier record the walk proved gone — each
+ *     no longer sits in front of where the run stopped. When the walk named
+ *     every record from the top down to the anchor, that is -1: the top. An
+ *     anchor with no identity proves nothing, so its index is used as is.
+ */
+export function listStartIndex(recordIds: readonly string[], start: ListRunStart | null): number | null {
+  if (!start) return null;
+  for (const key of [start.key, ...start.earlier.map((e) => e.key)]) {
+    if (key == null) continue;
+    const at = recordIds.indexOf(key);
+    if (at !== -1) return at;
+  }
+  if (start.key == null) return start.position;
+  const gone = start.earlier.filter((e) => e.key != null).length;
+  const after = start.position - gone - 1;
+  return after < 0 ? null : after;
 }
 
 /**
@@ -136,7 +281,10 @@ export async function listContextFor(
   items: ReadonlyArray<{ attempt: number; ordinal: number; listPosition: number | null; redialOf?: string | null }>,
   requestingUserId: string,
   now: Date = new Date(),
-  readShared: typeof listStartPosition = listStartPosition,
+  // Only `workedBy` is read here — the anchor is run creation's business.
+  readShared: (
+    db: Db, orgId: string, listViewId: string, now: Date,
+  ) => Promise<{ workedBy: ReadonlyArray<ListWorker> } | null> = listStartPosition,
 ): Promise<{ total: number; startedFrom: number; workedBy: string[] } | null> {
   if (!session.listViewId) return null;
   // A redial copy is also excluded, same as an attempt-2 retry: it is a

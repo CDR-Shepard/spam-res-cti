@@ -1,7 +1,7 @@
 import { getDb, schema } from '@cti/db';
 import type { ConsentBlock } from './consent-check.js';
 import { pairKey } from './contact-history.js';
-import { rotateAfter, type ListWorker } from './list-position.js';
+import { listStartIndex, rotateAfter, type ListRunStart } from './list-position.js';
 import { fetchContactNames, resolveDialNumber } from '../salesforce/record-phone.js';
 import { fetchTasks, resolveTaskTarget } from '../salesforce/task-targets.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
@@ -167,19 +167,20 @@ export interface CreateSessionDeps {
    *  stop the run, it just leaves the rows at the resolved Mobile-then-Phone
    *  order. */
   preferredNumbers: (orgId: string, pairs: ReadonlyArray<readonly [string, string]>) => Promise<Map<string, string>>;
-  /** Two reps, one list (spec §4): the furthest position any rep reached
-   *  dialing this SAME Salesforce list view in the last 12h (see
-   *  `list-position.ts#listStartPosition`), so a second run over it rotates
-   *  to start right after that spot instead of re-dialing the top. Injected
-   *  RAW, on the same fail-open terms as `preferredNumbers` above: a broken
-   *  read is caught right here (`resolveListStartPosition`), not inside the
-   *  live wiring — worst case is a run that starts from the top, never a
-   *  dead queue. Only called when the run carries a `listViewId`. */
+  /** Two reps, one list (spec §4): the MOST RECENT dial any rep made on this
+   *  SAME Salesforce list view in the last 12h — its record, its index, and
+   *  that run's records below it (live: `list-position.ts#listRunStart`) — so
+   *  a second run over it rotates to start right after that RECORD instead of
+   *  re-dialing the top (`listStartIndex`). Injected RAW, on the same
+   *  fail-open terms as `preferredNumbers` above: a broken read is caught
+   *  right here (`resolveListStartPosition`), not inside the live wiring —
+   *  worst case is a run that starts from the top, never a dead queue. Only
+   *  called when the run carries a `listViewId`. */
   listStartPosition: (
     orgId: string,
     listViewId: string,
     now: Date,
-  ) => Promise<{ position: number; workedBy: ReadonlyArray<ListWorker> } | null>;
+  ) => Promise<ListRunStart | null>;
   db: ReturnType<typeof getDb>;
 }
 
@@ -334,15 +335,20 @@ async function withPreferredNumbers(deps: CreateSessionDeps, orgId: string, rows
  * thrown read must mean "no rotation, a normal run from the top" — the same
  * posture `withPreferredNumbers` takes on its own lookup, and for the same
  * reason: a broken join must never turn into a dead queue.
+ *
+ * Returns the index of `recordIds` — the list as fetched for THIS run — to
+ * rotate after: the last dialed record's place in it, not that dial's index
+ * into an older fetch (I1 follow-up, `listStartIndex`).
  */
 async function resolveListStartPosition(
   deps: CreateSessionDeps,
   orgId: string,
   listViewId: string,
+  recordIds: readonly string[],
 ): Promise<number | null> {
   try {
     const shared = await deps.listStartPosition(orgId, listViewId, new Date());
-    return shared?.position ?? null;
+    return listStartIndex(recordIds, shared);
   } catch (err) {
     console.warn(
       `[create-session] list-position lookup failed for list "${listViewId}" — starting from the top: ${(err as Error).message}`,
@@ -363,12 +369,12 @@ export async function createDialerSession(
   // never the list's original order with positions patched on afterward.
   // `positions[i]` is the ORIGINAL list index of the i-th (now reordered)
   // record id; it becomes that row's `listPosition` below. No list view, or
-  // nobody has dialed it in the share window: `rotation` is null and the
-  // list's own order is the dial order, exactly as before this feature.
-  const startPosition = args.listViewId
-    ? await resolveListStartPosition(deps, args.orgId, args.listViewId)
+  // nobody has dialed it in the share window: the start index is null, and
+  // the list's own order is the dial order, exactly as before this feature.
+  const startIndex = args.listViewId
+    ? await resolveListStartPosition(deps, args.orgId, args.listViewId, args.recordIds)
     : null;
-  const rotation = args.listViewId ? rotateAfter(args.recordIds, startPosition) : null;
+  const rotation = args.listViewId ? rotateAfter(args.recordIds, startIndex) : null;
   const orderedRecordIds = rotation ? rotation.ordered : args.recordIds;
 
   const named = await withContactNames(

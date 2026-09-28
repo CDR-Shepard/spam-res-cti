@@ -36,7 +36,7 @@ import { createDialerSession } from '../dialer/create-session.js';
 import { workedRecentlySafe } from '../dialer/already-worked.js';
 import { blockedTargetsSafe } from '../dialer/consent-check.js';
 import { preferredNumbersFor } from '../dialer/contact-history-live.js';
-import { listContextFor, listStartPosition } from '../dialer/list-position.js';
+import { listContextFor, listRunStart } from '../dialer/list-position.js';
 import { runPosition } from '../dialer/run-settings.js';
 import {
   pauseSession,
@@ -311,7 +311,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
         workedRecently: (orgId, numbers) => workedRecentlySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
         preferredNumbers: (orgId, pairs) => preferredNumbersFor(db, orgId, pairs),
-        listStartPosition: (orgId, listViewIdArg, now) => listStartPosition(db, orgId, listViewIdArg, now),
+        listStartPosition: (orgId, listViewIdArg, now) => listRunStart(db, orgId, listViewIdArg, now),
       },
       { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds, listViewId },
     );
@@ -332,7 +332,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
         workedRecently: (orgId, numbers) => workedRecentlySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
         preferredNumbers: (orgId, pairs) => preferredNumbersFor(db, orgId, pairs),
-        listStartPosition: (orgId, listViewIdArg, now) => listStartPosition(db, orgId, listViewIdArg, now),
+        listStartPosition: (orgId, listViewIdArg, now) => listRunStart(db, orgId, listViewIdArg, now),
       },
       {
         userId: authed.userId,
