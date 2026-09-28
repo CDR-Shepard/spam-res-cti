@@ -68,12 +68,17 @@ const ALLOW_VERDICT = {
 
 /** HTTP status for each /telephony/token call, in order; 200 once they run out. */
 let tokenStatuses: number[] = [];
+/** The server's un-dispositioned call (the banner), and the Recent list. */
+let pendingDisposition: Record<string, unknown> | null = null;
+let recentRows: Array<Record<string, unknown>> = [];
 
 beforeEach(() => {
   FakeDevice.instances.length = 0;
   FakeDevice.registerGate = null;
   FakeDevice.connects = 0;
   tokenStatuses = [];
+  pendingDisposition = null;
+  recentRows = [];
   events.length = 0;
   gates.resetComplete = null;
   gates.token = null;
@@ -109,7 +114,8 @@ beforeEach(() => {
       return jsonResponse({ status: 'connected', token: 'tok2', user: { id: 'u1', email: 'rep@example.com' } });
     }
     if (url.includes('/auth/me')) return jsonResponse(ME);
-    if (url.includes('/calls/pending-disposition')) return jsonResponse({ pending: null });
+    if (url.includes('/calls/pending-disposition')) return jsonResponse({ pending: pendingDisposition });
+    if (url.includes('/calls?limit=')) return jsonResponse({ calls: recentRows });
     if (url.includes('/telephony/token')) return jsonResponse({ token: 'device-token' });
     return jsonResponse({});
   });
@@ -450,5 +456,47 @@ describe('App — on the sign-in gate, another tab signs in', () => {
     act(() => { for (const cb of listeners.get('cancel') ?? []) cb(); }); // the caller hangs up
     await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
     expect(events).toContain('device destroyed');
+  });
+});
+
+// Follow-up 5 (final review): reopening a disposition is locked during a reset
+// too. The session is being revoked — a wrap-up opened now could never save.
+describe('App — no wrap-up reopens during a reset', () => {
+  const CALL = {
+    id: 'call-9', toNumber: '+16195551234', normalizedToNumber: '+16195551234', fromNumber: '+16195559999',
+    direction: 'outbound', status: 'completed', disposition: null, notes: null, durationSeconds: 30,
+    salesforceTaskId: null, salesforceWhoId: null, salesforceWhatId: null, createdAt: new Date().toISOString(), syncError: null,
+  };
+
+  it('hides the pending-disposition banner, and a Recent row does not reopen the wrap-up', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    signedIn();
+    pendingDisposition = { id: 'call-9', toNumber: '+16195551234', fromNumber: '+16195559999', durationSeconds: 30, status: 'completed', notes: '' };
+    recentRows = [CALL];
+    resetSignal = () => jsonResponse({ resetDue: true });
+    const post = gate();
+    gates.resetComplete = post.promise;
+    render(<App />);
+    await screen.findByText(/needs a disposition/); // an old disposition never holds a reset back (R1)
+    await advance(8_000);
+    await waitFor(() => expect(events).toEqual(['device destroyed', 'reset-complete (session still stored)']));
+    expect(screen.queryByText(/needs a disposition/)).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Recent' }));
+    fireEvent.click(await screen.findByTitle('Finish disposition'));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByText('Log call')).toBeNull();
+
+    post.open();
+    await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
+    expect(events).toEqual(['device destroyed', 'reset-complete (session still stored)', 'reload (wiped)']);
+  });
+
+  it('with no reset, the banner reopens the wrap-up as before', async () => {
+    signedIn();
+    pendingDisposition = { id: 'call-9', toNumber: '+16195551234', fromNumber: '+16195559999', durationSeconds: 30, status: 'completed', notes: '' };
+    render(<App />);
+    fireEvent.click(await screen.findByText(/needs a disposition/));
+    expect(await screen.findByText('Log call')).toBeTruthy();
   });
 });

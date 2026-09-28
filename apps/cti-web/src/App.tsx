@@ -1534,6 +1534,9 @@ export function App(): JSX.Element {
   // the click-to-dial record (persisted at dial time), so the disposition
   // attaches correctly without writing a second Open-CTI Task.
   const reopenDisposition = useCallback((p: PendingDisposition) => {
+    // A reset is under way (C1(a)): its session is being revoked, so a
+    // wrap-up opened now could never be saved — and it would hold the reload.
+    if (resettingRef.current) return;
     openCtiTaskWrittenRef.current = false;
     openCtiTaskIdRef.current = null;
     connectionRef.current = null;
@@ -2131,7 +2134,8 @@ export function App(): JSX.Element {
 
   // Persistent, discoverable way back to an un-finished disposition — so a rep
   // who navigated away (or reloaded) isn't stuck until the next dial 409s.
-  const dispositionBanner = !inCall && pendingDisp ? (
+  // Not while a reset is under way: reopening is locked then (reopenDisposition).
+  const dispositionBanner = !inCall && pendingDisp && !resetting ? (
     <button className="disp-banner" onClick={() => reopenDisposition(pendingDisp)}>
       <span className="disp-dot" />
       <span className="disp-text">Finish your last call — {formatE164(pendingDisp.toNumber)} needs a disposition</span>
