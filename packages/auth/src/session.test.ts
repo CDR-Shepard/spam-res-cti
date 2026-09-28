@@ -5,6 +5,8 @@ const state = vi.hoisted(() => ({
   user: undefined as Record<string, unknown> | undefined,
   org: undefined as Record<string, unknown> | undefined,
   inserted: [] as Array<Record<string, unknown>>,
+  /** Every findFirst, in order — pins that the detail costs no extra query. */
+  lookups: [] as string[],
   lastUpdateTable: null as unknown,
   lastUpdateValues: null as Record<string, unknown> | null,
   lastUpdateWhere: null as unknown,
@@ -14,9 +16,9 @@ vi.mock('@cti/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@cti/db')>();
   const db = {
     query: {
-      sessions: { findFirst: async () => state.session },
-      users: { findFirst: async () => state.user },
-      organizations: { findFirst: async () => state.org },
+      sessions: { findFirst: async () => { state.lookups.push('sessions'); return state.session; } },
+      users: { findFirst: async () => { state.lookups.push('users'); return state.user; } },
+      organizations: { findFirst: async () => { state.lookups.push('organizations'); return state.org; } },
     },
     insert: () => ({ values: async (v: Record<string, unknown>) => { state.inserted.push(v); } }),
     update: (table: unknown) => ({
@@ -35,9 +37,12 @@ vi.mock('@cti/db', async (importOriginal) => {
 import { schema } from '@cti/db';
 import { sha256 } from './crypto.js';
 import {
+  isCtiResetDue,
   issueSession,
   resolveSession,
+  resolveSessionDetail,
   revokeAllSessionsForUser,
+  revokeSession,
   ServiceUserSessionError,
   SuspendedTenantError,
 } from './session.js';
@@ -62,12 +67,14 @@ function renderPredicate(node: unknown): string {
 
 const human = { id: 'U1', orgId: 'O1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true, kind: 'human', isSuperAdmin: false };
 const service = { ...human, id: 'AI', email: 'ai-agent@gg-homes.internal', kind: 'service' };
+const ISSUED = new Date('2026-09-28T20:00:00.000Z');
 
 beforeEach(() => {
   state.session = { userId: 'U1', tokenHash: 'h', expiresAt: new Date(Date.now() + 60_000), revokedAt: null };
   state.user = human;
   state.org = { status: 'active' };
   state.inserted = [];
+  state.lookups = [];
   state.lastUpdateTable = null;
   state.lastUpdateValues = null;
   state.lastUpdateWhere = null;
@@ -98,6 +105,58 @@ describe('resolveSession', () => {
   });
 });
 
+describe('resolveSessionDetail — what Reset CTI needs, from the same two rows', () => {
+  it("returns the user plus this session's created_at and the user's reset request", async () => {
+    const requested = new Date('2026-09-28T21:00:00.000Z');
+    state.session = { ...state.session, createdAt: ISSUED };
+    state.user = { ...human, ctiResetRequestedAt: requested };
+    await expect(resolveSessionDetail('Bearer tok')).resolves.toEqual({
+      user: { userId: 'U1', orgId: 'O1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true, kind: 'human', isSuperAdmin: false },
+      sessionCreatedAt: ISSUED,
+      ctiResetRequestedAt: requested,
+    });
+  });
+  it('a user nobody ever reset reads null', async () => {
+    state.session = { ...state.session, createdAt: ISSUED };
+    state.user = { ...human, ctiResetRequestedAt: null };
+    expect((await resolveSessionDetail('Bearer tok'))?.ctiResetRequestedAt).toBeNull();
+  });
+  it('costs exactly what resolveSession costs: one session, one user, one tenant lookup', async () => {
+    state.session = { ...state.session, createdAt: ISSUED };
+    await resolveSessionDetail('Bearer tok');
+    expect(state.lookups).toEqual(['sessions', 'users', 'organizations']);
+    state.lookups = [];
+    await resolveSession('Bearer tok');
+    expect(state.lookups).toEqual(['sessions', 'users', 'organizations']);
+  });
+  it('the same gates as resolveSession: no bearer, service user, suspended tenant, unknown token → null', async () => {
+    await expect(resolveSessionDetail(undefined)).resolves.toBeNull();
+    state.user = service;
+    await expect(resolveSessionDetail('Bearer tok')).resolves.toBeNull();
+    state.user = human;
+    state.org = { status: 'suspended' };
+    await expect(resolveSessionDetail('Bearer tok')).resolves.toBeNull();
+    state.org = { status: 'active' };
+    state.session = undefined;
+    await expect(resolveSessionDetail('Bearer nope')).resolves.toBeNull();
+  });
+});
+
+describe('isCtiResetDue — due when the reset was asked for after the session was issued', () => {
+  it('never asked → not due', () => {
+    expect(isCtiResetDue(null, ISSUED)).toBe(false);
+  });
+  it('asked after this session was issued → due', () => {
+    expect(isCtiResetDue(new Date('2026-09-28T20:00:00.001Z'), ISSUED)).toBe(true);
+  });
+  it('asked before this session (the rep already signed in again) → not due: no reset loop', () => {
+    expect(isCtiResetDue(new Date('2026-09-28T19:59:59.999Z'), ISSUED)).toBe(false);
+  });
+  it('asked at the very instant the session was issued → not due', () => {
+    expect(isCtiResetDue(new Date(ISSUED.getTime()), ISSUED)).toBe(false);
+  });
+});
+
 describe('issueSession', () => {
   it('stores only the sha256 of the token, with a 30-day expiry', async () => {
     const before = Date.now();
@@ -123,6 +182,15 @@ describe('issueSession', () => {
   it('refuses a user whose tenant row is missing', async () => {
     state.org = undefined;
     await expect(issueSession('U1')).rejects.toBeInstanceOf(SuspendedTenantError);
+  });
+});
+
+describe('revokeSession — the single-session revoke Reset CTI uses', () => {
+  it("revokes exactly the caller's token, never every session of the user (the iPhone shares the table)", async () => {
+    await revokeSession('Bearer tok');
+    expect(state.lastUpdateTable).toBe(schema.sessions);
+    expect(state.lastUpdateValues!.revokedAt).toBeInstanceOf(Date);
+    expect(renderPredicate(state.lastUpdateWhere)).toBe('token_hash = <param>');
   });
 });
 

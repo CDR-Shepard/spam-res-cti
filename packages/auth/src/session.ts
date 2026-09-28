@@ -39,6 +39,19 @@ export class SuspendedTenantError extends Error {
   }
 }
 
+/**
+ * Everything resolveSession reads, not just the user: the CALLING session's
+ * created_at and the user's Reset CTI request (migration 0045). Both come from
+ * the two rows resolveSession already loads, so asking costs no extra query.
+ */
+export interface SessionDetail {
+  user: SessionUser;
+  /** sessions.created_at of the session this bearer belongs to. */
+  sessionCreatedAt: Date;
+  /** users.cti_reset_requested_at; null when no admin ever reset this user. */
+  ctiResetRequestedAt: Date | null;
+}
+
 export async function issueSession(userId: string, ttlDays = DEFAULT_TTL_DAYS): Promise<{ token: string; expiresAt: Date }> {
   const db = getDb();
   const user = await db.query.users.findFirst({ where: eq(schema.users.id, userId) });
@@ -66,7 +79,7 @@ async function tenantIsActive(db: Db, orgId: string): Promise<boolean> {
   return org?.status === 'active';
 }
 
-export async function resolveSession(bearer: string | undefined): Promise<SessionUser | null> {
+export async function resolveSessionDetail(bearer: string | undefined): Promise<SessionDetail | null> {
   const token = bearerToken(bearer);
   if (!token) return null;
   const db = getDb();
@@ -82,14 +95,33 @@ export async function resolveSession(bearer: string | undefined): Promise<Sessio
   if (!user || user.kind === 'service') return null;
   if (!(await tenantIsActive(db, user.orgId))) return null;
   return {
-    userId: user.id,
-    orgId: user.orgId,
-    email: user.email,
-    isAdmin: user.isAdmin,
-    powerDialerEnabled: user.powerDialerEnabled,
-    kind: user.kind,
-    isSuperAdmin: user.isSuperAdmin,
+    user: {
+      userId: user.id,
+      orgId: user.orgId,
+      email: user.email,
+      isAdmin: user.isAdmin,
+      powerDialerEnabled: user.powerDialerEnabled,
+      kind: user.kind,
+      isSuperAdmin: user.isSuperAdmin,
+    },
+    sessionCreatedAt: row.createdAt,
+    ctiResetRequestedAt: user.ctiResetRequestedAt ?? null,
   };
+}
+
+export async function resolveSession(bearer: string | undefined): Promise<SessionUser | null> {
+  const detail = await resolveSessionDetail(bearer);
+  return detail ? detail.user : null;
+}
+
+/**
+ * A web session is due for an admin's CTI reset when the reset was asked for
+ * AFTER the session was issued. Signing in again issues a newer session, and
+ * that is what ends it: there is no flag to clear, so there is no reset loop.
+ * Both stamps are the database's clock (now() / defaultNow()).
+ */
+export function isCtiResetDue(requestedAt: Date | null, sessionCreatedAt: Date): boolean {
+  return requestedAt !== null && requestedAt.getTime() > sessionCreatedAt.getTime();
 }
 
 export async function revokeSession(bearer: string): Promise<void> {
