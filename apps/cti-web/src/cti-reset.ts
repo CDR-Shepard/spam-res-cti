@@ -23,6 +23,23 @@ export const SOUND_CHECK_DUE_KEY = 'cti.soundCheck.due';
 export const RESET_WIPE_KEYS: readonly string[] = [SESSION_KEY, DISPLAY_NAME_KEY, AUDIO_INPUT_KEY, AUDIO_OUTPUT_KEY];
 /** The sign-in screen's line after a reset (spec, exact). */
 export const RESET_NOTICE_TEXT = 'Your admin reset your phone. Sign in again to reconnect.';
+/** The one quiet line while a reset is under way (C1: no toast per refusal). */
+export const RESETTING_TEXT = 'Resetting your phone…';
+
+/**
+ * The softphone refused to build or use a Device, on purpose:
+ *  - 'resetting': a reset is under way (App's resetting latch). The Device is
+ *    down and the page is about to reload; nothing may bring it back.
+ *  - 'superseded': the Device was torn down while it was still being built, so
+ *    the build destroyed its own Device instead of adopting it.
+ * Callers stay quiet about it — it is never a "calls unavailable" error.
+ */
+export class DeviceRefusedError extends Error {
+  constructor(readonly reason: 'resetting' | 'superseded') {
+    super(reason === 'resetting' ? RESETTING_TEXT : 'The softphone restarted while it was connecting. Try again.');
+    this.name = 'DeviceRefusedError';
+  }
+}
 
 /** What App knows, read from its refs at the moment of asking. */
 export interface ResetBusySnapshot {
@@ -48,6 +65,10 @@ export interface ResetBusySnapshot {
    *  only 'active' or 'paused' block a reset. A terminal 'stopped' or 'done'
    *  run — its summary screen — does not, even with a `dialerSessionId`. */
   dialerRunStatus: string | null;
+  /** Start dialing is in flight (prepare → start → join, App's runStartsRef).
+   *  The server may be ringing a prospect for a leg that has not joined yet:
+   *  a reset now would drop the join and stop the run under the rep. */
+  runStarting: boolean;
   callbackWaiting: boolean;
   parkedRunId: string | null;
 }
@@ -66,7 +87,7 @@ export function isBusyForReset(s: ResetBusySnapshot): boolean {
   if (s.connection && s.connection.status?.() !== 'closed') return true;
   if (s.dialerConn || s.dialerLive) return true;
   if (s.dialerRunStatus === 'active' || s.dialerRunStatus === 'paused') return true;
-  if (s.parkedRunId !== null) return true;
+  if (s.runStarting || s.parkedRunId !== null) return true;
   return s.callbackWaiting;
 }
 
@@ -140,10 +161,17 @@ export function clearFlag(key: string, storage: StorageLike | null = browserStor
 }
 
 export interface PerformResetDeps {
+  /** Set App's resetting latch: from here until the reload nothing may build a
+   *  Device, place a call or join a run (C1). */
+  beginResetting: () => void;
   teardownDevice: () => void;
   /** Storage still holds this tab's session (not a newer one, not none). */
   sessionIsOurs: () => boolean;
   postResetComplete: () => Promise<void>;
+  /** isBusyForReset for THIS tab, re-read after the POST. */
+  isBusy: () => boolean;
+  /** Resolves once isBusy() reads false again. */
+  whenIdle: () => Promise<void>;
   broadcastReset: () => void;
   /** wipeForReset for this tab's session. */
   wipe: () => boolean;
@@ -154,8 +182,14 @@ export interface PerformResetDeps {
 /**
  * A reset, in the spec's order (decision 4). The caller runs the idle check
  * (this tab AND its peers) synchronously just before: see reset-poller.ts.
+ *  1. the resetting latch, synchronously, BEFORE the Device goes down: the
+ *     POST below takes up to 5 s, and in that window nothing (the `online`
+ *     handler, a leadership change, place(), Start dialing) may build a new
+ *     Device that the reload would then kill mid-ring (C1).
  *  2. teardownDevice: releases a pinned mic and unregisters from Twilio.
  *  3. POST /auth/reset-complete: stamps done and revokes THIS session.
+ *     Then re-check: if this tab picked something up during the POST, wait
+ *     until it is idle again before going on (C1(d)).
  *  4. broadcast {type:'reset'}: peer tabs finish too.
  *     3 and 4 are for the tab that starts the reset, and only while storage
  *     still holds its session. A stale tab just reloads.
@@ -165,6 +199,7 @@ export interface PerformResetDeps {
  * next sign-in's session is newer than the request, which is what ends it.
  */
 export async function performReset(deps: PerformResetDeps, initiator: boolean): Promise<void> {
+  deps.beginResetting();
   deps.teardownDevice();
   if (initiator && deps.sessionIsOurs()) {
     try {
@@ -172,6 +207,7 @@ export async function performReset(deps: PerformResetDeps, initiator: boolean): 
     } catch (err) {
       deps.warn('[cti-reset] reset-complete failed; wiping and reloading anyway', err);
     }
+    if (deps.isBusy()) await deps.whenIdle();
     try {
       deps.broadcastReset();
     } catch (err) {

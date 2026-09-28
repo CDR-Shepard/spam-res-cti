@@ -42,17 +42,20 @@ function fakeDeviceAudio() {
 
 class FakeDevice {
   static instances: FakeDevice[] = [];
+  /** register() for the n-th Device built (0-based); resolved when unset. */
+  static registerFor: ((n: number) => Promise<void>) | null = null;
   audio = fakeDeviceAudio();
   destroyed = false;
+  private readonly n: number;
   private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
-  constructor(_token: string, _opts: unknown) { FakeDevice.instances.push(this); }
+  constructor(_token: string, _opts: unknown) { this.n = FakeDevice.instances.length; FakeDevice.instances.push(this); }
   on(event: string, cb: (...args: unknown[]) => void): void {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), cb]);
   }
   emit(event: string, ...args: unknown[]): void {
     for (const cb of this.listeners.get(event) ?? []) cb(...args);
   }
-  register(): Promise<void> { return Promise.resolve(); }
+  register(): Promise<void> { return FakeDevice.registerFor?.(this.n) ?? Promise.resolve(); }
   updateToken(): void { /* not exercised */ }
   destroy(): void { this.destroyed = true; }
 }
@@ -95,6 +98,7 @@ function grantMic(): { opened: () => number; stopped: () => number } {
 
 beforeEach(() => {
   FakeDevice.instances.length = 0;
+  FakeDevice.registerFor = null;
   localStorage.clear();
   pending = null;
   vi.stubGlobal('fetch', vi.fn(async (input: unknown): Promise<Response> => {
@@ -232,5 +236,31 @@ describe('App — Settings', () => {
     expect(await screen.findByRole('dialog', { name: 'Sound check' })).toBeTruthy();
     // The banner survives the rebuild — it's App's pendingDisp state, unrelated to the Device.
     expect(await screen.findByText(/needs a disposition/)).toBeTruthy();
+  });
+
+  // The first Device is still registering when Reset my audio tears it down
+  // and builds a second. The first build then fails: it may destroy only its
+  // own Device, never the new one — and, being superseded, it says nothing.
+  it('Reset my audio mid-registration: the old build failing later never destroys the new Device, and never toasts', async () => {
+    let failFirst: (e: Error) => void = () => {};
+    FakeDevice.registerFor = (n) => (n === 0 ? new Promise<void>((_resolve, reject) => { failFirst = reject; }) : Promise.resolve());
+    signedIn();
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Reset my audio' }));
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(2));
+    expect(FakeDevice.instances[0]!.destroyed).toBe(true);
+
+    await act(async () => { failFirst(new Error('registration failed')); });
+    for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); });
+    expect(FakeDevice.instances[1]!.destroyed).toBe(false);
+    expect(screen.queryByText(/Inbound calls unavailable/)).toBeNull();
+
+    // The new Device is still the one App holds: the next Reset my audio tears IT down.
+    fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reset my audio' }));
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(3));
+    expect(FakeDevice.instances[1]!.destroyed).toBe(true);
   });
 });

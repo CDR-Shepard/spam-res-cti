@@ -17,6 +17,10 @@ const events: string[] = [];
 
 class FakeDevice {
   static instances: FakeDevice[] = [];
+  /** When set, register() waits on this. */
+  static registerGate: Promise<void> | null = null;
+  /** Outbound calls placed on any FakeDevice. */
+  static connects = 0;
   private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
   constructor(_token: string, _opts: unknown) { FakeDevice.instances.push(this); }
   on(event: string, cb: (...args: unknown[]) => void): void {
@@ -25,9 +29,13 @@ class FakeDevice {
   emit(event: string, ...args: unknown[]): void {
     for (const cb of this.listeners.get(event) ?? []) cb(...args);
   }
-  register(): Promise<void> { return Promise.resolve(); }
+  register(): Promise<void> { return FakeDevice.registerGate ?? Promise.resolve(); }
   updateToken(): void { /* not exercised */ }
   destroy(): void { events.push('device destroyed'); }
+  async connect(): Promise<{ on: () => void; parameters: Record<string, string> }> {
+    FakeDevice.connects += 1;
+    return { on: () => {}, parameters: {} };
+  }
 }
 vi.mock('@twilio/voice-sdk', () => ({ Device: FakeDevice }));
 
@@ -43,10 +51,33 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 let resetSignal: () => Response;
 let fetchMock: ReturnType<typeof vi.fn>;
+/** When set, these requests wait on the gate before answering. */
+const gates: { resetComplete: Promise<void> | null; token: Promise<void> | null; firewall: Promise<void> | null } = {
+  resetComplete: null, token: null, firewall: null,
+};
+/** A gate plus the function that opens it. */
+function gate(): { promise: Promise<void>; open: () => void } {
+  let open: () => void = () => {};
+  const promise = new Promise<void>((resolve) => { open = resolve; });
+  return { promise, open };
+}
+const ALLOW_VERDICT = {
+  decision: 'ALLOW', reasons: [], blockReason: null, requiredScriptId: null, auditId: 'audit-1',
+  checks: [], normalizedTo: '+16195551234', fromNumber: '+16195559999',
+};
+
+/** HTTP status for each /telephony/token call, in order; 200 once they run out. */
+let tokenStatuses: number[] = [];
 
 beforeEach(() => {
   FakeDevice.instances.length = 0;
+  FakeDevice.registerGate = null;
+  FakeDevice.connects = 0;
+  tokenStatuses = [];
   events.length = 0;
+  gates.resetComplete = null;
+  gates.token = null;
+  gates.firewall = null;
   localStorage.clear();
   resetSignal = () => jsonResponse({ resetDue: false });
   fetchMock = vi.fn(async (input: unknown, init?: { method?: string }): Promise<Response> => {
@@ -55,7 +86,22 @@ beforeEach(() => {
     if (url.includes('/auth/reset-signal')) return resetSignal();
     if (url.includes('/auth/reset-complete') && method === 'POST') {
       events.push(localStorage.getItem('cti.session.v1') ? 'reset-complete (session still stored)' : 'reset-complete (session already gone)');
+      if (gates.resetComplete) await gates.resetComplete;
       return jsonResponse({ ok: true });
+    }
+    if (url.includes('/firewall/precall')) {
+      if (gates.firewall) await gates.firewall;
+      return jsonResponse(ALLOW_VERDICT);
+    }
+    if (method === 'POST' && url.endsWith('/calls')) {
+      events.push('POST /calls');
+      return jsonResponse({ call: { id: 'call-1', fromNumber: '+16195559999', toNumber: '+16195551234', normalizedToNumber: '+16195551234' } });
+    }
+    const tokenStatus = url.includes('/telephony/token') ? tokenStatuses[callsTo('/telephony/token') - 1] ?? 200 : 200;
+    if (tokenStatus !== 200) return jsonResponse({ error: 'no token' }, tokenStatus);
+    if (url.includes('/telephony/token') && gates.token) {
+      await gates.token;
+      return jsonResponse({ token: 'device-token' });
     }
     if (url.includes('/auth/dev-session')) return jsonResponse({ error: 'Not found' }, 404);
     if (url.includes('/auth/salesforce/login/start')) return jsonResponse({ authUrl: 'https://login.example.com/x', handshake: 'h1' });
@@ -111,6 +157,112 @@ describe('App — an idle rep with a reset due', () => {
     expect(localStorage.getItem('cti.reset.notice')).toBe('1');
     expect(localStorage.getItem('unrelated')).toBe('kept');
     expect(callsTo('/auth/reset-complete')).toBe(1);
+  });
+});
+
+/** Dial a number on the pad (the rep's auto-place flow starts from here). */
+function dialDigits(digits: string): void {
+  for (const d of digits) {
+    const key = Array.from(document.querySelectorAll('.dialpad .key')).find((b) => b.querySelector('.num')?.textContent === d);
+    if (!key) throw new Error(`no dial pad key for "${d}"`);
+    fireEvent.click(key);
+  }
+}
+
+describe('App — C1: nothing builds a Device between the teardown and the reload', () => {
+  // The reviewer's repro: `online` fired while the reset-complete POST was in
+  // flight, a new Device registered, a callback rang, and the reload landed
+  // with the Decline screen up.
+  it('`online` while the reset-complete POST is in flight builds no Device, and says nothing', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    signedIn();
+    resetSignal = () => jsonResponse({ resetDue: true });
+    const post = gate();
+    gates.resetComplete = post.promise;
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    await advance(8_000);
+    await waitFor(() => expect(events).toEqual(['device destroyed', 'reset-complete (session still stored)']));
+    expect(screen.getByText('Resetting your phone…')).toBeTruthy();
+
+    act(() => { window.dispatchEvent(new Event('online')); });
+    await advance(1_000);
+    expect(FakeDevice.instances.length).toBe(1);
+    expect(callsTo('/telephony/token')).toBe(1);
+    expect(document.querySelector('.toast')).toBeNull();
+
+    post.open();
+    await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
+    expect(FakeDevice.instances.length).toBe(1);
+    expect(events).toEqual(['device destroyed', 'reset-complete (session still stored)', 'reload (wiped)']);
+  });
+
+  it('a Device build already in flight when the reset began destroys nothing of the next page — it builds no Device at all', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    signedIn();
+    resetSignal = () => jsonResponse({ resetDue: true });
+    const token = gate();
+    gates.token = token.promise; // the leader's first Device is still fetching its token
+    render(<App />);
+    await waitFor(() => expect(callsTo('/telephony/token')).toBe(1));
+    await advance(8_000);
+    await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
+
+    token.open(); // the build resumes AFTER the teardown
+    await advance(1_000);
+    expect(FakeDevice.instances.length).toBe(0);
+    expect(document.querySelector('.toast')).toBeNull();
+  });
+
+  // Same generation check, the other await: the Device exists and is
+  // registering when the teardown lands (here a sign-out: the SDK's token
+  // refresh came back 401). The caller that started that build — a dial,
+  // because the leader's first build failed — gets a refusal, never the
+  // destroyed Device.
+  it('a teardown while the Device registers: the dial that started the build never connects on the destroyed Device', async () => {
+    signedIn();
+    tokenStatuses = [500, 200, 401]; // mount build fails; the dial's build gets a token; its refresh is refused
+    render(<App />);
+    await waitFor(() => expect(callsTo('/telephony/token')).toBe(1));
+    await waitFor(() => expect(document.querySelector('.toast')).not.toBeNull()); // "Inbound calls unavailable"
+    expect(FakeDevice.instances.length).toBe(0);
+
+    const register = gate();
+    FakeDevice.registerGate = register.promise;
+    dialDigits('6195551234');
+    fireEvent.click(screen.getByTitle('Check & call'));
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1)); // place() is building it, and waits
+    act(() => { FakeDevice.instances[0]!.emit('tokenWillExpire'); });
+    await waitFor(() => expect(events).toContain('device destroyed'));
+
+    register.open();
+    for (let i = 0; i < 10; i++) await act(async () => { await Promise.resolve(); });
+    expect(FakeDevice.connects).toBe(0);
+  });
+
+  it('a firewall answer that lands mid-reset places no call (the auto-place refuses quietly)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    signedIn();
+    resetSignal = () => jsonResponse({ resetDue: true });
+    const firewall = gate();
+    gates.firewall = firewall.promise;
+    const post = gate();
+    gates.resetComplete = post.promise;
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    dialDigits('6195551234');
+    fireEvent.click(screen.getByTitle('Check & call'));
+    await advance(8_000);
+    await waitFor(() => expect(events).toEqual(['device destroyed', 'reset-complete (session still stored)']));
+
+    firewall.open(); // ALLOW: a rep's verdict places the call at once — but not now
+    await advance(1_000);
+    expect(events).toEqual(['device destroyed', 'reset-complete (session still stored)']);
+    expect(FakeDevice.instances.length).toBe(1);
+    expect(document.querySelector('.toast')).toBeNull();
+
+    post.open();
+    await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
   });
 });
 

@@ -66,7 +66,7 @@ import {
 } from './callback-waiting';
 import { HEARTBEAT_UNREACHABLE_TEXT, parkedRunOverAction, startParkedHeartbeat } from './parked-heartbeat';
 import { playCallbackChime } from './callback-chime';
-import { clearFlag, isBusyForReset, readFlag, RESET_NOTICE_KEY, RESET_NOTICE_TEXT, SOUND_CHECK_DUE_KEY } from './cti-reset';
+import { clearFlag, DeviceRefusedError, isBusyForReset, readFlag, RESET_NOTICE_KEY, RESET_NOTICE_TEXT, RESETTING_TEXT, SOUND_CHECK_DUE_KEY } from './cti-reset';
 import { useCtiReset } from './use-cti-reset';
 
 interface MeResponse {
@@ -390,6 +390,16 @@ export function App(): JSX.Element {
   }, [refreshMe]);
 
   const deviceRef = useRef<unknown>(null);
+  // Reset CTI's latch (C1): set synchronously right before a reset tears the
+  // Device down, and held until the reload. While set, nothing may build a
+  // Device, place a call or join a run — the reload would kill it mid-ring.
+  // The state drives the one quiet "Resetting your phone…" line.
+  const resettingRef = useRef(false);
+  const [resetting, setResettingState] = useState(false);
+  const setResetting = useCallback((on: boolean): void => {
+    resettingRef.current = on;
+    setResettingState(on);
+  }, []);
   const connectionRef = useRef<unknown>(null);
   // Shared AudioContext, resumed on accept (browsers gate audio until a user
   // gesture) so the caller's audio isn't silently dropped on answer.
@@ -444,6 +454,10 @@ export function App(): JSX.Element {
   useEffect(() => { pendingDispRef.current = pendingDisp; }, [pendingDisp]);
   const dialerLiveRef = useRef(false);
   useEffect(() => { dialerLiveRef.current = dialerLive; }, [dialerLive]);
+  // Start dialing sequences in flight (prepare → start → join), counted by
+  // DialerPanel's onStartingChange. The server may already be ringing a
+  // prospect for a leg that has not joined yet, so a reset must wait (C1(c)).
+  const runStartsRef = useRef(0);
   // Would a reset interrupt anything in THIS tab? Also broadcast to peer tabs
   // as `resetBusy` in the coordinator's presence. Per R1, an old
   // pendingDisposition (not the open wrap-up form) and a terminal (stopped or
@@ -465,6 +479,7 @@ export function App(): JSX.Element {
     dialerRunStatus: runSnapshotRef.current !== null && runSnapshotRef.current.sessionId === dialerSessionIdRef.current
       ? runSnapshotRef.current.sessionStatus
       : null,
+    runStarting: runStartsRef.current > 0,
     callbackWaiting: callbackWaitingRef.current !== null,
     parkedRunId: parkedRunIdRef.current,
   }), []);
@@ -477,9 +492,15 @@ export function App(): JSX.Element {
   // Set when leadership is lost mid-call; teardown is deferred until the call ends.
   const pendingTeardownRef = useRef(false);
 
+  // Bumped by every teardown. A Device build that started before a teardown
+  // sees a newer generation when it resumes, and destroys its own Device
+  // instead of adopting it (C1(b)) — no Device outlives the teardown it raced.
+  const deviceGenRef = useRef(0);
+
   // Destroy + forget the persistent Twilio device. Idempotent. Stops it ringing
   // and, crucially, stops its tokenWillExpire loop from POSTing /telephony/token.
   const teardownDevice = useCallback(() => {
+    deviceGenRef.current += 1;
     const d = deviceRef.current as { destroy?: () => void } | null;
     deviceRef.current = null;
     deviceInitRef.current = null;
@@ -757,17 +778,28 @@ export function App(): JSX.Element {
   // Lazily create + register ONE persistent Twilio device, reused for both
   // outbound dials and INBOUND calls (so callbacks ring the softphone). Idempotent.
   const ensureDevice = useCallback(async (): Promise<unknown> => {
+    // A reset is under way: the page is about to reload, and a Device built
+    // now would register, ring and die with it (C1(a)). Quietly, every time.
+    if (resettingRef.current) throw new DeviceRefusedError('resetting');
     if (deviceRef.current) return deviceRef.current;
     if (deviceInitRef.current) return deviceInitRef.current;
+    const gen = deviceGenRef.current;
+    const superseded = (): boolean => deviceGenRef.current !== gen;
+    // This build's own Device, so a failed or superseded build destroys only it.
+    const own: { device: { destroy?: () => void } | null } = { device: null };
     const init = (async () => {
     const tok = await api<{ token: string }>('/telephony/token', { method: 'POST' });
     const { Device } = await import('@twilio/voice-sdk');
+    // Torn down while the token was in flight (a reset, a leadership loss):
+    // build nothing (C1(b)).
+    if (superseded()) throw new DeviceRefusedError('superseded');
     // allowIncomingWhileBusy: a callback must reach the app while the rep sits
     // on a power-dial run's conference leg — the default drops it silently
     // (busy in 0 s). Set here, never via updateOptions(), which rebuilds the
     // sound cache and loses the ringtone speaker chosen in Settings. The
     // 'incoming' handler below decides what a busy rep's callback does.
     const device = new Device(tok.token, { logLevel: 1, allowIncomingWhileBusy: true });
+    own.device = device as unknown as { destroy?: () => void };
     deviceRef.current = device;
     // Every new Device (first load, or re-created after a leadership change)
     // gets the mic/speaker chosen in Settings — the power-dialer conference
@@ -865,6 +897,9 @@ export function App(): JSX.Element {
       }
     });
     await d.register();
+    // Torn down while registering: the teardown already destroyed this
+    // Device (it was on deviceRef); never hand it out (C1(b)).
+    if (superseded()) throw new DeviceRefusedError('superseded');
     applyAudioPrefs();
     return device;
     })();
@@ -872,12 +907,16 @@ export function App(): JSX.Element {
     try {
       return await init;
     } catch (err) {
-      // Failed init — destroy the half-built device so it stops emitting
-      // registered/unregistered events, then clear so the next call retries clean.
-      try { (deviceRef.current as { destroy?: () => void } | null)?.destroy?.(); } catch { /* */ }
-      deviceInitRef.current = null;
-      deviceRef.current = null;
-      throw err;
+      // Failed or superseded init — destroy the half-built device so it stops
+      // emitting registered/unregistered events. Only OUR device, and the refs
+      // only while they are still ours: after a teardown they may already hold
+      // a newer build, which this one must never destroy or forget.
+      try { own.device?.destroy?.(); } catch { /* */ }
+      if (deviceInitRef.current === init) deviceInitRef.current = null;
+      if (own.device !== null && deviceRef.current === own.device) deviceRef.current = null;
+      // A superseded build's own failure is moot — a newer Device (or none, on
+      // purpose) is the truth now — so it is never "calls unavailable".
+      throw superseded() && !(err instanceof DeviceRefusedError) ? new DeviceRefusedError('superseded') : err;
     }
   }, [signOut, ringNormally, waitOnCallback, liveWaitingCallback]);
 
@@ -1007,6 +1046,8 @@ export function App(): JSX.Element {
   // causes a prospect to ring into an empty room. Same idle test the handoff
   // poll applies before it accepts a run.
   const prepareDialerDevice = useCallback(async (): Promise<void> => {
+    // A reset is under way (C1(a)): no run — the panel shows the one quiet line.
+    if (resettingRef.current) throw new DeviceRefusedError('resetting');
     if (phaseRef.current !== 'idle' || connectionRef.current || incomingRef.current) {
       throw new Error('Finish the current call before starting a power-dial run.');
     }
@@ -1033,6 +1074,9 @@ export function App(): JSX.Element {
   // bringing back a leg that dropped on its own, or when Resume re-joins a run
   // parked for a callback; a fresh Start passes nothing.
   const joinLeg = useCallback(async (recoveringSessionId?: string | null, opts: JoinLegOptions = {}): Promise<boolean> => {
+    // A reset is under way (C1(a)): no leg, and no generation bump or nav lock
+    // either — the caller's run stops the ordinary way (a refused join).
+    if (resettingRef.current) throw new DeviceRefusedError('resetting');
     const isRecovery = recoveringSessionId !== undefined;
     const myRun = ++dialerRunRef.current;
     if (!isRecovery) legRejoinedAtRef.current = [];
@@ -1211,6 +1255,10 @@ export function App(): JSX.Element {
   }, [joinLeg, setParked, moveRingToBanner]);
   // Read at click time: is this tab's leg out of the room?
   const legIsDown = useCallback((): boolean => !dialerConnRef.current, []);
+  // DialerPanel brackets each Start dialing sequence with this (C1(c)).
+  const handleStartingChange = useCallback((starting: boolean): void => {
+    runStartsRef.current = Math.max(0, runStartsRef.current + (starting ? 1 : -1));
+  }, []);
 
   const startPowerDial = useCallback(async (objectType: unknown, recordIds: unknown): Promise<void> => {
     if (objectType !== 'Lead' && objectType !== 'Opportunity') {
@@ -1264,7 +1312,16 @@ export function App(): JSX.Element {
 
   // Reset CTI: every signed-in tab polls. Only the leader acts, and only when
   // this tab AND every peer is idle (use-cti-reset.ts).
-  const { onPeerReset } = useCtiReset({ enabled: signedIn && !!me, coordinatorRef, isBusy: resetBusy, teardownDevice });
+  const { onPeerReset } = useCtiReset({ enabled: signedIn && !!me, coordinatorRef, isBusy: resetBusy, teardownDevice, setResetting });
+
+  // A Device build that failed for real: callbacks stop arriving, so say so.
+  // A refusal on purpose (a reset under way, or a teardown that raced the
+  // build) is not a failure and stays quiet — no toast per refusal (C1).
+  const onDeviceBuildFailed = useCallback((err: unknown): void => {
+    if (err instanceof DeviceRefusedError) return;
+    setInboundDegraded(true);
+    setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
+  }, []);
 
   // Settings → Reset my audio. It's self-serve and never signs out: System
   // default for both, a fresh Device when nothing is live here, then the
@@ -1275,10 +1332,7 @@ export function App(): JSX.Element {
       if (!resetBusy()) {
         teardownDevice();
         if (coordinatorRef.current?.isLeader() ?? true) {
-          void ensureDevice().catch(() => {
-            setInboundDegraded(true);
-            setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
-          });
+          void ensureDevice().catch(onDeviceBuildFailed);
         }
       } else {
         // Something is live or owed here, so no rebuild. Put the live Device
@@ -1292,7 +1346,7 @@ export function App(): JSX.Element {
     }
     setToast({ text: 'Microphone and speaker are back to System default.', type: 'success' });
     setSoundCheckOpen(true);
-  }, [resetBusy, teardownDevice, ensureDevice, audioPort]);
+  }, [resetBusy, teardownDevice, ensureDevice, audioPort, onDeviceBuildFailed]);
 
   // One softphone per rep across all their tabs. The elected leader holds the
   // Twilio Device (inbound + outbound); non-leaders hold none, so Twilio never
@@ -1321,10 +1375,7 @@ export function App(): JSX.Element {
     coord.onLeadershipChange((isLeader) => {
       if (isLeader) {
         pendingTeardownRef.current = false;
-        void ensureDevice().catch(() => {
-          setInboundDegraded(true);
-          setToast({ text: 'Inbound calls unavailable — reload to receive callbacks.', type: 'error' });
-        });
+        void ensureDevice().catch(onDeviceBuildFailed);
         // NOTE: we deliberately do NOT pre-acquire the microphone here. Leadership
         // follows the visible tab, so priming the mic on every leadership change lit
         // up the browser's "microphone in use" indicator on every Salesforce tab the
@@ -1362,7 +1413,7 @@ export function App(): JSX.Element {
       coord.stop();
       coordinatorRef.current = null;
     };
-  }, [signedIn, me?.user?.userId, ensureDevice, teardownDevice, resetBusy, onPeerReset]);
+  }, [signedIn, me?.user?.userId, ensureDevice, teardownDevice, resetBusy, onPeerReset, onDeviceBuildFailed]);
 
   // Primary handoff intake: poll the server for a pending Salesforce→CTI
   // handoff (relayed by Apex — see docs/superpowers/plans/2026-07-14-power-dialer-5-handoff-relay.md)
@@ -1436,6 +1487,9 @@ export function App(): JSX.Element {
   }, [me, refreshPending]);
 
   const place = useCallback(async () => {
+    // A reset is under way (C1(a)): no call — the banner already says why.
+    // Before anything else, so no POST /calls creates a row nobody dials.
+    if (resettingRef.current) return;
     coordinatorRef.current?.promoteSelf();
     if (!firewall || firewall.decision === 'BLOCK') return;
     // Claim the outbound path synchronously so a callback that rings during the
@@ -2064,6 +2118,7 @@ export function App(): JSX.Element {
       onStartFromListView={startPowerDialFromListView}
       onPrepare={prepareDialerDevice}
       onJoin={joinDialerConference}
+      onStartingChange={handleStartingChange}
       onStop={handleDialerStop}
       onComplete={handleDialerComplete}
       onDismiss={handleDialerDismiss}
@@ -2148,6 +2203,7 @@ export function App(): JSX.Element {
   return (
     <div className="app">
       {header}
+      {resetting && <div className="reset-banner" role="status">{RESETTING_TEXT}</div>}
       {sfBanner}
       {dispositionBanner}
       <div className="body">{body}</div>

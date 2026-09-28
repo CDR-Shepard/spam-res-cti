@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
 import { api } from './api';
 import { pageReloader, performReset, storedSessionToken, wipeForReset, type PerformResetDeps } from './cti-reset';
-import { createResetPoller, type ResetPoller } from './reset-poller';
+import { createResetPoller, RESET_IDLE_CHECK_MS, type ResetPoller } from './reset-poller';
 import type { SoftphoneCoordinator } from './softphone-coordinator';
 
 /** The Device is already down when this POST goes out. A hung request must
@@ -40,6 +40,10 @@ export interface UseCtiResetOptions {
   /** isBusyForReset over App's refs, for THIS tab. */
   isBusy: () => boolean;
   teardownDevice: () => void;
+  /** App's resetting latch. true: synchronously, right before the Device goes
+   *  down — from then on nothing may build a Device, place a call or join a
+   *  run. false: the reset did not finish here (the hook went away first). */
+  setResetting: (on: boolean) => void;
 }
 
 export function useCtiReset(opts: UseCtiResetOptions): { onPeerReset: () => void } {
@@ -52,10 +56,30 @@ export function useCtiReset(opts: UseCtiResetOptions): { onPeerReset: () => void
     if (!enabled) return;
     // The session this page runs on. A reset only ever wipes THIS one.
     const pageToken = storedSessionToken();
+    // Every timer this effect starts, so its cleanup can cancel them all.
+    const cancels = new Set<() => void>();
+    const scheduleInterval = (cb: () => void, ms: number): (() => void) => {
+      const id = window.setInterval(cb, ms);
+      const cancel = (): void => { window.clearInterval(id); cancels.delete(cancel); };
+      cancels.add(cancel);
+      return cancel;
+    };
+    // Set while this effect holds App's latch, so a cleanup that runs before
+    // the reload (a sign-out mid-reset) never leaves the rep latched.
+    let latched = false;
     const resetDeps = (): PerformResetDeps => ({
+      beginResetting: () => { latched = true; latest.current.setResetting(true); },
       teardownDevice: () => latest.current.teardownDevice(),
       sessionIsOurs: () => storedSessionToken() === pageToken,
       postResetComplete: () => postResetComplete(),
+      isBusy: () => latest.current.isBusy(),
+      whenIdle: () => new Promise<void>((resolve) => {
+        const cancel = scheduleInterval(() => {
+          if (latest.current.isBusy()) return;
+          cancel();
+          resolve();
+        }, RESET_IDLE_CHECK_MS);
+      }),
       broadcastReset: () => latest.current.coordinatorRef.current?.broadcastReset(),
       wipe: () => wipeForReset(pageToken),
       reload: () => pageReloader.reload(),
@@ -70,10 +94,7 @@ export function useCtiReset(opts: UseCtiResetOptions): { onPeerReset: () => void
       isSelfBusy: () => latest.current.isBusy(),
       initiate: () => performReset(resetDeps(), true),
       finishForPeer: () => performReset(resetDeps(), false),
-      scheduleInterval: (cb, ms) => {
-        const id = window.setInterval(cb, ms);
-        return () => window.clearInterval(id);
-      },
+      scheduleInterval,
       onVisible: (cb) => {
         const onChange = (): void => { if (document.visibilityState === 'visible') cb(); };
         document.addEventListener('visibilitychange', onChange);
@@ -84,6 +105,8 @@ export function useCtiReset(opts: UseCtiResetOptions): { onPeerReset: () => void
     poller.start();
     return () => {
       poller.stop();
+      for (const cancel of [...cancels]) cancel();
+      if (latched) latest.current.setResetting(false);
       if (pollerRef.current === poller) pollerRef.current = null;
     };
   }, [enabled]);

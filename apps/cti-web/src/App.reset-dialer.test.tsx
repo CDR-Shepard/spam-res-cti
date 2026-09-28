@@ -54,6 +54,8 @@ const state = {
   holdStart: null as Promise<Response> | null,
   /** The next POST /dialer/sessions answers with this run. */
   nextSessionId: 'sess-1',
+  /** When set, POST /auth/reset-complete waits on this before answering. */
+  holdResetComplete: null as Promise<void> | null,
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -78,12 +80,16 @@ beforeEach(() => {
   state.resetDue = false;
   state.holdStart = null;
   state.nextSessionId = 'sess-1';
+  state.holdResetComplete = null;
   localStorage.clear();
   localStorage.setItem('cti.session.v1', JSON.stringify({ token: 'tok', userId: 'u1', email: 'rep@example.com' }));
   fetchMock = vi.fn(async (input: unknown, init?: { method?: string }): Promise<Response> => {
     const url = String(input);
     if (url.includes('/auth/reset-signal')) return jsonResponse({ resetDue: state.resetDue });
-    if (url.includes('/auth/reset-complete') && init?.method === 'POST') return jsonResponse({ ok: true });
+    if (url.includes('/auth/reset-complete') && init?.method === 'POST') {
+      if (state.holdResetComplete) await state.holdResetComplete;
+      return jsonResponse({ ok: true });
+    }
     if (url.includes('/auth/me')) {
       return jsonResponse({
         user: { userId: 'u1', orgId: 'org1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true },
@@ -136,6 +142,55 @@ function handOverRun(): void {
     }));
   });
 }
+
+describe('App — C1: a reset and Start dialing never overlap', () => {
+  // (c) Start dialing is prepare → start → join. Once `start` is accepted the
+  // server may be ringing a prospect for a leg that has not joined yet.
+  it('a start in flight holds the reset back; once it settles (here: refused), the reset goes ahead', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    state.resetDue = true;
+    let answerStart: (r: Response) => void = () => {};
+    state.holdStart = new Promise<Response>((resolve) => { answerStart = resolve; });
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    handOverRun();
+    fireEvent.click(await screen.findByText('Start dialing'));
+    await waitFor(() => expect(state.controls).toEqual(['start']));
+
+    await advance(30_000);
+    expect(callsTo('/auth/reset-complete')).toBe(0);
+    expect(FakeDevice.instances[0]!.destroyed).toBe(false);
+
+    act(() => { answerStart(jsonResponse({ error: 'boom' }, 500)); });
+    await waitFor(() => expect(state.controls).toEqual(['start', 'stop'])); // the sequence stops what it started
+    await advance(6_000);
+    await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
+    expect(callsTo('/auth/reset-complete')).toBe(1);
+  });
+
+  // (a) The reset began first (a `ready` run's confirm screen is idle).
+  it('Start dialing pressed mid-reset: refused with the one quiet line — no start, no Device', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    state.resetDue = true;
+    let openPost: () => void = () => {};
+    state.holdResetComplete = new Promise<void>((resolve) => { openPost = resolve; });
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    handOverRun();
+    await screen.findByText('Start dialing');
+    await advance(8_000);
+    await waitFor(() => expect(FakeDevice.instances[0]!.destroyed).toBe(true));
+
+    fireEvent.click(screen.getByText('Start dialing'));
+    await waitFor(() => expect(screen.getAllByText('Resetting your phone…').length).toBe(2)); // the banner + the panel's line
+    expect(state.controls).toEqual([]);
+    expect(FakeDevice.instances.length).toBe(1);
+    expect(document.querySelector('.toast')).toBeNull();
+
+    act(() => { openPost(); });
+    await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
+  });
+});
 
 describe('App — reset vs a power-dial run (I1: Stop must not leave a stale "active" behind)', () => {
   it('after Stop, the last "active" poll no longer holds the reset back', async () => {

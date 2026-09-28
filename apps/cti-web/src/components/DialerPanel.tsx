@@ -491,6 +491,13 @@ export interface DialerPanelProps {
    * AFTER `start` succeeded — see startDialingSequence.
    */
   onJoin: () => Promise<boolean>;
+  /**
+   * Brackets a whole Start dialing sequence (prepare → start → join): true
+   * before `onPrepare`, false once it settles, however it ends. App counts a
+   * start in flight as busy, so a Reset CTI never lands between a `start` the
+   * server accepted and the leg joining (spec 2026-09-28, C1(c)).
+   */
+  onStartingChange?: (starting: boolean) => void;
   /** Called when the rep stops the run from the Stop control. */
   onStop: () => void;
   /**
@@ -795,8 +802,8 @@ export function ConfirmBlock({
 
 export function DialerPanel(props: DialerPanelProps): JSX.Element {
   const {
-    sessionId, onScreenPop, onStartFromListView, onPrepare, onJoin, onStop, onComplete, onDismiss, holdMusic, lineAudio,
-    onRunSnapshot, callback, needsRejoin, onRejoin, popLedger: sharedPopLedger,
+    sessionId, onScreenPop, onStartFromListView, onPrepare, onJoin, onStartingChange, onStop, onComplete, onDismiss, holdMusic,
+    lineAudio, onRunSnapshot, callback, needsRejoin, onRejoin, popLedger: sharedPopLedger,
   } = props;
   const [view, setView] = useState<DialerSessionView | null>(null);
   // The poll owns `error` (a failed refresh); control actions own
@@ -1022,6 +1029,8 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // superseded join sends nothing and shows nothing — the rep chose to leave.
   const handleStartDialing = useCallback(() => {
     if (!sessionId) return;
+    // Synchronously, before the first await: from the click on, a reset waits.
+    onStartingChange?.(true);
     void (async () => {
       setControlBusy(true);
       setControlError(null);
@@ -1038,9 +1047,10 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
         setConflictSessionId(conflictingSessionId(e));
       } finally {
         setControlBusy(false);
+        onStartingChange?.(false);
       }
     })();
-  }, [onPrepare, onJoin, sessionId]);
+  }, [onPrepare, onJoin, onStartingChange, sessionId]);
 
   // The 409 named the rep's other active run (another tab, or a run wedged
   // by a closed tab). Stop THAT run, then the rep presses Start dialing again.

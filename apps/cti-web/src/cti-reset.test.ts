@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { StorageLike } from './audio-devices';
 import {
   clearFlag,
+  DeviceRefusedError,
   isBusyForReset,
   performReset,
   readFlag,
   RESET_NOTICE_KEY,
   RESET_WIPE_KEYS,
+  RESETTING_TEXT,
   SOUND_CHECK_DUE_KEY,
   storedSessionToken,
   wipeForReset,
@@ -26,7 +28,7 @@ const session = (token: string): string => JSON.stringify({ token, userId: 'u1',
 const IDLE: ResetBusySnapshot = {
   phase: 'idle', pendingDisposition: false, placing: false, takingCallback: false, incoming: false,
   connection: null, dialerConn: false, dialerLive: false, dialerSessionId: null, dialerRunStatus: null,
-  callbackWaiting: false, parkedRunId: null,
+  runStarting: false, callbackWaiting: false, parkedRunId: null,
 };
 
 describe('isBusyForReset — a reset never lands on any of these (spec decision 5, controller ruling R1)', () => {
@@ -46,6 +48,9 @@ describe('isBusyForReset — a reset never lands on any of these (spec decision 
     ['a connection that cannot say its status', { connection: {} }],
     ['the power-dial leg', { dialerConn: true }],
     ['a live run', { dialerLive: true }],
+    // C1(c): Start dialing's prepare → start → join. The server may already be
+    // ringing a prospect for a leg that has not joined yet.
+    ['a run start in flight (prepare → start → join)', { runStarting: true }],
     ['a dialer run whose latest snapshot status is active', { dialerSessionId: 'sess-1', dialerRunStatus: 'active' }],
     ['a dialer run whose latest snapshot status is paused', { dialerSessionId: 'sess-1', dialerRunStatus: 'paused' }],
     ['a callback waiting on the banner', { callbackWaiting: true }],
@@ -154,9 +159,12 @@ describe('performReset — the order is the contract (spec decision 4)', () => {
   function recorder(over: Partial<PerformResetDeps> = {}) {
     const events: string[] = [];
     const deps: PerformResetDeps = {
+      beginResetting: () => { events.push('latch'); },
       teardownDevice: () => { events.push('teardown'); },
       sessionIsOurs: () => true,
       postResetComplete: async () => { events.push('post reset-complete'); },
+      isBusy: () => { events.push('re-check'); return false; },
+      whenIdle: async () => { events.push('idle again'); },
       broadcastReset: () => { events.push('broadcast'); },
       wipe: () => { events.push('wipe + flags'); return true; },
       reload: () => { events.push('reload'); },
@@ -166,35 +174,73 @@ describe('performReset — the order is the contract (spec decision 4)', () => {
     return { events, deps };
   }
 
-  it('the tab that starts it: teardown → POST → broadcast → wipe + flags → reload', async () => {
+  it('the tab that starts it: latch → teardown → POST → re-check → broadcast → wipe + flags → reload', async () => {
     const r = recorder();
     await performReset(r.deps, true);
-    expect(r.events).toEqual(['teardown', 'post reset-complete', 'broadcast', 'wipe + flags', 'reload']);
+    expect(r.events).toEqual(['latch', 'teardown', 'post reset-complete', 're-check', 'broadcast', 'wipe + flags', 'reload']);
+  });
+
+  // C1(a): the latch is set BEFORE the Device goes down, synchronously — so
+  // nothing (the online handler, a leadership change, place()) can build a new
+  // Device in the up-to-5 s the POST is in flight.
+  it('the latch and the teardown happen synchronously, before the first await', () => {
+    const r = recorder();
+    r.deps.postResetComplete = () => { r.events.push('post reset-complete'); return new Promise<void>(() => {}); };
+    void performReset(r.deps, true);
+    expect(r.events).toEqual(['latch', 'teardown', 'post reset-complete']);
+  });
+
+  // C1(d): the tab was idle when the reset began, but the POST takes up to 5 s.
+  // If it picked something up meanwhile, nothing is broadcast, wiped or
+  // reloaded until it is idle again.
+  it('busy again after the POST: waits until idle, THEN broadcast → wipe + flags → reload', async () => {
+    let idle: () => void = () => {};
+    const r = recorder({
+      isBusy: () => { r.events.push('re-check (busy)'); return true; },
+      whenIdle: () => new Promise<void>((resolve) => { idle = () => { r.events.push('idle again'); resolve(); }; }),
+    });
+    const done = performReset(r.deps, true);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(r.events).toEqual(['latch', 'teardown', 'post reset-complete', 're-check (busy)']);
+    idle();
+    await done;
+    expect(r.events).toEqual(['latch', 'teardown', 'post reset-complete', 're-check (busy)', 'idle again', 'broadcast', 'wipe + flags', 'reload']);
   });
 
   it('a failed POST does not stop it — the next sign-in ends the reset anyway', async () => {
     const r = recorder();
     r.deps.postResetComplete = async () => { r.events.push('post reset-complete'); throw new Error('API 401'); };
     await performReset(r.deps, true);
-    expect(r.events).toEqual(['teardown', 'post reset-complete', 'warn', 'broadcast', 'wipe + flags', 'reload']);
+    expect(r.events).toEqual(['latch', 'teardown', 'post reset-complete', 'warn', 're-check', 'broadcast', 'wipe + flags', 'reload']);
   });
 
   it('a broadcast that throws (channel closed) still wipes and reloads', async () => {
     const r = recorder();
     r.deps.broadcastReset = () => { r.events.push('broadcast'); throw new Error('InvalidStateError'); };
     await performReset(r.deps, true);
-    expect(r.events).toEqual(['teardown', 'post reset-complete', 'broadcast', 'warn', 'wipe + flags', 'reload']);
+    expect(r.events).toEqual(['latch', 'teardown', 'post reset-complete', 're-check', 'broadcast', 'warn', 'wipe + flags', 'reload']);
   });
 
-  it('a peer finishing: no POST, no broadcast', async () => {
+  it('a peer finishing: latch and teardown, no POST, no broadcast', async () => {
     const r = recorder();
     await performReset(r.deps, false);
-    expect(r.events).toEqual(['teardown', 'wipe + flags', 'reload']);
+    expect(r.events).toEqual(['latch', 'teardown', 'wipe + flags', 'reload']);
   });
 
   it('a stale tab (storage no longer holds its session) neither POSTs nor broadcasts — it can never reset a newer session', async () => {
     const r = recorder({ sessionIsOurs: () => false });
     await performReset(r.deps, true);
-    expect(r.events).toEqual(['teardown', 'wipe + flags', 'reload']);
+    expect(r.events).toEqual(['latch', 'teardown', 'wipe + flags', 'reload']);
+  });
+});
+
+describe('DeviceRefusedError — a quiet refusal, never a toast', () => {
+  it('while resetting it says so in the one quiet line; torn down mid-build it says to try again', () => {
+    const resetting = new DeviceRefusedError('resetting');
+    expect(resetting).toBeInstanceOf(Error);
+    expect(resetting.reason).toBe('resetting');
+    expect(resetting.message).toBe(RESETTING_TEXT);
+    expect(RESETTING_TEXT).toBe('Resetting your phone…');
+    expect(new DeviceRefusedError('superseded').message).toMatch(/try again/i);
   });
 });
