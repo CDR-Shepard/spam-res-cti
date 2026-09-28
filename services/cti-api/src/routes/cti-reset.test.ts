@@ -10,12 +10,16 @@
  *   - the revoke is single-session, never every session, because the iPhone
  *     app shares the sessions table;
  *   - the audit lines;
- *   - the poll's own rate-limit bucket.
+ *   - the poll's own rate-limit bucket;
+ *   - R2 (controller ruling): reset-signal self-heals a session that already
+ *     reset but whose reset-complete POST never landed.
  */
 import { Writable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 
 const state = vi.hoisted(() => ({
   detail: null as null | {
@@ -293,5 +297,55 @@ describe('the poll has its own rate-limit bucket', () => {
     expect((await poll('tok-1')).statusCode).toBe(429); // its own cap, per token
     expect((await poll('tok-2')).statusCode).toBe(200); // another rep behind the same IP is unaffected
     await limited.close();
+  });
+});
+
+/**
+ * Controller ruling R2 (adds to the brief): GET /auth/reset-signal also
+ * self-heals a session whose reset-complete POST never landed. A rep who
+ * actually reset proves it by holding a session CREATED AFTER the request
+ * (isCtiResetDue is false for it) — that alone can only happen because they
+ * signed in again post-reset. If cti_reset_completed_at never caught up
+ * (the POST failed, dropped, whatever), the Team panel would show "pending"
+ * forever, so the poll stamps it itself with a single guarded UPDATE:
+ *   - guarded so a session that is DUE never stamps (that would hide a
+ *     reset that hasn't happened yet);
+ *   - guarded in SQL so it is a true no-op once completed_at already covers
+ *     the request (the ordinary case after a clean reset-complete);
+ *   - never even attempted when nothing was ever requested — the ordinary
+ *     poll for the overwhelming majority of sessions.
+ */
+describe('GET /auth/reset-signal — self-heals a session that already reset (R2)', () => {
+  it('(a) outstanding + fresh session: stamps completed_at with a single guarded UPDATE, pinned', async () => {
+    state.detail = staleRequest();
+    const res = await signal();
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ resetDue: false });
+    expect(state.updates).toHaveLength(1);
+    const u = state.updates[0]!;
+    expect(u.table).toBe(schema.users);
+    expect(Object.keys(u.set)).toEqual(['ctiResetCompletedAt']);
+    expect(renderPredicate(u.set.ctiResetCompletedAt)).toBe('now()');
+    const { sql, params } = new PgDialect().sqlToQuery(u.where as SQL);
+    expect(sql).toBe(
+      '("users"."id" = $1 and "users"."cti_reset_requested_at" > coalesce("users"."cti_reset_completed_at", \'epoch\'))',
+    );
+    expect(params).toEqual(['u1']);
+  });
+
+  it('(b) outstanding + due session: the session is due, so nothing is stamped', async () => {
+    state.detail = dueDetail();
+    const res = await signal();
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ resetDue: true });
+    expect(state.updates).toEqual([]);
+  });
+
+  it('(c) nothing outstanding — nobody ever asked: no UPDATE is even issued', async () => {
+    state.detail = { ...staleRequest(), ctiResetRequestedAt: null };
+    const res = await signal();
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ resetDue: false });
+    expect(state.updates).toEqual([]);
   });
 });

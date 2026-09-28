@@ -53,8 +53,34 @@ export async function registerCtiResetRoutes(app: FastifyInstance): Promise<void
     async (req, reply) => {
       const detail = await resolveSessionDetail(req.headers.authorization);
       if (!detail) return reply.code(401).send({ error: 'Unauthorized' });
+      const resetDue = isCtiResetDue(detail.ctiResetRequestedAt, detail.sessionCreatedAt);
+      /**
+       * R2 (controller ruling): self-heal a session that actually reset but
+       * whose POST /auth/reset-complete never landed (e.g. it failed). Only
+       * a session created AFTER the request could exist at all — that is
+       * exactly "not due" — so pair that with "a reset is outstanding"
+       * (requested_at newer than completed_at) and stamp completed_at here
+       * too, so the Team panel never shows "pending" forever for a rep who
+       * already signed back in. A single guarded UPDATE: the SQL WHERE is
+       * what makes it a true no-op once completed_at already covers the
+       * request (the ordinary case right after a clean reset-complete),
+       * and it is never even attempted for the vastly common case of a
+       * user who was never reset — this branch only runs when there IS an
+       * outstanding request AND this session is fresh.
+       */
+      if (!resetDue && detail.ctiResetRequestedAt !== null) {
+        await getDb()
+          .update(schema.users)
+          .set({ ctiResetCompletedAt: sql`now()` })
+          .where(
+            and(
+              eq(schema.users.id, detail.user.userId),
+              sql`${schema.users.ctiResetRequestedAt} > coalesce(${schema.users.ctiResetCompletedAt}, 'epoch')`,
+            ),
+          );
+      }
       reply.header('cache-control', 'no-store');
-      return { resetDue: isCtiResetDue(detail.ctiResetRequestedAt, detail.sessionCreatedAt) };
+      return { resetDue };
     },
   );
 
