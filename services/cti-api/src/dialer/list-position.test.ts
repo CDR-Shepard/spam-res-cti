@@ -422,6 +422,11 @@ describe('listStartIndex — which index of the FRESH list the new run rotates a
     expect(listStartIndex(['x', 'y', 'z', 'w'], start({ position: 1, key: null, earlier: [{ position: 0, key: 'a' }] }))).toBe(1);
   });
 
+  it('nothing present, one unknown slot left in front → start after fresh index 0, not the top', () => {
+    // Anchor at 2 and its trail at 1 are both gone; slot 0 was never proved gone, so it is presumed still there.
+    expect(listStartIndex(['a', 'b', 'c'], start({ position: 2, key: 'x', earlier: [{ position: 1, key: 'y' }] }))).toBe(0);
+  });
+
   it('nothing present, no earlier records → the index, less the anchor\'s own slot (it has left too)', () => {
     // Old list …, p9, p10(anchor), p11 …; p10 is gone, so p11 now sits at 10.
     expect(listStartIndex(Array.from({ length: 20 }, (_, i) => `x${i}`), start({ position: 10, key: 'p10' }))).toBe(9);
