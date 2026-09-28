@@ -391,7 +391,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       // `runPosition` (review M1): the in-flight item's 1-based rank among
       // this run's dialable rows — null for an unlimited run, where the
       // figure above already means the same thing it always has.
-      currentItem: current ? { ...current, runPosition: runPosition(items, current.ordinal, session.runSize) } : null,
+      currentItem: current ? { ...current, runPosition: runPosition(items, current, session.runSize) } : null,
       waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
       rollovers: rolloverSummary(jobs),
       // Two reps, one list (spec §4): null for a run not created from a list

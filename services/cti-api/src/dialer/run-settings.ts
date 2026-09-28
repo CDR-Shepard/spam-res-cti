@@ -126,18 +126,36 @@ export function settledAtBuild(
 }
 
 /**
- * The 1-based rank of `currentOrdinal` among this run's DIALABLE rows —
- * everyone with `ordinal <= currentOrdinal` who did NOT settle at build
- * (`settledAtBuild`). Null for an unlimited run (`runSize` null): "record X
- * of N" only makes sense once N is capped — an unlimited run's total already
- * counts every row, settled or not (routes/dialer.ts `firstPassTotal`,
- * list-position.ts `listContextFor`), unchanged by this fix.
+ * The 1-based rank of `current` among this run's DIALABLE PEOPLE (review R1)
+ * — the count of DISTINCT ordinals `<= current.ordinal` among attempt-1,
+ * non-redial rows that did NOT settle at build (`settledAtBuild`). Ranking by
+ * ordinal, not by row, matters because two rows can share one: a
+ * take-callback cancel and its requeue copy (session-store.ts
+ * `excludeCallbackCancels` documents the same pairing) are the SAME person,
+ * and must count once, not twice. A redial copy carries `redialOf` and is
+ * excluded from the counted set itself, but its ORIGINAL (still `redialOf:
+ * null`) anchors that ordinal — so the copy, when current, naturally ranks
+ * the same as the person it is redialing.
+ *
+ * Null for an unlimited run (`runSize` null): "record X of N" only makes
+ * sense once N is capped — an unlimited run's total already counts every
+ * row, settled or not (routes/dialer.ts `firstPassTotal`, list-position.ts
+ * `listContextFor`), unaffected by this function. Also null when `current`
+ * is itself an attempt-2 row: the end-of-run retry pass is a second lap over
+ * people already counted in the first, not a new "record" — ranking it by
+ * ordinal (always past every first-pass ordinal) used to read past runSize
+ * entirely (a 1-person run's retry pinned "record 2 of 1").
  */
 export function runPosition(
   items: ReadonlyArray<Pick<DialerItem, 'ordinal' | 'status' | 'outcome' | 'attempt' | 'redialOf'>>,
-  currentOrdinal: number,
+  current: Pick<DialerItem, 'ordinal' | 'attempt'>,
   runSize: number | null,
 ): number | null {
-  if (runSize === null) return null;
-  return items.filter((i) => i.ordinal <= currentOrdinal && !settledAtBuild(i)).length;
+  if (runSize === null || current.attempt === 2) return null;
+  const ordinals = new Set(
+    items
+      .filter((i) => i.attempt === 1 && i.redialOf == null && i.ordinal <= current.ordinal && !settledAtBuild(i))
+      .map((i) => i.ordinal),
+  );
+  return ordinals.size;
 }

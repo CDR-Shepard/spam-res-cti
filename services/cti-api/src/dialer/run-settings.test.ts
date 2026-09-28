@@ -161,12 +161,25 @@ describe('settledAtBuild', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Review R1 (ruling: fix it): runPosition ranked ROWS, not PEOPLE. A
+// take-callback cancel and its requeue copy SHARE an ordinal
+// (session-store.ts excludeCallbackCancels documents the same pairing) —
+// counting both inflated every position after them. An appended attempt-2
+// retry pushed the count past runSize entirely: a 1-person run whose miss
+// requeued as an attempt-2 row pinned "record 2 of 1", an impossible value.
+// Fixed by ranking DISTINCT ordinals among attempt-1, non-redial,
+// non-build-settled rows, and by returning null outright for a retry — a
+// retry lap has no "record X of N", it is a second pass over people already
+// counted in the first.
+// ---------------------------------------------------------------------------
 describe('runPosition', () => {
   const row = (ordinal: number, over: Partial<Pick<DialerItem, 'status' | 'outcome' | 'attempt' | 'redialOf'>> = {}) =>
     ({ ordinal, status: 'pending', outcome: null, attempt: 1, redialOf: null, ...over }) as Pick<DialerItem, 'ordinal' | 'status' | 'outcome' | 'attempt' | 'redialOf'>;
+  const current = (ordinal: number, attempt: 1 | 2 = 1) => ({ ordinal, attempt });
 
   it('null for an unlimited run — "record X of N" only makes sense once N is capped', () => {
-    expect(runPosition([row(0)], 0, null)).toBeNull();
+    expect(runPosition([row(0)], current(0), null)).toBeNull();
   });
 
   it('5 inherited (build-time) skips plus a limited "first 100" run: the 3rd pending row reads position 3 of 100', () => {
@@ -174,9 +187,9 @@ describe('runPosition', () => {
     const pendings = Array.from({ length: 100 }, (_, i) => row(5 + i));
     const items = [...skips, ...pendings];
     const runSize = 100;
-    expect(runPosition(items, 7, runSize)).toBe(3); // ordinal 5+2, the 3rd pending row
-    expect(runPosition(items, 5, runSize)).toBe(1); // the FIRST pending row — the 5 skips ahead of it don't count
-    expect(runPosition(items, 104, runSize)).toBe(100); // the LAST pending row
+    expect(runPosition(items, current(7), runSize)).toBe(3); // ordinal 5+2, the 3rd pending row
+    expect(runPosition(items, current(5), runSize)).toBe(1); // the FIRST pending row — the 5 skips ahead of it don't count
+    expect(runPosition(items, current(104), runSize)).toBe(100); // the LAST pending row
   });
 
   it('a RUNTIME skip (the cadence gate) still counts toward the position — only BUILD-time settles are excluded', () => {
@@ -185,19 +198,40 @@ describe('runPosition', () => {
       row(1, { status: 'skipped', outcome: 'cooldown' }), // runtime — counted
       row(2, { status: 'dialing' }),
     ];
-    expect(runPosition(items, 2, 2)).toBe(2);
-  });
-
-  it('an appended attempt-2 retry counts toward the position — it never settled at build', () => {
-    const items = [
-      row(0, { status: 'no_connect', outcome: 'voicemail' }),
-      row(1, { status: 'dialing', attempt: 2 }), // the retry, appended past the build range
-    ];
-    expect(runPosition(items, 1, 1)).toBe(2);
+    expect(runPosition(items, current(2), 2)).toBe(2);
   });
 
   it('rows past the current ordinal never count, even if they would otherwise qualify', () => {
     const items = [row(0), row(1), row(2)];
-    expect(runPosition(items, 1, 3)).toBe(2);
+    expect(runPosition(items, current(1), 3)).toBe(2);
+  });
+
+  it('an in-flight attempt-2 retry gives null, never a position — a retry lap is not "record X of N" (was pinned "2 of 1")', () => {
+    const items = [
+      row(0, { status: 'no_connect', outcome: 'voicemail' }),
+      row(1, { status: 'dialing', attempt: 2 }), // the retry, appended past the build range
+    ];
+    expect(runPosition(items, current(1, 2), 1)).toBeNull();
+  });
+
+  it("a take-callback cancel plus its requeue copy (SAME ordinal) don't inflate the positions after them", () => {
+    const items = [
+      row(0),
+      row(1, { status: 'skipped', outcome: 'canceled' }), // the cancelled dial
+      row(1, { status: 'pending' }), // its requeue copy — same ordinal as the cancel
+      row(2, { status: 'dialing' }),
+    ];
+    // Three distinct people (ordinals 0, 1, 2) — the pair at ordinal 1 counts
+    // once, so ordinal 2 still reads position 3, not 4.
+    expect(runPosition(items, current(2), 3)).toBe(3);
+  });
+
+  it('a redial copy ranks the SAME as its original — same ordinal, one position', () => {
+    const items = [
+      row(0),
+      row(1, { status: 'done' }), // the original, now done
+      row(1, { status: 'dialing', redialOf: 'i-original' }), // the redial copy — same ordinal, excluded from the base set itself
+    ];
+    expect(runPosition(items, current(1), 2)).toBe(2);
   });
 });
