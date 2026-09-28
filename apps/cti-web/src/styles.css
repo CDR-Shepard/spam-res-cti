@@ -1248,3 +1248,23 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 /* Admin: follow-up rollover health */
 .admin-rollovers { font-size: 12px; color: var(--text-muted); }
 .admin-rollovers ul { margin: 6px 0 0 16px; color: var(--bad); }
+
+/* Sound check (spec 2026-09-28): a full-screen overlay over the softphone.
+   Under the toast (z-index 100) so errors still show. */
+.sound-check {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 16px;
+  overflow-y: auto;
+  background: var(--bg-0);
+  color: var(--text);
+}
+.sound-check-card { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 12px; }
+.sound-check-card h2 { font-size: 17px; font-weight: 700; }
+.sound-check-ok { color: var(--good); font-weight: 600; font-size: 13px; }
+.sound-check-meter { height: 10px; border-radius: 5px; background: var(--surface-2); overflow: hidden; }
+.sound-check-meter-fill { height: 100%; background: var(--good); transition: width 80ms linear; }

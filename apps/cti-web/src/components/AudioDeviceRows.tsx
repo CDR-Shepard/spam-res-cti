@@ -22,6 +22,9 @@ type Toast = (t: { text: string; type: 'info' | 'error' | 'success' }) => void;
 interface Props {
   port: AudioDevicePort;
   onToast: Toast;
+  /** Told the saved choices after each pick, and again if the Device refused
+   *  it and the pick was put back (the sound check re-opens its meter on it). */
+  onChange?: (prefs: AudioPrefs) => void;
 }
 
 const MISSING_NOTE = 'Saved device not connected — using system default';
@@ -73,7 +76,7 @@ const capitalize = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1)
  * device than the headset he was wearing. Reps now pick both here; the choice
  * is saved in this browser and applied to the live Twilio Device.
  */
-export function AudioDeviceRows({ port, onToast }: Props): JSX.Element {
+export function AudioDeviceRows({ port, onToast, onChange }: Props): JSX.Element {
   const [devices, setDevices] = useState<MediaDeviceLike[] | null>(null);
   const [prefs, setPrefs] = useState<AudioPrefs>(() => loadAudioPrefs());
   const [busy, setBusy] = useState(false);
@@ -115,6 +118,7 @@ export function AudioDeviceRows({ port, onToast }: Props): JSX.Element {
     // keepSavedAudioPrefs) re-applies the new choice, not the old one.
     setPrefs(next);
     const remembered = saveAudioPrefs(next);
+    onChange?.(next);
     const label = options.find((o) => o.value === value)?.label ?? 'System default';
     setBusy(true);
     try {
@@ -128,11 +132,12 @@ export function AudioDeviceRows({ port, onToast }: Props): JSX.Element {
       // select and the saved choice back so neither claims otherwise.
       setPrefs(previous);
       saveAudioPrefs(previous);
+      onChange?.(previous);
       onToast({ text: `Couldn't switch to that ${NOUN[kind]}: ${errorText(e)}`, type: 'error' });
     } finally {
       setBusy(false);
     }
-  }, [prefs, port, onToast]);
+  }, [prefs, port, onToast, onChange]);
 
   const playTest = useCallback(async () => {
     try {
