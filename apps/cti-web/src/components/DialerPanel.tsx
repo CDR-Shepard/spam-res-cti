@@ -287,21 +287,36 @@ export function itemStatusLabel(item: Pick<DialerCurrentItem, 'status' | 'outcom
 }
 
 /**
+ * Pure — does a refused Start prove nothing was ever flipped active, so
+ * there is nothing to `stop`? (Re-review safety finding: this used to treat
+ * EVERY 400 as safe, but startSession flips the run active BEFORE
+ * advanceSession originates the first call — if Twilio's calls.create then
+ * fails (RestException 21211/21212/21210/21215), Fastify's default handler
+ * also reports that as a 400. Skipping stop there left an active run with no
+ * rep leg and nothing watching it.)
+ *
+ * A 409 always qualifies: it proves the session is still `ready` (the rep's
+ * other run holds the one-active-run index). A 400 qualifies ONLY when it
+ * names a `field` — Task 1's exact shape for a refused run-settings value
+ * (`{ error: 'Invalid <field>', field }`), validated and rejected BEFORE the
+ * claim transaction. Any other 400 (or any other status) must still stop.
+ */
+export function startRefusalNeedsNoStop(e: unknown): boolean {
+  if (!(e instanceof ApiError)) return false;
+  if (e.status === 409) return true;
+  if (e.status !== 400) return false;
+  return typeof (e.data as { field?: unknown } | null)?.field === 'string';
+}
+
+/**
  * Pure — the Start-dialing sequence, in this order and no other:
  *  1. `prepare` — the softphone readies its Device and refuses if a call is
  *     up (fails fast, before anything rings);
  *  2. `control('start')` — the engine flips the run active and originates
- *     the first call. A 409 proves the session is still `ready` (the rep's
- *     other run holds the one-active-run index) — nothing was flipped, so
- *     it's left for the confirm block, which offers to stop the other run. A
- *     400 (review fix, Minor 3) is refused validation — the server checks the
- *     run settings before the claim transaction, so nothing was ever flipped
- *     active — same treatment as the 409: no stop. Anything else proves
- *     nothing: the server may have flipped this session `active` before
- *     failing (a first originate that threw), leaving no conference leg
- *     joined — that would bridge the next human into an empty room, so a
- *     failure past those two known-safe cases sends a best-effort `stop`
- *     before rethrowing;
+ *     the first call. See `startRefusalNeedsNoStop` for which refusals prove
+ *     nothing was ever flipped (no stop) versus which must still stop —
+ *     leaving an active run with no rep leg would bridge the next human into
+ *     an empty room;
  *  3. `join` — the softphone joins the run's conference. Ring + AMD take
  *     seconds; the join takes about one, so the first human still finds the
  *     rep in the room.
@@ -318,18 +333,7 @@ export async function startDialingSequence(
   try {
     await control('start');
   } catch (e) {
-    // A 409 proves the session is still `ready` (the rep's other run holds
-    // the one-active-run index) — leave it for the confirm block, which
-    // offers to stop the other run. A 400 (review fix, Minor 3) proves the
-    // same thing from the other direction: refused validation happens BEFORE
-    // the claim transaction, so the session was never flipped active either —
-    // there is nothing to stop, and the server's own message (surfaced by the
-    // caller's controlErrorMessage) is what the rep needs to see. Anything
-    // else proves nothing: the server may have flipped this session active
-    // before failing (a first originate that threw), and an active run with
-    // no rep leg would bridge every human into an empty room. Stop it, best
-    // effort, then surface the error.
-    if (!(e instanceof ApiError && (e.status === 409 || e.status === 400))) {
+    if (!startRefusalNeedsNoStop(e)) {
       try { await control('stop'); } catch { /* the poll shows whatever state the run is in */ }
     }
     throw e;

@@ -26,6 +26,7 @@ import {
   missLine,
   itemStatusLabel,
   startDialingSequence,
+  startRefusalNeedsNoStop,
   ConfirmBlock,
   conflictingSessionId,
   CurrentRecord,
@@ -697,17 +698,61 @@ describe('startDialingSequence — prepare, then start, then join the conference
     expect(control.mock.calls.map(([a]) => a)).toEqual(['start']);
     expect(join).not.toHaveBeenCalled();
   });
-  // Review fix (Minor 3, spec 2026-09-28): a 400 from start is refused
-  // validation (an out-of-range maxRecords, say) — it happens BEFORE the
-  // claim transaction, so nothing was ever flipped active. Treat it like the
-  // 409: no stop, never joins, and the server's own message surfaces via
-  // controlErrorMessage in the caller.
-  it('a 400 from start sends no stop, like a 409 — it happens before the claim, so there is nothing to stop', async () => {
+  // Review fix (Minor 3, spec 2026-09-28), NARROWED by a re-review safety
+  // finding: a 400 from start is refused run-settings validation ONLY when
+  // it names a `field` — that is Task 1's exact shape for the settings
+  // refusal (`{ error: 'Invalid <field>', field }`), validated and rejected
+  // BEFORE the claim transaction, so nothing was ever flipped active. Any
+  // OTHER 400 — e.g. Twilio's calls.create rejecting the originate (21211,
+  // 21212, 21210, 21215), which Fastify's default handler also reports as a
+  // 400 — happens AFTER startSession has already flipped the run active, so
+  // it must still stop like any other post-claim failure. Skipping stop for
+  // every 400 (the previous, wider fix) left an active run with no rep leg
+  // and nothing watching it.
+  it('a 400 that names a field (the run-settings refusal) sends no stop, like a 409', async () => {
     const join = vi.fn(async () => true);
-    const control = vi.fn(async (_action: DialerControlAction) => { throw new ApiError(400, { error: 'Enter a whole number from 1 to 500, or leave it blank for all.' }); });
+    const control = vi.fn(async (_action: DialerControlAction) => { throw new ApiError(400, { error: 'Invalid maxRecords', field: 'maxRecords' }); });
     await expect(startDialingSequence(async () => {}, control, join)).rejects.toBeInstanceOf(ApiError);
     expect(control.mock.calls.map(([a]) => a)).toEqual(['start']);
     expect(join).not.toHaveBeenCalled();
+  });
+  it('a 400 WITHOUT a field — e.g. a Twilio originate failure surfacing after the claim — still sends stop', async () => {
+    const join = vi.fn(async () => true);
+    const control = vi.fn(async (_action: DialerControlAction) => { throw new ApiError(400, { statusCode: 400, code: '21212' }); });
+    await expect(startDialingSequence(async () => {}, control, join)).rejects.toBeInstanceOf(ApiError);
+    expect(control.mock.calls.map(([a]) => a)).toEqual(['start', 'stop']);
+    expect(join).not.toHaveBeenCalled();
+  });
+  it('a 400 with a non-string field also still sends stop (belt and suspenders)', async () => {
+    const join = vi.fn(async () => true);
+    const control = vi.fn(async (_action: DialerControlAction) => { throw new ApiError(400, { error: 'x', field: 123 }); });
+    await expect(startDialingSequence(async () => {}, control, join)).rejects.toBeInstanceOf(ApiError);
+    expect(control.mock.calls.map(([a]) => a)).toEqual(['start', 'stop']);
+    expect(join).not.toHaveBeenCalled();
+  });
+});
+
+describe('startRefusalNeedsNoStop — direct boundary tests (re-review safety fix)', () => {
+  it('a 409 always qualifies', () => {
+    expect(startRefusalNeedsNoStop(new ApiError(409, { error: 'x' }))).toBe(true);
+  });
+  it('a 400 with a string field qualifies', () => {
+    expect(startRefusalNeedsNoStop(new ApiError(400, { error: 'Invalid maxRecords', field: 'maxRecords' }))).toBe(true);
+  });
+  it('a 400 with no field does not qualify', () => {
+    expect(startRefusalNeedsNoStop(new ApiError(400, { statusCode: 400, code: '21212' }))).toBe(false);
+  });
+  it('a 400 with a non-string field does not qualify', () => {
+    expect(startRefusalNeedsNoStop(new ApiError(400, { error: 'x', field: 123 }))).toBe(false);
+  });
+  it('a 400 with no body at all does not qualify', () => {
+    expect(startRefusalNeedsNoStop(new ApiError(400, null))).toBe(false);
+  });
+  it('any other status does not qualify', () => {
+    expect(startRefusalNeedsNoStop(new ApiError(500, { error: 'x', field: 'maxRecords' }))).toBe(false);
+  });
+  it('a non-ApiError does not qualify', () => {
+    expect(startRefusalNeedsNoStop(new Error('network'))).toBe(false);
   });
 });
 

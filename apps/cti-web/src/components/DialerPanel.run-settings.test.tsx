@@ -163,13 +163,18 @@ describe('Ready to dial — run settings', () => {
     expect(saved).not.toHaveBeenCalled();
   });
 
-  // Review fix (Minor 3, spec 2026-09-28): a 400 happens before the claim, so
-  // there is nothing to stop — the Ready screen stays up with the server's
-  // own message, exactly like a 409.
-  it('a refused Start (400) shows the server\'s message and leaves the Ready screen up', async () => {
+  // Review fix (Minor 3, spec 2026-09-28), narrowed by a re-review safety
+  // finding: a 400 that names a `field` (Task 1's exact shape for a refused
+  // run-settings value) happens before the claim, so there is nothing to
+  // stop — the Ready screen stays up with the server's own message, exactly
+  // like a 409. A 400 WITHOUT a field is covered at the pure-function level
+  // (DialerPanel.test.tsx's startRefusalNeedsNoStop / startDialingSequence
+  // tests) — it must still stop, since it can arrive AFTER the claim (a
+  // Twilio originate failure).
+  it('a refused Start (400 naming a field) shows the server\'s message and leaves the Ready screen up', async () => {
     vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(READY);
     vi.spyOn(dialerApi, 'startDialerRun').mockRejectedValue(
-      new ApiError(400, { error: 'Enter a whole number from 1 to 500, or leave it blank for all.' }),
+      new ApiError(400, { error: 'Enter a whole number from 1 to 500, or leave it blank for all.', field: 'maxRecords' }),
     );
     const saved = vi.fn();
     mount({ onRunDefaultsSaved: saved });
