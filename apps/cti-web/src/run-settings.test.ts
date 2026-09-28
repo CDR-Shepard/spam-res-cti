@@ -35,20 +35,29 @@ describe('run settings on Ready to dial (spec 2026-09-28)', () => {
     expect(digitsOnly('abc')).toBe('');
   });
 
-  it('parseHowMany: blank is All; 1 to the list size is a number; anything else is refused', () => {
-    expect(parseHowMany('', 200)).toEqual({ ok: true, maxRecords: null });
-    expect(parseHowMany('  ', 200)).toEqual({ ok: true, maxRecords: null });
-    expect(parseHowMany('1', 200)).toEqual({ ok: true, maxRecords: 1 });
-    expect(parseHowMany('200', 200)).toEqual({ ok: true, maxRecords: 200 });
-    for (const bad of ['0', '201', '1.5', '-1', 'abc', '99999999999999999999']) {
-      expect(parseHowMany(bad, 200)).toEqual({ ok: false, error: 'Enter a whole number from 1 to 200, or leave it blank for all.' });
+  // Review fix (Important 1): the box's bound is the SERVER's maximum
+  // (MAX_RUN_RECORDS), never the current list size — a remembered or typed
+  // number bigger than today's list is fine; the list itself is what actually
+  // caps what dials (see confirmLine's "— the whole list" copy).
+  it('parseHowMany: blank is All; 1 to the server maximum is a number; anything else is refused', () => {
+    expect(parseHowMany('')).toEqual({ ok: true, maxRecords: null });
+    expect(parseHowMany('  ')).toEqual({ ok: true, maxRecords: null });
+    expect(parseHowMany('1')).toEqual({ ok: true, maxRecords: 1 });
+    expect(parseHowMany('500')).toEqual({ ok: true, maxRecords: 500 });
+    for (const bad of ['0', '501', '1.5', '-1', 'abc', '99999999999999999999']) {
+      expect(parseHowMany(bad)).toEqual({ ok: false, error: 'Enter a whole number from 1 to 500, or leave it blank for all.' });
     }
   });
 
+  it('accepts a number above the current list size — the list caps what dials, not the box (review fix)', () => {
+    // The exact repro: a saved 100 on what is today a 60-person list.
+    expect(parseHowMany('100')).toEqual({ ok: true, maxRecords: 100 });
+  });
+
   it('runSettingsFor: the Start body, or null while the box is invalid', () => {
-    expect(runSettingsFor({ passes: 2, rolloverBusinessDays: 1, howMany: '' }, 200)).toEqual({ passes: 2, maxRecords: null, rolloverBusinessDays: 1 });
-    expect(runSettingsFor({ passes: 1, rolloverBusinessDays: 2, howMany: '100' }, 200)).toEqual({ passes: 1, maxRecords: 100, rolloverBusinessDays: 2 });
-    expect(runSettingsFor({ passes: 1, rolloverBusinessDays: 2, howMany: '0' }, 200)).toBeNull();
+    expect(runSettingsFor({ passes: 2, rolloverBusinessDays: 1, howMany: '' })).toEqual({ passes: 2, maxRecords: null, rolloverBusinessDays: 1 });
+    expect(runSettingsFor({ passes: 1, rolloverBusinessDays: 2, howMany: '100' })).toEqual({ passes: 1, maxRecords: 100, rolloverBusinessDays: 2 });
+    expect(runSettingsFor({ passes: 1, rolloverBusinessDays: 2, howMany: '0' })).toBeNull();
   });
 
   it('runSettingsLine reads like the spec, and is absent for an older server', () => {

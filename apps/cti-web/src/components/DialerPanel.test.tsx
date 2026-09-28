@@ -755,15 +755,29 @@ describe('ConfirmBlock (SSR)', () => {
       <ConfirmBlock view={view} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} draft={{ passes: 2, rolloverBusinessDays: 1, howMany }} />,
     );
     expect(at('100')).toContain('100 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
-    expect(at('195')).toContain('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
+    // Review fix (Important 1): a limit that does NOT shrink the run (it's >=
+    // what the list can dial) reads plainly as the whole list.
+    expect(at('195')).toContain('187 will be dialed — the whole list · 9 called in the last 3 h · 4 no number · 2 blocked');
     expect(at('')).toContain('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
   });
   it('an out-of-range number holds Start dialing back', () => {
     const html = renderToStaticMarkup(
-      <ConfirmBlock view={view} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} draft={{ passes: 2, rolloverBusinessDays: 1, howMany: '203' }} />,
+      <ConfirmBlock view={view} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} draft={{ passes: 2, rolloverBusinessDays: 1, howMany: '600' }} />,
     );
-    expect(html).toContain('Enter a whole number from 1 to 202, or leave it blank for all.');
+    expect(html).toContain('Enter a whole number from 1 to 500, or leave it blank for all.');
     expect(html).toMatch(/<button class="btn primary full" disabled="">Start dialing<\/button>/);
+  });
+  it('a number above the list size no longer holds Start back (review fix, Important 1)', () => {
+    // The exact repro: a saved 100 on what is today a 60-person list — Start
+    // must stay enabled, and the line must say plainly it is the whole list.
+    const sixty: DialerSessionView = { ...view, counts: { ...view.counts, total: 60, pending: 60, unreachable: 0 }, skipBreakdown: {}, firstPassTotal: 60 };
+    const html = renderToStaticMarkup(
+      <ConfirmBlock view={sixty} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} draft={{ passes: 2, rolloverBusinessDays: 1, howMany: '100' }} />,
+    );
+    expect(html).not.toContain('Enter a whole number');
+    expect(html).toContain('60 will be dialed — the whole list');
+    expect(html).toContain('<button class="btn primary full">Start dialing</button>');
+    expect(html).not.toMatch(/<button class="btn primary full" disabled="">Start dialing<\/button>/);
   });
   it('shows the shared-list line under the breakdown line when listContext names another rep', () => {
     const html = renderToStaticMarkup(
@@ -921,8 +935,13 @@ describe('confirmLine — a run size (spec 2026-09-28)', () => {
   it('leads with the run size, never more than the list can dial', () => {
     const b = { already_worked: 9, blocked: 2 };
     expect(confirmLine(202, 4, b, 100)).toBe('100 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
-    expect(confirmLine(202, 4, b, 195)).toBe('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
+    // Review fix (Important 1): a limit >= what the list can dial has no
+    // effect — say so plainly rather than let it read as a coincidence.
+    expect(confirmLine(202, 4, b, 195)).toBe('187 will be dialed — the whole list · 9 called in the last 3 h · 4 no number · 2 blocked');
     expect(confirmLine(202, 4, b, null)).toBe('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
+  });
+  it('a limit exactly equal to what the list can dial also reads as the whole list', () => {
+    expect(confirmLine(202, 4, { already_worked: 9, blocked: 2 }, 187)).toBe('187 will be dialed — the whole list · 9 called in the last 3 h · 4 no number · 2 blocked');
   });
 });
 

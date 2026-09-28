@@ -17,7 +17,7 @@ export interface RunSettingsBlockProps {
 }
 
 export function RunSettingsBlock({ draft, listSize, busy, onChange }: RunSettingsBlockProps): JSX.Element {
-  const howMany = parseHowMany(draft.howMany, listSize);
+  const howMany = parseHowMany(draft.howMany);
   return (
     <div className="dp-run-settings-block">
       <div className="dp-setting">

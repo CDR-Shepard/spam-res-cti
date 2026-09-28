@@ -142,6 +142,12 @@ export function queueLine(firstPassTotal: number, unreachable: number, breakdown
  * Leads with the figure the rep is deciding on; zero parts omitted. A run size
  * (`maxRecords`, spec 2026-09-28) caps the lead figure at what the list can
  * actually give: asking for 195 of a list with 187 dialable reads "187".
+ *
+ * Review fix (Important 1): a remembered or typed limit that does not
+ * actually shrink the run — it is at least as big as what the list can dial —
+ * must not look like an arbitrary coincidence. Say plainly that this is the
+ * whole list, so a rep who remembers "I asked for 100" is not left wondering
+ * why only 60 are about to be dialed.
  */
 export function confirmLine(
   firstPassTotal: number,
@@ -151,7 +157,8 @@ export function confirmLine(
 ): string {
   const q = queueParts(firstPassTotal, unreachable, breakdown);
   const dialing = maxRecords === null ? q.dialing : Math.min(q.dialing, maxRecords);
-  const parts = [`${dialing} will be dialed`];
+  const wholeListSuffix = maxRecords !== null && maxRecords >= q.dialing ? ' — the whole list' : '';
+  const parts = [`${dialing} will be dialed${wholeListSuffix}`];
   if (q.cooldown > 0) parts.push(`${q.cooldown} called in the last 3 h`);
   if (q.skipOnDialer > 0) parts.push(`${q.skipOnDialer} skipped by flag`);
   if (q.unreachable > 0) parts.push(`${q.unreachable} no number`);
@@ -816,7 +823,7 @@ export function ConfirmBlock({
 }): JSX.Element {
   const contextLine = confirmContextLine(view.listContext);
   const listSize = view.firstPassTotal ?? view.counts.total;
-  const howMany = parseHowMany(draft.howMany, listSize);
+  const howMany = parseHowMany(draft.howMany);
   return (
     <div className="dialer-panel">
       <div className="section dp-picker">
@@ -1083,7 +1090,7 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
   // defaults, so App re-reads them (a refused Start saved nothing).
   const handleStartDialing = useCallback(() => {
     if (!sessionId || !view) return;
-    const settings = runSettingsFor(runDraft, view.firstPassTotal ?? view.counts.total);
+    const settings = runSettingsFor(runDraft);
     if (!settings) return; // the box holds something Start must not send — the button is disabled too
     // Synchronously, before the first await: from the click on, a reset waits.
     onStartingChange?.(true);

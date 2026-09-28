@@ -5,6 +5,7 @@
  * run's "record X of N". Pure — DialerPanel owns the state.
  */
 import {
+  MAX_RUN_RECORDS,
   toDialerRunDefaults,
   type DialerPasses,
   type DialerRunDefaults,
@@ -50,20 +51,33 @@ export function digitsOnly(raw: string): string {
 
 export type HowMany = { ok: true; maxRecords: number | null } | { ok: false; error: string };
 
-/** Blank = All; otherwise a whole number from 1 up to the list size. */
-export function parseHowMany(raw: string, listSize: number): HowMany {
+/**
+ * Blank = All; otherwise a whole number from 1 up to the SERVER's maximum
+ * (`MAX_RUN_RECORDS` — what `POST /dialer/sessions` itself caps at).
+ *
+ * Review fix (Important 1, spec 2026-09-28): this used to reject anything
+ * above the CURRENT list's size, which meant a remembered limit from a
+ * bigger list (say 100, saved against a 202-person list) blocked Start dead
+ * the next time the rep's list was smaller (60 people) — the box showed 100,
+ * Start stayed disabled, and there was no way to dial at all without first
+ * clearing the box. The list, not this box, is what actually caps how many
+ * get dialed (see confirmLine's "— the whole list" / two-line copy) — this
+ * function only needs to keep the number sane and within what the server
+ * will accept at all.
+ */
+export function parseHowMany(raw: string): HowMany {
   const text = raw.trim();
   if (text === '') return { ok: true, maxRecords: null };
   const n = /^\d+$/.test(text) ? Number(text) : Number.NaN;
-  if (!Number.isInteger(n) || n < 1 || n > listSize) {
-    return { ok: false, error: `Enter a whole number from 1 to ${listSize}, or leave it blank for all.` };
+  if (!Number.isInteger(n) || n < 1 || n > MAX_RUN_RECORDS) {
+    return { ok: false, error: `Enter a whole number from 1 to ${MAX_RUN_RECORDS}, or leave it blank for all.` };
   }
   return { ok: true, maxRecords: n };
 }
 
 /** The Start dialing body — or null while the box holds something Start must not send. */
-export function runSettingsFor(draft: RunDraft, listSize: number): DialerRunSettings | null {
-  const howMany = parseHowMany(draft.howMany, listSize);
+export function runSettingsFor(draft: RunDraft): DialerRunSettings | null {
+  const howMany = parseHowMany(draft.howMany);
   if (!howMany.ok) return null;
   return { passes: draft.passes, maxRecords: howMany.maxRecords, rolloverBusinessDays: draft.rolloverBusinessDays };
 }

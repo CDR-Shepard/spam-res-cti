@@ -89,9 +89,34 @@ describe('Ready to dial — run settings', () => {
     fireEvent.change(box, { target: { value: '12a' } });
     expect(box.value).toBe('12');
     fireEvent.change(box, { target: { value: '0' } });
-    expect(screen.getByText('Enter a whole number from 1 to 202, or leave it blank for all.')).toBeTruthy();
+    // The bound is the server's maximum (500), not this list's size (202) —
+    // review fix (Important 1).
+    expect(screen.getByText('Enter a whole number from 1 to 500, or leave it blank for all.')).toBeTruthy();
     expect(startButton().disabled).toBe(true);
     fireEvent.change(box, { target: { value: '202' } });
+    expect(startButton().disabled).toBe(false);
+    // A number bigger than this 202-person list is fine too — up to 500.
+    fireEvent.change(box, { target: { value: '300' } });
+    expect(screen.queryByText(/Enter a whole number/)).toBeNull();
+    expect(startButton().disabled).toBe(false);
+  });
+
+  // Review fix (Important 1): a remembered limit bigger than today's list
+  // used to disable Start dead, with no way to dial without first clearing
+  // the box. Repro: a saved 100 on a 60-person list.
+  it('a remembered limit above the list size stays, Start stays enabled, and the line says so (review fix)', async () => {
+    const SIXTY: DialerSessionView = {
+      session: { id: 'sess1', status: 'ready' },
+      counts: { total: 60, done: 0, connected: 0, noConnect: 0, skipped: 0, unreachable: 0, pending: 60 },
+      currentItem: null,
+      skipBreakdown: {},
+      firstPassTotal: 60,
+    };
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(SIXTY);
+    mount({ runDefaults: { passes: 2, maxRecords: 100, rolloverBusinessDays: 1 } });
+    expect((await screen.findByLabelText('How many') as HTMLInputElement).value).toBe('100');
+    expect(screen.getByText('60 will be dialed — the whole list')).toBeTruthy();
+    expect(screen.queryByText(/Enter a whole number/)).toBeNull();
     expect(startButton().disabled).toBe(false);
   });
 

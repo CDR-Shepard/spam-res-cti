@@ -32,9 +32,19 @@ describe('RunSettingsBlock (SSR)', () => {
   });
 
   it('says why an out-of-range number cannot start', () => {
-    const out = html({ ...today, howMany: '203' });
-    expect(out).toContain('Enter a whole number from 1 to 202, or leave it blank for all.');
+    // The bound is the SERVER's maximum (500), not this render's list size —
+    // review fix (Important 1): a number above the list is fine, only above
+    // the server maximum is refused.
+    const out = html({ ...today, howMany: '600' });
+    expect(out).toContain('Enter a whole number from 1 to 500, or leave it blank for all.');
     expect(out).toContain('aria-invalid="true"');
+  });
+
+  it('accepts a number above this render\'s list size, up to the server maximum (review fix)', () => {
+    const out = html({ ...today, howMany: '300' });
+    expect(out).not.toContain('Enter a whole number');
+    expect(out).toContain('aria-invalid="false"');
+    expect(out).toContain('value="300"');
   });
 
   it('locks every choice while a Start is in flight (four buttons and the box)', () => {
