@@ -192,6 +192,28 @@ describe('App — C1: a reset and Start dialing never overlap', () => {
   });
 });
 
+describe('App — reset vs a power-dial run: the run status App hands to isBusyForReset (R1)', () => {
+  // No leg on this tab, not parked, nav unlocked: ONLY the run's own status
+  // (the panel's poll) says a run is on. Paused counts; a terminal one doesn't.
+  it('a run the server reports paused holds the reset back; once it is stopped, the reset goes ahead', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    state.status = 'paused';
+    state.resetDue = true;
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    handOverRun();
+    await waitFor(() => expect(callsTo('/dialer/sessions/sess-1')).toBeGreaterThan(0));
+    await advance(30_000);
+    expect(callsTo('/auth/reset-complete')).toBe(0);
+    expect(FakeDevice.connects.length).toBe(0);
+
+    state.status = 'stopped'; // ended elsewhere: the next poll says so
+    await advance(10_000);
+    await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
+    expect(callsTo('/auth/reset-complete')).toBe(1);
+  });
+});
+
 describe('App — reset vs a power-dial run (I1: Stop must not leave a stale "active" behind)', () => {
   it('after Stop, the last "active" poll no longer holds the reset back', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });

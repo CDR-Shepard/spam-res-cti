@@ -145,6 +145,69 @@ describe('useCtiReset — the leader resets an idle tab', () => {
   });
 });
 
+// I2: the hook's own wiring to the coordinator — who may start a reset, and
+// that a peer's broadcast finishes it here.
+describe('useCtiReset — only an idle leader starts; a peer finishes on the broadcast', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('a non-leader never starts one, however long it is due and idle', async () => {
+    vi.useFakeTimers();
+    const h = mountHook();
+    h.f.leader = false;
+    await tick(RESET_POLL_MS * 3);
+    expect(h.events).toEqual([]);
+    expect(h.f.broadcasts).toBe(0);
+    h.f.leader = true; // it becomes the leader: now it may
+    await tick(RESET_IDLE_CHECK_MS * 2);
+    expect(h.events).toEqual(['latch', 'teardown', 'post', 'reload']);
+  });
+
+  it('a busy peer holds it back; once the peer is idle, it goes', async () => {
+    vi.useFakeTimers();
+    const h = mountHook();
+    h.f.peersBusy = true;
+    await tick(RESET_POLL_MS * 3);
+    expect(h.events).toEqual([]);
+    h.f.peersBusy = false;
+    await tick(RESET_IDLE_CHECK_MS * 2);
+    expect(h.events).toEqual(['latch', 'teardown', 'post', 'reload']);
+  });
+
+  it('before the coordinator has heard its peers (not settled), it waits', async () => {
+    vi.useFakeTimers();
+    const h = mountHook();
+    h.f.settled = false;
+    await tick(RESET_IDLE_CHECK_MS * 5);
+    expect(h.events).toEqual([]);
+    h.f.settled = true;
+    await tick(RESET_IDLE_CHECK_MS * 2);
+    expect(h.events).toEqual(['latch', 'teardown', 'post', 'reload']);
+  });
+
+  it('this tab busy: it waits', async () => {
+    vi.useFakeTimers();
+    const h = mountHook();
+    h.s.busy = true;
+    await tick(RESET_IDLE_CHECK_MS * 5);
+    expect(h.events).toEqual([]);
+    h.s.busy = false;
+    await tick(RESET_IDLE_CHECK_MS * 2);
+    expect(h.events).toEqual(['latch', 'teardown', 'post', 'reload']);
+  });
+
+  it("onPeerReset (a peer's broadcast) finishes it here — no POST, no broadcast of its own — even as a non-leader not yet due", async () => {
+    vi.useFakeTimers();
+    const h = mountHook({ due: false });
+    h.f.leader = false;
+    await tick(0);
+    act(() => { h.hook.result.current.onPeerReset(); });
+    await tick(0);
+    expect(h.events).toEqual(['latch', 'teardown', 'reload']);
+    expect(h.f.broadcasts).toBe(0);
+    expect(localStorage.getItem('cti.reset.notice')).toBe('1');
+  });
+});
+
 // M3: another tab wiped (or replaced) the session and this tab missed the
 // broadcast. It finishes on its next poll — tearing down and reloading, and
 // writing nothing: the other tab already did whatever storage needed.
