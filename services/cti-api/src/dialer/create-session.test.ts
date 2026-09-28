@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { schema } from '@cti/db';
-import { buildQueueRows, createDialerSession } from './create-session.js';
+import { BUILD_SKIP_OUTCOMES, buildQueueRows, createDialerSession } from './create-session.js';
 import { nextEligiblePendingItem } from './state.js';
 import type { DialerItem } from './session-store.js';
 import { pairKey } from './contact-history.js';
@@ -41,6 +41,18 @@ const noResolveDeps = {
 const args = { userId: 'u1', orgId: 'o1', objectType: 'Lead' as const, recordIds: ['00Q000000000001'] };
 
 describe('buildQueueRows', () => {
+  // F18 (re-review): pin the exact BUILD_SKIP_OUTCOMES literal set. Iterating
+  // over the constant itself (as run-settings.test.ts's settledAtBuild tests
+  // do, checking each member individually) is tautological — it would keep
+  // passing even if a literal silently disappeared from the source, since the
+  // loop would just run fewer times. This asserts the FULL set independently,
+  // so dropping any one of the five (e.g. 'already_worked') fails here.
+  it('BUILD_SKIP_OUTCOMES is exactly these five literals — run-settings.ts settledAtBuild depends on every one being present', () => {
+    expect([...BUILD_SKIP_OUTCOMES].sort()).toEqual(
+      ['already_worked', 'blocked', 'dnc_blocked', 'opted_out', 'skip_on_dialer'].sort(),
+    );
+  });
+
   it('numbers rows, carries the second number on secondaryNumber only (never fallbackNumber), and marks unreachable when no number resolved', () => {
     const rows = buildQueueRows('S1', [
       { recordId: '00Q1', objectType: 'Lead', toNumber: '+16195550100', fallbackNumber: '+16195550999' },
