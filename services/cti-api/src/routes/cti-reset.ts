@@ -46,13 +46,70 @@ export function resetSignalRateKey(req: Pick<FastifyRequest, 'headers' | 'ip'>):
 
 const TargetParams = z.object({ userId: z.string().uuid() });
 
+/**
+ * I2 (review fix): the per-token bucket below is keyed on the CALLER's own
+ * bearer — legitimate, since a rep's own tabs should share one bucket — but
+ * that also means a flood of MADE-UP bearers, each hashing to its own fresh
+ * bucket, never shares one and never trips it (400 requests, zero 429s, each
+ * still costing a sessions lookup). This tracks failed lookups PER IP
+ * instead, in a small bounded in-process map (insertion order doubles as LRU
+ * recency; capped so a distributed flood cannot grow it without bound), and
+ * blocks the IP outright once it passes FAILURE_LIMIT failures inside
+ * FAILURE_WINDOW_MS. A real poll holds a real session and never fails, so it
+ * never feeds this counter — ordinary office traffic, including many reps
+ * behind one NAT'd IP, never approaches the limit. Deliberately NOT a second
+ * `@fastify/rate-limit` registration scoped to this route: that plugin marks
+ * a shared `rateLimitRan` symbol on the request the first time it runs, and
+ * skips itself on a second run for the same request — it cannot be stacked.
+ * This is a hand-rolled `onRequest` hook instead, which has no such limit.
+ */
+const RESET_SIGNAL_FAILURE_LIMIT = 30;
+const RESET_SIGNAL_FAILURE_WINDOW_MS = 60_000;
+const RESET_SIGNAL_FAILURE_TRACKED_IPS_MAX = 5_000;
+
 export async function registerCtiResetRoutes(app: FastifyInstance): Promise<void> {
+  const failedLookupsByIp = new Map<string, { count: number; windowEndsAt: number }>();
+
+  function recordFailedLookup(ip: string): void {
+    const now = Date.now();
+    const existing = failedLookupsByIp.get(ip);
+    const entry = !existing || now >= existing.windowEndsAt
+      ? { count: 1, windowEndsAt: now + RESET_SIGNAL_FAILURE_WINDOW_MS }
+      : { count: existing.count + 1, windowEndsAt: existing.windowEndsAt };
+    failedLookupsByIp.delete(ip); // re-insert so this IP is most-recently-used
+    failedLookupsByIp.set(ip, entry);
+    if (failedLookupsByIp.size > RESET_SIGNAL_FAILURE_TRACKED_IPS_MAX) {
+      const oldestIp = failedLookupsByIp.keys().next().value;
+      if (oldestIp !== undefined) failedLookupsByIp.delete(oldestIp);
+    }
+  }
+
+  function isBlockedForFailedLookups(ip: string): boolean {
+    const existing = failedLookupsByIp.get(ip);
+    if (!existing) return false;
+    if (Date.now() >= existing.windowEndsAt) {
+      failedLookupsByIp.delete(ip);
+      return false;
+    }
+    return existing.count > RESET_SIGNAL_FAILURE_LIMIT;
+  }
+
   app.get(
     '/auth/reset-signal',
-    { config: { rateLimit: { max: RESET_SIGNAL_RATE_MAX, timeWindow: '1 minute', keyGenerator: resetSignalRateKey } } },
+    {
+      config: { rateLimit: { max: RESET_SIGNAL_RATE_MAX, timeWindow: '1 minute', keyGenerator: resetSignalRateKey } },
+      onRequest: async (req, reply) => {
+        if (isBlockedForFailedLookups(req.ip)) {
+          return reply.code(429).send({ error: 'Too many failed attempts' });
+        }
+      },
+    },
     async (req, reply) => {
       const detail = await resolveSessionDetail(req.headers.authorization);
-      if (!detail) return reply.code(401).send({ error: 'Unauthorized' });
+      if (!detail) {
+        recordFailedLookup(req.ip);
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
       const resetDue = isCtiResetDue(detail.ctiResetRequestedAt, detail.sessionCreatedAt);
       /**
        * R2 (controller ruling): self-heal a session that actually reset but

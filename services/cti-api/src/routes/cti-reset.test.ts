@@ -314,6 +314,63 @@ describe('the poll has its own rate-limit bucket', () => {
 });
 
 /**
+ * I2 (review fix): the per-token bucket above is keyed on the CALLER's own
+ * bearer, so a flood of made-up bearers (each hashing to its own fresh
+ * bucket) never shares one and never trips it — 400 requests, zero 429s.
+ * This tracks 401s PER IP instead, in a bounded in-process map, and blocks
+ * the IP outright (via an onRequest hook, before resolveSessionDetail even
+ * runs) once it passes ~30 failures in a minute. Real polls hold a real
+ * session and never fail, so they never add to this counter — this is what
+ * keeps ordinary office traffic, including many reps behind one NAT'd IP,
+ * completely unaffected by it.
+ */
+describe('GET /auth/reset-signal — a per-IP ceiling on failed lookups (I2)', () => {
+  const ATTACKER_IP = '203.0.113.77';
+  const signalFrom = (ip: string, token = 'tok-bad') =>
+    app.inject({ method: 'GET', url: '/auth/reset-signal', headers: { authorization: `Bearer ${token}` }, remoteAddress: ip });
+
+  it('31 failed lookups from one IP → the next request is 429', async () => {
+    state.detail = null; // every lookup below fails
+    for (let i = 0; i < 31; i++) {
+      const res = await signalFrom(ATTACKER_IP, `bad-token-${i}`); // a fresh token each time — never shares the per-token bucket
+      expect(res.statusCode).toBe(401);
+    }
+    const blocked = await signalFrom(ATTACKER_IP, 'bad-token-32');
+    expect(blocked.statusCode).toBe(429);
+  });
+
+  it('valid-token polls from the same IP stay 200, however many — legitimate traffic never fails, so it never feeds the counter', async () => {
+    const OFFICE_IP = '203.0.113.90';
+    state.detail = staleRequest();
+    for (let i = 0; i < 40; i++) {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/auth/reset-signal',
+        headers: { authorization: `Bearer shared-office-token` },
+        remoteAddress: OFFICE_IP,
+      });
+      expect(res.statusCode).toBe(200);
+    }
+  });
+
+  it('the counter window resets: once it elapses, the same IP is unblocked again', async () => {
+    vi.useFakeTimers();
+    try {
+      state.detail = null;
+      for (let i = 0; i < 31; i++) {
+        expect((await signalFrom(ATTACKER_IP, `bad-token-${i}`)).statusCode).toBe(401);
+      }
+      expect((await signalFrom(ATTACKER_IP, 'bad-token-32')).statusCode).toBe(429);
+      vi.advanceTimersByTime(61_000);
+      // Back to a normal 401 — the failure itself, not a 429 from a stale block.
+      expect((await signalFrom(ATTACKER_IP, 'bad-token-33')).statusCode).toBe(401);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
  * Controller ruling R2 (adds to the brief): GET /auth/reset-signal also
  * self-heals a session whose reset-complete POST never landed. A rep who
  * actually reset proves it by holding a session CREATED AFTER the request
