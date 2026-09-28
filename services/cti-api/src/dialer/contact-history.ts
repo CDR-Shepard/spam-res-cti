@@ -7,6 +7,7 @@
  * either number, or logged against the record, is a dial to the person.
  */
 import { DAILY_CAP_WINDOW_MS, DAILY_DIAL_CAP } from '@cti/firewall';
+import type { DialerPasses } from '@cti/contracts';
 
 export interface Dial {
   userId: string;
@@ -52,20 +53,27 @@ export function cadenceVerdict(
   return recentByOthers ? 'cooldown' : 'ok';
 }
 
+/** Click-to-dial's threshold: "Calls per person" is a power-dial setting only
+ *  (spec 2026-09-28 §4), so a manual miss keeps the owner's-2nd rule. */
+export const CLICK_TO_DIAL_ROLLOVER_MISSES = 2;
+
 /**
  * Roll the follow-up forward? The task OWNER has dialed the person at least
- * twice since the org day began, and none of those dials connected. Nobody
- * else's dials count: the task is theirs to work. Runs do not matter: two short
- * runs, a run's retry pass, or a power dial plus a manual call all read alike.
+ * `requiredMisses` times since the org day began, and none of those dials
+ * connected. `requiredMisses` is the power-dial run's Calls per person (Once =
+ * 1, Twice = 2 — spec 2026-09-28) for a power-dial miss, and
+ * `CLICK_TO_DIAL_ROLLOVER_MISSES` for a manual one. Nobody else's dials count:
+ * the task is theirs to work. Runs do not matter: two short runs, a run's retry
+ * pass, or a power dial plus a manual call all read alike.
  *
  * A Skip is not a dial for this rule (ruling 2026-09-23): the rep chose not to
- * wait, so it neither counts toward the two nor as a connect. It still counts
- * for `cadenceVerdict` above — the phone rang, which is what that rule cares
- * about.
+ * wait, so it neither counts toward the threshold nor as a connect. It still
+ * counts for `cadenceVerdict` above — the phone rang, which is what that rule
+ * cares about.
  */
-export function rolloverDue(dials: readonly Dial[], ownerUserId: string, dayStart: Date): boolean {
+export function rolloverDue(dials: readonly Dial[], ownerUserId: string, dayStart: Date, requiredMisses: DialerPasses): boolean {
   const own = dials.filter((d) => d.userId === ownerUserId && d.at.getTime() >= dayStart.getTime() && !d.skipped);
-  return own.length >= 2 && own.every((d) => !d.connected);
+  return own.length >= requiredMisses && own.every((d) => !d.connected);
 }
 
 /** The number that most recently reached the person, if it is still one of theirs. */

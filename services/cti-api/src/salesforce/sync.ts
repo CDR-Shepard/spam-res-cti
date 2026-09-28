@@ -8,7 +8,9 @@ import { getDb, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
 import { buildRecordingPublicUrl } from '../telephony/recording-links.js';
-import { rolloverDue, type Dial, type Person } from '../dialer/contact-history.js';
+import type { RolloverBusinessDays } from '@cti/contracts';
+import { CLICK_TO_DIAL_ROLLOVER_MISSES, rolloverDue, type Dial, type Person } from '../dialer/contact-history.js';
+import { savedRolloverBusinessDays } from '../dialer/run-settings.js';
 import { dialsToPerson } from '../dialer/contact-history-live.js';
 import { orgMidnightUtc, orgTodayIso } from '../dialer/org-day.js';
 import type { RolloverEnqueue } from '../dialer/engine.js';
@@ -263,6 +265,10 @@ export interface SyncOneDeps {
   /** Best-effort: enqueue (or idempotently no-op) the next-day follow-up
    *  rollover job for this owner/record/day. */
   enqueueRollover: (job: RolloverEnqueue) => Promise<void>;
+  /** The rep's saved "Missed tasks move to" (1 or 2 business days, spec
+   *  2026-09-28 §4) — where a click-to-dial rollover lands. Read only when a
+   *  rollover is actually due. */
+  rolloverBusinessDays: (userId: string) => Promise<RolloverBusinessDays>;
 }
 
 function liveSyncOneDeps(): SyncOneDeps {
@@ -280,6 +286,7 @@ function liveSyncOneDeps(): SyncOneDeps {
     contactHistory: (orgId, person, since) => dialsToPerson(db, orgId, person, since),
     orgDayStart: () => orgMidnightUtc(new Date()),
     enqueueRollover: (job) => enqueueFollowupRollover(db, job),
+    rolloverBusinessDays: (userId) => savedRolloverBusinessDays(db, userId),
   };
 }
 
@@ -499,14 +506,17 @@ export async function syncOne(
 
   // The per-day rollover counts THIS call too (spec §2.3): the task owner's
   // second dial of the day to the person, from any run or a manual call,
-  // rolls the follow-up when it misses. Best effort — a failure here is a
-  // task that stays open, which the rep can see; it must never fail the sync.
+  // rolls the follow-up when it misses. Click-to-dial keeps that 2-miss rule
+  // — "Calls per person" is a power-dial setting only — but lands where the
+  // rep's saved "Missed tasks move to" says (spec 2026-09-28 §4). Best
+  // effort — a failure here is a task that stays open, which the rep can see;
+  // it must never fail the sync.
   if (call.direction === 'outbound' && call.disposition !== 'Connected' && (whoId || whatId)) {
     try {
       const person: Person = { numbers: [call.normalizedToNumber], recordId: whoId ?? whatId ?? null };
       const dayStart = deps.orgDayStart();
       const own = await deps.contactHistory(call.orgId, person, dayStart);
-      if (rolloverDue(own, call.userId, dayStart)) {
+      if (rolloverDue(own, call.userId, dayStart, CLICK_TO_DIAL_ROLLOVER_MISSES)) {
         await deps.enqueueRollover({
           orgId: call.orgId,
           userId: call.userId,
@@ -516,6 +526,7 @@ export async function syncOne(
           objectType: objectTypeForId(whoId ?? whatId!),
           fromDate: orgTodayIso(dayStart),
           sourceTaskId: null,
+          businessDays: await deps.rolloverBusinessDays(call.userId),
         });
       }
     } catch (err) {

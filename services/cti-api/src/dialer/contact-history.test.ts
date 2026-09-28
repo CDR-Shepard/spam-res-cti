@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cadenceVerdict, COOLDOWN_MS, preferredNumber, rolloverDue, type Dial } from './contact-history.js';
+import { CLICK_TO_DIAL_ROLLOVER_MISSES, cadenceVerdict, COOLDOWN_MS, preferredNumber, rolloverDue, type Dial } from './contact-history.js';
 import { DAILY_CAP_WINDOW_MS } from '@cti/firewall';
 
 const NOW = new Date('2026-09-23T18:00:00Z');
@@ -39,28 +39,28 @@ describe('cadenceVerdict — 3 hours between dials to a person, power dialer onl
 
 describe("rolloverDue — the task owner's second miss of the org day", () => {
   const DAY = new Date('2026-09-23T07:00:00Z'); // LA midnight
-  it('false with one dial today', () => { expect(rolloverDue([dial({ at: ago(H) })], 'rep-1', DAY)).toBe(false); });
+  it('false with one dial today', () => { expect(rolloverDue([dial({ at: ago(H) })], 'rep-1', DAY, 2)).toBe(false); });
   it('true with two dials today by the owner, neither connected — any source, any session', () => {
-    expect(rolloverDue([dial({ at: ago(5 * H), sessionId: 'S-a' }), dial({ at: ago(H), sessionId: null, source: 'manual' })], 'rep-1', DAY)).toBe(true);
+    expect(rolloverDue([dial({ at: ago(5 * H), sessionId: 'S-a' }), dial({ at: ago(H), sessionId: null, source: 'manual' })], 'rep-1', DAY, 2)).toBe(true);
   });
   it("false when another rep's dials make up the count", () => {
-    expect(rolloverDue([dial({ at: ago(5 * H), userId: 'rep-2' }), dial({ at: ago(H) })], 'rep-1', DAY)).toBe(false);
+    expect(rolloverDue([dial({ at: ago(5 * H), userId: 'rep-2' }), dial({ at: ago(H) })], 'rep-1', DAY, 2)).toBe(false);
   });
   it('false when any of the owner\'s dials today connected', () => {
-    expect(rolloverDue([dial({ at: ago(5 * H), connected: true }), dial({ at: ago(H) })], 'rep-1', DAY)).toBe(false);
+    expect(rolloverDue([dial({ at: ago(5 * H), connected: true }), dial({ at: ago(H) })], 'rep-1', DAY, 2)).toBe(false);
   });
   it("yesterday's dials do not count", () => {
-    expect(rolloverDue([dial({ at: new Date(DAY.getTime() - 1000) }), dial({ at: ago(H) })], 'rep-1', DAY)).toBe(false);
+    expect(rolloverDue([dial({ at: new Date(DAY.getTime() - 1000) }), dial({ at: ago(H) })], 'rep-1', DAY, 2)).toBe(false);
   });
 });
 
 describe('rolloverDue — a Skip is not a dial for the rollover', () => {
   const DAY = new Date('2026-09-23T07:00:00Z');
   it('a skipped dial plus one real miss does NOT roll', () => {
-    expect(rolloverDue([dial({ at: ago(5 * H), skipped: true }), dial({ at: ago(H) })], 'rep-1', DAY)).toBe(false);
+    expect(rolloverDue([dial({ at: ago(5 * H), skipped: true }), dial({ at: ago(H) })], 'rep-1', DAY, 2)).toBe(false);
   });
   it('two real misses roll even with a skip in between', () => {
-    expect(rolloverDue([dial({ at: ago(5 * H) }), dial({ at: ago(3 * H), skipped: true }), dial({ at: ago(H) })], 'rep-1', DAY)).toBe(true);
+    expect(rolloverDue([dial({ at: ago(5 * H) }), dial({ at: ago(3 * H), skipped: true }), dial({ at: ago(H) })], 'rep-1', DAY, 2)).toBe(true);
   });
 });
 
@@ -82,5 +82,29 @@ describe('preferredNumber — the number that reached them', () => {
   it('null when nothing connected, or the connect was on a number the record no longer has', () => {
     expect(preferredNumber([dial({ connected: false })], ['+16195550100'])).toBeNull();
     expect(preferredNumber([dial({ toNumber: '+19995550000', connected: true })], ['+16195550100'])).toBeNull();
+  });
+});
+
+describe("rolloverDue — the threshold is the run's Calls per person (spec 2026-09-28)", () => {
+  const DAY = new Date('2026-09-23T07:00:00Z');
+  it("Once (1): the owner's FIRST non-connect of the day rolls", () => {
+    expect(rolloverDue([dial({ at: ago(H) })], 'rep-1', DAY, 1)).toBe(true);
+  });
+  it('Once never rolls a person reached today', () => {
+    expect(rolloverDue([dial({ at: ago(5 * H), connected: true }), dial({ at: ago(H) })], 'rep-1', DAY, 1)).toBe(false);
+  });
+  it('Once: a Skip alone is not a non-connect', () => {
+    expect(rolloverDue([dial({ at: ago(H), skipped: true })], 'rep-1', DAY, 1)).toBe(false);
+  });
+  it("Once: another rep's miss is not the owner's, and yesterday's does not count", () => {
+    expect(rolloverDue([dial({ at: ago(H), userId: 'rep-2' })], 'rep-1', DAY, 1)).toBe(false);
+    expect(rolloverDue([dial({ at: new Date(DAY.getTime() - 1000) })], 'rep-1', DAY, 1)).toBe(false);
+  });
+  it("Twice (2) is today's rule: one miss leaves it, two roll it", () => {
+    expect(rolloverDue([dial({ at: ago(H) })], 'rep-1', DAY, 2)).toBe(false);
+    expect(rolloverDue([dial({ at: ago(5 * H) }), dial({ at: ago(H) })], 'rep-1', DAY, 2)).toBe(true);
+  });
+  it('click-to-dial keeps the 2-miss rule', () => {
+    expect(CLICK_TO_DIAL_ROLLOVER_MISSES).toBe(2);
   });
 });

@@ -2,6 +2,9 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@cti/db';
+import type { DialerRunSettings } from '@cti/contracts';
+import type { Dial } from './contact-history.js';
+import type { DialOutcome } from './outcome.js';
 
 // In-memory fake DB: enough of the drizzle surface the engine uses.
 //
@@ -328,7 +331,13 @@ import {
 } from './engine.js';
 
 const REP_LEG = 'CA00000000000000000000000000000rep';
-const baseSession = { id: 'S1', orgId: 'O1', userId: 'U1', sfOwnerId: '005', objectType: 'Lead', status: 'active' };
+// Run settings (migration 0046) at their defaults — today's run: Twice, the
+// whole list, next business day. A session missing them would read `passes`
+// as undefined and never requeue.
+const baseSession = {
+  id: 'S1', orgId: 'O1', userId: 'U1', sfOwnerId: '005', objectType: 'Lead', status: 'active',
+  passes: 2, maxRecords: null, rolloverBusinessDays: 1,
+};
 function makeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
   return {
     db: undefined as any,
@@ -2386,5 +2395,70 @@ describe('handleDialOutcome — a human answering a run that is over is hung up,
     expect(deps.telephony.hangup).not.toHaveBeenCalled();
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'connected', outcome: 'connected' }) });
     expect(fdb._writes).not.toContainEqual({ patch: expect.objectContaining({ status: 'no_connect' }) });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Run settings (spec docs/superpowers/specs/2026-09-28-run-settings-design.md):
+// a miss follows the run's Calls per person, and the rollover carries its
+// Missed-tasks choice.
+// ---------------------------------------------------------------------------
+describe('handleDialOutcome — Calls per person (session.passes)', () => {
+  beforeEach(() => { _target = {}; });
+  const DAY = new Date(Date.UTC(2026, 6, 13, 7, 0, 0));
+  const miss = (over: Record<string, unknown> = {}) => [{
+    id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', primaryNumber: '+1', secondaryNumber: '+2',
+    recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, followupEligible: true, taskId: null, redialOf: null,
+    ...over,
+  }];
+  // The owner's dials to the person today. `d(0)` is THIS dial's own attempt
+  // row (written at originate), which the pre-CAS history read always finds.
+  const d = (hoursAgo: number, over: Partial<Dial> = {}): Dial => ({
+    userId: 'U1', sessionId: 'S1', toNumber: '+1', at: new Date(Date.UTC(2026, 6, 13, 18 - hoursAgo)),
+    connected: false, source: 'dialer', skipped: false, ...over,
+  });
+  type Row = [label: string, passes: 1 | 2, history: Dial[], outcome: DialOutcome, item: Record<string, unknown>, requeues: boolean, rolls: boolean];
+
+  it.each<Row>([
+    ['Once · first miss of the day: no retry, the follow-up rolls', 1, [d(0)], 'voicemail', {}, false, true],
+    ["Twice · first miss of the day: retry, no roll (today's run)", 2, [d(0)], 'voicemail', {}, true, false],
+    ["Twice · the retry misses (2nd of the day): no retry, rolls (today's run)", 2, [d(3), d(0)], 'no_answer', { attempt: 2 }, false, true],
+    ['Once · reached earlier today: no retry, never rolls', 1, [d(3, { connected: true }), d(0)], 'voicemail', {}, false, false],
+    ['Twice · reached earlier today: retry, never rolls', 2, [d(3, { connected: true }), d(0)], 'voicemail', {}, true, false],
+    ['Once · a Stop/hang-up before answer (canceled) is not a non-connect', 1, [d(0)], 'canceled', {}, false, false],
+    ['Once · an earlier Skip does not count, but this real miss rolls', 1, [d(3, { skipped: true }), d(0)], 'busy', {}, false, true],
+    ['Twice · an earlier Skip + this miss is ONE miss: retry, no roll', 2, [d(3, { skipped: true }), d(0)], 'busy', {}, true, false],
+    ['Once · a missed redial copy: no retry, and the earlier connect keeps it from rolling', 1, [d(3, { connected: true }), d(0)], 'voicemail', { redialOf: 'i0' }, false, false],
+    ['Twice · a missed redial copy never gets its own retry', 2, [d(3, { connected: true }), d(0)], 'voicemail', { redialOf: 'i0' }, false, false],
+  ])('%s', async (_label, passes, history, outcome, item, requeues, rolls) => {
+    const deps = makeDeps({ orgDayStart: DAY, contactHistory: vi.fn(async () => history) });
+    const fdb = fakeDb({ ...baseSession, passes }, miss(item)); deps.db = fdb;
+    await handleDialOutcome('CA1', outcome, deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'no_connect', outcome }) });
+    expect(fdb._txInserts.some((x: any) => x.values.attempt === 2)).toBe(requeues);
+    expect((deps.enqueueRollover as any).mock.calls.length).toBe(rolls ? 1 : 0);
+  });
+
+  it("the queued rollover carries the run's Missed-tasks choice as businessDays", async () => {
+    for (const rolloverBusinessDays of [1, 2] as const) {
+      const deps = makeDeps({ orgDayStart: DAY, contactHistory: vi.fn(async () => [d(3), d(0)]) });
+      deps.db = fakeDb({ ...baseSession, rolloverBusinessDays }, miss());
+      await handleDialOutcome('CA1', 'voicemail', deps);
+      expect(deps.enqueueRollover).toHaveBeenCalledWith(
+        expect.objectContaining({ businessDays: rolloverBusinessDays, fromDate: '2026-07-13', recordId: '00Q1' }),
+        expect.anything(),
+      );
+    }
+  });
+
+  it('a Skip or a take-callback cancel settles the row before its callback lands: a Once run neither retries nor rolls it', async () => {
+    for (const settled of [{ status: 'skipped', outcome: null }, { status: 'skipped', outcome: 'canceled' }]) {
+      const deps = makeDeps({ orgDayStart: DAY, contactHistory: vi.fn(async () => [d(0)]) });
+      const fdb = fakeDb({ ...baseSession, passes: 1 }, miss(settled)); deps.db = fdb;
+      await handleDialOutcome('CA1', 'canceled', deps);
+      expect(fdb._writes).toEqual([]);
+      expect(fdb._txInserts).toEqual([]);
+      expect(deps.enqueueRollover).not.toHaveBeenCalled();
+    }
   });
 });

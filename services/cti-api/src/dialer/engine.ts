@@ -10,6 +10,8 @@ import { recordConnectSticky } from './sticky.js';
 import type { RolloverDb } from '../salesforce/followup-enqueue.js';
 import type { PickDidArgs, PickDidResult } from './pick-agent-did.js';
 import type { DialOutcome } from './outcome.js';
+import type { DialerRunSettings, RolloverBusinessDays } from '@cti/contracts';
+import { claimReadySessionQuery, runSizeCutoff, saveRunDefaultsQuery, trimQueueQuery } from './run-settings.js';
 
 export interface RolloverEnqueue {
   /** `sessionId` is null when the trigger is not a power-dial run (a
@@ -20,6 +22,11 @@ export interface RolloverEnqueue {
    *  instead of searching the record, which on a record with several open
    *  follow-ups could roll one the rep never called. Null on Lead/Opp runs. */
   sourceTaskId: string | null;
+  /** Missed tasks move to (spec 2026-09-28): the copy starts at the 1st or 2nd
+   *  business day after the landing base — the run's setting for power dial,
+   *  the rep's saved choice for click-to-dial. Captured here so the worker
+   *  needs no session lookup. */
+  businessDays: RolloverBusinessDays;
 }
 
 export interface EngineDeps {
@@ -1015,17 +1022,21 @@ export async function handleDialOutcome(
   // reason in `outcome`; the decisions below do not read the reason). The
   // other number waits for the end-of-run retry.
   //
-  // Two independent questions, decided before the transaction:
-  //  - requeue: first miss in a LIVE run (active/paused) → an attempt-2 row at
-  //    the END of the run (5-minute floor) dialing the record's OTHER number
-  //    when it has one; the same number again when it has only one (legacy
-  //    pre-0024 rows with no pair retry whatever they were last dialing).
+  // Two independent questions, decided before the transaction. Both follow the
+  // run's Calls per person (`session.passes`, spec 2026-09-28): Twice (2, the
+  // default) is exactly the rule below; Once (1) has no end-of-run retry and
+  // rolls on the owner's FIRST non-connect of the day.
+  //  - requeue: a miss before the run's last pass, in a LIVE run
+  //    (active/paused) → an attempt-2 row at the END of the run (5-minute
+  //    floor) dialing the record's OTHER number when it has one; the same
+  //    number again when it has only one (legacy pre-0024 rows with no pair
+  //    retry whatever they were last dialing).
   //  - rollover: the rule is per DAY, per OWNER, not per run. This rep has now
-  //    dialed the person twice today (any run, any source — the row for THIS
-  //    dial is already on the log, written at originate) and never connected
-  //    → the follow-up rolls. Whether the run is live or stopped is
-  //    irrelevant: a rep who stops after one pass and dials the person again
-  //    three hours later rolls it then. One dial in a day leaves it open.
+  //    dialed the person `session.passes` times today (any run, any source —
+  //    the row for THIS dial is already on the log, written at originate) and
+  //    never connected → the follow-up rolls. Whether the run is live or
+  //    stopped is irrelevant: a rep who stops after one pass and dials the
+  //    person again three hours later rolls it then.
   // Both may happen for one miss: the retry is queued AND the task rolls.
   //
   // Fix-round-1 #4 (controller ruling): a REDIAL copy (`redialOf` set) never
@@ -1038,7 +1049,7 @@ export async function handleDialOutcome(
   // rolling on its own.
   const attempt = item.attempt ?? 1; // a fixture/row missing `attempt` must not silently read as a second miss
   const retryTo = item.secondaryNumber ?? item.primaryNumber ?? item.toNumber;
-  const requeue = attempt < 2 && retryTo != null && sessionLive && item.redialOf == null;
+  const requeue = attempt < session.passes && retryTo != null && sessionLive && item.redialOf == null;
   // Only a follow-up rolls over. Task runs dial whatever the rep's list holds
   // ("Check in", "Send quote"), and completing/copying one of those would
   // rewrite work the rollover rule was never meant to touch. Lead/Opp runs and
@@ -1067,7 +1078,7 @@ export async function handleDialOutcome(
       // stays open, which the rep sees; a spurious one rewrites their work.
       console.error('[dialer] rollover history read failed', { itemId: item.id, err: (err as Error).message });
     }
-    enqueue = today !== null && rolloverDue(today, session.userId, deps.orgDayStart);
+    enqueue = today !== null && rolloverDue(today, session.userId, deps.orgDayStart, session.passes);
   }
 
   // The CAS, the requeue insert, and the rollover enqueue all ride inside the
@@ -1113,6 +1124,7 @@ export async function handleDialOutcome(
         orgId: session.orgId, userId: session.userId, sfOwnerId: session.sfOwnerId, sessionId: session.id,
         recordId: item.recordId, objectType: item.objectType, fromDate: deps.todayIso,
         sourceTaskId: item.taskId ?? null,
+        businessDays: session.rolloverBusinessDays,
       }, tx);
     }
     return true;

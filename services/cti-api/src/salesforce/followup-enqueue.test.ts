@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { enqueueFollowupRollover } from './followup-enqueue.js';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { Pool } from 'pg';
+import { schema } from '@cti/db';
+import { enqueueFollowupRollover, rolloverJobInsert } from './followup-enqueue.js';
 import type { RolloverEnqueue } from '../dialer/engine.js';
 
 // The real de-duplication is the Postgres unique index
@@ -31,6 +34,7 @@ function job(over: Partial<RolloverEnqueue> = {}): RolloverEnqueue {
     orgId: 'org1', userId: 'user1', sfOwnerId: '005ABC', sessionId: 'sess1',
     recordId: '0031', objectType: 'Contact', fromDate: '2026-08-21',
     sourceTaskId: null,
+    businessDays: 1,
     ...over,
   };
 }
@@ -65,5 +69,31 @@ describe('enqueueFollowupRollover', () => {
     const f = fakeDb();
     await enqueueFollowupRollover(f.db as never, job());
     expect(f.clause()).toBe('do nothing');
+  });
+});
+
+// The job carries the run's "Missed tasks move to" (spec 2026-09-28), and the
+// insert Postgres receives is pinned: every column the job names, and a BARE
+// ON CONFLICT DO NOTHING — never a target (the partial-index trap, 42P10).
+describe('rolloverJobInsert — the SQL Postgres receives', () => {
+  // Never connects: drizzle only needs the dialect to render SQL.
+  const db = drizzle(new Pool({ connectionString: 'postgres://unused:unused@127.0.0.1:1/unused' }), { schema });
+
+  it('writes business_days with the rest of the job, bare ON CONFLICT DO NOTHING', () => {
+    const { sql, params } = rolloverJobInsert(db, job({ businessDays: 2 })).toSQL();
+    expect(sql).toBe(
+      'insert into "followup_rollover_jobs" ("id", "org_id", "user_id", "sf_owner_id", "session_id", "record_id", "object_type", "from_date", ' +
+        '"status", "attempts", "last_error", "next_attempt_at", "completed_at", "completed_task_id", "created_task_id", "target_date", "next_day", ' +
+        '"source_task_id", "completed_task_ids", "business_days", "created_at", "updated_at") ' +
+        'values (default, $1, $2, $3, $4, $5, $6, $7, $8, default, default, default, default, default, default, default, default, $9, default, $10, default, default) ' +
+        'on conflict do nothing',
+    );
+    expect(params).toEqual(['org1', 'user1', '005ABC', 'sess1', '0031', 'Contact', '2026-08-21', 'pending', null, 2]);
+  });
+
+  it('enqueueFollowupRollover carries businessDays onto the row', async () => {
+    const f = fakeDb();
+    await enqueueFollowupRollover(f.db as never, job({ businessDays: 2 }));
+    expect(f.rows[0]).toEqual(expect.objectContaining({ businessDays: 2, status: 'pending' }));
   });
 });

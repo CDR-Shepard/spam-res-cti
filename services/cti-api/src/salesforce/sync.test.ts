@@ -125,6 +125,7 @@ function syncDeps(over: Partial<SyncOneDeps> = {}): SyncOneDeps & { _db: ReturnT
     contactHistory: vi.fn(async () => []) as unknown as SyncOneDeps['contactHistory'],
     orgDayStart: (() => new Date('2026-08-26T07:00:00Z')) as unknown as SyncOneDeps['orgDayStart'],
     enqueueRollover: vi.fn(async () => {}) as unknown as SyncOneDeps['enqueueRollover'],
+    rolloverBusinessDays: vi.fn(async () => 1 as const) as unknown as SyncOneDeps['rolloverBusinessDays'],
     ...over,
     _db: db,
   } as SyncOneDeps & { _db: ReturnType<typeof fakeDb> };
@@ -241,6 +242,7 @@ describe("syncOne — a click-to-dial miss counts toward the owner's two dials o
       objectType: 'Lead',
       fromDate: '2026-08-26',
       sourceTaskId: null,
+      businessDays: 1,
     });
   });
 
@@ -346,6 +348,7 @@ describe("syncOne — a click-to-dial miss counts toward the owner's two dials o
       objectType: 'Opportunity',
       fromDate: '2026-08-26',
       sourceTaskId: null,
+      businessDays: 1,
     });
   });
 });
@@ -985,5 +988,55 @@ describe('runRecordingLinkSweepSafely — wholesale isolation for the recording-
       expect.objectContaining({ err: 'connection terminated unexpectedly' }),
     );
     errSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Run settings (spec 2026-09-28 §4): a click-to-dial rollover keeps the 2-miss
+// rule — "Calls per person" is a power-dial setting only — and lands where the
+// rep's saved "Missed tasks move to" says. The choice is read only when a
+// rollover is actually due, and a failed read fails closed like the rest of
+// the check.
+// ---------------------------------------------------------------------------
+describe("syncOne — a click-to-dial rollover uses the rep's saved Missed-tasks choice", () => {
+  const DAY = new Date('2026-08-26T07:00:00Z');
+  const d = (hoursAgo: number) => ({
+    userId: 'user-1', sessionId: null, toNumber: '+16195550100',
+    at: new Date(DAY.getTime() + (12 - hoursAgo) * 3_600_000), connected: false, source: 'manual' as const, skipped: false,
+  });
+  const rollable = () => fakeDb(callRow({ userId: 'user-1', salesforceWhoId: '00Q1' }));
+
+  it('carries the saved choice (2 business days) onto the job', async () => {
+    const rolloverBusinessDays = vi.fn(async () => 2 as const);
+    const deps = syncDeps({ db: rollable(), contactHistory: vi.fn(async () => [d(3), d(0)]), orgDayStart: () => DAY, rolloverBusinessDays });
+    await syncOne('call-1', deps);
+    expect(rolloverBusinessDays).toHaveBeenCalledWith('user-1');
+    expect(deps.enqueueRollover).toHaveBeenCalledWith(expect.objectContaining({ recordId: '00Q1', sessionId: null, businessDays: 2 }));
+  });
+
+  it('never reads the saved choice when nothing rolls (a first miss keeps the 2-miss rule)', async () => {
+    const rolloverBusinessDays = vi.fn(async () => 1 as const);
+    const deps = syncDeps({ db: rollable(), contactHistory: vi.fn(async () => [d(0)]), orgDayStart: () => DAY, rolloverBusinessDays });
+    await syncOne('call-1', deps);
+    expect(rolloverBusinessDays).not.toHaveBeenCalled();
+    expect(deps.enqueueRollover).not.toHaveBeenCalled();
+  });
+
+  it('a failed read fails closed: logged, no rollover, and the sync still succeeds', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const deps = syncDeps({
+        db: rollable(), contactHistory: vi.fn(async () => [d(3), d(0)]), orgDayStart: () => DAY,
+        rolloverBusinessDays: vi.fn(async () => { throw new Error('pool'); }),
+      });
+      await expect(syncOne('call-1', deps)).resolves.toBeUndefined();
+      expect(deps.enqueueRollover).not.toHaveBeenCalled();
+      expect(errSpy).toHaveBeenCalledWith(
+        '[sf-sync] per-day rollover check failed',
+        expect.objectContaining({ callId: 'call-1', err: 'pool' }),
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
