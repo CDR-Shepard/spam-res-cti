@@ -78,8 +78,37 @@ const RESET_SIGNAL_FAILURE_LIMIT = 30;
 const RESET_SIGNAL_FAILURE_WINDOW_MS = 60_000;
 const RESET_SIGNAL_FAILURE_TRACKED_IPS_MAX = 5_000;
 
-export async function registerCtiResetRoutes(app: FastifyInstance): Promise<void> {
+/**
+ * I2 follow-up (re-review): the per-IP block above is a blunt instrument —
+ * it holds an entire IP responsible for 401s that may not be malicious at
+ * all. A flood is often an office's OWN stale tabs (expired/revoked
+ * tokens still polling), and blocking the IP outright then also blocks
+ * every OTHER rep behind the same NAT, valid tokens included (measured:
+ * 11 stale tabs × 3 polls/min alone clears the 30/min threshold). This
+ * bounded map remembers which rate keys (the same hash resetSignalRateKey
+ * computes — never the raw token) had a lookup succeed recently, and lets
+ * a request bypass the IP block when its own key is in it. A forged
+ * bearer never succeeds, so it can never earn a place in this map — the
+ * bypass is unforgeable, only ever earned by an actual valid session.
+ */
+const RESET_SIGNAL_KNOWN_GOOD_TTL_MS = 5 * 60_000;
+const RESET_SIGNAL_KNOWN_GOOD_MAX = 5_000;
+
+export interface RegisterCtiResetRoutesOptions {
+  /** Test seam: override the per-IP failed-lookup map's cap (default RESET_SIGNAL_FAILURE_TRACKED_IPS_MAX). */
+  failureTrackedIpsMax?: number;
+  /** Test seam: override the known-good key map's cap (default RESET_SIGNAL_KNOWN_GOOD_MAX). */
+  knownGoodKeysMax?: number;
+}
+
+export async function registerCtiResetRoutes(
+  app: FastifyInstance,
+  opts: RegisterCtiResetRoutesOptions = {},
+): Promise<void> {
+  const failureTrackedIpsMax = opts.failureTrackedIpsMax ?? RESET_SIGNAL_FAILURE_TRACKED_IPS_MAX;
+  const knownGoodKeysMax = opts.knownGoodKeysMax ?? RESET_SIGNAL_KNOWN_GOOD_MAX;
   const failedLookupsByIp = new Map<string, { count: number; windowEndsAt: number }>();
+  const knownGoodKeys = new Map<string, { expiresAt: number }>();
 
   function recordFailedLookup(ip: string): void {
     const now = Date.now();
@@ -89,7 +118,7 @@ export async function registerCtiResetRoutes(app: FastifyInstance): Promise<void
       : { count: existing.count + 1, windowEndsAt: existing.windowEndsAt };
     failedLookupsByIp.delete(ip); // re-insert so this IP is most-recently-used
     failedLookupsByIp.set(ip, entry);
-    if (failedLookupsByIp.size > RESET_SIGNAL_FAILURE_TRACKED_IPS_MAX) {
+    if (failedLookupsByIp.size > failureTrackedIpsMax) {
       const oldestIp = failedLookupsByIp.keys().next().value;
       if (oldestIp !== undefined) failedLookupsByIp.delete(oldestIp);
     }
@@ -105,12 +134,33 @@ export async function registerCtiResetRoutes(app: FastifyInstance): Promise<void
     return existing.count > RESET_SIGNAL_FAILURE_LIMIT;
   }
 
+  /** Marks `key` (a resetSignalRateKey hash) as having just succeeded, so it
+   *  can ride through its own IP being blocked later. */
+  function recordKnownGood(key: string): void {
+    knownGoodKeys.delete(key); // re-insert so this key is most-recently-used
+    knownGoodKeys.set(key, { expiresAt: Date.now() + RESET_SIGNAL_KNOWN_GOOD_TTL_MS });
+    if (knownGoodKeys.size > knownGoodKeysMax) {
+      const oldestKey = knownGoodKeys.keys().next().value;
+      if (oldestKey !== undefined) knownGoodKeys.delete(oldestKey);
+    }
+  }
+
+  function isKnownGood(key: string): boolean {
+    const existing = knownGoodKeys.get(key);
+    if (!existing) return false;
+    if (Date.now() >= existing.expiresAt) {
+      knownGoodKeys.delete(key);
+      return false;
+    }
+    return true;
+  }
+
   app.get(
     '/auth/reset-signal',
     {
       config: { rateLimit: { max: RESET_SIGNAL_RATE_MAX, timeWindow: '1 minute', keyGenerator: resetSignalRateKey } },
       onRequest: async (req, reply) => {
-        if (isBlockedForFailedLookups(req.ip)) {
+        if (isBlockedForFailedLookups(req.ip) && !isKnownGood(resetSignalRateKey(req))) {
           return reply.code(429).send({ error: 'Too many failed attempts' });
         }
       },
@@ -121,6 +171,7 @@ export async function registerCtiResetRoutes(app: FastifyInstance): Promise<void
         recordFailedLookup(req.ip);
         return reply.code(401).send({ error: 'Unauthorized' });
       }
+      recordKnownGood(resetSignalRateKey(req));
       const resetDue = isCtiResetDue(detail.ctiResetRequestedAt, detail.sessionCreatedAt);
       /**
        * R2 (controller ruling): self-heal a session that actually reset but

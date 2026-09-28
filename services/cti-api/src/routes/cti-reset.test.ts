@@ -392,6 +392,134 @@ describe('GET /auth/reset-signal — a per-IP ceiling on failed lookups (I2)', (
 });
 
 /**
+ * I2 follow-up (re-review): the IP block above also caught a VALID token
+ * behind the same flooded IP — a real risk, since a flood is often exactly
+ * an office's OWN stale tabs (11 stale tabs × 3 polls/min > 30 failures/min
+ * blocks the whole office, valid tokens included). A bounded map of rate
+ * keys (the same hash resetSignalRateKey computes) that had a recent
+ * SUCCESSFUL lookup lets a request bypass the IP block when its own key
+ * already proved itself — a forged bearer never succeeds, so it can never
+ * be in this map.
+ */
+describe('GET /auth/reset-signal — a known-good token survives its own IP being blocked (I2 follow-up)', () => {
+  const FLOODED_IP = '203.0.113.88';
+  const floodWithGarbage = async (ip: string, tag: string, count = 31) => {
+    state.detail = null;
+    for (let i = 0; i < count; i++) {
+      await app.inject({ method: 'GET', url: '/auth/reset-signal', headers: { authorization: `Bearer ${tag}-${i}` }, remoteAddress: ip });
+    }
+  };
+  const pollWith = (token: string, ip: string) =>
+    app.inject({ method: 'GET', url: '/auth/reset-signal', headers: { authorization: `Bearer ${token}` }, remoteAddress: ip });
+
+  it('(a) flood from one IP, then a PREVIOUSLY VALID token from the same IP → still 200', async () => {
+    // The rep's own token succeeds once, first — recorded known-good.
+    state.detail = staleRequest();
+    const goodToken = 'good-tok-1';
+    expect((await pollWith(goodToken, FLOODED_IP)).statusCode).toBe(200);
+
+    // The SAME ip now floods with garbage — e.g. stale tabs whose tokens
+    // expired or were revoked — until it trips the IP block.
+    await floodWithGarbage(FLOODED_IP, 'stale-tok');
+    // Confirm the IP is genuinely blocked for a fresh/unknown token now.
+    expect((await pollWith('stale-tok-32', FLOODED_IP)).statusCode).toBe(429);
+
+    // But the rep's own, previously-successful token still gets through.
+    state.detail = staleRequest();
+    expect((await pollWith(goodToken, FLOODED_IP)).statusCode).toBe(200);
+  });
+
+  it('(b) a never-seen token from the flooded IP → 429', async () => {
+    await floodWithGarbage(FLOODED_IP, 'flood-tok');
+    state.detail = staleRequest(); // would succeed if it ever reached the handler
+    expect((await pollWith('never-seen-before', FLOODED_IP)).statusCode).toBe(429);
+  });
+
+  it('(c) a known-good entry expires after its 5-minute TTL', async () => {
+    vi.useFakeTimers();
+    try {
+      state.detail = staleRequest();
+      const goodToken = 'good-tok-ttl';
+      expect((await pollWith(goodToken, FLOODED_IP)).statusCode).toBe(200);
+
+      await floodWithGarbage(FLOODED_IP, 'ttl-flood');
+      // Still within the TTL: the known-good token still bypasses the block.
+      state.detail = staleRequest();
+      expect((await pollWith(goodToken, FLOODED_IP)).statusCode).toBe(200);
+
+      vi.advanceTimersByTime(5 * 60_000 + 1_000); // past the known-good TTL (and the 60s failure window)
+      await floodWithGarbage(FLOODED_IP, 'ttl-flood-again'); // re-block; the failure window elapsed too
+
+      // The previously-known-good token has expired and no longer bypasses.
+      state.detail = staleRequest();
+      expect((await pollWith(goodToken, FLOODED_IP)).statusCode).toBe(429);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * I2 follow-up, minor: both bounded maps' caps are exercised with a tiny
+ * injected cap (registerCtiResetRoutes's optional second argument) rather
+ * than literally pushing thousands of entries through — same eviction
+ * logic, a fast and deterministic test.
+ */
+describe('GET /auth/reset-signal — the per-IP and known-good maps are capped (I2 follow-up, minor)', () => {
+  function newCappedApp() {
+    const stream = new Writable({ write(_chunk, _enc, cb) { cb(); } });
+    return Fastify({ logger: { level: 'info', stream } });
+  }
+
+  it('the failed-lookup map evicts the oldest IP once it exceeds its cap', async () => {
+    const capped = newCappedApp();
+    await registerCtiResetRoutes(capped, { failureTrackedIpsMax: 2 });
+    await capped.ready();
+    state.detail = null;
+    const failFrom = (ip: string, token: string) =>
+      capped.inject({ method: 'GET', url: '/auth/reset-signal', headers: { authorization: `Bearer ${token}` }, remoteAddress: ip });
+
+    for (let i = 0; i < 31; i++) await failFrom('203.0.113.1', `ip1-tok-${i}`);
+    expect((await failFrom('203.0.113.1', 'ip1-tok-31')).statusCode).toBe(429); // IP1 tracked + blocked
+
+    await failFrom('203.0.113.2', 'ip2-tok-0'); // a second distinct tracked IP — map size now 2 == cap
+    await failFrom('203.0.113.3', 'ip3-tok-0'); // a third distinct IP: over the cap, evicts the oldest (IP1)
+
+    // IP1's tracked state is gone: one fresh failure starts a NEW window/count — 401, not 429.
+    expect((await failFrom('203.0.113.1', 'ip1-tok-fresh')).statusCode).toBe(401);
+    await capped.close();
+  });
+
+  it('the known-good map evicts the oldest key once it exceeds its cap', async () => {
+    const capped = newCappedApp();
+    await registerCtiResetRoutes(capped, { knownGoodKeysMax: 2 });
+    await capped.ready();
+    const IP = '203.0.113.44';
+    const succeedWith = async (token: string) => {
+      state.detail = staleRequest();
+      expect((await capped.inject({ method: 'GET', url: '/auth/reset-signal', headers: { authorization: `Bearer ${token}` }, remoteAddress: IP })).statusCode).toBe(200);
+    };
+
+    await succeedWith('good-tok-A'); // oldest — evicted once C is added
+    await succeedWith('good-tok-B');
+    await succeedWith('good-tok-C'); // pushes the map (cap 2) over, evicting A
+
+    state.detail = null;
+    for (let i = 0; i < 31; i++) {
+      await capped.inject({ method: 'GET', url: '/auth/reset-signal', headers: { authorization: `Bearer flood-${i}` }, remoteAddress: IP });
+    }
+    expect((await capped.inject({ method: 'GET', url: '/auth/reset-signal', headers: { authorization: 'Bearer flood-31' }, remoteAddress: IP })).statusCode).toBe(429);
+
+    // A (evicted) no longer bypasses the block…
+    state.detail = staleRequest();
+    expect((await capped.inject({ method: 'GET', url: '/auth/reset-signal', headers: { authorization: 'Bearer good-tok-A' }, remoteAddress: IP })).statusCode).toBe(429);
+    // …but C (still tracked) does.
+    expect((await capped.inject({ method: 'GET', url: '/auth/reset-signal', headers: { authorization: 'Bearer good-tok-C' }, remoteAddress: IP })).statusCode).toBe(200);
+    await capped.close();
+  });
+});
+
+/**
  * Controller ruling R2 (adds to the brief): GET /auth/reset-signal also
  * self-heals a session whose reset-complete POST never landed. A rep who
  * actually reset proves it by holding a session CREATED AFTER the request
