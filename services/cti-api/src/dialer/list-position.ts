@@ -1,11 +1,22 @@
 /**
- * Two reps, one list (2026-09-23 ruling, spec §4): creating a run over the
- * SAME Salesforce list view within the last 12h starts the queue right after
- * the furthest position any rep — including the one starting THIS run —
- * reached on it. The records before that spot go to the end, so the list
- * gets worked exactly once per lap instead of every run re-dialing the top.
+ * Two reps, one list (2026-09-23 ruling, spec §4; frontier rule corrected by
+ * review I1, 2026-09-28): creating a run over the SAME Salesforce list view
+ * within the last 12h starts the queue right after the position of the MOST
+ * RECENT dial on it — including one from THIS same rep's earlier run. The
+ * records before that spot go to the end, so the list gets worked exactly
+ * once per lap instead of every run re-dialing the top.
+ *
+ * I1: the position must come from the MOST RECENT dial, not the highest
+ * position ever reached in the window. A `max(list_position)` aggregate is
+ * sticky — once any dial anywhere in the window ever touches a high position
+ * (a full-list run, or a limited run that happened to land near the end), that
+ * high-water mark outlives it for the rest of the 12h window, so every later
+ * run wraps back to the top even while an untouched middle segment is still
+ * waiting for its turn. Ordering by `dialed_at` instead tracks the ACTUAL
+ * current frontier — whichever rep dialed most recently — which is what "two
+ * reps work the list together" was always meant to mean.
  */
-import { and, eq, gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, isNotNull } from 'drizzle-orm';
 import type { getDb } from '@cti/db';
 import { schema } from '@cti/db';
 
@@ -70,23 +81,39 @@ export async function listStartPosition(
   const i = schema.dialerQueueItems;
   const s = schema.dialerSessions;
   const u = schema.users;
-  const rows = await db
-    .select({ position: sql<number | null>`max(${i.listPosition})`, userId: u.id, name: u.displayName })
+  const scope = and(
+    eq(s.orgId, orgId),
+    eq(s.listViewId, listViewId),
+    gte(a.dialedAt, new Date(now.getTime() - LIST_SHARE_WINDOW_MS)),
+  );
+  // The frontier: the position of the MOST RECENT dial in the window (I1) —
+  // `dialed_at DESC`, then `id DESC` as a stable tiebreak so two dials in the
+  // same instant still resolve to one deterministic row. `list_position IS
+  // NOT NULL` mirrors the old MAX read's null filter: a row with no stamped
+  // position was never part of a rotated list-view build and cannot anchor a
+  // frontier.
+  const latest = await db
+    .select({ position: i.listPosition })
+    .from(a)
+    .innerJoin(i, eq(i.id, a.itemId))
+    .innerJoin(s, eq(s.id, a.sessionId))
+    .where(and(scope, isNotNull(i.listPosition)))
+    .orderBy(desc(a.dialedAt), desc(a.id))
+    .limit(1);
+  if (latest.length === 0 || latest[0]!.position == null) return null;
+  // Who worked it: every rep with a dial in the window, independent of the
+  // frontier lookup above — unchanged shape from before this fix.
+  const workers = await db
+    .select({ userId: u.id, name: u.displayName })
     .from(a)
     .innerJoin(i, eq(i.id, a.itemId))
     .innerJoin(s, eq(s.id, a.sessionId))
     .innerJoin(u, eq(u.id, s.userId))
-    .where(and(
-      eq(s.orgId, orgId),
-      eq(s.listViewId, listViewId),
-      gte(a.dialedAt, new Date(now.getTime() - LIST_SHARE_WINDOW_MS)),
-    ))
+    .where(scope)
     .groupBy(u.id, u.displayName);
-  const positions = rows.map((r) => r.position).filter((p): p is number => p != null);
-  if (!positions.length) return null;
   return {
-    position: Math.max(...positions),
-    workedBy: rows.map((r) => ({ userId: r.userId, name: r.name ?? 'Someone' })),
+    position: latest[0]!.position,
+    workedBy: workers.map((r) => ({ userId: r.userId, name: r.name ?? 'Someone' })),
   };
 }
 

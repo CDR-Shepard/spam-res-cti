@@ -42,16 +42,24 @@ vi.mock('@cti/db', async (importOriginal) => {
         followupRolloverJobs: { findMany: async () => state.jobs },
       },
       update: () => ({ set: () => ({ where: async () => undefined }) }),
-      // The ONLY thing `listStartPosition`'s grouped join touches. Ignoring
-      // `where`'s argument is fine here — that condition is pinned directly,
-      // with real SQL rendering, in `dialer/list-position.test.ts`; this
-      // harness only needs to prove WHETHER and WHEN the route reaches it.
+      // The ONLY thing `listStartPosition`'s two reads touch (I1: the frontier
+      // lookup — `.orderBy().limit()` — and the workers lookup — `.groupBy()`).
+      // Ignoring `where`'s argument is fine here — that condition, and the
+      // ORDER BY itself, are pinned directly with real SQL rendering in
+      // `dialer/list-position.test.ts`; this harness only needs to prove
+      // WHETHER and WHEN the route reaches it. Neither query's `position`
+      // value is asserted on by this file's tests (only `workedBy` and the
+      // route's own `total`/`startedFrom`), so the frontier read just needs
+      // to resolve non-empty whenever `positionRows` is non-empty.
       select: () => {
+        const positions = state.positionRows.map((r) => r.position).filter((p): p is number => p != null);
         const chain = {
           from: () => chain,
           innerJoin: () => chain,
           where: () => chain,
-          groupBy: () => Promise.resolve(state.positionRows),
+          orderBy: () => chain,
+          limit: () => Promise.resolve(positions.length ? [{ position: Math.max(...positions) }] : []),
+          groupBy: () => Promise.resolve(state.positionRows.map((r) => ({ userId: r.userId, name: r.name }))),
         };
         return chain;
       },

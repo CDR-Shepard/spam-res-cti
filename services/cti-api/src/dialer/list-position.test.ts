@@ -24,67 +24,208 @@ describe('rotateAfter', () => {
   });
 });
 
-/** Chainable fake matching the query shape: select → from → 3x innerJoin →
- *  where → groupBy (the terminal, awaited link — mirrors already-worked.test.ts
- *  and contact-history-live.test.ts's fakes for the same drizzle chain shape). */
-function fakeDb(rows: Array<{ position: number | null; userId: string; name: string | null }>) {
+/**
+ * Chainable fake for PINNING the exact SQL of the two queries
+ * `listStartPosition` now issues: the "most recent dial" lookup (terminal
+ * `.orderBy().limit()`) and the "who worked this list" lookup (terminal
+ * `.groupBy()`, unchanged shape from before). Both share the same
+ * select → from → innerJoin(s) → where prefix, so one fake chain serves
+ * either, dispatching on whichever terminal method is actually called.
+ * Mirrors already-worked.test.ts / contact-history-live.test.ts's fakes for
+ * the same drizzle chain shape.
+ */
+function fakeDb(opts: {
+  latest?: Array<{ position: number | null }>;
+  workers?: Array<{ userId: string; name: string | null }>;
+} = {}) {
   const wheres: SQL[] = [];
-  const chain = {
+  const orderBys: unknown[][] = [];
+  const limits: number[] = [];
+  const chain: {
+    from: () => typeof chain;
+    innerJoin: () => typeof chain;
+    where: (w: SQL) => typeof chain;
+    orderBy: (...args: unknown[]) => typeof chain;
+    limit: (n: number) => Promise<Array<{ position: number | null }>>;
+    groupBy: () => Promise<Array<{ userId: string; name: string | null }>>;
+  } = {
     from: () => chain,
     innerJoin: () => chain,
     where: (w: SQL) => { wheres.push(w); return chain; },
-    groupBy: () => Promise.resolve(rows),
+    orderBy: (...args: unknown[]) => { orderBys.push(args); return chain; },
+    limit: (n: number) => { limits.push(n); return Promise.resolve(opts.latest ?? []); },
+    groupBy: () => Promise.resolve(opts.workers ?? []),
   };
   const db = { select: vi.fn(() => chain) };
-  return { db: db as never, wheres };
+  return { db: db as never, wheres, orderBys, limits };
+}
+
+/**
+ * Fake that behaves like the real two queries against a growing table of
+ * `dialer_dial_attempts` fixture rows — used for the end-to-end wrap/continue/
+ * concurrency scenarios below, where what matters is that the RIGHT row wins,
+ * not the literal SQL text (that's pinned separately, above).
+ */
+function fakeDbFromAttempts(
+  attempts: ReadonlyArray<{ position: number | null; userId: string; name: string | null; dialedAt: Date }>,
+) {
+  const chain = {
+    from: () => chain,
+    innerJoin: () => chain,
+    where: () => chain,
+    orderBy: () => chain,
+    limit: () => {
+      const positioned = attempts.filter((a) => a.position != null);
+      const latest = [...positioned].sort((a, b) => b.dialedAt.getTime() - a.dialedAt.getTime())[0];
+      return Promise.resolve(latest ? [{ position: latest.position }] : []);
+    },
+    groupBy: () => {
+      const seen = new Map<string, string | null>();
+      for (const a of attempts) if (!seen.has(a.userId)) seen.set(a.userId, a.name);
+      return Promise.resolve([...seen.entries()].map(([userId, name]) => ({ userId, name })));
+    },
+  };
+  const db = { select: vi.fn(() => chain) };
+  return { db: db as never };
 }
 
 describe('listStartPosition', () => {
-  it('pins: org, list view, 12h bound (as a literal now - 12h), and the shape of the group-by read', async () => {
+  it('pins: org, list view, 12h bound (as a literal now - 12h), and the shape of BOTH reads — the most-recent-dial lookup (ORDER BY dialed_at DESC, a stable tiebreak, LIMIT 1) and the who-worked-it lookup', async () => {
     const now = new Date('2026-09-23T18:00:00Z');
-    const { db, wheres } = fakeDb([]);
+    // A non-empty `latest` so the function doesn't short-circuit before the
+    // second (workers) query — both reads are what this test pins.
+    const { db, wheres, orderBys, limits } = fakeDb({ latest: [{ position: 5 }] });
 
     await listStartPosition(db, 'ORG-1', '00B000000000001AAA', now);
 
-    expect(wheres).toHaveLength(1);
-    const { sql, params } = new PgDialect().sqlToQuery(wheres[0]!);
-    expect(sql).toContain('"dialer_sessions"."org_id" = $1');
-    expect(sql).toContain('"dialer_sessions"."list_view_id" = $2');
-    expect(sql).toContain('"dialer_dial_attempts"."dialed_at" >= $3');
-    expect(params).toEqual(['ORG-1', '00B000000000001AAA', new Date(now.getTime() - 12 * 60 * 60_000).toISOString()]);
+    // Two queries now, not one: the frontier (most-recent-dial) lookup, then
+    // the distinct-reps lookup. Both share the same WHERE scope.
+    expect(wheres).toHaveLength(2);
+    for (const w of wheres) {
+      const { sql, params } = new PgDialect().sqlToQuery(w);
+      expect(sql).toContain('"dialer_sessions"."org_id" = $1');
+      expect(sql).toContain('"dialer_sessions"."list_view_id" = $2');
+      expect(sql).toContain('"dialer_dial_attempts"."dialed_at" >= $3');
+      expect(params).toEqual(['ORG-1', '00B000000000001AAA', new Date(now.getTime() - 12 * 60 * 60_000).toISOString()]);
+    }
+    // Only the frontier query orders and limits — the workers query still
+    // reads every distinct rep in the window.
+    expect(orderBys).toHaveLength(1);
+    expect(limits).toEqual([1]);
+    // Only the FIRST (frontier) query excludes unpositioned rows — a row with
+    // no stamped list_position can't anchor a frontier. The workers query
+    // (built second) counts every rep regardless.
+    expect(new PgDialect().sqlToQuery(wheres[0]!).sql).toContain('is not null');
+    expect(new PgDialect().sqlToQuery(wheres[1]!).sql).not.toContain('is not null');
     // Spelled out so the boundary is readable without running the helper, and
     // cross-checked against the exported constant so the two never drift.
     expect(LIST_SHARE_WINDOW_MS).toBe(12 * 60 * 60_000);
     expect(new Date(now.getTime() - 12 * 60 * 60_000).toISOString()).toBe('2026-09-23T06:00:00.000Z');
   });
 
-  it('returns the max position across every rep who dialed the list, with distinct workedBy ids/names', async () => {
-    const { db } = fakeDb([
-      { position: 42, userId: 'U-GARRETT', name: 'Garrett' },
-      { position: 87, userId: 'U-DANNY', name: 'Danny' },
-    ]);
+  it('the frontier query orders by dialed_at DESC with a stable tiebreak', async () => {
+    const { db, orderBys } = fakeDb({});
+    await listStartPosition(db, 'O1', 'L1', new Date());
+    expect(orderBys).toHaveLength(1);
+    const rendered = orderBys[0]!.map((c) => new PgDialect().sqlToQuery(c as SQL).sql);
+    expect(rendered).toEqual(['"dialer_dial_attempts"."dialed_at" desc', '"dialer_dial_attempts"."id" desc']);
+  });
+
+  it('takes the position of the MOST RECENT dial, not the highest position ever reached', async () => {
+    const { db } = fakeDb({
+      latest: [{ position: 40 }],
+      workers: [{ userId: 'U-GARRETT', name: 'Garrett' }, { userId: 'U-DANNY', name: 'Danny' }],
+    });
     const got = await listStartPosition(db, 'O1', 'L1', new Date());
     expect(got).toEqual({
-      position: 87,
+      position: 40,
       workedBy: [{ userId: 'U-GARRETT', name: 'Garrett' }, { userId: 'U-DANNY', name: 'Danny' }],
     });
   });
 
   it('a null display name reads as "Someone" rather than dropping the row', async () => {
-    const { db } = fakeDb([{ position: 5, userId: 'U1', name: null }]);
+    const { db } = fakeDb({ latest: [{ position: 5 }], workers: [{ userId: 'U1', name: null }] });
     expect(await listStartPosition(db, 'O1', 'L1', new Date())).toEqual({
       position: 5, workedBy: [{ userId: 'U1', name: 'Someone' }],
     });
   });
 
   it('nobody dialed this list in the window → null (queue starts at the top)', async () => {
-    const { db } = fakeDb([]);
+    const { db } = fakeDb({ latest: [], workers: [] });
     expect(await listStartPosition(db, 'O1', 'L1', new Date())).toBeNull();
   });
 
-  it('a grouped row whose max is null (a session with no positioned items) is ignored', async () => {
-    const { db } = fakeDb([{ position: null, userId: 'U1', name: 'Garrett' }]);
+  it('the one row in the window has a null position (no positioned items) → null, ignored before the workers read even matters', async () => {
+    const { db } = fakeDb({ latest: [], workers: [{ userId: 'U1', name: 'Garrett' }] });
     expect(await listStartPosition(db, 'O1', 'L1', new Date())).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // I1 (spec 2026-09-28 review, ruling: fix it): the OLD rule (MAX list_position
+  // ever reached, across the whole 12h window) is sticky — once any dial ever
+  // touches a high position, every later run wraps to 0 forever, because a
+  // stale high-water-mark never ages out until the whole window does. The NEW
+  // rule (the position of the MOST RECENT dial) tracks the ACTUAL frontier.
+  // -------------------------------------------------------------------------
+  describe('the frontier tracks the most recent dial, not a sticky historical max', () => {
+    it('wrap: limited runs of 100 on a 200-record list alternate segments forever — 0–99, 100–199, 0–99, 100–199 — never getting stuck re-dialing one half', async () => {
+      const LIST_LEN = 200;
+      const RUN_SIZE = 100;
+      const attempts: Array<{ position: number; userId: string; name: string | null; dialedAt: Date }> = [];
+      let clock = new Date('2026-09-23T06:00:00Z').getTime();
+      const dialSegment = (start: number) => {
+        for (let k = 0; k < RUN_SIZE; k++) {
+          clock += 1_000;
+          attempts.push({ position: (start + k) % LIST_LEN, userId: 'U1', name: 'Rep', dialedAt: new Date(clock) });
+        }
+      };
+      const nextStart = async () => {
+        const { db } = fakeDbFromAttempts(attempts);
+        const got = await listStartPosition(db, 'O1', 'L1', new Date(clock + 60_000));
+        return rotateAfter(Array.from({ length: LIST_LEN }, (_, i) => i), got?.position ?? null).startedFrom;
+      };
+
+      expect(await nextStart()).toBe(0); // nothing dialed yet
+      dialSegment(0); // run 1: 0..99
+      expect(await nextStart()).toBe(100);
+      dialSegment(100); // run 2: 100..199
+      expect(await nextStart()).toBe(0);
+      dialSegment(0); // run 3: 0..99 AGAIN
+      expect(await nextStart()).toBe(100); // run 4 must continue at 100 — not re-wrap
+      dialSegment(100); // run 4: 100..199
+      expect(await nextStart()).toBe(0);
+    });
+
+    it('a 150-of-200 run followed by a second run continues at 150', async () => {
+      const attempts = Array.from({ length: 150 }, (_, k) => ({
+        position: k, userId: 'U1', name: 'Rep', dialedAt: new Date(Date.UTC(2026, 8, 23, 6, 0, k)),
+      }));
+      const { db } = fakeDbFromAttempts(attempts);
+      const got = await listStartPosition(db, 'O1', 'L1', new Date('2026-09-23T07:00:00Z'));
+      expect(got?.position).toBe(149);
+      expect(rotateAfter(Array.from({ length: 200 }, (_, i) => i), got!.position).startedFrom).toBe(150);
+    });
+
+    it('two reps concurrently: the new run starts after the LATEST dial, not whichever rep reached the higher position', async () => {
+      const attempts = [
+        // Still inside the 12h window, but stale relative to Rep B's dial.
+        { position: 199, userId: 'U-A', name: 'Rep A', dialedAt: new Date('2026-09-23T00:30:00Z') },
+        { position: 40, userId: 'U-B', name: 'Rep B', dialedAt: new Date('2026-09-23T06:00:00Z') },
+      ];
+      const { db } = fakeDbFromAttempts(attempts);
+      const got = await listStartPosition(db, 'O1', 'L1', new Date('2026-09-23T06:30:00Z'));
+      expect(got?.position).toBe(40);
+      expect(got?.workedBy).toEqual([
+        { userId: 'U-A', name: 'Rep A' }, { userId: 'U-B', name: 'Rep B' },
+      ]);
+    });
+
+    it('no dials in the window → null, so rotateAfter starts at 0', async () => {
+      const { db } = fakeDbFromAttempts([]);
+      const got = await listStartPosition(db, 'O1', 'L1', new Date());
+      expect(got).toBeNull();
+      expect(rotateAfter(Array.from({ length: 200 }, (_, i) => i), null).startedFrom).toBe(0);
+    });
   });
 });
 
