@@ -143,15 +143,26 @@ export async function registerCtiResetRoutes(app: FastifyInstance): Promise<void
         (detail.ctiResetCompletedAt === null ||
           detail.ctiResetRequestedAt.getTime() >= detail.ctiResetCompletedAt.getTime());
       if (!resetDue && resetOutstanding) {
-        await getDb()
-          .update(schema.users)
-          .set({ ctiResetCompletedAt: sql`now()` })
-          .where(
-            and(
-              eq(schema.users.id, detail.user.userId),
-              sql`${schema.users.ctiResetRequestedAt} > coalesce(${schema.users.ctiResetCompletedAt}, 'epoch')`,
-            ),
-          );
+        // M2 (review fix): this is a best-effort self-heal riding on top of a
+        // route whose real job is just answering { resetDue }. A poll runs
+        // every 20 s from every tab — a transient failure here (pool
+        // exhaustion, a lock timeout, anything) must never turn a routine
+        // poll into a 500. Caught, logged, and the normal response still
+        // goes out; the next poll gets another chance at the same no-op-safe
+        // guarded UPDATE.
+        try {
+          await getDb()
+            .update(schema.users)
+            .set({ ctiResetCompletedAt: sql`now()` })
+            .where(
+              and(
+                eq(schema.users.id, detail.user.userId),
+                sql`${schema.users.ctiResetRequestedAt} > coalesce(${schema.users.ctiResetCompletedAt}, 'epoch')`,
+              ),
+            );
+        } catch (err) {
+          req.log.warn({ err, userId: detail.user.userId }, 'cti_reset_signal_self_heal_failed');
+        }
       }
       reply.header('cache-control', 'no-store');
       return { resetDue };

@@ -33,6 +33,9 @@ const state = vi.hoisted(() => ({
   updateRows: [] as Array<Record<string, unknown>>,
   revoked: [] as string[],
   revokedAll: [] as string[],
+  // M2: when true, the fake `update().set().where()` rejects instead of
+  // resolving — simulates the DB failing mid-write for the R2 self-heal.
+  updateThrows: false,
 }));
 
 vi.mock('@cti/auth', async (importOriginal) => ({
@@ -85,6 +88,12 @@ function fakeDb() {
           return {
             where(where: unknown) {
               state.updates.push({ table, set: values, where });
+              if (state.updateThrows) {
+                const err = new Error('db down');
+                return Object.assign(Promise.reject(err), {
+                  returning: async (_cols?: unknown) => { throw err; },
+                });
+              }
               return Object.assign(Promise.resolve(undefined), {
                 returning: async (_cols?: unknown) => state.updateRows,
               });
@@ -127,6 +136,7 @@ beforeEach(async () => {
   state.updateRows = [];
   state.revoked = [];
   state.revokedAll = [];
+  state.updateThrows = false;
   logLines = [];
   const stream = new Writable({
     write(chunk, _enc, cb) {
@@ -446,5 +456,23 @@ describe('GET /auth/reset-signal — self-heals a session that already reset (R2
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ resetDue: false });
     expect(state.updates).toEqual([]);
+  });
+});
+
+/**
+ * M2 (review fix): the R2 self-heal is a best-effort write on top of a route
+ * whose real job is just answering { resetDue } — a rep's tab polls it every
+ * 20 s, and a failure here (a pool hiccup, a lock timeout, anything) must
+ * never turn a routine poll into a 500. It's caught, logged, and the normal
+ * response still goes out.
+ */
+describe('GET /auth/reset-signal — a failed R2 self-heal never breaks the poll (M2)', () => {
+  it('catches the guarded UPDATE error, logs a warning, and still answers 200 with resetDue', async () => {
+    state.detail = staleRequest(); // outstanding + fresh — the R2 branch that would otherwise write
+    state.updateThrows = true;
+    const res = await signal();
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ resetDue: false });
+    expect(logged('cti_reset_signal_self_heal_failed')).toEqual([expect.objectContaining({ userId: 'u1' })]);
   });
 });
