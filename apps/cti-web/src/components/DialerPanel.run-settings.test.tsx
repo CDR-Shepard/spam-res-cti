@@ -171,3 +171,77 @@ describe('Ready to dial — run settings', () => {
     expect(await screen.findByText('Once · first 100 · missed → next business day')).toBeTruthy();
   });
 });
+
+// Important 3 (spec 2026-09-28 review): wiring tests that kill mutations
+// M8/M9 (the reseed effect's dependency array), M10 (a new session DOES
+// reseed), M18/M19 (the runSize prop reaching CurrentRecord for an active
+// limited run).
+describe('Ready to dial — run settings wiring (review fix, Important 3)', () => {
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+  it('a re-render with a NEW runDefaults object does not overwrite what the rep already picked (kills M8/M9)', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(READY);
+    const { rerender } = render(
+      <DialerPanel
+        sessionId="sess1" onScreenPop={noop} onStartFromListView={async () => {}}
+        onPrepare={async () => {}} onJoin={async () => true} onStop={noop} onComplete={noop} onDismiss={noop}
+        runDefaults={{ passes: 2, maxRecords: null, rolloverBusinessDays: 1 }}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Once' })); // the rep deviates from today's default
+    expect(pressed('Once')).toBe('true');
+    // A fresh /auth/me lands mid-choice (e.g. beginRun's refresh resolving) —
+    // a brand-new object, different values, SAME session. Must not clobber
+    // what the rep just picked.
+    rerender(
+      <DialerPanel
+        sessionId="sess1" onScreenPop={noop} onStartFromListView={async () => {}}
+        onPrepare={async () => {}} onJoin={async () => true} onStop={noop} onComplete={noop} onDismiss={noop}
+        runDefaults={{ passes: 1, maxRecords: 50, rolloverBusinessDays: 2 }}
+      />,
+    );
+    expect(pressed('Once')).toBe('true');
+    expect((screen.getByLabelText('How many') as HTMLInputElement).value).toBe('');
+    expect(pressed('Next business day')).toBe('true');
+  });
+
+  it('a NEW sessionId reseeds the draft from the latest defaults (kills M10)', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(READY);
+    const { rerender } = render(
+      <DialerPanel
+        sessionId="sess1" onScreenPop={noop} onStartFromListView={async () => {}}
+        onPrepare={async () => {}} onJoin={async () => true} onStop={noop} onComplete={noop} onDismiss={noop}
+        runDefaults={{ passes: 2, maxRecords: null, rolloverBusinessDays: 1 }}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Once' })); // the rep deviates from today's default
+    expect(pressed('Once')).toBe('true');
+    // A genuinely NEW run, with a fresh runDefaults object too — THIS should
+    // reseed, unlike the same-session case above.
+    rerender(
+      <DialerPanel
+        sessionId="sess2" onScreenPop={noop} onStartFromListView={async () => {}}
+        onPrepare={async () => {}} onJoin={async () => true} onStop={noop} onComplete={noop} onDismiss={noop}
+        runDefaults={{ passes: 2, maxRecords: 75, rolloverBusinessDays: 2 }}
+      />,
+    );
+    await waitFor(() => expect((screen.getByLabelText('How many') as HTMLInputElement).value).toBe('75'));
+    expect(pressed('Twice')).toBe('true');
+    expect(pressed('In 2 business days')).toBe('true');
+  });
+
+  it('an active limited run with a current item gets the runSize prop (kills M18/M19)', async () => {
+    vi.spyOn(dialerApi, 'getDialer').mockResolvedValue({
+      ...READY,
+      session: { id: 'sess1', status: 'active', passes: 1, maxRecords: 100, rolloverBusinessDays: 1, runSize: 100 },
+      counts: { total: 100, done: 3, connected: 0, noConnect: 3, skipped: 0, unreachable: 0, pending: 97 },
+      currentItem: {
+        id: 'i1', recordId: '00Q1', objectType: 'Lead', status: 'dialing', toNumber: '+16195551234', runPosition: 4,
+      },
+      firstPassTotal: 100,
+      skipBreakdown: {},
+    });
+    mount();
+    expect(await screen.findByText('record 4 of 100')).toBeTruthy();
+  });
+});
