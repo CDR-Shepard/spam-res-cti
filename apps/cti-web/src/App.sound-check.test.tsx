@@ -120,6 +120,10 @@ const ALLOW_VERDICT = {
 };
 /** The run's server status: `ready` until Start dialing sends `start`. */
 let runStatus: 'ready' | 'active' = 'ready';
+/** What /firewall/precall answers. */
+let verdict: { decision: string } = ALLOW_VERDICT;
+/** /telephony/token answers 401 once set (a dead session). */
+let sessionDead = false;
 const runView = () => ({
   session: { id: 'sess-1', status: runStatus },
   counts: { total: 1, done: 0, connected: 0, noConnect: 0, skipped: 0, unreachable: 0, pending: 1 },
@@ -134,15 +138,21 @@ beforeEach(() => {
   localStorage.clear();
   pending = null;
   runStatus = 'ready';
+  verdict = ALLOW_VERDICT;
+  sessionDead = false;
   vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: { method?: string }): Promise<Response> => {
     const url = String(input);
     const method = init?.method ?? 'GET';
     if (url.includes('/auth/dev-session')) return jsonResponse({ error: 'Not found' }, 404);
     if (url.includes('/auth/me')) return jsonResponse(ME);
     if (url.includes('/calls/pending-disposition')) return jsonResponse({ pending });
-    if (url.includes('/telephony/token')) return jsonResponse({ token: 'device-token' });
+    if (url.includes('/telephony/token')) return sessionDead ? jsonResponse({ error: 'Unauthorized' }, 401) : jsonResponse({ token: 'device-token' });
     if (url.includes('/mobile/devices')) return jsonResponse({ devices: [] });
-    if (url.includes('/firewall/precall')) return jsonResponse(ALLOW_VERDICT);
+    if (url.includes('/firewall/precall')) return jsonResponse(verdict);
+    if (url.includes('/auth/salesforce/login/start')) return jsonResponse({ authUrl: 'https://login.example.com/x', handshake: 'h1' });
+    if (url.includes('/auth/salesforce/login/status')) {
+      return jsonResponse({ status: 'connected', token: 'tok2', user: { id: 'u1', email: 'rep@example.com' } });
+    }
     if (method === 'POST' && url.endsWith('/calls')) {
       return jsonResponse({ call: { id: 'call-1', fromNumber: '+16195559999', toNumber: '+16195551234', normalizedToNumber: '+16195551234' } });
     }
@@ -423,5 +433,58 @@ describe('App — the sound check and Reset my audio never touch a live call', (
     fireEvent.click(await screen.findByText('Start dialing'));
     await waitFor(() => expect(FakeDevice.connects.length).toBe(1)); // the leg joined: the run is live
     await waitFor(() => expect(dialog()).toBeNull());
+  });
+});
+
+// Task 3 review M-e and M-h.
+describe('App — the sound check around the rest of the softphone', () => {
+  it("hides while a click-to-dial verdict is on screen (preflight), and comes back after", async () => {
+    let clickToDial: (e: opencti.ClickToDialEvent) => void = () => {};
+    vi.spyOn(opencti, 'initOpenCti').mockResolvedValue({ ready: true });
+    vi.spyOn(opencti, 'onClickToDial').mockImplementation((handler) => { clickToDial = handler; });
+    vi.spyOn(opencti, 'notifyReady').mockImplementation(() => {});
+    vi.spyOn(opencti, 'setPanelHeight').mockImplementation(() => {});
+    vi.spyOn(opencti, 'setPanelVisibility').mockImplementation(() => {});
+    verdict = { ...ALLOW_VERDICT, decision: 'BLOCK' }; // a rep's refusal: the verdict stays up
+    signedIn();
+    localStorage.setItem('cti.soundCheck.due', '1');
+    render(<App />);
+    await screen.findByRole('dialog', { name: 'Sound check' });
+    await waitFor(() => expect(opencti.onClickToDial).toHaveBeenCalled());
+    await act(async () => { clickToDial({ number: '+16195551234' }); });
+    await screen.findByText(/can.t call this number/);
+    expect(dialog()).toBeNull();
+    fireEvent.keyDown(window, { key: 'Escape' }); // clear the verdict: back to idle
+    expect(await screen.findByRole('dialog', { name: 'Sound check' })).toBeTruthy();
+  });
+
+  it('closing the check never throws away an unsaved Settings draft', async () => {
+    signedIn();
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    const forward = await screen.findByPlaceholderText('+1 555 010 0123 (your mobile)') as HTMLInputElement;
+    fireEvent.change(forward, { target: { value: '+16195550000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run sound check' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Not now' }));
+    expect(dialog()).toBeNull();
+    expect((screen.getByPlaceholderText('+1 555 010 0123 (your mobile)') as HTMLInputElement).value).toBe('+16195550000');
+  });
+
+  it('a sign-out closes it: signing back in does not bring it back', async () => {
+    vi.spyOn(window, 'open').mockImplementation(() => null);
+    signedIn();
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Run sound check' }));
+    await screen.findByRole('dialog', { name: 'Sound check' });
+    sessionDead = true;
+    act(() => { FakeDevice.instances[0]!.emit('tokenWillExpire'); });
+    fireEvent.click(await screen.findByText('Sign in with Salesforce'));
+    sessionDead = false;
+    await screen.findByRole('button', { name: 'Settings' });
+    await act(async () => { await Promise.resolve(); });
+    expect(dialog()).toBeNull();
   });
 });

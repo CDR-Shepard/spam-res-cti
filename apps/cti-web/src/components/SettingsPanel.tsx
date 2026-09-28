@@ -32,6 +32,10 @@ interface Props {
   /** Reset my audio (App): System default for both, a fresh Device when idle,
    *  then the sound check. Never signs the rep out. */
   onResetAudio?: () => void;
+  /** Bumped by App when the sound check closes: re-mounts ONLY the
+   *  Microphone/Speaker rows, so they show what was chosen there, while any
+   *  unsaved draft elsewhere in Settings survives (Task 3 review M-h). */
+  audioEpoch?: number;
 }
 
 /** The link box's saved-selection line, or null when nothing is stored yet. */
@@ -65,7 +69,7 @@ function patchErrorMessage(e: unknown): string | null {
  * Dial plays in the headset between calls — six styles, Off, or the rep's own
  * YouTube playlist/video — and which microphone and speaker the softphone uses.
  */
-export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast, audioDevices, onRunSoundCheck, onResetAudio }: Props): JSX.Element {
+export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast, audioDevices, onRunSoundCheck, onResetAudio, audioEpoch = 0 }: Props): JSX.Element {
   const audioPort = useMemo(() => audioDevices ?? createAudioDevicePort(() => null), [audioDevices]);
   const [draft, setDraft] = useState(forwardE164 ?? '');
   const [saving, setSaving] = useState(false);
@@ -227,7 +231,7 @@ export function SettingsPanel({ forwardE164, holdMusic, onSaved, onToast, audioD
             )}
           </div>
         </div>
-        <AudioDeviceRows port={audioPort} onToast={onToast} />
+        <AudioDeviceRows key={audioEpoch} port={audioPort} onToast={onToast} />
         {(onRunSoundCheck || onResetAudio) && (
           <div className="set-row">
             <div className="icon"><MicIcon /></div>

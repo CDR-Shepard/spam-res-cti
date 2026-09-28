@@ -127,6 +127,8 @@ describe('App × 2 tabs — Reset my audio in the tab that is not the softphone'
     await advance(1_000);
     expect(FakeDevice.instances.length).toBe(built);
     expect(FakeDevice.instances[0]!.destroyed).toBe(false);
+    // Task 3 review M-h: it says what really happens — no rebuild here.
+    expect(within(tabB.container).getByText('Audio settings cleared — your active softphone tab will use System default.')).toBeTruthy();
   });
 });
 

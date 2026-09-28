@@ -539,6 +539,9 @@ export function App(): JSX.Element {
     setPendingDisp(null);
     setParked(null);
     setWaiting(null);
+    // Never carry an open sound check into the next sign-in (Task 3 review
+    // M-h). A due one comes back on the next load: its flag stays.
+    setSoundCheck(null);
   }, [teardownDevice, holdsLiveTelephony, setParked, setWaiting]);
 
   // Destroy the device on unmount (empty deps → runs only on real unmount, not
@@ -1372,7 +1375,11 @@ export function App(): JSX.Element {
         });
       }
     }
-    setToast({ text: 'Microphone and speaker are back to System default.', type: 'success' });
+    // Only the softphone tab holds the Device: another tab only clears the
+    // picks, which the softphone tab applies from storage (Task 3 review M-h).
+    setToast(coordinatorRef.current?.isLeader() ?? true
+      ? { text: 'Microphone and speaker are back to System default.', type: 'success' }
+      : { text: 'Audio settings cleared — your active softphone tab will use System default.', type: 'success' });
     setSoundCheck('asked');
   }, [resetBusy, teardownDevice, ensureDevice, audioPort, onDeviceBuildFailed]);
 
@@ -1980,6 +1987,8 @@ export function App(): JSX.Element {
   // unmounts (releasing the mic) and comes back when the rep is free.
   const soundCheckVisible = signedIn && !!me && soundCheck !== null
     && phase !== 'ringing' && phase !== 'active' && phase !== 'wrapup'
+    // …nor over a click-to-dial verdict (Task 3 review M-e).
+    && phase !== 'preflight'
     && !incoming && !dialerLive && !callbackWaiting && parkedRunId === null;
   // A due check opened on its own: surface the Salesforce panel so the rep
   // sees it (Task 3 review I1(b)).
@@ -2146,7 +2155,7 @@ export function App(): JSX.Element {
     <CallLog />
   ) : tab === 'settings' ? (
     <SettingsPanel
-      key={audioEpoch}
+      audioEpoch={audioEpoch}
       forwardE164={me.user.noAnswerForwardE164 ?? null}
       holdMusic={holdMusicFromMe(me.user)}
       onSaved={refreshMe}
