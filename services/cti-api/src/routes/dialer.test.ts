@@ -363,6 +363,11 @@ describe('parseRunSettings', () => {
   });
 
   it.each([
+    // M3 (review, ruling: fix it): an EMPTY body (`{}`) is a NEW client that
+    // sent a request but chose no settings — a bug on ITS end, never "no
+    // settings at all" like a missing body/content-type is. It must 400 like
+    // any other incomplete body, naming the first missing field.
+    [{}, 'passes'],
     [{ passes: 3, rolloverBusinessDays: 1 }, 'passes'],
     [{ passes: '1', rolloverBusinessDays: 1 }, 'passes'],
     [{ rolloverBusinessDays: 1 }, 'passes'],
