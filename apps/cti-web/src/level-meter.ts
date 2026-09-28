@@ -10,7 +10,12 @@ export const METER_FFT_SIZE = 1024;
 /** Normal speech (RMS ~0.05–0.2 of full scale) fills the bar to ~20–80 %. */
 export const METER_GAIN = 4;
 
-export interface MicTrackLike { stop(): void }
+export interface MicTrackLike {
+  stop(): void;
+  /** 'ended': the device went away (unplugged) — not fired by our own stop(). */
+  addEventListener?(type: 'ended', listener: () => void): void;
+  removeEventListener?(type: 'ended', listener: () => void): void;
+}
 export interface MicStreamLike { getTracks(): MicTrackLike[] }
 export interface AnalyserLike { fftSize: number; getFloatTimeDomainData(array: Float32Array): void }
 export interface MediaSourceLike { connect(node: AnalyserLike): void; disconnect(): void }

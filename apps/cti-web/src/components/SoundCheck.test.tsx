@@ -20,10 +20,12 @@ const DEVICES: MediaDeviceLike[] = [
   { kind: 'audiooutput', deviceId: 'spk-jabra', label: 'Jabra Evolve2 65' },
 ];
 
+/** Every device-change listener the fake port handed out, to fire by hand. */
+const deviceChangeListeners = new Set<() => void>();
 function fakePort(): AudioDevicePort {
   return {
     listDevices: vi.fn(async () => DEVICES),
-    onDeviceChange: vi.fn(() => () => {}),
+    onDeviceChange: vi.fn((cb: () => void) => { deviceChangeListeners.add(cb); return () => { deviceChangeListeners.delete(cb); }; }),
     canChooseOutput: vi.fn(() => true),
     setInputDevice: vi.fn(async () => {}),
     unsetInputDevice: vi.fn(async () => {}),
@@ -32,7 +34,7 @@ function fakePort(): AudioDevicePort {
   };
 }
 
-interface FakeStream extends MicStreamLike { deviceId: string | null; stopped: boolean }
+interface FakeStream extends MicStreamLike { deviceId: string | null; stopped: boolean; end(): void }
 interface FakeSource extends LevelSource { closed: boolean }
 
 function fakeEnv(initial: MicPermission) {
@@ -44,6 +46,7 @@ function fakeEnv(initial: MicPermission) {
     sources: [] as FakeSource[],
     level: 0.4,
     openError: null as Error | null,
+    levelError: null as Error | null,
   };
   const env: SoundCheckEnv = {
     watchPermission: async (onChange) => {
@@ -52,11 +55,21 @@ function fakeEnv(initial: MicPermission) {
     },
     openMic: vi.fn(async (deviceId: string | null) => {
       if (s.openError) throw s.openError;
-      const stream: FakeStream = { deviceId, stopped: false, getTracks: () => [{ stop: () => { stream.stopped = true; } }] };
+      const ended = new Set<() => void>();
+      const track = {
+        stop: () => { stream.stopped = true; },
+        addEventListener: (_type: 'ended', cb: () => void) => { ended.add(cb); },
+        removeEventListener: (_type: 'ended', cb: () => void) => { ended.delete(cb); },
+      };
+      const stream: FakeStream = {
+        deviceId, stopped: false, getTracks: () => [track],
+        end: () => { for (const cb of [...ended]) cb(); },
+      };
       s.streams.push(stream);
       return stream;
     }),
     createLevelSource: () => {
+      if (s.levelError) throw s.levelError;
       const src: FakeSource = { closed: false, read: () => s.level, close: () => { src.closed = true; } };
       s.sources.push(src);
       return src;
@@ -87,7 +100,7 @@ function renderCheck(env: SoundCheckEnv, props: { onDone?: () => void; onLater?:
   );
 }
 
-beforeEach(() => { localStorage.clear(); });
+beforeEach(() => { localStorage.clear(); deviceChangeListeners.clear(); });
 afterEach(() => { cleanup(); localStorage.clear(); });
 
 describe('SoundCheck — Chrome has not decided (prompt)', () => {
@@ -316,5 +329,67 @@ describe('SoundCheck — a hidden tab never holds the mic', () => {
     expect(f.s.streams).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: SOUND_CHECK_TEXT.start }));
     await waitFor(() => expect(f.s.streams).toHaveLength(2));
+  });
+});
+
+// Task 3 review M-d: what a screen reader hears.
+describe('SoundCheck — accessible meter and ✓', () => {
+  it('the meter says "Hearing you" or "No sound yet"', async () => {
+    const f = fakeEnv('granted');
+    f.s.level = 0;
+    renderCheck(f.env);
+    const meter = await screen.findByRole('progressbar', { name: 'Microphone level' });
+    await waitFor(() => expect(meter.getAttribute('aria-valuetext')).toBe('No sound yet'));
+    f.s.level = 0.4;
+    await waitFor(() => expect(meter.getAttribute('aria-valuetext')).toBe('Hearing you'));
+  });
+
+  it('the ✓ lands in a polite live region that was already there before Chrome flipped', async () => {
+    const f = fakeEnv('denied');
+    renderCheck(f.env, { startNow: false });
+    await screen.findByText(SOUND_CHECK_TEXT.deniedTitle);
+    const live = document.querySelector('[aria-live="polite"]');
+    expect(live).not.toBeNull();
+    f.flip('granted');
+    const ok = await screen.findByText(SOUND_CHECK_TEXT.allowed);
+    expect(live!.contains(ok)).toBe(true);
+  });
+});
+
+// Task 3 review M-i.
+describe('SoundCheck — blocked: the steps work inside Salesforce too', () => {
+  it("points at Salesforce's address bar", () => {
+    expect(SOUND_CHECK_TEXT.deniedBody).toContain("(in Salesforce, use Salesforce's address bar)");
+  });
+});
+
+// Task 3 review M-f: the meter follows the hardware, and never throws unhandled.
+describe('SoundCheck — the meter follows the hardware', () => {
+  it('a device plugged in or out re-opens the meter; the old stream is released', async () => {
+    const f = fakeEnv('granted');
+    renderCheck(f.env);
+    await waitFor(() => expect(f.s.sources).toHaveLength(1));
+    act(() => { for (const cb of [...deviceChangeListeners]) cb(); });
+    await waitFor(() => expect(f.s.streams).toHaveLength(2));
+    expect(f.s.streams[0]!.stopped).toBe(true);
+    expect(f.s.sources[0]!.closed).toBe(true);
+    expect(f.s.streams[1]!.stopped).toBe(false);
+  });
+
+  it("the mic's track ending (headset unplugged) re-opens the meter", async () => {
+    const f = fakeEnv('granted');
+    renderCheck(f.env);
+    await waitFor(() => expect(f.s.sources).toHaveLength(1));
+    act(() => { f.s.streams[0]!.end(); });
+    await waitFor(() => expect(f.s.streams).toHaveLength(2));
+    expect(f.s.streams[0]!.stopped).toBe(true);
+  });
+
+  it('a meter that cannot be built says why and releases the mic — no unhandled rejection', async () => {
+    const f = fakeEnv('granted');
+    f.s.levelError = new Error('AudioContext unavailable');
+    renderCheck(f.env);
+    expect((await screen.findByRole('alert')).textContent).toBe("Couldn't open the microphone: AudioContext unavailable");
+    expect(f.s.streams[0]!.stopped).toBe(true);
   });
 });

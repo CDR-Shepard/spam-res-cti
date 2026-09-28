@@ -30,15 +30,20 @@ export const SOUND_CHECK_TEXT = {
   promptBody: "The softphone needs your microphone for calls. Click below, then choose Allow in Chrome's popup.",
   allow: 'Allow microphone',
   deniedTitle: 'Your microphone is blocked',
-  deniedBody: 'Chrome is blocking the microphone for the softphone. Click the icon left of the address bar → Microphone → Allow. This screen updates by itself.',
+  deniedBody: "Chrome is blocking the microphone for the softphone. Click the icon left of the address bar (in Salesforce, use Salesforce's address bar) → Microphone → Allow. This screen updates by itself.",
   allowed: '✓ Microphone allowed',
   grantedTitle: 'Sound check',
   start: 'Start sound check',
   startHint: 'Your microphone stays off until you start.',
   speak: 'Say something — the bar should move.',
+  hearing: 'Hearing you',
+  silent: 'No sound yet',
   done: 'Looks good',
   later: 'Not now',
 } as const;
+
+/** The meter's fill (0..1) from which a screen reader hears "Hearing you". */
+const HEARING_LEVEL = 0.05;
 
 /** What Tab cycles through inside the dialog. */
 const FOCUSABLE = 'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
@@ -60,6 +65,9 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
   const [level, setLevel] = useState(0);
   const [micError, setMicError] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
+  // Bumped when the hardware changes under the meter (a device plugged in or
+  // out, the mic's track ending): the meter re-opens (Task 3 review M-f).
+  const [reopen, setReopen] = useState(0);
 
   // Chrome's setting, live: Blocked → Allowed flips this screen with no reload.
   useEffect(() => {
@@ -110,6 +118,12 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
   // presses Start again — nothing re-opens by itself.
   useEffect(() => env.onHidden(() => setStarted(false)), [env]);
 
+  // A device plugged in or out while the meter runs: re-open it.
+  useEffect(() => {
+    if (permission !== 'granted' || !started) return undefined;
+    return port.onDeviceChange(() => setReopen((n) => n + 1));
+  }, [permission, started, port]);
+
   // The meter: the chosen mic is open only while Allowed, started and on screen.
   useEffect(() => {
     if (permission !== 'granted' || !started) return;
@@ -117,13 +131,27 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
     let stream: MicStreamLike | null = null;
     let source: LevelSource | null = null;
     let timer: ReturnType<typeof setInterval> | null = null;
+    const onEnded = (): void => { if (live) setReopen((n) => n + 1); };
+    const unwatch = (s: MicStreamLike): void => {
+      for (const track of s.getTracks()) track.removeEventListener?.('ended', onEnded);
+    };
     env.openMic(micId).then(
       (opened) => {
         if (!live) { stopStream(opened); return; } // closed while opening: release it at once
         stream = opened;
-        const meter = env.createLevelSource(opened);
+        let meter: LevelSource;
+        try {
+          meter = env.createLevelSource(opened);
+        } catch (e) {
+          stream = null;
+          stopStream(opened);
+          setMicError(micErrorText(e, 'granted'));
+          return;
+        }
         source = meter;
         setMicError(null);
+        // The headset was unplugged: the track ends on its own. Re-open.
+        for (const track of opened.getTracks()) track.addEventListener?.('ended', onEnded);
         timer = setInterval(() => setLevel(meter.read()), METER_INTERVAL_MS);
       },
       // Chrome reads Allowed here, so a refusal is the operating system's.
@@ -133,9 +161,12 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
       live = false;
       if (timer !== null) clearInterval(timer);
       source?.close();
-      if (stream) stopStream(stream);
+      if (stream) {
+        unwatch(stream);
+        stopStream(stream);
+      }
     };
-  }, [permission, started, micId, env]);
+  }, [permission, started, micId, reopen, env]);
 
   // "Allow microphone": the click is the user gesture Chrome's popup needs.
   const allow = async (): Promise<void> => {
@@ -158,6 +189,11 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
   return (
     <div className="sound-check" role="dialog" aria-modal="true" aria-label="Sound check" ref={dialogRef} tabIndex={-1} onKeyDown={onKeyDown}>
       <div className="sound-check-card">
+        {/* Already on screen before Chrome flips Blocked → Allowed, so the ✓
+            is announced when it lands (Task 3 review M-d). */}
+        <div aria-live="polite">
+          {permission === 'granted' && justAllowed && <p className="sound-check-ok">{SOUND_CHECK_TEXT.allowed}</p>}
+        </div>
         {permission === 'checking' && <p className="sub">{SOUND_CHECK_TEXT.checking}</p>}
         {permission === 'prompt' && (
           <>
@@ -175,7 +211,6 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
         {permission === 'granted' && (
           <>
             <h2>{SOUND_CHECK_TEXT.grantedTitle}</h2>
-            {justAllowed && <p className="sound-check-ok">{SOUND_CHECK_TEXT.allowed}</p>}
             {started ? (
               <>
                 <p className="sub">{SOUND_CHECK_TEXT.speak}</p>
@@ -186,6 +221,7 @@ export function SoundCheck({ port, onToast, onDone, onLater, startNow = false, e
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={pct}
+                  aria-valuetext={level >= HEARING_LEVEL ? SOUND_CHECK_TEXT.hearing : SOUND_CHECK_TEXT.silent}
                 >
                   <div className="sound-check-meter-fill" style={{ width: `${pct}%` }} />
                 </div>
