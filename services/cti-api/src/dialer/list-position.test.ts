@@ -260,6 +260,24 @@ describe('listContextFor', () => {
     expect(readShared).toHaveBeenCalledOnce();
   });
 
+  // Review M1 (ruling: fix it): for a LIMITED run, `total` must agree with
+  // `session.runSize` — the count of PEOPLE this run will actually dial —
+  // not the row-based ordinal count, which also includes settled-at-build
+  // rows (skip, unreachable, consent-blocked) kept in front of the cutoff.
+  it("a limited run's total is session.runSize, not the row-based ordinal count", async () => {
+    const got = await listContextFor(
+      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', runSize: 2 }, items, 'U-ME', new Date(), vi.fn(async () => null),
+    );
+    expect(got).toEqual({ total: 2, startedFrom: 87, workedBy: [] });
+  });
+
+  it('an unlimited run (runSize null) is unchanged: total is the row-based ordinal count', async () => {
+    const got = await listContextFor(
+      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', runSize: null }, items, 'U-ME', new Date(), vi.fn(async () => null),
+    );
+    expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
+  });
+
   it('a redial copy (attempt 1, redialOf set) is excluded from `total` — Task 11 fix-round-1 Minor: it is not part of the queue creation built, same as an attempt-2 retry', async () => {
     const withRedial = [...items, { attempt: 1, ordinal: 4, listPosition: 87, redialOf: 'i1' }];
     const got = await listContextFor(

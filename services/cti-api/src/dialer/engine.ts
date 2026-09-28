@@ -211,6 +211,12 @@ function isActiveSessionConflict(err: unknown): boolean {
  * the rep's Calls per person / How many / Missed tasks saved as their next
  * defaults (controller ruling S2: How many is remembered too).
  *
+ * `run_size` — min(maxRecords, pending rows), review M1 — rides the SAME
+ * claim UPDATE as the other three settings, so the queue read that yields it
+ * (and the cutoff `runSizeCutoff` also needs) happens BEFORE that UPDATE
+ * rather than after. A read never needs the 'ready' guard the UPDATE enforces,
+ * so this reordering changes nothing about correctness.
+ *
  * 'lost' = 0 rows matched (the session is not ready — a second Start, or a
  * stopped run): nothing else is written, so a second Start never re-trims or
  * changes a live run's settings. 'conflict' = the rep has another active run
@@ -232,14 +238,17 @@ async function claimReadySession(
 ): Promise<'claimed' | 'lost' | 'conflict'> {
   try {
     return await deps.db.transaction(async (tx) => {
-      const [claimed] = await claimReadySessionQuery(tx, sessionId, settings, new Date());
+      let runSize: number | null = null;
+      let cutoff: number | null = null;
+      if (settings && settings.maxRecords !== null) {
+        const items = await tx.query.dialerQueueItems.findMany({ where: eq(schema.dialerQueueItems.sessionId, sessionId) });
+        runSize = Math.min(settings.maxRecords, items.filter((i) => i.status === 'pending').length);
+        cutoff = runSizeCutoff(items, settings.maxRecords);
+      }
+      const [claimed] = await claimReadySessionQuery(tx, sessionId, settings, new Date(), runSize);
       if (!claimed) return 'lost' as const;
       if (settings) {
-        if (settings.maxRecords !== null) {
-          const items = await tx.query.dialerQueueItems.findMany({ where: eq(schema.dialerQueueItems.sessionId, sessionId) });
-          const cutoff = runSizeCutoff(items, settings.maxRecords);
-          if (cutoff !== null) await trimQueueQuery(tx, sessionId, cutoff);
-        }
+        if (cutoff !== null) await trimQueueQuery(tx, sessionId, cutoff);
         await saveRunDefaultsQuery(tx, claimed.userId, settings);
       }
       return 'claimed' as const;

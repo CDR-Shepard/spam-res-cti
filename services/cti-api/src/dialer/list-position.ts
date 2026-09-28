@@ -132,7 +132,7 @@ export async function listStartPosition(
  */
 export async function listContextFor(
   db: Db,
-  session: { orgId: string; listViewId: string | null; status: string },
+  session: { orgId: string; listViewId: string | null; status: string; runSize?: number | null },
   items: ReadonlyArray<{ attempt: number; ordinal: number; listPosition: number | null; redialOf?: string | null }>,
   requestingUserId: string,
   now: Date = new Date(),
@@ -147,7 +147,15 @@ export async function listContextFor(
   // routes/dialer.ts `firstPassTotal`): a take-callback requeue copy
   // (engine.ts `callbackRequeue`) is an attempt-1, non-redial row that reuses
   // its cancelled original's ordinal, and must not inflate "record N of M".
-  const total = new Set(items.filter((it) => it.attempt === 1 && it.redialOf == null).map((it) => it.ordinal)).size;
+  //
+  // For a LIMITED run, `session.runSize` (review M1) — min(maxRecords,
+  // pending rows) at the claim — is the true count of PEOPLE this run will
+  // dial; the row-based count also includes settled-at-build rows (skip,
+  // unreachable, consent-blocked) the queue keeps in front of the cutoff, and
+  // those must not count toward N. Unlimited (`runSize` null/undefined):
+  // unchanged.
+  const total = session.runSize ??
+    new Set(items.filter((it) => it.attempt === 1 && it.redialOf == null).map((it) => it.ordinal)).size;
   const first = items.find((it) => it.ordinal === 0);
   const startedFrom = first?.listPosition ?? 0;
   let workedBy: string[] = [];

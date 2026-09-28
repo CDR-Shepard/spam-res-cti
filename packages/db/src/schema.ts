@@ -306,6 +306,12 @@ export const dialerSessions = pgTable(
     maxRecords: integer('max_records'),
     /** Missed tasks move to: 1 = next business day, 2 = in 2 business days. */
     rolloverBusinessDays: integer('rollover_business_days').$type<1 | 2>().default(1).notNull(),
+    /** How many people this run will actually dial (review M1, migration
+     *  0046): min(maxRecords, pending rows) at the claim. NULL for an
+     *  unlimited run. Distinct from `maxRecords` — the queue can carry
+     *  settled rows (skip, unreachable, consent-blocked) ahead of the Nth
+     *  pending one, and "record X of N" must not count those toward N. */
+    runSize: integer('run_size'),
     /** "No answer" Chatter sweep (salesforce/no-answer-chatter-worker.ts, migration
      *  0040). Set once the ended run's sweep is FINISHED — every qualifying record
      *  posted or terminally skipped — or given up on after MAX_ATTEMPTS. NULL on an

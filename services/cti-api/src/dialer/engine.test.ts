@@ -2541,10 +2541,24 @@ describe('startSession — run settings ride the ready → active claim', () => 
     });
   });
 
-  it.each([null, 4, 50])('maxRecords %s keeps every row — All, or no more dialable rows than asked for', async (maxRecords) => {
+  // Review M1 (ruling: fix it): run_size — min(maxRecords, pending rows) —
+  // rides the SAME claim update as the other three settings. queue() has 4
+  // PENDING rows (ordinals 1, 3, 4, 6); once2.maxRecords is 2.
+  it('writes run_size = min(maxRecords, pending rows) in the SAME claim update', async () => {
+    const deps = makeDeps(); const fdb = fakeDb(ready, queue()); deps.db = fdb;
+    await startSession('S1', deps, once2);
+    expect(fdb._txWrites[0].patch).toEqual(expect.objectContaining({ runSize: 2 }));
+  });
+
+  it.each([
+    [null, null], // unlimited: no cap requested, run_size stays null
+    [4, 4], // exactly meets the pending count — nothing trimmed, run_size = 4
+    [50, 4], // capped by the ACTUAL pending count, not the requested max
+  ] as const)('maxRecords %s keeps every row and writes run_size %s', async (maxRecords, expectedRunSize) => {
     const deps = makeDeps(); const fdb = fakeDb(ready, queue()); deps.db = fdb;
     await startSession('S1', deps, { passes: 2, maxRecords, rolloverBusinessDays: 1 });
     expect(fdb._txDeletes).toEqual([]);
+    expect(fdb._txWrites[0].patch).toEqual(expect.objectContaining({ runSize: expectedRunSize }));
   });
 
   it('ORDER: flip → trim → save defaults inside ONE transaction, and only then the first call', async () => {

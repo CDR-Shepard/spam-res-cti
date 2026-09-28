@@ -183,6 +183,67 @@ describe('GET /dialer/sessions/:id — listContext', () => {
     expect(res.json().firstPassTotal).toBe(2);
   });
 
+  // Review M1 (ruling: fix it): for a LIMITED run, firstPassTotal must agree
+  // with session.runSize — the count of PEOPLE this run will actually dial —
+  // not the row-based ordinal count, which also includes settled-at-build
+  // rows (skip, unreachable, consent-blocked) kept in front of the cutoff.
+  it('firstPassTotal is session.runSize for a limited run, not the row-based ordinal count', async () => {
+    state.session = { id: 'S7', orgId: 'O1', userId: 'U-ME', status: 'active', listViewId: null, runSize: 2 };
+    state.items = [
+      { attempt: 1, ordinal: 0, listPosition: null, status: 'skipped', outcome: 'skip_on_dialer' },
+      { attempt: 1, ordinal: 1, listPosition: null, status: 'pending' },
+      { attempt: 1, ordinal: 2, listPosition: null, status: 'pending' },
+    ];
+    const res = await get('S7');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().firstPassTotal).toBe(2);
+  });
+
+  it("an unlimited run's firstPassTotal is unchanged: the row-based ordinal count", async () => {
+    state.session = { id: 'S8', orgId: 'O1', userId: 'U-ME', status: 'active', listViewId: null, runSize: null };
+    state.items = [
+      { attempt: 1, ordinal: 0, listPosition: null, status: 'done' },
+      { attempt: 1, ordinal: 1, listPosition: null, status: 'pending' },
+    ];
+    const res = await get('S8');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().firstPassTotal).toBe(2);
+  });
+
+  // Review M1: currentItem.runPosition — the 1-based rank of the in-flight
+  // item among rows this run will actually dial (ordinal <= current,
+  // excluding rows settled at build), or null for an unlimited run.
+  it('currentItem.runPosition ranks the in-flight item among dialable rows only, for a limited run', async () => {
+    state.session = { id: 'S9', orgId: 'O1', userId: 'U-ME', status: 'active', listViewId: null, runSize: 100 };
+    state.items = [
+      ...Array.from({ length: 5 }, (_, i) => ({ id: `skip${i}`, attempt: 1, ordinal: i, listPosition: null, status: 'skipped', outcome: 'skip_on_dialer' })),
+      { id: 'i5', attempt: 1, ordinal: 5, listPosition: null, status: 'done' },
+      { id: 'i6', attempt: 1, ordinal: 6, listPosition: null, status: 'done' },
+      { id: 'i7', attempt: 1, ordinal: 7, listPosition: null, status: 'dialing' },
+    ];
+    const res = await get('S9');
+    expect(res.statusCode).toBe(200);
+    // 5 build-time skips excluded; ordinals 5, 6, 7 are the 1st, 2nd, 3rd
+    // dialable rows — the in-flight one (ordinal 7) is position 3.
+    expect(res.json().currentItem).toMatchObject({ id: 'i7', runPosition: 3 });
+  });
+
+  it("currentItem.runPosition is null for an unlimited run", async () => {
+    state.session = { id: 'S10', orgId: 'O1', userId: 'U-ME', status: 'active', listViewId: null, runSize: null };
+    state.items = [{ id: 'i0', attempt: 1, ordinal: 0, listPosition: null, status: 'dialing' }];
+    const res = await get('S10');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().currentItem).toMatchObject({ id: 'i0', runPosition: null });
+  });
+
+  it('currentItem stays null when nothing is in flight, limited run or not', async () => {
+    state.session = { id: 'S11', orgId: 'O1', userId: 'U-ME', status: 'active', listViewId: null, runSize: 5 };
+    state.items = [{ id: 'i0', attempt: 1, ordinal: 0, listPosition: null, status: 'pending' }];
+    const res = await get('S11');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().currentItem).toBeNull();
+  });
+
   /**
    * The controller decision this test exists to enforce: the panel polls this
    * route every 1-2s for the life of a run, and the grouped join is org-wide

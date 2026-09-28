@@ -69,6 +69,21 @@ const CONSENT_OUTCOME: Record<ConsentBlock, string> = {
   dnc: 'dnc_blocked',
 };
 
+/**
+ * Every outcome a row can carry while still `skipped` BEFORE any dial has
+ * ever been attempted on it — i.e. every value `buildQueueRows` below can
+ * stamp. Exported so `run-settings.ts#settledAtBuild` (review M1) can tell a
+ * build-time skip apart from a RUNTIME one (the cadence gate's 'cooldown' /
+ * 'daily_cap', or take-callback's 'canceled') without duplicating this list:
+ * a runtime skip transitioned FROM 'pending', so the person WAS one of this
+ * run's dialable people; a build-time skip never was.
+ */
+export const BUILD_SKIP_OUTCOMES: ReadonlySet<string> = new Set([
+  SKIP_ON_DIALER_OUTCOME,
+  ALREADY_WORKED_OUTCOME,
+  ...Object.values(CONSENT_OUTCOME),
+]);
+
 export function buildQueueRows(
   sessionId: string,
   resolved: ResolvedRow[],

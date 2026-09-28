@@ -37,6 +37,7 @@ import { workedRecentlySafe } from '../dialer/already-worked.js';
 import { blockedTargetsSafe } from '../dialer/consent-check.js';
 import { preferredNumbersFor } from '../dialer/contact-history-live.js';
 import { listContextFor, listStartPosition } from '../dialer/list-position.js';
+import { runPosition } from '../dialer/run-settings.js';
 import {
   pauseSession,
   resumeSession,
@@ -378,8 +379,19 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       // Counted by ORDINAL: a take-callback requeue copy (engine.ts
       // `callbackRequeue`) is an attempt-1, non-redial row that reuses its
       // cancelled original's ordinal, and must not grow this either.
-      firstPassTotal: new Set(items.filter((i) => i.attempt === 1 && i.redialOf == null).map((i) => i.ordinal)).size,
-      currentItem: current,
+      //
+      // For a LIMITED run, `session.runSize` (review M1) — min(maxRecords,
+      // pending rows) at the claim — IS this figure: the row-based ordinal
+      // count also includes settled-at-build rows (skip, unreachable,
+      // consent-blocked) the queue keeps in front of the cutoff, which must
+      // not count toward N in "record X of N". Unlimited (`runSize` null):
+      // unchanged.
+      firstPassTotal: session.runSize ??
+        new Set(items.filter((i) => i.attempt === 1 && i.redialOf == null).map((i) => i.ordinal)).size,
+      // `runPosition` (review M1): the in-flight item's 1-based rank among
+      // this run's dialable rows — null for an unlimited run, where the
+      // figure above already means the same thing it always has.
+      currentItem: current ? { ...current, runPosition: runPosition(items, current.ordinal, session.runSize) } : null,
       waitingRetry: nextRetry ? { nextRetryAt: nextRetry.toISOString() } : null,
       rollovers: rolloverSummary(jobs),
       // Two reps, one list (spec §4): null for a run not created from a list
