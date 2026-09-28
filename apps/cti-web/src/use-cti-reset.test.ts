@@ -2,9 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import { pageReloader } from './cti-reset';
-import { RESET_IDLE_CHECK_MS } from './reset-poller';
+import { RESET_IDLE_CHECK_MS, RESET_POLL_MS } from './reset-poller';
 import type { SoftphoneCoordinator } from './softphone-coordinator';
-import { fetchResetDue, postResetComplete, RESET_COMPLETE_TIMEOUT_MS, useCtiReset } from './use-cti-reset';
+import { fetchResetDue, postResetComplete, RESET_COMPLETE_TIMEOUT_MS, RESET_RELOAD_GRACE_MS, useCtiReset } from './use-cti-reset';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) } as Response;
@@ -142,5 +142,89 @@ describe('useCtiReset — the leader resets an idle tab', () => {
     expect(h.events).toEqual(['latch', 'teardown', 'post', 'reload']);
     expect(h.f.broadcasts).toBe(1);
     expect(localStorage.getItem('cti.session.v1')).toBeNull();
+  });
+});
+
+// M3: another tab wiped (or replaced) the session and this tab missed the
+// broadcast. It finishes on its next poll — tearing down and reloading, and
+// writing nothing: the other tab already did whatever storage needed.
+describe('useCtiReset — a session that went stale under this tab', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('the next poll tears down and reloads without asking the server, and writes no flags', async () => {
+    vi.useFakeTimers();
+    const h = mountHook({ due: false });
+    await tick(0);
+    expect(h.events).toEqual([]);
+    localStorage.removeItem('cti.session.v1'); // another tab signed out, say — no reset
+    localStorage.setItem('cti.audio.input', 'mic-jabra');
+    const polls = vi.mocked(fetch).mock.calls.filter(([u]) => String(u).includes('/auth/reset-signal')).length;
+    await tick(RESET_POLL_MS);
+    expect(h.events).toEqual(['latch', 'teardown', 'reload']);
+    expect(vi.mocked(fetch).mock.calls.filter(([u]) => String(u).includes('/auth/reset-signal')).length).toBe(polls);
+    expect(localStorage.getItem('cti.reset.notice')).toBeNull();
+    expect(localStorage.getItem('cti.soundCheck.due')).toBeNull();
+    expect(localStorage.getItem('cti.audio.input')).toBe('mic-jabra');
+    expect(h.f.broadcasts).toBe(0);
+  });
+
+  it('waits out a call first', async () => {
+    vi.useFakeTimers();
+    const h = mountHook({ due: false });
+    await tick(0);
+    h.s.busy = true;
+    localStorage.setItem('cti.session.v1', JSON.stringify({ token: 'newer', userId: 'u1', email: 'rep@x.com' }));
+    await tick(RESET_POLL_MS + RESET_IDLE_CHECK_MS * 3);
+    expect(h.events).toEqual([]);
+    h.s.busy = false;
+    await tick(RESET_IDLE_CHECK_MS);
+    expect(h.events).toEqual(['latch', 'teardown', 'reload']);
+    expect(JSON.parse(localStorage.getItem('cti.session.v1')!).token).toBe('newer'); // never touched
+  });
+});
+
+// M4: a reset that did not finish must not strand the rep on a latched,
+// Device-less tab. It is logged, the latch is cleared, and polling resumes.
+describe('useCtiReset — a reset that did not finish', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('reload() throws: logged, unlatched, and the poller re-arms', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const h = mountHook();
+    const blocked = new Error('SecurityError: reload blocked');
+    vi.mocked(pageReloader.reload).mockImplementation(() => { h.events.push('reload (blocked)'); throw blocked; });
+    await tick(RESET_IDLE_CHECK_MS * 2);
+    expect(h.events).toEqual(['latch', 'teardown', 'post', 'reload (blocked)', 'unlatch']);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[cti-reset]'), blocked);
+
+    // Re-armed: the next poll finds storage wiped (the wipe ran before the
+    // reload threw) — a stale session — and tries the reload again.
+    await tick(RESET_POLL_MS);
+    expect(h.events.slice(5)).toEqual(['latch', 'teardown', 'reload (blocked)', 'unlatch']);
+  });
+
+  it('the page never reloads (reload() did nothing): after the grace period, logged, unlatched, re-armed', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const h = mountHook();
+    await tick(RESET_IDLE_CHECK_MS); // the second yes-check: the reset, up to reload()
+    expect(h.events).toEqual(['latch', 'teardown', 'post', 'reload']);
+    await tick(RESET_RELOAD_GRACE_MS - 1);
+    expect(h.events).toEqual(['latch', 'teardown', 'post', 'reload']);
+    await tick(1);
+    expect(h.events).toEqual(['latch', 'teardown', 'post', 'reload', 'unlatch']);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[cti-reset]'), expect.any(Error));
+    await tick(RESET_POLL_MS);
+    expect(h.events.slice(5)).toEqual(['latch', 'teardown', 'reload']);
+  });
+
+  it('unmounted mid-reset (a sign-out): the latch is released', async () => {
+    vi.useFakeTimers();
+    const h = mountHook({ holdPost: true });
+    await tick(RESET_IDLE_CHECK_MS * 2);
+    expect(h.events).toEqual(['latch', 'teardown', 'post']);
+    h.hook.unmount();
+    expect(h.events).toEqual(['latch', 'teardown', 'post', 'unlatch']);
   });
 });

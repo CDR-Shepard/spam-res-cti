@@ -15,6 +15,9 @@ import type { SoftphoneCoordinator } from './softphone-coordinator';
 /** The Device is already down when this POST goes out. A hung request must
  *  not leave the rep unable to take calls for long. */
 export const RESET_COMPLETE_TIMEOUT_MS = 5_000;
+/** A reload normally ends this page at once. Still here this long after
+ *  reload()? It did not happen: unlatch and try again (M4). */
+export const RESET_RELOAD_GRACE_MS = 10_000;
 
 /** GET /auth/reset-signal. Rejects on any failure; the poller ignores it. */
 export async function fetchResetDue(): Promise<boolean> {
@@ -64,9 +67,26 @@ export function useCtiReset(opts: UseCtiResetOptions): { onPeerReset: () => void
       cancels.add(cancel);
       return cancel;
     };
+    const delay = (ms: number): Promise<void> => new Promise<void>((resolve) => {
+      const id = window.setTimeout(() => { cancels.delete(cancel); resolve(); }, ms);
+      const cancel = (): void => { window.clearTimeout(id); cancels.delete(cancel); };
+      cancels.add(cancel);
+    });
     // Set while this effect holds App's latch, so a cleanup that runs before
     // the reload (a sign-out mid-reset) never leaves the rep latched.
     let latched = false;
+    const unlatch = (): void => {
+      if (!latched) return;
+      latched = false;
+      latest.current.setResetting(false);
+    };
+    // A reset ends with reload(), which ends this page. Surviving the grace
+    // period means it did not happen: reject, so the poller recovers (M4).
+    const untilUnload = async (reset: Promise<void>): Promise<void> => {
+      await reset;
+      await delay(RESET_RELOAD_GRACE_MS);
+      throw new Error(`the page did not reload within ${RESET_RELOAD_GRACE_MS} ms`);
+    };
     const resetDeps = (): PerformResetDeps => ({
       beginResetting: () => { latched = true; latest.current.setResetting(true); },
       teardownDevice: () => latest.current.teardownDevice(),
@@ -92,8 +112,17 @@ export function useCtiReset(opts: UseCtiResetOptions): { onPeerReset: () => void
         return !!c && c.isLeader() && c.settled() && !c.peersBusyForReset() && !latest.current.isBusy();
       },
       isSelfBusy: () => latest.current.isBusy(),
-      initiate: () => performReset(resetDeps(), true),
-      finishForPeer: () => performReset(resetDeps(), false),
+      // Another tab changed storage under this page (M3).
+      sessionIsStale: () => storedSessionToken() !== pageToken,
+      initiate: () => untilUnload(performReset(resetDeps(), true)),
+      finishForPeer: () => untilUnload(performReset(resetDeps(), false)),
+      // Whatever storage holds now is another tab's doing (a reset's wipe, a
+      // sign-out, a new sign-in): leave it exactly as it is.
+      finishStale: () => untilUnload(performReset({ ...resetDeps(), wipe: () => false }, false)),
+      onFailed: (err) => {
+        console.warn('[cti-reset] the reset did not finish; the softphone is back and will try again', err);
+        unlatch();
+      },
       scheduleInterval,
       onVisible: (cb) => {
         const onChange = (): void => { if (document.visibilityState === 'visible') cb(); };
@@ -106,7 +135,7 @@ export function useCtiReset(opts: UseCtiResetOptions): { onPeerReset: () => void
     return () => {
       poller.stop();
       for (const cancel of [...cancels]) cancel();
-      if (latched) latest.current.setResetting(false);
+      unlatch();
       if (pollerRef.current === poller) pollerRef.current = null;
     };
   }, [enabled]);

@@ -266,6 +266,26 @@ describe('App — C1: nothing builds a Device between the teardown and the reloa
   });
 });
 
+describe('App — M3: another tab reset and this one missed the broadcast', () => {
+  it("the next poll finds storage wiped: Device down and reload — no POST, and storage left as the other tab left it", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    signedIn();
+    render(<App />);
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    await waitFor(() => expect(callsTo('/auth/reset-signal')).toBe(1));
+
+    // The other tab's reset: wipe, then its two flags.
+    localStorage.removeItem('cti.session.v1');
+    localStorage.setItem('cti.soundCheck.due', '1');
+    localStorage.setItem('cti.reset.notice', '1');
+    await advance(21_000);
+    await waitFor(() => expect(pageReloader.reload).toHaveBeenCalledTimes(1));
+    expect(events).toEqual(['device destroyed', 'reload (wiped)']);
+    expect(callsTo('/auth/reset-signal')).toBe(1); // it never asked
+    expect(callsTo('/auth/reset-complete')).toBe(0);
+  });
+});
+
 describe('App — a reset never interrupts a call', () => {
   it('waits while a callback rings, then resets once the rep declines it', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });

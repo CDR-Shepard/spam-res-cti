@@ -13,6 +13,12 @@
  *    presence beat, so a peer that just picked up a call has said so.
  *  - A peer's {type:'reset'} makes it finish the reset (no POST) as soon as
  *    THIS tab is idle.
+ *  - A poll that finds storage no longer holding this page's session (another
+ *    tab reset, signed out or signed in again, and this tab missed its
+ *    broadcast) finishes too, once idle — without touching storage (M3).
+ *  - A reset that does not finish (it rejected, or the page never reloaded)
+ *    is reported through onFailed and the poller re-arms: polling resumes on
+ *    the 20 s beat, so the rep is never left on a latched, Device-less tab (M4).
  * Timers and visibility are injected so tests drive them by hand.
  */
 export const RESET_POLL_MS = 20_000;
@@ -26,10 +32,17 @@ export interface ResetPollerDeps {
    *  this tab idle and no peer busy. */
   canInitiate: () => boolean;
   isSelfBusy: () => boolean;
+  /** Storage no longer holds the session this page started on. */
+  sessionIsStale: () => boolean;
   /** performReset as the tab that starts it. */
   initiate: () => Promise<void>;
   /** performReset as a peer (no POST, no broadcast). */
   finishForPeer: () => Promise<void>;
+  /** Finish for a stale session: tear down and reload, touching no storage —
+   *  another tab already changed it (a reset's wipe, a sign-out, a new sign-in). */
+  finishStale: () => Promise<void>;
+  /** A reset did not finish (its promise rejected). The poller has re-armed. */
+  onFailed: (err: unknown) => void;
   scheduleInterval: (cb: () => void, ms: number) => () => void;
   /** Subscribe to the tab becoming visible; returns the unsubscribe. */
   onVisible: (cb: () => void) => () => void;
@@ -45,7 +58,8 @@ export interface ResetPoller {
 export function createResetPoller(deps: ResetPollerDeps): ResetPoller {
   let running = false;
   let due = false;
-  let peerAsked = false;
+  /** A finish this tab owes once idle: a peer's broadcast, or a stale session. */
+  let pending: 'peer' | 'stale' | null = null;
   let acting = false;
   let streak = 0;
   let cancelPoll: (() => void) | null = null;
@@ -63,17 +77,32 @@ export function createResetPoller(deps: ResetPollerDeps): ResetPoller {
     cancelChecks = null;
   };
 
+  const startPolling = (): void => {
+    if (!cancelPoll) cancelPoll = deps.scheduleInterval(() => { void poll(); }, RESET_POLL_MS);
+    if (!cancelVisible) cancelVisible = deps.onVisible(() => { void poll(); });
+  };
+
   const begin = (run: () => Promise<void>): void => {
     acting = true;
     stopPolling();
     stopChecks();
-    void run();
+    run().catch((err: unknown) => {
+      if (!running) return; // stopped meanwhile: nothing left to recover
+      // Back to square one, on the 20 s beat (no immediate poll: a reset that
+      // fails every time must not become a tight loop).
+      acting = false;
+      due = false;
+      pending = null;
+      streak = 0;
+      deps.onFailed(err);
+      startPolling();
+    });
   };
 
   const check = (): void => {
     if (!running || acting) return;
-    if (peerAsked) {
-      if (!deps.isSelfBusy()) begin(deps.finishForPeer);
+    if (pending) {
+      if (!deps.isSelfBusy()) begin(pending === 'peer' ? deps.finishForPeer : deps.finishStale);
       return;
     }
     if (!due) return;
@@ -85,15 +114,26 @@ export function createResetPoller(deps: ResetPollerDeps): ResetPoller {
     if (!cancelChecks) cancelChecks = deps.scheduleInterval(check, RESET_IDLE_CHECK_MS);
   };
 
+  const finish = (kind: 'peer' | 'stale'): void => {
+    if (!running || acting) return;
+    // A peer's broadcast after a stale guess upgrades it (a peer finish also
+    // wipes). The reverse can't happen: poll() never runs while one is pending.
+    pending = kind;
+    stopPolling();
+    check();
+    if (!acting) startChecks();
+  };
+
   const poll = async (): Promise<void> => {
-    if (!running || due || acting) return;
+    if (!running || due || acting || pending) return;
+    if (deps.sessionIsStale()) { finish('stale'); return; }
     let isDue: boolean;
     try {
       isDue = await deps.fetchResetDue();
     } catch {
       return; // 401, offline, 5xx: never a reset and never a sign-out; the next poll retries
     }
-    if (!running || due || acting || !isDue) return;
+    if (!running || due || acting || pending || !isDue) return;
     due = true;
     stopPolling();
     check();
@@ -104,8 +144,7 @@ export function createResetPoller(deps: ResetPollerDeps): ResetPoller {
     start() {
       if (running) return;
       running = true;
-      cancelPoll = deps.scheduleInterval(() => { void poll(); }, RESET_POLL_MS);
-      cancelVisible = deps.onVisible(() => { void poll(); });
+      startPolling();
       void poll();
     },
     stop() {
@@ -113,12 +152,6 @@ export function createResetPoller(deps: ResetPollerDeps): ResetPoller {
       stopPolling();
       stopChecks();
     },
-    peerReset() {
-      if (!running || acting) return;
-      peerAsked = true;
-      stopPolling();
-      check();
-      if (!acting) startChecks();
-    },
+    peerReset() { finish('peer'); },
   };
 }
