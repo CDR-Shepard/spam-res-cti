@@ -1163,6 +1163,24 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
   font-variant-numeric: tabular-nums;
 }
 .dp-summary-cta { margin-top: 16px; }
+/* Run settings on Ready to dial (spec 2026-09-28). */
+.dp-run-settings-block { display: flex; flex-direction: column; gap: 10px; }
+.dp-setting { display: flex; flex-direction: column; gap: 6px; }
+.dp-setting-label { font-size: 11px; font-weight: 600; color: var(--text-muted); }
+.dp-setting-choices { gap: 8px; }
+.dp-setting-choices .btn { flex: 1; font-size: 12px; }
+.dp-setting-howmany { gap: 6px; font-size: 12px; color: var(--text); }
+.dp-how-many-input {
+  width: 64px;
+  padding: 6px 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  font-variant-numeric: tabular-nums;
+}
+.dp-how-many-input[aria-invalid="true"] { border-color: var(--bad); }
+.dp-run-line { margin-top: 6px; }
 
 /* ---- Admin: number-pool management (admins only) ---- */
 .admin { display: flex; flex-direction: column; gap: 10px; }

@@ -1,7 +1,8 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { HoldMusicSetting } from '@cti/contracts';
+import type { DialerRunDefaults, HoldMusicSetting } from '@cti/contracts';
 import { api, ApiError, clearSession, readSession, SESSION_KEY, writeSession } from './api';
 import { holdMusicFromMe } from './hold-music-from-me';
+import { runDefaultsFromMe } from './run-settings';
 import { createLineAudio, watchLineVolume, type LineAudio } from './line-audio';
 import { startRingback, stopRingback } from './ringback';
 import { AdminPanel } from './components/AdminPanel';
@@ -76,6 +77,9 @@ interface MeResponse {
     /** Legacy on/off flag — still read while an older API/session may still send it. */
     dialerHoldMusic?: boolean;
     holdMusic?: HoldMusicSetting;
+    /** Power Dial run settings the rep last started with (spec 2026-09-28).
+     *  Absent from an older API — `runDefaultsFromMe` reads that as today's run. */
+    dialerRunDefaults?: DialerRunDefaults;
   };
   salesforce:
     | { connected: false }
@@ -2224,6 +2228,8 @@ export function App(): JSX.Element {
       onDismiss={handleDialerDismiss}
       holdMusic={holdMusicFromMe(me.user)}
       lineAudio={lineAudio}
+      runDefaults={runDefaultsFromMe(me.user)}
+      onRunDefaultsSaved={refreshMe}
       onRunSnapshot={handleRunSnapshot}
       callback={callbackWaiting ? {
         id: callbackWaiting.id,
