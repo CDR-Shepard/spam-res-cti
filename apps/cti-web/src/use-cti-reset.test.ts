@@ -195,6 +195,22 @@ describe('useCtiReset — only an idle leader starts; a peer finishes on the bro
     expect(h.events).toEqual(['latch', 'teardown', 'post', 'reload']);
   });
 
+  // Re-review item 4 (U5): the rep signed in again elsewhere between this tab
+  // learning "due" and it starting the reset. Its POST would revoke — and its
+  // broadcast would reset — the NEW session. Neither happens; the newer
+  // session is never touched.
+  it('storage holds a newer session by the time it starts: no POST, no broadcast, the new session left alone', async () => {
+    vi.useFakeTimers();
+    const h = mountHook();
+    await tick(0); // due: the first yes-check has run
+    const newer = JSON.stringify({ token: 'newer', userId: 'u1', email: 'rep@x.com' });
+    localStorage.setItem('cti.session.v1', newer);
+    await tick(RESET_IDLE_CHECK_MS); // the second yes: it starts
+    expect(h.events).toEqual(['latch', 'teardown', 'reload']);
+    expect(h.f.broadcasts).toBe(0);
+    expect(localStorage.getItem('cti.session.v1')).toBe(newer);
+  });
+
   it("onPeerReset (a peer's broadcast) finishes it here — no POST, no broadcast of its own — even as a non-leader not yet due", async () => {
     vi.useFakeTimers();
     const h = mountHook({ due: false });
