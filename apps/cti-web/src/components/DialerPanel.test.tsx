@@ -737,6 +737,12 @@ describe('ConfirmBlock (SSR)', () => {
     expect(html).toContain('Start dialing');
     expect(html).toContain('Choose a different list');
   });
+  // Accessibility fix (Minor 4, spec 2026-09-28 review): "N will be dialed"
+  // changes as the rep types, so a screen reader needs to hear the update.
+  it('puts "N will be dialed" in an aria-live="polite" region', () => {
+    const html = renderToStaticMarkup(<ConfirmBlock view={view} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} />);
+    expect(html).toContain('<div class="dp-queue-line" aria-live="polite">187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked</div>');
+  });
   it('reads Starting… and disables both buttons while busy; shows the error when there is one', () => {
     const html = renderToStaticMarkup(<ConfirmBlock view={view} busy={true} error="Another power-dial run is already active for you" onStartDialing={() => {}} onChooseAnother={() => {}} />);
     expect(html).toContain('Starting…');

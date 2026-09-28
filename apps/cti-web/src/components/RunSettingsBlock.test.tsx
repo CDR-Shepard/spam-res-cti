@@ -50,4 +50,16 @@ describe('RunSettingsBlock (SSR)', () => {
   it('locks every choice while a Start is in flight (four buttons and the box)', () => {
     expect((html(today, true).match(/disabled=""/g) ?? []).length).toBe(5);
   });
+
+  // Accessibility fix (Minor 4, spec 2026-09-28 review).
+  it('gives the error an id + role="alert", and points the input at it with aria-describedby', () => {
+    const out = html({ ...today, howMany: '600' });
+    const idMatch = out.match(/<div class="dp-error" id="([^"]+)" role="alert">/);
+    expect(idMatch).toBeTruthy();
+    expect(out).toContain(`aria-describedby="${idMatch![1]}"`);
+  });
+
+  it('no aria-describedby (nothing to point at) while the box is valid', () => {
+    expect(html(today)).not.toContain('aria-describedby');
+  });
 });

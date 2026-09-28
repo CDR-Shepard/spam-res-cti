@@ -4,6 +4,7 @@
  * How many, Missed tasks move to. Prop-only — DialerPanel owns the draft — so
  * it renders under renderToStaticMarkup like ConfirmBlock.
  */
+import { useId } from 'react';
 import { DIALER_PASSES, ROLLOVER_BUSINESS_DAYS } from '@cti/contracts';
 import { digitsOnly, parseHowMany, PASS_LABELS, ROLLOVER_LABELS, type RunDraft } from '../run-settings';
 
@@ -18,11 +19,19 @@ export interface RunSettingsBlockProps {
 
 export function RunSettingsBlock({ draft, listSize, busy, onChange }: RunSettingsBlockProps): JSX.Element {
   const howMany = parseHowMany(draft.howMany);
+  // Accessibility fix (Minor 4, spec 2026-09-28 review): useId, not a fixed
+  // string, so these ids stay unique if this block is ever mounted twice on
+  // one page (two dialer tabs, say) — a collision would make aria-labelledby/
+  // aria-describedby point a screen reader at the WRONG block's text.
+  const passesLabelId = useId();
+  const rolloverLabelId = useId();
+  const howManyInputId = useId();
+  const howManyErrorId = useId();
   return (
     <div className="dp-run-settings-block">
       <div className="dp-setting">
-        <div className="dp-setting-label" id="dp-passes-label">Calls per person</div>
-        <div className="row dp-setting-choices" role="group" aria-labelledby="dp-passes-label">
+        <div className="dp-setting-label" id={passesLabelId}>Calls per person</div>
+        <div className="row dp-setting-choices" role="group" aria-labelledby={passesLabelId}>
           {DIALER_PASSES.map((value) => (
             <button
               key={value}
@@ -38,11 +47,11 @@ export function RunSettingsBlock({ draft, listSize, busy, onChange }: RunSetting
         </div>
       </div>
       <div className="dp-setting">
-        <label className="dp-setting-label" htmlFor="dp-how-many">How many</label>
+        <label className="dp-setting-label" htmlFor={howManyInputId}>How many</label>
         <div className="row dp-setting-howmany">
           <span>Call the first</span>
           <input
-            id="dp-how-many"
+            id={howManyInputId}
             className="dp-how-many-input"
             type="text"
             inputMode="numeric"
@@ -50,15 +59,16 @@ export function RunSettingsBlock({ draft, listSize, busy, onChange }: RunSetting
             value={draft.howMany}
             disabled={busy}
             aria-invalid={!howMany.ok}
+            aria-describedby={howMany.ok ? undefined : howManyErrorId}
             onChange={(e) => onChange({ ...draft, howMany: digitsOnly(e.target.value) })}
           />
           <span>{`of ${listSize}`}</span>
         </div>
-        {!howMany.ok && <div className="dp-error">{howMany.error}</div>}
+        {!howMany.ok && <div className="dp-error" id={howManyErrorId} role="alert">{howMany.error}</div>}
       </div>
       <div className="dp-setting">
-        <div className="dp-setting-label" id="dp-rollover-label">Missed tasks move to</div>
-        <div className="row dp-setting-choices" role="group" aria-labelledby="dp-rollover-label">
+        <div className="dp-setting-label" id={rolloverLabelId}>Missed tasks move to</div>
+        <div className="row dp-setting-choices" role="group" aria-labelledby={rolloverLabelId}>
           {ROLLOVER_BUSINESS_DAYS.map((value) => (
             <button
               key={value}

@@ -902,7 +902,10 @@ export function ConfirmBlock({
     <div className="dialer-panel">
       <div className="section dp-picker">
         <div className="kicker">Ready to dial</div>
-        <div className="dp-queue-line">
+        {/* Accessibility fix (Minor 4, spec 2026-09-28 review): "N will be
+            dialed" changes as the rep types in How many — a screen reader
+            needs to hear it. */}
+        <div className="dp-queue-line" aria-live="polite">
           {confirmLine(listSize, view.counts.unreachable, view.skipBreakdown, maxRecordsForLines)}
         </div>
         {secondLine && <div className="dp-queue-line dp-whole-list">{secondLine}</div>}
