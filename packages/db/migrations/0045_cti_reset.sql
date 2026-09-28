@@ -17,7 +17,14 @@
 --                               (POST /auth/reset-complete). The Team panel
 --                               shows "pending" while requested_at is later.
 -- All three are nullable with no default: additive, and old code ignores them.
+--
+-- M5 (review fix): migrate-runner.ts wraps every file in begin/commit, so
+-- SET LOCAL below applies for the rest of THIS transaction only. users is a
+-- hot, high-traffic table — fail fast instead of queueing behind, and
+-- indefinitely blocking, whatever already holds a conflicting lock on it.
 -- =============================================================================
+
+SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS cti_reset_requested_at timestamptz;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS cti_reset_requested_by uuid REFERENCES users(id) ON DELETE SET NULL;

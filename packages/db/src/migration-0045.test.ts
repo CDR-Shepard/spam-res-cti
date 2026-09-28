@@ -1,6 +1,8 @@
 /**
  * 0045_cti_reset.sql — pinned. Read from disk rather than applied (the unit
- * suite has no database), so the file's text IS the contract: three nullable
+ * suite has no database), so the file's text IS the contract: a lock_timeout
+ * guard (M5 — see migrate-runner.ts's `begin`/`commit` per file, which is
+ * what makes SET LOCAL apply for the rest of this file) plus three nullable
  * columns, nothing else, safe to re-run.
  */
 import { readFileSync } from 'node:fs';
@@ -22,8 +24,9 @@ const statements = raw
   .filter((s) => s.length > 0);
 
 describe('migration 0045_cti_reset', () => {
-  it('adds exactly three nullable columns to users, idempotently', () => {
+  it('sets a lock_timeout guard, then adds exactly three nullable columns to users, idempotently', () => {
     expect(statements).toEqual([
+      "SET LOCAL lock_timeout = '5s'",
       'ALTER TABLE users ADD COLUMN IF NOT EXISTS cti_reset_requested_at timestamptz',
       'ALTER TABLE users ADD COLUMN IF NOT EXISTS cti_reset_requested_by uuid REFERENCES users(id) ON DELETE SET NULL',
       'ALTER TABLE users ADD COLUMN IF NOT EXISTS cti_reset_completed_at timestamptz',
