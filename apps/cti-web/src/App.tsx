@@ -1399,25 +1399,25 @@ export function App(): JSX.Element {
   // sound check.
   const resetMyAudio = useCallback((): void => {
     saveAudioPrefs({ input: null, output: null });
-    if (deviceRef.current) {
-      if (!resetBusy()) {
-        teardownDevice();
-        if (coordinatorRef.current?.isLeader() ?? true) {
-          void ensureDevice().catch(onDeviceBuildFailed);
-        }
-      } else {
-        // Something is live or owed here, so no rebuild. Put the live Device
-        // back on the defaults, exactly as picking "System default" in
-        // Settings does (safe mid-call).
-        void Promise.all([audioPort.unsetInputDevice(), audioPort.setOutputDevice(SYSTEM_DEFAULT)]).catch((err: unknown) => {
-          const why = err instanceof Error && err.message ? err.message : 'the browser refused it';
-          setToast({ text: `Couldn't switch back to System default: ${why}`, type: 'error' });
-        });
-      }
+    const isLeader = coordinatorRef.current?.isLeader() ?? true;
+    if (!resetBusy()) {
+      // Idle: a fresh Device on the leader — also when there is none at all
+      // ("Inbound calls unavailable": its build failed), which is exactly when
+      // a rep presses this. A non-leader only sheds a Device it still holds.
+      if (deviceRef.current || isLeader) teardownDevice();
+      if (isLeader) void ensureDevice().catch(onDeviceBuildFailed);
+    } else if (deviceRef.current) {
+      // Something is live or owed here, so no rebuild. Put the live Device
+      // back on the defaults, exactly as picking "System default" in
+      // Settings does (safe mid-call).
+      void Promise.all([audioPort.unsetInputDevice(), audioPort.setOutputDevice(SYSTEM_DEFAULT)]).catch((err: unknown) => {
+        const why = err instanceof Error && err.message ? err.message : 'the browser refused it';
+        setToast({ text: `Couldn't switch back to System default: ${why}`, type: 'error' });
+      });
     }
     // Only the softphone tab holds the Device: another tab only clears the
     // picks, which the softphone tab applies from storage (Task 3 review M-h).
-    setToast(coordinatorRef.current?.isLeader() ?? true
+    setToast(isLeader
       ? { text: 'Microphone and speaker are back to System default.', type: 'success' }
       : { text: 'Audio settings cleared — your active softphone tab will use System default.', type: 'success' });
     setSoundCheck('asked');

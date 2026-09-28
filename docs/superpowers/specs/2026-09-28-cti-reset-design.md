@@ -28,7 +28,7 @@ The header gets a **Reset everyone** button, behind a confirm. It covers every h
    - A reset never interrupts any of those. It waits.
 2. **After sign-in,** the **sound check** runs once, in whichever of the three permission states applies. "Looks good" finishes it. It can also be run any time from Settings with **Run sound check**.
 
-**Settings → Reset my audio** is self-serve and never signs the rep out. It clears the rep's mic and speaker picks, rebuilds the Twilio Device (only when idle), and opens the sound check.
+**Settings → Reset my audio** is self-serve and never signs the rep out. It clears the rep's mic and speaker picks, rebuilds the Twilio Device (only when idle, and also when there is none, e.g. after "Inbound calls unavailable"), and opens the sound check.
 
 ## Decisions
 

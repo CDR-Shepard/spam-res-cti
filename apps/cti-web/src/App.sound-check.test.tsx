@@ -124,6 +124,10 @@ let runStatus: 'ready' | 'active' = 'ready';
 let verdict: { decision: string } = ALLOW_VERDICT;
 /** /telephony/token answers 401 once set (a dead session). */
 let sessionDead = false;
+/** The next this-many /telephony/token calls fail with a 500 (Twilio/API trouble). */
+let tokenFailures = 0;
+/** When set, the next /telephony/token call waits on it (a hung request). */
+let holdNextToken: Promise<void> | null = null;
 const runView = () => ({
   session: { id: 'sess-1', status: runStatus },
   counts: { total: 1, done: 0, connected: 0, noConnect: 0, skipped: 0, unreachable: 0, pending: 1 },
@@ -140,12 +144,16 @@ beforeEach(() => {
   runStatus = 'ready';
   verdict = ALLOW_VERDICT;
   sessionDead = false;
+  tokenFailures = 0;
+  holdNextToken = null;
   vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: { method?: string }): Promise<Response> => {
     const url = String(input);
     const method = init?.method ?? 'GET';
     if (url.includes('/auth/dev-session')) return jsonResponse({ error: 'Not found' }, 404);
     if (url.includes('/auth/me')) return jsonResponse(ME);
     if (url.includes('/calls/pending-disposition')) return jsonResponse({ pending });
+    if (url.includes('/telephony/token') && tokenFailures > 0) { tokenFailures -= 1; return jsonResponse({ error: 'boom' }, 500); }
+    if (url.includes('/telephony/token') && holdNextToken) { const held = holdNextToken; holdNextToken = null; await held; }
     if (url.includes('/telephony/token')) return sessionDead ? jsonResponse({ error: 'Unauthorized' }, 401) : jsonResponse({ token: 'device-token' });
     if (url.includes('/mobile/devices')) return jsonResponse({ devices: [] });
     if (url.includes('/firewall/precall')) return jsonResponse(verdict);
@@ -367,6 +375,42 @@ describe('App — Settings', () => {
     expect(await screen.findByRole('dialog', { name: 'Sound check' })).toBeTruthy();
     // The banner survives the rebuild — it's App's pendingDisp state, unrelated to the Device.
     expect(await screen.findByText(/needs a disposition/)).toBeTruthy();
+  });
+
+  // Follow-up 3 (final review): "Inbound calls unavailable" — the Device
+  // failed to build, so there is none — is exactly when a rep presses Reset
+  // my audio. It must build one, not only clear the picks.
+  it('Reset my audio with NO Device (its build failed): builds a fresh one', async () => {
+    tokenFailures = 1;
+    signedIn();
+    render(<App />);
+    await screen.findByText(/Inbound calls unavailable/);
+    expect(FakeDevice.instances.length).toBe(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Reset my audio' }));
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    expect(FakeDevice.instances[0]!.destroyed).toBe(false);
+    expect(await screen.findByRole('dialog', { name: 'Sound check' })).toBeTruthy();
+    expect(screen.getByText('Microphone and speaker are back to System default.')).toBeTruthy();
+  });
+
+  it('Reset my audio while the first build hangs on its token: a fresh build, not stuck behind the hung one', async () => {
+    let release: () => void = () => {};
+    holdNextToken = new Promise<void>((resolve) => { release = resolve; });
+    const tokenCalls = (): number => vi.mocked(fetch).mock.calls.filter(([u]) => String(u).includes('/telephony/token')).length;
+    signedIn();
+    render(<App />);
+    await waitFor(() => expect(tokenCalls()).toBe(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Reset my audio' }));
+    await waitFor(() => expect(FakeDevice.instances.length).toBe(1));
+    expect(tokenCalls()).toBe(2);
+
+    await act(async () => { release(); }); // the hung build resumes, superseded: it builds nothing
+    for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); });
+    expect(FakeDevice.instances.length).toBe(1);
+    expect(FakeDevice.instances[0]!.destroyed).toBe(false);
+    expect(screen.queryByText(/Inbound calls unavailable/)).toBeNull();
   });
 
   // The first Device is still registering when Reset my audio tears it down

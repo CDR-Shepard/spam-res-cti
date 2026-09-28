@@ -99,7 +99,7 @@ SELECT s.id, s.created_at, s.expires_at, (u.cti_reset_requested_at > s.created_a
 - **The mic:** the stream is stopped whenever the check closes. The check hides during a ring, a call, wrap-up, a waiting callback or a power-dial run, and comes back afterwards.
 - **"Not now"** closes it for this page load. After a reset it returns on each load until **Looks good**.
 - **Settings → Run sound check** opens it at any time.
-- **Settings → Reset my audio** puts the mic and speaker back to System default and builds a fresh Twilio Device (only when nothing is live; otherwise the live Device just switches to the defaults). Then it opens the check. It never signs the rep out.
+- **Settings → Reset my audio** puts the mic and speaker back to System default and builds a fresh Twilio Device (only when nothing is live; otherwise the live Device just switches to the defaults). It builds one even when the softphone has none — after *Inbound calls unavailable*, which is when reps reach for it. Then it opens the check. It never signs the rep out.
 
 ## Deploying (migration 0045)
 
