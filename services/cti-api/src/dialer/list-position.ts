@@ -54,8 +54,8 @@ export interface ListWorker {
 }
 
 /**
- * The furthest `list_position` any rep reached dialing THIS list view in the
- * last `LIST_SHARE_WINDOW_MS`, plus who they were — org-wide, not scoped to
+ * The `list_position` of the MOST RECENT dial any rep made on THIS list view
+ * in the last `LIST_SHARE_WINDOW_MS`, plus who they were — org-wide, not scoped to
  * one rep, because the whole point is noticing ANOTHER rep's run (or this
  * same rep's own earlier one). `null` when nobody has dialed it in the
  * window: the queue starts at the top, today's behaviour.

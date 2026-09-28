@@ -11,7 +11,7 @@ The rules are org-wide and have no kill switch. Change a constant and redeploy.
 | State law: no 4th call to a number in a rolling 24 h. Every dial by anyone counts, click-to-dial included, and so does a Skip (the phone rang). | `packages/firewall/src/state-calling-rules.ts` `DAILY_DIAL_CAP_STATES`, `DAILY_DIAL_CAP` | FL, OK, WA, MD; 3 per 24 h |
 | Follow-up rollover: the task owner's Nth dial of the org day that doesn't connect rolls the follow-up. For a power-dial miss N is the run's Calls per person (Once = 1st, Twice = 2nd); for click-to-dial it is always 2. It counts power dial and click-to-dial, but only the owner's own dials. A Skip does not count. Where it lands: see Run settings below. | `dialer/contact-history.ts` `rolloverDue`; `salesforce/sync.ts` hook (`CLICK_TO_DIAL_ROLLOVER_MISSES`) | 1 or 2 per LA day |
 | One number per pass: attempt 1 dials the lead number and the other is tried once, at the end-of-run retry (Twice runs only; a Once run has no retry). A number the person once answered on leads, and the other is never dialed. | `dialer/create-session.ts` | — |
-| Two reps, one list: a new run from a list view starts after the furthest record dialed on that list in 12 h. | `dialer/list-position.ts` `LIST_SHARE_WINDOW_MS` | 12 h |
+| Two reps, one list: a new run from a list view starts after the MOST RECENT dial on that list in 12 h (the active rep's frontier). | `dialer/list-position.ts` `LIST_SHARE_WINDOW_MS` | 12 h |
 | A hang-up never auto-redials. The rep chooses Redial or Resume, and a missed Redial is not retried. End call hangs up and pauses. | `dialer/engine.ts` `redialCurrent` / `endCurrent` | — |
 | A run whose prospect hung up more than 10 min ago, with no panel poll, is reaped. | `salesforce/followup-worker.ts` `HUNG_UP_PRESENCE_MS` | 10 min |
 
@@ -101,7 +101,7 @@ Spec: `docs/superpowers/specs/2026-09-28-run-settings-design.md`. Three choices 
 | Missed tasks move to | Next business day (default) · In 2 business days | `dialer_sessions.rollover_business_days` (1/2) → `followup_rollover_jobs.business_days` | The copy lands 1 or 2 business days after the LATER of the dial day (`from_date`) and the task's own due date. Then the 100/day cap pushes it on as before. `next_day` is that uncapped day. |
 
 - **Where the next run starts:** after the position of the MOST RECENT dial on that list in the last 12 h (not the furthest one), so "first 100" runs step through the list 1–100, 101–200, then back to the top. Salesforce→CTI handoff runs and raw-id runs have no list position: "first N" of the same selection re-queues the same top N each time, and only the 3 h already-worked skip moves it along.
-- Starting saves all three choices to the rep's account: Calls per person and Missed tasks to `users.dialer_passes` and `users.dialer_rollover_business_days`, and How many to `users.dialer_max_records` (nullable, NULL = All). `GET /auth/me` returns them as `dialerRunDefaults: { passes, rolloverBusinessDays, maxRecords }`, and the remembered How many number prefills the Ready screen's box every time — in any tab or in Salesforce.
+- Starting saves all three choices to the rep's account: Calls per person and Missed tasks to `users.dialer_passes` and `users.dialer_rollover_business_days`, and How many to `users.dialer_max_records` (nullable, NULL = All). `GET /auth/me` returns them as `dialerRunDefaults: { passes, rolloverBusinessDays, maxRecords }`, and the remembered How many number prefills the Ready screen's box (a tab re-reads it when a run begins) — in any tab or in Salesforce.
 - Click-to-dial keeps the 2-miss rule and lands where the rep's saved Missed-tasks choice says.
 - A Start with no body (a tab from before this release) is today's run: Twice, All, next business day. Nothing is saved.
 - The end-of-run summary says follow-ups were "moved to a later day" — it never names a specific day like "tomorrow" — whatever the choice.
@@ -114,8 +114,9 @@ Spec: `docs/superpowers/specs/2026-09-28-run-settings-design.md`. Three choices 
 
   A redial copy never gets its own retry.
 - Known edges:
-  - The shared list position is the furthest `list_position` DIALED on the list in 12 h. After a full first-N run, the next run starts at N+1, and a run stopped early resumes where it stopped. A run that wraps past the end of the list sets the position to the last record, so the next run starts at the top. Anyone called in the last 3 h is skipped there anyway.
-  - A rolled task's same-day siblings are matched on the EFFECTIVE day — the later of the dial day and the task's own due date — not the dial day alone. For a worked-ahead task that's the due date, so its same-kind follow-ups due that day are cleared too. Unchanged for a task due today or overdue, where the effective day already equals the dial day.
+  - The shared list position is the `list_position` of the MOST RECENT dial on the list in 12 h. After a first-N run the next run starts at N+1, a run stopped early resumes where it stopped, and a run that wraps past the end of the list resumes after wherever the wrap stopped. Anyone called in the last 3 h is skipped there anyway.
+  - **Known edge (follow-up):** the position is a list INDEX. On a Task list view that hides completed tasks, every rolled task drops out of the view, so the next run re-fetches a shorter list and rotates after the old index — it starts later than "N+1" and wraps round to the skipped segment. On a 200-person list everyone is still covered, just out of order; on 300+ a segment can wait for the wrap. A rolled copy whose new due date falls inside the view's own date range also reappears, and after 3 h can be dialed again that day (the one-rollover-per-person-per-day guard stops a second roll). Fix planned: anchor the start on the last dialed RECORD, not its index.
+  - A rolled task's same-kind siblings are cleared when due on EITHER the effective day (the later of the dial day and the task's own due date) OR the dial day. For a worked-ahead task that clears its same-kind follow-ups due on its own date and any due on the dial day. Unchanged for a task due today or overdue, where both days are the same.
 
 A run's settings, and what its rollovers did:
 ```sql
@@ -150,11 +151,13 @@ A run's skips by outcome:
 SELECT outcome, count(*) FROM dialer_queue_items WHERE session_id = '<uuid>' AND status = 'skipped' GROUP BY 1 ORDER BY 2 DESC;
 ```
 
-A list's shared position, which a new run starts after:
+A list's shared position, which a new run starts after (the MOST RECENT dial in 12 h):
 ```sql
-SELECT s.list_view_id, u.display_name, max(i.list_position) furthest
+SELECT i.list_position, u.display_name, a.dialed_at
   FROM dialer_dial_attempts a JOIN dialer_queue_items i ON i.id = a.item_id
   JOIN dialer_sessions s ON s.id = a.session_id JOIN users u ON u.id = s.user_id
  WHERE s.list_view_id = '<00B…>' AND a.dialed_at > now() - interval '12 hours'
- GROUP BY 1, 2;
+   AND i.list_position IS NOT NULL
+ ORDER BY a.dialed_at DESC, a.id DESC LIMIT 1;
 ```
+A run's own settings and size: `SELECT passes, max_records, rollover_business_days, run_size FROM dialer_sessions WHERE id = '<uuid>';`
