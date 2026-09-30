@@ -20,6 +20,8 @@ railway config plan      # expect: 1 to add (outreach-api), 0 to change, 0 to de
 railway config apply     # confirms interactively; creates the service with its build/deploy settings
 ```
 
+**Stop if the plan shows any `- Delete variable` line.** It means someone added a variable to an existing service on Railway after `.railway/railway.ts` was last pulled, and `apply` would delete it from production. Add that name to the service's `env` block as `preserve()`, re-run the plan, and continue only at `0 to destroy`. (Example: `@cti/api.TWILIO_IOS_PUSH_CREDENTIAL_SID`, added for the Callsign iPhone app after the pull, was caught this way; deleting it breaks iOS VoIP push registration.)
+
 If `apply` refuses because a service is still Config-as-Code-managed, that service is `@cti/api` — translation alone (§5.1) does not lift the refusal, so follow §5 (5.1 through 5.4) now, out of order, then come back and retry `apply` here.
 
 The first deploy will fail at boot with "Invalid environment configuration" until step 2 is done — that is expected.
