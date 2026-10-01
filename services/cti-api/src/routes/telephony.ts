@@ -278,7 +278,11 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     // Every Hangup answered here ends the rep's leg: its time on the dialer
     // ends now (no further callback reaches this route for it).
     const hangup = async (): Promise<string> => {
-      await orDefaultAfter(recordRepLegEnded(getDb(), body.CallSid, new Date(), 'run_end'), undefined);
+      // Fire-and-forget (M5, final review): recordRepLegEnded never throws
+      // (rep-legs.ts), so there is nothing to bound here any more — awaiting
+      // it (even deadline-bounded) only delayed answering Twilio's Hangup by
+      // up to the rejoin deadline for a write the response does not depend on.
+      void recordRepLegEnded(getDb(), body.CallSid, new Date(), 'run_end');
       const response = new VoiceResponse();
       response.hangup();
       return response.toString();
@@ -348,7 +352,11 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
         return reply.type('text/xml').send(response.toString());
       }
       await stampRepCallSid(body.From ?? '', body.CallSid, body.DialerSessionId);
-      await recordRepLegJoin(body.From ?? '', body.CallSid);
+      // Fire-and-forget (M5, final review): recordRepLegJoin never throws
+      // (rep-legs.ts) — awaiting it only added up to the rejoin deadline's
+      // worth of latency to the rep's join for a write the TwiML below does
+      // not depend on.
+      void recordRepLegJoin(body.From ?? '', body.CallSid);
       return reply.type('text/xml').send(twiml);
     }
 

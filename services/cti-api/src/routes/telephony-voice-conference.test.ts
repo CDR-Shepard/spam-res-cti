@@ -39,6 +39,9 @@ const state = vi.hoisted(() => ({
   liveRunsThrows: false,
   liveRunsHang: false,
   liveRunLookups: [] as Array<{ where: unknown; columns?: unknown }>,
+  /** M5 (final review): the leg-join insert / leg-end write never resolve. */
+  legJoinHangs: false,
+  legEndHangs: false,
 }));
 
 // The talk-time report's leg bookkeeping (dialer/rep-legs.ts) — recorded, never
@@ -46,8 +49,14 @@ const state = vi.hoisted(() => ({
 // already assert.
 const legs = vi.hoisted(() => ({ joined: [] as unknown[][], ended: [] as unknown[][] }));
 vi.mock('../dialer/rep-legs.js', () => ({
-  recordRepLegJoined: async (...args: unknown[]) => { legs.joined.push(args); },
-  recordRepLegEnded: async (...args: unknown[]) => { legs.ended.push(args); },
+  recordRepLegJoined: async (...args: unknown[]) => {
+    if (state.legJoinHangs) return new Promise(() => {});
+    legs.joined.push(args);
+  },
+  recordRepLegEnded: async (...args: unknown[]) => {
+    if (state.legEndHangs) return new Promise(() => {});
+    legs.ended.push(args);
+  },
 }));
 
 vi.mock('../config.js', () => ({
@@ -164,6 +173,8 @@ beforeEach(async () => {
   state.liveRunsThrows = false;
   state.liveRunsHang = false;
   state.liveRunLookups = [];
+  state.legJoinHangs = false;
+  state.legEndHangs = false;
   legs.joined = []; legs.ended = [];
   app = Fastify();
   await registerTelephonyRoutes(app);
@@ -624,5 +635,28 @@ describe('time on the power dialer — dialer_rep_legs bookkeeping', () => {
     const res = await rejoin();
     expect(res.body).toContain('<Conference');
     expect(legs.ended).toEqual([]);
+  });
+
+  // M5 (final review): both writes are now fire-and-forget on their request's
+  // critical path — a hanging write must never cost the rep (or Twilio) the
+  // response. Same idiom as `liveRunsHang` + `_setRejoinDbTimeoutForTests`
+  // above; the small timeout is belt-and-braces since neither write is
+  // awaited at all any more.
+  it('a hanging leg-join write still lets the rep into the room promptly', async () => {
+    _setRejoinDbTimeoutForTests(30);
+    state.legJoinHangs = true;
+    const res = await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<Conference');
+  });
+
+  it('a hanging leg-end write still answers the Hangup promptly', async () => {
+    _setRejoinDbTimeoutForTests(30);
+    state.legEndHangs = true;
+    state.legSession = null;
+    state.liveSession = null;
+    const res = await rejoin();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<Hangup');
   });
 });
