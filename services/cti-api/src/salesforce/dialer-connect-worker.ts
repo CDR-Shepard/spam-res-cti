@@ -70,6 +70,8 @@ export function errorText(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).slice(0, 500);
 }
 
+const SF_ERROR_FALLBACK = 'Salesforce error (see last_error)';
+
 /**
  * Console-safe summary of a Salesforce error (M3, final review, THIS worker
  * only — the sibling workers' identical pattern is a separate ticket).
@@ -90,7 +92,22 @@ export function sfErrorSummary(err: unknown): string {
   const parts: string[] = [];
   if (status) parts.push(`status=${status}`);
   if (codes.length) parts.push(`errorCodes=${codes.join(',')}`);
-  return parts.length ? parts.join(' ') : 'Salesforce error (see last_error)';
+  return parts.length ? parts.join(' ') : SF_ERROR_FALLBACK;
+}
+
+/**
+ * guarded()'s catch-all sees database errors too, and nothing wrote
+ * `last_error` on that path — so no pointer to it. A Postgres error is named by
+ * its SQLSTATE (its message can quote a value, e.g. invalid input syntax); a
+ * Salesforce-shaped error keeps its errorCode summary; anything else, only its
+ * class. Never a message on the console.
+ */
+export function unexpectedErrorSummary(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return `pg=${code}`;
+  const sf = sfErrorSummary(err);
+  if (sf !== SF_ERROR_FALLBACK) return sf;
+  return err instanceof Error ? err.name : typeof err;
 }
 
 export function patchConnect(db: Db, id: string, patch: Partial<typeof c.$inferInsert>, now: Date) {
@@ -300,7 +317,7 @@ async function guarded(connectId: string, fn: () => Promise<unknown>): Promise<v
   try {
     await fn();
   } catch (err) {
-    console.error(`${LOG} row failed`, { connectId, err: sfErrorSummary(err) });
+    console.error(`${LOG} row failed`, { connectId, err: unexpectedErrorSummary(err) });
   }
 }
 

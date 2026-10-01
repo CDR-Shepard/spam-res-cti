@@ -19,6 +19,7 @@ import {
   selectDueConnectTasks,
   selectDueLinks,
   sfErrorSummary,
+  unexpectedErrorSummary,
   type DialerConnectDeps,
 } from './dialer-connect-worker.js';
 
@@ -389,5 +390,22 @@ describe('DIALER_CONNECT_TASKS kill switch — the loop', () => {
     const start = vi.fn(() => timer);
     expect(maybeStartDialerConnectLoop({ DIALER_CONNECT_TASKS: 'on' }, start)).toBe(timer);
     expect(start).toHaveBeenCalledWith(LOOP_INTERVAL_MS);
+  });
+});
+
+describe('unexpectedErrorSummary — guarded()\'s catch-all wrote no last_error (re-review N2)', () => {
+  it('names a Postgres error by its SQLSTATE, never its message', () => {
+    const pg = Object.assign(new Error('invalid input syntax for type integer: "(619) 555-9999"'), { code: '22P02' });
+    expect(unexpectedErrorSummary(pg)).toBe('pg=22P02');
+  });
+
+  it('keeps the Salesforce errorCode summary for a Salesforce-shaped error', () => {
+    const body = [{ message: 'Subject: (619) 555-9999', errorCode: 'STRING_TOO_LONG' }];
+    expect(unexpectedErrorSummary(new Error(`Salesforce Task create failed: ${JSON.stringify(body)}`))).toBe('errorCodes=STRING_TOO_LONG');
+  });
+
+  it('otherwise logs only the error class — no message, no pointer to a last_error that was never written', () => {
+    expect(unexpectedErrorSummary(new TypeError('cannot read x of (619) 555-9999'))).toBe('TypeError');
+    expect(unexpectedErrorSummary('weird')).toBe('string');
   });
 });
