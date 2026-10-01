@@ -79,10 +79,11 @@ link outlives any run/item cleanup.
 | `object_type`, `record_id` | the item's own record (Lead / Contact / Opportunity) |
 | `from_number`, `to_number` | the DID and the number dialed |
 | `bridged_at` | set at insert |
+| `sf_user_id` | the rep's Salesforce user id (`dialer_sessions.sf_owner_id`) — the ownership gate's caller |
 | `ended_at`, `talk_seconds` | stamped from the prospect leg's `completed` callback; `talk_seconds` = `ended_at − bridged_at` (excludes screening) |
-| `recording_state` | `requested` / `start_failed` / `skipped_consent` / `skipped_switch` |
+| `recording_state` | `pending` (row written) / `requested` / `start_failed` / `skipped_consent` / `skipped_switch` |
 | `recording_url` | Twilio media URL (`.mp3`), validated by `TWILIO_RECORDING_MEDIA_RE` |
-| `salesforce_task_id`, `task_state`, `task_attempts`, `task_last_error`, `next_attempt_at`, `claimed_at` | Task worker bookkeeping; `task_state` = `pending` / `created` / `skipped_not_owner` / `expired` / `failed` |
+| `salesforce_task_id`, `task_state`, `task_attempts`, `next_attempt_at`, `last_error` | Task worker bookkeeping; `task_state` = `pending` / `created` / `skipped_not_owner` / `expired` / `failed`. `next_attempt_at` is the lease + backoff clock for both phases |
 | `recording_link_synced_at`, `link_attempts` | link PATCH bookkeeping |
 | `created_at`, `updated_at` | |
 
@@ -95,7 +96,9 @@ link outlives any run/item cleanup.
    `recordingStatusCallback = /telephony/twilio/dialer-recording?connectId=<id>`.
    Row before recording, so the callback always finds its row. The row is not
    written before the bridge, so a failed bridge never yields a Task for a call
-   that did not happen. Recording start is best-effort: a failure stamps
+   that did not happen. Recording start is best-effort: one retry after
+   750 ms (Twilio warns a record request can land while the new TwiML is still
+   being applied), none after error 21220 (the call already ended); a failure stamps
    `start_failed`, logs loudly, and never touches the live call. A failed row
    insert skips the recording (nothing could receive its callback) and logs.
 2. **Hang-up.** The dialer's existing status route (`/telephony/twilio/dialer-status`)
@@ -104,9 +107,11 @@ link outlives any run/item cleanup.
    Next/End settles the item before the prospect's `completed` arrives. This
    runs alongside, not inside, the engine's existing handling.
 3. **Task** — new scan-based worker `salesforce/dialer-connect-worker.ts`
-   (mirrors `no-answer-chatter-worker.ts`: deps injection, CAS claim with
-   stuck-claim reaping, backoff, single-flight loop, kill switch = loop never
-   started). Picks rows with `ended_at` set and `task_state='pending'`, plus rows
+   (deps injection, single-flight loop, kill switch = loop never started, like
+   `inbound-text-worker.ts`). **The claim is the lease:** claiming bumps the
+   attempt counter by compare-and-swap and pushes `next_attempt_at` out by that
+   try's backoff, so there is no in-flight state and no reaper — a crashed try
+   simply comes due again. Picks rows with `ended_at` set and `task_state='pending'`, plus rows
    bridged more than 4 h ago whose `ended_at` never arrived (logged with no
    duration). Per row, as the rep (`createCallTask`, `userId` = the rep):
    - Subject — THE call-subject rule: `buildCallSubject({ inbound: false,
@@ -126,8 +131,10 @@ link outlives any run/item cleanup.
      `mayCreateTaskOn`): not the rep's record → `skipped_not_owner`, no Task.
      The recording still exists in the CTI.
    - No Chatter post.
-   - If `recording_url` is already present, PATCH the link right after create.
-   - Failures back off (1 min, 5 min, 15 min, 1 h, 3 h); the 6th failure →
+   - After the create the row is due at once, so the link phase (step 4)
+     attaches the recording on the next tick if it is already in.
+   - Failures back off (5 min, 15 min, 1 h, 3 h, 6 h — the first wait outlasts
+     a row's worst case, which the lease requires); the 6th failure →
      `failed` + a loud log line (no retry-forever, unlike
      `sweepUnpushedRecordingLinks`). A Salesforce auth error does not count
      as an attempt (the rep reconnecting fixes it), matching the follow-up
@@ -136,11 +143,13 @@ link outlives any run/item cleanup.
    signature validated against the full URL (`signedCallbackUrl`), `connectId`
    UUID-checked, `RecordingStatus=completed` only, media URL regex-checked, and
    `CallSid` cross-checked against `call_sid` (the id is public — it is in the
-   link). Stores `recording_url`. If the Task already exists, PATCHes
-   `tdc_cti__Recording_URL__c` (`updateCallTask`) and stamps
-   `recording_link_synced_at`; otherwise step 3 attaches it. The worker also
-   retries rows with a Task + recording but no `recording_link_synced_at`,
-   capped at 6 `link_attempts` on the same backoff.
+   link). Stores `recording_url` — the webhook itself never calls Salesforce.
+   The worker's link phase PATCHes `tdc_cti__Recording_URL__c`
+   (`updateCallTask`, as the rep) with the public playback URL on its next
+   tick (≤ 5 s) once the Task exists, and stamps `recording_link_synced_at`.
+   A rejected field (no tdc_cti license) stamps it too, with a loud log —
+   same as the click-to-dial sweep. Capped at 6 `link_attempts` on the same
+   backoff.
 5. **Playback** — `GET /recordings/:id?sig=` resolves `calls` first, then
    `dialer_connects`. Same HMAC signer (`buildRecordingPublicUrl`); the ids are
    UUIDs, so the two id spaces cannot collide. Same SSRF pin, Range support,
