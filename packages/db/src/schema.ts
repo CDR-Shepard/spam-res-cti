@@ -692,6 +692,12 @@ export const calls = pgTable(
     answeredAt: timestamp('answered_at', { withTimezone: true }),
     endedAt: timestamp('ended_at', { withTimezone: true }),
     durationSeconds: integer('duration_seconds'),
+    /** TRUE talk time (migration 0048): the customer's connected line only —
+     *  the <Dial action>'s DialCallDuration or the dialed leg's own
+     *  CallDuration, 0 when never answered (telephony/talk-seconds.ts).
+     *  durationSeconds stays as it was: the reputation engine reads it.
+     *  NULL on rows from before 0048. */
+    talkSeconds: integer('talk_seconds'),
     disposition: text('disposition'),
     notes: text('notes'),
     recordingUrl: text('recording_url'),
@@ -1024,6 +1030,40 @@ export const dialerConnects = pgTable(
   }),
 );
 export type DialerConnect = typeof dialerConnects.$inferSelect;
+
+/** Every end_source a dialer_rep_legs row can hold (migration 0048's CHECK). */
+export const DIALER_REP_LEG_END_SOURCES = ['rep_left', 'run_end', 'replaced', 'reconciled', 'fallback'] as const;
+export type DialerRepLegEndSource = (typeof DIALER_REP_LEG_END_SOURCES)[number];
+
+/**
+ * One row per rep conference leg of the power dialer (migration 0048): how long
+ * the rep's line sat on the dialer — dialing, hold music and talking all count.
+ * Written by dialer/rep-legs.ts, closed by dialer/rep-leg-reconcile.ts when
+ * every end signal was missed, read by reports/talk-time-query.ts. FK-free.
+ */
+export const dialerRepLegs = pgTable(
+  'dialer_rep_legs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    sessionId: uuid('session_id').notNull(),
+    /** The rep leg. FULL unique index: the bare ON CONFLICT arbiter. */
+    callSid: text('call_sid').notNull(),
+    joinedAt: timestamp('joined_at', { withTimezone: true }).defaultNow().notNull(),
+    /** NULL while the leg is open; stamped once. */
+    endedAt: timestamp('ended_at', { withTimezone: true }),
+    endSource: text('end_source').$type<DialerRepLegEndSource>(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    // FULL, never partial: rep-legs.ts's bare ON CONFLICT DO NOTHING arbitrates on it.
+    callSidUnique: uniqueIndex('dialer_rep_legs_call_sid_unique').on(t.callSid),
+    orgJoinedIdx: index('dialer_rep_legs_org_joined_idx').on(t.orgId, t.joinedAt),
+  }),
+);
+export type DialerRepLeg = typeof dialerRepLegs.$inferSelect;
 
 /**
  * Sticky caller ID per (rep, lead) — the DID a rep last called a given recipient

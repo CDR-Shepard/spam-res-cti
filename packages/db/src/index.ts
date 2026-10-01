@@ -61,6 +61,8 @@ export type {
   DialerConnect,
   DialerConnectRecordingState,
   DialerHandoff,
+  DialerRepLeg,
+  DialerRepLegEndSource,
   FollowupRolloverJob,
   InboundMessage,
   InboundMessageStatus,
