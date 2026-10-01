@@ -18,12 +18,12 @@ Days are America/Los_Angeles. A call counts on the day it started. A dialer leg 
 
 - **Regular calls:** `calls.talk_seconds`, the true talk time (ring time excluded), from the deploy of 0048 on. Older calls fall back to `calls.duration_seconds`, which includes ringing. So ranges before the deploy read high.
 - **Power dial:** `dialer_connects.talk_seconds` (migration 0047).
-- **On dialer:** `dialer_rep_legs` (migration 0048). How a leg's end gets stamped, in order:
-  1. the leg's own Twilio status callback (`rep_left`);
-  2. the rejoin route (`rep_left` / `run_end`);
-  3. the run's end (`run_end`);
-  4. a newer leg on the same run (`replaced`);
-  5. failing all of those, the reconcile loop (every 5 min, Twilio's call record, `reconciled`; after 48 h of Twilio errors a leg is closed at join + 12 h, `fallback`, logged `[dialer] rep leg closed by rule`).
+- **On dialer:** `dialer_rep_legs` (migration 0048). Whichever of these HEARS the leg end FIRST stamps it — not a precedence order, a race (e.g. `run_end` and `rep_left` can each win depending on timing):
+  - the leg's own Twilio status callback (`rep_left`);
+  - the rejoin route (`rep_left` / `run_end`);
+  - the run's end (`run_end`);
+  - a newer leg on the same run (`replaced`);
+  - only if NONE of those ever arrive, the reconcile loop (every 5 min, Twilio's call record, `reconciled`; after 48 h of Twilio errors a leg is closed at join + 12 h, `fallback`, logged `[dialer] rep leg closed by rule`).
 
 ## The Salesforce talk-time report
 

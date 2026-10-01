@@ -48,11 +48,17 @@ from dialer_connects
 where bridged_at > now() - interval '1 day'
 group by 1, 2 order by 3 desc;
 
--- Anything stuck or failing
+-- Anything stuck or failing. A 'pending' row with ended_at still null is a
+-- call that may simply still be IN PROGRESS — only flag it once it has
+-- either ended and sat unprocessed for a while, or run well past the 4 h
+-- missed-end window (final review M9).
 select id, user_id, task_state, task_attempts, link_attempts, last_error, bridged_at
 from dialer_connects
 where (task_state = 'failed')
-   or (task_state = 'pending' and bridged_at < now() - interval '30 minutes')
+   or (task_state = 'pending' and (
+         (ended_at is not null and updated_at < now() - interval '30 minutes')
+         or bridged_at < now() - interval '4 hours'
+       ))
    or (task_state = 'created' and recording_url is not null and recording_link_synced_at is null
        and updated_at < now() - interval '30 minutes')
 order by bridged_at desc limit 50;
