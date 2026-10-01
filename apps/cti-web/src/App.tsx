@@ -15,6 +15,7 @@ import { RecentCalls } from './components/RecentCalls';
 import { ReputationPanel } from './components/ReputationPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SoundCheck } from './components/SoundCheck';
+import { TalkTimePanel } from './components/TalkTimePanel';
 import { TeamPanel } from './components/TeamPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
@@ -2228,6 +2229,8 @@ export function App(): JSX.Element {
     />
   ) : tab === 'team' ? (
     <TeamPanel />
+  ) : tab === 'talktime' ? (
+    <TalkTimePanel />
   ) : tab === 'reputation' ? (
     <ReputationPanel />
   ) : tab === 'admin' ? (
@@ -2324,6 +2327,7 @@ export function App(): JSX.Element {
     powerdial: <ZapIcon />,
     recent: <ClockIcon />,
     team: <UserIcon />,
+    talktime: <ClockIcon />,
     reputation: <ShieldIcon />,
     admin: <SettingsIcon />,
     calls: <PhoneOutgoingIcon />,

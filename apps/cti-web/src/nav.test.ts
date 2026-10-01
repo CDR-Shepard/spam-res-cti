@@ -16,14 +16,18 @@ describe('navTabsFor', () => {
       .not.toContain('powerdial');
   });
 
-  it('admins get Team in the More overflow, beside Reputation', () => {
+  it('admins get Team and Talk time in the More overflow, beside Reputation', () => {
     const ids = navTabsFor({ isAdmin: true, powerDialerEnabled: true }).map((t) => t.id);
-    expect(ids).toEqual(['dialer', 'powerdial', 'recent', 'team', 'reputation', 'admin', 'calls', 'settings']);
-    expect(NAV_OVERFLOW_IDS).toEqual(['team', 'reputation', 'admin', 'calls']);
+    expect(ids).toEqual(['dialer', 'powerdial', 'recent', 'team', 'talktime', 'reputation', 'admin', 'calls', 'settings']);
+    expect(NAV_OVERFLOW_IDS).toEqual(['team', 'talktime', 'reputation', 'admin', 'calls']);
+  });
+
+  it('reps never see Talk time', () => {
+    expect(navTabsFor({ ...rep, powerDialerEnabled: true }).map((t) => t.id)).not.toContain('talktime');
   });
 
   it('labels are stable', () => {
     const byId = Object.fromEntries(navTabsFor({ isAdmin: true, powerDialerEnabled: true }).map((t) => [t.id, t.label]));
-    expect(byId).toMatchObject({ team: 'Team', admin: 'Numbers', reputation: 'Reputation', dialer: 'Dial' });
+    expect(byId).toMatchObject({ team: 'Team', talktime: 'Talk time', admin: 'Numbers', reputation: 'Reputation', dialer: 'Dial' });
   });
 });
