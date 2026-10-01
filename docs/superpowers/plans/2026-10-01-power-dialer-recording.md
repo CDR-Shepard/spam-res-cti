@@ -17,6 +17,7 @@
 - Recording happens only when `TWILIO_RECORD_CALLS` is true **and** `DIALER_RECORDING=on` **and** the org's `default` campaign is not `recordingConsentMode='two_party'`. A failed consent lookup fails closed (no recording).
 - Kill switches: `DIALER_RECORDING` and `DIALER_CONNECT_TASKS`, each `z.enum(['on','off']).default('on')` — strict like `NO_ANSWER_CHATTER` (`false`/`0` fail the boot).
 - Task subject = THE call-subject rule, `buildCallSubject({ inbound: false, disposition: 'Connected', counterpartyE164, recordName })` → `Outbound Call | Connected | (619) 555-1234 / Jane Doe`.
+- Task date: `ActivityDate` is the org's (America/Los_Angeles) calendar day — `orgTodayIso` — never the UTC date. A power-dial Task is dated the day it was BRIDGED. (The reps' Salesforce talk-time report 00OUS000007DAyP2AW filters `Due Date = TODAY`, `Subject contains Outbound,Inbound`, `Assigned = $USER`, and sums Call Duration.)
 - Task links: Lead / Contact → `WhoId`; Opportunity → `WhatId`. Ownership gate = `mayCreateTaskOn` (click-to-dial rule). No Chatter post.
 - No backfill: a pending row bridged more than **24 h** ago becomes `expired`. A row bridged more than **4 h** ago with no hang-up stamp is logged without a duration.
 - Retries: claim = lease; backoff **5 min, 15 min, 1 h, 3 h, 6 h**; the **6th** failed try is final (`MAX_TRIES = 6`). A Salesforce auth error on the Task phase is not counted and retries in 1 h (the 24 h window bounds it).
@@ -38,6 +39,7 @@
 | `services/cti-api/src/config.ts` | modify | `DIALER_RECORDING`, `DIALER_CONNECT_TASKS` |
 | `services/cti-api/src/routes/dialer.ts` | modify | hang-up stamp on `/dialer-status`; new `/dialer-recording` route |
 | `services/cti-api/src/routes/recordings.ts` | modify | `resolveRecordingUrl` (calls, then dialer_connects) |
+| `services/cti-api/src/salesforce/client.ts` | modify | `createCallTask` dates Tasks in the org's (Pacific) day, `activityDate` override |
 | `services/cti-api/src/salesforce/dialer-connect-task.ts` | create | pure: backoff, links, Task payload |
 | `services/cti-api/src/salesforce/dialer-connect-worker.ts` | create | the Task + link worker, loop, kill switch |
 | `services/cti-api/src/server.ts` | modify | starts/stops the worker loop |
@@ -1334,14 +1336,100 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 6: The Task payload (pure)
+### Task 6: Call Tasks are dated in the org's (Pacific) day
+
+**Why:** `createCallTask` stamps `ActivityDate` with the UTC date (`new Date().toISOString().slice(0, 10)`). From 5 pm Pacific on, UTC is already tomorrow, so the Task is dated tomorrow — and the reps' Salesforce talk-time report (`Due Date = TODAY`) drops it from the day it happened. Measured 2026-10-01: 45 of the last 3 days' 627 "Call Log" Tasks were mis-dated, every one created 5 pm–midnight PT. The power-dial Tasks go through the same function, so fix it here once.
+
+**Files:**
+- Modify: `services/cti-api/src/salesforce/client.ts` (`CallTaskInput`, `createCallTask`)
+- Test: `services/cti-api/src/salesforce/create-call-task.test.ts`
+
+**Interfaces:**
+- Consumes: `orgTodayIso(now?: Date): string` from `services/cti-api/src/dialer/org-day.ts` (America/Los_Angeles, `YYYY-MM-DD`).
+- Produces: `CallTaskInput.activityDate?: string` (`YYYY-MM-DD`); when omitted, `createCallTask` uses `orgTodayIso(new Date())`.
+
+- [ ] **Step 1: Write the failing tests** — in `create-call-task.test.ts`, change the vitest import to `import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';` and append:
+
+```ts
+describe('createCallTask — ActivityDate is the org\'s (Pacific) calendar day, never UTC\'s', () => {
+  beforeEach(() => {
+    state.mockRequest.mockReset();
+    state.mockRequest.mockResolvedValue(jsonResponse(201, { id: '00TNEW', success: true }));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a call at 6 pm Pacific is dated that day — UTC has already rolled over to the next', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-02T01:00:00Z')); // 18:00 PDT on Oct 1
+    await createCallTask('u1', INPUT);
+    expect(bodyOf(0).ActivityDate).toBe('2026-10-01');
+  });
+
+  it('a morning call is dated the same day either way', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-01T16:00:00Z')); // 09:00 PDT
+    await createCallTask('u1', INPUT);
+    expect(bodyOf(0).ActivityDate).toBe('2026-10-01');
+  });
+
+  it('an explicit activityDate wins (the power dialer dates a Task by the day it was bridged)', async () => {
+    await createCallTask('u1', { ...INPUT, activityDate: '2026-09-30' });
+    expect(bodyOf(0).ActivityDate).toBe('2026-09-30');
+  });
+});
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `cd /Users/cdrshepard/spam-res-cti-dialer-rec/services/cti-api && npx vitest run src/salesforce/create-call-task.test.ts`
+Expected: FAIL — the 6 pm test gets `'2026-10-02'`; the explicit-date test gets today's date (and may not typecheck until Step 3 adds the field).
+
+- [ ] **Step 3: Implement** — in `client.ts`:
+  - add `import { orgTodayIso } from '../dialer/org-day.js';` with the other imports;
+  - in `CallTaskInput`, after `description?: string;`:
+
+```ts
+  /** The Task's date (ActivityDate, `YYYY-MM-DD`): the day the call happened in
+   *  the org's timezone. Omitted = today in the org's timezone. */
+  activityDate?: string;
+```
+  - in `createCallTask`, replace `const today = new Date().toISOString().slice(0, 10);` with:
+
+```ts
+  // The org's calendar day, never UTC's. From 5 pm Pacific UTC is already
+  // tomorrow, and the reps' talk-time report (Due Date = TODAY) would drop the
+  // call from the day it happened.
+  const activityDate = input.activityDate ?? orgTodayIso(new Date());
+```
+  - and in `base`, change `ActivityDate: today,` to `ActivityDate: activityDate,`.
+
+- [ ] **Step 4: Run the Salesforce suite and the typecheck**
+
+Run: `cd /Users/cdrshepard/spam-res-cti-dialer-rec/services/cti-api && npx vitest run src/salesforce src/sms && npx tsc -p tsconfig.json --noEmit`
+Expected: all PASS; clean. (`grep -n "ActivityDate: today" src/salesforce/client.ts` must print nothing.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/cdrshepard/spam-res-cti-dialer-rec
+git add services/cti-api/src/salesforce/client.ts services/cti-api/src/salesforce/create-call-task.test.ts
+git commit -m "fix(sf): date call Tasks in the org's Pacific day, not UTC — 5pm+ calls fell out of today's talk-time report
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 7: The Task payload (pure)
 
 **Files:**
 - Create: `services/cti-api/src/salesforce/dialer-connect-task.ts`
 - Test: `services/cti-api/src/salesforce/dialer-connect-task.test.ts`
 
 **Interfaces:**
-- Consumes: `DialerConnect` (Task 1), `buildCallSubject` (`salesforce/call-subject.ts`), `CallTaskInput` (`salesforce/client.ts`).
+- Consumes: `DialerConnect` (Task 1), `buildCallSubject` (`salesforce/call-subject.ts`), `CallTaskInput` incl. its new `activityDate` (Task 6, `salesforce/client.ts`), `orgTodayIso` (`dialer/org-day.ts`).
 - Produces: `RETRY_DELAYS_MS`, `MAX_TRIES` (= 6), `leaseFor(attempt: number): number`, `CONNECT_DISPOSITION = 'Connected'`, `CONNECT_TASK_DESCRIPTION = 'Logged by the Power Dialer.'`, `type TaskLinks = { whoId?: string; whatId?: string }`, `taskLinks(objectType: string, recordId: string): TaskLinks | null`, `buildConnectTaskInput(row: ConnectTaskRow, links: TaskLinks, recordName: string | null): CallTaskInput` where `ConnectTaskRow = Pick<DialerConnect, 'id' | 'callSid' | 'fromNumber' | 'toNumber' | 'bridgedAt' | 'endedAt' | 'talkSeconds'>`.
 
 - [ ] **Step 1: Write the failing tests** — `dialer-connect-task.test.ts`
@@ -1401,6 +1489,7 @@ describe('buildConnectTaskInput', () => {
       callType: 'Outbound',
       callDisposition: 'Connected',
       callDurationInSeconds: 125,
+      activityDate: '2026-10-01',
       whatId: '0061',
       description: CONNECT_TASK_DESCRIPTION,
       customFields: {
@@ -1415,6 +1504,10 @@ describe('buildConnectTaskInput', () => {
         Outbound_Caller_ID__c: '+16195550101',
       },
     });
+  });
+  it('is dated the Pacific day it was BRIDGED — a 6:30 pm PT call is still that day, though UTC has rolled over', () => {
+    const late = buildConnectTaskInput({ ...ROW, bridgedAt: new Date('2026-10-02T01:30:00Z') }, { whoId: '00Q1' }, null);
+    expect(late.activityDate).toBe('2026-10-01');
   });
   it('no name → number-only subject; no hang-up stamp → no duration, no end time', () => {
     const input = buildConnectTaskInput({ ...ROW, endedAt: null, talkSeconds: null }, { whoId: '00Q1' }, null);
@@ -1441,6 +1534,7 @@ Expected: FAIL — cannot resolve `./dialer-connect-task.js`.
  * Design: docs/superpowers/specs/2026-10-01-power-dialer-recording-design.md.
  */
 import type { DialerConnect } from '@cti/db';
+import { orgTodayIso } from '../dialer/org-day.js';
 import { buildCallSubject } from './call-subject.js';
 import type { CallTaskInput } from './client.js';
 
@@ -1481,6 +1575,9 @@ export function buildConnectTaskInput(row: ConnectTaskRow, links: TaskLinks, rec
     callType: 'Outbound',
     callDisposition: CONNECT_DISPOSITION,
     callDurationInSeconds: row.talkSeconds ?? undefined,
+    // The day the call happened, in the org's timezone — not the day the
+    // worker got to it, and never the UTC date.
+    activityDate: orgTodayIso(row.bridgedAt),
     ...links,
     description: CONNECT_TASK_DESCRIPTION,
     // Same custom fields as a click-to-dial Task (salesforce/sync.ts), so
@@ -1517,14 +1614,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 7: Worker — the Task phase
+### Task 8: Worker — the Task phase
 
 **Files:**
 - Create: `services/cti-api/src/salesforce/dialer-connect-worker.ts`
 - Test: `services/cti-api/src/salesforce/dialer-connect-worker.test.ts`
 
 **Interfaces:**
-- Consumes: Task 1 (`dialerConnects`, `DialerConnect`), Task 6 (all exports), `createCallTask`/`updateCallTask` (`./client.js`), `fetchOwnership`/`mayCreateTaskOn` (`./ownership.js`), `fetchRecordName` (`./sync.js`), `isSalesforceAuthError`/`withTimeout` (`./followup-worker.js`), `RecordingLinkConfig` (`../telephony/recording-links.js`).
+- Consumes: Task 1 (`dialerConnects`, `DialerConnect`), Task 7 (all exports), `createCallTask`/`updateCallTask` (`./client.js`), `fetchOwnership`/`mayCreateTaskOn` (`./ownership.js`), `fetchRecordName` (`./sync.js`), `isSalesforceAuthError`/`withTimeout` (`./followup-worker.js`), `RecordingLinkConfig` (`../telephony/recording-links.js`).
 - Produces: `interface DialerConnectDeps { db; now: () => Date; link: RecordingLinkConfig; sf: { createCallTask; updateCallTask; fetchOwnership; fetchRecordName } }`; constants `LOOP_INTERVAL_MS`, `BATCH_LIMIT`, `TASK_WINDOW_MS`, `MISSED_END_AFTER_MS`, `AUTH_RETRY_MS`, `SF_CALL_TIMEOUT_MS`, `SF_CREATE_TIMEOUT_MS`; `expireStaleConnects(db, now)`, `selectDueConnectTasks(db, now)`, `claimConnectTask(db, row, now)`, `processConnectTask(row, deps): Promise<'created' | 'skipped_not_owner' | 'failed' | 'retry'>`.
 
 - [ ] **Step 1: Write the failing tests** — `dialer-connect-worker.test.ts`
@@ -1704,7 +1801,7 @@ describe('the Task-phase SQL, rendered', () => {
 Run: `cd /Users/cdrshepard/spam-res-cti-dialer-rec/services/cti-api && npx vitest run src/salesforce/dialer-connect-worker.test.ts`
 Expected: FAIL — cannot resolve `./dialer-connect-worker.js`.
 
-- [ ] **Step 3: Implement** — `dialer-connect-worker.ts` (the link phase, tick and loop are added in Task 8):
+- [ ] **Step 3: Implement** — `dialer-connect-worker.ts` (the link phase, tick and loop are added in Task 9):
 
 ```ts
 /**
@@ -1717,7 +1814,7 @@ Expected: FAIL — cannot resolve `./dialer-connect-worker.js`.
  * hang-up was never heard — and that were bridged inside the last 24 h. The
  * click-to-dial ownership rule first (no Task on a record the rep does not
  * own), then createCallTask, then `created`.
- * LINK PHASE (Task 8): rows with a Task and a recording but no synced link.
+ * LINK PHASE (Task 9): rows with a Task and a recording but no synced link.
  *
  * THE CLAIM IS THE LEASE. Claiming bumps the attempt counter and pushes
  * next_attempt_at out by that try's backoff (5 min at least, longer than a
@@ -1891,7 +1988,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 8: Worker — the link phase, the tick, the loop, `DIALER_CONNECT_TASKS`, server wiring
+### Task 9: Worker — the link phase, the tick, the loop, `DIALER_CONNECT_TASKS`, server wiring
 
 **Files:**
 - Modify: `services/cti-api/src/salesforce/dialer-connect-worker.ts`
@@ -1899,7 +1996,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Test: `services/cti-api/src/salesforce/dialer-connect-worker.test.ts`, `services/cti-api/src/config.test.ts`
 
 **Interfaces:**
-- Consumes: Task 7 exports; `buildRecordingPublicUrl` (`../telephony/recording-links.js`); `loadConfig`, `AppConfig` (`../config.js`).
+- Consumes: Task 8 exports; `buildRecordingPublicUrl` (`../telephony/recording-links.js`); `loadConfig`, `AppConfig` (`../config.js`).
 - Produces: `RECORDING_URL_FIELD = 'tdc_cti__Recording_URL__c'`, `selectDueLinks(db, now)`, `claimLink(db, row, now)`, `pushConnectLink(row, deps): Promise<'synced' | 'rejected' | 'retry' | 'failed'>`, `runDialerConnectTick(deps?): Promise<{ expired: number; tasks: number; links: number }>`, `startDialerConnectLoop(intervalMs?)`, `maybeStartDialerConnectLoop(cfg, start?)`; `cfg.DIALER_CONNECT_TASKS: 'on' | 'off'`.
 
 - [ ] **Step 1: Write the failing tests** — append to `dialer-connect-worker.test.ts` (add the new names to the existing import from `./dialer-connect-worker.js`: `LOOP_INTERVAL_MS, RECORDING_URL_FIELD, claimLink, maybeStartDialerConnectLoop, pushConnectLink, runDialerConnectTick, selectDueLinks`; and add `import { buildRecordingPublicUrl } from '../telephony/recording-links.js';`):
@@ -2264,7 +2361,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 9: Runbook
+### Task 10: Runbook
 
 **Files:**
 - Create: `docs/runbooks/power-dial-recording.md`
@@ -2339,7 +2436,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 10: Whole-branch review, then deploy + live check (USER-GATED)
+### Task 11: Whole-branch review, then deploy + live check (USER-GATED)
 
 **Files:** none (unless review findings require fixes).
 

@@ -155,6 +155,21 @@ link outlives any run/item cleanup.
    UUIDs, so the two id spaces cannot collide. Same SSRF pin, Range support,
    uniform 404.
 
+## The reps' Salesforce talk-time report
+
+Report `00OUS000007DAyP2AW` ("Copy of SMS 360 Full Report", Activity report):
+`Subject contains Outbound,Inbound`, `Assigned = $USER`, `Due Date = TODAY`,
+grouped by Assigned + Subject, summing Call Duration. A power-dial Task
+qualifies: subject `Outbound Call | Connected | …`, owned by the rep (created
+with the rep's token), `CallDurationInSeconds = talk_seconds`.
+
+**Date bug found and fixed here (affects click-to-dial too):** `createCallTask`
+dated Tasks with the UTC date, so every call from 5 pm Pacific on was dated
+tomorrow and missing from that day's report — 45 of 627 "Call Log" Tasks in the
+3 days to 2026-10-01, all created 5 pm–midnight PT. `ActivityDate` is now the
+org's (America/Los_Angeles) day; a power-dial Task is dated the day it was
+bridged. Already-mis-dated Tasks are not corrected by this change.
+
 ## No backfill
 
 Rows only exist from deploy onward, and the worker only logs a Task for a row
