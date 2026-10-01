@@ -41,6 +41,15 @@ const state = vi.hoisted(() => ({
   liveRunLookups: [] as Array<{ where: unknown; columns?: unknown }>,
 }));
 
+// The talk-time report's leg bookkeeping (dialer/rep-legs.ts) — recorded, never
+// run, so the fake database's update log below stays exactly what these tests
+// already assert.
+const legs = vi.hoisted(() => ({ joined: [] as unknown[][], ended: [] as unknown[][] }));
+vi.mock('../dialer/rep-legs.js', () => ({
+  recordRepLegJoined: async (...args: unknown[]) => { legs.joined.push(args); },
+  recordRepLegEnded: async (...args: unknown[]) => { legs.ended.push(args); },
+}));
+
 vi.mock('../config.js', () => ({
   loadConfig: () => ({ API_PUBLIC_URL: 'https://api.test', TWILIO_SKIP_SIGNATURE_CHECK: false }),
 }));
@@ -155,6 +164,7 @@ beforeEach(async () => {
   state.liveRunsThrows = false;
   state.liveRunsHang = false;
   state.liveRunLookups = [];
+  legs.joined = []; legs.ended = [];
   app = Fastify();
   await registerTelephonyRoutes(app);
   await app.ready();
@@ -566,5 +576,53 @@ describe('POST /telephony/twilio/voice — a named join must be the run that own
     state.liveRunsHang = true;
     _setRejoinDbTimeoutForTests(30);
     expect((await join(REP_FROM, REP_CALL_SID, SESSION_ID)).body).toContain('<Conference');
+  });
+});
+
+describe('time on the power dialer — dialer_rep_legs bookkeeping', () => {
+  const OLD_LEG = 'CAfedcba9876543210fedcba9876543210';
+
+  it('a join opens the leg, for this rep and this sid', async () => {
+    const res = await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    expect(res.body).toContain('<Conference');
+    expect(legs.joined).toHaveLength(1);
+    expect(legs.joined[0]!.slice(1, 3)).toEqual([REP_ID, REP_CALL_SID]);
+    expect(legs.joined[0]![3]).toBeInstanceOf(Date);
+  });
+
+  it('a refused join (<Reject/>) opens no leg', async () => {
+    state.liveRuns = [{ id: SESSION_ID, status: 'paused' }, { id: '0d6f2e1b-3c5a-4e7d-8f90-a1b2c3d4e5f6', status: 'active' }];
+    await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    expect(legs.joined).toEqual([]);
+  });
+
+  it('a join that replaces an older leg on the run ends the older one as replaced', async () => {
+    state.stampedBefore = { repCallSid: OLD_LEG };
+    await join(REP_FROM, REP_CALL_SID, SESSION_ID);
+    await vi.waitFor(() => expect(legs.ended.map((a) => [a[1], a[3]])).toContainEqual([OLD_LEG, 'replaced']));
+  });
+
+  it('the rep hung up (rejoin, CallStatus=completed): the leg ends as rep_left', async () => {
+    await rejoin({ CallStatus: 'completed' });
+    expect(legs.ended.map((a) => [a[1], a[3]])).toEqual([[REP_CALL_SID, 'rep_left']]);
+  });
+
+  it('a leg the server hangs up (its run is over) ends as run_end', async () => {
+    state.legSession = null;
+    state.liveSession = null;
+    const res = await rejoin();
+    expect(res.body).toContain('<Hangup');
+    expect(legs.ended.map((a) => [a[1], a[3]])).toEqual([[REP_CALL_SID, 'run_end']]);
+  });
+
+  it('a <Dial> that FAILED is hung up and ends as run_end', async () => {
+    await rejoin({ DialCallStatus: 'failed' });
+    expect(legs.ended.map((a) => [a[1], a[3]])).toEqual([[REP_CALL_SID, 'run_end']]);
+  });
+
+  it('a leg merely between rooms ends nothing', async () => {
+    const res = await rejoin();
+    expect(res.body).toContain('<Conference');
+    expect(legs.ended).toEqual([]);
   });
 });

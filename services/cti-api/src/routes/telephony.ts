@@ -25,6 +25,7 @@ import {
 } from '../telephony/webhooks.js';
 import { DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repUserIdFromClientIdentity, TwilioDialerTelephony } from '../dialer/twilio-telephony.js';
 import { mayJoinNamedRun } from '../dialer/join-guard.js';
+import { recordRepLegEnded, recordRepLegJoined } from '../dialer/rep-legs.js';
 
 
 /**
@@ -72,10 +73,26 @@ async function stampRepCallSid(from: string, callSid: string | undefined, sessio
     const db = getDb();
     const before = await db.query.dialerSessions.findFirst({ where, columns: { repCallSid: true } });
     await db.update(schema.dialerSessions).set({ repCallSid: callSid, updatedAt: new Date() }).where(where);
-    if (before?.repCallSid && before.repCallSid !== callSid) void hangUpReplacedLeg(userId, before.repCallSid);
+    if (before?.repCallSid && before.repCallSid !== callSid) {
+      void hangUpReplacedLeg(userId, before.repCallSid);
+      // The talk-time report counts the rep's line once: the old leg's time on
+      // the dialer ends where the new one starts, whenever Twilio reaps it.
+      void recordRepLegEnded(db, before.repCallSid, new Date(), 'replaced');
+    }
   } catch (err) {
     console.error('[dialer] rep call sid stamp failed', { userId, err: (err as Error).message });
   }
+}
+
+/**
+ * Open this rep leg's time-on-the-dialer row (dialer/rep-legs.ts). Runs right
+ * after `stampRepCallSid`, whose stamp it reads to find the run. Bounded by
+ * the rejoin deadline: a slow insert costs the report a leg, never the join.
+ */
+async function recordRepLegJoin(from: string, callSid: string | undefined): Promise<void> {
+  const userId = repUserIdFromClientIdentity(from);
+  if (!userId || !callSid || !TWILIO_CALL_SID_RE.test(callSid)) return;
+  await orDefaultAfter(recordRepLegJoined(getDb(), userId, callSid, new Date()), undefined);
 }
 
 /**
@@ -251,21 +268,28 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     const body = (req.body ?? {}) as Record<string, string>;
     const VoiceResponse = twilio.twiml.VoiceResponse;
     if (body.CallStatus === 'completed') {
-      await orDefaultAfter(pauseRunThatLostItsLeg(body.From ?? '', body.CallSid), undefined);
+      // In parallel: both share the ~15 s Twilio gives this request.
+      await Promise.all([
+        orDefaultAfter(pauseRunThatLostItsLeg(body.From ?? '', body.CallSid), undefined),
+        orDefaultAfter(recordRepLegEnded(getDb(), body.CallSid, new Date(), 'rep_left'), undefined),
+      ]);
       return reply.type('text/xml').send(new VoiceResponse().toString());
     }
-    const hangup = (): string => {
+    // Every Hangup answered here ends the rep's leg: its time on the dialer
+    // ends now (no further callback reaches this route for it).
+    const hangup = async (): Promise<string> => {
+      await orDefaultAfter(recordRepLegEnded(getDb(), body.CallSid, new Date(), 'run_end'), undefined);
       const response = new VoiceResponse();
       response.hangup();
       return response.toString();
     };
     // A room that could not be entered at all must not be retried: fail → action
     // → rejoin → fail would spin as fast as Twilio can ask, for the whole run.
-    if (body.DialCallStatus === 'failed') return reply.type('text/xml').send(hangup());
+    if (body.DialCallStatus === 'failed') return reply.type('text/xml').send(await hangup());
     const from = body.From ?? '';
     const userId = repUserIdFromClientIdentity(from);
     if (!userId || !(await legShouldRejoin(userId, body.CallSid))) {
-      return reply.type('text/xml').send(hangup());
+      return reply.type('text/xml').send(await hangup());
     }
     const twiml = dialerConferenceTwiml(from, { holdMusic: await orDefaultAfter(repHoldMusicChoice(from), DEFAULT_HOLD_MUSIC), rejoinUrl: dialerRejoinUrl() });
     return reply.type('text/xml').send(twiml);
@@ -324,6 +348,7 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
         return reply.type('text/xml').send(response.toString());
       }
       await stampRepCallSid(body.From ?? '', body.CallSid, body.DialerSessionId);
+      await recordRepLegJoin(body.From ?? '', body.CallSid);
       return reply.type('text/xml').send(twiml);
     }
 
@@ -681,6 +706,11 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
           payload: body,
         });
       }
+      else if (endsARepLeg(body)) {
+        // No call row: the power dialer's rep conference leg, whose own final
+        // status callback is the surest end of its time on the dialer.
+        await recordRepLegEnded(db, body.CallSid, new Date(), 'rep_left');
+      }
     }
 
     await db
@@ -690,6 +720,13 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
 
     return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response/>');
   });
+}
+
+const FINAL_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answer', 'canceled']);
+
+/** A leg's OWN final status callback — not a dialed child leg, not a <Dial action>. */
+function endsARepLeg(body: Record<string, string>): boolean {
+  return !body.ParentCallSid && !body.DialCallStatus && FINAL_CALL_STATUSES.has(body.CallStatus ?? '');
 }
 
 function sanitizeHeaders(h: Record<string, unknown>): Record<string, unknown> {

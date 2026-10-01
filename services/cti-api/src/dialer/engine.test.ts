@@ -371,6 +371,7 @@ function makeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
     enqueueRollover: vi.fn(async () => {}),
     onScreenPop: vi.fn(),
     onBridged: vi.fn(async () => {}),
+    onRepLegReleased: vi.fn(async () => {}),
     todayIso: '2026-07-13',
     // Contact-cadence defaults: no history, nobody in flight, no capped state —
     // so every test above this line reads exactly as it did before the gate
@@ -662,6 +663,32 @@ describe('advanceSession', () => {
     await advanceSession('S1', deps);
     expect(deps.telephony.hangup).not.toHaveBeenCalled();
     expect(deps.telephony.endConference).toHaveBeenCalledWith('U1');
+  });
+  it('the run end closes the rep leg on the talk-time report — even when the hangup is refused', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
+    const deps = makeDeps(); deps.db = fakeDb({ ...baseSession, repCallSid: REP_LEG }, items);
+    deps.telephony.hangup = vi.fn(async () => { throw new Error('Call is not in-progress'); });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await advanceSession('S1', deps);
+      expect(deps.onRepLegReleased).toHaveBeenCalledWith(REP_LEG);
+    } finally { err.mockRestore(); }
+  });
+  it('a failing leg close never fails the run end', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
+    const deps = makeDeps({ onRepLegReleased: vi.fn(async () => { throw new Error('db down'); }) });
+    deps.db = fakeDb({ ...baseSession, repCallSid: REP_LEG }, items);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect((await advanceSession('S1', deps)).action).toBe('done');
+      expect(deps.telephony.endConference).toHaveBeenCalledWith('U1');
+    } finally { err.mockRestore(); }
+  });
+  it('a run whose rep never joined closes no leg', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];
+    const deps = makeDeps(); deps.db = fakeDb(baseSession, items);
+    await advanceSession('S1', deps);
+    expect(deps.onRepLegReleased).not.toHaveBeenCalled();
   });
   it('still completes the run when releasing the conference fails (best-effort, never throws)', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'done', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', outcome: 'connected' }];

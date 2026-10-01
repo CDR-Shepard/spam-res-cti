@@ -39,6 +39,11 @@ vi.mock('../telephony/talk-seconds.js', async (importOriginal) => ({
     state.talk.push({ callId, write });
   },
 }));
+const legs = vi.hoisted(() => ({ ended: [] as unknown[][] }));
+vi.mock('../dialer/rep-legs.js', () => ({
+  recordRepLegJoined: async () => {},
+  recordRepLegEnded: async (...args: unknown[]) => { legs.ended.push(args); },
+}));
 vi.mock('@cti/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@cti/auth')>()),
   resolveSession: async () => null,
@@ -71,6 +76,7 @@ beforeEach(async () => {
   state.call = CALL;
   state.sets = [];
   state.talk = [];
+  legs.ended = [];
   app = Fastify();
   await registerTelephonyRoutes(app);
   await app.ready();
@@ -108,5 +114,31 @@ describe('POST /telephony/twilio/status — true talk time', () => {
     state.call = null;
     await post({ CallSid: PARENT, CallStatus: 'in-progress', DialCallStatus: 'completed', DialCallDuration: '37' });
     expect(state.talk).toEqual([]);
+  });
+});
+
+describe('POST /telephony/twilio/status — a rep conference leg that ends', () => {
+  const REP_LEG = `CA${'c'.repeat(32)}`;
+
+  it("a final callback that matches no call row (the dialer rep leg's own) ends its time on the dialer", async () => {
+    state.call = null;
+    await post({ CallSid: REP_LEG, CallStatus: 'completed', CallDuration: '3600' });
+    expect(legs.ended).toHaveLength(1);
+    expect(legs.ended[0]![1]).toBe(REP_LEG);
+    expect(legs.ended[0]![2]).toBeInstanceOf(Date);
+    expect(legs.ended[0]![3]).toBe('rep_left');
+  });
+
+  it('a callback for a real call row never touches a rep leg', async () => {
+    await post({ CallSid: PARENT, CallStatus: 'completed', CallDuration: '58' });
+    expect(legs.ended).toEqual([]);
+  });
+
+  it('a non-final callback, a child leg, or a <Dial action> ends nothing', async () => {
+    state.call = null;
+    await post({ CallSid: REP_LEG, CallStatus: 'in-progress' });
+    await post({ CallSid: CHILD, ParentCallSid: REP_LEG, CallStatus: 'completed', CallDuration: '9' });
+    await post({ CallSid: REP_LEG, CallStatus: 'completed', DialCallStatus: 'completed' });
+    expect(legs.ended).toEqual([]);
   });
 });

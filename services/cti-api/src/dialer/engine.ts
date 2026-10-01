@@ -56,6 +56,10 @@ export interface EngineDeps {
    *  bridgeToRep succeeds. Best-effort — the engine catches and logs a failure;
    *  it must never break a call the rep is on. */
   onBridged: (call: BridgedCall) => Promise<void>;
+  /** The run is over and its rep leg was just hung up: close the leg's time on
+   *  the dialer (dialer/rep-legs.ts — the talk-time report). Best-effort; the
+   *  engine also catches a failure, which must never fail the run's end. */
+  onRepLegReleased: (repCallSid: string) => Promise<void>;
   todayIso: string;
   /** The person's contact history since `since`, both sources. */
   contactHistory: (orgId: string, person: Person, since: Date) => Promise<Dial[]>;
@@ -148,6 +152,13 @@ async function releaseRepConference(deps: EngineDeps, session: Session): Promise
       await deps.telephony.hangup(session.repCallSid);
     } catch (err) {
       console.error('[dialer] rep leg hangup failed', { sessionId: session.id, userId: session.userId, err: (err as Error).message });
+    }
+    // Time on the dialer ends here, hung up or not: a refused hangup means the
+    // leg had already gone, and an end it was already given wins.
+    try {
+      await deps.onRepLegReleased(session.repCallSid);
+    } catch (err) {
+      console.error('[dialer] rep leg end not recorded', { sessionId: session.id, err: (err as Error).message });
     }
   }
   // The room name is rep-scoped, not per-run, so the by-name teardown is only

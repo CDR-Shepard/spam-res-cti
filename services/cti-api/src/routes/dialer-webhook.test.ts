@@ -29,6 +29,7 @@ function fakeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
     enqueueRollover: vi.fn(async () => {}),
     onScreenPop: vi.fn(unexpected('onScreenPop')),
     onBridged: vi.fn(unexpected('onBridged')) as unknown as EngineDeps['onBridged'],
+    onRepLegReleased: vi.fn(unexpected('onRepLegReleased')) as unknown as EngineDeps['onRepLegReleased'],
     todayIso: '2026-07-13',
     // Contact-cadence deps: the webhook handler forwards them unread, like the
     // rest, so they are throwing stubs too.

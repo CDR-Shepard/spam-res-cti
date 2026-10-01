@@ -16,6 +16,7 @@ import { TwilioDialerTelephony } from './twilio-telephony.js';
 import { withinCallingHours, parseCallingHoursExempt } from './pick-did.js';
 import { pickDidForRun } from './pick-agent-did.js';
 import { enqueueFollowupRollover } from '../salesforce/followup-enqueue.js';
+import { recordRepLegEnded } from './rep-legs.js';
 
 /** Real EngineDeps for a request. Screen-pop is wired by Plan 4. */
 export function buildEngineDeps(): EngineDeps {
@@ -47,6 +48,7 @@ export function buildEngineDeps(): EngineDeps {
         isTwoParty: (orgId) => orgIsTwoParty(db, orgId),
         startRecording: (callSid, connectId) => telephony.startRecording(callSid, connectId),
       }),
+    onRepLegReleased: (repCallSid) => recordRepLegEnded(db, repCallSid, new Date(), 'run_end'),
     todayIso: orgTodayIso(now),
     contactHistory: (orgId, person, since) => dialsToPerson(db, orgId, person, since),
     // The handle is the engine's — the claim transaction's `tx` — not the `db`
