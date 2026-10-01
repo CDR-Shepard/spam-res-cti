@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { orgMidnightUtc, orgTodayIso } from './org-day.js';
 
 const laClock = (d: Date) =>
@@ -49,6 +49,36 @@ describe('orgMidnightUtc', () => {
       expect(laClock(m)).toBe('00:00');
       expect(laDate(m)).toBe(laDate(new Date(iso)));
     }
+  });
+});
+
+describe('the Intl.DateTimeFormat cache (final review I1)', () => {
+  // orgMidnightUtc scans ~113 candidate offsets per call; before the fix each
+  // candidate built a brand-new Intl.DateTimeFormat. A wide talk-time range
+  // called it 92+ times in one request, so this was the hot loop stalling the
+  // event loop. One formatter per (timeZone, kind), reused forever, fixes it —
+  // proven here by counting constructions, not by timing (which is flaky).
+  it('builds each (timeZone, kind) formatter once, however many times it is asked', () => {
+    const ctor = vi.spyOn(Intl, 'DateTimeFormat');
+    const before = ctor.mock.calls.length;
+    orgMidnightUtc(new Date('2026-01-15T20:30:00Z'));
+    orgMidnightUtc(new Date('2026-06-15T20:30:00Z'));
+    orgMidnightUtc(new Date('2026-11-01T20:00:00Z')); // a DST-transition day, still only the cached formatters
+    orgTodayIso(new Date('2026-01-17T20:30:00Z'));
+    // Exactly two distinct (kind, tz) pairs are ever needed for one timezone:
+    // the 'en-CA' day formatter and the 'en-US' hh:mm formatter.
+    expect(ctor.mock.calls.length - before).toBeLessThanOrEqual(2);
+    ctor.mockRestore();
+  });
+
+  it('a different timezone gets its own cached pair, independent of the default', () => {
+    const ctor = vi.spyOn(Intl, 'DateTimeFormat');
+    orgMidnightUtc(new Date('2026-08-24T18:00:00Z')); // warms America/Los_Angeles
+    const before = ctor.mock.calls.length;
+    orgMidnightUtc(new Date('2026-08-24T18:00:00Z'), 'Asia/Tokyo');
+    orgMidnightUtc(new Date('2026-08-24T18:00:00Z'), 'Asia/Tokyo');
+    expect(ctor.mock.calls.length - before).toBeLessThanOrEqual(2);
+    ctor.mockRestore();
   });
 });
 

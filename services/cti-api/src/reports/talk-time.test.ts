@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as orgDay from '../dialer/org-day.js';
 import {
   MAX_RANGE_DAYS,
   addDays,
@@ -99,6 +100,28 @@ describe('dialerSecondsByUserDay', () => {
       days, NOW,
     );
     expect(out).toEqual({ u1: { '2026-10-01': 3600 } });
+  });
+});
+
+describe('dialerSecondsByUserDay — performance (final review I1)', () => {
+  // The old code called dayStartUtc TWICE per day (day i's start, then day
+  // i+1's start again as "day i's end"), each call scanning ~113 candidate
+  // offsets in orgMidnightUtc — the one synchronous hotspot this branch added
+  // to the event loop that also serves live Twilio webhooks. A spy on the
+  // count is deterministic; a timing assertion would be flaky on CI.
+  it('a 92-day range computes at most 93 day starts, not ~184', () => {
+    const spy = vi.spyOn(orgDay, 'orgMidnightUtc');
+    const days = Array.from({ length: 92 }, (_, i) => addDays('2026-01-01', i));
+    dialerSecondsByUserDay([], days, new Date('2026-04-03T00:00:00Z'));
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(93);
+    spy.mockRestore();
+  });
+
+  it('an empty day list does no work and returns no rows', () => {
+    const spy = vi.spyOn(orgDay, 'orgMidnightUtc');
+    expect(dialerSecondsByUserDay([{ userId: 'u1', joinedAt: new Date(), endedAt: null }], [], new Date())).toEqual({});
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });
 

@@ -86,7 +86,15 @@ export function dialerSecondsByUserDay(
   days: readonly string[],
   now: Date,
 ): Record<string, Record<string, number>> {
-  const bounds = days.map((day) => ({ day, start: dayStartUtc(day).getTime(), end: dayStartUtc(addDays(day, 1)).getTime() }));
+  if (days.length === 0) return {};
+  // `days.length + 1` midnights, computed ONCE (final review I1): the old code
+  // called `dayStartUtc` twice per day (day i's start, then day i+1's start as
+  // "day i's end"), so a 92-day range did 184 calls into `orgMidnightUtc`'s
+  // ~113-candidate scan — the one synchronous hotspot this branch added to the
+  // process serving live Twilio webhooks. The end of day i IS the start of day
+  // i+1, so `starts[i+1]` is reused instead of recomputed.
+  const starts = [...days, addDays(days[days.length - 1]!, 1)].map((d) => dayStartUtc(d).getTime());
+  const bounds = days.map((day, i) => ({ day, start: starts[i]!, end: starts[i + 1]! }));
   const userIds = [...new Set(legs.map((l) => l.userId))];
   return Object.fromEntries(
     userIds

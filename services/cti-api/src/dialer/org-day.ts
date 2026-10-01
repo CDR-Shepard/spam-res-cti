@@ -4,10 +4,29 @@
  *  it moved to a rolling 3-hour window (see `already-worked.ts`). */
 export const ORG_TIMEZONE = 'America/Los_Angeles';
 
-const ymdIn = (tz: string, d: Date): string =>
-  new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
-const hhmmIn = (tz: string, d: Date): string =>
-  new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).format(d);
+/**
+ * One `Intl.DateTimeFormat` per (timeZone, kind), built on first use and
+ * reused forever after (final review I1): `orgMidnightUtc` scans ~113
+ * candidate offsets per call, and before this cache each one built a FRESH
+ * formatter — the only cost a wide talk-time report added to this process's
+ * event loop. A formatter is immutable once constructed and `tz` is always a
+ * literal (`ORG_TIMEZONE` or a test override), so the cache can never go
+ * stale and never needs to be bounded.
+ */
+const formatterCache = new Map<string, Intl.DateTimeFormat>();
+function formatterFor(kind: 'ymd' | 'hhmm', tz: string): Intl.DateTimeFormat {
+  const key = `${kind}:${tz}`;
+  const cached = formatterCache.get(key);
+  if (cached) return cached;
+  const made =
+    kind === 'ymd'
+      ? new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
+      : new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+  formatterCache.set(key, made);
+  return made;
+}
+const ymdIn = (tz: string, d: Date): string => formatterFor('ymd', tz).format(d);
+const hhmmIn = (tz: string, d: Date): string => formatterFor('hhmm', tz).format(d);
 
 /** `YYYY-MM-DD` for `now` in the org's timezone (`en-CA` formats in ISO order,
  *  so no further reassembly is needed). Extracted from `dialer/live-deps.ts`
