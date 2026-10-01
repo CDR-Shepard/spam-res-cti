@@ -38,13 +38,14 @@ export function talkRowsStatement(orgId: string, start: Date, end: Date): SQL {
     where org_id = ${orgId}
       and coalesce(started_at, created_at) >= ${from}::timestamptz
       and coalesce(started_at, created_at) < ${to}::timestamptz
-      -- Sargable alongside the coalesce above (final review M11): a row is
-      -- CREATED before it starts, so created_at >= range-start minus a day's
-      -- slack never drops a row the coalesce predicate would keep, while
-      -- letting calls_org_created_idx (org_id, created_at) narrow the scan —
-      -- the coalesce expression alone can't use that index.
+      -- Sargable alongside the coalesce above (final review M11), so
+      -- calls_org_created_idx (org_id, created_at) can narrow the scan — the
+      -- coalesce expression alone can't use that index. A day of slack on
+      -- BOTH bounds: started_at and created_at are ms apart, in either order
+      -- (an inbound row stamps started_at just before its insert), so the
+      -- pair never drops a row the coalesce predicate would keep.
       and created_at >= ${from}::timestamptz - interval '1 day'
-      and created_at < ${to}::timestamptz
+      and created_at < ${to}::timestamptz + interval '1 day'
       and ((direction = 'outbound' and disposition = 'Connected')
         or (direction = 'inbound' and status = 'completed' and answered_at is not null and inbound_voicemail_url is null))
     group by 1, 2, 3

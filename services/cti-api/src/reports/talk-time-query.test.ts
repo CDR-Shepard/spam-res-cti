@@ -41,13 +41,18 @@ describe('talkRowsStatement — what counts as talk', () => {
 
   // Final review M11: a sargable created_at range beside the coalesce
   // predicate, so calls_org_created_idx (org_id, created_at) can narrow the
-  // scan — the coalesce expression on its own can't use that index. A call
-  // row is created before it starts, so the day-early lower bound never drops
-  // a row the coalesce predicate would otherwise keep.
+  // scan — the coalesce expression on its own can't use that index. Both
+  // bounds carry a day of slack, so the pair never drops a row the coalesce
+  // predicate would keep (started_at and created_at are ms apart either way).
   it('the calls branch also filters on the plain, indexable created_at (sargable alongside the coalesce)', () => {
     expect(text).toContain('and created_at >= $');
     expect(text).toContain("interval '1 day'");
     expect(text).toContain('and created_at < $');
+    // Re-review N1: an inbound row's started_at is stamped just BEFORE its
+    // insert, so created_at can land a few ms past the range end while the
+    // coalesce keeps the row — the upper bound needs the same day of slack.
+    expect(text).toMatch(/and created_at < \$\d+::timestamptz \+ interval '1 day'/);
+    expect(text).toMatch(/and created_at >= \$\d+::timestamptz - interval '1 day'/);
     // 3 each: the calls-branch coalesce bound, the new sargable bound, and the
     // dialer_connects branch's own bridged_at bound.
     expect(q.params.filter((p) => p === RANGE.start.toISOString())).toHaveLength(3);

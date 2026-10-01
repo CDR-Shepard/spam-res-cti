@@ -92,7 +92,9 @@ export function dialerSecondsByUserDay(
   // "day i's end"), so a 92-day range did 184 calls into `orgMidnightUtc`'s
   // ~113-candidate scan — the one synchronous hotspot this branch added to the
   // process serving live Twilio webhooks. The end of day i IS the start of day
-  // i+1, so `starts[i+1]` is reused instead of recomputed.
+  // i+1, so `starts[i+1]` is reused instead of recomputed. `days` must be
+  // CONSECUTIVE (the only caller passes parseTalkRange's full range): with a
+  // gap, a day's "end" would be the next listed day's start.
   const starts = [...days, addDays(days[days.length - 1]!, 1)].map((d) => dayStartUtc(d).getTime());
   const bounds = days.map((day, i) => ({ day, start: starts[i]!, end: starts[i + 1]! }));
   const userIds = [...new Set(legs.map((l) => l.userId))];
