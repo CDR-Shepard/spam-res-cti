@@ -216,7 +216,7 @@ export async function endConnectOnTerminalStatus(
   try {
     await stamp(callSid, now);
   } catch (err) {
-    console.error('[dialer] connect end stamp failed', { err: (err as Error).message });
+    console.error('[dialer] connect end stamp failed', { callSid, err: (err as Error).message });
   }
 }
 

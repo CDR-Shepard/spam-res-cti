@@ -175,7 +175,7 @@ describe('endConnectOnTerminalStatus — the bridged-call hang-up stamp', () => 
     await expect(
       endConnectOnTerminalStatus({ CallSid: SID, CallStatus: 'completed' }, vi.fn(async () => { throw new Error('db down'); }), AT),
     ).resolves.toBeUndefined();
-    expect(error).toHaveBeenCalledWith('[dialer] connect end stamp failed', { err: 'db down' });
+    expect(error).toHaveBeenCalledWith('[dialer] connect end stamp failed', { callSid: SID, err: 'db down' });
     error.mockRestore();
   });
 });
