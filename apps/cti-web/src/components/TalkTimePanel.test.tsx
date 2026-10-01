@@ -3,8 +3,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { TalkTimePanel } from './TalkTimePanel';
 import * as talkApi from '../talk-time-api';
+import { ApiError } from '../api';
 
 vi.mock('../talk-time-api');
+
+/** A promise this test controls the settling of, for asserting what the UI
+ *  shows WHILE a request is still in flight. */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 
 const REPORT: talkApi.TalkTimeReport = {
   from: '2026-10-01',
@@ -80,6 +90,41 @@ describe('TalkTimePanel', () => {
     vi.mocked(talkApi.getTalkTime).mockRejectedValue(new Error('500'));
     render(<TalkTimePanel />);
     expect((await screen.findByRole('alert')).textContent).toBe('Could not load talk time.');
+  });
+
+  it('a 400 shows the server\'s own message, not the generic one', async () => {
+    vi.mocked(talkApi.getTalkTime).mockRejectedValue(new ApiError(400, { error: 'at most 92 days' }));
+    render(<TalkTimePanel />);
+    expect((await screen.findByRole('alert')).textContent).toBe('at most 92 days');
+  });
+
+  it('a reload shows a loading state while the current table stays up', async () => {
+    render(<TalkTimePanel />);
+    await screen.findByRole('button', { name: 'Garrett Martorello' });
+
+    const next = deferred<talkApi.TalkTimeReport>();
+    vi.mocked(talkApi.getTalkTime).mockReturnValueOnce(next.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'This week' }));
+
+    // Still showing last range's data, now with a visible loading indicator —
+    // not silently stale, not blanked out either.
+    await waitFor(() => expect(screen.getByText(/Loading/i)).toBeTruthy());
+    expect(screen.getByRole('button', { name: 'Garrett Martorello' })).toBeTruthy();
+
+    next.resolve({ ...REPORT, from: '2026-09-28' });
+    await waitFor(() => expect(screen.queryByText(/Loading/i)).toBeNull());
+  });
+
+  it('an error on reload clears the previous range\'s table — never stale rows under a new-range error', async () => {
+    render(<TalkTimePanel />);
+    await screen.findByRole('button', { name: 'Garrett Martorello' });
+
+    vi.mocked(talkApi.getTalkTime).mockRejectedValueOnce(new Error('500'));
+    fireEvent.click(screen.getByRole('button', { name: 'This week' }));
+
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Garrett Martorello' })).toBeNull();
+    expect(screen.queryByText('Total')).toBeNull();
   });
 
   it('an empty range says nobody talked', async () => {

@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { ApiError } from '../api';
 import { getTalkTime, type TalkTimeReport } from '../talk-time-api';
 import { formatDay, formatHms, rangeFor, type RangeShortcut } from '../talk-time-format';
 
@@ -7,6 +8,19 @@ const SHORTCUTS: ReadonlyArray<{ id: RangeShortcut; label: string }> = [
   { id: 'week', label: 'This week' },
   { id: 'last7', label: 'Last 7 days' },
 ];
+
+const GENERIC_ERROR = 'Could not load talk time.';
+
+/** The server's own 400 message (e.g. "at most 92 days") when there is one —
+ *  parseTalkRange's error is always a plain string — else the generic line
+ *  (final review M8). */
+function talkTimeErrorMessage(err: unknown): string {
+  if (err instanceof ApiError && err.status === 400) {
+    const data = err.data as { error?: unknown } | null;
+    if (data && typeof data.error === 'string') return data.error;
+  }
+  return GENERIC_ERROR;
+}
 
 /**
  * Admin-only Talk time report (talk-time spec): per rep, over the org's Pacific
@@ -32,8 +46,14 @@ export function TalkTimePanel(): JSX.Element {
     try {
       const next = await getTalkTime(from, to);
       if (mine === latest.current) setReport(next);
-    } catch {
-      if (mine === latest.current) setError('Could not load talk time.');
+    } catch (err) {
+      // Clear the stale report too (final review M8): otherwise a new range's
+      // error sits over the PREVIOUS range's table, which looks like it still
+      // answers the inputs shown above it.
+      if (mine === latest.current) {
+        setError(talkTimeErrorMessage(err));
+        setReport(null);
+      }
     } finally {
       if (mine === latest.current) setLoading(false);
     }
@@ -71,6 +91,7 @@ export function TalkTimePanel(): JSX.Element {
       </div>
       {error && <div className="admin-err" role="alert">{error}</div>}
       {loading && !report && <div className="empty-state"><span className="spinner lg" /></div>}
+      {loading && report && <div className="empty-hint"><span className="spinner" /> Loading talk time…</div>}
       {report && (
         <div className="calllog-scroll">
           <table className="calllog-table">
