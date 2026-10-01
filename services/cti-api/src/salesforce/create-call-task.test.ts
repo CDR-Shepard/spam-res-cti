@@ -5,7 +5,7 @@
  * module boundary so the REAL createCallTask runs against canned HTTP
  * responses. Nothing in './client.js' is mocked — it is the thing under test.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
   sfConn: {
@@ -205,5 +205,34 @@ describe('createCallTask — CTI Origin marker', () => {
       .mockResolvedValueOnce(jsonResponse(400, INVALID_FIELD))
       .mockResolvedValueOnce(jsonResponse(400, [{ errorCode: 'INVALID_FIELD' }]));
     await expect(createCallTask('u1', INPUT)).rejects.toThrow(/degraded/);
+  });
+});
+
+describe('createCallTask — ActivityDate is the org\'s (Pacific) calendar day, never UTC\'s', () => {
+  beforeEach(() => {
+    state.mockRequest.mockReset();
+    state.mockRequest.mockResolvedValue(jsonResponse(201, { id: '00TNEW', success: true }));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a call at 6 pm Pacific is dated that day — UTC has already rolled over to the next', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-02T01:00:00Z')); // 18:00 PDT on Oct 1
+    await createCallTask('u1', INPUT);
+    expect(bodyOf(0).ActivityDate).toBe('2026-10-01');
+  });
+
+  it('a morning call is dated the same day either way', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-01T16:00:00Z')); // 09:00 PDT
+    await createCallTask('u1', INPUT);
+    expect(bodyOf(0).ActivityDate).toBe('2026-10-01');
+  });
+
+  it('an explicit activityDate wins (the power dialer dates a Task by the day it was bridged)', async () => {
+    await createCallTask('u1', { ...INPUT, activityDate: '2026-09-30' });
+    expect(bodyOf(0).ActivityDate).toBe('2026-09-30');
   });
 });

@@ -9,6 +9,7 @@ import { getDb, schema } from '@cti/db';
 import { refreshAccessToken } from './oauth.js';
 import { soqlEscape } from './soql.js';
 import { CTI_ORIGIN, CTI_ORIGIN_FIELD, isInvalidFieldError, withoutCtiOrigin } from './cti-origin.js';
+import { orgTodayIso } from '../dialer/org-day.js';
 
 export class SalesforceUnauthorizedError extends Error {
   constructor() {
@@ -313,6 +314,9 @@ export interface CallTaskInput {
   whoId?: string;
   whatId?: string;
   description?: string;
+  /** The Task's date (ActivityDate, `YYYY-MM-DD`): the day the call happened in
+   *  the org's timezone. Omitted = today in the org's timezone. */
+  activityDate?: string;
   /** All optional custom fields below — best-effort, degrade gracefully */
   customFields?: Record<string, string | number | null>;
 }
@@ -344,14 +348,17 @@ export async function createCallTask(
   userId: string,
   input: CallTaskInput,
 ): Promise<{ taskId: string; degradedFields?: string[] }> {
-  const today = new Date().toISOString().slice(0, 10);
+  // The org's calendar day, never UTC's. From 5 pm Pacific UTC is already
+  // tomorrow, and the reps' talk-time report (Due Date = TODAY) would drop the
+  // call from the day it happened.
+  const activityDate = input.activityDate ?? orgTodayIso(new Date());
   const base: Record<string, unknown> = {
     Subject: input.subject,
     Status: 'Completed',
     Priority: 'Normal',
     TaskSubtype: 'Call',
     CallType: input.callType ?? 'Outbound',
-    ActivityDate: today,
+    ActivityDate: activityDate,
   };
   if (input.callDisposition) base.CallDisposition = input.callDisposition;
   if (typeof input.callDurationInSeconds === 'number')
