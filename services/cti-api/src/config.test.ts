@@ -63,3 +63,22 @@ describe('INBOUND_TEXTS — the inbound-texts (Task + email alert) kill switch',
     await expect(loadWith({ INBOUND_TEXTS: 'false' })).rejects.toThrow(/INBOUND_TEXTS/);
   });
 });
+
+describe('DIALER_RECORDING — the power-dial recording kill switch', () => {
+  const saved = { ...process.env };
+  beforeEach(() => { delete process.env.DIALER_RECORDING; });
+  afterEach(() => { process.env = { ...saved }; });
+
+  it('defaults to ON', async () => {
+    expect((await loadWith({ DIALER_RECORDING: undefined })).DIALER_RECORDING).toBe('on');
+  });
+  it('an empty value is treated as unset → on', async () => {
+    expect((await loadWith({ DIALER_RECORDING: '' })).DIALER_RECORDING).toBe('on');
+  });
+  it('off turns it off', async () => {
+    expect((await loadWith({ DIALER_RECORDING: 'off' })).DIALER_RECORDING).toBe('off');
+  });
+  it('anything else fails the boot loudly', async () => {
+    await expect(loadWith({ DIALER_RECORDING: 'false' })).rejects.toThrow(/DIALER_RECORDING/);
+  });
+});

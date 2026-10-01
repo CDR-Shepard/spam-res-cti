@@ -155,6 +155,14 @@ const schema = z.object({
    * NO_ANSWER_CHATTER, so `false` / `0` fail the boot instead of reading as "on".
    */
   INBOUND_TEXTS: z.enum(['on', 'off']).default('on'),
+
+  /**
+   * Kill switch for recording power-dial calls (dialer/connect-log.ts). `off` =
+   * bridged calls are still logged (and still get their Task) but no recording
+   * is started. TWILIO_RECORD_CALLS=false stops these recordings too. Default
+   * `on`; strict enum like NO_ANSWER_CHATTER.
+   */
+  DIALER_RECORDING: z.enum(['on', 'off']).default('on'),
 });
 
 export type AppConfig = z.infer<typeof schema>;

@@ -31,7 +31,8 @@ import { getDb, schema } from '@cti/db';
 import { MAX_RUN_RECORDS, type DialerRunSettings } from '@cti/contracts';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
-import { signedCallbackUrl } from '../telephony/webhooks.js';
+import { signedCallbackUrl, TWILIO_CALL_SID_RE } from '../telephony/webhooks.js';
+import { stampConnectEnded } from '../dialer/connect-log.js';
 import { createDialerSession } from '../dialer/create-session.js';
 import { workedRecentlySafe } from '../dialer/already-worked.js';
 import { blockedTargetsSafe } from '../dialer/consent-check.js';
@@ -194,6 +195,28 @@ export async function onDialerStatus(
   const status = body.CallStatus ?? body.DialCallStatus ?? '';
   const outcome = STATUS_OUTCOMES.get(status);
   if (outcome) await runHandleDialOutcome(callSid, outcome, deps);
+}
+
+/**
+ * Stamp the bridged-call log's hang-up from the same terminal status callback,
+ * keyed by CallSid ALONE — not through the engine, because a rep's Next or End
+ * settles the item before the prospect's `completed` arrives, and the call
+ * still ended. Only a row still open is stamped (stampConnectEnded), so a
+ * re-delivered callback is a no-op. Never throws: Twilio gets its 200.
+ */
+export async function endConnectOnTerminalStatus(
+  body: Record<string, string>,
+  stamp: (callSid: string, at: Date) => Promise<unknown>,
+  now: Date,
+): Promise<void> {
+  const callSid = body.CallSid ?? '';
+  const status = body.CallStatus ?? body.DialCallStatus ?? '';
+  if (!TWILIO_CALL_SID_RE.test(callSid) || !STATUS_OUTCOMES.has(status)) return;
+  try {
+    await stamp(callSid, now);
+  } catch (err) {
+    console.error('[dialer] connect end stamp failed', { err: (err as Error).message });
+  }
 }
 
 /** Session by id, scoped to the caller — never leaks another rep's session. */
@@ -608,7 +631,12 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     if (!validTwilioSignature(req)) {
       return reply.code(403).type('text/xml').send('<Response><Reject/></Response>');
     }
-    await onDialerStatus(req.body as Record<string, string>, buildEngineDeps());
+    const body = req.body as Record<string, string>;
+    try {
+      await onDialerStatus(body, buildEngineDeps());
+    } finally {
+      await endConnectOnTerminalStatus(body, (callSid, at) => stampConnectEnded(getDb(), callSid, at), new Date());
+    }
     return reply.type('text/xml').send(TWIML_EMPTY);
   });
 }

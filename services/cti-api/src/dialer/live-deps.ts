@@ -9,6 +9,7 @@ import { getDb } from '@cti/db';
 import { isDailyCapped, stateForAreaCode } from '@cti/firewall';
 import { loadConfig } from '../config.js';
 import { dialsToPerson, inFlightElsewhere } from './contact-history-live.js';
+import { orgIsTwoParty, recordBridgedCall } from './connect-log.js';
 import type { EngineDeps } from './engine.js';
 import { orgMidnightUtc, orgTodayIso } from './org-day.js';
 import { TwilioDialerTelephony } from './twilio-telephony.js';
@@ -28,14 +29,24 @@ export function buildEngineDeps(): EngineDeps {
   // could disagree across the org's midnight, e.g. one ticking over to the
   // next day a moment before the other).
   const now = new Date();
+  const telephony = new TwilioDialerTelephony();
+  const recordingEnabled = cfg.TWILIO_RECORD_CALLS && cfg.DIALER_RECORDING === 'on';
   return {
     db,
-    telephony: new TwilioDialerTelephony(),
+    telephony,
     pickDid: (args) => pickDidForRun(db, args),
     withinCallingHours: (toE164, nowUtc) => exempt.has(toE164) || withinCallingHours(toE164, nowUtc),
     nowUtc: now,
     enqueueRollover: (job, handle) => enqueueFollowupRollover(handle, job),
     onScreenPop: () => {}, // Plan 4 wires Open CTI screen-pop
+    onBridged: (call) =>
+      recordBridgedCall(call, {
+        db,
+        now: () => new Date(),
+        recordingEnabled,
+        isTwoParty: (orgId) => orgIsTwoParty(db, orgId),
+        startRecording: (callSid, connectId) => telephony.startRecording(callSid, connectId),
+      }),
     todayIso: orgTodayIso(now),
     contactHistory: (orgId, person, since) => dialsToPerson(db, orgId, person, since),
     // The handle is the engine's — the claim transaction's `tx` — not the `db`

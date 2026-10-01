@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { onDialerAmd, onDialerStatus } from './dialer.js';
+import { endConnectOnTerminalStatus, onDialerAmd, onDialerStatus } from './dialer.js';
 import type { EngineDeps } from '../dialer/engine.js';
 
 // Minimal fake EngineDeps: onDialerAmd/onDialerStatus only ever touch
@@ -28,6 +28,7 @@ function fakeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
     nowUtc: new Date('2026-07-13T18:00:00Z'),
     enqueueRollover: vi.fn(async () => {}),
     onScreenPop: vi.fn(unexpected('onScreenPop')),
+    onBridged: vi.fn(unexpected('onBridged')) as unknown as EngineDeps['onBridged'],
     todayIso: '2026-07-13',
     // Contact-cadence deps: the webhook handler forwards them unread, like the
     // rest, so they are throwing stubs too.
@@ -148,5 +149,32 @@ describe('onDialerStatus', () => {
     const runHandleDialOutcome = vi.fn(async () => {});
     await onDialerStatus({ CallSid: 'CA1', CallStatus: 'busy' }, deps, runHandleDialOutcome);
     expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+});
+
+describe('endConnectOnTerminalStatus — the bridged-call hang-up stamp', () => {
+  const SID = 'CA' + 'b'.repeat(32);
+  const AT = new Date('2026-10-01T18:02:05Z');
+
+  it('a terminal status stamps the connect row for that call sid — whatever the item says', async () => {
+    const stamp = vi.fn(async () => []);
+    await endConnectOnTerminalStatus({ CallSid: SID, CallStatus: 'completed' }, stamp, AT);
+    expect(stamp).toHaveBeenCalledWith(SID, AT);
+  });
+
+  it('a non-terminal status or a malformed sid stamps nothing', async () => {
+    const stamp = vi.fn(async () => []);
+    await endConnectOnTerminalStatus({ CallSid: SID, CallStatus: 'in-progress' }, stamp, AT);
+    await endConnectOnTerminalStatus({ CallSid: 'nope', CallStatus: 'completed' }, stamp, AT);
+    expect(stamp).not.toHaveBeenCalled();
+  });
+
+  it('a failed stamp is logged, never thrown — Twilio still gets its 200', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(
+      endConnectOnTerminalStatus({ CallSid: SID, CallStatus: 'completed' }, vi.fn(async () => { throw new Error('db down'); }), AT),
+    ).resolves.toBeUndefined();
+    expect(error).toHaveBeenCalledWith('[dialer] connect end stamp failed', { err: 'db down' });
+    error.mockRestore();
   });
 });

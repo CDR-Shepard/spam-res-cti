@@ -370,6 +370,7 @@ function makeDeps(over: Partial<EngineDeps> = {}): EngineDeps {
     // and leave the 2nd unconstrained (expect.anything()).
     enqueueRollover: vi.fn(async () => {}),
     onScreenPop: vi.fn(),
+    onBridged: vi.fn(async () => {}),
     todayIso: '2026-07-13',
     // Contact-cadence defaults: no history, nobody in flight, no capped state —
     // so every test above this line reads exactly as it did before the gate
@@ -2612,5 +2613,46 @@ describe('startSession — run settings ride the ready → active claim', () => 
     expect(fdb._txWrites.some((w: any) => 'dialerPasses' in w.patch)).toBe(false);
     expect(fdb._txDeletes).toEqual([]);
     expect(fdb._txQueryReads.filter((r: any) => r.table === 'dialerQueueItems')).toEqual([]);
+  });
+});
+
+describe('handleDialOutcome connected — the bridged-call log and its recording', () => {
+  const connectedItems = () => [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fromNumber: '+16190000000', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
+
+  it('logs the call AFTER the bridge, with the run ids, the rep\'s Salesforce user and the dialed numbers', async () => {
+    const deps = makeDeps(); deps.db = fakeDb(baseSession, connectedItems());
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(deps.onBridged).toHaveBeenCalledWith({
+      orgId: 'O1', userId: 'U1', sfUserId: '005', sessionId: 'S1', itemId: 'i1', callSid: 'CA1',
+      objectType: 'Lead', recordId: '00Q1', fromNumber: '+16190000000', toNumber: '+16195550100',
+    });
+    const bridged = (deps.telephony.bridgeToRep as any).mock.invocationCallOrder[0];
+    const logged = (deps.onBridged as any).mock.invocationCallOrder[0];
+    expect(logged).toBeGreaterThan(bridged);
+  });
+
+  it('a failing log never touches the call: no throw, the screen-pop and the connected stamp still happen', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const deps = makeDeps({ onBridged: vi.fn(async () => { throw new Error('db down'); }) });
+    const fdb = fakeDb(baseSession, connectedItems()); deps.db = fdb;
+    await expect(handleDialOutcome('CA1', 'connected', deps)).resolves.toBeUndefined();
+    expect(deps.onScreenPop).toHaveBeenCalledWith('U1', 'Lead', '00Q1');
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'connected' }) });
+    expect(error).toHaveBeenCalledWith('[dialer] bridged-call log failed', { itemId: 'i1', err: 'db down' });
+    error.mockRestore();
+  });
+
+  it('a lost connect claim (a duplicate AMD "human") logs nothing', async () => {
+    const deps = makeDeps(); deps.db = fakeDb(baseSession, connectedItems(), { claimReturnsRows: false });
+    await handleDialOutcome('CA1', 'connected', deps);
+    expect(deps.onBridged).not.toHaveBeenCalled();
+  });
+
+  it('a failed bridge logs nothing — no Task for a call that never reached the rep', async () => {
+    const base = makeDeps();
+    const deps = makeDeps({ telephony: { ...base.telephony, bridgeToRep: vi.fn(async () => { throw new Error('twilio 500'); }) } });
+    deps.db = fakeDb(baseSession, connectedItems());
+    await expect(handleDialOutcome('CA1', 'connected', deps)).rejects.toThrow('twilio 500');
+    expect(deps.onBridged).not.toHaveBeenCalled();
   });
 });

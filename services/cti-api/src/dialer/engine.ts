@@ -2,6 +2,7 @@ import { and, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 import { DAILY_CAP_WINDOW_MS } from '@cti/firewall';
 import type { DialerItem } from './session-store.js';
+import type { BridgedCall } from './connect-log.js';
 import { cadenceVerdict, rolloverDue, type Dial, type Person } from './contact-history.js';
 import { stampConnected } from './contact-history-live.js';
 import { earliestRetryAt, inFlightItem, isTalking, nextEligiblePendingItem, RETRY_FLOOR_MS } from './state.js';
@@ -50,6 +51,11 @@ export interface EngineDeps {
    *  row out of 'dialing' — no try/catch here on purpose. */
   enqueueRollover: (job: RolloverEnqueue, db: RolloverDb) => Promise<void>;
   onScreenPop: (userId: string, objectType: string, recordId: string) => void;
+  /** The prospect was just bridged to the rep: log the call (dialer_connects)
+   *  and start its recording (dialer/connect-log.ts). Called only AFTER
+   *  bridgeToRep succeeds. Best-effort — the engine catches and logs a failure;
+   *  it must never break a call the rep is on. */
+  onBridged: (call: BridgedCall) => Promise<void>;
   todayIso: string;
   /** The person's contact history since `since`, both sources. */
   contactHistory: (orgId: string, person: Person, since: Date) => Promise<Dial[]>;
@@ -1042,6 +1048,25 @@ export async function handleDialOutcome(
     // ending it would end the rep's call after this one conversation.
     await deps.telephony.bridgeToRep(callId, session.userId, { repRejoins: !!session.repCallSid });
     deps.onScreenPop(session.userId, item.objectType, item.recordId);
+    // Log the bridged call and start its recording — AFTER the bridge, so a
+    // failed bridge never becomes a Task. Best-effort like the sticky write
+    // below: the rep is already talking to this person.
+    try {
+      await deps.onBridged({
+        orgId: session.orgId,
+        userId: session.userId,
+        sfUserId: session.sfOwnerId,
+        sessionId: session.id,
+        itemId: item.id,
+        callSid: callId,
+        objectType: item.objectType,
+        recordId: item.recordId,
+        fromNumber: item.fromNumber ?? null,
+        toNumber: dialedNumber ?? null,
+      });
+    } catch (err) {
+      console.error('[dialer] bridged-call log failed', { itemId: item.id, err: (err as Error).message });
+    }
     // Sticky-on-connect: remember this (org, rep, lead) -> pool DID binding so
     // an inbound callback from the lead rings the same rep. Best-effort — a
     // sticky write failure must never break an already-connected call.
