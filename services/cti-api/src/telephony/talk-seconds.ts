@@ -13,6 +13,20 @@
  *    dial INCLUDING ringing. Never used here. It is what
  *    calls.duration_seconds usually ends as, and the reputation engine reads
  *    that column — which is why talk time has its own.
+ *
+ * DEDUPE-KEY COLLISION (M4, final review): when the REP hangs up first, the
+ * `<Dial action>` callback and the parent (rep) leg's own final status
+ * callback both arrive as CallStatus=completed for the SAME CallSid — so both
+ * land on the webhook dedupe key `${CallSid}:completed`
+ * (`provider_webhook_events`), and the later of the two is silently dropped.
+ * Talk time still comes out right in that order because this module never
+ * reads the dropped one: the surviving write is whichever of the two hit
+ * first, and the dialed CHILD leg's `if_unset` write (a DIFFERENT CallSid, so
+ * a different dedupe key — never dropped) supplies the value whenever the
+ * `<Dial action>` is the one that got deduped away. The key is `${CallSid}:
+ * ${status}` elsewhere in the codebase too and MUST NOT change here: it is
+ * what gates `duration_seconds` (not just talk_seconds), and a key change
+ * would stop deduping exactly the redelivered-webhook case it exists for.
  */
 import { and, eq, isNull } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
