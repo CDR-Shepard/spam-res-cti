@@ -38,6 +38,21 @@ describe('talkRowsStatement — what counts as talk', () => {
     expect(q.params.filter((p) => p === ORG)).toHaveLength(2);
     expect(q.params).toEqual(expect.arrayContaining([RANGE.start.toISOString(), RANGE.end.toISOString()]));
   });
+
+  // Final review M11: a sargable created_at range beside the coalesce
+  // predicate, so calls_org_created_idx (org_id, created_at) can narrow the
+  // scan — the coalesce expression on its own can't use that index. A call
+  // row is created before it starts, so the day-early lower bound never drops
+  // a row the coalesce predicate would otherwise keep.
+  it('the calls branch also filters on the plain, indexable created_at (sargable alongside the coalesce)', () => {
+    expect(text).toContain('and created_at >= $');
+    expect(text).toContain("interval '1 day'");
+    expect(text).toContain('and created_at < $');
+    // 3 each: the calls-branch coalesce bound, the new sargable bound, and the
+    // dialer_connects branch's own bridged_at bound.
+    expect(q.params.filter((p) => p === RANGE.start.toISOString())).toHaveLength(3);
+    expect(q.params.filter((p) => p === RANGE.end.toISOString())).toHaveLength(3);
+  });
 });
 
 describe('legsStatement — legs that overlap the range', () => {
