@@ -36,8 +36,8 @@ long they sat on the power dialer)". Today:
 
 | Source | Counted when | Duration |
 |---|---|---|
-| Regular outbound (`calls`, direction outbound) | `disposition = 'Connected'` — the only "talked to a person" signal (the rep's wrap-up chip) | `duration_seconds` (true talk time once fix 1 lands) |
-| Inbound (`calls`, direction inbound) | `status = 'completed'` and `answered_at` not null and `inbound_voicemail_url` null | `duration_seconds` (already the answered `DialCallDuration`) |
+| Regular outbound (`calls`, direction outbound) | `disposition = 'Connected'` — the only "talked to a person" signal (the rep's wrap-up chip) | `coalesce(talk_seconds, duration_seconds)` (fix 1) |
+| Inbound (`calls`, direction inbound) | `status = 'completed'` and `answered_at` not null and `inbound_voicemail_url` null | `coalesce(talk_seconds, duration_seconds)` (already the answered `DialCallDuration`) |
 | Power dial (`dialer_connects`) | every bridged call (recording-feature ruling) | `talk_seconds` (null → 0) |
 | Time on the power dialer (`dialer_rep_legs`, new) | every rep conference leg | `ended_at − joined_at`, clipped to the reported days |
 
@@ -46,24 +46,37 @@ Days are the org's Pacific days (`dialer/org-day.ts`: `ORG_TIMEZONE`,
 falling back to `created_at`; power dial: `bridged_at`). A dialer leg that spans
 midnight is split across the two days.
 
-## Fix 1 — true talk time on regular calls
+## Fix 1 — true talk time on regular calls (a NEW column, `calls.talk_seconds`)
 
-`/telephony/twilio/status` keeps its last-write-wins for status, but a duration
-is written only when it measures the customer's connected line:
+`calls.duration_seconds` stays exactly as it is. It is last-write-wins across
+three Twilio callbacks and usually ends as the rep-browser leg's ring-inclusive
+`CallDuration` — and the reputation engine reads it: a call counts as
+"answered" when `answered_at` is set OR its duration is above 0
+(`firewall/reputation/query.ts`, `routes/reputation.ts`), feeding the 5 %
+answer-rate floor and the 6 s robocall floor that the firewall gate and the
+auto-pause worker enforce. Zeroing unanswered durations would swing every DID's
+answer rate to its true value overnight and could pause numbers — a behavior
+change nobody asked for here (flagged separately as its own task).
 
-- `DialCallDuration` (the `<Dial action>` request) — talk time of the dialed leg;
-- a CHILD leg's `CallDuration` (the request carries `ParentCallSid`) — the
-  dialed leg's own answered duration;
+So talk time gets its own column, **`calls.talk_seconds`** (migration 0048),
+written only from durations that measure the customer's connected line:
+
+- the `<Dial action>` request (`DialCallStatus` present): `DialCallDuration`
+  when `DialCallStatus` is `completed` or `answered`, else **0**;
+- a CHILD leg's own status callback (carries `ParentCallSid`): its
+  `CallDuration`, when present;
 - never the row's own (parent, rep-browser) leg `CallDuration`;
-- a `<Dial action>` whose `DialCallStatus` is not `completed` writes **0**, so
-  an unanswered call never falls back to the softphone's ring-inclusive timer
-  (`PATCH /calls/:id` only fills a null duration).
+- inbound answered (`routes/inbound.ts` dial-result, `DialCallStatus=completed`):
+  `DialCallDuration`; an inbound voicemail never sets it.
 
-`POST /admin/calls/reconcile-durations` (which takes `max(CallDuration,
-DialCallDuration)`) adopts the same rule, or it would re-inflate rows. The
-Salesforce Task's Call Duration is `calls.duration_seconds` at sync time, so
-the report becomes true talk time with no Salesforce change. Past Tasks keep
-their old numbers.
+A later callback never raises a value the `<Dial action>` already set (it is the
+authoritative one): `talk_seconds` is written by `<Dial action>`
+unconditionally, by a child callback only while it is still null.
+
+The Salesforce Task's Call Duration becomes `coalesce(talk_seconds,
+duration_seconds)` at sync time (`salesforce/sync.ts`), so the reps' report shows
+true talk time from deploy on; a call already in flight across the deploy falls
+back to the old number. Past Tasks keep their old numbers.
 
 ## Fix 2 — Task date in the org's day
 
@@ -135,14 +148,16 @@ per-day rows. Durations render as `h:mm:ss`.
 
 ## Untouched
 
-The compliance counters, the Recent list, the pending-disposition banner, and
+The compliance counters, `calls.duration_seconds` and every reputation /
+firewall reader of it, the Recent list, the pending-disposition banner, and
 the dispositions themselves. The Salesforce report definition is not edited.
 
 ## Testing
 
-- Fix 1: each callback shape (child completed, `<Dial action>` answered /
-  unanswered, parent completed) writes the right duration or none; reconcile
-  uses the same rule.
+- Fix 1: each callback shape (child completed, `<Dial action>` completed /
+  answered / no-answer, parent completed) writes the right `talk_seconds` or
+  none, in every arrival order; `duration_seconds` and its reputation readers
+  are unchanged; the Task gets `coalesce(talk_seconds, duration_seconds)`.
 - Legs: join inserts once; rejoin `completed` and `releaseRepConference` stamp
   once; reconcile closes from Twilio, and the 48 h fallback.
 - Report: day bucketing across midnight (Pacific, DST-safe via
