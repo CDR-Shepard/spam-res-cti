@@ -1005,6 +1005,7 @@ After the `vi.mock('../telephony/talk-seconds.js', …)` block, add:
 ```ts
 const legs = vi.hoisted(() => ({ ended: [] as unknown[][] }));
 vi.mock('../dialer/rep-legs.js', () => ({
+  recordRepLegJoined: async () => {},
   recordRepLegEnded: async (...args: unknown[]) => { legs.ended.push(args); },
 }));
 ```
@@ -1730,6 +1731,7 @@ describe('parseTalkRange', () => {
   it('rejects malformed or impossible dates, a reversed range, and more than 92 days', () => {
     expect(parseTalkRange({ from: '2026-10-1', to: '2026-10-01' }).ok).toBe(false);
     expect(parseTalkRange({ from: '2026-02-30', to: '2026-03-01' }).ok).toBe(false);
+    expect(parseTalkRange({ from: '2026-13-01', to: '2026-13-02' }).ok).toBe(false);
     expect(parseTalkRange({ to: '2026-10-01' }).ok).toBe(false);
     expect(parseTalkRange({ from: ['2026-10-01'], to: '2026-10-01' }).ok).toBe(false);
     expect(parseTalkRange({ from: '2026-10-02', to: '2026-10-01' })).toEqual({ ok: false, error: 'from must be on or before to' });
@@ -1877,8 +1879,12 @@ export function dayStartUtc(day: string): Date {
   return orgMidnightUtc(new Date(`${day}T12:00:00Z`));
 }
 
+/** A real calendar day: `2026-02-30` rolls over to March and `2026-13-01` does
+ *  not parse — both rejected (toISOString would THROW on the second). */
 function isRealDay(value: unknown): value is string {
-  return typeof value === 'string' && DAY_RE.test(value) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
+  if (typeof value !== 'string' || !DAY_RE.test(value)) return false;
+  const ms = Date.parse(`${value}T00:00:00Z`);
+  return !Number.isNaN(ms) && new Date(ms).toISOString().slice(0, 10) === value;
 }
 
 export function parseTalkRange(query: { from?: unknown; to?: unknown }): { ok: true; range: TalkRange } | { ok: false; error: string } {
