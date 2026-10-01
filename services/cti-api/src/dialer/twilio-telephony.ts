@@ -25,7 +25,11 @@ import type { DialerTelephony } from './telephony-port.js';
  * a `.create()` method.
  */
 export interface TwilioDialerClient {
-  calls: ((callSid: string) => { update(args: Record<string, unknown>): Promise<unknown> }) & {
+  calls: ((callSid: string) => {
+    update(args: Record<string, unknown>): Promise<unknown>;
+    /** Call Recordings API — start a recording on an in-progress call. */
+    recordings: { create(args: Record<string, unknown>): Promise<{ sid: string }> };
+  }) & {
     create(args: Record<string, unknown>): Promise<{ sid: string }>;
   };
   /** Same callable-plus-methods shape as `calls`, for conference teardown:
@@ -110,6 +114,16 @@ export function dialerRejoinUrl(): string {
   return `${loadConfig().API_PUBLIC_URL}${DIALER_REJOIN_PATH}`;
 }
 
+/** Where Twilio posts a finished power-dial recording (routes/dialer.ts). One
+ *  constant for the URL `startRecording` names and the route that serves it. */
+export const DIALER_RECORDING_PATH = '/telephony/twilio/dialer-recording';
+/** The pause before the one retry of a failed recording start. */
+export const RECORDING_RETRY_DELAY_MS = 750;
+/** Twilio 21220: the call is no longer in progress — nothing left to record. */
+export const TWILIO_CALL_NOT_IN_PROGRESS = 21220;
+
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 export function bridgeTwiml(userId: string, endOnExit: boolean, opts: ConferenceOptions = {}): string {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const twiml = new VoiceResponse();
@@ -157,6 +171,7 @@ export class TwilioDialerTelephony implements DialerTelephony {
       const cfg = loadConfig();
       return twilio(cfg.TWILIO_ACCOUNT_SID, cfg.TWILIO_AUTH_TOKEN) as unknown as TwilioDialerClient;
     },
+    private sleep: (ms: number) => Promise<void> = defaultSleep,
   ) {}
 
   /**
@@ -186,7 +201,9 @@ export class TwilioDialerTelephony implements DialerTelephony {
       url: `${cfg.API_PUBLIC_URL}/telephony/twilio/dialer-answer`,
       statusCallback: `${cfg.API_PUBLIC_URL}/telephony/twilio/dialer-status?itemId=${a.itemId}`,
       statusCallbackEvent: ['completed'],
-      // NOTE: dialer recording is a separate, deliberate decision — the screening leg must NOT be recorded (prospect answers before a rep is present / disclosed to).
+      // Never recorded: the prospect answers this leg before any rep is on it.
+      // The bridged conversation is recorded by `startRecording`, which the
+      // engine's bridge hook (dialer/connect-log.ts) calls only AFTER bridgeToRep.
     } as never);
     return { callId: result.sid };
   }
@@ -201,6 +218,37 @@ export class TwilioDialerTelephony implements DialerTelephony {
   async bridgeToRep(callId: string, userId: string, opts: { repRejoins?: boolean } = {}): Promise<void> {
     const client = this.clientFactory();
     await client.calls(callId).update({ twiml: bridgeTwiml(userId, opts.repRejoins === true) } as never);
+  }
+
+  /**
+   * Record the PROSPECT's leg from now until it ends. Called only after
+   * `bridgeToRep` (dialer/connect-log.ts), so the AMD screening is never on
+   * it. Dual channel like click-to-dial: the prospect on track 1, what they
+   * hear — the rep, via the room — on track 2. Twilio posts the finished file
+   * to DIALER_RECORDING_PATH keyed by OUR row id (`connectId`), never by
+   * anything the prospect could influence.
+   *
+   * One retry after a short pause: Twilio documents that a record request can
+   * fail while a call's new TwiML is still being applied. Not after 21220 — the
+   * call already ended. A retry whose first try secretly landed makes a second
+   * recording of the same call; the callback just stores the later one.
+   */
+  async startRecording(callSid: string, connectId: string): Promise<void> {
+    const cfg = loadConfig();
+    const client = this.clientFactory();
+    const args = {
+      recordingChannels: 'dual',
+      recordingStatusCallback: `${cfg.API_PUBLIC_URL}${DIALER_RECORDING_PATH}?connectId=${connectId}`,
+      recordingStatusCallbackEvent: ['completed'],
+      recordingStatusCallbackMethod: 'POST',
+    };
+    try {
+      await client.calls(callSid).recordings.create(args);
+    } catch (err) {
+      if ((err as { code?: unknown }).code === TWILIO_CALL_NOT_IN_PROGRESS) throw err;
+      await this.sleep(RECORDING_RETRY_DELAY_MS);
+      await client.calls(callSid).recordings.create(args);
+    }
   }
 
   /** Hang up (skip/stop): end the call outright rather than routing it anywhere. */

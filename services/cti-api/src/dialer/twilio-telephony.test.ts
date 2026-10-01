@@ -13,7 +13,7 @@ vi.mock('../config.js', () => ({
   }),
 }));
 
-import { bridgeTwiml, conferenceName, DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repUserIdFromClientIdentity, TwilioDialerTelephony, waitUrlFor, type TwilioDialerClient } from './twilio-telephony.js';
+import { bridgeTwiml, conferenceName, DIALER_RECORDING_PATH, DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, RECORDING_RETRY_DELAY_MS, repUserIdFromClientIdentity, TwilioDialerTelephony, waitUrlFor, type TwilioDialerClient } from './twilio-telephony.js';
 
 // ---------------------------------------------------------------------------
 // conferenceName / bridgeTwiml — pure
@@ -106,19 +106,21 @@ describe('dialerConferenceTwiml', () => {
  *  conference sid to the call sids in it. `opts.fail` names operations that throw. */
 function fakeClient(
   rooms: { sid: string }[] = [],
-  opts: { initRooms?: { sid: string }[]; participants?: Record<string, string[]>; fail?: string[] } = {},
+  opts: { initRooms?: { sid: string }[]; participants?: Record<string, string[]>; fail?: string[]; recordingFailures?: unknown[] } = {},
 ): {
   client: TwilioDialerClient;
   createCalls: Record<string, unknown>[];
   updateCalls: { callId: string; args: Record<string, unknown> }[];
   conferenceListArgs: Record<string, unknown>[];
   conferenceUpdates: { sid: string; args: Record<string, unknown> }[];
+  recordingCreates: { callId: string; args: Record<string, unknown> }[];
   events: string[];
 } {
   const createCalls: Record<string, unknown>[] = [];
   const updateCalls: { callId: string; args: Record<string, unknown> }[] = [];
   const conferenceListArgs: Record<string, unknown>[] = [];
   const conferenceUpdates: { sid: string; args: Record<string, unknown> }[] = [];
+  const recordingCreates: { callId: string; args: Record<string, unknown> }[] = [];
   const events: string[] = [];
   const fails = (op: string): boolean => (opts.fail ?? []).includes(op);
 
@@ -128,6 +130,14 @@ function fakeClient(
       updateCalls.push({ callId: callSid, args });
       events.push(`call:${callSid}`);
       return {};
+    },
+    recordings: {
+      create: async (args: Record<string, unknown>) => {
+        recordingCreates.push({ callId: callSid, args });
+        const failure = opts.recordingFailures?.shift();
+        if (failure !== undefined) throw failure;
+        return { sid: 'RE1' };
+      },
     },
   })) as TwilioDialerClient['calls'];
   callsFn.create = async (args: Record<string, unknown>) => {
@@ -161,6 +171,7 @@ function fakeClient(
     updateCalls,
     conferenceListArgs,
     conferenceUpdates,
+    recordingCreates,
     events,
   };
 }
@@ -378,5 +389,56 @@ describe('hold music per rep — the choice becomes the rep leg\'s waitUrl', () 
     expect(repUserIdFromClientIdentity('client:rep_abc123')).toBeNull();
     expect(repUserIdFromClientIdentity('+16195551234')).toBeNull();
     expect(repUserIdFromClientIdentity('')).toBeNull();
+  });
+});
+
+describe('TwilioDialerTelephony.startRecording', () => {
+  const SID = 'CA' + 'a'.repeat(32);
+  const CONNECT = '11111111-2222-4333-8444-555555555555';
+  const noSleep = async () => {};
+
+  it('records the prospect leg dual-channel, posting the finished recording to the dialer-recording route keyed by our row id', async () => {
+    const { client, recordingCreates } = fakeClient();
+    await new TwilioDialerTelephony(() => client, noSleep).startRecording(SID, CONNECT);
+    expect(recordingCreates).toEqual([
+      {
+        callId: SID,
+        args: {
+          recordingChannels: 'dual',
+          recordingStatusCallback: `https://api.test.example${DIALER_RECORDING_PATH}?connectId=${CONNECT}`,
+          recordingStatusCallbackEvent: ['completed'],
+          recordingStatusCallbackMethod: 'POST',
+        },
+      },
+    ]);
+    expect(DIALER_RECORDING_PATH).toBe('/telephony/twilio/dialer-recording');
+  });
+
+  it('retries ONCE after a short pause — Twilio may still be applying the bridge TwiML', async () => {
+    const { client, recordingCreates } = fakeClient([], { recordingFailures: [new Error('transient')] });
+    const sleep = vi.fn(async () => {});
+    await new TwilioDialerTelephony(() => client, sleep).startRecording(SID, CONNECT);
+    expect(recordingCreates).toHaveLength(2);
+    expect(sleep).toHaveBeenCalledWith(RECORDING_RETRY_DELAY_MS);
+  });
+
+  it('does NOT retry when the call already ended (21220) — there is nothing left to record', async () => {
+    const ended = Object.assign(new Error('Call is not in-progress'), { code: 21220 });
+    const { client, recordingCreates } = fakeClient([], { recordingFailures: [ended] });
+    await expect(new TwilioDialerTelephony(() => client, noSleep).startRecording(SID, CONNECT)).rejects.toBe(ended);
+    expect(recordingCreates).toHaveLength(1);
+  });
+
+  it('a second failure propagates to the caller (connect-log stamps start_failed)', async () => {
+    const { client, recordingCreates } = fakeClient([], { recordingFailures: [new Error('a'), new Error('b')] });
+    await expect(new TwilioDialerTelephony(() => client, noSleep).startRecording(SID, CONNECT)).rejects.toThrow('b');
+    expect(recordingCreates).toHaveLength(2);
+  });
+
+  it('originate still never records the screening leg', async () => {
+    const { client, createCalls, recordingCreates } = fakeClient();
+    await new TwilioDialerTelephony(() => client, noSleep).originate({ sessionId: 's', itemId: 'i', fromE164: '+16195550101', toE164: '+16195559999', userId: 'u' });
+    expect(createCalls[0]).not.toHaveProperty('record');
+    expect(recordingCreates).toHaveLength(0);
   });
 });
