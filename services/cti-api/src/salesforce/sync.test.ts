@@ -201,6 +201,29 @@ describe('syncOne — the after-call ownership gate', () => {
   });
 });
 
+describe('syncOne — Call Duration is true talk time (talk-time spec, fix 1)', () => {
+  const owned = { salesforceWhoId: '00Q1', salesforceWhatId: '0061' };
+  const durationSent = (d: ReturnType<typeof syncDeps>) => (d.createCallTask as any).mock.calls[0][1].callDurationInSeconds;
+
+  it('uses talkSeconds — the ring-inclusive durationSeconds is not talk time', async () => {
+    const d = syncDeps({ db: fakeDb(callRow({ ...owned, disposition: 'Connected', durationSeconds: 52, talkSeconds: 37 })) });
+    await syncOne('call-1', d);
+    expect(durationSent(d)).toBe(37);
+  });
+
+  it('an unanswered call logs 0, not its ringing', async () => {
+    const d = syncDeps({ db: fakeDb(callRow({ ...owned, durationSeconds: 21, talkSeconds: 0 })) });
+    await syncOne('call-1', d);
+    expect(durationSent(d)).toBe(0);
+  });
+
+  it('falls back to durationSeconds for a call that has no talkSeconds (in flight across the deploy)', async () => {
+    const d = syncDeps({ db: fakeDb(callRow({ ...owned, durationSeconds: 52, talkSeconds: null })) });
+    await syncOne('call-1', d);
+    expect(durationSent(d)).toBe(52);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Task 7 — a click-to-dial miss counts toward the task owner's two dials of
 // the day (spec §2.3): the SAME per-day rollover rule the power dialer's

@@ -21,6 +21,7 @@ import { getDb, schema } from '@cti/db';
 import { humanUsersInOrg, sha256 } from '@cti/auth';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
+import { parseTwilioSeconds } from '../telephony/talk-seconds.js';
 import { findByPhone, findPrimaryOpenOpportunityId } from '../salesforce/client.js';
 import { enqueueSyncForCall } from '../salesforce/sync.js';
 import { normalize } from '@cti/phone';
@@ -543,6 +544,9 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
           // the talk time Twilio reports, not "now".
           answeredAt: answeredAtFrom(now, body.DialCallDuration),
           durationSeconds: body.DialCallDuration ? Number(body.DialCallDuration) : undefined,
+          // The talk-time report and the Task's Call Duration read this one
+          // (talk-time spec, fix 1); an answered inbound leg IS its talk time.
+          talkSeconds: parseTwilioSeconds(body.DialCallDuration) ?? undefined,
           endedAt: now,
           updatedAt: new Date(),
         })

@@ -478,7 +478,10 @@ export async function syncOne(
     subject,
     callType: inbound ? 'Inbound' : 'Outbound',
     callDisposition: call.disposition ?? undefined,
-    callDurationInSeconds: call.durationSeconds ?? undefined,
+    // True talk time (talk-time spec, fix 1): durationSeconds usually holds the
+    // rep leg's ring-inclusive length. A call with no talkSeconds (in flight
+    // across the deploy) keeps the old number.
+    callDurationInSeconds: call.talkSeconds ?? call.durationSeconds ?? undefined,
     whoId,
     whatId,
     description,

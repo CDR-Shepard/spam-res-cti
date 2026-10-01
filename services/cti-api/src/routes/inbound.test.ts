@@ -609,6 +609,17 @@ describe('POST /telephony/twilio/inbound/dial-result — answeredAt is the "rep 
     expect(state.updates.some((u) => 'answeredAt' in u)).toBe(false);
     expect(state.updates.some((u) => u.status === 'completed')).toBe(false);
   });
+
+  it('an answered inbound call stores its talk time (DialCallDuration) in talkSeconds too', async () => {
+    await dialResult({ DialCallStatus: 'completed', DialCallDuration: '500' });
+    const patch = state.updates.find((u) => u.status === 'completed');
+    expect(patch?.talkSeconds).toBe(500);
+  });
+
+  it('an unanswered inbound call never writes talkSeconds', async () => {
+    await dialResult({ DialCallStatus: 'no-answer' });
+    expect(state.updates.some((u) => 'talkSeconds' in u)).toBe(false);
+  });
 });
 
 describe('insertInboundCall — the statement Postgres actually receives', () => {

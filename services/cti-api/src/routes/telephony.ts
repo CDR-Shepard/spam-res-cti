@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { resolveSession } from '@cti/auth';
 import { DEFAULT_HOLD_MUSIC, toHoldMusicChoice, type HoldMusicChoice } from '@cti/contracts';
 import { getProvider } from '../telephony/index.js';
+import { applyTalkSeconds, talkSecondsWrite } from '../telephony/talk-seconds.js';
 import { getDb, schema } from '@cti/db';
 import { loadConfig } from '../config.js';
 import { sha256 } from '@cti/auth';
@@ -669,6 +670,10 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
           updates.endedAt = event.endedAt ?? new Date();
         }
         await db.update(schema.calls).set(updates).where(eq(schema.calls.id, call.id));
+        // True talk time (telephony/talk-seconds.ts) — its own column, so the
+        // durationSeconds above, which the reputation engine reads, keeps its rule.
+        const talk = talkSecondsWrite(body);
+        if (talk) await applyTalkSeconds(db, call.id, talk);
         await db.insert(schema.callEvents).values({
           callId: call.id,
           eventType: 'status',
