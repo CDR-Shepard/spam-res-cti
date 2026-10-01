@@ -2863,6 +2863,13 @@ Past Tasks were not rewritten. Days before the deploy still include ring time.
 
 ## Checks
 
+Read-only SQL. `railway run` injects the PRIVATE `DATABASE_URL`, which a laptop
+cannot reach, so open the public URL instead (never echo or paste `$PUB` — it is
+a live DB credential):
+
+    PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
+    psql "$PUB"
+
 - **Open legs right now:**
   ```sql
   select user_id, joined_at from dialer_rep_legs where ended_at is null order by joined_at;

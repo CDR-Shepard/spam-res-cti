@@ -28,7 +28,18 @@ automated disclosure.
 - `recording_link_synced_at` set with `last_error = 'recording link field
   rejected'` → the rep lacks the tdc_cti package license (UserPackageLicense).
 
-## Checks (read-only SQL, via `railway run -s Postgres`)
+## Checks (read-only SQL)
+
+`railway run` injects the PRIVATE `DATABASE_URL`, which a laptop cannot reach.
+Pull the public URL into a shell variable instead. **Never `echo $PUB` or paste
+it anywhere**: it is a live DB credential.
+
+```bash
+PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
+psql "$PUB"
+```
+
+Then, at the `psql` prompt:
 
 ```sql
 -- Today's bridged calls by outcome
