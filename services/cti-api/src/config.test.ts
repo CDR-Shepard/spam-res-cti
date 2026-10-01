@@ -82,3 +82,22 @@ describe('DIALER_RECORDING — the power-dial recording kill switch', () => {
     await expect(loadWith({ DIALER_RECORDING: 'false' })).rejects.toThrow(/DIALER_RECORDING/);
   });
 });
+
+describe('DIALER_CONNECT_TASKS — the power-dial Call Task kill switch', () => {
+  const saved = { ...process.env };
+  beforeEach(() => { delete process.env.DIALER_CONNECT_TASKS; });
+  afterEach(() => { process.env = { ...saved }; });
+
+  it('defaults to ON', async () => {
+    expect((await loadWith({ DIALER_CONNECT_TASKS: undefined })).DIALER_CONNECT_TASKS).toBe('on');
+  });
+  it('an empty value is treated as unset → on', async () => {
+    expect((await loadWith({ DIALER_CONNECT_TASKS: '' })).DIALER_CONNECT_TASKS).toBe('on');
+  });
+  it('off turns it off', async () => {
+    expect((await loadWith({ DIALER_CONNECT_TASKS: 'off' })).DIALER_CONNECT_TASKS).toBe('off');
+  });
+  it('anything else fails the boot loudly', async () => {
+    await expect(loadWith({ DIALER_CONNECT_TASKS: 'false' })).rejects.toThrow(/DIALER_CONNECT_TASKS/);
+  });
+});

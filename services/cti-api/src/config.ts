@@ -163,6 +163,15 @@ const schema = z.object({
    * `on`; strict enum like NO_ANSWER_CHATTER.
    */
   DIALER_RECORDING: z.enum(['on', 'off']).default('on'),
+
+  /**
+   * Kill switch for the power-dial Call Tasks (salesforce/dialer-connect-worker.ts).
+   * `off` = the worker loop is never started: no Task, no recording link. Bridged
+   * calls are still logged (dialer_connects); turning it back on logs only calls
+   * bridged in the last 24 h — older ones expire, never backfilled. Default `on`;
+   * strict enum like NO_ANSWER_CHATTER.
+   */
+  DIALER_CONNECT_TASKS: z.enum(['on', 'off']).default('on'),
 });
 
 export type AppConfig = z.infer<typeof schema>;

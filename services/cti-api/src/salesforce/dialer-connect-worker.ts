@@ -22,13 +22,15 @@
  * Kill switch: DIALER_CONNECT_TASKS=off never starts the loop.
  * Design: docs/superpowers/specs/2026-10-01-power-dialer-recording-design.md.
  */
-import { and, asc, eq, gte, isNotNull, lt, lte, or } from 'drizzle-orm';
+import { and, asc, eq, gte, isNotNull, isNull, lt, lte, or } from 'drizzle-orm';
 import { getDb, schema, type DialerConnect } from '@cti/db';
 import { createCallTask, updateCallTask } from './client.js';
 import { fetchOwnership, mayCreateTaskOn } from './ownership.js';
 import { fetchRecordName } from './sync.js';
 import { isSalesforceAuthError, withTimeout } from './followup-worker.js';
-import type { RecordingLinkConfig } from '../telephony/recording-links.js';
+import { buildRecordingPublicUrl, type RecordingLinkConfig } from '../telephony/recording-links.js';
+import type { AppConfig } from '../config.js';
+import { loadConfig } from '../config.js';
 import { MAX_TRIES, buildConnectTaskInput, leaseFor, taskLinks } from './dialer-connect-task.js';
 
 type Db = ReturnType<typeof getDb>;
@@ -162,4 +164,148 @@ export async function processConnectTask(
   } catch (err) {
     return taskTryFailed(row, err, deps);
   }
+}
+
+/** The writable recording field click-to-dial Tasks carry (salesforce/sync.ts). */
+export const RECORDING_URL_FIELD = 'tdc_cti__Recording_URL__c';
+
+export function selectDueLinks(db: Db, now: Date) {
+  return db
+    .select()
+    .from(c)
+    .where(
+      and(
+        eq(c.taskState, 'created'),
+        isNotNull(c.salesforceTaskId),
+        isNotNull(c.recordingUrl),
+        isNull(c.recordingLinkSyncedAt),
+        lt(c.linkAttempts, MAX_TRIES),
+        lte(c.nextAttemptAt, now),
+      ),
+    )
+    .orderBy(asc(c.bridgedAt))
+    .limit(BATCH_LIMIT);
+}
+
+export function claimLink(db: Db, row: Pick<DialerConnect, 'id' | 'linkAttempts'>, now: Date) {
+  const attempt = row.linkAttempts + 1;
+  return db
+    .update(c)
+    .set({ linkAttempts: attempt, nextAttemptAt: new Date(now.getTime() + leaseFor(attempt)), updatedAt: now })
+    .where(
+      and(
+        eq(c.id, row.id),
+        isNull(c.recordingLinkSyncedAt),
+        eq(c.linkAttempts, row.linkAttempts),
+        lte(c.nextAttemptAt, now),
+      ),
+    )
+    .returning();
+}
+
+/**
+ * One claimed row → its recording link on its Task, as the rep. The PUBLIC
+ * playback URL (GET /recordings/:id?sig=), never the Twilio media URL. A field
+ * Salesforce rejects (the rep has no tdc_cti package license — see the
+ * recording-links memory) is stamped synced with a loud log, exactly like the
+ * click-to-dial sweep: no retry can fix a license.
+ */
+export async function pushConnectLink(row: DialerConnect, deps: DialerConnectDeps): Promise<'synced' | 'rejected' | 'retry' | 'failed'> {
+  const url = buildRecordingPublicUrl(row.id, deps.link);
+  try {
+    const { updated } = await withTimeout(
+      deps.sf.updateCallTask(row.userId, row.salesforceTaskId!, { [RECORDING_URL_FIELD]: url }),
+      SF_CALL_TIMEOUT_MS,
+      'recording link',
+    );
+    await patchConnect(deps.db, row.id, {
+      recordingLinkSyncedAt: deps.now(),
+      lastError: updated ? null : 'recording link field rejected',
+    }, deps.now());
+    if (!updated) {
+      console.error(`${LOG} recording link field rejected — check the rep's tdc_cti package license`, { connectId: row.id, userId: row.userId });
+      return 'rejected';
+    }
+    return 'synced';
+  } catch (err) {
+    const message = errorText(err);
+    await patchConnect(deps.db, row.id, { lastError: message }, deps.now());
+    if (row.linkAttempts >= MAX_TRIES) {
+      console.error(`${LOG} gave up — recording link not on the Task`, { connectId: row.id, userId: row.userId, err: message });
+      return 'failed';
+    }
+    console.warn(`${LOG} recording link try failed, will retry`, { connectId: row.id, attempt: row.linkAttempts, err: message });
+    return 'retry';
+  }
+}
+
+async function guarded(connectId: string, fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`${LOG} row failed`, { connectId, err: errorText(err) });
+  }
+}
+
+function liveDeps(): DialerConnectDeps {
+  const cfg = loadConfig();
+  return {
+    db: getDb(),
+    now: () => new Date(),
+    link: { apiPublicUrl: cfg.API_PUBLIC_URL, secret: cfg.SESSION_SECRET },
+    sf: { createCallTask, updateCallTask, fetchOwnership, fetchRecordName },
+  };
+}
+
+export async function runDialerConnectTick(
+  deps: DialerConnectDeps = liveDeps(),
+): Promise<{ expired: number; tasks: number; links: number }> {
+  const expired = await expireStaleConnects(deps.db, deps.now());
+  if (expired.length > 0) {
+    console.warn(`${LOG} power-dial calls expired without a Task (bridged over 24 h ago)`, { count: expired.length });
+  }
+  let tasks = 0;
+  for (const candidate of await selectDueConnectTasks(deps.db, deps.now())) {
+    // `deps.now()` AT EACH CLAIM: the lease is measured from the claim itself.
+    const [claimed] = await claimConnectTask(deps.db, candidate, deps.now());
+    if (!claimed) continue; // another worker has it, or it is no longer due
+    if (claimed.taskAttempts > MAX_TRIES) {
+      // Its last try crashed mid-way; never a 7th.
+      await patchConnect(deps.db, claimed.id, { taskState: 'failed', lastError: `gave up after ${MAX_TRIES} tries` }, deps.now());
+      console.error(`${LOG} gave up — no Task for this power-dial call`, { connectId: claimed.id, userId: claimed.userId, err: 'tries exhausted' });
+      continue;
+    }
+    await guarded(claimed.id, () => processConnectTask(claimed, deps));
+    tasks++;
+  }
+  let links = 0;
+  for (const candidate of await selectDueLinks(deps.db, deps.now())) {
+    const [claimed] = await claimLink(deps.db, candidate, deps.now());
+    if (!claimed) continue;
+    await guarded(claimed.id, () => pushConnectLink(claimed, deps));
+    links++;
+  }
+  return { expired: expired.length, tasks, links };
+}
+
+/** Single-flight: a slow tick is never overlapped. */
+export function startDialerConnectLoop(intervalMs = LOOP_INTERVAL_MS): NodeJS.Timeout {
+  let running = false;
+  return setInterval(() => {
+    if (running) return;
+    running = true;
+    runDialerConnectTick()
+      .catch((err) => console.error(`${LOG} tick error`, { err: errorText(err) }))
+      .finally(() => {
+        running = false;
+      });
+  }, intervalMs);
+}
+
+/** The kill switch (config.ts DIALER_CONNECT_TASKS). `start` is a test seam. */
+export function maybeStartDialerConnectLoop(
+  cfg: Pick<AppConfig, 'DIALER_CONNECT_TASKS'>,
+  start: (intervalMs: number) => NodeJS.Timeout = startDialerConnectLoop,
+): NodeJS.Timeout | null {
+  return cfg.DIALER_CONNECT_TASKS === 'on' ? start(LOOP_INTERVAL_MS) : null;
 }
