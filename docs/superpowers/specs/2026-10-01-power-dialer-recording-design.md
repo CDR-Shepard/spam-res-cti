@@ -120,8 +120,10 @@ link outlives any run/item cleanup.
      the same lookup click-to-dial sync uses.
    - `Status=Completed`, `TaskSubtype=Call`, `CallType=Outbound`,
      `CallDisposition=Connected`, `CallDurationInSeconds=talk_seconds`,
-     `CTI_Origin__c` marker (createCallTask stamps it), Description = one line
-     naming the Power Dialer and the call time.
+     `CTI_Origin__c` marker (createCallTask stamps it), Description = a lean
+     fixed line naming the Power Dialer (`'Logged by the Power Dialer.'`, like
+     click-to-dial — org automations repost Descriptions). The call's time is
+     not in the Description; it lives on `Call_Start_Time__c` below.
    - Lead / Contact → `WhoId`; Opportunity → `WhatId`.
    - Custom fields as click-to-dial: `External_Call_Id__c` = row id,
      `Provider_Call_Id__c` = `call_sid`, From/To/Normalized_To,
@@ -173,9 +175,12 @@ bridged. Already-mis-dated Tasks are not corrected by this change.
 ## No backfill
 
 Rows only exist from deploy onward, and the worker only logs a Task for a row
-bridged within the last **24 h**; older pending rows become `expired`.
-`createCallTask` dates the Task today, so a week-old call logged after the
-switch was off would read as today's activity — this window prevents that.
+bridged within the last **24 h**; older pending rows become `expired`. The
+window is not about the Task's date (`createCallTask` dates it the day it was
+bridged, not today — see the "Date bug found and fixed here" note above) — it
+exists so a stale call can never backfill into a rep's reports days after the
+fact, and so a disconnected Salesforce connection's hourly retry
+(`AUTH_RETRY_MS`) cannot keep trying forever.
 
 ## Untouched
 

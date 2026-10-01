@@ -18,6 +18,7 @@ import {
   runDialerConnectTick,
   selectDueConnectTasks,
   selectDueLinks,
+  sfErrorSummary,
   type DialerConnectDeps,
 } from './dialer-connect-worker.js';
 
@@ -136,10 +137,67 @@ describe('processConnectTask — the Task', () => {
     expect(error).toHaveBeenCalledWith('[dialer-connect-worker] gave up — no Task for this power-dial call', expect.objectContaining({ connectId: connectRow().id }));
   });
 
+  it('M3: a create failure whose body echoes a phone number never reaches the console — last_error keeps the full text for hand repair', async () => {
+    const PHONE = '(619) 555-9999';
+    const sfBody = [{ message: `Subject: data value too large: Outbound Call | Connected | ${PHONE} / Jane Doe (max length=80)`, errorCode: 'STRING_TOO_LONG', fields: ['Subject'] }];
+    const sfError = new Error(`Salesforce Task create failed: ${JSON.stringify(sfBody)}`);
+    const h = harness({ createCallTask: vi.fn(async () => { throw sfError; }) });
+    expect(await processConnectTask(connectRow({ taskAttempts: MAX_TRIES }), h.deps)).toBe('failed');
+    expect(h.writes).toEqual([expect.objectContaining({ taskState: 'failed', lastError: expect.stringContaining(PHONE) })]);
+    expect(error).toHaveBeenCalledWith(
+      '[dialer-connect-worker] gave up — no Task for this power-dial call',
+      expect.objectContaining({ connectId: connectRow().id, err: 'errorCodes=STRING_TOO_LONG' }),
+    );
+    for (const call of error.mock.calls) expect(JSON.stringify(call)).not.toContain(PHONE);
+  });
+
   it('an ownership lookup that throws fails closed into a retry — never a Task on an unknown owner', async () => {
     const h = harness({ fetchOwnership: vi.fn(async () => { throw new Error('soql 500'); }) });
     expect(await processConnectTask(connectRow(), h.deps)).toBe('retry');
     expect(h.sf.createCallTask).not.toHaveBeenCalled();
+  });
+
+  describe('M2 — the "created" stamp is never an SF failure', () => {
+    /** The real `harness()` db always succeeds; this one fails the `created`
+     *  stamp (and only that write) `failTimes` times before succeeding. */
+    function dbFailingTheCreatedStamp(writes: Record<string, unknown>[], failTimes: number): DialerConnectDeps['db'] {
+      let stampCalls = 0;
+      return {
+        update: () => ({
+          set: (patch: Record<string, unknown>) => ({
+            where: async () => {
+              if (patch.taskState === 'created') {
+                stampCalls++;
+                if (stampCalls <= failTimes) throw new Error('db down');
+              }
+              writes.push(patch);
+            },
+          }),
+        }),
+      } as unknown as DialerConnectDeps['db'];
+    }
+
+    it('a DB failure after a successful create is retried once and never recorded as an SF failure', async () => {
+      const writes: Record<string, unknown>[] = [];
+      const db = dbFailingTheCreatedStamp(writes, 2); // fails the stamp AND its one retry
+      const h = harness();
+      expect(await processConnectTask(connectRow({ taskAttempts: 2 }), { ...h.deps, db })).toBe('created');
+      expect(h.sf.createCallTask).toHaveBeenCalledTimes(1); // never retried as a Salesforce try
+      expect(writes).toEqual([]); // the stamp never landed — no 'created' write, no lastError either
+      expect(error).toHaveBeenCalledWith(
+        '[dialer-connect-worker] Task created in Salesforce but not stamped locally',
+        { connectId: connectRow().id, taskId: '00TNEW000000001' },
+      );
+    });
+
+    it('a stamp that fails once and succeeds on its retry needs no log at all', async () => {
+      const writes: Record<string, unknown>[] = [];
+      const db = dbFailingTheCreatedStamp(writes, 1); // fails once, the retry lands
+      const h = harness();
+      expect(await processConnectTask(connectRow(), { ...h.deps, db })).toBe('created');
+      expect(writes).toEqual([expect.objectContaining({ taskState: 'created', salesforceTaskId: '00TNEW000000001' })]);
+      expect(error).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -296,6 +354,27 @@ describe('runDialerConnectTick', () => {
     expect(h.sf.createCallTask).toHaveBeenCalledTimes(2);
     expect(writes).toContainEqual(expect.objectContaining({ lastError: 'boom' }));
     expect(writes).toContainEqual(expect.objectContaining({ taskState: 'created', salesforceTaskId: '00TNEW000000002' }));
+  });
+});
+
+describe('sfErrorSummary — never the raw Salesforce body on the console (M3)', () => {
+  it('pulls out the errorCode(s), never a field value', () => {
+    const body = [{ message: 'Subject: data value too large: (619) 555-9999', errorCode: 'STRING_TOO_LONG', fields: ['Subject'] }];
+    expect(sfErrorSummary(new Error(`Salesforce Task create failed: ${JSON.stringify(body)}`))).toBe('errorCodes=STRING_TOO_LONG');
+  });
+
+  it('de-dupes repeated codes across a multi-error body', () => {
+    const body = [{ errorCode: 'INVALID_FIELD' }, { errorCode: 'INVALID_FIELD' }, { errorCode: 'REQUIRED_FIELD_MISSING' }];
+    expect(sfErrorSummary(new Error(JSON.stringify(body)))).toBe('errorCodes=INVALID_FIELD,REQUIRED_FIELD_MISSING');
+  });
+
+  it('surfaces an HTTP status the message happens to carry', () => {
+    expect(sfErrorSummary(new Error('SOQL failed (404): not found'))).toBe('status=404');
+  });
+
+  it('a plain, non-Salesforce-shaped error falls back to a safe generic line', () => {
+    expect(sfErrorSummary(new Error('503 busy'))).toBe('Salesforce error (see last_error)');
+    expect(sfErrorSummary(new SalesforceUnauthorizedError())).toBe('Salesforce error (see last_error)');
   });
 });
 

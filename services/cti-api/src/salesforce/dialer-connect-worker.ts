@@ -16,8 +16,12 @@
  * try simply comes due again. Like the other Salesforce workers, a create that
  * landed after our timeout gave up on it can be made again by the retry.
  *
- * NO BACKFILL: pending rows bridged more than 24 h ago are expired, because
- * createCallTask dates the Task today — an old call must not read as today's.
+ * NO BACKFILL: pending rows bridged more than 24 h ago are expired. Not
+ * because of the Task's date any more — createCallTask has dated it
+ * orgTodayIso(bridgedAt), the day it was BRIDGED, since Task 6/7 — but so a
+ * stale call can never backfill into a rep's reports days after the fact, and
+ * so a disconnected Salesforce connection's hourly retry (AUTH_RETRY_MS)
+ * cannot keep trying forever.
  *
  * Kill switch: DIALER_CONNECT_TASKS=off never starts the loop.
  * Design: docs/superpowers/specs/2026-10-01-power-dialer-recording-design.md.
@@ -38,7 +42,8 @@ const c = schema.dialerConnects;
 
 export const LOOP_INTERVAL_MS = 5_000;
 export const BATCH_LIMIT = 25;
-/** No Task for a call bridged longer ago than this — the Task would be dated today. */
+/** No Task for a call bridged longer ago than this: it would backfill a rep's
+ *  report days late, and it bounds the hourly auth-retry loop (AUTH_RETRY_MS). */
 export const TASK_WINDOW_MS = 24 * 60 * 60_000;
 /** A bridged call with no hang-up stamp by now is logged anyway, without a duration. */
 export const MISSED_END_AFTER_MS = 4 * 60 * 60_000;
@@ -63,6 +68,29 @@ export interface DialerConnectDeps {
 
 export function errorText(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).slice(0, 500);
+}
+
+/**
+ * Console-safe summary of a Salesforce error (M3, final review, THIS worker
+ * only — the sibling workers' identical pattern is a separate ticket).
+ * `errorText()` embeds client.ts's raw `JSON.stringify(res.json)`, and
+ * Salesforce echoes field VALUES back on a few error codes — notably
+ * STRING_TOO_LONG on Subject, which here contains the call's formatted phone
+ * number. Logs get only the Salesforce errorCode(s) (and an HTTP status, when
+ * the message happens to carry one) — never the raw body. `last_error` keeps
+ * the full text via `errorText()` for hand repair; nothing about that changes.
+ */
+export function sfErrorSummary(err: unknown): string {
+  const message = errorText(err);
+  // Only "(404): " — a status always precedes a colon in this codebase's error
+  // messages (client.ts, followup-worker.ts). Without the colon, a phone
+  // number's area code — e.g. "(619) 555-9999" — would misread as a status.
+  const status = message.match(/\((\d{3})\):/)?.[1];
+  const codes = [...new Set([...message.matchAll(/"errorCode"\s*:\s*"([A-Za-z_]+)"/g)].map((m) => m[1]))];
+  const parts: string[] = [];
+  if (status) parts.push(`status=${status}`);
+  if (codes.length) parts.push(`errorCodes=${codes.join(',')}`);
+  return parts.length ? parts.join(' ') : 'Salesforce error (see last_error)';
 }
 
 export function patchConnect(db: Db, id: string, patch: Partial<typeof c.$inferInsert>, now: Date) {
@@ -122,13 +150,40 @@ async function taskTryFailed(row: DialerConnect, err: unknown, deps: DialerConne
   }
   if (row.taskAttempts >= MAX_TRIES) {
     await patchConnect(deps.db, row.id, { taskState: 'failed', lastError: message }, now);
-    console.error(`${LOG} gave up — no Task for this power-dial call`, { connectId: row.id, userId: row.userId, err: message });
+    console.error(`${LOG} gave up — no Task for this power-dial call`, { connectId: row.id, userId: row.userId, err: sfErrorSummary(err) });
     return 'failed';
   }
   // next_attempt_at already holds this try's backoff — the claim set it.
   await patchConnect(deps.db, row.id, { lastError: message }, now);
-  console.warn(`${LOG} Task try failed, will retry`, { connectId: row.id, attempt: row.taskAttempts, err: message });
+  console.warn(`${LOG} Task try failed, will retry`, { connectId: row.id, attempt: row.taskAttempts, err: sfErrorSummary(err) });
   return 'retry';
+}
+
+/**
+ * Stamp a successful Salesforce create (M2, final review): the Task EXISTS in
+ * Salesforce by the time this runs, so a failure HERE is ours, never
+ * Salesforce's — it must never be recorded as an SF failure (that would
+ * double the row's attempt count and, on tries 1-5, read as "retry the
+ * create", making a SECOND Task; on try 6, mark the row `failed` although a
+ * Task exists). Retried once in-process; if it still won't take, logged by id
+ * only (a Salesforce record id is not PII) so it can be repaired by hand.
+ * Retrying here does not stop the row from being claimed again on the next
+ * tick with this stamp still missing — the lease still expires, and that
+ * retry re-creates the Task (the same exposure as T8-3, unchanged by this
+ * fix). The log line is the point, not a cure.
+ */
+async function stampCreated(connectId: string, taskId: string, deps: DialerConnectDeps): Promise<void> {
+  const stamp = () =>
+    patchConnect(deps.db, connectId, { taskState: 'created', salesforceTaskId: taskId, lastError: null, nextAttemptAt: deps.now() }, deps.now());
+  try {
+    await stamp();
+  } catch {
+    try {
+      await stamp();
+    } catch {
+      console.error(`${LOG} Task created in Salesforce but not stamped locally`, { connectId, taskId });
+    }
+  }
 }
 
 /** One claimed row → its Task. `row.taskAttempts` already counts this try. */
@@ -142,6 +197,7 @@ export async function processConnectTask(
     console.error(`${LOG} no Task link for this record type`, { connectId: row.id, objectType: row.objectType });
     return 'failed';
   }
+  let taskId: string;
   try {
     const allowed = await mayCreateTaskOn([links.whoId, links.whatId], row.sfUserId, (id) =>
       withTimeout(deps.sf.fetchOwnership(row.userId, id), SF_CALL_TIMEOUT_MS, 'ownership lookup'),
@@ -153,17 +209,18 @@ export async function processConnectTask(
     // Cosmetic: fetchRecordName already swallows its own errors; a timeout is null too.
     const recordName = await withTimeout(deps.sf.fetchRecordName(row.userId, row.recordId), SF_CALL_TIMEOUT_MS, 'record name')
       .catch(() => null);
-    const { taskId } = await withTimeout(
+    ({ taskId } = await withTimeout(
       deps.sf.createCallTask(row.userId, buildConnectTaskInput(row, links, recordName)),
       SF_CREATE_TIMEOUT_MS,
       'task create',
-    );
-    // Due now: the link phase attaches the recording on the next tick if it is in.
-    await patchConnect(deps.db, row.id, { taskState: 'created', salesforceTaskId: taskId, lastError: null, nextAttemptAt: deps.now() }, deps.now());
-    return 'created';
+    ));
   } catch (err) {
     return taskTryFailed(row, err, deps);
   }
+  // Outside the try on purpose (M2): the SF call already succeeded.
+  // Due now: the link phase attaches the recording on the next tick if it is in.
+  await stampCreated(row.id, taskId, deps);
+  return 'created';
 }
 
 /** The writable recording field click-to-dial Tasks carry (salesforce/sync.ts). */
@@ -231,10 +288,10 @@ export async function pushConnectLink(row: DialerConnect, deps: DialerConnectDep
     const message = errorText(err);
     await patchConnect(deps.db, row.id, { lastError: message }, deps.now());
     if (row.linkAttempts >= MAX_TRIES) {
-      console.error(`${LOG} gave up — recording link not on the Task`, { connectId: row.id, userId: row.userId, err: message });
+      console.error(`${LOG} gave up — recording link not on the Task`, { connectId: row.id, userId: row.userId, err: sfErrorSummary(err) });
       return 'failed';
     }
-    console.warn(`${LOG} recording link try failed, will retry`, { connectId: row.id, attempt: row.linkAttempts, err: message });
+    console.warn(`${LOG} recording link try failed, will retry`, { connectId: row.id, attempt: row.linkAttempts, err: sfErrorSummary(err) });
     return 'retry';
   }
 }
@@ -243,7 +300,7 @@ async function guarded(connectId: string, fn: () => Promise<unknown>): Promise<v
   try {
     await fn();
   } catch (err) {
-    console.error(`${LOG} row failed`, { connectId, err: errorText(err) });
+    console.error(`${LOG} row failed`, { connectId, err: sfErrorSummary(err) });
   }
 }
 
