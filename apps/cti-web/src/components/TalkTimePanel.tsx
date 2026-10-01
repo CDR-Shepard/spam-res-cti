@@ -91,7 +91,7 @@ export function TalkTimePanel(): JSX.Element {
       </div>
       {error && <div className="admin-err" role="alert">{error}</div>}
       {loading && !report && <div className="empty-state"><span className="spinner lg" /></div>}
-      {loading && report && <div className="empty-hint"><span className="spinner" /> Loading talk time…</div>}
+      {loading && report && <div className="calllog-loading"><span className="spinner" /> Loading talk time…</div>}
       {report && (
         <div className="calllog-scroll">
           <table className="calllog-table">
