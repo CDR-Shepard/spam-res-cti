@@ -970,6 +970,61 @@ export const inboundTextDigests = pgTable(
 );
 export type InboundTextDigest = typeof inboundTextDigests.$inferSelect;
 
+/** Every recording_state a dialer_connects row can hold (migration 0047's CHECK). */
+export const DIALER_CONNECT_RECORDING_STATES = ['pending', 'requested', 'start_failed', 'skipped_consent', 'skipped_switch'] as const;
+export type DialerConnectRecordingState = (typeof DIALER_CONNECT_RECORDING_STATES)[number];
+/** Every task_state a dialer_connects row can hold (migration 0047's CHECK). */
+export const DIALER_CONNECT_TASK_STATES = ['pending', 'created', 'skipped_not_owner', 'expired', 'failed'] as const;
+export type DialerConnectTaskState = (typeof DIALER_CONNECT_TASK_STATES)[number];
+
+/**
+ * One row per power-dial call bridged to a rep (migration 0047). Written by
+ * dialer/connect-log.ts right after the bridge, before the recording starts;
+ * turned into ONE completed Call Task + recording link by
+ * salesforce/dialer-connect-worker.ts. FK-free like dialerDialAttempts — a
+ * recording link in Salesforce must outlive any run or item cleanup.
+ */
+export const dialerConnects = pgTable(
+  'dialer_connects',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    /** The rep's Salesforce user id — the ownership gate's caller. */
+    sfUserId: text('sf_user_id').notNull(),
+    sessionId: uuid('session_id').notNull(),
+    itemId: uuid('item_id').notNull(),
+    /** The prospect's leg. FULL unique index: the bare ON CONFLICT arbiter. */
+    callSid: text('call_sid').notNull(),
+    objectType: text('object_type').notNull(),
+    recordId: text('record_id').notNull(),
+    fromNumber: text('from_number').notNull(),
+    toNumber: text('to_number').notNull(),
+    bridgedAt: timestamp('bridged_at', { withTimezone: true }).defaultNow().notNull(),
+    endedAt: timestamp('ended_at', { withTimezone: true }),
+    /** ended_at − bridged_at: the screening seconds are not talk time. */
+    talkSeconds: integer('talk_seconds'),
+    recordingState: text('recording_state').$type<DialerConnectRecordingState>().default('pending').notNull(),
+    recordingUrl: text('recording_url'),
+    taskState: text('task_state').$type<DialerConnectTaskState>().default('pending').notNull(),
+    taskAttempts: integer('task_attempts').default(0).notNull(),
+    /** The worker's lease and backoff clock, for both phases. */
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).defaultNow().notNull(),
+    lastError: text('last_error'),
+    salesforceTaskId: text('salesforce_task_id'),
+    linkAttempts: integer('link_attempts').default(0).notNull(),
+    recordingLinkSyncedAt: timestamp('recording_link_synced_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    // FULL, never partial: connect-log's bare ON CONFLICT DO NOTHING arbitrates on it.
+    callSidUnique: uniqueIndex('dialer_connects_call_sid_unique').on(t.callSid),
+    taskDueIdx: index('dialer_connects_task_due_idx').on(t.taskState, t.nextAttemptAt),
+  }),
+);
+export type DialerConnect = typeof dialerConnects.$inferSelect;
+
 /**
  * Sticky caller ID per (rep, lead) — the DID a rep last called a given recipient
  * (lead) from. Future calls to the same lead reuse this number (when the rep
