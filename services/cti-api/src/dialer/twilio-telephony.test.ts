@@ -13,7 +13,7 @@ vi.mock('../config.js', () => ({
   }),
 }));
 
-import { bridgeTwiml, conferenceName, DIALER_RECORDING_PATH, DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, RECORDING_RETRY_DELAY_MS, repUserIdFromClientIdentity, TwilioDialerTelephony, waitUrlFor, type TwilioDialerClient } from './twilio-telephony.js';
+import { bridgeTwiml, callEndFrom, conferenceName, DIALER_RECORDING_PATH, DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, RECORDING_RETRY_DELAY_MS, repUserIdFromClientIdentity, TwilioDialerTelephony, waitUrlFor, type TwilioDialerClient } from './twilio-telephony.js';
 
 // ---------------------------------------------------------------------------
 // conferenceName / bridgeTwiml — pure
@@ -440,5 +440,55 @@ describe('TwilioDialerTelephony.startRecording', () => {
     await new TwilioDialerTelephony(() => client, noSleep).originate({ sessionId: 's', itemId: 'i', fromE164: '+16195550101', toE164: '+16195559999', userId: 'u' });
     expect(createCalls[0]).not.toHaveProperty('record');
     expect(recordingCreates).toHaveLength(0);
+  });
+});
+
+describe('callEndFrom — has a rep leg ended, and when, per Twilio', () => {
+  const start = new Date('2026-10-01T16:00:00Z');
+
+  it('a live call has not ended', () => {
+    for (const status of ['queued', 'ringing', 'in-progress']) {
+      expect(callEndFrom({ status, startTime: start, endTime: null, duration: null })).toEqual({ ended: false });
+    }
+  });
+
+  it("an ended call ends at Twilio's endTime", () => {
+    const end = new Date('2026-10-01T17:30:00Z');
+    expect(callEndFrom({ status: 'completed', startTime: start, endTime: end, duration: '5400' }))
+      .toEqual({ ended: true, endedAt: end });
+  });
+
+  it('without an endTime, at start + duration', () => {
+    expect(callEndFrom({ status: 'completed', startTime: start, endTime: null, duration: '600' }))
+      .toEqual({ ended: true, endedAt: new Date('2026-10-01T16:10:00Z') });
+  });
+
+  it('with neither, ended at an unknown time', () => {
+    expect(callEndFrom({ status: 'failed', startTime: null, endTime: null, duration: null }))
+      .toEqual({ ended: true, endedAt: null });
+  });
+});
+
+describe('TwilioDialerTelephony.callEnd', () => {
+  it('fetches the call by sid and reads its end', async () => {
+    const end = new Date('2026-10-01T17:30:00Z');
+    const fetched: string[] = [];
+    const client = {
+      calls: Object.assign(
+        (sid: string) => ({
+          update: async () => ({}),
+          recordings: { create: async () => ({ sid: 'RE1' }) },
+          fetch: async () => {
+            fetched.push(sid);
+            return { status: 'completed', startTime: null, endTime: end, duration: '60' };
+          },
+        }),
+        { create: async () => ({ sid: 'CA1' }) },
+      ),
+      conferences: Object.assign(() => ({ update: async () => ({}), participants: { list: async () => [] } }), { list: async () => [] }),
+    } as unknown as TwilioDialerClient;
+    const t = new TwilioDialerTelephony(() => client);
+    await expect(t.callEnd('CA0123456789abcdef0123456789abcdef')).resolves.toEqual({ ended: true, endedAt: end });
+    expect(fetched).toEqual(['CA0123456789abcdef0123456789abcdef']);
   });
 });

@@ -26,6 +26,7 @@ import { maybeStartDialerConnectLoop } from './salesforce/dialer-connect-worker.
 import { maybeStartInboundTextLoop } from './sms/inbound-text-worker.js';
 import { startReputationWorker } from './reputation/worker.js';
 import { startDirectoryLoop } from './mobile/directory-build.js';
+import { startRepLegReconcileLoop } from './dialer/rep-leg-reconcile.js';
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
@@ -138,6 +139,8 @@ async function main(): Promise<void> {
   const dialerConnectTimer = maybeStartDialerConnectLoop(cfg);
   const reputationTimer = startReputationWorker(app.log, cfg.REPUTATION_WORKER_INTERVAL_MS);
   const directoryTimer = startDirectoryLoop(cfg.DIRECTORY_REBUILD_INTERVAL_MS);
+  // Talk-time report: close rep legs whose end callback never came (Twilio's own record).
+  const repLegTimer = startRepLegReconcileLoop();
 
   const close = async () => {
     clearInterval(syncTimer);
@@ -148,6 +151,7 @@ async function main(): Promise<void> {
     if (dialerConnectTimer) clearInterval(dialerConnectTimer);
     clearInterval(reputationTimer);
     clearInterval(directoryTimer);
+    clearInterval(repLegTimer);
     await app.close();
   };
   process.on('SIGTERM', close);

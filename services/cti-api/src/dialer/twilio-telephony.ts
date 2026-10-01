@@ -24,11 +24,38 @@ import type { DialerTelephony } from './telephony-port.js';
  * real SDK's `CallListInstance` shape: callable to get a call's context, plus
  * a `.create()` method.
  */
+/** The fields of Twilio's call record the rep-leg reconcile reads. */
+export interface TwilioCallRecord {
+  status: string;
+  startTime: Date | null;
+  endTime: Date | null;
+  duration: string | null;
+}
+
+/** Has a call ended, and when (null = ended, time unknown). */
+export type CallEnd = { ended: false } | { ended: true; endedAt: Date | null };
+
+const ENDED_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answer', 'canceled']);
+
+/** PURE: Twilio's record of a call → has it ended, and when. endTime first,
+ *  else startTime + duration, else unknown. */
+export function callEndFrom(call: TwilioCallRecord): CallEnd {
+  if (!ENDED_CALL_STATUSES.has(call.status)) return { ended: false };
+  if (call.endTime) return { ended: true, endedAt: call.endTime };
+  const seconds = call.duration == null ? NaN : Number(call.duration);
+  if (call.startTime && Number.isFinite(seconds)) {
+    return { ended: true, endedAt: new Date(call.startTime.getTime() + seconds * 1000) };
+  }
+  return { ended: true, endedAt: null };
+}
+
 export interface TwilioDialerClient {
   calls: ((callSid: string) => {
     update(args: Record<string, unknown>): Promise<unknown>;
     /** Call Recordings API — start a recording on an in-progress call. */
     recordings: { create(args: Record<string, unknown>): Promise<{ sid: string }> };
+    /** The call's own record — the rep-leg reconcile reads its end. */
+    fetch(): Promise<TwilioCallRecord>;
   }) & {
     create(args: Record<string, unknown>): Promise<{ sid: string }>;
   };
@@ -255,6 +282,12 @@ export class TwilioDialerTelephony implements DialerTelephony {
   async hangup(callId: string): Promise<void> {
     const client = this.clientFactory();
     await client.calls(callId).update({ status: 'completed' } as never);
+  }
+
+  /** Twilio's own record of a call's end, for a rep leg whose end callback we
+   *  never heard (dialer/rep-leg-reconcile.ts). Throws on a Twilio error. */
+  async callEnd(callSid: string): Promise<CallEnd> {
+    return callEndFrom(await this.clientFactory().calls(callSid).fetch());
   }
 
   /**
