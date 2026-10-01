@@ -21,6 +21,23 @@ import { verifyRecordingSig } from '../telephony/recording-links.js';
 // with the write side so the two checks can't drift.
 import { UUID_RE, TWILIO_RECORDING_MEDIA_RE } from '../telephony/webhooks.js';
 
+type Db = ReturnType<typeof getDb>;
+
+/**
+ * The Twilio media URL behind a playback id. Click-to-dial calls (`calls`) and
+ * bridged power-dial calls (`dialer_connects`) share one link format: both ids
+ * are UUIDs, so they cannot collide, and the HMAC binds the link to its id.
+ */
+export async function resolveRecordingUrl(db: Db, id: string): Promise<string | null> {
+  const call = await db.query.calls.findFirst({ where: eq(schema.calls.id, id), columns: { recordingUrl: true } });
+  if (call) return call.recordingUrl ?? null;
+  const connect = await db.query.dialerConnects.findFirst({
+    where: eq(schema.dialerConnects.id, id),
+    columns: { recordingUrl: true },
+  });
+  return connect?.recordingUrl ?? null;
+}
+
 export async function registerRecordingRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
 
@@ -32,9 +49,8 @@ export async function registerRecordingRoutes(app: FastifyInstance): Promise<voi
       return reply.code(404).send('Not found');
     }
 
-    const db = getDb();
-    const call = await db.query.calls.findFirst({ where: eq(schema.calls.id, callId) });
-    if (!call || !call.recordingUrl || !TWILIO_RECORDING_MEDIA_RE.test(call.recordingUrl)) {
+    const recordingUrl = await resolveRecordingUrl(getDb(), callId);
+    if (!recordingUrl || !TWILIO_RECORDING_MEDIA_RE.test(recordingUrl)) {
       return reply.code(404).send('Not found');
     }
     if (!cfg.TWILIO_ACCOUNT_SID || !cfg.TWILIO_AUTH_TOKEN) {
@@ -49,7 +65,7 @@ export async function registerRecordingRoutes(app: FastifyInstance): Promise<voi
     reply.raw.on('close', () => ac.abort());
     let upstream: Response;
     try {
-      upstream = await fetch(call.recordingUrl, {
+      upstream = await fetch(recordingUrl, {
         headers: { authorization: `Basic ${auth}`, ...(range ? { range } : {}) },
         signal: ac.signal,
       });

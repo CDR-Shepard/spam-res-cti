@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { endConnectOnTerminalStatus, onDialerAmd, onDialerStatus } from './dialer.js';
+import { endConnectOnTerminalStatus, onDialerAmd, onDialerRecording, onDialerStatus } from './dialer.js';
 import type { EngineDeps } from '../dialer/engine.js';
 
 // Minimal fake EngineDeps: onDialerAmd/onDialerStatus only ever touch
@@ -176,5 +176,38 @@ describe('endConnectOnTerminalStatus — the bridged-call hang-up stamp', () => 
     ).resolves.toBeUndefined();
     expect(error).toHaveBeenCalledWith('[dialer] connect end stamp failed', { err: 'db down' });
     error.mockRestore();
+  });
+});
+
+describe('onDialerRecording — a finished power-dial recording', () => {
+  const SID = 'CA' + 'c'.repeat(32);
+  const CONNECT = '11111111-2222-4333-8444-555555555555';
+  const MEDIA = 'https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE123';
+  const AT = new Date('2026-10-01T18:02:10Z');
+  const done = { CallSid: SID, RecordingStatus: 'completed', RecordingUrl: MEDIA };
+
+  it('stores the .mp3 media URL against our row id AND the call sid', async () => {
+    const store = vi.fn(async () => [{ id: CONNECT }]);
+    expect(await onDialerRecording(done, { connectId: CONNECT }, store, AT)).toBe('stored');
+    expect(store).toHaveBeenCalledWith(CONNECT, SID, `${MEDIA}.mp3`, AT);
+  });
+
+  it('a row id whose call sid does not match is a mismatch — nothing is repointed', async () => {
+    expect(await onDialerRecording(done, { connectId: CONNECT }, vi.fn(async () => []), AT)).toBe('mismatch');
+  });
+
+  it('ignores a bad row id, a bad call sid, a not-completed status (absent / in-progress), or a non-Twilio URL', async () => {
+    const store = vi.fn(async () => [{ id: CONNECT }]);
+    const cases: Array<[Record<string, string>, { connectId?: string }]> = [
+      [done, {}],
+      [done, { connectId: 'not-a-uuid' }],
+      [{ ...done, CallSid: 'XX1' }, { connectId: CONNECT }],
+      [{ ...done, RecordingStatus: 'absent' }, { connectId: CONNECT }],
+      [{ ...done, RecordingStatus: 'in-progress' }, { connectId: CONNECT }],
+      [{ ...done, RecordingUrl: 'https://evil.example/x' }, { connectId: CONNECT }],
+      [{ CallSid: SID, RecordingStatus: 'completed' }, { connectId: CONNECT }],
+    ];
+    for (const [body, query] of cases) expect(await onDialerRecording(body, query, store, AT)).toBe('ignored');
+    expect(store).not.toHaveBeenCalled();
   });
 });

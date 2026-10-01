@@ -31,8 +31,9 @@ import { getDb, schema } from '@cti/db';
 import { MAX_RUN_RECORDS, type DialerRunSettings } from '@cti/contracts';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
-import { signedCallbackUrl, TWILIO_CALL_SID_RE } from '../telephony/webhooks.js';
-import { stampConnectEnded } from '../dialer/connect-log.js';
+import { signedCallbackUrl, TWILIO_CALL_SID_RE, TWILIO_RECORDING_MEDIA_RE, UUID_RE } from '../telephony/webhooks.js';
+import { stampConnectEnded, storeConnectRecording } from '../dialer/connect-log.js';
+import { DIALER_RECORDING_PATH } from '../dialer/twilio-telephony.js';
 import { createDialerSession } from '../dialer/create-session.js';
 import { workedRecentlySafe } from '../dialer/already-worked.js';
 import { blockedTargetsSafe } from '../dialer/consent-check.js';
@@ -217,6 +218,29 @@ export async function endConnectOnTerminalStatus(
   } catch (err) {
     console.error('[dialer] connect end stamp failed', { err: (err as Error).message });
   }
+}
+
+/**
+ * A finished power-dial recording (TwilioDialerTelephony#startRecording names
+ * this route). Twilio signs the full URL including `?connectId=`, checked by
+ * the route before this runs. The row id is public — it is in the playback
+ * link — so the store matches the CallSid too. Only `completed` with a Twilio
+ * media URL is stored; the worker attaches the link to the Task.
+ */
+export async function onDialerRecording(
+  body: Record<string, string>,
+  query: { connectId?: string },
+  store: (connectId: string, callSid: string, recordingUrl: string, at: Date) => Promise<unknown[]>,
+  now: Date,
+): Promise<'stored' | 'ignored' | 'mismatch'> {
+  const connectId = query.connectId;
+  if (!connectId || !UUID_RE.test(connectId)) return 'ignored';
+  const callSid = body.CallSid;
+  if (!callSid || !TWILIO_CALL_SID_RE.test(callSid)) return 'ignored';
+  if (body.RecordingStatus !== 'completed') return 'ignored';
+  if (!body.RecordingUrl || !TWILIO_RECORDING_MEDIA_RE.test(body.RecordingUrl)) return 'ignored';
+  const rows = await store(connectId, callSid, `${body.RecordingUrl}.mp3`, now);
+  return rows.length > 0 ? 'stored' : 'mismatch';
 }
 
 /** Session by id, scoped to the caller — never leaks another rep's session. */
@@ -637,6 +661,21 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     } finally {
       await endConnectOnTerminalStatus(body, (callSid, at) => stampConnectEnded(getDb(), callSid, at), new Date());
     }
+    return reply.type('text/xml').send(TWIML_EMPTY);
+  });
+
+  app.post(DIALER_RECORDING_PATH, async (req, reply) => {
+    if (!validTwilioSignature(req)) {
+      return reply.code(403).type('text/xml').send('<Response><Reject/></Response>');
+    }
+    const query = req.query as { connectId?: string };
+    const outcome = await onDialerRecording(
+      req.body as Record<string, string>,
+      query,
+      (connectId, callSid, url, at) => storeConnectRecording(getDb(), connectId, callSid, url, at),
+      new Date(),
+    );
+    if (outcome === 'mismatch') req.log.warn({ connectId: query.connectId }, 'dialer_recording_callsid_mismatch');
     return reply.type('text/xml').send(TWIML_EMPTY);
   });
 }
