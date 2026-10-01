@@ -58,6 +58,7 @@ export type {
   CallerDirectoryEntry,
   CallerDirectoryVersion,
   CampaignConfig,
+  DialerConnectRecordingState,
   DialerHandoff,
   FollowupRolloverJob,
   InboundMessage,
