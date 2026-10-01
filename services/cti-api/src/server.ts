@@ -9,6 +9,7 @@ import { registerFirewallRoutes } from './routes/firewall.js';
 import { registerCallRoutes } from './routes/calls.js';
 import { registerTelephonyRoutes } from './routes/telephony.js';
 import { registerAdminRoutes } from './routes/admin.js';
+import { registerAdminTalkTimeRoutes } from './routes/admin-talk-time.js';
 import { registerCtiRoutes } from './routes/cti.js';
 import { registerInboundRoutes } from './routes/inbound.js';
 import { registerInboundSmsRoutes } from './routes/inbound-sms.js';
@@ -112,6 +113,7 @@ async function main(): Promise<void> {
   await registerCallRoutes(app);
   await registerTelephonyRoutes(app);
   await registerAdminRoutes(app);
+  await registerAdminTalkTimeRoutes(app);
   await registerCtiResetRoutes(app);
   await registerCtiRoutes(app);
   await registerInboundRoutes(app);
