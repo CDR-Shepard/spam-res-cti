@@ -94,21 +94,25 @@ One row per rep conference leg. FK-free (like `dialer_dial_attempts`).
 | `call_sid` text, FULL unique index | the rep leg; bare `ON CONFLICT DO NOTHING` |
 | `joined_at` | stamped by the join (the voice route's dialer-conference branch, where `stampRepCallSid` already runs) |
 | `ended_at` | null while open |
-| `end_source` | `rep_left` (rejoin route saw `CallStatus=completed`), `run_end` (the engine hung the leg up — `releaseRepConference`), `reconciled` (fetched from Twilio) |
+| `end_source` | `rep_left` (the leg's own final status callback, or the rejoin route saw `CallStatus=completed`), `run_end` (the server ended it — `releaseRepConference`, or the rejoin route answered Hangup), `replaced` (a newer leg joined the same run), `reconciled` (Twilio's call record), `fallback` (closed by rule) |
 | `created_at`, `updated_at` | |
 
 - **Join:** the voice route inserts the row where it stamps
   `dialer_sessions.rep_call_sid` (best-effort; a failure never blocks the join).
-- **Leave:** stamped once (`ended_at is null` guard) from (a) the rejoin route
-  when Twilio reports the leg `completed`, and (b) the engine's
-  `releaseRepConference`, which ends the leg over REST — no further TwiML runs,
-  so the rejoin route never hears it.
-- **Reconcile:** a leg still open after its run is no longer `active`/`paused`,
-  or open longer than 12 h, gets its true end from Twilio
-  (`calls(sid).fetch()` → `startTime + duration`), `end_source='reconciled'`.
-  Runs in an existing loop (the dialer-connect worker's tick), capped per tick.
-  A fetch that fails leaves the row for the next tick; after 48 h it is closed
-  at `joined_at + 12 h` and logged, so the report never shows an endless leg.
+- **Leave:** stamped once (`ended_at is null` guard) by whichever hears it
+  first: (a) the leg's own final status callback on `/telephony/twilio/status`
+  (it matches no `calls` row); (b) the rejoin route — `CallStatus=completed`
+  (`rep_left`) or a Hangup it answers (`run_end`); (c) the engine's
+  `releaseRepConference`, which ends the leg over REST (`run_end`); (d) a newer
+  leg joining the same run (`replaced`, at the new leg's join).
+- **Reconcile:** its own loop (`dialer/rep-leg-reconcile.ts`), every 5 min, up
+  to 25 open legs oldest first: Twilio's call record (`calls(sid).fetch()` →
+  `endTime`, else `startTime + duration`) closes an ended leg,
+  `end_source='reconciled'`. A fetch that fails leaves the row for the next
+  tick; after 48 h it is closed at `joined_at + 12 h` (`fallback`) and logged,
+  so the report never shows an endless leg.
+- **Counted once:** a rep's overlapping legs (an old leg lingering beside its
+  replacement) are merged before they are summed.
 - **Open legs in the report:** an open leg counts up to `now` (a rep on the
   dialer right now shows live time).
 
@@ -125,7 +129,7 @@ most 92 days (400 otherwise). Response:
   "reps": [
     {
       "userId": "…", "name": "Garrett Martorello",
-      "talkSeconds": 13240,
+      "talkSeconds": 13240, "connectedCalls": 72,
       "bySource": { "outbound": { "calls": 41, "seconds": 6100 },
                     "powerDial": { "calls": 22, "seconds": 5400 },
                     "inbound": { "calls": 9, "seconds": 1740 } },
@@ -137,8 +141,8 @@ most 92 days (400 otherwise). Response:
 }
 ```
 
-Every rep in the org with any activity in the range appears; reps with none are
-omitted. Sorted by talk time, highest first.
+Every rep in the org with any activity in the range appears (a user id with no
+user row reads "Unknown user"); reps with none are omitted. Sorted by talk time, highest first.
 
 **UI (cti-web):** an admin-only **Talk time** screen in the softphone's More
 menu, next to Team. From/To date inputs (default today/today) with Today /
