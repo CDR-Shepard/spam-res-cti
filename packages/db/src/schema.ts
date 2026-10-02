@@ -1065,6 +1065,37 @@ export const dialerRepLegs = pgTable(
 );
 export type DialerRepLeg = typeof dialerRepLegs.$inferSelect;
 
+// =============================================================================
+// dialer_time_tasks — the "Power Dialer Time" Task per (rep, Pacific day)
+// (migration 0049; salesforce/dialer-time-worker.ts).
+// =============================================================================
+
+export const dialerTimeTasks = pgTable(
+  'dialer_time_tasks',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    /** YYYY-MM-DD, the org's Pacific day. */
+    day: text('day').notNull(),
+    /** NULL until created/adopted; cleared when Salesforce says it was deleted. */
+    salesforceTaskId: text('salesforce_task_id'),
+    /** The CallDurationInSeconds last written; NULL until then. */
+    syncedSeconds: integer('synced_seconds'),
+    attempts: integer('attempts').default(0).notNull(),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).defaultNow().notNull(),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    // FULL, never partial: dialer-time-store.ts's bare ON CONFLICT DO NOTHING arbitrates on it.
+    userDayUnique: uniqueIndex('dialer_time_tasks_user_day_unique').on(t.userId, t.day),
+  }),
+);
+
+export type DialerTimeTask = typeof dialerTimeTasks.$inferSelect;
+
 /**
  * Sticky caller ID per (rep, lead) — the DID a rep last called a given recipient
  * (lead) from. Future calls to the same lead reuse this number (when the rep

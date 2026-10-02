@@ -63,6 +63,7 @@ export type {
   DialerHandoff,
   DialerRepLeg,
   DialerRepLegEndSource,
+  DialerTimeTask,
   FollowupRolloverJob,
   InboundMessage,
   InboundMessageStatus,
