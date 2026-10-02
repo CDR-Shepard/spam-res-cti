@@ -29,9 +29,11 @@ they dial and re-checks the last 3 days. Design:
 
 ## Duplicates
 
-Two Tasks for the same rep and day should never happen (the worker claims a
-row before writing — see the design doc's I1 fix), but if one somehow shows
-up:
+Two Tasks for the same rep and day should never happen — the worker claims
+each row with an atomic lease before any Salesforce write (so two API
+instances overlapping during a deploy never write the same rep and day), and
+it looks up the rep's existing Task before creating one — but if one somehow
+shows up:
 
 ```sql
 SELECT OwnerId, ActivityDate, COUNT(Id) c FROM Task
@@ -65,8 +67,8 @@ from dialer_time_tasks where last_error = 'reconnect Salesforce' order by next_a
 ```
 
 A row with no `salesforce_task_id` and nothing in `last_error` → the rep has
-no Salesforce connection, or their sign-in expired (they reconnect; it
-catches up on the next tick).
+no Salesforce connection (once they connect, it catches up on the next
+tick).
 
 `last_error = 'reconnect Salesforce'` → the rep's Salesforce sign-in expired
 (an auth error). `attempts` is NOT bumped for this — it's not a failure, it's
@@ -79,10 +81,21 @@ a wait for the rep to reconnect — and the row retries every 15 minutes
    the worker from recreating what you're about to delete).
 2. Find the Tasks in Salesforce by `Subject = 'Power Dialer Time'` (or
    `CTI_Origin__c = 'Power Dialer Time'`) and delete them.
-3. Re-enabling (`DIALER_TIME_TASKS=on`) recreates them on its own: the
-   worker's "no Task id yet" (missing) path looks up-or-creates a Task for
-   every (rep, day) in the last 3 Pacific days on its very next tick. Nothing
-   needs to be restored by hand.
+3. Re-enabling (`DIALER_TIME_TASKS=on`) does NOT bring deleted Tasks back on
+   its own for a day whose number has stopped changing: the worker writes
+   only when the computed seconds differ from `synced_seconds`, so it never
+   touches Salesforce for that day again. To recreate them, BEFORE
+   re-enabling reset the last 3 days' rows (a production write — run it
+   deliberately, without the read-only `PGOPTIONS`):
+
+   ```sql
+   update dialer_time_tasks
+   set salesforce_task_id = null, synced_seconds = null, next_attempt_at = now(), updated_at = now()
+   where day >= to_char((now() at time zone 'America/Los_Angeles') - interval '2 days', 'YYYY-MM-DD');
+   ```
+
+   The next tick then looks up (finds nothing) and creates each Task again.
+   Days older than the 3-day window are not recreated.
 
 ## Not covered
 

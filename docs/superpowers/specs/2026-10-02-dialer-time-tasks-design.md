@@ -75,8 +75,14 @@ Same shape as the other scan workers (deps injection, single-flight
   - **Task id known:** PATCH `CallDurationInSeconds` only, then stamp
     `synced_seconds`. A 404 (Task deleted in Salesforce) clears the id so the
     next tick recreates it.
-- **Errors:** `SalesforceUnauthorizedError` (rep must reconnect) → skip, retry
-  next tick, does not count. Any other error → `attempts + 1`,
+- **Claim first:** before any Salesforce write the worker claims the row with
+  one atomic `UPDATE … SET next_attempt_at = now + 4 min WHERE id = … AND
+  next_attempt_at <= now RETURNING …` (`CLAIM_LEASE_MS`), so two API instances
+  overlapping during a deploy never write the same (rep, day); success
+  releases the lease (`next_attempt_at = now`).
+- **Errors:** `SalesforceUnauthorizedError` (rep must reconnect) →
+  `last_error = 'reconnect Salesforce'`, `next_attempt_at = now + 15 min`
+  (`AUTH_RETRY_MS`), `attempts` unchanged. Any other error → `attempts + 1`,
   `next_attempt_at = now + backoff` (5 m, 15 m, 1 h, 3 h, 6 h, then 6 h),
   `last_error` = full text (DB only). Never gives up: the day's number must
   converge. Logs carry ids and Salesforce `errorCode`s only (the existing
@@ -129,7 +135,8 @@ counters, reputation.
   duration, marker) and the marker-rejected retry; the PATCH; the lookup SOQL
   (escaped, exact filters).
 - Pure diff: which (rep, day) pairs need a write — missing row, changed
-  seconds, zero seconds skipped, backoff not due skipped.
+  seconds, no create for zero seconds, an existing Task corrected down to 0,
+  backoff not due skipped.
 - Worker: create → stamp; adopt an existing Task; PATCH on change; 404 →
   id cleared; auth error not counted; other error backs off; no connection
   skipped; kill switch.

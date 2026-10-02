@@ -248,7 +248,7 @@ describe('runDialerTimeTick', () => {
   it('spans the window correctly across a 25-hour Pacific day (M7, DST fall-back)', async () => {
     const { store } = memoryStore();
     // 2026-11-01 is the fall-back day: Oct 30 is still PDT, Nov 2 is already PST.
-    const fallBack = new Date('2026-11-01T20:00:00Z'); // 13:00 PDT Nov 1
+    const fallBack = new Date('2026-11-01T20:00:00Z'); // 12:00 PST Nov 1
     const d = deps(store, {}, () => fallBack);
     await runDialerTimeTick(d);
     expect(store.legWindows).toEqual([
