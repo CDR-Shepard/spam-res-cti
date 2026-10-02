@@ -43,11 +43,21 @@ const rowColumns = {
   nextAttemptAt: t.nextAttemptAt,
 };
 
+/** The leg scan has no usable index otherwise (final review M4): the only
+ *  index is (org_id, joined_at), and `joined_at < end` alone matches every
+ *  leg in history. Bounded below by 3 days before the window starts — safe
+ *  because dialer/rep-leg-reconcile.ts GIVE_UP_AFTER_MS (48 h) closes any
+ *  open leg by FALLBACK_LEG_MS (joinedAt + 12 h), so no leg relevant to the
+ *  window can have started earlier than that. A computed Date, not SQL
+ *  interval text, to keep this render test simple. */
+const LEG_LOOKBACK_MS = 3 * 24 * 60 * 60_000;
+
 export function windowLegsStatement(db: Db, start: Date, end: Date) {
+  const lowerBound = new Date(start.getTime() - LEG_LOOKBACK_MS);
   return db
     .select({ orgId: l.orgId, userId: l.userId, joinedAt: l.joinedAt, endedAt: l.endedAt })
     .from(l)
-    .where(and(lt(l.joinedAt, end), or(isNull(l.endedAt), gt(l.endedAt, start))));
+    .where(and(gt(l.joinedAt, lowerBound), lt(l.joinedAt, end), or(isNull(l.endedAt), gt(l.endedAt, start))));
 }
 
 export function rowsForDaysStatement(db: Db, days: readonly string[]) {

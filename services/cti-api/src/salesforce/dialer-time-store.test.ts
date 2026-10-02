@@ -13,14 +13,15 @@ import { claimRowStatement, insertRowStatement, rowsForDaysStatement, windowLegs
 const db = drizzle(new Pool({ connectionString: 'postgres://unused:unused@127.0.0.1:1/unused' }), { schema });
 
 describe('dialer-time-store SQL', () => {
-  it('loads every leg that overlaps the window, open legs included', () => {
+  it('loads every leg that overlaps the window, open legs included, bounded below by 3 days (M4)', () => {
     const start = new Date('2026-09-30T07:00:00Z');
     const end = new Date('2026-10-03T07:00:00Z');
+    const lowerBound = new Date('2026-09-27T07:00:00Z'); // start - 3 days
     const q = windowLegsStatement(db, start, end).toSQL();
     expect(q.sql).toBe(
-      'select "org_id", "user_id", "joined_at", "ended_at" from "dialer_rep_legs" where ("dialer_rep_legs"."joined_at" < $1 and ("dialer_rep_legs"."ended_at" is null or "dialer_rep_legs"."ended_at" > $2))',
+      'select "org_id", "user_id", "joined_at", "ended_at" from "dialer_rep_legs" where ("dialer_rep_legs"."joined_at" > $1 and "dialer_rep_legs"."joined_at" < $2 and ("dialer_rep_legs"."ended_at" is null or "dialer_rep_legs"."ended_at" > $3))',
     );
-    expect(q.params).toEqual([end.toISOString(), start.toISOString()]);
+    expect(q.params).toEqual([lowerBound.toISOString(), end.toISOString(), start.toISOString()]);
   });
 
   it('loads the rows for exactly the window days', () => {
