@@ -244,6 +244,17 @@ describe('runDialerTimeTick', () => {
     await runDialerTimeTick(d);
     expect(store.legWindows).toEqual([{ start: new Date('2026-10-01T07:00:00.000Z'), end: new Date('2026-10-04T07:00:00.000Z') }]);
   });
+
+  it('spans the window correctly across a 25-hour Pacific day (M7, DST fall-back)', async () => {
+    const { store } = memoryStore();
+    // 2026-11-01 is the fall-back day: Oct 30 is still PDT, Nov 2 is already PST.
+    const fallBack = new Date('2026-11-01T20:00:00Z'); // 13:00 PDT Nov 1
+    const d = deps(store, {}, () => fallBack);
+    await runDialerTimeTick(d);
+    expect(store.legWindows).toEqual([
+      { start: new Date('2026-10-30T07:00:00.000Z'), end: new Date('2026-11-02T08:00:00.000Z') },
+    ]);
+  });
 });
 
 describe('maybeStartDialerTimeLoop', () => {
