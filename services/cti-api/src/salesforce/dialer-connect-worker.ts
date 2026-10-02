@@ -32,6 +32,8 @@ import { createCallTask, updateCallTask } from './client.js';
 import { fetchOwnership, mayCreateTaskOn } from './ownership.js';
 import { fetchRecordName } from './sync.js';
 import { isSalesforceAuthError, withTimeout } from './followup-worker.js';
+import { errorText, sfErrorSummary, unexpectedErrorSummary } from './error-summary.js';
+export { errorText, sfErrorSummary, unexpectedErrorSummary } from './error-summary.js';
 import { buildRecordingPublicUrl, type RecordingLinkConfig } from '../telephony/recording-links.js';
 import type { AppConfig } from '../config.js';
 import { loadConfig } from '../config.js';
@@ -64,50 +66,6 @@ export interface DialerConnectDeps {
     fetchOwnership: typeof fetchOwnership;
     fetchRecordName: typeof fetchRecordName;
   };
-}
-
-export function errorText(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err)).slice(0, 500);
-}
-
-const SF_ERROR_FALLBACK = 'Salesforce error (see last_error)';
-
-/**
- * Console-safe summary of a Salesforce error (M3, final review, THIS worker
- * only — the sibling workers' identical pattern is a separate ticket).
- * `errorText()` embeds client.ts's raw `JSON.stringify(res.json)`, and
- * Salesforce echoes field VALUES back on a few error codes — notably
- * STRING_TOO_LONG on Subject, which here contains the call's formatted phone
- * number. Logs get only the Salesforce errorCode(s) (and an HTTP status, when
- * the message happens to carry one) — never the raw body. `last_error` keeps
- * the full text via `errorText()` for hand repair; nothing about that changes.
- */
-export function sfErrorSummary(err: unknown): string {
-  const message = errorText(err);
-  // Only "(404): " — a status always precedes a colon in this codebase's error
-  // messages (client.ts, followup-worker.ts). Without the colon, a phone
-  // number's area code — e.g. "(619) 555-9999" — would misread as a status.
-  const status = message.match(/\((\d{3})\):/)?.[1];
-  const codes = [...new Set([...message.matchAll(/"errorCode"\s*:\s*"([A-Za-z_]+)"/g)].map((m) => m[1]))];
-  const parts: string[] = [];
-  if (status) parts.push(`status=${status}`);
-  if (codes.length) parts.push(`errorCodes=${codes.join(',')}`);
-  return parts.length ? parts.join(' ') : SF_ERROR_FALLBACK;
-}
-
-/**
- * guarded()'s catch-all sees database errors too, and nothing wrote
- * `last_error` on that path — so no pointer to it. A Postgres error is named by
- * its SQLSTATE (its message can quote a value, e.g. invalid input syntax); a
- * Salesforce-shaped error keeps its errorCode summary; anything else, only its
- * class. Never a message on the console.
- */
-export function unexpectedErrorSummary(err: unknown): string {
-  const code = (err as { code?: unknown } | null)?.code;
-  if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return `pg=${code}`;
-  const sf = sfErrorSummary(err);
-  if (sf !== SF_ERROR_FALLBACK) return sf;
-  return err instanceof Error ? err.name : typeof err;
 }
 
 export function patchConnect(db: Db, id: string, patch: Partial<typeof c.$inferInsert>, now: Date) {
