@@ -6,12 +6,16 @@
  * Salesforce reports can sum it. dialer_time_tasks remembers the Task id and
  * the seconds last written; a write happens only when they differ.
  *
- * No duplicates: before a create, the rep's existing Task for that day is
- * looked up and adopted — so a crash between create and stamp, or a lost row,
- * is repaired on the next tick. A Task deleted in Salesforce is recreated.
- * Errors: a Salesforce auth error waits for the rep to reconnect (uncounted);
- * anything else backs off 5 m → 6 h and keeps trying (the day's number must
- * converge). Logs carry ids and error codes only.
+ * No duplicates: a row is claimed (THE CLAIM IS THE LEASE, like
+ * dialer-connect-worker.ts) before any Salesforce write, so two overlapping
+ * API instances during a deploy never both create the same (rep, day) Task.
+ * Before a create, the rep's existing Task for that day is also looked up and
+ * adopted — so a crash between create and stamp, or a lost row, is repaired
+ * on the next tick. A Task deleted in Salesforce is recreated.
+ * Errors: a Salesforce auth error waits AUTH_RETRY_MS for the rep to
+ * reconnect (uncounted, last_error marked); anything else backs off 5 m → 6 h
+ * and keeps trying (the day's number must converge). Logs carry ids and error
+ * codes only.
  *
  * Kill switch: DIALER_TIME_TASKS=off never starts the loop.
  * Design: docs/superpowers/specs/2026-10-02-dialer-time-tasks-design.md.
@@ -32,6 +36,10 @@ export const SF_TIMEOUT_MS = 30_000;
  *  next tick can retry a row whose lease holder died; longer than one sync's
  *  worst case (up to 3 Salesforce calls at SF_TIMEOUT_MS each). */
 export const CLAIM_LEASE_MS = 4 * 60_000;
+/** A disconnected rep's auth error waits this long before the next attempt,
+ *  uncounted — like dialer-connect-worker.ts's AUTH_RETRY_MS (final review M1). */
+export const AUTH_RETRY_MS = 15 * 60_000;
+const RECONNECT = 'reconnect Salesforce';
 export const LOG = '[dialer-time-worker]';
 
 export interface DialerTimeDeps {
@@ -93,7 +101,13 @@ async function syncOne(w: PlannedWrite, deps: DialerTimeDeps): Promise<boolean> 
     await deps.store.saveSynced(row.id, taskId, w.seconds, deps.now());
     return true;
   } catch (err) {
-    if (isSalesforceAuthError(err)) return false; // the rep reconnects; uncounted
+    if (isSalesforceAuthError(err)) {
+      // Leaves a trace and stops hammering the token refresh (final review
+      // M1): no bumped attempt count, a 15-minute wait, like the sibling's
+      // RECONNECT marker — the rep reconnecting is not a failure.
+      await deps.store.saveAuthWait(row.id, new Date(deps.now().getTime() + AUTH_RETRY_MS), RECONNECT, deps.now());
+      return false;
+    }
     const attempts = row.attempts + 1;
     const now = deps.now();
     await deps.store.saveFailure(row.id, attempts, new Date(now.getTime() + backoffMs(attempts)), errorText(err), now);

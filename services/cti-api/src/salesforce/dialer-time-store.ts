@@ -24,6 +24,10 @@ export interface DialerTimeStore {
   claimRow(id: string, now: Date, leaseMs: number): Promise<SyncedRow | null>;
   saveSynced(id: string, taskId: string, seconds: number, now: Date): Promise<void>;
   saveFailure(id: string, attempts: number, nextAttemptAt: Date, lastError: string, now: Date): Promise<void>;
+  /** An expired Salesforce sign-in (final review M1): waits `nextAttemptAt`
+   *  without bumping `attempts`, so a reconnect doesn't read as a failure and
+   *  the token refresh isn't hammered every tick until the rep reconnects. */
+  saveAuthWait(id: string, nextAttemptAt: Date, lastError: string, now: Date): Promise<void>;
   clearTaskId(id: string, now: Date): Promise<void>;
   sfUserIdFor(userId: string): Promise<string | null>;
 }
@@ -85,6 +89,10 @@ export function liveDialerTimeStore(db: Db): DialerTimeStore {
     },
     async saveFailure(id, attempts, nextAttemptAt, lastError, now) {
       await db.update(t).set({ attempts, nextAttemptAt, lastError, updatedAt: now }).where(eq(t.id, id));
+    },
+    async saveAuthWait(id, nextAttemptAt, lastError, now) {
+      // attempts untouched on purpose: a reconnect is not a failure.
+      await db.update(t).set({ nextAttemptAt, lastError, updatedAt: now }).where(eq(t.id, id));
     },
     async clearTaskId(id, now) {
       // Also releases the claim (I1): a deleted-in-Salesforce Task is not a

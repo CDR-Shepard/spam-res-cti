@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SalesforceUnauthorizedError } from './client.js';
 import type { DialerTimeStore } from './dialer-time-store.js';
 import type { SyncedRow, WindowLeg } from './dialer-time-plan.js';
-import { DIALER_TIME_INTERVAL_MS, maybeStartDialerTimeLoop, runDialerTimeTick, type DialerTimeDeps } from './dialer-time-worker.js';
+import { AUTH_RETRY_MS, DIALER_TIME_INTERVAL_MS, maybeStartDialerTimeLoop, runDialerTimeTick, type DialerTimeDeps } from './dialer-time-worker.js';
 
 const NOW = new Date('2026-10-02T17:00:00Z'); // 10:00 PDT
 const MIN = 60_000;
@@ -16,10 +16,12 @@ function memoryStore(init: { legs?: WindowLeg[]; rows?: SyncedRow[]; sfUserId?: 
   const store: DialerTimeStore & {
     rows: Map<string, SyncedRow>;
     failures: Array<{ id: string; attempts: number; next: Date; err: string }>;
+    authWaits: Array<{ id: string; next: Date; lastError: string }>;
     legWindows: Array<{ start: Date; end: Date }>;
   } = {
     rows,
     failures: [],
+    authWaits: [],
     legWindows,
     loadLegs: async (start, end) => {
       legWindows.push({ start, end });
@@ -51,6 +53,11 @@ function memoryStore(init: { legs?: WindowLeg[]; rows?: SyncedRow[]; sfUserId?: 
       store.failures.push({ id, attempts, next, err });
       const r = rows.get(id)!;
       rows.set(id, { ...r, attempts, nextAttemptAt: next });
+    },
+    async saveAuthWait(id, next, lastError) {
+      store.authWaits.push({ id, next, lastError });
+      const r = rows.get(id)!;
+      rows.set(id, { ...r, nextAttemptAt: next }); // attempts UNCHANGED — not a failure
     },
     async clearTaskId(id, now) {
       const r = rows.get(id)!;
@@ -179,11 +186,23 @@ describe('runDialerTimeTick', () => {
     expect(logged).not.toContain('555-9999');
   });
 
-  it('an auth error on the create path is skipped uncounted', async () => {
+  it('an auth error on the create path leaves a trace without counting an attempt (M1)', async () => {
     const { store } = memoryStore();
     const d = deps(store, { createDialerTimeTask: vi.fn(async () => { throw new SalesforceUnauthorizedError(); }) });
     await runDialerTimeTick(d);
     expect(store.failures).toEqual([]);
+    expect(store.authWaits).toEqual([{ id: 'row-g-2026-10-02', next: new Date(NOW.getTime() + AUTH_RETRY_MS), lastError: 'reconnect Salesforce' }]);
+    expect(store.rows.get('row-g-2026-10-02')?.attempts).toBe(0);
+  });
+
+  it('an auth error on the PATCH path also leaves a trace without counting an attempt (M1, M7)', async () => {
+    const r: SyncedRow = { id: 'r1', orgId: 'org1', userId: 'g', day: '2026-10-02', salesforceTaskId: '00TX', syncedSeconds: 1200, attempts: 0, nextAttemptAt: new Date(0) };
+    const { store } = memoryStore({ rows: [r] });
+    const d = deps(store, { updateDialerTimeTask: vi.fn(async () => { throw new SalesforceUnauthorizedError(); }) });
+    await runDialerTimeTick(d);
+    expect(store.failures).toEqual([]);
+    expect(store.authWaits).toEqual([{ id: 'r1', next: new Date(NOW.getTime() + AUTH_RETRY_MS), lastError: 'reconnect Salesforce' }]);
+    expect(store.rows.get('r1')?.attempts).toBe(0);
   });
 
   it('skips a rep with no Salesforce connection without creating anything', async () => {
