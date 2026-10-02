@@ -23,6 +23,7 @@ import { startSyncLoop } from './salesforce/sync.js';
 import { startFollowupLoop, startRetryNudgeLoop } from './salesforce/followup-worker.js';
 import { maybeStartNoAnswerChatterLoop } from './salesforce/no-answer-chatter-worker.js';
 import { maybeStartDialerConnectLoop } from './salesforce/dialer-connect-worker.js';
+import { maybeStartDialerTimeLoop } from './salesforce/dialer-time-worker.js';
 import { maybeStartInboundTextLoop } from './sms/inbound-text-worker.js';
 import { startReputationWorker } from './reputation/worker.js';
 import { startDirectoryLoop } from './mobile/directory-build.js';
@@ -137,6 +138,9 @@ async function main(): Promise<void> {
   // Bridged power-dial calls → one completed Call Task + recording link.
   // Null when DIALER_CONNECT_TASKS=off.
   const dialerConnectTimer = maybeStartDialerConnectLoop(cfg);
+  // Each rep's time on the power dialer → one "Power Dialer Time" Task per day.
+  // Null when DIALER_TIME_TASKS=off.
+  const dialerTimeTimer = maybeStartDialerTimeLoop(cfg);
   const reputationTimer = startReputationWorker(app.log, cfg.REPUTATION_WORKER_INTERVAL_MS);
   const directoryTimer = startDirectoryLoop(cfg.DIRECTORY_REBUILD_INTERVAL_MS);
   // Talk-time report: close rep legs whose end callback never came (Twilio's own record).
@@ -149,6 +153,7 @@ async function main(): Promise<void> {
     if (noAnswerChatterTimer) clearInterval(noAnswerChatterTimer);
     if (inboundTextTimer) clearInterval(inboundTextTimer);
     if (dialerConnectTimer) clearInterval(dialerConnectTimer);
+    if (dialerTimeTimer) clearInterval(dialerTimeTimer);
     clearInterval(reputationTimer);
     clearInterval(directoryTimer);
     clearInterval(repLegTimer);

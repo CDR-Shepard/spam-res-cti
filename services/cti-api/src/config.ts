@@ -172,6 +172,15 @@ const schema = z.object({
    * strict enum like NO_ANSWER_CHATTER.
    */
   DIALER_CONNECT_TASKS: z.enum(['on', 'off']).default('on'),
+
+  /**
+   * Kill switch for the daily "Power Dialer Time" Tasks
+   * (salesforce/dialer-time-worker.ts). `off` = the loop is never started: no
+   * Task is created or updated. dialer_rep_legs is still written, so turning
+   * it back on catches up the last 3 days. Default `on`; strict enum like
+   * NO_ANSWER_CHATTER.
+   */
+  DIALER_TIME_TASKS: z.enum(['on', 'off']).default('on'),
 });
 
 export type AppConfig = z.infer<typeof schema>;
