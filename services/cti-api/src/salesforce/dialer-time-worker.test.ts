@@ -12,10 +12,19 @@ const LEG: WindowLeg = { orgId: 'org1', userId: 'g', joinedAt: new Date('2026-10
 function memoryStore(init: { legs?: WindowLeg[]; rows?: SyncedRow[]; sfUserId?: string | null } = {}) {
   const rows = new Map<string, SyncedRow>((init.rows ?? []).map((r) => [r.id, { ...r }]));
   const calls: string[] = [];
-  const store: DialerTimeStore & { rows: Map<string, SyncedRow>; failures: Array<{ id: string; attempts: number; next: Date; err: string }> } = {
+  const legWindows: Array<{ start: Date; end: Date }> = [];
+  const store: DialerTimeStore & {
+    rows: Map<string, SyncedRow>;
+    failures: Array<{ id: string; attempts: number; next: Date; err: string }>;
+    legWindows: Array<{ start: Date; end: Date }>;
+  } = {
     rows,
     failures: [],
-    loadLegs: async () => init.legs ?? [LEG],
+    legWindows,
+    loadLegs: async (start, end) => {
+      legWindows.push({ start, end });
+      return init.legs ?? [LEG];
+    },
     loadRows: async (days) => [...rows.values()].filter((r) => days.includes(r.day)),
     async ensureRow(orgId, userId, day) {
       calls.push(`ensure ${userId} ${day}`);
@@ -25,9 +34,9 @@ function memoryStore(init: { legs?: WindowLeg[]; rows?: SyncedRow[]; sfUserId?: 
       rows.set(r.id, r);
       return r;
     },
-    async saveSynced(id, taskId, seconds) {
+    async saveSynced(id, taskId, seconds, now) {
       const r = rows.get(id)!;
-      rows.set(id, { ...r, salesforceTaskId: taskId, syncedSeconds: seconds, attempts: 0 });
+      rows.set(id, { ...r, salesforceTaskId: taskId, syncedSeconds: seconds, attempts: 0, nextAttemptAt: now });
     },
     async saveFailure(id, attempts, next, err) {
       store.failures.push({ id, attempts, next, err });
@@ -43,10 +52,10 @@ function memoryStore(init: { legs?: WindowLeg[]; rows?: SyncedRow[]; sfUserId?: 
   return { store, calls };
 }
 
-function deps(store: DialerTimeStore, sf: Partial<DialerTimeDeps['sf']> = {}): DialerTimeDeps {
+function deps(store: DialerTimeStore, sf: Partial<DialerTimeDeps['sf']> = {}, now: () => Date = () => NOW): DialerTimeDeps {
   return {
     store,
-    now: () => NOW,
+    now,
     sf: {
       createDialerTimeTask: vi.fn(async () => ({ taskId: '00TNEW' })),
       updateDialerTimeTask: vi.fn(async () => 'updated' as const),
@@ -75,6 +84,18 @@ describe('runDialerTimeTick', () => {
     expect(d.sf.createDialerTimeTask).not.toHaveBeenCalled();
     expect(d.sf.updateDialerTimeTask).toHaveBeenCalledWith('g', '00TOLD', 1800);
     expect(store.rows.get('row-g-2026-10-02')).toMatchObject({ salesforceTaskId: '00TOLD', syncedSeconds: 1800 });
+  });
+
+  it('creates a new Task when the adopted one is missing from Salesforce', async () => {
+    const { store } = memoryStore();
+    const d = deps(store, {
+      findDialerTimeTask: vi.fn(async () => '00TOLD'),
+      updateDialerTimeTask: vi.fn(async () => 'missing' as const),
+    });
+    await runDialerTimeTick(d);
+    expect(d.sf.updateDialerTimeTask).toHaveBeenCalledWith('g', '00TOLD', 1800);
+    expect(d.sf.createDialerTimeTask).toHaveBeenCalledWith('g', '2026-10-02', 1800);
+    expect(store.rows.get('row-g-2026-10-02')).toMatchObject({ salesforceTaskId: '00TNEW', syncedSeconds: 1800 });
   });
 
   it('PATCHes the known Task when the seconds changed, and does nothing when they did not', async () => {
@@ -139,6 +160,21 @@ describe('runDialerTimeTick', () => {
     const d = deps(store);
     await runDialerTimeTick(d);
     expect(d.sf.createDialerTimeTask).toHaveBeenCalledWith('j', '2026-10-02', 1800);
+  });
+
+  it('loads legs for the 3 Pacific days ending today', async () => {
+    const { store } = memoryStore();
+    const d = deps(store);
+    await runDialerTimeTick(d);
+    expect(store.legWindows).toEqual([{ start: new Date('2026-09-30T07:00:00.000Z'), end: new Date('2026-10-03T07:00:00.000Z') }]);
+  });
+
+  it('moves the leg window forward just after Pacific midnight', async () => {
+    const { store } = memoryStore();
+    const afterMidnight = new Date('2026-10-03T07:30:00Z'); // 00:30 PDT Oct 3
+    const d = deps(store, {}, () => afterMidnight);
+    await runDialerTimeTick(d);
+    expect(store.legWindows).toEqual([{ start: new Date('2026-10-01T07:00:00.000Z'), end: new Date('2026-10-04T07:00:00.000Z') }]);
   });
 });
 

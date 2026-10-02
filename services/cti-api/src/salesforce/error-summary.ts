@@ -12,14 +12,16 @@ export function errorText(err: unknown): string {
 const SF_ERROR_FALLBACK = 'Salesforce error (see last_error)';
 
 /**
- * Console-safe summary of a Salesforce error (M3, final review, THIS worker
- * only — the sibling workers' identical pattern is a separate ticket).
- * `errorText()` embeds client.ts's raw `JSON.stringify(res.json)`, and
- * Salesforce echoes field VALUES back on a few error codes — notably
- * STRING_TOO_LONG on Subject, which here contains the call's formatted phone
- * number. Logs get only the Salesforce errorCode(s) (and an HTTP status, when
- * the message happens to carry one) — never the raw body. `last_error` keeps
- * the full text via `errorText()` for hand repair; nothing about that changes.
+ * Console-safe summary of a Salesforce error (M3, final review). Shared by
+ * dialer-connect-worker.ts and dialer-time-worker.ts. `errorText()` embeds
+ * client.ts's raw `JSON.stringify(res.json)`, and Salesforce echoes field
+ * VALUES back on a few error codes — notably STRING_TOO_LONG on Subject,
+ * which here contains the call's formatted phone number. Logs get only the
+ * Salesforce errorCode(s) (and an HTTP status, when the message happens to
+ * carry one) — never the raw body. `last_error` keeps the full text via
+ * `errorText()` for hand repair; nothing about that changes. The other
+ * Salesforce workers (inbound-text-worker, followup-worker,
+ * no-answer-chatter) still log raw text — a separate ticket.
  */
 export function sfErrorSummary(err: unknown): string {
   const message = errorText(err);
