@@ -23,6 +23,7 @@ export interface DialerTimeStore {
 
 const rowColumns = {
   id: t.id,
+  orgId: t.orgId,
   userId: t.userId,
   day: t.day,
   salesforceTaskId: t.salesforceTaskId,

@@ -10,7 +10,7 @@ function leg(userId: string, joined: string, ended: string | null, orgId = 'org1
   return { orgId, userId, joinedAt: new Date(joined), endedAt: ended ? new Date(ended) : null };
 }
 function row(over: Partial<SyncedRow> & Pick<SyncedRow, 'userId' | 'day'>): SyncedRow {
-  return { id: `row-${over.userId}-${over.day}`, salesforceTaskId: '00TX', syncedSeconds: 0, attempts: 0, nextAttemptAt: new Date(0), ...over };
+  return { id: `row-${over.userId}-${over.day}`, orgId: 'org1', salesforceTaskId: '00TX', syncedSeconds: 0, attempts: 0, nextAttemptAt: new Date(0), ...over };
 }
 
 describe('windowDays', () => {
@@ -67,11 +67,43 @@ describe('planDialerTimeWrites', () => {
     ]);
   });
 
-  it('never plans a zero-second day, and keeps each rep with its own org', () => {
+  it('never creates for a zero-second day (no row, no Task id), even with other reps having real time', () => {
     const two = [leg('g', '2026-10-02T16:00:00Z', '2026-10-02T16:00:00Z'), leg('j', '2026-10-02T16:00:00Z', '2026-10-02T16:01:00Z', 'org2')];
     expect(planDialerTimeWrites({ legs: two, days: DAYS, now: NOW, rows: [] })).toEqual([
       { orgId: 'org2', userId: 'j', day: '2026-10-02', seconds: 60, row: null },
     ]);
+  });
+
+  it('corrects a synced Task back down to 0 when a later reconcile leaves that day at zero (I2)', () => {
+    // 'g' dialed for real on Oct 1, but Oct 2's leg was reconciled to zero length —
+    // a day that used to have real seconds synced to Salesforce must be corrected.
+    const legs = [leg('g', '2026-10-01T16:00:00Z', '2026-10-01T16:30:00Z'), leg('g', '2026-10-02T16:00:00Z', '2026-10-02T16:00:00Z')];
+    const r = row({ userId: 'g', day: '2026-10-02', salesforceTaskId: '00TX', syncedSeconds: 1800 });
+    expect(planDialerTimeWrites({ legs, days: DAYS, now: NOW, rows: [r] })).toEqual([
+      { orgId: 'org1', userId: 'g', day: '2026-10-01', seconds: 1800, row: null },
+      { orgId: 'org1', userId: 'g', day: '2026-10-02', seconds: 0, row: r },
+    ]);
+  });
+
+  it('never creates for 0: a corrected-to-zero row with no Task id yet is still skipped', () => {
+    const r = row({ userId: 'g', day: '2026-10-02', salesforceTaskId: null, syncedSeconds: null });
+    expect(planDialerTimeWrites({ legs: [], days: DAYS, now: NOW, rows: [r] })).toEqual([]);
+  });
+
+  it('corrects a synced Task to 0 for a rep with no legs left anywhere in the window (I2)', () => {
+    // The rep has no legs at all in the 3-day window any more (e.g. all reconciled
+    // away) — the row must still be found and corrected, not just skipped because
+    // the rep has dropped out of dialerSecondsByUserDay's output entirely.
+    const r = row({ userId: 'g', day: '2026-10-01', salesforceTaskId: '00TX', syncedSeconds: 900 });
+    expect(planDialerTimeWrites({ legs: [], days: DAYS, now: NOW, rows: [r] })).toEqual([
+      { orgId: 'org1', userId: 'g', day: '2026-10-01', seconds: 0, row: r },
+    ]);
+  });
+
+  it('does not correct to 0 when the row is already 0, or its backoff is not due', () => {
+    const synced = row({ userId: 'g', day: '2026-10-01', salesforceTaskId: '00TX', syncedSeconds: 0 });
+    const backedOff = row({ userId: 'j', day: '2026-10-01', salesforceTaskId: '00TY', syncedSeconds: 900, nextAttemptAt: new Date(NOW.getTime() + MIN) });
+    expect(planDialerTimeWrites({ legs: [], days: DAYS, now: NOW, rows: [synced, backedOff] })).toEqual([]);
   });
 });
 

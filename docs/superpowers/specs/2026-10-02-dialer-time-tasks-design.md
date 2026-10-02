@@ -60,9 +60,13 @@ Same shape as the other scan workers (deps injection, single-flight
   lands on the right day's Task.
 - **Per tick:** load legs overlapping the window (all orgs; `org_id`,
   `user_id`, `joined_at`, `ended_at`); compute seconds per (rep, day); load
-  the `dialer_time_tasks` rows for those days; for each (rep, day) with
-  seconds > 0 whose row is missing or whose `synced_seconds` differs, and
-  whose `next_attempt_at` is due:
+  the `dialer_time_tasks` rows for those days; for each (rep, day) whose
+  `next_attempt_at` is due: a Task is created only when seconds > 0 and the
+  row is missing or its `synced_seconds` differs; an existing Task (one with a
+  `salesforce_task_id`) is PATCHed whenever the computed number differs from
+  what was last synced, including down to 0 — a day can fall back to 0 after
+  the reconciler's 48 h fallback closes a leg, and Salesforce must converge to
+  match, never a CREATE for 0 seconds:
   - **No Task id yet:** first look for one already in Salesforce (SOQL as the
     rep: `Subject = 'Power Dialer Time' AND ActivityDate = <day> AND OwnerId =
     <rep's sf_user_id>`, LIMIT 1) and adopt it; otherwise create it. Then

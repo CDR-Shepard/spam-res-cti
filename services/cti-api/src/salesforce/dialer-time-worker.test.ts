@@ -30,7 +30,7 @@ function memoryStore(init: { legs?: WindowLeg[]; rows?: SyncedRow[]; sfUserId?: 
       calls.push(`ensure ${userId} ${day}`);
       const found = [...rows.values()].find((r) => r.userId === userId && r.day === day);
       if (found) return found;
-      const r: SyncedRow = { id: `row-${userId}-${day}`, userId, day, salesforceTaskId: null, syncedSeconds: null, attempts: 0, nextAttemptAt: new Date(0) };
+      const r: SyncedRow = { id: `row-${userId}-${day}`, orgId, userId, day, salesforceTaskId: null, syncedSeconds: null, attempts: 0, nextAttemptAt: new Date(0) };
       rows.set(r.id, r);
       return r;
     },
@@ -99,7 +99,7 @@ describe('runDialerTimeTick', () => {
   });
 
   it('PATCHes the known Task when the seconds changed, and does nothing when they did not', async () => {
-    const r: SyncedRow = { id: 'r1', userId: 'g', day: '2026-10-02', salesforceTaskId: '00TX', syncedSeconds: 1200, attempts: 0, nextAttemptAt: new Date(0) };
+    const r: SyncedRow = { id: 'r1', orgId: 'org1', userId: 'g', day: '2026-10-02', salesforceTaskId: '00TX', syncedSeconds: 1200, attempts: 0, nextAttemptAt: new Date(0) };
     const { store } = memoryStore({ rows: [r] });
     const d = deps(store);
     await runDialerTimeTick(d);
@@ -110,7 +110,7 @@ describe('runDialerTimeTick', () => {
   });
 
   it('clears the id when Salesforce says the Task is gone, and recreates it next tick', async () => {
-    const r: SyncedRow = { id: 'r1', userId: 'g', day: '2026-10-02', salesforceTaskId: '00TGONE', syncedSeconds: 1200, attempts: 0, nextAttemptAt: new Date(0) };
+    const r: SyncedRow = { id: 'r1', orgId: 'org1', userId: 'g', day: '2026-10-02', salesforceTaskId: '00TGONE', syncedSeconds: 1200, attempts: 0, nextAttemptAt: new Date(0) };
     const { store } = memoryStore({ rows: [r] });
     const d = deps(store, { updateDialerTimeTask: vi.fn(async () => 'missing' as const) });
     await runDialerTimeTick(d);
@@ -155,7 +155,7 @@ describe('runDialerTimeTick', () => {
     const { store } = memoryStore({ legs: [LEG, j] });
     store.ensureRow = vi.fn(async (orgId, userId, day) => {
       if (userId === 'g') throw new Error('db down');
-      return { id: `row-${userId}-${day}`, userId, day, salesforceTaskId: null, syncedSeconds: null, attempts: 0, nextAttemptAt: new Date(0) };
+      return { id: `row-${userId}-${day}`, orgId, userId, day, salesforceTaskId: null, syncedSeconds: null, attempts: 0, nextAttemptAt: new Date(0) };
     });
     const d = deps(store);
     await runDialerTimeTick(d);

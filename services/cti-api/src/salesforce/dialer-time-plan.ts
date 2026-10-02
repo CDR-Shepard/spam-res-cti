@@ -19,7 +19,7 @@ export interface WindowLeg extends LegSpan {
   orgId: string;
 }
 
-export type SyncedRow = Pick<DialerTimeTask, 'id' | 'userId' | 'day' | 'salesforceTaskId' | 'syncedSeconds' | 'attempts' | 'nextAttemptAt'>;
+export type SyncedRow = Pick<DialerTimeTask, 'id' | 'orgId' | 'userId' | 'day' | 'salesforceTaskId' | 'syncedSeconds' | 'attempts' | 'nextAttemptAt'>;
 
 export interface PlannedWrite {
   orgId: string;
@@ -39,6 +39,23 @@ export function backoffMs(attempts: number): number {
   return BACKOFF_MS[Math.min(Math.max(attempts, 1), BACKOFF_MS.length) - 1]!;
 }
 
+/** Due, or no row to be due yet (a fresh create is always due). */
+function isDue(row: SyncedRow | null, now: Date): boolean {
+  return !row || row.nextAttemptAt.getTime() <= now.getTime();
+}
+
+/** A day that was synced with real seconds must converge back to 0 when the
+ *  computed number drops to 0 (final review I2 — the reconciler's 48 h
+ *  fallback can do this). Never a CREATE for 0: only a row that already has a
+ *  Task is corrected. Uses the row's own orgId, not the legs-derived map,
+ *  because a rep with no legs left in the window at all has no entry there. */
+function zeroCorrection(row: SyncedRow, now: Date): PlannedWrite | null {
+  if (!row.salesforceTaskId) return null;
+  if ((row.syncedSeconds ?? 0) <= 0) return null;
+  if (!isDue(row, now)) return null;
+  return { orgId: row.orgId, userId: row.userId, day: row.day, seconds: 0, row };
+}
+
 export function planDialerTimeWrites(input: {
   legs: readonly WindowLeg[];
   days: readonly string[];
@@ -50,15 +67,37 @@ export function planDialerTimeWrites(input: {
   const rowOf = new Map(rows.map((r) => [`${r.userId}|${r.day}`, r]));
   const seconds = dialerSecondsByUserDay(legs, days, now);
   const planned: PlannedWrite[] = [];
+  // Every (userId, day) visited by the main loop below, so the no-legs-left
+  // sweep after it never double-plans a pair dialerSecondsByUserDay did see.
+  const seen = new Set<string>();
+
   for (const [userId, byDay] of Object.entries(seconds)) {
     for (const day of days) {
+      const key = `${userId}|${day}`;
+      seen.add(key);
       const s = byDay[day] ?? 0;
-      if (s <= 0) continue;
-      const row = rowOf.get(`${userId}|${day}`) ?? null;
+      const row = rowOf.get(key) ?? null;
+      if (s <= 0) {
+        const correction = row && zeroCorrection(row, now);
+        if (correction) planned.push(correction);
+        continue;
+      }
       if (row && row.syncedSeconds === s) continue;
-      if (row && row.nextAttemptAt.getTime() > now.getTime()) continue;
+      if (!isDue(row, now)) continue;
       planned.push({ orgId: orgOf.get(userId)!, userId, day, seconds: s, row });
     }
   }
+
+  // Reps with NO legs left anywhere in the window are absent from `seconds`
+  // entirely (dialerSecondsByUserDay drops users with no day > 0), so a rep
+  // whose dialing was entirely reconciled away still needs their synced rows
+  // walked and corrected to 0 — iterate the rows themselves, not just the
+  // reps the legs mention.
+  for (const row of rows) {
+    if (seen.has(`${row.userId}|${row.day}`)) continue;
+    const correction = zeroCorrection(row, now);
+    if (correction) planned.push(correction);
+  }
+
   return planned;
 }
