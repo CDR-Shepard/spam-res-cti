@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import { schema } from '@cti/db';
-import { insertRowStatement, rowsForDaysStatement, windowLegsStatement } from './dialer-time-store.js';
+import { claimRowStatement, insertRowStatement, rowsForDaysStatement, windowLegsStatement } from './dialer-time-store.js';
 
 const db = drizzle(new Pool({ connectionString: 'postgres://unused:unused@127.0.0.1:1/unused' }), { schema });
 
@@ -34,5 +34,15 @@ describe('dialer-time-store SQL', () => {
     expect(q.sql).toMatch(/^insert into "dialer_time_tasks" /);
     expect(q.sql).toMatch(/on conflict do nothing$/);
     expect(q.sql).not.toMatch(/on conflict \(/);
+  });
+
+  it('claims a row atomically: only when due, and the lease is the write (I1)', () => {
+    const now = new Date('2026-10-02T17:00:00Z');
+    const leaseMs = 4 * 60_000;
+    const q = claimRowStatement(db, 'row-1', now, leaseMs).toSQL();
+    expect(q.sql).toBe(
+      'update "dialer_time_tasks" set "next_attempt_at" = $1, "updated_at" = $2 where ("dialer_time_tasks"."id" = $3 and "dialer_time_tasks"."next_attempt_at" <= $4) returning "id", "org_id", "user_id", "day", "salesforce_task_id", "synced_seconds", "attempts", "next_attempt_at"',
+    );
+    expect(q.params).toEqual([new Date(now.getTime() + leaseMs).toISOString(), now.toISOString(), 'row-1', now.toISOString()]);
   });
 });

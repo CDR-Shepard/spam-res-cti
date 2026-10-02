@@ -34,6 +34,15 @@ function memoryStore(init: { legs?: WindowLeg[]; rows?: SyncedRow[]; sfUserId?: 
       rows.set(r.id, r);
       return r;
     },
+    async claimRow(id, now, leaseMs) {
+      const r = rows.get(id);
+      if (!r || r.nextAttemptAt.getTime() > now.getTime()) return null;
+      // No await between the check and the set: this is the whole point of
+      // the in-memory store standing in for an atomic `UPDATE ... RETURNING`.
+      const claimed = { ...r, nextAttemptAt: new Date(now.getTime() + leaseMs) };
+      rows.set(id, claimed);
+      return claimed;
+    },
     async saveSynced(id, taskId, seconds, now) {
       const r = rows.get(id)!;
       rows.set(id, { ...r, salesforceTaskId: taskId, syncedSeconds: seconds, attempts: 0, nextAttemptAt: now });
@@ -43,9 +52,10 @@ function memoryStore(init: { legs?: WindowLeg[]; rows?: SyncedRow[]; sfUserId?: 
       const r = rows.get(id)!;
       rows.set(id, { ...r, attempts, nextAttemptAt: next });
     },
-    async clearTaskId(id) {
+    async clearTaskId(id, now) {
       const r = rows.get(id)!;
-      rows.set(id, { ...r, salesforceTaskId: null, syncedSeconds: null });
+      // Also releases the claim (I1): due again immediately, not after the lease.
+      rows.set(id, { ...r, salesforceTaskId: null, syncedSeconds: null, nextAttemptAt: now ?? r.nextAttemptAt });
     },
     sfUserIdFor: async () => (init.sfUserId === undefined ? '005G' : init.sfUserId),
   };
@@ -75,6 +85,38 @@ describe('runDialerTimeTick', () => {
     expect(d.sf.findDialerTimeTask).toHaveBeenCalledWith('g', '005G', '2026-10-02');
     expect(d.sf.createDialerTimeTask).toHaveBeenCalledWith('g', '2026-10-02', 1800);
     expect(store.rows.get('row-g-2026-10-02')).toMatchObject({ salesforceTaskId: '00TNEW', syncedSeconds: 1800 });
+  });
+
+  it('two overlapping instances racing the same shared store create exactly one Task (I1)', async () => {
+    // Simulates two API instances (old + new container during a deploy) both
+    // ticking at once. The Salesforce create is held open until both ticks
+    // have had a chance to claim the row, so this only passes if claimRow's
+    // check-and-set is atomic: whichever tick claims first wins, and the
+    // other must see the lease and bail out WITHOUT calling createDialerTimeTask.
+    const { store } = memoryStore();
+    let resolveCreate!: (v: { taskId: string }) => void;
+    const createPromise = new Promise<{ taskId: string }>((resolve) => {
+      resolveCreate = resolve;
+    });
+    const sf: DialerTimeDeps['sf'] = {
+      createDialerTimeTask: vi.fn(() => createPromise),
+      updateDialerTimeTask: vi.fn(async () => 'updated' as const),
+      findDialerTimeTask: vi.fn(async () => null),
+    };
+    const d1: DialerTimeDeps = { store, now: () => NOW, sf };
+    const d2: DialerTimeDeps = { store, now: () => NOW, sf };
+
+    const p1 = runDialerTimeTick(d1);
+    const p2 = runDialerTimeTick(d2);
+    // p2 never reaches the (still-blocked) Salesforce create: its claim loses
+    // the race, so it settles on its own without waiting on createPromise.
+    const r2 = await p2;
+    resolveCreate({ taskId: '00T1' });
+    const r1 = await p1;
+
+    expect(sf.createDialerTimeTask).toHaveBeenCalledTimes(1);
+    expect(r1.written + r2.written).toBe(1);
+    expect(store.rows.get('row-g-2026-10-02')).toMatchObject({ salesforceTaskId: '00T1', syncedSeconds: 1800 });
   });
 
   it('adopts a Task already in Salesforce instead of creating a second one', async () => {
@@ -119,16 +161,14 @@ describe('runDialerTimeTick', () => {
     expect(d.sf.createDialerTimeTask).toHaveBeenCalledWith('g', '2026-10-02', 1800);
   });
 
-  it('an auth error is skipped uncounted; any other error backs off with the full text in last_error only', async () => {
+  it('any other error backs off with the full text in last_error only', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { store } = memoryStore();
-    const d = deps(store, { createDialerTimeTask: vi.fn(async () => { throw new SalesforceUnauthorizedError(); }) });
-    await runDialerTimeTick(d);
-    expect(store.failures).toEqual([]);
-
     const body = [{ message: 'Subject: (619) 555-9999', errorCode: 'STRING_TOO_LONG' }];
-    d.sf.createDialerTimeTask = vi.fn(async () => {
-      throw new Error(`Salesforce Power Dialer Time create failed (400): ${JSON.stringify(body)}`);
+    const d = deps(store, {
+      createDialerTimeTask: vi.fn(async () => {
+        throw new Error(`Salesforce Power Dialer Time create failed (400): ${JSON.stringify(body)}`);
+      }),
     });
     await runDialerTimeTick(d);
     expect(store.failures).toHaveLength(1);
@@ -137,6 +177,13 @@ describe('runDialerTimeTick', () => {
     const logged = JSON.stringify(warn.mock.calls);
     expect(logged).toContain('STRING_TOO_LONG');
     expect(logged).not.toContain('555-9999');
+  });
+
+  it('an auth error on the create path is skipped uncounted', async () => {
+    const { store } = memoryStore();
+    const d = deps(store, { createDialerTimeTask: vi.fn(async () => { throw new SalesforceUnauthorizedError(); }) });
+    await runDialerTimeTick(d);
+    expect(store.failures).toEqual([]);
   });
 
   it('skips a rep with no Salesforce connection without creating anything', async () => {
@@ -155,7 +202,9 @@ describe('runDialerTimeTick', () => {
     const { store } = memoryStore({ legs: [LEG, j] });
     store.ensureRow = vi.fn(async (orgId, userId, day) => {
       if (userId === 'g') throw new Error('db down');
-      return { id: `row-${userId}-${day}`, orgId, userId, day, salesforceTaskId: null, syncedSeconds: null, attempts: 0, nextAttemptAt: new Date(0) };
+      const r: SyncedRow = { id: `row-${userId}-${day}`, orgId, userId, day, salesforceTaskId: null, syncedSeconds: null, attempts: 0, nextAttemptAt: new Date(0) };
+      store.rows.set(r.id, r); // claimRow reads the row back out of the store
+      return r;
     });
     const d = deps(store);
     await runDialerTimeTick(d);

@@ -27,6 +27,11 @@ import { isSalesforceAuthError, withTimeout } from './followup-worker.js';
 
 export const DIALER_TIME_INTERVAL_MS = 300_000;
 export const SF_TIMEOUT_MS = 30_000;
+/** THE CLAIM IS THE LEASE (final review I1; dialer-connect-worker.ts's
+ *  convention): shorter than DIALER_TIME_INTERVAL_MS so this instance's own
+ *  next tick can retry a row whose lease holder died; longer than one sync's
+ *  worst case (up to 3 Salesforce calls at SF_TIMEOUT_MS each). */
+export const CLAIM_LEASE_MS = 4 * 60_000;
 export const LOG = '[dialer-time-worker]';
 
 export interface DialerTimeDeps {
@@ -65,7 +70,13 @@ async function createOrAdopt(w: PlannedWrite, deps: DialerTimeDeps): Promise<str
 
 /** One (rep, day). Returns true when Salesforce now holds `w.seconds`. */
 async function syncOne(w: PlannedWrite, deps: DialerTimeDeps): Promise<boolean> {
-  const row = w.row ?? (await deps.store.ensureRow(w.orgId, w.userId, w.day));
+  const unclaimed = w.row ?? (await deps.store.ensureRow(w.orgId, w.userId, w.day));
+  // Claim before any Salesforce write (final review I1): two overlapping API
+  // instances during a deploy must never both create the same (rep, day)
+  // Task. `row` is the freshly claimed copy, not `unclaimed` — another
+  // instance may have just created the Task between the plan and this claim.
+  const row = await deps.store.claimRow(unclaimed.id, deps.now(), CLAIM_LEASE_MS);
+  if (!row) return false; // another instance holds the lease, or it's no longer due
   try {
     if (row.salesforceTaskId) {
       const r = await withTimeout(deps.sf.updateDialerTimeTask(w.userId, row.salesforceTaskId, w.seconds), SF_TIMEOUT_MS, 'Salesforce Task update');

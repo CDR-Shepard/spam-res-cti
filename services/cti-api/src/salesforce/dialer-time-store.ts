@@ -3,7 +3,7 @@
  * The worker only sees the DialerTimeStore interface, so its tests run on an
  * in-memory store; this file's SQL is pinned in dialer-time-store.test.ts.
  */
-import { and, eq, gt, inArray, isNull, lt, or } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, lt, lte, or } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 import type { SyncedRow, WindowLeg } from './dialer-time-plan.js';
 
@@ -15,6 +15,13 @@ export interface DialerTimeStore {
   loadLegs(start: Date, end: Date): Promise<WindowLeg[]>;
   loadRows(days: readonly string[]): Promise<SyncedRow[]>;
   ensureRow(orgId: string, userId: string, day: string): Promise<SyncedRow>;
+  /** THE CLAIM IS THE LEASE (final review I1, dialer-connect-worker.ts's
+   *  convention): an atomic UPDATE ... WHERE next_attempt_at <= now RETURNING
+   *  the row, so two overlapping API instances can never both write the same
+   *  (rep, day) Task. Returns the fresh row (another instance may have just
+   *  created the Task) on success, or null when it is already leased or not
+   *  yet due — the caller skips it for free. */
+  claimRow(id: string, now: Date, leaseMs: number): Promise<SyncedRow | null>;
   saveSynced(id: string, taskId: string, seconds: number, now: Date): Promise<void>;
   saveFailure(id: string, attempts: number, nextAttemptAt: Date, lastError: string, now: Date): Promise<void>;
   clearTaskId(id: string, now: Date): Promise<void>;
@@ -47,6 +54,15 @@ export function insertRowStatement(db: Db, orgId: string, userId: string, day: s
   return db.insert(t).values({ orgId, userId, day }).onConflictDoNothing();
 }
 
+/** THE CLAIM IS THE LEASE — see DialerTimeStore.claimRow. */
+export function claimRowStatement(db: Db, id: string, now: Date, leaseMs: number) {
+  return db
+    .update(t)
+    .set({ nextAttemptAt: new Date(now.getTime() + leaseMs), updatedAt: now })
+    .where(and(eq(t.id, id), lte(t.nextAttemptAt, now)))
+    .returning(rowColumns);
+}
+
 export function liveDialerTimeStore(db: Db): DialerTimeStore {
   return {
     loadLegs: (start, end) => windowLegsStatement(db, start, end),
@@ -56,6 +72,10 @@ export function liveDialerTimeStore(db: Db): DialerTimeStore {
       const [row] = await db.select(rowColumns).from(t).where(and(eq(t.userId, userId), eq(t.day, day))).limit(1);
       if (!row) throw new Error('dialer_time_tasks row missing after insert');
       return row;
+    },
+    async claimRow(id, now, leaseMs) {
+      const [row] = await claimRowStatement(db, id, now, leaseMs);
+      return row ?? null;
     },
     async saveSynced(id, taskId, seconds, now) {
       await db
@@ -67,7 +87,9 @@ export function liveDialerTimeStore(db: Db): DialerTimeStore {
       await db.update(t).set({ attempts, nextAttemptAt, lastError, updatedAt: now }).where(eq(t.id, id));
     },
     async clearTaskId(id, now) {
-      await db.update(t).set({ salesforceTaskId: null, syncedSeconds: null, updatedAt: now }).where(eq(t.id, id));
+      // Also releases the claim (I1): a deleted-in-Salesforce Task is not a
+      // failure needing backoff, it's due again immediately.
+      await db.update(t).set({ salesforceTaskId: null, syncedSeconds: null, nextAttemptAt: now, updatedAt: now }).where(eq(t.id, id));
     },
     async sfUserIdFor(userId) {
       const [conn] = await db
