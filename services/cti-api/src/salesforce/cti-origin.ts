@@ -26,6 +26,8 @@ export const CTI_ORIGIN = {
   followUp: 'Power Dialer Follow-Up',
   /** Call record logged against a Lead/Contact/Opportunity after a dial. */
   callLog: 'Call Log',
+  /** A rep's daily "Power Dialer Time" Task (salesforce/dialer-time-worker.ts). */
+  dialerTime: 'Power Dialer Time',
 } as const;
 
 export type CtiOrigin = (typeof CTI_ORIGIN)[keyof typeof CTI_ORIGIN];
