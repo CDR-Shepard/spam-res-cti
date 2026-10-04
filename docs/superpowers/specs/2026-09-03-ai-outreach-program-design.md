@@ -86,6 +86,8 @@ spam-res-cti/
 
 ## 5. Sub-projects and order
 
+> **Superseded 2026-10-04.** The order below is replaced by `2026-10-04-outreach-salesforce-campaigns-design.md` §3: records come from the tenant's Salesforce instead of a CSV-import lead store, and AI voice uses Twilio ConversationRelay instead of Retell or Vapi. The table is kept for history.
+
 Each row is one spec → plan → implementation cycle.
 
 | # | Sub-project | Delivers | Depends on |
