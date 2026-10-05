@@ -21,6 +21,15 @@
  */
 public with sharing class PowerDialRelay {
   /**
+   * Salesforce profiles whose users may use Power Dial: admins plus the reps'
+   * "Sales" profile. Mirrors the CTI's own rule (POWER_DIALER_PROFILES, default
+   * "Sales", plus app-admins), which the CTI enforces again on the relay —
+   * POST /dialer/handoffs refuses anyone whose power dialer is switched off.
+   */
+  @TestVisible
+  private static final Set<String> ALLOWED_PROFILES = new Set<String>{ 'System Administrator', 'Sales' };
+
+  /**
    * Sends the selected record ids to the CTI power dialer.
    *
    * @param objectApiName 'Lead' or 'Opportunity' — the object the selected
@@ -31,11 +40,11 @@ public with sharing class PowerDialRelay {
    */
   @AuraEnabled
   public static Integer sendToCti(String objectApiName, List<Id> recordIds) {
-    // Rollout gate: Power Dial is limited to System Administrator profile
-    // users for now. Enforced server-side so it holds even if the button is
-    // surfaced (or the Apex is called) from a non-admin context.
-    if (!isSystemAdministrator()) {
-      throw new AuraHandledException('Power Dial is limited to administrators during this rollout.');
+    // Profile gate: Power Dial is open to the System Administrator and Sales
+    // profiles. Enforced server-side so it holds even if the button is surfaced
+    // (or the Apex is called) from any other profile's context.
+    if (!isAllowedProfile()) {
+      throw new AuraHandledException('Power Dial is available to Sales and System Administrator users only.');
     }
     if (String.isBlank(objectApiName)) {
       throw new AuraHandledException('objectApiName is required.');
@@ -87,7 +96,7 @@ public with sharing class PowerDialRelay {
    * Flow entry point — the Power Dial Screen Flow launched from a Lead/Opportunity
    * list-view button. Salesforce passes the selected record ids in a lowercase
    * `ids` Text collection; we derive the object type from the ids themselves and
-   * hand off to `sendToCti` (which enforces the admin gate + does the relay).
+   * hand off to `sendToCti` (which enforces the profile gate + does the relay).
    * Returns a status instead of throwing so the flow can show a clean message.
    */
   @InvocableMethod(
@@ -138,18 +147,18 @@ public with sharing class PowerDialRelay {
   }
 
   /**
-   * Whether the running user may use Power Dial. Rollout gate: limited to the
-   * System Administrator profile for now. The LWC calls this (cacheable) to
-   * hide the button for everyone else; `sendToCti` enforces it again server-side.
+   * Whether the running user may use Power Dial: a System Administrator or Sales
+   * profile user (ALLOWED_PROFILES). The LWC calls this (cacheable) to hide the
+   * button for everyone else; `sendToCti` enforces it again server-side.
    */
   @AuraEnabled(cacheable=true)
   public static Boolean canUsePowerDial() {
-    return isSystemAdministrator();
+    return isAllowedProfile();
   }
 
-  private static Boolean isSystemAdministrator() {
+  private static Boolean isAllowedProfile() {
     Profile p = [SELECT Name FROM Profile WHERE Id = :UserInfo.getProfileId() LIMIT 1];
-    return p != null && p.Name == 'System Administrator';
+    return p != null && ALLOWED_PROFILES.contains(p.Name);
   }
 
   /**

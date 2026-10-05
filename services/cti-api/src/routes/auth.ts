@@ -150,6 +150,24 @@ export function starterNumbersLogLevel(o: AutoAssignOutcome | null): 'warn' | 'i
 }
 
 /**
+ * Does a Salesforce sign-in switch this user's power dialer ON? App-admins
+ * always qualify; everyone else by Salesforce profile (POWER_DIALER_PROFILES,
+ * default "Sales"). An unknown profile (a failed lookup) never qualifies a
+ * non-admin — failing closed, like the starter-number hook.
+ *
+ * Grant-only: the caller acts on `true` and never turns the flag OFF on a
+ * `false`, so a Team-panel grant to someone outside these profiles survives
+ * their sign-ins.
+ */
+export function grantsPowerDialerOnSignIn(args: {
+  isAdmin: boolean;
+  profileName: string | null | undefined;
+  eligibleProfiles: readonly string[];
+}): boolean {
+  return args.isAdmin || isEligibleProfile(args.profileName, args.eligibleProfiles);
+}
+
+/**
  * Grant the CTI permission set to a rep who has just connected Salesforce, if
  * they are switched on for the power dialer.
  *
@@ -516,6 +534,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           .split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
         const adminProfiles = (cfg.SALESFORCE_ADMIN_PROFILES ?? 'System Administrator')
           .split(',').map((p) => p.trim().toLowerCase()).filter(Boolean);
+        const powerDialerProfiles = parseProfiles(cfg.POWER_DIALER_PROFILES);
         const sfProfileName = await fetchProfileName(tok.access_token, tok.instance_url, tok.sfUserId);
         knownProfileName = sfProfileName ?? null;
         const profileKnown = sfProfileName != null;
@@ -525,12 +544,23 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           { email, sfProfile: sfProfileName ?? '(unknown)', isSysAdminProfile, explicitAdmin, orgIsNew },
           'salesforce_login_admin_resolve',
         );
+        // The power dialer follows the profile too (Sales reps + admins), set
+        // HERE — before the post-sign-in hooks below — so the permission-set
+        // hook already sees the flag on and grants CTI_Task_Origin in the same
+        // sign-in. Unlike isAdmin it is grant-only (see grantsPowerDialerOnSignIn).
+        let dialerGranted = false;
         let user = await db.query.users.findFirst({ where: humanUserByEmail(org.id, email) });
         if (!user) {
           const shouldBeAdmin = isSysAdminProfile || explicitAdmin || orgIsNew;
+          dialerGranted = grantsPowerDialerOnSignIn({
+            isAdmin: shouldBeAdmin, profileName: sfProfileName, eligibleProfiles: powerDialerProfiles,
+          });
           const [createdUser] = await db
             .insert(schema.users)
-            .values({ orgId: org.id, email, displayName: profile.sfUserName ?? null, isAdmin: shouldBeAdmin })
+            .values({
+              orgId: org.id, email, displayName: profile.sfUserName ?? null,
+              isAdmin: shouldBeAdmin, powerDialerEnabled: dialerGranted,
+            })
             .returning();
           user = createdUser!;
         } else {
@@ -541,9 +571,18 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           // failed (profileKnown === false) leave admin status untouched rather
           // than risk demoting the org's only admin on a transient error.
           const target = profileKnown ? (isSysAdminProfile || explicitAdmin) : (explicitAdmin || user.isAdmin);
-          if (user.isAdmin !== target) {
-            await db.update(schema.users).set({ isAdmin: target }).where(eq(schema.users.id, user.id));
+          dialerGranted = !user.powerDialerEnabled && grantsPowerDialerOnSignIn({
+            isAdmin: target, profileName: sfProfileName, eligibleProfiles: powerDialerProfiles,
+          });
+          if (user.isAdmin !== target || dialerGranted) {
+            await db
+              .update(schema.users)
+              .set({ isAdmin: target, ...(dialerGranted ? { powerDialerEnabled: true } : {}) })
+              .where(eq(schema.users.id, user.id));
           }
+        }
+        if (dialerGranted) {
+          app.log.info({ target: user.id, sfProfile: sfProfileName ?? '(unknown)' }, 'power_dialer_granted_on_signin');
         }
         targetUserId = user.id;
       } else {
