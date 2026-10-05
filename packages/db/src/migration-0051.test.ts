@@ -310,9 +310,13 @@ describe('migration 0051_outreach_campaigns', () => {
     ]);
   });
 
-  it('nothing but CREATE TABLE, CREATE INDEX, and the one ALTER', () => {
+  it('starts with the lock_timeout guard (hot tables: organizations, users, dialer_sessions)', () => {
+    expect(statements[0]).toBe("SET LOCAL lock_timeout = '5s'");
+  });
+
+  it('nothing but the lock guard, CREATE TABLE, CREATE INDEX, and the one ALTER', () => {
     const creates = statements.filter((s) => s.startsWith('CREATE TABLE')).length;
-    expect(statements).toHaveLength(creates + INDEXES.length + 1);
+    expect(statements).toHaveLength(1 + creates + INDEXES.length + 1);
   });
 
   for (const [table, drizzleTable] of Object.entries(DRIZZLE)) {
