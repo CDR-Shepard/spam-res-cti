@@ -113,6 +113,18 @@ describe('call plan routes', () => {
     expect(decisions.editPlan).not.toHaveBeenCalled();
   });
 
+  it('400 on a line break in a single-line field, a bidi override or a zero-width character; a multi-line summary is fine', async () => {
+    const bad = [{ opener: 'one\ntwo' }, { opener: 'abc\u202edef' }, { avoid: ['x\u200by'] }, { bestTimeToCall: { window: 'any', reason: 'a\u2028b' } }];
+    for (const over of bad) {
+      const res = await call('PUT', `/api/call-plans/${ENROLLMENT_ID}`, { version: 1, plan: { ...EDITABLE, ...over } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVALID_BODY');
+    }
+    expect(decisions.editPlan).not.toHaveBeenCalled();
+    const ok = await call('PUT', `/api/call-plans/${ENROLLMENT_ID}`, { version: 1, plan: { ...EDITABLE, situationSummary: 'First line.\n\nSecond line.' } });
+    expect(ok.statusCode).toBe(200);
+  });
+
   it('a valid edit, approve, reject and research each run their decision and answer with the card', async () => {
     const edit = await call('PUT', `/api/call-plans/${ENROLLMENT_ID}`, { version: 1, plan: EDITABLE });
     expect(edit.statusCode).toBe(200);

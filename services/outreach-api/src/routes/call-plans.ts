@@ -5,7 +5,7 @@ import { ApproveCallPlanRequest, CallStage, EditCallPlanRequest } from '@cti/con
 import type { Db } from '@cti/db';
 import { loadCallPlanCard, loadCallPlanCards } from '../call-plans/cards.js';
 import { DECISION_WORDS, DecisionError, approvePlan, editPlan, rejectPlan, researchAgain } from '../call-plans/decisions.js';
-import { isPlainText } from '../call-plans/plain-text.js';
+import { planTextIssues } from '../call-plans/plain-text.js';
 import { releaseApprovedCalls } from '../call-plans/release.js';
 import { sendError } from '../http/errors.js';
 import { requireAdmin, requireContext, type RequestContext } from '../tenancy/scope.js';
@@ -13,7 +13,11 @@ import { campaignId, campaignOr404 } from './campaigns.js';
 
 const EnrollmentParams = z.object({ enrollmentId: z.string().uuid() });
 const BoardQuery = z.object({ cursor: z.string().max(200).optional(), stage: CallStage.optional() });
-const EditBody = EditCallPlanRequest.refine((v) => isPlainText(v.plan), { message: 'The plan must be plain text.', path: ['plan'] });
+const EditBody = EditCallPlanRequest.superRefine((v, ctx) => {
+  for (const path of planTextIssues(v.plan)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Use plain text on one line here.', path: ['plan', ...path.split('.')] });
+  }
+});
 
 function sendDecisionError(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof DecisionError) return sendError(reply, err.status, err.code, DECISION_WORDS[err.code]);
