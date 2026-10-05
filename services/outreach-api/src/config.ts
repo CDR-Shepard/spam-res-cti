@@ -35,11 +35,19 @@ const schema = z.object({
   CTI_INTERNAL_URL: z
     .string()
     .url()
+    .refine(isHttp, 'CTI_INTERNAL_URL must use http: or https:')
     .refine(isOrigin, 'CTI_INTERNAL_URL must be an origin only (scheme, host and port): no path, query, fragment or credentials')
     .optional(),
   /** Shared with cti-api: HMAC key for the internal AI call trigger. */
   OUTREACH_INTERNAL_SECRET: z.string().min(32).optional(),
 });
+
+/** Only http and https are fetched; `ftp://`, `file://` and `javascript:` all parse as URLs. */
+function isHttp(value: string): boolean {
+  if (!URL.canParse(value)) return true; // .url() already reports it
+  const { protocol } = new URL(value);
+  return protocol === 'http:' || protocol === 'https:';
+}
 
 /** `http://host:port` and nothing after it (a lone trailing slash is fine): the client appends the signed paths itself. */
 function isOrigin(value: string): boolean {

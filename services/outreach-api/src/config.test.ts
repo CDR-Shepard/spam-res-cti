@@ -112,6 +112,12 @@ describe('parseConfig', () => {
       expect(parseConfig({ ...base, CTI_INTERNAL_URL: good }).CTI_INTERNAL_URL).toBe(good);
     }
   });
+  it('M-5: CTI_INTERNAL_URL must be http: or https:', () => {
+    for (const bad of ['ftp://ctiapi.railway.internal:4000', 'file:///etc/passwd', 'ws://ctiapi.railway.internal:4000', 'javascript:alert(1)']) {
+      expect(() => parseConfig({ ...base, CTI_INTERNAL_URL: bad }), bad).toThrow(/CTI_INTERNAL_URL/);
+    }
+    expect(() => parseConfig({ ...base, CTI_INTERNAL_URL: 'ftp://ctiapi.railway.internal:4000' })).toThrow(/http: or https:/);
+  });
   it('rejects a bad encryption key with a clear message', () => {
     expect(() => parseConfig({ ...base, TOKEN_ENCRYPTION_KEY: 'short' })).toThrow(/TOKEN_ENCRYPTION_KEY/);
   });
