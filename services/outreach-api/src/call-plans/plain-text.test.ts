@@ -50,6 +50,13 @@ describe('planTextIssues (one field rule: single-line fields reject line breaks)
     expect(planTextIssues({ ...plan, ...over })).toEqual(paths);
   });
 
+  it('skips sellingSignals: evidence is verbatim record text, discarded and replaced server-side (I-1)', () => {
+    const signals = [{ signal: 'Wants out\u200b', evidence: 'line one\nline two\ufeff\u202e', source: 'note' as const, strength: 'strong' as const }];
+    expect(planTextIssues({ ...plan, sellingSignals: signals })).toEqual([]);
+    // Everything else is still checked.
+    expect(planTextIssues({ ...plan, sellingSignals: signals, opener: 'a\nb' })).toEqual(['opener']);
+  });
+
   it('also reports control and format characters in any field, the summary included', () => {
     expect(planTextIssues({ ...plan, situationSummary: 'a\u202eb' })).toEqual(['situationSummary']);
     expect(planTextIssues({ ...plan, opener: 'a\u200bb', questions: ['x\u0000'] })).toEqual(['opener', 'questions.0']);

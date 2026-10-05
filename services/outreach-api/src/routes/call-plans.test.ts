@@ -125,6 +125,13 @@ describe('call plan routes', () => {
     expect(ok.statusCode).toBe(200);
   });
 
+  it('I-1: an edit whose selling-signal evidence has line breaks, a ZWSP or a BOM is accepted: the server replaces the signals', async () => {
+    const sellingSignals = [{ signal: 'Wants out', evidence: 'moving\nsoon\u200b\ufeff', source: 'note', strength: 'strong' }];
+    const res = await call('PUT', `/api/call-plans/${ENROLLMENT_ID}`, { version: 1, plan: { ...EDITABLE, sellingSignals } });
+    expect(res.statusCode).toBe(200);
+    expect(decisions.editPlan).toHaveBeenCalledTimes(1);
+  });
+
   it('a valid edit, approve, reject and research each run their decision and answer with the card', async () => {
     const edit = await call('PUT', `/api/call-plans/${ENROLLMENT_ID}`, { version: 1, plan: EDITABLE });
     expect(edit.statusCode).toBe(200);

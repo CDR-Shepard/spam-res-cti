@@ -38,9 +38,14 @@ function collect(value: unknown, path: string[], out: string[]): void {
   }
 }
 
-/** The dotted paths of the plan's fields that are not plain text (empty when the plan is fine). */
+/**
+ * The dotted paths of the plan's fields that are not plain text (empty when the plan is fine).
+ * `sellingSignals` are not checked: their evidence is verbatim record text (line breaks and all), and an edit
+ * never keeps what the client sends there, the research's own signals are carried over (M-3).
+ */
 export function planTextIssues(plan: EditableCallPlan): string[] {
   const out: string[] = [];
-  collect(plan, [], out);
+  const { sellingSignals: _discarded, ...checked } = plan;
+  collect(checked, [], out);
   return out;
 }
