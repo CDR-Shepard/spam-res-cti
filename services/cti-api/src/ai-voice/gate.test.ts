@@ -86,6 +86,11 @@ const cases: Case[] = [
   { name: 'calling-hours exempt number', cfg: { DIALER_CALLING_HOURS_EXEMPT: ` ${CA} ,+15555550000` }, target: rec(), inHours: false, want: { ok: true, toE164: CA, fromE164: FROM } },
   { name: 'per-customer ceiling', target: rec(), pick: { skip: 'customer_ceiling' }, want: blockedBy('customer_ceiling') },
   { name: 'no caller id', target: rec(), pick: null, want: blockedBy('no_caller_id') },
+  { name: 'record call with no pool DID ignores the default caller ID', cfg: { TWILIO_DEFAULT_CALLER_ID: '+16195550002' }, target: rec(), pick: null, want: blockedBy('no_caller_id') },
+  { name: 'test call with no pool DID falls back to the default caller ID', cfg: { TWILIO_DEFAULT_CALLER_ID: '(619) 555-0002' }, isAdmin: true, target: test(TEST), pick: null, want: { ok: true, toE164: TEST, fromE164: '+16195550002' } },
+  { name: 'test call with no pool DID and no default caller ID', isAdmin: true, target: test(TEST), pick: null, want: blockedBy('no_caller_id') },
+  { name: 'test call with an unparseable default caller ID', cfg: { TWILIO_DEFAULT_CALLER_ID: 'n/a' }, isAdmin: true, target: test(TEST), pick: null, want: blockedBy('no_caller_id') },
+  { name: 'test call still honours the per-customer ceiling', cfg: { TWILIO_DEFAULT_CALLER_ID: '+16195550002' }, isAdmin: true, target: test(TEST), pick: { skip: 'customer_ceiling' }, want: blockedBy('customer_ceiling') },
 ];
 
 describe('gateAiCall', () => {

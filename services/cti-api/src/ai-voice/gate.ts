@@ -15,6 +15,10 @@
  *   per-customer ceiling + caller ID    (`pickDidForRun`, LAST — it claims a
  *                                        dial against the chosen DID)
  *
+ * A record call needs a dialer-pool DID. A test call with no pool DID (and no
+ * ceiling skip) falls back to TWILIO_DEFAULT_CALLER_ID so an exhausted pool
+ * cannot block the smoke test.
+ *
  * A failed read anywhere THROWS: unlike the dialer's queue build, nothing here
  * fails open — the caller turns the error into a refused call.
  */
@@ -117,7 +121,13 @@ export async function gateAiCall(db: Db, input: AiGateInput, deps: GateDeps = de
   }
 
   const pick = await deps.pickDidForRun(db, { orgId, userId, toE164: to, runKind: 'pool' });
-  if (!pick) return blocked('no_caller_id');
-  if ('skip' in pick) return blocked('customer_ceiling');
-  return { ok: true, toE164: to, fromE164: pick.e164 };
+  if (pick && 'skip' in pick) return blocked('customer_ceiling');
+  const from = pick?.e164 ?? (input.target.kind === 'test' ? defaultCallerId(cfg) : null);
+  if (!from) return blocked('no_caller_id');
+  return { ok: true, toE164: to, fromE164: from };
+}
+
+/** TWILIO_DEFAULT_CALLER_ID as E.164, or null when unset or unparseable. */
+function defaultCallerId(cfg: AppConfig): string | null {
+  return cfg.TWILIO_DEFAULT_CALLER_ID ? toE164(cfg.TWILIO_DEFAULT_CALLER_ID) : null;
 }
