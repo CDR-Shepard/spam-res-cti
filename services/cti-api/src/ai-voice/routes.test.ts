@@ -17,6 +17,7 @@ const API = 'https://api.test';
 const state = vi.hoisted(() => ({
   cfg: {} as Record<string, unknown>,
   sessions: new Map<string, Record<string, unknown>>(),
+  lookups: 0,
 }));
 
 vi.mock('../config.js', async (importOriginal) => ({
@@ -25,7 +26,10 @@ vi.mock('../config.js', async (importOriginal) => ({
 }));
 vi.mock('@cti/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@cti/auth')>()),
-  resolveSession: async (h: string | undefined) => (h ? state.sessions.get(h) ?? null : null),
+  resolveSession: async (h: string | undefined) => {
+    state.lookups += 1;
+    return h ? state.sessions.get(h) ?? null : null;
+  },
 }));
 vi.mock('@cti/db', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@cti/db')>()),
@@ -192,6 +196,20 @@ describe('POST /ai-calls', () => {
     // Another user has their own bucket.
     expect((await post({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' }, ADMIN_AUTH)).statusCode).toBe(409);
   });
+
+  it('the bucket is the signed-in user, not the bearer token, and the session is looked up once per request', async () => {
+    await app.close();
+    await build(true);
+    gateResult = { ok: false, reason: 'no_consent' };
+    state.sessions.set('Bearer rep-second-device', { ...state.sessions.get(REP_AUTH)! });
+    for (let i = 0; i < 10; i += 1) await post({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' });
+    state.lookups = 0;
+    expect((await post({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' }, 'Bearer rep-second-device')).statusCode).toBe(429);
+    expect(state.lookups).toBe(1);
+    state.lookups = 0;
+    expect((await post({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' }, ADMIN_AUTH)).statusCode).toBe(409);
+    expect(state.lookups).toBe(1);
+  });
 });
 
 describe('GET /ai-calls, /ai-calls/:id, /ai-calls/availability', () => {
@@ -279,12 +297,50 @@ describe('POST /telephony/twilio/ai-voice/amd', () => {
     expect(store.rows.get(ID)?.answeredBy).toBe('human');
   });
 
-  it('a callback for another call sid is ignored', async () => {
+  it('a callback for another call sid is rejected (403) and changes nothing', async () => {
     await liveCall();
-    await signedPost(path, { CallSid: `CA${'f'.repeat(32)}`, AnsweredBy: 'machine_end_beep' });
+    const res = await signedPost(path, { CallSid: `CA${'f'.repeat(32)}`, AnsweredBy: 'machine_end_beep' });
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain('<Reject/>');
     expect(tw.redirects).toHaveLength(0);
     expect(store.rows.get(ID)?.answeredBy).toBeNull();
   });
+});
+
+describe('Twilio AI-voice callbacks must carry the call sid', () => {
+  const OTHER = `CA${'f'.repeat(32)}`;
+  const cases = [
+    ['amd', { AnsweredBy: 'machine_end_beep' }],
+    ['status', { CallStatus: 'completed', CallDuration: '30' }],
+    ['transfer-result', { DialCallStatus: 'no-answer' }],
+  ] as const;
+
+  for (const [name, body] of cases) {
+    const path = `/telephony/twilio/ai-voice/${name}?aiCallId=${ID}`;
+
+    it(`${name}: 400 without a CallSid, and nothing changes`, async () => {
+      await liveCall('in_progress');
+      await store.update(ID, { outcome: 'qualified_transferred' });
+      const before = { ...store.rows.get(ID) };
+      const res = await signedPost(path, body);
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toContain('<Reject/>');
+      expect(store.rows.get(ID)).toEqual(before);
+      expect(tw.redirects).toHaveLength(0);
+      expect(transferFailed).not.toHaveBeenCalled();
+    });
+
+    it(`${name}: 403 for another call's sid, and nothing changes`, async () => {
+      await liveCall('in_progress');
+      await store.update(ID, { outcome: 'qualified_transferred' });
+      const before = { ...store.rows.get(ID) };
+      const res = await signedPost(path, { CallSid: OTHER, ...body });
+      expect(res.statusCode).toBe(403);
+      expect(res.body).toContain('<Reject/>');
+      expect(store.rows.get(ID)).toEqual(before);
+      expect(transferFailed).not.toHaveBeenCalled();
+    });
+  }
 });
 
 describe('POST /telephony/twilio/ai-voice/status', () => {

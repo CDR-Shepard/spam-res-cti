@@ -27,7 +27,7 @@ import { ctiDisposition } from './outcomes.js';
 import { closeActiveCall } from './registry.js';
 import { liveAiCallSf, logAiCallTask, logCallbackTask, type SfLogDeps } from './sf-logging.js';
 import type { AiCallOutcome, AiCallRow, AiCallStatus, AiCallStore, NewCtiCall } from './store.js';
-import { summarizeAiCall, summaryClientFor, type SummaryDeps } from './summary.js';
+import { carriedLines, reformatSummary, summarizeAiCall, summaryClientFor, type SummaryDeps } from './summary.js';
 import { taskLinks } from '../salesforce/dialer-connect-task.js';
 
 export const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'no-answer', 'failed', 'canceled'] as const;
@@ -120,6 +120,8 @@ export function ctiCallValues(row: AiCallRow, callStatus: string): NewCtiCall {
     salesforceWhatId: links?.whatId ?? null,
     campaignKey: null,
     metadata: { ai: true, aiCallId: row.id, outcome: row.outcome },
+    // The dialer's 24 h cap window reads calls.created_at: a late (sweeper) finalize must not move the call.
+    createdAt: row.createdAt,
   };
 }
 
@@ -133,16 +135,45 @@ export interface AfterCallDeps {
 
 /** The summary (stored on the row), then the call's Task and, for a promised call back, the callback Task. */
 export async function afterAiCall(row: AiCallRow, deps: AfterCallDeps): Promise<void> {
-  const summary = await summarizeAiCall(
+  const drafted = await summarizeAiCall(
     { aiCallId: row.id, outcome: row.outcome, transcript: row.transcript, qualification: row.qualification, toolSummary: row.summary },
     deps.summary,
   );
+  const { summary, outcome } = await withLateTransferFailure(row, drafted, deps);
   await deps.store
     .update(row.id, { summary })
     .catch((e: unknown) => deps.log.error({ aiCallId: row.id, err: errText(e) }, 'ai-voice: summary write failed'));
   if (!deps.sf) return;
-  await logAiCallTask(row, summary, deps.sf);
+  await logAiCallTask({ ...row, outcome }, summary, deps.sf);
+  // The snapshot's outcome: a transfer that failed after finalize gets its callback Task from that late path.
   await logCallbackTask(row, summary, deps.sf);
+}
+
+/**
+ * The one outcome change after finalize — qualified_transferred →
+ * transfer_failed, from a transfer-result that lost the race to the status
+ * callback — may land while the summary is being drafted. Re-read the row so
+ * this (snapshot-based) write cannot put back the old outcome words or drop
+ * the did-not-connect line.
+ */
+async function withLateTransferFailure(
+  row: AiCallRow,
+  drafted: string,
+  deps: AfterCallDeps,
+): Promise<{ summary: string; outcome: AiCallRow['outcome'] }> {
+  if (row.outcome !== 'qualified_transferred') return { summary: drafted, outcome: row.outcome };
+  const fresh = await deps.store.get(row.id).catch((e: unknown) => {
+    deps.log.warn({ aiCallId: row.id, err: errText(e) }, 'ai-voice: summary re-read failed');
+    return null;
+  });
+  if (fresh?.outcome !== 'transfer_failed') return { summary: drafted, outcome: row.outcome };
+  const summary = reformatSummary(drafted, {
+    qualification: fresh.qualification,
+    outcome: fresh.outcome,
+    aiCallId: row.id,
+    extra: carriedLines(fresh.summary),
+  });
+  return { summary, outcome: fresh.outcome };
 }
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));

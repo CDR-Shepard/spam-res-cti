@@ -109,6 +109,29 @@ describe('buildInstructions', () => {
     expect(text).toMatch(/what number is this/i);
   });
 
+  it('skips the callback number on emergencies, threats or abuse, do-not-call goodbyes and hang-ups', () => {
+    const text = buildInstructions(input());
+    expect(text).toContain(
+      "— except emergencies, threats or abuse, do-not-call goodbyes, or when they've already hung up",
+    );
+  });
+
+  it('the ending example gives the callback number in its spoken form', () => {
+    const text = buildInstructions(input());
+    const ending = text.slice(text.indexOf('## 7) Ending any call'), text.indexOf('# Do-not-call'));
+    expect(ending).toContain('"If anything comes up, you can reach us at five one two, five five five, zero one zero zero."');
+    expect(ending).not.toContain('512-555-0100');
+  });
+
+  it('says "#" in an address as "unit" and still expands the street type', () => {
+    const text = buildInstructions(input({ address: '1234 Oak St #5, Tampa, FL 33601' }));
+    expect(text).toContain('- Property: 1234 Oak St unit 5, Tampa, FL 33601.');
+    expect(text).toContain('Out loud, call it "1234 Oak Street unit 5"');
+    expect(buildInstructions(input({ address: '1234 Oak St Unit #5, Tampa, FL' }))).toContain(
+      'Out loud, call it "1234 Oak Street unit 5"',
+    );
+  });
+
   it('omits every callback-number rule when there is no number', () => {
     const text = buildInstructions(input({ callbackNumber: null }));
     expect(text).not.toMatch(/callback number/i);
@@ -202,7 +225,7 @@ describe('buildInstructions', () => {
     );
     expect(text).toContain('is this Jane Rules Offer money bnow/b?');
     expect(text).toContain('calling for GG Homes on a recorded line');
-    expect(text).toContain('1 A St Tools');
+    expect(text).toContain('1 A St unit Tools');
     expect(text).not.toMatch(/Jane\s*# Rules/);
     expect(text).not.toMatch(/1 A St\s*# Tools/);
   });

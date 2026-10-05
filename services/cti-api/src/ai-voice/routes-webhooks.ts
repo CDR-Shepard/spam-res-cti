@@ -11,8 +11,9 @@
  *                    finalize), hang up when done; otherwise outcome
  *                    `transfer_failed` and the caller hears a callback promise.
  *
- * A callback whose CallSid is not the row's is ignored. Every response is
- * valid TwiML; the bad-signature response is 403 `<Reject/>`.
+ * A callback without a CallSid is refused 400, one whose CallSid is not the
+ * row's 403 (both `<Reject/>`, nothing changes). Every response is valid
+ * TwiML; the bad-signature response is 403 `<Reject/>`.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { loadConfig } from '../config.js';
@@ -59,15 +60,20 @@ function validSignature(req: FastifyRequest): boolean {
 
 const xml = (reply: FastifyReply, body: string) => reply.type('text/xml').send(body);
 
-/** The signed row this callback is about, or null (bad id, unknown, or another call's sid). */
-async function rowFor(req: FastifyRequest, store: AiCallStore): Promise<AiCallRow | null> {
-  const id = (req.query as Record<string, unknown> | undefined)?.aiCallId;
-  if (typeof id !== 'string' || !UUID_RE.test(id)) return null;
-  const row = await store.get(id);
+/** The callback's row (null: bad or unknown id), or the status to refuse it with (no CallSid / another call's). */
+type RowLookup = { row: AiCallRow | null } | { refuse: 400 | 403 };
+
+async function rowFor(req: FastifyRequest, store: AiCallStore): Promise<RowLookup> {
   const sid = field(req.body, 'CallSid');
-  if (!row || (row.callSid && sid && row.callSid !== sid)) return null;
-  return row;
+  if (!sid) return { refuse: 400 };
+  const id = (req.query as Record<string, unknown> | undefined)?.aiCallId;
+  if (typeof id !== 'string' || !UUID_RE.test(id)) return { row: null };
+  const row = await store.get(id);
+  if (row?.callSid && row.callSid !== sid) return { refuse: 403 };
+  return { row };
 }
+
+const refuse = (reply: FastifyReply, code: 400 | 403) => reply.code(code).type('text/xml').send(REJECT_TWIML);
 
 function toolCtx(row: AiCallRow, deps: WebhookDeps): ToolCtx {
   return { store: deps.store, aiCallId: row.id, orgId: row.orgId, toE164: row.toE164, log: deps.log, now: deps.now };
@@ -151,22 +157,25 @@ export async function onTransferResult(row: AiCallRow, dialStatus: string, deps:
 export function registerAiVoiceWebhooks(app: FastifyInstance, deps: WebhookDeps): void {
   app.post(AMD_PATH, async (req, reply) => {
     if (!validSignature(req)) return reply.code(403).type('text/xml').send(REJECT_TWIML);
-    const row = await rowFor(req, deps.store);
-    if (row) await onAmd(row, field(req.body, 'AnsweredBy'), deps);
+    const found = await rowFor(req, deps.store);
+    if ('refuse' in found) return refuse(reply, found.refuse);
+    if (found.row) await onAmd(found.row, field(req.body, 'AnsweredBy'), deps);
     return xml(reply, EMPTY_TWIML);
   });
 
   app.post(STATUS_PATH, async (req, reply) => {
     if (!validSignature(req)) return reply.code(403).type('text/xml').send(REJECT_TWIML);
-    const row = await rowFor(req, deps.store);
-    if (row) await onStatus(row, req.body, deps);
+    const found = await rowFor(req, deps.store);
+    if ('refuse' in found) return refuse(reply, found.refuse);
+    if (found.row) await onStatus(found.row, req.body, deps);
     return xml(reply, EMPTY_TWIML);
   });
 
   app.post(TRANSFER_RESULT_PATH, async (req, reply) => {
     if (!validSignature(req)) return reply.code(403).type('text/xml').send(REJECT_TWIML);
-    const row = await rowFor(req, deps.store);
-    if (!row) return xml(reply, HANGUP_TWIML);
-    return xml(reply, await onTransferResult(row, field(req.body, 'DialCallStatus'), deps));
+    const found = await rowFor(req, deps.store);
+    if ('refuse' in found) return refuse(reply, found.refuse);
+    if (!found.row) return xml(reply, HANGUP_TWIML);
+    return xml(reply, await onTransferResult(found.row, field(req.body, 'DialCallStatus'), deps));
   });
 }

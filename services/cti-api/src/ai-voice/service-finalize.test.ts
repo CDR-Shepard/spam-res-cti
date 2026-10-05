@@ -209,6 +209,12 @@ describe('finalize, Task 7: the calls row, the after-call work, the transfer sta
 });
 
 describe('ctiCallValues', () => {
+  it("is created at the AI call's creation time, so a late (sweeper) finalize does not move it in the 24 h cap window", () => {
+    const createdAt = new Date('2026-10-05T09:00:00Z');
+    const row = { ...rowOf({ id: ID, orgId: 'o1', startedBy: 'u1', toE164: '+16195550100' }), callSid: 'CA1', createdAt };
+    expect(ctiCallValues(row as AiCallRow, 'completed').createdAt).toEqual(createdAt);
+  });
+
   it('a test call is still a calls row (it rang a real phone), with no Salesforce links', () => {
     const row = { ...rowOf({ id: ID, orgId: 'o1', startedBy: 'u1', toE164: '+16195550100' }), isTest: true, callSid: 'CA1', outcome: 'hung_up' };
     expect(ctiCallValues(row as AiCallRow, 'completed')).toMatchObject({ salesforceWhoId: null, salesforceWhatId: null, disposition: 'Connected' });
@@ -239,6 +245,26 @@ describe('afterAiCall', () => {
     expect(store.rows.get(ID)?.summary).toBe(`Callback requested: Thursday\n\nOutcome: Callback requested\nAI call id: ${ID}`);
     expect(order).toEqual(['AI call: Callback requested', 'AI call: callback Thursday']);
     expect(store.rows.get(ID)?.sfTaskId).toBe('00T1');
+  });
+
+  it('a transfer that rang out while the summary was being written: the stored summary and the call Task use the new outcome', async () => {
+    const MISSED = 'Transfer to a specialist did not connect — call them back.';
+    // The late transfer-result already ran (failTransfer + its summary) before this snapshot's write.
+    await store.update(ID, { outcome: 'transfer_failed', summary: `Wants an offer.\n${MISSED}` } as never);
+    const subjects: string[] = [];
+    const sf = {
+      createCallTask: vi.fn(async (_u: string, input: { subject: string }) => {
+        subjects.push(input.subject);
+        return { taskId: `00T${subjects.length}` };
+      }),
+      fetchOwnership: vi.fn(async () => ({ type: 'Lead' as const, ownerId: 'SF1' })),
+      sfUserIdFor: vi.fn(async () => 'SF1'),
+    };
+    const snapshot = record({ outcome: 'qualified_transferred', summary: 'Wants an offer.' });
+    await afterAiCall(snapshot, { store, log: silentLog, summary: { client: null, model: 'm', log: silentLog }, sf: { sf, store, log: silentLog, now: () => END } });
+    expect(store.rows.get(ID)?.summary).toBe(`Wants an offer.\n${MISSED}\n\nOutcome: Transfer missed — callback promised\nAI call id: ${ID}`);
+    // The late path owns the callback Task; afterAiCall makes only the call's Task.
+    expect(subjects).toEqual(['AI call: Transfer missed — callback promised']);
   });
 
   it('without Salesforce (or for a test call) only the summary is written', async () => {

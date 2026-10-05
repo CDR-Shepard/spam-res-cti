@@ -452,7 +452,8 @@ describe('tool calls', () => {
     openai.clearSent();
     openai.msg(done(fnCall('end_call', '{"outcome":"not_interested"}', 'call_9')));
     await flush();
-    expect(openai.sent).toEqual([
+    // The VAD auto-response switch-off is pinned under 'closing latch'.
+    expect(openai.sent.filter((m) => m.type !== 'session.update')).toEqual([
       {
         type: 'conversation.item.create',
         item: {
@@ -567,7 +568,7 @@ describe('tool calls', () => {
     openai.clearSent();
     openai.msg(done(fnCall('save_qualification', '{}', 'c1'), fnCall('mark_do_not_call', '{}', 'c2')));
     await flush();
-    expect(openai.types()).toEqual(['conversation.item.create', 'conversation.item.create']);
+    expect(openai.types()).toEqual(['conversation.item.create', 'conversation.item.create', 'session.update']);
   });
 
   it('ignores response.done without function calls', async () => {
@@ -780,6 +781,44 @@ describe('bridge-owned end backstop', () => {
 
 describe('closing latch', () => {
   const done = (...output: object[]) => ({ type: 'response.done', response: { status: 'completed', output } });
+  const STOP_AUTO_RESPONSES = {
+    type: 'session.update',
+    session: {
+      type: 'realtime',
+      audio: {
+        input: {
+          turn_detection: { type: 'semantic_vad', eagerness: 'high', create_response: false, interrupt_response: true },
+        },
+      },
+    },
+  };
+
+  for (const then of ['hangup', 'transfer'] as const) {
+    it(`a ${then} result turns off VAD auto-responses (same turn detection otherwise), once`, async () => {
+      const { openai, bridge } = setup({ vadEagerness: 'high' }, { onTool: vi.fn(async () => ({ output: 'ok', then })) });
+      bridge.start();
+      openai.clearSent();
+      openai.msg(done(fnCall('end_call', '{}', 'c1')));
+      await flush();
+      expect(openai.sent).toEqual([
+        { type: 'conversation.item.create', item: { type: 'function_call_output', call_id: 'c1', output: 'ok' } },
+        STOP_AUTO_RESPONSES,
+      ]);
+      openai.clearSent();
+      openai.msg(done(fnCall('end_call', '{}', 'c2')));
+      await flush();
+      expect(openai.types()).toEqual(['conversation.item.create']);
+    });
+  }
+
+  it('a continuing result leaves VAD auto-responses on', async () => {
+    const { openai, bridge } = setup();
+    bridge.start();
+    openai.clearSent();
+    openai.msg(done(fnCall('save_qualification', '{}', 'c1')));
+    await flush();
+    expect(openai.types()).not.toContain('session.update');
+  });
 
   it('after a hangup result, later tool batches send outputs but no response.create', async () => {
     const onTool = vi.fn(async (name: string) => ({

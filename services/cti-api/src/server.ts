@@ -149,7 +149,7 @@ async function main(): Promise<void> {
   // Talk-time report: close rep legs whose end callback never came (Twilio's own record).
   const repLegTimer = startRepLegReconcileLoop();
   // AI calls whose status callback never came → finalized from Twilio's record (unref'd; null when AI voice is off).
-  startAiCallSweeper(cfg, app.log);
+  const aiCallSweepTimer = startAiCallSweeper(cfg, app.log);
 
   const close = async () => {
     clearInterval(syncTimer);
@@ -162,6 +162,7 @@ async function main(): Promise<void> {
     clearInterval(reputationTimer);
     clearInterval(directoryTimer);
     clearInterval(repLegTimer);
+    if (aiCallSweepTimer) clearInterval(aiCallSweepTimer);
     await app.close();
   };
   process.on('SIGTERM', close);

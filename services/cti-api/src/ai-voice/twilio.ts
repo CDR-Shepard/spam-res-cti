@@ -14,6 +14,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import twilio from 'twilio';
 import type { AppConfig } from '../config.js';
 import { attachCallerParameters, type MatchedCaller } from '../routes/inbound-caller-params.js';
+import { repClientIdentity } from '../dialer/twilio-telephony.js';
 
 export const AI_VOICE_TWILIO_PREFIX = '/telephony/twilio/ai-voice';
 export const STREAM_PATH = `${AI_VOICE_TWILIO_PREFIX}/stream`;
@@ -68,10 +69,8 @@ export function verifyStreamToken(aiCallId: string, token: string, secret: strin
   return got.length === want.length && timingSafeEqual(got, want);
 }
 
-/** The rep's softphone identity — the shape `/telephony/token` mints (routes/telephony.ts). */
-export function repClientIdentity(userId: string): string {
-  return `rep_${userId.replace(/-/g, '')}`;
-}
+/** The rep's softphone identity — shared with the Voice token route (routes/telephony.ts). */
+export { repClientIdentity };
 
 export interface TransferTwimlInput {
   /** The hand-off rep's users.id. */

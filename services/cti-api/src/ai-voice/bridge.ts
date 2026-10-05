@@ -12,7 +12,8 @@
  * `session.update` always goes first. Audio payloads are never logged.
  *
  * Once the call is closing (a hangup/transfer tool result, or `silence()`) the
- * agent is never asked to speak again. If the call ends from the OpenAI side
+ * agent is never asked to speak again; a hangup/transfer result also turns off
+ * VAD auto-responses (`create_response: false`). If the call ends from the OpenAI side
  * or hits its time limit, the bridge silences the agent, reports `onEnd`, and
  * closes both sockets after END_GRACE_MS unless the service calls `stop()`
  * first — closing the stream lets Twilio continue past </Connect> and end the
@@ -21,7 +22,7 @@
 import { obj, openAiErrorFields, parseFrame, str, type Msg } from './bridge-frames.js';
 import { Outbox } from './bridge-outbox.js';
 import { PlaybackTracker, type ClearTimer, type SetTimer, type Truncation } from './bridge-playback.js';
-import { openerItem, sessionUpdate, truncate, type ReasoningEffort, type VadEagerness } from './bridge-session.js';
+import { openerItem, sessionUpdate, stopAutoResponses, truncate, type ReasoningEffort, type VadEagerness } from './bridge-session.js';
 import { errText, functionCalls, runToolBatch, type BridgeLog, type ToolResult } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
 
@@ -88,6 +89,8 @@ export class AiCallBridge {
   private silenced = false;
   /** No further `response.create` once a tool ended the conversation or the agent was silenced. */
   private closing = false;
+  /** VAD auto-responses were turned off (sent once, when a tool ends the conversation). */
+  private autoResponsesOff = false;
   private truncated = new Set<string>();
   private ended = false;
   private stopped = false;
@@ -288,10 +291,18 @@ export class AiCallBridge {
     this.toolChain = this.toolChain
       .then(async () => {
         const carryOn = await runToolBatch(calls, deps);
-        if (!carryOn) this.closing = true;
+        if (!carryOn) this.closeConversation();
         if (!this.closing) this.sendOpenAi({ type: 'response.create' });
       })
       .catch((e: unknown) => this.hooks.log.error({ err: errText(e) }, 'ai-voice bridge: tool batch failed'));
+  }
+
+  /** A hangup/transfer result: latch closing and stop VAD from starting a response during the drain. */
+  private closeConversation(): void {
+    this.closing = true;
+    if (this.autoResponsesOff) return;
+    this.autoResponsesOff = true;
+    this.sendOpenAi(stopAutoResponses(this.opts));
   }
 
   // ── sockets & lifecycle ────────────────────────────────────────────────────

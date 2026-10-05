@@ -121,13 +121,14 @@ describe('gateAiCall', () => {
 
   it('does not count dials for an uncapped or unknown-state number', async () => {
     for (const to of [CA, '+442071838750']) {
-      const c: Case = { name: '', isAdmin: true, target: test(to), want: blockedBy('not_admin_for_test') };
+      const c: Case = { name: '', isAdmin: true, target: test(to), want: { ok: true, toE164: to, fromE164: FROM } };
       const d = deps(c);
-      await gateAiCall(
+      const got = await gateAiCall(
         db,
         { cfg: { ...baseCfg, AI_VOICE_TEST_NUMBERS: to } as AppConfig, orgId: 'O1', userId: 'U1', isAdmin: true, now: NOW, target: c.target },
         d,
       );
+      expect(got.ok).toBe(true);
       expect(d.dailyDialCount).not.toHaveBeenCalled();
     }
   });

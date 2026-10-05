@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CallTaskInput } from '../salesforce/client.js';
+import { SalesforceUnauthorizedError, type CallTaskInput } from '../salesforce/client.js';
 import type { OwnershipSnapshot } from '../salesforce/ownership.js';
 import {
   CALLBACK_TASK_STATUS,
@@ -207,6 +207,46 @@ describe('logCallbackTask', () => {
   });
 });
 
+describe('logCallbackTask: a hand-off user whose own Salesforce connection is gone', () => {
+  const OPP = '0065e00000AbCdEFGH';
+  const oppRow = () => row({ sfObject: 'Opportunity', sfRecordId: OPP, outcome: 'transfer_failed' });
+
+  beforeEach(() => {
+    // The hand-off user owns the Opportunity; the starter is its lead manager, so the starter may write on it.
+    owners.set(OPP, { type: 'Opportunity', ownerId: SF_OWNER, leadManagerId: SF_STARTER });
+    const lookup = sf.fetchOwnership;
+    sf.fetchOwnership = vi.fn(async (userId: string, id: string) => {
+      if (userId === OWNER) throw new SalesforceUnauthorizedError();
+      return lookup(userId, id);
+    });
+  });
+
+  it('creates it as the starter, assigned to the hand-off user (OwnerId), still Open', async () => {
+    expect(await logCallbackTask(oppRow(), SUMMARY, deps)).toBe('00T1');
+    expect(created).toHaveLength(1);
+    expect(created[0]!.userId).toBe(STARTER);
+    expect(created[0]!.input.customFields).toEqual({ Status: CALLBACK_TASK_STATUS, OwnerId: SF_OWNER });
+  });
+
+  it('if Salesforce refuses the OwnerId, it is created unassigned (the starter owns it)', async () => {
+    const create = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Salesforce Task create failed: [{"errorCode":"INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY","fields":["OwnerId"]}]'))
+      .mockResolvedValueOnce({ taskId: '00T7' });
+    sf.createCallTask = create;
+    expect(await logCallbackTask(oppRow(), SUMMARY, deps)).toBe('00T7');
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[1]![0]).toBe(STARTER);
+    expect((create.mock.calls[1]![1] as CallTaskInput).customFields).toEqual({ Status: CALLBACK_TASK_STATUS });
+  });
+
+  it('a hand-off user who is the starter gets no OwnerId', async () => {
+    sf.fetchOwnership = vi.fn(async () => ({ type: 'Opportunity' as const, ownerId: SF_STARTER }));
+    await logCallbackTask({ ...oppRow(), handoffUserId: STARTER }, SUMMARY, deps);
+    expect(created[0]!.input.customFields).toEqual({ Status: CALLBACK_TASK_STATUS });
+  });
+});
+
 describe('withSalesforceEffects', () => {
   it('a missed transfer on a call that already finalized creates the callback Task itself', async () => {
     await store.update(ID, { endedAt: new Date(), outcome: 'transfer_failed' } as never);
@@ -216,6 +256,25 @@ describe('withSalesforceEffects', () => {
     await effects.transferFailed(ctx, { finalized: true });
     await vi.waitFor(() => expect(created).toHaveLength(1));
     expect(created[0]!.input.subject).toBe('AI call: callback requested');
+  });
+
+  it('a late missed transfer re-renders the finalized summary: the did-not-connect line and the new outcome words', async () => {
+    const stale = `Jane wants an offer.\n\nOutcome: Transferred to rep\nAI call id: ${ID}`;
+    await store.update(ID, { endedAt: new Date(), outcome: 'transfer_failed', summary: stale } as never);
+    owners.set(LEAD, { type: 'Lead', ownerId: SF_OWNER });
+    const effects = withSalesforceEffects(defaultToolEffects, deps);
+    const ctx = { store, aiCallId: ID, orgId: 'o1', toE164: '+16195550100', log: silentLog, now: () => new Date() };
+    await effects.transferFailed(ctx, { finalized: true });
+    const want = [
+      'Jane wants an offer.',
+      'Transfer to a specialist did not connect — call them back.',
+      '',
+      'Outcome: Transfer missed — callback promised',
+      `AI call id: ${ID}`,
+    ].join('\n');
+    expect(store.rows.get(ID)?.summary).toBe(want);
+    await vi.waitFor(() => expect(created).toHaveLength(1));
+    expect(created[0]!.input.description?.startsWith(want)).toBe(true);
   });
 
   it('on a live call it leaves the callback Task to finalize', async () => {

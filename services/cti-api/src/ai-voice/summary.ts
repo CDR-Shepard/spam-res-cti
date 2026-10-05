@@ -102,6 +102,51 @@ export function formatSummary(i: { narrative: string; qualification: unknown; ou
   ].join('\n');
 }
 
+/** The lines of `text` that a summary rewrite must keep ("Callback requested: …", the missed-transfer line). */
+export function carriedLines(text: string | null | undefined): string[] {
+  return (text ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => CARRIED_LINE.test(l));
+}
+
+/** Where formatSummary's block (Qualification / Outcome / AI call id) starts in `head`; -1 when absent. */
+function blockStart(head: string): number {
+  for (const tag of ['Qualification:\n', 'Outcome: ']) {
+    if (head.startsWith(tag)) return 0;
+    const i = head.lastIndexOf(`\n\n${tag}`);
+    if (i >= 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * A stored summary re-rendered for an outcome that changed after finalize (a
+ * transfer that rang out late): its narrative — the text before the formatted
+ * block, or all of it when it was never formatted — plus any line appended
+ * after the block and the `extra` lines it lacks, then the block again with
+ * the new outcome words.
+ */
+export function reformatSummary(
+  stored: string | null,
+  i: { qualification: unknown; outcome: string | null; aiCallId: string; extra?: readonly string[] },
+): string {
+  const s = stored ?? '';
+  const marker = `AI call id: ${i.aiCallId}`;
+  const end = s.lastIndexOf(marker);
+  const head = end >= 0 ? s.slice(0, end) : s;
+  const start = end >= 0 ? blockStart(head) : -1;
+  const body = (start >= 0 ? head.slice(0, start) : head).trim();
+  const after = end >= 0 ? s.slice(end + marker.length).split('\n') : [];
+  const lines = body ? body.split('\n') : [];
+  for (const raw of [...after, ...(i.extra ?? [])]) {
+    const line = raw.trim();
+    if (line && !lines.some((l) => l.trim() === line)) lines.push(line);
+  }
+  const narrative = lines.join('\n').trim() || `AI call — ${outcomeWords(i.outcome)}`;
+  return formatSummary({ narrative, qualification: i.qualification, outcome: i.outcome, aiCallId: i.aiCallId });
+}
+
 function fallbackNarrative(i: SummaryInput): string {
   return i.toolSummary?.trim() || `AI call — ${outcomeWords(i.outcome)}`;
 }
@@ -138,7 +183,7 @@ async function claudeNarrative(i: SummaryInput, client: SummaryClient, deps: Sum
 export async function summarizeAiCall(i: SummaryInput, deps: SummaryDeps): Promise<string> {
   const callerSpoke = spokenLines(i.transcript).some((l) => l.role === 'caller');
   const fromModel = deps.client && callerSpoke ? await claudeNarrative(i, deps.client, deps) : null;
-  const carried = (i.toolSummary ?? '').split('\n').filter((l) => CARRIED_LINE.test(l.trim()));
+  const carried = carriedLines(i.toolSummary);
   const narrative = fromModel ? [fromModel, ...carried].join('\n') : fallbackNarrative(i);
   return formatSummary({ narrative, qualification: i.qualification, outcome: i.outcome, aiCallId: i.aiCallId });
 }

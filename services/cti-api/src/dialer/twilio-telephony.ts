@@ -181,6 +181,13 @@ export function dialerConferenceTwiml(from: string, opts: ConferenceOptions = {}
   return m ? bridgeTwiml(m[1]!, true, opts) : null;
 }
 
+/** A rep's softphone (Twilio Client) identity: `rep_` + the users.id with its
+ *  dashes stripped. The ONE place it is built — the Voice token route
+ *  (routes/telephony.ts) mints it, the AI voice transfer dials it. */
+export function repClientIdentity(userId: string): string {
+  return `rep_${userId.replace(/-/g, '')}`;
+}
+
 /** The `users.id` behind a signed `From: client:rep_<32 hex>` identity — the
  *  token route (routes/telephony.ts) mints `rep_` + the uuid with its dashes
  *  stripped, so this puts them back. Null for any other shape, so a caller can

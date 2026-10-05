@@ -23,7 +23,7 @@ import {
   TWILIO_RECORDING_MEDIA_RE,
   signedCallbackUrl,
 } from '../telephony/webhooks.js';
-import { DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repUserIdFromClientIdentity, TwilioDialerTelephony } from '../dialer/twilio-telephony.js';
+import { DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, repClientIdentity, repUserIdFromClientIdentity, TwilioDialerTelephony } from '../dialer/twilio-telephony.js';
 import { mayJoinNamedRun } from '../dialer/join-guard.js';
 import { recordRepLegEnded, recordRepLegJoined } from '../dialer/rep-legs.js';
 
@@ -236,7 +236,7 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     try {
       const token = await provider.createClientToken({
         userId: session.userId,
-        identity: `rep_${session.userId.replace(/-/g, '')}`,
+        identity: repClientIdentity(session.userId),
         platform: body.data.platform,
       });
       return token;

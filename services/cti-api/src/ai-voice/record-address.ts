@@ -28,9 +28,15 @@ const STANDARD: Record<Exclude<AiCallObject, 'Opportunity'>, Record<keyof Addres
   Contact: { street: 'MailingStreet', city: 'MailingCity', state: 'MailingState', zip: 'MailingPostalCode' },
 };
 
+/**
+ * Any `*Property*Address*__c` text field that is not a previous / prior / old /
+ * mailing address. Ranked above the generic `Address__c`.
+ */
+const PROPERTY_ADDRESS = /^(?!\w*(?:previous|prior|old|mailing))\w*property\w*address\w*__c$/i;
+
 /** Opportunity custom fields, most specific first. */
 const OPPORTUNITY: Record<keyof AddressFields, readonly Matcher[]> = {
-  street: ['Property_Address__c', 'Property_Street__c', 'Street__c', 'Address__c', /^\w*property\w*address\w*__c$/i],
+  street: ['Property_Address__c', 'Property_Street__c', 'Street__c', PROPERTY_ADDRESS, 'Address__c'],
   city: ['Property_City__c', 'City__c'],
   state: ['Property_State__c', 'State__c'],
   zip: ['Property_Zip__c', 'Zip__c', 'Postal_Code__c'],

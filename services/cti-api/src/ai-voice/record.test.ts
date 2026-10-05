@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DialTarget } from '../salesforce/record-phone.js';
+import { pickAddressFields } from './record-address.js';
 import { NOTES_MAX_CHARS, clearDescribeCache, loadAiCallRecord, type RecordDeps } from './record.js';
 
 const LEAD_ID = '00Q5e00000AbCdEFGH';
@@ -272,5 +273,26 @@ describe('loadAiCallRecord', () => {
     expect(soql.find((q) => q.includes('FROM Opportunity'))).toBe(
       `SELECT Id, AI_Call_Consent__c, Name FROM Opportunity WHERE Id = '${OPP_ID}' LIMIT 1`,
     );
+  });
+});
+
+describe('pickAddressFields (Opportunity street)', () => {
+  const text = (name: string) => ({ name, type: 'string' });
+
+  it('ranks a *Property*Address*__c field above the generic Address__c', () => {
+    const got = pickAddressFields('Opportunity', [text('Address__c'), text('Subject_Property_Address__c')]);
+    expect(got.street).toBe('Subject_Property_Address__c');
+  });
+
+  it('ignores previous / prior / old / mailing property-address fields', () => {
+    for (const skip of ['Previous_Property_Address__c', 'Prior_Property_Address__c', 'Old_Property_Address__c', 'Mailing_Property_Address__c']) {
+      expect(pickAddressFields('Opportunity', [text(skip), text('Address__c')]).street).toBe('Address__c');
+      expect(pickAddressFields('Opportunity', [text(skip)]).street).toBeNull();
+    }
+  });
+
+  it('still prefers the exact Property_Address__c', () => {
+    const got = pickAddressFields('Opportunity', [text('Subject_Property_Address__c'), text('Property_Address__c')]);
+    expect(got.street).toBe('Property_Address__c');
   });
 });

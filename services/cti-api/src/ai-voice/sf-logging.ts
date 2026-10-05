@@ -12,8 +12,9 @@
  *   logCallbackTask  a promised call back (outcome qualified_callback or
  *                    transfer_failed): an OPEN Task for the hand-off user
  *                    (the record owner), created with their own Salesforce
- *                    connection so it is theirs; the starter's when they have
- *                    none. createCallTask has no OwnerId input.
+ *                    connection so it is theirs; if that connection is gone,
+ *                    created by the starter with OwnerId (customFields) set
+ *                    to them; the starter's when they have no Salesforce user.
  *
  * No CallDurationInSeconds: the AI's talk time is not the rep's, and the
  * reps' talk-time reports sum that field.
@@ -150,41 +151,83 @@ export async function logAiCallTask(row: AiCallRow, summary: string, deps: SfLog
   }
 }
 
-/** The hand-off user when they can write to Salesforce, else the starter. */
-async function callbackAuthor(row: AiCallRow, deps: SfLogDeps): Promise<{ userId: string; sfUserId: string } | null> {
-  for (const userId of [row.handoffUserId, row.startedBy]) {
-    if (!userId) continue;
-    const sfUserId = await deps.sf.sfUserIdFor(userId);
-    if (sfUserId) return { userId, sfUserId };
-  }
-  return null;
+interface Author {
+  userId: string;
+  sfUserId: string;
+}
+
+async function authorFor(userId: string | null, deps: SfLogDeps): Promise<Author | null> {
+  if (!userId) return null;
+  const sfUserId = await deps.sf.sfUserIdFor(userId);
+  return sfUserId ? { userId, sfUserId } : null;
 }
 
 const statusRefused = (e: unknown): boolean => /RESTRICTED_PICKLIST|bad value for restricted picklist/i.test(errText(e));
+const ownerRefused = (e: unknown): boolean => /OwnerId/.test(errText(e));
 
+/** The custom field Salesforce refused (one we set and can live without), or null. */
+function refusedField(e: unknown, input: CallTaskInput): 'OwnerId' | 'Status' | null {
+  const fields = input.customFields ?? {};
+  if ('OwnerId' in fields && ownerRefused(e)) return 'OwnerId';
+  if ('Status' in fields && statusRefused(e)) return 'Status';
+  return null;
+}
+
+/**
+ * Create, dropping a refused OwnerId (→ unassigned: the author owns it) or
+ * Open status (→ completed) and trying again. A refused create never lands,
+ * so each retry is safe; each drops one field, so at most two retries.
+ */
+async function createTolerant(author: Author, input: CallTaskInput, row: AiCallRow, deps: SfLogDeps): Promise<string> {
+  try {
+    return await create(author.userId, input, deps);
+  } catch (e) {
+    const field = refusedField(e, input);
+    if (!field) throw e;
+    deps.log.warn({ aiCallId: row.id, field }, 'ai-voice: callback Task field refused, creating it without');
+    const { [field]: _refused, ...rest } = input.customFields ?? {};
+    return createTolerant(author, { ...input, customFields: rest }, row, deps);
+  }
+}
+
+async function createCallbackAs(author: Author, links: TaskLinks, input: CallTaskInput, row: AiCallRow, deps: SfLogDeps): Promise<string | null> {
+  if (!(await allowed(author.userId, author.sfUserId, links, deps))) {
+    deps.log.info({ aiCallId: row.id }, 'ai-voice: callback Task not allowed on this record (ownership rule)');
+    return null;
+  }
+  return createTolerant(author, input, row, deps);
+}
+
+/**
+ * The callback Task belongs to the hand-off user: created with their own
+ * Salesforce connection. When they have a Salesforce user id but their
+ * connection is gone (missing / revoked → an auth error), the starter creates
+ * it with `OwnerId` = the hand-off user, so it is still assigned to them (and
+ * unassigned — the starter's — if Salesforce refuses that OwnerId). No
+ * Salesforce user for the hand-off user: the starter's, as before.
+ */
 export async function logCallbackTask(row: AiCallRow, summary: string, deps: SfLogDeps): Promise<string | null> {
   const links = recordLinks(row);
   if (!links || !row.outcome || !CALLBACK_OUTCOMES.has(row.outcome)) return null;
   try {
-    const author = await callbackAuthor(row, deps);
-    if (!author) {
+    const input = callbackTaskInput(row, links, summary, deps.now());
+    const handoff = await authorFor(row.handoffUserId, deps);
+    if (handoff) {
+      try {
+        return await createCallbackAs(handoff, links, input, row, deps);
+      } catch (e) {
+        if (handoff.userId === row.startedBy || !isSalesforceAuthError(e)) throw e;
+        deps.log.warn({ aiCallId: row.id }, "ai-voice: hand-off user's Salesforce connection is unusable — the starter creates the callback Task for them");
+      }
+    }
+    const starter = await authorFor(row.startedBy, deps);
+    if (!starter) {
       deps.log.warn({ aiCallId: row.id }, 'ai-voice: nobody with Salesforce to own the callback Task');
       return null;
     }
-    if (!(await allowed(author.userId, author.sfUserId, links, deps))) {
-      deps.log.info({ aiCallId: row.id }, 'ai-voice: callback Task not allowed on this record (ownership rule)');
-      return null;
-    }
-    const input = callbackTaskInput(row, links, summary, deps.now());
-    try {
-      return await create(author.userId, input, deps);
-    } catch (e) {
-      if (!statusRefused(e)) throw e;
-      // A rejected picklist value never creates the Task, so one retry is safe.
-      deps.log.warn({ aiCallId: row.id }, 'ai-voice: open Task status refused, creating the callback Task completed');
-      const { customFields: _status, ...completed } = input;
-      return await create(author.userId, completed, deps);
-    }
+    const assignTo = handoff && handoff.sfUserId !== starter.sfUserId ? handoff.sfUserId : null;
+    const owned = assignTo ? { ...input, customFields: { ...input.customFields, OwnerId: assignTo } } : input;
+    return await createCallbackAs(starter, links, owned, row, deps);
   } catch (e) {
     deps.log.error({ aiCallId: row.id, auth: isSalesforceAuthError(e), err: errText(e) }, 'ai-voice: callback Task failed');
     return null;

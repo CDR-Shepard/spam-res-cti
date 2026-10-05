@@ -22,6 +22,11 @@ const TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
 
 export const OPENER_PROMPT = '(The person picked up but has not spoken yet. Open the call now.)';
 
+/** Semantic VAD; `createResponse: false` stops the server starting a response when the caller stops talking. */
+function turnDetection(eagerness: VadEagerness, createResponse: boolean): object {
+  return { type: 'semantic_vad', eagerness, create_response: createResponse, interrupt_response: true };
+}
+
 export function sessionUpdate(s: SessionSettings): object {
   const reasoning = s.model.startsWith(REASONING_MODEL_PREFIX) ? { reasoning: { effort: s.reasoningEffort } } : {};
   return {
@@ -37,18 +42,25 @@ export function sessionUpdate(s: SessionSettings): object {
           format: AUDIO_FORMAT,
           noise_reduction: { type: 'near_field' },
           transcription: { model: TRANSCRIPTION_MODEL, language: 'en' },
-          turn_detection: {
-            type: 'semantic_vad',
-            eagerness: s.vadEagerness,
-            create_response: true,
-            interrupt_response: true,
-          },
+          turn_detection: turnDetection(s.vadEagerness, true),
         },
         output: { format: AUDIO_FORMAT, voice: s.voice },
       },
       tools: s.tools,
       tool_choice: 'auto',
     },
+  };
+}
+
+/**
+ * Sent once the call is closing (hangup / transfer): the same turn detection
+ * with `create_response: false`, so the caller talking during the final
+ * playback drain cannot start a new agent response.
+ */
+export function stopAutoResponses(s: Pick<SessionSettings, 'vadEagerness'>): object {
+  return {
+    type: 'session.update',
+    session: { type: 'realtime', audio: { input: { turn_detection: turnDetection(s.vadEagerness, false) } } },
   };
 }
 

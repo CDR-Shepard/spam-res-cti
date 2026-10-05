@@ -19,6 +19,7 @@ import { END_CALL_OUTCOMES, QUALIFICATION_FIELDS, TRANSFER_REASONS } from './pro
 import type { BridgeLog, ToolResult } from './bridge.js';
 import type { ToolName } from './prompt.js';
 import type { AiCallOutcome, AiCallStore } from './store.js';
+import { reformatSummary } from './summary.js';
 import { TRANSFER_TIME_LIMIT_SECONDS, type AiVoiceTwilio } from './twilio.js';
 
 export interface ToolCtx {
@@ -67,6 +68,8 @@ const QUALIFICATION_MAX = 500;
 const WHEN_MAX = 200;
 const NOTE_MAX = 500;
 const WRONG_NUMBER = /wrong\s*number/i;
+/** The summary line a transfer that did not connect leaves (summary.ts carries it through rewrites). */
+export const TRANSFER_MISSED_LINE = 'Transfer to a specialist did not connect — call them back.';
 const ISO_8601 = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -113,8 +116,18 @@ export const defaultToolEffects: ToolEffects = {
     await ctx.store.update(ctx.aiCallId, { callbackAt: parseCallbackAt(req.when) });
     await ctx.store.appendSummary(ctx.aiCallId, `Callback requested: ${req.when}${req.note ? ` — ${req.note}` : ''}`);
   },
-  async transferFailed(ctx) {
-    await ctx.store.appendSummary(ctx.aiCallId, 'Transfer to a specialist did not connect — call them back.');
+  async transferFailed(ctx, info) {
+    if (!info.finalized) return ctx.store.appendSummary(ctx.aiCallId, TRANSFER_MISSED_LINE);
+    // Finalize already wrote the formatted summary with the old outcome: re-render it.
+    const row = await ctx.store.get(ctx.aiCallId);
+    if (!row) return;
+    const summary = reformatSummary(row.summary, {
+      qualification: row.qualification,
+      outcome: row.outcome,
+      aiCallId: row.id,
+      extra: [TRANSFER_MISSED_LINE],
+    });
+    await ctx.store.update(ctx.aiCallId, { summary });
   },
 };
 

@@ -43,7 +43,8 @@ const DIGIT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seve
 const TEST_CALL_LINE = 'Just so you know, this is a test call.';
 
 /**
- * Strip markup characters (`#`, quotes, angle brackets, backticks), collapse
+ * Strip markup characters (`#`, quotes, angle brackets, backticks; an
+ * address's `#` has already become "unit"), collapse
  * whitespace (incl. newlines) and cap, so a record value cannot start a new
  * prompt section, close a quoted line, or open a tag.
  */
@@ -77,11 +78,21 @@ const STREET_SUFFIX: Readonly<Record<string, string>> = {
   cir: 'Circle', pl: 'Place', hwy: 'Highway', pkwy: 'Parkway', ter: 'Terrace', trl: 'Trail', way: 'Way',
 };
 
-/** Expand a trailing street-type abbreviation so text-to-speech reads it naturally. */
+/** `#` in an address is said "unit" ("Oak St #5", "Oak St Unit #5" → "Oak St unit 5"), not dropped. */
+function unitWord(address: string | null): string | null {
+  return address === null ? null : address.replace(/(?:\bunit\s*)?#\s*/gi, ' unit ');
+}
+
+/**
+ * Expand the street-type abbreviation before any trailing "unit <n>" so
+ * text-to-speech reads it naturally ("1234 Oak St unit 5" → "1234 Oak Street unit 5").
+ */
 function spokenStreet(street: string): string {
-  const m = /^(.*\s)([A-Za-z]+)\.?$/.exec(street);
+  const u = /^(.*?)(\s+unit\s+\S+)$/i.exec(street);
+  const [base, unit] = u ? [u[1]!, u[2]!] : [street, ''];
+  const m = /^(.*\s)([A-Za-z]+)\.?$/.exec(base);
   const full = m ? STREET_SUFFIX[m[2]!.toLowerCase()] : undefined;
-  return m && full ? `${m[1]}${full}` : street;
+  return `${m && full ? `${m[1]}${full}` : base}${unit}`;
 }
 
 /**
@@ -115,7 +126,7 @@ interface Ctx {
 }
 
 function context(p: PromptInput): Ctx {
-  const address = oneLine(p.address, ADDRESS_MAX);
+  const address = oneLine(unitWord(p.address), ADDRESS_MAX);
   return {
     agent: oneLine(p.agentName, LABEL_MAX) ?? 'Alex',
     company: oneLine(p.companyName, LABEL_MAX) ?? 'our company',
@@ -260,7 +271,7 @@ function flowSection(c: Ctx): string {
 function callbackRule(c: Ctx): string {
   if (!c.phone) return '';
   return `
-- Callback number: before ending any call where the person wasn't transferred, give our callback number once, spoken naturally, as part of your goodbye — e.g. "If anything comes up, you can reach us at ${c.phone.written}." Also give it whenever they ask "What number is this?" or "How do I reach you?"`;
+- Callback number: before ending any call where the person wasn't transferred — except emergencies, threats or abuse, do-not-call goodbyes, or when they've already hung up — give our callback number once, spoken naturally, as part of your goodbye — e.g. "If anything comes up, you can reach us at ${c.phone.spoken}." Also give it whenever they ask "What number is this?" or "How do I reach you?"`;
 }
 
 const DO_NOT_CALL = `# Do-not-call (highest priority)

@@ -3,6 +3,7 @@ import {
   SUMMARY_MAX_TOKENS,
   TRANSCRIPT_CAP,
   formatSummary,
+  reformatSummary,
   renderTranscript,
   summarizeAiCall,
   summaryClientFor,
@@ -35,6 +36,29 @@ describe('formatSummary', () => {
   it('no Qualification block when nothing was captured', () => {
     expect(formatSummary({ narrative: 'No answer.', qualification: {}, outcome: 'no_answer', aiCallId: ID })).toBe(
       ['No answer.', '', 'Outcome: No answer', `AI call id: ${ID}`].join('\n'),
+    );
+  });
+});
+
+describe('reformatSummary (an outcome that changed after finalize)', () => {
+  const MISSED = 'Transfer to a specialist did not connect — call them back.';
+  const q = { motivation: 'relocating' };
+  const formatted = formatSummary({ narrative: 'Jane wants an offer.', qualification: q, outcome: 'qualified_transferred', aiCallId: ID });
+  const want = formatSummary({ narrative: `Jane wants an offer.\n${MISSED}`, qualification: q, outcome: 'transfer_failed', aiCallId: ID });
+
+  it('keeps the narrative, adds the line, and re-renders the block with the new outcome words', () => {
+    expect(reformatSummary(formatted, { qualification: q, outcome: 'transfer_failed', aiCallId: ID, extra: [MISSED] })).toBe(want);
+  });
+
+  it('moves a line appended after the block into the narrative, once', () => {
+    const appended = `${formatted}\n${MISSED}`;
+    expect(reformatSummary(appended, { qualification: q, outcome: 'transfer_failed', aiCallId: ID, extra: [MISSED] })).toBe(want);
+  });
+
+  it('formats a raw (never formatted) summary, and falls back to "AI call — <outcome>" when empty', () => {
+    expect(reformatSummary('Jane wants an offer.', { qualification: q, outcome: 'transfer_failed', aiCallId: ID, extra: [MISSED] })).toBe(want);
+    expect(reformatSummary(null, { qualification: {}, outcome: 'transfer_failed', aiCallId: ID })).toBe(
+      formatSummary({ narrative: 'AI call — Transfer missed — callback promised', qualification: {}, outcome: 'transfer_failed', aiCallId: ID }),
     );
   });
 });

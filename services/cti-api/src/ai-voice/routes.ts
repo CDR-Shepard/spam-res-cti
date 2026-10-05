@@ -11,10 +11,9 @@
  * Dependencies are injectable (`overrides`) so tests never touch Twilio,
  * OpenAI, Salesforce or the database.
  */
-import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { resolveSession } from '@cti/auth';
+import { resolveSession, type SessionUser } from '@cti/auth';
 import { getDb } from '@cti/db';
 import { aiVoiceAvailable, loadConfig, parseTestNumbers } from '../config.js';
 import type { Db } from '../dialer/pick-did.js';
@@ -62,12 +61,25 @@ const ListQuery = z.object({
   limit: z.coerce.number().int().min(1).max(LIST_LIMIT_MAX).default(LIST_LIMIT_DEFAULT),
 });
 
-/** One rate bucket per bearer token (a rep's tabs share it), hashed; per IP without one. */
-export function aiCallRateKey(req: Pick<FastifyRequest, 'headers' | 'ip'>): string {
-  const auth = req.headers.authorization;
-  if (!auth) return `ai-call-ip:${req.ip}`;
-  const token = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : auth;
-  return `ai-call:${createHash('sha256').update(token).digest('hex')}`;
+/** The request's session, resolved once and shared by the rate-limit key and the handler. */
+const requestSessions = new WeakMap<object, Promise<SessionUser | null>>();
+
+function sessionFor(req: Pick<FastifyRequest, 'headers'>): Promise<SessionUser | null> {
+  const known = requestSessions.get(req);
+  if (known) return known;
+  const pending = resolveSession(req.headers.authorization);
+  requestSessions.set(req, pending);
+  return pending;
+}
+
+/**
+ * One rate bucket per signed-in user (all their tabs and devices share it);
+ * per IP when there is no session (or the lookup fails — the handler then
+ * answers 401 / 500 itself).
+ */
+export async function aiCallRateKey(req: Pick<FastifyRequest, 'headers' | 'ip'>): Promise<string> {
+  const session = await sessionFor(req).catch(() => null);
+  return session ? `ai-call-user:${session.userId}` : `ai-call-ip:${req.ip}`;
 }
 
 /** HTTP status + body for a start result. */
@@ -114,7 +126,7 @@ export async function registerAiVoiceRoutes(app: FastifyInstance, overrides: Par
     '/ai-calls',
     { config: { rateLimit: { max: START_RATE_MAX, timeWindow: '1 minute', keyGenerator: aiCallRateKey } } },
     async (req, reply) => {
-      const session = await resolveSession(req.headers.authorization);
+      const session = await sessionFor(req);
       if (!session) return reply.code(401).send({ error: 'unauthorized' });
       const body = StartBody.safeParse(req.body ?? {});
       if (!body.success) return reply.code(400).send({ error: 'invalid_body' });

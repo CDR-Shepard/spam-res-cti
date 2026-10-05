@@ -13,7 +13,7 @@ vi.mock('../config.js', () => ({
   }),
 }));
 
-import { bridgeTwiml, callEndFrom, conferenceName, DIALER_RECORDING_PATH, DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, RECORDING_RETRY_DELAY_MS, repUserIdFromClientIdentity, TwilioDialerTelephony, waitUrlFor, type TwilioDialerClient } from './twilio-telephony.js';
+import { bridgeTwiml, callEndFrom, conferenceName, DIALER_RECORDING_PATH, DIALER_REJOIN_PATH, dialerConferenceTwiml, dialerRejoinUrl, RECORDING_RETRY_DELAY_MS, repClientIdentity, repUserIdFromClientIdentity, TwilioDialerTelephony, waitUrlFor, type TwilioDialerClient } from './twilio-telephony.js';
 
 // ---------------------------------------------------------------------------
 // conferenceName / bridgeTwiml — pure
@@ -381,6 +381,12 @@ describe('hold music per rep — the choice becomes the rep leg\'s waitUrl', () 
   it('dialerRejoinUrl is the public URL of the rejoin route — the one string Twilio signs and the route validates', () => {
     expect(DIALER_REJOIN_PATH).toBe('/telephony/twilio/dialer-conference-rejoin');
     expect(dialerRejoinUrl()).toBe('https://api.test.example/telephony/twilio/dialer-conference-rejoin');
+  });
+
+  it('repClientIdentity is rep_ + the users.id without dashes, and repUserIdFromClientIdentity reverses it', () => {
+    const id = 'c9c45940-0f17-4c1e-bb3e-d084ba93eb86';
+    expect(repClientIdentity(id)).toBe('rep_c9c459400f174c1ebb3ed084ba93eb86');
+    expect(repUserIdFromClientIdentity(`client:${repClientIdentity(id)}`)).toBe(id);
   });
 
   it('repUserIdFromClientIdentity restores the dashed users.id from the 32-hex identity, null for anything else', () => {
