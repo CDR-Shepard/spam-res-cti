@@ -332,7 +332,7 @@ Set any of these with `railway variables --set "NAME=value" --service @cti/api`.
 | `timeout` / `network` | no answer within 20 seconds, or unreachable: private networking |
 | `bad_response` | a 200 whose body outreach-api cannot read: the services are on different versions |
 
-A transport failure never uses up the lead's attempts: the pacer retries with the same key until cti-api answers. A 409 `idempotency_conflict` is not a transport failure: the same key arrived with a different body. The log shows `result: retry:idempotency_conflict`, and the pacer drops that key and retries once with a new one, no sooner than 10 minutes later.
+A transport failure never uses up the lead's attempts: the pacer retries with the same key until cti-api answers. A 409 `idempotency_conflict` is not a transport failure: the same key arrived with a different body. The pacer first reads what cti-api stored under that key in `ai_call_requests` (shared database, read-only): a placed call is linked to the touch, a request still in flight keeps the key (`retry:in_flight`), and only when no call was placed under it does the log show `result: retry:idempotency_conflict` and the pacer retry once with a new key, no sooner than 10 minutes later.
 
 To confirm by hand, probe the link from outreach-api's shell (`railway ssh --service outreach-api`):
 
