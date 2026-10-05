@@ -28,6 +28,9 @@
 --   touch_days         Days after enrollment of each touch; default 6 touches
 --                      over 14 days.
 --   approvals_remaining  AI-written messages an admin still approves (phase 2).
+--   tasks_checked_at   Cursor of the refresh's Task check (Tasks logged since are
+--                      re-triaged). Moves only when the check succeeds, so a
+--                      failed check loses no window.
 -- crm_records          One row per Salesforce record per tenant. Notes text is
 --                      never stored — triage fetches and discards it.
 --   phones             [{ field, e164 }] in field-map order.
@@ -135,6 +138,7 @@ CREATE TABLE IF NOT EXISTS "campaigns" (
   "last_refreshed_at" timestamptz,
   "last_refresh_error" text,
   "refresh_started_at" timestamptz,
+  "tasks_checked_at" timestamptz,
   "created_by" uuid,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "updated_at" timestamptz NOT NULL DEFAULT now(),

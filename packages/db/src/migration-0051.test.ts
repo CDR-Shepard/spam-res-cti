@@ -99,6 +99,7 @@ const TABLES: Record<string, string[]> = {
     '"last_refreshed_at" timestamptz',
     '"last_refresh_error" text',
     '"refresh_started_at" timestamptz',
+    '"tasks_checked_at" timestamptz',
     '"created_by" uuid',
     CREATED,
     UPDATED,

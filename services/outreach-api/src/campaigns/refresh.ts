@@ -126,6 +126,42 @@ async function idsToFetch(db: Db, client: SalesforceClient, orgId: string, sfObj
 }
 
 /**
+ * No connection, or Salesforce refused the tenant's token (A5 marks the connection broken).
+ * A `SalesforceApiError` (an outage or a bad query) is not one: it is recorded and retried.
+ */
+function isConnectionFailure(err: unknown): boolean {
+  return err instanceof CrmNotConnectedError || err instanceof SalesforceAuthError;
+}
+
+/**
+ * Marks the records that got a Task since the cursor (`tasks_checked_at`, else the last
+ * refresh) for triage. A first refresh only starts the cursor: every record is new and
+ * owed a triage anyway. The cursor moves to `now` only when the check succeeds. A failure
+ * other than an unusable connection is logged and the refresh carries on (exits and new
+ * enrollments must not wait on Task access); the window is checked again next time.
+ */
+async function checkTaskActivity(db: Db, client: SalesforceClient, campaign: CampaignRow, now: Date, log?: RunnerLogger): Promise<void> {
+  const ids = { orgId: campaign.orgId, campaignId: campaign.id };
+  const since = campaign.tasksCheckedAt ?? campaign.lastRefreshedAt;
+  const setCursor = (at: Date) => db.update(schema.campaigns).set({ tasksCheckedAt: at }).where(eq(schema.campaigns.id, campaign.id));
+  if (!since) {
+    await setCursor(now);
+    return;
+  }
+  try {
+    const flagged = await flagRecordsWithNewTasks(db, client, { campaignId: campaign.id, since });
+    if (flagged > 0) log?.info({ ...ids, flagged }, 'records with new Tasks marked for triage');
+  } catch (err) {
+    if (isConnectionFailure(err)) throw err;
+    log?.warn(ids, 'Task check failed; the refresh carries on and the same window is checked next time');
+    // Pin the window's start: the fallback (last refresh) is about to move.
+    if (!campaign.tasksCheckedAt) await setCursor(since);
+    return;
+  }
+  await setCursor(now);
+}
+
+/**
  * One campaign, one refresh. Throws on any Salesforce or database failure; the caller
  * (`refreshDueCampaigns`) decides between pausing the tenant and recording the error.
  */
@@ -150,10 +186,7 @@ export async function refreshCampaign(
   if (fetchIds.length > 0) {
     await upsertRecords(db, campaign.orgId, await fetchRecords(client, sfObject, fetchIds, fieldMap[sfObject]));
   }
-  if (deps.triage && campaign.lastRefreshedAt) {
-    const flagged = await flagRecordsWithNewTasks(db, client, { campaignId: campaign.id, since: campaign.lastRefreshedAt });
-    if (flagged > 0) log?.info({ orgId: campaign.orgId, campaignId: campaign.id, flagged }, 'records with new Tasks marked for triage');
-  }
+  if (deps.triage) await checkTaskActivity(db, client, campaign, now, log);
 
   const members = await loadRecords(db, campaign.orgId, ids);
   const bySfId = new Map(members.map((r) => [r.sfRecordId, r]));
@@ -209,13 +242,6 @@ function errorMessage(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).slice(0, MAX_ERROR_LENGTH);
 }
 
-/**
- * No connection, or Salesforce refused the tenant's token (A5 marks the connection broken).
- * A `SalesforceApiError` (an outage or a bad query) is not one: it is recorded and retried.
- */
-function isConnectionFailure(err: unknown): boolean {
-  return err instanceof CrmNotConnectedError || err instanceof SalesforceAuthError;
-}
 
 /**
  * Archived campaigns hold no one: end their open enrollments so the people's keys free up.

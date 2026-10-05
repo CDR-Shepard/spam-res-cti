@@ -38,6 +38,8 @@ function fakeSalesforce(state: {
   records: Record<string, SfRecordSnapshot>;
   /** Tasks every Task query returns. */
   tasks?: Array<{ WhoId: string | null; WhatId: string | null }>;
+  /** When set, every Task query throws it. */
+  taskError?: Error;
 }) {
   const soql: string[] = [];
   const client = {
@@ -48,7 +50,10 @@ function fakeSalesforce(state: {
         const ids = [...q.matchAll(/'([^']+)'/g)].map((m) => m[1]!);
         return ids.filter((id) => id in state.stamps).map((Id) => ({ Id, LastModifiedDate: state.stamps[Id] }));
       }
-      if (q.startsWith('SELECT WhoId, WhatId FROM Task ')) return state.tasks ?? [];
+      if (q.startsWith('SELECT WhoId, WhatId FROM Task ')) {
+        if (state.taskError) throw state.taskError;
+        return state.tasks ?? [];
+      }
       return state.members.map((Id) => ({ attributes: { type: 'Lead', url: `/services/data/v60.0/sobjects/Lead/${Id}` }, Id }));
     }),
   } as unknown as SalesforceClient;
@@ -136,14 +141,21 @@ describe.skipIf(!pgLane)('campaign refresh (real Postgres)', () => {
       async function refreshedOnce(tasks: Array<{ WhoId: string | null; WhatId: string | null }>) {
         const orgId = await seedOrg(db);
         const campaign = await seedCampaign(db, orgId);
-        const state = { members: [leadId(1), leadId(2)], stamps: {} as Record<string, string>, records: { [leadId(1)]: reachable(1), [leadId(2)]: reachable(2) }, tasks: [] as typeof tasks };
+        const state = {
+          members: [leadId(1), leadId(2)],
+          stamps: {} as Record<string, string>,
+          records: { [leadId(1)]: reachable(1), [leadId(2)]: reachable(2), [leadId(3)]: reachable(3) } as Record<string, SfRecordSnapshot>,
+          tasks: [] as typeof tasks,
+          taskError: undefined as Error | undefined,
+        };
         const sf = fakeSalesforce(state);
         await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: NOW, triage: true }, campaign);
         await db.update(schema.crmRecords).set({ triageNeeded: false, triageAttemptedAt: NOW }).where(eq(schema.crmRecords.orgId, orgId));
         state.stamps = { [leadId(1)]: STAMP_1, [leadId(2)]: STAMP_1 };
         state.tasks = tasks;
-        return { orgId, sf, campaign: await campaignById(db, campaign.id) };
+        return { orgId, sf, state, campaign: await campaignById(db, campaign.id) };
       }
+      const taskQueries = (soql: string[]) => soql.filter((q) => q.startsWith('SELECT WhoId, WhatId FROM Task '));
       const triageState = async (orgId: string) =>
         new Map((await db.select().from(schema.crmRecords).where(eq(schema.crmRecords.orgId, orgId))).map((r) => [r.sfRecordId, { needed: r.triageNeeded, attempted: r.triageAttemptedAt }]));
 
@@ -163,6 +175,44 @@ describe.skipIf(!pgLane)('campaign refresh (real Postgres)', () => {
         await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: LATER }, campaign);
         expect(sf.soql.filter((q) => q.includes('FROM Task'))).toEqual([]);
         // refreshedOnce's first refresh ran with triage on, before the campaign had a last refresh.
+      });
+
+      it('a first refresh starts the Task cursor; a successful check moves it, and the next cutoff comes from it', async () => {
+        const { sf, campaign } = await refreshedOnce([]);
+        expect(campaign.tasksCheckedAt?.toISOString()).toBe(NOW.toISOString());
+        const cursor = new Date('2026-10-05T16:00:00.000Z');
+        await db.update(schema.campaigns).set({ tasksCheckedAt: cursor }).where(eq(schema.campaigns.id, campaign.id));
+        await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: LATER, triage: true }, await campaignById(db, campaign.id));
+        expect(taskQueries(sf.soql).at(-1)).toContain('AND LastModifiedDate > 2026-10-05T15:55:00Z');
+        expect((await campaignById(db, campaign.id)).tasksCheckedAt?.toISOString()).toBe(LATER.toISOString());
+      });
+
+      it('a failed Task check is logged and the refresh carries on: exits and enrollments happen, the cursor stays, and the window is checked next time', async () => {
+        const { orgId, sf, state, campaign } = await refreshedOnce([{ WhoId: leadId(1), WhatId: null }]);
+        log.warn.mockClear();
+        state.taskError = new SalesforceApiError("INVALID_TYPE: sObject type 'Task' is not supported.", 400, null);
+        state.members = [leadId(1), leadId(3)]; // leadId(2) left, leadId(3) joined
+        const out = await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: LATER, triage: true, log }, campaign);
+        expect(out).toMatchObject({ enrolled: 1, exited: 1 });
+        expect(log.warn).toHaveBeenCalledWith({ orgId, campaignId: campaign.id }, expect.stringContaining('Task check failed'));
+        const after = await campaignById(db, campaign.id);
+        expect(after.tasksCheckedAt?.toISOString()).toBe(NOW.toISOString());
+        expect(after.lastRefreshedAt?.toISOString()).toBe(LATER.toISOString());
+
+        state.taskError = undefined;
+        const later = new Date(LATER.getTime() + 5 * 3_600_000);
+        await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: later, triage: true, log }, after);
+        expect(taskQueries(sf.soql).at(-1)).toContain('AND LastModifiedDate > 2026-10-05T14:55:00Z');
+        expect((await triageState(orgId)).get(leadId(1))).toEqual({ needed: true, attempted: null });
+      });
+
+      it('a SalesforceAuthError from the Task check still fails the refresh (the tick pauses the tenant)', async () => {
+        const { orgId, sf, state, campaign } = await refreshedOnce([]);
+        state.taskError = new SalesforceAuthError();
+        await expect(refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: LATER, triage: true }, campaign)).rejects.toBeInstanceOf(SalesforceAuthError);
+        await seedConnection(db, orgId);
+        await refreshDueCampaigns({ db, clients: async () => sf.client, now: LATER, log, triage: true });
+        expect(await campaignById(db, campaign.id)).toMatchObject({ status: 'paused', pauseReason: 'crm_broken' });
       });
 
       it('the tick passes the triage switch through to each campaign', async () => {

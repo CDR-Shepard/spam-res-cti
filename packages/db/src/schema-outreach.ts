@@ -120,6 +120,8 @@ export const campaigns = pgTable(
     lastRefreshError: text('last_refresh_error'),
     /** Claim taken by a `campaign.refresh` tick while it works on this campaign; a claim older than 30 minutes is stale. */
     refreshStartedAt: timestamp('refresh_started_at', { withTimezone: true }),
+    /** Cursor of the refresh's Task check; moves only when the check succeeds. */
+    tasksCheckedAt: timestamp('tasks_checked_at', { withTimezone: true }),
     createdBy: uuid('created_by'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
