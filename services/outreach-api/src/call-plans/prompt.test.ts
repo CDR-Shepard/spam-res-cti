@@ -59,6 +59,13 @@ describe('CALL_PLAN_SYSTEM_PROMPT', () => {
     for (const category of DoNotContactCategory.options) expect(s).toContain(category);
     expect(s).toMatch(/still be willing to sell/);
   });
+  it('P4-3: tells the model the plan fields carry no prices, amounts, offers or URLs and never script the AI as a human', () => {
+    const s = CALL_PLAN_SYSTEM_PROMPT;
+    expect(s).toMatch(/plan's own fields[^.]*must contain no prices, dollar amounts, offers or web addresses/);
+    expect(s).toMatch(/Do not write the number itself/);
+    expect(s).toMatch(/Never script the assistant as a human or as a real person/);
+    expect(s).toMatch(/evidence is the one place words copied from the data may appear as they are/);
+  });
   it('tells the model how to read an event: when it starts versus when it was logged', () => {
     expect(CALL_PLAN_SYSTEM_PROMPT).toMatch(/starts/);
     expect(CALL_PLAN_SYSTEM_PROMPT).toMatch(/logged/);
