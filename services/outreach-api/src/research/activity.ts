@@ -3,7 +3,7 @@ import { SalesforceApiError, type SalesforceClient } from '@cti/salesforce';
 import { SF_ID } from '../campaigns/records.js';
 import { RESEARCH_LIMITS as L } from './limits.js';
 import type { LinkIds } from './related.js';
-import { readSource, type SourceRead } from './salesforce-errors.js';
+import { classifyReadError, readSource, type SourceRead } from './salesforce-errors.js';
 import { clip, plainText, soqlIdList } from './text.js';
 
 export type ActivitySource = 'task' | 'event' | 'note' | 'content_note' | 'email' | 'chatter' | 'chatter_comment';
@@ -61,17 +61,18 @@ export function readEvents(client: SalesforceClient, links: LinkIds): Promise<So
     const where = whoWhat(links);
     if (!where) return { items: [], truncated: false };
     const { rows, truncated } = capped(await client.query<Row>(
-      `SELECT Id, Subject, Description, StartDateTime, EndDateTime, Location, CreatedDate FROM Event WHERE ${where} ORDER BY StartDateTime DESC NULLS LAST LIMIT ${L.events + 1}`,
+      // Ranked by CreatedDate like Tasks and Notes: StartDateTime DESC would put far-future events ahead of recent past activity.
+      `SELECT Id, Subject, Description, StartDateTime, EndDateTime, Location, CreatedDate FROM Event WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${L.events + 1}`,
     ), L.events);
     return {
       truncated,
       items: rows.map((r) => ({
         source: 'event' as const,
         id: String(r.Id),
-        at: str(r.StartDateTime) ?? str(r.CreatedDate),
+        at: str(r.CreatedDate),
         title: str(r.Subject),
         body: clip(str(r.Description) ?? '', L.noteChars).text,
-        meta: meta({ ends: r.EndDateTime, location: r.Location }),
+        meta: meta({ starts: r.StartDateTime, ends: r.EndDateTime, location: r.Location }),
       })),
     };
   });
@@ -98,19 +99,26 @@ export async function readContentNotes(client: SalesforceClient, links: LinkIds)
   const read = await readSource('content_notes', async () => {
     if (!links.parentIds.length) return { items: [], truncated: false };
     const docs = await client.query<Row>(
-      `SELECT ContentDocumentId, ContentDocument.Title, ContentDocument.LatestPublishedVersionId, ContentDocument.CreatedDate FROM ContentDocumentLink WHERE LinkedEntityId IN (${soqlIdList(links.parentIds)}) AND ContentDocument.FileType = 'SNOTE' LIMIT 100`,
+      `SELECT ContentDocumentId, ContentDocument.Title, ContentDocument.LatestPublishedVersionId, ContentDocument.CreatedDate FROM ContentDocumentLink WHERE LinkedEntityId IN (${soqlIdList(links.parentIds)}) AND ContentDocument.FileType = 'SNOTE' ORDER BY ContentDocument.CreatedDate DESC LIMIT 100`,
     );
-    const notes = docs
-      .map((d) => d.ContentDocument as Row | undefined)
-      .flatMap((doc) => (doc && typeof doc.LatestPublishedVersionId === 'string' && SF_ID.test(doc.LatestPublishedVersionId) ? [doc] : []))
+    // One note linked to the Lead, its Contact and its Opportunity comes back once per link: keep it once.
+    const byDocument = new Map<string, Row>();
+    for (const link of docs) {
+      const doc = link.ContentDocument as Row | undefined;
+      if (!doc || typeof doc.LatestPublishedVersionId !== 'string' || !SF_ID.test(doc.LatestPublishedVersionId)) continue;
+      const key = typeof link.ContentDocumentId === 'string' ? link.ContentDocumentId : doc.LatestPublishedVersionId;
+      if (!byDocument.has(key)) byDocument.set(key, doc);
+    }
+    const notes = [...byDocument.values()]
       .sort((a, b) => String(b.CreatedDate ?? '').localeCompare(String(a.CreatedDate ?? '')));
     const { rows, truncated } = capped(notes, L.contentNotes);
     const items: ActivityItem[] = [];
     for (const doc of rows) {
       const res = await client.request(`/sobjects/ContentVersion/${doc.LatestPublishedVersionId as string}/VersionData`);
-      // An outage or throttle is retried with the whole research; only a refusal for this one note is recorded.
-      if (res.status >= 500 || res.status === 429) throw new SalesforceApiError(`Note body fetch failed (${res.status})`, res.status, res.json);
       if (res.status >= 400) {
+        // An outage or throttle (including a 403 REQUEST_LIMIT_EXCEEDED) throws and is retried with the whole
+        // research; only a refusal for this one note is recorded.
+        classifyReadError(new SalesforceApiError(`Note body fetch failed (${res.status})`, res.status, res.json));
         unreadable += 1;
         continue;
       }

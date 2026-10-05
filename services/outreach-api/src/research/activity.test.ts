@@ -36,12 +36,13 @@ describe('readTasks', () => {
 });
 
 describe('readEvents', () => {
-  it('orders by start, newest first, and uses the start as the time', async () => {
-    const sf = fakeSalesforce({ queries: [[/FROM Event/, [{ Id: id(1), Subject: 'Walkthrough', Description: null, StartDateTime: day(5), EndDateTime: day(6), Location: 'Oak St', CreatedDate: day(1) }]]] });
+  it('ranks by creation, newest first, so a future event cannot outrank recent past activity', async () => {
+    const sf = fakeSalesforce({ queries: [[/FROM Event/, [{ Id: id(1), Subject: 'Walkthrough', Description: null, StartDateTime: day(25), EndDateTime: day(26), Location: 'Oak St', CreatedDate: day(1) }]]] });
     const out = await readEvents(sf.client, links);
     expect(sf.soql[0]).toContain('FROM Event WHERE (WhoId IN');
-    expect(sf.soql[0]).toContain('ORDER BY StartDateTime DESC NULLS LAST LIMIT 11');
-    expect(out.items[0]).toMatchObject({ source: 'event', at: day(5), title: 'Walkthrough', body: '', meta: { location: 'Oak St' } });
+    expect(sf.soql[0]).toContain('ORDER BY CreatedDate DESC LIMIT 11');
+    expect(sf.soql[0]).not.toContain('StartDateTime DESC');
+    expect(out.items[0]).toMatchObject({ source: 'event', at: day(1), title: 'Walkthrough', body: '', meta: { starts: day(25), ends: day(26), location: 'Oak St' } });
   });
 });
 
@@ -68,12 +69,50 @@ describe('readContentNotes', () => {
     });
     const out = await readContentNotes(sf.client, links);
     expect(sf.soql[0]).toBe(
-      `SELECT ContentDocumentId, ContentDocument.Title, ContentDocument.LatestPublishedVersionId, ContentDocument.CreatedDate FROM ContentDocumentLink WHERE LinkedEntityId IN ('${LEAD}', '${OPP}', '${ACCOUNT}') AND ContentDocument.FileType = 'SNOTE' LIMIT 100`,
+      `SELECT ContentDocumentId, ContentDocument.Title, ContentDocument.LatestPublishedVersionId, ContentDocument.CreatedDate FROM ContentDocumentLink WHERE LinkedEntityId IN ('${LEAD}', '${OPP}', '${ACCOUNT}') AND ContentDocument.FileType = 'SNOTE' ORDER BY ContentDocument.CreatedDate DESC LIMIT 100`,
     );
     expect(sf.paths).toHaveLength(10);
     expect(sf.paths[0]).toBe('/sobjects/ContentVersion/068800000000012AAA/VersionData');
     expect(out.items[0]).toMatchObject({ source: 'content_note', title: 'Note 12', body: 'Roof leaks', at: day(12) });
     expect(out.summary).toMatchObject({ status: 'ok', count: 10, truncated: true });
+  });
+
+  it('de-duplicates a note linked to several records before capping and fetching', async () => {
+    const same = doc(7, day(7));
+    const sf = fakeSalesforce({
+      queries: [[/FROM ContentDocumentLink/, [same, same, same, doc(8, day(8))]]],
+      requests: [[/VersionData$/, { status: 200, json: { raw: 'ok' } }]],
+    });
+    const out = await readContentNotes(sf.client, links);
+    expect(sf.paths.sort()).toEqual(['/sobjects/ContentVersion/068800000000007AAA/VersionData', '/sobjects/ContentVersion/068800000000008AAA/VersionData']);
+    expect(out.items.map((i) => i.title)).toEqual(['Note 8', 'Note 7']);
+    expect(out.summary).toMatchObject({ count: 2, truncated: false });
+  });
+
+  it('duplicates do not eat the cap: 10 distinct notes each linked 3 times fill all 10 slots', async () => {
+    const links3 = Array.from({ length: 10 }, (_, i) => doc(i + 1, day(i + 1))).flatMap((d) => [d, d, d]);
+    const sf = fakeSalesforce({ queries: [[/FROM ContentDocumentLink/, links3]], requests: [[/VersionData$/, { status: 200, json: { raw: 'ok' } }]] });
+    const out = await readContentNotes(sf.client, links);
+    expect(out.items).toHaveLength(10);
+    expect(out.summary.truncated).toBe(false);
+  });
+
+  it.each(['REQUEST_LIMIT_EXCEEDED', 'CONCURRENT_REQUESTS_LIMIT_EXCEEDED'])('a 403 %s on a body fetch throws, it is not "unreadable"', async (errorCode) => {
+    const sf = fakeSalesforce({
+      queries: [[/FROM ContentDocumentLink/, [doc(1, day(1))]]],
+      requests: [[/VersionData$/, { status: 403, json: [{ errorCode, message: 'slow down' }] }]],
+    });
+    await expect(readContentNotes(sf.client, links)).rejects.toBeInstanceOf(SalesforceApiError);
+  });
+
+  it('a 403 INSUFFICIENT_ACCESS on a body fetch is still just unreadable', async () => {
+    const sf = fakeSalesforce({
+      queries: [[/FROM ContentDocumentLink/, [doc(1, day(1))]]],
+      requests: [[/VersionData$/, { status: 403, json: [{ errorCode: 'INSUFFICIENT_ACCESS', message: 'no' }] }]],
+    });
+    const out = await readContentNotes(sf.client, links);
+    expect(out.items).toEqual([]);
+    expect(out.summary.note).toBe('1 note body unreadable');
   });
 
   it('one unreadable body drops that note only and says so', async () => {
