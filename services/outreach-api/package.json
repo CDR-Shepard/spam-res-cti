@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "eval:triage": "tsx scripts/triage-eval.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
