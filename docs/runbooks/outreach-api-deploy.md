@@ -34,7 +34,9 @@ The first deploy fails at boot with "Invalid environment configuration" until th
    - `TOKEN_ENCRYPTION_KEY` and `SESSION_SECRET` = **exactly** the values on the CTI API service (copy them from `@cti/api → Variables`; sessions are shared)
    - Sign-in with Salesforce and the other variables (`SALESFORCE_*`, `ANTHROPIC_API_KEY`, `CTI_INTERNAL_URL`, `OUTREACH_INTERNAL_SECRET`): see `outreach-sf-campaigns.md` (Signing in to Outreach; AI call campaigns)
    - Optional, only for the email sign-in button: `WORKOS_API_KEY`, `WORKOS_CLIENT_ID` from WorkOS; `WORKOS_REDIRECT_URI` = `https://<name>.up.railway.app/api/auth/workos/callback`
-3. If you use WorkOS, add that redirect URI there (step 0.5). Redeploy outreach-api — dashboard: **outreach-api → Deployments tab → ⋯ on the latest deployment → Redeploy** (this always rebuilds, so the new variables take effect). Expect the pre-deploy migrate to print `0 new of 36 total` and `/healthz` → 200, `/readyz` → `{ ok: true, dbOk: true, jobsOk: true }`.
+3. If you use WorkOS, add that redirect URI there (step 0.5). Redeploy outreach-api — dashboard: **outreach-api → Deployments tab → ⋯ on the latest deployment → Redeploy** (this always rebuilds, so the new variables take effect). Expect the pre-deploy migrate to print `3 new of 53 total` from whichever service's pre-deploy runs first (`@cti/api` or outreach-api), and `0 new of 53 total` from the other; then `/healthz` → 200, `/readyz` → `{ ok: true, dbOk: true, jobsOk: true }`.
+   - Migration `0052` adds foreign keys that briefly lock `ai_calls`, `users` and `organizations` (at most 5 seconds, its `lock_timeout`). Deploy outside reps' peak hours. If the lock is not granted in time the migration fails and the deploy fails safely, with nothing applied: redeploy.
+   - Watch `@cti/api`'s `/healthz` too after this deploy: it now listens on `::`, so a 200 there confirms it came back up.
 
 ## 3. Link GG Homes to WorkOS and invite yourself (optional)
 

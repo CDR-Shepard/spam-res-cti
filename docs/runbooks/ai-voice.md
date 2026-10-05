@@ -297,6 +297,8 @@ railway variables --set "AI_VOICE=on" --service @cti/api
 
 `AI_VOICE=off` only affects AI calls. `OUTREACH_KILL_SWITCH=on` is the global switch that also stops campaign outreach; it stops AI calls too. If a call is misbehaving right now, use the kill switch first and investigate after.
 
+AI call campaigns are paused by either switch, without using up any lead's attempts. Once a minute outreach-api's pacer asks cti-api whether AI calling is on. While it is off, or cti-api does not answer, the pacer claims nothing and logs `ai_call.place: cti-api says AI calling is off, or did not answer; nothing is placed this tick`. A trigger that still gets `ai_voice_unavailable` (the switch flipped mid-tick) gives its attempt back. When the switch is back on, the waiting calls go out in their next calling window. To stop one campaign, pause it in outreach-web: that is the normal stop. The kill switch is for stopping every AI call at once.
+
 ## 10. Tuning
 
 Set any of these with `railway variables --set "NAME=value" --service @cti/api`. Each change redeploys and applies to **new calls**.
@@ -325,11 +327,12 @@ Set any of these with `railway variables --set "NAME=value" --service @cti/api`.
 | `HTTP 404` | `CTI_INTERNAL_URL` is not the `.railway.internal` host, or the secret is unset on `@cti/api` (production) |
 | `HTTP 503 internal_disabled` | the secret is unset on `@cti/api` (outside production) |
 | `HTTP 403 forbidden` | the request carried an `Origin` header |
-| `HTTP 409 idempotency_conflict` | the same request key arrived with a different body; refused rather than risk a second call |
 | `HTTP 429` / `HTTP 400 invalid_body` | cti-api's internal rate limit / the services are on different versions |
 | `HTTP 500 internal_error` | cti-api failed on the request (`ai-voice internal: request failed` in its logs) |
 | `timeout` / `network` | no answer within 20 seconds, or unreachable: private networking |
 | `bad_response` | a 200 whose body outreach-api cannot read: the services are on different versions |
+
+A transport failure never uses up the lead's attempts: the pacer retries with the same key until cti-api answers. A 409 `idempotency_conflict` is not a transport failure: the same key arrived with a different body. The log shows `result: retry:idempotency_conflict`, and the pacer drops that key and retries once with a new one, no sooner than 10 minutes later.
 
 To confirm by hand, probe the link from outreach-api's shell (`railway ssh --service outreach-api`):
 

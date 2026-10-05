@@ -49,6 +49,7 @@ outreach-api is the Railway service `outreach-api` in project `endearing-comfort
 - **It was created with the Railway CLI, not with `railway config apply`. Never run `railway config apply`.** The `outreachApi` block in `.railway/railway.ts` is a record of the service (so a future apply does not blank its variables), not a way to create it.
 - **One image for every service built from this repo.** Railway applies the repo's root `railway.json` (and so the root `Dockerfile`) to every service built from the repo and refuses per-service config files. The root `Dockerfile` therefore also builds `apps/outreach-web` and `services/outreach-api`. outreach-api runs that same image, with its **start command overridden in the dashboard** to `node services/outreach-api/dist/server.js` and `PORT` = `4100`. There is no `services/outreach-api/railway.json`.
 - **Pre-deploy migrations.** The root `railway.json`'s pre-deploy step (`npm --workspace packages/db run migrate`) runs for outreach-api too, and needs `DATABASE_URL` (set). Migrations `0052_ai_call_campaigns.sql` and `0053_ai_call_requests.sql` run in whichever service deploys first.
+- **After every deploy:** `TOKEN_ENCRYPTION_KEY` must be identical on `@cti/api` and outreach-api. `@cti/api` decrypts the integration token that outreach-api stores. If the keys differ, every AI call is refused with `salesforce_error` ("Salesforce did not answer" in the results). The leads wait and use no attempts, but nobody is called until the keys match.
 - **Variables** are set in the dashboard (or with `railway variables --set ... --service outreach-api`). The names are listed in `.railway/railway.ts` and `services/outreach-api/.env.example`. The ones for AI call campaigns are in the next section.
 
 **Known issue.** `@cti/web` has failed every deploy since 2026-09-28: the root `railway.json`'s pre-deploy migrate runs there too, and that service has no `DATABASE_URL`. It does not affect `@cti/api` or outreach-api.
@@ -183,7 +184,7 @@ How the pacer times calls:
 
 - **Calling hours:** 08:00 to 21:00 in the person's local time. A lead's first call uses the plan's preferred window (morning 8–12, afternoon 12–5, evening 5–9, or any time); later calls use the whole calling window.
 - **After no answer, busy, voicemail or failed:** the next try is at least 20 hours later, in the next calling window.
-- **Retried refusals** wait before the next try: calling hours, until the window opens; daily state cap or per-customer ceiling, about 12 hours and then the window; no AI caller ID or AI calling switched off, 30 minutes; another call to them in progress, 10 minutes; any other, 5 minutes doubling to 2 hours. The same request key is kept for an in-flight or transport retry, and those wait at least 10 minutes. A trigger whose tick died (a `dialing` touch with no call after 5 minutes) is tried again with the same key no sooner than 10 minutes after it was claimed; if its lead has ended meanwhile, the touch is skipped (`enrollment_ended`) instead. A claim the pacer could not make (the lead changed since it was queued) waits 15 minutes. After 8 triggers the lead exits "gave up after repeated errors".
+- **Retried refusals** wait before the next try: calling hours, until the window opens; daily state cap or per-customer ceiling, about 12 hours and then the window; no AI caller ID or AI calling switched off, 30 minutes; another call to them in progress, 10 minutes; the phone carrier refused the call (`twilio_error`), as after no answer (at least 20 hours, in the next calling window), because the carrier may already have rung them; any other, 5 minutes doubling to 2 hours. The same request key is kept for an in-flight or transport retry, and those wait at least 10 minutes. If cti-api answers 409 (`idempotency_conflict`), the key is dropped and the retry goes once with a new key, at least 10 minutes later. A trigger whose tick died (a `dialing` touch with no call after 5 minutes) is tried again with the same key no sooner than 10 minutes after it was claimed; if its lead has ended meanwhile, the touch is skipped (`enrollment_ended`) instead. A claim the pacer could not make (the lead changed since it was queued) waits 15 minutes. If the lead is no longer queued, the touch is skipped (`not_claimable`) so "Call all approved" can queue it again. After 8 refusals in a row the touch is skipped too, and a lead still queued goes back to approved. After 8 attempts the lead exits "gave up after repeated errors". Only attempts about the person count. A refusal about the system never uses an attempt and never ends the lead: AI calling switched off, no AI caller ID free, a Salesforce or compliance-check error in cti-api, or no answer from cti-api. While cti-api says AI calling is off, or does not answer, the pacer claims nothing at all.
 - **New Salesforce activity.** If a Task or Event on the record is newer than the research, the call is not placed: the lead goes back to research and the card says "New activity in Salesforce since the research: researching again before any call." A rep's call Task between attempts does the same, by design. Tasks the AI's own calls logged are ignored.
 - **Salesforce checkboxes** Do Not Call and Skip on Dialer stop the call (shown as "Do Not Call is checked in Salesforce" / "Skip on Dialer is checked in Salesforce"). The AI call consent checkbox is read fresh too: unchecked or empty, the lead ends with "no AI consent in Salesforce" (`ai_call_no_consent`) without a trigger.
 - **A plan the voice agent refuses, or an approver who cannot place AI calls** (`plan_rejected`, `unknown_user`): the lead goes back to the review board with an error on its card. It is not ended: edit the plan and approve it again (or have someone who can place AI calls approve it).
@@ -222,7 +223,7 @@ These appear in the Status cell. **Retried** ones say "Waiting — next try …"
 | another call to them is in progress | `call_in_progress` | retried |
 | Salesforce did not answer / a compliance check could not run / the phone carrier refused the call / the call request was still being handled | `salesforce_error` / `gate_error` / `twilio_error` / `in_flight` | retried |
 | the AI calling service did not answer | `transport` | retried |
-| gave up after repeated errors | `gave_up` | final (after 8 triggers) |
+| gave up after repeated errors | `gave_up` | final (after 8 attempts; refusals about the system do not count) |
 | could not check Salesforce for new activity | `activity_check_failed` | waits 30 minutes |
 
 ### Cost
@@ -239,7 +240,6 @@ outreach-api's logs (`railway logs --service outreach-api`) carry one line per t
 | `HTTP 404` | `CTI_INTERNAL_URL` is not the `.railway.internal` host, or `OUTREACH_INTERNAL_SECRET` is unset on `@cti/api` (production hides the routes behind a 404). |
 | `HTTP 503 internal_disabled` | `OUTREACH_INTERNAL_SECRET` is unset on `@cti/api` (outside production only). |
 | `HTTP 403 forbidden` | The request carried an `Origin` header; only outreach-api's server calls the route. |
-| `HTTP 409 idempotency_conflict` | The same request key arrived with a different body (the plan text or target changed while the key was kept). cti-api refuses it rather than risk a second call; it gives up after 8 triggers. Check `ai_call_requests` for the key (below). |
 | `HTTP 429` | cti-api's rate limit for internal requests was hit; the pacer retries. |
 | `HTTP 400 invalid_body` | cti-api could not read the request: the two services are on different versions. Deploy both from the same commit. |
 | `HTTP 500 internal_error` (or another status) | cti-api failed on the request; its logs say `ai-voice internal: request failed`. The pacer retries with the same key. |
@@ -248,7 +248,15 @@ outreach-api's logs (`railway logs --service outreach-api`) carry one line per t
 
 The curl probe in "Before the first campaign" step 4 tells the same cases apart by hand.
 
-**A touch that gave up after transport errors may still have placed a call.** The request can reach cti-api even when its answer is lost, and outreach-api has no read-only way to ask cti-api about a request key. Before calling the person by hand, check `ai_calls` by trigger key: the key is `touch:<touch id>:<attempt>`, and cti-api stores it in `ai_call_requests.idempotency_key` with the call it placed in `ai_call_id`:
+Transport failures never use up a lead's attempts: the pacer keeps retrying with the same key until cti-api answers.
+
+Other lines to know:
+
+- **`result: retry:idempotency_conflict`.** cti-api answered 409: the same request key arrived with a different body, for example when the plan text or target changed while the key was kept. The pacer drops the key and retries once with a new one, at least 10 minutes later; that attempt counts. Check `ai_call_requests` for the old key (below).
+- **`ai_call.place: cti-api says AI calling is off, or did not answer; nothing is placed this tick`** (`availability: off` or `unreachable`). The kill switch is on, `OPENAI_API_KEY` is unset on `@cti/api`, or cti-api is down or unreachable. Nothing is claimed and no lead uses an attempt.
+- **Every call ends `retry:salesforce_error`.** Check that `TOKEN_ENCRYPTION_KEY` is identical on `@cti/api` and outreach-api ("How outreach-api is deployed"), and that the tenant's Salesforce connection still works.
+
+**A touch waiting after transport errors ("the AI calling service did not answer") may already have placed a call.** The request can reach cti-api even when its answer is lost, and outreach-api has no read-only way to ask cti-api about a request key. The pacer's retry reuses the key, so it never dials twice. Before calling the person by hand, check `ai_calls` by trigger key: the key is `touch:<touch id>:<attempt>:<claim time in ms>`, and cti-api stores it in `ai_call_requests.idempotency_key` with the call it placed in `ai_call_id`:
 
 ```bash
 echo "SELECT idempotency_key, ai_call_id, response, created_at FROM ai_call_requests WHERE org_id = :'org' AND idempotency_key LIKE :'key';" | psql "$PUB" -v org='<org uuid>' -v key='touch:<touch id>:%'
@@ -256,5 +264,5 @@ echo "SELECT idempotency_key, ai_call_id, response, created_at FROM ai_call_requ
 
 ### Stopping everything
 
-- **Pause the campaign** (the **Pause** button): planned calls wait and nothing new is claimed.
-- **The AI voice kill switch:** `AI_VOICE=off` on `@cti/api`. The pacer retries every 30 minutes and places nothing (the results show "AI calling is switched off"). `OUTREACH_KILL_SWITCH=on` stops all outreach, including AI calls.
+- **Pause the campaign** (the **Pause** button): planned calls wait and nothing new is claimed. This is the normal way to stop a campaign.
+- **The AI voice kill switch:** `AI_VOICE=off` on `@cti/api`. It pauses AI calls without using up any lead's attempts. While it is off the pacer claims nothing and logs `ai_call.place: cti-api says AI calling is off, or did not answer; nothing is placed this tick`. When it is back on, the waiting calls go out in their next calling window. `OUTREACH_KILL_SWITCH=on` stops all outreach, including AI calls, the same way.
