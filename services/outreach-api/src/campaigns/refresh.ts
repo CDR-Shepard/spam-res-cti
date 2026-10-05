@@ -257,14 +257,16 @@ function dueCondition(now: Date) {
 /**
  * Takes the campaign's refresh claim. pg-boss fails a tick at 15 minutes but the handler
  * keeps running, so the next 5-minute tick can select the same campaign; the database
- * decides who works on it. Returns false when another tick holds a fresh claim, or when the
- * campaign was refreshed, paused or archived since this tick selected it. A claim older than
+ * decides who works on it. Returns the claim's timestamp, or null when another tick holds a
+ * fresh claim, or when the campaign was refreshed, paused or archived since this tick
+ * selected it. A claim older than
  * `REFRESH_CLAIM_STALE_MINUTES` belongs to a dead tick and is taken over.
  */
-async function claimCampaign(db: Db, campaign: CampaignRow, now: Date): Promise<boolean> {
+async function claimCampaign(db: Db, campaign: CampaignRow, now: Date): Promise<Date | null> {
   const claimed = await db
     .update(schema.campaigns)
-    .set({ refreshStartedAt: sql`now()` })
+    // Truncated to milliseconds so the value read back as a JS Date is exactly what the row holds.
+    .set({ refreshStartedAt: sql`date_trunc('milliseconds', now())` })
     .where(
       and(
         eq(schema.campaigns.id, campaign.id),
@@ -276,15 +278,22 @@ async function claimCampaign(db: Db, campaign: CampaignRow, now: Date): Promise<
         ),
       ),
     )
-    .returning({ id: schema.campaigns.id });
-  return claimed.length > 0;
+    .returning({ refreshStartedAt: schema.campaigns.refreshStartedAt });
+  return claimed[0]?.refreshStartedAt ?? null;
 }
 
-async function releaseClaim(db: Db, campaign: CampaignRow): Promise<void> {
+/** Clears the claim this tick took (`claimedAt`); a claim another tick took over since is left alone. */
+async function releaseClaim(db: Db, campaign: CampaignRow, claimedAt: Date): Promise<void> {
   await db
     .update(schema.campaigns)
     .set({ refreshStartedAt: null })
-    .where(and(eq(schema.campaigns.id, campaign.id), eq(schema.campaigns.orgId, campaign.orgId)));
+    .where(
+      and(
+        eq(schema.campaigns.id, campaign.id),
+        eq(schema.campaigns.orgId, campaign.orgId),
+        eq(schema.campaigns.refreshStartedAt, claimedAt),
+      ),
+    );
 }
 
 async function refreshOrg(deps: RefreshDeps, orgId: string, due: CampaignRow[], outOfTime: () => boolean): Promise<void> {
@@ -303,7 +312,8 @@ async function refreshOrg(deps: RefreshDeps, orgId: string, due: CampaignRow[], 
   }
   for (const campaign of due) {
     if (outOfTime()) return;
-    if (!(await claimCampaign(db, campaign, now))) {
+    const claimedAt = await claimCampaign(db, campaign, now);
+    if (!claimedAt) {
       log.info({ orgId, campaignId: campaign.id }, 'campaign refresh skipped: another tick holds it, or it is no longer due');
       continue;
     }
@@ -314,7 +324,7 @@ async function refreshOrg(deps: RefreshDeps, orgId: string, due: CampaignRow[], 
       if (isConnectionFailure(err)) return pauseForBrokenCrm(db, log, orgId, err);
       await recordFailure(db, log, campaign, now, err);
     } finally {
-      await releaseClaim(db, campaign);
+      await releaseClaim(db, campaign, claimedAt);
     }
   }
 }

@@ -181,8 +181,9 @@ function registerChangeRoutes(app: FastifyInstance, deps: CampaignRouteDeps): vo
     const current = await campaignOr404(db, ctx.orgId, id, reply);
     if (!current) return;
     if (current.status === 'archived') return sendError(reply, 409, 'CAMPAIGN_ARCHIVED', 'An archived campaign cannot be changed');
-    const [row] = await db.update(c).set({ ...changes, updatedAt: new Date() }).where(and(eq(c.id, id), eq(c.orgId, ctx.orgId))).returning();
-    if (!row) return sendError(reply, 404, 'CAMPAIGN_NOT_FOUND', 'No such campaign');
+    // Compare-and-swap on "not archived": an archive that lands after the check above wins.
+    const [row] = await db.update(c).set({ ...changes, updatedAt: new Date() }).where(and(eq(c.id, id), eq(c.orgId, ctx.orgId), ne(c.status, 'archived'))).returning();
+    if (!row) return sendError(reply, 409, 'CAMPAIGN_ARCHIVED', 'An archived campaign cannot be changed');
     return toCampaignDto(row);
   });
 

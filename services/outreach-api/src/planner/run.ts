@@ -266,21 +266,30 @@ async function loadQueueCandidates(db: Db, now: Date, batch: number): Promise<Qu
 
 type Recheck = ReturnType<typeof recheckQueuedCall>;
 
-/** Apply one re-check verdict with a compare-and-swap on `status = 'planned'`. True when this call changed the touch. */
+/** The touch's campaign is still `active` (it may have been paused since the candidates were loaded). */
+const campaignStillActive = sql`exists (
+  select 1 from campaign_enrollments ce join campaigns cc on cc.id = ce.campaign_id
+  where ce.id = touches.enrollment_id and cc.status = 'active')`;
+
+/**
+ * Apply one re-check verdict with a compare-and-swap on `status = 'planned'` and on the
+ * campaign still being `active`, so a campaign paused mid-tick never has a touch queued,
+ * deferred or skipped. True when this call changed the touch.
+ */
 async function applyRecheck(db: Db, touchId: string, verdict: Recheck): Promise<boolean> {
   const audit = JSON.stringify(verdict.audit);
   const result =
     verdict.kind === 'queue'
       ? await db.execute(sql`
           update touches set status = 'queued', gate_audit = gate_audit || ${audit}::jsonb, updated_at = now()
-          where id = ${touchId} and status = 'planned' returning id`)
+          where id = ${touchId} and status = 'planned' and ${campaignStillActive} returning id`)
       : verdict.kind === 'defer'
         ? await db.execute(sql`
             update touches set due_at = ${iso(verdict.dueAt)}::timestamptz, gate_audit = gate_audit || ${audit}::jsonb, updated_at = now()
-            where id = ${touchId} and status = 'planned' returning id`)
+            where id = ${touchId} and status = 'planned' and ${campaignStillActive} returning id`)
         : await db.execute(sql`
             update touches set status = 'skipped', skip_reason = ${verdict.reason}, gate_audit = gate_audit || ${audit}::jsonb, updated_at = now()
-            where id = ${touchId} and status = 'planned' returning id`);
+            where id = ${touchId} and status = 'planned' and ${campaignStillActive} returning id`);
   return rowsOf<{ id: string }>(result).length > 0;
 }
 

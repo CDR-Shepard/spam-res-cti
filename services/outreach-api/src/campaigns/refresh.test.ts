@@ -291,6 +291,22 @@ describe.skipIf(!pgLane)('campaign refresh (real Postgres)', () => {
         expect((await campaignById(db, campaign.id)).lastRefreshError).toBe('INVALID_FIELD');
       });
 
+      it('leaves a claim another tick took over mid-refresh in place', async () => {
+        const orgId = await seedOrg(db);
+        await seedConnection(db, orgId);
+        const campaign = await seedCampaign(db, orgId, { status: 'active' });
+        const takeover = new Date('2030-01-01T00:00:00.123Z');
+        const client = {
+          listViewSoql: vi.fn(async () => {
+            // This tick ran past the stale limit and a later tick claimed the campaign again.
+            await db.update(schema.campaigns).set({ refreshStartedAt: takeover }).where(eq(schema.campaigns.id, campaign.id));
+            throw new Error('slow and failing');
+          }),
+        } as unknown as SalesforceClient;
+        await refreshDueCampaigns({ db, clients: async () => client, now: NOW, log });
+        expect((await claimOf(campaign.id))?.toISOString()).toBe(takeover.toISOString());
+      });
+
       it('clears the claim when the connection turned out to be broken', async () => {
         const orgId = await seedOrg(db);
         await seedConnection(db, orgId);

@@ -360,6 +360,28 @@ describe.skipIf(!pgLane)('planner run (real Postgres)', () => {
       expect(t.gate_audit[t.gate_audit.length - 1]).toMatchObject({ rule: 'queue_recheck', verdict: 'deferred' });
     });
 
+    it('does not queue, defer or skip a touch whose campaign was paused after the candidates were loaded', async () => {
+      const { orgId, enrollmentId, touchId } = await plannedCall();
+      const pauseWhileChecking = vi.fn(async () => {
+        await pool.query(`update campaigns set status = 'paused' where org_id = $1`, [orgId]);
+        return new Map();
+      });
+      expect(await promoteQueuedCalls(db, NOW, { log, blockedTargets: pauseWhileChecking })).toBe(0);
+      expect(pauseWhileChecking).toHaveBeenCalled();
+      expect((await touch(touchId)).status).toBe('planned');
+
+      // The same holds for a skip verdict: the number is opted out, but the paused campaign's touch is left alone.
+      await pool.query(`update campaigns set status = 'active' where org_id = $1`, [orgId]);
+      await pool.query(`insert into opt_outs (org_id, e164, source) values ($1, $2, 'manual')`, [orgId, CA_MOBILE[0]!.e164]);
+      const optedOut = vi.fn(async () => {
+        await pool.query(`update campaigns set status = 'paused' where org_id = $1`, [orgId]);
+        return new Map([[CA_MOBILE[0]!.e164, { reason: 'opted_out' }]]) as never;
+      });
+      await promoteQueuedCalls(db, NOW, { log, blockedTargets: optedOut });
+      expect((await touch(touchId)).status).toBe('planned');
+      expect((await enrollment(enrollmentId)).touches_done).toBe(0);
+    });
+
     it('fails closed when the suppression read throws: the touch stays planned', async () => {
       const { touchId } = await plannedCall();
       const failing = vi.fn(async () => {

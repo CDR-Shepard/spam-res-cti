@@ -231,7 +231,16 @@ describe('PATCH /api/campaigns/:id', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ refreshMinutes: 120, touchDays: [0, 2, 5] });
     expect(fixture.writes).toEqual([{ op: 'update', table: schema.campaigns, values: { refreshMinutes: 120, touchDays: [0, 2, 5], updatedAt: expect.any(Date) } }]);
-    expect(sql(fixture.captured.where.at(-1)).sql).toBe('("campaigns"."id" = $1 and "campaigns"."org_id" = $2)');
+    expect(sql(fixture.captured.where.at(-1)).sql).toBe('("campaigns"."id" = $1 and "campaigns"."org_id" = $2 and "campaigns"."status" <> $3)');
+    expect(sql(fixture.captured.where.at(-1)).params).toEqual([CAMPAIGN_ID, 'O1', 'archived']);
+  });
+
+  it('409 CAMPAIGN_ARCHIVED when the campaign is archived between the check and the update (compare-and-swap lost)', async () => {
+    // The first read still sees a draft; the guarded UPDATE matches no row.
+    const res = await app.inject({ method: 'PATCH', url: `/api/campaigns/${CAMPAIGN_ID}`, headers: auth, payload: { name: 'Y' } });
+    expect(fixture.writes).toHaveLength(1);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'CAMPAIGN_ARCHIVED' });
   });
 
   it.each([
