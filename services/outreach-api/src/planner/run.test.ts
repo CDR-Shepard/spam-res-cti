@@ -261,6 +261,25 @@ describe.skipIf(!pgLane)('planner run (real Postgres)', () => {
       expect(await enrollment(enrollmentId)).toMatchObject({ status: 'completed', exit_reason: 'sequence_complete', touches_done: 2 });
     });
 
+    it('counts each touch exactly once even when seq has a gap (after a needs-review skip)', async () => {
+      const orgId = await seedOrg();
+      const campaignId = await seedCampaign(orgId, 'active');
+      const recordId = await seedRecord(orgId);
+      const enrollmentId = await seedEnrollment({ orgId, campaignId, recordId, touchesDone: 0 });
+      // seq 1 was skipped for review without advancing; the resumed enrollment's touch is seq 2.
+      const touch = await one<{ id: string }>(
+        `insert into touches (org_id, enrollment_id, seq, channel, status, due_at, sent_at) values ($1, $2, 2, 'rep_call', 'sent', $3, $3) returning id`,
+        [orgId, enrollmentId, NOW],
+      );
+
+      await Promise.all([advanceAfterTouch(db, touch.id, NOW), advanceAfterTouch(db, touch.id, NOW)]);
+      await advanceAfterTouch(db, touch.id, NOW);
+
+      expect((await enrollment(enrollmentId)).touches_done).toBe(1);
+      const { rows } = await pool.query(`select counted_at from touches where id = $1`, [touch.id]);
+      expect(rows[0].counted_at).not.toBeNull();
+    });
+
     it('ignores a touch that is not terminal', async () => {
       const { orgId, enrollmentId } = await dueEnrollment('active');
       const touch = await one<{ id: string }>(
@@ -269,6 +288,85 @@ describe.skipIf(!pgLane)('planner run (real Postgres)', () => {
       );
       await advanceAfterTouch(db, touch.id, NOW);
       expect((await enrollment(enrollmentId)).touches_done).toBe(0);
+    });
+  });
+
+  describe('promoteQueuedCalls re-check', () => {
+    async function plannedCall(over: { phones?: unknown[]; dueAt?: Date } = {}) {
+      const orgId = await seedOrg();
+      const campaignId = await seedCampaign(orgId, 'active');
+      const recordId = await seedRecord(orgId, over.phones ? { phones: over.phones } : {});
+      const enrollmentId = await seedEnrollment({ orgId, campaignId, recordId });
+      const { rows } = await pool.query(
+        `insert into touches (org_id, enrollment_id, seq, channel, status, due_at, gate_audit)
+         values ($1, $2, 1, 'rep_call', 'planned', $3, $4::jsonb) returning id`,
+        [orgId, enrollmentId, over.dueAt ?? new Date(NOW.getTime() - 3 * DAY), JSON.stringify([{ rule: 'rule1_live', channel: 'rep_call', verdict: 'kept', detail: 'First live channel' }])],
+      );
+      return { orgId, enrollmentId, touchId: rows[0].id as string };
+    }
+    const touch = async (id: string) => (await pool.query(`select status, due_at, skip_reason, gate_audit from touches where id = $1`, [id])).rows[0];
+
+    it('queues an old planned call that still passes, and records the re-check in the audit', async () => {
+      const { touchId } = await plannedCall();
+      expect(await promoteQueuedCalls(db, NOW, { log })).toBeGreaterThanOrEqual(1);
+      const t = await touch(touchId);
+      expect(t.status).toBe('queued');
+      expect(t.gate_audit).toHaveLength(2);
+      expect(t.gate_audit[1]).toMatchObject({ rule: 'queue_recheck', channel: 'rep_call', verdict: 'kept' });
+    });
+
+    it('skips a call whose number was opted out since planning, and counts it', async () => {
+      const { orgId, enrollmentId, touchId } = await plannedCall();
+      await pool.query(`insert into opt_outs (org_id, e164, source) values ($1, $2, 'manual')`, [orgId, CA_MOBILE[0]!.e164]);
+      await promoteQueuedCalls(db, NOW, { log });
+      const t = await touch(touchId);
+      expect(t).toMatchObject({ status: 'skipped', skip_reason: 'suppressed' });
+      expect(t.gate_audit[1]).toMatchObject({ rule: 'queue_recheck', verdict: 'removed' });
+      expect((await enrollment(enrollmentId)).touches_done).toBe(1);
+    });
+
+    it('skips a call when Salesforce Do Not Call is now set', async () => {
+      const { enrollmentId, touchId } = await plannedCall();
+      await pool.query(`update crm_records set sf_do_not_call = true where id = (select crm_record_id from campaign_enrollments where id = $1)`, [enrollmentId]);
+      await promoteQueuedCalls(db, NOW, { log });
+      expect(await touch(touchId)).toMatchObject({ status: 'skipped', skip_reason: 'suppressed' });
+    });
+
+    it('leaves the call planned and pushes it 24 hours past a recent CTI dial', async () => {
+      const { orgId, touchId } = await plannedCall();
+      const dial = new Date(NOW.getTime() - HOUR); // 09:00 PDT: 24 h later is inside the window
+      await pool.query(
+        `insert into dialer_dial_attempts (org_id, user_id, session_id, item_id, to_number, from_number, dialed_at)
+         values ($1, $2, $3, $4, $5, '+14155550199', $6)`,
+        [orgId, randomUUID(), randomUUID(), randomUUID(), CA_MOBILE[0]!.e164, dial],
+      );
+      await promoteQueuedCalls(db, NOW, { log });
+      const t = await touch(touchId);
+      expect(t.status).toBe('planned');
+      expect(new Date(t.due_at)).toEqual(new Date(dial.getTime() + DAY)); // Wed 09:00 PDT, inside the window
+      expect(t.gate_audit.map((g: { rule: string }) => g.rule)).toEqual(['rule1_live', 'human_dial', 'queue_recheck']);
+      // Not due any more, so the next tick leaves it alone.
+      expect(await promoteQueuedCalls(db, NOW, { log })).toBe(0);
+      expect((await touch(touchId)).status).toBe('planned');
+    });
+
+    it('leaves the call planned until the next 08:00 recipient-local when the window is closed', async () => {
+      const { touchId } = await plannedCall();
+      const night = new Date('2026-10-07T05:30:00Z'); // Tue 22:30 PDT
+      await promoteQueuedCalls(db, night, { log });
+      const t = await touch(touchId);
+      expect(t.status).toBe('planned');
+      expect(new Date(t.due_at)).toEqual(new Date('2026-10-07T15:00:00Z'));
+      expect(t.gate_audit[t.gate_audit.length - 1]).toMatchObject({ rule: 'queue_recheck', verdict: 'deferred' });
+    });
+
+    it('fails closed when the suppression read throws: the touch stays planned', async () => {
+      const { touchId } = await plannedCall();
+      const failing = vi.fn(async () => {
+        throw new Error('connection reset');
+      });
+      expect(await promoteQueuedCalls(db, NOW, { log, blockedTargets: failing })).toBe(0);
+      expect((await touch(touchId)).status).toBe('planned');
     });
   });
 

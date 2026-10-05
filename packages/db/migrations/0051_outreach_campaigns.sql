@@ -230,6 +230,7 @@ CREATE TABLE IF NOT EXISTS "touches" (
   "body" text,
   "gate_audit" jsonb NOT NULL DEFAULT '[]'::jsonb,
   "skip_reason" text,
+  "counted_at" timestamptz,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "updated_at" timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT "touches_channel_check" CHECK ("channel" IN ('ai_call','rep_call','sms','email')),

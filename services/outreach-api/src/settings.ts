@@ -3,11 +3,18 @@
  *
  * Tolerant by design: a missing or malformed key falls back to its default, so
  * a hand-edited settings blob can never crash a job tick. A malformed
- * `liveChannels` entry is dropped rather than defaulted, so junk can only make
- * FEWER channels live, never more.
+ * `liveChannels` entry (or one that is not implemented yet) is dropped rather than
+ * defaulted, so junk can only make FEWER channels live, never more.
  */
 export const LIVE_CHANNEL_VALUES = ['rep_call', 'ai_call', 'sms', 'email'] as const;
 export type LiveChannel = (typeof LIVE_CHANNEL_VALUES)[number];
+/**
+ * Channels something can actually send on. Phase 1 sends only rep calls (through the
+ * dialer); an `ai_call`, `sms`, or `email` entry is ignored so the planner HOLDS those
+ * touches instead of emitting a `planned` touch that nothing would ever send. Widen this
+ * list in the phase that ships the channel.
+ */
+export const IMPLEMENTED_CHANNELS: readonly LiveChannel[] = ['rep_call'];
 
 export interface OutreachSettings {
   aiDailyBudgetUsd: number;
@@ -28,7 +35,7 @@ function budgetFrom(value: unknown): number {
 }
 
 function isLiveChannel(value: unknown): value is LiveChannel {
-  return typeof value === 'string' && (LIVE_CHANNEL_VALUES as readonly string[]).includes(value);
+  return typeof value === 'string' && (IMPLEMENTED_CHANNELS as readonly string[]).includes(value);
 }
 
 function liveChannelsFrom(value: unknown): LiveChannel[] {

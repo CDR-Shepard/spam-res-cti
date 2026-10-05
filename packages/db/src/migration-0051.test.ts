@@ -176,6 +176,7 @@ const TABLES: Record<string, string[]> = {
     '"body" text',
     `"gate_audit" jsonb NOT NULL DEFAULT '[]'::jsonb`,
     '"skip_reason" text',
+    '"counted_at" timestamptz',
     CREATED,
     UPDATED,
   ],

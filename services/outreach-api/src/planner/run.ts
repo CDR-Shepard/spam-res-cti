@@ -16,7 +16,7 @@ import { exitEnrollment } from '../campaigns/enroll.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { outreachSettings } from '../settings.js';
 import { localDayStart, recipientTimezone } from './local-time.js';
-import { DEFAULT_ORDER, HUMAN_DIAL_DEFER_MS, isMobileField, planTouch, type PlanDecision, type PlanInput } from './rules.js';
+import { DEFAULT_ORDER, HUMAN_DIAL_DEFER_MS, isMobileField, planTouch, recheckQueuedCall, type PlanDecision, type PlanInput } from './rules.js';
 
 export type BlockLookup = (db: Db, orgId: string, numbers: readonly string[]) => Promise<Map<string, ConsentBlock>>;
 
@@ -34,6 +34,8 @@ export interface PlanDeps {
 }
 
 const DEFAULT_BATCH = 200;
+/** Touch statuses that count as "open": at most one per enrollment at a time (the plan view relies on it). */
+export const OPEN_TOUCH_STATUSES = ['planned', 'held', 'queued', 'dialing'] as const;
 const Phones = z.array(z.object({ field: z.string(), e164: z.string() }));
 type Phone = z.infer<typeof Phones>[number];
 type TouchDecision = Extract<PlanDecision, { kind: 'touch' }>;
@@ -78,7 +80,7 @@ async function loadDue(db: Db, now: Date, batch: number, waitForTriage: boolean)
       ${triageWait}
       and not exists (
         select 1 from touches t
-        where t.enrollment_id = e.id and t.status in ('planned', 'held', 'queued', 'dialing')
+        where t.enrollment_id = e.id and t.status in ${[...OPEN_TOUCH_STATUSES]}
       )
     order by e.next_touch_at, e.id
     limit ${batch}`);
@@ -198,7 +200,7 @@ async function insertTouch(db: Db, enrollmentId: string, d: TouchDecision): Prom
     where e.id = ${enrollmentId} and e.status = 'active'
       and not exists (
         select 1 from touches t
-        where t.enrollment_id = e.id and t.status in ('planned', 'held', 'queued', 'dialing')
+        where t.enrollment_id = e.id and t.status in ${[...OPEN_TOUCH_STATUSES]}
       )
     on conflict (enrollment_id, seq) do nothing
     returning id`);
@@ -240,29 +242,103 @@ export async function planDueEnrollments(deps: PlanDeps): Promise<{ planned: num
   return { planned, exited };
 }
 
-/** In ACTIVE campaigns, due `planned` rep calls join the call queue. Dry-run touches stay `planned`. */
-export async function promoteQueuedCalls(db: Db, now: Date): Promise<number> {
+interface QueueRow extends DueRow {
+  touch_id: string;
+}
+
+async function loadQueueCandidates(db: Db, now: Date, batch: number): Promise<QueueRow[]> {
   const result = await db.execute(sql`
-    update touches t set status = 'queued', updated_at = now()
-    from campaign_enrollments e, campaigns c
-    where e.id = t.enrollment_id and c.id = e.campaign_id
-      and c.status = 'active' and e.status = 'active'
+    select t.id as touch_id, e.id, e.org_id, e.crm_record_id, e.touches_done, c.touch_days,
+           r.phones, r.email, r.state, r.consent_ai_call, r.sf_do_not_call, r.sf_email_opt_out,
+           o.settings
+    from touches t
+    join campaign_enrollments e on e.id = t.enrollment_id
+    join campaigns c on c.id = e.campaign_id
+    join crm_records r on r.id = e.crm_record_id
+    join organizations o on o.id = e.org_id
+    where c.status = 'active' and e.status = 'active'
       and t.status = 'planned' and t.channel = 'rep_call'
       and t.due_at <= ${iso(now)}::timestamptz
-    returning t.id`);
-  return rowsOf<{ id: string }>(result).length;
+    order by t.due_at, t.id
+    limit ${batch}`);
+  return rowsOf<QueueRow>(result);
+}
+
+type Recheck = ReturnType<typeof recheckQueuedCall>;
+
+/** Apply one re-check verdict with a compare-and-swap on `status = 'planned'`. True when this call changed the touch. */
+async function applyRecheck(db: Db, touchId: string, verdict: Recheck): Promise<boolean> {
+  const audit = JSON.stringify(verdict.audit);
+  const result =
+    verdict.kind === 'queue'
+      ? await db.execute(sql`
+          update touches set status = 'queued', gate_audit = gate_audit || ${audit}::jsonb, updated_at = now()
+          where id = ${touchId} and status = 'planned' returning id`)
+      : verdict.kind === 'defer'
+        ? await db.execute(sql`
+            update touches set due_at = ${iso(verdict.dueAt)}::timestamptz, gate_audit = gate_audit || ${audit}::jsonb, updated_at = now()
+            where id = ${touchId} and status = 'planned' returning id`)
+        : await db.execute(sql`
+            update touches set status = 'skipped', skip_reason = ${verdict.reason}, gate_audit = gate_audit || ${audit}::jsonb, updated_at = now()
+            where id = ${touchId} and status = 'planned' returning id`);
+  return rowsOf<{ id: string }>(result).length > 0;
+}
+
+export interface PromoteOptions {
+  log?: RunnerLogger;
+  batch?: number; // 200
+  /** Injected in tests; defaults to the firewall's `blockedTargets`. */
+  blockedTargets?: BlockLookup;
 }
 
 /**
- * Count a touch that reached `sent`, `failed`, or `skipped` and schedule the
- * next one from the enrollment date: next_touch_at = greatest(now,
- * enrolled_at + touch_days[n] days) for the n-th touch (0-based). After the
- * last day the enrollment completes. Call it once, after the compare-and-swap
- * that moved the touch to its terminal status; `touches_done < seq` makes a
- * repeated call for the same touch a no-op.
+ * In ACTIVE campaigns, due `planned` rep calls join the call queue. Dry-run touches stay
+ * `planned`. A touch planned in a dry run can be days old, so each candidate is re-checked
+ * with the planner's rules first (`recheckQueuedCall`): suppressed or unreachable → the
+ * touch is `skipped` and counted, so the enrollment moves on to its next day; a recent
+ * human dial, a touch already sent today, or a closed calling window → it stays `planned`
+ * with `due_at` pushed to the next opening. The verdict is appended to `gate_audit`.
+ * A suppression read that fails leaves the touch planned for the next tick (fail closed).
+ * Returns the number of touches queued.
+ */
+export async function promoteQueuedCalls(db: Db, now: Date, opts: PromoteOptions = {}): Promise<number> {
+  const log: RunnerLogger = opts.log ?? console;
+  const lookup = opts.blockedTargets ?? firewallBlockedTargets;
+  const deps: PlanDeps = { db, now, log, blockedTargets: lookup };
+  const candidates = await loadQueueCandidates(db, now, opts.batch ?? DEFAULT_BATCH);
+  let queued = 0;
+  for (const row of candidates) {
+    try {
+      const input = await loadPlanInput(deps, lookup, row);
+      if (!input) continue;
+      const verdict = recheckQueuedCall(input);
+      const changed = await applyRecheck(db, row.touch_id, verdict);
+      if (changed && verdict.kind === 'queue') queued += 1;
+      if (changed && verdict.kind === 'skip') await advanceAfterTouch(db, row.touch_id, now);
+    } catch (err) {
+      log.error({ touchId: row.touch_id, err: (err as Error).message }, 'planner: queue re-check failed; retrying next tick');
+    }
+  }
+  return queued;
+}
+
+/**
+ * Count a touch that reached `sent`, `failed`, or `skipped` and schedule the next one from
+ * the enrollment date: next_touch_at = greatest(now, enrolled_at + touch_days[n] days) for
+ * the n-th touch (0-based). After the last day the enrollment completes.
+ *
+ * Counted exactly once per touch: one statement stamps `touches.counted_at` (only where it
+ * is still null, so a concurrent or repeated call matches no row) and, in the same
+ * statement, increments `touches_done`. A guard on `touches_done < seq` is not enough,
+ * because `seq` has gaps once a touch is skipped without advancing (needs-review).
  */
 export async function advanceAfterTouch(db: Db, touchId: string, now: Date): Promise<void> {
   const result = await db.execute(sql`
+    with counted as (
+      update touches set counted_at = now(), updated_at = now()
+      where id = ${touchId} and status in ('sent', 'failed', 'skipped') and counted_at is null
+      returning enrollment_id
+    )
     update campaign_enrollments e
     set touches_done = e.touches_done + 1,
         next_touch_at = case
@@ -270,10 +346,8 @@ export async function advanceAfterTouch(db: Db, touchId: string, now: Date): Pro
           else greatest(${iso(now)}::timestamptz, e.enrolled_at + make_interval(days => c.touch_days[e.touches_done + 2]))
         end,
         updated_at = now()
-    from touches t, campaigns c
-    where t.id = ${touchId} and e.id = t.enrollment_id and c.id = e.campaign_id
-      and t.status in ('sent', 'failed', 'skipped')
-      and e.touches_done < t.seq
+    from counted, campaigns c
+    where e.id = counted.enrollment_id and c.id = e.campaign_id
     returning e.id, e.status, e.touches_done, cardinality(c.touch_days) as total`);
   const row = rowsOf<{ id: string; status: string; touches_done: number; total: number }>(result)[0];
   if (row && row.status === 'active' && row.touches_done >= row.total) {
@@ -284,7 +358,7 @@ export async function advanceAfterTouch(db: Db, touchId: string, now: Date): Pro
 /** One `touch.plan` tick: plan, then promote, in that order, so a touch due now is queued in the same tick. */
 export async function planTick(deps: PlanDeps): Promise<{ planned: number; exited: number; promoted: number }> {
   const { planned, exited } = await planDueEnrollments(deps);
-  const promoted = await promoteQueuedCalls(deps.db, deps.now);
+  const promoted = await promoteQueuedCalls(deps.db, deps.now, { log: deps.log, batch: deps.batch, blockedTargets: deps.blockedTargets });
   if (planned + exited + promoted > 0) deps.log.info({ planned, exited, promoted }, 'touch.plan tick');
   return { planned, exited, promoted };
 }

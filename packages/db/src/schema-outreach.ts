@@ -248,6 +248,8 @@ export const touches = pgTable(
     /** GateStep[] (@cti/contracts review.ts) — every planner rule's verdict. */
     gateAudit: jsonb('gate_audit').$type<unknown[]>().default(sql`'[]'::jsonb`).notNull(),
     skipReason: text('skip_reason'),
+    /** Set once, by the compare-and-swap that counts this touch toward `touches_done`. */
+    countedAt: timestamp('counted_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },

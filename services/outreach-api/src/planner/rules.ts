@@ -35,6 +35,7 @@ export const RULE = {
   frequency: 'rule7_frequency',
   repeat: 'rule8_repeat',
   humanDial: 'human_dial',
+  queueRecheck: 'queue_recheck',
 } as const;
 
 export interface PlanInput {
@@ -198,4 +199,30 @@ export function planTouch(input: PlanInput): PlanDecision {
   }
   const timing = schedule(picked.channel, input);
   return { kind: 'touch', channel: picked.channel, status: picked.status, dueAt: timing.dueAt, audit: [...picked.steps, ...timing.steps] };
+}
+
+export type QueueRecheck =
+  | { kind: 'queue'; audit: GateStep[] }
+  | { kind: 'defer'; dueAt: Date; audit: GateStep[] }
+  | { kind: 'skip'; reason: 'suppressed' | 'no_phone_number'; audit: GateStep[] };
+
+/**
+ * Re-check a `planned` rep call at the moment it would join the call queue. A touch planned
+ * in a dry run can be days old, so the facts it was planned on (opt-outs, the Salesforce
+ * flags, a rep's recent dial, the recipient's hours, a touch already sent today) may have
+ * changed. It uses the planner's own rule functions: the call is skipped when no number can
+ * be called any more (rules 2 and 4), deferred when a human dial, the one-touch-a-day rule,
+ * or the calling window says not yet (rules 6 and 7), and queued otherwise.
+ */
+export function recheckQueuedCall(input: PlanInput): QueueRecheck {
+  const gap = contactPointGap('rep_call', input);
+  if (gap) return { kind: 'skip', reason: 'no_phone_number', audit: [step(RULE.queueRecheck, 'rep_call', 'removed', `Not queued: ${gap}`)] };
+  const blocked = suppression('rep_call', input);
+  if (blocked) return { kind: 'skip', reason: 'suppressed', audit: [step(RULE.queueRecheck, 'rep_call', 'removed', `Not queued: ${blocked}`)] };
+  const timing = schedule('rep_call', input);
+  if (timing.dueAt > input.now) {
+    const audit = [...timing.steps, step(RULE.queueRecheck, 'rep_call', 'deferred', `Not queued yet: waiting until ${timing.dueAt.toISOString()}`)];
+    return { kind: 'defer', dueAt: timing.dueAt, audit };
+  }
+  return { kind: 'queue', audit: [step(RULE.queueRecheck, 'rep_call', 'kept', 'Re-checked when queued: suppression, recent dials, and calling hours still allow the call')] };
 }

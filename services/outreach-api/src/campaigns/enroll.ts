@@ -18,7 +18,12 @@ const UPSERT_BATCH = 200;
 const UNIQUE_VIOLATION = '23505';
 const ACTIVE_KEY_INDEX = 'enrollment_contact_keys_active_unique';
 
-/** Touch statuses that have not started; an exit or a review flag cancels them. */
+/**
+ * Touch statuses that have not started; an exit or a review flag cancels them.
+ * Not the planner's "open" set: that one (`OPEN_TOUCH_STATUSES` in planner/run.ts) also
+ * contains `dialing`, because a touch mid-dial still blocks planning another, whereas an
+ * exit must leave a `dialing` touch to reconciliation.
+ */
 export const OPEN_TOUCH_STATUSES = ['planned', 'held', 'queued'] as const;
 /** Enrollment statuses that are finished; nothing moves them again. */
 export const TERMINAL_ENROLLMENT_STATUSES = ['exited', 'completed'] as const;

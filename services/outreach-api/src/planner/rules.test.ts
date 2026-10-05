@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GateStep, TouchChannel } from '@cti/contracts';
-import { DEFAULT_ORDER, RULE, planTouch, type PlanDecision, type PlanInput } from './rules.js';
+import { DEFAULT_ORDER, RULE, planTouch, recheckQueuedCall, type PlanDecision, type PlanInput } from './rules.js';
 
 // Tuesday 2026-10-06, 10:00 Pacific (PDT = UTC-7): inside every window for a 415 number.
 const NOW = new Date('2026-10-06T17:00:00Z');
@@ -277,5 +277,48 @@ describe('planTouch deferrals', () => {
   it('a held touch still gets a due time', () => {
     const d = planTouch(input({ now: new Date('2026-10-07T05:30:00Z'), liveChannels: PHASE_1, phones: [] }));
     expect(d).toMatchObject({ kind: 'touch', channel: 'email', status: 'held', dueAt: new Date('2026-10-07T13:00:00Z') });
+  });
+});
+
+describe('recheckQueuedCall', () => {
+  const CALL = { liveChannels: PHASE_1 };
+
+  it('queues when nothing has changed, with a kept audit step', () => {
+    const r = recheckQueuedCall(input(CALL));
+    expect(r).toMatchObject({ kind: 'queue' });
+    expect(r.audit).toEqual([expect.objectContaining({ rule: RULE.queueRecheck, channel: 'rep_call', verdict: 'kept' })]);
+  });
+
+  const skips: Array<[string, Partial<PlanInput>, string]> = [
+    ['every number opted out', { blocks: allBlocked('opted_out') }, 'suppressed'],
+    ['every number on the federal list', { blocks: allBlocked('dnc') }, 'suppressed'],
+    ['Salesforce Do Not Call', { sfDoNotCall: true }, 'suppressed'],
+    ['no phone number left', { phones: [] }, 'no_phone_number'],
+  ];
+  it.each(skips)('skips for %s', (_label, over, reason) => {
+    const r = recheckQueuedCall(input({ ...CALL, ...over }));
+    expect(r).toMatchObject({ kind: 'skip', reason });
+    expect(r.audit[0]).toMatchObject({ rule: RULE.queueRecheck, verdict: 'removed' });
+  });
+
+  it('a block on only one of two numbers still queues (a number can be called)', () => {
+    expect(recheckQueuedCall(input({ ...CALL, blocks: new Map([[LANDLINE.e164, 'opted_out' as const]]) })).kind).toBe('queue');
+  });
+
+  it('defers 24 hours after a recent human dial, reusing the planner deferral', () => {
+    const dial = new Date(NOW.getTime() - 3600_000); // 09:00 PDT: 24 h later is inside the window
+    const r = recheckQueuedCall(input({ ...CALL, lastHumanDialAt: dial }));
+    expect(r).toMatchObject({ kind: 'defer', dueAt: new Date(dial.getTime() + 24 * 3600_000) });
+    expect(r.audit.map((s) => s.rule)).toEqual([RULE.humanDial, RULE.queueRecheck]);
+  });
+
+  it('defers to the next opening outside the call window', () => {
+    const r = recheckQueuedCall(input({ ...CALL, now: new Date('2026-10-07T05:30:00Z') }));
+    expect(r).toMatchObject({ kind: 'defer', dueAt: new Date('2026-10-07T15:00:00Z') });
+    expect(r.audit.map((s) => s.rule)).toEqual([RULE.hours, RULE.queueRecheck]);
+  });
+
+  it('defers to the next local day when the person was already touched today', () => {
+    expect(recheckQueuedCall(input({ ...CALL, touchedToday: true }))).toMatchObject({ kind: 'defer', dueAt: new Date('2026-10-07T15:00:00Z') });
   });
 });
