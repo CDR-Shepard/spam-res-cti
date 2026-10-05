@@ -94,6 +94,18 @@ interface TickState {
 const errName = (err: unknown): string => (err instanceof Error ? err.name : typeof err);
 
 /**
+ * B4: a bookkeeping write (the spend, the failure count) that fails is logged at error level and never aborts the tick:
+ * the model call it records is already paid for, and the next lead must still be planned. Names only, never the text.
+ */
+async function bookkeeping(deps: PrepareDeps, p: DuePrep, what: string, write: () => Promise<void>): Promise<void> {
+  try {
+    await write();
+  } catch (err) {
+    deps.log.error({ orgId: p.orgId, enrollmentId: p.enrollmentId, errName: errName(err) }, `call.prepare: recording ${what} failed`);
+  }
+}
+
+/**
  * Runs a store. A lead that moved on since the claim has its result discarded; any other failure fails
  * this lead only (the store's transaction rolled back, so it retries after the backoff) and the tick goes on.
  */
@@ -116,7 +128,7 @@ async function guardedStore(deps: PrepareDeps, p: DuePrep, cost: number, store: 
 async function planRejected(deps: PrepareDeps, p: DuePrep, snapshot: ResearchSnapshot, err: CallPlanOutputError): Promise<Outcome> {
   const { db, now, log } = deps;
   const cost = costMicros(err.usage.model, err.usage.inputTokens, err.usage.outputTokens);
-  await addSpend(db, p.orgId, now, cost);
+  await bookkeeping(deps, p, 'the AI spend', () => addSpend(db, p.orgId, now, cost));
   // Paths and codes only: never the validator's messages, which can quote what the model wrote.
   log.warn({ enrollmentId: p.enrollmentId, issues: err.issues }, 'call.prepare: plan output rejected');
   const flag = salvageFlag(err.rawDoNotContact);
@@ -125,9 +137,11 @@ async function planRejected(deps: PrepareDeps, p: DuePrep, snapshot: ResearchSna
       await storeSalvagedFlag(db, p, now, snapshot, err.usage, flag);
       return 'held';
     });
-    if (held.kind === 'held') return held;
+    // B1: the flag could not be stored (the lead moved on, or the write failed and retries after the backoff). That is
+    // not the model's fault: no strike is counted, and the card keeps guardedStore's error.
+    return held;
   }
-  await recordPlanFailure(db, p, now);
+  await bookkeeping(deps, p, 'the failed plan', () => recordPlanFailure(db, p, now));
   return { kind: 'failed', costMicros: cost };
 }
 
@@ -165,7 +179,7 @@ async function prepareOne(deps: PrepareDeps, org: OrgContext, p: DuePrep): Promi
   }
   const cost = costMicros(out.model, out.inputTokens, out.outputTokens);
   // Spend first: the call is paid for even if storing the result fails or is discarded.
-  await addSpend(db, p.orgId, now, cost);
+  await bookkeeping(deps, p, 'the AI spend', () => addSpend(db, p.orgId, now, cost));
   const snap = snapshot;
   return guardedStore(deps, p, cost, async () => ((await storePrepared(db, p, now, snap, out)) ? 'held' : 'planned'));
 }

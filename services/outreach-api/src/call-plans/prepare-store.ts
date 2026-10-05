@@ -10,7 +10,7 @@ import { schema, type Db } from '@cti/db';
 import type { CallPlanResult } from '../ai/call-plan-model.js';
 import { holdForReview } from '../campaigns/dnc-hold.js';
 import { snapshotHash, type ResearchSnapshot } from '../research/snapshot.js';
-import { cutUtf16, wellFormed } from '../research/text.js';
+import { cutUtf16, wellFormed, wellFormedDeep } from '../research/text.js';
 import { MAX_PREPARE_FAILURES, type DuePrep } from './claims.js';
 import { savePlan, saveResearch, storeDncTriage } from './store.js';
 
@@ -52,7 +52,10 @@ export async function recordPlanFailure(db: Db, p: DuePrep, now: Date): Promise<
 }
 
 /** Research, plan and stage move in one transaction; a do-not-contact flag also holds the person. Returns true when held. */
-export async function storePrepared(db: Db, p: DuePrep, now: Date, snapshot: ResearchSnapshot, out: CallPlanResult): Promise<boolean> {
+export async function storePrepared(db: Db, p: DuePrep, now: Date, snapshot: ResearchSnapshot, raw: CallPlanResult): Promise<boolean> {
+  // B2: the model can answer a lone surrogate, which JSON.stringify writes as an escape jsonb refuses; that would fail the
+  // store and repeat a paid call. Every plan string is made well-formed first (U+FFFD; the board then shows the issue).
+  const out = { ...raw, plan: wellFormedDeep(raw.plan) };
   return db.transaction(async (tx) => {
     const research = await saveResearch(tx, { orgId: p.orgId, enrollmentId: p.enrollmentId, crmRecordId: p.crmRecordId, snapshot });
     const flag = out.plan.doNotContact;
@@ -131,9 +134,10 @@ export async function storeSalvagedFlag(
 ): Promise<void> {
   await db.transaction(async (tx) => {
     const e = schema.campaignEnrollments;
+    // B3: the hold replaces whatever the card said before (an earlier failed plan's error).
     const still = await tx
       .update(e)
-      .set({ updatedAt: now })
+      .set({ callPrepareError: null, updatedAt: now })
       .where(and(claimed(p, now), eq(e.status, 'active'), eq(e.callStage, 'research')))
       .returning({ id: e.id });
     if (still.length === 0) throw new StaleStageError();

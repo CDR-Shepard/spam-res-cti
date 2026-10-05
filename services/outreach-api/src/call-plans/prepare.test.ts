@@ -4,7 +4,7 @@ import { eq, sql } from 'drizzle-orm';
 import { ResearchSource, type CallPlan, type FieldMap } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
-import { spentTodayMicros } from '../ai/budget.js';
+import { addSpend, spentTodayMicros } from '../ai/budget.js';
 import { CallPlanOutputError, type CallPlanModel } from '../ai/call-plan-model.js';
 import { costMicros } from '../ai/model.js';
 import { pendingDncFlag } from '../campaigns/dnc-hold.js';
@@ -17,7 +17,8 @@ import { campaignById, leadId, seedCampaign, seedConnection, seedEnrollment, see
 import { createTestDb, pgLane } from '../test/pg.js';
 import { claimDuePreparations, PREPARE_BACKOFF_MS } from './claims.js';
 import { ERR_PLAN_INVALID, ERR_PLAN_PARKED, ERR_PREPARE_FAILED, ERR_RECORD_GONE, LEAD_TIMEOUT_MS, PREPARE_DEADLINE_MS, prepareDueCalls, type PrepareDeps } from './prepare.js';
-import { savePlan } from './store.js';
+import { recordPlanFailure } from './prepare-store.js';
+import { savePlan, storeDncTriage } from './store.js';
 
 vi.mock('../research/snapshot.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../research/snapshot.js')>();
@@ -26,7 +27,17 @@ vi.mock('../research/snapshot.js', async (importOriginal) => {
 
 vi.mock('./store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./store.js')>();
-  return { ...actual, savePlan: vi.fn(actual.savePlan) };
+  return { ...actual, savePlan: vi.fn(actual.savePlan), storeDncTriage: vi.fn(actual.storeDncTriage) };
+});
+
+vi.mock('../ai/budget.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../ai/budget.js')>();
+  return { ...actual, addSpend: vi.fn(actual.addSpend) };
+});
+
+vi.mock('./prepare-store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./prepare-store.js')>();
+  return { ...actual, recordPlanFailure: vi.fn(actual.recordPlanFailure) };
 });
 
 const NOW = new Date('2026-10-05T15:00:00.000Z');
@@ -36,6 +47,9 @@ const FIELD_MAP: FieldMap = { Lead: { ...TEST_FIELD_MAP.Lead, consent: CONSENT_F
 const log = { error: vi.fn(), info: vi.fn(), warn: vi.fn() };
 const research = vi.mocked(researchRecord);
 const savePlanMock = vi.mocked(savePlan);
+const storeDncTriageMock = vi.mocked(storeDncTriage);
+const addSpendMock = vi.mocked(addSpend);
+const recordPlanFailureMock = vi.mocked(recordPlanFailure);
 const SF = {} as SalesforceClient;
 
 function snap(sfRecordId: string, consent: ResearchSnapshot['consent'] = 'yes'): ResearchSnapshot {
@@ -438,6 +452,60 @@ describe.skipIf(!pgLane)('prepareDueCalls (real Postgres)', () => {
       expect(await prepareDueCalls(deps(model))).toEqual({ planned: 0, held: 0, failed: 1 });
       expect(await db.select().from(schema.recordTriage).where(eq(schema.recordTriage.crmRecordId, t.lead.crmRecordId))).toEqual([]);
       expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ status: 'active' });
+    });
+  });
+
+  describe('sweep (B1-B4)', () => {
+    const outputError = (raw?: unknown) =>
+      new CallPlanOutputError('invalid call plan: questions (too_small)', { inputTokens: 9_000, outputTokens: 800, model: MODEL }, { issues: [{ path: 'questions', code: 'too_small' }], rawDoNotContact: raw });
+
+    it('B1: a salvaged flag whose store fails returns failed without counting a strike', async () => {
+      const t = await tenant();
+      const model = fakeModel();
+      model.plan.mockRejectedValue(outputError({ category: 'sold', quote: 'sold the house' }));
+      storeDncTriageMock.mockRejectedValueOnce(new Error('connection reset'));
+      expect(await prepareDueCalls(deps(model))).toEqual({ planned: 0, held: 0, failed: 1 });
+      expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ status: 'active', callStage: 'research', callPrepareFailures: 0, callPrepareError: ERR_PREPARE_FAILED });
+      expect(recordPlanFailureMock).not.toHaveBeenCalled();
+    });
+
+    it('B2: a lone surrogate in the model output is made well-formed before the jsonb write, so the paid plan is kept', async () => {
+      const t = await tenant();
+      const opener = `Hi there \uD83D, it is about the house on Oak Street.`;
+      expect(await prepareDueCalls(deps(fakeModel({ ...validPlan, opener, talkingPoints: ['Roof \uDC00 repairs', ...validPlan.talkingPoints.slice(1)] })))).toEqual({ planned: 1, held: 0, failed: 0 });
+      const [p] = await plansOf(t.lead.enrollmentId);
+      expect((p!.plan as CallPlan).opener).toBe('Hi there \uFFFD, it is about the house on Oak Street.');
+      expect((p!.plan as CallPlan).talkingPoints[0]).toBe('Roof \uFFFD repairs');
+      expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ callStage: 'review', callPrepareError: null });
+    });
+
+    it('B3: a salvaged flag clears the card error left by an earlier failed plan', async () => {
+      const t = await tenant();
+      await db.update(schema.campaignEnrollments).set({ callPrepareError: ERR_PLAN_INVALID, callPrepareFailures: 1 }).where(eq(schema.campaignEnrollments.id, t.lead.enrollmentId));
+      const model = fakeModel();
+      model.plan.mockRejectedValue(outputError({ category: 'attorney', quote: 'our lawyer handles this' }));
+      expect(await prepareDueCalls(deps(model))).toEqual({ planned: 0, held: 1, failed: 0 });
+      expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ status: 'needs_review', callPrepareError: null });
+    });
+
+    it('B4: a failed spend write is logged at error level and the plan is still stored', async () => {
+      const t = await tenant();
+      addSpendMock.mockRejectedValueOnce(new Error('deadlock detected'));
+      expect(await prepareDueCalls(deps(fakeModel()))).toEqual({ planned: 1, held: 0, failed: 0 });
+      expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ callStage: 'review' });
+      expect(log.error).toHaveBeenCalledWith(expect.objectContaining({ orgId: t.orgId, enrollmentId: t.lead.enrollmentId, errName: 'Error' }), 'call.prepare: recording the AI spend failed');
+    });
+
+    it('B4: a failed spend or strike write for a rejected plan is logged and the tick goes on to the next lead', async () => {
+      const t = await tenant({ leads: 2 });
+      const model = fakeModel();
+      model.plan.mockRejectedValueOnce(outputError()).mockRejectedValueOnce(outputError());
+      addSpendMock.mockRejectedValueOnce(new Error('deadlock detected'));
+      recordPlanFailureMock.mockRejectedValueOnce(new Error('deadlock detected'));
+      expect(await prepareDueCalls(deps(model))).toEqual({ planned: 0, held: 0, failed: 2 });
+      expect(model.plan).toHaveBeenCalledTimes(2);
+      expect(await enrollment(t.leads[1]!.enrollmentId)).toMatchObject({ callPrepareFailures: 1, callPrepareError: ERR_PLAN_INVALID });
+      expect(log.error).toHaveBeenCalledWith(expect.objectContaining({ enrollmentId: t.leads[0]!.enrollmentId }), 'call.prepare: recording the failed plan failed');
     });
   });
 });
