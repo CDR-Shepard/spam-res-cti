@@ -71,11 +71,34 @@ describe('assembleSnapshot: record blocks over half the budget', () => {
     expect(snap.truncated).toBe(true);
   });
 
-  it('never drops self Name, Phone, MobilePhone or Email, even when still over budget', () => {
-    const snap = assembleSnapshot(input({ records: [self, contact] }), 200);
+  it('never drops self Name, Phone, MobilePhone or Email', () => {
+    const snap = assembleSnapshot(input({ records: [self, contact] }), 1_200);
     const [s, c] = snap.records;
     expect(s?.fields.map((f) => f.name)).toEqual(['Name', 'Phone', 'MobilePhone', 'Email']);
     expect(c?.fields).toEqual([]);
+  });
+
+  it('never exceeds the total, even when the protected self fields alone are over it: they are truncated, consent and Id are not', () => {
+    const big = block('self', 'Lead', [['Name', 'N'.repeat(3_000)], ['Phone', '5'.repeat(2_000)], ['Email', 'e'.repeat(2_500)], ['AI_Call_Consent__c', 'true'], ['Notes__c', 'n'.repeat(500)]]);
+    const run = () => assembleSnapshot(input({ records: [big, contact], consentField: 'ai_call_consent__c', activity: [item(1), item(2)] }), 1_500);
+    const snap = run();
+    expect(snapshotSize(snap)).toBeLessThanOrEqual(1_500);
+    expect(snap.consent).toBe('yes');
+    const [s] = snap.records;
+    expect(s?.id).toBe('Lead-id');
+    expect(s?.fields.map((f) => f.name)).toEqual(['Name', 'Phone', 'Email', 'AI_Call_Consent__c']);
+    expect(s?.fields.find((f) => f.name === 'AI_Call_Consent__c')?.value).toBe('true');
+    expect(s?.fields.find((f) => f.name === 'Name')?.value.endsWith('…')).toBe(true);
+    expect(snap.truncated).toBe(true);
+    expect(run()).toEqual(snap);
+  });
+
+  it('keeps the consent field while shorter non-key fields are dropped first', () => {
+    const shorts: Array<[string, string]> = ['A', 'B', 'C', 'D', 'E', 'F'].map((k) => [`${k}__c`, 'xy']);
+    const withConsent = block('self', 'Lead', [['AI_Call_Consent__c', 'true'], ['Name', 'Pat'], ...shorts]);
+    const snap = assembleSnapshot(input({ records: [withConsent], consentField: 'AI_Call_Consent__c' }), 460);
+    expect(snap.records[0]?.fields.map((f) => f.name)).toEqual(['AI_Call_Consent__c', 'Name']);
+    expect(snapshotSize(snap)).toBeLessThanOrEqual(460);
   });
 
   it('does not touch the blocks when they fit', () => {

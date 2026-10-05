@@ -42,6 +42,8 @@ export interface SnapshotInput {
   sfRecordId: string;
   collectedAt: Date;
   consent: z.infer<typeof AiConsentStatus>;
+  /** The consent field's API name: its value in the self block is never dropped or truncated. */
+  consentField?: string | null;
   records: RecordBlock[];
   activity: ActivityItem[];
   sources: ResearchSourceSummary[];
@@ -49,13 +51,19 @@ export interface SnapshotInput {
 
 const KEEP_ON_SELF = new Set(['name', 'phone', 'mobilephone', 'email', 'firstname', 'lastname']);
 const len = (v: unknown): number => JSON.stringify(v).length;
+const ELLIPSIS = '…';
+
+type Fit = { records: RecordBlock[]; cut: boolean };
 
 /** Drops the longest field values (related blocks first, then non-key fields of self) until the blocks fit `budget`. */
-function fitRecords(records: RecordBlock[], budget: number): { records: RecordBlock[]; cut: boolean } {
+function dropFields(records: RecordBlock[], budget: number, consentField: string | null): Fit {
+  const isConsent = (name: string): boolean => consentField !== null && name.toLowerCase() === consentField.toLowerCase();
   let out = records.map((b) => ({ ...b, fields: [...b.fields] }));
   let cut = false;
   while (len(out) > budget) {
-    const candidates = out.flatMap((b, bi) => b.fields.map((f, fi) => ({ bi, fi, size: f.value.length, rank: b.relation === 'self' ? (KEEP_ON_SELF.has(f.name.toLowerCase()) ? 2 : 1) : 0 })));
+    const candidates = out.flatMap((b, bi) =>
+      b.fields.map((f, fi) => ({ bi, fi, size: f.value.length, rank: b.relation === 'self' ? (KEEP_ON_SELF.has(f.name.toLowerCase()) || isConsent(f.name) ? 2 : 1) : 0 })),
+    );
     const victim = candidates.filter((c) => c.rank < 2).sort((a, b) => a.rank - b.rank || b.size - a.size)[0];
     if (!victim) break;
     out = out.map((b, bi) => (bi === victim.bi ? { ...b, fields: b.fields.filter((_, fi) => fi !== victim.fi) } : b));
@@ -64,9 +72,37 @@ function fitRecords(records: RecordBlock[], budget: number): { records: RecordBl
   return { records: out, cut };
 }
 
+/**
+ * Last resort when the protected self fields (name, phones, email) alone are over `budget`: the longest
+ * value loses its tail, one after another, until the blocks fit. The consent field and every id are never touched.
+ */
+function truncateProtected(records: RecordBlock[], budget: number, consentField: string | null): Fit {
+  const isConsent = (name: string): boolean => consentField !== null && name.toLowerCase() === consentField.toLowerCase();
+  let out = records;
+  let cut = false;
+  while (len(out) > budget) {
+    const excess = len(out) - budget;
+    const candidates = out.flatMap((b, bi) => b.fields.map((f, fi) => ({ bi, fi, size: f.value.length })).filter((c) => c.size > 2 && !isConsent(b.fields[c.fi]!.name)));
+    const victim = candidates.sort((a, b) => b.size - a.size || a.bi - b.bi || a.fi - b.fi)[0];
+    if (!victim) break;
+    const keep = Math.max(1, victim.size - excess - 1);
+    out = out.map((b, bi) => (bi === victim.bi ? { ...b, fields: b.fields.map((f, fi) => (fi === victim.fi ? { ...f, value: f.value.slice(0, keep) + ELLIPSIS } : f)) } : b));
+    cut = true;
+  }
+  return { records: out, cut };
+}
+
+function fitRecords(records: RecordBlock[], budget: number, consentField: string | null): Fit {
+  const dropped = dropFields(records, budget, consentField);
+  const truncated = truncateProtected(dropped.records, budget, consentField);
+  return { records: truncated.records, cut: dropped.cut || truncated.cut };
+}
+
 export function assembleSnapshot(input: SnapshotInput, totalChars: number = RESEARCH_LIMITS.totalChars): ResearchSnapshot {
-  const { records, cut } = fitRecords(input.records, Math.floor(totalChars / 2));
-  const base = { version: 1 as const, sfObject: input.sfObject, sfRecordId: input.sfRecordId, collectedAt: input.collectedAt.toISOString(), consent: input.consent, records, activity: [] as ActivityItem[], sources: input.sources, truncated: cut };
+  const consentField = input.consentField ?? null;
+  const envelope = { version: 1 as const, sfObject: input.sfObject, sfRecordId: input.sfRecordId, collectedAt: input.collectedAt.toISOString(), consent: input.consent, records: [] as RecordBlock[], activity: [] as ActivityItem[], sources: input.sources, truncated: true };
+  const { records, cut } = fitRecords(input.records, Math.min(Math.floor(totalChars / 2), totalChars - len(envelope)), consentField);
+  const base = { ...envelope, records, truncated: cut };
   let used = len(base);
   const activity: ActivityItem[] = [];
   const newestFirst = [...input.activity].sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''));
@@ -107,6 +143,7 @@ export async function researchRecord(
     sfRecordId: target.sfRecordId,
     collectedAt: target.now,
     consent: main.consent,
+    consentField: target.consentField,
     records: [main.main, ...main.related.items],
     activity: [tasks, events, notes, contentNotes, emails, chatter.posts, chatter.comments].flatMap((r) => r.items),
     sources: SOURCE_ORDER.map((s) => summaries.find((x) => x.source === s)!),
