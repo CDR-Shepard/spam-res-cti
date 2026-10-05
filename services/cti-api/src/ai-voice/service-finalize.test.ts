@@ -96,6 +96,18 @@ describe('finalizeAiCall', () => {
     expect(store.optOuts).toEqual([{ orgId: 'o1', e164: '+16195550100', note: 'ai call: do not call' }]);
   });
 
+  it('a wrong_number call re-asserts the opt-out too', async () => {
+    await store.update(ID, { outcome: 'wrong_number' });
+    await finalizeAiCall(deps(), ID, { callStatus: 'completed', durationSeconds: 10, endedAt: END });
+    expect(store.optOuts).toEqual([{ orgId: 'o1', e164: '+16195550100', note: 'ai call: wrong number' }]);
+  });
+
+  it('no opt-out for other outcomes', async () => {
+    await store.update(ID, { outcome: 'voicemail' });
+    await finalizeAiCall(deps(), ID, { callStatus: 'completed', durationSeconds: 10, endedAt: END });
+    expect(store.optOuts).toEqual([]);
+  });
+
   it('an unknown id finalizes nothing', async () => {
     expect((await finalizeAiCall(deps(), 'nope', { callStatus: 'completed', durationSeconds: 1, endedAt: END })).finalized).toBe(false);
   });

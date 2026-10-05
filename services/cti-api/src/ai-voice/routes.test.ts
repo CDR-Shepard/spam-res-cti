@@ -299,6 +299,7 @@ describe('POST /telephony/twilio/ai-voice/amd', () => {
     await signedPost(path, { CallSid: CALL_SID, AnsweredBy: 'fax' });
     expect(tw.hangups).toEqual([CALL_SID]);
     expect(store.rows.get(ID)?.outcome).toBe('wrong_number');
+    expect(store.optOuts).toEqual([{ orgId: ORG, e164: '+16195550100', note: 'fax' }]);
   });
 
   it('a human only records answered_by', async () => {

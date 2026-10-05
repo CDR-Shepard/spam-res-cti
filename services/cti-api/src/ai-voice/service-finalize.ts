@@ -11,7 +11,7 @@
  * CAS keeps it and never infers it.
  *
  * After the CAS, in order:
- *   1. a `do_not_call` outcome re-asserts the opt-out;
+ *   1. a `do_not_call` or `wrong_number` outcome re-asserts the opt-out;
  *   2. a placed call (it has a CallSid) gets its `calls` row, linked through
  *      `ai_calls.cti_call_id` in the same transaction — so the dialer's daily
  *      cap and per-customer ceiling count AI calls, exactly once;
@@ -194,10 +194,10 @@ export async function finalizeAiCall(deps: FinalizeDeps, aiCallId: string, input
   });
   if (!row) return { finalized: false };
 
-  if (row.outcome === 'do_not_call') {
+  if (row.outcome === 'do_not_call' || row.outcome === 'wrong_number') {
     // The tool already wrote it; re-assert in case that write failed mid-call.
     try {
-      await store.upsertOptOut(row.orgId, row.toE164, 'ai call: do not call');
+      await store.upsertOptOut(row.orgId, row.toE164, row.outcome === 'do_not_call' ? 'ai call: do not call' : 'ai call: wrong number');
     } catch (e) {
       log.error({ aiCallId, err: errText(e) }, 'ai-voice: opt-out re-assert failed — add it by hand');
     }

@@ -3,7 +3,8 @@
  * (query string included — telephony/webhooks.ts) and keyed by `?aiCallId=`:
  *
  *   amd              async AMD: a machine after the beep gets the voicemail
- *                    (silence the agent, redirect to <Say>); a fax is hung up.
+ *                    (silence the agent, redirect to <Say>); a fax is opted
+ *                    out (source ai_call, note 'fax') and hung up.
  *   status           call progress; a terminal status finalizes (idempotent;
  *                    the summary / Salesforce work runs after the reply).
  *   transfer-result  the transfer's <Dial action>: rep answered → status
@@ -97,6 +98,9 @@ export async function onAmd(row: AiCallRow, answeredBy: string, deps: WebhookDep
     await deps.store
       .setOutcome(row.id, 'wrong_number', null)
       .catch((e: unknown) => deps.log.error({ aiCallId: row.id, err: errText(e) }, 'ai-voice: fax outcome write failed'));
+    await deps.store
+      .upsertOptOut(row.orgId, row.toE164, 'fax')
+      .catch((e: unknown) => deps.log.error({ aiCallId: row.id, err: errText(e) }, 'ai-voice: fax opt-out write failed'));
     await hangUp(callSid, deps, row.id);
     return;
   }
