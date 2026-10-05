@@ -10,6 +10,7 @@ import { createBoss, JobRunner } from './jobs/boss.js';
 import { QUEUES } from './jobs/queues.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerCampaignRoutes } from './routes/campaigns.js';
 import { registerConnectionRoutes } from './routes/connections.js';
 import { registerTeamRoutes } from './routes/team.js';
 import { shutdown } from './shutdown.js';
@@ -45,6 +46,7 @@ async function main(): Promise<void> {
       (scope) => registerAdminTenantRoutes(scope, { db, idp }),
       (scope) => registerTeamRoutes(scope, { db, idp }),
       (scope) => registerConnectionRoutes(scope, { db, cfg, clients }),
+      (scope) => registerCampaignRoutes(scope, { db, clients }),
     ],
   });
   const close = () => shutdown(runner, app);
