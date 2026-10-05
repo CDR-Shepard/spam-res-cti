@@ -50,7 +50,7 @@ export function pkcePair(): { verifier: string; challenge: string } {
 
 export function buildAuthorizeUrl(
   cfg: SalesforceOAuthConfig,
-  args: { state: string; codeChallenge: string },
+  args: { state: string; codeChallenge: string; scope?: string },
 ): string {
   const url = new URL('/services/oauth2/authorize', cfg.loginUrl);
   url.search = new URLSearchParams({
@@ -60,7 +60,7 @@ export function buildAuthorizeUrl(
     state: args.state,
     code_challenge: args.codeChallenge,
     code_challenge_method: 'S256',
-    scope: SCOPE,
+    scope: args.scope ?? SCOPE,
     prompt: 'login',
   }).toString();
   return url.toString();
@@ -115,6 +115,20 @@ export async function refreshAccessToken(
   const parsed = REFRESH_RESPONSE.safeParse(json);
   if (!parsed.success) throw new SalesforceApiError('Salesforce token refresh returned an unexpected body', 200, null);
   return { accessToken: parsed.data.access_token, instanceUrl: parsed.data.instance_url ?? null };
+}
+
+/** Best-effort token revocation (RFC 7009 as Salesforce implements it). Never throws: a sign-in must not fail on it. */
+export async function revokeToken(cfg: SalesforceOAuthConfig, token: string, fetchImpl: typeof fetch = fetch): Promise<void> {
+  try {
+    await fetchImpl(new URL('/services/oauth2/revoke', cfg.loginUrl).toString(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token }).toString(),
+      signal: AbortSignal.timeout(SALESFORCE_REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    // ignored on purpose
+  }
 }
 
 async function postToken(

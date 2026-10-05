@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { SalesforceApiError, SalesforceAuthError } from './errors.js';
 import { fakeFetch } from './fake-fetch.js';
-import { buildAuthorizeUrl, exchangeCode, pkcePair, refreshAccessToken, type SalesforceOAuthConfig } from './oauth.js';
+import { buildAuthorizeUrl, exchangeCode, pkcePair, refreshAccessToken, revokeToken, type SalesforceOAuthConfig } from './oauth.js';
 
 const CFG: SalesforceOAuthConfig = {
   clientId: 'client-id',
@@ -47,6 +47,14 @@ describe('buildAuthorizeUrl', () => {
       scope: 'api refresh_token offline_access',
       prompt: 'login',
     });
+  });
+
+  it('sends a custom scope when given, and keeps the default scope otherwise', () => {
+    const custom = new URL(buildAuthorizeUrl(CFG, { state: 's', codeChallenge: 'c', scope: 'x y' }));
+    expect(custom.searchParams.get('scope')).toBe('x y');
+    expect(custom.search).toContain('scope=x+y');
+    const plain = new URL(buildAuthorizeUrl(CFG, { state: 's', codeChallenge: 'c' }));
+    expect(plain.searchParams.get('scope')).toBe('api refresh_token offline_access');
   });
 
   it('accepts a login URL with a trailing slash', () => {
@@ -175,5 +183,39 @@ describe('refreshAccessToken', () => {
   it('a 5xx throws SalesforceApiError (transient, not a broken connection)', async () => {
     const http = fakeFetch([{ status: 503, text: 'unavailable' }]);
     await expect(refreshAccessToken(CFG, 'r', http.impl)).rejects.toBeInstanceOf(SalesforceApiError);
+  });
+});
+
+describe('revokeToken', () => {
+  it('POSTs the token as a form body to the revoke endpoint', async () => {
+    const http = fakeFetch([{ status: 200 }]);
+    await revokeToken(CFG, 'RT', http.impl);
+    expect(http.calls).toHaveLength(1);
+    expect(http.calls[0]!.url).toBe('https://login.salesforce.com/services/oauth2/revoke');
+    expect(http.calls[0]!.method).toBe('POST');
+    expect(http.calls[0]!.headers['content-type']).toBe('application/x-www-form-urlencoded');
+    expect(form(http.calls[0]!.body)).toEqual({ token: 'RT' });
+  });
+
+  it('sends an abort signal', async () => {
+    let seen: AbortSignal | null | undefined;
+    const spy = (async (_url: unknown, init?: RequestInit) => {
+      seen = init?.signal;
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+    await revokeToken(CFG, 'RT', spy);
+    expect(seen).toBeInstanceOf(AbortSignal);
+  });
+
+  it.each([400, 500])('resolves on a %i answer', async (status) => {
+    const http = fakeFetch([{ status, text: 'nope' }]);
+    await expect(revokeToken(CFG, 'RT', http.impl)).resolves.toBeUndefined();
+  });
+
+  it('resolves when the network fails', async () => {
+    const failing = (async () => {
+      throw new TypeError('fetch failed');
+    }) as typeof fetch;
+    await expect(revokeToken(CFG, 'RT', failing)).resolves.toBeUndefined();
   });
 });
