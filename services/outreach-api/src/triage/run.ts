@@ -16,7 +16,7 @@ import { FieldMap, SfObject, type TriageResult } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
 import { addSpend, budgetMicros, spentTodayMicros } from '../ai/budget.js';
-import { costMicros, TriageOutputError, type TriageModel } from '../ai/model.js';
+import { costMicros, isPricedModel, TriageOutputError, type TriageModel } from '../ai/model.js';
 import { OPEN_TOUCH_STATUSES } from '../campaigns/enroll.js';
 import { pauseOrgCampaigns } from '../campaigns/pause.js';
 import { CrmNotConnectedError, type SalesforceClientFactory } from '../crm/client-factory.js';
@@ -272,6 +272,11 @@ async function triageOrg(deps: TriageDeps, tick: TickState, orgId: string, recor
 }
 
 export async function triageDueRecords(deps: TriageDeps): Promise<void> {
+  // Spend is priced per model; an unpriced one would pay for calls it could not record. Check before any claim.
+  if (!isPricedModel(deps.model.modelId)) {
+    deps.log.error({ model: deps.model.modelId }, 'triage: no price configured for the triage model; skipping triage this tick');
+    return;
+  }
   const tick: TickState = { startedAt: (deps.clock ?? Date.now)(), attempted: new Set() };
   const due = await claimDueRecords(deps.db, deps.now, deps.batch ?? TRIAGE_BATCH);
   const byOrg = new Map<string, DueRecord[]>();
@@ -281,6 +286,11 @@ export async function triageDueRecords(deps: TriageDeps): Promise<void> {
       if (!(await triageOrg(deps, tick, orgId, records))) return;
     }
   } finally {
-    await releaseClaims(deps.db, deps.now, due.filter((rec) => !tick.attempted.has(rec.id)).map((rec) => rec.id));
+    // Runs on the way out of an error too: a failure here is logged, never allowed to replace that error.
+    try {
+      await releaseClaims(deps.db, deps.now, due.filter((rec) => !tick.attempted.has(rec.id)).map((rec) => rec.id));
+    } catch (err) {
+      deps.log.error({ err: message(err) }, 'triage: releasing unstarted claims failed; they are retried after the backoff');
+    }
   }
 }

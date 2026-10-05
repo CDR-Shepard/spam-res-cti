@@ -163,7 +163,7 @@ export const crmRecords = pgTable(
   (t) => ({
     // FULL: refresh upserts ON CONFLICT (org_id, sf_record_id).
     orgRecordUnique: uniqueIndex('crm_records_org_record_unique').on(t.orgId, t.sfRecordId),
-    triageNeededIdx: index('crm_records_triage_needed_idx').on(t.orgId).where(sql`triage_needed`),
+    triageNeededIdx: index('crm_records_triage_needed_idx').on(t.orgId, t.syncedAt).where(sql`triage_needed`),
   }),
 );
 

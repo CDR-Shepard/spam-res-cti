@@ -3,6 +3,7 @@ import { ContactChannel, DoNotContactCategory, TRIAGE_TAGS, TriageResult } from 
 import {
   AnthropicTriageModel,
   costMicros,
+  isPricedModel,
   TRIAGE_INPUT_SCHEMA,
   TRIAGE_MODEL,
   TRIAGE_TOOL_NAME,
@@ -36,6 +37,14 @@ describe('costMicros', () => {
   });
   it('refuses a model without a price', () => {
     expect(() => costMicros('claude-unknown', 1, 1)).toThrow(/no price/);
+  });
+  it('isPricedModel says which models costMicros knows', () => {
+    expect(isPricedModel(TRIAGE_MODEL)).toBe(true);
+    expect(isPricedModel('claude-unknown')).toBe(false);
+  });
+  it('the Anthropic adapter exposes the model id it calls', () => {
+    expect(new AnthropicTriageModel({ client: {} as never }).modelId).toBe(TRIAGE_MODEL);
+    expect(new AnthropicTriageModel({ client: {} as never, model: 'claude-x' }).modelId).toBe('claude-x');
   });
 });
 

@@ -19,6 +19,11 @@ export function costMicros(model: string, inputTokens: number, outputTokens: num
   return inputTokens * price.input + outputTokens * price.output;
 }
 
+/** True when `costMicros` has a price for `model`. */
+export function isPricedModel(model: string): boolean {
+  return Object.hasOwn(PRICE_MICROS_PER_TOKEN, model);
+}
+
 export interface TriagePrompt {
   system: string;
   user: string;
@@ -31,6 +36,8 @@ export interface TriageUsage {
 }
 
 export interface TriageModel {
+  /** The model id calls are made (and priced) with; the tick refuses a model `costMicros` cannot price. */
+  readonly modelId: string;
   triage(prompt: TriagePrompt): Promise<{ result: TriageResult; inputTokens: number; outputTokens: number; model: string }>;
 }
 
@@ -120,14 +127,14 @@ export interface MessagesClient {
 const MAX_OUTPUT_TOKENS = 1_024;
 
 export class AnthropicTriageModel implements TriageModel {
-  private readonly model: string;
+  readonly modelId: string;
   constructor(private readonly deps: { client: MessagesClient; model?: string }) {
-    this.model = deps.model ?? TRIAGE_MODEL;
+    this.modelId = deps.model ?? TRIAGE_MODEL;
   }
 
   async triage(prompt: TriagePrompt): Promise<{ result: TriageResult; inputTokens: number; outputTokens: number; model: string }> {
     const response = await this.deps.client.messages.create({
-      model: this.model,
+      model: this.modelId,
       max_tokens: MAX_OUTPUT_TOKENS,
       system: prompt.system,
       messages: [{ role: 'user', content: prompt.user }],
@@ -137,7 +144,7 @@ export class AnthropicTriageModel implements TriageModel {
     const usage: TriageUsage = {
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
-      model: this.model,
+      model: this.modelId,
     };
     const call = response.content.find((b) => b.type === 'tool_use' && b.name === TRIAGE_TOOL_NAME);
     if (!call) throw new TriageOutputError('the model did not call record_triage', usage);

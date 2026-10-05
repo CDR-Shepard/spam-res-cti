@@ -231,7 +231,7 @@ const INDEXES = [
   'CREATE UNIQUE INDEX IF NOT EXISTS "crm_oauth_states_state_unique" ON "crm_oauth_states" ("state")',
   'CREATE INDEX IF NOT EXISTS "campaigns_org_status_idx" ON "campaigns" ("org_id", "status")',
   'CREATE UNIQUE INDEX IF NOT EXISTS "crm_records_org_record_unique" ON "crm_records" ("org_id", "sf_record_id")',
-  'CREATE INDEX IF NOT EXISTS "crm_records_triage_needed_idx" ON "crm_records" ("org_id") WHERE "triage_needed"',
+  'CREATE INDEX IF NOT EXISTS "crm_records_triage_needed_idx" ON "crm_records" ("org_id", "synced_at") WHERE "triage_needed"',
   'CREATE INDEX IF NOT EXISTS "record_triage_record_created_idx" ON "record_triage" ("crm_record_id", "created_at" DESC)',
   'CREATE UNIQUE INDEX IF NOT EXISTS "campaign_enrollments_campaign_record_unique" ON "campaign_enrollments" ("campaign_id", "crm_record_id")',
   'CREATE INDEX IF NOT EXISTS "campaign_enrollments_org_status_next_idx" ON "campaign_enrollments" ("org_id", "status", "next_touch_at")',
@@ -338,6 +338,12 @@ describe('migration 0051_outreach_campaigns', () => {
       expect(cfg.foreignKeys).toHaveLength(0);
     });
   }
+
+  it('the triage scan index is partial on triage_needed and covers (org_id, synced_at), in SQL and in Drizzle', () => {
+    const cfg = getTableConfig(crmRecords).indexes.find((i) => i.config.name === 'crm_records_triage_needed_idx')!.config;
+    expect(cfg.columns.map((c) => (c as { name: string }).name)).toEqual(['org_id', 'synced_at']);
+    expect(cfg.where).toBeDefined();
+  });
 
   it('Drizzle indexes carry the SQL names, uniqueness, and partial predicates', () => {
     const all = Object.values(DRIZZLE).flatMap((t) => getTableConfig(t).indexes);

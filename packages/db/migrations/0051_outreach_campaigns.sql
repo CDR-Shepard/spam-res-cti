@@ -166,8 +166,8 @@ CREATE TABLE IF NOT EXISTS "crm_records" (
 
 CREATE UNIQUE INDEX IF NOT EXISTS "crm_records_org_record_unique" ON "crm_records" ("org_id", "sf_record_id");
 
--- The triage tick's scan: only records still owed a triage.
-CREATE INDEX IF NOT EXISTS "crm_records_triage_needed_idx" ON "crm_records" ("org_id") WHERE "triage_needed";
+-- The triage tick's scan: only records still owed a triage, oldest sync first per tenant.
+CREATE INDEX IF NOT EXISTS "crm_records_triage_needed_idx" ON "crm_records" ("org_id", "synced_at") WHERE "triage_needed";
 
 CREATE TABLE IF NOT EXISTS "record_triage" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),

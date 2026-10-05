@@ -37,8 +37,8 @@ function fakeSalesforce(failFor: (soql: string) => Error | undefined = () => und
   } as unknown as SalesforceClient;
 }
 
-function fakeModel(result: TriageResult = PLAIN): TriageModel & { triage: ReturnType<typeof vi.fn> } {
-  return { triage: vi.fn(async () => ({ result, inputTokens: 812, outputTokens: 143, model: TRIAGE_MODEL })) };
+function fakeModel(result: TriageResult = PLAIN, modelId: string = TRIAGE_MODEL): TriageModel & { triage: ReturnType<typeof vi.fn> } {
+  return { modelId, triage: vi.fn(async () => ({ result, inputTokens: 812, outputTokens: 143, model: TRIAGE_MODEL })) };
 }
 
 describe.skipIf(!pgLane)('triageDueRecords (real Postgres, fake model and Salesforce)', () => {
@@ -153,6 +153,7 @@ describe.skipIf(!pgLane)('triageDueRecords (real Postgres, fake model and Salesf
   it('records the spend of an invalid model answer and does not retry it until the record changes', async () => {
     const t = await tenant();
     const model: TriageModel = {
+      modelId: TRIAGE_MODEL,
       triage: vi.fn(async () => {
         throw new TriageOutputError('invalid triage output: tags.0: Invalid enum value', { inputTokens: 700, outputTokens: 100, model: TRIAGE_MODEL });
       }),
@@ -167,12 +168,35 @@ describe.skipIf(!pgLane)('triageDueRecords (real Postgres, fake model and Salesf
   it('stops the whole tick when the model API fails, leaving every record for the next tick', async () => {
     const a = await tenant({ n: 1 });
     const b = await tenant({ n: 2 });
-    const model: TriageModel = { triage: vi.fn(async () => { throw new Error('529 overloaded'); }) };
+    const model: TriageModel = { modelId: TRIAGE_MODEL, triage: vi.fn(async () => { throw new Error('529 overloaded'); }) };
     await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: NOW, log });
     expect(model.triage).toHaveBeenCalledTimes(1);
     expect((await record(a.recordId)).triageNeeded).toBe(true);
     expect((await record(b.recordId)).triageNeeded).toBe(true);
     expect(log.error).toHaveBeenCalledWith(expect.objectContaining({ err: '529 overloaded' }), 'triage: model call failed; stopping this tick');
+  });
+
+  it('skips the whole tick, before any claim or paid call, when the configured model has no price', async () => {
+    const t = await tenant();
+    const model = fakeModel(PLAIN, 'claude-not-in-the-price-table');
+    await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: NOW, log });
+    expect(model.triage).not.toHaveBeenCalled();
+    expect(await record(t.recordId)).toMatchObject({ triageNeeded: true, triageAttemptedAt: null });
+    expect(log.error).toHaveBeenCalledWith(expect.objectContaining({ model: 'claude-not-in-the-price-table' }), expect.stringContaining('no price'));
+  });
+
+  it('a failure while releasing claims is logged and never masks the error that ended the tick', async () => {
+    await tenant();
+    const failing = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'update') return () => { throw new Error('release failed'); };
+        if (prop === 'select') return () => { throw new Error('settings read failed'); };
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    await expect(triageDueRecords({ db: failing, clients: async () => fakeSalesforce(), model: fakeModel(), now: NOW, log })).rejects.toThrow('settings read failed');
+    expect(log.error).toHaveBeenCalledWith(expect.objectContaining({ err: 'release failed' }), expect.stringContaining('releasing'));
   });
 
   it('ignores records whose only enrollment is not active or whose campaign is not running', async () => {
