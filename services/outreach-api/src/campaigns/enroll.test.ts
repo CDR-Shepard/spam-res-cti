@@ -151,7 +151,7 @@ describe.skipIf(!pgLane)('enrollment (real Postgres)', () => {
       const x = await seedRecord(db, orgId, snapshot({ sfRecordId: leadId(1) }));
       await enrollRecords(db, { orgId, campaignId: a.id, touchDays: TOUCH_DAYS, now: NOW, records: [{ crmRecordId: x, keys: ['+15125550100'] }] });
       const [first] = await enrollmentsOf(db, a.id);
-      await exitEnrollment(db, first!.id, 'left_query');
+      await exitEnrollment(db, first!.id, { from: ['active'], reason: 'left_query' });
       const out = await enrollRecords(db, { orgId, campaignId: b.id, touchDays: TOUCH_DAYS, now: NOW, records: [{ crmRecordId: x, keys: ['+15125550100'] }] });
       expect(out).toEqual({ enrolled: 1, skippedInOtherCampaign: 0, skippedNoKeys: 0 });
     });
@@ -221,7 +221,7 @@ describe.skipIf(!pgLane)('enrollment (real Postgres)', () => {
 
     it('exits, frees the keys, and skips the touches that have not started', async () => {
       const { orgId, enrollmentId } = await enrolledWithTouches();
-      await exitEnrollment(db, enrollmentId, 'left_query');
+      expect(await exitEnrollment(db, enrollmentId, { from: ['active'], reason: 'left_query' })).toBe(true);
       const [row] = await db.select().from(schema.campaignEnrollments).where(eq(schema.campaignEnrollments.id, enrollmentId));
       expect(row).toMatchObject({ status: 'exited', exitReason: 'left_query', nextTouchAt: null });
       expect(await activeKeys(orgId)).toEqual([]);
@@ -238,7 +238,7 @@ describe.skipIf(!pgLane)('enrollment (real Postgres)', () => {
       const { orgId, enrollmentId } = await enrolledWithTouches();
       await expect(
         db.transaction(async (tx) => {
-          await exitEnrollment(tx, enrollmentId, 'do_not_contact_confirmed');
+          await exitEnrollment(tx, enrollmentId, { from: ['active'], reason: 'do_not_contact_confirmed' });
           throw new Error('caller aborts');
         }),
       ).rejects.toThrow('caller aborts');
@@ -249,10 +249,25 @@ describe.skipIf(!pgLane)('enrollment (real Postgres)', () => {
 
     it('can complete instead of exit, and never rewrites a finished enrollment', async () => {
       const { enrollmentId } = await enrolledWithTouches();
-      await exitEnrollment(db, enrollmentId, 'sequence_complete', 'completed');
-      await exitEnrollment(db, enrollmentId, 'left_query');
+      await exitEnrollment(db, enrollmentId, { from: ['active'], reason: 'sequence_complete', status: 'completed' });
+      expect(await exitEnrollment(db, enrollmentId, { from: ['active', 'needs_review'], reason: 'left_query' })).toBe(false);
       const [row] = await db.select().from(schema.campaignEnrollments).where(eq(schema.campaignEnrollments.id, enrollmentId));
       expect(row).toMatchObject({ status: 'completed', exitReason: 'sequence_complete' });
+    });
+
+    it('exits only from the expected statuses: a row moved to needs_review after the caller read it keeps its status, keys and touches', async () => {
+      const { orgId, enrollmentId } = await enrolledWithTouches();
+      // The caller read `active`; the triage tick flags the person before the exit runs.
+      await db.update(schema.campaignEnrollments).set({ status: 'needs_review', reviewCategory: 'sold' }).where(eq(schema.campaignEnrollments.id, enrollmentId));
+      expect(await exitEnrollment(db, enrollmentId, { from: ['active'], reason: 'left_query' })).toBe(false);
+      const [row] = await db.select().from(schema.campaignEnrollments).where(eq(schema.campaignEnrollments.id, enrollmentId));
+      expect(row).toMatchObject({ status: 'needs_review', exitReason: null, reviewCategory: 'sold' });
+      expect(await activeKeys(orgId)).toHaveLength(1);
+      expect((await touchStatuses(enrollmentId)).map(([status]) => status)).toEqual(['planned', 'held', 'queued', 'dialing', 'sent']);
+
+      // The review path names needs_review and does exit it.
+      expect(await exitEnrollment(db, enrollmentId, { from: ['needs_review'], reason: 'do_not_contact_confirmed' })).toBe(true);
+      expect(await activeKeys(orgId)).toEqual([]);
     });
   });
 });

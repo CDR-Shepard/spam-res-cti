@@ -229,14 +229,15 @@ async function planOne(deps: PlanDeps, lookup: BlockLookup, row: DueRow): Promis
       return 'held';
     }
     if (row.touches_done >= row.touch_days.length) {
-      await exitEnrollment(db, row.id, 'sequence_complete', 'completed');
-      return 'exited';
+      const done = await exitEnrollment(db, row.id, { from: ['active'], reason: 'sequence_complete', status: 'completed' });
+      return done ? 'exited' : 'skipped';
     }
     const input = await loadPlanInput(deps, lookup, row);
     if (!input) return 'skipped';
     const decision = planTouch(input);
     if (decision.kind === 'exit') {
-      await exitEnrollment(db, row.id, decision.reason);
+      // Only from `active`: the triage tick may have moved it to needs_review since it was loaded.
+      if (!(await exitEnrollment(db, row.id, { from: ['active'], reason: decision.reason }))) return 'skipped';
       log.info({ enrollmentId: row.id, audit: decision.audit }, 'planner: no allowed channel; enrollment exited');
       return 'exited';
     }
@@ -387,7 +388,7 @@ export async function advanceAfterTouch(db: Db, touchId: string, now: Date): Pro
     returning e.id, e.status, e.touches_done, cardinality(c.touch_days) as total`);
   const row = rowsOf<{ id: string; status: string; touches_done: number; total: number }>(result)[0];
   if (row && row.status === 'active' && row.touches_done >= row.total) {
-    await exitEnrollment(db, row.id, 'sequence_complete', 'completed');
+    await exitEnrollment(db, row.id, { from: ['active'], reason: 'sequence_complete', status: 'completed' });
   }
 }
 

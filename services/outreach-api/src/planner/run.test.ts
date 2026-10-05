@@ -454,6 +454,21 @@ describe.skipIf(!pgLane)('planner run (real Postgres)', () => {
     });
   });
 
+  it('a planner exit decided on an `active` read leaves alone an enrollment the triage tick flagged meanwhile', async () => {
+    const { orgId, enrollmentId } = await dueEnrollment('dry_run', { email: null });
+    // Every number blocked → planTouch decides to exit (no_allowed_channel); the flag lands in between.
+    const flagMeanwhile = vi.fn(async () => {
+      await pool.query(`update campaign_enrollments set status = 'needs_review', review_category = 'sold' where id = $1`, [enrollmentId]);
+      return new Map([[CA_MOBILE[0]!.e164, 'opted_out' as const]]);
+    });
+    await pool.query(`insert into enrollment_contact_keys (enrollment_id, org_id, key) values ($1, $2, $3)`, [enrollmentId, orgId, CA_MOBILE[0]!.e164]);
+    await planDueEnrollments({ db, now: NOW, log, blockedTargets: flagMeanwhile });
+    expect(flagMeanwhile).toHaveBeenCalled();
+    expect(await enrollment(enrollmentId)).toMatchObject({ status: 'needs_review', exit_reason: null });
+    const keys = await one<{ n: number }>(`select count(*)::int as n from enrollment_contact_keys where enrollment_id = $1 and active`, [enrollmentId]);
+    expect(keys.n).toBe(1);
+  });
+
   it('a touch insert racing an exit waits for it and then inserts nothing (the enrollment row is share-locked)', async () => {
     const { enrollmentId } = await dueEnrollment('dry_run');
     const exit = await pool.connect();

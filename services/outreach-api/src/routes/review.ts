@@ -201,7 +201,7 @@ async function dismiss(db: Db, orgId: string, enrollmentId: string, now: Date): 
     }
     const [campaign] = await tx.select({ status: c.status }).from(c).where(eq(c.id, claimed.campaignId)).limit(1);
     if (campaign?.status === 'archived') {
-      await exitEnrollment(tx, claimed.id, CAMPAIGN_ARCHIVED_EXIT_REASON);
+      await exitEnrollment(tx, claimed.id, { from: ['needs_review'], reason: CAMPAIGN_ARCHIVED_EXIT_REASON });
       return true;
     }
     await tx
@@ -236,7 +236,7 @@ async function confirm(deps: ReviewRouteDeps, log: ReviewLog, ctx: RequestContex
         .values(numbers.map((e164) => ({ orgId: ctx.orgId, e164, source: REVIEW_OPT_OUT_SOURCE, note })))
         .onConflictDoNothing();
     }
-    await exitEnrollment(tx, target.enrollmentId, CONFIRMED_EXIT_REASON);
+    await exitEnrollment(tx, target.enrollmentId, { from: ['needs_review'], reason: CONFIRMED_EXIT_REASON });
     if (sfObject) await deps.onConfirmed?.({ orgId: ctx.orgId, sfObject, sfRecordId: target.sfRecordId }, tx);
     return true;
   });

@@ -9,7 +9,8 @@
  *   campaigns refreshing at the same moment cannot both enroll the same person.
  * - `exitEnrollment` releases the person's keys and cancels the touches not yet started.
  */
-import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
+import type { EnrollmentStatus } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import type { SfRecordSnapshot } from './records.js';
 
@@ -196,29 +197,34 @@ export async function enrollRecords(
   return { enrolled, skippedInOtherCampaign, skippedNoKeys };
 }
 
+/** A status an enrollment can be exited from (a finished one never moves again). */
+export type ExitableStatus = Exclude<EnrollmentStatus, (typeof TERMINAL_ENROLLMENT_STATUSES)[number]>;
+
 /**
  * Ends an enrollment: status (`exited` by default, `completed` for a finished sequence)
  * and `exit_reason`; its contact keys go inactive so the person may join another
  * campaign; its `planned|held|queued` touches become `skipped` with `skip_reason = reason`
- * (a `dialing` touch is left to reconciliation). An already exited or completed enrollment
- * keeps its status and reason; the key and touch cleanup still runs (idempotent).
+ * (a `dialing` touch is left to reconciliation).
+ *
+ * `from` is the status the caller decided on. The update matches only a row still in one
+ * of those statuses: a caller that read `active` must not end an enrollment the triage tick
+ * moved to `needs_review` since (that would drop a do-not-contact flag from Needs Review and
+ * free the person's keys). When no row matches, nothing else is touched and it returns false.
  */
 export async function exitEnrollment(
   db: Db,
   enrollmentId: string,
-  reason: string,
-  status: 'exited' | 'completed' = 'exited',
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
+  opts: { from: readonly ExitableStatus[]; reason: string; status?: 'exited' | 'completed' },
+): Promise<boolean> {
+  const { from, reason, status = 'exited' } = opts;
+  if (from.length === 0) throw new Error('exitEnrollment needs at least one expected status');
+  return db.transaction(async (tx) => {
+    const ended = await tx
       .update(schema.campaignEnrollments)
       .set({ status, exitReason: reason, nextTouchAt: null, updatedAt: sql`now()` })
-      .where(
-        and(
-          eq(schema.campaignEnrollments.id, enrollmentId),
-          notInArray(schema.campaignEnrollments.status, [...TERMINAL_ENROLLMENT_STATUSES]),
-        ),
-      );
+      .where(and(eq(schema.campaignEnrollments.id, enrollmentId), inArray(schema.campaignEnrollments.status, [...from])))
+      .returning({ id: schema.campaignEnrollments.id });
+    if (ended.length === 0) return false;
     await tx
       .update(schema.enrollmentContactKeys)
       .set({ active: false })
@@ -227,5 +233,6 @@ export async function exitEnrollment(
       .update(schema.touches)
       .set({ status: 'skipped', skipReason: reason, updatedAt: sql`now()` })
       .where(and(eq(schema.touches.enrollmentId, enrollmentId), inArray(schema.touches.status, [...OPEN_TOUCH_STATUSES])));
+    return true;
   });
 }

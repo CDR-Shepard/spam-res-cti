@@ -12,7 +12,7 @@ vi.mock('@cti/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@cti/auth')>()),
   resolveSession: async () => state.session,
 }));
-const enroll = vi.hoisted(() => ({ exitEnrollment: vi.fn(async () => undefined) }));
+const enroll = vi.hoisted(() => ({ exitEnrollment: vi.fn(async () => true) }));
 vi.mock('../campaigns/enroll.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../campaigns/enroll.js')>()),
   exitEnrollment: enroll.exitEnrollment,
@@ -248,7 +248,7 @@ describe('POST /api/review/:enrollmentId', () => {
       { orgId: 'O1', e164: '+14155550102', source: 'do_not_contact_review', note: 'Do-not-contact confirmed by admin@gg.co: attorney — "Talk to my lawyer"' },
     ]);
     expect(enroll.exitEnrollment).toHaveBeenCalledTimes(1);
-    expect(enroll.exitEnrollment).toHaveBeenCalledWith(fixture.db, ENROLLMENT_ID, 'do_not_contact_confirmed');
+    expect(enroll.exitEnrollment).toHaveBeenCalledWith(fixture.db, ENROLLMENT_ID, { from: ['needs_review'], reason: 'do_not_contact_confirmed' });
     expect(onConfirmed).toHaveBeenCalledTimes(1);
     expect(onConfirmed).toHaveBeenCalledWith({ orgId: 'O1', sfObject: 'Lead', sfRecordId: '00Q000000000001AAA' }, fixture.db);
   });

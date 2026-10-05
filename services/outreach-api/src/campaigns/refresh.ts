@@ -13,7 +13,7 @@ import { CrmNotConnectedError, type SalesforceClientFactory } from '../crm/clien
 import { loadConnection } from '../crm/connection-store.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { contactKeys, skipReasonFor } from './eligibility.js';
-import { CAMPAIGN_ARCHIVED_EXIT_REASON, chunk, enrollRecords, exitEnrollment, TERMINAL_ENROLLMENT_STATUSES, upsertRecords } from './enroll.js';
+import { CAMPAIGN_ARCHIVED_EXIT_REASON, chunk, enrollRecords, exitEnrollment, TERMINAL_ENROLLMENT_STATUSES, upsertRecords, type ExitableStatus } from './enroll.js';
 import { pauseOrgCampaigns, RUNNING_CAMPAIGN_STATUSES } from './pause.js';
 import { fetchRecords, type SfRecordSnapshot } from './records.js';
 import { fetchMemberIds, MAX_CAMPAIGN_RECORDS, membershipSoql } from './source.js';
@@ -38,6 +38,8 @@ const PG_IN_BATCH = 5_000;
 const EXITABLE_STATUSES: ReadonlySet<string> = new Set(['active']);
 /** Statuses an archived campaign keeps: finished ones, and a do-not-contact flag still waiting for a person. */
 const KEPT_WHEN_ARCHIVED = [...TERMINAL_ENROLLMENT_STATUSES, 'needs_review'] as const;
+/** The open statuses an archived campaign releases: everything but needs_review. */
+const RELEASED_WHEN_ARCHIVED: readonly ExitableStatus[] = ['active', 'conversing', 'handed_off'];
 /** Archived campaigns release at most this many enrollments per tick. */
 const ARCHIVE_RELEASE_BATCH = 1_000;
 const MAX_ERROR_LENGTH = 1_000;
@@ -170,8 +172,8 @@ export async function refreshCampaign(
     const record = bySfId.get(e.sfRecordId);
     const reason = !memberIds.has(e.sfRecordId) ? 'left_query' : record ? skipReasonFor(toSnapshot(record), blocks, false) : null;
     if (!reason) continue;
-    await exitEnrollment(db, e.id, reason);
-    exited += 1;
+    // Guarded on `active`: the triage tick may have flagged the person since the read above.
+    if (await exitEnrollment(db, e.id, { from: ['active'], reason })) exited += 1;
   }
 
   const alreadyEnrolled = new Set(enrollments.map((e) => e.sfRecordId));
@@ -231,8 +233,12 @@ async function releaseArchivedEnrollments(db: Db, log: RunnerLogger): Promise<vo
       ),
     )
     .limit(ARCHIVE_RELEASE_BATCH);
-  for (const row of rows) await exitEnrollment(db, row.id, CAMPAIGN_ARCHIVED_EXIT_REASON);
-  if (rows.length > 0) log.info({ released: rows.length }, 'released enrollments of archived campaigns');
+  let released = 0;
+  for (const row of rows) {
+    // Every open status but needs_review, re-checked at the update (a flag may have landed since the read).
+    if (await exitEnrollment(db, row.id, { from: RELEASED_WHEN_ARCHIVED, reason: CAMPAIGN_ARCHIVED_EXIT_REASON })) released += 1;
+  }
+  if (released > 0) log.info({ released }, 'released enrollments of archived campaigns');
 }
 
 /**
