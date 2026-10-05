@@ -10,7 +10,7 @@ describe('outreach words', () => {
   it.each([
     ['manual', 'Paused by an admin'],
     ['crm_broken', 'Paused: the Salesforce connection needs to be reconnected'],
-    ['ai_budget', "Paused: today's AI budget is used up — resumes tomorrow"],
+    ['ai_budget', "Paused: today's AI budget is used up — it does not resume on its own: press Resume after midnight UTC or raise the budget"],
     ['kill_switch', 'Paused: outreach is switched off'],
   ])('words the pause reason %s', (reason, words) => {
     expect(pauseReasonWords(reason)).toBe(words);

@@ -23,7 +23,8 @@ export const CAMPAIGN_STATUS_WORDS: Record<CampaignStatus, string> = {
 export const PAUSE_REASON_WORDS: Readonly<Record<string, string>> = {
   manual: 'Paused by an admin',
   crm_broken: 'Paused: the Salesforce connection needs to be reconnected',
-  ai_budget: "Paused: today's AI budget is used up — resumes tomorrow",
+  // Nothing resumes an ai_budget pause automatically (any campaign mode): an admin presses Resume.
+  ai_budget: "Paused: today's AI budget is used up — it does not resume on its own: press Resume after midnight UTC or raise the budget",
   kill_switch: 'Paused: outreach is switched off',
 };
 
