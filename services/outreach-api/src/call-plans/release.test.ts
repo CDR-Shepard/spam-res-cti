@@ -75,6 +75,16 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
     expect(await refused(releaseApprovedCalls(db, other.ctx, b.campaignId, SEED_NOW))).toEqual({ code: 'NOT_FOUND', status: 404 });
   });
 
+  /** Polls until some backend is waiting on a lock: the release has reached the row the test holds. No fixed sleep. */
+  async function untilABackendWaitsOnALock(): Promise<void> {
+    for (let i = 0; i < 400; i += 1) {
+      const { rows } = await pool.query(`select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`);
+      if (rows.length > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error('the release never waited on the lock');
+  }
+
   it('14: an exit that commits while the release is inserting wins: no touch for an exited enrollment', async () => {
     const b = await setup();
     const lead = await approvedLead(b);
@@ -83,13 +93,52 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
       await client.query('begin');
       await client.query(`update campaign_enrollments set status = 'exited', exit_reason = 'left_query' where id = $1`, [lead.enrollmentId]);
       const release = releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW);
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await untilABackendWaitsOnALock();
       await client.query('commit');
       expect(await release).toEqual({ released: 0, skipped: 1 });
     } finally {
       client.release();
     }
     expect(await touches(lead.enrollmentId)).toEqual([]);
+  });
+
+  it('I-1: an edit and a new approval that commit while the release waits for the lead leave no touch carrying the stale plan', async () => {
+    const b = await setup();
+    const lead = await approvedLead(b);
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      await client.query(`select 1 from campaign_enrollments where id = $1 for update`, [lead.enrollmentId]);
+      // The edit (supersede v1, v2 proposed), then the re-approval, as two people would have done them.
+      await client.query(`update call_plans set status = 'superseded' where id = $1`, [lead.planId]);
+      await client.query(
+        `insert into call_plans (org_id, enrollment_id, research_id, version, status, source, plan, dnc_flagged, decided_by, decided_at)
+         select org_id, enrollment_id, research_id, 2, 'approved', 'edit', plan, false, $2, now() from call_plans where id = $1`,
+        [lead.planId, b.admin],
+      );
+      const release = releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW);
+      await untilABackendWaitsOnALock();
+      await client.query('commit');
+      expect(await release).toEqual({ released: 0, skipped: 1 });
+    } finally {
+      client.release();
+    }
+    expect(await touches(lead.enrollmentId)).toEqual([]);
+    expect(await stage(lead.enrollmentId)).toBe('approved');
+  });
+
+  it('M-4: leads the engine would refuse do not starve the ones behind them, however many there are', async () => {
+    const b = await setup();
+    const t0 = new Date('2026-10-01T00:00:00Z').getTime();
+    const blocked = [];
+    for (let i = 0; i < 3; i += 1) blocked.push(await approvedLead(b, { recordOver: { sfDoNotCall: true }, enrolledAt: new Date(t0 + i) }));
+    const good = [];
+    for (let i = 0; i < 3; i += 1) good.push(await approvedLead(b, { enrolledAt: new Date(t0 + 10 + i) }));
+    // A window of 2 holds only blocked leads under the old LIMIT; the cap is on releases, not on what is looked at.
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW, { max: 2 })).toEqual({ released: 2, skipped: 3 });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW, { max: 2 })).toEqual({ released: 1, skipped: 3 });
+    for (const l of good) expect(await touches(l.enrollmentId)).toHaveLength(1);
+    for (const l of blocked) expect(await touches(l.enrollmentId)).toEqual([]);
   });
 
   it('skips every lead whose consent is not exactly yes, whatever the engine would say later (CF-5, CF-10b)', async () => {
@@ -108,14 +157,17 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
     expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1 });
   });
 
-  it('skips a plan the model flagged do-not-contact until a person dismissed the flag (CF-10c)', async () => {
+  it("skips a plan the model flagged do-not-contact until a person dismissed THAT flag: the plan's own columns decide (CF-10c)", async () => {
     const b = await setup();
     const lead = await approvedLead(b, { dncFlagged: true });
     expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1 });
     const [triage] = (await db.execute(sql`
       insert into record_triage (org_id, crm_record_id, notes_hash, model, result, input_tokens, output_tokens)
       values (${b.orgId}::uuid, ${lead.crmRecordId}::uuid, 'h', 'm', ${JSON.stringify({ summary: 's', channels: [], timing: null, tags: [], doNotContact: { category: 'attorney', quote: 'q' } })}::jsonb, 1, 1) returning id`) as unknown as { rows: Array<{ id: string }> }).rows;
+    // Some flag on the record was dismissed, but not this plan's: still skipped.
     await db.execute(sql`update crm_records set dnc_dismissed_triage_id = ${triage!.id}::uuid where id = ${lead.crmRecordId}::uuid`);
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1 });
+    await db.execute(sql`update call_plans set dnc_dismissed_by = ${b.admin}::uuid, dnc_dismissed_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${lead.planId}::uuid`);
     expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 1, skipped: 0 });
   });
 

@@ -27,16 +27,21 @@ interface Releasable {
   state: string | null;
   dnc_pending: boolean;
   dnc_flagged: boolean;
-  dnc_ever_dismissed: boolean;
+  /** This plan's own flag was dismissed (`call_plans.dnc_dismissed_at`). */
+  dnc_dismissed: boolean;
+  /** Paging cursor: `enrolled_at` as text keeps its microseconds. */
+  enrolled_cursor: string;
 }
 
 const CONSENTS: readonly string[] = ['yes', 'no', 'field_missing', 'unknown'];
 
 /**
- * The insert is one statement: the enrollment is locked FOR SHARE and must still be active, still
- * `approved` and still selected, and have no touch that has not started. A `dialing` touch only
- * blocks when it belongs to THIS plan; one left over from before a reactivation (CF-3) is the
- * reconciler's business, and the engine refuses a second simultaneous call to the person anyway.
+ * The enrollment is locked FOR SHARE first, in its own statement, so that the insert's statement snapshot is taken only
+ * after any editor or approver holding the row has committed. The insert then requires the lead to be active, still
+ * `approved`, still selected, with THIS plan still its approved plan (an edit and a new approval since the read make a
+ * different plan the approved one: no touch carries the stale plan, I-1), and no touch that has not started. A `dialing`
+ * touch only blocks when it belongs to THIS plan; one left over from before a reactivation (CF-3) is the reconciler's
+ * business, and the engine refuses a second simultaneous call to the person anyway.
  */
 function insertTouch(r: Releasable, now: Date) {
   return sql`
@@ -46,18 +51,19 @@ function insertTouch(r: Releasable, now: Date) {
            'ai_call', 'planned', ${now.toISOString()}::timestamptz, '[]'::jsonb, ${r.plan_id}::uuid, ${r.decided_by}::uuid
     from campaign_enrollments e
     where e.id = ${r.enrollment_id}::uuid and e.status = 'active' and e.call_stage = 'approved'
+      and exists (select 1 from call_plans p where p.id = ${r.plan_id}::uuid and p.enrollment_id = e.id and p.status = 'approved')
       and ${selectionExists(sql`e.campaign_id`, sql`(select sf_record_id from crm_records where id = e.crm_record_id)`)}
       and not exists (
         select 1 from touches t
         where t.enrollment_id = e.id
           and (t.status in ('planned', 'held', 'queued') or (t.status = 'dialing' and t.call_plan_id = ${r.plan_id}::uuid)))
-    for share of e
     on conflict (enrollment_id, seq) do nothing
     returning id`;
 }
 
 async function releaseOne(db: Db, r: Releasable, now: Date): Promise<boolean> {
   return db.transaction(async (tx) => {
+    await tx.execute(sql`select 1 from campaign_enrollments where id = ${r.enrollment_id}::uuid for share`);
     const inserted = await tx.execute(insertTouch(r, now));
     if ((inserted as unknown as { rows: unknown[] }).rows.length === 0) return false;
     await tx
@@ -68,7 +74,43 @@ async function releaseOne(db: Db, r: Releasable, now: Date): Promise<boolean> {
   });
 }
 
-export async function releaseApprovedCalls(db: Db, ctx: RequestContext, campaignId: string, now: Date): Promise<ReleaseCallsResponse> {
+/** The next page of approved leads after `after` (null: the first), oldest enrollment first. */
+async function approvedPage(db: Db, ctx: RequestContext, campaignId: string, after: { at: string; id: string } | null, size: number): Promise<Releasable[]> {
+  // The consent is the one the approved plan's own research read (CF-6), never the newest research.
+  const result = await db.execute(sql`
+    select e.id as enrollment_id, e.enrolled_at::text as enrolled_cursor, p.id as plan_id, p.decided_by, cr.snapshot ->> 'consent' as consent,
+           r.phones, r.sf_do_not_call, r.skip_on_dialer, r.is_closed, r.state,
+           ${DNC_PENDING_SQL} as dnc_pending, p.dnc_flagged, (p.dnc_dismissed_at is not null) as dnc_dismissed
+    from campaign_enrollments e
+    join crm_records r on r.id = e.crm_record_id and r.org_id = e.org_id
+    join call_plans p on p.enrollment_id = e.id and p.status = 'approved'
+    join call_research cr on cr.id = p.research_id
+    where e.org_id = ${ctx.orgId}::uuid and e.campaign_id = ${campaignId}::uuid and e.status = 'active' and e.call_stage = 'approved'
+      ${after ? sql`and (e.enrolled_at, e.id) > (${after.at}::timestamptz, ${after.id}::uuid)` : sql``}
+    order by e.enrolled_at, e.id
+    limit ${size}`);
+  return (result as unknown as { rows: Releasable[] }).rows;
+}
+
+function releasable(r: Releasable, blocks: Awaited<ReturnType<typeof blockedTargets>>, now: Date): boolean {
+  const consent = r.consent && CONSENTS.includes(r.consent) ? (r.consent as AiConsentStatus) : null;
+  const warnings = gateWarnings({
+    consent,
+    record: { phones: r.phones, sfDoNotCall: r.sf_do_not_call, skipOnDialer: r.skip_on_dialer, isClosed: r.is_closed, state: r.state },
+    blocks,
+    now,
+    dnc: { pending: r.dnc_pending, flaggedNotDismissed: r.dnc_flagged && !r.dnc_dismissed },
+  });
+  // Only an explicit yes goes out: a null consent has no warning of its own, but it is not consent either.
+  return consent === 'yes' && !hasBlockingWarning(warnings);
+}
+
+/**
+ * `max` caps the calls released, not the leads looked at: pages of `max` leads are read until `max` are released or
+ * none are left, so leads the engine would refuse never starve the ones behind them (M-4).
+ */
+export async function releaseApprovedCalls(db: Db, ctx: RequestContext, campaignId: string, now: Date, opts: { max?: number } = {}): Promise<ReleaseCallsResponse> {
+  const max = opts.max ?? RELEASE_MAX;
   const [campaign] = await db
     .select({ mode: schema.campaigns.mode, status: schema.campaigns.status })
     .from(schema.campaigns)
@@ -76,34 +118,21 @@ export async function releaseApprovedCalls(db: Db, ctx: RequestContext, campaign
   if (!campaign) throw new DecisionError('NOT_FOUND');
   if (campaign.mode !== 'ai_call') throw new DecisionError('NOT_AI_CALL_CAMPAIGN');
   if (campaign.status !== 'active') throw new DecisionError('CAMPAIGN_NOT_ACTIVE');
-  // The consent is the one the approved plan's own research read (CF-6), never the newest research.
-  const result = await db.execute(sql`
-    select e.id as enrollment_id, p.id as plan_id, p.decided_by, cr.snapshot ->> 'consent' as consent,
-           r.phones, r.sf_do_not_call, r.skip_on_dialer, r.is_closed, r.state,
-           ${DNC_PENDING_SQL} as dnc_pending, p.dnc_flagged, (r.dnc_dismissed_triage_id is not null) as dnc_ever_dismissed
-    from campaign_enrollments e
-    join crm_records r on r.id = e.crm_record_id and r.org_id = e.org_id
-    join call_plans p on p.enrollment_id = e.id and p.status = 'approved'
-    join call_research cr on cr.id = p.research_id
-    where e.org_id = ${ctx.orgId}::uuid and e.campaign_id = ${campaignId}::uuid and e.status = 'active' and e.call_stage = 'approved'
-    order by e.enrolled_at, e.id
-    limit ${RELEASE_MAX}`);
-  const rows = (result as unknown as { rows: Releasable[] }).rows;
-  const blocks = await blockedTargets(db, ctx.orgId, [...new Set(rows.flatMap((r) => r.phones.map((p) => p.e164)))]);
   let released = 0;
   let skipped = 0;
-  for (const r of rows) {
-    const consent = r.consent && CONSENTS.includes(r.consent) ? (r.consent as AiConsentStatus) : null;
-    const warnings = gateWarnings({
-      consent,
-      record: { phones: r.phones, sfDoNotCall: r.sf_do_not_call, skipOnDialer: r.skip_on_dialer, isClosed: r.is_closed, state: r.state },
-      blocks,
-      now,
-      dnc: { pending: r.dnc_pending, flaggedNotDismissed: r.dnc_flagged && !r.dnc_ever_dismissed },
-    });
-    // Only an explicit yes goes out: a null consent has no warning of its own, but it is not consent either.
-    if (consent !== 'yes' || hasBlockingWarning(warnings) || !(await releaseOne(db, r, now))) skipped += 1;
-    else released += 1;
+  let after: { at: string; id: string } | null = null;
+  while (released < max) {
+    const rows = await approvedPage(db, ctx, campaignId, after, max);
+    if (rows.length === 0) break;
+    const blocks = await blockedTargets(db, ctx.orgId, [...new Set(rows.flatMap((r) => r.phones.map((p) => p.e164)))]);
+    for (const r of rows) {
+      if (released >= max) break;
+      if (releasable(r, blocks, now) && (await releaseOne(db, r, now))) released += 1;
+      else skipped += 1;
+    }
+    const last = rows.at(-1)!;
+    after = { at: last.enrolled_cursor, id: last.enrollment_id };
+    if (rows.length < max) break;
   }
   return { released, skipped };
 }
