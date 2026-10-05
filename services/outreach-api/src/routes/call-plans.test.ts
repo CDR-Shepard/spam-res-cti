@@ -17,7 +17,7 @@ const decisions = vi.hoisted(() => ({
   researchAgain: vi.fn(async () => undefined),
 }));
 vi.mock('../call-plans/decisions.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../call-plans/decisions.js')>()), ...decisions }));
-const release = vi.hoisted(() => ({ releaseApprovedCalls: vi.fn(async () => ({ released: 2, skipped: 1 })) }));
+const release = vi.hoisted(() => ({ releaseApprovedCalls: vi.fn(async () => ({ released: 2, skipped: 1, more: false })) }));
 vi.mock('../call-plans/release.js', () => release);
 const cards = vi.hoisted(() => ({
   loadCallPlanCards: vi.fn(async () => ({ cards: [], nextCursor: null, counts: { research: 0, review: 0, approved: 0, queued: 0, done: 0 } })),
@@ -173,7 +173,7 @@ describe('call plan routes', () => {
     state.session = admin;
     const res = await call('POST', `/api/campaigns/${CAMPAIGN_ID}/ai-calls/release`);
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ released: 2, skipped: 1 });
+    expect(res.json()).toEqual({ released: 2, skipped: 1, more: false });
   });
 
   it('release maps a refused campaign to 409 with its code', async () => {

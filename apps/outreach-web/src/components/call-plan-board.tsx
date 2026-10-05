@@ -51,6 +51,7 @@ export function CallPlanBoard({ campaign, isAdmin }: { campaign: Campaign; isAdm
         )}
         {isAdmin && campaign.status === 'dry_run' && <p className="text-sm text-muted-foreground">Activate the campaign to place calls.</p>}
         {release.data && <p role="status" className="text-sm">{plural(release.data.released, 'call', 'calls')} queued. {release.data.skipped} skipped.</p>}
+        {release.data?.more && <p role="status" className="text-sm text-muted-foreground">More approved leads are waiting. Press Call all approved again.</p>}
         {release.error && <p role="alert" className="text-sm text-destructive">{errorText(release.error)}</p>}
         {board.error && <p role="alert" className="text-sm text-destructive">{errorText(board.error)}</p>}
         {board.isPending && <p className="text-sm text-muted-foreground">Loading call plans…</p>}

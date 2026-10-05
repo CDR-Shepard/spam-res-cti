@@ -42,7 +42,7 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
 
     const res = await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW);
 
-    expect(res).toEqual({ released: 2, skipped: 1 });
+    expect(res).toEqual({ released: 2, skipped: 1, more: false });
     for (const lead of [a, c]) {
       const [t, ...rest] = await touches(lead.enrollmentId);
       expect(rest).toEqual([]);
@@ -57,8 +57,8 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
   it('12: releasing twice releases nothing the second time', async () => {
     const b = await setup();
     const lead = await approvedLead(b);
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 1, skipped: 0 });
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 0 });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 1, skipped: 0, more: false });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 0, more: false });
     expect(await touches(lead.enrollmentId)).toHaveLength(1);
   });
 
@@ -109,7 +109,7 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
       const release = releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW);
       await untilBlockedBy(client);
       await client.query('commit');
-      expect(await release).toEqual({ released: 0, skipped: 1 });
+      expect(await release).toEqual({ released: 0, skipped: 1, more: false });
     } finally {
       client.release();
     }
@@ -133,7 +133,7 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
       const release = releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW);
       await untilBlockedBy(client);
       await client.query('commit');
-      expect(await release).toEqual({ released: 0, skipped: 1 });
+      expect(await release).toEqual({ released: 0, skipped: 1, more: false });
     } finally {
       client.release();
     }
@@ -170,16 +170,34 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
     const good = [];
     for (let i = 0; i < 3; i += 1) good.push(await approvedLead(b, { enrolledAt: new Date(t0 + 10 + i) }));
     // A window of 2 holds only blocked leads under the old LIMIT; the cap is on releases, not on what is looked at.
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW, { max: 2 })).toEqual({ released: 2, skipped: 3 });
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW, { max: 2 })).toEqual({ released: 1, skipped: 3 });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW, { max: 2 })).toEqual({ released: 2, skipped: 3, more: true });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW, { max: 2 })).toEqual({ released: 1, skipped: 3, more: false });
     for (const l of good) expect(await touches(l.enrollmentId)).toHaveLength(1);
     for (const l of blocked) expect(await touches(l.enrollmentId)).toEqual([]);
+  });
+
+  it('M-3: a call looks at no more than maxPages pages and says more is waiting; the cap on releases says so too', async () => {
+    const b = await setup();
+    const t0 = new Date('2026-10-01T00:00:00Z').getTime();
+    for (let i = 0; i < 5; i += 1) await approvedLead(b, { recordOver: { sfDoNotCall: true }, enrolledAt: new Date(t0 + i) });
+    const good = await approvedLead(b, { enrolledAt: new Date(t0 + 10) });
+    // Two pages of two: four blocked leads looked at, the fifth and the good one are not reached.
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW, { max: 2, maxPages: 2 })).toEqual({ released: 0, skipped: 4, more: true });
+    expect(await touches(good.enrollmentId)).toEqual([]);
+    // Three pages reach the end (5 blocked + 1 good = 6 leads = 3 pages of 2), so nothing is left unseen.
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW, { max: 2, maxPages: 3 })).toEqual({ released: 1, skipped: 5, more: false });
+
+    const c = await setup();
+    const leads = [await approvedLead(c), await approvedLead(c), await approvedLead(c)];
+    expect(await releaseApprovedCalls(db, c.ctx, c.campaignId, SEED_NOW, { max: 2 })).toEqual({ released: 2, skipped: 0, more: true });
+    expect(await releaseApprovedCalls(db, c.ctx, c.campaignId, SEED_NOW, { max: 2 })).toEqual({ released: 1, skipped: 0, more: false });
+    for (const l of leads) expect(await touches(l.enrollmentId)).toHaveLength(1);
   });
 
   it('skips every lead whose consent is not exactly yes, whatever the engine would say later (CF-5, CF-10b)', async () => {
     const b = await setup();
     const leads = [await approvedLead(b, { consent: 'no' }), await approvedLead(b, { consent: 'unknown' }), await approvedLead(b, { consent: null }), await approvedLead(b, { consent: 'field_missing' })];
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 4 });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 4, more: false });
     for (const l of leads) expect(await touches(l.enrollmentId)).toEqual([]);
   });
 
@@ -189,28 +207,28 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
     await db.execute(sql`
       insert into call_research (org_id, enrollment_id, crm_record_id, version, snapshot, size_chars, content_hash)
       select org_id, enrollment_id, crm_record_id, 2, jsonb_set(snapshot, '{consent}', '"yes"'), size_chars, 'newer' from call_research where id = ${lead.researchId}::uuid`);
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1 });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1, more: false });
   });
 
   it("skips a plan the model flagged do-not-contact until a person dismissed THAT flag: the plan's own columns decide (CF-10c)", async () => {
     const b = await setup();
     const lead = await approvedLead(b, { dncFlagged: true });
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1 });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1, more: false });
     const [triage] = (await db.execute(sql`
       insert into record_triage (org_id, crm_record_id, notes_hash, model, result, input_tokens, output_tokens)
       values (${b.orgId}::uuid, ${lead.crmRecordId}::uuid, 'h', 'm', ${JSON.stringify({ summary: 's', channels: [], timing: null, tags: [], doNotContact: { category: 'attorney', quote: 'q' } })}::jsonb, 1, 1) returning id`) as unknown as { rows: Array<{ id: string }> }).rows;
     // Some flag on the record was dismissed, but not this plan's: still skipped.
     await db.execute(sql`update crm_records set dnc_dismissed_triage_id = ${triage!.id}::uuid where id = ${lead.crmRecordId}::uuid`);
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1 });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1, more: false });
     await db.execute(sql`update call_plans set dnc_dismissed_by = ${b.admin}::uuid, dnc_dismissed_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${lead.planId}::uuid`);
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 1, skipped: 0 });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 1, skipped: 0, more: false });
   });
 
   it('a lead deselected after approval is skipped, never queued', async () => {
     const b = await setup();
     const lead = await approvedLead(b);
     await db.execute(sql`delete from campaign_selections where campaign_id = ${b.campaignId}::uuid`);
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1 });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1, more: false });
     expect(await touches(lead.enrollmentId)).toEqual([]);
   });
 
@@ -218,7 +236,7 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
     const b = await setup();
     const lead = await approvedLead(b);
     await db.insert(schema.touches).values({ orgId: b.orgId, enrollmentId: lead.enrollmentId, seq: 1, channel: 'ai_call', status: 'dialing', dueAt: SEED_NOW });
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 1, skipped: 0 });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 1, skipped: 0, more: false });
     const all = await touches(lead.enrollmentId);
     expect(all.map((t) => [t.seq, t.status]).sort()).toEqual([[1, 'dialing'], [2, 'planned']]);
   });
@@ -227,7 +245,7 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
     const b = await setup();
     const lead = await approvedLead(b);
     await db.insert(schema.touches).values({ orgId: b.orgId, enrollmentId: lead.enrollmentId, seq: 1, channel: 'ai_call', status: 'planned', dueAt: SEED_NOW, callPlanId: lead.planId });
-    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1 });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1, more: false });
     expect(await touches(lead.enrollmentId)).toHaveLength(1);
   });
 });

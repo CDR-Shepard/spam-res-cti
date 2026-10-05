@@ -217,11 +217,19 @@ describe('CallPlanBoard', () => {
   });
 
   it('8: an admin on an active campaign releases the approved calls and sees the result', async () => {
-    const calls = stubApi({ [`GET ${BOARD}`]: standard(), [`POST /api/campaigns/${CAMPAIGN_ID}/ai-calls/release`]: { released: 1, skipped: 0 } });
+    const calls = stubApi({ [`GET ${BOARD}`]: standard(), [`POST /api/campaigns/${CAMPAIGN_ID}/ai-calls/release`]: { released: 1, skipped: 0, more: false } });
     render();
     await userEvent.click(await screen.findByRole('button', { name: 'Call all approved (1)' }));
     expect(await screen.findByText('1 call queued. 0 skipped.')).toBeInTheDocument();
     expect(calls.some((c) => c.method === 'POST' && c.url === `/api/campaigns/${CAMPAIGN_ID}/ai-calls/release`)).toBe(true);
+  });
+
+  it('8a: a release that stopped at its cap says more approved leads are waiting', async () => {
+    stubApi({ [`GET ${BOARD}`]: standard(), [`POST /api/campaigns/${CAMPAIGN_ID}/ai-calls/release`]: { released: 500, skipped: 3, more: true } });
+    render();
+    await userEvent.click(await screen.findByRole('button', { name: 'Call all approved (1)' }));
+    expect(await screen.findByText('500 calls queued. 3 skipped.')).toBeInTheDocument();
+    expect(screen.getByText('More approved leads are waiting. Press Call all approved again.')).toBeInTheDocument();
   });
 
   it('8b: a non-admin never sees the release button', async () => {

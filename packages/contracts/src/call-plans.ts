@@ -164,6 +164,9 @@ export type ApproveCallPlanRequest = z.infer<typeof ApproveCallPlanRequest>;
 export const EditCallPlanRequest = z.object({ version: z.number().int().min(1), plan: EditableCallPlan });
 export type EditCallPlanRequest = z.infer<typeof EditCallPlanRequest>;
 
-/** POST /api/campaigns/:id/ai-calls/release — "Call all approved". */
-export const ReleaseCallsResponse = z.object({ released: z.number(), skipped: z.number() });
+/**
+ * POST /api/campaigns/:id/ai-calls/release — "Call all approved". `skipped` counts the leads looked at and not released.
+ * `more`: the call stopped at its cap (calls released, or pages read) with approved leads still unread; run it again.
+ */
+export const ReleaseCallsResponse = z.object({ released: z.number(), skipped: z.number(), more: z.boolean() });
 export type ReleaseCallsResponse = z.infer<typeof ReleaseCallsResponse>;

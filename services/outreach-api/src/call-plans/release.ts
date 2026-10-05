@@ -14,6 +14,8 @@ import { DNC_PENDING_SQL } from './dnc-sql.js';
 import { gateWarnings, hasBlockingWarning } from './warnings.js';
 
 export const RELEASE_MAX = 500;
+/** Pages one call reads at most: with RELEASE_MAX a call looks at no more than 5,000 leads (M-3). */
+export const RELEASE_MAX_PAGES = 10;
 
 interface Releasable {
   enrollment_id: string;
@@ -75,8 +77,14 @@ async function releaseOne(db: Db, r: Releasable, now: Date): Promise<boolean> {
   });
 }
 
-/** The next page of approved leads after `after` (null: the first), oldest enrollment first. */
-async function approvedPage(db: Db, ctx: RequestContext, campaignId: string, after: { at: string; id: string } | null, size: number): Promise<Releasable[]> {
+/** The next page of approved leads after `after` (null: the first), oldest enrollment first; `more` = a lead follows the page. */
+async function approvedPage(
+  db: Db,
+  ctx: RequestContext,
+  campaignId: string,
+  after: { at: string; id: string } | null,
+  size: number,
+): Promise<{ rows: Releasable[]; more: boolean }> {
   // The consent is the one the approved plan's own research read (CF-6), never the newest research.
   const result = await db.execute(sql`
     select e.id as enrollment_id, e.enrolled_at::text as enrolled_cursor, p.id as plan_id, p.decided_by, cr.snapshot ->> 'consent' as consent,
@@ -89,8 +97,9 @@ async function approvedPage(db: Db, ctx: RequestContext, campaignId: string, aft
     where e.org_id = ${ctx.orgId}::uuid and e.campaign_id = ${campaignId}::uuid and e.status = 'active' and e.call_stage = 'approved'
       ${after ? sql`and (e.enrolled_at, e.id) > (${after.at}::timestamptz, ${after.id}::uuid)` : sql``}
     order by e.enrolled_at, e.id
-    limit ${size}`);
-  return (result as unknown as { rows: Releasable[] }).rows;
+    limit ${size + 1}`);
+  const rows = (result as unknown as { rows: Releasable[] }).rows;
+  return { rows: rows.slice(0, size), more: rows.length > size };
 }
 
 function releasable(r: Releasable, blocks: Awaited<ReturnType<typeof blockedTargets>>, now: Date): boolean {
@@ -108,10 +117,18 @@ function releasable(r: Releasable, blocks: Awaited<ReturnType<typeof blockedTarg
 
 /**
  * `max` caps the calls released, not the leads looked at: pages of `max` leads are read until `max` are released or
- * none are left, so leads the engine would refuse never starve the ones behind them (M-4).
+ * none are left, so leads the engine would refuse never starve the ones behind them (M-4). `maxPages` bounds the
+ * reading (M-3); either cap stopping the call with approved leads unread answers `more: true`.
  */
-export async function releaseApprovedCalls(db: Db, ctx: RequestContext, campaignId: string, now: Date, opts: { max?: number } = {}): Promise<ReleaseCallsResponse> {
+export async function releaseApprovedCalls(
+  db: Db,
+  ctx: RequestContext,
+  campaignId: string,
+  now: Date,
+  opts: { max?: number; maxPages?: number } = {},
+): Promise<ReleaseCallsResponse> {
   const max = opts.max ?? RELEASE_MAX;
+  const maxPages = opts.maxPages ?? RELEASE_MAX_PAGES;
   const [campaign] = await db
     .select({ mode: schema.campaigns.mode, status: schema.campaigns.status })
     .from(schema.campaigns)
@@ -121,19 +138,25 @@ export async function releaseApprovedCalls(db: Db, ctx: RequestContext, campaign
   if (campaign.status !== 'active') throw new DecisionError('CAMPAIGN_NOT_ACTIVE');
   let released = 0;
   let skipped = 0;
+  let more = false;
   let after: { at: string; id: string } | null = null;
-  while (released < max) {
-    const rows = await approvedPage(db, ctx, campaignId, after, max);
-    if (rows.length === 0) break;
-    const blocks = await blockedTargets(db, ctx.orgId, [...new Set(rows.flatMap((r) => r.phones.map((p) => p.e164)))]);
-    for (const r of rows) {
-      if (released >= max) break;
+  for (let pages = 0; pages < maxPages && released < max; pages += 1) {
+    const page = await approvedPage(db, ctx, campaignId, after, max);
+    if (page.rows.length === 0) break;
+    const blocks = await blockedTargets(db, ctx.orgId, [...new Set(page.rows.flatMap((r) => r.phones.map((p) => p.e164)))]);
+    let unread = page.more;
+    for (const r of page.rows) {
+      if (released >= max) {
+        unread = true;
+        break;
+      }
       if (releasable(r, blocks, now) && (await releaseOne(db, r, now))) released += 1;
       else skipped += 1;
     }
-    const last = rows.at(-1)!;
+    more = unread;
+    if (!page.more) break;
+    const last = page.rows.at(-1)!;
     after = { at: last.enrolled_cursor, id: last.enrollment_id };
-    if (rows.length < max) break;
   }
-  return { released, skipped };
+  return { released, skipped, more };
 }
