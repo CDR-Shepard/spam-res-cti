@@ -6,6 +6,7 @@ import {
   PatchMeBody,
   assignStarterNumbersOnConnect,
   ensurePermissionSetOnConnect,
+  grantsPowerDialerOnSignIn,
   starterNumbersLogLevel,
   starterNumbersOnConnectDeps,
   type StarterNumbersOnConnectDeps,
@@ -271,5 +272,35 @@ describe('starterNumbersLogLevel', () => {
 
   it('is a warn on failure', () => {
     expect(starterNumbersLogLevel({ status: 'failed', reason: 'x' })).toBe('warn');
+  });
+});
+
+describe('grantsPowerDialerOnSignIn', () => {
+  const SALES = ['Sales'] as const;
+
+  it('grants a rep on an eligible profile, matched like STARTER_NUMBER_PROFILES', () => {
+    expect(grantsPowerDialerOnSignIn({ isAdmin: false, profileName: 'Sales', eligibleProfiles: SALES })).toBe(true);
+    expect(grantsPowerDialerOnSignIn({ isAdmin: false, profileName: '  sales ', eligibleProfiles: SALES })).toBe(true);
+  });
+
+  it('grants an admin whatever their profile — even when the lookup failed', () => {
+    expect(grantsPowerDialerOnSignIn({ isAdmin: true, profileName: 'System Administrator', eligibleProfiles: SALES })).toBe(true);
+    expect(grantsPowerDialerOnSignIn({ isAdmin: true, profileName: null, eligibleProfiles: SALES })).toBe(true);
+  });
+
+  it('does not grant anyone else', () => {
+    expect(grantsPowerDialerOnSignIn({ isAdmin: false, profileName: 'Accounting', eligibleProfiles: SALES })).toBe(false);
+    expect(grantsPowerDialerOnSignIn({ isAdmin: false, profileName: 'Escrow & Listing Manager', eligibleProfiles: SALES })).toBe(false);
+  });
+
+  // Failing OPEN here would hand the dialer to anyone whose lookup blipped.
+  it('fails closed for a non-admin whose profile is unknown', () => {
+    expect(grantsPowerDialerOnSignIn({ isAdmin: false, profileName: null, eligibleProfiles: SALES })).toBe(false);
+    expect(grantsPowerDialerOnSignIn({ isAdmin: false, profileName: undefined, eligibleProfiles: SALES })).toBe(false);
+  });
+
+  it('with no profiles configured, only admins are granted', () => {
+    expect(grantsPowerDialerOnSignIn({ isAdmin: false, profileName: 'Sales', eligibleProfiles: [] })).toBe(false);
+    expect(grantsPowerDialerOnSignIn({ isAdmin: true, profileName: 'Sales', eligibleProfiles: [] })).toBe(true);
   });
 });
