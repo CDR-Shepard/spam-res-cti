@@ -89,10 +89,16 @@ export type EditableCallPlan = z.infer<typeof EditableCallPlan>;
 export const GateWarningCode = z.enum([
   'no_ai_consent',
   'consent_field_missing',
+  /** The consent field is configured but its value could not be read (CF-5): never consent. */
+  'consent_unknown',
   'no_phone',
   'opted_out',
   'blocked',
   'dnc',
+  /** A do-not-contact flag on the person is waiting in Needs Review (CF-10). */
+  'dnc_pending',
+  /** The plan was flagged do-not-contact and no person has dismissed the flag (CF-10). */
+  'dnc_not_dismissed',
   'sf_do_not_call',
   'skip_on_dialer',
   'closed',
@@ -114,6 +120,9 @@ export const CallPlanVersion = z.object({
   decidedAt: z.string().nullable(),
   /** The model raised do-not-contact and a person dismissed it before this card was shown. */
   dncFlagDismissed: z.boolean(),
+  /** Who dismissed it and when (display name or email); null when it was not recorded. */
+  dncFlagDismissedBy: z.string().nullable(),
+  dncFlagDismissedAt: z.string().nullable(),
 });
 export type CallPlanVersion = z.infer<typeof CallPlanVersion>;
 

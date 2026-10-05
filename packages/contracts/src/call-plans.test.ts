@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AiConsentStatus, CallPlan, EditableCallPlan, ResearchSourceSummary } from './call-plans.js';
+import { AiConsentStatus, CallPlan, CallPlanVersion, EditableCallPlan, GateWarning, ResearchSourceSummary } from './call-plans.js';
 
 export const validPlan = {
   situationSummary: 'Inherited the house in 2024; told a rep in May the roof leaks and the siblings disagree about selling.',
@@ -49,5 +49,23 @@ describe('AiConsentStatus', () => {
   it('has an explicit unknown, so a consent value that could not be read is never shown as no', () => {
     expect(AiConsentStatus.options).toEqual(['yes', 'no', 'field_missing', 'unknown']);
     expect(AiConsentStatus.safeParse('unknown').success).toBe(true);
+  });
+});
+
+describe('GateWarning', () => {
+  it('names an unreadable consent and the two do-not-contact holds', () => {
+    for (const code of ['consent_unknown', 'dnc_pending', 'dnc_not_dismissed']) {
+      expect(GateWarning.safeParse({ code, severity: 'block', words: 'x' }).success).toBe(true);
+    }
+  });
+});
+
+describe('CallPlanVersion', () => {
+  const base = { version: 2, status: 'proposed', source: 'model', plan: EditableCallPlan.parse(validPlan), createdAt: '2026-10-05T10:00:00.000Z', decidedAt: null, dncFlagDismissed: true };
+
+  it('carries who dismissed a do-not-contact flag and when, or null when it was not recorded', () => {
+    expect(CallPlanVersion.parse({ ...base, dncFlagDismissedBy: 'Rita Rep', dncFlagDismissedAt: '2026-10-05T11:00:00.000Z' }).dncFlagDismissedBy).toBe('Rita Rep');
+    expect(CallPlanVersion.parse({ ...base, dncFlagDismissedBy: null, dncFlagDismissedAt: null }).dncFlagDismissedAt).toBeNull();
+    expect(CallPlanVersion.safeParse(base).success).toBe(false);
   });
 });
