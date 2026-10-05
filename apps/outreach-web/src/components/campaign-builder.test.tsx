@@ -90,7 +90,7 @@ describe('CampaignBuilder', () => {
     const calls = stubApi({
       'GET /api/crm/listviews?object=Lead': leadViews,
       'POST /api/campaigns': created,
-      [`GET /api/campaigns/${created.id}/candidates?page=1`]: { total: 1, page: 1, pageSize: 50, pages: 1, selectedCount: 0, records: [{ sfRecordId: '00Q000000000001AAA', name: 'Jane Seller', ownerName: 'Rep One', consentAiCall: true, skipReason: null, selected: false, enrolled: false }] },
+      [`GET /api/campaigns/${created.id}/candidates?page=1`]: { total: 1, page: 1, pageSize: 50, pages: 1, selectedCount: 0, activeEnrolledCount: 0, records: [{ sfRecordId: '00Q000000000001AAA', name: 'Jane Seller', ownerName: 'Rep One', consentAiCall: true, skipReason: null, selected: false, enrolled: false, enrollmentStatus: null, exitReason: null }] },
     });
     renderWithProviders(<CampaignBuilder onCreated={onCreated} />, { isAdmin: true });
     await userEvent.selectOptions(screen.getByLabelText('What the campaign does'), 'ai_call');

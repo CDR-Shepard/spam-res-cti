@@ -22,14 +22,16 @@ export interface ConfirmActionProps {
   onConfirm: () => void;
   disabled?: boolean;
   destructive?: boolean;
+  /** Look of the opening button (default solid; a destructive action is always the destructive look). */
+  triggerVariant?: 'default' | 'outline' | 'ghost';
 }
 
 /** A button that asks before doing something that is hard to take back (go live, archive, confirm do-not-contact, disconnect). */
-export function ConfirmAction({ label, triggerAriaLabel, title, description, confirmLabel, onConfirm, disabled, destructive }: ConfirmActionProps) {
+export function ConfirmAction({ label, triggerAriaLabel, title, description, confirmLabel, onConfirm, disabled, destructive, triggerVariant = 'default' }: ConfirmActionProps) {
   return (
     <AlertDialog>
       <AlertDialogTrigger asChild>
-        <Button size="sm" variant={destructive ? 'destructive' : 'default'} disabled={disabled} aria-label={triggerAriaLabel}>{label}</Button>
+        <Button size="sm" variant={destructive ? 'destructive' : triggerVariant} disabled={disabled} aria-label={triggerAriaLabel}>{label}</Button>
       </AlertDialogTrigger>
       <AlertDialogContent>
         <AlertDialogHeader>

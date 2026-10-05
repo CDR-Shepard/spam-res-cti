@@ -174,7 +174,7 @@ describe('CampaignDetail settings', () => {
 });
 
 describe('CampaignDetail of an AI call campaign', () => {
-  const candidates = { total: 1, page: 1, pageSize: 50, pages: 1, selectedCount: 0, records: [{ sfRecordId: '00Q000000000001AAA', name: 'Jane Seller', ownerName: 'Rep One', consentAiCall: true, skipReason: null, selected: false, enrolled: false }] };
+  const candidates = { total: 1, page: 1, pageSize: 50, pages: 1, selectedCount: 0, activeEnrolledCount: 0, records: [{ sfRecordId: '00Q000000000001AAA', name: 'Jane Seller', ownerName: 'Rep One', consentAiCall: true, skipReason: null, selected: false, enrolled: false, enrollmentStatus: null, exitReason: null }] };
 
   it('shows the lead picker instead of the sequence plan', async () => {
     const calls = renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ mode: 'ai_call' }), [`GET ${CAMPAIGN}/candidates?page=1`]: candidates });
