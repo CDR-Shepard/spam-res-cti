@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>AI_Call_Consent_Date__c</fullName>
+    <description>When AI-call consent was captured. Set by AI Outreach together with AI Call Consent. (Outreach spec 2026-10-04, section 11.1.)</description>
+    <externalId>false</externalId>
+    <inlineHelpText>When this person agreed to calls from our AI assistant.</inlineHelpText>
+    <label>AI Call Consent Date</label>
+    <required>false</required>
+    <trackTrending>false</trackTrending>
+    <type>DateTime</type>
+</CustomField>

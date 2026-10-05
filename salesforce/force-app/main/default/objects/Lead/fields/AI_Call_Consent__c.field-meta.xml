@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>AI_Call_Consent__c</fullName>
+    <defaultValue>false</defaultValue>
+    <description>Checked = this person agreed to calls from the AI assistant. Set by AI Outreach when it captures consent (a text or email reply, a web form, an inbound call) or by a rep. AI Outreach never places an AI call to a record without this box. Where and when consent came from are in AI Call Consent Source and AI Call Consent Date. (Outreach spec 2026-10-04, section 11.1.)</description>
+    <externalId>false</externalId>
+    <inlineHelpText>Tick only when this person has agreed to calls from our AI assistant. If you tick it yourself, set AI Call Consent Source to Rep.</inlineHelpText>
+    <label>AI Call Consent</label>
+    <trackTrending>false</trackTrending>
+    <type>Checkbox</type>
+</CustomField>
