@@ -80,7 +80,7 @@ async function claimDueRecords(db: Db, now: Date, batch: number): Promise<DueRec
       WHERE r.triage_needed
         AND (r.triage_attempted_at IS NULL OR r.triage_attempted_at < ${staleBefore}::timestamptz)
         AND EXISTS (SELECT 1 FROM campaign_enrollments e JOIN campaigns c ON c.id = e.campaign_id
-                    WHERE e.crm_record_id = r.id AND e.status = 'active' AND c.status IN ('dry_run', 'active'))
+                    WHERE e.crm_record_id = r.id AND e.status = 'active' AND c.status IN ('dry_run', 'active') AND c.mode = 'sequence')
     ), picked AS (
       SELECT id FROM ranked WHERE rn <= ${TRIAGE_PER_ORG_CAP} ORDER BY rn, synced_at LIMIT ${batch}
     ), locked AS (

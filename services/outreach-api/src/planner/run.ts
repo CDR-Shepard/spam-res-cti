@@ -80,6 +80,7 @@ async function loadDue(db: Db, now: Date, batch: number, waitForTriage: boolean)
     join organizations o on o.id = e.org_id
     where e.status = 'active'
       and c.status in ('dry_run', 'active')
+      and c.mode = 'sequence'
       and e.next_touch_at <= ${iso(now)}::timestamptz
       ${triageWait}
       and not exists (
@@ -277,7 +278,7 @@ async function loadQueueCandidates(db: Db, now: Date, batch: number): Promise<Qu
     join campaigns c on c.id = e.campaign_id
     join crm_records r on r.id = e.crm_record_id
     join organizations o on o.id = e.org_id
-    where c.status = 'active' and e.status = 'active'
+    where c.status = 'active' and c.mode = 'sequence' and e.status = 'active'
       and t.status = 'planned' and t.channel = 'rep_call'
       and t.due_at <= ${iso(now)}::timestamptz
     order by t.due_at, t.id

@@ -213,6 +213,17 @@ describe.skipIf(!pgLane)('triageDueRecords (real Postgres, fake model and Salesf
     expect((await record(t.recordId)).triageNeeded).toBe(true);
   });
 
+  it('never claims a record whose only running enrollment is in an ai_call campaign', async () => {
+    const t = await tenant();
+    await db.update(schema.campaigns).set({ mode: 'ai_call' }).where(eq(schema.campaigns.id, t.campaign.id));
+    const model = fakeModel();
+    await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: NOW, log });
+    expect(model.triage).not.toHaveBeenCalled();
+    const row = await record(t.recordId);
+    expect(row.triageAttemptedAt).toBeNull();
+    expect(row.triageNeeded).toBe(true);
+  });
+
   it('leaves a record whose notes fetch failed pending and backed off, and carries on with the next records', async () => {
     const t = await tenant({ n: 1 });
     const [second, third] = await moreRecords(t, 2, 3);

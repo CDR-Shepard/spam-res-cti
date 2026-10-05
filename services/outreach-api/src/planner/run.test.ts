@@ -196,6 +196,24 @@ describe.skipIf(!pgLane)('planner run (real Postgres)', () => {
     expect(rows[0].gate_audit).toContainEqual(expect.objectContaining({ rule: 'human_dial', verdict: 'deferred' }));
   });
 
+  it('plans no sequence touch for an ai_call campaign enrollment, even when due', async () => {
+    const { enrollmentId, campaignId } = await dueEnrollment('active');
+    await pool.query(`update campaigns set mode = 'ai_call' where id = $1`, [campaignId]);
+    await planTick({ db, now: NOW, log, waitForTriage: false });
+    expect(await touchesOf(enrollmentId)).toEqual([]);
+  });
+
+  it('promoteQueuedCalls leaves a planned rep call of an ai_call campaign alone', async () => {
+    const { orgId, enrollmentId, campaignId } = await dueEnrollment('active');
+    await pool.query(
+      `insert into touches (org_id, enrollment_id, seq, channel, status, due_at) values ($1, $2, 1, 'rep_call', 'planned', $3)`,
+      [orgId, enrollmentId, new Date(NOW.getTime() - HOUR)],
+    );
+    await pool.query(`update campaigns set mode = 'ai_call' where id = $1`, [campaignId]);
+    await promoteQueuedCalls(db, NOW);
+    expect((await touchesOf(enrollmentId))[0]).toMatchObject({ channel: 'rep_call', status: 'planned' });
+  });
+
   it('planTick plans and queues an active campaign rep call in one tick', async () => {
     const { enrollmentId } = await dueEnrollment('active');
     const result = await planTick({ db, now: NOW, log });
