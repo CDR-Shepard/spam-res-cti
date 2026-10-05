@@ -25,14 +25,18 @@ export type AgentPlanIssue = (typeof AGENT_PLAN_ISSUES)[number];
 
 /**
  * Amounts in digits and in words. Deliberately blunt: any run of three digits fails (a price like "around 250", a year,
- * a house number, a ZIP), as do "low 300s", "low 90s", "1.2m", "250k" and the words hundred/thousand/million/grand.
+ * a house number, a ZIP), as do "low 300s", "the 90's", "1.2m", "1.5 MM", "250k", digits spaced out ("2 5 0"),
+ * "six figures" and the words hundred/thousand/million/grand.
  * A plan needs none of them. Amounts spelled out without those words ("two fifty", "ninety") are NOT caught here; the
  * non-overridable price rule after the fence in the agent's instructions is what covers them.
  */
 const MONEY: readonly RegExp[] = [
   /[$\u20AC\u00A3\u00A5]/,
-  /\d+(?:[.,]\d+)?\s*[km]\b/i,
-  /\b\d{2}s\b/i,
+  /\d+(?:[.,]\d+)?\s*(?:k|m|mm)\b/i,
+  /\b\d{2}'?s\b/i,
+  // Digits spelled one by one ("2 5 0") and "six figures".
+  /\b\d(?:\s+\d){2,}\b/,
+  /\b(?:five|six|seven|eight)[\s-]+figures?\b/i,
   /\b(?:dollars?|bucks|usd|cents?)\b/i,
   /\b(?:hundred|thousand|million|billion|grand|mil)s?\b/i,
   /\d{3,}/,
@@ -44,45 +48,67 @@ const MONEY: readonly RegExp[] = [
  * house is worth is a legitimate question. Amounts are caught by MONEY.
  */
 const OFFER: readonly RegExp[] = [
-  /\b(?:our|my|the|an?)\s+(?:\w+\s+)?offers?\b/i,
-  /\bcash\s+offers?\b/i,
-  /\b(?:we|i)(?:'ll|\s+(?:can|could|will|would|may|might|are going to))\s+offer\b/i,
+  /\b(?:our|my|the|an?)[\s-]+(?:\w+[\s-]+)?offers?\b/i,
+  /\bcash[\s-]+offers?\b/i,
+  /\b(?:we|i)(?:'ll|'d|\s+(?:can|could|will|would|may|might|are going to|want to|plan to))(?:\s+(?:like|love|be happy|be glad)\s+to)?\s+offer\b/i,
   /\boffer(?:s|ed|ing)?\s+(?:you|them|him|her|us)\b/i,
   /\b(?:make|making|made|give|giving|submit|submitting|present|presenting)\s+(?:you\s+|them\s+|him\s+|her\s+)?(?:\w+\s+)?offers?\b/i,
   /\b(?:pay|paying|paid)\s+(?:you|them|him|her)\b/i,
 ];
 
 const REAL = String.raw`(?:(?:real|actual|live|living|genuine|flesh and blood)\s+)*`;
+/** "AI" also spelled with a space or hyphen ("A I", "A-I"). */
+const AI_LETTERS = String.raw`(?:ai|a\.i\.?|a[\s-]i)`;
+/** Who the agent may never pass itself off as. */
+const PERSON_ROLES = String.raw`(?:employee|staff|staffer|staff member|team member|human|human being|rep|representative|person|people|man|woman|guy|lady|worker|associate)`;
 
 const HUMAN_CLAIM: readonly RegExp[] = [
   new RegExp(String.raw`\b(?:i am|i'm|im|we are|we're|you are|you're|youre)\s+(?:a\s+|an\s+)?${REAL}(?:human|person|human being)\b`, 'i'),
-  /\bnot\s+(?:an?\s+)?(?:ai|a\.i\.?|robot|bot|machine|computer|automated|artificial|recording)\b/i,
+  new RegExp(String.raw`\bnot\s+(?:an?\s+)?(?:${AI_LETTERS}|robot|bot|machine|computer|automated|artificial|recording)\b`, 'i'),
   /\b(?:pretend|pretending|claim|claiming|act like|acting like|pose as|posing as|say|saying|tell them|tell him|tell her|insist|insisting)\b[^.\n]{0,40}\b(?:human|real person|a person|live person)\b/i,
   new RegExp(String.raw`\b(?:speaking|talking|chatting)\s+(?:with|to)\s+(?:a|an)\s+(?:${REAL}human|human being|real person|live person|living person|actual person)\b`, 'i'),
+  // Impersonation: "pretend to be an employee", "act as a human rep", "present yourself as a person", "pose as staff".
+  new RegExp(
+    String.raw`\b(?:pretend(?:ing)?\s+(?:to be|you are|you're|youre)|act(?:ing)?\s+(?:as|like)|pos(?:e|ing)\s+as|present(?:ing)?\s+(?:yourself|itself)\s+as|pass(?:ing)?\s+(?:yourself|itself)\s+off\s+as|masquerad(?:e|ing)\s+as|impersonat(?:e|ing))\s+(?:an?\s+|the\s+|one of (?:the|our)\s+)?(?:\w+\s+){0,2}${PERSON_ROLES}s?\b`,
+    'i',
+  ),
 ];
 
-const AI_WORDS = String.raw`(?:ai|a\.i\.?|artificial|robot|bot|automated|machine|computer|recorded|recording|assistant)`;
+const AI_WORDS = String.raw`(?:${AI_LETTERS}|artificial|robot|bot|automated|machine|computer|recorded|recording|assistant)`;
 
 const DISCLOSURE_SKIP: readonly RegExp[] = [
   /\bdisclos/i,
   new RegExp(
-    String.raw`\b(?:skip|skipping|omit|omitting|drop|hide|hiding|conceal|leave out|don't mention|do not mention|don't say|do not say|never mention|never say|without mentioning|without saying|no need to mention|no need to say|avoid saying|avoid mentioning)\b[^.\n]{0,40}\b${AI_WORDS}\b`,
+    String.raw`\b(?:skip|skipping|omit|omitting|drop|hide|hiding|conceal|leave out|don't mention|do not mention|don't say|do not say|never mention|never say|without mentioning|without saying|no need to mention|no need to say|avoid saying|avoid mentioning|deny|denies|denying|lie|lies|lying|bring up|bringing up)\b[^.\n]{0,40}\b${AI_WORDS}\b`,
     'i',
   ),
   new RegExp(String.raw`\b(?:don't|do not|never|not to|shouldn't|should not)\s+(?:tell|admit|reveal|let on|confess|acknowledge|confirm|volunteer)\b[^.\n]{0,50}\b${AI_WORDS}\b`, 'i'),
+  // "Introduce yourself without the AI part."
+  new RegExp(String.raw`\bwithout\s+(?:the\s+|an?\s+|any\s+|your\s+)?(?:mention\s+of\s+(?:the\s+|an?\s+|being\s+)?)?${AI_WORDS}\b`, 'i'),
+  // "If asked if you're a bot, say no." / "Say no if they ask whether you are a robot."
+  new RegExp(String.raw`\b(?:if|when|should)\b[^.\n]{0,60}\b${AI_WORDS}\b[^.\n]{0,40}\b(?:say|answer|reply|respond|tell them)\s+(?:with\s+)?(?:a\s+)?["']?no\b`, 'i'),
+  new RegExp(String.raw`\b(?:say|answer|reply|respond)\s+(?:with\s+)?(?:a\s+)?["']?no\b[^.\n]{0,60}\b${AI_WORDS}\b`, 'i'),
+  // "Keep the AI thing quiet." / "Stay quiet about being a bot."
+  new RegExp(String.raw`\b(?:keep|keeping)\b[^.\n]{0,30}\b${AI_WORDS}\b[^.\n]{0,30}\b(?:quiet|secret|hidden|private|under wraps|to yourself|low[\s-]key)\b`, 'i'),
+  new RegExp(String.raw`\b(?:keep|keeping|stay|staying|be|remain)\s+(?:it\s+)?(?:quiet|silent|mum|vague)\s+(?:about|on|regarding)\b[^.\n]{0,40}\b${AI_WORDS}\b`, 'i'),
+  // "Only reveal you are AI if they ask directly." / "Only if they ask, say you are AI."
+  new RegExp(String.raw`\bonly\s+(?:reveal|say|admit|mention|tell|confirm|acknowledge)\b[^.\n]{0,50}\b${AI_WORDS}\b[^.\n]{0,40}\b(?:if|when|once|after|unless)\b`, 'i'),
+  new RegExp(String.raw`\bonly\s+(?:if|when|once|after)\b[^.\n]{0,40}\b(?:reveal|say|admit|mention|tell|confirm|acknowledge)\b[^.\n]{0,40}\b${AI_WORDS}\b`, 'i'),
 ];
 
 /**
  * Web addresses, e-mail addresses and IPs. Any "word.letters" (two or more letters after the dot) reads as a domain, so
  * no closed TLD list can be walked around ("evil.xyz", "deals.shop/pay"). Ordinary prose stays clear: "e.g." and "i.e."
  * have one letter after each dot, and "St." / "Mr." are followed by a space. A sentence run together without a space
- * ("sold.Then") is a false positive and costs a re-edit.
+ * ("sold.Then") is a false positive and costs a re-edit. Any "@" reads as an e-mail address.
  */
 const URL_LIKE: readonly RegExp[] = [
   /\bhttps?:\/\//i,
   /\bwww\./i,
-  /\b[a-z0-9-]+\.[a-z]{2,}\b/i,
-  /\S+@\S+/,
+  /\b[a-z0-9_-]+\.[a-z]{2,}\b/i,
+  // Any @ ("bob@evil", "bob @ evil", "bob@ evil") and a domain spelled out ("evil dot com").
+  /@/,
+  /\bdot\s+(?:com|net|org|io|co|us|biz|info|xyz)\b/i,
   /\b\d{1,3}(?:\.\d{1,3}){3}\b/,
 ];
 
@@ -94,11 +120,12 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 const LINE_BREAK = /[\n\r]/;
 
 /**
- * The allowlist (S-2), applied after NFKC and after accents are removed: ASCII letters and digits, the space, tab and
- * line feed, and basic punctuation: . , ; : ! ? ' " ( ) - / & % # @ + _ plus curly quotes, en and em dashes and the
- * ellipsis. Anything else (look-alike brackets and letters from other scripts, emoji, symbols, backticks, braces, and
- * Latin letters that have no plain-ASCII base such as "ø", "ı" or "ł") rejects the plan. `$ € £ ¥ < >` are left to the
- * checks that name them.
+ * The allowlist (S-2), applied after NFKC, after accents are removed and after the stroke letters are folded (E6): ASCII
+ * letters and digits, the space, tab and line feed, and basic punctuation: . , ; : ! ? ' " ( ) - / & % # @ + _ plus
+ * curly quotes, en and em dashes and the ellipsis. Anything else (look-alike brackets and letters from other scripts
+ * such as Greek or Cyrillic, IPA letters such as "ŋ" or "ɪ", emoji, symbols, backticks, braces) rejects the plan. Names
+ * like Søren, Bjørn or Łukasz pass: their letters fold to a plain base letter. `$ € £ ¥ < >` are left to the checks
+ * that name them.
  */
 const OUTSIDE_ASCII_ALLOWLIST = /[^A-Za-z0-9 \t\n.,;:!?'"()\-/&%#@+_\u2018\u2019\u201C\u201D\u2013\u2014\u2026$\u20AC\u00A3\u00A5<>]/u;
 /** Dot look-alikes NFKC leaves alone (ideographic and halfwidth full stops), so "www。evil。com" still reads as a URL. */
@@ -108,9 +135,9 @@ const APOSTROPHES = /[\u2018\u2019\u02BC]/g;
 
 /**
  * Accents come off letters (NFD, then every combining mark goes), so "hùman" reads as "human" in every word check and a
- * name like "María" or "café" still passes. Letters that carry no mark to strip but look like a base letter are mapped
- * for the word checks (ø is o, ı is i, ł is l, ...); the allowlist, which runs on the unmapped text, still rejects them
- * as disallowed_char, so a plan cannot use them at all.
+ * name like "María" or "café" still passes. Letters that carry no mark to strip but have a plain base letter are mapped
+ * too (ø is o, ı is i, ł is l, ß is ss, ...), for the word checks and the allowlist alike: "øffer" is caught as "offer",
+ * and "Søren" passes. Letters outside this map that are not ASCII stay disallowed_char.
  */
 const STROKE_FOLD: Readonly<Record<string, string>> = {
   '\u00F8': 'o', '\u00D8': 'O', '\u0131': 'i', '\u0142': 'l', '\u0141': 'L', '\u0111': 'd', '\u0110': 'D',
@@ -148,7 +175,7 @@ export function agentPlanTextIssues(text: string, opts: { singleLine: boolean })
   if (control || CONTROL.test(plain)) found.add('control_char');
   // What is left once the control characters are gone must be on the allowlist (they already have their own issue).
   // A combining mark that NFKC could not compose onto its letter is stray (invisible padding), never accent: reject it.
-  if (STRAY_MARK.test(plain) || OUTSIDE_ASCII_ALLOWLIST.test(unmarked.replace(CONTROL_EVERYWHERE, ''))) found.add('disallowed_char');
+  if (STRAY_MARK.test(plain) || OUTSIDE_ASCII_ALLOWLIST.test(checked.replace(CONTROL_EVERYWHERE, ''))) found.add('disallowed_char');
   if (opts.singleLine && LINE_BREAK.test(text)) found.add('line_break');
   return AGENT_PLAN_ISSUES.filter((issue) => found.has(issue));
 }
