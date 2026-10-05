@@ -1,0 +1,216 @@
+/**
+ * Records and enrollments — the write side of a campaign refresh.
+ *
+ * - `upsertRecords` keeps one `crm_records` row per Salesforce record per tenant.
+ * - `enrollRecords` enforces "one active campaign per person" with the partial unique
+ *   index `enrollment_contact_keys_active_unique` on `(org_id, key) WHERE active`: a
+ *   record whose phone or email is already held by an active enrollment anywhere in the
+ *   tenant is not enrolled. The index, not a read-then-write check, decides, so two
+ *   campaigns refreshing at the same moment cannot both enroll the same person.
+ * - `exitEnrollment` releases the person's keys and cancels the touches not yet started.
+ */
+import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
+import { schema, type Db } from '@cti/db';
+import type { SfRecordSnapshot } from './records.js';
+
+const DAY_MS = 86_400_000;
+const UPSERT_BATCH = 200;
+const UNIQUE_VIOLATION = '23505';
+const ACTIVE_KEY_INDEX = 'enrollment_contact_keys_active_unique';
+
+/** Touch statuses that have not started; an exit or a review flag cancels them. */
+export const OPEN_TOUCH_STATUSES = ['planned', 'held', 'queued'] as const;
+/** Enrollment statuses that are finished; nothing moves them again. */
+export const TERMINAL_ENROLLMENT_STATUSES = ['exited', 'completed'] as const;
+
+export function chunk<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Column updates on conflict. Each expression reads the OLD row as `crm_records.` and the
+ * incoming row as `excluded.`; Postgres evaluates the whole SET list against the old row,
+ * so `triage_needed` compares the previous `sf_last_modified_at` with the new one.
+ */
+const UPSERT_SET = {
+  sfObject: sql.raw('excluded.sf_object'),
+  name: sql.raw('excluded.name'),
+  ownerSfUserId: sql.raw('excluded.owner_sf_user_id'),
+  ownerName: sql.raw('excluded.owner_name'),
+  leadManagerSfUserId: sql.raw('excluded.lead_manager_sf_user_id'),
+  phones: sql.raw('excluded.phones'),
+  email: sql.raw('excluded.email'),
+  state: sql.raw('excluded.state'),
+  webFormSource: sql.raw('excluded.web_form_source'),
+  // A sync never clears consent that is already true; only an explicit revocation may.
+  consentAiCall: sql.raw('crm_records.consent_ai_call OR excluded.consent_ai_call'),
+  sfDoNotCall: sql.raw('excluded.sf_do_not_call'),
+  sfEmailOptOut: sql.raw('excluded.sf_email_opt_out'),
+  skipOnDialer: sql.raw('excluded.skip_on_dialer'),
+  isClosed: sql.raw('excluded.is_closed'),
+  triageNeeded: sql.raw(
+    'crm_records.triage_needed OR crm_records.sf_last_modified_at IS DISTINCT FROM excluded.sf_last_modified_at',
+  ),
+  sfLastModifiedAt: sql.raw('excluded.sf_last_modified_at'),
+  syncedAt: sql`now()`,
+};
+
+function toRow(orgId: string, s: SfRecordSnapshot): typeof schema.crmRecords.$inferInsert {
+  return {
+    orgId,
+    sfObject: s.sfObject,
+    sfRecordId: s.sfRecordId,
+    name: s.name,
+    ownerSfUserId: s.ownerSfUserId,
+    ownerName: s.ownerName,
+    leadManagerSfUserId: s.leadManagerSfUserId,
+    phones: s.phones,
+    email: s.email,
+    state: s.state,
+    webFormSource: s.webFormSource,
+    consentAiCall: s.consentAiCall,
+    sfDoNotCall: s.sfDoNotCall,
+    sfEmailOptOut: s.sfEmailOptOut,
+    skipOnDialer: s.skipOnDialer,
+    isClosed: s.isClosed,
+    triageNeeded: true,
+    sfLastModifiedAt: s.lastModifiedAt,
+  };
+}
+
+/**
+ * Inserts or updates one `crm_records` row per snapshot, 200 per statement. Returns, per
+ * sfRecordId, the row id and `changed`: true for a new row or when `sf_last_modified_at`
+ * moved. A new or changed row gets `triage_needed = true`; an unchanged row keeps its flag.
+ */
+export async function upsertRecords(
+  db: Db,
+  orgId: string,
+  snapshots: SfRecordSnapshot[],
+): Promise<Map<string, { id: string; changed: boolean }>> {
+  const out = new Map<string, { id: string; changed: boolean }>();
+  // One row per Id: Postgres rejects an upsert that touches the same row twice.
+  const unique = [...new Map(snapshots.map((s) => [s.sfRecordId, s])).values()];
+  for (const batch of chunk(unique, UPSERT_BATCH)) {
+    const ids = batch.map((s) => s.sfRecordId);
+    const before = await db
+      .select({ sfRecordId: schema.crmRecords.sfRecordId, lastModified: schema.crmRecords.sfLastModifiedAt })
+      .from(schema.crmRecords)
+      .where(and(eq(schema.crmRecords.orgId, orgId), inArray(schema.crmRecords.sfRecordId, ids)));
+    const prior = new Map(before.map((r) => [r.sfRecordId, r.lastModified?.getTime() ?? null]));
+    const incoming = new Map(batch.map((s) => [s.sfRecordId, s.lastModifiedAt?.getTime() ?? null]));
+    const rows = await db
+      .insert(schema.crmRecords)
+      .values(batch.map((s) => toRow(orgId, s)))
+      .onConflictDoUpdate({ target: [schema.crmRecords.orgId, schema.crmRecords.sfRecordId], set: UPSERT_SET })
+      .returning({ id: schema.crmRecords.id, sfRecordId: schema.crmRecords.sfRecordId });
+    for (const r of rows) {
+      const changed = !prior.has(r.sfRecordId) || prior.get(r.sfRecordId) !== incoming.get(r.sfRecordId);
+      out.set(r.sfRecordId, { id: r.id, changed });
+    }
+  }
+  return out;
+}
+
+/** node-postgres puts `code`/`constraint` on the error; tolerate a wrapper that nests it in `cause`. */
+function pgErrorFields(err: unknown): { code?: unknown; constraint?: unknown } {
+  if (!err || typeof err !== 'object') return {};
+  const e = err as { code?: unknown; constraint?: unknown; cause?: unknown };
+  if (e.code !== undefined) return e;
+  return e.cause && typeof e.cause === 'object' ? (e.cause as { code?: unknown; constraint?: unknown }) : {};
+}
+
+function isActiveKeyConflict(err: unknown): boolean {
+  const { code, constraint } = pgErrorFields(err);
+  return code === UNIQUE_VIOLATION && constraint === ACTIVE_KEY_INDEX;
+}
+
+/**
+ * Enrolls each record in its own transaction: the enrollment row, then its contact keys
+ * (sorted, so concurrent transactions take key locks in the same order). A key held by
+ * another active enrollment raises a unique violation; the transaction rolls back, which
+ * removes the new enrollment, and the record counts as `skippedInOtherCampaign`. A record
+ * already enrolled in this campaign (in any status) is left alone and counts as neither.
+ * Callers pass only records that passed eligibility, each with at least one key.
+ */
+export async function enrollRecords(
+  db: Db,
+  input: {
+    orgId: string;
+    campaignId: string;
+    touchDays: number[];
+    now: Date;
+    records: Array<{ crmRecordId: string; keys: string[] }>;
+  },
+): Promise<{ enrolled: number; skippedInOtherCampaign: number }> {
+  const nextTouchAt = new Date(input.now.getTime() + (input.touchDays[0] ?? 0) * DAY_MS);
+  let enrolled = 0;
+  let skippedInOtherCampaign = 0;
+  for (const record of input.records) {
+    const keys = [...new Set(record.keys)].sort();
+    try {
+      const inserted = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(schema.campaignEnrollments)
+          .values({
+            orgId: input.orgId,
+            campaignId: input.campaignId,
+            crmRecordId: record.crmRecordId,
+            status: 'active',
+            nextTouchAt,
+            enrolledAt: input.now,
+          })
+          .onConflictDoNothing({ target: [schema.campaignEnrollments.campaignId, schema.campaignEnrollments.crmRecordId] })
+          .returning({ id: schema.campaignEnrollments.id });
+        if (!row) return false;
+        if (keys.length > 0) {
+          await tx
+            .insert(schema.enrollmentContactKeys)
+            .values(keys.map((key) => ({ enrollmentId: row.id, orgId: input.orgId, key, active: true })));
+        }
+        return true;
+      });
+      if (inserted) enrolled += 1;
+    } catch (err) {
+      if (!isActiveKeyConflict(err)) throw err;
+      skippedInOtherCampaign += 1;
+    }
+  }
+  return { enrolled, skippedInOtherCampaign };
+}
+
+/**
+ * Ends an enrollment: status (`exited` by default, `completed` for a finished sequence)
+ * and `exit_reason`; its contact keys go inactive so the person may join another
+ * campaign; its `planned|held|queued` touches become `skipped` with `skip_reason = reason`
+ * (a `dialing` touch is left to reconciliation). An already exited or completed enrollment
+ * keeps its status and reason; the key and touch cleanup still runs (idempotent).
+ */
+export async function exitEnrollment(
+  db: Db,
+  enrollmentId: string,
+  reason: string,
+  status: 'exited' | 'completed' = 'exited',
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx
+      .update(schema.campaignEnrollments)
+      .set({ status, exitReason: reason, nextTouchAt: null, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.campaignEnrollments.id, enrollmentId),
+          notInArray(schema.campaignEnrollments.status, [...TERMINAL_ENROLLMENT_STATUSES]),
+        ),
+      );
+    await tx
+      .update(schema.enrollmentContactKeys)
+      .set({ active: false })
+      .where(eq(schema.enrollmentContactKeys.enrollmentId, enrollmentId));
+    await tx
+      .update(schema.touches)
+      .set({ status: 'skipped', skipReason: reason, updatedAt: sql`now()` })
+      .where(and(eq(schema.touches.enrollmentId, enrollmentId), inArray(schema.touches.status, [...OPEN_TOUCH_STATUSES])));
+  });
+}
