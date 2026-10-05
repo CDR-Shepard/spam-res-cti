@@ -9,13 +9,10 @@
  * `consentFieldMissing: true`, which the gate treats as a block — absence of
  * the field is never read as consent.
  */
-import {
-  fetchRecordAddress as realFetchRecordAddress,
-  sfFetch as realSfFetch,
-  soqlQuery as realSoqlQuery,
-} from '../salesforce/client.js';
+import { sfFetch as realSfFetch, soqlQuery as realSoqlQuery } from '../salesforce/client.js';
 import { soqlEscape } from '../salesforce/soql.js';
 import { resolveDialNumber as realResolveDialNumber } from '../salesforce/record-phone.js';
+import { addressFieldNames, formatAddress, pickAddressFields, type AddressFields } from './record-address.js';
 
 export type AiCallObject = 'Lead' | 'Opportunity' | 'Contact';
 
@@ -29,6 +26,7 @@ export interface AiCallRecord {
   /** `AI_Call_Consent__c === true`; false when the field does not exist. */
   consentAiCall: boolean;
   consentFieldMissing: boolean;
+  /** The property address, `"<street>, <city>, <state> <zip>"`; null when the record has none. */
   address: string | null;
   /** Notes fields that exist as `Label: value` lines, then recent Tasks (newest last); capped. */
   notes: string;
@@ -40,7 +38,6 @@ export interface RecordDeps {
   /** Non-generic so a test fake can stand in; the real `soqlQuery` satisfies it. */
   soqlQuery: (userId: string, soql: string) => Promise<Array<Record<string, unknown>>>;
   resolveDialNumber: typeof realResolveDialNumber;
-  fetchRecordAddress: typeof realFetchRecordAddress;
   /** Clock for the describe cache (ms since epoch). */
   now?: () => number;
 }
@@ -49,7 +46,6 @@ const defaultDeps: RecordDeps = {
   sfFetch: realSfFetch,
   soqlQuery: realSoqlQuery,
   resolveDialNumber: realResolveDialNumber,
-  fetchRecordAddress: realFetchRecordAddress,
 };
 
 export const NOTES_MAX_CHARS = 6_000;
@@ -71,10 +67,13 @@ const NOTE_FIELDS = [
 /** The only fields ever selected — the describe narrows this to what exists. */
 const WANTED_FIELDS = [CONSENT_FIELD, ...NOTE_FIELDS, 'FirstName', 'Name', 'OwnerId'] as const;
 
-/** Field API name → label, for the WANTED_FIELDS this object has. */
-type FieldLabels = ReadonlyMap<string, string>;
+/** What the describe tells us: WANTED_FIELDS present (API name → label) and the address fields. */
+interface Described {
+  labels: ReadonlyMap<string, string>;
+  address: AddressFields;
+}
 
-const describeCache = new Map<string, { at: number; labels: FieldLabels }>();
+const describeCache = new Map<string, { at: number; described: Described }>();
 
 /** Test hook: forget every cached describe. */
 export function clearDescribeCache(): void {
@@ -85,23 +84,25 @@ async function describeFields(
   userId: string,
   objectType: AiCallObject,
   deps: RecordDeps,
-): Promise<FieldLabels> {
+): Promise<Described> {
   const now = (deps.now ?? Date.now)();
   const key = `${userId}:${objectType}`;
   const hit = describeCache.get(key);
-  if (hit && now - hit.at < DESCRIBE_TTL_MS) return hit.labels;
+  if (hit && now - hit.at < DESCRIBE_TTL_MS) return hit.described;
 
   const res = await deps.sfFetch(userId, `/sobjects/${objectType}/describe`);
   if (res.status >= 400) throw new Error(`Salesforce ${objectType} describe failed (${res.status})`);
-  const fields = (res.json as { fields?: Array<{ name?: unknown; label?: unknown }> } | null)?.fields ?? [];
+  const raw = (res.json as { fields?: Array<{ name?: unknown; label?: unknown; type?: unknown }> } | null)?.fields ?? [];
+  const fields = raw.flatMap((f) =>
+    typeof f.name === 'string'
+      ? [{ name: f.name, type: typeof f.type === 'string' ? f.type : '', label: typeof f.label === 'string' ? f.label.trim() : '' }]
+      : [],
+  );
   const wanted = new Set<string>(WANTED_FIELDS);
-  const labels = new Map<string, string>();
-  for (const f of fields) {
-    if (typeof f.name !== 'string' || !wanted.has(f.name)) continue;
-    labels.set(f.name, typeof f.label === 'string' && f.label.trim() ? f.label.trim() : f.name);
-  }
-  describeCache.set(key, { at: now, labels });
-  return labels;
+  const labels = new Map(fields.filter((f) => wanted.has(f.name)).map((f) => [f.name, f.label || f.name] as const));
+  const described = { labels, address: pickAddressFields(objectType, fields) };
+  describeCache.set(key, { at: now, described });
+  return described;
 }
 
 function text(v: unknown): string | null {
@@ -138,18 +139,6 @@ async function recentTasks(userId: string, objectType: AiCallObject, rid: string
   }
 }
 
-async function addressOf(userId: string, recordId: string, deps: RecordDeps): Promise<string | null> {
-  try {
-    const a = await deps.fetchRecordAddress(userId, recordId);
-    if (!a) return null;
-    const region = [text(a.state), text(a.postalCode)].filter(Boolean).join(' ');
-    return [region, text(a.country)].filter(Boolean).join(', ') || null;
-  } catch (err) {
-    console.warn('[ai-voice] record address read failed:', (err as Error).message);
-    return null;
-  }
-}
-
 async function phonesOf(userId: string, objectType: AiCallObject, recordId: string, deps: RecordDeps): Promise<string[]> {
   const dial = await deps.resolveDialNumber(userId, objectType, recordId);
   if (!dial || dial.skipOnDialer) return [];
@@ -159,8 +148,8 @@ async function phonesOf(userId: string, objectType: AiCallObject, recordId: stri
 /**
  * Load the AI-call context for one record, or null when the id is malformed or
  * the record is not visible to this rep. A failed describe, record query or
- * phone lookup THROWS (consent and phones are safety inputs); a failed Task or
- * address read only degrades the context.
+ * phone lookup THROWS (consent and phones are safety inputs); a failed Task
+ * read only degrades the context.
  */
 export async function loadAiCallRecord(
   userId: string,
@@ -170,8 +159,8 @@ export async function loadAiCallRecord(
 ): Promise<AiCallRecord | null> {
   if (!RECORD_ID.test(recordId)) return null;
   const rid = soqlEscape(recordId);
-  const labels = await describeFields(userId, objectType, deps);
-  const selected = ['Id', ...WANTED_FIELDS.filter((f) => labels.has(f))];
+  const { labels, address: addressFields } = await describeFields(userId, objectType, deps);
+  const selected = [...new Set(['Id', ...WANTED_FIELDS.filter((f) => labels.has(f)), ...addressFieldNames(addressFields)])];
   const rows = await deps.soqlQuery(
     userId,
     `SELECT ${selected.join(', ')} FROM ${objectType} WHERE Id = '${rid}' LIMIT 1`,
@@ -179,9 +168,8 @@ export async function loadAiCallRecord(
   const row = rows[0];
   if (!row) return null;
 
-  const [tasks, address, phones] = await Promise.all([
+  const [tasks, phones] = await Promise.all([
     recentTasks(userId, objectType, rid, deps),
-    addressOf(userId, recordId, deps),
     phonesOf(userId, objectType, recordId, deps),
   ]);
 
@@ -199,7 +187,7 @@ export async function loadAiCallRecord(
     phones,
     consentAiCall: !consentFieldMissing && row[CONSENT_FIELD] === true,
     consentFieldMissing,
-    address,
+    address: formatAddress(row, addressFields),
     notes: capNotes([...noteLines, ...tasks.map(taskLine)].join('\n')),
     ownerSfUserId: text(row.OwnerId),
   };

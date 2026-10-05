@@ -1,22 +1,30 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DialTarget } from '../salesforce/record-phone.js';
-import type { RecordAddress } from '../salesforce/client.js';
 import { NOTES_MAX_CHARS, clearDescribeCache, loadAiCallRecord, type RecordDeps } from './record.js';
 
 const LEAD_ID = '00Q5e00000AbCdEFGH';
 const OPP_ID = '0065e00000AbCdEFGH';
 
-type Field = { name: string; label: string };
+type Field = { name: string; label: string; type?: string };
 const LEAD_FIELDS: Field[] = [
-  { name: 'Id', label: 'Lead ID' },
-  { name: 'AI_Call_Consent__c', label: 'AI Call Consent' },
-  { name: 'Notes__c', label: 'Notes' },
-  { name: 'Description', label: 'Description' },
-  { name: 'Motivation__c', label: 'Motivation' },
-  { name: 'FirstName', label: 'First Name' },
-  { name: 'Name', label: 'Full Name' },
-  { name: 'OwnerId', label: 'Owner ID' },
-  { name: 'Unrelated__c', label: 'Unrelated' },
+  { name: 'Id', label: 'Lead ID', type: 'id' },
+  { name: 'AI_Call_Consent__c', label: 'AI Call Consent', type: 'boolean' },
+  { name: 'Notes__c', label: 'Notes', type: 'textarea' },
+  { name: 'Description', label: 'Description', type: 'textarea' },
+  { name: 'Motivation__c', label: 'Motivation', type: 'picklist' },
+  { name: 'FirstName', label: 'First Name', type: 'string' },
+  { name: 'Name', label: 'Full Name', type: 'string' },
+  { name: 'OwnerId', label: 'Owner ID', type: 'reference' },
+  { name: 'Unrelated__c', label: 'Unrelated', type: 'string' },
+  { name: 'Street', label: 'Street', type: 'textarea' },
+  { name: 'City', label: 'City', type: 'string' },
+  { name: 'State', label: 'State/Province', type: 'string' },
+  { name: 'PostalCode', label: 'Zip/Postal Code', type: 'string' },
+];
+const OPP_BASE: Field[] = [
+  { name: 'Id', label: 'Opportunity ID', type: 'id' },
+  { name: 'AI_Call_Consent__c', label: 'AI Call Consent', type: 'boolean' },
+  { name: 'Name', label: 'Opportunity Name', type: 'string' },
 ];
 
 interface FakeOpts {
@@ -26,7 +34,6 @@ interface FakeOpts {
   tasks?: Array<Record<string, unknown>>;
   tasksFail?: boolean;
   dial?: DialTarget | null;
-  address?: RecordAddress | null;
 }
 
 function fakeDeps(o: FakeOpts = {}) {
@@ -48,11 +55,6 @@ function fakeDeps(o: FakeOpts = {}) {
       o.dial === undefined
         ? { e164: '+16195550100', fallbackE164: '+16195550101', skipOnDialer: false, displayName: 'Jane Doe', contactId: null }
         : o.dial,
-    ),
-    fetchRecordAddress: vi.fn(async () =>
-      o.address === undefined
-        ? { state: 'CA', country: 'US', postalCode: '92101', recordName: 'Jane Doe', objectType: 'Lead' as const }
-        : o.address,
     ),
   } satisfies RecordDeps;
   return { deps, soql };
@@ -81,6 +83,10 @@ describe('loadAiCallRecord', () => {
         FirstName: 'Jane',
         Name: 'Jane Doe',
         OwnerId: '0055e000001AAAAAAA',
+        Street: '123 Main St\nUnit 4',
+        City: 'Austin',
+        State: 'TX',
+        PostalCode: '78701',
       },
       tasks: [
         { Subject: 'Call', Description: 'Left VM', ActivityDate: '2026-10-02', CreatedDate: '2026-10-02T10:00:00.000+0000' },
@@ -96,7 +102,7 @@ describe('loadAiCallRecord', () => {
       phones: ['+16195550100', '+16195550101'],
       consentAiCall: true,
       consentFieldMissing: false,
-      address: 'CA 92101, US',
+      address: '123 Main St, Unit 4, Austin, TX 78701',
       notes: [
         'Notes: Inherited the house',
         'Motivation: Relocating',
@@ -107,7 +113,7 @@ describe('loadAiCallRecord', () => {
     });
     const recordSoql = soql.find((q) => q.includes('FROM Lead'))!;
     expect(recordSoql).toContain(`WHERE Id = '${LEAD_ID}'`);
-    for (const f of ['AI_Call_Consent__c', 'Notes__c', 'Description', 'Motivation__c', 'FirstName', 'Name', 'OwnerId']) {
+    for (const f of ['AI_Call_Consent__c', 'Notes__c', 'Description', 'Motivation__c', 'FirstName', 'Name', 'OwnerId', 'Street', 'City', 'State', 'PostalCode']) {
       expect(recordSoql).toContain(f);
     }
     // Only fields the describe reported, and never one outside the allowlist.
@@ -159,7 +165,7 @@ describe('loadAiCallRecord', () => {
   });
 
   it('queries an Opportunity\'s Tasks by WhatId', async () => {
-    const { deps, soql } = fakeDeps({ record: { Id: OPP_ID }, address: null });
+    const { deps, soql } = fakeDeps({ fields: OPP_BASE, record: { Id: OPP_ID } });
     const rec = await loadAiCallRecord('U1', 'Opportunity', OPP_ID, deps);
     expect(soql.find((q) => q.includes('FROM Task'))).toContain(`WHERE WhatId = '${OPP_ID}'`);
     expect(rec?.address).toBeNull();
@@ -176,13 +182,11 @@ describe('loadAiCallRecord', () => {
     expect(rec!.notes.endsWith('Task 2026-10-03 — Newest: keep me')).toBe(true);
   });
 
-  it('a failed Task or address read degrades to no tasks / no address', async () => {
+  it('a failed Task read degrades to no tasks', async () => {
     const { deps } = fakeDeps({ record: { Id: LEAD_ID, Notes__c: 'n' }, tasksFail: true });
-    deps.fetchRecordAddress.mockRejectedValueOnce(new Error('network'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const rec = await loadAiCallRecord('U1', 'Lead', LEAD_ID, deps);
     expect(rec?.notes).toBe('Notes: n');
-    expect(rec?.address).toBeNull();
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
@@ -208,5 +212,65 @@ describe('loadAiCallRecord', () => {
     await loadAiCallRecord('U1', 'Lead', LEAD_ID, withClock);
     expect(deps.sfFetch).toHaveBeenCalledTimes(4);
     expect(deps.sfFetch).toHaveBeenLastCalledWith('U1', '/sobjects/Lead/describe');
+  });
+  it('Contact reads the Mailing* address parts, skipping empty ones', async () => {
+    const fields: Field[] = [
+      { name: 'Id', label: 'Contact ID', type: 'id' },
+      { name: 'MailingStreet', label: 'Mailing Street', type: 'textarea' },
+      { name: 'MailingCity', label: 'Mailing City', type: 'string' },
+      { name: 'MailingState', label: 'Mailing State', type: 'string' },
+      { name: 'MailingPostalCode', label: 'Mailing Zip', type: 'string' },
+    ];
+    const { deps, soql } = fakeDeps({
+      fields,
+      record: { Id: LEAD_ID, MailingStreet: '9 Elm Rd', MailingCity: ' ', MailingState: 'FL', MailingPostalCode: null },
+    });
+    const rec = await loadAiCallRecord('U1', 'Contact', LEAD_ID, deps);
+    expect(rec?.address).toBe('9 Elm Rd, FL');
+    expect(soql.find((q) => q.includes('FROM Contact'))).toContain('MailingStreet');
+  });
+
+  it('Opportunity reads Property_Address__c + City__c from the describe, in the one record query', async () => {
+    const fields: Field[] = [
+      ...OPP_BASE,
+      { name: 'Address__c', label: 'Address', type: 'string' }, // lower priority than Property_Address__c
+      { name: 'property_address__c', label: 'Property Address', type: 'textarea' },
+      { name: 'City__c', label: 'City', type: 'string' },
+      { name: 'State__c', label: 'State', type: 'picklist' }, // not a text type: ignored
+    ];
+    const { deps, soql } = fakeDeps({
+      fields,
+      record: { Id: OPP_ID, property_address__c: '123 Main St', City__c: 'Austin', Address__c: 'wrong', State__c: 'TX' },
+    });
+    const rec = await loadAiCallRecord('U1', 'Opportunity', OPP_ID, deps);
+    expect(rec?.address).toBe('123 Main St, Austin');
+    const recordQueries = soql.filter((q) => q.includes('FROM Opportunity'));
+    expect(recordQueries).toHaveLength(1);
+    expect(recordQueries[0]).toContain('property_address__c');
+    expect(recordQueries[0]).toContain('City__c');
+    for (const f of ['Address__c,', 'State__c']) expect(recordQueries[0]).not.toContain(` ${f}`);
+    expect(rec?.firstName).toBeNull();
+  });
+
+  it('Opportunity falls back to a *Property*Address*__c field and the zip fields', async () => {
+    const fields: Field[] = [
+      ...OPP_BASE,
+      { name: 'Subject_Property_Address_Line__c', label: 'Subject Property Address', type: 'string' },
+      { name: 'Property_State__c', label: 'Property State', type: 'string' },
+      { name: 'Postal_Code__c', label: 'Postal Code', type: 'string' },
+    ];
+    const { deps } = fakeDeps({
+      fields,
+      record: { Id: OPP_ID, Subject_Property_Address_Line__c: '5 Oak Ave', Property_State__c: 'OK', Postal_Code__c: '73101' },
+    });
+    expect((await loadAiCallRecord('U1', 'Opportunity', OPP_ID, deps))?.address).toBe('5 Oak Ave, OK 73101');
+  });
+
+  it('Opportunity with no address fields has a null address', async () => {
+    const { deps, soql } = fakeDeps({ fields: OPP_BASE, record: { Id: OPP_ID, Name: 'Smith deal' } });
+    expect((await loadAiCallRecord('U1', 'Opportunity', OPP_ID, deps))?.address).toBeNull();
+    expect(soql.find((q) => q.includes('FROM Opportunity'))).toBe(
+      `SELECT Id, AI_Call_Consent__c, Name FROM Opportunity WHERE Id = '${OPP_ID}' LIMIT 1`,
+    );
   });
 });
