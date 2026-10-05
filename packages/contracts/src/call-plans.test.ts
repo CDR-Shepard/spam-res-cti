@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CallPlan, EditableCallPlan, ResearchSourceSummary } from './call-plans.js';
+import { AiConsentStatus, CallPlan, EditableCallPlan, ResearchSourceSummary } from './call-plans.js';
 
 export const validPlan = {
   situationSummary: 'Inherited the house in 2024; told a rep in May the roof leaks and the siblings disagree about selling.',
@@ -42,5 +42,12 @@ describe('CallPlan', () => {
 describe('ResearchSourceSummary', () => {
   it('records a degraded source', () => {
     expect(ResearchSourceSummary.parse({ source: 'chatter', status: 'missing', count: 0, truncated: false, note: 'INVALID_TYPE' }).status).toBe('missing');
+  });
+});
+
+describe('AiConsentStatus', () => {
+  it('has an explicit unknown, so a consent value that could not be read is never shown as no', () => {
+    expect(AiConsentStatus.options).toEqual(['yes', 'no', 'field_missing', 'unknown']);
+    expect(AiConsentStatus.safeParse('unknown').success).toBe(true);
   });
 });

@@ -22,8 +22,9 @@ export const ResearchSourceSummary = z.object({
 });
 export type ResearchSourceSummary = z.infer<typeof ResearchSourceSummary>;
 
-/** The record's AI call consent field (`AI_Call_Consent__c` through the field map) when researched. */
-export const AiConsentStatus = z.enum(['yes', 'no', 'field_missing']);
+/** The record's AI call consent field (`AI_Call_Consent__c` through the field map) when researched.
+ * 'unknown': the field is configured but its value could not be read; never treated as consent. */
+export const AiConsentStatus = z.enum(['yes', 'no', 'field_missing', 'unknown']);
 export type AiConsentStatus = z.infer<typeof AiConsentStatus>;
 
 /** campaign_enrollments.call_stage. */
