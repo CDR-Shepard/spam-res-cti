@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Lets a rep open the Power Dial list-view button on Lead and Opportunity.
+
+  The button is a mass-action button onto a Visualforce page (PowerDialListLead
+  / PowerDialListOpp) whose controller extension, PowerDialListController,
+  relays the selection through PowerDialRelay. The System Administrator profile
+  reaches all four; the Sales profile reaches none, so without this a rep gets
+  "Insufficient Privileges" before PowerDialRelay's profile gate is even asked.
+  PowerDialRelay is listed for its @AuraEnabled / invocable entry points too.
+
+  Page and class access ONLY - no object, field or system permissions. Whether
+  the rep may actually dial is still decided by PowerDialRelay's profile gate
+  and, in the CTI, by the rep's own power-dialer switch. Assign it to reps on
+  the Sales profile (System Administrators already have this access).
+-->
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <classAccesses>
+        <apexClass>PowerDialListController</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <classAccesses>
+        <apexClass>PowerDialRelay</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <description>Opens the Power Dial list-view button for Sales reps: Visualforce page and Apex class access only. See the comment in this file.</description>
+    <hasActivationRequired>false</hasActivationRequired>
+    <label>Power Dial Access</label>
+    <pageAccesses>
+        <apexPage>PowerDialListLead</apexPage>
+        <enabled>true</enabled>
+    </pageAccesses>
+    <pageAccesses>
+        <apexPage>PowerDialListOpp</apexPage>
+        <enabled>true</enabled>
+    </pageAccesses>
+</PermissionSet>

@@ -22,6 +22,7 @@ const state = vi.hoisted(() => ({
   assignCalls: [] as Array<{ orgId: string; userId: string; email: string }>,
   permissionCalls: [] as Array<{ orgId: string; targetUserId: string }>,
   inserted: [] as Array<Record<string, unknown>>,
+  userUpdates: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock('../config.js', () => ({
@@ -30,6 +31,7 @@ vi.mock('../config.js', () => ({
     SALESFORCE_ALLOWED_ORG_ID: undefined,
     SALESFORCE_ADMIN_PROFILES: 'System Administrator',
     STARTER_NUMBER_PROFILES: 'Sales',
+    POWER_DIALER_PROFILES: 'Sales',
   }),
 }));
 
@@ -79,6 +81,20 @@ vi.mock('@cti/db', async (importOriginal) => {
     };
     return p;
   };
+  // Writes to `users` are recorded AND applied to the row the fake hands back,
+  // so a hook that re-reads the user after sign-in sees what sign-in wrote.
+  const userUpdate = () => {
+    const p: Record<string, unknown> = {
+      set: (v: Record<string, unknown>) => {
+        state.userUpdates.push(v);
+        Object.assign(state.users[state.users.length - 1] ?? {}, v);
+        return p;
+      },
+      where: () => p,
+      then: (ok: (x: unknown) => unknown) => Promise.resolve(undefined).then(ok),
+    };
+    return p;
+  };
   return {
     ...actual,
     getDb: () => ({
@@ -93,7 +109,7 @@ vi.mock('@cti/db', async (importOriginal) => {
         },
       },
       insert: () => chain(undefined),
-      update: () => chain(undefined),
+      update: (table: unknown) => (table === actual.schema.users ? userUpdate() : chain(undefined)),
     }) as unknown as ReturnType<typeof actual.getDb>,
   };
 });
@@ -114,6 +130,7 @@ beforeEach(async () => {
   state.assignCalls = [];
   state.permissionCalls = [];
   state.inserted = [];
+  state.userUpdates = [];
   app = Fastify();
   await registerAuthRoutes(app);
 });
@@ -190,5 +207,80 @@ describe('GET /auth/salesforce/callback — post-sign-in hooks are actually wire
     await flush();
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('Salesforce connected');
+  });
+});
+
+describe('GET /auth/salesforce/callback — the power dialer follows the Salesforce profile', () => {
+  const loginMode = () => { state.stateRow = { ...state.stateRow!, userId: null }; };
+  const rep = (over: Record<string, unknown>) =>
+    ({ id: 'user-1', orgId: 'org-1', email: 'hudson@sjoinvestments.com', isAdmin: false, powerDialerEnabled: false, ...over });
+
+  it('a brand-new Sales rep is created with the dialer ON — and gets the CTI permission set in the same sign-in', async () => {
+    loginMode();
+    state.users = [];
+    await callback();
+    await flush();
+    expect(state.inserted[0]).toMatchObject({ isAdmin: false, powerDialerEnabled: true });
+    expect(state.permissionCalls).toEqual([{ orgId: 'org-1', targetUserId: 'user-new' }]);
+  });
+
+  it('an existing Sales rep who was OFF is switched ON', async () => {
+    loginMode();
+    state.users = [rep({})];
+    await callback();
+    await flush();
+    expect(state.userUpdates).toEqual([{ isAdmin: false, powerDialerEnabled: true }]);
+    expect(state.permissionCalls).toEqual([{ orgId: 'org-1', targetUserId: 'user-1' }]);
+  });
+
+  it('an admin is switched ON whatever their profile', async () => {
+    loginMode();
+    state.profileName = 'System Administrator';
+    state.users = [rep({})];
+    await callback();
+    await flush();
+    expect(state.userUpdates).toEqual([{ isAdmin: true, powerDialerEnabled: true }]);
+  });
+
+  it('a non-rep profile is NOT switched on', async () => {
+    loginMode();
+    state.profileName = 'Accounting';
+    state.users = [rep({})];
+    await callback();
+    await flush();
+    expect(state.userUpdates).toEqual([]);
+    expect(state.users[0]!.powerDialerEnabled).toBe(false);
+    expect(state.permissionCalls).toEqual([]);
+  });
+
+  // Grant-only, unlike isAdmin: a sign-in never takes the dialer away.
+  it('never switches OFF a Team-panel grant to someone outside the profiles', async () => {
+    loginMode();
+    state.profileName = 'Accounting';
+    state.users = [rep({ powerDialerEnabled: true })];
+    await callback();
+    await flush();
+    expect(state.userUpdates).toEqual([]);
+    expect(state.users[0]!.powerDialerEnabled).toBe(true);
+  });
+
+  it('a failed profile lookup grants nothing to a non-admin', async () => {
+    loginMode();
+    state.profileName = null;
+    state.users = [rep({})];
+    await callback();
+    await flush();
+    expect(state.userUpdates).toEqual([]);
+    expect(state.users[0]!.powerDialerEnabled).toBe(false);
+  });
+
+  // Connect mode is a signed-in user re-linking Salesforce. The profile rule
+  // runs at sign-in, exactly where isAdmin is re-synced.
+  it('connect mode leaves the flag alone', async () => {
+    state.users = [rep({})];
+    await callback();
+    await flush();
+    expect(state.userUpdates).toEqual([]);
+    expect(state.users[0]!.powerDialerEnabled).toBe(false);
   });
 });

@@ -101,9 +101,27 @@ private class PowerDialRelayTest {
 
   @isTest
   static void canUsePowerDial_trueForAdmin() {
-    // Tests run as the (admin) deploying user → the rollout gate is open.
+    // Tests run as the (admin) deploying user → the profile gate is open.
     System.assertEquals(true, PowerDialRelay.canUsePowerDial(),
       'A System Administrator should be allowed to use Power Dial.');
+  }
+
+  @isTest
+  static void canUsePowerDial_trueForSalesProfile() {
+    // An existing active rep (no User insert — inserting one trips this org's
+    // User-creation flow). Skip cleanly if the org has no active Sales user.
+    List<User> reps = [
+      SELECT Id FROM User
+      WHERE IsActive = true AND UserType = 'Standard' AND Profile.Name = 'Sales'
+      LIMIT 1
+    ];
+    if (reps.isEmpty()) {
+      return;
+    }
+    System.runAs(reps[0]) {
+      System.assertEquals(true, PowerDialRelay.canUsePowerDial(),
+        'A Sales profile user should be allowed to use Power Dial.');
+    }
   }
 
   @isTest
@@ -133,27 +151,28 @@ private class PowerDialRelayTest {
   }
 
   @isTest
-  static void sendToCti_nonAdmin_throwsAuraHandledException() {
-    // Use an existing active non-admin user (no User insert — inserting one
-    // trips this org's User-creation flow). Skip cleanly if the org has none.
-    List<User> nonAdmins = [
+  static void sendToCti_otherProfile_throwsAuraHandledException() {
+    // An existing active user on any profile OUTSIDE the gate (no User insert —
+    // inserting one trips this org's User-creation flow). Skip cleanly if none.
+    Set<String> allowed = PowerDialRelay.ALLOWED_PROFILES;
+    List<User> others = [
       SELECT Id FROM User
-      WHERE IsActive = true AND Profile.Name != 'System Administrator'
+      WHERE IsActive = true AND UserType = 'Standard' AND Profile.Name NOT IN :allowed
       LIMIT 1
     ];
-    if (nonAdmins.isEmpty()) {
+    if (others.isEmpty()) {
       return;
     }
     Boolean threw = false;
-    System.runAs(nonAdmins[0]) {
+    System.runAs(others[0]) {
       System.assertEquals(false, PowerDialRelay.canUsePowerDial(),
-        'A non-admin should not be allowed to use Power Dial.');
+        'A user outside the Sales and System Administrator profiles should not be allowed to use Power Dial.');
       try {
         PowerDialRelay.sendToCti('Lead', new List<Id>{ UserInfo.getUserId() });
       } catch (AuraHandledException ex) {
         threw = true;
       }
     }
-    System.assert(threw, 'Expected a non-admin caller to be blocked by the rollout gate.');
+    System.assert(threw, 'Expected a caller outside the allowed profiles to be blocked by the profile gate.');
   }
 }

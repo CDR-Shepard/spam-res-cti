@@ -148,7 +148,20 @@ sensitive operational data — don't paste it into a public channel.
 
 The Call Center swap in §2 does not turn Power Dialer on for anyone — it
 only makes the new CTI the system of record for calling. Power Dialer
-itself is a separate, per-user grant:
+itself is a per-user flag (`power_dialer_enabled`), set two ways.
+
+**Automatically at sign-in — Sales reps and admins (since 2026-10-05).**
+Every Salesforce sign-in switches the flag ON for a user on a
+`POWER_DIALER_PROFILES` profile (default `Sales`) or who is an app-admin
+(`grantsPowerDialerOnSignIn` in `services/cti-api/src/routes/auth.ts`), and
+the permission-set hook then grants them `CTI_Task_Origin` in the same
+sign-in. It is grant-only: a sign-in never switches the flag off. Someone
+already signed in picks it up at their next Salesforce sign-in — flip them
+in the Team panel below for access right now, or use Reset CTI to have
+everyone sign in again. Because sign-in re-grants it, switching a Sales rep
+or admin **off** in the Team panel lasts only until their next sign-in.
+
+**By hand in the Team panel — anyone else, or right now:**
 
 1. An admin opens the softphone → **More** (the overflow tab that holds
    admin-only tools) → **Team**.
@@ -184,53 +197,40 @@ design for the same button — nothing in the deployed metadata (no list
 button, page layout, or Lightning page) references either of them, so
 don't take their README as a description of what's actually live.)
 
-**As of 2026-08-26, this button works only for System Administrator
-profile users, and there is no permission set involved in that gate.**
-`PowerDialRelay.cls`'s private `isSystemAdministrator()` (around lines
-150–153) does a hard `Profile.Name == 'System Administrator'` check, and
-it is called from both `sendToCti()` (the rollout-gate check and comment
-around lines 34–39 — this is what actually throws for a non-admin who gets
-this far) and the cacheable `canUsePowerDial()` (around lines 145–148,
-intended for a caller to hide the button for non-admins). There is no
-permission set, custom setting, or other metadata switch anywhere in this
-gate today — a rep's profile is the only input. Assigning any permission
-set to a non-admin rep changes nothing here: `sendToCti()` still throws an
-`AuraHandledException`/error page via `isSystemAdministrator()` regardless
-of what permission sets that rep holds.
+**As of 2026-10-05, this button works for the System Administrator and
+Sales profiles.** `PowerDialRelay.cls`'s private `isAllowedProfile()`
+checks the running user's profile name against `ALLOWED_PROFILES`
+(`System Administrator`, `Sales`), from both `sendToCti()` (this is what
+throws for anyone else who gets that far) and the cacheable
+`canUsePowerDial()` (for a caller hiding the button). It mirrors the CTI's
+sign-in rule in §3, and the CTI keeps the last word: `POST /dialer/handoffs`
+refuses anyone whose `power_dialer_enabled` is off, whatever the button let
+through.
 
-Given that:
+A Sales rep also needs the **Power Dial Access** permission set
+(`permissionsets/Power_Dial_Access.permissionset-meta.xml`): Visualforce
+page access to `PowerDialListLead` / `PowerDialListOpp` and Apex class
+access to `PowerDialListController` / `PowerDialRelay`. The System
+Administrator profile already reaches all four; the Sales profile reaches
+none, so without it the button stops at "Insufficient Privileges" before
+the gate is even asked. Nothing assigns it automatically: assign it to
+every Sales rep once, and to each new Sales hire.
 
-- **The CTI server gate and Team panel from §3 are the operative,
-  real per-rep controls** (`power_dialer_enabled` + `requirePowerDialer`).
-  Nothing in this runbook grants or revokes SF-button access per rep,
-  because nothing per-rep currently exists on the SF side to grant.
-- **The Salesforce list-view button is not a per-user control today.** It
-  is either available (System Administrator profile) or not, independent
-  of `power_dialer_enabled`, independent of this swap, and independent of
-  anything toggled in the Team panel. An admin whose `power_dialer_enabled`
-  is off still sees the button but gets rejected server-side by the CTI API
-  when they try to actually dial; a non-admin never sees a working button
-  regardless of their `power_dialer_enabled` value.
-- **Extending the SF button to non-admin enabled reps requires changing the
-  gate in `PowerDialRelay.cls`** — replacing or supplementing
-  `isSystemAdministrator()` in both `sendToCti()` and `canUsePowerDial()`
-  with a check tied to real per-rep enablement (for example, having Apex
-  call back to the CTI API for the live `power_dialer_enabled` value, or
-  introducing an actual permission set and checking `FeatureManagement` /
-  `hasPermissionSet` against it) — and deploying that Apex change to `_t2`.
-  That is a separate, future Salesforce deploy, out of scope for this
-  runbook. **Do not try to work around it by creating or assigning a
-  permission set** — none exists in the gate as written, and one would not
-  change `isSystemAdministrator()`'s behavior.
+Deploy the classes and the permission set by name — never this whole
+directory (see `salesforce/README.md`):
 
-This SF-button-admin-only vs. CTI-server-per-rep-enablement gap is a known,
-deliberate limitation of this rollout — see
-`docs/superpowers/specs/2026-08-25-power-dialer-enablement-design.md`
-§"Out of scope" ("Automated SF permset sync for the LWC (manual parity per
-runbook)" — that line predates the discovery that the gate is a hard-coded
-profile check rather than a permset, but the conclusion still holds:
-Salesforce-side parity for this button is a manual, out-of-band concern
-this runbook does not automate).
+```bash
+sf project deploy start -o _t2 \
+  -m "ApexClass:PowerDialRelay" -m "ApexClass:PowerDialRelayTest" \
+  -m "PermissionSet:Power_Dial_Access" \
+  --test-level RunSpecifiedTests --tests PowerDialRelayTest
+```
+
+The one remaining gap: the button follows profiles only. A Team-panel grant
+to someone on another profile (say `Wholesale`) turns on the CTI's own
+Power Dial tab, which picks Salesforce list views itself, but not this
+button — add their profile to `ALLOWED_PROFILES` (and redeploy) if they
+need the button too.
 
 ## 5. Rollback
 

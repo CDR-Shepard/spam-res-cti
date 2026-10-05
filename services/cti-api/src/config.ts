@@ -46,6 +46,12 @@ const schema = z.object({
   // still sign in; they just do not cost the reserve 12 billable numbers each.
   // Every dialing rep in production is on "Sales". Empty disables the feature.
   STARTER_NUMBER_PROFILES: z.string().default('Sales'),
+  // Salesforce profiles whose users get the power dialer switched ON when they
+  // sign in with Salesforce; app-admins always do, whatever their profile.
+  // Comma-separated. Grant-only: a sign-in never switches it off, so a Team-panel
+  // grant to anyone else sticks — and a Team-panel "off" for someone on these
+  // profiles lasts only until their next sign-in. Empty = admins + Team panel only.
+  POWER_DIALER_PROFILES: z.string().default('Sales'),
 
   TELEPHONY_PROVIDER: z.enum(['twilio', 'telnyx']).default('twilio'),
 
