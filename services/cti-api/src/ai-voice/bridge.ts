@@ -3,6 +3,11 @@
  * over two injected ws-like sockets (no network, no DB). Both sides speak
  * base64 μ-law 8 kHz, so audio passes straight through.
  *
+ * The bridge fails closed until OpenAI confirms the session (`session.updated`):
+ * no agent audio reaches Twilio before it, and an OpenAI `error` before it, or
+ * no confirmation within SESSION_READY_TIMEOUT_MS of the socket opening, ends
+ * the call (`error`, "session not configured: …"). Later errors are only logged.
+ *
  * Caller audio is always forwarded. Agent audio goes to Twilio chunk by chunk,
  * each followed by a `mark`, so a barge-in can `clear` Twilio and truncate the
  * assistant item where the caller stopped hearing it (bridge-playback.ts). The
@@ -34,6 +39,8 @@ export const OPENER_DELAY_MS = 3000;
 export const PLAYBACK_DRAIN_MAX_MS = 8000;
 /** After a bridge-side end, how long the service has to hang up/redirect before the bridge closes the stream. */
 export const END_GRACE_MS = 10_000;
+/** How long after the OpenAI socket opens (and the session is sent) to wait for `session.updated`. */
+export const SESSION_READY_TIMEOUT_MS = 5000;
 /** Shortest accepted `maxCallMs`. */
 export const MIN_CALL_MS = 10_000;
 
@@ -97,6 +104,7 @@ export class AiCallBridge {
   private openerTimer: ReturnType<typeof setTimeout> | null = null;
   private maxTimer: ReturnType<typeof setTimeout> | null = null;
   private backstopTimer: ReturnType<typeof setTimeout> | null = null;
+  private readyTimer: ReturnType<typeof setTimeout> | null = null;
   private toolChain: Promise<void> = Promise.resolve();
 
   constructor(
@@ -118,7 +126,10 @@ export class AiCallBridge {
     opts.twilio.on('close', () => this.endAndTearDown('twilio_closed'));
     opts.twilio.on('error', (e) => this.endAndTearDown('error', `twilio: ${e.message}`));
     opts.openai.on('message', (d) => this.onOpenAiFrame(d));
-    opts.openai.on('open', () => this.flush());
+    opts.openai.on('open', () => {
+      this.armReadyTimer();
+      this.flush();
+    });
     opts.openai.on('close', () => this.endWithBackstop('openai_closed'));
     opts.openai.on('error', (e) => this.endWithBackstop('error', `openai: ${e.message}`));
   }
@@ -129,6 +140,7 @@ export class AiCallBridge {
     this.started = true;
     this.outbox.prepend(JSON.stringify(sessionUpdate(this.opts)));
     this.maxTimer = this.setTimer(() => this.endWithBackstop('max_duration'), this.opts.maxCallMs);
+    this.armReadyTimer();
     this.flush();
   }
 
@@ -204,7 +216,7 @@ export class AiCallBridge {
       case 'response.done':
         return this.onResponseDone(obj(msg.response));
       case 'error':
-        return this.hooks.log.warn(openAiErrorFields(obj(msg.error)), 'ai-voice bridge: openai error event');
+        return this.onOpenAiError(openAiErrorFields(obj(msg.error)));
       default:
         return;
     }
@@ -213,8 +225,37 @@ export class AiCallBridge {
   private onSessionUpdated(): void {
     if (this.sessionReady || this.ended) return;
     this.sessionReady = true;
+    this.clearReadyTimer();
     if (this.callerSpoke || this.openerSent || this.closing) return;
     this.openerTimer = this.setTimer(() => this.openCall(), OPENER_DELAY_MS);
+  }
+
+  /** Before `session.updated` an error means the session was never configured: end the call. */
+  private onOpenAiError(fields: Record<string, string>): void {
+    this.hooks.log.warn(fields, 'ai-voice bridge: openai error event');
+    if (!this.sessionReady) this.notConfigured(fields.message || fields.code || 'error');
+  }
+
+  /** Start the `session.updated` clock once the session is sent and the socket is open. */
+  private armReadyTimer(): void {
+    if (!this.started || this.sessionReady || this.ended || this.readyTimer !== null) return;
+    if (this.opts.openai.readyState !== WS_OPEN) return;
+    this.readyTimer = this.setTimer(() => {
+      this.readyTimer = null;
+      this.notConfigured('timeout');
+    }, SESSION_READY_TIMEOUT_MS);
+  }
+
+  private clearReadyTimer(): void {
+    if (this.readyTimer === null) return;
+    this.clearTimer(this.readyTimer);
+    this.readyTimer = null;
+  }
+
+  private notConfigured(why: string): void {
+    if (this.ended) return;
+    this.hooks.log.error({ why }, 'ai-voice bridge: session not configured, ending the call');
+    this.endWithBackstop('error', `session not configured: ${why}`);
   }
 
   private openCall(): void {
@@ -242,7 +283,7 @@ export class AiCallBridge {
   }
 
   private onAgentAudio(itemId: string, delta: string): void {
-    if (this.silenced || !delta || this.truncated.has(itemId)) return;
+    if (!this.sessionReady || this.silenced || !delta || this.truncated.has(itemId)) return;
     this.sendTwilio({
       event: 'media',
       streamSid: this.opts.streamSid,
@@ -346,6 +387,7 @@ export class AiCallBridge {
     if (this.ended) return;
     this.ended = true;
     this.cancelOpener();
+    this.clearReadyTimer();
     if (this.maxTimer !== null) this.clearTimer(this.maxTimer);
     this.maxTimer = null;
     this.playback.releaseAll();

@@ -3,6 +3,7 @@ import {
   AiCallBridge,
   END_GRACE_MS,
   OPENER_DELAY_MS,
+  SESSION_READY_TIMEOUT_MS,
   type BridgeHooks,
   type BridgeOptions,
   type BridgeSocket,
@@ -54,6 +55,7 @@ class FakeSocket implements BridgeSocket {
 }
 
 const SID = 'MZ0000';
+const READY = { type: 'session.updated', session: {} };
 /** Base64 μ-law audio lasting `ms` milliseconds. */
 const audio = (ms: number): string => Buffer.alloc(ms * 8).toString('base64');
 const flush = async (): Promise<void> => {
@@ -232,7 +234,7 @@ describe('opener', () => {
     const { openai, bridge } = setup();
     bridge.start();
     openai.clearSent();
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(SESSION_READY_TIMEOUT_MS - 1);
     expect(openai.sent).toEqual([]); // not armed until session.updated
     openai.msg({ type: 'session.updated', session: {} });
     await vi.advanceTimersByTimeAsync(OPENER_DELAY_MS - 1);
@@ -289,6 +291,7 @@ describe('agent audio and barge-in', () => {
   it('forwards each delta to Twilio followed by a mark', () => {
     const { twilio, openai, bridge } = setup();
     bridge.start();
+    openai.msg(READY);
     openai.msg({
       type: 'response.output_audio.delta',
       item_id: 'item_1',
@@ -321,6 +324,7 @@ describe('agent audio and barge-in', () => {
   it('clears Twilio and truncates the playing item when the caller barges in', () => {
     const { twilio, openai, bridge } = setup();
     bridge.start();
+    openai.msg(READY);
     twilio.msg(media(1000));
     openai.msg({
       type: 'response.output_audio.delta',
@@ -355,6 +359,7 @@ describe('agent audio and barge-in', () => {
   it('does nothing on speech_started once the agent audio has played out', () => {
     const { twilio, openai, bridge } = setup();
     bridge.start();
+    openai.msg(READY);
     openai.msg({
       type: 'response.output_audio.delta',
       item_id: 'item_1',
@@ -585,8 +590,9 @@ describe('tool calls', () => {
 
 describe('ending', () => {
   it('fires onEnd(max_duration) after maxCallMs from start', async () => {
-    const { bridge, hooks } = setup({ maxCallMs: 60_000 });
+    const { openai, bridge, hooks } = setup({ maxCallMs: 60_000 });
     bridge.start();
+    openai.msg(READY);
     await vi.advanceTimersByTimeAsync(59_999);
     expect(hooks.onEnd).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
@@ -650,6 +656,7 @@ describe('ending', () => {
   it('logs OpenAI error events without ending the call', () => {
     const { openai, bridge, hooks } = setup();
     bridge.start();
+    openai.msg(READY);
     openai.msg({
       type: 'error',
       error: {
@@ -671,6 +678,7 @@ describe('ending', () => {
   it('never logs audio payloads', () => {
     const { twilio, openai, bridge, hooks } = setup();
     bridge.start();
+    openai.msg(READY);
     const secret = 'U0VDUkVUQVVESU8=';
     twilio.msg(media(20, secret));
     openai.msg({
@@ -712,6 +720,8 @@ describe('bridge-owned end backstop', () => {
   function playing() {
     const ctx = setup({ maxCallMs: 60_000 });
     ctx.bridge.start();
+    ctx.openai.msg(READY);
+    ctx.openai.msg({ type: 'input_audio_buffer.speech_started', audio_start_ms: 1 }); // no opener
     ctx.twilio.msg(media(1000));
     ctx.openai.msg({ type: 'response.created', response: { id: 'r1' } });
     ctx.openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(1000) });
@@ -876,6 +886,7 @@ describe('after a barge-in truncation', () => {
   it('drops late deltas for the truncated item and never truncates it twice', () => {
     const { twilio, openai, bridge } = setup();
     bridge.start();
+    openai.msg(READY);
     twilio.msg(media(1000));
     openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(2000) });
     twilio.msg(media(1300));
@@ -892,6 +903,7 @@ describe('after a barge-in truncation', () => {
   it('still plays the next item', () => {
     const { twilio, openai, bridge } = setup();
     bridge.start();
+    openai.msg(READY);
     openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(100) });
     openai.msg({ type: 'input_audio_buffer.speech_started', audio_start_ms: 1 });
     twilio.clearSent();
@@ -919,6 +931,7 @@ describe('silence()', () => {
   it('clears Twilio, cancels the active response, truncates, and drops later audio', () => {
     const { twilio, openai, bridge, hooks } = setup();
     bridge.start();
+    openai.msg(READY);
     twilio.msg(media(1000));
     openai.msg({ type: 'response.created', response: { id: 'resp_1' } });
     openai.msg({
@@ -992,6 +1005,7 @@ describe('waitForPlayback()', () => {
   it('resolves once output_audio.done has arrived and every mark has played', async () => {
     const { twilio, openai, bridge } = setup();
     bridge.start();
+    openai.msg(READY);
     openai.msg({
       type: 'response.output_audio.delta',
       item_id: 'item_1',
@@ -1019,6 +1033,7 @@ describe('waitForPlayback()', () => {
   it('resolves after maxMs (default 8 s) when marks never come back', async () => {
     const { openai, bridge } = setup();
     bridge.start();
+    openai.msg(READY);
     openai.msg({
       type: 'response.output_audio.delta',
       item_id: 'item_1',
@@ -1038,6 +1053,7 @@ describe('waitForPlayback()', () => {
   it('resolves at once when nothing is playing, and when the bridge stops', async () => {
     const { openai, bridge } = setup();
     bridge.start();
+    openai.msg(READY);
     await expect(bridge.waitForPlayback(1000)).resolves.toBeUndefined();
     openai.msg({
       type: 'response.output_audio.delta',
@@ -1048,5 +1064,59 @@ describe('waitForPlayback()', () => {
     bridge.stop();
     await expect(w).resolves.toBeUndefined();
     await expect(bridge.waitForPlayback(60_000)).resolves.toBeUndefined(); // after the end
+  });
+});
+
+describe('fails closed until the session is configured', () => {
+  const delta = { type: 'response.output_audio.delta', item_id: 'item_1', delta: 'AUD1' };
+
+  it('forwards no agent audio to Twilio before session.updated', () => {
+    const { twilio, openai, bridge } = setup();
+    bridge.start();
+    openai.msg(delta);
+    expect(twilio.sent).toEqual([]);
+    openai.msg({ type: 'session.updated', session: {} });
+    openai.msg(delta);
+    expect(twilio.sent.map((m) => m.event)).toEqual(['media', 'mark']);
+  });
+
+  it('an OpenAI error before session.updated ends the call through the backstop', async () => {
+    const { twilio, openai, bridge, hooks } = setup();
+    bridge.start();
+    openai.msg({ type: 'error', error: { type: 'invalid_request_error', code: 'bad_model', message: 'model not found' } });
+    expect(hooks.onEnd).toHaveBeenCalledWith('error', 'session not configured: model not found');
+    expect(twilio.sent).toEqual([{ event: 'clear', streamSid: SID }]);
+    await vi.advanceTimersByTimeAsync(END_GRACE_MS);
+    expect(twilio.readyState).toBe(3);
+    expect(openai.readyState).toBe(3);
+    expect(hooks.onEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it(`ends the call when no session.updated arrives within ${SESSION_READY_TIMEOUT_MS} ms of the socket opening`, async () => {
+    const { openai, bridge, hooks } = setup();
+    openai.readyState = 0;
+    bridge.start();
+    await vi.advanceTimersByTimeAsync(SESSION_READY_TIMEOUT_MS * 2);
+    expect(hooks.onEnd).not.toHaveBeenCalled(); // the clock starts when the socket opens
+    openai.open();
+    await vi.advanceTimersByTimeAsync(SESSION_READY_TIMEOUT_MS - 1);
+    expect(hooks.onEnd).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hooks.onEnd).toHaveBeenCalledWith('error', 'session not configured: timeout');
+    await vi.advanceTimersByTimeAsync(END_GRACE_MS);
+    expect(openai.readyState).toBe(3);
+    expect(hooks.onEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it('session.updated in time disarms the timeout, and later errors are only logged', async () => {
+    const { openai, bridge, hooks } = setup();
+    bridge.start();
+    await vi.advanceTimersByTimeAsync(SESSION_READY_TIMEOUT_MS - 1);
+    openai.msg({ type: 'session.updated', session: {} });
+    openai.msg({ type: 'input_audio_buffer.speech_started', audio_start_ms: 1 }); // no opener timer
+    await vi.advanceTimersByTimeAsync(SESSION_READY_TIMEOUT_MS * 2);
+    openai.msg({ type: 'error', error: { type: 'x', code: 'y', message: 'z' } });
+    expect(hooks.onEnd).not.toHaveBeenCalled();
+    expect(hooks.log.warn).toHaveBeenCalledWith(expect.objectContaining({ message: 'z' }), expect.any(String));
   });
 });
