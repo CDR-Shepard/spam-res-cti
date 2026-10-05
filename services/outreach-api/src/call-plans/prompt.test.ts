@@ -73,6 +73,12 @@ describe('CALL_PLAN_SYSTEM_PROMPT', () => {
     expect(s).toMatch(/street name only/);
     expect(s).toMatch(/gets the address from the record/);
   });
+  it('E7: no decades, no k/m amounts, and a space after every sentence period (the program rejects them)', () => {
+    const s = CALL_PLAN_SYSTEM_PROMPT;
+    expect(s).toMatch(/No decades \("the 90s", "the 90's"\)/);
+    expect(s).toMatch(/no number followed by k or m \("250k", "1\.5m", "3 MM"\)/);
+    expect(s).toMatch(/Always put a space after the period that ends a sentence \("sold\. Then", never "sold\.Then"\)/);
+  });
   it('tells the model how to read an event: when it starts versus when it was logged', () => {
     expect(CALL_PLAN_SYSTEM_PROMPT).toMatch(/starts/);
     expect(CALL_PLAN_SYSTEM_PROMPT).toMatch(/logged/);
