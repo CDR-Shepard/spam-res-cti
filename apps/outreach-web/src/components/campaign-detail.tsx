@@ -4,6 +4,7 @@ import type { Campaign } from '@cti/contracts';
 import { useAuth } from '@/lib/auth';
 import { getCampaign, outreachKeys } from '@/lib/outreach-api';
 import { errorText, formatCount, formatDateTime, pauseReasonWords, SF_OBJECT_WORDS } from '@/lib/outreach-words';
+import { CallPlanBoard } from './call-plan-board';
 import { CampaignPlan } from './campaign-plan';
 import { CampaignSettings } from './campaign-settings';
 import { CampaignStatusActions } from './campaign-status-actions';
@@ -27,8 +28,17 @@ export function CampaignDetail({ campaignId }: { campaignId: string }) {
       <CampaignHeader campaign={c} isAdmin={isAdmin} />
       <CampaignBanners campaign={c} />
       <CampaignSettings campaign={c} canEdit={isAdmin && c.status !== 'archived'} />
-      {c.mode === 'ai_call' ? <LeadPicker campaignId={c.id} canEdit={isAdmin && c.status !== 'archived'} /> : <CampaignPlan campaignId={c.id} />}
+      {c.mode === 'ai_call' ? <AiCallSections campaign={c} isAdmin={isAdmin} /> : <CampaignPlan campaignId={c.id} />}
     </div>
+  );
+}
+
+function AiCallSections({ campaign: c, isAdmin }: { campaign: Campaign; isAdmin: boolean }) {
+  return (
+    <>
+      <LeadPicker campaignId={c.id} canEdit={isAdmin && c.status !== 'archived'} />
+      <CallPlanBoard campaign={c} isAdmin={isAdmin} />
+    </>
   );
 }
 

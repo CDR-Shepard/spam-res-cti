@@ -176,9 +176,13 @@ describe('CampaignDetail settings', () => {
 describe('CampaignDetail of an AI call campaign', () => {
   const candidates = { total: 1, page: 1, pageSize: 50, pages: 1, selectedCount: 0, activeEnrolledCount: 0, records: [{ sfRecordId: '00Q000000000001AAA', name: 'Jane Seller', ownerName: 'Rep One', consentAiCall: true, skipReason: null, selected: false, enrolled: false, enrollmentStatus: null, exitReason: null }] };
 
-  it('shows the lead picker instead of the sequence plan', async () => {
-    const calls = renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ mode: 'ai_call' }), [`GET ${CAMPAIGN}/candidates?page=1`]: candidates });
+  const emptyBoard = { cards: [], nextCursor: null, counts: { research: 0, review: 0, approved: 0, queued: 0, done: 0 } };
+
+  it('shows the lead picker and the call plan board instead of the sequence plan', async () => {
+    const calls = renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ mode: 'ai_call' }), [`GET ${CAMPAIGN}/candidates?page=1`]: candidates, [`GET ${CAMPAIGN}/call-plans`]: emptyBoard });
     expect(await screen.findByText('Leads to call')).toBeInTheDocument();
+    expect(await screen.findByText('Call plans')).toBeInTheDocument();
+    expect(calls.some((c) => c.url === `${CAMPAIGN}/call-plans`)).toBe(true);
     expect(await screen.findByText('Jane Seller')).toBeInTheDocument();
     expect(screen.queryByText('Plan')).not.toBeInTheDocument();
     expect(calls.some((c) => c.url === `${CAMPAIGN}/plan`)).toBe(false);

@@ -4,13 +4,18 @@ import {
   CandidatePage,
   CampaignPlanResponse,
   CampaignPreview,
+  CallPlanCard,
+  CallPlansResponse,
   CampaignsResponse,
+  ReleaseCallsResponse,
   CrmConnectionStatus,
   ListViewsResponse,
   NeedsReviewResponse,
   SelectionResponse,
   StartConnectionResponse,
+  type CallStage,
   type CampaignStatusChange,
+  type EditCallPlanRequest,
   type CreateCampaignInput,
   type EnrollmentStatus,
   type FieldMap,
@@ -37,6 +42,8 @@ export const outreachKeys = {
   plan: (campaignId: string) => ['campaigns', 'plan', campaignId] as const,
   candidateLists: (campaignId: string) => ['campaigns', 'candidates', campaignId] as const,
   candidates: (campaignId: string, page: number) => ['campaigns', 'candidates', campaignId, page] as const,
+  callPlanLists: (campaignId: string) => ['campaigns', 'call-plans', campaignId] as const,
+  callPlans: (campaignId: string, stage: CallStage | null) => ['campaigns', 'call-plans', campaignId, stage ?? 'all'] as const,
   review: ['review'] as const,
 };
 
@@ -117,4 +124,32 @@ export function getReview(): Promise<NeedsReviewResponse> {
 export function decideReview(enrollmentId: string, decision: ReviewDecision['decision']): Promise<void> {
   const body: ReviewDecision = { decision };
   return apiEmpty(`/api/review/${seg(enrollmentId)}`, { method: 'POST', body: json(body) });
+}
+
+export function getCallPlans(campaignId: string, opts: { cursor?: string | null; stage?: CallStage | null } = {}): Promise<CallPlansResponse> {
+  const query = new URLSearchParams();
+  if (opts.cursor) query.set('cursor', opts.cursor);
+  if (opts.stage) query.set('stage', opts.stage);
+  const qs = query.toString();
+  return api(`/api/campaigns/${seg(campaignId)}/call-plans${qs ? `?${qs}` : ''}`, CallPlansResponse);
+}
+
+export function editCallPlan(enrollmentId: string, req: EditCallPlanRequest): Promise<CallPlanCard> {
+  return api(`/api/call-plans/${seg(enrollmentId)}`, CallPlanCard, { method: 'PUT', body: json(req) });
+}
+
+export function approveCallPlan(enrollmentId: string, version: number): Promise<CallPlanCard> {
+  return api(`/api/call-plans/${seg(enrollmentId)}/approve`, CallPlanCard, { method: 'POST', body: json({ version }) });
+}
+
+export function rejectCallPlan(enrollmentId: string): Promise<CallPlanCard> {
+  return api(`/api/call-plans/${seg(enrollmentId)}/reject`, CallPlanCard, { method: 'POST' });
+}
+
+export function researchAgain(enrollmentId: string): Promise<CallPlanCard> {
+  return api(`/api/call-plans/${seg(enrollmentId)}/research`, CallPlanCard, { method: 'POST' });
+}
+
+export function releaseCalls(campaignId: string): Promise<ReleaseCallsResponse> {
+  return api(`/api/campaigns/${seg(campaignId)}/ai-calls/release`, ReleaseCallsResponse, { method: 'POST' });
 }
