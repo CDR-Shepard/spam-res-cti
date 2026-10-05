@@ -195,8 +195,14 @@ async function loadPlanInput(deps: PlanDeps, lookup: BlockLookup, row: DueRow): 
  * open touch — checked in the same statement. seq is touches_done + 1, or one
  * past the highest seq already used when a touch was skipped without
  * advancing (needs-review), so the unique key never blocks a resumed enrollment.
+ *
+ * `FOR SHARE OF e` serializes the insert with an exit or a review hold, which
+ * update the enrollment row: an insert that comes second waits, re-reads the row,
+ * finds it no longer active, and inserts nothing; one that comes first commits
+ * before the exit's touch cleanup runs, so the cleanup skips the new touch.
+ * Exported for the race test.
  */
-async function insertTouch(db: Db, enrollmentId: string, d: TouchDecision): Promise<boolean> {
+export async function insertTouch(db: Db, enrollmentId: string, d: TouchDecision): Promise<boolean> {
   const result = await db.execute(sql`
     insert into touches (org_id, enrollment_id, seq, channel, status, due_at, gate_audit)
     select e.org_id, e.id,
@@ -208,6 +214,7 @@ async function insertTouch(db: Db, enrollmentId: string, d: TouchDecision): Prom
         select 1 from touches t
         where t.enrollment_id = e.id and t.status in ${[...OPEN_TOUCH_STATUSES]}
       )
+    for share of e
     on conflict (enrollment_id, seq) do nothing
     returning id`);
   return rowsOf<{ id: string }>(result).length > 0;

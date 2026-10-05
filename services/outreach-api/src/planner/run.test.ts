@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import type { Db } from '@cti/db';
 import { createTestDb, pgLane } from '../test/pg.js';
-import { advanceAfterTouch, planDueEnrollments, planTick, promoteQueuedCalls } from './run.js';
+import { advanceAfterTouch, insertTouch, planDueEnrollments, planTick, promoteQueuedCalls } from './run.js';
 
 // Tuesday 2026-10-06, 10:00 Pacific: inside the call window for a 415 number.
 const NOW = new Date('2026-10-06T17:00:00Z');
@@ -452,6 +452,27 @@ describe.skipIf(!pgLane)('planner run (real Postgres)', () => {
       expect(rows[0].skip_reason).toBe('needs_review');
       expect((await review(enrollmentId)).status).toBe('needs_review');
     });
+  });
+
+  it('a touch insert racing an exit waits for it and then inserts nothing (the enrollment row is share-locked)', async () => {
+    const { enrollmentId } = await dueEnrollment('dry_run');
+    const exit = await pool.connect();
+    try {
+      // exitEnrollment's statements, held open: the enrollment leaves `active` and its open touches are cleaned up.
+      await exit.query('begin');
+      await exit.query(`update campaign_enrollments set status = 'exited', exit_reason = 'left_query' where id = $1`, [enrollmentId]);
+      await exit.query(`update touches set status = 'skipped', skip_reason = 'left_query' where enrollment_id = $1 and status in ('planned', 'held', 'queued')`, [enrollmentId]);
+      const insert = insertTouch(db, enrollmentId, { kind: 'touch', channel: 'rep_call', status: 'planned', dueAt: NOW, audit: [] });
+      let settled = false;
+      void insert.then(() => { settled = true; }, () => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(settled).toBe(false);
+      await exit.query('commit');
+      expect(await insert).toBe(false);
+    } finally {
+      exit.release();
+    }
+    expect(await touchesOf(enrollmentId)).toEqual([]);
   });
 
   it('a touch skipped for review does not block the next plan after the enrollment resumes', async () => {
