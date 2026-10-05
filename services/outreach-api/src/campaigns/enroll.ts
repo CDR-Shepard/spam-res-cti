@@ -14,8 +14,11 @@ import type { EnrollmentStatus } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import type { SfRecordSnapshot } from './records.js';
 
-const DAY_MS = 86_400_000;
+export const DAY_MS = 86_400_000;
 const UPSERT_BATCH = 200;
+
+/** When a new (or re-enrolled) enrollment's first touch is due: the campaign's first touch day after `now`. */
+export const firstTouchAt = (now: Date, touchDays: readonly number[]): Date => new Date(now.getTime() + (touchDays[0] ?? 0) * DAY_MS);
 const UNIQUE_VIOLATION = '23505';
 const ACTIVE_KEY_INDEX = 'enrollment_contact_keys_active_unique';
 
@@ -188,7 +191,7 @@ export async function enrollRecords(
     callStage?: 'research' | null;
   },
 ): Promise<{ enrolled: number; skippedInOtherCampaign: number; skippedNoKeys: number }> {
-  const nextTouchAt = new Date(input.now.getTime() + (input.touchDays[0] ?? 0) * DAY_MS);
+  const nextTouchAt = firstTouchAt(input.now, input.touchDays);
   let enrolled = 0;
   let skippedInOtherCampaign = 0;
   let skippedNoKeys = 0;

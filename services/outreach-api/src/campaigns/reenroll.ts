@@ -8,9 +8,8 @@
  */
 import { sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
-import { isActiveKeyConflict, selectionExists } from './enroll.js';
+import { firstTouchAt, isActiveKeyConflict, selectionExists } from './enroll.js';
 
-const DAY_MS = 86_400_000;
 /** `exit_reason` of an AI call enrollment whose lead an admin deselected. */
 export const DESELECTED_EXIT_REASON = 'deselected';
 
@@ -35,7 +34,7 @@ export async function reenrollDeselected(
   db: Db,
   input: { campaignId: string; touchDays: number[]; now: Date; candidates: ReenrollCandidate[] },
 ): Promise<{ reenrolled: number; skippedInOtherCampaign: number; skippedNoKeys: number }> {
-  const nextTouchAt = new Date(input.now.getTime() + (input.touchDays[0] ?? 0) * DAY_MS);
+  const nextTouchAt = firstTouchAt(input.now, input.touchDays);
   let reenrolled = 0;
   let skippedInOtherCampaign = 0;
   let skippedNoKeys = 0;

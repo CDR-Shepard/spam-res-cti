@@ -3,10 +3,19 @@ import { and, eq } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { enrollmentsOf, leadId, seedCampaign, seedOrg, seedRecord, snapshot } from '../test/outreach-fixtures.js';
-import { enrollRecords, exitEnrollment, upsertRecords } from './enroll.js';
+import { DAY_MS, enrollRecords, exitEnrollment, firstTouchAt, upsertRecords } from './enroll.js';
 
 const NOW = new Date('2026-10-05T15:00:00.000Z');
 const TOUCH_DAYS = [0, 1, 3, 6, 10, 14];
+
+describe('firstTouchAt (shared by enrollment and re-enrollment)', () => {
+  it('is the first touch day after now, and now when the campaign has none', () => {
+    const now = new Date('2026-10-05T12:00:00.000Z');
+    expect(DAY_MS).toBe(86_400_000);
+    expect(firstTouchAt(now, [2, 5])).toEqual(new Date('2026-10-07T12:00:00.000Z'));
+    expect(firstTouchAt(now, [])).toEqual(now);
+  });
+});
 
 describe.skipIf(!pgLane)('enrollment (real Postgres)', () => {
   let db: Db;
