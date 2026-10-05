@@ -194,7 +194,7 @@ describe.skipIf(!pgLane)('campaign refresh (real Postgres)', () => {
         state.members = [leadId(1), leadId(3)]; // leadId(2) left, leadId(3) joined
         const out = await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: LATER, triage: true, log }, campaign);
         expect(out).toMatchObject({ enrolled: 1, exited: 1 });
-        expect(log.warn).toHaveBeenCalledWith({ orgId, campaignId: campaign.id }, expect.stringContaining('Task check failed'));
+        expect(log.warn).toHaveBeenCalledWith({ orgId, campaignId: campaign.id, errName: 'SalesforceApiError', status: 400 }, expect.stringContaining('Task check failed'));
         const after = await campaignById(db, campaign.id);
         expect(after.tasksCheckedAt?.toISOString()).toBe(NOW.toISOString());
         expect(after.lastRefreshedAt?.toISOString()).toBe(LATER.toISOString());
