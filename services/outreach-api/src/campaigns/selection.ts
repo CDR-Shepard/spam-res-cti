@@ -56,8 +56,16 @@ export async function deselectRecords(db: Executor, orgId: string, campaignId: s
   return removed;
 }
 
+/**
+ * "Clear": unticks every lead of the campaign EXCEPT those held for review here (C1). A held lead is locked in the picker
+ * (it cannot be unticked one by one), so Clear keeps it too; otherwise it would sit unticked behind its lock and be stopped
+ * as deselected the moment its hold is released.
+ */
 export async function clearSelection(db: Executor, orgId: string, campaignId: string): Promise<number> {
-  const rows = await db.delete(s).where(inCampaign(orgId, campaignId)).returning({ id: s.sfRecordId });
+  const heldHere = sql`exists (
+    select 1 from campaign_enrollments e join crm_records r on r.id = e.crm_record_id and r.org_id = e.org_id
+    where e.campaign_id = ${s.campaignId} and e.org_id = ${s.orgId} and e.status = 'needs_review' and r.sf_record_id = ${s.sfRecordId})`;
+  const rows = await db.delete(s).where(and(inCampaign(orgId, campaignId), sql`not ${heldHere}`)).returning({ id: s.sfRecordId });
   return rows.length;
 }
 

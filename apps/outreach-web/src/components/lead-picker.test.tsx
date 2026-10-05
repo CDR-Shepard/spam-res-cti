@@ -189,7 +189,7 @@ describe('LeadPicker', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Clear' }));
       const dialog = await screen.findByRole('alertdialog');
       expect(within(dialog).getByText(/2 enrolled leads will be stopped/)).toBeInTheDocument();
-      expect(within(dialog).getByText(/held for review/i)).toBeInTheDocument();
+      expect(within(dialog).getByText(/Leads held for review stay ticked and are not stopped/)).toBeInTheDocument();
       expect(selectionBody(calls)).toEqual([]);
       await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
       expect(selectionBody(calls)).toEqual([]);

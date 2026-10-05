@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestDb, pgLane, type TestDb } from '../test/pg.js';
-import { leadId, seedCampaign, seedOrg } from '../test/outreach-fixtures.js';
+import { leadId, seedCampaign, seedEnrollment, seedOrg, seedRecord, snapshot } from '../test/outreach-fixtures.js';
 import { applySelectionChange, allSelectedIds, clearSelection, deselectRecords, selectedAmong, selectedCount, selectRecords } from './selection.js';
 
 describe.skipIf(!pgLane)('campaign selections (real Postgres)', () => {
@@ -35,6 +35,24 @@ describe.skipIf(!pgLane)('campaign selections (real Postgres)', () => {
     expect(await deselectRecords(t.db, stranger, c.id, [leadId(1)])).toBe(0);
     expect(await clearSelection(t.db, stranger, c.id)).toBe(0);
     expect(await selectedCount(t.db, orgId, c.id)).toBe(2);
+  });
+
+  it('C1: clearing keeps the leads held for review ticked (they cannot be unticked one by one either); everyone else is unticked', async () => {
+    const orgId = await seedOrg(t.db);
+    const c = await seedCampaign(t.db, orgId, { mode: 'ai_call' });
+    const other = await seedCampaign(t.db, orgId, { mode: 'ai_call' });
+    const [held, active, exited] = [leadId(101), leadId(102), leadId(103)];
+    for (const [sfRecordId, status] of [[held, 'needs_review'], [active, 'active'], [exited, 'exited']] as const) {
+      const rec = await seedRecord(t.db, orgId, snapshot({ sfRecordId }));
+      await seedEnrollment(t.db, orgId, c.id, rec, { status });
+    }
+    // Held for review in ANOTHER campaign does not keep this campaign's tick.
+    const elsewhere = await seedRecord(t.db, orgId, snapshot({ sfRecordId: leadId(104) }));
+    await seedEnrollment(t.db, orgId, other.id, elsewhere, { status: 'needs_review' });
+    await selectRecords(t.db, { orgId, campaignId: c.id, userId: null, sfRecordIds: [held, active, exited, leadId(104), leadId(105)] });
+
+    expect(await applySelectionChange(t.db, { orgId, campaignId: c.id, userId: null, clear: true, add: [], remove: [] })).toBe(1);
+    expect(await allSelectedIds(t.db, orgId, c.id)).toEqual(new Set([held]));
   });
 
   it('selects 50,000 ids in batches without hitting the bind-parameter limit', async () => {

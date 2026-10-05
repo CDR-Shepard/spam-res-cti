@@ -74,7 +74,7 @@ export function LeadPicker({ campaignId, canEdit }: { campaignId: string; canEdi
                 label="Clear"
                 triggerVariant="ghost"
                 title="Clear the selection?"
-                description={`This unticks all ${formatCount(p.selectedCount)} selected leads. ${plural(p.activeEnrolledCount, 'enrolled lead', 'enrolled leads')} will be stopped at the next refresh (${p.activeEnrolledCount === 1 ? 'it' : 'they'} can be ticked again later). Leads held for review are not stopped.`}
+                description={`This unticks the ${formatCount(p.selectedCount)} selected leads. ${plural(p.activeEnrolledCount, 'enrolled lead', 'enrolled leads')} will be stopped at the next refresh (${p.activeEnrolledCount === 1 ? 'it' : 'they'} can be ticked again later). Leads held for review stay ticked and are not stopped.`}
                 confirmLabel="Clear selection"
                 destructive
                 disabled={busy}
