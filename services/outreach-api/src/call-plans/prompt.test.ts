@@ -66,6 +66,13 @@ describe('CALL_PLAN_SYSTEM_PROMPT', () => {
     expect(s).toMatch(/Never script the assistant as a human or as a real person/);
     expect(s).toMatch(/evidence is the one place words copied from the data may appear as they are/);
   });
+  it('CF-14: no number of three or more digits anywhere in the plan fields; the property by street name only', () => {
+    const s = CALL_PLAN_SYSTEM_PROMPT;
+    expect(s).toMatch(/No number of three or more digits anywhere in those fields/);
+    expect(s).toMatch(/house numbers, years, ZIP codes or phone numbers/);
+    expect(s).toMatch(/street name only/);
+    expect(s).toMatch(/gets the address from the record/);
+  });
   it('tells the model how to read an event: when it starts versus when it was logged', () => {
     expect(CALL_PLAN_SYSTEM_PROMPT).toMatch(/starts/);
     expect(CALL_PLAN_SYSTEM_PROMPT).toMatch(/logged/);
