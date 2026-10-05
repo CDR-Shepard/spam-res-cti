@@ -22,6 +22,7 @@ import { loadConnection } from '../crm/connection-store.js';
 import { mayDecideWith, ownSfUserId } from '../tenancy/record-owner.js';
 import type { RequestContext } from '../tenancy/scope.js';
 import { DNC_PENDING_SQL } from './dnc-sql.js';
+import { planTextProblems } from './plan-text-words.js';
 import { gateWarnings } from './warnings.js';
 
 export const CARD_PAGE_SIZE = 25;
@@ -115,6 +116,7 @@ function toCard(row: CardRow, ctx: RequestContext, mine: string | null, instance
       blocks,
       now,
       dnc: { pending: row.dnc_pending || row.status === 'needs_review', flaggedNotDismissed: row.dnc_flagged === true && row.plan_dismissed_at === null },
+      planTextProblems: parsedPlan?.success ? planTextProblems(parsedPlan.data) : [],
     }),
     research:
       row.research_version !== null

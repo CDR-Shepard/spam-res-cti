@@ -66,6 +66,16 @@ describe.skipIf(!pgLane)('call plan decisions (real Postgres)', () => {
       expect((await enrollment(s.lead.enrollmentId)).callStage).toBe('review');
     });
 
+    it('3b (P4-1): a plan the voice agent would refuse (an offer, a price) cannot be approved; an edit that fixes it can', async () => {
+      const s = await setup({ planOver: { opener: 'Lead with our cash offer', talkingPoints: ['Say around $200k'] } });
+      expect(await code(approve(s, 1))).toEqual({ code: 'PLAN_TEXT_REJECTED', status: 409 });
+      expect((await plans(s.lead.enrollmentId))[0]!.status).toBe('proposed');
+      expect((await enrollment(s.lead.enrollmentId)).callStage).toBe('review');
+      await editPlan(db, s.ctx, s.lead.enrollmentId, { version: 1, plan: EDITABLE }, SEED_NOW);
+      await approve(s, 2);
+      expect((await enrollment(s.lead.enrollmentId)).callStage).toBe('approved');
+    });
+
     it("3: approving a version that an edit replaced is PLAN_CHANGED", async () => {
       const s = await setup();
       await editPlan(db, s.ctx, s.lead.enrollmentId, { version: 1, plan: EDITABLE }, SEED_NOW);

@@ -78,6 +78,17 @@ describe.skipIf(!pgLane)('call plan cards (real Postgres)', () => {
     expect(card!.warnings.map((w) => `${w.code}:${w.severity}`)).toEqual(['opted_out:block', 'sf_do_not_call:block']);
   });
 
+  it('2b (P4-1): the card of a plan the voice agent would refuse carries a blocking warning naming the fields', async () => {
+    const b = await board();
+    await seedPlanLead(db, b, { callStage: 'review', planOver: { opener: 'Lead with our cash offer', questions: ['Is it listed at zillow.com?'] } });
+    await seedPlanLead(db, b, { callStage: 'review' });
+    const [bad, good] = (await loadCallPlanCards(db, b.ctx, b.campaignId, opts)).cards;
+    expect(bad!.warnings).toEqual([
+      { code: 'plan_text_rejected', severity: 'block', words: "Can't approve: the voice agent can't be given this text. Edit it first. the opener: offer wording; question 1: a web address." },
+    ]);
+    expect(good!.warnings).toEqual([]);
+  });
+
   it('3: an admin may decide on everything; a rep only on records they own in Salesforce', async () => {
     const b = await board();
     await seedPlanLead(db, b, { ownerSfUserId: OWNER });

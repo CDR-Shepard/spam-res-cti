@@ -4,13 +4,14 @@
  * fresh Salesforce read (CF-1) and re-checks the selection (CF-2) before it triggers anything.
  */
 import { and, eq, sql } from 'drizzle-orm';
-import type { AiConsentStatus, ReleaseCallsResponse } from '@cti/contracts';
+import { EditableCallPlan, type AiConsentStatus, type ReleaseCallsResponse } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { blockedTargets } from '@cti/firewall';
 import { selectionExists } from '../campaigns/enroll.js';
 import type { RequestContext } from '../tenancy/scope.js';
 import { DecisionError } from './decisions.js';
 import { DNC_PENDING_SQL } from './dnc-sql.js';
+import { planTextProblems } from './plan-text-words.js';
 import { gateWarnings, hasBlockingWarning } from './warnings.js';
 
 export const RELEASE_MAX = 500;
@@ -22,6 +23,7 @@ interface Releasable {
   plan_id: string;
   decided_by: string;
   consent: string | null;
+  plan: unknown;
   phones: Array<{ field: string; e164: string }>;
   sf_do_not_call: boolean;
   skip_on_dialer: boolean;
@@ -87,7 +89,7 @@ async function approvedPage(
 ): Promise<{ rows: Releasable[]; more: boolean }> {
   // The consent is the one the approved plan's own research read (CF-6), never the newest research.
   const result = await db.execute(sql`
-    select e.id as enrollment_id, e.enrolled_at::text as enrolled_cursor, p.id as plan_id, p.decided_by, cr.snapshot ->> 'consent' as consent,
+    select e.id as enrollment_id, e.enrolled_at::text as enrolled_cursor, p.id as plan_id, p.decided_by, cr.snapshot ->> 'consent' as consent, p.plan,
            r.phones, r.sf_do_not_call, r.skip_on_dialer, r.is_closed, r.state,
            ${DNC_PENDING_SQL} as dnc_pending, p.dnc_flagged, (p.dnc_dismissed_at is not null) as dnc_dismissed
     from campaign_enrollments e
@@ -102,6 +104,12 @@ async function approvedPage(
   return { rows: rows.slice(0, size), more: rows.length > size };
 }
 
+/** An approved plan the voice agent would refuse is skipped here instead of failing at trigger time; an unreadable one too. */
+function planProblems(stored: unknown): string[] {
+  const plan = EditableCallPlan.safeParse(stored);
+  return plan.success ? planTextProblems(plan.data) : ['the stored plan could not be read'];
+}
+
 function releasable(r: Releasable, blocks: Awaited<ReturnType<typeof blockedTargets>>, now: Date): boolean {
   const consent = r.consent && CONSENTS.includes(r.consent) ? (r.consent as AiConsentStatus) : null;
   const warnings = gateWarnings({
@@ -110,6 +118,7 @@ function releasable(r: Releasable, blocks: Awaited<ReturnType<typeof blockedTarg
     blocks,
     now,
     dnc: { pending: r.dnc_pending, flaggedNotDismissed: r.dnc_flagged && !r.dnc_dismissed },
+    planTextProblems: planProblems(r.plan),
   });
   // Only an explicit yes goes out: a null consent has no warning of its own, but it is not consent either.
   return consent === 'yes' && !hasBlockingWarning(warnings);

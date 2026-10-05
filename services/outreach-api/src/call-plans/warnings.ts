@@ -3,6 +3,7 @@
  * Advisory: the engine re-reads consent and phones at call time and is the only authority.
  */
 import { GateWarningCode, type AiConsentStatus, type GateWarning } from '@cti/contracts';
+import { planTextWarningWords } from './plan-text-words.js';
 import { CALL_WINDOW, isDailyCapped, withinRecipientWindow, type ConsentBlock } from '@cti/firewall';
 
 export const WARNING_WORDS: Readonly<Record<GateWarningCode, string>> = {
@@ -15,6 +16,7 @@ export const WARNING_WORDS: Readonly<Record<GateWarningCode, string>> = {
   dnc: 'On the federal Do Not Call list.',
   dnc_pending: "Can't call: a do-not-contact flag on this person is waiting in Needs Review.",
   dnc_not_dismissed: "Can't call: the research flagged this person do-not-contact and nobody has dismissed the flag.",
+  plan_text_rejected: "Can't approve: the voice agent can't be given this plan's text. Edit it first.",
   sf_do_not_call: "Can't call: Do Not Call is checked in Salesforce.",
   skip_on_dialer: "Can't call: Skip on Dialer is checked in Salesforce.",
   closed: 'The record is closed in Salesforce.',
@@ -33,6 +35,8 @@ export interface WarningInput {
   now: Date;
   /** Do-not-contact holds (CF-10). Left out, there are none. */
   dnc?: { pending: boolean; flaggedNotDismissed: boolean };
+  /** What the voice agent's text check refuses in the plan, as phrases (`planTextProblems`). Left out or empty: nothing. */
+  planTextProblems?: readonly string[];
 }
 
 const warn = (code: GateWarningCode, severity: GateWarning['severity'], words = WARNING_WORDS[code]): GateWarning => ({ code, severity, words });
@@ -67,6 +71,7 @@ export function gateWarnings(i: WarningInput): GateWarning[] {
     ...phoneWarnings(i),
     ...(i.dnc?.pending ? [warn('dnc_pending', 'block')] : []),
     ...(i.dnc?.flaggedNotDismissed ? [warn('dnc_not_dismissed', 'block')] : []),
+    ...(i.planTextProblems?.length ? [warn('plan_text_rejected', 'block', planTextWarningWords(i.planTextProblems))] : []),
     ...(i.record.sfDoNotCall ? [warn('sf_do_not_call', 'block')] : []),
     ...(i.record.skipOnDialer ? [warn('skip_on_dialer', 'block')] : []),
     ...(i.record.isClosed ? [warn('closed', 'info')] : []),

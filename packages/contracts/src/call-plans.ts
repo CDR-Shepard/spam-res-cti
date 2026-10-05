@@ -99,6 +99,8 @@ export const GateWarningCode = z.enum([
   'dnc_pending',
   /** The plan was flagged do-not-contact and no person has dismissed the flag (CF-10). */
   'dnc_not_dismissed',
+  /** The plan's text would be refused by the voice agent's check (a price, an offer, a URL, a human claim...): edit it. */
+  'plan_text_rejected',
   'sf_do_not_call',
   'skip_on_dialer',
   'closed',

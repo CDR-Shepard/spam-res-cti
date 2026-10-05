@@ -194,6 +194,14 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
     for (const l of leads) expect(await touches(l.enrollmentId)).toHaveLength(1);
   });
 
+  it('P4-1: an approved plan the voice agent would refuse is skipped, never queued', async () => {
+    const b = await setup();
+    const lead = await approvedLead(b, { planOver: { opener: 'Lead with our cash offer' } });
+    expect(await releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)).toEqual({ released: 0, skipped: 1, more: false });
+    expect(await touches(lead.enrollmentId)).toEqual([]);
+    expect(await stage(lead.enrollmentId)).toBe('approved');
+  });
+
   it('skips every lead whose consent is not exactly yes, whatever the engine would say later (CF-5, CF-10b)', async () => {
     const b = await setup();
     const leads = [await approvedLead(b, { consent: 'no' }), await approvedLead(b, { consent: 'unknown' }), await approvedLead(b, { consent: null }), await approvedLead(b, { consent: 'field_missing' })];

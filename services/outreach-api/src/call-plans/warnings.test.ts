@@ -20,6 +20,14 @@ const codes = (w: ReturnType<typeof gateWarnings>) => w.map((x) => `${x.code}:${
 const blocks = (...entries: Array<[string, ConsentBlock]>) => new Map(entries);
 
 describe('gateWarnings', () => {
+  it('3c (P4-1): a plan whose text the voice agent would refuse is a blocking warning that names the fields', () => {
+    const w = gateWarnings(input({ planTextProblems: ['the opener: offer wording', 'question 2: a web address'] }));
+    expect(codes(w)).toEqual(['plan_text_rejected:block']);
+    expect(w[0]!.words).toBe("Can't approve: the voice agent can't be given this text. Edit it first. the opener: offer wording; question 2: a web address.");
+    expect(hasBlockingWarning(w)).toBe(true);
+    expect(gateWarnings(input({ planTextProblems: [] }))).toEqual([]);
+  });
+
   it('1: a clean record at 14:00 has none', () => {
     expect(gateWarnings(input())).toEqual([]);
   });

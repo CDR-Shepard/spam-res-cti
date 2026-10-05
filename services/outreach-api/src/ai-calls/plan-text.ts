@@ -25,7 +25,7 @@ export interface PlanTextIssue {
 
 export type RenderedPlan = { ok: true; text: string } | { ok: false; issues: PlanTextIssue[] };
 
-const GOAL_LABELS: Readonly<Record<CallGoalKey, string>> = {
+export const GOAL_LABELS: Readonly<Record<CallGoalKey, string>> = {
   still_selling: 'Still selling?',
   timeline: 'Timeline',
   condition: 'Condition',

@@ -1,7 +1,7 @@
 /** Row builders for the call plan board and decision tests (real Postgres): an AI call lead with research and a plan. */
 import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
-import { ResearchSource, type CallStage } from '@cti/contracts';
+import { ResearchSource, type CallPlan, type CallStage } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { assembleSnapshot } from '../research/snapshot.js';
 import { saveResearch, savePlan } from '../call-plans/store.js';
@@ -41,6 +41,8 @@ export interface PlanLeadOptions {
   /** null: research only, no plan yet. */
   planStatus?: 'proposed' | 'approved' | null;
   dncFlagged?: boolean;
+  /** Fields of the stored plan to change (the default is the valid fixture). */
+  planOver?: Partial<CallPlan>;
   ownerSfUserId?: string | null;
   phones?: Array<{ field: string; e164: string }>;
   recordOver?: Partial<typeof schema.crmRecords.$inferInsert>;
@@ -99,7 +101,7 @@ export async function seedPlanLead(db: Db, base: { orgId: string; campaignId: st
     researchId: research.id,
     source: 'model',
     model: 'claude-sonnet-5-5',
-    plan: validPlan,
+    plan: { ...validPlan, ...o.planOver },
     dncFlagged: o.dncFlagged ?? false,
     inputTokens: 1,
     outputTokens: 1,

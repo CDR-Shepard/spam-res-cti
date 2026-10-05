@@ -125,6 +125,25 @@ describe('call plan routes', () => {
     expect(ok.statusCode).toBe(200);
   });
 
+  it('P4-1: an edit the voice agent would refuse is 400 with each field and problem in words; ordinary words like worth pass', async () => {
+    const bad = { ...EDITABLE, opener: 'Lead with our cash offer', questions: ['Ask about $200k', 'Fine one'], avoid: ['See www.example.com'] };
+    const res = await call('PUT', `/api/call-plans/${ENROLLMENT_ID}`, { version: 1, plan: bad });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.code).toBe('INVALID_BODY');
+    expect(body.error).toBe(
+      "Can't save: the voice agent can't be given this text. the opener: offer wording; question 1: a price or an amount; avoid line 1: a web address.",
+    );
+    expect(body.details.issues).toEqual([
+      { path: 'opener', issue: 'offer' },
+      { path: 'questions.0', issue: 'money' },
+      { path: 'avoid.0', issue: 'url' },
+    ]);
+    expect(decisions.editPlan).not.toHaveBeenCalled();
+    const ok = await call('PUT', `/api/call-plans/${ENROLLMENT_ID}`, { version: 1, plan: { ...EDITABLE, questions: ['What do they think the house is worth?'] } });
+    expect(ok.statusCode).toBe(200);
+  });
+
   it('I-1: an edit whose selling-signal evidence has line breaks, a ZWSP or a BOM is accepted: the server replaces the signals', async () => {
     const sellingSignals = [{ signal: 'Wants out', evidence: 'moving\nsoon\u200b\ufeff', source: 'note', strength: 'strong' }];
     const res = await call('PUT', `/api/call-plans/${ENROLLMENT_ID}`, { version: 1, plan: { ...EDITABLE, sellingSignals } });

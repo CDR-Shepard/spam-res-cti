@@ -5,12 +5,13 @@
  */
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { SellingSignal, type ApproveCallPlanRequest, type EditCallPlanRequest } from '@cti/contracts';
+import { EditableCallPlan, SellingSignal, type ApproveCallPlanRequest, type EditCallPlanRequest } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { pendingDncFlag } from '../campaigns/dnc-hold.js';
 import { exitEnrollment } from '../campaigns/enroll.js';
 import { mayDecide } from '../tenancy/record-owner.js';
 import type { RequestContext } from '../tenancy/scope.js';
+import { planTextProblems } from './plan-text-words.js';
 import { RECORD_BLOCK_COLUMNS, recordIsBlocked, type BlockableRecord } from './record-block.js';
 import { currentPlan, savePlan, type CallPlanRow } from './store.js';
 
@@ -26,6 +27,7 @@ export type DecisionCode =
   | 'DNC_PENDING'
   | 'DNC_NOT_DISMISSED'
   | 'RECORD_BLOCKED'
+  | 'PLAN_TEXT_REJECTED'
   | 'CAMPAIGN_NOT_ACTIVE'
   | 'NOT_AI_CALL_CAMPAIGN';
 
@@ -39,6 +41,7 @@ const STATUS: Readonly<Record<DecisionCode, 403 | 404 | 409>> = {
   DNC_PENDING: 409,
   DNC_NOT_DISMISSED: 409,
   RECORD_BLOCKED: 409,
+  PLAN_TEXT_REJECTED: 409,
   CAMPAIGN_NOT_ACTIVE: 409,
   NOT_AI_CALL_CAMPAIGN: 409,
 };
@@ -53,6 +56,7 @@ export const DECISION_WORDS: Readonly<Record<DecisionCode, string>> = {
   DNC_PENDING: 'A do-not-contact flag on this person is waiting in Needs Review.',
   DNC_NOT_DISMISSED: "Can't approve: the research flagged this person do-not-contact and nobody has dismissed the flag.",
   RECORD_BLOCKED: "Can't approve: the call would be refused as things stand. Check the warnings on the card.",
+  PLAN_TEXT_REJECTED: "Can't approve: the voice agent can't be given this plan's text (a price, an offer, a web address...). Edit it first; the card says which lines.",
   CAMPAIGN_NOT_ACTIVE: 'Calls start only from an active campaign. Activate it first.',
   NOT_AI_CALL_CAMPAIGN: 'This campaign does not place AI calls.',
 };
@@ -146,6 +150,9 @@ export async function approvePlan(db: Db, ctx: RequestContext, enrollmentId: str
     inStage(row, ['review']);
     const plan = await currentPlan(tx, enrollmentId);
     if (!plan || plan.version !== req.version || plan.status !== 'proposed') throw new DecisionError('PLAN_CHANGED');
+    // The voice agent refuses a plan with a price, an offer, a web address or a human claim: say so now, not at call time (CF-9).
+    const readable = EditableCallPlan.safeParse(plan.plan);
+    if (!readable.success || planTextProblems(readable.data).length > 0) throw new DecisionError('PLAN_TEXT_REJECTED');
     const consent = await planConsent(tx, plan);
     requireConsent(consent);
     // A flag nobody dismissed holds the person; a plan the model flagged goes ahead only once a person dismissed THAT flag,
