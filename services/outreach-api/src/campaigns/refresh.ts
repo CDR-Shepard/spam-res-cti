@@ -214,7 +214,7 @@ export async function refreshCampaign(
         : record ? skipReasonFor(toSnapshot(record), blocks, false) : null;
     if (!reason) continue;
     // Guarded on `active`: the triage tick may have flagged the person since the read above.
-    if (await exitEnrollment(db, e.id, { from: ['active'], reason })) exited += 1;
+    if (await exitEnrollment(db, e.id, { from: ['active'], reason, onlyIfDeselected: reason === DESELECTED_EXIT_REASON })) exited += 1;
   }
 
   const alreadyEnrolled = new Set(enrollments.map((e) => e.sfRecordId));
@@ -223,7 +223,7 @@ export async function refreshCampaign(
     if (!record || alreadyEnrolled.has(id)) return [];
     const snapshot = toSnapshot(record);
     if (skipReasonFor(snapshot, blocks, false) !== null) return [];
-    return [{ crmRecordId: record.id, keys: contactKeys(snapshot) }];
+    return [{ crmRecordId: record.id, keys: contactKeys(snapshot), sfRecordId: id }];
   });
   const { enrolled, skippedInOtherCampaign, skippedNoKeys } = await enrollRecords(db, {
     orgId: campaign.orgId,

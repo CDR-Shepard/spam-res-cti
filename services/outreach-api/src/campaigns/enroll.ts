@@ -9,7 +9,7 @@
  *   campaigns refreshing at the same moment cannot both enroll the same person.
  * - `exitEnrollment` releases the person's keys and cancels the touches not yet started.
  */
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import type { EnrollmentStatus } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import type { SfRecordSnapshot } from './records.js';
@@ -139,6 +139,30 @@ function isActiveKeyConflict(err: unknown): boolean {
   return code === UNIQUE_VIOLATION && constraint === ACTIVE_KEY_INDEX;
 }
 
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+
+/** `EXISTS` in SQL: the lead is (still) ticked in the campaign's lead picker. */
+export function selectionExists(campaignId: SQL | string, sfRecordId: SQL | string): SQL {
+  return sql`EXISTS (SELECT 1 FROM campaign_selections cs WHERE cs.campaign_id = ${campaignId} AND cs.sf_record_id = ${sfRecordId})`;
+}
+
+/** One statement: the enrollment row if and only if the lead is still selected and not yet enrolled here. */
+async function insertSelectedEnrollment(
+  tx: Tx,
+  input: { orgId: string; campaignId: string; now: Date; callStage?: 'research' | null },
+  record: { crmRecordId: string; sfRecordId?: string },
+  nextTouchAt: Date,
+): Promise<{ id: string } | undefined> {
+  if (!record.sfRecordId) throw new Error('an AI call enrollment needs the lead\'s Salesforce Id');
+  const result = await tx.execute(sql`
+    INSERT INTO campaign_enrollments (org_id, campaign_id, crm_record_id, status, next_touch_at, call_stage, enrolled_at)
+    SELECT ${input.orgId}::uuid, ${input.campaignId}::uuid, ${record.crmRecordId}::uuid, 'active', ${nextTouchAt.toISOString()}::timestamptz, ${input.callStage}, ${input.now.toISOString()}::timestamptz
+    WHERE ${selectionExists(sql`${input.campaignId}::uuid`, sql`${record.sfRecordId}`)}
+    ON CONFLICT (campaign_id, crm_record_id) DO NOTHING
+    RETURNING id`);
+  return (result as unknown as { rows: Array<{ id: string }> }).rows[0];
+}
+
 /**
  * Enrolls each record in its own transaction: the enrollment row, then its contact keys
  * (sorted, so concurrent transactions take key locks in the same order). A key held by
@@ -154,8 +178,13 @@ export async function enrollRecords(
     campaignId: string;
     touchDays: number[];
     now: Date;
-    records: Array<{ crmRecordId: string; keys: string[] }>;
-    /** AI call campaigns enroll at `research`; sequence campaigns leave it null. */
+    /** `sfRecordId` is needed when `callStage` is set: the enroll re-checks the lead is still selected. */
+    records: Array<{ crmRecordId: string; keys: string[]; sfRecordId?: string }>;
+    /**
+     * AI call campaigns enroll at `research`; sequence campaigns leave it null. An AI call
+     * enrollment is inserted only while the lead is STILL in `campaign_selections`, decided
+     * by the insert statement itself: the refresh read the selection seconds earlier.
+     */
     callStage?: 'research' | null;
   },
 ): Promise<{ enrolled: number; skippedInOtherCampaign: number; skippedNoKeys: number }> {
@@ -172,19 +201,15 @@ export async function enrollRecords(
     }
     try {
       const inserted = await db.transaction(async (tx) => {
-        const [row] = await tx
-          .insert(schema.campaignEnrollments)
-          .values({
-            orgId: input.orgId,
-            campaignId: input.campaignId,
-            crmRecordId: record.crmRecordId,
-            status: 'active',
-            nextTouchAt,
-            callStage: input.callStage ?? null,
-            enrolledAt: input.now,
-          })
-          .onConflictDoNothing({ target: [schema.campaignEnrollments.campaignId, schema.campaignEnrollments.crmRecordId] })
-          .returning({ id: schema.campaignEnrollments.id });
+        const row = input.callStage
+          ? await insertSelectedEnrollment(tx, input, record, nextTouchAt)
+          : (
+              await tx
+                .insert(schema.campaignEnrollments)
+                .values({ orgId: input.orgId, campaignId: input.campaignId, crmRecordId: record.crmRecordId, status: 'active', nextTouchAt, enrolledAt: input.now })
+                .onConflictDoNothing({ target: [schema.campaignEnrollments.campaignId, schema.campaignEnrollments.crmRecordId] })
+                .returning({ id: schema.campaignEnrollments.id })
+            )[0];
         if (!row) return false;
         await tx
           .insert(schema.enrollmentContactKeys)
@@ -213,19 +238,29 @@ export type ExitableStatus = Exclude<EnrollmentStatus, (typeof TERMINAL_ENROLLME
  * of those statuses: a caller that read `active` must not end an enrollment the triage tick
  * moved to `needs_review` since (that would drop a do-not-contact flag from Needs Review and
  * free the person's keys). When no row matches, nothing else is touched and it returns false.
+ *
+ * `onlyIfDeselected` (AI call campaigns, reason `deselected`) adds the same kind of guard on
+ * the lead picker: the refresh decided on a selection it read seconds ago, so the UPDATE
+ * itself requires the lead to be absent from `campaign_selections` right now.
  */
 export async function exitEnrollment(
   db: Db,
   enrollmentId: string,
-  opts: { from: readonly ExitableStatus[]; reason: string; status?: 'exited' | 'completed' },
+  opts: { from: readonly ExitableStatus[]; reason: string; status?: 'exited' | 'completed'; onlyIfDeselected?: boolean },
 ): Promise<boolean> {
-  const { from, reason, status = 'exited' } = opts;
+  const { from, reason, status = 'exited', onlyIfDeselected = false } = opts;
   if (from.length === 0) throw new Error('exitEnrollment needs at least one expected status');
   return db.transaction(async (tx) => {
     const ended = await tx
       .update(schema.campaignEnrollments)
       .set({ status, exitReason: reason, nextTouchAt: null, updatedAt: sql`now()` })
-      .where(and(eq(schema.campaignEnrollments.id, enrollmentId), inArray(schema.campaignEnrollments.status, [...from])))
+      .where(
+        and(
+          eq(schema.campaignEnrollments.id, enrollmentId),
+          inArray(schema.campaignEnrollments.status, [...from]),
+          onlyIfDeselected ? sql`NOT ${selectionExists(sql`campaign_enrollments.campaign_id`, sql`(SELECT r.sf_record_id FROM crm_records r WHERE r.id = campaign_enrollments.crm_record_id)`)}` : undefined,
+        ),
+      )
       .returning({ id: schema.campaignEnrollments.id });
     if (ended.length === 0) return false;
     await tx
