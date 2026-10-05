@@ -6,7 +6,12 @@ import { schema, type Db } from '@cti/db';
 import { assembleSnapshot } from '../research/snapshot.js';
 import { saveResearch, savePlan } from '../call-plans/store.js';
 import { validPlan } from './call-plan-fixtures.js';
+import type { RequestContext } from '../tenancy/scope.js';
 import { leadId, seedCampaign, seedEnrollment, seedOrg, seedRecord, snapshot } from './outreach-fixtures.js';
+
+/** A request context for a signed-in person (no HTTP involved). */
+export const ctxOf = (orgId: string, userId: string, isAdmin: boolean): RequestContext =>
+  ({ session: { userId, orgId, isAdmin, isSuperAdmin: false, email: 'x@gg.co', kind: 'human' }, orgId, tenant: {} }) as unknown as RequestContext;
 
 export const SEED_NOW = new Date('2026-10-05T19:00:00.000Z');
 

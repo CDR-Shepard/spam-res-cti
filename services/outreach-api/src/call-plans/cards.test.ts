@@ -3,13 +3,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { seedConnection } from '../test/outreach-fixtures.js';
-import { seedAiCallCampaign, seedPlanLead, seedUser, SEED_NOW } from '../test/call-plan-seed.js';
+import { ctxOf, seedAiCallCampaign, seedPlanLead, seedUser, SEED_NOW } from '../test/call-plan-seed.js';
 import { createTestDb, pgLane } from '../test/pg.js';
-import type { RequestContext } from '../tenancy/scope.js';
 import { CARD_PAGE_SIZE, decodeCardCursor, encodeCardCursor, loadCallPlanCard, loadCallPlanCards } from './cards.js';
 
-const ctxOf = (orgId: string, userId: string, isAdmin: boolean): RequestContext =>
-  ({ session: { userId, orgId, isAdmin, isSuperAdmin: false, email: 'x@gg.co', kind: 'human' }, orgId, tenant: {} }) as unknown as RequestContext;
 const T = (minutes: number) => new Date(SEED_NOW.getTime() - minutes * 60_000);
 const OWNER = '005000000000001AAA';
 

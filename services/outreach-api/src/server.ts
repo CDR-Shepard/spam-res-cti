@@ -20,6 +20,7 @@ import { DescribeCache } from './research/describe.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerSalesforceAuthRoutes } from './routes/auth-salesforce.js';
+import { registerCallPlanRoutes } from './routes/call-plans.js';
 import { registerCampaignSelectionRoutes } from './routes/campaign-selection.js';
 import { registerCampaignRoutes } from './routes/campaigns.js';
 import { registerConnectionRoutes } from './routes/connections.js';
@@ -107,6 +108,7 @@ async function main(): Promise<void> {
       (scope) => registerCampaignRoutes(scope, { db, clients }),
       (scope) => registerCampaignSelectionRoutes(scope, { db, clients, cache: memberCache }),
       (scope) => registerReviewRoutes(scope, { db }),
+      (scope) => registerCallPlanRoutes(scope, { db }),
     ],
   });
   const close = () => shutdown(runner, app);
