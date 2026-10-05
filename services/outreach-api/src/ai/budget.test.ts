@@ -10,7 +10,7 @@ describe('budget (pure)', () => {
     expect(utcDay(new Date('2026-10-05T00:00:00Z'))).toBe('2026-10-05');
   });
   it('budgetMicros converts the daily USD budget to micro-dollars', () => {
-    const base = { liveChannels: ['rep_call' as const], consentFromWebForms: false, consentFromInboundCalls: false };
+    const base = { liveChannels: ['rep_call' as const], consentFromWebForms: false, consentFromInboundCalls: false, aiCallConcurrency: 2, aiCallDailyCap: 50, aiCallMaxAttempts: 3 };
     expect(budgetMicros({ ...base, aiDailyBudgetUsd: 25 })).toBe(25_000_000);
     expect(budgetMicros({ ...base, aiDailyBudgetUsd: 0.5 })).toBe(500_000);
   });

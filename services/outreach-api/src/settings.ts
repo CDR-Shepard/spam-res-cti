@@ -21,10 +21,19 @@ export interface OutreachSettings {
   liveChannels: Array<'rep_call' | 'ai_call' | 'sms' | 'email'>;
   consentFromWebForms: boolean;
   consentFromInboundCalls: boolean;
+  /** AI call campaigns (plan 1C): live AI calls per tenant at once (1–5). */
+  aiCallConcurrency: number;
+  /** AI calls placed per tenant per rolling 24 hours (0–500; 0 = none). */
+  aiCallDailyCap: number;
+  /** Unanswered-call attempts per lead (no answer, busy, voicemail, failed) before it completes (1–5). */
+  aiCallMaxAttempts: number;
 }
 
 export const DEFAULT_AI_DAILY_BUDGET_USD = 25;
 export const DEFAULT_LIVE_CHANNELS: readonly LiveChannel[] = ['rep_call'];
+export const DEFAULT_AI_CALL_CONCURRENCY = 2;
+export const DEFAULT_AI_CALL_DAILY_CAP = 50;
+export const DEFAULT_AI_CALL_MAX_ATTEMPTS = 3;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -32,6 +41,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function budgetFrom(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : DEFAULT_AI_DAILY_BUDGET_USD;
+}
+
+/** An integer in [min, max], else the default: junk can never make AI call pacing more aggressive. */
+function intIn(value: unknown, min: number, max: number, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max ? value : fallback;
 }
 
 function isLiveChannel(value: unknown): value is LiveChannel {
@@ -50,5 +64,8 @@ export function outreachSettings(org: { settings: unknown }): OutreachSettings {
     liveChannels: liveChannelsFrom(s.liveChannels),
     consentFromWebForms: s.consentFromWebForms === true,
     consentFromInboundCalls: s.consentFromInboundCalls === true,
+    aiCallConcurrency: intIn(s.aiCallConcurrency, 1, 5, DEFAULT_AI_CALL_CONCURRENCY),
+    aiCallDailyCap: intIn(s.aiCallDailyCap, 0, 500, DEFAULT_AI_CALL_DAILY_CAP),
+    aiCallMaxAttempts: intIn(s.aiCallMaxAttempts, 1, 5, DEFAULT_AI_CALL_MAX_ATTEMPTS),
   };
 }
