@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
     "@cti/auth": "*",
     "@cti/contracts": "*",
     "@cti/db": "*",
