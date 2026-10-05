@@ -12,6 +12,9 @@ import { seedConnection, TEST_FIELD_MAP } from './outreach-fixtures.js';
 
 type Row = Record<string, unknown>;
 
+/** The harness tenant's AI call consent checkbox: the fake record answers `true` unless a test says otherwise. */
+export const CONSENT_FIELD = 'AI_Call_Consent__c';
+
 export interface FakeSfState {
   /** Per record id: fields to change on the default Lead row; `null` = Salesforce does not return the record. */
   records: Map<string, Row | null>;
@@ -37,7 +40,7 @@ export function fakePaceSalesforce(): { client: SalesforceClient; state: FakeSfS
       return ids.flatMap((id) => {
         const over = state.records.get(id);
         if (over === null) return [];
-        return [{ Id: id, Name: 'Pat Seller', OwnerId: '005000000000001AAA', Owner: { Name: 'Rep One' }, LastModifiedDate: '2026-10-01T12:00:00.000+0000', IsConverted: false, MobilePhone: '+15125550100', DoNotCall: false, ...over }];
+        return [{ Id: id, Name: 'Pat Seller', OwnerId: '005000000000001AAA', Owner: { Name: 'Rep One' }, LastModifiedDate: '2026-10-01T12:00:00.000+0000', IsConverted: false, MobilePhone: '+15125550100', DoNotCall: false, [CONSENT_FIELD]: true, ...over }];
       });
     },
   } as unknown as SalesforceClient;
@@ -90,7 +93,7 @@ export async function paceHarness(db: Db, settings: Record<string, unknown> = {}
   await db.update(schema.organizations).set({ settings }).where(eq(schema.organizations.id, base.orgId));
   await seedConnection(db, base.orgId, {
     ...TEST_FIELD_MAP,
-    Lead: { ...TEST_FIELD_MAP.Lead, skipOnDialer: 'Skip_On_Dialer__c' },
+    Lead: { ...TEST_FIELD_MAP.Lead, skipOnDialer: 'Skip_On_Dialer__c', consent: CONSENT_FIELD },
   });
   const sf = fakePaceSalesforce();
   const cti = fakeCti(db);

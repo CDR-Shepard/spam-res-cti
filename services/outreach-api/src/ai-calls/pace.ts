@@ -5,7 +5,7 @@
  * pace-context.ts.
  *
  * One touch, in order: a pending do-not-contact flag holds the person; the fresh Salesforce
- * read (Do Not Call, Skip on Dialer, the record gone) can end the enrollment; the touch's plan
+ * read (Do Not Call, Skip on Dialer, AI call consent not checked, the record gone) can end the enrollment; the touch's plan
  * must still be the approved plan and pass the voice agent's text check; outside the window
  * the touch waits (nothing claimed); new Salesforce activity since the research sends the lead
  * back to research (CF-1); then the claim (CF-2, CF-10, CF-11), the trigger, and the answer.
@@ -57,10 +57,17 @@ export async function placeDueAiCalls(deps: PaceDeps): Promise<PaceCounts> {
   if (reaped > 0) deps.log.warn({ reaped }, 'ai_call.place: dialing touches with no answer went back to planned');
   for (const orgId of await orgsWithDueAiCalls(deps.db, deps.now)) {
     if (clock() > deadline) break;
-    await placeForOrg(deps, orgId, counts, () => clock() <= deadline);
+    try {
+      await placeForOrg(deps, orgId, counts, () => clock() <= deadline);
+    } catch (err) {
+      // A4: one tenant's failure never stops the others. Its org id and the error's name only: never plan text or a phone.
+      deps.log.error({ orgId, errName: errName(err) }, 'ai_call.place: the tick failed for this tenant; the next tenant goes on');
+    }
   }
   return counts;
 }
+
+const errName = (err: unknown): string => (err instanceof Error ? err.name : typeof err);
 
 async function placeForOrg(deps: PaceDeps, orgId: string, counts: PaceCounts, inTime: () => boolean): Promise<void> {
   const tick = await loadOrgTick(deps, orgId);
@@ -81,6 +88,8 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
   if (!fresh) return finish(deps, c, 'record_not_found');
   if (fresh.sfDoNotCall) return finish(deps, c, 'sf_do_not_call');
   if (fresh.skipOnDialer) return finish(deps, c, 'skip_on_dialer');
+  // A5 (CF-5): consent read fresh from Salesforce must be exactly yes; false or unknown is no consent, and nothing is triggered.
+  if (fresh.consentAiCall !== true) return finish(deps, c, 'no_consent');
   const plan: PlanForCall | null = c.callPlanId ? (tick.plans.get(c.callPlanId) ?? null) : null;
   if (!plan || plan.status !== 'approved' || plan.enrollmentId !== c.enrollmentId || !plan.plan) {
     await planNoLongerApproved(db, c, now);

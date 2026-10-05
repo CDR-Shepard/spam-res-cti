@@ -6,7 +6,8 @@ import { schema, type Db } from '@cti/db';
 import { SalesforceAuthError } from '@cti/salesforce';
 import { enrollmentById, planById, seedAiCall, seedReleasedLead, touchById } from '../test/ai-call-seed.js';
 import { validPlan } from '../test/call-plan-fixtures.js';
-import { paceHarness } from '../test/fake-pace.js';
+import { CONSENT_FIELD, paceHarness } from '../test/fake-pace.js';
+import { placeDueAiCalls } from './pace.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { renderPlanForAgent } from './plan-text.js';
@@ -246,5 +247,37 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
     expect(all).not.toContain('+1512');
     expect(all).not.toContain('Oak Street');
     expect((await planById(db, lead.planId!)).status).toBe('approved');
+  });
+
+  it.each<[string, unknown]>([
+    ['false', false],
+    ['unknown (empty)', null],
+  ])('A5: the fresh Salesforce read says consent is %s: the enrollment exits ai_call_no_consent and nothing is triggered', async (_label, value) => {
+    const h = await paceHarness(db);
+    const lead = await seedReleasedLead(db, h.base);
+    h.sf.state.records.set(lead.sfRecordId, { [CONSENT_FIELD]: value });
+
+    expect((await h.run(NOW)).failed).toBe(1);
+    expect(h.cti.requests).toEqual([]);
+    expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'skipped', attempts: 0 });
+    expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'ai_call_no_consent', callStage: 'done' });
+  });
+
+  it('A4: one tenant whose tick throws is logged with its org id and the next tenant is still paced', async () => {
+    const bad = await paceHarness(db);
+    const good = await paceHarness(db);
+    const badLead = await seedReleasedLead(db, bad.base);
+    const goodLead = await seedReleasedLead(db, good.base);
+    const clients = async (orgId: string) => {
+      if (orgId === bad.base.orgId) throw new TypeError('a bug in the tick');
+      if (orgId === good.base.orgId) return good.sf.client;
+      throw new CrmNotConnectedError();
+    };
+    const counts = await placeDueAiCalls({ db, clients, cti: good.cti.cti, now: NOW, log: { info: () => {}, warn: () => {}, error: (obj: unknown, msg?: string) => good.logs.push({ level: 'error', obj, msg }) }, clock: () => 0 });
+
+    expect(counts.placed).toBeGreaterThanOrEqual(1);
+    expect((await touchById(db, goodLead.touchId)).status).toBe('sent');
+    expect((await touchById(db, badLead.touchId)).status).toBe('planned');
+    expect(good.logs).toContainEqual({ level: 'error', obj: { orgId: bad.base.orgId, errName: 'TypeError' }, msg: 'ai_call.place: the tick failed for this tenant; the next tenant goes on' });
   });
 });
