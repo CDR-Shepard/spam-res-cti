@@ -57,8 +57,9 @@ async function finishedCalls(db: Db): Promise<Finished[]> {
 }
 
 /**
- * The next call, the next day, carrying the same plan and approver. Only for a lead still `active` with no touch that
- * has not started (a `dialing` touch only counts when it carries this plan: one left from before a reactivation, CF-3,
+ * The next call, the next day, carrying the same plan and approver. Only for a lead still `active` whose touch's plan is
+ * still the approved plan of this enrollment (A2: a lead reactivated while the call was live has its plan superseded, and
+ * research makes the next one), with no touch that has not started (a `dialing` touch only counts when it carries this plan: one left from before a reactivation, CF-3,
  * is the reconciler's). The pacer re-checks everything (the plan still approved, consent, selection) before it calls.
  */
 function insertRetry(f: Finished, dueAt: Date) {
@@ -69,6 +70,9 @@ function insertRetry(f: Finished, dueAt: Date) {
            'ai_call', 'planned', ${iso(dueAt)}, '[]'::jsonb, ${f.call_plan_id}::uuid, ${f.requested_by}::uuid
     from campaign_enrollments e
     where e.id = ${f.enrollment_id}::uuid and e.status = 'active'
+      and exists (
+        select 1 from call_plans p
+        where p.id = ${f.call_plan_id}::uuid and p.enrollment_id = e.id and p.status = 'approved')
       and not exists (
         select 1 from touches t
         where t.enrollment_id = e.id

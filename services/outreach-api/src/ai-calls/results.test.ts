@@ -124,4 +124,22 @@ describe.skipIf(!pgLane)('collectAiCallResults (real Postgres)', () => {
     const after = await touchesOf(other.enrollmentId);
     expect(after.map((t) => [t.seq, t.status])).toEqual([[1, 'sent'], [4, 'dialing'], [5, 'planned']]);
   });
+
+  it('A2: a lead reactivated while its call was live gets no retry with the old plan (the plan is no longer approved)', async () => {
+    const lead = await placed('completed', 'voicemail');
+    // Reactivated mid-call: the plan was superseded and the lead went back to research (still active).
+    await db.update(schema.callPlans).set({ status: 'superseded' }).where(eq(schema.callPlans.id, lead.planId));
+    const res = await collectAiCallResults(db, NOW, quiet);
+    expect(await touchById(db, lead.touchId)).toMatchObject({ outcome: 'voicemail', countedAt: NOW });
+    expect((await touchesOf(lead.enrollmentId)).map((t) => t.seq)).toEqual([1]);
+    expect(res.retried).toBe(0);
+  });
+
+  it('A2: a plan approved for another enrollment never carries a retry', async () => {
+    const lead = await placed('completed', 'voicemail');
+    const other = await placed('completed', 'qualified_callback');
+    await db.update(schema.touches).set({ callPlanId: other.planId }).where(eq(schema.touches.id, lead.touchId));
+    await collectAiCallResults(db, NOW, quiet);
+    expect((await touchesOf(lead.enrollmentId)).map((t) => t.seq)).toEqual([1]);
+  });
 });
