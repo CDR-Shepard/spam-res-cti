@@ -176,6 +176,14 @@ describe('startAiCall — a record', () => {
     expect(store.rows.get(res.aiCallId!)).toMatchObject({ status: 'failed', outcome: 'failed', endedAt: NOW });
     expect(getActiveCall(res.aiCallId!)).toBeNull();
   });
+
+  it('S-6: when Twilio refuses and the row cannot be marked failed, the answer is still twilio_error (never an exception that frees the idempotency key)', async () => {
+    twilio.failPlace = true;
+    const update = vi.spyOn(store, 'update').mockRejectedValueOnce(new Error('db down'));
+    const res = await start({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' });
+    expect(res).toMatchObject({ ok: false, reason: 'twilio_error', aiCallId: expect.any(String) });
+    expect(update).toHaveBeenCalled();
+  });
 });
 
 describe('startAiCall — a test number', () => {

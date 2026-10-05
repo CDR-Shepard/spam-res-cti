@@ -151,34 +151,32 @@ async function handleTrigger(deps: InternalAiDeps, cfgOf: () => AppConfig, body:
       await deps.requests.complete(body.orgId, body.idempotencyKey, answer);
       return answer;
     }
-    await deps.requests.release(body.orgId, body.idempotencyKey);
-    if ((await deps.requests.reserve(key)).kind === 'existing') return failed('in_flight');
+    // One atomic UPDATE decides who retries: any other concurrent retry of this stale key answers in_flight (S-3).
+    if (!(await deps.requests.takeOver(body.orgId, body.idempotencyKey))) return failed('in_flight');
   }
   const answer = await startReserved(deps, cfgOf, db, session, body);
   await deps.requests.complete(body.orgId, body.idempotencyKey, answer);
   return answer;
 }
 
+/**
+ * startAiCall turns Salesforce, gate and Twilio errors into results, so an exception is rare, but it can come after Twilio
+ * took the call. It propagates (a 500) and the reservation is KEPT (S-6): a retry meets in_flight, and once the
+ * reservation is stale the takeover first looks for the call this request left, so a call is never placed twice.
+ */
 async function startReserved(deps: InternalAiDeps, cfgOf: () => AppConfig, db: Db, session: SessionUser, body: Body): Promise<InternalAiCallResponse> {
   const t = body.target;
-  try {
-    const result = await deps.start({
-      db,
-      cfg: cfgOf(),
-      session,
-      target: t.kind === 'record' ? { objectType: t.objectType, recordId: t.recordId } : { testTo: t.to },
-      plan: t.planText,
-      deps: {
-        ...deps.startDeps,
-        // The tenant's integration connection, never the approver's own Salesforce token.
-        loadRecord: (_userId, objectType, recordId) => deps.loadIntegrationRecord(db, body.orgId, objectType as 'Lead' | 'Opportunity', recordId),
-      },
-    });
-    return toInternalResponse(result);
-  } catch (err) {
-    // startAiCall turns Salesforce, gate and Twilio errors into results; an exception is a
-    // database error before the dial. Nothing is known to have been dialed: free the key.
-    await deps.requests.release(body.orgId, body.idempotencyKey);
-    throw err;
-  }
+  const result = await deps.start({
+    db,
+    cfg: cfgOf(),
+    session,
+    target: t.kind === 'record' ? { objectType: t.objectType, recordId: t.recordId } : { testTo: t.to },
+    plan: t.planText,
+    deps: {
+      ...deps.startDeps,
+      // The tenant's integration connection, never the approver's own Salesforce token.
+      loadRecord: (_userId, objectType, recordId) => deps.loadIntegrationRecord(db, body.orgId, objectType as 'Lead' | 'Opportunity', recordId),
+    },
+  });
+  return toInternalResponse(result);
 }

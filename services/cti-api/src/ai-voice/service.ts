@@ -233,7 +233,13 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
   } catch (e) {
     deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: Twilio refused the call');
     dropActiveCall(aiCallId);
-    await deps.store.update(aiCallId, { status: 'failed', outcome: 'failed', endedAt: deps.now() });
+    // Twilio may have placed the call before it errored (a timeout), so this answer must come back whatever the database
+    // says: an exception here would reach the internal route, and nothing may free that request's idempotency key (S-6).
+    try {
+      await deps.store.update(aiCallId, { status: 'failed', outcome: 'failed', endedAt: deps.now() });
+    } catch (updateErr) {
+      deps.log.error({ aiCallId, err: errText(updateErr) }, 'ai-voice: the failed call could not be marked failed');
+    }
     return { ok: false, reason: 'twilio_error', aiCallId };
   }
 

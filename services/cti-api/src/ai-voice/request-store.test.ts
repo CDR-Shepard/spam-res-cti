@@ -8,9 +8,9 @@ import {
   completeQuery,
   findCallSinceQuery,
   findRequestQuery,
-  releaseQuery,
   requestHash,
   reserveQuery,
+  takeOverQuery,
 } from './request-store.js';
 
 const db = drizzle(new Pool({ connectionString: 'postgres://unused:unused@127.0.0.1:1/unused' }), { schema });
@@ -41,7 +41,7 @@ describe('ai_call_requests SQL, rendered', () => {
   it('2: complete stores the answer and its call, by key', () => {
     const { sql, params } = completeQuery(db, ORG, KEY, { result: 'placed', aiCallId: CALL }).toSQL();
     expect(sql).toBe(
-      'update "ai_call_requests" set "ai_call_id" = $1, "response" = $2, "updated_at" = now() where ("ai_call_requests"."org_id" = $3 and "ai_call_requests"."idempotency_key" = $4)',
+      'update "ai_call_requests" set "ai_call_id" = $1, "response" = $2, "updated_at" = now() where (("ai_call_requests"."org_id" = $3 and "ai_call_requests"."idempotency_key" = $4) and "ai_call_requests"."response" is null)',
     );
     expect(params).toEqual([CALL, JSON.stringify({ result: 'placed', aiCallId: CALL }), ORG, KEY]);
   });
@@ -51,12 +51,12 @@ describe('ai_call_requests SQL, rendered', () => {
     expect(params[0]).toBeNull();
   });
 
-  it('release deletes only an unanswered reservation', () => {
-    const { sql, params } = releaseQuery(db, ORG, KEY).toSQL();
+  it('S-3: the takeover is ONE update: it restamps an unanswered reservation older than the stale window, and says whether it did', () => {
+    const { sql, params } = takeOverQuery(db, ORG, KEY).toSQL();
     expect(sql).toBe(
-      'delete from "ai_call_requests" where ("ai_call_requests"."org_id" = $1 and "ai_call_requests"."idempotency_key" = $2 and "ai_call_requests"."response" is null)',
+      'update "ai_call_requests" set "created_at" = now(), "updated_at" = now() where (("ai_call_requests"."org_id" = $1 and "ai_call_requests"."idempotency_key" = $2) and "ai_call_requests"."response" is null and "ai_call_requests"."created_at" < now() - make_interval(secs => $3)) returning "idempotency_key"',
     );
-    expect(params).toEqual([ORG, KEY]);
+    expect(params).toEqual([ORG, KEY, 600]);
   });
 
   it('3: findCallSince looks for a record call by org, starter, record and time, newest first', () => {
