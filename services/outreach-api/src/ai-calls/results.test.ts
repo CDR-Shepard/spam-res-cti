@@ -128,7 +128,7 @@ describe.skipIf(!pgLane)('collectAiCallResults (real Postgres)', () => {
   it('A2: a lead reactivated while its call was live gets no retry with the old plan (the plan is no longer approved)', async () => {
     const lead = await placed('completed', 'voicemail');
     // Reactivated mid-call: the plan was superseded and the lead went back to research (still active).
-    await db.update(schema.callPlans).set({ status: 'superseded' }).where(eq(schema.callPlans.id, lead.planId));
+    await db.update(schema.callPlans).set({ status: 'superseded' }).where(eq(schema.callPlans.id, lead.planId!));
     const res = await collectAiCallResults(db, NOW, quiet);
     expect(await touchById(db, lead.touchId)).toMatchObject({ outcome: 'voicemail', countedAt: NOW });
     expect((await touchesOf(lead.enrollmentId)).map((t) => t.seq)).toEqual([1]);
