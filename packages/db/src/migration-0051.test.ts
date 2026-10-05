@@ -284,7 +284,7 @@ const DRIZZLE: Record<string, PgTable> = {
 /** Columns later migrations add to 0051's tables; each is pinned by its own migration test. */
 const ADDED_LATER: Readonly<Record<string, readonly string[]>> = {
   campaigns: ['mode'], // 0052
-  campaign_enrollments: ['call_stage', 'call_prepare_attempted_at', 'call_prepare_error'], // 0052
+  campaign_enrollments: ['call_stage', 'call_prepare_attempted_at', 'call_prepare_error', 'call_prepare_failures'], // 0052
   touches: ['ai_call_id', 'call_plan_id', 'requested_by', 'attempts', 'trigger_key', 'last_block_reason'], // 0052
 };
 

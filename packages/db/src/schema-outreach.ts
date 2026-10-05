@@ -222,6 +222,8 @@ export const campaignEnrollments = pgTable(
     callStage: text('call_stage').$type<(typeof CALL_STAGES)[number]>(),
     callPrepareAttemptedAt: timestamp('call_prepare_attempted_at', { withTimezone: true }),
     callPrepareError: text('call_prepare_error'),
+    /** Consecutive plans that failed validation; 3 parks the lead until "Research again". */
+    callPrepareFailures: integer('call_prepare_failures').default(0).notNull(),
     enrolledAt: timestamp('enrolled_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
@@ -389,6 +391,9 @@ export const callPlans = pgTable(
     createdBy: uuid('created_by'),
     decidedBy: uuid('decided_by'),
     decidedAt: timestamp('decided_at', { withTimezone: true }),
+    /** Who dismissed this plan's do-not-contact flag in Needs Review, and when (FK in SQL only). */
+    dncDismissedBy: uuid('dnc_dismissed_by'),
+    dncDismissedAt: timestamp('dnc_dismissed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({

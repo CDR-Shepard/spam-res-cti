@@ -54,6 +54,7 @@ describe('migration 0052_ai_call_campaigns', () => {
     expect(alter).toContain(`ADD COLUMN IF NOT EXISTS "call_stage" text CONSTRAINT "campaign_enrollments_call_stage_check" CHECK ("call_stage" IN (${quoted(CALL_STAGES)}))`);
     expect(alter).toContain('ADD COLUMN IF NOT EXISTS "call_prepare_attempted_at" timestamptz');
     expect(alter).toContain('ADD COLUMN IF NOT EXISTS "call_prepare_error" text');
+    expect(alter).toContain('ADD COLUMN IF NOT EXISTS "call_prepare_failures" integer NOT NULL DEFAULT 0');
   });
 
   it('versions research and plans per enrollment, and allows one current plan', () => {
@@ -65,6 +66,12 @@ describe('migration 0052_ai_call_campaigns', () => {
     const plans = statements.find((s) => s.startsWith('CREATE TABLE IF NOT EXISTS "call_plans"'))!;
     expect(plans).toContain(`CONSTRAINT "call_plans_status_check" CHECK ("status" IN (${quoted(CALL_PLAN_STATUSES)}))`);
     expect(plans).toContain(`CONSTRAINT "call_plans_source_check" CHECK ("source" IN (${quoted(CALL_PLAN_SOURCES)}))`);
+  });
+
+  it('records who dismissed a plan\'s do-not-contact flag, and when, on call_plans', () => {
+    const plans = statements.find((s) => s.startsWith('CREATE TABLE IF NOT EXISTS "call_plans"'))!;
+    expect(plans).toContain('"dnc_dismissed_by" uuid REFERENCES "users"("id") ON DELETE SET NULL');
+    expect(plans).toContain('"dnc_dismissed_at" timestamptz');
   });
 
   it('adds the AI call columns to touches; ai_call_id references ai_calls (0050)', () => {
@@ -82,13 +89,13 @@ describe('migration 0052_ai_call_campaigns', () => {
 
   it('Drizzle mirrors the new columns and tables', () => {
     expect(columnsOf(campaigns)).toContain('mode');
-    expect(columnsOf(campaignEnrollments)).toEqual(expect.arrayContaining(['call_stage', 'call_prepare_attempted_at', 'call_prepare_error']));
+    expect(columnsOf(campaignEnrollments)).toEqual(expect.arrayContaining(['call_stage', 'call_prepare_attempted_at', 'call_prepare_error', 'call_prepare_failures']));
     expect(columnsOf(touches)).toEqual(expect.arrayContaining(['ai_call_id', 'call_plan_id', 'requested_by', 'attempts', 'trigger_key', 'last_block_reason']));
     expect(columnsOf(campaignSelections)).toEqual(['campaign_id', 'org_id', 'sf_record_id', 'selected_by', 'selected_at']);
     expect(columnsOf(callResearch)).toEqual(['id', 'org_id', 'enrollment_id', 'crm_record_id', 'version', 'snapshot', 'sources', 'size_chars', 'content_hash', 'created_at']);
     expect(columnsOf(callPlans)).toEqual([
       'id', 'org_id', 'enrollment_id', 'research_id', 'version', 'status', 'source', 'model', 'plan', 'dnc_flagged',
-      'input_tokens', 'output_tokens', 'created_by', 'decided_by', 'decided_at', 'created_at',
+      'input_tokens', 'output_tokens', 'created_by', 'decided_by', 'decided_at', 'dnc_dismissed_by', 'dnc_dismissed_at', 'created_at',
     ]);
     for (const t of [campaignSelections, callResearch, callPlans]) expect(getTableConfig(t).foreignKeys).toHaveLength(0);
   });

@@ -12,6 +12,9 @@
 --                           approved → queued → done.
 --   call_prepare_attempted_at  Claim of the call.prepare tick; 30-minute backoff.
 --   call_prepare_error      Last research/plan failure, shown on the card.
+--   call_prepare_failures   Consecutive plans the model answered but that failed validation.
+--                           At 3 the lead is parked (no automatic attempt) until a person
+--                           presses "Research again", which resets it.
 -- call_research             One row per research run (versioned per enrollment):
 --                           the capped Salesforce snapshot and a per-source status.
 -- call_plans                One row per plan version. At most one current plan
@@ -19,6 +22,8 @@
 --   source                  model (Claude) | edit (a person's edit).
 --   dnc_flagged             The model raised do-not-contact: the person was held
 --                           in Needs Review (record_triage row, 1A dnc-hold).
+--   dnc_dismissed_by/at     Who dismissed that flag in Needs Review, and when. Carried
+--                           forward by an edit; shown on the plan card.
 -- touches (channel ai_call)
 --   ai_call_id              The ai_calls row (0050) of the placed call.
 --   call_plan_id            The approved plan the call carries.
@@ -49,7 +54,8 @@ CREATE TABLE IF NOT EXISTS "campaign_selections" (
 ALTER TABLE "campaign_enrollments"
   ADD COLUMN IF NOT EXISTS "call_stage" text CONSTRAINT "campaign_enrollments_call_stage_check" CHECK ("call_stage" IN ('research', 'review', 'approved', 'queued', 'done')),
   ADD COLUMN IF NOT EXISTS "call_prepare_attempted_at" timestamptz,
-  ADD COLUMN IF NOT EXISTS "call_prepare_error" text;
+  ADD COLUMN IF NOT EXISTS "call_prepare_error" text,
+  ADD COLUMN IF NOT EXISTS "call_prepare_failures" integer NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS "campaign_enrollments_call_stage_idx" ON "campaign_enrollments" ("call_stage", "org_id") WHERE "call_stage" IN ('research', 'approved');
 
@@ -84,6 +90,8 @@ CREATE TABLE IF NOT EXISTS "call_plans" (
   "created_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "decided_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "decided_at" timestamptz,
+  "dnc_dismissed_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
+  "dnc_dismissed_at" timestamptz,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT "call_plans_status_check" CHECK ("status" IN ('proposed', 'approved', 'rejected', 'superseded')),
   CONSTRAINT "call_plans_source_check" CHECK ("source" IN ('model', 'edit'))
