@@ -150,6 +150,13 @@ describe('runStreamSession — the start frame', () => {
     expect(bridge.start).toHaveBeenCalledTimes(1);
   });
 
+  it('a queued row (its post-create write failed) is still a placed call and starts', async () => {
+    await store.update(ID, { status: 'queued' });
+    expect(await begin()).toBe('started');
+    expect(store.rows.get(ID)).toMatchObject({ status: 'in_progress', startedAt: NOW });
+    expect(twilio.hangups).toEqual([]);
+  });
+
   it('a row that is no longer live is refused', async () => {
     await store.update(ID, { status: 'completed' });
     expect(await begin()).toBe('not_live');

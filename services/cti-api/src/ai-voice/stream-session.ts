@@ -21,7 +21,7 @@ import { AI_CALL_TOOLS, buildInstructions } from './prompt.js';
 import { claimClose, getActiveCall, updateActiveCall, type ActiveAiCall, type ActiveBridge } from './registry.js';
 import { localTimeFor } from './service.js';
 import { handleToolCall, type ToolEffects } from './service-tools.js';
-import type { AiCallStore } from './store.js';
+import type { AiCallStatus, AiCallStore } from './store.js';
 import { TranscriptBuffer } from './transcript.js';
 import { TRANSFER_RESULT_PATH, callbackUrl, transferTwiml, verifyStreamToken, type AiVoiceTwilio } from './twilio.js';
 import { realtimeUrl } from './ws-adapter.js';
@@ -29,7 +29,8 @@ import { realtimeUrl } from './ws-adapter.js';
 /** How long Twilio has to send `start` after the socket opens. */
 export const START_TIMEOUT_MS = 10_000;
 const WS_OPEN = 1;
-const LIVE_ROW_STATUSES = ['ringing', 'in_progress'];
+/** `queued` too: a row whose post-create write failed is still a placed call. */
+const LIVE_ROW_STATUSES: readonly AiCallStatus[] = ['queued', 'ringing', 'in_progress'];
 
 export interface StreamSessionDeps {
   cfg: AppConfig;
@@ -131,7 +132,7 @@ async function onStart(socket: BridgeSocket, start: Msg, deps: StreamSessionDeps
 
   try {
     const row = await deps.store.get(aiCallId);
-    if (!row || !LIVE_ROW_STATUSES.includes(row.status)) return refuse('not_live', false);
+    if (!row || !(LIVE_ROW_STATUSES as readonly string[]).includes(row.status)) return refuse('not_live', false);
     if (socket.readyState !== WS_OPEN) return 'closed';
     startBridge(socket, { ...entry, callSid }, str(start.streamSid), deps);
   } catch (e) {
@@ -141,7 +142,7 @@ async function onStart(socket: BridgeSocket, start: Msg, deps: StreamSessionDeps
   }
   // Bookkeeping only: a failed status write must not end a conversation that is running.
   await deps.store
-    .updateWhereStatus(aiCallId, ['ringing', 'in_progress'], { status: 'in_progress', startedAt: deps.now() })
+    .updateWhereStatus(aiCallId, LIVE_ROW_STATUSES, { status: 'in_progress', startedAt: deps.now() })
     .catch((e: unknown) => deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: in-progress write failed'));
   deps.log.info({ aiCallId }, 'ai-voice: stream started');
   return 'started';
