@@ -1267,6 +1267,26 @@ export const aiCalls = pgTable(
 
 export type AiCallRow = typeof aiCalls.$inferSelect;
 
+/** Idempotency for POST /internal/ai-calls (0053). `response` NULL = in flight. */
+export const aiCallRequests = pgTable(
+  'ai_call_requests',
+  {
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    idempotencyKey: text('idempotency_key').notNull(),
+    requestHash: text('request_hash').notNull(),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    aiCallId: uuid('ai_call_id').references(() => aiCalls.id, { onDelete: 'set null' }),
+    response: jsonb('response'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ name: 'ai_call_requests_pkey', columns: [t.orgId, t.idempotencyKey] }),
+    createdIdx: index('ai_call_requests_created_idx').on(t.createdAt),
+  }),
+);
+export type AiCallRequestRow = typeof aiCallRequests.$inferSelect;
+
 // Outreach tables (migration 0051). Kept LAST so schema-outreach.ts never needs
 // anything above it.
 export * from './schema-outreach.js';
