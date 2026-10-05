@@ -7,6 +7,7 @@ import { respond, StubResponse, stubApi } from '../test/stub-api';
 afterEach(() => vi.unstubAllGlobals());
 
 const ENROLLMENT_ID = '22222222-2222-4222-8222-222222222222';
+const AI_CALL_ID = '33333333-3333-4333-8333-333333333333';
 const emptyPlan = { rows: [], nextCursor: null, counts: { active: 3 } };
 
 interface Case { name: string; call: () => Promise<unknown>; route: string; response: unknown; body?: unknown }
@@ -28,6 +29,11 @@ const cases: Case[] = [
   { name: 'getPlan (cursor, status)', call: () => outreach.getPlan(CAMPAIGN_ID, { cursor: 'c1', status: 'exited' }), route: `GET /api/campaigns/${CAMPAIGN_ID}/plan?cursor=c1&status=exited`, response: emptyPlan },
   { name: 'getReview', call: () => outreach.getReview(), route: 'GET /api/review', response: { items: [] } },
   { name: 'decideReview', call: () => outreach.decideReview(ENROLLMENT_ID, 'confirm'), route: `POST /api/review/${ENROLLMENT_ID}`, response: respond(204), body: { decision: 'confirm' } },
+  { name: 'getAiCallResults', call: () => outreach.getAiCallResults(CAMPAIGN_ID), route: `GET /api/campaigns/${CAMPAIGN_ID}/ai-calls`, response: { items: [], nextCursor: null } },
+  { name: 'getAiCallResults (cursor)', call: () => outreach.getAiCallResults(CAMPAIGN_ID, 'c+1'), route: `GET /api/campaigns/${CAMPAIGN_ID}/ai-calls?cursor=c%2B1`, response: { items: [], nextCursor: null } },
+  { name: 'getAiCallTranscript', call: () => outreach.getAiCallTranscript(AI_CALL_ID), route: `GET /api/ai-calls/${AI_CALL_ID}/transcript`, response: { aiCallId: AI_CALL_ID, lines: [] } },
+  { name: 'getAiAvailability', call: () => outreach.getAiAvailability(), route: 'GET /api/ai-calls/availability', response: { available: true, testNumbers: ['+15125550111'] } },
+  { name: 'startTestCall', call: () => outreach.startTestCall('+15125550111'), route: 'POST /api/ai-calls/test', response: { result: 'placed', aiCallId: AI_CALL_ID }, body: { to: '+15125550111' } },
 ];
 
 describe('outreach-api', () => {

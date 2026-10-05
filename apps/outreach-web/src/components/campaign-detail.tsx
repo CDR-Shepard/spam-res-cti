@@ -4,6 +4,7 @@ import type { Campaign } from '@cti/contracts';
 import { useAuth } from '@/lib/auth';
 import { getCampaign, outreachKeys } from '@/lib/outreach-api';
 import { errorText, formatCount, formatDateTime, pauseReasonWords, SF_OBJECT_WORDS } from '@/lib/outreach-words';
+import { AiCallResults } from './ai-call-results';
 import { CallPlanBoard } from './call-plan-board';
 import { CampaignPlan } from './campaign-plan';
 import { CampaignSettings } from './campaign-settings';
@@ -38,6 +39,7 @@ function AiCallSections({ campaign: c, isAdmin }: { campaign: Campaign; isAdmin:
     <>
       <LeadPicker campaignId={c.id} canEdit={isAdmin && c.status !== 'archived'} />
       <CallPlanBoard campaign={c} isAdmin={isAdmin} />
+      <AiCallResults campaignId={c.id} />
     </>
   );
 }

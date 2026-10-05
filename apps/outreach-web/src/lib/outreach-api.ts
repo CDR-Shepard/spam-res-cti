@@ -1,4 +1,7 @@
 import {
+  AiAvailability,
+  AiCallResultsResponse,
+  AiCallTranscript,
   AuthProviders,
   Campaign,
   CandidatePage,
@@ -13,6 +16,7 @@ import {
   NeedsReviewResponse,
   SelectionResponse,
   StartConnectionResponse,
+  TestCallResponse,
   type CallStage,
   type CampaignStatusChange,
   type EditCallPlanRequest,
@@ -23,6 +27,7 @@ import {
   type ReviewDecision,
   type SelectionChange,
   type SfObject,
+  type TestCallRequest,
   type UpdateCampaignRequest,
 } from '@cti/contracts';
 import { api, apiEmpty, json } from './api';
@@ -45,6 +50,9 @@ export const outreachKeys = {
   callPlanLists: (campaignId: string) => ['campaigns', 'call-plans', campaignId] as const,
   callPlans: (campaignId: string, stage: CallStage | null) => ['campaigns', 'call-plans', campaignId, stage ?? 'all'] as const,
   review: ['review'] as const,
+  aiCallResults: (campaignId: string) => ['campaigns', 'ai-calls', campaignId] as const,
+  aiCallTranscript: (aiCallId: string) => ['ai-calls', 'transcript', aiCallId] as const,
+  aiAvailability: ['ai-calls', 'availability'] as const,
 };
 
 const seg = (value: string): string => encodeURIComponent(value);
@@ -152,4 +160,22 @@ export function researchAgain(enrollmentId: string): Promise<CallPlanCard> {
 
 export function releaseCalls(campaignId: string): Promise<ReleaseCallsResponse> {
   return api(`/api/campaigns/${seg(campaignId)}/ai-calls/release`, ReleaseCallsResponse, { method: 'POST' });
+}
+
+export function getAiCallResults(campaignId: string, cursor?: string | null): Promise<AiCallResultsResponse> {
+  return api(`/api/campaigns/${seg(campaignId)}/ai-calls${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, AiCallResultsResponse);
+}
+
+export function getAiCallTranscript(aiCallId: string): Promise<AiCallTranscript> {
+  return api(`/api/ai-calls/${seg(aiCallId)}/transcript`, AiCallTranscript);
+}
+
+export function getAiAvailability(): Promise<AiAvailability> {
+  return api('/api/ai-calls/availability', AiAvailability);
+}
+
+/** Admin only: the AI agent calls one of the CTI's test numbers. The answer is cti-api's (placed, or why not). */
+export function startTestCall(to: string): Promise<TestCallResponse> {
+  const body: TestCallRequest = { to };
+  return api('/api/ai-calls/test', TestCallResponse, { method: 'POST', body: json(body) });
 }

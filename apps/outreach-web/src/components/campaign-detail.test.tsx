@@ -188,6 +188,14 @@ describe('CampaignDetail of an AI call campaign', () => {
     expect(calls.some((c) => c.url === `${CAMPAIGN}/plan`)).toBe(false);
   });
 
+  it('shows the AI call results under the board', async () => {
+    const results = { items: [{ touchId: '00000000-0000-4000-8000-000000000001', enrollmentId: '00000000-0000-4000-8000-000000000002', name: 'Jane Seller', sfObject: 'Lead', sfRecordId: '00Q000000000001AAA', recordUrl: null, touchStatus: 'failed', dueAt: '2026-10-05T22:00:00.000Z', attempts: 1, lastBlockReason: 'no_consent', aiCallId: null, callStatus: null, outcome: null, summary: null, qualification: null, durationSeconds: null, startedAt: null, enrollmentStatus: 'exited', exitReason: 'ai_call_no_consent', mayReadTranscript: false }], nextCursor: null };
+    const calls = renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ mode: 'ai_call' }), [`GET ${CAMPAIGN}/candidates?page=1`]: candidates, [`GET ${CAMPAIGN}/call-plans`]: emptyBoard, [`GET ${CAMPAIGN}/ai-calls`]: results });
+    expect(await screen.findByText('AI calls')).toBeInTheDocument();
+    expect(await screen.findByText('Not called: no AI consent in Salesforce')).toBeInTheDocument();
+    expect(calls.some((c) => c.url === `${CAMPAIGN}/ai-calls`)).toBe(true);
+  });
+
   it('says what a dry run does for AI calls', async () => {
     renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ mode: 'ai_call', status: 'dry_run' }), [`GET ${CAMPAIGN}/candidates?page=1`]: candidates });
     expect(await screen.findByRole('status')).toHaveTextContent('Dry run: picked leads are researched and call plans are written for review. No calls are placed.');
@@ -197,6 +205,7 @@ describe('CampaignDetail of an AI call campaign', () => {
     renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ mode: 'sequence', status: 'dry_run' }) });
     expect(await screen.findByRole('status')).toHaveTextContent('Dry run: the plan below shows what would happen. Nothing is sent and no calls are queued.');
     expect(screen.queryByText('Leads to call')).not.toBeInTheDocument();
+    expect(screen.queryByText('AI calls')).not.toBeInTheDocument();
   });
 
   it('lets a member see the picker but not change it', async () => {

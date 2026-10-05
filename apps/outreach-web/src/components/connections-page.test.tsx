@@ -155,3 +155,21 @@ describe('ConnectionsPage field map', () => {
     expect(screen.queryByRole('button', { name: 'Save fields' })).not.toBeInTheDocument();
   });
 });
+
+describe('ConnectionsPage test call', () => {
+  it('shows an admin the AI test call card after the Salesforce card', async () => {
+    stubApi({ 'GET /api/connections/salesforce': connection(), 'GET /api/ai-calls/availability': { available: true, testNumbers: ['+15125550111'] } });
+    renderWithProviders(<ConnectionsPage />, { isAdmin: true });
+    expect(await screen.findByRole('button', { name: 'Test call to my phone' })).toBeInTheDocument();
+    const titles = [...document.querySelectorAll('[data-slot="card-title"]')].map((t) => t.textContent);
+    expect(titles.indexOf('Test call to my phone')).toBe(titles.indexOf('Salesforce') + 1);
+  });
+
+  it('never shows it to a member, nor asks for the test numbers', async () => {
+    const calls = stubApi({ 'GET /api/connections/salesforce': connection(), 'GET /api/ai-calls/availability': { available: true, testNumbers: ['+15125550111'] } });
+    renderWithProviders(<ConnectionsPage />);
+    expect(await screen.findByText('https://gghomes.my.salesforce.com')).toBeInTheDocument();
+    expect(screen.queryByText('Test call to my phone')).not.toBeInTheDocument();
+    expect(calls.some((c) => c.url === '/api/ai-calls/availability')).toBe(false);
+  });
+});
