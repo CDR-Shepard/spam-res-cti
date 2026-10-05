@@ -25,7 +25,9 @@ export interface ReenrollCandidate {
  * One transaction per lead, like `enrollRecords`:
  * 1. a compare-and-swap UPDATE (still `exited` for `deselected`, and the lead is selected
  *    right now, decided by the statement itself) back to `active` at `call_stage = 'research'`;
- * 2. the old key rows go and the current keys are claimed. A key held by another active
+ * 2. the plans of its earlier life are superseded, so no plan or research from before the
+ *    reactivation is ever offered, approved or called (call-plans/store.ts);
+ * 3. the old key rows go and the current keys are claimed. A key held by another active
  *    enrollment raises the unique violation, the transaction rolls back and the enrollment
  *    stays exited, exactly like a fresh enrollment that loses the key.
  */
@@ -55,6 +57,10 @@ export async function reenrollDeselected(
           RETURNING org_id`);
         const row = (result as unknown as { rows: Array<{ org_id: string }> }).rows[0];
         if (!row) return false;
+        await tx
+          .update(schema.callPlans)
+          .set({ status: 'superseded' })
+          .where(sql`${schema.callPlans.enrollmentId} = ${candidate.enrollmentId}::uuid AND ${schema.callPlans.status} IN ('proposed', 'approved')`);
         await tx.delete(schema.enrollmentContactKeys).where(sql`${schema.enrollmentContactKeys.enrollmentId} = ${candidate.enrollmentId}::uuid`);
         await tx
           .insert(schema.enrollmentContactKeys)
