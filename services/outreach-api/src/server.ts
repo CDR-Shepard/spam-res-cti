@@ -8,6 +8,7 @@ import { buildApp } from './app.js';
 import { WorkosIdentityProvider } from './auth/workos-provider.js';
 import { loadConfig } from './config.js';
 import { liveClientFactory } from './crm/client-factory.js';
+import { MemberIdCache } from './campaigns/member-cache.js';
 import { refreshDueCampaigns } from './campaigns/refresh.js';
 import { createBoss, JobRunner, type JobHandler } from './jobs/boss.js';
 import { QUEUES } from './jobs/queues.js';
@@ -16,6 +17,7 @@ import { planTick } from './planner/run.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerSalesforceAuthRoutes } from './routes/auth-salesforce.js';
+import { registerCampaignSelectionRoutes } from './routes/campaign-selection.js';
 import { registerCampaignRoutes } from './routes/campaigns.js';
 import { registerConnectionRoutes } from './routes/connections.js';
 import { registerReviewRoutes } from './routes/review.js';
@@ -40,6 +42,8 @@ async function main(): Promise<void> {
   const cfg = loadConfig();
   const db = getDb();
   const clients = liveClientFactory(db, cfg);
+  // Member Ids per campaign for the lead picker; one replica, so a process-local cache is enough.
+  const memberCache = new MemberIdCache();
   // Scheduled ticks (src/jobs/schedules.ts). A feature that is not configured gets no
   // worker, and JobRunner skips the schedule of a queue that has no worker.
   const triageModel =
@@ -85,6 +89,7 @@ async function main(): Promise<void> {
       (scope) => registerTeamRoutes(scope, { db, idp }),
       (scope) => registerConnectionRoutes(scope, { db, cfg, clients }),
       (scope) => registerCampaignRoutes(scope, { db, clients }),
+      (scope) => registerCampaignSelectionRoutes(scope, { db, clients, cache: memberCache }),
       (scope) => registerReviewRoutes(scope, { db }),
     ],
   });
