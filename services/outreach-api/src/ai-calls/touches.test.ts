@@ -18,6 +18,7 @@ import {
   settleTouch,
   STALE_DIALING_MS,
 } from './touches.js';
+import { IN_FLIGHT_RETRY_MS } from './pacing-rules.js';
 
 const NOW = new Date('2026-10-05T23:00:00.000Z');
 const MIN = 60_000;
@@ -213,9 +214,25 @@ describe.skipIf(!pgLane)('AI call touches (real Postgres)', () => {
     await setTouch(placed.touchId, { aiCallId: await seedAiCall(db, base.orgId, placed.approver) });
 
     expect(await reapStaleDialing(db, NOW)).toBe(1);
-    expect(await touchById(db, stale.touchId)).toMatchObject({ status: 'planned', dueAt: NOW, triggerKey: `touch:${stale.touchId}:1`, attempts: 1 });
+    // A3: the key is kept, so the retry waits at least IN_FLIGHT_RETRY_MS after the original reservation (CF-13).
+    expect(await touchById(db, stale.touchId)).toMatchObject({
+      status: 'planned', dueAt: new Date(ago(STALE_DIALING_MS + MIN).getTime() + IN_FLIGHT_RETRY_MS), triggerKey: `touch:${stale.touchId}:1`, attempts: 1,
+    });
     expect((await touchById(db, fresh.touchId)).status).toBe('dialing');
     expect((await touchById(db, placed.touchId)).status).toBe('dialing');
+  });
+
+  it('A3: a touch claimed long ago is due now; a touch of an ended enrollment is skipped, not planned', async () => {
+    const base = await seedAiCallCampaign(db, 'active');
+    const old = await seedReleasedLead(db, base);
+    const ended = await seedReleasedLead(db, base);
+    await claimAiTouch(db, old.touchId, ago(30 * MIN));
+    await claimAiTouch(db, ended.touchId, ago(30 * MIN));
+    await db.update(schema.campaignEnrollments).set({ status: 'exited', exitReason: 'opted_out' }).where(eq(schema.campaignEnrollments.id, ended.enrollmentId));
+
+    expect(await reapStaleDialing(db, NOW)).toBe(2);
+    expect(await touchById(db, old.touchId)).toMatchObject({ status: 'planned', dueAt: NOW, triggerKey: `touch:${old.touchId}:1` });
+    expect(await touchById(db, ended.touchId)).toMatchObject({ status: 'skipped', skipReason: 'enrollment_ended' });
   });
 
   it('11: live calls count dialing touches and sent touches whose call is still live; the day counts sent touches of the last 24 hours', async () => {

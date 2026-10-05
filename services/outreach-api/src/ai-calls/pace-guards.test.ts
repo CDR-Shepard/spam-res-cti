@@ -9,6 +9,7 @@ import { ctxOf, seedPlanLead, seedUser } from '../test/call-plan-seed.js';
 import { paceHarness } from '../test/fake-pace.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { ACTIVITY_CHECK_RETRY_MS } from './pace-context.js';
+import { IN_FLIGHT_RETRY_MS } from './pacing-rules.js';
 import { BACK_TO_RESEARCH_WORDS, PARK_WORDS } from './stage.js';
 import { STALE_DIALING_MS } from './touches.js';
 
@@ -101,10 +102,11 @@ describe.skipIf(!pgLane)('placeDueAiCalls guards (real Postgres)', () => {
     const h = await paceHarness(db);
     const approver = await seedUser(db, h.base.orgId);
     const lead = await seedReleasedLead(db, h.base, { approver });
-    // Its earlier life: the touch was claimed long ago and its tick died; then the lead was deselected and reactivated.
+    // Its earlier life: the touch was claimed long ago (past the in-flight window, A3) and its tick died; then the lead was
+    // deselected and reactivated.
     await db
       .update(schema.touches)
-      .set({ status: 'dialing', attempts: 1, triggerKey: `touch:${lead.touchId}:1`, claimedAt: at(NOW, -STALE_DIALING_MS - MIN) })
+      .set({ status: 'dialing', attempts: 1, triggerKey: `touch:${lead.touchId}:1`, claimedAt: at(NOW, -Math.max(STALE_DIALING_MS, IN_FLIGHT_RETRY_MS) - MIN) })
       .where(eq(schema.touches.id, lead.touchId));
     await db.update(schema.callPlans).set({ status: 'superseded' }).where(eq(schema.callPlans.id, lead.planId!));
     await db.update(schema.campaignEnrollments).set({ callStage: 'research' }).where(eq(schema.campaignEnrollments.id, lead.enrollmentId));

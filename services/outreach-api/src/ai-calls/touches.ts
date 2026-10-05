@@ -14,6 +14,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { exitEnrollment } from '../campaigns/enroll.js';
 import { DNC_PENDING_SQL } from '../call-plans/dnc-sql.js';
+import { IN_FLIGHT_RETRY_MS } from './pacing-rules.js';
 
 /** A `dialing` touch with no call after this long lost its tick (a crash mid-trigger). */
 export const STALE_DIALING_MS = 5 * 60_000;
@@ -158,18 +159,35 @@ export async function skipTouch(db: Db, touchId: string, reason: string, now: Da
   return done.length > 0;
 }
 
+/** Enrollment states that end it: a stale `dialing` touch of one of these is skipped, never planned again (A3). */
+const ENDED_ENROLLMENT_STATUSES = ['exited', 'completed', 'handed_off'] as const;
+export const REAPED_ENDED_REASON = 'enrollment_ended';
+
 /**
- * A `dialing` touch with no call whose tick died goes back to `planned`, due now, KEEPING its key: if cti-api got the
- * request, the same key returns its answer and never dials twice. The claim then re-checks everything, so a touch
- * left over from before a reactivation (its plan superseded, CF-3) is never called; the tick skips it.
+ * A `dialing` touch with no call whose tick died goes back to `planned`, KEEPING its key: if cti-api got the request, the
+ * same key returns its answer and never dials twice. Because the key is kept, it is due no earlier than IN_FLIGHT_RETRY_MS
+ * after the original claim (A3, CF-13: cti-api answers in_flight until its reservation is stale). The claim then
+ * re-checks everything, so a touch left over from before a reactivation (its plan superseded, CF-3) is never called; the
+ * tick skips it. A touch whose enrollment has ended (exited, completed, handed off) is skipped instead, so the results
+ * page stops waiting on it. Returns how many touches were reaped either way.
  */
 export async function reapStaleDialing(db: Db, now: Date): Promise<number> {
-  const result = await db.execute(sql`
-    update touches set status = 'planned', due_at = ${iso(now)}, updated_at = ${iso(now)}
-    where channel = 'ai_call' and status = 'dialing' and ai_call_id is null
-      and claimed_at < ${iso(new Date(now.getTime() - STALE_DIALING_MS))}
-    returning id`);
-  return rows<unknown>(result).length;
+  const staleScope = sql`t.channel = 'ai_call' and t.status = 'dialing' and t.ai_call_id is null
+      and t.claimed_at < ${iso(new Date(now.getTime() - STALE_DIALING_MS))}
+      and e.id = t.enrollment_id`;
+  const ended = sql.join(ENDED_ENROLLMENT_STATUSES.map((s) => sql`${s}`), sql`, `);
+  const skipped = await db.execute(sql`
+    update touches t set status = 'skipped', skip_reason = ${REAPED_ENDED_REASON}, last_block_reason = ${REAPED_ENDED_REASON}, updated_at = ${iso(now)}
+    from campaign_enrollments e
+    where ${staleScope} and e.status in (${ended})
+    returning t.id`);
+  const planned = await db.execute(sql`
+    update touches t
+    set status = 'planned', due_at = greatest(${iso(now)}, t.claimed_at + make_interval(secs => ${IN_FLIGHT_RETRY_MS / 1000})), updated_at = ${iso(now)}
+    from campaign_enrollments e
+    where ${staleScope} and e.status not in (${ended})
+    returning t.id`);
+  return rows<unknown>(skipped).length + rows<unknown>(planned).length;
 }
 
 /** Ends an `active` AI call enrollment (keys freed, open touches skipped) and closes its call stage; anything else is left alone. */
