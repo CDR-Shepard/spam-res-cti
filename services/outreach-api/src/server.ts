@@ -21,6 +21,7 @@ import { SCHEDULES } from './jobs/schedules.js';
 import { planTick } from './planner/run.js';
 import { DescribeCache } from './research/describe.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
+import { registerAiCallRoutes } from './routes/ai-calls.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerSalesforceAuthRoutes } from './routes/auth-salesforce.js';
 import { registerCallPlanRoutes } from './routes/call-plans.js';
@@ -129,6 +130,7 @@ async function main(): Promise<void> {
       (scope) => registerCampaignSelectionRoutes(scope, { db, clients, cache: memberCache }),
       (scope) => registerReviewRoutes(scope, { db }),
       (scope) => registerCallPlanRoutes(scope, { db }),
+      (scope) => registerAiCallRoutes(scope, { db, cti }),
     ],
   });
   const close = () => shutdown(runner, app);
