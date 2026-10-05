@@ -2,6 +2,8 @@
 export const RESEARCH_LIMITS = {
   /** Fields selected from the lead's own record (after dropping binary and compound types). */
   recordFields: 300,
+  /** Characters of field names in one SELECT (the query travels in a GET URL). */
+  selectChars: 5_000,
   /** Fields per related record. */
   relatedFields: 120,
   relatedRecords: 6,
