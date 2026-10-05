@@ -31,9 +31,20 @@ const schema = z.object({
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
   /** Claude model for AI call plans (plan 1C). Must be priced in ai/model.ts PRICE_MICROS_PER_TOKEN. */
   CALL_PLAN_MODEL: z.string().min(1).default('claude-sonnet-5-5'),
+  /** cti-api on Railway's private network, e.g. http://ctiapi.railway.internal:4000 (plan 1C). */
+  CTI_INTERNAL_URL: z.string().url().optional(),
+  /** Shared with cti-api: HMAC key for the internal AI call trigger. */
+  OUTREACH_INTERNAL_SECRET: z.string().min(32).optional(),
 });
 
-export type AppConfig = z.infer<typeof schema> & { workosEnabled: boolean; salesforceEnabled: boolean; salesforceSignInEnabled: boolean; aiEnabled: boolean };
+export type AppConfig = z.infer<typeof schema> & {
+  workosEnabled: boolean;
+  salesforceEnabled: boolean;
+  salesforceSignInEnabled: boolean;
+  aiEnabled: boolean;
+  /** The internal AI call trigger is configured: CTI_INTERNAL_URL and OUTREACH_INTERNAL_SECRET are both set. */
+  aiCallsEnabled: boolean;
+};
 
 /** Pure: parses a raw env map. Empty strings count as unset (deploy UIs write them). */
 export function parseConfig(env: Record<string, string | undefined>): AppConfig {
@@ -64,6 +75,7 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
     salesforceEnabled: Boolean(c.SALESFORCE_CLIENT_ID && c.SALESFORCE_REDIRECT_URI),
     salesforceSignInEnabled: Boolean(c.SALESFORCE_CLIENT_ID && c.SALESFORCE_SIGNIN_REDIRECT_URI),
     aiEnabled: Boolean(c.ANTHROPIC_API_KEY),
+    aiCallsEnabled: Boolean(c.CTI_INTERNAL_URL && c.OUTREACH_INTERNAL_SECRET),
   };
 }
 

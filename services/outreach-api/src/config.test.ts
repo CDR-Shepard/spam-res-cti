@@ -86,6 +86,24 @@ describe('parseConfig', () => {
     expect(parseConfig({ ...base, CALL_PLAN_MODEL: '' }).CALL_PLAN_MODEL).toBe('claude-sonnet-5-5');
     expect(parseConfig({ ...base, CALL_PLAN_MODEL: 'claude-opus-5' }).CALL_PLAN_MODEL).toBe('claude-opus-5');
   });
+  describe('the internal AI call trigger (plan 1C)', () => {
+    const secret = 'k'.repeat(32);
+    const url = 'http://ctiapi.railway.internal:4000';
+    it('is enabled only when CTI_INTERNAL_URL and OUTREACH_INTERNAL_SECRET are both set', () => {
+      expect(parseConfig(base).aiCallsEnabled).toBe(false);
+      expect(parseConfig({ ...base, CTI_INTERNAL_URL: url }).aiCallsEnabled).toBe(false);
+      expect(parseConfig({ ...base, OUTREACH_INTERNAL_SECRET: secret }).aiCallsEnabled).toBe(false);
+      expect(parseConfig({ ...base, CTI_INTERNAL_URL: '', OUTREACH_INTERNAL_SECRET: secret }).aiCallsEnabled).toBe(false);
+      const cfg = parseConfig({ ...base, CTI_INTERNAL_URL: url, OUTREACH_INTERNAL_SECRET: secret });
+      expect(cfg.aiCallsEnabled).toBe(true);
+      expect(cfg.CTI_INTERNAL_URL).toBe(url);
+      expect(cfg.OUTREACH_INTERNAL_SECRET).toBe(secret);
+    });
+    it('rejects a secret shorter than 32 characters and a malformed url', () => {
+      expect(() => parseConfig({ ...base, OUTREACH_INTERNAL_SECRET: 'k'.repeat(31) })).toThrow(/OUTREACH_INTERNAL_SECRET/);
+      expect(() => parseConfig({ ...base, CTI_INTERNAL_URL: 'ctiapi.railway.internal' })).toThrow(/CTI_INTERNAL_URL/);
+    });
+  });
   it('rejects a bad encryption key with a clear message', () => {
     expect(() => parseConfig({ ...base, TOKEN_ENCRYPTION_KEY: 'short' })).toThrow(/TOKEN_ENCRYPTION_KEY/);
   });
