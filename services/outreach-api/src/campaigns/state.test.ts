@@ -27,7 +27,7 @@ describe('pauseReasonAfter', () => {
 const row: CampaignRow = {
   id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', orgId: 'O1', name: 'Probate leads', sfObject: 'Lead', sourceKind: 'list_view', listViewId: '00B5f00000ABCDE',
   soql: 'SELECT Id FROM Lead', status: 'paused', pauseReason: 'crm_broken', pausedFrom: 'active', refreshMinutes: 240, touchDays: [0, 1, 3, 6, 10, 14], approvalsRemaining: 50,
-  playbook: {}, memberCount: 812, lastRefreshedAt: new Date('2026-10-04T10:00:00Z'), lastRefreshError: null, createdBy: 'U1',
+  playbook: {}, memberCount: 812, lastRefreshedAt: new Date('2026-10-04T10:00:00Z'), lastRefreshError: null, refreshStartedAt: null, createdBy: 'U1',
   createdAt: new Date('2026-10-01T09:00:00Z'), updatedAt: new Date('2026-10-04T10:00:00Z'),
 };
 

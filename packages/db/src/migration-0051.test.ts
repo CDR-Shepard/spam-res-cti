@@ -98,6 +98,7 @@ const TABLES: Record<string, string[]> = {
     '"member_count" integer NOT NULL DEFAULT 0',
     '"last_refreshed_at" timestamptz',
     '"last_refresh_error" text',
+    '"refresh_started_at" timestamptz',
     '"created_by" uuid',
     CREATED,
     UPDATED,

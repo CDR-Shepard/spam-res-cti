@@ -118,6 +118,8 @@ export const campaigns = pgTable(
     memberCount: integer('member_count').default(0).notNull(),
     lastRefreshedAt: timestamp('last_refreshed_at', { withTimezone: true }),
     lastRefreshError: text('last_refresh_error'),
+    /** Claim taken by a `campaign.refresh` tick while it works on this campaign; a claim older than 30 minutes is stale. */
+    refreshStartedAt: timestamp('refresh_started_at', { withTimezone: true }),
     createdBy: uuid('created_by'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),

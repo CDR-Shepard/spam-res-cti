@@ -86,12 +86,28 @@ describe.skipIf(!pgLane)('enrollment (real Postgres)', () => {
       const campaign = await seedCampaign(db, orgId);
       const recordId = await seedRecord(db, orgId, snapshot({ sfRecordId: leadId(1) }));
       const out = await enrollRecords(db, { orgId, campaignId: campaign.id, touchDays: [2, 5], now: NOW, records: [{ crmRecordId: recordId, keys: ['+15125550100', 'pat@example.com', '+15125550100'] }] });
-      expect(out).toEqual({ enrolled: 1, skippedInOtherCampaign: 0 });
+      expect(out).toEqual({ enrolled: 1, skippedInOtherCampaign: 0, skippedNoKeys: 0 });
       const [enrollment] = await enrollmentsOf(db, campaign.id);
       expect(enrollment).toMatchObject({ status: 'active', crmRecordId: recordId, touchesDone: 0 });
       expect(enrollment!.nextTouchAt?.toISOString()).toBe('2026-10-07T15:00:00.000Z');
       expect(enrollment!.enrolledAt.toISOString()).toBe(NOW.toISOString());
       expect((await activeKeys(orgId)).map((k) => k.key).sort()).toEqual(['+15125550100', 'pat@example.com']);
+    });
+
+    it('skips a record with no contact keys instead of enrolling it', async () => {
+      const orgId = await seedOrg(db);
+      const campaign = await seedCampaign(db, orgId);
+      const keyless = await seedRecord(db, orgId, snapshot({ sfRecordId: leadId(1), phones: [] }));
+      const keyed = await seedRecord(db, orgId, snapshot({ sfRecordId: leadId(2) }));
+      const out = await enrollRecords(db, {
+        orgId,
+        campaignId: campaign.id,
+        touchDays: TOUCH_DAYS,
+        now: NOW,
+        records: [{ crmRecordId: keyless, keys: [] }, { crmRecordId: keyed, keys: ['+15125550100'] }],
+      });
+      expect(out).toEqual({ enrolled: 1, skippedInOtherCampaign: 0, skippedNoKeys: 1 });
+      expect((await enrollmentsOf(db, campaign.id)).map((e) => e.crmRecordId)).toEqual([keyed]);
     });
 
     it('leaves a record already enrolled in the same campaign alone', async () => {
@@ -100,7 +116,7 @@ describe.skipIf(!pgLane)('enrollment (real Postgres)', () => {
       const recordId = await seedRecord(db, orgId, snapshot({ sfRecordId: leadId(1) }));
       const input = { orgId, campaignId: campaign.id, touchDays: TOUCH_DAYS, now: NOW, records: [{ crmRecordId: recordId, keys: ['+15125550100'] }] };
       await enrollRecords(db, input);
-      expect(await enrollRecords(db, input)).toEqual({ enrolled: 0, skippedInOtherCampaign: 0 });
+      expect(await enrollRecords(db, input)).toEqual({ enrolled: 0, skippedInOtherCampaign: 0, skippedNoKeys: 0 });
       expect(await enrollmentsOf(db, campaign.id)).toHaveLength(1);
     });
 
@@ -112,7 +128,7 @@ describe.skipIf(!pgLane)('enrollment (real Postgres)', () => {
       const y = await seedRecord(db, orgId, snapshot({ sfRecordId: leadId(2), email: 'pat@example.com' }));
       await enrollRecords(db, { orgId, campaignId: a.id, touchDays: TOUCH_DAYS, now: NOW, records: [{ crmRecordId: x, keys: ['+15125550100'] }] });
       const out = await enrollRecords(db, { orgId, campaignId: b.id, touchDays: TOUCH_DAYS, now: NOW, records: [{ crmRecordId: y, keys: ['+15125550100', 'pat@example.com'] }] });
-      expect(out).toEqual({ enrolled: 0, skippedInOtherCampaign: 1 });
+      expect(out).toEqual({ enrolled: 0, skippedInOtherCampaign: 1, skippedNoKeys: 0 });
       expect(await enrollmentsOf(db, b.id)).toEqual([]);
       expect((await activeKeys(orgId)).map((k) => k.key)).toEqual(['+15125550100']);
     });
@@ -126,7 +142,7 @@ describe.skipIf(!pgLane)('enrollment (real Postgres)', () => {
       const [first] = await enrollmentsOf(db, a.id);
       await exitEnrollment(db, first!.id, 'left_query');
       const out = await enrollRecords(db, { orgId, campaignId: b.id, touchDays: TOUCH_DAYS, now: NOW, records: [{ crmRecordId: x, keys: ['+15125550100'] }] });
-      expect(out).toEqual({ enrolled: 1, skippedInOtherCampaign: 0 });
+      expect(out).toEqual({ enrolled: 1, skippedInOtherCampaign: 0, skippedNoKeys: 0 });
     });
 
     it('keeps the same phone in two different tenants independent', async () => {

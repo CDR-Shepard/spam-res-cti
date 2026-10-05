@@ -133,7 +133,7 @@ function isActiveKeyConflict(err: unknown): boolean {
  * another active enrollment raises a unique violation; the transaction rolls back, which
  * removes the new enrollment, and the record counts as `skippedInOtherCampaign`. A record
  * already enrolled in this campaign (in any status) is left alone and counts as neither.
- * Callers pass only records that passed eligibility, each with at least one key.
+ * A record with no keys is skipped (counted in `skippedNoKeys`), never enrolled.
  */
 export async function enrollRecords(
   db: Db,
@@ -144,12 +144,18 @@ export async function enrollRecords(
     now: Date;
     records: Array<{ crmRecordId: string; keys: string[] }>;
   },
-): Promise<{ enrolled: number; skippedInOtherCampaign: number }> {
+): Promise<{ enrolled: number; skippedInOtherCampaign: number; skippedNoKeys: number }> {
   const nextTouchAt = new Date(input.now.getTime() + (input.touchDays[0] ?? 0) * DAY_MS);
   let enrolled = 0;
   let skippedInOtherCampaign = 0;
+  let skippedNoKeys = 0;
   for (const record of input.records) {
     const keys = [...new Set(record.keys)].sort();
+    // No key means no way to hold the person to one active campaign: never enroll without one.
+    if (keys.length === 0) {
+      skippedNoKeys += 1;
+      continue;
+    }
     try {
       const inserted = await db.transaction(async (tx) => {
         const [row] = await tx
@@ -165,11 +171,9 @@ export async function enrollRecords(
           .onConflictDoNothing({ target: [schema.campaignEnrollments.campaignId, schema.campaignEnrollments.crmRecordId] })
           .returning({ id: schema.campaignEnrollments.id });
         if (!row) return false;
-        if (keys.length > 0) {
-          await tx
-            .insert(schema.enrollmentContactKeys)
-            .values(keys.map((key) => ({ enrollmentId: row.id, orgId: input.orgId, key, active: true })));
-        }
+        await tx
+          .insert(schema.enrollmentContactKeys)
+          .values(keys.map((key) => ({ enrollmentId: row.id, orgId: input.orgId, key, active: true })));
         return true;
       });
       if (inserted) enrolled += 1;
@@ -178,7 +182,7 @@ export async function enrollRecords(
       skippedInOtherCampaign += 1;
     }
   }
-  return { enrolled, skippedInOtherCampaign };
+  return { enrolled, skippedInOtherCampaign, skippedNoKeys };
 }
 
 /**

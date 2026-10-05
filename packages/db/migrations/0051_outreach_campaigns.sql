@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS "campaigns" (
   "member_count" integer NOT NULL DEFAULT 0,
   "last_refreshed_at" timestamptz,
   "last_refresh_error" text,
+  "refresh_started_at" timestamptz,
   "created_by" uuid,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "updated_at" timestamptz NOT NULL DEFAULT now(),

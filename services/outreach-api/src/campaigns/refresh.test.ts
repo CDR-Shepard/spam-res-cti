@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { SalesforceApiError, SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
@@ -15,7 +15,7 @@ import {
   TEST_FIELD_MAP,
 } from '../test/outreach-fixtures.js';
 import { fetchRecords, type SfRecordSnapshot } from './records.js';
-import { refreshCampaign, refreshDueCampaigns } from './refresh.js';
+import { refreshCampaign, refreshDueCampaigns, REFRESH_TICK_BUDGET_MS } from './refresh.js';
 
 vi.mock('./records.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./records.js')>()),
@@ -250,6 +250,92 @@ describe.skipIf(!pgLane)('campaign refresh (real Postgres)', () => {
       await refreshDueCampaigns({ db, clients: async () => sf.client, now: NOW, log });
       expect(await enrollmentsOf(db, campaign.id)).toHaveLength(1);
       expect(await campaignById(db, campaign.id)).toMatchObject({ memberCount: 1, lastRefreshError: null });
+    });
+
+    describe('claims', () => {
+      const failing = (message = 'boom') =>
+        ({ listViewSoql: vi.fn(async () => { throw new Error(message); }) }) as unknown as SalesforceClient;
+      const claimOf = async (id: string) => (await campaignById(db, id)).refreshStartedAt;
+
+      it('skips a campaign another tick holds, and leaves that tick\'s claim in place', async () => {
+        const orgId = await seedOrg(db);
+        await seedConnection(db, orgId);
+        const campaign = await seedCampaign(db, orgId, { status: 'active' });
+        await db.update(schema.campaigns).set({ refreshStartedAt: sql`now() - interval '2 minutes'` }).where(eq(schema.campaigns.id, campaign.id));
+        const client = failing();
+        await refreshDueCampaigns({ db, clients: async () => client, now: NOW, log });
+        expect(client.listViewSoql).not.toHaveBeenCalled();
+        expect(await claimOf(campaign.id)).not.toBeNull();
+        expect((await campaignById(db, campaign.id)).lastRefreshError).toBeNull();
+      });
+
+      it('takes over a claim older than 30 minutes and clears it when the refresh succeeds', async () => {
+        const orgId = await seedOrg(db);
+        await seedConnection(db, orgId);
+        const campaign = await seedCampaign(db, orgId, { status: 'active' });
+        await db.update(schema.campaigns).set({ refreshStartedAt: sql`now() - interval '31 minutes'` }).where(eq(schema.campaigns.id, campaign.id));
+        const sf = fakeSalesforce({ members: [leadId(1)], stamps: {}, records: { [leadId(1)]: reachable(1) } });
+        await refreshDueCampaigns({ db, clients: async () => sf.client, now: NOW, log });
+        expect(await enrollmentsOf(db, campaign.id)).toHaveLength(1);
+        expect(await claimOf(campaign.id)).toBeNull();
+      });
+
+      it('clears the claim when the refresh fails', async () => {
+        const orgId = await seedOrg(db);
+        await seedConnection(db, orgId);
+        const campaign = await seedCampaign(db, orgId, { status: 'active' });
+        const client = failing('INVALID_FIELD');
+        await refreshDueCampaigns({ db, clients: async () => client, now: NOW, log });
+        expect(client.listViewSoql).toHaveBeenCalledTimes(1);
+        expect(await claimOf(campaign.id)).toBeNull();
+        expect((await campaignById(db, campaign.id)).lastRefreshError).toBe('INVALID_FIELD');
+      });
+
+      it('clears the claim when the connection turned out to be broken', async () => {
+        const orgId = await seedOrg(db);
+        await seedConnection(db, orgId);
+        const campaign = await seedCampaign(db, orgId, { status: 'active' });
+        const client = { listViewSoql: vi.fn(async () => { throw new SalesforceAuthError('revoked'); }) } as unknown as SalesforceClient;
+        await refreshDueCampaigns({ db, clients: async () => client, now: NOW, log });
+        expect(await campaignById(db, campaign.id)).toMatchObject({ status: 'paused', refreshStartedAt: null });
+      });
+
+      it('stops starting campaigns once the tick has used its time budget', async () => {
+        const orgId = await seedOrg(db);
+        await seedConnection(db, orgId);
+        const first = await seedCampaign(db, orgId, { status: 'active', name: 'first' });
+        const second = await seedCampaign(db, orgId, { status: 'active', name: 'second' });
+        let t = 1_000;
+        const client = {
+          listViewSoql: vi.fn(async () => {
+            t += REFRESH_TICK_BUDGET_MS; // the first campaign takes the whole budget
+            throw new Error('slow and failing');
+          }),
+        } as unknown as SalesforceClient;
+        await refreshDueCampaigns({ db, clients: async () => client, now: NOW, log, clock: () => t });
+        expect(client.listViewSoql).toHaveBeenCalledTimes(1);
+        expect((await campaignById(db, first.id)).lastRefreshError).toBe('slow and failing');
+        expect(await campaignById(db, second.id)).toMatchObject({ lastRefreshError: null, lastRefreshedAt: null, refreshStartedAt: null });
+        expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ budgetMs: REFRESH_TICK_BUDGET_MS }), expect.stringContaining('out of time'));
+      });
+
+      it('two overlapping ticks refresh a campaign once', async () => {
+        const orgId = await seedOrg(db);
+        await seedConnection(db, orgId);
+        const campaign = await seedCampaign(db, orgId, { status: 'active' });
+        const sf = fakeSalesforce({ members: [leadId(1)], stamps: {}, records: { [leadId(1)]: reachable(1) } });
+        vi.mocked(sf.client.listViewSoql).mockImplementation(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return "SELECT Id, Name FROM Lead WHERE Status = 'Open'";
+        });
+        await Promise.all([
+          refreshDueCampaigns({ db, clients: async () => sf.client, now: NOW, log }),
+          refreshDueCampaigns({ db, clients: async () => sf.client, now: NOW, log }),
+        ]);
+        expect(sf.client.listViewSoql).toHaveBeenCalledTimes(1);
+        expect(await enrollmentsOf(db, campaign.id)).toHaveLength(1);
+        expect(await claimOf(campaign.id)).toBeNull();
+      });
     });
 
     it('releases the open enrollments of an archived campaign so the people can join another', async () => {

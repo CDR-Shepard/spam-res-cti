@@ -3,7 +3,7 @@
  * whose Salesforce `LastModifiedDate` moved, enrolls new eligible members, and exits
  * enrollments whose record left the query, closed, or lost every channel.
  */
-import { and, eq, inArray, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, lte, notInArray, or, sql } from 'drizzle-orm';
 import { FieldMap, SfObject, type CampaignSource } from '@cti/contracts';
 import { schema, type CampaignRow, type CrmRecordRow, type Db } from '@cti/db';
 import { blockedTargets, type ConsentBlock } from '@cti/firewall';
@@ -15,10 +15,15 @@ import { contactKeys, skipReasonFor } from './eligibility.js';
 import { chunk, enrollRecords, exitEnrollment, TERMINAL_ENROLLMENT_STATUSES, upsertRecords } from './enroll.js';
 import { pauseOrgCampaigns, RUNNING_CAMPAIGN_STATUSES } from './pause.js';
 import { fetchRecords, type SfRecordSnapshot } from './records.js';
-import { fetchMemberIds, membershipSoql } from './source.js';
+import { fetchMemberIds, MAX_CAMPAIGN_RECORDS, membershipSoql } from './source.js';
 
-/** Spec §6.1: a campaign holds at most 50,000 records. */
-export const CAMPAIGN_MAX_MEMBERS = 50_000;
+/**
+ * A tick stops starting new campaigns after this long. pg-boss fails the job at 15 minutes
+ * (`expireInSeconds: 900`) but cannot stop the handler, so a tick must wind down on its own.
+ */
+export const REFRESH_TICK_BUDGET_MS = 12 * 60_000;
+/** A refresh claim older than this is taken to belong to a crashed or timed-out tick. */
+export const REFRESH_CLAIM_STALE_MINUTES = 30;
 /** Ids per `WHERE Id IN (...)` Salesforce query. */
 const SF_ID_BATCH = 200;
 /** Values per Postgres `IN (...)` list (well under the 65,535 bind-parameter limit). */
@@ -115,13 +120,13 @@ async function idsToFetch(db: Db, client: SalesforceClient, orgId: string, sfObj
  * (`refreshDueCampaigns`) decides between pausing the tenant and recording the error.
  */
 export async function refreshCampaign(
-  deps: { db: Db; client: SalesforceClient; fieldMap: FieldMap; now: Date },
+  deps: { db: Db; client: SalesforceClient; fieldMap: FieldMap; now: Date; log?: RunnerLogger },
   campaign: CampaignRow,
 ): Promise<{ members: number; enrolled: number; exited: number }> {
-  const { db, client, fieldMap, now } = deps;
+  const { db, client, fieldMap, now, log } = deps;
   const sfObject = SfObject.parse(campaign.sfObject);
   const soql = await membershipSoql(client, { sfObject, source: campaignSource(campaign) });
-  const ids = await fetchMemberIds(client, soql, CAMPAIGN_MAX_MEMBERS);
+  const ids = await fetchMemberIds(client, soql, MAX_CAMPAIGN_RECORDS);
 
   const fetchIds = await idsToFetch(db, client, campaign.orgId, sfObject, ids);
   if (fetchIds.length > 0) {
@@ -157,13 +162,19 @@ export async function refreshCampaign(
     if (skipReasonFor(snapshot, blocks, false) !== null) return [];
     return [{ crmRecordId: record.id, keys: contactKeys(snapshot) }];
   });
-  const { enrolled } = await enrollRecords(db, {
+  const { enrolled, skippedInOtherCampaign, skippedNoKeys } = await enrollRecords(db, {
     orgId: campaign.orgId,
     campaignId: campaign.id,
     touchDays: campaign.touchDays,
     now,
     records: candidates,
   });
+  if (skippedInOtherCampaign > 0 || skippedNoKeys > 0) {
+    log?.info(
+      { orgId: campaign.orgId, campaignId: campaign.id, skippedInOtherCampaign, skippedNoKeys },
+      'members not enrolled: already in another active campaign, or no contact key',
+    );
+  }
 
   await db
     .update(schema.campaigns)
@@ -220,9 +231,63 @@ async function pauseForBrokenCrm(db: Db, log: RunnerLogger, orgId: string, err: 
   log.warn({ orgId, paused, err: errorMessage(err) }, 'salesforce connection unusable; paused the tenant campaigns');
 }
 
-type RefreshDeps = { db: Db; clients: SalesforceClientFactory; now: Date; log: RunnerLogger };
+type RefreshDeps = {
+  db: Db;
+  clients: SalesforceClientFactory;
+  now: Date;
+  log: RunnerLogger;
+  /** Wall clock in ms for the tick budget; injected by tests. Defaults to `Date.now`. */
+  clock?: () => number;
+};
 
-async function refreshOrg(deps: RefreshDeps, orgId: string, due: CampaignRow[]): Promise<void> {
+/** The campaign is still running and due, as of `now` (the same test the tick's selection uses). */
+function dueCondition(now: Date) {
+  return and(
+    inArray(schema.campaigns.status, [...RUNNING_CAMPAIGN_STATUSES]),
+    or(
+      isNull(schema.campaigns.lastRefreshedAt),
+      lte(
+        schema.campaigns.lastRefreshedAt,
+        sql`${now.toISOString()}::timestamptz - make_interval(mins => ${schema.campaigns.refreshMinutes})`,
+      ),
+    ),
+  );
+}
+
+/**
+ * Takes the campaign's refresh claim. pg-boss fails a tick at 15 minutes but the handler
+ * keeps running, so the next 5-minute tick can select the same campaign; the database
+ * decides who works on it. Returns false when another tick holds a fresh claim, or when the
+ * campaign was refreshed, paused or archived since this tick selected it. A claim older than
+ * `REFRESH_CLAIM_STALE_MINUTES` belongs to a dead tick and is taken over.
+ */
+async function claimCampaign(db: Db, campaign: CampaignRow, now: Date): Promise<boolean> {
+  const claimed = await db
+    .update(schema.campaigns)
+    .set({ refreshStartedAt: sql`now()` })
+    .where(
+      and(
+        eq(schema.campaigns.id, campaign.id),
+        eq(schema.campaigns.orgId, campaign.orgId),
+        dueCondition(now),
+        or(
+          isNull(schema.campaigns.refreshStartedAt),
+          lt(schema.campaigns.refreshStartedAt, sql`now() - make_interval(mins => ${REFRESH_CLAIM_STALE_MINUTES})`),
+        ),
+      ),
+    )
+    .returning({ id: schema.campaigns.id });
+  return claimed.length > 0;
+}
+
+async function releaseClaim(db: Db, campaign: CampaignRow): Promise<void> {
+  await db
+    .update(schema.campaigns)
+    .set({ refreshStartedAt: null })
+    .where(and(eq(schema.campaigns.id, campaign.id), eq(schema.campaigns.orgId, campaign.orgId)));
+}
+
+async function refreshOrg(deps: RefreshDeps, orgId: string, due: CampaignRow[], outOfTime: () => boolean): Promise<void> {
   const { db, log, now } = deps;
   let client: SalesforceClient;
   let fieldMap: FieldMap;
@@ -237,12 +302,19 @@ async function refreshOrg(deps: RefreshDeps, orgId: string, due: CampaignRow[]):
     return;
   }
   for (const campaign of due) {
+    if (outOfTime()) return;
+    if (!(await claimCampaign(db, campaign, now))) {
+      log.info({ orgId, campaignId: campaign.id }, 'campaign refresh skipped: another tick holds it, or it is no longer due');
+      continue;
+    }
     try {
-      const result = await refreshCampaign({ db, client, fieldMap, now }, campaign);
+      const result = await refreshCampaign({ db, client, fieldMap, now, log }, campaign);
       log.info({ orgId, campaignId: campaign.id, ...result }, 'campaign refreshed');
     } catch (err) {
       if (isConnectionFailure(err)) return pauseForBrokenCrm(db, log, orgId, err);
       await recordFailure(db, log, campaign, now, err);
+    } finally {
+      await releaseClaim(db, campaign);
     }
   }
 }
@@ -250,30 +322,32 @@ async function refreshOrg(deps: RefreshDeps, orgId: string, due: CampaignRow[]):
 /**
  * The `campaign.refresh` tick (every 5 minutes): refreshes each `dry_run`/`active`
  * campaign whose last successful refresh is older than its `refresh_minutes` (or that never
- * refreshed), tenant by tenant. `CrmNotConnectedError` or `SalesforceAuthError` pauses that
- * tenant's running campaigns (`pause_reason = 'crm_broken'`); any other failure is stored in
- * `last_refresh_error` and retried on the next tick.
+ * refreshed), tenant by tenant. Each campaign is claimed (`refresh_started_at`) for the
+ * duration of its refresh, so overlapping ticks never refresh it twice, and the tick stops
+ * starting campaigns after `REFRESH_TICK_BUDGET_MS`; the rest wait for the next tick.
+ * `CrmNotConnectedError` or `SalesforceAuthError` pauses that tenant's running campaigns
+ * (`pause_reason = 'crm_broken'`); any other failure is stored in `last_refresh_error` and
+ * retried on the next tick.
  */
 export async function refreshDueCampaigns(deps: RefreshDeps): Promise<void> {
   const { db, now } = deps;
+  const clock = deps.clock ?? Date.now;
+  const deadline = clock() + REFRESH_TICK_BUDGET_MS;
+  let budgetLogged = false;
+  const outOfTime = (): boolean => {
+    if (clock() < deadline) return false;
+    if (!budgetLogged) {
+      budgetLogged = true;
+      deps.log.warn({ budgetMs: REFRESH_TICK_BUDGET_MS }, 'campaign refresh tick out of time; remaining campaigns wait for the next tick');
+    }
+    return true;
+  };
   await releaseArchivedEnrollments(db, deps.log);
-  const due = await db
-    .select()
-    .from(schema.campaigns)
-    .where(
-      and(
-        inArray(schema.campaigns.status, [...RUNNING_CAMPAIGN_STATUSES]),
-        or(
-          isNull(schema.campaigns.lastRefreshedAt),
-          lte(
-            schema.campaigns.lastRefreshedAt,
-            sql`${now.toISOString()}::timestamptz - make_interval(mins => ${schema.campaigns.refreshMinutes})`,
-          ),
-        ),
-      ),
-    )
-    .orderBy(schema.campaigns.orgId, schema.campaigns.createdAt);
+  const due = await db.select().from(schema.campaigns).where(dueCondition(now)).orderBy(schema.campaigns.orgId, schema.campaigns.createdAt);
   const byOrg = new Map<string, CampaignRow[]>();
   for (const c of due) byOrg.set(c.orgId, [...(byOrg.get(c.orgId) ?? []), c]);
-  for (const [orgId, list] of byOrg) await refreshOrg(deps, orgId, list);
+  for (const [orgId, list] of byOrg) {
+    if (outOfTime()) return;
+    await refreshOrg(deps, orgId, list, outOfTime);
+  }
 }
