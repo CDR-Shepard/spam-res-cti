@@ -93,14 +93,14 @@ export const AI_CALL_TOOLS: RealtimeFunctionTool[] = [
     type: 'function',
     name: 'mark_do_not_call',
     description:
-      'Record that this person must never be called again. Call it the moment they ask not to be called, then say a short goodbye and end_call with outcome do_not_call.',
-    parameters: objectSchema({ note: str('Their request, in a few words.') }, ['note']),
+      'Record that this number must never be called again. Call it the moment they ask not to be called (then a short goodbye and end_call with outcome do_not_call), or on a wrong number with note "wrong number" (then end_call with outcome wrong_number).',
+    parameters: objectSchema({ note: str('Their request in a few words, or "wrong number".') }, ['note']),
   },
   {
     type: 'function',
     name: 'save_qualification',
     description:
-      'Save what you just learned about the seller. Call silently whenever you learn something; fill only the fields you learned, briefly, in their words.',
+      "Save what you have learned about the seller. Call silently at a natural pause, batching what you've learned — not after every sentence; fill only the fields you learned, briefly, in their words.",
     parameters: objectSchema(
       Object.fromEntries(QUALIFICATION_FIELDS.map((f) => [f, str(QUALIFICATION_HINTS[f])])),
       [],
