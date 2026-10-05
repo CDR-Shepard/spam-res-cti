@@ -97,6 +97,8 @@ function reviewDb(fx: { enrollments?: Row[]; connections?: Row[]; updateReturnin
         return { onConflictDoNothing: async () => undefined, returning: async () => [] };
       },
     }),
+    // Raw SQL (the AI call stage reset): no row matches, so a sequence dismissal writes nothing more.
+    execute: async () => ({ rows: [] }),
     transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => fn(db as unknown as Db),
   };
   return { db: db as unknown as Db, writes, captured };

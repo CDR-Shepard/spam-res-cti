@@ -193,4 +193,73 @@ describe.skipIf(!pgLane)('review decisions (real Postgres)', () => {
     const enrollment = await t.pool.query(`select status, exit_reason from campaign_enrollments where id = $1`, [enrollmentId]);
     expect(enrollment.rows[0]).toEqual({ status: 'exited', exit_reason: 'do_not_contact_confirmed' });
   });
+
+  describe('AI call campaigns', () => {
+    const SNAPSHOT = { schemaVersion: 1, consent: 'yes' };
+    const PLAN = { situationSummary: 'Wants to sell.' };
+
+    /** The flagged enrollment of `seedFlagged`, turned into an AI call lead with research v1 and plans (v1 superseded, v2 as given). */
+    async function seedAiCallLead(planStatus: 'approved' | 'proposed', over: { dncFlagged?: boolean; stage?: string } = {}) {
+      const seeded = await seedFlagged();
+      await t.pool.query(`update campaigns set mode = 'ai_call' where id = (select campaign_id from campaign_enrollments where id = $1)`, [seeded.enrollmentId]);
+      await t.pool.query(`update campaign_enrollments set call_stage = $2 where id = $1`, [seeded.enrollmentId, over.stage ?? 'approved']);
+      const research = await q(
+        `insert into call_research (org_id, enrollment_id, crm_record_id, version, snapshot, size_chars, content_hash) values ($1, $2, $3, 1, $4::jsonb, 10, 'h') returning id`,
+        [seeded.orgId, seeded.enrollmentId, seeded.recordId, JSON.stringify(SNAPSHOT)],
+      );
+      const user = await q(`insert into users (org_id, email) values ($1, $2) returning id`, [seeded.orgId, `a-${randomUUID().slice(0, 8)}@gg.co`]);
+      await t.pool.query(
+        `insert into call_plans (org_id, enrollment_id, research_id, version, status, source, plan) values ($1, $2, $3, 1, 'superseded', 'model', $4::jsonb)`,
+        [seeded.orgId, seeded.enrollmentId, research.id, JSON.stringify(PLAN)],
+      );
+      const decided = planStatus === 'approved';
+      await t.pool.query(
+        `insert into call_plans (org_id, enrollment_id, research_id, version, status, source, plan, dnc_flagged, decided_by, decided_at)
+         values ($1, $2, $3, 2, $4, 'model', $5::jsonb, $6, $7, $8)`,
+        [seeded.orgId, seeded.enrollmentId, research.id, planStatus, JSON.stringify(PLAN), over.dncFlagged ?? false, decided ? user.id : null, decided ? new Date() : null],
+      );
+      return { ...seeded, userId: user.id };
+    }
+    const asUser = (orgId: string, userId: string) => {
+      state.session = { userId, orgId, email: 'admin@gg.co', isAdmin: true, powerDialerEnabled: false, kind: 'human', isSuperAdmin: false };
+    };
+    const planV2 = async (enrollmentId: string) =>
+      (await t.pool.query(`select status, decided_by, decided_at from call_plans where enrollment_id = $1 and version = 2`, [enrollmentId])).rows[0];
+    const stageOf = async (enrollmentId: string) =>
+      (await t.pool.query(`select status, call_stage from campaign_enrollments where id = $1`, [enrollmentId])).rows[0];
+
+    it('a dismissal returns an approved plan to review for a fresh approval', async () => {
+      const { orgId, enrollmentId, userId } = await seedAiCallLead('approved');
+      asUser(orgId, userId);
+      expect((await decide(enrollmentId, 'dismiss')).statusCode).toBe(204);
+      expect(await stageOf(enrollmentId)).toEqual({ status: 'active', call_stage: 'review' });
+      expect(await planV2(enrollmentId)).toEqual({ status: 'proposed', decided_by: null, decided_at: null });
+    });
+
+    it('a dismissal with no plan to review sends the lead back to research', async () => {
+      const { orgId, enrollmentId, userId } = await seedAiCallLead('approved', { stage: 'review' });
+      await t.pool.query(`update call_plans set status = 'superseded' where enrollment_id = $1`, [enrollmentId]);
+      asUser(orgId, userId);
+      expect((await decide(enrollmentId, 'dismiss')).statusCode).toBe(204);
+      expect(await stageOf(enrollmentId)).toEqual({ status: 'active', call_stage: 'research' });
+    });
+
+    it('records who dismissed the plan\'s own do-not-contact flag, and when (CF-7)', async () => {
+      const { orgId, enrollmentId, userId } = await seedAiCallLead('proposed', { dncFlagged: true, stage: 'review' });
+      asUser(orgId, userId);
+      expect((await decide(enrollmentId, 'dismiss')).statusCode).toBe(204);
+      expect(await stageOf(enrollmentId)).toEqual({ status: 'active', call_stage: 'review' });
+      const plan = await planV2(enrollmentId);
+      expect(plan.status).toBe('proposed');
+      expect(plan.decided_by).toBe(userId);
+      expect(plan.decided_at).toBeInstanceOf(Date);
+    });
+
+    it('a sequence enrollment is dismissed as before and keeps a null call_stage', async () => {
+      const { orgId, enrollmentId } = await seedFlagged();
+      asAdmin(orgId);
+      expect((await decide(enrollmentId, 'dismiss')).statusCode).toBe(204);
+      expect(await stageOf(enrollmentId)).toEqual({ status: 'active', call_stage: null });
+    });
+  });
 });

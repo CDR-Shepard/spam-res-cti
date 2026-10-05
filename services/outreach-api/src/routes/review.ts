@@ -17,7 +17,9 @@ import { z } from 'zod';
 import { DoNotContactCategory, ReviewDecision, SfObject, type NeedsReviewItem, type NeedsReviewResponse } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { CAMPAIGN_ARCHIVED_EXIT_REASON, exitEnrollment } from '../campaigns/enroll.js';
+import { resetCallStageAfterDismiss } from '../call-plans/store.js';
 import { sendError } from '../http/errors.js';
+import { SF_ID_CORE, mayDecide, ownSfUserId } from '../tenancy/record-owner.js';
 import { requireContext, type RequestContext } from '../tenancy/scope.js';
 
 export interface ConfirmedDoNotContact {
@@ -71,12 +73,6 @@ function validNumbers(raw: unknown): { numbers: string[]; dropped: number } {
   return { numbers: [...numbers], dropped };
 }
 
-/** Salesforce Ids compare on their case-sensitive 15-character core, so a 15- and an 18-character form match. */
-function sameSfId(a: string | null, b: string | null): boolean {
-  if (!a || !b || a.length < SF_ID_CORE || b.length < SF_ID_CORE) return false;
-  return a.slice(0, SF_ID_CORE) === b.slice(0, SF_ID_CORE);
-}
-
 interface ReviewRow {
   enrollmentId: string;
   campaignId: string;
@@ -104,19 +100,6 @@ function toItem(row: ReviewRow): NeedsReviewItem {
     quote: row.quote ?? '',
     flaggedAt: (row.flaggedAt ?? new Date(0)).toISOString(),
   };
-}
-
-/** Salesforce's case-sensitive Id core: the first 15 characters (an 18-character Id adds a checksum). */
-const SF_ID_CORE = 15;
-
-/** The Salesforce user the signed-in person connected as (the CTI's salesforce_connections), or null. */
-async function ownSfUserId(db: Db, userId: string): Promise<string | null> {
-  const [conn] = await db
-    .select({ sfUserId: schema.salesforceConnections.sfUserId })
-    .from(schema.salesforceConnections)
-    .where(eq(schema.salesforceConnections.userId, userId))
-    .limit(1);
-  return conn?.sfUserId ?? null;
 }
 
 /** Admins see every item; anyone else only the records they own (the same rule as `mayDecide`). */
@@ -180,13 +163,6 @@ async function loadTarget(db: Db, orgId: string, enrollmentId: string): Promise<
   return row ?? null;
 }
 
-/** Admins decide anything; anyone else only records they own in Salesforce (via the CTI's salesforce_connections). */
-async function mayDecide(db: Db, ctx: RequestContext, ownerSfUserId: string | null): Promise<boolean> {
-  if (ctx.session.isAdmin || ctx.session.isSuperAdmin) return true;
-  if (!ownerSfUserId) return false;
-  return sameSfId(await ownSfUserId(db, ctx.session.userId), ownerSfUserId);
-}
-
 /**
  * The dismissal marker only moves forward, in the triage rows' created order (created_at,
  * then id, as pendingDncFlag orders them): dismissing an item that carries an older flag
@@ -201,7 +177,7 @@ function markerMovesForward(triageId: string): SQL {
   )`;
 }
 
-async function dismiss(db: Db, orgId: string, enrollmentId: string, now: Date): Promise<boolean> {
+async function dismiss(db: Db, orgId: string, enrollmentId: string, userId: string, now: Date): Promise<boolean> {
   return db.transaction(async (tx) => {
     // Compare-and-swap: of two concurrent decisions, only one gets the row.
     const [claimed] = await tx
@@ -225,6 +201,8 @@ async function dismiss(db: Db, orgId: string, enrollmentId: string, now: Date): 
       .update(e)
       .set({ status: 'active', reviewCategory: null, reviewQuote: null, reviewTriageId: null, flaggedAt: null, nextTouchAt: now, updatedAt: now })
       .where(eq(e.id, claimed.id));
+    // AI call campaigns: a dismissed flag sends the lead back to the plan board for a fresh approval.
+    await resetCallStageAfterDismiss(tx, claimed.id, { userId, at: now });
     return true;
   });
 }
@@ -282,7 +260,7 @@ export async function registerReviewRoutes(app: FastifyInstance, deps: ReviewRou
     }
     if (target.status !== 'needs_review') return sendError(reply, 409, 'NOT_IN_REVIEW', 'This record is no longer waiting for review');
     const now = new Date();
-    const done = body.data.decision === 'dismiss' ? await dismiss(db, ctx.orgId, target.enrollmentId, now) : await confirm(deps, deps.log ?? req.log, ctx, target, now);
+    const done = body.data.decision === 'dismiss' ? await dismiss(db, ctx.orgId, target.enrollmentId, ctx.session.userId, now) : await confirm(deps, deps.log ?? req.log, ctx, target, now);
     // A concurrent decision got there first.
     if (!done) return sendError(reply, 409, 'NOT_IN_REVIEW', 'This record is no longer waiting for review');
     return reply.code(204).send();

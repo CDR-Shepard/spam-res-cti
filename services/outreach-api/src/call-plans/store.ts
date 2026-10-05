@@ -149,12 +149,27 @@ export async function storeDncTriage(
   return row!.id;
 }
 
-/** After a person dismisses a do-not-contact flag: the lead goes back on the board for a fresh approval. */
-export async function resetCallStageAfterDismiss(tx: Db, enrollmentId: string): Promise<void> {
+/**
+ * After a person dismisses a do-not-contact flag: the lead goes back on the board for a fresh approval.
+ * `by` records who dismissed the flag of a plan the model itself flagged (`dnc_flagged`): it is kept
+ * on that proposed plan as `decided_by` / `decided_at`, which the board shows (CF-7). An approved plan
+ * that goes back to `proposed` keeps no decision (the approval is void).
+ */
+export async function resetCallStageAfterDismiss(tx: Db, enrollmentId: string, by?: { userId: string; at: Date }): Promise<void> {
+  // Sequence enrollments (call_stage null) are none of this function's business: nothing is written for them.
+  const aiCall = await tx.execute(sql`
+    select 1 from campaign_enrollments where id = ${enrollmentId}::uuid and call_stage is not null and call_stage <> 'done'`);
+  if (rows<unknown>(aiCall).length === 0) return;
   await tx
     .update(schema.callPlans)
     .set({ status: 'proposed', decidedBy: null, decidedAt: null })
     .where(and(eq(schema.callPlans.enrollmentId, enrollmentId), eq(schema.callPlans.status, 'approved')));
+  if (by) {
+    await tx
+      .update(schema.callPlans)
+      .set({ decidedBy: by.userId, decidedAt: by.at })
+      .where(and(eq(schema.callPlans.enrollmentId, enrollmentId), eq(schema.callPlans.status, 'proposed'), eq(schema.callPlans.dncFlagged, true)));
+  }
   await tx.execute(sql`
     update campaign_enrollments e
     set call_stage = case when exists (select 1 from call_plans p where p.enrollment_id = e.id and p.status = 'proposed') then 'review' else 'research' end,
