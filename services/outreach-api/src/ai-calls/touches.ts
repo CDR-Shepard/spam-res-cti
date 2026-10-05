@@ -160,6 +160,40 @@ export async function deferTouch(db: Db, touchId: string, at: Date, reason: stri
   await db.update(t).set({ dueAt: at, lastBlockReason: reason, updatedAt: sql`now()` }).where(and(eq(t.id, touchId), eq(t.status, 'planned')));
 }
 
+/** `touches.last_block_reason` (and skip reason) of a touch the claim refused although the tick had found it callable. */
+export const NOT_CLAIMABLE_REASON = 'not_claimable';
+
+/**
+ * Why the claim refused a `planned` touch (M-1): is its lead still active at `queued`, is its plan still the lead's approved
+ * plan, and since when has it been refused without a break (`refusedSince`: the first refusal of the run, see
+ * deferNotClaimable; null when the last reason was something else). Null when the touch is no longer `planned`.
+ */
+export async function refusedTouchState(
+  db: Db,
+  touchId: string,
+): Promise<{ queued: boolean; planApproved: boolean; refusedSince: Date | null } | null> {
+  const result = await db.execute(sql`
+    select (e.status = 'active' and e.call_stage = 'queued') as queued,
+           exists (select 1 from call_plans p where p.id = t.call_plan_id and p.enrollment_id = e.id and p.status = 'approved') as "planApproved",
+           case when t.last_block_reason = ${NOT_CLAIMABLE_REASON} then t.updated_at end as "refusedSince"
+    from touches t
+    join campaign_enrollments e on e.id = t.enrollment_id and e.org_id = t.org_id
+    where t.id = ${touchId}::uuid and t.status = 'planned'`);
+  const row = rows<{ queued: boolean; planApproved: boolean; refusedSince: Date | string | null }>(result)[0];
+  return row ? { queued: row.queued, planApproved: row.planApproved, refusedSince: row.refusedSince === null ? null : new Date(row.refusedSince) } : null;
+}
+
+/**
+ * A refused touch waits until `at`. While the refusals run on, `updated_at` keeps the time of the first one (any other
+ * reason in between starts a new run), so refusedTouchState can tell how long the touch has been refused.
+ */
+export async function deferNotClaimable(db: Db, touchId: string, at: Date, now: Date): Promise<void> {
+  await db.execute(sql`
+    update touches set due_at = ${iso(at)}, last_block_reason = ${NOT_CLAIMABLE_REASON},
+      updated_at = case when last_block_reason = ${NOT_CLAIMABLE_REASON} then updated_at else ${iso(now)} end
+    where id = ${touchId}::uuid and status = 'planned'`);
+}
+
 /** A `planned` touch that must not be called (its plan is no longer approved, or the lead is going back to research). */
 export async function skipTouch(db: Db, touchId: string, reason: string, now: Date): Promise<boolean> {
   const t = schema.touches;

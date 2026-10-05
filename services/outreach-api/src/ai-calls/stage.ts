@@ -13,11 +13,15 @@
  *    touch left from before a reactivation, CF-3). The touch is skipped; a lead still at `queued` goes back
  *    to review when a proposed plan waits, to research when there is no plan at all, and stays put when
  *    another approved plan carries its own touch.
+ *  - skipNotClaimable (M-1): the claim keeps refusing the touch although its plan is still approved: the lead is no longer
+ *    at `queued` (held and dismissed, then approved again: the old touch would block the release forever), or something
+ *    else stopped the claim for NOT_CLAIMABLE_MAX_DEFERRALS refusals in a row. The touch is skipped; a lead still at `queued`
+ *    with no other open touch goes back to `approved`, so "Call all approved" can make a fresh touch once it is callable.
  */
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import type { ParkReason } from './pacing-rules.js';
-import { skipTouch } from './touches.js';
+import { NOT_CLAIMABLE_REASON, skipTouch } from './touches.js';
 
 export const PARK_WORDS: Readonly<Record<ParkReason, string>> = {
   plan_rejected: "The voice agent refused this plan's text. Edit the plan, then approve it again.",
@@ -72,5 +76,18 @@ export async function planNoLongerApproved(db: Db, t: { touchId: string; enrollm
           updated_at = ${now.toISOString()}::timestamptz
       where e.id = ${t.enrollmentId}::uuid and e.status = 'active' and e.call_stage = 'queued'
         and not exists (select 1 from call_plans p where p.enrollment_id = e.id and p.status = 'approved')`);
+  });
+}
+
+export async function skipNotClaimable(db: Db, t: { touchId: string; enrollmentId: string }, now: Date): Promise<void> {
+  await db.transaction(async (tx) => {
+    if (!(await skipTouch(tx as unknown as Db, t.touchId, NOT_CLAIMABLE_REASON, now))) return;
+    await tx.execute(sql`
+      update campaign_enrollments e
+      set call_stage = 'approved', updated_at = ${now.toISOString()}::timestamptz
+      where e.id = ${t.enrollmentId}::uuid and e.status = 'active' and e.call_stage = 'queued'
+        and exists (select 1 from call_plans p where p.enrollment_id = e.id and p.status = 'approved')
+        and not exists (
+          select 1 from touches x where x.enrollment_id = e.id and x.channel = 'ai_call' and x.status in ('planned', 'held', 'queued', 'dialing'))`);
   });
 }

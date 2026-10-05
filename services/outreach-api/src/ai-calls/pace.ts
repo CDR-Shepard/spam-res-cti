@@ -19,12 +19,24 @@ import type { CtiClient } from './cti-client.js';
 import { decideTrigger, windowCheck, type TriggerDecision } from './pacing-rules.js';
 import { loadOrgTick, type OrgTick, type PlanForCall } from './pace-context.js';
 import { renderPlanForAgent } from './plan-text.js';
-import { backToResearch, parkPlan, planNoLongerApproved } from './stage.js';
-import { claimAiTouch, deferTouch, finishAiEnrollment, orgsWithDueAiCalls, reapStaleDialing, settleTouch, type AiTouchCandidate } from './touches.js';
+import { backToResearch, parkPlan, planNoLongerApproved, skipNotClaimable } from './stage.js';
+import {
+  claimAiTouch,
+  deferNotClaimable,
+  deferTouch,
+  finishAiEnrollment,
+  orgsWithDueAiCalls,
+  reapStaleDialing,
+  refusedTouchState,
+  settleTouch,
+  type AiTouchCandidate,
+} from './touches.js';
 
 export const PLACE_DEADLINE_MS = 50_000;
 /** A touch the claim refused (it changed under us): look again later rather than every minute. */
 export const NOT_CLAIMABLE_DEFER_MS = 15 * 60_000;
+/** M-1: refused this many times in a row (this many NOT_CLAIMABLE_DEFER_MS since the first), the touch is skipped instead. */
+export const NOT_CLAIMABLE_MAX_DEFERRALS = 8;
 
 export interface PaceDeps {
   db: Db;
@@ -42,7 +54,7 @@ export interface PaceCounts {
   failed: number;
   deferred: number;
   held: number;
-  /** Back on the board: the plan was refused or its approver can't call (CF-12), or it is no longer approved. */
+  /** Back on the board: the plan was refused or its approver can't call (CF-12), it is no longer approved, or the claim can never take the touch (M-1). */
   parked: number;
   /** Back to research: Salesforce activity the plan never saw (CF-1). */
   researched: number;
@@ -130,10 +142,7 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
     return 'parked';
   }
   const claim = await claimAiTouch(db, c.touchId, now);
-  if (!claim) {
-    await deferTouch(db, c.touchId, new Date(now.getTime() + NOT_CLAIMABLE_DEFER_MS), 'not_claimable');
-    return 'deferred';
-  }
+  if (!claim) return refused(deps, c);
   const outcome = await deps.cti.trigger({
     orgId: c.orgId,
     userId: c.requestedBy,
@@ -146,6 +155,29 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
   const transport = outcome.kind === 'transport' ? { transport: outcome.error } : {};
   deps.log.info({ orgId: c.orgId, touchId: c.touchId, attempt: claim.attempts, result: resultWords(decision), ...transport }, 'ai_call.place: trigger answered');
   return apply(deps, c, plan.id, decision);
+}
+
+/**
+ * M-1: the claim refused a touch the tick found callable. A plan no longer approved goes as planNoLongerApproved. A lead no
+ * longer at `queued` (an old touch left behind, e.g. reaped during a hold that was dismissed and the plan approved again)
+ * can never be claimed: skipped, so the release can make a fresh touch. Otherwise it waits NOT_CLAIMABLE_DEFER_MS, and after
+ * NOT_CLAIMABLE_MAX_DEFERRALS refusals in a row it is skipped too, never deferred forever.
+ */
+async function refused(deps: PaceDeps, c: AiTouchCandidate): Promise<Result> {
+  const { db, now } = deps;
+  const state = await refusedTouchState(db, c.touchId);
+  if (!state) return 'deferred';
+  if (!state.planApproved) {
+    await planNoLongerApproved(db, c, now);
+    return 'parked';
+  }
+  const limit = now.getTime() - NOT_CLAIMABLE_MAX_DEFERRALS * NOT_CLAIMABLE_DEFER_MS;
+  if (!state.queued || (state.refusedSince !== null && state.refusedSince.getTime() <= limit)) {
+    await skipNotClaimable(db, c, now);
+    return 'parked';
+  }
+  await deferNotClaimable(db, c.touchId, new Date(now.getTime() + NOT_CLAIMABLE_DEFER_MS), now);
+  return 'deferred';
 }
 
 const resultWords = (d: TriggerDecision): string => (d.kind === 'placed' ? 'placed' : `${d.kind}:${d.reason}`);

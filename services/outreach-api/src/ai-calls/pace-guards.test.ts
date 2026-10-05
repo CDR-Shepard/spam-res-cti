@@ -4,6 +4,8 @@ import { eq, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { SalesforceApiError } from '@cti/salesforce';
 import { approvePlan } from '../call-plans/decisions.js';
+import { releaseApprovedCalls } from '../call-plans/release.js';
+import { resetCallStageAfterDismiss } from '../call-plans/store.js';
 import { enrollmentById, planById, seedAiCall, seedReleasedLead, touchById } from '../test/ai-call-seed.js';
 import { ctxOf, seedPlanLead, seedUser } from '../test/call-plan-seed.js';
 import { paceHarness } from '../test/fake-pace.js';
@@ -11,7 +13,8 @@ import { createTestDb, pgLane } from '../test/pg.js';
 import { ACTIVITY_CHECK_RETRY_MS } from './pace-context.js';
 import { IN_FLIGHT_RETRY_MS } from './pacing-rules.js';
 import { BACK_TO_RESEARCH_WORDS, PARK_WORDS } from './stage.js';
-import { STALE_DIALING_MS } from './touches.js';
+import { NOT_CLAIMABLE_DEFER_MS, NOT_CLAIMABLE_MAX_DEFERRALS } from './pace.js';
+import { claimAiTouch, STALE_DIALING_MS } from './touches.js';
 
 const NOW = new Date('2026-10-05T23:00:00.000Z');
 const MIN = 60_000;
@@ -168,6 +171,53 @@ describe.skipIf(!pgLane)('placeDueAiCalls guards (real Postgres)', () => {
       expect((await planById(db, lead.planId!)).status).toBe('proposed');
       const warned = h.logs.find((l) => l.msg === 'ai_call.place: the plan fails the voice agent text check');
       expect(JSON.stringify(warned)).not.toContain('250');
+    });
+  });
+  describe('M-1: a touch the claim refuses is never deferred forever', () => {
+    it('reaped during a hold, the hold dismissed and the same plan approved again: the touch is skipped, release makes a fresh one, and it is called', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      const ctx = ctxOf(h.base.orgId, await seedUser(db, h.base.orgId), true);
+      // Its tick died mid-trigger, and a do-not-contact hold came in meanwhile; the reaper plans the touch again (A3).
+      await claimAiTouch(db, lead.touchId, at(NOW, -30 * MIN));
+      await db.update(schema.campaignEnrollments).set({ status: 'needs_review' }).where(eq(schema.campaignEnrollments.id, lead.enrollmentId));
+      await h.run(at(NOW, -10 * MIN));
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned' });
+      // A person dismisses the flag (routes/review.ts dismiss) and approves the same plan again.
+      await db.update(schema.campaignEnrollments).set({ status: 'active' }).where(eq(schema.campaignEnrollments.id, lead.enrollmentId));
+      await resetCallStageAfterDismiss(db, lead.enrollmentId);
+      await approvePlan(db, ctx, lead.enrollmentId, { version: (await planById(db, lead.planId!)).version }, NOW);
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'active', callStage: 'approved' });
+      expect((await releaseApprovedCalls(db, ctx, h.base.campaignId, NOW)).released).toBe(0); // the old planned touch blocks it
+
+      await h.run(NOW);
+
+      expect(h.cti.requests).toEqual([]);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'skipped', skipReason: 'not_claimable' });
+      expect((await releaseApprovedCalls(db, ctx, h.base.campaignId, NOW)).released).toBe(1);
+      expect((await h.run(at(NOW, MIN))).placed).toBe(1);
+      expect(h.cti.requests).toHaveLength(1);
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'active', callStage: 'queued' });
+    });
+
+    it('a lead still queued with its plan approved that the claim keeps refusing is deferred, then skipped not_claimable after the limit and put back to approved', async () => {
+      expect(NOT_CLAIMABLE_MAX_DEFERRALS).toBe(8);
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      await db.execute(sql`delete from campaign_selections where campaign_id = ${h.base.campaignId}::uuid and sf_record_id = ${lead.sfRecordId}`);
+
+      let when = NOW;
+      for (let i = 0; i < NOT_CLAIMABLE_MAX_DEFERRALS; i += 1) {
+        expect((await h.run(when)).deferred).toBe(1);
+        const t = await touchById(db, lead.touchId);
+        expect(t).toMatchObject({ status: 'planned', attempts: 0, lastBlockReason: 'not_claimable', dueAt: at(when, NOT_CLAIMABLE_DEFER_MS) });
+        when = t.dueAt;
+      }
+      expect((await h.run(when)).parked).toBe(1);
+
+      expect(h.cti.requests).toEqual([]);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'skipped', skipReason: 'not_claimable', attempts: 0 });
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'active', callStage: 'approved' });
     });
   });
 });
