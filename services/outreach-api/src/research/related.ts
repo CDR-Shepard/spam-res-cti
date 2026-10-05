@@ -68,25 +68,36 @@ function consentOf(row: Row, fieldNames: Set<string>, consentField: string | nul
 }
 
 interface RelatedTarget { sobject: string; id: string; relation: RecordRelation; role: string | null }
+type ReadFailure = { status: 'missing' | 'denied' | 'error'; note: string };
 
-async function relatedTargets(deps: ResearchReadDeps, sfObject: 'Lead' | 'Opportunity', id: string, row: Row): Promise<RelatedTarget[]> {
+async function relatedTargets(deps: ResearchReadDeps, sfObject: 'Lead' | 'Opportunity', id: string, row: Row): Promise<{ targets: RelatedTarget[]; failure: ReadFailure | null }> {
   if (sfObject === 'Lead') {
-    if (row.IsConverted !== true) return [];
-    return [
+    if (row.IsConverted !== true) return { targets: [], failure: null };
+    const targets = [
       { sobject: 'Contact', id: idOf(row.ConvertedContactId), relation: 'converted_contact' as const },
       { sobject: 'Account', id: idOf(row.ConvertedAccountId), relation: 'converted_account' as const },
       { sobject: 'Opportunity', id: idOf(row.ConvertedOpportunityId), relation: 'converted_opportunity' as const },
     ].flatMap((t) => (t.id ? [{ ...t, id: t.id, role: null }] : []));
+    return { targets, failure: null };
   }
   const account = idOf(row.AccountId);
-  const roles = await deps.client.query<Row>(
-    `SELECT ContactId, Role, IsPrimary FROM OpportunityContactRole WHERE OpportunityId = '${soqlEscape(id)}' ORDER BY IsPrimary DESC LIMIT ${RESEARCH_LIMITS.relatedRecords}`,
-  );
+  // M-3: the Account comes from the Opportunity row itself, so a contact-role read the integration user may not make
+  // (classified, never an outage: classifyReadError rethrows those) loses only the contacts, never the Account.
+  let roles: Row[] = [];
+  let failure: ReadFailure | null = null;
+  try {
+    roles = await deps.client.query<Row>(
+      `SELECT ContactId, Role, IsPrimary FROM OpportunityContactRole WHERE OpportunityId = '${soqlEscape(id)}' ORDER BY IsPrimary DESC LIMIT ${RESEARCH_LIMITS.relatedRecords}`,
+    );
+  } catch (err) {
+    failure = classifyReadError(err);
+  }
   const contacts = roles.flatMap((r) => {
     const cid = idOf(r.ContactId);
     return cid ? [{ sobject: 'Contact', id: cid, relation: 'contact' as const, role: typeof r.Role === 'string' ? r.Role : r.IsPrimary === true ? 'Primary' : null }] : [];
   });
-  return [...(account ? [{ sobject: 'Account', id: account, relation: 'account' as const, role: null }] : []), ...contacts].slice(0, RESEARCH_LIMITS.relatedRecords);
+  const targets = [...(account ? [{ sobject: 'Account', id: account, relation: 'account' as const, role: null }] : []), ...contacts].slice(0, RESEARCH_LIMITS.relatedRecords);
+  return { targets, failure };
 }
 
 function linksFor(sfObject: 'Lead' | 'Opportunity', id: string, related: RecordBlock[]): LinkIds {
@@ -106,19 +117,16 @@ export async function readMainAndRelated(
   const main = await readRecordBlock(deps, target.sfObject, target.sfRecordId, 'self', null, RESEARCH_LIMITS.recordFields, target.consentField);
   if (!main) return null;
   const blocks: RecordBlock[] = [];
-  let summaryStatus: 'ok' | 'missing' | 'denied' | 'error' = 'ok';
-  let note: string | null = null;
-  try {
-    for (const t of await relatedTargets(deps, target.sfObject, target.sfRecordId, main.row)) {
-      try {
-        const got = await readRecordBlock(deps, t.sobject, t.id, t.relation, t.role, RESEARCH_LIMITS.relatedFields);
-        if (got) blocks.push(got.block);
-      } catch (err) {
-        ({ status: summaryStatus, note } = classifyReadError(err));
-      }
+  const { targets, failure } = await relatedTargets(deps, target.sfObject, target.sfRecordId, main.row);
+  let summaryStatus: 'ok' | 'missing' | 'denied' | 'error' = failure?.status ?? 'ok';
+  let note: string | null = failure?.note ?? null;
+  for (const t of targets) {
+    try {
+      const got = await readRecordBlock(deps, t.sobject, t.id, t.relation, t.role, RESEARCH_LIMITS.relatedFields);
+      if (got) blocks.push(got.block);
+    } catch (err) {
+      ({ status: summaryStatus, note } = classifyReadError(err));
     }
-  } catch (err) {
-    ({ status: summaryStatus, note } = classifyReadError(err));
   }
   return {
     main: main.block,

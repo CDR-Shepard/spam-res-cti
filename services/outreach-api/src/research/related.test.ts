@@ -195,6 +195,28 @@ describe('degraded and failed reads', () => {
     expect(got?.related.summary).toMatchObject({ status: 'ok', count: 1, note: 'INSUFFICIENT_ACCESS' });
   });
 
+  it('M-3: an Opportunity whose contact roles cannot be read still gets its Account; the note names the failure', async () => {
+    const sf = fakeSalesforce({
+      describes,
+      queries: [
+        [/FROM Opportunity WHERE Id = /, [{ Id: OPP, Name: 'Oak St', AccountId: ACCOUNT }]],
+        [/FROM OpportunityContactRole/, denied],
+        [/FROM Account WHERE Id = /, [{ Id: ACCOUNT, Name: 'Family' }]],
+      ],
+    });
+    const got = await readMainAndRelated(deps(sf), { sfObject: 'Opportunity', sfRecordId: OPP, consentField: null });
+    expect(got?.related.items.map((b) => [b.relation, b.id])).toEqual([['account', ACCOUNT]]);
+    expect(got?.related.summary).toMatchObject({ status: 'ok', count: 1, note: 'INSUFFICIENT_ACCESS' });
+    expect(got?.links.whatIds).toEqual([OPP, ACCOUNT]);
+  });
+
+  it('M-2: a MALFORMED_QUERY on an optional read is that source missing, never a failed research', async () => {
+    const malformed = new SalesforceApiError('bad', 400, [{ errorCode: 'MALFORMED_QUERY', message: 'x' }]);
+    const sf = fakeSalesforce({ describes, queries: [leadRoute(converted), [/FROM Contact/, malformed], [/FROM Account/, malformed]] });
+    const got = await readMainAndRelated(deps(sf), { sfObject: 'Lead', sfRecordId: LEAD, consentField: null });
+    expect(got?.related.summary).toMatchObject({ status: 'missing', count: 0, note: 'MALFORMED_QUERY' });
+  });
+
   it('a 503 on the main read throws', async () => {
     const sf = fakeSalesforce({ describes, queries: [[/FROM Lead/, new SalesforceApiError('down', 503, null)]] });
     await expect(readMainAndRelated(deps(sf), { sfObject: 'Lead', sfRecordId: LEAD, consentField: null })).rejects.toThrow('down');
