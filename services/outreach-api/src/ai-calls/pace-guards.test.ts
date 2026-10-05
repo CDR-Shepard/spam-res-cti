@@ -286,4 +286,20 @@ describe.skipIf(!pgLane)('placeDueAiCalls guards (real Postgres)', () => {
       expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', triggerKey: claim!.triggerKey, dueAt: at(reserved, IN_FLIGHT_RETRY_MS) });
     });
   });
+
+  it('M-a: a campaign pause longer than the refusal limit does not count toward it: the first refusal after it defers and starts a new run', async () => {
+    const h = await paceHarness(db);
+    const lead = await seedReleasedLead(db, h.base);
+    await db.execute(sql`delete from campaign_selections where campaign_id = ${h.base.campaignId}::uuid and sf_record_id = ${lead.sfRecordId}`);
+    expect((await h.run(NOW)).deferred).toBe(1);
+    await db.update(schema.campaigns).set({ status: 'paused' }).where(eq(schema.campaigns.id, h.base.campaignId));
+    await h.run(at(NOW, 60 * MIN));
+    await db.update(schema.campaigns).set({ status: 'active' }).where(eq(schema.campaigns.id, h.base.campaignId));
+    const resumed = at(NOW, 150 * MIN); // 20:30 CDT: inside the evening window, 2.5 h after the first refusal
+
+    expect(await h.run(resumed)).toMatchObject({ deferred: 1, parked: 0 });
+
+    expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', lastBlockReason: 'not_claimable', updatedAt: resumed, dueAt: at(resumed, NOT_CLAIMABLE_DEFER_MS) });
+    expect(h.cti.requests).toEqual([]);
+  });
 });

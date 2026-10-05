@@ -164,20 +164,30 @@ export async function deferTouch(db: Db, touchId: string, at: Date, reason: stri
 
 /** `touches.last_block_reason` (and skip reason) of a touch the claim refused although the tick had found it callable. */
 export const NOT_CLAIMABLE_REASON = 'not_claimable';
+/**
+ * M-a: a refusal run goes on only while the touch is looked at when due. A touch due longer ago than this (its campaign was
+ * paused, or no tick ran) starts a new run, so time the touch was never due does not count toward the limit.
+ */
+export const NOT_CLAIMABLE_RUN_GAP_MS = 15 * 60_000;
+
+/** The refusal run goes on: the last reason was not_claimable and the touch is looked at within the gap of being due (M-a). */
+const runGoesOn = (now: Date) => sql`(last_block_reason = ${NOT_CLAIMABLE_REASON} and due_at >= ${iso(new Date(now.getTime() - NOT_CLAIMABLE_RUN_GAP_MS))})`;
 
 /**
  * Why the claim refused a `planned` touch (M-1): is its lead still active at `queued`, is its plan still the lead's approved
  * plan, and since when has it been refused without a break (`refusedSince`: the first refusal of the run, see
- * deferNotClaimable; null when the last reason was something else). Null when the touch is no longer `planned`.
+ * deferNotClaimable; null when the last reason was something else, or the run broke off, M-a). Null when the touch is no
+ * longer `planned`.
  */
 export async function refusedTouchState(
   db: Db,
   touchId: string,
+  now: Date,
 ): Promise<{ queued: boolean; planApproved: boolean; refusedSince: Date | null } | null> {
   const result = await db.execute(sql`
     select (e.status = 'active' and e.call_stage = 'queued') as queued,
            exists (select 1 from call_plans p where p.id = t.call_plan_id and p.enrollment_id = e.id and p.status = 'approved') as "planApproved",
-           case when t.last_block_reason = ${NOT_CLAIMABLE_REASON} then t.updated_at end as "refusedSince"
+           case when ${runGoesOn(now)} then t.updated_at end as "refusedSince"
     from touches t
     join campaign_enrollments e on e.id = t.enrollment_id and e.org_id = t.org_id
     where t.id = ${touchId}::uuid and t.status = 'planned'`);
@@ -187,12 +197,13 @@ export async function refusedTouchState(
 
 /**
  * A refused touch waits until `at`. While the refusals run on, `updated_at` keeps the time of the first one (any other
- * reason in between starts a new run), so refusedTouchState can tell how long the touch has been refused.
+ * reason in between, or a touch left due longer than NOT_CLAIMABLE_RUN_GAP_MS, starts a new run), so refusedTouchState can
+ * tell how long the touch has been refused while it was due.
  */
 export async function deferNotClaimable(db: Db, touchId: string, at: Date, now: Date): Promise<void> {
   await db.execute(sql`
     update touches set due_at = ${iso(at)}, last_block_reason = ${NOT_CLAIMABLE_REASON},
-      updated_at = case when last_block_reason = ${NOT_CLAIMABLE_REASON} then updated_at else ${iso(now)} end
+      updated_at = case when ${runGoesOn(now)} then updated_at else ${iso(now)} end
     where id = ${touchId}::uuid and status = 'planned'`);
 }
 

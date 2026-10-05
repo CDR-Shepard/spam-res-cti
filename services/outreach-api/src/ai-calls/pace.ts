@@ -222,7 +222,7 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
  */
 async function refused(deps: PaceDeps, c: AiTouchCandidate): Promise<Result> {
   const { db, now } = deps;
-  const state = await refusedTouchState(db, c.touchId);
+  const state = await refusedTouchState(db, c.touchId, now);
   if (!state) return 'deferred';
   if (!state.planApproved) return skipResult(deps, c, await planNoLongerApproved(db, c, now));
   const limit = now.getTime() - NOT_CLAIMABLE_MAX_DEFERRALS * NOT_CLAIMABLE_DEFER_MS;
