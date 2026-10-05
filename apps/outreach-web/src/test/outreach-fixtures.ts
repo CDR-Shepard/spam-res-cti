@@ -1,4 +1,4 @@
-import type { Campaign, CampaignPreview, CrmConnectionStatus, FieldMap } from '@cti/contracts';
+import type { Campaign, CampaignPreview, CrmConnectionStatus, FieldMap, NeedsReviewItem, PlanRow } from '@cti/contracts';
 
 export const CAMPAIGN_ID = '11111111-1111-4111-8111-111111111111';
 export const LIST_VIEW_ID = '00B5e00000AbCdE';
@@ -52,5 +52,53 @@ export function preview(): CampaignPreview {
       { sfRecordId: '00Q5e00000Abc01', name: 'Jane Seller', ownerName: 'Rep One', channels: ['call', 'sms'], skipReason: null },
       { sfRecordId: '00Q5e00000Abc02', name: null, ownerName: null, channels: [], skipReason: 'no_contact_point' },
     ],
+  };
+}
+
+export const ENROLLMENT_ID = '22222222-2222-4222-8222-222222222222';
+export const OTHER_ENROLLMENT_ID = '44444444-4444-4444-8444-444444444444';
+
+export function planRow(over: Partial<PlanRow> = {}): PlanRow {
+  return {
+    enrollmentId: ENROLLMENT_ID,
+    sfRecordId: '00Q5e00000Abc01',
+    name: 'Jane Seller',
+    ownerName: 'Rep One',
+    status: 'active',
+    exitReason: null,
+    triage: {
+      summary: 'Inherited a vacant house and wants it gone before winter.',
+      channels: [{ channel: 'call', reason: '"Call me after 5, I\'m at work"' }],
+      timing: 'after 5pm',
+      tags: ['motivated', 'inherited', 'vacant'],
+    },
+    nextTouch: {
+      seq: 1,
+      channel: 'rep_call',
+      status: 'planned',
+      dueAt: '2026-10-05T22:00:00.000Z',
+      gateAudit: [
+        { rule: 'contact_point', channel: 'sms', verdict: 'removed', detail: 'No mobile number on the record' },
+        { rule: 'call_kind', channel: 'rep_call', verdict: 'kept', detail: 'No AI-call consent, so a rep makes this call' },
+        { rule: 'human_contact', channel: 'rep_call', verdict: 'deferred', detail: 'A rep dialed this person yesterday, so it waits a day' },
+      ],
+    },
+    ...over,
+  };
+}
+
+export function reviewItem(over: Partial<NeedsReviewItem> = {}): NeedsReviewItem {
+  return {
+    enrollmentId: ENROLLMENT_ID,
+    campaignId: CAMPAIGN_ID,
+    campaignName: 'Spring sellers',
+    sfObject: 'Lead',
+    sfRecordId: '00Q5e00000Abc01',
+    name: 'Jane Seller',
+    ownerName: 'Rep One',
+    category: 'attorney',
+    quote: 'Talk to my lawyer, not me.',
+    flaggedAt: '2026-10-04T16:00:00.000Z',
+    ...over,
   };
 }
