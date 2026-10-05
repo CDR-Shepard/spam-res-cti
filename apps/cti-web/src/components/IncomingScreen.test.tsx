@@ -39,3 +39,17 @@ describe('IncomingScreen — Salesforce caller-match rendering', () => {
     expect(html).toContain('Incoming call');
   });
 });
+
+describe('IncomingScreen — AI transfer', () => {
+  it('shows "AI transfer — <reason>" when the AI hands a caller over', () => {
+    const html = renderToStaticMarkup(
+      <IncomingScreen {...base} callerName="Jane Doe" recordType="Lead" aiTransfer="AI transfer — wants an offer" />,
+    );
+    expect(html).toContain('AI transfer — wants an offer');
+    expect(html).toContain('Jane Doe');
+  });
+
+  it('a normal callback shows no AI tag', () => {
+    expect(renderToStaticMarkup(<IncomingScreen {...base} callerName="Jane Doe" />)).not.toContain('AI transfer');
+  });
+});

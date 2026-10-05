@@ -30,4 +30,12 @@ describe('navTabsFor', () => {
     const byId = Object.fromEntries(navTabsFor({ isAdmin: true, powerDialerEnabled: true }).map((t) => [t.id, t.label]));
     expect(byId).toMatchObject({ team: 'Team', talktime: 'Talk time', admin: 'Numbers', reputation: 'Reputation', dialer: 'Dial' });
   });
+
+  it('AI calls shows on the main bar only when asked, after Recent', () => {
+    expect(navTabsFor(rep, { aiCalls: true }).map((t) => t.id)).toEqual(['dialer', 'recent', 'aicalls', 'settings']);
+    expect(navTabsFor(rep, { aiCalls: false }).map((t) => t.id)).not.toContain('aicalls');
+    const admin = navTabsFor({ isAdmin: true, powerDialerEnabled: false }, { aiCalls: true });
+    expect(admin.find((t) => t.id === 'aicalls')?.label).toBe('AI calls');
+    expect(NAV_OVERFLOW_IDS).not.toContain('aicalls');
+  });
 });

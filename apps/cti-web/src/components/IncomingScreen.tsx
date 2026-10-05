@@ -17,6 +17,9 @@ interface IncomingScreenProps {
   callerName?: string;
   /** e.g. "Lead" / "Contact" / "Opportunity" / "Record" — shown next to the number when a name is present. */
   recordType?: string;
+  /** "AI transfer — <reason>" when the AI assistant is handing this caller over
+   *  (the `aiTransfer` call parameter; see ai-calls-api.ts aiTransferLabel). */
+  aiTransfer?: string;
   onAccept: () => void;
   onDecline: () => void;
 }
@@ -35,6 +38,7 @@ export function IncomingScreen(props: IncomingScreenProps): JSX.Element {
       <div className="call-avatar ringing"><PhoneIcon /></div>
       <div className="to">{line1}</div>
       <div className="timer muted">{line2}</div>
+      {props.aiTransfer && <div className="ai-transfer-tag">{props.aiTransfer}</div>}
       <div className="call-controls">
         <button className="cbtn hangup" onClick={props.onDecline} title="Decline">
           <PhoneHangupIcon />
