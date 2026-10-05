@@ -4,6 +4,44 @@ Everything here is a human step. The code ships with plan 1B (`docs/superpowers/
 
 The target org is alias `_t2` (`gghsd.my.salesforce.com`). **It is PRODUCTION.** Read `salesforce/README.md` first: never deploy with `-d force-app` or `-d force-app/main/default`, because that pushes the stale `layouts/` snapshots over the org's live layouts.
 
+## Signing in to Outreach
+
+People sign in to outreach-web with Salesforce, the same login as the CTI softphone. It uses the CTI's External Client App `Caller_Reputation_CTI` (PKCE, no client secret).
+
+**Who can sign in.** Only people who already exist in the CTI, in a tenant the CTI already has for their Salesforce org. Outreach never creates a tenant or a user from a sign-in, and never changes admin rights. Signing in to the CTI softphone once is enough to create a person. Admin rights are the CTI's (set from the Salesforce profile when someone signs in to the CTI). The Salesforce token a sign-in obtains is revoked and dropped straight away: nothing is stored.
+
+**The variables on outreach-api** (Railway, filled in the dashboard):
+
+| Variable | Value |
+|---|---|
+| `SALESFORCE_CLIENT_ID` | The `Caller_Reputation_CTI` consumer key, the same as `@cti/api`'s |
+| `SALESFORCE_LOGIN_URL` | `https://login.salesforce.com` |
+| `SALESFORCE_SIGNIN_REDIRECT_URI` | `https://outreach-api-production-a07b.up.railway.app/api/auth/salesforce/callback` (already on the app's callback list) |
+| `SALESFORCE_ALLOWED_ORG_ID` | Optional. Copy `@cti/api`'s, so only that org can sign in |
+
+There is no client secret: the app requires PKCE. Redeploy outreach-api after changing them. Sign-in is on when `SALESFORCE_CLIENT_ID` and `SALESFORCE_SIGNIN_REDIRECT_URI` are both set.
+
+**Error words.** A failed sign-in lands on `/sign-in?error=<reason>`:
+
+| Reason | What it means, and the fix |
+|---|---|
+| `no_account` | The Salesforce org is known but this person is not in the CTI. Have them sign in to the CTI softphone once, or ask an admin to add them. |
+| `no_tenant` | No CTI tenant has this Salesforce org. The CTI creates the tenant on its first Salesforce login. |
+| `tenant_suspended` | The tenant is suspended. |
+| `org_not_allowed` | `SALESFORCE_ALLOWED_ORG_ID` is set and this is another org. Sign in with the right org, or correct the variable. |
+| `salesforce_unavailable` | Salesforce did not answer (or answered inconsistently). Try again in a minute. |
+| `invalid_code` | The Salesforce code was refused (expired or already used). Start again. |
+| `bad_state` | The attempt expired, or was started in another tab or browser. Start again. |
+| `bad_return_to` | The link's return address was unsafe and was dropped. Sign in as usual. |
+| `access_denied` / `missing_code` | The person cancelled in Salesforce, or Salesforce sent no code. |
+| `forbidden` | The account cannot hold a session (a service user). |
+| `sign_in_disabled` | Salesforce sign-in is not configured on outreach-api (see the variables above). |
+| `server_error` | Something failed in outreach-api. Check its logs (the error name is logged, never the code or a token). |
+
+**WorkOS is optional.** With `WORKOS_API_KEY`, `WORKOS_CLIENT_ID` and `WORKOS_REDIRECT_URI` all set, the sign-in page also offers "Sign in with email". Leave them unset and the button is hidden.
+
+**The integration connection is separate.** Settings → Connections (§0.5 below, `SALESFORCE_REDIRECT_URI`) signs in the Integration user through a different callback on the same app. Confirm `/api/connections/salesforce/callback` is on the app's callback list as well as `/api/auth/salesforce/callback`.
+
 ## 0. Salesforce setup (one time, ~30 minutes)
 
 outreach-api connects to Salesforce as one company-wide **Integration user**, never as a rep. That user gets exactly the access in the `AI_Outreach` permission set, plus an in-org permission set for the tenant's own custom fields.

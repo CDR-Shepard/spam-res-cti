@@ -56,6 +56,12 @@ export default defineRailway(() => {
       WORKOS_API_KEY: preserve(),
       WORKOS_CLIENT_ID: preserve(),
       WORKOS_REDIRECT_URI: preserve(),
+      // Sign in with Salesforce (plan 1C Part 0): the CTI's External Client App
+      // Caller_Reputation_CTI (PKCE, no secret). Filled in the dashboard.
+      SALESFORCE_CLIENT_ID: preserve(),
+      SALESFORCE_LOGIN_URL: preserve(),
+      SALESFORCE_SIGNIN_REDIRECT_URI: preserve(),
+      SALESFORCE_ALLOWED_ORG_ID: preserve(),
       PGBOSS_SCHEMA: "pgboss",
     },
   });
