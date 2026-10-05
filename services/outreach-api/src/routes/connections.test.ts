@@ -304,6 +304,23 @@ describe('PUT /api/connections/salesforce/field-map', () => {
     expect(fixture.writes).toEqual([]);
   });
 
+  it('400 DO_NOT_CALL_FIELD_REQUIRED when the Lead Do Not Call field is unmapped, before calling Salesforce', async () => {
+    const res = await put({ ...DEFAULT_MAP, Lead: { ...DEFAULT_MAP.Lead, doNotCall: null } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ code: 'DO_NOT_CALL_FIELD_REQUIRED', error: expect.stringContaining('Do Not Call') });
+    expect(clients).not.toHaveBeenCalled();
+    expect(fixture.writes).toEqual([]);
+  });
+
+  it('accepts an unmapped Lead email opt-out (no email is sent in phase 1)', async () => {
+    const next: FieldMap = { ...DEFAULT_MAP, Lead: { ...DEFAULT_MAP.Lead, emailOptOut: null } };
+    await app.close();
+    app = await build({ updateReturning: [connectionRow({ fieldMap: next })] });
+    const res = await put(next);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().fieldMap.Lead.emailOptOut).toBeNull();
+  });
+
   it('409 CRM_NOT_CONNECTED when the tenant has no connection', async () => {
     clients.mockRejectedValue(new CrmNotConnectedError());
     const res = await put(DEFAULT_MAP);

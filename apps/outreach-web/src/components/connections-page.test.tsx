@@ -120,6 +120,19 @@ describe('ConnectionsPage field map', () => {
     expect(await screen.findByText('Saved.')).toBeInTheDocument();
   });
 
+  it("shows the server's reason when it refuses the map", async () => {
+    stubApi({
+      'GET /api/connections/salesforce': connection(),
+      'PUT /api/connections/salesforce/field-map': respond(400, {
+        error: 'The Lead Do Not Call field is not mapped, so a Lead marked Do Not Call in Salesforce could still be called. Give the connected Salesforce user access to Lead.DoNotCall, then reconnect.',
+        code: 'DO_NOT_CALL_FIELD_REQUIRED',
+      }),
+    });
+    renderWithProviders(<ConnectionsPage />, { isAdmin: true });
+    await userEvent.click(await screen.findByRole('button', { name: 'Save fields' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The Lead Do Not Call field is not mapped');
+  });
+
   it('refuses a duplicate or malformed field name', async () => {
     stubApi({ 'GET /api/connections/salesforce': connection() });
     renderWithProviders(<ConnectionsPage />, { isAdmin: true });

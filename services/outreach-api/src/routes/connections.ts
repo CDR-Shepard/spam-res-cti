@@ -164,6 +164,15 @@ export async function registerConnectionRoutes(app: FastifyInstance, deps: Conne
     if (!ctx || !requireAdmin(ctx, reply) || salesforceDisabled(cfg, reply)) return;
     const body = FieldMap.safeParse(req.body);
     if (!body.success) return sendError(reply, 400, 'VALIDATION', 'Invalid field map', body.error.flatten());
+    // A Lead's Do Not Call checkbox is a suppression the planner must see (an Opportunity's
+    // comes from its primary contact role, so it may stay unmapped).
+    if (body.data.Lead.doNotCall === null) {
+      return sendError(reply, 400, 'DO_NOT_CALL_FIELD_REQUIRED', 'The Lead Do Not Call field is not mapped, so a Lead marked Do Not Call in Salesforce could still be called. Give the connected Salesforce user access to Lead.DoNotCall, then reconnect.');
+    }
+    if (body.data.Lead.emailOptOut === null) {
+      // Accepted: phase 1 sends no email. Map it before email goes live.
+      req.log.warn({ orgId: ctx.orgId }, 'field map saved without a Lead email opt-out field');
+    }
     const badNames = fieldMapProblems(body.data);
     if (badNames.length > 0) return sendError(reply, 422, 'INVALID_FIELD_MAP', 'Some field names are not valid', { problems: badNames });
     let describes: ObjectDescribes;
