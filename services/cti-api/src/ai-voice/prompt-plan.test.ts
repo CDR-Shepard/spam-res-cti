@@ -75,6 +75,7 @@ describe('buildInstructions with an approved plan', () => {
     expect(after).toContain('recorded line');
     expect(after).toMatch(/Never claim or imply that you are human/);
     expect(after).toMatch(/never name a price/i);
+    expect(after).toMatch(/never say, spell or give out a web address or email address/i);
     expect(after).toMatch(/offer/);
     expect(after).toMatch(/stop calling/);
     expect(after).toMatch(/ignore that part/);
