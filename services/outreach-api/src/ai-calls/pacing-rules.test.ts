@@ -66,10 +66,13 @@ describe('decideTrigger', () => {
     expect(decideTrigger(blocked('calling_hours'), 1, TO, NOW)).toMatchObject({ kind: 'retry', at: later(15 * MIN), keepKey: false });
   });
 
-  it.each(['daily_cap', 'customer_ceiling'] as const)('4: %s retries at the window opening 12 hours on', (reason) => {
+  it.each([
+    ['daily_cap', true],
+    ['customer_ceiling', false],
+  ] as const)('4: %s retries at the window opening 12 hours on (the org-wide daily cap gives its attempt back; the per-person ceiling counts)', (reason, refundAttempt) => {
     const at = nextWindowOpening(TO, later(12 * HOUR), CALL_WINDOW);
     expect(at).toEqual(new Date('2026-10-06T13:00:00.000Z'));
-    expect(decideTrigger(blocked(reason), 1, TO, NOW)).toEqual({ kind: 'retry', reason, at, keepKey: false, refundAttempt: false });
+    expect(decideTrigger(blocked(reason), 1, TO, NOW)).toEqual({ kind: 'retry', reason, at, keepKey: false, refundAttempt });
   });
 
   it.each(['ai_voice_unavailable', 'no_caller_id'] as const)('5: %s retries in 30 minutes', (reason) => {
@@ -124,10 +127,11 @@ describe('decideTrigger', () => {
   });
 
   it('I-1: a failure about the system, not the person, never gives up and gives its attempt back, with its usual backoff', () => {
-    expect([...SYSTEM_REASONS].sort()).toEqual(['ai_voice_unavailable', 'gate_error', 'no_caller_id', 'salesforce_error', 'transport']);
+    expect([...SYSTEM_REASONS].sort()).toEqual(['ai_voice_unavailable', 'daily_cap', 'gate_error', 'no_caller_id', 'salesforce_error', 'transport']);
     const system: Array<[string, TriggerOutcome, Date, boolean]> = [
       ['ai_voice_unavailable', blocked('ai_voice_unavailable'), later(30 * MIN), false],
       ['no_caller_id', blocked('no_caller_id'), later(30 * MIN), false],
+      ['daily_cap', blocked('daily_cap'), new Date('2026-10-06T13:00:00.000Z'), false],
       ['gate_error', failed('gate_error'), later(2 * HOUR), false],
       ['salesforce_error', failed('salesforce_error'), later(2 * HOUR), false],
       ['transport', { kind: 'transport', error: 'network' }, later(2 * HOUR), true],
@@ -140,7 +144,7 @@ describe('decideTrigger', () => {
   });
 
   it('I-1: a failure about the person counts its attempt', () => {
-    for (const outcome of [blocked('calling_hours'), blocked('call_in_progress'), failed('in_flight'), failed('twilio_error'), blocked('daily_cap')]) {
+    for (const outcome of [blocked('calling_hours'), blocked('call_in_progress'), failed('in_flight'), failed('twilio_error'), blocked('customer_ceiling')]) {
       expect(decideTrigger(outcome, 1, TO, NOW)).toMatchObject({ kind: 'retry', refundAttempt: false });
     }
   });

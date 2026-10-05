@@ -43,12 +43,15 @@ export const RETRY_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * About the system, not the person (I-1): cti-api's AI voice is off or not set up, no AI caller ID is free, its gate or its
+ * About the system, not the person (I-1): cti-api's AI voice is off or not set up, no AI caller ID is free, the tenant's
+ * state daily cap is reached (`daily_cap`, org-wide; the per-person `customer_ceiling` still counts), its gate or its
  * Salesforce read failed, or cti-api did not answer at all (`transport`). They retry with their usual backoff but never count
  * toward MAX_TRIGGER_ATTEMPTS: the attempt is given back (touches.ts settleTouch), so a kill switch, a missing key or an outage
  * pauses every queued lead instead of exiting them `ai_call_gave_up`.
  */
-export const SYSTEM_REASONS: ReadonlySet<string> = new Set(['ai_voice_unavailable', 'no_caller_id', 'gate_error', 'salesforce_error', 'transport']);
+export const SYSTEM_REASONS: ReadonlySet<string> = new Set([
+  'ai_voice_unavailable', 'no_caller_id', 'daily_cap', 'gate_error', 'salesforce_error', 'transport',
+]);
 
 /**
  * M-3: cti-api answered 409, so it already holds or answered this key for another request body. The same key can only meet

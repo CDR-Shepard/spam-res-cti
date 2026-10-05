@@ -382,10 +382,25 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect(h.logs).toEqual([{ level: 'warn', obj: { availability: label }, msg: 'ai_call.place: cti-api says AI calling is off, or did not answer; nothing is placed this tick' }]);
     });
 
-    it('a reason about the person still gives up at the limit', async () => {
+    it('10 daily_cap answers in a row (the org-wide state cap): still active, no attempt used; then the call is placed', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      for (let i = 0; i < 10; i += 1) h.cti.answers.push({ result: 'blocked', reason: 'daily_cap' });
+
+      await tickUntil(h, lead.touchId, 10);
+      const t = await touchById(db, lead.touchId);
+      expect(t).toMatchObject({ status: 'planned', attempts: 0, triggerKey: null, lastBlockReason: 'daily_cap' });
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'active', exitReason: null });
+
+      await tickUntil(h, lead.touchId, 11);
+      expect(new Set(h.cti.requests.map((r) => r.idempotencyKey)).size).toBe(11);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', attempts: 1 });
+    });
+
+    it.each(['call_in_progress', 'customer_ceiling'] as const)('a reason about the person (%s) still gives up at the limit', async (reason) => {
       const h = await paceHarness(db);
       const lead = await seedReleasedLead(db, h.base, { touch: { attempts: 7 } });
-      h.cti.answers.push({ result: 'blocked', reason: 'call_in_progress' });
+      h.cti.answers.push({ result: 'blocked', reason });
 
       await h.run(NOW);
 
