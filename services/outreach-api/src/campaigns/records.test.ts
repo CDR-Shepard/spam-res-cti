@@ -80,6 +80,15 @@ describe('snapshotFromRow', () => {
     expect(snapshotFromRow('Lead', LEAD_MAP, leadRow(over))).toMatchObject(expected);
   });
 
+  it('reads mapped fields case-insensitively: a lower-cased map entry still sees the canonical-case value', () => {
+    const lower: ObjectFieldMap = {
+      ...LEAD_MAP, phones: ['mobilephone', 'PHONE'], doNotCall: 'donotcall', skipOnDialer: 'skip_on_dialer__c', consent: 'ai_call_consent__c', emailOptOut: 'hasoptedoutofemail', email: 'EMAIL',
+    };
+    const s = snapshotFromRow('Lead', lower, leadRow({ DoNotCall: true, Skip_on_Dialer__c: true, AI_Call_Consent__c: true, HasOptedOutOfEmail: true }))!;
+    expect(s).toMatchObject({ sfDoNotCall: true, skipOnDialer: true, consentAiCall: true, sfEmailOptOut: true, email: 'Ann@Example.com' });
+    expect(s.phones).toEqual([{ field: 'mobilephone', e164: '+13058142231' }, { field: 'PHONE', e164: '+17862014455' }]);
+  });
+
   it('reads the Id from attributes.url when Id is absent, and skips a row with neither', () => {
     expect(snapshotFromRow('Lead', LEAD_MAP, leadRow({ Id: undefined }))!.sfRecordId).toBe(LEAD_ID);
     expect(snapshotFromRow('Lead', LEAD_MAP, { Name: 'x' })).toBeNull();

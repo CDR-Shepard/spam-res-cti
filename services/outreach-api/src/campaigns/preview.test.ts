@@ -3,7 +3,7 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { FieldMap, ObjectFieldMap } from '@cti/contracts';
 import type { ConsentBlock } from '@cti/firewall';
-import type { SalesforceClient } from '@cti/salesforce';
+import { SalesforceApiError, type SalesforceClient } from '@cti/salesforce';
 import { fakeDb } from '../test/harness.js';
 import { PREVIEW_EXAMINE_LIMIT, previewCampaign } from './preview.js';
 
@@ -77,7 +77,7 @@ describe('previewCampaign', () => {
     const preview = await previewCampaign({ db: fakeDb().db, client, orgId: 'O1', fieldMap: FIELD_MAP }, { sfObject: 'Lead', source: { kind: 'soql', soql: MEMBERSHIP } });
     expect(preview).toMatchObject({ total: 2_050, examined: 2_000, eligible: 2_000, skipped: {} });
     expect(preview.sample).toHaveLength(20);
-    expect(queryAll).toHaveBeenCalledTimes(11); // membership + 10 batches of 200
+    expect(queryAll).toHaveBeenCalledTimes(11); // one membership read (a single page here) + 10 record batches of 200
   });
 
   it('rejects a bad source before calling Salesforce', async () => {
@@ -85,5 +85,26 @@ describe('previewCampaign', () => {
     await expect(previewCampaign({ db: fakeDb().db, client, orgId: 'O1', fieldMap: FIELD_MAP }, { sfObject: 'Lead', source: { kind: 'soql', soql: 'SELECT Id FROM Contact' } }))
       .rejects.toMatchObject({ code: 'invalid_soql' });
     expect(queryAll).not.toHaveBeenCalled();
+  });
+
+  it('turns a list view into its described SOQL (one describe call), then previews as usual', async () => {
+    const rows = new Map([[id(1), leadRow(1, { MobilePhone: '(305) 814-2231' })]]);
+    const { queryAll } = stubClient([1], rows);
+    const listViewSoql = vi.fn(async () => MEMBERSHIP);
+    const client = { queryAll, listViewSoql } as unknown as SalesforceClient;
+    const preview = await previewCampaign({ db: fakeDb().db, client, orgId: 'O1', fieldMap: FIELD_MAP }, { sfObject: 'Lead', source: { kind: 'list_view', listViewId: '00B5f00000ABCDE' } });
+    expect(listViewSoql).toHaveBeenCalledWith('Lead', '00B5f00000ABCDE');
+    expect(preview).toMatchObject({ total: 1, examined: 1, eligible: 1 });
+    expect(queryAll).toHaveBeenCalledTimes(2); // membership + 1 record batch
+  });
+
+  it("reports a Salesforce error from the record fetch in Salesforce's words", async () => {
+    const queryAll = vi.fn(async (soql: string) => {
+      if (soql === MEMBERSHIP) return [{ Id: id(1) }];
+      throw new SalesforceApiError('query failed (400)', 400, [{ errorCode: 'INVALID_FIELD', message: "No such column 'State' on entity 'Lead'" }]);
+    });
+    const client = { queryAll, listViewSoql: vi.fn() } as unknown as SalesforceClient;
+    await expect(previewCampaign({ db: fakeDb().db, client, orgId: 'O1', fieldMap: FIELD_MAP }, { sfObject: 'Lead', source: { kind: 'soql', soql: MEMBERSHIP } }))
+      .rejects.toMatchObject({ code: 'salesforce_error', message: "INVALID_FIELD: No such column 'State' on entity 'Lead'" });
   });
 });

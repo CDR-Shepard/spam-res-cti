@@ -56,8 +56,19 @@ function checked(value: unknown): boolean {
   return value === true;
 }
 
-function read(row: Row, field: string | null): unknown {
-  return field ? row[field] : undefined;
+/**
+ * Reads mapped fields case-insensitively: Salesforce answers with canonical
+ * field-name case, while the field map accepts any case (SOQL does too). A
+ * miss on `donotcall` would read a Do Not Call record as callable.
+ */
+function rowReader(row: Row): (field: string | null) => unknown {
+  const keys = new Map<string, string>();
+  for (const key of Object.keys(row)) keys.set(key.toLowerCase(), key);
+  return (field) => {
+    if (!field) return undefined;
+    const actual = keys.get(field.toLowerCase());
+    return actual === undefined ? undefined : row[actual];
+  };
 }
 
 function dateOrNull(value: unknown): Date | null {
@@ -90,8 +101,9 @@ function toPhones(raw: Array<{ field: string; value: unknown }>): Array<{ field:
 export function snapshotFromRow(sfObject: SfObject, m: ObjectFieldMap, row: Row): SfRecordSnapshot | null {
   const sfRecordId = recordIdFromRow(row);
   if (!sfRecordId) return null;
+  const read = rowReader(row);
   const contact = sfObject === 'Opportunity' ? primaryContact(row) : null;
-  const ownPhones = m.phones.map((field) => ({ field, value: row[field] }));
+  const ownPhones = m.phones.map((field) => ({ field, value: read(field) }));
   const contactPhones = contact ? [{ field: 'Contact.MobilePhone', value: contact.MobilePhone }, { field: 'Contact.Phone', value: contact.Phone }] : [];
   return {
     sfObject,
@@ -99,16 +111,16 @@ export function snapshotFromRow(sfObject: SfObject, m: ObjectFieldMap, row: Row)
     name: text(row.Name),
     ownerSfUserId: text(row.OwnerId),
     ownerName: text((row.Owner as Row | null | undefined)?.Name),
-    leadManagerSfUserId: text(read(row, m.leadManager)),
+    leadManagerSfUserId: text(read(m.leadManager)),
     phones: toPhones([...ownPhones, ...contactPhones]),
-    email: text(read(row, m.email)) ?? text(contact?.Email),
-    state: text(read(row, m.state)),
-    webFormSource: text(read(row, m.webFormSource)),
-    consentAiCall: checked(read(row, m.consent)),
-    sfDoNotCall: checked(read(row, m.doNotCall)) || checked(contact?.DoNotCall),
-    sfEmailOptOut: checked(read(row, m.emailOptOut)) || checked(contact?.HasOptedOutOfEmail),
-    skipOnDialer: checked(read(row, m.skipOnDialer)),
-    isClosed: checked(row[CLOSED_FIELD[sfObject]]),
+    email: text(read(m.email)) ?? text(contact?.Email),
+    state: text(read(m.state)),
+    webFormSource: text(read(m.webFormSource)),
+    consentAiCall: checked(read(m.consent)),
+    sfDoNotCall: checked(read(m.doNotCall)) || checked(contact?.DoNotCall),
+    sfEmailOptOut: checked(read(m.emailOptOut)) || checked(contact?.HasOptedOutOfEmail),
+    skipOnDialer: checked(read(m.skipOnDialer)),
+    isClosed: checked(read(CLOSED_FIELD[sfObject])),
     lastModifiedAt: dateOrNull(row.LastModifiedDate),
   };
 }
