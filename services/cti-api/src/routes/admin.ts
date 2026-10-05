@@ -3,14 +3,15 @@
  * MVP: every authenticated user can manage their own org. Tighten with roles later.
  */
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { humanUserById, humanUsersInOrg, resolveSession } from '@cti/auth';
-import { getDb, schema } from '@cti/db';
+import { getDb, NUMBER_KINDS, REP_NUMBER_KINDS, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
 import { ensureCtiPermissionSetLive } from '../salesforce/permission-set-live.js';
 import { PERMISSION_SET_MISSING, type EnsureOutcome } from '../salesforce/permission-set.js';
+import { kindForImportedNumber, numberKindChange } from './number-kind.js';
 
 /** Human-readable label for an imported DID, derived from its area code so the
  *  Numbers pool reads "San Diego (619)" / "Los Angeles (213)" at a glance. */
@@ -68,13 +69,15 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     const s = await resolveSession(req.headers.authorization);
     if (!s) return reply.code(401).send({ error: 'Unauthorized' });
     const db = getDb();
-    // Admins see the whole org pool (active + reserve); reps see only the
-    // numbers assigned to them (powers their dialer from-picker).
+    // Admins see the whole org pool (active + reserve + AI calls); reps see
+    // only the rep-kind numbers assigned to them (powers their dialer
+    // from-picker) — never an AI (`ai_pool`) number.
     const where = s.isAdmin
       ? eq(schema.outboundNumbers.orgId, s.orgId)
       : and(
           eq(schema.outboundNumbers.orgId, s.orgId),
           eq(schema.outboundNumbers.assignedUserId, s.userId),
+          inArray(schema.outboundNumbers.kind, [...REP_NUMBER_KINDS]),
         );
     const rows = await db
       .select()
@@ -137,12 +140,26 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         active: z.boolean().optional(),
         // The rep to assign to; omit / null = leave in the reserve pool.
         assignedUserId: z.string().uuid().nullable().optional(),
+        // A NEW number's kind ('ai_pool' = AI calls). An existing number keeps
+        // its kind: change it on its row (PATCH), never by re-adding it.
+        kind: z.enum(NUMBER_KINDS).optional(),
       })
       .safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
     const norm = normalize(parsed.data.e164);
     if (!norm.ok) return reply.code(400).send({ error: 'Invalid number' });
+    if (parsed.data.kind === 'ai_pool' && parsed.data.assignedUserId)
+      return reply.code(400).send({ error: 'An AI calls number cannot be assigned to a rep' });
     const db = getDb();
+    if (parsed.data.kind || parsed.data.assignedUserId) {
+      const existing = await db.query.outboundNumbers.findFirst({
+        where: and(eq(schema.outboundNumbers.orgId, s.orgId), eq(schema.outboundNumbers.e164, norm.value!.e164)),
+      });
+      if (existing && parsed.data.kind && existing.kind !== parsed.data.kind)
+        return reply.code(409).send({ error: `This number already exists as ${existing.kind}; change its kind on its row` });
+      if (existing?.kind === 'ai_pool' && parsed.data.assignedUserId)
+        return reply.code(400).send({ error: 'An AI calls number cannot be assigned to a rep' });
+    }
     if (parsed.data.assignedUserId) {
       const rep = await db.query.users.findFirst({
         where: humanUserById(s.orgId, parsed.data.assignedUserId),
@@ -158,6 +175,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         provider: parsed.data.provider,
         active: parsed.data.active ?? true,
         assignedUserId: parsed.data.assignedUserId ?? null,
+        kind: parsed.data.kind ?? 'agent',
         health: 'unknown',
         // Explicit, matching import-twilio. The column's schema default is
         // false, so leaving it off silently created numbers that answer every
@@ -189,7 +207,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
         label: z.string().optional(),
         // Assign to a rep, or null to return it to the reserve pool.
         assignedUserId: z.string().uuid().nullable().optional(),
-        kind: z.enum(['agent', 'dialer_pool']).optional(),
+        kind: z.enum(NUMBER_KINDS).optional(),
         health: z.enum(['healthy', 'warning', 'degraded', 'spam_likely', 'unknown']).optional(),
         inboundEnabled: z.boolean().optional(),
         inboundGreeting: z.string().max(800).nullable().optional(),
@@ -205,6 +223,12 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       where: and(eq(schema.outboundNumbers.id, id), eq(schema.outboundNumbers.orgId, s.orgId)),
     });
     if (!owned) return reply.code(404).send({ error: 'Not found' });
+    // An AI (`ai_pool`) number is never a rep's: moving one in un-assigns it.
+    const kindChange = numberKindChange(owned, {
+      ...(parsed.data.kind !== undefined ? { kind: parsed.data.kind } : {}),
+      ...(parsed.data.assignedUserId !== undefined ? { assignedUserId: parsed.data.assignedUserId } : {}),
+    });
+    if (!kindChange.ok) return reply.code(400).send({ error: kindChange.error });
     if (parsed.data.assignedUserId) {
       const rep = await db.query.users.findFirst({
         where: humanUserById(s.orgId, parsed.data.assignedUserId),
@@ -216,8 +240,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       .set({
         ...(parsed.data.active !== undefined ? { active: parsed.data.active } : {}),
         ...(parsed.data.label !== undefined ? { label: parsed.data.label } : {}),
-        ...(parsed.data.assignedUserId !== undefined ? { assignedUserId: parsed.data.assignedUserId } : {}),
-        ...(parsed.data.kind !== undefined ? { kind: parsed.data.kind } : {}),
+        ...kindChange.set,
         ...(parsed.data.health
           ? { health: parsed.data.health, healthUpdatedAt: new Date() }
           : {}),
@@ -357,6 +380,10 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
           twilioSid: n.sid ?? null,
           health: 'unknown',
           inboundEnabled: true,
+          // A Twilio FriendlyName containing "(ai_pool)" files a NEW number as
+          // the AI's own caller ID. The conflict update below never touches
+          // kind, so an existing row is never re-kinded.
+          kind: kindForImportedNumber(n.friendly_name),
         })
         .onConflictDoUpdate({
           target: [schema.outboundNumbers.orgId, schema.outboundNumbers.e164],
