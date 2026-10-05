@@ -60,7 +60,7 @@ export async function customerAttemptState(db: Db, orgId: string, toE164: string
  * `atCustomerCeiling` so click-to-dial and the dialer can never drift apart on
  * the boundary. No campaign = no ceiling.
  */
-function atCeiling(state: AttemptState): boolean {
+export function atCeiling(state: AttemptState): boolean {
   return (
     state.campaign != null &&
     atCustomerCeiling({

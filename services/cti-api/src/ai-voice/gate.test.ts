@@ -55,7 +55,7 @@ function deps(c: Case) {
     ),
     dailyDialCount: vi.fn(async () => c.dailyCount ?? 0),
     withinCallingHours: vi.fn(() => c.inHours ?? true),
-    pickDidForRun: vi.fn(async () => (c.pick === undefined ? { e164: FROM } : c.pick)),
+    pickAiDid: vi.fn(async () => (c.pick === undefined ? { e164: FROM } : c.pick)),
   } satisfies GateDeps;
 }
 
@@ -86,10 +86,9 @@ const cases: Case[] = [
   { name: 'calling-hours exempt number', cfg: { DIALER_CALLING_HOURS_EXEMPT: ` ${CA} ,+15555550000` }, target: rec(), inHours: false, want: { ok: true, toE164: CA, fromE164: FROM } },
   { name: 'per-customer ceiling', target: rec(), pick: { skip: 'customer_ceiling' }, want: blockedBy('customer_ceiling') },
   { name: 'no caller id', target: rec(), pick: null, want: blockedBy('no_caller_id') },
-  { name: 'record call with no pool DID ignores the default caller ID', cfg: { TWILIO_DEFAULT_CALLER_ID: '+16195550002' }, target: rec(), pick: null, want: blockedBy('no_caller_id') },
-  { name: 'test call with no pool DID falls back to the default caller ID', cfg: { TWILIO_DEFAULT_CALLER_ID: '(619) 555-0002' }, isAdmin: true, target: test(TEST), pick: null, want: { ok: true, toE164: TEST, fromE164: '+16195550002' } },
-  { name: 'test call with no pool DID and no default caller ID', isAdmin: true, target: test(TEST), pick: null, want: blockedBy('no_caller_id') },
-  { name: 'test call with an unparseable default caller ID', cfg: { TWILIO_DEFAULT_CALLER_ID: 'n/a' }, isAdmin: true, target: test(TEST), pick: null, want: blockedBy('no_caller_id') },
+  { name: 'record call with no AI number ignores the default caller ID', cfg: { TWILIO_DEFAULT_CALLER_ID: '+16195550002' }, target: rec(), pick: null, want: blockedBy('no_caller_id') },
+  { name: 'test call with no AI number NEVER falls back to the default caller ID', cfg: { TWILIO_DEFAULT_CALLER_ID: '(619) 555-0002' }, isAdmin: true, target: test(TEST), pick: null, want: blockedBy('no_caller_id') },
+  { name: 'test call with no AI number and no default caller ID', isAdmin: true, target: test(TEST), pick: null, want: blockedBy('no_caller_id') },
   { name: 'test call still honours the per-customer ceiling', cfg: { TWILIO_DEFAULT_CALLER_ID: '+16195550002' }, isAdmin: true, target: test(TEST), pick: { skip: 'customer_ceiling' }, want: blockedBy('customer_ceiling') },
 ];
 
@@ -110,8 +109,8 @@ describe('gateAiCall', () => {
     expect(d.blockedTargets).toHaveBeenCalledWith(db, 'O1', [FL]);
     expect(d.dailyDialCount).toHaveBeenCalledWith(db, 'O1', FL, NOW);
     expect(d.withinCallingHours).toHaveBeenCalledWith(FL, NOW);
-    expect(d.pickDidForRun).toHaveBeenCalledWith(db, { orgId: 'O1', userId: 'U1', toE164: FL, runKind: 'pool' });
-    const order = [d.blockedTargets, d.dailyDialCount, d.withinCallingHours, d.pickDidForRun].map(
+    expect(d.pickAiDid).toHaveBeenCalledWith(db, { orgId: 'O1', userId: 'U1', toE164: FL });
+    const order = [d.blockedTargets, d.dailyDialCount, d.withinCallingHours, d.pickAiDid].map(
       (f) => f.mock.invocationCallOrder[0]!,
     );
     expect(order).toEqual([...order].sort((a, b) => a - b));
@@ -121,7 +120,7 @@ describe('gateAiCall', () => {
     const c: Case = { name: '', target: rec(), inHours: false, want: blockedBy('calling_hours') };
     const d = deps(c);
     await gateAiCall(db, { cfg: baseCfg, orgId: 'O1', userId: 'U1', isAdmin: false, now: NOW, target: c.target }, d);
-    expect(d.pickDidForRun).not.toHaveBeenCalled();
+    expect(d.pickAiDid).not.toHaveBeenCalled();
   });
 
   it('does not count dials for an uncapped or unknown-state number', async () => {
@@ -151,6 +150,6 @@ describe('gateAiCall', () => {
     await expect(
       gateAiCall(db, { cfg: baseCfg, orgId: 'O1', userId: 'U1', isAdmin: false, now: NOW, target: c.target }, d),
     ).rejects.toThrow('pg down');
-    expect(d.pickDidForRun).not.toHaveBeenCalled();
+    expect(d.pickAiDid).not.toHaveBeenCalled();
   });
 });

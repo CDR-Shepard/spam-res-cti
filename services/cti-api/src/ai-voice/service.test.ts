@@ -196,7 +196,7 @@ describe('aiGateDeps', () => {
       blockedTargets: vi.fn(),
       dailyDialCount: vi.fn(async () => 1),
       withinCallingHours: vi.fn(),
-      pickDidForRun: vi.fn(),
+      pickAiDid: vi.fn(),
     };
     store.uncounted = 2;
     const wrapped = aiGateDeps(store, base);

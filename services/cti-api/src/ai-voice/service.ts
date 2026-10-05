@@ -15,10 +15,10 @@ import { DAILY_CAP_WINDOW_MS, dailyDialCount, timezoneForNumber } from '@cti/fir
 import { toE164 } from '@cti/phone';
 import type { AppConfig } from '../config.js';
 import { blockedTargets } from '../dialer/consent-check.js';
-import { pickDidForRun } from '../dialer/pick-agent-did.js';
 import { withinCallingHours, type Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
 import { gateAiCall, type AiGateBlock, type AiGateInput, type AiGateResult, type GateDeps } from './gate.js';
+import { pickAiDid } from './number-pool.js';
 import type { AiCallObject, AiCallRecord } from './record.js';
 import { dropActiveCall, registerActiveCall, updateActiveCall } from './registry.js';
 import type { AiCallStore } from './store.js';
@@ -69,7 +69,7 @@ const FALLBACK_TIME_ZONE = 'America/Chicago';
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-const realGateDeps: GateDeps = { blockedTargets, dailyDialCount, withinCallingHours, pickDidForRun };
+const realGateDeps: GateDeps = { blockedTargets, dailyDialCount, withinCallingHours, pickAiDid };
 
 /** The dialer's gate deps, with the daily count widened to placed AI calls not yet in `calls`. */
 export function aiGateDeps(store: AiCallStore, base: GateDeps = realGateDeps): GateDeps {

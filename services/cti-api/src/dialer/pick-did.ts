@@ -17,12 +17,17 @@
  *   - no `assignedUserId` filter: pool DIDs are shared across the org's reps,
  *     not owned by one rep, so calls.ts's per-rep ownership check doesn't
  *     apply here.
- *   - an added `kind = 'dialer_pool'` filter, so this path can never burn a
- *     rep's own `agent`-kind DID even if a stale/misrouted sticky row somehow
- *     pointed at one.
+ *   - an added `kind` filter (`dialer_pool` by default), so this path can
+ *     never burn a rep's own `agent`-kind DID even if a stale/misrouted sticky
+ *     row somehow pointed at one.
+ *
+ * The AI voice agent walks its OWN pool through the same machinery by passing
+ * `kind: 'ai_pool'` (ai-voice/number-pool.ts): every read and claim below is
+ * pinned to the caller's kind, so the dialer can never pick an AI number and
+ * the AI can never pick a rep's or the dialer's.
  */
 import { and, eq, notInArray, sql } from 'drizzle-orm';
-import type { getDb } from '@cti/db';
+import type { getDb, NumberKind } from '@cti/db';
 import { schema } from '@cti/db';
 import {
   CALLING_HOUR_END_INCLUSIVE,
@@ -36,7 +41,7 @@ import {
   todayIsoWeekday,
   warmupCapForAge,
 } from '@cti/firewall';
-import { dialerPoolNumbers as realDialerPoolNumbers } from './pool.js';
+import { dialerPoolNumbers as realDialerPoolNumbers, type PoolKind } from './pool.js';
 
 // The system calling window lives in @cti/firewall (calling-window.ts) so the
 // firewall gate and this pre-filter cannot drift. Re-exported here so the
@@ -166,14 +171,15 @@ export function effectiveCapFor(n: Pick<OutboundNumber, 'firstUsedAt' | 'warmupO
  *
  * `kind` pins which sort of number may be claimed and defaults to the pool
  * dialer's own `dialer_pool`; Task runs dial the rep's OWN numbers and pass
- * `'agent'`, so neither path can ever burn a number of the other kind.
+ * `'agent'`, the AI voice agent passes `'ai_pool'`, so no path can ever burn a
+ * number of another kind.
  */
 export async function attemptIncrement(
   db: Db,
   orgId: string,
   e164: string,
   effectiveCap: number,
-  kind: 'agent' | 'dialer_pool' = 'dialer_pool',
+  kind: NumberKind = 'dialer_pool',
 ): Promise<boolean> {
   const today = new Date().toISOString().slice(0, 10);
   const incremented = await db
@@ -205,11 +211,37 @@ export interface PickPoolDidArgs {
   orgId: string;
   userId: string;
   toE164: string;
+  /** Which pool to walk; `dialer_pool` (the power dialer) unless the AI says `ai_pool`. */
+  kind?: PoolKind;
 }
 
 export interface PickPoolDidDeps {
   /** Injectable for tests; defaults to the real dialer/pool.js implementation. */
-  dialerPoolNumbers?: (orgId: string) => Promise<OutboundNumber[]>;
+  dialerPoolNumbers?: (orgId: string, kind: PoolKind) => Promise<OutboundNumber[]>;
+  /**
+   * The sticky candidate for this recipient, replacing the `sticky_numbers`
+   * read. The AI passes its own (the number its last call to them came from):
+   * `sticky_numbers` is keyed (org, rep, recipient) and belongs to the rep's
+   * dialing, so the AI never writes it. Whatever this returns is still
+   * re-read with this call's `kind` before it can be claimed.
+   */
+  stickyE164?: () => Promise<string | undefined>;
+}
+
+/** The rep's `sticky_numbers` row for this recipient — the power dialer's sticky source. */
+async function repStickyE164(db: Db, orgId: string, userId: string, toE164: string): Promise<string | undefined> {
+  const rows = await db
+    .select({ e164: schema.stickyNumbers.e164 })
+    .from(schema.stickyNumbers)
+    .where(
+      and(
+        eq(schema.stickyNumbers.orgId, orgId),
+        eq(schema.stickyNumbers.assignedUserId, userId),
+        eq(schema.stickyNumbers.recipientE164, toE164),
+      ),
+    )
+    .limit(1);
+  return rows[0]?.e164;
 }
 
 /**
@@ -221,48 +253,37 @@ export interface PickPoolDidDeps {
  */
 export async function pickPoolDid(
   db: Db,
-  { orgId, userId, toE164 }: PickPoolDidArgs,
+  { orgId, userId, toE164, kind = 'dialer_pool' }: PickPoolDidArgs,
   deps: PickPoolDidDeps = {},
 ): Promise<{ e164: string } | null> {
   const listPoolNumbers = deps.dialerPoolNumbers ?? realDialerPoolNumbers;
-
-  const stickyRows = await db
-    .select({ e164: schema.stickyNumbers.e164 })
-    .from(schema.stickyNumbers)
-    .where(
-      and(
-        eq(schema.stickyNumbers.orgId, orgId),
-        eq(schema.stickyNumbers.assignedUserId, userId),
-        eq(schema.stickyNumbers.recipientE164, toE164),
-      ),
-    )
-    .limit(1);
-  const stickyE164 = stickyRows[0]?.e164;
+  const stickyE164 = deps.stickyE164 ? await deps.stickyE164() : await repStickyE164(db, orgId, userId, toE164);
 
   if (stickyE164) {
-    // Re-read the sticky candidate to (a) confirm it's still an active
-    // dialer_pool DID and (b) get firstUsedAt/warmupOverrideCap to compute
+    // Re-read the sticky candidate to (a) confirm it's still an active DID of
+    // THIS pool's kind and (b) get firstUsedAt/warmupOverrideCap to compute
     // its current cap — mirrors calls.ts reading `did` before the atomic
-    // increment. Undefined here means "no longer an active dialer_pool
-    // number" (reassigned, deactivated, or a stale sticky row); fall through
-    // to the pool rather than treating it as eligible.
+    // increment. Undefined here means "not an active number of this kind"
+    // (reassigned, deactivated, a stale sticky row, or a sticky that points
+    // at another kind's number); fall through to the pool rather than
+    // treating it as eligible.
     const sticky = await db.query.outboundNumbers.findFirst({
       where: and(
         eq(schema.outboundNumbers.orgId, orgId),
         eq(schema.outboundNumbers.e164, stickyE164),
         eq(schema.outboundNumbers.active, true),
-        eq(schema.outboundNumbers.kind, 'dialer_pool'),
+        eq(schema.outboundNumbers.kind, kind),
       ),
     });
     if (sticky) {
-      const ok = await attemptIncrement(db, orgId, sticky.e164, effectiveCapFor(sticky));
+      const ok = await attemptIncrement(db, orgId, sticky.e164, effectiveCapFor(sticky), kind);
       if (ok) return { e164: sticky.e164 };
     }
   }
 
-  const pool = await listPoolNumbers(orgId);
+  const pool = await listPoolNumbers(orgId, kind);
   for (const n of pool) {
-    const ok = await attemptIncrement(db, orgId, n.e164, effectiveCapFor(n));
+    const ok = await attemptIncrement(db, orgId, n.e164, effectiveCapFor(n), kind);
     if (ok) return { e164: n.e164 };
   }
   return null;

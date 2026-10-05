@@ -12,12 +12,12 @@
  *   recipient-local calling hours       (`withinCallingHours`, with the
  *                                        dialer's DIALER_CALLING_HOURS_EXEMPT
  *                                        allowlist; test numbers skip this)
- *   per-customer ceiling + caller ID    (`pickDidForRun`, LAST — it claims a
+ *   per-customer ceiling + caller ID    (`pickAiDid`, LAST — it claims a
  *                                        dial against the chosen DID)
  *
- * A record call needs a dialer-pool DID. A test call with no pool DID (and no
- * ceiling skip) falls back to TWILIO_DEFAULT_CALLER_ID so an exhausted pool
- * cannot block the smoke test.
+ * Every call, test or not, dials from the AI's OWN pool (`ai_pool`,
+ * number-pool.ts) — never a rep's or the dialer's number, never
+ * TWILIO_DEFAULT_CALLER_ID. No claimable AI number = `no_caller_id`.
  *
  * A failed read anywhere THROWS: unlike the dialer's queue build, nothing here
  * fails open — the caller turns the error into a refused call.
@@ -27,7 +27,7 @@ import { dailyCapCheck, dailyDialCount as realDailyDialCount, isDailyCapped, sta
 import { aiVoiceAvailable, parseTestNumbers, type AppConfig } from '../config.js';
 import { blockedTargets as realBlockedTargets } from '../dialer/consent-check.js';
 import { parseCallingHoursExempt, withinCallingHours as realWithinCallingHours, type Db } from '../dialer/pick-did.js';
-import { pickDidForRun as realPickDidForRun } from '../dialer/pick-agent-did.js';
+import { pickAiDid as realPickAiDid } from './number-pool.js';
 import type { AiCallRecord } from './record.js';
 
 export type AiGateBlock =
@@ -62,14 +62,14 @@ export interface GateDeps {
   blockedTargets: typeof realBlockedTargets;
   dailyDialCount: typeof realDailyDialCount;
   withinCallingHours: typeof realWithinCallingHours;
-  pickDidForRun: typeof realPickDidForRun;
+  pickAiDid: typeof realPickAiDid;
 }
 
 const defaultDeps: GateDeps = {
   blockedTargets: realBlockedTargets,
   dailyDialCount: realDailyDialCount,
   withinCallingHours: realWithinCallingHours,
-  pickDidForRun: realPickDidForRun,
+  pickAiDid: realPickAiDid,
 };
 
 const blocked = (reason: AiGateBlock): AiGateResult => ({ ok: false, reason });
@@ -120,14 +120,8 @@ export async function gateAiCall(db: Db, input: AiGateInput, deps: GateDeps = de
     if (!exempt.has(to) && !deps.withinCallingHours(to, now)) return blocked('calling_hours');
   }
 
-  const pick = await deps.pickDidForRun(db, { orgId, userId, toE164: to, runKind: 'pool' });
+  const pick = await deps.pickAiDid(db, { orgId, userId, toE164: to });
   if (pick && 'skip' in pick) return blocked('customer_ceiling');
-  const from = pick?.e164 ?? (input.target.kind === 'test' ? defaultCallerId(cfg) : null);
-  if (!from) return blocked('no_caller_id');
-  return { ok: true, toE164: to, fromE164: from };
-}
-
-/** TWILIO_DEFAULT_CALLER_ID as E.164, or null when unset or unparseable. */
-function defaultCallerId(cfg: AppConfig): string | null {
-  return cfg.TWILIO_DEFAULT_CALLER_ID ? toE164(cfg.TWILIO_DEFAULT_CALLER_ID) : null;
+  if (!pick) return blocked('no_caller_id');
+  return { ok: true, toE164: to, fromE164: pick.e164 };
 }
