@@ -144,6 +144,7 @@ describe('call plan routes', () => {
     ['CONSENT_UNKNOWN', 409],
     ['DNC_PENDING', 409],
     ['DNC_NOT_DISMISSED', 409],
+    ['RECORD_BLOCKED', 409],
     ['FORBIDDEN', 403],
     ['NOT_FOUND', 404],
   ] as const)('a thrown DecisionError %s answers %i with its code and words', async (code, status) => {
