@@ -1,19 +1,27 @@
 # AI voice calls — operator runbook
 
-Everything here is a human step. The design is `docs/superpowers/plans/2026-10-05-ai-voice-calls.md`; the code is `services/cti-api/src/ai-voice/`.
+**First call checklist** (the minimum to hear the AI on your own phone):
 
-**Push:** see the session summary.
+1. On Railway service `@cti/api`, set `OPENAI_API_KEY` and `AI_VOICE_TEST_NUMBERS=<your mobile, E.164>` (§3).
+2. Push the branch to `main` (the default branch `@cti/api` deploys from).
+3. Wait for the `@cti/api` deploy to show **Success** (dashboard → `@cti/api` → Deployments). It also serves the softphone.
+4. Open the softphone as an **admin** → **AI calls** on the bottom bar → **Test AI call** box → pick your number → **Start test call**.
+5. Answer. The first sentence must say it is an AI assistant on a recorded line. No Salesforce step is needed for a test call.
+
+Everything here is a human step. The design is `docs/superpowers/plans/2026-10-05-ai-voice-calls.md`; the code is `services/cti-api/src/ai-voice/`.
 
 ## 1. What it does
 
-A rep (or admin) presses **AI call** on a Lead or Opportunity in the softphone. An AI voice agent phones the person over Twilio, talks to them through OpenAI's Realtime API, and:
+An admin presses **AI call** on a Lead or Opportunity in the softphone (or starts a test call to their own phone). The code also accepts Contacts, but the consent field is deployed only on Lead and Opportunity, so a Contact is refused with `consent_field_missing`. An AI voice agent phones the person over Twilio, talks to them through OpenAI's Realtime API, and:
 
-- **Opens by saying it is an AI assistant** calling for the company, and that the call is recorded and transcribed. If anyone asks, it says it is an AI. It never claims to be human.
+- **Opens by saying it is an AI assistant** calling for the company, on a recorded line (the text transcript is kept). If anyone asks, it says it is an AI. It never claims to be human.
 - **Qualifies** the seller: motivation, timeline, condition, price expectations, decision makers, occupancy. It **never makes an offer or names a price.**
 - **Transfers to a person** if the seller wants one or is qualified: the call rings the record owner's softphone (or the rep who started the call if the owner is not mapped).
 - **Honours "stop calling me"** immediately: it writes the number to the shared opt-out list, says goodbye, and hangs up. The CTI dialer respects the same list.
 - **Leaves a voicemail** if a machine answers, and promises a callback if no person picks up the transfer within 25 seconds.
 - Stores the text transcript, a summary, the qualification answers and the outcome. **No call audio is stored.**
+
+**v1: AI calls are admin-initiated.** A rep's click-to-dial places the human call as soon as the firewall check clears, so the rep never gets the screen the **AI call** button sits on. Admins get that screen (and the **Test AI call** box). Reps see an **AI calls** tab with their own AI calls while AI calling is on.
 
 **Hard rules the code enforces on every call:**
 
@@ -26,7 +34,7 @@ A rep (or admin) presses **AI call** on a Lead or Opportunity in the softphone. 
    - Go to platform.openai.com, sign in, **Settings → Billing**: add a payment method and a small credit balance (start with $20).
    - Go to platform.openai.com → **API keys → Create new secret key**. Name it `cti-ai-voice`. Copy it once; OpenAI never shows it again.
    - **Never paste the key in chat, a commit, or a log line.**
-2. **Anthropic API key (optional).** Only used for the post-call summary. Without it the summary is a plain line such as "AI call: no answer". Create one at console.anthropic.com → API keys if you want better summaries.
+2. **Anthropic API key (optional).** Only used for the post-call summary. Without it the summary is the agent's own closing note, or else a plain line such as "AI call — No answer". Create one at console.anthropic.com → API keys if you want better summaries.
 3. **The consent fields and the rep permission set deployed to Salesforce** (§4). Without them every non-test AI call is refused with `consent_field_missing`.
 4. **`API_PUBLIC_URL` on `@cti/api` is already set** to its public `https://` URL (the dialer uses it). The AI call's audio stream connects back to it over `wss://`, so it must be correct.
 5. **Your own mobile number in E.164 form**, for example `+15125550100`, for the smoke test.
@@ -74,19 +82,15 @@ railway variables --service @cti/api --kv | grep -E '^(AI_VOICE|OPENAI_API_KEY)'
 
 Expected: `OPENAI_API_KEY`, `AI_VOICE_TEST_NUMBERS` (plus any other `AI_VOICE*` you set).
 
-Then confirm the deploy is healthy:
+Then confirm the deploy is healthy: Railway dashboard → `@cti/api` → **Deployments** → the latest deployment shows **Success**. Open its **Deploy Logs** and search for `Invalid environment configuration`.
 
-```bash
-railway logs --service @cti/api | tail -30
-```
-
-Expected: no "Invalid environment configuration" line. If you see one, a value is outside the accepted set in the table; fix it and the service redeploys.
+Expected: no such line. If you see one, a value is outside the accepted set in the table; fix it and the service redeploys.
 
 ## 4. Salesforce: consent fields and rep access
 
 The org is alias `_t2` (`gghsd.my.salesforce.com`). **It is PRODUCTION.** Read `salesforce/README.md` first: never deploy with `-d force-app` or `-d force-app/main/default`, because that pushes stale `layouts/` snapshots over the live page layouts. Name the exact files, as below. Run from the repo root.
 
-> If you already ran `docs/runbooks/outreach-sf-campaigns.md` §0, the six field files are already in the org (the deploy below shows `Unchanged`), and you only need steps 3 and 4.
+> If you already ran `docs/runbooks/outreach-sf-campaigns.md` §0, the six field files are already in the org and show `Unchanged` below. **Step 2 is still required:** it creates the `AI_Call_Consent_Access` permission set. Never skip it.
 
 1. **Validate first** (check-only, changes nothing). Expect `Status: Succeeded`:
 
@@ -100,7 +104,7 @@ The org is alias `_t2` (`gghsd.my.salesforce.com`). **It is PRODUCTION.** Read `
    cd salesforce && sf project deploy start -o _t2 --source-dir force-app/main/default/objects/Lead/fields/AI_Call_Consent__c.field-meta.xml --source-dir force-app/main/default/objects/Lead/fields/AI_Call_Consent_Date__c.field-meta.xml --source-dir force-app/main/default/objects/Lead/fields/AI_Call_Consent_Source__c.field-meta.xml --source-dir force-app/main/default/objects/Opportunity/fields/AI_Call_Consent__c.field-meta.xml --source-dir force-app/main/default/objects/Opportunity/fields/AI_Call_Consent_Date__c.field-meta.xml --source-dir force-app/main/default/objects/Opportunity/fields/AI_Call_Consent_Source__c.field-meta.xml --source-dir force-app/main/default/permissionsets/AI_Call_Consent_Access.permissionset-meta.xml
    ```
 
-3. **Assign `AI_Call_Consent_Access` to every rep** (every person who will press AI call, including you). The AI call reads `AI_Call_Consent__c` with the **rep's own** Salesforce login, so a rep without this permission set cannot start a consented AI call (they see "consent field missing"). One command per rep; replace the placeholder with the rep's Salesforce username:
+3. **Assign `AI_Call_Consent_Access` to every rep** (every person who will press AI call — in v1 the admins, including you). The AI call reads `AI_Call_Consent__c` with the **rep's own** Salesforce login, so a rep without this permission set cannot start a consented AI call (they see "consent field missing"). One command per rep; replace the placeholder with the rep's Salesforce username:
 
    ```bash
    sf org assign permset -n AI_Call_Consent_Access -o _t2 -b rep@example.com
@@ -120,34 +124,45 @@ Do this on your own mobile before any real prospect. A test call needs no Salesf
 
 1. Confirm §3 is done and the deploy is healthy. `AI_VOICE_TEST_NUMBERS` must contain your mobile.
 2. Open the CTI softphone and sign in as an **admin**. Keep it open and allow the microphone; the transfer test rings it.
-3. Open the **AI calls** tab. The **Test AI call** box shows your number (prefilled from `AI_VOICE_TEST_NUMBERS`). If the tab or box is missing, AI voice is unavailable: recheck `OPENAI_API_KEY`, `AI_VOICE=on` and that `OUTREACH_KILL_SWITCH` is not `on`.
-4. Press **Test AI call**. The row should go `ringing` within a few seconds and your phone should ring. The caller ID is one of your company's numbers.
-5. **Answer and listen.** The first thing the agent says must be that it is an AI assistant calling for the company and that the call is recorded and transcribed. Fail the test if it does not say so.
+3. Tap **AI calls** on the bottom bar (sparkle icon, after Recent). The top box, **Test AI call**, has one quick button per number in `AI_VOICE_TEST_NUMBERS` (shown like `+1 (512) 555-0100`), a number field prefilled with the first one, and a **Start test call** button.
+   - No **AI calls** tab at all: the running `@cti/api` deploy does not have the AI routes yet. Check that the deploy finished.
+   - A red line "AI calling is turned off — new AI calls will be refused.": recheck `OPENAI_API_KEY`, `AI_VOICE=on` and that `OUTREACH_KILL_SWITCH` is not `on`.
+   - "No test numbers are set (AI_VOICE_TEST_NUMBERS), so a test call will be refused.": set `AI_VOICE_TEST_NUMBERS` (§3).
+4. Tap your number's quick button (or type it), then **Start test call**. Expect the green line "Calling +1 (512) 555-0100 — answer your phone." A new row appears at the top with the chip **Calling…**, then **In progress** once you answer. Your phone should ring within a few seconds; the caller ID is one of your company's numbers. A refusal shows the reason in red, in plain words.
+5. **Answer and listen.** The first thing the agent says must be that it is an AI assistant calling for the company, on a recorded line. Fail the test if it does not say so.
 6. **Talk to it** for a minute as a seller. Say you might sell, the house needs work, and you want about a certain amount. It should ask follow-up questions and must not name a price or make an offer.
-7. **Test the transfer:** say "Can I talk to a real person?" Your phone should go quiet and the softphone you have open should ring as an incoming call showing an AI transfer. Answer it in the softphone and confirm audio both ways, then hang up. (The call goes to the rep who started it, because a test call has no record owner.)
-8. **Test the opt-out:** start a second test call, answer, and say "Stop calling me." The agent should say a short goodbye and hang up within a few seconds. In the AI calls tab the outcome should read do not call. Start a **third** test call: it must be refused with a plain-words message about opt-out (`opted_out`). That proves the opt-out is live.
+7. **Test the transfer:** say "Can I talk to a real person?" Your phone should go quiet and the softphone you have open should ring as an incoming call; under the name and number the ring screen shows **"AI transfer — asked for a person"**. Answer it in the softphone and confirm audio both ways, then hang up. The row goes **Transferring**, then **Transferred**. (The call goes to the person who started it, because a test call has no record owner.)
+8. **Test the opt-out:** start a second test call, answer, and say "Stop calling me." The agent should say a short goodbye and hang up within a few seconds. In the AI calls tab the row's outcome should read **Do not call**. Start a **third** test call: it must be refused with "This number asked not to be called (it is on the opt-out list)." That proves the opt-out is live.
 9. **Delete the test opt-out row** so your own number can be called again. Get the public database URL first. `$PUB` is a live credential: never print or share it:
 
    ```bash
    PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
    ```
 
-   Then delete only the AI-call opt-out for your number. Replace `+15125550100` with your mobile:
+   Find your organization's id (one line per org; pick yours):
 
    ```bash
-   echo "DELETE FROM opt_outs WHERE e164 = :'num' AND source = 'ai_call' RETURNING id, e164, source, created_at;" | psql "$PUB" -v num='+15125550100'
+   echo "SELECT id, name FROM organizations;" | psql "$PUB"
    ```
 
-   Expected: exactly one row returned. Zero rows means the opt-out was not written: stop and investigate (the AI "stop calling me" path is broken). Never run the delete without the `source = 'ai_call'` guard, or you could remove a real opt-out.
+   Then delete only the AI-call opt-out for your number in your org. Replace `<org uuid>` with that id and `+15125550100` with your mobile:
 
-10. Open the first call in the AI calls tab and check the transcript and summary (§8). Smoke test passes when: disclosure heard, no price named, transfer rang the softphone, opt-out written and honoured, and the row was deleted.
+   ```bash
+   echo "DELETE FROM opt_outs WHERE org_id = :'org' AND e164 = :'num' AND source = 'ai_call' RETURNING id, org_id, e164, source, created_at;" | psql "$PUB" -v org='<org uuid>' -v num='+15125550100'
+   ```
+
+   Expected: exactly one row returned. Zero rows means either the opt-out was not written (the AI "stop calling me" path is broken: stop and investigate), or your number already had an opt-out from another source, which the AI call does not overwrite. Never run the delete without the `org_id` and `source = 'ai_call'` guards, or you could remove a real opt-out.
+
+10. Tap the first call's row in the AI calls tab to expand its transcript, and read its summary (§8). Smoke test passes when: disclosure heard, no price named, transfer rang the softphone, opt-out written and honoured, and the row was deleted.
 
 ## 6. A real, consent-gated call
 
-1. In Salesforce, open a **Lead you own** whose phone number is one you are happy to call (a colleague or your own second number is best the first time).
+Admins only in v1 (§1).
+
+1. In Salesforce, open a **Lead you own** whose phone number is one you are happy to call (a colleague or your own second number is best the first time). An Opportunity works the same way.
 2. Tick **AI Call Consent** on it. Set **AI Call Consent Source** to `Rep`. Save.
-3. In the softphone, click-to-dial from that Lead so the softphone has the record, then press **AI call** beside the normal call button.
-4. The row appears in the AI calls tab. If it is refused, the message says why in plain words:
+3. Click the phone number on that Lead (click-to-dial). While AI calling is on, the dial screen shows a box under the verdict panel's Cancel / **Call now** row: "Let the AI assistant call" plus the record's name, with an **AI call** button. It is disabled while the firewall check or a human call is in flight. Do not press Call now.
+4. Press **AI call**. On success the dial screen clears, the softphone switches to the **AI calls** tab with a green "AI call started — follow it here.", and the row appears at the top. If it is refused, the reason shows in red under the button, in plain words:
 
    | Reason code | What it means and what to do |
    |---|---|
@@ -162,22 +177,34 @@ Do this on your own mobile before any real prospect. A test call needs no Salesf
    | `not_admin_for_test` | Only admins can place test calls |
    | `call_in_progress` | That number is already on a live AI call |
 
-   Other errors: `record_not_found` (bad record), `salesforce_error` (your Salesforce login could not read the record), `twilio_error` (Twilio refused to place it), `gate_error` (a safety check failed to run, so the call was refused).
+   Other errors:
+
+   | HTTP | Code | Meaning |
+   |---|---|---|
+   | 400 | `invalid_body` | The request was malformed (not a Lead / Opportunity / Contact id, or a bad test number) |
+   | 404 | `record_not_found` | Salesforce could not find the record, or you cannot see it |
+   | 429 | (rate limited) | More than 10 AI call starts in one minute by the same person. Wait a minute |
+   | 502 | `salesforce_error` | Your Salesforce login could not read the record |
+   | 502 | `twilio_error` | Twilio refused to place the call (the row is marked failed) |
+   | 503 | `gate_error` | A safety check failed to run, so the call was refused |
 
 ## 7. Where callers end up
 
-- **Transfer:** the call rings the **Salesforce record owner's** softphone if that owner is mapped to a CTI user. Otherwise it rings the rep who started the AI call. The transferring rep sees the prospect's number and name and an "AI transfer" reason.
-- **If nobody answers the transfer within 25 seconds,** the caller hears that a specialist will call them right back, and the call ends with outcome `transfer_failed`; the call row says to call them back. A callback Task in Salesforce is created for the rep.
-- **The callback number** the agent gives the caller is the number it called from (the caller-ID number Twilio dialled out on), so a caller who phones back reaches the normal inbound path.
+- **Transfer:** the call rings the **Salesforce record owner's** softphone if that owner has connected Salesforce in the CTI (so is mapped to a CTI user). Otherwise it rings the person who started the AI call. It rings through the normal incoming path: the caller ID is the prospect's number, the record screen-pops on Answer, and the ring screen shows **"AI transfer — "** followed by the reason, one of: interested, wants an offer, asked for a person, legal or complex question, has a question.
+- **If nobody answers the transfer within 25 seconds,** the caller hears "Sorry, our specialist just stepped away — they'll call you right back. Thanks!" and the call ends. The outcome reads **Transfer missed — callback promised**, and the summary carries the line "Transfer to a specialist did not connect — call them back."
+- **Callback Task (Salesforce):** a promised call back — a missed transfer, or a callback the person asked for (**Callback requested**) — gets an **Open** Task on the record for the hand-off person (the record owner), created with their own Salesforce login. If their Salesforce connection is gone, the starter creates it and assigns it to them (`OwnerId`); if neither works, it is the starter's own Task. Subject `AI call: callback requested` (missed transfer: dated today, and the description adds "The caller was promised a call back.") or `AI call: callback <when>` (asked-for callback: `<when>` is what the person said, or "Wed, Oct 7, 5:00 PM" in their time zone for an exact time; dated that day). If the org refuses the Open status, the Task is made Completed instead. Not for test calls, and only on records the Task's author may write to (§8).
+- **The callback number** the agent gives the caller is the number it called from (the caller-ID number Twilio dialled out on), so a caller who phones back reaches the normal inbound path. It is not given on emergencies, threats or abuse, do-not-call goodbyes, or after they hang up.
 
 ## 8. Reading the results
 
-- **AI calls panel (softphone → AI calls):** the 20 most recent calls (admins see everyone's, reps see their own) with status, outcome, duration, summary and an expandable **transcript**. It refreshes every few seconds while a call is live.
-- **Transcript:** lines from the agent and the caller. Anything the agent was cut off from saying (for example by voicemail or a transfer) is shown as `[not played]`.
-- **Statuses:** `queued`, `ringing`, `in_progress`, `transferring` are live; `transferred`, `completed`, `failed`, `blocked` are final.
-- **Outcomes:** qualified and transferred, qualified with callback, do not call, wrong number, voicemail, no answer, busy, hung up, failed, blocked.
-- **Salesforce Task:** after a real (non-test) call on a Lead or Opportunity you own, a Task titled `AI call: <outcome>` is logged on the record with the summary, the qualification answers, and the CTI call id. Test calls log no Task.
-- **Qualification answers** are on the call row and in the Task description: motivation, timeline, condition, price expectations, decision makers, occupancy.
+- **AI calls panel (softphone → AI calls):** the 20 most recent calls (admins see everyone's, reps see their own). Each row: status chip, the number, a grey **Test** chip for test calls, the start time, and the duration once ended; below it the outcome in words (for a blocked row, the block reason), and the summary. Tap a row to expand its **transcript**. **Refresh** is top right. It refreshes every 4 s while a call is live (or ended less than 20 s ago), otherwise every 30 s, and not while the page is hidden.
+- **Transcript:** **AI:** and **Caller:** lines. Anything the agent was cut off from saying (for example by voicemail or a transfer) is shown in grey as `[not played] …`.
+- **Status chips:** **Calling…**, **In progress**, **Transferring** are live; **Transferred**, **Completed**, **Failed**, **Blocked** are final. A finished call can still move from Completed to Transferred once, a few seconds later, when the transfer result arrives.
+- **Outcome words:** Transferred to rep, Callback requested, Not interested, Do not call, Left voicemail, No answer, Busy, Failed, Wrong number, Hung up, Transfer missed — callback promised, Blocked, Other.
+- **Summary:** a few seconds after the call ends, the agent's notes are replaced by 2–4 sentences (Claude when `ANTHROPIC_API_KEY` is set and the caller spoke), then any "Callback requested: …" / "Transfer to a specialist did not connect …" lines, a blank line, a **Qualification:** block (`- Motivation: …`, only what was captured), `Outcome: <words>` and `AI call id: <id>`.
+- **Salesforce call Task:** after a real (non-test) call that was placed, ONE completed Call Task on the record, created as the person who started the call. Only when they have connected Salesforce in the CTI and may write on the record (the power dialer's rule: they own it, are the Opportunity's lead manager, or it is queue-owned). Subject `AI call: <outcome words>` (for example `AI call: Callback requested`), Call Result the matching disposition (Connected, Left voicemail, No answer, Busy, Wrong number, Do not call, Failed), description = the summary plus `Transcript in CTI: AI call <id>`. No call duration: AI talk time is not rep talk time. Test calls log no Task. A promised call back also gets the callback Task (§7).
+- **Call history:** placed AI calls also appear in the starter's own call history with the disposition already filled in (no wrap-up prompt) and 0 talk seconds. They count toward the daily state cap and the per-customer ceiling like any dial.
+- **Qualification answers** are on the call row and in the summary: motivation, timeline, condition, occupancy, price expectation, decision makers, mortgage, other.
 
 ## 9. Kill switch
 
@@ -209,10 +236,10 @@ Set any of these with `railway variables --set "NAME=value" --service @cti/api`.
 ## 11. Known limits
 
 - **cti-api must run exactly one replica.** Live calls are tracked in memory in one process. A call answered by a different replica, or after a restart, has no state: it is hung up and shown as `failed`. `.railway/railway.ts` already pins one replica; do not scale `@cti/api` up. Avoid redeploying during a live call.
-- **A lost Twilio status callback leaves a call row non-final** (no end time, status stuck on `in_progress` or `ringing`). Twilio does not retry. If you see a row that never finishes, check the Twilio console for the call, and leave the row; it does not block anything except that the same number cannot be called again for up to an hour (`call_in_progress`).
+- **A lost Twilio status callback is repaired by a sweeper.** Every 2 minutes it finalizes, from Twilio's own call record, any placed call still open after 3 minutes (a row that never placed a call is marked failed after 10 minutes). The sweeper only runs while AI voice is available; rows left open while `AI_VOICE` is off wait until it is back on.
 - **Transfers ring the record owner if mapped, else the rep who started the call.** If that person's softphone is not open and registered, nobody answers and the 25-second callback path runs.
 - **No call audio is stored,** only text transcripts and summaries. If you need recordings for compliance, that is a separate build.
-- **Same-number duplicate check is not atomic.** Two simultaneous starts to one number could both go through. The UI and the rate limit (10 AI call starts per minute per rep) make this very unlikely.
+- **Same-number duplicate check is not atomic.** Two simultaneous starts to one number could both go through. The UI and the rate limit (10 AI call starts per minute per person) make this very unlikely.
 - **Untested against a live carrier until your smoke test:** the transfer caller ID, call time limit extension, and the voicemail voice are only exercised for real in §5. Run the smoke test after every deploy that touches `services/cti-api/src/ai-voice/`.
 
 ## 12. Costs
@@ -226,11 +253,11 @@ Per minute of conversation:
 | Twilio Media Streams | about $0.0044 per minute |
 | Twilio answering-machine detection | $0.0075 per **call** |
 
-So about **$0.12 per minute plus $0.0075 per call**. The 10-minute cap makes the worst case about $1.30 per call, and a typical qualifying call of 3 minutes is about $0.40. A call that rings out costs about $0.01. Summaries with a Haiku-class model are a fraction of a cent. Check real spend on platform.openai.com → **Usage** after your first day, and set a monthly spend limit under **Settings → Limits**.
+So about **$0.12 per minute plus $0.0075 per call** ($0.10 + $0.014 + $0.0044 = $0.1184). The 10-minute cap makes the worst case about **$1.20** per call (10 × $0.1184 + $0.0075 ≈ $1.19), and a typical qualifying call of 3 minutes is about $0.36. A call that rings out costs about $0.01. Summaries with a Haiku-class model are a fraction of a cent. Check real spend on platform.openai.com → **Usage** after your first day, and set a monthly spend limit under **Settings → Limits**.
 
 ## 13. Legal notes
 
 - **AI calls only to people with the consent checkbox ticked.** The checkbox is the record that the person agreed to calls from an AI assistant. Tick it only when they actually did (a reply, a web form, an inbound call, or a rep confirming on the phone) and record the source.
-- **Disclosure at the start of every call.** The agent says it is an AI assistant and that the call is recorded and transcribed. Do not change the prompt to remove it.
+- **Disclosure at the start of every call.** The agent says it is an AI assistant calling for the company on a recorded line. Do not change the prompt to remove it.
 - **Do-not-call is honoured everywhere.** An opt-out, blocked number, or federal DNC listing stops the AI call, and "stop calling me" on an AI call adds the number to the shared opt-out list the dialer also uses.
 - **Consult counsel on state-specific rules.** Federal and state laws on AI and artificial-voice calls, call recording and two-party consent, and telemarketing hours differ by state and are changing. Have your attorney confirm the disclosure wording, the consent capture wording and which states you may AI-call before you scale up. This runbook is operations guidance, not legal advice.
