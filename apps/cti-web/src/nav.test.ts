@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { navTabsFor, NAV_OVERFLOW_IDS } from './nav';
+import { navTabsFor, NAV_OVERFLOW_IDS, type Tab } from './nav';
 
 const rep = { isAdmin: false, powerDialerEnabled: false };
 
@@ -31,11 +31,11 @@ describe('navTabsFor', () => {
     expect(byId).toMatchObject({ team: 'Team', talktime: 'Talk time', admin: 'Numbers', reputation: 'Reputation', dialer: 'Dial' });
   });
 
-  it('AI calls shows on the main bar only when asked, after Recent', () => {
-    expect(navTabsFor(rep, { aiCalls: true }).map((t) => t.id)).toEqual(['dialer', 'recent', 'aicalls', 'settings']);
-    expect(navTabsFor(rep, { aiCalls: false }).map((t) => t.id)).not.toContain('aicalls');
-    const admin = navTabsFor({ isAdmin: true, powerDialerEnabled: false }, { aiCalls: true });
-    expect(admin.find((t) => t.id === 'aicalls')?.label).toBe('AI calls');
-    expect(NAV_OVERFLOW_IDS).not.toContain('aicalls');
+  it('has no AI calls tab: AI calls start from outreach campaigns, not the softphone', () => {
+    expect(navTabsFor(rep).map((t) => t.id)).not.toContain('aicalls');
+    expect(navTabsFor({ isAdmin: true, powerDialerEnabled: true }).map((t) => t.id)).not.toContain('aicalls');
+    // @ts-expect-error 'aicalls' is no longer a Tab
+    const gone: Tab = 'aicalls';
+    expect(gone).toBe('aicalls'); // only here to use the value; the type error above is the check
   });
 });

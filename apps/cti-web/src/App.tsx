@@ -6,9 +6,7 @@ import { runDefaultsFromMe } from './run-settings';
 import { createLineAudio, watchLineVolume, type LineAudio } from './line-audio';
 import { startRingback, stopRingback } from './ringback';
 import { AdminPanel } from './components/AdminPanel';
-import { AiCallButton } from './components/AiCallButton';
-import { AiCallPanel, AiCallsIcon } from './components/AiCallPanel';
-import { aiCallTargetFor, aiTransferLabel, getAiAvailability, type AiAvailability } from './ai-calls-api';
+import { aiTransferLabel } from './ai-transfer';
 import { CallLog } from './components/CallLog';
 import { DialerPanel, processedCount, type PopLedger } from './components/DialerPanel';
 import { IncomingScreen } from './components/IncomingScreen';
@@ -213,22 +211,6 @@ export function App(): JSX.Element {
   const [disposition, setDisposition] = useState('Connected');
   const [notes, setNotes] = useState('');
   const [ctiContext, setCtiContext] = useState<ClickToDialEvent | null>(null);
-  // AI voice calls (GET /ai-calls/availability): null until known, or when the
-  // API has no AI routes. Asked again on each click-to-dial so the AI call
-  // button follows the kill switch.
-  const [aiAvail, setAiAvail] = useState<AiAvailability | null>(null);
-  const meUserId = me?.user.userId;
-  useEffect(() => {
-    if (!meUserId) return;
-    if (ctiContext === null && aiAvail !== null) return;
-    let cancelled = false;
-    getAiAvailability().then(
-      (a) => { if (!cancelled) setAiAvail(a); },
-      () => { if (!cancelled) setAiAvail(null); },
-    );
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meUserId, ctiContext]);
   // A ringing INBOUND call waiting for the rep to accept/decline in the CTI.
   const [incoming, setIncoming] = useState<TwilioIncomingCall | null>(null);
   // The rep's outstanding un-dispositioned call (server truth), if any — drives
@@ -2247,8 +2229,6 @@ export function App(): JSX.Element {
         whatId: c.salesforceWhatId,
       })}
     />
-  ) : tab === 'aicalls' ? (
-    <AiCallPanel isAdmin={me.user.isAdmin} testNumbers={aiAvail?.testNumbers ?? []} available={aiAvail?.available === true} />
   ) : tab === 'team' ? (
     <TeamPanel />
   ) : tab === 'talktime' ? (
@@ -2341,18 +2321,6 @@ export function App(): JSX.Element {
           </div>
         ) : null
       )}
-      <AiCallButton
-        key={ctiContext?.recordId ?? 'none'}
-        target={aiCallTargetFor(ctiContext)}
-        available={aiAvail?.available === true}
-        recordName={ctiContext?.recordName}
-        disabled={busy}
-        onStarted={() => {
-          reset();
-          setTab('aicalls');
-          setToast({ text: 'AI call started — follow it here.', type: 'success' });
-        }}
-      />
     </div>
   );
 
@@ -2360,7 +2328,6 @@ export function App(): JSX.Element {
     dialer: <GridIcon />,
     powerdial: <ZapIcon />,
     recent: <ClockIcon />,
-    aicalls: <AiCallsIcon />,
     team: <UserIcon />,
     talktime: <ClockIcon />,
     reputation: <ShieldIcon />,
@@ -2368,10 +2335,7 @@ export function App(): JSX.Element {
     calls: <PhoneOutgoingIcon />,
     settings: <UserIcon />,
   };
-  // Admins see AI calls whenever the API has it (so a switched-off state is
-  // explained there); reps only while AI calling is on.
-  const showAiCalls = !!aiAvail && (aiAvail.available || me.user.isAdmin);
-  const navItems = navTabsFor(me.user, { aiCalls: showAiCalls }).map((t) => ({ ...t, icon: iconFor[t.id] }));
+  const navItems = navTabsFor(me.user).map((t) => ({ ...t, icon: iconFor[t.id] }));
   // Keep the bottom bar uncrowded: the admin-only tools live under a "More"
   // overflow (reps have none, so their bar is just the 4 primary tabs).
   const primaryItems = navItems.filter((i) => !NAV_OVERFLOW_IDS.includes(i.id));

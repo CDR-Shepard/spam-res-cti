@@ -18,7 +18,7 @@ interface IncomingScreenProps {
   /** e.g. "Lead" / "Contact" / "Opportunity" / "Record" — shown next to the number when a name is present. */
   recordType?: string;
   /** "AI transfer — <reason>" when the AI assistant is handing this caller over
-   *  (the `aiTransfer` call parameter; see ai-calls-api.ts aiTransferLabel). */
+   *  (the `aiTransfer` call parameter; see ai-transfer.ts aiTransferLabel). */
   aiTransfer?: string;
   onAccept: () => void;
   onDecline: () => void;
