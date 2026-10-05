@@ -30,6 +30,7 @@ export function campaign(over: Partial<Campaign> = {}): Campaign {
     name: 'Spring sellers',
     sfObject: 'Lead',
     source: { kind: 'list_view', listViewId: LIST_VIEW_ID },
+    mode: 'sequence',
     status: 'dry_run',
     pauseReason: null,
     pausedFrom: null,

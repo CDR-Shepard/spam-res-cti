@@ -9,7 +9,7 @@ import {
   NeedsReviewResponse,
   StartConnectionResponse,
   type CampaignStatusChange,
-  type CreateCampaignRequest,
+  type CreateCampaignInput,
   type EnrollmentStatus,
   type FieldMap,
   type PreviewRequest,
@@ -71,7 +71,7 @@ export function listCampaigns(opts: { archived?: boolean } = {}): Promise<Campai
   return api(`/api/campaigns${opts.archived ? '?archived=1' : ''}`, CampaignsResponse);
 }
 
-export function createCampaign(req: CreateCampaignRequest): Promise<Campaign> {
+export function createCampaign(req: CreateCampaignInput): Promise<Campaign> {
   return api('/api/campaigns', Campaign, { method: 'POST', body: json(req) });
 }
 

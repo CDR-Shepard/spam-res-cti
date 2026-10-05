@@ -35,7 +35,7 @@ const ListQuery = z.object({ archived: z.enum(['0', '1']).optional() });
 const PlanQuery = z.object({ cursor: z.string().uuid().optional(), status: EnrollmentStatus.optional() });
 
 /** A malformed id can never match a row: 404, not 400 (same rule as team.ts). */
-function campaignId(req: FastifyRequest, reply: FastifyReply): string | null {
+export function campaignId(req: FastifyRequest, reply: FastifyReply): string | null {
   const params = IdParams.safeParse(req.params);
   if (params.success) return params.data.id;
   sendError(reply, 404, 'CAMPAIGN_NOT_FOUND', 'No such campaign');
@@ -48,21 +48,21 @@ async function loadCampaign(db: Db, orgId: string, id: string): Promise<Campaign
   return row && row.id === id && row.orgId === orgId ? row : null;
 }
 
-async function campaignOr404(db: Db, orgId: string, id: string, reply: FastifyReply): Promise<CampaignRow | null> {
+export async function campaignOr404(db: Db, orgId: string, id: string, reply: FastifyReply): Promise<CampaignRow | null> {
   const row = await loadCampaign(db, orgId, id);
   if (!row) sendError(reply, 404, 'CAMPAIGN_NOT_FOUND', 'No such campaign');
   return row;
 }
 
 /** The field map of a connected tenant, or null (no connection, broken, or an unreadable map). */
-async function connectedFieldMap(db: Db, orgId: string): Promise<FieldMap | null> {
+export async function connectedFieldMap(db: Db, orgId: string): Promise<FieldMap | null> {
   const row = await loadConnection(db, orgId);
   if (!row || row.status !== 'connected') return null;
   const parsed = FieldMap.safeParse(row.fieldMap);
   return parsed.success ? parsed.data : null;
 }
 
-function sendSourceError(reply: FastifyReply, err: unknown): FastifyReply {
+export function sendSourceError(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof CampaignSourceError) return sendError(reply, 422, 'INVALID_SOURCE', err.message, { code: err.code });
   return sendCrmError(reply, err);
 }
@@ -147,7 +147,7 @@ function registerBuildRoutes(app: FastifyInstance, deps: CampaignRouteDeps): voi
     } catch (err) {
       return sendSourceError(reply, err);
     }
-    const { name, sfObject, source } = body.data;
+    const { name, sfObject, source, mode } = body.data;
     const [row] = await db
       .insert(schema.campaigns)
       .values({
@@ -157,6 +157,7 @@ function registerBuildRoutes(app: FastifyInstance, deps: CampaignRouteDeps): voi
         sourceKind: source.kind,
         listViewId: source.kind === 'list_view' ? source.listViewId : null,
         soql,
+        mode,
         status: 'draft',
         createdBy: ctx.session.userId,
       })

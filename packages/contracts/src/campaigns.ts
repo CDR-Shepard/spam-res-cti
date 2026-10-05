@@ -29,13 +29,23 @@ export const TouchDays = z
   .refine(isTouchSchedule, { message: 'Touch days must start at 0 and strictly increase' });
 export type TouchDays = z.infer<typeof TouchDays>;
 
+/** sequence = plan 1A (triage + touch planner); ai_call = plan 1C (picked leads, call plans, AI voice calls). Fixed at creation. */
+export const CampaignMode = z.enum(['sequence', 'ai_call']);
+export type CampaignMode = z.infer<typeof CampaignMode>;
+
+/** A 15- or 18-character Salesforce record Id. Shape-checked before it can reach SOQL. */
+export const SfRecordIdString = z.string().regex(/^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/, 'Not a Salesforce record id');
+
 /** POST /api/campaigns. */
 export const CreateCampaignRequest = z.object({
   name: z.string().trim().min(1).max(120),
   sfObject: SfObject,
   source: CampaignSource,
+  mode: CampaignMode.default('sequence'),
 });
 export type CreateCampaignRequest = z.infer<typeof CreateCampaignRequest>;
+/** What a client may send: `mode` is optional (defaults to sequence). */
+export type CreateCampaignInput = z.input<typeof CreateCampaignRequest>;
 
 /** PATCH /api/campaigns/:id. */
 export const UpdateCampaignRequest = z.object({
@@ -54,6 +64,7 @@ export const Campaign = z.object({
   name: z.string(),
   sfObject: SfObject,
   source: CampaignSource,
+  mode: CampaignMode,
   status: CampaignStatus,
   /** manual | crm_broken | ai_budget | kill_switch while paused; else null. */
   pauseReason: z.string().nullable(),
@@ -85,6 +96,53 @@ export const SkipReason = z.enum([
   'closed',
 ]);
 export type SkipReason = z.infer<typeof SkipReason>;
+
+/** GET /api/campaigns/:id/candidates?page=N — the lead picker. */
+export const CANDIDATE_PAGE_SIZE = 50;
+
+export const CandidateRecord = z.object({
+  sfRecordId: z.string(),
+  name: z.string().nullable(),
+  ownerName: z.string().nullable(),
+  /** The record's AI call consent field as last read; a call still re-checks it in the engine. */
+  consentAiCall: z.boolean(),
+  /** Why the record would not enroll (null = it can). Null for a record already enrolled here. */
+  skipReason: SkipReason.nullable(),
+  selected: z.boolean(),
+  /** Already enrolled in this campaign. */
+  enrolled: z.boolean(),
+});
+export type CandidateRecord = z.infer<typeof CandidateRecord>;
+
+export const CandidatePage = z.object({
+  /** Every member the query returns (capped at 50,000). */
+  total: z.number(),
+  page: z.number().int().min(1),
+  pageSize: z.number(),
+  pages: z.number().int().min(1),
+  selectedCount: z.number(),
+  records: z.array(CandidateRecord).max(CANDIDATE_PAGE_SIZE),
+});
+export type CandidatePage = z.infer<typeof CandidatePage>;
+
+/** PUT /api/campaigns/:id/selection. `selectAll` selects every current member; `clear` deselects everything. */
+export const SELECTION_CHANGE_MAX = 500;
+export const SelectionChange = z
+  .object({
+    add: z.array(SfRecordIdString).max(SELECTION_CHANGE_MAX).default([]),
+    remove: z.array(SfRecordIdString).max(SELECTION_CHANGE_MAX).default([]),
+    selectAll: z.boolean().default(false),
+    clear: z.boolean().default(false),
+  })
+  .refine((c) => c.add.length > 0 || c.remove.length > 0 || c.selectAll || c.clear, { message: 'Nothing to change' });
+export type SelectionChange = z.infer<typeof SelectionChange>;
+
+export const SelectionResponse = z.object({
+  selectedCount: z.number(),
+  /** Ids in `add` that are not members of the campaign's query (never selected). */
+  ignored: z.number(),
+});
+export type SelectionResponse = z.infer<typeof SelectionResponse>;
 
 /** POST /api/campaigns/preview. */
 export const PreviewRequest = z.object({ sfObject: SfObject, source: CampaignSource });

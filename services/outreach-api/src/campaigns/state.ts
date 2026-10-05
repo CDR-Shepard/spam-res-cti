@@ -31,6 +31,7 @@ export function toCampaignDto(row: CampaignRow): Campaign {
     name: row.name,
     sfObject: row.sfObject,
     source,
+    mode: row.mode === 'ai_call' ? 'ai_call' : 'sequence',
     status: row.status,
     pauseReason: row.pauseReason,
     pausedFrom: row.pausedFrom === 'dry_run' || row.pausedFrom === 'active' ? row.pausedFrom : null,

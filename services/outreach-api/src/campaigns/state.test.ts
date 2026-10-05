@@ -34,7 +34,7 @@ const row: CampaignRow = {
 describe('toCampaignDto', () => {
   it('maps a list-view campaign to the Campaign contract', () => {
     expect(Campaign.parse(toCampaignDto(row))).toEqual({
-      id: row.id, name: 'Probate leads', sfObject: 'Lead', source: { kind: 'list_view', listViewId: '00B5f00000ABCDE' }, status: 'paused',
+      id: row.id, name: 'Probate leads', sfObject: 'Lead', source: { kind: 'list_view', listViewId: '00B5f00000ABCDE' }, mode: 'sequence', status: 'paused',
       pauseReason: 'crm_broken', pausedFrom: 'active', refreshMinutes: 240, touchDays: [0, 1, 3, 6, 10, 14], memberCount: 812,
       lastRefreshedAt: '2026-10-04T10:00:00.000Z', lastRefreshError: null, createdAt: '2026-10-01T09:00:00.000Z',
     });

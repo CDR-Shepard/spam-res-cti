@@ -170,8 +170,17 @@ describe('POST /api/campaigns', () => {
     const created = Campaign.parse(res.json());
     expect(created).toMatchObject({ status: 'draft', name: 'Probate', source: { kind: 'soql', soql: "SELECT Id FROM Lead WHERE Status = 'Open'" } });
     expect(fixture.writes).toEqual([{ op: 'insert', table: schema.campaigns, values: {
-      orgId: 'O1', name: 'Probate', sfObject: 'Lead', sourceKind: 'soql', listViewId: null, soql: "SELECT Id FROM Lead WHERE Status = 'Open'", status: 'draft', createdBy: ADMIN_ID,
+      orgId: 'O1', name: 'Probate', sfObject: 'Lead', sourceKind: 'soql', listViewId: null, soql: "SELECT Id FROM Lead WHERE Status = 'Open'", mode: 'sequence', status: 'draft', createdBy: ADMIN_ID,
     } }]);
+  });
+
+  it('stores the mode a campaign is created with', async () => {
+    await app.close();
+    app = await build({ insertDefaults: campaignRow({ mode: 'ai_call' }) });
+    const res = await app.inject({ method: 'POST', url: '/api/campaigns', headers: auth, payload: { name: 'Past sellers', sfObject: 'Lead', mode: 'ai_call', source: { kind: 'soql', soql: 'SELECT Id FROM Lead' } } });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().mode).toBe('ai_call');
+    expect(fixture.writes.find((w) => w.table === schema.campaigns)?.values).toMatchObject({ mode: 'ai_call' });
   });
 
   it("creates from a list view, storing the list view's described SOQL", async () => {

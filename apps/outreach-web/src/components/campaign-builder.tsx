@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { CampaignSource, type Campaign, type CreateCampaignRequest, type PreviewRequest, type SfObject } from '@cti/contracts';
+import { CampaignSource, type Campaign, type CreateCampaignInput, type PreviewRequest, type SfObject } from '@cti/contracts';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -39,7 +39,7 @@ export function CampaignBuilder({ onCreated }: CampaignBuilderProps) {
   const views = useQuery({ queryKey: outreachKeys.listViews(sfObject), queryFn: () => listViews(sfObject), enabled: isAdmin && kind === 'list_view' });
   const preview = useMutation({ mutationFn: (req: PreviewRequest) => previewCampaign(req) });
   const create = useMutation({
-    mutationFn: (req: CreateCampaignRequest) => createCampaign(req),
+    mutationFn: (req: CreateCampaignInput) => createCampaign(req),
     onSuccess: (created) => { void qc.invalidateQueries({ queryKey: outreachKeys.campaignLists }); onCreated(created); },
   });
   /** Any change to what the campaign reads makes an earlier preview or error stale. */

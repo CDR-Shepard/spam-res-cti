@@ -4,9 +4,12 @@ import {
   CampaignPlanResponse,
   CampaignPreview,
   CampaignSource,
+  CampaignMode,
   CampaignStatusChange,
+  CandidatePage,
   CreateCampaignRequest,
   PlanRow,
+  SelectionChange,
   SkipReason,
   TouchDays,
   UpdateCampaignRequest,
@@ -91,6 +94,7 @@ describe('campaign contracts', () => {
       name: 'Open leads',
       sfObject: 'Lead',
       source: { kind: 'list_view', listViewId: '00B5f00000ABCDE' },
+      mode: 'sequence',
       status: 'dry_run',
       pauseReason: null,
       pausedFrom: null,
@@ -108,7 +112,7 @@ describe('campaign contracts', () => {
   it('Campaign carries pausedFrom: what a paused campaign was doing (dry_run or active), else null', () => {
     const base = Campaign.parse({
       id: '33333333-3333-4333-8333-333333333333', name: 'Open leads', sfObject: 'Lead', source: { kind: 'soql', soql: 'SELECT Id FROM Lead' },
-      status: 'paused', pauseReason: 'ai_budget', pausedFrom: 'dry_run', refreshMinutes: 240, touchDays: [0], memberCount: 1,
+      mode: 'sequence', status: 'paused', pauseReason: 'ai_budget', pausedFrom: 'dry_run', refreshMinutes: 240, touchDays: [0], memberCount: 1,
       lastRefreshedAt: null, lastRefreshError: null, createdAt: '2026-10-04T11:00:00.000Z',
     });
     expect(base.pausedFrom).toBe('dry_run');
@@ -166,5 +170,35 @@ describe('campaign contracts', () => {
   it('CampaignPlanResponse counts are keyed by enrollment status only', () => {
     expect(CampaignPlanResponse.parse({ rows: [], nextCursor: null, counts: { active: 3, exited: 1 } }).counts).toEqual({ active: 3, exited: 1 });
     expect(CampaignPlanResponse.safeParse({ rows: [], nextCursor: null, counts: { waiting: 1 } }).success).toBe(false);
+  });
+});
+
+describe('campaign mode', () => {
+  it('defaults a new campaign to sequence and accepts ai_call', () => {
+    const base = { name: 'Past sellers', sfObject: 'Lead', source: { kind: 'soql', soql: 'SELECT Id FROM Lead' } };
+    expect(CreateCampaignRequest.parse(base).mode).toBe('sequence');
+    expect(CreateCampaignRequest.parse({ ...base, mode: 'ai_call' }).mode).toBe('ai_call');
+    expect(CreateCampaignRequest.safeParse({ ...base, mode: 'robocall' }).success).toBe(false);
+    expect(CampaignMode.options).toEqual(['sequence', 'ai_call']);
+  });
+});
+
+describe('SelectionChange', () => {
+  const id = '00Q000000000001AAA';
+  it('needs at least one action', () => {
+    expect(SelectionChange.safeParse({}).success).toBe(false);
+    expect(SelectionChange.parse({ add: [id] })).toEqual({ add: [id], remove: [], selectAll: false, clear: false });
+  });
+  it('refuses malformed ids and more than 500 per call', () => {
+    expect(SelectionChange.safeParse({ add: ["00Q' OR Id != '"] }).success).toBe(false);
+    expect(SelectionChange.safeParse({ add: Array.from({ length: 501 }, () => id) }).success).toBe(false);
+  });
+});
+
+describe('CandidatePage', () => {
+  it('caps a page at 50 records', () => {
+    const rec = { sfRecordId: '00Q000000000001AAA', name: null, ownerName: null, consentAiCall: false, skipReason: null, selected: false, enrolled: false };
+    const page = { total: 51, page: 1, pageSize: 50, pages: 2, selectedCount: 0, records: Array.from({ length: 51 }, () => rec) };
+    expect(CandidatePage.safeParse(page).success).toBe(false);
   });
 });
