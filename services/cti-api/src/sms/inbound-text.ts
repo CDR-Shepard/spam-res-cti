@@ -85,15 +85,19 @@ export function textTaskDescription(body: string, numMedia: number): string {
  * Who gets the text. Agent numbers belong to one rep. Pool numbers are shared,
  * so they route exactly like a callback to that number: the rep the caller is
  * sticky to (they actually talked), else the rep who last power-dialed them.
+ * An AI (`ai_pool`) number goes to the hand-off user of the newest AI call to
+ * the sender (ai-voice/number-pool.ts `aiCallbackRep`), as a callback does.
  * Null = nobody, and the webhook stores the row as `skipped`.
  */
 export function chooseTextRecipient(
   number: Pick<OutboundNumber, 'kind' | 'assignedUserId'>,
   stickyRep: string | null,
   lastDialerRep: string | null,
+  aiRep: string | null = null,
 ): string | null {
   if (number.kind === 'agent') return number.assignedUserId ?? null;
   if (number.kind === 'dialer_pool') return stickyRep ?? lastDialerRep ?? null;
+  if (number.kind === 'ai_pool') return aiRep;
   return null;
 }
 

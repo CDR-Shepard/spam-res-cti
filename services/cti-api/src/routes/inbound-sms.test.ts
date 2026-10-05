@@ -29,6 +29,7 @@ const state = vi.hoisted(() => ({
   lastDialerError: null as Error | null,
   stickyAgentForCaller: vi.fn(),
   lastDialerForCaller: vi.fn(),
+  aiCallbackRep: vi.fn(async () => 'ai-rep' as string | null),
 }));
 
 vi.mock('../config.js', () => ({
@@ -57,6 +58,11 @@ vi.mock('../telephony/index.js', () => ({
 vi.mock('../dialer/sticky.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../dialer/sticky.js')>();
   return { ...actual, stickyAgentForCaller: state.stickyAgentForCaller, lastDialerForCaller: state.lastDialerForCaller };
+});
+
+vi.mock('../ai-voice/number-pool.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../ai-voice/number-pool.js')>();
+  return { ...actual, aiCallbackRep: state.aiCallbackRep };
 });
 
 vi.mock('@cti/db', async (importOriginal) => {
@@ -366,6 +372,18 @@ describe('POST /telephony/twilio/sms — who gets it', () => {
     expectEmptyTwiml(await text({ MessageSid: SID_2 }));
     expect(state.rows.get(SID_2)).toMatchObject({ userId: null, status: 'skipped' });
     expect(logLines.some((l) => l.includes('inbound_sms_route_lookup_failed'))).toBe(true);
+  });
+});
+
+describe('POST /telephony/twilio/sms — a text to an AI (ai_pool) number', () => {
+  it("routes to the AI call's hand-off user; the dialer rules are never asked", async () => {
+    state.owned = OWNED({ kind: 'ai_pool', assignedUserId: null, e164: '+16197244374' });
+    state.stickyAgentId = 'rep-sticky';
+    await text({ To: '+16197244374' });
+    expect(state.rows.get(SID_1)).toMatchObject({ userId: 'ai-rep', status: 'pending' });
+    expect(state.aiCallbackRep).toHaveBeenCalledWith(expect.anything(), 'org-1', '+13105550002', '+16197244374');
+    expect(state.stickyAgentForCaller).not.toHaveBeenCalled();
+    expect(state.lastDialerForCaller).not.toHaveBeenCalled();
   });
 });
 

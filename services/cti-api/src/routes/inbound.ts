@@ -26,6 +26,7 @@ import { findByPhone, findPrimaryOpenOpportunityId } from '../salesforce/client.
 import { enqueueSyncForCall } from '../salesforce/sync.js';
 import { normalize } from '@cti/phone';
 import { lastDialerForCaller, stickyAgentForCaller } from '../dialer/sticky.js';
+import { aiCallbackRep } from '../ai-voice/number-pool.js';
 import { dialClientWithCallerParams } from './inbound-caller-params.js';
 import { INBOUND_POP_LOOKUP_MS, popRecordFor } from '../salesforce/inbound-pop.js';
 import {
@@ -152,6 +153,22 @@ async function lastDialerOrNone(
   }
 }
 
+/** Same degrade-to-nobody rule for a callback to an AI (`ai_pool`) number. */
+async function aiCallbackRepOrNone(
+  db: Parameters<typeof aiCallbackRep>[0],
+  orgId: string,
+  callerE164: string,
+  dialedAiDid: string,
+  onError: (err: unknown) => void,
+): Promise<string | null> {
+  try {
+    return await aiCallbackRep(db, orgId, callerE164, dialedAiDid);
+  } catch (err) {
+    onError(err);
+    return null;
+  }
+}
+
 export async function registerInboundRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
 
@@ -212,11 +229,20 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     // `handlerUserId` — so that rep (not some arbitrary org user) is who gets
     // credited with the call, sees it in their CTI, and whose SF connection
     // is used for the sync below. Agent-kind DIDs are unaffected: stays null.
+    //
+    // AI-pool DIDs (the AI voice agent's own caller IDs) are shared too: the
+    // seller is calling back the number the AI called them from (its voicemail
+    // states it). Ring the hand-off user of the newest AI call to them (the
+    // record owner, else the admin who started it); with none, voicemail —
+    // exactly the dialer-pool fallback.
+    const sharedPool = owned.kind === 'dialer_pool' || owned.kind === 'ai_pool';
     const poolRepId =
       owned.kind === 'dialer_pool'
         ? (await stickyAgentForCaller(db, owned.orgId, normFrom, owned.e164)) ??
           (await lastDialerOrNone(db, owned.orgId, normFrom, owned.e164, (err) => app.log.warn({ err }, 'inbound_last_dialer_lookup_failed')))
-        : null;
+        : owned.kind === 'ai_pool'
+          ? await aiCallbackRepOrNone(db, owned.orgId, normFrom, owned.e164, (err) => app.log.warn({ err }, 'inbound_ai_callback_lookup_failed'))
+          : null;
 
     // Attribute the inbound call to: the pool rep (dialer-pool callback),
     // else the DID's owner, or — for an unassigned reserve number — any user
@@ -331,8 +357,9 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
 
     const t = new twilio.twiml.VoiceResponse();
 
-    // Dialer-pool DIDs: if the caller has a sticky agent on THIS pool DID, or
-    // a rep power-dialed them recently, ring that rep so the callback reaches
+    // Shared-pool DIDs (dialer_pool, ai_pool): if the caller has a sticky agent
+    // on THIS pool DID, a rep power-dialed them recently, or (AI number) an AI
+    // call reached them, ring that rep so the callback reaches
     // the person they are calling back; otherwise fall through to voicemail.
     // No presence check on purpose — ring exactly as the sticky path always
     // has: an offline softphone simply does not answer, dial-result then
@@ -340,7 +367,7 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
     // ATTRIBUTED to the right rep (their Recent list, their SF sync) instead
     // of an org-wide voicemail box nobody owns. Additive branch — the
     // agent-kind DID routing below (assignedUserId) is unchanged.
-    if (owned.kind === 'dialer_pool') {
+    if (sharedPool) {
       if (poolRepId) {
         // All-party consent: the caller hears the disclosure before we bridge them
         // to the rep and start recording.

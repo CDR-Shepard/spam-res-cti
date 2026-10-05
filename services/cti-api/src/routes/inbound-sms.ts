@@ -31,6 +31,7 @@ import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { lastDialerForCaller, stickyAgentForCaller } from '../dialer/sticky.js';
 import { chooseTextRecipient } from '../sms/inbound-text.js';
+import { aiCallbackRep } from '../ai-voice/number-pool.js';
 
 export const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
 
@@ -92,6 +93,10 @@ async function recipientFor(
   log: FastifyBaseLogger,
   messageSid: string,
 ): Promise<string | null> {
+  if (owned.kind === 'ai_pool') {
+    const aiRep = await orNone(() => aiCallbackRep(db, owned.orgId, fromE164, owned.e164), log, 'ai_callback', messageSid);
+    return chooseTextRecipient(owned, null, null, aiRep);
+  }
   if (owned.kind !== 'dialer_pool') return chooseTextRecipient(owned, null, null);
   const sticky = await orNone(() => stickyAgentForCaller(db, owned.orgId, fromE164, owned.e164), log, 'sticky', messageSid);
   const lastDialer = sticky

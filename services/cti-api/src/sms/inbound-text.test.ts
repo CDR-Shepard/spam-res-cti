@@ -110,6 +110,12 @@ describe('chooseTextRecipient', () => {
     expect(chooseTextRecipient({ kind: 'dialer_pool', assignedUserId: null }, null, 'dialer')).toBe('dialer');
     expect(chooseTextRecipient({ kind: 'dialer_pool', assignedUserId: null }, null, null)).toBeNull();
   });
+
+  it("routes an AI (ai_pool) number to the AI call's hand-off user, never the dialer rules", () => {
+    expect(chooseTextRecipient({ kind: 'ai_pool', assignedUserId: null }, 'sticky', 'dialer', 'ai-rep')).toBe('ai-rep');
+    expect(chooseTextRecipient({ kind: 'ai_pool', assignedUserId: null }, 'sticky', 'dialer', null)).toBeNull();
+    expect(chooseTextRecipient({ kind: 'dialer_pool', assignedUserId: null }, null, null, 'ai-rep')).toBeNull();
+  });
 });
 
 describe('textTaskLinks', () => {
