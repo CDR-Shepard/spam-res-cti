@@ -154,12 +154,12 @@ describe.skipIf(!pgLane)('AI call refresh vs the lead picker (real Postgres)', (
 
     it('reactivates the SAME enrollment: active, call_stage research, keys claimed again', async () => {
       const { orgId, c, id } = await exitedLead();
-      await db.update(schema.campaignEnrollments).set({ callStage: 'review', callPrepareError: 'old error', callPrepareAttemptedAt: NOW }).where(eq(schema.campaignEnrollments.id, id));
+      await db.update(schema.campaignEnrollments).set({ callStage: 'review', callPrepareError: 'old error', callPrepareAttemptedAt: NOW, callPrepareFailures: 3 }).where(eq(schema.campaignEnrollments.id, id));
       await pick(orgId, c.id, 1);
       const out = await refresh(c.id, fakeSalesforce([1, 2]).client, LATER);
       expect(out).toMatchObject({ enrolled: 1, exited: 0 });
       const after = (await statusOf(c.id)).get(leadId(1))!;
-      expect(after).toMatchObject({ id, status: 'active', exitReason: null, callStage: 'research', callPrepareError: null, callPrepareAttemptedAt: null });
+      expect(after).toMatchObject({ id, status: 'active', exitReason: null, callStage: 'research', callPrepareError: null, callPrepareAttemptedAt: null, callPrepareFailures: 0 });
       expect(await keysOf(id)).toEqual(['+15125552001:true']);
       expect(await enrollmentsOf(db, c.id)).toHaveLength(2);
       // And the next refresh leaves it alone.

@@ -119,7 +119,7 @@ export interface MessagesClient {
       messages: Array<{ role: 'user'; content: string }>;
       tools: TriageTool[];
       tool_choice: { type: 'tool'; name: string };
-    }): Promise<{
+    }, options?: { signal?: AbortSignal }): Promise<{
       content: Array<{ type: string; name?: string; input?: unknown }>;
       usage: { input_tokens: number; output_tokens: number };
     }>;

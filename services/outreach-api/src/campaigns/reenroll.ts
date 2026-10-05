@@ -50,7 +50,7 @@ export async function reenrollDeselected(
         const result = await tx.execute(sql`
           UPDATE campaign_enrollments
           SET status = 'active', exit_reason = NULL, call_stage = 'research', next_touch_at = ${nextTouchAt.toISOString()}::timestamptz,
-              call_prepare_attempted_at = NULL, call_prepare_error = NULL, updated_at = now()
+              call_prepare_attempted_at = NULL, call_prepare_error = NULL, call_prepare_failures = 0, updated_at = now()
           WHERE id = ${candidate.enrollmentId}::uuid AND campaign_id = ${input.campaignId}::uuid
             AND status = 'exited' AND exit_reason = ${DESELECTED_EXIT_REASON}
             AND ${selectionExists(sql`campaign_enrollments.campaign_id`, sql`${candidate.sfRecordId}`)}

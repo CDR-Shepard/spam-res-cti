@@ -89,17 +89,33 @@ export interface CallPlanResult {
 export interface CallPlanModel {
   /** The model id calls are made (and priced) with; the tick refuses a model `costMicros` cannot price. */
   readonly modelId: string;
-  plan(prompt: { system: string; user: string }): Promise<CallPlanResult>;
+  /** `signal` aborts the model call (the tick's per-lead bound). */
+  plan(prompt: { system: string; user: string }, opts?: { signal?: AbortSignal }): Promise<CallPlanResult>;
 }
 
-/** The model answered, but not with a valid `CallPlan`. `usage` is what the call cost. */
+/** Which check failed, never what the model wrote: safe to log. */
+export interface PlanIssue {
+  path: string;
+  code: string;
+}
+
+/**
+ * The model answered, but not with a valid `CallPlan`. `usage` is what the call cost.
+ * `rawDoNotContact` is the unvalidated `doNotContact` of the tool input (undefined when there was none):
+ * a flag must not be lost because the rest of the plan was unusable, so the tick validates it on its own.
+ */
 export class CallPlanOutputError extends Error {
+  readonly issues: PlanIssue[];
+  readonly rawDoNotContact: unknown;
   constructor(
     message: string,
     readonly usage: TriageUsage,
+    detail: { issues?: PlanIssue[]; rawDoNotContact?: unknown } = {},
   ) {
     super(message);
     this.name = 'CallPlanOutputError';
+    this.issues = detail.issues ?? [];
+    this.rawDoNotContact = detail.rawDoNotContact;
   }
 }
 
@@ -109,22 +125,26 @@ export class AnthropicCallPlanModel implements CallPlanModel {
     this.modelId = deps.model ?? CALL_PLAN_MODEL_DEFAULT;
   }
 
-  async plan(prompt: { system: string; user: string }): Promise<CallPlanResult> {
-    const response = await this.deps.client.messages.create({
-      model: this.modelId,
-      max_tokens: MAX_OUTPUT_TOKENS,
-      system: prompt.system,
-      messages: [{ role: 'user', content: prompt.user }],
-      tools: [CALL_PLAN_TOOL],
-      tool_choice: { type: 'tool', name: CALL_PLAN_TOOL_NAME },
-    });
+  async plan(prompt: { system: string; user: string }, opts: { signal?: AbortSignal } = {}): Promise<CallPlanResult> {
+    const response = await this.deps.client.messages.create(
+      {
+        model: this.modelId,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        system: prompt.system,
+        messages: [{ role: 'user', content: prompt.user }],
+        tools: [CALL_PLAN_TOOL],
+        tool_choice: { type: 'tool', name: CALL_PLAN_TOOL_NAME },
+      },
+      { signal: opts.signal },
+    );
     const usage: TriageUsage = { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens, model: this.modelId };
     const call = response.content.find((b) => b.type === 'tool_use' && b.name === CALL_PLAN_TOOL_NAME);
     if (!call) throw new CallPlanOutputError('the model did not call record_call_plan', usage);
     const parsed = CallPlan.safeParse(call.input);
     if (!parsed.success) {
-      const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
-      throw new CallPlanOutputError(`invalid call plan: ${issues}`, usage);
+      const issues = parsed.error.issues.map((i) => ({ path: i.path.join('.') || '(root)', code: i.code }));
+      const rawDoNotContact = (call.input as { doNotContact?: unknown } | null | undefined)?.doNotContact;
+      throw new CallPlanOutputError(`invalid call plan: ${issues.map((i) => `${i.path} (${i.code})`).join('; ')}`, usage, { issues, rawDoNotContact });
     }
     return { plan: parsed.data, ...usage };
   }

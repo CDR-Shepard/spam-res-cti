@@ -8,6 +8,8 @@ import { schema, type Db } from '@cti/db';
 
 export const PREPARE_PER_ORG_CAP = 3;
 export const PREPARE_BACKOFF_MS = 30 * 60_000;
+/** Invalid plans in a row after which a lead is parked until "Research again" (call_prepare_failures). */
+export const MAX_PREPARE_FAILURES = 3;
 
 export interface DuePrep {
   enrollmentId: string;
@@ -31,14 +33,14 @@ export async function claimDuePreparations(db: Db, now: Date, batch: number): Pr
     WITH ranked AS (
       SELECT e.id, ROW_NUMBER() OVER (PARTITION BY e.org_id ORDER BY e.enrolled_at, e.id) AS rn
       FROM campaign_enrollments e JOIN campaigns c ON c.id = e.campaign_id AND c.org_id = e.org_id
-      WHERE e.status = 'active' AND e.call_stage = 'research'
+      WHERE e.status = 'active' AND e.call_stage = 'research' AND e.call_prepare_failures < ${MAX_PREPARE_FAILURES}
         AND c.mode = 'ai_call' AND c.status IN ('dry_run', 'active')
         AND (e.call_prepare_attempted_at IS NULL OR e.call_prepare_attempted_at < ${stale}::timestamptz)
     ), picked AS (
       SELECT id FROM ranked WHERE rn <= ${PREPARE_PER_ORG_CAP} ORDER BY rn, id LIMIT ${batch}
     ), locked AS (
       SELECT e.id FROM campaign_enrollments e
-      WHERE e.id IN (SELECT id FROM picked) AND e.status = 'active' AND e.call_stage = 'research'
+      WHERE e.id IN (SELECT id FROM picked) AND e.status = 'active' AND e.call_stage = 'research' AND e.call_prepare_failures < ${MAX_PREPARE_FAILURES}
         AND (e.call_prepare_attempted_at IS NULL OR e.call_prepare_attempted_at < ${stale}::timestamptz)
       FOR UPDATE SKIP LOCKED
     )

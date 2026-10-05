@@ -32,6 +32,7 @@ describe('AnthropicCallPlanModel', () => {
         messages: [{ role: 'user', content: 'U' }],
         system: 'S',
       }),
+      expect.anything(),
     );
   });
   it('uses a configured model id', async () => {
@@ -39,7 +40,7 @@ describe('AnthropicCallPlanModel', () => {
     const model = new AnthropicCallPlanModel({ client: c, model: 'claude-opus-5' });
     expect(model.modelId).toBe('claude-opus-5');
     await model.plan({ system: 'S', user: 'U' });
-    expect(c.messages.create).toHaveBeenCalledWith(expect.objectContaining({ model: 'claude-opus-5' }));
+    expect(c.messages.create).toHaveBeenCalledWith(expect.objectContaining({ model: 'claude-opus-5' }), expect.anything());
   });
   it('defaults to claude-sonnet-5-5', () => {
     expect(CALL_PLAN_MODEL_DEFAULT).toBe('claude-sonnet-5-5');
@@ -51,6 +52,30 @@ describe('AnthropicCallPlanModel', () => {
     expect(err).toBeInstanceOf(CallPlanOutputError);
     expect((err as CallPlanOutputError).usage).toEqual({ inputTokens: 12_000, outputTokens: 1_500, model: 'claude-sonnet-5-5' });
     expect((err as Error).message).toMatch(/questions/);
+  });
+  it('reports only the paths and codes of the failed checks, never the validator messages or the model values', async () => {
+    const bad = { ...validPlan, openingLine: 12_345, situationSummary: 'x'.repeat(5_000) };
+    const err = (await new AnthropicCallPlanModel({ client: client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input: bad }]) }).plan({ system: 'S', user: 'U' }).catch((e: unknown) => e)) as CallPlanOutputError;
+    expect(err.issues.length).toBeGreaterThan(0);
+    for (const i of err.issues) expect(Object.keys(i).sort()).toEqual(['code', 'path']);
+    expect(err.issues).toContainEqual({ path: 'situationSummary', code: 'too_big' });
+    expect(err.message).toMatch(/^invalid call plan: /);
+    expect(err.message).not.toMatch(/Expected|Required|received|characters/i);
+  });
+  it('carries the raw doNotContact of a rejected plan, so a flag is not lost with it', async () => {
+    const flag = { category: 'attorney', quote: 'talk to my lawyer' };
+    const c = client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input: { ...validPlan, questions: [], doNotContact: flag } }]);
+    const err = (await new AnthropicCallPlanModel({ client: c }).plan({ system: 'S', user: 'U' }).catch((e: unknown) => e)) as CallPlanOutputError;
+    expect(err.rawDoNotContact).toEqual(flag);
+    const none = (await new AnthropicCallPlanModel({ client: client([{ type: 'text' }]) }).plan({ system: 'S', user: 'U' }).catch((e: unknown) => e)) as CallPlanOutputError;
+    expect(none.rawDoNotContact).toBeUndefined();
+    expect(none.issues).toEqual([]);
+  });
+  it('passes the abort signal to the SDK call', async () => {
+    const c = client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input: validPlan }]);
+    const signal = new AbortController().signal;
+    await new AnthropicCallPlanModel({ client: c }).plan({ system: 'S', user: 'U' }, { signal });
+    expect(c.messages.create).toHaveBeenCalledWith(expect.anything(), { signal });
   });
   it('rejects a plan that names one goal twice, or carries an extra price key the contract does not know', async () => {
     const twice = { ...validPlan, goals: [...validPlan.goals.slice(0, 3), validPlan.goals[0]] };

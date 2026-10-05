@@ -177,11 +177,11 @@ describe.skipIf(!pgLane)('call plan decisions (real Postgres)', () => {
   });
 
   describe('research again', () => {
-    it.each(['review', 'approved'] as const)('10: from %s it goes back to research and clears the prepare claim and error', async (callStage) => {
+    it.each(['review', 'approved'] as const)('10: from %s it goes back to research and clears the prepare claim, error and failure count (a parked lead is tried again)', async (callStage) => {
       const s = await setup({ callStage, planStatus: callStage === 'approved' ? 'approved' : 'proposed' });
-      await db.update(schema.campaignEnrollments).set({ callPrepareAttemptedAt: SEED_NOW, callPrepareError: 'Research or planning failed; it will try again.' }).where(eq(schema.campaignEnrollments.id, s.lead.enrollmentId));
+      await db.update(schema.campaignEnrollments).set({ callPrepareAttemptedAt: SEED_NOW, callPrepareError: 'Research or planning failed; it will try again.', callPrepareFailures: 3 }).where(eq(schema.campaignEnrollments.id, s.lead.enrollmentId));
       await researchAgain(db, s.ctx, s.lead.enrollmentId, SEED_NOW);
-      expect(await enrollment(s.lead.enrollmentId)).toMatchObject({ callStage: 'research', callPrepareAttemptedAt: null, callPrepareError: null });
+      expect(await enrollment(s.lead.enrollmentId)).toMatchObject({ callStage: 'research', callPrepareAttemptedAt: null, callPrepareError: null, callPrepareFailures: 0 });
     });
 
     it('10b: a queued lead cannot be researched again', async () => {

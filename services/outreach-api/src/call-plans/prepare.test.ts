@@ -16,7 +16,7 @@ import { describeOf, fakeSalesforce } from '../test/fake-sf-client.js';
 import { campaignById, leadId, seedCampaign, seedConnection, seedEnrollment, seedOrg, seedRecord, snapshot, TEST_FIELD_MAP } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { claimDuePreparations, PREPARE_BACKOFF_MS } from './claims.js';
-import { ERR_PLAN_INVALID, ERR_PREPARE_FAILED, ERR_RECORD_GONE, prepareDueCalls, type PrepareDeps } from './prepare.js';
+import { ERR_PLAN_INVALID, ERR_PLAN_PARKED, ERR_PREPARE_FAILED, ERR_RECORD_GONE, LEAD_TIMEOUT_MS, PREPARE_DEADLINE_MS, prepareDueCalls, type PrepareDeps } from './prepare.js';
 import { savePlan } from './store.js';
 
 vi.mock('../research/snapshot.js', async (importOriginal) => {
@@ -295,5 +295,149 @@ describe.skipIf(!pgLane)('prepareDueCalls (real Postgres)', () => {
     const [r] = await researchOf(t.lead.enrollmentId);
     // The consent value was absent from the row: unknown, never yes.
     expect((r!.snapshot as ResearchSnapshot).consent).toBe('unknown');
+  });
+
+  describe('failed plans (I-2)', () => {
+    const outputError = (raw?: unknown) =>
+      new CallPlanOutputError('invalid call plan: questions (too_small)', { inputTokens: 9_000, outputTokens: 800, model: MODEL }, { issues: [{ path: 'questions', code: 'too_small' }], rawDoNotContact: raw });
+    const later = (k: number) => new Date(NOW.getTime() + k * (PREPARE_BACKOFF_MS + 1_000));
+
+    it('parks a lead after 3 invalid plans in a row: its error says so and no tick tries it again', async () => {
+      const t = await tenant();
+      const model = fakeModel();
+      model.plan.mockRejectedValue(outputError());
+      for (const k of [0, 1, 2]) {
+        expect(await prepareDueCalls(deps(model, { now: later(k) }))).toEqual({ planned: 0, held: 0, failed: 1 });
+        expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ callPrepareFailures: k + 1, callPrepareError: k < 2 ? ERR_PLAN_INVALID : ERR_PLAN_PARKED });
+      }
+      expect(ERR_PLAN_PARKED).toBe('Could not draft a plan — research again');
+      expect(await prepareDueCalls(deps(model, { now: later(3) }))).toEqual({ planned: 0, held: 0, failed: 0 });
+      expect(await prepareDueCalls(deps(model, { now: later(30) }))).toEqual({ planned: 0, held: 0, failed: 0 });
+      expect(model.plan).toHaveBeenCalledTimes(3);
+      expect(await claimDuePreparations(db, later(30), 6)).toEqual([]);
+      // "Research again" (the counter back to 0, the claim cleared) makes it due again.
+      await db.update(schema.campaignEnrollments).set({ callPrepareFailures: 0, callPrepareAttemptedAt: null }).where(eq(schema.campaignEnrollments.id, t.lead.enrollmentId));
+      expect((await claimDuePreparations(db, later(31), 6)).map((c) => c.enrollmentId)).toEqual([t.lead.enrollmentId]);
+    });
+
+    it('a plan that passes resets the count; other failures do not count towards parking', async () => {
+      const t = await tenant();
+      await db.update(schema.campaignEnrollments).set({ callPrepareFailures: 2 }).where(eq(schema.campaignEnrollments.id, t.lead.enrollmentId));
+      expect(await prepareDueCalls(deps(fakeModel()))).toEqual({ planned: 1, held: 0, failed: 0 });
+      expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ callPrepareFailures: 0, callStage: 'review' });
+      const u = await tenant();
+      const model = fakeModel();
+      model.plan.mockRejectedValue(new Error('overloaded'));
+      await prepareDueCalls(deps(model));
+      expect(await enrollment(u.lead.enrollmentId)).toMatchObject({ callPrepareFailures: 0, callPrepareError: ERR_PREPARE_FAILED });
+    });
+
+    it('still holds the person when the rejected plan carried a valid do-not-contact flag (quote cut to 300, well-formed)', async () => {
+      const t = await tenant();
+      const model = fakeModel();
+      const quote = `${'x'.repeat(299)}😀 and more words`;
+      model.plan.mockRejectedValue(outputError({ category: 'attorney', quote }));
+      expect(await prepareDueCalls(deps(model))).toEqual({ planned: 0, held: 1, failed: 0 });
+      const pending = await pendingDncFlag(db, t.lead.crmRecordId);
+      expect(pending).toMatchObject({ category: 'attorney', quote: 'x'.repeat(299) });
+      expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ status: 'needs_review', reviewCategory: 'attorney', reviewTriageId: pending!.triageId, callPrepareFailures: 0, callPrepareError: null });
+      expect(await plansOf(t.lead.enrollmentId)).toEqual([]);
+      expect(await researchOf(t.lead.enrollmentId)).toEqual([]);
+      const [triage] = await db.select().from(schema.recordTriage).where(eq(schema.recordTriage.id, pending!.triageId));
+      expect(triage).toMatchObject({ model: MODEL, inputTokens: 9_000, outputTokens: 800, createdAt: NOW });
+      expect(await spentTodayMicros(db, t.orgId, NOW)).toBe(costMicros(MODEL, 9_000, 800));
+    });
+
+    it.each([
+      ['an unknown category', { category: 'owes_money', quote: 'q' }],
+      ['an empty quote', { category: 'sold', quote: '   ' }],
+      ['not an object', 'sold'],
+      ['null', null],
+    ])('does not hold on a salvaged flag with %s: the failure counts as usual', async (_label, raw) => {
+      const t = await tenant();
+      const model = fakeModel();
+      model.plan.mockRejectedValue(outputError(raw));
+      expect(await prepareDueCalls(deps(model))).toEqual({ planned: 0, held: 0, failed: 1 });
+      expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ status: 'active', callPrepareFailures: 1, callPrepareError: ERR_PLAN_INVALID });
+      expect(await pendingDncFlag(db, t.lead.crmRecordId)).toBeNull();
+    });
+
+    it('logs the failed checks as paths and codes only', async () => {
+      await tenant();
+      const model = fakeModel();
+      model.plan.mockRejectedValue(outputError());
+      await prepareDueCalls(deps(model));
+      const logged = JSON.stringify(log.warn.mock.calls);
+      expect(logged).toContain('"path":"questions","code":"too_small"');
+      expect(logged).not.toContain('invalid call plan');
+    });
+  });
+
+  describe('bounds (M-5..M-7)', () => {
+    it('stops starting leads at the 5-minute deadline and releases the rest, by the injected clock', async () => {
+      const t = await tenant({ leads: 3 });
+      let clock = 1_000_000;
+      const model = fakeModel();
+      model.plan.mockImplementation(async () => {
+        clock += PREPARE_DEADLINE_MS; // the first lead used the whole budget
+        return { plan: validPlan, inputTokens: 12_000, outputTokens: 1_500, model: MODEL };
+      });
+      expect(await prepareDueCalls(deps(model, { clock: () => clock }))).toEqual({ planned: 1, held: 0, failed: 0 });
+      expect(model.plan).toHaveBeenCalledTimes(1);
+      expect(log.warn).toHaveBeenCalledWith(expect.anything(), 'call.prepare: tick deadline reached; leaving the rest for the next tick');
+      expect((await enrollment(t.leads[0]!.enrollmentId)).callStage).toBe('review');
+      for (const l of t.leads.slice(1)) expect(await enrollment(l.enrollmentId)).toMatchObject({ callStage: 'research', callPrepareAttemptedAt: null });
+    });
+
+    it('gives each lead one overall signal of 4 minutes; research and the model both get it, and an abort fails that lead only', async () => {
+      const t = await tenant({ leads: 2 });
+      const asked: number[] = [];
+      const controllers: AbortController[] = [];
+      const leadSignal = (ms: number) => {
+        asked.push(ms);
+        const c = new AbortController();
+        controllers.push(c);
+        return c.signal;
+      };
+      // Lead 1: research hangs until its signal aborts. Lead 2: researches normally.
+      research.mockImplementationOnce(() => new Promise(() => {}));
+      const model = fakeModel();
+      const run = prepareDueCalls(deps(model, { leadSignal }));
+      await vi.waitFor(() => expect(controllers).toHaveLength(1));
+      controllers[0]!.abort(new Error('timed out'));
+      expect(await run).toEqual({ planned: 1, held: 0, failed: 1 });
+      expect(asked).toEqual([LEAD_TIMEOUT_MS, LEAD_TIMEOUT_MS]);
+      expect(LEAD_TIMEOUT_MS).toBeLessThanOrEqual(4 * 60_000);
+      expect(await enrollment(t.leads[0]!.enrollmentId)).toMatchObject({ callStage: 'research', callPrepareError: ERR_PREPARE_FAILED });
+      expect(model.plan).toHaveBeenCalledTimes(1);
+      expect(model.plan.mock.calls[0]![1]).toEqual({ signal: controllers[1]!.signal });
+      expect(await enrollment(t.leads[1]!.enrollmentId)).toMatchObject({ callStage: 'review' });
+    });
+
+    it('a do-not-contact plan discarded by a stale lead leaves no triage row and no hold', async () => {
+      const t = await tenant();
+      const model = fakeModel({ ...validPlan, doNotContact: { category: 'sold', quote: 'closed with another buyer' } });
+      model.plan.mockImplementation(async () => {
+        await db.update(schema.campaignEnrollments).set({ callPrepareAttemptedAt: null }).where(eq(schema.campaignEnrollments.id, t.lead.enrollmentId));
+        return { plan: { ...validPlan, doNotContact: { category: 'sold' as const, quote: 'closed with another buyer' } }, inputTokens: 12_000, outputTokens: 1_500, model: MODEL };
+      });
+      expect(await prepareDueCalls(deps(model))).toEqual({ planned: 0, held: 0, failed: 1 });
+      expect(await db.select().from(schema.recordTriage).where(eq(schema.recordTriage.crmRecordId, t.lead.crmRecordId))).toEqual([]);
+      expect(await pendingDncFlag(db, t.lead.crmRecordId)).toBeNull();
+      expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ status: 'active', callStage: 'research' });
+      expect(await plansOf(t.lead.enrollmentId)).toEqual([]);
+    });
+
+    it('a salvaged do-not-contact flag discarded by a stale lead leaves no triage row either', async () => {
+      const t = await tenant();
+      const model = fakeModel();
+      model.plan.mockImplementation(async () => {
+        await db.update(schema.campaignEnrollments).set({ callPrepareAttemptedAt: null }).where(eq(schema.campaignEnrollments.id, t.lead.enrollmentId));
+        throw new CallPlanOutputError('invalid call plan: questions (too_small)', { inputTokens: 9_000, outputTokens: 800, model: MODEL }, { rawDoNotContact: { category: 'sold', quote: 'sold the house' } });
+      });
+      expect(await prepareDueCalls(deps(model))).toEqual({ planned: 0, held: 0, failed: 1 });
+      expect(await db.select().from(schema.recordTriage).where(eq(schema.recordTriage.crmRecordId, t.lead.crmRecordId))).toEqual([]);
+      expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ status: 'active' });
+    });
   });
 });

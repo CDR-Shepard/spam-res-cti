@@ -13,31 +13,51 @@
  * all checked by the UPDATE inside the storing transaction. "Research again" and a
  * re-enrollment clear the claim, so a plan drafted from research that started before either
  * is discarded rather than offered.
+ *
+ * A plan the model answers but that fails validation counts towards parking (`call_prepare_failures`):
+ * after MAX_PREPARE_FAILURES in a row the lead is skipped until a person presses "Research again". A
+ * do-not-contact flag in such a plan still holds the person, when it validates on its own.
  */
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { FieldMap } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
 import { addSpend, budgetMicros, spentTodayMicros } from '../ai/budget.js';
 import { CallPlanOutputError, type CallPlanModel, type CallPlanResult } from '../ai/call-plan-model.js';
 import { costMicros, isPricedModel } from '../ai/model.js';
-import { holdForReview, holdIfFlagged } from '../campaigns/dnc-hold.js';
+import { holdIfFlagged } from '../campaigns/dnc-hold.js';
 import { pauseOrgCampaigns } from '../campaigns/pause.js';
 import { CrmNotConnectedError, type SalesforceClientFactory } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import type { DescribeCache } from '../research/describe.js';
-import { researchRecord, snapshotHash, type ResearchSnapshot } from '../research/snapshot.js';
+import { researchRecord, type ResearchSnapshot } from '../research/snapshot.js';
 import { outreachSettings } from '../settings.js';
 import { claimDuePreparations, releasePreparations, type DuePrep } from './claims.js';
+import { abortable } from './abortable.js';
 import { buildCallPlanPrompt } from './prompt.js';
-import { savePlan, saveResearch, storeDncTriage } from './store.js';
+import {
+  ERR_PLAN_INVALID,
+  ERR_PLAN_PARKED,
+  ERR_PREPARE_FAILED,
+  ERR_RECORD_GONE,
+  recordPlanFailure,
+  salvageFlag,
+  setError,
+  StaleStageError,
+  storePrepared,
+  storeSalvagedFlag,
+} from './prepare-store.js';
+
+export { ERR_PLAN_INVALID, ERR_PLAN_PARKED, ERR_PREPARE_FAILED, ERR_RECORD_GONE };
 
 export const PREPARE_BATCH = 6;
 export const PREPARE_DEADLINE_MS = 5 * 60_000;
-export const ERR_RECORD_GONE = 'The Salesforce record was not found or the integration user cannot see it.';
-export const ERR_PLAN_INVALID = "The AI's plan did not pass checks; it will try again.";
-export const ERR_PREPARE_FAILED = 'Research or planning failed; it will try again.';
+/**
+ * One lead's research and model call together. The tick stops STARTING leads at PREPARE_DEADLINE_MS, so
+ * without this a lead started just before it could run on for the model's own timeout and retries.
+ */
+export const LEAD_TIMEOUT_MS = 4 * 60_000;
 
 export interface PrepareDeps {
   db: Db;
@@ -48,6 +68,8 @@ export interface PrepareDeps {
   log: RunnerLogger;
   /** Wall clock in ms for the tick deadline; tests inject one. Defaults to `Date.now`. */
   clock?: () => number;
+  /** The signal bounding one lead's research and model call; tests inject one. Defaults to `AbortSignal.timeout`. */
+  leadSignal?: (ms: number) => AbortSignal;
   batch?: number;
 }
 
@@ -57,7 +79,6 @@ export interface PrepareCounts {
   failed: number;
 }
 
-class StaleStageError extends Error {}
 type Outcome = { kind: 'planned' | 'held' | 'failed'; costMicros: number } | { kind: 'skip_org' };
 interface OrgContext {
   client: SalesforceClient;
@@ -72,66 +93,56 @@ interface TickState {
 
 const errName = (err: unknown): string => (err instanceof Error ? err.name : typeof err);
 
-/** This tick's claim on the enrollment still stands. */
-function claimed(p: DuePrep, now: Date) {
-  const e = schema.campaignEnrollments;
-  return and(eq(e.id, p.enrollmentId), eq(e.callPrepareAttemptedAt, now));
+/**
+ * Runs a store. A lead that moved on since the claim has its result discarded; any other failure fails
+ * this lead only (the store's transaction rolled back, so it retries after the backoff) and the tick goes on.
+ */
+async function guardedStore(deps: PrepareDeps, p: DuePrep, cost: number, store: () => Promise<'planned' | 'held'>): Promise<Outcome> {
+  const { db, now, log } = deps;
+  try {
+    return { kind: await store(), costMicros: cost };
+  } catch (err) {
+    if (err instanceof StaleStageError) {
+      log.info({ enrollmentId: p.enrollmentId }, 'call.prepare: the lead moved on while planning; result discarded');
+      return { kind: 'failed', costMicros: cost };
+    }
+    log.warn({ enrollmentId: p.enrollmentId, errName: errName(err) }, 'call.prepare: storing the result failed');
+    await setError(db, p, now, ERR_PREPARE_FAILED);
+    return { kind: 'failed', costMicros: cost };
+  }
 }
 
-/** The error shows on the card; written only while the claim stands, so a lead that moved on keeps a clean card. */
-async function setError(db: Db, p: DuePrep, now: Date, message: string): Promise<void> {
-  await db.update(schema.campaignEnrollments).set({ callPrepareError: message, updatedAt: now }).where(claimed(p, now));
-}
-
-/** Research, plan and stage move in one transaction; a do-not-contact flag also holds the person. Returns true when held. */
-async function storePrepared(db: Db, p: DuePrep, now: Date, snapshot: ResearchSnapshot, out: CallPlanResult): Promise<boolean> {
-  return db.transaction(async (tx) => {
-    const research = await saveResearch(tx, { orgId: p.orgId, enrollmentId: p.enrollmentId, crmRecordId: p.crmRecordId, snapshot });
-    const flag = out.plan.doNotContact;
-    await savePlan(tx, {
-      orgId: p.orgId,
-      enrollmentId: p.enrollmentId,
-      researchId: research.id,
-      source: 'model',
-      model: out.model,
-      plan: out.plan,
-      dncFlagged: flag !== null,
-      inputTokens: out.inputTokens,
-      outputTokens: out.outputTokens,
-      createdBy: null,
+/** The model answered, but not with a usable plan: paid for, counted towards parking, and a do-not-contact flag is never lost with it. */
+async function planRejected(deps: PrepareDeps, p: DuePrep, snapshot: ResearchSnapshot, err: CallPlanOutputError): Promise<Outcome> {
+  const { db, now, log } = deps;
+  const cost = costMicros(err.usage.model, err.usage.inputTokens, err.usage.outputTokens);
+  await addSpend(db, p.orgId, now, cost);
+  // Paths and codes only: never the validator's messages, which can quote what the model wrote.
+  log.warn({ enrollmentId: p.enrollmentId, issues: err.issues }, 'call.prepare: plan output rejected');
+  const flag = salvageFlag(err.rawDoNotContact);
+  if (flag) {
+    const held = await guardedStore(deps, p, cost, async () => {
+      await storeSalvagedFlag(db, p, now, snapshot, err.usage, flag);
+      return 'held';
     });
-    const e = schema.campaignEnrollments;
-    const moved = await tx
-      .update(e)
-      .set({ callStage: 'review', callPrepareError: null, updatedAt: now })
-      .where(and(claimed(p, now), eq(e.status, 'active'), eq(e.callStage, 'research')))
-      .returning({ id: e.id });
-    if (moved.length === 0) throw new StaleStageError();
-    if (!flag) return false;
-    const triageId = await storeDncTriage(tx, {
-      orgId: p.orgId,
-      crmRecordId: p.crmRecordId,
-      notesHash: snapshotHash(snapshot),
-      model: out.model,
-      summary: out.plan.situationSummary,
-      flag,
-      inputTokens: out.inputTokens,
-      outputTokens: out.outputTokens,
-      createdAt: now,
-    });
-    await holdForReview(tx, { enrollmentId: p.enrollmentId }, { triageId, category: flag.category, quote: flag.quote }, now);
-    return true;
-  });
+    if (held.kind === 'held') return held;
+  }
+  await recordPlanFailure(db, p, now);
+  return { kind: 'failed', costMicros: cost };
 }
 
 async function prepareOne(deps: PrepareDeps, org: OrgContext, p: DuePrep): Promise<Outcome> {
   const { db, now, log } = deps;
   if (await holdIfFlagged(db, { enrollmentId: p.enrollmentId, crmRecordId: p.crmRecordId, now })) return { kind: 'held', costMicros: 0 };
+  const signal = (deps.leadSignal ?? ((ms: number) => AbortSignal.timeout(ms)))(LEAD_TIMEOUT_MS);
   let snapshot: ResearchSnapshot | null;
   try {
-    snapshot = await researchRecord(
-      { client: org.client, describes: deps.describes, orgId: p.orgId },
-      { sfObject: p.sfObject, sfRecordId: p.sfRecordId, consentField: org.fieldMap[p.sfObject].consent, now },
+    snapshot = await abortable(
+      researchRecord(
+        { client: org.client, describes: deps.describes, orgId: p.orgId },
+        { sfObject: p.sfObject, sfRecordId: p.sfRecordId, consentField: org.fieldMap[p.sfObject].consent, now },
+      ),
+      signal,
     );
   } catch (err) {
     if (err instanceof SalesforceAuthError || err instanceof CrmNotConnectedError) return { kind: 'skip_org' };
@@ -145,16 +156,9 @@ async function prepareOne(deps: PrepareDeps, org: OrgContext, p: DuePrep): Promi
   }
   let out: CallPlanResult;
   try {
-    out = await deps.model.plan(buildCallPlanPrompt(snapshot, { companyName: org.companyName, today: now }));
+    out = await deps.model.plan(buildCallPlanPrompt(snapshot, { companyName: org.companyName, today: now }), { signal });
   } catch (err) {
-    if (err instanceof CallPlanOutputError) {
-      // Paid for, but unusable: the spend counts, and the lead is tried again after the backoff.
-      const cost = costMicros(err.usage.model, err.usage.inputTokens, err.usage.outputTokens);
-      await addSpend(db, p.orgId, now, cost);
-      log.warn({ enrollmentId: p.enrollmentId, err: err.message }, 'call.prepare: plan output rejected');
-      await setError(db, p, now, ERR_PLAN_INVALID);
-      return { kind: 'failed', costMicros: cost };
-    }
+    if (err instanceof CallPlanOutputError) return planRejected(deps, p, snapshot, err);
     log.warn({ enrollmentId: p.enrollmentId, errName: errName(err) }, 'call.prepare: model call failed');
     await setError(db, p, now, ERR_PREPARE_FAILED);
     return { kind: 'failed', costMicros: 0 };
@@ -162,19 +166,8 @@ async function prepareOne(deps: PrepareDeps, org: OrgContext, p: DuePrep): Promi
   const cost = costMicros(out.model, out.inputTokens, out.outputTokens);
   // Spend first: the call is paid for even if storing the result fails or is discarded.
   await addSpend(db, p.orgId, now, cost);
-  try {
-    const held = await storePrepared(db, p, now, snapshot, out);
-    return { kind: held ? 'held' : 'planned', costMicros: cost };
-  } catch (err) {
-    if (err instanceof StaleStageError) {
-      log.info({ enrollmentId: p.enrollmentId }, 'call.prepare: the lead moved on while planning; result discarded');
-      return { kind: 'failed', costMicros: cost };
-    }
-    // One lead's failed store must not abort the tick after a paid model call: the transaction rolled back, so the lead retries after the backoff.
-    log.warn({ enrollmentId: p.enrollmentId, errName: errName(err) }, 'call.prepare: storing the plan failed');
-    await setError(db, p, now, ERR_PREPARE_FAILED);
-    return { kind: 'failed', costMicros: cost };
-  }
+  const snap = snapshot;
+  return guardedStore(deps, p, cost, async () => ((await storePrepared(db, p, now, snap, out)) ? 'held' : 'planned'));
 }
 
 async function pauseForBudget(deps: PrepareDeps, orgId: string, spent: number, budget: number): Promise<void> {
@@ -204,6 +197,7 @@ async function prepareOrg(deps: PrepareDeps, tick: TickState, orgId: string, pre
     .from(schema.organizations)
     .where(eq(schema.organizations.id, orgId));
   const budget = budgetMicros(outreachSettings({ settings: row?.settings ?? {} }));
+  // Spent is tracked locally after this read: a tenant can overshoot its budget by up to PREPARE_PER_ORG_CAP (3) plans in one tick.
   let spent = await spentTodayMicros(db, orgId, now);
   if (spent >= budget) {
     await pauseForBudget(deps, orgId, spent, budget);

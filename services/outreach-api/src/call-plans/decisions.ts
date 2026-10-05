@@ -165,7 +165,7 @@ export async function researchAgain(db: Db, ctx: RequestContext, enrollmentId: s
     inStage(row, ['research', 'review', 'approved']);
     await tx
       .update(schema.campaignEnrollments)
-      .set({ callStage: 'research', callPrepareAttemptedAt: null, callPrepareError: null, updatedAt: now })
+      .set({ callStage: 'research', callPrepareAttemptedAt: null, callPrepareError: null, callPrepareFailures: 0, updatedAt: now })
       .where(eq(schema.campaignEnrollments.id, enrollmentId));
   });
 }

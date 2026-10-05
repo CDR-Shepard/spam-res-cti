@@ -24,12 +24,13 @@ export function cutUtf16(s: string, max: number): string {
   return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
 }
 
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
 /**
  * A string Postgres jsonb will accept. Salesforce can hand us a lone surrogate, which
  * `JSON.stringify` writes as a \udXXX escape that jsonb refuses, and a NUL, which jsonb refuses too.
  * Each lone surrogate becomes U+FFFD and NULs are dropped.
  */
-const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 export const wellFormed = (s: string): string => s.replace(LONE_SURROGATE, '\uFFFD').replace(/\u0000/g, '');
 
 /** `wellFormed` on every string in `v`, keys included (objects and arrays are copied, never changed in place). */
