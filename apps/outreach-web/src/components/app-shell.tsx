@@ -11,9 +11,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="min-h-screen bg-background text-foreground">
       <header className="flex items-center gap-4 px-6 py-3">
         <Link to="/" className="font-semibold">Outreach</Link>
-        <nav className="flex gap-3 text-sm">
-          <Link to="/" activeProps={{ className: 'font-medium' }}>Dashboard</Link>
+        <nav aria-label="Main" className="flex gap-3 text-sm">
+          <Link to="/" activeOptions={{ exact: true }} activeProps={{ className: 'font-medium' }}>Dashboard</Link>
+          <Link to="/campaigns" activeProps={{ className: 'font-medium' }}>Campaigns</Link>
           <Link to="/team" activeProps={{ className: 'font-medium' }}>Team</Link>
+          <Link to="/settings/connections" activeProps={{ className: 'font-medium' }}>Settings</Link>
         </nav>
         <div className="ml-auto flex items-center gap-3">
           <TenantSwitcher />

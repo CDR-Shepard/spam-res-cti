@@ -1,6 +1,6 @@
 import { StrictMode, useEffect } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, createRouter, type AnyRouter, RouterProvider } from '@tanstack/react-router';
@@ -130,5 +130,58 @@ describe('auth callback', () => {
     await waitFor(() => expect(replaceSpy).toHaveBeenCalled());
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(replaceSpy).toHaveBeenCalledWith('/team');
+  });
+});
+
+
+const SIGNED_IN_SESSION = {
+  token: 'tok',
+  expiresAt: '2026-10-01T00:00:00.000Z',
+  user: { userId: 'U1', orgId: 'O1', email: 'a@b.co', displayName: null, isAdmin: true, isSuperAdmin: false, kind: 'human' },
+  tenant: { id: 'O1', name: 'GG Homes', slug: 'gg-homes', timezone: 'America/Los_Angeles', status: 'active' },
+};
+
+/** Signs in through the callback route (the only way to seed a real AuthProvider here), answering API calls from `routes` by path. */
+async function signedInAppAt(routes: Record<string, unknown>): Promise<AnyRouter> {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input).replace(/^https?:\/\/[^/]+/, '');
+    const body = url === '/api/auth/session' ? SIGNED_IN_SESSION : routes[url];
+    if (body === undefined) return new Response(JSON.stringify({ error: 'nf', code: 'NOT_FOUND' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }));
+  const { replace } = stubLocationMethods();
+  const router = renderAppAt('/auth/callback?returnTo=/');
+  await waitFor(() => expect(replace).toHaveBeenCalledWith('/'));
+  return router;
+}
+
+describe('outreach pages', () => {
+  it.each([
+    ['/campaigns'],
+    ['/campaigns/new'],
+    ['/campaigns/11111111-1111-4111-8111-111111111111'],
+    ['/settings/connections'],
+  ])('%s sits under the authenticated layout (signed-out visits go to sign-in)', async (path) => {
+    const router = renderAppAt(path);
+    await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in'));
+    expect(router.state.location.search).toMatchObject({ returnTo: path });
+  });
+
+  it('renders /campaigns inside the app shell with the outreach nav once signed in', async () => {
+    const router = await signedInAppAt({ '/api/campaigns': { campaigns: [] } });
+    await router.navigate({ to: '/campaigns' });
+    expect(await screen.findByRole('heading', { name: 'Campaigns' })).toBeInTheDocument();
+    const nav = screen.getByRole('navigation', { name: 'Main' });
+    expect(within(nav).getAllByRole('link').map((a) => a.textContent)).toEqual(['Dashboard', 'Campaigns', 'Team', 'Settings']);
+    expect(router.state.matches.map((m) => m.routeId)).toEqual(['__root__', '/_authenticated', '/_authenticated/campaigns/']);
+  });
+
+  it('turns the Salesforce callback query into a message on the connections page', async () => {
+    const notConnected = { configured: true, connected: false, status: null, instanceUrl: null, username: null, connectedAt: null, lastError: null, fieldMap: null };
+    const router = await signedInAppAt({ '/api/connections/salesforce': notConnected });
+    router.history.push('/settings/connections?connected=1');
+    expect(await screen.findByText('Salesforce is connected.')).toBeInTheDocument();
+    router.history.push('/settings/connections?error=access_denied');
+    expect(await screen.findByText('Salesforce sign-in was cancelled.')).toBeInTheDocument();
   });
 });
