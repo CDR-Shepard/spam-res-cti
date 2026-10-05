@@ -53,7 +53,7 @@ type SessionRow = typeof schema.dialerSessions.$inferSelect;
 function session(o: Partial<SessionRow> = {}): SessionRow {
   return {
     id: 'S1', orgId: 'O1', userId: 'U1', sfOwnerId: ME, objectType: 'Lead', status: 'done',
-    lastPolledAt: null, repCallSid: null, listViewId: null, passes: 2, maxRecords: null, rolloverBusinessDays: 1, runSize: null,
+    lastPolledAt: null, repCallSid: null, listViewId: null, campaignId: null, passes: 2, maxRecords: null, rolloverBusinessDays: 1, runSize: null,
     noAnswerChatterAt: null, noAnswerChatterClaimedAt: null, noAnswerChatterAttempts: 0, noAnswerChatterNextAt: null,
     createdAt: new Date(NOW.getTime() - 3_600_000), updatedAt: new Date(NOW.getTime() - 60_000),
     ...o,

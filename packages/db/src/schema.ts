@@ -300,6 +300,10 @@ export const dialerSessions = pgTable(
     /** Which list view a run came from, so a second run on the same list starts
      *  where the first has got to (shared position). */
     listViewId: text('list_view_id'),
+    /** The outreach campaign this run was built from (migration 0051; plan 1B's
+     *  "Campaign calls"). Null for list-view, Task, and manual runs. No FK, in
+     *  SQL or here: a run's history outlives its campaign. */
+    campaignId: uuid('campaign_id'),
     /** Run settings chosen on Ready to dial (migration 0046), written by the
      *  ready → active claim (engine.ts `claimReadySession`). A Start that sends
      *  none keeps these defaults, which are today's run. 1 = Once, 2 = Twice. */
@@ -1262,3 +1266,7 @@ export const aiCalls = pgTable(
 );
 
 export type AiCallRow = typeof aiCalls.$inferSelect;
+
+// Outreach tables (migration 0051). Kept LAST so schema-outreach.ts never needs
+// anything above it.
+export * from './schema-outreach.js';

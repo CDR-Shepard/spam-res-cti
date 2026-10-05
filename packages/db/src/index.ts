@@ -54,11 +54,17 @@ export function getDb(): Db {
 
 export { schema };
 export { AI_NUMBER_KIND, NUMBER_KINDS, REP_NUMBER_KINDS, type NumberKind } from './number-kinds.js';
+export { runMigrations, type MigrationFile } from './migrate-runner.js';
+export { loadMigrationFiles } from './migration-files.js';
 export type {
   Call,
   CallerDirectoryEntry,
   CallerDirectoryVersion,
   CampaignConfig,
+  CampaignEnrollmentRow,
+  CampaignRow,
+  CrmConnectionRow,
+  CrmRecordRow,
   DialerConnect,
   DialerConnectRecordingState,
   DialerHandoff,
@@ -77,6 +83,8 @@ export type {
   OutboundNumber,
   PreCallAudit,
   SalesforceConnection,
+  SfWriteRow,
+  TouchRow,
   User,
   UserKind,
 } from './schema.js';

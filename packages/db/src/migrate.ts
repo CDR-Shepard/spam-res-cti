@@ -6,15 +6,16 @@
  * Run with: `npm run migrate` (repo root) or `npm -w packages/db run migrate`.
  * Env: `.env` in the cwd, else `services/cti-api/.env`. The actual apply/lock
  * logic lives in `migrate-runner.ts`, which takes a Postgres advisory lock so
- * concurrent deploys serialize instead of racing each other.
+ * concurrent deploys serialize instead of racing each other. The files are
+ * read by `migration-files.ts`, which the real-Postgres test lane shares.
  */
 import dotenv from 'dotenv';
 import { existsSync } from 'node:fs';
-import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { getPool } from './index.js';
 import { runMigrations } from './migrate-runner.js';
+import { loadMigrationFiles } from './migration-files.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -28,15 +29,8 @@ if (!process.env.DATABASE_URL) {
   if (existsSync(apiEnv)) dotenv.config({ path: apiEnv });
 }
 
-// `src/migrate.ts` and `dist/migrate.js` sit at the same depth, so this resolves
-// to packages/db/migrations from either.
-const MIGRATIONS_DIR = resolve(__dirname, '../migrations');
-
 async function main(): Promise<void> {
-  const names = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.sql'));
-  const files = await Promise.all(
-    names.map(async (name) => ({ name, sql: await readFile(join(MIGRATIONS_DIR, name), 'utf8') })),
-  );
+  const files = await loadMigrationFiles();
   const pool = getPool();
   const client = await pool.connect();
   try {
