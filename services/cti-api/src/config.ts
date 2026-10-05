@@ -212,7 +212,10 @@ const schema = z.object({
    * all outreach, including AI calls. Default `off`.
    */
   OUTREACH_KILL_SWITCH: z.enum(['on', 'off']).default('off'),
-  /** Shared with outreach-api: HMAC key for POST /internal/ai-calls (plan 1C). Unset = the internal routes answer 503. */
+  /**
+   * Shared with outreach-api: HMAC key for POST /internal/ai-calls (plan 1C). Unset = the internal routes are off: in
+   * production they answer 404, exactly like a route that does not exist; outside production, 503 `internal_disabled`.
+   */
   OUTREACH_INTERNAL_SECRET: z.string().min(32).optional(),
 });
 
