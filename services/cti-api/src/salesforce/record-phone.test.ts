@@ -398,3 +398,39 @@ describe('resolveDialNumber — Opportunity phone fields (this org stores phones
     expect(soqlOf(1)).toBe("SELECT Name, ContactId, Mobile_Phone__c, Phone__c, Other_Phone__c FROM Opportunity WHERE Id = '006AAA' LIMIT 1");
   });
 });
+
+describe('resolveDialNumber — an injected SOQL runner (the AI engine\'s integration connection)', () => {
+  beforeEach(() => {
+    mockSoql.mockReset();
+    _resetSkipFieldWarnForTests();
+  });
+
+  it('sends both Skip on Dialer queries through the runner on INVALID_FIELD, and never the module soqlQuery', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sent: string[] = [];
+    const fakeQuery = vi.fn(async (_userId: string, soql: string) => {
+      sent.push(soql);
+      if (sent.length === 1) throw new Error('SOQL failed (400): [{"errorCode":"INVALID_FIELD"}]');
+      return [{ Name: 'Pat Doe', MobilePhone: '619-555-0100', Phone: null }];
+    }) as unknown as Parameters<typeof resolveDialNumber>[3];
+
+    const r = await resolveDialNumber('u', 'Lead', '00Q000000000001AAA', fakeQuery);
+
+    expect(sent).toEqual([
+      "SELECT Name, MobilePhone, Phone, Skip_on_Dialer__c FROM Lead WHERE Id = '00Q000000000001AAA' LIMIT 1",
+      "SELECT Name, MobilePhone, Phone FROM Lead WHERE Id = '00Q000000000001AAA' LIMIT 1",
+    ]);
+    expect(r).toMatchObject({ e164: '+16195550100', skipOnDialer: false, displayName: 'Pat Doe' });
+    expect(mockSoql).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('sends an Opportunity\'s contact-role fallback through the runner too', async () => {
+    const fakeQuery = vi.fn(async (_userId: string, soql: string) =>
+      soql.includes('FROM OpportunityContactRole') ? [{ Contact: { MobilePhone: null, Phone: '213-555-0199' } }] : [{ Name: 'Deal' }],
+    ) as unknown as Parameters<typeof resolveDialNumber>[3];
+    const r = await resolveDialNumber('u', 'Opportunity', '006000000000001AAA', fakeQuery);
+    expect(r?.e164).toBe('+12135550199');
+    expect(mockSoql).not.toHaveBeenCalled();
+  });
+});

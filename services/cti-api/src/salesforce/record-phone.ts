@@ -19,6 +19,12 @@ export function choosePhones(
 }
 
 type PhoneFields = { MobilePhone?: string | null; Phone?: string | null };
+
+/** How a lookup runs its SOQL. The default is the CTI's per-rep `soqlQuery`; the
+ *  AI call engine passes a runner over the tenant's integration connection
+ *  (ai-voice/integration-record.ts). A runner must throw an Error whose message
+ *  carries Salesforce's error code (e.g. INVALID_FIELD), as `soqlQuery` does. */
+export type SoqlRunner = <T>(userId: string, soql: string) => Promise<T[]>;
 type NameField = { Name?: string | null };
 
 /** A record the lookup actually found: its phone fields (possibly empty),
@@ -91,9 +97,10 @@ async function soqlToleratingMissingSkipField<T>(
   userId: string,
   withField: string,
   withoutField: string,
+  query: SoqlRunner,
 ): Promise<T[]> {
   try {
-    return await soqlQuery<T>(userId, withField);
+    return await query<T>(userId, withField);
   } catch (err) {
     if (!/INVALID_FIELD/.test((err as Error).message)) throw err;
     if (!warnedSkipField) {
@@ -104,15 +111,16 @@ async function soqlToleratingMissingSkipField<T>(
           `that connection's power-dial queues treat every record as unflagged`,
       );
     }
-    return await soqlQuery<T>(userId, withoutField);
+    return await query<T>(userId, withoutField);
   }
 }
 
-async function lookupLead(userId: string, rid: string): Promise<FoundRecord | null> {
+async function lookupLead(userId: string, rid: string, query: SoqlRunner): Promise<FoundRecord | null> {
   const rows = await soqlToleratingMissingSkipField<PhoneFields & NameField & { Skip_on_Dialer__c?: boolean | null }>(
     userId,
     `SELECT Name, MobilePhone, Phone, ${SKIP_FIELD} FROM Lead WHERE Id = '${rid}' LIMIT 1`,
     `SELECT Name, MobilePhone, Phone FROM Lead WHERE Id = '${rid}' LIMIT 1`,
+    query,
   );
   const row = rows[0];
   return row
@@ -120,9 +128,9 @@ async function lookupLead(userId: string, rid: string): Promise<FoundRecord | nu
     : null;
 }
 
-async function lookupContact(userId: string, rid: string): Promise<FoundRecord | null> {
+async function lookupContact(userId: string, rid: string, query: SoqlRunner): Promise<FoundRecord | null> {
   // No skip field on Contact — never ask for it, never flag one.
-  const rows = await soqlQuery<PhoneFields & NameField>(userId, `SELECT Name, MobilePhone, Phone FROM Contact WHERE Id = '${rid}' LIMIT 1`);
+  const rows = await query<PhoneFields & NameField>(userId, `SELECT Name, MobilePhone, Phone FROM Contact WHERE Id = '${rid}' LIMIT 1`);
   const row = rows[0];
   return row ? { fields: row, skipOnDialer: false, displayName: cleanName(row.Name), contactId: null } : null;
 }
@@ -154,9 +162,9 @@ export function opportunityPhones(row: OppPhoneRow): PhoneFields {
  *  Opportunity's own fields are all empty; the checkbox was already read from
  *  the Opportunity, so it is not asked for again here. No primary contact role
  *  means there is nothing to dial. */
-async function lookupOpportunityContactRole(userId: string, rid: string): Promise<PhoneFields | null> {
+async function lookupOpportunityContactRole(userId: string, rid: string, query: SoqlRunner): Promise<PhoneFields | null> {
   type Row = { Contact?: PhoneFields | null };
-  const rows = await soqlQuery<Row>(
+  const rows = await query<Row>(
     userId,
     `SELECT Contact.MobilePhone, Contact.Phone FROM OpportunityContactRole WHERE OpportunityId = '${rid}' AND IsPrimary = true LIMIT 1`,
   );
@@ -169,12 +177,13 @@ async function lookupOpportunityContactRole(userId: string, rid: string): Promis
  *  branch does); the primary Contact Role's phone only when all three are
  *  empty. A missing Opportunity is null; one with no number anywhere is
  *  found-but-empty, so the queue still honors its checkbox. */
-async function lookupOpportunity(userId: string, rid: string): Promise<FoundRecord | null> {
+async function lookupOpportunity(userId: string, rid: string, query: SoqlRunner): Promise<FoundRecord | null> {
   const fields = `Name, ContactId, ${OPP_PHONE_FIELDS.join(', ')}`;
   const rows = await soqlToleratingMissingSkipField<OppPhoneRow>(
     userId,
     `SELECT ${fields}, ${SKIP_FIELD} FROM Opportunity WHERE Id = '${rid}' LIMIT 1`,
     `SELECT ${fields} FROM Opportunity WHERE Id = '${rid}' LIMIT 1`,
+    query,
   );
   const row = rows[0];
   if (!row) return null;
@@ -184,7 +193,7 @@ async function lookupOpportunity(userId: string, rid: string): Promise<FoundReco
   const naming = { displayName: cleanName(row.Name), contactId: row.ContactId || null };
   const own = opportunityPhones(row);
   if (own.MobilePhone) return { fields: own, skipOnDialer, ...naming };
-  const contact = await lookupOpportunityContactRole(userId, rid);
+  const contact = await lookupOpportunityContactRole(userId, rid, query);
   return { fields: contact ?? {}, skipOnDialer, ...naming };
 }
 
@@ -233,13 +242,14 @@ export async function resolveDialNumber(
   userId: string,
   objectType: 'Lead' | 'Contact' | 'Opportunity',
   recordId: string,
+  query: SoqlRunner = soqlQuery,
 ): Promise<DialTarget | null> {
   const rid = soqlEscape(recordId);
   const found = objectType === 'Lead'
-    ? await lookupLead(userId, rid)
+    ? await lookupLead(userId, rid, query)
     : objectType === 'Contact'
-      ? await lookupContact(userId, rid)
-      : await lookupOpportunity(userId, rid);
+      ? await lookupContact(userId, rid, query)
+      : await lookupOpportunity(userId, rid, query);
   if (!found) return null;
 
   const { skipOnDialer, displayName, contactId } = found;
