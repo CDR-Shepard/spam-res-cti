@@ -11,4 +11,5 @@ export const SCHEDULES: readonly ScheduleDefinition[] = [
   { queue: 'campaign.refresh', cron: '*/5 * * * *' },
   { queue: 'record.triage', cron: '* * * * *' },
   { queue: 'touch.plan', cron: '* * * * *' },
+  { queue: 'call.prepare', cron: '* * * * *' },
 ];

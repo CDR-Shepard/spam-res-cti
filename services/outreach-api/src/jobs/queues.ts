@@ -37,4 +37,5 @@ export const QUEUES: readonly QueueDefinition[] = [
   { name: 'campaign.refresh', options: TICK_QUEUE_OPTIONS },
   { name: 'record.triage', options: TICK_QUEUE_OPTIONS },
   { name: 'touch.plan', options: TICK_QUEUE_OPTIONS },
+  { name: 'call.prepare', options: TICK_QUEUE_OPTIONS },
 ];

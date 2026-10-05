@@ -3,8 +3,10 @@ import Anthropic from '@anthropic-ai/sdk';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { getDb, getPool } from '@cti/db';
+import { AnthropicCallPlanModel } from './ai/call-plan-model.js';
 import { AnthropicTriageModel } from './ai/model.js';
 import { buildApp } from './app.js';
+import { prepareDueCalls } from './call-plans/prepare.js';
 import { WorkosIdentityProvider } from './auth/workos-provider.js';
 import { loadConfig } from './config.js';
 import { liveClientFactory } from './crm/client-factory.js';
@@ -14,6 +16,7 @@ import { createBoss, JobRunner, type JobHandler } from './jobs/boss.js';
 import { QUEUES } from './jobs/queues.js';
 import { SCHEDULES } from './jobs/schedules.js';
 import { planTick } from './planner/run.js';
+import { DescribeCache } from './research/describe.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerSalesforceAuthRoutes } from './routes/auth-salesforce.js';
@@ -50,6 +53,12 @@ async function main(): Promise<void> {
     cfg.aiEnabled && cfg.ANTHROPIC_API_KEY
       ? new AnthropicTriageModel({ client: new Anthropic({ apiKey: cfg.ANTHROPIC_API_KEY, timeout: 60_000, maxRetries: 2 }) })
       : null;
+  // AI call plans (plan 1C): Salesforce describes are cached per tenant and object for 10 minutes.
+  const describes = new DescribeCache();
+  const planModel =
+    cfg.aiEnabled && cfg.ANTHROPIC_API_KEY
+      ? new AnthropicCallPlanModel({ client: new Anthropic({ apiKey: cfg.ANTHROPIC_API_KEY, timeout: 120_000, maxRetries: 2 }), model: cfg.CALL_PLAN_MODEL })
+      : null;
   const handlers: Record<string, JobHandler> = {
     ...(cfg.salesforceEnabled
       ? {
@@ -62,6 +71,13 @@ async function main(): Promise<void> {
       ? {
           'record.triage': async () => {
             await triageDueRecords({ db, clients, model: triageModel, now: new Date(), log: console });
+          },
+        }
+      : {}),
+    ...(cfg.salesforceEnabled && planModel
+      ? {
+          'call.prepare': async () => {
+            await prepareDueCalls({ db, clients, model: planModel, describes, now: new Date(), log: console });
           },
         }
       : {}),
