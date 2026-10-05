@@ -85,7 +85,16 @@ describe('decideTrigger', () => {
     expect(decideTrigger(failed('in_flight'), 1, TO, NOW)).toEqual({ kind: 'retry', reason: 'in_flight', at: later(IN_FLIGHT_RETRY_MS), keepKey: true, refundAttempt: false });
   });
 
-  it.each(['salesforce_error', 'gate_error', 'twilio_error'] as const)('8: %s backs off 5 min x 2^(attempts-1), at most 2 hours, with a new key', (reason) => {
+  it('M-2: twilio_error may have placed the call: like no answer, the next calling window at least 20 hours on, a new key, the attempt counted', () => {
+    for (const attempts of [1, 4]) {
+      expect(decideTrigger(failed('twilio_error'), attempts, TO, NOW)).toEqual({
+        kind: 'retry', reason: 'twilio_error', at: nextAttemptAt(TO, NOW), keepKey: false, refundAttempt: false,
+      });
+    }
+    expect(nextAttemptAt(TO, NOW).getTime() - NOW.getTime()).toBeGreaterThanOrEqual(20 * HOUR);
+  });
+
+  it.each(['salesforce_error', 'gate_error'] as const)('8: %s backs off 5 min x 2^(attempts-1), at most 2 hours, with a new key', (reason) => {
     expect(decideTrigger(failed(reason), 1, TO, NOW)).toMatchObject({ kind: 'retry', reason, at: later(5 * MIN), keepKey: false });
     expect(decideTrigger(failed(reason), 2, TO, NOW)).toMatchObject({ at: later(10 * MIN) });
     expect(decideTrigger(failed(reason), 4, TO, NOW)).toMatchObject({ at: later(40 * MIN) });

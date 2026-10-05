@@ -8,6 +8,7 @@ import { enrollmentById, planById, seedAiCall, seedReleasedLead, touchById } fro
 import { validPlan } from '../test/call-plan-fixtures.js';
 import { CONSENT_FIELD, paceHarness } from '../test/fake-pace.js';
 import { placeDueAiCalls } from './pace.js';
+import { nextAttemptAt } from './pacing-rules.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { renderPlanForAgent } from './plan-text.js';
@@ -153,6 +154,19 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
     expect(t.dueAt).toEqual(at(NOW, 15 * MIN)); // inside our window, so the engine's refusal waits 15 minutes
     await h.run(t.dueAt);
     expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([keyOf(lead.touchId, 1), keyOf(lead.touchId, 2, t.dueAt)]);
+  });
+
+  it('M-2: twilio_error (the carrier may have taken the call) waits like no answer: the next calling window 20+ hours on, with a new key', async () => {
+    const h = await paceHarness(db);
+    const lead = await seedReleasedLead(db, h.base);
+    h.cti.answers.push({ result: 'failed', reason: 'twilio_error' });
+
+    expect((await h.run(NOW)).retried).toBe(1);
+
+    expect(await touchById(db, lead.touchId)).toMatchObject({
+      status: 'planned', dueAt: nextAttemptAt('+15125550100', NOW), triggerKey: null, lastBlockReason: 'twilio_error', attempts: 1,
+    });
+    expect((await touchById(db, lead.touchId)).dueAt.getTime() - NOW.getTime()).toBeGreaterThanOrEqual(20 * 60 * MIN);
   });
 
   it('9: a retryable failure on the eighth attempt gives up: exit ai_call_gave_up', async () => {

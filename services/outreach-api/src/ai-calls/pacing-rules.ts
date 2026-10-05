@@ -74,6 +74,8 @@ function retryAt(reason: string, attempts: number, to: string | null, now: Date)
     case 'ai_voice_unavailable':
     case 'no_caller_id': return later(now, 30 * MINUTE);
     case 'call_in_progress': return later(now, 10 * MINUTE);
+    // M-2: Twilio may have taken the call before it failed, so the person may have been rung: wait as for no answer.
+    case 'twilio_error': return nextAttemptAt(to, now);
     case 'in_flight': return later(now, IN_FLIGHT_RETRY_MS);
     // The request may have reached cti-api and be reserved there: the same key goes again, never before the takeover.
     case 'transport': return later(now, Math.max(backoffMs(attempts), IN_FLIGHT_RETRY_MS));
