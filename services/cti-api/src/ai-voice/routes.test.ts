@@ -36,6 +36,7 @@ import { registerAiVoiceRoutes } from './routes.js';
 import { claimClose, clearActiveCalls, getActiveCall, registerActiveCall } from './registry.js';
 import { activeEntry, CALL_SID, fakeStore, fakeTwilio, type FakeStore, type FakeTwilio } from './testing.js';
 import type { AiGateResult } from './gate.js';
+import { defaultToolEffects, type ToolCtx } from './service-tools.js';
 
 const ORG = 'oooooooo-0000-4000-8000-000000000001';
 const REP = 'aaaaaaaa-0000-4000-8000-000000000001';
@@ -49,6 +50,8 @@ let app: FastifyInstance;
 let store: FakeStore;
 let tw: FakeTwilio;
 let gateResult: AiGateResult;
+let afterCall: ReturnType<typeof vi.fn>;
+let transferFailed: ReturnType<typeof vi.fn>;
 let bridge: { start: ReturnType<typeof vi.fn>; silence: ReturnType<typeof vi.fn>; waitForPlayback: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
 
 async function build(withRateLimit = false) {
@@ -79,6 +82,8 @@ async function build(withRateLimit = false) {
     }),
     gate: async () => gateResult,
     now: () => NOW,
+    afterCall: (row) => afterCall(row),
+    effects: { ...defaultToolEffects, transferFailed: (ctx, info) => transferFailed(ctx, info) },
   });
   await app.ready();
 }
@@ -110,6 +115,8 @@ beforeEach(async () => {
   tw = fakeTwilio();
   gateResult = { ok: true, toE164: '+16195550100', fromE164: '+16195550000' };
   bridge = { start: vi.fn(), silence: vi.fn(), waitForPlayback: vi.fn(async () => {}), stop: vi.fn() };
+  afterCall = vi.fn(async () => {});
+  transferFailed = vi.fn(async (ctx: ToolCtx, info: { finalized: boolean }) => defaultToolEffects.transferFailed(ctx, info));
   await build();
 });
 afterEach(async () => {
@@ -308,6 +315,22 @@ describe('POST /telephony/twilio/ai-voice/status', () => {
     expect(store.rows.get(ID)).toMatchObject({ outcome: 'no_answer', durationSeconds: 0 });
   });
 
+  it('replies at once and leaves the summary / Salesforce work running behind it', async () => {
+    await liveCall('in_progress');
+    afterCall = vi.fn(() => new Promise<void>(() => {})); // never finishes
+    const res = await signedPost(path, { CallSid: CALL_SID, CallStatus: 'completed', CallDuration: '30' });
+    expect(res.statusCode).toBe(200);
+    expect(afterCall).toHaveBeenCalledTimes(1);
+    expect(store.ctiCalls.size).toBe(1);
+    expect(store.rows.get(ID)?.ctiCallId).toBeTruthy();
+  });
+
+  it('stores the CallSid from the callback when the row never got one', async () => {
+    await store.insert({ id: ID, orgId: ORG, startedBy: REP, toE164: '+16195550100', fromE164: '+16195550000', status: 'queued' });
+    await signedPost(path, { CallSid: CALL_SID, CallStatus: 'ringing' });
+    expect(store.rows.get(ID)).toMatchObject({ callSid: CALL_SID, status: 'ringing' });
+  });
+
   it('a skip-signature dev flag lets an unsigned callback through', async () => {
     state.cfg = { ...state.cfg, TWILIO_SKIP_SIGNATURE_CHECK: true };
     await liveCall('ringing');
@@ -325,13 +348,31 @@ describe('POST /telephony/twilio/ai-voice/transfer-result', () => {
     expect(res.body).toContain('<Reject/>');
   });
 
-  it('the rep answered: hang up when they are done, outcome stays qualified_transferred', async () => {
+  it('the rep answered: hang up when they are done, status transferred, outcome stays qualified_transferred', async () => {
     await liveCall('transferring');
     await store.update(ID, { outcome: 'qualified_transferred' });
     const res = await signedPost(path, { CallSid: CALL_SID, DialCallStatus: 'completed' });
     expect(res.headers['content-type']).toContain('text/xml');
     expect(res.body).toContain('<Response><Hangup/></Response>');
-    expect(store.rows.get(ID)?.outcome).toBe('qualified_transferred');
+    expect(store.rows.get(ID)).toMatchObject({ status: 'transferred', outcome: 'qualified_transferred' });
+  });
+
+  it('a late "completed" (the status callback finalized first) still upgrades the row to transferred', async () => {
+    await liveCall('transferring');
+    await store.update(ID, { outcome: 'qualified_transferred' });
+    await signedPost(`/telephony/twilio/ai-voice/status?aiCallId=${ID}`, { CallSid: CALL_SID, CallStatus: 'completed', CallDuration: '300' });
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'qualified_transferred' });
+    await signedPost(path, { CallSid: CALL_SID, DialCallStatus: 'completed' });
+    expect(store.rows.get(ID)?.status).toBe('transferred');
+  });
+
+  it('a late "no-answer" after finalize: transfer_failed, and the effect is told the call is finalized', async () => {
+    await liveCall('transferring');
+    await store.update(ID, { outcome: 'qualified_transferred' });
+    await signedPost(`/telephony/twilio/ai-voice/status?aiCallId=${ID}`, { CallSid: CALL_SID, CallStatus: 'completed', CallDuration: '40' });
+    await signedPost(path, { CallSid: CALL_SID, DialCallStatus: 'no-answer' });
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'transfer_failed' });
+    expect(transferFailed).toHaveBeenCalledWith(expect.objectContaining({ aiCallId: ID }), { finalized: true });
   });
 
   it('no rep: the caller hears the callback promise, outcome transfer_failed, a callback is requested', async () => {
@@ -342,6 +383,8 @@ describe('POST /telephony/twilio/ai-voice/transfer-result', () => {
     expect(res.body).toContain('<Hangup/>');
     expect(store.rows.get(ID)?.outcome).toBe('transfer_failed');
     expect(store.rows.get(ID)?.summary).toContain('call them back');
+    expect(transferFailed).toHaveBeenCalledWith(expect.objectContaining({ aiCallId: ID }), { finalized: false });
+    expect(store.rows.get(ID)?.status).toBe('transferring');
   });
 
   it('an unknown call still gets valid TwiML that ends the call', async () => {

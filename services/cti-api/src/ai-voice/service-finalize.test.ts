@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { derivedOutcome, finalizeAiCall, isTerminalCallStatus, mapCallStatus } from './service-finalize.js';
+import { afterAiCall, ctiCallValues, derivedOutcome, finalizeAiCall, isTerminalCallStatus, mapCallStatus } from './service-finalize.js';
 import { clearActiveCalls, getActiveCall, registerActiveCall } from './registry.js';
-import { activeEntry, fakeStore, silentLog, type FakeStore } from './testing.js';
+import type { AiCallRow } from './store.js';
+import { activeEntry, fakeStore, rowOf, silentLog, type FakeStore } from './testing.js';
 
 const ID = '11111111-2222-4333-8444-555555555555';
 const END = new Date('2026-10-05T18:05:00Z');
@@ -51,10 +52,10 @@ describe('finalizeAiCall', () => {
     expect(store.rows.get(ID)?.outcome).toBe('no_answer');
   });
 
-  it('keeps a tool outcome; a completed transfer becomes status transferred', async () => {
-    await store.update(ID, { status: 'transferring', outcome: 'qualified_transferred' });
+  it('keeps a tool outcome', async () => {
+    await store.update(ID, { outcome: 'not_interested' });
     await finalizeAiCall(deps(), ID, { callStatus: 'completed', durationSeconds: 300, endedAt: END });
-    expect(store.rows.get(ID)).toMatchObject({ status: 'transferred', outcome: 'qualified_transferred' });
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'not_interested' });
   });
 
   it('a transfer that rang out finishes completed / transfer_failed', async () => {
@@ -97,5 +98,151 @@ describe('finalizeAiCall', () => {
 
   it('an unknown id finalizes nothing', async () => {
     expect((await finalizeAiCall(deps(), 'nope', { callStatus: 'completed', durationSeconds: 1, endedAt: END })).finalized).toBe(false);
+  });
+});
+
+describe('finalize, Task 7: the calls row, the after-call work, the transfer status', () => {
+  const SID = `CA${'b'.repeat(32)}`;
+  const deps = (afterCall?: (row: AiCallRow) => Promise<void>) => ({ store, log: silentLog, ...(afterCall ? { afterCall } : {}) });
+
+  beforeEach(async () => {
+    await store.update(ID, { callSid: SID, fromE164: '+16195550000', startedAt: new Date('2026-10-05T18:00:30Z') });
+    store.rows.set(ID, { ...store.rows.get(ID)!, sfObject: 'Lead', sfRecordId: '00Q5e00000AbCdEFGH', handoffUserId: 'u2' });
+  });
+
+  it('writes ONE outbound calls row (so the dialer caps count it) and links it via cti_call_id', async () => {
+    await store.update(ID, { outcome: 'not_interested' });
+    const res = await finalizeAiCall(deps(), ID, { callStatus: 'completed', durationSeconds: 95, endedAt: END });
+    expect(res.finalized).toBe(true);
+    expect(store.ctiCalls.size).toBe(1);
+    const [call] = [...store.ctiCalls.values()];
+    expect(call).toMatchObject({
+      orgId: 'o1',
+      userId: 'u1',
+      provider: 'twilio',
+      providerCallId: SID,
+      direction: 'outbound',
+      fromNumber: '+16195550000',
+      toNumber: '+16195550100',
+      normalizedToNumber: '+16195550100',
+      status: 'completed',
+      durationSeconds: 95,
+      talkSeconds: 0,
+      disposition: 'Connected',
+      salesforceWhoId: '00Q5e00000AbCdEFGH',
+      salesforceWhatId: null,
+      campaignKey: null,
+      metadata: { ai: true, aiCallId: ID, outcome: 'not_interested' },
+      endedAt: END,
+    });
+    expect(store.rows.get(ID)?.ctiCallId).toBe(call!.id);
+    if (res.finalized) expect(res.row.ctiCallId).toBe(call!.id);
+  });
+
+  it('a second finalize writes nothing (idempotent)', async () => {
+    await finalizeAiCall(deps(), ID, { callStatus: 'no-answer', durationSeconds: 0, endedAt: END });
+    const again = await finalizeAiCall(deps(), ID, { callStatus: 'completed', durationSeconds: 3, endedAt: END });
+    expect(again.finalized).toBe(false);
+    expect(store.ctiCalls.size).toBe(1);
+  });
+
+  it.each([
+    ['no-answer', 'no_answer', 'No answer'],
+    ['busy', 'busy', 'Busy'],
+    ['failed', 'failed', 'Failed'],
+    ['canceled', 'canceled', 'Failed'],
+  ])('Twilio %s → calls.status %s, disposition %s', async (callStatus, status, disposition) => {
+    await finalizeAiCall(deps(), ID, { callStatus, durationSeconds: 0, endedAt: END });
+    expect([...store.ctiCalls.values()][0]).toMatchObject({ status, disposition });
+  });
+
+  it('a call that was never placed (no CallSid anywhere) gets no calls row', async () => {
+    store.rows.set(ID, { ...store.rows.get(ID)!, callSid: null });
+    await finalizeAiCall(deps(), ID, { callStatus: 'failed', durationSeconds: null, endedAt: END });
+    expect(store.ctiCalls.size).toBe(0);
+    expect(store.rows.get(ID)?.endedAt).toEqual(END);
+  });
+
+  it('stores the CallSid from the callback when the row never got one, and uses it for the calls row', async () => {
+    store.rows.set(ID, { ...store.rows.get(ID)!, callSid: null });
+    await finalizeAiCall(deps(), ID, { callStatus: 'completed', durationSeconds: 4, endedAt: END, callSid: SID });
+    expect(store.rows.get(ID)?.callSid).toBe(SID);
+    expect([...store.ctiCalls.values()][0]?.providerCallId).toBe(SID);
+  });
+
+  it('a calls-row failure is logged and the call is still finalized', async () => {
+    const error = vi.fn();
+    store.recordCtiCall = async () => Promise.reject(new Error('db blip'));
+    const res = await finalizeAiCall({ store, log: { ...silentLog, error } }, ID, { callStatus: 'completed', durationSeconds: 4, endedAt: END });
+    expect(res.finalized).toBe(true);
+    expect(error).toHaveBeenCalled();
+  });
+
+  it('the after-call work (summary, Salesforce) runs detached: finalize does not wait for it', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const afterCall = vi.fn(async () => gate);
+    const res = await finalizeAiCall(deps(afterCall), ID, { callStatus: 'completed', durationSeconds: 4, endedAt: END });
+    expect(res.finalized).toBe(true);
+    expect(afterCall).toHaveBeenCalledTimes(1);
+    expect((afterCall.mock.calls[0] as unknown as [AiCallRow])[0].ctiCallId).toBeTruthy();
+    release();
+    if (res.finalized) await res.after;
+  });
+
+  it('an after-call failure never escapes', async () => {
+    const res = await finalizeAiCall(deps(async () => Promise.reject(new Error('boom'))), ID, { callStatus: 'completed', durationSeconds: 4, endedAt: END });
+    if (res.finalized) await expect(res.after).resolves.toBeUndefined();
+  });
+
+  it('finalize never sets transferred itself: a transfer still in flight ends completed / qualified_transferred', async () => {
+    await store.update(ID, { status: 'transferring', outcome: 'qualified_transferred' });
+    await finalizeAiCall(deps(), ID, { callStatus: 'completed', durationSeconds: 300, endedAt: END });
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'qualified_transferred' });
+  });
+
+  it('keeps transferred when the transfer-result already confirmed the rep answered', async () => {
+    await store.update(ID, { status: 'transferred', outcome: 'qualified_transferred' });
+    await finalizeAiCall(deps(), ID, { callStatus: 'completed', durationSeconds: 300, endedAt: END });
+    expect(store.rows.get(ID)?.status).toBe('transferred');
+  });
+});
+
+describe('ctiCallValues', () => {
+  it('a test call is still a calls row (it rang a real phone), with no Salesforce links', () => {
+    const row = { ...rowOf({ id: ID, orgId: 'o1', startedBy: 'u1', toE164: '+16195550100' }), isTest: true, callSid: 'CA1', outcome: 'hung_up' };
+    expect(ctiCallValues(row as AiCallRow, 'completed')).toMatchObject({ salesforceWhoId: null, salesforceWhatId: null, disposition: 'Connected' });
+  });
+
+  it('an Opportunity is the What', () => {
+    const row = { ...rowOf({ id: ID, orgId: 'o1', startedBy: 'u1', toE164: '+16195550100' }), sfObject: 'Opportunity', sfRecordId: '0065e00000AbCdEFGH', callSid: 'CA1' };
+    expect(ctiCallValues(row as AiCallRow, 'completed')).toMatchObject({ salesforceWhoId: null, salesforceWhatId: '0065e00000AbCdEFGH' });
+  });
+});
+
+describe('afterAiCall', () => {
+  const SID = `CA${'b'.repeat(32)}`;
+  const record = (over: Partial<AiCallRow> = {}): AiCallRow =>
+    ({ ...store.rows.get(ID)!, callSid: SID, sfObject: 'Lead', sfRecordId: '00Q5e00000AbCdEFGH', outcome: 'qualified_callback', summary: 'Callback requested: Thursday', ...over }) as AiCallRow;
+
+  it('writes the summary, then the call Task and (for a callback) the callback Task', async () => {
+    const order: string[] = [];
+    const sf = {
+      createCallTask: vi.fn(async (_u: string, input: { subject: string }) => {
+        order.push(input.subject);
+        return { taskId: `00T${order.length}` };
+      }),
+      fetchOwnership: vi.fn(async () => ({ type: 'Lead' as const, ownerId: 'SF1' })),
+      sfUserIdFor: vi.fn(async () => 'SF1'),
+    };
+    await afterAiCall(record(), { store, log: silentLog, summary: { client: null, model: 'm', log: silentLog }, sf: { sf, store, log: silentLog, now: () => END } });
+    expect(store.rows.get(ID)?.summary).toBe(`Callback requested: Thursday\n\nOutcome: Callback requested\nAI call id: ${ID}`);
+    expect(order).toEqual(['AI call: Callback requested', 'AI call: callback Thursday']);
+    expect(store.rows.get(ID)?.sfTaskId).toBe('00T1');
+  });
+
+  it('without Salesforce (or for a test call) only the summary is written', async () => {
+    await afterAiCall(record({ outcome: 'no_answer', summary: null }), { store, log: silentLog, summary: { client: null, model: 'm', log: silentLog }, sf: null });
+    expect(store.rows.get(ID)?.summary).toBe(`AI call — No answer\n\nOutcome: No answer\nAI call id: ${ID}`);
   });
 });

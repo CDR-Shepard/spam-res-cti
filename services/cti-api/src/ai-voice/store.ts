@@ -10,6 +10,15 @@
  */
 import { and, desc, eq, inArray, isNotNull, isNull, gte, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
+import {
+  failTransfer,
+  markTransferredQuery,
+  recordCtiCall,
+  setSfTaskId,
+  staleOpenQuery,
+  type NewCtiCall,
+  type TransferFail,
+} from './store-end.js';
 
 type Db = ReturnType<typeof getDb>;
 const t = schema.aiCalls;
@@ -53,7 +62,7 @@ export type NewAiCall = typeof t.$inferInsert;
 export type AiCallPatch = Partial<
   Pick<
     NewAiCall,
-    'status' | 'outcome' | 'callSid' | 'fromE164' | 'answeredBy' | 'summary' | 'callbackAt' | 'startedAt' | 'endedAt'
+    'status' | 'outcome' | 'callSid' | 'fromE164' | 'answeredBy' | 'summary' | 'callbackAt' | 'startedAt' | 'endedAt' | 'sfTaskId'
   >
 >;
 
@@ -63,6 +72,8 @@ export interface FinalizeWrite {
   durationSeconds: number | null;
   endedAt: Date;
   answeredBy: string | null;
+  /** Twilio's CallSid from the callback: stored only when the row never got one. */
+  callSid: string | null;
 }
 
 /** Statuses of a call that is still on (or about to be on) the line. */
@@ -95,7 +106,19 @@ export interface AiCallStore {
   activeCallTo(orgId: string, e164: string, since: Date): Promise<boolean>;
   /** Placed AI calls to `e164` since `since` that have no `calls` row yet (so the daily cap counts them). */
   uncountedPlaced(orgId: string, e164: string, since: Date): Promise<number>;
+  /** The rep answered the transfer: status `transferred` (a live transferring row, or a just-completed one). */
+  markTransferred(id: string): Promise<boolean>;
+  /** The transfer did not connect: `qualified_transferred` → `transfer_failed`; says whether finalize already ran. */
+  failTransfer(id: string): Promise<TransferFail>;
+  /** Insert (or find) the call's `calls` row and set `cti_call_id`, atomically; returns calls.id. */
+  recordCtiCall(aiCallId: string, values: NewCtiCall): Promise<string>;
+  /** The Salesforce Task id, on ai_calls and on its `calls` row. */
+  setSfTaskId(aiCallId: string, taskId: string): Promise<void>;
+  /** Unfinished rows: placed ones created before `placedBefore`, never-placed ones before `unplacedBefore`. */
+  staleOpen(placedBefore: Date, unplacedBefore: Date, limit: number): Promise<AiCallRow[]>;
 }
+
+export type { NewCtiCall, TransferFail } from './store-end.js';
 
 const touched = { updatedAt: sql`now()` };
 
@@ -152,7 +175,10 @@ export const finalizeQuery = (db: Db, id: string, w: FinalizeWrite) => {
     .update(t)
     .set({
       outcome: final(),
-      status: sql`case when ${final()} = 'qualified_transferred' then 'transferred' when ${final()} = 'failed' then 'failed' else 'completed' end`,
+      // `transferred` is set ONLY by the transfer-result (the rep answered);
+      // finalize keeps it, and never infers it from the outcome.
+      status: sql`case when ${t.status} = 'transferred' then 'transferred' when ${final()} = 'failed' then 'failed' else 'completed' end`,
+      callSid: sql`coalesce(${t.callSid}, ${w.callSid})`,
       durationSeconds: w.durationSeconds,
       endedAt: w.endedAt,
       answeredBy: sql`coalesce(${t.answeredBy}, ${w.answeredBy})`,
@@ -282,5 +308,12 @@ export function drizzleAiCallStore(db: Db): AiCallStore {
       const [row] = await uncountedPlacedQuery(db, orgId, e164, since);
       return row?.n ?? 0;
     },
+    async markTransferred(id) {
+      return (await markTransferredQuery(db, id)).length > 0;
+    },
+    failTransfer: (id) => failTransfer(db, id),
+    recordCtiCall: (aiCallId, values) => recordCtiCall(db, aiCallId, values),
+    setSfTaskId: (aiCallId, taskId) => setSfTaskId(db, aiCallId, taskId),
+    staleOpen: (placedBefore, unplacedBefore, limit) => staleOpenQuery(db, placedBefore, unplacedBefore, limit),
   };
 }

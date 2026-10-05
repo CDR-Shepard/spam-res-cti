@@ -6,8 +6,8 @@
  */
 import type { BridgeSocket } from './bridge.js';
 import type { ActiveAiCall } from './registry.js';
-import type { AiCallRow, AiCallStore, NewAiCall, TranscriptEntry } from './store.js';
-import type { AiVoiceTwilio } from './twilio.js';
+import type { AiCallRow, AiCallStore, NewAiCall, NewCtiCall, TranscriptEntry } from './store.js';
+import type { AiVoiceTwilio, FetchedCall } from './twilio.js';
 
 export const silentLog = { info: () => {}, warn: () => {}, error: () => {} };
 
@@ -40,6 +40,8 @@ export function rowOf(v: NewAiCall & { id: string }): AiCallRow {
 
 export interface FakeStore extends AiCallStore {
   rows: Map<string, AiCallRow>;
+  /** `calls` rows written by recordCtiCall, keyed by their id. */
+  ctiCalls: Map<string, NewCtiCall & { id: string }>;
   optOuts: Array<{ orgId: string; e164: string; note: string }>;
   handoff: Map<string, string>;
   orgNames: Map<string, string>;
@@ -54,8 +56,10 @@ export function fakeStore(): FakeStore {
     const cur = rows.get(id);
     if (cur) rows.set(id, { ...cur, ...patch });
   };
+  const ctiCalls: FakeStore['ctiCalls'] = new Map();
   const store: FakeStore = {
     rows,
+    ctiCalls,
     optOuts,
     handoff: new Map(),
     orgNames: new Map(),
@@ -118,10 +122,11 @@ export function fakeStore(): FakeStore {
       const r = rows.get(id);
       if (!r || r.endedAt) return null;
       const outcome = r.outcome ?? w.derivedOutcome;
-      const status = outcome === 'qualified_transferred' ? 'transferred' : outcome === 'failed' ? 'failed' : 'completed';
+      const status = r.status === 'transferred' ? 'transferred' : outcome === 'failed' ? 'failed' : 'completed';
       put(id, {
         outcome,
         status,
+        callSid: r.callSid ?? w.callSid,
         durationSeconds: w.durationSeconds,
         endedAt: w.endedAt,
         answeredBy: r.answeredBy ?? w.answeredBy,
@@ -145,6 +150,39 @@ export function fakeStore(): FakeStore {
     async uncountedPlaced() {
       return store.uncounted;
     },
+    async markTransferred(id) {
+      const r = rows.get(id);
+      if (!r || r.outcome !== 'qualified_transferred' || !['transferring', 'completed'].includes(r.status)) return false;
+      put(id, { status: 'transferred' });
+      return true;
+    },
+    async failTransfer(id) {
+      const r = rows.get(id);
+      if (!r || r.outcome !== 'qualified_transferred') return 'none';
+      put(id, { outcome: 'transfer_failed' });
+      return r.endedAt ? 'ended' : 'live';
+    },
+    async recordCtiCall(aiCallId, values) {
+      const existing = [...ctiCalls.values()].find((c) => c.providerCallId && c.providerCallId === values.providerCallId);
+      const id = existing?.id ?? `cccccccc-0000-4000-8000-${String(ctiCalls.size + 1).padStart(12, '0')}`;
+      if (!existing) ctiCalls.set(id, { ...values, id });
+      const r = rows.get(aiCallId);
+      if (r && !r.ctiCallId) put(aiCallId, { ctiCallId: id });
+      return id;
+    },
+    async setSfTaskId(aiCallId, taskId) {
+      const r = rows.get(aiCallId);
+      if (!r) return;
+      put(aiCallId, { sfTaskId: taskId });
+      const c = r.ctiCallId ? ctiCalls.get(r.ctiCallId) : undefined;
+      if (c && !c.salesforceTaskId) ctiCalls.set(c.id, { ...c, salesforceTaskId: taskId });
+    },
+    async staleOpen(placedBefore, unplacedBefore, limit) {
+      return [...rows.values()]
+        .filter((r) => !r.endedAt && r.createdAt < (r.callSid ? placedBefore : unplacedBefore))
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .slice(0, limit);
+    },
   };
   return store;
 }
@@ -156,6 +194,8 @@ export interface FakeTwilio extends AiVoiceTwilio {
   failPlace: boolean;
   failRedirect: boolean;
   failHangup: boolean;
+  /** What fetchCall returns per CallSid (absent → a 404-like error). */
+  fetched: Map<string, FetchedCall>;
 }
 
 export const CALL_SID = `CA${'b'.repeat(32)}`;
@@ -168,6 +208,12 @@ export function fakeTwilio(): FakeTwilio {
     failPlace: false,
     failRedirect: false,
     failHangup: false,
+    fetched: new Map(),
+    async fetchCall(callSid) {
+      const c = t.fetched.get(callSid);
+      if (!c) throw Object.assign(new Error('The requested resource was not found'), { status: 404 });
+      return c;
+    },
     async placeCall(i) {
       if (t.failPlace) throw new Error('twilio says no');
       t.placed.push(i);

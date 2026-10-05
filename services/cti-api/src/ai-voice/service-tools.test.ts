@@ -60,6 +60,31 @@ describe('end_call', () => {
     expect(store.rows.get(ID)?.outcome).toBe('do_not_call');
   });
 
+  it('writes the outcome only when it wins the close (voicemail / a transfer already owns the call)', async () => {
+    closing = true; // another closer claimed first
+    const res = await run('end_call', { outcome: 'not_interested', summary: 'bye' });
+    expect(res).toEqual({ output: 'already ending', then: 'hangup' });
+    expect(store.rows.get(ID)).toMatchObject({ outcome: null, summary: null });
+    await settle();
+    expect(twilio.hangups).toHaveLength(0);
+  });
+
+  it('a do-not-call request is honoured even when another closer owns the call — but the outcome is not touched', async () => {
+    closing = true;
+    await store.update(ID, { outcome: 'voicemail' });
+    await run('end_call', { outcome: 'do_not_call', summary: 'stop' });
+    expect(store.optOuts).toEqual([{ orgId: ORG, e164: TO, note: 'asked not to be called' }]);
+    expect(store.rows.get(ID)?.outcome).toBe('voicemail');
+  });
+
+  it('end_call(wrong_number) replaces the do_not_call that mark_do_not_call wrote (the opt-out stays)', async () => {
+    await run('mark_do_not_call', { note: 'not the owner' });
+    expect(store.rows.get(ID)?.outcome).toBe('do_not_call');
+    await run('end_call', { outcome: 'wrong_number', summary: 'Wrong person.' });
+    expect(store.rows.get(ID)).toMatchObject({ outcome: 'wrong_number', summary: 'Wrong person.' });
+    expect(store.optOuts).toHaveLength(1);
+  });
+
   it('a second end/transfer is a no-op (only one closer acts)', async () => {
     await run('end_call', { outcome: 'hung_up', summary: '' });
     const res = await run('transfer_to_rep', { reason: 'interested', summary: 'x' });
@@ -176,6 +201,15 @@ describe('save_qualification and schedule_callback', () => {
     await run('schedule_callback', { when: 'Thursday after 5 PM', note: '' });
     expect(store.rows.get(ID)?.callbackAt).toBeNull();
     expect(store.rows.get(ID)?.summary).toBe('Callback requested: Thursday after 5 PM');
+  });
+});
+
+describe('the summary keeps what the tools recorded', () => {
+  it('schedule_callback then end_call(qualified_callback): the callback line survives the closing summary', async () => {
+    await run('schedule_callback', { when: 'Thursday after 5 PM', note: 'after work' });
+    await run('end_call', { outcome: 'qualified_callback', summary: 'Open to selling; call Thursday.' });
+    expect(store.rows.get(ID)?.summary).toBe('Callback requested: Thursday after 5 PM — after work\nOpen to selling; call Thursday.');
+    expect(store.rows.get(ID)?.outcome).toBe('qualified_callback');
   });
 });
 

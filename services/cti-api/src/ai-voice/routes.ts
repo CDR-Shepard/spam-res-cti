@@ -18,12 +18,15 @@ import { resolveSession } from '@cti/auth';
 import { getDb } from '@cti/db';
 import { aiVoiceAvailable, loadConfig, parseTestNumbers } from '../config.js';
 import type { Db } from '../dialer/pick-did.js';
+import type { BridgeLog } from './bridge.js';
 import { UUID_RE } from '../telephony/webhooks.js';
 import { gateAiCall } from './gate.js';
 import { loadAiCallRecord } from './record.js';
 import { registerAiVoiceStreamRoute } from './routes-stream.js';
 import { registerAiVoiceWebhooks } from './routes-webhooks.js';
 import { startAiCall, type StartDeps, type StartResult } from './service.js';
+import { liveAfterCall, type AfterCall } from './service-finalize.js';
+import { withSalesforceEffects } from './sf-logging.js';
 import { defaultToolEffects, type ToolEffects } from './service-tools.js';
 import { drizzleAiCallStore, type AiCallStore } from './store.js';
 import type { StreamSessionDeps } from './stream-session.js';
@@ -40,6 +43,8 @@ export interface AiVoiceDeps {
   createBridge?: StreamSessionDeps['createBridge'];
   db: () => Db;
   now: () => Date;
+  /** Summary + Salesforce Tasks once a call is finalized (detached from the webhook). */
+  afterCall: AfterCall;
 }
 
 const START_RATE_MAX = 10;
@@ -82,23 +87,28 @@ export function startResponse(r: StartResult): { code: number; body: Record<stri
   }
 }
 
-function defaultDeps(): AiVoiceDeps {
+/** Live wiring; the Salesforce/summary pieces are built on the store and clock actually in use. */
+function defaultDeps(overrides: Partial<AiVoiceDeps>, log: BridgeLog): AiVoiceDeps {
   const cfg = loadConfig();
+  const store = overrides.store ?? drizzleAiCallStore(getDb());
+  const now = overrides.now ?? (() => new Date());
+  const { afterCall, sf } = liveAfterCall(cfg, store, log, now);
   return {
-    store: drizzleAiCallStore(getDb()),
+    store,
     twilio: createAiVoiceTwilio(cfg),
-    effects: defaultToolEffects,
+    effects: withSalesforceEffects(defaultToolEffects, sf),
     loadRecord: (userId, objectType, recordId) => loadAiCallRecord(userId, objectType, recordId),
     gate: gateAiCall,
     openRealtime,
     db: () => getDb(),
-    now: () => new Date(),
+    now,
+    afterCall,
   };
 }
 
 export async function registerAiVoiceRoutes(app: FastifyInstance, overrides: Partial<AiVoiceDeps> = {}): Promise<void> {
-  const deps: AiVoiceDeps = { ...defaultDeps(), ...overrides };
   const log = app.log;
+  const deps: AiVoiceDeps = { ...defaultDeps(overrides, log), ...overrides };
 
   app.post(
     '/ai-calls',
@@ -151,7 +161,7 @@ export async function registerAiVoiceRoutes(app: FastifyInstance, overrides: Par
     return row;
   });
 
-  registerAiVoiceWebhooks(app, { store: deps.store, twilio: deps.twilio, effects: deps.effects, now: deps.now, log });
+  registerAiVoiceWebhooks(app, { store: deps.store, twilio: deps.twilio, effects: deps.effects, now: deps.now, log, afterCall: deps.afterCall });
 
   await registerAiVoiceStreamRoute(app, (req) => ({
     cfg: loadConfig(),

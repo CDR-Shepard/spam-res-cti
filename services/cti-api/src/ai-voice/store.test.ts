@@ -67,15 +67,16 @@ describe('ai_calls SQL, rendered', () => {
     expect(sql).toContain('"ai_calls"."ended_at" is null');
   });
 
-  it('finalize is a compare-and-swap on ended_at and derives status from the final outcome', () => {
+  it('finalize is a compare-and-swap on ended_at; status keeps a confirmed transfer, else follows the final outcome', () => {
     const { sql, params } = finalizeQuery(db, ID, {
       derivedOutcome: 'no_answer',
       durationSeconds: 0,
       endedAt: NOW,
       answeredBy: null,
+      callSid: null,
     }).toSQL();
     expect(sql).toMatch(/"outcome" = coalesce\("ai_calls"\."outcome", \$\d+\)/);
-    expect(sql).toMatch(/when coalesce\("ai_calls"\."outcome", \$\d+\) = 'qualified_transferred' then 'transferred'/);
+    expect(sql).toContain(`case when "ai_calls"."status" = 'transferred' then 'transferred'`);
     expect(sql).toMatch(/when coalesce\("ai_calls"\."outcome", \$\d+\) = 'failed' then 'failed'/);
     expect(sql).toMatch(/"answered_by" = coalesce\("ai_calls"\."answered_by", \$\d+\)/);
     expect(sql).toContain(`else 'completed' end`);

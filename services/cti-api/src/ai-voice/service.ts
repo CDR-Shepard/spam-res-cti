@@ -235,9 +235,30 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
   }
 
   updateActiveCall(aiCallId, { callSid });
-  await deps.store.update(aiCallId, { callSid });
-  // A status callback may already have moved the row on; only a queued row becomes ringing.
-  await deps.store.updateWhereStatus(aiCallId, ['queued'], { status: 'ringing' });
+  await recordPlaced(deps, aiCallId, callSid);
   deps.log.info({ aiCallId, isTest }, 'ai-voice: call placed');
   return { ok: true, aiCallId, status: 'ringing' };
+}
+
+/**
+ * The phone is already ringing: a database error here must not turn into a
+ * 500 for a live call. Retried once, then logged loudly; the status callback
+ * (keyed by aiCallId) still finalizes the row and stores its CallSid.
+ */
+async function recordPlaced(deps: StartDeps, aiCallId: string, callSid: string): Promise<void> {
+  const write = async () => {
+    await deps.store.update(aiCallId, { callSid });
+    // A status callback may already have moved the row on; only a queued row becomes ringing.
+    await deps.store.updateWhereStatus(aiCallId, ['queued'], { status: 'ringing' });
+  };
+  try {
+    await write();
+  } catch (first) {
+    deps.log.warn({ aiCallId, err: errText(first) }, 'ai-voice: CallSid write failed, retrying');
+    try {
+      await write();
+    } catch (e) {
+      deps.log.error({ aiCallId, callSid, err: errText(e) }, 'ai-voice: CALL IS LIVE but its CallSid was not stored — the status callback will finalize it');
+    }
+  }
 }

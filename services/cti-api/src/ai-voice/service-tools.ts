@@ -36,8 +36,12 @@ export interface ToolEffects {
   markDoNotCall(ctx: ToolCtx, note: string): Promise<void>;
   saveQualification(ctx: ToolCtx, fields: Record<string, string>): Promise<void>;
   scheduleCallback(ctx: ToolCtx, req: { when: string; note: string }): Promise<void>;
-  /** A transfer rang out or could not be placed: make sure someone calls them back. */
-  transferFailed(ctx: ToolCtx): Promise<void>;
+  /**
+   * A transfer rang out or could not be placed: make sure someone calls them
+   * back. `finalized`: the row was already closed (the status callback won the
+   * race), so finalize's callback Task has been and gone — this one must make it.
+   */
+  transferFailed(ctx: ToolCtx, info: { finalized: boolean }): Promise<void>;
 }
 
 /** How the tool handler acts on the live call (built by the stream session). */
@@ -87,14 +91,19 @@ async function bestEffort(ctx: ToolCtx, what: string, fn: () => Promise<unknown>
   }
 }
 
+/** Upsert `opt_outs` (idempotent), retrying once; throws if it still fails. */
+async function writeOptOut(ctx: ToolCtx, note: string): Promise<void> {
+  try {
+    await ctx.store.upsertOptOut(ctx.orgId, ctx.toE164, note);
+  } catch (first) {
+    ctx.log.warn({ aiCallId: ctx.aiCallId, err: errText(first) }, 'ai-voice: opt-out write failed, retrying');
+    await ctx.store.upsertOptOut(ctx.orgId, ctx.toE164, note);
+  }
+}
+
 export const defaultToolEffects: ToolEffects = {
   async markDoNotCall(ctx, note) {
-    try {
-      await ctx.store.upsertOptOut(ctx.orgId, ctx.toE164, note);
-    } catch (first) {
-      ctx.log.warn({ aiCallId: ctx.aiCallId, err: errText(first) }, 'ai-voice: opt-out write failed, retrying');
-      await ctx.store.upsertOptOut(ctx.orgId, ctx.toE164, note);
-    }
+    await writeOptOut(ctx, note);
     await ctx.store.setOutcome(ctx.aiCallId, WRONG_NUMBER.test(note) ? 'wrong_number' : 'do_not_call', null);
   },
   async saveQualification(ctx, fields) {
@@ -145,18 +154,37 @@ async function redirectToRep(env: ToolEnv, twiml: string): Promise<void> {
   }
 }
 
+/** The closing outcome; its summary is APPENDED so lines the tools wrote earlier (a callback time) survive. */
+async function recordOutcome(ctx: ToolCtx, outcome: AiCallOutcome, summary: string | null): Promise<void> {
+  await ctx.store.setOutcome(ctx.aiCallId, outcome, null);
+  if (summary) await ctx.store.appendSummary(ctx.aiCallId, summary);
+}
+
 const ALREADY_ENDING: ToolResult = { output: 'already ending', then: 'hangup' };
 
+/**
+ * The outcome is written only by the closer that wins `claimClose` (a
+ * voicemail, transfer or failure that got there first owns the row). A
+ * do-not-call request is honoured either way. `wrong_number` may replace the
+ * `do_not_call` that mark_do_not_call wrote for the same wrong number; no
+ * other outcome overwrites `do_not_call` (store.setOutcome).
+ */
 async function endCall(args: unknown, env: ToolEnv): Promise<ToolResult> {
   const { ctx } = env;
   const outcome = oneOf<AiCallOutcome>(field(args, 'outcome'), END_CALL_OUTCOMES, 'other');
   const summary = text(field(args, 'summary'), SUMMARY_MAX) || null;
-  if (outcome === 'do_not_call' || outcome === 'wrong_number') {
-    const note = outcome === 'wrong_number' ? 'wrong number' : 'asked not to be called';
-    await bestEffort(ctx, 'opt_out', () => env.effects.markDoNotCall(ctx, note));
+  const optOut = outcome === 'do_not_call' || outcome === 'wrong_number';
+  const note = outcome === 'wrong_number' ? 'wrong number' : 'asked not to be called';
+  const claimed = env.call.claimClose();
+  if (!claimed) {
+    if (optOut) await bestEffort(ctx, 'opt_out', () => writeOptOut(ctx, note));
+    return ALREADY_ENDING;
   }
-  await bestEffort(ctx, 'outcome', () => ctx.store.setOutcome(ctx.aiCallId, outcome, summary));
-  if (!env.call.claimClose()) return ALREADY_ENDING;
+  if (optOut) await bestEffort(ctx, 'opt_out', () => env.effects.markDoNotCall(ctx, note));
+  await bestEffort(ctx, 'outcome', async () => {
+    if (outcome === 'wrong_number') await ctx.store.replaceOutcome(ctx.aiCallId, 'do_not_call', 'wrong_number');
+    await recordOutcome(ctx, outcome, summary);
+  });
   afterPlayback(env, 'hangup', () => hangUp(env));
   return { output: 'ending', then: 'hangup' };
 }
@@ -168,7 +196,7 @@ async function transferToRep(args: unknown, env: ToolEnv): Promise<ToolResult> {
   const summary = text(field(args, 'summary'), SUMMARY_MAX) || null;
   await bestEffort(ctx, 'transferring', async () => {
     await ctx.store.updateWhereStatus(ctx.aiCallId, ['ringing', 'in_progress'], { status: 'transferring' });
-    await ctx.store.setOutcome(ctx.aiCallId, 'qualified_transferred', summary);
+    await recordOutcome(ctx, 'qualified_transferred', summary);
   });
   afterPlayback(env, 'transfer', async () => {
     const twiml = env.call.transferTwiml(reason);
@@ -178,7 +206,7 @@ async function transferToRep(args: unknown, env: ToolEnv): Promise<ToolResult> {
       ctx.log.error({ aiCallId: ctx.aiCallId, err: errText(e) }, 'ai-voice: transfer redirect failed');
       await bestEffort(ctx, 'transfer_failed', async () => {
         await ctx.store.replaceOutcome(ctx.aiCallId, 'qualified_transferred', 'transfer_failed');
-        await env.effects.transferFailed(ctx);
+        await env.effects.transferFailed(ctx, { finalized: false });
       });
       await hangUp(env);
     }

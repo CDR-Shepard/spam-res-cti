@@ -105,8 +105,9 @@ describe('fixed TwiML', () => {
 function fakeClient() {
   const update = vi.fn(async (_a: Record<string, unknown>) => ({}));
   const create = vi.fn(async (_a: Record<string, unknown>) => ({ sid: SID }));
-  const calls = Object.assign(vi.fn((_sid: string) => ({ update })), { create });
-  return { client: { calls } as unknown as AiVoiceTwilioClient, create, update, calls };
+  const fetch = vi.fn(async () => ({ status: 'completed', duration: '42', answeredBy: 'human', endTime: new Date('2026-10-05T18:05:00Z') }));
+  const calls = Object.assign(vi.fn((_sid: string) => ({ update, fetch })), { create });
+  return { client: { calls } as unknown as AiVoiceTwilioClient, create, update, fetch, calls };
 }
 
 describe('createAiVoiceTwilio', () => {
@@ -153,6 +154,19 @@ describe('createAiVoiceTwilio', () => {
       { twiml: '<Response><Dial/></Response>', timeLimit: TRANSFER_TIME_LIMIT_SECONDS },
       { status: 'completed' },
     ]);
+  });
+
+  it('fetchCall reads the call record (status, duration, AMD, end time) for the stale-call sweep', async () => {
+    const f = fakeClient();
+    const port = createAiVoiceTwilio(cfg, () => f.client);
+    expect(await port.fetchCall(SID)).toEqual({
+      status: 'completed',
+      durationSeconds: 42,
+      answeredBy: 'human',
+      endTime: new Date('2026-10-05T18:05:00Z'),
+    });
+    f.fetch.mockResolvedValueOnce({ status: 'in-progress', duration: null, answeredBy: null, endTime: null } as never);
+    expect(await port.fetchCall(SID)).toEqual({ status: 'in-progress', durationSeconds: null, answeredBy: null, endTime: null });
   });
 
   it('builds the REST client once, lazily', async () => {

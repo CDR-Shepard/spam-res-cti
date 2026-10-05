@@ -215,3 +215,29 @@ describe('localTimeFor', () => {
     expect(localTimeFor('+442071234567', NOW)).toBe('Monday 1:00 PM');
   });
 });
+
+describe('startAiCall — the call is live before its row is updated', () => {
+  it('a failed CallSid write is retried once, and the call still returns ringing', async () => {
+    const update = store.update.bind(store);
+    let failures = 1;
+    store.update = vi.fn(async (id, patch) => {
+      if ('callSid' in patch && failures-- > 0) throw new Error('db blip');
+      return update(id, patch);
+    });
+    const res = await start({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' });
+    expect(res).toMatchObject({ ok: true, status: 'ringing' });
+    if (!res.ok) throw new Error('unreachable');
+    expect(store.rows.get(res.aiCallId)).toMatchObject({ callSid: CALL_SID, status: 'ringing' });
+  });
+
+  it('if the database stays down, it logs loudly and still answers ringing (never a 500 for a live call)', async () => {
+    const error = vi.fn();
+    deps.log = { ...silentLog, error };
+    store.update = vi.fn(async () => Promise.reject(new Error('db down')));
+    store.updateWhereStatus = vi.fn(async () => Promise.reject(new Error('db down')));
+    const res = await start({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' });
+    expect(res).toMatchObject({ ok: true, status: 'ringing' });
+    expect(error).toHaveBeenCalled();
+    if (res.ok) expect(getActiveCall(res.aiCallId)?.callSid).toBe(CALL_SID);
+  });
+});

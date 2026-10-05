@@ -125,7 +125,10 @@ export function voicemailTwiml(text: string): string {
 
 /** The slice of the twilio REST client this module uses (a fake in tests). */
 export interface AiVoiceTwilioClient {
-  calls: ((callSid: string) => { update(args: Record<string, unknown>): Promise<unknown> }) & {
+  calls: ((callSid: string) => {
+    update(args: Record<string, unknown>): Promise<unknown>;
+    fetch(): Promise<{ status: string; duration?: string | null; answeredBy?: string | null; endTime?: Date | null }>;
+  }) & {
     create(args: Record<string, unknown>): Promise<{ sid: string }>;
   };
 }
@@ -143,6 +146,16 @@ export interface AiVoiceTwilio {
   /** Replace the call's TwiML. Replacing `<Connect><Stream>` ends the stream (Twilio sends `stop`). */
   redirect(callSid: string, twiml: string, opts?: { timeLimit?: number }): Promise<void>;
   hangup(callSid: string): Promise<void>;
+  /** Twilio's record of the call (the stale-call sweep's source of truth). */
+  fetchCall(callSid: string): Promise<FetchedCall>;
+}
+
+export interface FetchedCall {
+  /** Twilio CallStatus: queued | ringing | in-progress | completed | busy | no-answer | failed | canceled. */
+  status: string;
+  durationSeconds: number | null;
+  answeredBy: string | null;
+  endTime: Date | null;
 }
 
 export function createAiVoiceTwilio(
@@ -177,6 +190,16 @@ export function createAiVoiceTwilio(
     },
     async hangup(callSid) {
       await rest().calls(callSid).update({ status: 'completed' });
+    },
+    async fetchCall(callSid) {
+      const c = await rest().calls(callSid).fetch();
+      const seconds = Number.parseInt(c.duration ?? '', 10);
+      return {
+        status: c.status,
+        durationSeconds: Number.isFinite(seconds) ? seconds : null,
+        answeredBy: c.answeredBy ?? null,
+        endTime: c.endTime ?? null,
+      };
     },
   };
 }

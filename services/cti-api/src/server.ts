@@ -20,6 +20,7 @@ import { registerDialerRoutes } from './routes/dialer.js';
 import { registerMobileRoutes } from './routes/mobile.js';
 import { registerCtiResetRoutes } from './routes/cti-reset.js';
 import { registerAiVoiceRoutes } from './ai-voice/routes.js';
+import { startAiCallSweeper } from './ai-voice/sweeper.js';
 import { startSyncLoop } from './salesforce/sync.js';
 import { startFollowupLoop, startRetryNudgeLoop } from './salesforce/followup-worker.js';
 import { maybeStartNoAnswerChatterLoop } from './salesforce/no-answer-chatter-worker.js';
@@ -147,6 +148,8 @@ async function main(): Promise<void> {
   const directoryTimer = startDirectoryLoop(cfg.DIRECTORY_REBUILD_INTERVAL_MS);
   // Talk-time report: close rep legs whose end callback never came (Twilio's own record).
   const repLegTimer = startRepLegReconcileLoop();
+  // AI calls whose status callback never came → finalized from Twilio's record (unref'd; null when AI voice is off).
+  startAiCallSweeper(cfg, app.log);
 
   const close = async () => {
     clearInterval(syncTimer);

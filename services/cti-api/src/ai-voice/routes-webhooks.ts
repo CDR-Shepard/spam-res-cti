@@ -4,9 +4,12 @@
  *
  *   amd              async AMD: a machine after the beep gets the voicemail
  *                    (silence the agent, redirect to <Say>); a fax is hung up.
- *   status           call progress; a terminal status finalizes (idempotent).
- *   transfer-result  the transfer's <Dial action>: rep answered → hang up when
- *                    done; otherwise the caller hears a callback promise.
+ *   status           call progress; a terminal status finalizes (idempotent;
+ *                    the summary / Salesforce work runs after the reply).
+ *   transfer-result  the transfer's <Dial action>: rep answered → status
+ *                    `transferred` (the ONLY place that sets it, even after
+ *                    finalize), hang up when done; otherwise outcome
+ *                    `transfer_failed` and the caller hears a callback promise.
  *
  * A callback whose CallSid is not the row's is ignored. Every response is
  * valid TwiML; the bad-signature response is 403 `<Reject/>`.
@@ -19,7 +22,7 @@ import type { BridgeLog } from './bridge.js';
 import { voicemailText } from './prompt.js';
 import { claimClose, getActiveCall } from './registry.js';
 import { localTimeFor } from './service.js';
-import { finalizeAiCall, isTerminalCallStatus, mapCallStatus } from './service-finalize.js';
+import { finalizeAiCall, isTerminalCallStatus, mapCallStatus, type AfterCall } from './service-finalize.js';
 import type { ToolCtx, ToolEffects } from './service-tools.js';
 import type { AiCallRow, AiCallStore } from './store.js';
 import { AMD_PATH, STATUS_PATH, TRANSFER_RESULT_PATH, noRepTwiml, voicemailTwiml, type AiVoiceTwilio } from './twilio.js';
@@ -30,6 +33,8 @@ export interface WebhookDeps {
   effects: ToolEffects;
   now: () => Date;
   log: BridgeLog;
+  /** Summary + Salesforce after finalize (detached). */
+  afterCall?: AfterCall;
 }
 
 const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
@@ -107,26 +112,36 @@ export async function onAmd(row: AiCallRow, answeredBy: string, deps: WebhookDep
 
 export async function onStatus(row: AiCallRow, body: unknown, deps: WebhookDeps): Promise<void> {
   const callStatus = field(body, 'CallStatus');
+  const callSid = field(body, 'CallSid') || null;
   if (isTerminalCallStatus(callStatus)) {
     const seconds = Number.parseInt(field(body, 'CallDuration'), 10);
-    await finalizeAiCall({ store: deps.store, log: deps.log }, row.id, {
+    const fin = { store: deps.store, log: deps.log, ...(deps.afterCall ? { afterCall: deps.afterCall } : {}) };
+    await finalizeAiCall(fin, row.id, {
       callStatus,
       durationSeconds: Number.isFinite(seconds) ? seconds : null,
       endedAt: deps.now(),
       answeredBy: field(body, 'AnsweredBy') || null,
+      callSid,
     });
     return;
   }
+  // The CallSid write after placing the call can fail (service.ts); the callback carries it.
+  if (!row.callSid && callSid && !row.endedAt) await deps.store.update(row.id, { callSid });
   const next = mapCallStatus(callStatus);
   if (next) await deps.store.updateWhereStatus(row.id, next === 'ringing' ? ['queued'] : ['queued', 'ringing'], { status: next });
 }
 
 export async function onTransferResult(row: AiCallRow, dialStatus: string, deps: WebhookDeps): Promise<string> {
-  if (DIAL_CONNECTED.has(dialStatus)) return HANGUP_TWIML;
+  if (DIAL_CONNECTED.has(dialStatus)) {
+    await deps.store
+      .markTransferred(row.id)
+      .catch((e: unknown) => deps.log.error({ aiCallId: row.id, err: errText(e) }, 'ai-voice: transferred status write failed'));
+    return HANGUP_TWIML;
+  }
   deps.log.info({ aiCallId: row.id, dialStatus }, 'ai-voice: transfer did not connect');
   try {
-    await deps.store.replaceOutcome(row.id, 'qualified_transferred', 'transfer_failed');
-    await deps.effects.transferFailed(toolCtx(row, deps));
+    const was = await deps.store.failTransfer(row.id);
+    if (was !== 'none') await deps.effects.transferFailed(toolCtx(row, deps), { finalized: was === 'ended' });
   } catch (e) {
     deps.log.error({ aiCallId: row.id, err: errText(e) }, 'ai-voice: transfer-failed bookkeeping failed');
   }
