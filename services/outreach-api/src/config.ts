@@ -32,10 +32,21 @@ const schema = z.object({
   /** Claude model for AI call plans (plan 1C). Must be priced in ai/model.ts PRICE_MICROS_PER_TOKEN. */
   CALL_PLAN_MODEL: z.string().min(1).default('claude-sonnet-5-5'),
   /** cti-api on Railway's private network, e.g. http://ctiapi.railway.internal:4000 (plan 1C). */
-  CTI_INTERNAL_URL: z.string().url().optional(),
+  CTI_INTERNAL_URL: z
+    .string()
+    .url()
+    .refine(isOrigin, 'CTI_INTERNAL_URL must be an origin only (scheme, host and port): no path, query, fragment or credentials')
+    .optional(),
   /** Shared with cti-api: HMAC key for the internal AI call trigger. */
   OUTREACH_INTERNAL_SECRET: z.string().min(32).optional(),
 });
+
+/** `http://host:port` and nothing after it (a lone trailing slash is fine): the client appends the signed paths itself. */
+function isOrigin(value: string): boolean {
+  if (!URL.canParse(value)) return true; // .url() already reports it
+  const u = new URL(value);
+  return (u.pathname === '/' || u.pathname === '') && u.search === '' && u.hash === '' && u.username === '' && u.password === '';
+}
 
 export type AppConfig = z.infer<typeof schema> & {
   workosEnabled: boolean;

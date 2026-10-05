@@ -104,6 +104,14 @@ describe('parseConfig', () => {
       expect(() => parseConfig({ ...base, CTI_INTERNAL_URL: 'ctiapi.railway.internal' })).toThrow(/CTI_INTERNAL_URL/);
     });
   });
+  it('S-7: CTI_INTERNAL_URL must be an origin: a path, query, fragment or credentials would silently change what is signed and called', () => {
+    for (const bad of ['http://ctiapi.railway.internal:4000/api', 'http://ctiapi.railway.internal:4000/x/', 'http://ctiapi.railway.internal?a=1', 'http://ctiapi.railway.internal#f', 'http://u:p@ctiapi.railway.internal:4000']) {
+      expect(() => parseConfig({ ...base, CTI_INTERNAL_URL: bad }), bad).toThrow(/CTI_INTERNAL_URL must be an origin/);
+    }
+    for (const good of ['http://ctiapi.railway.internal:4000', 'http://ctiapi.railway.internal:4000/', 'https://cti.example.com']) {
+      expect(parseConfig({ ...base, CTI_INTERNAL_URL: good }).CTI_INTERNAL_URL).toBe(good);
+    }
+  });
   it('rejects a bad encryption key with a clear message', () => {
     expect(() => parseConfig({ ...base, TOKEN_ENCRYPTION_KEY: 'short' })).toThrow(/TOKEN_ENCRYPTION_KEY/);
   });
