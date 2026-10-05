@@ -10,6 +10,7 @@ import { refreshDueCampaigns } from './campaigns/refresh.js';
 import { createBoss, JobRunner, type JobHandler } from './jobs/boss.js';
 import { QUEUES } from './jobs/queues.js';
 import { SCHEDULES } from './jobs/schedules.js';
+import { planTick } from './planner/run.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerCampaignRoutes } from './routes/campaigns.js';
@@ -44,6 +45,10 @@ async function main(): Promise<void> {
           },
         }
       : {}),
+    // Plan due enrollments, then queue due rep calls of ACTIVE campaigns (src/planner/run.ts).
+    'touch.plan': async () => {
+      await planTick({ db, now: new Date(), log: console, waitForTriage: cfg.salesforceEnabled && cfg.aiEnabled });
+    },
   };
   const runner = new JobRunner({ boss: createBoss(cfg), queues: QUEUES, log: console, handlers, schedules: SCHEDULES });
   await runner.start();
