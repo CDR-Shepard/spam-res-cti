@@ -18,6 +18,7 @@ Everything here is a human step; the code is already on `main` once plan 2 merge
 Railway applies the repo's root `railway.json` (and so the root `Dockerfile`) to every service built from this repo, and refuses per-service config files. So:
 
 - `outreach-api` builds the **root `Dockerfile`**, which also builds `apps/outreach-web` and `services/outreach-api` (there is no `services/outreach-api/railway.json`).
+- Its `RAILWAY_DOCKERFILE_PATH` variable (`services/outreach-api/Dockerfile`) is overridden by the root `railway.json` today and only takes effect once that file is retired (§5, before 2026-12-01), so `services/outreach-api/Dockerfile` must still build before then.
 - Its **start command is overridden in the dashboard** (service Settings → Deploy): `node services/outreach-api/dist/server.js`, with `PORT` = `4100`.
 - Its **pre-deploy step** is the root `railway.json`'s `npm --workspace packages/db run migrate`, which needs `DATABASE_URL` (set).
 - Create or change the service with the dashboard or the CLI (`railway add`, `railway variables --set ... --service outreach-api`). **Never run `railway config apply`**: the `outreachApi` block in `.railway/railway.ts` records the service and its variable names, it does not create it.

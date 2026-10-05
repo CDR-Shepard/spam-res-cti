@@ -48,6 +48,9 @@ export default defineRailway(() => {
     healthcheckTimeout: 120,
     env: {
       NODE_ENV: "production",
+      // Equals the live dashboard value, but the root railway.json currently overrides it: the service is built from
+      // the root Dockerfile. This path only takes effect once the root railway.json is retired (Config as Code cutoff
+      // 2026-12-01), so services/outreach-api/Dockerfile must still build before that happens.
       RAILWAY_DOCKERFILE_PATH: "services/outreach-api/Dockerfile",
       DATABASE_URL: Postgres.env.DATABASE_URL,
       // Same values as the CTI API so sessions and encrypted tokens interoperate.

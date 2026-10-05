@@ -6975,16 +6975,15 @@ These are operator steps; no task runs them. Do them in this order after the bra
 | both | `SESSION_SECRET` | identical (1A rule, unchanged) |
 
 **2. The service and infrastructure as code.**
-- **Build and deploy config:** outreach-api is configured by `services/outreach-api/railway.json` (commit `9d0a231`), with the Dockerfile builder, the pre-deploy migration, the start command and the `/healthz` healthcheck. Its service settings point at that file, so it never builds from the CTI's root `railway.json`.
-- **Public domain:** `outreach-api-production-a07b.up.railway.app`. `API_PUBLIC_URL` and `APP_PUBLIC_URL` are `https://outreach-api-production-a07b.up.railway.app`, and both Salesforce callbacks above use this host.
-- **Variables:** apply `.railway/railway.ts` (Tasks 0F and 34) for the variable list:
-- outreach-api is the new service `outreach-api` in `endearing-comfort`. It builds `services/outreach-api/Dockerfile` and serves the built outreach-web bundle (`SPA_DIST`) from the same origin, so there is no separate web service.
-- Every new variable is `preserve()`d, so the apply never overwrites dashboard values. Set them in the dashboard right after the first apply, then redeploy.
+- **The service exists already.** `outreach-api` in `endearing-comfort` was created with the Railway CLI, not by `railway config apply`. **Never run `railway config apply`**: `.railway/railway.ts` (Tasks 0F and 34) records the service and its variable names, it does not create or configure it. Change the service with the dashboard or the CLI (`railway variables --set ... --service outreach-api`).
+- **Build and deploy config:** Railway applies the repo's root `railway.json` to every service built from this repo and refuses per-service config files (there is no `services/outreach-api/railway.json`). So outreach-api builds the **root `Dockerfile`** (which builds `apps/outreach-web` and `services/outreach-api`), its pre-deploy step is the root `railway.json`'s `npm --workspace packages/db run migrate`, and its **start command is overridden in the dashboard**: `node services/outreach-api/dist/server.js`, with `PORT` = `4100`. The full shape, and the follow-up before the 2026-12-01 Config-as-Code cutoff, are in `docs/runbooks/outreach-api-deploy.md` (§1 and §5).
+- **Public domain:** `outreach-api-production-a07b.up.railway.app`. `API_PUBLIC_URL` and `APP_PUBLIC_URL` are `https://outreach-api-production-a07b.up.railway.app`, and both Salesforce callbacks above use this host. outreach-api serves the built outreach-web bundle (`SPA_DIST`) from the same origin, so there is no separate web service.
+- **Variables:** set the table in step 1 in the dashboard (or with `railway variables --set`), then redeploy.
 
 **3. Private networking**
 - `@cti/api` already has the private endpoint `ctiapi`. Both services must be in the same project **and** environment.
 - `@cti/api` now listens on `::` (Task 27), which serves IPv4 and IPv6, so it is reachable whether this environment's private DNS is IPv6-only (environments created before 2025-10-16) or dual-stack.
-- Check it from outreach-api's shell (`railway ssh --service outreach-api`) with `curl -s -o /dev/null -w '%{http_code}' "$CTI_INTERNAL_URL/internal/ai-calls/availability"`. Expected: `401` (reachable, unsigned). `503` means the secret is unset on cti-api; a connection error means private networking is not reaching it.
+- Check it from outreach-api's shell (`railway ssh --service outreach-api`) with `curl -s -o /dev/null -w '%{http_code}' "$CTI_INTERNAL_URL/internal/ai-calls/availability"`. Expected: `401` (reachable, unsigned). `404` means `CTI_INTERNAL_URL` is not the private host or the secret is unset on cti-api (production hides the routes behind a 404); a connection error means private networking is not reaching it (`ai-voice.md` §11).
 
 **4. Migrations.** `0052_ai_call_campaigns.sql` and `0053_ai_call_requests.sql` run in the pre-deploy `migrate` step of whichever service deploys first (both run `packages/db` migrations). 0051 must already be applied: 1A deploys before or with 1C.
 
