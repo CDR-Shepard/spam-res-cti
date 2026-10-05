@@ -1,3 +1,4 @@
+export * from './call-plans.js';
 export * from './campaigns.js';
 export * from './crm.js';
 export * from './dialer-run.js';
