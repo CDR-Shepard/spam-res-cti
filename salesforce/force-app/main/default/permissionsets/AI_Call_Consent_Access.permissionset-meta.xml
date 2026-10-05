@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Assign this to every REP who starts AI calls (outreach AI voice, cti-api
+  services/cti-api/src/ai-voice/). Before placing an AI call, cti-api reads
+  AI_Call_Consent__c on the Lead/Opportunity with the rep's OWN Salesforce
+  token; a rep without read access gets "consent_field_missing" and the call
+  is refused (it fails closed). Edit is included so a rep can tick the box and
+  set the source to Rep when a person agrees to AI calls on the phone.
+
+  Grants only read + edit on the three AI Call Consent fields on Lead and
+  Opportunity - no object permissions, no system permissions. The
+  integration user gets AI_Outreach instead (never this set). The API name is
+  load-bearing: docs/runbooks/ai-voice.md and salesforce-metadata.test.ts
+  refer to it by AI_Call_Consent_Access.
+-->
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>For reps who start AI calls. Read and edit on the three AI Call Consent fields on Lead and Opportunity, nothing else. See the comment in this file.</description>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Lead.AI_Call_Consent_Date__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Lead.AI_Call_Consent_Source__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Lead.AI_Call_Consent__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Opportunity.AI_Call_Consent_Date__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Opportunity.AI_Call_Consent_Source__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Opportunity.AI_Call_Consent__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <hasActivationRequired>false</hasActivationRequired>
+    <label>AI Call Consent Access</label>
+</PermissionSet>

@@ -121,3 +121,25 @@ describe('AI_Outreach permission set', () => {
     expect(perms).toEqual([{ name: 'EditTask', enabled: 'true' }]);
   });
 });
+
+describe('AI_Call_Consent_Access permission set (reps who start AI calls)', () => {
+  const xml = read('permissionsets/AI_Call_Consent_Access.permissionset-meta.xml');
+  const blocks = tagValues(xml, 'fieldPermissions').map((b) => ({ field: only(b, 'field'), readable: only(b, 'readable'), editable: only(b, 'editable') }));
+
+  it('is labelled AI Call Consent Access and bound to no license', () => {
+    expect(only(xml, 'label')).toBe('AI Call Consent Access');
+    expect(xml).not.toContain('<license>');
+    expect(only(xml, 'hasActivationRequired')).toBe('false');
+  });
+
+  it('grants read + edit on exactly the six consent fields, pinned to the same constants — nothing else', () => {
+    const expected = CONSENT_OBJECTS.flatMap((o) => Object.values(CONSENT_FIELDS).map((f) => `${o}.${f}`)).sort();
+    expect(blocks.map((b) => b.field).sort()).toEqual(expected);
+    for (const b of blocks) expect(b, b.field).toMatchObject({ readable: 'true', editable: 'true' });
+  });
+
+  it('grants no object or system permissions', () => {
+    expect(xml).not.toContain('<objectPermissions>');
+    expect(xml).not.toContain('<userPermissions>');
+  });
+});
