@@ -48,7 +48,7 @@ export async function pendingDncFlag(db: Db, crmRecordId: string): Promise<DncFl
     left join record_triage d on d.id = r.dnc_dismissed_triage_id
     where rt.crm_record_id = ${crmRecordId}
       and jsonb_typeof(rt.result -> 'doNotContact') = 'object'
-      and (d.id is null or rt.created_at > d.created_at)
+      and (d.id is null or (rt.created_at, rt.id) > (d.created_at, d.id))
     order by rt.created_at desc, rt.id desc
     limit 1`);
   const row = (result as unknown as { rows: Array<{ id: string; flag: unknown }> }).rows[0];

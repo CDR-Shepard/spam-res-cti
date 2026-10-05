@@ -187,6 +187,20 @@ async function mayDecide(db: Db, ctx: RequestContext, ownerSfUserId: string | nu
   return sameSfId(await ownSfUserId(db, ctx.session.userId), ownerSfUserId);
 }
 
+/**
+ * The dismissal marker only moves forward, in the triage rows' created order (created_at,
+ * then id, as pendingDncFlag orders them): dismissing an item that carries an older flag
+ * must not un-dismiss a newer one. A marker pointing at a missing row is replaced.
+ */
+function markerMovesForward(triageId: string): SQL {
+  return sql`(
+    ${r.dncDismissedTriageId} is null
+    or not exists (select 1 from record_triage cur where cur.id = ${r.dncDismissedTriageId})
+    or (select (d.created_at, d.id) from record_triage d where d.id = ${triageId})
+       > (select (cur.created_at, cur.id) from record_triage cur where cur.id = ${r.dncDismissedTriageId})
+  )`;
+}
+
 async function dismiss(db: Db, orgId: string, enrollmentId: string, now: Date): Promise<boolean> {
   return db.transaction(async (tx) => {
     // Compare-and-swap: of two concurrent decisions, only one gets the row.
@@ -197,7 +211,10 @@ async function dismiss(db: Db, orgId: string, enrollmentId: string, now: Date): 
       .returning({ id: e.id, campaignId: e.campaignId, crmRecordId: e.crmRecordId, reviewTriageId: e.reviewTriageId });
     if (!claimed) return false;
     if (claimed.reviewTriageId) {
-      await tx.update(r).set({ dncDismissedTriageId: claimed.reviewTriageId }).where(and(eq(r.id, claimed.crmRecordId), eq(r.orgId, orgId)));
+      await tx
+        .update(r)
+        .set({ dncDismissedTriageId: claimed.reviewTriageId })
+        .where(and(eq(r.id, claimed.crmRecordId), eq(r.orgId, orgId), markerMovesForward(claimed.reviewTriageId)));
     }
     const [campaign] = await tx.select({ status: c.status }).from(c).where(eq(c.id, claimed.campaignId)).limit(1);
     if (campaign?.status === 'archived') {

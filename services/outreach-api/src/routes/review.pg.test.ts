@@ -130,6 +130,25 @@ describe.skipIf(!pgLane)('review decisions (real Postgres)', () => {
     expect(await pendingDncFlag(t.db, recordId)).toMatchObject({ triageId: newer.id });
   });
 
+  it('dismissing an item with an older flag never moves the dismissal marker back; a newer one moves it forward', async () => {
+    const { orgId, enrollmentId, recordId, triageId: older } = await seedFlagged();
+    const newer = await flagTriage(orgId, recordId, new Date(Date.now()));
+    const marker = async () => (await t.pool.query(`select dnc_dismissed_triage_id as id from crm_records where id = $1`, [recordId])).rows[0].id;
+    await t.pool.query(`update crm_records set dnc_dismissed_triage_id = $2 where id = $1`, [recordId, newer.id]);
+    asAdmin(orgId);
+    expect((await decide(enrollmentId, 'dismiss')).statusCode).toBe(204);
+    expect(await marker()).toBe(newer.id);
+
+    // The other way round: the marker sits on the older flag, the item dismissed carries the newer one.
+    await t.pool.query(
+      `update campaign_enrollments set status = 'needs_review', review_category = 'attorney', review_quote = 'q', review_triage_id = $2 where id = $1`,
+      [enrollmentId, newer.id],
+    );
+    await t.pool.query(`update crm_records set dnc_dismissed_triage_id = $2 where id = $1`, [recordId, older]);
+    expect((await decide(enrollmentId, 'dismiss')).statusCode).toBe(204);
+    expect(await marker()).toBe(newer.id);
+  });
+
   it('dismiss on an archived campaign exits the enrollment (campaign_archived) and frees its keys instead of resuming it', async () => {
     const { orgId, enrollmentId, recordId, triageId } = await seedFlagged({ campaignStatus: 'archived' });
     asAdmin(orgId);
