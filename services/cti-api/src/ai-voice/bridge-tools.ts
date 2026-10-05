@@ -1,8 +1,9 @@
 /**
  * Running the function calls a Realtime `response.done` carries: in order,
- * one output per call, then at most one `response.create` — and none when any
- * call ends the conversation (`hangup` / `transfer`), because the service will
- * wait for the agent's last words and then act on the call itself.
+ * one output per call. The batch reports whether the conversation continues —
+ * not when any call ends it (`hangup` / `transfer`), because the service will
+ * wait for the agent's last words and then act on the call itself. The bridge
+ * decides whether to send the one `response.create`.
  */
 import { functionCallOutput } from './bridge-session.js';
 import { TOOL_NAMES, type ToolName } from './prompt.js';
@@ -49,15 +50,15 @@ export function functionCalls(response: Record<string, unknown>): FunctionCall[]
   return Array.isArray(response.output) ? response.output.filter(isFunctionCall) : [];
 }
 
-/** Run calls in order, send every output, then at most one `response.create`. */
-export async function runToolBatch(calls: readonly FunctionCall[], deps: ToolDeps): Promise<void> {
+/** Run calls in order and send every output; resolves true when every result continues the conversation. */
+export async function runToolBatch(calls: readonly FunctionCall[], deps: ToolDeps): Promise<boolean> {
   let carryOn = true;
   for (const call of calls) {
     const result = await runTool(call, deps);
     deps.send(functionCallOutput(call.call_id, result.output));
     if (result.then === 'hangup' || result.then === 'transfer') carryOn = false;
   }
-  if (carryOn) deps.send({ type: 'response.create' });
+  return carryOn;
 }
 
 async function runTool(call: FunctionCall, deps: ToolDeps): Promise<ToolResult> {

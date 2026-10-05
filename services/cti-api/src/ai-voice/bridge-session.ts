@@ -3,7 +3,7 @@
  * configuration or fixed text, kept apart from the socket plumbing.
  */
 
-export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 export type VadEagerness = 'low' | 'medium' | 'high' | 'auto';
 
 export interface SessionSettings {

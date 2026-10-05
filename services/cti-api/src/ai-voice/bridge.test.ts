@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AiCallBridge, OPENER_DELAY_MS, type BridgeHooks, type BridgeOptions, type BridgeSocket } from './bridge.js';
+import {
+  AiCallBridge,
+  END_GRACE_MS,
+  OPENER_DELAY_MS,
+  type BridgeHooks,
+  type BridgeOptions,
+  type BridgeSocket,
+} from './bridge.js';
 import { AI_CALL_TOOLS } from './prompt.js';
 
 type Ev = 'message' | 'close' | 'error' | 'open';
@@ -152,6 +159,11 @@ describe('session.update', () => {
     expect(session('gpt-realtime-2').reasoning).toEqual({ effort: 'minimal' });
     expect(session('gpt-realtime-2.1-mini').reasoning).toEqual({
       effort: 'minimal',
+    });
+    const xhigh = setup({ model: 'gpt-realtime-2.1', reasoningEffort: 'xhigh' });
+    xhigh.bridge.start();
+    expect((xhigh.openai.sent[0] as { session: { reasoning: unknown } }).session.reasoning).toEqual({
+      effort: 'xhigh',
     });
     expect(session('gpt-realtime-1.5')).not.toHaveProperty('reasoning');
     expect(session('gpt-realtime')).not.toHaveProperty('reasoning');
@@ -597,6 +609,13 @@ describe('ending', () => {
     expect(hooks.onEnd).toHaveBeenCalledWith('openai_closed', undefined);
   });
 
+  it('rejects a missing or too-short maxCallMs', () => {
+    for (const maxCallMs of [9_999, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => setup({ maxCallMs })).toThrow(RangeError);
+    }
+    expect(() => setup({ maxCallMs: 10_000 })).not.toThrow();
+  });
+
   it('a socket error ends with error', () => {
     const { twilio, bridge, hooks } = setup();
     bridge.start();
@@ -605,13 +624,13 @@ describe('ending', () => {
   });
 
   it('fires onEnd exactly once across twilio close, openai close and stop()', async () => {
-    const { twilio, openai, bridge, hooks } = setup({ maxCallMs: 1000 });
+    const { twilio, openai, bridge, hooks } = setup({ maxCallMs: 10_000 });
     bridge.start();
     twilio.close();
     openai.close();
     bridge.stop();
     bridge.stop();
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(hooks.onEnd).toHaveBeenCalledTimes(1);
     expect(hooks.onEnd).toHaveBeenCalledWith('twilio_closed', undefined);
   });
@@ -688,6 +707,175 @@ describe('hook failures', () => {
   });
 });
 
+describe('bridge-owned end backstop', () => {
+  function playing() {
+    const ctx = setup({ maxCallMs: 60_000 });
+    ctx.bridge.start();
+    ctx.twilio.msg(media(1000));
+    ctx.openai.msg({ type: 'response.created', response: { id: 'r1' } });
+    ctx.openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(1000) });
+    ctx.twilio.msg(media(1200));
+    ctx.twilio.clearSent();
+    ctx.openai.clearSent();
+    return ctx;
+  }
+
+  it('max_duration silences at once, reports, then closes both sockets after END_GRACE_MS', async () => {
+    const { twilio, openai, hooks } = playing();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(hooks.onEnd).toHaveBeenCalledWith('max_duration', undefined);
+    expect(twilio.sent).toEqual([{ event: 'clear', streamSid: SID }]);
+    expect(openai.types()).toEqual(['response.cancel', 'conversation.item.truncate']);
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'item_2', delta: 'LATE' });
+    expect(twilio.sent).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(END_GRACE_MS - 1);
+    expect(twilio.readyState).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(twilio.readyState).toBe(3);
+    expect(openai.readyState).toBe(3);
+    expect(hooks.onEnd).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('openai_closed silences Twilio and closes it after the grace period', async () => {
+    const { twilio, openai, hooks } = playing();
+    openai.close();
+    expect(hooks.onEnd).toHaveBeenCalledWith('openai_closed', undefined);
+    expect(twilio.sent).toEqual([{ event: 'clear', streamSid: SID }]);
+    await vi.advanceTimersByTimeAsync(END_GRACE_MS);
+    expect(twilio.readyState).toBe(3);
+    expect(hooks.onEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it('an OpenAI socket error silences, reports error, and closes after the grace period', async () => {
+    const { twilio, openai, hooks } = playing();
+    openai.emit('error', new Error('boom'));
+    expect(hooks.onEnd).toHaveBeenCalledWith('error', 'openai: boom');
+    expect(twilio.sent).toEqual([{ event: 'clear', streamSid: SID }]);
+    await vi.advanceTimersByTimeAsync(END_GRACE_MS);
+    expect(twilio.readyState).toBe(3);
+    expect(openai.readyState).toBe(3);
+  });
+
+  it('stop() inside the grace period cancels the backstop', async () => {
+    const { twilio, openai, bridge, hooks } = playing();
+    openai.close();
+    bridge.stop();
+    expect(twilio.closeCalls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(END_GRACE_MS * 2);
+    expect(twilio.closeCalls).toBe(1);
+    expect(hooks.onEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it('a late session.updated after the end arms no opener', async () => {
+    const { openai, bridge } = setup({ maxCallMs: 10_000 });
+    bridge.start();
+    await vi.advanceTimersByTimeAsync(10_000); // max_duration; only the backstop remains
+    expect(vi.getTimerCount()).toBe(1);
+    openai.msg({ type: 'session.updated', session: {} });
+    expect(vi.getTimerCount()).toBe(1);
+  });
+});
+
+describe('closing latch', () => {
+  const done = (...output: object[]) => ({ type: 'response.done', response: { status: 'completed', output } });
+
+  it('after a hangup result, later tool batches send outputs but no response.create', async () => {
+    const onTool = vi.fn(async (name: string) => ({
+      output: 'ok',
+      then: name === 'end_call' ? ('hangup' as const) : ('continue' as const),
+    }));
+    const { openai, bridge } = setup({}, { onTool: onTool as BridgeHooks['onTool'] });
+    bridge.start();
+    openai.msg(done(fnCall('end_call', '{}', 'c1')));
+    await flush();
+    openai.clearSent();
+    openai.msg(done(fnCall('save_qualification', '{}', 'c2')));
+    await flush();
+    expect(openai.types()).toEqual(['conversation.item.create']);
+  });
+
+  it('after a transfer result, the opener never fires', async () => {
+    const { openai, bridge } = setup({}, { onTool: vi.fn(async () => ({ output: 'ok', then: 'transfer' as const })) });
+    bridge.start();
+    openai.msg({ type: 'session.updated', session: {} });
+    openai.msg(done(fnCall('transfer_to_rep', '{}', 'c1')));
+    await flush();
+    openai.clearSent();
+    await vi.advanceTimersByTimeAsync(OPENER_DELAY_MS * 2);
+    expect(openai.sent).toEqual([]);
+  });
+
+  it('after silence(), a continuing tool result sends no response.create', async () => {
+    const { openai, bridge } = setup();
+    bridge.start();
+    bridge.silence();
+    openai.clearSent();
+    openai.msg(done(fnCall('save_qualification', '{}', 'c1')));
+    await flush();
+    expect(openai.types()).toEqual(['conversation.item.create']);
+  });
+
+  it('silence() during a slow tool suppresses the response.create it would have sent', async () => {
+    const onTool = vi.fn(async () => {
+      await new Promise((r) => setTimeout(r, 100));
+      return { output: 'ok' };
+    });
+    const { openai, bridge } = setup({}, { onTool });
+    bridge.start();
+    openai.msg(done(fnCall('save_qualification', '{}', 'c1')));
+    await vi.advanceTimersByTimeAsync(10);
+    bridge.silence();
+    openai.clearSent();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(openai.types()).toEqual(['conversation.item.create']);
+  });
+});
+
+describe('after a barge-in truncation', () => {
+  it('drops late deltas for the truncated item and never truncates it twice', () => {
+    const { twilio, openai, bridge } = setup();
+    bridge.start();
+    twilio.msg(media(1000));
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(2000) });
+    twilio.msg(media(1300));
+    openai.msg({ type: 'input_audio_buffer.speech_started', audio_start_ms: 1 });
+    twilio.clearSent();
+    openai.clearSent();
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(100) });
+    expect(twilio.sent).toEqual([]);
+    openai.msg({ type: 'input_audio_buffer.speech_started', audio_start_ms: 2 });
+    bridge.silence();
+    expect(openai.types()).not.toContain('conversation.item.truncate');
+  });
+
+  it('still plays the next item', () => {
+    const { twilio, openai, bridge } = setup();
+    bridge.start();
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(100) });
+    openai.msg({ type: 'input_audio_buffer.speech_started', audio_start_ms: 1 });
+    twilio.clearSent();
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'item_2', delta: 'NEXT' });
+    expect(twilio.sent[0]).toEqual({ event: 'media', streamSid: SID, media: { payload: 'NEXT' } });
+  });
+});
+
+describe('OpenAI outbox cap', () => {
+  it('keeps session.update and the newest caller audio when OpenAI is slow to open', () => {
+    const { twilio, openai, bridge, hooks } = setup();
+    openai.readyState = 0;
+    bridge.start();
+    for (let i = 0; i < 600; i++) twilio.msg(media(i * 20, `P${i}`));
+    openai.open();
+    expect(openai.sent).toHaveLength(500);
+    expect(openai.sent[0]?.type).toBe('session.update');
+    expect(openai.sent[1]?.audio).toBe('P101');
+    expect(openai.sent[499]?.audio).toBe('P599');
+    expect(hooks.log.warn).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('silence()', () => {
   it('clears Twilio, cancels the active response, truncates, and drops later audio', () => {
     const { twilio, openai, bridge, hooks } = setup();
@@ -719,12 +907,15 @@ describe('silence()', () => {
       delta: 'MORE',
     });
     expect(twilio.sent).toHaveLength(1);
-    // transcripts still flow
-    openai.msg({
-      type: 'conversation.item.input_audio_transcription.completed',
-      transcript: 'wait',
+    // transcripts still flow; agent lines are marked as not heard
+    openai.msg({ type: 'conversation.item.input_audio_transcription.completed', transcript: 'wait' });
+    openai.msg({ type: 'response.output_audio_transcript.done', transcript: 'As I was saying' });
+    expect(hooks.onTranscript).toHaveBeenCalledTimes(2);
+    expect(hooks.onTranscript.mock.calls[0]?.[0]).toMatchObject({ role: 'caller', text: 'wait' });
+    expect(hooks.onTranscript.mock.calls[1]?.[0]).toMatchObject({
+      role: 'system',
+      text: '[not played] As I was saying',
     });
-    expect(hooks.onTranscript).toHaveBeenCalledTimes(1);
     // idempotent
     bridge.silence();
     expect(twilio.sent).toHaveLength(1);

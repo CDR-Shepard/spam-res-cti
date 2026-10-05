@@ -8,10 +8,19 @@
  * assistant item where the caller stopped hearing it (bridge-playback.ts). The
  * model waits for the caller's "Hello?" and opens the call itself after
  * OPENER_DELAY_MS of silence. Tool calls arrive on `response.done` and run via
- * `hooks.onTool`. OpenAI messages queue until started and open, so
+ * `hooks.onTool`. OpenAI messages queue (bounded) until started and open, so
  * `session.update` always goes first. Audio payloads are never logged.
+ *
+ * Once the call is closing (a hangup/transfer tool result, or `silence()`) the
+ * agent is never asked to speak again. If the call ends from the OpenAI side
+ * or hits its time limit, the bridge silences the agent, reports `onEnd`, and
+ * closes both sockets after END_GRACE_MS unless the service calls `stop()`
+ * first — closing the stream lets Twilio continue past </Connect> and end the
+ * call even if the service never hangs up.
  */
-import { PlaybackTracker, type ClearTimer, type SetTimer } from './bridge-playback.js';
+import { obj, openAiErrorFields, parseFrame, str, type Msg } from './bridge-frames.js';
+import { Outbox } from './bridge-outbox.js';
+import { PlaybackTracker, type ClearTimer, type SetTimer, type Truncation } from './bridge-playback.js';
 import { openerItem, sessionUpdate, truncate, type ReasoningEffort, type VadEagerness } from './bridge-session.js';
 import { errText, functionCalls, runToolBatch, type BridgeLog, type ToolResult } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
@@ -22,6 +31,10 @@ export type { BridgeLog, ReasoningEffort, ToolResult, VadEagerness };
 export const OPENER_DELAY_MS = 3000;
 /** Default cap on waiting for the agent's last words before a hangup/transfer. */
 export const PLAYBACK_DRAIN_MAX_MS = 8000;
+/** After a bridge-side end, how long the service has to hang up/redirect before the bridge closes the stream. */
+export const END_GRACE_MS = 10_000;
+/** Shortest accepted `maxCallMs`. */
+export const MIN_CALL_MS = 10_000;
 
 const WS_OPEN = 1;
 
@@ -61,56 +74,58 @@ export interface BridgeOptions {
   clearTimer?: ClearTimer;
 }
 
-type Msg = Record<string, unknown>;
-
-const str = (v: unknown): string => (typeof v === 'string' ? v : '');
-const obj = (v: unknown): Msg => (v !== null && typeof v === 'object' ? (v as Msg) : {});
-
 export class AiCallBridge {
   private readonly now: () => number;
   private readonly setTimer: SetTimer;
   private readonly clearTimer: ClearTimer;
   private readonly playback: PlaybackTracker;
-  private outbox: string[] = [];
+  private readonly outbox: Outbox;
   private started = false;
   private sessionReady = false;
   private callerSpoke = false;
   private openerSent = false;
   private responseActive = false;
   private silenced = false;
+  /** No further `response.create` once a tool ended the conversation or the agent was silenced. */
+  private closing = false;
+  private truncated = new Set<string>();
   private ended = false;
   private stopped = false;
   private openerTimer: ReturnType<typeof setTimeout> | null = null;
   private maxTimer: ReturnType<typeof setTimeout> | null = null;
+  private backstopTimer: ReturnType<typeof setTimeout> | null = null;
   private toolChain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly opts: BridgeOptions,
     private readonly hooks: BridgeHooks,
   ) {
+    if (!Number.isFinite(opts.maxCallMs) || opts.maxCallMs < MIN_CALL_MS) {
+      throw new RangeError(`maxCallMs must be a finite number >= ${MIN_CALL_MS}`);
+    }
     this.now = opts.now ?? (() => Date.now());
     this.setTimer = opts.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
     this.clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h));
-    this.playback = new PlaybackTracker({
-      setTimer: this.setTimer,
-      clearTimer: this.clearTimer,
-    });
+    this.playback = new PlaybackTracker({ setTimer: this.setTimer, clearTimer: this.clearTimer });
+    this.outbox = new Outbox(() =>
+      hooks.log.warn({ queued: 'full' }, 'ai-voice bridge: openai outbox full, dropping oldest caller audio'),
+    );
 
     opts.twilio.on('message', (d) => this.onTwilioFrame(d));
     opts.twilio.on('close', () => this.endAndTearDown('twilio_closed'));
     opts.twilio.on('error', (e) => this.endAndTearDown('error', `twilio: ${e.message}`));
     opts.openai.on('message', (d) => this.onOpenAiFrame(d));
     opts.openai.on('open', () => this.flush());
-    opts.openai.on('close', () => this.finish('openai_closed'));
-    opts.openai.on('error', (e) => this.finish('error', `openai: ${e.message}`));
+    opts.openai.on('close', () => this.endWithBackstop('openai_closed'));
+    opts.openai.on('error', (e) => this.endWithBackstop('error', `openai: ${e.message}`));
   }
 
   /** Configure the session (sent first, once OpenAI is open) and arm the max-duration timer. */
   start(): void {
     if (this.started || this.stopped) return;
     this.started = true;
-    this.outbox = [JSON.stringify(sessionUpdate(this.opts)), ...this.outbox];
-    this.maxTimer = this.setTimer(() => this.finish('max_duration'), this.opts.maxCallMs);
+    this.outbox.prepend(JSON.stringify(sessionUpdate(this.opts)));
+    this.maxTimer = this.setTimer(() => this.endWithBackstop('max_duration'), this.opts.maxCallMs);
     this.flush();
   }
 
@@ -118,11 +133,12 @@ export class AiCallBridge {
   silence(): void {
     if (this.silenced) return;
     this.silenced = true;
+    this.closing = true;
     this.cancelOpener();
     this.sendTwilio({ event: 'clear', streamSid: this.opts.streamSid });
     if (this.responseActive) this.sendOpenAi({ type: 'response.cancel' });
     const cut = this.playback.interrupt();
-    if (cut) this.sendOpenAi(truncate(cut.itemId, cut.audioEndMs));
+    if (cut) this.truncateOnce(cut);
   }
 
   /** Resolves when the agent's current audio has finished playing, or after `maxMs`. */
@@ -146,11 +162,7 @@ export class AiCallBridge {
         const media = obj(msg.media);
         this.playback.onInboundMedia(Number(media.timestamp));
         const payload = str(media.payload);
-        if (payload)
-          this.sendOpenAi({
-            type: 'input_audio_buffer.append',
-            audio: payload,
-          });
+        if (payload) this.sendOpenAi({ type: 'input_audio_buffer.append', audio: payload }, true);
         return;
       }
       case 'mark':
@@ -189,32 +201,22 @@ export class AiCallBridge {
       case 'response.done':
         return this.onResponseDone(obj(msg.response));
       case 'error':
-        return this.logOpenAiError(obj(msg.error));
+        return this.hooks.log.warn(openAiErrorFields(obj(msg.error)), 'ai-voice bridge: openai error event');
       default:
         return;
     }
   }
 
-  private logOpenAiError(err: Msg): void {
-    const fields = {
-      errorType: str(err.type),
-      code: str(err.code),
-      message: str(err.message),
-      param: str(err.param),
-    };
-    this.hooks.log.warn(fields, 'ai-voice bridge: openai error event');
-  }
-
   private onSessionUpdated(): void {
-    if (this.sessionReady) return;
+    if (this.sessionReady || this.ended) return;
     this.sessionReady = true;
-    if (this.callerSpoke || this.openerSent || this.silenced) return;
+    if (this.callerSpoke || this.openerSent || this.closing) return;
     this.openerTimer = this.setTimer(() => this.openCall(), OPENER_DELAY_MS);
   }
 
   private openCall(): void {
     this.openerTimer = null;
-    if (this.callerSpoke || this.openerSent || this.ended) return;
+    if (this.callerSpoke || this.openerSent || this.ended || this.closing) return;
     this.openerSent = true;
     this.sendOpenAi(openerItem());
     this.sendOpenAi({ type: 'response.create' });
@@ -226,11 +228,18 @@ export class AiCallBridge {
     const cut = this.playback.interrupt();
     if (!cut) return;
     this.sendTwilio({ event: 'clear', streamSid: this.opts.streamSid });
+    this.truncateOnce(cut);
+  }
+
+  /** Truncate an item at most once, and drop any of its audio that arrives afterwards. */
+  private truncateOnce(cut: Truncation): void {
+    if (this.truncated.has(cut.itemId)) return;
+    this.truncated = new Set([...this.truncated, cut.itemId]);
     this.sendOpenAi(truncate(cut.itemId, cut.audioEndMs));
   }
 
   private onAgentAudio(itemId: string, delta: string): void {
-    if (this.silenced || !delta) return;
+    if (this.silenced || !delta || this.truncated.has(itemId)) return;
     this.sendTwilio({
       event: 'media',
       streamSid: this.opts.streamSid,
@@ -244,9 +253,15 @@ export class AiCallBridge {
     });
   }
 
+  /** Agent lines spoken after `silence()` were never played to the caller; record them as such. */
   private transcript(role: 'agent' | 'caller', value: unknown): void {
     const text = str(value).trim();
-    if (text) this.guard('onTranscript', () => this.hooks.onTranscript({ role, text, at: new Date(this.now()) }));
+    if (!text) return;
+    const entry =
+      role === 'agent' && this.silenced
+        ? { role: 'system' as const, text: `[not played] ${text}`, at: new Date(this.now()) }
+        : { role, text, at: new Date(this.now()) };
+    this.guard('onTranscript', () => this.hooks.onTranscript(entry));
   }
 
   /** A throwing hook must not take down the socket event handler that called it. */
@@ -271,21 +286,20 @@ export class AiCallBridge {
       send: (m: object) => this.sendOpenAi(m),
     };
     this.toolChain = this.toolChain
-      .then(() => runToolBatch(calls, deps))
+      .then(async () => {
+        const carryOn = await runToolBatch(calls, deps);
+        if (!carryOn) this.closing = true;
+        if (!this.closing) this.sendOpenAi({ type: 'response.create' });
+      })
       .catch((e: unknown) => this.hooks.log.error({ err: errText(e) }, 'ai-voice bridge: tool batch failed'));
   }
 
   // ── sockets & lifecycle ────────────────────────────────────────────────────
 
   private parse(raw: unknown, source: 'twilio' | 'openai'): Msg | null {
-    try {
-      const v: unknown = JSON.parse(typeof raw === 'string' ? raw : String(raw));
-      if (v !== null && typeof v === 'object') return v as Msg;
-    } catch {
-      // fall through
-    }
-    this.hooks.log.warn({ source }, 'ai-voice bridge: unparseable frame');
-    return null;
+    const msg = parseFrame(raw);
+    if (!msg) this.hooks.log.warn({ source }, 'ai-voice bridge: unparseable frame');
+    return msg;
   }
 
   private sendTwilio(m: object): void {
@@ -294,11 +308,11 @@ export class AiCallBridge {
   }
 
   /** Queue until started and open; drop once the OpenAI socket is closing/closed. */
-  private sendOpenAi(m: object): void {
+  private sendOpenAi(m: object, droppable = false): void {
     if (this.stopped || this.opts.openai.readyState > WS_OPEN) return;
     const data = JSON.stringify(m);
     if (!this.started || this.opts.openai.readyState !== WS_OPEN) {
-      this.outbox = [...this.outbox, data];
+      this.outbox.push(data, droppable);
       return;
     }
     this.flush();
@@ -307,9 +321,7 @@ export class AiCallBridge {
 
   private flush(): void {
     if (!this.started || this.stopped || this.opts.openai.readyState !== WS_OPEN) return;
-    const pending = this.outbox;
-    this.outbox = [];
-    for (const m of pending) this.opts.openai.send(m);
+    for (const m of this.outbox.drain()) this.opts.openai.send(m);
   }
 
   private cancelOpener(): void {
@@ -329,11 +341,22 @@ export class AiCallBridge {
     this.guard('onEnd', () => this.hooks.onEnd(reason, detail));
   }
 
+  /** OpenAI-side or time-limit end: silence now, report, and close the stream if the service does not. */
+  private endWithBackstop(reason: EndReason, detail?: string): void {
+    if (this.ended) return;
+    this.silence();
+    this.finish(reason, detail);
+    if (this.stopped) return;
+    this.backstopTimer = this.setTimer(() => this.endAndTearDown(reason, detail), END_GRACE_MS);
+  }
+
   private endAndTearDown(reason: EndReason, detail?: string): void {
     this.finish(reason, detail);
     if (this.stopped) return;
     this.stopped = true;
-    this.outbox = [];
+    if (this.backstopTimer !== null) this.clearTimer(this.backstopTimer);
+    this.backstopTimer = null;
+    this.outbox.clear();
     for (const s of [this.opts.twilio, this.opts.openai]) {
       try {
         s.close();
