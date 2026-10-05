@@ -283,6 +283,20 @@ describe('POST /api/campaigns/:id/status', () => {
     expect(where.params).toEqual([CAMPAIGN_ID, 'O1', from]);
   });
 
+  it('a campaign paused out of its dry run reports pausedFrom, and resumes to dry_run (clearing it)', async () => {
+    await app.close();
+    app = await build({
+      tables: { campaigns: [campaignRow({ status: 'paused', pauseReason: 'ai_budget', pausedFrom: 'dry_run' })] },
+      updateReturning: [campaignRow({ status: 'dry_run', pauseReason: null, pausedFrom: null })],
+    });
+    const before = await app.inject({ method: 'GET', url: `/api/campaigns/${CAMPAIGN_ID}`, headers: auth });
+    expect(before.json()).toMatchObject({ status: 'paused', pausedFrom: 'dry_run' });
+    const res = await change('dry_run');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: 'dry_run', pausedFrom: null });
+    expect(fixture.writes).toEqual([{ op: 'update', table: schema.campaigns, values: { status: 'dry_run', pauseReason: null, pausedFrom: null, updatedAt: expect.any(Date) } }]);
+  });
+
   it.each([['draft', 'active'], ['active', 'dry_run'], ['archived', 'dry_run']] as const)('409 BAD_TRANSITION %s → %s, no write', async (from, to) => {
     await app.close();
     app = await build({ tables: { campaigns: [campaignRow({ status: from })] } });

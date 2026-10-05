@@ -32,6 +32,7 @@ export function campaign(over: Partial<Campaign> = {}): Campaign {
     source: { kind: 'list_view', listViewId: LIST_VIEW_ID },
     status: 'dry_run',
     pauseReason: null,
+    pausedFrom: null,
     refreshMinutes: 240,
     touchDays: [0, 1, 3, 6, 10, 14],
     memberCount: 1250,

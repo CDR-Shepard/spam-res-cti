@@ -57,6 +57,8 @@ export const Campaign = z.object({
   status: CampaignStatus,
   /** manual | crm_broken | ai_budget | kill_switch while paused; else null. */
   pauseReason: z.string().nullable(),
+  /** While paused: what the pause interrupted, so the page can offer the matching resume. Else null. */
+  pausedFrom: z.enum(['dry_run', 'active']).nullable(),
   refreshMinutes: z.number(),
   touchDays: z.array(z.number()),
   memberCount: z.number(),

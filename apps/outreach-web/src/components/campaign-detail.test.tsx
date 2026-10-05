@@ -45,6 +45,30 @@ describe('CampaignDetail header', () => {
     expect(group ? within(group).getAllByRole('button').map((b) => b.textContent) : []).toEqual(labels);
   });
 
+  it('a campaign paused from its dry run leads with "Resume dry run", then offers going live', async () => {
+    renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ status: 'paused', pauseReason: 'ai_budget', pausedFrom: 'dry_run' }) });
+    await screen.findByRole('heading', { name: 'Spring sellers' });
+    const group = screen.getByRole('group', { name: 'Change status' });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(['Resume dry run', 'Go live', 'Archive']);
+  });
+
+  it('a campaign paused while live leads with "Resume" (going live again, after a dialog)', async () => {
+    renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ status: 'paused', pauseReason: 'manual', pausedFrom: 'active' }) });
+    await screen.findByRole('heading', { name: 'Spring sellers' });
+    const group = screen.getByRole('group', { name: 'Change status' });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(['Resume', 'Start dry run', 'Archive']);
+  });
+
+  it('"Resume dry run" posts dry_run without a dialog', async () => {
+    const calls = renderDetail({
+      [`GET ${CAMPAIGN}`]: campaign({ status: 'paused', pauseReason: 'manual', pausedFrom: 'dry_run' }),
+      [`POST ${CAMPAIGN}/status`]: campaign({ status: 'dry_run' }),
+    });
+    await userEvent.click(await screen.findByRole('button', { name: 'Resume dry run' }));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    await waitFor(() => expect(calls.find((c) => c.method === 'POST')?.body).toEqual({ status: 'dry_run' }));
+  });
+
   it('offers members no status changes', async () => {
     renderDetail({ [`GET ${CAMPAIGN}`]: campaign() }, false);
     await screen.findByRole('heading', { name: 'Spring sellers' });

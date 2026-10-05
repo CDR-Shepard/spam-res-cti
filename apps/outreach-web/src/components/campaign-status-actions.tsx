@@ -14,7 +14,8 @@ const ARCHIVE = { title: 'Archive this campaign?', description: 'An archived cam
 /**
  * The buttons each status offers. Mirrors outreach-api's `canTransition` (A7):
  * draft→dry_run|archived; dry_run→active|paused|archived; active→paused|archived;
- * paused→active|dry_run|archived; archived→nothing.
+ * paused→active|dry_run|archived; archived→nothing. A campaign paused out of its
+ * dry run offers `PAUSED_FROM_DRY_RUN` instead (see `actionsFor`).
  */
 export const STATUS_ACTIONS: Record<CampaignStatus, readonly StatusAction[]> = {
   draft: [{ to: 'dry_run', label: 'Start dry run' }, { to: 'archived', label: 'Archive', confirm: ARCHIVE }],
@@ -23,6 +24,18 @@ export const STATUS_ACTIONS: Record<CampaignStatus, readonly StatusAction[]> = {
   paused: [{ to: 'active', label: 'Resume', confirm: RESUME }, { to: 'dry_run', label: 'Start dry run' }, { to: 'archived', label: 'Archive', confirm: ARCHIVE }],
   archived: [],
 };
+
+/** Paused out of a dry run: resuming means the dry run again; going live stays a deliberate, confirmed step. */
+export const PAUSED_FROM_DRY_RUN: readonly StatusAction[] = [
+  { to: 'dry_run', label: 'Resume dry run' },
+  { to: 'active', label: 'Go live', confirm: GO_LIVE },
+  { to: 'archived', label: 'Archive', confirm: ARCHIVE },
+];
+
+export function actionsFor(campaign: Pick<Campaign, 'status' | 'pausedFrom'>): readonly StatusAction[] {
+  if (campaign.status === 'paused' && campaign.pausedFrom === 'dry_run') return PAUSED_FROM_DRY_RUN;
+  return STATUS_ACTIONS[campaign.status];
+}
 
 const STATUS_ERROR_WORDS = { BAD_TRANSITION: "That change isn't allowed from the campaign's current status. Reload the page and try again." };
 
@@ -37,7 +50,7 @@ export function CampaignStatusActions({ campaign }: { campaign: Campaign }) {
       void qc.invalidateQueries({ queryKey: outreachKeys.plan(updated.id) });
     },
   });
-  const actions = STATUS_ACTIONS[campaign.status];
+  const actions = actionsFor(campaign);
   if (actions.length === 0) return null;
   return (
     <div className="space-y-2">

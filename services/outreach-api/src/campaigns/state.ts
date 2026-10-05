@@ -33,6 +33,7 @@ export function toCampaignDto(row: CampaignRow): Campaign {
     source,
     status: row.status,
     pauseReason: row.pauseReason,
+    pausedFrom: row.pausedFrom === 'dry_run' || row.pausedFrom === 'active' ? row.pausedFrom : null,
     refreshMinutes: row.refreshMinutes,
     touchDays: row.touchDays,
     memberCount: row.memberCount,

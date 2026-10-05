@@ -93,6 +93,7 @@ describe('campaign contracts', () => {
       source: { kind: 'list_view', listViewId: '00B5f00000ABCDE' },
       status: 'dry_run',
       pauseReason: null,
+      pausedFrom: null,
       refreshMinutes: 240,
       touchDays: [0, 1, 3, 6, 10, 14],
       memberCount: 412,
@@ -102,6 +103,18 @@ describe('campaign contracts', () => {
     };
     expect(Campaign.parse(campaign)).toEqual(campaign);
     expect(Campaign.safeParse({ ...campaign, status: 'running' }).success).toBe(false);
+  });
+
+  it('Campaign carries pausedFrom: what a paused campaign was doing (dry_run or active), else null', () => {
+    const base = Campaign.parse({
+      id: '33333333-3333-4333-8333-333333333333', name: 'Open leads', sfObject: 'Lead', source: { kind: 'soql', soql: 'SELECT Id FROM Lead' },
+      status: 'paused', pauseReason: 'ai_budget', pausedFrom: 'dry_run', refreshMinutes: 240, touchDays: [0], memberCount: 1,
+      lastRefreshedAt: null, lastRefreshError: null, createdAt: '2026-10-04T11:00:00.000Z',
+    });
+    expect(base.pausedFrom).toBe('dry_run');
+    expect(Campaign.safeParse({ ...base, pausedFrom: 'active' }).success).toBe(true);
+    expect(Campaign.safeParse({ ...base, pausedFrom: 'draft' }).success).toBe(false);
+    expect(Campaign.safeParse({ ...base, pausedFrom: undefined }).success).toBe(false);
   });
 
   it('CampaignPreview round-trips, skip counts keyed only by known reasons, sample capped at 20', () => {
