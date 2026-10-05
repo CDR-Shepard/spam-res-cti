@@ -135,7 +135,6 @@ afterEach(async () => {
 
 describe('GET /api/review', () => {
   it("lists the tenant's needs_review enrollments, newest first, scoped to the tenant", async () => {
-    state.session = rep;
     const res = await app.inject({ method: 'GET', url: '/api/review', headers: auth });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
@@ -164,6 +163,24 @@ describe('GET /api/review', () => {
     state.session = null;
     const res = await app.inject({ method: 'GET', url: '/api/review' });
     expect(res.statusCode).toBe(401);
+  });
+
+  it('a member sees only the records they own (by their Salesforce user, 15-character core)', async () => {
+    await app.close();
+    app = await build({ enrollments: [reviewRow], connections: [{ sfUserId: OWNER_SF_ID_18 }] });
+    state.session = rep;
+    const res = await app.inject({ method: 'GET', url: '/api/review', headers: auth });
+    expect(res.statusCode).toBe(200);
+    const where = render(fixture.captured.where.at(-1));
+    expect(where.sql).toContain('left("crm_records"."owner_sf_user_id", 15) = ');
+    expect(where.params).toEqual(expect.arrayContaining(['O1', 'needs_review', OWNER_SF_ID_15]));
+  });
+
+  it('a member with no Salesforce connection owns nothing and sees an empty list', async () => {
+    state.session = rep;
+    const res = await app.inject({ method: 'GET', url: '/api/review', headers: auth });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ items: [] });
   });
 });
 

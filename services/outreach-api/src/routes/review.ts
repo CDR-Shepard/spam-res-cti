@@ -1,6 +1,7 @@
 /**
  * Needs Review (spec §7.3): records the AI flagged do-not-contact wait here
- * for their owner. Nothing is suppressed until a person decides.
+ * for their owner. Nothing is suppressed until a person decides. Admins see and
+ * decide every item; anyone else only the records they own in Salesforce.
  *
  *  - dismiss: the enrollment resumes and is planned on the next tick, and the record
  *    remembers which flag was dismissed (`crm_records.dnc_dismissed_triage_id`), so the
@@ -10,7 +11,7 @@
  *    enrollment exits, and `onConfirmed` runs in the same transaction (1B wires
  *    it to the Salesforce write-back outbox).
  */
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { DoNotContactCategory, ReviewDecision, SfObject, type NeedsReviewItem, type NeedsReviewResponse } from '@cti/contracts';
@@ -72,8 +73,8 @@ function validNumbers(raw: unknown): { numbers: string[]; dropped: number } {
 
 /** Salesforce Ids compare on their case-sensitive 15-character core, so a 15- and an 18-character form match. */
 function sameSfId(a: string | null, b: string | null): boolean {
-  if (!a || !b || a.length < 15 || b.length < 15) return false;
-  return a.slice(0, 15) === b.slice(0, 15);
+  if (!a || !b || a.length < SF_ID_CORE || b.length < SF_ID_CORE) return false;
+  return a.slice(0, SF_ID_CORE) === b.slice(0, SF_ID_CORE);
 }
 
 interface ReviewRow {
@@ -105,7 +106,28 @@ function toItem(row: ReviewRow): NeedsReviewItem {
   };
 }
 
-async function listReview(db: Db, orgId: string): Promise<NeedsReviewResponse> {
+/** Salesforce's case-sensitive Id core: the first 15 characters (an 18-character Id adds a checksum). */
+const SF_ID_CORE = 15;
+
+/** The Salesforce user the signed-in person connected as (the CTI's salesforce_connections), or null. */
+async function ownSfUserId(db: Db, userId: string): Promise<string | null> {
+  const [conn] = await db
+    .select({ sfUserId: schema.salesforceConnections.sfUserId })
+    .from(schema.salesforceConnections)
+    .where(eq(schema.salesforceConnections.userId, userId))
+    .limit(1);
+  return conn?.sfUserId ?? null;
+}
+
+/** Admins see every item; anyone else only the records they own (the same rule as `mayDecide`). */
+async function listReview(db: Db, ctx: RequestContext): Promise<NeedsReviewResponse> {
+  let ownerFilter: SQL | undefined;
+  if (!(ctx.session.isAdmin || ctx.session.isSuperAdmin)) {
+    const mine = await ownSfUserId(db, ctx.session.userId);
+    if (!mine || mine.length < SF_ID_CORE) return { items: [] };
+    const core = sql.raw(String(SF_ID_CORE));
+    ownerFilter = sql`left(${r.ownerSfUserId}, ${core}) = ${mine.slice(0, SF_ID_CORE)} and length(${r.ownerSfUserId}) >= ${core}`;
+  }
   const rows = await db
     .select({
       enrollmentId: e.id,
@@ -122,7 +144,7 @@ async function listReview(db: Db, orgId: string): Promise<NeedsReviewResponse> {
     .from(e)
     .innerJoin(c, eq(c.id, e.campaignId))
     .innerJoin(r, eq(r.id, e.crmRecordId))
-    .where(and(eq(e.orgId, orgId), eq(e.status, 'needs_review')))
+    .where(and(eq(e.orgId, ctx.orgId), eq(e.status, 'needs_review'), ownerFilter))
     .orderBy(desc(e.flaggedAt))
     .limit(REVIEW_LIST_LIMIT);
   return { items: rows.map(toItem) };
@@ -162,12 +184,7 @@ async function loadTarget(db: Db, orgId: string, enrollmentId: string): Promise<
 async function mayDecide(db: Db, ctx: RequestContext, ownerSfUserId: string | null): Promise<boolean> {
   if (ctx.session.isAdmin || ctx.session.isSuperAdmin) return true;
   if (!ownerSfUserId) return false;
-  const [conn] = await db
-    .select({ sfUserId: schema.salesforceConnections.sfUserId })
-    .from(schema.salesforceConnections)
-    .where(eq(schema.salesforceConnections.userId, ctx.session.userId))
-    .limit(1);
-  return sameSfId(conn?.sfUserId ?? null, ownerSfUserId);
+  return sameSfId(await ownSfUserId(db, ctx.session.userId), ownerSfUserId);
 }
 
 async function dismiss(db: Db, orgId: string, enrollmentId: string, now: Date): Promise<boolean> {
@@ -231,7 +248,7 @@ export async function registerReviewRoutes(app: FastifyInstance, deps: ReviewRou
   app.get('/review', async (req, reply) => {
     const ctx = await requireContext(db, req, reply);
     if (!ctx) return;
-    return listReview(db, ctx.orgId);
+    return listReview(db, ctx);
   });
 
   app.post('/review/:enrollmentId', async (req, reply) => {

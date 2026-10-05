@@ -142,6 +142,29 @@ describe.skipIf(!pgLane)('review decisions (real Postgres)', () => {
     expect(record.rows[0].dnc_dismissed_triage_id).toBe(triageId);
   });
 
+  it('a member lists only the items whose record they own; an admin lists all of them', async () => {
+    const mine = await seedFlagged();
+    await t.pool.query(`update crm_records set owner_sf_user_id = '005A0000001abcdEFG' where id = $1`, [mine.recordId]);
+    const theirs = await q(`insert into crm_records (org_id, sf_object, sf_record_id, owner_sf_user_id) values ($1, 'Lead', $2, '005B0000009zzzzXYZ') returning id`, [
+      mine.orgId,
+      `00Q${randomUUID().replace(/-/g, '').slice(0, 15)}`,
+    ]);
+    const campaign = await q(`select campaign_id as id from campaign_enrollments where id = $1`, [mine.enrollmentId]);
+    const other = await q(
+      `insert into campaign_enrollments (org_id, campaign_id, crm_record_id, status, review_category, review_quote, flagged_at)
+       values ($1, $2, $3, 'needs_review', 'sold', 'sold it', now()) returning id`,
+      [mine.orgId, campaign.id, theirs.id],
+    );
+    const user = await q(`insert into users (org_id, email) values ($1, $2) returning id`, [mine.orgId, `rep-${randomUUID().slice(0, 8)}@gg.co`]);
+    await t.pool.query(`insert into salesforce_connections (user_id, sf_user_id, sf_org_id, instance_url, access_token_enc) values ($1, '005A0000001abcd', '00D000000000001', 'https://x.my.salesforce.com', 'enc')`, [user.id]);
+    const list = async () => (await app.inject({ method: 'GET', url: '/api/review', headers: { authorization: 'Bearer t' } })).json().items.map((i: { enrollmentId: string }) => i.enrollmentId).sort();
+
+    state.session = { userId: user.id, orgId: mine.orgId, email: 'rep@gg.co', isAdmin: false, powerDialerEnabled: false, kind: 'human', isSuperAdmin: false };
+    expect(await list()).toEqual([mine.enrollmentId]);
+    asAdmin(mine.orgId);
+    expect(await list()).toEqual([mine.enrollmentId, other.id].sort());
+  });
+
   it("lists an archived campaign's needs_review items, and confirm still works on them", async () => {
     const { orgId, enrollmentId } = await seedFlagged({ campaignStatus: 'archived' });
     asAdmin(orgId);
