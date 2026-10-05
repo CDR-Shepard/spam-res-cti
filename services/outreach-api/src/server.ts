@@ -49,7 +49,7 @@ async function main(): Promise<void> {
     ...(cfg.salesforceEnabled
       ? {
           'campaign.refresh': async () => {
-            await refreshDueCampaigns({ db, clients, now: new Date(), log: console });
+            await refreshDueCampaigns({ db, clients, now: new Date(), log: console, triage: triageModel !== null });
           },
         }
       : {}),

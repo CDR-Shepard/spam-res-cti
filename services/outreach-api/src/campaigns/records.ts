@@ -32,7 +32,8 @@ const CLOSED_FIELD: Readonly<Record<SfObject, string>> = { Lead: 'IsConverted', 
 /** Opportunity's person is its primary contact role's Contact (spec §5). */
 export const PRIMARY_CONTACT_SUBQUERY =
   '(SELECT Contact.Email, Contact.MobilePhone, Contact.Phone, Contact.DoNotCall, Contact.HasOptedOutOfEmail FROM OpportunityContactRoles WHERE IsPrimary = true LIMIT 1)';
-const SF_ID = /^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/;
+/** A 15- or 18-character Salesforce record Id. */
+export const SF_ID = /^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/;
 
 type Row = Record<string, unknown>;
 

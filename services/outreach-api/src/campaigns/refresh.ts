@@ -1,6 +1,7 @@
 /**
  * `campaign.refresh`: re-runs each due campaign's membership query, syncs the records
- * whose Salesforce `LastModifiedDate` moved, enrolls new eligible members, and exits
+ * whose Salesforce `LastModifiedDate` moved, marks records that got a Task since the last
+ * refresh for triage again (when AI triage is on), enrolls new eligible members, and exits
  * enrollments whose record left the query, closed, or lost every channel.
  */
 import { and, eq, inArray, isNull, lt, lte, notInArray, or, sql } from 'drizzle-orm';
@@ -16,6 +17,7 @@ import { CAMPAIGN_ARCHIVED_EXIT_REASON, chunk, enrollRecords, exitEnrollment, TE
 import { pauseOrgCampaigns, RUNNING_CAMPAIGN_STATUSES } from './pause.js';
 import { fetchRecords, type SfRecordSnapshot } from './records.js';
 import { fetchMemberIds, MAX_CAMPAIGN_RECORDS, membershipSoql } from './source.js';
+import { flagRecordsWithNewTasks } from './task-activity.js';
 
 /**
  * A tick stops starting new campaigns after this long. pg-boss fails the job at 15 minutes
@@ -126,7 +128,15 @@ async function idsToFetch(db: Db, client: SalesforceClient, orgId: string, sfObj
  * (`refreshDueCampaigns`) decides between pausing the tenant and recording the error.
  */
 export async function refreshCampaign(
-  deps: { db: Db; client: SalesforceClient; fieldMap: FieldMap; now: Date; log?: RunnerLogger },
+  deps: {
+    db: Db;
+    client: SalesforceClient;
+    fieldMap: FieldMap;
+    now: Date;
+    log?: RunnerLogger;
+    /** AI triage is configured: records that got a Task since the last refresh are triaged again. */
+    triage?: boolean;
+  },
   campaign: CampaignRow,
 ): Promise<{ members: number; enrolled: number; exited: number }> {
   const { db, client, fieldMap, now, log } = deps;
@@ -137,6 +147,10 @@ export async function refreshCampaign(
   const fetchIds = await idsToFetch(db, client, campaign.orgId, sfObject, ids);
   if (fetchIds.length > 0) {
     await upsertRecords(db, campaign.orgId, await fetchRecords(client, sfObject, fetchIds, fieldMap[sfObject]));
+  }
+  if (deps.triage && campaign.lastRefreshedAt) {
+    const flagged = await flagRecordsWithNewTasks(db, client, { campaignId: campaign.id, since: campaign.lastRefreshedAt });
+    if (flagged > 0) log?.info({ orgId: campaign.orgId, campaignId: campaign.id, flagged }, 'records with new Tasks marked for triage');
   }
 
   const members = await loadRecords(db, campaign.orgId, ids);
@@ -245,6 +259,8 @@ type RefreshDeps = {
   clients: SalesforceClientFactory;
   now: Date;
   log: RunnerLogger;
+  /** AI triage is configured (the `record.triage` tick runs): new Tasks re-trigger triage. */
+  triage?: boolean;
   /** Wall clock in ms for the tick budget; injected by tests. Defaults to `Date.now`. */
   clock?: () => number;
 };
@@ -327,7 +343,7 @@ async function refreshOrg(deps: RefreshDeps, orgId: string, due: CampaignRow[], 
       continue;
     }
     try {
-      const result = await refreshCampaign({ db, client, fieldMap, now, log }, campaign);
+      const result = await refreshCampaign({ db, client, fieldMap, now, log, triage: deps.triage }, campaign);
       log.info({ orgId, campaignId: campaign.id, ...result }, 'campaign refreshed');
     } catch (err) {
       if (isConnectionFailure(err)) return pauseForBrokenCrm(db, log, orgId, err);

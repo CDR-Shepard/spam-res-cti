@@ -32,7 +32,13 @@ const log = { error: vi.fn(), info: vi.fn(), warn: vi.fn() };
  * A stand-in Salesforce: `members` is what the list view returns, `stamps` each record's
  * LastModifiedDate, `records` what a field fetch returns. Every SOQL is recorded.
  */
-function fakeSalesforce(state: { members: string[]; stamps: Record<string, string>; records: Record<string, SfRecordSnapshot> }) {
+function fakeSalesforce(state: {
+  members: string[];
+  stamps: Record<string, string>;
+  records: Record<string, SfRecordSnapshot>;
+  /** Tasks every Task query returns. */
+  tasks?: Array<{ WhoId: string | null; WhatId: string | null }>;
+}) {
   const soql: string[] = [];
   const client = {
     listViewSoql: vi.fn(async () => "SELECT Id, Name FROM Lead WHERE Status = 'Open'"),
@@ -42,6 +48,7 @@ function fakeSalesforce(state: { members: string[]; stamps: Record<string, strin
         const ids = [...q.matchAll(/'([^']+)'/g)].map((m) => m[1]!);
         return ids.filter((id) => id in state.stamps).map((Id) => ({ Id, LastModifiedDate: state.stamps[Id] }));
       }
+      if (q.startsWith('SELECT WhoId, WhatId FROM Task ')) return state.tasks ?? [];
       return state.members.map((Id) => ({ attributes: { type: 'Lead', url: `/services/data/v60.0/sobjects/Lead/${Id}` }, Id }));
     }),
   } as unknown as SalesforceClient;
@@ -123,6 +130,47 @@ describe.skipIf(!pgLane)('campaign refresh (real Postgres)', () => {
       const rows = new Map((await enrollmentsOf(db, campaign.id)).map((e) => [e.id, e]));
       expect(rows.get(first!.id)).toMatchObject({ status: 'exited', exitReason: 'left_query' });
       expect(rows.get(second!.id)).toMatchObject({ status: 'conversing', exitReason: null });
+    });
+
+    describe('Tasks logged since the last refresh (they do not move the record\'s LastModifiedDate)', () => {
+      async function refreshedOnce(tasks: Array<{ WhoId: string | null; WhatId: string | null }>) {
+        const orgId = await seedOrg(db);
+        const campaign = await seedCampaign(db, orgId);
+        const state = { members: [leadId(1), leadId(2)], stamps: {} as Record<string, string>, records: { [leadId(1)]: reachable(1), [leadId(2)]: reachable(2) }, tasks: [] as typeof tasks };
+        const sf = fakeSalesforce(state);
+        await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: NOW, triage: true }, campaign);
+        await db.update(schema.crmRecords).set({ triageNeeded: false, triageAttemptedAt: NOW }).where(eq(schema.crmRecords.orgId, orgId));
+        state.stamps = { [leadId(1)]: STAMP_1, [leadId(2)]: STAMP_1 };
+        state.tasks = tasks;
+        return { orgId, sf, campaign: await campaignById(db, campaign.id) };
+      }
+      const triageState = async (orgId: string) =>
+        new Map((await db.select().from(schema.crmRecords).where(eq(schema.crmRecords.orgId, orgId))).map((r) => [r.sfRecordId, { needed: r.triageNeeded, attempted: r.triageAttemptedAt }]));
+
+      it('with AI triage on, marks an enrolled record that got a Task for triage again', async () => {
+        const { orgId, sf, campaign } = await refreshedOnce([{ WhoId: leadId(2), WhatId: null }]);
+        await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: LATER, triage: true }, campaign);
+        const taskQueries = sf.soql.filter((q) => q.startsWith('SELECT WhoId, WhatId FROM Task '));
+        expect(taskQueries).toHaveLength(1);
+        expect(taskQueries[0]).toContain('AND LastModifiedDate > 2026-10-05T14:55:00Z');
+        const rows = await triageState(orgId);
+        expect(rows.get(leadId(2))).toEqual({ needed: true, attempted: null });
+        expect(rows.get(leadId(1))).toEqual({ needed: false, attempted: NOW });
+      });
+
+      it('with AI triage off, or on a first refresh, asks Salesforce for no Tasks', async () => {
+        const { sf, campaign } = await refreshedOnce([{ WhoId: leadId(2), WhatId: null }]);
+        await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: LATER }, campaign);
+        expect(sf.soql.filter((q) => q.includes('FROM Task'))).toEqual([]);
+        // refreshedOnce's first refresh ran with triage on, before the campaign had a last refresh.
+      });
+
+      it('the tick passes the triage switch through to each campaign', async () => {
+        const { orgId, sf } = await refreshedOnce([{ WhoId: leadId(1), WhatId: null }]);
+        await seedConnection(db, orgId);
+        await refreshDueCampaigns({ db, clients: async () => sf.client, now: LATER, log, triage: true });
+        expect((await triageState(orgId)).get(leadId(1))).toEqual({ needed: true, attempted: null });
+      });
     });
 
     it('exits a member whose record closed (Lead converted or Opportunity closed) with closed', async () => {
