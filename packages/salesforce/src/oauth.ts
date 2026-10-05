@@ -118,16 +118,18 @@ export async function refreshAccessToken(
 }
 
 /** Best-effort token revocation (RFC 7009 as Salesforce implements it). Never throws: a sign-in must not fail on it. */
-export async function revokeToken(cfg: SalesforceOAuthConfig, token: string, fetchImpl: typeof fetch = fetch): Promise<void> {
+/** Never throws: true when Salesforce accepted the revoke, false on any refusal or network failure (the caller decides what to log). */
+export async function revokeToken(cfg: SalesforceOAuthConfig, token: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
   try {
-    await fetchImpl(new URL('/services/oauth2/revoke', cfg.loginUrl).toString(), {
+    const res = await fetchImpl(new URL('/services/oauth2/revoke', cfg.loginUrl).toString(), {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ token }).toString(),
       signal: AbortSignal.timeout(SALESFORCE_REQUEST_TIMEOUT_MS),
     });
+    return res.ok;
   } catch {
-    // ignored on purpose
+    return false;
   }
 }
 

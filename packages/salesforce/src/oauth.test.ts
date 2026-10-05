@@ -207,15 +207,19 @@ describe('revokeToken', () => {
     expect(seen).toBeInstanceOf(AbortSignal);
   });
 
-  it.each([400, 500])('resolves on a %i answer', async (status) => {
-    const http = fakeFetch([{ status, text: 'nope' }]);
-    await expect(revokeToken(CFG, 'RT', http.impl)).resolves.toBeUndefined();
+  it('D1: resolves true when Salesforce accepts the revoke', async () => {
+    await expect(revokeToken(CFG, 'RT', fakeFetch([{ status: 200 }]).impl)).resolves.toBe(true);
   });
 
-  it('resolves when the network fails', async () => {
+  it.each([400, 500])('D1: resolves false (never throws) on a %i answer', async (status) => {
+    const http = fakeFetch([{ status, text: 'nope' }]);
+    await expect(revokeToken(CFG, 'RT', http.impl)).resolves.toBe(false);
+  });
+
+  it('D1: resolves false when the network fails', async () => {
     const failing = (async () => {
       throw new TypeError('fetch failed');
     }) as typeof fetch;
-    await expect(revokeToken(CFG, 'RT', failing)).resolves.toBeUndefined();
+    await expect(revokeToken(CFG, 'RT', failing)).resolves.toBe(false);
   });
 });

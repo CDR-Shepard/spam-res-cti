@@ -64,7 +64,7 @@ export async function readSalesforceIdentity(
   cfg: SalesforceSignInConfig,
   code: string,
   verifier: string,
-  deps: { fetchImpl?: typeof fetch; sleep?: (ms: number) => Promise<void> } = {},
+  deps: { fetchImpl?: typeof fetch; sleep?: (ms: number) => Promise<void>; log?: { warn: (obj: object, msg: string) => void } } = {},
 ): Promise<SalesforceIdentity> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -77,13 +77,17 @@ export async function readSalesforceIdentity(
   try {
     if (cfg.allowedOrgId && core(tok.sfOrgId) !== core(cfg.allowedOrgId)) throw new SalesforceSignInError('org_not_allowed');
     const info = await readUserInfo(tok.accessToken, tok.instanceUrl, fetchImpl, sleep);
-    if ((info.organization_id && core(info.organization_id) !== core(tok.sfOrgId)) || (info.user_id && core(info.user_id) !== core(tok.sfUserId))) {
+    // D2: both ids are required and must match the token's id URL; a userinfo without either is never trusted.
+    if (!info.organization_id || !info.user_id || core(info.organization_id) !== core(tok.sfOrgId) || core(info.user_id) !== core(tok.sfUserId)) {
       throw new SalesforceSignInError('salesforce_unavailable');
     }
     const email = info.email?.trim().toLowerCase() || null;
     return { sfOrgId: tok.sfOrgId, sfUserId: tok.sfUserId, email, name: info.name?.trim() || null };
   } finally {
-    // Sign-in only: the tokens are never stored, and are revoked so they cannot outlive this request.
-    await revokeToken(oauthCfg(cfg), tok.refreshToken ?? tok.accessToken, fetchImpl);
+    // Sign-in only: the tokens are never stored, and are revoked so they cannot outlive this request. A refused revoke
+    // is logged (D1), never the token; the sign-in itself stands.
+    if (!(await revokeToken(oauthCfg(cfg), tok.refreshToken ?? tok.accessToken, fetchImpl))) {
+      deps.log?.warn({}, 'salesforce sign-in: revoking the token failed');
+    }
   }
 }

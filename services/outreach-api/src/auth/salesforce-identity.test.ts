@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { FAKE_SF_ORG_ID, FAKE_SF_USER_ID, fakeSalesforceLogin, type FakeSalesforceLoginCall } from '../test/fake-salesforce-login.js';
 import { readSalesforceIdentity, salesforceSignInUrl, SalesforceSignInError, SIGN_IN_SCOPE, type SalesforceSignInConfig } from './salesforce-identity.js';
 
@@ -107,6 +107,28 @@ describe('readSalesforceIdentity', () => {
   it('8b: the 15-character form of the same org or user in userinfo is consistent', async () => {
     const t = setup({ userinfoOrgId: FAKE_SF_ORG_ID.slice(0, 15), userinfoUserId: FAKE_SF_USER_ID.slice(0, 15) });
     expect((await t.read()).sfUserId).toBe(FAKE_SF_USER_ID);
+  });
+
+  it.each<[string, Array<'user_id' | 'organization_id'>]>([
+    ['user_id', ['user_id']],
+    ['organization_id', ['organization_id']],
+    ['both', ['user_id', 'organization_id']],
+  ])('D2: a userinfo without %s is refused (both ids are required), with the token still revoked', async (_label, omit) => {
+    const t = setup({ userinfoOmit: omit });
+    await expect(t.read()).rejects.toMatchObject({ reason: 'salesforce_unavailable' });
+    expect(revoked(t.calls)).toEqual(['RT']);
+  });
+
+  it('D1: a revoke Salesforce refuses is logged as a warning (never the token), and the sign-in still succeeds', async () => {
+    const fake = fakeSalesforceLogin({ revokeStatus: 400 });
+    const log = { warn: vi.fn() };
+    const got = await readSalesforceIdentity(CFG, 'CODE-xyz', 'VERIFIER-abc', { fetchImpl: fake.fetchImpl, sleep: async () => {}, log });
+    expect(got.sfUserId).toBe(FAKE_SF_USER_ID);
+    expect(log.warn).toHaveBeenCalledWith({}, 'salesforce sign-in: revoking the token failed');
+    expect(JSON.stringify(log.warn.mock.calls)).not.toMatch(/\bAT\b|\bRT\b/);
+    const ok = { warn: vi.fn() };
+    await readSalesforceIdentity(CFG, 'CODE-xyz', 'VERIFIER-abc', { fetchImpl: fakeSalesforceLogin().fetchImpl, sleep: async () => {}, log: ok });
+    expect(ok.warn).not.toHaveBeenCalled();
   });
 
   it('9: no thrown value carries the tokens or the code', async () => {

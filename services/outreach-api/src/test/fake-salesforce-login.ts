@@ -19,6 +19,10 @@ export interface FakeSalesforceLoginOptions {
   userinfoUserId?: string;
   /** Leave `refresh_token` out of the token response. */
   noRefreshToken?: boolean;
+  /** Leave these fields out of the userinfo answer. */
+  userinfoOmit?: Array<'user_id' | 'organization_id'>;
+  /** Answer the revoke endpoint with this status (default 200). */
+  revokeStatus?: number;
 }
 
 export interface FakeSalesforceLoginCall {
@@ -55,13 +59,13 @@ export function fakeSalesforceLogin(opts: FakeSalesforceLoginOptions = {}): { fe
         userinfoReads += 1;
         if (userinfoReads <= (opts.userinfoFailures ?? 0)) return json(401, { error: 'invalid_session' });
         return json(200, {
-          user_id: opts.userinfoUserId ?? userId,
-          organization_id: opts.userinfoOrgId ?? orgId,
+          ...(opts.userinfoOmit?.includes('user_id') ? {} : { user_id: opts.userinfoUserId ?? userId }),
+          ...(opts.userinfoOmit?.includes('organization_id') ? {} : { organization_id: opts.userinfoOrgId ?? orgId }),
           email: opts.email === undefined ? 'rep@gg.com' : opts.email,
           name: opts.name ?? 'Rae Rep',
         });
       case '/services/oauth2/revoke':
-        return new Response(null, { status: 200 });
+        return new Response(null, { status: opts.revokeStatus ?? 200 });
       default:
         return json(404, { error: 'not_found' });
     }

@@ -58,7 +58,7 @@ export async function registerSalesforceAuthRoutes(app: FastifyInstance, deps: S
     if (!nonce || !verifier || nonce !== state.nonce) return signInRedirect(cfg, reply, 'bad_state', state.returnTo);
     if (q.data.error || !q.data.code) return signInRedirect(cfg, reply, q.data.error === 'access_denied' ? 'access_denied' : 'missing_code');
     try {
-      const identity = await readSalesforceIdentity(signIn, q.data.code, verifier, { fetchImpl: deps.fetchImpl, sleep: deps.sleep });
+      const identity = await readSalesforceIdentity(signIn, q.data.code, verifier, { fetchImpl: deps.fetchImpl, sleep: deps.sleep, log: req.log });
       const match = await matchSalesforceUser(db, identity);
       if (!match.ok) {
         req.log.info({ reason: match.reason }, 'salesforce sign-in refused');
