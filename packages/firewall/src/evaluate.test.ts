@@ -27,6 +27,7 @@ function fakeDb(opts: {
   campaign?: Record<string, unknown>;
   dailyCap?: { attempts?: number; calls?: number };
   dailyCapError?: boolean;
+  outboundNumber?: Record<string, unknown>;
 } = {}) {
   const inserted: unknown[] = [];
   const selectedTables: unknown[] = [];
@@ -54,7 +55,7 @@ function fakeDb(opts: {
       optOuts: { findFirst: findFirst(undefined) },
       blockedNumbers: { findFirst: findFirst(undefined) },
       campaignConfigs: { findFirst: findFirst(opts.campaign) },
-      outboundNumbers: { findFirst: findFirst(undefined) },
+      outboundNumbers: { findFirst: findFirst(opts.outboundNumber) },
       stateCallingRules: { findFirst: findFirst(undefined) },
       federalDncEntries: { findFirst: findFirst(undefined) },
       organizations: { findFirst: findFirst({ dncMode: 'registry' }) },
@@ -230,5 +231,30 @@ describe('evaluate — daily dial cap (gate 3b)', () => {
     await evaluate(db, { ...base, toNumberRaw: '(619) 555-9999' });
     expect(selectedTables).not.toContain(schema.dialerDialAttempts);
     expect(selectedTables).not.toContain(schema.calls);
+  });
+});
+
+describe('evaluate — never clears an AI (ai_pool) number for a rep', () => {
+  const number = (kind: string) => ({
+    id: 'N1', orgId: 'O1', e164: '+16197244374', kind, assignedUserId: 'U1', active: true, health: 'healthy',
+    dialsToday: 0, dialsTodayDate: '1970-01-01', firstUsedAt: null, warmupOverrideCap: 100,
+    lastMinuteDialCount: 0, lastMinuteWindowStart: null, baselineAttestation: null,
+  });
+
+  // The audit still records the number the rep ASKED for (pre-existing); POST
+  // /calls then refuses it because its own re-read is rep-kind only
+  // (services/cti-api routes/calls.ts, pinned in routes-calls-kind.test.ts).
+  it('a pinned from-number of kind ai_pool is treated as not registered (the outbound_number gate fails)', async () => {
+    const { db } = fakeDb({ outboundNumber: number('ai_pool') });
+    const res = await evaluate(db, { ...base, toNumberRaw: '(619) 555-9999', fromNumber: '+16197244374' });
+    const check = res.checks.find((c) => c.name === 'outbound_number');
+    expect(check).toMatchObject({ passed: false, reasonCode: 'OUTBOUND_NUMBER_MISSING' });
+    expect(res.decision).not.toBe('ALLOW');
+  });
+
+  it('the same row as an agent number is accepted (control)', async () => {
+    const { db } = fakeDb({ outboundNumber: number('agent') });
+    const res = await evaluate(db, { ...base, toNumberRaw: '(619) 555-9999', fromNumber: '+16197244374' });
+    expect(res.checks.find((c) => c.name === 'outbound_number')).toMatchObject({ passed: true });
   });
 });

@@ -6,13 +6,44 @@
  * selection) so the per-DID gates a rep sees in the verdict are evaluated
  * against the same number that will carry the call.
  */
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, type SQL } from 'drizzle-orm';
 import type { getDb } from '@cti/db';
-import { schema } from '@cti/db';
+import { REP_NUMBER_KINDS, schema } from '@cti/db';
 import { warmupCapForAge } from './warmup.js';
 import { regionForAreaCode, timezoneForAreaCode } from './tz.js';
 
 type Db = ReturnType<typeof getDb>;
+
+/**
+ * May a REP dial from a number of this kind? Every kind except the AI voice
+ * agent's own `ai_pool` (`REP_NUMBER_KINDS`). Click-to-dial, the firewall's
+ * from-number check, POST /calls and the dial-time re-check all filter on it.
+ */
+export function isRepNumberKind(kind: string): boolean {
+  return (REP_NUMBER_KINDS as readonly string[]).includes(kind);
+}
+
+const repKind = () => inArray(schema.outboundNumbers.kind, [...REP_NUMBER_KINDS]);
+
+/** The calling rep's ASSIGNED, active, rep-kind numbers — the rotation pool. */
+export function repPoolWhere(orgId: string, userId: string): SQL {
+  return and(
+    eq(schema.outboundNumbers.orgId, orgId),
+    eq(schema.outboundNumbers.active, true),
+    eq(schema.outboundNumbers.assignedUserId, userId),
+    repKind(),
+  )!;
+}
+
+/** One number, only if it is this rep's own and of a rep kind (never `ai_pool`). */
+export function repDialableWhere(orgId: string, userId: string, e164: string): SQL {
+  return and(
+    eq(schema.outboundNumbers.orgId, orgId),
+    eq(schema.outboundNumbers.e164, e164),
+    eq(schema.outboundNumbers.assignedUserId, userId),
+    repKind(),
+  )!;
+}
 
 /** 3-digit area code of a +1 NANP number, or null. */
 function npaOf(e164: string | null | undefined): string | null {
@@ -75,20 +106,14 @@ export async function pickRotationNumber(
   exclude?: ReadonlySet<string>,
 ): Promise<string | null> {
   // Only the calling rep's ASSIGNED pool is dialable. Unassigned numbers are
-  // the shared reserve, held back until an admin assigns them.
-  const pool = await db
-    .select()
-    .from(schema.outboundNumbers)
-    .where(
-      and(
-        eq(schema.outboundNumbers.orgId, orgId),
-        eq(schema.outboundNumbers.active, true),
-        eq(schema.outboundNumbers.assignedUserId, userId),
-      ),
-    );
+  // the shared reserve, held back until an admin assigns them. Never an AI
+  // (`ai_pool`) number: the WHERE excludes them and the ranking below drops
+  // any that reach it anyway, so not even the sticky can pick one.
+  const pool = await db.select().from(schema.outboundNumbers).where(repPoolWhere(orgId, userId));
   const today = new Date().toISOString().slice(0, 10);
   const calleeNpa = npaOf(toE164);
   const eligible = pool
+    .filter((n) => isRepNumberKind(n.kind))
     .filter((n) => !exclude?.has(n.e164))
     .filter((n) => n.health !== 'spam_likely' && n.health !== 'degraded')
     .map((n) => {

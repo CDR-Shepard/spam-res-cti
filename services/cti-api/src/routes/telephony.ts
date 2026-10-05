@@ -12,7 +12,8 @@ import { resolveSession } from '@cti/auth';
 import { DEFAULT_HOLD_MUSIC, toHoldMusicChoice, type HoldMusicChoice } from '@cti/contracts';
 import { getProvider } from '../telephony/index.js';
 import { applyTalkSeconds, talkSecondsWrite } from '../telephony/talk-seconds.js';
-import { getDb, schema } from '@cti/db';
+import { getDb, REP_NUMBER_KINDS, schema } from '@cti/db';
+import { isRepNumberKind } from '@cti/firewall';
 import { loadConfig } from '../config.js';
 import { sha256 } from '@cti/auth';
 import { dispatchAlert } from '../alerts.js';
@@ -413,13 +414,15 @@ export async function registerTelephonyRoutes(app: FastifyInstance): Promise<voi
     // Re-check the DID is still healthy at DIAL time. The firewall ran up to a
     // few minutes ago; an analytics-block webhook or the reputation worker may
     // have degraded the number since. Don't dial a number that just got paused.
+    // Rep-kind only: a rep's call never goes out on an AI (`ai_pool`) number.
     const did = await db.query.outboundNumbers.findFirst({
       where: and(
         eq(schema.outboundNumbers.orgId, call.orgId),
         eq(schema.outboundNumbers.e164, call.fromNumber),
+        inArray(schema.outboundNumbers.kind, [...REP_NUMBER_KINDS]),
       ),
     });
-    if (!did || !did.active || did.health === 'spam_likely' || did.health === 'degraded') {
+    if (!did || !did.active || !isRepNumberKind(did.kind) || did.health === 'spam_likely' || did.health === 'degraded') {
       twiml.say('The outbound number for this call is no longer available. Please try again.');
       return reply.type('text/xml').send(twiml.toString());
     }

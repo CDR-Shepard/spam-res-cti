@@ -11,9 +11,9 @@ import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveSession } from '@cti/auth';
-import { getDb, schema } from '@cti/db';
+import { getDb, REP_NUMBER_KINDS, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
-import { warmupCapForAge } from '@cti/firewall';
+import { isRepNumberKind, repDialableWhere, warmupCapForAge } from '@cti/firewall';
 import { counterpartyE164, enqueueSyncForCall, fetchRecordName, AUTO_DISPOSITION } from '../salesforce/sync.js';
 import { buildCallSubject } from '../salesforce/call-subject.js';
 import { updateCallTask } from '../salesforce/client.js';
@@ -259,14 +259,13 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     // burst limit — all re-checked inside the same UPDATE so concurrent dials
     // can't push it over the cap (TOCTOU-safe). Zero rows updated => not
     // eligible, so the call is refused rather than silently burning the DID.
+    // Rep-kind only: a rep's call never goes out on an AI (`ai_pool`) number,
+    // even one an audit pinned (repDialableWhere + the kind re-check + the
+    // claim's own kind filter below).
     const did = await db.query.outboundNumbers.findFirst({
-      where: and(
-        eq(schema.outboundNumbers.orgId, session.orgId),
-        eq(schema.outboundNumbers.e164, fromNumber),
-        eq(schema.outboundNumbers.assignedUserId, session.userId),
-      ),
+      where: repDialableWhere(session.orgId, session.userId, fromNumber),
     });
-    if (!did || !did.active)
+    if (!did || !did.active || !isRepNumberKind(did.kind))
       return reply.code(409).send({ error: 'Approved caller ID is not in your assigned pool; re-run the check' });
     const daysSince = did.firstUsedAt
       ? Math.floor((Date.now() - did.firstUsedAt.getTime()) / 86_400_000)
@@ -290,6 +289,7 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
           eq(schema.outboundNumbers.e164, fromNumber),
           eq(schema.outboundNumbers.assignedUserId, session.userId),
           eq(schema.outboundNumbers.active, true),
+          inArray(schema.outboundNumbers.kind, [...REP_NUMBER_KINDS]),
           notInArray(schema.outboundNumbers.health, ['spam_likely', 'degraded']),
           sql`(case when ${schema.outboundNumbers.dialsTodayDate} = ${today}::date then ${schema.outboundNumbers.dialsToday} else 0 end) < ${effectiveCap}`,
           sql`(case when ${schema.outboundNumbers.lastMinuteWindowStart} is null or now() - ${schema.outboundNumbers.lastMinuteWindowStart} > interval '1 minute' then 0 else ${schema.outboundNumbers.lastMinuteDialCount} end) < 10`,

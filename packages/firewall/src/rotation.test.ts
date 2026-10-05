@@ -22,6 +22,7 @@ function fakeDb(rows: unknown[], stickyE164: string | null = null): Parameters<t
 
 interface Row {
   e164: string;
+  kind: string;
   active: boolean;
   health: string;
   dialsToday: number;
@@ -32,6 +33,7 @@ interface Row {
 }
 const row = (over: Partial<Row>): Row => ({
   e164: '+15550000000',
+  kind: 'agent',
   active: true,
   health: 'unknown',
   dialsToday: 0,

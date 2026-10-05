@@ -20,7 +20,7 @@ import { REASON } from './reasons.js';
 import { enforcedStateHoursLabel, resolveRecipientState } from './recipient.js';
 import { fetchDidWindowStats } from './reputation/query.js';
 import { answerRateBreach, engagementBreach, THRESHOLDS } from './reputation/signals.js';
-import { pickRotationNumber } from './rotation.js';
+import { isRepNumberKind, pickRotationNumber, repDialableWhere } from './rotation.js';
 import { DAILY_DIAL_CAP, isDailyCapped } from './state-calling-rules.js';
 import { resolveTimezone, stateForAreaCode, timezoneForNumber } from './tz.js';
 import type { CheckResult, FirewallDeps, FirewallInput, FirewallResponse } from './types.js';
@@ -309,15 +309,13 @@ export async function evaluate(db: Db, input: FirewallInput, deps: FirewallDeps 
       detail: 'No outbound caller ID available — pool exhausted or none registered',
     });
   } else {
-    const outNum = await db.query.outboundNumbers.findFirst({
-      where: and(
-        eq(schema.outboundNumbers.orgId, input.orgId),
-        eq(schema.outboundNumbers.e164, effectiveFrom),
-        // Reps may only dial from their own assigned pool — not another rep's
-        // number and not a held-back reserve number.
-        eq(schema.outboundNumbers.assignedUserId, input.userId),
-      ),
+    // Reps may only dial from their own assigned pool — not another rep's
+    // number, not a held-back reserve number, and never the AI voice agent's
+    // own (`ai_pool`) numbers (repDialableWhere + the kind re-check).
+    const found = await db.query.outboundNumbers.findFirst({
+      where: repDialableWhere(input.orgId, input.userId, effectiveFrom),
     });
+    const outNum = found && isRepNumberKind(found.kind) ? found : undefined;
     if (!outNum) {
       checks.push({
         name: 'outbound_number',
