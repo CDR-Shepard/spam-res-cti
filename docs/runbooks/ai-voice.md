@@ -5,8 +5,20 @@
 1. On Railway service `@cti/api`, set `OPENAI_API_KEY` and `AI_VOICE_TEST_NUMBERS=<your mobile, E.164>` (§3).
 2. Push the branch to `main` (the default branch `@cti/api` deploys from).
 3. Wait for the `@cti/api` deploy to show **Success** (dashboard → `@cti/api` → Deployments). It also serves the softphone.
-4. Open the softphone as an **admin** → **AI calls** on the bottom bar → **Test AI call** box → pick your number → **Start test call**.
-5. Answer. The first sentence must say it is an AI assistant on a recorded line. No Salesforce step is needed for a test call.
+4. Confirm the migration applied. `$PUB` is a live credential: never print or share it:
+
+   ```bash
+   PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
+   ```
+
+   ```bash
+   echo "SELECT filename FROM cti_schema_migrations WHERE filename = '0050_ai_calls.sql';" | psql "$PUB"
+   ```
+
+   Expected: one row, `0050_ai_calls.sql`. Zero rows means the pre-deploy migration did not run: check the deploy log before placing any call.
+5. Run the caller-ID pre-flight in §5.
+6. Open the softphone as an **admin** → **AI calls** on the bottom bar → **Test AI call** box → pick your number → **Start test call**.
+7. Answer. The first sentence must say it is an AI assistant on a recorded line. No Salesforce step is needed for a test call.
 
 Everything here is a human step. The design is `docs/superpowers/plans/2026-10-05-ai-voice-calls.md`; the code is `services/cti-api/src/ai-voice/`.
 
@@ -122,6 +134,22 @@ The consent source picklist (`Text Reply`, `Email Reply`, `Web Form`, `Inbound C
 
 Do this on your own mobile before any real prospect. A test call needs no Salesforce record and no consent tick. Only an admin can place one, and only to a number in `AI_VOICE_TEST_NUMBERS`.
 
+**Test calls count like real dials.** A placed test call counts toward the per-customer ceiling (when the number belongs to a campaign) and, for a Florida, Oklahoma, Washington or Maryland area code, the 3-calls-per-24-hours state cap. Repeating the smoke test to one number on the same day can therefore be refused with `customer_ceiling` or `daily_cap`. Use a second test number (add it to `AI_VOICE_TEST_NUMBERS`) or wait a day.
+
+**Pre-flight: caller ID (2 minutes, before step 1).** A real (record) AI call dials out from one of your org's active **dialer pool** numbers; with none it is refused `no_caller_id`. A **test** call uses a pool number too, but if none is available it falls back to `TWILIO_DEFAULT_CALLER_ID` on `@cti/api` (and is refused `no_caller_id` only if that is unset as well). Get `$PUB` as in the first call checklist, find your org id (one line per org; pick yours):
+
+```bash
+echo "SELECT id, name FROM organizations;" | psql "$PUB"
+```
+
+then list the pool numbers (replace `<org uuid>`):
+
+```bash
+echo "SELECT e164, active FROM outbound_numbers WHERE org_id = :'org' AND kind = 'dialer_pool' AND active;" | psql "$PUB" -v org='<org uuid>'
+```
+
+Expected: at least one row before you place a record call (§6). Zero rows is fine for the test call only if `TWILIO_DEFAULT_CALLER_ID` is set; the name check is `railway variables --service @cti/api --kv | grep -E '^TWILIO_DEFAULT_CALLER_ID=' | cut -d= -f1`.
+
 1. Confirm §3 is done and the deploy is healthy. `AI_VOICE_TEST_NUMBERS` must contain your mobile.
 2. Open the CTI softphone and sign in as an **admin**. Keep it open and allow the microphone; the transfer test rings it.
 3. Tap **AI calls** on the bottom bar (sparkle icon, after Recent). The top box, **Test AI call**, has one quick button per number in `AI_VOICE_TEST_NUMBERS` (shown like `+1 (512) 555-0100`), a number field prefilled with the first one, and a **Start test call** button.
@@ -171,9 +199,9 @@ Admins only in v1 (§1).
    | `ai_voice_unavailable` | Kill switch is on or `OPENAI_API_KEY` is unset (§3, §9) |
    | `no_phone` / `invalid_number` | The record has no usable phone number |
    | `opted_out` / `blocked` / `dnc` | The number is on the opt-out, blocked, or federal do-not-call list. Do not override |
-   | `daily_cap` / `customer_ceiling` | A daily state cap or the per-customer call limit is reached |
+   | `daily_cap` / `customer_ceiling` | A daily state cap or the per-customer call limit is reached. Test calls count too (§5) |
    | `calling_hours` | Outside 08:00 to 21:00 in the person's local time |
-   | `no_caller_id` | No outbound number available for this call |
+   | `no_caller_id` | No active `dialer_pool` number is available (see the §5 pre-flight). A test call falls back to `TWILIO_DEFAULT_CALLER_ID` first |
    | `not_admin_for_test` | Only admins can place test calls |
    | `call_in_progress` | That number is already on a live AI call |
 
@@ -233,16 +261,32 @@ Set any of these with `railway variables --set "NAME=value" --service @cti/api`.
 - **Agent name, `AI_VOICE_AGENT_NAME`:** the first name it gives (default `Alex`).
 - **Call length, `AI_VOICE_MAX_CALL_SECONDS`:** default `600`. After a transfer the call is not cut at this limit.
 
-## 11. Known limits
+## 11. Troubleshooting
+
+**Answered → silence → it hangs up.** The audio stream never connected.
+
+- Deploy logs (`@cti/api` → the latest deployment → **Deploy Logs**): search for `ai-voice: stream upgrade with a bad signature`. If present, Twilio signed the stream URL for a different host: `API_PUBLIC_URL` on `@cti/api` must be its public `https://` URL, exactly as Twilio reaches it.
+- Twilio Console → **Monitor → Errors**: errors in the 31920 series are the Media Streams WebSocket handshake failing (wrong host, TLS, or the service not reachable).
+- `API_PUBLIC_URL` on `@cti/api` is the public `https://` URL (not `http://`, not an internal Railway hostname).
+- `OPENAI_API_KEY` is set (§3 name check). Without it AI voice is off and the call is refused rather than placed, so this is the first thing to recheck if anything changed.
+
+**The AI says nothing (or gibberish), then hangs up.** OpenAI never confirmed the voice session, so the call ends within about 5 seconds of connecting. Deploy logs show `ai-voice bridge: session not configured, ending the call` (field `why`: OpenAI's error message, or `timeout`), then `ai-voice: conversation ended` with reason `error` and detail `session not configured: …`. Usually a bad model or reasoning setting:
+
+- Check `AI_VOICE_MODEL` and `AI_VOICE_REASONING`. Try `AI_VOICE_MODEL=gpt-realtime` with `AI_VOICE_REASONING` unset, then place a test call. Reasoning is only sent for `gpt-realtime-2*` models, so it cannot break `gpt-realtime`.
+- An OpenAI account without Realtime access or credit produces the same line with OpenAI's error text.
+
+## 12. Known limits
 
 - **cti-api must run exactly one replica.** Live calls are tracked in memory in one process. A call answered by a different replica, or after a restart, has no state: it is hung up and shown as `failed`. `.railway/railway.ts` already pins one replica; do not scale `@cti/api` up. Avoid redeploying during a live call.
 - **A lost Twilio status callback is repaired by a sweeper.** Every 2 minutes it finalizes, from Twilio's own call record, any placed call still open after 3 minutes (a row that never placed a call is marked failed after 10 minutes). The sweeper only runs while AI voice is available; rows left open while `AI_VOICE` is off wait until it is back on.
 - **Transfers ring the record owner if mapped, else the rep who started the call.** If that person's softphone is not open and registered, nobody answers and the 25-second callback path runs.
 - **No call audio is stored,** only text transcripts and summaries. If you need recordings for compliance, that is a separate build.
 - **Same-number duplicate check is not atomic.** Two simultaneous starts to one number could both go through. The UI and the rate limit (10 AI call starts per minute per person) make this very unlikely.
+- **Transfer time limit.** On transfer the call's time limit is lifted to 4 hours. If Twilio refuses that, the rep's conversation is cut at `AI_VOICE_MAX_CALL_SECONDS` + 60 seconds from the start of the call (11 minutes by default).
+- **Transfer caller ID.** The rep's softphone should show the prospect's number as the caller. Verify this in the smoke test (§5 step 7).
 - **Untested against a live carrier until your smoke test:** the transfer caller ID, call time limit extension, and the voicemail voice are only exercised for real in §5. Run the smoke test after every deploy that touches `services/cti-api/src/ai-voice/`.
 
-## 12. Costs
+## 13. Costs
 
 Per minute of conversation:
 
@@ -255,7 +299,7 @@ Per minute of conversation:
 
 So about **$0.12 per minute plus $0.0075 per call** ($0.10 + $0.014 + $0.0044 = $0.1184). The 10-minute cap makes the worst case about **$1.20** per call (10 × $0.1184 + $0.0075 ≈ $1.19), and a typical qualifying call of 3 minutes is about $0.36. A call that rings out costs about $0.01. Summaries with a Haiku-class model are a fraction of a cent. Check real spend on platform.openai.com → **Usage** after your first day, and set a monthly spend limit under **Settings → Limits**.
 
-## 13. Legal notes
+## 14. Legal notes
 
 - **AI calls only to people with the consent checkbox ticked.** The checkbox is the record that the person agreed to calls from an AI assistant. Tick it only when they actually did (a reply, a web form, an inbound call, or a rep confirming on the phone) and record the source.
 - **Disclosure at the start of every call.** The agent says it is an AI assistant calling for the company on a recorded line. Do not change the prompt to remove it.
