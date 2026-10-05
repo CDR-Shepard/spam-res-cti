@@ -16,6 +16,7 @@ import {
   type LocalWindow,
 } from '@cti/firewall';
 import type { ContactChannel, GateStep, TouchChannel } from '@cti/contracts';
+import { isMobileField } from '../campaigns/eligibility.js';
 import { nextLocalDayStart, nextLocalOpening, recipientTimezone } from './local-time.js';
 
 /** The campaign default order when triage has no preference (spec §7.2). */
@@ -53,6 +54,8 @@ export interface PlanInput {
   lastChannel: 'ai_call' | 'rep_call' | 'sms' | 'email' | null;
   touchedToday: boolean; // any touch to this person sent today (recipient-local) in any campaign
   lastHumanDialAt: Date | null; // latest CTI dial to any of the person's numbers
+  isClosed: boolean; // Lead converted or Opportunity closed (the refresh exits it; the queue re-check must not wait for that)
+  skipOnDialer: boolean; // the field-mapped Skip on Dialer flag
 }
 
 export type PlanDecision =
@@ -68,8 +71,7 @@ type Phone = PlanInput['phones'][number];
 
 const step = (rule: string, channel: string, verdict: GateStep['verdict'], detail: string): GateStep => ({ rule, channel, verdict, detail });
 const kindOf = (c: TouchChannel): ContactChannel => (c === 'ai_call' || c === 'rep_call' ? 'call' : c);
-/** Same test as the campaign preview (A6): a text needs a number from a field whose name contains `Mobile`. */
-export const isMobileField = (field: string): boolean => field.includes('Mobile');
+/** Same test as the campaign preview (A6): a text needs a number from a field whose name contains "mobile", any case. */
 const isMobile = (p: Phone): boolean => isMobileField(p.field);
 const BLOCK_ORDER: readonly ConsentBlock[] = ['opted_out', 'blocked', 'dnc'];
 
@@ -204,17 +206,24 @@ export function planTouch(input: PlanInput): PlanDecision {
 export type QueueRecheck =
   | { kind: 'queue'; audit: GateStep[] }
   | { kind: 'defer'; dueAt: Date; audit: GateStep[] }
-  | { kind: 'skip'; reason: 'suppressed' | 'no_phone_number'; audit: GateStep[] };
+  | { kind: 'skip'; reason: 'closed' | 'skip_on_dialer' | 'suppressed' | 'no_phone_number'; audit: GateStep[] };
 
 /**
  * Re-check a `planned` rep call at the moment it would join the call queue. A touch planned
  * in a dry run can be days old, so the facts it was planned on (opt-outs, the Salesforce
  * flags, a rep's recent dial, the recipient's hours, a touch already sent today) may have
- * changed. It uses the planner's own rule functions: the call is skipped when no number can
- * be called any more (rules 2 and 4), deferred when a human dial, the one-touch-a-day rule,
- * or the calling window says not yet (rules 6 and 7), and queued otherwise.
+ * changed. It uses the planner's own rule functions: the call is skipped when the record has
+ * closed or is marked Skip on Dialer, or when no number can be called any more (rules 2 and
+ * 4), deferred when a human dial, the one-touch-a-day rule, or the calling window says not
+ * yet (rules 6 and 7), and queued otherwise.
  */
 export function recheckQueuedCall(input: PlanInput): QueueRecheck {
+  if (input.isClosed) {
+    return { kind: 'skip', reason: 'closed', audit: [step(RULE.queueRecheck, 'rep_call', 'removed', 'Not queued: the record is closed in Salesforce')] };
+  }
+  if (input.skipOnDialer) {
+    return { kind: 'skip', reason: 'skip_on_dialer', audit: [step(RULE.queueRecheck, 'rep_call', 'removed', 'Not queued: Skip on Dialer is set in Salesforce')] };
+  }
   const gap = contactPointGap('rep_call', input);
   if (gap) return { kind: 'skip', reason: 'no_phone_number', audit: [step(RULE.queueRecheck, 'rep_call', 'removed', `Not queued: ${gap}`)] };
   const blocked = suppression('rep_call', input);

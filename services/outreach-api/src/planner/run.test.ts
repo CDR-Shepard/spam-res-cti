@@ -332,6 +332,16 @@ describe.skipIf(!pgLane)('planner run (real Postgres)', () => {
       expect(await touch(touchId)).toMatchObject({ status: 'skipped', skip_reason: 'suppressed' });
     });
 
+    it('skips a call when the record has closed or is marked Skip on Dialer since planning', async () => {
+      const closed = await plannedCall();
+      await pool.query(`update crm_records set is_closed = true where id = (select crm_record_id from campaign_enrollments where id = $1)`, [closed.enrollmentId]);
+      const skip = await plannedCall();
+      await pool.query(`update crm_records set skip_on_dialer = true where id = (select crm_record_id from campaign_enrollments where id = $1)`, [skip.enrollmentId]);
+      await promoteQueuedCalls(db, NOW, { log });
+      expect(await touch(closed.touchId)).toMatchObject({ status: 'skipped', skip_reason: 'closed' });
+      expect(await touch(skip.touchId)).toMatchObject({ status: 'skipped', skip_reason: 'skip_on_dialer' });
+    });
+
     it('leaves the call planned and pushes it 24 hours past a recent CTI dial', async () => {
       const { orgId, touchId } = await plannedCall();
       const dial = new Date(NOW.getTime() - HOUR); // 09:00 PDT: 24 h later is inside the window

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SkipReason } from '@cti/contracts';
 import type { ConsentBlock } from '@cti/firewall';
-import { availableChannels, contactKeys, skipReasonFor } from './eligibility.js';
+import { availableChannels, contactKeys, isMobileField, skipReasonFor } from './eligibility.js';
 import type { SfRecordSnapshot } from './records.js';
 
 const MOBILE = '+13058142231';
@@ -15,6 +15,19 @@ function snap(over: Partial<SfRecordSnapshot> = {}): SfRecordSnapshot {
   };
 }
 const blocks = (entries: Array<[string, ConsentBlock]> = []) => new Map<string, ConsentBlock>(entries);
+
+describe('isMobileField', () => {
+  it.each([
+    ['MobilePhone', true],
+    ['Mobile_Phone__c', true],
+    ['Contact.MobilePhone', true],
+    ['mobile__c', true],
+    ['Phone', false],
+    ['HomePhone', false],
+  ])('%s → %s (case-insensitive)', (field, expected) => {
+    expect(isMobileField(field)).toBe(expected);
+  });
+});
 
 describe('contactKeys', () => {
   it('every E.164 plus the lowercased email, each once', () => {

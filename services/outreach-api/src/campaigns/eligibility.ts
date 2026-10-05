@@ -5,8 +5,13 @@ import type { SfRecordSnapshot } from './records.js';
 /** Strongest first: what a skipped record is reported as when several reasons removed its channels. */
 const SUPPRESSION_ORDER = ['opted_out', 'blocked', 'dnc', 'sf_do_not_call', 'sf_email_opt_out'] as const satisfies readonly SkipReason[];
 
-/** Texting needs a mobile: Lead MobilePhone, Opportunity Mobile_Phone__c, Contact.MobilePhone. */
-const MOBILE_FIELD = /mobile/i;
+/**
+ * Texting needs a mobile: Lead MobilePhone, Opportunity Mobile_Phone__c, Contact.MobilePhone.
+ * Case-insensitive. One definition for the campaign preview and the planner.
+ */
+export function isMobileField(field: string): boolean {
+  return /mobile/i.test(field);
+}
 
 /** Pure: the keys that make "one active campaign per person" (spec §6.3) — every E.164 and the lowercased email. */
 export function contactKeys(s: SfRecordSnapshot): string[] {
@@ -19,7 +24,7 @@ export function availableChannels(s: SfRecordSnapshot, blocks: ReadonlyMap<strin
   const usable = s.sfDoNotCall ? [] : s.phones.filter((p) => !blocks.has(p.e164));
   const channels: ContactChannel[] = [];
   if (usable.length > 0) channels.push('call');
-  if (usable.some((p) => MOBILE_FIELD.test(p.field))) channels.push('sms');
+  if (usable.some((p) => isMobileField(p.field))) channels.push('sms');
   if (s.email && !s.sfEmailOptOut) channels.push('email');
   return channels;
 }

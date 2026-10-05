@@ -17,7 +17,8 @@ import { exitEnrollment } from '../campaigns/enroll.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { outreachSettings } from '../settings.js';
 import { localDayStart, recipientTimezone } from './local-time.js';
-import { DEFAULT_ORDER, HUMAN_DIAL_DEFER_MS, isMobileField, planTouch, recheckQueuedCall, type PlanDecision, type PlanInput } from './rules.js';
+import { isMobileField } from '../campaigns/eligibility.js';
+import { DEFAULT_ORDER, HUMAN_DIAL_DEFER_MS, planTouch, recheckQueuedCall, type PlanDecision, type PlanInput } from './rules.js';
 
 export type BlockLookup = (db: Db, orgId: string, numbers: readonly string[]) => Promise<Map<string, ConsentBlock>>;
 
@@ -54,6 +55,8 @@ interface DueRow {
   consent_ai_call: boolean;
   sf_do_not_call: boolean;
   sf_email_opt_out: boolean;
+  is_closed: boolean;
+  skip_on_dialer: boolean;
   settings: unknown;
 }
 
@@ -70,7 +73,7 @@ async function loadDue(db: Db, now: Date, batch: number, waitForTriage: boolean)
   const result = await db.execute(sql`
     select e.id, e.org_id, e.crm_record_id, e.touches_done, c.touch_days,
            r.phones, r.email, r.state, r.consent_ai_call, r.sf_do_not_call, r.sf_email_opt_out,
-           o.settings
+           r.is_closed, r.skip_on_dialer, o.settings
     from campaign_enrollments e
     join campaigns c on c.id = e.campaign_id
     join crm_records r on r.id = e.crm_record_id
@@ -182,6 +185,8 @@ async function loadPlanInput(deps: PlanDeps, lookup: BlockLookup, row: DueRow): 
     lastChannel,
     touchedToday,
     lastHumanDialAt,
+    isClosed: row.is_closed,
+    skipOnDialer: row.skip_on_dialer,
   };
 }
 
@@ -258,7 +263,7 @@ async function loadQueueCandidates(db: Db, now: Date, batch: number): Promise<Qu
   const result = await db.execute(sql`
     select t.id as touch_id, e.id, e.org_id, e.crm_record_id, e.touches_done, c.touch_days,
            r.phones, r.email, r.state, r.consent_ai_call, r.sf_do_not_call, r.sf_email_opt_out,
-           o.settings
+           r.is_closed, r.skip_on_dialer, o.settings
     from touches t
     join campaign_enrollments e on e.id = t.enrollment_id
     join campaigns c on c.id = e.campaign_id

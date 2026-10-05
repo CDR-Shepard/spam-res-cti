@@ -26,6 +26,8 @@ function input(over: Partial<PlanInput> = {}): PlanInput {
     lastChannel: null,
     touchedToday: false,
     lastHumanDialAt: null,
+    isClosed: false,
+    skipOnDialer: false,
     ...over,
   };
 }
@@ -280,6 +282,13 @@ describe('planTouch deferrals', () => {
   });
 });
 
+describe('mobile fields', () => {
+  it('a lower-case custom mobile field counts for a text, as in the campaign preview', () => {
+    const decision = planTouch(input({ phones: [{ field: 'mobile__c', e164: MOBILE.e164 }], email: null, triageChannels: ['sms'] }));
+    expect(decision).toMatchObject({ kind: 'touch', channel: 'sms' });
+  });
+});
+
 describe('recheckQueuedCall', () => {
   const CALL = { liveChannels: PHASE_1 };
 
@@ -294,6 +303,8 @@ describe('recheckQueuedCall', () => {
     ['every number on the federal list', { blocks: allBlocked('dnc') }, 'suppressed'],
     ['Salesforce Do Not Call', { sfDoNotCall: true }, 'suppressed'],
     ['no phone number left', { phones: [] }, 'no_phone_number'],
+    ['the record closed (Lead converted, Opportunity closed)', { isClosed: true }, 'closed'],
+    ['Skip on Dialer set in Salesforce', { skipOnDialer: true }, 'skip_on_dialer'],
   ];
   it.each(skips)('skips for %s', (_label, over, reason) => {
     const r = recheckQueuedCall(input({ ...CALL, ...over }));
