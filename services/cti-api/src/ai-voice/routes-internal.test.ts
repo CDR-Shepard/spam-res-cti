@@ -195,12 +195,33 @@ describe('POST /internal/ai-calls', () => {
       expect(deps.start).toHaveBeenCalledTimes(1);
     });
 
+    it('M-4: takes the reservation over BEFORE looking for a call, so a call the original request inserts in between is found and nothing is dialed', async () => {
+      await staleReservation();
+      const order: string[] = [];
+      (store.takeOver as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+        order.push('takeOver');
+        // The original request lands its call while the retry is taking the key over.
+        store.calls.push({ id: CALL, status: 'ringing', blockReason: null, callSid: 'CA9' });
+        return true;
+      });
+      (store.findCallSince as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+        order.push('findCallSince');
+        return store.calls[0] ?? null;
+      });
+      const res = await post(recordBody());
+      expect(order).toEqual(['takeOver', 'findCallSince']);
+      expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
+      expect(deps.start).not.toHaveBeenCalled();
+      expect(store.findCallSince).toHaveBeenCalledWith(expect.objectContaining({ since: new Date(NOW.getTime() - 11 * 60_000 - 5_000) }));
+    });
+
     it('S-3: a retry that loses the takeover answers in_flight and dials nothing', async () => {
       await staleReservation();
       (store.takeOver as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
       const res = await post(recordBody());
       expect(res.json()).toEqual({ result: 'failed', reason: 'in_flight', aiCallId: null });
       expect(deps.start).not.toHaveBeenCalled();
+      expect(store.findCallSince).not.toHaveBeenCalled();
     });
 
     it('S-6: an exception inside the start never frees the key: a retry meets in_flight until the reservation is stale', async () => {

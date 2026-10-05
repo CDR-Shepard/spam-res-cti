@@ -146,6 +146,10 @@ async function handleTrigger(deps: InternalAiDeps, cfgOf: () => AppConfig, body:
     if (row.requestHash !== hash) return { conflict: true };
     if (row.response) return InternalAiCallResponse.parse(row.response);
     if (deps.now().getTime() - row.createdAt.getTime() < STALE_REQUEST_MS) return failed('in_flight');
+    // Take the reservation over FIRST, then look for a call the original request left, since the OLD row's createdAt: a call
+    // it inserted up to the takeover is seen, where looking first and taking over second could miss one inserted in between
+    // and dial a second time. One atomic UPDATE decides who retries; any other concurrent retry answers in_flight (S-3).
+    if (!(await deps.requests.takeOver(body.orgId, body.idempotencyKey))) return failed('in_flight');
     const found = await deps.requests.findCallSince({
       orgId: body.orgId, userId: body.userId, since: new Date(row.createdAt.getTime() - FIND_SLACK_MS), ...targetKeys(body),
     });
@@ -154,8 +158,6 @@ async function handleTrigger(deps: InternalAiDeps, cfgOf: () => AppConfig, body:
       await deps.requests.complete(body.orgId, body.idempotencyKey, answer);
       return answer;
     }
-    // One atomic UPDATE decides who retries: any other concurrent retry of this stale key answers in_flight (S-3).
-    if (!(await deps.requests.takeOver(body.orgId, body.idempotencyKey))) return failed('in_flight');
   }
   const answer = await startReserved(deps, cfgOf, db, session, body);
   await deps.requests.complete(body.orgId, body.idempotencyKey, answer);
