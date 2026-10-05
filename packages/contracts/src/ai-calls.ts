@@ -1,0 +1,100 @@
+import { z } from 'zod';
+import { SfObject } from './crm.js';
+
+export const INTERNAL_AI_CALLS_PATH = '/internal/ai-calls';
+export const INTERNAL_AI_AVAILABILITY_PATH = '/internal/ai-calls/availability';
+/** The approved plan as the voice agent receives it (fenced as data in its instructions). */
+export const PLAN_TEXT_MAX = 4_000;
+
+export const IdempotencyKey = z.string().regex(/^[A-Za-z0-9:_-]{8,120}$/);
+
+/** The engine's gate refusals (cti-api ai-voice/gate.ts AiGateBlock) plus call_in_progress (service.ts). */
+export const AiCallBlockReason = z.enum([
+  'ai_voice_unavailable', 'no_consent', 'consent_field_missing', 'no_phone', 'opted_out', 'blocked', 'dnc',
+  'daily_cap', 'customer_ceiling', 'calling_hours', 'no_caller_id', 'not_admin_for_test', 'invalid_number', 'call_in_progress',
+]);
+export type AiCallBlockReason = z.infer<typeof AiCallBlockReason>;
+
+/**
+ * Not a gate decision: the call could not be attempted. in_flight = the same key is still being handled.
+ * plan_rejected = the plan text failed cti-api's deterministic check (CF-9); nothing was dialed, and the
+ * same plan will be rejected again, so it is final for that plan.
+ */
+export const AiCallFailReason = z.enum([
+  'record_not_found', 'salesforce_error', 'gate_error', 'twilio_error', 'in_flight', 'unknown_user', 'plan_rejected',
+]);
+export type AiCallFailReason = z.infer<typeof AiCallFailReason>;
+
+const SF_RECORD_ID = z.string().regex(/^[a-zA-Z0-9]{15,18}$/);
+
+export const InternalAiCallTarget = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('record'), objectType: z.enum(['Lead', 'Opportunity']), recordId: SF_RECORD_ID, planText: z.string().min(1).max(PLAN_TEXT_MAX) }).strict(),
+  z.object({ kind: z.literal('test'), to: z.string().min(7).max(20), planText: z.string().max(PLAN_TEXT_MAX).nullable() }).strict(),
+]);
+export type InternalAiCallTarget = z.infer<typeof InternalAiCallTarget>;
+
+/** POST /internal/ai-calls (cti-api), HMAC-signed. `userId` is the person who approved the plan (or the admin testing). */
+export const InternalAiCallRequest = z
+  .object({ orgId: z.string().uuid(), userId: z.string().uuid(), idempotencyKey: IdempotencyKey, target: InternalAiCallTarget })
+  .strict();
+export type InternalAiCallRequest = z.infer<typeof InternalAiCallRequest>;
+
+export const InternalAiCallResponse = z.discriminatedUnion('result', [
+  z.object({ result: z.literal('placed'), aiCallId: z.string().uuid() }),
+  z.object({ result: z.literal('blocked'), reason: AiCallBlockReason, aiCallId: z.string().uuid() }),
+  z.object({ result: z.literal('failed'), reason: AiCallFailReason, aiCallId: z.string().uuid().nullable() }),
+]);
+export type InternalAiCallResponse = z.infer<typeof InternalAiCallResponse>;
+
+/** GET /internal/ai-calls/availability (cti-api), HMAC-signed; relayed to admins by outreach-api. */
+export const AiAvailability = z.object({ available: z.boolean(), testNumbers: z.array(z.string()) });
+export type AiAvailability = z.infer<typeof AiAvailability>;
+
+/** ai_calls.status / ai_calls.outcome (migration 0050). */
+export const AiCallStatus = z.enum(['queued', 'ringing', 'in_progress', 'transferring', 'transferred', 'completed', 'failed', 'blocked']);
+export type AiCallStatus = z.infer<typeof AiCallStatus>;
+export const AiCallOutcome = z.enum([
+  'qualified_transferred', 'qualified_callback', 'not_interested', 'do_not_call', 'voicemail', 'no_answer', 'busy',
+  'failed', 'wrong_number', 'hung_up', 'transfer_failed', 'blocked', 'other',
+]);
+export type AiCallOutcome = z.infer<typeof AiCallOutcome>;
+
+/** One AI call touch on the campaign's results table. */
+export const AiCallResult = z.object({
+  touchId: z.string().uuid(),
+  enrollmentId: z.string().uuid(),
+  name: z.string().nullable(),
+  sfObject: SfObject,
+  sfRecordId: z.string(),
+  recordUrl: z.string().url().nullable(),
+  touchStatus: z.enum(['planned', 'held', 'queued', 'dialing', 'sent', 'failed', 'skipped']),
+  dueAt: z.string(),
+  attempts: z.number().int(),
+  lastBlockReason: z.string().nullable(),
+  aiCallId: z.string().uuid().nullable(),
+  callStatus: AiCallStatus.nullable(),
+  outcome: AiCallOutcome.nullable(),
+  summary: z.string().nullable(),
+  qualification: z.record(z.unknown()).nullable(),
+  durationSeconds: z.number().int().nullable(),
+  startedAt: z.string().nullable(),
+  enrollmentStatus: z.string(),
+  exitReason: z.string().nullable(),
+  /** Owner or admin: may open the transcript. */
+  mayReadTranscript: z.boolean(),
+});
+export type AiCallResult = z.infer<typeof AiCallResult>;
+
+export const AiCallResultsResponse = z.object({ items: z.array(AiCallResult), nextCursor: z.string().nullable() });
+export type AiCallResultsResponse = z.infer<typeof AiCallResultsResponse>;
+
+export const TranscriptLine = z.object({ role: z.enum(['agent', 'caller', 'system']), text: z.string(), at: z.string().nullable() });
+export type TranscriptLine = z.infer<typeof TranscriptLine>;
+export const AiCallTranscript = z.object({ aiCallId: z.string().uuid(), lines: z.array(TranscriptLine) });
+export type AiCallTranscript = z.infer<typeof AiCallTranscript>;
+
+/** POST /api/ai-calls/test (admin): "Test call to my phone". */
+export const TestCallRequest = z.object({ to: z.string().min(7).max(20) });
+export type TestCallRequest = z.infer<typeof TestCallRequest>;
+export const TestCallResponse = InternalAiCallResponse;
+export type TestCallResponse = InternalAiCallResponse;
