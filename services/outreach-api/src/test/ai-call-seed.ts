@@ -1,6 +1,7 @@
 /** Row builders for the AI call pacer and results tests (real Postgres): a released lead with its planned touch, and ai_calls rows. */
 import { randomUUID } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
+import type { InternalAiCallResponse } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { seedPlanLead, seedUser, type PlanLead, type PlanLeadOptions } from './call-plan-seed.js';
 
@@ -63,6 +64,27 @@ export async function seedAiCall(
     .values({ id: randomUUID(), orgId, startedBy, toE164: '+15125550100', status: 'queued', ...over })
     .returning({ id: schema.aiCalls.id });
   return row!.id;
+}
+
+/**
+ * An ai_call_requests row as cti-api's request store writes it (request-store.ts): reserved before anything is dialed,
+ * `response` null while the request is in flight, then the stored answer.
+ */
+export async function seedAiCallRequest(
+  db: Db,
+  a: { orgId: string; key: string; userId: string; response?: InternalAiCallResponse | null; createdAt?: Date; updatedAt?: Date; hash?: string },
+): Promise<void> {
+  const response = a.response ?? null;
+  await db.insert(schema.aiCallRequests).values({
+    orgId: a.orgId,
+    idempotencyKey: a.key,
+    requestHash: a.hash ?? 'a-different-body',
+    userId: a.userId,
+    aiCallId: response?.aiCallId ?? null,
+    response,
+    ...(a.createdAt ? { createdAt: a.createdAt } : {}),
+    ...(a.updatedAt ?? a.createdAt ? { updatedAt: a.updatedAt ?? a.createdAt } : {}),
+  });
 }
 
 export async function touchById(db: Db, id: string) {

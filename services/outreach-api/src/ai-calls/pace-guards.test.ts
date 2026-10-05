@@ -6,7 +6,7 @@ import { SalesforceApiError } from '@cti/salesforce';
 import { approvePlan } from '../call-plans/decisions.js';
 import { releaseApprovedCalls } from '../call-plans/release.js';
 import { resetCallStageAfterDismiss } from '../call-plans/store.js';
-import { enrollmentById, planById, seedAiCall, seedReleasedLead, touchById } from '../test/ai-call-seed.js';
+import { enrollmentById, planById, seedAiCall, seedAiCallRequest, seedReleasedLead, selectLead, touchById } from '../test/ai-call-seed.js';
 import { ctxOf, seedPlanLead, seedUser } from '../test/call-plan-seed.js';
 import { paceHarness } from '../test/fake-pace.js';
 import { createTestDb, pgLane } from '../test/pg.js';
@@ -218,6 +218,72 @@ describe.skipIf(!pgLane)('placeDueAiCalls guards (real Postgres)', () => {
       expect(h.cti.requests).toEqual([]);
       expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'skipped', skipReason: 'not_claimable', attempts: 0 });
       expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'active', callStage: 'approved' });
+    });
+  });
+
+  describe('round 2 I-2: a kept key that already placed a call is never followed by a second call', () => {
+    const aiCallOf = async (sfRecordId: string) => {
+      const [row] = await db.select({ id: schema.aiCalls.id }).from(schema.aiCalls).where(eq(schema.aiCalls.sfRecordId, sfRecordId));
+      expect(row).toBeDefined();
+      return row!.id;
+    };
+
+    it('the answer is lost after cti-api placed the call, the lead is unticked for 2 h: the call is linked, and re-tick + "Call all approved" never calls again', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      const ctx = ctxOf(h.base.orgId, await seedUser(db, h.base.orgId), true);
+      h.cti.answers.push({ lostPlaced: true, createdAt: NOW });
+
+      expect((await h.run(NOW)).retried).toBe(1); // a timeout, as far as outreach-api knows
+      await db.execute(sql`delete from campaign_selections where campaign_id = ${h.base.campaignId}::uuid and sf_record_id = ${lead.sfRecordId}`);
+      for (let m = 10; m <= 130; m += 15) await h.run(at(NOW, m * MIN));
+      await selectLead(db, { orgId: h.base.orgId, campaignId: h.base.campaignId, sfRecordId: lead.sfRecordId });
+      await releaseApprovedCalls(db, ctx, h.base.campaignId, at(NOW, 131 * MIN));
+      await h.run(at(NOW, 132 * MIN));
+      await h.run(at(NOW, 24 * 60 * MIN));
+
+      expect(h.cti.requests).toHaveLength(1);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', aiCallId: await aiCallOf(lead.sfRecordId), triggerKey: null });
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'active', callStage: 'queued' });
+    });
+
+    it('M-1 path: cti-api placed the call but the tick died, a hold came in, was dismissed and the plan approved again: the call is linked, and the release makes no second touch', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      const ctx = ctxOf(h.base.orgId, await seedUser(db, h.base.orgId), true);
+      const claimedAt = at(NOW, -30 * MIN);
+      const claim = await claimAiTouch(db, lead.touchId, claimedAt);
+      const aiCallId = await seedAiCall(db, h.base.orgId, lead.approver, { sfRecordId: lead.sfRecordId, createdAt: claimedAt });
+      await seedAiCallRequest(db, { orgId: h.base.orgId, key: claim!.triggerKey, userId: lead.approver, response: { result: 'placed', aiCallId }, createdAt: claimedAt });
+      await db.update(schema.campaignEnrollments).set({ status: 'needs_review' }).where(eq(schema.campaignEnrollments.id, lead.enrollmentId));
+      await h.run(at(NOW, -10 * MIN)); // the reaper plans it again, keeping the key
+      await db.update(schema.campaignEnrollments).set({ status: 'active' }).where(eq(schema.campaignEnrollments.id, lead.enrollmentId));
+      await resetCallStageAfterDismiss(db, lead.enrollmentId);
+      await approvePlan(db, ctx, lead.enrollmentId, { version: (await planById(db, lead.planId!)).version }, NOW);
+
+      expect((await h.run(NOW)).placed).toBe(1);
+
+      expect(h.cti.requests).toEqual([]);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', aiCallId, triggerKey: null });
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'active', callStage: 'queued' });
+      expect((await releaseApprovedCalls(db, ctx, h.base.campaignId, NOW)).released).toBe(0);
+      await h.run(at(NOW, MIN));
+      expect(h.cti.requests).toEqual([]);
+    });
+
+    it('M-b: a kept key still in flight at cti-api is neither skipped nor counted as parked: it waits, keeping the key', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      const claim = await claimAiTouch(db, lead.touchId, at(NOW, -30 * MIN));
+      await db.update(schema.touches).set({ status: 'planned', dueAt: NOW }).where(eq(schema.touches.id, lead.touchId));
+      const reserved = at(NOW, -MIN);
+      await seedAiCallRequest(db, { orgId: h.base.orgId, key: claim!.triggerKey, userId: lead.approver, createdAt: at(NOW, -30 * MIN), updatedAt: reserved });
+      await db.update(schema.campaignEnrollments).set({ callStage: 'approved' }).where(eq(schema.campaignEnrollments.id, lead.enrollmentId));
+
+      expect(await h.run(NOW)).toMatchObject({ parked: 0, deferred: 1, placed: 0 });
+
+      expect(h.cti.requests).toEqual([]);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', triggerKey: claim!.triggerKey, dueAt: at(reserved, IN_FLIGHT_RETRY_MS) });
     });
   });
 });

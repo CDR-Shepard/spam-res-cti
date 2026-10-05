@@ -17,9 +17,14 @@
  *    at `queued` (held and dismissed, then approved again: the old touch would block the release forever), or something
  *    else stopped the claim for NOT_CLAIMABLE_MAX_DEFERRALS refusals in a row. The touch is skipped; a lead still at `queued`
  *    with no other open touch goes back to `approved`, so "Call all approved" can make a fresh touch once it is callable.
+ *
+ * planNoLongerApproved and skipNotClaimable first ask what cti-api did with a key the touch kept (key-resolution.ts, round
+ * 2): a placed call is linked instead of skipped (a fresh touch would call the person again), and a request cti-api may
+ * still be handling leaves the touch and its key alone (`pending`). Only then is the touch skipped.
  */
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
+import { settleKeptKey } from './key-resolution.js';
 import type { ParkReason } from './pacing-rules.js';
 import { NOT_CLAIMABLE_REASON, skipTouch } from './touches.js';
 
@@ -65,9 +70,25 @@ export async function backToResearch(db: Db, t: { touchId: string; enrollmentId:
   });
 }
 
-export async function planNoLongerApproved(db: Db, t: { touchId: string; enrollmentId: string }, now: Date): Promise<void> {
-  await db.transaction(async (tx) => {
-    if (!(await skipTouch(tx as unknown as Db, t.touchId, PLAN_NOT_APPROVED_SKIP_REASON, now))) return;
+/**
+ * What a skip did to the touch: `skipped`; `placed` (its kept key had placed a call, now linked: not skipped); `pending`
+ * (cti-api may still be handling its kept key until `until`: left alone, key kept); `unchanged` (no longer planned).
+ */
+export type SkipOutcome = { kind: 'skipped' } | { kind: 'placed' } | { kind: 'pending'; until: Date } | { kind: 'unchanged' };
+
+/** Skips a planned touch unless its kept key says otherwise (see SkipOutcome). Run inside the caller's transaction. */
+async function skipUnlessKeyPlaced(tx: Db, touchId: string, reason: string, now: Date): Promise<SkipOutcome> {
+  const kept = await settleKeptKey(tx, touchId, now);
+  if (kept.kind === 'pending') return { kind: 'pending', until: kept.until };
+  if (kept.kind === 'placed') return { kind: 'placed' };
+  return (await skipTouch(tx, touchId, reason, now)) ? { kind: 'skipped' } : { kind: 'unchanged' };
+}
+
+export async function planNoLongerApproved(db: Db, t: { touchId: string; enrollmentId: string }, now: Date): Promise<SkipOutcome> {
+  return db.transaction(async (tx) => {
+    const out = await skipUnlessKeyPlaced(tx as unknown as Db, t.touchId, PLAN_NOT_APPROVED_SKIP_REASON, now);
+    // A linked call leaves the lead with no approved plan just the same: it goes back to review or research as after a skip.
+    if (out.kind !== 'skipped' && out.kind !== 'placed') return out;
     await tx.execute(sql`
       update campaign_enrollments e
       set call_stage = case
@@ -76,12 +97,15 @@ export async function planNoLongerApproved(db: Db, t: { touchId: string; enrollm
           updated_at = ${now.toISOString()}::timestamptz
       where e.id = ${t.enrollmentId}::uuid and e.status = 'active' and e.call_stage = 'queued'
         and not exists (select 1 from call_plans p where p.enrollment_id = e.id and p.status = 'approved')`);
+    return out;
   });
 }
 
-export async function skipNotClaimable(db: Db, t: { touchId: string; enrollmentId: string }, now: Date): Promise<void> {
-  await db.transaction(async (tx) => {
-    if (!(await skipTouch(tx as unknown as Db, t.touchId, NOT_CLAIMABLE_REASON, now))) return;
+export async function skipNotClaimable(db: Db, t: { touchId: string; enrollmentId: string }, now: Date): Promise<SkipOutcome> {
+  return db.transaction(async (tx) => {
+    const out = await skipUnlessKeyPlaced(tx as unknown as Db, t.touchId, NOT_CLAIMABLE_REASON, now);
+    // A linked call keeps the lead at `queued` (put back there if it was `approved`): the results tick takes it from here.
+    if (out.kind !== 'skipped') return out;
     await tx.execute(sql`
       update campaign_enrollments e
       set call_stage = 'approved', updated_at = ${now.toISOString()}::timestamptz
@@ -89,5 +113,6 @@ export async function skipNotClaimable(db: Db, t: { touchId: string; enrollmentI
         and exists (select 1 from call_plans p where p.enrollment_id = e.id and p.status = 'approved')
         and not exists (
           select 1 from touches x where x.enrollment_id = e.id and x.channel = 'ai_call' and x.status in ('planned', 'held', 'queued', 'dialing'))`);
+    return out;
   });
 }

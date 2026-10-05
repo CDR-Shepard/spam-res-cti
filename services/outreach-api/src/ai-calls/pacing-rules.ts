@@ -56,6 +56,8 @@ export const SYSTEM_REASONS: ReadonlySet<string> = new Set([
 /**
  * M-3: cti-api answered 409, so it already holds or answered this key for another request body. The same key can only meet
  * 409 again: the key is dropped and the retry goes once with a new one. The attempt counts (it is about this touch).
+ * Round 2: pace.ts first reads cti-api's request store for the key (key-resolution.ts), so a conflict reaches decideTrigger
+ * only when cti-api placed no call under it; a stored answer or a request still in flight is decided as that instead.
  */
 export const IDEMPOTENCY_CONFLICT = 'idempotency_conflict';
 

@@ -13,9 +13,10 @@
  * doubt holds: a flag that no longer validates, or a dismissal that points at a missing
  * triage row, still holds the person for a human.
  */
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import { DoNotContactCategory, TriageResult } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
+import { settleKeptKeys } from '../ai-calls/key-resolution.js';
 import { OPEN_TOUCH_STATUSES } from './enroll.js';
 
 export interface DncFlag {
@@ -59,6 +60,12 @@ export async function pendingDncFlag(db: Db, crmRecordId: string): Promise<DncFl
  * Moves the target's ACTIVE enrollments to `needs_review` with the flag, and skips their
  * touches that have not started (`planned|held|queued`; a `dialing` touch is left to
  * reconciliation). Run it inside the caller's transaction. Returns the enrollments held.
+ *
+ * A planned AI call touch that kept its idempotency key may already have reached cti-api
+ * (final fixes round 2): it is asked first (settleKeptKeys). A call cti-api placed under the
+ * key is linked, never skipped (after the hold is dismissed, a fresh touch would call the
+ * person again); a request cti-api may still be handling is left planned with its key, as a
+ * `dialing` touch is, and the pacer resolves it once the hold is over.
  */
 export async function holdForReview(
   tx: Db,
@@ -83,10 +90,17 @@ export async function holdForReview(
     .returning({ id: e.id });
   const ids = held.map((h) => h.id);
   if (ids.length > 0) {
+    const inFlight = await settleKeptKeys(tx, ids, now);
     await tx
       .update(schema.touches)
       .set({ status: 'skipped', skipReason: NEEDS_REVIEW_SKIP_REASON, updatedAt: now })
-      .where(and(inArray(schema.touches.enrollmentId, ids), inArray(schema.touches.status, [...OPEN_TOUCH_STATUSES])));
+      .where(
+        and(
+          inArray(schema.touches.enrollmentId, ids),
+          inArray(schema.touches.status, [...OPEN_TOUCH_STATUSES]),
+          inFlight.length > 0 ? notInArray(schema.touches.id, inFlight) : undefined,
+        ),
+      );
   }
   return ids;
 }

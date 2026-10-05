@@ -6,7 +6,7 @@ import type { SalesforceClient } from '@cti/salesforce';
 import type { CtiClient } from '../ai-calls/cti-client.js';
 import { placeDueAiCalls } from '../ai-calls/pace.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
-import { seedAiCall } from './ai-call-seed.js';
+import { seedAiCall, seedAiCallRequest } from './ai-call-seed.js';
 import { seedAiCallCampaign } from './call-plan-seed.js';
 import { seedConnection, TEST_FIELD_MAP } from './outreach-fixtures.js';
 
@@ -50,9 +50,18 @@ export function fakePaceSalesforce(): { client: SalesforceClient; state: FakeSfS
 export interface FakeCti {
   cti: CtiClient;
   requests: InternalAiCallRequest[];
-  /** Answers in order; when they run out every trigger is placed. A `blocked`/`placed`/`failed` result writes its ai_calls row. */
+  /**
+   * Answers in order; when they run out every trigger is placed. A `blocked`/`placed`/`failed` result writes its ai_calls row.
+   * `lostPlaced`: cti-api reserved the key, placed the call and stored `placed` under the key (ai_calls and ai_call_requests
+   * rows), but the answer never reached outreach-api (a timeout).
+   */
   answers: Array<
-    { result: 'placed' } | { result: 'blocked'; reason: string } | { result: 'failed'; reason: string; withCall?: boolean } | { transport: string } | { conflict: true }
+    | { result: 'placed' }
+    | { result: 'blocked'; reason: string }
+    | { result: 'failed'; reason: string; withCall?: boolean }
+    | { transport: string }
+    | { conflict: true }
+    | { lostPlaced: true; createdAt: Date }
   >;
   /** What `availability()` answers (null: cti-api did not answer); on with no test numbers unless a test says otherwise. */
   available: AiAvailability | null;
@@ -72,6 +81,13 @@ export function fakeCti(db: Db): FakeCti {
         const a = fake.answers.shift() ?? { result: 'placed' as const };
         if ('transport' in a) return { kind: 'transport', error: a.transport };
         if ('conflict' in a) return { kind: 'conflict' };
+        if ('lostPlaced' in a) {
+          const target = req.target.kind === 'record' ? { sfObject: req.target.objectType, sfRecordId: req.target.recordId } : {};
+          const aiCallId = await seedAiCall(db, req.orgId, req.userId, { status: 'queued', createdAt: a.createdAt, ...target });
+          const response = { result: 'placed', aiCallId } as InternalAiCallResponse;
+          await seedAiCallRequest(db, { orgId: req.orgId, key: req.idempotencyKey, userId: req.userId, response, createdAt: a.createdAt });
+          return { kind: 'transport', error: 'timeout' };
+        }
         if (a.result === 'failed' && !a.withCall) return { kind: 'response', response: { result: 'failed', reason: a.reason, aiCallId: null } as InternalAiCallResponse };
         const status = a.result === 'placed' ? 'queued' : a.result;
         const aiCallId = await seedAiCall(db, req.orgId, req.userId, { status, ...(req.target.kind === 'record' ? { sfObject: req.target.objectType, sfRecordId: req.target.recordId } : {}) });

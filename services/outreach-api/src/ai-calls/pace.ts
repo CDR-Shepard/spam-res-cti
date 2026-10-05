@@ -10,16 +10,22 @@
  * must still be the approved plan and pass the voice agent's text check; outside the window
  * the touch waits (nothing claimed); new Salesforce activity since the research sends the lead
  * back to research (CF-1); then the claim (CF-2, CF-10, CF-11), the trigger, and the answer.
+ *
+ * Round 2: a touch that kept its idempotency key may already have reached cti-api. Before anything else, and so before any
+ * path could drop that key, cti-api's request store is read (key-resolution.ts): a call placed under the key is linked (the
+ * touch is sent, nothing is triggered), and a request cti-api may still be handling waits, keeping its key. A 409 is resolved
+ * the same way before a new key is minted.
  */
 import type { Db } from '@cti/db';
 import { holdIfFlagged } from '../campaigns/dnc-hold.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
-import type { CtiClient } from './cti-client.js';
+import type { CtiClient, TriggerOutcome } from './cti-client.js';
+import { resolveKey, settleKeptKey } from './key-resolution.js';
 import { decideTrigger, windowCheck, type TriggerDecision } from './pacing-rules.js';
 import { loadOrgTick, type OrgTick, type PlanForCall } from './pace-context.js';
 import { renderPlanForAgent } from './plan-text.js';
-import { backToResearch, parkPlan, planNoLongerApproved, skipNotClaimable } from './stage.js';
+import { backToResearch, parkPlan, planNoLongerApproved, skipNotClaimable, type SkipOutcome } from './stage.js';
 import {
   claimAiTouch,
   deferNotClaimable,
@@ -107,8 +113,53 @@ async function placeForOrg(deps: PaceDeps, orgId: string, counts: PaceCounts, in
   }
 }
 
+/** `touches.last_block_reason` of a touch waiting because cti-api may still be handling its kept key. */
+const IN_FLIGHT_REASON = 'in_flight';
+
+/** The tick's word for a skip that asked about a kept key first (stage.ts SkipOutcome). M-b: nothing changed is not `parked`. */
+async function skipResult(deps: PaceDeps, c: AiTouchCandidate, out: SkipOutcome): Promise<Result> {
+  switch (out.kind) {
+    case 'skipped':
+      return 'parked';
+    case 'placed':
+      return 'placed';
+    case 'pending':
+      await deferTouch(deps.db, c.touchId, out.until, IN_FLIGHT_REASON);
+      return 'deferred';
+    case 'unchanged':
+      return 'deferred';
+  }
+}
+
+/**
+ * Round 2: a kept key is resolved before any path below can drop it. Placed: linked (the touch is sent). Pending: the touch
+ * waits, keeping its key, until cti-api would take the request over. Otherwise (never reached cti-api, or refused) null:
+ * the touch goes on, and a claim re-sends the same key, so cti-api replays a stored refusal.
+ */
+async function keptKeyFirst(deps: PaceDeps, c: AiTouchCandidate): Promise<Result | null> {
+  if (c.triggerKey === null) return null;
+  const kept = await settleKeptKey(deps.db, c.touchId, deps.now);
+  if (kept.kind === 'free') return null;
+  deps.log.info({ orgId: c.orgId, touchId: c.touchId, keptKey: kept.kind }, 'ai_call.place: kept key resolved in cti-api\'s request store');
+  return skipResult(deps, c, kept.kind === 'placed' ? { kind: 'placed' } : kept);
+}
+
+/**
+ * M-3 and round 2: a 409 means cti-api holds this key for another request body, which may have placed a call. Its request
+ * store says what happened: a stored (or rebuilt) answer is applied as if the trigger had returned it; a request still in
+ * flight is `in_flight` (the key is kept); only a key cti-api has no call for is dropped for a new one.
+ */
+async function conflictOutcome(deps: PaceDeps, c: AiTouchCandidate, key: string): Promise<{ outcome: TriggerOutcome; resolved: string }> {
+  const r = await resolveKey(deps.db, { orgId: c.orgId, key, sfRecordId: c.sfRecordId }, deps.now);
+  if (r.kind === 'answered') return { outcome: { kind: 'response', response: r.answer }, resolved: 'answered' };
+  if (r.kind === 'pending') return { outcome: { kind: 'response', response: { result: 'failed', reason: 'in_flight', aiCallId: null } }, resolved: 'pending' };
+  return { outcome: { kind: 'conflict' }, resolved: 'none' };
+}
+
 async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Promise<Result> {
   const { db, now } = deps;
+  const kept = await keptKeyFirst(deps, c);
+  if (kept) return kept;
   if (await holdIfFlagged(db, { enrollmentId: c.enrollmentId, crmRecordId: c.crmRecordId, now })) return 'held';
   const fresh = tick.fresh(c.sfRecordId);
   if (!fresh) return finish(deps, c, 'record_not_found');
@@ -118,8 +169,7 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
   if (fresh.consentAiCall !== true) return finish(deps, c, 'no_consent');
   const plan: PlanForCall | null = c.callPlanId ? (tick.plans.get(c.callPlanId) ?? null) : null;
   if (!plan || plan.status !== 'approved' || plan.enrollmentId !== c.enrollmentId || !plan.plan) {
-    await planNoLongerApproved(db, c, now);
-    return 'parked';
+    return skipResult(deps, c, await planNoLongerApproved(db, c, now));
   }
   const rendered = renderPlanForAgent(plan.plan);
   if (!rendered.ok) {
@@ -143,17 +193,24 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
   }
   const claim = await claimAiTouch(db, c.touchId, now);
   if (!claim) return refused(deps, c);
-  const outcome = await deps.cti.trigger({
+  const answered = await deps.cti.trigger({
     orgId: c.orgId,
     userId: c.requestedBy,
     idempotencyKey: claim.triggerKey,
     target: { kind: 'record', objectType: c.sfObject, recordId: c.sfRecordId, planText: rendered.text },
   });
+  const conflict = answered.kind === 'conflict' ? await conflictOutcome(deps, c, claim.triggerKey) : null;
+  const outcome = conflict?.outcome ?? answered;
   const decision = decideTrigger(outcome, claim.attempts, to, now);
   // Never the plan text or a phone number. A transport failure names what went wrong (F1): "HTTP <status> [cti-api's error
   // code]", "timeout", "network" or "bad_response" (cti-client.ts builds it; the code is [a-z_] only, never body text).
+  // A 409 says what cti-api's request store had under the key: answered, pending or none.
   const transport = outcome.kind === 'transport' ? { transport: outcome.error } : {};
-  deps.log.info({ orgId: c.orgId, touchId: c.touchId, attempt: claim.attempts, result: resultWords(decision), ...transport }, 'ai_call.place: trigger answered');
+  const conflictWords = conflict ? { conflict: conflict.resolved } : {};
+  deps.log.info(
+    { orgId: c.orgId, touchId: c.touchId, attempt: claim.attempts, result: resultWords(decision), ...transport, ...conflictWords },
+    'ai_call.place: trigger answered',
+  );
   return apply(deps, c, plan.id, decision);
 }
 
@@ -167,14 +224,10 @@ async function refused(deps: PaceDeps, c: AiTouchCandidate): Promise<Result> {
   const { db, now } = deps;
   const state = await refusedTouchState(db, c.touchId);
   if (!state) return 'deferred';
-  if (!state.planApproved) {
-    await planNoLongerApproved(db, c, now);
-    return 'parked';
-  }
+  if (!state.planApproved) return skipResult(deps, c, await planNoLongerApproved(db, c, now));
   const limit = now.getTime() - NOT_CLAIMABLE_MAX_DEFERRALS * NOT_CLAIMABLE_DEFER_MS;
   if (!state.queued || (state.refusedSince !== null && state.refusedSince.getTime() <= limit)) {
-    await skipNotClaimable(db, c, now);
-    return 'parked';
+    return skipResult(deps, c, await skipNotClaimable(db, c, now));
   }
   await deferNotClaimable(db, c.touchId, new Date(now.getTime() + NOT_CLAIMABLE_DEFER_MS), now);
   return 'deferred';

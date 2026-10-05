@@ -36,6 +36,8 @@ export interface AiTouchCandidate {
   attempts: number;
   callPlanId: string | null;
   requestedBy: string | null;
+  /** The idempotency key kept from a trigger that may have reached cti-api (transport, in_flight, reaped); null otherwise. */
+  triggerKey: string | null;
   phones: Array<{ field: string; e164: string }>;
   /** No earlier ai_call touch of the enrollment was sent: the plan's preferred window applies to its first trigger. */
   firstAiTouch: boolean;
@@ -70,7 +72,7 @@ export async function dueAiCallTouches(db: Db, orgId: string, now: Date, limit: 
   const result = await db.execute(sql`
     select t.id as "touchId", t.org_id as "orgId", e.campaign_id as "campaignId", t.enrollment_id as "enrollmentId",
            e.crm_record_id as "crmRecordId", r.sf_object as "sfObject", r.sf_record_id as "sfRecordId", t.seq, t.attempts,
-           t.call_plan_id as "callPlanId", t.requested_by as "requestedBy", r.phones,
+           t.call_plan_id as "callPlanId", t.requested_by as "requestedBy", t.trigger_key as "triggerKey", r.phones,
            not exists (
              select 1 from touches x where x.enrollment_id = t.enrollment_id and x.channel = 'ai_call' and x.status = 'sent' and x.id <> t.id
            ) as "firstAiTouch"

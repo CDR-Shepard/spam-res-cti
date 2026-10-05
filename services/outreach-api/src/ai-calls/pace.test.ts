@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { EditableCallPlan } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { SalesforceAuthError } from '@cti/salesforce';
-import { enrollmentById, planById, seedAiCall, seedReleasedLead, touchById } from '../test/ai-call-seed.js';
+import { enrollmentById, planById, seedAiCall, seedAiCallRequest, seedReleasedLead, touchById } from '../test/ai-call-seed.js';
 import { validPlan } from '../test/call-plan-fixtures.js';
 import { CONSENT_FIELD, paceHarness } from '../test/fake-pace.js';
 import { placeDueAiCalls } from './pace.js';
@@ -181,6 +181,65 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
 
     expect((await h.run(t.dueAt)).placed).toBe(1);
     expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([keyOf(lead.touchId, 1), keyOf(lead.touchId, 2, t.dueAt)]);
+  });
+
+  describe('round 2 I-1: a 409 asks cti-api\'s request store what happened under the key before a new key is minted', () => {
+    const EARLIER = at(NOW, -30 * MIN);
+
+    it('a stored placed answer: the touch is sent and linked to that call, and no new trigger goes', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      const aiCallId = await seedAiCall(db, h.base.orgId, lead.approver, { sfRecordId: lead.sfRecordId, createdAt: EARLIER });
+      await seedAiCallRequest(db, { orgId: h.base.orgId, key: keyOf(lead.touchId, 1), userId: lead.approver, response: { result: 'placed', aiCallId }, createdAt: EARLIER });
+      h.cti.answers.push({ conflict: true });
+
+      expect((await h.run(NOW)).placed).toBe(1);
+
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', aiCallId, triggerKey: null, attempts: 1 });
+      await h.run(at(NOW, 60 * MIN));
+      expect(h.cti.requests).toHaveLength(1);
+    });
+
+    it('a stale reservation with no answer and an ai_calls row since it: placed with that call, and no new trigger goes', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      await seedAiCallRequest(db, { orgId: h.base.orgId, key: keyOf(lead.touchId, 1), userId: lead.approver, createdAt: EARLIER });
+      const aiCallId = await seedAiCall(db, h.base.orgId, lead.approver, { sfRecordId: lead.sfRecordId, createdAt: at(EARLIER, MIN), callSid: 'CA1' });
+      h.cti.answers.push({ conflict: true });
+
+      expect((await h.run(NOW)).placed).toBe(1);
+
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', aiCallId, triggerKey: null });
+      await h.run(at(NOW, 60 * MIN));
+      expect(h.cti.requests).toHaveLength(1);
+    });
+
+    it('a stale reservation with no answer and no call: exactly one new key', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      await seedAiCallRequest(db, { orgId: h.base.orgId, key: keyOf(lead.touchId, 1), userId: lead.approver, createdAt: EARLIER });
+      h.cti.answers.push({ conflict: true });
+
+      expect((await h.run(NOW)).retried).toBe(1);
+      const t = await touchById(db, lead.touchId);
+      expect(t).toMatchObject({ status: 'planned', triggerKey: null, lastBlockReason: 'idempotency_conflict', attempts: 1 });
+
+      expect((await h.run(t.dueAt)).placed).toBe(1);
+      expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([keyOf(lead.touchId, 1), keyOf(lead.touchId, 2, t.dueAt)]);
+    });
+
+    it('a reservation still in flight: the key is kept and asked again once it can be stale (as in_flight)', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      await seedAiCallRequest(db, { orgId: h.base.orgId, key: keyOf(lead.touchId, 1), userId: lead.approver, createdAt: EARLIER, updatedAt: at(NOW, -MIN) });
+      h.cti.answers.push({ conflict: true });
+
+      expect((await h.run(NOW)).retried).toBe(1);
+
+      const t = await touchById(db, lead.touchId);
+      expect(t).toMatchObject({ status: 'planned', triggerKey: keyOf(lead.touchId, 1), lastBlockReason: 'in_flight', attempts: 1 });
+      expect(t.dueAt.getTime() - NOW.getTime()).toBeGreaterThanOrEqual(10 * MIN);
+    });
   });
 
   it('9: a retryable failure on the eighth attempt gives up: exit ai_call_gave_up', async () => {

@@ -19,7 +19,7 @@ export const TRIGGER_TIMEOUT_MS = 20_000;
 export type TriggerOutcome =
   | { kind: 'response'; response: InternalAiCallResponse }
   | { kind: 'transport'; error: string }
-  /** HTTP 409 idempotency_conflict: the key is cti-api's already, for a different body. The pacer retries with a new key. */
+  /** HTTP 409 idempotency_conflict: the key is cti-api's already, for a different body. The pacer asks cti-api's request store what happened under it before it ever mints a new key. */
   | { kind: 'conflict' };
 
 export interface CtiClient {
