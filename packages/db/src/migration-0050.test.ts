@@ -23,6 +23,10 @@ const statements = raw
   .filter((s) => s.length > 0);
 
 describe('migration 0050_ai_calls', () => {
+  it('starts with the lock_timeout guard (FKs lock the hot organizations and users tables)', () => {
+    expect(statements[0]).toBe("SET LOCAL lock_timeout = '5s'");
+  });
+
   it('creates ai_calls idempotently with every column', () => {
     const create = statements.find((s) => s.startsWith('CREATE TABLE'));
     expect(create).toMatch(/^CREATE TABLE IF NOT EXISTS "ai_calls" \(/);

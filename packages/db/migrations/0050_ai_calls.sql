@@ -19,6 +19,11 @@
 --   cti_call_id      The calls row this call produced.
 -- =============================================================================
 
+-- organizations and users are hot tables (FKs lock them): fail fast rather than
+-- queue behind a conflicting lock (0045's rule; migrate-runner wraps each file
+-- in one transaction, so SET LOCAL scopes to this file).
+SET LOCAL lock_timeout = '5s';
+
 CREATE TABLE IF NOT EXISTS "ai_calls" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   "org_id" uuid NOT NULL REFERENCES "organizations"("id"),
