@@ -73,6 +73,21 @@ describe.skipIf(!pgLane)('review decisions (real Postgres)', () => {
     expect(keys.rows[0].n).toBe(0);
   });
 
+  it('an onConfirmed failure rolls back the opt-outs and the exit, leaving the item waiting for review', async () => {
+    const { orgId, enrollmentId } = await seedFlagged();
+    state.session = { userId: randomUUID(), orgId, email: 'admin@gg.co', isAdmin: true, powerDialerEnabled: false, kind: 'human', isSuperAdmin: false };
+    onConfirmed.mockRejectedValueOnce(new Error('outbox unavailable'));
+
+    const res = await app.inject({ method: 'POST', url: `/api/review/${enrollmentId}`, headers: { authorization: 'Bearer t' }, payload: { decision: 'confirm' } });
+
+    expect(res.statusCode).toBe(500);
+    expect((await t.pool.query(`select count(*)::int as n from opt_outs where org_id = $1`, [orgId])).rows[0].n).toBe(0);
+    const enrollment = await t.pool.query(`select status, exit_reason from campaign_enrollments where id = $1`, [enrollmentId]);
+    expect(enrollment.rows[0]).toEqual({ status: 'needs_review', exit_reason: null });
+    const keys = await t.pool.query(`select count(*)::int as n from enrollment_contact_keys where enrollment_id = $1 and active`, [enrollmentId]);
+    expect(keys.rows[0].n).toBe(2);
+  });
+
   it('dismiss puts the enrollment back in the planner queue', async () => {
     const { orgId, enrollmentId } = await seedFlagged();
     state.session = { userId: randomUUID(), orgId, email: 'admin@gg.co', isAdmin: true, powerDialerEnabled: false, kind: 'human', isSuperAdmin: false };

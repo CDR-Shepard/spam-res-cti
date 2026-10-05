@@ -10,7 +10,7 @@
 import { and, desc, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { DoNotContactCategory, ReviewDecision, type NeedsReviewItem, type NeedsReviewResponse } from '@cti/contracts';
+import { DoNotContactCategory, ReviewDecision, SfObject, type NeedsReviewItem, type NeedsReviewResponse } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { exitEnrollment } from '../campaigns/enroll.js';
 import { sendError } from '../http/errors.js';
@@ -26,6 +26,12 @@ export interface ReviewRouteDeps {
   db: Db;
   /** Runs inside the confirm transaction; 1B enqueues the Salesforce DoNotCall/HasOptedOutOfEmail write here. */
   onConfirmed?: (args: ConfirmedDoNotContact, tx: Db) => Promise<void>;
+  /** Where data-quality warnings go (ids only, never phone numbers); defaults to the request logger. */
+  log?: ReviewLog;
+}
+
+export interface ReviewLog {
+  warn(fields: Record<string, unknown>, message: string): void;
 }
 
 export const REVIEW_LIST_LIMIT = 200;
@@ -33,14 +39,33 @@ export const REVIEW_LIST_LIMIT = 200;
 export const REVIEW_OPT_OUT_SOURCE = 'do_not_contact_review';
 export const CONFIRMED_EXIT_REASON = 'do_not_contact_confirmed';
 
-const Phones = z.array(z.object({ field: z.string(), e164: z.string() }));
+const PhoneEntry = z.object({ field: z.string(), e164: z.string().regex(/^\+[1-9]\d{6,14}$/) });
 const EnrollmentParams = z.object({ enrollmentId: z.string().uuid() });
 
 const e = schema.campaignEnrollments;
 const r = schema.crmRecords;
 const c = schema.campaigns;
 
+/** For display only: an unknown object shows as a Lead. `confirm` never guesses (see `knownSfObject`). */
 const asSfObject = (value: string): 'Lead' | 'Opportunity' => (value === 'Opportunity' ? 'Opportunity' : 'Lead');
+
+function knownSfObject(value: string): 'Lead' | 'Opportunity' | null {
+  const parsed = SfObject.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** The record's valid E.164 numbers, parsed entry by entry so one bad entry does not hide the others. */
+function validNumbers(raw: unknown): { numbers: string[]; dropped: number } {
+  const entries: unknown[] = Array.isArray(raw) ? raw : [];
+  const numbers = new Set<string>();
+  let dropped = 0;
+  for (const entry of entries) {
+    const parsed = PhoneEntry.safeParse(entry);
+    if (parsed.success) numbers.add(parsed.data.e164);
+    else dropped += 1;
+  }
+  return { numbers: [...numbers], dropped };
+}
 
 /** Salesforce Ids compare on their case-sensitive 15-character core, so a 15- and an 18-character form match. */
 function sameSfId(a: string | null, b: string | null): boolean {
@@ -151,9 +176,15 @@ async function dismiss(db: Db, orgId: string, enrollmentId: string, now: Date): 
   return resumed.length > 0;
 }
 
-async function confirm(deps: ReviewRouteDeps, ctx: RequestContext, target: ReviewTarget, now: Date): Promise<boolean> {
-  const parsed = Phones.safeParse(target.phones);
-  const numbers = [...new Set((parsed.success ? parsed.data : []).map((p) => p.e164))];
+async function confirm(deps: ReviewRouteDeps, log: ReviewLog, ctx: RequestContext, target: ReviewTarget, now: Date): Promise<boolean> {
+  const { numbers, dropped } = validNumbers(target.phones);
+  if (dropped > 0 || numbers.length === 0) {
+    log.warn({ orgId: ctx.orgId, enrollmentId: target.enrollmentId, dropped, kept: numbers.length }, 'review: phone entries dropped or none valid when confirming do-not-contact');
+  }
+  const sfObject = knownSfObject(target.sfObject);
+  if (!sfObject) {
+    log.warn({ orgId: ctx.orgId, enrollmentId: target.enrollmentId, sfObject: target.sfObject }, 'review: unknown sf_object; the Salesforce write-back is skipped');
+  }
   const note = `Do-not-contact confirmed by ${ctx.session.email}: ${target.category ?? 'other'} — "${target.quote ?? ''}"`.slice(0, 500);
   return deps.db.transaction(async (tx) => {
     // Compare-and-swap: of two concurrent confirms, only one gets the row.
@@ -170,7 +201,7 @@ async function confirm(deps: ReviewRouteDeps, ctx: RequestContext, target: Revie
         .onConflictDoNothing();
     }
     await exitEnrollment(tx, target.enrollmentId, CONFIRMED_EXIT_REASON);
-    await deps.onConfirmed?.({ orgId: ctx.orgId, sfObject: asSfObject(target.sfObject), sfRecordId: target.sfRecordId }, tx);
+    if (sfObject) await deps.onConfirmed?.({ orgId: ctx.orgId, sfObject, sfRecordId: target.sfRecordId }, tx);
     return true;
   });
 }
@@ -198,7 +229,7 @@ export async function registerReviewRoutes(app: FastifyInstance, deps: ReviewRou
     }
     if (target.status !== 'needs_review') return sendError(reply, 409, 'NOT_IN_REVIEW', 'This record is no longer waiting for review');
     const now = new Date();
-    const done = body.data.decision === 'dismiss' ? await dismiss(db, ctx.orgId, target.enrollmentId, now) : await confirm(deps, ctx, target, now);
+    const done = body.data.decision === 'dismiss' ? await dismiss(db, ctx.orgId, target.enrollmentId, now) : await confirm(deps, deps.log ?? req.log, ctx, target, now);
     // A concurrent decision got there first.
     if (!done) return sendError(reply, 409, 'NOT_IN_REVIEW', 'This record is no longer waiting for review');
     return reply.code(204).send();

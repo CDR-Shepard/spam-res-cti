@@ -105,6 +105,7 @@ function reviewDb(fx: { enrollments?: Row[]; connections?: Row[]; updateReturnin
 let app: FastifyInstance;
 let fixture: ReturnType<typeof reviewDb>;
 let onConfirmed: ReturnType<typeof vi.fn<NonNullable<ReviewRouteDeps['onConfirmed']>>>;
+const warn = vi.fn();
 
 async function build(fx: Parameters<typeof reviewDb>[0] = {}): Promise<FastifyInstance> {
   fixture = reviewDb(fx);
@@ -112,7 +113,7 @@ async function build(fx: Parameters<typeof reviewDb>[0] = {}): Promise<FastifyIn
   return buildApp({
     cfg: testConfig(),
     readiness: async () => ({ dbOk: true, jobsOk: true }),
-    apiRoutes: [(scope) => registerReviewRoutes(scope, { db: fixture.db, onConfirmed })],
+    apiRoutes: [(scope) => registerReviewRoutes(scope, { db: fixture.db, onConfirmed, log: { warn } })],
   });
 }
 
@@ -124,6 +125,7 @@ beforeEach(async () => {
   vi.setSystemTime(NOW);
   state.session = admin;
   enroll.exitEnrollment.mockClear();
+  warn.mockClear();
   app = await build({ enrollments: [reviewRow] });
 });
 afterEach(async () => {
@@ -248,6 +250,59 @@ describe('POST /api/review/:enrollmentId', () => {
     expect(res.statusCode).toBe(409);
     expect(enroll.exitEnrollment).not.toHaveBeenCalled();
     expect(onConfirmed).not.toHaveBeenCalled();
+  });
+
+  it('dismiss: 409 NOT_IN_REVIEW when another decision got there first (the guarded update matches no row)', async () => {
+    await app.close();
+    app = await build({ enrollments: [reviewRow], updateReturning: [] });
+    const res = await decide('dismiss');
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'NOT_IN_REVIEW' });
+    expect(fixture.writes).toHaveLength(1);
+    expect(render(fixture.captured.where.at(-1)).params).toEqual(expect.arrayContaining(['needs_review']));
+  });
+
+  it('confirm keeps the valid numbers of a malformed phones list and logs a warning without PII', async () => {
+    await app.close();
+    app = await build({
+      enrollments: [{ ...reviewRow, phones: [{ field: 'MobilePhone', e164: '+14155550101' }, { field: 'Phone' }, { field: 'Other', e164: '4155550102' }, 'junk'] }],
+    });
+    const res = await decide('confirm');
+    expect(res.statusCode).toBe(204);
+    const optOuts = fixture.writes.filter((w) => w.op === 'insert' && w.table === schema.optOuts);
+    expect((optOuts[0]!.values as Array<{ e164: string }>).map((v) => v.e164)).toEqual(['+14155550101']);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [fields, message] = warn.mock.calls[0]!;
+    expect(fields).toEqual({ orgId: 'O1', enrollmentId: ENROLLMENT_ID, dropped: 3, kept: 1 });
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/415|junk/);
+    expect(message).toEqual(expect.stringContaining('phone'));
+    expect(enroll.exitEnrollment).toHaveBeenCalledTimes(1);
+  });
+
+  it('confirm with no valid number (phones not even a list) still exits, and warns', async () => {
+    await app.close();
+    app = await build({ enrollments: [{ ...reviewRow, phones: 'oops' }] });
+    const res = await decide('confirm');
+    expect(res.statusCode).toBe(204);
+    expect(fixture.writes.some((w) => w.table === schema.optOuts)).toBe(false);
+    expect(warn).toHaveBeenCalledWith({ orgId: 'O1', enrollmentId: ENROLLMENT_ID, dropped: 0, kept: 0 }, expect.stringContaining('phone'));
+    expect(enroll.exitEnrollment).toHaveBeenCalledTimes(1);
+  });
+
+  it('a clean phones list logs nothing', async () => {
+    await decide('confirm');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('confirm on a record of an unknown Salesforce object does not call onConfirmed with a guessed type, but still suppresses and exits', async () => {
+    await app.close();
+    app = await build({ enrollments: [{ ...reviewRow, sfObject: 'Contact' }] });
+    const res = await decide('confirm');
+    expect(res.statusCode).toBe(204);
+    expect(onConfirmed).not.toHaveBeenCalled();
+    expect(fixture.writes.some((w) => w.table === schema.optOuts)).toBe(true);
+    expect(enroll.exitEnrollment).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith({ orgId: 'O1', enrollmentId: ENROLLMENT_ID, sfObject: 'Contact' }, expect.stringContaining('sf_object'));
   });
 
   it('409 NOT_IN_REVIEW when the enrollment is not waiting for review', async () => {
