@@ -1,0 +1,166 @@
+/**
+ * AI voice HTTP surface (`registerAiVoiceRoutes`, one line in server.ts):
+ *
+ *   POST /ai-calls                       start an AI call (rep session; 10/min per user)
+ *   GET  /ai-calls/availability          is AI calling on; test numbers (admins)
+ *   GET  /ai-calls?limit=20              recent calls (admin: org, rep: own)
+ *   GET  /ai-calls/:id                   one call in the session's org
+ *   POST /telephony/twilio/ai-voice/{amd,status,transfer-result}   (routes-webhooks.ts)
+ *   GET  /telephony/twilio/ai-voice/stream  (WebSocket, routes-stream.ts)
+ *
+ * Dependencies are injectable (`overrides`) so tests never touch Twilio,
+ * OpenAI, Salesforce or the database.
+ */
+import { createHash } from 'node:crypto';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { z } from 'zod';
+import { resolveSession } from '@cti/auth';
+import { getDb } from '@cti/db';
+import { aiVoiceAvailable, loadConfig, parseTestNumbers } from '../config.js';
+import type { Db } from '../dialer/pick-did.js';
+import { UUID_RE } from '../telephony/webhooks.js';
+import { gateAiCall } from './gate.js';
+import { loadAiCallRecord } from './record.js';
+import { registerAiVoiceStreamRoute } from './routes-stream.js';
+import { registerAiVoiceWebhooks } from './routes-webhooks.js';
+import { startAiCall, type StartDeps, type StartResult } from './service.js';
+import { defaultToolEffects, type ToolEffects } from './service-tools.js';
+import { drizzleAiCallStore, type AiCallStore } from './store.js';
+import type { StreamSessionDeps } from './stream-session.js';
+import { createAiVoiceTwilio, type AiVoiceTwilio } from './twilio.js';
+import { openRealtime } from './ws-adapter.js';
+
+export interface AiVoiceDeps {
+  store: AiCallStore;
+  twilio: AiVoiceTwilio;
+  effects: ToolEffects;
+  loadRecord: StartDeps['loadRecord'];
+  gate: StartDeps['gate'];
+  openRealtime: StreamSessionDeps['openRealtime'];
+  createBridge?: StreamSessionDeps['createBridge'];
+  db: () => Db;
+  now: () => Date;
+}
+
+const START_RATE_MAX = 10;
+const LIST_LIMIT_DEFAULT = 20;
+const LIST_LIMIT_MAX = 100;
+
+const StartBody = z.union([
+  z.object({
+    objectType: z.enum(['Lead', 'Opportunity', 'Contact']),
+    recordId: z.string().regex(/^[a-zA-Z0-9]{15,18}$/),
+  }),
+  z.object({ testTo: z.string().min(7).max(20) }),
+]);
+const ListQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(LIST_LIMIT_MAX).default(LIST_LIMIT_DEFAULT),
+});
+
+/** One rate bucket per bearer token (a rep's tabs share it), hashed; per IP without one. */
+export function aiCallRateKey(req: Pick<FastifyRequest, 'headers' | 'ip'>): string {
+  const auth = req.headers.authorization;
+  if (!auth) return `ai-call-ip:${req.ip}`;
+  const token = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : auth;
+  return `ai-call:${createHash('sha256').update(token).digest('hex')}`;
+}
+
+/** HTTP status + body for a start result. */
+export function startResponse(r: StartResult): { code: number; body: Record<string, unknown> } {
+  if (r.ok) return { code: 201, body: { aiCallId: r.aiCallId, status: r.status } };
+  switch (r.reason) {
+    case 'record_not_found':
+      return { code: 404, body: { error: r.reason } };
+    case 'salesforce_error':
+      return { code: 502, body: { error: r.reason } };
+    case 'gate_error':
+      return { code: 503, body: { error: r.reason } };
+    case 'twilio_error':
+      return { code: 502, body: { error: r.reason, aiCallId: r.aiCallId } };
+    default:
+      return { code: 409, body: { error: r.reason, aiCallId: r.aiCallId } };
+  }
+}
+
+function defaultDeps(): AiVoiceDeps {
+  const cfg = loadConfig();
+  return {
+    store: drizzleAiCallStore(getDb()),
+    twilio: createAiVoiceTwilio(cfg),
+    effects: defaultToolEffects,
+    loadRecord: (userId, objectType, recordId) => loadAiCallRecord(userId, objectType, recordId),
+    gate: gateAiCall,
+    openRealtime,
+    db: () => getDb(),
+    now: () => new Date(),
+  };
+}
+
+export async function registerAiVoiceRoutes(app: FastifyInstance, overrides: Partial<AiVoiceDeps> = {}): Promise<void> {
+  const deps: AiVoiceDeps = { ...defaultDeps(), ...overrides };
+  const log = app.log;
+
+  app.post(
+    '/ai-calls',
+    { config: { rateLimit: { max: START_RATE_MAX, timeWindow: '1 minute', keyGenerator: aiCallRateKey } } },
+    async (req, reply) => {
+      const session = await resolveSession(req.headers.authorization);
+      if (!session) return reply.code(401).send({ error: 'unauthorized' });
+      const body = StartBody.safeParse(req.body ?? {});
+      if (!body.success) return reply.code(400).send({ error: 'invalid_body' });
+      const result = await startAiCall({
+        db: deps.db(),
+        cfg: loadConfig(),
+        session,
+        target: body.data,
+        deps: { store: deps.store, twilio: deps.twilio, loadRecord: deps.loadRecord, gate: deps.gate, now: deps.now, log },
+      });
+      const { code, body: out } = startResponse(result);
+      return reply.code(code).send(out);
+    },
+  );
+
+  app.get('/ai-calls/availability', async (req, reply) => {
+    const session = await resolveSession(req.headers.authorization);
+    if (!session) return reply.code(401).send({ error: 'unauthorized' });
+    const cfg = loadConfig();
+    return {
+      available: aiVoiceAvailable(cfg),
+      testNumbers: session.isAdmin ? [...parseTestNumbers(cfg.AI_VOICE_TEST_NUMBERS)] : [],
+    };
+  });
+
+  app.get('/ai-calls', async (req, reply) => {
+    const session = await resolveSession(req.headers.authorization);
+    if (!session) return reply.code(401).send({ error: 'unauthorized' });
+    const q = ListQuery.safeParse(req.query ?? {});
+    if (!q.success) return reply.code(400).send({ error: 'invalid_query' });
+    const aiCalls = await deps.store.list(session.orgId, {
+      limit: q.data.limit,
+      ...(session.isAdmin ? {} : { startedBy: session.userId }),
+    });
+    return { aiCalls };
+  });
+
+  app.get('/ai-calls/:id', async (req, reply) => {
+    const session = await resolveSession(req.headers.authorization);
+    if (!session) return reply.code(401).send({ error: 'unauthorized' });
+    const id = (req.params as { id?: string }).id ?? '';
+    const row = UUID_RE.test(id) ? await deps.store.getInOrg(session.orgId, id) : null;
+    if (!row) return reply.code(404).send({ error: 'not_found' });
+    return row;
+  });
+
+  registerAiVoiceWebhooks(app, { store: deps.store, twilio: deps.twilio, effects: deps.effects, now: deps.now, log });
+
+  await registerAiVoiceStreamRoute(app, (req) => ({
+    cfg: loadConfig(),
+    store: deps.store,
+    twilio: deps.twilio,
+    effects: deps.effects,
+    openRealtime: deps.openRealtime,
+    ...(deps.createBridge ? { createBridge: deps.createBridge } : {}),
+    now: deps.now,
+    log: req.log,
+  }));
+}

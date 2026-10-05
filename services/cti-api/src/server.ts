@@ -19,6 +19,7 @@ import { registerRecordingRoutes } from './routes/recordings.js';
 import { registerDialerRoutes } from './routes/dialer.js';
 import { registerMobileRoutes } from './routes/mobile.js';
 import { registerCtiResetRoutes } from './routes/cti-reset.js';
+import { registerAiVoiceRoutes } from './ai-voice/routes.js';
 import { startSyncLoop } from './salesforce/sync.js';
 import { startFollowupLoop, startRetryNudgeLoop } from './salesforce/followup-worker.js';
 import { maybeStartNoAnswerChatterLoop } from './salesforce/no-answer-chatter-worker.js';
@@ -125,6 +126,7 @@ async function main(): Promise<void> {
   await registerRecordingRoutes(app);
   await registerDialerRoutes(app);
   await registerMobileRoutes(app);
+  await registerAiVoiceRoutes(app);
 
   const syncTimer = startSyncLoop(5000);
   const followupTimer = startFollowupLoop(5000);
