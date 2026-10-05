@@ -24,6 +24,13 @@
 -- in one transaction, so SET LOCAL scopes to this file).
 SET LOCAL lock_timeout = '5s';
 
+-- The AI voice agent's OWN caller-ID numbers: the AI dials only from 'ai_pool',
+-- and no rep path (click-to-dial, power dialer) ever dials from one. ADD VALUE
+-- runs inside migrate-runner's transaction (allowed on Postgres 12+), but the
+-- new value cannot be USED until this file commits, so nothing below may
+-- mention it. Admins move numbers into the pool afterwards (runbook ai-voice §5).
+ALTER TYPE number_kind ADD VALUE IF NOT EXISTS 'ai_pool';
+
 CREATE TABLE IF NOT EXISTS "ai_calls" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   "org_id" uuid NOT NULL REFERENCES "organizations"("id"),

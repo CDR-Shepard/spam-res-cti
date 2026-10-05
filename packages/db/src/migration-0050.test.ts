@@ -10,7 +10,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTableConfig } from 'drizzle-orm/pg-core';
-import { aiCalls } from './schema.js';
+import { aiCalls, numberKindEnum } from './schema.js';
+import { AI_NUMBER_KIND, NUMBER_KINDS, REP_NUMBER_KINDS } from './number-kinds.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(resolve(here, '../migrations/0050_ai_calls.sql'), 'utf8');
@@ -25,6 +26,22 @@ const statements = raw
 describe('migration 0050_ai_calls', () => {
   it('starts with the lock_timeout guard (FKs lock the hot organizations and users tables)', () => {
     expect(statements[0]).toBe("SET LOCAL lock_timeout = '5s'");
+  });
+
+  it('adds the ai_pool number kind second, right after the lock guard, and never uses it in the same file', () => {
+    // Postgres forbids USING an enum value in the transaction that added it
+    // (migrate-runner wraps the file in one), so 'ai_pool' appears exactly once.
+    expect(statements[1]).toBe("ALTER TYPE number_kind ADD VALUE IF NOT EXISTS 'ai_pool'");
+    expect(statements.filter((s) => s.includes('ai_pool'))).toHaveLength(1);
+  });
+
+  it('the schema enum carries ai_pool LAST (ADD VALUE appends; drizzle-kit compares order)', () => {
+    expect(numberKindEnum.enumValues).toEqual(['agent', 'dialer_pool', 'ai_pool']);
+    expect(NUMBER_KINDS).toEqual(numberKindEnum.enumValues);
+    expect(AI_NUMBER_KIND).toBe('ai_pool');
+    // A rep path may never dial from an AI number.
+    expect(REP_NUMBER_KINDS).toEqual(['agent', 'dialer_pool']);
+    expect(REP_NUMBER_KINDS).not.toContain(AI_NUMBER_KIND);
   });
 
   it('creates ai_calls idempotently with every column', () => {

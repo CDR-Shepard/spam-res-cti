@@ -53,6 +53,7 @@ export function getDb(): Db {
 }
 
 export { schema };
+export { AI_NUMBER_KIND, NUMBER_KINDS, REP_NUMBER_KINDS, type NumberKind } from './number-kinds.js';
 export type {
   Call,
   CallerDirectoryEntry,
