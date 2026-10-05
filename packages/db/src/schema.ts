@@ -1209,3 +1209,54 @@ export type OutboundNumber = typeof outboundNumbers.$inferSelect;
 export type CampaignConfig = typeof campaignConfigs.$inferSelect;
 export type SalesforceConnection = typeof salesforceConnections.$inferSelect;
 export type DialerHandoff = typeof dialerHandoffs.$inferSelect;
+
+// =============================================================================
+// AI voice calls (migration 0050; services/cti-api/src/ai-voice)
+// =============================================================================
+
+export const aiCalls = pgTable(
+  'ai_calls',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id),
+    /** The rep/admin who pressed the button. */
+    startedBy: uuid('started_by').notNull().references(() => users.id),
+    /** Who a transfer rings: record owner if mapped, else startedBy. */
+    handoffUserId: uuid('handoff_user_id').references(() => users.id),
+    /** Lead | Opportunity | Contact; NULL for a test call. */
+    sfObject: text('sf_object'),
+    sfRecordId: text('sf_record_id'),
+    toE164: text('to_e164').notNull(),
+    fromE164: text('from_e164'),
+    isTest: boolean('is_test').default(false).notNull(),
+    /** queued | ringing | in_progress | transferring | transferred | completed | failed | blocked (CHECK in SQL). */
+    status: text('status').default('queued').notNull(),
+    /** qualified_transferred | qualified_callback | not_interested | do_not_call | voicemail | no_answer | busy | failed | wrong_number | hung_up | transfer_failed | blocked. */
+    outcome: text('outcome'),
+    blockReason: text('block_reason'),
+    /** Twilio CallSid; NULL until placed. Partial unique index. */
+    callSid: text('call_sid'),
+    answeredBy: text('answered_by'),
+    qualification: jsonb('qualification').default(sql`'{}'::jsonb`).notNull(),
+    /** Array of { role: 'agent' | 'caller' | 'system', text, at }. */
+    transcript: jsonb('transcript').default(sql`'[]'::jsonb`).notNull(),
+    summary: text('summary'),
+    callbackAt: timestamp('callback_at', { withTimezone: true }),
+    sfTaskId: text('sf_task_id'),
+    /** The calls row this call produced. */
+    ctiCallId: uuid('cti_call_id'),
+    durationSeconds: integer('duration_seconds'),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    endedAt: timestamp('ended_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    orgCreatedIdx: index('ai_calls_org_created_idx').on(t.orgId, sql`${t.createdAt} desc`),
+    callSidUnique: uniqueIndex('ai_calls_call_sid_unique')
+      .on(t.callSid)
+      .where(sql`${t.callSid} is not null`),
+  }),
+);
+
+export type AiCallRow = typeof aiCalls.$inferSelect;
