@@ -1,3 +1,4 @@
+import { toE164 } from '@cti/phone';
 import { z } from 'zod';
 
 const schema = z.object({
@@ -181,9 +182,58 @@ const schema = z.object({
    * NO_ANSWER_CHATTER.
    */
   DIALER_TIME_TASKS: z.enum(['on', 'off']).default('on'),
+
+  /**
+   * AI voice calls (ai-voice/): OpenAI Realtime over a Twilio Media Stream.
+   * Available only when OPENAI_API_KEY is set (see aiVoiceAvailable). Strict
+   * enum like NO_ANSWER_CHATTER, so `false` / `0` fail the boot.
+   */
+  OPENAI_API_KEY: z.string().optional(),
+  /** Kill switch for AI voice calls. `off` = no AI call is placed or answered. */
+  AI_VOICE: z.enum(['on', 'off']).default('on'),
+  AI_VOICE_MODEL: z.string().default('gpt-realtime-2.1'),
+  /** Sent as session.reasoning.effort only for `gpt-realtime-2*` models. */
+  AI_VOICE_REASONING: z.enum(['minimal', 'low', 'medium', 'high']).default('low'),
+  AI_VOICE_VAD_EAGERNESS: z.enum(['low', 'medium', 'high', 'auto']).default('auto'),
+  AI_VOICE_VOICE: z.string().default('marin'),
+  AI_VOICE_AGENT_NAME: z.string().default('Alex'),
+  /**
+   * Comma-separated numbers an admin may AI-call without Salesforce consent and
+   * outside calling hours (own test phones only). Parse with parseTestNumbers.
+   */
+  AI_VOICE_TEST_NUMBERS: z.string().optional(),
+  /** Hard cap on one AI call's length, in seconds. */
+  AI_VOICE_MAX_CALL_SECONDS: z.coerce.number().int().positive().default(600),
+  /** Post-call transcript summaries (Anthropic). Optional. */
+  ANTHROPIC_API_KEY: z.string().optional(),
+  AI_SUMMARY_MODEL: z.string().default('claude-haiku-4-5-20251001'),
+  /**
+   * Global outreach kill switch, shared by name with outreach-api. `on` stops
+   * all outreach, including AI calls. Default `off`.
+   */
+  OUTREACH_KILL_SWITCH: z.enum(['on', 'off']).default('off'),
 });
 
 export type AppConfig = z.infer<typeof schema>;
+
+/** E.164-normalizes a comma-separated number list; invalid entries are dropped. */
+export function parseTestNumbers(raw: string | undefined): Set<string> {
+  const out = new Set<string>();
+  for (const part of (raw ?? '').split(',')) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const e164 = toE164(trimmed);
+    if (e164) out.add(e164);
+  }
+  return out;
+}
+
+/** AI voice is available only with an OpenAI key, AI_VOICE=on and no global kill switch. */
+export function aiVoiceAvailable(
+  cfg: Pick<AppConfig, 'OPENAI_API_KEY' | 'AI_VOICE' | 'OUTREACH_KILL_SWITCH'>,
+): boolean {
+  return !!cfg.OPENAI_API_KEY && cfg.AI_VOICE === 'on' && cfg.OUTREACH_KILL_SWITCH !== 'on';
+}
 
 let cached: AppConfig | undefined;
 
