@@ -47,6 +47,12 @@ describe('sign-in routes', () => {
     const nonceCookie = res.cookies.find((c) => c.name === 'outreach_oauth_nonce');
     expect(nonceCookie).toMatchObject({ httpOnly: true, path: '/api/auth/workos/callback', maxAge: 600 });
   });
+  it('the WorkOS start route still binds the callback with its own nonce cookie (the shared handoff helpers moved, nothing else did)', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/auth/workos/start' });
+    const nonceCookie = res.cookies.find((c) => c.name === 'outreach_oauth_nonce');
+    expect(nonceCookie).toMatchObject({ httpOnly: true, path: '/api/auth/workos/callback', maxAge: 600 });
+    expect(res.cookies.find((c) => c.name === 'outreach_sf_signin')).toBeUndefined();
+  });
   it('start redirects to /sign-in?error=sign_in_disabled (not a 503 JSON body) when WorkOS is not configured', async () => {
     await app.close();
     app = await buildTestApp({ cfg, db: fakeDb({ organizations: [tenant] }).db, idp: null });

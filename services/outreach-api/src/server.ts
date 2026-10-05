@@ -15,6 +15,7 @@ import { SCHEDULES } from './jobs/schedules.js';
 import { planTick } from './planner/run.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerSalesforceAuthRoutes } from './routes/auth-salesforce.js';
 import { registerCampaignRoutes } from './routes/campaigns.js';
 import { registerConnectionRoutes } from './routes/connections.js';
 import { registerReviewRoutes } from './routes/review.js';
@@ -70,12 +71,16 @@ async function main(): Promise<void> {
   const idp = cfg.workosEnabled
     ? new WorkosIdentityProvider({ apiKey: cfg.WORKOS_API_KEY!, clientId: cfg.WORKOS_CLIENT_ID!, redirectUri: cfg.WORKOS_REDIRECT_URI! })
     : null;
+  const salesforceSignIn = cfg.salesforceSignInEnabled
+    ? { clientId: cfg.SALESFORCE_CLIENT_ID!, redirectUri: cfg.SALESFORCE_SIGNIN_REDIRECT_URI!, loginUrl: cfg.SALESFORCE_LOGIN_URL, allowedOrgId: cfg.SALESFORCE_ALLOWED_ORG_ID ?? null }
+    : null;
   const app = await buildApp({
     cfg,
     spaDist: SPA_DIST,
     readiness: async () => ({ dbOk: await dbOk(), jobsOk: runner.isHealthy() }),
     apiRoutes: [
       (scope) => registerAuthRoutes(scope, { cfg, db, idp }),
+      (scope) => registerSalesforceAuthRoutes(scope, { cfg, db, signIn: salesforceSignIn }),
       (scope) => registerAdminTenantRoutes(scope, { db, idp }),
       (scope) => registerTeamRoutes(scope, { db, idp }),
       (scope) => registerConnectionRoutes(scope, { db, cfg, clients }),

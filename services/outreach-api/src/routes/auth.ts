@@ -1,9 +1,10 @@
 import { eq } from 'drizzle-orm';
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { issueSession, resolveSession, revokeSession, ServiceUserSessionError, SuspendedTenantError, type SessionUser } from '@cti/auth';
-import type { SessionUser as SessionUserDto } from '@cti/contracts';
+import { resolveSession, revokeSession, ServiceUserSessionError, SuspendedTenantError, type SessionUser } from '@cti/auth';
+import type { AuthProviders, SessionUser as SessionUserDto } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
+import { HANDOFF_COOKIE, HANDOFF_PATH, issueHandoff, signInRedirect } from '../auth/handoff.js';
 import type { IdentityProvider } from '../auth/identity-provider.js';
 import { IdentityExchangeError } from '../auth/identity-provider.js';
 import { completeSignIn } from '../auth/sign-in.js';
@@ -12,8 +13,6 @@ import type { AppConfig } from '../config.js';
 import { sendError } from '../http/errors.js';
 import { toTenantDto } from '../tenancy/scope.js';
 
-export const HANDOFF_COOKIE = 'outreach_session_handoff';
-const HANDOFF_PATH = '/api/auth/session';
 /** Set at /auth/workos/start, checked at /auth/workos/callback: binds the callback to the same browser that started the flow (login-CSRF defense — see auth/state.ts's SignedState). */
 const NONCE_COOKIE = 'outreach_oauth_nonce';
 const NONCE_PATH = '/api/auth/workos/callback';
@@ -34,18 +33,6 @@ function toSessionUserDto(s: SessionUser, displayName: string | null): SessionUs
   return { userId: s.userId, orgId: s.orgId, email: s.email, displayName, isAdmin: s.isAdmin, isSuperAdmin: s.isSuperAdmin, kind: 'human' };
 }
 
-/** `new URL(path, cfg.APP_PUBLIC_URL)` with optional query params — the one place both app-facing redirects (sign-in error, post-callback handoff) build their target. */
-function appUrl(cfg: AppConfig, path: string, params?: Record<string, string>): URL {
-  const url = new URL(path, cfg.APP_PUBLIC_URL);
-  for (const [key, value] of Object.entries(params ?? {})) url.searchParams.set(key, value);
-  return url;
-}
-
-/** Back to the app's sign-in page with a reason; `returnTo` (only ever a *verified* one) rides along so the page's "Continue" re-targets the user's destination. */
-function signInRedirect(cfg: AppConfig, reply: FastifyReply, error: string, returnTo?: string): FastifyReply {
-  return reply.redirect(appUrl(cfg, '/sign-in', returnTo ? { error, returnTo } : { error }).toString());
-}
-
 /** Tenant guard: the resolved row must actually be the session's own org, not just fakeDb's/a bug's first row (see tenancy/scope.ts's identical guard). */
 async function userAndTenant(db: Db, session: SessionUser) {
   const [user, tenant] = await Promise.all([
@@ -58,6 +45,8 @@ async function userAndTenant(db: Db, session: SessionUser) {
 
 export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): Promise<void> {
   const { cfg, db, idp } = deps;
+
+  app.get('/auth/providers', async (): Promise<AuthProviders> => ({ salesforce: cfg.salesforceSignInEnabled, workos: cfg.workosEnabled }));
 
   app.get('/auth/workos/start', async (req, reply) => {
     // Reached by `window.location.assign(...)` — a top-level navigation, like the
@@ -90,11 +79,7 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
     try {
       const outcome = await completeSignIn({ db, idp }, q.data.code);
       if (!outcome.ok) return signInRedirect(cfg, reply, outcome.reason);
-      const session = await issueSession(outcome.userId);
-      const value = Buffer.from(JSON.stringify({ token: session.token, expiresAt: session.expiresAt.toISOString() }), 'utf8').toString('base64url');
-      reply.setCookie(HANDOFF_COOKIE, value, { httpOnly: true, sameSite: 'lax', secure: cfg.NODE_ENV === 'production', path: HANDOFF_PATH, maxAge: 60, signed: true });
-      const target = appUrl(cfg, '/auth/callback', state.returnTo ? { returnTo: state.returnTo } : undefined);
-      return reply.redirect(target.toString());
+      return await issueHandoff(reply, cfg, outcome.userId, state.returnTo);
     } catch (err) {
       if (err instanceof IdentityExchangeError) return signInRedirect(cfg, reply, 'invalid_code');
       if (err instanceof SuspendedTenantError) return signInRedirect(cfg, reply, 'tenant_suspended');
