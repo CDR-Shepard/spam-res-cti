@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SalesforceClient, type TokenSource } from './client.js';
+import { SALESFORCE_REQUEST_TIMEOUT_MS, SalesforceClient, type TokenSource } from './client.js';
 import { QueryTooLargeError, SalesforceApiError, SalesforceAuthError } from './errors.js';
 import { fakeFetch, type FakeScript } from './fake-fetch.js';
 
@@ -65,6 +65,45 @@ describe('SalesforceClient.request', () => {
     const { sf } = client([{ status: 502, text: '<html>bad gateway</html>' }, { status: 204 }]);
     expect(await sf.request('/a')).toEqual({ status: 502, json: { raw: '<html>bad gateway</html>' } });
     expect(await sf.request('/b', { method: 'DELETE' })).toEqual({ status: 204, json: null });
+  });
+});
+
+describe('SalesforceClient timeouts and network failures', () => {
+  it('sends an abort signal on every request and honours the caller signal as well', async () => {
+    const seen: Array<AbortSignal | null | undefined> = [];
+    const impl = (async (_url: unknown, init?: RequestInit) => {
+      seen.push(init?.signal);
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+    const sf = new SalesforceClient({ tokens: tokens(), apiVersion: 'v60.0', fetchImpl: impl });
+    await sf.request('/limits');
+    const caller = new AbortController();
+    await sf.request('/limits', { signal: caller.signal });
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
+    expect(seen[0]!.aborted).toBe(false);
+    expect(seen[1]!.aborted).toBe(false);
+    caller.abort();
+    expect(seen[1]!.aborted).toBe(true);
+  });
+
+  it('the default timeout is 30 seconds', () => {
+    expect(SALESFORCE_REQUEST_TIMEOUT_MS).toBe(30_000);
+  });
+
+  it('wraps a rejected fetch (network failure or timeout) as a SalesforceApiError', async () => {
+    const impl = (async () => {
+      throw new TypeError('fetch failed');
+    }) as typeof fetch;
+    const sf = new SalesforceClient({ tokens: tokens(), apiVersion: 'v60.0', fetchImpl: impl });
+    const err = await sf.request('/limits').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SalesforceApiError);
+    expect(err).not.toBeInstanceOf(TypeError);
+  });
+
+  it('wraps a body read that rejects as a SalesforceApiError', async () => {
+    const impl = (async () => ({ status: 200, text: async () => { throw new TypeError('terminated'); } })) as unknown as typeof fetch;
+    const sf = new SalesforceClient({ tokens: tokens(), apiVersion: 'v60.0', fetchImpl: impl });
+    await expect(sf.request('/limits')).rejects.toBeInstanceOf(SalesforceApiError);
   });
 });
 

@@ -65,6 +65,8 @@ export interface SalesforceResponse {
 export const COMPOSITE_BATCH_LIMIT = 200;
 /** The campaign size cap; `queryAll`'s default `maxRecords`. */
 export const DEFAULT_MAX_RECORDS = 50_000;
+/** Every Salesforce request, including the token POST, gives up after this long. */
+export const SALESFORCE_REQUEST_TIMEOUT_MS = 30_000;
 /** List views come back in pages; more than this many pages is treated as the end. */
 const MAX_LIST_VIEW_PAGES = 20;
 
@@ -232,18 +234,28 @@ export class SalesforceClient {
   }
 
   private async once(url: URL, accessToken: string, init: SalesforceRequestInit): Promise<SalesforceResponse> {
-    const res = await this.fetchImpl(url.toString(), {
-      method: init.method ?? 'GET',
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        'content-type': 'application/json',
-        accept: 'application/json',
-      },
-      body: init.body === undefined ? undefined : JSON.stringify(init.body),
-      signal: init.signal,
-    });
-    return { status: res.status, json: parseBody(await res.text()) };
+    const timeout = AbortSignal.timeout(SALESFORCE_REQUEST_TIMEOUT_MS);
+    try {
+      const res = await this.fetchImpl(url.toString(), {
+        method: init.method ?? 'GET',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json',
+          accept: 'application/json',
+        },
+        body: init.body === undefined ? undefined : JSON.stringify(init.body),
+        signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
+      });
+      return { status: res.status, json: parseBody(await res.text()) };
+    } catch (err) {
+      // A network failure or timeout is transient, never a broken connection.
+      throw new SalesforceApiError(`Salesforce request failed: ${errorText(err)}`, 0, null);
+    }
   }
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }
 
 function parseBody(text: string): unknown {

@@ -6,13 +6,15 @@
  * through `SalesforceOAuthConfig` (no process.env reads here) and HTTP goes
  * through an injectable `fetchImpl`.
  *
- * Errors: a 400/401 from the token endpoint (invalid_grant, a revoked or
- * expired refresh token, a bad code or verifier) throws `SalesforceAuthError`
- * — the connection is unusable. Any other failure (5xx, an unreadable body)
- * throws `SalesforceApiError` — transient, retry later.
+ * Errors: a 401, or a 400 whose body says `invalid_grant` (a revoked or
+ * expired refresh token, a bad code or verifier), throws `SalesforceAuthError`
+ * — the connection is unusable. Any other failure (another 400 such as a
+ * config error, a 5xx, an unreadable body, a network error or timeout) throws
+ * `SalesforceApiError` — it must not mark the connection broken.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
+import { SALESFORCE_REQUEST_TIMEOUT_MS } from './client.js';
 import { SalesforceApiError, SalesforceAuthError } from './errors.js';
 
 export interface SalesforceOAuthConfig {
@@ -121,14 +123,22 @@ async function postToken(
   fetchImpl: typeof fetch,
   what: string,
 ): Promise<unknown> {
-  const res = await fetchImpl(new URL('/services/oauth2/token', cfg.loginUrl).toString(), {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-    body: form.toString(),
-  });
-  const text = await res.text();
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetchImpl(new URL('/services/oauth2/token', cfg.loginUrl).toString(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body: form.toString(),
+      signal: AbortSignal.timeout(SALESFORCE_REQUEST_TIMEOUT_MS),
+    });
+    text = await res.text();
+  } catch (err) {
+    const why = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    throw new SalesforceApiError(`Salesforce ${what} request failed: ${why}`, 0, null);
+  }
   // Error bodies are {"error":"invalid_grant","error_description":"…"}: no secrets.
-  if (res.status === 400 || res.status === 401) {
+  if (res.status === 401 || (res.status === 400 && errorCode(text) === 'invalid_grant')) {
     throw new SalesforceAuthError(`Salesforce ${what} failed (${res.status}): ${text}`);
   }
   if (res.status >= 400) throw new SalesforceApiError(`Salesforce ${what} failed (${res.status}): ${text}`, res.status, text);
@@ -136,5 +146,14 @@ async function postToken(
     return JSON.parse(text) as unknown;
   } catch {
     throw new SalesforceApiError(`Salesforce ${what} returned a body that is not JSON`, res.status, null);
+  }
+}
+
+function errorCode(text: string): string | null {
+  try {
+    const error = (JSON.parse(text) as { error?: unknown } | null)?.error;
+    return typeof error === 'string' ? error : null;
+  } catch {
+    return null;
   }
 }

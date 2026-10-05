@@ -95,6 +95,44 @@ describe('exchangeCode', () => {
     await expect(exchangeCode(CFG, 'c', 'v', http.impl)).rejects.toBeInstanceOf(SalesforceAuthError);
   });
 
+  it('a 400 that is not invalid_grant (a config error) throws SalesforceApiError, not an auth error', async () => {
+    for (const error of ['invalid_client_id', 'redirect_uri_mismatch', 'invalid_request', 'unsupported_grant_type']) {
+      const http = fakeFetch([{ status: 400, body: { error, error_description: 'x' } }]);
+      const err = await exchangeCode(CFG, 'c', 'v', http.impl).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(SalesforceApiError);
+      expect(err).not.toBeInstanceOf(SalesforceAuthError);
+    }
+  });
+
+  it('a 400 with an unreadable body throws SalesforceApiError', async () => {
+    const http = fakeFetch([{ status: 400, text: '<html>nope</html>' }]);
+    await expect(exchangeCode(CFG, 'c', 'v', http.impl)).rejects.toBeInstanceOf(SalesforceApiError);
+  });
+
+  it('a 401 from the token endpoint still throws SalesforceAuthError', async () => {
+    const http = fakeFetch([{ status: 401, text: 'nope' }]);
+    await expect(refreshAccessToken(CFG, 'r', http.impl)).rejects.toBeInstanceOf(SalesforceAuthError);
+  });
+
+  it('a refresh 400 that is not invalid_grant throws SalesforceApiError', async () => {
+    const http = fakeFetch([{ status: 400, body: { error: 'invalid_client_id' } }]);
+    const err = await refreshAccessToken(CFG, 'r', http.impl).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SalesforceApiError);
+    expect(err).not.toBeInstanceOf(SalesforceAuthError);
+  });
+
+  it('sends an abort signal on every token POST and wraps a rejected fetch as SalesforceApiError', async () => {
+    let seen: AbortSignal | null | undefined;
+    const hanging = (async (_url: unknown, init?: RequestInit) => {
+      seen = init?.signal;
+      throw new TypeError('fetch failed');
+    }) as typeof fetch;
+    const err = await refreshAccessToken(CFG, 'r', hanging).catch((e: unknown) => e);
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(err).toBeInstanceOf(SalesforceApiError);
+    expect(err).not.toBeInstanceOf(TypeError);
+  });
+
   it('a 5xx throws SalesforceApiError', async () => {
     const http = fakeFetch([{ status: 503, text: 'unavailable' }]);
     await expect(exchangeCode(CFG, 'c', 'v', http.impl)).rejects.toBeInstanceOf(SalesforceApiError);
