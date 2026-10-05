@@ -124,8 +124,11 @@ export async function editPlan(db: Db, ctx: RequestContext, enrollmentId: string
       outputTokens: 0,
       createdBy: ctx.session.userId,
     });
-    if (plan.dncFlagged && plan.status === 'proposed' && plan.decidedBy) {
-      await tx.update(schema.callPlans).set({ decidedBy: plan.decidedBy, decidedAt: plan.decidedAt }).where(eq(schema.callPlans.id, saved.id));
+    if (plan.dncFlagged && plan.dncDismissedBy) {
+      await tx
+        .update(schema.callPlans)
+        .set({ dncDismissedBy: plan.dncDismissedBy, dncDismissedAt: plan.dncDismissedAt })
+        .where(eq(schema.callPlans.id, saved.id));
     }
     await setStage(tx, enrollmentId, 'review', now);
   });

@@ -171,12 +171,39 @@ describe.skipIf(!pgLane)('call plan cards (real Postgres)', () => {
       const triageId = await flagTriage(b.orgId, lead.crmRecordId);
       const dismisser = await seedUser(db, b.orgId, { displayName: 'Rita Rep' });
       await db.execute(sql`update crm_records set dnc_dismissed_triage_id = ${triageId}::uuid where id = ${lead.crmRecordId}::uuid`);
-      await db.execute(sql`update call_plans set decided_by = ${dismisser}::uuid, decided_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${lead.planId}::uuid`);
+      await db.execute(sql`update call_plans set dnc_dismissed_by = ${dismisser}::uuid, dnc_dismissed_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${lead.planId}::uuid`);
 
       const card = await loadCallPlanCard(db, b.ctx, lead.enrollmentId, SEED_NOW);
 
       expect(card!.plan).toMatchObject({ status: 'proposed', decidedAt: null, dncFlagDismissed: true, dncFlagDismissedBy: 'Rita Rep', dncFlagDismissedAt: SEED_NOW.toISOString() });
       expect(card!.warnings).toEqual([]);
+    });
+
+    it('an approved plan keeps the dismisser, apart from who approved it and when', async () => {
+      const b = await board();
+      const lead = await seedPlanLead(db, b, { dncFlagged: true, callStage: 'approved', planStatus: 'approved' });
+      const triageId = await flagTriage(b.orgId, lead.crmRecordId);
+      const dismisser = await seedUser(db, b.orgId, { displayName: 'Rita Rep' });
+      const approver = await seedUser(db, b.orgId, { displayName: 'Sam Approver' });
+      const approvedAt = new Date(SEED_NOW.getTime() + 3_600_000);
+      await db.execute(sql`update crm_records set dnc_dismissed_triage_id = ${triageId}::uuid where id = ${lead.crmRecordId}::uuid`);
+      await db.execute(sql`update call_plans set dnc_dismissed_by = ${dismisser}::uuid, dnc_dismissed_at = ${SEED_NOW.toISOString()}::timestamptz,
+        decided_by = ${approver}::uuid, decided_at = ${approvedAt.toISOString()}::timestamptz where id = ${lead.planId}::uuid`);
+
+      const card = await loadCallPlanCard(db, b.ctx, lead.enrollmentId, SEED_NOW);
+
+      expect(card!.plan).toMatchObject({ status: 'approved', decidedAt: approvedAt.toISOString(), dncFlagDismissed: true, dncFlagDismissedBy: 'Rita Rep', dncFlagDismissedAt: SEED_NOW.toISOString() });
+    });
+
+    it('a decision by someone else on a proposed plan is not shown as the dismissal', async () => {
+      const b = await board();
+      const lead = await seedPlanLead(db, b, { dncFlagged: true });
+      const triageId = await flagTriage(b.orgId, lead.crmRecordId);
+      const other = await seedUser(db, b.orgId, { displayName: 'Not The Dismisser' });
+      await db.execute(sql`update crm_records set dnc_dismissed_triage_id = ${triageId}::uuid where id = ${lead.crmRecordId}::uuid`);
+      await db.execute(sql`update call_plans set decided_by = ${other}::uuid, decided_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${lead.planId}::uuid`);
+      const card = await loadCallPlanCard(db, b.ctx, lead.enrollmentId, SEED_NOW);
+      expect(card!.plan).toMatchObject({ dncFlagDismissed: true, dncFlagDismissedBy: null, dncFlagDismissedAt: null });
     });
 
     it('a flagged plan nobody dismissed blocks approval on the card', async () => {

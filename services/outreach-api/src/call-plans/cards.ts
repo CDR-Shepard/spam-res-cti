@@ -57,7 +57,8 @@ interface CardRow {
   plan: unknown;
   plan_created_at: Date | string | null;
   plan_decided_at: Date | string | null;
-  plan_decider: string | null;
+  plan_dismisser: string | null;
+  plan_dismissed_at: Date | string | null;
   dnc_flagged: boolean | null;
 }
 
@@ -78,20 +79,19 @@ const CARD_SELECT = sql`
          ${DNC_PENDING_SQL} as dnc_pending, ${DNC_EVER_DISMISSED_SQL} as dnc_ever_dismissed,
          cr.version as research_version, cr.created_at as research_at, cr.sources as research_sources, cr.snapshot ->> 'consent' as consent,
          p.version as plan_version, p.status as plan_status, p.source as plan_source, p.plan, p.created_at as plan_created_at, p.decided_at as plan_decided_at,
-         coalesce(du.display_name, du.email) as plan_decider, p.dnc_flagged
+         coalesce(du.display_name, du.email) as plan_dismisser, p.dnc_dismissed_at as plan_dismissed_at, p.dnc_flagged
   from campaign_enrollments e
   join crm_records r on r.id = e.crm_record_id and r.org_id = e.org_id
   left join call_plans p on p.enrollment_id = e.id and p.status in ('proposed', 'approved')
   left join call_research cr on cr.id = p.research_id
-  left join users du on du.id = p.decided_by`;
+  left join users du on du.id = p.dnc_dismissed_by`;
 
 type Blocks = Awaited<ReturnType<typeof blockedTargets>>;
 
 function dismissal(row: CardRow): { dismissed: boolean; by: string | null; at: string | null } {
   const dismissed = row.dnc_flagged === true && row.dnc_ever_dismissed && !row.dnc_pending;
-  // A proposed flagged plan keeps the dismisser as its decision (resetCallStageAfterDismiss); an approved one's decision is the approval.
-  const recorded = dismissed && row.plan_status === 'proposed' && row.plan_decided_at;
-  return { dismissed, by: recorded ? row.plan_decider : null, at: recorded ? iso(row.plan_decided_at) : null };
+  // The dismisser lives on the plan itself (resetCallStageAfterDismiss), beside the approval, whatever the plan's status.
+  return { dismissed, by: dismissed ? row.plan_dismisser : null, at: dismissed ? iso(row.plan_dismissed_at) : null };
 }
 
 function toCard(row: CardRow, ctx: RequestContext, mine: string | null, instanceUrl: string | null, blocks: Blocks, now: Date): CallPlanCard {

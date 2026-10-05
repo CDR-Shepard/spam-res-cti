@@ -112,8 +112,10 @@ describe.skipIf(!pgLane)('call plan decisions (real Postgres)', () => {
       expect(await code(approve(s))).toEqual({ code: 'DNC_NOT_DISMISSED', status: 409 });
       const triageId = await flagTriage(s.orgId, s.lead.crmRecordId);
       await db.execute(sql`update crm_records set dnc_dismissed_triage_id = ${triageId}::uuid where id = ${s.lead.crmRecordId}::uuid`);
+      await db.execute(sql`update call_plans set dnc_dismissed_by = ${s.admin}::uuid, dnc_dismissed_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${s.lead.planId}::uuid`);
       expect(await code(approve(s))).toBeNull();
-      expect((await currentPlan(db, s.lead.enrollmentId))).toMatchObject({ status: 'approved', dncFlagged: true });
+      // The approval is the plan's decision; the dismissal stays on the plan beside it.
+      expect((await currentPlan(db, s.lead.enrollmentId))).toMatchObject({ status: 'approved', dncFlagged: true, decidedBy: s.admin, dncDismissedBy: s.admin, dncDismissedAt: SEED_NOW });
     });
 
     it.each(['research', 'queued', 'approved'] as const)('6: call_stage %s is NOT_IN_REVIEW', async (callStage) => {
@@ -149,9 +151,16 @@ describe.skipIf(!pgLane)('call plan decisions (real Postgres)', () => {
 
     it('7c (CF-7): an edit keeps the do-not-contact history and the dismisser of the plan it replaces', async () => {
       const s = await setup({ dncFlagged: true });
-      await db.execute(sql`update call_plans set decided_by = ${s.admin}::uuid, decided_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${s.lead.planId}::uuid`);
+      await db.execute(sql`update call_plans set dnc_dismissed_by = ${s.admin}::uuid, dnc_dismissed_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${s.lead.planId}::uuid`);
       await editPlan(db, s.ctx, s.lead.enrollmentId, { version: 1, plan: EDITABLE }, SEED_NOW);
-      expect(await currentPlan(db, s.lead.enrollmentId)).toMatchObject({ version: 2, dncFlagged: true, decidedBy: s.admin });
+      expect(await currentPlan(db, s.lead.enrollmentId)).toMatchObject({ version: 2, dncFlagged: true, dncDismissedBy: s.admin, dncDismissedAt: SEED_NOW, decidedBy: null, decidedAt: null });
+    });
+
+    it('7d: editing an approved plan keeps the dismisser too (the approval itself is void)', async () => {
+      const s = await setup({ dncFlagged: true, callStage: 'approved', planStatus: 'approved' });
+      await db.execute(sql`update call_plans set dnc_dismissed_by = ${s.admin}::uuid, dnc_dismissed_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${s.lead.planId}::uuid`);
+      await editPlan(db, s.ctx, s.lead.enrollmentId, { version: 1, plan: EDITABLE }, SEED_NOW);
+      expect(await currentPlan(db, s.lead.enrollmentId)).toMatchObject({ version: 2, status: 'proposed', dncDismissedBy: s.admin, dncDismissedAt: SEED_NOW });
     });
 
     it('8: two concurrent edits from the same version: one wins, the other gets PLAN_CHANGED', async () => {

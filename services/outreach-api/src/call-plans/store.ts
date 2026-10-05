@@ -151,9 +151,9 @@ export async function storeDncTriage(
 
 /**
  * After a person dismisses a do-not-contact flag: the lead goes back on the board for a fresh approval.
- * `by` records who dismissed the flag of a plan the model itself flagged (`dnc_flagged`): it is kept
- * on that proposed plan as `decided_by` / `decided_at`, which the board shows (CF-7). An approved plan
- * that goes back to `proposed` keeps no decision (the approval is void).
+ * `by` records who dismissed the flag of a plan the model itself flagged (`dnc_flagged`): `dnc_dismissed_by`
+ * and `dnc_dismissed_at` on that plan, which the board shows (CF-7). An approved plan that goes back to
+ * `proposed` loses its approval (`decided_*`) but keeps the dismissal.
  */
 export async function resetCallStageAfterDismiss(tx: Db, enrollmentId: string, by?: { userId: string; at: Date }): Promise<void> {
   // Sequence enrollments (call_stage null) are none of this function's business: nothing is written for them.
@@ -167,7 +167,7 @@ export async function resetCallStageAfterDismiss(tx: Db, enrollmentId: string, b
   if (by) {
     await tx
       .update(schema.callPlans)
-      .set({ decidedBy: by.userId, decidedAt: by.at })
+      .set({ dncDismissedBy: by.userId, dncDismissedAt: by.at })
       .where(and(eq(schema.callPlans.enrollmentId, enrollmentId), eq(schema.callPlans.status, 'proposed'), eq(schema.callPlans.dncFlagged, true)));
   }
   await tx.execute(sql`

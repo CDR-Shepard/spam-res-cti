@@ -205,6 +205,20 @@ describe.skipIf(!pgLane)('call plan store (real Postgres)', () => {
       expect(await currentPlan(db, l.enrollmentId)).toMatchObject({ id: plan.id, status: 'proposed', decidedBy: null, decidedAt: null });
       expect(await enrollment(l.enrollmentId)).toMatchObject({ callStage: 'review', callPrepareAttemptedAt: null });
     });
+    it.each(['proposed', 'approved'] as const)('records the dismisser on a flagged %s plan, and on no other plan', async (status) => {
+      const l = await lead({ callStage: status === 'approved' ? 'approved' : 'review' });
+      const research = await saveResearch(db, { ...l, snapshot: researchSnapshot(l.sfRecordId) });
+      const plan = await savePlan(db, { ...planInput(l, research.id), dncFlagged: true });
+      const [user] = await db.insert(schema.users).values({ orgId: l.orgId, email: `u${n}@example.com`, displayName: 'Rita' }).returning({ id: schema.users.id });
+      await db.update(schema.callPlans).set({ status }).where(eq(schema.callPlans.id, plan.id));
+      await resetCallStageAfterDismiss(db, l.enrollmentId, { userId: user!.id, at: NOW });
+      expect(await currentPlan(db, l.enrollmentId)).toMatchObject({ status: 'proposed', dncDismissedBy: user!.id, dncDismissedAt: NOW, decidedBy: null, decidedAt: null });
+      const plain = await lead({ callStage: 'review' });
+      const r2 = await saveResearch(db, { ...plain, snapshot: researchSnapshot(plain.sfRecordId) });
+      await savePlan(db, planInput(plain, r2.id));
+      await resetCallStageAfterDismiss(db, plain.enrollmentId, { userId: user!.id, at: NOW });
+      expect(await currentPlan(db, plain.enrollmentId)).toMatchObject({ dncDismissedBy: null, dncDismissedAt: null });
+    });
     it('sends a lead without a current plan back to research', async () => {
       const l = await lead({ callStage: 'review' });
       await resetCallStageAfterDismiss(db, l.enrollmentId);

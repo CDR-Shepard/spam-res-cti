@@ -224,7 +224,7 @@ describe.skipIf(!pgLane)('review decisions (real Postgres)', () => {
       state.session = { userId, orgId, email: 'admin@gg.co', isAdmin: true, powerDialerEnabled: false, kind: 'human', isSuperAdmin: false };
     };
     const planV2 = async (enrollmentId: string) =>
-      (await t.pool.query(`select status, decided_by, decided_at from call_plans where enrollment_id = $1 and version = 2`, [enrollmentId])).rows[0];
+      (await t.pool.query(`select status, decided_by, decided_at, dnc_dismissed_by, dnc_dismissed_at from call_plans where enrollment_id = $1 and version = 2`, [enrollmentId])).rows[0];
     const stageOf = async (enrollmentId: string) =>
       (await t.pool.query(`select status, call_stage from campaign_enrollments where id = $1`, [enrollmentId])).rows[0];
 
@@ -233,7 +233,7 @@ describe.skipIf(!pgLane)('review decisions (real Postgres)', () => {
       asUser(orgId, userId);
       expect((await decide(enrollmentId, 'dismiss')).statusCode).toBe(204);
       expect(await stageOf(enrollmentId)).toEqual({ status: 'active', call_stage: 'review' });
-      expect(await planV2(enrollmentId)).toEqual({ status: 'proposed', decided_by: null, decided_at: null });
+      expect(await planV2(enrollmentId)).toEqual({ status: 'proposed', decided_by: null, decided_at: null, dnc_dismissed_by: null, dnc_dismissed_at: null });
     });
 
     it('a dismissal with no plan to review sends the lead back to research', async () => {
@@ -251,8 +251,17 @@ describe.skipIf(!pgLane)('review decisions (real Postgres)', () => {
       expect(await stageOf(enrollmentId)).toEqual({ status: 'active', call_stage: 'review' });
       const plan = await planV2(enrollmentId);
       expect(plan.status).toBe('proposed');
-      expect(plan.decided_by).toBe(userId);
-      expect(plan.decided_at).toBeInstanceOf(Date);
+      expect(plan.dnc_dismissed_by).toBe(userId);
+      expect(plan.dnc_dismissed_at).toBeInstanceOf(Date);
+      expect(plan.decided_by).toBeNull();
+      expect(plan.decided_at).toBeNull();
+    });
+
+    it('a dismissal of an approved flagged plan records the dismisser and voids the approval', async () => {
+      const { orgId, enrollmentId, userId } = await seedAiCallLead('approved', { dncFlagged: true });
+      asUser(orgId, userId);
+      expect((await decide(enrollmentId, 'dismiss')).statusCode).toBe(204);
+      expect(await planV2(enrollmentId)).toMatchObject({ status: 'proposed', decided_by: null, decided_at: null, dnc_dismissed_by: userId });
     });
 
     it('a sequence enrollment is dismissed as before and keeps a null call_stage', async () => {
