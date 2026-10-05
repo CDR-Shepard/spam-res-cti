@@ -199,3 +199,20 @@ describe('aiVoiceAvailable', () => {
     expect(aiVoiceAvailable({ ...base, ...over })).toBe(expected);
   });
 });
+
+describe('OUTREACH_INTERNAL_SECRET (plan 1C internal AI call trigger)', () => {
+  const saved = { ...process.env };
+  beforeEach(() => { delete process.env.OUTREACH_INTERNAL_SECRET; });
+  afterEach(() => { process.env = { ...saved }; });
+
+  it('is optional: unset (or empty) leaves the internal routes disabled', async () => {
+    expect((await loadWith({})).OUTREACH_INTERNAL_SECRET).toBeUndefined();
+    expect((await loadWith({ OUTREACH_INTERNAL_SECRET: '' })).OUTREACH_INTERNAL_SECRET).toBeUndefined();
+  });
+  it('accepts 32 characters or more', async () => {
+    expect((await loadWith({ OUTREACH_INTERNAL_SECRET: 'k'.repeat(32) })).OUTREACH_INTERNAL_SECRET).toBe('k'.repeat(32));
+  });
+  it('a shorter secret fails the boot loudly', async () => {
+    await expect(loadWith({ OUTREACH_INTERNAL_SECRET: 'k'.repeat(31) })).rejects.toThrow(/OUTREACH_INTERNAL_SECRET/);
+  });
+});

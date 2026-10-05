@@ -7,6 +7,7 @@
  *   GET  /ai-calls/:id                   one call (admin: org, rep: started or handed to them)
  *   POST /telephony/twilio/ai-voice/{amd,status,transfer-result}   (routes-webhooks.ts)
  *   GET  /telephony/twilio/ai-voice/stream  (WebSocket, routes-stream.ts)
+ *   POST /internal/ai-calls, GET /internal/ai-calls/availability   (outreach-api only, routes-internal.ts)
  *
  * Dependencies are injectable (`overrides`) so tests never touch Twilio,
  * OpenAI, Salesforce or the database.
@@ -20,7 +21,11 @@ import type { Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
 import { UUID_RE } from '../telephony/webhooks.js';
 import { gateAiCall } from './gate.js';
+import { internalSession } from './internal-auth.js';
+import { loadIntegrationRecord } from './integration-record.js';
 import { loadAiCallRecord } from './record.js';
+import { drizzleAiCallRequestStore, type AiCallRequestStore } from './request-store.js';
+import { registerInternalAiCallRoutes } from './routes-internal.js';
 import { registerAiVoiceStreamRoute } from './routes-stream.js';
 import { registerAiVoiceWebhooks } from './routes-webhooks.js';
 import { startAiCall, type StartDeps, type StartResult } from './service.js';
@@ -44,6 +49,8 @@ export interface AiVoiceDeps {
   now: () => Date;
   /** Summary + Salesforce Tasks once a call is finalized (detached from the webhook). */
   afterCall: AfterCall;
+  /** Idempotency store of the internal trigger; tests override it (default: ai_call_requests). */
+  requests?: AiCallRequestStore;
 }
 
 const START_RATE_MAX = 10;
@@ -186,4 +193,15 @@ export async function registerAiVoiceRoutes(app: FastifyInstance, overrides: Par
     now: deps.now,
     log: req.log,
   }));
+
+  await registerInternalAiCallRoutes(app, {
+    db: deps.db,
+    now: deps.now,
+    requests: deps.requests ?? drizzleAiCallRequestStore(deps.db),
+    session: internalSession,
+    loadIntegrationRecord: (db, orgId, objectType, recordId) => loadIntegrationRecord(db, loadConfig(), orgId, objectType, recordId),
+    start: startAiCall,
+    startDeps: { store: deps.store, twilio: deps.twilio, gate: deps.gate, now: deps.now, log },
+    log,
+  });
 }

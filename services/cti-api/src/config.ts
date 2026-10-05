@@ -212,6 +212,8 @@ const schema = z.object({
    * all outreach, including AI calls. Default `off`.
    */
   OUTREACH_KILL_SWITCH: z.enum(['on', 'off']).default('off'),
+  /** Shared with outreach-api: HMAC key for POST /internal/ai-calls (plan 1C). Unset = the internal routes answer 503. */
+  OUTREACH_INTERNAL_SECRET: z.string().min(32).optional(),
 });
 
 export type AppConfig = z.infer<typeof schema>;

@@ -3,6 +3,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import { loadConfig } from './config.js';
+import { listenOptions } from './listen.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerFirewallRoutes } from './routes/firewall.js';
@@ -168,7 +169,8 @@ async function main(): Promise<void> {
   process.on('SIGTERM', close);
   process.on('SIGINT', close);
 
-  await app.listen({ port: cfg.API_PORT, host: '0.0.0.0' });
+  // '::' is dual-stack on Linux: public traffic (IPv4) is unchanged, and Railway private networking (IPv6-only in older environments) can reach the internal AI call routes.
+  await app.listen(listenOptions(cfg.API_PORT));
   app.log.info({ url: cfg.API_PUBLIC_URL }, 'cti-api listening');
 }
 
