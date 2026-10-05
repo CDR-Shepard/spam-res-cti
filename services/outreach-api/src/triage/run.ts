@@ -7,7 +7,9 @@
  * `doNotContact` result moves every active enrollment of the record to `needs_review`.
  *
  * Rows are claimed atomically (`triage_attempted_at = now`, FOR UPDATE SKIP LOCKED), so an
- * overlapping tick never takes the same record. A claimed record whose triage did not finish
+ * overlapping tick never takes the same record. Clearing `triage_needed` compares
+ * `triage_attempted_at` with that claim, so a sync that changes the record mid-triage
+ * (which resets it to NULL) is triaged again rather than lost. A claimed record whose triage did not finish
  * (a failed notes fetch) is skipped for `TRIAGE_BACKOFF_MS`; a claimed record the tick never
  * reached is released. At most `TRIAGE_PER_ORG_CAP` records per tenant go into one batch.
  */
@@ -127,14 +129,28 @@ async function touchHistory(db: Db, crmRecordId: string): Promise<Array<{ channe
   return rows.map((row) => ({ channel: row.channel, status: row.status, at: (row.sentAt ?? row.dueAt).toISOString() }));
 }
 
-async function clearTriageNeeded(db: Db, crmRecordId: string): Promise<void> {
-  await db.update(schema.crmRecords).set({ triageNeeded: false }).where(eq(schema.crmRecords.id, crmRecordId));
+/**
+ * The record is still exactly as this tick claimed it: `triage_attempted_at` is the claim's
+ * time. A sync that changed the record since (enroll.ts upsert, or a newly logged Task)
+ * reset it to NULL, and then the triage this tick ran is stale: `triage_needed` must stay set.
+ */
+function stillClaimed(crmRecordId: string, claimedAt: Date) {
+  return and(eq(schema.crmRecords.id, crmRecordId), eq(schema.crmRecords.triageAttemptedAt, claimedAt));
 }
 
-/** Stores the result and, for a do-not-contact flag, holds the person for review — one transaction. */
+async function clearTriageNeeded(db: Db, crmRecordId: string, claimedAt: Date): Promise<void> {
+  await db.update(schema.crmRecords).set({ triageNeeded: false }).where(stillClaimed(crmRecordId, claimedAt));
+}
+
+/**
+ * Stores the result and, for a do-not-contact flag, holds the person for review — one
+ * transaction. The record's `notes_hash`/`triage_needed` move only while the claim still
+ * stands (`claimedAt`); after a mid-triage sync the record is triaged again on the next
+ * tick. A do-not-contact flag holds the person either way: the safe side.
+ */
 async function storeTriage(
   db: Db,
-  args: { orgId: string; crmRecordId: string; notesHash: string; model: string; result: TriageResult; inputTokens: number; outputTokens: number; now: Date },
+  args: { orgId: string; crmRecordId: string; claimedAt: Date; notesHash: string; model: string; result: TriageResult; inputTokens: number; outputTokens: number; now: Date },
 ): Promise<number> {
   return db.transaction(async (tx) => {
     const [stored] = await tx.insert(schema.recordTriage).values({
@@ -150,7 +166,7 @@ async function storeTriage(
     await tx
       .update(schema.crmRecords)
       .set({ notesHash: args.notesHash, triageNeeded: false })
-      .where(eq(schema.crmRecords.id, args.crmRecordId));
+      .where(stillClaimed(args.crmRecordId, args.claimedAt));
     const flag = args.result.doNotContact;
     if (!flag) return 0;
     // An enrollment that left `active` meanwhile is not held here; the planner holds the
@@ -178,7 +194,7 @@ async function triageOne(deps: TriageDeps, client: SalesforceClient, fieldMap: F
 
   const fingerprint = notesFingerprint(bundle);
   if (fingerprint === rec.notesHash) {
-    await clearTriageNeeded(db, rec.id);
+    await clearTriageNeeded(db, rec.id, now);
     return { kind: 'done', costMicros: 0 };
   }
 
@@ -190,7 +206,7 @@ async function triageOne(deps: TriageDeps, client: SalesforceClient, fieldMap: F
       // Paid for, but unusable. Not retried until the record changes again (`notes_hash` is left as it was).
       const cost = costMicros(err.usage.model, err.usage.inputTokens, err.usage.outputTokens);
       await addSpend(db, rec.orgId, now, cost);
-      await clearTriageNeeded(db, rec.id);
+      await clearTriageNeeded(db, rec.id, now);
       log.warn({ orgId: rec.orgId, crmRecordId: rec.id, err: err.message }, 'triage: model output rejected');
       return { kind: 'done', costMicros: cost };
     }
@@ -201,7 +217,8 @@ async function triageOne(deps: TriageDeps, client: SalesforceClient, fieldMap: F
   const cost = costMicros(out.model, out.inputTokens, out.outputTokens);
   // Spend first: the call is paid for even if storing the result fails.
   await addSpend(db, rec.orgId, now, cost);
-  const flagged = await storeTriage(db, { orgId: rec.orgId, crmRecordId: rec.id, notesHash: fingerprint, now, ...out });
+  // The claim set triage_attempted_at = now (claimDueRecords).
+  const flagged = await storeTriage(db, { orgId: rec.orgId, crmRecordId: rec.id, claimedAt: now, notesHash: fingerprint, now, ...out });
   if (flagged > 0) log.info({ orgId: rec.orgId, crmRecordId: rec.id, flagged }, 'triage: do-not-contact flag held for review');
   return { kind: 'done', costMicros: cost };
 }

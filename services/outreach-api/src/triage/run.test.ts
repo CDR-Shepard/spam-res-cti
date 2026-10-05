@@ -8,6 +8,7 @@ import { costMicros, TRIAGE_MODEL, TriageOutputError, type TriageModel } from '.
 import { createTestDb, pgLane } from '../test/pg.js';
 import type { FieldMap } from '@cti/contracts';
 import { campaignById, leadId, seedCampaign, seedConnection, seedEnrollment, seedOrg, seedRecord, snapshot } from '../test/outreach-fixtures.js';
+import { upsertRecords } from '../campaigns/enroll.js';
 import { notesFingerprint, type NotesBundle } from './notes.js';
 import { TRIAGE_BACKOFF_MS, TRIAGE_DEADLINE_MS, TRIAGE_PER_ORG_CAP, triageDueRecords } from './run.js';
 
@@ -314,6 +315,69 @@ describe.skipIf(!pgLane)('triageDueRecords (real Postgres, fake model and Salesf
     for (const id of floodIds) expect(await record(id)).toMatchObject({ triageAttemptedAt: NOW });
     await triageDueRecords({ db, clients, model, now: new Date(NOW.getTime() + TRIAGE_BACKOFF_MS + 1000), log });
     for (const id of floodIds) expect((await record(id)).triageAttemptedAt?.getTime()).toBe(NOW.getTime() + TRIAGE_BACKOFF_MS + 1000);
+  });
+
+  describe('a sync that lands mid-triage is not lost', () => {
+    /** What a campaign refresh does when the record changed in Salesforce: triage_needed = true, triage_attempted_at = NULL. */
+    const syncChanged = (orgId: string, n = 1) =>
+      upsertRecords(db, orgId, [snapshot({ sfRecordId: leadId(n), lastModifiedAt: new Date('2026-10-05T14:59:00.000Z') })]);
+
+    it('the model result is stored, but triage_needed stays set and notes_hash unchanged, so the next tick re-triages', async () => {
+      const t = await tenant();
+      const model = fakeModel();
+      model.triage.mockImplementationOnce(async () => {
+        await syncChanged(t.orgId);
+        return { result: PLAIN, inputTokens: 812, outputTokens: 143, model: TRIAGE_MODEL };
+      });
+      await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: NOW, log });
+      expect(await triageRows(t.recordId)).toHaveLength(1);
+      expect(await record(t.recordId)).toMatchObject({ triageNeeded: true, triageAttemptedAt: null, notesHash: null });
+
+      await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: new Date(NOW.getTime() + 60_000), log });
+      expect(model.triage).toHaveBeenCalledTimes(2);
+      expect(await record(t.recordId)).toMatchObject({ triageNeeded: false, notesHash: notesFingerprint(BUNDLE) });
+    });
+
+    it('a do-not-contact flag from that stale triage still holds the person for review', async () => {
+      const t = await tenant();
+      const model = fakeModel(SOLD);
+      model.triage.mockImplementationOnce(async () => {
+        await syncChanged(t.orgId);
+        return { result: SOLD, inputTokens: 812, outputTokens: 143, model: TRIAGE_MODEL };
+      });
+      await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: NOW, log });
+      const [enrollment] = await db.select().from(schema.campaignEnrollments).where(eq(schema.campaignEnrollments.id, t.enrollmentId));
+      expect(enrollment).toMatchObject({ status: 'needs_review', reviewCategory: 'sold' });
+      expect(await record(t.recordId)).toMatchObject({ triageNeeded: true, triageAttemptedAt: null });
+    });
+
+    it('an unchanged fingerprint does not clear a flag a sync set while the notes were being fetched', async () => {
+      const t = await tenant({ notesHash: notesFingerprint(BUNDLE) });
+      const sf = fakeSalesforce();
+      const query = sf.query as unknown as ReturnType<typeof vi.fn>;
+      const real = query.getMockImplementation()!;
+      query.mockImplementationOnce(async (soql: string) => {
+        await syncChanged(t.orgId);
+        return real(soql);
+      });
+      const model = fakeModel();
+      await triageDueRecords({ db, clients: async () => sf, model, now: NOW, log });
+      expect(model.triage).not.toHaveBeenCalled();
+      expect(await record(t.recordId)).toMatchObject({ triageNeeded: true, triageAttemptedAt: null });
+    });
+
+    it('an invalid model answer does not clear a flag a sync set during the call', async () => {
+      const t = await tenant();
+      const model: TriageModel = {
+        modelId: TRIAGE_MODEL,
+        triage: vi.fn(async () => {
+          await syncChanged(t.orgId);
+          throw new TriageOutputError('invalid triage output', { inputTokens: 700, outputTokens: 100, model: TRIAGE_MODEL });
+        }),
+      };
+      await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: NOW, log });
+      expect(await record(t.recordId)).toMatchObject({ triageNeeded: true, triageAttemptedAt: null });
+    });
   });
 
   it('claims rows atomically: two overlapping ticks never triage the same record', async () => {
