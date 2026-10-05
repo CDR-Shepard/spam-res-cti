@@ -147,13 +147,14 @@ describe('GET /telephony/twilio/ai-voice/stream (WebSocket)', () => {
   });
 
   it('leaves every other route alone: plain HTTP still works, an upgrade elsewhere is dropped as before (Node default)', async () => {
-    const plain = await app.inject({ method: 'GET', url: '/ai-calls/availability' });
-    expect(plain.statusCode).toBe(401);
+    // No OUTREACH_INTERNAL_SECRET in this config and not production: the internal route's own 503 (a handler answered).
+    const plain = await app.inject({ method: 'GET', url: '/internal/ai-calls/availability' });
+    expect(plain.statusCode).toBe(503);
     const noUpgrade = await app.inject({ method: 'GET', url: '/telephony/twilio/ai-voice/stream' });
     expect(noUpgrade.statusCode).toBe(403);
     await expect(
       new Promise((resolve, reject) => {
-        const ws = new WebSocket(`${base}/ai-calls/availability`);
+        const ws = new WebSocket(`${base}/internal/ai-calls/availability`);
         ws.once('open', resolve);
         ws.once('error', reject);
       }),

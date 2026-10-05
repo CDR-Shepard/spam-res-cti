@@ -147,120 +147,31 @@ async function liveCall(status = 'in_progress', over: Parameters<typeof activeEn
   registerActiveCall(activeEntry({ aiCallId: ID, orgId: ORG, callSid: CALL_SID, bridge, ...over }));
 }
 
-describe('POST /ai-calls', () => {
-  const post = (payload: unknown, auth = REP_AUTH) =>
-    app.inject({ method: 'POST', url: '/ai-calls', headers: { authorization: auth }, payload: payload as object });
-
-  it('401 without a session', async () => {
-    expect((await post({ testTo: '+16195550199' }, '')).statusCode).toBe(401);
-  });
-
-  it('400 for a body that is neither a record nor a test number', async () => {
-    expect((await post({ objectType: 'Account', recordId: '001000000000001' })).statusCode).toBe(400);
-    expect((await post({ objectType: 'Lead', recordId: 'bad id!' })).statusCode).toBe(400);
-    expect((await post({})).statusCode).toBe(400);
-  });
-
-  it('201 with the call id when the call is placed', async () => {
-    const res = await post({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' });
-    expect(res.statusCode).toBe(201);
-    const body = res.json() as { aiCallId: string; status: string };
-    expect(body.status).toBe('ringing');
-    expect(store.rows.get(body.aiCallId)?.callSid).toBe(CALL_SID);
-    expect(tw.placed).toHaveLength(1);
-  });
-
-  it('409 with the block reason and the row id when the gate refuses', async () => {
-    gateResult = { ok: false, reason: 'no_consent' };
-    const res = await post({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' });
-    expect(res.statusCode).toBe(409);
-    expect(res.json()).toMatchObject({ error: 'no_consent', aiCallId: expect.any(String) });
-    expect(tw.placed).toHaveLength(0);
-  });
-
-  it('502 twilio_error when Twilio refuses', async () => {
-    tw.failPlace = true;
-    const res = await post({ testTo: '+16195550199' }, ADMIN_AUTH);
-    expect(res.statusCode).toBe(502);
-    expect(res.json()).toMatchObject({ error: 'twilio_error' });
-  });
-
-  it('rate limits a user to 10 starts a minute', async () => {
-    await app.close();
-    await build(true);
-    gateResult = { ok: false, reason: 'no_consent' };
-    const codes: number[] = [];
-    for (let i = 0; i < 11; i += 1) codes.push((await post({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' })).statusCode);
-    expect(codes.slice(0, 10).every((c) => c === 409)).toBe(true);
-    expect(codes[10]).toBe(429);
-    // Another user has their own bucket.
-    expect((await post({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' }, ADMIN_AUTH)).statusCode).toBe(409);
-  });
-
-  it('the bucket is the signed-in user, not the bearer token, and the session is looked up once per request', async () => {
-    await app.close();
-    await build(true);
-    gateResult = { ok: false, reason: 'no_consent' };
-    state.sessions.set('Bearer rep-second-device', { ...state.sessions.get(REP_AUTH)! });
-    for (let i = 0; i < 10; i += 1) await post({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' });
-    state.lookups = 0;
-    expect((await post({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' }, 'Bearer rep-second-device')).statusCode).toBe(429);
-    expect(state.lookups).toBe(1);
-    state.lookups = 0;
-    expect((await post({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' }, ADMIN_AUTH)).statusCode).toBe(409);
-    expect(state.lookups).toBe(1);
-  });
-});
-
-describe('GET /ai-calls, /ai-calls/:id, /ai-calls/availability', () => {
-  beforeEach(async () => {
-    await store.insert({ id: ID, orgId: ORG, startedBy: REP, toE164: '+16195550100', status: 'completed', transcript: [{ role: 'agent', text: 'Hi', at: 'x' }] });
-    await store.insert({ orgId: ORG, startedBy: ADMIN, toE164: '+16195550101', status: 'completed' });
-    await store.insert({ orgId: 'other-org', startedBy: 'someone', toE164: '+16195550102', status: 'completed' });
-  });
-  const get = (url: string, auth = REP_AUTH) => app.inject({ method: 'GET', url, headers: { authorization: auth } });
-
-  it('401 without a session', async () => {
-    expect((await get('/ai-calls', '')).statusCode).toBe(401);
-    expect((await get(`/ai-calls/${ID}`, '')).statusCode).toBe(401);
-    expect((await get('/ai-calls/availability', '')).statusCode).toBe(401);
-  });
-
-  it('a rep lists their own calls; an admin lists the org', async () => {
-    expect((await get('/ai-calls')).json().aiCalls).toHaveLength(1);
-    expect((await get('/ai-calls', ADMIN_AUTH)).json().aiCalls).toHaveLength(2);
-  });
-
-  it('400 for a bad limit', async () => {
-    expect((await get('/ai-calls?limit=0')).statusCode).toBe(400);
-    expect((await get('/ai-calls?limit=500')).statusCode).toBe(400);
-  });
-
-  it('one call in the same org, with its transcript; 404 otherwise', async () => {
-    const res = await get(`/ai-calls/${ID}`);
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({ id: ID, transcript: [{ role: 'agent', text: 'Hi' }] });
-    expect((await get('/ai-calls/22222222-2222-4333-8444-555555555555')).statusCode).toBe(404);
-    expect((await get('/ai-calls/not-a-uuid')).statusCode).toBe(404);
-  });
-
-  it('a rep reads only calls they started or were handed; an admin reads any in the org', async () => {
-    const theirs = '33333333-2222-4333-8444-555555555555';
-    const handed = '44444444-2222-4333-8444-555555555555';
-    await store.insert({ id: theirs, orgId: ORG, startedBy: ADMIN, toE164: '+16195550103', status: 'completed' });
-    await store.insert({ id: handed, orgId: ORG, startedBy: ADMIN, handoffUserId: REP, toE164: '+16195550104', status: 'completed' });
-    const res = await get(`/ai-calls/${theirs}`);
+describe('the softphone-only AI call routes are gone (plan 1C: campaigns start calls through the internal trigger)', () => {
+  it.each([
+    ['POST', '/ai-calls', { testTo: '+16195550199' }],
+    ['GET', '/ai-calls', undefined],
+    ['GET', `/ai-calls/${ID}`, undefined],
+    ['GET', '/ai-calls/availability', undefined],
+  ] as const)('%s %s answers 404 even for a signed-in admin', async (method, url, payload) => {
+    const res = await app.inject({ method, url, headers: { authorization: ADMIN_AUTH }, ...(payload ? { payload } : {}) });
     expect(res.statusCode).toBe(404);
-    expect(res.json()).toEqual({ error: 'not_found' });
-    expect((await get(`/ai-calls/${handed}`)).statusCode).toBe(200);
-    expect((await get(`/ai-calls/${theirs}`, ADMIN_AUTH)).statusCode).toBe(200);
   });
 
-  it('availability shows test numbers to admins only', async () => {
-    expect((await get('/ai-calls/availability')).json()).toEqual({ available: true, testNumbers: [] });
-    expect((await get('/ai-calls/availability', ADMIN_AUTH)).json()).toEqual({ available: true, testNumbers: ['+16195550199'] });
-    state.cfg = { ...state.cfg, AI_VOICE: 'off' };
-    expect((await get('/ai-calls/availability')).json().available).toBe(false);
+  it('the internal trigger is still registered: an unsigned POST /internal/ai-calls is 401 bad_signature, not 404', async () => {
+    state.cfg = { ...state.cfg, OUTREACH_INTERNAL_SECRET: 'k'.repeat(40) };
+    const res = await app.inject({ method: 'POST', url: '/internal/ai-calls', headers: { 'content-type': 'application/json' }, payload: '{}' });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: 'bad_signature' });
+  });
+
+  it('and its availability route answers 401 unsigned, 503 internal_disabled with no secret (outside production)', async () => {
+    state.cfg = { ...state.cfg, OUTREACH_INTERNAL_SECRET: 'k'.repeat(40) };
+    expect((await app.inject({ method: 'GET', url: '/internal/ai-calls/availability' })).statusCode).toBe(401);
+    state.cfg = { ...state.cfg, OUTREACH_INTERNAL_SECRET: undefined };
+    const off = await app.inject({ method: 'GET', url: '/internal/ai-calls/availability' });
+    expect(off.statusCode).toBe(503);
+    expect(off.json()).toEqual({ error: 'internal_disabled' });
   });
 });
 

@@ -1,7 +1,7 @@
 /**
- * registerAiVoiceRoutes mounts the internal AI call routes (plan 1C) beside the rep routes,
- * with no database opened at registration, and the rep routes' JSON parsing is untouched by
- * the internal scope's raw-body parser.
+ * registerAiVoiceRoutes mounts the internal AI call routes (plan 1C) with no database opened at
+ * registration, and JSON parsing elsewhere in the app is untouched by the internal scope's
+ * raw-body parser.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -95,8 +95,21 @@ describe('internal AI call routes, as registered by registerAiVoiceRoutes', () =
     expect(res.json()).toMatchObject({ error: 'Not Found', statusCode: 404 });
   });
 
-  it("the rep routes still parse JSON normally (the raw parser is scoped to the internal routes)", async () => {
-    const res = await app.inject({ method: 'POST', url: '/ai-calls', headers: { 'content-type': 'application/json' }, payload: '{"testTo":"+16195550199"}' });
-    expect(res.statusCode).toBe(401); // reached the handler: parsed, then refused for having no session
+  it("a JSON route outside the internal scope still parses JSON normally (the raw parser is scoped to the internal routes)", async () => {
+    const other = Fastify();
+    other.post('/probe', async (req) => ({ type: typeof req.body, body: req.body }));
+    await registerAiVoiceRoutes(other, {
+      store: fakeStore(),
+      twilio: fakeTwilio(),
+      loadRecord: async () => null,
+      gate: async () => ({ ok: false, reason: 'no_consent' }),
+      now: () => NOW,
+      afterCall: async () => {},
+      effects: defaultToolEffects,
+    });
+    await other.ready();
+    const res = await other.inject({ method: 'POST', url: '/probe', headers: { 'content-type': 'application/json' }, payload: '{"a":1}' });
+    await other.close();
+    expect(res.json()).toEqual({ type: 'object', body: { a: 1 } });
   });
 });
