@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { SalesforceClient } from '@cti/salesforce';
+import { QueryTooLargeError, SalesforceApiError, type SalesforceClient } from '@cti/salesforce';
 import { leadId } from '../test/outreach-fixtures.js';
 import { activitySoql, recordsWithNewActivity } from './activity-check.js';
 
@@ -71,5 +71,48 @@ describe('recordsWithNewActivity', () => {
     expect(soql).toEqual([]);
     const failing = { async queryAll() { throw new Error('INVALID_TYPE'); } } as unknown as SalesforceClient;
     await expect(recordsWithNewActivity(failing, [{ sfRecordId: A, since: SINCE }], new Set())).rejects.toThrow('INVALID_TYPE');
+  });
+
+  describe('A1: a batch that overflows the row cap', () => {
+    const C = leadId(3_000);
+    /** Overflows any query naming `heavy`; otherwise answers from `rows`. */
+    function overflowing(heavy: string, rows: Array<Record<string, unknown>> = []) {
+      const soql: string[] = [];
+      const c = {
+        async queryAll(q: string, opts?: { maxRecords?: number }) {
+          soql.push(q);
+          expect(opts?.maxRecords).toBe(2_000);
+          if (q.includes(heavy)) throw new QueryTooLargeError(2_000);
+          return / FROM Task /.test(q) ? rows.filter((r) => q.includes(String(r.WhoId))) : [];
+        },
+      } as unknown as SalesforceClient;
+      return { c, soql };
+    }
+
+    it('retries record by record: the record that alone overflows goes back to research, the others are checked normally', async () => {
+      const { c, soql } = overflowing(A, [{ Id: '00T000000000009AAA', WhoId: B, LastModifiedDate: '2026-10-05T13:00:00.000+0000' }]);
+      const found = await recordsWithNewActivity(c, [{ sfRecordId: A, since: SINCE }, { sfRecordId: B, since: SINCE }, { sfRecordId: C, since: SINCE }], new Set());
+      expect([...found].sort()).toEqual([A, B].sort());
+      // The batch Task query, then one per record (A overflows on Task, so its Event query is not needed), then Events.
+      expect(soql.some((q) => q.includes(`'${C}'`) && !q.includes(`'${A}'`))).toBe(true);
+    });
+
+    it('a single record that overflows counts as new activity without another query', async () => {
+      const { c, soql } = overflowing(A);
+      expect(await recordsWithNewActivity(c, [{ sfRecordId: A, since: SINCE }], new Set())).toEqual(new Set([A]));
+      expect(soql).toHaveLength(1);
+    });
+
+    it('any other Salesforce error during the per-record retry still propagates', async () => {
+      let n = 0;
+      const c = {
+        async queryAll() {
+          n += 1;
+          if (n === 1) throw new QueryTooLargeError(2_000);
+          throw new SalesforceApiError('boom', 500, null);
+        },
+      } as unknown as SalesforceClient;
+      await expect(recordsWithNewActivity(c, [{ sfRecordId: A, since: SINCE }, { sfRecordId: B, since: SINCE }], new Set())).rejects.toBeInstanceOf(SalesforceApiError);
+    });
   });
 });
