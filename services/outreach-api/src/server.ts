@@ -6,8 +6,10 @@ import { buildApp } from './app.js';
 import { WorkosIdentityProvider } from './auth/workos-provider.js';
 import { loadConfig } from './config.js';
 import { liveClientFactory } from './crm/client-factory.js';
-import { createBoss, JobRunner } from './jobs/boss.js';
+import { refreshDueCampaigns } from './campaigns/refresh.js';
+import { createBoss, JobRunner, type JobHandler } from './jobs/boss.js';
 import { QUEUES } from './jobs/queues.js';
+import { SCHEDULES } from './jobs/schedules.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerCampaignRoutes } from './routes/campaigns.js';
@@ -30,13 +32,24 @@ async function dbOk(): Promise<boolean> {
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
-  const runner = new JobRunner({ boss: createBoss(cfg), queues: QUEUES, log: console });
-  await runner.start();
   const db = getDb();
+  const clients = liveClientFactory(db, cfg);
+  // Scheduled ticks (src/jobs/schedules.ts). A feature that is not configured gets no
+  // worker, and JobRunner skips the schedule of a queue that has no worker.
+  const handlers: Record<string, JobHandler> = {
+    ...(cfg.salesforceEnabled
+      ? {
+          'campaign.refresh': async () => {
+            await refreshDueCampaigns({ db, clients, now: new Date(), log: console });
+          },
+        }
+      : {}),
+  };
+  const runner = new JobRunner({ boss: createBoss(cfg), queues: QUEUES, log: console, handlers, schedules: SCHEDULES });
+  await runner.start();
   const idp = cfg.workosEnabled
     ? new WorkosIdentityProvider({ apiKey: cfg.WORKOS_API_KEY!, clientId: cfg.WORKOS_CLIENT_ID!, redirectUri: cfg.WORKOS_REDIRECT_URI! })
     : null;
-  const clients = liveClientFactory(db, cfg);
   const app = await buildApp({
     cfg,
     spaDist: SPA_DIST,
