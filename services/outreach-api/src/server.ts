@@ -1,7 +1,9 @@
 import 'dotenv/config';
+import Anthropic from '@anthropic-ai/sdk';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { getDb, getPool } from '@cti/db';
+import { AnthropicTriageModel } from './ai/model.js';
 import { buildApp } from './app.js';
 import { WorkosIdentityProvider } from './auth/workos-provider.js';
 import { loadConfig } from './config.js';
@@ -17,6 +19,7 @@ import { registerCampaignRoutes } from './routes/campaigns.js';
 import { registerConnectionRoutes } from './routes/connections.js';
 import { registerTeamRoutes } from './routes/team.js';
 import { shutdown } from './shutdown.js';
+import { triageDueRecords } from './triage/run.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Where vite drops the built outreach-web bundle (src/ and dist/ sit at the same depth). */
@@ -37,11 +40,22 @@ async function main(): Promise<void> {
   const clients = liveClientFactory(db, cfg);
   // Scheduled ticks (src/jobs/schedules.ts). A feature that is not configured gets no
   // worker, and JobRunner skips the schedule of a queue that has no worker.
+  const triageModel =
+    cfg.aiEnabled && cfg.ANTHROPIC_API_KEY
+      ? new AnthropicTriageModel({ client: new Anthropic({ apiKey: cfg.ANTHROPIC_API_KEY, timeout: 60_000, maxRetries: 2 }) })
+      : null;
   const handlers: Record<string, JobHandler> = {
     ...(cfg.salesforceEnabled
       ? {
           'campaign.refresh': async () => {
             await refreshDueCampaigns({ db, clients, now: new Date(), log: console });
+          },
+        }
+      : {}),
+    ...(cfg.salesforceEnabled && triageModel
+      ? {
+          'record.triage': async () => {
+            await triageDueRecords({ db, clients, model: triageModel, now: new Date(), log: console });
           },
         }
       : {}),
