@@ -1,0 +1,140 @@
+/**
+ * Salesforce OAuth 2.0 — Authorization Code + PKCE, parameterized.
+ *
+ * Modeled on services/cti-api/src/salesforce/oauth.ts (`buildStartArtifacts`,
+ * `exchangeCodeForTokens`, `refreshAccessToken`), but every setting comes in
+ * through `SalesforceOAuthConfig` (no process.env reads here) and HTTP goes
+ * through an injectable `fetchImpl`.
+ *
+ * Errors: a 400/401 from the token endpoint (invalid_grant, a revoked or
+ * expired refresh token, a bad code or verifier) throws `SalesforceAuthError`
+ * — the connection is unusable. Any other failure (5xx, an unreadable body)
+ * throws `SalesforceApiError` — transient, retry later.
+ */
+import { createHash, randomBytes } from 'node:crypto';
+import { z } from 'zod';
+import { SalesforceApiError, SalesforceAuthError } from './errors.js';
+
+export interface SalesforceOAuthConfig {
+  clientId: string;
+  /** Optional with PKCE; sent when the connected app requires it. */
+  clientSecret?: string;
+  redirectUri: string;
+  /** e.g. `https://login.salesforce.com`. */
+  loginUrl: string;
+}
+
+const SCOPE = 'api refresh_token offline_access';
+const SF_ID = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
+
+const TOKEN_RESPONSE = z.object({
+  access_token: z.string().min(1),
+  refresh_token: z.string().min(1).optional(),
+  instance_url: z.string().url(),
+  id: z.string().url(),
+});
+
+const REFRESH_RESPONSE = z.object({
+  access_token: z.string().min(1),
+  instance_url: z.string().url().optional(),
+});
+
+/** RFC 7636 S256 pair: a 32-byte base64url verifier and its SHA-256 challenge. */
+export function pkcePair(): { verifier: string; challenge: string } {
+  const verifier = randomBytes(32).toString('base64url');
+  const challenge = createHash('sha256').update(verifier).digest('base64url');
+  return { verifier, challenge };
+}
+
+export function buildAuthorizeUrl(
+  cfg: SalesforceOAuthConfig,
+  args: { state: string; codeChallenge: string },
+): string {
+  const url = new URL('/services/oauth2/authorize', cfg.loginUrl);
+  url.search = new URLSearchParams({
+    response_type: 'code',
+    client_id: cfg.clientId,
+    redirect_uri: cfg.redirectUri,
+    state: args.state,
+    code_challenge: args.codeChallenge,
+    code_challenge_method: 'S256',
+    scope: SCOPE,
+    prompt: 'login',
+  }).toString();
+  return url.toString();
+}
+
+export async function exchangeCode(
+  cfg: SalesforceOAuthConfig,
+  code: string,
+  verifier: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ accessToken: string; refreshToken: string | null; instanceUrl: string; sfUserId: string; sfOrgId: string }> {
+  const form = new URLSearchParams({
+    grant_type: 'authorization_code',
+    code,
+    client_id: cfg.clientId,
+    redirect_uri: cfg.redirectUri,
+    code_verifier: verifier,
+  });
+  if (cfg.clientSecret) form.set('client_secret', cfg.clientSecret);
+  const json = await postToken(cfg, form, fetchImpl, 'token exchange');
+  const parsed = TOKEN_RESPONSE.safeParse(json);
+  // The body holds tokens: never attach it to an error.
+  if (!parsed.success) throw new SalesforceApiError('Salesforce token exchange returned an unexpected body', 200, null);
+  // `id` is https://login.salesforce.com/id/{orgId}/{userId}
+  const parts = new URL(parsed.data.id).pathname.split('/').filter(Boolean);
+  const sfUserId = parts[parts.length - 1] ?? '';
+  const sfOrgId = parts[parts.length - 2] ?? '';
+  if (!SF_ID.test(sfUserId) || !SF_ID.test(sfOrgId)) {
+    throw new SalesforceApiError(`Salesforce identity URL has no org and user Id: ${parsed.data.id}`, 200, null);
+  }
+  return {
+    accessToken: parsed.data.access_token,
+    refreshToken: parsed.data.refresh_token ?? null,
+    instanceUrl: parsed.data.instance_url,
+    sfUserId,
+    sfOrgId,
+  };
+}
+
+export async function refreshAccessToken(
+  cfg: SalesforceOAuthConfig,
+  refreshToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ accessToken: string; instanceUrl: string | null }> {
+  const form = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+    client_id: cfg.clientId,
+  });
+  if (cfg.clientSecret) form.set('client_secret', cfg.clientSecret);
+  const json = await postToken(cfg, form, fetchImpl, 'token refresh');
+  const parsed = REFRESH_RESPONSE.safeParse(json);
+  if (!parsed.success) throw new SalesforceApiError('Salesforce token refresh returned an unexpected body', 200, null);
+  return { accessToken: parsed.data.access_token, instanceUrl: parsed.data.instance_url ?? null };
+}
+
+async function postToken(
+  cfg: SalesforceOAuthConfig,
+  form: URLSearchParams,
+  fetchImpl: typeof fetch,
+  what: string,
+): Promise<unknown> {
+  const res = await fetchImpl(new URL('/services/oauth2/token', cfg.loginUrl).toString(), {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+    body: form.toString(),
+  });
+  const text = await res.text();
+  // Error bodies are {"error":"invalid_grant","error_description":"…"}: no secrets.
+  if (res.status === 400 || res.status === 401) {
+    throw new SalesforceAuthError(`Salesforce ${what} failed (${res.status}): ${text}`);
+  }
+  if (res.status >= 400) throw new SalesforceApiError(`Salesforce ${what} failed (${res.status}): ${text}`, res.status, text);
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new SalesforceApiError(`Salesforce ${what} returned a body that is not JSON`, res.status, null);
+  }
+}
