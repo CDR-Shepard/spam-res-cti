@@ -4,11 +4,11 @@
 
 **Goal:** An admin enters a Salesforce query in outreach-web, ticks the leads to call, and for each lead the system reads the whole Salesforce record, its related records, its activity and its Chatter. Claude then writes the best call plan for finding out whether the person still wants to sell their house. A person approves each plan, and the existing AI voice engine in `@cti/api` places the call through every compliance gate it already has.
 
-**Architecture:** An AI call campaign is a 1A campaign with `mode = 'ai_call'`. It reuses 1A's source, refresh, enrollment, one-campaign-per-person keys, exits, pauses and Needs Review. It adds four things: a lead selection, a research-and-plan job (`call.prepare`), a review board, and two ticks. The `ai_call.place` tick paces approved calls, and the `ai_call.results` tick folds call outcomes back into enrollments. outreach-api never dials. It asks `@cti/api` over Railway's private network, through a new HMAC-signed `POST /internal/ai-calls`. cti-api re-reads the record with the tenant's integration connection and runs `gateAiCall` and `startAiCall` unchanged. It also injects the approved plan into the agent's instructions as fenced data. Results are read straight from `ai_calls` in the shared Postgres. The softphone's AI controls are removed last.
+**Architecture:** An AI call campaign is a 1A campaign with `mode = 'ai_call'`. It reuses 1A's source, refresh, enrollment, one-campaign-per-person keys, exits, pauses and Needs Review. It adds four things: a lead selection, a research-and-plan job (`call.prepare`), a review board, and two ticks. The `ai_call.place` tick paces approved calls, and the `ai_call.results` tick folds call outcomes back into enrollments. outreach-api never dials. It asks `@cti/api` over Railway's private network, through a new HMAC-signed `POST /internal/ai-calls`. cti-api re-reads the record with the tenant's integration connection and runs `gateAiCall` and `startAiCall` unchanged. It also injects the approved plan into the agent's instructions as fenced data. Results are read straight from `ai_calls` in the shared Postgres. The softphone's AI controls are removed last. Part 0 (Tasks 0A–0F) comes first: outreach-web signs people in with the same Salesforce login as the CTI (no WorkOS needed). It maps them to their existing CTI user and keeps no Salesforce token.
 
 **Tech Stack:** TypeScript 5.6 strict ESM, Fastify 4, Drizzle 0.36.4, zod 3, pg-boss 12.30, `@anthropic-ai/sdk` (Claude `claude-sonnet-5-5` for plans), `@cti/salesforce` REST client, React 18 + TanStack Router/Query + Tailwind 4 + shadcn (outreach-web), vitest.
 
-**Builds on:** plan 1A, on branch `feat/outreach-sf-campaigns` (its last commit is `51f5f1c`). The spec is `docs/superpowers/specs/2026-10-04-outreach-salesforce-campaigns-design.md` on the docs branch, and the 1A plan is `docs/superpowers/plans/2026-10-04-sf-campaigns-1a-dry-run.md`. The AI voice engine is on `main`: `services/cti-api/src/ai-voice/`, migration `0050_ai_calls.sql` and `docs/runbooks/ai-voice.md`. Plan 1B (live rep calls, the `sf_writes` outbox) is **not** a prerequisite: 1C neither reads nor writes anything 1B adds.
+**Builds on:** plan 1A, on branch `feat/outreach-sf-campaigns` (its last code commit before this plan is `9d0a231`). The spec is `docs/superpowers/specs/2026-10-04-outreach-salesforce-campaigns-design.md` on the docs branch, and the 1A plan is `docs/superpowers/plans/2026-10-04-sf-campaigns-1a-dry-run.md`. The AI voice engine is on `main`: `services/cti-api/src/ai-voice/`, migration `0050_ai_calls.sql` and `docs/runbooks/ai-voice.md`. Plan 1B (live rep calls, the `sf_writes` outbox) is **not** a prerequisite: 1C neither reads nor writes anything 1B adds.
 
 ---
 
@@ -132,6 +132,11 @@ Each one is deliberate, and a reviewer can reject it here before any code exists
 
 11. **Test calls move to outreach-web.** An admin uses the "Test call to my phone" card on Settings. outreach-api relays the request to the internal endpoint as `target.kind = 'test'`, and cti-api still requires the requesting user to be an admin and the number to be in `AI_VOICE_TEST_NUMBERS`. The test-number list comes from a signed `GET /internal/ai-calls/availability`, so it lives in one place (cti-api's environment).
 
+12. **Sign-in is Salesforce, through the CTI's External Client App (Part 0).** outreach-web signs people in with `Caller_Reputation_CTI` (PKCE, no secret) at `/api/auth/salesforce/callback`, a separate callback from the integration connection's.
+    - **Matching:** the identity maps to an EXISTING tenant (`organizations.sf_org_id`) and an EXISTING human user. The user is found first through the CTI's `salesforce_connections` (same Salesforce user), then by email exactly as cti-api does (including its `sf-<user>@<org>.salesforce.local` fallback).
+    - **Nothing is created and nothing is stored:** no tenant, no user, no `is_admin` change, and the Salesforce token is revoked and dropped. `SALESFORCE_ALLOWED_ORG_ID` is enforced.
+    - **Why not an IdentityProvider implementation:** the WorkOS port is shaped around memberships, organizations and invites, which Salesforce sign-in has none of. A small, separate route (`routes/auth-salesforce.ts`) shares the session handoff (`auth/handoff.ts`) instead. WorkOS stays optional; unset, its button is hidden.
+
 ---
 
 ## How a lead moves through the plan
@@ -159,6 +164,10 @@ Statuses stay 1A's (`active`, `needs_review`, `handed_off`, `exited`, `completed
 - `packages/db/migrations/0053_ai_call_requests.sql` (new), `packages/db/src/migration-0053.test.ts` (new), `packages/db/src/schema.ts` (modify: the `aiCallRequests` table).
 - `packages/contracts/src/campaigns.ts` (modify: mode, candidates, selection), `packages/contracts/src/call-plans.ts` (new), `packages/contracts/src/ai-calls.ts` (new), `packages/contracts/src/index.ts`.
 - `packages/auth/src/internal-signature.ts` (new), `packages/auth/src/index.ts`.
+
+**Sign-in (Part 0)**
+- **New:** `services/outreach-api/src/auth/salesforce-identity.ts`, `auth/salesforce-user.ts`, `auth/handoff.ts`, `routes/auth-salesforce.ts` and `test/fake-salesforce-login.ts`.
+- **Modified:** `routes/auth.ts`, `config.ts`, `server.ts`, `packages/salesforce/src/oauth.ts`, `packages/contracts/src/session.ts`, and `apps/outreach-web/src/components/sign-in-page.tsx` and `lib/auth.tsx`.
 
 **outreach-api** (`services/outreach-api/src/`)
 - **Campaigns:** `campaigns/member-cache.ts`, `campaigns/candidates.ts` and `campaigns/selection.ts` (all new). `campaigns/refresh.ts`, `campaigns/enroll.ts` and `campaigns/state.ts` (modify).
@@ -190,6 +199,12 @@ Statuses stay 1A's (`active`, `needs_review`, `handed_off`, `exited`, `completed
 
 | # | Task | Main files |
 |---|---|---|
+| 0A | Sign-in configuration and the providers contract | `config.ts`, `contracts/session.ts` |
+| 0B | Salesforce identity (code + PKCE → org, user, email), token revoked | `auth/salesforce-identity.ts`, `@cti/salesforce` `oauth.ts`, `test/fake-salesforce-login.ts` |
+| 0C | Match the identity to an existing CTI user (never create) | `auth/salesforce-user.ts` |
+| 0D | Salesforce sign-in routes and `/auth/providers` | `routes/auth-salesforce.ts`, `auth/handoff.ts`, `routes/auth.ts` |
+| 0E | Web: Sign in with Salesforce | `sign-in-page.tsx`, `lib/auth.tsx` |
+| 0F | Sign-in runbook, env example and IaC | `outreach-sf-campaigns.md`, `.env.example`, `.railway/railway.ts` |
 | 1 | Migration 0052 and Drizzle schema | `0052_ai_call_campaigns.sql`, `schema-outreach.ts` |
 | 2 | Campaign mode and lead-selection contracts | `contracts/campaigns.ts`, `campaigns/state.ts`, `routes/campaigns.ts` |
 | 3 | Member-id cache and the selection store | `campaigns/member-cache.ts`, `campaigns/selection.ts` |
@@ -228,6 +243,650 @@ Statuses stay 1A's (`active`, `needs_review`, `handed_off`, `exited`, `completed
 | 36 | cti-web: remove the AI call UI (last) | `App.tsx`, `nav.ts`, AI components |
 
 ---
+## Part 0: Sign in with Salesforce
+
+outreach-web signs people in with the same Salesforce login the CTI uses, so nobody needs a WorkOS account. WorkOS stays in the code as an optional second button, hidden when it is not configured.
+
+**What is fixed (from the operator):**
+- **The app:** Salesforce production org, External Client App `Caller_Reputation_CTI`, PKCE required, no client secret. Its consumer key is already on outreach-api as `SALESFORCE_CLIENT_ID`, with `SALESFORCE_LOGIN_URL`.
+- **The callback:** the app's callback list already has `https://outreach-api-production-a07b.up.railway.app/api/auth/salesforce/callback`. The path is exactly `/api/auth/salesforce/callback`, configured as `SALESFORCE_SIGNIN_REDIRECT_URI`. That is a different variable from `SALESFORCE_REDIRECT_URI`, which is the integration connection's callback (`/api/connections/salesforce/callback`).
+
+**How cti-api signs in** (`services/cti-api/src/routes/auth.ts`, `POST /auth/salesforce/start` and `GET /auth/salesforce/callback`; read before Task 0C):
+1. It exchanges the code with PKCE, and the org and user Ids come from the token's `id` URL.
+2. If `SALESFORCE_ALLOWED_ORG_ID` is set, the first 15 characters of the org Id must match it, or the sign-in gets a 403.
+3. It reads `/services/oauth2/userinfo`, retrying with backoff, because it can 401 just after the exchange.
+4. It finds the tenant by `organizations.sf_org_id`, and the human user with `humanUserByEmail(org.id, email)`, where `email` = userinfo email, or `sf-<userId>@<orgId>.salesforce.local` when there is none (lower-cased).
+5. **Unlike outreach**, it creates a missing tenant (`createTenant`) or user, re-syncs `is_admin` to the Salesforce profile, and stores the tokens in `salesforce_connections`.
+
+**What outreach does differently (the rules for Part 0):**
+- **Never creates anything.** No tenant and no user. An unknown org → `no_tenant`. A known org with no matching user → `no_account` ("sign in to the CTI once, or ask an admin").
+- **Matches the user** first through the CTI's `salesforce_connections` (same Salesforce org and user Id, by their 15-character cores, in that tenant), then by email exactly as cti-api does.
+- **Admin rights** come from the CTI `users` row as it stands. outreach never changes `is_admin`.
+- **Keeps no Salesforce token.** The tokens live only in memory for the callback. They are revoked best-effort once identity is read, and never written anywhere.
+- **Enforces `SALESFORCE_ALLOWED_ORG_ID`** when it is set (the same 15-character rule).
+- **Issues the same outreach session** (`issueSession`, then the existing handoff cookie and `/auth/callback` page).
+- **State and CSRF:** the existing signed `state` (`auth/state.ts`) plus the nonce cookie bound to the browser. The PKCE verifier rides in a signed, httpOnly cookie scoped to the callback path.
+
+### Task 0A: Sign-in configuration and the providers contract
+
+**Files:**
+- Modify: `services/outreach-api/src/config.ts`, `services/outreach-api/src/config.test.ts`
+- Modify: `packages/contracts/src/session.ts` (+ its test, if one exists; otherwise `packages/contracts/src/session.test.ts` is created)
+
+**Interfaces:**
+- Produces:
+  - **Config:**
+    - `AppConfig.SALESFORCE_SIGNIN_REDIRECT_URI?: string` (URL).
+    - `AppConfig.SALESFORCE_ALLOWED_ORG_ID?: string` (15 or 18 alphanumerics).
+    - `AppConfig.salesforceSignInEnabled: boolean`, true when `SALESFORCE_CLIENT_ID && SALESFORCE_SIGNIN_REDIRECT_URI`.
+    - `salesforceEnabled` (the integration connection) is unchanged: `SALESFORCE_CLIENT_ID && SALESFORCE_REDIRECT_URI`.
+  - **Contracts:** `AuthProviders = z.object({ salesforce: z.boolean(), workos: z.boolean() })` and its type, exported from `@cti/contracts`.
+
+- [ ] **Step 1: Write the failing tests**
+
+`config.test.ts` adds:
+- `salesforceSignInEnabled` is true with `SALESFORCE_CLIENT_ID` + `SALESFORCE_SIGNIN_REDIRECT_URI` alone (no `SALESFORCE_REDIRECT_URI`), and `salesforceEnabled` is then false.
+- `SALESFORCE_SIGNIN_REDIRECT_URI` without `SALESFORCE_CLIENT_ID` throws `/SALESFORCE_CLIENT_ID/`.
+- `SALESFORCE_CLIENT_ID` with neither redirect throws a message naming both `SALESFORCE_REDIRECT_URI` and `SALESFORCE_SIGNIN_REDIRECT_URI`. The existing `/SALESFORCE_REDIRECT_URI/` assertion keeps passing.
+- `SALESFORCE_ALLOWED_ORG_ID` accepts `00D000000000001` and `00D000000000001AAA`, and rejects `00D-bad`.
+- An empty string for either new variable counts as unset (the existing blank-stripping rule).
+
+The contracts test checks that `AuthProviders.parse({ salesforce: true, workos: false })` round-trips.
+
+Run: `npm -w services/outreach-api run test -- config` and `npm -w packages/contracts run test -- session`
+Expected: FAIL.
+
+- [ ] **Step 2: Implement**
+
+`config.ts` schema, after `SALESFORCE_REDIRECT_URI`:
+
+```ts
+  /** `${API_PUBLIC_URL}/api/auth/salesforce/callback` — people sign in to outreach-web with Salesforce (same External Client App as the CTI). */
+  SALESFORCE_SIGNIN_REDIRECT_URI: z.string().url().optional(),
+  /** When set, only this Salesforce org may sign in (first 15 characters compared), as in cti-api. */
+  SALESFORCE_ALLOWED_ORG_ID: z.string().regex(/^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/, 'SALESFORCE_ALLOWED_ORG_ID must be a 15- or 18-character org Id').optional(),
+```
+
+In `parseConfig`, replace the Salesforce pairing check:
+
+```ts
+  const redirects = [c.SALESFORCE_REDIRECT_URI, c.SALESFORCE_SIGNIN_REDIRECT_URI].filter(Boolean).length;
+  if (redirects > 0 && !c.SALESFORCE_CLIENT_ID) {
+    throw new Error('Invalid environment configuration:\n  - Salesforce: a redirect uri is set but SALESFORCE_CLIENT_ID is missing');
+  }
+  if (c.SALESFORCE_CLIENT_ID && redirects === 0) {
+    throw new Error('Invalid environment configuration:\n  - Salesforce: SALESFORCE_CLIENT_ID needs SALESFORCE_REDIRECT_URI (integration connection) and/or SALESFORCE_SIGNIN_REDIRECT_URI (sign-in)');
+  }
+```
+
+The return value gains `salesforceSignInEnabled: Boolean(c.SALESFORCE_CLIENT_ID && c.SALESFORCE_SIGNIN_REDIRECT_URI)`, and `salesforceEnabled` becomes `Boolean(c.SALESFORCE_CLIENT_ID && c.SALESFORCE_REDIRECT_URI)`. Add `salesforceSignInEnabled` to the `AppConfig` type.
+
+`packages/contracts/src/session.ts`:
+
+```ts
+/** GET /api/auth/providers — which sign-in buttons the web shows. */
+export const AuthProviders = z.object({ salesforce: z.boolean(), workos: z.boolean() });
+export type AuthProviders = z.infer<typeof AuthProviders>;
+```
+
+- [ ] **Step 3: Verify and commit**
+
+Run: `npm -w packages/contracts run build && npm run typecheck && npm test`.
+Expected: PASS.
+
+```bash
+git add services/outreach-api/src/config.ts services/outreach-api/src/config.test.ts packages/contracts/src/session.ts packages/contracts/src/session.test.ts
+git commit -m "feat(outreach-api): configuration for signing in with Salesforce"
+```
+
+---
+
+### Task 0B: Salesforce identity (code + PKCE → org, user, email), token discarded
+
+**Files:**
+- Modify: `packages/salesforce/src/oauth.ts`, `packages/salesforce/src/oauth.test.ts`. Add an optional `scope` to `buildAuthorizeUrl`, and add `revokeToken`.
+- Create: `services/outreach-api/src/test/fake-salesforce-login.ts` (the fake Salesforce for Tasks 0B and 0D)
+- Create: `services/outreach-api/src/auth/salesforce-identity.ts`, `services/outreach-api/src/auth/salesforce-identity.test.ts`
+
+**Interfaces:**
+- Produces:
+  - `@cti/salesforce`:
+    - `buildAuthorizeUrl(cfg, { state, codeChallenge, scope? })`. The default scope is unchanged (`api refresh_token offline_access`).
+    - `revokeToken(cfg: SalesforceOAuthConfig, token: string, fetchImpl?: typeof fetch): Promise<void>`, which POSTs `token=<t>` to `${loginUrl}/services/oauth2/revoke` and never throws.
+  - `salesforce-identity.ts`:
+    - `SalesforceSignInConfig = { clientId: string; redirectUri: string; loginUrl: string; allowedOrgId: string | null }`.
+    - `SIGN_IN_SCOPE = 'api refresh_token offline_access'`, the scope the CTI requests from the same app. A sign-in must not ask for a scope set the External Client App has not been tested with. The refresh token it yields is revoked at once.
+    - `SalesforceIdentity = { sfOrgId: string; sfUserId: string; email: string | null; name: string | null }`.
+    - `class SalesforceSignInError extends Error { reason: 'invalid_code' | 'org_not_allowed' | 'salesforce_unavailable' }`.
+    - `salesforceSignInUrl(cfg, args: { state: string; codeChallenge: string }): string`.
+    - `readSalesforceIdentity(cfg, code: string, verifier: string, deps?: { fetchImpl?: typeof fetch; sleep?: (ms: number) => Promise<void> }): Promise<SalesforceIdentity>`.
+  - `test/fake-salesforce-login.ts`: `fakeSalesforceLogin(opts: { orgId?: string; userId?: string; email?: string | null; name?: string; tokenStatus?: number; userinfoFailures?: number; userinfoOrgId?: string }): { fetchImpl: typeof fetch; calls: Array<{ url: string; body: string }> }`. It answers:
+    - `POST …/services/oauth2/token` with `{ access_token: 'AT', refresh_token: 'RT', instance_url: 'https://acme.my.salesforce.com', id: 'https://login.salesforce.com/id/<orgId>/<userId>' }` (or `tokenStatus` with `{ error: 'invalid_grant' }`);
+    - `GET …/services/oauth2/userinfo` with `{ user_id, organization_id, email, name }` after `userinfoFailures` 401s;
+    - `POST …/services/oauth2/revoke` with 200.
+
+- [ ] **Step 1: Write the failing tests**
+
+`oauth.test.ts`:
+- `buildAuthorizeUrl` with `scope: 'x y'` sends `scope=x+y`; without it, the scope is unchanged.
+- `revokeToken` POSTs a form body `token=RT` to `/services/oauth2/revoke`. It resolves on a 400, a 500 or a network error.
+
+`salesforce-identity.test.ts`, using `fakeSalesforceLogin` and a no-op `sleep`:
+
+| # | Case | Expectation |
+|---|---|---|
+| 1 | Happy path | The token request carries `grant_type=authorization_code`, `code`, `client_id`, `redirect_uri` = the sign-in URI, `code_verifier` and NO `client_secret`. Result `{ sfOrgId, sfUserId, email: 'rep@gg.com', name }` |
+| 2 | Revocation | `RT` is revoked (a call to `/services/oauth2/revoke` with `token=RT`). With no refresh token, `AT` is revoked. Revocation also happens when the userinfo read fails |
+| 3 | Email | Lower-cased and trimmed; an empty email → `null` |
+| 4 | `userinfoFailures: 2` | Succeeds on the third read (delays `[0, 500, 1500, 3500]`, as cti-api) |
+| 5 | Userinfo failing four times | `SalesforceSignInError('salesforce_unavailable')` |
+| 6 | Token 400 `invalid_grant` | `SalesforceSignInError('invalid_code')`; a token 500 → `salesforce_unavailable` |
+| 7 | `allowedOrgId` set to another org | `org_not_allowed`, thrown BEFORE userinfo is read, with the token still revoked; the 15-character form of the same org passes |
+| 8 | Userinfo reports a different `organization_id` or `user_id` than the `id` URL | `salesforce_unavailable` (an inconsistent identity is never used) |
+| 9 | Secrets | No error message or thrown value contains `AT`, `RT` or the code |
+
+Run: `npm -w packages/salesforce run test -- oauth` and `npm -w services/outreach-api run test -- salesforce-identity`
+Expected: FAIL.
+
+- [ ] **Step 2: Implement**
+
+`packages/salesforce/src/oauth.ts`:
+- `buildAuthorizeUrl`'s `args` gains `scope?: string`, used as `scope: args.scope ?? SCOPE`.
+- Add:
+
+```ts
+/** Best-effort token revocation (RFC 7009 as Salesforce implements it). Never throws: a sign-in must not fail on it. */
+export async function revokeToken(cfg: SalesforceOAuthConfig, token: string, fetchImpl: typeof fetch = fetch): Promise<void> {
+  try {
+    await fetchImpl(new URL('/services/oauth2/revoke', cfg.loginUrl).toString(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token }).toString(),
+      signal: AbortSignal.timeout(SALESFORCE_REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    // ignored on purpose
+  }
+}
+```
+
+`services/outreach-api/src/auth/salesforce-identity.ts`:
+
+```ts
+/**
+ * Sign-in with Salesforce: who is this person? Code + PKCE exchange, then the userinfo
+ * endpoint, and the tokens are revoked and dropped. Nothing here touches the database.
+ */
+import { buildAuthorizeUrl, exchangeCode, revokeToken, SalesforceAuthError, type SalesforceOAuthConfig } from '@cti/salesforce';
+import { z } from 'zod';
+
+export const SIGN_IN_SCOPE = 'api refresh_token offline_access';
+const USERINFO_DELAYS_MS = [0, 500, 1_500, 3_500];
+const SF_ID_CORE = 15;
+
+export interface SalesforceSignInConfig { clientId: string; redirectUri: string; loginUrl: string; allowedOrgId: string | null }
+export interface SalesforceIdentity { sfOrgId: string; sfUserId: string; email: string | null; name: string | null }
+
+export class SalesforceSignInError extends Error {
+  constructor(readonly reason: 'invalid_code' | 'org_not_allowed' | 'salesforce_unavailable') {
+    super(`Salesforce sign-in failed: ${reason}`);
+    this.name = 'SalesforceSignInError';
+  }
+}
+
+const UserInfo = z.object({ user_id: z.string().optional(), organization_id: z.string().optional(), email: z.string().optional(), name: z.string().optional() });
+const core = (id: string): string => id.slice(0, SF_ID_CORE);
+const oauthCfg = (cfg: SalesforceSignInConfig): SalesforceOAuthConfig => ({ clientId: cfg.clientId, redirectUri: cfg.redirectUri, loginUrl: cfg.loginUrl });
+
+export function salesforceSignInUrl(cfg: SalesforceSignInConfig, args: { state: string; codeChallenge: string }): string {
+  return buildAuthorizeUrl(oauthCfg(cfg), { ...args, scope: SIGN_IN_SCOPE });
+}
+
+async function readUserInfo(accessToken: string, instanceUrl: string, fetchImpl: typeof fetch, sleep: (ms: number) => Promise<void>): Promise<z.infer<typeof UserInfo>> {
+  for (const delay of USERINFO_DELAYS_MS) {
+    if (delay > 0) await sleep(delay);
+    try {
+      const res = await fetchImpl(new URL('/services/oauth2/userinfo', instanceUrl).toString(), { headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' } });
+      if (res.status === 200) {
+        const parsed = UserInfo.safeParse(await res.json());
+        if (parsed.success) return parsed.data;
+      }
+    } catch {
+      // retried below
+    }
+  }
+  throw new SalesforceSignInError('salesforce_unavailable');
+}
+
+export async function readSalesforceIdentity(
+  cfg: SalesforceSignInConfig,
+  code: string,
+  verifier: string,
+  deps: { fetchImpl?: typeof fetch; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<SalesforceIdentity> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let tok: Awaited<ReturnType<typeof exchangeCode>>;
+  try {
+    tok = await exchangeCode(oauthCfg(cfg), code, verifier, fetchImpl);
+  } catch (err) {
+    throw new SalesforceSignInError(err instanceof SalesforceAuthError ? 'invalid_code' : 'salesforce_unavailable');
+  }
+  try {
+    if (cfg.allowedOrgId && core(tok.sfOrgId) !== core(cfg.allowedOrgId)) throw new SalesforceSignInError('org_not_allowed');
+    const info = await readUserInfo(tok.accessToken, tok.instanceUrl, fetchImpl, sleep);
+    if ((info.organization_id && core(info.organization_id) !== core(tok.sfOrgId)) || (info.user_id && core(info.user_id) !== core(tok.sfUserId))) {
+      throw new SalesforceSignInError('salesforce_unavailable');
+    }
+    const email = info.email?.trim().toLowerCase() || null;
+    return { sfOrgId: tok.sfOrgId, sfUserId: tok.sfUserId, email, name: info.name?.trim() || null };
+  } finally {
+    // Sign-in only: the tokens are never stored, and are revoked so they cannot outlive this request.
+    await revokeToken(oauthCfg(cfg), tok.refreshToken ?? tok.accessToken, fetchImpl);
+  }
+}
+```
+
+`fake-salesforce-login.ts` implements the fake described in Interfaces. It is a `vi.fn`-free plain function that switches on `new URL(url).pathname`, so both this test and the route test (Task 0D) use it.
+
+- [ ] **Step 3: Verify and commit**
+
+Run: `npm -w packages/salesforce run test`, `npm -w services/outreach-api run test -- salesforce-identity`, then `npm run typecheck && npm test`.
+Expected: PASS.
+
+```bash
+git add packages/salesforce/src/oauth.ts packages/salesforce/src/oauth.test.ts services/outreach-api/src/test/fake-salesforce-login.ts services/outreach-api/src/auth/salesforce-identity.ts services/outreach-api/src/auth/salesforce-identity.test.ts
+git commit -m "feat(outreach-api): read a Salesforce identity for sign-in and revoke the token"
+```
+
+---
+
+### Task 0C: Match the Salesforce identity to an existing CTI user (never create)
+
+**Files:**
+- Create: `services/outreach-api/src/auth/salesforce-user.ts`, `services/outreach-api/src/auth/salesforce-user.test.ts` (PG lane)
+
+**Interfaces:**
+- Consumes: `SalesforceIdentity` (Task 0B), `humanUserByEmail` (`@cti/auth`), and `schema.organizations` / `schema.users` / `schema.salesforceConnections`.
+- Produces:
+  - `type SalesforceUserMatch = { ok: true; userId: string; orgId: string } | { ok: false; reason: 'no_tenant' | 'tenant_suspended' | 'no_account' }`.
+  - `syntheticSalesforceEmail(id): string`, which is `sf-<userId>@<orgId>.salesforce.local` lower-cased, cti-api's fallback.
+  - `matchSalesforceUser(db: Db, id: SalesforceIdentity): Promise<SalesforceUserMatch>`.
+
+- [ ] **Step 1: Write the failing PG tests**
+
+| # | Case | Expectation |
+|---|---|---|
+| 1 | Org whose `sf_org_id` is the 18-character Id; a user with a `salesforce_connections` row (same Salesforce user Id) | `{ ok: true, userId, orgId }`, even when that user's CTI email differs from the Salesforce email |
+| 2 | 15-character vs 18-character forms | Match both ways (org and user) |
+| 3 | No connection row; a human user with the Salesforce email | Matched by email (lower-cased) |
+| 4 | No email from Salesforce; a user `sf-005…@00D….salesforce.local` | Matched (cti-api's synthetic email) |
+| 5 | Connection row pointing at a user in ANOTHER org | Ignored; falls through to email in this org |
+| 6 | A `kind = 'service'` user with the email | Not matched (`no_account`) |
+| 7 | Unknown Salesforce org | `no_tenant`, and NO row is inserted anywhere (count `organizations` and `users` before and after) |
+| 8 | Known org, no matching user | `no_account`, no insert |
+| 9 | Org status `suspended` | `tenant_suspended` |
+| 10 | Admin rights | The match never updates `users.is_admin` (an admin stays admin, a rep stays rep, whatever Salesforce says) |
+
+- [ ] **Step 2: Implement `salesforce-user.ts`**
+
+```ts
+/**
+ * Map a Salesforce identity to the CTI user it already is. outreach never creates a tenant
+ * or a user from a sign-in, and never changes is_admin: the CTI owns both (cti-api's own
+ * Salesforce login creates and re-syncs them).
+ */
+import { and, eq, sql } from 'drizzle-orm';
+import { humanUserByEmail } from '@cti/auth';
+import { schema, type Db } from '@cti/db';
+import type { SalesforceIdentity } from './salesforce-identity.js';
+
+const CORE = 15;
+export type SalesforceUserMatch = { ok: true; userId: string; orgId: string } | { ok: false; reason: 'no_tenant' | 'tenant_suspended' | 'no_account' };
+
+export const syntheticSalesforceEmail = (id: Pick<SalesforceIdentity, 'sfOrgId' | 'sfUserId'>): string => `sf-${id.sfUserId}@${id.sfOrgId}.salesforce.local`.toLowerCase();
+
+export async function matchSalesforceUser(db: Db, id: SalesforceIdentity): Promise<SalesforceUserMatch> {
+  const orgCore = id.sfOrgId.slice(0, CORE);
+  const [org] = await db
+    .select({ id: schema.organizations.id, status: schema.organizations.status })
+    .from(schema.organizations)
+    .where(sql`left(${schema.organizations.sfOrgId}, ${CORE}) = ${orgCore}`)
+    .limit(1);
+  if (!org) return { ok: false, reason: 'no_tenant' };
+  if (org.status !== 'active') return { ok: false, reason: 'tenant_suspended' };
+
+  const [connected] = await db
+    .select({ userId: schema.users.id })
+    .from(schema.salesforceConnections)
+    .innerJoin(schema.users, eq(schema.users.id, schema.salesforceConnections.userId))
+    .where(and(
+      eq(schema.users.orgId, org.id),
+      eq(schema.users.kind, 'human'),
+      sql`left(${schema.salesforceConnections.sfUserId}, ${CORE}) = ${id.sfUserId.slice(0, CORE)}`,
+      sql`left(${schema.salesforceConnections.sfOrgId}, ${CORE}) = ${orgCore}`,
+    ))
+    .limit(1);
+  if (connected) return { ok: true, userId: connected.userId, orgId: org.id };
+
+  const email = (id.email ?? syntheticSalesforceEmail(id)).trim().toLowerCase();
+  const user = await db.query.users.findFirst({ where: humanUserByEmail(org.id, email), columns: { id: true } });
+  return user ? { ok: true, userId: user.id, orgId: org.id } : { ok: false, reason: 'no_account' };
+}
+```
+
+- [ ] **Step 3: Verify and commit**
+
+Run: `npm run test:pg`, then `npm run typecheck && npm test`.
+Expected: PASS.
+
+```bash
+git add services/outreach-api/src/auth/salesforce-user.ts services/outreach-api/src/auth/salesforce-user.test.ts
+git commit -m "feat(outreach-api): match a Salesforce sign-in to its existing CTI user, never creating one"
+```
+
+---
+
+### Task 0D: The Salesforce sign-in routes
+
+**Files:**
+- Create: `services/outreach-api/src/auth/handoff.ts` (moved out of `routes/auth.ts`, behaviour unchanged): `HANDOFF_COOKIE`, `HANDOFF_PATH`, `appUrl`, `signInRedirect` and `issueHandoff(reply, cfg, userId, returnTo?)`
+- Create: `services/outreach-api/src/routes/auth-salesforce.ts`, `services/outreach-api/src/routes/auth-salesforce.test.ts`
+- Modify: `services/outreach-api/src/routes/auth.ts` (imports the moved helpers; adds `GET /auth/providers`), `services/outreach-api/src/routes/auth.test.ts` (one case), `services/outreach-api/src/server.ts`
+
+**Interfaces:**
+- Consumes: Tasks 0A–0C, `signState` / `verifyState` (`auth/state.ts`), `pkcePair` (`@cti/salesforce`) and `issueSession`.
+- Produces:
+  - **Routes** (under `/api`):
+    - `GET /auth/salesforce/start?returnTo=` → 302 to Salesforce.
+    - `GET /auth/salesforce/callback` → 302 to `/auth/callback` (with the handoff cookie) or to `/sign-in?error=<reason>`.
+    - `GET /auth/providers` → `AuthProviders`.
+  - **Wiring:** `registerSalesforceAuthRoutes(app, deps: { cfg: AppConfig; db: Db; signIn: SalesforceSignInConfig | null; fetchImpl?: typeof fetch; sleep?: (ms: number) => Promise<void> })`.
+  - **Cookies:**
+    - `SF_SIGNIN_COOKIE = 'outreach_sf_signin'`: signed, httpOnly, `sameSite: 'lax'`, `secure` in production, `path: '/api/auth/salesforce/callback'`, `maxAge: 600`. Its value is `<nonce>.<pkce verifier>`.
+
+**The flow.**
+1. **Start.** `signState(SESSION_SECRET, { returnTo })` gives `{ state, nonce }`, and `pkcePair()` gives `{ verifier, challenge }`. Set the cookie to `${nonce}.${verifier}` (signed), then redirect to `salesforceSignInUrl(cfg, { state, codeChallenge: challenge })`.
+2. **Callback.** Clear the cookie on every attempt first, then run these checks:
+   - `verifyState` must pass;
+   - the cookie must unsign and its nonce must equal `state.nonce`;
+   - `error` / `code` are handled.
+
+   Then call `readSalesforceIdentity(cfg, code, verifier)` and `matchSalesforceUser(db, identity)`, and finish with `issueHandoff(reply, cfg, userId, state.returnTo)`. This is the same session and handoff the WorkOS callback issues today.
+
+**Error reasons** (each redirects to `/sign-in?error=…`):
+
+| Reason | When |
+|---|---|
+| `sign_in_disabled` | `signIn` is null (Salesforce sign-in not configured) |
+| `bad_return_to` | The start route's `returnTo` is unsafe |
+| `bad_state` | `state` is invalid or expired, or the cookie is missing, unsigned or carries another nonce |
+| `access_denied` / `missing_code` | Salesforce's `error`, or no code |
+| `invalid_code` / `salesforce_unavailable` / `org_not_allowed` | `SalesforceSignInError.reason` |
+| `no_tenant` / `tenant_suspended` / `no_account` | `matchSalesforceUser` |
+| `tenant_suspended` / `forbidden` | `issueSession` throws `SuspendedTenantError` / `ServiceUserSessionError` |
+| `server_error` | Anything else (logged with the error name only) |
+
+- [ ] **Step 1: Write the failing tests**
+
+`auth-salesforce.test.ts` (route shapes with `buildApp` + `fakeDb`, `fakeSalesforceLogin` as `fetchImpl`, and `vi.mock('../auth/salesforce-user.js', …)` spreading `importOriginal` so the match is stubbed):
+
+| # | Case | Expectation |
+|---|---|---|
+| 1 | Start | 302 to `${SALESFORCE_LOGIN_URL}/services/oauth2/authorize` with `client_id`, `redirect_uri` = `SALESFORCE_SIGNIN_REDIRECT_URI`, `code_challenge_method=S256`, a `code_challenge`, the signed `state`, and `prompt=login`; sets `outreach_sf_signin` (httpOnly, path `/api/auth/salesforce/callback`) |
+| 2 | Start with `returnTo=//evil.com` | 302 to `/sign-in?error=bad_return_to`, no cookie |
+| 3 | Full round trip | Start, then the callback with the cookie, `state` and `code=C`: the fake sees `code_verifier` = the verifier whose challenge was sent; `matchSalesforceUser` gets the identity; the answer is a 302 to `${APP_PUBLIC_URL}/auth/callback` with the signed handoff cookie, and `GET /api/auth/session` with that cookie returns the session. The Salesforce refresh token was revoked, and no Salesforce token appears in any database write (`fakeDb` records none) |
+| 4 | Callback without the cookie, with a cookie from another start (different nonce), or with a tampered cookie | `bad_state` |
+| 5 | Callback with `error=access_denied` | `/sign-in?error=access_denied` |
+| 6 | `org_not_allowed` (`SALESFORCE_ALLOWED_ORG_ID` set to another org) | `/sign-in?error=org_not_allowed` |
+| 7 | Match `no_account` / `no_tenant` | Those reasons |
+| 8 | Sign-in not configured | Start and callback → `sign_in_disabled` |
+| 9 | Cookie cleared | The callback's response always clears `outreach_sf_signin` |
+| 10 | `GET /api/auth/providers` | `{ salesforce: cfg.salesforceSignInEnabled, workos: cfg.workosEnabled }` with no session required |
+
+`auth.test.ts`: every existing WorkOS case still passes after the helpers move. Add one case: the WorkOS start route still sets its own nonce cookie (a guard that the move changed nothing).
+
+Run: `npm -w services/outreach-api run test -- routes/auth`
+Expected: FAIL.
+
+- [ ] **Step 2: Implement**
+
+`auth/handoff.ts`: move `HANDOFF_COOKIE`, `HANDOFF_PATH`, `appUrl` and `signInRedirect` out of `routes/auth.ts`, and add:
+
+```ts
+/** Issue the outreach session and the short-lived handoff cookie, then send the browser to the app's /auth/callback. Shared by every sign-in provider. */
+export async function issueHandoff(reply: FastifyReply, cfg: AppConfig, userId: string, returnTo?: string): Promise<FastifyReply> {
+  const session = await issueSession(userId);
+  const value = Buffer.from(JSON.stringify({ token: session.token, expiresAt: session.expiresAt.toISOString() }), 'utf8').toString('base64url');
+  reply.setCookie(HANDOFF_COOKIE, value, { httpOnly: true, sameSite: 'lax', secure: cfg.NODE_ENV === 'production', path: HANDOFF_PATH, maxAge: 60, signed: true });
+  return reply.redirect(appUrl(cfg, '/auth/callback', returnTo ? { returnTo } : undefined).toString());
+}
+```
+
+The WorkOS callback calls `issueHandoff` in place of its inline code. Its catch blocks stay as they are.
+
+`routes/auth-salesforce.ts`:
+
+```ts
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { ServiceUserSessionError, SuspendedTenantError } from '@cti/auth';
+import type { Db } from '@cti/db';
+import { pkcePair } from '@cti/salesforce';
+import { issueHandoff, signInRedirect } from '../auth/handoff.js';
+import { readSalesforceIdentity, salesforceSignInUrl, SalesforceSignInError, type SalesforceSignInConfig } from '../auth/salesforce-identity.js';
+import { matchSalesforceUser } from '../auth/salesforce-user.js';
+import { isSafeReturnTo, signState, verifyState } from '../auth/state.js';
+import type { AppConfig } from '../config.js';
+
+export const SF_SIGNIN_COOKIE = 'outreach_sf_signin';
+const SF_SIGNIN_PATH = '/api/auth/salesforce/callback';
+const StartQuery = z.object({ returnTo: z.string().refine(isSafeReturnTo).optional() });
+const CallbackQuery = z.object({ code: z.string().optional(), state: z.string(), error: z.string().optional() });
+
+export interface SalesforceAuthDeps { cfg: AppConfig; db: Db; signIn: SalesforceSignInConfig | null; fetchImpl?: typeof fetch; sleep?: (ms: number) => Promise<void> }
+
+export async function registerSalesforceAuthRoutes(app: FastifyInstance, deps: SalesforceAuthDeps): Promise<void> {
+  const { cfg, db, signIn } = deps;
+
+  app.get('/auth/salesforce/start', async (req, reply) => {
+    if (!signIn) return signInRedirect(cfg, reply, 'sign_in_disabled');
+    const q = StartQuery.safeParse(req.query);
+    if (!q.success) return signInRedirect(cfg, reply, 'bad_return_to');
+    const { state, nonce } = signState(cfg.SESSION_SECRET, { returnTo: q.data.returnTo });
+    const { verifier, challenge } = pkcePair();
+    reply.setCookie(SF_SIGNIN_COOKIE, `${nonce}.${verifier}`, { httpOnly: true, sameSite: 'lax', secure: cfg.NODE_ENV === 'production', path: SF_SIGNIN_PATH, maxAge: 600, signed: true });
+    return reply.redirect(salesforceSignInUrl(signIn, { state, codeChallenge: challenge }));
+  });
+
+  app.get('/auth/salesforce/callback', async (req, reply) => {
+    reply.clearCookie(SF_SIGNIN_COOKIE, { path: SF_SIGNIN_PATH });
+    if (!signIn) return signInRedirect(cfg, reply, 'sign_in_disabled');
+    const q = CallbackQuery.safeParse(req.query);
+    if (!q.success) return signInRedirect(cfg, reply, 'bad_state');
+    const state = verifyState(cfg.SESSION_SECRET, q.data.state);
+    if (!state) return signInRedirect(cfg, reply, 'bad_state');
+    const raw = req.cookies[SF_SIGNIN_COOKIE];
+    const unsigned = raw ? reply.unsignCookie(raw) : null;
+    const [nonce, verifier] = unsigned?.valid && unsigned.value ? unsigned.value.split('.', 2) : [];
+    if (!nonce || !verifier || nonce !== state.nonce) return signInRedirect(cfg, reply, 'bad_state', state.returnTo);
+    if (q.data.error || !q.data.code) return signInRedirect(cfg, reply, q.data.error === 'access_denied' ? 'access_denied' : 'missing_code');
+    try {
+      const identity = await readSalesforceIdentity(signIn, q.data.code, verifier, { fetchImpl: deps.fetchImpl, sleep: deps.sleep });
+      const match = await matchSalesforceUser(db, identity);
+      if (!match.ok) {
+        req.log.info({ reason: match.reason }, 'salesforce sign-in refused');
+        return signInRedirect(cfg, reply, match.reason);
+      }
+      return await issueHandoff(reply, cfg, match.userId, state.returnTo);
+    } catch (err) {
+      if (err instanceof SalesforceSignInError) return signInRedirect(cfg, reply, err.reason);
+      if (err instanceof SuspendedTenantError) return signInRedirect(cfg, reply, 'tenant_suspended');
+      if (err instanceof ServiceUserSessionError) return signInRedirect(cfg, reply, 'forbidden');
+      req.log.error({ errName: (err as Error).name }, 'salesforce sign-in callback failed');
+      return signInRedirect(cfg, reply, 'server_error');
+    }
+  });
+}
+```
+
+`base64url` (the PKCE verifier) and the state nonce contain no `.`, so `split('.', 2)` is safe.
+
+`routes/auth.ts` gains:
+
+```ts
+  app.get('/auth/providers', async (): Promise<AuthProviders> => ({ salesforce: cfg.salesforceSignInEnabled, workos: cfg.workosEnabled }));
+```
+
+`server.ts`:
+
+```ts
+  const salesforceSignIn = cfg.salesforceSignInEnabled
+    ? { clientId: cfg.SALESFORCE_CLIENT_ID!, redirectUri: cfg.SALESFORCE_SIGNIN_REDIRECT_URI!, loginUrl: cfg.SALESFORCE_LOGIN_URL, allowedOrgId: cfg.SALESFORCE_ALLOWED_ORG_ID ?? null }
+    : null;
+// apiRoutes:
+      (scope) => registerSalesforceAuthRoutes(scope, { cfg, db, signIn: salesforceSignIn }),
+```
+
+- [ ] **Step 3: Verify and commit**
+
+Run: `npm -w services/outreach-api run test`, then `npm run typecheck && npm test`.
+Expected: PASS.
+
+```bash
+git add services/outreach-api/src/auth/handoff.ts services/outreach-api/src/routes/auth-salesforce.ts services/outreach-api/src/routes/auth-salesforce.test.ts services/outreach-api/src/routes/auth.ts services/outreach-api/src/routes/auth.test.ts services/outreach-api/src/server.ts
+git commit -m "feat(outreach-api): sign in to outreach with Salesforce (PKCE, existing CTI users only)"
+```
+
+---
+
+### Task 0E: Web: "Sign in with Salesforce"
+
+**Files:**
+- Modify:
+  - `apps/outreach-web/src/lib/auth.tsx` (`startSignIn` takes a provider)
+  - `apps/outreach-web/src/lib/outreach-api.ts` (`getAuthProviders`)
+  - `apps/outreach-web/src/components/sign-in-page.tsx`, `apps/outreach-web/src/components/sign-in-page.test.tsx`
+  - `apps/outreach-web/src/lib/auth.test.tsx` (if it asserts the start URL)
+
+**Interfaces:**
+- Produces:
+  - `startSignIn(returnTo?: string, provider: 'salesforce' | 'workos' = 'salesforce')`, which navigates to `/api/auth/${provider}/start${q}`.
+  - `getAuthProviders(): Promise<AuthProviders>` (`GET /api/auth/providers`, no auth header needed).
+  - `outreachKeys.authProviders`.
+
+- [ ] **Step 1: Write the failing tests**
+
+`sign-in-page.test.tsx`, with `stubApi`:
+
+| # | Case | Expectation |
+|---|---|---|
+| 1 | Providers `{ salesforce: true, workos: false }` | One button, "Sign in with Salesforce"; clicking it calls `window.location.assign('/api/auth/salesforce/start?returnTo=%2Fcampaigns')` for `returnTo='/campaigns'`; no WorkOS button |
+| 2 | `{ salesforce: true, workos: true }` | Both buttons: "Sign in with Salesforce" (primary) and "Sign in with email" (secondary, to `/api/auth/workos/start`) |
+| 3 | `{ salesforce: false, workos: false }` | No button; the `sign_in_disabled` message |
+| 4 | Providers request fails | "Sign in with Salesforce" still shows: it is the default, and the server answers `sign_in_disabled` if it is off |
+| 5 | Messages for the new reasons | `no_account` → "Your Salesforce user is not set up in the CTI yet. Sign in to the CTI softphone once, or ask an admin to add you."; `org_not_allowed` → "This Salesforce org is not allowed to use Outreach."; `salesforce_unavailable` → "Salesforce did not answer. Try again in a minute."; `no_tenant` → "This Salesforce org is not set up for Outreach. Contact your administrator." |
+
+Every existing message test still passes, apart from the `no_tenant` text, which changes.
+
+Run: `npm -w apps/outreach-web run test -- sign-in-page auth`
+Expected: FAIL.
+
+- [ ] **Step 2: Implement**
+
+`lib/auth.tsx`:
+
+```ts
+  const startSignIn = useCallback((returnTo?: string, provider: 'salesforce' | 'workos' = 'salesforce') => {
+    const q = returnTo ? `?returnTo=${encodeURIComponent(returnTo)}` : '';
+    window.location.assign(`/api/auth/${provider}/start${q}`);
+  }, []);
+```
+
+Update the `AuthContextValue.startSignIn` type to match.
+
+`sign-in-page.tsx`:
+- `const providers = useQuery({ queryKey: outreachKeys.authProviders, queryFn: getAuthProviders, retry: false })`.
+- `const salesforce = providers.data?.salesforce ?? true; const workos = providers.data?.workos ?? false;`
+- The description becomes "Sign in with your Salesforce account."
+- Render the buttons as in the tests. When both are false and the request succeeded, show `MESSAGES.sign_in_disabled`.
+- Add the four messages to `MESSAGES`.
+
+- [ ] **Step 3: Verify and commit**
+
+Run: `npm -w apps/outreach-web run test && npm -w apps/outreach-web run typecheck && npm -w apps/outreach-web run build`, then `npm run typecheck && npm test`.
+Expected: PASS.
+
+```bash
+git add apps/outreach-web/src/lib/auth.tsx apps/outreach-web/src/lib/outreach-api.ts apps/outreach-web/src/components/sign-in-page.tsx apps/outreach-web/src/components/sign-in-page.test.tsx
+git commit -m "feat(outreach-web): Sign in with Salesforce; WorkOS button only when configured"
+```
+
+(Add `apps/outreach-web/src/lib/auth.test.tsx` if Step 1 changed it.)
+
+---
+
+### Task 0F: Sign-in runbook, env example and IaC
+
+**Files:**
+- Modify: `docs/runbooks/outreach-sf-campaigns.md`, `services/outreach-api/.env.example`, `.railway/railway.ts`
+
+This is a docs and config task, with no TDD cycle.
+
+- [ ] **Step 1: `.railway/railway.ts`**
+
+On `outreachApi.env`, after `WORKOS_REDIRECT_URI`, add the block below. Task 34 later adds the remaining keys and skips any already present.
+
+```ts
+      // Sign in with Salesforce (plan 1C Part 0): the CTI's External Client App
+      // Caller_Reputation_CTI (PKCE, no secret). Filled in the dashboard.
+      SALESFORCE_CLIENT_ID: preserve(),
+      SALESFORCE_LOGIN_URL: preserve(),
+      SALESFORCE_SIGNIN_REDIRECT_URI: preserve(),
+      SALESFORCE_ALLOWED_ORG_ID: preserve(),
+```
+
+- [ ] **Step 2: `services/outreach-api/.env.example`**
+
+Add:
+
+```
+# Sign in with Salesforce (same External Client App as the CTI; PKCE, no secret).
+SALESFORCE_CLIENT_ID=
+SALESFORCE_LOGIN_URL=https://login.salesforce.com
+SALESFORCE_SIGNIN_REDIRECT_URI=http://localhost:4100/api/auth/salesforce/callback
+# Optional: only this Salesforce org may sign in (same value as on cti-api).
+SALESFORCE_ALLOWED_ORG_ID=
+```
+
+Also mark the WorkOS lines as optional in their comment: "Optional. Leave unset to hide the email sign-in button."
+
+- [ ] **Step 3: `docs/runbooks/outreach-sf-campaigns.md`**
+
+Add a section, `## Signing in to Outreach`, before §0. It covers:
+- **Who can sign in.** People sign in with Salesforce, the same login as the CTI. Only people who already exist in the CTI can, in a tenant the CTI already has for that Salesforce org. Signing in to the CTI softphone once is enough to create them. Admin rights are the CTI's.
+- **The variables on outreach-api:**
+  - `SALESFORCE_CLIENT_ID` (the `Caller_Reputation_CTI` consumer key, the same as `@cti/api`'s);
+  - `SALESFORCE_LOGIN_URL` (`https://login.salesforce.com`);
+  - `SALESFORCE_SIGNIN_REDIRECT_URI` (`https://outreach-api-production-a07b.up.railway.app/api/auth/salesforce/callback`, already on the app's callback list);
+  - optionally `SALESFORCE_ALLOWED_ORG_ID` (copy `@cti/api`'s).
+  - No client secret: the app requires PKCE.
+- **Error words.** What each `/sign-in?error=` reason means, from the Task 0D table, with the fix for `no_account` (sign in to the CTI first) and `org_not_allowed`.
+- **WorkOS is optional.** Unset, the email button is hidden.
+- **The integration connection** (§0.5, `SALESFORCE_REDIRECT_URI`) is a separate callback on the same app. Confirm `/api/connections/salesforce/callback` is also on the app's callback list.
+
+- [ ] **Step 4: Verify and commit**
+
+Run: `grep -n "SALESFORCE_SIGNIN_REDIRECT_URI" .railway/railway.ts services/outreach-api/.env.example` (two lines expected), then `npm run typecheck && npm test`.
+Expected: PASS.
+
+```bash
+git add docs/runbooks/outreach-sf-campaigns.md services/outreach-api/.env.example .railway/railway.ts
+git commit -m "docs(runbooks): sign in to Outreach with Salesforce"
+```
+
+---
+
 ## Part 1: Selecting leads
 
 ### Task 1: Migration 0052 and the Drizzle schema
@@ -6069,7 +6728,7 @@ This is a docs and config task, so there is no TDD cycle. The verification is th
       OUTREACH_INTERNAL_SECRET: preserve(),
 ```
 
-`preserve()` keeps whatever the dashboard holds, so an IaC apply never blanks a secret. Nothing else changes: `@cti/api` already declares `networking: { privateNetworkEndpoint: "ctiapi" }`.
+Task 0F already added `SALESFORCE_CLIENT_ID` and `SALESFORCE_LOGIN_URL`: skip any key that is already present. `preserve()` keeps whatever the dashboard holds, so an IaC apply never blanks a secret. Nothing else changes: `@cti/api` already declares `networking: { privateNetworkEndpoint: "ctiapi" }`.
 
 - [ ] **Step 2: `services/outreach-api/.env.example`**
 
@@ -6306,11 +6965,19 @@ These are operator steps; no task runs them. Do them in this order after the bra
 | `outreach-api` | `CTI_INTERNAL_URL` | `http://ctiapi.railway.internal:<value of @cti/api API_PORT>` (plain http; private networking is not TLS-terminated) |
 | `outreach-api` | `ANTHROPIC_API_KEY` | Claude key (triage and call plans). Secret |
 | `outreach-api` | `CALL_PLAN_MODEL` | optional; default `claude-sonnet-5-5`. Any value must be priced in `ai/model.ts` or `call.prepare` refuses to run |
-| `outreach-api` | `SALESFORCE_CLIENT_ID`, `SALESFORCE_CLIENT_SECRET`, `SALESFORCE_REDIRECT_URI`, `SALESFORCE_LOGIN_URL` | outreach's own Connected App (1A), unchanged by 1C |
+| `outreach-api` | `SALESFORCE_CLIENT_ID` | the consumer key of the External Client App `Caller_Reputation_CTI` (production org), the same one `@cti/api` uses. Already set |
+| `outreach-api` | `SALESFORCE_LOGIN_URL` | `https://login.salesforce.com`. Already set |
+| `outreach-api` | `SALESFORCE_SIGNIN_REDIRECT_URI` | `https://outreach-api-production-a07b.up.railway.app/api/auth/salesforce/callback` (already on the app's callback list). Turns on Sign in with Salesforce (Part 0) |
+| `outreach-api` | `SALESFORCE_ALLOWED_ORG_ID` | optional; copy `@cti/api`'s value so only that org can sign in |
+| `outreach-api` | `SALESFORCE_REDIRECT_URI` | `https://outreach-api-production-a07b.up.railway.app/api/connections/salesforce/callback` (the integration connection; must also be on the app's callback list). Leave `SALESFORCE_CLIENT_SECRET` unset: the app uses PKCE with no secret |
+| `outreach-api` | `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_REDIRECT_URI` | optional. Unset hides the email sign-in button; Salesforce sign-in does not need them |
 | both | `TOKEN_ENCRYPTION_KEY` | **must be identical** on both services: cti-api now decrypts the integration access token outreach-api stored |
 | both | `SESSION_SECRET` | identical (1A rule, unchanged) |
 
-**2. Infrastructure as code.** Apply `.railway/railway.ts` (Task 34):
+**2. The service and infrastructure as code.**
+- **Build and deploy config:** outreach-api is configured by `services/outreach-api/railway.json` (commit `9d0a231`), with the Dockerfile builder, the pre-deploy migration, the start command and the `/healthz` healthcheck. Its service settings point at that file, so it never builds from the CTI's root `railway.json`.
+- **Public domain:** `outreach-api-production-a07b.up.railway.app`. `API_PUBLIC_URL` and `APP_PUBLIC_URL` are `https://outreach-api-production-a07b.up.railway.app`, and both Salesforce callbacks above use this host.
+- **Variables:** apply `.railway/railway.ts` (Tasks 0F and 34) for the variable list:
 - outreach-api is the new service `outreach-api` in `endearing-comfort`. It builds `services/outreach-api/Dockerfile` and serves the built outreach-web bundle (`SPA_DIST`) from the same origin, so there is no separate web service.
 - Every new variable is `preserve()`d, so the apply never overwrites dashboard values. Set them in the dashboard right after the first apply, then redeploy.
 
@@ -6324,8 +6991,9 @@ These are operator steps; no task runs them. Do them in this order after the bra
 **5. Order**
 1. Deploy `@cti/api` and `outreach-api` together from the merge.
 2. cti-web redeploys from the same merge. The softphone loses its AI UI (Task 36) at the same moment cti-api drops those routes (Task 35). An old softphone tab still open shows its generic error until reloaded.
-3. Run `ai-voice.md` §5 (the test call from outreach-web).
-4. Run a one-lead AI call campaign in **dry run**, then active (`outreach-sf-campaigns.md` §AI call campaigns).
+3. Sign in to outreach-web with Salesforce (Part 0) as a user who already exists in the CTI. Expect the campaigns page; `/sign-in?error=no_account` means that user has never signed in to the CTI.
+4. Run `ai-voice.md` §5 (the test call from outreach-web).
+5. Run a one-lead AI call campaign in **dry run**, then active (`outreach-sf-campaigns.md` §AI call campaigns).
 
 **6. Verify the price.** Before the first real campaign, confirm `PRICE_MICROS_PER_TOKEN['claude-sonnet-5-5']` against Anthropic's price list (decision 8).
 
@@ -6333,7 +7001,16 @@ These are operator steps; no task runs them. Do them in this order after the bra
 
 ## Self-review
 
-**Spec coverage** (the brief's nine points):
+**Spec coverage** (the brief's nine points, plus sign-in):
+
+0. **Sign in with Salesforce: Tasks 0A–0F.**
+   - **The flow:** PKCE with the CTI's External Client App at `/api/auth/salesforce/callback` (`SALESFORCE_SIGNIN_REDIRECT_URI`), then the userinfo read.
+   - **The match:** an existing tenant by Salesforce org, and an existing user through `salesforce_connections` or by email as cti-api does. Nothing is created, and `is_admin` comes from the CTI row.
+   - **The token** is revoked and never stored, and `SALESFORCE_ALLOWED_ORG_ID` is enforced.
+   - **Session and safety:** the same session handoff as today, and the signed state plus a browser-bound cookie (nonce and verifier).
+   - **WorkOS** is optional and hidden when unset.
+   - **Tests** use a fake Salesforce (`fakeSalesforceLogin`).
+
 
 1. **Lead selection: Tasks 1–7.**
    - The paged picker (50 a page) is capped at `MAX_CAMPAIGN_RECORDS`, and the selection is stored server-side.
