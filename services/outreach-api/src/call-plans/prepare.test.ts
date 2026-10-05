@@ -16,11 +16,17 @@ import { describeOf, fakeSalesforce } from '../test/fake-sf-client.js';
 import { campaignById, leadId, seedCampaign, seedConnection, seedEnrollment, seedOrg, seedRecord, snapshot, TEST_FIELD_MAP } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { claimDuePreparations, PREPARE_BACKOFF_MS } from './claims.js';
-import { ERR_PLAN_INVALID, ERR_RECORD_GONE, prepareDueCalls, type PrepareDeps } from './prepare.js';
+import { ERR_PLAN_INVALID, ERR_PREPARE_FAILED, ERR_RECORD_GONE, prepareDueCalls, type PrepareDeps } from './prepare.js';
+import { savePlan } from './store.js';
 
 vi.mock('../research/snapshot.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../research/snapshot.js')>();
   return { ...actual, researchRecord: vi.fn(actual.researchRecord) };
+});
+
+vi.mock('./store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./store.js')>();
+  return { ...actual, savePlan: vi.fn(actual.savePlan) };
 });
 
 const NOW = new Date('2026-10-05T15:00:00.000Z');
@@ -29,6 +35,7 @@ const CONSENT_FIELD = 'AI_Call_Consent__c';
 const FIELD_MAP: FieldMap = { Lead: { ...TEST_FIELD_MAP.Lead, consent: CONSENT_FIELD }, Opportunity: TEST_FIELD_MAP.Opportunity };
 const log = { error: vi.fn(), info: vi.fn(), warn: vi.fn() };
 const research = vi.mocked(researchRecord);
+const savePlanMock = vi.mocked(savePlan);
 const SF = {} as SalesforceClient;
 
 function snap(sfRecordId: string, consent: ResearchSnapshot['consent'] = 'yes'): ResearchSnapshot {
@@ -249,6 +256,23 @@ describe.skipIf(!pgLane)('prepareDueCalls (real Postgres)', () => {
     expect(await researchOf(t.lead.enrollmentId)).toEqual([]);
     expect((await enrollment(t.lead.enrollmentId)).callPrepareError).toBeNull();
     expect(await spentTodayMicros(db, t.orgId, NOW)).toBe(costMicros(MODEL, 12_000, 1_500));
+  });
+
+  it('a store failure other than a stale lead fails that lead only: error on its card, the tick goes on, the spend counts', async () => {
+    const t = await tenant({ leads: 2 });
+    savePlanMock.mockRejectedValueOnce(Object.assign(new Error('secret record text in a driver message'), { code: '22P05' }));
+    const model = fakeModel();
+    expect(await prepareDueCalls(deps(model))).toEqual({ planned: 1, held: 0, failed: 1 });
+    expect(model.plan).toHaveBeenCalledTimes(2);
+    const [first, second] = t.leads;
+    expect(await enrollment(first!.enrollmentId)).toMatchObject({ callStage: 'research', callPrepareError: ERR_PREPARE_FAILED });
+    expect(await plansOf(first!.enrollmentId)).toEqual([]);
+    expect(await researchOf(first!.enrollmentId)).toEqual([]);
+    expect(await enrollment(second!.enrollmentId)).toMatchObject({ callStage: 'review', callPrepareError: null });
+    expect(await spentTodayMicros(db, t.orgId, NOW)).toBe(2 * costMicros(MODEL, 12_000, 1_500));
+    const logged = JSON.stringify(log.warn.mock.calls);
+    expect(logged).toContain('"errName":"Error"');
+    expect(logged).not.toContain('secret record text');
   });
 
   it('plans from the real research module against a fake Salesforce, reading the consent field', async () => {

@@ -24,6 +24,22 @@ export function cutUtf16(s: string, max: number): string {
   return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
 }
 
+/**
+ * A string Postgres jsonb will accept. Salesforce can hand us a lone surrogate, which
+ * `JSON.stringify` writes as a \udXXX escape that jsonb refuses, and a NUL, which jsonb refuses too.
+ * Each lone surrogate becomes U+FFFD and NULs are dropped.
+ */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+export const wellFormed = (s: string): string => s.replace(LONE_SURROGATE, '\uFFFD').replace(/\u0000/g, '');
+
+/** `wellFormed` on every string in `v`, keys included (objects and arrays are copied, never changed in place). */
+export function wellFormedDeep<T>(v: T): T {
+  if (typeof v === 'string') return wellFormed(v) as T;
+  if (Array.isArray(v)) return v.map((x) => wellFormedDeep(x)) as T;
+  if (v !== null && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [wellFormed(k), wellFormedDeep(x)])) as T;
+  return v;
+}
+
 export function clip(s: string, max: number): { text: string; truncated: boolean } {
   return s.length > max ? { text: `${cutUtf16(s, max)}…`, truncated: true } : { text: s, truncated: false };
 }

@@ -7,7 +7,7 @@ import { readContentNotes, readEmails, readEvents, readNotes, readTasks, type Ac
 import { readChatter } from './chatter.js';
 import { RESEARCH_LIMITS } from './limits.js';
 import { readMainAndRelated, type RecordBlock, type ResearchReadDeps } from './related.js';
-import { cutUtf16 } from './text.js';
+import { cutUtf16, wellFormed, wellFormedDeep } from './text.js';
 
 const Field = z.object({ name: z.string(), label: z.string(), value: z.string() });
 const Block = z.object({
@@ -99,7 +99,9 @@ function fitRecords(records: RecordBlock[], budget: number, consentField: string
   return { records: truncated.records, cut: dropped.cut || truncated.cut };
 }
 
-export function assembleSnapshot(input: SnapshotInput, totalChars: number = RESEARCH_LIMITS.totalChars): ResearchSnapshot {
+export function assembleSnapshot(raw: SnapshotInput, totalChars: number = RESEARCH_LIMITS.totalChars): ResearchSnapshot {
+  // Every Salesforce string must be storable as jsonb: a lone surrogate from Salesforce itself would otherwise fail the store.
+  const input = { ...raw, sfRecordId: wellFormed(raw.sfRecordId), records: wellFormedDeep(raw.records), activity: wellFormedDeep(raw.activity), sources: wellFormedDeep(raw.sources) };
   const consentField = input.consentField ?? null;
   const envelope = { version: 1 as const, sfObject: input.sfObject, sfRecordId: input.sfRecordId, collectedAt: input.collectedAt.toISOString(), consent: input.consent, records: [] as RecordBlock[], activity: [] as ActivityItem[], sources: input.sources, truncated: true };
   const { records, cut } = fitRecords(input.records, Math.min(Math.floor(totalChars / 2), totalChars - len(envelope)), consentField);

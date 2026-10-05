@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clip, cutUtf16, escapeAttr, escapeData, fieldValueText, plainText, soqlIdList } from './text.js';
+import { clip, cutUtf16, escapeAttr, escapeData, fieldValueText, plainText, soqlIdList, wellFormed, wellFormedDeep } from './text.js';
 
 /** A high surrogate not followed by a low one, or a low one not preceded by a high one. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
@@ -77,5 +77,17 @@ describe('escapeData / escapeAttr', () => {
     expect(escapeData('&lt;')).toBe('&amp;lt;');
     expect(escapeAttr('a"b<')).toBe('a&quot;b&lt;');
     expect(escapeData('a"b')).toBe('a"b');
+  });
+});
+
+describe('wellFormed', () => {
+  it('replaces lone surrogates with U+FFFD, drops NULs, and keeps emoji pairs', () => {
+    expect(wellFormed('a\ud83dxb\ude00c\u0000d😀')).toBe('a\ufffdxb\ufffdcd😀');
+  });
+  it('copies objects and arrays (keys too) without changing the original', () => {
+    const original = { 'k\ud83d': ['v\ud83d', { n: 1, ok: true, none: null }] };
+    const out = wellFormedDeep(original);
+    expect(out).toEqual({ 'k\ufffd': ['v\ufffd', { n: 1, ok: true, none: null }] });
+    expect(Object.keys(original)[0]).toBe('k\ud83d');
   });
 });

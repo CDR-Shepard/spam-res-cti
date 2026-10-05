@@ -166,8 +166,13 @@ async function prepareOne(deps: PrepareDeps, org: OrgContext, p: DuePrep): Promi
     const held = await storePrepared(db, p, now, snapshot, out);
     return { kind: held ? 'held' : 'planned', costMicros: cost };
   } catch (err) {
-    if (!(err instanceof StaleStageError)) throw err;
-    log.info({ enrollmentId: p.enrollmentId }, 'call.prepare: the lead moved on while planning; result discarded');
+    if (err instanceof StaleStageError) {
+      log.info({ enrollmentId: p.enrollmentId }, 'call.prepare: the lead moved on while planning; result discarded');
+      return { kind: 'failed', costMicros: cost };
+    }
+    // One lead's failed store must not abort the tick after a paid model call: the transaction rolled back, so the lead retries after the backoff.
+    log.warn({ enrollmentId: p.enrollmentId, errName: errName(err) }, 'call.prepare: storing the plan failed');
+    await setError(db, p, now, ERR_PREPARE_FAILED);
     return { kind: 'failed', costMicros: cost };
   }
 }

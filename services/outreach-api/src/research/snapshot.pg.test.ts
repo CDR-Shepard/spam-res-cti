@@ -37,4 +37,20 @@ describe.skipIf(!pgLane)('research snapshots in jsonb (real Postgres)', () => {
       expect((result as unknown as { rows: Array<{ j: unknown }> }).rows[0]!.j).toEqual(snapshot);
     }
   });
+
+  it('stores a snapshot whose Salesforce values hold a lone surrogate (and a NUL), well-formed, as jsonb', async () => {
+    const lone = `bad\ud83d text\ude00 end\u0000`;
+    const snapshot = assembleSnapshot({
+      sfObject: 'Lead',
+      sfRecordId: '00Q000000000001AAA',
+      collectedAt: new Date('2026-10-05T12:00:00.000Z'),
+      consent: 'yes',
+      records: [{ relation: 'self', sfObject: 'Lead', id: '00Q000000000001AAA', role: null, fields: [{ name: 'Name', label: 'Name', value: lone }] }],
+      activity: [{ source: 'task', id: '00T000000000001AAA', at: '2026-10-01T10:00:00.000Z', title: lone, body: lone, meta: { starts: lone } }],
+      sources: [{ source: 'tasks', status: 'error', count: 0, truncated: false, note: lone }],
+    });
+    const result = await db.execute(sql`select ${JSON.stringify(snapshot)}::jsonb as j`);
+    expect((result as unknown as { rows: Array<{ j: unknown }> }).rows[0]!.j).toEqual(snapshot);
+    expect(snapshot.records[0]!.fields[0]!.value).toBe('bad\ufffd text\ufffd end');
+  });
 });
