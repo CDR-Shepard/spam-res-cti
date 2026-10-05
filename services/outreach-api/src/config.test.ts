@@ -81,6 +81,11 @@ describe('parseConfig', () => {
     expect(parseConfig({ ...base, ANTHROPIC_API_KEY: '' }).aiEnabled).toBe(false);
     expect(parseConfig({ ...base, ANTHROPIC_API_KEY: 'sk-ant-test' }).aiEnabled).toBe(true);
   });
+  it('defaults CALL_PLAN_MODEL to claude-sonnet-5-5 (empty counts as unset) and takes a configured one', () => {
+    expect(parseConfig(base).CALL_PLAN_MODEL).toBe('claude-sonnet-5-5');
+    expect(parseConfig({ ...base, CALL_PLAN_MODEL: '' }).CALL_PLAN_MODEL).toBe('claude-sonnet-5-5');
+    expect(parseConfig({ ...base, CALL_PLAN_MODEL: 'claude-opus-5' }).CALL_PLAN_MODEL).toBe('claude-opus-5');
+  });
   it('rejects a bad encryption key with a clear message', () => {
     expect(() => parseConfig({ ...base, TOKEN_ENCRYPTION_KEY: 'short' })).toThrow(/TOKEN_ENCRYPTION_KEY/);
   });

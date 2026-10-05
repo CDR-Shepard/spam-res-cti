@@ -29,6 +29,8 @@ const schema = z.object({
   SALESFORCE_API_VERSION: z.string().regex(/^v\d+\.\d$/, 'SALESFORCE_API_VERSION must look like v60.0').default('v60.0'),
   /** Claude for note triage (A9); unset = triage disabled. */
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
+  /** Claude model for AI call plans (plan 1C). Must be priced in ai/model.ts PRICE_MICROS_PER_TOKEN. */
+  CALL_PLAN_MODEL: z.string().min(1).default('claude-sonnet-5-5'),
 });
 
 export type AppConfig = z.infer<typeof schema> & { workosEnabled: boolean; salesforceEnabled: boolean; salesforceSignInEnabled: boolean; aiEnabled: boolean };
