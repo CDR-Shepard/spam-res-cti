@@ -4,6 +4,7 @@
  * answer (decision 10). Per-touch work lives in placeOne; what the tick reads first lives in
  * pace-context.ts.
  *
+ * First, once a tick, cti-api is asked whether AI calling is on at all (I-1): off or unreachable, nothing is claimed.
  * One touch, in order: a pending do-not-contact flag holds the person; the fresh Salesforce
  * read (Do Not Call, Skip on Dialer, AI call consent not checked, the record gone) can end the enrollment; the touch's plan
  * must still be the approved plan and pass the voice agent's text check; outside the window
@@ -55,7 +56,9 @@ export async function placeDueAiCalls(deps: PaceDeps): Promise<PaceCounts> {
   const deadline = clock() + PLACE_DEADLINE_MS;
   const reaped = await reapStaleDialing(deps.db, deps.now);
   if (reaped > 0) deps.log.warn({ reaped }, 'ai_call.place: dialing touches with no answer went back to planned');
-  for (const orgId of await orgsWithDueAiCalls(deps.db, deps.now)) {
+  const orgs = await orgsWithDueAiCalls(deps.db, deps.now);
+  if (orgs.length === 0 || !(await aiCallingOn(deps))) return counts;
+  for (const orgId of orgs) {
     if (clock() > deadline) break;
     try {
       await placeForOrg(deps, orgId, counts, () => clock() <= deadline);
@@ -68,6 +71,17 @@ export async function placeDueAiCalls(deps: PaceDeps): Promise<PaceCounts> {
 }
 
 const errName = (err: unknown): string => (err instanceof Error ? err.name : typeof err);
+
+/**
+ * I-1: cti-api's own switch (AI_VOICE, OUTREACH_KILL_SWITCH, the OpenAI key) is the same for every tenant, so it is asked
+ * once a tick. Off, or no answer at all: nothing is claimed this tick, so no lead uses an attempt; the touches stay due.
+ */
+async function aiCallingOn(deps: PaceDeps): Promise<boolean> {
+  const answer = await deps.cti.availability();
+  if (answer?.available) return true;
+  deps.log.warn({ availability: answer ? 'off' : 'unreachable' }, 'ai_call.place: cti-api says AI calling is off, or did not answer; nothing is placed this tick');
+  return false;
+}
 
 async function placeForOrg(deps: PaceDeps, orgId: string, counts: PaceCounts, inTime: () => boolean): Promise<void> {
   const tick = await loadOrgTick(deps, orgId);
@@ -143,7 +157,7 @@ async function apply(deps: PaceDeps, c: AiTouchCandidate, planId: string, d: Tri
       await settleTouch(db, c.touchId, { kind: 'placed', aiCallId: d.aiCallId }, now);
       return 'placed';
     case 'retry':
-      await settleTouch(db, c.touchId, { kind: 'retry', at: d.at, reason: d.reason, keepKey: d.keepKey }, now);
+      await settleTouch(db, c.touchId, { kind: 'retry', at: d.at, reason: d.reason, keepKey: d.keepKey, refundAttempt: d.refundAttempt }, now);
       return 'retried';
     case 'park':
       await parkPlan(db, { touchId: c.touchId, enrollmentId: c.enrollmentId, planId }, d.reason, now);

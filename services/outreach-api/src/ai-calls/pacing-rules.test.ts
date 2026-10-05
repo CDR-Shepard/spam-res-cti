@@ -9,6 +9,7 @@ import {
   PARK_REASONS,
   PREFERRED_WINDOWS,
   RETRY_REASONS,
+  SYSTEM_REASONS,
   decideTrigger,
   nextAttemptAt,
   windowCheck,
@@ -57,6 +58,7 @@ describe('decideTrigger', () => {
       reason: 'calling_hours',
       at: new Date('2026-10-06T13:00:00.000Z'),
       keepKey: false,
+      refundAttempt: false,
     });
   });
 
@@ -67,24 +69,24 @@ describe('decideTrigger', () => {
   it.each(['daily_cap', 'customer_ceiling'] as const)('4: %s retries at the window opening 12 hours on', (reason) => {
     const at = nextWindowOpening(TO, later(12 * HOUR), CALL_WINDOW);
     expect(at).toEqual(new Date('2026-10-06T13:00:00.000Z'));
-    expect(decideTrigger(blocked(reason), 1, TO, NOW)).toEqual({ kind: 'retry', reason, at, keepKey: false });
+    expect(decideTrigger(blocked(reason), 1, TO, NOW)).toEqual({ kind: 'retry', reason, at, keepKey: false, refundAttempt: false });
   });
 
   it.each(['ai_voice_unavailable', 'no_caller_id'] as const)('5: %s retries in 30 minutes', (reason) => {
-    expect(decideTrigger(blocked(reason), 1, TO, NOW)).toEqual({ kind: 'retry', reason, at: later(30 * MIN), keepKey: false });
+    expect(decideTrigger(blocked(reason), 1, TO, NOW)).toEqual({ kind: 'retry', reason, at: later(30 * MIN), keepKey: false, refundAttempt: true });
   });
 
   it('6: call_in_progress retries in 10 minutes with a new key', () => {
-    expect(decideTrigger(blocked('call_in_progress'), 1, TO, NOW)).toEqual({ kind: 'retry', reason: 'call_in_progress', at: later(10 * MIN), keepKey: false });
+    expect(decideTrigger(blocked('call_in_progress'), 1, TO, NOW)).toEqual({ kind: 'retry', reason: 'call_in_progress', at: later(10 * MIN), keepKey: false, refundAttempt: false });
   });
 
   it('7 / CF-13: in_flight keeps the SAME key and waits at least the 10-minute stale reservation', () => {
     expect(IN_FLIGHT_RETRY_MS).toBeGreaterThanOrEqual(10 * MIN);
-    expect(decideTrigger(failed('in_flight'), 1, TO, NOW)).toEqual({ kind: 'retry', reason: 'in_flight', at: later(IN_FLIGHT_RETRY_MS), keepKey: true });
+    expect(decideTrigger(failed('in_flight'), 1, TO, NOW)).toEqual({ kind: 'retry', reason: 'in_flight', at: later(IN_FLIGHT_RETRY_MS), keepKey: true, refundAttempt: false });
   });
 
   it.each(['salesforce_error', 'gate_error', 'twilio_error'] as const)('8: %s backs off 5 min x 2^(attempts-1), at most 2 hours, with a new key', (reason) => {
-    expect(decideTrigger(failed(reason), 1, TO, NOW)).toEqual({ kind: 'retry', reason, at: later(5 * MIN), keepKey: false });
+    expect(decideTrigger(failed(reason), 1, TO, NOW)).toMatchObject({ kind: 'retry', reason, at: later(5 * MIN), keepKey: false });
     expect(decideTrigger(failed(reason), 2, TO, NOW)).toMatchObject({ at: later(10 * MIN) });
     expect(decideTrigger(failed(reason), 4, TO, NOW)).toMatchObject({ at: later(40 * MIN) });
     expect(decideTrigger(failed(reason), 7, TO, NOW)).toMatchObject({ at: later(2 * HOUR) });
@@ -92,17 +94,39 @@ describe('decideTrigger', () => {
 
   it('9 / CF-13: a transport failure keeps the key, with the same backoff but never sooner than the stale reservation', () => {
     const t: TriggerOutcome = { kind: 'transport', error: 'timeout' };
-    expect(decideTrigger(t, 1, TO, NOW)).toEqual({ kind: 'retry', reason: 'transport', at: later(IN_FLIGHT_RETRY_MS), keepKey: true });
+    expect(decideTrigger(t, 1, TO, NOW)).toEqual({ kind: 'retry', reason: 'transport', at: later(IN_FLIGHT_RETRY_MS), keepKey: true, refundAttempt: true });
     expect(decideTrigger(t, 4, TO, NOW)).toMatchObject({ at: later(40 * MIN), keepKey: true });
     expect(decideTrigger(t, 7, TO, NOW)).toMatchObject({ at: later(2 * HOUR), keepKey: true });
   });
 
-  it('10: any retry on the eighth attempt gives up', () => {
+  it('10: a retry about the person on the eighth attempt gives up', () => {
     expect(MAX_TRIGGER_ATTEMPTS).toBe(8);
     expect(decideTrigger(failed('twilio_error'), 7, TO, NOW).kind).toBe('retry');
     expect(decideTrigger(failed('twilio_error'), 8, TO, NOW)).toEqual({ kind: 'final', reason: 'gave_up', aiCallId: null });
     expect(decideTrigger(blocked('calling_hours'), 8, TO, NOW)).toEqual({ kind: 'final', reason: 'gave_up', aiCallId: AI_CALL_ID });
-    expect(decideTrigger({ kind: 'transport', error: 'network' }, 9, TO, NOW)).toEqual({ kind: 'final', reason: 'gave_up', aiCallId: null });
+    expect(decideTrigger(blocked('call_in_progress'), 8, TO, NOW)).toEqual({ kind: 'final', reason: 'gave_up', aiCallId: AI_CALL_ID });
+  });
+
+  it('I-1: a failure about the system, not the person, never gives up and gives its attempt back, with its usual backoff', () => {
+    expect([...SYSTEM_REASONS].sort()).toEqual(['ai_voice_unavailable', 'gate_error', 'no_caller_id', 'salesforce_error', 'transport']);
+    const system: Array<[string, TriggerOutcome, Date, boolean]> = [
+      ['ai_voice_unavailable', blocked('ai_voice_unavailable'), later(30 * MIN), false],
+      ['no_caller_id', blocked('no_caller_id'), later(30 * MIN), false],
+      ['gate_error', failed('gate_error'), later(2 * HOUR), false],
+      ['salesforce_error', failed('salesforce_error'), later(2 * HOUR), false],
+      ['transport', { kind: 'transport', error: 'network' }, later(2 * HOUR), true],
+    ];
+    for (const [reason, outcome, at, keepKey] of system) {
+      for (const attempts of [MAX_TRIGGER_ATTEMPTS, MAX_TRIGGER_ATTEMPTS + 5]) {
+        expect(decideTrigger(outcome, attempts, TO, NOW)).toEqual({ kind: 'retry', reason, at, keepKey, refundAttempt: true });
+      }
+    }
+  });
+
+  it('I-1: a failure about the person counts its attempt', () => {
+    for (const outcome of [blocked('calling_hours'), blocked('call_in_progress'), failed('in_flight'), failed('twilio_error'), blocked('daily_cap')]) {
+      expect(decideTrigger(outcome, 1, TO, NOW)).toMatchObject({ kind: 'retry', refundAttempt: false });
+    }
   });
 
   it('every reason the engine can give is final, parked or retried, never two of them', () => {

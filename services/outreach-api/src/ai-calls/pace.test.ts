@@ -18,6 +18,8 @@ const NOW = new Date('2026-10-05T23:00:00.000Z');
 const AFTERNOON = new Date('2026-10-05T19:00:00.000Z');
 const MIN = 60_000;
 const at = (from: Date, ms: number) => new Date(from.getTime() + ms);
+/** The key a claim at `when` mints (I-1: the claim time keeps it unique when an attempt is given back). */
+const keyOf = (touchId: string, attempt: number, when: Date = NOW) => `touch:${touchId}:${attempt}:${when.getTime()}`;
 const planText = () => {
   const r = renderPlanForAgent(EditableCallPlan.parse(validPlan));
   if (!r.ok) throw new Error('the fixture plan must pass the agent text check');
@@ -48,7 +50,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect.arrayContaining([a, b].map((l) => ({
         orgId: h.base.orgId,
         userId: l.approver,
-        idempotencyKey: `touch:${l.touchId}:1`,
+        idempotencyKey: keyOf(l.touchId, 1),
         target: { kind: 'record', objectType: 'Lead', recordId: l.sfRecordId, planText: planText() },
       }))),
     );
@@ -120,11 +122,12 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
 
     expect((await h.run(NOW)).retried).toBe(1);
     const t = await touchById(db, lead.touchId);
-    expect(t).toMatchObject({ status: 'planned', triggerKey: `touch:${lead.touchId}:1`, lastBlockReason: 'transport', attempts: 1 });
+    // I-1: a transport failure is about the system, so its attempt is given back.
+    expect(t).toMatchObject({ status: 'planned', triggerKey: keyOf(lead.touchId, 1), lastBlockReason: 'transport', attempts: 0 });
 
     await h.run(t.dueAt);
-    expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([`touch:${lead.touchId}:1`, `touch:${lead.touchId}:1`]);
-    expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', attempts: 2 });
+    expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([keyOf(lead.touchId, 1), keyOf(lead.touchId, 1)]);
+    expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', attempts: 1 });
   });
 
   it('7: in_flight waits at least 10 minutes and retries with the same key', async () => {
@@ -136,7 +139,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
     const t = await touchById(db, lead.touchId);
     expect(t.dueAt.getTime() - NOW.getTime()).toBeGreaterThanOrEqual(10 * MIN);
     await h.run(t.dueAt);
-    expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([`touch:${lead.touchId}:1`, `touch:${lead.touchId}:1`]);
+    expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([keyOf(lead.touchId, 1), keyOf(lead.touchId, 1)]);
   });
 
   it('8: calling_hours retries at the window opening with a NEW key', async () => {
@@ -149,7 +152,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
     expect(t).toMatchObject({ status: 'planned', triggerKey: null, lastBlockReason: 'calling_hours' });
     expect(t.dueAt).toEqual(at(NOW, 15 * MIN)); // inside our window, so the engine's refusal waits 15 minutes
     await h.run(t.dueAt);
-    expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([`touch:${lead.touchId}:1`, `touch:${lead.touchId}:2`]);
+    expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([keyOf(lead.touchId, 1), keyOf(lead.touchId, 2, t.dueAt)]);
   });
 
   it('9: a retryable failure on the eighth attempt gives up: exit ai_call_gave_up', async () => {
@@ -296,4 +299,70 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect(JSON.stringify(h.logs)).not.toContain('+1512');
     },
   );
+  describe('I-1: a system-wide failure never uses up a lead\'s attempts', () => {
+    type Harness = Awaited<ReturnType<typeof paceHarness>>;
+    /** Ticks at the touch's due time until `n` triggers have gone out (a tick outside the window only moves it on). */
+    const tickUntil = async (h: Harness, touchId: string, n: number) => {
+      for (let tick = 0; h.cti.requests.length < n && tick < 5 * n; tick += 1) await h.run((await touchById(db, touchId)).dueAt);
+      expect(h.cti.requests).toHaveLength(n);
+    };
+
+    it('10 ai_voice_unavailable answers in a row: still active, no attempt used, a new key each time; then the call is placed', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      for (let i = 0; i < 10; i += 1) h.cti.answers.push({ result: 'blocked', reason: 'ai_voice_unavailable' });
+
+      await tickUntil(h, lead.touchId, 10);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', attempts: 0, triggerKey: null, lastBlockReason: 'ai_voice_unavailable' });
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'active', exitReason: null });
+
+      await tickUntil(h, lead.touchId, 11);
+      expect(new Set(h.cti.requests.map((r) => r.idempotencyKey)).size).toBe(11);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', attempts: 1 });
+    });
+
+    it('10 transport failures in a row: still active, no attempt used, the SAME key every time (CF-13); then the call is placed', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      for (let i = 0; i < 10; i += 1) h.cti.answers.push({ transport: 'network' });
+
+      await tickUntil(h, lead.touchId, 10);
+      const first = h.cti.requests[0]!.idempotencyKey;
+      expect(first).toMatch(new RegExp(`^touch:${lead.touchId}:1:\\d+$`));
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', attempts: 0, triggerKey: first, lastBlockReason: 'transport' });
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'active', exitReason: null });
+
+      await tickUntil(h, lead.touchId, 11);
+      expect(new Set(h.cti.requests.map((r) => r.idempotencyKey))).toEqual(new Set([first]));
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', attempts: 1 });
+    });
+
+    it.each([
+      ['off', { available: false, testNumbers: [] }],
+      ['unreachable', null],
+    ] as const)('cti-api says AI calling is %s: nothing is claimed or triggered, no attempt used, one log line', async (label, answer) => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      const before = await touchById(db, lead.touchId);
+      h.cti.available = answer ? { ...answer, testNumbers: [] } : null;
+
+      expect(await h.run(NOW)).toEqual({ placed: 0, retried: 0, failed: 0, deferred: 0, held: 0, parked: 0, researched: 0 });
+
+      expect(h.cti.requests).toEqual([]);
+      expect(h.cti.availabilityCalls).toBe(1);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', attempts: 0, dueAt: before.dueAt, lastBlockReason: before.lastBlockReason, claimedAt: null });
+      expect(h.logs).toEqual([{ level: 'warn', obj: { availability: label }, msg: 'ai_call.place: cti-api says AI calling is off, or did not answer; nothing is placed this tick' }]);
+    });
+
+    it('a reason about the person still gives up at the limit', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base, { touch: { attempts: 7 } });
+      h.cti.answers.push({ result: 'blocked', reason: 'call_in_progress' });
+
+      await h.run(NOW);
+
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'failed', lastBlockReason: 'gave_up', attempts: 8 });
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'ai_call_gave_up' });
+    });
+  });
 });

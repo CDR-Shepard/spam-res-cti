@@ -43,7 +43,8 @@ export interface AiTouchCandidate {
 
 export type Settle =
   | { kind: 'placed'; aiCallId: string }
-  | { kind: 'retry'; at: Date; reason: string; keepKey: boolean }
+  /** `refundAttempt`: the failure was about the system, not the person (I-1): the claim's attempt is given back. */
+  | { kind: 'retry'; at: Date; reason: string; keepKey: boolean; refundAttempt: boolean }
   | { kind: 'failed'; reason: string; aiCallId: string | null };
 
 const rows = <T>(r: unknown): T[] => (r as { rows: T[] }).rows;
@@ -114,7 +115,12 @@ const claimable = sql`
   and not ${DNC_PENDING_SQL}
   and exists (select 1 from campaign_selections cs where cs.campaign_id = e.campaign_id and cs.org_id = e.org_id and cs.sf_record_id = r.sf_record_id)`;
 
-/** `planned → dialing`: one more attempt, and the key kept from a retry that may still be in cti-api, or a new one. */
+/**
+ * `planned → dialing`: one more attempt, and the key kept from a retry that may still be in cti-api, or a new one:
+ * `touch:<touch id>:<attempt>:<claim time in ms>`. The claim time makes a new key unique even when an attempt was given back
+ * (I-1) and the attempt number repeats: cti-api stores every answer under its key, so a repeated key would only replay the
+ * old refusal. A touch is claimed again only once due again, always at a later tick, so the claim time never repeats.
+ */
 export async function claimAiTouch(db: Db, touchId: string, now: Date): Promise<{ attempts: number; triggerKey: string } | null> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`
@@ -122,7 +128,7 @@ export async function claimAiTouch(db: Db, touchId: string, now: Date): Promise<
     const result = await tx.execute(sql`
       update touches t
       set status = 'dialing', claimed_at = ${iso(now)}, updated_at = ${iso(now)}, attempts = t.attempts + 1,
-          trigger_key = coalesce(t.trigger_key, 'touch:' || t.id || ':' || (t.attempts + 1))
+          trigger_key = coalesce(t.trigger_key, 'touch:' || t.id || ':' || (t.attempts + 1) || ':' || ${String(now.getTime())}::text)
       from campaign_enrollments e, campaigns c, crm_records r, call_plans p, call_research cr
       where t.id = ${touchId}::uuid and ${claimable}
       returning t.attempts, t.trigger_key as "triggerKey"`);
@@ -137,7 +143,13 @@ export async function settleTouch(db: Db, touchId: string, s: Settle, now: Date)
     s.kind === 'placed'
       ? { status: 'sent' as const, sentAt: now, aiCallId: s.aiCallId, triggerKey: null, lastBlockReason: null }
       : s.kind === 'retry'
-        ? { status: 'planned' as const, dueAt: s.at, lastBlockReason: s.reason, ...(s.keepKey ? {} : { triggerKey: null }) }
+        ? {
+            status: 'planned' as const,
+            dueAt: s.at,
+            lastBlockReason: s.reason,
+            ...(s.keepKey ? {} : { triggerKey: null }),
+            ...(s.refundAttempt ? { attempts: sql<number>`greatest(${t.attempts} - 1, 0)` } : {}),
+          }
         : { status: 'failed' as const, lastBlockReason: s.reason, triggerKey: null, ...(s.aiCallId ? { aiCallId: s.aiCallId } : {}) };
   await db.update(t).set({ ...set, updatedAt: now }).where(and(eq(t.id, touchId), eq(t.status, 'dialing')));
 }

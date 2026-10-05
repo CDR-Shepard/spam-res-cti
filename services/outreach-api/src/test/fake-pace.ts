@@ -1,5 +1,5 @@
 /** Stand-ins for the `ai_call.place` tick tests: a scripted CtiClient and a Salesforce client that answers the record, Task and Event reads. */
-import type { InternalAiCallRequest, InternalAiCallResponse } from '@cti/contracts';
+import type { AiAvailability, InternalAiCallRequest, InternalAiCallResponse } from '@cti/contracts';
 import { eq } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import type { SalesforceClient } from '@cti/salesforce';
@@ -52,6 +52,9 @@ export interface FakeCti {
   requests: InternalAiCallRequest[];
   /** Answers in order; when they run out every trigger is placed. A `blocked`/`placed`/`failed` result writes its ai_calls row. */
   answers: Array<{ result: 'placed' } | { result: 'blocked'; reason: string } | { result: 'failed'; reason: string; withCall?: boolean } | { transport: string }>;
+  /** What `availability()` answers (null: cti-api did not answer); on with no test numbers unless a test says otherwise. */
+  available: AiAvailability | null;
+  availabilityCalls: number;
 }
 
 /** A CtiClient that records each request and answers from the script, writing the ai_calls row cti-api would write (its FK needs one). */
@@ -59,6 +62,8 @@ export function fakeCti(db: Db): FakeCti {
   const fake: FakeCti = {
     requests: [],
     answers: [],
+    available: { available: true, testNumbers: [] },
+    availabilityCalls: 0,
     cti: {
       async trigger(req) {
         fake.requests.push(req);
@@ -71,7 +76,8 @@ export function fakeCti(db: Db): FakeCti {
         return { kind: 'response', response: response as InternalAiCallResponse };
       },
       async availability() {
-        return { available: true, testNumbers: [] };
+        fake.availabilityCalls += 1;
+        return fake.available;
       },
     },
   };

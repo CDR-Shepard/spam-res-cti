@@ -127,7 +127,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls guards (real Postgres)', () => {
       .values({ orgId: h.base.orgId, enrollmentId: lead.enrollmentId, seq: 2, channel: 'ai_call', status: 'planned', dueAt: NOW, callPlanId: fresh.planId, requestedBy: approver })
       .returning({ id: schema.touches.id });
     expect((await h.run(NOW)).placed).toBe(1);
-    expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([`touch:${next!.id}:1`]);
+    expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([`touch:${next!.id}:1:${NOW.getTime()}`]);
   });
 
   describe('CF-12: a refused plan or an approver who cannot call goes back to the board, never retried', () => {

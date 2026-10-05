@@ -8,7 +8,8 @@
  *  - park: the PLAN cannot be used (cti-api refused its text, or the approver has no CTI user). It goes back
  *    to the board for a person and is never retried until a plan is approved again.
  *  - retry: planned again for a computed time. The idempotency key is kept only when cti-api may still be
- *    handling, or have handled, this exact request (a transport failure, `in_flight`).
+ *    handling, or have handled, this exact request (a transport failure, `in_flight`). A retry about the system,
+ *    not the person (SYSTEM_REASONS, I-1), gives its attempt back, so an outage never uses up MAX_TRIGGER_ATTEMPTS.
  */
 import type { PreferredWindow } from '@cti/contracts';
 import { CALL_WINDOW, nextWindowOpening, withinRecipientWindow, type LocalWindow } from '@cti/firewall';
@@ -41,11 +42,19 @@ export const RETRY_REASONS: ReadonlySet<string> = new Set([
   'calling_hours', 'daily_cap', 'customer_ceiling', 'no_caller_id', 'ai_voice_unavailable', 'call_in_progress', 'in_flight', 'salesforce_error', 'gate_error', 'twilio_error',
 ]);
 
+/**
+ * About the system, not the person (I-1): cti-api's AI voice is off or not set up, no AI caller ID is free, its gate or its
+ * Salesforce read failed, or cti-api did not answer at all (`transport`). They retry with their usual backoff but never count
+ * toward MAX_TRIGGER_ATTEMPTS: the attempt is given back (touches.ts settleTouch), so a kill switch, a missing key or an outage
+ * pauses every queued lead instead of exiting them `ai_call_gave_up`.
+ */
+export const SYSTEM_REASONS: ReadonlySet<string> = new Set(['ai_voice_unavailable', 'no_caller_id', 'gate_error', 'salesforce_error', 'transport']);
+
 export type ParkReason = 'plan_rejected' | 'unknown_user';
 
 export type TriggerDecision =
   | { kind: 'placed'; aiCallId: string }
-  | { kind: 'retry'; reason: string; at: Date; keepKey: boolean }
+  | { kind: 'retry'; reason: string; at: Date; keepKey: boolean; refundAttempt: boolean }
   | { kind: 'final'; reason: string; aiCallId: string | null }
   | { kind: 'park'; reason: ParkReason };
 
@@ -72,7 +81,7 @@ function retryAt(reason: string, attempts: number, to: string | null, now: Date)
   }
 }
 
-/** `attempts` counts the trigger just answered (the claim incremented it). */
+/** `attempts` counts the trigger just answered (the claim incremented it); attempts given back (I-1) are not in it. */
 export function decideTrigger(outcome: TriggerOutcome, attempts: number, toE164: string | null, now: Date): TriggerDecision {
   if (outcome.kind === 'response' && outcome.response.result === 'placed') return { kind: 'placed', aiCallId: outcome.response.aiCallId };
   const refusal = outcome.kind === 'response' && outcome.response.result !== 'placed' ? outcome.response : null;
@@ -80,10 +89,11 @@ export function decideTrigger(outcome: TriggerOutcome, attempts: number, toE164:
   const aiCallId = refusal ? refusal.aiCallId : null;
   if (PARK_REASONS.has(reason)) return { kind: 'park', reason: reason as ParkReason };
   if (FINAL_REASONS.has(reason)) return { kind: 'final', reason, aiCallId };
-  if (attempts >= MAX_TRIGGER_ATTEMPTS) return { kind: 'final', reason: 'gave_up', aiCallId };
+  const system = SYSTEM_REASONS.has(reason);
+  if (!system && attempts >= MAX_TRIGGER_ATTEMPTS) return { kind: 'final', reason: 'gave_up', aiCallId };
   // Keep the idempotency key only when cti-api may still be handling (or have handled) this exact request.
   const keepKey = outcome.kind === 'transport' || reason === 'in_flight';
-  return { kind: 'retry', reason, at: retryAt(reason, attempts, toE164, now), keepKey };
+  return { kind: 'retry', reason, at: retryAt(reason, attempts, toE164, now), keepKey, refundAttempt: system };
 }
 
 export function windowCheck(toE164: string | null, now: Date, preferred: PreferredWindow): { ok: true } | { ok: false; at: Date } {

@@ -23,6 +23,8 @@ import { IN_FLIGHT_RETRY_MS } from './pacing-rules.js';
 const NOW = new Date('2026-10-05T23:00:00.000Z');
 const MIN = 60_000;
 const ago = (ms: number) => new Date(NOW.getTime() - ms);
+/** The key a claim at `at` mints: the touch, the attempt and the claim time (I-1: unique even when an attempt is given back). */
+const keyOf = (touchId: string, attempt: number, at: Date = NOW) => `touch:${touchId}:${attempt}:${at.getTime()}`;
 
 describe.skipIf(!pgLane)('AI call touches (real Postgres)', () => {
   let db: Db;
@@ -81,10 +83,10 @@ describe.skipIf(!pgLane)('AI call touches (real Postgres)', () => {
     expect((await dueAiCallTouches(db, base.orgId, NOW, 20))[0]?.firstAiTouch).toBe(false);
   });
 
-  it('2-3: the first claim mints touch:<id>:1 and marks it dialing; a second claim gets nothing', async () => {
+  it('2-3: the first claim mints touch:<id>:1:<claim ms> and marks it dialing; a second claim gets nothing', async () => {
     const base = await seedAiCallCampaign(db, 'active');
     const lead = await seedReleasedLead(db, base);
-    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 1, triggerKey: `touch:${lead.touchId}:1` });
+    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 1, triggerKey: keyOf(lead.touchId, 1) });
     expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'dialing', claimedAt: NOW, attempts: 1 });
     expect(await claimAiTouch(db, lead.touchId, NOW)).toBeNull();
   });
@@ -93,10 +95,24 @@ describe.skipIf(!pgLane)('AI call touches (real Postgres)', () => {
     const base = await seedAiCallCampaign(db, 'active');
     const lead = await seedReleasedLead(db, base);
     await claimAiTouch(db, lead.touchId, NOW);
-    await settleTouch(db, lead.touchId, { kind: 'retry', at: NOW, reason: 'transport', keepKey: true }, NOW);
-    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 2, triggerKey: `touch:${lead.touchId}:1` });
-    await settleTouch(db, lead.touchId, { kind: 'retry', at: NOW, reason: 'calling_hours', keepKey: false }, NOW);
-    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 3, triggerKey: `touch:${lead.touchId}:3` });
+    await settleTouch(db, lead.touchId, { kind: 'retry', at: NOW, reason: 'transport', keepKey: true, refundAttempt: false }, NOW);
+    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 2, triggerKey: keyOf(lead.touchId, 1) });
+    await settleTouch(db, lead.touchId, { kind: 'retry', at: NOW, reason: 'calling_hours', keepKey: false, refundAttempt: false }, NOW);
+    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 3, triggerKey: keyOf(lead.touchId, 3) });
+  });
+
+  it('I-1: a retry that gives its attempt back counts nothing, and the next claim still mints a key never sent before', async () => {
+    const base = await seedAiCallCampaign(db, 'active');
+    const lead = await seedReleasedLead(db, base);
+    const later = new Date(NOW.getTime() + 30 * MIN);
+    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 1, triggerKey: keyOf(lead.touchId, 1) });
+    await settleTouch(db, lead.touchId, { kind: 'retry', at: later, reason: 'ai_voice_unavailable', keepKey: false, refundAttempt: true }, NOW);
+    expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', attempts: 0, triggerKey: null, lastBlockReason: 'ai_voice_unavailable' });
+    // cti-api stored the refusal under the first key: the same attempt number must come with a new key.
+    expect(await claimAiTouch(db, lead.touchId, later)).toEqual({ attempts: 1, triggerKey: keyOf(lead.touchId, 1, later) });
+    // A transport failure gives the attempt back too, and keeps its key (CF-13).
+    await settleTouch(db, lead.touchId, { kind: 'retry', at: later, reason: 'transport', keepKey: true, refundAttempt: true }, later);
+    expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', attempts: 0, triggerKey: keyOf(lead.touchId, 1, later) });
   });
 
   it('5: an exited enrollment is not claimed and its touch is untouched', async () => {
@@ -169,10 +185,10 @@ describe.skipIf(!pgLane)('AI call touches (real Postgres)', () => {
     const lead = await seedReleasedLead(db, base);
     const at = new Date(NOW.getTime() + 10 * MIN);
     await claimAiTouch(db, lead.touchId, NOW);
-    await settleTouch(db, lead.touchId, { kind: 'retry', at, reason: 'in_flight', keepKey: true }, NOW);
-    expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', dueAt: at, lastBlockReason: 'in_flight', triggerKey: `touch:${lead.touchId}:1` });
+    await settleTouch(db, lead.touchId, { kind: 'retry', at, reason: 'in_flight', keepKey: true, refundAttempt: false }, NOW);
+    expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', dueAt: at, lastBlockReason: 'in_flight', triggerKey: keyOf(lead.touchId, 1) });
     await claimAiTouch(db, lead.touchId, NOW);
-    await settleTouch(db, lead.touchId, { kind: 'retry', at, reason: 'twilio_error', keepKey: false }, NOW);
+    await settleTouch(db, lead.touchId, { kind: 'retry', at, reason: 'twilio_error', keepKey: false, refundAttempt: false }, NOW);
     expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', lastBlockReason: 'twilio_error', triggerKey: null });
   });
 
@@ -216,7 +232,7 @@ describe.skipIf(!pgLane)('AI call touches (real Postgres)', () => {
     expect(await reapStaleDialing(db, NOW)).toBe(1);
     // A3: the key is kept, so the retry waits at least IN_FLIGHT_RETRY_MS after the original reservation (CF-13).
     expect(await touchById(db, stale.touchId)).toMatchObject({
-      status: 'planned', dueAt: new Date(ago(STALE_DIALING_MS + MIN).getTime() + IN_FLIGHT_RETRY_MS), triggerKey: `touch:${stale.touchId}:1`, attempts: 1,
+      status: 'planned', dueAt: new Date(ago(STALE_DIALING_MS + MIN).getTime() + IN_FLIGHT_RETRY_MS), triggerKey: keyOf(stale.touchId, 1, ago(STALE_DIALING_MS + MIN)), attempts: 1,
     });
     expect((await touchById(db, fresh.touchId)).status).toBe('dialing');
     expect((await touchById(db, placed.touchId)).status).toBe('dialing');
@@ -231,7 +247,7 @@ describe.skipIf(!pgLane)('AI call touches (real Postgres)', () => {
     await db.update(schema.campaignEnrollments).set({ status: 'exited', exitReason: 'opted_out' }).where(eq(schema.campaignEnrollments.id, ended.enrollmentId));
 
     expect(await reapStaleDialing(db, NOW)).toBe(2);
-    expect(await touchById(db, old.touchId)).toMatchObject({ status: 'planned', dueAt: NOW, triggerKey: `touch:${old.touchId}:1` });
+    expect(await touchById(db, old.touchId)).toMatchObject({ status: 'planned', dueAt: NOW, triggerKey: keyOf(old.touchId, 1, ago(30 * MIN)) });
     expect(await touchById(db, ended.touchId)).toMatchObject({ status: 'skipped', skipReason: 'enrollment_ended' });
   });
 
