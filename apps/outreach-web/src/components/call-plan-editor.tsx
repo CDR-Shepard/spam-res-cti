@@ -66,10 +66,10 @@ export function CallPlanEditor({ plan, onSave, onCancel, busy }: { plan: Editabl
       <Field label="Situation summary"><Textarea value={draft.situationSummary} onChange={(e) => set('situationSummary', e.target.value)} /></Field>
       {plan.sellingSignals.length > 0 && (
         <ul className="space-y-1 text-xs text-muted-foreground" aria-label="Selling signals (read-only)">
-          {plan.sellingSignals.map((s) => <li key={`${s.signal}-${s.evidence}`}>{s.signal} ({STRENGTH_WORDS[s.strength]}, {EVIDENCE_WORDS[s.source]})</li>)}
+          {plan.sellingSignals.map((s, i) => <li key={i}>{s.signal} ({STRENGTH_WORDS[s.strength]}, {EVIDENCE_WORDS[s.source]})</li>)}
         </ul>
       )}
-      <Field label="Opener"><Textarea value={draft.opener} onChange={(e) => set('opener', e.target.value)} /></Field>
+      <Field label="Opener"><Input value={draft.opener} onChange={(e) => set('opener', e.target.value)} /></Field>
       {draft.goals.map((g, i) => (
         <fieldset key={g.goal} className="space-y-2 rounded-md border p-2">
           <legend className="px-1 text-sm font-medium">{GOAL_WORDS[g.goal]}</legend>

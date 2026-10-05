@@ -92,7 +92,7 @@ function List({ title, items }: { title: string; items: readonly string[] }) {
   return (
     <div>
       <h4 className="font-medium">{title}</h4>
-      <ul className="list-disc space-y-0.5 pl-5">{items.map((t) => <li key={t}>{t}</li>)}</ul>
+      <ul className="list-disc space-y-0.5 pl-5">{items.map((t, i) => <li key={i}>{t}</li>)}</ul>
     </div>
   );
 }
@@ -105,8 +105,8 @@ function PlanView({ plan }: { plan: EditableCallPlan }) {
         <div>
           <h4 className="font-medium">Selling signals</h4>
           <ul className="space-y-1">
-            {plan.sellingSignals.map((s) => (
-              <li key={`${s.signal}-${s.evidence}`}>
+            {plan.sellingSignals.map((s, i) => (
+              <li key={i}>
                 {s.signal} <q>{s.evidence}</q> <span className="text-xs text-muted-foreground">({EVIDENCE_WORDS[s.source]}, {STRENGTH_WORDS[s.strength]})</span>
               </li>
             ))}

@@ -158,6 +158,30 @@ describe('CallPlanBoard', () => {
     expect((put.body as { plan: object }).plan).not.toHaveProperty('doNotContact');
   });
 
+  it('M-9: repeated text in the lists and the selling signals renders every line, with no duplicate-key warning', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const dup = { signal: 'Wants a quick sale', evidence: 'we need this done', source: 'task' as const, strength: 'strong' as const };
+    const plan: EditableCallPlan = { ...PLAN, sellingSignals: [dup, dup], talkingPoints: ['We buy as-is', 'We buy as-is'], questions: ['Same?', 'Same?'], avoid: ['Avoid', 'Avoid'] };
+    stubApi({ [`GET ${BOARD}`]: board([card(1, { plan: { ...card(1).plan!, plan } })], { review: 1 }) });
+    render();
+    const c = within(await cardOf('Lead 1'));
+    expect(c.getAllByText('We buy as-is')).toHaveLength(2);
+    expect(c.getAllByText('Same?')).toHaveLength(2);
+    expect(c.getAllByText(/Wants a quick sale/)).toHaveLength(2);
+    await userEvent.click(c.getByRole('button', { name: 'Edit' }));
+    expect(screen.getAllByText(/Wants a quick sale/).length).toBeGreaterThan(0);
+    expect(error.mock.calls.filter((args) => String(args[0]).includes('same key'))).toEqual([]);
+    error.mockRestore();
+  });
+
+  it('M-9b: the opener is a single line in the editor (the server refuses line breaks there)', async () => {
+    stubApi({ [`GET ${BOARD}`]: board([card(1)], { review: 1 }) });
+    render();
+    await userEvent.click(within(await cardOf('Lead 1')).getByRole('button', { name: 'Edit' }));
+    expect(screen.getByLabelText('Opener').tagName).toBe('INPUT');
+    expect(screen.getByLabelText('Situation summary').tagName).toBe('TEXTAREA');
+  });
+
   it('5b: the editor refuses a plan that breaks the contract (no questions) and sends nothing', async () => {
     const calls = stubApi({ [`GET ${BOARD}`]: board([card(1)], { review: 1 }) });
     render();
