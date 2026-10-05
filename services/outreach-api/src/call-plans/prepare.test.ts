@@ -180,8 +180,8 @@ describe.skipIf(!pgLane)('prepareDueCalls (real Postgres)', () => {
   });
 
   it('stops a tenant when its budget runs out mid-tick and releases the rest', async () => {
-    const t = await tenant({ settings: { aiDailyBudgetUsd: 0.05 }, leads: 3 });
-    const model = fakeModel(); // 12_000 * 3 + 1_500 * 15 = 58_500 micros > 50_000
+    const t = await tenant({ settings: { aiDailyBudgetUsd: 0.03 }, leads: 3 });
+    const model = fakeModel(); // 12_000 * 2 + 1_500 * 10 = 39_000 micros > 30_000
     expect(await prepareDueCalls(deps(model))).toEqual({ planned: 1, held: 0, failed: 0 });
     expect(model.plan).toHaveBeenCalledTimes(1);
     expect(await campaignById(db, t.campaign.id)).toMatchObject({ status: 'paused', pauseReason: 'ai_budget' });

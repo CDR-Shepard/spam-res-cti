@@ -10,8 +10,8 @@ export const TRIAGE_MODEL = 'claude-haiku-4-5-20251001';
 /** USD per million tokens = micro-dollars per token (Haiku 4.5: $1 in, $5 out). */
 export const PRICE_MICROS_PER_TOKEN: Readonly<Record<string, { input: number; output: number }>> = {
   'claude-haiku-4-5-20251001': { input: 1, output: 5 },
-  // Plan 1C call plans. $3 / $15 per million tokens — VERIFY against Anthropic's price list before deploy (plan 1C decision 8).
-  'claude-sonnet-5-5': { input: 3, output: 15 },
+  // Plan 1C call plans (Sonnet 5.5): $2 in, $10 out.
+  'claude-sonnet-5-5': { input: 2, output: 10 },
 };
 
 /** Cost of one call in micro-dollars. Throws for a model without a price, so spend is never silently zero. */

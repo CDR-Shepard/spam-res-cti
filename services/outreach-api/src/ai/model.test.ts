@@ -35,6 +35,9 @@ describe('costMicros', () => {
   it('prices Haiku 4.5 at 1 and 5 micro-dollars per input and output token', () => {
     expect(costMicros(TRIAGE_MODEL, 812, 143)).toBe(812 + 143 * 5);
   });
+  it('prices Sonnet 5.5 (call plans) at 2 and 10 micro-dollars per input and output token ($2 / $10 per million)', () => {
+    expect(costMicros('claude-sonnet-5-5', 12_000, 1_500)).toBe(12_000 * 2 + 1_500 * 10);
+  });
   it('refuses a model without a price', () => {
     expect(() => costMicros('claude-unknown', 1, 1)).toThrow(/no price/);
   });
