@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { clip, escapeAttr, escapeData, fieldValueText, plainText, soqlIdList } from './text.js';
+import { clip, cutUtf16, escapeAttr, escapeData, fieldValueText, plainText, soqlIdList } from './text.js';
+
+/** A high surrogate not followed by a low one, or a low one not preceded by a high one. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 describe('plainText', () => {
   it('strips tags, decodes entities and collapses whitespace', () => {
@@ -33,6 +36,23 @@ describe('clip', () => {
   it('cuts with an ellipsis and says so', () => {
     expect(clip('abcdef', 4)).toEqual({ text: 'abcd…', truncated: true });
     expect(clip('abcd', 4)).toEqual({ text: 'abcd', truncated: false });
+  });
+  it('never splits an emoji: a cut that would end on the first half of a surrogate pair drops that half', () => {
+    const s = `${'a'.repeat(9)}😀 sold`;
+    const out = clip(s, 10);
+    expect(out).toEqual({ text: `${'a'.repeat(9)}…`, truncated: true });
+    expect(LONE_SURROGATE.test(out.text)).toBe(false);
+    expect(clip(s, 11).text).toBe(`${'a'.repeat(9)}😀…`);
+  });
+});
+
+describe('cutUtf16', () => {
+  it('cuts at most max code units and never leaves a lone surrogate', () => {
+    expect(cutUtf16('abcdef', 3)).toBe('abc');
+    expect(cutUtf16('😀😀', 3)).toBe('😀');
+    expect(cutUtf16('😀😀', 1)).toBe('');
+    expect(cutUtf16('😀', 0)).toBe('');
+    for (let n = 0; n <= 20; n++) expect(LONE_SURROGATE.test(cutUtf16('x😀'.repeat(10), n))).toBe(false);
   });
 });
 

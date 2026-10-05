@@ -14,8 +14,18 @@ export function plainText(s: string): string {
     .trim();
 }
 
+/**
+ * The first `max` UTF-16 code units of `s`, minus a trailing first half of a surrogate pair:
+ * a lone surrogate would serialize as a \udXXX escape that Postgres jsonb rejects.
+ */
+export function cutUtf16(s: string, max: number): string {
+  const cut = s.slice(0, Math.max(0, max));
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
 export function clip(s: string, max: number): { text: string; truncated: boolean } {
-  return s.length > max ? { text: `${s.slice(0, max)}…`, truncated: true } : { text: s, truncated: false };
+  return s.length > max ? { text: `${cutUtf16(s, max)}…`, truncated: true } : { text: s, truncated: false };
 }
 
 /** A field value worth showing: strings, numbers, true. False, empty, and compound/relationship objects are dropped. */

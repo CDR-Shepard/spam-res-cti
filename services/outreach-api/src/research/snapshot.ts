@@ -7,6 +7,7 @@ import { readContentNotes, readEmails, readEvents, readNotes, readTasks, type Ac
 import { readChatter } from './chatter.js';
 import { RESEARCH_LIMITS } from './limits.js';
 import { readMainAndRelated, type RecordBlock, type ResearchReadDeps } from './related.js';
+import { cutUtf16 } from './text.js';
 
 const Field = z.object({ name: z.string(), label: z.string(), value: z.string() });
 const Block = z.object({
@@ -86,7 +87,7 @@ function truncateProtected(records: RecordBlock[], budget: number, consentField:
     const victim = candidates.sort((a, b) => b.size - a.size || a.bi - b.bi || a.fi - b.fi)[0];
     if (!victim) break;
     const keep = Math.max(1, victim.size - excess - 1);
-    out = out.map((b, bi) => (bi === victim.bi ? { ...b, fields: b.fields.map((f, fi) => (fi === victim.fi ? { ...f, value: f.value.slice(0, keep) + ELLIPSIS } : f)) } : b));
+    out = out.map((b, bi) => (bi === victim.bi ? { ...b, fields: b.fields.map((f, fi) => (fi === victim.fi ? { ...f, value: cutUtf16(f.value, keep) + ELLIPSIS } : f)) } : b));
     cut = true;
   }
   return { records: out, cut };

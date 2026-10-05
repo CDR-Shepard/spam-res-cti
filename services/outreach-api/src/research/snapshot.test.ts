@@ -93,6 +93,16 @@ describe('assembleSnapshot: record blocks over half the budget', () => {
     expect(run()).toEqual(snap);
   });
 
+  it('never splits an emoji when it truncates a protected value, so the snapshot stays valid for jsonb', () => {
+    const emoji = block('self', 'Lead', [['Name', '😀'.repeat(1_500)], ['Email', `x${'🏠'.repeat(1_000)}`], ['AI_Call_Consent__c', 'true']]);
+    for (const total of [1_201, 1_202, 1_203, 1_500, 1_777]) {
+      const snap = assembleSnapshot(input({ records: [emoji], consentField: 'AI_Call_Consent__c' }), total);
+      expect(snapshotSize(snap)).toBeLessThanOrEqual(total);
+      // JSON.stringify writes a lone surrogate as a \udXXX escape, which Postgres jsonb refuses.
+      expect(JSON.stringify(snap)).not.toMatch(/\\ud[89a-f][0-9a-f]{2}/i);
+    }
+  });
+
   it('keeps the consent field while shorter non-key fields are dropped first', () => {
     const shorts: Array<[string, string]> = ['A', 'B', 'C', 'D', 'E', 'F'].map((k) => [`${k}__c`, 'xy']);
     const withConsent = block('self', 'Lead', [['AI_Call_Consent__c', 'true'], ['Name', 'Pat'], ...shorts]);
