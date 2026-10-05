@@ -1,6 +1,7 @@
 /** Real Postgres: "Call all approved". */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
+import type { PoolClient } from 'pg';
 import { schema, type Db } from '@cti/db';
 import { seedCampaign, seedOrg } from '../test/outreach-fixtures.js';
 import { ctxOf, seedAiCallCampaign, seedPlanLead, seedUser, SEED_NOW } from '../test/call-plan-seed.js';
@@ -75,11 +76,24 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
     expect(await refused(releaseApprovedCalls(db, other.ctx, b.campaignId, SEED_NOW))).toEqual({ code: 'NOT_FOUND', status: 404 });
   });
 
-  /** Polls until some backend is waiting on a lock: the release has reached the row the test holds. No fixed sleep. */
-  async function untilABackendWaitsOnALock(): Promise<void> {
+  /**
+   * Polls until `count` backends are waiting, directly or behind another waiter (a row lock's queue), on `holder`'s
+   * transaction: the releases have reached the row the test holds. Filtered by the holder's pid, so another suite's lock
+   * waits on the same server never satisfy it. No fixed sleep.
+   */
+  async function untilBlockedBy(holder: PoolClient, count = 1): Promise<void> {
+    const { rows: pidRows } = await holder.query('select pg_backend_pid() as pid');
+    const pid = (pidRows[0] as { pid: number }).pid;
     for (let i = 0; i < 400; i += 1) {
-      const { rows } = await pool.query(`select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`);
-      if (rows.length > 0) return;
+      const { rows } = await pool.query(
+        `with recursive waiting(pid) as (
+           select pid from pg_stat_activity where $1 = any(pg_blocking_pids(pid))
+           union
+           select a.pid from pg_stat_activity a join waiting w on w.pid = any(pg_blocking_pids(a.pid)))
+         select count(*)::int as n from waiting`,
+        [pid],
+      );
+      if ((rows[0] as { n: number }).n >= count) return;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error('the release never waited on the lock');
@@ -93,7 +107,7 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
       await client.query('begin');
       await client.query(`update campaign_enrollments set status = 'exited', exit_reason = 'left_query' where id = $1`, [lead.enrollmentId]);
       const release = releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW);
-      await untilABackendWaitsOnALock();
+      await untilBlockedBy(client);
       await client.query('commit');
       expect(await release).toEqual({ released: 0, skipped: 1 });
     } finally {
@@ -117,7 +131,7 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
         [lead.planId, b.admin],
       );
       const release = releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW);
-      await untilABackendWaitsOnALock();
+      await untilBlockedBy(client);
       await client.query('commit');
       expect(await release).toEqual({ released: 0, skipped: 1 });
     } finally {
@@ -125,6 +139,27 @@ describe.skipIf(!pgLane)('releaseApprovedCalls (real Postgres)', () => {
     }
     expect(await touches(lead.enrollmentId)).toEqual([]);
     expect(await stage(lead.enrollmentId)).toBe('approved');
+  });
+
+  it('M-1: two releases of the same lead at once serialize: one queues the call, the other is a no-op, and neither deadlocks', async () => {
+    const b = await setup();
+    const lead = await approvedLead(b);
+    const client = await pool.connect();
+    let results: Awaited<ReturnType<typeof releaseApprovedCalls>>[];
+    try {
+      // Both releases queue on the lead's row; when it is freed they run at the same moment.
+      await client.query('begin');
+      await client.query(`select 1 from campaign_enrollments where id = $1 for update`, [lead.enrollmentId]);
+      const both = Promise.all([releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW), releaseApprovedCalls(db, b.ctx, b.campaignId, SEED_NOW)]);
+      await untilBlockedBy(client, 2);
+      await client.query('commit');
+      results = await both;
+    } finally {
+      client.release();
+    }
+    expect(results.map((r) => r.released).sort()).toEqual([0, 1]);
+    expect(await touches(lead.enrollmentId)).toHaveLength(1);
+    expect(await stage(lead.enrollmentId)).toBe('queued');
   });
 
   it('M-4: leads the engine would refuse do not starve the ones behind them, however many there are', async () => {

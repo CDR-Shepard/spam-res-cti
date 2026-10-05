@@ -36,12 +36,13 @@ interface Releasable {
 const CONSENTS: readonly string[] = ['yes', 'no', 'field_missing', 'unknown'];
 
 /**
- * The enrollment is locked FOR SHARE first, in its own statement, so that the insert's statement snapshot is taken only
- * after any editor or approver holding the row has committed. The insert then requires the lead to be active, still
- * `approved`, still selected, with THIS plan still its approved plan (an edit and a new approval since the read make a
- * different plan the approved one: no touch carries the stale plan, I-1), and no touch that has not started. A `dialing`
- * touch only blocks when it belongs to THIS plan; one left over from before a reactivation (CF-3) is the reconciler's
- * business, and the engine refuses a second simultaneous call to the person anyway.
+ * The enrollment is locked FOR NO KEY UPDATE first, in its own statement, so that the insert's statement snapshot is
+ * taken only after any editor or approver holding the row has committed. (Not FOR SHARE: two releases of one lead would
+ * both hold the share and deadlock on the update, M-1. Now the second waits, then finds the lead already queued.)
+ * The insert then requires the lead to be active, still `approved`, still selected, with THIS plan still its approved plan
+ * (an edit and a new approval since the read make a different plan the approved one: no touch carries the stale plan, I-1),
+ * and no touch that has not started. A `dialing` touch only blocks when it belongs to THIS plan; one left over from before
+ * a reactivation (CF-3) is the reconciler's business, and the engine refuses a second simultaneous call to the person anyway.
  */
 function insertTouch(r: Releasable, now: Date) {
   return sql`
@@ -63,7 +64,7 @@ function insertTouch(r: Releasable, now: Date) {
 
 async function releaseOne(db: Db, r: Releasable, now: Date): Promise<boolean> {
   return db.transaction(async (tx) => {
-    await tx.execute(sql`select 1 from campaign_enrollments where id = ${r.enrollment_id}::uuid for share`);
+    await tx.execute(sql`select 1 from campaign_enrollments where id = ${r.enrollment_id}::uuid for no key update`);
     const inserted = await tx.execute(insertTouch(r, now));
     if ((inserted as unknown as { rows: unknown[] }).rows.length === 0) return false;
     await tx
