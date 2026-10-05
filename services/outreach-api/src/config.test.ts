@@ -34,6 +34,40 @@ describe('parseConfig', () => {
     expect(() => parseConfig({ ...base, SALESFORCE_CLIENT_ID: '3MVG9-client' })).toThrow(/SALESFORCE_REDIRECT_URI/);
     expect(() => parseConfig({ ...base, SALESFORCE_REDIRECT_URI: 'http://localhost:4100/api/connections/salesforce/callback' })).toThrow(/SALESFORCE_CLIENT_ID/);
   });
+  describe('Salesforce sign-in', () => {
+    const signIn = 'http://localhost:4100/api/auth/salesforce/callback';
+    it('is enabled by the client id and the sign-in redirect alone, leaving the integration connection off', () => {
+      const cfg = parseConfig({ ...base, SALESFORCE_CLIENT_ID: '3MVG9-client', SALESFORCE_SIGNIN_REDIRECT_URI: signIn });
+      expect(cfg.salesforceSignInEnabled).toBe(true);
+      expect(cfg.salesforceEnabled).toBe(false);
+      expect(parseConfig(base).salesforceSignInEnabled).toBe(false);
+    });
+    it('keeps both features independent when both redirects are set', () => {
+      const cfg = parseConfig({ ...base, SALESFORCE_CLIENT_ID: 'c', SALESFORCE_REDIRECT_URI: 'http://localhost:4100/api/connections/salesforce/callback', SALESFORCE_SIGNIN_REDIRECT_URI: signIn });
+      expect(cfg.salesforceEnabled).toBe(true);
+      expect(cfg.salesforceSignInEnabled).toBe(true);
+    });
+    it('requires the client id with a sign-in redirect', () => {
+      expect(() => parseConfig({ ...base, SALESFORCE_SIGNIN_REDIRECT_URI: signIn })).toThrow(/SALESFORCE_CLIENT_ID/);
+    });
+    it('requires a redirect when the client id is set, naming both', () => {
+      const attempt = () => parseConfig({ ...base, SALESFORCE_CLIENT_ID: '3MVG9-client' });
+      expect(attempt).toThrow(/SALESFORCE_REDIRECT_URI/);
+      expect(attempt).toThrow(/SALESFORCE_SIGNIN_REDIRECT_URI/);
+    });
+    it.each(['00D000000000001', '00D000000000001AAA'])('accepts the org id %s', (id) => {
+      expect(parseConfig({ ...base, SALESFORCE_ALLOWED_ORG_ID: id }).SALESFORCE_ALLOWED_ORG_ID).toBe(id);
+    });
+    it('rejects a malformed org id', () => {
+      expect(() => parseConfig({ ...base, SALESFORCE_ALLOWED_ORG_ID: '00D-bad' })).toThrow(/SALESFORCE_ALLOWED_ORG_ID/);
+    });
+    it('treats empty strings as unset', () => {
+      const cfg = parseConfig({ ...base, SALESFORCE_SIGNIN_REDIRECT_URI: '', SALESFORCE_ALLOWED_ORG_ID: '' });
+      expect(cfg.SALESFORCE_SIGNIN_REDIRECT_URI).toBeUndefined();
+      expect(cfg.SALESFORCE_ALLOWED_ORG_ID).toBeUndefined();
+      expect(cfg.salesforceSignInEnabled).toBe(false);
+    });
+  });
   it('defaults the Salesforce login url and api version, strips a trailing slash, and rejects a malformed version', () => {
     const cfg = parseConfig(base);
     expect(cfg.SALESFORCE_LOGIN_URL).toBe('https://login.salesforce.com');

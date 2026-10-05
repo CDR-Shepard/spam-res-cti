@@ -23,3 +23,7 @@ export type SessionResponse = z.infer<typeof SessionResponse>;
 
 export const MeResponse = z.object({ user: SessionUser, tenant: Tenant });
 export type MeResponse = z.infer<typeof MeResponse>;
+
+/** GET /api/auth/providers — which sign-in buttons the web shows. */
+export const AuthProviders = z.object({ salesforce: z.boolean(), workos: z.boolean() });
+export type AuthProviders = z.infer<typeof AuthProviders>;

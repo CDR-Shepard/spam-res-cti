@@ -21,13 +21,17 @@ const schema = z.object({
   SALESFORCE_CLIENT_SECRET: z.string().min(1).optional(),
   /** `${API_PUBLIC_URL}/api/connections/salesforce/callback` — must match the Connected App's callback URL exactly. */
   SALESFORCE_REDIRECT_URI: z.string().url().optional(),
+  /** `${API_PUBLIC_URL}/api/auth/salesforce/callback` — people sign in to outreach-web with Salesforce (same External Client App as the CTI). */
+  SALESFORCE_SIGNIN_REDIRECT_URI: z.string().url().optional(),
+  /** When set, only this Salesforce org may sign in (first 15 characters compared), as in cti-api. */
+  SALESFORCE_ALLOWED_ORG_ID: z.string().regex(/^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/, 'SALESFORCE_ALLOWED_ORG_ID must be a 15- or 18-character org Id').optional(),
   SALESFORCE_LOGIN_URL: z.string().url().default('https://login.salesforce.com').transform((u) => u.replace(/\/+$/, '')),
   SALESFORCE_API_VERSION: z.string().regex(/^v\d+\.\d$/, 'SALESFORCE_API_VERSION must look like v60.0').default('v60.0'),
   /** Claude for note triage (A9); unset = triage disabled. */
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
 });
 
-export type AppConfig = z.infer<typeof schema> & { workosEnabled: boolean; salesforceEnabled: boolean; aiEnabled: boolean };
+export type AppConfig = z.infer<typeof schema> & { workosEnabled: boolean; salesforceEnabled: boolean; salesforceSignInEnabled: boolean; aiEnabled: boolean };
 
 /** Pure: parses a raw env map. Empty strings count as unset (deploy UIs write them). */
 export function parseConfig(env: Record<string, string | undefined>): AppConfig {
@@ -45,12 +49,20 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
     const missing = ['WORKOS_API_KEY', 'WORKOS_CLIENT_ID', 'WORKOS_REDIRECT_URI'].filter((k) => !(c as Record<string, unknown>)[k]);
     throw new Error(`Invalid environment configuration:\n  - WorkOS: set all three or none; missing ${missing.join(', ')}`);
   }
-  const salesforceSet = [c.SALESFORCE_CLIENT_ID, c.SALESFORCE_REDIRECT_URI].filter(Boolean).length;
-  if (salesforceSet === 1) {
-    const missing = c.SALESFORCE_CLIENT_ID ? 'SALESFORCE_REDIRECT_URI' : 'SALESFORCE_CLIENT_ID';
-    throw new Error(`Invalid environment configuration:\n  - Salesforce: set SALESFORCE_CLIENT_ID and SALESFORCE_REDIRECT_URI together; missing ${missing}`);
+  const redirects = [c.SALESFORCE_REDIRECT_URI, c.SALESFORCE_SIGNIN_REDIRECT_URI].filter(Boolean).length;
+  if (redirects > 0 && !c.SALESFORCE_CLIENT_ID) {
+    throw new Error('Invalid environment configuration:\n  - Salesforce: a redirect uri is set but SALESFORCE_CLIENT_ID is missing');
   }
-  return { ...c, workosEnabled: set === 3, salesforceEnabled: salesforceSet === 2, aiEnabled: Boolean(c.ANTHROPIC_API_KEY) };
+  if (c.SALESFORCE_CLIENT_ID && redirects === 0) {
+    throw new Error('Invalid environment configuration:\n  - Salesforce: SALESFORCE_CLIENT_ID needs SALESFORCE_REDIRECT_URI (integration connection) and/or SALESFORCE_SIGNIN_REDIRECT_URI (sign-in)');
+  }
+  return {
+    ...c,
+    workosEnabled: set === 3,
+    salesforceEnabled: Boolean(c.SALESFORCE_CLIENT_ID && c.SALESFORCE_REDIRECT_URI),
+    salesforceSignInEnabled: Boolean(c.SALESFORCE_CLIENT_ID && c.SALESFORCE_SIGNIN_REDIRECT_URI),
+    aiEnabled: Boolean(c.ANTHROPIC_API_KEY),
+  };
 }
 
 let cached: AppConfig | undefined;
