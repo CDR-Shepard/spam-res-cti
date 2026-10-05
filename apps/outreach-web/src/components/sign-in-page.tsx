@@ -1,10 +1,15 @@
+import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useAuth } from '@/lib/auth';
+import { getAuthProviders, outreachKeys } from '@/lib/outreach-api';
 
-/** Keyed by the `error` reason outreach-api's callback redirects with (routes/auth.ts) plus the web's own `handoff_failed`. */
+/** Keyed by the `error` reason outreach-api's sign-in callbacks redirect with (routes/auth.ts, routes/auth-salesforce.ts) plus the web's own `handoff_failed`. */
 const MESSAGES: Record<string, string> = {
-  no_tenant: 'Your account is not a member of a workspace yet. Ask your admin for an invite.',
+  no_tenant: 'This Salesforce org is not set up for Outreach. Contact your administrator.',
+  no_account: 'Your Salesforce user is not set up in the CTI yet. Sign in to the CTI softphone once, or ask an admin to add you.',
+  org_not_allowed: 'This Salesforce org is not allowed to use Outreach.',
+  salesforce_unavailable: 'Salesforce did not answer. Try again in a minute.',
   tenant_suspended: 'This workspace is suspended. Contact support.',
   invalid_code: 'That sign-in link expired. Try again.',
   bad_state: 'That sign-in attempt expired or was started in another tab. Try again.',
@@ -26,16 +31,27 @@ function messageFor(error: string): string {
 
 export function SignInPage({ error, returnTo }: { error?: string; returnTo?: string }) {
   const auth = useAuth();
+  const providers = useQuery({ queryKey: outreachKeys.authProviders, queryFn: getAuthProviders, retry: false });
+  // While loading, or if the request fails, Salesforce is the default: the server answers sign_in_disabled if it is off.
+  const salesforce = providers.data?.salesforce ?? true;
+  const workos = providers.data?.workos ?? false;
+  const nothingConfigured = providers.isSuccess && !salesforce && !workos;
   return (
     <main className="min-h-screen grid place-items-center bg-background p-6">
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>Outreach</CardTitle>
-          <CardDescription>Sign in with your work email.</CardDescription>
+          <CardDescription>Sign in with your Salesforce account.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {error && <p role="alert" className="text-sm text-destructive">{messageFor(error)}</p>}
-          <Button className="w-full" onClick={() => auth.startSignIn(returnTo)}>Continue</Button>
+          {nothingConfigured && error !== 'sign_in_disabled' && <p role="alert" className="text-sm text-destructive">{MESSAGES.sign_in_disabled}</p>}
+          {salesforce && <Button className="w-full" onClick={() => auth.startSignIn(returnTo, 'salesforce')}>Sign in with Salesforce</Button>}
+          {workos && (
+            <Button className="w-full" variant={salesforce ? 'secondary' : 'default'} onClick={() => auth.startSignIn(returnTo, 'workos')}>
+              Sign in with email
+            </Button>
+          )}
         </CardContent>
       </Card>
     </main>

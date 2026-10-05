@@ -3,6 +3,9 @@ import { useQueryClient } from '@tanstack/react-query';
 import { SessionResponse, type SessionUser, type Tenant } from '@cti/contracts';
 import { api, apiEmpty, apiSession, setUnauthorizedHandler } from './api';
 
+/** Which sign-in the browser starts: the API's `/api/auth/<provider>/start`. Salesforce is the default. */
+export type SignInProvider = 'salesforce' | 'workos';
+
 export interface AuthContextValue {
   user: SessionUser | null;
   /** The tenant the session belongs to. */
@@ -10,7 +13,7 @@ export interface AuthContextValue {
   /** The tenant requests act on (differs from `tenant` only for super admins who switched). */
   activeTenant: Tenant | null;
   isAuthenticated: boolean;
-  startSignIn: (returnTo?: string) => void;
+  startSignIn: (returnTo?: string, provider?: SignInProvider) => void;
   completeHandoff: () => Promise<boolean>;
   signOut: () => Promise<void>;
   switchTenant: (tenant: Tenant) => void;
@@ -24,9 +27,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [activeTenant, setActiveTenant] = useState<Tenant | null>(null);
 
-  const startSignIn = useCallback((returnTo?: string) => {
+  const startSignIn = useCallback((returnTo?: string, provider: SignInProvider = 'salesforce') => {
     const q = returnTo ? `?returnTo=${encodeURIComponent(returnTo)}` : '';
-    window.location.assign(`/api/auth/workos/start${q}`);
+    window.location.assign(`/api/auth/${provider}/start${q}`);
   }, []);
 
   const completeHandoff = useCallback(async () => {

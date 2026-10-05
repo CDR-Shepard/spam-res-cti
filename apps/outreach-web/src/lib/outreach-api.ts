@@ -1,4 +1,5 @@
 import {
+  AuthProviders,
   Campaign,
   CampaignPlanResponse,
   CampaignPreview,
@@ -23,6 +24,7 @@ import { api, apiEmpty, json } from './api';
  * invalidate with these, so the two can never drift apart.
  */
 export const outreachKeys = {
+  authProviders: ['auth', 'providers'] as const,
   connection: ['crm', 'connection'] as const,
   listViews: (sfObject: SfObject) => ['crm', 'listviews', sfObject] as const,
   campaignLists: ['campaigns', 'list'] as const,
@@ -34,6 +36,11 @@ export const outreachKeys = {
 };
 
 const seg = (value: string): string => encodeURIComponent(value);
+
+/** Which sign-in buttons the server offers; needs no session. */
+export function getAuthProviders(): Promise<AuthProviders> {
+  return api('/api/auth/providers', AuthProviders);
+}
 
 export function getConnection(): Promise<CrmConnectionStatus> {
   return api('/api/connections/salesforce', CrmConnectionStatus);

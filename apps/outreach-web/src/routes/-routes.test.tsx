@@ -58,13 +58,13 @@ describe('router guard', () => {
     const router = renderAppAt('/team');
     await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in'));
     expect(router.state.location.search).toMatchObject({ returnTo: '/team' });
-    expect(await screen.findByRole('button', { name: 'Continue' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Sign in with Salesforce' })).toBeInTheDocument();
   });
 });
 
 describe('sign-in returnTo validation', () => {
   it.each([['//evil.com'], ['/%5Cevil.com']])(
-    'strips an unsafe returnTo (%s) and falls back to a plain Continue that does not carry it forward',
+    'strips an unsafe returnTo (%s) and falls back to a plain sign-in that does not carry it forward',
     async (unsafeReturnTo) => {
       const { assign: assignSpy } = stubLocationMethods();
       const router = renderAppAt(`/sign-in?returnTo=${unsafeReturnTo}`);
@@ -73,10 +73,10 @@ describe('sign-in returnTo validation', () => {
       expect(router.state.location.search).toEqual({});
       // ...nor appear anywhere in the rendered page...
       expect(screen.queryByText(/evil/i)).not.toBeInTheDocument();
-      const button = await screen.findByRole('button', { name: 'Continue' });
+      const button = await screen.findByRole('button', { name: 'Sign in with Salesforce' });
       await userEvent.click(button);
       // ...nor leak into the redirect this page triggers.
-      expect(assignSpy).toHaveBeenCalledWith('/api/auth/workos/start');
+      expect(assignSpy).toHaveBeenCalledWith('/api/auth/salesforce/start');
     },
   );
 });
