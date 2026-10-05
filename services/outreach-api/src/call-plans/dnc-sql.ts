@@ -1,7 +1,7 @@
 /**
  * SQL for the board and the release: whether a do-not-contact flag on the record is pending
- * (the same rule as `pendingDncFlag` in campaigns/dnc-hold.ts), and whether a person ever
- * dismissed one. Both expect `crm_records` aliased as `r`.
+ * (the same rule as `pendingDncFlag` in campaigns/dnc-hold.ts). It expects `crm_records` aliased as `r`.
+ * Whether a plan's OWN flag was dismissed is `call_plans.dnc_dismissed_at`, never a record-level proxy.
  */
 import { sql } from 'drizzle-orm';
 
@@ -13,6 +13,3 @@ export const DNC_PENDING_SQL = sql`exists (
     and jsonb_typeof(rt.result -> 'doNotContact') = 'object'
     and (d.id is null or (rt.created_at, rt.id) > (d.created_at, d.id))
 )`;
-
-/** A person has dismissed some do-not-contact flag on the record. */
-export const DNC_EVER_DISMISSED_SQL = sql`(r.dnc_dismissed_triage_id is not null)`;

@@ -21,7 +21,7 @@ import { blockedTargets } from '@cti/firewall';
 import { loadConnection } from '../crm/connection-store.js';
 import { mayDecideWith, ownSfUserId } from '../tenancy/record-owner.js';
 import type { RequestContext } from '../tenancy/scope.js';
-import { DNC_EVER_DISMISSED_SQL, DNC_PENDING_SQL } from './dnc-sql.js';
+import { DNC_PENDING_SQL } from './dnc-sql.js';
 import { gateWarnings } from './warnings.js';
 
 export const CARD_PAGE_SIZE = 25;
@@ -46,7 +46,6 @@ interface CardRow {
   is_closed: boolean;
   state: string | null;
   dnc_pending: boolean;
-  dnc_ever_dismissed: boolean;
   research_version: number | null;
   research_at: Date | string | null;
   research_sources: unknown;
@@ -76,7 +75,7 @@ export function decodeCardCursor(cursor: string | null): { at: string; id: strin
 const CARD_SELECT = sql`
   select e.id as enrollment_id, to_char(e.enrolled_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as enrolled_cursor, e.status, e.call_stage, e.call_prepare_error,
          r.sf_object, r.sf_record_id, r.name, r.owner_name, r.owner_sf_user_id, r.phones, r.sf_do_not_call, r.skip_on_dialer, r.is_closed, r.state,
-         ${DNC_PENDING_SQL} as dnc_pending, ${DNC_EVER_DISMISSED_SQL} as dnc_ever_dismissed,
+         ${DNC_PENDING_SQL} as dnc_pending,
          cr.version as research_version, cr.created_at as research_at, cr.sources as research_sources, cr.snapshot ->> 'consent' as consent,
          p.version as plan_version, p.status as plan_status, p.source as plan_source, p.plan, p.created_at as plan_created_at, p.decided_at as plan_decided_at,
          coalesce(du.display_name, du.email) as plan_dismisser, p.dnc_dismissed_at as plan_dismissed_at, p.dnc_flagged
@@ -89,8 +88,9 @@ const CARD_SELECT = sql`
 type Blocks = Awaited<ReturnType<typeof blockedTargets>>;
 
 function dismissal(row: CardRow): { dismissed: boolean; by: string | null; at: string | null } {
-  const dismissed = row.dnc_flagged === true && row.dnc_ever_dismissed && !row.dnc_pending;
-  // The dismisser lives on the plan itself (resetCallStageAfterDismiss), beside the approval, whatever the plan's status.
+  // The plan's own dismissal columns decide (resetCallStageAfterDismiss writes them, whatever the plan's status);
+  // a dismissal of some other flag on the record is not this plan's.
+  const dismissed = row.dnc_flagged === true && row.plan_dismissed_at !== null && !row.dnc_pending;
   return { dismissed, by: dismissed ? row.plan_dismisser : null, at: dismissed ? iso(row.plan_dismissed_at) : null };
 }
 
@@ -114,7 +114,7 @@ function toCard(row: CardRow, ctx: RequestContext, mine: string | null, instance
       record: { phones: Phones.parse(row.phones), sfDoNotCall: row.sf_do_not_call, skipOnDialer: row.skip_on_dialer, isClosed: row.is_closed, state: row.state },
       blocks,
       now,
-      dnc: { pending: row.dnc_pending || row.status === 'needs_review', flaggedNotDismissed: row.dnc_flagged === true && !row.dnc_ever_dismissed },
+      dnc: { pending: row.dnc_pending || row.status === 'needs_review', flaggedNotDismissed: row.dnc_flagged === true && row.plan_dismissed_at === null },
     }),
     research:
       row.research_version !== null

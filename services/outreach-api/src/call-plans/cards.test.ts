@@ -195,7 +195,7 @@ describe.skipIf(!pgLane)('call plan cards (real Postgres)', () => {
       expect(card!.plan).toMatchObject({ status: 'approved', decidedAt: approvedAt.toISOString(), dncFlagDismissed: true, dncFlagDismissedBy: 'Rita Rep', dncFlagDismissedAt: SEED_NOW.toISOString() });
     });
 
-    it('a decision by someone else on a proposed plan is not shown as the dismissal', async () => {
+    it("a person's dismissal of some other flag on the record is not this plan's dismissal (the plan's own columns decide)", async () => {
       const b = await board();
       const lead = await seedPlanLead(db, b, { dncFlagged: true });
       const triageId = await flagTriage(b.orgId, lead.crmRecordId);
@@ -203,7 +203,8 @@ describe.skipIf(!pgLane)('call plan cards (real Postgres)', () => {
       await db.execute(sql`update crm_records set dnc_dismissed_triage_id = ${triageId}::uuid where id = ${lead.crmRecordId}::uuid`);
       await db.execute(sql`update call_plans set decided_by = ${other}::uuid, decided_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${lead.planId}::uuid`);
       const card = await loadCallPlanCard(db, b.ctx, lead.enrollmentId, SEED_NOW);
-      expect(card!.plan).toMatchObject({ dncFlagDismissed: true, dncFlagDismissedBy: null, dncFlagDismissedAt: null });
+      expect(card!.plan).toMatchObject({ dncFlagDismissed: false, dncFlagDismissedBy: null, dncFlagDismissedAt: null });
+      expect(card!.warnings.map((w) => `${w.code}:${w.severity}`)).toEqual(['dnc_not_dismissed:block']);
     });
 
     it('a flagged plan nobody dismissed blocks approval on the card', async () => {

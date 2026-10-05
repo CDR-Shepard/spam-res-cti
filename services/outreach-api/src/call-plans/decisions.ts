@@ -4,12 +4,14 @@
  * "Call all approved" lives in release.ts.
  */
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import type { ApproveCallPlanRequest, EditCallPlanRequest } from '@cti/contracts';
+import { z } from 'zod';
+import { SellingSignal, type ApproveCallPlanRequest, type EditCallPlanRequest } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { pendingDncFlag } from '../campaigns/dnc-hold.js';
 import { exitEnrollment } from '../campaigns/enroll.js';
 import { mayDecide } from '../tenancy/record-owner.js';
 import type { RequestContext } from '../tenancy/scope.js';
+import { RECORD_BLOCK_COLUMNS, recordIsBlocked, type BlockableRecord } from './record-block.js';
 import { currentPlan, savePlan, type CallPlanRow } from './store.js';
 
 export const PLAN_REJECTED_EXIT_REASON = 'plan_rejected';
@@ -23,6 +25,7 @@ export type DecisionCode =
   | 'CONSENT_UNKNOWN'
   | 'DNC_PENDING'
   | 'DNC_NOT_DISMISSED'
+  | 'RECORD_BLOCKED'
   | 'CAMPAIGN_NOT_ACTIVE'
   | 'NOT_AI_CALL_CAMPAIGN';
 
@@ -35,6 +38,7 @@ const STATUS: Readonly<Record<DecisionCode, 403 | 404 | 409>> = {
   CONSENT_UNKNOWN: 409,
   DNC_PENDING: 409,
   DNC_NOT_DISMISSED: 409,
+  RECORD_BLOCKED: 409,
   CAMPAIGN_NOT_ACTIVE: 409,
   NOT_AI_CALL_CAMPAIGN: 409,
 };
@@ -48,6 +52,7 @@ export const DECISION_WORDS: Readonly<Record<DecisionCode, string>> = {
   CONSENT_UNKNOWN: "Can't approve: consent could not be read — research again.",
   DNC_PENDING: 'A do-not-contact flag on this person is waiting in Needs Review.',
   DNC_NOT_DISMISSED: "Can't approve: the research flagged this person do-not-contact and nobody has dismissed the flag.",
+  RECORD_BLOCKED: "Can't approve: the call would be refused as things stand. Check the warnings on the card.",
   CAMPAIGN_NOT_ACTIVE: 'Calls start only from an active campaign. Activate it first.',
   NOT_AI_CALL_CAMPAIGN: 'This campaign does not place AI calls.',
 };
@@ -61,20 +66,19 @@ export class DecisionError extends Error {
   }
 }
 
-interface Locked {
+interface Locked extends BlockableRecord {
   id: string;
   status: string;
   callStage: string | null;
   crmRecordId: string;
   ownerSfUserId: string | null;
-  dncDismissed: boolean;
 }
 
 /** Locks the enrollment (FOR UPDATE) and checks the viewer may decide on it. */
 async function lockForDecision(tx: Db, ctx: RequestContext, enrollmentId: string): Promise<Locked> {
   const result = await tx.execute(sql`
     select e.id, e.status, e.call_stage as "callStage", e.crm_record_id as "crmRecordId", r.owner_sf_user_id as "ownerSfUserId",
-           (r.dnc_dismissed_triage_id is not null) as "dncDismissed"
+           ${RECORD_BLOCK_COLUMNS}
     from campaign_enrollments e join crm_records r on r.id = e.crm_record_id and r.org_id = e.org_id
     where e.id = ${enrollmentId}::uuid and e.org_id = ${ctx.orgId}::uuid and e.call_stage is not null
     for update of e`);
@@ -112,19 +116,21 @@ export async function editPlan(db: Db, ctx: RequestContext, enrollmentId: string
     if (!plan || plan.version !== req.version) throw new DecisionError('PLAN_CHANGED');
     // A person's edit is a new version of the same research. It keeps the plan's do-not-contact history (CF-7):
     // the board keeps saying the flag was raised and dismissed, and a flag nobody dismissed still blocks approval.
+    // The signals, their evidence and sources are the research's, never the client's: an edit carries them over untouched (M-3).
+    const sellingSignals = z.array(SellingSignal).max(8).catch([]).parse((plan.plan as { sellingSignals?: unknown } | null)?.sellingSignals);
     const saved = await savePlan(tx, {
       orgId: ctx.orgId,
       enrollmentId,
       researchId: plan.researchId,
       source: 'edit',
       model: null,
-      plan: { ...req.plan, doNotContact: null },
+      plan: { ...req.plan, sellingSignals, doNotContact: null },
       dncFlagged: plan.dncFlagged,
       inputTokens: 0,
       outputTokens: 0,
       createdBy: ctx.session.userId,
     });
-    if (plan.dncFlagged && plan.dncDismissedBy) {
+    if (plan.dncFlagged && plan.dncDismissedAt) {
       await tx
         .update(schema.callPlans)
         .set({ dncDismissedBy: plan.dncDismissedBy, dncDismissedAt: plan.dncDismissedAt })
@@ -140,10 +146,14 @@ export async function approvePlan(db: Db, ctx: RequestContext, enrollmentId: str
     inStage(row, ['review']);
     const plan = await currentPlan(tx, enrollmentId);
     if (!plan || plan.version !== req.version || plan.status !== 'proposed') throw new DecisionError('PLAN_CHANGED');
-    requireConsent(await planConsent(tx, plan));
-    // A flag nobody dismissed holds the person; a plan the model flagged goes ahead only once a person dismissed it (CF-7, CF-10).
+    const consent = await planConsent(tx, plan);
+    requireConsent(consent);
+    // A flag nobody dismissed holds the person; a plan the model flagged goes ahead only once a person dismissed THAT flag,
+    // which the plan's own columns record (CF-7, CF-10). A dismissal of some other flag on the record is not it.
     if (await pendingDncFlag(tx, row.crmRecordId)) throw new DecisionError('DNC_PENDING');
-    if (plan.dncFlagged && !row.dncDismissed) throw new DecisionError('DNC_NOT_DISMISSED');
+    if (plan.dncFlagged && !plan.dncDismissedAt) throw new DecisionError('DNC_NOT_DISMISSED');
+    // The board shows these as blocking warnings; the same rule stops an approval nobody could act on (M-7).
+    if (await recordIsBlocked(tx, ctx.orgId, row, 'yes', now)) throw new DecisionError('RECORD_BLOCKED');
     await tx.update(schema.callPlans).set({ status: 'approved', decidedBy: ctx.session.userId, decidedAt: now }).where(eq(schema.callPlans.id, plan.id));
     await setStage(tx, enrollmentId, 'approved', now);
   });

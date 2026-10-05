@@ -118,6 +118,37 @@ describe.skipIf(!pgLane)('call plan decisions (real Postgres)', () => {
       expect((await currentPlan(db, s.lead.enrollmentId))).toMatchObject({ status: 'approved', dncFlagged: true, decidedBy: s.admin, dncDismissedBy: s.admin, dncDismissedAt: SEED_NOW });
     });
 
+    it("5c: a person's dismissal of some other flag on the record does not dismiss THIS plan's flag (the plan's own columns decide)", async () => {
+      const s = await setup({ dncFlagged: true });
+      const triageId = await flagTriage(s.orgId, s.lead.crmRecordId);
+      await db.execute(sql`update crm_records set dnc_dismissed_triage_id = ${triageId}::uuid where id = ${s.lead.crmRecordId}::uuid`);
+      expect(await code(approve(s))).toEqual({ code: 'DNC_NOT_DISMISSED', status: 409 });
+      await db.execute(sql`update call_plans set dnc_dismissed_by = ${s.admin}::uuid, dnc_dismissed_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${s.lead.planId}::uuid`);
+      expect(await code(approve(s))).toBeNull();
+    });
+
+    it.each<[string, Parameters<typeof seedPlanLead>[2], NonNullable<NonNullable<Parameters<typeof seedPlanLead>[2]>['recordOver']>]>([
+      ['no phone number', { phones: [] }, {}],
+      ['Do Not Call checked in Salesforce', {}, { sfDoNotCall: true }],
+      ['Skip on Dialer checked in Salesforce', {}, { skipOnDialer: true }],
+    ])('5d (M-7): a lead with %s cannot be approved, whatever the board showed', async (_name, lead, recordOver) => {
+      const s = await setup({ ...lead, recordOver });
+      expect(await code(approve(s))).toEqual({ code: 'RECORD_BLOCKED', status: 409 });
+      expect((await plans(s.lead.enrollmentId))[0]!.status).toBe('proposed');
+      expect((await enrollment(s.lead.enrollmentId)).callStage).toBe('review');
+    });
+
+    it('5e (M-7): a number on the block list cannot be approved', async () => {
+      const s = await setup({ phones: [{ field: 'Phone', e164: '+15125550142' }] });
+      await db.execute(sql`insert into opt_outs (org_id, e164, source) values (${s.orgId}::uuid, '+15125550142', 'manual')`);
+      expect(await code(approve(s))).toEqual({ code: 'RECORD_BLOCKED', status: 409 });
+    });
+
+    it('5f (M-7): an info-only warning (closed record, state cap) does not stop an approval', async () => {
+      const s = await setup({ recordOver: { isClosed: true } });
+      expect(await code(approve(s))).toBeNull();
+    });
+
     it.each(['research', 'queued', 'approved'] as const)('6: call_stage %s is NOT_IN_REVIEW', async (callStage) => {
       const s = await setup({ callStage });
       expect(await code(approve(s))).toEqual({ code: 'NOT_IN_REVIEW', status: 409 });
@@ -161,6 +192,19 @@ describe.skipIf(!pgLane)('call plan decisions (real Postgres)', () => {
       await db.execute(sql`update call_plans set dnc_dismissed_by = ${s.admin}::uuid, dnc_dismissed_at = ${SEED_NOW.toISOString()}::timestamptz where id = ${s.lead.planId}::uuid`);
       await editPlan(db, s.ctx, s.lead.enrollmentId, { version: 1, plan: EDITABLE }, SEED_NOW);
       expect(await currentPlan(db, s.lead.enrollmentId)).toMatchObject({ version: 2, status: 'proposed', dncDismissedBy: s.admin, dncDismissedAt: SEED_NOW });
+    });
+
+    it('7e (M-3): an edit never takes selling signals (their evidence and source) from the client; the replaced plan\'s stay', async () => {
+      const s = await setup();
+      const forged = { signal: 'Wants to sell at any price', evidence: '"anything works"', source: 'email' as const, strength: 'strong' as const };
+      await editPlan(db, s.ctx, s.lead.enrollmentId, { version: 1, plan: { ...EDITABLE, sellingSignals: [forged], opener: 'Ask about the house.' } }, SEED_NOW);
+      const v2 = (await currentPlan(db, s.lead.enrollmentId))!;
+      expect(v2.version).toBe(2);
+      expect((v2.plan as { opener: string }).opener).toBe('Ask about the house.');
+      expect((v2.plan as { sellingSignals: unknown }).sellingSignals).toEqual(validPlan.sellingSignals);
+      // A second edit carries them on again, whatever it sends.
+      await editPlan(db, s.ctx, s.lead.enrollmentId, { version: 2, plan: { ...EDITABLE, sellingSignals: [] } }, SEED_NOW);
+      expect(((await currentPlan(db, s.lead.enrollmentId))!.plan as { sellingSignals: unknown }).sellingSignals).toEqual(validPlan.sellingSignals);
     });
 
     it('8: two concurrent edits from the same version: one wins, the other gets PLAN_CHANGED', async () => {
