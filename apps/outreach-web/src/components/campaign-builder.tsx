@@ -1,19 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { CampaignSource, type Campaign, type CreateCampaignInput, type PreviewRequest, type SfObject } from '@cti/contracts';
+import { CampaignSource, type Campaign, type CampaignMode, type CreateCampaignInput, type PreviewRequest, type SfObject } from '@cti/contracts';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Textarea } from '@/components/ui/textarea';
 import { ApiRequestError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { createCampaign, listViews, outreachKeys, previewCampaign } from '@/lib/outreach-api';
 import { errorText } from '@/lib/outreach-words';
 import { CampaignPreview } from './campaign-preview';
-
-type SourceKind = CampaignSource['kind'];
+import { CampaignSourceFields, type SourceKind } from './campaign-source-fields';
+import { LeadPicker } from './lead-picker';
 
 /** The source the form describes, or null while it is incomplete (no list view picked, query too short). */
 export function sourceFrom(kind: SourceKind, listViewId: string, soql: string): CampaignSource | null {
@@ -35,17 +33,32 @@ export function CampaignBuilder({ onCreated }: CampaignBuilderProps) {
   const [kind, setKind] = useState<SourceKind>('list_view');
   const [listViewId, setListViewId] = useState('');
   const [soql, setSoql] = useState('');
+  const [mode, setMode] = useState<CampaignMode>('sequence');
+  /** An AI call campaign, created as a draft and now waiting for its leads to be picked. */
+  const [draft, setDraft] = useState<Campaign | null>(null);
   const source = sourceFrom(kind, listViewId, soql);
   const views = useQuery({ queryKey: outreachKeys.listViews(sfObject), queryFn: () => listViews(sfObject), enabled: isAdmin && kind === 'list_view' });
   const preview = useMutation({ mutationFn: (req: PreviewRequest) => previewCampaign(req) });
   const create = useMutation({
     mutationFn: (req: CreateCampaignInput) => createCampaign(req),
-    onSuccess: (created) => { void qc.invalidateQueries({ queryKey: outreachKeys.campaignLists }); onCreated(created); },
+    onSuccess: (created) => {
+      void qc.invalidateQueries({ queryKey: outreachKeys.campaignLists });
+      if (created.mode === 'ai_call') setDraft(created);
+      else onCreated(created);
+    },
   });
   /** Any change to what the campaign reads makes an earlier preview or error stale. */
   const sourceChanged = () => { preview.reset(); create.reset(); };
 
   if (!isAdmin) return <p className="text-sm text-muted-foreground">Only admins can create campaigns.</p>;
+  if (draft) {
+    return (
+      <div className="space-y-4">
+        <LeadPicker campaignId={draft.id} canEdit />
+        <Button type="button" onClick={() => onCreated(draft)}>Continue to campaign</Button>
+      </div>
+    );
+  }
 
   const sourceError = [preview.error, create.error].find(isInvalidSource);
   const otherError = [preview.error, create.error].find((e) => e && !isInvalidSource(e));
@@ -62,6 +75,18 @@ export function CampaignBuilder({ onCreated }: CampaignBuilderProps) {
             <Input id="campaign-name" value={name} maxLength={120} onChange={(e) => setName(e.target.value)} placeholder="Spring motivated sellers" />
           </div>
           <div className="grid gap-1">
+            <Label htmlFor="campaign-mode">What the campaign does</Label>
+            <select
+              id="campaign-mode"
+              className="h-9 rounded-md border bg-background px-2 text-sm"
+              value={mode}
+              onChange={(e) => setMode(e.target.value === 'ai_call' ? 'ai_call' : 'sequence')}
+            >
+              <option value="sequence">Calls through reps (sequence)</option>
+              <option value="ai_call">AI calls to leads you pick</option>
+            </select>
+          </div>
+          <div className="grid gap-1">
             <Label htmlFor="campaign-object">Salesforce object</Label>
             <select
               id="campaign-object"
@@ -74,43 +99,20 @@ export function CampaignBuilder({ onCreated }: CampaignBuilderProps) {
             </select>
           </div>
         </div>
-        <Tabs value={kind} onValueChange={(v) => { setKind(v === 'soql' ? 'soql' : 'list_view'); sourceChanged(); }}>
-          <TabsList aria-label="Who is in the campaign">
-            <TabsTrigger value="list_view">List view</TabsTrigger>
-            <TabsTrigger value="soql">SOQL</TabsTrigger>
-          </TabsList>
-          <TabsContent value="list_view" className="grid gap-1 pt-2">
-            <Label htmlFor="campaign-list-view">Salesforce list view</Label>
-            <select
-              id="campaign-list-view"
-              className="h-9 rounded-md border bg-background px-2 text-sm"
-              value={listViewId}
-              onChange={(e) => { setListViewId(e.target.value); sourceChanged(); }}
-            >
-              <option value="">{views.isPending ? 'Loading list views…' : 'Choose a list view'}</option>
-              {views.data?.listViews.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
-            </select>
-            {views.error && <p role="alert" className="text-sm text-destructive">{errorText(views.error)}</p>}
-            <p className="text-xs text-muted-foreground">The list view is read again on every refresh, so edits in Salesforce carry over.</p>
-          </TabsContent>
-          <TabsContent value="soql" className="grid gap-1 pt-2">
-            <Label htmlFor="campaign-soql">SOQL query</Label>
-            <Textarea
-              id="campaign-soql"
-              rows={6}
-              spellCheck={false}
-              className="font-mono"
-              value={soql}
-              onChange={(e) => { setSoql(e.target.value); sourceChanged(); }}
-              placeholder={`SELECT Id FROM ${sfObject} WHERE ...`}
-            />
-            <p className="text-xs text-muted-foreground">One SELECT on {sfObject}. No COUNT(), GROUP BY, or semicolons.</p>
-          </TabsContent>
-        </Tabs>
+        <CampaignSourceFields
+          sfObject={sfObject}
+          kind={kind}
+          listViewId={listViewId}
+          soql={soql}
+          views={views}
+          onKind={(k) => { setKind(k); sourceChanged(); }}
+          onListView={(id) => { setListViewId(id); sourceChanged(); }}
+          onSoql={(text) => { setSoql(text); sourceChanged(); }}
+        />
         {sourceError && <p role="alert" className="text-sm text-destructive">Salesforce can't use this source: {sourceError.message}</p>}
         <div className="flex gap-2">
           <Button type="button" variant="outline" disabled={!source || preview.isPending} onClick={() => source && preview.mutate({ sfObject, source })}>Preview</Button>
-          <Button type="button" disabled={!source || !name.trim() || create.isPending} onClick={() => source && create.mutate({ name: name.trim(), sfObject, source })}>Create campaign</Button>
+          <Button type="button" disabled={!source || !name.trim() || create.isPending} onClick={() => source && create.mutate({ name: name.trim(), sfObject, source, mode })}>Create campaign</Button>
         </div>
         {preview.isPending && <p className="text-sm text-muted-foreground">Checking records in Salesforce…</p>}
         {otherError && <p role="alert" className="text-sm text-destructive">{errorText(otherError)}</p>}

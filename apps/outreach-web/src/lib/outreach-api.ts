@@ -1,12 +1,14 @@
 import {
   AuthProviders,
   Campaign,
+  CandidatePage,
   CampaignPlanResponse,
   CampaignPreview,
   CampaignsResponse,
   CrmConnectionStatus,
   ListViewsResponse,
   NeedsReviewResponse,
+  SelectionResponse,
   StartConnectionResponse,
   type CampaignStatusChange,
   type CreateCampaignInput,
@@ -14,6 +16,7 @@ import {
   type FieldMap,
   type PreviewRequest,
   type ReviewDecision,
+  type SelectionChange,
   type SfObject,
   type UpdateCampaignRequest,
 } from '@cti/contracts';
@@ -32,6 +35,8 @@ export const outreachKeys = {
   campaign: (campaignId: string) => ['campaigns', 'detail', campaignId] as const,
   plans: ['campaigns', 'plan'] as const,
   plan: (campaignId: string) => ['campaigns', 'plan', campaignId] as const,
+  candidateLists: (campaignId: string) => ['campaigns', 'candidates', campaignId] as const,
+  candidates: (campaignId: string, page: number) => ['campaigns', 'candidates', campaignId, page] as const,
   review: ['review'] as const,
 };
 
@@ -94,6 +99,14 @@ export function getPlan(campaignId: string, opts: { cursor?: string | null; stat
   if (opts.status) query.set('status', opts.status);
   const qs = query.toString();
   return api(`/api/campaigns/${seg(campaignId)}/plan${qs ? `?${qs}` : ''}`, CampaignPlanResponse);
+}
+
+export function getCandidates(campaignId: string, page: number): Promise<CandidatePage> {
+  return api(`/api/campaigns/${seg(campaignId)}/candidates?page=${page}`, CandidatePage);
+}
+
+export function changeSelection(campaignId: string, change: Partial<SelectionChange>): Promise<SelectionResponse> {
+  return api(`/api/campaigns/${seg(campaignId)}/selection`, SelectionResponse, { method: 'PUT', body: json(change) });
 }
 
 export function getReview(): Promise<NeedsReviewResponse> {

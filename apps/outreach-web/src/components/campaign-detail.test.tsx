@@ -172,3 +172,32 @@ describe('CampaignDetail settings', () => {
     expect(screen.queryByRole('button', { name: 'Save settings' })).not.toBeInTheDocument();
   });
 });
+
+describe('CampaignDetail of an AI call campaign', () => {
+  const candidates = { total: 1, page: 1, pageSize: 50, pages: 1, selectedCount: 0, records: [{ sfRecordId: '00Q000000000001AAA', name: 'Jane Seller', ownerName: 'Rep One', consentAiCall: true, skipReason: null, selected: false, enrolled: false }] };
+
+  it('shows the lead picker instead of the sequence plan', async () => {
+    const calls = renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ mode: 'ai_call' }), [`GET ${CAMPAIGN}/candidates?page=1`]: candidates });
+    expect(await screen.findByText('Leads to call')).toBeInTheDocument();
+    expect(await screen.findByText('Jane Seller')).toBeInTheDocument();
+    expect(screen.queryByText('Plan')).not.toBeInTheDocument();
+    expect(calls.some((c) => c.url === `${CAMPAIGN}/plan`)).toBe(false);
+  });
+
+  it('says what a dry run does for AI calls', async () => {
+    renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ mode: 'ai_call', status: 'dry_run' }), [`GET ${CAMPAIGN}/candidates?page=1`]: candidates });
+    expect(await screen.findByRole('status')).toHaveTextContent('Dry run: picked leads are researched and call plans are written for review. No calls are placed.');
+  });
+
+  it('a sequence campaign keeps the sequence plan and its dry-run banner', async () => {
+    renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ mode: 'sequence', status: 'dry_run' }) });
+    expect(await screen.findByRole('status')).toHaveTextContent('Dry run: the plan below shows what would happen. Nothing is sent and no calls are queued.');
+    expect(screen.queryByText('Leads to call')).not.toBeInTheDocument();
+  });
+
+  it('lets a member see the picker but not change it', async () => {
+    renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ mode: 'ai_call' }), [`GET ${CAMPAIGN}/candidates?page=1`]: candidates }, false);
+    expect(await screen.findByRole('checkbox', { name: 'Select Jane Seller' })).toBeDisabled();
+  });
+});
+

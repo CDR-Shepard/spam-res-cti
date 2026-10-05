@@ -8,6 +8,12 @@ import { CampaignPlan } from './campaign-plan';
 import { CampaignSettings } from './campaign-settings';
 import { CampaignStatusActions } from './campaign-status-actions';
 import { CampaignStatusBadge } from './campaign-status-badge';
+import { LeadPicker } from './lead-picker';
+
+const DRY_RUN_WORDS: Record<Campaign['mode'], string> = {
+  sequence: 'Dry run: the plan below shows what would happen. Nothing is sent and no calls are queued.',
+  ai_call: 'Dry run: picked leads are researched and call plans are written for review. No calls are placed.',
+};
 
 export function CampaignDetail({ campaignId }: { campaignId: string }) {
   const auth = useAuth();
@@ -21,7 +27,7 @@ export function CampaignDetail({ campaignId }: { campaignId: string }) {
       <CampaignHeader campaign={c} isAdmin={isAdmin} />
       <CampaignBanners campaign={c} />
       <CampaignSettings campaign={c} canEdit={isAdmin && c.status !== 'archived'} />
-      <CampaignPlan campaignId={c.id} />
+      {c.mode === 'ai_call' ? <LeadPicker campaignId={c.id} canEdit={isAdmin && c.status !== 'archived'} /> : <CampaignPlan campaignId={c.id} />}
     </div>
   );
 }
@@ -55,7 +61,7 @@ function CampaignBanners({ campaign: c }: { campaign: Campaign }) {
         <div role="status" className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">{pauseReasonWords(c.pauseReason)}</div>
       )}
       {c.status === 'dry_run' && (
-        <div role="status" className="rounded-md border p-3 text-sm">Dry run: the plan below shows what would happen. Nothing is sent and no calls are queued.</div>
+        <div role="status" className="rounded-md border p-3 text-sm">{DRY_RUN_WORDS[c.mode]}</div>
       )}
       {c.lastRefreshError && (
         <div role="alert" className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">The last Salesforce refresh failed: {c.lastRefreshError}</div>
