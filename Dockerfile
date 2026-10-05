@@ -32,7 +32,11 @@ RUN npm ci --include=dev
 # Build the API workspace directly (not `npm run build:api`, which re-runs
 # build:packages itself) so the shared packages compile exactly once.
 COPY . .
-RUN npm run build:packages && npm run build:web && npm -w services/cti-api run build
+# The same image also runs the outreach-api service (its own startCommand):
+# Railway applies this repo's root railway.json, and so this Dockerfile, to every
+# service built from the repo, so the outreach web bundle and API are built here too.
+RUN npm run build:packages && npm run build:web && npm -w services/cti-api run build \
+ && npm --workspace apps/outreach-web run build && npm --workspace services/outreach-api run build
 
 # Hosts inject the listen port via PORT (config honors it); 4000 is the default.
 EXPOSE 4000
