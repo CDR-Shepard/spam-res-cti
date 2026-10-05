@@ -115,6 +115,6 @@ describe('CALL_PLAN_INPUT_SCHEMA', () => {
 describe('pricing', () => {
   it('prices claude-sonnet-5-5 so the daily budget counts plan calls', () => {
     expect(isPricedModel('claude-sonnet-5-5')).toBe(true);
-    expect(costMicros('claude-sonnet-5-5', 1_000, 100)).toBe(1_000 * 3 + 100 * 15);
+    expect(costMicros('claude-sonnet-5-5', 1_000, 100)).toBe(1_000 * 2 + 100 * 10);
   });
 });
