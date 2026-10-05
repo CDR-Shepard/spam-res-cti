@@ -392,6 +392,58 @@ describe.skipIf(!pgLane)('planner run (real Postgres)', () => {
     });
   });
 
+  describe('do-not-contact flags (never planned or queued without a human)', () => {
+    const FLAG = { summary: 'Sold.', channels: [], timing: null, tags: [], doNotContact: { category: 'sold', quote: 'we sold the house' } };
+    async function flag(orgId: string, recordId: string, at = new Date(NOW.getTime() - DAY)): Promise<string> {
+      const row = await one<{ id: string }>(
+        `insert into record_triage (org_id, crm_record_id, notes_hash, model, result, input_tokens, output_tokens, created_at)
+         values ($1, $2, 'h', 'm', $3::jsonb, 1, 1, $4) returning id`,
+        [orgId, recordId, JSON.stringify(FLAG), at],
+      );
+      return row.id;
+    }
+    const review = async (id: string) =>
+      one<{ status: string; review_category: string | null; review_quote: string | null; review_triage_id: string | null; next_touch_at: Date | null }>(
+        `select status, review_category, review_quote, review_triage_id, next_touch_at from campaign_enrollments where id = $1`,
+        [id],
+      );
+
+    it('holds for review instead of planning when the record carries a flag no one dismissed (e.g. it was triaged while in another campaign)', async () => {
+      const { orgId, recordId, enrollmentId } = await dueEnrollment('dry_run');
+      const triageId = await flag(orgId, recordId);
+      const out = await planDueEnrollments({ db, now: NOW, log });
+      expect(out.held).toBeGreaterThanOrEqual(1);
+      expect(await touchesOf(enrollmentId)).toEqual([]);
+      expect(await review(enrollmentId)).toEqual({ status: 'needs_review', review_category: 'sold', review_quote: 'we sold the house', review_triage_id: triageId, next_touch_at: null });
+    });
+
+    it('plans normally once a person dismissed that flag', async () => {
+      const { orgId, recordId, enrollmentId } = await dueEnrollment('dry_run');
+      const triageId = await flag(orgId, recordId);
+      await pool.query(`update crm_records set dnc_dismissed_triage_id = $2 where id = $1`, [recordId, triageId]);
+      await planDueEnrollments({ db, now: NOW, log });
+      expect((await touchesOf(enrollmentId)).map((x) => x.status)).toEqual(['planned']);
+      expect((await review(enrollmentId)).status).toBe('active');
+    });
+
+    it('holds for review instead of queueing a planned call when a flag appeared after planning', async () => {
+      const orgId = await seedOrg();
+      const campaignId = await seedCampaign(orgId, 'active');
+      const recordId = await seedRecord(orgId);
+      const enrollmentId = await seedEnrollment({ orgId, campaignId, recordId });
+      await pool.query(
+        `insert into touches (org_id, enrollment_id, seq, channel, status, due_at) values ($1, $2, 1, 'rep_call', 'planned', $3)`,
+        [orgId, enrollmentId, new Date(NOW.getTime() - HOUR)],
+      );
+      await flag(orgId, recordId);
+      await promoteQueuedCalls(db, NOW, { log });
+      expect((await touchesOf(enrollmentId)).map((x) => x.status)).toEqual(['skipped']);
+      const { rows } = await pool.query(`select skip_reason from touches where enrollment_id = $1`, [enrollmentId]);
+      expect(rows[0].skip_reason).toBe('needs_review');
+      expect((await review(enrollmentId)).status).toBe('needs_review');
+    });
+  });
+
   it('a touch skipped for review does not block the next plan after the enrollment resumes', async () => {
     const { orgId, enrollmentId } = await dueEnrollment('dry_run');
     await pool.query(

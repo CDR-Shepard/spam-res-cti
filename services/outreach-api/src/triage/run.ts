@@ -17,7 +17,7 @@ import { schema, type Db } from '@cti/db';
 import { SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
 import { addSpend, budgetMicros, spentTodayMicros } from '../ai/budget.js';
 import { costMicros, isPricedModel, TriageOutputError, type TriageModel } from '../ai/model.js';
-import { OPEN_TOUCH_STATUSES } from '../campaigns/enroll.js';
+import { holdForReview } from '../campaigns/dnc-hold.js';
 import { pauseOrgCampaigns } from '../campaigns/pause.js';
 import { CrmNotConnectedError, type SalesforceClientFactory } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
@@ -137,7 +137,7 @@ async function storeTriage(
   args: { orgId: string; crmRecordId: string; notesHash: string; model: string; result: TriageResult; inputTokens: number; outputTokens: number; now: Date },
 ): Promise<number> {
   return db.transaction(async (tx) => {
-    await tx.insert(schema.recordTriage).values({
+    const [stored] = await tx.insert(schema.recordTriage).values({
       orgId: args.orgId,
       crmRecordId: args.crmRecordId,
       notesHash: args.notesHash,
@@ -146,30 +146,17 @@ async function storeTriage(
       inputTokens: args.inputTokens,
       outputTokens: args.outputTokens,
       createdAt: args.now,
-    });
+    }).returning({ id: schema.recordTriage.id });
     await tx
       .update(schema.crmRecords)
       .set({ notesHash: args.notesHash, triageNeeded: false })
       .where(eq(schema.crmRecords.id, args.crmRecordId));
     const flag = args.result.doNotContact;
     if (!flag) return 0;
-    const flagged = await tx
-      .update(schema.campaignEnrollments)
-      .set({ status: 'needs_review', reviewCategory: flag.category, reviewQuote: flag.quote, flaggedAt: args.now, nextTouchAt: null, updatedAt: args.now })
-      .where(and(eq(schema.campaignEnrollments.crmRecordId, args.crmRecordId), eq(schema.campaignEnrollments.status, 'active')))
-      .returning({ id: schema.campaignEnrollments.id });
-    if (flagged.length > 0) {
-      await tx
-        .update(schema.touches)
-        .set({ status: 'skipped', skipReason: 'needs_review', updatedAt: args.now })
-        .where(
-          and(
-            inArray(schema.touches.enrollmentId, flagged.map((f) => f.id)),
-            inArray(schema.touches.status, [...OPEN_TOUCH_STATUSES]),
-          ),
-        );
-    }
-    return flagged.length;
+    // An enrollment that left `active` meanwhile is not held here; the planner holds the
+    // record's next enrollment from this stored row (campaigns/dnc-hold.ts).
+    const held = await holdForReview(tx, { crmRecordId: args.crmRecordId }, { triageId: stored!.id, ...flag }, args.now);
+    return held.length;
   });
 }
 

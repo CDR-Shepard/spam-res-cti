@@ -12,7 +12,7 @@ import { CrmNotConnectedError, type SalesforceClientFactory } from '../crm/clien
 import { loadConnection } from '../crm/connection-store.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { contactKeys, skipReasonFor } from './eligibility.js';
-import { chunk, enrollRecords, exitEnrollment, TERMINAL_ENROLLMENT_STATUSES, upsertRecords } from './enroll.js';
+import { CAMPAIGN_ARCHIVED_EXIT_REASON, chunk, enrollRecords, exitEnrollment, TERMINAL_ENROLLMENT_STATUSES, upsertRecords } from './enroll.js';
 import { pauseOrgCampaigns, RUNNING_CAMPAIGN_STATUSES } from './pause.js';
 import { fetchRecords, type SfRecordSnapshot } from './records.js';
 import { fetchMemberIds, MAX_CAMPAIGN_RECORDS, membershipSoql } from './source.js';
@@ -28,8 +28,14 @@ export const REFRESH_CLAIM_STALE_MINUTES = 30;
 const SF_ID_BATCH = 200;
 /** Values per Postgres `IN (...)` list (well under the 65,535 bind-parameter limit). */
 const PG_IN_BATCH = 5_000;
-/** Enrollment statuses a refresh may end. A `conversing` or `handed_off` person belongs to a rep. */
-const EXITABLE_STATUSES: ReadonlySet<string> = new Set(['active', 'needs_review']);
+/**
+ * Enrollment statuses a refresh may end. A `conversing` or `handed_off` person belongs to a
+ * rep; a `needs_review` person waits for a human decision on a do-not-contact flag, and an
+ * exit would drop the item from Needs Review and free the person's keys (spec §7.3).
+ */
+const EXITABLE_STATUSES: ReadonlySet<string> = new Set(['active']);
+/** Statuses an archived campaign keeps: finished ones, and a do-not-contact flag still waiting for a person. */
+const KEPT_WHEN_ARCHIVED = [...TERMINAL_ENROLLMENT_STATUSES, 'needs_review'] as const;
 /** Archived campaigns release at most this many enrollments per tick. */
 const ARCHIVE_RELEASE_BATCH = 1_000;
 const MAX_ERROR_LENGTH = 1_000;
@@ -195,7 +201,10 @@ function isConnectionFailure(err: unknown): boolean {
   return err instanceof CrmNotConnectedError || err instanceof SalesforceAuthError;
 }
 
-/** Archived campaigns hold no one: end their open enrollments so the people's keys free up. */
+/**
+ * Archived campaigns hold no one: end their open enrollments so the people's keys free up.
+ * A `needs_review` enrollment stays until a person decides it (a dismissal then exits it).
+ */
 async function releaseArchivedEnrollments(db: Db, log: RunnerLogger): Promise<void> {
   const rows = await db
     .select({ id: schema.campaignEnrollments.id })
@@ -204,11 +213,11 @@ async function releaseArchivedEnrollments(db: Db, log: RunnerLogger): Promise<vo
     .where(
       and(
         eq(schema.campaigns.status, 'archived'),
-        notInArray(schema.campaignEnrollments.status, [...TERMINAL_ENROLLMENT_STATUSES]),
+        notInArray(schema.campaignEnrollments.status, [...KEPT_WHEN_ARCHIVED]),
       ),
     )
     .limit(ARCHIVE_RELEASE_BATCH);
-  for (const row of rows) await exitEnrollment(db, row.id, 'campaign_archived');
+  for (const row of rows) await exitEnrollment(db, row.id, CAMPAIGN_ARCHIVED_EXIT_REASON);
   if (rows.length > 0) log.info({ released: rows.length }, 'released enrollments of archived campaigns');
 }
 

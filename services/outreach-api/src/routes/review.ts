@@ -2,7 +2,10 @@
  * Needs Review (spec §7.3): records the AI flagged do-not-contact wait here
  * for their owner. Nothing is suppressed until a person decides.
  *
- *  - dismiss: the enrollment resumes and is planned on the next tick.
+ *  - dismiss: the enrollment resumes and is planned on the next tick, and the record
+ *    remembers which flag was dismissed (`crm_records.dnc_dismissed_triage_id`), so the
+ *    planner does not hold it again for that flag; a newer flag holds it again. In an
+ *    archived campaign there is nothing to resume: the enrollment exits instead.
  *  - confirm: every number on the record goes into the tenant's opt_outs, the
  *    enrollment exits, and `onConfirmed` runs in the same transaction (1B wires
  *    it to the Salesforce write-back outbox).
@@ -12,7 +15,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { DoNotContactCategory, ReviewDecision, SfObject, type NeedsReviewItem, type NeedsReviewResponse } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
-import { exitEnrollment } from '../campaigns/enroll.js';
+import { CAMPAIGN_ARCHIVED_EXIT_REASON, exitEnrollment } from '../campaigns/enroll.js';
 import { sendError } from '../http/errors.js';
 import { requireContext, type RequestContext } from '../tenancy/scope.js';
 
@@ -168,12 +171,28 @@ async function mayDecide(db: Db, ctx: RequestContext, ownerSfUserId: string | nu
 }
 
 async function dismiss(db: Db, orgId: string, enrollmentId: string, now: Date): Promise<boolean> {
-  const resumed = await db
-    .update(e)
-    .set({ status: 'active', reviewCategory: null, reviewQuote: null, flaggedAt: null, nextTouchAt: now, updatedAt: now })
-    .where(and(eq(e.id, enrollmentId), eq(e.orgId, orgId), eq(e.status, 'needs_review')))
-    .returning({ id: e.id });
-  return resumed.length > 0;
+  return db.transaction(async (tx) => {
+    // Compare-and-swap: of two concurrent decisions, only one gets the row.
+    const [claimed] = await tx
+      .update(e)
+      .set({ updatedAt: now })
+      .where(and(eq(e.id, enrollmentId), eq(e.orgId, orgId), eq(e.status, 'needs_review')))
+      .returning({ id: e.id, campaignId: e.campaignId, crmRecordId: e.crmRecordId, reviewTriageId: e.reviewTriageId });
+    if (!claimed) return false;
+    if (claimed.reviewTriageId) {
+      await tx.update(r).set({ dncDismissedTriageId: claimed.reviewTriageId }).where(and(eq(r.id, claimed.crmRecordId), eq(r.orgId, orgId)));
+    }
+    const [campaign] = await tx.select({ status: c.status }).from(c).where(eq(c.id, claimed.campaignId)).limit(1);
+    if (campaign?.status === 'archived') {
+      await exitEnrollment(tx, claimed.id, CAMPAIGN_ARCHIVED_EXIT_REASON);
+      return true;
+    }
+    await tx
+      .update(e)
+      .set({ status: 'active', reviewCategory: null, reviewQuote: null, reviewTriageId: null, flaggedAt: null, nextTouchAt: now, updatedAt: now })
+      .where(eq(e.id, claimed.id));
+    return true;
+  });
 }
 
 async function confirm(deps: ReviewRouteDeps, log: ReviewLog, ctx: RequestContext, target: ReviewTarget, now: Date): Promise<boolean> {

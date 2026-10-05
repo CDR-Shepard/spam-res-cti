@@ -366,5 +366,43 @@ describe.skipIf(!pgLane)('campaign refresh (real Postgres)', () => {
       const keys = await db.select().from(schema.enrollmentContactKeys).where(eq(schema.enrollmentContactKeys.orgId, orgId));
       expect(keys.every((k) => !k.active)).toBe(true);
     });
+
+    it('keeps an archived campaign\'s needs_review enrollment held, keys and all, until a person decides', async () => {
+      const orgId = await seedOrg(db);
+      await seedConnection(db, orgId);
+      const campaign = await seedCampaign(db, orgId, { status: 'dry_run' });
+      const sf = fakeSalesforce({ members: [leadId(1)], stamps: {}, records: { [leadId(1)]: reachable(1) } });
+      await refreshDueCampaigns({ db, clients: async () => sf.client, now: NOW, log });
+      await db.update(schema.campaignEnrollments).set({ status: 'needs_review', reviewCategory: 'sold', reviewQuote: 'sold it' }).where(eq(schema.campaignEnrollments.campaignId, campaign.id));
+      await db.update(schema.campaigns).set({ status: 'archived' }).where(eq(schema.campaigns.id, campaign.id));
+      await refreshDueCampaigns({ db, clients: async () => sf.client, now: LATER, log });
+      expect((await enrollmentsOf(db, campaign.id))[0]).toMatchObject({ status: 'needs_review', exitReason: null, reviewCategory: 'sold' });
+      const keys = await db.select().from(schema.enrollmentContactKeys).where(eq(schema.enrollmentContactKeys.orgId, orgId));
+      expect(keys.length).toBeGreaterThan(0);
+      expect(keys.every((k) => k.active)).toBe(true);
+    });
+  });
+
+  it('never exits a needs_review enrollment: left the query, closed, or skip-on-dialer, the flag still waits for a person', async () => {
+    const orgId = await seedOrg(db);
+    const campaign = await seedCampaign(db, orgId);
+    const state = {
+      members: [leadId(1), leadId(2), leadId(3)],
+      stamps: {} as Record<string, string>,
+      records: { [leadId(1)]: reachable(1), [leadId(2)]: reachable(2), [leadId(3)]: reachable(3) },
+    };
+    const sf = fakeSalesforce(state);
+    await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: NOW }, campaign);
+    await db.update(schema.campaignEnrollments).set({ status: 'needs_review', reviewCategory: 'attorney', reviewQuote: 'my lawyer' }).where(eq(schema.campaignEnrollments.campaignId, campaign.id));
+
+    const moved = new Date(STAMP_2.replace('+0000', 'Z'));
+    state.members = [leadId(2), leadId(3)];
+    state.stamps = { [leadId(2)]: STAMP_2, [leadId(3)]: STAMP_2 };
+    state.records[leadId(2)] = reachable(2, { isClosed: true, lastModifiedAt: moved });
+    state.records[leadId(3)] = reachable(3, { skipOnDialer: true, lastModifiedAt: moved });
+    const out = await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: LATER }, campaign);
+    expect(out.exited).toBe(0);
+    const rows = await enrollmentsOf(db, campaign.id);
+    expect(rows.map((e) => e.status)).toEqual(['needs_review', 'needs_review', 'needs_review']);
   });
 });

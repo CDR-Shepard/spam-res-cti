@@ -37,6 +37,13 @@
 --                      claims rows by setting it and skips rows claimed in the last
 --                      30 minutes, so a record that keeps failing cannot hog every
 --                      batch. A sync that changes the record resets it to NULL.
+--                      The tick's writes compare it with the claim, so a sync that
+--                      lands mid-triage is not lost.
+--   dnc_dismissed_triage_id  The record_triage row whose do-not-contact flag a
+--                      person last dismissed. A flagged triage newer than it holds
+--                      the person in Needs Review again. No FK (record_triage is
+--                      created after this table and references it); a dangling
+--                      id counts as no dismissal, so the person is held.
 --   (org_id, sf_record_id) FULL unique index — upserts ON CONFLICT.
 -- record_triage        One row per model call: the notes fingerprint, model,
 --                      zod-validated TriageResult, and token counts.
@@ -44,6 +51,8 @@
 --   status             active | conversing | needs_review | handed_off |
 --                      completed | exited.
 --   review_*/flagged_at  The AI's do-not-contact flag awaiting the owner.
+--   review_triage_id   The record_triage row that flag came from; a dismissal
+--                      copies it to crm_records.dnc_dismissed_triage_id.
 --   (campaign_id, crm_record_id) FULL unique index.
 -- enrollment_contact_keys  Every E.164 and lowercased email of an enrollment.
 --   enrollment_contact_keys_active_unique  PARTIAL unique (org_id, key) WHERE
@@ -160,6 +169,7 @@ CREATE TABLE IF NOT EXISTS "crm_records" (
   "notes_hash" text,
   "triage_needed" boolean NOT NULL DEFAULT true,
   "triage_attempted_at" timestamptz,
+  "dnc_dismissed_triage_id" uuid,
   "sf_last_modified_at" timestamptz,
   "synced_at" timestamptz NOT NULL DEFAULT now()
 );
@@ -194,6 +204,7 @@ CREATE TABLE IF NOT EXISTS "campaign_enrollments" (
   "review_category" text,
   "review_quote" text,
   "flagged_at" timestamptz,
+  "review_triage_id" uuid REFERENCES "record_triage"("id") ON DELETE SET NULL,
   "next_touch_at" timestamptz,
   "touches_done" integer NOT NULL DEFAULT 0,
   "enrolled_at" timestamptz NOT NULL DEFAULT now(),

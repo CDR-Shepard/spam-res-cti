@@ -157,6 +157,8 @@ export const crmRecords = pgTable(
     triageNeeded: boolean('triage_needed').default(true).notNull(),
     /** Last time the triage tick claimed this row; NULL after a sync that changed the record. */
     triageAttemptedAt: timestamp('triage_attempted_at', { withTimezone: true }),
+    /** The record_triage row whose do-not-contact flag a person last dismissed; a newer flag holds the person again. No FK. */
+    dncDismissedTriageId: uuid('dnc_dismissed_triage_id'),
     sfLastModifiedAt: timestamp('sf_last_modified_at', { withTimezone: true }),
     syncedAt: timestamp('synced_at', { withTimezone: true }).defaultNow().notNull(),
   },
@@ -200,6 +202,8 @@ export const campaignEnrollments = pgTable(
     reviewCategory: text('review_category'),
     reviewQuote: text('review_quote'),
     flaggedAt: timestamp('flagged_at', { withTimezone: true }),
+    /** The record_triage row the flag came from (FK in SQL only). */
+    reviewTriageId: uuid('review_triage_id'),
     nextTouchAt: timestamp('next_touch_at', { withTimezone: true }),
     touchesDone: integer('touches_done').default(0).notNull(),
     enrolledAt: timestamp('enrolled_at', { withTimezone: true }).defaultNow().notNull(),

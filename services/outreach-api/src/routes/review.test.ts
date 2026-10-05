@@ -201,19 +201,22 @@ describe('POST /api/review/:enrollmentId', () => {
     expect(res.statusCode).toBe(204);
   });
 
-  it('dismiss reactivates the enrollment with next_touch_at = now and clears the review fields', async () => {
+  it('dismiss claims the item, records the dismissed flag on the record, then reactivates the enrollment with next_touch_at = now', async () => {
+    await app.close();
+    app = await build({ enrollments: [reviewRow], updateReturning: [{ id: ENROLLMENT_ID, campaignId: CAMPAIGN_ID, crmRecordId: 'R1', reviewTriageId: 'T1' }] });
     const res = await decide('dismiss');
     expect(res.statusCode).toBe(204);
     expect(fixture.writes).toEqual([
+      { op: 'update', table: schema.campaignEnrollments, values: { updatedAt: NOW } },
+      { op: 'update', table: schema.crmRecords, values: { dncDismissedTriageId: 'T1' } },
       {
         op: 'update',
         table: schema.campaignEnrollments,
-        values: { status: 'active', reviewCategory: null, reviewQuote: null, flaggedAt: null, nextTouchAt: NOW, updatedAt: NOW },
+        values: { status: 'active', reviewCategory: null, reviewQuote: null, reviewTriageId: null, flaggedAt: null, nextTouchAt: NOW, updatedAt: NOW },
       },
     ]);
-    const where = render(fixture.captured.where.at(-1));
-    expect(where.sql).toContain('"campaign_enrollments"."status" = ');
-    expect(where.params).toEqual(expect.arrayContaining([ENROLLMENT_ID, 'O1', 'needs_review']));
+    const claim = render(fixture.captured.where.find((w) => render(w).sql.includes('"campaign_enrollments"."status" = ')));
+    expect(claim.params).toEqual(expect.arrayContaining([ENROLLMENT_ID, 'O1', 'needs_review']));
     expect(enroll.exitEnrollment).not.toHaveBeenCalled();
     expect(onConfirmed).not.toHaveBeenCalled();
   });

@@ -142,6 +142,8 @@ describe.skipIf(!pgLane)('triageDueRecords (real Postgres, fake model and Salesf
     const byId = new Map(enrollments.map((e) => [e.id, e]));
     expect(byId.get(t.enrollmentId)).toMatchObject({ status: 'needs_review', reviewCategory: 'sold', reviewQuote: 'sold the house last month', nextTouchAt: null });
     expect(byId.get(t.enrollmentId)!.flaggedAt?.toISOString()).toBe(NOW.toISOString());
+    const [stored] = await triageRows(t.recordId);
+    expect(byId.get(t.enrollmentId)!.reviewTriageId).toBe(stored!.id);
     expect(byId.get(exitedId)).toMatchObject({ status: 'exited', reviewCategory: null });
     const touches = await db.select().from(schema.touches).where(eq(schema.touches.enrollmentId, t.enrollmentId)).orderBy(schema.touches.seq);
     expect(touches.map((x) => [x.status, x.skipReason])).toEqual([

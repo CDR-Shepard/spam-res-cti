@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { TriageResult, type ContactChannel, type TouchChannel } from '@cti/contracts';
 import type { Db } from '@cti/db';
 import { blockedTargets as firewallBlockedTargets, resolveRecipientState, resolveTimezone, type ConsentBlock } from '@cti/firewall';
+import { holdIfFlagged } from '../campaigns/dnc-hold.js';
 import { exitEnrollment } from '../campaigns/enroll.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { outreachSettings } from '../settings.js';
@@ -39,7 +40,7 @@ export const OPEN_TOUCH_STATUSES = ['planned', 'held', 'queued', 'dialing'] as c
 const Phones = z.array(z.object({ field: z.string(), e164: z.string() }));
 type Phone = z.infer<typeof Phones>[number];
 type TouchDecision = Extract<PlanDecision, { kind: 'touch' }>;
-type Outcome = 'planned' | 'exited' | 'skipped';
+type Outcome = 'planned' | 'exited' | 'held' | 'skipped';
 
 interface DueRow {
   id: string;
@@ -210,6 +211,11 @@ async function insertTouch(db: Db, enrollmentId: string, d: TouchDecision): Prom
 async function planOne(deps: PlanDeps, lookup: BlockLookup, row: DueRow): Promise<Outcome> {
   const { db, log } = deps;
   try {
+    // A do-not-contact flag goes to a person before anything else happens to the enrollment.
+    if (await holdIfFlagged(db, { enrollmentId: row.id, crmRecordId: row.crm_record_id, now: deps.now })) {
+      log.info({ enrollmentId: row.id }, 'planner: do-not-contact flag pending; held for review instead of planning');
+      return 'held';
+    }
     if (row.touches_done >= row.touch_days.length) {
       await exitEnrollment(db, row.id, 'sequence_complete', 'completed');
       return 'exited';
@@ -229,17 +235,19 @@ async function planOne(deps: PlanDeps, lookup: BlockLookup, row: DueRow): Promis
   }
 }
 
-export async function planDueEnrollments(deps: PlanDeps): Promise<{ planned: number; exited: number }> {
+export async function planDueEnrollments(deps: PlanDeps): Promise<{ planned: number; exited: number; held: number }> {
   const lookup = deps.blockedTargets ?? firewallBlockedTargets;
   const due = await loadDue(deps.db, deps.now, deps.batch ?? DEFAULT_BATCH, deps.waitForTriage ?? false);
   let planned = 0;
   let exited = 0;
+  let held = 0;
   for (const row of due) {
     const outcome = await planOne(deps, lookup, row);
     if (outcome === 'planned') planned += 1;
     if (outcome === 'exited') exited += 1;
+    if (outcome === 'held') held += 1;
   }
-  return { planned, exited };
+  return { planned, exited, held };
 }
 
 interface QueueRow extends DueRow {
@@ -307,6 +315,8 @@ export interface PromoteOptions {
  * touch is `skipped` and counted, so the enrollment moves on to its next day; a recent
  * human dial, a touch already sent today, or a closed calling window → it stays `planned`
  * with `due_at` pushed to the next opening. The verdict is appended to `gate_audit`.
+ * A record with a pending do-not-contact flag is held for review first (`holdIfFlagged`),
+ * which skips the touch.
  * A suppression read that fails leaves the touch planned for the next tick (fail closed).
  * Returns the number of touches queued.
  */
@@ -318,6 +328,11 @@ export async function promoteQueuedCalls(db: Db, now: Date, opts: PromoteOptions
   let queued = 0;
   for (const row of candidates) {
     try {
+      // Flagged since the call was planned: hold for review (which skips the touch) instead of queueing it.
+      if (await holdIfFlagged(db, { enrollmentId: row.id, crmRecordId: row.crm_record_id, now })) {
+        log.info({ touchId: row.touch_id, enrollmentId: row.id }, 'planner: do-not-contact flag pending; held for review instead of queueing');
+        continue;
+      }
       const input = await loadPlanInput(deps, lookup, row);
       if (!input) continue;
       const verdict = recheckQueuedCall(input);
@@ -365,9 +380,9 @@ export async function advanceAfterTouch(db: Db, touchId: string, now: Date): Pro
 }
 
 /** One `touch.plan` tick: plan, then promote, in that order, so a touch due now is queued in the same tick. */
-export async function planTick(deps: PlanDeps): Promise<{ planned: number; exited: number; promoted: number }> {
-  const { planned, exited } = await planDueEnrollments(deps);
+export async function planTick(deps: PlanDeps): Promise<{ planned: number; exited: number; held: number; promoted: number }> {
+  const { planned, exited, held } = await planDueEnrollments(deps);
   const promoted = await promoteQueuedCalls(deps.db, deps.now, { log: deps.log, batch: deps.batch, blockedTargets: deps.blockedTargets });
-  if (planned + exited + promoted > 0) deps.log.info({ planned, exited, promoted }, 'touch.plan tick');
-  return { planned, exited, promoted };
+  if (planned + exited + held + promoted > 0) deps.log.info({ planned, exited, held, promoted }, 'touch.plan tick');
+  return { planned, exited, held, promoted };
 }

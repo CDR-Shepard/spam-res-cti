@@ -25,6 +25,8 @@ const ACTIVE_KEY_INDEX = 'enrollment_contact_keys_active_unique';
  * exit must leave a `dialing` touch to reconciliation.
  */
 export const OPEN_TOUCH_STATUSES = ['planned', 'held', 'queued'] as const;
+/** `exit_reason` of an enrollment ended because its campaign was archived. */
+export const CAMPAIGN_ARCHIVED_EXIT_REASON = 'campaign_archived';
 /** Enrollment statuses that are finished; nothing moves them again. */
 export const TERMINAL_ENROLLMENT_STATUSES = ['exited', 'completed'] as const;
 
