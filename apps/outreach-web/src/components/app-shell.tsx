@@ -14,6 +14,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <nav aria-label="Main" className="flex gap-3 text-sm">
           <Link to="/" activeOptions={{ exact: true }} activeProps={{ className: 'font-medium' }}>Dashboard</Link>
           <Link to="/campaigns" activeProps={{ className: 'font-medium' }}>Campaigns</Link>
+          <Link to="/review" activeProps={{ className: 'font-medium' }}>Needs review</Link>
           <Link to="/team" activeProps={{ className: 'font-medium' }}>Team</Link>
           <Link to="/settings/connections" activeProps={{ className: 'font-medium' }}>Settings</Link>
         </nav>

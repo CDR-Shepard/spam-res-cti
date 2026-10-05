@@ -161,6 +161,7 @@ describe('outreach pages', () => {
     ['/campaigns/new'],
     ['/campaigns/11111111-1111-4111-8111-111111111111'],
     ['/settings/connections'],
+    ['/review'],
   ])('%s sits under the authenticated layout (signed-out visits go to sign-in)', async (path) => {
     const router = renderAppAt(path);
     await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in'));
@@ -172,7 +173,7 @@ describe('outreach pages', () => {
     await router.navigate({ to: '/campaigns' });
     expect(await screen.findByRole('heading', { name: 'Campaigns' })).toBeInTheDocument();
     const nav = screen.getByRole('navigation', { name: 'Main' });
-    expect(within(nav).getAllByRole('link').map((a) => a.textContent)).toEqual(['Dashboard', 'Campaigns', 'Team', 'Settings']);
+    expect(within(nav).getAllByRole('link').map((a) => a.textContent)).toEqual(['Dashboard', 'Campaigns', 'Needs review', 'Team', 'Settings']);
     expect(router.state.matches.map((m) => m.routeId)).toEqual(['__root__', '/_authenticated', '/_authenticated/campaigns/']);
   });
 
