@@ -280,4 +280,20 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
     expect((await touchById(db, badLead.touchId)).status).toBe('planned');
     expect(good.logs).toContainEqual({ level: 'error', obj: { orgId: bad.base.orgId, errName: 'TypeError' }, msg: 'ai_call.place: the tick failed for this tenant; the next tenant goes on' });
   });
+
+  it.each(['HTTP 401 bad_signature', 'HTTP 404', 'HTTP 503 internal_disabled', 'timeout', 'network', 'bad_response'])(
+    'F1: a transport failure (%s) is logged with what went wrong, never the plan text or a phone number',
+    async (error) => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      h.cti.answers.push({ transport: error });
+      await h.run(NOW);
+      expect(h.logs).toContainEqual({
+        level: 'info',
+        obj: { orgId: h.base.orgId, touchId: lead.touchId, attempt: 1, result: 'retry:transport', transport: error },
+        msg: 'ai_call.place: trigger answered',
+      });
+      expect(JSON.stringify(h.logs)).not.toContain('+1512');
+    },
+  );
 });

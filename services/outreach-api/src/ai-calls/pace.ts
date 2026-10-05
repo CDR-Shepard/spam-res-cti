@@ -127,8 +127,10 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
     target: { kind: 'record', objectType: c.sfObject, recordId: c.sfRecordId, planText: rendered.text },
   });
   const decision = decideTrigger(outcome, claim.attempts, to, now);
-  // Never the plan text or a phone number.
-  deps.log.info({ orgId: c.orgId, touchId: c.touchId, attempt: claim.attempts, result: resultWords(decision) }, 'ai_call.place: trigger answered');
+  // Never the plan text or a phone number. A transport failure names what went wrong (F1): "HTTP <status> [cti-api's error
+  // code]", "timeout", "network" or "bad_response" (cti-client.ts builds it; the code is [a-z_] only, never body text).
+  const transport = outcome.kind === 'transport' ? { transport: outcome.error } : {};
+  deps.log.info({ orgId: c.orgId, touchId: c.touchId, attempt: claim.attempts, result: resultWords(decision), ...transport }, 'ai_call.place: trigger answered');
   return apply(deps, c, plan.id, decision);
 }
 
