@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { SkipReason } from '@cti/contracts';
+import { DoNotContactCategory, SkipReason } from '@cti/contracts';
 import { ApiRequestError } from './api';
-import { errorText, humanize, pauseReasonWords, SKIP_REASON_WORDS, wordFor } from './outreach-words';
+import { DNC_CATEGORY_WORDS, enrollmentStatusWords, errorText, gateStepWords, humanize, pauseReasonWords, SKIP_REASON_WORDS, wordFor } from './outreach-words';
 
 describe('outreach words', () => {
   it('has a human label for every SkipReason', () => {
@@ -30,5 +30,22 @@ describe('outreach words', () => {
     expect(errorText(err)).toBe('Salesforce is not connected. An admin can connect it in Settings.');
     expect(errorText(new ApiRequestError(500, 'INTERNAL_ERROR', 'Server says no'))).toBe('Server says no');
     expect(errorText(new Error('boom'))).toBe('Something went wrong. Try again.');
+  });
+});
+
+describe('plan and review words', () => {
+  it('words every enrollment status, adding the exit reason for stopped people', () => {
+    expect(enrollmentStatusWords('active', null)).toBe('In sequence');
+    expect(enrollmentStatusWords('exited', 'left_query')).toBe('Stopped: left the Salesforce query');
+    expect(enrollmentStatusWords('exited', 'litigator')).toBe('Stopped: litigator');
+    expect(enrollmentStatusWords('completed', 'sequence_complete')).toBe('Finished');
+  });
+  it('turns a gate step into a sentence', () => {
+    expect(gateStepWords({ rule: 'contact_point', channel: 'sms', verdict: 'removed', detail: 'No mobile number on the record' })).toBe('Text ruled out: No mobile number on the record');
+    expect(gateStepWords({ rule: 'call_kind', channel: 'rep_call', verdict: 'kept', detail: 'No AI-call consent, so a rep makes this call' })).toBe('Rep call kept: No AI-call consent, so a rep makes this call');
+    expect(gateStepWords({ rule: 'frequency', channel: '', verdict: 'deferred', detail: 'Already contacted today' })).toBe('Moved later: Already contacted today');
+  });
+  it('has words for every do-not-contact category', () => {
+    for (const category of DoNotContactCategory.options) expect(DNC_CATEGORY_WORDS[category]).toMatch(/^[A-Z]/);
   });
 });
