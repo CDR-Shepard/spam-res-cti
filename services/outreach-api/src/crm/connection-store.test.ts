@@ -78,6 +78,22 @@ describe('markBroken', () => {
   });
 });
 
+describe('markBroken with a refresh token guard', () => {
+  it('only marks the row broken while it still holds the refresh token the caller read', async () => {
+    const { db, captured } = fakeDb();
+    await markBroken(db, 'O1', 'refresh failed', 'CIPHER-1');
+    const where = sql(captured.where[0]);
+    expect(where).toContain('"crm_connections"."org_id" = $1');
+    expect(where).toContain('"crm_connections"."refresh_token_enc" = $3');
+  });
+
+  it('guards on a still-null refresh token', async () => {
+    const { db, captured } = fakeDb();
+    await markBroken(db, 'O1', 'no token', null);
+    expect(sql(captured.where[0])).toContain('"crm_connections"."refresh_token_enc" is null');
+  });
+});
+
 describe('saveFieldMap / deleteConnection', () => {
   it('saveFieldMap updates only the field map, scoped to the org, and returns the row (or null)', async () => {
     const { db, writes, captured } = fakeDb({ updateReturning: [connectionRow()] });
@@ -117,6 +133,22 @@ describe('orgTokenSource', () => {
     expect(decryptString(update.values.accessTokenEnc as string)).toBe('AT-new');
     expect(update.values.instanceUrl).toBe('https://gg2.my.salesforce.com');
     expect(await tokens.current()).toEqual({ accessToken: 'AT-new', instanceUrl: 'https://gg2.my.salesforce.com' });
+  });
+
+  it('refresh() writes the new access token only while the refresh token is the one it read', async () => {
+    sf.refresh.mockResolvedValue({ accessToken: 'AT-new', instanceUrl: null });
+    const row = connectionRow();
+    const { db, captured } = fakeDb({ tables: { crmConnections: [row] } });
+    await orgTokenSource(db, 'O1', oauth).refresh();
+    const where = captured.where.map((w) => sql(w));
+    expect(where.some((w) => w.includes('"crm_connections"."refresh_token_enc" = $3'))).toBe(true);
+  });
+
+  it('refresh() rejected by Salesforce marks the connection broken only if the refresh token is unchanged', async () => {
+    sf.refresh.mockRejectedValue(new SalesforceAuthError('invalid_grant: expired access/refresh token'));
+    const { db, captured } = fakeDb({ tables: { crmConnections: [connectionRow()] } });
+    await expect(orgTokenSource(db, 'O1', oauth).refresh()).rejects.toBeInstanceOf(SalesforceAuthError);
+    expect(captured.where.map((w) => sql(w)).some((w) => w.includes('"crm_connections"."refresh_token_enc" = $3'))).toBe(true);
   });
 
   it('refresh() rejected by Salesforce marks the connection broken and throws SalesforceAuthError', async () => {

@@ -1,4 +1,4 @@
-import { and, eq, type SQL } from 'drizzle-orm';
+import { and, eq, isNull, type SQL } from 'drizzle-orm';
 import { decryptString, encryptString } from '@cti/auth';
 import type { FieldMap } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
@@ -66,11 +66,22 @@ export async function deleteConnection(db: Db, orgId: string): Promise<void> {
   await db.delete(schema.crmConnections).where(byOrg(orgId));
 }
 
-export async function markBroken(db: Db, orgId: string, error: string): Promise<void> {
+/** `byOrg` plus: the row still holds the refresh token ciphertext the caller read (null = still has none). */
+function byOrgWithRefreshToken(orgId: string, refreshTokenEnc: string | null): SQL {
+  const unchanged = refreshTokenEnc === null ? isNull(schema.crmConnections.refreshTokenEnc) : eq(schema.crmConnections.refreshTokenEnc, refreshTokenEnc);
+  return and(byOrg(orgId), unchanged)!;
+}
+
+/**
+ * Marks the connection broken. Pass `ifRefreshTokenEnc` (the ciphertext the
+ * failed refresh used) so a reconnect that replaced the tokens in the meantime
+ * is not marked broken by a failure that belongs to the old ones.
+ */
+export async function markBroken(db: Db, orgId: string, error: string, ifRefreshTokenEnc?: string | null): Promise<void> {
   await db
     .update(schema.crmConnections)
     .set({ status: 'broken', lastError: error.slice(0, MAX_ERROR_LENGTH), updatedAt: new Date() })
-    .where(byOrg(orgId));
+    .where(ifRefreshTokenEnc === undefined ? byOrg(orgId) : byOrgWithRefreshToken(orgId, ifRefreshTokenEnc));
 }
 
 /**
@@ -106,7 +117,7 @@ export function orgTokenSource(db: Db, orgId: string, oauth: SalesforceOAuthConf
   async function exchangeAndStore(): Promise<SalesforceToken> {
     const row = await loadConnection(db, orgId);
     if (!row?.refreshTokenEnc) {
-      await markBroken(db, orgId, 'No refresh token stored; reconnect Salesforce');
+      await markBroken(db, orgId, 'No refresh token stored; reconnect Salesforce', row ? null : undefined);
       throw new SalesforceAuthError('No Salesforce refresh token; reconnect Salesforce');
     }
     let next: { accessToken: string; instanceUrl: string | null };
@@ -115,14 +126,14 @@ export function orgTokenSource(db: Db, orgId: string, oauth: SalesforceOAuthConf
     } catch (err) {
       if (!(err instanceof SalesforceAuthError)) throw err; // outage: keep the connection, the caller retries next tick
       const message = `Token refresh failed: ${err.message}`;
-      await markBroken(db, orgId, message);
+      await markBroken(db, orgId, message, row.refreshTokenEnc);
       throw new SalesforceAuthError(message);
     }
     const token: SalesforceToken = { accessToken: next.accessToken, instanceUrl: next.instanceUrl ?? row.instanceUrl };
     await db
       .update(schema.crmConnections)
       .set({ accessTokenEnc: encryptString(token.accessToken), instanceUrl: token.instanceUrl, updatedAt: new Date() })
-      .where(byOrg(orgId));
+      .where(byOrgWithRefreshToken(orgId, row.refreshTokenEnc));
     return token;
   }
 

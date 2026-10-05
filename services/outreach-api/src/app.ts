@@ -4,6 +4,7 @@ import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import type { AppConfig } from './config.js';
 import { rateLimitError, registerErrorHandler } from './http/errors.js';
+import { serializeRequest } from './http/log-serializers.js';
 import { registerHealthRoutes, type Readiness } from './routes/health.js';
 import { registerSpa } from './routes/spa.js';
 
@@ -14,6 +15,8 @@ export interface AppDeps {
   spaDist?: string;
   /** Route plugins registered under /api (added by later tasks). */
   apiRoutes?: Array<(app: FastifyInstance) => Promise<void>>;
+  /** Where the request logger writes; defaults to stdout. Tests pass a stream to read the log lines. */
+  logStream?: { write(line: string): void };
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -22,6 +25,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     logger: {
       level: cfg.NODE_ENV === 'production' ? 'info' : cfg.NODE_ENV === 'test' ? 'silent' : 'debug',
       redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'],
+      // OAuth callbacks carry a one-time code and state in the query string: never log them.
+      serializers: { req: serializeRequest },
+      ...(deps.logStream ? { stream: deps.logStream } : {}),
     },
     trustProxy: 1,
     bodyLimit: 1024 * 1024,
