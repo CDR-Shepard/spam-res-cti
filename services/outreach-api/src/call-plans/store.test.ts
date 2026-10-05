@@ -224,6 +224,18 @@ describe.skipIf(!pgLane)('call plan store (real Postgres)', () => {
       await resetCallStageAfterDismiss(db, l.enrollmentId);
       expect((await enrollment(l.enrollmentId)).callStage).toBe('research');
     });
+    it.each(['proposed', 'approved'] as const)('M-6: a dismissal does not undo a pending "Research again" (%s plan is still current, stage research stays)', async (status) => {
+      const l = await lead({ callStage: 'research' });
+      const research = await saveResearch(db, { ...l, snapshot: researchSnapshot(l.sfRecordId) });
+      const plan = await savePlan(db, { ...planInput(l, research.id), dncFlagged: true });
+      await db.update(schema.callPlans).set({ status }).where(eq(schema.callPlans.id, plan.id));
+      await db.update(schema.campaignEnrollments).set({ callPrepareAttemptedAt: NOW }).where(eq(schema.campaignEnrollments.id, l.enrollmentId));
+      const [user] = await db.insert(schema.users).values({ orgId: l.orgId, email: `u${n}@example.com`, displayName: 'Rita' }).returning({ id: schema.users.id });
+      await resetCallStageAfterDismiss(db, l.enrollmentId, { userId: user!.id, at: NOW });
+      // A prepare already claimed for the new research stays claimed.
+      expect(await enrollment(l.enrollmentId)).toMatchObject({ callStage: 'research', callPrepareAttemptedAt: NOW });
+      expect(await currentPlan(db, l.enrollmentId)).toMatchObject({ status: 'proposed', dncDismissedBy: user!.id });
+    });
     it('leaves a done stage and a sequence enrollment (no call stage) alone', async () => {
       const done = await lead({ callStage: 'done' });
       const sequence = await lead({ callStage: null });

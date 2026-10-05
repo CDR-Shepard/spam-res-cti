@@ -153,7 +153,7 @@ export async function storeDncTriage(
  * After a person dismisses a do-not-contact flag: the lead goes back on the board for a fresh approval.
  * `by` records who dismissed the flag of a plan the model itself flagged (`dnc_flagged`): `dnc_dismissed_by`
  * and `dnc_dismissed_at` on that plan, which the board shows (CF-7). An approved plan that goes back to
- * `proposed` loses its approval (`decided_*`) but keeps the dismissal.
+ * `proposed` loses its approval (`decided_*`) but keeps the dismissal. A pending "Research again" stays pending.
  */
 export async function resetCallStageAfterDismiss(tx: Db, enrollmentId: string, by?: { userId: string; at: Date }): Promise<void> {
   // Sequence enrollments (call_stage null) are none of this function's business: nothing is written for them.
@@ -170,9 +170,17 @@ export async function resetCallStageAfterDismiss(tx: Db, enrollmentId: string, b
       .set({ dncDismissedBy: by.userId, dncDismissedAt: by.at })
       .where(and(eq(schema.callPlans.enrollmentId, enrollmentId), eq(schema.callPlans.status, 'proposed'), eq(schema.callPlans.dncFlagged, true)));
   }
+  // "Research again" leaves the old plan current until the new one supersedes it, so a lead in `research` that still has a plan
+  // is waiting for new research: a dismissal must not send it back to review (M-6), nor release a prepare already claimed.
   await tx.execute(sql`
     update campaign_enrollments e
-    set call_stage = case when exists (select 1 from call_plans p where p.enrollment_id = e.id and p.status = 'proposed') then 'review' else 'research' end,
-        call_prepare_attempted_at = null, updated_at = now()
+    set call_stage = case
+          when e.call_stage = 'research' then 'research'
+          when exists (select 1 from call_plans p where p.enrollment_id = e.id and p.status = 'proposed') then 'review'
+          else 'research' end,
+        call_prepare_attempted_at = case
+          when e.call_stage = 'research' and exists (select 1 from call_plans p where p.enrollment_id = e.id and p.status in ('proposed', 'approved')) then e.call_prepare_attempted_at
+          else null end,
+        updated_at = now()
     where e.id = ${enrollmentId}::uuid and e.call_stage is not null and e.call_stage <> 'done'`);
 }
