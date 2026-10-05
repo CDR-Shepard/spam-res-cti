@@ -80,14 +80,19 @@ describe('internal AI call routes, as registered by registerAiVoiceRoutes', () =
     expect(res.json()).toEqual({ available: true, testNumbers: ['+16195550199'] });
   });
 
-  it('answers 503 while OUTREACH_INTERNAL_SECRET is unset (the default today)', async () => {
+  it('S-4: while OUTREACH_INTERNAL_SECRET is unset (the default today) the route is the framework\'s own 404, as if it did not exist', async () => {
     delete state.cfg.OUTREACH_INTERNAL_SECRET;
-    expect((await signedGet()).statusCode).toBe(503);
+    const res = await signedGet();
+    expect(res.statusCode).toBe(404);
+    const missing = await app.inject({ method: 'GET', url: '/internal/ai-calls/nothing-here', headers: { host: 'ctiapi.railway.internal' } });
+    expect(res.json()).toMatchObject({ error: 'Not Found', statusCode: 404 });
+    expect(Object.keys(res.json()).sort()).toEqual(Object.keys(missing.json()).sort());
   });
 
   it('does not exist on the public host in production', async () => {
     const res = await app.inject({ method: 'POST', url: INTERNAL_AI_CALLS_PATH, headers: { host: 'api.test', 'content-type': 'application/json' }, payload: '{}' });
     expect(res.statusCode).toBe(404);
+    expect(res.json()).toMatchObject({ error: 'Not Found', statusCode: 404 });
   });
 
   it("the rep routes still parse JSON normally (the raw parser is scoped to the internal routes)", async () => {

@@ -1,9 +1,10 @@
 /**
  * Who may call the internal AI call routes (plan 1C): only outreach-api, over Railway's
  * private network. Four independent locks, cheapest refusal first:
- *   1. no OUTREACH_INTERNAL_SECRET configured  → 503 internal_disabled
- *   2. production, Host not *.railway.internal  → 404 not_found (the public edge never
- *      routes such a host, so from the internet the routes do not exist)
+ *   1. production, Host not *.railway.internal  → 404 (the public edge never routes such a
+ *      host, so from the internet the routes do not exist)
+ *   2. no OUTREACH_INTERNAL_SECRET configured   → production: the same 404 (a disabled route
+ *      is indistinguishable from a missing one, S-4); elsewhere 503 internal_disabled
  *   3. any Origin header                        → 403 forbidden (browsers always send one)
  *   4. HMAC over method, path, timestamp, body  → 401 bad_signature
  * The route adds its own rate limit (INTERNAL_RATE_MAX a minute).
@@ -43,10 +44,12 @@ export function internalHostAllowed(host: string | undefined, nodeEnv: AppConfig
   return name.endsWith(PRIVATE_SUFFIX) && name.length > PRIVATE_SUFFIX.length;
 }
 
-/** Locks 1-3: decided from the headers alone, so they run before the body is even read. */
+/** Locks 1-3: decided from the headers alone, so they run before the body is even read. A 404 is answered with `reply.callNotFound()`. */
 export function checkInternalTransport(headers: Headers, cfg: InternalCfg): { ok: true } | Refusal {
-  if (!cfg.OUTREACH_INTERNAL_SECRET) return { ok: false, status: 503, error: 'internal_disabled' };
   if (!internalHostAllowed(header(headers, 'host'), cfg.NODE_ENV)) return { ok: false, status: 404, error: 'not_found' };
+  if (!cfg.OUTREACH_INTERNAL_SECRET) {
+    return cfg.NODE_ENV === 'production' ? { ok: false, status: 404, error: 'not_found' } : { ok: false, status: 503, error: 'internal_disabled' };
+  }
   if (header(headers, 'origin') !== undefined) return { ok: false, status: 403, error: 'forbidden' };
   return { ok: true };
 }

@@ -97,7 +97,10 @@ export async function registerInternalAiCallRoutes(app: FastifyInstance, deps: I
     // Secret, host and Origin need no body: refuse before it is read.
     scope.addHook('onRequest', async (req, reply) => {
       const guard = checkInternalTransport(req.headers, cfgOf());
-      if (!guard.ok) return reply.code(guard.status).send({ error: guard.error });
+      if (guard.ok) return;
+      // A 404 is the framework's own not-found reply: byte for byte what a route that does not exist answers (S-4).
+      if (guard.status === 404) return reply.callNotFound();
+      return reply.code(guard.status).send({ error: guard.error });
     });
     scope.addHook('preHandler', async (req, reply) => {
       const raw = (req as RawRequest).rawBody ?? '';

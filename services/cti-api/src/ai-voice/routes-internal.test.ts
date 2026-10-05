@@ -285,18 +285,22 @@ describe('POST /internal/ai-calls', () => {
 });
 
 describe('the guards', () => {
-  it('no secret configured -> 503 internal_disabled', async () => {
+  it('S-4: no secret configured -> in production a plain 404, outside it 503 internal_disabled', async () => {
     cfg.OUTREACH_INTERNAL_SECRET = undefined;
-    const res = await post(recordBody(), { sign: false });
-    expect(res.statusCode).toBe(503);
-    expect(res.json()).toEqual({ error: 'internal_disabled' });
+    const prod = await post(recordBody(), { sign: false });
+    expect(prod.statusCode).toBe(404);
+    expect(prod.json()).toMatchObject({ error: 'Not Found', statusCode: 404 });
+    cfg.NODE_ENV = 'development';
+    const dev = await post(recordBody(), { sign: false });
+    expect(dev.statusCode).toBe(503);
+    expect(dev.json()).toEqual({ error: 'internal_disabled' });
   });
 
   it('a public host in production -> 404, before the body is even parsed', async () => {
     expect((await post(recordBody(), { headers: { host: 'cti.example.com' } })).statusCode).toBe(404);
     const garbage = await post(null, { raw: '{not json', headers: { host: 'cti.example.com' } });
     expect(garbage.statusCode).toBe(404);
-    expect(garbage.json()).toEqual({ error: 'not_found' });
+    expect(garbage.json()).toMatchObject({ error: 'Not Found', statusCode: 404 });
   });
 
   it('a browser (any Origin) -> 403', async () => {

@@ -51,9 +51,17 @@ describe('internalHostAllowed', () => {
 });
 
 describe('checkInternalRequest — guard order', () => {
-  it('3a: an unset secret answers 503 even with a bad host', () => {
-    const r = req({ host: 'api.example.com' });
-    expect(checkInternalRequest(r, { OUTREACH_INTERNAL_SECRET: undefined, NODE_ENV: 'production' }, NOW)).toEqual({
+  it('3a (S-4): in production an unset secret and a public host are both a plain 404, host checked first, so the route looks missing', () => {
+    const off = { OUTREACH_INTERNAL_SECRET: undefined, NODE_ENV: 'production' as const };
+    expect(checkInternalRequest(req({ host: 'api.example.com' }), off, NOW)).toEqual({ ok: false, status: 404, error: 'not_found' });
+    expect(checkInternalRequest(req({ host: 'ctiapi.railway.internal' }), off, NOW)).toEqual({ ok: false, status: 404, error: 'not_found' });
+    expect(checkInternalRequest(req({ host: 'api.example.com' }), PROD, NOW)).toEqual(
+      checkInternalRequest(req({ host: 'ctiapi.railway.internal' }), off, NOW),
+    );
+  });
+
+  it('3a: outside production an unset secret still says internal_disabled (503), for the developer', () => {
+    expect(checkInternalRequest(req({ host: 'localhost:4000' }), { OUTREACH_INTERNAL_SECRET: undefined, NODE_ENV: 'development' }, NOW)).toEqual({
       ok: false,
       status: 503,
       error: 'internal_disabled',
