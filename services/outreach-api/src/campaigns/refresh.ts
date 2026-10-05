@@ -8,7 +8,7 @@ import { and, eq, inArray, isNull, lt, lte, notInArray, or, sql } from 'drizzle-
 import { FieldMap, SfObject, type CampaignSource } from '@cti/contracts';
 import { schema, type CampaignRow, type CrmRecordRow, type Db } from '@cti/db';
 import { blockedTargets, type ConsentBlock } from '@cti/firewall';
-import { SalesforceAuthError, soqlEscape, type SalesforceClient } from '@cti/salesforce';
+import { SalesforceApiError, SalesforceAuthError, soqlEscape, type SalesforceClient } from '@cti/salesforce';
 import { CrmNotConnectedError, type SalesforceClientFactory } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
 import type { RunnerLogger } from '../jobs/boss.js';
@@ -153,7 +153,9 @@ async function checkTaskActivity(db: Db, client: SalesforceClient, campaign: Cam
     if (flagged > 0) log?.info({ ...ids, flagged }, 'records with new Tasks marked for triage');
   } catch (err) {
     if (isConnectionFailure(err)) throw err;
-    log?.warn(ids, 'Task check failed; the refresh carries on and the same window is checked next time');
+    const status = err instanceof SalesforceApiError ? err.status : undefined;
+    const errName = err instanceof Error ? err.name : typeof err;
+    log?.warn({ ...ids, errName, status }, 'Task check failed; the refresh carries on and the same window is checked next time');
     // Pin the window's start: the fallback (last refresh) is about to move.
     if (!campaign.tasksCheckedAt) await setCursor(since);
     return;
@@ -241,7 +243,6 @@ export async function refreshCampaign(
 function errorMessage(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).slice(0, MAX_ERROR_LENGTH);
 }
-
 
 /**
  * Archived campaigns hold no one: end their open enrollments so the people's keys free up.
