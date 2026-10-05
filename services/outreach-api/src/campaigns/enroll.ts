@@ -139,7 +139,7 @@ function isActiveKeyConflict(err: unknown): boolean {
   return code === UNIQUE_VIOLATION && constraint === ACTIVE_KEY_INDEX;
 }
 
-type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 /** `EXISTS` in SQL: the lead is (still) ticked in the campaign's lead picker. */
 export function selectionExists(campaignId: SQL | string, sfRecordId: SQL | string): SQL {

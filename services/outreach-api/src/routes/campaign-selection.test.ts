@@ -17,22 +17,14 @@ vi.mock('@cti/auth', async (importOriginal) => ({
 const m = vi.hoisted(() => ({
   memberIds: vi.fn(),
   candidatePage: vi.fn(),
-  selectRecords: vi.fn(),
-  deselectRecords: vi.fn(),
-  clearSelection: vi.fn(),
-  selectedCount: vi.fn(),
+  applyChange: vi.fn(),
 }));
 vi.mock('../campaigns/member-cache.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../campaigns/member-cache.js')>()),
   campaignMemberIds: m.memberIds,
 }));
 vi.mock('../campaigns/candidates.js', () => ({ candidatePage: m.candidatePage }));
-vi.mock('../campaigns/selection.js', () => ({
-  selectRecords: m.selectRecords,
-  deselectRecords: m.deselectRecords,
-  clearSelection: m.clearSelection,
-  selectedCount: m.selectedCount,
-}));
+vi.mock('../campaigns/selection.js', () => ({ applySelectionChange: m.applyChange }));
 
 const cfg = testConfig();
 const ADMIN_ID = '11111111-1111-4111-8111-111111111111';
@@ -71,10 +63,7 @@ beforeEach(async () => {
   clients = vi.fn<SalesforceClientFactory>(async () => ({}) as unknown as SalesforceClient);
   for (const fn of Object.values(m)) fn.mockReset();
   m.memberIds.mockResolvedValue([a, b]);
-  m.selectRecords.mockResolvedValue(1);
-  m.deselectRecords.mockResolvedValue(0);
-  m.clearSelection.mockResolvedValue(0);
-  m.selectedCount.mockResolvedValue(2);
+  m.applyChange.mockResolvedValue(2);
   app = await build();
 });
 
@@ -109,28 +98,22 @@ describe('campaign selection routes', () => {
   it('PUT {add:[member, nonMember]} selects only the member and reports one ignored', async () => {
     const res = await put({ add: [a, nonMember] });
     expect(res.statusCode).toBe(200);
-    expect(m.selectRecords).toHaveBeenCalledWith(expect.anything(), { orgId: 'O1', campaignId: CAMPAIGN_ID, userId: ADMIN_ID, sfRecordIds: [a] });
+    expect(m.applyChange).toHaveBeenCalledWith(expect.anything(), { orgId: 'O1', campaignId: CAMPAIGN_ID, userId: ADMIN_ID, clear: false, add: [a], remove: [] });
     expect(res.json()).toEqual({ selectedCount: 2, ignored: 1 });
   });
 
-  it('PUT {selectAll:true} selects every member; remove is applied after selectAll', async () => {
-    const order: string[] = [];
-    m.selectRecords.mockImplementation(async () => { order.push('select'); return 2; });
-    m.deselectRecords.mockImplementation(async () => { order.push('deselect'); return 1; });
+  it('PUT {selectAll:true, remove} hands every member and the removals to ONE applySelectionChange call', async () => {
     const res = await put({ selectAll: true, remove: [b] });
     expect(res.statusCode).toBe(200);
-    expect(m.selectRecords.mock.calls[0]![1].sfRecordIds).toEqual([a, b]);
-    expect(m.deselectRecords).toHaveBeenCalledWith(expect.anything(), CAMPAIGN_ID, [b]);
-    expect(order).toEqual(['select', 'deselect']);
+    expect(m.applyChange).toHaveBeenCalledTimes(1);
+    expect(m.applyChange).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ clear: false, add: [a, b], remove: [b] }));
     expect(res.json().ignored).toBe(0);
   });
 
-  it('PUT {clear:true, add:[x]} clears first, then adds', async () => {
-    const order: string[] = [];
-    m.clearSelection.mockImplementation(async () => { order.push('clear'); return 2; });
-    m.selectRecords.mockImplementation(async () => { order.push('select'); return 1; });
+  it('PUT {clear:true, add:[x]} is one atomic change (the store clears first, then adds)', async () => {
     expect((await put({ clear: true, add: [b] })).statusCode).toBe(200);
-    expect(order).toEqual(['clear', 'select']);
+    expect(m.applyChange).toHaveBeenCalledTimes(1);
+    expect(m.applyChange).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ clear: true, add: [b], remove: [] }));
   });
 
   it('422 INVALID_SOURCE with the message when the members cannot be read', async () => {
@@ -138,7 +121,7 @@ describe('campaign selection routes', () => {
     const res = await put({ add: [a] });
     expect(res.statusCode).toBe(422);
     expect(res.json()).toMatchObject({ code: 'INVALID_SOURCE', error: 'The query returns more than 50,000 records. Narrow the query.', details: { code: 'too_large' } });
-    expect(m.selectRecords).not.toHaveBeenCalled();
+    expect(m.applyChange).not.toHaveBeenCalled();
   });
 
   it('409 CRM_NOT_CONNECTED without a connection, on both routes', async () => {

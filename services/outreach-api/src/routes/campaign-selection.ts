@@ -4,7 +4,7 @@ import { SelectionChange, type CandidatePage, type SelectionResponse } from '@ct
 import type { CampaignRow, Db } from '@cti/db';
 import { candidatePage } from '../campaigns/candidates.js';
 import { campaignMemberIds, type MemberIdCache } from '../campaigns/member-cache.js';
-import { clearSelection, deselectRecords, selectedCount, selectRecords } from '../campaigns/selection.js';
+import { applySelectionChange } from '../campaigns/selection.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import { sendError } from '../http/errors.js';
 import { requireAdmin, requireContext } from '../tenancy/scope.js';
@@ -72,12 +72,10 @@ export async function registerCampaignSelectionRoutes(app: FastifyInstance, deps
         return sendSourceError(reply, err);
       }
     }
-    if (change.clear) await clearSelection(db, row.id);
     const wanted = change.selectAll ? [...members] : change.add;
     const accepted = wanted.filter((sfId) => members.has(sfId));
-    await selectRecords(db, { orgId: ctx.orgId, campaignId: row.id, userId: ctx.session.userId, sfRecordIds: accepted });
-    if (change.remove.length > 0) await deselectRecords(db, row.id, change.remove);
-    const response: SelectionResponse = { selectedCount: await selectedCount(db, row.id), ignored: change.selectAll ? 0 : change.add.length - accepted.length };
+    const total = await applySelectionChange(db, { orgId: ctx.orgId, campaignId: row.id, userId: ctx.session.userId, clear: change.clear, add: accepted, remove: change.remove });
+    const response: SelectionResponse = { selectedCount: total, ignored: change.selectAll ? 0 : change.add.length - accepted.length };
     return response;
   });
 }
