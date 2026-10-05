@@ -2,7 +2,8 @@
  * outreach-api's side of the internal AI call trigger (plan 1C): signed, short-timeout, and it
  * never throws. A transport outcome (timeout, network, a non-200, an unreadable body) is
  * something the pacer retries with the SAME idempotency key, so cti-api can never place a
- * second call for one touch attempt.
+ * second call for one touch attempt. A 409 is not transport (M-3): cti-api already holds or
+ * answered that key for a different request, so the same key can only meet 409 again.
  */
 import { internalRequestHeaders } from '@cti/auth';
 import {
@@ -15,7 +16,11 @@ import {
 
 export const TRIGGER_TIMEOUT_MS = 20_000;
 
-export type TriggerOutcome = { kind: 'response'; response: InternalAiCallResponse } | { kind: 'transport'; error: string };
+export type TriggerOutcome =
+  | { kind: 'response'; response: InternalAiCallResponse }
+  | { kind: 'transport'; error: string }
+  /** HTTP 409 idempotency_conflict: the key is cti-api's already, for a different body. The pacer retries with a new key. */
+  | { kind: 'conflict' };
 
 export interface CtiClient {
   trigger(req: InternalAiCallRequest): Promise<TriggerOutcome>;
@@ -53,6 +58,7 @@ export function httpCtiClient(cfg: { CTI_INTERNAL_URL: string; OUTREACH_INTERNAL
         return { kind: 'transport', error: name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'network' };
       }
       const json: unknown = await res.json().catch(() => null);
+      if (res.status === 409) return { kind: 'conflict' };
       if (res.status !== 200) return { kind: 'transport', error: `HTTP ${res.status}${bodyError(json)}` };
       const parsed = InternalAiCallResponse.safeParse(json);
       return parsed.success ? { kind: 'response', response: parsed.data } : { kind: 'transport', error: 'bad_response' };

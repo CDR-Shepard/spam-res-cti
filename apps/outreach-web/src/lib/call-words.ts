@@ -136,6 +136,7 @@ const PACER_REASON_WORDS: Readonly<Record<string, string>> = {
   activity_check_failed: 'could not check Salesforce for new activity',
   new_salesforce_activity: 'new activity in Salesforce; researching again',
   plan_not_approved: 'the plan is no longer approved',
+  idempotency_conflict: 'the call request clashed with an earlier one; trying again',
 };
 
 const REASON_WORDS: Readonly<Record<string, string>> = { ...BLOCK_REASON_WORDS, ...FAIL_REASON_WORDS, ...PACER_REASON_WORDS };

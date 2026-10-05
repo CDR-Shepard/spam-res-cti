@@ -84,6 +84,7 @@ describe('AI call result words', () => {
     expect(notCalledWords('twilio_error')).toBe('Not called: the phone carrier refused the call');
     expect(notCalledWords('gave_up')).toBe('Not called: gave up after repeated errors');
     expect(notCalledWords('plan_rejected')).toBe("Not called: the voice agent refused the plan's text");
+    expect(notCalledWords('idempotency_conflict')).toBe('Not called: the call request clashed with an earlier one; trying again');
     expect(notCalledWords('brand_new')).toBe('Not called: brand new');
     expect(notCalledWords(null)).toBe('Not called');
   });

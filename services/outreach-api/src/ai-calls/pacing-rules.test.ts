@@ -108,6 +108,13 @@ describe('decideTrigger', () => {
     expect(decideTrigger(t, 7, TO, NOW)).toMatchObject({ at: later(2 * HOUR), keepKey: true });
   });
 
+  it('M-3: an idempotency conflict retries with a NEW key, no sooner than the stale reservation, and counts the attempt', () => {
+    const conflict: TriggerOutcome = { kind: 'conflict' };
+    expect(decideTrigger(conflict, 1, TO, NOW)).toEqual({ kind: 'retry', reason: 'idempotency_conflict', at: later(IN_FLIGHT_RETRY_MS), keepKey: false, refundAttempt: false });
+    expect(decideTrigger(conflict, 7, TO, NOW)).toMatchObject({ at: later(2 * HOUR), keepKey: false });
+    expect(decideTrigger(conflict, MAX_TRIGGER_ATTEMPTS, TO, NOW)).toEqual({ kind: 'final', reason: 'gave_up', aiCallId: null });
+  });
+
   it('10: a retry about the person on the eighth attempt gives up', () => {
     expect(MAX_TRIGGER_ATTEMPTS).toBe(8);
     expect(decideTrigger(failed('twilio_error'), 7, TO, NOW).kind).toBe('retry');

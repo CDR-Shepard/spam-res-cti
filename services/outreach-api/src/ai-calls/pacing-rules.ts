@@ -50,6 +50,12 @@ export const RETRY_REASONS: ReadonlySet<string> = new Set([
  */
 export const SYSTEM_REASONS: ReadonlySet<string> = new Set(['ai_voice_unavailable', 'no_caller_id', 'gate_error', 'salesforce_error', 'transport']);
 
+/**
+ * M-3: cti-api answered 409, so it already holds or answered this key for another request body. The same key can only meet
+ * 409 again: the key is dropped and the retry goes once with a new one. The attempt counts (it is about this touch).
+ */
+export const IDEMPOTENCY_CONFLICT = 'idempotency_conflict';
+
 export type ParkReason = 'plan_rejected' | 'unknown_user';
 
 export type TriggerDecision =
@@ -77,6 +83,8 @@ function retryAt(reason: string, attempts: number, to: string | null, now: Date)
     // M-2: Twilio may have taken the call before it failed, so the person may have been rung: wait as for no answer.
     case 'twilio_error': return nextAttemptAt(to, now);
     case 'in_flight': return later(now, IN_FLIGHT_RETRY_MS);
+    // M-3: cti-api holds or answered the old key; the new key goes no sooner than that reservation could be stale.
+    case IDEMPOTENCY_CONFLICT:
     // The request may have reached cti-api and be reserved there: the same key goes again, never before the takeover.
     case 'transport': return later(now, Math.max(backoffMs(attempts), IN_FLIGHT_RETRY_MS));
     default: return later(now, backoffMs(attempts));
@@ -87,7 +95,7 @@ function retryAt(reason: string, attempts: number, to: string | null, now: Date)
 export function decideTrigger(outcome: TriggerOutcome, attempts: number, toE164: string | null, now: Date): TriggerDecision {
   if (outcome.kind === 'response' && outcome.response.result === 'placed') return { kind: 'placed', aiCallId: outcome.response.aiCallId };
   const refusal = outcome.kind === 'response' && outcome.response.result !== 'placed' ? outcome.response : null;
-  const reason: string = refusal ? refusal.reason : 'transport';
+  const reason: string = refusal ? refusal.reason : outcome.kind === 'conflict' ? IDEMPOTENCY_CONFLICT : 'transport';
   const aiCallId = refusal ? refusal.aiCallId : null;
   if (PARK_REASONS.has(reason)) return { kind: 'park', reason: reason as ParkReason };
   if (FINAL_REASONS.has(reason)) return { kind: 'final', reason, aiCallId };

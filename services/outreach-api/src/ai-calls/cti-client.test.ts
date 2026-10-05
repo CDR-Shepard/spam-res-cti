@@ -54,12 +54,16 @@ describe('httpCtiClient.trigger', () => {
   it.each([
     [401, { error: 'bad_signature' }, 'HTTP 401 bad_signature'],
     [404, { error: 'not_found' }, 'HTTP 404 not_found'],
-    [409, { error: 'idempotency_conflict' }, 'HTTP 409 idempotency_conflict'],
     [429, { statusCode: 429, message: 'Rate limit exceeded' }, 'HTTP 429'],
     [503, { error: 'internal_disabled' }, 'HTTP 503 internal_disabled'],
     [500, 'not json', 'HTTP 500'],
   ])('4: HTTP %i is a transport error naming the status and the body error', async (status, body, error) => {
     expect(await client(fetchReturning(status, body)).trigger(REQ)).toEqual({ kind: 'transport', error });
+  });
+
+  it('M-3: HTTP 409 is an idempotency conflict, not a transport error: cti-api already holds or answered the key', async () => {
+    expect(await client(fetchReturning(409, { error: 'idempotency_conflict' })).trigger(REQ)).toEqual({ kind: 'conflict' });
+    expect(await client(fetchReturning(409, 'not json')).trigger(REQ)).toEqual({ kind: 'conflict' });
   });
 
   it('5: passes a timeout signal; a timeout or abort is "timeout"', async () => {

@@ -51,7 +51,9 @@ export interface FakeCti {
   cti: CtiClient;
   requests: InternalAiCallRequest[];
   /** Answers in order; when they run out every trigger is placed. A `blocked`/`placed`/`failed` result writes its ai_calls row. */
-  answers: Array<{ result: 'placed' } | { result: 'blocked'; reason: string } | { result: 'failed'; reason: string; withCall?: boolean } | { transport: string }>;
+  answers: Array<
+    { result: 'placed' } | { result: 'blocked'; reason: string } | { result: 'failed'; reason: string; withCall?: boolean } | { transport: string } | { conflict: true }
+  >;
   /** What `availability()` answers (null: cti-api did not answer); on with no test numbers unless a test says otherwise. */
   available: AiAvailability | null;
   availabilityCalls: number;
@@ -69,6 +71,7 @@ export function fakeCti(db: Db): FakeCti {
         fake.requests.push(req);
         const a = fake.answers.shift() ?? { result: 'placed' as const };
         if ('transport' in a) return { kind: 'transport', error: a.transport };
+        if ('conflict' in a) return { kind: 'conflict' };
         if (a.result === 'failed' && !a.withCall) return { kind: 'response', response: { result: 'failed', reason: a.reason, aiCallId: null } as InternalAiCallResponse };
         const status = a.result === 'placed' ? 'queued' : a.result;
         const aiCallId = await seedAiCall(db, req.orgId, req.userId, { status, ...(req.target.kind === 'record' ? { sfObject: req.target.objectType, sfRecordId: req.target.recordId } : {}) });

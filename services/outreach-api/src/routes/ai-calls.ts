@@ -72,7 +72,7 @@ export async function registerAiCallRoutes(app: FastifyInstance, deps: { db: Db;
       idempotencyKey: `test:${randomUUID()}`,
       target: { kind: 'test', to: body.data.to, planText: null },
     });
-    if (outcome.kind === 'transport') return sendError(reply, 502, 'CTI_UNREACHABLE', 'The AI calling service did not answer. Try again in a minute.');
+    if (outcome.kind !== 'response') return sendError(reply, 502, 'CTI_UNREACHABLE', 'The AI calling service did not answer. Try again in a minute.');
     return outcome.response;
   });
 }

@@ -169,6 +169,20 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
     expect((await touchById(db, lead.touchId)).dueAt.getTime() - NOW.getTime()).toBeGreaterThanOrEqual(20 * 60 * MIN);
   });
 
+  it('M-3: a 409 idempotency conflict drops the key: the retry goes once with a NEW key and is placed', async () => {
+    const h = await paceHarness(db);
+    const lead = await seedReleasedLead(db, h.base);
+    h.cti.answers.push({ conflict: true });
+
+    expect((await h.run(NOW)).retried).toBe(1);
+    const t = await touchById(db, lead.touchId);
+    expect(t).toMatchObject({ status: 'planned', triggerKey: null, lastBlockReason: 'idempotency_conflict', attempts: 1 });
+    expect(t.dueAt.getTime() - NOW.getTime()).toBeGreaterThanOrEqual(10 * MIN);
+
+    expect((await h.run(t.dueAt)).placed).toBe(1);
+    expect(h.cti.requests.map((r) => r.idempotencyKey)).toEqual([keyOf(lead.touchId, 1), keyOf(lead.touchId, 2, t.dueAt)]);
+  });
+
   it('9: a retryable failure on the eighth attempt gives up: exit ai_call_gave_up', async () => {
     const h = await paceHarness(db);
     const lead = await seedReleasedLead(db, h.base, { touch: { attempts: 7 } });
