@@ -45,6 +45,11 @@ describe('plan and review words', () => {
     expect(gateStepWords({ rule: 'call_kind', channel: 'rep_call', verdict: 'kept', detail: 'No AI-call consent, so a rep makes this call' })).toBe('Rep call kept: No AI-call consent, so a rep makes this call');
     expect(gateStepWords({ rule: 'frequency', channel: '', verdict: 'deferred', detail: 'Already contacted today' })).toBe('Moved later: Already contacted today');
   });
+  it('words the planner\'s comma lists and "none" channels', () => {
+    expect(gateStepWords({ rule: 'channel_order', channel: 'call,sms', verdict: 'kept', detail: 'No triage preference, then the default order call, sms, email' })).toBe('Call, Text kept: No triage preference, then the default order call, sms, email');
+    expect(gateStepWords({ rule: 'channel_order', channel: 'call, sms,email', verdict: 'kept', detail: '' })).toBe('Call, Text, Email kept');
+    expect(gateStepWords({ rule: 'live_channel', channel: 'none', verdict: 'removed', detail: 'No channel remains: the enrollment exits (no_allowed_channel)' })).toBe('No channel ruled out: No channel remains: the enrollment exits (no_allowed_channel)');
+  });
   it('has words for every do-not-contact category', () => {
     for (const category of DoNotContactCategory.options) expect(DNC_CATEGORY_WORDS[category]).toMatch(/^[A-Z]/);
   });

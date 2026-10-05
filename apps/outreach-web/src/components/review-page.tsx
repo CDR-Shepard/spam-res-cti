@@ -4,11 +4,15 @@ import type { NeedsReviewItem, NeedsReviewResponse, ReviewDecision } from '@cti/
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { ApiRequestError } from '@/lib/api';
 import { decideReview, getReview, outreachKeys } from '@/lib/outreach-api';
 import { DNC_CATEGORY_WORDS, errorText, formatDateTime } from '@/lib/outreach-words';
 import { ConfirmAction } from './confirm-action';
 
-const REVIEW_ERROR_WORDS = { NOT_OWNER: "Only the record's owner or an admin can decide this one." };
+const REVIEW_ERROR_WORDS = {
+  NOT_OWNER: "Only the record's owner or an admin can decide this one.",
+  NOT_IN_REVIEW: 'Someone else already decided this one. The list has been refreshed.',
+};
 
 interface Decision { enrollmentId: string; decision: ReviewDecision['decision'] }
 
@@ -22,6 +26,10 @@ export function ReviewPage() {
       // here instead of refetching the whole list.
       qc.setQueryData<NeedsReviewResponse>(outreachKeys.review, (old) => old && { items: old.items.filter((i) => i.enrollmentId !== enrollmentId) });
       void qc.invalidateQueries({ queryKey: outreachKeys.plans });
+    },
+    onError: (error) => {
+      // Someone else decided first: the row on screen is stale, so load the list again.
+      if (error instanceof ApiRequestError && error.code === 'NOT_IN_REVIEW') void qc.invalidateQueries({ queryKey: outreachKeys.review });
     },
   });
   const items = review.data?.items;

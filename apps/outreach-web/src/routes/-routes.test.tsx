@@ -133,7 +133,6 @@ describe('auth callback', () => {
   });
 });
 
-
 const SIGNED_IN_SESSION = {
   token: 'tok',
   expiresAt: '2026-10-01T00:00:00.000Z',

@@ -57,6 +57,32 @@ describe('ReviewPage', () => {
     expect(screen.getByText('Jane Seller')).toBeInTheDocument();
   });
 
+  it('after someone else decided first (409 NOT_IN_REVIEW), says so and reloads the list so the stale row is gone', async () => {
+    stubApi({ 'GET /api/review': twoItems });
+    renderWithRouter(<ReviewPage />);
+    await screen.findByText('Jane Seller');
+    // From here on the server's list no longer has Jane, and deciding on her answers 409.
+    const calls = stubApi({
+      'GET /api/review': { items: [twoItems.items[1]] },
+      [`POST /api/review/${ENROLLMENT_ID}`]: respond(409, { error: 'This record is no longer waiting for review', code: 'NOT_IN_REVIEW' }),
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Dismiss flag for Jane Seller' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Someone else already decided this one.');
+    await waitFor(() => expect(screen.queryByText('Jane Seller')).not.toBeInTheDocument());
+    expect(calls.filter((c) => c.method === 'GET' && c.url === '/api/review')).toHaveLength(1);
+    expect(screen.getByText('Sam Seller')).toBeInTheDocument();
+  });
+
+  it('does not reload the list for other failures such as NOT_OWNER', async () => {
+    stubApi({ 'GET /api/review': twoItems });
+    renderWithRouter(<ReviewPage />);
+    await screen.findByText('Jane Seller');
+    const calls = stubApi({ 'GET /api/review': twoItems, [`POST /api/review/${ENROLLMENT_ID}`]: respond(403, { error: 'Not the owner', code: 'NOT_OWNER' }) });
+    await userEvent.click(screen.getByRole('button', { name: 'Dismiss flag for Jane Seller' }));
+    await screen.findByRole('alert');
+    expect(calls.filter((c) => c.method === 'GET' && c.url === '/api/review')).toHaveLength(0);
+  });
+
   it('says when there is nothing to review', async () => {
     stubApi({ 'GET /api/review': { items: [] } });
     renderWithRouter(<ReviewPage />);

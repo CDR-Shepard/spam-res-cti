@@ -27,7 +27,7 @@ export function CampaignsPage() {
         <CardContent className="space-y-4">
           <div className="flex items-center gap-2 text-sm">
             <input id={archivedId} type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
-            <label htmlFor={archivedId}>Show archived</label>
+            <label htmlFor={archivedId}>Include archived</label>
           </div>
           {campaigns.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
           {campaigns.error && <p role="alert" className="text-sm text-destructive">{errorText(campaigns.error)}</p>}

@@ -26,6 +26,8 @@ export function CampaignSettings({ campaign, canEdit }: { campaign: Campaign; ca
     onSuccess: (updated) => {
       qc.setQueryData(outreachKeys.campaign(updated.id), updated);
       void qc.invalidateQueries({ queryKey: outreachKeys.campaignLists });
+      // The plan view shows the campaign's status and touch days.
+      void qc.invalidateQueries({ queryKey: outreachKeys.plan(updated.id) });
     },
   });
   const submit = (e: FormEvent) => {

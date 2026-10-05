@@ -120,10 +120,19 @@ const GATE_VERDICT_WORDS: Record<GateStep['verdict'], string> = {
   held: 'held until the channel is live',
 };
 
+/**
+ * The planner's `channel` is one of the five channels, but also `none` (no channel remained) and
+ * comma lists such as `call,sms,email` (the candidate order). Word each part.
+ */
+function gateChannelWords(channel: string): string {
+  if (channel === 'none') return 'No channel';
+  return channel.split(',').map((part) => wordFor(GATE_CHANNEL_WORDS, part.trim())).join(', ');
+}
+
 /** One planner gate step as a sentence, e.g. "Text ruled out: No mobile number on the record". The planner's `detail` carries the specifics. */
 export function gateStepWords(step: GateStep): string {
   const verdict = GATE_VERDICT_WORDS[step.verdict];
-  const lead = step.channel ? `${wordFor(GATE_CHANNEL_WORDS, step.channel)} ${verdict}` : humanize(verdict);
+  const lead = step.channel ? `${gateChannelWords(step.channel)} ${verdict}` : humanize(verdict);
   return step.detail ? `${lead}: ${step.detail}` : lead;
 }
 

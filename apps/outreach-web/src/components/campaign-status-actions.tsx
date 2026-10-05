@@ -13,11 +13,11 @@ const ARCHIVE = { title: 'Archive this campaign?', description: 'An archived cam
 
 /**
  * The buttons each status offers. Mirrors outreach-api's `canTransition` (A7):
- * draft→dry_run; dry_run→active|paused|archived; active→paused|archived;
+ * draft→dry_run|archived; dry_run→active|paused|archived; active→paused|archived;
  * paused→active|dry_run|archived; archived→nothing.
  */
 export const STATUS_ACTIONS: Record<CampaignStatus, readonly StatusAction[]> = {
-  draft: [{ to: 'dry_run', label: 'Start dry run' }],
+  draft: [{ to: 'dry_run', label: 'Start dry run' }, { to: 'archived', label: 'Archive', confirm: ARCHIVE }],
   dry_run: [{ to: 'active', label: 'Go live', confirm: GO_LIVE }, { to: 'paused', label: 'Pause' }, { to: 'archived', label: 'Archive', confirm: ARCHIVE }],
   active: [{ to: 'paused', label: 'Pause' }, { to: 'archived', label: 'Archive', confirm: ARCHIVE }],
   paused: [{ to: 'active', label: 'Resume', confirm: RESUME }, { to: 'dry_run', label: 'Start dry run' }, { to: 'archived', label: 'Archive', confirm: ARCHIVE }],
@@ -33,6 +33,8 @@ export function CampaignStatusActions({ campaign }: { campaign: Campaign }) {
     onSuccess: (updated) => {
       qc.setQueryData(outreachKeys.campaign(updated.id), updated);
       void qc.invalidateQueries({ queryKey: outreachKeys.campaignLists });
+      // The plan view shows the campaign's status and touch days.
+      void qc.invalidateQueries({ queryKey: outreachKeys.plan(updated.id) });
     },
   });
   const actions = STATUS_ACTIONS[campaign.status];

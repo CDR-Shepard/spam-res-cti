@@ -32,7 +32,7 @@ describe('CampaignDetail header', () => {
   });
 
   const allowed: Array<[CampaignStatus, string[]]> = [
-    ['draft', ['Start dry run']],
+    ['draft', ['Start dry run', 'Archive']],
     ['dry_run', ['Go live', 'Pause', 'Archive']],
     ['active', ['Pause', 'Archive']],
     ['paused', ['Resume', 'Start dry run', 'Archive']],
@@ -77,6 +77,13 @@ describe('CampaignDetail header', () => {
     expect(await screen.findByText('Paused by an admin')).toBeInTheDocument();
   });
 
+  it('reloads the plan after a status change', async () => {
+    const calls = renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ status: 'active' }), [`POST ${CAMPAIGN}/status`]: campaign({ status: 'paused', pauseReason: 'manual' }) });
+    await userEvent.click(await screen.findByRole('button', { name: 'Pause' }));
+    await screen.findByText('Paused by an admin');
+    await waitFor(() => expect(calls.filter((c) => c.method === 'GET' && c.url === `${CAMPAIGN}/plan`).length).toBeGreaterThanOrEqual(2));
+  });
+
   it('explains a rejected transition', async () => {
     renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ status: 'active' }), [`POST ${CAMPAIGN}/status`]: respond(409, { error: 'bad', code: 'BAD_TRANSITION' }) });
     await userEvent.click(await screen.findByRole('button', { name: 'Pause' }));
@@ -113,6 +120,16 @@ describe('CampaignDetail settings', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
     await waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ refreshMinutes: 120, touchDays: [0, 2, 5] }));
     expect(await screen.findByText('Saved.')).toBeInTheDocument();
+  });
+
+  it('reloads the plan after the settings are saved', async () => {
+    const calls = renderDetail({ [`GET ${CAMPAIGN}`]: campaign(), [`PATCH ${CAMPAIGN}`]: campaign({ refreshMinutes: 120 }) });
+    const refresh = await screen.findByLabelText('Refresh every (minutes)');
+    await userEvent.clear(refresh);
+    await userEvent.type(refresh, '120');
+    await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    await screen.findByText('Saved.');
+    await waitFor(() => expect(calls.filter((c) => c.method === 'GET' && c.url === `${CAMPAIGN}/plan`).length).toBeGreaterThanOrEqual(2));
   });
 
   it('refuses touch days that do not start at 0 and go up', async () => {

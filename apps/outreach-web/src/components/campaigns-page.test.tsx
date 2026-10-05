@@ -39,11 +39,11 @@ describe('CampaignsPage', () => {
     expect(screen.queryByRole('link', { name: 'New campaign' })).not.toBeInTheDocument();
   });
 
-  it('asks for archived campaigns when the box is ticked', async () => {
+  it('asks for the list including archived campaigns when the box is ticked', async () => {
     const calls = stubApi({ 'GET /api/campaigns': { campaigns: [] }, 'GET /api/campaigns?archived=1': { campaigns: [campaign({ status: 'archived' })] } });
     renderWithRouter(<CampaignsPage />, { isAdmin: true });
     expect(await screen.findByRole('link', { name: 'New campaign' })).toHaveAttribute('href', '/campaigns/new');
-    await userEvent.click(screen.getByLabelText('Show archived'));
+    await userEvent.click(screen.getByLabelText('Include archived'));
     expect(await screen.findByText('Archived')).toBeInTheDocument();
     await waitFor(() => expect(calls.map((c) => c.url)).toContain('/api/campaigns?archived=1'));
   });
