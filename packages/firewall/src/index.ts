@@ -9,6 +9,8 @@ export { evaluate } from './evaluate.js';
 export { velocityGateCheck } from './velocity.js';
 export * from './calling-hours.js';
 export * from './calling-window.js';
+export * from './recipient-window.js';
+export * from './suppression.js';
 export * from './tz.js';
 export * from './state-calling-rules.js';
 export * from './warmup.js';

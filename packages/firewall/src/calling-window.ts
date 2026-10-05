@@ -5,7 +5,8 @@
  * one-minute margin at the top.
  *
  * ONE definition, two enforcement sites. The dialer's coarse pre-filter
- * (`withinCallingHours` in dialer/pick-did.ts) and the firewall's authoritative
+ * (`withinCallingHours` in recipient-window.ts, re-exported by the dialer's
+ * pick-did.ts) and the firewall's authoritative
  * click-to-dial gate used to carry independent literals — 8am–9pm here,
  * 8am–8pm there — so a call the firewall would BLOCK at 8:10pm local could
  * still be attempted by the power dialer at that same instant, with nothing
