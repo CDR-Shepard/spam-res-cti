@@ -166,7 +166,7 @@ Three per-tenant settings live in `organizations.settings` (jsonb). They have no
 | Setting | Default | Range | Meaning |
 |---|---|---|---|
 | `aiCallConcurrency` | 2 | 1–5 | AI calls the tenant may have live at once. A placed call holds a slot until it ends, and at most one hour. |
-| `aiCallDailyCap` | 50 | 0–500 (0 = none) | AI calls placed per rolling 24 hours. It counts only calls outreach placed: not calls the engine refused, and not test calls. |
+| `aiCallDailyCap` | 50 | 0–500 (0 = no calls are placed) | AI calls placed per rolling 24 hours. It counts only calls outreach placed: not calls the engine refused, and not test calls. |
 | `aiCallMaxAttempts` | 3 | 1–5 | Unanswered attempts per lead (no answer, busy, voicemail, failed) before the lead completes. |
 
 ```bash
@@ -227,7 +227,32 @@ These appear in the Status cell. **Retried** ones say "Waiting — next try …"
 
 ### Cost
 
-Each plan is one Claude call, counted with note triage against the tenant's daily budget (`aiDailyBudgetUsd`, default $25, per UTC day). Sonnet 5.5 costs $2 per million input tokens and $10 per million output tokens (`PRICE_MICROS_PER_TOKEN` in `services/outreach-api/src/ai/model.ts`), so a typical plan (about 12,000 tokens in, 1,500 out) costs about 4 cents. When the day's budget is spent, AI call campaigns pause with the banner "Paused: today's AI budget is used up", exactly like sequence campaigns; resume them after the next UTC day starts or after raising `aiDailyBudgetUsd` in the same way as the pacing settings. The voice call itself is billed separately (`ai-voice.md` §13).
+Each plan is one Claude call, counted with note triage against the tenant's daily budget (`aiDailyBudgetUsd`, default $25, per UTC day). Sonnet 5.5 costs $2 per million input tokens and $10 per million output tokens (`PRICE_MICROS_PER_TOKEN` in `services/outreach-api/src/ai/model.ts`), so a typical plan (about 12,000 tokens in, 1,500 out) costs about 4 cents. When the day's budget is spent, **every running campaign of the tenant pauses** (`pauseOrgCampaigns`, reason `ai_budget`): sequence and AI call campaigns alike, dry run or live, not just the campaign that spent it. The banner reads "Paused: today's AI budget is used up — it does not resume on its own: press Resume after midnight UTC or raise the budget". Nothing resumes these campaigns automatically: an admin presses **Resume** (or **Resume dry run**) on each one after the next UTC day starts, or after raising `aiDailyBudgetUsd` in the same way as the pacing settings. The voice call itself is billed separately (`ai-voice.md` §13).
+
+### Troubleshooting
+
+outreach-api's logs (`railway logs --service outreach-api`) carry one line per trigger, `ai_call.place: trigger answered`, with the org, touch, attempt and `result`; never the plan text or a phone number. When `result` is `retry:transport`, the `transport` field says what went wrong:
+
+| `transport` | What it means and what to do |
+|---|---|
+| `HTTP 401 bad_signature` | cti-api refused the signature: the two `OUTREACH_INTERNAL_SECRET` values differ, or the clocks are more than 5 minutes apart. `@cti/api`'s logs say `ai-voice internal: signature refused` with the reason. |
+| `HTTP 404` | `CTI_INTERNAL_URL` is not the `.railway.internal` host, or `OUTREACH_INTERNAL_SECRET` is unset on `@cti/api` (production hides the routes behind a 404). |
+| `HTTP 503 internal_disabled` | `OUTREACH_INTERNAL_SECRET` is unset on `@cti/api` (outside production only). |
+| `HTTP 403 forbidden` | The request carried an `Origin` header; only outreach-api's server calls the route. |
+| `HTTP 409 idempotency_conflict` | The same request key arrived with a different body (the plan text or target changed while the key was kept). cti-api refuses it rather than risk a second call; it gives up after 8 triggers. Check `ai_call_requests` for the key (below). |
+| `HTTP 429` | cti-api's rate limit for internal requests was hit; the pacer retries. |
+| `HTTP 400 invalid_body` | cti-api could not read the request: the two services are on different versions. Deploy both from the same commit. |
+| `HTTP 500 internal_error` (or another status) | cti-api failed on the request; its logs say `ai-voice internal: request failed`. The pacer retries with the same key. |
+| `timeout` / `network` | cti-api did not answer within 20 seconds, or could not be reached: private networking (`ai-voice.md` §11). |
+| `bad_response` | cti-api answered 200 with a body outreach-api cannot read: the two services are on different versions. Deploy both from the same commit. |
+
+The curl probe in "Before the first campaign" step 4 tells the same cases apart by hand.
+
+**A touch that gave up after transport errors may still have placed a call.** The request can reach cti-api even when its answer is lost, and outreach-api has no read-only way to ask cti-api about a request key. Before calling the person by hand, check `ai_calls` by trigger key: the key is `touch:<touch id>:<attempt>`, and cti-api stores it in `ai_call_requests.idempotency_key` with the call it placed in `ai_call_id`:
+
+```bash
+echo "SELECT idempotency_key, ai_call_id, response, created_at FROM ai_call_requests WHERE org_id = :'org' AND idempotency_key LIKE :'key';" | psql "$PUB" -v org='<org uuid>' -v key='touch:<touch id>:%'
+```
 
 ### Stopping everything
 

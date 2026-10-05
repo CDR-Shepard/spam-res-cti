@@ -317,7 +317,21 @@ Set any of these with `railway variables --set "NAME=value" --service @cti/api`.
 - `API_PUBLIC_URL` on `@cti/api` is the public `https://` URL (not `http://`, not an internal Railway hostname).
 - `OPENAI_API_KEY` is set (§3 name check). Without it AI voice is off and the call is refused rather than placed, so this is the first thing to recheck if anything changed.
 
-**Campaign and test calls are not placed.** outreach-api's logs (`railway logs --service outreach-api`) show `ai_call.place: trigger answered` with `result: retry:transport` (the call is retried; the results table says "last try: the AI calling service did not answer", and the test call card says "The AI calling service did not answer. Try again in a minute."). The log does not carry the HTTP status, so probe the link by hand from outreach-api's shell (`railway ssh --service outreach-api`):
+**Campaign and test calls are not placed.** outreach-api's logs (`railway logs --service outreach-api`) show `ai_call.place: trigger answered` with `result: retry:transport` (the call is retried; the results table says "last try: the AI calling service did not answer", and the test call card says "The AI calling service did not answer. Try again in a minute."). The same line's `transport` field says what went wrong:
+
+| `transport` | Meaning |
+|---|---|
+| `HTTP 401 bad_signature` | signature refused: the `OUTREACH_INTERNAL_SECRET` values differ, or the clocks are more than 5 minutes apart |
+| `HTTP 404` | `CTI_INTERNAL_URL` is not the `.railway.internal` host, or the secret is unset on `@cti/api` (production) |
+| `HTTP 503 internal_disabled` | the secret is unset on `@cti/api` (outside production) |
+| `HTTP 403 forbidden` | the request carried an `Origin` header |
+| `HTTP 409 idempotency_conflict` | the same request key arrived with a different body; refused rather than risk a second call |
+| `HTTP 429` / `HTTP 400 invalid_body` | cti-api's internal rate limit / the services are on different versions |
+| `HTTP 500 internal_error` | cti-api failed on the request (`ai-voice internal: request failed` in its logs) |
+| `timeout` / `network` | no answer within 20 seconds, or unreachable: private networking |
+| `bad_response` | a 200 whose body outreach-api cannot read: the services are on different versions |
+
+To confirm by hand, probe the link from outreach-api's shell (`railway ssh --service outreach-api`):
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}' "$CTI_INTERNAL_URL/internal/ai-calls/availability"
