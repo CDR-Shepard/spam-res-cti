@@ -13,6 +13,7 @@ const ISSUE_WORDS: Readonly<Record<AgentPlanIssue, string>> = {
   url: 'a web address',
   angle_bracket: 'a < or > sign',
   control_char: 'a hidden or control character',
+  disallowed_char: 'a character the voice agent cannot be given (an emoji, a symbol, a look-alike letter)',
   line_break: 'a line break',
 };
 

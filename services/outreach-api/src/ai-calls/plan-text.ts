@@ -34,14 +34,20 @@ export const GOAL_LABELS: Readonly<Record<CallGoalKey, string>> = {
 
 const bullets = (items: readonly string[]): string => items.map((i) => `- ${i}`).join('\n');
 
+/**
+ * S-1: what the records say about THEIR price is never sent, only whether the plan knows it. The agent is told never to
+ * name a price, and a number in its instructions is a number it can say. Every other goal sends its `known` text.
+ */
+const knownText = (g: EditableCallPlan['goals'][number]): string | null => (g.goal === 'price_expectations' ? null : g.known);
+
 /** Every plan field the agent may receive, with its path. */
 function sentFields(plan: EditableCallPlan): Array<[string, string]> {
   return [
     ['opener', plan.opener],
-    ...plan.goals.flatMap((g, i): Array<[string, string]> => [
-      ...(g.known ? [[`goals.${i}.known`, g.known] as [string, string]] : []),
-      [`goals.${i}.approach`, g.approach],
-    ]),
+    ...plan.goals.flatMap((g, i): Array<[string, string]> => {
+      const known = knownText(g);
+      return [...(known ? [[`goals.${i}.known`, known] as [string, string]] : []), [`goals.${i}.approach`, g.approach]];
+    }),
     ...plan.questions.map((q, i): [string, string] => [`questions.${i}`, q]),
     ...plan.sellingSignals.map((s, i): [string, string] => [`sellingSignals.${i}.signal`, s.signal]),
     ...plan.talkingPoints.map((t, i): [string, string] => [`talkingPoints.${i}`, t]),
@@ -55,7 +61,11 @@ export function planTextIssues(plan: EditableCallPlan): PlanTextIssue[] {
 }
 
 function required(plan: EditableCallPlan, questions: number): string[] {
-  const goal = (g: EditableCallPlan['goals'][number]) => `- ${GOAL_LABELS[g.goal]} (${g.known ? `known: ${g.known}` : 'unknown'}) — ${g.approach}`;
+  const state = (g: EditableCallPlan['goals'][number]): string => {
+    if (!g.known) return 'unknown';
+    return g.goal === 'price_expectations' ? 'known' : `known: ${g.known}`;
+  };
+  const goal = (g: EditableCallPlan['goals'][number]) => `- ${GOAL_LABELS[g.goal]} (${state(g)}) — ${g.approach}`;
   return [`Opener: ${plan.opener}`, `Goals:\n${plan.goals.map(goal).join('\n')}`, `Questions:\n${bullets(plan.questions.slice(0, questions))}`];
 }
 
@@ -89,12 +99,11 @@ function fitted(plan: EditableCallPlan): string {
   return out || cutLine(lines[0] ?? '');
 }
 
-/** At most PLAN_TEXT_MAX characters, ending at a space when there is one, never half a surrogate pair. */
+/** At most PLAN_TEXT_MAX characters, ending at a space when there is one. */
 function cutLine(line: string): string {
   const head = line.slice(0, PLAN_TEXT_MAX);
   const space = head.lastIndexOf(' ');
-  const cut = space > 0 ? head.slice(0, space) : head;
-  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+  return space > 0 ? head.slice(0, space) : head;
 }
 
 export function renderPlanForAgent(plan: EditableCallPlan): RenderedPlan {
