@@ -1,5 +1,6 @@
 import type { SalesforceClient, SObjectDescribe } from '@cti/salesforce';
 import { describe, expect, it, vi } from 'vitest';
+import { describeOf } from '../test/fake-sf-client.js';
 import { DescribeCache, describeObject, readableFields } from './describe.js';
 
 const field = (name: string, type = 'string') => ({ name, type, label: `${name} label` });
@@ -22,6 +23,12 @@ describe('readableFields', () => {
   };
   it('drops binary, compound and masked types and unsafe names, puts Id first, keeps describe order', () => {
     expect(readableFields(d, 100).map((f) => f.name)).toEqual(['Id', 'Name', 'Phone', 'Notes__c']);
+  });
+  it('puts the pinned field right after Id, matched case-insensitively, and keeps it inside the cap', () => {
+    const wide = describeOf('Lead', [['Id', 'id'], ['Name'], ['Phone'], ['AI_Call_Consent__c', 'boolean']]);
+    expect(readableFields(wide, 100, 'ai_call_consent__c').map((f) => f.name)).toEqual(['Id', 'AI_Call_Consent__c', 'Name', 'Phone']);
+    expect(readableFields(wide, 2, 'AI_Call_Consent__c').map((f) => f.name)).toEqual(['Id', 'AI_Call_Consent__c']);
+    expect(readableFields(wide, 100, 'Missing__c').map((f) => f.name)).toEqual(['Id', 'Name', 'Phone', 'AI_Call_Consent__c']);
   });
   it('carries the label and caps at max', () => {
     expect(readableFields(d, 2)).toEqual([

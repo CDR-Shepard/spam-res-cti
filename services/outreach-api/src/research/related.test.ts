@@ -32,7 +32,7 @@ describe('readMainAndRelated: a Lead', () => {
     const got = await readMainAndRelated(deps(sf), { sfObject: 'Lead', sfRecordId: LEAD, consentField: 'AI_Call_Consent__c' });
     expect(sf.described).toEqual(['Lead']);
     expect(sf.soql).toEqual([
-      `SELECT Id, Name, Phone, DoNotCall, IsConverted, ConvertedContactId, ConvertedAccountId, ConvertedOpportunityId, AI_Call_Consent__c, Notes__c FROM Lead WHERE Id = '${LEAD}' LIMIT 1`,
+      `SELECT Id, AI_Call_Consent__c, Name, Phone, DoNotCall, IsConverted, ConvertedContactId, ConvertedAccountId, ConvertedOpportunityId, Notes__c FROM Lead WHERE Id = '${LEAD}' LIMIT 1`,
     ]);
     expect(got?.related.summary).toEqual({ source: 'related', status: 'ok', count: 0, truncated: false, note: null });
     expect(got?.links).toEqual({ whoIds: [LEAD], whatIds: [], parentIds: [LEAD] });
@@ -119,6 +119,38 @@ describe('consent', () => {
   ])('%j with field %s -> %s', async (row, field, expected) => {
     expect(await read({ Id: LEAD, ...row }, field)).toBe(expected);
   });
+  it('configured but absent from the row: unknown, never no', async () => {
+    expect(await read({ Id: LEAD }, 'AI_Call_Consent__c')).toBe('unknown');
+  });
+  it('a value that is neither a boolean nor null is unknown, never no', async () => {
+    expect(await read({ Id: LEAD, AI_Call_Consent__c: 'true' }, 'AI_Call_Consent__c')).toBe('unknown');
+  });
+
+  describe('a consent field behind a long field list', () => {
+    const many = Array.from({ length: 400 }, (_, i): [string] => [`A_Rather_Long_Custom_Field_Name_Number_${i}__c`]);
+    const wide = { ...describes, Lead: describeOf('Lead', [['Id', 'id'], ...many, ['AI_Call_Consent__c', 'boolean']]) };
+    const wideRead = async (value: unknown) => {
+      const sf = fakeSalesforce({ describes: wide, queries: [[/FROM Lead WHERE Id = /, [{ Id: LEAD, AI_Call_Consent__c: value }]]] });
+      const got = await readMainAndRelated(deps(sf), { sfObject: 'Lead', sfRecordId: LEAD, consentField: 'AI_Call_Consent__c' });
+      return { sf, got };
+    };
+    it('is always selected, right after Id, so yes stays yes', async () => {
+      const { sf, got } = await wideRead(true);
+      expect(sf.soql[0]).toMatch(/^SELECT Id, AI_Call_Consent__c, A_Rather_Long_Custom_Field_Name_Number_0__c, /);
+      expect(sf.soql[0]!.length).toBeLessThan(7_000);
+      expect(got?.consent).toBe('yes');
+    });
+    it('and an explicit no stays no', async () => {
+      expect((await wideRead(false)).got?.consent).toBe('no');
+    });
+    it('is matched case-insensitively against the describe and selected under its describe name', async () => {
+      const sf = fakeSalesforce({ describes: wide, queries: [[/FROM Lead WHERE Id = /, [{ Id: LEAD, AI_Call_Consent__c: true }]]] });
+      const got = await readMainAndRelated(deps(sf), { sfObject: 'Lead', sfRecordId: LEAD, consentField: 'ai_call_consent__c' });
+      expect(sf.soql[0]).toMatch(/^SELECT Id, AI_Call_Consent__c, /);
+      expect(got?.consent).toBe('yes');
+    });
+  });
+
   it('is field_missing when the describe lacks the field', async () => {
     const sf = fakeSalesforce({ describes: { ...describes, Lead: describeOf('Lead', [['Id', 'id'], ['Name']]) }, queries: [leadRoute({ Id: LEAD, Name: 'x' })] });
     expect((await readMainAndRelated(deps(sf), { sfObject: 'Lead', sfRecordId: LEAD, consentField: 'AI_Call_Consent__c' }))?.consent).toBe('field_missing');

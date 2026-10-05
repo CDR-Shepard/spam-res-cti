@@ -22,10 +22,13 @@ export interface MainAndRelated { main: RecordBlock; consent: AiConsentStatus; r
 type Row = Record<string, unknown>;
 const idOf = (v: unknown): string | null => (typeof v === 'string' && SF_ID.test(v) ? v : null);
 
-/** The SOQL travels in a GET URL, so the select list is cut (from the end) to stay far below the URI limit. */
-function withinSelectBudget<F extends { name: string }>(fields: F[]): F[] {
+/**
+ * The SOQL travels in a GET URL, so the select list is cut (from the end) to stay far below the URI limit.
+ * The first `keep` fields (Id and the consent field) are never cut.
+ */
+function withinSelectBudget<F extends { name: string }>(fields: F[], keep: number): F[] {
   let used = 0;
-  return fields.filter((f) => (used += f.name.length + 2) <= RESEARCH_LIMITS.selectChars);
+  return fields.filter((f, i) => (used += f.name.length + 2) <= RESEARCH_LIMITS.selectChars || i < keep);
 }
 
 export async function readRecordBlock(
@@ -35,9 +38,13 @@ export async function readRecordBlock(
   relation: RecordRelation,
   role: string | null,
   maxFields: number,
+  consentField: string | null = null,
 ): Promise<{ block: RecordBlock; row: Row; fieldNames: Set<string> } | null> {
   const d = await describeObject(deps.client, deps.describes, deps.orgId, sobject);
-  const fields = withinSelectBudget(readableFields(d, maxFields));
+  const all = readableFields(d, maxFields, consentField);
+  // Id, then the consent field when it is readable: both are always selected, whatever else is cut.
+  const consentKey = consentField === null ? null : (all.find((f) => f.name !== 'Id' && f.name.toLowerCase() === consentField.toLowerCase())?.name ?? null);
+  const fields = withinSelectBudget(all, consentKey === null ? 1 : 2);
   const [row] = await deps.client.query<Row>(`SELECT ${fields.map((f) => f.name).join(', ')} FROM ${sobject} WHERE Id = '${soqlEscape(id)}' LIMIT 1`);
   if (!row) return null;
   const values = fields.flatMap((f) => {
@@ -47,10 +54,17 @@ export async function readRecordBlock(
   return { block: { relation, sfObject: sobject, id, role, fields: values }, row, fieldNames: new Set(d.fields.map((f) => f.name.toLowerCase())) };
 }
 
+/**
+ * Fail-safe: only a boolean true is 'yes'. A configured field whose value did not come back
+ * (absent from the row, or not a boolean) is 'unknown', never 'no' and never 'yes'.
+ */
 function consentOf(row: Row, fieldNames: Set<string>, consentField: string | null): AiConsentStatus {
   if (!consentField || !fieldNames.has(consentField.toLowerCase())) return 'field_missing';
   const key = Object.keys(row).find((k) => k.toLowerCase() === consentField.toLowerCase());
-  return key !== undefined && row[key] === true ? 'yes' : 'no';
+  if (key === undefined) return 'unknown';
+  const value = row[key];
+  if (value === true) return 'yes';
+  return value === false || value === null ? 'no' : 'unknown';
 }
 
 interface RelatedTarget { sobject: string; id: string; relation: RecordRelation; role: string | null }
@@ -89,7 +103,7 @@ export async function readMainAndRelated(
   target: { sfObject: 'Lead' | 'Opportunity'; sfRecordId: string; consentField: string | null },
 ): Promise<MainAndRelated | null> {
   soqlIdList([target.sfRecordId]); // throws on a malformed id before any request
-  const main = await readRecordBlock(deps, target.sfObject, target.sfRecordId, 'self', null, RESEARCH_LIMITS.recordFields);
+  const main = await readRecordBlock(deps, target.sfObject, target.sfRecordId, 'self', null, RESEARCH_LIMITS.recordFields, target.consentField);
   if (!main) return null;
   const blocks: RecordBlock[] = [];
   let summaryStatus: 'ok' | 'missing' | 'denied' | 'error' = 'ok';
