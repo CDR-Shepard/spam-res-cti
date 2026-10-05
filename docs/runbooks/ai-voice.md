@@ -3,6 +3,8 @@
 **First call checklist** (the minimum to hear the AI on your own phone):
 
 1. On Railway service `@cti/api`, set `OPENAI_API_KEY` and `AI_VOICE_TEST_NUMBERS=<your mobile, E.164>` (§3).
+
+   1b. On both `@cti/api` and `outreach-api`, set `OUTREACH_INTERNAL_SECRET` to the same 32+ character random value, and on `outreach-api` set `CTI_INTERNAL_URL` (§3).
 2. Push the branch to `main` (the default branch `@cti/api` deploys from).
 3. Wait for the `@cti/api` deploy to show **Success** (dashboard → `@cti/api` → Deployments). It also serves the softphone.
 4. Confirm the migration applied. `$PUB` is a live credential: never print or share it:
@@ -20,23 +22,30 @@
    1. Twilio Console → **Phone Numbers → Buy a number**. Set its **Friendly Name** to contain `(ai_pool)`, for example `AI calls (ai_pool)`. Point its Voice webhook ("A call comes in", HTTP POST) at the same URL as the other CTI numbers, `<API_PUBLIC_URL>/telephony/twilio/inbound`, and its Messaging webhook at `<API_PUBLIC_URL>/telephony/twilio/sms` (open any existing CTI number in the Twilio Console to copy them; step 2 also sets both). Done on 2026-10-05: `+16197244374`, Friendly Name `AI calls (ai_pool)`, webhooks set.
    2. **Only once steps 3 and 4 show the deploy and migration live:** softphone as an **admin** → bottom bar **More** → **Numbers** → **Import from Twilio**. The number appears under **AI calls** because of its Twilio name.
    3. Run the pre-flight query in §5 and expect one `ai_pool` row.
-6. Open the softphone as an **admin** → **AI calls** on the bottom bar → **Test AI call** box → pick your number → **Start test call**.
-7. Answer. The first sentence must say it is an AI assistant on a recorded line. No Salesforce step is needed for a test call.
+6. Open **outreach-web** (the outreach-api URL) as an **admin** → **Settings → Connections** → **Test call to my phone** → pick your number → **Test call to my phone**.
+7. Answer. The first sentence must say it is an AI assistant on a recorded line. No Salesforce record or consent tick is needed for a test call.
 
 Everything here is a human step. The design is `docs/superpowers/plans/2026-10-05-ai-voice-calls.md`; the code is `services/cti-api/src/ai-voice/`.
 
 ## 1. What it does
 
-An admin presses **AI call** on a Lead or Opportunity in the softphone (or starts a test call to their own phone). The code also accepts Contacts, but the consent field is deployed only on Lead and Opportunity, so a Contact is refused with `consent_field_missing`. An AI voice agent phones the person over Twilio, talks to them through OpenAI's Realtime API, and:
+AI calls start only from **outreach-web**:
+
+- an admin builds an **AI call campaign** from a Salesforce query or list view and ticks the leads;
+- the AI researches each lead's whole record, related records, activity and Chatter, and drafts a call plan;
+- the record owner or an admin approves each plan;
+- an admin presses **Call all approved**.
+
+outreach-api then asks `@cti/api` (this service) to place each call, paced and with every safety gate below applied at the moment of the call. The CTI softphone no longer has an AI call button or an AI calls tab. Test calls are in outreach-web (Settings → Connections → **Test call to my phone**). The code accepts Contacts, but the consent field is deployed only on Lead and Opportunity, so a Contact is refused with `consent_field_missing`. An AI voice agent phones the person over Twilio, talks to them through OpenAI's Realtime API, and:
 
 - **Opens by saying it is an AI assistant** calling for the company, on a recorded line (the text transcript is kept). If anyone asks, it says it is an AI. It never claims to be human.
 - **Qualifies** the seller: motivation, timeline, condition, price expectations, decision makers, occupancy. It **never makes an offer or names a price.**
-- **Transfers to a person** if the seller wants one or is qualified: the call rings the record owner's softphone (or the rep who started the call if the owner is not mapped).
+- **Transfers to a person** if the seller wants one or is qualified: the call rings the record owner's softphone (or the person who approved the plan if the owner is not mapped).
 - **Honours "stop calling me"** immediately: it writes the number to the shared opt-out list, says goodbye, and hangs up. The CTI dialer respects the same list.
 - **Leaves a voicemail** if a machine answers, and promises a callback if no person picks up the transfer within 25 seconds.
 - Stores the text transcript, a summary, the qualification answers and the outcome. **No call audio is stored.**
 
-**v1: AI calls are admin-initiated.** A rep's click-to-dial places the human call as soon as the firewall check clears, so the rep never gets the screen the **AI call** button sits on. Admins get that screen (and the **Test AI call** box). Reps see an **AI calls** tab with their own AI calls while AI calling is on.
+**Who can do what.** Admins create campaigns, press **Call all approved** and run test calls. The record owner or an admin approves a plan. Reps do not start AI calls; they receive the transfers.
 
 **Hard rules the code enforces on every call:**
 
@@ -56,7 +65,7 @@ An admin presses **AI call** on a Lead or Opportunity in the softphone (or start
 
 ## 3. Railway variables
 
-Set on service `@cti/api` (never on outreach-api). Link the CLI first if you have not:
+Set on service `@cti/api`, except `OUTREACH_INTERNAL_SECRET`, which `outreach-api` also holds (below), and the outreach-api variables in `outreach-sf-campaigns.md`. Link the CLI first if you have not:
 
 ```bash
 railway link
@@ -68,7 +77,7 @@ Pick project `endearing-comfort`. Setting a variable on a linked service redeplo
 |---|---|---|
 | `OPENAI_API_KEY` | the key from §2.1 (secret) | **AI voice is switched off** (`available: false`, no AI call is placed or answered) |
 | `AI_VOICE` | `on` or `off` | `on`. `off` is the kill switch (§9). Only `on` / `off` are accepted; `true`, `1`, `false` stop the service booting |
-| `AI_VOICE_TEST_NUMBERS` | your mobile(s), E.164, comma-separated: `+15125550100,+15125550101` | no test numbers; "Test AI call" cannot be used |
+| `AI_VOICE_TEST_NUMBERS` | your mobile(s), E.164, comma-separated: `+15125550100,+15125550101` | no test numbers; the **Test call to my phone** card in outreach-web says "No test numbers are set" |
 | `AI_VOICE_VOICE` | `marin` | `marin` |
 | `AI_VOICE_MODEL` | `gpt-realtime-2.1` | `gpt-realtime-2.1` |
 | `AI_VOICE_REASONING` | `minimal`, `low`, `medium` or `high` | `low`. Only sent for `gpt-realtime-2*` models |
@@ -78,8 +87,11 @@ Pick project `endearing-comfort`. Setting a variable on a linked service redeplo
 | `ANTHROPIC_API_KEY` | optional key from §2.2 (secret) | summaries use the plain fallback |
 | `AI_SUMMARY_MODEL` | model for summaries | `claude-haiku-4-5-20251001` |
 | `OUTREACH_KILL_SWITCH` | leave unset (or `off`) | `off`. `on` stops all outreach including AI calls |
+| `OUTREACH_INTERNAL_SECRET` | the same 32+ character secret as on outreach-api (secret) | the internal AI call routes do not exist as far as outreach-api can tell (404 in production, 503 `internal_disabled` elsewhere) and no campaign call or test call can be placed |
 
-Set the required two now (replace the placeholders; do not echo the real key anywhere):
+`@cti/api` now listens on `::` (IPv4 and IPv6) so outreach-api reaches it over Railway private networking at `http://ctiapi.railway.internal:<API_PORT>` (`http://ctiapi.railway.internal:4000` here). Set that URL as `CTI_INTERNAL_URL` on outreach-api; it must be an origin only (no path).
+
+Set the required two now (replace the placeholders; do not echo the real key anywhere), then the shared secret below:
 
 ```bash
 railway variables --set "OPENAI_API_KEY=sk-..." --service @cti/api
@@ -89,13 +101,23 @@ railway variables --set "OPENAI_API_KEY=sk-..." --service @cti/api
 railway variables --set "AI_VOICE_TEST_NUMBERS=+15125550100" --service @cti/api
 ```
 
+Generate the shared secret once and set it on both services without printing it (`railway variables --set` redeploys each service):
+
+```bash
+SECRET=$(openssl rand -hex 32)
+railway variables --set "OUTREACH_INTERNAL_SECRET=$SECRET" --service @cti/api
+railway variables --set "OUTREACH_INTERNAL_SECRET=$SECRET" --service outreach-api
+railway variables --set "CTI_INTERNAL_URL=http://ctiapi.railway.internal:4000" --service outreach-api
+unset SECRET
+```
+
 Confirm the names landed (this prints names and values, so do not share the output):
 
 ```bash
 railway variables --service @cti/api --kv | grep -E '^(AI_VOICE|OPENAI_API_KEY)' | cut -d= -f1
 ```
 
-Expected: `OPENAI_API_KEY`, `AI_VOICE_TEST_NUMBERS` (plus any other `AI_VOICE*` you set).
+Expected: `OPENAI_API_KEY`, `AI_VOICE_TEST_NUMBERS` (plus any other `AI_VOICE*` you set). `OUTREACH_INTERNAL_SECRET` is not matched by that pattern; check it with `grep -E '^OUTREACH_INTERNAL_SECRET' | cut -d= -f1` on each service.
 
 Then confirm the deploy is healthy: Railway dashboard → `@cti/api` → **Deployments** → the latest deployment shows **Success**. Open its **Deploy Logs** and search for `Invalid environment configuration`.
 
@@ -119,7 +141,7 @@ The org is alias `_t2` (`gghsd.my.salesforce.com`). **It is PRODUCTION.** Read `
    cd salesforce && sf project deploy start -o _t2 --source-dir force-app/main/default/objects/Lead/fields/AI_Call_Consent__c.field-meta.xml --source-dir force-app/main/default/objects/Lead/fields/AI_Call_Consent_Date__c.field-meta.xml --source-dir force-app/main/default/objects/Lead/fields/AI_Call_Consent_Source__c.field-meta.xml --source-dir force-app/main/default/objects/Opportunity/fields/AI_Call_Consent__c.field-meta.xml --source-dir force-app/main/default/objects/Opportunity/fields/AI_Call_Consent_Date__c.field-meta.xml --source-dir force-app/main/default/objects/Opportunity/fields/AI_Call_Consent_Source__c.field-meta.xml --source-dir force-app/main/default/permissionsets/AI_Call_Consent_Access.permissionset-meta.xml
    ```
 
-3. **Assign `AI_Call_Consent_Access` to every rep** (every person who will press AI call — in v1 the admins, including you). The AI call reads `AI_Call_Consent__c` with the **rep's own** Salesforce login, so a rep without this permission set cannot start a consented AI call (they see "consent field missing"). One command per rep; replace the placeholder with the rep's Salesforce username:
+3. **Assign `AI_Call_Consent_Access` to reps who need to see or tick the consent box.** Campaign calls read `AI_Call_Consent__c` with the tenant's **Integration user** (the `AI_Outreach` permission set, `outreach-sf-campaigns.md` §0), not with a rep's login, so this set is no longer needed to start a call. One command per rep; replace the placeholder with the rep's Salesforce username:
 
    ```bash
    sf org assign permset -n AI_Call_Consent_Access -o _t2 -b rep@example.com
@@ -135,7 +157,7 @@ The consent source picklist (`Text Reply`, `Email Reply`, `Web Form`, `Inbound C
 
 ## 5. Morning smoke test (about 15 minutes)
 
-Do this on your own mobile before any real prospect. A test call needs no Salesforce record and no consent tick. Only an admin can place one, and only to a number in `AI_VOICE_TEST_NUMBERS`.
+Do this on your own mobile before any real prospect. A test call needs no Salesforce record and no consent tick. Only an admin can place one, from outreach-web, and only to a number in `AI_VOICE_TEST_NUMBERS`.
 
 **Test calls count like real dials.** A placed test call counts toward the per-customer ceiling (when the number belongs to a campaign) and, for a Florida, Oklahoma, Washington or Maryland area code, the 3-calls-per-24-hours state cap. Repeating the smoke test to one number on the same day can therefore be refused with `customer_ceiling` or `daily_cap`. Use a second test number (add it to `AI_VOICE_TEST_NUMBERS`) or wait a day.
 
@@ -172,17 +194,17 @@ Do this on your own mobile before any real prospect. A test call needs no Salesf
 
 If an AI number had been assigned to a rep before you moved it, that rep's click-to-dial stops using it at once (reps never dial from `ai_pool`).
 
-1. Confirm §3 is done and the deploy is healthy. `AI_VOICE_TEST_NUMBERS` must contain your mobile.
-2. Open the CTI softphone and sign in as an **admin**. Keep it open and allow the microphone; the transfer test rings it.
-3. Tap **AI calls** on the bottom bar (sparkle icon, after Recent). The top box, **Test AI call**, has one quick button per number in `AI_VOICE_TEST_NUMBERS` (shown like `+1 (512) 555-0100`), a number field prefilled with the first one, and a **Start test call** button.
-   - No **AI calls** tab at all: the running `@cti/api` deploy does not have the AI routes yet. Check that the deploy finished.
-   - A red line "AI calling is turned off — new AI calls will be refused.": recheck `OPENAI_API_KEY`, `AI_VOICE=on` and that `OUTREACH_KILL_SWITCH` is not `on`.
-   - "No test numbers are set (AI_VOICE_TEST_NUMBERS), so a test call will be refused.": set `AI_VOICE_TEST_NUMBERS` (§3).
-4. Tap your number's quick button (or type it), then **Start test call**. Expect the green line "Calling +1 (512) 555-0100 — answer your phone." A new row appears at the top with the chip **Calling…**, then **In progress** once you answer. Your phone should ring within a few seconds; the caller ID is the AI's own number (an **AI calls** number, for example `+1 (619) 724-4374`), never a rep's. A refusal shows the reason in red, in plain words.
+1. Confirm §3 is done and the deploy is healthy. `AI_VOICE_TEST_NUMBERS` must contain your mobile, and `OUTREACH_INTERNAL_SECRET` and `CTI_INTERNAL_URL` must be set on outreach-api.
+2. Open the CTI softphone and sign in as the **same user** as outreach-web (both sign in with Salesforce). Keep it open and allow the microphone: the transfer rings the person who started the test call, which is you.
+3. Open outreach-web as an **admin** → **Settings → Connections**. The **Test call to my phone** card has a **Test number** list (one entry per number in `AI_VOICE_TEST_NUMBERS`, shown as E.164, for example `+15125550100`) and a **Test call to my phone** button.
+   - No card at all: you are not an admin, or AI calling is off (recheck `OPENAI_API_KEY`, `AI_VOICE=on` and that `OUTREACH_KILL_SWITCH` is not `on`), or outreach-api has no `CTI_INTERNAL_URL` / `OUTREACH_INTERNAL_SECRET`. The card also stays hidden while it loads.
+   - A red line "The AI calling service did not answer. Try again in a minute.": outreach-api cannot reach `@cti/api` (§11).
+   - "No test numbers are set. Add yours to AI_VOICE_TEST_NUMBERS on the CTI API service.": set `AI_VOICE_TEST_NUMBERS` (§3).
+4. Pick your number and press **Test call to my phone**. Expect the line "Calling now. Pick up to hear the agent." No row appears anywhere in outreach-web (a test call has no campaign); read it in SQL in step 10. Your phone should ring within a few seconds; the caller ID is the AI's own number (an **AI calls** number, for example `+1 (619) 724-4374`), never a rep's. A refusal shows "Not called: " and the reason in plain words, for example "Not called: they opted out of calls".
 5. **Answer and listen.** The first thing the agent says must be that it is an AI assistant calling for the company, on a recorded line. Fail the test if it does not say so.
 6. **Talk to it** for a minute as a seller. Say you might sell, the house needs work, and you want about a certain amount. It should ask follow-up questions and must not name a price or make an offer.
-7. **Test the transfer:** say "Can I talk to a real person?" Your phone should go quiet and the softphone you have open should ring as an incoming call; under the name and number the ring screen shows **"AI transfer — asked for a person"**. Answer it in the softphone and confirm audio both ways, then hang up. The row goes **Transferring**, then **Transferred**. (The call goes to the person who started it, because a test call has no record owner.)
-8. **Test the opt-out:** start a second test call, answer, and say "Stop calling me." The agent should say a short goodbye and hang up within a few seconds. In the AI calls tab the row's outcome should read **Do not call**. Start a **third** test call: it must be refused with "This number asked not to be called (it is on the opt-out list)." That proves the opt-out is live.
+7. **Test the transfer:** say "Can I talk to a real person?" Your phone should go quiet and the softphone you have open should ring as an incoming call; under the name and number the ring screen shows **"AI transfer — asked for a person"**. Answer it in the softphone and confirm audio both ways, then hang up. (The call goes to the person who started it, because a test call has no record owner.)
+8. **Test the opt-out:** start a second test call, answer, and say "Stop calling me." The agent should say a short goodbye and hang up within a few seconds. Start a **third** test call from the card: it must be refused with "Not called: they opted out of calls". That proves the opt-out is live.
 9. **Delete the test opt-out row** so your own number can be called again. Get the public database URL first. `$PUB` is a live credential: never print or share it:
 
    ```bash
@@ -203,43 +225,45 @@ If an AI number had been assigned to a rep before you moved it, that rep's click
 
    Expected: exactly one row returned. Zero rows means either the opt-out was not written (the AI "stop calling me" path is broken: stop and investigate), or your number already had an opt-out from another source, which the AI call does not overwrite. Never run the delete without the `org_id` and `source = 'ai_call'` guards, or you could remove a real opt-out.
 
-10. Tap the first call's row in the AI calls tab to expand its transcript, and read its summary (§8). Smoke test passes when: disclosure heard, no price named, transfer rang the softphone, opt-out written and honoured, and the row was deleted.
+10. Read the three calls in SQL (`$PUB` as above), because test calls have no campaign row in outreach-web:
 
-## 6. A real, consent-gated call
+    ```bash
+    echo "SELECT status, outcome, summary FROM ai_calls WHERE is_test ORDER BY created_at DESC LIMIT 3;" | psql "$PUB"
+    ```
 
-Admins only in v1 (§1).
+    Newest first: the third call is `blocked` and the second is `do_not_call`. Smoke test passes when: disclosure heard, no price named, transfer rang the softphone, opt-out written and honoured, and the row was deleted.
+
+## 6. A real, consent-gated call (from a campaign)
 
 1. In Salesforce, open a **Lead you own** whose phone number is one you are happy to call (a colleague or your own second number is best the first time). An Opportunity works the same way.
 2. Tick **AI Call Consent** on it. Set **AI Call Consent Source** to `Rep`. Save.
-3. Click the phone number on that Lead (click-to-dial). While AI calling is on, the dial screen shows a box under the verdict panel's Cancel / **Call now** row: "Let the AI assistant call" plus the record's name, with an **AI call** button. It is disabled while the firewall check or a human call is in flight. Do not press Call now.
-4. Press **AI call**. On success the dial screen clears, the softphone switches to the **AI calls** tab with a green "AI call started — follow it here.", and the row appears at the top. If it is refused, the reason shows in red under the button, in plain words:
+3. Create an AI call campaign in outreach-web (runbook `outreach-sf-campaigns.md` §AI call campaigns), with a list view or query that includes that lead.
+4. Tick that one lead.
+5. Press **Start dry run**. A draft campaign is not refreshed, so nothing is researched until then. The lead is enrolled at the next refresh (every 5 minutes) and its plan is drafted within about a minute after that.
+6. Approve the plan (the record owner or an admin).
+7. **Activate** the campaign (the **Go live** button, then confirm).
+8. Press **Call all approved**.
 
-   | Reason code | What it means and what to do |
-   |---|---|
-   | `no_consent` | **AI Call Consent** is unticked on that record. Tick it only if the person really agreed |
-   | `consent_field_missing` | You do not have the consent fields: assign `AI_Call_Consent_Access` (§4 step 3), or the fields are not deployed |
-   | `ai_voice_unavailable` | Kill switch is on or `OPENAI_API_KEY` is unset (§3, §9) |
-   | `no_phone` / `invalid_number` | The record has no usable phone number |
-   | `opted_out` / `blocked` / `dnc` | The number is on the opt-out, blocked, or federal do-not-call list. Do not override |
-   | `daily_cap` / `customer_ceiling` | A daily state cap or the per-customer call limit is reached. Test calls count too (§5) |
-   | `calling_hours` | Outside 08:00 to 21:00 in the person's local time |
-   | `no_caller_id` | No AI number (`ai_pool`, the **AI calls** group on Numbers) is active, healthy and under today's limit. Add one or check it (§5 pre-flight). There is no fallback number |
-   | `not_admin_for_test` | Only admins can place test calls |
-   | `call_in_progress` | That number is already on a live AI call |
+If a call is refused, the reason shows on the campaign's results table as "Not called: …", in plain words. Some refusals are retried automatically (`calling_hours`, `daily_cap`, `customer_ceiling`, `no_caller_id`, `ai_voice_unavailable`, `call_in_progress`); the rest are final for that lead (`outreach-sf-campaigns.md` §AI call campaigns). The reason codes:
 
-   Other errors:
+| Reason code | What it means and what to do |
+|---|---|
+| `no_consent` | **AI Call Consent** is unticked on that record. Tick it only if the person really agreed |
+| `consent_field_missing` | The consent fields are not deployed in Salesforce, or the Integration user cannot read them: deploy them (§4) and assign `AI_Outreach` to the Integration user (`outreach-sf-campaigns.md` §0) |
+| `ai_voice_unavailable` | Kill switch is on or `OPENAI_API_KEY` is unset (§3, §9) |
+| `no_phone` / `invalid_number` | The record has no usable phone number |
+| `opted_out` / `blocked` / `dnc` | The number is on the opt-out, blocked, or federal do-not-call list. Do not override |
+| `daily_cap` / `customer_ceiling` | A daily state cap or the per-customer call limit is reached. Test calls count too (§5) |
+| `calling_hours` | Outside 08:00 to 21:00 in the person's local time |
+| `no_caller_id` | No AI number (`ai_pool`, the **AI calls** group on Numbers) is active, healthy and under today's limit. Add one or check it (§5 pre-flight). There is no fallback number |
+| `not_admin_for_test` | Only admins can place test calls |
+| `call_in_progress` | That number is already on a live AI call |
 
-   | HTTP | Code | Meaning |
-   |---|---|---|
-   | 400 | `invalid_body` | The request was malformed (not a Lead / Opportunity / Contact id, or a bad test number) |
-   | 404 | `record_not_found` | Salesforce could not find the record, or you cannot see it |
-   | 429 | (rate limited) | More than 10 AI call starts in one minute by the same person. Wait a minute |
-   | 502 | `salesforce_error` | Your Salesforce login could not read the record |
-   | 502 | `twilio_error` | Twilio refused to place the call (the row is marked failed) |
-   | 503 | `gate_error` | A safety check failed to run, so the call was refused |
+Errors between outreach-api and cti-api (signature, private network, secret unset) appear in outreach-api's logs as `ai_call.place` transport errors and the call is retried; see §11.
 
 ## 7. Where callers end up
 
+- **Approver:** for a campaign call, the person who "started" the call is the user who **approved the plan**.
 - **Transfer:** the call rings the **Salesforce record owner's** softphone if that owner has connected Salesforce in the CTI (so is mapped to a CTI user). Otherwise it rings the person who started the AI call. It rings through the normal incoming path: the caller ID is the prospect's number, the record screen-pops on Answer, and the ring screen shows **"AI transfer — "** followed by the reason, one of: interested, wants an offer, asked for a person, legal or complex question, has a question.
 - **If nobody answers the transfer within 25 seconds,** the caller hears "Sorry, our specialist just stepped away — they'll call you right back. Thanks!" and the call ends. The outcome reads **Transfer missed — callback promised**, and the summary carries the line "Transfer to a specialist did not connect — call them back."
 - **Callback Task (Salesforce):** a promised call back — a missed transfer, or a callback the person asked for (**Callback requested**) — gets an **Open** Task on the record for the hand-off person (the record owner), created with their own Salesforce login. If their Salesforce connection is gone, the starter creates it and assigns it to them (`OwnerId`); if neither works, it is the starter's own Task. Subject `AI call: callback requested` (missed transfer: dated today, and the description adds "The caller was promised a call back.") or `AI call: callback <when>` (asked-for callback: `<when>` is what the person said, or "Wed, Oct 7, 5:00 PM" in their time zone for an exact time; dated that day). If the org refuses the Open status, the Task is made Completed instead. Not for test calls, and only on records the Task's author may write to (§8).
@@ -248,13 +272,13 @@ Admins only in v1 (§1).
 
 ## 8. Reading the results
 
-- **AI calls panel (softphone → AI calls):** the 20 most recent calls (admins see everyone's, reps see their own). Each row: status chip, the number, a grey **Test** chip for test calls, the start time, and the duration once ended; below it the outcome in words (for a blocked row, the block reason), and the summary. Tap a row to expand its **transcript**. **Refresh** is top right. It refreshes every 4 s while a call is live (or ended less than 20 s ago), otherwise every 30 s, and not while the page is hidden.
-- **Transcript:** **AI:** and **Caller:** lines. Anything the agent was cut off from saying (for example by voicemail or a transfer) is shown in grey as `[not played] …`.
+- **outreach-web → the campaign → AI call results:** one row per call, with status, outcome, summary and qualification, and **Transcript** for the record owner or an admin. (The card is titled **AI calls** and sits under the call plans.) It refreshes every 15 seconds while a call is waiting, being placed or live.
+- **Transcript:** **AI:** and **Caller:** lines in the database (outreach-web labels them **AI** and **Them**). Anything the agent was cut off from saying (for example by voicemail or a transfer) is shown in grey as `[not played] …`.
 - **Status chips:** **Calling…**, **In progress**, **Transferring** are live; **Transferred**, **Completed**, **Failed**, **Blocked** are final. A finished call can still move from Completed to Transferred once, a few seconds later, when the transfer result arrives.
 - **Outcome words:** Transferred to rep, Callback requested, Not interested, Do not call, Left voicemail, No answer, Busy, Failed, Wrong number, Hung up, Transfer missed — callback promised, Blocked, Other.
 - **Summary:** a few seconds after the call ends, the agent's notes are replaced by 2–4 sentences (Claude when `ANTHROPIC_API_KEY` is set and the caller spoke), then any "Callback requested: …" / "Transfer to a specialist did not connect …" lines, a blank line, a **Qualification:** block (`- Motivation: …`, only what was captured), `Outcome: <words>` and `AI call id: <id>`.
-- **Salesforce call Task:** after a real (non-test) call that was placed, ONE completed Call Task on the record, created as the person who started the call. Only when they have connected Salesforce in the CTI and may write on the record (the power dialer's rule: they own it, are the Opportunity's lead manager, or it is queue-owned). Subject `AI call: <outcome words>` (for example `AI call: Callback requested`), Call Result the matching disposition (Connected, Left voicemail, No answer, Busy, Wrong number, Do not call, Failed), description = the summary plus `Transcript in CTI: AI call <id>`. No call duration: AI talk time is not rep talk time. Test calls log no Task. A promised call back also gets the callback Task (§7).
-- **Call history:** placed AI calls also appear in the starter's own call history with the disposition already filled in (no wrap-up prompt) and 0 talk seconds. They count toward the daily state cap and the per-customer ceiling like any dial.
+- **Salesforce call Task:** after a real (non-test) call that was placed, ONE completed Call Task on the record, created as the plan's approver (with their CTI Salesforce connection; no connection = no call Task). Only when they may write on the record (the power dialer's rule: they own it, are the Opportunity's lead manager, or it is queue-owned). Subject `AI call: <outcome words>` (for example `AI call: Callback requested`), Call Result the matching disposition (Connected, Left voicemail, No answer, Busy, Wrong number, Do not call, Failed), description = the summary plus `Transcript in CTI: AI call <id>`. No call duration: AI talk time is not rep talk time. Test calls log no Task. A promised call back also gets the callback Task (§7).
+- **Call history:** placed AI calls also appear in the starter's (for a campaign call, the approver's) own call history with the disposition already filled in (no wrap-up prompt) and 0 talk seconds. They count toward the daily state cap and the per-customer ceiling like any dial.
 - **Qualification answers** are on the call row and in the summary: motivation, timeline, condition, occupancy, price expectation, decision makers, mortgage, other.
 
 ## 9. Kill switch
@@ -277,7 +301,7 @@ railway variables --set "AI_VOICE=on" --service @cti/api
 
 Set any of these with `railway variables --set "NAME=value" --service @cti/api`. Each change redeploys and applies to **new calls**.
 
-- **Voice, `AI_VOICE_VOICE`:** `marin` (default) or `cedar` are OpenAI's highest-quality voices. Other OpenAI realtime voices (for example `alloy`, `ash`, `coral`, `sage`, `verse`) also work. Try two on your own phone with Test AI call and pick one.
+- **Voice, `AI_VOICE_VOICE`:** `marin` (default) or `cedar` are OpenAI's highest-quality voices. Other OpenAI realtime voices (for example `alloy`, `ash`, `coral`, `sage`, `verse`) also work. Try two on your own phone with **Test call to my phone** and pick one.
 - **Model, `AI_VOICE_MODEL`:** default `gpt-realtime-2.1`. A cheaper "mini" realtime model costs roughly a third as much with some loss in quality. If the model name is wrong, calls fail on connect and show `failed`.
 - **Reasoning, `AI_VOICE_REASONING`:** `low` default. `minimal` answers fastest; `medium` / `high` think longer and add delay. Only applies to `gpt-realtime-2*` models.
 - **Interruptions, `AI_VOICE_VAD_EAGERNESS`:** how quickly the agent decides you have finished talking. `low` waits longer (use if it cuts people off), `high` replies sooner (use if it feels slow), `auto` default.
@@ -293,6 +317,24 @@ Set any of these with `railway variables --set "NAME=value" --service @cti/api`.
 - `API_PUBLIC_URL` on `@cti/api` is the public `https://` URL (not `http://`, not an internal Railway hostname).
 - `OPENAI_API_KEY` is set (§3 name check). Without it AI voice is off and the call is refused rather than placed, so this is the first thing to recheck if anything changed.
 
+**Campaign and test calls are not placed.** outreach-api's logs (`railway logs --service outreach-api`) show `ai_call.place: trigger answered` with `result: retry:transport` (the call is retried; the results table says "last try: the AI calling service did not answer", and the test call card says "The AI calling service did not answer. Try again in a minute."). The log does not carry the HTTP status, so probe the link by hand from outreach-api's shell (`railway ssh --service outreach-api`):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}' "$CTI_INTERNAL_URL/internal/ai-calls/availability"
+```
+
+| Answer | What it means and what to do |
+|---|---|
+| `401` | The link works (reachable, unsigned). If real calls still fail, the signed requests are refused: the two `OUTREACH_INTERNAL_SECRET` values differ, or the clocks are more than 5 minutes apart. `@cti/api`'s logs say `ai-voice internal: signature refused` with the reason. |
+| `404` | Either `CTI_INTERNAL_URL` is a public URL (it must be the `.railway.internal` host) or `OUTREACH_INTERNAL_SECRET` is unset on `@cti/api` (production hides the routes behind the same 404). Check both. |
+| `503` | `internal_disabled`: `OUTREACH_INTERNAL_SECRET` is unset on `@cti/api` (outside production only). |
+| connection error or timeout | Private networking: check that both services are in the same project and environment, and that `@cti/api` listens on `::`. |
+
+Two more cases:
+
+- `result: retry:salesforce_error` repeatedly: the integration connection's token expired and outreach-api could not refresh it. Reconnect Salesforce in outreach-web Settings → Connections.
+- Results show "could not check Salesforce for new activity": the integration user cannot read Task or Event (see `outreach-sf-campaigns.md` §AI call campaigns). Nobody is called until it can.
+
 **The AI says nothing (or gibberish), then hangs up.** OpenAI never confirmed the voice session, so the call ends within about 5 seconds of connecting. Deploy logs show `ai-voice bridge: session not configured, ending the call` (field `why`: OpenAI's error message, or `timeout`), then `ai-voice: conversation ended` with reason `error` and detail `session not configured: …`. Usually a bad model or reasoning setting:
 
 - Check `AI_VOICE_MODEL` and `AI_VOICE_REASONING`. Try `AI_VOICE_MODEL=gpt-realtime` with `AI_VOICE_REASONING` unset, then place a test call. Reasoning is only sent for `gpt-realtime-2*` models, so it cannot break `gpt-realtime`.
@@ -305,7 +347,8 @@ Set any of these with `railway variables --set "NAME=value" --service @cti/api`.
 - **Transfers ring the record owner if mapped, else the rep who started the call.** If that person's softphone is not open and registered, nobody answers and the 25-second callback path runs.
 - **AI numbers are separate from reps' numbers.** The AI dials only from `ai_pool` numbers, with the dialer's safety rules: the same number to the same person when it can (the number its last AI call to them came from), each number's warmup daily limit and the 10-per-minute limit, and health (a `degraded` / `spam_likely` number is skipped). Reps' click-to-dial, the firewall check and the power dialer never pick an `ai_pool` number. One new AI number carries only its warmup limit per day, so add more AI numbers before calling at volume.
 - **No call audio is stored,** only text transcripts and summaries. If you need recordings for compliance, that is a separate build.
-- **Same-number duplicate check is not atomic.** Two simultaneous starts to one number could both go through. The UI and the rate limit (10 AI call starts per minute per person) make this very unlikely.
+- **Same-number duplicate check is not atomic.** Two simultaneous starts to one number could both go through. The pacer runs at most `aiCallConcurrency` calls per tenant and the idempotency key stops a retried trigger from dialing twice.
+- **Campaign calls read the record with the tenant's integration connection,** so the AI sees what the integration user sees, not what the approver sees.
 - **Transfer time limit.** On transfer the call's time limit is lifted to 4 hours. If Twilio refuses that, the rep's conversation is cut at `AI_VOICE_MAX_CALL_SECONDS` + 60 seconds from the start of the call (11 minutes by default).
 - **Transfer caller ID.** The rep's softphone should show the prospect's number as the caller. Verify this in the smoke test (§5 step 7).
 - **Untested against a live carrier until your smoke test:** the transfer caller ID, call time limit extension, and the voicemail voice are only exercised for real in §5. Run the smoke test after every deploy that touches `services/cti-api/src/ai-voice/`.

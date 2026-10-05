@@ -42,6 +42,17 @@ There is no client secret: the app requires PKCE. Redeploy outreach-api after ch
 
 **The integration connection is separate.** Settings → Connections (§0.5 below, `SALESFORCE_REDIRECT_URI`) signs in the Integration user through a different callback on the same app. Confirm `/api/connections/salesforce/callback` is on the app's callback list as well as `/api/auth/salesforce/callback`.
 
+## How outreach-api is deployed
+
+outreach-api is the Railway service `outreach-api` in project `endearing-comfort` (production), at `https://outreach-api-production-a07b.up.railway.app`. It also serves the built outreach-web bundle from the same origin, so there is no separate web service.
+
+- **It was created with the Railway CLI, not with `railway config apply`. Never run `railway config apply`.** The `outreachApi` block in `.railway/railway.ts` is a record of the service (so a future apply does not blank its variables), not a way to create it.
+- **One image for every service built from this repo.** Railway applies the repo's root `railway.json` (and so the root `Dockerfile`) to every service built from the repo and refuses per-service config files. The root `Dockerfile` therefore also builds `apps/outreach-web` and `services/outreach-api`. outreach-api runs that same image, with its **start command overridden in the dashboard** to `node services/outreach-api/dist/server.js` and `PORT` = `4100`. There is no `services/outreach-api/railway.json`.
+- **Pre-deploy migrations.** The root `railway.json`'s pre-deploy step (`npm --workspace packages/db run migrate`) runs for outreach-api too, and needs `DATABASE_URL` (set). Migrations `0052_ai_call_campaigns.sql` and `0053_ai_call_requests.sql` run in whichever service deploys first.
+- **Variables** are set in the dashboard (or with `railway variables --set ... --service outreach-api`). The names are listed in `.railway/railway.ts` and `services/outreach-api/.env.example`. The ones for AI call campaigns are in the next section.
+
+**Known issue.** `@cti/web` has failed every deploy since 2026-09-28: the root `railway.json`'s pre-deploy migrate runs there too, and that service has no `DATABASE_URL`. It does not affect `@cti/api` or outreach-api.
+
 ## 0. Salesforce setup (one time, ~30 minutes)
 
 outreach-api connects to Salesforce as one company-wide **Integration user**, never as a rep. That user gets exactly the access in the `AI_Outreach` permission set, plus an in-org permission set for the tenant's own custom fields.
@@ -100,9 +111,125 @@ outreach-api connects to Salesforce as one company-wide **Integration user**, ne
    - Callback URL: `${API_PUBLIC_URL}/api/connections/salesforce/callback`, using outreach-api's public URL from `outreach-api-deploy.md` §2.
    - OAuth scopes: `Manage user data via APIs (api)` and `Perform requests at any time (refresh_token, offline_access)`.
    - Require **PKCE**. Refresh token policy: **valid until revoked**. Under **Manage → Edit Policies**, set Permitted Users to "Admin approved users are pre-authorized" and add the `AI Outreach` permission set, so only the Integration user can use the app.
-   - Set the outreach-api Railway variables `SALESFORCE_CLIENT_ID` (consumer key), `SALESFORCE_CLIENT_SECRET` (consumer secret; outreach-api sends it when it is set), and `SALESFORCE_REDIRECT_URI` (the callback URL above). Then redeploy outreach-api.
+   - Set the outreach-api Railway variables `SALESFORCE_CLIENT_ID` (consumer key) and `SALESFORCE_REDIRECT_URI` (the callback URL above). Leave `SALESFORCE_CLIENT_SECRET` unset: the External Client App is PKCE-only and has no secret (outreach-api sends a secret only when the variable is set). Then redeploy outreach-api.
    - In outreach-web, open **Settings → Connections** as an admin, choose **Connect Salesforce**, and sign in **as the Integration user**. The page should show it as connected with the Integration user's username.
 
 6. **Optional, in Setup only:** to let reps see the consent fields, add them to the Lead and Opportunity page layouts through the Setup UI. **Do not** deploy layouts from the repo (`salesforce/README.md`). If reps should record consent themselves (source `Rep`), give their profile or permission set **edit** on the three fields.
 
 **Check:** on any Lead, Setup → Object Manager → Lead → Fields shows `AI Call Consent`, `AI Call Consent Date`, and `AI Call Consent Source` with five values in order: Text Reply, Email Reply, Web Form, Inbound Call, Rep.
+
+
+## AI call campaigns (plan 1C)
+
+### What it is
+
+A campaign mode where people pick the leads, the AI researches and plans each call, a person approves each plan, and the AI voice agent (cti-api) places the calls. Every engine gate still applies, at the moment of the call: consent (`AI_Call_Consent__c`), opt-outs, the block list, federal DNC, the state caps, the per-customer ceiling, calling hours and the AI caller IDs. The CTI softphone has no AI call button or tab any more; everything starts here.
+
+### Before the first campaign
+
+1. Complete `ai-voice.md` §2–§5: the AI number and the test call from outreach-web.
+2. On outreach-api set the three variables below, and redeploy. On `@cti/api`, `OUTREACH_INTERNAL_SECRET` must hold the same value (`ai-voice.md` §3).
+
+   | Variable | Value |
+   |---|---|
+   | `ANTHROPIC_API_KEY` | Claude key (call plans and note triage). Unset = both off |
+   | `CTI_INTERNAL_URL` | `http://ctiapi.railway.internal:4000` (plain http on Railway's private network; an origin only, no path) |
+   | `OUTREACH_INTERNAL_SECRET` | The same 32+ character secret as on `@cti/api` |
+
+   `CALL_PLAN_MODEL` is optional (default `claude-sonnet-5-5`); any other value must be priced in `services/outreach-api/src/ai/model.ts` or plans are not drafted. Both outreach-api and `@cti/api` must also hold the same `TOKEN_ENCRYPTION_KEY`, because `@cti/api` decrypts the integration token that outreach-api stores.
+3. The Integration user needs read access to Tasks, Events, Notes, ContentNote/ContentDocumentLink, EmailMessage and Chatter (FeedItem, FeedComment), and to Account (related records) as well as the Lead and Opportunity fields in §0. Missing access is not an error for the plan: its card lists the source as "the integration user cannot read it".
+
+   **Tasks and Events are the exception.** Before every call the pacer checks Salesforce for a Task or Event newer than the research. If the Integration user cannot read Task or Event, that check fails every time and the tenant's due calls wait in 30-minute steps; the results show "could not check Salesforce for new activity". Nobody is called unchecked.
+4. Check the link from outreach-api's shell (`railway ssh --service outreach-api`):
+
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}' "$CTI_INTERNAL_URL/internal/ai-calls/availability"
+   ```
+
+   Expected: `401` (reachable, unsigned). `404` means `CTI_INTERNAL_URL` is not the `.railway.internal` host, or `OUTREACH_INTERNAL_SECRET` is unset on `@cti/api` (production hides the routes behind the same 404); `503` is the unset secret outside production; a connection error means private networking is not reaching it (`ai-voice.md` §11).
+
+### Step by step
+
+1. **New campaign.** Campaigns → New campaign. Under **What the campaign does** pick **AI calls to leads you pick**, then the Salesforce object (Leads or Opportunities).
+2. **Pick the source:** a Salesforce list view or a SOQL query. **Create campaign** makes a draft.
+3. **Tick leads** in the **Leads to call** picker (**Select this page**, **Select all N**, or tick rows; **Clear** unticks everything), then **Continue to campaign**. Only ticked leads are enrolled. Rows the campaign cannot use are greyed with the reason (no phone or email, opted out, on the block list, Do Not Call, Skip on Dialer, already in another active campaign, closed). A lead without AI consent in Salesforce can still be ticked; its card then shows "AI consent: no" and cannot be approved.
+4. **Start dry run** first. A draft campaign is not refreshed, so nothing happens until then. The refresh runs every 5 minutes, enrolls the ticked leads, and the plans are drafted about a minute after. In a dry run the plans are drafted and nothing is called.
+5. **Review each card** on the **Call plans** board: the record link, owner, AI consent badge, research sources (and whether each could be read), selling signals with their quotes, the opener, the four goals, talking points, questions, things to avoid, the best time to call, and any warnings. Then **Approve**, **Edit**, **Reject** (removes the lead from the campaign) or **Research again**. Only the record owner or an admin can decide. Approving does not place a call.
+6. **Go live.** Press **Go live** and confirm (the board's hint calls this "Activate"). **Call all approved (N)** appears for admins on an active campaign.
+7. **Call all approved.** This queues one call per approved lead for the pacer, which places them as the settings below allow (it may take several presses if more than one batch is waiting: "More approved leads are waiting").
+8. **Watch the AI calls card** under the board (results table: Lead, Status, Outcome, Summary, When; **Transcript** for the record owner or an admin).
+
+### Pacing settings
+
+Three per-tenant settings live in `organizations.settings` (jsonb). They have no screen; change them with SQL. Out-of-range or non-integer values are ignored and the default applies.
+
+| Setting | Default | Range | Meaning |
+|---|---|---|---|
+| `aiCallConcurrency` | 2 | 1–5 | AI calls the tenant may have live at once. A placed call holds a slot until it ends, and at most one hour. |
+| `aiCallDailyCap` | 50 | 0–500 (0 = none) | AI calls placed per rolling 24 hours. It counts only calls outreach placed: not calls the engine refused, and not test calls. |
+| `aiCallMaxAttempts` | 3 | 1–5 | Unanswered attempts per lead (no answer, busy, voicemail, failed) before the lead completes. |
+
+```bash
+PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
+echo "SELECT id, name FROM organizations;" | psql "$PUB"
+echo "UPDATE organizations SET settings = coalesce(settings, '{}'::jsonb) || jsonb_build_object('aiCallConcurrency', 3) WHERE id = :'org' RETURNING settings;" | psql "$PUB" -v org='<org uuid>'
+echo "UPDATE organizations SET settings = coalesce(settings, '{}'::jsonb) || jsonb_build_object('aiCallDailyCap', 100) WHERE id = :'org' RETURNING settings;" | psql "$PUB" -v org='<org uuid>'
+echo "UPDATE organizations SET settings = coalesce(settings, '{}'::jsonb) || jsonb_build_object('aiCallMaxAttempts', 2) WHERE id = :'org' RETURNING settings;" | psql "$PUB" -v org='<org uuid>'
+```
+
+`$PUB` is a live credential: never print or share it. The pacer runs every minute and picks the new values up on its next tick.
+
+How the pacer times calls:
+
+- **Calling hours:** 08:00 to 21:00 in the person's local time. A lead's first call uses the plan's preferred window (morning 8–12, afternoon 12–5, evening 5–9, or any time); later calls use the whole calling window.
+- **After no answer, busy, voicemail or failed:** the next try is at least 20 hours later, in the next calling window.
+- **Retried refusals** wait before the next try: calling hours, until the window opens; daily state cap or per-customer ceiling, about 12 hours and then the window; no AI caller ID or AI calling switched off, 30 minutes; another call to them in progress, 10 minutes; any other, 5 minutes doubling to 2 hours. The same request key is kept for an in-flight or transport retry, and those wait at least 10 minutes. A claim the pacer could not make (the lead changed since it was queued) waits 15 minutes. After 8 triggers the lead exits "gave up after repeated errors".
+- **New Salesforce activity.** If a Task or Event on the record is newer than the research, the call is not placed: the lead goes back to research and the card says "New activity in Salesforce since the research: researching again before any call." A rep's call Task between attempts does the same, by design. Tasks the AI's own calls logged are ignored.
+- **Salesforce checkboxes** Do Not Call and Skip on Dialer stop the call (shown as "Do Not Call is checked in Salesforce" / "Skip on Dialer is checked in Salesforce").
+- **A plan the voice agent refuses, or an approver who cannot place AI calls** (`plan_rejected`, `unknown_user`): the lead goes back to the review board with an error on its card. It is not ended: edit the plan and approve it again (or have someone who can place AI calls approve it).
+
+### What each outcome does
+
+| Call outcome (words in the results table) | What happens to the lead |
+|---|---|
+| Transferred to a person, Callback booked, Transfer missed — call them back | Handed off to the rep (the enrollment ends as `handed_off`) |
+| Not interested | Leaves the campaign ("Not interested") |
+| Asked not to be called | Leaves the campaign ("Asked not to be called"); the engine has already written the opt-out |
+| Wrong number | Leaves the campaign ("Wrong number") |
+| No answer, Busy, Voicemail, Call failed | Another call is planned for the next day, up to `aiCallMaxAttempts` attempts; then it completes as "No answer after every attempt" |
+| Hung up, Other | Completes as "The call ended" |
+| Blocked | Decided when the call is triggered: see "Not called" below |
+
+### "Not called: …" reasons
+
+These appear in the Status cell. **Retried** ones say "Waiting — next try …" with the last reason; **final** ones end the lead for good and read "Not called: …".
+
+| Words | Code | Kind |
+|---|---|---|
+| no AI consent in Salesforce | `no_consent` | final |
+| this Salesforce org has no AI consent field | `consent_field_missing` | final |
+| the record has no phone number / the phone number is not valid | `no_phone` / `invalid_number` | final |
+| they opted out of calls | `opted_out` | final |
+| the number is on the block list | `blocked` | final |
+| on the federal Do Not Call list | `dnc` | final |
+| the Salesforce record was not found | `record_not_found` | final |
+| test calls are for admins, to a number in AI_VOICE_TEST_NUMBERS | `not_admin_for_test` | final (test calls only) |
+| outside calling hours where they live | `calling_hours` | retried |
+| their state's daily call limit was reached | `daily_cap` | retried |
+| the call limit for this person was reached | `customer_ceiling` | retried |
+| no AI caller ID number is free | `no_caller_id` | retried (add an AI number: `ai-voice.md` §5) |
+| AI calling is switched off | `ai_voice_unavailable` | retried (the kill switch) |
+| another call to them is in progress | `call_in_progress` | retried |
+| Salesforce did not answer / a compliance check could not run / the phone carrier refused the call / the call request was still being handled | `salesforce_error` / `gate_error` / `twilio_error` / `in_flight` | retried |
+| the AI calling service did not answer | `transport` | retried |
+| gave up after repeated errors | `gave_up` | final (after 8 triggers) |
+| could not check Salesforce for new activity | `activity_check_failed` | waits 30 minutes |
+
+### Cost
+
+Each plan is one Claude call, counted with note triage against the tenant's daily budget (`aiDailyBudgetUsd`, default $25, per UTC day). Sonnet 5.5 costs $2 per million input tokens and $10 per million output tokens (`PRICE_MICROS_PER_TOKEN` in `services/outreach-api/src/ai/model.ts`), so a typical plan (about 12,000 tokens in, 1,500 out) costs about 4 cents. When the day's budget is spent, AI call campaigns pause with the banner "Paused: today's AI budget is used up", exactly like sequence campaigns; resume them after the next UTC day starts or after raising `aiDailyBudgetUsd` in the same way as the pacing settings. The voice call itself is billed separately (`ai-voice.md` §13).
+
+### Stopping everything
+
+- **Pause the campaign** (the **Pause** button): planned calls wait and nothing new is claimed.
+- **The AI voice kill switch:** `AI_VOICE=off` on `@cti/api`. The pacer retries every 30 minutes and places nothing (the results show "AI calling is switched off"). `OUTREACH_KILL_SWITCH=on` stops all outreach, including AI calls.
