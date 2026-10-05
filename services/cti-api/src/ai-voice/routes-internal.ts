@@ -145,10 +145,13 @@ async function handleTrigger(deps: InternalAiDeps, cfgOf: () => AppConfig, body:
     const row = reserved.row;
     if (row.requestHash !== hash) return { conflict: true };
     if (row.response) return InternalAiCallResponse.parse(row.response);
-    if (deps.now().getTime() - row.createdAt.getTime() < STALE_REQUEST_MS) return failed('in_flight');
-    // Take the reservation over FIRST, then look for a call the original request left, since the OLD row's createdAt: a call
-    // it inserted up to the takeover is seen, where looking first and taking over second could miss one inserted in between
-    // and dial a second time. One atomic UPDATE decides who retries; any other concurrent retry answers in_flight (S-3).
+    // Stale = not reserved or taken over (updated_at) for STALE_REQUEST_MS. created_at is never restamped (M-A).
+    if (deps.now().getTime() - row.updatedAt.getTime() < STALE_REQUEST_MS) return failed('in_flight');
+    // Take the reservation over FIRST, then look for a call since the ORIGINAL reservation (created_at): a call the original
+    // request inserted up to the takeover is seen, where looking first and taking over second could miss one inserted in
+    // between. The takeover stamps only updated_at, so if this lookup throws or the process dies here, the next retry still
+    // searches from the original reservation and finds that call instead of dialing a second time. One atomic UPDATE
+    // decides who retries; any other concurrent retry answers in_flight (S-3).
     if (!(await deps.requests.takeOver(body.orgId, body.idempotencyKey))) return failed('in_flight');
     const found = await deps.requests.findCallSince({
       orgId: body.orgId, userId: body.userId, since: new Date(row.createdAt.getTime() - FIND_SLACK_MS), ...targetKeys(body),
@@ -167,7 +170,8 @@ async function handleTrigger(deps: InternalAiDeps, cfgOf: () => AppConfig, body:
 /**
  * startAiCall turns Salesforce, gate and Twilio errors into results, so an exception is rare, but it can come after Twilio
  * took the call. It propagates (a 500) and the reservation is KEPT (S-6): a retry meets in_flight, and once the
- * reservation is stale the takeover first looks for the call this request left, so a call is never placed twice.
+ * reservation is stale the retry takes it over and then looks (from the original created_at) for the call this request
+ * left, so a call is never placed twice.
  */
 async function startReserved(deps: InternalAiDeps, cfgOf: () => AppConfig, db: Db, session: SessionUser, body: Body): Promise<InternalAiCallResponse> {
   const t = body.target;

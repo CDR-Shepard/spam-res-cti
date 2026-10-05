@@ -58,7 +58,9 @@ describe.skipIf(!server)('ai_call_requests store (real Postgres)', () => {
   const reserve = (key: string) => store().reserve({ orgId, key, hash: 'h', userId });
   const row = async (key: string) => (await db.select().from(schema.aiCallRequests).where(eq(schema.aiCallRequests.idempotencyKey, key)))[0]!;
   const age = (key: string, minutes: number) =>
-    db.execute(sql`update ai_call_requests set created_at = now() - make_interval(mins => ${minutes}) where idempotency_key = ${key}`);
+    db.execute(
+      sql`update ai_call_requests set created_at = now() - make_interval(mins => ${minutes}), updated_at = now() - make_interval(mins => ${minutes}) where idempotency_key = ${key}`,
+    );
 
   it('S-3: two concurrent retries of a stale reservation: exactly one takes it over', async () => {
     const key = 'touch:s3-race:1';
@@ -66,8 +68,30 @@ describe.skipIf(!server)('ai_call_requests store (real Postgres)', () => {
     await age(key, 11);
     const results = await Promise.all(Array.from({ length: 8 }, () => store().takeOver(orgId, key)));
     expect(results.filter(Boolean)).toHaveLength(1);
-    // The winner restamped it: it is fresh now, so nobody else may take it over.
-    expect(Date.now() - (await row(key)).createdAt.getTime()).toBeLessThan(STALE_REQUEST_MS);
+    // The winner stamped updated_at: it is fresh now, so nobody else may take it over.
+    expect(Date.now() - (await row(key)).updatedAt.getTime()).toBeLessThan(STALE_REQUEST_MS);
+    expect(await store().takeOver(orgId, key)).toBe(false);
+  });
+
+  it('M-A: a takeover never moves created_at, so every later retry looks for a call from the ORIGINAL reservation', async () => {
+    const key = 'touch:ma-created:1';
+    await reserve(key);
+    await age(key, 30);
+    const before = (await row(key)).createdAt.getTime();
+    expect(await store().takeOver(orgId, key)).toBe(true);
+    // The retry that took it over died before finishing; ten minutes later the next retry takes it over again.
+    await db.execute(sql`update ai_call_requests set updated_at = now() - make_interval(mins => 11) where idempotency_key = ${key}`);
+    expect(await store().takeOver(orgId, key)).toBe(true);
+    expect((await row(key)).createdAt.getTime()).toBe(before);
+    expect(Date.now() - before).toBeGreaterThan(29 * 60_000);
+  });
+
+  it('M-A: staleness is measured from updated_at: an old reservation taken over a minute ago is not stale', async () => {
+    const key = 'touch:ma-updated:1';
+    await reserve(key);
+    await db.execute(
+      sql`update ai_call_requests set created_at = now() - make_interval(mins => 30), updated_at = now() - make_interval(mins => 1) where idempotency_key = ${key}`,
+    );
     expect(await store().takeOver(orgId, key)).toBe(false);
   });
 

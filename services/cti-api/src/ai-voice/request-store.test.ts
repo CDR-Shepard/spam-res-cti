@@ -51,11 +51,12 @@ describe('ai_call_requests SQL, rendered', () => {
     expect(params[0]).toBeNull();
   });
 
-  it('S-3: the takeover is ONE update: it restamps an unanswered reservation older than the stale window, and says whether it did', () => {
+  it('S-3/M-A: the takeover is ONE update: it stamps updated_at of an unanswered reservation not touched for the stale window, never created_at', () => {
     const { sql, params } = takeOverQuery(db, ORG, KEY).toSQL();
     expect(sql).toBe(
-      'update "ai_call_requests" set "created_at" = now(), "updated_at" = now() where (("ai_call_requests"."org_id" = $1 and "ai_call_requests"."idempotency_key" = $2) and "ai_call_requests"."response" is null and "ai_call_requests"."created_at" < now() - make_interval(secs => $3)) returning "idempotency_key"',
+      'update "ai_call_requests" set "updated_at" = now() where (("ai_call_requests"."org_id" = $1 and "ai_call_requests"."idempotency_key" = $2) and "ai_call_requests"."response" is null and "ai_call_requests"."updated_at" < now() - make_interval(secs => $3)) returning "idempotency_key"',
     );
+    expect(sql).not.toContain('"created_at"');
     expect(params).toEqual([ORG, KEY, 600]);
   });
 

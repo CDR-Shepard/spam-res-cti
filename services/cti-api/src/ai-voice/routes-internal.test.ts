@@ -58,8 +58,8 @@ function memoryStore() {
     }),
     takeOver: vi.fn(async (orgId, key) => {
       const row = rows.get(k(orgId, key));
-      if (!row || row.response !== null || NOW.getTime() - row.createdAt.getTime() < STALE_REQUEST_MS) return false;
-      rows.set(k(orgId, key), { ...row, createdAt: NOW });
+      if (!row || row.response !== null || NOW.getTime() - row.updatedAt.getTime() < STALE_REQUEST_MS) return false;
+      rows.set(k(orgId, key), { ...row, updatedAt: NOW });
       return true;
     }),
     findCallSince: vi.fn(async () => calls[0] ?? null),
@@ -166,7 +166,8 @@ describe('POST /internal/ai-calls', () => {
     async function staleReservation() {
       await store.reserve({ orgId: ORG, key: recordBody().idempotencyKey, hash: (await import('./request-store.js')).requestHash(JSON.stringify(recordBody())), userId: USER });
       const [key, row] = [...store.rows.entries()][0]!;
-      store.rows.set(key, { ...row, createdAt: new Date(NOW.getTime() - 11 * 60_000) });
+      const old = new Date(NOW.getTime() - 11 * 60_000);
+      store.rows.set(key, { ...row, createdAt: old, updatedAt: old });
       (store.reserve as ReturnType<typeof vi.fn>).mockClear();
     }
 
@@ -213,6 +214,29 @@ describe('POST /internal/ai-calls', () => {
       expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
       expect(deps.start).not.toHaveBeenCalled();
       expect(store.findCallSince).toHaveBeenCalledWith(expect.objectContaining({ since: new Date(NOW.getTime() - 11 * 60_000 - 5_000) }));
+    });
+
+    it('M-A: staleness is read from updated_at: a reservation taken over a minute ago answers in_flight without a takeover', async () => {
+      await staleReservation();
+      const [key, row] = [...store.rows.entries()][0]!;
+      store.rows.set(key, { ...row, createdAt: new Date(NOW.getTime() - 30 * 60_000), updatedAt: new Date(NOW.getTime() - 60_000) });
+      const res = await post(recordBody());
+      expect(res.json()).toEqual({ result: 'failed', reason: 'in_flight', aiCallId: null });
+      expect(store.takeOver).not.toHaveBeenCalled();
+      expect(deps.start).not.toHaveBeenCalled();
+    });
+
+    it('M-A: a retry after a takeover that died looks for the call from the ORIGINAL reservation, and finds it', async () => {
+      await staleReservation();
+      const [key, row] = [...store.rows.entries()][0]!;
+      // Reserved 30 min ago; a takeover 11 min ago died between its takeover and its look for the call.
+      store.rows.set(key, { ...row, createdAt: new Date(NOW.getTime() - 30 * 60_000), updatedAt: new Date(NOW.getTime() - 11 * 60_000) });
+      store.calls.push({ id: CALL, status: 'ringing', blockReason: null, callSid: 'CA1' });
+      const res = await post(recordBody());
+      expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
+      expect(deps.start).not.toHaveBeenCalled();
+      expect(store.findCallSince).toHaveBeenCalledWith(expect.objectContaining({ since: new Date(NOW.getTime() - 30 * 60_000 - 5_000) }));
+      expect(store.rows.get(key)?.createdAt).toEqual(new Date(NOW.getTime() - 30 * 60_000));
     });
 
     it('S-3: a retry that loses the takeover answers in_flight and dials nothing', async () => {

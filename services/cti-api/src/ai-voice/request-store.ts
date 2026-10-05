@@ -10,7 +10,7 @@ import type { InternalAiCallResponse } from '@cti/contracts';
 import { schema } from '@cti/db';
 import type { Db } from '../dialer/pick-did.js';
 
-/** An unanswered reservation older than this is treated as a crashed request. */
+/** An unanswered reservation not touched (reserved or taken over: updated_at) for this long is treated as a crashed request. */
 export const STALE_REQUEST_MS = 10 * 60_000;
 export const requestHash = (rawBody: string): string => createHash('sha256').update(rawBody, 'utf8').digest('hex');
 
@@ -30,9 +30,10 @@ export interface AiCallRequestStore {
   /** Stores the answer of an UNANSWERED key; a key that already has an answer keeps it (S-5). */
   complete(orgId: string, key: string, response: InternalAiCallResponse): Promise<void>;
   /**
-   * Atomically takes over an unanswered reservation older than STALE_REQUEST_MS (a crashed request): one UPDATE restamps
-   * it, so of any number of concurrent retries exactly one gets `true` (S-3). Never frees the key: an unanswered
-   * reservation is only ever taken over, so a retry cannot dial while another is in flight.
+   * Atomically takes over an unanswered reservation whose updated_at is older than STALE_REQUEST_MS (a crashed request):
+   * one UPDATE stamps updated_at, so of any number of concurrent retries exactly one gets `true` (S-3). created_at is
+   * NEVER restamped: it stays the original reservation, so every retry looks for a call from there (M-A). Never frees the
+   * key: an unanswered reservation is only ever taken over, so a retry cannot dial while another is in flight.
    */
   takeOver(orgId: string, key: string): Promise<boolean>;
   /** The ai_calls row a crashed request may have produced. */
@@ -64,8 +65,8 @@ export function completeQuery(db: Db, orgId: string, key: string, response: Inte
 export function takeOverQuery(db: Db, orgId: string, key: string) {
   return db
     .update(r)
-    .set({ createdAt: sql`now()`, updatedAt: sql`now()` })
-    .where(and(byKey(orgId, key), isNull(r.response), lt(r.createdAt, sql`now() - make_interval(secs => ${STALE_REQUEST_MS / 1000})`)))
+    .set({ updatedAt: sql`now()` })
+    .where(and(byKey(orgId, key), isNull(r.response), lt(r.updatedAt, sql`now() - make_interval(secs => ${STALE_REQUEST_MS / 1000})`)))
     .returning({ key: r.idempotencyKey });
 }
 
