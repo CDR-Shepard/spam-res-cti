@@ -125,6 +125,7 @@ const TABLES: Record<string, string[]> = {
     '"is_closed" boolean NOT NULL DEFAULT false',
     '"notes_hash" text',
     '"triage_needed" boolean NOT NULL DEFAULT true',
+    '"triage_attempted_at" timestamptz',
     '"sf_last_modified_at" timestamptz',
     '"synced_at" timestamptz NOT NULL DEFAULT now()',
   ],

@@ -5,6 +5,11 @@
  * (`ai_budget`). Per record: fetch the notes, skip the model when the fingerprint is
  * unchanged, otherwise call the model, record the spend, and store the result. A
  * `doNotContact` result moves every active enrollment of the record to `needs_review`.
+ *
+ * Rows are claimed atomically (`triage_attempted_at = now`, FOR UPDATE SKIP LOCKED), so an
+ * overlapping tick never takes the same record. A claimed record whose triage did not finish
+ * (a failed notes fetch) is skipped for `TRIAGE_BACKOFF_MS`; a claimed record the tick never
+ * reached is released. At most `TRIAGE_PER_ORG_CAP` records per tenant go into one batch.
  */
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { FieldMap, SfObject, type TriageResult } from '@cti/contracts';
@@ -21,6 +26,12 @@ import { outreachSettings } from '../settings.js';
 import { buildTriagePrompt, fetchNotesBundle, notesFingerprint, type NotesBundle } from './notes.js';
 
 export const TRIAGE_BATCH = 20;
+/** Most records one tenant may take from a batch, so one tenant cannot starve the others. */
+export const TRIAGE_PER_ORG_CAP = 5;
+/** How long a claimed record whose triage did not finish waits before it is picked again. */
+export const TRIAGE_BACKOFF_MS = 30 * 60 * 1000;
+/** The tick stops starting new records after this long (the queue expires a job at 15 minutes). */
+export const TRIAGE_DEADLINE_MS = 5 * 60 * 1000;
 const HISTORY_LIMIT = 10;
 
 export interface TriageDeps {
@@ -30,6 +41,8 @@ export interface TriageDeps {
   now: Date;
   log: RunnerLogger;
   batch?: number;
+  /** Wall clock in ms for the tick deadline; tests inject one. Defaults to `Date.now`. */
+  clock?: () => number;
 }
 
 interface DueRecord {
@@ -47,22 +60,59 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-async function dueRecords(db: Db, batch: number): Promise<DueRecord[]> {
-  const r = schema.crmRecords;
-  const e = schema.campaignEnrollments;
-  const c = schema.campaigns;
-  return db
-    .select({ id: r.id, orgId: r.orgId, sfObject: r.sfObject, sfRecordId: r.sfRecordId, notesHash: r.notesHash })
-    .from(r)
-    .where(
-      and(
-        eq(r.triageNeeded, true),
-        sql`EXISTS (SELECT 1 FROM ${e} JOIN ${c} ON ${c.id} = ${e.campaignId}
-                    WHERE ${e.crmRecordId} = ${r.id} AND ${e.status} = 'active' AND ${c.status} IN ('dry_run', 'active'))`,
-      ),
+/**
+ * Claims up to `batch` due records, at most `TRIAGE_PER_ORG_CAP` per tenant, oldest first
+ * and round-robin across tenants. Due: still owed a triage, enrolled in a running campaign,
+ * and not claimed within the backoff. The window function cannot share a statement with
+ * FOR UPDATE, so the ranked ids are locked in a second step that re-checks the due
+ * condition (a concurrent claim makes the re-check fail and the row is skipped).
+ */
+async function claimDueRecords(db: Db, now: Date, batch: number): Promise<DueRecord[]> {
+  const nowIso = now.toISOString();
+  const staleBefore = new Date(now.getTime() - TRIAGE_BACKOFF_MS).toISOString();
+  const result = await db.execute(sql`
+    WITH ranked AS (
+      SELECT r.id, r.synced_at,
+             ROW_NUMBER() OVER (PARTITION BY r.org_id ORDER BY r.synced_at, r.id) AS rn
+      FROM crm_records r
+      WHERE r.triage_needed
+        AND (r.triage_attempted_at IS NULL OR r.triage_attempted_at < ${staleBefore}::timestamptz)
+        AND EXISTS (SELECT 1 FROM campaign_enrollments e JOIN campaigns c ON c.id = e.campaign_id
+                    WHERE e.crm_record_id = r.id AND e.status = 'active' AND c.status IN ('dry_run', 'active'))
+    ), picked AS (
+      SELECT id FROM ranked WHERE rn <= ${TRIAGE_PER_ORG_CAP} ORDER BY rn, synced_at LIMIT ${batch}
+    ), locked AS (
+      SELECT r.id FROM crm_records r
+      WHERE r.id IN (SELECT id FROM picked)
+        AND r.triage_needed
+        AND (r.triage_attempted_at IS NULL OR r.triage_attempted_at < ${staleBefore}::timestamptz)
+      FOR UPDATE SKIP LOCKED
     )
-    .orderBy(r.orgId, r.syncedAt)
-    .limit(batch);
+    UPDATE crm_records r SET triage_attempted_at = ${nowIso}::timestamptz
+    FROM locked
+    WHERE r.id = locked.id
+    RETURNING r.id, r.org_id, r.sf_object, r.sf_record_id, r.notes_hash, r.synced_at`);
+  const rows = result.rows as Array<{
+    id: string;
+    org_id: string;
+    sf_object: string;
+    sf_record_id: string;
+    notes_hash: string | null;
+    synced_at: Date | string;
+  }>;
+  return rows
+    .sort((a, b) => new Date(a.synced_at).getTime() - new Date(b.synced_at).getTime())
+    .map((row) => ({ id: row.id, orgId: row.org_id, sfObject: row.sf_object, sfRecordId: row.sf_record_id, notesHash: row.notes_hash }));
+}
+
+/** Gives back the claim on records the tick never started, so they are not backed off. */
+async function releaseClaims(db: Db, now: Date, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const r = schema.crmRecords;
+  await db
+    .update(r)
+    .set({ triageAttemptedAt: null })
+    .where(and(inArray(r.id, ids), eq(r.triageAttemptedAt, now)));
 }
 
 async function touchHistory(db: Db, crmRecordId: string): Promise<Array<{ channel: string; status: string; at: string }>> {
@@ -174,9 +224,16 @@ async function pauseForBudget(deps: TriageDeps, orgId: string, spent: number, bu
   deps.log.warn({ orgId, spentMicros: spent, budgetMicros: budget, paused }, 'daily AI budget spent; paused the tenant campaigns');
 }
 
-/** Returns false when the whole tick must stop (the model API is failing). */
-async function triageOrg(deps: TriageDeps, orgId: string, records: DueRecord[]): Promise<boolean> {
+/** Where the tick stands: when it began and which claimed records it has started. */
+interface TickState {
+  startedAt: number;
+  attempted: Set<string>;
+}
+
+/** Returns false when the whole tick must stop (the model API is failing, or the deadline passed). */
+async function triageOrg(deps: TriageDeps, tick: TickState, orgId: string, records: DueRecord[]): Promise<boolean> {
   const { db, log, now } = deps;
+  const clock = deps.clock ?? Date.now;
   const [org] = await db.select({ settings: schema.organizations.settings }).from(schema.organizations).where(eq(schema.organizations.id, orgId));
   const budget = budgetMicros(outreachSettings({ settings: org?.settings ?? {} }));
   let spent = await spentTodayMicros(db, orgId, now);
@@ -197,10 +254,15 @@ async function triageOrg(deps: TriageDeps, orgId: string, records: DueRecord[]):
     return true;
   }
   for (const rec of records) {
+    if (clock() - tick.startedAt >= TRIAGE_DEADLINE_MS) {
+      log.warn({ orgId }, 'triage: tick deadline reached; leaving the rest for the next tick');
+      return false;
+    }
     if (spent >= budget) {
       await pauseForBudget(deps, orgId, spent, budget);
       return true;
     }
+    tick.attempted.add(rec.id);
     const step = await triageOne(deps, client, fieldMap, rec);
     if (step.kind === 'stop') return false;
     if (step.kind === 'skip_org') return true;
@@ -210,10 +272,15 @@ async function triageOrg(deps: TriageDeps, orgId: string, records: DueRecord[]):
 }
 
 export async function triageDueRecords(deps: TriageDeps): Promise<void> {
-  const due = await dueRecords(deps.db, deps.batch ?? TRIAGE_BATCH);
+  const tick: TickState = { startedAt: (deps.clock ?? Date.now)(), attempted: new Set() };
+  const due = await claimDueRecords(deps.db, deps.now, deps.batch ?? TRIAGE_BATCH);
   const byOrg = new Map<string, DueRecord[]>();
   for (const rec of due) byOrg.set(rec.orgId, [...(byOrg.get(rec.orgId) ?? []), rec]);
-  for (const [orgId, records] of byOrg) {
-    if (!(await triageOrg(deps, orgId, records))) return;
+  try {
+    for (const [orgId, records] of byOrg) {
+      if (!(await triageOrg(deps, tick, orgId, records))) return;
+    }
+  } finally {
+    await releaseClaims(deps.db, deps.now, due.filter((rec) => !tick.attempted.has(rec.id)).map((rec) => rec.id));
   }
 }

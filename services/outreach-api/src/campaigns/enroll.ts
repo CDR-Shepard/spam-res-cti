@@ -58,6 +58,10 @@ const UPSERT_SET = {
   triageNeeded: sql.raw(
     'crm_records.triage_needed OR crm_records.sf_last_modified_at IS DISTINCT FROM excluded.sf_last_modified_at',
   ),
+  // A changed record is triaged without waiting out the failure backoff.
+  triageAttemptedAt: sql.raw(
+    'CASE WHEN crm_records.sf_last_modified_at IS DISTINCT FROM excluded.sf_last_modified_at THEN NULL ELSE crm_records.triage_attempted_at END',
+  ),
   sfLastModifiedAt: sql.raw('excluded.sf_last_modified_at'),
   syncedAt: sql`now()`,
 };

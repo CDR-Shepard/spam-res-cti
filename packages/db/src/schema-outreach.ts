@@ -155,6 +155,8 @@ export const crmRecords = pgTable(
     isClosed: boolean('is_closed').default(false).notNull(),
     notesHash: text('notes_hash'),
     triageNeeded: boolean('triage_needed').default(true).notNull(),
+    /** Last time the triage tick claimed this row; NULL after a sync that changed the record. */
+    triageAttemptedAt: timestamp('triage_attempted_at', { withTimezone: true }),
     sfLastModifiedAt: timestamp('sf_last_modified_at', { withTimezone: true }),
     syncedAt: timestamp('synced_at', { withTimezone: true }).defaultNow().notNull(),
   },

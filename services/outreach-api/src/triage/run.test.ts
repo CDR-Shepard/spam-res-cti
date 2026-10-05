@@ -2,13 +2,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { eq } from 'drizzle-orm';
 import type { TriageResult } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
-import type { SalesforceClient } from '@cti/salesforce';
+import { SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
 import { spentTodayMicros } from '../ai/budget.js';
 import { costMicros, TRIAGE_MODEL, TriageOutputError, type TriageModel } from '../ai/model.js';
 import { createTestDb, pgLane } from '../test/pg.js';
+import type { FieldMap } from '@cti/contracts';
 import { campaignById, leadId, seedCampaign, seedConnection, seedEnrollment, seedOrg, seedRecord, snapshot } from '../test/outreach-fixtures.js';
 import { notesFingerprint, type NotesBundle } from './notes.js';
-import { triageDueRecords } from './run.js';
+import { TRIAGE_BACKOFF_MS, TRIAGE_DEADLINE_MS, TRIAGE_PER_ORG_CAP, triageDueRecords } from './run.js';
 
 const NOW = new Date('2026-10-05T15:00:00.000Z');
 const log = { error: vi.fn(), info: vi.fn(), warn: vi.fn() };
@@ -25,9 +26,14 @@ const PLAIN: TriageResult = {
 };
 const SOLD: TriageResult = { ...PLAIN, channels: [], tags: [], doNotContact: { category: 'sold', quote: 'sold the house last month' } };
 
-function fakeSalesforce(): SalesforceClient {
+/** `failFor` returns an error to throw for a query (or undefined to let it through). */
+function fakeSalesforce(failFor: (soql: string) => Error | undefined = () => undefined): SalesforceClient {
   return {
-    query: vi.fn(async (soql: string) => (soql.includes('FROM Task') ? [] : [{ Notes__c: NOTES, Description: null }])),
+    query: vi.fn(async (soql: string) => {
+      const err = failFor(soql);
+      if (err) throw err;
+      return soql.includes('FROM Task') ? [] : [{ Notes__c: NOTES, Description: null }];
+    }),
   } as unknown as SalesforceClient;
 }
 
@@ -48,7 +54,7 @@ describe.skipIf(!pgLane)('triageDueRecords (real Postgres, fake model and Salesf
     log.warn.mockReset();
     log.error.mockReset();
     // The tick scans every tenant: retire the records earlier tests left pending.
-    await db.update(schema.crmRecords).set({ triageNeeded: false });
+    await db.update(schema.crmRecords).set({ triageNeeded: false, triageAttemptedAt: null });
   });
 
   /** A tenant with a connection, one dry-run campaign, and one enrolled record needing triage. */
@@ -60,6 +66,18 @@ describe.skipIf(!pgLane)('triageDueRecords (real Postgres, fake model and Salesf
     const enrollmentId = await seedEnrollment(db, orgId, campaign.id, recordId);
     return { orgId, campaign, recordId, enrollmentId };
   }
+
+  /** More enrolled records for a tenant made by `tenant()`: sfRecordIds leadId(from)…leadId(to), oldest first. */
+  async function moreRecords(t: { orgId: string; campaign: { id: string } }, from: number, to: number): Promise<string[]> {
+    const ids: string[] = [];
+    for (let n = from; n <= to; n++) {
+      const id = await seedRecord(db, t.orgId, snapshot({ sfRecordId: leadId(n) }), { syncedAt: new Date(NOW.getTime() - (100 - n) * 60_000) });
+      await seedEnrollment(db, t.orgId, t.campaign.id, id);
+      ids.push(id);
+    }
+    return ids;
+  }
+  const failsFor = (n: number) => (soql: string) => (soql.includes(`Id = '${leadId(n)}'`) ? new Error('503 from Salesforce') : undefined);
 
   async function record(id: string) {
     const [row] = await db.select().from(schema.crmRecords).where(eq(schema.crmRecords.id, id));
@@ -166,5 +184,121 @@ describe.skipIf(!pgLane)('triageDueRecords (real Postgres, fake model and Salesf
     await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: NOW, log });
     expect(model.triage).not.toHaveBeenCalled();
     expect((await record(t.recordId)).triageNeeded).toBe(true);
+  });
+
+  it('leaves a record whose notes fetch failed pending and backed off, and carries on with the next records', async () => {
+    const t = await tenant({ n: 1 });
+    const [second, third] = await moreRecords(t, 2, 3);
+    await db.update(schema.crmRecords).set({ syncedAt: new Date(NOW.getTime() - 99 * 60_000) }).where(eq(schema.crmRecords.id, t.recordId));
+    const model = fakeModel();
+    await triageDueRecords({ db, clients: async () => fakeSalesforce(failsFor(1)), model, now: NOW, log });
+    expect(model.triage).toHaveBeenCalledTimes(2);
+    expect(await record(t.recordId)).toMatchObject({ triageNeeded: true, triageAttemptedAt: NOW });
+    expect(await record(second!)).toMatchObject({ triageNeeded: false });
+    expect(await record(third!)).toMatchObject({ triageNeeded: false });
+    expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ crmRecordId: t.recordId, err: '503 from Salesforce' }), 'triage: notes fetch failed');
+
+    // Inside the backoff window the record is not picked again; once it has passed, it is.
+    const soon = new Date(NOW.getTime() + TRIAGE_BACKOFF_MS - 1000);
+    const later = new Date(NOW.getTime() + TRIAGE_BACKOFF_MS + 1000);
+    await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: soon, log });
+    expect(model.triage).toHaveBeenCalledTimes(2);
+    await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: later, log });
+    expect(model.triage).toHaveBeenCalledTimes(3);
+    expect(await record(t.recordId)).toMatchObject({ triageNeeded: false });
+  });
+
+  it('skips the rest of a tenant on a SalesforceAuthError, releases its unstarted records, and triages other tenants', async () => {
+    const a = await tenant({ n: 1 });
+    const [a2] = await moreRecords(a, 2, 2);
+    const b = await tenant({ n: 1 });
+    await db.update(schema.crmRecords).set({ syncedAt: new Date(NOW.getTime() - 99 * 60_000) }).where(eq(schema.crmRecords.id, a.recordId));
+    const model = fakeModel();
+    const clients = async (orgId: string) => fakeSalesforce(orgId === a.orgId ? () => new SalesforceAuthError() : undefined);
+    await triageDueRecords({ db, clients, model, now: NOW, log });
+    expect(model.triage).toHaveBeenCalledTimes(1);
+    expect(await record(b.recordId)).toMatchObject({ triageNeeded: false });
+    expect(await record(a.recordId)).toMatchObject({ triageNeeded: true, triageAttemptedAt: NOW });
+    expect(await record(a2!)).toMatchObject({ triageNeeded: true, triageAttemptedAt: null });
+    expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ orgId: a.orgId }), 'triage: salesforce connection unusable; skipping tenant');
+  });
+
+  it('skips a tenant whose Salesforce field map is invalid, leaving its records unclaimed', async () => {
+    const orgId = await seedOrg(db);
+    await seedConnection(db, orgId, { Lead: { notes: 'not an array' } } as unknown as FieldMap);
+    const campaign = await seedCampaign(db, orgId, { status: 'dry_run' });
+    const bad = await seedRecord(db, orgId, snapshot({ sfRecordId: leadId(1) }));
+    await seedEnrollment(db, orgId, campaign.id, bad);
+    const good = await tenant({ n: 2 });
+    const model = fakeModel();
+    await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: NOW, log });
+    expect(model.triage).toHaveBeenCalledTimes(1);
+    expect(await record(good.recordId)).toMatchObject({ triageNeeded: false });
+    expect(await record(bad)).toMatchObject({ triageNeeded: true, triageAttemptedAt: null });
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ orgId, err: 'the Salesforce field map is missing or invalid' }),
+      'triage: no usable salesforce connection; skipping tenant',
+    );
+  });
+
+  it('stops starting records once the deadline has passed and releases the rest', async () => {
+    const t = await tenant({ n: 1 });
+    const [second] = await moreRecords(t, 2, 2);
+    await db.update(schema.crmRecords).set({ syncedAt: new Date(NOW.getTime() - 99 * 60_000) }).where(eq(schema.crmRecords.id, t.recordId));
+    // start, then the check before record 1, then the check before record 2.
+    const clock = vi.fn().mockReturnValueOnce(1_000).mockReturnValueOnce(1_000).mockReturnValue(1_000 + TRIAGE_DEADLINE_MS);
+    const model = fakeModel();
+    await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: NOW, log, clock });
+    expect(model.triage).toHaveBeenCalledTimes(1);
+    expect(await record(t.recordId)).toMatchObject({ triageNeeded: false });
+    expect(await record(second!)).toMatchObject({ triageNeeded: true, triageAttemptedAt: null });
+    expect(log.warn).toHaveBeenCalledWith({ orgId: t.orgId }, 'triage: tick deadline reached; leaving the rest for the next tick');
+  });
+
+  it('caps each tenant at its share of a batch, so a flood from one tenant cannot starve another', async () => {
+    const flood = await tenant({ n: 1 });
+    await moreRecords(flood, 2, 12);
+    const small = await tenant({ n: 1 });
+    await moreRecords(small, 2, 3);
+    const model = fakeModel();
+    await triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: NOW, log });
+    const pending = async (orgId: string) =>
+      (await db.select().from(schema.crmRecords).where(eq(schema.crmRecords.orgId, orgId))).filter((r) => r.triageNeeded).length;
+    expect(TRIAGE_PER_ORG_CAP).toBe(5);
+    expect(model.triage).toHaveBeenCalledTimes(TRIAGE_PER_ORG_CAP + 3);
+    expect(await pending(flood.orgId)).toBe(12 - TRIAGE_PER_ORG_CAP);
+    expect(await pending(small.orgId)).toBe(0);
+  });
+
+  it('backs off failing records so they cannot fill every batch', async () => {
+    const flood = await tenant({ n: 1 });
+    const floodIds = [flood.recordId, ...(await moreRecords(flood, 2, 5))];
+    const other = await tenant({ n: 1 });
+    // Every record of the first tenant fails its notes fetch, forever.
+    const clients = async (orgId: string) => fakeSalesforce(orgId === flood.orgId ? () => new Error('500') : undefined);
+    const model = fakeModel();
+    await triageDueRecords({ db, clients, model, now: NOW, log });
+    expect(await record(other.recordId)).toMatchObject({ triageNeeded: false });
+    for (const id of floodIds) expect(await record(id)).toMatchObject({ triageNeeded: true, triageAttemptedAt: NOW });
+
+    const newcomer = (await moreRecords(flood, 6, 6))[0]!;
+    await triageDueRecords({ db, clients, model, now: new Date(NOW.getTime() + 60_000), log });
+    // Only the record that had not yet been tried was picked; the five backed-off ones were left alone.
+    expect(await record(newcomer)).toMatchObject({ triageAttemptedAt: new Date(NOW.getTime() + 60_000) });
+    for (const id of floodIds) expect(await record(id)).toMatchObject({ triageAttemptedAt: NOW });
+    await triageDueRecords({ db, clients, model, now: new Date(NOW.getTime() + TRIAGE_BACKOFF_MS + 1000), log });
+    for (const id of floodIds) expect((await record(id)).triageAttemptedAt?.getTime()).toBe(NOW.getTime() + TRIAGE_BACKOFF_MS + 1000);
+  });
+
+  it('claims rows atomically: two overlapping ticks never triage the same record', async () => {
+    const t = await tenant({ n: 1 });
+    await moreRecords(t, 2, 5);
+    const model = fakeModel();
+    const run = () => triageDueRecords({ db, clients: async () => fakeSalesforce(), model, now: NOW, log });
+    await Promise.all([run(), run()]);
+    expect(model.triage).toHaveBeenCalledTimes(5);
+    const rows = await db.select().from(schema.recordTriage).where(eq(schema.recordTriage.orgId, t.orgId));
+    expect(new Set(rows.map((r) => r.crmRecordId)).size).toBe(5);
+    expect(rows).toHaveLength(5);
   });
 });

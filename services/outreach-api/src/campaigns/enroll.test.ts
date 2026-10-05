@@ -65,6 +65,17 @@ describe.skipIf(!pgLane)('enrollment (real Postgres)', () => {
       expect((await recordRow(orgId, leadId(1))).triageNeeded).toBe(true);
     });
 
+    it('resets the triage backoff when LastModifiedDate moved, and keeps it when it did not', async () => {
+      const orgId = await seedOrg(db);
+      const first = await upsertRecords(db, orgId, [snapshot({ sfRecordId: leadId(1) })]);
+      const id = first.get(leadId(1))!.id;
+      await db.update(schema.crmRecords).set({ triageAttemptedAt: NOW }).where(eq(schema.crmRecords.id, id));
+      await upsertRecords(db, orgId, [snapshot({ sfRecordId: leadId(1), name: 'Renamed' })]);
+      expect((await recordRow(orgId, leadId(1))).triageAttemptedAt).toEqual(NOW);
+      await upsertRecords(db, orgId, [snapshot({ sfRecordId: leadId(1), lastModifiedAt: new Date('2026-10-04T09:30:00.000Z') })]);
+      expect((await recordRow(orgId, leadId(1))).triageAttemptedAt).toBeNull();
+    });
+
     it('never clears a consent that is already true, and records a new one', async () => {
       const orgId = await seedOrg(db);
       await upsertRecords(db, orgId, [snapshot({ sfRecordId: leadId(1), consentAiCall: true }), snapshot({ sfRecordId: leadId(2) })]);

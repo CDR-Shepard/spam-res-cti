@@ -33,6 +33,10 @@
 --   phones             [{ field, e164 }] in field-map order.
 --   triage_needed      Set when the record is new or changed; the triage tick
 --                      clears it. Partial index: the tick scans only these.
+--   triage_attempted_at  When the triage tick last claimed the record. The tick
+--                      claims rows by setting it and skips rows claimed in the last
+--                      30 minutes, so a record that keeps failing cannot hog every
+--                      batch. A sync that changes the record resets it to NULL.
 --   (org_id, sf_record_id) FULL unique index — upserts ON CONFLICT.
 -- record_triage        One row per model call: the notes fingerprint, model,
 --                      zod-validated TriageResult, and token counts.
@@ -155,6 +159,7 @@ CREATE TABLE IF NOT EXISTS "crm_records" (
   "is_closed" boolean NOT NULL DEFAULT false,
   "notes_hash" text,
   "triage_needed" boolean NOT NULL DEFAULT true,
+  "triage_attempted_at" timestamptz,
   "sf_last_modified_at" timestamptz,
   "synced_at" timestamptz NOT NULL DEFAULT now()
 );
