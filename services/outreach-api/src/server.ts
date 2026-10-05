@@ -8,6 +8,7 @@ import { AnthropicTriageModel } from './ai/model.js';
 import { buildApp } from './app.js';
 import { httpCtiClient } from './ai-calls/cti-client.js';
 import { placeDueAiCalls } from './ai-calls/pace.js';
+import { collectAiCallResults } from './ai-calls/results.js';
 import { prepareDueCalls } from './call-plans/prepare.js';
 import { WorkosIdentityProvider } from './auth/workos-provider.js';
 import { loadConfig } from './config.js';
@@ -90,6 +91,14 @@ async function main(): Promise<void> {
       ? {
           'ai_call.place': async () => {
             await placeDueAiCalls({ db, clients, cti, now: new Date(), log: console });
+          },
+        }
+      : {}),
+    // Finished AI calls feed their enrollments: hand-offs, exits and next-day retries (reads ai_calls only).
+    ...(cti
+      ? {
+          'ai_call.results': async () => {
+            await collectAiCallResults(db, new Date(), console);
           },
         }
       : {}),

@@ -39,4 +39,5 @@ export const QUEUES: readonly QueueDefinition[] = [
   { name: 'touch.plan', options: TICK_QUEUE_OPTIONS },
   { name: 'call.prepare', options: TICK_QUEUE_OPTIONS },
   { name: 'ai_call.place', options: TICK_QUEUE_OPTIONS },
+  { name: 'ai_call.results', options: TICK_QUEUE_OPTIONS },
 ];

@@ -16,15 +16,16 @@ describe('tick queues and schedules', () => {
       { queue: 'touch.plan', cron: '* * * * *' },
       { queue: 'call.prepare', cron: '* * * * *' },
       { queue: 'ai_call.place', cron: '* * * * *' },
+      { queue: 'ai_call.results', cron: '* * * * *' },
     ]);
   });
   it('declares call.prepare as a stately tick and schedules it every minute', () => {
     expect(QUEUES.find((q) => q.name === 'call.prepare')?.options).toEqual({ retryLimit: 0, retryDelay: 0, retryBackoff: false, expireInSeconds: 900, policy: 'stately' });
     expect(SCHEDULES).toContainEqual({ queue: 'call.prepare', cron: '* * * * *' });
   });
-  it('declares ai_call.place as a stately tick and schedules it every minute', () => {
-    expect(QUEUES.find((q) => q.name === 'ai_call.place')?.options).toEqual({ retryLimit: 0, retryDelay: 0, retryBackoff: false, expireInSeconds: 900, policy: 'stately' });
-    expect(SCHEDULES).toContainEqual({ queue: 'ai_call.place', cron: '* * * * *' });
+  it.each(['ai_call.place', 'ai_call.results'])('declares %s as a stately tick and schedules it every minute', (name) => {
+    expect(QUEUES.find((q) => q.name === name)?.options).toEqual({ retryLimit: 0, retryDelay: 0, retryBackoff: false, expireInSeconds: 900, policy: 'stately' });
+    expect(SCHEDULES).toContainEqual({ queue: name, cron: '* * * * *' });
   });
   it('schedules only queues that exist', () => {
     const names = new Set(QUEUES.map((q) => q.name));

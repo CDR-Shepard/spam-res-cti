@@ -13,4 +13,5 @@ export const SCHEDULES: readonly ScheduleDefinition[] = [
   { queue: 'touch.plan', cron: '* * * * *' },
   { queue: 'call.prepare', cron: '* * * * *' },
   { queue: 'ai_call.place', cron: '* * * * *' },
+  { queue: 'ai_call.results', cron: '* * * * *' },
 ];
