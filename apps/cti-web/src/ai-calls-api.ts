@@ -152,7 +152,8 @@ export const BLOCK_WORDS: Readonly<Record<string, string>> = {
   daily_cap: "This number has reached today's call limit for its state.",
   customer_ceiling: 'This person has been called the most times allowed for now — try again later.',
   calling_hours: "It's outside calling hours (8am–9pm) where this person lives.",
-  no_caller_id: "There's no caller ID number free to call from right now.",
+  // The AI dials only from its own pool (`ai_pool`), never a rep's or the dialer's number.
+  no_caller_id: 'No AI caller-ID number is set up. Add a number to the AI pool (runbook §5).',
   not_admin_for_test: 'Test AI calls are for admins, and only to the configured test numbers.',
   invalid_number: "That isn't a valid phone number.",
   call_in_progress: 'An AI call to this number is already in progress.',

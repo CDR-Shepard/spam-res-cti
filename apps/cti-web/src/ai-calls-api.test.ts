@@ -5,6 +5,7 @@ import {
   aiCallTargetFor,
   aiTransferLabel,
   BLOCK_WORDS,
+  blockWords,
   getAiAvailability,
   isLiveRow,
   listAiCalls,
@@ -79,6 +80,12 @@ describe('words', () => {
     expect(aiCallErrorMessage(new ApiError(409, { error: 'no_consent', aiCallId: 'x' })))
       .toBe("This record hasn't agreed to AI calls — AI Call Consent is unticked in Salesforce.");
     expect(aiCallErrorMessage(new ApiError(409, { error: 'calling_hours' }))).toMatch(/outside calling hours/);
+  });
+
+  it('no_caller_id points at the AI pool, never at a rep or dialer number', () => {
+    expect(blockWords('no_caller_id')).toBe('No AI caller-ID number is set up. Add a number to the AI pool (runbook §5).');
+    expect(aiCallErrorMessage(new ApiError(409, { error: 'no_caller_id', aiCallId: 'x' })))
+      .toBe('No AI caller-ID number is set up. Add a number to the AI pool (runbook §5).');
   });
 
   it('HTTP errors read plainly', () => {

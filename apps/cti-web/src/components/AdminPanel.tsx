@@ -9,7 +9,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import { formatE164 } from '../format';
-import { CloudIcon, PlusIcon, ShieldIcon, UserIcon } from '../icons';
+import { CloudIcon, PlusIcon, ShieldIcon, UserIcon, ZapIcon } from '../icons';
+import { addPlacement, AI_CALLS, AI_CALLS_LABEL, groupNumbers, placementOf, placementPatch, RESERVE, type NumberKind } from '../admin-numbers';
 
 interface NumberRow {
   id: string;
@@ -18,6 +19,7 @@ interface NumberRow {
   active: boolean;
   health: 'healthy' | 'warning' | 'degraded' | 'spam_likely' | 'unknown';
   assignedUserId: string | null;
+  kind?: NumberKind;
   createdAt: string;
 }
 interface Rep {
@@ -30,8 +32,6 @@ interface RolloverHealth {
   succeeded: number;
   failed: Array<{ recordId: string; userEmail: string; lastError: string | null; attempts: number; updatedAt?: string }>;
 }
-
-const RESERVE = '__reserve__';
 
 function repLabel(r: Rep): string {
   return (r.displayName?.trim() || r.email.split('@')[0]) + (r.isAdmin ? ' (admin)' : '');
@@ -127,27 +127,8 @@ export function AdminPanel(): JSX.Element {
     [reps],
   );
 
-  // Group numbers: each rep, then the reserve pool. Stable, predictable order.
-  const groups = useMemo(() => {
-    const byAssignee = new Map<string | null, NumberRow[]>();
-    for (const n of numbers) {
-      const key = n.assignedUserId;
-      byAssignee.set(key, [...(byAssignee.get(key) ?? []), n]);
-    }
-    const repGroups = reps.map((r) => ({
-      key: r.id,
-      title: repLabel(r),
-      icon: 'rep' as const,
-      rows: byAssignee.get(r.id) ?? [],
-    }));
-    const reserve = {
-      key: RESERVE,
-      title: 'Reserve pool',
-      icon: 'reserve' as const,
-      rows: byAssignee.get(null) ?? [],
-    };
-    return [...repGroups, reserve];
-  }, [numbers, reps]);
+  // Group numbers: each rep, then the reserve pool, then AI calls (the AI's own caller IDs).
+  const groups = useMemo(() => groupNumbers(numbers, reps, repLabel), [numbers, reps]);
 
   const patchNumber = useCallback(
     async (id: string, body: Record<string, unknown>) => {
@@ -168,8 +149,8 @@ export function AdminPanel(): JSX.Element {
   );
 
   const assign = useCallback(
-    (id: string, value: string) => {
-      void patchNumber(id, { assignedUserId: value === RESERVE ? null : value });
+    (n: NumberRow, value: string) => {
+      void patchNumber(n.id, placementPatch(n, value));
     },
     [patchNumber],
   );
@@ -185,7 +166,7 @@ export function AdminPanel(): JSX.Element {
         body: {
           e164,
           label: newLabel.trim() || undefined,
-          assignedUserId: newAssignee === RESERVE ? null : newAssignee,
+          ...addPlacement(newAssignee),
         },
       });
       // Upsert into local state (POST is an upsert server-side).
@@ -278,6 +259,7 @@ export function AdminPanel(): JSX.Element {
           />
           <select className="field" value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)}>
             <option value={RESERVE}>Reserve pool (unassigned)</option>
+            <option value={AI_CALLS}>{AI_CALLS_LABEL} (the AI's own caller ID)</option>
             {reps.map((r) => (
               <option key={r.id} value={r.id}>Assign to {repLabel(r)}</option>
             ))}
@@ -306,7 +288,7 @@ export function AdminPanel(): JSX.Element {
         groups.map((g) => (
           <div className="admin-group" key={g.key}>
             <div className="admin-group-head">
-              {g.icon === 'rep' ? <UserIcon /> : <ShieldIcon />}
+              {g.icon === 'rep' ? <UserIcon /> : g.icon === 'ai' ? <ZapIcon /> : <ShieldIcon />}
               <span className="g-title">{g.title}</span>
               <span className="count">{g.rows.length}</span>
             </div>
@@ -322,11 +304,12 @@ export function AdminPanel(): JSX.Element {
                   <span className={`health-dot health-${n.health}`} title={`Health: ${n.health.replace('_', ' ')}`} />
                   <select
                     className="field num-assign"
-                    value={n.assignedUserId ?? RESERVE}
+                    value={placementOf(n)}
                     disabled={busyId === n.id}
-                    onChange={(e) => assign(n.id, e.target.value)}
+                    onChange={(e) => assign(n, e.target.value)}
                   >
                     <option value={RESERVE}>Reserve</option>
+                    <option value={AI_CALLS}>{AI_CALLS_LABEL}</option>
                     {reps.map((r) => (
                       <option key={r.id} value={r.id}>{repLabel(r)}</option>
                     ))}
