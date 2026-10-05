@@ -14,6 +14,9 @@ describe('agentPlanTextIssues (CF-9 post-validation)', () => {
     'If they ask for a real person, offer to connect them.'.replace('offer to connect', 'connect'),
     'Mention we buy as-is, so the roof does not need fixing first.',
     'Has the U.S. Bank loan been paid down?',
+    'Ask what they think the house is worth.',
+    'Ask whether the house is worth fixing up before they sell.',
+    'Ask if they have had other offers or listed it before.',
   ])('passes ordinary plan text: %s', (text) => {
     expect(multi(text)).toEqual([]);
     expect(single(text)).toEqual([]);
@@ -34,7 +37,12 @@ describe('agentPlanTextIssues (CF-9 post-validation)', () => {
     ['Costs €5000.', 'money'],
     ['Make a cash offer today.', 'offer'],
     ['We already offered them a deal.', 'offer'],
-    ['Tell them what the house is worth.', 'offer'],
+    ['Lead with our offer.', 'offer'],
+    ['We can offer a fast close.', 'offer'],
+    ["We'll offer to close in a week.", 'offer'],
+    ['Offer you a quick sale.', 'offer'],
+    ['Make an offer before they hang up.', 'offer'],
+    ['Say we will pay you in cash.', 'offer'],
     ["Say you're a real person from the office.", 'human_claim'],
     ['I am a human, not a machine.', 'human_claim'],
     ['You are not an AI.', 'human_claim'],
@@ -66,7 +74,7 @@ describe('agentPlanTextIssues (CF-9 post-validation)', () => {
   });
 
   it('reports each issue once, in a fixed order', () => {
-    expect(multi('Offer $5 at <x> https://a.io and say you are a human\u0001')).toEqual([
+    expect(multi('Make an offer of $5 at <x> https://a.io and say you are a human\u0001')).toEqual([
       'money',
       'offer',
       'human_claim',
@@ -82,7 +90,7 @@ describe('agentPlanTextIssues (CF-9 post-validation)', () => {
   });
 
   it('is case-insensitive', () => {
-    expect(multi('OFFER')).toEqual(['offer']);
+    expect(multi('MAKE AN OFFER')).toEqual(['offer']);
     expect(multi('SKIP THE DISCLOSURE')).toEqual(['disclosure_skip']);
     expect(multi('WWW.EXAMPLE.COM')).toEqual(['url']);
   });

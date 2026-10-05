@@ -31,7 +31,18 @@ const MONEY: readonly RegExp[] = [
   /\d{5,}/,
 ];
 
-const OFFER: readonly RegExp[] = [/\boffer/i, /\bworth/i];
+/**
+ * Offer phrasing only. The bare word is allowed ("other offers"), and so is "worth": asking what the owner thinks the
+ * house is worth is a legitimate question. Amounts are caught by MONEY.
+ */
+const OFFER: readonly RegExp[] = [
+  /\b(?:our|my|the|an?)\s+(?:\w+\s+)?offers?\b/i,
+  /\bcash\s+offers?\b/i,
+  /\b(?:we|i)(?:'ll|\s+(?:can|could|will|would|may|might|are going to))\s+offer\b/i,
+  /\boffer(?:s|ed|ing)?\s+(?:you|them|him|her|us)\b/i,
+  /\b(?:make|making|made|give|giving|submit|submitting|present|presenting)\s+(?:you\s+|them\s+|him\s+|her\s+)?(?:\w+\s+)?offers?\b/i,
+  /\b(?:pay|paying|paid)\s+(?:you|them|him|her)\b/i,
+];
 
 const HUMAN_CLAIM: readonly RegExp[] = [
   /\b(?:i am|i'm|im|we are|we're|you are|you're|youre)\s+(?:a\s+|an\s+)?(?:real\s+|actual\s+|live\s+)?(?:human|person)\b/i,
