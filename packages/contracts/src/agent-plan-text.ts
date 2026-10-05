@@ -18,17 +18,22 @@ export const AGENT_PLAN_ISSUES = [
   'url',
   'angle_bracket',
   'control_char',
+  'disallowed_char',
   'line_break',
 ] as const;
 export type AgentPlanIssue = (typeof AGENT_PLAN_ISSUES)[number];
 
+/**
+ * Amounts in digits and in words. Deliberately blunt: any run of three digits fails (a price like "around 250", a year,
+ * a house number, a ZIP), as do "low 300s" and the words hundred/thousand/million/grand. A plan needs none of them.
+ */
 const MONEY: readonly RegExp[] = [
   /[$\u20AC\u00A3\u00A5]/,
   /\d+(?:[.,]\d+)?\s*k\b/i,
-  /\d+(?:[.,]\d+)?\s*(?:million|mil|mm|grand|thousand|bucks|dollars?|usd)\b/i,
-  /\b(?:dollars?|bucks|usd)\b/i,
+  /\b(?:dollars?|bucks|usd|cents?)\b/i,
+  /\b(?:hundred|thousand|million|billion|grand|mil)s?\b/i,
+  /\d{3,}/,
   /\d{1,3}(?:,\d{3})+/,
-  /\d{5,}/,
 ];
 
 /**
@@ -44,15 +49,24 @@ const OFFER: readonly RegExp[] = [
   /\b(?:pay|paying|paid)\s+(?:you|them|him|her)\b/i,
 ];
 
+const REAL = String.raw`(?:(?:real|actual|live|living|genuine|flesh and blood)\s+)*`;
+
 const HUMAN_CLAIM: readonly RegExp[] = [
-  /\b(?:i am|i'm|im|we are|we're|you are|you're|youre)\s+(?:a\s+|an\s+)?(?:real\s+|actual\s+|live\s+)?(?:human|person)\b/i,
-  /\bnot\s+(?:an?\s+)?(?:ai|a\.i\.?|robot|bot|machine|computer|automated|recording)\b/i,
-  /\b(?:pretend|pretending|claim|claiming|act like|acting like|pose as|posing as|say|saying|tell them|tell him|tell her)\b[^.\n]{0,40}\b(?:human|real person|a person|live person)\b/i,
+  new RegExp(String.raw`\b(?:i am|i'm|im|we are|we're|you are|you're|youre)\s+(?:a\s+|an\s+)?${REAL}(?:human|person|human being)\b`, 'i'),
+  /\bnot\s+(?:an?\s+)?(?:ai|a\.i\.?|robot|bot|machine|computer|automated|artificial|recording)\b/i,
+  /\b(?:pretend|pretending|claim|claiming|act like|acting like|pose as|posing as|say|saying|tell them|tell him|tell her|insist|insisting)\b[^.\n]{0,40}\b(?:human|real person|a person|live person)\b/i,
+  new RegExp(String.raw`\b(?:speaking|talking|chatting)\s+(?:with|to)\s+(?:a|an)\s+(?:${REAL}human|human being|real person|live person|living person|actual person)\b`, 'i'),
 ];
+
+const AI_WORDS = String.raw`(?:ai|a\.i\.?|artificial|robot|bot|automated|machine|computer|recorded|recording)`;
 
 const DISCLOSURE_SKIP: readonly RegExp[] = [
   /\bdisclos/i,
-  /\b(?:skip|skipping|omit|omitting|drop|hide|leave out|don't mention|do not mention|don't say|do not say|never mention|never say|without mentioning|without saying|no need to mention|no need to say)\b[^.\n]{0,40}\b(?:ai|a\.i\.?|artificial|robot|bot|automated|recorded|recording)\b/i,
+  new RegExp(
+    String.raw`\b(?:skip|skipping|omit|omitting|drop|hide|hiding|conceal|leave out|don't mention|do not mention|don't say|do not say|never mention|never say|without mentioning|without saying|no need to mention|no need to say|avoid saying|avoid mentioning)\b[^.\n]{0,40}\b${AI_WORDS}\b`,
+    'i',
+  ),
+  new RegExp(String.raw`\b(?:don't|do not|never|not to|shouldn't|should not)\s+(?:tell|admit|reveal|let on|confess|acknowledge|confirm|volunteer)\b[^.\n]{0,50}\b${AI_WORDS}\b`, 'i'),
 ];
 
 const URL_LIKE: readonly RegExp[] = [
@@ -64,26 +78,44 @@ const URL_LIKE: readonly RegExp[] = [
 const ANGLE = /[<>]/;
 /** C0/C1 controls except tab and LF, format characters (zero-width etc.) and the Unicode line/paragraph separators. */
 const CONTROL = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\u2029]|\p{Cf}/u;
+const CONTROL_EVERYWHERE = new RegExp(CONTROL.source, 'gu');
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 const LINE_BREAK = /[\n\r]/;
+
+/**
+ * The allowlist (S-2), applied after NFKC: Latin letters with their common accents (not × or ÷), digits, the space, tab
+ * and line feed, and basic punctuation: . , ; : ! ? ' " ( ) - / & % # @ + _ plus curly quotes, en and em dashes and the
+ * ellipsis. Anything else (look-alike brackets and letters from other scripts, emoji, symbols, backticks, braces)
+ * rejects the plan. `$ € £ ¥ < >` are left to the checks that name them.
+ */
+const OUTSIDE_ALLOWLIST = /[^A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u024F0-9 \t\n.,;:!?'"()\-/&%#@+_\u2018\u2019\u201C\u201D\u2013\u2014\u2026$\u20AC\u00A3\u00A5<>]/u;
+/** Dot look-alikes NFKC leaves alone (ideographic and halfwidth full stops), so "www。evil。com" still reads as a URL. */
+const DOT_LOOKALIKES = /[\u3002\uFF61\u2024\uFE52\u00B7\u2027]/g;
 
 const any = (patterns: readonly RegExp[], text: string): boolean => patterns.some((p) => p.test(text));
 
 /**
  * Every reason `text` may not reach the voice agent, each once, in AGENT_PLAN_ISSUES order;
  * `[]` means it passes. `singleLine` also refuses a line break (a one-line field).
+ *
+ * The text is NFKC-normalised first (fullwidth and presentation forms read as plain ASCII: "\uFF1C" is "<", a fullwidth
+ * "\uFF2F\uFF26\uFF26\uFF25\uFF32" is "OFFER"), so no look-alike gets past the word checks, and then it must stay inside the allowlist.
  */
 export function agentPlanTextIssues(text: string, opts: { singleLine: boolean }): AgentPlanIssue[] {
+  const control = CONTROL.test(text) || LONE_SURROGATE.test(text);
   // Curly apostrophes read as straight ones, so "don’t mention" is caught like "don't mention".
-  const plain = text.replace(/[\u2018\u2019\u02BC]/g, "'");
+  const plain = text.normalize('NFKC').replace(/[\u2018\u2019\u02BC]/g, "'");
+  const checked = plain.replace(DOT_LOOKALIKES, '.');
   const found = new Set<AgentPlanIssue>();
-  if (any(MONEY, plain)) found.add('money');
-  if (any(OFFER, plain)) found.add('offer');
-  if (any(HUMAN_CLAIM, plain)) found.add('human_claim');
-  if (any(DISCLOSURE_SKIP, plain)) found.add('disclosure_skip');
-  if (any(URL_LIKE, plain)) found.add('url');
-  if (ANGLE.test(plain)) found.add('angle_bracket');
-  if (CONTROL.test(text) || LONE_SURROGATE.test(text)) found.add('control_char');
+  if (any(MONEY, checked)) found.add('money');
+  if (any(OFFER, checked)) found.add('offer');
+  if (any(HUMAN_CLAIM, checked)) found.add('human_claim');
+  if (any(DISCLOSURE_SKIP, checked)) found.add('disclosure_skip');
+  if (any(URL_LIKE, checked)) found.add('url');
+  if (ANGLE.test(checked)) found.add('angle_bracket');
+  if (control || CONTROL.test(plain)) found.add('control_char');
+  // What is left once the control characters are gone must be on the allowlist (they already have their own issue).
+  if (OUTSIDE_ALLOWLIST.test(plain.replace(CONTROL_EVERYWHERE, ''))) found.add('disallowed_char');
   if (opts.singleLine && LINE_BREAK.test(text)) found.add('line_break');
   return AGENT_PLAN_ISSUES.filter((issue) => found.has(issue));
 }
