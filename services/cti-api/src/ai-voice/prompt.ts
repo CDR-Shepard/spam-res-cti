@@ -16,9 +16,10 @@
  * telephone number, so when `callbackNumber` is given the voicemail ends with
  * it and the live agent gives it before every non-transfer goodbye.
  */
+import { approvedPlanText, neutraliseFences, planSection, PLAN_PROMPT_MAX } from './prompt-plan.js';
 import { AI_CALL_TOOLS, TOOL_NAMES, type RealtimeFunctionTool, type ToolName } from './prompt-tools.js';
 
-export { AI_CALL_TOOLS, TOOL_NAMES, type RealtimeFunctionTool, type ToolName };
+export { AI_CALL_TOOLS, PLAN_PROMPT_MAX, TOOL_NAMES, type RealtimeFunctionTool, type ToolName };
 
 export interface PromptInput {
   agentName: string;
@@ -31,6 +32,8 @@ export interface PromptInput {
   localTime: string;
   /** E.164 number people can call back on (the call's caller-ID DID); null omits every mention. */
   callbackNumber: string | null;
+  /** The plan a person approved for this call (plan 1C, prompt-plan.ts); absent/null = none. */
+  approvedPlan?: string | null;
 }
 
 const FIRST_NAME_MAX = 40;
@@ -59,7 +62,7 @@ function oneLine(s: string | null, max: number): string | null {
  * the fence. Capped, keeping the newest (the tail — Tasks come newest last).
  */
 function fenceSafe(notes: string): string {
-  const body = notes.replace(/<\s*(\/?)\s*crm_notes\s*>/gi, '[$1crm_notes]').trim();
+  const body = neutraliseFences(notes).trim();
   if (!body) return '(no notes on file)';
   return body.length <= NOTES_PROMPT_MAX ? body : `…${body.slice(body.length - (NOTES_PROMPT_MAX - 1)).trimStart()}`;
 }
@@ -123,6 +126,7 @@ interface Ctx {
   localTime: string;
   notes: string;
   phone: { written: string; spoken: string } | null;
+  plan: string | null;
 }
 
 function context(p: PromptInput): Ctx {
@@ -137,6 +141,7 @@ function context(p: PromptInput): Ctx {
     localTime: oneLine(p.localTime, LABEL_MAX) ?? 'unknown',
     notes: fenceSafe(p.notes),
     phone: phoneForms(p.callbackNumber),
+    plan: approvedPlanText(p.approvedPlan),
   };
 }
 
@@ -334,6 +339,7 @@ export function buildInstructions(p: PromptInput): string {
     languageSection(c),
     disclosureSection(c),
     contextSection(c),
+    planSection(c.plan, c.company),
     flowSection(c),
     DO_NOT_CALL,
     rulesSection(c),
@@ -341,7 +347,9 @@ export function buildInstructions(p: PromptInput): string {
     voicemailSection(c),
     UNCLEAR_AUDIO,
     SAFETY,
-  ].join('\n\n');
+  ]
+    .filter((section): section is string => section !== null)
+    .join('\n\n');
 }
 
 /**

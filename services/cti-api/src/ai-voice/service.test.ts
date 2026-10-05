@@ -241,3 +241,22 @@ describe('startAiCall — the call is live before its row is updated', () => {
     if (res.ok) expect(getActiveCall(res.aiCallId)?.callSid).toBe(CALL_SID);
   });
 });
+
+describe('startAiCall — the approved plan (plan 1C)', () => {
+  it('registers the active call with the plan as prompt.approvedPlan', async () => {
+    const res = await startAiCall({ db, cfg, session, target: { objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' }, plan: 'PLAN', deps });
+    if (!res.ok) throw new Error('unreachable');
+    expect(getActiveCall(res.aiCallId)?.prompt.approvedPlan).toBe('PLAN');
+  });
+
+  it('without a plan the prompt carries none (the instructions stay as they were)', async () => {
+    for (const plan of [undefined, null, '']) {
+      const res = await startAiCall({ db, cfg, session, target: { objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' }, plan, deps });
+      if (!res.ok) throw new Error('unreachable');
+      expect(getActiveCall(res.aiCallId)?.prompt.approvedPlan ?? null).toBeNull();
+      expect('approvedPlan' in getActiveCall(res.aiCallId)!.prompt).toBe(false);
+      clearActiveCalls();
+      store.rows.clear();
+    }
+  });
+});

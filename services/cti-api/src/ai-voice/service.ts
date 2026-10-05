@@ -58,6 +58,8 @@ export interface StartInput {
   cfg: AppConfig;
   session: SessionUser;
   target: StartTarget;
+  /** The approved call plan (plan 1C internal trigger); the prompt fences it as data. */
+  plan?: string | null;
   deps: StartDeps;
 }
 
@@ -205,6 +207,7 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
         notes: record?.notes ?? '',
         isTest,
         callbackNumber: gate.fromE164,
+        ...(i.plan ? { approvedPlan: i.plan } : {}),
       },
       bridge: null,
       transcript: null,
