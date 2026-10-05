@@ -281,6 +281,13 @@ const DRIZZLE: Record<string, PgTable> = {
   ai_usage_days: aiUsageDays,
 };
 
+/** Columns later migrations add to 0051's tables; each is pinned by its own migration test. */
+const ADDED_LATER: Readonly<Record<string, readonly string[]>> = {
+  campaigns: ['mode'], // 0052
+  campaign_enrollments: ['call_stage', 'call_prepare_attempted_at', 'call_prepare_error'], // 0052
+  touches: ['ai_call_id', 'call_plan_id', 'requested_by', 'attempts', 'trigger_key', 'last_block_reason'], // 0052
+};
+
 describe('migration 0051_outreach_campaigns', () => {
   it('creates exactly the ten outreach tables, each idempotently', () => {
     const creates = statements.filter((s) => s.startsWith('CREATE TABLE'));
@@ -330,8 +337,10 @@ describe('migration 0051_outreach_campaigns', () => {
       const cfg = getTableConfig(drizzleTable);
       expect(cfg.name).toBe(table);
       const sqlColumns = TABLES[table]!.map((c) => /^"([a-z_]+)"/.exec(c)![1]);
-      expect(cfg.columns.map((c) => c.name)).toEqual(sqlColumns);
-      for (const col of cfg.columns) {
+      const later = ADDED_LATER[table] ?? [];
+      // Order-insensitive: Drizzle keeps later columns next to their siblings, SQL appends them.
+      expect(cfg.columns.map((c) => c.name).sort()).toEqual([...sqlColumns, ...later].sort());
+      for (const col of cfg.columns.filter((c) => !later.includes(c.name))) {
         const def = TABLES[table]!.find((c) => c.startsWith(`"${col.name}" `))!;
         expect({ column: col.name, notNull: col.notNull || col.primary }).toEqual({
           column: col.name,
@@ -351,6 +360,8 @@ describe('migration 0051_outreach_campaigns', () => {
   it('Drizzle indexes carry the SQL names, uniqueness, and partial predicates', () => {
     const all = Object.values(DRIZZLE).flatMap((t) => getTableConfig(t).indexes);
     const byName = new Map(all.map((i) => [i.config.name, i.config]));
+    // Indexes later migrations add to 0051's tables (pinned by their own tests).
+    for (const later of ['campaign_enrollments_call_stage_idx', 'touches_ai_call_idx']) byName.delete(later); // 0052
     expect([...byName.keys()].sort()).toEqual(INDEXES.map((s) => /INDEX IF NOT EXISTS "([a-z_]+)"/.exec(s)![1]).sort());
     for (const stmt of INDEXES) {
       const name = /INDEX IF NOT EXISTS "([a-z_]+)"/.exec(stmt)![1]!;

@@ -48,6 +48,14 @@ export const TOUCH_STATUSES = ['planned', 'held', 'queued', 'dialing', 'sent', '
 export const SF_WRITE_KINDS = ['task', 'consent', 'do_not_contact'] as const;
 /** sf_writes.status (CHECK). */
 export const SF_WRITE_STATUSES = ['pending', 'done', 'failed'] as const;
+/** campaigns.mode (CHECK): sequence = plan 1A; ai_call = plan 1C. */
+export const CAMPAIGN_MODES = ['sequence', 'ai_call'] as const;
+/** campaign_enrollments.call_stage (CHECK); NULL for sequence campaigns. */
+export const CALL_STAGES = ['research', 'review', 'approved', 'queued', 'done'] as const;
+/** call_plans.status (CHECK). Current = proposed | approved (partial unique). */
+export const CALL_PLAN_STATUSES = ['proposed', 'approved', 'rejected', 'superseded'] as const;
+/** call_plans.source (CHECK). */
+export const CALL_PLAN_SOURCES = ['model', 'edit'] as const;
 
 /** One company-wide Salesforce connection per tenant (the Integration user). */
 export const crmConnections = pgTable(
@@ -122,6 +130,8 @@ export const campaigns = pgTable(
     refreshStartedAt: timestamp('refresh_started_at', { withTimezone: true }),
     /** Cursor of the refresh's Task check; moves only when the check succeeds. */
     tasksCheckedAt: timestamp('tasks_checked_at', { withTimezone: true }),
+    /** sequence | ai_call; fixed at creation. */
+    mode: text('mode').$type<(typeof CAMPAIGN_MODES)[number]>().default('sequence').notNull(),
     createdBy: uuid('created_by'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
@@ -208,12 +218,17 @@ export const campaignEnrollments = pgTable(
     reviewTriageId: uuid('review_triage_id'),
     nextTouchAt: timestamp('next_touch_at', { withTimezone: true }),
     touchesDone: integer('touches_done').default(0).notNull(),
+    /** AI call campaigns only: research → review → approved → queued → done. */
+    callStage: text('call_stage').$type<(typeof CALL_STAGES)[number]>(),
+    callPrepareAttemptedAt: timestamp('call_prepare_attempted_at', { withTimezone: true }),
+    callPrepareError: text('call_prepare_error'),
     enrolledAt: timestamp('enrolled_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
     campaignRecordUnique: uniqueIndex('campaign_enrollments_campaign_record_unique').on(t.campaignId, t.crmRecordId),
     orgStatusNextIdx: index('campaign_enrollments_org_status_next_idx').on(t.orgId, t.status, t.nextTouchAt),
+    callStageIdx: index('campaign_enrollments_call_stage_idx').on(t.callStage, t.orgId).where(sql`call_stage IN ('research', 'approved')`),
   }),
 );
 
@@ -258,6 +273,15 @@ export const touches = pgTable(
     skipReason: text('skip_reason'),
     /** Set once, by the compare-and-swap that counts this touch toward `touches_done`. */
     countedAt: timestamp('counted_at', { withTimezone: true }),
+    /** ai_calls.id of the placed call (FK in SQL only). */
+    aiCallId: uuid('ai_call_id'),
+    callPlanId: uuid('call_plan_id'),
+    requestedBy: uuid('requested_by'),
+    /** Triggers sent to @cti/api for this touch. */
+    attempts: integer('attempts').default(0).notNull(),
+    /** Idempotency key of the trigger in flight; NULL once a definite answer is stored. */
+    triggerKey: text('trigger_key'),
+    lastBlockReason: text('last_block_reason'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
@@ -266,6 +290,7 @@ export const touches = pgTable(
     enrollmentSeqUnique: uniqueIndex('touches_enrollment_seq_unique').on(t.enrollmentId, t.seq),
     orgStatusDueIdx: index('touches_org_status_due_idx').on(t.orgId, t.status, t.dueAt),
     dialerSessionIdx: index('touches_dialer_session_idx').on(t.dialerSessionId).where(sql`dialer_session_id IS NOT NULL`),
+    aiCallIdx: index('touches_ai_call_idx').on(t.aiCallId).where(sql`ai_call_id IS NOT NULL`),
   }),
 );
 
@@ -309,9 +334,75 @@ export const aiUsageDays = pgTable(
   }),
 );
 
+/** Leads an admin ticked in an AI call campaign's lead picker. */
+export const campaignSelections = pgTable(
+  'campaign_selections',
+  {
+    campaignId: uuid('campaign_id').notNull(),
+    orgId: uuid('org_id').notNull(),
+    sfRecordId: text('sf_record_id').notNull(),
+    selectedBy: uuid('selected_by'),
+    selectedAt: timestamp('selected_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ name: 'campaign_selections_pkey', columns: [t.campaignId, t.sfRecordId] }),
+  }),
+);
+
+/** One research run per row: the capped Salesforce snapshot (ResearchSnapshot, outreach-api research/snapshot.ts). */
+export const callResearch = pgTable(
+  'call_research',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull(),
+    enrollmentId: uuid('enrollment_id').notNull(),
+    crmRecordId: uuid('crm_record_id').notNull(),
+    version: integer('version').notNull(),
+    snapshot: jsonb('snapshot').notNull(),
+    /** ResearchSourceSummary[] (@cti/contracts call-plans.ts). */
+    sources: jsonb('sources').$type<unknown[]>().default(sql`'[]'::jsonb`).notNull(),
+    sizeChars: integer('size_chars').notNull(),
+    contentHash: text('content_hash').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    enrollmentVersionUnique: uniqueIndex('call_research_enrollment_version_unique').on(t.enrollmentId, t.version),
+  }),
+);
+
+/** One call plan version per row. `plan` is a zod-validated CallPlan (@cti/contracts call-plans.ts). */
+export const callPlans = pgTable(
+  'call_plans',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull(),
+    enrollmentId: uuid('enrollment_id').notNull(),
+    researchId: uuid('research_id').notNull(),
+    version: integer('version').notNull(),
+    status: text('status').$type<(typeof CALL_PLAN_STATUSES)[number]>().default('proposed').notNull(),
+    source: text('source').$type<(typeof CALL_PLAN_SOURCES)[number]>().notNull(),
+    model: text('model'),
+    plan: jsonb('plan').notNull(),
+    dncFlagged: boolean('dnc_flagged').default(false).notNull(),
+    inputTokens: integer('input_tokens').default(0).notNull(),
+    outputTokens: integer('output_tokens').default(0).notNull(),
+    createdBy: uuid('created_by'),
+    decidedBy: uuid('decided_by'),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    enrollmentVersionUnique: uniqueIndex('call_plans_enrollment_version_unique').on(t.enrollmentId, t.version),
+    currentUnique: uniqueIndex('call_plans_current_unique').on(t.enrollmentId).where(sql`status IN ('proposed', 'approved')`),
+  }),
+);
+
 export type CrmConnectionRow = typeof crmConnections.$inferSelect;
 export type CampaignRow = typeof campaigns.$inferSelect;
 export type CrmRecordRow = typeof crmRecords.$inferSelect;
 export type CampaignEnrollmentRow = typeof campaignEnrollments.$inferSelect;
 export type TouchRow = typeof touches.$inferSelect;
 export type SfWriteRow = typeof sfWrites.$inferSelect;
+export type CampaignSelectionRow = typeof campaignSelections.$inferSelect;
+export type CallResearchRow = typeof callResearch.$inferSelect;
+export type CallPlanRow = typeof callPlans.$inferSelect;

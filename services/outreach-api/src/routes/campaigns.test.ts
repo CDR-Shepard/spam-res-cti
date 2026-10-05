@@ -38,7 +38,7 @@ const connection = { id: 'CONN1', orgId: 'O1', provider: 'salesforce', status: '
 function campaignRow(over: Record<string, unknown> = {}) {
   return {
     id: CAMPAIGN_ID, orgId: 'O1', name: 'Probate', sfObject: 'Lead', sourceKind: 'soql', listViewId: null, soql: 'SELECT Id FROM Lead', status: 'draft', pauseReason: null, pausedFrom: null,
-    refreshMinutes: 240, touchDays: [0, 1, 3, 6, 10, 14], approvalsRemaining: 50, playbook: {}, memberCount: 0, lastRefreshedAt: null, lastRefreshError: null, refreshStartedAt: null,
+    refreshMinutes: 240, touchDays: [0, 1, 3, 6, 10, 14], approvalsRemaining: 50, playbook: {}, memberCount: 0, lastRefreshedAt: null, lastRefreshError: null, refreshStartedAt: null, mode: 'sequence',
     createdBy: ADMIN_ID, createdAt: new Date('2026-10-04T12:00:00Z'), updatedAt: new Date('2026-10-04T12:00:00Z'), ...over,
   };
 }
