@@ -162,7 +162,11 @@ export async function approvePlan(db: Db, ctx: RequestContext, enrollmentId: str
     // The board shows these as blocking warnings; the same rule stops an approval nobody could act on (M-7).
     if (await recordIsBlocked(tx, ctx.orgId, row, 'yes', now)) throw new DecisionError('RECORD_BLOCKED');
     await tx.update(schema.callPlans).set({ status: 'approved', decidedBy: ctx.session.userId, decidedAt: now }).where(eq(schema.callPlans.id, plan.id));
-    await setStage(tx, enrollmentId, 'approved', now);
+    // A new approval answers the reason the pacer sent the plan back (ai-calls/stage.ts parkPlan), so the board drops it.
+    await tx
+      .update(schema.campaignEnrollments)
+      .set({ callStage: 'approved', callPrepareError: null, updatedAt: now })
+      .where(eq(schema.campaignEnrollments.id, enrollmentId));
   });
 }
 

@@ -38,4 +38,5 @@ export const QUEUES: readonly QueueDefinition[] = [
   { name: 'record.triage', options: TICK_QUEUE_OPTIONS },
   { name: 'touch.plan', options: TICK_QUEUE_OPTIONS },
   { name: 'call.prepare', options: TICK_QUEUE_OPTIONS },
+  { name: 'ai_call.place', options: TICK_QUEUE_OPTIONS },
 ];

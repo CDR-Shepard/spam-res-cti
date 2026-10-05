@@ -6,6 +6,8 @@ import { getDb, getPool } from '@cti/db';
 import { AnthropicCallPlanModel } from './ai/call-plan-model.js';
 import { AnthropicTriageModel } from './ai/model.js';
 import { buildApp } from './app.js';
+import { httpCtiClient } from './ai-calls/cti-client.js';
+import { placeDueAiCalls } from './ai-calls/pace.js';
 import { prepareDueCalls } from './call-plans/prepare.js';
 import { WorkosIdentityProvider } from './auth/workos-provider.js';
 import { loadConfig } from './config.js';
@@ -60,6 +62,8 @@ async function main(): Promise<void> {
     cfg.aiEnabled && cfg.ANTHROPIC_API_KEY
       ? new AnthropicCallPlanModel({ client: new Anthropic({ apiKey: cfg.ANTHROPIC_API_KEY, timeout: 120_000, maxRetries: 2 }), model: cfg.CALL_PLAN_MODEL })
       : null;
+  // The signed internal AI call trigger (plan 1C); null until CTI_INTERNAL_URL and OUTREACH_INTERNAL_SECRET are set.
+  const cti = cfg.aiCallsEnabled ? httpCtiClient({ CTI_INTERNAL_URL: cfg.CTI_INTERNAL_URL!, OUTREACH_INTERNAL_SECRET: cfg.OUTREACH_INTERNAL_SECRET! }) : null;
   const handlers: Record<string, JobHandler> = {
     ...(cfg.salesforceEnabled
       ? {
@@ -79,6 +83,13 @@ async function main(): Promise<void> {
       ? {
           'call.prepare': async () => {
             await prepareDueCalls({ db, clients, model: planModel, describes, now: new Date(), log: console });
+          },
+        }
+      : {}),
+    ...(cfg.salesforceEnabled && cti
+      ? {
+          'ai_call.place': async () => {
+            await placeDueAiCalls({ db, clients, cti, now: new Date(), log: console });
           },
         }
       : {}),

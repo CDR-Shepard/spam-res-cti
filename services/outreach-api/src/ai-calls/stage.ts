@@ -1,0 +1,76 @@
+/**
+ * Where a lead goes when its queued call must not go ahead as planned, short of leaving the campaign.
+ * Every write is a compare-and-swap on a lead still `active` at `queued`, so a lead that moved on (held,
+ * exited, reactivated at `research`) is never pulled back.
+ *
+ *  - parkPlan (CF-12): the plan can't be used: cti-api refused its text (`plan_rejected`), or the approver
+ *    can't place AI calls (`unknown_user`). The approval is withdrawn and the lead waits on the board with
+ *    the reason; nothing retries until a person approves a plan again.
+ *  - backToResearch (CF-1): Salesforce has activity the research never saw. New research, then a new plan
+ *    for a person to approve. The current plan stays on the card until the new one supersedes it, exactly
+ *    as after "Research again".
+ *  - planNoLongerApproved: the touch's plan is not the approved plan any more (an approval withdrawn, or a
+ *    touch left from before a reactivation, CF-3). The touch is skipped; a lead still at `queued` goes back
+ *    to review when a proposed plan waits, to research when there is no plan at all, and stays put when
+ *    another approved plan carries its own touch.
+ */
+import { and, eq, inArray, sql } from 'drizzle-orm';
+import { schema, type Db } from '@cti/db';
+import type { ParkReason } from './pacing-rules.js';
+import { skipTouch } from './touches.js';
+
+export const PARK_WORDS: Readonly<Record<ParkReason, string>> = {
+  plan_rejected: "The voice agent refused this plan's text. Edit the plan, then approve it again.",
+  unknown_user: 'The approver cannot place AI calls (no CTI user). Someone who can must approve the plan again.',
+};
+export const BACK_TO_RESEARCH_WORDS = 'New activity in Salesforce since the research: researching again before any call.';
+export const NEW_ACTIVITY_SKIP_REASON = 'new_salesforce_activity';
+export const PLAN_NOT_APPROVED_SKIP_REASON = 'plan_not_approved';
+
+const queuedLead = (enrollmentId: string) => {
+  const e = schema.campaignEnrollments;
+  return and(eq(e.id, enrollmentId), eq(e.status, 'active'), eq(e.callStage, 'queued'));
+};
+
+export async function parkPlan(db: Db, t: { touchId: string; enrollmentId: string; planId: string | null }, reason: ParkReason, now: Date): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx
+      .update(schema.touches)
+      .set({ status: 'failed', lastBlockReason: reason, triggerKey: null, updatedAt: now })
+      .where(and(eq(schema.touches.id, t.touchId), inArray(schema.touches.status, ['planned', 'dialing'])));
+    const back = await tx
+      .update(schema.campaignEnrollments)
+      .set({ callStage: 'review', callPrepareError: PARK_WORDS[reason], updatedAt: now })
+      .where(queuedLead(t.enrollmentId))
+      .returning({ id: schema.campaignEnrollments.id });
+    if (back.length === 0 || !t.planId) return;
+    await tx
+      .update(schema.callPlans)
+      .set({ status: 'proposed', decidedBy: null, decidedAt: null })
+      .where(and(eq(schema.callPlans.id, t.planId), eq(schema.callPlans.enrollmentId, t.enrollmentId), eq(schema.callPlans.status, 'approved')));
+  });
+}
+
+export async function backToResearch(db: Db, t: { touchId: string; enrollmentId: string }, now: Date): Promise<void> {
+  await db.transaction(async (tx) => {
+    if (!(await skipTouch(tx as unknown as Db, t.touchId, NEW_ACTIVITY_SKIP_REASON, now))) return;
+    await tx
+      .update(schema.campaignEnrollments)
+      .set({ callStage: 'research', callPrepareAttemptedAt: null, callPrepareError: BACK_TO_RESEARCH_WORDS, callPrepareFailures: 0, updatedAt: now })
+      .where(queuedLead(t.enrollmentId));
+  });
+}
+
+export async function planNoLongerApproved(db: Db, t: { touchId: string; enrollmentId: string }, now: Date): Promise<void> {
+  await db.transaction(async (tx) => {
+    if (!(await skipTouch(tx as unknown as Db, t.touchId, PLAN_NOT_APPROVED_SKIP_REASON, now))) return;
+    await tx.execute(sql`
+      update campaign_enrollments e
+      set call_stage = case
+            when exists (select 1 from call_plans p where p.enrollment_id = e.id and p.status = 'proposed') then 'review'
+            else 'research' end,
+          updated_at = ${now.toISOString()}::timestamptz
+      where e.id = ${t.enrollmentId}::uuid and e.status = 'active' and e.call_stage = 'queued'
+        and not exists (select 1 from call_plans p where p.enrollment_id = e.id and p.status = 'approved')`);
+  });
+}
