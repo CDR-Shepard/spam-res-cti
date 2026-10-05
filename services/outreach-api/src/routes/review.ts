@@ -1,0 +1,206 @@
+/**
+ * Needs Review (spec §7.3): records the AI flagged do-not-contact wait here
+ * for their owner. Nothing is suppressed until a person decides.
+ *
+ *  - dismiss: the enrollment resumes and is planned on the next tick.
+ *  - confirm: every number on the record goes into the tenant's opt_outs, the
+ *    enrollment exits, and `onConfirmed` runs in the same transaction (1B wires
+ *    it to the Salesforce write-back outbox).
+ */
+import { and, desc, eq } from 'drizzle-orm';
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { DoNotContactCategory, ReviewDecision, type NeedsReviewItem, type NeedsReviewResponse } from '@cti/contracts';
+import { schema, type Db } from '@cti/db';
+import { exitEnrollment } from '../campaigns/enroll.js';
+import { sendError } from '../http/errors.js';
+import { requireContext, type RequestContext } from '../tenancy/scope.js';
+
+export interface ConfirmedDoNotContact {
+  orgId: string;
+  sfObject: 'Lead' | 'Opportunity';
+  sfRecordId: string;
+}
+
+export interface ReviewRouteDeps {
+  db: Db;
+  /** Runs inside the confirm transaction; 1B enqueues the Salesforce DoNotCall/HasOptedOutOfEmail write here. */
+  onConfirmed?: (args: ConfirmedDoNotContact, tx: Db) => Promise<void>;
+}
+
+export const REVIEW_LIST_LIMIT = 200;
+/** `opt_outs.source` for a number suppressed by a confirmed do-not-contact flag. */
+export const REVIEW_OPT_OUT_SOURCE = 'do_not_contact_review';
+export const CONFIRMED_EXIT_REASON = 'do_not_contact_confirmed';
+
+const Phones = z.array(z.object({ field: z.string(), e164: z.string() }));
+const EnrollmentParams = z.object({ enrollmentId: z.string().uuid() });
+
+const e = schema.campaignEnrollments;
+const r = schema.crmRecords;
+const c = schema.campaigns;
+
+const asSfObject = (value: string): 'Lead' | 'Opportunity' => (value === 'Opportunity' ? 'Opportunity' : 'Lead');
+
+/** Salesforce Ids compare on their case-sensitive 15-character core, so a 15- and an 18-character form match. */
+function sameSfId(a: string | null, b: string | null): boolean {
+  if (!a || !b || a.length < 15 || b.length < 15) return false;
+  return a.slice(0, 15) === b.slice(0, 15);
+}
+
+interface ReviewRow {
+  enrollmentId: string;
+  campaignId: string;
+  campaignName: string;
+  sfObject: string;
+  sfRecordId: string;
+  name: string | null;
+  ownerName: string | null;
+  category: string | null;
+  quote: string | null;
+  flaggedAt: Date | null;
+}
+
+function toItem(row: ReviewRow): NeedsReviewItem {
+  const category = DoNotContactCategory.safeParse(row.category);
+  return {
+    enrollmentId: row.enrollmentId,
+    campaignId: row.campaignId,
+    campaignName: row.campaignName,
+    sfObject: asSfObject(row.sfObject),
+    sfRecordId: row.sfRecordId,
+    name: row.name,
+    ownerName: row.ownerName,
+    category: category.success ? category.data : 'other',
+    quote: row.quote ?? '',
+    flaggedAt: (row.flaggedAt ?? new Date(0)).toISOString(),
+  };
+}
+
+async function listReview(db: Db, orgId: string): Promise<NeedsReviewResponse> {
+  const rows = await db
+    .select({
+      enrollmentId: e.id,
+      campaignId: c.id,
+      campaignName: c.name,
+      sfObject: r.sfObject,
+      sfRecordId: r.sfRecordId,
+      name: r.name,
+      ownerName: r.ownerName,
+      category: e.reviewCategory,
+      quote: e.reviewQuote,
+      flaggedAt: e.flaggedAt,
+    })
+    .from(e)
+    .innerJoin(c, eq(c.id, e.campaignId))
+    .innerJoin(r, eq(r.id, e.crmRecordId))
+    .where(and(eq(e.orgId, orgId), eq(e.status, 'needs_review')))
+    .orderBy(desc(e.flaggedAt))
+    .limit(REVIEW_LIST_LIMIT);
+  return { items: rows.map(toItem) };
+}
+
+interface ReviewTarget {
+  enrollmentId: string;
+  status: string;
+  ownerSfUserId: string | null;
+  phones: unknown;
+  sfObject: string;
+  sfRecordId: string;
+  category: string | null;
+  quote: string | null;
+}
+
+async function loadTarget(db: Db, orgId: string, enrollmentId: string): Promise<ReviewTarget | null> {
+  const [row] = await db
+    .select({
+      enrollmentId: e.id,
+      status: e.status,
+      ownerSfUserId: r.ownerSfUserId,
+      phones: r.phones,
+      sfObject: r.sfObject,
+      sfRecordId: r.sfRecordId,
+      category: e.reviewCategory,
+      quote: e.reviewQuote,
+    })
+    .from(e)
+    .innerJoin(r, eq(r.id, e.crmRecordId))
+    .where(and(eq(e.id, enrollmentId), eq(e.orgId, orgId)))
+    .limit(1);
+  return row ?? null;
+}
+
+/** Admins decide anything; anyone else only records they own in Salesforce (via the CTI's salesforce_connections). */
+async function mayDecide(db: Db, ctx: RequestContext, ownerSfUserId: string | null): Promise<boolean> {
+  if (ctx.session.isAdmin || ctx.session.isSuperAdmin) return true;
+  if (!ownerSfUserId) return false;
+  const [conn] = await db
+    .select({ sfUserId: schema.salesforceConnections.sfUserId })
+    .from(schema.salesforceConnections)
+    .where(eq(schema.salesforceConnections.userId, ctx.session.userId))
+    .limit(1);
+  return sameSfId(conn?.sfUserId ?? null, ownerSfUserId);
+}
+
+async function dismiss(db: Db, orgId: string, enrollmentId: string, now: Date): Promise<boolean> {
+  const resumed = await db
+    .update(e)
+    .set({ status: 'active', reviewCategory: null, reviewQuote: null, flaggedAt: null, nextTouchAt: now, updatedAt: now })
+    .where(and(eq(e.id, enrollmentId), eq(e.orgId, orgId), eq(e.status, 'needs_review')))
+    .returning({ id: e.id });
+  return resumed.length > 0;
+}
+
+async function confirm(deps: ReviewRouteDeps, ctx: RequestContext, target: ReviewTarget, now: Date): Promise<boolean> {
+  const parsed = Phones.safeParse(target.phones);
+  const numbers = [...new Set((parsed.success ? parsed.data : []).map((p) => p.e164))];
+  const note = `Do-not-contact confirmed by ${ctx.session.email}: ${target.category ?? 'other'} — "${target.quote ?? ''}"`.slice(0, 500);
+  return deps.db.transaction(async (tx) => {
+    // Compare-and-swap: of two concurrent confirms, only one gets the row.
+    const claimed = await tx
+      .update(e)
+      .set({ updatedAt: now })
+      .where(and(eq(e.id, target.enrollmentId), eq(e.orgId, ctx.orgId), eq(e.status, 'needs_review')))
+      .returning({ id: e.id });
+    if (claimed.length === 0) return false;
+    if (numbers.length > 0) {
+      await tx
+        .insert(schema.optOuts)
+        .values(numbers.map((e164) => ({ orgId: ctx.orgId, e164, source: REVIEW_OPT_OUT_SOURCE, note })))
+        .onConflictDoNothing();
+    }
+    await exitEnrollment(tx, target.enrollmentId, CONFIRMED_EXIT_REASON);
+    await deps.onConfirmed?.({ orgId: ctx.orgId, sfObject: asSfObject(target.sfObject), sfRecordId: target.sfRecordId }, tx);
+    return true;
+  });
+}
+
+export async function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps): Promise<void> {
+  const { db } = deps;
+
+  app.get('/review', async (req, reply) => {
+    const ctx = await requireContext(db, req, reply);
+    if (!ctx) return;
+    return listReview(db, ctx.orgId);
+  });
+
+  app.post('/review/:enrollmentId', async (req, reply) => {
+    const ctx = await requireContext(db, req, reply);
+    if (!ctx) return;
+    const params = EnrollmentParams.safeParse(req.params);
+    if (!params.success) return sendError(reply, 404, 'REVIEW_NOT_FOUND', 'No such review item');
+    const body = ReviewDecision.safeParse(req.body);
+    if (!body.success) return sendError(reply, 400, 'VALIDATION', 'Invalid decision', body.error.flatten());
+    const target = await loadTarget(db, ctx.orgId, params.data.enrollmentId);
+    if (!target) return sendError(reply, 404, 'REVIEW_NOT_FOUND', 'No such review item');
+    if (!(await mayDecide(db, ctx, target.ownerSfUserId))) {
+      return sendError(reply, 403, 'NOT_OWNER', "Only the record's owner or an admin can decide this");
+    }
+    if (target.status !== 'needs_review') return sendError(reply, 409, 'NOT_IN_REVIEW', 'This record is no longer waiting for review');
+    const now = new Date();
+    const done = body.data.decision === 'dismiss' ? await dismiss(db, ctx.orgId, target.enrollmentId, now) : await confirm(deps, ctx, target, now);
+    // A concurrent decision got there first.
+    if (!done) return sendError(reply, 409, 'NOT_IN_REVIEW', 'This record is no longer waiting for review');
+    return reply.code(204).send();
+  });
+}

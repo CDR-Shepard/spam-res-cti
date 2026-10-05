@@ -17,6 +17,7 @@ import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerCampaignRoutes } from './routes/campaigns.js';
 import { registerConnectionRoutes } from './routes/connections.js';
+import { registerReviewRoutes } from './routes/review.js';
 import { registerTeamRoutes } from './routes/team.js';
 import { shutdown } from './shutdown.js';
 import { triageDueRecords } from './triage/run.js';
@@ -79,6 +80,7 @@ async function main(): Promise<void> {
       (scope) => registerTeamRoutes(scope, { db, idp }),
       (scope) => registerConnectionRoutes(scope, { db, cfg, clients }),
       (scope) => registerCampaignRoutes(scope, { db, clients }),
+      (scope) => registerReviewRoutes(scope, { db }),
     ],
   });
   const close = () => shutdown(runner, app);
