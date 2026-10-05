@@ -36,7 +36,26 @@ export interface Fixtures {
    * fixture-guessing fallback (see below).
    */
   updateReturning?: Array<Record<string, unknown>>;
+  /**
+   * Rows for any other relational table, keyed by its `db.query` name (e.g.
+   * `crmConnections`, `crmOauthStates`, `campaigns`). Same no-filtering rule as
+   * the three above; a `db.query.<name>` not listed here answers
+   * `undefined`/`[]` rather than throwing.
+   */
+  tables?: Record<string, Array<Record<string, unknown>>>;
+  /**
+   * What awaited `select(...)` chains resolve to, one entry per chain in the
+   * order the code under test awaits them. Once used up, a chain resolves to
+   * `fx.users ?? []` (the original single-result behavior).
+   */
+  selectResults?: Array<Array<Record<string, unknown>>>;
+  /** What `delete(...).where(...)` yields, awaited directly or via `.returning()`; defaults to `[]`. */
+  deleteReturning?: Array<Record<string, unknown>>;
+  /** The database's column defaults (e.g. `createdAt`), merged under each `insert(...).values(v).returning()` row; `v` wins. */
+  insertDefaults?: Record<string, unknown>;
 }
+
+type Row = Record<string, unknown>;
 
 /**
  * Fake Drizzle handle in this repo's convention: `where` is not filtered
@@ -46,15 +65,20 @@ export interface Fixtures {
  * explicitly, or filter in the code under test (as completeSignIn does).
  *
  * Every `where` argument — passed to any table's `findFirst`/`findMany`, to a
- * `select(...).where(...)` chain, or to an `update(...).where(...)` — is
+ * `select(...).where(...)` chain, to an `update(...).where(...)`, or to a
+ * `delete(...).where(...)` — is
  * pushed (in call order) onto the returned `captured.where` array, so a test
  * can render the raw drizzle `SQL` fragment (e.g. via `new PgDialect().sqlToQuery(...)`)
  * to prove the code under test queried/wrote on the column(s) it claims to.
  */
 export function fakeDb(fx: Fixtures = {}) {
-  const writes: Array<{ op: 'insert' | 'update'; table: unknown; values: Record<string, unknown> }> = [];
+  const writes: Array<{ op: 'insert' | 'update'; table: unknown; values: Row }> = [];
+  /** `insert(...).values(v).onConflictDoUpdate({ set })` calls; the insert itself is also in `writes`. */
+  const upserts: Array<{ table: unknown; values: Row; set: Row }> = [];
+  const deletes: Array<{ table: unknown }> = [];
   const captured: { where: unknown[] } = { where: [] };
-  const table = (rows: Array<Record<string, unknown>> = []) => ({
+  const selectQueue = [...(fx.selectResults ?? [])];
+  const table = (rows: Row[] = []) => ({
     findFirst: async (args?: { where?: unknown }) => {
       if (args?.where !== undefined) captured.where.push(args.where);
       return rows[0];
@@ -64,21 +88,31 @@ export function fakeDb(fx: Fixtures = {}) {
       return rows;
     },
   });
+  const tables: Record<string, ReturnType<typeof table>> = {
+    organizations: table(fx.organizations),
+    users: table(fx.users),
+    sessions: table(fx.sessions),
+    ...Object.fromEntries(Object.entries(fx.tables ?? {}).map(([name, rows]) => [name, table(rows)])),
+  };
   const db = {
-    query: {
-      organizations: table(fx.organizations),
-      users: table(fx.users),
-      sessions: table(fx.sessions),
-    },
+    // Any table name works: unlisted ones are empty.
+    query: new Proxy(tables, { get: (t, name) => (typeof name === 'string' ? t[name] ?? table([]) : undefined) }),
     insert: (t: unknown) => ({
-      values: (values: Record<string, unknown>) => {
+      values: (values: Row) => {
         writes.push({ op: 'insert', table: t, values });
-        const row = { id: `new-${writes.length}`, ...values };
-        return { returning: async () => [row], onConflictDoNothing: async () => undefined };
+        const row = { id: `new-${writes.length}`, ...fx.insertDefaults, ...values };
+        return {
+          returning: async () => [row],
+          onConflictDoNothing: async () => undefined,
+          onConflictDoUpdate: (conflict: { set: Row }) => {
+            upserts.push({ table: t, values, set: conflict.set });
+            return { returning: async () => [row], then: (resolve: (v: undefined) => void) => resolve(undefined) };
+          },
+        };
       },
     }),
     update: (t: unknown) => ({
-      set: (values: Record<string, unknown>) => ({
+      set: (values: Row) => ({
         // `where`'s result carries `.returning()` for callers that need the
         // matched row(s) back, and is itself thenable — an awaited `where(...)`
         // with no `.returning()` chained (existing callers like sign-in.ts)
@@ -94,19 +128,32 @@ export function fakeDb(fx: Fixtures = {}) {
         },
       }),
     }),
-    // Chainable + thenable: `from`/`where`/`orderBy` all return the same
-    // chain (order and count don't matter, matching `findFirst`/`findMany`'s
+    delete: (t: unknown) => ({
+      where: (cond?: unknown) => {
+        if (cond !== undefined) captured.where.push(cond);
+        deletes.push({ table: t });
+        const rows = fx.deleteReturning ?? [];
+        return { returning: async () => rows, then: (resolve: (v: typeof rows) => void) => resolve(rows) };
+      },
+    }),
+    // Chainable + thenable: every builder method returns the same chain
+    // (order and count don't matter, matching `findFirst`/`findMany`'s
     // no-filtering convention); `where`'s predicate is still captured, and
-    // awaiting the chain resolves to `fx.users`.
+    // awaiting the chain resolves to the next `fx.selectResults` entry, else
+    // to `fx.users`.
     select: () => {
       const chain = {
         from: () => chain,
+        innerJoin: () => chain,
+        leftJoin: () => chain,
         where: (cond?: unknown) => {
           if (cond !== undefined) captured.where.push(cond);
           return chain;
         },
         orderBy: () => chain,
-        then: (resolve: (v: Array<Record<string, unknown>>) => void) => resolve(fx.users ?? []),
+        groupBy: () => chain,
+        limit: () => chain,
+        then: (resolve: (v: Row[]) => void) => resolve(selectQueue.length > 0 ? selectQueue.shift()! : fx.users ?? []),
       };
       return chain;
     },
@@ -114,7 +161,7 @@ export function fakeDb(fx: Fixtures = {}) {
     // runs against this same `db`, recording writes exactly as it would outside one.
     transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => fn(db as unknown as Db),
   };
-  return { db: db as unknown as Db, writes, captured };
+  return { db: db as unknown as Db, writes, upserts, deletes, captured };
 }
 
 /**

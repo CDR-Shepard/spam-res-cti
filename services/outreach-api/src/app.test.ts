@@ -94,3 +94,16 @@ describe('error envelope', () => {
     expect(second.json()).not.toHaveProperty('statusCode');
   });
 });
+
+describe('CORS', () => {
+  it('allows PUT in a preflight (the Salesforce field-map save uses it)', async () => {
+    app = await build();
+    const res = await app.inject({
+      method: 'OPTIONS',
+      url: '/api/echo',
+      headers: { origin: 'http://app.test', 'access-control-request-method': 'PUT' },
+    });
+    expect(res.statusCode).toBe(204);
+    expect(String(res.headers['access-control-allow-methods'])).toContain('PUT');
+  });
+});

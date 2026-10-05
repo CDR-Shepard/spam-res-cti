@@ -5,10 +5,12 @@ import { getDb, getPool } from '@cti/db';
 import { buildApp } from './app.js';
 import { WorkosIdentityProvider } from './auth/workos-provider.js';
 import { loadConfig } from './config.js';
+import { liveClientFactory } from './crm/client-factory.js';
 import { createBoss, JobRunner } from './jobs/boss.js';
 import { QUEUES } from './jobs/queues.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerConnectionRoutes } from './routes/connections.js';
 import { registerTeamRoutes } from './routes/team.js';
 import { shutdown } from './shutdown.js';
 
@@ -33,6 +35,7 @@ async function main(): Promise<void> {
   const idp = cfg.workosEnabled
     ? new WorkosIdentityProvider({ apiKey: cfg.WORKOS_API_KEY!, clientId: cfg.WORKOS_CLIENT_ID!, redirectUri: cfg.WORKOS_REDIRECT_URI! })
     : null;
+  const clients = liveClientFactory(db, cfg);
   const app = await buildApp({
     cfg,
     spaDist: SPA_DIST,
@@ -41,6 +44,7 @@ async function main(): Promise<void> {
       (scope) => registerAuthRoutes(scope, { cfg, db, idp }),
       (scope) => registerAdminTenantRoutes(scope, { db, idp }),
       (scope) => registerTeamRoutes(scope, { db, idp }),
+      (scope) => registerConnectionRoutes(scope, { db, cfg, clients }),
     ],
   });
   const close = () => shutdown(runner, app);

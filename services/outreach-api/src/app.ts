@@ -43,7 +43,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       return cb(null, allow.includes(origin) || origin === cfg.APP_PUBLIC_URL || origin === cfg.API_PUBLIC_URL);
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Authorization', 'Content-Type', 'X-Request-Id', 'X-Org-Id'],
   });
   // Signed so the auth routes can bind the OAuth nonce and the session handoff
