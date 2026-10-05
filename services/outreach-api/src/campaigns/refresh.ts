@@ -5,7 +5,7 @@
  * enrollments whose record left the query, closed, or lost every channel.
  */
 import { and, eq, inArray, isNull, lt, lte, notInArray, or, sql } from 'drizzle-orm';
-import { FieldMap, SfObject, type CampaignSource } from '@cti/contracts';
+import { FieldMap, SfObject } from '@cti/contracts';
 import { schema, type CampaignRow, type CrmRecordRow, type Db } from '@cti/db';
 import { blockedTargets, type ConsentBlock } from '@cti/firewall';
 import { SalesforceApiError, SalesforceAuthError, soqlEscape, type SalesforceClient } from '@cti/salesforce';
@@ -14,6 +14,7 @@ import { loadConnection } from '../crm/connection-store.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { contactKeys, skipReasonFor } from './eligibility.js';
 import { CAMPAIGN_ARCHIVED_EXIT_REASON, chunk, enrollRecords, exitEnrollment, TERMINAL_ENROLLMENT_STATUSES, upsertRecords, type ExitableStatus } from './enroll.js';
+import { campaignSource } from './member-cache.js';
 import { pauseOrgCampaigns, RUNNING_CAMPAIGN_STATUSES } from './pause.js';
 import { fetchRecords, type SfRecordSnapshot } from './records.js';
 import { fetchMemberIds, MAX_CAMPAIGN_RECORDS, membershipSoql } from './source.js';
@@ -43,12 +44,6 @@ const RELEASED_WHEN_ARCHIVED: readonly ExitableStatus[] = ['active', 'conversing
 /** Archived campaigns release at most this many enrollments per tick. */
 const ARCHIVE_RELEASE_BATCH = 1_000;
 const MAX_ERROR_LENGTH = 1_000;
-
-function campaignSource(c: CampaignRow): CampaignSource {
-  return c.sourceKind === 'list_view' && c.listViewId
-    ? { kind: 'list_view', listViewId: c.listViewId }
-    : { kind: 'soql', soql: c.soql };
-}
 
 function toSnapshot(r: CrmRecordRow): SfRecordSnapshot {
   return {
