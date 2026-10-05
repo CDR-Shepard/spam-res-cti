@@ -16,12 +16,25 @@ describe.skipIf(!pgLane)('campaign selections (real Postgres)', () => {
     expect(await selectRecords(t.db, { orgId, campaignId: c.id, userId: null, sfRecordIds: ids })).toBe(3);
     expect(await selectRecords(t.db, { orgId, campaignId: c.id, userId: null, sfRecordIds: [leadId(1)] })).toBe(0);
     await selectRecords(t.db, { orgId, campaignId: other.id, userId: null, sfRecordIds: [leadId(9)] });
-    expect(await deselectRecords(t.db, c.id, [leadId(2)])).toBe(1);
-    expect(await selectedCount(t.db, c.id)).toBe(2);
-    expect([...(await selectedAmong(t.db, c.id, [leadId(1), leadId(2), leadId(9)]))]).toEqual([leadId(1)]);
-    expect(await allSelectedIds(t.db, c.id)).toEqual(new Set([leadId(1), leadId(3)]));
-    expect(await clearSelection(t.db, c.id)).toBe(2);
-    expect(await selectedCount(t.db, other.id)).toBe(1);
+    expect(await deselectRecords(t.db, orgId, c.id, [leadId(2)])).toBe(1);
+    expect(await selectedCount(t.db, orgId, c.id)).toBe(2);
+    expect([...(await selectedAmong(t.db, orgId, c.id, [leadId(1), leadId(2), leadId(9)]))]).toEqual([leadId(1)]);
+    expect(await allSelectedIds(t.db, orgId, c.id)).toEqual(new Set([leadId(1), leadId(3)]));
+    expect(await clearSelection(t.db, orgId, c.id)).toBe(2);
+    expect(await selectedCount(t.db, orgId, other.id)).toBe(1);
+  });
+
+  it("every read and write is scoped to the tenant: another tenant's id never matches the campaign's rows", async () => {
+    const orgId = await seedOrg(t.db);
+    const stranger = await seedOrg(t.db);
+    const c = await seedCampaign(t.db, orgId, { mode: 'ai_call' });
+    await selectRecords(t.db, { orgId, campaignId: c.id, userId: null, sfRecordIds: [leadId(1), leadId(2)] });
+    expect(await selectedCount(t.db, stranger, c.id)).toBe(0);
+    expect((await selectedAmong(t.db, stranger, c.id, [leadId(1)])).size).toBe(0);
+    expect((await allSelectedIds(t.db, stranger, c.id)).size).toBe(0);
+    expect(await deselectRecords(t.db, stranger, c.id, [leadId(1)])).toBe(0);
+    expect(await clearSelection(t.db, stranger, c.id)).toBe(0);
+    expect(await selectedCount(t.db, orgId, c.id)).toBe(2);
   });
 
   it('selects 50,000 ids in batches without hitting the bind-parameter limit', async () => {
@@ -38,7 +51,7 @@ describe.skipIf(!pgLane)('campaign selections (real Postgres)', () => {
       await selectRecords(t.db, { orgId, campaignId: c.id, userId: null, sfRecordIds: [leadId(1), leadId(2)] });
       const count = await applySelectionChange(t.db, { orgId, campaignId: c.id, userId: null, clear: true, add: [leadId(3), leadId(4)], remove: [leadId(4)] });
       expect(count).toBe(1);
-      expect(await allSelectedIds(t.db, c.id)).toEqual(new Set([leadId(3)]));
+      expect(await allSelectedIds(t.db, orgId, c.id)).toEqual(new Set([leadId(3)]));
     });
 
     it('is atomic: a failure after the clear leaves the previous selection untouched', async () => {
@@ -48,7 +61,7 @@ describe.skipIf(!pgLane)('campaign selections (real Postgres)', () => {
       // A tenant that does not exist breaks the insert's foreign key, after the clear ran.
       const missingOrg = '00000000-0000-4000-8000-000000000000';
       await expect(applySelectionChange(t.db, { orgId: missingOrg, campaignId: c.id, userId: null, clear: true, add: [leadId(5)], remove: [] })).rejects.toThrow();
-      expect(await allSelectedIds(t.db, c.id)).toEqual(new Set([leadId(1), leadId(2)]));
+      expect(await allSelectedIds(t.db, orgId, c.id)).toEqual(new Set([leadId(1), leadId(2)]));
     });
 
     it('is atomic across batches: a refresh reading mid-change never sees a partial selection', async () => {
@@ -59,7 +72,7 @@ describe.skipIf(!pgLane)('campaign selections (real Postgres)', () => {
       let running = true;
       const watcher = (async () => {
         while (running) {
-          const n = await selectedCount(t.db, c.id);
+          const n = await selectedCount(t.db, orgId, c.id);
           if (n !== 0 && n !== ids.length) partial = true;
         }
       })();
@@ -67,7 +80,7 @@ describe.skipIf(!pgLane)('campaign selections (real Postgres)', () => {
       running = false;
       await watcher;
       expect(partial).toBe(false);
-      expect(await selectedCount(t.db, c.id)).toBe(5_000);
+      expect(await selectedCount(t.db, orgId, c.id)).toBe(5_000);
     });
   });
 });

@@ -58,7 +58,7 @@ describe.skipIf(!pgLane)('AI call refresh vs the lead picker (real Postgres)', (
   });
 
   const pick = (orgId: string, campaignId: string, ...ns: number[]) => selectRecords(db, { orgId, campaignId, userId: null, sfRecordIds: ns.map(leadId) });
-  const unpick = (campaignId: string, ...ns: number[]) => deselectRecords(db, campaignId, ns.map(leadId));
+  const unpick = (orgId: string, campaignId: string, ...ns: number[]) => deselectRecords(db, orgId, campaignId, ns.map(leadId));
   const serve = (...records: SfRecordSnapshot[]) =>
     vi.mocked(fetchRecords).mockImplementation(async (_c, _o, ids) => records.filter((r) => ids.includes(r.sfRecordId)));
   const refresh = async (campaignId: string, client: SalesforceClient, now = NOW) =>
@@ -78,7 +78,7 @@ describe.skipIf(!pgLane)('AI call refresh vs the lead picker (real Postgres)', (
     await pick(orgId, c.id, 1, 2);
     // The field fetch happens after the selection read: an admin unticks lead 2 meanwhile.
     vi.mocked(fetchRecords).mockImplementation(async (_c, _o, ids) => {
-      await unpick(c.id, 2);
+      await unpick(orgId, c.id, 2);
       return [reachable(1), reachable(2)].filter((r) => ids.includes(r.sfRecordId));
     });
     const sf = fakeSalesforce([1, 2]);
@@ -95,7 +95,7 @@ describe.skipIf(!pgLane)('AI call refresh vs the lead picker (real Postgres)', (
     await refresh(c.id, fakeSalesforce([1, 2]).client);
 
     // Lead 1 is unticked, then ticked again while the refresh is checking lead 2 in Salesforce.
-    await unpick(c.id, 1);
+    await unpick(orgId, c.id, 1);
     const sf = fakeSalesforce([1, 2], { onStamps: async () => { await pick(orgId, c.id, 1); } });
     const out = await refresh(c.id, sf.client, LATER);
     expect(sf.client.queryAll).toHaveBeenCalledWith(expect.stringContaining(' IN ('));
@@ -109,10 +109,30 @@ describe.skipIf(!pgLane)('AI call refresh vs the lead picker (real Postgres)', (
     await pick(orgId, c.id, 1);
     serve(reachable(1));
     await refresh(c.id, fakeSalesforce([1]).client);
-    await unpick(c.id, 1);
+    await unpick(orgId, c.id, 1);
     expect((await refresh(c.id, fakeSalesforce([1]).client, LATER)).exited).toBe(1);
     expect((await statusOf(c.id)).get(leadId(1))).toMatchObject({ status: 'exited', exitReason: DESELECTED_EXIT_REASON });
     expect(await enrollmentsOf(db, c.id)).toHaveLength(1);
+  });
+
+  it('does not look for new Salesforce Tasks for an AI call campaign (its research reads them itself)', async () => {
+    const orgId = await seedOrg(db);
+    const c = await seedCampaign(db, orgId, { mode: 'ai_call', status: 'dry_run', lastRefreshedAt: new Date('2026-10-05T14:00:00Z'), tasksCheckedAt: new Date('2026-10-05T14:00:00Z') });
+    await pick(orgId, c.id, 1);
+    serve(reachable(1));
+    const sf = fakeSalesforce([1]);
+    await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: NOW, triage: true }, await campaignById(db, c.id));
+    expect(vi.mocked(sf.client.queryAll).mock.calls.some(([q]) => String(q).includes('FROM Task'))).toBe(false);
+    expect((await campaignById(db, c.id)).tasksCheckedAt?.toISOString()).toBe('2026-10-05T14:00:00.000Z');
+  });
+
+  it('still looks for them in a sequence campaign (triage reads them)', async () => {
+    const orgId = await seedOrg(db);
+    const c = await seedCampaign(db, orgId, { status: 'dry_run', lastRefreshedAt: new Date('2026-10-05T14:00:00Z'), tasksCheckedAt: new Date('2026-10-05T14:00:00Z') });
+    serve(reachable(1));
+    const sf = fakeSalesforce([1]);
+    await refreshCampaign({ db, client: sf.client, fieldMap: TEST_FIELD_MAP, now: NOW, triage: true }, await campaignById(db, c.id));
+    expect((await campaignById(db, c.id)).tasksCheckedAt?.toISOString()).toBe(NOW.toISOString());
   });
 
   describe('re-selecting a lead whose enrollment exited as deselected', () => {
@@ -123,7 +143,7 @@ describe.skipIf(!pgLane)('AI call refresh vs the lead picker (real Postgres)', (
       await pick(orgId, c.id, 1, 2);
       serve(reachable(1), reachable(2));
       await refresh(c.id, fakeSalesforce([1, 2]).client);
-      await unpick(c.id, 1);
+      await unpick(orgId, c.id, 1);
       expect((await refresh(c.id, fakeSalesforce([1, 2]).client, NOW)).exited).toBe(1);
       const before = (await statusOf(c.id)).get(leadId(1))!;
       expect(before).toMatchObject({ status: 'exited', exitReason: DESELECTED_EXIT_REASON });
@@ -188,7 +208,7 @@ describe.skipIf(!pgLane)('AI call refresh vs the lead picker (real Postgres)', (
     it('does not reactivate a lead that was unticked again after the refresh read the selection', async () => {
       const { orgId, c } = await exitedLead();
       await pick(orgId, c.id, 1);
-      const sf = fakeSalesforce([1, 2], { onStamps: async () => { await unpick(c.id, 1); } });
+      const sf = fakeSalesforce([1, 2], { onStamps: async () => { await unpick(orgId, c.id, 1); } });
       expect((await refresh(c.id, sf.client, LATER)).enrolled).toBe(0);
       expect((await statusOf(c.id)).get(leadId(1))).toMatchObject({ status: 'exited', exitReason: DESELECTED_EXIT_REASON });
     });

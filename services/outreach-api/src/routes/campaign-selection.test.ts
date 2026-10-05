@@ -76,6 +76,18 @@ describe('campaign selection routes', () => {
     }
   });
 
+  it("404 CAMPAIGN_NOT_FOUND for another tenant's campaign id, on both routes; nothing is read or changed", async () => {
+    await app.close();
+    app = await build({ tables: { campaigns: [campaignRow({ orgId: 'O2' })] } });
+    for (const res of [await get(), await put({ add: [a] }), await put({ clear: true })]) {
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ code: 'CAMPAIGN_NOT_FOUND' });
+    }
+    expect(m.applyChange).not.toHaveBeenCalled();
+    expect(m.candidatePage).not.toHaveBeenCalled();
+    expect(clients).not.toHaveBeenCalled();
+  });
+
   it('409 NOT_AI_CALL_CAMPAIGN for a sequence campaign', async () => {
     await app.close();
     app = await build({ tables: { campaigns: [campaignRow({ mode: 'sequence' })] } });

@@ -33,7 +33,7 @@ const quoted = (values: readonly string[]) => values.map((v) => `'${v}'`).join('
 const columnsOf = (t: Parameters<typeof getTableConfig>[0]) => getTableConfig(t).columns.map((c) => c.name);
 
 describe('migration 0052_ai_call_campaigns', () => {
-  it('starts with the lock_timeout guard (FKs lock organizations, users, campaigns, touches)', () => {
+  it('starts with the lock_timeout guard (it locks campaigns, campaign_enrollments, touches and the FK targets organizations, users, crm_records, ai_calls)', () => {
     expect(statements[0]).toBe("SET LOCAL lock_timeout = '5s'");
   });
 

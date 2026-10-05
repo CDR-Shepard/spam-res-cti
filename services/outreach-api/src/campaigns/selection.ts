@@ -37,39 +37,42 @@ export async function applySelectionChange(
   args: { orgId: string; campaignId: string; userId: string | null; clear: boolean; add: readonly string[]; remove: readonly string[] },
 ): Promise<number> {
   return db.transaction(async (tx) => {
-    if (args.clear) await clearSelection(tx, args.campaignId);
+    if (args.clear) await clearSelection(tx, args.orgId, args.campaignId);
     await selectRecords(tx, { orgId: args.orgId, campaignId: args.campaignId, userId: args.userId, sfRecordIds: args.add });
-    if (args.remove.length > 0) await deselectRecords(tx, args.campaignId, args.remove);
-    return selectedCount(tx, args.campaignId);
+    if (args.remove.length > 0) await deselectRecords(tx, args.orgId, args.campaignId, args.remove);
+    return selectedCount(tx, args.orgId, args.campaignId);
   });
 }
 
-export async function deselectRecords(db: Executor, campaignId: string, sfRecordIds: readonly string[]): Promise<number> {
+/** Every read and write below is scoped by `org_id` as well as the campaign: defense in depth behind the route's tenant check. */
+const inCampaign = (orgId: string, campaignId: string) => and(eq(s.orgId, orgId), eq(s.campaignId, campaignId));
+
+export async function deselectRecords(db: Executor, orgId: string, campaignId: string, sfRecordIds: readonly string[]): Promise<number> {
   let removed = 0;
   for (const batch of chunk([...new Set(sfRecordIds)], SELECTION_BATCH)) {
-    const rows = await db.delete(s).where(and(eq(s.campaignId, campaignId), inArray(s.sfRecordId, batch))).returning({ id: s.sfRecordId });
+    const rows = await db.delete(s).where(and(inCampaign(orgId, campaignId), inArray(s.sfRecordId, batch))).returning({ id: s.sfRecordId });
     removed += rows.length;
   }
   return removed;
 }
 
-export async function clearSelection(db: Executor, campaignId: string): Promise<number> {
-  const rows = await db.delete(s).where(eq(s.campaignId, campaignId)).returning({ id: s.sfRecordId });
+export async function clearSelection(db: Executor, orgId: string, campaignId: string): Promise<number> {
+  const rows = await db.delete(s).where(inCampaign(orgId, campaignId)).returning({ id: s.sfRecordId });
   return rows.length;
 }
 
-export async function selectedCount(db: Executor, campaignId: string): Promise<number> {
-  const [row] = await db.select({ n: count() }).from(s).where(eq(s.campaignId, campaignId));
+export async function selectedCount(db: Executor, orgId: string, campaignId: string): Promise<number> {
+  const [row] = await db.select({ n: count() }).from(s).where(inCampaign(orgId, campaignId));
   return Number(row?.n ?? 0);
 }
 
-export async function selectedAmong(db: Db, campaignId: string, sfRecordIds: readonly string[]): Promise<Set<string>> {
+export async function selectedAmong(db: Db, orgId: string, campaignId: string, sfRecordIds: readonly string[]): Promise<Set<string>> {
   if (sfRecordIds.length === 0) return new Set();
-  const rows = await db.select({ id: s.sfRecordId }).from(s).where(and(eq(s.campaignId, campaignId), inArray(s.sfRecordId, [...sfRecordIds])));
+  const rows = await db.select({ id: s.sfRecordId }).from(s).where(and(inCampaign(orgId, campaignId), inArray(s.sfRecordId, [...sfRecordIds])));
   return new Set(rows.map((r) => r.id));
 }
 
-export async function allSelectedIds(db: Db, campaignId: string): Promise<Set<string>> {
-  const rows = await db.select({ id: s.sfRecordId }).from(s).where(eq(s.campaignId, campaignId)).orderBy(sql`${s.selectedAt}`);
+export async function allSelectedIds(db: Db, orgId: string, campaignId: string): Promise<Set<string>> {
+  const rows = await db.select({ id: s.sfRecordId }).from(s).where(inCampaign(orgId, campaignId)).orderBy(sql`${s.selectedAt}`);
   return new Set(rows.map((r) => r.id));
 }

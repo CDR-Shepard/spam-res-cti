@@ -553,7 +553,7 @@ describe.skipIf(!pgLane)('campaign refresh (real Postgres)', () => {
       };
       const before = await byRecord();
       await db.update(schema.campaignEnrollments).set({ status: 'needs_review', reviewCategory: 'attorney', reviewQuote: 'my lawyer' }).where(eq(schema.campaignEnrollments.id, before.get(leadId(3))!.id));
-      await deselectRecords(db, c.id, [leadId(1), leadId(3)]);
+      await deselectRecords(db, orgId, c.id, [leadId(1), leadId(3)]);
       const out = await refresh(c.id, sf.client, LATER);
       expect(out.exited).toBe(1);
       const after = await byRecord();

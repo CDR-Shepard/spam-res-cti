@@ -21,13 +21,13 @@ export interface CandidateDeps {
 type EnrollmentOnPage = { status: EnrollmentStatus; exitReason: string | null };
 
 /** The enrollment (any status) of each Salesforce Id on this page, if the campaign has one. */
-async function enrollmentsAmong(db: Db, campaignId: string, ids: readonly string[]): Promise<Map<string, EnrollmentOnPage>> {
+async function enrollmentsAmong(db: Db, orgId: string, campaignId: string, ids: readonly string[]): Promise<Map<string, EnrollmentOnPage>> {
   if (ids.length === 0) return new Map();
   const rows = await db
     .select({ id: schema.crmRecords.sfRecordId, status: schema.campaignEnrollments.status, exitReason: schema.campaignEnrollments.exitReason })
     .from(schema.campaignEnrollments)
     .innerJoin(schema.crmRecords, eq(schema.crmRecords.id, schema.campaignEnrollments.crmRecordId))
-    .where(and(eq(schema.campaignEnrollments.campaignId, campaignId), inArray(schema.crmRecords.sfRecordId, [...ids])));
+    .where(and(eq(schema.campaignEnrollments.orgId, orgId), eq(schema.campaignEnrollments.campaignId, campaignId), inArray(schema.crmRecords.sfRecordId, [...ids])));
   return new Map(rows.map((r) => [r.id, { status: r.status, exitReason: r.exitReason }]));
 }
 
@@ -35,11 +35,11 @@ async function enrollmentsAmong(db: Db, campaignId: string, ids: readonly string
 const holdsTheLead = (e: EnrollmentOnPage | undefined): boolean => !!e && !(e.status === 'exited' && e.exitReason === DESELECTED_EXIT_REASON);
 
 /** Enrollments still `active`: the leads "Clear" would stop at the next refresh. */
-async function activeEnrolledCount(db: Db, campaignId: string): Promise<number> {
+async function activeEnrolledCount(db: Db, orgId: string, campaignId: string): Promise<number> {
   const [row] = await db
     .select({ n: count() })
     .from(schema.campaignEnrollments)
-    .where(and(eq(schema.campaignEnrollments.campaignId, campaignId), eq(schema.campaignEnrollments.status, 'active')));
+    .where(and(eq(schema.campaignEnrollments.orgId, orgId), eq(schema.campaignEnrollments.campaignId, campaignId), eq(schema.campaignEnrollments.status, 'active')));
   return Number(row?.n ?? 0);
 }
 
@@ -53,10 +53,10 @@ export async function candidatePage(deps: CandidateDeps, campaign: CampaignRow, 
   const snapshots = slice.length > 0 ? await fetchRecords(client, sfObject, slice, fieldMap[sfObject]) : [];
   const [blocks, enrollments, selected, total, activeEnrolled] = await Promise.all([
     blockedTargets(db, campaign.orgId, [...new Set(snapshots.flatMap((s) => s.phones.map((p) => p.e164)))]),
-    enrollmentsAmong(db, campaign.id, slice),
-    selectedAmong(db, campaign.id, slice),
-    selectedCount(db, campaign.id),
-    activeEnrolledCount(db, campaign.id),
+    enrollmentsAmong(db, campaign.orgId, campaign.id, slice),
+    selectedAmong(db, campaign.orgId, campaign.id, slice),
+    selectedCount(db, campaign.orgId, campaign.id),
+    activeEnrolledCount(db, campaign.orgId, campaign.id),
   ]);
   const taken = await activeContactKeys(db, campaign.orgId, snapshots.filter((s) => !holdsTheLead(enrollments.get(s.sfRecordId))).flatMap(contactKeys));
   return {

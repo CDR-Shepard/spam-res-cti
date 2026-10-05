@@ -183,14 +183,15 @@ export async function refreshCampaign(
   const ids = await fetchMemberIds(client, soql, MAX_CAMPAIGN_RECORDS);
   const aiCall = campaign.mode === 'ai_call';
   // An ai_call campaign reads and enrolls only the leads an admin picked; the query only bounds them.
-  const selected = aiCall ? await allSelectedIds(db, campaign.id) : null;
+  const selected = aiCall ? await allSelectedIds(db, campaign.orgId, campaign.id) : null;
   const relevant = selected ? ids.filter((id) => selected.has(id)) : ids;
 
   const fetchIds = await idsToFetch(db, client, campaign.orgId, sfObject, relevant);
   if (fetchIds.length > 0) {
     await upsertRecords(db, campaign.orgId, await fetchRecords(client, sfObject, fetchIds, fieldMap[sfObject]));
   }
-  if (deps.triage) await checkTaskActivity(db, client, campaign, now, log);
+  // Triage skips AI call campaigns (their call.prepare research reads Tasks itself), so a Task flag would feed nothing.
+  if (deps.triage && !aiCall) await checkTaskActivity(db, client, campaign, now, log);
 
   const members = await loadRecords(db, campaign.orgId, relevant);
   const bySfId = new Map(members.map((r) => [r.sfRecordId, r]));

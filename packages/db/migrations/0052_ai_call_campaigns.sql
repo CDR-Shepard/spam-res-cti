@@ -29,9 +29,10 @@
 --   last_block_reason       Why the last trigger was refused or failed.
 -- =============================================================================
 
--- Foreign keys below lock organizations, users, campaigns and touches: fail fast
--- rather than queue behind a conflicting lock (0045's rule; migrate-runner wraps
--- each file in one transaction, so SET LOCAL scopes to this file).
+-- The ALTERs below lock campaigns, campaign_enrollments and touches, and the new foreign
+-- keys lock their targets (organizations, users, campaigns, campaign_enrollments,
+-- crm_records, ai_calls): fail fast rather than queue behind a conflicting lock (0045's
+-- rule; migrate-runner wraps each file in one transaction, so SET LOCAL scopes to this file).
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE "campaigns" ADD COLUMN IF NOT EXISTS "mode" text NOT NULL DEFAULT 'sequence' CONSTRAINT "campaigns_mode_check" CHECK ("mode" IN ('sequence', 'ai_call'));
