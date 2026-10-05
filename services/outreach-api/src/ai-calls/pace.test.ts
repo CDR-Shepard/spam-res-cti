@@ -41,13 +41,15 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
     const counts = await h.run(NOW);
 
     expect(counts).toMatchObject({ placed: 2, retried: 0, failed: 0, deferred: 0, held: 0 });
+    // Both are due at the same moment, so their order (due_at, then the random id) is not part of the test.
+    expect(h.cti.requests).toHaveLength(2);
     expect(h.cti.requests).toEqual(
-      [a, b].map((l) => ({
+      expect.arrayContaining([a, b].map((l) => ({
         orgId: h.base.orgId,
         userId: l.approver,
         idempotencyKey: `touch:${l.touchId}:1`,
         target: { kind: 'record', objectType: 'Lead', recordId: l.sfRecordId, planText: planText() },
-      })),
+      }))),
     );
     for (const l of [a, b]) {
       const t = await touchById(db, l.touchId);
