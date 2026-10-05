@@ -94,7 +94,7 @@ describe('candidatePage', () => {
 
   it("an already-enrolled member is enrolled with no skip reason, even though its keys are active (they are its own)", async () => {
     const { client } = stubClient(2);
-    const { db } = fakeDb({ selectResults: [[{ id: id(1) }]] });
+    const { db } = fakeDb({ selectResults: [[{ id: id(1), status: 'active', exitReason: null }]] });
     mocks.activeKeys.mockImplementation(async (_db, _org, keys: string[]) => new Set(keys));
     const page = await candidatePage({ db, client, cache: new MemberIdCache(), fieldMap: FIELD_MAP }, campaign, 1);
     expect(mocks.activeKeys.mock.calls[0]![2]).toEqual([phone(2)]);

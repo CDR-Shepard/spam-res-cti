@@ -197,8 +197,8 @@ describe('SelectionChange', () => {
 
 describe('CandidatePage', () => {
   it('caps a page at 50 records', () => {
-    const rec = { sfRecordId: '00Q000000000001AAA', name: null, ownerName: null, consentAiCall: false, skipReason: null, selected: false, enrolled: false };
-    const page = { total: 51, page: 1, pageSize: 50, pages: 2, selectedCount: 0, records: Array.from({ length: 51 }, () => rec) };
+    const rec = { sfRecordId: '00Q000000000001AAA', name: null, ownerName: null, consentAiCall: false, skipReason: null, selected: false, enrolled: false, enrollmentStatus: null, exitReason: null };
+    const page = { total: 51, page: 1, pageSize: 50, pages: 2, selectedCount: 0, activeEnrolledCount: 0, records: Array.from({ length: 51 }, () => rec) };
     expect(CandidatePage.safeParse(page).success).toBe(false);
   });
 });

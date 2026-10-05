@@ -16,6 +16,7 @@ import { contactKeys, skipReasonFor } from './eligibility.js';
 import { CAMPAIGN_ARCHIVED_EXIT_REASON, chunk, enrollRecords, exitEnrollment, TERMINAL_ENROLLMENT_STATUSES, upsertRecords, type ExitableStatus } from './enroll.js';
 import { campaignSource } from './member-cache.js';
 import { pauseOrgCampaigns, RUNNING_CAMPAIGN_STATUSES } from './pause.js';
+import { DESELECTED_EXIT_REASON, reenrollDeselected } from './reenroll.js';
 import { fetchRecords, type SfRecordSnapshot } from './records.js';
 import { allSelectedIds } from './selection.js';
 import { fetchMemberIds, MAX_CAMPAIGN_RECORDS, membershipSoql } from './source.js';
@@ -45,8 +46,7 @@ const RELEASED_WHEN_ARCHIVED: readonly ExitableStatus[] = ['active', 'conversing
 /** Archived campaigns release at most this many enrollments per tick. */
 const ARCHIVE_RELEASE_BATCH = 1_000;
 const MAX_ERROR_LENGTH = 1_000;
-/** `exit_reason` of an AI call campaign enrollment whose lead an admin deselected. */
-export const DESELECTED_EXIT_REASON = 'deselected';
+export { DESELECTED_EXIT_REASON };
 
 function toSnapshot(r: CrmRecordRow): SfRecordSnapshot {
   return {
@@ -198,7 +198,7 @@ export async function refreshCampaign(
   const memberIds = new Set(ids);
 
   const enrollments = await db
-    .select({ id: schema.campaignEnrollments.id, status: schema.campaignEnrollments.status, sfRecordId: schema.crmRecords.sfRecordId })
+    .select({ id: schema.campaignEnrollments.id, status: schema.campaignEnrollments.status, exitReason: schema.campaignEnrollments.exitReason, sfRecordId: schema.crmRecords.sfRecordId })
     .from(schema.campaignEnrollments)
     .innerJoin(schema.crmRecords, eq(schema.crmRecords.id, schema.campaignEnrollments.crmRecordId))
     .where(eq(schema.campaignEnrollments.campaignId, campaign.id));
@@ -233,9 +233,22 @@ export async function refreshCampaign(
     records: candidates,
     callStage: aiCall ? 'research' : null,
   });
-  if (skippedInOtherCampaign > 0 || skippedNoKeys > 0) {
+  // A lead ticked again after it was deselected comes back as the same enrollment, if it is still eligible.
+  const back = await reenrollDeselected(db, {
+    campaignId: campaign.id,
+    touchDays: campaign.touchDays,
+    now,
+    candidates: enrollments.flatMap((e) => {
+      const record = bySfId.get(e.sfRecordId);
+      if (!selected?.has(e.sfRecordId) || e.status !== 'exited' || e.exitReason !== DESELECTED_EXIT_REASON || !record) return [];
+      const snapshot = toSnapshot(record);
+      return skipReasonFor(snapshot, blocks, false) === null ? [{ enrollmentId: e.id, sfRecordId: e.sfRecordId, keys: contactKeys(snapshot) }] : [];
+    }),
+  });
+  const skipped = { skippedInOtherCampaign: skippedInOtherCampaign + back.skippedInOtherCampaign, skippedNoKeys: skippedNoKeys + back.skippedNoKeys };
+  if (skipped.skippedInOtherCampaign > 0 || skipped.skippedNoKeys > 0) {
     log?.info(
-      { orgId: campaign.orgId, campaignId: campaign.id, skippedInOtherCampaign, skippedNoKeys },
+      { orgId: campaign.orgId, campaignId: campaign.id, ...skipped },
       'members not enrolled: already in another active campaign, or no contact key',
     );
   }
@@ -244,7 +257,7 @@ export async function refreshCampaign(
     .update(schema.campaigns)
     .set({ memberCount: ids.length, lastRefreshedAt: now, lastRefreshError: null, updatedAt: now })
     .where(eq(schema.campaigns.id, campaign.id));
-  return { members: ids.length, enrolled, exited };
+  return { members: ids.length, enrolled: enrolled + back.reenrolled, exited };
 }
 
 function errorMessage(err: unknown): string {

@@ -11,6 +11,8 @@ import type { SalesforceClient } from '@cti/salesforce';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { campaignById, enrollmentsOf, leadId, seedCampaign, seedOrg, snapshot, TEST_FIELD_MAP } from '../test/outreach-fixtures.js';
 import { fetchRecords, type SfRecordSnapshot } from './records.js';
+import { contactKeys } from './eligibility.js';
+import { enrollRecords } from './enroll.js';
 import { deselectRecords, selectRecords } from './selection.js';
 import { DESELECTED_EXIT_REASON, refreshCampaign } from './refresh.js';
 
@@ -111,5 +113,84 @@ describe.skipIf(!pgLane)('AI call refresh vs the lead picker (real Postgres)', (
     expect((await refresh(c.id, fakeSalesforce([1]).client, LATER)).exited).toBe(1);
     expect((await statusOf(c.id)).get(leadId(1))).toMatchObject({ status: 'exited', exitReason: DESELECTED_EXIT_REASON });
     expect(await enrollmentsOf(db, c.id)).toHaveLength(1);
+  });
+
+  describe('re-selecting a lead whose enrollment exited as deselected', () => {
+    /** Lead 1 enrolled, then unticked and exited by a refresh; lead 2 stays enrolled (so later refreshes still read Salesforce). */
+    async function exitedLead() {
+      const orgId = await seedOrg(db);
+      const c = await seedCampaign(db, orgId, { mode: 'ai_call', status: 'dry_run' });
+      await pick(orgId, c.id, 1, 2);
+      serve(reachable(1), reachable(2));
+      await refresh(c.id, fakeSalesforce([1, 2]).client);
+      await unpick(c.id, 1);
+      expect((await refresh(c.id, fakeSalesforce([1, 2]).client, NOW)).exited).toBe(1);
+      const before = (await statusOf(c.id)).get(leadId(1))!;
+      expect(before).toMatchObject({ status: 'exited', exitReason: DESELECTED_EXIT_REASON });
+      return { orgId, c, id: before.id };
+    }
+    const keysOf = async (enrollmentId: string) =>
+      (await db.select().from(schema.enrollmentContactKeys).where(eq(schema.enrollmentContactKeys.enrollmentId, enrollmentId))).map((k) => `${k.key}:${k.active}`).sort();
+
+    it('reactivates the SAME enrollment: active, call_stage research, keys claimed again', async () => {
+      const { orgId, c, id } = await exitedLead();
+      await db.update(schema.campaignEnrollments).set({ callStage: 'review', callPrepareError: 'old error', callPrepareAttemptedAt: NOW }).where(eq(schema.campaignEnrollments.id, id));
+      await pick(orgId, c.id, 1);
+      const out = await refresh(c.id, fakeSalesforce([1, 2]).client, LATER);
+      expect(out).toMatchObject({ enrolled: 1, exited: 0 });
+      const after = (await statusOf(c.id)).get(leadId(1))!;
+      expect(after).toMatchObject({ id, status: 'active', exitReason: null, callStage: 'research', callPrepareError: null, callPrepareAttemptedAt: null });
+      expect(await keysOf(id)).toEqual(['+15125552001:true']);
+      expect(await enrollmentsOf(db, c.id)).toHaveLength(2);
+      // And the next refresh leaves it alone.
+      expect(await refresh(c.id, fakeSalesforce([1, 2]).client, LATER)).toMatchObject({ enrolled: 0, exited: 0 });
+    });
+
+    it('claims the keys of the record as it is now, not as it was when the lead was enrolled', async () => {
+      const { orgId, c, id } = await exitedLead();
+      serve(reachable(1, { phones: [{ field: 'MobilePhone', e164: '+15125559999' }], lastModifiedAt: new Date('2026-10-04T00:00:00Z') }), reachable(2));
+      await pick(orgId, c.id, 1);
+      await db.update(schema.crmRecords).set({ sfLastModifiedAt: new Date('2026-09-01T00:00:00Z') }).where(eq(schema.crmRecords.sfRecordId, leadId(1)));
+      await refresh(c.id, fakeSalesforce([1, 2]).client, LATER);
+      expect(await keysOf(id)).toEqual(['+15125559999:true']);
+    });
+
+    it('does not reactivate an exit for any other reason, even when the lead is selected', async () => {
+      const { orgId, c, id } = await exitedLead();
+      await db.update(schema.campaignEnrollments).set({ exitReason: 'closed' }).where(eq(schema.campaignEnrollments.id, id));
+      await pick(orgId, c.id, 1);
+      expect((await refresh(c.id, fakeSalesforce([1, 2]).client, LATER)).enrolled).toBe(0);
+      expect((await statusOf(c.id)).get(leadId(1))).toMatchObject({ status: 'exited', exitReason: 'closed' });
+    });
+
+    it('behaves like a fresh enrollment conflict when another active enrollment holds the key: stays exited', async () => {
+      const { orgId, c, id } = await exitedLead();
+      const other = await seedCampaign(db, orgId, { mode: 'ai_call', status: 'dry_run' });
+      const [record] = await db.select().from(schema.crmRecords).where(eq(schema.crmRecords.sfRecordId, leadId(1)));
+      const taken = await enrollRecords(db, { orgId, campaignId: other.id, touchDays: [0], now: NOW, records: [{ crmRecordId: record!.id, keys: contactKeys(reachable(1)) }] });
+      expect(taken.enrolled).toBe(1);
+      await pick(orgId, c.id, 1);
+      const out = await refresh(c.id, fakeSalesforce([1, 2]).client, LATER);
+      expect(out.enrolled).toBe(0);
+      expect((await statusOf(c.id)).get(leadId(1))).toMatchObject({ id, status: 'exited', exitReason: DESELECTED_EXIT_REASON });
+      expect(await keysOf(id)).toEqual(['+15125552001:false']);
+    });
+
+    it('does not reactivate a lead that is no longer eligible (closed in Salesforce)', async () => {
+      const { orgId, c } = await exitedLead();
+      serve(reachable(1, { isClosed: true, lastModifiedAt: new Date('2026-10-04T00:00:00Z') }), reachable(2));
+      await db.update(schema.crmRecords).set({ sfLastModifiedAt: new Date('2026-09-01T00:00:00Z') }).where(eq(schema.crmRecords.sfRecordId, leadId(1)));
+      await pick(orgId, c.id, 1);
+      expect((await refresh(c.id, fakeSalesforce([1, 2]).client, LATER)).enrolled).toBe(0);
+      expect((await statusOf(c.id)).get(leadId(1))).toMatchObject({ status: 'exited' });
+    });
+
+    it('does not reactivate a lead that was unticked again after the refresh read the selection', async () => {
+      const { orgId, c } = await exitedLead();
+      await pick(orgId, c.id, 1);
+      const sf = fakeSalesforce([1, 2], { onStamps: async () => { await unpick(c.id, 1); } });
+      expect((await refresh(c.id, sf.client, LATER)).enrolled).toBe(0);
+      expect((await statusOf(c.id)).get(leadId(1))).toMatchObject({ status: 'exited', exitReason: DESELECTED_EXIT_REASON });
+    });
   });
 });

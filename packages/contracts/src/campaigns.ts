@@ -97,6 +97,9 @@ export const SkipReason = z.enum([
 ]);
 export type SkipReason = z.infer<typeof SkipReason>;
 
+export const EnrollmentStatus = z.enum(['active', 'conversing', 'needs_review', 'handed_off', 'completed', 'exited']);
+export type EnrollmentStatus = z.infer<typeof EnrollmentStatus>;
+
 /** GET /api/campaigns/:id/candidates?page=N — the lead picker. */
 export const CANDIDATE_PAGE_SIZE = 50;
 
@@ -109,8 +112,14 @@ export const CandidateRecord = z.object({
   /** Why the record would not enroll (null = it can). Null for a record already enrolled here. */
   skipReason: SkipReason.nullable(),
   selected: z.boolean(),
-  /** Already enrolled in this campaign. */
+  /**
+   * An enrollment of this campaign holds the lead: any status, except an exit with reason
+   * `deselected` (that lead is selectable again, and a refresh brings it back).
+   */
   enrolled: z.boolean(),
+  /** The enrollment's status and exit reason, when one exists (also for an exit that is not `enrolled`). */
+  enrollmentStatus: EnrollmentStatus.nullable(),
+  exitReason: z.string().nullable(),
 });
 export type CandidateRecord = z.infer<typeof CandidateRecord>;
 
@@ -121,6 +130,8 @@ export const CandidatePage = z.object({
   pageSize: z.number(),
   pages: z.number().int().min(1),
   selectedCount: z.number(),
+  /** Enrollments of this campaign still `active`: what "Clear" stops at the next refresh. */
+  activeEnrolledCount: z.number(),
   records: z.array(CandidateRecord).max(CANDIDATE_PAGE_SIZE),
 });
 export type CandidatePage = z.infer<typeof CandidatePage>;
@@ -176,9 +187,6 @@ export type TouchChannel = z.infer<typeof TouchChannel>;
 
 export const TouchStatus = z.enum(['planned', 'held', 'queued', 'dialing', 'sent', 'failed', 'skipped']);
 export type TouchStatus = z.infer<typeof TouchStatus>;
-
-export const EnrollmentStatus = z.enum(['active', 'conversing', 'needs_review', 'handed_off', 'completed', 'exited']);
-export type EnrollmentStatus = z.infer<typeof EnrollmentStatus>;
 
 /** One planner rule's verdict on one channel — a touch's gate audit is a list of these. */
 export const GateStep = z.object({

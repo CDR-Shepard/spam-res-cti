@@ -134,7 +134,7 @@ function pgErrorFields(err: unknown): { code?: unknown; constraint?: unknown } {
   return e.cause && typeof e.cause === 'object' ? (e.cause as { code?: unknown; constraint?: unknown }) : {};
 }
 
-function isActiveKeyConflict(err: unknown): boolean {
+export function isActiveKeyConflict(err: unknown): boolean {
   const { code, constraint } = pgErrorFields(err);
   return code === UNIQUE_VIOLATION && constraint === ACTIVE_KEY_INDEX;
 }
