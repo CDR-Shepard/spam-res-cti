@@ -4,7 +4,7 @@
  *   POST /ai-calls                       start an AI call (rep session; 10/min per user)
  *   GET  /ai-calls/availability          is AI calling on; test numbers (admins)
  *   GET  /ai-calls?limit=20              recent calls (admin: org, rep: own)
- *   GET  /ai-calls/:id                   one call in the session's org
+ *   GET  /ai-calls/:id                   one call (admin: org, rep: started or handed to them)
  *   POST /telephony/twilio/ai-voice/{amd,status,transfer-result}   (routes-webhooks.ts)
  *   GET  /telephony/twilio/ai-voice/stream  (WebSocket, routes-stream.ts)
  *
@@ -169,7 +169,8 @@ export async function registerAiVoiceRoutes(app: FastifyInstance, overrides: Par
     if (!session) return reply.code(401).send({ error: 'unauthorized' });
     const id = (req.params as { id?: string }).id ?? '';
     const row = UUID_RE.test(id) ? await deps.store.getInOrg(session.orgId, id) : null;
-    if (!row) return reply.code(404).send({ error: 'not_found' });
+    const mayRead = row && (session.isAdmin || row.startedBy === session.userId || row.handoffUserId === session.userId);
+    if (!mayRead) return reply.code(404).send({ error: 'not_found' });
     return row;
   });
 

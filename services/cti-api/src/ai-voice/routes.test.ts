@@ -244,6 +244,18 @@ describe('GET /ai-calls, /ai-calls/:id, /ai-calls/availability', () => {
     expect((await get('/ai-calls/not-a-uuid')).statusCode).toBe(404);
   });
 
+  it('a rep reads only calls they started or were handed; an admin reads any in the org', async () => {
+    const theirs = '33333333-2222-4333-8444-555555555555';
+    const handed = '44444444-2222-4333-8444-555555555555';
+    await store.insert({ id: theirs, orgId: ORG, startedBy: ADMIN, toE164: '+16195550103', status: 'completed' });
+    await store.insert({ id: handed, orgId: ORG, startedBy: ADMIN, handoffUserId: REP, toE164: '+16195550104', status: 'completed' });
+    const res = await get(`/ai-calls/${theirs}`);
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'not_found' });
+    expect((await get(`/ai-calls/${handed}`)).statusCode).toBe(200);
+    expect((await get(`/ai-calls/${theirs}`, ADMIN_AUTH)).statusCode).toBe(200);
+  });
+
   it('availability shows test numbers to admins only', async () => {
     expect((await get('/ai-calls/availability')).json()).toEqual({ available: true, testNumbers: [] });
     expect((await get('/ai-calls/availability', ADMIN_AUTH)).json()).toEqual({ available: true, testNumbers: ['+16195550199'] });
