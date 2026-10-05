@@ -15,7 +15,8 @@ import {
   TEST_FIELD_MAP,
 } from '../test/outreach-fixtures.js';
 import { fetchRecords, type SfRecordSnapshot } from './records.js';
-import { refreshCampaign, refreshDueCampaigns, REFRESH_TICK_BUDGET_MS } from './refresh.js';
+import { deselectRecords, selectRecords } from './selection.js';
+import { DESELECTED_EXIT_REASON, refreshCampaign, refreshDueCampaigns, REFRESH_TICK_BUDGET_MS } from './refresh.js';
 
 vi.mock('./records.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./records.js')>()),
@@ -502,5 +503,89 @@ describe.skipIf(!pgLane)('campaign refresh (real Postgres)', () => {
     expect(out.exited).toBe(0);
     const rows = await enrollmentsOf(db, campaign.id);
     expect(rows.map((e) => e.status)).toEqual(['needs_review', 'needs_review', 'needs_review']);
+  });
+
+  describe('ai_call campaigns', () => {
+    const pick = (orgId: string, campaignId: string, ...ns: number[]) => selectRecords(db, { orgId, campaignId, userId: null, sfRecordIds: ns.map(leadId) });
+    const refresh = async (campaignId: string, client: SalesforceClient, now = NOW) =>
+      refreshCampaign({ db, client, fieldMap: TEST_FIELD_MAP, now }, await campaignById(db, campaignId));
+
+    it('enrolls only the selected members, at call_stage research; an unselected member is never enrolled', async () => {
+      const orgId = await seedOrg(db);
+      const c = await seedCampaign(db, orgId, { mode: 'ai_call', status: 'dry_run', lastRefreshedAt: null });
+      await pick(orgId, c.id, 1);
+      const sf = fakeSalesforce({ members: [leadId(1), leadId(2)], stamps: {}, records: { [leadId(1)]: reachable(1), [leadId(2)]: reachable(2) } });
+      const out = await refresh(c.id, sf.client);
+      expect(out).toEqual({ members: 2, enrolled: 1, exited: 0 });
+      const rows = await enrollmentsOf(db, c.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'active', callStage: 'research' });
+      expect((await campaignById(db, c.id)).memberCount).toBe(2);
+    });
+
+    it('a second refresh still enrolls nobody unselected, and enrolls a member selected since', async () => {
+      const orgId = await seedOrg(db);
+      const c = await seedCampaign(db, orgId, { mode: 'ai_call', status: 'dry_run' });
+      await pick(orgId, c.id, 1);
+      const sf = fakeSalesforce({ members: [leadId(1), leadId(2), leadId(3)], stamps: {}, records: { [leadId(1)]: reachable(1), [leadId(2)]: reachable(2), [leadId(3)]: reachable(3) } });
+      await refresh(c.id, sf.client);
+      expect(await enrollmentsOf(db, c.id)).toHaveLength(1);
+      await pick(orgId, c.id, 2);
+      expect((await refresh(c.id, sf.client, LATER)).enrolled).toBe(1);
+      expect((await enrollmentsOf(db, c.id)).map((e) => e.callStage)).toEqual(['research', 'research']);
+      expect((await refresh(c.id, sf.client, LATER)).enrolled).toBe(0);
+      expect(await enrollmentsOf(db, c.id)).toHaveLength(2);
+    });
+
+    it('exits an active enrollment whose record was deselected (deselected), and leaves needs_review alone', async () => {
+      const orgId = await seedOrg(db);
+      const c = await seedCampaign(db, orgId, { mode: 'ai_call', status: 'dry_run' });
+      await pick(orgId, c.id, 1, 3);
+      const sf = fakeSalesforce({ members: [leadId(1), leadId(3)], stamps: {}, records: { [leadId(1)]: reachable(1), [leadId(3)]: reachable(3) } });
+      await refresh(c.id, sf.client);
+      const byRecord = async () => {
+        const rows = await db
+          .select({ sf: schema.crmRecords.sfRecordId, status: schema.campaignEnrollments.status, reason: schema.campaignEnrollments.exitReason, id: schema.campaignEnrollments.id })
+          .from(schema.campaignEnrollments)
+          .innerJoin(schema.crmRecords, eq(schema.crmRecords.id, schema.campaignEnrollments.crmRecordId))
+          .where(eq(schema.campaignEnrollments.campaignId, c.id));
+        return new Map(rows.map((r) => [r.sf, r]));
+      };
+      const before = await byRecord();
+      await db.update(schema.campaignEnrollments).set({ status: 'needs_review', reviewCategory: 'attorney', reviewQuote: 'my lawyer' }).where(eq(schema.campaignEnrollments.id, before.get(leadId(3))!.id));
+      await deselectRecords(db, c.id, [leadId(1), leadId(3)]);
+      const out = await refresh(c.id, sf.client, LATER);
+      expect(out.exited).toBe(1);
+      const after = await byRecord();
+      expect(after.get(leadId(1))).toMatchObject({ status: 'exited', reason: DESELECTED_EXIT_REASON });
+      expect(after.get(leadId(3))).toMatchObject({ status: 'needs_review', reason: null });
+      const keys = await db.select().from(schema.enrollmentContactKeys).where(eq(schema.enrollmentContactKeys.enrollmentId, before.get(leadId(1))!.id));
+      expect(keys.length).toBeGreaterThan(0);
+      expect(keys.every((k) => !k.active)).toBe(true);
+    });
+
+    it('syncs only selected and enrolled records: the other members are not field-fetched', async () => {
+      const orgId = await seedOrg(db);
+      const c = await seedCampaign(db, orgId, { mode: 'ai_call', status: 'dry_run' });
+      await pick(orgId, c.id, 1);
+      const members = Array.from({ length: 500 }, (_, i) => leadId(i + 1));
+      const sf = fakeSalesforce({ members, stamps: {}, records: { [leadId(1)]: reachable(1) } });
+      await refresh(c.id, sf.client);
+      await refresh(c.id, sf.client, LATER);
+      const inQueries = sf.soql.filter((q) => q.includes(' IN ('));
+      for (const q of inQueries) expect([...q.matchAll(/'([^']+)'/g)].map((m) => m[1])).toEqual([leadId(1)]);
+      for (const call of vi.mocked(fetchRecords).mock.calls) expect(call[2]).toEqual([leadId(1)]);
+      expect((await campaignById(db, c.id)).memberCount).toBe(500);
+    });
+
+    it('a sequence campaign is unchanged: every eligible member enrolls with call_stage null', async () => {
+      const orgId = await seedOrg(db);
+      const c = await seedCampaign(db, orgId, { status: 'dry_run' });
+      const sf = fakeSalesforce({ members: [leadId(10), leadId(11)], stamps: {}, records: { [leadId(10)]: reachable(10), [leadId(11)]: reachable(11) } });
+      await refresh(c.id, sf.client);
+      const rows = await enrollmentsOf(db, c.id);
+      expect(rows).toHaveLength(2);
+      expect(rows.every((e) => e.callStage === null)).toBe(true);
+    });
   });
 });

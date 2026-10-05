@@ -17,6 +17,7 @@ import { CAMPAIGN_ARCHIVED_EXIT_REASON, chunk, enrollRecords, exitEnrollment, TE
 import { campaignSource } from './member-cache.js';
 import { pauseOrgCampaigns, RUNNING_CAMPAIGN_STATUSES } from './pause.js';
 import { fetchRecords, type SfRecordSnapshot } from './records.js';
+import { allSelectedIds } from './selection.js';
 import { fetchMemberIds, MAX_CAMPAIGN_RECORDS, membershipSoql } from './source.js';
 import { flagRecordsWithNewTasks } from './task-activity.js';
 
@@ -44,6 +45,8 @@ const RELEASED_WHEN_ARCHIVED: readonly ExitableStatus[] = ['active', 'conversing
 /** Archived campaigns release at most this many enrollments per tick. */
 const ARCHIVE_RELEASE_BATCH = 1_000;
 const MAX_ERROR_LENGTH = 1_000;
+/** `exit_reason` of an AI call campaign enrollment whose lead an admin deselected. */
+export const DESELECTED_EXIT_REASON = 'deselected';
 
 function toSnapshot(r: CrmRecordRow): SfRecordSnapshot {
   return {
@@ -178,14 +181,18 @@ export async function refreshCampaign(
   const sfObject = SfObject.parse(campaign.sfObject);
   const soql = await membershipSoql(client, { sfObject, source: campaignSource(campaign) });
   const ids = await fetchMemberIds(client, soql, MAX_CAMPAIGN_RECORDS);
+  const aiCall = campaign.mode === 'ai_call';
+  // An ai_call campaign reads and enrolls only the leads an admin picked; the query only bounds them.
+  const selected = aiCall ? await allSelectedIds(db, campaign.id) : null;
+  const relevant = selected ? ids.filter((id) => selected.has(id)) : ids;
 
-  const fetchIds = await idsToFetch(db, client, campaign.orgId, sfObject, ids);
+  const fetchIds = await idsToFetch(db, client, campaign.orgId, sfObject, relevant);
   if (fetchIds.length > 0) {
     await upsertRecords(db, campaign.orgId, await fetchRecords(client, sfObject, fetchIds, fieldMap[sfObject]));
   }
   if (deps.triage) await checkTaskActivity(db, client, campaign, now, log);
 
-  const members = await loadRecords(db, campaign.orgId, ids);
+  const members = await loadRecords(db, campaign.orgId, relevant);
   const bySfId = new Map(members.map((r) => [r.sfRecordId, r]));
   const blocks = await blocksFor(db, campaign.orgId, members.flatMap((r) => r.phones.map((p) => p.e164)));
   const memberIds = new Set(ids);
@@ -200,14 +207,18 @@ export async function refreshCampaign(
   for (const e of enrollments) {
     if (!EXITABLE_STATUSES.has(e.status)) continue;
     const record = bySfId.get(e.sfRecordId);
-    const reason = !memberIds.has(e.sfRecordId) ? 'left_query' : record ? skipReasonFor(toSnapshot(record), blocks, false) : null;
+    const reason = !memberIds.has(e.sfRecordId)
+      ? 'left_query'
+      : selected && !selected.has(e.sfRecordId)
+        ? DESELECTED_EXIT_REASON
+        : record ? skipReasonFor(toSnapshot(record), blocks, false) : null;
     if (!reason) continue;
     // Guarded on `active`: the triage tick may have flagged the person since the read above.
     if (await exitEnrollment(db, e.id, { from: ['active'], reason })) exited += 1;
   }
 
   const alreadyEnrolled = new Set(enrollments.map((e) => e.sfRecordId));
-  const candidates = ids.flatMap((id) => {
+  const candidates = relevant.flatMap((id) => {
     const record = bySfId.get(id);
     if (!record || alreadyEnrolled.has(id)) return [];
     const snapshot = toSnapshot(record);
@@ -220,6 +231,7 @@ export async function refreshCampaign(
     touchDays: campaign.touchDays,
     now,
     records: candidates,
+    callStage: aiCall ? 'research' : null,
   });
   if (skippedInOtherCampaign > 0 || skippedNoKeys > 0) {
     log?.info(

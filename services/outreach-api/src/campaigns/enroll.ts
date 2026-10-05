@@ -155,6 +155,8 @@ export async function enrollRecords(
     touchDays: number[];
     now: Date;
     records: Array<{ crmRecordId: string; keys: string[] }>;
+    /** AI call campaigns enroll at `research`; sequence campaigns leave it null. */
+    callStage?: 'research' | null;
   },
 ): Promise<{ enrolled: number; skippedInOtherCampaign: number; skippedNoKeys: number }> {
   const nextTouchAt = new Date(input.now.getTime() + (input.touchDays[0] ?? 0) * DAY_MS);
@@ -178,6 +180,7 @@ export async function enrollRecords(
             crmRecordId: record.crmRecordId,
             status: 'active',
             nextTouchAt,
+            callStage: input.callStage ?? null,
             enrolledAt: input.now,
           })
           .onConflictDoNothing({ target: [schema.campaignEnrollments.campaignId, schema.campaignEnrollments.crmRecordId] })
