@@ -128,6 +128,24 @@ describe('SalesforceClient.query', () => {
   });
 });
 
+describe('SalesforceClient.queryIncludingArchived (final review OUT I-1)', () => {
+  it('reads the first page of the REST queryAll resource, which also returns archived activities', async () => {
+    const { sf, http } = client([
+      { status: 200, body: { totalSize: 2, done: false, nextRecordsUrl: '/services/data/v60.0/queryAll/01g-2', records: [{ Id: 'a' }] } },
+    ]);
+    expect(await sf.queryIncludingArchived('SELECT Id FROM Task WHERE IsDeleted = false LIMIT 5')).toEqual([{ Id: 'a' }]);
+    expect(http.calls).toHaveLength(1);
+    const url = new URL(http.calls[0]!.url);
+    expect(url.pathname).toBe('/services/data/v60.0/queryAll');
+    expect(url.searchParams.get('q')).toBe('SELECT Id FROM Task WHERE IsDeleted = false LIMIT 5');
+  });
+
+  it('throws SalesforceApiError on >= 400', async () => {
+    const { sf } = client([{ status: 400, body: [{ message: 'bad', errorCode: 'INVALID_FIELD' }] }]);
+    await expect(sf.queryIncludingArchived('SELECT Nope FROM Task')).rejects.toBeInstanceOf(SalesforceApiError);
+  });
+});
+
 describe('SalesforceClient.queryAll', () => {
   const page = (records: unknown[], next: string | null, totalSize = 5) => ({
     status: 200,

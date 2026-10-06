@@ -100,6 +100,16 @@ export class SalesforceClient {
   }
 
   /**
+   * First page of a SOQL query through the REST `queryAll` resource, which also returns archived activities (Tasks and
+   * Events Salesforce archived after a year) and deleted rows: filter `IsDeleted = false` in the SOQL. For small, bounded
+   * reads (a LIMIT well under one page).
+   */
+  async queryIncludingArchived<T = Record<string, unknown>>(soql: string, opts: { signal?: AbortSignal } = {}): Promise<T[]> {
+    const page = await this.queryPage<T>((instanceUrl) => this.apiUrl(instanceUrl, '/queryAll', { q: soql }), opts.signal);
+    return page.records;
+  }
+
+  /**
    * Every row of a SOQL query, following `nextRecordsUrl` to the end. Uses the
    * REST `query` resource, not `queryAll` (which would add deleted rows).
    * Throws `QueryTooLargeError` as soon as the result is known to exceed
