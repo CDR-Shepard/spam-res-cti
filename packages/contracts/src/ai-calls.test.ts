@@ -172,9 +172,14 @@ describe('plan 1D: context, slots, practice calls, appointment_set', () => {
         status: 'done',
         changes: [{ label: 'Status', before: 'Working', after: 'Qualified', kind: 'converted' }],
         error: null, mayRetry: false, convertedOpportunityId: '0068X00000AbCdEQAZ',
+        convertedOpportunityUrl: 'https://gghsd.my.salesforce.com/lightning/r/Opportunity/0068X00000AbCdEQAZ/view',
       },
     };
     expect(AiCallResult.parse(row)).toEqual(row);
+    const { convertedOpportunityUrl: _url, ...noUrl } = row.writeback;
+    expect(WritebackSummary.safeParse(noUrl).success).toBe(false);
+    expect(WritebackSummary.safeParse({ ...row.writeback, convertedOpportunityUrl: '0068X00000AbCdEQAZ' }).success).toBe(false);
+    expect(WritebackSummary.safeParse({ ...row.writeback, convertedOpportunityUrl: null }).success).toBe(true);
     expect(AiCallResult.safeParse({ ...row, appointment: undefined }).success).toBe(false);
     expect(WritebackSummary.safeParse({ ...row.writeback, status: 'queued' }).success).toBe(false);
   });
