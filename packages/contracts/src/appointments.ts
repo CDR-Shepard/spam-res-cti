@@ -36,10 +36,19 @@ export const AppointmentSlot = z
       .nullable(),
     /** The specialist's zone: business hours are in it. */
     timeZone: IanaZone,
+    /**
+     * Part 4 Fix 1 (I-3): the time the slot blocks on the specialist's calendar, its kind's buffer included (a walkthrough's
+     * travel time; a phone call has none, and then these are absent). Optional, so a slot from an older outreach-api still
+     * parses; absent means [start, end).
+     */
+    blockStart: IsoInstant.optional(),
+    blockEnd: IsoInstant.optional(),
   })
   .strict()
   .refine((s) => s.id.startsWith(s.kind === 'phone' ? 'p' : 'w'), { message: 'slot id prefix must match kind' })
-  .refine((s) => Date.parse(s.end) > Date.parse(s.start), { message: 'end after start' });
+  .refine((s) => Date.parse(s.end) > Date.parse(s.start), { message: 'end after start' })
+  .refine((s) => s.blockStart === undefined || Date.parse(s.blockStart) <= Date.parse(s.start), { message: 'blockStart at or before start' })
+  .refine((s) => s.blockEnd === undefined || Date.parse(s.blockEnd) >= Date.parse(s.end), { message: 'blockEnd at or after end' });
 export type AppointmentSlot = z.infer<typeof AppointmentSlot>;
 
 export const AppointmentSlots = z
@@ -59,6 +68,9 @@ export const BookedAppointment = z
     addressConfirmed: z.boolean(),
     note: z.string().max(300),
     bookedAt: IsoInstant,
+    /** Part 4 Fix 1 (I-3): copied from the slot. Absent on older bookings, and then [start, end) is what it blocks. */
+    blockStart: IsoInstant.optional(),
+    blockEnd: IsoInstant.optional(),
   })
   .strict();
 export type BookedAppointment = z.infer<typeof BookedAppointment>;

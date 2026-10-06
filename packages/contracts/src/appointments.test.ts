@@ -197,3 +197,32 @@ describe('bookingStands (Part 4 Fix 1, I-1)', () => {
     expect([...BOOKING_STANDS_OUTCOMES]).toEqual(['appointment_set', 'qualified_transferred', 'transfer_failed']);
   });
 });
+
+describe('the blocked time (Part 4 Fix 1, I-3: the walkthrough travel buffer)', () => {
+  const walk = slot({ id: 'w1', kind: 'walkthrough', start: '2026-10-08T16:00:00.000Z', end: '2026-10-08T17:00:00.000Z' });
+  const blocked = { ...walk, blockStart: '2026-10-08T15:30:00.000Z', blockEnd: '2026-10-08T17:30:00.000Z' };
+
+  it('a slot may carry blockStart / blockEnd; a slot without them (an older outreach-api) still parses', () => {
+    expect(AppointmentSlot.parse(blocked)).toEqual(blocked);
+    expect(AppointmentSlot.parse(walk)).toEqual(walk);
+    expect(AppointmentSlots.safeParse([phoneSlot, blocked]).success).toBe(true);
+  });
+
+  it('the block must hold the slot: never starting after it, never ending before it, and real instants', () => {
+    expect(AppointmentSlot.safeParse({ ...blocked, blockStart: '2026-10-08T16:30:00.000Z' }).success).toBe(false);
+    expect(AppointmentSlot.safeParse({ ...blocked, blockEnd: '2026-10-08T16:30:00.000Z' }).success).toBe(false);
+    expect(AppointmentSlot.safeParse({ ...blocked, blockStart: 'soon' }).success).toBe(false);
+    expect(AppointmentSlot.safeParse({ ...walk, blockStart: walk.start, blockEnd: walk.end }).success).toBe(true);
+  });
+
+  it('a booking may carry the block too; an older booking without it still parses', () => {
+    const booked = {
+      slotId: 'w1', kind: 'walkthrough', start: walk.start, end: walk.end, specialistSfUserId: GRANT, addressConfirmed: true, note: '',
+      bookedAt: '2026-10-06T18:00:00.000Z',
+    };
+    const withBlock = { ...booked, blockStart: blocked.blockStart, blockEnd: blocked.blockEnd };
+    expect(BookedAppointment.parse(withBlock)).toEqual(withBlock);
+    expect(BookedAppointment.parse(booked)).toEqual(booked);
+    expect(BookedAppointment.safeParse({ ...booked, blockEnd: 'later' }).success).toBe(false);
+  });
+});

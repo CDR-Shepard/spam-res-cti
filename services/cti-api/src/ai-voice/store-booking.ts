@@ -39,7 +39,11 @@ export const appointmentLockQuery = (sfUserId: string): SQL =>
 const standsSql = (): SQL =>
   sql`(${t.outcome} in (${sql.join(BOOKING_STANDS_OUTCOMES.map((o) => sql`${o}`), sql`, `)}) or (${t.outcome} is null and ${t.endedAt} is null))`;
 
-/** Another real call in this call's org whose standing booking with the same owner overlaps [start, end). */
+/**
+ * Another real call in this call's org whose standing booking with the same owner overlaps this one. Each booking is
+ * compared by the time it blocks (Fix 1, I-3): [blockStart, blockEnd) when its slot carried one (a walkthrough's travel
+ * buffer), else [start, end). So two walkthroughs keep their buffers apart, and back-to-back phone calls both book.
+ */
 export const appointmentConflictQuery = (db: Conn, id: string, a: BookedAppointment) =>
   db
     .select({ id: t.id })
@@ -53,8 +57,8 @@ export const appointmentConflictQuery = (db: Conn, id: string, a: BookedAppointm
         standsSql(),
         sql`${t.createdAt} >= now() - make_interval(days => ${BOOKING_LOOKBACK_DAYS})`,
         sql`left(${t.appointment}->>'specialistSfUserId', 15) = ${ownerCore(a.specialistSfUserId)}`,
-        sql`(${t.appointment}->>'start')::timestamptz < ${a.end}::timestamptz`,
-        sql`(${t.appointment}->>'end')::timestamptz > ${a.start}::timestamptz`,
+        sql`coalesce(${t.appointment}->>'blockStart', ${t.appointment}->>'start')::timestamptz < ${a.blockEnd ?? a.end}::timestamptz`,
+        sql`coalesce(${t.appointment}->>'blockEnd', ${t.appointment}->>'end')::timestamptz > ${a.blockStart ?? a.start}::timestamptz`,
       ),
     )
     .limit(1);

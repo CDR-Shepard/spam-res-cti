@@ -72,6 +72,15 @@ describe('bookAppointment', () => {
     expect(store.rows.get(ID)?.summary).toBe(`Appointment booked: walkthrough ${W1.start}`);
   });
 
+  it('Fix 1 I-3: the time a slot blocks (a walkthrough\'s buffer) is stored with the booking; a slot without one stores none', async () => {
+    ctx = { ...ctx, slots: [P1, { ...W1, blockStart: '2026-10-08T15:30:00.000Z', blockEnd: '2026-10-08T17:30:00.000Z' }] };
+    await book({ slot_id: 'w1', address_confirmed: true, note: '' });
+    expect(stored()).toMatchObject({ slotId: 'w1', blockStart: '2026-10-08T15:30:00.000Z', blockEnd: '2026-10-08T17:30:00.000Z' });
+    await book({ slot_id: 'p1', address_confirmed: false, note: '' });
+    expect(stored()).not.toHaveProperty('blockStart');
+    expect(stored()).not.toHaveProperty('blockEnd');
+  });
+
   it('4: booking twice keeps the last booking', async () => {
     await book({ slot_id: 'p1', address_confirmed: false, note: '' });
     await book({ slot_id: 'p2', address_confirmed: false, note: '' });

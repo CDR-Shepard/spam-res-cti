@@ -146,10 +146,18 @@ describe('ai_calls SQL, rendered', () => {
     expect(sql).toContain('"ai_calls"."appointment" is not null');
     expect(sql).toMatch(/"ai_calls"\."created_at" >= now\(\) - make_interval\(days => \$\d+\)/);
     expect(sql).toMatch(/left\("ai_calls"\."appointment"->>'specialistSfUserId', 15\) = \$\d+/);
-    expect(sql).toMatch(/\("ai_calls"\."appointment"->>'start'\)::timestamptz < \$\d+::timestamptz/);
-    expect(sql).toMatch(/\("ai_calls"\."appointment"->>'end'\)::timestamptz > \$\d+::timestamptz/);
+    // Fix 1 I-3: each booking's blocked time (its buffer included), [blockStart ?? start, blockEnd ?? end).
+    expect(sql).toMatch(/coalesce\("ai_calls"\."appointment"->>'blockStart', "ai_calls"\."appointment"->>'start'\)::timestamptz < \$\d+::timestamptz/);
+    expect(sql).toMatch(/coalesce\("ai_calls"\."appointment"->>'blockEnd', "ai_calls"\."appointment"->>'end'\)::timestamptz > \$\d+::timestamptz/);
     expect(sql).toContain('limit $');
     expect(params).toEqual(expect.arrayContaining([ID, '0058X00000Fsx39', BOOKED.start, BOOKED.end, 30]));
+  });
+
+  it('Fix 1 I-3: a new booking that carries a block is compared by it', () => {
+    const blocked = { ...BOOKED, blockStart: '2030-01-01T00:00:00.000Z', blockEnd: '2030-01-02T00:00:00.000Z' };
+    const { params } = appointmentConflictQuery(db, ID, blocked).toSQL();
+    expect(params).toEqual(expect.arrayContaining([blocked.blockStart, blocked.blockEnd]));
+    expect(params).not.toContain(BOOKED.start);
   });
 
   it('Fix 1 I-1: only a standing booking holds the time (a live row with no outcome, or a keeping outcome)', () => {

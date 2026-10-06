@@ -121,10 +121,10 @@ export function fakeStore(): FakeStore {
       if (!r || r.endedAt) return 'not_live';
       const core = a.specialistSfUserId.slice(0, 15);
       const taken = [...rows.values()].some((o) => {
-        const b = o.appointment as { specialistSfUserId: string; start: string; end: string } | null;
+        const b = o.appointment as { specialistSfUserId: string; start: string; end: string; blockStart?: string; blockEnd?: string } | null;
         return (
           o.id !== id && o.orgId === r.orgId && !o.isTest && b !== null && bookingStands(o) && b.specialistSfUserId.slice(0, 15) === core &&
-          Date.parse(b.start) < Date.parse(a.end) && Date.parse(b.end) > Date.parse(a.start)
+          Date.parse(b.blockStart ?? b.start) < Date.parse(a.blockEnd ?? a.end) && Date.parse(b.blockEnd ?? b.end) > Date.parse(a.blockStart ?? a.start)
         );
       });
       if (taken) return 'taken';

@@ -38,6 +38,9 @@ function bookingFor(slot: AppointmentSlot, args: unknown, now: Date): BookedAppo
     addressConfirmed: field(args, 'address_confirmed') === true,
     note: typeof note === 'string' ? note.trim().slice(0, NOTE_MAX) : '',
     bookedAt: now.toISOString(),
+    // Fix 1 I-3: the time the slot blocks (its buffer included), for the D-10 check and outreach-api's next offer.
+    ...(slot.blockStart !== undefined ? { blockStart: slot.blockStart } : {}),
+    ...(slot.blockEnd !== undefined ? { blockEnd: slot.blockEnd } : {}),
   });
 }
 

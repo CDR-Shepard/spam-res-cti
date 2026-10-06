@@ -178,4 +178,42 @@ describe.skipIf(!server)('ai_calls appointment booking (real Postgres)', () => {
     expect(await run(id, booked('2030-01-13T18:00:00.000Z', 15))).toBe('not_live');
     expect(await appointmentOf(id)).toBeNull();
   });
+
+  describe('Fix 1 I-3: the walkthrough travel buffer', () => {
+    const walk = (start: string, bufferMin: number | null): BookedAppointment => {
+      const b = booked(start, 60);
+      const ms = (bufferMin ?? 0) * 60_000;
+      return {
+        ...b, slotId: 'w1', kind: 'walkthrough', addressConfirmed: true,
+        ...(bufferMin === null ? {} : { blockStart: new Date(Date.parse(b.start) - ms).toISOString(), blockEnd: new Date(Date.parse(b.end) + ms).toISOString() }),
+      };
+    };
+
+    it('9–10 and 10–11 walkthroughs racing, each with a 30-minute buffer: exactly one books', async () => {
+      const [a, b] = await Promise.all([call(), call()]);
+      const results = await Promise.all([run(a, walk('2030-02-04T17:00:00.000Z', 30)), run(b, walk('2030-02-04T18:00:00.000Z', 30))]);
+      expect([...results].sort()).toEqual(['booked', 'taken']);
+    });
+
+    it('the second walkthrough is refused in either order; one a full buffer clear of the first books', async () => {
+      expect(await run(await call(), walk('2030-02-05T18:00:00.000Z', 30))).toBe('booked');
+      expect(await run(await call(), walk('2030-02-05T17:00:00.000Z', 30))).toBe('taken');
+      expect(await run(await call(), walk('2030-02-05T19:00:00.000Z', 30))).toBe('taken');
+      expect(await run(await call(), walk('2030-02-05T20:00:00.000Z', 30))).toBe('booked');
+    });
+
+    it('phone calls back to back (no buffer) both book', async () => {
+      expect(await run(await call(), booked('2030-02-06T17:00:00.000Z', 15))).toBe('booked');
+      expect(await run(await call(), booked('2030-02-06T17:15:00.000Z', 15))).toBe('booked');
+      expect(await run(await call(), booked('2030-02-06T16:45:00.000Z', 15))).toBe('booked');
+    });
+
+    it('a phone call inside a booked walkthrough\'s buffer is refused; an older booking without a block counts as [start, end)', async () => {
+      expect(await run(await call(), walk('2030-02-07T17:00:00.000Z', 30))).toBe('booked');
+      expect(await run(await call(), booked('2030-02-07T18:00:00.000Z', 15))).toBe('taken');
+      expect(await run(await call(), booked('2030-02-07T18:30:00.000Z', 15))).toBe('booked');
+      expect(await run(await call(), walk('2030-02-08T17:00:00.000Z', null))).toBe('booked');
+      expect(await run(await call(), booked('2030-02-08T18:00:00.000Z', 15))).toBe('booked');
+    });
+  });
 });
