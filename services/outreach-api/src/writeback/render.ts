@@ -4,7 +4,7 @@
  * within the field's length and the post within the org's Lead FeedItem limit (980 characters, both objects).
  */
 import { cutUtf16, wellFormed } from '../research/text.js';
-import { DNC_FIELDS, type Change, type Skipped, type WritePlan } from './plan.js';
+import { DNC_FIELDS, TABLE_FIELDS, type Change, type Skipped, type WritePlan } from './plan.js';
 
 export const CHATTER_MAX = 980;
 export const CHANGES_MAX = 32_000;
@@ -18,8 +18,8 @@ export interface Applied {
   /** `field` (the allowlist name) lets a refused do-not-call flag get its own section (5a Fix 1, M-8). */
   notWritten: Array<{ label: string; reason: string; field?: string }>;
   created: string[];
-  /** Fields a rep changed since the plan, left alone (Fix 1, I-3). */
-  notChanged?: Array<{ label: string; now: string | null }>;
+  /** Fields changed in Salesforce since the plan, left alone (Fix 1, I-3); `held` names the status that moved (D-25 N3). */
+  notChanged?: Array<{ label: string; now: string | null; held?: string }>;
 }
 export interface RenderInput {
   at: Date;
@@ -103,7 +103,10 @@ function conversionLine(c: NonNullable<RenderInput['conversion']>): string {
 const section = (title: string, items: readonly string[]): string[] => (items.length > 0 ? [title, ...items.map((x) => `- ${x}`)] : []);
 
 const DNC_TITLE = 'Could not set do-not-call flag';
-const NOT_CHANGED_TITLE = 'Not changed — a rep edited it since the call';
+const NOT_CHANGED_TITLE = 'Not changed — changed in Salesforce since the call';
+/** "Rating (held: Stage was changed)" when only its status moved; else "Timeline (now 30 Days)". */
+const notChangedLine = (n: NonNullable<Applied['notChanged']>[number]): string =>
+  n.held === undefined ? `${oneLine(n.label)} (now ${shown(n.now)})` : `${oneLine(n.label)} (held: ${oneLine(n.held)} was changed)`;
 const isDnc = (field: string | undefined): boolean => field !== undefined && DNC_FIELDS.has(field);
 
 /** The do-not-call flags that were not set: plan skips and Salesforce refusals, as label and reason (M-8). */
@@ -132,7 +135,8 @@ function bookedWords(plan: WritePlan): string | null {
 
 /**
  * The AI Last Call Changes field (spec §5.5): header, a "Booked …; then transferred …" line (M-9), then Could not set
- * do-not-call flag (M-8), Changed, Created, Kept the rep's value, Not written, Not filled.
+ * do-not-call flag (M-8), Changed, Not changed since the call, Created, Kept the rep's value, Not written, Not changed
+ * (held status-side moves, D-21(4)), Not filled.
  */
 export function changesFieldText(i: RenderInput): string {
   const header = `AI call on ${ptWords(i.at)} · ${oneLine(i.outcomeWords)} · AI call ${oneLine(i.aiCallId).slice(0, 8)}…`;
@@ -148,12 +152,13 @@ export function changesFieldText(i: RenderInput): string {
     ...(then !== '' && booked !== null ? [`Booked ${booked}${then}`] : []),
     ...section(DNC_TITLE, dncRefusals(i).map((r) => `${r.label}: ${r.reason}`)),
     ...section('Changed', i.applied.written.map((c) => `${oneLine(c.label)}: ${shown(c.before)} → ${shown(c.after)}`)),
-    ...section(NOT_CHANGED_TITLE, (i.applied.notChanged ?? []).map((n) => `${oneLine(n.label)} (now ${shown(n.now)})`)),
+    ...section(NOT_CHANGED_TITLE, (i.applied.notChanged ?? []).map(notChangedLine)),
     ...section('Created', created),
     ...section("Kept the rep's value", i.plan.kept.map((k) => `${oneLine(k.label)}: kept "${oneLine(k.current)}" (seller said: "${oneLine(k.evidence)}")`)),
     ...section('Not written', [...refused, ...i.applied.notWritten.filter((n) => !isDnc(n.field)).map((n) => `${oneLine(n.label)}: ${oneLine(n.reason)}`)]),
+    ...section('Not changed', i.plan.skipped.filter((s) => !isDnc(s.field) && TABLE_FIELDS.has(s.field)).map((s) => `${oneLine(s.label)}: ${SKIP_WORDS[s.why]}`)),
     ...section('Not filled', [
-      ...i.plan.skipped.filter((s) => !isDnc(s.field)).map((s) => `${oneLine(s.label)}: ${SKIP_WORDS[s.why]}`),
+      ...i.plan.skipped.filter((s) => !isDnc(s.field) && !TABLE_FIELDS.has(s.field)).map((s) => `${oneLine(s.label)}: ${SKIP_WORDS[s.why]}`),
       ...(i.plan.mapped ? [] : ['Fill-blanks skipped: the answer mapping was unavailable']),
     ]),
   ];

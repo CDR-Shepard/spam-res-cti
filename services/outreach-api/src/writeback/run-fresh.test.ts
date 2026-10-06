@@ -11,7 +11,7 @@ import { createTestDb, pgLane } from '../test/pg.js';
 import { CONTACT, depsFor, fakeOrg, PHONE_BOOKING, RUN_AT, seedWriteback, SETTER, transportError, type OrgState } from '../test/writeback-harness.js';
 import { runWritebacks } from './run.js';
 
-const NOT_CHANGED = 'Not changed — a rep edited it since the call';
+const NOT_CHANGED = 'Not changed — changed in Salesforce since the call';
 const later = new Date(RUN_AT.getTime() + 2 * 60_000);
 
 function oppState(recordId: string, over: Record<string, unknown> = {}): { state: OrgState; record: Record<string, unknown> } {
@@ -52,7 +52,7 @@ describe.skipIf(!pgLane)('runWritebacks re-reads before the PATCH (real Postgres
     expect(patch.fields).not.toHaveProperty('Rating__c');
     expect(patch.fields).not.toHaveProperty('Timeline__c');
     const text = changesOf(patch.fields);
-    expect(text).toContain(`${NOT_CHANGED}\n- Stage (now Offer Made)\n- Rating (now (blank))\n- Timeline (now 30 Days)`);
+    expect(text).toContain(`${NOT_CHANGED}\n- Stage (now Offer Made)\n- Rating (held: Stage was changed)\n- Timeline (now 30 Days)`);
     expect(text).not.toContain('\nChanged\n');
     expect(text).toContain('Created\n- Event: Phone Consultation');
   });

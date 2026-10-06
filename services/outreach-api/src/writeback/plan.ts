@@ -119,6 +119,13 @@ const STATUS_FIELD: Readonly<Record<SfObject, string>> = { Lead: 'Status', Oppor
  */
 export const DNC_FIELDS: ReadonlySet<string> = new Set(['DoNotCall', 'Removal_Status__c', 'Skip_on_Dialer__c', 'PersonDoNotCall']);
 const FOLLOW_UP_FIELDS: ReadonlySet<string> = new Set(['Next_Follow_Up_Date__c']);
+/**
+ * The fields the outcome tables move (Status/Stage, the reasons, Rating, Next Follow-Up), less do-not-call. Their skips
+ * are listed as "Not changed", not "Not filled": they are not seller answers (sweep D-21(4)).
+ */
+export const TABLE_FIELDS: ReadonlySet<string> = new Set(
+  [...Object.values(STATUS_FIELD), ...[...Object.values(LEAD_TABLE), ...Object.values(OPP_TABLE)].flatMap((r) => r.also.map((m) => m.field))].filter((f) => !DNC_FIELDS.has(f)),
+);
 
 const whyFor = (field: string): Change['why'] => (DNC_FIELDS.has(field) ? 'dnc' : FOLLOW_UP_FIELDS.has(field) ? 'follow_up' : 'status');
 
@@ -160,6 +167,17 @@ class Builder {
     if (!modeAllows(m.mode, f, this.i.current) || sameText(before, r.text)) return null;
     return { name: f.name, value: r.value, change: { field: m.field, label: f.label, before, after: r.text, why } };
   }
+  /** Whether the move would change the record; a move whose field or value can't be resolved counts as a change. */
+  wouldChange(m: Move): boolean {
+    const f = this.field(m.field);
+    const r = resolveMove(m, f, { now: this.i.now, callbackAt: this.i.callbackAt });
+    if (!r.ok || !f) return true;
+    return modeAllows(m.mode, f, this.i.current) && !sameText(asText(currentOf(this.i.current, f.name)), r.text);
+  }
+  /** A held move is listed only when it would have changed something (sweep D-21(3)). */
+  hold(m: Move, why: Skipped['why']): void {
+    if (this.wouldChange(m)) this.skip(m.field, why);
+  }
   apply(m: Move, why?: Change['why']): void {
     const out = this.move(m, why);
     if (!out) return;
@@ -189,25 +207,30 @@ function guardBlock(i: WritePlanInput, current: string | null): 'not_from_state'
   return null;
 }
 
+/** A record already at the target: only the research check applies (sweep D-21(6)); a rep may have moved it there. */
+const researchBlock = (i: WritePlanInput, current: string | null): 'moved_since_research' | null =>
+  i.researchStatus !== null && current !== i.researchStatus ? 'moved_since_research' : null;
+
 /**
  * The status move and the moves that go with it, as a list of moves to apply. A reason goes only with its status. When
- * the record is outside the from-states or moved since research, Rating and Next Follow-Up stay too (a rep has the
- * record; 5a Fix 1, I-3), unless it is already at the target. Do-not-call moves always apply.
+ * the record is outside the from-states or moved since research, Rating, the reason and Next Follow-Up stay too (a rep
+ * has the record; 5a Fix 1, I-3), also when it is already at the target (sweep D-21(6)). Do-not-call moves always apply.
+ * A held move that would change nothing is not listed (D-21(3)).
  */
 function rowMoves(b: Builder, i: WritePlanInput, row: Row): Move[] {
   const name = STATUS_FIELD[i.sfObject];
   const current = asText(currentOf(i.current, b.field(name)?.name ?? name));
   const atTarget = row.status !== null && sameText(current, row.status);
-  const block = row.status === null ? guardBlock(i, current) : atTarget ? null : statusBlock(b, i, row, row.status);
-  if (row.status !== null && block !== null) b.skip(name, block);
+  const block = row.status === null ? guardBlock(i, current) : atTarget ? researchBlock(i, current) : statusBlock(b, i, row, row.status);
+  if (row.status !== null && !atTarget && block !== null) b.skip(name, block);
   const held = block === 'not_from_state' || block === 'moved_since_research' ? block : null;
   const moves: Move[] = row.status === null || atTarget || block !== null ? [] : [{ field: name, value: row.status, mode: 'set' }];
   for (const m of row.also) {
+    const asFill: Move = atTarget && REASON_FIELDS.has(m.field) && m.mode === 'set' ? { ...m, mode: 'fill' } : m;
     if (DNC_FIELDS.has(m.field)) moves.push(m);
-    else if (REASON_FIELDS.has(m.field) && atTarget) moves.push({ ...m, mode: m.mode === 'set' ? 'fill' : m.mode });
-    else if (REASON_FIELDS.has(m.field) && block !== null) b.skip(m.field, block);
-    else if (held !== null) b.skip(m.field, held);
-    else moves.push(m);
+    else if (REASON_FIELDS.has(m.field) && block !== null) b.hold(asFill, block);
+    else if (held !== null) b.hold(m, held);
+    else moves.push(asFill);
   }
   return moves;
 }

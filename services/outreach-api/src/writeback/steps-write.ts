@@ -159,15 +159,16 @@ function notCarried(run: RowRun): NotWritten[] {
   return raw.flatMap((r) => (r && typeof r.field === 'string' && typeof r.code === 'string' ? [{ label: r.field, reason: refusedWords(r.code), field: r.field, code: r.code }] : []));
 }
 
-/** I-3: the patch and its changes less what a rep changed since the plan, from a read made just before every PATCH. */
+/** I-3: the patch and its changes less what changed in Salesforce since the plan, from a read made just before every PATCH. */
 async function unedited(run: RowRun, writable: ReadonlyMap<string, WritableField>, patch: Record<string, unknown>, changes: Change[]) {
   if (Object.keys(patch).length === 0) return { base: patch, changes, notChanged: [] as NotChanged[] };
   const target = writeTarget(run.row);
-  const statusField = writable.get(target.sobject === 'Lead' ? 'Status' : 'StageName')?.name ?? null;
+  const status = writable.get(target.sobject === 'Lead' ? 'Status' : 'StageName');
+  const statusField = status?.name ?? null;
   const fresh = await readFresh(run.client, target.sobject, target.id, [...Object.keys(patch), ...(statusField ? [statusField] : [])]);
   const saved = planData(run).status;
   const planStatus = saved === undefined ? undefined : typeof saved === 'string' ? saved : null;
-  const kept = keepUnedited({ patch, changes, fresh, statusField, planStatus });
+  const kept = keepUnedited({ patch, changes, fresh, statusField, ...(status ? { statusLabel: status.label } : {}), planStatus });
   const held = new Set(kept.notChanged.map((n) => n.field.toLowerCase()));
   return { base: kept.patch, changes: changes.filter((c) => !held.has(c.field.toLowerCase())), notChanged: kept.notChanged };
 }

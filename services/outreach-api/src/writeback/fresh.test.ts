@@ -14,6 +14,9 @@ describe('sameValue', () => {
     ['2026-10-06T22:20:00.000+0000', '2026-10-06T22:21:00.000Z', false],
     ['250000', '250000.0', true],
     ['Hot', 'Warm', false],
+    // sweep D-25 N2: Salesforce keeps whole seconds; our own write had milliseconds.
+    ['2026-10-06T22:20:05.000+0000', '2026-10-06T22:20:05.734Z', true],
+    ['2026-10-06T22:20:06.000+0000', '2026-10-06T22:20:05.734Z', false],
   ])('%s vs %s → %s', (a, b, out) => {
     expect(sameValue(a, b)).toBe(out);
   });
@@ -26,10 +29,11 @@ describe('keepUnedited', () => {
       changes: [change('Rating__c', null, 'Cold', 'status'), change('Timeline__c', null, '90 Days', 'filled')],
       fresh: { StageName: 'Offer Made', Rating__c: null, Timeline__c: null },
       statusField: 'StageName',
+      statusLabel: 'Stage',
       planStatus: 'Followup',
     });
     expect(out.patch).toEqual({ Timeline__c: '90 Days' });
-    expect(out.notChanged).toEqual([{ field: 'Rating__c', label: 'Rating__c', now: null }]);
+    expect(out.notChanged).toEqual([{ field: 'Rating__c', label: 'Rating__c', now: null, held: 'Stage' }]);
   });
 
   it('a row planned before the status was recorded skips the guard; per-field checks still apply', () => {
@@ -49,9 +53,11 @@ describe('keepUnedited', () => {
       changes: [change('DoNotCall', 'false', 'true', 'dnc'), change('Removal_Status__c', null, 'Remove me', 'dnc'), change('Status', 'Working', 'Unqualified', 'status')],
       fresh: { DoNotCall: true, Removal_Status__c: 'Spam', Status: 'Nurture' },
       statusField: 'Status',
+      statusLabel: 'Status',
       planStatus: 'Working',
     });
     expect(out.patch).toEqual({ DoNotCall: true });
     expect(out.notChanged.map((n) => n.field)).toEqual(['Removal_Status__c', 'Status']);
+    expect(out.notChanged.every((n) => n.held === undefined)).toBe(true);
   });
 });
