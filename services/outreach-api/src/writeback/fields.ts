@@ -78,15 +78,15 @@ const isPicklist = (f: SObjectField): boolean => f.type === 'picklist' || f.type
 
 /**
  * The allowlist ∩ the describe, keyed by the allowlist's name. A field is kept when the org has it (matched
- * case-insensitively), `updateable !== false`, `calculated !== true`, it is not on `ROLLUP_DENY`, its name passes
- * `FIELD_API_NAME`, and (for qualification fields) its type still fits its kind.
+ * case-insensitively), `updateable === true` (unknown means no: 5a Fix 1, M-5), `calculated !== true`, it is not on
+ * `ROLLUP_DENY`, its name passes `FIELD_API_NAME`, and (for qualification fields) its type still fits its kind.
  */
 export function writableFields(d: SObjectDescribe, sfObject: SfObject): Map<string, WritableField> {
   const byName = new Map(d.fields.map((f) => [f.name.toLowerCase(), f]));
   const out = new Map<string, WritableField>();
   for (const [name, kind] of allowlist(sfObject)) {
     const f = byName.get(name.toLowerCase());
-    if (!f || f.updateable === false || f.calculated === true) continue;
+    if (!f || f.updateable !== true || f.calculated === true) continue;
     if (DENY_LOWER[sfObject].has(f.name.toLowerCase()) || !FIELD_API_NAME.test(f.name)) continue;
     if (kind !== 'status' && !KIND_TYPES[kind].has(f.type)) continue;
     const picklist = isPicklist(f) ? (f.picklistValues ?? []).filter((p) => p.active).map((p) => p.value) : null;

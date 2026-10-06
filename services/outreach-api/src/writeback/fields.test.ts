@@ -39,6 +39,11 @@ describe('writableFields', () => {
     expect(w.has('Condition__c')).toBe(false);
     expect(w.has('Occupancy__c')).toBe(false);
   });
+  it('5a Fix 1 (M-5): drops a field whose describe does not say updateable (unknown means no)', () => {
+    const { updateable: _u, ...noFlag } = f('Timeline__c', 'picklist', { picklistValues: pick([['30 Days', true]]) });
+    const out = writableFields({ name: 'Lead', fields: [noFlag, f('Roof_Issues__c', 'boolean', { updateable: undefined })] }, 'Lead');
+    expect([...out.keys()]).toEqual([]);
+  });
   it('drops a rollup name even when the describe says it is updateable', () => {
     expect(ROLLUP_DENY.Lead.has('Next_Task_Due_Date__c')).toBe(true);
     expect(w.has('Next_Task_Due_Date__c')).toBe(false);
