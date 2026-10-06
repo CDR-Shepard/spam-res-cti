@@ -213,7 +213,7 @@ Results show the status, the change list and, after a conversion, a link to the 
 
 Every migration starts with `SET LOCAL lock_timeout = '5s';` and uses `IF NOT EXISTS`.
 
-**`0054_ai_call_booking.sql`.** This is CTI-owned (`schema.ts`). It adds columns to `ai_calls`:
+**`0055_ai_call_booking.sql`.** This is CTI-owned (`schema.ts`). It adds columns to `ai_calls`:
 
 | Column | Type | Meaning |
 |---|---|---|
@@ -221,7 +221,7 @@ Every migration starts with `SET LOCAL lock_timeout = '5s';` and uses `IF NOT EX
 | `appointment` | jsonb null | The `BookedAppointment` from `book_appointment` |
 | `practice` | boolean not null default false, `CHECK (NOT practice OR is_test)` | A practice call: real record context, a test number |
 
-**`0055_ai_call_writebacks.sql`.** This is outreach-owned (`schema-outreach.ts`; foreign keys in SQL only).
+**`0056_ai_call_writebacks.sql`.** This is outreach-owned (`schema-outreach.ts`; foreign keys in SQL only).
 
 `ai_call_writebacks`:
 - **Ids:** `id` and `org_id`, plus `ai_call_id`, which is UNIQUE and cascades on delete.
@@ -505,7 +505,7 @@ The row ends `partial`, with the refusal code. When conversion is simply turned 
    - Give reps read access to the new field through Setup.
    - Add the field to layouts in Setup, never from the repo.
    - Optionally, map the consent, Spanish-speaker and Skip-on-Dialer fields in Setup → Lead → Map Lead Fields (still-open decision 3).
-2. **Migrations** 0054 and 0055 run in the pre-deploy migrate step.
+2. **Migrations** 0055, 0056 and 0057 (indexes) run in the pre-deploy migrate step.
 3. **Set `AI_CALL_DEFAULT_SPECIALISTS=0058X00000Fsx39QAB`** (Grant Golden) on outreach-api.
 4. **Deploy `@cti/api` and outreach-api together.** A trigger that reaches an old cti-api with the new fields gets a 400. That is treated as a transport error and retried with the same key, so the deploy window is safe.
 5. **Before the first real campaign,** check readiness ("Lead conversion: ready", "Appointments go to: Grant Golden"). Then run practice calls on a real Opportunity and a real Lead, which never write. Then run a one-Lead live campaign and check the conversion by hand.

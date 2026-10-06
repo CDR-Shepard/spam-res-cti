@@ -1,5 +1,5 @@
 /**
- * Outreach AI-call tables added by plan 1D (migration 0055_ai_call_writebacks.sql).
+ * Outreach AI-call tables added by plan 1D (migration 0056_ai_call_writebacks.sql).
  *
  * Re-exported from schema-outreach.ts (which schema.ts re-exports), so
  * `schema.aiCallWritebacks` / `schema.aiPracticeCalls` reach every service
@@ -8,7 +8,7 @@
  *
  * Same rule as schema-outreach.ts: this file imports NOTHING from schema.ts, so
  * foreign keys and CHECK constraints live in the SQL migration only; the
- * `*_` constants are the CHECKs' exact value lists, pinned by migration-0055.test.ts.
+ * `*_` constants are the CHECKs' exact value lists, pinned by migration-0056.test.ts.
  */
 import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -61,7 +61,7 @@ export const aiCallWritebacks = pgTable(
     aiCallUnique: uniqueIndex('ai_call_writebacks_ai_call_unique').on(t.aiCallId),
     dueIdx: index('ai_call_writebacks_due_idx').on(t.nextAttemptAt).where(sql`status IN ('pending', 'running')`),
     recordIdx: index('ai_call_writebacks_record_idx').on(t.orgId, t.sfRecordId),
-    // 0056 (sweep D-8): the foreign-key columns no index led with.
+    // 0057 (sweep D-8): the foreign-key columns no index led with.
     touchIdx: index('ai_call_writebacks_touch_idx').on(t.touchId),
     enrollmentIdx: index('ai_call_writebacks_enrollment_idx').on(t.enrollmentId),
   }),
@@ -90,7 +90,7 @@ export const aiPracticeCalls = pgTable(
   },
   (t) => ({
     campaignIdx: index('ai_practice_calls_campaign_idx').on(t.campaignId, sql`${t.createdAt} desc`),
-    // 0056 (sweep D-8): the foreign-key columns no index led with.
+    // 0057 (sweep D-8): the foreign-key columns no index led with.
     orgIdx: index('ai_practice_calls_org_idx').on(t.orgId),
     enrollmentIdx: index('ai_practice_calls_enrollment_idx').on(t.enrollmentId),
     callPlanIdx: index('ai_practice_calls_call_plan_idx').on(t.callPlanId),

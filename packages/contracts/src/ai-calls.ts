@@ -89,7 +89,7 @@ export const AiCallOutcome = z.enum([
 ]);
 export type AiCallOutcome = z.infer<typeof AiCallOutcome>;
 
-/** ai_call_writebacks.status (migration 0055). */
+/** ai_call_writebacks.status (migration 0056). */
 export const WritebackStatus = z.enum(['pending', 'running', 'done', 'partial', 'failed', 'skipped']);
 export type WritebackStatus = z.infer<typeof WritebackStatus>;
 export const WritebackChange = z.object({
@@ -159,7 +159,7 @@ export type TestCallResponse = InternalAiCallResponse;
 export const PracticeCallRequest = z.object({ version: z.number().int().min(1), to: z.string().min(7).max(20) }).strict();
 export type PracticeCallRequest = z.infer<typeof PracticeCallRequest>;
 
-/** One practice call on the campaign's list (ai_practice_calls, 0055). */
+/** One practice call on the campaign's list (ai_practice_calls, 0056). */
 export const PracticeCall = z.object({
   id: z.string().uuid(),
   enrollmentId: z.string().uuid(),

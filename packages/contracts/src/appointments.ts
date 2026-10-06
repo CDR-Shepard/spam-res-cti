@@ -57,7 +57,7 @@ export const AppointmentSlots = z
   .refine((a) => new Set(a.map((s) => s.id)).size === a.length, { message: 'slot ids unique' });
 export type AppointmentSlots = z.infer<typeof AppointmentSlots>;
 
-/** What the agent's book_appointment tool stored on ai_calls.appointment (0054). */
+/** What the agent's book_appointment tool stored on ai_calls.appointment (0055). */
 export const BookedAppointment = z
   .object({
     slotId: z.string().regex(SLOT_ID),

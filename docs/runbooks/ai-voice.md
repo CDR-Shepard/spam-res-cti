@@ -420,7 +420,7 @@ So about **$0.12 per minute plus $0.0075 per call** ($0.10 + $0.014 + $0.0044 = 
 - **Booking.** `book_appointment` takes an offered `slot_id` (p1–p9, w1–w9). It is refused, and the agent offers the other time, when another AI call already holds that owner's time (overlap, a walkthrough's buffer included; test and practice bookings never block a real one). It stores `ai_calls.appointment` and sets the outcome **`appointment_set`** ("Appointment set") at once.
 - **What keeps it.** A booked call keeps `appointment_set` if the caller hangs up, the line goes quiet, or the call hits its time limit. A transfer after booking keeps the booking (`qualified_transferred` / `transfer_failed`; the rep can cancel). "Stop calling me", wrong number, or an `end_call` with another decision (not interested, a callback instead) replaces it and frees the time. `end_call(appointment_set)` with nothing stored is recorded as a callback with the line "The agent ended as booked, but no appointment was saved — call them back."
 - **Salesforce.** cti-api never writes the appointment to Salesforce. outreach-api's write-back creates the Event (and converts a Lead) after the call: `outreach-sf-campaigns.md` §Appointments and Salesforce write-back.
-- **Deploy order.** Migration `0054_ai_call_booking.sql` must be applied before the new `@cti/api` runs: every `ai_calls` insert writes `offered_slots` and `practice`. Deploy `@cti/api` before or together with outreach-api (one commit): its trigger contract is strict, and an old `@cti/api` answers `HTTP 400 invalid_body` to a trigger carrying `context` or slots with `blockStart`/`blockEnd`. That trigger is retried with the same key, so the window is safe.
+- **Deploy order.** Migration `0055_ai_call_booking.sql` must be applied before the new `@cti/api` runs: every `ai_calls` insert writes `offered_slots` and `practice`. Deploy `@cti/api` before or together with outreach-api (one commit): its trigger contract is strict, and an old `@cti/api` answers `HTTP 400 invalid_body` to a trigger carrying `context` or slots with `blockStart`/`blockEnd`. That trigger is retried with the same key, so the window is safe.
 
 ## 16. Practice calls (plan 1D)
 
@@ -443,7 +443,7 @@ A practice call **never books in Salesforce, never converts a Lead and never wri
 
 The campaign page lists the latest 20 practice calls above the results (admins only): time, lead, outcome, "Would have booked: Phone call Wed Oct 7, 11:00 AM" and the transcript. Refusals show in words ("Not placed: …"); cti-api is gated on its test branch (an admin, a number on `AI_VOICE_TEST_NUMBERS`).
 
-## 17. New `ai_calls` columns (plan 1D, migration 0054)
+## 17. New `ai_calls` columns (plan 1D, migration 0055)
 
 | Column | What it holds |
 |---|---|

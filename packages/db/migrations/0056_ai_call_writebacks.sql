@@ -1,5 +1,5 @@
 -- =============================================================================
--- 0055_ai_call_writebacks.sql — Salesforce write-back after AI calls, and
+-- 0056_ai_call_writebacks.sql — Salesforce write-back after AI calls, and
 -- practice calls (plan 1D:
 -- docs/superpowers/plans/2026-10-06-ai-call-context-booking-writeback-1d.md).
 --

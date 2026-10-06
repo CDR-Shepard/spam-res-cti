@@ -1,11 +1,11 @@
 -- =============================================================================
--- 0056_ai_call_writeback_indexes.sql — indexes on the foreign-key columns of
--- 0055's tables that no index led with (plan 1D sweep, D-8).
+-- 0057_ai_call_writeback_indexes.sql — indexes on the foreign-key columns of
+-- 0056's tables that no index led with (plan 1D sweep, D-8).
 --
 -- Without them, deleting a touch, an enrollment, a call plan, an AI call, a
 -- user or an organization scans ai_call_writebacks / ai_practice_calls for the
 -- ON DELETE action, and a join on these columns scans too. Both tables are new
--- and small, so the plain (non-concurrent) builds are quick; 0054 and 0055 are
+-- and small, so the plain (non-concurrent) builds are quick; 0055 and 0056 are
 -- never edited.
 -- =============================================================================
 

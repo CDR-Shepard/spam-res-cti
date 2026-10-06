@@ -1,5 +1,5 @@
 /**
- * Plan 1D write-back rows (`ai_call_writebacks`, migration 0055): one per counted real AI call, enqueued in the results
+ * Plan 1D write-back rows (`ai_call_writebacks`, migration 0056): one per counted real AI call, enqueued in the results
  * transaction, claimed by the `ai_call.writeback` tick with a lease, retried with backoff, and resumed step by step (each
  * step's result is saved before the next starts, so a retry never redoes a step).
  */

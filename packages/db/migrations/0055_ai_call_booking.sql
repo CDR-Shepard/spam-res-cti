@@ -1,5 +1,5 @@
 -- =============================================================================
--- 0054_ai_call_booking.sql — AI call appointment booking (plan 1D:
+-- 0055_ai_call_booking.sql — AI call appointment booking (plan 1D:
 -- docs/superpowers/plans/2026-10-06-ai-call-context-booking-writeback-1d.md).
 --
 -- ai_calls
