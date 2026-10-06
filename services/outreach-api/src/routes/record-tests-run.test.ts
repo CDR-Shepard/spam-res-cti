@@ -114,6 +114,13 @@ describe('POST /api/record-tests/browser-token', () => {
     expect(res.json().code).toBe(code);
   });
 
+  it("18 (E-3): an admin the calling service doesn't know in this tenant (a super admin acting on another) is told so, not that only admins may", async () => {
+    tokenAnswer = { kind: 'refused', code: 'unknown_user' };
+    expect((await tokenPost()).json().error).toBe("Talk in browser only works in your own tenant: the calling service doesn't know you here. Use Ring my phone.");
+    tokenAnswer = { kind: 'refused', code: 'not_admin' };
+    expect((await tokenPost()).json().error).toBe('Only an admin can take a test call in the browser.');
+  });
+
   it('18: no cti-api client configured is 503 AI_CALLS_NOT_CONFIGURED', async () => {
     await app.close();
     app = await build({ cti: null });

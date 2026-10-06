@@ -123,6 +123,10 @@ function sendTokenRefusal(reply: FastifyReply, answer: Exclude<BrowserTokenOutco
   if (answer.code === 'browser_calls_unavailable') {
     return sendError(reply, 503, 'BROWSER_CALLS_UNAVAILABLE', 'Talk in browser is not set up on the calling service. Use Ring my phone.');
   }
+  if (answer.code === 'unknown_user') {
+    // A super admin acting on another tenant (X-Org-Id) is an admin, just not a user cti-api knows there.
+    return sendError(reply, 403, 'FORBIDDEN', "Talk in browser only works in your own tenant: the calling service doesn't know you here. Use Ring my phone.");
+  }
   return sendError(reply, 403, 'FORBIDDEN', 'Only an admin can take a test call in the browser.');
 }
 

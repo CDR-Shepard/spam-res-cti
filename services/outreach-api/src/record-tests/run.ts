@@ -57,11 +57,6 @@ async function destination(deps: RunDeps, ctx: RequestContext, body: RecordTestC
   return to === null ? 'not_a_test_number' : { mode: 'phone', to };
 }
 
-async function orgSettings(db: Db, orgId: string): Promise<unknown> {
-  const [org] = await db.select({ settings: schema.organizations.settings }).from(schema.organizations).where(eq(schema.organizations.id, orgId));
-  return org?.settings ?? {};
-}
-
 export async function startRecordTestCall(deps: RunDeps, ctx: RequestContext, testId: string, body: RecordTestCallRequest): Promise<RunResult> {
   const { db, now } = deps;
   const test = await loadRecordTest(db, ctx.orgId, testId, now);
@@ -74,7 +69,8 @@ export async function startRecordTestCall(deps: RunDeps, ctx: RequestContext, te
   if (typeof dest === 'string') return { ok: false, error: dest };
 
   const context = { returning: plan.data.reengagement?.lastContact != null };
-  const slots = await practiceSlots(deps, ctx.orgId, await orgSettings(db, ctx.orgId), 'record-test.call');
+  // The request's tenant row already holds the settings (requireContext read it).
+  const slots = await practiceSlots(deps, ctx.orgId, ctx.tenant.settings, 'record-test.call');
   const userId = ctx.session.userId;
   const idempotencyKey = `rtest:${randomUUID()}`;
   const inserted = await withCallLimit(db, { orgId: ctx.orgId, userId, now }, async (tx) => {
