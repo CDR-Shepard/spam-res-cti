@@ -55,7 +55,7 @@ async function noOpportunityTask(run: RowRun, accountId: string | null): Promise
   const description = `The AI assistant booked a ${kind} on a call (AI call ${run.row.aiCallId}) for Lead ${run.row.sfRecordId}, which someone had already converted without an Opportunity. Create the Opportunity and book the time.`;
   let taskId: string | null = null;
   try {
-    taskId = await createTaskOnce(run.client, taskFields({ whatId: accountId, whoId: null, ownerId: booked.specialistSfUserId, subject, description, today: ptToday(run.deps.now) }));
+    taskId = await createTaskOnce(run.client, taskFields({ whatId: accountId, whoId: null, ownerId: booked.specialistSfUserId, subject, description, today: ptToday(run.deps.now) }), run.ctx.call.endedAt);
   } catch (err) {
     if (!(err instanceof WriteRefusedError)) throw err;
   }
