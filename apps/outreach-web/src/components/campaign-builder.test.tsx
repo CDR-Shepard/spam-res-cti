@@ -6,6 +6,9 @@ import { LIST_VIEW_ID, campaign, preview } from '../test/outreach-fixtures';
 import { respond, stubApi } from '../test/stub-api';
 import { CampaignBuilder } from './campaign-builder';
 
+// Sweep D-12: these tests time out at the 5 s default under the full parallel root run (they pass alone); no logic change.
+vi.setConfig({ testTimeout: 15_000 });
+
 afterEach(() => vi.unstubAllGlobals());
 
 const leadViews = { listViews: [{ id: LIST_VIEW_ID, label: 'Hot leads', developerName: 'Hot_Leads' }] };

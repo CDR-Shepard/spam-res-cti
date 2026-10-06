@@ -7,6 +7,9 @@ import { createMemoryHistory, createRouter, type AnyRouter, RouterProvider } fro
 import { routeTree } from '../routeTree.gen';
 import { AuthProvider, useAuth } from '../lib/auth';
 
+// Sweep D-12: these tests time out at the 5 s default under the full parallel root run (they pass alone); no logic change.
+vi.setConfig({ testTimeout: 15_000 });
+
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 /**

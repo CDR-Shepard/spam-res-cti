@@ -6,6 +6,9 @@ import { CAMPAIGN_ID, campaign } from '../test/outreach-fixtures';
 import { stubApi } from '../test/stub-api';
 import { CampaignsPage } from './campaigns-page';
 
+// Sweep D-12: these tests time out at the 5 s default under the full parallel root run (they pass alone); no logic change.
+vi.setConfig({ testTimeout: 15_000 });
+
 afterEach(() => vi.unstubAllGlobals());
 
 const SECOND_ID = '33333333-3333-4333-8333-333333333333';

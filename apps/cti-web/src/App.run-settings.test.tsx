@@ -19,6 +19,9 @@ import { App } from './App';
 import * as opencti from './opencti';
 import * as coordinator from './softphone-coordinator';
 
+// Sweep D-12: these tests time out at the 5 s default under the full parallel root run (they pass alone); no logic change.
+vi.setConfig({ testTimeout: 15_000 });
+
 class FakeTrack {
   private handlers = new Map<string, Array<() => void>>();
   addEventListener(event: string, cb: () => void): void {
