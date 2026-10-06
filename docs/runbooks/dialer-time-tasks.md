@@ -30,6 +30,11 @@ number changed, including correcting a day down to 0. Later ticks write
 nothing extra. Expect lower numbers than before for any rep who left a line
 open (a 2026-10-05 line left open for 7 h 58 m should now read under an hour).
 
+**The deploy overlap.** While the old container still runs, its worker (3 days,
+line-open numbers) and the new one (14 days, active numbers) can rewrite each
+other's last-3-day numbers. It converges one tick after the old container exits.
+Harmless: each Task is a single (rep, day) row and nothing is created twice.
+
 ## Switch (Railway `@cti/api` variable — changing it restarts the service)
 
 | Variable | Default | `off` means |

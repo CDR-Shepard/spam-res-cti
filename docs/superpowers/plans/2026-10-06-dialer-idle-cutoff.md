@@ -29,6 +29,8 @@ rewritten with the new number.
 
 ## Global Constraints
 
+> Superseded detail: the idle cut uses engine.ts stopIdleSession (flip first), not stopSession(..., { reason }); stopSession never writes stop_reason. See the spec §2.
+
 - One constant: `export const DIALER_IDLE_MS = 15 * 60_000;` in
   `services/cti-api/src/dialer/idle.ts`. Both the counting and the live cut
   import it. No other literal 15-minute value anywhere.

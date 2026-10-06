@@ -303,6 +303,27 @@ describe('runDialerTimeTick — active time only', () => {
     expect(store.rows.get('r1')).toMatchObject({ salesforceTaskId: '00TX', syncedSeconds: 0 });
   });
 
+  it('never creates a 0-second Task: a planned zero-correction whose freshly claimed row lost its Task id makes no Salesforce call', async () => {
+    // The deploy overlap: the plan saw Task 00TX at 1800 s and the day now has no
+    // activity (a 0 correction), but between the plan and this claim ANOTHER instance
+    // got 'missing' from Salesforce and cleared the id. A create would write a 0-second
+    // Task (and a find would adopt one), so the claim's copy decides: nothing is sent.
+    const r: SyncedRow = { id: 'r1', orgId: 'org1', userId: 'g', day: '2026-10-02', salesforceTaskId: '00TX', syncedSeconds: 1800, attempts: 0, nextAttemptAt: new Date(0) };
+    const { store } = memoryStore({ activity: [], rows: [r] });
+    const claimRow = store.claimRow.bind(store);
+    store.claimRow = vi.fn(async (id, now, leaseMs) => {
+      const claimed = await claimRow(id, now, leaseMs);
+      return claimed ? { ...claimed, salesforceTaskId: null, syncedSeconds: null } : null;
+    });
+    const d = deps(store);
+    await expect(runDialerTimeTick(d)).resolves.toEqual({ planned: 1, written: 0 });
+    expect(store.claimRow).toHaveBeenCalledTimes(1);
+    expect(d.sf.createDialerTimeTask).not.toHaveBeenCalled();
+    expect(d.sf.findDialerTimeTask).not.toHaveBeenCalled();
+    expect(d.sf.updateDialerTimeTask).not.toHaveBeenCalled();
+    expect(store.failures).toEqual([]);
+  });
+
   it('rewrites a Task from the first day of the 14-day window, not just the last three', async () => {
     // A day 13 Pacific days back (2026-09-19) that was synced under the old line-open number.
     const oldLeg: WindowLeg = { orgId: 'org1', userId: 'g', joinedAt: new Date('2026-09-19T16:00:00Z'), endedAt: new Date('2026-09-19T17:00:00Z') };

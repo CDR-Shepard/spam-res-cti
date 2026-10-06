@@ -1051,7 +1051,10 @@ export type DialerRepLegEndSource = (typeof DIALER_REP_LEG_END_SOURCES)[number];
 
 /**
  * One row per rep conference leg of the power dialer (migration 0048): how long
- * the rep's line sat on the dialer — dialing, hold music and talking all count.
+ * the rep's line sat open on the dialer. The leg is the line-open span; time on
+ * the dialer is the leg intersected with the rep's activity windows (a dial or a
+ * conversation, plus 15 minutes) — see services/cti-api reports/talk-time.ts and
+ * docs/superpowers/specs/2026-10-06-dialer-idle-cutoff-design.md.
  * Written by dialer/rep-legs.ts, closed by dialer/rep-leg-reconcile.ts when
  * every end signal was missed, read by reports/talk-time-query.ts. FK-free.
  */

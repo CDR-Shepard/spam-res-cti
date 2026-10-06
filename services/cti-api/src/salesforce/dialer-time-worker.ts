@@ -86,6 +86,12 @@ async function syncOne(w: PlannedWrite, deps: DialerTimeDeps): Promise<boolean> 
   // instance may have just created the Task between the plan and this claim.
   const row = await deps.store.claimRow(unclaimed.id, deps.now(), CLAIM_LEASE_MS);
   if (!row) return false; // another instance holds the lease, or it's no longer due
+  // A 0-second Task is never created, found or adopted. The plan can hold a zero
+  // correction only for a row that had a Task; if the claimed copy has none, another
+  // instance (the old container, mid-deploy) just got 'missing' and cleared the id.
+  // Nothing to correct: the next tick plans from the cleared row, and a day with no
+  // activity plans nothing at all.
+  if (!row.salesforceTaskId && w.seconds <= 0) return false;
   try {
     if (row.salesforceTaskId) {
       const r = await withTimeout(deps.sf.updateDialerTimeTask(w.userId, row.salesforceTaskId, w.day, w.seconds), SF_TIMEOUT_MS, 'Salesforce Task update');

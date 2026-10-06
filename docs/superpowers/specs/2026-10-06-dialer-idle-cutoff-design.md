@@ -76,8 +76,12 @@ Both callers load activity alongside legs:
 
 - **The admin report** (`reports/talk-time-query.ts`) loads it for the org.
   Dials need `dialed_at >= start − 15 min and dialed_at < end`. Conversations
-  need `bridged_at < end and (ended_at is null or ended_at >= start − 15 min)`.
-  The lookback is a computed Date parameter, not SQL interval text.
+  need `bridged_at < end and ((ended_at is null and bridged_at >= start − 15 min − 4 h) or
+  ended_at >= start − 15 min)`. The 4-hour floor on a row with no recorded end is
+  the orphan cap (`MAX_CONVERSATION_MS`): a call row whose end callback was lost
+  counts for at most 4 hours, so one bridged earlier than that before the lookback
+  can no longer reach the range and is not read forever. The lookbacks are
+  computed Date parameters, not SQL interval text.
 - **The Salesforce worker** (`salesforce/dialer-time-store.ts`) uses the same
   predicates across all orgs.
 
@@ -94,18 +98,29 @@ timer.
 **open rep leg** (`dialer_rep_legs.ended_at is null`). A run parked while the
 rep takes a callback has already dropped its leg, so it is never cut.
 
-The query runs once per tick:
+The query runs once per tick, and once more per idle candidate as a re-check
+(see "Re-check before cutting" below). `idleRunCandidatesStatement(now, sessionId?)`;
+`$1` is `now − MAX_CONVERSATION_MS` (4 h), and the `and s.id = $2` line is added
+only for the re-check:
 
 ```sql
 select s.id as session_id, s.user_id,
        greatest(s.updated_at, max(l.joined_at), max(i.updated_at)) as last_activity_at,
-       coalesce(bool_or(i.status = 'dialing' or (i.status = 'connected' and i.prospect_ended_at is null)), false) as live
+       coalesce(bool_or((i.status = 'dialing' or (i.status = 'connected' and i.prospect_ended_at is null)) and i.updated_at > $1::timestamptz), false) as live
 from dialer_sessions s
 join dialer_rep_legs l on l.session_id = s.id and l.ended_at is null
 left join dialer_queue_items i on i.session_id = s.id
 where s.status in ('active', 'paused')
+  -- and s.id = $2   (re-check only)
 group by s.id, s.user_id, s.updated_at
 ```
+
+**`live` is bounded to 4 hours.** Twilio ends any call at 4 hours, so an item
+still `dialing`, or `connected` with `prospect_ended_at` null, whose last change
+is more than `MAX_CONVERSATION_MS` old is a lost status callback, not a live
+call. Without the bound, one lost callback would block the cut forever and
+re-create the original "line left open for hours" symptom. `MAX_CONVERSATION_MS`
+is the same constant `reports/talk-time.ts` uses for the orphan cap.
 
 What counts as the run's last change:
 
@@ -117,6 +132,15 @@ What counts as the run's last change:
 **Idle (pure `isIdleRun`):** `!live && now − last_activity_at >= DIALER_IDLE_MS`.
 A ringing dial or a live conversation is never cut, however long it runs. This
 matches `engine.ts` `isTalking` and the abandoned-run reaper.
+
+**Re-check before cutting.** The tick snapshots the candidates once, then stops
+them one by one, and each stop makes several Twilio calls, so a later candidate's
+snapshot can be seconds old when its turn comes. For each candidate that is idle
+in the snapshot, the tick re-reads that one run (`candidates(sessionId)`) with a
+fresh clock and re-applies `isIdleRun`. It stops the run only if the fresh row is
+still idle; a run that is no longer idle, or no longer a candidate (its leg closed,
+it was stopped), is skipped silently. `stopIdleSession`'s conditional flip below
+remains the last line of defence.
 
 **What happens:** `stopIdleSession(sessionId, deps)` (engine.ts). It runs in the
 REVERSE order of `stopSession`: it marks the run stopped first, then releases

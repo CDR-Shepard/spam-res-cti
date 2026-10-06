@@ -9,6 +9,7 @@
  * Design: docs/superpowers/specs/2026-10-02-dialer-time-tasks-design.md and
  * docs/superpowers/specs/2026-10-06-dialer-idle-cutoff-design.md.
  */
+import { DIALER_IDLE_MS } from '../dialer/idle.js';
 import { sfFetch, soqlQuery } from './client.js';
 import { soqlEscape } from './soql.js';
 import { CTI_ORIGIN, CTI_ORIGIN_FIELD, isInvalidFieldError, withoutCtiOrigin } from './cti-origin.js';
@@ -22,7 +23,7 @@ const DELETED_CODES = new Set(['NOT_FOUND', 'ENTITY_IS_DELETED']);
 /** What the Task's Description says, create and patch alike — so a Task made
  *  under the old line-open wording is reworded the first time it is rewritten. */
 export function dialerTimeDescription(day: string): string {
-  return `Time on the power dialer on ${day}, Pacific: counted while dialing or talking; quiet stretches over 15 minutes are left out. Kept up to date by the CTI.`;
+  return `Time on the power dialer on ${day}, Pacific: counted while dialing or talking; quiet stretches over ${DIALER_IDLE_MS / 60_000} minutes are left out. Kept up to date by the CTI.`;
 }
 
 export function buildDialerTimeTaskFields(day: string, seconds: number): Record<string, unknown> {

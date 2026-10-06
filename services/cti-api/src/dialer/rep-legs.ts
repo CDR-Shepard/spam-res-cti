@@ -1,7 +1,9 @@
 /**
- * Time on the power dialer (talk-time spec): one dialer_rep_legs row per rep
- * conference leg, from the join to the leg's end — dialing, hold music and
- * talking all count.
+ * The rep's open line on the power dialer (talk-time spec): one dialer_rep_legs
+ * row per rep conference leg, from the join to the leg's end. The leg is the
+ * line-open span; time ON the dialer is the leg intersected with the rep's
+ * activity windows (a dial or a conversation, plus 15 minutes) — see
+ * reports/talk-time.ts and the idle-cutoff spec.
  *
  * Opened by the voice route right after it stamps the leg on its run. Ended by
  * whichever hears it first: the leg's own status callback (status route), the

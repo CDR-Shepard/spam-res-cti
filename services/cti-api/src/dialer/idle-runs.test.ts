@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { stopIdleSession } from './engine.js';
 import { DIALER_IDLE_MS } from './idle.js';
 import { buildEngineDeps } from './live-deps.js';
+import { MAX_CONVERSATION_MS } from '../reports/talk-time.js';
 import {
   IDLE_CHECK_INTERVAL_MS,
   idleRunCandidatesStatement,
@@ -51,7 +52,9 @@ describe('isIdleRun', () => {
 });
 
 describe('idleRunCandidatesStatement — the one query a tick runs', () => {
-  const text = new PgDialect().sqlToQuery(idleRunCandidatesStatement()).sql.replace(/\s+/g, ' ').trim();
+  const query = new PgDialect().sqlToQuery(idleRunCandidatesStatement(NOW));
+  const text = query.sql.replace(/\s+/g, ' ').trim();
+  const liveFloor = new Date(NOW.getTime() - MAX_CONVERSATION_MS).toISOString();
 
   it('selects the run and rep under the aliases toCandidate reads: session_id and user_id', () => {
     expect(text).toContain('select s.id as session_id, s.user_id,');
@@ -68,16 +71,29 @@ describe('idleRunCandidatesStatement — the one query a tick runs', () => {
   it('the last activity is the newest of the run, a leg join and an item change', () => {
     expect(text).toContain('greatest(s.updated_at, max(l.joined_at), max(i.updated_at)) as last_activity_at');
   });
-  it("live = an item that is dialing, or connected with the prospect still on the line; null-safe", () => {
+  it("live = a dialing item, or connected with the prospect still on the line, touched within the 4-hour call limit; null-safe", () => {
+    // Twilio ends any call at 4 hours, so an item still 'ringing' or 'talking'
+    // after that is a lost callback, not a live call: it must not block the cut forever.
     expect(text).toContain(
-      "coalesce(bool_or(i.status = 'dialing' or (i.status = 'connected' and i.prospect_ended_at is null)), false) as live",
+      "coalesce(bool_or((i.status = 'dialing' or (i.status = 'connected' and i.prospect_ended_at is null)) and i.updated_at > $1::timestamptz), false) as live",
     );
+  });
+  it('binds the live floor — now minus MAX_CONVERSATION_MS (4 h) — as the one parameter, and nothing else', () => {
+    expect(MAX_CONVERSATION_MS).toBe(4 * 3_600_000);
+    expect(query.params).toEqual([liveFloor]);
   });
   it('groups by the run', () => {
     expect(text).toContain('group by s.id, s.user_id, s.updated_at');
   });
-  it('binds nothing: the 15 minutes is applied in JS, by isIdleRun, from the one constant', () => {
-    expect(new PgDialect().sqlToQuery(idleRunCandidatesStatement()).params).toEqual([]);
+  it('unfiltered, it carries no session predicate: the tick looks at every candidate', () => {
+    expect(text).not.toContain('s.id = $');
+  });
+  it('given a session id it adds `and s.id = $n` and carries the id as a bound parameter (the re-check)', () => {
+    const filtered = new PgDialect().sqlToQuery(idleRunCandidatesStatement(NOW, 'sess-42'));
+    const filteredText = filtered.sql.replace(/\s+/g, ' ').trim();
+    expect(filteredText).toContain("where s.status in ('active', 'paused') and s.id = $2 group by");
+    expect(filteredText).toContain('and s.id = $');
+    expect(filtered.params).toEqual([liveFloor, 'sess-42']);
   });
 });
 
@@ -104,7 +120,8 @@ describe('toCandidate — a raw db.execute row', () => {
 });
 
 function deps(candidates: IdleCandidate[], stop: IdleRunDeps['stop'] = async () => ({ action: 'stopped' })): IdleRunDeps {
-  return { candidates: async () => candidates, now: () => NOW, stop };
+  // Like the real statement: given a session id, only that run (if it is still a candidate).
+  return { candidates: async (id) => (id ? candidates.filter((c) => c.sessionId === id) : candidates), now: () => NOW, stop };
 }
 
 describe('stopIdleRunsTick', () => {
@@ -156,6 +173,71 @@ describe('stopIdleRunsTick', () => {
     expect(n).toBe(1);
     expect(info).toHaveBeenCalledTimes(1);
     expect(info).toHaveBeenCalledWith('[dialer] idle run stopped', expect.objectContaining({ sessionId: 'real' }));
+  });
+
+  it('re-checks each idle candidate by id right before stopping it, after one unfiltered snapshot', async () => {
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const all = [run('idle-a'), run('recent', { lastActivityAt: ago(MIN) }), run('idle-b')];
+    const candidates = vi.fn(async (id?: string) => (id ? all.filter((c) => c.sessionId === id) : all));
+    const stop = vi.fn(async () => ({ action: 'stopped' as const }));
+    await stopIdleRunsTick({ candidates, now: () => NOW, stop });
+    // snapshot (no id), then one re-check per idle candidate; the recent run is never re-checked.
+    expect(candidates.mock.calls.map((c) => c[0])).toEqual([undefined, 'idle-a', 'idle-b']);
+  });
+
+  it('a candidate idle in the snapshot but live on the re-check is not stopped', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const stop = vi.fn(async () => ({ action: 'stopped' as const }));
+    const candidates = async (id?: string) =>
+      id === 'woke' ? [run('woke', { live: true })] : id === 'still' ? [run('still')] : [run('woke'), run('still')];
+    const n = await stopIdleRunsTick({ candidates, now: () => NOW, stop });
+    expect(stop.mock.calls.map((c) => (c as unknown[])[0])).toEqual(['still']);
+    expect(n).toBe(1);
+    expect(info).toHaveBeenCalledTimes(1);
+  });
+
+  it('a candidate that got newer activity on the re-check (no longer 15 minutes old) is not stopped', async () => {
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const stop = vi.fn(async () => ({ action: 'stopped' as const }));
+    const candidates = async (id?: string) => (id ? [run('busy', { lastActivityAt: ago(MIN) })] : [run('busy')]);
+    expect(await stopIdleRunsTick({ candidates, now: () => NOW, stop })).toBe(0);
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it('a candidate that vanished on the re-check (leg closed, run no longer active) is not stopped, silently', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stop = vi.fn(async () => ({ action: 'stopped' as const }));
+    const candidates = async (id?: string) => (id ? [] : [run('gone')]);
+    expect(await stopIdleRunsTick({ candidates, now: () => NOW, stop })).toBe(0);
+    expect(stop).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it('a candidate still idle on the re-check is stopped, judged at the re-check time', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const clock = [NOW, new Date(NOW.getTime() + 60_000)];
+    const now = vi.fn(() => clock.shift() ?? NOW);
+    const stop = vi.fn(async () => ({ action: 'stopped' as const }));
+    const candidates = async (id?: string) => [run('idle-a', { lastActivityAt: ago(20 * MIN) })].filter((c) => !id || c.sessionId === id);
+    expect(await stopIdleRunsTick({ candidates, now, stop })).toBe(1);
+    expect(stop).toHaveBeenCalledWith('idle-a');
+    // 20 minutes at the snapshot clock, 21 at the re-check clock: the log reports the fresher number.
+    expect(info).toHaveBeenCalledWith('[dialer] idle run stopped', expect.objectContaining({ sessionId: 'idle-a', idleMinutes: 21 }));
+  });
+
+  it('a re-check that throws is logged, and the next idle run is still stopped', async () => {
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stop = vi.fn(async () => ({ action: 'stopped' as const }));
+    const candidates = async (id?: string) => {
+      if (id === 'bad') throw new Error('db down');
+      return id ? [run(id)] : [run('bad'), run('good')];
+    };
+    expect(await stopIdleRunsTick({ candidates, now: () => NOW, stop })).toBe(1);
+    expect(stop.mock.calls.map((c) => (c as unknown[])[0])).toEqual(['good']);
+    expect(error).toHaveBeenCalledWith('[dialer] idle run stop failed', { sessionId: 'bad', err: 'db down' });
   });
 
   it('stops nothing, and logs nothing, when no run is idle', async () => {
