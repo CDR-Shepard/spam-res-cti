@@ -90,4 +90,13 @@ describe.skipIf(!pgLane)('bookedNotOnCalendar (real Postgres)', () => {
     const hours = (await t.read()).map((b) => b.start.getUTCHours()).sort((a, b) => a - b);
     expect(hours).toEqual([10, 11, 12, 13]);
   });
+
+  it('Part 4 Fix 1 (I-3): a booking that carries the time it blocks (a walkthrough\'s buffer) is busy for all of it', async () => {
+    const t = await tenant();
+    await t.call({
+      ...booked('2026-10-07T16:00:00.000Z', '2026-10-07T17:00:00.000Z'), slotId: 'w1', kind: 'walkthrough',
+      blockStart: '2026-10-07T15:30:00.000Z', blockEnd: '2026-10-07T17:30:00.000Z',
+    });
+    expect(await t.read()).toEqual([{ start: new Date('2026-10-07T15:30:00.000Z'), end: new Date('2026-10-07T17:30:00.000Z'), allDay: false }]);
+  });
 });

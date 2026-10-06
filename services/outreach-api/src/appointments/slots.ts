@@ -105,10 +105,17 @@ export function pickOffered(windows: readonly Window[], max: number, timeZone: s
   return perDay.slice(0, Math.max(0, max));
 }
 
+/**
+ * The slots for picked windows. `bufferMs` is the kind's own buffer, the one `conflicts` widened the window by (Part 4
+ * Fix 1, I-3): when it is set, each slot carries the time it blocks, [start − buffer, end + buffer), so cti-api's booking
+ * check and the next offer keep the travel time around a booked walkthrough free. A kind with no buffer (the phone call by
+ * default) carries no block.
+ */
 export function toSlots(
   kind: AppointmentKind,
   picked: readonly Window[],
   specialist: { sfUserId: string; firstName: string | null; timeZone: string },
+  bufferMs = 0,
 ): AppointmentSlot[] {
   const prefix = kind === 'phone' ? 'p' : 'w';
   return picked.slice(0, MAX_IDS_PER_KIND).map((w, i) => ({
@@ -119,5 +126,8 @@ export function toSlots(
     specialistSfUserId: specialist.sfUserId,
     specialistFirstName: specialist.firstName,
     timeZone: specialist.timeZone,
+    ...(bufferMs > 0
+      ? { blockStart: new Date(w.start.getTime() - bufferMs).toISOString(), blockEnd: new Date(w.end.getTime() + bufferMs).toISOString() }
+      : {}),
   }));
 }

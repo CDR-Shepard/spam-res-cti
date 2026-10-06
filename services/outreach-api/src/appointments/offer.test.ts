@@ -46,6 +46,9 @@ describe('offerSlots', () => {
     expect(AppointmentSlots.safeParse(offer.slots).success).toBe(true);
     expect(offer.slots[0]).toMatchObject({ kind: 'phone', start: '2026-10-06T17:00:00.000Z', end: '2026-10-06T17:15:00.000Z' });
     expect(offer.slots[4]).toMatchObject({ kind: 'walkthrough', start: '2026-10-07T16:00:00.000Z', end: '2026-10-07T17:00:00.000Z' });
+    // Part 4 Fix 1 (I-3): a walkthrough carries its 30-minute travel buffer as the time it blocks; a phone call has none.
+    expect(offer.slots[4]).toMatchObject({ blockStart: '2026-10-07T15:30:00.000Z', blockEnd: '2026-10-07T17:30:00.000Z' });
+    expect(offer.slots[0]).not.toHaveProperty('blockStart');
     // The busy read covers now to now + 15 days.
     expect(sf.soql[1]).toContain('StartDateTime < 2026-10-21T15:00:00Z');
     expect(sf.soql[1]).toContain(`OwnerId = '${GRANT}'`);

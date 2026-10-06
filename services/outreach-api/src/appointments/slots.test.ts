@@ -247,6 +247,16 @@ describe('toSlots', () => {
     expect(AppointmentSlots.safeParse([...phone, ...walk]).success).toBe(true);
   });
 
+  it('Part 4 Fix 1 (I-3): with a buffer each slot carries the time it blocks (the same widening conflicts() uses); with none, no block', () => {
+    const picked = pickOffered(freeWindows(WALK, WEEKDAYS, [], NOW, LA), 6, LA);
+    const [w1] = toSlots('walkthrough', picked, grant, 30 * MIN);
+    expect(w1).toMatchObject({ start: '2026-10-07T16:00:00.000Z', end: '2026-10-07T17:00:00.000Z', blockStart: '2026-10-07T15:30:00.000Z', blockEnd: '2026-10-07T17:30:00.000Z' });
+    const [p1] = toSlots('phone', pickOffered(freeWindows(PHONE, WEEKDAYS, [], NOW, LA), 6, LA), grant, 0);
+    expect(p1).not.toHaveProperty('blockStart');
+    expect(p1).not.toHaveProperty('blockEnd');
+    expect(AppointmentSlots.safeParse([p1, w1]).success).toBe(true);
+  });
+
   it('never makes an id the contract refuses: at most nine of a kind', () => {
     const many: Window[] = Array.from({ length: 12 }, (_, i) => ({ start: new Date(NOW.getTime() + i * 60 * MIN), end: new Date(NOW.getTime() + (i * 60 + 15) * MIN) }));
     expect(toSlots('phone', many, grant).map((s) => s.id)).toEqual(['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9']);

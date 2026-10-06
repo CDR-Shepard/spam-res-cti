@@ -50,8 +50,9 @@ export async function bookedNotOnCalendar(db: Db, a: { orgId: string; ownerSfUse
   return rows.flatMap(({ appointment }): Busy[] => {
     const booked = BookedAppointment.safeParse(appointment);
     if (!booked.success || core(booked.data.specialistSfUserId) !== core(a.ownerSfUserId)) return [];
-    const start = new Date(booked.data.start);
-    const end = new Date(booked.data.end);
+    // The time it blocks (Part 4 Fix 1, I-3): a walkthrough's buffer included, as cti-api's booking check compares it.
+    const start = new Date(booked.data.blockStart ?? booked.data.start);
+    const end = new Date(booked.data.blockEnd ?? booked.data.end);
     return start.getTime() < a.until.getTime() && end.getTime() > a.now.getTime() ? [{ start, end, allDay: false }] : [];
   });
 }

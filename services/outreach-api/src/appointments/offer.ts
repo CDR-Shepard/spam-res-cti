@@ -31,10 +31,11 @@ export type OfferCalendar =
 /** How far ahead the owner's calendar is read. Nothing later than this is ever offered. */
 export const OFFER_CALENDAR_DAYS = 15;
 const DAY_MS = 86_400_000;
+const MIN_MS = 60_000;
 
 function kindSlots(kind: 'phone' | 'walkthrough', rules: KindRules, booking: AiCallBookingSettings, busy: readonly Busy[], now: Date, until: Date, owner: OwnerUser): AppointmentSlot[] {
   const read = freeWindows(rules, booking.days, busy, now, owner.timeZone).filter((w) => w.end.getTime() <= until.getTime());
-  return toSlots(kind, pickOffered(read, rules.maxOffered, owner.timeZone), owner);
+  return toSlots(kind, pickOffered(read, rules.maxOffered, owner.timeZone), owner, rules.bufferMinutes * MIN_MS);
 }
 
 /** Reads Salesforce only; never throws. */
