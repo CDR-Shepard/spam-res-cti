@@ -18,9 +18,14 @@ export interface ActivityItem {
 
 type Row = Record<string, unknown>;
 const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim() : null);
+/** A string, or a finite number as its decimal text (CallDurationInSeconds comes back as a JSON number). */
+const metaText = (v: unknown): string | null => (typeof v === 'number' && Number.isFinite(v) ? String(v) : str(v));
 const byNewest = (a: ActivityItem, b: ActivityItem) => (b.at ?? '').localeCompare(a.at ?? '');
 const meta = (pairs: Record<string, unknown>): Record<string, string> =>
-  Object.fromEntries(Object.entries(pairs).flatMap(([k, v]) => (str(v) ? [[k, str(v)!]] : [])));
+  Object.fromEntries(Object.entries(pairs).flatMap(([k, v]) => {
+    const text = metaText(v);
+    return text === null ? [] : [[k, text]];
+  }));
 
 /** `(WhoId IN (…) OR WhatId IN (…))`, or null when both lists are empty. */
 function whoWhat(links: LinkIds): string | null {
@@ -40,7 +45,7 @@ export function readTasks(client: SalesforceClient, links: LinkIds): Promise<Sou
     const where = whoWhat(links);
     if (!where) return { items: [], truncated: false };
     const { rows, truncated } = capped(await client.query<Row>(
-      `SELECT Id, Subject, Description, Status, ActivityDate, CreatedDate, CallDisposition, TaskSubtype FROM Task WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${L.tasks + 1}`,
+      `SELECT Id, Subject, Description, Status, ActivityDate, CreatedDate, CallDisposition, TaskSubtype, CallType, CallDurationInSeconds FROM Task WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${L.tasks + 1}`,
     ), L.tasks);
     return {
       truncated,
@@ -50,7 +55,8 @@ export function readTasks(client: SalesforceClient, links: LinkIds): Promise<Sou
         at: str(r.CreatedDate),
         title: str(r.Subject),
         body: clip(str(r.Description) ?? '', L.noteChars).text,
-        meta: meta({ status: r.Status, due: r.ActivityDate, disposition: r.CallDisposition, kind: r.TaskSubtype }),
+        // research/last-contact.ts reads these to tell a call that reached a person from one that did not.
+        meta: meta({ status: r.Status, due: r.ActivityDate, disposition: r.CallDisposition, kind: r.TaskSubtype, callType: r.CallType, seconds: r.CallDurationInSeconds }),
       })),
     };
   });

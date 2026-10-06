@@ -27,7 +27,7 @@ const block = (relation: Block['relation'], fields: Array<[string, string]>): Bl
   role: null,
   fields: fields.map(([name, value]) => ({ name, label: name, value })),
 });
-const call = { source: 'task' as const, id: '00T000000000000001', at: '2026-02-12T18:00:00.000Z', title: 'Spoke with Pat', body: '', meta: { kind: 'Call' } };
+const call = { source: 'task' as const, id: '00T000000000000001', at: '2026-02-12T18:00:00.000Z', title: 'Outbound Call | Connected | (619) 555-0142 / Pat Seller', body: '', meta: { kind: 'Call', disposition: 'Connected' } };
 const answeredButTimelineAndPrice: Array<[string, string]> = [
   ['Motivation__c', 'Inherited'],
   ['Condition__c', 'Fair'],

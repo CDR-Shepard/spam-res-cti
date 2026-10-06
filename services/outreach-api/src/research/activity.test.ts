@@ -13,15 +13,17 @@ const id = (n: number) => `00T${String(n).padStart(12, '0')}AAA`;
 
 describe('readTasks', () => {
   it('queries Task by who or what, newest first, one past the cap', async () => {
-    const rows = Array.from({ length: 26 }, (_, i) => ({ Id: id(i), Subject: `S${i}`, Description: 'd', Status: 'Completed', ActivityDate: '2026-09-01', CreatedDate: day(26 - i), CallDisposition: 'No Answer', TaskSubtype: 'Call' }));
+    const rows = Array.from({ length: 26 }, (_, i) => ({ Id: id(i), Subject: `S${i}`, Description: 'd', Status: 'Completed', ActivityDate: '2026-09-01', CreatedDate: day(26 - i), CallDisposition: 'No Answer', TaskSubtype: 'Call', CallType: 'Outbound', CallDurationInSeconds: i === 0 ? 75 : null }));
     const sf = fakeSalesforce({ queries: [[/FROM Task/, rows]] });
     const out = await readTasks(sf.client, links);
     expect(sf.soql).toEqual([
-      `SELECT Id, Subject, Description, Status, ActivityDate, CreatedDate, CallDisposition, TaskSubtype FROM Task WHERE (WhoId IN ('${LEAD}') OR WhatId IN ('${OPP}')) ORDER BY CreatedDate DESC LIMIT 26`,
+      `SELECT Id, Subject, Description, Status, ActivityDate, CreatedDate, CallDisposition, TaskSubtype, CallType, CallDurationInSeconds FROM Task WHERE (WhoId IN ('${LEAD}') OR WhatId IN ('${OPP}')) ORDER BY CreatedDate DESC LIMIT 26`,
     ]);
     expect(out.items).toHaveLength(25);
     expect(out.summary).toEqual({ source: 'tasks', status: 'ok', count: 25, truncated: true, note: null });
-    expect(out.items[0]).toMatchObject({ source: 'task', title: 'S0', meta: { status: 'Completed', disposition: 'No Answer', kind: 'Call' } });
+    expect(out.items[0]).toMatchObject({ source: 'task', title: 'S0', meta: { status: 'Completed', due: '2026-09-01', disposition: 'No Answer', kind: 'Call', callType: 'Outbound', seconds: '75' } });
+    // Fix 1 (I-1): a null duration is left out, never read as zero.
+    expect(out.items[1]?.meta).not.toHaveProperty('seconds');
   });
   it('without whatIds the clause is WhoId only', async () => {
     const sf = fakeSalesforce({ queries: [[/FROM Task/, []]] });

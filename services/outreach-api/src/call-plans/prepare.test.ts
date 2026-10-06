@@ -113,7 +113,7 @@ describe.skipIf(!pgLane)('prepareDueCalls (real Postgres)', () => {
     const researched = assembleSnapshot({
       ...snapInput(t.lead.sfRecordId),
       records: [{ relation: 'self', sfObject: 'Lead', id: t.lead.sfRecordId, role: null, fields: [{ name: 'Name', label: 'Name', value: 'Pat Seller' }, { name: 'Timeline__c', label: 'Timeline', value: '90 Days' }] }],
-      activity: [{ source: 'task', id: '00T000000000000001', at: '2026-02-12T18:00:00.000Z', title: 'Spoke with Pat', body: 'Roof leaks', meta: { kind: 'Call' } }],
+      activity: [{ source: 'task', id: '00T000000000000001', at: '2026-02-12T18:00:00.000Z', title: 'Outbound Call | Connected | (619) 555-0142 / Pat Seller', body: 'Roof leaks', meta: { kind: 'Call', disposition: 'Connected' } }],
     });
     research.mockResolvedValueOnce(researched);
     const model = fakeModel({ ...validPlan, reengagement: { lastContact: 'in 2024', lastTopic: 'the roof leak' }, stillToLearn: ['price', 'timeline', 'condition'] });
