@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import type { RecordTest } from '@cti/contracts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,8 @@ import { RecordTestRun } from './record-test-run';
 import { RecordTestPlan } from './record-test-sections';
 
 export const RECORD_TEST_POLL_MS = 2_000;
+/** Shown by every control that would leave this test while the browser call is up (it would drop the call). */
+export const BROWSER_LOCK_WORDS = 'Hang up the browser call first: leaving this test would drop it.';
 
 /** Read again every 2 seconds while the preview is still being written or one of its calls is live. */
 export function recordTestPollInterval(t: RecordTest | undefined): number | false {
@@ -21,10 +23,16 @@ export function recordTestPollInterval(t: RecordTest | undefined): number | fals
 
 /**
  * One record test (plan 1E, spec §4.2): "how I'll approach this call". Polls while the preview runs; Regenerate (or Try
- * again) starts a new preview of the same record and opens it.
+ * again) starts a new preview of the same record and opens it. While a browser call is up nothing here unmounts the run
+ * controls (a failed poll shows inline) and Regenerate is off: opening another test would drop the call.
  */
-export function RecordTestPreview({ id, onOpen }: { id: string; onOpen: (id: string) => void }) {
+export function RecordTestPreview({ id, onOpen, onBrowserLive }: { id: string; onOpen: (id: string) => void; onBrowserLive?: (live: boolean) => void }) {
   const qc = useQueryClient();
+  const [browserLive, setBrowserLive] = useState(false);
+  useEffect(() => {
+    onBrowserLive?.(browserLive);
+  }, [browserLive, onBrowserLive]);
+  useEffect(() => () => onBrowserLive?.(false), [onBrowserLive]);
   const test = useQuery({ queryKey: outreachKeys.recordTest(id), queryFn: () => recordTest(id), refetchInterval: (q) => recordTestPollInterval(q.state.data) });
   const again = useMutation({
     mutationFn: (record: string) => createRecordTest(record),
@@ -40,7 +48,7 @@ export function RecordTestPreview({ id, onOpen }: { id: string; onOpen: (id: str
   }, [qc, status]);
 
   if (test.isPending) return <p className="text-sm text-muted-foreground">Loading the test…</p>;
-  if (test.error) return <p role="alert" className="text-sm text-destructive">{errorText(test.error)}</p>;
+  if (!test.data) return <p role="alert" className="text-sm text-destructive">{errorText(test.error)}</p>;
   const t = test.data;
   const rerun = () => again.mutate(t.sfRecordId);
   return (
@@ -56,6 +64,7 @@ export function RecordTestPreview({ id, onOpen }: { id: string; onOpen: (id: str
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4 text-sm">
+        {test.error && <p role="alert" className="text-destructive">{`Couldn't refresh this test: ${errorText(test.error)} Still trying.`}</p>}
         {t.status === 'running' && <p role="status" className="text-muted-foreground">Reading Salesforce and writing the plan… (about a minute)</p>}
         {t.status === 'failed' && (
           <div className="space-y-2">
@@ -66,8 +75,11 @@ export function RecordTestPreview({ id, onOpen }: { id: string; onOpen: (id: str
         {t.status === 'ready' && (
           <>
             <RecordTestPlan test={t} />
-            <Button size="sm" variant="outline" disabled={again.isPending} onClick={rerun}>Regenerate</Button>
-            <RecordTestRun test={t} />
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="outline" disabled={again.isPending || browserLive} onClick={rerun}>Regenerate</Button>
+              {browserLive && <span className="text-xs text-muted-foreground">{BROWSER_LOCK_WORDS}</span>}
+            </div>
+            <RecordTestRun test={t} onBrowserLive={setBrowserLive} />
           </>
         )}
         {again.error && <p role="alert" className="text-destructive">{recordTestErrorText(again.error)}</p>}

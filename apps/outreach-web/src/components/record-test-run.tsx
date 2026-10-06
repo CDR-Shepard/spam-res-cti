@@ -18,26 +18,29 @@ const NO_NUMBERS = 'No test numbers are set. Add yours to AI_VOICE_TEST_NUMBERS 
  * Run a ready preview (plan 1E, spec §4.3): Ring my phone (a test number) or Talk in browser (the AI calls this tab).
  * Only when the plan text passed the check; both are off while one of the admin's test calls is live.
  */
-export function RecordTestRun({ test }: { test: RecordTest }) {
+export function RecordTestRun({ test, onBrowserLive }: { test: RecordTest; onBrowserLive?: (live: boolean) => void }) {
   if (test.status !== 'ready' || !test.planText) return null;
-  return <RunControls test={test} />;
+  return <RunControls test={test} onBrowserLive={onBrowserLive} />;
 }
 
-function RunControls({ test }: { test: RecordTest }) {
+function RunControls({ test, onBrowserLive }: { test: RecordTest; onBrowserLive?: (live: boolean) => void }) {
   const qc = useQueryClient();
   const availability = useQuery({ queryKey: outreachKeys.aiAvailability, queryFn: getAiAvailability });
   const [browserBusy, setBrowserBusy] = useState(false);
+  useEffect(() => { onBrowserLive?.(browserBusy); }, [browserBusy, onBrowserLive]);
+  useEffect(() => () => onBrowserLive?.(false), [onBrowserLive]);
   const liveCall = test.calls.find((c) => isLiveCall(c)) ?? null;
   const refresh = () => void qc.invalidateQueries({ queryKey: outreachKeys.recordTest(test.id) });
+  // Once read, the answer stays: a failed or changed re-read never unmounts a browser call that is up.
   if (availability.isPending) return <p className="text-sm text-muted-foreground">Checking the AI calling service…</p>;
-  if (availability.error) return <p role="alert" className="text-sm text-destructive">{errorText(availability.error)}</p>;
-  if (!availability.data.available) return <p className="text-sm text-muted-foreground">AI calling is off, so test calls can't run right now.</p>;
+  if (!availability.data) return <p role="alert" className="text-sm text-destructive">{errorText(availability.error)}</p>;
+  if (!availability.data.available && !browserBusy) return <p className="text-sm text-muted-foreground">AI calling is off, so test calls can't run right now.</p>;
   return (
     <section aria-label="Run the call" className="space-y-3 rounded-md border p-3 text-sm">
       <h3 className="font-medium">Try the call</h3>
       <p className="text-xs text-muted-foreground">{HINT}</p>
       <PhoneRun testId={test.id} numbers={availability.data.testNumbers} disabled={liveCall !== null || browserBusy} onPlaced={refresh} />
-      {availability.data.browserCalls === true && <BrowserRun testId={test.id} disabled={liveCall !== null} onBusy={setBrowserBusy} onChange={refresh} />}
+      {(availability.data.browserCalls === true || browserBusy) && <BrowserRun testId={test.id} disabled={liveCall !== null} onBusy={setBrowserBusy} onChange={refresh} />}
       {liveCall?.callStatus && <p role="status">{`Your test call: ${CALL_STATUS_WORDS[liveCall.callStatus]}`}</p>}
     </section>
   );
