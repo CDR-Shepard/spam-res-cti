@@ -6,7 +6,7 @@ import { appointmentOwner } from './owner.js';
 const GRANT = '0058X00000Fsx39QAB';
 const X = '0058X00000Abcd1QAB';
 const GONE = '0058X00000Zzzz9QAB';
-const user = (sfUserId: string, isActive: boolean, firstName = 'Grant'): OwnerUser => ({ sfUserId, firstName, name: `${firstName} Person`, isActive, timeZone: 'America/Los_Angeles' });
+const user = (sfUserId: string, isActive: boolean, firstName = 'Grant'): OwnerUser => ({ sfUserId, firstName, name: `${firstName} Person`, isActive, timeZone: 'America/Los_Angeles', zoneRefused: null });
 const booking = (specialists: string[]) => ({ ...DEFAULT_AI_CALL_BOOKING, specialists });
 const users = (...us: OwnerUser[]) => new Map(us.map((u) => [u.sfUserId, u]));
 

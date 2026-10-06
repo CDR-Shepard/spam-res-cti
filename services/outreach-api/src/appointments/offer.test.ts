@@ -3,7 +3,9 @@ import { AppointmentSlots, type AiCallBookingSettings } from '@cti/contracts';
 import { SalesforceApiError } from '@cti/salesforce';
 import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
 import { fakeSalesforce, type QueryRoute } from '../test/fake-sf-client.js';
-import { offerSlots } from './offer.js';
+import { rowsWhere } from '../test/fake-soql-where.js';
+import { offerFrom, offerSlots, readOfferCalendar } from './offer.js';
+import { zonedParts } from './zoned.js';
 
 const GRANT = '0058X00000Fsx39QAB';
 const X = '0058X00000Abcd1QAB';
@@ -94,4 +96,61 @@ describe('offerSlots', () => {
       expect(await offerSlots(sf.client, { booking: booking(), now: NOW })).toEqual({ slots: [], ownerSfUserId: null, note: 'salesforce_error' });
     }
   });
+
+  describe('Fix 1 (I-1a): today\'s all-day Event blocks today late in the local day (lead 0 h, until 22:00)', () => {
+    const late = (zone: string) =>
+      booking({
+        phone: { ...DEFAULT_AI_CALL_BOOKING.phone, minLeadMinutes: 0, endHour: 22 },
+        walkthrough: { ...DEFAULT_AI_CALL_BOOKING.walkthrough, enabled: false },
+      });
+    const table = [{ StartDateTime: '2026-10-06T00:00:00.000+0000', EndDateTime: '2026-10-06T00:00:00.000+0000', IsAllDayEvent: true, ActivityDate: '2026-10-06' }];
+    it.each([
+      ['Pacific/Honolulu', '2026-10-07T00:30:00.000Z'], // Tue 10/6 14:30 HST
+      ['America/Los_Angeles', '2026-10-07T00:30:00.000Z'], // Tue 10/6 17:30 PDT
+    ])('%s at %s: nothing today, the first time is tomorrow morning', async (zone, at) => {
+      const now = new Date(at);
+      const users: QueryRoute[1] = [grantRow({ TimeZoneSidKey: zone })];
+      const sf = sfWith(users, (q: string) => rowsWhere(q, table));
+      const offer = await offerSlots(sf.client, { booking: late(zone), now });
+      // Without the all-day Event, today still has times (so the test can fail).
+      const free = await offerSlots(sfWith(users, []).client, { booking: late(zone), now });
+      expect(free.slots.some((s) => zonedParts(new Date(s.start), zone).day === 6)).toBe(true);
+      expect(offer.slots.length).toBeGreaterThan(0);
+      expect(offer.slots.every((s) => zonedParts(new Date(s.start), zone).day === 7)).toBe(true);
+      expect(zonedParts(new Date(offer.slots[0]!.start), zone)).toMatchObject({ day: 7, hour: 10, minute: 0 });
+    });
+  });
+
+  describe('Fix 1 (I-4, M-1): the calendar is read once, and booked times are taken out per touch', () => {
+    it('readOfferCalendar reads Salesforce; offerFrom is pure and takes out booked times like busy ones', async () => {
+      const sf = sfWith([grantRow()]);
+      const cal = await readOfferCalendar(sf.client, { booking: booking(), now: NOW });
+      expect(sf.soql).toHaveLength(2);
+      const first = offerFrom(cal, { booking: booking(), now: NOW, booked: [] });
+      const p1 = first.slots[0]!;
+      const booked = [{ start: new Date(p1.start), end: new Date(p1.end), allDay: false }];
+      const second = offerFrom(cal, { booking: booking(), now: NOW, booked });
+      expect(second.slots.map((s) => s.start)).not.toContain(p1.start);
+      expect(second.slots[0]!.start).toBe('2026-10-06T17:30:00.000Z');
+      expect(sf.soql).toHaveLength(2);
+      // The same calendar again, with nothing booked, gives the first offer again (the read is not changed).
+      expect(offerFrom(cal, { booking: booking(), now: NOW, booked: [] })).toEqual(first);
+    });
+
+    it('a booked walkthrough keeps its buffer', async () => {
+      const cal = await readOfferCalendar(sfWith([grantRow()]).client, { booking: booking(), now: NOW });
+      // Booked Wed 9:00–10:00 PDT: 10:00 is inside the 30 min buffer, so Wednesday's morning walkthrough is 11:00.
+      const booked = [{ start: new Date('2026-10-07T16:00:00.000Z'), end: new Date('2026-10-07T17:00:00.000Z'), allDay: false }];
+      const offer = offerFrom(cal, { booking: booking(), now: NOW, booked });
+      expect(offer.slots.find((s) => s.id === 'w1')?.start).toBe('2026-10-07T18:00:00.000Z');
+    });
+
+    it('a calendar that could not be read carries its note through', async () => {
+      const off = await readOfferCalendar(sfWith([grantRow()]).client, { booking: booking({ enabled: false }), now: NOW });
+      expect(offerFrom(off, { booking: booking({ enabled: false }), now: NOW, booked: [] })).toEqual({ slots: [], ownerSfUserId: null, note: 'booking_off' });
+      const broken = await readOfferCalendar(sfWith(new Error('socket hang up')).client, { booking: booking(), now: NOW });
+      expect(offerFrom(broken, { booking: booking(), now: NOW, booked: [] })).toEqual({ slots: [], ownerSfUserId: null, note: 'salesforce_error' });
+    });
+  });
 });
+

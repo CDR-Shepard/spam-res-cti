@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AppointmentSlots } from '@cti/contracts';
 import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
-import { freeWindows, pickOffered, toSlots, type Busy, type KindRules, type Window } from './slots.js';
+import { conflicts, freeWindows, pickOffered, toSlots, type Busy, type KindRules, type Window } from './slots.js';
 import { zonedInstant } from './zoned.js';
 
 const LA = 'America/Los_Angeles';
@@ -250,5 +250,44 @@ describe('toSlots', () => {
   it('never makes an id the contract refuses: at most nine of a kind', () => {
     const many: Window[] = Array.from({ length: 12 }, (_, i) => ({ start: new Date(NOW.getTime() + i * 60 * MIN), end: new Date(NOW.getTime() + (i * 60 + 15) * MIN) }));
     expect(toSlots('phone', many, grant).map((s) => s.id)).toEqual(['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9']);
+  });
+});
+
+describe('conflicts (Fix 1, I-1: the one rule freeWindows uses; Part 5b re-checks a booking with it)', () => {
+  const w = (start: Date, minutes: number): Window => ({ start, end: new Date(start.getTime() + minutes * MIN) });
+  const BUF = 30 * MIN;
+
+  it.each<[string, Window, Busy[], number, boolean]>([
+    ['touching on the left is free', w(la(10, 7, 10), 15), [timed(la(10, 7, 9, 45), la(10, 7, 10))], 0, false],
+    ['touching on the right is free', w(la(10, 7, 10), 15), [timed(la(10, 7, 10, 15), la(10, 7, 10, 30))], 0, false],
+    ['a one-minute overlap conflicts', w(la(10, 7, 10), 15), [timed(la(10, 7, 10, 14), la(10, 7, 10, 30))], 0, true],
+    ['busy inside the window conflicts', w(la(10, 7, 9), 60), [timed(la(10, 7, 9, 20), la(10, 7, 9, 40))], 0, true],
+    ['the buffer turns a near miss into a conflict', w(la(10, 7, 10), 60), [timed(la(10, 7, 11, 15), la(10, 7, 12))], BUF, true],
+    ['touching the buffered edge is free', w(la(10, 7, 10), 60), [timed(la(10, 7, 11, 30), la(10, 7, 12))], BUF, false],
+    ['an all-day Event conflicts on its local date', w(la(10, 7, 23), 30), [allDay(2026, 10, 7)], 0, true],
+    ['an all-day Event is never widened by the buffer', w(la(10, 8, 0, 30), 30), [allDay(2026, 10, 7)], 120 * MIN, false],
+    ['a window across midnight touches both local dates', w(la(10, 6, 23, 30), 60), [allDay(2026, 10, 7)], 0, true],
+    ['an all-day item without a day is judged by its instants', w(la(10, 7, 10), 60), [{ start: la(10, 7, 10, 30), end: la(10, 7, 11), allDay: true }], 0, true],
+  ])('%s', (_label, window, busy, buffer, expected) => {
+    expect(conflicts(window, busy, LA, buffer)).toBe(expected);
+  });
+
+  it('agrees with freeWindows on every candidate (touching, overlapping, buffered, all-day)', () => {
+    const anyLead: KindRules = { ...WALK, minLeadMinutes: 0 };
+    const phoneAnyLead: KindRules = { ...PHONE, minLeadMinutes: 0, horizonBusinessDays: 5 };
+    const busySets: Busy[][] = [
+      [timed(la(10, 7, 11), la(10, 7, 12))],
+      [timed(la(10, 7, 10, 15), la(10, 7, 10, 30)), timed(la(10, 8, 13, 59), la(10, 8, 14, 1))],
+      [allDay(2026, 10, 8), timed(la(10, 9, 8, 30), la(10, 9, 9))],
+      [timed(la(10, 6, 20), la(10, 7, 10, 20))],
+    ];
+    for (const rules of [anyLead, phoneAnyLead]) {
+      const all = freeWindows(rules, WEEKDAYS, [], NOW, LA);
+      for (const busy of busySets) {
+        const kept = all.filter((x) => !conflicts(x, busy, LA, rules.bufferMinutes * MIN));
+        expect(freeWindows(rules, WEEKDAYS, busy, NOW, LA)).toEqual(kept);
+        expect(kept.length).toBeLessThan(all.length);
+      }
+    }
   });
 });

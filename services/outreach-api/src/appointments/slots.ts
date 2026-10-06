@@ -1,7 +1,8 @@
 /**
  * Free appointment times (pure). Business hours are wall-clock times in the specialist's zone; busy time is the appointment
- * owner's Salesforce Events. A candidate start is kept when it is far enough ahead (lead time), its buffered interval meets
- * no busy Event (intervals that only touch do not overlap), and no all-day Event covers its local day.
+ * owner's Salesforce Events. A candidate start is kept when it is far enough ahead (lead time) and `conflicts` finds nothing:
+ * its buffered interval meets no timed busy item (intervals that only touch do not overlap), and no all-day item falls on a
+ * local day the window touches. `conflicts` is the one rule: the write-time re-check of a booking uses it too.
  */
 import type { AiCallBookingSettings, AppointmentKind, AppointmentSlot } from '@cti/contracts';
 import { addLocalDays, zonedInstant, zonedParts, type LocalDay } from './zoned.js';
@@ -50,18 +51,42 @@ function candidates(rules: KindRules, day: LocalDay, timeZone: string): Window[]
 
 const overlaps = (aStart: number, aEnd: number, b: Busy): boolean => b.start.getTime() < aEnd && b.end.getTime() > aStart;
 
+/** The local days (keys) a window touches, from its start's day to the day of its last instant. */
+function windowDays(w: Window, timeZone: string): Set<string> {
+  const lastKey = dayKey(zonedParts(new Date(Math.max(w.start.getTime(), w.end.getTime() - 1)), timeZone));
+  const out = new Set<string>();
+  for (let i = 0; i < MAX_DAYS_SCANNED; i += 1) {
+    const key = dayKey(addLocalDays(w.start, i, timeZone));
+    out.add(key);
+    if (key === lastKey) break;
+  }
+  return out;
+}
+
+/**
+ * Whether a window meets busy time: a timed item overlaps the window widened by `bufferMs` on both sides (touching is
+ * free), or an all-day item's local day is one the window touches (all-day items are never widened by the buffer).
+ */
+export function conflicts(w: Window, busy: readonly Busy[], timeZone: string, bufferMs: number): boolean {
+  const from = w.start.getTime() - bufferMs;
+  const to = w.end.getTime() + bufferMs;
+  let days: Set<string> | null = null;
+  return busy.some((b) => {
+    if (!(b.allDay && b.day)) return overlaps(from, to, b);
+    days ??= windowDays(w, timeZone);
+    return days.has(dayKey(b.day));
+  });
+}
+
 /** Every free start for one kind, ascending. */
 export function freeWindows(rules: KindRules, days: readonly number[], busy: readonly Busy[], now: Date, timeZone: string): Window[] {
   if (!rules.enabled) return [];
   const earliest = now.getTime() + rules.minLeadMinutes * MIN;
   const buffer = rules.bufferMinutes * MIN;
-  const allDays = new Set(busy.flatMap((b) => (b.allDay && b.day ? [dayKey(b.day)] : [])));
-  const timed = busy.filter((b) => !(b.allDay && b.day));
   return horizonDays(rules.horizonBusinessDays, days, now, timeZone)
-    .filter((day) => !allDays.has(dayKey(day)))
     .flatMap((day) => candidates(rules, day, timeZone))
     .filter((w) => w.start.getTime() >= earliest)
-    .filter((w) => !timed.some((b) => overlaps(w.start.getTime() - buffer, w.end.getTime() + buffer, b)));
+    .filter((w) => !conflicts(w, busy, timeZone, buffer));
 }
 
 /** At most `max`, at most 2 per local day: per day the first morning (< 12:00) and the first afternoon window, else the first two. */
