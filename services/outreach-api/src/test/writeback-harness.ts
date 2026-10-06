@@ -122,6 +122,12 @@ export function fakeOrg(state: OrgState): FakeSfWrites {
     [/^SELECT Id FROM Event WHERE WhatId = null/, () => created('Event').filter((c) => !('WhatId' in c.fields)).map(() => ({ Id: '00U8X00000Hold1QAA' }))],
     [/^SELECT Id FROM Task /, (q) => created('Task').filter((c) => q.includes(String(c.fields.Subject).replace(/'/g, "\\'"))).map(() => ({ Id: '00T8X00000Task1QAA' }))],
     [/^SELECT ContactId FROM OpportunityContactRole/, [{ ContactId: CONTACT }]],
+    // The posts made on the record so far, newest first (a create whose answer was lost is still in Salesforce).
+    [/^SELECT Id, Body FROM FeedItem WHERE ParentId = '/, (q) =>
+      created('FeedItem')
+        .filter((c) => q.includes(`'${String(c.fields.ParentId)}'`))
+        .map((c, i) => ({ Id: `0D58X00000000${i}0AAA`, Body: c.fields.Body }))
+        .reverse()],
     [/ FROM (Lead|Opportunity) WHERE Id = /, (q) => {
       const rec = state.records.get(idIn(q));
       return rec ? [{ Id: idIn(q), ...rec }] : [];

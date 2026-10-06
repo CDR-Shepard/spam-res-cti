@@ -8,7 +8,7 @@ import { seedAiCall } from '../test/ai-call-seed.js';
 import { seedAiCallCampaign, seedUser } from '../test/call-plan-seed.js';
 import { refused } from '../test/fake-sf-writes.js';
 import { createTestDb, pgLane } from '../test/pg.js';
-import { CONTACT, depsFor, fakeModel, fakeOrg, GRANT, PHONE_BOOKING, RUN_AT, seedWriteback, SETTER, writebackById, type OrgState } from '../test/writeback-harness.js';
+import { CONTACT, depsFor, fakeModel, fakeOrg, GRANT, PHONE_BOOKING, RUN_AT, seedWriteback, SETTER, transportError, writebackById, type OrgState } from '../test/writeback-harness.js';
 import { CHATTER_MAX } from './render.js';
 import { runWritebacks } from './run.js';
 
@@ -113,6 +113,21 @@ describe.skipIf(!pgLane)('runWritebacks on Opportunities (real Postgres)', () =>
     expect(f.creates.filter((c) => c.sobject === 'Event')).toHaveLength(1);
     expect(f.creates.filter((c) => c.sobject === 'FeedItem')).toHaveLength(1);
     expect(f.updates).toHaveLength(2);
+  });
+
+  it('M4: the post\'s answer is lost: the retry finds it by the call marker and never posts twice; another call\'s post is not ours', async () => {
+    const s = await booked();
+    const f = fakeOrg(oppState(s.recordId));
+    await f.client.createRecords([{ sobject: 'FeedItem', fields: { ParentId: s.recordId, Body: 'AI call 00000000 · Oct 1, 9:00 AM PT · Hung up' } }]);
+    f.onCreate = (c) => (c.sobject === 'FeedItem' ? transportError() : undefined);
+    expect((await runWritebacks(depsFor(db, f))).retried).toBe(1);
+    f.onCreate = null;
+    expect((await runWritebacks(depsFor(db, f, { now: later(2 * MIN) }))).done).toBe(1);
+    const posts = f.creates.filter((c) => c.sobject === 'FeedItem');
+    expect(posts).toHaveLength(2);
+    expect(String(posts[1]!.fields.Body).startsWith(`AI call ${s.aiCallId.slice(0, 8)} · `)).toBe(true);
+    expect(f.soql.some((q) => q.startsWith(`SELECT Id, Body FROM FeedItem WHERE ParentId = '${s.recordId}' AND Type = 'TextPost' AND CreatedDate >= `))).toBe(true);
+    expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'done', sfFeedItemId: '0D58X0000000010AAA' });
   });
 
   it('6: no mapping model: the status moves are still written and the changes text says fill-blanks were skipped', async () => {

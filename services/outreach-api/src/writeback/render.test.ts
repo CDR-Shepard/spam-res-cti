@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { prodDescribe } from '../test/writeback-describes.js';
 import { writableFields } from './fields.js';
 import { buildWritePlan, type Change, type WritePlan } from './plan.js';
-import { CHANGES_MAX, CHATTER_MAX, changesFieldText, chatterText, ptWords, type RenderInput } from './render.js';
+import { CHANGES_MAX, CHATTER_MAX, changesFieldText, chatterMarker, chatterText, ptWords, type RenderInput } from './render.js';
 
 const AT = new Date('2026-10-06T22:12:00.000Z'); // Tue Oct 6, 3:12 PM PT
 const CALL_ID = '6f0c2a9e-1b2c-4d5e-8f90-123456789abc';
@@ -198,7 +198,7 @@ describe('chatterText (spec §5.6)', () => {
     const { plan, written } = oppBooking('phone', false);
     expect(chatterText(base(plan, written))).toBe(
       [
-        'AI call · Oct 6, 3:12 PM PT · Appointment set',
+        'AI call 6f0c2a9e · Oct 6, 3:12 PM PT · Appointment set',
         'Booked: phone consultation with Grant, Wed Oct 7, 11:00 AM PT (seller: 2:00 PM ET)',
         'Summary: The seller is moving to Texas for work and wants to sell within three months. The roof needs replacing. They booked a call with Grant.',
         'Seller said: Timeline 90 Days · Motivation Relocating OOS · Major Repairs Needed Roof',
@@ -216,7 +216,7 @@ describe('chatterText (spec §5.6)', () => {
       }),
     );
     expect(text.split('\n').slice(0, 3)).toEqual([
-      'AI call · Oct 6, 3:12 PM PT · Appointment set',
+      'AI call 6f0c2a9e · Oct 6, 3:12 PM PT · Appointment set',
       'Converted from Lead by the AI after the seller booked.',
       'Booked: walkthrough at 12 Oak St, Fresno with Grant, Wed Oct 7, 11:00 AM PT',
     ]);
@@ -245,7 +245,7 @@ describe('chatterText (spec §5.6)', () => {
     });
     expect(chatterText(base(plan, plan.changes, { summary: null, conversionRefused: 'INSUFFICIENT_ACCESS: no Convert Leads permission' }))).toBe(
       [
-        'AI call · Oct 6, 3:12 PM PT · Appointment set',
+        'AI call 6f0c2a9e · Oct 6, 3:12 PM PT · Appointment set',
         'Not converted to an Opportunity (INSUFFICIENT_ACCESS: no Convert Leads permission): a hold and a "convert and book" Task were created.',
         'Booked: phone consultation with Grant, Wed Oct 7, 11:00 AM PT (seller: 2:00 PM ET)',
         'Changed: Status → Working; Rating → Hot',
@@ -253,10 +253,16 @@ describe('chatterText (spec §5.6)', () => {
       ].join('\n'),
     );
   });
+  it('M4: the first line carries the call marker, so a retry can find a post whose answer was lost', () => {
+    const { plan, written } = oppBooking('phone', false);
+    expect(chatterMarker(CALL_ID)).toBe('AI call 6f0c2a9e ·');
+    const long = chatterText(base(plan, written, { summary: 'w'.repeat(5_000), appointmentWords: 'b'.repeat(2_000) }));
+    expect(long.startsWith(`${chatterMarker(CALL_ID)} `)).toBe(true);
+  });
   it('a call that changed nothing says so', () => {
     const { plan } = oppBooking('phone', false);
     const text = chatterText(base(plan, [], { outcomeWords: 'Wrong number', appointmentWords: null, summary: null }));
-    expect(text).toBe(['AI call · Oct 6, 3:12 PM PT · Wrong number', 'Changed: nothing', `Call details: ${URL}`].join('\n'));
+    expect(text).toBe(['AI call 6f0c2a9e · Oct 6, 3:12 PM PT · Wrong number', 'Changed: nothing', `Call details: ${URL}`].join('\n'));
   });
   it('a 5,000-character summary: ≤ 980 characters, cut in order, still ending with the URL line', () => {
     const { plan, written } = oppBooking('phone', false);

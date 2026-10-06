@@ -160,6 +160,12 @@ export function changesFieldText(i: RenderInput): string {
   return capped(strip(lines.join('\n')), CHANGES_MAX);
 }
 
+/**
+ * The start of every post's first line, "AI call 6f0c2a9e ·": stable across retries (it holds no time), so a retry finds a
+ * post whose answer was lost instead of posting twice (Fix 1, M4). Cutting keeps the head of the post, so it is never cut.
+ */
+export const chatterMarker = (aiCallId: string): string => `AI call ${oneLine(aiCallId).slice(0, 8)} ·`;
+
 type SummaryCut = 'full' | 'sentence' | 'short' | 'none';
 interface ChatterCut {
   summary: SummaryCut;
@@ -191,7 +197,7 @@ function chatterHead(i: RenderInput, cut: ChatterCut): string[] {
   const booked = words === null ? '' : `${capped(oneLine(words), LINE_PART_MAX)}${then}`;
   const dnc = [...new Set(dncRefusals(i).map((r) => r.label))];
   return [
-    `AI call · ${ptShort(i.at)} · ${capped(oneLine(i.outcomeWords), 60)}`,
+    `${chatterMarker(i.aiCallId)} ${ptShort(i.at)} · ${capped(oneLine(i.outcomeWords), 60)}`,
     ...(dnc.length > 0 ? [`${DNC_TITLE}: ${capped(dnc.join(', '), REFUSAL_MAX)} (see AI Last Call Changes)`] : []),
     ...(i.conversion ? [i.conversion.adopted ? `${repConverted(i.conversion)}.` : 'Converted from Lead by the AI after the seller booked.'] : []),
     ...(refused === null ? [] : [`Not converted to an Opportunity (${refused}): a hold and a "convert and book" Task were created.`]),

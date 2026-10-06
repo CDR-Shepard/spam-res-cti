@@ -12,7 +12,7 @@ import { CHANGES_FIELD, writableFields, type WritableField } from './fields.js';
 import { keepUnedited, readFresh, type NotChanged } from './fresh.js';
 import { patchDroppingRefused, without, type FieldRefusal } from './patch.js';
 import type { Change, WritePlan } from './plan.js';
-import { changesFieldText, chatterText, ptWords } from './render.js';
+import { changesFieldText, chatterMarker, chatterText, ptWords } from './render.js';
 import { isDone, ownerOf, ptToday, RecordGoneError, saveStep, throwIfNotARefusal, type RowRun } from './row-run.js';
 import { writeTarget } from './store.js';
 import { appointmentWords, createdLines, refusedWords, renderInputFor, sellerTimeZone, stripUrls, writtenChanges, type NotWritten } from './words.js';
@@ -194,6 +194,20 @@ export async function fieldsStep(run: RowRun, plan: WritePlan, appt: Appointment
   return saveStep(run, 'fields', { status: 'done', data: { written, notWritten, notChanged } });
 }
 
+/** SOQL dateTime literal, whole seconds UTC. */
+const soqlDateTime = (at: Date): string => at.toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+/** Our post on the record from an earlier attempt whose answer was lost: found by the call marker on its first line (M4). */
+async function findOurPost(run: RowRun, parentId: string): Promise<string | null> {
+  const since = run.ctx.call.endedAt === null ? '' : ` AND CreatedDate >= ${soqlDateTime(run.ctx.call.endedAt)}`;
+  const rows = await run.client.query<{ Id?: unknown; Body?: unknown }>(
+    `SELECT Id, Body FROM FeedItem WHERE ParentId = '${soqlEscape(parentId)}' AND Type = 'TextPost'${since} ORDER BY CreatedDate DESC LIMIT 50`,
+  );
+  const marker = `${chatterMarker(run.row.aiCallId)} `;
+  const ours = rows.find((r) => typeof r.Body === 'string' && r.Body.startsWith(marker));
+  return typeof ours?.Id === 'string' ? ours.Id : null;
+}
+
 /** Step 5: one FeedItem on the record written to (the new Opportunity after a conversion), unless there is nothing to say. */
 export async function chatterStep(run: RowRun, plan: WritePlan, appt: AppointmentResult | null): Promise<RowRun> {
   if (isDone(run, 'chatter')) return run;
@@ -207,6 +221,8 @@ export async function chatterStep(run: RowRun, plan: WritePlan, appt: Appointmen
   const words = booked ? appointmentWords({ booked, result: appt, owner, address: str(planData(run).address), sellerZone: sellerTimeZone(run.ctx.call.toE164) }) : null;
   const body = chatterText(renderInputFor(run, plan, { written, notWritten, created: [] }, { appointmentWords: words, owner, summary: stripUrls(run.ctx.call.summary) }));
   const target = writeTarget(run.row);
+  const found = await findOurPost(run, target.id);
+  if (found !== null) return saveStep(run, 'chatter', { status: 'done', detail: 'found the post an earlier attempt made' }, { sfFeedItemId: found });
   const [r] = await run.client.createRecords([{ sobject: 'FeedItem', fields: { ParentId: target.id, Body: body, Type: 'TextPost', IsRichText: false } }]);
   if (r?.success && r.id) return saveStep(run, 'chatter', { status: 'done' }, { sfFeedItemId: r.id });
   const code = r?.errors[0]?.statusCode ?? 'UNKNOWN_ERROR';
