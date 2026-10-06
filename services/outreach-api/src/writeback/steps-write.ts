@@ -8,7 +8,8 @@ import { soqlEscape } from '@cti/salesforce';
 import { describeObject } from '../research/describe.js';
 import { bookingSettings } from '../settings.js';
 import { bookingPassed, bookOpportunity, createTaskOnce, holdForLead, PASSED_TASK_SUBJECT, taskFields, WriteRefusedError, type AppointmentResult } from './appointment.js';
-import { CHANGES_FIELD, writableFields } from './fields.js';
+import { CHANGES_FIELD, writableFields, type WritableField } from './fields.js';
+import { keepUnedited, readFresh, type NotChanged } from './fresh.js';
 import { patchDroppingRefused, without, type FieldRefusal } from './patch.js';
 import type { Change, WritePlan } from './plan.js';
 import { changesFieldText, chatterText, ptWords } from './render.js';
@@ -135,6 +136,19 @@ function notCarried(run: RowRun): NotWritten[] {
   return raw.flatMap((r) => (r && typeof r.field === 'string' && typeof r.code === 'string' ? [{ label: r.field, reason: refusedWords(r.code), field: r.field, code: r.code }] : []));
 }
 
+/** I-3: the patch and its changes less what a rep changed since the plan, from a read made just before every PATCH. */
+async function unedited(run: RowRun, writable: ReadonlyMap<string, WritableField>, patch: Record<string, unknown>, changes: Change[]) {
+  if (Object.keys(patch).length === 0) return { base: patch, changes, notChanged: [] as NotChanged[] };
+  const target = writeTarget(run.row);
+  const statusField = writable.get(target.sobject === 'Lead' ? 'Status' : 'StageName')?.name ?? null;
+  const fresh = await readFresh(run.client, target.sobject, target.id, [...Object.keys(patch), ...(statusField ? [statusField] : [])]);
+  const saved = planData(run).status;
+  const planStatus = saved === undefined ? undefined : typeof saved === 'string' ? saved : null;
+  const kept = keepUnedited({ patch, changes, fresh, statusField, planStatus });
+  const held = new Set(kept.notChanged.map((n) => n.field.toLowerCase()));
+  return { base: kept.patch, changes: changes.filter((c) => !held.has(c.field.toLowerCase())), notChanged: kept.notChanged };
+}
+
 /** Step 3: one PATCH with the plan, the booking moves and AI Last Call Changes; refused fields dropped and listed. */
 export async function fieldsStep(run: RowRun, plan: WritePlan, appt: AppointmentResult | null): Promise<RowRun> {
   if (isDone(run, 'fields')) return run;
@@ -143,20 +157,21 @@ export async function fieldsStep(run: RowRun, plan: WritePlan, appt: Appointment
   const booked = appt?.kind === 'created' || appt?.kind === 'existing';
   const bookingPatch = a?.kind === 'opportunity_event' ? (booked ? a.onBooked : a.onConflict) : {};
   // The booking's stage and rating moves first, like the status moves of any other plan.
-  const changes: Change[] = [...(a?.kind === 'opportunity_event' ? (booked ? a.onBookedChanges : a.onConflictChanges) : []), ...plan.changes];
-  const base = { ...plan.patch, ...bookingPatch };
+  const planned: Change[] = [...(a?.kind === 'opportunity_event' ? (booked ? a.onBookedChanges : a.onConflictChanges) : []), ...plan.changes];
+  const earlier = [...notCarried(run), ...(plan.contactDnc ? await contactDnc(run, target.id) : [])];
+  const describe = await describeObject(run.client, run.deps.describes, run.row.orgId, target.sobject);
+  const writable = writableFields(describe, target.sobject);
+  const { base, changes, notChanged } = await unedited(run, writable, { ...plan.patch, ...bookingPatch }, planned);
   const label = (key: string): { label: string; field: string } => {
     const c = changes.find((x) => x.field.toLowerCase() === key.toLowerCase());
     return c ? { label: c.label, field: c.field } : { label: key.toLowerCase() === CHANGES_FIELD.toLowerCase() ? 'AI Last Call Changes' : key, field: key };
   };
   const toNotWritten = (r: FieldRefusal): NotWritten => ({ ...label(r.field), reason: refusedWords(r.code), code: r.code });
-  const earlier = [...notCarried(run), ...(plan.contactDnc ? await contactDnc(run, target.id) : [])];
-  const describe = await describeObject(run.client, run.deps.describes, run.row.orgId, target.sobject);
-  const changesName = writableFields(describe, target.sobject).get(CHANGES_FIELD)?.name ?? null;
+  const changesName = writable.get(CHANGES_FIELD)?.name ?? null;
   const owner = await ownerOf(run);
   const created = createdLines({ plan, result: appt, owner, taskId: run.row.steps.task?.taskId ?? null });
   const text = (written: Change[], notWritten: NotWritten[]) =>
-    changesFieldText(renderInputFor(run, plan, { written, notWritten, created }, { appointmentWords: null, owner, summary: null }));
+    changesFieldText(renderInputFor(run, plan, { written, notWritten, created, notChanged }, { appointmentWords: null, owner, summary: null }));
 
   const result = await patchDroppingRefused(run.client, target.sobject, target.id, (dropped, refusals) => {
     const written = writtenChanges(changes, dropped);
@@ -176,7 +191,7 @@ export async function fieldsStep(run: RowRun, plan: WritePlan, appt: Appointment
       if (only && !only.success) throwIfNotARefusal(only.errors[0]?.statusCode ?? 'UNKNOWN_ERROR');
     }
   }
-  return saveStep(run, 'fields', { status: 'done', data: { written, notWritten } });
+  return saveStep(run, 'fields', { status: 'done', data: { written, notWritten, notChanged } });
 }
 
 /** Step 5: one FeedItem on the record written to (the new Opportunity after a conversion), unless there is nothing to say. */

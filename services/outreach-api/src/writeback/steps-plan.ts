@@ -13,6 +13,7 @@ import { readCurrent, writableFields, type WritableField } from './fields.js';
 import { MappingOutputError, type MappedAnswers } from './mapping-model.js';
 import { patchDroppingRefused, without } from './patch.js';
 import { buildWritePlan, StoredWritePlan, type WritePlan } from './plan.js';
+import { asText, currentOf } from './plan-values.js';
 import { ptWords } from './render.js';
 import { isAppointmentCall, ptToday, saveStep, type RowRun } from './row-run.js';
 import { saveProgress, writeTarget } from './store.js';
@@ -164,6 +165,8 @@ export async function planStep(run: RowRun): Promise<{ kind: 'plan'; run: RowRun
     converted: converted ? { fromLeadId: run.row.sfRecordId } : null,
     practice: run.ctx.call.practice,
   });
-  const next = await saveStep(run, 'plan', { status: 'done', data: { address: current.address, name: current.name } }, { plan });
+  // The Status/Stage as the plan saw it: the PATCH re-checks the status guard against it (I-3).
+  const status = asText(currentOf(current.values, target.sobject === 'Lead' ? 'Status' : 'StageName'));
+  const next = await saveStep(run, 'plan', { status: 'done', data: { address: current.address, name: current.name, status } }, { plan });
   return { kind: 'plan', run: next, plan };
 }

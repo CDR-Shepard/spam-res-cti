@@ -18,6 +18,8 @@ export interface Applied {
   /** `field` (the allowlist name) lets a refused do-not-call flag get its own section (5a Fix 1, M-8). */
   notWritten: Array<{ label: string; reason: string; field?: string }>;
   created: string[];
+  /** Fields a rep changed since the plan, left alone (Fix 1, I-3). */
+  notChanged?: Array<{ label: string; now: string | null }>;
 }
 export interface RenderInput {
   at: Date;
@@ -92,6 +94,7 @@ function conversionLine(c: NonNullable<RenderInput['conversion']>): string {
 const section = (title: string, items: readonly string[]): string[] => (items.length > 0 ? [title, ...items.map((x) => `- ${x}`)] : []);
 
 const DNC_TITLE = 'Could not set do-not-call flag';
+const NOT_CHANGED_TITLE = 'Not changed — a rep edited it since the call';
 const isDnc = (field: string | undefined): boolean => field !== undefined && DNC_FIELDS.has(field);
 
 /** The do-not-call flags that were not set: plan skips and Salesforce refusals, as label and reason (M-8). */
@@ -136,6 +139,7 @@ export function changesFieldText(i: RenderInput): string {
     ...(then !== '' && booked !== null ? [`Booked ${booked}${then}`] : []),
     ...section(DNC_TITLE, dncRefusals(i).map((r) => `${r.label}: ${r.reason}`)),
     ...section('Changed', i.applied.written.map((c) => `${oneLine(c.label)}: ${shown(c.before)} → ${shown(c.after)}`)),
+    ...section(NOT_CHANGED_TITLE, (i.applied.notChanged ?? []).map((n) => `${oneLine(n.label)} (now ${shown(n.now)})`)),
     ...section('Created', created),
     ...section("Kept the rep's value", i.plan.kept.map((k) => `${oneLine(k.label)}: kept "${oneLine(k.current)}" (seller said: "${oneLine(k.evidence)}")`)),
     ...section('Not written', [...refused, ...i.applied.notWritten.filter((n) => !isDnc(n.field)).map((n) => `${oneLine(n.label)}: ${oneLine(n.reason)}`)]),
