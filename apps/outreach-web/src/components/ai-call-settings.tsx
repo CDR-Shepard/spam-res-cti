@@ -62,6 +62,8 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
   const resolved = useQuery({ queryKey: outreachKeys.salesforceUsersById(savedIds), queryFn: () => salesforceUsersById(savedIds), enabled: savedIds.length > 0 });
   const save = useMutation({ mutationFn: saveAiCallSettings, onSuccess: (data) => qc.setQueryData(outreachKeys.aiCallSettings, data) });
   const known = new Map([...(resolved.data ?? []), ...added].map((u) => [core(u.id), u]));
+  // M-3: saved ids the lookup answered without: not (or no longer) Salesforce users. Unknown until the lookup succeeds.
+  const notFound = new Set(resolved.isSuccess ? savedIds.map(core).filter((id) => !known.has(id)) : []);
   const valid = AiCallSettings.safeParse(draft).success;
   const setBooking = (patch: Partial<Booking>) => setDraft((d) => ({ ...d, booking: { ...d.booking, ...patch } }));
   const setKind = (kind: Kind, patch: Partial<KindRules>) => setDraft((d) => ({ ...d, booking: { ...d.booking, [kind]: { ...d.booking[kind], ...patch } } }));
@@ -83,9 +85,10 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
         <OwnerList
           ids={draft.booking.specialists}
           known={known}
+          notFound={notFound}
           onChange={(specialists) => setBooking({ specialists })}
         />
-        <NobodyActive ids={draft.booking.specialists} known={known} />
+        <NobodyActive ids={draft.booking.specialists} known={known} notFound={notFound} />
         {resolved.error && <p className="text-sm text-destructive">{errorText(resolved.error)}</p>}
         <p className="text-xs text-muted-foreground">{OWNER_LINE}</p>
         <UserSearch exclude={new Set(draft.booking.specialists.map(core))} full={draft.booking.specialists.length >= MAX_OWNERS} onAdd={add} />
@@ -127,7 +130,22 @@ function Check({ label, checked, onChange, hint }: { label: string; checked: boo
   );
 }
 
-function OwnerList({ ids, known, onChange }: { ids: string[]; known: ReadonlyMap<string, SalesforceUserOption>; onChange: (ids: string[]) => void }) {
+interface OwnerListProps {
+  ids: string[];
+  known: ReadonlyMap<string, SalesforceUserOption>;
+  /** Cores of saved ids the lookup did not return: shown "(not found)", and never an owner. */
+  notFound: ReadonlySet<string>;
+  onChange: (ids: string[]) => void;
+}
+
+/** How a listed id reads: its name, or the id itself, with "(inactive)" or "(not found)" in red when it can't own appointments. */
+function ownerLabel(id: string, known: ReadonlyMap<string, SalesforceUserOption>, notFound: ReadonlySet<string>): { name: string; text: string; flagged: boolean } {
+  const u = known.get(core(id));
+  if (u) return { name: u.name, text: u.isActive ? u.name : `${u.name} (inactive)`, flagged: !u.isActive };
+  return notFound.has(core(id)) ? { name: id, text: `${id} (not found)`, flagged: true } : { name: id, text: id, flagged: false };
+}
+
+function OwnerList({ ids, known, notFound, onChange }: OwnerListProps) {
   const move = (i: number, by: -1 | 1) => {
     const next = [...ids];
     [next[i], next[i + by]] = [next[i + by]!, next[i]!];
@@ -137,13 +155,11 @@ function OwnerList({ ids, known, onChange }: { ids: string[]; known: ReadonlyMap
   return (
     <ol aria-label="Appointment owners" className="space-y-1">
       {ids.map((id, i) => {
-        const u = known.get(core(id));
-        const name = u?.name ?? id;
-        const inactive = u ? !u.isActive : false;
+        const { name, text, flagged } = ownerLabel(id, known, notFound);
         return (
           <li key={id} className="flex items-center gap-2 rounded-md border px-2 py-1 text-sm">
             <span className="w-5 text-muted-foreground">{i + 1}.</span>
-            <span className={inactive ? 'flex-1 text-destructive' : 'flex-1'}>{inactive ? `${name} (inactive)` : name}</span>
+            <span className={flagged ? 'flex-1 text-destructive' : 'flex-1'}>{text}</span>
             <Button type="button" variant="ghost" size="sm" aria-label={`Move ${name} up`} disabled={i === 0} onClick={() => move(i, -1)}>↑</Button>
             <Button type="button" variant="ghost" size="sm" aria-label={`Move ${name} down`} disabled={i === ids.length - 1} onClick={() => move(i, 1)}>↓</Button>
             <Button type="button" variant="ghost" size="sm" aria-label={`Remove ${name}`} onClick={() => onChange(ids.filter((x) => x !== id))}>×</Button>
@@ -154,10 +170,19 @@ function OwnerList({ ids, known, onChange }: { ids: string[]; known: ReadonlyMap
   );
 }
 
-/** Shown once the list is known to name nobody active: booking is then off whatever the switch says. */
-function NobodyActive({ ids, known }: { ids: string[]; known: ReadonlyMap<string, SalesforceUserOption> }) {
-  const users = ids.map((id) => known.get(core(id)));
-  const off = ids.length === 0 || (users.every((u) => u !== undefined) && !users.some((u) => u?.isActive));
+/**
+ * Shown once the list is known to name nobody active: booking is then off whatever the switch says. An id the lookup did not
+ * return counts as inactive (M-3); one not looked up yet (or whose lookup failed) is unknown, so the line waits.
+ */
+function NobodyActive({ ids, known, notFound }: { ids: string[]; known: ReadonlyMap<string, SalesforceUserOption>; notFound: ReadonlySet<string> }) {
+  const statusOf = (id: string): 'active' | 'inactive' | 'unknown' => {
+    if (notFound.has(core(id))) return 'inactive';
+    const u = known.get(core(id));
+    if (!u) return 'unknown';
+    return u.isActive ? 'active' : 'inactive';
+  };
+  const status = ids.map(statusOf);
+  const off = ids.length === 0 || (!status.includes('unknown') && !status.includes('active'));
   return off ? <p className="text-sm font-medium text-destructive">{BOOKING_OFF}</p> : null;
 }
 

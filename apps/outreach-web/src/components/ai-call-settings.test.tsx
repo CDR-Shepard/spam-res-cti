@@ -131,6 +131,40 @@ describe('AiCallSettingsCard', () => {
     expect(screen.getByText(BOOKING_OFF)).toBeInTheDocument();
   });
 
+  describe('Fix 1 (M-3): an id the lookup did not return', () => {
+    it('shows "(not found)" in red and counts as nobody active', async () => {
+      stubApi({ 'GET /api/settings/ai-calls': settings({ specialists: [PAT] }), [idsUrl([PAT])]: [] });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      const label = await screen.findByText(`${PAT} (not found)`);
+      expect(label).toHaveClass('text-destructive');
+      expect(screen.getByText(BOOKING_OFF)).toBeInTheDocument();
+    });
+
+    it('beside an inactive user still turns booking off; beside an active one it does not', async () => {
+      stubApi({ 'GET /api/settings/ai-calls': settings({ specialists: [PAT, SAM] }), [idsUrl([PAT, SAM])]: [sam] });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      expect(await screen.findByText(`${PAT} (not found)`)).toBeInTheDocument();
+      expect(screen.getByText('Sam Gone (inactive)')).toBeInTheDocument();
+      expect(screen.getByText(BOOKING_OFF)).toBeInTheDocument();
+    });
+
+    it('a found active user keeps booking on', async () => {
+      stubApi({ 'GET /api/settings/ai-calls': settings({ specialists: [PAT, GRANT] }), [idsUrl([PAT, GRANT])]: [grant] });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      expect(await screen.findByText(`${PAT} (not found)`)).toBeInTheDocument();
+      expect(screen.queryByText(BOOKING_OFF)).not.toBeInTheDocument();
+    });
+
+    it('when the lookup fails, an unknown id is neither "not found" nor booking off (nobody knows yet)', async () => {
+      stubApi({ 'GET /api/settings/ai-calls': settings({ specialists: [PAT] }), [idsUrl([PAT])]: respond(502, { error: 'Salesforce did not answer', code: 'CRM_ERROR' }) });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      expect(await screen.findByText(PAT)).toBeInTheDocument();
+      await waitFor(() => expect(screen.getAllByText(/./, { selector: 'p.text-destructive' }).length).toBeGreaterThan(0));
+      expect(screen.queryByText(`${PAT} (not found)`)).not.toBeInTheDocument();
+      expect(screen.queryByText(BOOKING_OFF)).not.toBeInTheDocument();
+    });
+  });
+
   it('turning "Convert a Lead…" off PUTs convertLeads: false; write-back off PUTs writeback: false', async () => {
     const calls = stubApi({
       'GET /api/settings/ai-calls': settings(),
