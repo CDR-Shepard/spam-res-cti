@@ -210,7 +210,8 @@ function transferFor(entry: ActiveAiCall, cfg: AppConfig, reason: string): strin
   const name = r ? (r.objectType === 'Opportunity' ? r.firstName : r.name) : 'AI test call';
   return transferTwiml({
     userId: entry.handoffUserId,
-    callerId: entry.toE164,
+    // A <Dial callerId> must be a phone number: a browser test leg (plan 1E, `client:…`) shows the AI's own number.
+    callerId: entry.toE164.startsWith('client:') ? entry.fromE164 : entry.toE164,
     actionUrl: callbackUrl(cfg.API_PUBLIC_URL, TRANSFER_RESULT_PATH, entry.aiCallId),
     caller: { ...(name ? { name } : {}), ...(r ? { popRecordId: r.recordId } : {}) },
     reason,

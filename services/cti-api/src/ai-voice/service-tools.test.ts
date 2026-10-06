@@ -185,6 +185,13 @@ describe('mark_do_not_call', () => {
     expect(twilio.hangups).toHaveLength(0);
   });
 
+  it('plan 1E: on a browser practice leg (client:<identity>, is_test) nothing is opted out; the outcome is still recorded (G-2)', async () => {
+    ctx = { ...ctx, toE164: 'client:aitest_aaaaaaaa000040008000000000000001_a1b2c3d4e5f6', isTest: true };
+    await run('mark_do_not_call', { note: 'stop calling me' });
+    expect(store.optOuts).toEqual([]);
+    expect(store.rows.get(ID)?.outcome).toBe('do_not_call');
+  });
+
   it('a wrong number is opted out and recorded as wrong_number', async () => {
     await run('mark_do_not_call', { note: 'Wrong number' });
     expect(store.optOuts).toHaveLength(1);

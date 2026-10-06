@@ -56,7 +56,8 @@ export interface CallLookup {
   userId: string;
   sfRecordId: string | null;
   toE164: string | null;
-  kind: 'record' | 'test' | 'practice';
+  /** practice_browser (plan 1E) is never looked up by its leg: a crashed practice request only adopts its linked call. */
+  kind: 'record' | 'test' | 'practice' | 'practice_browser';
   since: Date;
 }
 
@@ -111,7 +112,7 @@ export function findCallSinceQuery(db: Db, a: CallLookup) {
   const target =
     a.kind === 'record'
       ? and(eq(c.sfRecordId, a.sfRecordId ?? ''), eq(c.isTest, false))
-      : and(eq(c.toE164, a.toE164 ?? ''), eq(c.isTest, true), eq(c.practice, a.kind === 'practice'));
+      : and(eq(c.toE164, a.toE164 ?? ''), eq(c.isTest, true), eq(c.practice, a.kind === 'practice' || a.kind === 'practice_browser'));
   return db
     .select({ id: c.id, status: c.status, blockReason: c.blockReason, callSid: c.callSid })
     .from(c)

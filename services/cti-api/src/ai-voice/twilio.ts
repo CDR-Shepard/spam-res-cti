@@ -138,6 +138,8 @@ export interface PlaceCallInput {
   twiml: string;
   statusCallback: string;
   amdCallback: string;
+  /** Answering-machine detection (default true). Plan 1E: false for a browser leg, which is never a machine. */
+  amd?: boolean;
 }
 
 export interface AiVoiceTwilio {
@@ -171,12 +173,16 @@ export function createAiVoiceTwilio(
         from: i.from,
         twiml: i.twiml,
         timeout: RING_TIMEOUT_SECONDS,
-        machineDetection: 'DetectMessageEnd',
-        machineDetectionSpeechThreshold: 1900,
-        machineDetectionSpeechEndThreshold: 1400,
-        asyncAmd: 'true',
-        asyncAmdStatusCallback: i.amdCallback,
-        asyncAmdStatusCallbackMethod: 'POST',
+        ...(i.amd === false
+          ? {}
+          : {
+              machineDetection: 'DetectMessageEnd',
+              machineDetectionSpeechThreshold: 1900,
+              machineDetectionSpeechEndThreshold: 1400,
+              asyncAmd: 'true',
+              asyncAmdStatusCallback: i.amdCallback,
+              asyncAmdStatusCallbackMethod: 'POST',
+            }),
         statusCallback: i.statusCallback,
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         statusCallbackMethod: 'POST',

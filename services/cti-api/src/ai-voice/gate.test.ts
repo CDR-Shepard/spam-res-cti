@@ -56,6 +56,7 @@ function deps(c: Case) {
     dailyDialCount: vi.fn(async () => c.dailyCount ?? 0),
     withinCallingHours: vi.fn(() => c.inHours ?? true),
     pickAiDid: vi.fn(async () => (c.pick === undefined ? { e164: FROM } : c.pick)),
+    peekAiCallerId: vi.fn(async () => FROM),
   } satisfies GateDeps;
 }
 
@@ -151,5 +152,66 @@ describe('gateAiCall', () => {
       gateAiCall(db, { cfg: baseCfg, orgId: 'O1', userId: 'U1', isAdmin: false, now: NOW, target: c.target }, d),
     ).rejects.toThrow('pg down');
     expect(d.pickAiDid).not.toHaveBeenCalled();
+  });
+});
+
+describe('gateAiCall — practice_browser (plan 1E): the browser branch', () => {
+  const ADMIN = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const OTHER = 'bbbbbbbb-0000-4000-8000-000000000002';
+  const own = `aitest_${ADMIN.replace(/-/g, '')}_a1b2c3d4e5f6`;
+  const browser = (identity: string) => ({ kind: 'browser' as const, identity });
+  const gate = (over: { cfg?: Partial<AppConfig>; isAdmin?: boolean; identity?: string; now?: Date; peek?: string | null } = {}) => {
+    const d = { ...deps({ name: '', target: browser(own), want: blockedBy('invalid_number') }), peekAiCallerId: vi.fn(async () => (over.peek === undefined ? FROM : over.peek)) };
+    const got = gateAiCall(
+      db,
+      { cfg: { ...baseCfg, ...over.cfg } as AppConfig, orgId: 'O1', userId: ADMIN, isAdmin: over.isAdmin ?? true, now: over.now ?? NOW, target: browser(over.identity ?? own) },
+      d,
+    );
+    return { got, d };
+  };
+
+  it('2: an admin ringing their own browser identity, with a pool number: ok, to client:<identity>, from the peeked number, nothing else read or claimed', async () => {
+    const { got, d } = gate();
+    expect(await got).toEqual({ ok: true, toE164: `client:${own}`, fromE164: FROM });
+    expect(d.peekAiCallerId).toHaveBeenCalledWith(db, 'O1');
+    for (const f of [d.blockedTargets, d.dailyDialCount, d.withinCallingHours, d.pickAiDid]) expect(f).not.toHaveBeenCalled();
+  });
+
+  it('3: at 3 AM for the record it is still ok: nobody\'s phone rings, so no calling-hours rule', async () => {
+    const { got, d } = gate({ now: new Date('2026-10-06T10:00:00Z') }); // 3 AM in San Diego
+    expect((await got).ok).toBe(true);
+    expect(d.withinCallingHours).not.toHaveBeenCalled();
+  });
+
+  it('4: AI voice off -> ai_voice_unavailable, before anything is read', async () => {
+    const { got, d } = gate({ cfg: { AI_VOICE: 'off' } as Partial<AppConfig> });
+    expect(await got).toEqual(blockedBy('ai_voice_unavailable'));
+    expect(d.peekAiCallerId).not.toHaveBeenCalled();
+  });
+
+  it('5: not an admin -> not_admin_for_test', async () => {
+    const { got, d } = gate({ isAdmin: false });
+    expect(await got).toEqual(blockedBy('not_admin_for_test'));
+    expect(d.peekAiCallerId).not.toHaveBeenCalled();
+  });
+
+  it("6: another admin's identity -> invalid_number (G-3)", async () => {
+    const { got, d } = gate({ identity: `aitest_${OTHER.replace(/-/g, '')}_a1b2c3d4e5f6` });
+    expect(await got).toEqual(blockedBy('invalid_number'));
+    expect(d.peekAiCallerId).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a rep softphone identity', `rep_${ADMIN.replace(/-/g, '')}`],
+    ['a phone number', '+16195550199'],
+    ['an identity with a trailing extra', `${'x'}${own}`],
+  ])('7: %s forced through -> invalid_number (G-3)', async (_label, identity) => {
+    const { got } = gate({ identity });
+    expect(await got).toEqual(blockedBy('invalid_number'));
+  });
+
+  it('no usable ai_pool number -> no_caller_id; nothing falls back to the default caller ID', async () => {
+    const { got } = gate({ peek: null, cfg: { TWILIO_DEFAULT_CALLER_ID: '+16195550002' } as Partial<AppConfig> });
+    expect(await got).toEqual(blockedBy('no_caller_id'));
   });
 });

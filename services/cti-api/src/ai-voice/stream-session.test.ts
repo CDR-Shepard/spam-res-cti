@@ -259,6 +259,18 @@ describe('runStreamSession — bridge hooks', () => {
     expect(twiml).toContain(`action="https://api.test/telephony/twilio/ai-voice/transfer-result?aiCallId=${ID}"`);
     expect(twiml).toContain('<Parameter name="aiTransfer" value="interested"/>');
   });
+
+  it('plan 1E: a transfer on a browser leg rings the starter with the from number as caller ID (a client: value is no phone number)', async () => {
+    const leg = 'client:aitest_aaaaaaaa000040008000000000000001_a1b2c3d4e5f6';
+    registerActiveCall(activeEntry({ aiCallId: ID, callSid: CALL_SID, toE164: leg, isTest: true }));
+    await begin();
+    await captured!.hooks.onTool('transfer_to_rep', { reason: 'interested', summary: 'hot' });
+    await settle();
+    const twiml = twilio.redirects[0]?.twiml ?? '';
+    expect(twiml).toContain('callerId="+16195550000"');
+    expect(twiml).not.toContain('client:aitest');
+    expect(twiml).toContain('<Identity>rep_u1</Identity>');
+  });
 });
 
 describe('runStreamSession — appointment times (plan 1D)', () => {

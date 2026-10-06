@@ -142,6 +142,24 @@ describe('createAiVoiceTwilio', () => {
     });
   });
 
+  it('plan 1E: amd: false (a browser leg) sends none of the six AMD keys; everything else is identical', async () => {
+    const f = fakeClient();
+    const port = createAiVoiceTwilio(cfg, () => f.client);
+    const base = { to: 'client:aitest_x', from: '+16195550000', twiml: '<Response/>', statusCallback: 'https://x/status', amdCallback: 'https://x/amd' };
+    await port.placeCall({ ...base, amd: false });
+    await port.placeCall({ ...base, amd: true });
+    const [off, on] = f.create.mock.calls.map((c) => c[0] as Record<string, unknown>);
+    const AMD_KEYS = [
+      'machineDetection', 'machineDetectionSpeechThreshold', 'machineDetectionSpeechEndThreshold',
+      'asyncAmd', 'asyncAmdStatusCallback', 'asyncAmdStatusCallbackMethod',
+    ];
+    for (const k of AMD_KEYS) {
+      expect(off).not.toHaveProperty(k);
+      expect(on).toHaveProperty(k);
+    }
+    expect(off).toEqual(Object.fromEntries(Object.entries(on!).filter(([k]) => !AMD_KEYS.includes(k))));
+  });
+
   it('redirect replaces the TwiML (optionally lifting the time limit); hangup completes the call', async () => {
     const f = fakeClient();
     const port = createAiVoiceTwilio(cfg, () => f.client);

@@ -206,6 +206,7 @@ describe('aiGateDeps', () => {
       dailyDialCount: vi.fn(async () => 1),
       withinCallingHours: vi.fn(),
       pickAiDid: vi.fn(),
+      peekAiCallerId: vi.fn(),
     };
     store.uncounted = 2;
     const wrapped = aiGateDeps(store, base);
@@ -292,6 +293,7 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
     dailyDialCount: async () => 0,
     withinCallingHours: () => false, // outside calling hours: a test-number call is exempt, a seller's is not
     pickAiDid: async () => ({ e164: FROM }),
+    peekAiCallerId: async () => FROM,
   };
   /** The real gate, with no database behind it. */
   const realGate = () => {

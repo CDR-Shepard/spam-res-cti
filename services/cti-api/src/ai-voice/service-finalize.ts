@@ -14,7 +14,9 @@
  *   1. a `do_not_call` or `wrong_number` outcome re-asserts the opt-out;
  *   2. a placed call (it has a CallSid) gets its `calls` row, linked through
  *      `ai_calls.cti_call_id` in the same transaction — so the dialer's daily
- *      cap and per-customer ceiling count AI calls, exactly once;
+ *      cap and per-customer ceiling count AI calls, exactly once. A browser
+ *      test leg (plan 1E, `to_e164` `client:…`) dialed no phone number and
+ *      gets none: there is nothing for a cap, ceiling or contact history;
  *   3. `afterCall` (summary + Salesforce Tasks, `afterAiCall`) runs DETACHED:
  *      the webhook replies without waiting on Claude or Salesforce. The
  *      promise is returned as `after` (tests, the sweeper) and never rejects.
@@ -224,8 +226,15 @@ export function liveAfterCall(
   return { sf, afterCall: (row) => afterAiCall(row, { store, log, summary, sf }) };
 }
 
+/** Plan 1E: a practice_browser leg rang the admin's browser (`client:<identity>`), not a phone number. */
+export const isClientLeg = (row: Pick<AiCallRow, 'toE164'>): boolean => row.toE164.startsWith('client:');
+
 async function withCtiCall(row: AiCallRow, callStatus: string, deps: FinalizeDeps): Promise<AiCallRow> {
   if (!row.callSid) return row; // never placed: nothing rang, nothing to count
+  if (isClientLeg(row)) {
+    deps.log.info({ aiCallId: row.id }, 'ai-voice: browser test leg; no calls row');
+    return row;
+  }
   try {
     const ctiCallId = await deps.store.recordCtiCall(row.id, ctiCallValues(row, callStatus));
     return { ...row, ctiCallId };

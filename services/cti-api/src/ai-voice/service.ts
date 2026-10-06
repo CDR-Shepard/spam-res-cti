@@ -18,7 +18,7 @@ import { blockedTargets } from '../dialer/consent-check.js';
 import { withinCallingHours, type Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
 import { gateAiCall, type AiGateBlock, type AiGateInput, type AiGateResult, type GateDeps } from './gate.js';
-import { pickAiDid } from './number-pool.js';
+import { peekAiCallerId, pickAiDid } from './number-pool.js';
 import type { AiCallObject, AiCallRecord } from './record.js';
 import { dropActiveCall, registerActiveCall, updateActiveCall } from './registry.js';
 import { gateTarget, handoffUser, loadTarget, rowTarget, targetKind, typedNumber, type StartTarget } from './service-target.js';
@@ -76,7 +76,13 @@ const FALLBACK_TIME_ZONE = 'America/Chicago';
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-const realGateDeps: GateDeps = { blockedTargets, dailyDialCount, withinCallingHours, pickAiDid };
+const realGateDeps: GateDeps = { blockedTargets, dailyDialCount, withinCallingHours, pickAiDid, peekAiCallerId };
+
+/** Both practice kinds (plan 1D phone, plan 1E browser) must sound exactly as the seller would hear the call. */
+const isPractice = (i: StartInput): boolean => {
+  const kind = targetKind(i.target);
+  return kind === 'practice' || kind === 'practice_browser';
+};
 
 /** The dialer's gate deps, with the daily count widened to placed AI calls not yet in `calls`. */
 export function aiGateDeps(store: AiCallStore, base: GateDeps = realGateDeps): GateDeps {
@@ -128,7 +134,7 @@ function bookingPrompt(
  * its zone is known (Fix 1 M-5 for the slot words; Part 6 B for "their local time right now"), else the number it rings.
  */
 function sellerNumber(i: StartInput, record: AiCallRecord | null, to: string): string {
-  const phone = targetKind(i.target) === 'practice' ? record?.phones[0] : undefined;
+  const phone = isPractice(i) ? record?.phones[0] : undefined;
   return phone && timezoneForNumber(phone) ? phone : to;
 }
 
@@ -206,7 +212,7 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
       toE164: gate.toE164,
       fromE164: gate.fromE164,
       isTest,
-      ...(kind === 'practice' ? { localTimeE164: sellerNumber(i, record, gate.toE164) } : {}),
+      ...(isPractice(i) ? { localTimeE164: sellerNumber(i, record, gate.toE164) } : {}),
       record,
       prompt: {
         agentName: cfg.AI_VOICE_AGENT_NAME,
@@ -239,6 +245,8 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
       }),
       statusCallback: callbackUrl(cfg.API_PUBLIC_URL, STATUS_PATH, aiCallId),
       amdCallback: callbackUrl(cfg.API_PUBLIC_URL, AMD_PATH, aiCallId),
+      // A browser leg (plan 1E) is never an answering machine.
+      amd: kind !== 'practice_browser',
     }));
   } catch (e) {
     deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: Twilio refused the call');

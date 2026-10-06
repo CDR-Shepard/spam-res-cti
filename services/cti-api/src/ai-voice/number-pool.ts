@@ -14,10 +14,13 @@
  * the number its newest AI call to this person came from (`ai_calls`) — the
  * rep's `sticky_numbers` row is the rep's, and the AI never writes it.
  *
+ * Plan 1E: `peekAiCallerId` reads (never claims) the caller ID a browser test
+ * leg shows: no phone number is dialed, so no warmup or velocity dial is spent.
+ *
  * Also here: who a callback to an AI number rings (routes/inbound.ts and the
  * inbound-text router), from the same `ai_calls` rows.
  */
-import { and, desc, eq, gte, isNotNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, isNotNull, notInArray, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
 import {
   atCeiling,
@@ -26,6 +29,7 @@ import {
   type PickDidResult,
 } from '../dialer/pick-agent-did.js';
 import { pickPoolDid } from '../dialer/pick-did.js';
+import { poolNumbersWhere } from '../dialer/pool.js';
 
 type Db = ReturnType<typeof getDb>;
 const t = schema.aiCalls;
@@ -69,6 +73,23 @@ export async function pickAiDid(db: Db, args: AiPickArgs, deps: AiPickDeps = liv
     { ...args, kind: 'ai_pool' },
     { stickyE164: () => deps.lastFrom(db, args.orgId, args.toE164) },
   );
+}
+
+/**
+ * The org's first usable `ai_pool` number, READ ONLY (plan 1E browser tests): the pool listing pickPoolDid walks for
+ * `kind = 'ai_pool'` (`poolNumbersWhere`: this org, active, this kind, in the listing's own order) plus the claim's
+ * health filter, LIMIT 1, and no claim UPDATE. A browser leg dials no phone number, so no dial is counted against it.
+ */
+export const peekAiCallerIdQuery = (db: Db, orgId: string) =>
+  db
+    .select({ e164: schema.outboundNumbers.e164 })
+    .from(schema.outboundNumbers)
+    .where(and(poolNumbersWhere(orgId, 'ai_pool'), notInArray(schema.outboundNumbers.health, ['spam_likely', 'degraded'])))
+    .limit(1);
+
+export async function peekAiCallerId(db: Db, orgId: string): Promise<string | null> {
+  const [row] = await peekAiCallerIdQuery(db, orgId);
+  return row?.e164 ?? null;
 }
 
 /**

@@ -10,7 +10,7 @@ import { internalRequestHeaders, type SessionUser } from '@cti/auth';
 import { INTERNAL_AI_BROWSER_TOKEN_PATH, INTERNAL_AI_CALLS_PATH, InternalBrowserTokenResponse, aiTestIdentityUser } from '@cti/contracts';
 import type { AppConfig } from '../config.js';
 import type { Db } from '../dialer/pick-did.js';
-import type { AiCallRequestRow, AiCallRequestStore } from './request-store.js';
+import { STALE_REQUEST_MS, requestHash, type AiCallRequestRow, type AiCallRequestStore } from './request-store.js';
 import { registerInternalAiCallRoutes, type InternalAiDeps } from './routes-internal.js';
 import type { StartInput, StartResult } from './service.js';
 
@@ -41,7 +41,12 @@ function memoryRequests(): AiCallRequestStore & { rows: Map<string, AiCallReques
       const row = rows.get(key);
       if (row && row.response === null) rows.set(key, { ...row, response, aiCallId: response.aiCallId });
     }),
-    takeOver: vi.fn(async () => false),
+    takeOver: vi.fn(async (_orgId, key) => {
+      const row = rows.get(key);
+      if (!row || row.response !== null || NOW.getTime() - row.updatedAt.getTime() < STALE_REQUEST_MS) return false;
+      rows.set(key, { ...row, updatedAt: NOW });
+      return true;
+    }),
     findCallSince: vi.fn(async () => null),
     linkCall: vi.fn(async () => {}),
     findCall: vi.fn(async () => null),
@@ -152,5 +157,67 @@ describe('POST /internal/ai-calls/browser-token', () => {
     expect((await post(INTERNAL_AI_BROWSER_TOKEN_PATH, tokenBody, { headers: { origin: 'https://cti.example.com' } })).statusCode).toBe(403);
     expect((await post(INTERNAL_AI_BROWSER_TOKEN_PATH, tokenBody, { headers: { host: 'cti.example.com' } })).statusCode).toBe(404);
     expect(deps.session).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /internal/ai-calls — practice_browser (plan 1E Task 7)', () => {
+  const SLOT = {
+    id: 'p1', kind: 'phone', start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T18:15:00.000Z',
+    specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
+  };
+  const KEY = 'rtest:55555555-2222-4333-8444-555555555555';
+  const browserBody = (target: Record<string, unknown> = {}) => ({
+    orgId: ORG,
+    userId: USER,
+    idempotencyKey: KEY,
+    target: { kind: 'practice_browser', objectType: 'Lead', recordId: LEAD, clientIdentity: IDENTITY, planText: PLAN, ...target },
+  });
+  const startInput = (n = 0) => deps.start.mock.calls[n]![0] as StartInput;
+
+  it('13: a signed practice_browser trigger is placed: the browser target, the plan, slots and context, on the tenant integration', async () => {
+    const res = await post(INTERNAL_AI_CALLS_PATH, browserBody({ slots: [SLOT], context: { returning: true } }));
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
+    const input = startInput();
+    expect(input.target).toEqual({ practiceBrowser: { objectType: 'Lead', recordId: LEAD, identity: IDENTITY } });
+    expect(input.plan).toBe(PLAN);
+    expect(input.slots).toEqual([SLOT]);
+    expect(input.returning).toBe(true);
+    expect(input.session.userId).toBe(USER);
+    await input.deps.loadRecord('any-user', 'Lead', LEAD);
+    expect(deps.loadIntegrationRecord).toHaveBeenCalledWith(db, ORG, 'Lead', LEAD);
+  });
+
+  it('13: the same key again answers the stored response and starts nothing; the same key with another identity is 409', async () => {
+    await post(INTERNAL_AI_CALLS_PATH, browserBody());
+    const again = await post(INTERNAL_AI_CALLS_PATH, browserBody());
+    expect(again.json()).toEqual({ result: 'placed', aiCallId: CALL });
+    const other = await post(INTERNAL_AI_CALLS_PATH, browserBody({ clientIdentity: `aitest_${OTHER_ADMIN.replace(/-/g, '')}_a1b2c3d4e5f6` }));
+    expect(other.statusCode).toBe(409);
+    expect(other.json()).toEqual({ error: 'idempotency_conflict' });
+    expect(deps.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('13: a stale key with no linked call is run again, never matched to a call by the leg it rang', async () => {
+    const body = browserBody();
+    await requests.reserve({ orgId: ORG, key: KEY, hash: requestHash(JSON.stringify(body)), userId: USER });
+    const old = new Date(NOW.getTime() - 11 * 60_000);
+    requests.rows.set(KEY, { ...requests.rows.get(KEY)!, createdAt: old, updatedAt: old });
+    expect((await post(INTERNAL_AI_CALLS_PATH, body)).json()).toEqual({ result: 'placed', aiCallId: CALL });
+    expect(requests.findCallSince).not.toHaveBeenCalled();
+    expect(deps.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('14: plan text with an amount ("300k") is failed / plan_rejected and nothing is reserved or started (G-5)', async () => {
+    const res = await post(INTERNAL_AI_CALLS_PATH, browserBody({ planText: 'Opener: They said they would take 300k for it.' }));
+    expect(res.json()).toEqual({ result: 'failed', reason: 'plan_rejected', aiCallId: null });
+    expect(requests.reserve).not.toHaveBeenCalled();
+    expect(deps.start).not.toHaveBeenCalled();
+  });
+
+  it('a clientIdentity that is not an aitest identity is 400 invalid_body (the contract refuses it)', async () => {
+    const res = await post(INTERNAL_AI_CALLS_PATH, browserBody({ clientIdentity: `rep_${USER.replace(/-/g, '')}` }));
+    expect(res.statusCode).toBe(400);
+    expect(requests.reserve).not.toHaveBeenCalled();
   });
 });

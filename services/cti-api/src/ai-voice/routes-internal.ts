@@ -14,7 +14,8 @@
  *
  * Plan 1D: a record target may carry `slots` (appointment times, structured, never plan text) and
  * `context.returning`; a `practice` target rings an admin's test number with a real record's plan and
- * context (service-target.ts). Every switch on the target kind below is explicit (D-2).
+ * context (service-target.ts). Plan 1E: a `practice_browser` target is the same practice call ringing the admin's
+ * browser (`client:<clientIdentity>`). Every switch on the target kind below is explicit (D-2).
  */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import {
@@ -86,8 +87,7 @@ function targetKeys(body: Body): Pick<CallLookup, 'sfRecordId' | 'toE164' | 'kin
       // A practice call rings the admin's test number (its row also carries the record id, but so may a real call's).
       return { sfRecordId: null, toE164: toE164(t.to) ?? t.to.slice(0, 20), kind: t.kind };
     case 'practice_browser':
-      // Plan 1E: no caller sends this kind before Task 7 handles it; never answer for it here.
-      throw new Error('practice_browser is handled in Task 7');
+      return { sfRecordId: null, toE164: `client:${t.clientIdentity}`, kind: 'practice_browser' };
   }
 }
 
@@ -105,8 +105,11 @@ function startTarget(t: Body['target']): Pick<StartInput, 'target' | 'slots' | '
     case 'test':
       return { target: { testTo: t.to } };
     case 'practice_browser':
-      // Plan 1E: no caller sends this kind before Task 7 handles it; never answer for it here.
-      throw new Error('practice_browser is handled in Task 7');
+      return {
+        target: { practiceBrowser: { objectType: t.objectType, recordId: t.recordId, identity: t.clientIdentity } },
+        slots: t.slots,
+        returning: t.context?.returning ?? false,
+      };
   }
 }
 
@@ -210,11 +213,12 @@ async function handleTrigger(deps: InternalAiDeps, cfgOf: () => AppConfig, body:
 /**
  * The call a crashed request left. Its own call, linked to the key the moment it was inserted (final review m3), is exact.
  * A reservation with no link falls back to the lookup by record or number for record and test keys (a request reserved
- * before links existed); a practice key never does, so a newer practice call to the same test number is never adopted.
+ * before links existed); a practice key (phone or browser) never does, so a newer practice call to the same leg is never
+ * adopted.
  */
 async function crashedCall(deps: InternalAiDeps, body: Body, row: AiCallRequestRow): Promise<FoundCall | null> {
   if (row.aiCallId) return deps.requests.findCall(body.orgId, body.userId, row.aiCallId);
-  if (body.target.kind === 'practice') return null;
+  if (body.target.kind === 'practice' || body.target.kind === 'practice_browser') return null;
   return deps.requests.findCallSince({
     orgId: body.orgId, userId: body.userId, since: new Date(row.createdAt.getTime() - FIND_SLACK_MS), ...targetKeys(body),
   });
