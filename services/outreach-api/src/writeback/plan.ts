@@ -7,11 +7,11 @@
  */
 import { BookedAppointment } from '@cti/contracts';
 import { z } from 'zod';
-import { DECLINED_VALUES, NEVER_WRITE_VALUES, isBlankish } from '../research/qualification.js';
+import { isBlankish } from '../research/qualification.js';
 import type { WritableField } from './fields.js';
-import type { MappedAnswers, MappedValue } from './mapping-model.js';
+import type { MappedAnswers } from './mapping-model.js';
 import { CALL_RESULTS, LEAD_FROM, LEAD_TABLE, OPP_FROM, OPP_OPEN, OPP_TABLE, REASON_FIELDS, callResult, type CallResult, type Move, type Row } from './outcome-tables.js';
-import { asText, blankKind, currentOf, inPicklist, modeAllows, resolveMove, sameText } from './plan-values.js';
+import { asText, blankKind, currentOf, fillValue, inPicklist, isDeclined, modeAllows, onlyNeverWrite, resolveMove, sameAnswer, sameText } from './plan-values.js';
 
 type SfObject = 'Lead' | 'Opportunity';
 
@@ -219,37 +219,6 @@ function bookingMoves(b: Builder, i: WritePlanInput, row: Row): { patch: Record<
     changes.push(out.change);
   }
   return { patch, changes };
-}
-
-/** Blank, or holding only never-write values ("I Didn't Ask"): the only values a declined answer may replace. */
-const onlyNeverWrite = (before: string | null): boolean => before === null || before.split(';').every((s) => s.trim() === '' || NEVER_WRITE_VALUES.has(s.trim().toLowerCase()));
-const isDeclined = (v: MappedValue): boolean => {
-  const vs = Array.isArray(v) ? v : typeof v === 'string' ? [v] : [];
-  return vs.length > 0 && vs.every((x) => DECLINED_VALUES.has(x.trim().toLowerCase()));
-};
-const neverWrite = (v: MappedValue): boolean => (Array.isArray(v) ? v : typeof v === 'string' ? [v] : []).some((x) => NEVER_WRITE_VALUES.has(x.trim().toLowerCase()));
-
-/** The mapped value as the field takes it, or null when it is not valid for the field (re-checked against the describe). */
-function fillValue(f: WritableField, v: MappedValue): string | number | boolean | null {
-  if (neverWrite(v)) return null;
-  if (f.kind === 'picklist') return typeof v === 'string' ? inPicklist(f, v) : null;
-  if (f.kind === 'multipicklist') {
-    const vs = Array.isArray(v) ? v.map((x) => inPicklist(f, x)) : [];
-    return vs.length > 0 && vs.every((x) => x !== null) ? vs.join(';') : null;
-  }
-  if (f.kind === 'currency') return typeof v === 'number' && Number.isFinite(v) ? v : null;
-  if (f.kind === 'boolean') return v === true ? true : null;
-  return f.kind === 'text' && typeof v === 'string' && v.trim() !== '' ? v : null;
-}
-
-/** Same answer as the record already holds: case-insensitive text, numeric for currency, as a set for a multipicklist. */
-function sameAnswer(f: WritableField, current: string, after: string): boolean {
-  if (f.kind === 'currency') return Number(current) === Number(after);
-  if (f.kind === 'multipicklist') {
-    const set = (s: string) => [...new Set(s.split(';').map((x) => x.trim().toLowerCase()).filter((x) => x !== ''))].sort().join(';');
-    return set(current) === set(after);
-  }
-  return current.trim().toLowerCase() === after.trim().toLowerCase();
 }
 
 /** spec §5.1: fill only blank or "didn't ask" values; a declined value only over blank or never-write; a rep's value is kept. */
