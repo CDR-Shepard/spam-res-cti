@@ -272,9 +272,10 @@ describe('runStreamSession — appointment times (plan 1D)', () => {
       specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
     },
   ];
+  const ADDRESS = '1234 Oak St, Tampa, FL 33601';
   const withSlots = () => {
     const base = activeEntry({ aiCallId: ID, callSid: CALL_SID });
-    registerActiveCall({ ...base, prompt: { ...base.prompt, slots: SLOTS, sellerTimeZone: 'America/Los_Angeles' } });
+    registerActiveCall({ ...base, prompt: { ...base.prompt, address: ADDRESS, slots: SLOTS, sellerTimeZone: 'America/Los_Angeles' } });
   };
   const toolNamed = (name: string) => (captured!.opts.tools as RealtimeFunctionTool[]).find((t) => t.name === name);
 
@@ -309,12 +310,23 @@ describe('runStreamSession — appointment times (plan 1D)', () => {
   it('Fix 1 M-2: a slot the prompt drops (a zone this runtime cannot format) is neither in the tool enum nor bookable', async () => {
     const base = activeEntry({ aiCallId: ID, callSid: CALL_SID });
     const bad: AppointmentSlot = { ...SLOTS[1]!, timeZone: 'Mars/Olympus_Mons' };
-    registerActiveCall({ ...base, prompt: { ...base.prompt, slots: [SLOTS[0]!, bad], sellerTimeZone: 'America/Los_Angeles' } });
+    registerActiveCall({ ...base, prompt: { ...base.prompt, address: ADDRESS, slots: [SLOTS[0]!, bad], sellerTimeZone: 'America/Los_Angeles' } });
     await begin();
     expect((toolNamed('book_appointment')?.parameters as { properties: { slot_id: { enum: string[] } } }).properties.slot_id.enum).toEqual(['p1']);
     expect(captured!.opts.instructions).not.toContain('- w1:');
     const res = await captured!.hooks.onTool('book_appointment', { slot_id: 'w1', address_confirmed: true, note: '' });
     expect(res.output).toMatch(/not on your list/);
+  });
+
+  it('final review I-1: with no street address a walkthrough is neither offered nor bookable; phone times still are', async () => {
+    const base = activeEntry({ aiCallId: ID, callSid: CALL_SID });
+    registerActiveCall({ ...base, prompt: { ...base.prompt, address: null, slots: SLOTS, sellerTimeZone: 'America/Los_Angeles' } });
+    await begin();
+    expect((toolNamed('book_appointment')?.parameters as { properties: { slot_id: { enum: string[] } } }).properties.slot_id.enum).toEqual(['p1']);
+    expect(captured!.opts.instructions).not.toContain('- w1:');
+    const res = await captured!.hooks.onTool('book_appointment', { slot_id: 'w1', address_confirmed: true, note: '' });
+    expect(res.output).toMatch(/not on your list/);
+    expect(store.rows.get(ID)?.appointment ?? null).toBeNull();
   });
 
   it('without slots the tools are unchanged, and book_appointment books nothing', async () => {

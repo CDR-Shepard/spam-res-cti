@@ -154,7 +154,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
   // Part 6 B: a practice call rings a test number but says the seller's local time (the record's phone; service.ts).
   const instructions = buildInstructions({ ...entry.prompt, localTime: localTimeFor(entry.localTimeE164 ?? entry.toE164, deps.now()) });
   // The times the prompt lists are exactly the ones the agent can name and book (Fix 1, M-2).
-  const slots = promptSlots(entry.prompt.slots);
+  const slots = promptSlots(entry.prompt.slots, entry.prompt.address);
   const openai = deps.openRealtime(realtimeUrl(cfg.AI_VOICE_MODEL), cfg.OPENAI_API_KEY ?? '');
   const transcript = new TranscriptBuffer((lines) => deps.store.appendTranscript(entry.aiCallId, lines), { log: deps.log });
   let bridge: ActiveBridge | null = null;

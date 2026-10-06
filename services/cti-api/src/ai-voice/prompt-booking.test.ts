@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AppointmentSlot } from '@cti/contracts';
-import { context } from './prompt-context.js';
+import { context, promptSlots } from './prompt-context.js';
 import type { PromptInput } from './prompt.js';
 import { bookingSection, slotWords } from './prompt-booking.js';
 import { buildInstructions } from './prompt.js';
@@ -160,5 +160,33 @@ describe('Fix 1 M-6: the role section names a booked appointment as a good endin
     const text = buildInstructions(input());
     expect(text).toContain('- A good call ends in a warm hand-off, a scheduled callback, or a polite goodbye. Never an offer, never a hard sell.');
     expect(text).not.toContain('booked appointment');
+  });
+});
+
+describe('final review I-1: a walkthrough needs a street address to confirm', () => {
+  it('drops walkthrough slots (list and offer words) when the record has no address; phone slots stay', () => {
+    const c = context(input({ address: null, slots: [slot(), walk()], sellerTimeZone: LA }));
+    expect(c.slots.map((s) => s.id)).toEqual(['p1']);
+    const text = bookingSection(c)!;
+    expect(text).not.toMatch(/walkthrough|w1/);
+    expect(text).not.toContain("That's the property, right?");
+  });
+
+  it('drops walkthrough slots when the address has only a city', () => {
+    const c = context(input({ address: 'Tampa, FL 33601', slots: [slot(), walk()], sellerTimeZone: LA }));
+    expect(c.slots.map((s) => s.id)).toEqual(['p1']);
+  });
+
+  it('walkthroughs only and no street: nothing to offer, so no booking section', () => {
+    expect(bookingSection(context(input({ address: null, slots: [walk()], sellerTimeZone: LA })))).toBeNull();
+  });
+
+  it('keeps walkthrough slots when the address has a street', () => {
+    expect(context(input({ slots: [slot(), walk()], sellerTimeZone: LA })).slots.map((s) => s.id)).toEqual(['p1', 'w1']);
+  });
+
+  it('promptSlots applies the same rule, so the tool enum and the bookable list agree with the prompt', () => {
+    expect(promptSlots([slot(), walk()], null).map((s) => s.id)).toEqual(['p1']);
+    expect(promptSlots([slot(), walk()], '1234 Oak St, Tampa, FL 33601').map((s) => s.id)).toEqual(['p1', 'w1']);
   });
 });

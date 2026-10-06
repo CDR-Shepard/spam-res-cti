@@ -120,20 +120,28 @@ function isZone(tz: string | null | undefined): tz is string {
   }
 }
 
+/** The record's address flattened for speech (`#` said "unit"). */
+const spokenAddress = (address: string | null): string | null => oneLine(unitWord(address), ADDRESS_MAX);
+
 /**
  * Slots as the prompt renders them: a valid id and real times only, the first name flattened like any record value. The
  * stream session builds the book_appointment enum and the bookable list from this same list (Fix 1, M-2).
+ * A walkthrough needs a street to confirm with the seller (final review I-1): without one, walkthrough slots are dropped
+ * here, so the prompt, the tool enum and the bookable list all lose them together. Phone slots are unaffected.
  */
-export function promptSlots(slots: readonly AppointmentSlot[] | undefined): AppointmentSlot[] {
+export function promptSlots(slots: readonly AppointmentSlot[] | undefined, address: string | null): AppointmentSlot[] {
+  const spoken = spokenAddress(address);
+  const hasStreet = spoken !== null && placeOf(spoken).street !== null;
   return (slots ?? [])
     .filter((s) => SLOT_ID.test(s.id) && Number.isFinite(Date.parse(s.start)) && Number.isFinite(Date.parse(s.end)) && isZone(s.timeZone))
+    .filter((s) => s.kind !== 'walkthrough' || hasStreet)
     .map((s) => ({ ...s, specialistFirstName: oneLine(s.specialistFirstName, FIRST_NAME_MAX) }));
 }
 
 export function context(p: PromptInput): Ctx {
-  const address = oneLine(unitWord(p.address), ADDRESS_MAX);
+  const address = spokenAddress(p.address);
   const plan = approvedPlanText(p.approvedPlan);
-  const slots = promptSlots(p.slots);
+  const slots = promptSlots(p.slots, p.address);
   return {
     agent: oneLine(p.agentName, LABEL_MAX) ?? 'Alex',
     company: oneLine(p.companyName, LABEL_MAX) ?? 'our company',
