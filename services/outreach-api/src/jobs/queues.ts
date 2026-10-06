@@ -40,4 +40,6 @@ export const QUEUES: readonly QueueDefinition[] = [
   { name: 'call.prepare', options: TICK_QUEUE_OPTIONS },
   { name: 'ai_call.place', options: TICK_QUEUE_OPTIONS },
   { name: 'ai_call.results', options: TICK_QUEUE_OPTIONS },
+  // Plan 1D: each counted AI call's result written to Salesforce (claims its rows with a lease; see writeback/run.ts).
+  { name: 'ai_call.writeback', options: TICK_QUEUE_OPTIONS },
 ];

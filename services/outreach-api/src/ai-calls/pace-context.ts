@@ -18,6 +18,7 @@ import { fetchRecords, type SfRecordSnapshot } from '../campaigns/records.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
 import { bookingSettings, outreachSettings } from '../settings.js';
+import { writebackActivityIds } from '../writeback/store.js';
 import { engineTaskIds, recordsWithNewActivity, type ActivityProbe } from './activity-check.js';
 import type { PaceDeps } from './pace.js';
 import { deferTouch, dueAiCallTouches, liveAiCallCount, placedInLastDay, PLACE_CANDIDATES_PER_ORG, type AiTouchCandidate } from './touches.js';
@@ -127,7 +128,10 @@ export async function loadOrgTick(deps: PaceDeps, orgId: string): Promise<OrgTic
   });
   let newActivity: Set<string>;
   try {
-    newActivity = await recordsWithNewActivity(client, probes, await engineTaskIds(deps.db, orgId, probes.map((p) => p.sfRecordId)));
+    // CF-1: the engine's own call Tasks and the Events and Tasks the write-back created (plan 1D) are not news.
+    const ids = probes.map((p) => p.sfRecordId);
+    const ours = new Set([...(await engineTaskIds(deps.db, orgId, ids)), ...(await writebackActivityIds(deps.db, orgId, ids))]);
+    newActivity = await recordsWithNewActivity(client, probes, ours);
   } catch (err) {
     if (!salesforceUnavailable(err)) throw err;
     deps.log.warn({ orgId, errName: errName(err) }, 'ai_call.place: could not check Salesforce for new activity; the tenant waits');

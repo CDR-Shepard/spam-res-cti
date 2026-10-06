@@ -17,13 +17,14 @@ describe('tick queues and schedules', () => {
       { queue: 'call.prepare', cron: '* * * * *' },
       { queue: 'ai_call.place', cron: '* * * * *' },
       { queue: 'ai_call.results', cron: '* * * * *' },
+      { queue: 'ai_call.writeback', cron: '* * * * *' },
     ]);
   });
   it('declares call.prepare as a stately tick and schedules it every minute', () => {
     expect(QUEUES.find((q) => q.name === 'call.prepare')?.options).toEqual({ retryLimit: 0, retryDelay: 0, retryBackoff: false, expireInSeconds: 900, policy: 'stately' });
     expect(SCHEDULES).toContainEqual({ queue: 'call.prepare', cron: '* * * * *' });
   });
-  it.each(['ai_call.place', 'ai_call.results'])('declares %s as a stately tick and schedules it every minute', (name) => {
+  it.each(['ai_call.place', 'ai_call.results', 'ai_call.writeback'])('declares %s as a stately tick and schedules it every minute', (name) => {
     expect(QUEUES.find((q) => q.name === name)?.options).toEqual({ retryLimit: 0, retryDelay: 0, retryBackoff: false, expireInSeconds: 900, policy: 'stately' });
     expect(SCHEDULES).toContainEqual({ queue: name, cron: '* * * * *' });
   });

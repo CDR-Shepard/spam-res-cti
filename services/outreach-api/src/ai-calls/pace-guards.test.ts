@@ -71,6 +71,26 @@ describe.skipIf(!pgLane)('placeDueAiCalls guards (real Postgres)', () => {
       expect((await h.run(NOW)).placed).toBe(1);
     });
 
+    it('11 (CF-1, plan 1D): the Events and Tasks the write-back created are not news either', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      await researchedAt(lead.researchId);
+      const earlier = await seedAiCall(db, h.base.orgId, lead.approver, { status: 'completed', outcome: 'appointment_set', sfObject: 'Lead', sfRecordId: lead.sfRecordId });
+      await db.insert(schema.aiCallWritebacks).values({
+        orgId: h.base.orgId,
+        aiCallId: earlier,
+        sfObject: 'Lead',
+        sfRecordId: lead.sfRecordId,
+        outcome: 'appointment_set',
+        status: 'done',
+        sfEventId: '00U000000000088AAA',
+        steps: { task: { status: 'done', taskId: '00T000000000089AAA' } },
+      });
+      h.sf.state.events.push({ Id: '00U000000000088AAA', WhatId: lead.sfRecordId, LastModifiedDate: at(RESEARCHED, 60 * MIN).toISOString() });
+      h.sf.state.tasks.push({ Id: '00T000000000089AAA', WhoId: lead.sfRecordId, LastModifiedDate: at(RESEARCHED, 60 * MIN).toISOString() });
+      expect((await h.run(NOW)).placed).toBe(1);
+    });
+
     it('when the activity check fails, nobody in the tenant is called and the touches wait', async () => {
       const h = await paceHarness(db);
       const lead = await seedReleasedLead(db, h.base);

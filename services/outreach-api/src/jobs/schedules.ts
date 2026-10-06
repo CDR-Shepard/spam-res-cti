@@ -14,4 +14,5 @@ export const SCHEDULES: readonly ScheduleDefinition[] = [
   { queue: 'call.prepare', cron: '* * * * *' },
   { queue: 'ai_call.place', cron: '* * * * *' },
   { queue: 'ai_call.results', cron: '* * * * *' },
+  { queue: 'ai_call.writeback', cron: '* * * * *' },
 ];

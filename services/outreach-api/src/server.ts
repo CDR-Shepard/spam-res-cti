@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { getDb, getPool } from '@cti/db';
 import { AnthropicCallPlanModel } from './ai/call-plan-model.js';
-import { AnthropicTriageModel } from './ai/model.js';
+import { AnthropicTriageModel, isPricedModel } from './ai/model.js';
 import { buildApp } from './app.js';
 import { httpCtiClient } from './ai-calls/cti-client.js';
 import { placeDueAiCalls } from './ai-calls/pace.js';
@@ -33,6 +33,8 @@ import { registerReviewRoutes } from './routes/review.js';
 import { registerTeamRoutes } from './routes/team.js';
 import { shutdown } from './shutdown.js';
 import { triageDueRecords } from './triage/run.js';
+import { AnthropicMappingModel } from './writeback/mapping-model.js';
+import { runWritebacks } from './writeback/run.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Where vite drops the built outreach-web bundle (src/ and dist/ sit at the same depth). */
@@ -64,6 +66,11 @@ async function main(): Promise<void> {
   const planModel =
     cfg.aiEnabled && cfg.ANTHROPIC_API_KEY
       ? new AnthropicCallPlanModel({ client: new Anthropic({ apiKey: cfg.ANTHROPIC_API_KEY, timeout: 120_000, maxRetries: 2 }), model: cfg.CALL_PLAN_MODEL })
+      : null;
+  // Plan 1D write-back: Claude maps the seller's answers to the org's values; only a priced model (spend is never silently zero).
+  const mappingModel =
+    cfg.aiEnabled && cfg.ANTHROPIC_API_KEY && isPricedModel(cfg.WRITEBACK_MODEL)
+      ? new AnthropicMappingModel({ client: new Anthropic({ apiKey: cfg.ANTHROPIC_API_KEY, timeout: 60_000, maxRetries: 2 }), model: cfg.WRITEBACK_MODEL })
       : null;
   // The signed internal AI call trigger (plan 1C); null until CTI_INTERNAL_URL and OUTREACH_INTERNAL_SECRET are set.
   const cti = cfg.aiCallsEnabled ? httpCtiClient({ CTI_INTERNAL_URL: cfg.CTI_INTERNAL_URL!, OUTREACH_INTERNAL_SECRET: cfg.OUTREACH_INTERNAL_SECRET! }) : null;
@@ -101,6 +108,23 @@ async function main(): Promise<void> {
       ? {
           'ai_call.results': async () => {
             await collectAiCallResults(db, new Date(), console);
+          },
+        }
+      : {}),
+    // Plan 1D: each counted AI call's result written to Salesforce once, step by step (the describe cache is call.prepare's).
+    ...(cfg.salesforceEnabled && cti
+      ? {
+          'ai_call.writeback': async () => {
+            await runWritebacks({
+              db,
+              clients,
+              describes,
+              model: mappingModel,
+              appPublicUrl: cfg.APP_PUBLIC_URL,
+              now: new Date(),
+              log: console,
+              defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS,
+            });
           },
         }
       : {}),
