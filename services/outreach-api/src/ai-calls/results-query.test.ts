@@ -7,6 +7,7 @@ import { seedAiCall, seedReleasedLead } from '../test/ai-call-seed.js';
 import { ctxOf, seedAiCallCampaign, seedUser } from '../test/call-plan-seed.js';
 import { seedConnection } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
+import { NEW_OPP, PHONE_BOOKING, seedWriteback } from '../test/writeback-harness.js';
 import { listAiCallResults, loadTranscript, RESULTS_PAGE_SIZE, transcriptLines } from './results-query.js';
 
 const OWNER = '005000000000001AAA';
@@ -92,7 +93,7 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
       startedAt: '2026-10-05T23:00:00.000Z',
       enrollmentStatus: 'active',
       mayReadTranscript: true,
-      // Plan 1D Task 29 fills these; until then every row has none.
+      // No booking and no write-back row on this call.
       appointment: null,
       writeback: null,
     });
@@ -151,5 +152,87 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
     const asRep = await listAiCallResults(db, ctxOf(s.base.orgId, s.rep, false), s.base.campaignId, null);
     expect(asOwner.items[0]?.mayReadTranscript).toBe(true);
     expect(asRep.items[0]?.mayReadTranscript).toBe(false);
+  });
+
+  describe('plan 1D: the appointment, the conversion and the write-back', () => {
+    const PLAN = {
+      sfObject: 'Opportunity', result: 'appointment', patch: { StageName: 'Appointment Set' },
+      changes: [{ field: 'StageName', label: 'Stage', before: 'New Opportunity', after: 'Appointment Set', why: 'status' }],
+      kept: [{ field: 'Rating__c', label: 'Rating', current: 'Warm', proposed: 'Hot', evidence: 'soon' }],
+      skipped: [{ field: 'Timeline__c', label: 'Timeline', why: 'not_writable' }],
+      appointment: null, contactDnc: false, mapped: true, bookingThen: null,
+    };
+    async function listed(over: Record<string, unknown>, o: { sfObject?: 'Lead' | 'Opportunity'; admin?: boolean; appointment?: unknown } = {}) {
+      const w = await seedWriteback(db, { sfObject: o.sfObject ?? 'Opportunity', outcome: 'appointment_set', researchStatus: 'New Opportunity', appointment: PHONE_BOOKING });
+      if (o.appointment !== undefined) await db.update(schema.aiCalls).set({ appointment: o.appointment }).where(eq(schema.aiCalls.id, w.aiCallId));
+      if (Object.keys(over).length > 0) await db.update(schema.aiCallWritebacks).set(over).where(eq(schema.aiCallWritebacks.id, w.writebackId));
+      const user = await seedUser(db, w.orgId);
+      const res = await listAiCallResults(db, ctxOf(w.orgId, user, o.admin ?? true), w.campaignId, null);
+      expect(AiCallResultsResponse.parse(res)).toEqual(res);
+      return { w, item: res.items[0]! };
+    }
+
+    it('a booked call with a done write-back lists the appointment and what was changed, kept, not written and created', async () => {
+      const { item } = await listed({
+        status: 'done', plan: PLAN, sfEventId: '00U8X00000Evnt1QAA', sfTaskId: '00T8X00000Task1QAA', sfFeedItemId: '0D58X00000Feed1QAA',
+        steps: { fields: { status: 'done', data: {
+          written: [{ field: 'StageName', label: 'Stage', before: 'New Opportunity', after: 'Appointment Set', why: 'status' }],
+          notWritten: [{ label: 'Loss Reason', reason: 'Salesforce refused (FIELD_CUSTOM_VALIDATION_EXCEPTION)', field: 'Loss_Reason__c', code: 'FIELD_CUSTOM_VALIDATION_EXCEPTION' }],
+          notChanged: [{ field: 'Next_Follow_Up_Date__c', label: 'Next Follow-Up', now: '2026-10-09' }],
+        } } },
+      });
+      expect(item.appointment).toEqual(PHONE_BOOKING);
+      expect(item.writeback).toEqual({
+        status: 'done', error: null, mayRetry: false, convertedOpportunityId: null,
+        changes: [
+          { kind: 'created', label: 'Appointment Event', before: null, after: '00U8X00000Evnt1QAA' },
+          { kind: 'created', label: 'Task', before: null, after: '00T8X00000Task1QAA' },
+          { kind: 'created', label: 'Chatter post', before: null, after: '0D58X00000Feed1QAA' },
+          { kind: 'changed', label: 'Stage', before: 'New Opportunity', after: 'Appointment Set' },
+          { kind: 'kept', label: 'Rating', before: 'Warm', after: 'Hot' },
+          { kind: 'kept', label: 'Next Follow-Up', before: '2026-10-09', after: null },
+          { kind: 'not_written', label: 'Timeline', before: null, after: "the connected Salesforce user can't edit it" },
+          { kind: 'not_written', label: 'Loss Reason', before: null, after: 'Salesforce refused (FIELD_CUSTOM_VALIDATION_EXCEPTION)' },
+        ],
+      });
+    });
+
+    it('before the fields step ran, the plan\'s own changes are listed', async () => {
+      const { item } = await listed({ status: 'pending', plan: PLAN });
+      expect(item.writeback?.changes.filter((c) => c.kind === 'changed')).toEqual([{ kind: 'changed', label: 'Stage', before: 'New Opportunity', after: 'Appointment Set' }]);
+    });
+
+    it('a converted Lead carries the new Opportunity and a converted change; a fallback row carries the refusal as not written', async () => {
+      const { w, item } = await listed({ status: 'done', plan: PLAN, convertedOpportunityId: NEW_OPP, steps: { convert: { status: 'done', detail: 'converted' } } }, { sfObject: 'Lead' });
+      expect(item.writeback).toMatchObject({ convertedOpportunityId: NEW_OPP });
+      expect(item.writeback!.changes[0]).toEqual({ kind: 'converted', label: 'Lead converted to an Opportunity', before: w.recordId, after: NEW_OPP });
+      const fallback = await listed({ status: 'partial', plan: PLAN, lastError: 'INSUFFICIENT_ACCESS', sfEventId: '00U8X00000Hold1QAA', steps: { convert: { status: 'failed', detail: 'INSUFFICIENT_ACCESS: no convert permission' }, appointment: { status: 'done', detail: 'lead_hold' } } }, { sfObject: 'Lead' });
+      expect(fallback.item.writeback).toMatchObject({ status: 'partial', error: 'INSUFFICIENT_ACCESS', convertedOpportunityId: null });
+      expect(fallback.item.writeback!.changes).toContainEqual({ kind: 'not_written', label: 'Lead conversion', before: null, after: 'INSUFFICIENT_ACCESS: no convert permission' });
+      expect(fallback.item.writeback!.changes).toContainEqual({ kind: 'created', label: 'Calendar hold', before: null, after: '00U8X00000Hold1QAA' });
+    });
+
+    it('a failed write-back may be retried by an admin, never by a rep', async () => {
+      const asAdmin = await listed({ status: 'failed', lastError: 'SERVER_UNAVAILABLE' });
+      expect(asAdmin.item.writeback).toMatchObject({ status: 'failed', mayRetry: true, error: 'SERVER_UNAVAILABLE', changes: [] });
+      const asRep = await listed({ status: 'failed' }, { admin: false });
+      expect(asRep.item.writeback?.mayRetry).toBe(false);
+      const done = await listed({ status: 'done' });
+      expect(done.item.writeback?.mayRetry).toBe(false);
+    });
+
+    it('a plan that no longer parses gives no changes, never an error; drifted appointment JSON reads as null (D-6)', async () => {
+      const { item } = await listed({ status: 'done', plan: { an: 'old plan' }, sfEventId: '00U8X00000Evnt1QAA' }, { appointment: { slotId: 'nope' } });
+      expect(item.writeback).toMatchObject({ status: 'done', changes: [] });
+      expect(item.appointment).toBeNull();
+    });
+
+    it('no write-back row gives writeback null', async () => {
+      const { w } = await listed({});
+      await db.delete(schema.aiCallWritebacks).where(eq(schema.aiCallWritebacks.id, w.writebackId));
+      const user = await seedUser(db, w.orgId);
+      const [item] = (await listAiCallResults(db, ctxOf(w.orgId, user, true), w.campaignId, null)).items;
+      expect(item).toMatchObject({ appointment: PHONE_BOOKING, writeback: null });
+    });
   });
 });

@@ -4,12 +4,24 @@
  * so a test call, or another tenant's call, is never listed or opened.
  */
 import { sql } from 'drizzle-orm';
-import { AiCallOutcome, AiCallStatus, TranscriptLine, type AiCallResult, type AiCallResultsResponse, type AiCallTranscript } from '@cti/contracts';
+import {
+  AiCallOutcome,
+  AiCallStatus,
+  BookedAppointment,
+  TranscriptLine,
+  WritebackStatus,
+  type AiCallResult,
+  type AiCallResultsResponse,
+  type AiCallTranscript,
+  type WritebackChange,
+  type WritebackSummary,
+} from '@cti/contracts';
 import type { Db } from '@cti/db';
 import { decodeCardCursor, encodeCardCursor } from '../call-plans/cards.js';
 import { loadConnection } from '../crm/connection-store.js';
 import { mayDecide, mayDecideWith, ownSfUserId } from '../tenancy/record-owner.js';
 import type { RequestContext } from '../tenancy/scope.js';
+import { StoredWritePlan, type Skipped } from '../writeback/plan.js';
 
 export const RESULTS_PAGE_SIZE = 50;
 
@@ -34,6 +46,15 @@ interface ResultRow {
   qualification: unknown;
   duration_seconds: number | null;
   started_at: Date | string | null;
+  appointment: unknown;
+  w_status: string | null;
+  w_plan: unknown;
+  w_steps: unknown;
+  w_last_error: string | null;
+  w_event_id: string | null;
+  w_task_id: string | null;
+  w_feed_item_id: string | null;
+  w_converted_opportunity_id: string | null;
 }
 
 const rows = <T>(r: unknown): T[] => (r as { rows: T[] }).rows;
@@ -69,9 +90,77 @@ function toResult(r: ResultRow, ctx: RequestContext, mine: string | null, instan
     enrollmentStatus: r.enrollment_status,
     exitReason: r.exit_reason,
     mayReadTranscript: r.ai_call_id !== null && mayDecideWith(ctx, mine, r.owner_sf_user_id),
-    // Plan 1D Task 29 fills these from ai_calls.appointment and ai_call_writebacks.
-    appointment: null,
-    writeback: null,
+    // D-6: each row's JSON is read on its own; a drifted row reads as null and never breaks the page.
+    appointment: parsed(BookedAppointment, r.appointment),
+    writeback: writebackSummary(r, isAdmin(ctx)),
+  };
+}
+
+const isAdmin = (ctx: RequestContext): boolean => ctx.session.isAdmin || ctx.session.isSuperAdmin;
+const parsed = <T>(s: { safeParse(v: unknown): { success: true; data: T } | { success: false } }, v: unknown): T | null => {
+  const out = s.safeParse(v);
+  return out.success ? out.data : null;
+};
+const obj = (v: unknown): Record<string, unknown> => (typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+const list = (v: unknown): Record<string, unknown>[] => (Array.isArray(v) ? v.map(obj) : []);
+const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+const entry = (kind: WritebackChange['kind'], label: unknown, before: unknown, after: unknown): WritebackChange => ({
+  kind,
+  label: str(label) ?? '(field)',
+  before: str(before),
+  after: str(after),
+});
+
+/** A plan entry the write-back did not write, in words (the web shows `after` as the reason of a not_written entry). */
+const SKIPPED_WORDS: Readonly<Record<Skipped['why'], string>> = {
+  not_writable: "the connected Salesforce user can't edit it",
+  invalid_value: 'Salesforce has no such value for it',
+  moved_since_research: 'changed in Salesforce since the research',
+  not_from_state: 'not moved from the status it is in',
+};
+export const MAX_WRITEBACK_CHANGES = 80;
+
+/** The created records and the conversion, from the row's ids and step results. */
+function createdChanges(r: ResultRow, steps: Record<string, unknown>): WritebackChange[] {
+  const convert = obj(steps.convert);
+  const hold = obj(steps.appointment).detail === 'lead_hold';
+  return [
+    ...(r.w_converted_opportunity_id ? [entry('converted', 'Lead converted to an Opportunity', r.sf_record_id, r.w_converted_opportunity_id)] : []),
+    ...(!r.w_converted_opportunity_id && (convert.status === 'failed' || convert.status === 'skipped') ? [entry('not_written', 'Lead conversion', null, convert.detail)] : []),
+    ...(r.w_event_id ? [entry('created', hold ? 'Calendar hold' : 'Appointment Event', null, r.w_event_id)] : []),
+    ...(r.w_task_id ? [entry('created', 'Task', null, r.w_task_id)] : []),
+    ...(r.w_feed_item_id ? [entry('created', 'Chatter post', null, r.w_feed_item_id)] : []),
+  ];
+}
+
+/**
+ * The write-back as the results page shows it: what was changed (what the fields step wrote, or the plan before it ran),
+ * kept (a rep's value kept over the seller's answer, or edited since the call), not written (with why), created and
+ * converted, capped at 80. A plan that no longer parses lists nothing; it never throws.
+ */
+export function writebackSummary(r: ResultRow, admin: boolean): WritebackSummary | null {
+  const status = WritebackStatus.safeParse(r.w_status);
+  if (!status.success) return null;
+  const plan = r.w_plan === null ? null : StoredWritePlan.safeParse(r.w_plan);
+  const steps = obj(r.w_steps);
+  const fields = obj(obj(steps.fields).data);
+  const changes: WritebackChange[] =
+    plan && !plan.success
+      ? []
+      : [
+          ...createdChanges(r, steps),
+          ...(Array.isArray(fields.written) ? list(fields.written) : (plan?.data.changes ?? [])).map((c) => entry('changed', c.label, c.before, c.after)),
+          ...(plan?.data.kept ?? []).map((k) => entry('kept', k.label, k.current, k.proposed)),
+          ...list(fields.notChanged).map((n) => entry('kept', n.label, n.now, null)),
+          ...(plan?.data.skipped ?? []).map((k) => entry('not_written', k.label, null, SKIPPED_WORDS[k.why])),
+          ...list(fields.notWritten).map((n) => entry('not_written', n.label, null, n.reason)),
+        ];
+  return {
+    status: status.data,
+    changes: changes.slice(0, MAX_WRITEBACK_CHANGES),
+    error: r.w_last_error,
+    mayRetry: status.data === 'failed' && admin,
+    convertedOpportunityId: r.w_converted_opportunity_id,
   };
 }
 
@@ -83,11 +172,14 @@ export async function listAiCallResults(db: Db, ctx: RequestContext, campaignId:
            to_char(t.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as created_cursor,
            r.name, r.sf_object, r.sf_record_id, r.owner_sf_user_id,
            e.status as enrollment_status, e.exit_reason,
-           a.status as call_status, a.outcome, a.summary, a.qualification, a.duration_seconds, a.started_at
+           a.status as call_status, a.outcome, a.summary, a.qualification, a.duration_seconds, a.started_at, a.appointment,
+           w.status as w_status, w.plan as w_plan, w.steps as w_steps, w.last_error as w_last_error, w.sf_event_id as w_event_id,
+           w.sf_task_id as w_task_id, w.sf_feed_item_id as w_feed_item_id, w.converted_opportunity_id as w_converted_opportunity_id
     from touches t
     join campaign_enrollments e on e.id = t.enrollment_id and e.org_id = t.org_id
     join crm_records r on r.id = e.crm_record_id and r.org_id = e.org_id
     left join ai_calls a on a.id = t.ai_call_id and a.org_id = t.org_id
+    left join ai_call_writebacks w on w.ai_call_id = a.id and w.org_id = t.org_id
     where t.org_id = ${ctx.orgId}::uuid and e.campaign_id = ${campaignId}::uuid and t.channel = 'ai_call'
       ${after ? sql`and (t.created_at, t.id) < (${after.at}::timestamptz, ${after.id}::uuid)` : sql``}
     order by t.created_at desc, t.id desc
