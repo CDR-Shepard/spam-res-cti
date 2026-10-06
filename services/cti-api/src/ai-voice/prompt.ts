@@ -16,7 +16,11 @@
  * telephone number, so when `callbackNumber` is given the voicemail ends with
  * it and the live agent gives it before every non-transfer goodbye.
  */
-import { approvedPlanText, neutraliseFences, planSection, PLAN_PROMPT_MAX } from './prompt-plan.js';
+import type { AppointmentSlot } from '@cti/contracts';
+import { bookingSection } from './prompt-booking.js';
+import { context, propertyPhrase, TEST_CALL_LINE, type Ctx } from './prompt-context.js';
+import { flowSection } from './prompt-flow.js';
+import { planSection, PLAN_PROMPT_MAX } from './prompt-plan.js';
 import { AI_CALL_TOOLS, TOOL_NAMES, type RealtimeFunctionTool, type ToolName } from './prompt-tools.js';
 
 export { AI_CALL_TOOLS, PLAN_PROMPT_MAX, TOOL_NAMES, type RealtimeFunctionTool, type ToolName };
@@ -34,127 +38,12 @@ export interface PromptInput {
   callbackNumber: string | null;
   /** The plan a person approved for this call (plan 1C, prompt-plan.ts); absent/null = none. */
   approvedPlan?: string | null;
-}
-
-const FIRST_NAME_MAX = 40;
-const ADDRESS_MAX = 160;
-const LABEL_MAX = 60;
-const NOTES_PROMPT_MAX = 3_000;
-const E164 = /^\+[1-9]\d{7,14}$/;
-const NANP = /^\+1(\d{3})(\d{3})(\d{4})$/;
-const DIGIT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'] as const;
-const TEST_CALL_LINE = 'Just so you know, this is a test call.';
-
-/**
- * Strip markup characters (`#`, quotes, angle brackets, backticks; an
- * address's `#` has already become "unit"), collapse
- * whitespace (incl. newlines) and cap, so a record value cannot start a new
- * prompt section, close a quoted line, or open a tag.
- */
-function oneLine(s: string | null, max: number): string | null {
-  if (s === null) return null;
-  const flat = s.replace(/[#"<>`]/g, '').replace(/\s+/g, ' ').trim();
-  return flat ? flat.slice(0, max).trim() : null;
-}
-
-/**
- * Notes may contain anything: a forged fence tag must not close (or reopen)
- * the fence. Capped, keeping the newest (the tail — Tasks come newest last).
- */
-function fenceSafe(notes: string): string {
-  const body = neutraliseFences(notes).trim();
-  if (!body) return '(no notes on file)';
-  return body.length <= NOTES_PROMPT_MAX ? body : `…${body.slice(body.length - (NOTES_PROMPT_MAX - 1)).trimStart()}`;
-}
-
-/** "+15125550100" → { written: "512-555-0100", spoken: "five one two, five five five, zero one zero zero" }. */
-function phoneForms(e164: string | null): { written: string; spoken: string } | null {
-  const n = e164?.trim() ?? '';
-  if (!E164.test(n)) return null;
-  const groups = NANP.exec(n)?.slice(1) ?? [n.slice(1)];
-  const say = (g: string) => [...g].map((d) => DIGIT_WORDS[Number(d)]).join(' ');
-  return { written: NANP.test(n) ? groups.join('-') : n, spoken: groups.map(say).join(', ') };
-}
-
-const STREET_SUFFIX: Readonly<Record<string, string>> = {
-  st: 'Street', ave: 'Avenue', rd: 'Road', dr: 'Drive', ln: 'Lane', blvd: 'Boulevard', ct: 'Court',
-  cir: 'Circle', pl: 'Place', hwy: 'Highway', pkwy: 'Parkway', ter: 'Terrace', trl: 'Trail', way: 'Way',
-};
-
-/** `#` in an address is said "unit" ("Oak St #5", "Oak St Unit #5" → "Oak St unit 5"), not dropped. */
-function unitWord(address: string | null): string | null {
-  return address === null ? null : address.replace(/(?:\bunit\s*)?#\s*/gi, ' unit ');
-}
-
-/**
- * Expand the street-type abbreviation before any trailing "unit <n>" so
- * text-to-speech reads it naturally ("1234 Oak St unit 5" → "1234 Oak Street unit 5").
- */
-function spokenStreet(street: string): string {
-  const u = /^(.*?)(\s+unit\s+\S+)$/i.exec(street);
-  const [base, unit] = u ? [u[1]!, u[2]!] : [street, ''];
-  const m = /^(.*\s)([A-Za-z]+)\.?$/.exec(base);
-  const full = m ? STREET_SUFFIX[m[2]!.toLowerCase()] : undefined;
-  return `${m && full ? `${m[1]}${full}` : base}${unit}`;
-}
-
-/**
- * The part of `"<street>, <city>, <state> <zip>"` a person says aloud: the
- * street when the address has one (it starts with a house number), else the
- * city when the first part is a plain place name, else nothing.
- */
-function placeOf(address: string): { street: string | null; city: string | null } {
-  const first = address.split(',')[0]?.trim() ?? '';
-  if (/^\d/.test(first)) return { street: spokenStreet(first), city: null };
-  return { street: null, city: first && !/\d/.test(first) ? first : null };
-}
-
-/** How to refer to the property in speech — never with anything we do not know. */
-function propertyPhrase(c: { street: string | null; city: string | null }, owner: 'the' | 'your' | 'their'): string {
-  if (c.street) return `${owner} property at ${c.street}`;
-  return c.city ? `${owner} property in ${c.city}` : `${owner} property`;
-}
-
-interface Ctx {
-  agent: string;
-  company: string;
-  first: string | null;
-  address: string | null;
-  street: string | null;
-  city: string | null;
-  isTest: boolean;
-  localTime: string;
-  notes: string;
-  phone: { written: string; spoken: string } | null;
-  plan: string | null;
-}
-
-function context(p: PromptInput): Ctx {
-  const address = oneLine(unitWord(p.address), ADDRESS_MAX);
-  return {
-    agent: oneLine(p.agentName, LABEL_MAX) ?? 'Alex',
-    company: oneLine(p.companyName, LABEL_MAX) ?? 'our company',
-    first: oneLine(p.firstName, FIRST_NAME_MAX),
-    address,
-    ...(address ? placeOf(address) : { street: null, city: null }),
-    isTest: p.isTest,
-    localTime: oneLine(p.localTime, LABEL_MAX) ?? 'unknown',
-    notes: fenceSafe(p.notes),
-    phone: phoneForms(p.callbackNumber),
-    plan: approvedPlanText(p.approvedPlan),
-  };
-}
-
-/** The first thing the agent says: disclosure first, then who it is trying to reach. */
-function openingLine(c: Ctx): string {
-  const disclosure = `Hi, this is ${c.agent}, an AI assistant calling for ${c.company} on a recorded line`;
-  const who = c.first
-    ? `is this ${c.first}?`
-    : c.street
-      ? `am I speaking with the owner of ${c.street}?`
-      : "is this the homeowner I'm trying to reach?";
-  if (!c.isTest) return `${disclosure} — ${who}`;
-  return `${disclosure}. ${TEST_CALL_LINE} ${who.charAt(0).toUpperCase()}${who.slice(1)}`;
+  /** Plan 1D: we have spoken with this seller before (the plan's re-engagement says when). */
+  returning?: boolean;
+  /** Plan 1D: appointment times the agent may offer and book (structured; never plan text). */
+  slots?: readonly AppointmentSlot[];
+  /** Plan 1D: the zone of the number dialed (`timezoneForNumber(to)`); slot times are said in it. */
+  sellerTimeZone?: string | null;
 }
 
 function roleSection(c: Ctx): string {
@@ -217,67 +106,6 @@ ${c.notes}
 </crm_notes>`;
 }
 
-function flowSection(c: Ctx): string {
-  const confirm = c.first
-    ? `"Great! I'm reaching out about ${propertyPhrase(c, c.street ? 'the' : 'your')} — do you have a quick minute?"`
-    : `"Great — do you have a quick minute?"`;
-  return `# Conversation Flow
-## 1) Opening
-- Wait for them to answer. Speak when they say "Hello?" — or, if you're told they picked up but haven't spoken, open right away.
-- Say this opening line word for word. Never skip 'AI assistant' or 'recorded line'.
-  "${openingLine(c)}"
-- Then stop and wait for their answer.
-
-## 2) Confirm and ask for a minute
-- If it's them: ${confirm}
-  - Or: "Perfect — got a quick sec?" / "Awesome. Is now an okay time for a quick question?"
-- Only after they say yes: "We're a local company that buys houses directly — would you ever consider selling?"
-- Busy right now: "No problem — when's a better time, later today or tomorrow?" → schedule_callback.
-- Someone else in the household (spouse, family): if they're also an owner, you can talk with them. Otherwise ask the best time to reach the owner → schedule_callback.
-- Wrong number or they don't know the owner: "Oh, I'm sorry about that!" Ask once if they happen to know the owner, then call mark_do_not_call (note "wrong number") so this number isn't called again, then a quick goodbye → end_call (outcome "wrong_number").
-
-## 3) Qualify — a conversation, not a survey
-- Learn these naturally, one at a time, following their lead. Skip anything they've already told you. Three to five questions is plenty.
-  - Motivation: "What has you thinking about selling?" / "Is something changing that's got you open to it?"
-  - Timeline: "If it made sense, how soon would you want to move?" / "Is there a timeframe you're working with?"
-  - Condition: "How's the house holding up — any big repairs it needs?" / "Anything major, like the roof or AC?"
-  - Occupancy: "Is anyone living there right now — you, family, tenants?"
-  - Price expectation: "Do you have a ballpark in mind you'd be happy with?" If they'd rather not say: "No worries at all." Never react to their number with your own.
-  - Decision makers: "Is anyone else on the title, or involved in the decision?"
-  - Mortgage or liens: only if they bring it up — don't dig.
-- Save what you learn with save_qualification: call it at a natural pause, batching what you've learned — not after every sentence.
-- If they're clearly interested, don't finish the list — move to the hand-off.
-
-## 4) Hand-off to a specialist
-- Hand off when they:
-  - are interested or open to selling (reason "interested") — first ask: "Would it help if I got one of our specialists on the line right now?" / "Want me to connect you with someone on our team real quick?"
-  - ask for an offer, a price, or "what would you pay" (reason "wants_offer") — "That's exactly what our specialist handles — let me grab them for you."
-  - ask for a person, a manager, or a callback from a human (reason "wants_human").
-  - mention an attorney, a lawsuit, bankruptcy, probate or an estate, foreclosure, or anything legally complex (reason "legal_or_complex").
-  - ask something you can't answer (reason "question").
-- How: say ONE short line, then call transfer_to_rep right away, then say nothing more — the call is being connected.
-  - "Perfect — let me grab one of our specialists for you, one moment." / "Sure thing — connecting you with someone on our team now." / "Great question for our specialist — one sec while I bring them on."
-- If they want to talk but not right now → schedule_callback.
-
-## 5) Not interested
-- At most ONE gentle, curious follow-up: "Totally understand — is that because you're keeping it, or just not the right time?"
-- If it's "not right now" or "maybe later": "Would it be okay if someone checked back in a few months?" → if yes, schedule_callback.
-- If it's still no, respect it right away: "No problem at all — thanks for your time, have a great day." → end_call (outcome "not_interested").
-
-## 6) Callbacks
-- Pin down a time: "When's better — later today, or sometime tomorrow?"
-- Call schedule_callback (silently), then confirm it in ONE line together with your goodbye — e.g. "Perfect — we'll call you Thursday after five. Talk soon!" — then end_call (outcome "qualified_callback").
-
-## 7) Ending any call
-- Always say a short, warm goodbye FIRST ("Thanks so much — have a great rest of your day."), then call end_call. Say nothing after it.${callbackRule(c)}`;
-}
-
-/** The live-call callback-number rule; empty when there is no number. */
-function callbackRule(c: Ctx): string {
-  if (!c.phone) return '';
-  return `
-- Callback number: before ending any call where the person wasn't transferred — except emergencies, threats or abuse, do-not-call goodbyes, or when they've already hung up — give our callback number once, spoken naturally, as part of your goodbye — e.g. "If anything comes up, you can reach us at ${c.phone.spoken}." Also give it whenever they ask "What number is this?" or "How do I reach you?"`;
-}
 
 const DO_NOT_CALL = `# Do-not-call (highest priority)
 - Any request to stop — "stop calling", "take me off your list", "don't call me again", "remove my number", "leave me alone", "put me on your do-not-call list" — overrides everything else.
@@ -299,13 +127,18 @@ function rulesSection(c: Ctx): string {
 }
 
 function toolsSection(c: Ctx): string {
+  const booking = c.slots.length > 0;
+  const bookLine = booking
+    ? '- book_appointment — once they pick one of the offered times (see Booking): slot_id is its id from the list; address_confirmed is true only after they confirmed the property (always for a walkthrough); note is anything the specialist should know. Call it silently. If it says the time was just taken, offer another time from the list.\n'
+    : '';
+  const appointmentOutcome = booking ? '"appointment_set" (an appointment was booked), ' : '';
   return `# Tools
 - Never say a tool's name out loud. Only call tools for the situations below.
 - save_qualification — for their motivation, timeline, condition, occupancy, price expectation, decision makers, mortgage or liens, or anything else useful: call it at a natural pause, batching what you've learned — not after every sentence. Fill only what you learned, briefly, in their words. Call it silently — no preamble, don't mention it. Afterwards just continue the conversation; don't repeat what you already said.
 - transfer_to_rep — for the hand-off situations above. Preamble (say it BEFORE calling): "Perfect — let me grab one of our specialists for you, one moment." The summary is one or two sentences for the ${c.company} rep (who they are, what they want, key facts). After calling it, say nothing more.
 - schedule_callback — when they want a call later. "when" is what they said, relative to their local time (e.g. "Thursday after 5 PM"), or an ISO 8601 time if exact. Call it silently; afterwards, one confirmation-and-goodbye line.
 - mark_do_not_call — the moment they ask not to be called (note: their request in a few words; preamble: "I'll take you off our list right now."), and on a wrong number (note: "wrong number"; no preamble needed).
-- end_call — to finish any call. Preamble: your goodbye line. Outcome: "not_interested", "do_not_call", "wrong_number", "qualified_callback" (a callback is scheduled), "hung_up" (they left or the line went dead), or "other". The summary is one or two sentences. Say nothing after calling it.`;
+${bookLine}- end_call — to finish any call. Preamble: your goodbye line. Outcome: "not_interested", "do_not_call", "wrong_number", "qualified_callback" (a callback is scheduled), ${appointmentOutcome}"hung_up" (they left or the line went dead), or "other". The summary is one or two sentences. Say nothing after calling it.`;
 }
 
 function voicemailSection(c: Ctx): string {
@@ -341,6 +174,7 @@ export function buildInstructions(p: PromptInput): string {
     contextSection(c),
     planSection(c.plan, c.company),
     flowSection(c),
+    bookingSection(c),
     DO_NOT_CALL,
     rulesSection(c),
     toolsSection(c),

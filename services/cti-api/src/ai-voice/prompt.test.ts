@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { AppointmentSlot } from '@cti/contracts';
 import {
   AI_CALL_TOOLS,
   TOOL_NAMES,
@@ -24,6 +25,18 @@ function input(over: Partial<PromptInput> = {}): PromptInput {
     ...over,
   };
 }
+
+const PLAN = 'Opener: Remind them we last spoke in the spring about the roof.\n\nQuestions:\n- Is the roof still leaking?';
+const SLOTS: AppointmentSlot[] = [
+  {
+    id: 'p1', kind: 'phone', start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T18:15:00.000Z',
+    specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
+  },
+  {
+    id: 'w1', kind: 'walkthrough', start: '2026-10-08T16:00:00.000Z', end: '2026-10-08T17:00:00.000Z',
+    specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
+  },
+];
 
 function fenced(text: string): string {
   const open = text.indexOf(FENCE_OPEN);
@@ -230,12 +243,103 @@ describe('buildInstructions', () => {
     expect(text).not.toMatch(/1 A St\s*# Tools/);
   });
 
+  it('a first call (not returning, no slots) is word for word the instructions before plan 1D', async () => {
+    await expect(buildInstructions(input())).toMatchFileSnapshot('./__snapshots__/prompt-first-call.txt');
+    await expect(buildInstructions(input({ returning: false, slots: [] }))).toMatchFileSnapshot('./__snapshots__/prompt-first-call.txt');
+  });
+
   it('caps the fenced notes at 3,000 characters, keeping the newest', () => {
     const notes = `OLDEST ${'x'.repeat(4000)} NEWEST`;
     const body = fenced(buildInstructions(input({ notes }))).trim();
     expect(body.length).toBeLessThanOrEqual(3000);
     expect(body).toContain('NEWEST');
     expect(body).not.toContain('OLDEST');
+  });
+});
+
+describe('buildInstructions — a returning seller (plan 1D)', () => {
+  const FIRST_PITCH = 'would you ever consider selling?';
+
+  it('treats them as an existing relationship instead of pitching', () => {
+    const text = buildInstructions(input({ returning: true, approvedPlan: PLAN }));
+    expect(text).not.toContain(FIRST_PITCH);
+    expect(text).toContain(
+      "- Only after they say yes: we've spoken before. Use the call plan's opener: remind them when we last talked (the plan says when) and ask whether they're still thinking about selling the property at 1234 Oak Street. Never introduce us as if they'd never heard of us, and don't re-ask anything the plan says we already know.",
+    );
+  });
+
+  it('asks only about what the plan still needs to learn', () => {
+    const text = buildInstructions(input({ returning: true, approvedPlan: PLAN }));
+    const qualify = text.slice(text.indexOf('## 3) Qualify'), text.indexOf('## 4) Hand-off'));
+    expect(qualify.split('\n')[1]).toBe('- If the call plan lists what we still need to learn, ask only about those, and skip the rest.');
+  });
+
+  it('keeps the first-call line when returning is false or absent', () => {
+    expect(buildInstructions(input({ returning: false, approvedPlan: PLAN }))).toContain(FIRST_PITCH);
+    expect(buildInstructions(input({ approvedPlan: PLAN }))).toContain(FIRST_PITCH);
+  });
+
+  it('a returning flag with no usable plan falls back to the first-call line (nothing to remind them of)', () => {
+    const text = buildInstructions(input({ returning: true }));
+    expect(text).toContain(FIRST_PITCH);
+    expect(text).not.toContain("we've spoken before");
+  });
+});
+
+describe('buildInstructions — appointment times (plan 1D)', () => {
+  const withSlots = (over: Partial<PromptInput> = {}) =>
+    buildInstructions(input({ slots: SLOTS, sellerTimeZone: 'America/New_York', ...over }));
+
+  it('places the booking section after the flow and before do-not-call', () => {
+    const text = withSlots();
+    const flow = text.indexOf('# Conversation Flow');
+    const booking = text.indexOf('# Booking an appointment');
+    expect(flow).toBeGreaterThanOrEqual(0);
+    expect(booking).toBeGreaterThan(flow);
+    expect(text.indexOf('# Do-not-call')).toBeGreaterThan(booking);
+    expect(text).toContain('- p1: phone call, Wednesday, October 7 at 2 PM their time, 11 AM Pacific');
+  });
+
+  it('has no booking section, book_appointment or appointment_set without slots', () => {
+    for (const text of [buildInstructions(input()), buildInstructions(input({ slots: [] }))]) {
+      expect(text).not.toContain('# Booking an appointment');
+      expect(text).not.toContain('book_appointment');
+      expect(text).not.toContain('appointment_set');
+    }
+  });
+
+  it('names book_appointment in the tools and appointment_set in the end_call outcomes only with slots', () => {
+    const text = withSlots();
+    const tools = text.slice(text.indexOf('# Tools'), text.indexOf('# Voicemail'));
+    expect(tools).toMatch(/^- book_appointment — /m);
+    expect(tools).toContain('"appointment_set" (an appointment was booked)');
+  });
+
+  it('offers an appointment from the hand-off step and keeps callbacks for when no time works', () => {
+    const text = withSlots();
+    const handoff = text.slice(text.indexOf('## 4) Hand-off'), text.indexOf('## 5) Not interested'));
+    expect(handoff).toContain(
+      "- If they're interested but would rather pick a time than talk now, or after the specialist question they say not right now, offer an appointment (see Booking).",
+    );
+    const callbacks = text.slice(text.indexOf('## 6) Callbacks'), text.indexOf('## 7) Ending'));
+    expect(callbacks).toContain('Callbacks are for when no offered time works.');
+    expect(buildInstructions(input())).not.toContain('Callbacks are for when no offered time works.');
+  });
+
+  it('keeps the plan fenced and the rules the plan cannot override after it', () => {
+    const text = withSlots({ returning: true, approvedPlan: PLAN });
+    const plan = text.indexOf('# Call plan (approved by our team)');
+    const close = text.indexOf('</call_plan>');
+    expect(plan).toBeGreaterThanOrEqual(0);
+    expect(close).toBeGreaterThan(plan);
+    expect(text.indexOf('these rules always win')).toBeGreaterThan(close);
+    expect(text.indexOf('Never say, spell or give out a web address or email address.')).toBeGreaterThan(close);
+    for (const later of ['# Conversation Flow', '# Booking an appointment', '# Do-not-call', '# Rules', '# Safety']) {
+      expect(text.indexOf(later)).toBeGreaterThan(close);
+    }
+    expect(text).toContain(
+      '"Hi, this is Ava, an AI assistant calling for GG Homes on a recorded line — is this Jane?"',
+    );
   });
 });
 
