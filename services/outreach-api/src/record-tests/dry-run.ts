@@ -29,7 +29,9 @@ import { buildWritePlan } from '../writeback/plan.js';
 import { changesFieldText, chatterText, type RenderInput } from '../writeback/render.js';
 import { WRITEBACK_OUTCOMES } from '../writeback/store.js';
 import { stripUrls } from '../writeback/words.js';
-import { bookedWords, changeList, conversionWords, createdRecords, emptyDryRun, GONE_NOTE, NOTHING_NOTE, UNMAPPED_NOTE, writtenChanges, type Booking } from './dry-run-words.js';
+import {
+  bookedWords, changeList, conversionWords, createdRecords, emptyDryRun, GONE_NOTE, notesOf, NOTHING_NOTE, UNMAPPED_NOTE, WRITEBACK_OFF_NOTE, writtenChanges, type Booking,
+} from './dry-run-words.js';
 import { claimDryRun, releaseDryRun, saveMapping, storeDryRun, storedMappingOf, type StoredMapping } from './dry-run-store.js';
 import type { LimitRefusal } from './limits.js';
 
@@ -178,7 +180,8 @@ async function compute(deps: DryRunDeps, row: CallRow, outcome: string, stored: 
     chatterText: posts ? chatterText({ ...base, summary: stripUrls(row.summary), appointmentWords: bookedWords(booking), applied: { written, notWritten: [], created: [] } }) : null,
     wouldCreate: [...created, ...(posts ? ['Chatter post'] : [])],
     conversion,
-    note: failed ? UNMAPPED_NOTE : null,
+    // 1D: with write-back off a real call writes none of this (it is offered no times, so books nothing either).
+    note: notesOf([failed ? UNMAPPED_NOTE : null, outreachSettings({ settings: row.org_settings }).aiCallWriteback ? null : WRITEBACK_OFF_NOTE]),
   };
 }
 

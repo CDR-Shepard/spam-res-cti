@@ -11,6 +11,12 @@ import { ptWords } from '../writeback/render.js';
 export const NOTHING_NOTE = 'A real call that ended this way writes nothing to Salesforce.';
 export const GONE_NOTE = 'The record is gone.';
 export const UNMAPPED_NOTE = "Couldn't map the seller's answers; status moves only.";
+/** 1D: write-back is off until an admin turns it on, and a real call offers no times (so books nothing) while it is off. */
+export const WRITEBACK_OFF_NOTE =
+  'Write-back was off, so a real call would have written none of this to Salesforce (and offered no times). This is what it would write with write-back on.';
+
+/** The dry run's note: each that applies, in order, or null. */
+export const notesOf = (notes: ReadonlyArray<string | null>): string | null => notes.filter((n): n is string => n !== null).join(' ') || null;
 
 const EVENT_SUBJECTS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'Phone Consultation', walkthrough: 'Property Consultation' };
 const KIND_WORDS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'phone consultation', walkthrough: 'walkthrough' };

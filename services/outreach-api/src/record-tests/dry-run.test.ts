@@ -14,7 +14,7 @@ import { ctxOf, seedUser } from '../test/call-plan-seed.js';
 import { seedOrg } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { RT_LEAD, RT_OPP } from '../test/record-test-org.js';
-import { fakeModel, fakeOrg, PHONE_BOOKING, quiet, SETTER, transportError, type OrgState } from '../test/writeback-harness.js';
+import { fakeModel, fakeOrg, GRANT, PHONE_BOOKING, quiet, SETTER, transportError, type OrgState } from '../test/writeback-harness.js';
 import { DescribeCache } from '../research/describe.js';
 import type { MappingModel } from '../writeback/mapping-model.js';
 import { dryRunTestCall } from './dry-run.js';
@@ -22,6 +22,15 @@ import { insertRecordTest } from './store.js';
 
 const NOW = new Date('2026-10-06T22:20:00.000Z');
 const ENDED = new Date('2026-10-06T22:12:00.000Z');
+
+/** Booking with a Lead's conversion on, and write-back on (1D: both are off until an admin turns them on). */
+const BOOKING_ON = {
+  enabled: true, specialists: [GRANT], convertLeads: true, days: [1, 2, 3, 4, 5],
+  phone: { enabled: true, durationMinutes: 15, startHour: 10, endHour: 18, stepMinutes: 30, minLeadMinutes: 120, horizonBusinessDays: 2, bufferMinutes: 0, maxOffered: 6 },
+  walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 },
+};
+const ALL_ON = { aiCallWriteback: true, aiCallBooking: BOOKING_ON };
+const WRITEBACK_OFF = 'Write-back was off, so a real call would have written none of this to Salesforce (and offered no times). This is what it would write with write-back on.';
 
 const snapshotWith = (field: string, value: string) => ({ records: [{ relation: 'self', fields: [{ name: field, label: field, value }] }] });
 
@@ -43,11 +52,14 @@ describe.skipIf(!pgLane)('dryRunTestCall (real Postgres)', () => {
     await drop?.();
   });
 
-  interface Setup { sfObject?: 'Lead' | 'Opportunity'; outcome?: string; status?: string; appointment?: BookedAppointment | null; model?: MappingModel | null }
+  interface Setup {
+    sfObject?: 'Lead' | 'Opportunity'; outcome?: string; status?: string; appointment?: BookedAppointment | null; model?: MappingModel | null;
+    settings?: Record<string, unknown>;
+  }
   async function setup(o: Setup = {}) {
     const sfObject = o.sfObject ?? 'Opportunity';
     const sfRecordId = sfObject === 'Lead' ? RT_LEAD : RT_OPP;
-    const orgId = await seedOrg(db);
+    const orgId = await seedOrg(db, o.settings ?? ALL_ON);
     const admin = await seedUser(db, orgId);
     const testId = await insertRecordTest(db, { orgId, requestedBy: admin, sfObject, sfRecordId });
     const research = sfObject === 'Lead' ? snapshotWith('Status', 'Working') : snapshotWith('StageName', 'Closed Lost');
@@ -94,6 +106,31 @@ describe.skipIf(!pgLane)('dryRunTestCall (real Postgres)', () => {
     expect(out.dryRun.wouldCreate).toContain('Event: Phone Consultation, Wed Oct 7, 11:00 AM PT, owner Grant Golden');
     expect(sent(s.f)).toEqual([]);
     expect(s.f.soapBodies).toEqual([]);
+  });
+
+  it("2b: a Lead that booked with conversion at its 1D default (off): no conversion line, the hold on Grant's calendar and his Task", async () => {
+    const s = await setup({ sfObject: 'Lead', settings: { aiCallWriteback: true } });
+    const out = await dryRunTestCall(s.deps, s.ctx, s.callId);
+    if (!('ok' in out) || !out.ok) throw new Error(`refused: ${JSON.stringify(out)}`);
+    expect(out.dryRun.conversion).toBeNull();
+    expect(out.dryRun.wouldCreate).toEqual([
+      "Hold on Grant Golden's calendar: Wed Oct 7, 11:00 AM PT", 'Task to Grant Golden: convert the Lead and book it', 'Chatter post',
+    ]);
+    expect(out.dryRun.note).toBeNull();
+    expect(sent(s.f)).toEqual([]);
+  });
+
+  it('11: write-back off (the 1D default): the same changes, with the note that a real call would write none of them', async () => {
+    const on = await setup();
+    const off = await setup({ settings: {} });
+    const [a, b] = [await dryRunTestCall(on.deps, on.ctx, on.callId), await dryRunTestCall(off.deps, off.ctx, off.callId)];
+    if (!('ok' in a) || !a.ok || !('ok' in b) || !b.ok) throw new Error('refused');
+    expect(a.dryRun.note).toBeNull();
+    expect(b.dryRun.note).toBe(WRITEBACK_OFF);
+    expect(b.dryRun.changes).toEqual(a.dryRun.changes);
+    const failing: MappingModel = { modelId: 'claude-sonnet-5-5', map: async () => { throw new Error('overloaded'); } };
+    const both = await setup({ settings: {}, model: failing });
+    expect(await dryRunTestCall(both.deps, both.ctx, both.callId)).toMatchObject({ ok: true, dryRun: { note: `Couldn't map the seller's answers; status moves only. ${WRITEBACK_OFF}` } });
   });
 
   it('3: a voicemail writes nothing: no model call and no Salesforce read', async () => {
