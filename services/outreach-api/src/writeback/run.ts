@@ -6,7 +6,7 @@
  */
 import { SalesforceApiError } from '@cti/salesforce';
 import { loadWritebackContext } from './context.js';
-import { GONE_CODES, RecordGoneError, stepCode, type RowRun, type WritebackDeps } from './row-run.js';
+import { GONE_CODES, callBookedAppointment, RecordGoneError, stepCode, type RowRun, type WritebackDeps } from './row-run.js';
 import { convertStepRun, planStep } from './steps-plan.js';
 import { appointmentStep, chatterStep, fieldsStep, taskStep } from './steps-write.js';
 import { claimWritebacks, deferWriteback, finishWriteback, retryWriteback, type WritebackRow } from './store.js';
@@ -44,7 +44,10 @@ const nothingToWrite = (plan: WritePlan): boolean =>
 
 const nextUtcMidnight = (now: Date): Date => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
 
-async function end(run: { deps: WritebackDeps; row: WritebackRow }, status: 'done' | 'partial' | 'skipped', error: string | null): Promise<Ended> {
+/** A stored plan that no longer parses: the row fails at once with this last_error (no retries, no Salesforce write). */
+export const STORED_PLAN_INVALID = 'STORED_PLAN_INVALID';
+
+async function end(run: { deps: WritebackDeps; row: WritebackRow }, status: 'done' | 'partial' | 'skipped' | 'failed', error: string | null): Promise<Ended> {
   await finishWriteback(run.deps.db, run.row.id, status, run.deps.now, error);
   return status;
 }
@@ -64,8 +67,9 @@ async function processRow(deps: WritebackDeps, row: WritebackRow, at: (step: str
   if (ctx === null) return end({ deps, row }, 'skipped', 'ai call gone');
   // Second guard (Task 25 never enqueues one): a test or practice call never converts, books or writes. No Salesforce at all.
   if (ctx.call.isTest || ctx.call.practice) return end({ deps, row }, 'skipped', 'test call');
-  // Turned off after this row was queued (or while it waited to retry): it stops here (sweep D-23 M5).
-  if (!ctx.settings.aiCallWriteback) return end({ deps, row }, 'skipped', 'write-back is off');
+  // Turned off after this row was queued (or while it waited to retry): it stops here (sweep D-23 M5), unless the call booked
+  // a time that stands: that seller was told it is set, so the row still runs the appointment path (final fix 3).
+  if (!ctx.settings.aiCallWriteback && !callBookedAppointment(ctx.call)) return end({ deps, row }, 'skipped', 'write-back is off');
   let run: RowRun = { deps, client: await deps.clients(row.orgId), ctx, row };
 
   at('convert');
@@ -77,6 +81,10 @@ async function processRow(deps: WritebackDeps, row: WritebackRow, at: (step: str
   at('plan');
   const planned = await planStep(run);
   if (planned.kind === 'gone') return end(run, 'skipped', 'record gone or converted');
+  if (planned.kind === 'invalid') {
+    deps.log.error({ writebackId: row.id, aiCallId: row.aiCallId, step: 'plan' }, 'ai_call.writeback: the stored write plan no longer parses; failing the row');
+    return end(run, 'failed', STORED_PLAN_INVALID);
+  }
   if (planned.kind === 'budget') {
     await deferWriteback(deps.db, row.id, nextUtcMidnight(deps.now), deps.now, 'daily AI budget spent');
     return 'retried';

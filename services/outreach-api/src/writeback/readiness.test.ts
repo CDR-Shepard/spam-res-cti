@@ -10,7 +10,7 @@ import { writebackReadiness } from './readiness.js';
 
 const GRANT = '0058X00000Fsx39QAB';
 const US = '0058X0000Integ1QAA';
-const BOOKING: AiCallBookingSettings = { ...DEFAULT_AI_CALL_BOOKING, specialists: [GRANT] };
+const BOOKING: AiCallBookingSettings = { ...DEFAULT_AI_CALL_BOOKING, enabled: true, convertLeads: true, specialists: [GRANT] };
 const PSA = /^SELECT Id FROM PermissionSetAssignment WHERE AssigneeId = /;
 const USERS = /^SELECT Id, FirstName, Name, IsActive, TimeZoneSidKey FROM User/;
 

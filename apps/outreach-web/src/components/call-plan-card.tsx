@@ -28,7 +28,7 @@ function approvalNote(card: CallPlanCard): string | null {
   return null;
 }
 
-export function CallPlanCardView({ card, onChanged }: { card: CallPlanCard; onChanged: () => void }) {
+export function CallPlanCardView({ card, onChanged, campaignId = null }: { card: CallPlanCard; onChanged: () => void; campaignId?: string | null }) {
   const [editing, setEditing] = useState(false);
   const act = useMutation({
     mutationFn: (a: Action) => {
@@ -76,7 +76,7 @@ export function CallPlanCardView({ card, onChanged }: { card: CallPlanCard; onCh
             )}
           </div>
         ) : <p className="text-muted-foreground">Only the record owner or an admin can decide.</p>}
-        {!editing && <PracticeCall card={card} />}
+        {!editing && <PracticeCall card={card} campaignId={campaignId} />}
       </CardContent>
     </Card>
   );

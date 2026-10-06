@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AppointmentSlots, type AiCallBookingSettings } from '@cti/contracts';
 import { SalesforceApiError } from '@cti/salesforce';
 import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
 import { fakeSalesforce, type QueryRoute } from '../test/fake-sf-client.js';
 import { rowsWhere } from '../test/fake-soql-where.js';
+import { BUSY_ROW_LIMIT } from './calendar.js';
 import { offerFrom, offerSlots, readOfferCalendar } from './offer.js';
 import { zonedParts } from './zoned.js';
 
@@ -11,7 +12,7 @@ const GRANT = '0058X00000Fsx39QAB';
 const X = '0058X00000Abcd1QAB';
 /** Tuesday 2026-10-06 08:00 PDT. */
 const NOW = new Date('2026-10-06T15:00:00.000Z');
-const booking = (over: Partial<AiCallBookingSettings> = {}): AiCallBookingSettings => ({ ...structuredClone(DEFAULT_AI_CALL_BOOKING), specialists: [GRANT], ...over });
+const booking = (over: Partial<AiCallBookingSettings> = {}): AiCallBookingSettings => ({ ...structuredClone(DEFAULT_AI_CALL_BOOKING), enabled: true, specialists: [GRANT], ...over });
 const grantRow = (over: Record<string, unknown> = {}) => ({ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles', ...over });
 const sfWith = (users: QueryRoute[1], events: QueryRoute[1] = []) => fakeSalesforce({ queries: [[/FROM User/, users], [/FROM Event/, events]] });
 
@@ -146,6 +147,16 @@ describe('offerSlots', () => {
       const booked = [{ start: new Date('2026-10-07T16:00:00.000Z'), end: new Date('2026-10-07T17:00:00.000Z'), allDay: false }];
       const offer = offerFrom(cal, { booking: booking(), now: NOW, booked });
       expect(offer.slots.find((s) => s.id === 'w1')?.start).toBe('2026-10-07T18:00:00.000Z');
+    });
+
+    it('final review: a busy read that hits its row cap is logged (owner id and cap only); a smaller one is not', async () => {
+      const row = { StartDateTime: '2026-10-20T16:00:00.000+0000', EndDateTime: '2026-10-20T17:00:00.000+0000', IsAllDayEvent: false };
+      const warn = vi.fn();
+      await readOfferCalendar(sfWith([grantRow()], Array.from({ length: BUSY_ROW_LIMIT }, () => row)).client, { booking: booking(), now: NOW, log: { warn } });
+      expect(warn).toHaveBeenCalledWith({ ownerSfUserId: GRANT, rows: BUSY_ROW_LIMIT }, 'appointments: the busy read hit its row cap; later busy time may be missing');
+      const quiet = vi.fn();
+      await readOfferCalendar(sfWith([grantRow()], [row]).client, { booking: booking(), now: NOW, log: { warn: quiet } });
+      expect(quiet).not.toHaveBeenCalled();
     });
 
     it('a calendar that could not be read carries its note through', async () => {

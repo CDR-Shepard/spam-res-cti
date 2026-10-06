@@ -270,14 +270,17 @@ echo "SELECT idempotency_key, ai_call_id, response, created_at FROM ai_call_requ
 
 - **Pause the campaign** (the **Pause** button): planned calls wait and nothing new is claimed. This is the normal way to stop a campaign.
 - **The AI voice kill switch:** `AI_VOICE=off` on `@cti/api`. It pauses AI calls without using up any lead's attempts. While it is off the pacer claims nothing and logs `ai_call.place: cti-api says AI calling is off, or did not answer; nothing is placed this tick`. When it is back on, the waiting calls go out in their next calling window. `OUTREACH_KILL_SWITCH=on` stops all outreach, including AI calls, the same way.
+- **Booking, conversion and write-back** (plan 1D) have their own switches and a code rollback: see [Rollback](#rollback).
 
 ## Appointments and Salesforce write-back (plan 1D)
 
 After a **real** AI call is counted, outreach-api writes its result back to Salesforce once, through the tenant's connection, step by step (`ai_call.writeback`, every minute): a Lead that booked is converted, the appointment Event is put on the appointment owner's calendar, the record's fields are filled or moved, a Task is made when a person must act, and a Chatter post sums the call up. cti-api never writes any of it. Test and practice calls are never written.
 
+**Everything starts off.** Booking, Lead conversion and write-back are **off for every tenant** until an admin ticks them on Settings → Connections → **AI calls** ("Book appointments on AI calls", "Convert a Lead that books an appointment", "Write call results back to Salesforce"). They apply to every AI call campaign of the tenant. `AI_CALL_DEFAULT_SPECIALISTS` only pre-fills the appointment owner list; it turns nothing on. **Booking needs write-back:** a time the agent offers and a seller takes must reach Salesforce, so "Book appointments on AI calls" can only be on while "Write call results back to Salesforce" is on. The card disables the booking box with "Turn on Salesforce write-back first", unticking write-back unticks booking in the same save, and the server refuses a save with booking on and write-back off (400 `BOOKING_NEEDS_WRITEBACK`). A real call also offers no times at call time unless write-back is on. Lead conversion is independent: off keeps the designed hold and Task for the appointment owner. Turn them on in the order of [Deploy order](#deploy-order): readiness, practice calls (which need no switch), then a one-Lead live check with write-back first, then booking (and conversion when ready). To stop them, see [Rollback](#rollback).
+
 ### Setup (one time, in this order)
 
-1. **Salesforce metadata.** From `salesforce/`, on `main`, name the three files exactly. Validate first, then deploy:
+1. **Salesforce metadata.** From the repo root, on the merged `main` (merged **locally**, before it is pushed: see [Deploy order](#deploy-order)), name the three files exactly. Validate first, then deploy:
 
    ```bash
    cd salesforce
@@ -292,13 +295,15 @@ After a **real** AI call is counted, outreach-api writes its result back to Sale
 
    Never pass a directory. The org's own tests fail and `NoTestRun` is refused, hence `PowerDialRelayTest`. The sandbox `gghsd-maindev` lacks some fields, so validate against `_t2`. No Apex is deployed: conversion uses the SOAP API.
 
+   **If validate fails with a permission dependency on `ConvertLeads`** (Salesforce can require Lead create or edit alongside Convert Leads, and `AI_Outreach` grants neither): remove nothing from the repo. Either grant the missing Lead permission in the org on `AI_Outreach_Fields` (§0 step 4) and validate again, or leave conversion to a System Administrator connected user (step 2), who has it already. Never deploy with a different test level to get past it.
+
 2. **Find the connected user.** Settings → Connections shows the username. Every write-back edit, Event, Task, Chatter post and conversion shows as that user (Created By, Last Modified By). It may be the shared System Administrator `integration@gghomessd.com` (spec decision 5, not yet decided). A dedicated "AI Outreach" user would make the history readable, but it needs its own **paid** Salesforce user license: it converts Leads and creates Accounts, Opportunities and Events, which the free API-only `Salesforce Integration` license (§0 step 1) may not cover. Check with Salesforce before buying. **If `AI_Outreach` is assigned to an Integration-license user, Salesforce may refuse Convert Leads or Edit Events:** the assignment fails, or readiness (step 7) says conversion is not ready. Then connect a full-license user instead (same permission sets) and reconnect on Settings → Connections. Nothing in the code depends on which user it is. Then assign the permission set:
 
    ```bash
    sf org assign permset -n AI_Outreach -o _t2 -b <username>
    ```
 
-   `AI_Outreach` has no assignments today. The new field's field-level security comes only from it, even for a System Administrator. For a non-administrator user it also supplies Convert Leads, Edit Events and Tasks, and create on Account, Contact and Opportunity. The Events and Tasks the write-back makes carry **CTI Origin = AI Outreach** (`Activity.CTI_Origin__c`, granted by `AI_Outreach`); if Salesforce refuses that field they are made once more without it, and the AI's own Events and Tasks are never taken for new activity before the next call. Conversions are made over the SOAP API with the same connection, so the readiness check asks SOAP who the user is (`getUserInfo`).
+   Assign it only if it is not already assigned (§0 step 3 assigns `AI_Outreach` to the Integration user); a duplicate-assignment error means it already is. The new field's field-level security comes only from it, even for a System Administrator. For a non-administrator user it also supplies Convert Leads, Edit Events and Tasks, and create on Account, Contact and Opportunity. The Events and Tasks the write-back makes carry **CTI Origin = AI Outreach** (`Activity.CTI_Origin__c`, granted by `AI_Outreach`); if Salesforce refuses that field they are made once more without it, and the AI's own Events and Tasks are never taken for new activity before the next call. Conversions are made over the SOAP API with the same connection, so the readiness check asks SOAP who the user is (`getUserInfo`).
 
 3. **Grant the tenant's fields** in the in-org `AI_Outreach_Fields` set (§0 step 4): **Edit** (not just Read) on every field the write-back writes and the status fields:
    - **Lead:** Status, Rating, `Unqualified_Reason__c`, `Removal_Status__c`, DoNotCall, `Skip_on_Dialer__c`;
@@ -311,7 +316,7 @@ After a **real** AI call is counted, outreach-api writes its result back to Sale
 
 4. **Let reps see the field.** Setup → Object Manager → Lead (and Opportunity) → **AI Last Call Changes** → Set Field-Level Security: visible (read-only) for the Sales, Sales Manager and Wholesale profiles. Add it to the page layouts **in Setup**, never from the repo.
 
-5. **The connected user must see the appointment owner's calendar.** Run as that user:
+5. **The connected user must see the appointment owner's calendar.** Run as that user (an `sf` alias signed in as the connected user: the recipe is in step 8):
 
    ```sql
    SELECT COUNT() FROM Event WHERE OwnerId = '0058X00000Fsx39QAB' AND StartDateTime = NEXT_N_DAYS:7
@@ -319,16 +324,31 @@ After a **real** AI call is counted, outreach-api writes its result back to Sale
 
    It must match what Grant sees. "View All Data", or the System Administrator profile, covers it; otherwise the offered times may overlap private Events.
 
-6. **The default appointment owner.** Set `AI_CALL_DEFAULT_SPECIALISTS=0058X00000Fsx39QAB` (Grant Golden) on outreach-api. The card shows "Appointments go to: Grant Golden"; an admin can change the list on the card (the first active person owns every AI-booked appointment).
+6. **The default appointment owner.** Set `AI_CALL_DEFAULT_SPECIALISTS=0058X00000Fsx39QAB` (Grant Golden) on outreach-api. The card shows "Appointments go to: Grant Golden"; an admin can change the list on the card (the first active person owns every AI-booked appointment). It only pre-fills the list: booking stays off until an admin ticks it, after write-back (Deploy order step 7).
 
 7. **Readiness.** Settings → Connections → **AI calls** → "Salesforce write-back readiness" must say **Ready**, "Appointments go to: Grant Golden" and "Lead conversion: ready. New records will be Person Account / Homeowner Opportunity". Each problem is listed in words, for example "Lead · AI Last Call Changes: the connected Salesforce user can't edit it" or "Event: can't be created by the connected user". "Lead conversion: not ready (…)" names why (the SOAP API refused the connection, no Convert Leads permission, or Account/Contact/Opportunity not createable); until it is fixed, a Lead that books gets a calendar hold and a Task instead.
 
-8. **Smoke checks as the connected user** (Developer Console signed in as that user, or `sf data query --target-org <alias> -q "<query>"` with one `--target-org` only: `_t2` is the deploy user, not the connected user). To get an alias for the connected user, run `sf org login web -a <alias> -r https://gghsd.my.salesforce.com` and sign in **as the connected user** (the user outreach-web's Salesforce connection uses, shown on Settings → Connections); `sf org list` then shows the alias with that username:
-   - `SELECT Id, Body FROM FeedItem WHERE ParentId = '<an Opportunity id>' AND Type = 'TextPost' LIMIT 5` runs (the Chatter step looks for its own earlier post this way; if the user cannot run it, every Chatter step retries and fails);
-   - post a test FeedItem on a **test Lead you own** (this is production: never a prospect's or another rep's Lead) whose first line starts `AI call test1234 ·`, and confirm the org's Lead FeedItem trigger keeps that **first line** intact (a real post starts with `AI call <8 characters of the call id> ·`, which is how a retry finds it). Then **delete the test post** from the Lead's Chatter feed;
-   - on a Person Account, the connected user can edit **Do Not Call** (`PersonDoNotCall`; field-level security follows `Contact.DoNotCall`). A refusal is recorded as "Not written", never silent.
+8. **Smoke checks as the connected user** (Developer Console signed in as that user, or `sf data query --target-org <alias> -q "<query>"` with one `--target-org` only: `_t2` is the deploy user, not the connected user). To get an alias for the connected user, run `sf org login web -a <alias> -r https://gghsd.my.salesforce.com` and sign in **as the connected user** (the user outreach-web's Salesforce connection uses, shown on Settings → Connections); `sf org list` then shows the alias with that username.
 
-9. **Then check with practice calls** on a real Opportunity and a real Lead before any live campaign (`ai-voice.md` §16). They never write to Salesforce.
+   **An API-only connected user** (the `Salesforce Integration` license of §0 step 1) cannot sign in to the browser, so neither `sf org login web` nor the Developer Console works for it. Run the read checks as an administrator instead, by the permission queries below, and leave the post check to the one-Lead live check (Deploy order step 7), whose Chatter post is the real test.
+   - `SELECT Id, Body FROM FeedItem WHERE ParentId = '<an Opportunity id>' AND Type = 'TextPost' LIMIT 5` runs (the Chatter step looks for its own earlier post this way; if the user cannot run it, every Chatter step retries and fails);
+   - the connected user can **create** a FeedItem, through the same REST resource the write-back uses, on a **test Lead you own** (this is production: never a prospect's or another rep's Lead):
+
+     ```bash
+     sf api request rest 'services/data/v60.0/composite/sobjects' --method POST --target-org <alias> \
+       --body '{"allOrNone":false,"records":[{"attributes":{"type":"FeedItem"},"ParentId":"<your test Lead id>","Type":"TextPost","IsRichText":false,"Body":"AI call test1234 · smoke check, delete me"}]}'
+     ```
+
+     (`v60.0` is outreach-api's default `SALESFORCE_API_VERSION`; `sf api request rest` is a beta command, so `sf api request rest --help` has the current flags.) It answers `"success": true` with the new id. Confirm on the Lead's Chatter feed that the org's Lead FeedItem trigger keeps that **first line** (`AI call test1234 ·`) intact (a real post starts with `AI call <8 characters of the call id> ·`, which is how a retry finds it). Then **delete the test post** from the Lead's Chatter feed;
+   - on a Person Account, the connected user can edit **Do Not Call** (`PersonDoNotCall`; field-level security follows `Contact.DoNotCall`). Check it with an administrator alias (any one, `_t2` included), naming the connected user's username:
+
+     ```bash
+     sf data query --target-org _t2 -q "SELECT Field, PermissionsEdit, Parent.Name FROM FieldPermissions WHERE SobjectType = 'Contact' AND Field = 'Contact.DoNotCall' AND PermissionsEdit = true AND ParentId IN (SELECT PermissionSetId FROM PermissionSetAssignment WHERE Assignee.Username = '<connected username>')"
+     ```
+
+     At least one row means it may edit it (a System Administrator profile may show no row and still edit it: then open a Person Account as an administrator using **Login As** the connected user, if the org allows it, and tick and untick Do Not Call). A refusal at write time is recorded as "Not written", never silent.
+
+9. **Then check with practice calls** on a real Opportunity and a real Lead before any live campaign (`ai-voice.md` §16). They never write to Salesforce. A practice call offers the appointment owner's times whenever an owner is set (the configured default or the card's list), whatever the switches say, so it works with everything off: see [Deploy order](#deploy-order) step 6.
 
 ### Lead conversion
 
@@ -354,14 +374,14 @@ The results table's **Salesforce** column shows the write-back's status; click i
 | Pending | Queued, or waiting for its next try (backoff 1 m, 5 m, 30 m, 2 h, 6 h, 24 h; a non-booking call waits for the next UTC day when the AI budget is spent) |
 | Writing | A tick is running it now |
 | Done | Every step ran and nothing was refused (a value a rep changed since the call is kept, and listed as such) |
-| Partial | It finished, but Salesforce refused something (a field, the Event, the conversion, the Task or the post); the error column names the first refusal. Not retried: fix by hand |
-| Failed | Six transient errors in a row. An admin can **Retry** it |
-| Skipped | Nothing to write: write-back is off for the tenant, a test or practice call, the record was deleted, or a hang-up with nothing learned |
+| Partial | It finished, but Salesforce refused something (a field, the Event, the conversion, the Task or the post); the write-back details ("Last error") name the first refusal. Not retried: fix by hand |
+| Failed | Six transient errors in a row. An admin can **Retry** it. **Failed with an appointment: press Retry, or give the time to Grant by hand** (from the row's appointment column), because the seller was told the time is set |
+| Skipped | Nothing to write: write-back is off for the tenant (never for a call that booked a time that stands: that is written whatever the switch says), a test or practice call, the record was deleted, or a hang-up with nothing learned. The details say why ("Why: write-back is off") |
 
 - **AI Last Call Changes** (on the Lead or Opportunity) is rewritten after each AI call: a header line (time, outcome, call id), then **Changed** (old → new), **Not changed** (a Status or Stage move the plan left alone, with why: not editable, not in the org's picklist, changed since the AI's research, or not from a usual starting value), **Not changed — changed in Salesforce since the call** (someone, a rep or a flow, changed it after the call, so it is kept; a field shown "held: Stage was changed" was left because its Stage or Status moved), **Kept** (a rep's value kept over the seller's answer), **Not written** (with why) and **Created** (the conversion, the Event, the Task).
 - **The Chatter post** on the record written to (the new Opportunity after a conversion): `AI call <id> · <date> · <outcome>`, what was booked, the summary (links removed), what the seller said, what changed, and **Call details**: a link to the campaign page with `?call=<AI call id>`, which opens that call on the results with its transcript and write-back.
 - **Retry** (admins, failed rows only): the results row → **Failed** → **Retry**. Finished steps are kept, so nothing is done twice; a retry reads `IsConverted` first and never converts twice.
-- **Turning write-back off** for a tenant: untick "Write call results back to Salesforce" on the AI calls card (`aiCallWriteback: false`). Calls counted from then on, and rows already queued or waiting to retry, are recorded `skipped` ("write-back is off") at their next tick without any Salesforce call.
+- **Turning write-back off** for a tenant: untick "Write call results back to Salesforce" on the AI calls card (`aiCallWriteback: false`); the card unticks "Book appointments on AI calls" in the same save, because booking needs write-back. Calls counted from then on, and rows already queued or waiting to retry, are recorded `skipped` ("write-back is off") at their next tick without any Salesforce call, **except a call that booked a time that stands** (Appointment set, or a transfer after a booking): that seller was told the time is set, so the row is still written (the convert, the Event or hold, the Task, the changes text and the Chatter post). Booked calls still reach Salesforce when write-back is off; the hard stop is pausing the campaigns and `AI_VOICE=off`.
 
 ### Troubleshooting
 
@@ -371,7 +391,12 @@ The results table's **Salesforce** column shows the write-back's status; click i
 - **"Lead not converted" with a hold and a "convert and book" Task** means Salesforce refused the conversion. Common causes: `Hunt_Winner_Owner_Change` on a Hunt-queue Lead, `Spam_Status_Lock`, a missing Convert Leads permission, or the SOAP API unavailable to the user. `last_error` has the code. The row ends `partial` (not retried): convert the Lead by hand, book the time the Task names, then delete the hold. A row that ended `failed` (transient errors used up) can be retried; the retry reads `IsConverted` first, so it never converts twice.
 - **The booked time passed before the write** (a late retry whose run starts at or after the slot's **start** time): no Event or conversion is made; the owner gets "Appointment time passed before it could be saved — call the seller to re-book". If an earlier attempt had already put a hold on the owner's calendar for that time, the Task and AI Last Call Changes name it ("the time passed: delete it"): delete that hold by hand.
 - **A converted Lead whose Opportunity is not owned by Grant:** a flow changed the owner after conversion. The Event is still Grant's.
+- **"Converted by the AI" on a Lead a person converted.** A conversion counts as the AI's when the connected user made it after the call. If the connection is a shared administrator login and that person converted the Lead by hand in the minutes after the call, the write-back takes it for its own (copies consent, says the AI converted it). A dedicated connected user avoids this (Setup step 2).
+- **A rep's edit in the same second as the write.** The write-back reads the record fresh, then writes; Salesforce has no "only if unchanged" write, so a rep edit landing between the two (well under a second) is overwritten. AI Last Call Changes lists the old → new values to set back.
 - **Every Chatter step fails:** the connected user cannot query FeedItem (Setup step 8).
+- **`Failed` with `STORED_PLAN_INVALID`:** the write plan an earlier attempt saved no longer reads (a release changed its shape between attempts). It fails at once instead of retrying, and a Retry fails the same way: write that call's result by hand from its summary on the results.
+- **Log `appointments: the busy read hit its row cap; later busy time may be missing`** (with the owner's id): the owner has more than 2000 Events in the booking window, so later times may overlap busy time. Tidy the owner's calendar, or shorten the booking window on the card.
+- **The AI treated a returning seller as new.** The last real conversation is read from the record's Tasks and Events (archived ones older than a year included): a Task with a Connected or Do Not Call result, a "Call back" result with at least 60 seconds of talk, a call of at least 60 seconds with no result that is not inbound, or a past Event whose subject names a consult, appointment, walkthrough, meeting or visit. An inbound call or a CallRail recording counts only with a Connected result, because its length may be ringing or voicemail. A conversation logged in none of these ways is not seen: log it as a Call Task with a Call Result.
 - **Read a row by hand:**
 
   ```bash
@@ -380,11 +405,43 @@ The results table's **Salesforce** column shows the write-back's status; click i
 
 ### Deploy order
 
-1. **Salesforce first** (Setup steps 1–5): the three files with `RunSpecifiedTests PowerDialRelayTest`, `AI_Outreach` assigned to the connected user, Edit in `AI_Outreach_Fields` (including Opportunity `LeadManager__c` and `Spanish_Speaker__c`), reps' read field-level security in Setup.
-2. **Variables** on outreach-api: `AI_CALL_DEFAULT_SPECIALISTS=0058X00000Fsx39QAB`. `WRITEBACK_MODEL` is optional (default `claude-sonnet-5-5`); any other value must be priced in `services/outreach-api/src/ai/model.ts`, or the write-back runs without the answer mapping.
-3. **Migrations** `0055_ai_call_booking.sql`, `0056_ai_call_writebacks.sql` and `0057_ai_call_writeback_indexes.sql` (indexes only) run in the pre-deploy migrate of whichever service deploys first (production is at 0054, `0054_dialer_stop_reason.sql`, once the dialer idle-cutoff release is deployed). 0055 must be in place before the new `@cti/api` runs.
-4. **Deploy `@cti/api` and outreach-api from the same merge,** `@cti/api` first or together. A trigger with slots that reaches an old `@cti/api` gets a 400 and is retried with the same key, so the window is safe.
-5. **Check** `/healthz` on both, then Settings → Connections → AI calls: Ready, "Appointments go to: Grant Golden", "Lead conversion: ready" with Person Account / Homeowner Opportunity.
-6. **Practice calls:** one on a real Opportunity and one on a real Lead, to your own test number. Listen for the "we spoke back in …" opener, book a phone time with Grant, and confirm nothing appears in Salesforce (no Event, no conversion, no field change).
-7. **A one-lead live campaign on a Lead** you own (conversion is the riskiest path; pick a Lead the team would convert anyway). After the call, check: the Lead converted (Qualified), one new Person Account, Contact and Opportunity named after the Lead, owned by Grant, Lead Manager = the Lead's prior owner; the Event on Grant's calendar on the new Opportunity, and the org's confirmation Task made by its own flow; Stage Appointment Set; consent copied; the AI Last Call Changes text; the Chatter post on the Opportunity; the write-back `Done` on the results. Then one on an Opportunity.
+Booking, conversion and write-back start **off** for every tenant (above), so deploying turns nothing on. They are turned on at step 8, after the checks.
 
+1. **Pause every active AI call campaign** (the **Pause** button). Nothing real is called while you check.
+2. **Salesforce first, from a local merge.** Railway deploys both services the moment the merge reaches GitHub's `main`, so merge **locally**, run Setup steps 1–5 from that local `main` (the three files with `RunSpecifiedTests PowerDialRelayTest`, `AI_Outreach` assigned to the connected user if it is not already, Edit in `AI_Outreach_Fields` including Opportunity `LeadManager__c` and `Spanish_Speaker__c`, reps' read field-level security in Setup), then push.
+3. **Variables** on outreach-api, before or with the push: `AI_CALL_DEFAULT_SPECIALISTS=0058X00000Fsx39QAB` (it only pre-fills "Appointments go to"). `WRITEBACK_MODEL` is optional (default `claude-sonnet-5-5`); any other value must be priced in `services/outreach-api/src/ai/model.ts`, or the write-back runs without the answer mapping. Both are listed in `services/outreach-api/.env.example` and `.railway/railway.ts`.
+4. **Migrations and deploy.** `0055_ai_call_booking.sql`, `0056_ai_call_writebacks.sql` and `0057_ai_call_writeback_indexes.sql` (indexes only) run in the pre-deploy migrate of whichever service deploys first (production is at 0054, `0054_dialer_stop_reason.sql`, once the dialer idle-cutoff release is deployed). 0055 must be in place before the new `@cti/api` runs. Deploy `@cti/api` and outreach-api from the same merge, `@cti/api` first or together. A trigger with slots that reaches an old `@cti/api` gets a 400 and is retried with the same key, so the window is safe. Everything is still off.
+5. **Readiness.** `/healthz` on both, then Settings → Connections → AI calls: Ready, "Appointments go to: Grant Golden", "Lead conversion: ready" with Person Account / Homeowner Opportunity. Do Setup steps 6–8.
+6. **Practice calls** (campaigns still paused, every switch still off): a practice call offers Grant's times without any switch, because the default owner is set. One on a real Opportunity and one on a real Lead, to your own test number. Listen for the "we spoke back in …" opener, book a phone time with Grant, and confirm nothing appears in Salesforce (no Event, no conversion, no field change). A practice call never writes, whatever the switches say.
+7. **A one-Lead live check.** Make a campaign with one Lead you own (conversion is the riskiest path; pick a Lead the team would convert anyway) and keep every other AI call campaign paused. Tick "Write call results back to Salesforce" and save, then tick "Book appointments on AI calls" and "Convert a Lead that books an appointment" and save (booking cannot be ticked before write-back; leave conversion off if you would rather check the hold and Task fallback first): the switches are the tenant's, so they reach only the campaign that is running. After the call, check: the Lead converted (Qualified), one new Person Account, Contact and Opportunity named after the Lead, owned by Grant, Lead Manager = the Lead's prior owner; the Event on Grant's calendar on the new Opportunity, and the org's confirmation Task made by its own flow; Stage Appointment Set; consent copied; the AI Last Call Changes text; the Chatter post on the Opportunity; the write-back `Done` on the results. Then one on an Opportunity. If anything is wrong, untick write-back (booking goes with it) and conversion, and see [Rollback](#rollback).
+8. **Turn on.** With the switches left on (write-back, then booking, then conversion when ready), resume the paused campaigns.
+
+### Rollback
+
+**Stop now** (seconds, no deploy):
+
+1. **Pause** the AI call campaigns.
+2. On Settings → Connections → **AI calls**, untick "Write call results back to Salesforce" and save. The card unticks "Book appointments on AI calls" in the same save (booking needs write-back), so calls from then on offer no times. Rows already queued or waiting to retry are recorded `skipped` ("write-back is off") at their next tick, with no Salesforce call, **except rows for calls that booked a time**: those are still written, because the seller was told the time is set. Booked calls still reach Salesforce when write-back is off; unticking it does not stop them. The hard stop is pausing the campaigns (step 1) and `AI_VOICE=off` (step 4).
+3. Also untick "Convert a Lead that books an appointment" and save, so turning write-back on again later converts nothing until you decide it should.
+4. Last resort: `AI_VOICE=off` on `@cti/api` (`ai-voice.md` §9). No AI call is placed and no lead uses an attempt.
+
+**Code:**
+
+1. Leave migrations `0055`–`0057` in place: they only add columns (with defaults), tables and indexes, and the previous code runs on them.
+2. **Before redeploying the previous version, wait until the results show no live or uncounted calls** (the pre-1D build retries an `appointment_set` call: it does not know the outcome, so the touch is re-queued and the AI calls the seller again once campaigns resume). Then redeploy the previous **outreach-api** first, or together with the previous **`@cti/api`** (Railway → the service → Deployments → the last good one → Redeploy). Never roll `@cti/api` back alone while the new outreach-api runs: an old `@cti/api` answers its triggers 400, and those calls only retry.
+3. Pending `ai_call_writebacks` rows are left; the previous outreach-api does not read them.
+
+**Salesforce** (by hand; the new fields and permission grants can stay):
+
+- **A converted Lead cannot be unconverted.** Fix the new Person Account, Contact and Opportunity by hand (or delete them and recreate the Lead, if the team prefers).
+- **Delete the AI's own holds and Tasks.** Everything the write-back made carries **CTI Origin = AI Outreach**. Find them as an administrator:
+
+  ```bash
+  sf data query --target-org _t2 -q "SELECT Id, Subject, StartDateTime, OwnerId FROM Event WHERE CTI_Origin__c = 'AI Outreach' AND Subject LIKE 'Hold: AI-booked%' AND CreatedDate = LAST_N_DAYS:7"
+  sf data query --target-org _t2 -q "SELECT Id, Subject, WhoId, WhatId, OwnerId FROM Task WHERE CTI_Origin__c = 'AI Outreach' AND CreatedDate = LAST_N_DAYS:7"
+  ```
+
+  Delete the ones that should not stand from the record (or `sf data delete record --target-org _t2 -s Event -i <id>`). A booked appointment Event (Subject not starting `Hold:`) is a real appointment with the seller: cancel it with the seller before deleting it.
+- **Field changes** are listed in each record's **AI Last Call Changes** (old → new): set back by hand any that should not stand.
+
+The AI voice side of a rollback is in `ai-voice.md` §15.

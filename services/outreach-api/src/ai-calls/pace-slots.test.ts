@@ -18,7 +18,7 @@ const MIN = 60_000;
 const at = (from: Date, ms: number) => new Date(from.getTime() + ms);
 const OWNER = '0058X00000Fsx39QAB';
 const ownerRow = { Id: OWNER, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles' };
-const booking = { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [OWNER] } };
+const booking = { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [OWNER] }, aiCallWriteback: true };
 
 type RecordTarget = Extract<InternalAiCallRequest['target'], { kind: 'record' }>;
 const target = (r: InternalAiCallRequest): RecordTarget => {

@@ -14,7 +14,7 @@ import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import { sendError } from '../http/errors.js';
 import { DescribeCache } from '../research/describe.js';
 import { soqlIdList } from '../research/text.js';
-import { bookingSettings, outreachSettings } from '../settings.js';
+import { bookingSettings, liveCallBooking, outreachSettings } from '../settings.js';
 import { requireAdmin, requireContext } from '../tenancy/scope.js';
 import { writebackReadiness } from '../writeback/readiness.js';
 import { sendCrmError } from './crm-errors.js';
@@ -28,6 +28,7 @@ export interface AiCallSettingsRouteDeps {
   describes?: DescribeCache;
 }
 
+export const BOOKING_NEEDS_WRITEBACK_WORDS = 'Booking appointments needs Salesforce write-back. Turn on Salesforce write-back first, then booking.';
 export const USER_SEARCH_LIMIT = 25;
 export const MAX_USER_IDS = 20;
 
@@ -70,7 +71,8 @@ export async function registerAiCallSettingsRoutes(app: FastifyInstance, deps: A
   const describes = deps.describes ?? new DescribeCache();
   const settingsOf = (blob: unknown): AiCallSettings => {
     const org = { settings: blob };
-    return { booking: bookingSettings(org, deps.defaultSpecialists), writeback: outreachSettings(org).aiCallWriteback };
+    // Booking reads as off while write-back is off, even in a blob saved before that rule (liveCallBooking).
+    return { booking: liveCallBooking(org, deps.defaultSpecialists), writeback: outreachSettings(org).aiCallWriteback };
   };
 
   app.get('/settings/ai-calls', async (req, reply) => {
@@ -84,6 +86,8 @@ export async function registerAiCallSettingsRoutes(app: FastifyInstance, deps: A
     if (!ctx || !requireAdmin(ctx, reply)) return reply;
     const body = AiCallSettings.safeParse(req.body ?? null);
     if (!body.success) return sendError(reply, 400, 'INVALID_BODY', 'Those AI call settings are not valid.', body.error.issues.map((i) => i.path.join('.')));
+    // Fix 2: a time offered to a seller must reach Salesforce, so booking can only be on while write-back is on.
+    if (body.data.booking.enabled && !body.data.writeback) return sendError(reply, 400, 'BOOKING_NEEDS_WRITEBACK', BOOKING_NEEDS_WRITEBACK_WORDS);
     // organizations has no updated_at column; only these two keys change, every other setting is kept.
     const result = await db.execute(sql`
       update organizations

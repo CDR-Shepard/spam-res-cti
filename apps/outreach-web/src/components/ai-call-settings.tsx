@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { AiCallSettings, type SalesforceUserOption } from '@cti/contracts';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -19,6 +19,11 @@ const KIND_TITLES: Readonly<Record<Kind, { offer: string; noun: string }>> = {
   walkthrough: { offer: 'Offer walkthroughs', noun: 'Walkthrough' },
 };
 const OWNER_LINE = 'Every AI-booked appointment goes to the first active person on this list. They distribute them.';
+/** Final review WEB I-2: the switches below default off, and are tenant-wide. */
+const START_OFF_WORDS =
+  'Booking, Lead conversion and Salesforce write-back start off for every tenant, and these switches apply to every AI call campaign. Turn them on only after the readiness check below says Ready, a practice call sounds right, and a one-Lead live check was written back correctly.';
+/** Fix 2: a time the agent offers must reach Salesforce, so booking needs write-back. */
+const NEEDS_WRITEBACK_WORDS = 'Turn on Salesforce write-back first';
 const INVALID_WORDS = 'Check the numbers: each kind needs an end hour after its start hour, and every value in range.';
 const MAX_OWNERS = 20;
 
@@ -54,7 +59,8 @@ function AdminAiCallSettings() {
 
 function SettingsForm({ saved }: { saved: AiCallSettings }) {
   const qc = useQueryClient();
-  const [draft, setDraft] = useState<AiCallSettings>(saved);
+  // Booking reads as off while write-back is off (an older blob may say otherwise): the form never starts in a state the server refuses.
+  const [draft, setDraft] = useState<AiCallSettings>(() => ({ ...saved, booking: { ...saved.booking, enabled: saved.booking.enabled && saved.writeback } }));
   // The people the saved list names are resolved once; anyone added from a search is already known.
   const [savedIds] = useState(saved.booking.specialists);
   const [added, setAdded] = useState<SalesforceUserOption[]>([]);
@@ -78,7 +84,14 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
         if (valid) save.mutate(draft);
       }}
     >
-      <Check label="Book appointments on AI calls" checked={draft.booking.enabled} onChange={(enabled) => setBooking({ enabled })} />
+      <p className="text-sm text-muted-foreground">{START_OFF_WORDS}</p>
+      <Check
+        label="Book appointments on AI calls"
+        checked={draft.booking.enabled}
+        disabled={!draft.writeback}
+        onChange={(enabled) => setBooking({ enabled })}
+        hint={draft.writeback ? undefined : NEEDS_WRITEBACK_WORDS}
+      />
       <section className="space-y-2">
         <h3 className="text-sm font-medium">Appointments go to</h3>
         <OwnerList
@@ -105,26 +118,39 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
       </div>
       <section className="space-y-2">
         <h3 className="text-sm font-medium">Salesforce write-back</h3>
-        <Check label="Write call results back to Salesforce" checked={draft.writeback} onChange={(writeback) => setDraft((d) => ({ ...d, writeback }))} />
+        <Check
+          label="Write call results back to Salesforce"
+          checked={draft.writeback}
+          onChange={(writeback) => setDraft((d) => ({ ...d, writeback, booking: { ...d.booking, enabled: d.booking.enabled && writeback } }))}
+        />
       </section>
       {!valid && <p className="text-sm text-destructive">{INVALID_WORDS}</p>}
       <div className="flex items-center gap-3">
         <Button type="submit" size="sm" disabled={!valid || save.isPending}>Save AI call settings</Button>
-        {save.isSuccess && !save.isPending && <p role="status" className="text-sm">Saved.</p>}
+        {/* Only while the form still holds what was saved: every edit makes a new draft (final review m8). */}
+        {save.isSuccess && !save.isPending && save.variables === draft && <p role="status" className="text-sm">Saved.</p>}
       </div>
       {save.error && <p className="text-sm text-destructive">{errorText(save.error)}</p>}
     </form>
   );
 }
 
-function Check({ label, checked, onChange, hint }: { label: string; checked: boolean; onChange: (v: boolean) => void; hint?: string }) {
+function Check({ label, checked, onChange, hint, disabled }: { label: string; checked: boolean; onChange: (v: boolean) => void; hint?: string; disabled?: boolean }) {
+  const hintId = useId();
   return (
     <div className="space-y-1">
       <label className="flex items-center gap-2 text-sm font-medium">
-        <input type="checkbox" className="size-4" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+        <input
+          type="checkbox"
+          className="size-4"
+          checked={checked}
+          disabled={disabled}
+          aria-describedby={hint ? hintId : undefined}
+          onChange={(e) => onChange(e.target.checked)}
+        />
         {label}
       </label>
-      {hint && <p className="pl-6 text-xs text-muted-foreground">{hint}</p>}
+      {hint && <p id={hintId} className="pl-6 text-xs text-muted-foreground">{hint}</p>}
     </div>
   );
 }

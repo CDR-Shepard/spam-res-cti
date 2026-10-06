@@ -227,8 +227,10 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
     it('a failed write-back may be retried by an admin, never by a rep', async () => {
       const asAdmin = await listed({ status: 'failed', lastError: 'SERVER_UNAVAILABLE' });
       expect(asAdmin.item.writeback).toMatchObject({ status: 'failed', mayRetry: true, error: 'SERVER_UNAVAILABLE', changes: [] });
-      const asRep = await listed({ status: 'failed' }, { admin: false });
+      const asRep = await listed({ status: 'failed', lastError: 'SERVER_UNAVAILABLE' }, { admin: false });
       expect(asRep.item.writeback?.mayRetry).toBe(false);
+      // Final review: the error is for admins only (it may carry Salesforce's words).
+      expect(asRep.item.writeback?.error).toBeNull();
       const done = await listed({ status: 'done' });
       expect(done.item.writeback?.mayRetry).toBe(false);
     });

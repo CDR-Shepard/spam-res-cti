@@ -38,15 +38,21 @@ function kindSlots(kind: 'phone' | 'walkthrough', rules: KindRules, booking: AiC
   return toSlots(kind, pickOffered(read, rules.maxOffered, owner.timeZone), owner, rules.bufferMinutes * MIN_MS);
 }
 
+/** Only ids and counts: a busy read that hit its row cap (final review). */
+export interface OfferLog {
+  warn(obj: Record<string, unknown>, msg: string): void;
+}
+
 /** Reads Salesforce only; never throws. */
-export async function readOfferCalendar(client: SalesforceClient, i: { booking: AiCallBookingSettings; now: Date }): Promise<OfferCalendar> {
+export async function readOfferCalendar(client: SalesforceClient, i: { booking: AiCallBookingSettings; now: Date; log?: OfferLog }): Promise<OfferCalendar> {
   const { booking, now } = i;
   if (!bookingActive(booking)) return { kind: 'none', note: 'booking_off' };
   try {
     const owner = appointmentOwner(booking, await readUsers(client, booking.specialists));
     if (!owner) return { kind: 'none', note: 'no_owner' };
     const until = new Date(now.getTime() + OFFER_CALENDAR_DAYS * DAY_MS);
-    return { kind: 'read', owner, busy: await readBusy(client, owner.sfUserId, now, until, owner.timeZone), until };
+    const capped = (rows: number) => i.log?.warn({ ownerSfUserId: owner.sfUserId, rows }, 'appointments: the busy read hit its row cap; later busy time may be missing');
+    return { kind: 'read', owner, busy: await readBusy(client, owner.sfUserId, now, until, owner.timeZone, capped), until };
   } catch {
     return { kind: 'none', note: 'salesforce_error' };
   }

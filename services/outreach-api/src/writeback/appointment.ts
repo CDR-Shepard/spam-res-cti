@@ -186,8 +186,15 @@ export async function bookOpportunity(
   return created.success && created.id ? { kind: 'created', eventId: created.id } : { kind: 'refused', code: firstCode(created) };
 }
 
-/** A Task once: the one we made in the last two days (same record, owner, Subject and origin), else a new one. */
-export async function createTaskOnce(client: SalesforceClient, fields: Record<string, unknown>): Promise<string> {
+/** Clock skew allowed between the call's end (our clock) and a Task's CreatedDate (Salesforce's). */
+const TASK_SKEW_MS = 60_000;
+
+/**
+ * A Task once: the one we made since the call ended (same record, owner, Subject and origin), else a new one. `since` is
+ * the call's end, so the lookup covers the row's whole life, an admin retry days later included (final review); null
+ * (no end time known) looks without a date bound.
+ */
+export async function createTaskOnce(client: SalesforceClient, fields: Record<string, unknown>, since: Date | null): Promise<string> {
   const ids = (['WhatId', 'WhoId'] as const).flatMap((k) => (typeof fields[k] === 'string' ? [[k, checkId(fields[k] as string, k)] as const] : []));
   const owner = checkId(String(fields.OwnerId), 'OwnerId');
   const on = ids.map(([k, id]) => `${k} = '${soqlEscape(id)}'`);
@@ -195,13 +202,16 @@ export async function createTaskOnce(client: SalesforceClient, fields: Record<st
   const existing = await findOne(
     client,
     (o) =>
-      `SELECT Id FROM Task WHERE ${record} AND OwnerId = '${soqlEscape(owner)}' AND Subject = '${soqlEscape(String(fields.Subject))}'${originClause(o)} AND CreatedDate = LAST_N_DAYS:2 LIMIT 1`,
+      `SELECT Id FROM Task WHERE ${record} AND OwnerId = '${soqlEscape(owner)}' AND Subject = '${soqlEscape(String(fields.Subject))}'${originClause(o)}${sinceClause(since)} LIMIT 1`,
   );
   if (existing !== null) return existing;
   const created = await createOne(client, 'Task', fields);
   if (created.success && created.id) return created.id;
   throw new WriteRefusedError(firstCode(created), `Salesforce refused the Task: ${firstCode(created)}`);
 }
+
+const sinceClause = (since: Date | null): string =>
+  since === null || Number.isNaN(since.getTime()) ? '' : ` AND CreatedDate >= ${soqlDateTime(new Date(since.getTime() - TASK_SKEW_MS).toISOString())}`;
 
 /** The id, or null with the refusal's code when Salesforce refused; anything else propagates for a retry. */
 async function refusedAsNull(run: () => Promise<string>): Promise<{ id: string | null; code?: string }> {
@@ -229,7 +239,7 @@ export async function findLeadHold(client: SalesforceClient, booked: BookedAppoi
  */
 export async function holdForLead(
   client: SalesforceClient,
-  i: { leadId: string; leadName: string | null; booked: BookedAppointment; aiCallId: string; ownerName: string; reason: string; today: string },
+  i: { leadId: string; leadName: string | null; booked: BookedAppointment; aiCallId: string; ownerName: string; reason: string; today: string; since: Date | null },
 ): Promise<AppointmentResult> {
   const lead = checkId(i.leadId, 'leadId');
   const owner = checkId(i.booked.specialistSfUserId, 'the appointment owner');
@@ -248,7 +258,7 @@ export async function holdForLead(
     `Reason: ${oneLine(i.reason)}`,
     eventId === null ? 'No hold could be put on the calendar: book the time now.' : 'A hold is on the calendar at that time: convert the Lead, book it on the Opportunity, then delete the hold.',
   ].join('\n');
-  const task = await refusedAsNull(() => createTaskOnce(client, taskFields({ whatId: null, whoId: lead, ownerId: owner, subject, description, today: i.today })));
+  const task = await refusedAsNull(() => createTaskOnce(client, taskFields({ whatId: null, whoId: lead, ownerId: owner, subject, description, today: i.today }), i.since));
   return {
     kind: 'lead_hold',
     eventId,

@@ -168,7 +168,7 @@ describe('bookOpportunity', () => {
 
 describe('holdForLead (fallback only)', () => {
   const hold = (f: ReturnType<typeof org>) =>
-    holdForLead(f.client, { leadId: LEAD, leadName: 'Jane Seller', booked: PHONE, aiCallId: AI_CALL, ownerName: 'Grant Golden', reason: 'FIELD_CUSTOM_VALIDATION_EXCEPTION: Hunt Lead', today: '2026-10-06' });
+    holdForLead(f.client, { leadId: LEAD, leadName: 'Jane Seller', booked: PHONE, aiCallId: AI_CALL, ownerName: 'Grant Golden', reason: 'FIELD_CUSTOM_VALIDATION_EXCEPTION: Hunt Lead', today: '2026-10-06', since: CALL_ENDED });
 
   it('7: the hold Event is the appointment owner\'s, with no WhoId or WhatId', async () => {
     const f = org();
@@ -220,22 +220,34 @@ describe('holdForLead (fallback only)', () => {
   });
 });
 
+const CALL_ENDED = new Date('2026-09-30T17:45:12.345Z');
+
 describe('createTaskOnce', () => {
   const fields = taskFields({ whatId: OPP, whoId: null, ownerId: OWNER, subject: "AI booked Wed Oct 7, 11:00 AM PT but the calendar was taken: call the seller's back", description: 'd', today: '2026-10-06' });
 
   it('9: finds the Task it already made: no create', async () => {
     const f = org([[TASK_LOOKUP, [{ Id: '00T8X00000Task1QAA' }]]]);
-    expect(await createTaskOnce(f.client, fields)).toBe('00T8X00000Task1QAA');
+    expect(await createTaskOnce(f.client, fields, CALL_ENDED)).toBe('00T8X00000Task1QAA');
     expect(f.creates).toEqual([]);
     expect(f.soql[0]).toBe(
-      `SELECT Id FROM Task WHERE WhatId = '${OPP}' AND OwnerId = '${OWNER}' AND Subject = 'AI booked Wed Oct 7, 11:00 AM PT but the calendar was taken: call the seller\\'s back' AND CTI_Origin__c = 'AI Outreach' AND CreatedDate = LAST_N_DAYS:2 LIMIT 1`,
+      `SELECT Id FROM Task WHERE WhatId = '${OPP}' AND OwnerId = '${OWNER}' AND Subject = 'AI booked Wed Oct 7, 11:00 AM PT but the calendar was taken: call the seller\\'s back' AND CTI_Origin__c = 'AI Outreach' AND CreatedDate >= 2026-09-30T17:44:12Z LIMIT 1`,
     );
+  });
+
+  it('final review: the lookup covers the row\'s whole life (since the call ended, a minute of skew), never only two days', async () => {
+    const f = org([[TASK_LOOKUP, []]]);
+    await createTaskOnce(f.client, fields, CALL_ENDED);
+    expect(f.soql[0]).toContain('AND CreatedDate >= 2026-09-30T17:44:12Z LIMIT 1');
+    expect(f.soql[0]).not.toContain('LAST_N_DAYS');
+    const unknown = org([[TASK_LOOKUP, []]]);
+    await createTaskOnce(unknown.client, fields, null);
+    expect(unknown.soql[0]).not.toContain('CreatedDate');
   });
 
   it('otherwise creates it open, high priority, due today; INVALID_FIELD on the origin retries without it', async () => {
     const f = org();
     f.onCreate = (c) => ('CTI_Origin__c' in c.fields ? refused('INVALID_FIELD', 'No such column CTI_Origin__c') : ok('00T8X00000Task2QAA'));
-    expect(await createTaskOnce(f.client, fields)).toBe('00T8X00000Task2QAA');
+    expect(await createTaskOnce(f.client, fields, CALL_ENDED)).toBe('00T8X00000Task2QAA');
     expect(f.creates[0]!.fields).toMatchObject({ Status: 'Open', Priority: 'High', ActivityDate: '2026-10-06', WhatId: OPP, OwnerId: OWNER });
     expect(f.creates[1]!.fields).not.toHaveProperty('CTI_Origin__c');
   });
@@ -243,7 +255,7 @@ describe('createTaskOnce', () => {
   it('a refusal throws WriteRefusedError with the code', async () => {
     const f = org();
     f.onCreate = () => refused('FIELD_CUSTOM_VALIDATION_EXCEPTION');
-    await expect(createTaskOnce(f.client, fields)).rejects.toMatchObject({ name: 'WriteRefusedError', code: 'FIELD_CUSTOM_VALIDATION_EXCEPTION' });
+    await expect(createTaskOnce(f.client, fields, CALL_ENDED)).rejects.toMatchObject({ name: 'WriteRefusedError', code: 'FIELD_CUSTOM_VALIDATION_EXCEPTION' });
   });
 
   it('a subject over 255 characters is cut', () => {

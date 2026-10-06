@@ -201,7 +201,7 @@ describe('CallPlanBoard', () => {
       const cut = { version: 1, collectedAt: '2026-10-05T10:00:00.000Z', sources: [{ source: 'tasks' as const, status: 'ok' as const, count: 25, truncated: true, note: null }] };
       stubApi({ [`GET ${BOARD}`]: board([card(1, { research: cut }), card(2)], { review: 2 }) });
       render();
-      expect(within(await cardOf('Lead 1')).getByText('Last real contact: none found in recent activity')).toBeInTheDocument();
+      expect(within(await cardOf('Lead 1')).getByText('Last real contact: none found')).toBeInTheDocument();
       expect(within(await cardOf('Lead 2')).queryByText(/Last real contact/)).toBeNull();
     });
   });

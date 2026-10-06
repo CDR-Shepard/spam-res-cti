@@ -8,7 +8,7 @@ import { CALL_STATUS_WORDS, OUTCOME_WORDS, aiExitWords, appointmentWords, notCal
 import { getAiCallResults, outreachKeys } from '@/lib/outreach-api';
 import { errorText, formatDateTime } from '@/lib/outreach-words';
 import { AiCallTranscriptPanel } from './ai-call-transcript';
-import { WritebackBadge, WritebackChanges } from './writeback-changes';
+import { WritebackBadge, WritebackChanges, writebackStatusWords } from './writeback-changes';
 
 export const RESULTS_POLL_MS = 15_000;
 const LIVE_CALL: ReadonlySet<string> = new Set(['queued', 'ringing', 'in_progress', 'transferring']);
@@ -16,12 +16,17 @@ const COLUMNS = 7;
 /** A deep-linked call (`?call=`) not on the pages read so far: read on, at most this many pages. */
 const FOCUS_MAX_PAGES = 10;
 
-/** Read again every 15 seconds while any call is waiting, being placed, or still live. */
-export function resultsPollInterval(pages: readonly AiCallResultsResponse[] | undefined): number | false {
-  const busy = (pages ?? []).some((p) =>
-    p.items.some((i) => i.touchStatus === 'planned' || i.touchStatus === 'dialing' || (i.callStatus !== null && LIVE_CALL.has(i.callStatus))),
-  );
-  return busy ? RESULTS_POLL_MS : false;
+const isBusy = (i: AiCallResult): boolean =>
+  i.touchStatus === 'planned' || i.touchStatus === 'dialing' || (i.callStatus !== null && LIVE_CALL.has(i.callStatus));
+
+/**
+ * Read again every 15 seconds while any call is waiting, being placed, or still live. After a deep link read more than one
+ * page (final review m12), a poll would re-read every one of them: only the linked call, once found, keeps it going.
+ */
+export function resultsPollInterval(pages: readonly AiCallResultsResponse[] | undefined, focusCallId: string | null = null): number | false {
+  const items = (pages ?? []).flatMap((p) => p.items);
+  const watched = focusCallId !== null && (pages?.length ?? 0) > 1 ? items.filter((i) => i.aiCallId === focusCallId) : items;
+  return watched.some(isBusy) ? RESULTS_POLL_MS : false;
 }
 
 /**
@@ -35,7 +40,7 @@ export function AiCallResults({ campaignId, focusCallId = null }: { campaignId: 
     queryFn: ({ pageParam }) => getAiCallResults(campaignId, pageParam),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.nextCursor,
-    refetchInterval: (q) => resultsPollInterval(q.state.data?.pages),
+    refetchInterval: (q) => resultsPollInterval(q.state.data?.pages, focusCallId),
   });
   const items = results.data?.pages.flatMap((p) => p.items) ?? [];
   const found = focusCallId !== null && items.some((i) => i.aiCallId === focusCallId);
@@ -113,7 +118,7 @@ function ResultsTable({ items, focusCallId, onRetried }: { items: AiCallResult[]
                 <SummaryCell r={r} open={isOpen(r, 'transcript')} onToggle={() => toggle(r, 'transcript')} />
               </TableCell>
               <TableCell className="whitespace-normal">{r.appointment ? appointmentWords(r.appointment) : null}</TableCell>
-              <TableCell className="whitespace-normal"><SalesforceCell r={r} onToggle={() => toggle(r, 'writeback')} /></TableCell>
+              <TableCell className="whitespace-normal"><SalesforceCell r={r} open={isOpen(r, 'writeback')} onToggle={() => toggle(r, 'writeback')} /></TableCell>
               <TableCell>{formatDateTime(r.startedAt ?? r.dueAt)}</TableCell>
             </TableRow>
             {isOpen(r, 'writeback') && r.writeback && r.aiCallId && (
@@ -165,13 +170,21 @@ function OutcomeCell({ r }: { r: AiCallResult }) {
 }
 
 /** The write-back's status (a button that opens what was written) and, after a Lead conversion, a link to the new record. */
-function SalesforceCell({ r, onToggle }: { r: AiCallResult; onToggle: () => void }) {
+function SalesforceCell({ r, open, onToggle }: { r: AiCallResult; open: boolean; onToggle: () => void }) {
   const w = r.writeback;
   if (!w) return null;
   const oppUrl = w.convertedOpportunityUrl;
   return (
     <div className="space-y-1">
-      <button type="button" className="cursor-pointer" onClick={onToggle}><WritebackBadge status={w.status} /></button>
+      <button
+        type="button"
+        className="cursor-pointer"
+        aria-expanded={open}
+        aria-label={`Salesforce write-back: ${writebackStatusWords(w.status)}, ${open ? 'hide' : 'show'} what was written`}
+        onClick={onToggle}
+      >
+        <WritebackBadge status={w.status} />
+      </button>
       {w.convertedOpportunityId && (
         <p className="text-xs">{oppUrl ? <a href={oppUrl} target="_blank" rel="noreferrer" className="underline">Converted to Opportunity</a> : 'Converted to Opportunity'}</p>
       )}
@@ -196,7 +209,7 @@ function SummaryCell({ r, open, onToggle }: { r: AiCallResult; open: boolean; on
         </dl>
       )}
       {r.mayReadTranscript && r.aiCallId && (
-        <Button size="sm" variant="outline" onClick={onToggle}>{open ? 'Hide transcript' : 'Transcript'}</Button>
+        <Button size="sm" variant="outline" aria-expanded={open} onClick={onToggle}>{open ? 'Hide transcript' : 'Transcript'}</Button>
       )}
     </div>
   );

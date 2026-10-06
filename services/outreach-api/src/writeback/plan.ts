@@ -105,8 +105,11 @@ export interface WritePlanInput {
   appointment: BookedAppointment | null;
   callbackAt: Date | null;
   now: Date;
-  /** Set when the Lead was converted: the plan targets the new Opportunity (sfObject 'Opportunity'). */
-  converted: { fromLeadId: string } | null;
+  /**
+   * Set when the Lead was converted: the plan targets the new Opportunity (sfObject 'Opportunity'). `byRep`: a rep
+   * converted it, not this write-back, so the rep guard applies (final review): see repGuarded.
+   */
+  converted: { fromLeadId: string; byRep?: boolean } | null;
   /** A practice call: never books (its stored booking is ignored). */
   practice?: boolean;
 }
@@ -217,7 +220,8 @@ const researchBlock = (i: WritePlanInput, current: string | null): 'moved_since_
  * has the record; 5a Fix 1, I-3), also when it is already at the target (sweep D-21(6)). Do-not-call moves always apply.
  * A held move that would change nothing is not listed (D-21(3)).
  */
-function rowMoves(b: Builder, i: WritePlanInput, row: Row): Move[] {
+function rowMoves(b: Builder, i: WritePlanInput, table: Row): Move[] {
+  const row = repGuarded(i, table);
   const name = STATUS_FIELD[i.sfObject];
   const current = asText(currentOf(i.current, b.field(name)?.name ?? name));
   const atTarget = row.status !== null && sameText(current, row.status);
@@ -233,6 +237,17 @@ function rowMoves(b: Builder, i: WritePlanInput, row: Row): Move[] {
     else moves.push(asFill);
   }
   return moves;
+}
+
+/**
+ * A Lead a rep converted (final review): the Opportunity is the rep's, and no research saw it. Its Stage moves only from an
+ * open stage (a Stage the rep closed is theirs), and a value the table would set over theirs (Rating) only fills a blank.
+ * Do-not-call, the reasons (which go with their status) and Next Follow-Up keep their own rules.
+ */
+function repGuarded(i: WritePlanInput, row: Row): Row {
+  if (i.converted?.byRep !== true) return row;
+  const keepsMode = (m: Move): boolean => m.mode !== 'set' || DNC_FIELDS.has(m.field) || REASON_FIELDS.has(m.field) || FOLLOW_UP_FIELDS.has(m.field);
+  return { ...row, onlyFromOpen: true, also: row.also.map((m) => (keepsMode(m) ? m : { ...m, mode: 'fill' })) };
 }
 
 /** The booking moves as a patch plus changes, applied later by the run step. */

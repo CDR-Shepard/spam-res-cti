@@ -42,6 +42,26 @@ describe('WritebackChanges', () => {
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
   });
 
+  it.each([
+    ['pending', 'Nothing was written yet.'],
+    ['running', 'Nothing was written yet.'],
+    ['failed', 'Nothing was written yet.'],
+    ['done', 'Nothing in Salesforce needed changing.'],
+    ['partial', 'Nothing was written.'],
+    ['skipped', 'Nothing was written.'],
+  ] as const)('final review m7: a %s row with no changes reads "%s"', (status, words) => {
+    stubApi({});
+    renderWithProviders(<WritebackChanges summary={summary({ status, changes: [] })} aiCallId={CALL} onRetried={() => {}} />);
+    expect(screen.getByText(words)).toBeInTheDocument();
+  });
+
+  it('final review m7: a skipped row gives its reason as "Why", never as an error', () => {
+    stubApi({});
+    renderWithProviders(<WritebackChanges summary={summary({ status: 'skipped', error: 'write-back is off', changes: [] })} aiCallId={CALL} onRetried={() => {}} />);
+    expect(screen.getByText('Why: write-back is off')).toBeInTheDocument();
+    expect(screen.queryByText(/Last error/)).not.toBeInTheDocument();
+  });
+
   it('a failed write-back shows its error and a Retry that POSTs and then refetches', async () => {
     const calls = stubApi({ [`POST /api/ai-calls/${CALL}/writeback/retry`]: respond(204) });
     const onRetried = vi.fn();

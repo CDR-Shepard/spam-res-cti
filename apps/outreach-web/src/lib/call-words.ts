@@ -198,6 +198,22 @@ export function practiceAnswerWords(r: { result: 'placed' | 'blocked' | 'failed'
   return r.result === 'placed' ? 'Ringing your phone…' : `Not placed: ${reasonWords(r.reason ?? 'unknown')}`;
 }
 
+const RINGING: ReadonlySet<string> = new Set(['queued', 'ringing']);
+const ON_CALL: ReadonlySet<string> = new Set(['in_progress', 'transferring']);
+
+/**
+ * The practice button's status once cti-api answered (final review): it follows the call (its row on the campaign's
+ * practice list) instead of saying "Ringing your phone…" for good.
+ */
+export function practiceStatusWords(
+  answer: { result: 'placed' | 'blocked' | 'failed'; reason?: string },
+  call: { callStatus: AiCallStatus | null; outcome: AiCallOutcome | null } | undefined,
+): string {
+  if (answer.result !== 'placed' || !call || call.callStatus === null || RINGING.has(call.callStatus)) return practiceAnswerWords(answer);
+  if (ON_CALL.has(call.callStatus)) return 'On the call…';
+  return call.outcome ? `Practice call ended: ${OUTCOME_WORDS[call.outcome]}.` : `Practice call ended: ${CALL_STATUS_WORDS[call.callStatus]}.`;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The campaign page's search: `?call=<AI call id>` (the Chatter post's "Call details" link) opens that call on the results. */

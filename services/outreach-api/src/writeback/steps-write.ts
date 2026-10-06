@@ -69,6 +69,7 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
     ownerName: owner?.name ?? 'the appointment owner',
     reason: convert?.detail ?? 'the Lead was not converted',
     today: ptToday(run.deps.now),
+    since: run.ctx.call.endedAt,
   });
   const ids = result.kind === 'lead_hold' ? result : { eventId: null, taskId: null };
   const failed = ids.eventId === null ? 'HOLD_NOT_CREATED' : ids.taskId === null ? 'TASK_NOT_CREATED' : null;
@@ -111,7 +112,7 @@ export async function taskStep(run: RowRun, plan: WritePlan, appt: AppointmentRe
   const target = writeTarget(run.row);
   const record = target.sobject === 'Lead' ? { whatId: null, whoId: target.id } : { whatId: target.id, whoId: null };
   try {
-    const taskId = await createTaskOnce(run.client, taskFields({ ...record, ownerId: a.booked.specialistSfUserId, ...words, today: ptToday(run.deps.now) }));
+    const taskId = await createTaskOnce(run.client, taskFields({ ...record, ownerId: a.booked.specialistSfUserId, ...words, today: ptToday(run.deps.now) }), run.ctx.call.endedAt);
     return saveStep(run, 'task', { status: 'done', taskId }, { sfTaskId: taskId });
   } catch (err) {
     if (!(err instanceof WriteRefusedError)) throw err;

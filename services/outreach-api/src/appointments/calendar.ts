@@ -133,8 +133,17 @@ function allDayBusy(row: Row, start: Date | null, end: Date | null, days: { firs
  * The owner's busy time within [from, to): timed rows overlapping it (touching is not overlapping), and all-day rows on the
  * local dates (in `timeZone`, the owner's) it touches, one item per date. Rows that cannot be read are skipped.
  */
-export async function readBusy(client: SalesforceClient, ownerId: string, from: Date, to: Date, timeZone: string): Promise<Busy[]> {
+export async function readBusy(
+  client: SalesforceClient,
+  ownerId: string,
+  from: Date,
+  to: Date,
+  timeZone: string,
+  /** Told when the read hit BUSY_ROW_LIMIT, so later busy time may be missing (final review: never silent). */
+  onCapped?: (rows: number) => void,
+): Promise<Busy[]> {
   const rows = await client.query<Row>(busySoql(ownerId, from, to, timeZone));
+  if (rows.length >= BUSY_ROW_LIMIT) onCapped?.(rows.length);
   const days = rangeDays(from, to, timeZone);
   return rows.flatMap((row): Busy[] => {
     const start = instant(row.StartDateTime);

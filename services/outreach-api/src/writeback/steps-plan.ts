@@ -55,7 +55,7 @@ async function noOpportunityTask(run: RowRun, accountId: string | null): Promise
   const description = `The AI assistant booked a ${kind} on a call (AI call ${run.row.aiCallId}) for Lead ${run.row.sfRecordId}, which someone had already converted without an Opportunity. Create the Opportunity and book the time.`;
   let taskId: string | null = null;
   try {
-    taskId = await createTaskOnce(run.client, taskFields({ whatId: accountId, whoId: null, ownerId: booked.specialistSfUserId, subject, description, today: ptToday(run.deps.now) }));
+    taskId = await createTaskOnce(run.client, taskFields({ whatId: accountId, whoId: null, ownerId: booked.specialistSfUserId, subject, description, today: ptToday(run.deps.now) }), run.ctx.call.endedAt);
   } catch (err) {
     if (!(err instanceof WriteRefusedError)) throw err;
   }
@@ -90,7 +90,10 @@ export async function convertStepRun(run: RowRun): Promise<{ run: RowRun; result
   if (saved === 'done' && run.row.convertedOpportunityId !== null) return { run, result: 'converted' };
   if (saved === 'failed' || saved === 'skipped') return { run, result: run.row.steps.convert?.detail === 'CONVERTED_WITHOUT_OPPORTUNITY' ? 'no_opportunity' : 'fallback' };
 
-  if (!bookingSettings({ settings: run.ctx.orgSettings }, run.deps.defaultSpecialists).convertLeads) {
+  // A conversion we already saved (its carry failed after the ids were stored) is adopted whatever the switch says now:
+  // the record is converted, so "conversion is off" would be untrue (final review).
+  const ours = run.row.convertedOpportunityId !== null;
+  if (!ours && !bookingSettings({ settings: run.ctx.orgSettings }, run.deps.defaultSpecialists).convertLeads) {
     return { run: await saveStep(run, 'convert', { status: 'skipped', detail: 'conversion is off' }), result: 'fallback' };
   }
   const booked = run.ctx.call.appointment!;
@@ -144,8 +147,12 @@ async function mapAnswers(run: RowRun, sfObject: 'Lead' | 'Opportunity', fields:
 }
 
 /** Step 1: the frozen plan, or a new one against the target's fresh describe and values. */
-export async function planStep(run: RowRun): Promise<{ kind: 'plan'; run: RowRun; plan: WritePlan } | { kind: 'gone' } | { kind: 'budget' }> {
-  if (run.row.plan !== null) return { kind: 'plan', run, plan: StoredWritePlan.parse(run.row.plan) };
+export async function planStep(run: RowRun): Promise<{ kind: 'plan'; run: RowRun; plan: WritePlan } | { kind: 'gone' } | { kind: 'budget' } | { kind: 'invalid' }> {
+  if (run.row.plan !== null) {
+    // A frozen plan that no longer parses (a shape change, a hand edit) never parses on a retry either: fail at once (final review).
+    const stored = StoredWritePlan.safeParse(run.row.plan);
+    return stored.success ? { kind: 'plan', run, plan: stored.data } : { kind: 'invalid' };
+  }
   const target = writeTarget(run.row);
   const describe = await describeObject(run.client, run.deps.describes, run.row.orgId, target.sobject);
   const fields = writableFields(describe, target.sobject);
@@ -164,7 +171,7 @@ export async function planStep(run: RowRun): Promise<{ kind: 'plan'; run: RowRun
     appointment: run.ctx.call.appointment,
     callbackAt: run.ctx.call.callbackAt,
     now: run.deps.now,
-    converted: converted ? { fromLeadId: run.row.sfRecordId } : null,
+    converted: converted ? { fromLeadId: run.row.sfRecordId, byRep: run.row.steps.convert?.data?.repConverted === true } : null,
     practice: run.ctx.call.practice,
   });
   // The Status/Stage as the plan saw it: the PATCH re-checks the status guard against it (I-3).

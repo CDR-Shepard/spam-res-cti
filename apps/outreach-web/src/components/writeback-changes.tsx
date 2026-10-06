@@ -22,6 +22,9 @@ const STATUS_VARIANT: Readonly<Record<WritebackStatus, 'secondary' | 'outline' |
   skipped: 'outline',
 };
 
+/** The badge's words, for a control that names the status. */
+export const writebackStatusWords = (status: WritebackStatus): string => STATUS_WORDS[status];
+
 export function WritebackBadge({ status }: { status: WritebackStatus }) {
   return <Badge variant={STATUS_VARIANT[status]}>{STATUS_WORDS[status]}</Badge>;
 }
@@ -36,6 +39,16 @@ const GROUPS: ReadonlyArray<[WritebackChange['kind'], string]> = [
 ];
 
 const blank = (v: string | null): string => v ?? '(blank)';
+
+/** With no changes listed: still to come (or to retry), finished with nothing to change, or ended without writing. */
+const NOTHING_WORDS: Readonly<Record<WritebackStatus, string>> = {
+  pending: 'Nothing was written yet.',
+  running: 'Nothing was written yet.',
+  failed: 'Nothing was written yet.',
+  done: 'Nothing in Salesforce needed changing.',
+  partial: 'Nothing was written.',
+  skipped: 'Nothing was written.',
+};
 
 /** One change in words. A not_written entry carries its reason in `after`; a kept one the seller's answer (or null: changed since the call). */
 function changeWords(c: WritebackChange): string {
@@ -76,9 +89,10 @@ export function WritebackChanges({ summary, aiCallId, onRetried }: { summary: Wr
   const retry = useMutation({ mutationFn: () => retryWriteback(aiCallId), onSuccess: onRetried });
   return (
     <div className="space-y-2 text-sm">
-      {summary.changes.length === 0 && <p className="text-muted-foreground">Nothing was written yet.</p>}
+      {summary.changes.length === 0 && <p className="text-muted-foreground">{NOTHING_WORDS[summary.status]}</p>}
       <ChangeGroups changes={summary.changes} />
-      {summary.error && <p className="text-muted-foreground">Last error: {summary.error}</p>}
+      {/* A skipped row's "error" is why it was skipped (write-back is off, a test call), not a failure. */}
+      {summary.error && <p className="text-muted-foreground">{summary.status === 'skipped' ? 'Why' : 'Last error'}: {summary.error}</p>}
       {summary.mayRetry && (
         <Button size="sm" variant="outline" disabled={retry.isPending} onClick={() => retry.mutate()}>Retry</Button>
       )}

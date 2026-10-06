@@ -13,7 +13,7 @@ const grant = { id: GRANT, name: 'Grant Golden', title: 'Acquisitions', isActive
 const pat = { id: PAT, name: 'Pat Doe', title: null, isActive: true };
 const sam = { id: SAM, name: 'Sam Gone', title: null, isActive: false };
 
-/** The server's defaults with the configured default owner list (AI_CALL_DEFAULT_SPECIALISTS = Grant Golden). */
+/** A tenant that turned booking, conversion and write-back on, with the configured default owner list (Grant Golden). */
 function settings(over: Partial<AiCallSettings['booking']> = {}, writeback = true): AiCallSettings {
   return {
     booking: {
@@ -43,7 +43,7 @@ describe('AiCallSettingsCard', () => {
     expect(calls).toEqual([]);
   });
 
-  it('renders the defaults', async () => {
+  it('renders a turned-on tenant', async () => {
     stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant] });
     renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
     expect(await screen.findByRole('checkbox', { name: 'Book appointments on AI calls' })).toBeChecked();
@@ -60,6 +60,17 @@ describe('AiCallSettingsCard', () => {
     expect(screen.getByLabelText('Walkthrough earliest (hours ahead)')).toHaveValue(20);
     expect(screen.getByLabelText('Walkthrough latest (business days ahead)')).toHaveValue(5);
     expect(screen.getByText('Every AI-booked appointment goes to the first active person on this list. They distribute them.')).toBeInTheDocument();
+  });
+
+  it('final review WEB I-2: a tenant that never turned them on sees booking, conversion and write-back off, and when to turn them on', async () => {
+    stubApi({ 'GET /api/settings/ai-calls': settings({ enabled: false, convertLeads: false }, false), [idsUrl([GRANT])]: [grant] });
+    renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+    expect(await screen.findByRole('checkbox', { name: 'Book appointments on AI calls' })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Convert a Lead that books an appointment' })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Write call results back to Salesforce' })).not.toBeChecked();
+    expect(screen.getByText(/start off for every tenant/)).toHaveTextContent(
+      'Booking, Lead conversion and Salesforce write-back start off for every tenant, and these switches apply to every AI call campaign. Turn them on only after the readiness check below says Ready, a practice call sounds right, and a one-Lead live check was written back correctly.',
+    );
   });
 
   it('the default list from the server shows Grant Golden first, and booking is on', async () => {
@@ -91,6 +102,9 @@ describe('AiCallSettingsCard', () => {
     await waitFor(() => expect(puts(calls)).toHaveLength(1));
     expect(puts(calls)[0]).toEqual(settings({ specialists: [GRANT, PAT] }));
     expect(await screen.findByRole('status')).toHaveTextContent('Saved.');
+    // final review m8: an edit after saving is not saved, and the page stops saying so.
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Pat Doe' }));
+    expect(screen.queryByText('Saved.')).not.toBeInTheDocument();
   });
 
   it('reorders and removes people; the order is what is saved', async () => {
@@ -169,14 +183,74 @@ describe('AiCallSettingsCard', () => {
     const calls = stubApi({
       'GET /api/settings/ai-calls': settings(),
       [idsUrl([GRANT])]: [grant],
-      'PUT /api/settings/ai-calls': settings({ convertLeads: false }, false),
+      'PUT /api/settings/ai-calls': settings({ convertLeads: false, enabled: false }, false),
     });
     renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
     await userEvent.click(await screen.findByRole('checkbox', { name: 'Convert a Lead that books an appointment' }));
     await userEvent.click(screen.getByRole('checkbox', { name: 'Write call results back to Salesforce' }));
     await userEvent.click(screen.getByRole('button', { name: 'Save AI call settings' }));
     await waitFor(() => expect(puts(calls)).toHaveLength(1));
-    expect(puts(calls)[0]).toEqual(settings({ convertLeads: false }, false));
+    // Fix 2: turning write-back off turns booking off in the same save.
+    expect(puts(calls)[0]).toEqual(settings({ convertLeads: false, enabled: false }, false));
+  });
+
+  describe('fix 2: booking needs write-back', () => {
+    const BOOK = { name: 'Book appointments on AI calls' };
+    const WRITE = { name: 'Write call results back to Salesforce' };
+    const HINT = 'Turn on Salesforce write-back first';
+
+    it('with write-back off the booking checkbox is unticked and disabled, with the hint; with it on there is no hint', async () => {
+      stubApi({ 'GET /api/settings/ai-calls': settings({ enabled: false }, false), [idsUrl([GRANT])]: [grant] });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      const book = await screen.findByRole('checkbox', BOOK);
+      expect(book).toBeDisabled();
+      expect(book).not.toBeChecked();
+      expect(book).toHaveAccessibleDescription(HINT);
+      expect(screen.getByText(HINT)).toBeInTheDocument();
+    });
+
+    it('ticking write-back enables booking, and booking and write-back save together', async () => {
+      const calls = stubApi({
+        'GET /api/settings/ai-calls': settings({ enabled: false }, false),
+        [idsUrl([GRANT])]: [grant],
+        'PUT /api/settings/ai-calls': settings(),
+      });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      await userEvent.click(await screen.findByRole('checkbox', WRITE));
+      expect(screen.getByRole('checkbox', BOOK)).toBeEnabled();
+      expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('checkbox', BOOK));
+      await userEvent.click(screen.getByRole('button', { name: 'Save AI call settings' }));
+      await waitFor(() => expect(puts(calls)).toHaveLength(1));
+      expect(puts(calls)[0]).toEqual(settings());
+    });
+
+    it('unticking write-back unticks booking and disables it; ticking write-back again does not bring booking back', async () => {
+      stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant] });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      expect(await screen.findByRole('checkbox', BOOK)).toBeChecked();
+      await userEvent.click(screen.getByRole('checkbox', WRITE));
+      expect(screen.getByRole('checkbox', BOOK)).not.toBeChecked();
+      expect(screen.getByRole('checkbox', BOOK)).toBeDisabled();
+      await userEvent.click(screen.getByRole('checkbox', WRITE));
+      expect(screen.getByRole('checkbox', BOOK)).not.toBeChecked();
+      expect(screen.getByRole('checkbox', BOOK)).toBeEnabled();
+    });
+
+    it('a saved blob with booking on and write-back off (before the rule) is shown, and saved, as booking off', async () => {
+      const calls = stubApi({
+        'GET /api/settings/ai-calls': settings({ enabled: true }, false),
+        [idsUrl([GRANT])]: [grant],
+        'PUT /api/settings/ai-calls': settings({ enabled: false }, false),
+      });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      const book = await screen.findByRole('checkbox', BOOK);
+      expect(book).not.toBeChecked();
+      expect(book).toBeDisabled();
+      await userEvent.click(screen.getByRole('button', { name: 'Save AI call settings' }));
+      await waitFor(() => expect(puts(calls)).toHaveLength(1));
+      expect(puts(calls)[0]!.booking.enabled).toBe(false);
+    });
   });
 
   it('edits a kind\'s hours and lead time; an end hour not after the start hour cannot be saved', async () => {

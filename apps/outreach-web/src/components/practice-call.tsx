@@ -1,14 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import type { CallPlanCard } from '@cti/contracts';
+import type { CallPlanCard, PracticeCallsResponse, TestCallResponse } from '@cti/contracts';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { useAuth } from '@/lib/auth';
-import { practiceAnswerWords } from '@/lib/call-words';
-import { getAiAvailability, outreachKeys, practiceCall } from '@/lib/outreach-api';
+import { practiceStatusWords } from '@/lib/call-words';
+import { getAiAvailability, outreachKeys, practiceCall, practiceCalls } from '@/lib/outreach-api';
 import { errorText } from '@/lib/outreach-words';
 
 const HINT = "You'll hear exactly what the seller would hear. Nothing is written to Salesforce.";
+const FOLLOW_MS = 5_000;
+const LIVE: ReadonlySet<string> = new Set(['queued', 'ringing', 'in_progress', 'transferring']);
 const NO_NUMBERS = 'No test numbers are set. Add yours to AI_VOICE_TEST_NUMBERS on the CTI API service.';
 
 /**
@@ -16,14 +18,33 @@ const NO_NUMBERS = 'No test numbers are set. Add yours to AI_VOICE_TEST_NUMBERS 
  * with the real record and this card's plan (proposed or approved), and the appointment owner's real free times. It never
  * books, converts or writes anything in Salesforce, and it never approves the plan.
  */
-export function PracticeCall({ card }: { card: CallPlanCard }) {
+export function PracticeCall({ card, campaignId = null }: { card: CallPlanCard; campaignId?: string | null }) {
   const auth = useAuth();
   const isAdmin = Boolean(auth.user?.isAdmin || auth.user?.isSuperAdmin);
   if (!isAdmin || !card.plan) return null;
-  return <AdminPracticeCall enrollmentId={card.enrollmentId} version={card.plan.version} />;
+  return <AdminPracticeCall enrollmentId={card.enrollmentId} version={card.plan.version} campaignId={campaignId} />;
 }
 
-function AdminPracticeCall({ enrollmentId, version }: { enrollmentId: string; version: number }) {
+/** While a placed practice call is not on the list yet, or still live: read the list again (it shares the list card's cache). */
+function followInterval(data: PracticeCallsResponse | undefined, aiCallId: string): number | false {
+  const call = data?.items.find((i) => i.aiCallId === aiCallId);
+  return !call || call.callStatus === null || LIVE.has(call.callStatus) ? FOLLOW_MS : false;
+}
+
+/** What happened to the call this button placed: ringing, on the call, or how it ended (final review). */
+function PracticeStatus({ answer, campaignId }: { answer: TestCallResponse; campaignId: string | null }) {
+  const placed = answer.result === 'placed' ? answer.aiCallId : null;
+  const list = useQuery({
+    queryKey: outreachKeys.practiceCalls(campaignId ?? ''),
+    queryFn: () => practiceCalls(campaignId!),
+    enabled: campaignId !== null && placed !== null,
+    refetchInterval: (q) => (placed === null ? false : followInterval(q.state.data, placed)),
+  });
+  const call = placed === null ? undefined : list.data?.items.find((i) => i.aiCallId === placed);
+  return <p role="status">{practiceStatusWords(answer, call)}</p>;
+}
+
+function AdminPracticeCall({ enrollmentId, version, campaignId }: { enrollmentId: string; version: number; campaignId: string | null }) {
   const qc = useQueryClient();
   const availability = useQuery({ queryKey: outreachKeys.aiAvailability, queryFn: getAiAvailability });
   const [picked, setPicked] = useState<string | null>(null);
@@ -51,7 +72,7 @@ function AdminPracticeCall({ enrollmentId, version }: { enrollmentId: string; ve
         </div>
       )}
       <p className="text-xs text-muted-foreground">{HINT}</p>
-      {call.data && <p role="status">{practiceAnswerWords(call.data)}</p>}
+      {call.data && <PracticeStatus answer={call.data} campaignId={campaignId} />}
       {call.error && <p role="alert" className="text-destructive">{errorText(call.error)}</p>}
     </div>
   );

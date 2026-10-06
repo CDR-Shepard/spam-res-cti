@@ -18,7 +18,7 @@ const GRANT = '0058X00000Fsx39QAB';
 
 describe('offerSlots: slots the contract refuses', () => {
   it('give invalid_slots with the owner named, and no slots', async () => {
-    const booking: AiCallBookingSettings = { ...structuredClone(DEFAULT_AI_CALL_BOOKING), specialists: [GRANT] };
+    const booking: AiCallBookingSettings = { ...structuredClone(DEFAULT_AI_CALL_BOOKING), enabled: true, specialists: [GRANT] };
     const sf = fakeSalesforce({
       queries: [
         [/FROM User/, [{ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles' }]],

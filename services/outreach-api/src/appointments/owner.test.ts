@@ -7,7 +7,7 @@ const GRANT = '0058X00000Fsx39QAB';
 const X = '0058X00000Abcd1QAB';
 const GONE = '0058X00000Zzzz9QAB';
 const user = (sfUserId: string, isActive: boolean, firstName = 'Grant'): OwnerUser => ({ sfUserId, firstName, name: `${firstName} Person`, isActive, timeZone: 'America/Los_Angeles', zoneRefused: null });
-const booking = (specialists: string[]) => ({ ...DEFAULT_AI_CALL_BOOKING, specialists });
+const booking = (specialists: string[]) => ({ ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists });
 const users = (...us: OwnerUser[]) => new Map(us.map((u) => [u.sfUserId, u]));
 
 describe('appointmentOwner: the first ACTIVE user on the ordered list, nobody else', () => {

@@ -161,7 +161,8 @@ export function writebackSummary(r: ResultRow, admin: boolean, instanceUrl: stri
   return {
     status: status.data,
     changes: changes.slice(0, MAX_WRITEBACK_CHANGES),
-    error: r.w_last_error,
+    // Final review: last_error is for admins only; it may carry Salesforce's own words.
+    error: admin ? r.w_last_error : null,
     mayRetry: status.data === 'failed' && admin,
     convertedOpportunityId: r.w_converted_opportunity_id,
     convertedOpportunityUrl: recordUrl(instanceUrl, r.w_converted_opportunity_id),

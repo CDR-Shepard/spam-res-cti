@@ -29,7 +29,10 @@ export interface OutreachSettings {
   aiCallDailyCap: number;
   /** Unanswered-call attempts per lead (no answer, busy, voicemail, failed) before it completes (1–5). */
   aiCallMaxAttempts: number;
-  /** Plan 1D: write call results back to Salesforce. On unless explicitly `false`. */
+  /**
+   * Plan 1D: write call results back to Salesforce. Off unless explicitly `true` (final review WEB I-2): an admin turns it
+   * on in the AI call settings card after the readiness check, a practice call and the one-Lead check.
+   */
   aiCallWriteback: boolean;
 }
 
@@ -43,11 +46,15 @@ export const DEFAULT_AI_CALL_MAX_ATTEMPTS = 3;
  * Booking defaults (user decisions): phone 15 min, Mon–Fri, starts every 30 min 10:00–17:30, earliest 2 h ahead, 2 business
  * days; walkthrough 60 min, starts on the hour 9:00–16:00, earliest 20 h ahead, 5 business days, 30 min buffer; up to 6 of
  * each kind offered. `specialists` is empty here: the configured default list fills it (bookingSettings).
+ *
+ * Final review WEB I-2: booking and Lead conversion are OFF for every tenant until an admin turns them on in the AI call
+ * settings card (after the readiness check, a practice call and the one-Lead check), even when AI_CALL_DEFAULT_SPECIALISTS
+ * is set: that list only pre-fills the owner. No migration: an absent setting is off.
  */
 export const DEFAULT_AI_CALL_BOOKING: Readonly<AiCallBookingSettings> = Object.freeze({
-  enabled: true,
+  enabled: false,
   specialists: [],
-  convertLeads: true,
+  convertLeads: false,
   days: [1, 2, 3, 4, 5],
   phone: { enabled: true, durationMinutes: 15, startHour: 10, endHour: 18, stepMinutes: 30, minLeadMinutes: 120, horizonBusinessDays: 2, bufferMinutes: 0, maxOffered: 6 },
   walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 },
@@ -89,6 +96,25 @@ export function bookingSettings(org: { settings: unknown }, defaultSpecialists: 
   return { ...structuredClone(DEFAULT_AI_CALL_BOOKING), specialists: [...defaultSpecialists] };
 }
 
+/**
+ * Fix 2: what a REAL call may offer. Booking counts only while write-back is on, so a time a seller is offered and takes always
+ * reaches Salesforce (Grant sees it). The settings route refuses to save booking on with write-back off; this is the
+ * defensive twin for a blob saved before that rule, or edited by hand. Only the on switch changes. Lead conversion is
+ * independent and stays as saved (off: the designed hold plus Task fallback).
+ */
+export function liveCallBooking(org: { settings: unknown }, defaultSpecialists: readonly string[]): AiCallBookingSettings {
+  const b = bookingSettings(org, defaultSpecialists);
+  return outreachSettings(org).aiCallWriteback ? b : { ...b, enabled: false };
+}
+
+/**
+ * Fix 2: what a PRACTICE call offers: times whenever booking settings name a specialist, whatever the toggles say, so an admin
+ * can hear the offer before anything is turned on. A practice call still never books, converts or writes.
+ */
+export function practiceBooking(org: { settings: unknown }, defaultSpecialists: readonly string[]): AiCallBookingSettings {
+  return { ...bookingSettings(org, defaultSpecialists), enabled: true };
+}
+
 /** Booking is on and names someone. Whether that list resolves to an ACTIVE user is checked when slots are offered (`no_owner`). */
 export function bookingActive(b: AiCallBookingSettings): boolean {
   return b.enabled && b.specialists.length > 0;
@@ -104,6 +130,6 @@ export function outreachSettings(org: { settings: unknown }): OutreachSettings {
     aiCallConcurrency: intIn(s.aiCallConcurrency, 1, 5, DEFAULT_AI_CALL_CONCURRENCY),
     aiCallDailyCap: intIn(s.aiCallDailyCap, 0, 500, DEFAULT_AI_CALL_DAILY_CAP),
     aiCallMaxAttempts: intIn(s.aiCallMaxAttempts, 1, 5, DEFAULT_AI_CALL_MAX_ATTEMPTS),
-    aiCallWriteback: s.aiCallWriteback !== false,
+    aiCallWriteback: s.aiCallWriteback === true,
   };
 }

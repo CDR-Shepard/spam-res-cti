@@ -8,7 +8,7 @@ import { readUsers, type OwnerUser } from '../appointments/calendar.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import type { DescribeCache } from '../research/describe.js';
-import type { WritebackContext } from './context.js';
+import type { WritebackCall, WritebackContext } from './context.js';
 import type { MappingModel } from './mapping-model.js';
 import { callResult } from './outcome-tables.js';
 import { saveProgress, type Progress, type StepName, type StepState, type Steps, type WritebackRow } from './store.js';
@@ -45,8 +45,11 @@ export class RecordGoneError extends Error {
 }
 
 export const GONE_CODES: ReadonlySet<string> = new Set(['ENTITY_IS_DELETED', 'NOT_FOUND']);
-/** Result-level codes that a retry can fix (thrown as SalesforceApiError so the tick backs off). */
-export const TRANSIENT_CODES: ReadonlySet<string> = new Set(['UNABLE_TO_LOCK_ROW', 'REQUEST_LIMIT_EXCEEDED', 'SERVER_UNAVAILABLE']);
+/**
+ * Result-level codes that a retry can fix (thrown as SalesforceApiError so the tick backs off). UNKNOWN_EXCEPTION is
+ * Salesforce's own internal error, which a later attempt usually clears (final review): never a final "Not written".
+ */
+export const TRANSIENT_CODES: ReadonlySet<string> = new Set(['UNABLE_TO_LOCK_ROW', 'REQUEST_LIMIT_EXCEEDED', 'SERVER_UNAVAILABLE', 'UNKNOWN_EXCEPTION']);
 
 /** A result-level error code the run must not record as a refusal: gone → RecordGoneError, transient → SalesforceApiError. */
 export function throwIfNotARefusal(code: string): void {
@@ -84,7 +87,15 @@ export async function saveStep(run: RowRun, step: StepName, state: StepState, ex
 
 /** The call booked an appointment that stands (D-20: keyed on the result, so a booking then a transfer counts). */
 export function isAppointmentCall(run: RowRun): boolean {
-  const c = run.ctx.call;
+  return callBookedAppointment(run.ctx.call);
+}
+
+/**
+ * The same test on the call alone. Fix 3: a row for such a call is written even when write-back is off, because the seller
+ * was told the time is set (booking is gated on write-back when the call is made, not when it is written). The enqueue
+ * (store.ts) applies the same rule in SQL.
+ */
+export function callBookedAppointment(c: WritebackCall): boolean {
   return callResult(c.outcome, null, c.appointment !== null, { practice: c.practice }) === 'appointment';
 }
 
