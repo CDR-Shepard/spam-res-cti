@@ -3,7 +3,8 @@
  * HMAC-signed by outreach-api, idempotent per key (internal-auth.ts, request-store.ts).
  *
  *   POST /internal/ai-calls               place (or refuse) one AI call
- *   GET  /internal/ai-calls/availability  is AI calling on; the admin test numbers
+ *   GET  /internal/ai-calls/availability  is AI calling on; the admin test numbers; can a browser test get a token
+ *   POST /internal/ai-calls/browser-token an admin's incoming-only Voice token for "Talk in browser" (browser-token.ts)
  *
  * Everything the engine checks for a rep's call it checks here too: gateAiCall runs inside
  * startAiCall, unchanged (consent read fresh from Salesforce, opt-outs, block list, federal
@@ -31,6 +32,7 @@ import { toE164 } from '@cti/phone';
 import { aiVoiceAvailable, loadConfig, parseTestNumbers, type AppConfig } from '../config.js';
 import type { Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
+import { browserCallsAvailable, registerBrowserTokenRoute } from './browser-token.js';
 import { checkInternalRequest, checkInternalTransport, INTERNAL_RATE_MAX } from './internal-auth.js';
 import type { AiCallRecord } from './record.js';
 import { requestHash, STALE_REQUEST_MS, type AiCallRequestRow, type AiCallRequestStore, type CallLookup, type FoundCall } from './request-store.js';
@@ -147,8 +149,14 @@ export async function registerInternalAiCallRoutes(app: FastifyInstance, deps: I
 
     scope.get(INTERNAL_AI_AVAILABILITY_PATH, { config: { rateLimit } }, async (): Promise<AiAvailability> => {
       const cfg = cfgOf();
-      return { available: aiVoiceAvailable(cfg), testNumbers: [...parseTestNumbers(cfg.AI_VOICE_TEST_NUMBERS)] };
+      return {
+        available: aiVoiceAvailable(cfg),
+        testNumbers: [...parseTestNumbers(cfg.AI_VOICE_TEST_NUMBERS)],
+        browserCalls: browserCallsAvailable(cfg),
+      };
     });
+
+    registerBrowserTokenRoute(scope, deps, cfgOf, rateLimit);
 
     scope.post(INTERNAL_AI_CALLS_PATH, { config: { rateLimit } }, async (req, reply) => {
       const parsed = InternalAiCallRequest.safeParse(req.body);

@@ -518,9 +518,17 @@ describe('GET /internal/ai-calls/availability', () => {
     const signed = internalRequestHeaders(SECRET, { method: 'GET', path: INTERNAL_AI_AVAILABILITY_PATH, body: '' }, NOW);
     const res = await get(signed);
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ available: true, testNumbers: ['+15125550100', '+15125550101'] });
+    expect(res.json()).toEqual({ available: true, testNumbers: ['+15125550100', '+15125550101'], browserCalls: false });
     cfg.OUTREACH_KILL_SWITCH = 'on';
-    expect((await get(signed)).json()).toEqual({ available: false, testNumbers: ['+15125550100', '+15125550101'] });
+    expect((await get(signed)).json()).toEqual({ available: false, testNumbers: ['+15125550100', '+15125550101'], browserCalls: false });
+  });
+
+  it('plan 1E: browserCalls says whether a browser test can get a token (AI voice on, the account and API key set)', async () => {
+    const signed = internalRequestHeaders(SECRET, { method: 'GET', path: INTERNAL_AI_AVAILABILITY_PATH, body: '' }, NOW);
+    Object.assign(cfg, { TWILIO_ACCOUNT_SID: `AC${'1'.repeat(32)}`, TWILIO_API_KEY_SID: `SK${'2'.repeat(32)}`, TWILIO_API_KEY_SECRET: 's' });
+    expect((await get(signed)).json()).toMatchObject({ available: true, browserCalls: true });
+    cfg.AI_VOICE = 'off';
+    expect((await get(signed)).json()).toMatchObject({ available: false, browserCalls: false });
   });
 
   it('10: unsigned -> 401', async () => {

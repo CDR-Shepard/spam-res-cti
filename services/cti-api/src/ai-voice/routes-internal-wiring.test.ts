@@ -77,7 +77,7 @@ describe('internal AI call routes, as registered by registerAiVoiceRoutes', () =
   it('serves the signed availability check on the private host', async () => {
     const res = await signedGet();
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ available: true, testNumbers: ['+16195550199'] });
+    expect(res.json()).toEqual({ available: true, testNumbers: ['+16195550199'], browserCalls: false });
   });
 
   it('S-4: while OUTREACH_INTERNAL_SECRET is unset (the default today) the route is the framework\'s own 404, as if it did not exist', async () => {
