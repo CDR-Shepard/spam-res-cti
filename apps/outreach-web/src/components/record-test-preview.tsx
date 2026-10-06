@@ -64,7 +64,7 @@ export function RecordTestPreview({ id, onOpen, onBrowserLive }: { id: string; o
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4 text-sm">
-        {test.error && <p role="alert" className="text-destructive">{`Couldn't refresh this test: ${errorText(test.error)} Still trying.`}</p>}
+        {test.error && <p role="alert" className="text-destructive">{`Couldn't refresh this test: ${errorText(test.error)}${recordTestPollInterval(t) ? ' Still trying.' : ''}`}</p>}
         {t.status === 'running' && <p role="status" className="text-muted-foreground">Reading Salesforce and writing the plan… (about a minute)</p>}
         {t.status === 'failed' && (
           <div className="space-y-2">

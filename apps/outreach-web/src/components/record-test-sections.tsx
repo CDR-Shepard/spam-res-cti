@@ -1,9 +1,9 @@
 import { contactLabel, lastContactWordsAt, type AppointmentSlot, type CallPlan, type RecordTest } from '@cti/contracts';
 import type { ReactNode } from 'react';
 import { Badge } from '@/components/ui/badge';
-import { appointmentWords, CONSENT_WORDS, EVIDENCE_WORDS, GOAL_WORDS, sourceLine, STRENGTH_WORDS, TOPIC_WORDS } from '@/lib/call-words';
+import { appointmentWords, EVIDENCE_WORDS, GOAL_WORDS, sourceLine, STRENGTH_WORDS, TOPIC_WORDS } from '@/lib/call-words';
 import { DNC_CATEGORY_WORDS } from '@/lib/outreach-words';
-import { costWords, offerNoteWords } from '@/lib/record-test-words';
+import { costWords, offerNoteWords, RECORD_TEST_CONSENT_WORDS } from '@/lib/record-test-words';
 
 const PT = 'America/Los_Angeles';
 const PLAN_TEXT_LABEL = 'The plan text the agent gets';
@@ -53,7 +53,7 @@ function ConsentLines({ test }: { test: RecordTest }) {
   if (!test.consent) return null;
   return (
     <div className="space-y-1">
-      <Badge variant={test.consent === 'yes' ? 'secondary' : 'destructive'}>{CONSENT_WORDS[test.consent]}</Badge>
+      <Badge variant={test.consent === 'yes' ? 'secondary' : 'destructive'}>{RECORD_TEST_CONSENT_WORDS[test.consent]}</Badge>
       {test.consent !== 'yes' && <p className="font-medium text-destructive">A campaign would not call this person. A test only rings you.</p>}
     </div>
   );

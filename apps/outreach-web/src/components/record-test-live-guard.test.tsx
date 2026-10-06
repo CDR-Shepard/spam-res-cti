@@ -41,7 +41,7 @@ describe('a live call and the page around it', () => {
     renderWithProviders(<RecordTestPreview id={TEST_ID} onOpen={() => {}} />, { isAdmin: true });
     expect(await screen.findByRole('button', { name: 'Ring my phone' })).toBeInTheDocument();
     table[GET] = respond(500, { error: 'outreach-api is restarting', code: 'INTERNAL' });
-    expect(await screen.findByText(/Couldn't refresh this test/, {}, { timeout: 4000 })).toHaveTextContent('outreach-api is restarting');
+    expect(await screen.findByText(/Couldn't refresh this test/, {}, { timeout: 4000 })).toHaveTextContent('outreach-api is restarting Still trying.');
     expect(screen.getByRole('button', { name: 'Ring my phone' })).toBeInTheDocument();
     expect(screen.getByText('Jane Seller')).toBeInTheDocument();
   });

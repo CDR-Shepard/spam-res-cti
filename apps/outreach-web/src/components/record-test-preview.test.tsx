@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { focusManager } from '@tanstack/react-query';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from '../test/render';
 import { LEAD_ID, OTHER_TEST_ID, PLAN_TEXT, TEST_ID, recordPlan, recordTest } from '../test/record-test-fixtures';
 import { respond, stubApi } from '../test/stub-api';
 import { RecordTestPreview } from './record-test-preview';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  focusManager.setFocused(undefined);
+});
 
 const GET = `GET /api/record-tests/${TEST_ID}`;
 const CREATE = 'POST /api/record-tests';
@@ -94,5 +98,21 @@ describe('RecordTestPreview', () => {
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith(OTHER_TEST_ID));
     expect(calls.find((c) => c.method === 'POST')?.body).toEqual({ record: LEAD_ID });
     expect(within(document.body).queryByLabelText('The plan text the agent gets')).not.toBeInTheDocument();
+  });
+
+  it('consent that could not be read points to Regenerate, the button on this page', async () => {
+    show({ [GET]: recordTest({ consent: 'unknown' }) });
+    expect(await screen.findByText('AI consent: could not be read — Regenerate')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Regenerate' })).toBeInTheDocument();
+  });
+
+  it('a failed re-read of a settled test says so, without "Still trying." (nothing retries until the page is focused again)', async () => {
+    const { table } = show({ [GET]: recordTest() });
+    expect(await screen.findByText('AI consent: yes')).toBeInTheDocument();
+    table[GET] = respond(500, { error: 'outreach-api is restarting', code: 'INTERNAL' });
+    act(() => { focusManager.setFocused(false); focusManager.setFocused(true); });
+    const alert = await screen.findByText(/Couldn't refresh this test/);
+    expect(alert).toHaveTextContent("Couldn't refresh this test: outreach-api is restarting");
+    expect(alert).not.toHaveTextContent('Still trying.');
   });
 });

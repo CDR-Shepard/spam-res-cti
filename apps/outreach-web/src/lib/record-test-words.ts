@@ -1,5 +1,6 @@
-import type { RecordTestError, RecordTestStatus } from '@cti/contracts';
+import type { AiConsentStatus, RecordTestError, RecordTestStatus } from '@cti/contracts';
 import { ApiRequestError } from './api';
+import { CONSENT_WORDS } from './call-words';
 import { errorText, wordFor } from './outreach-words';
 
 /** Test a record (plan 1E): why a preview failed, in words. */
@@ -47,9 +48,12 @@ function retryAtOf(details: unknown): string | null {
   return typeof at === 'string' && !Number.isNaN(Date.parse(at)) ? at : null;
 }
 
+/** The plan board's consent words, except that this page's button is Regenerate, not "research again". */
+export const RECORD_TEST_CONSENT_WORDS: Record<AiConsentStatus, string> = { ...CONSENT_WORDS, unknown: 'AI consent: could not be read — Regenerate' };
+
 /**
  * A record test route's refusal in words. A 429 keeps the server's reason and says when to try again in the viewer's
- * own zone (the server words it in Pacific time).
+ * own zone (the server words it in the tenant's zone).
  */
 export function recordTestErrorText(error: unknown): string {
   if (error instanceof ApiRequestError && error.status === 429) {
