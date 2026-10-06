@@ -32,6 +32,8 @@ export interface RenderInput {
   conversion: { leadName: string | null; ownerName: string; adopted: boolean } | null;
   /** Set on the fallback path: why the Lead could not be converted. */
   conversionRefused: string | null;
+  /** Why a Lead was not converted when no hold or "convert and book" Task was made either (the booked time passed, I-1). */
+  notConverted?: string | null;
   /** Who a booked call was then transferred to (plan.bookingThen 'transferred'); null or absent reads "a rep". */
   transferredTo?: string | null;
 }
@@ -123,7 +125,10 @@ function bookedWords(plan: WritePlan): string | null {
 export function changesFieldText(i: RenderInput): string {
   const header = `AI call on ${ptWords(i.at)} · ${oneLine(i.outcomeWords)} · AI call ${oneLine(i.aiCallId).slice(0, 8)}…`;
   const created = [...(i.conversion ? [conversionLine(i.conversion)] : []), ...i.applied.created.map(oneLine)];
-  const refused = i.conversionRefused === null ? [] : [`Lead not converted: ${oneLine(i.conversionRefused)}; a hold and a "convert and book" Task were created instead`];
+  const refused = [
+    ...(i.conversionRefused === null ? [] : [`Lead not converted: ${oneLine(i.conversionRefused)}; a hold and a "convert and book" Task were created instead`]),
+    ...(i.notConverted === undefined || i.notConverted === null ? [] : [`Lead not converted: ${oneLine(i.notConverted)}`]),
+  ];
   const booked = bookedWords(i.plan);
   const then = thenWords(i);
   const lines = [

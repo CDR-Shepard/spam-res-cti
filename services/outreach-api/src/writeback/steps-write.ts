@@ -3,10 +3,11 @@
  * conflict/refusal Task, the one PATCH (plan + booking moves + AI Last Call Changes), and the Chatter post. Each saves its
  * result before the next runs.
  */
+import type { BookedAppointment } from '@cti/contracts';
 import { soqlEscape } from '@cti/salesforce';
 import { describeObject } from '../research/describe.js';
 import { bookingSettings } from '../settings.js';
-import { bookOpportunity, createTaskOnce, holdForLead, taskFields, WriteRefusedError, type AppointmentResult } from './appointment.js';
+import { bookingPassed, bookOpportunity, createTaskOnce, holdForLead, PASSED_TASK_SUBJECT, taskFields, WriteRefusedError, type AppointmentResult } from './appointment.js';
 import { CHANGES_FIELD, writableFields } from './fields.js';
 import { patchDroppingRefused, without, type FieldRefusal } from './patch.js';
 import type { Change, WritePlan } from './plan.js';
@@ -30,6 +31,11 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
   if (isDone(run, 'appointment')) return { run, result: savedAppointment(run) };
   const a = plan.appointment;
   if (a === null) return { run: await saveStep(run, 'appointment', { status: 'skipped' }), result: null };
+  if (bookingPassed(a.booked, run.deps.now)) {
+    // The time has passed (a late retry, an admin retry days later): nothing goes on the calendar; handled like a conflict.
+    const result: AppointmentResult = { kind: 'expired' };
+    return { run: await saveStep(run, 'appointment', { status: 'done', detail: 'expired', data: { result } }), result };
+  }
   const owner = await ownerOf(run);
   const target = writeTarget(run.row);
   if (a.kind === 'opportunity_event') {
@@ -69,17 +75,36 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
   return { run: next, result };
 }
 
-/** Step 4 (run before the PATCH, so the changes text lists it): an Opportunity whose slot was taken or refused gets a Task to the owner. */
+/** The Task's words: the slot was taken or refused (an Opportunity), or the booked time passed (either object, I-1). */
+function taskWords(run: RowRun, booked: BookedAppointment, appt: AppointmentResult): { subject: string; description: string } | null {
+  const when = ptWords(new Date(booked.start));
+  const call = `on an AI call (AI call ${run.row.aiCallId})`;
+  if (appt.kind === 'expired') {
+    const description = `The seller agreed to a ${KIND[booked.kind]} at ${when} ${call}, but that time passed before the write-back could save it, so nothing was put on the calendar. Call the seller to re-book.`;
+    return { subject: PASSED_TASK_SUBJECT, description };
+  }
+  if (appt.kind !== 'conflict' && appt.kind !== 'refused') return null;
+  const why = appt.kind === 'conflict' ? 'the calendar was taken' : `Salesforce refused the Event (${appt.code})`;
+  return {
+    subject: `AI booked a ${KIND[booked.kind]} for ${when} but ${why}: call the seller to set a time`,
+    description: `The seller agreed to a ${KIND[booked.kind]} at ${when} ${call}, but ${why}. Call the seller to set a time.`,
+  };
+}
+
+/**
+ * Step 4 (run before the PATCH, so the changes text lists it): a Task to the appointment owner when an Opportunity's slot
+ * was taken or refused, or when the booked time passed (on the Opportunity, or on the Lead that was not converted).
+ */
 export async function taskStep(run: RowRun, plan: WritePlan, appt: AppointmentResult | null): Promise<RowRun> {
   if (isDone(run, 'task')) return run;
-  const booked = plan.appointment?.booked;
-  if (!booked || plan.appointment?.kind !== 'opportunity_event' || (appt?.kind !== 'conflict' && appt?.kind !== 'refused')) return saveStep(run, 'task', { status: 'skipped' });
-  const when = ptWords(new Date(booked.start));
-  const why = appt.kind === 'conflict' ? 'the calendar was taken' : `Salesforce refused the Event (${appt.code})`;
-  const subject = `AI booked a ${KIND[booked.kind]} for ${when} but ${why}: call the seller to set a time`;
-  const description = `The seller agreed to a ${KIND[booked.kind]} at ${when} on an AI call (AI call ${run.row.aiCallId}), but ${why}. Call the seller to set a time.`;
+  const a = plan.appointment;
+  const onOpportunity = a?.kind === 'opportunity_event';
+  const words = a && appt && (onOpportunity || appt.kind === 'expired') ? taskWords(run, a.booked, appt) : null;
+  if (!a || words === null) return saveStep(run, 'task', { status: 'skipped' });
+  const target = writeTarget(run.row);
+  const record = target.sobject === 'Lead' ? { whatId: null, whoId: target.id } : { whatId: target.id, whoId: null };
   try {
-    const taskId = await createTaskOnce(run.client, taskFields({ whatId: writeTarget(run.row).id, whoId: null, ownerId: booked.specialistSfUserId, subject, description, today: ptToday(run.deps.now) }));
+    const taskId = await createTaskOnce(run.client, taskFields({ ...record, ownerId: a.booked.specialistSfUserId, ...words, today: ptToday(run.deps.now) }));
     return saveStep(run, 'task', { status: 'done', taskId }, { sfTaskId: taskId });
   } catch (err) {
     if (!(err instanceof WriteRefusedError)) throw err;

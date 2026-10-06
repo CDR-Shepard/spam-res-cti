@@ -32,6 +32,7 @@ export type ConvertOutcome =
   | { kind: 'adopted'; opportunityId: string; accountId: string | null; contactId: string | null; adopted: true; ours: boolean }
   | { kind: 'no_opportunity'; accountId: string | null } // converted (by someone) without an Opportunity → Task to the owner, row partial
   | { kind: 'refused'; code: string; message: string } // permanent → fallback path
+  | { kind: 'not_converted' } // `adoptOnly` and the Lead stands unconverted: nothing was asked of SOAP
   | { kind: 'gone' }; // Lead deleted → row skipped
 
 type Row = Record<string, unknown>;
@@ -125,17 +126,20 @@ async function onConvertError(err: unknown, client: SalesforceClient, i: { leadI
 
 /**
  * Adopt-or-convert one Lead. Returns the outcome and the Lead's values before conversion (saved on the row, so a retry
- * never needs the Lead again). `leadDescribe` narrows the read to the carry fields the org has.
+ * never needs the Lead again). `leadDescribe` narrows the read to the carry fields the org has. `adoptOnly` (the booked
+ * time has passed, Fix 1 I-1): a converted Lead is still adopted (an earlier attempt's conversion is kept), but an
+ * unconverted one is never converted: `not_converted`.
  */
 export async function convertStep(
   client: SalesforceClient,
-  i: { leadId: string; ownerId: string; callEndedAt: Date; leadDescribe?: SObjectDescribe },
+  i: { leadId: string; ownerId: string; callEndedAt: Date; leadDescribe?: SObjectDescribe; adoptOnly?: boolean },
 ): Promise<{ outcome: ConvertOutcome; lead: Row | null }> {
   if (!SF_ID.test(i.leadId)) throw new RangeError('convertStep: not a Salesforce id');
   const select = leadSelect(i.leadDescribe);
   const lead = await readLead(client, i.leadId, select);
   if (lead === null) return { outcome: { kind: 'gone' }, lead: null };
   if (lead.IsConverted === true) return { outcome: await adopt(client, lead, i.callEndedAt), lead };
+  if (i.adoptOnly === true) return { outcome: { kind: 'not_converted' }, lead };
 
   let status: string;
   try {

@@ -19,8 +19,16 @@ import { ptWords } from './render.js';
 export type AppointmentResult =
   | { kind: 'created' | 'existing'; eventId: string }
   | { kind: 'conflict' }
+  /** The booked time had passed when the row ran (Fix 1, I-1): nothing was put on the calendar; handled like a conflict. */
+  | { kind: 'expired' }
   | { kind: 'refused'; code: string }
   | { kind: 'lead_hold'; eventId: string | null; taskId: string | null };
+
+/** The booked time has ended by `now`: no Event, hold or conversion is made for it (Fix 1, I-1). */
+export const bookingPassed = (booked: BookedAppointment, now: Date): boolean => new Date(booked.end).getTime() <= now.getTime();
+
+/** The Task subject when the booked time passed before the write-back could save it (Fix 1, I-1). */
+export const PASSED_TASK_SUBJECT = 'Appointment time passed before it could be saved — call the seller to re-book';
 
 /** Salesforce refused a create for good; `code` is its first statusCode. */
 export class WriteRefusedError extends Error {

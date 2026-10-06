@@ -60,6 +60,8 @@ export function appointmentWords(i: { booked: BookedAppointment; result: Appoint
       return `${kind} for ${when} not booked: the calendar was taken (Task to ${name})`;
     case 'refused':
       return `${kind} for ${when} not booked: Salesforce refused the Event, ${result.code} (Task to ${name})`;
+    case 'expired':
+      return `${kind} for ${when} not booked: the time passed before it could be saved (Task to ${name})`;
     case 'lead_hold':
       return `${kind} ${when} held on ${name}'s calendar; the Lead was not converted (Task to ${name})`;
     default:
@@ -78,7 +80,9 @@ export function createdLines(i: { plan: WritePlan; result: AppointmentResult | n
   if (r?.kind === 'lead_hold') {
     return [...(r.eventId ? [`Hold on ${name}'s calendar: ${when}`] : []), ...(r.taskId ? [`Task to ${name}: convert the Lead and book it`] : [])];
   }
-  return i.taskId ? [`Task to ${name}: call the seller to set a time (${when} was not booked)`] : [];
+  if (!i.taskId) return [];
+  if (r?.kind === 'expired') return [`Task to ${name}: call the seller to re-book (${when} passed before it could be saved)`];
+  return [`Task to ${name}: call the seller to set a time (${when} was not booked)`];
 }
 
 /** URLs out of the summary before it is posted: Chatter turns them into links (D-17). */
@@ -99,6 +103,8 @@ export function renderInputFor(run: RowRun, plan: WritePlan, applied: Applied, e
   const converted = convert?.status === 'done' && run.row.convertedOpportunityId !== null;
   const data = convert?.data ?? {};
   const refused = convert === undefined || converted || convert.detail === 'CONVERTED_WITHOUT_OPPORTUNITY' ? null : (convert.detail ?? 'not converted');
+  // The booked time passed (I-1): no hold and no "convert and book" Task were made, so the reason is said on its own.
+  const passed = (run.row.steps.appointment?.data?.result as { kind?: unknown } | undefined)?.kind === 'expired';
   return {
     at: run.ctx.call.endedAt ?? run.deps.now,
     outcomeWords: OUTCOME_WORDS[run.ctx.call.outcome] ?? run.ctx.call.outcome,
@@ -109,7 +115,8 @@ export function renderInputFor(run: RowRun, plan: WritePlan, applied: Applied, e
     appointmentWords: extra.appointmentWords,
     resultsUrl: resultsUrl(run),
     conversion: converted ? { leadName: typeof data.leadName === 'string' ? data.leadName : null, ownerName: ownerName(extra.owner), adopted: data.repConverted === true } : null,
-    conversionRefused: refused,
+    conversionRefused: passed ? null : refused,
+    notConverted: passed ? refused : null,
     transferredTo: run.ctx.call.transferredTo,
   };
 }

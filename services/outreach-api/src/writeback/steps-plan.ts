@@ -7,7 +7,7 @@ import { addSpend, budgetMicros, spentTodayMicros } from '../ai/budget.js';
 import { costMicros, type TriageUsage } from '../ai/model.js';
 import { describeObject } from '../research/describe.js';
 import { bookingSettings } from '../settings.js';
-import { createTaskOnce, taskFields, WriteRefusedError } from './appointment.js';
+import { bookingPassed, createTaskOnce, taskFields, WriteRefusedError } from './appointment.js';
 import { CARRY_FIELDS, carryPatch, convertStep, LEAD_MANAGER_FIELD, leadManagerFor, type ConvertOutcome } from './convert.js';
 import { readCurrent, writableFields, type WritableField } from './fields.js';
 import { MappingOutputError, type MappedAnswers } from './mapping-model.js';
@@ -18,6 +18,8 @@ import { isAppointmentCall, ptToday, saveStep, type RowRun } from './row-run.js'
 import { saveProgress, writeTarget } from './store.js';
 
 type Row = Record<string, unknown>;
+/** The convert step's detail when the booked time passed before the Lead was converted (I-1). */
+export const BOOKING_PASSED_DETAIL = 'the booked time passed before it could be saved';
 export type ConvertStepResult = 'converted' | 'fallback' | 'no_opportunity' | 'gone' | 'not_needed';
 
 const errName = (err: unknown): string => (err instanceof Error ? err.name : typeof err);
@@ -91,10 +93,14 @@ export async function convertStepRun(run: RowRun): Promise<{ run: RowRun; result
   }
   const booked = run.ctx.call.appointment!;
   const leadDescribe = await describeObject(run.client, run.deps.describes, run.row.orgId, 'Lead');
-  const { outcome, lead } = await convertStep(run.client, { leadId: run.row.sfRecordId, ownerId: booked.specialistSfUserId, callEndedAt: run.ctx.call.endedAt ?? run.deps.now, leadDescribe });
+  // Conversion is for an appointment that stands: once the time has passed, a Lead is only adopted, never converted (I-1).
+  const adoptOnly = bookingPassed(booked, run.deps.now);
+  const { outcome, lead } = await convertStep(run.client, { leadId: run.row.sfRecordId, ownerId: booked.specialistSfUserId, callEndedAt: run.ctx.call.endedAt ?? run.deps.now, leadDescribe, adoptOnly });
   switch (outcome.kind) {
     case 'gone':
       return { run, result: 'gone' };
+    case 'not_converted':
+      return { run: await saveStep(run, 'convert', { status: 'skipped', detail: BOOKING_PASSED_DETAIL }), result: 'fallback' };
     case 'refused':
       run.deps.log.warn({ writebackId: run.row.id, aiCallId: run.row.aiCallId, step: 'convert', code: outcome.code }, 'ai_call.writeback: Salesforce refused the Lead conversion; taking the fallback');
       return { run: await saveStep(run, 'convert', { status: 'failed', detail: `${outcome.code}: ${outcome.message}` }), result: 'fallback' };
