@@ -33,6 +33,16 @@ const book = (f: ReturnType<typeof org>, booked = PHONE, bufferMinutes = 30) =>
   bookOpportunity(f.client, { oppId: OPP, booked, location: ADDRESS, aiCallId: AI_CALL, sellerTimeZone: 'America/Chicago', bufferMinutes });
 
 describe('bookOpportunity', () => {
+  it('I-1: the booked time has passed: an Event an earlier attempt made is still found; otherwise expired, no calendar read, no create', async () => {
+    const late = new Date('2026-10-07T19:00:00.000Z');
+    const f = org([[EXISTING_EVENT, [{ Id: '00U8X00000Evnt1QAA' }]]]);
+    expect(await bookOpportunity(f.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, now: late })).toEqual({ kind: 'existing', eventId: '00U8X00000Evnt1QAA' });
+    const g = org();
+    expect(await bookOpportunity(g.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, now: late })).toEqual({ kind: 'expired' });
+    expect(g.soql.some((q) => BUSY.test(q))).toBe(false);
+    expect(g.creates).toEqual([]);
+  });
+
   it('1: no Event yet and a free calendar: creates it like reps do (body pinned)', async () => {
     const f = org();
     expect(await book(f)).toEqual({ kind: 'created', eventId: expect.stringMatching(/^00U/) });

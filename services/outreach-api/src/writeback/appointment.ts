@@ -143,12 +143,12 @@ const originClause = (withOrigin: boolean): string => (withOrigin ? ` AND ${ORIG
 const firstCode = (r: CompositeResult): string => r.errors[0]?.statusCode ?? 'UNKNOWN_ERROR';
 
 /**
- * The Event on the Opportunity: an existing one of ours, else (calendar still free) a new one. A conflict or a refusal
- * creates nothing; the caller moves the stage to Followup and gives the owner a Task.
+ * The Event on the Opportunity: an existing one of ours, else (the time still ahead, the calendar still free) a new one. A
+ * passed time, a conflict or a refusal creates nothing; the caller moves the stage to Followup and gives the owner a Task.
  */
 export async function bookOpportunity(
   client: SalesforceClient,
-  i: { oppId: string; booked: BookedAppointment; location: string | null; aiCallId: string; sellerTimeZone: string | null; bufferMinutes: number; ownerTimeZone?: string },
+  i: { oppId: string; booked: BookedAppointment; location: string | null; aiCallId: string; sellerTimeZone: string | null; bufferMinutes: number; ownerTimeZone?: string; now?: Date },
 ): Promise<AppointmentResult> {
   const opp = checkId(i.oppId, 'oppId');
   const owner = checkId(i.booked.specialistSfUserId, 'the appointment owner');
@@ -157,6 +157,8 @@ export async function bookOpportunity(
     (o) => `SELECT Id FROM Event WHERE WhatId = '${soqlEscape(opp)}' AND OwnerId = '${soqlEscape(owner)}' AND StartDateTime = ${soqlDateTime(i.booked.start)}${originClause(o)} LIMIT 1`,
   );
   if (existing !== null) return { kind: 'existing', eventId: existing };
+  // The time has passed (a late retry): an Event an earlier attempt made was found above; none is made now (I-1).
+  if (i.now !== undefined && bookingPassed(i.booked, i.now)) return { kind: 'expired' };
 
   const window = { start: new Date(i.booked.start), end: new Date(i.booked.end) };
   const bufferMs = i.booked.kind === 'walkthrough' ? i.bufferMinutes * MIN_MS : 0;

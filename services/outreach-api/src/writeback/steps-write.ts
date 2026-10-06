@@ -33,8 +33,8 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
   if (isDone(run, 'appointment')) return { run, result: savedAppointment(run) };
   const a = plan.appointment;
   if (a === null) return { run: await saveStep(run, 'appointment', { status: 'skipped' }), result: null };
-  if (bookingPassed(a.booked, run.deps.now)) {
-    // The time has passed (a late retry, an admin retry days later): nothing goes on the calendar; handled like a conflict.
+  if (a.kind === 'lead_hold' && bookingPassed(a.booked, run.deps.now)) {
+    // The time has passed (a late retry, an admin retry days later): no hold; handled like a conflict (I-1).
     const result: AppointmentResult = { kind: 'expired' };
     return { run: await saveStep(run, 'appointment', { status: 'done', detail: 'expired', data: { result } }), result };
   }
@@ -50,6 +50,7 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
       sellerTimeZone: sellerTimeZone(run.ctx.call.toE164),
       bufferMinutes: booking.walkthrough.bufferMinutes,
       ...(owner ? { ownerTimeZone: owner.timeZone } : {}),
+      now: run.deps.now,
     });
     const eventId = result.kind === 'created' || result.kind === 'existing' ? result.eventId : undefined;
     const status = result.kind === 'refused' ? 'failed' : 'done';
