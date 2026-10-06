@@ -183,14 +183,74 @@ describe('AiCallSettingsCard', () => {
     const calls = stubApi({
       'GET /api/settings/ai-calls': settings(),
       [idsUrl([GRANT])]: [grant],
-      'PUT /api/settings/ai-calls': settings({ convertLeads: false }, false),
+      'PUT /api/settings/ai-calls': settings({ convertLeads: false, enabled: false }, false),
     });
     renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
     await userEvent.click(await screen.findByRole('checkbox', { name: 'Convert a Lead that books an appointment' }));
     await userEvent.click(screen.getByRole('checkbox', { name: 'Write call results back to Salesforce' }));
     await userEvent.click(screen.getByRole('button', { name: 'Save AI call settings' }));
     await waitFor(() => expect(puts(calls)).toHaveLength(1));
-    expect(puts(calls)[0]).toEqual(settings({ convertLeads: false }, false));
+    // Fix 2: turning write-back off turns booking off in the same save.
+    expect(puts(calls)[0]).toEqual(settings({ convertLeads: false, enabled: false }, false));
+  });
+
+  describe('fix 2: booking needs write-back', () => {
+    const BOOK = { name: 'Book appointments on AI calls' };
+    const WRITE = { name: 'Write call results back to Salesforce' };
+    const HINT = 'Turn on Salesforce write-back first';
+
+    it('with write-back off the booking checkbox is unticked and disabled, with the hint; with it on there is no hint', async () => {
+      stubApi({ 'GET /api/settings/ai-calls': settings({ enabled: false }, false), [idsUrl([GRANT])]: [grant] });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      const book = await screen.findByRole('checkbox', BOOK);
+      expect(book).toBeDisabled();
+      expect(book).not.toBeChecked();
+      expect(book).toHaveAccessibleDescription(HINT);
+      expect(screen.getByText(HINT)).toBeInTheDocument();
+    });
+
+    it('ticking write-back enables booking, and booking and write-back save together', async () => {
+      const calls = stubApi({
+        'GET /api/settings/ai-calls': settings({ enabled: false }, false),
+        [idsUrl([GRANT])]: [grant],
+        'PUT /api/settings/ai-calls': settings(),
+      });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      await userEvent.click(await screen.findByRole('checkbox', WRITE));
+      expect(screen.getByRole('checkbox', BOOK)).toBeEnabled();
+      expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('checkbox', BOOK));
+      await userEvent.click(screen.getByRole('button', { name: 'Save AI call settings' }));
+      await waitFor(() => expect(puts(calls)).toHaveLength(1));
+      expect(puts(calls)[0]).toEqual(settings());
+    });
+
+    it('unticking write-back unticks booking and disables it; ticking write-back again does not bring booking back', async () => {
+      stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant] });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      expect(await screen.findByRole('checkbox', BOOK)).toBeChecked();
+      await userEvent.click(screen.getByRole('checkbox', WRITE));
+      expect(screen.getByRole('checkbox', BOOK)).not.toBeChecked();
+      expect(screen.getByRole('checkbox', BOOK)).toBeDisabled();
+      await userEvent.click(screen.getByRole('checkbox', WRITE));
+      expect(screen.getByRole('checkbox', BOOK)).not.toBeChecked();
+      expect(screen.getByRole('checkbox', BOOK)).toBeEnabled();
+    });
+
+    it('a saved blob with booking on and write-back off (before the rule) is shown, and saved, as booking off', async () => {
+      const calls = stubApi({
+        'GET /api/settings/ai-calls': settings({ enabled: true }, false),
+        [idsUrl([GRANT])]: [grant],
+        'PUT /api/settings/ai-calls': settings({ enabled: false }, false),
+      });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      const book = await screen.findByRole('checkbox', BOOK);
+      expect(book).not.toBeChecked();
+      expect(book).toBeDisabled();
+      await userEvent.click(screen.getByRole('button', { name: 'Save AI call settings' }));
+      await waitFor(() => expect(puts(calls)).toHaveLength(1));
+      expect(puts(calls)[0]!.booking.enabled).toBe(false);
+    });
   });
 
   it('edits a kind\'s hours and lead time; an end hour not after the start hour cannot be saved', async () => {
