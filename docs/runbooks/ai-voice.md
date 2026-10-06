@@ -489,7 +489,7 @@ It takes about a minute ("Reading Salesforce and writing the plan…"). The page
 | Opener | What the agent says after the AI disclosure |
 | Situation, Selling signals, Goals | The plan's summary, each signal with its quote, source and strength, and how each of the four goals will be approached |
 | The plan text the agent gets | The exact text the voice agent is given, in a box. If the plan text check refuses it, this is a red line instead: "The voice agent can't be given this plan: … Regenerate it." **That blocks running the call** |
-| Appointment times | The times it would offer now, in Pacific time (and your own zone when it differs), or why there are none ("Booking is off", "Nobody active is on the appointment list", "No free time in the next 15 days", "Couldn't read the calendar"). A test call reads the calendar again when it starts |
+| Appointment times | The times it would offer now, in Pacific time (and your own zone when it differs), or why there are none ("Nobody is on the appointment list", "Nobody active is on the appointment list", "No free time in the next 15 days", "Couldn't read the calendar"). Like a 1D practice call, a test offers times whenever someone is on the appointment list, even with Book appointments or write-back off; a real call offers them only with both on. A test call reads the calendar again when it starts |
 | What it read | The research sources, as on the plan board (counts, "the integration user cannot read it", …) |
 | Cost | "This preview cost about $0.05." |
 

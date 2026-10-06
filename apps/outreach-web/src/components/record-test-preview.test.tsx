@@ -82,7 +82,7 @@ describe('RecordTestPreview', () => {
 
   it('no times offered: the note in words', async () => {
     show({ [GET]: recordTest({ slots: [], offerNote: 'booking_off' }) });
-    expect(await screen.findByText('Booking is off, so no times would be offered.')).toBeInTheDocument();
+    expect(await screen.findByText('Nobody is on the appointment list, so no times would be offered.')).toBeInTheDocument();
   });
 
   it('a failed preview says why and offers Try again', async () => {

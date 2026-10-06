@@ -11,6 +11,8 @@ describe('record test words', () => {
 
   it('words each offer note, and an unknown one plainly', () => {
     expect(offerNoteWords('no_free_time')).toBe('No free time in the next 15 days, so no times would be offered.');
+    // 1D practiceBooking: a test offers times whatever the Book appointments switch says, so booking_off means nobody is named.
+    expect(offerNoteWords('booking_off')).toBe('Nobody is on the appointment list, so no times would be offered.');
     expect(offerNoteWords('constructor')).toBe('No times would be offered.');
     expect(offerNoteWords(null)).toBe('No times would be offered.');
   });

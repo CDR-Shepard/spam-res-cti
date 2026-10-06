@@ -15,9 +15,12 @@ export const RECORD_TEST_ERROR_WORDS: Record<RecordTestError, string> = {
 
 export const RECORD_TEST_STATUS_WORDS: Record<RecordTestStatus, string> = { running: 'Running', ready: 'Ready', failed: 'Failed' };
 
-/** Why a preview offers no appointment times (outreach-api appointments/offer.ts `OfferNote`). */
+/**
+ * Why a preview offers no appointment times (outreach-api appointments/offer.ts `OfferNote`). A test offers times whatever
+ * the Book appointments switch says (1D practiceBooking), so `booking_off` here only means nobody is on the list.
+ */
 const OFFER_NOTE_WORDS: Readonly<Record<string, string>> = {
-  booking_off: 'Booking is off, so no times would be offered.',
+  booking_off: 'Nobody is on the appointment list, so no times would be offered.',
   no_owner: 'Nobody active is on the appointment list, so no times would be offered.',
   no_free_time: 'No free time in the next 15 days, so no times would be offered.',
   salesforce_error: "Couldn't read the calendar, so no times would be offered.",
