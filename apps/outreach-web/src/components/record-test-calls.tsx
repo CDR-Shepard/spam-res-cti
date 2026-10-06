@@ -94,7 +94,14 @@ function LiveState({ c }: { c: RecordTestCall }) {
   const status = c.callStatus;
   if (!live && (status === null || LIVE_STATUS.has(status))) return <p className="text-muted-foreground">{STUCK_WORDS}</p>;
   if (!live || status === null) return <p>{status ? CALL_STATUS_WORDS[status] : 'Placed'}</p>;
-  return <p role="status">{`${CALL_STATUS_WORDS[status]} · ${minutes(Math.max(0, Math.floor(age(c, now) / 1_000)))}`}</p>;
+  // Only the status is a live region; the running time ticks every second and is not announced.
+  return (
+    <p>
+      <span role="status">{CALL_STATUS_WORDS[status]}</span>
+      {' · '}
+      <span aria-live="off">{minutes(Math.max(0, Math.floor(age(c, now) / 1_000)))}</span>
+    </p>
+  );
 }
 
 function Learned({ qualification }: { qualification: Record<string, string> }) {

@@ -62,7 +62,10 @@ describe('RecordTestCalls', () => {
     vi.useFakeTimers({ now: NOW, toFake: ['Date'] });
     stubApi({});
     renderWithProviders(<RecordTestCalls calls={[recordTestCall({ callStatus: 'ringing', outcome: null, durationSeconds: null, summary: null })]} />, { isAdmin: true });
-    expect(screen.getByText('Ringing · 1:00')).toBeInTheDocument();
+    // It reads "Ringing · 1:00", but only the status is announced, not the clock that ticks every second.
+    expect(screen.getByRole('status').parentElement).toHaveTextContent('Ringing · 1:00');
+    expect(screen.getByRole('status')).toHaveTextContent(/^Ringing$/);
+    expect(screen.getByText('1:00')).toHaveAttribute('aria-live', 'off');
     expect(screen.queryByRole('button', { name: 'Transcript' })).not.toBeInTheDocument();
     vi.useRealTimers();
   });

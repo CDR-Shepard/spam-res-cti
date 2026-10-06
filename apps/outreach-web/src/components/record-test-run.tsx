@@ -105,7 +105,7 @@ function BrowserRun({ testId, disabled, onBusy, onChange }: { testId: string; di
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="outline" disabled={disabled || active || call.supported !== true} onClick={() => void call.start()}>Talk in browser</Button>
         {call.state.phase === 'live' && (
-          <Button size="sm" variant="outline" onClick={call.toggleMute}>{call.state.muted ? 'Unmute' : 'Mute'}</Button>
+          <Button size="sm" variant={call.state.muted ? 'secondary' : 'outline'} aria-pressed={call.state.muted} onClick={call.toggleMute}>Mute</Button>
         )}
         {active && <Button size="sm" variant="destructive" onClick={call.hangUp}>Hang up</Button>}
       </div>
@@ -132,5 +132,12 @@ function LiveTimer({ since, muted }: { since: number; muted: boolean }) {
     return () => clearInterval(t);
   }, []);
   const s = Math.max(0, Math.floor((now - since) / 1_000));
-  return <p role="status">{`Connected · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}${muted ? ' · muted' : ''}`}</p>;
+  // Only the state is a live region: a screen reader hears "Connected" and "muted", never the clock every second.
+  return (
+    <p>
+      <span role="status">{muted ? 'Connected · muted' : 'Connected'}</span>
+      {' · '}
+      <span aria-live="off">{`${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`}</span>
+    </p>
+  );
 }
