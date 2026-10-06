@@ -155,7 +155,11 @@ describe('call plan routes', () => {
     const edit = await call('PUT', `/api/call-plans/${ENROLLMENT_ID}`, { version: 1, plan: EDITABLE });
     expect(edit.statusCode).toBe(200);
     expect(edit.json()).toEqual({ enrollmentId: ENROLLMENT_ID });
-    expect(decisions.editPlan).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ orgId: 'O1' }), ENROLLMENT_ID, { version: 1, plan: EDITABLE }, expect.any(Date));
+    expect(decisions.editPlan).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ orgId: 'O1' }), ENROLLMENT_ID,
+      // The body is parsed: a plan sent without the 1D fields gets their defaults.
+      { version: 1, plan: { ...EDITABLE, reengagement: null, stillToLearn: [] } },
+      expect.any(Date),
+    );
     expect((await call('POST', `/api/call-plans/${ENROLLMENT_ID}/approve`, { version: 3 })).statusCode).toBe(200);
     expect(decisions.approvePlan).toHaveBeenCalledWith(expect.anything(), expect.anything(), ENROLLMENT_ID, { version: 3 }, expect.any(Date));
     expect((await call('POST', `/api/call-plans/${ENROLLMENT_ID}/reject`)).statusCode).toBe(200);

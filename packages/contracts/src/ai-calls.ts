@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AppointmentSlots, BookedAppointment, CallContext } from './appointments.js';
 import { SfObject } from './crm.js';
 
 export const INTERNAL_AI_CALLS_PATH = '/internal/ai-calls';
@@ -27,9 +28,36 @@ export type AiCallFailReason = z.infer<typeof AiCallFailReason>;
 
 const SF_RECORD_ID = z.string().regex(/^[a-zA-Z0-9]{15,18}$/);
 
+/**
+ * record   A real call to the record's phone, with its approved plan. `context` and `slots` (plan 1D) are
+ *          structured data cti-api renders outside the plan fence; slots are never plan text.
+ * test     An admin's test number, optionally with a plan.
+ * practice An admin's test number with a real record's plan and prompt (plan 1D decision 6): never books,
+ *          converts or writes to Salesforce, and a transfer rings the admin who started it.
+ */
 export const InternalAiCallTarget = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('record'), objectType: z.enum(['Lead', 'Opportunity']), recordId: SF_RECORD_ID, planText: z.string().min(1).max(PLAN_TEXT_MAX) }).strict(),
+  z
+    .object({
+      kind: z.literal('record'),
+      objectType: z.enum(['Lead', 'Opportunity']),
+      recordId: SF_RECORD_ID,
+      planText: z.string().min(1).max(PLAN_TEXT_MAX),
+      context: CallContext.optional(),
+      slots: AppointmentSlots.optional(),
+    })
+    .strict(),
   z.object({ kind: z.literal('test'), to: z.string().min(7).max(20), planText: z.string().max(PLAN_TEXT_MAX).nullable() }).strict(),
+  z
+    .object({
+      kind: z.literal('practice'),
+      objectType: z.enum(['Lead', 'Opportunity']),
+      recordId: SF_RECORD_ID,
+      to: z.string().min(7).max(20),
+      planText: z.string().min(1).max(PLAN_TEXT_MAX),
+      context: CallContext.optional(),
+      slots: AppointmentSlots.optional(),
+    })
+    .strict(),
 ]);
 export type InternalAiCallTarget = z.infer<typeof InternalAiCallTarget>;
 
@@ -56,8 +84,30 @@ export type AiCallStatus = z.infer<typeof AiCallStatus>;
 export const AiCallOutcome = z.enum([
   'qualified_transferred', 'qualified_callback', 'not_interested', 'do_not_call', 'voicemail', 'no_answer', 'busy',
   'failed', 'wrong_number', 'hung_up', 'transfer_failed', 'blocked', 'other',
+  /** Plan 1D: the agent booked one of the offered slots (a stored ai_calls.appointment). */
+  'appointment_set',
 ]);
 export type AiCallOutcome = z.infer<typeof AiCallOutcome>;
+
+/** ai_call_writebacks.status (migration 0055). */
+export const WritebackStatus = z.enum(['pending', 'running', 'done', 'partial', 'failed', 'skipped']);
+export type WritebackStatus = z.infer<typeof WritebackStatus>;
+export const WritebackChange = z.object({
+  label: z.string(),
+  before: z.string().nullable(),
+  after: z.string().nullable(),
+  kind: z.enum(['changed', 'kept', 'not_written', 'created', 'converted']),
+});
+export type WritebackChange = z.infer<typeof WritebackChange>;
+export const WritebackSummary = z.object({
+  status: WritebackStatus,
+  changes: z.array(WritebackChange).max(80),
+  error: z.string().nullable(),
+  mayRetry: z.boolean(),
+  /** Set when the write-back converted the Lead: results link to the new Opportunity. */
+  convertedOpportunityId: z.string().nullable(),
+});
+export type WritebackSummary = z.infer<typeof WritebackSummary>;
 
 /** One AI call touch on the campaign's results table. */
 export const AiCallResult = z.object({
@@ -82,6 +132,10 @@ export const AiCallResult = z.object({
   exitReason: z.string().nullable(),
   /** Owner or admin: may open the transcript. */
   mayReadTranscript: z.boolean(),
+  /** The slot the agent booked (plan 1D), or null. */
+  appointment: BookedAppointment.nullable(),
+  /** The Salesforce write-back for this call (plan 1D), or null when there is none. */
+  writeback: WritebackSummary.nullable(),
 });
 export type AiCallResult = z.infer<typeof AiCallResult>;
 
@@ -98,3 +152,28 @@ export const TestCallRequest = z.object({ to: z.string().min(7).max(20) });
 export type TestCallRequest = z.infer<typeof TestCallRequest>;
 export const TestCallResponse = InternalAiCallResponse;
 export type TestCallResponse = InternalAiCallResponse;
+
+/** POST /api/call-plans/:enrollmentId/practice (admin): ring a test number with this lead's plan `version`. */
+export const PracticeCallRequest = z.object({ version: z.number().int().min(1), to: z.string().min(7).max(20) }).strict();
+export type PracticeCallRequest = z.infer<typeof PracticeCallRequest>;
+
+/** One practice call on the campaign's list (ai_practice_calls, 0055). */
+export const PracticeCall = z.object({
+  id: z.string().uuid(),
+  enrollmentId: z.string().uuid(),
+  name: z.string().nullable(),
+  sfObject: SfObject,
+  sfRecordId: z.string(),
+  planVersion: z.number().int(),
+  aiCallId: z.string().uuid().nullable(),
+  callStatus: AiCallStatus.nullable(),
+  outcome: AiCallOutcome.nullable(),
+  summary: z.string().nullable(),
+  appointment: BookedAppointment.nullable(),
+  result: InternalAiCallResponse.nullable(),
+  createdAt: z.string(),
+});
+export type PracticeCall = z.infer<typeof PracticeCall>;
+
+export const PracticeCallsResponse = z.object({ items: z.array(PracticeCall) });
+export type PracticeCallsResponse = z.infer<typeof PracticeCallsResponse>;

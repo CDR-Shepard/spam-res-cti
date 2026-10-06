@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AiConsentStatus, CallPlan, CallPlanVersion, EditableCallPlan, GateWarning, ResearchSourceSummary } from './call-plans.js';
+import { AiConsentStatus, CallPlan, CallPlanVersion, EditableCallPlan, GateWarning, QUALIFICATION_TOPICS, QualificationTopic, Reengagement, ResearchSourceSummary } from './call-plans.js';
 
 export const validPlan = {
   situationSummary: 'Inherited the house in 2024; told a rep in May the roof leaks and the siblings disagree about selling.',
@@ -20,7 +20,7 @@ export const validPlan = {
 
 describe('CallPlan', () => {
   it('accepts a complete plan', () => {
-    expect(CallPlan.parse(validPlan)).toEqual(validPlan);
+    expect(CallPlan.parse(validPlan)).toEqual({ ...validPlan, reengagement: null, stillToLearn: [] });
   });
   it('needs each of the four goals exactly once', () => {
     const twice = { ...validPlan, goals: [...validPlan.goals.slice(0, 3), validPlan.goals[0]] };
@@ -67,5 +67,44 @@ describe('CallPlanVersion', () => {
     expect(CallPlanVersion.parse({ ...base, dncFlagDismissedBy: 'Rita Rep', dncFlagDismissedAt: '2026-10-05T11:00:00.000Z' }).dncFlagDismissedBy).toBe('Rita Rep');
     expect(CallPlanVersion.parse({ ...base, dncFlagDismissedBy: null, dncFlagDismissedAt: null }).dncFlagDismissedAt).toBeNull();
     expect(CallPlanVersion.safeParse(base).success).toBe(false);
+  });
+});
+
+describe('plan 1D re-engagement fields', () => {
+  it('an old stored plan with no reengagement or stillToLearn parses to null and []', () => {
+    const parsed = EditableCallPlan.parse(validPlan);
+    expect(parsed.reengagement).toBeNull();
+    expect(parsed.stillToLearn).toEqual([]);
+    expect(CallPlan.parse(validPlan).reengagement).toBeNull();
+  });
+
+  it('a plan with both parses and keeps them', () => {
+    const plan = {
+      ...validPlan,
+      reengagement: { lastContact: 'back in February', lastTopic: 'They wanted to wait until the tenants moved out' },
+      stillToLearn: ['timeline', 'mortgage'],
+    };
+    expect(CallPlan.parse(plan)).toEqual(plan);
+  });
+
+  it('an unknown topic is rejected', () => {
+    expect(CallPlan.safeParse({ ...validPlan, stillToLearn: ['zodiac_sign'] }).success).toBe(false);
+  });
+
+  it('caps stillToLearn at nine and the re-engagement words', () => {
+    expect(CallPlan.safeParse({ ...validPlan, stillToLearn: [...QUALIFICATION_TOPICS, 'motivation'] }).success).toBe(false);
+    expect(Reengagement.safeParse({ lastContact: 'x'.repeat(81), lastTopic: null }).success).toBe(false);
+    expect(Reengagement.safeParse({ lastContact: null, lastTopic: 'x'.repeat(201) }).success).toBe(false);
+  });
+
+  it('EditableCallPlan keeps both new keys', () => {
+    expect(Object.keys(EditableCallPlan.shape)).toEqual(expect.arrayContaining(['reengagement', 'stillToLearn']));
+  });
+
+  it('the nine qualification topics', () => {
+    expect([...QualificationTopic.options]).toEqual([
+      'motivation', 'timeline', 'condition', 'repairs', 'occupancy', 'price', 'competition', 'mortgage', 'decision_makers',
+    ]);
+    expect(QUALIFICATION_TOPICS).toBe(QualificationTopic.options);
   });
 });

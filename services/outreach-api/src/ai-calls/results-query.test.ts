@@ -92,6 +92,9 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
       startedAt: '2026-10-05T23:00:00.000Z',
       enrollmentStatus: 'active',
       mayReadTranscript: true,
+      // Plan 1D Task 29 fills these; until then every row has none.
+      appointment: null,
+      writeback: null,
     });
     expect(res.items[1]).toMatchObject({ touchStatus: 'failed', lastBlockReason: 'no_consent', enrollmentStatus: 'exited', exitReason: 'ai_call_no_consent', aiCallId: null, callStatus: null, mayReadTranscript: false });
     expect(res.items[0]).toMatchObject({ touchStatus: 'planned', attempts: 2, lastBlockReason: 'calling_hours', qualification: null });

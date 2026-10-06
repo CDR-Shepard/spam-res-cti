@@ -100,7 +100,9 @@ describe('AnthropicCallPlanModel', () => {
 
 describe('CALL_PLAN_INPUT_SCHEMA', () => {
   it('mirrors CallPlan: same required keys and the contract enums', () => {
-    expect([...CALL_PLAN_INPUT_SCHEMA.required].sort()).toEqual(Object.keys(CallPlan.shape).sort());
+    // Plan 1D: CallPlan's re-engagement fields default when absent; Task 9 adds them to the model's schema.
+    const notYetAsked = new Set(['reengagement', 'stillToLearn']);
+    expect([...CALL_PLAN_INPUT_SCHEMA.required].sort()).toEqual(Object.keys(CallPlan.shape).filter((k) => !notYetAsked.has(k)).sort());
     const p = (...path: Array<string | number>) => at(CALL_PLAN_INPUT_SCHEMA.properties, ...path);
     expect(p('goals', 'items', 'properties', 'goal', 'enum')).toEqual([...CALL_GOAL_KEYS]);
     expect(p('goals', 'minItems')).toBe(4);

@@ -3,6 +3,7 @@ import {
   AiAvailability,
   AiCallBlockReason,
   AiCallFailReason,
+  AiCallOutcome,
   AiCallResult,
   INTERNAL_AI_AVAILABILITY_PATH,
   INTERNAL_AI_CALLS_PATH,
@@ -10,7 +11,10 @@ import {
   InternalAiCallRequest,
   InternalAiCallResponse,
   PLAN_TEXT_MAX,
+  PracticeCall,
+  PracticeCallRequest,
   TestCallRequest,
+  WritebackSummary,
 } from './ai-calls.js';
 
 const ORG = '11111111-1111-4111-8111-111111111111';
@@ -107,7 +111,83 @@ describe('internal AI call contracts', () => {
       touchStatus: 'sent', dueAt: '2026-10-05T12:00:00.000Z', attempts: 1, lastBlockReason: null, aiCallId: CALL,
       callStatus: 'completed', outcome: 'not_interested', summary: null, qualification: null, durationSeconds: 42,
       startedAt: null, enrollmentStatus: 'exited', exitReason: 'not_interested', mayReadTranscript: true,
+      appointment: null, writeback: null,
     };
     expect(AiCallResult.parse(row)).toEqual(row);
+  });
+});
+
+const SLOT = {
+  id: 'p1', kind: 'phone', start: '2026-10-07T17:00:00.000Z', end: '2026-10-07T17:15:00.000Z',
+  specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
+};
+const BOOKED = {
+  slotId: 'p1', kind: 'phone', start: '2026-10-07T17:00:00.000Z', end: '2026-10-07T17:15:00.000Z',
+  specialistSfUserId: '0058X00000Fsx39QAB', addressConfirmed: false, note: '', bookedAt: '2026-10-06T18:00:00.000Z',
+};
+const practiceTarget = { kind: 'practice', objectType: 'Opportunity', recordId: '0068X00000AbCdEQAZ', to: '+15125550100', planText: 'x' };
+
+describe('plan 1D: context, slots, practice calls, appointment_set', () => {
+  it('a record target parses with and without slots and context', () => {
+    expect(InternalAiCallRequest.safeParse(recordRequest).success).toBe(true);
+    const withBoth = withTarget({ context: { returning: true }, slots: [SLOT] });
+    expect(InternalAiCallRequest.parse(withBoth)).toEqual(withBoth);
+    expect(InternalAiCallRequest.safeParse(withTarget({ slots: [] })).success).toBe(true);
+  });
+
+  it('a record target rejects a bad slot or a bad context (still .strict())', () => {
+    expect(InternalAiCallRequest.safeParse(withTarget({ slots: [{ ...SLOT, id: 'w1' }] })).success).toBe(false);
+    expect(InternalAiCallRequest.safeParse(withTarget({ context: { returning: 'yes' } })).success).toBe(false);
+  });
+
+  it('a practice target parses, with or without slots and context', () => {
+    const body = { ...recordRequest, target: practiceTarget };
+    expect(InternalAiCallRequest.parse(body)).toEqual(body);
+    const full = { ...recordRequest, target: { ...practiceTarget, context: { returning: false }, slots: [SLOT] } };
+    expect(InternalAiCallRequest.parse(full)).toEqual(full);
+  });
+
+  it.each([
+    ['missing planText', (() => { const { planText: _p, ...rest } = practiceTarget; return rest; })()],
+    ['a null planText', { ...practiceTarget, planText: null }],
+    ['missing to', (() => { const { to: _t, ...rest } = practiceTarget; return rest; })()],
+    ['objectType Contact', { ...practiceTarget, objectType: 'Contact' }],
+    ['an unknown key', { ...practiceTarget, extra: 1 }],
+  ])('a practice target with %s is rejected', (_label, target) => {
+    expect(InternalAiCallRequest.safeParse({ ...recordRequest, target }).success).toBe(false);
+  });
+
+  it("'appointment_set' is an outcome", () => {
+    expect(AiCallOutcome.options).toContain('appointment_set');
+  });
+
+  it('a result row carries the appointment and the write-back summary', () => {
+    const row = {
+      touchId: TOUCH, enrollmentId: TOUCH, name: 'Pat', sfObject: 'Lead', sfRecordId: '00Q000000000001AAA', recordUrl: null,
+      touchStatus: 'sent', dueAt: '2026-10-05T12:00:00.000Z', attempts: 1, lastBlockReason: null, aiCallId: CALL,
+      callStatus: 'completed', outcome: 'appointment_set', summary: null, qualification: null, durationSeconds: 42,
+      startedAt: null, enrollmentStatus: 'exited', exitReason: null, mayReadTranscript: true,
+      appointment: BOOKED,
+      writeback: {
+        status: 'done',
+        changes: [{ label: 'Status', before: 'Working', after: 'Qualified', kind: 'converted' }],
+        error: null, mayRetry: false, convertedOpportunityId: '0068X00000AbCdEQAZ',
+      },
+    };
+    expect(AiCallResult.parse(row)).toEqual(row);
+    expect(AiCallResult.safeParse({ ...row, appointment: undefined }).success).toBe(false);
+    expect(WritebackSummary.safeParse({ ...row.writeback, status: 'queued' }).success).toBe(false);
+  });
+
+  it('practice call request and list item', () => {
+    expect(PracticeCallRequest.parse({ version: 2, to: '+15125550100' })).toEqual({ version: 2, to: '+15125550100' });
+    expect(PracticeCallRequest.safeParse({ version: 0, to: '+15125550100' }).success).toBe(false);
+    expect(PracticeCallRequest.safeParse({ version: 1, to: '+15125550100', extra: 1 }).success).toBe(false);
+    const item = {
+      id: CALL, enrollmentId: TOUCH, name: null, sfObject: 'Opportunity', sfRecordId: '0068X00000AbCdEQAZ', planVersion: 2,
+      aiCallId: null, callStatus: null, outcome: null, summary: null, appointment: null,
+      result: { result: 'failed', reason: 'in_flight', aiCallId: null }, createdAt: '2026-10-06T18:00:00.000Z',
+    };
+    expect(PracticeCall.parse(item)).toEqual(item);
   });
 });

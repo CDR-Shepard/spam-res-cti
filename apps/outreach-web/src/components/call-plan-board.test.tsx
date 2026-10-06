@@ -26,6 +26,8 @@ const PLAN: EditableCallPlan = {
   questions: ['Is everyone on the title on board?'],
   avoid: ['Do not mention the attorney'],
   bestTimeToCall: { window: 'evening', reason: 'Works days' },
+  reengagement: null,
+  stillToLearn: [],
 };
 
 function card(n: number, over: Partial<CallPlanCard> = {}): CallPlanCard {

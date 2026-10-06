@@ -19,4 +19,6 @@ export const validPlan: CallPlan = {
   avoid: ['Do not mention the probate attorney by name'],
   bestTimeToCall: { window: 'evening', reason: 'Works days; picked up at 6pm last time' },
   doNotContact: null,
+  reengagement: null,
+  stillToLearn: [],
 };

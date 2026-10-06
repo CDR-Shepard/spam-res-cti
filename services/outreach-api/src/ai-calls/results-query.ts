@@ -69,6 +69,9 @@ function toResult(r: ResultRow, ctx: RequestContext, mine: string | null, instan
     enrollmentStatus: r.enrollment_status,
     exitReason: r.exit_reason,
     mayReadTranscript: r.ai_call_id !== null && mayDecideWith(ctx, mine, r.owner_sf_user_id),
+    // Plan 1D Task 29 fills these from ai_calls.appointment and ai_call_writebacks.
+    appointment: null,
+    writeback: null,
   };
 }
 

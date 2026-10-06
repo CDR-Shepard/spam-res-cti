@@ -36,6 +36,8 @@ function row(n: number, over: Partial<AiCallResult> = {}): AiCallResult {
     enrollmentStatus: 'active',
     exitReason: null,
     mayReadTranscript: false,
+    appointment: null,
+    writeback: null,
     ...over,
   };
 }

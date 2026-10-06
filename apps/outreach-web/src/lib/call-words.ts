@@ -1,5 +1,5 @@
 import { humanize, wordFor } from './outreach-words';
-import type { AiCallBlockReason, AiCallFailReason, AiCallOutcome, AiCallStatus, AiConsentStatus, CallGoalKey, CallStage, EvidenceSource, PreferredWindow, ResearchSource, ResearchSourceStatus, ResearchSourceSummary, SellingSignal } from '@cti/contracts';
+import type { AiCallBlockReason, AiCallFailReason, AiCallOutcome, AiCallStatus, AiConsentStatus, CallGoalKey, CallStage, EvidenceSource, PreferredWindow, QualificationTopic, ResearchSource, ResearchSourceStatus, ResearchSourceSummary, SellingSignal } from '@cti/contracts';
 
 export const CALL_STAGE_WORDS: Record<CallStage, string> = {
   research: 'researching',
@@ -83,6 +83,20 @@ export const OUTCOME_WORDS: Record<AiCallOutcome, string> = {
   transfer_failed: 'Transfer missed — call them back',
   blocked: 'Blocked',
   other: 'Other',
+  appointment_set: 'Appointment set',
+};
+
+/** What a call still needs to learn (plan 1D `stillToLearn`). */
+export const TOPIC_WORDS: Record<QualificationTopic, string> = {
+  motivation: "why they'd sell",
+  timeline: 'timeline',
+  condition: 'condition',
+  repairs: 'repairs',
+  occupancy: 'who lives there',
+  price: 'their price in mind',
+  competition: 'other offers or agents',
+  mortgage: 'what they owe',
+  decision_makers: 'who decides',
 };
 
 export const CALL_STATUS_WORDS: Record<AiCallStatus, string> = {

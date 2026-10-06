@@ -61,6 +61,19 @@ export type CallGoal = z.infer<typeof CallGoal>;
 export const PreferredWindow = z.enum(['any', 'morning', 'afternoon', 'evening']);
 export type PreferredWindow = z.infer<typeof PreferredWindow>;
 
+/** What a seller conversation should learn; `stillToLearn` lists those Salesforce does not answer yet (plan 1D). */
+export const QualificationTopic = z.enum(['motivation', 'timeline', 'condition', 'repairs', 'occupancy', 'price', 'competition', 'mortgage', 'decision_makers']);
+export type QualificationTopic = z.infer<typeof QualificationTopic>;
+export const QUALIFICATION_TOPICS = QualificationTopic.options;
+
+/** A returning seller: when we last spoke and about what (plan 1D). */
+export const Reengagement = z.object({
+  /** Computed words ("back in February"), never digits; overwritten after parsing (Task 9). */
+  lastContact: z.string().trim().min(1).max(80).nullable(),
+  lastTopic: z.string().trim().min(1).max(200).nullable(),
+});
+export type Reengagement = z.infer<typeof Reengagement>;
+
 const lines = (maxChars: number, maxItems: number, minItems = 0) => z.array(z.string().trim().min(1).max(maxChars)).min(minItems).max(maxItems);
 
 /** The plan model's output (zod-validated before use) and what a person approves. */
@@ -79,6 +92,9 @@ export const CallPlan = z.object({
   bestTimeToCall: z.object({ window: PreferredWindow, reason: z.string().trim().max(200) }),
   /** Non-null holds the person in Needs Review; no plan is offered for approval. */
   doNotContact: z.object({ category: DoNotContactCategory, quote: z.string().trim().min(1).max(300) }).nullable(),
+  /** Plan 1D. The defaults let plans stored before 1D (call_plans.plan) still parse. */
+  reengagement: Reengagement.nullable().default(null),
+  stillToLearn: z.array(QualificationTopic).max(9).default([]),
 });
 export type CallPlan = z.infer<typeof CallPlan>;
 

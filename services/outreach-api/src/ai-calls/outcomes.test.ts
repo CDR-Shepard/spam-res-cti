@@ -6,6 +6,7 @@ describe('nextStepFor (decision 9)', () => {
   it.each([
     ['qualified_transferred', { kind: 'hand_off' }],
     ['qualified_callback', { kind: 'hand_off' }],
+    ['appointment_set', { kind: 'hand_off' }],
     ['transfer_failed', { kind: 'hand_off' }],
     ['not_interested', { kind: 'exit', reason: 'not_interested' }],
     ['do_not_call', { kind: 'exit', reason: 'do_not_call' }],

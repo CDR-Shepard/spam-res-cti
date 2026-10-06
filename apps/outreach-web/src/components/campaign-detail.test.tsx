@@ -189,7 +189,7 @@ describe('CampaignDetail of an AI call campaign', () => {
   });
 
   it('shows the AI call results under the board', async () => {
-    const results = { items: [{ touchId: '00000000-0000-4000-8000-000000000001', enrollmentId: '00000000-0000-4000-8000-000000000002', name: 'Jane Seller', sfObject: 'Lead', sfRecordId: '00Q000000000001AAA', recordUrl: null, touchStatus: 'failed', dueAt: '2026-10-05T22:00:00.000Z', attempts: 1, lastBlockReason: 'no_consent', aiCallId: null, callStatus: null, outcome: null, summary: null, qualification: null, durationSeconds: null, startedAt: null, enrollmentStatus: 'exited', exitReason: 'ai_call_no_consent', mayReadTranscript: false }], nextCursor: null };
+    const results = { items: [{ touchId: '00000000-0000-4000-8000-000000000001', enrollmentId: '00000000-0000-4000-8000-000000000002', name: 'Jane Seller', sfObject: 'Lead', sfRecordId: '00Q000000000001AAA', recordUrl: null, touchStatus: 'failed', dueAt: '2026-10-05T22:00:00.000Z', attempts: 1, lastBlockReason: 'no_consent', aiCallId: null, callStatus: null, outcome: null, summary: null, qualification: null, durationSeconds: null, startedAt: null, enrollmentStatus: 'exited', exitReason: 'ai_call_no_consent', mayReadTranscript: false, appointment: null, writeback: null }], nextCursor: null };
     const calls = renderDetail({ [`GET ${CAMPAIGN}`]: campaign({ mode: 'ai_call' }), [`GET ${CAMPAIGN}/candidates?page=1`]: candidates, [`GET ${CAMPAIGN}/call-plans`]: emptyBoard, [`GET ${CAMPAIGN}/ai-calls`]: results });
     expect(await screen.findByText('AI calls')).toBeInTheDocument();
     expect(await screen.findByText('Not called: no AI consent in Salesforce')).toBeInTheDocument();

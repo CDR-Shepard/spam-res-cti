@@ -6,7 +6,7 @@ export const TERMINAL_AI_CALL_STATUSES = ['transferred', 'completed', 'failed', 
 
 export type NextStep = { kind: 'hand_off' } | { kind: 'exit'; reason: string } | { kind: 'complete'; reason: string } | { kind: 'retry' };
 
-const HAND_OFF: ReadonlySet<string> = new Set(['qualified_transferred', 'qualified_callback', 'transfer_failed']);
+const HAND_OFF: ReadonlySet<string> = new Set(['qualified_transferred', 'qualified_callback', 'transfer_failed', 'appointment_set']);
 const EXIT: ReadonlySet<string> = new Set(['not_interested', 'do_not_call', 'wrong_number']);
 const UNANSWERED: ReadonlySet<string> = new Set(['no_answer', 'busy', 'voicemail', 'failed']);
 

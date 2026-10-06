@@ -55,7 +55,8 @@ async function request(path: string, init: RequestInit): Promise<Response> {
   return res;
 }
 
-export async function api<T>(path: string, schema: z.ZodType<T>, init: RequestInit = {}): Promise<T> {
+/** `unknown` input: a schema with `.default()` (e.g. CallPlan's 1D fields) parses to a type unlike its input. */
+export async function api<T>(path: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, init: RequestInit = {}): Promise<T> {
   const res = await request(path, init);
   return schema.parse(await res.json());
 }

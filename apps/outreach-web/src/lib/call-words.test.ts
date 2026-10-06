@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AiCallBlockReason, AiCallFailReason, AiCallOutcome, AiCallStatus, AiConsentStatus, CallGoalKey, CallStage, EvidenceSource, PreferredWindow, ResearchSource, ResearchSourceStatus } from '@cti/contracts';
+import { AiCallBlockReason, AiCallFailReason, AiCallOutcome, AiCallStatus, AiConsentStatus, CallGoalKey, CallStage, EvidenceSource, PreferredWindow, QualificationTopic, ResearchSource, ResearchSourceStatus } from '@cti/contracts';
 import {
   BLOCK_REASON_WORDS,
   CALL_STATUS_WORDS,
@@ -12,6 +12,7 @@ import {
   SOURCE_STATUS_WORDS,
   SOURCE_WORDS,
   STRENGTH_WORDS,
+  TOPIC_WORDS,
   WINDOW_WORDS,
   aiExitWords,
   notCalledWords,
@@ -42,6 +43,7 @@ describe('word tables', () => {
     ['CALL_STATUS_WORDS', AiCallStatus.options, CALL_STATUS_WORDS],
     ['BLOCK_REASON_WORDS', AiCallBlockReason.options, BLOCK_REASON_WORDS],
     ['FAIL_REASON_WORDS', AiCallFailReason.options, FAIL_REASON_WORDS],
+    ['TOPIC_WORDS', QualificationTopic.options, TOPIC_WORDS],
   ];
   it.each(tables)('%s has a non-empty word for every key', (_name, keys, words) => {
     for (const key of keys) expect(words[key]?.length ?? 0, key).toBeGreaterThan(0);
@@ -52,11 +54,28 @@ describe('word tables', () => {
   });
 });
 
+describe('TOPIC_WORDS', () => {
+  it('words each qualification topic plainly', () => {
+    expect(TOPIC_WORDS).toEqual({
+      motivation: "why they'd sell",
+      timeline: 'timeline',
+      condition: 'condition',
+      repairs: 'repairs',
+      occupancy: 'who lives there',
+      price: 'their price in mind',
+      competition: 'other offers or agents',
+      mortgage: 'what they owe',
+      decision_makers: 'who decides',
+    });
+  });
+});
+
 describe('AI call result words', () => {
   it('words the outcomes a person acts on', () => {
     expect(OUTCOME_WORDS.qualified_callback).toBe('Callback booked');
     expect(OUTCOME_WORDS.qualified_transferred).toBe('Transferred to a person');
     expect(CALL_STATUS_WORDS.completed).toBe('Completed');
+    expect(OUTCOME_WORDS.appointment_set).toBe('Appointment set');
   });
 
   it.each([
