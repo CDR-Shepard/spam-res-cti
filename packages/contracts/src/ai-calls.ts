@@ -106,6 +106,8 @@ export const WritebackSummary = z.object({
   mayRetry: z.boolean(),
   /** Set when the write-back converted the Lead: results link to the new Opportunity. */
   convertedOpportunityId: z.string().nullable(),
+  /** The new Opportunity's Salesforce link, built by the server (P6 M-3); null without a conversion or a connection. */
+  convertedOpportunityUrl: z.string().url().nullable(),
 });
 export type WritebackSummary = z.infer<typeof WritebackSummary>;
 

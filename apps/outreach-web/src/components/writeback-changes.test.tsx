@@ -14,6 +14,7 @@ const summary = (over: Partial<WritebackSummary> = {}): WritebackSummary => ({
   error: null,
   mayRetry: false,
   convertedOpportunityId: null,
+  convertedOpportunityUrl: null,
   changes: [
     { kind: 'converted', label: 'Lead converted to an Opportunity', before: '00Q000000000001AAA', after: '006000000000001AAA' },
     { kind: 'created', label: 'Appointment Event', before: null, after: '00U000000000001AAA' },

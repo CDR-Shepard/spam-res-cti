@@ -183,7 +183,7 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
       });
       expect(item.appointment).toEqual(PHONE_BOOKING);
       expect(item.writeback).toEqual({
-        status: 'done', error: null, mayRetry: false, convertedOpportunityId: null,
+        status: 'done', error: null, mayRetry: false, convertedOpportunityId: null, convertedOpportunityUrl: null,
         changes: [
           { kind: 'created', label: 'Appointment Event', before: null, after: '00U8X00000Evnt1QAA' },
           { kind: 'created', label: 'Task', before: null, after: '00T8X00000Task1QAA' },
@@ -204,12 +204,22 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
 
     it('a converted Lead carries the new Opportunity and a converted change; a fallback row carries the refusal as not written', async () => {
       const { w, item } = await listed({ status: 'done', plan: PLAN, convertedOpportunityId: NEW_OPP, steps: { convert: { status: 'done', detail: 'converted' } } }, { sfObject: 'Lead' });
-      expect(item.writeback).toMatchObject({ convertedOpportunityId: NEW_OPP });
+      expect(item.writeback).toMatchObject({ convertedOpportunityId: NEW_OPP, convertedOpportunityUrl: null });
       expect(item.writeback!.changes[0]).toEqual({ kind: 'converted', label: 'Lead converted to an Opportunity', before: w.recordId, after: NEW_OPP });
       const fallback = await listed({ status: 'partial', plan: PLAN, lastError: 'INSUFFICIENT_ACCESS', sfEventId: '00U8X00000Hold1QAA', steps: { convert: { status: 'failed', detail: 'INSUFFICIENT_ACCESS: no convert permission' }, appointment: { status: 'done', detail: 'lead_hold' } } }, { sfObject: 'Lead' });
       expect(fallback.item.writeback).toMatchObject({ status: 'partial', error: 'INSUFFICIENT_ACCESS', convertedOpportunityId: null });
       expect(fallback.item.writeback!.changes).toContainEqual({ kind: 'not_written', label: 'Lead conversion', before: null, after: 'INSUFFICIENT_ACCESS: no convert permission' });
       expect(fallback.item.writeback!.changes).toContainEqual({ kind: 'created', label: 'Calendar hold', before: null, after: '00U8X00000Hold1QAA' });
+    });
+
+    it('P6 M-3: with a Salesforce connection the server sends the new Opportunity\'s link (the web never rebuilds it)', async () => {
+      const w = await seedWriteback(db, { sfObject: 'Lead', outcome: 'appointment_set', researchStatus: 'New Opportunity', appointment: PHONE_BOOKING });
+      await seedConnection(db, w.orgId);
+      await db.update(schema.aiCallWritebacks).set({ status: 'done', plan: PLAN, convertedOpportunityId: NEW_OPP }).where(eq(schema.aiCallWritebacks.id, w.writebackId));
+      const res = await listAiCallResults(db, ctxOf(w.orgId, await seedUser(db, w.orgId), true), w.campaignId, null);
+      const item = res.items[0]!;
+      expect(item.recordUrl).toBe(`https://example.my.salesforce.com/${w.recordId}`);
+      expect(item.writeback!.convertedOpportunityUrl).toBe(`https://example.my.salesforce.com/${NEW_OPP}`);
     });
 
     it('a failed write-back may be retried by an admin, never by a rep', async () => {

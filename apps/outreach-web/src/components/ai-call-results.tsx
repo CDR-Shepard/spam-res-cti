@@ -165,7 +165,7 @@ function OutcomeCell({ r }: { r: AiCallResult }) {
 function SalesforceCell({ r, onToggle }: { r: AiCallResult; onToggle: () => void }) {
   const w = r.writeback;
   if (!w) return null;
-  const oppUrl = w.convertedOpportunityId && r.recordUrl ? r.recordUrl.replace(r.sfRecordId, w.convertedOpportunityId) : null;
+  const oppUrl = w.convertedOpportunityUrl;
   return (
     <div className="space-y-1">
       <button type="button" className="cursor-pointer" onClick={onToggle}><WritebackBadge status={w.status} /></button>

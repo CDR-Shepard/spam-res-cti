@@ -66,6 +66,9 @@ function qualificationOf(v: unknown): Record<string, unknown> | null {
   return Object.keys(v).length > 0 ? (v as Record<string, unknown>) : null;
 }
 
+/** A record's Salesforce link on the tenant's instance; null without a connection. */
+const recordUrl = (instanceUrl: string | null, id: string | null): string | null => (instanceUrl && id ? `${instanceUrl.replace(/\/$/, '')}/${id}` : null);
+
 function toResult(r: ResultRow, ctx: RequestContext, mine: string | null, instanceUrl: string | null): AiCallResult {
   const status = AiCallStatus.safeParse(r.call_status);
   const outcome = AiCallOutcome.safeParse(r.outcome);
@@ -75,7 +78,7 @@ function toResult(r: ResultRow, ctx: RequestContext, mine: string | null, instan
     name: r.name,
     sfObject: r.sf_object,
     sfRecordId: r.sf_record_id,
-    recordUrl: instanceUrl ? `${instanceUrl.replace(/\/$/, '')}/${r.sf_record_id}` : null,
+    recordUrl: recordUrl(instanceUrl, r.sf_record_id),
     touchStatus: r.touch_status,
     dueAt: iso(r.due_at)!,
     attempts: r.attempts,
@@ -92,7 +95,7 @@ function toResult(r: ResultRow, ctx: RequestContext, mine: string | null, instan
     mayReadTranscript: r.ai_call_id !== null && mayDecideWith(ctx, mine, r.owner_sf_user_id),
     // D-6: each row's JSON is read on its own; a drifted row reads as null and never breaks the page.
     appointment: parsed(BookedAppointment, r.appointment),
-    writeback: writebackSummary(r, isAdmin(ctx)),
+    writeback: writebackSummary(r, isAdmin(ctx), instanceUrl),
   };
 }
 
@@ -138,7 +141,7 @@ function createdChanges(r: ResultRow, steps: Record<string, unknown>): Writeback
  * kept (a rep's value kept over the seller's answer, or edited since the call), not written (with why), created and
  * converted, capped at 80. A plan that no longer parses lists nothing; it never throws.
  */
-export function writebackSummary(r: ResultRow, admin: boolean): WritebackSummary | null {
+export function writebackSummary(r: ResultRow, admin: boolean, instanceUrl: string | null = null): WritebackSummary | null {
   const status = WritebackStatus.safeParse(r.w_status);
   if (!status.success) return null;
   const plan = r.w_plan === null ? null : StoredWritePlan.safeParse(r.w_plan);
@@ -161,6 +164,7 @@ export function writebackSummary(r: ResultRow, admin: boolean): WritebackSummary
     error: r.w_last_error,
     mayRetry: status.data === 'failed' && admin,
     convertedOpportunityId: r.w_converted_opportunity_id,
+    convertedOpportunityUrl: recordUrl(instanceUrl, r.w_converted_opportunity_id),
   };
 }
 

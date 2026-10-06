@@ -152,7 +152,7 @@ describe('plan 1D: appointment and Salesforce columns', () => {
     specialistSfUserId: '0058X00000Fsx39QAB', addressConfirmed: false, note: '', bookedAt: '2026-10-06T22:05:00.000Z',
   };
   const WB: WritebackSummary = {
-    status: 'done', error: null, mayRetry: false, convertedOpportunityId: null,
+    status: 'done', error: null, mayRetry: false, convertedOpportunityId: null, convertedOpportunityUrl: null,
     changes: [{ kind: 'changed', label: 'Stage', before: 'New Opportunity', after: 'Appointment Set' }],
   };
   const booked = (over: Partial<AiCallResult> = {}) =>
@@ -181,10 +181,12 @@ describe('plan 1D: appointment and Salesforce columns', () => {
   });
 
   it('a converted Lead shows "Converted to Opportunity", linking to the new record', async () => {
-    stubApi({ [`GET ${RESULTS}`]: page([booked({ writeback: { ...WB, convertedOpportunityId: '006000000000009AAA' } })]) });
+    // P6 M-3: the link is the server's, never rebuilt from the Lead's URL.
+    const url = 'https://gghomes.lightning.force.com/lightning/r/Opportunity/006000000000009AAA/view';
+    stubApi({ [`GET ${RESULTS}`]: page([booked({ writeback: { ...WB, convertedOpportunityId: '006000000000009AAA', convertedOpportunityUrl: url } })]) });
     renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
     const link = await screen.findByRole('link', { name: 'Converted to Opportunity' });
-    expect(link).toHaveAttribute('href', 'https://gghomes.my.salesforce.com/006000000000009AAA');
+    expect(link).toHaveAttribute('href', url);
   });
 
   it('no write-back and no booking leave both cells empty', async () => {
