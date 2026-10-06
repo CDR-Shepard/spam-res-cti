@@ -115,21 +115,29 @@ describe('router guard re-run on 401', () => {
 });
 
 describe('auth callback', () => {
-  it('exchanges the session exactly once (even under StrictMode) and replaces the location with returnTo', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      token: 'tok',
-      expiresAt: '2026-10-01T00:00:00.000Z',
-      user: { userId: 'U1', orgId: 'O1', email: 'a@b.co', displayName: null, isAdmin: false, isSuperAdmin: false, kind: 'human' },
-      tenant: { id: 'O1', name: 'GG Homes', slug: 'gg-homes', timezone: 'America/Los_Angeles', status: 'active' },
-    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  it('exchanges the session exactly once (even under StrictMode) and lands on returnTo signed in, without a page reload', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input).replace(/^https?:\/\/[^/]+/, '');
+      const body = url === '/api/auth/session'
+        ? {
+            token: 'tok',
+            expiresAt: '2026-10-01T00:00:00.000Z',
+            user: { userId: 'U1', orgId: 'O1', email: 'a@b.co', displayName: null, isAdmin: false, isSuperAdmin: false, kind: 'human' },
+            tenant: { id: 'O1', name: 'GG Homes', slug: 'gg-homes', timezone: 'America/Los_Angeles', status: 'active' },
+          }
+        : { error: 'nf', code: 'NOT_FOUND' };
+      return new Response(JSON.stringify(body), { status: url === '/api/auth/session' ? 200 : 404, headers: { 'Content-Type': 'application/json' } });
+    });
     vi.stubGlobal('fetch', fetchMock);
-    const { replace: replaceSpy } = stubLocationMethods();
+    const { replace: replaceSpy, assign: assignSpy } = stubLocationMethods();
 
-    renderAppAt('/auth/callback?returnTo=/team');
+    const router = renderAppAt('/auth/callback?returnTo=/team');
 
-    await waitFor(() => expect(replaceSpy).toHaveBeenCalled());
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(replaceSpy).toHaveBeenCalledWith('/team');
+    // The bearer lives in memory only, so a full reload (location.replace) would drop it and bounce back to sign-in.
+    await waitFor(() => expect(router.state.location.pathname).toBe('/team'));
+    expect(replaceSpy).not.toHaveBeenCalled();
+    expect(assignSpy).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/api/auth/session'))).toHaveLength(1);
   });
 });
 
@@ -148,9 +156,9 @@ async function signedInAppAt(routes: Record<string, unknown>): Promise<AnyRouter
     if (body === undefined) return new Response(JSON.stringify({ error: 'nf', code: 'NOT_FOUND' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
     return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }));
-  const { replace } = stubLocationMethods();
+  stubLocationMethods();
   const router = renderAppAt('/auth/callback?returnTo=/');
-  await waitFor(() => expect(replace).toHaveBeenCalledWith('/'));
+  await waitFor(() => expect(router.state.location.pathname).toBe('/'));
   return router;
 }
 
