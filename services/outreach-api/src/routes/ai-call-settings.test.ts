@@ -100,6 +100,28 @@ describe('AI call settings routes', () => {
     });
   });
 
+  describe('fix 2: booking can only be on while write-back is on', () => {
+    const booked = { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [GRANT] };
+
+    it('PUT booking on with write-back off is a 400 BOOKING_NEEDS_WRITEBACK that says why, and saves nothing', async () => {
+      await build();
+      const res = await call('PUT', '/api/settings/ai-calls', { booking: booked, writeback: false });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ code: 'BOOKING_NEEDS_WRITEBACK' });
+      expect(res.json().error).toMatch(/turn on salesforce write-back first/i);
+    });
+
+    it('a settings blob saved that way before this rule reads as booking off (never offers times that are not written back)', async () => {
+      await build({ settings: { aiCallBooking: booked, aiCallWriteback: false } });
+      expect((await call('GET', '/api/settings/ai-calls')).json()).toEqual({ booking: { ...booked, enabled: false }, writeback: false });
+    });
+
+    it('booking on with write-back on reads as saved', async () => {
+      await build({ settings: { aiCallBooking: booked, aiCallWriteback: true } });
+      expect((await call('GET', '/api/settings/ai-calls')).json()).toEqual({ booking: booked, writeback: true });
+    });
+  });
+
   describe('GET /salesforce/users', () => {
     const userRows = [
       { Id: GRANT, Name: 'Grant Golden', Title: 'Acquisitions', IsActive: true },
@@ -221,6 +243,20 @@ describe.skipIf(!pgLane)('AI call settings routes (real Postgres)', () => {
 
     const [org] = await t.db.select({ settings: schema.organizations.settings }).from(schema.organizations).where(eq(schema.organizations.id, orgId));
     expect(org!.settings).toEqual({ aiCallConcurrency: 3, aiCallBooking: next.booking, aiCallWriteback: false });
+  });
+
+  it('fix 2: PUT refuses booking on with write-back off and keeps what was stored; booking and write-back both on are stored', async () => {
+    const orgId = await seedOrg(t.db, { aiCallConcurrency: 3 });
+    asAdminOf(orgId);
+    const booked = { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [GRANT] };
+    const refused = await pgCall('PUT', { booking: booked, writeback: false });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().code).toBe('BOOKING_NEEDS_WRITEBACK');
+    const [before] = await t.db.select({ settings: schema.organizations.settings }).from(schema.organizations).where(eq(schema.organizations.id, orgId));
+    expect(before!.settings).toEqual({ aiCallConcurrency: 3 });
+    const both = { booking: booked, writeback: true };
+    expect((await pgCall('PUT', both)).json()).toEqual(both);
+    expect((await pgCall('GET')).json()).toEqual(both);
   });
 
   it('a saved empty list stays empty (the configured default no longer applies)', async () => {

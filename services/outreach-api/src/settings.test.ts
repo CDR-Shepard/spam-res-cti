@@ -7,7 +7,9 @@ import {
   DEFAULT_AI_CALL_CONCURRENCY,
   DEFAULT_AI_CALL_DAILY_CAP,
   DEFAULT_AI_CALL_MAX_ATTEMPTS,
+  liveCallBooking,
   outreachSettings,
+  practiceBooking,
   type OutreachSettings,
 } from './settings.js';
 
@@ -191,6 +193,41 @@ describe('outreachSettings', () => {
       ['absent', undefined, false],
     ])('aiCallWriteback %s gives %s (off unless explicitly true, final review WEB I-2)', (_label, aiCallWriteback, expected) => {
       expect(outreachSettings({ settings: { aiCallWriteback } }).aiCallWriteback).toBe(expected);
+    });
+
+    describe('fix 2: booking needs write-back for a real call; a practice call offers times whenever there is a specialist', () => {
+      const saved = (enabled: boolean, specialists: string[]) => ({ aiCallBooking: { ...DEFAULT_BOOKING, enabled, specialists } });
+
+      it.each([
+        ['booking on, write-back on', { ...saved(true, [GRANT]), aiCallWriteback: true }, true],
+        ['booking on, write-back off', { ...saved(true, [GRANT]), aiCallWriteback: false }, false],
+        ['booking on, write-back absent', saved(true, [GRANT]), false],
+        ['booking on, write-back the string "true"', { ...saved(true, [GRANT]), aiCallWriteback: 'true' }, false],
+        ['booking off, write-back on', { ...saved(false, [GRANT]), aiCallWriteback: true }, false],
+        ['booking on, write-back on, no specialist', { ...saved(true, []), aiCallWriteback: true }, false],
+      ])('liveCallBooking: %s gives active %s', (_label, settings, active) => {
+        expect(bookingActive(liveCallBooking({ settings }, []))).toBe(active);
+      });
+
+      it('liveCallBooking changes only the on switch; the rest is bookingSettings as it was', () => {
+        const settings = { ...saved(true, [OTHER]), aiCallWriteback: false };
+        expect(liveCallBooking({ settings }, [GRANT])).toEqual({ ...bookingSettings({ settings }, [GRANT]), enabled: false });
+      });
+
+      it.each([
+        ['booking off, a specialist saved', saved(false, [GRANT]), [], true],
+        ['booking off, write-back off, the configured default owner', {}, [GRANT], true],
+        ['booking on', { ...saved(true, [GRANT]), aiCallWriteback: true }, [], true],
+        ['no specialist anywhere', saved(false, []), [], false],
+        ['a saved empty list beats the configured default', saved(false, []), [GRANT], false],
+      ])('practiceBooking: %s gives active %s whatever the toggles', (_label, settings, defaults, active) => {
+        expect(bookingActive(practiceBooking({ settings }, defaults))).toBe(active);
+      });
+
+      it('practiceBooking never changes conversion or the hours', () => {
+        const settings = { aiCallBooking: { ...DEFAULT_BOOKING, specialists: [GRANT], convertLeads: false } };
+        expect(practiceBooking({ settings }, [])).toEqual({ ...DEFAULT_BOOKING, specialists: [GRANT], enabled: true });
+      });
     });
 
     it.each([

@@ -17,7 +17,7 @@ import { readOfferCalendar, type Offer, type OfferCalendar } from '../appointmen
 import { fetchRecords, type SfRecordSnapshot } from '../campaigns/records.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
-import { bookingSettings, outreachSettings } from '../settings.js';
+import { liveCallBooking, outreachSettings } from '../settings.js';
 import { writebackActivityIds } from '../writeback/store.js';
 import { engineTaskIds, recordsWithNewActivity, type ActivityProbe } from './activity-check.js';
 import type { PaceDeps } from './pace.js';
@@ -46,7 +46,7 @@ export interface OrgTick {
   newActivity: Set<string>;
   /** Plan 1D: the tenant's integration connection, for the appointment offer's reads. */
   client: SalesforceClient;
-  /** Plan 1D: the tenant's booking settings as this tick read them (the configured default list applied). */
+  /** Plan 1D: the tenant's booking settings as this tick read them (the configured default list applied; off unless write-back is on, fix 2). */
   booking: AiCallBookingSettings;
   /** Fix 1 (M-1): the appointment owner and their calendar, read from Salesforce on first use and kept for the tick. */
   calendar(): Promise<OfferCalendar>;
@@ -66,7 +66,7 @@ async function slotsFor(deps: PaceDeps, orgId: string): Promise<{ slots: number;
   const live = await liveAiCallCount(deps.db, orgId, deps.now);
   const remaining = settings.aiCallDailyCap - (await placedInLastDay(deps.db, orgId, deps.now));
   if (remaining <= 0) deps.log.info({ orgId, cap: settings.aiCallDailyCap }, 'ai_call.place: daily AI call cap reached');
-  return { slots: Math.min(settings.aiCallConcurrency - live, remaining), booking: bookingSettings(org, deps.defaultSpecialists) };
+  return { slots: Math.min(settings.aiCallConcurrency - live, remaining), booking: liveCallBooking(org, deps.defaultSpecialists) };
 }
 
 async function loadPlans(deps: PaceDeps, orgId: string, candidates: AiTouchCandidate[]): Promise<Map<string, PlanForCall>> {

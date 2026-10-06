@@ -29,7 +29,7 @@ import { readOfferCalendar } from '../appointments/offer.js';
 import { describePlanTextIssues } from '../call-plans/plan-text-words.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
-import { bookingSettings } from '../settings.js';
+import { practiceBooking } from '../settings.js';
 import type { RequestContext } from '../tenancy/scope.js';
 import type { CtiClient } from './cti-client.js';
 import { renderPlanForAgent } from './plan-text.js';
@@ -89,11 +89,12 @@ async function loadPlan(db: Db, orgId: string, enrollmentId: string, version: nu
 
 /**
  * The owner's free times, read now, less what other AI calls already booked with them (as the pacer offers them), so the
- * admin hears what a seller would be offered. Never throws: any failure offers nothing and the call still goes.
+ * admin hears what a seller would be offered. Offered whenever booking settings name a specialist, whatever the Book
+ * appointments switch says (fix 2); the call still never books. Never throws: any failure offers nothing and the call still goes.
  */
 async function practiceSlots(deps: PracticeDeps, orgId: string, settings: unknown): Promise<AppointmentSlot[]> {
   try {
-    const booking = bookingSettings({ settings }, deps.defaultSpecialists);
+    const booking = practiceBooking({ settings }, deps.defaultSpecialists);
     const cal = await readOfferCalendar(await deps.clients(orgId), { booking, now: deps.now, log: deps.log });
     const offer = await offerWithAiBookings(deps.db, cal, { orgId, booking, now: deps.now });
     if (offer.note && offer.note !== 'booking_off') deps.log.info({ orgId, slots: offer.note }, 'ai_call.practice: no appointment times offered');

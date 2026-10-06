@@ -123,13 +123,17 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
     expect(row).toMatchObject({ result: null, aiCallId: null });
   });
 
-  // Final review WEB I-2: booking is off until an admin turns it on; these tenants have.
-  const BOOKING_ON = { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [GRANT] } };
+  // Booking and write-back both on (fix 2: booking needs write-back).
+  const BOOKING_ON = { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [GRANT] }, aiCallWriteback: true };
 
-  it('final review WEB I-2: a tenant that never turned booking on gets no times, even with a default owner configured', async () => {
+  it('fix 2: a tenant that never turned booking on still hears times when a default owner is configured, and nothing is written', async () => {
     const s = await setup();
     await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
-    expect(s.cti.requests[0]!.target).not.toHaveProperty('slots');
+    const target = s.cti.requests[0]!.target;
+    if (target.kind !== 'practice') throw new Error('not a practice target');
+    expect(target.slots?.length).toBeGreaterThan(0);
+    expect(target.slots!.every((slot) => slot.specialistSfUserId === GRANT)).toBe(true);
+    expect(s.sf.log.every((entry) => entry === 'query')).toBe(true);
   });
 
   it('6: with booking active the trigger carries the owner\'s free times, read only', async () => {
@@ -193,14 +197,30 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
     });
   });
 
-  it('6b: booking off sends no slots; a Salesforce failure sends none and the call still goes', async () => {
-    const s = await setup({ settings: { aiCallBooking: { enabled: false, specialists: [GRANT], convertLeads: true, days: [1, 2, 3, 4, 5], phone: { enabled: true, durationMinutes: 15, startHour: 10, endHour: 18, stepMinutes: 30, minLeadMinutes: 120, horizonBusinessDays: 2, bufferMinutes: 0, maxOffered: 6 }, walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 } } } });
+  it('6b: whatever the toggles, no specialist anywhere sends no slots; a Salesforce failure sends none and the call still goes', async () => {
+    const emptyList = { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [] as string[] }, aiCallWriteback: true };
+    const s = await setup({ settings: emptyList });
     await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
     expect(s.cti.requests[0]!.target).not.toHaveProperty('slots');
+    expect(s.sf.log).toEqual([]);
     const t = await setup();
     const res = await startPractice({ ...t.deps, clients: async () => { throw new Error('not connected'); } }, t.ctx, t.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
     expect(res.ok).toBe(true);
     expect(t.cti.requests[0]!.target).not.toHaveProperty('slots');
+  });
+
+  it('6c: booking ticked off, or on with write-back off, still offers times (a practice call never books)', async () => {
+    for (const settings of [
+      { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: false, specialists: [GRANT] } },
+      { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [GRANT] }, aiCallWriteback: false },
+    ]) {
+      const s = await setup({ settings });
+      await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
+      const target = s.cti.requests[0]!.target;
+      if (target.kind !== 'practice') throw new Error('not a practice target');
+      expect(target.slots?.length).toBeGreaterThan(0);
+      expect(s.sf.log.every((entry) => entry === 'query')).toBe(true);
+    }
   });
 
   it('7: listPracticeCalls is newest first, at most 20, joined to the call (status, outcome, summary, appointment); drifted JSON reads as null', async () => {

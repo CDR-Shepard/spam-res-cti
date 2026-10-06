@@ -473,7 +473,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
   describe('plan 1D: every trigger carries the returning flag; a freshly minted key also carries free appointment times', () => {
     const OWNER = '0058X00000Fsx39QAB';
     const ownerRow = (over: Record<string, unknown> = {}) => ({ Id: OWNER, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles', ...over });
-    const bookingWith = (specialists: string[]) => ({ aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists } });
+    const bookingWith = (specialists: string[]) => ({ aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists }, aiCallWriteback: true });
     type RecordTarget = Extract<InternalAiCallRequest['target'], { kind: 'record' }>;
     const target = (r: InternalAiCallRequest): RecordTarget => {
       if (r.target.kind !== 'record') throw new Error('expected a record target');
@@ -524,6 +524,17 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
 
       expect((await h.run(NOW)).placed).toBe(1);
       expect('slots' in target(h.cti.requests[0]!)).toBe(false);
+    });
+
+    it('1d (fix 2): booking on but write-back off (a blob saved before the rule): a real call gets no times and reads no calendar', async () => {
+      const h = await paceHarness(db, { ...bookingWith([OWNER]), aiCallWriteback: false });
+      h.sf.state.users = [ownerRow()];
+      await seedReleasedLead(db, h.base);
+
+      expect((await h.run(NOW)).placed).toBe(1);
+      expect('slots' in target(h.cti.requests[0]!)).toBe(false);
+      expect(userQueries(h.sf.state.soql)).toEqual([]);
+      expect(h.logs.some((l) => l.msg === 'ai_call.place: no appointment times offered')).toBe(false);
     });
 
     it('2: no specialists (empty default, nothing saved): no slots key, context present, nothing read for the offer, nothing logged', async () => {

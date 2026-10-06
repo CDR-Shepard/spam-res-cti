@@ -96,6 +96,25 @@ export function bookingSettings(org: { settings: unknown }, defaultSpecialists: 
   return { ...structuredClone(DEFAULT_AI_CALL_BOOKING), specialists: [...defaultSpecialists] };
 }
 
+/**
+ * Fix 2: what a REAL call may offer. Booking counts only while write-back is on, so a time a seller is offered and takes always
+ * reaches Salesforce (Grant sees it). The settings route refuses to save booking on with write-back off; this is the
+ * defensive twin for a blob saved before that rule, or edited by hand. Only the on switch changes. Lead conversion is
+ * independent and stays as saved (off: the designed hold plus Task fallback).
+ */
+export function liveCallBooking(org: { settings: unknown }, defaultSpecialists: readonly string[]): AiCallBookingSettings {
+  const b = bookingSettings(org, defaultSpecialists);
+  return outreachSettings(org).aiCallWriteback ? b : { ...b, enabled: false };
+}
+
+/**
+ * Fix 2: what a PRACTICE call offers: times whenever booking settings name a specialist, whatever the toggles say, so an admin
+ * can hear the offer before anything is turned on. A practice call still never books, converts or writes.
+ */
+export function practiceBooking(org: { settings: unknown }, defaultSpecialists: readonly string[]): AiCallBookingSettings {
+  return { ...bookingSettings(org, defaultSpecialists), enabled: true };
+}
+
 /** Booking is on and names someone. Whether that list resolves to an ACTIVE user is checked when slots are offered (`no_owner`). */
 export function bookingActive(b: AiCallBookingSettings): boolean {
   return b.enabled && b.specialists.length > 0;
