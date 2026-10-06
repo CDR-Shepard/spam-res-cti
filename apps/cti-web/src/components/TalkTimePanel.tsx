@@ -26,8 +26,8 @@ function talkTimeErrorMessage(err: unknown): string {
  * Admin-only Talk time report (talk-time spec): per rep, over the org's Pacific
  * days From–To — talk time on every connected call (click-to-dial, power dial,
  * answered inbound), connected calls, power-dial talk, and time on the power
- * dialer (the rep's line open: dialing and hold music included). Tap a rep for
- * their days.
+ * dialer (counted while dialing or talking; quiet stretches over 15 minutes are
+ * left out). Tap a rep for their days.
  */
 export function TalkTimePanel(): JSX.Element {
   const [range, setRange] = useState(() => rangeFor('today'));
@@ -86,8 +86,8 @@ export function TalkTimePanel(): JSX.Element {
         ))}
       </div>
       <div className="calllog-summary">
-        Pacific time. Talk time counts connected calls — click-to-dial, power dial and answered inbound. On dialer is how
-        long the rep&rsquo;s line was open on the power dialer.
+        Pacific time. Talk time counts connected calls — click-to-dial, power dial and answered inbound. On dialer counts
+        the rep&rsquo;s power-dial time while dialing or talking; quiet stretches over 15 minutes are left out.
       </div>
       {error && <div className="admin-err" role="alert">{error}</div>}
       {loading && !report && <div className="empty-state"><span className="spinner lg" /></div>}

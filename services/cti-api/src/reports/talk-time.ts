@@ -4,6 +4,7 @@
  * seconds per day, and assemble one row per rep. PURE — the SQL is in
  * reports/talk-time-query.ts.
  */
+import { DIALER_IDLE_MS } from '../dialer/idle.js';
 import { ORG_TIMEZONE, orgMidnightUtc } from '../dialer/org-day.js';
 
 export const MAX_RANGE_DAYS = 92;
@@ -58,7 +59,16 @@ export interface LegSpan {
   endedAt: Date | null;
 }
 
-interface Span {
+/** Something happening on a rep's power-dial line (idle-cutoff spec): a dial
+ *  placed (`start` = `end` = dialed_at) or a conversation (bridged_at →
+ *  ended_at; null = still talking, counted to `now`). */
+export interface ActivitySpan {
+  userId: string;
+  start: Date;
+  end: Date | null;
+}
+
+export interface Span {
   start: number;
   end: number;
 }
@@ -66,23 +76,65 @@ interface Span {
 /** PURE: spans → non-overlapping spans, so a leg that lingered beside its
  *  replacement is counted once. Empty spans are dropped. */
 export function mergeIntervals(spans: readonly Span[]): Span[] {
-  return [...spans]
-    .filter((s) => s.end > s.start)
-    .sort((a, b) => a.start - b.start)
-    .reduce<Span[]>((merged, s) => {
-      const last = merged[merged.length - 1];
-      if (last && s.start <= last.end) {
-        return [...merged.slice(0, -1), { start: last.start, end: Math.max(last.end, s.end) }];
-      }
-      return [...merged, s];
-    }, []);
+  const sorted = spans.filter((s) => s.end > s.start).sort((a, b) => a.start - b.start);
+  // Mutates a LOCAL result: the inputs can be tens of thousands of dial windows,
+  // and copying the array on every step made this quadratic.
+  const merged: Span[] = [];
+  for (const s of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && s.start <= last.end) last.end = Math.max(last.end, s.end);
+    else merged.push({ start: s.start, end: s.end });
+  }
+  return merged;
 }
 
-/** PURE: seconds on the power dialer per user per day. An open leg runs to
- *  `now`; a leg is split at each Pacific midnight; time outside `days` is not
- *  counted. Days with no time are absent. */
+/** PURE: the overlap of two lists of sorted, non-overlapping spans
+ *  (mergeIntervals output). Two-pointer walk; touching spans share no time. */
+export function intersectIntervals(a: readonly Span[], b: readonly Span[]): Span[] {
+  const out: Span[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    const start = Math.max(a[i]!.start, b[j]!.start);
+    const end = Math.min(a[i]!.end, b[j]!.end);
+    if (end > start) out.push({ start, end });
+    // Advance whichever span ends first; the other may still overlap the next.
+    if (a[i]!.end < b[j]!.end) i++;
+    else j++;
+  }
+  return out;
+}
+
+/** Group items by userId in one pass. */
+function groupByUser<T extends { userId: string }>(items: readonly T[]): Map<string, T[]> {
+  const byUser = new Map<string, T[]>();
+  for (const item of items) {
+    const mine = byUser.get(item.userId);
+    if (mine) mine.push(item);
+    else byUser.set(item.userId, [item]);
+  }
+  return byUser;
+}
+
+/** PURE: a user's counted spans — the open line (legs; an open leg runs to
+ *  `now`) intersected with the active windows (a dial counts the idle limit after
+ *  it; a conversation from its start to `now`/its end, plus the idle limit). */
+function countedSpans(legs: readonly LegSpan[], activity: readonly ActivitySpan[], now: Date): Span[] {
+  const open = mergeIntervals(legs.map((l) => ({ start: l.joinedAt.getTime(), end: (l.endedAt ?? now).getTime() })));
+  const active = mergeIntervals(
+    activity.map((a) => ({ start: a.start.getTime(), end: (a.end ?? now).getTime() + DIALER_IDLE_MS })),
+  );
+  return intersectIntervals(open, active);
+}
+
+/** PURE: seconds on the power dialer per user per day — the time the rep's line
+ *  was open AND something happened in the last 15 minutes (a dial placed, or a
+ *  conversation in progress or ended less than 15 minutes ago; idle-cutoff spec).
+ *  An open leg runs to `now`; counted time is split at each Pacific midnight;
+ *  time outside `days` is not counted. Days with no time are absent. */
 export function dialerSecondsByUserDay(
   legs: readonly LegSpan[],
+  activity: readonly ActivitySpan[],
   days: readonly string[],
   now: Date,
 ): Record<string, Record<string, number>> {
@@ -97,15 +149,11 @@ export function dialerSecondsByUserDay(
   // gap, a day's "end" would be the next listed day's start.
   const starts = [...days, addDays(days[days.length - 1]!, 1)].map((d) => dayStartUtc(d).getTime());
   const bounds = days.map((day, i) => ({ day, start: starts[i]!, end: starts[i + 1]! }));
-  const userIds = [...new Set(legs.map((l) => l.userId))];
+  const activityByUser = groupByUser(activity);
   return Object.fromEntries(
-    userIds
-      .map((userId) => {
-        const spans = mergeIntervals(
-          legs
-            .filter((l) => l.userId === userId)
-            .map((l) => ({ start: l.joinedAt.getTime(), end: (l.endedAt ?? now).getTime() })),
-        );
+    [...groupByUser(legs)]
+      .map(([userId, userLegs]) => {
+        const spans = countedSpans(userLegs, activityByUser.get(userId) ?? [], now);
         const perDay = bounds
           .map((b) => {
             const ms = spans.reduce((sum, s) => sum + Math.max(0, Math.min(s.end, b.end) - Math.max(s.start, b.start)), 0);

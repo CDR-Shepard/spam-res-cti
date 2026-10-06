@@ -1,15 +1,18 @@
 /**
- * The talk-time report's reads (talk-time spec). Three reads per request:
- * connected calls aggregated per rep / Pacific day / source (one statement over
- * calls + dialer_connects), the rep legs that overlap the range, and the reps'
- * names. The arithmetic is in reports/talk-time.ts.
+ * The talk-time report's reads (talk-time spec, idle-cutoff spec). Four reads
+ * per request: connected calls aggregated per rep / Pacific day / source (one
+ * statement over calls + dialer_connects), the rep legs that overlap the range,
+ * the dials and conversations that make a line "active" (loadActivity), and the
+ * reps' names. The arithmetic is in reports/talk-time.ts.
  */
-import { and, eq, gt, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, gt, gte, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
+import { DIALER_IDLE_MS } from '../dialer/idle.js';
 import { ORG_TIMEZONE } from '../dialer/org-day.js';
 import {
   assembleTalkTimeReport,
   dialerSecondsByUserDay,
+  type ActivitySpan,
   type LegSpan,
   type RepName,
   type TalkRange,
@@ -84,6 +87,37 @@ export function legsStatement(db: Db, orgId: string, range: TalkRange) {
     .where(and(eq(l.orgId, orgId), lt(l.joinedAt, range.end), or(isNull(l.endedAt), gt(l.endedAt, range.start))));
 }
 
+export function dialActivityStatement(db: Db, orgId: string | null, start: Date, end: Date) {
+  const d = schema.dialerDialAttempts;
+  const lookback = new Date(start.getTime() - DIALER_IDLE_MS);
+  return db
+    .select({ userId: d.userId, dialedAt: d.dialedAt })
+    .from(d)
+    .where(and(orgId ? eq(d.orgId, orgId) : undefined, gte(d.dialedAt, lookback), lt(d.dialedAt, end)));
+}
+
+export function conversationActivityStatement(db: Db, orgId: string | null, start: Date, end: Date) {
+  const c = schema.dialerConnects;
+  const lookback = new Date(start.getTime() - DIALER_IDLE_MS);
+  return db
+    .select({ userId: c.userId, bridgedAt: c.bridgedAt, endedAt: c.endedAt })
+    .from(c)
+    .where(and(orgId ? eq(c.orgId, orgId) : undefined, lt(c.bridgedAt, end), or(isNull(c.endedAt), gte(c.endedAt, lookback))));
+}
+
+/** Dials and conversations whose 15-minute window can reach [start, end) —
+ *  one org's, or every org's (orgId null: the Salesforce worker). */
+export async function loadActivity(db: Db, orgId: string | null, start: Date, end: Date): Promise<ActivitySpan[]> {
+  const [dials, talks] = await Promise.all([
+    dialActivityStatement(db, orgId, start, end),
+    conversationActivityStatement(db, orgId, start, end),
+  ]);
+  return [
+    ...dials.map((r) => ({ userId: r.userId, start: r.dialedAt, end: r.dialedAt })),
+    ...talks.map((r) => ({ userId: r.userId, start: r.bridgedAt, end: r.endedAt })),
+  ];
+}
+
 export async function loadRepNames(db: Db, orgId: string, userIds: readonly string[]): Promise<RepName[]> {
   if (userIds.length === 0) return [];
   const u = schema.users;
@@ -95,8 +129,12 @@ export async function loadRepNames(db: Db, orgId: string, userIds: readonly stri
 }
 
 export async function loadTalkTimeReport(db: Db, orgId: string, range: TalkRange, now: Date): Promise<TalkTimeReport> {
-  const [talk, legs] = await Promise.all([loadTalkRows(db, orgId, range), legsStatement(db, orgId, range) as Promise<LegSpan[]>]);
-  const dialer = dialerSecondsByUserDay(legs, range.days, now);
+  const [talk, legs, activity] = await Promise.all([
+    loadTalkRows(db, orgId, range),
+    legsStatement(db, orgId, range) as Promise<LegSpan[]>,
+    loadActivity(db, orgId, range.start, range.end),
+  ]);
+  const dialer = dialerSecondsByUserDay(legs, activity, range.days, now);
   const names = await loadRepNames(db, orgId, [...new Set([...talk.map((t) => t.userId), ...legs.map((l) => l.userId)])]);
   return assembleTalkTimeReport({ range, names, talk, dialer });
 }
