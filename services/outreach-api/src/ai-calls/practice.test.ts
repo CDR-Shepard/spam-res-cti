@@ -237,4 +237,21 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
     const other = await setup();
     expect(await loadTranscript(db, other.ctx, aiCallId)).toBeNull();
   });
+
+  it('P6 M-10: cti-api placed the call but its answer was lost: the list and the transcript find the call by the practice key', async () => {
+    const s = await setup();
+    s.cti.answers.push({ lostPlaced: true, createdAt: NOW });
+    expect(await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER })).toEqual({ ok: false, error: 'cti_unreachable' });
+    const [row] = await practiceRows(s.lead.enrollmentId);
+    expect(row).toMatchObject({ result: null, aiCallId: null });
+    const [request] = await db.select().from(schema.aiCallRequests).where(eq(schema.aiCallRequests.idempotencyKey, row!.idempotencyKey));
+    const aiCallId = request!.aiCallId!;
+    await db.update(schema.aiCalls).set({ isTest: true, practice: true, transcript: [{ role: 'agent', text: 'Hi Pat', at: null }] }).where(eq(schema.aiCalls.id, aiCallId));
+
+    const [item] = (await listPracticeCalls(db, s.base.orgId, s.base.campaignId)).items;
+    expect(item).toMatchObject({ aiCallId, callStatus: 'queued', result: { result: 'placed', aiCallId } });
+    expect(await loadTranscript(db, s.ctx, aiCallId)).toEqual({ aiCallId, lines: [{ role: 'agent', text: 'Hi Pat', at: null }] });
+    const other = await setup();
+    expect(await loadTranscript(db, other.ctx, aiCallId)).toBeNull();
+  });
 });

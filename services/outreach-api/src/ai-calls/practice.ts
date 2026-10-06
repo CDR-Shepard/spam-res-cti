@@ -200,15 +200,20 @@ function toPracticeCall(r: PracticeRow): PracticeCall {
   };
 }
 
-/** The campaign's latest practice calls, newest first. The caller checked the campaign is this tenant's. */
+/**
+ * The campaign's latest practice calls, newest first. The caller checked the campaign is this tenant's. A row whose
+ * cti-api answer was lost (a timeout after it placed the call) finds its call and answer by its practice key in
+ * ai_call_requests, where cti-api stores every answer (P6 M-10), so the list never says "No answer" for a phone that rang.
+ */
 export async function listPracticeCalls(db: Db, orgId: string, campaignId: string): Promise<PracticeCallsResponse> {
   const result = await db.execute(sql`
-    select p.id, p.enrollment_id, r.name, r.sf_object, r.sf_record_id, p.plan_version, p.ai_call_id,
-           a.status as call_status, a.outcome, a.summary, a.appointment, p.result, p.created_at
+    select p.id, p.enrollment_id, r.name, r.sf_object, r.sf_record_id, p.plan_version, coalesce(p.ai_call_id, q.ai_call_id) as ai_call_id,
+           a.status as call_status, a.outcome, a.summary, a.appointment, coalesce(p.result, q.response) as result, p.created_at
     from ai_practice_calls p
     join campaign_enrollments e on e.id = p.enrollment_id and e.org_id = p.org_id
     join crm_records r on r.id = e.crm_record_id and r.org_id = e.org_id
-    left join ai_calls a on a.id = p.ai_call_id and a.org_id = p.org_id
+    left join ai_call_requests q on p.ai_call_id is null and q.org_id = p.org_id and q.idempotency_key = p.idempotency_key
+    left join ai_calls a on a.id = coalesce(p.ai_call_id, q.ai_call_id) and a.org_id = p.org_id
     where p.org_id = ${orgId}::uuid and p.campaign_id = ${campaignId}::uuid
     order by p.created_at desc, p.id desc
     limit ${PRACTICE_LIST_LIMIT}`);
