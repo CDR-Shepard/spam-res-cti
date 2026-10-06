@@ -265,6 +265,16 @@ describe('5a Fix 1 (M-3): the disposition carries a caller quote', () => {
   });
 });
 
+describe('sweep D-21(5): the disposition quote must be substantive', () => {
+  const i = input({ transcript: [{ role: 'caller', text: 'No.' }, { role: 'caller', text: 'Yeah.' }, { role: 'caller', text: 'Ok sure' }, { role: 'caller', text: 'Already sold.' }, { role: 'caller', text: 'We listed it with an agent.' }] });
+  it.each(['no', 'yeah', 'Ok sure'])('%j is too short to refine the disposition: left out', (quote) => {
+    expect(parseMapping({ disposition: 'sold_mls', disposition_evidence: quote, answers: {} }, i)).toEqual({ disposition: 'sold_mls', values: {} });
+  });
+  it.each(['Already sold', 'We listed it with an agent'])('%j counts', (quote) => {
+    expect(parseMapping({ disposition: 'sold_mls', disposition_evidence: quote, answers: {} }, i).dispositionEvidence).toBe(quote);
+  });
+});
+
 describe('5a Fix 1 (M-4): answer keys are matched to the fields whatever their case', () => {
   it('a key in another case maps to the field, keyed by the field name', () => {
     const out = parseMapping({ disposition: 'interested', answers: { timeline__C: { value: '90 Days', evidence: 'about 90 days' } } }, input());

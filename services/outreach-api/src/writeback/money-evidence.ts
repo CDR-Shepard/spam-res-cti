@@ -7,6 +7,9 @@
  * - **Words only:** a run of number words counts only with a magnitude (hundred, thousand, grand, million, mil), and only
  *   when it parses with no ambiguity ("two fifty thousand", "a quarter million", "three hundred grand"). Anything else
  *   gives nothing, so the value is dropped.
+ * - **Ranges (sweep D-21(1)):** a quote that gives a range justifies nothing, because picking an end is resolving the
+ *   range for the seller: "between …", two numbers joined by to / or / through / a spaced dash ("250k-300k" too), or two
+ *   or more amounts of 1,000 and up.
  *
  * Pure.
  */
@@ -144,7 +147,41 @@ export function moneyCandidates(evidence: string): number[] {
   return /\d/.test(text) ? digitCandidates(text) : wordCandidates(text);
 }
 
-/** Whether the seller's quote states exactly this amount. */
+/** A range amount floor: two stated amounts at or above this are two prices, not one. */
+const RANGE_AMOUNT_MIN = 1_000;
+const RANGE_JOIN = /^\s*(?:to|or|through|thru|-|–|—)\s*$/;
+const WORD_JOIN = new Set(['to', 'or', 'through', 'thru', '-', '–', '—']);
+const isNumberWord = (t: string): boolean => NUMBER_WORD.has(t) && t !== 'a' && t !== 'and';
+
+/** Digits: two digit amounts with only a range word or a dash between them. */
+function digitRange(text: string): boolean {
+  const matches = [...text.replace(/\$/g, '').matchAll(DIGIT_NUMBER)];
+  const plain = text.replace(/\$/g, '');
+  return matches.some((m, i) => {
+    const next = matches[i + 1];
+    return next !== undefined && RANGE_JOIN.test(plain.slice(m.index! + m[0].length, next.index));
+  });
+}
+
+/** Words: number words, a range word (or a spaced dash), then number words ("two fifty to three hundred thousand"). */
+function wordRange(text: string): boolean {
+  const tokens = text.match(/[a-z]+|(?<=\s)[-–—](?=\s)/g) ?? [];
+  return tokens.some((t, i) => {
+    if (!WORD_JOIN.has(t) || i === 0 || !isNumberWord(tokens[i - 1]!)) return false;
+    const after = tokens[i + 1] === 'a' ? tokens[i + 2] : tokens[i + 1];
+    return after !== undefined && isNumberWord(after);
+  });
+}
+
+/** Whether the quote gives a range (or several prices) rather than one amount. */
+export function isRangeQuote(evidence: string): boolean {
+  const text = lower(evidence);
+  if (/\bbetween\b/.test(text)) return true;
+  if (moneyCandidates(evidence).filter((n) => n >= RANGE_AMOUNT_MIN).length >= 2) return true;
+  return /\d/.test(text) ? digitRange(text) : wordRange(text);
+}
+
+/** Whether the seller's quote states exactly this amount, and no other (never one end of a range). */
 export function evidenceJustifies(evidence: string, value: number): boolean {
-  return moneyCandidates(evidence).includes(value);
+  return !isRangeQuote(evidence) && moneyCandidates(evidence).includes(value);
 }

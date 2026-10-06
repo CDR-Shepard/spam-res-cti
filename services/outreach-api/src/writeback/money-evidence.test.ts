@@ -72,3 +72,29 @@ describe('evidenceJustifies', () => {
     expect(evidenceJustifies('2 hundred thousand', 200_000)).toBe(false);
   });
 });
+
+describe('sweep D-21(1): a range never justifies a price', () => {
+  it.each<[string, number]>([
+    ['between 200 and 250k', 250_000],
+    ['between 200 and 250k', 200],
+    ['250k to 300k', 300_000],
+    ['250k to 300k', 250_000],
+    ['250 or 300 thousand', 300_000],
+    ['250,000 or 300,000', 250_000],
+    ['250k-300k', 300_000],
+    ['250k – 300k', 250_000],
+    ['somewhere around 250k, maybe 260k', 260_000],
+    ['two fifty to three hundred thousand', 300_000],
+    ['between a quarter million and three hundred thousand', 250_000],
+  ])('%j does not justify %d', (evidence, value) => {
+    expect(evidenceJustifies(evidence, value)).toBe(false);
+  });
+  it.each<[string, number]>([
+    ['350,000 at least', 350_000],
+    ['I owe 200,000, and the rest is mine', 200_000],
+    ['forty or 40 grand', 40_000],
+    ['three hundred grand', 300_000],
+  ])('a single stated amount still justifies: %j → %d', (evidence, value) => {
+    expect(evidenceJustifies(evidence, value)).toBe(true);
+  });
+});

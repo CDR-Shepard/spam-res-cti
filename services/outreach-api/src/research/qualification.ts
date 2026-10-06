@@ -85,9 +85,10 @@ const ZERO_IS_VALUE: ReadonlySet<string> = new Set(
 
 /**
  * Whether a field's value counts as blank. `field` (the API name, any case) decides the currency zero rule
- * (5a Fix 1, I-1): 0 is blank unless the field is `zeroIsValue` (amount owed). Without it, 0 is blank.
+ * (5a Fix 1, I-1): 0 is blank unless the field is `zeroIsValue` (amount owed). It is required (sweep D-21(2)) so a new
+ * caller can't silently treat a rep's "owes 0" as blank; pass `undefined` only for a value with no field behind it.
  */
-export function isBlankish(value: string | null | undefined, kind: FieldKind, field?: string): boolean {
+export function isBlankish(value: string | null | undefined, kind: FieldKind, field: string | undefined): boolean {
   if (value === null || value === undefined || value.trim() === '') return true;
   switch (kind) {
     case 'boolean':

@@ -77,7 +77,7 @@ describe('isBlankish', () => {
     ['350000', 'currency', false],
     ['moving', 'text', false],
   ])('%j as %s is blankish: %s', (value, kind, expected) => {
-    expect(isBlankish(value, kind)).toBe(expected);
+    expect(isBlankish(value, kind, undefined)).toBe(expected);
   });
 });
 

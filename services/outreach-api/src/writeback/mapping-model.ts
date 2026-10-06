@@ -153,6 +153,18 @@ function checkedEvidence(raw: unknown, haystacks: readonly string[]): string | n
   return haystacks.some((h) => h.includes(needle)) ? raw : null;
 }
 
+/** Words that settle where a seller stands, so a two-word quote ("Already sold") is enough (sweep D-21(5)). */
+const DISPOSITION_WORDS = /\b(?:sold|sell|selling|listed|listing|realtor|agent|investor|interested|offer|moving|keeping|renting)\b/;
+const DISPOSITION_MIN_WORDS = 3;
+
+/** A disposition quote counts only when it is substantive: three words or more, or two with a word that settles it. */
+function substantiveDisposition(evidence: string | null): string | null {
+  if (evidence === null) return null;
+  const words = normalize(evidence).split(/[^a-z0-9']+/).filter((w) => w !== '');
+  if (words.length >= DISPOSITION_MIN_WORDS) return evidence;
+  return words.length === 2 && DISPOSITION_WORDS.test(words.join(' ')) ? evidence : null;
+}
+
 function picklistValue(f: WritableField, v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const hit = allowedValues(f).find((a) => a.toLowerCase() === v.trim().toLowerCase());
@@ -214,7 +226,7 @@ export function parseMapping(raw: unknown, i: MappingInput): MappedAnswers {
     const checked = checkedAnswer(f, answer as { value?: unknown; evidence?: unknown }, lines);
     if (checked !== null) values[f.name] = checked;
   }
-  const dispositionEvidence = checkedEvidence(body.disposition_evidence, lines.caller);
+  const dispositionEvidence = substantiveDisposition(checkedEvidence(body.disposition_evidence, lines.caller));
   return { disposition: disposition.success ? disposition.data : 'unknown', ...(dispositionEvidence === null ? {} : { dispositionEvidence }), values };
 }
 
