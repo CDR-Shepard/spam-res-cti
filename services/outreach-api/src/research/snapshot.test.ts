@@ -6,6 +6,7 @@ import { describeOf, fakeSalesforce, type QueryRoute, type RequestRoute } from '
 import type { ActivityItem } from './activity.js';
 import { DescribeCache } from './describe.js';
 import type { RecordBlock } from './related.js';
+import { planFacts } from '../call-plans/plan-context.js';
 import { ResearchSnapshot, assembleSnapshot, researchRecord, snapshotHash, snapshotSize, type SnapshotInput } from './snapshot.js';
 
 const LEAD = '00Q000000000001AAA';
@@ -193,6 +194,19 @@ describe('researchRecord', () => {
     expect(snap?.collectedAt).toBe(NOW.toISOString());
     expect(snap?.activity.map((a) => a.source)).toEqual(['chatter', 'task']);
     expect(ResearchSnapshot.safeParse(snap).success).toBe(true);
+  });
+
+  it('final review OUT I-1: forty unanswered dials after the last connect and an archived connect: the targeted read keeps them as contacts', async () => {
+    const q = happy();
+    const noAnswers = Array.from({ length: 26 }, (_, i) => ({ Id: `00T0000000001${String(i).padStart(2, '0')}AAA`, Subject: 'Outbound Call | No answer | Pat', CreatedDate: new Date(NOW.getTime() - (i + 1) * 3_600_000).toISOString(), CallDisposition: 'No answer', TaskSubtype: 'Call' }));
+    q.queries[1] = [/FROM Task/, noAnswers];
+    const connect = { Id: '00T000000000999AAA', Subject: 'Outbound Call | Connected | Pat', CreatedDate: '2025-08-20T17:00:00.000Z', CallDisposition: 'Connected', TaskSubtype: 'Call', CallType: 'Outbound' };
+    const sf = fakeSalesforce({ describes, ...q, archived: [[/FROM Task/, [connect]]] });
+    const snap = (await run(sf))!;
+    expect(sf.archived.some((x) => x.includes('IsDeleted = false'))).toBe(true);
+    expect(snap.contacts?.map((c) => c.id)).toEqual(['00T000000000999AAA']);
+    expect(ResearchSnapshot.parse(JSON.parse(JSON.stringify(snap)))).toEqual(snap);
+    expect(planFacts(snap, NOW)).toMatchObject({ lastContactWords: 'about a year ago', lastContactKind: 'call' });
   });
 
   it('is null when the main record is missing', async () => {

@@ -5,6 +5,7 @@ import { AiConsentStatus, ResearchSource, ResearchSourceSummary } from '@cti/con
 import { canonicalJson } from '../triage/notes.js';
 import { readContentNotes, readEmails, readEvents, readNotes, readTasks, type ActivityItem } from './activity.js';
 import { readChatter } from './chatter.js';
+import { readContactEvidence } from './contact-evidence.js';
 import { RESEARCH_LIMITS } from './limits.js';
 import { qualificationFieldNames } from './qualification.js';
 import { readMainAndRelated, type RecordBlock, type ResearchReadDeps } from './related.js';
@@ -36,6 +37,11 @@ export const ResearchSnapshot = z.object({
   consent: AiConsentStatus,
   records: z.array(Block),
   activity: z.array(Activity),
+  /**
+   * Final review OUT I-1: candidate contact Tasks and Events from the targeted read (contact-evidence.ts), archived
+   * included; searched with `activity` for the last real contact only. Absent on snapshots stored before it.
+   */
+  contacts: z.array(Activity).optional(),
   sources: z.array(ResearchSourceSummary),
   truncated: z.boolean(),
 });
@@ -50,6 +56,8 @@ export interface SnapshotInput {
   consentField?: string | null;
   records: RecordBlock[];
   activity: ActivityItem[];
+  /** The targeted contact read's rows (OUT I-1); small and bodiless, kept outside the activity budget's cut. */
+  contacts?: ActivityItem[];
   sources: ResearchSourceSummary[];
 }
 
@@ -110,7 +118,11 @@ export function assembleSnapshot(raw: SnapshotInput, totalChars: number = RESEAR
   // Every Salesforce string must be storable as jsonb: a lone surrogate from Salesforce itself would otherwise fail the store.
   const input = { ...raw, sfRecordId: wellFormed(raw.sfRecordId), records: wellFormedDeep(raw.records), activity: wellFormedDeep(raw.activity), sources: wellFormedDeep(raw.sources) };
   const consentField = input.consentField ?? null;
-  const envelope = { version: 1 as const, sfObject: input.sfObject, sfRecordId: input.sfRecordId, collectedAt: input.collectedAt.toISOString(), consent: input.consent, records: [] as RecordBlock[], activity: [] as ActivityItem[], sources: input.sources, truncated: true };
+  const contacts = wellFormedDeep(raw.contacts ?? []);
+  const envelope = {
+    version: 1 as const, sfObject: input.sfObject, sfRecordId: input.sfRecordId, collectedAt: input.collectedAt.toISOString(), consent: input.consent,
+    records: [] as RecordBlock[], activity: [] as ActivityItem[], ...(contacts.length > 0 ? { contacts } : {}), sources: input.sources, truncated: true,
+  };
   const { records, cut } = fitRecords(input.records, Math.min(Math.floor(totalChars / 2), totalChars - len(envelope)), consentField, input.sfObject);
   const base = { ...envelope, records, truncated: cut };
   let used = len(base);
@@ -146,6 +158,8 @@ export async function researchRecord(
     readEmails(deps.client, links),
     readChatter(deps.client, links),
   ]);
+  // OUT I-1: after the activity reads, so an outage there is reported as before; its own outage retries research too.
+  const contacts = await readContactEvidence(deps.client, links, target.now);
   const reads = [main.related, tasks, events, notes, contentNotes, emails, chatter.posts, chatter.comments];
   const summaries = [{ source: 'record' as const, status: 'ok' as const, count: 1, truncated: false, note: null }, ...reads.map((r) => r.summary)];
   return assembleSnapshot({
@@ -156,6 +170,7 @@ export async function researchRecord(
     consentField: target.consentField,
     records: [main.main, ...main.related.items],
     activity: [tasks, events, notes, contentNotes, emails, chatter.posts, chatter.comments].flatMap((r) => r.items),
+    contacts,
     sources: SOURCE_ORDER.map((s) => summaries.find((x) => x.source === s)!),
   });
 }

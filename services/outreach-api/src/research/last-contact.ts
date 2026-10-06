@@ -8,8 +8,9 @@
  * Fix 1 (I-1): most call Tasks are dials nobody answered ("Outbound Call | No answer | …", "VoiceMail Drop | <rep>",
  * "CallRail Recording" of a missed call). A call Task counts only with positive evidence:
  *  - its CallDisposition, or the disposition part of a CTI subject, is one of CONNECTED_DISPOSITIONS; or
- *  - it lasted at least MIN_TALK_SECONDS (CallDurationInSeconds), which is how an inbound call with no disposition
- *    and a CallRail recording count;
+ *  - it lasted at least MIN_TALK_SECONDS (CallDurationInSeconds) and either says "Call back" or has no disposition and
+ *    was not inbound (final review: "Call back" alone, and a long inbound recording, are often no conversation — the
+ *    latter the seller's own voicemail);
  * and never when the disposition, the subject's head or its disposition part says nobody was reached (NEVER_CONTACT),
  * or the caller was anonymous. An "AI call: …" Task (cti-api ai-voice/sf-logging) counts only when its outcome was a
  * conversation (AI_CONVERSATION) and its CallDisposition says a person was reached: the open callback to-do Tasks it
@@ -24,8 +25,13 @@ export interface LastContact {
 }
 
 /** The wrap-up dispositions that mean a person was reached (cti-web WrapupForm DISPOSITIONS), lower-cased. */
-export const CONNECTED_DISPOSITIONS: ReadonlySet<string> = new Set(['connected', 'call back', 'do not call']);
-/** A call Task with no positive disposition counts only when it lasted this long. */
+export const CONNECTED_DISPOSITIONS: ReadonlySet<string> = new Set(['connected', 'do not call']);
+/**
+ * Final review (OUT minor 3): reps also pick "Call back" when someone else answered or asked them to try later, so on
+ * its own it is no evidence; with a real conversation's length (MIN_TALK_SECONDS) it counts.
+ */
+const CALL_BACK = 'call back';
+/** A call Task with no positive disposition counts only when it lasted this long (and, with no disposition, was not inbound). */
 export const MIN_TALK_SECONDS = 60;
 /** Nobody was reached: never contact, whatever the duration. */
 export const NEVER_CONTACT =
@@ -72,7 +78,16 @@ function reachedSomeone(i: Item, title: string): boolean {
   if (said.some((s) => NEVER_CONTACT.test(s)) || parts.some((p) => lower(p) === 'anonymous')) return false;
   if (CONNECTED_DISPOSITIONS.has(lower(disposition)) || CONNECTED_DISPOSITIONS.has(lower(segment))) return true;
   const seconds = Number(i.meta.seconds);
-  return i.meta.seconds !== undefined && Number.isFinite(seconds) && seconds >= MIN_TALK_SECONDS;
+  if (i.meta.seconds === undefined || !Number.isFinite(seconds) || seconds < MIN_TALK_SECONDS) return false;
+  if (lower(disposition) === CALL_BACK || lower(segment) === CALL_BACK) return true;
+  // No disposition: a long inbound recording is often the seller's own voicemail (final review OUT minor 3).
+  return !mayBeInbound(i, title);
+}
+
+/** An inbound call, or a CallRail recording whose direction is not known to be outbound. */
+function mayBeInbound(i: Item, title: string): boolean {
+  const type = lower(i.meta.callType);
+  return type === 'inbound' || /^inbound call\b/i.test(title) || (/^callrail recording\b/i.test(title) && type !== 'outbound');
 }
 
 function contactOf(i: Item, now: Date): LastContact | null {
@@ -96,10 +111,13 @@ function contactOf(i: Item, now: Date): LastContact | null {
   }
 }
 
-/** The newest real two-way contact in the snapshot's activity, or null. */
+/**
+ * The newest real two-way contact in the snapshot's activity and its targeted contact read (final review OUT I-1: a
+ * connect behind many newer dials, or archived after a year), or null.
+ */
 export function lastRealContact(s: ResearchSnapshot, now: Date): LastContact | null {
   let newest: LastContact | null = null;
-  for (const item of s.activity) {
+  for (const item of [...s.activity, ...(s.contacts ?? [])]) {
     const c = contactOf(item, now);
     if (c && (!newest || c.at > newest.at)) newest = c;
   }

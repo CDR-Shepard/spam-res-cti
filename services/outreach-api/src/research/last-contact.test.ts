@@ -89,12 +89,12 @@ describe('lastRealContact: a call counts only with evidence that a person was re
 
   it.each<[string, Item]>([
     ['Outbound Call | Connected', call(`Outbound Call | Connected | ${WHO}`, { disposition: 'Connected', callType: 'Outbound' })],
-    ['Outbound Call | Call back', call(`Outbound Call | Call back | ${WHO}`, { disposition: 'Call back', callType: 'Outbound' })],
+    ['Outbound Call | Call back that lasted two minutes', call(`Outbound Call | Call back | ${WHO}`, { disposition: 'Call back', callType: 'Outbound', seconds: '120' })],
     ['Outbound Call | Do not call', call(`Outbound Call | Do not call | ${WHO}`, { disposition: 'Do not call', callType: 'Outbound' })],
     ['the subject\'s disposition when CallDisposition was not written (a degraded Task)', call(`Outbound Call | Connected | ${WHO}`)],
     ['CallDisposition in any case', call('Call', { disposition: 'CONNECTED' })],
-    ['an inbound call with no disposition that lasted a minute', call('Inbound Call | (619) 555-0142', { callType: 'Inbound', seconds: '60' })],
-    ['a CallRail recording of three minutes', call('CallRail Recording', { callType: 'Inbound', seconds: '180' })],
+    ['an inbound call the rep marked Connected', call(`Inbound Call | Connected | ${WHO}`, { callType: 'Inbound', disposition: 'Connected', seconds: '30' })],
+    ['an outbound CallRail recording of three minutes', call('CallRail Recording', { callType: 'Outbound', seconds: '180' })],
     ['an "Outgoing" call of two minutes', call('Outgoing | Dana Rep', { seconds: '120' })],
     ['a call shape with no TaskSubtype, by its CallType', task(AT, `Outbound Call | Connected | ${WHO}`, { callType: 'Outbound', disposition: 'Connected' })],
     ['a call shape with no TaskSubtype and no CallType, by its subject', task(AT, `Outbound Call | Connected | ${WHO}`, {})],
@@ -104,6 +104,13 @@ describe('lastRealContact: a call counts only with evidence that a person was re
 
   it.each<[string, Item]>([
     ['Outbound Call | No answer', call(`Outbound Call | No answer | ${WHO}`, { disposition: 'No answer', callType: 'Outbound' })],
+    // Final review (OUT minor 3): "Call back" is also picked when someone else answered; it needs a real conversation's length.
+    ['Outbound Call | Call back with no talk time', call(`Outbound Call | Call back | ${WHO}`, { disposition: 'Call back', callType: 'Outbound' })],
+    ['a "Call back" subject under a minute', call(`Outbound Call | Call back | ${WHO}`, { seconds: '40' })],
+    // An inbound recording with no disposition is often the seller's own voicemail, however long.
+    ['an inbound call with no disposition that lasted a minute', call('Inbound Call | (619) 555-0142', { callType: 'Inbound', seconds: '60' })],
+    ['an inbound CallRail recording of three minutes', call('CallRail Recording', { callType: 'Inbound', seconds: '180' })],
+    ['a CallRail recording of three minutes with no direction', call('CallRail Recording', { seconds: '180' })],
     ['CallRail Recording with no duration', call('CallRail Recording', { callType: 'Inbound' })],
     ['CallRail Recording under a minute', call('CallRail Recording', { callType: 'Inbound', seconds: '59' })],
     ['Inbound Call | <phone> with no duration', call('Inbound Call | (619) 555-0142', { callType: 'Inbound' })],
@@ -252,5 +259,32 @@ describe('contactWords', () => {
       expect(words).toMatch(/^[A-Za-z ]+$/);
       expect(agentPlanTextIssues(words, { singleLine: true })).toEqual([]);
     }
+  });
+});
+
+describe('final review OUT I-1: the targeted contact read (snapshot contacts) is searched with the recent activity', () => {
+  const WHO = '(619) 555-0142 / Pat Seller';
+  const noAnswer = (i: number) => task(new Date(NOW.getTime() - (i + 1) * 6 * 3_600_000).toISOString(), `Outbound Call | No answer | ${WHO}`, { kind: 'Call', disposition: 'No answer', callType: 'Outbound' });
+
+  it('forty unanswered dials after the last connect: the connect, found by the targeted read, is the last contact', () => {
+    const connect = task('2026-07-14T17:00:00.000Z', `Outbound Call | Connected | ${WHO}`, { kind: 'Call', disposition: 'Connected', seconds: '300' });
+    const s = { ...snap(Array.from({ length: 25 }, (_, i) => noAnswer(i))), contacts: [connect] };
+    const c = lastRealContact(s, NOW);
+    expect(c).toEqual({ at: new Date('2026-07-14T17:00:00.000Z'), kind: 'call' });
+    expect(contactWords(c!.at, NOW)).toBe('back in July');
+  });
+
+  it('an archived connected call more than a year ago reads "about a year ago"', () => {
+    const archived = task('2025-08-20T17:00:00.000Z', `Outbound Call | Connected | ${WHO}`, { kind: 'Call', disposition: 'Connected' });
+    const c = lastRealContact({ ...snap([noAnswer(1)]), contacts: [archived] }, NOW);
+    expect(contactWords(c!.at, NOW)).toBe('about a year ago');
+  });
+
+  it('the newest of the two reads wins, and targeted rows face the same evidence rules', () => {
+    const recent = task('2026-09-20T17:00:00.000Z', `Outbound Call | Connected | ${WHO}`, { kind: 'Call', disposition: 'Connected' });
+    const older = task('2026-03-01T17:00:00.000Z', `Outbound Call | Connected | ${WHO}`, { kind: 'Call', disposition: 'Connected' });
+    expect(lastRealContact({ ...snap([recent]), contacts: [older] }, NOW)?.at).toEqual(new Date('2026-09-20T17:00:00.000Z'));
+    const voicemail = task('2026-09-25T17:00:00.000Z', `Outbound Call | Left voicemail | ${WHO}`, { kind: 'Call', disposition: 'Left voicemail', seconds: '95' });
+    expect(lastRealContact({ ...snap([]), contacts: [voicemail] }, NOW)).toBeNull();
   });
 });

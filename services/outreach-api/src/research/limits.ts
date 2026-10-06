@@ -14,6 +14,9 @@ export const RESEARCH_LIMITS = {
   contentNotes: 10,
   noteChars: 3_000,
   emails: 10,
+  /** The targeted reads for the last real contact (final review OUT I-1): connected-call Tasks and past meeting Events. */
+  contactTasks: 10,
+  contactEvents: 5,
   emailChars: 2_000,
   feedItems: 25,
   feedComments: 50,

@@ -21,14 +21,15 @@ const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? 
 /** A string, or a finite number as its decimal text (CallDurationInSeconds comes back as a JSON number). */
 const metaText = (v: unknown): string | null => (typeof v === 'number' && Number.isFinite(v) ? String(v) : str(v));
 const byNewest = (a: ActivityItem, b: ActivityItem) => (b.at ?? '').localeCompare(a.at ?? '');
-const meta = (pairs: Record<string, unknown>): Record<string, string> =>
+/** The item meta: each value as text, empty ones left out. */
+export const meta = (pairs: Record<string, unknown>): Record<string, string> =>
   Object.fromEntries(Object.entries(pairs).flatMap(([k, v]) => {
     const text = metaText(v);
     return text === null ? [] : [[k, text]];
   }));
 
 /** `(WhoId IN (…) OR WhatId IN (…))`, or null when both lists are empty. */
-function whoWhat(links: LinkIds): string | null {
+export function whoWhat(links: LinkIds): string | null {
   const parts = [
     ...(links.whoIds.length ? [`WhoId IN (${soqlIdList(links.whoIds)})`] : []),
     ...(links.whatIds.length ? [`WhatId IN (${soqlIdList(links.whatIds)})`] : []),
@@ -41,7 +42,7 @@ function capped<T>(rows: T[], max: number): { rows: T[]; truncated: boolean } {
 }
 
 const TASK_FIELDS = 'Id, Subject, Description, Status, ActivityDate, CreatedDate';
-const CALL_FIELDS = 'CallDisposition, TaskSubtype, CallType, CallDurationInSeconds';
+export const CALL_FIELDS = 'CallDisposition, TaskSubtype, CallType, CallDurationInSeconds';
 
 /**
  * The Tasks, with the call fields; when the integration user can't read one of them (INVALID_FIELD), once more without

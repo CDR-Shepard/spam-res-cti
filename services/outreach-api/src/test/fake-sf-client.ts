@@ -13,14 +13,19 @@ export interface FakeSf {
   described: string[];
   /** Every REST path requested, in order. */
   paths: string[];
+  /** Every SOQL string sent through the queryAll resource (queryIncludingArchived), in order. */
+  archived: string[];
 }
 
 export function fakeSalesforce(opts: {
   describes?: Record<string, SObjectDescribe>;
   queries?: QueryRoute[];
   requests?: RequestRoute[];
+  /** Routes for queryIncludingArchived; a query with no route answers no rows. */
+  archived?: QueryRoute[];
 }): FakeSf {
   const soql: string[] = [];
+  const archived: string[] = [];
   const described: string[] = [];
   const paths: string[] = [];
   const client = {
@@ -38,6 +43,14 @@ export function fakeSalesforce(opts: {
       if (answer instanceof Error) throw answer;
       return typeof answer === 'function' ? answer(q) : answer;
     },
+    async queryIncludingArchived(q: string): Promise<Row[]> {
+      archived.push(q);
+      const route = (opts.archived ?? []).find(([re]) => re.test(q));
+      if (!route) return [];
+      const [, answer] = route;
+      if (answer instanceof Error) throw answer;
+      return typeof answer === 'function' ? answer(q) : answer;
+    },
     async request(path: string): Promise<SalesforceResponse> {
       paths.push(path);
       const route = (opts.requests ?? []).find(([re]) => re.test(path));
@@ -47,7 +60,7 @@ export function fakeSalesforce(opts: {
       return answer;
     },
   } as unknown as SalesforceClient;
-  return { client, soql, described, paths };
+  return { client, soql, described, paths, archived };
 }
 
 export const describeOf = (name: string, fields: Array<[string, string?]>): SObjectDescribe => ({
