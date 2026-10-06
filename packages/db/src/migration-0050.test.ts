@@ -105,6 +105,8 @@ describe('migration 0050_ai_calls', () => {
         'is_test', 'status', 'outcome', 'block_reason', 'call_sid', 'answered_by', 'qualification', 'transcript',
         'summary', 'callback_at', 'sf_task_id', 'cti_call_id', 'duration_seconds', 'started_at', 'ended_at',
         'created_at', 'updated_at',
+        // Added by later migrations: 0054 (booking).
+        'offered_slots', 'appointment', 'practice',
       ].sort(),
     );
     const unique = cfg.indexes.find((i) => i.config.name === 'ai_calls_call_sid_unique');

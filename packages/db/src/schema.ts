@@ -1256,6 +1256,12 @@ export const aiCalls = pgTable(
     endedAt: timestamp('ended_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+    /** The AppointmentSlot[] the trigger sent (contracts appointments.ts); '[]' when none (0054). */
+    offeredSlots: jsonb('offered_slots').default(sql`'[]'::jsonb`).notNull(),
+    /** The BookedAppointment that book_appointment stored; NULL until a slot is booked (0054). */
+    appointment: jsonb('appointment'),
+    /** A practice call: real record and plan, dialed to a test number. Always also isTest (CHECK in SQL, 0054). */
+    practice: boolean('practice').default(false).notNull(),
   },
   (t) => ({
     orgCreatedIdx: index('ai_calls_org_created_idx').on(t.orgId, sql`${t.createdAt} desc`),
