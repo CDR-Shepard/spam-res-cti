@@ -35,6 +35,7 @@ import { researchRecord, type ResearchSnapshot } from '../research/snapshot.js';
 import { outreachSettings } from '../settings.js';
 import { claimDuePreparations, releasePreparations, type DuePrep } from './claims.js';
 import { abortable } from './abortable.js';
+import { planFacts, withPlanFacts } from './plan-context.js';
 import { buildCallPlanPrompt } from './prompt.js';
 import {
   ERR_PLAN_INVALID,
@@ -168,9 +169,10 @@ async function prepareOne(deps: PrepareDeps, org: OrgContext, p: DuePrep): Promi
     await setError(db, p, now, ERR_RECORD_GONE);
     return { kind: 'failed', costMicros: 0 };
   }
+  const facts = planFacts(snapshot, now);
   let out: CallPlanResult;
   try {
-    out = await deps.model.plan(buildCallPlanPrompt(snapshot, { companyName: org.companyName, today: now }), { signal });
+    out = await deps.model.plan(buildCallPlanPrompt(snapshot, { companyName: org.companyName, today: now, facts }), { signal });
   } catch (err) {
     if (err instanceof CallPlanOutputError) return planRejected(deps, p, snapshot, err);
     log.warn({ enrollmentId: p.enrollmentId, errName: errName(err) }, 'call.prepare: model call failed');
@@ -181,7 +183,9 @@ async function prepareOne(deps: PrepareDeps, org: OrgContext, p: DuePrep): Promi
   // Spend first: the call is paid for even if storing the result fails or is discarded.
   await bookkeeping(deps, p, 'the AI spend', () => addSpend(db, p.orgId, now, cost));
   const snap = snapshot;
-  return guardedStore(deps, p, cost, async () => ((await storePrepared(db, p, now, snap, out)) ? 'held' : 'planned'));
+  // 1D: the computed facts win over what the model wrote for them (a new result; the model's is left as it was).
+  const result: CallPlanResult = { ...out, plan: withPlanFacts(out.plan, facts) };
+  return guardedStore(deps, p, cost, async () => ((await storePrepared(db, p, now, snap, result)) ? 'held' : 'planned'));
 }
 
 async function pauseForBudget(deps: PrepareDeps, orgId: string, spent: number, budget: number): Promise<void> {

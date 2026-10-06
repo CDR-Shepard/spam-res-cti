@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CALL_GOAL_KEYS, CallPlan, DoNotContactCategory, EvidenceSource, PreferredWindow } from '@cti/contracts';
+import { CALL_GOAL_KEYS, CallPlan, DoNotContactCategory, EvidenceSource, PreferredWindow, QUALIFICATION_TOPICS } from '@cti/contracts';
 import { validPlan } from '../test/call-plan-fixtures.js';
 import { costMicros, isPricedModel } from './model.js';
 import {
@@ -100,9 +100,7 @@ describe('AnthropicCallPlanModel', () => {
 
 describe('CALL_PLAN_INPUT_SCHEMA', () => {
   it('mirrors CallPlan: same required keys and the contract enums', () => {
-    // Plan 1D: CallPlan's re-engagement fields default when absent; Task 9 adds them to the model's schema.
-    const notYetAsked = new Set(['reengagement', 'stillToLearn']);
-    expect([...CALL_PLAN_INPUT_SCHEMA.required].sort()).toEqual(Object.keys(CallPlan.shape).filter((k) => !notYetAsked.has(k)).sort());
+    expect([...CALL_PLAN_INPUT_SCHEMA.required].sort()).toEqual(Object.keys(CallPlan.shape).sort());
     const p = (...path: Array<string | number>) => at(CALL_PLAN_INPUT_SCHEMA.properties, ...path);
     expect(p('goals', 'items', 'properties', 'goal', 'enum')).toEqual([...CALL_GOAL_KEYS]);
     expect(p('goals', 'minItems')).toBe(4);
@@ -111,6 +109,33 @@ describe('CALL_PLAN_INPUT_SCHEMA', () => {
     expect(p('bestTimeToCall', 'properties', 'window', 'enum')).toEqual(PreferredWindow.options);
     expect(p('doNotContact', 'anyOf', 1, 'properties', 'category', 'enum')).toEqual(DoNotContactCategory.options);
     expect(p('questions', 'minItems')).toBe(1);
+  });
+  it('1D: asks for reengagement (null or both keys) and stillToLearn (the nine topics)', () => {
+    const p = (...path: Array<string | number>) => at(CALL_PLAN_INPUT_SCHEMA.properties, ...path);
+    expect(CALL_PLAN_INPUT_SCHEMA.required).toEqual(expect.arrayContaining(['reengagement', 'stillToLearn']));
+    expect(p('reengagement', 'anyOf', 0)).toEqual({ type: 'null' });
+    expect(p('reengagement', 'anyOf', 1)).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: ['lastContact', 'lastTopic'],
+      properties: { lastContact: { type: ['string', 'null'], maxLength: 80 }, lastTopic: { type: ['string', 'null'], maxLength: 200 } },
+    });
+    expect(p('stillToLearn')).toMatchObject({ type: 'array', maxItems: 9, items: { type: 'string', enum: [...QUALIFICATION_TOPICS] } });
+  });
+});
+
+describe('1D re-engagement output', () => {
+  it('parses a model answer with both keys', async () => {
+    const input = { ...validPlan, reengagement: { lastContact: 'back in February', lastTopic: 'the roof leak' }, stillToLearn: ['timeline', 'price'] };
+    const out = await new AnthropicCallPlanModel({ client: client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input }]) }).plan({ system: 'S', user: 'U' });
+    expect(out.plan.reengagement).toEqual({ lastContact: 'back in February', lastTopic: 'the roof leak' });
+    expect(out.plan.stillToLearn).toEqual(['timeline', 'price']);
+  });
+  it('refuses a topic the contract does not know', async () => {
+    const input = { ...validPlan, stillToLearn: ['budget'] };
+    const err = await new AnthropicCallPlanModel({ client: client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input }]) }).plan({ system: 'S', user: 'U' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CallPlanOutputError);
+    expect((err as CallPlanOutputError).issues.map((i) => i.path)).toContain('stillToLearn.0');
   });
 });
 

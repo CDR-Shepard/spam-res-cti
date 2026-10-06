@@ -11,6 +11,7 @@ import { pendingDncFlag } from '../campaigns/dnc-hold.js';
 import { exitEnrollment } from '../campaigns/enroll.js';
 import { mayDecide } from '../tenancy/record-owner.js';
 import type { RequestContext } from '../tenancy/scope.js';
+import { withStoredFacts } from './plan-context.js';
 import { planTextProblems } from './plan-text-words.js';
 import { RECORD_BLOCK_COLUMNS, recordIsBlocked, type BlockableRecord } from './record-block.js';
 import { currentPlan, savePlan, type CallPlanRow } from './store.js';
@@ -128,7 +129,8 @@ export async function editPlan(db: Db, ctx: RequestContext, enrollmentId: string
       researchId: plan.researchId,
       source: 'edit',
       model: null,
-      plan: { ...req.plan, sellingSignals, doNotContact: null },
+      // 1D: the computed last-contact words and the stored topics are never the client's to set (withStoredFacts).
+      plan: { ...withStoredFacts(req.plan, plan.plan), sellingSignals, doNotContact: null },
       dncFlagged: plan.dncFlagged,
       inputTokens: 0,
       outputTokens: 0,

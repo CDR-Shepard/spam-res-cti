@@ -217,6 +217,28 @@ describe.skipIf(!pgLane)('call plan decisions (real Postgres)', () => {
       expect(((await currentPlan(db, s.lead.enrollmentId))!.plan as { sellingSignals: unknown }).sellingSignals).toEqual(validPlan.sellingSignals);
     });
 
+    it('7f (1D): an edit body without the re-engagement fields (an old page) keeps the stored ones', async () => {
+      const reengagement = { lastContact: 'back in February', lastTopic: 'the roof leak' };
+      const s = await setup({ planOver: { reengagement, stillToLearn: ['timeline', 'price'] } });
+      await editPlan(db, s.ctx, s.lead.enrollmentId, { version: 1, plan: { ...EDITABLE, opener: 'Ask about the house.', reengagement: null, stillToLearn: [] } }, SEED_NOW);
+      const v2 = (await currentPlan(db, s.lead.enrollmentId))!.plan as { opener: string; reengagement: unknown; stillToLearn: unknown };
+      expect(v2).toMatchObject({ opener: 'Ask about the house.', reengagement, stillToLearn: ['timeline', 'price'] });
+    });
+
+    it('7g (1D, CF-14): a tampered lastContact never replaces the computed words; the topic and the person\'s topics are kept', async () => {
+      const s = await setup({ planOver: { reengagement: { lastContact: 'back in February', lastTopic: 'the roof leak' }, stillToLearn: ['timeline', 'price'] } });
+      const plan = { ...EDITABLE, reengagement: { lastContact: 'on the fifth', lastTopic: 'their move to Reno' }, stillToLearn: ['condition' as const] };
+      await editPlan(db, s.ctx, s.lead.enrollmentId, { version: 1, plan }, SEED_NOW);
+      const v2 = (await currentPlan(db, s.lead.enrollmentId))!.plan as { reengagement: unknown; stillToLearn: unknown };
+      expect(v2).toMatchObject({ reengagement: { lastContact: 'back in February', lastTopic: 'their move to Reno' }, stillToLearn: ['condition'] });
+    });
+
+    it('7h (1D): an edit cannot invent a last contact the research did not find', async () => {
+      const s = await setup();
+      await editPlan(db, s.ctx, s.lead.enrollmentId, { version: 1, plan: { ...EDITABLE, reengagement: { lastContact: 'back in May', lastTopic: 'the roof' } } }, SEED_NOW);
+      expect(((await currentPlan(db, s.lead.enrollmentId))!.plan as { reengagement: unknown }).reengagement).toBeNull();
+    });
+
     it('8: two concurrent edits from the same version: one wins, the other gets PLAN_CHANGED', async () => {
       const s = await setup();
       const results = await Promise.all([

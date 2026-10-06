@@ -2,7 +2,7 @@
  * The call plan port and its Anthropic adapter: one forced tool call (`record_call_plan`)
  * whose input schema mirrors `CallPlan`, validated with zod before anything uses it.
  */
-import { CALL_GOAL_KEYS, CallPlan, DoNotContactCategory, EvidenceSource, PreferredWindow } from '@cti/contracts';
+import { CALL_GOAL_KEYS, CallPlan, DoNotContactCategory, EvidenceSource, PreferredWindow, QUALIFICATION_TOPICS } from '@cti/contracts';
 import type { MessagesClient, TriageTool, TriageUsage } from './model.js';
 
 export const CALL_PLAN_MODEL_DEFAULT = 'claude-sonnet-5-5';
@@ -15,7 +15,7 @@ const list = (maxLength: number, maxItems: number, minItems = 0) => ({ type: 'ar
 export const CALL_PLAN_INPUT_SCHEMA: TriageTool['input_schema'] = {
   type: 'object',
   additionalProperties: false,
-  required: ['situationSummary', 'sellingSignals', 'opener', 'goals', 'talkingPoints', 'questions', 'avoid', 'bestTimeToCall', 'doNotContact'],
+  required: ['situationSummary', 'sellingSignals', 'opener', 'goals', 'talkingPoints', 'questions', 'avoid', 'bestTimeToCall', 'doNotContact', 'reengagement', 'stillToLearn'],
   properties: {
     situationSummary: { ...text(800), description: 'Three to five plain sentences: who they are, the property, what happened so far, where things stand.' },
     sellingSignals: {
@@ -69,6 +69,25 @@ export const CALL_PLAN_INPUT_SCHEMA: TriageTool['input_schema'] = {
           properties: { category: { type: 'string', enum: [...DoNotContactCategory.options] }, quote: text(300) },
         },
       ],
+    },
+    // Plan 1D. lastContact is replaced by our computed words after parsing (call-plans/plan-context.ts).
+    reengagement: {
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['lastContact', 'lastTopic'],
+          properties: { lastContact: { type: ['string', 'null'], maxLength: 80 }, lastTopic: { type: ['string', 'null'], maxLength: 200 } },
+        },
+      ],
+      description: 'Null when the facts show no last real contact. Otherwise lastContact is the facts\' words exactly, and lastTopic what that contact was about, with no digits.',
+    },
+    stillToLearn: {
+      type: 'array',
+      maxItems: 9,
+      items: { type: 'string', enum: [...QUALIFICATION_TOPICS] },
+      description: "Only topics from the facts' missing list that this call should learn.",
     },
   },
 };

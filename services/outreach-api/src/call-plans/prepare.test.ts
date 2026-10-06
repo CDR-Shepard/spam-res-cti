@@ -52,8 +52,8 @@ const addSpendMock = vi.mocked(addSpend);
 const recordPlanFailureMock = vi.mocked(recordPlanFailure);
 const SF = {} as SalesforceClient;
 
-function snap(sfRecordId: string, consent: ResearchSnapshot['consent'] = 'yes'): ResearchSnapshot {
-  return assembleSnapshot({
+function snapInput(sfRecordId: string, consent: ResearchSnapshot['consent'] = 'yes'): Parameters<typeof assembleSnapshot>[0] {
+  return {
     sfObject: 'Lead',
     sfRecordId,
     collectedAt: NOW,
@@ -61,8 +61,9 @@ function snap(sfRecordId: string, consent: ResearchSnapshot['consent'] = 'yes'):
     records: [{ relation: 'self', sfObject: 'Lead', id: sfRecordId, role: null, fields: [{ name: 'Name', label: 'Name', value: 'Pat Seller' }] }],
     activity: [],
     sources: ResearchSource.options.map((source) => ({ source, status: 'ok' as const, count: 0, truncated: false, note: null })),
-  });
+  };
 }
+const snap = (sfRecordId: string, consent: ResearchSnapshot['consent'] = 'yes'): ResearchSnapshot => assembleSnapshot(snapInput(sfRecordId, consent));
 
 type FakeModel = CallPlanModel & { plan: ReturnType<typeof vi.fn> };
 function fakeModel(plan: CallPlan = validPlan, modelId = MODEL): FakeModel {
@@ -108,7 +109,14 @@ describe.skipIf(!pgLane)('prepareDueCalls (real Postgres)', () => {
 
   it('researches, plans and moves the lead to review, recording the spend', async () => {
     const t = await tenant();
-    const model = fakeModel();
+    // 1D: a connected call in February and a timeline in Salesforce; the model misdates the contact and re-asks the timeline.
+    const researched = assembleSnapshot({
+      ...snapInput(t.lead.sfRecordId),
+      records: [{ relation: 'self', sfObject: 'Lead', id: t.lead.sfRecordId, role: null, fields: [{ name: 'Name', label: 'Name', value: 'Pat Seller' }, { name: 'Timeline__c', label: 'Timeline', value: '90 Days' }] }],
+      activity: [{ source: 'task', id: '00T000000000000001', at: '2026-02-12T18:00:00.000Z', title: 'Spoke with Pat', body: 'Roof leaks', meta: { kind: 'Call' } }],
+    });
+    research.mockResolvedValueOnce(researched);
+    const model = fakeModel({ ...validPlan, reengagement: { lastContact: 'in 2024', lastTopic: 'the roof leak' }, stillToLearn: ['price', 'timeline', 'condition'] });
     const out = await prepareDueCalls(deps(model));
     expect(out).toEqual({ planned: 1, held: 0, failed: 0 });
     expect(research).toHaveBeenCalledWith(expect.objectContaining({ client: SF, orgId: t.orgId }), {
@@ -119,10 +127,14 @@ describe.skipIf(!pgLane)('prepareDueCalls (real Postgres)', () => {
     });
     const prompt = model.plan.mock.calls[0]![0] as { system: string; user: string };
     expect(prompt.user).toContain('Company: GG Homes. Today: 2026-10-05.');
+    expect(prompt.user).toContain('Last real contact: back in February (call)');
+    expect(prompt.user).toContain('Missing in Salesforce: motivation, condition, repairs, occupancy, price, competition, mortgage');
     const [r] = await researchOf(t.lead.enrollmentId);
-    expect(r).toMatchObject({ version: 1, snapshot: snap(t.lead.sfRecordId) });
+    expect(r).toMatchObject({ version: 1, snapshot: researched });
     const [p] = await plansOf(t.lead.enrollmentId);
-    expect(p).toMatchObject({ version: 1, status: 'proposed', source: 'model', model: MODEL, plan: validPlan, dncFlagged: false, inputTokens: 12_000, outputTokens: 1_500, researchId: r!.id });
+    // The computed words replace the model's; only topics Salesforce is missing stay to learn.
+    const stored = { ...validPlan, reengagement: { lastContact: 'back in February', lastTopic: 'the roof leak' }, stillToLearn: ['price', 'condition'] };
+    expect(p).toMatchObject({ version: 1, status: 'proposed', source: 'model', model: MODEL, plan: stored, dncFlagged: false, inputTokens: 12_000, outputTokens: 1_500, researchId: r!.id });
     expect(await enrollment(t.lead.enrollmentId)).toMatchObject({ status: 'active', callStage: 'review', callPrepareError: null });
     expect(await spentTodayMicros(db, t.orgId, NOW)).toBe(costMicros(MODEL, 12_000, 1_500));
   });
