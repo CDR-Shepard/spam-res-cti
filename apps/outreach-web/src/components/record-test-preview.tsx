@@ -7,13 +7,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { createRecordTest, outreachKeys, recordTest } from '@/lib/outreach-api';
 import { errorText, formatDateTime } from '@/lib/outreach-words';
 import { RECORD_TEST_ERROR_WORDS, RECORD_TEST_STATUS_WORDS, recordTestErrorText } from '@/lib/record-test-words';
+import { isLiveCall, RecordTestCalls } from './record-test-calls';
+import { RecordTestRun } from './record-test-run';
 import { RecordTestPlan } from './record-test-sections';
 
 export const RECORD_TEST_POLL_MS = 2_000;
 
-/** Read again every 2 seconds while the preview is still being written. */
+/** Read again every 2 seconds while the preview is still being written or one of its calls is live. */
 export function recordTestPollInterval(t: RecordTest | undefined): number | false {
-  return t?.status === 'running' ? RECORD_TEST_POLL_MS : false;
+  if (!t) return false;
+  return t.status === 'running' || t.calls.some((c) => isLiveCall(c)) ? RECORD_TEST_POLL_MS : false;
 }
 
 /**
@@ -64,9 +67,11 @@ export function RecordTestPreview({ id, onOpen }: { id: string; onOpen: (id: str
           <>
             <RecordTestPlan test={t} />
             <Button size="sm" variant="outline" disabled={again.isPending} onClick={rerun}>Regenerate</Button>
+            <RecordTestRun test={t} />
           </>
         )}
         {again.error && <p role="alert" className="text-destructive">{recordTestErrorText(again.error)}</p>}
+        <RecordTestCalls calls={t.calls} />
       </CardContent>
     </Card>
   );
