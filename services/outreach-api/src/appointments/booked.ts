@@ -5,13 +5,15 @@
  * call's offer takes these out itself: concurrent and back-to-back calls are never promised the same time.
  *
  * Read-only (outreach-api never writes ai_calls). Test and practice calls never count: nothing is ever written for them, so
- * their bookings are not real appointments. A booking whose write-back created the Event is the calendar's to show.
+ * their bookings are not real appointments. A booking whose write-back created the Event is the calendar's to show, unless
+ * it blocks more than its Event (a walkthrough's travel buffer, `blockStart`): cti-api's booking check still holds that
+ * whole block, so the offer must too, or it proposes a time the agent is then told was "just taken" (sweep D-19(a)).
  *
  * Only a booking that stands counts (Part 4 Fix 1, I-1; `bookingStands` in @cti/contracts, the same rule as cti-api's
  * D-10 check): a live call's, or a finished call's whose outcome keeps it (appointment_set, or a transfer). A call that
  * booked and then ended do-not-call, not interested and so on freed the time.
  */
-import { and, desc, eq, gte, inArray, isNotNull, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { BOOKING_STANDS_OUTCOMES, BookedAppointment } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { OFFER_CALENDAR_DAYS } from './offer.js';
@@ -41,7 +43,7 @@ export async function bookedNotOnCalendar(db: Db, a: { orgId: string; ownerSfUse
         isNotNull(c.appointment),
         eq(c.isTest, false),
         gte(c.createdAt, since),
-        isNull(w.sfEventId),
+        or(isNull(w.sfEventId), sql`${c.appointment}->>'blockStart' is not null`),
         or(inArray(c.outcome, [...BOOKING_STANDS_OUTCOMES]), and(isNull(c.outcome), isNull(c.endedAt))),
       ),
     )

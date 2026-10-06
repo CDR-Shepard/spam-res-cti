@@ -99,4 +99,19 @@ describe.skipIf(!pgLane)('bookedNotOnCalendar (real Postgres)', () => {
     });
     expect(await t.read()).toEqual([{ start: new Date('2026-10-07T15:30:00.000Z'), end: new Date('2026-10-07T17:30:00.000Z'), allDay: false }]);
   });
+
+  it('sweep D-19(a): a walkthrough whose Event exists still blocks its buffer, as cti-api\'s booking check does', async () => {
+    const t = await tenant();
+    const walk = await t.call({
+      ...booked('2026-10-07T16:00:00.000Z', '2026-10-07T17:00:00.000Z'), slotId: 'w1', kind: 'walkthrough',
+      blockStart: '2026-10-07T15:30:00.000Z', blockEnd: '2026-10-07T17:30:00.000Z',
+    });
+    const phone = await t.call(booked('2026-10-07T19:00:00.000Z', '2026-10-07T19:15:00.000Z'));
+    const row = { orgId: t.orgId, sfObject: 'Opportunity' as const, sfRecordId: '0068X00000AbCdEUAZ', outcome: 'appointment_set', status: 'done' as const };
+    await db.insert(schema.aiCallWritebacks).values([
+      { ...row, aiCallId: walk, sfEventId: '00U8X00000AbCdEUA1' },
+      { ...row, aiCallId: phone, sfEventId: '00U8X00000AbCdEUA2' },
+    ]);
+    expect(await t.read()).toEqual([{ start: new Date('2026-10-07T15:30:00.000Z'), end: new Date('2026-10-07T17:30:00.000Z'), allDay: false }]);
+  });
 });
