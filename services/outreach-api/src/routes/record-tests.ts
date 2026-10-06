@@ -2,22 +2,27 @@
  * Test a record (plan 1E, spec §4.2), admins only: start a preview of how the AI would call any Lead or Opportunity,
  * read it (the page polls while it runs), and list the tenant's latest. A preview runs in this process after the 202
  * (record-tests/preview.ts); it never creates an enrollment, touch or plan row and never writes to Salesforce.
+ *
+ * Part 2: run a ready preview as a practice call to one of the admin test numbers or to the admin's own browser
+ * (record-tests/run.ts), relay the browser's incoming-only Voice token from cti-api (never logged, never cached), and
+ * read the test's calls back with the preview.
  */
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { CreateRecordTestRequest, FieldMap, parseSalesforceRecordRef, RECORD_REF_ERROR_WORDS } from '@cti/contracts';
+import { CreateRecordTestRequest, FieldMap, parseSalesforceRecordRef, RECORD_REF_ERROR_WORDS, RecordTestCallRequest } from '@cti/contracts';
 import type { Db } from '@cti/db';
 import { budgetMicros } from '../ai/budget.js';
 import type { CallPlanModel } from '../ai/call-plan-model.js';
 import { isPricedModel } from '../ai/model.js';
-import type { CtiClient } from '../ai-calls/cti-client.js';
+import type { BrowserTokenOutcome, CtiClient } from '../ai-calls/cti-client.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
 import { sendError } from '../http/errors.js';
 import type { DescribeCache } from '../research/describe.js';
 import { CALLS_PER_HOUR, PREVIEWS_PER_DAY, PREVIEWS_PER_HOUR, withPreviewLimit, type LimitRefusal } from '../record-tests/limits.js';
 import { runPreview } from '../record-tests/preview.js';
-import { insertRecordTest, listRecordTests, loadRecordTest, toRecordTest } from '../record-tests/store.js';
+import { startRecordTestCall, type RunError } from '../record-tests/run.js';
+import { insertRecordTest, listRecordTests, loadRecordTest, loadRecordTestCalls, toRecordTest } from '../record-tests/store.js';
 import { outreachSettings } from '../settings.js';
 import { requireAdmin, requireContext } from '../tenancy/scope.js';
 
@@ -70,6 +75,37 @@ export function sendLimitRefusal(reply: FastifyReply, refusal: LimitRefusal): Fa
 
 const errName = (err: unknown): string => (err instanceof Error ? err.name : typeof err);
 
+const CTI_UNREACHABLE = 'The AI calling service did not answer. Try again in a minute.';
+const NOT_CONFIGURED = 'AI calls are not set up on this server yet.';
+/** The browser token route's own limiter, per address (spec §8.2). */
+const TOKEN_RATE_LIMIT = { max: 10, timeWindow: '1 minute' };
+
+const RUN_ERRORS: Readonly<Record<Exclude<RunError, 'plan_text_rejected'>, [number, string, string]>> = {
+  not_found: [404, 'NOT_FOUND', 'That test is not here. It may belong to another tenant.'],
+  not_ready: [409, 'NOT_READY', 'That preview is not ready. Wait for it to finish, or run a new one.'],
+  not_a_test_number: [400, 'NOT_A_TEST_NUMBER', 'That number is not one of the test numbers. Pick one from the list.'],
+  not_your_browser: [403, 'NOT_YOUR_BROWSER', 'That browser is not registered to you. Start Talk in browser again.'],
+  cti_unreachable: [502, 'CTI_UNREACHABLE', CTI_UNREACHABLE],
+};
+
+function sendRunError(reply: FastifyReply, error: RunError, words: readonly string[] = []): FastifyReply {
+  if (error === 'plan_text_rejected') {
+    const message = `Can't run this test: the voice agent can't be given this plan's text. ${words.join('; ')}.`;
+    return sendError(reply, 409, 'PLAN_TEXT_REJECTED', message, { words });
+  }
+  const [status, code, message] = RUN_ERRORS[error];
+  return sendError(reply, status, code, message);
+}
+
+/** cti-api's refusal of a browser token (or no answer), as an error reply. */
+function sendTokenRefusal(reply: FastifyReply, answer: Exclude<BrowserTokenOutcome, { kind: 'token' }>): FastifyReply {
+  if (answer.kind === 'transport') return sendError(reply, 502, 'CTI_UNREACHABLE', CTI_UNREACHABLE);
+  if (answer.code === 'browser_calls_unavailable') {
+    return sendError(reply, 503, 'BROWSER_CALLS_UNAVAILABLE', 'Talk in browser is not set up on the calling service. Use Ring my phone.');
+  }
+  return sendError(reply, 403, 'FORBIDDEN', 'Only an admin can take a test call in the browser.');
+}
+
 export async function registerRecordTestRoutes(app: FastifyInstance, deps: RecordTestRouteDeps): Promise<void> {
   const { db, clients, model, describes, defaultSpecialists } = deps;
   const now = deps.now ?? (() => new Date());
@@ -114,7 +150,32 @@ export async function registerRecordTestRoutes(app: FastifyInstance, deps: Recor
     const params = IdParams.safeParse(req.params);
     const row = params.success ? await loadRecordTest(db, ctx.orgId, params.data.id, now()) : null;
     if (!row) return sendError(reply, 404, 'NOT_FOUND', 'That test is not here. It may belong to another tenant.');
-    const conn = await loadConnection(db, ctx.orgId);
-    return toRecordTest(row, [], conn?.instanceUrl ?? null);
+    const [conn, calls] = await Promise.all([loadConnection(db, ctx.orgId), loadRecordTestCalls(db, ctx.orgId, row.id)]);
+    return toRecordTest(row, calls, conn?.instanceUrl ?? null);
+  });
+
+  app.post('/record-tests/browser-token', { config: { rateLimit: TOKEN_RATE_LIMIT } }, async (req, reply) => {
+    const ctx = await requireContext(db, req, reply);
+    if (!ctx || !requireAdmin(ctx, reply)) return reply;
+    if (!deps.cti) return sendError(reply, 503, 'AI_CALLS_NOT_CONFIGURED', NOT_CONFIGURED);
+    const answer = await deps.cti.browserToken({ orgId: ctx.orgId, userId: ctx.session.userId });
+    req.log.info({ orgId: ctx.orgId, answer: answer.kind === 'refused' ? answer.code : answer.kind }, 'record-test: browser token');
+    if (answer.kind !== 'token') return sendTokenRefusal(reply, answer);
+    return reply.header('cache-control', 'no-store').send({ token: answer.token, identity: answer.identity, expiresAt: answer.expiresAt });
+  });
+
+  app.post('/record-tests/:id/calls', async (req, reply) => {
+    const ctx = await requireContext(db, req, reply);
+    if (!ctx || !requireAdmin(ctx, reply)) return reply;
+    const params = IdParams.safeParse(req.params);
+    if (!params.success) return sendRunError(reply, 'not_found');
+    const body = RecordTestCallRequest.safeParse(req.body ?? {});
+    if (!body.success) return sendError(reply, 400, 'INVALID_BODY', 'Pick one of the test numbers, or start Talk in browser again.');
+    const cti = deps.cti;
+    if (!cti) return sendError(reply, 503, 'AI_CALLS_NOT_CONFIGURED', NOT_CONFIGURED);
+    const out = await startRecordTestCall({ db, clients, cti, now: now(), log: req.log, defaultSpecialists }, ctx, params.data.id, body.data);
+    if ('refusal' in out) return sendLimitRefusal(reply, out.refusal);
+    if (!out.ok) return sendRunError(reply, out.error, out.words);
+    return { callId: out.callId, response: out.response };
   });
 }

@@ -23,7 +23,11 @@ const ENROLLMENT_ID = '66666666-6666-4666-8666-666666666666';
 const admin = { userId: 'U-ADMIN', orgId: 'O1', email: 'admin@gg.co', isAdmin: true, powerDialerEnabled: false, kind: 'human', isSuperAdmin: false };
 const rep = { ...admin, userId: 'U-REP', isAdmin: false };
 const auth = { authorization: 'Bearer t' };
-const cti: CtiClient = { trigger: async () => ({ kind: 'transport', error: 'unused' }), availability: async () => null };
+const cti: CtiClient = {
+  trigger: async () => ({ kind: 'transport', error: 'unused' }),
+  availability: async () => null,
+  browserToken: async () => ({ kind: 'transport', error: 'unused' }),
+};
 
 let app: FastifyInstance;
 async function build(c: CtiClient | null, campaign: Record<string, unknown> | null = { id: CAMPAIGN_ID, orgId: 'O1', mode: 'ai_call', status: 'active' }) {

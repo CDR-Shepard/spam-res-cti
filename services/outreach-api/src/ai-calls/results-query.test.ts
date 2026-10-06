@@ -1,13 +1,15 @@
 /** Real Postgres: the AI call results table and the transcript. */
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
 import { AiCallResultsResponse } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
-import { seedAiCall, seedReleasedLead } from '../test/ai-call-seed.js';
+import { seedAiCall, seedAiCallRequest, seedReleasedLead } from '../test/ai-call-seed.js';
 import { ctxOf, seedAiCallCampaign, seedUser } from '../test/call-plan-seed.js';
 import { seedConnection } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { NEW_OPP, PHONE_BOOKING, seedWriteback } from '../test/writeback-harness.js';
+import { insertRecordTest } from '../record-tests/store.js';
 import { listAiCallResults, loadTranscript, RESULTS_PAGE_SIZE, transcriptLines } from './results-query.js';
 
 const OWNER = '005000000000001AAA';
@@ -243,6 +245,40 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
       const user = await seedUser(db, w.orgId);
       const [item] = (await listAiCallResults(db, ctxOf(w.orgId, user, true), w.campaignId, null)).items;
       expect(item).toMatchObject({ appointment: PHONE_BOOKING, writeback: null });
+    });
+  });
+
+  describe('plan 1E: a Test a record call\'s transcript', () => {
+    const lines = [{ role: 'agent', text: 'Hi Pat', at: null }];
+    async function testCall(o: { lost?: boolean } = {}) {
+      const s = await setup();
+      const aiCallId = await seedAiCall(db, s.base.orgId, s.admin, { isTest: true, practice: true, status: 'completed', transcript: lines, toE164: 'client:aitest_x' });
+      const testId = await insertRecordTest(db, { orgId: s.base.orgId, requestedBy: s.admin, sfObject: 'Lead', sfRecordId: '00Q8X00001AbCdEUAV' });
+      const key = `rtest:${randomUUID()}`;
+      await db.insert(schema.aiRecordTestCalls).values({
+        orgId: s.base.orgId, recordTestId: testId, requestedBy: s.admin, mode: 'browser', clientIdentity: 'aitest_x', idempotencyKey: key,
+        aiCallId: o.lost ? null : aiCallId,
+      });
+      if (o.lost) await seedAiCallRequest(db, { orgId: s.base.orgId, key, userId: s.admin, response: { result: 'placed', aiCallId } });
+      return { s, aiCallId };
+    }
+
+    it('20: an admin of its tenant opens it, by the call it stored or (a lost answer) by its key', async () => {
+      for (const lost of [false, true]) {
+        const { s, aiCallId } = await testCall({ lost });
+        expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), aiCallId)).toEqual({ aiCallId, lines });
+      }
+    });
+
+    it('21: a rep is forbidden', async () => {
+      const { s, aiCallId } = await testCall();
+      expect(await loadTranscript(db, ctxOf(s.base.orgId, s.rep, false), aiCallId)).toBe('forbidden');
+    });
+
+    it("22: another tenant's admin gets nothing", async () => {
+      const { aiCallId } = await testCall();
+      const other = await setup();
+      expect(await loadTranscript(db, ctxOf(other.base.orgId, other.admin, true), aiCallId)).toBeNull();
     });
   });
 });

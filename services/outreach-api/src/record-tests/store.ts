@@ -2,12 +2,18 @@
  * Test a record (plan 1E): the ai_record_tests rows. A preview is inserted `running` (under the limits' lock, limits.ts),
  * finished once by runPreview (preview.ts), and read back org-scoped. A row a restart left `running` READS as
  * failed: interrupted after PREVIEW_STALE_MS; nothing rewrites it. Every JSON column is read with safeParse, so a drifted
- * row shows nulls and never throws (1D D-6).
+ * row shows nulls and never throws (1D D-6). Plan 1E Part 2: the test calls run from a preview (ai_record_test_calls),
+ * joined to the ai_calls rows cti-api wrote.
  */
 import { and, eq, sql } from 'drizzle-orm';
 import {
+  AiCallOutcome,
+  AiCallStatus,
   AppointmentSlots,
+  BookedAppointment,
   CallPlan,
+  InternalAiCallResponse,
+  RecordTestDryRun,
   RecordTestError,
   type AppointmentSlot,
   type RecordTest,
@@ -165,4 +171,63 @@ export function toRecordTest(row: RecordTestRow, calls: RecordTestCall[], instan
     createdAt: row.createdAt.toISOString(),
     calls,
   };
+}
+
+interface CallRow {
+  id: string;
+  mode: RecordTestCall['mode'];
+  to_e164: string | null;
+  created_at: Date | string;
+  ai_call_id: string | null;
+  result: unknown;
+  dry_run: unknown;
+  call_status: string | null;
+  outcome: string | null;
+  summary: string | null;
+  duration_seconds: number | null;
+  callback_at: Date | string | null;
+  qualification: unknown;
+  appointment: unknown;
+}
+
+/** What the call learned: only string answers are kept (a drifted value never breaks the page). */
+function stringsOnly(v: unknown): Record<string, string> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+  return Object.fromEntries(Object.entries(v).filter((e): e is [string, string] => typeof e[1] === 'string'));
+}
+
+function toRecordTestCall(r: CallRow): RecordTestCall {
+  return {
+    id: r.id,
+    mode: r.mode,
+    toE164: r.to_e164,
+    createdAt: new Date(r.created_at).toISOString(),
+    aiCallId: r.ai_call_id,
+    result: parsedOrNull(InternalAiCallResponse, r.result),
+    callStatus: parsedOrNull(AiCallStatus, r.call_status),
+    outcome: parsedOrNull(AiCallOutcome, r.outcome),
+    summary: r.summary,
+    durationSeconds: r.duration_seconds,
+    callbackAt: r.callback_at === null ? null : new Date(r.callback_at).toISOString(),
+    qualification: stringsOnly(r.qualification),
+    appointment: parsedOrNull(BookedAppointment, r.appointment),
+    dryRun: parsedOrNull(RecordTestDryRun, r.dry_run),
+  };
+}
+
+/**
+ * The calls run from test `testId` in this org, newest first, each joined to its ai_calls row. A call whose cti-api
+ * answer was lost (a timeout after it placed the call) finds its call and answer by its rtest: key in ai_call_requests,
+ * where cti-api stores every answer (as 1D listPracticeCalls does).
+ */
+export async function loadRecordTestCalls(db: Db, orgId: string, testId: string): Promise<RecordTestCall[]> {
+  const result = await db.execute(sql`
+    select c.id, c.mode, c.to_e164, c.created_at, coalesce(c.ai_call_id, q.ai_call_id) as ai_call_id, coalesce(c.result, q.response) as result,
+           c.dry_run, a.status as call_status, a.outcome, a.summary, a.duration_seconds, a.callback_at, a.qualification, a.appointment
+    from ai_record_test_calls c
+    left join ai_call_requests q on c.ai_call_id is null and q.org_id = c.org_id and q.idempotency_key = c.idempotency_key
+    left join ai_calls a on a.id = coalesce(c.ai_call_id, q.ai_call_id) and a.org_id = c.org_id
+    where c.org_id = ${orgId}::uuid and c.record_test_id = ${testId}::uuid
+    order by c.created_at desc, c.id desc`);
+  return (result as unknown as { rows: CallRow[] }).rows.map(toRecordTestCall);
 }

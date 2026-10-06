@@ -7,7 +7,7 @@ import type { AiAvailability, InternalAiCallRequest, InternalAiCallResponse } fr
 import { and, eq } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import type { SalesforceClient } from '@cti/salesforce';
-import type { CtiClient } from '../ai-calls/cti-client.js';
+import type { BrowserTokenOutcome, CtiClient } from '../ai-calls/cti-client.js';
 import { placeDueAiCalls } from '../ai-calls/pace.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { seedAiCall, seedAiCallRequest } from './ai-call-seed.js';
@@ -100,6 +100,9 @@ export interface FakeCti {
   /** What `availability()` answers (null: cti-api did not answer); on with no test numbers unless a test says otherwise. */
   available: AiAvailability | null;
   availabilityCalls: number;
+  /** Plan 1E: what `browserToken()` answers (a token for the asking user unless a test says otherwise), and each request. */
+  token: BrowserTokenOutcome | null;
+  tokenRequests: Array<{ orgId: string; userId: string }>;
 }
 
 /** A CtiClient that records each request and answers from the script, writing the ai_calls row cti-api would write (its FK needs one). */
@@ -109,6 +112,8 @@ export function fakeCti(db: Db): FakeCti {
     answers: [],
     available: { available: true, testNumbers: [] },
     availabilityCalls: 0,
+    token: null,
+    tokenRequests: [],
     store: false,
     now: new Date(0),
     sentAt: [],
@@ -130,7 +135,7 @@ export function fakeCti(db: Db): FakeCti {
         }
         if (a.result === 'failed' && !a.withCall) return { kind: 'response', response: { result: 'failed', reason: a.reason, aiCallId: null } as InternalAiCallResponse };
         const status = a.result === 'placed' ? 'queued' : a.result;
-        const aiCallId = await seedAiCall(db, req.orgId, req.userId, { status, ...(req.target.kind === 'record' ? { sfObject: req.target.objectType, sfRecordId: req.target.recordId } : {}) });
+        const aiCallId = await seedAiCall(db, req.orgId, req.userId, { status, ...seededTarget(req) });
         const response = a.result === 'placed' ? { result: 'placed', aiCallId } : { ...a, aiCallId };
         return { kind: 'response', response: response as InternalAiCallResponse };
       },
@@ -138,9 +143,21 @@ export function fakeCti(db: Db): FakeCti {
         fake.availabilityCalls += 1;
         return fake.available;
       },
+      async browserToken(req) {
+        fake.tokenRequests.push(req);
+        return fake.token ?? { kind: 'token', token: 'fake.jwt.token', identity: `aitest_${req.userId.replace(/-/g, '')}_000000000000`, expiresAt: '2030-01-01T00:00:00.000Z' };
+      },
     },
   };
   return fake;
+}
+
+/** The ai_calls columns cti-api writes for the target: the record's ids; a browser leg (plan 1E) as is_test + practice to client:<identity>. */
+function seededTarget(req: InternalAiCallRequest): Partial<typeof schema.aiCalls.$inferInsert> {
+  const t = req.target;
+  if (t.kind === 'record') return { sfObject: t.objectType, sfRecordId: t.recordId };
+  if (t.kind === 'practice_browser') return { sfObject: t.objectType, sfRecordId: t.recordId, toE164: `client:${t.clientIdentity}`, isTest: true, practice: true };
+  return {};
 }
 
 const bodyHash = (req: InternalAiCallRequest): string => createHash('sha256').update(JSON.stringify({ userId: req.userId, target: req.target })).digest('hex');

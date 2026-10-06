@@ -226,6 +226,7 @@ export async function loadTranscript(db: Db, ctx: RequestContext, aiCallId: stri
   return { aiCallId, lines: transcriptLines(row.transcript) };
 }
 
+/** A practice call (plan 1D) or a Test a record call (plan 1E): admins of its tenant only. */
 async function loadPracticeTranscript(db: Db, ctx: RequestContext, aiCallId: string): Promise<AiCallTranscript | 'forbidden' | null> {
   const result = await db.execute(sql`
     select a.transcript
@@ -234,7 +235,11 @@ async function loadPracticeTranscript(db: Db, ctx: RequestContext, aiCallId: str
       and (exists (select 1 from ai_practice_calls p where p.ai_call_id = a.id and p.org_id = a.org_id)
         -- P6 M-10: a practice row whose answer was lost is linked by its key (cti-api stored the call under it).
         or exists (select 1 from ai_practice_calls p join ai_call_requests q on q.org_id = p.org_id and q.idempotency_key = p.idempotency_key
-                   where p.ai_call_id is null and p.org_id = a.org_id and q.ai_call_id = a.id))
+                   where p.ai_call_id is null and p.org_id = a.org_id and q.ai_call_id = a.id)
+        -- Plan 1E: a Test a record call, by the call it stored or (a lost answer) by its rtest: key.
+        or exists (select 1 from ai_record_test_calls c where c.ai_call_id = a.id and c.org_id = a.org_id)
+        or exists (select 1 from ai_record_test_calls c join ai_call_requests q on q.org_id = c.org_id and q.idempotency_key = c.idempotency_key
+                   where c.ai_call_id is null and c.org_id = a.org_id and q.ai_call_id = a.id))
     limit 1`);
   const row = rows<{ transcript: unknown }>(result)[0];
   if (!row) return null;

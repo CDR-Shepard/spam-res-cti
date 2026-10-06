@@ -122,3 +122,58 @@ describe('httpCtiClient.availability', () => {
     expect(await client(f).availability()).toBeNull();
   });
 });
+
+describe('httpCtiClient.availability, plan 1E', () => {
+  it('passes browserCalls through (absent from an older cti-api)', async () => {
+    expect(await client(fetchReturning(200, { available: true, testNumbers: [], browserCalls: true })).availability()).toEqual({ available: true, testNumbers: [], browserCalls: true });
+    expect(await client(fetchReturning(200, { available: true, testNumbers: [] })).availability()).not.toHaveProperty('browserCalls');
+  });
+});
+
+describe('httpCtiClient.browserToken (plan 1E)', () => {
+  const TOKEN_REQ = { orgId: REQ.orgId, userId: REQ.userId };
+  const IDENTITY = `aitest_${REQ.userId.replace(/-/g, '')}_a1b2c3d4e5f6`;
+  const MINTED = { token: 'eyJhbGciOiJIUzI1NiJ9.e30.c2lnbmF0dXJl', identity: IDENTITY, expiresAt: '2026-10-06T18:20:00.000Z' };
+
+  it('12: a 200 is the token', async () => {
+    expect(await client(fetchReturning(200, MINTED)).browserToken(TOKEN_REQ)).toEqual({ kind: 'token', ...MINTED });
+  });
+
+  it.each([
+    [403, 'not_admin'],
+    [403, 'unknown_user'],
+    [503, 'browser_calls_unavailable'],
+  ] as const)('13: HTTP %i %s is refused with that code', async (status, code) => {
+    expect(await client(fetchReturning(status, { error: code })).browserToken(TOKEN_REQ)).toEqual({ kind: 'refused', code });
+  });
+
+  it.each([
+    ['a 503 with another error', fetchReturning(503, { error: 'internal_disabled' }), 'HTTP 503 internal_disabled'],
+    ['a 200 that is not a token', fetchReturning(200, { token: 'x', identity: 'rep_abc', expiresAt: 'x' }), 'bad_response'],
+    ['a refused connection', vi.fn(async () => { throw new TypeError('fetch failed'); }), 'network'],
+  ])('14: %s is transport', async (_label, f, error) => {
+    expect(await client(f).browserToken(TOKEN_REQ)).toEqual({ kind: 'transport', error });
+  });
+
+  it('14: a timeout is transport "timeout"', async () => {
+    const f = vi.fn(async () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    });
+    expect(await client(f).browserToken(TOKEN_REQ)).toEqual({ kind: 'transport', error: 'timeout' });
+  });
+
+  it('15: POSTs { orgId, userId } to the token path, signed over that body', async () => {
+    const f = fetchReturning(200, MINTED);
+    await client(f).browserToken(TOKEN_REQ);
+    const [url, init] = f.mock.calls[0]!;
+    expect(url).toBe(`${BASE}/internal/ai-calls/browser-token`);
+    expect(init.method).toBe('POST');
+    expect(init.body).toBe(JSON.stringify(TOKEN_REQ));
+    const verdict = verifyInternalRequest(
+      SECRET,
+      { method: 'POST', path: '/internal/ai-calls/browser-token', body: JSON.stringify(TOKEN_REQ) },
+      { timestamp: init.headers[INTERNAL_TIMESTAMP_HEADER], signature: init.headers[INTERNAL_SIGNATURE_HEADER] },
+    );
+    expect(verdict).toEqual({ ok: true });
+  });
+});

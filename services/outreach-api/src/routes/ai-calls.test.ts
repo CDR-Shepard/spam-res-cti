@@ -41,6 +41,9 @@ function fakeCti(outcome: TriggerOutcome = { kind: 'response', response: { resul
     async availability() {
       return cti.availabilityAnswer;
     },
+    async browserToken() {
+      return { kind: 'transport', error: 'unused' };
+    },
   };
   return { cti, requests };
 }
