@@ -74,6 +74,30 @@ describe('PracticeCall', () => {
     expect(calls.find((c) => c.method === 'POST')?.body).toEqual({ version: 3, to: '+12125550100' });
   });
 
+  describe('final review: the status follows the call once it was placed', () => {
+    const CAMPAIGN = '33333333-3333-4333-8333-333333333333';
+    const LIST = `GET /api/campaigns/${CAMPAIGN}/practice-calls`;
+    const item = (callStatus: string, outcome: string | null) => ({
+      id: '44444444-4444-4444-8444-444444444444', enrollmentId: ENROLLMENT, name: 'Jane Seller', sfObject: 'Lead', sfRecordId: '00Q000000000001AAA', planVersion: 3,
+      aiCallId: CALL, callStatus, outcome, summary: null, appointment: null, result: { result: 'placed', aiCallId: CALL }, createdAt: '2026-10-06T16:00:00.000Z',
+    });
+
+    it('leaves "Ringing your phone…" once the call has ended, and says how it went', async () => {
+      stubApi({ [AVAILABILITY]: numbers, [PRACTICE]: { result: 'placed', aiCallId: CALL }, [LIST]: { items: [item('completed', 'not_interested')] } });
+      renderWithProviders(<PracticeCall card={card()} campaignId={CAMPAIGN} />, { isAdmin: true });
+      await userEvent.click(await screen.findByRole('button', { name: 'Practice call to my phone' }));
+      expect(await screen.findByText('Practice call ended: Not interested.')).toBeInTheDocument();
+      expect(screen.queryByText('Ringing your phone…')).not.toBeInTheDocument();
+    });
+
+    it('says "On the call…" while it is in progress', async () => {
+      stubApi({ [AVAILABILITY]: numbers, [PRACTICE]: { result: 'placed', aiCallId: CALL }, [LIST]: { items: [item('in_progress', null)] } });
+      renderWithProviders(<PracticeCall card={card()} campaignId={CAMPAIGN} />, { isAdmin: true });
+      await userEvent.click(await screen.findByRole('button', { name: 'Practice call to my phone' }));
+      expect(await screen.findByText('On the call…')).toBeInTheDocument();
+    });
+  });
+
   it('a proposed plan can be practised too', async () => {
     const calls = stubApi({ [AVAILABILITY]: numbers, [PRACTICE]: { result: 'placed', aiCallId: CALL } });
     renderWithProviders(<PracticeCall card={card({ callStage: 'review', plan: { ...card().plan!, status: 'proposed', version: 1 } })} />, { isAdmin: true });

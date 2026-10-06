@@ -56,7 +56,7 @@ export function CallPlanBoard({ campaign, isAdmin }: { campaign: Campaign; isAdm
         {board.error && <p role="alert" className="text-sm text-destructive">{errorText(board.error)}</p>}
         {board.isPending && <p className="text-sm text-muted-foreground">Loading call plans…</p>}
         {board.data && cards.length === 0 && <p className="text-sm text-muted-foreground">No leads here yet. Tick leads above; they are researched at the next refresh.</p>}
-        <div className="space-y-3">{cards.map((card) => <CallPlanCardView key={card.enrollmentId} card={card} onChanged={refresh} />)}</div>
+        <div className="space-y-3">{cards.map((card) => <CallPlanCardView key={card.enrollmentId} card={card} onChanged={refresh} campaignId={campaign.id} />)}</div>
         {board.hasNextPage && <Button size="sm" variant="outline" disabled={board.isFetchingNextPage} onClick={() => void board.fetchNextPage()}>Load more</Button>}
       </CardContent>
     </Card>
