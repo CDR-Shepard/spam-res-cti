@@ -9,12 +9,14 @@ export class SalesforceAuthError extends Error {
 }
 
 /** Salesforce answered, but with an error (≥ 400) or a body we could not use.
- *  `body` is Salesforce's parsed answer, kept so callers can show it verbatim. */
+ *  `body` is Salesforce's parsed answer, kept so callers can show it verbatim.
+ *  `code` is Salesforce's error code when one is known (a SOAP fault's, prefix stripped). */
 export class SalesforceApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
     readonly body: unknown,
+    readonly code?: string,
   ) {
     super(message);
     this.name = 'SalesforceApiError';

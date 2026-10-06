@@ -10,6 +10,7 @@
 import { toDescribe, type SObjectDescribe } from './describe-parse.js';
 import { QueryTooLargeError, SalesforceApiError, SalesforceAuthError } from './errors.js';
 import { parseListViews, type ListViewSummary } from './listviews.js';
+import { soapFault, xmlEscape } from './xml.js';
 
 export type { PicklistValue, RecordTypeInfo, SObjectDescribe, SObjectField } from './describe-parse.js';
 
@@ -50,6 +51,11 @@ export interface SalesforceRequestInit {
 export interface SalesforceResponse {
   status: number;
   json: unknown;
+}
+
+export interface SoapResponse {
+  status: number;
+  xml: string;
 }
 
 /** sObject Collections takes at most 200 records per request (a Salesforce limit). */
@@ -186,6 +192,41 @@ export class SalesforceClient {
     return res.json.map(toCompositeResult);
   }
 
+  /**
+   * POST a SOAP envelope to /services/Soap/u/{n} (n = apiVersion without the 'v'). `bodyXml` goes inside
+   * <env:Body>; the SessionHeader carries the current access token (the connection's `api` scope covers SOAP).
+   * A fault `INVALID_SESSION_ID` (or HTTP 401) refreshes the token once and retries; a second one throws
+   * SalesforceAuthError. Other faults are returned for the caller to read. 30 s timeout, like every request.
+   */
+  async soap(bodyXml: string, opts: { signal?: AbortSignal } = {}): Promise<SoapResponse> {
+    const first = await this.soapOnce(await this.tokens.current(), bodyXml, opts.signal);
+    if (!sessionRefused(first)) return first;
+    const second = await this.soapOnce(await this.tokens.refresh(), bodyXml, opts.signal);
+    if (sessionRefused(second)) throw new SalesforceAuthError('Salesforce rejected the refreshed access token (SOAP INVALID_SESSION_ID)');
+    return second;
+  }
+
+  private async soapOnce(token: SalesforceToken, bodyXml: string, signal?: AbortSignal): Promise<SoapResponse> {
+    const url = new URL(`/services/Soap/u/${this.apiVersion.replace(/^v/, '')}`, token.instanceUrl);
+    const envelope =
+      '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<env:Envelope xmlns:env="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:partner.soap.sforce.com">' +
+      `<env:Header><urn:SessionHeader><urn:sessionId>${xmlEscape(token.accessToken)}</urn:sessionId></urn:SessionHeader></env:Header>` +
+      `<env:Body>${bodyXml}</env:Body></env:Envelope>`;
+    const timeout = AbortSignal.timeout(SALESFORCE_REQUEST_TIMEOUT_MS);
+    try {
+      const res = await this.fetchImpl(url.toString(), {
+        method: 'POST',
+        headers: { 'content-type': 'text/xml; charset=UTF-8', accept: 'text/xml', SOAPAction: '""' },
+        body: envelope,
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+      });
+      return { status: res.status, xml: await res.text() };
+    } catch (err) {
+      throw new SalesforceApiError(`Salesforce SOAP request failed: ${errorText(err)}`, 0, null);
+    }
+  }
+
   private async queryPage<T>(urlFor: (instanceUrl: string) => URL, signal?: AbortSignal): Promise<QueryPage<T>> {
     const res = await this.send(urlFor, { signal });
     if (res.status >= 400) throw apiError('SOQL failed', res);
@@ -241,6 +282,10 @@ export class SalesforceClient {
       throw new SalesforceApiError(`Salesforce request failed: ${errorText(err)}`, 0, null);
     }
   }
+}
+
+function sessionRefused(res: SoapResponse): boolean {
+  return res.status === 401 || soapFault(res.xml)?.code === 'INVALID_SESSION_ID';
 }
 
 function errorText(err: unknown): string {
