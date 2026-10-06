@@ -186,10 +186,11 @@ export function aiExitWords(reason: string | null): string | null {
  * Plan 1D: a booked appointment as "Phone call Wed Oct 7, 11:00 AM" or "Walkthrough …", in `timeZone` (the viewer's own when
  * left out). ICU's narrow no-break space before AM/PM becomes a plain one.
  */
-export function appointmentWords(a: { kind: 'phone' | 'walkthrough'; start: string }, timeZone?: string): string {
+export function appointmentWords(a: { kind: 'phone' | 'walkthrough'; start: string }, timeZone?: string, withName?: string | null): string {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).formatToParts(new Date(a.start));
   const part = (type: Intl.DateTimeFormatPartTypes): string => parts.find((p) => p.type === type)?.value ?? '';
-  return `${a.kind === 'phone' ? 'Phone call' : 'Walkthrough'} ${part('weekday')} ${part('month')} ${part('day')}, ${part('hour')}:${part('minute')} ${part('dayPeriod')}`;
+  const what = `${a.kind === 'phone' ? 'Phone call' : 'Walkthrough'}${withName ? ` with ${withName},` : ''}`;
+  return `${what} ${part('weekday')} ${part('month')} ${part('day')}, ${part('hour')}:${part('minute')} ${part('dayPeriod')}`;
 }
 
 /** A practice call's answer: ringing, or why it was not placed (a gate refusal or a failure, in words). */

@@ -107,6 +107,8 @@ export const RecordTestCall = z.object({
   callbackAt: z.string().nullable(),
   qualification: z.record(z.string()),
   appointment: BookedAppointment.nullable(),
+  /** Who the booking is with (spec §4.4 "Phone call with Grant, …"): the booked offered slot's specialist; null when unknown. */
+  appointmentWith: z.string().nullable(),
   dryRun: RecordTestDryRun.nullable(),
 });
 export type RecordTestCall = z.infer<typeof RecordTestCall>;

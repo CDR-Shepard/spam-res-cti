@@ -66,7 +66,7 @@ function CallCard({ c }: { c: RecordTestCall }) {
       {c.summary && <p>{c.summary}</p>}
       <Learned qualification={c.qualification} />
       {c.callbackAt && <p>{`Asked for a call back: ${formatDateTime(c.callbackAt)}`}</p>}
-      {c.appointment && <p className="font-medium">{`Would have booked: ${appointmentWords(c.appointment, PT)} PT`}</p>}
+      {c.appointment && <p className="font-medium">{`Would have booked: ${appointmentWords(c.appointment, PT, c.appointmentWith)} PT`}</p>}
       {finished && (
         <div className="flex flex-wrap gap-2">
           <Button size="sm" variant="outline" onClick={() => setOpen(!open)}>{open ? 'Hide transcript' : 'Transcript'}</Button>

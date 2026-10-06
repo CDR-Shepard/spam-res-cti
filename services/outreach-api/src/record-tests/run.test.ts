@@ -23,6 +23,8 @@ import { insertRecordTest, loadRecordTestCalls } from './store.js';
 const TEST_NUMBER = '+15125550111';
 /** Tue Oct 6, 9:00 AM PT: the default phone hours leave free times today and tomorrow. */
 const NOW = new Date('2026-10-06T16:00:00.000Z');
+/** The slots cti-api stored on the call (ai_calls.offered_slots): the booked one names its specialist. */
+const OFFERED = [{ id: 'p1', kind: 'phone', start: PHONE_BOOKING.start, end: PHONE_BOOKING.end, specialistSfUserId: GRANT, specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles' }];
 const identityOf = (userId: string, nonce = 'a1b2c3d4e5f6') => `aitest_${userId.replace(/-/g, '')}_${nonce}`;
 
 function readOnlyOrg() {
@@ -188,12 +190,22 @@ describe.skipIf(!pgLane)('running a record test call (real Postgres)', () => {
     }
   });
 
+  it('11b: "with <name>" is null when the booked slot is not among the offered ones', async () => {
+    const s = await setup();
+    const res = await startRecordTestCall(s.deps, s.ctx, s.testId, { mode: 'phone', to: TEST_NUMBER });
+    if (!('ok' in res) || !res.ok || res.response.result !== 'placed') throw new Error('not placed');
+    await db.update(schema.aiCalls)
+      .set({ status: 'completed', outcome: 'appointment_set', appointment: { ...PHONE_BOOKING, slotId: 'p2' }, offeredSlots: OFFERED })
+      .where(eq(schema.aiCalls.id, res.response.aiCallId));
+    expect((await loadRecordTestCalls(db, s.orgId, s.testId))[0]!.appointmentWith).toBeNull();
+  });
+
   it('11: loadRecordTestCalls is newest first, joined to the call; a lost answer is found through ai_call_requests', async () => {
     const s = await setup();
     const first = await startRecordTestCall(s.deps, s.ctx, s.testId, { mode: 'phone', to: TEST_NUMBER });
     if (!('ok' in first) || !first.ok || first.response.result !== 'placed') throw new Error('not placed');
     await db.update(schema.aiCalls)
-      .set({ isTest: true, practice: true, status: 'completed', outcome: 'appointment_set', summary: 'Booked Grant.', durationSeconds: 95, appointment: PHONE_BOOKING, qualification: { timeline: '30 days', beds: 3 } })
+      .set({ isTest: true, practice: true, status: 'completed', outcome: 'appointment_set', summary: 'Booked Grant.', durationSeconds: 95, appointment: PHONE_BOOKING, qualification: { timeline: '30 days', beds: 3 }, offeredSlots: OFFERED })
       .where(eq(schema.aiCalls.id, first.response.aiCallId));
     s.cti.answers.push({ lostPlaced: true, createdAt: NOW });
     const later = { ...s.deps, now: new Date(NOW.getTime() + 60_000) };
@@ -207,8 +219,9 @@ describe.skipIf(!pgLane)('running a record test call (real Postgres)', () => {
     expect(lost!.aiCallId).toBe((lost!.result as { aiCallId: string }).aiCallId);
     expect(placed).toMatchObject({
       mode: 'phone', toE164: TEST_NUMBER, aiCallId: first.response.aiCallId, callStatus: 'completed', outcome: 'appointment_set',
-      summary: 'Booked Grant.', durationSeconds: 95, appointment: PHONE_BOOKING, qualification: { timeline: '30 days' }, dryRun: null,
+      summary: 'Booked Grant.', durationSeconds: 95, appointment: PHONE_BOOKING, appointmentWith: 'Grant', qualification: { timeline: '30 days' }, dryRun: null,
     });
+    expect(lost!.appointmentWith).toBeNull();
     expect(await loadRecordTestCalls(db, (await setup()).orgId, s.testId)).toEqual([]);
   });
 });

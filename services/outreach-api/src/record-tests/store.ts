@@ -188,6 +188,7 @@ interface CallRow {
   callback_at: Date | string | null;
   qualification: unknown;
   appointment: unknown;
+  offered_slots: unknown;
 }
 
 /** What the call learned: only string answers are kept (a drifted value never breaks the page). */
@@ -196,7 +197,16 @@ function stringsOnly(v: unknown): Record<string, string> {
   return Object.fromEntries(Object.entries(v).filter((e): e is [string, string] => typeof e[1] === 'string'));
 }
 
+/** The first name of the specialist on the offered slot the seller booked (as cti-api stored both); null when not found. */
+function bookedWith(appointment: BookedAppointment | null, offered: unknown): string | null {
+  if (!appointment) return null;
+  const slots = parsedOrNull(AppointmentSlots, offered) ?? [];
+  const slot = slots.find((s) => s.id === appointment.slotId && s.specialistSfUserId === appointment.specialistSfUserId);
+  return slot?.specialistFirstName ?? null;
+}
+
 function toRecordTestCall(r: CallRow): RecordTestCall {
+  const appointment = parsedOrNull(BookedAppointment, r.appointment);
   return {
     id: r.id,
     mode: r.mode,
@@ -210,7 +220,8 @@ function toRecordTestCall(r: CallRow): RecordTestCall {
     durationSeconds: r.duration_seconds,
     callbackAt: r.callback_at === null ? null : new Date(r.callback_at).toISOString(),
     qualification: stringsOnly(r.qualification),
-    appointment: parsedOrNull(BookedAppointment, r.appointment),
+    appointment,
+    appointmentWith: bookedWith(appointment, r.offered_slots),
     dryRun: parsedOrNull(RecordTestDryRun, r.dry_run),
   };
 }
@@ -223,7 +234,8 @@ function toRecordTestCall(r: CallRow): RecordTestCall {
 export async function loadRecordTestCalls(db: Db, orgId: string, testId: string): Promise<RecordTestCall[]> {
   const result = await db.execute(sql`
     select c.id, c.mode, c.to_e164, c.created_at, coalesce(c.ai_call_id, q.ai_call_id) as ai_call_id, coalesce(c.result, q.response) as result,
-           c.dry_run, a.status as call_status, a.outcome, a.summary, a.duration_seconds, a.callback_at, a.qualification, a.appointment
+           c.dry_run, a.status as call_status, a.outcome, a.summary, a.duration_seconds, a.callback_at, a.qualification, a.appointment,
+           a.offered_slots
     from ai_record_test_calls c
     left join ai_call_requests q on c.ai_call_id is null and q.org_id = c.org_id and q.idempotency_key = c.idempotency_key
     left join ai_calls a on a.id = coalesce(c.ai_call_id, q.ai_call_id) and a.org_id = c.org_id

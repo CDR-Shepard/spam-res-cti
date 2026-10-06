@@ -77,6 +77,7 @@ export function recordTestCall(over: Partial<RecordTestCall> = {}): RecordTestCa
     callbackAt: null,
     qualification: {},
     appointment: null,
+    appointmentWith: null,
     dryRun: null,
     ...over,
   };

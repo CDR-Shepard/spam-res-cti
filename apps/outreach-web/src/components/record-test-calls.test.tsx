@@ -32,6 +32,12 @@ describe('RecordTestCalls', () => {
     expect(screen.getByText('Would have booked: Phone call Wed Oct 7, 11:00 AM PT')).toBeInTheDocument();
   });
 
+  it('names who the booking is with when the call knows (spec §4.4)', () => {
+    stubApi({});
+    renderWithProviders(<RecordTestCalls calls={[{ ...booked, appointmentWith: 'Grant' }]} />, { isAdmin: true });
+    expect(screen.getByText('Would have booked: Phone call with Grant, Wed Oct 7, 11:00 AM PT')).toBeInTheDocument();
+  });
+
   it('newest first; a refusal and a lost answer say so', () => {
     stubApi({});
     const older = recordTestCall({ id: '99999999-9999-4999-8999-999999999991', createdAt: '2026-10-06T16:00:00.000Z', result: { result: 'blocked', reason: 'no_caller_id', aiCallId: AI_CALL_ID }, callStatus: 'blocked', outcome: 'blocked' });
