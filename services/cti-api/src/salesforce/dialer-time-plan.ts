@@ -1,16 +1,20 @@
 /**
  * Which (rep, Pacific day) "Power Dialer Time" Tasks need a Salesforce write
  * this tick. PURE. The number is exactly the admin Talk time report's "On
- * dialer": dialerSecondsByUserDay — legs merged per rep (overlaps once), split
- * at Pacific midnight, an open leg counted up to `now`.
+ * dialer": dialerSecondsByUserDay — the line open AND something happened in the
+ * last 15 minutes (a dial, or a conversation), legs merged per rep (overlaps
+ * once), split at Pacific midnight, an open leg counted up to `now`.
  */
 import type { DialerTimeTask } from '@cti/db';
 import { orgTodayIso } from '../dialer/org-day.js';
-import { addDays, dialerSecondsByUserDay, type LegSpan } from '../reports/talk-time.js';
+import { addDays, dialerSecondsByUserDay, type ActivitySpan, type LegSpan } from '../reports/talk-time.js';
 
-/** Today and the two days before: a leg crossing midnight, closing late or
- *  reconciled up to 48 h later still lands on the right day's Task. */
-export const DIALER_TIME_WINDOW_DAYS = 3;
+/** Today and the thirteen days before — two weeks: the idle-cutoff deploy
+ *  rewrites every day since the feature began, and a write that keeps failing
+ *  (a rep must reconnect Salesforce) keeps converging for two weeks. A leg
+ *  crossing midnight, closing late or reconciled up to 48 h later also still
+ *  lands on the right day's Task. */
+export const DIALER_TIME_WINDOW_DAYS = 14;
 
 const MIN = 60_000;
 export const BACKOFF_MS = [5 * MIN, 15 * MIN, 60 * MIN, 180 * MIN, 360 * MIN] as const;
@@ -46,9 +50,11 @@ function isDue(row: SyncedRow | null, now: Date): boolean {
 
 /** A day that was synced with real seconds must converge back to 0 when the
  *  computed number drops to 0 (final review I2 — the reconciler's 48 h
- *  fallback can do this). Never a CREATE for 0: only a row that already has a
+ *  fallback can do this; so does the idle cutoff, for a day synced under the
+ *  old line-open number). Never a CREATE for 0: only a row that already has a
  *  Task is corrected. Uses the row's own orgId, not the legs-derived map,
- *  because a rep with no legs left in the window at all has no entry there. */
+ *  because a rep with no counted time left in the window at all has no entry
+ *  there. */
 function zeroCorrection(row: SyncedRow, now: Date): PlannedWrite | null {
   if (!row.salesforceTaskId) return null;
   if ((row.syncedSeconds ?? 0) <= 0) return null;
@@ -58,16 +64,17 @@ function zeroCorrection(row: SyncedRow, now: Date): PlannedWrite | null {
 
 export function planDialerTimeWrites(input: {
   legs: readonly WindowLeg[];
+  activity: readonly ActivitySpan[];
   days: readonly string[];
   now: Date;
   rows: readonly SyncedRow[];
 }): PlannedWrite[] {
-  const { legs, days, now, rows } = input;
+  const { legs, activity, days, now, rows } = input;
   const orgOf = new Map(legs.map((l) => [l.userId, l.orgId]));
   const rowOf = new Map(rows.map((r) => [`${r.userId}|${r.day}`, r]));
-  const seconds = dialerSecondsByUserDay(legs, days, now);
+  const seconds = dialerSecondsByUserDay(legs, activity, days, now);
   const planned: PlannedWrite[] = [];
-  // Every (userId, day) visited by the main loop below, so the no-legs-left
+  // Every (userId, day) visited by the main loop below, so the no-time-left
   // sweep after it never double-plans a pair dialerSecondsByUserDay did see.
   const seen = new Set<string>();
 
@@ -88,9 +95,10 @@ export function planDialerTimeWrites(input: {
     }
   }
 
-  // Reps with NO legs left anywhere in the window are absent from `seconds`
-  // entirely (dialerSecondsByUserDay drops users with no day > 0), so a rep
-  // whose dialing was entirely reconciled away still needs their synced rows
+  // Reps with NO counted time left anywhere in the window — no legs, or legs
+  // with nothing active in them — are absent from `seconds` entirely
+  // (dialerSecondsByUserDay drops users with no day > 0), so a rep whose
+  // dialing was entirely reconciled away or idle still needs their synced rows
   // walked and corrected to 0 — iterate the rows themselves, not just the
   // reps the legs mention.
   for (const row of rows) {
