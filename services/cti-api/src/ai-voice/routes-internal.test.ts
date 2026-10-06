@@ -184,7 +184,7 @@ describe('POST /internal/ai-calls', () => {
       expect(deps.start).not.toHaveBeenCalled();
       expect([...store.rows.values()][0]?.response).toEqual(answer);
       expect(store.findCallSince).toHaveBeenCalledWith({
-        orgId: ORG, userId: USER, sfRecordId: LEAD, toE164: null, since: new Date(NOW.getTime() - 11 * 60_000 - 5_000),
+        orgId: ORG, userId: USER, sfRecordId: LEAD, toE164: null, kind: 'record', since: new Date(NOW.getTime() - 11 * 60_000 - 5_000),
       });
     });
 
@@ -369,7 +369,7 @@ describe('POST /internal/ai-calls', () => {
       expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
       expect(deps.start).not.toHaveBeenCalled();
       expect(store.findCallSince).toHaveBeenCalledWith({
-        orgId: ORG, userId: USER, sfRecordId: null, toE164: '+15125550100', since: new Date(NOW.getTime() - 11 * 60_000 - 5_000),
+        orgId: ORG, userId: USER, sfRecordId: null, toE164: '+15125550100', kind: 'practice', since: new Date(NOW.getTime() - 11 * 60_000 - 5_000),
       });
     });
 

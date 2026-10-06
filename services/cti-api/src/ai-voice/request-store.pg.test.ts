@@ -112,4 +112,29 @@ describe.skipIf(!server)('ai_call_requests store (real Postgres)', () => {
     await store().complete(orgId, key, { result: 'failed', reason: 'salesforce_error', aiCallId: null });
     expect((await row(key)).response).toEqual({ result: 'failed', reason: 'in_flight', aiCallId: null });
   });
+
+  it('Fix 1 I-2: a crashed request finds its own kind of call, never a practice or test call on the same record or number', async () => {
+    const LEAD = '00Q5e00000AbCdEFGH';
+    const TEST_TO = '+15125550177';
+    const since = new Date(Date.now() - 60_000);
+    const insert = async (v: { sfRecordId?: string; toE164: string; isTest: boolean; practice: boolean; minutesAgo: number }) => {
+      const [r] = await db
+        .insert(schema.aiCalls)
+        .values({
+          orgId, startedBy: userId, sfObject: v.sfRecordId ? 'Lead' : null, sfRecordId: v.sfRecordId ?? null, toE164: v.toE164,
+          isTest: v.isTest, practice: v.practice, status: 'ringing', createdAt: new Date(Date.now() - v.minutesAgo * 1000),
+        })
+        .returning({ id: schema.aiCalls.id });
+      return r!.id;
+    };
+    const real = await insert({ sfRecordId: LEAD, toE164: '+15125550100', isTest: false, practice: false, minutesAgo: 30 });
+    const plainTest = await insert({ toE164: TEST_TO, isTest: true, practice: false, minutesAgo: 20 });
+    // The newest row of all: a practice call on the same record by the same admin, ringing the same test number.
+    const practice = await insert({ sfRecordId: LEAD, toE164: TEST_TO, isTest: true, practice: true, minutesAgo: 10 });
+    const find = (a: { sfRecordId: string | null; toE164: string | null; kind: 'record' | 'test' | 'practice' }) =>
+      store().findCallSince({ orgId, userId, since, ...a });
+    expect((await find({ sfRecordId: LEAD, toE164: null, kind: 'record' }))?.id).toBe(real);
+    expect((await find({ sfRecordId: null, toE164: TEST_TO, kind: 'practice' }))?.id).toBe(practice);
+    expect((await find({ sfRecordId: null, toE164: TEST_TO, kind: 'test' }))?.id).toBe(plainTest);
+  });
 });

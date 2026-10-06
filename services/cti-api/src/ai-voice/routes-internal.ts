@@ -33,7 +33,7 @@ import type { Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
 import { checkInternalRequest, checkInternalTransport, INTERNAL_RATE_MAX } from './internal-auth.js';
 import type { AiCallRecord } from './record.js';
-import { requestHash, STALE_REQUEST_MS, type AiCallRequestStore, type FoundCall } from './request-store.js';
+import { requestHash, STALE_REQUEST_MS, type AiCallRequestStore, type CallLookup, type FoundCall } from './request-store.js';
 import type { StartDeps, StartInput, StartResult } from './service.js';
 
 export interface InternalAiDeps {
@@ -74,15 +74,15 @@ function rebuilt(row: FoundCall): InternalAiCallResponse {
 }
 
 /** How a crashed request's call is found again: by the record for a record call; by the number it rang otherwise. */
-function targetKeys(body: Body): { sfRecordId: string | null; toE164: string | null } {
+function targetKeys(body: Body): Pick<CallLookup, 'sfRecordId' | 'toE164' | 'kind'> {
   const t = body.target;
   switch (t.kind) {
     case 'record':
-      return { sfRecordId: t.recordId, toE164: null };
+      return { sfRecordId: t.recordId, toE164: null, kind: 'record' };
     case 'test':
     case 'practice':
       // A practice call rings the admin's test number (its row also carries the record id, but so may a real call's).
-      return { sfRecordId: null, toE164: toE164(t.to) ?? t.to.slice(0, 20) };
+      return { sfRecordId: null, toE164: toE164(t.to) ?? t.to.slice(0, 20), kind: t.kind };
   }
 }
 

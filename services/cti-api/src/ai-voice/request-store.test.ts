@@ -60,18 +60,24 @@ describe('ai_call_requests SQL, rendered', () => {
     expect(params).toEqual([ORG, KEY, 600]);
   });
 
-  it('3: findCallSince looks for a record call by org, starter, record and time, newest first', () => {
-    const { sql, params } = findCallSinceQuery(db, { orgId: ORG, userId: USER, sfRecordId: '00Q5e00000AbCdEFGH', toE164: null, since: SINCE }).toSQL();
+  it('3: findCallSince looks for a REAL record call by org, starter, record and time, newest first (Fix 1 I-2: never a practice call)', () => {
+    const { sql, params } = findCallSinceQuery(db, { orgId: ORG, userId: USER, sfRecordId: '00Q5e00000AbCdEFGH', toE164: null, kind: 'record', since: SINCE }).toSQL();
     expect(sql).toBe(
-      'select "id", "status", "block_reason", "call_sid" from "ai_calls" where ("ai_calls"."org_id" = $1 and "ai_calls"."started_by" = $2 and "ai_calls"."sf_record_id" = $3 and "ai_calls"."created_at" >= $4) order by "ai_calls"."created_at" desc limit $5',
+      'select "id", "status", "block_reason", "call_sid" from "ai_calls" where ("ai_calls"."org_id" = $1 and "ai_calls"."started_by" = $2 and ("ai_calls"."sf_record_id" = $3 and "ai_calls"."is_test" = $4) and "ai_calls"."created_at" >= $5) order by "ai_calls"."created_at" desc limit $6',
     );
-    expect(params).toEqual([ORG, USER, '00Q5e00000AbCdEFGH', SINCE.toISOString(), 1]);
+    expect(params).toEqual([ORG, USER, '00Q5e00000AbCdEFGH', false, SINCE.toISOString(), 1]);
   });
 
-  it('3: a test call is found by its number instead', () => {
-    const { sql, params } = findCallSinceQuery(db, { orgId: ORG, userId: USER, sfRecordId: null, toE164: '+15125550100', since: SINCE }).toSQL();
-    expect(sql).toContain('"ai_calls"."to_e164" = $3');
+  it('3: a test call is found by its number instead, among test calls that are not practice calls', () => {
+    const { sql, params } = findCallSinceQuery(db, { orgId: ORG, userId: USER, sfRecordId: null, toE164: '+15125550100', kind: 'test', since: SINCE }).toSQL();
+    expect(sql).toContain('"ai_calls"."to_e164" = $3 and "ai_calls"."is_test" = $4 and "ai_calls"."practice" = $5');
     expect(sql).not.toContain('sf_record_id');
-    expect(params[2]).toBe('+15125550100');
+    expect(params.slice(2, 5)).toEqual(['+15125550100', true, false]);
+  });
+
+  it('3: a practice call is found by its number, among practice calls only', () => {
+    const { sql, params } = findCallSinceQuery(db, { orgId: ORG, userId: USER, sfRecordId: null, toE164: '+15125550100', kind: 'practice', since: SINCE }).toSQL();
+    expect(sql).toContain('"ai_calls"."to_e164" = $3 and "ai_calls"."is_test" = $4 and "ai_calls"."practice" = $5');
+    expect(params.slice(2, 5)).toEqual(['+15125550100', true, true]);
   });
 });

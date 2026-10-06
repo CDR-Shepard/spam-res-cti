@@ -36,8 +36,21 @@ export interface AiCallRequestStore {
    * key: an unanswered reservation is only ever taken over, so a retry cannot dial while another is in flight.
    */
   takeOver(orgId: string, key: string): Promise<boolean>;
-  /** The ai_calls row a crashed request may have produced. */
-  findCallSince(a: { orgId: string; userId: string; sfRecordId: string | null; toE164: string | null; since: Date }): Promise<FoundCall | null>;
+  /**
+   * The ai_calls row a crashed request may have produced: a record key finds a real call on the record, a test or practice
+   * key a call of its own kind to the number it rang (Fix 1, I-2: a practice call carries the real record id, so a record
+   * key must never take it for the real call).
+   */
+  findCallSince(a: CallLookup): Promise<FoundCall | null>;
+}
+
+export interface CallLookup {
+  orgId: string;
+  userId: string;
+  sfRecordId: string | null;
+  toE164: string | null;
+  kind: 'record' | 'test' | 'practice';
+  since: Date;
 }
 
 const RESERVE_ATTEMPTS = 3;
@@ -70,9 +83,12 @@ export function takeOverQuery(db: Db, orgId: string, key: string) {
     .returning({ key: r.idempotencyKey });
 }
 
-export function findCallSinceQuery(db: Db, a: Parameters<AiCallRequestStore['findCallSince']>[0]) {
+export function findCallSinceQuery(db: Db, a: CallLookup) {
   const c = schema.aiCalls;
-  const target = a.sfRecordId !== null ? eq(c.sfRecordId, a.sfRecordId) : eq(c.toE164, a.toE164 ?? '');
+  const target =
+    a.kind === 'record'
+      ? and(eq(c.sfRecordId, a.sfRecordId ?? ''), eq(c.isTest, false))
+      : and(eq(c.toE164, a.toE164 ?? ''), eq(c.isTest, true), eq(c.practice, a.kind === 'practice'));
   return db
     .select({ id: c.id, status: c.status, blockReason: c.blockReason, callSid: c.callSid })
     .from(c)
