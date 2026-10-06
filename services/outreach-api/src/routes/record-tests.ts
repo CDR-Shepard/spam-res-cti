@@ -6,6 +6,9 @@
  * Part 2: run a ready preview as a practice call to one of the admin test numbers or to the admin's own browser
  * (record-tests/run.ts), relay the browser's incoming-only Voice token from cti-api (never logged, never cached), and
  * read the test's calls back with the preview.
+ *
+ * Task 11: "What would be written to Salesforce" for one finished test call (record-tests/dry-run.ts): reads and one
+ * mapping-model call, nothing sent, stored on the call row.
  */
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
@@ -20,13 +23,16 @@ import { loadConnection } from '../crm/connection-store.js';
 import { sendError } from '../http/errors.js';
 import type { DescribeCache } from '../research/describe.js';
 import { CALLS_PER_HOUR, PREVIEWS_PER_DAY, PREVIEWS_PER_HOUR, withPreviewLimit, type LimitRefusal } from '../record-tests/limits.js';
+import { dryRunTestCall, type DryRunResult } from '../record-tests/dry-run.js';
 import { runPreview } from '../record-tests/preview.js';
 import { startRecordTestCall, type RunError } from '../record-tests/run.js';
 import { insertRecordTest, listRecordTests, loadRecordTest, loadRecordTestCalls, toRecordTest } from '../record-tests/store.js';
 import { outreachSettings } from '../settings.js';
+import type { MappingModel } from '../writeback/mapping-model.js';
 import { requireAdmin, requireContext } from '../tenancy/scope.js';
 
 const IdParams = z.object({ id: z.string().uuid() });
+const CallParams = z.object({ callId: z.string().uuid() });
 
 export interface RecordTestRouteDeps {
   db: Db;
@@ -36,6 +42,10 @@ export interface RecordTestRouteDeps {
   /** The plan model; null (or unpriced) means previews are not configured. */
   model: CallPlanModel | null;
   describes: DescribeCache;
+  /** The write-back's answer-mapping model, for "What would be written" (Task 11); absent or null answers 503 NO_MODEL. */
+  mappingModel?: MappingModel | null;
+  /** APP_PUBLIC_URL: the dry run's Chatter text links to the test page. */
+  appPublicUrl?: string;
   /** AI_CALL_DEFAULT_SPECIALISTS (the offer's appointment owner list when a tenant saved none). */
   defaultSpecialists: readonly string[];
   now?: () => Date;
@@ -96,6 +106,13 @@ function sendRunError(reply: FastifyReply, error: RunError, words: readonly stri
   const [status, code, message] = RUN_ERRORS[error];
   return sendError(reply, status, code, message);
 }
+
+const DRY_RUN_ERRORS: Readonly<Record<Extract<DryRunResult, { error: string }>['error'], [number, string, string]>> = {
+  not_found: [404, 'NOT_FOUND', 'That test call is not here. It may belong to another tenant.'],
+  not_finished: [409, 'NOT_FINISHED', 'That call is still going. Wait for it to end.'],
+  no_model: [503, 'NO_MODEL', 'The answer-mapping model is not set up on this server.'],
+  salesforce_error: [502, 'SALESFORCE_ERROR', "Salesforce didn't answer while the record was read. Try again."],
+};
 
 /** cti-api's refusal of a browser token (or no answer), as an error reply. */
 function sendTokenRefusal(reply: FastifyReply, answer: Exclude<BrowserTokenOutcome, { kind: 'token' }>): FastifyReply {
@@ -177,5 +194,17 @@ export async function registerRecordTestRoutes(app: FastifyInstance, deps: Recor
     if ('refusal' in out) return sendLimitRefusal(reply, out.refusal);
     if (!out.ok) return sendRunError(reply, out.error, out.words);
     return { callId: out.callId, response: out.response };
+  });
+
+  app.post('/record-tests/calls/:callId/dry-run', async (req, reply) => {
+    const ctx = await requireContext(db, req, reply);
+    if (!ctx || !requireAdmin(ctx, reply)) return reply;
+    const params = CallParams.safeParse(req.params);
+    if (!params.success) return sendError(reply, ...DRY_RUN_ERRORS.not_found);
+    const dryDeps = { db, clients, model: deps.mappingModel ?? null, describes, now: now(), log: req.log, resultsBaseUrl: deps.appPublicUrl ?? '' };
+    const out = await dryRunTestCall(dryDeps, ctx, params.data.callId);
+    if ('refusal' in out) return sendLimitRefusal(reply, out.refusal);
+    if (!out.ok) return sendError(reply, ...DRY_RUN_ERRORS[out.error]);
+    return out.dryRun;
   });
 }

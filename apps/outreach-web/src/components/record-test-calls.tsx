@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { appointmentWords, CALL_STATUS_WORDS, OUTCOME_WORDS, practiceAnswerWords } from '@/lib/call-words';
 import { formatDateTime, humanize } from '@/lib/outreach-words';
 import { AiCallTranscriptPanel } from './ai-call-transcript';
+import { RecordTestDryRun } from './record-test-dry-run';
 
 const PT = 'America/Los_Angeles';
 const LIVE_STATUS: ReadonlySet<AiCallStatus> = new Set(['queued', 'ringing', 'in_progress', 'transferring']);
@@ -23,7 +24,7 @@ const minutes = (s: number): string => `${Math.floor(s / 60)}:${String(s % 60).p
 
 /**
  * A record test's calls, newest first (plan 1E, spec §4.4): how each went, what it learned and what it would have
- * booked. Nothing of it reached Salesforce.
+ * booked, and on request what a real call would have written (Task 11). Nothing of it reached Salesforce.
  */
 export function RecordTestCalls({ calls }: { calls: readonly RecordTestCall[] }) {
   if (calls.length === 0) return null;
@@ -53,6 +54,7 @@ function CallCard({ c }: { c: RecordTestCall }) {
         </div>
       )}
       {open && c.aiCallId && <AiCallTranscriptPanel aiCallId={c.aiCallId} />}
+      {finished && <RecordTestDryRun call={c} />}
     </article>
   );
 }

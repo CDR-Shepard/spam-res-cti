@@ -39,6 +39,7 @@ const cases: Case[] = [
   { name: 'recordTest', call: () => outreach.recordTest(TEST_ID), route: `GET /api/record-tests/${TEST_ID}`, response: recordTest() },
   { name: 'recordTestCall', call: () => outreach.recordTestCall(TEST_ID, { mode: 'phone', to: '+15125550111' }), route: `POST /api/record-tests/${TEST_ID}/calls`, response: { callId: AI_CALL_ID, response: { result: 'placed', aiCallId: AI_CALL_ID } }, body: { mode: 'phone', to: '+15125550111' } },
   { name: 'browserToken', call: () => outreach.browserToken(), route: 'POST /api/record-tests/browser-token', response: { token: 'jwt', identity: IDENTITY, expiresAt: '2026-10-06T18:00:00.000Z' } },
+  { name: 'recordTestDryRun', call: () => outreach.recordTestDryRun(AI_CALL_ID), route: `POST /api/record-tests/calls/${AI_CALL_ID}/dry-run`, response: { status: 'nothing', changes: [], changesText: null, chatterText: null, wouldCreate: [], conversion: null, note: 'A real call that ended this way writes nothing to Salesforce.' } },
   { name: 'startTestCall', call: () => outreach.startTestCall('+15125550111'), route: 'POST /api/ai-calls/test', response: { result: 'placed', aiCallId: AI_CALL_ID }, body: { to: '+15125550111' } },
 ];
 

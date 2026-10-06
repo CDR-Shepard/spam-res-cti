@@ -161,7 +161,10 @@ async function main(): Promise<void> {
       (scope) => registerPracticeCallRoutes(scope, { db, clients, cti, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS }),
       (scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, describes }),
       // Plan 1E: Test a record (admins): preview how the AI would call any Lead or Opportunity, without a campaign.
-      (scope) => registerRecordTestRoutes(scope, { db, clients, cti, model: planModel, describes, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS }),
+      (scope) =>
+        registerRecordTestRoutes(scope, {
+          db, clients, cti, model: planModel, describes, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, mappingModel, appPublicUrl: cfg.APP_PUBLIC_URL,
+        }),
     ],
   });
   const close = () => shutdown(runner, app);

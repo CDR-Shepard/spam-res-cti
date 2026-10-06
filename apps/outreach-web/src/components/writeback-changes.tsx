@@ -51,16 +51,11 @@ function changeWords(c: WritebackChange): string {
   }
 }
 
-/**
- * What one AI call's Salesforce write-back did: grouped by kind with old → new, its last error, and Retry for an admin when
- * the round failed (the server keeps the finished steps, so nothing is done twice).
- */
-export function WritebackChanges({ summary, aiCallId, onRetried }: { summary: WritebackSummary; aiCallId: string; onRetried: () => void }) {
-  const retry = useMutation({ mutationFn: () => retryWriteback(aiCallId), onSuccess: onRetried });
-  const groups = GROUPS.map(([kind, title]) => [title, summary.changes.filter((c) => c.kind === kind)] as const).filter(([, items]) => items.length > 0);
+/** The changes grouped by kind, each list named by its heading (also the Test a record dry run's, plan 1E). */
+export function ChangeGroups({ changes }: { changes: readonly WritebackChange[] }) {
+  const groups = GROUPS.map(([kind, title]) => [title, changes.filter((c) => c.kind === kind)] as const).filter(([, items]) => items.length > 0);
   return (
-    <div className="space-y-2 text-sm">
-      {groups.length === 0 && <p className="text-muted-foreground">Nothing was written yet.</p>}
+    <>
       {groups.map(([title, items]) => (
         <div key={title}>
           <h4 className="font-medium">{title}</h4>
@@ -69,6 +64,20 @@ export function WritebackChanges({ summary, aiCallId, onRetried }: { summary: Wr
           </ul>
         </div>
       ))}
+    </>
+  );
+}
+
+/**
+ * What one AI call's Salesforce write-back did: grouped by kind with old → new, its last error, and Retry for an admin when
+ * the round failed (the server keeps the finished steps, so nothing is done twice).
+ */
+export function WritebackChanges({ summary, aiCallId, onRetried }: { summary: WritebackSummary; aiCallId: string; onRetried: () => void }) {
+  const retry = useMutation({ mutationFn: () => retryWriteback(aiCallId), onSuccess: onRetried });
+  return (
+    <div className="space-y-2 text-sm">
+      {summary.changes.length === 0 && <p className="text-muted-foreground">Nothing was written yet.</p>}
+      <ChangeGroups changes={summary.changes} />
       {summary.error && <p className="text-muted-foreground">Last error: {summary.error}</p>}
       {summary.mayRetry && (
         <Button size="sm" variant="outline" disabled={retry.isPending} onClick={() => retry.mutate()}>Retry</Button>

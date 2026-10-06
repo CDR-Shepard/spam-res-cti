@@ -20,6 +20,7 @@ import {
   NeedsReviewResponse,
   PracticeCallsResponse,
   RecordTest,
+  RecordTestDryRun,
   RecordTestsResponse,
   SelectionResponse,
   StartConnectionResponse,
@@ -266,4 +267,9 @@ export function recordTestCall(id: string, body: RecordTestCallRequest): Promise
 /** Admin only: an incoming-only Voice token for one "Talk in browser" run. Never stored, logged or cached. */
 export function browserToken(): Promise<BrowserTokenResponse> {
   return api('/api/record-tests/browser-token', BrowserTokenResponse, { method: 'POST' });
+}
+
+/** Admin only (plan 1E): what a real call that ended like this test call would write to Salesforce. Nothing is sent. */
+export function recordTestDryRun(callId: string): Promise<RecordTestDryRun> {
+  return api(`/api/record-tests/calls/${seg(callId)}/dry-run`, RecordTestDryRun, { method: 'POST' });
 }
