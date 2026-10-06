@@ -514,8 +514,9 @@ Under a ready preview (only when the plan text passed): "Exactly the call the se
   1. **Use headphones**, so the AI doesn't hear itself. You are the seller.
   2. Press **Talk in browser**. The browser asks for the **microphone**: allow it.
   3. The page connects this tab ("Connecting this browser…"), asks the AI to call ("Asking the AI to call…"), and **answers on its own** when it rings ("The AI is calling this browser…").
-  4. Live: "Connected · 1:23", **Mute** / **Unmute**, **Hang up**. Closing the tab also ends the call.
-  5. While the browser call is up, **Regenerate**, **Preview the call** and the **Recent tests** rows are off ("Hang up the browser call first: leaving this test would drop it."). If the page can't reach outreach-api for a moment it says "Couldn't refresh this test: … Still trying." and the call carries on.
+  4. Live: "Connected · 1:23", **Mute** (a toggle: it stays pressed while you are muted, and the line reads "Connected · muted"), **Hang up**. A screen reader hears "Connected" and "muted", not the clock.
+  5. **Don't use the top bar, Back, a reload or close the tab during the call: leaving the page hangs up.** The page asks first ("A test call is live — leave and hang up?"; for a reload or closing the tab the browser asks in its own words); OK leaves and ends the call.
+  6. While the browser call is up, **Regenerate**, **Preview the call** and the **Recent tests** rows are off ("Hang up the browser call first: leaving this test would drop it."). If the page can't reach outreach-api for a moment it says "Couldn't refresh this test: … Still trying." and the call carries on. If the AI's call has already rung the tab when the run request fails (the answer was lost on the way back), the call is kept, and the card follows it.
 
 While a call is live its card shows the status and how long it has run ("In progress · 2:10"); "Ringing your phone…" clears once the call is answered or ends. After the call, the card (newest first) shows the outcome and length, the summary, **What it learned** (label: value), "Asked for a call back: …", **"Would have booked: Phone call with Grant, Wed Oct 7, 11:00 AM PT"** (the name is the booked time's specialist) and **Transcript**. The page reads it again every 2 seconds while a call is live, and stops 30 minutes after the call started (well past the longest call, `AI_VOICE_MAX_CALL_SECONDS`, 10 minutes by default): a status still live then reads "Status unknown — check the transcript later".
 
@@ -540,7 +541,8 @@ A preview only reads Salesforce (GET and SOQL through the tenant's integration c
 
 ### Troubleshooting
 
-- **"Talk in browser" is missing.** The calling service reports `browserCalls: false`: one of `TWILIO_ACCOUNT_SID` / `TWILIO_API_KEY_SID` / `TWILIO_API_KEY_SECRET` is not set on `@cti/api` (the §3 name check), AI voice is off (`OPENAI_API_KEY` unset or `AI_VOICE=off`), or `@cti/api` is older than outreach-api. Or the browser cannot run Twilio's Voice SDK (an old browser, or not HTTPS). **Ring my phone** still works.
+- **"AI calling is off, so test calls can't run right now." and no buttons at all.** The calling service reports AI calling unavailable: `AI_VOICE=off` or `OPENAI_API_KEY` unset on `@cti/api`, or `OUTREACH_KILL_SWITCH=on` (§9). Neither Ring my phone nor Talk in browser is shown until it is back on.
+- **"Talk in browser" is missing, but Ring my phone is there.** The calling service reports `browserCalls: false`: one of `TWILIO_ACCOUNT_SID` / `TWILIO_API_KEY_SID` / `TWILIO_API_KEY_SECRET` is not set on `@cti/api` (the §3 name check), or `@cti/api` is older than outreach-api. Or the browser cannot run Twilio's Voice SDK (an old browser). A page opened over plain http usually still shows the button; pressing it ends with the microphone's https words (below). **Ring my phone** still works.
 - **"This browser couldn't connect to the calling service. Try again or use Ring my phone."** The tab never registered with Twilio: registration failed or took over 15 seconds (a corporate firewall or VPN blocking Twilio's WebSockets, `*.twilio.com`), Twilio refused the Device, or the Device could not be built from the token. Try another network, or use Ring my phone.
 - **"The AI didn't ring through. Try again or use Ring my phone."** The tab registered and the AI call was placed, but nothing rang the tab within 45 seconds: media blocked by a firewall or VPN (UDP to `*.twilio.com`), or the leg failed on Twilio's side (check `@cti/api`'s logs for the call). Try another network, or use Ring my phone.
 - **"Talk in browser is not set up on the calling service. Use Ring my phone."** The token route answered 503 `BROWSER_CALLS_UNAVAILABLE`: see "Talk in browser is missing" above (the page caught it before ringing).
@@ -561,16 +563,37 @@ echo "SELECT t.created_at, t.sf_object, t.sf_record_id, t.status, t.error, c.mod
 
 ### Deploy (plan 1E)
 
+**1E deploys only after 1D is live.** `feat/ai-call-1e` contains all of plan 1D. Before anything below:
+
+- **If 1D is already merged and deployed** (its [Deploy order](outreach-sf-campaigns.md#deploy-order) steps 1–6 done: campaigns paused while checking, Salesforce deployed from a local merge, booking, conversion and write-back off), 1E adds only the steps below.
+- **If 1E ships in the same push as 1D,** follow `outreach-sf-campaigns.md` [Deploy order](outreach-sf-campaigns.md#deploy-order) from step 1: pause every AI call campaign, deploy Salesforce from the **local** merge before pushing (Railway deploys on push), and leave every switch off. Do the steps below at its step 4, and run the 1E smoke test (step 7 below) at its step 6, with the practice calls.
+
 1. **Twilio: nothing to create.** Confirm the three `TWILIO_*` names on `@cti/api` (§3). No TwiML App, number or webhook is added: the browser token has no outgoing grant, and the AI leg uses the existing AI voice callbacks. Browser legs bill as Twilio Client minutes.
 2. **No new variables.** `AI_VOICE_TEST_NUMBERS` must list each admin's phone for **Ring my phone**.
-3. **Migrations:** 1D's `0055`–`0057`, then `0058_ai_record_tests.sql`, in the pre-deploy migrate step of whichever service deploys first.
-4. **Deploy `@cti/api` and outreach-api from the same merge.** In the window, an old `@cti/api` answers a browser test with 400 (shown as "The AI calling service did not answer") and has no token route (the page hides **Talk in browser**). Phone tests work throughout.
+3. **Migrations:** 1D's `0055`–`0057` first, then `0058_ai_record_tests.sql` (after `0057`), in the pre-deploy migrate step of whichever service deploys first.
+4. **Deploy `@cti/api` and outreach-api from the same merge, `@cti/api` first or together.** In the window, an old `@cti/api` answers a browser test with 400 (shown as "The AI calling service did not answer") and has no token route (the page hides **Talk in browser**). Phone tests work throughout.
 5. **Headers.** outreach-api sends no Content-Security-Policy or Permissions-Policy today, so the microphone and Twilio's WebSocket and media work as they do in cti-web. If one is ever added it must allow `microphone=(self)`, `connect-src` to `wss://*.twilio.com https://*.twilio.com`, and `media-src`/WebRTC as cti-web needs.
 6. **Request logging.** The browser token travels in a response body only. Both services' Fastify request loggers must keep request/response serializers that log no bodies (cti-api uses Fastify's defaults; outreach-api's `serializeRequest` logs method, URL, host and address only). Don't add body logging to either.
 7. **Smoke test** (about 10 minutes):
    - preview a real Opportunity and a real Lead: check the opener, still to learn, the plan text and the times;
    - **Ring my phone** on one;
-   - **Talk in browser** on the other, with headphones: allow the microphone, the call answers on its own, ask for a phone appointment, hang up. This is the first live check of a `client:` leg with answering-machine detection off: confirm the AI speaks within a couple of seconds of the tab answering (no AMD wait) and that `@cti/api`'s logs show `ai-voice: browser test leg; no calls row` at the end;
+   - **Talk in browser** on the other, with headphones: allow the microphone, the call answers on its own, ask for a phone appointment, hang up. This is the first live check of a `client:` leg with answering-machine detection off. Phone legs use async AMD too, so how fast the AI speaks proves nothing; check Twilio's own record of the leg instead. Its `answered_by` is set only when the call was placed with AMD, so the browser leg must read `null` (the phone leg from the line above reads `human` or `machine_…`). Find the leg and its `call_sid`, then ask Twilio (read-only; `$PUB` as in the first-call checklist, and the account SID and auth token from `@cti/api`'s variables — don't print them):
+
+     ```bash
+     eval "$(railway variables -s @cti/api --kv | grep -E '^TWILIO_(ACCOUNT_SID|AUTH_TOKEN)=' | sed 's/^/export /')"
+     echo "SELECT to_e164 LIKE 'client:%' AS browser, call_sid, answered_by, outcome FROM ai_calls WHERE org_id = :'org' AND is_test ORDER BY created_at DESC LIMIT 2;" | psql "$PUB" -v org='<org uuid>'
+     curl -s -u "$TWILIO_ACCOUNT_SID:$TWILIO_AUTH_TOKEN" "https://api.twilio.com/2010-04-01/Accounts/$TWILIO_ACCOUNT_SID/Calls/<browser call_sid>.json" | jq '{to, answered_by, status}'
+     ```
+
+     The browser row reads `browser = t`, `answered_by` empty and an outcome other than `voicemail`; Twilio's answer reads `"to": "client:aitest_…"` and `"answered_by": null`. `@cti/api`'s logs show `ai-voice: browser test leg; no calls row` at the end (`railway logs -s @cti/api | grep 'browser test leg'`);
    - the card shows "Would have booked …", the outcome, the summary and the transcript;
    - press **What would be written to Salesforce** once;
    - in Salesforce, confirm no Event, Task, field change, conversion or Chatter post appeared on either record.
+
+### Rollback (plan 1E)
+
+Test a record is admin-only and additive: it adds a page, six admin routes, cti-api's `practice_browser` target and token route, and two new tables. Nothing a campaign or a real call uses depends on it.
+
+- **Stop it now:** `AI_VOICE=off` on `@cti/api` (§9). The page then shows "AI calling is off, so test calls can't run right now." and no test call can be placed; previews still read Salesforce only.
+- **Remove it:** redeploy the previous outreach-api (it serves outreach-web) first, or together with the previous `@cti/api`; never `@cti/api` alone while the new outreach-api runs (a browser test would get a 400). The page and its routes are gone; 1D is unaffected.
+- **Leave `0058_ai_record_tests.sql` in place.** Its two tables are only read by 1E's code; the previous build ignores them.
