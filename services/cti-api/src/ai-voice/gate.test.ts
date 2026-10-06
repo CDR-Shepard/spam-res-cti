@@ -204,7 +204,9 @@ describe('gateAiCall — practice_browser (plan 1E): the browser branch', () => 
   it.each([
     ['a rep softphone identity', `rep_${ADMIN.replace(/-/g, '')}`],
     ['a phone number', '+16195550199'],
-    ['an identity with a trailing extra', `${'x'}${own}`],
+    ['an identity with a leading extra', `x${own}`],
+    ['an identity with a trailing extra', `${own}x`],
+    ['an identity with a trailing query', `${own}?foo=bar`],
   ])('7: %s forced through -> invalid_number (G-3)', async (_label, identity) => {
     const { got } = gate({ identity });
     expect(await got).toEqual(blockedBy('invalid_number'));

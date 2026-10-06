@@ -79,14 +79,14 @@ describe('the AI pool SQL, rendered', () => {
     expect(params).toContain(new Date(NOW.getTime() - 14 * 24 * 3600 * 1000).toISOString());
   });
 
-  it('peekAiCallerId (plan 1E): a read-only pick of the org\'s first usable ai_pool number, never a claim', () => {
+  it('peekAiCallerId (plan 1E): a read-only pick of the org\'s first usable ai_pool number (by number, so it is stable), never a claim', () => {
     const { sql, params } = peekAiCallerIdQuery(db, 'O1').toSQL();
     expect(sql).toMatch(/^select "e164" from "outbound_numbers" where /);
     expect(sql).toContain('"outbound_numbers"."org_id" = $1');
     expect(sql).toContain('"outbound_numbers"."active" = $2');
     expect(sql).toContain('"outbound_numbers"."kind" = $3');
     expect(sql).toContain('"outbound_numbers"."health" not in ($4, $5)');
-    expect(sql).toMatch(/limit \$6$/);
+    expect(sql).toMatch(/order by "outbound_numbers"\."e164" limit \$6$/);
     expect(sql.toLowerCase()).not.toContain('update');
     expect(params).toEqual(['O1', true, 'ai_pool', 'spam_likely', 'degraded', 1]);
   });

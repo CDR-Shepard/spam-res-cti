@@ -85,6 +85,8 @@ export const peekAiCallerIdQuery = (db: Db, orgId: string) =>
     .select({ e164: schema.outboundNumbers.e164 })
     .from(schema.outboundNumbers)
     .where(and(poolNumbersWhere(orgId, 'ai_pool'), notInArray(schema.outboundNumbers.health, ['spam_likely', 'degraded'])))
+    // The same number every run: the browser leg's caller ID, and the callback number the agent says, stay put.
+    .orderBy(schema.outboundNumbers.e164)
     .limit(1);
 
 export async function peekAiCallerId(db: Db, orgId: string): Promise<string | null> {
