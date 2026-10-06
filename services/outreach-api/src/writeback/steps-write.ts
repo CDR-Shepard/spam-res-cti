@@ -8,7 +8,7 @@ import { soqlEscape } from '@cti/salesforce';
 import { SF_ID } from '../campaigns/records.js';
 import { describeObject } from '../research/describe.js';
 import { bookingSettings } from '../settings.js';
-import { bookingPassed, bookOpportunity, createTaskOnce, holdForLead, PASSED_TASK_SUBJECT, taskFields, WriteRefusedError, type AppointmentResult } from './appointment.js';
+import { bookingPassed, bookOpportunity, createTaskOnce, findLeadHold, holdForLead, PASSED_TASK_SUBJECT, taskFields, WriteRefusedError, type AppointmentResult } from './appointment.js';
 import { CHANGES_FIELD, writableFields, type WritableField } from './fields.js';
 import { keepUnedited, readFresh, type NotChanged } from './fresh.js';
 import { patchDroppingRefused, without, type FieldRefusal } from './patch.js';
@@ -34,9 +34,12 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
   const a = plan.appointment;
   if (a === null) return { run: await saveStep(run, 'appointment', { status: 'skipped' }), result: null };
   if (a.kind === 'lead_hold' && bookingPassed(a.booked, run.deps.now)) {
-    // The time has passed (a late retry, an admin retry days later): no hold; handled like a conflict (I-1).
-    const result: AppointmentResult = { kind: 'expired' };
-    return { run: await saveStep(run, 'appointment', { status: 'done', detail: 'expired', data: { result } }), result };
+    // The time has passed (a late retry, an admin retry days later): no hold; handled like a conflict (I-1). A hold an
+    // earlier attempt made before failing is looked up, so the Task can say it is there to delete (D-25 N1).
+    const holdId = await findLeadHold(run.client, a.booked);
+    const result: AppointmentResult = holdId === null ? { kind: 'expired' } : { kind: 'expired', holdId };
+    const ids = holdId === null ? {} : { eventId: holdId };
+    return { run: await saveStep(run, 'appointment', { status: 'done', detail: 'expired', ...ids, data: { result } }, holdId === null ? {} : { sfEventId: holdId }), result };
   }
   const owner = await ownerOf(run);
   const target = writeTarget(run.row);
@@ -83,7 +86,8 @@ function taskWords(run: RowRun, booked: BookedAppointment, appt: AppointmentResu
   const when = ptWords(new Date(booked.start));
   const call = `on an AI call (AI call ${run.row.aiCallId})`;
   if (appt.kind === 'expired') {
-    const description = `The seller agreed to a ${KIND[booked.kind]} at ${when} ${call}, but that time passed before the write-back could save it, so nothing was put on the calendar. Call the seller to re-book.`;
+    const calendar = appt.holdId === undefined ? ', so nothing was put on the calendar.' : '. A hold an earlier attempt put on the calendar at that time is still there: delete it.';
+    const description = `The seller agreed to a ${KIND[booked.kind]} at ${when} ${call}, but that time passed before the write-back could save it${calendar} Call the seller to re-book.`;
     return { subject: PASSED_TASK_SUBJECT, description };
   }
   if (appt.kind !== 'conflict' && appt.kind !== 'refused') return null;

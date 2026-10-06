@@ -96,8 +96,9 @@ export async function convertStepRun(run: RowRun): Promise<{ run: RowRun; result
   const booked = run.ctx.call.appointment!;
   const leadDescribe = await describeObject(run.client, run.deps.describes, run.row.orgId, 'Lead');
   // Conversion is for an appointment that stands: once the time has passed, a Lead is only adopted, never converted (I-1).
+  // Without an end time, "ours" is judged from the call's start, never from now (a retry's now is after our conversion: M10).
   const adoptOnly = bookingPassed(booked, run.deps.now);
-  const { outcome, lead } = await convertStep(run.client, { leadId: run.row.sfRecordId, ownerId: booked.specialistSfUserId, callEndedAt: run.ctx.call.endedAt ?? run.deps.now, leadDescribe, adoptOnly });
+  const { outcome, lead } = await convertStep(run.client, { leadId: run.row.sfRecordId, ownerId: booked.specialistSfUserId, callEndedAt: run.ctx.call.endedAt ?? run.ctx.call.startedAt, leadDescribe, adoptOnly });
   switch (outcome.kind) {
     case 'gone':
       return { run, result: 'gone' };

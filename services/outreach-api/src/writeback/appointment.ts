@@ -8,7 +8,7 @@
  * which no consultation flow fires on, plus an urgent "convert it and book it" Task to the owner.
  */
 import type { BookedAppointment } from '@cti/contracts';
-import { soqlEscape, type CompositeResult, type SalesforceClient } from '@cti/salesforce';
+import { SalesforceApiError, soqlEscape, type CompositeResult, type SalesforceClient } from '@cti/salesforce';
 import { DEFAULT_OWNER_TIME_ZONE, readBusy } from '../appointments/calendar.js';
 import { conflicts } from '../appointments/slots.js';
 import { SF_ID } from '../campaigns/records.js';
@@ -19,13 +19,19 @@ import { ptWords } from './render.js';
 export type AppointmentResult =
   | { kind: 'created' | 'existing'; eventId: string }
   | { kind: 'conflict' }
-  /** The booked time had passed when the row ran (Fix 1, I-1): nothing was put on the calendar; handled like a conflict. */
-  | { kind: 'expired' }
+  /**
+   * The booked time had passed when the row ran (Fix 1, I-1): nothing is put on the calendar; handled like a conflict.
+   * `holdId`: a Lead hold an earlier attempt made at that time, still on the calendar (sweep D-25 N1).
+   */
+  | { kind: 'expired'; holdId?: string }
   | { kind: 'refused'; code: string }
   | { kind: 'lead_hold'; eventId: string | null; taskId: string | null };
 
-/** The booked time has ended by `now`: no Event, hold or conversion is made for it (Fix 1, I-1). */
-export const bookingPassed = (booked: BookedAppointment, now: Date): boolean => new Date(booked.end).getTime() <= now.getTime();
+/**
+ * The booked time has come by `now` (its START, sweep D-25 N4: an appointment already under way is as good as missed): no
+ * Event, hold or conversion is made for it (Fix 1, I-1).
+ */
+export const bookingPassed = (booked: BookedAppointment, now: Date): boolean => new Date(booked.start).getTime() <= now.getTime();
 
 /** The Task subject when the booked time passed before the write-back could save it (Fix 1, I-1). */
 export const PASSED_TASK_SUBJECT = 'Appointment time passed before it could be saved — call the seller to re-book';
@@ -118,13 +124,22 @@ export function taskFields(i: { whatId: string | null; whoId: string | null; own
 const isOriginRefusal = (r: CompositeResult): boolean =>
   r.errors.some((e) => e.statusCode.startsWith('INVALID_FIELD') && (e.message.includes(ORIGIN_FIELD) || (e.fields ?? []).includes(ORIGIN_FIELD)));
 
-/** One create; when Salesforce does not know CTI_Origin__c, once more without it. */
+/** sObject Collections may refuse an unknown or hidden field for the whole request (HTTP 400) rather than per record. */
+const isOriginRequestRefusal = (err: unknown): boolean =>
+  err instanceof SalesforceApiError && err.status === 400 && /INVALID_FIELD/.test(err.message) && err.message.includes(ORIGIN_FIELD);
+
+/** One create; when Salesforce does not know CTI_Origin__c (per record, or for the whole request: D-23 M6), once more without it. */
 async function createOne(client: SalesforceClient, sobject: string, fields: Record<string, unknown>): Promise<CompositeResult> {
-  const [first] = await client.createRecords([{ sobject, fields }]);
-  if (!first || first.success || !isOriginRefusal(first)) return first ?? { success: false, errors: [{ statusCode: 'UNKNOWN_ERROR', message: '' }] };
+  const unknown: CompositeResult = { success: false, errors: [{ statusCode: 'UNKNOWN_ERROR', message: '' }] };
+  try {
+    const [first] = await client.createRecords([{ sobject, fields }]);
+    if (!first || first.success || !isOriginRefusal(first)) return first ?? unknown;
+  } catch (err) {
+    if (!isOriginRequestRefusal(err)) throw err;
+  }
   const { [ORIGIN_FIELD]: _origin, ...rest } = fields;
   const [second] = await client.createRecords([{ sobject, fields: rest }]);
-  return second ?? { success: false, errors: [{ statusCode: 'UNKNOWN_ERROR', message: '' }] };
+  return second ?? unknown;
 }
 
 /** The first row's Id; when the org lacks CTI_Origin__c, the same lookup without it. */
@@ -197,6 +212,16 @@ async function refusedAsNull<T>(run: () => Promise<T>): Promise<T | null> {
   }
 }
 
+/** A hold we already put on the owner's calendar at the booked time (a retry never doubles it), or null. */
+export async function findLeadHold(client: SalesforceClient, booked: BookedAppointment): Promise<string | null> {
+  const owner = checkId(booked.specialistSfUserId, 'the appointment owner');
+  return findOne(
+    client,
+    (o) =>
+      `SELECT Id FROM Event WHERE WhatId = null AND WhoId = null AND OwnerId = '${soqlEscape(owner)}' AND StartDateTime = ${soqlDateTime(booked.start)}${originClause(o)} AND Subject LIKE 'Hold: AI-booked%' LIMIT 1`,
+  );
+}
+
 /**
  * FALLBACK ONLY: used when a booked Lead could not be converted (Task 24). The hold keeps the time on the owner's calendar;
  * the Task (always to the appointment owner, who distributes appointments; never the Lead's owner) says why and what to do.
@@ -208,11 +233,7 @@ export async function holdForLead(
   const lead = checkId(i.leadId, 'leadId');
   const owner = checkId(i.booked.specialistSfUserId, 'the appointment owner');
   const eventId = await refusedAsNull(async () => {
-    const found = await findOne(
-      client,
-      (o) =>
-        `SELECT Id FROM Event WHERE WhatId = null AND WhoId = null AND OwnerId = '${soqlEscape(owner)}' AND StartDateTime = ${soqlDateTime(i.booked.start)}${originClause(o)} AND Subject LIKE 'Hold: AI-booked%' LIMIT 1`,
-    );
+    const found = await findLeadHold(client, i.booked);
     if (found !== null) return found;
     const created = await createOne(client, 'Event', leadHoldFields({ booked: i.booked, leadName: i.leadName, leadId: lead, aiCallId: i.aiCallId }));
     if (created.success && created.id) return created.id;

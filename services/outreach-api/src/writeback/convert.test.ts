@@ -97,6 +97,18 @@ describe('convertStep', () => {
     await expect(step(t)).rejects.toMatchObject({ code: 'UNKNOWN_EXCEPTION' });
   });
 
+  it('sweep D-23 M2: getUserInfo refused for auth while REST works → SOAP is closed to us: not ours; REST fails too → thrown (retried)', async () => {
+    const f = org(converted, [[READ_OPP, [{ Id: OPP, CreatedById: US, CreatedDate: '2026-10-06T22:15:00.000+0000' }]]]);
+    f.onSoap = () => new SalesforceAuthError('Salesforce rejected the refreshed access token (SOAP INVALID_SESSION_ID)');
+    expect((await step(f)).outcome).toMatchObject({ kind: 'adopted', ours: false });
+
+    let oppReads = 0;
+    const g = org(converted, [[READ_OPP, () => (++oppReads === 1 ? [{ Id: OPP, CreatedById: US, CreatedDate: '2026-10-06T22:15:00.000+0000' }] : new SalesforceAuthError())]]);
+    g.onSoap = () => new SalesforceAuthError();
+    await expect(step(g)).rejects.toBeInstanceOf(SalesforceAuthError);
+    expect(oppReads).toBe(2);
+  });
+
   it('4: converted without an Opportunity: no_opportunity with the Account', async () => {
     const f = org({ ...converted, ConvertedOpportunityId: null });
     expect((await step(f)).outcome).toEqual({ kind: 'no_opportunity', accountId: ACCOUNT });
@@ -135,6 +147,17 @@ describe('convertStep', () => {
     f.onSoap = () => convertRefused('FIELD_CUSTOM_VALIDATION_EXCEPTION', 'Only the Hunt winner may convert');
     expect((await step(f)).outcome).toMatchObject({ kind: 'refused', code: 'FIELD_CUSTOM_VALIDATION_EXCEPTION' });
     expect(reads).toBe(2);
+  });
+
+  it('sweep D-25 N5: a refusal whose re-read finds the Lead deleted is gone (skipped), not refused', async () => {
+    let reads = 0;
+    const f = org(null, [[READ_LEAD, () => (++reads === 1 ? [LEAD_ROW] : [])]]);
+    f.onSoap = () => convertRefused('ENTITY_IS_DELETED', 'entity is deleted');
+    expect((await step(f)).outcome).toEqual({ kind: 'gone' });
+    let again = 0;
+    const g = org(null, [[READ_LEAD, () => (++again === 1 ? [LEAD_ROW] : [])]]);
+    g.onSoap = () => soapFaultAnswer('INSUFFICIENT_ACCESS', 'no access');
+    expect((await step(g)).outcome).toEqual({ kind: 'gone' });
   });
 
   it('D-5: UNABLE_TO_LOCK_ROW or REQUEST_LIMIT_EXCEEDED in the result is transient: it throws (retried)', async () => {

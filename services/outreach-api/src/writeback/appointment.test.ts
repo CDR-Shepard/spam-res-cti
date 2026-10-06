@@ -1,8 +1,9 @@
 /** Task 23: the appointment Event at write time (re-checked, never doubled), and the fallback hold + Task. */
 import { describe, expect, it } from 'vitest';
 import type { BookedAppointment } from '@cti/contracts';
+import { SalesforceApiError } from '@cti/salesforce';
 import { fakeSfWrites, ok, refused, type WriteQueryRoute } from '../test/fake-sf-writes.js';
-import { bookOpportunity, createTaskOnce, holdForLead, leadHoldFields, opportunityEventFields, taskFields } from './appointment.js';
+import { bookingPassed, bookOpportunity, createTaskOnce, holdForLead, leadHoldFields, opportunityEventFields, taskFields } from './appointment.js';
 
 const OWNER = '0058X00000Fsx39QAB';
 const OPP = '0068X00000Oppt1QAA';
@@ -31,6 +32,22 @@ function org(routes: WriteQueryRoute[] = []) {
 }
 const book = (f: ReturnType<typeof org>, booked = PHONE, bufferMinutes = 30) =>
   bookOpportunity(f.client, { oppId: OPP, booked, location: ADDRESS, aiCallId: AI_CALL, sellerTimeZone: 'America/Chicago', bufferMinutes });
+
+describe('bookingPassed (sweep D-25 N4: passed once its START has come)', () => {
+  it.each<[string, boolean]>([
+    ['2026-10-07T17:59:59.000Z', false],
+    ['2026-10-07T18:00:00.000Z', true],
+    ['2026-10-07T18:05:00.000Z', true],
+    ['2026-10-07T19:00:00.000Z', true],
+  ])('at %s → %s', (now, passed) => {
+    expect(bookingPassed(PHONE, new Date(now))).toBe(passed);
+  });
+  it('a call already under way is not put on the calendar', async () => {
+    const f = org();
+    expect(await bookOpportunity(f.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, now: new Date('2026-10-07T18:05:00.000Z') })).toEqual({ kind: 'expired' });
+    expect(f.creates).toEqual([]);
+  });
+});
 
 describe('bookOpportunity', () => {
   it('I-1: the booked time has passed: an Event an earlier attempt made is still found; otherwise expired, no calendar read, no create', async () => {
@@ -106,6 +123,23 @@ describe('bookOpportunity', () => {
     expect((await book(f)).kind).toBe('created');
     expect(f.creates).toHaveLength(2);
     expect(f.creates[1]!.fields).not.toHaveProperty('CTI_Origin__c');
+  });
+
+  it('sweep D-23 M6: a whole-request 400 INVALID_FIELD naming CTI_Origin__c: one retry without it, created', async () => {
+    const f = org();
+    const body = [{ message: "No such column 'CTI_Origin__c' on sobject of type Event", errorCode: 'INVALID_FIELD' }];
+    f.onCreate = (c) => ('CTI_Origin__c' in c.fields ? new SalesforceApiError(`Composite POST failed (400): ${JSON.stringify(body)}`, 400, body) : undefined);
+    expect((await book(f)).kind).toBe('created');
+    expect(f.creates).toHaveLength(2);
+    expect(f.creates[1]!.fields).not.toHaveProperty('CTI_Origin__c');
+  });
+
+  it('sweep D-23 M6: any other whole-request 400 is thrown, not retried', async () => {
+    const f = org();
+    const body = [{ message: 'JSON_PARSER_ERROR', errorCode: 'JSON_PARSER_ERROR' }];
+    f.onCreate = () => new SalesforceApiError(`Composite POST failed (400): ${JSON.stringify(body)}`, 400, body);
+    await expect(book(f)).rejects.toBeInstanceOf(SalesforceApiError);
+    expect(f.creates).toHaveLength(1);
   });
 
   it('5: a validation rule refuses the Event: refused with its code', async () => {

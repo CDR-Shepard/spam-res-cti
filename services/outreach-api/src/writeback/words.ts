@@ -80,8 +80,10 @@ export function createdLines(i: { plan: WritePlan; result: AppointmentResult | n
   if (r?.kind === 'lead_hold') {
     return [...(r.eventId ? [`Hold on ${name}'s calendar: ${when}`] : []), ...(r.taskId ? [`Task to ${name}: convert the Lead and book it`] : [])];
   }
-  if (!i.taskId) return [];
-  if (r?.kind === 'expired') return [`Task to ${name}: call the seller to re-book (${when} passed before it could be saved)`];
+  // A hold an earlier attempt made before the time passed is still there (D-25 N1): named, so it gets deleted.
+  const hold = r?.kind === 'expired' && r.holdId !== undefined ? [`Hold on ${name}'s calendar: ${when} (the time passed: delete it)`] : [];
+  if (!i.taskId) return hold;
+  if (r?.kind === 'expired') return [...hold, `Task to ${name}: call the seller to re-book (${when} passed before it could be saved)`];
   return [`Task to ${name}: call the seller to set a time (${when} was not booked)`];
 }
 

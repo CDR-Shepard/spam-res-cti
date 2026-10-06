@@ -64,6 +64,8 @@ async function processRow(deps: WritebackDeps, row: WritebackRow, at: (step: str
   if (ctx === null) return end({ deps, row }, 'skipped', 'ai call gone');
   // Second guard (Task 25 never enqueues one): a test or practice call never converts, books or writes. No Salesforce at all.
   if (ctx.call.isTest || ctx.call.practice) return end({ deps, row }, 'skipped', 'test call');
+  // Turned off after this row was queued (or while it waited to retry): it stops here (sweep D-23 M5).
+  if (!ctx.settings.aiCallWriteback) return end({ deps, row }, 'skipped', 'write-back is off');
   let run: RowRun = { deps, client: await deps.clients(row.orgId), ctx, row };
 
   at('convert');

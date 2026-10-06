@@ -40,6 +40,8 @@ export interface WritebackCall {
   toE164: string;
   /** When the call ended (the changes header and "ours" for an adopted conversion); null when unknown. */
   endedAt: Date | null;
+  /** When the call started (else when its row was made): "ours" falls back to it when the end is unknown (D-23 M10). */
+  startedAt: Date;
   /** Who a transfer rang (`handoff_user_id`'s name), for "then transferred to …". */
   transferredTo: string | null;
 }
@@ -65,6 +67,7 @@ interface Raw {
   practice: boolean;
   to_e164: string;
   ended_at: Date | string | null;
+  started_at: Date | string;
   handoff_name: string | null;
   campaign_id: string | null;
   org_settings: unknown;
@@ -103,7 +106,7 @@ export function researchStatusOf(snapshot: unknown, sfObject: 'Lead' | 'Opportun
 export async function loadWritebackContext(db: Db, row: WritebackRow): Promise<WritebackContext | null> {
   const result = await db.execute(sql`
     select a.outcome, a.qualification, a.transcript, a.summary, a.appointment, a.callback_at, a.is_test, a.practice, a.to_e164, a.ended_at,
-           u.display_name as handoff_name, e.campaign_id, o.settings as org_settings, rs.snapshot
+           coalesce(a.started_at, a.created_at) as started_at, u.display_name as handoff_name, e.campaign_id, o.settings as org_settings, rs.snapshot
     from ai_calls a
     join organizations o on o.id = a.org_id
     left join users u on u.id = a.handoff_user_id
@@ -128,6 +131,7 @@ export async function loadWritebackContext(db: Db, row: WritebackRow): Promise<W
       practice: raw.practice,
       toE164: raw.to_e164,
       endedAt: date(raw.ended_at),
+      startedAt: date(raw.started_at) ?? new Date(0),
       transferredTo: raw.handoff_name,
     },
     campaignId: raw.campaign_id,

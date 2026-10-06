@@ -79,13 +79,19 @@ async function readLead(client: SalesforceClient, leadId: string, select: readon
 
 /**
  * Whether `userId` is the connected user (SOAP getUserInfo). When SOAP is closed to this connection for good, the AI cannot
- * have converted anything (it converts only over SOAP), so the answer is no; a transient failure throws (retried).
+ * have converted anything (it converts only over SOAP), so the answer is no; a transient failure throws (retried). An auth
+ * refusal is "closed for good" only when REST still takes the token (`restProbe`, as onConvertError does); when REST fails
+ * too the token itself is the problem and the probe's error is thrown, so the row retries (sweep D-23 M2).
  */
-async function connectedUserIs(client: SalesforceClient, userId: string): Promise<boolean> {
+async function connectedUserIs(client: SalesforceClient, userId: string, restProbe: () => Promise<unknown>): Promise<boolean> {
   try {
     return core((await getUserInfo(client)).userId) === core(userId);
   } catch (err) {
-    if (err instanceof SalesforceAuthError || (err instanceof SalesforceApiError && err.code !== undefined && isPermanentSoapFault(err.code))) return false;
+    if (err instanceof SalesforceAuthError) {
+      await restProbe();
+      return false;
+    }
+    if (err instanceof SalesforceApiError && err.code !== undefined && isPermanentSoapFault(err.code)) return false;
     throw err;
   }
 }
@@ -98,13 +104,14 @@ async function adopt(client: SalesforceClient, lead: Row, callEndedAt: Date, rep
   const oppId = sfId(lead.ConvertedOpportunityId);
   const accountId = sfId(lead.ConvertedAccountId);
   if (oppId === null) return { kind: 'no_opportunity', accountId };
-  const [opp] = await client.query<Row>(`SELECT Id, CreatedById, CreatedBy.Name, CreatedDate FROM Opportunity WHERE Id = '${soqlEscape(oppId)}' LIMIT 1`);
+  const readOpp = () => client.query<Row>(`SELECT Id, CreatedById, CreatedBy.Name, CreatedDate FROM Opportunity WHERE Id = '${soqlEscape(oppId)}' LIMIT 1`);
+  const [opp] = await readOpp();
   if (!opp) return { kind: 'no_opportunity', accountId };
   const created = new Date(String(opp.CreatedDate ?? '').replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
   const after = !Number.isNaN(created.getTime()) && created.getTime() > callEndedAt.getTime();
   const createdBy = sfId(opp.CreatedById);
   // Only a recent Opportunity can be ours, so the connected user is looked up only then.
-  const ours = !repConverted && after && createdBy !== null && (await connectedUserIs(client, createdBy));
+  const ours = !repConverted && after && createdBy !== null && (await connectedUserIs(client, createdBy, readOpp));
   const by = opp.CreatedBy !== null && typeof opp.CreatedBy === 'object' ? str((opp.CreatedBy as Row).Name) : null;
   return { kind: 'adopted', opportunityId: oppId, accountId, contactId: sfId(lead.ConvertedContactId), adopted: true, ours, convertedByName: by === null ? null : oneLine(by) };
 }
@@ -117,7 +124,9 @@ const refused = (code: string, message: string): ConvertOutcome => ({ kind: 'ref
  */
 async function refusedOrAdopted(client: SalesforceClient, i: { leadId: string; callEndedAt: Date; select: readonly string[] }, code: string, message: string): Promise<ConvertOutcome> {
   const again = await readLead(client, i.leadId, i.select);
-  if (again?.IsConverted === true) return adopt(client, again, i.callEndedAt, true);
+  // Deleted (or merged) meanwhile: nothing to fall back on, the row is skipped (sweep D-25 N5).
+  if (again === null) return { kind: 'gone' };
+  if (again.IsConverted === true) return adopt(client, again, i.callEndedAt, true);
   return refused(code, message);
 }
 

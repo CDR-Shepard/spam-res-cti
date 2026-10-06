@@ -54,9 +54,14 @@ export function throwIfNotARefusal(code: string): void {
   if (TRANSIENT_CODES.has(code)) throw new SalesforceApiError(`Salesforce answered ${code}`, 503, null, code);
 }
 
+/**
+ * A step that has run for good. `failed` is final too (sweep D-23 M7): a step saves `failed` only for a refusal Salesforce
+ * would repeat (a transient failure throws and saves nothing), and the steps after it already acted on it (the "Salesforce
+ * refused the Event: call the seller" Task, the changes text), so re-running it on a later retry would contradict them.
+ */
 export const isDone = (run: RowRun, step: StepName): boolean => {
   const s = run.row.steps[step]?.status;
-  return s === 'done' || s === 'skipped';
+  return s === 'done' || s === 'skipped' || s === 'failed';
 };
 
 /** Saves a step's result (and any ids) and returns the run with them applied. */
