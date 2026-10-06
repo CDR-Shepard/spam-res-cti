@@ -93,9 +93,8 @@ describe('parseMapping', () => {
   it('a price whose evidence names no number is dropped, and so is one only the agent said', () => {
     expect(parseMapping({ disposition: 'interested', answers: { Seller_s_Asking_Price__c: { value: 350_000, evidence: "I'd want" } } }, input()).values).toEqual({});
     expect(parseMapping({ disposition: 'interested', answers: { Seller_s_Asking_Price__c: { value: 400_000, evidence: 'around 400 thousand' } } }, input()).values).toEqual({});
-    expect(parseMapping({ disposition: 'interested', answers: { Seller_s_Asking_Price__c: { value: 350_000, evidence: 'three fifty' } } }, input()).values).toEqual({
-      Seller_s_Asking_Price__c: { value: 350_000, evidence: 'three fifty' },
-    });
+    // 5a Fix 1 (I-2): spoken words need a magnitude ("three fifty" alone is not an amount)
+    expect(parseMapping({ disposition: 'interested', answers: { Seller_s_Asking_Price__c: { value: 350_000, evidence: 'three fifty' } } }, input()).values).toEqual({});
   });
   it('7: an unknown field key is dropped, and so is a status field', () => {
     const out = parseMapping({ disposition: 'interested', answers: { Notes__c: { value: 'x', evidence }, Status: { value: 'Working', evidence }, DoNotCall: { value: true, evidence } } }, input());
@@ -187,5 +186,88 @@ describe('AnthropicMappingModel', () => {
     const err = await m.map(input()).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(MappingOutputError);
     expect((err as MappingOutputError).usage).toEqual({ inputTokens: 3_000, outputTokens: 200, model: 'claude-sonnet-5-5' });
+  });
+});
+
+describe('5a Fix 1 (I-2): a money answer must follow from the seller\'s own quote', () => {
+  const said = input({
+    qualification: {},
+    transcript: [
+      { role: 'caller', text: 'yeah that one works' },
+      { role: 'caller', text: 'I have two kids' },
+      { role: 'caller', text: 'I was hoping for about 250k' },
+      { role: 'caller', text: 'three hundred grand would do it' },
+      { role: 'caller', text: 'it is worth 1.2 million' },
+      { role: 'caller', text: 'we still owe like forty grand' },
+      { role: 'caller', text: 'two fifty thousand, maybe' },
+      { role: 'caller', text: 'a quarter million' },
+    ],
+  });
+  const price = (value: number, evidence: string) => parseMapping({ disposition: 'interested', answers: { Seller_s_Asking_Price__c: { value, evidence } } }, said).values.Seller_s_Asking_Price__c?.value ?? null;
+  const owed = (value: number, evidence: string) => parseMapping({ disposition: 'interested', answers: { Amount_Owed__c: { value, evidence } } }, said).values.Amount_Owed__c?.value ?? null;
+  it.each<[number, string, number | null]>([
+    [1_000, 'yeah that one works', null],
+    [1_000_000, 'that one works', null],
+    [2_000, 'I have two kids', null],
+    [250_000, 'about 250k', 250_000],
+    [200_000, 'about 250k', null],
+    [300_000, 'three hundred grand', 300_000],
+    [1_200_000, '1.2 million', 1_200_000],
+    [1_000_000, '1.2 million', null],
+    [250_000, 'two fifty thousand', 250_000],
+    [250_000, 'a quarter million', 250_000],
+  ])('asking price %d from %j → %j', (value, evidence, expected) => {
+    expect(price(value, evidence)).toBe(expected);
+  });
+  it('amount owed "owe like forty grand" is 40,000 and nothing else', () => {
+    expect(owed(40_000, 'owe like forty grand')).toBe(40_000);
+    expect(owed(400_000, 'owe like forty grand')).toBeNull();
+  });
+});
+
+describe('5a Fix 1 (M-1): evidence is matched inside one line, never stitched across lines', () => {
+  const i = input({ qualification: { a: 'roof is', b: 'leaking badly' }, transcript: [{ role: 'caller', text: 'I think maybe' }, { role: 'caller', text: '90 days from now' }] });
+  it('a quote that spans two caller lines is dropped; one inside a line is kept', () => {
+    expect(parseMapping({ disposition: 'interested', answers: { Timeline__c: { value: '90 Days', evidence: 'maybe 90 days' } } }, i).values).toEqual({});
+    expect(parseMapping({ disposition: 'interested', answers: { Timeline__c: { value: '90 Days', evidence: '90 days from now' } } }, i).values.Timeline__c?.value).toBe('90 Days');
+  });
+  it('a quote that spans two saved notes is dropped', () => {
+    expect(parseMapping({ disposition: 'interested', answers: { Roof_Issues__c: { value: true, evidence: 'roof is leaking' } } }, i).values).toEqual({});
+    expect(parseMapping({ disposition: 'interested', answers: { Roof_Issues__c: { value: true, evidence: 'leaking badly' } } }, i).values.Roof_Issues__c?.value).toBe(true);
+  });
+});
+
+describe("5a Fix 1 (M-2): Reason for Selling is the seller's own words", () => {
+  const i = input({ sfObject: 'Opportunity', fields: oppFields, qualification: { reason: 'relocating for work' }, transcript: [{ role: 'caller', text: "We're  moving to Texas for my job, honestly." }] });
+  it('writes the evidence quote (trimmed, spacing collapsed), never the model\'s paraphrase', () => {
+    const out = parseMapping({ disposition: 'interested', answers: { Reason_For_Selling__c: { value: 'Relocating for work', evidence: " We're  moving to Texas for my job " } } }, i);
+    expect(out.values.Reason_For_Selling__c).toEqual({ value: "We're moving to Texas for my job", evidence: " We're  moving to Texas for my job " });
+  });
+  it('a quote found only in the agent\'s notes is not the seller\'s words: dropped', () => {
+    expect(parseMapping({ disposition: 'interested', answers: { Reason_For_Selling__c: { value: 'Relocating', evidence: 'relocating for work' } } }, i).values).toEqual({});
+  });
+});
+
+describe('5a Fix 1 (M-3): the disposition carries a caller quote', () => {
+  it('the tool offers disposition_evidence (optional)', () => {
+    const schema = mappingTool(leadFields).input_schema as { properties: Record<string, unknown>; required: string[] };
+    expect(schema.properties.disposition_evidence).toEqual({ type: 'string', maxLength: 200, description: expect.any(String) });
+    expect(schema.required).toEqual(['disposition', 'answers']);
+  });
+  it('keeps a quote found in one caller line, and leaves it out otherwise (notes do not count)', () => {
+    const i = input({ qualification: { status: 'sold it last month' }, transcript: [{ role: 'caller', text: 'We already sold it to an investor.' }] });
+    expect(parseMapping({ disposition: 'sold_investor', disposition_evidence: 'sold it to an investor', answers: {} }, i)).toEqual({ disposition: 'sold_investor', dispositionEvidence: 'sold it to an investor', values: {} });
+    expect(parseMapping({ disposition: 'sold_investor', disposition_evidence: 'sold it last month', answers: {} }, i)).toEqual({ disposition: 'sold_investor', values: {} });
+    expect(parseMapping({ disposition: 'sold_investor', answers: {} }, i)).toEqual({ disposition: 'sold_investor', values: {} });
+  });
+  it('the system prompt asks for the quote', () => {
+    expect(mappingPrompt(input()).system).toMatch(/disposition_evidence/);
+  });
+});
+
+describe('5a Fix 1 (M-4): answer keys are matched to the fields whatever their case', () => {
+  it('a key in another case maps to the field, keyed by the field name', () => {
+    const out = parseMapping({ disposition: 'interested', answers: { timeline__C: { value: '90 Days', evidence: 'about 90 days' } } }, input());
+    expect(out.values).toEqual({ Timeline__c: { value: '90 Days', evidence: 'about 90 days' } });
   });
 });
