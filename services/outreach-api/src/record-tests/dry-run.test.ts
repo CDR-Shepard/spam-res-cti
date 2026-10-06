@@ -14,7 +14,7 @@ import { ctxOf, seedUser } from '../test/call-plan-seed.js';
 import { seedOrg } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { RT_LEAD, RT_OPP } from '../test/record-test-org.js';
-import { fakeModel, fakeOrg, PHONE_BOOKING, quiet, SETTER, type OrgState } from '../test/writeback-harness.js';
+import { fakeModel, fakeOrg, PHONE_BOOKING, quiet, SETTER, transportError, type OrgState } from '../test/writeback-harness.js';
 import { DescribeCache } from '../research/describe.js';
 import type { MappingModel } from '../writeback/mapping-model.js';
 import { dryRunTestCall } from './dry-run.js';
@@ -128,6 +128,43 @@ describe.skipIf(!pgLane)('dryRunTestCall (real Postgres)', () => {
     expect(out.dryRun.changesText).toContain('Fill-blanks skipped');
   });
 
+  it('8: two presses at once make one model call: the second is told it is running, then reads the stored answer', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const model = fakeModel();
+    const slow: MappingModel & { calls: number } = Object.assign(model, { map: async (...a: Parameters<MappingModel['map']>) => { const out = await fakeModel().map(...a); model.calls += 1; await gate; return out; } });
+    const s = await setup({ model: slow });
+    const first = dryRunTestCall(s.deps, s.ctx, s.callId);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await dryRunTestCall(s.deps, s.ctx, s.callId)).toEqual({ ok: false, error: 'running' });
+    release();
+    const done = await first;
+    expect(done).toMatchObject({ ok: true, dryRun: { status: 'ready' } });
+    expect(await dryRunTestCall(s.deps, s.ctx, s.callId)).toEqual(done);
+    expect(slow.calls).toBe(1);
+  });
+
+  it('9: Salesforce failing after the model answered: salesforce_error, and the retry reuses the stored answers (one paid call)', async () => {
+    const s = await setup();
+    let down = true;
+    s.f.queries.unshift([/^SELECT Id, FirstName, Name, IsActive, TimeZoneSidKey FROM User/, () => { if (down) throw transportError(); return []; }]);
+    expect(await dryRunTestCall(s.deps, s.ctx, s.callId)).toEqual({ ok: false, error: 'salesforce_error' });
+    expect(await stored(s.callId)).toMatchObject({ pending: true, mapping: { failed: false } });
+    down = false;
+    s.f.queries.shift();
+    const again = await dryRunTestCall(s.deps, s.ctx, s.callId);
+    expect(again).toMatchObject({ ok: true, dryRun: { status: 'ready' } });
+    expect((s.model as ReturnType<typeof fakeModel>).calls).toBe(1);
+    expect(again).toMatchObject({ dryRun: { changes: expect.arrayContaining([{ label: 'Timeline', before: "Didn't Ask", after: '90 Days', kind: 'changed' }]) } });
+  });
+
+  it('10: a failure that is not Salesforce (a model with no price) is failed, not salesforce_error, and can be pressed again', async () => {
+    const unpriced: MappingModel = { modelId: 'nope', map: async (...a) => ({ ...(await fakeModel().map(...a)), usage: { inputTokens: 1, outputTokens: 1, model: 'not-a-priced-model' } }) };
+    const s = await setup({ model: unpriced });
+    expect(await dryRunTestCall(s.deps, s.ctx, s.callId)).toEqual({ ok: false, error: 'failed' });
+    expect(await dryRunTestCall({ ...s.deps, model: fakeModel() }, s.ctx, s.callId)).toMatchObject({ ok: true, dryRun: { status: 'ready' } });
+  });
+
   it("7: another org's call is not_found (G-8)", async () => {
     const s = await setup();
     const other = await seedOrg(db);
@@ -148,8 +185,10 @@ describe.skipIf(!pgLane)('dryRunTestCall (real Postgres)', () => {
 
 describe('dry-run.ts imports nothing that writes', () => {
   it('never imports the write steps, the Event/Task creates or the conversion', () => {
-    const source = readFileSync(new URL('./dry-run.ts', import.meta.url), 'utf8');
-    const imports = [...source.matchAll(/^import[^;]+from '([^']+)';/gm)].map((m) => m[0]);
-    expect(imports.join('\n')).not.toMatch(/steps-write|writeback\/appointment|convertStep|patch\.js|row-run/);
+    for (const file of ['./dry-run.ts', './dry-run-store.ts', './dry-run-words.ts']) {
+      const source = readFileSync(new URL(file, import.meta.url), 'utf8');
+      const imports = [...source.matchAll(/^import[^;]+from '([^']+)';/gm)].map((m) => m[0]);
+      expect(imports.join('\n')).not.toMatch(/steps-write|writeback\/appointment|convertStep|patch\.js|row-run/);
+    }
   });
 });

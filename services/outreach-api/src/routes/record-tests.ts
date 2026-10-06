@@ -111,7 +111,9 @@ const DRY_RUN_ERRORS: Readonly<Record<Extract<DryRunResult, { error: string }>['
   not_found: [404, 'NOT_FOUND', 'That test call is not here. It may belong to another tenant.'],
   not_finished: [409, 'NOT_FINISHED', 'That call is still going. Wait for it to end.'],
   no_model: [503, 'NO_MODEL', 'The answer-mapping model is not set up on this server.'],
+  running: [409, 'DRY_RUN_RUNNING', 'This is already being worked out. Wait a few seconds and press again.'],
   salesforce_error: [502, 'SALESFORCE_ERROR', "Salesforce didn't answer while the record was read. Try again."],
+  failed: [500, 'DRY_RUN_FAILED', "Something went wrong while working this out. Nothing was sent to Salesforce. Try again."],
 };
 
 /** cti-api's refusal of a browser token (or no answer), as an error reply. */

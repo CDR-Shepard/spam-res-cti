@@ -90,6 +90,8 @@ describe('POST /api/record-tests/calls/:callId/dry-run', () => {
     [{ ok: false, error: 'not_finished' }, 409, 'NOT_FINISHED'],
     [{ ok: false, error: 'no_model' }, 503, 'NO_MODEL'],
     [{ ok: false, error: 'salesforce_error' }, 502, 'SALESFORCE_ERROR'],
+    [{ ok: false, error: 'running' }, 409, 'DRY_RUN_RUNNING'],
+    [{ ok: false, error: 'failed' }, 500, 'DRY_RUN_FAILED'],
     [{ ok: false, refusal: { code: 'AI_BUDGET_SPENT' } }, 409, 'AI_BUDGET_SPENT'],
   ] as const)('%j is %i %s', async (answer, status, code) => {
     dry.dryRunTestCall.mockResolvedValue(answer);
