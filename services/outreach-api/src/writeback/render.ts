@@ -4,7 +4,7 @@
  * within the field's length and the post within the org's Lead FeedItem limit (980 characters, both objects).
  */
 import { cutUtf16, wellFormed } from '../research/text.js';
-import type { Change, Skipped, WritePlan } from './plan.js';
+import { DNC_FIELDS, type Change, type Skipped, type WritePlan } from './plan.js';
 
 export const CHATTER_MAX = 980;
 export const CHANGES_MAX = 32_000;
@@ -15,7 +15,8 @@ const REFUSAL_MAX = 150;
 
 export interface Applied {
   written: Change[];
-  notWritten: Array<{ label: string; reason: string }>;
+  /** `field` (the allowlist name) lets a refused do-not-call flag get its own section (5a Fix 1, M-8). */
+  notWritten: Array<{ label: string; reason: string; field?: string }>;
   created: string[];
 }
 export interface RenderInput {
@@ -31,6 +32,8 @@ export interface RenderInput {
   conversion: { leadName: string | null; ownerName: string; adopted: boolean } | null;
   /** Set on the fallback path: why the Lead could not be converted. */
   conversionRefused: string | null;
+  /** Who a booked call was then transferred to (plan.bookingThen 'transferred'); null or absent reads "a rep". */
+  transferredTo?: string | null;
 }
 
 const PT_PARTS = new Intl.DateTimeFormat('en-US', { timeZone: PT_ZONE, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
@@ -59,7 +62,17 @@ const strip = (s: string): string => wellFormed(s).replace(CONTROL, '');
 /** One line: stripped, whitespace (newlines included) collapsed. */
 const oneLine = (s: string): string => strip(s).replace(/\s+/g, ' ').trim();
 const capped = (s: string, max: number): string => (s.length > max ? `${cutUtf16(s, max - 1)}…` : s);
-const shown = (v: string | null): string => (v === null || oneLine(v) === '' ? '(blank)' : oneLine(v));
+/** An ISO or Salesforce ("+0000") date-time: shown as Pacific words (5a Fix 1, M-7). A bare date is left alone. */
+const DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})$/;
+function datetimeWords(v: string): string | null {
+  if (!DATETIME.test(v)) return null;
+  const at = new Date(v.replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
+  return Number.isNaN(at.getTime()) ? null : ptWords(at);
+}
+const shown = (v: string | null): string => {
+  if (v === null || oneLine(v) === '') return '(blank)';
+  return datetimeWords(v.trim()) ?? oneLine(v);
+};
 
 const SKIP_WORDS: Readonly<Record<Skipped['why'], string>> = {
   not_writable: "the connected Salesforce user can't edit it",
@@ -76,19 +89,53 @@ function conversionLine(c: NonNullable<RenderInput['conversion']>): string {
 
 const section = (title: string, items: readonly string[]): string[] => (items.length > 0 ? [title, ...items.map((x) => `- ${x}`)] : []);
 
-/** The AI Last Call Changes field (spec §5.5): header, then Changed, Created, Kept the rep's value, Not written, Not filled. */
+const DNC_TITLE = 'Could not set do-not-call flag';
+const isDnc = (field: string | undefined): boolean => field !== undefined && DNC_FIELDS.has(field);
+
+/** The do-not-call flags that were not set: plan skips and Salesforce refusals, as label and reason (M-8). */
+function dncRefusals(i: RenderInput): Array<{ label: string; reason: string }> {
+  return [
+    ...i.plan.skipped.filter((s) => isDnc(s.field)).map((s) => ({ label: oneLine(s.label), reason: SKIP_WORDS[s.why] })),
+    ...i.applied.notWritten.filter((n) => isDnc(n.field)).map((n) => ({ label: oneLine(n.label), reason: oneLine(n.reason) })),
+  ];
+}
+
+const KIND_WORDS: Readonly<Record<string, string>> = { phone: 'phone consultation', walkthrough: 'walkthrough' };
+
+/** "; then transferred to Evren" / "; then the transfer failed" when the booked call went on to a transfer (M-9). */
+function thenWords(i: RenderInput): string {
+  if (i.plan.bookingThen === 'transfer_failed') return '; then the transfer failed';
+  if (i.plan.bookingThen !== 'transferred') return '';
+  const who = i.transferredTo === undefined || i.transferredTo === null || oneLine(i.transferredTo) === '' ? 'a rep' : capped(oneLine(i.transferredTo), 80);
+  return `; then transferred to ${who}`;
+}
+
+/** "Booked phone consultation Wed Oct 7, 11:00 AM PT", from the plan's booking. */
+function bookedWords(plan: WritePlan): string | null {
+  const b = plan.appointment?.booked;
+  return b ? `${KIND_WORDS[b.kind] ?? b.kind} ${ptWords(new Date(b.start))}` : null;
+}
+
+/**
+ * The AI Last Call Changes field (spec §5.5): header, a "Booked …; then transferred …" line (M-9), then Could not set
+ * do-not-call flag (M-8), Changed, Created, Kept the rep's value, Not written, Not filled.
+ */
 export function changesFieldText(i: RenderInput): string {
   const header = `AI call on ${ptWords(i.at)} · ${oneLine(i.outcomeWords)} · AI call ${oneLine(i.aiCallId).slice(0, 8)}…`;
   const created = [...(i.conversion ? [conversionLine(i.conversion)] : []), ...i.applied.created.map(oneLine)];
   const refused = i.conversionRefused === null ? [] : [`Lead not converted: ${oneLine(i.conversionRefused)}; a hold and a "convert and book" Task were created instead`];
+  const booked = bookedWords(i.plan);
+  const then = thenWords(i);
   const lines = [
     header,
+    ...(then !== '' && booked !== null ? [`Booked ${booked}${then}`] : []),
+    ...section(DNC_TITLE, dncRefusals(i).map((r) => `${r.label}: ${r.reason}`)),
     ...section('Changed', i.applied.written.map((c) => `${oneLine(c.label)}: ${shown(c.before)} → ${shown(c.after)}`)),
     ...section('Created', created),
     ...section("Kept the rep's value", i.plan.kept.map((k) => `${oneLine(k.label)}: kept "${oneLine(k.current)}" (seller said: "${oneLine(k.evidence)}")`)),
-    ...section('Not written', [...refused, ...i.applied.notWritten.map((n) => `${oneLine(n.label)}: ${oneLine(n.reason)}`)]),
+    ...section('Not written', [...refused, ...i.applied.notWritten.filter((n) => !isDnc(n.field)).map((n) => `${oneLine(n.label)}: ${oneLine(n.reason)}`)]),
     ...section('Not filled', [
-      ...i.plan.skipped.map((s) => `${oneLine(s.label)}: ${SKIP_WORDS[s.why]}`),
+      ...i.plan.skipped.filter((s) => !isDnc(s.field)).map((s) => `${oneLine(s.label)}: ${SKIP_WORDS[s.why]}`),
       ...(i.plan.mapped ? [] : ['Fill-blanks skipped: the answer mapping was unavailable']),
     ]),
   ];
@@ -121,9 +168,13 @@ function chatterHead(i: RenderInput, cut: ChatterCut): string[] {
   const summary = i.summary === null ? '' : oneLine(i.summary);
   const filled = i.applied.written.filter((c) => c.why === 'filled').slice(0, 4);
   const refused = i.conversionRefused === null ? null : capped(oneLine(i.conversionRefused), REFUSAL_MAX);
-  const booked = i.appointmentWords === null ? '' : capped(oneLine(i.appointmentWords), LINE_PART_MAX);
+  const then = thenWords(i);
+  const words = i.appointmentWords === null ? (then === '' ? null : bookedWords(i.plan)) : i.appointmentWords;
+  const booked = words === null ? '' : `${capped(oneLine(words), LINE_PART_MAX)}${then}`;
+  const dnc = [...new Set(dncRefusals(i).map((r) => r.label))];
   return [
     `AI call · ${ptShort(i.at)} · ${capped(oneLine(i.outcomeWords), 60)}`,
+    ...(dnc.length > 0 ? [`${DNC_TITLE}: ${capped(dnc.join(', '), REFUSAL_MAX)} (see AI Last Call Changes)`] : []),
     ...(i.conversion ? ['Converted from Lead by the AI after the seller booked.'] : []),
     ...(refused === null ? [] : [`Not converted to an Opportunity (${refused}): a hold and a "convert and book" Task were created.`]),
     ...(booked === '' ? [] : [`Booked: ${booked}`]),
