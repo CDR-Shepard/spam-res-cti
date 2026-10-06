@@ -19,6 +19,9 @@ const KIND_TITLES: Readonly<Record<Kind, { offer: string; noun: string }>> = {
   walkthrough: { offer: 'Offer walkthroughs', noun: 'Walkthrough' },
 };
 const OWNER_LINE = 'Every AI-booked appointment goes to the first active person on this list. They distribute them.';
+/** Final review WEB I-2: the switches below default off, and are tenant-wide. */
+const START_OFF_WORDS =
+  'Booking, Lead conversion and Salesforce write-back start off for every tenant, and these switches apply to every AI call campaign. Turn them on only after the readiness check below says Ready, a practice call sounds right, and a one-Lead live check was written back correctly.';
 const INVALID_WORDS = 'Check the numbers: each kind needs an end hour after its start hour, and every value in range.';
 const MAX_OWNERS = 20;
 
@@ -78,6 +81,7 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
         if (valid) save.mutate(draft);
       }}
     >
+      <p className="text-sm text-muted-foreground">{START_OFF_WORDS}</p>
       <Check label="Book appointments on AI calls" checked={draft.booking.enabled} onChange={(enabled) => setBooking({ enabled })} />
       <section className="space-y-2">
         <h3 className="text-sm font-medium">Appointments go to</h3>

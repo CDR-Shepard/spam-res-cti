@@ -11,10 +11,12 @@ import {
   type OutreachSettings,
 } from './settings.js';
 
+// Final review WEB I-2: booking and Lead conversion are off until an admin turns them on (after the readiness check, a
+// practice call and the one-Lead check), whatever AI_CALL_DEFAULT_SPECIALISTS says.
 const DEFAULT_BOOKING: AiCallBookingSettings = {
-    enabled: true,
+    enabled: false,
     specialists: [],
-    convertLeads: true,
+    convertLeads: false,
     days: [1, 2, 3, 4, 5],
     phone: { enabled: true, durationMinutes: 15, startHour: 10, endHour: 18, stepMinutes: 30, minLeadMinutes: 120, horizonBusinessDays: 2, bufferMinutes: 0, maxOffered: 6 },
     walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 },
@@ -28,7 +30,7 @@ const DEFAULTS: OutreachSettings = {
   aiCallConcurrency: 2,
   aiCallDailyCap: 50,
   aiCallMaxAttempts: 3,
-  aiCallWriteback: true,
+  aiCallWriteback: false,
 };
 const GRANT = '0058X00000Fsx39QAB';
 const OTHER = '0058X00000Abcd1QAB';
@@ -110,9 +112,15 @@ describe('outreachSettings', () => {
       expect(AiCallBookingSettings.safeParse(DEFAULT_AI_CALL_BOOKING).success).toBe(true);
     });
 
-    it('an empty blob gives the defaults: booking on with nobody to book with, write-back on', () => {
+    it('final review WEB I-2: an empty blob gives the defaults: booking, conversion and write-back all off', () => {
       expect(bookingSettings({ settings: {} }, [])).toEqual(DEFAULT_BOOKING);
-      expect(outreachSettings({ settings: {} }).aiCallWriteback).toBe(true);
+      expect(outreachSettings({ settings: {} }).aiCallWriteback).toBe(false);
+    });
+
+    it('final review WEB I-2: a configured default owner fills the list but turns nothing on', () => {
+      const b = bookingSettings({ settings: {} }, [GRANT]);
+      expect(b).toMatchObject({ enabled: false, convertLeads: false, specialists: [GRANT] });
+      expect(bookingActive(b)).toBe(false);
     });
 
     it('Fix 1 (M-4): booking is read only through bookingSettings, whose default list is required', () => {
@@ -177,10 +185,11 @@ describe('outreachSettings', () => {
     it.each([
       ['false', false, false],
       ['true', true, true],
-      ['the string "false"', 'false', true],
-      ['0', 0, true],
-      ['null', null, true],
-    ])('aiCallWriteback %s gives %s (on unless explicitly false)', (_label, aiCallWriteback, expected) => {
+      ['the string "true"', 'true', false],
+      ['1', 1, false],
+      ['null', null, false],
+      ['absent', undefined, false],
+    ])('aiCallWriteback %s gives %s (off unless explicitly true, final review WEB I-2)', (_label, aiCallWriteback, expected) => {
       expect(outreachSettings({ settings: { aiCallWriteback } }).aiCallWriteback).toBe(expected);
     });
 

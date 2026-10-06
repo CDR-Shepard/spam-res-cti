@@ -13,6 +13,7 @@ import { fakeCti } from '../test/fake-pace.js';
 import { fakeSfWrites, type FakeSfWrites } from '../test/fake-sf-writes.js';
 import { seedCampaign, seedEnrollment, seedRecord, snapshot } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
+import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
 import { depsFor, GRANT, PHONE_BOOKING, quiet } from '../test/writeback-harness.js';
 
 const TEST_NUMBER = '+15125550111';
@@ -122,8 +123,17 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
     expect(row).toMatchObject({ result: null, aiCallId: null });
   });
 
-  it('6: with booking active the trigger carries the owner\'s free times, read only', async () => {
+  // Final review WEB I-2: booking is off until an admin turns it on; these tenants have.
+  const BOOKING_ON = { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [GRANT] } };
+
+  it('final review WEB I-2: a tenant that never turned booking on gets no times, even with a default owner configured', async () => {
     const s = await setup();
+    await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
+    expect(s.cti.requests[0]!.target).not.toHaveProperty('slots');
+  });
+
+  it('6: with booking active the trigger carries the owner\'s free times, read only', async () => {
+    const s = await setup({ settings: BOOKING_ON });
     await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
     const target = s.cti.requests[0]!.target;
     if (target.kind !== 'practice') throw new Error('not a practice target');
@@ -133,7 +143,7 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
   });
 
   it('P6 M-1: a time another real AI call already booked with the owner is not offered (as the pacer does)', async () => {
-    const s = await setup();
+    const s = await setup({ settings: BOOKING_ON });
     await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
     const first = s.cti.requests[0]!.target;
     if (first.kind !== 'practice' || !first.slots?.length) throw new Error('no slots offered');

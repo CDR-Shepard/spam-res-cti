@@ -123,7 +123,7 @@ describe.skipIf(!pgLane)('collectAiCallResults (real Postgres)', () => {
   const writebacksOf = (aiCallId: string) => db.select().from(schema.aiCallWritebacks).where(eq(schema.aiCallWritebacks.aiCallId, aiCallId));
 
   it('9: completed / appointment_set: handed off, and one pending write-back row in the same step', async () => {
-    const lead = await placed('completed', 'appointment_set');
+    const lead = await placed('completed', 'appointment_set', { settings: { aiCallWriteback: true } });
     await collectAiCallResults(db, NOW, quiet);
     expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'handed_off' });
     expect(await writebacksOf(lead.aiCallId)).toEqual([
@@ -154,6 +154,12 @@ describe.skipIf(!pgLane)('collectAiCallResults (real Postgres)', () => {
     const lead = await placed('completed', 'voicemail');
     await collectAiCallResults(db, NOW, quiet);
     expect(await writebacksOf(lead.aiCallId)).toEqual([]);
+  });
+
+  it("final review WEB I-2: a tenant that never turned write-back on: the row is born skipped with 'write-back is off'", async () => {
+    const lead = await placed('completed', 'qualified_callback');
+    await collectAiCallResults(db, NOW, quiet);
+    expect(await writebacksOf(lead.aiCallId)).toEqual([expect.objectContaining({ status: 'skipped', lastError: 'write-back is off' })]);
   });
 
   it("12: the tenant's aiCallWriteback false: the row is born skipped with 'write-back is off'", async () => {

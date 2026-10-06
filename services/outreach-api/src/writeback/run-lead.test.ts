@@ -202,7 +202,7 @@ describe.skipIf(!pgLane)('runWritebacks on Leads (real Postgres)', () => {
   });
 
   it('3d: conversion switched off: no SOAP at all, the fallback, and the row is done', async () => {
-    const s = await bookedLead({ aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [GRANT], convertLeads: false } });
+    const s = await bookedLead({ aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [GRANT], convertLeads: false } });
     const f = fakeOrg(leadState(s.recordId));
     expect((await runWritebacks(depsFor(db, f))).done).toBe(1);
     expect(f.soapBodies).toEqual([]);

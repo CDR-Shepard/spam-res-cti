@@ -11,7 +11,7 @@ const GRANT = '0058X00000Fsx39QAB';
 const X = '0058X00000Abcd1QAB';
 /** Tuesday 2026-10-06 08:00 PDT. */
 const NOW = new Date('2026-10-06T15:00:00.000Z');
-const booking = (over: Partial<AiCallBookingSettings> = {}): AiCallBookingSettings => ({ ...structuredClone(DEFAULT_AI_CALL_BOOKING), specialists: [GRANT], ...over });
+const booking = (over: Partial<AiCallBookingSettings> = {}): AiCallBookingSettings => ({ ...structuredClone(DEFAULT_AI_CALL_BOOKING), enabled: true, specialists: [GRANT], ...over });
 const grantRow = (over: Record<string, unknown> = {}) => ({ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles', ...over });
 const sfWith = (users: QueryRoute[1], events: QueryRoute[1] = []) => fakeSalesforce({ queries: [[/FROM User/, users], [/FROM Event/, events]] });
 

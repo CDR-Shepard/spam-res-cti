@@ -3,10 +3,11 @@
  * a fake Salesforce org that remembers what was written: the record, the Lead's conversion, the Events, Tasks and FeedItems.
  */
 import { eq, sql } from 'drizzle-orm';
-import type { BookedAppointment } from '@cti/contracts';
+import type { AiCallBookingSettings, BookedAppointment } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { SalesforceApiError, type SObjectDescribe } from '@cti/salesforce';
 import { DescribeCache } from '../research/describe.js';
+import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
 import type { MappedAnswers, MappingModel } from '../writeback/mapping-model.js';
 import type { WritebackDeps } from '../writeback/run.js';
 import { enqueueWritebackSql } from '../writeback/store.js';
@@ -18,6 +19,10 @@ import { prodDescribe } from './writeback-describes.js';
 type Row = Record<string, unknown>;
 
 export const GRANT = '0058X00000Fsx39QAB';
+/** A booking blob an admin turned on (final review WEB I-2: the defaults are off), Grant as the appointment owner. */
+export const BOOKING_ON: AiCallBookingSettings = { ...DEFAULT_AI_CALL_BOOKING, enabled: true, convertLeads: true, specialists: [GRANT] };
+/** The settings of a tenant that turned write-back, booking and conversion on. */
+export const WRITEBACK_ON = { aiCallWriteback: true, aiCallBooking: BOOKING_ON } as const;
 export const SETTER = '0058X00000Setr1QAA';
 export const US = '0058X0000Integ1QAA';
 export const NEW_OPP = '0068X00000NewOpQAA';
@@ -63,7 +68,8 @@ let n = 0;
 export async function seedWriteback(db: Db, s: SeedInput): Promise<{ orgId: string; campaignId: string; aiCallId: string; writebackId: string; recordId: string }> {
   n += 1;
   const base = await seedAiCallCampaign(db, 'active');
-  if (s.settings) await db.update(schema.organizations).set({ settings: s.settings }).where(eq(schema.organizations.id, base.orgId));
+  // Final review WEB I-2: write-back, booking and conversion are off by default; these tenants have turned them on.
+  await db.update(schema.organizations).set({ settings: { ...WRITEBACK_ON, ...(s.settings ?? {}) } }).where(eq(schema.organizations.id, base.orgId));
   const recordId = s.sfObject === 'Lead' ? `00Q8X${String(n).padStart(10, '0')}AAA` : `0068X${String(n).padStart(10, '0')}AAA`;
   const lead = await seedReleasedLead(db, base, { recordOver: { sfObject: s.sfObject, sfRecordId: recordId } });
   const statusName = s.sfObject === 'Lead' ? 'Status' : 'StageName';

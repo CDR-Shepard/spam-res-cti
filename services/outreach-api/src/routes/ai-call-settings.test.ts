@@ -28,7 +28,8 @@ const ORG = { id: 'O1', name: 'GG Homes', slug: 'gg-homes', status: 'active', ti
 const admin = { userId: 'U-ADMIN', orgId: 'O1', email: 'admin@gg.co', isAdmin: true, powerDialerEnabled: false, kind: 'human', isSuperAdmin: false };
 const rep = { ...admin, userId: 'U-REP', isAdmin: false };
 const auth = { authorization: 'Bearer t' };
-const DEFAULTS = { booking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [] as string[] }, writeback: true };
+// Final review WEB I-2: booking, conversion and write-back are off until an admin turns them on.
+const DEFAULTS = { booking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [] as string[] }, writeback: false };
 
 let app: FastifyInstance;
 async function build(opts: { settings?: unknown; queries?: QueryRoute[]; clients?: SalesforceClientFactory; defaultSpecialists?: string[] } = {}) {
@@ -66,11 +67,12 @@ describe('AI call settings routes', () => {
   });
 
   describe('GET /settings/ai-calls', () => {
-    it('an empty settings blob gives the defaults', async () => {
+    it('an empty settings blob gives the defaults: booking, conversion and write-back off', async () => {
       await build();
       const res = await call('GET', '/api/settings/ai-calls');
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual(DEFAULTS);
+      expect(res.json()).toMatchObject({ booking: { enabled: false, convertLeads: false }, writeback: false });
     });
 
     it('the configured default list fills a tenant that never saved one; a saved blob wins', async () => {
@@ -209,7 +211,7 @@ describe.skipIf(!pgLane)('AI call settings routes (real Postgres)', () => {
   it('PUT stores the blob beside the other settings, returns it, and GET returns it', async () => {
     const orgId = await seedOrg(t.db, { aiCallConcurrency: 3, aiCallBooking: 'junk' });
     asAdminOf(orgId);
-    expect((await pgCall('GET')).json()).toEqual({ booking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [GRANT] }, writeback: true });
+    expect((await pgCall('GET')).json()).toEqual({ booking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [GRANT] }, writeback: false });
 
     const next = { booking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [OTHER, GRANT], convertLeads: false, days: [1, 2, 3] }, writeback: false };
     const put = await pgCall('PUT', next);

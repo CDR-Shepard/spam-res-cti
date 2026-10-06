@@ -13,7 +13,7 @@ const grant = { id: GRANT, name: 'Grant Golden', title: 'Acquisitions', isActive
 const pat = { id: PAT, name: 'Pat Doe', title: null, isActive: true };
 const sam = { id: SAM, name: 'Sam Gone', title: null, isActive: false };
 
-/** The server's defaults with the configured default owner list (AI_CALL_DEFAULT_SPECIALISTS = Grant Golden). */
+/** A tenant that turned booking, conversion and write-back on, with the configured default owner list (Grant Golden). */
 function settings(over: Partial<AiCallSettings['booking']> = {}, writeback = true): AiCallSettings {
   return {
     booking: {
@@ -43,7 +43,7 @@ describe('AiCallSettingsCard', () => {
     expect(calls).toEqual([]);
   });
 
-  it('renders the defaults', async () => {
+  it('renders a turned-on tenant', async () => {
     stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant] });
     renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
     expect(await screen.findByRole('checkbox', { name: 'Book appointments on AI calls' })).toBeChecked();
@@ -60,6 +60,17 @@ describe('AiCallSettingsCard', () => {
     expect(screen.getByLabelText('Walkthrough earliest (hours ahead)')).toHaveValue(20);
     expect(screen.getByLabelText('Walkthrough latest (business days ahead)')).toHaveValue(5);
     expect(screen.getByText('Every AI-booked appointment goes to the first active person on this list. They distribute them.')).toBeInTheDocument();
+  });
+
+  it('final review WEB I-2: a tenant that never turned them on sees booking, conversion and write-back off, and when to turn them on', async () => {
+    stubApi({ 'GET /api/settings/ai-calls': settings({ enabled: false, convertLeads: false }, false), [idsUrl([GRANT])]: [grant] });
+    renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+    expect(await screen.findByRole('checkbox', { name: 'Book appointments on AI calls' })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Convert a Lead that books an appointment' })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Write call results back to Salesforce' })).not.toBeChecked();
+    expect(screen.getByText(/start off for every tenant/)).toHaveTextContent(
+      'Booking, Lead conversion and Salesforce write-back start off for every tenant, and these switches apply to every AI call campaign. Turn them on only after the readiness check below says Ready, a practice call sounds right, and a one-Lead live check was written back correctly.',
+    );
   });
 
   it('the default list from the server shows Grant Golden first, and booking is on', async () => {

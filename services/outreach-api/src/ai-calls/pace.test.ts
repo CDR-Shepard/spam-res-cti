@@ -473,7 +473,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
   describe('plan 1D: every trigger carries the returning flag; a freshly minted key also carries free appointment times', () => {
     const OWNER = '0058X00000Fsx39QAB';
     const ownerRow = (over: Record<string, unknown> = {}) => ({ Id: OWNER, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles', ...over });
-    const bookingWith = (specialists: string[]) => ({ aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, specialists } });
+    const bookingWith = (specialists: string[]) => ({ aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists } });
     type RecordTarget = Extract<InternalAiCallRequest['target'], { kind: 'record' }>;
     const target = (r: InternalAiCallRequest): RecordTarget => {
       if (r.target.kind !== 'record') throw new Error('expected a record target');
@@ -517,13 +517,13 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect(t.context).toEqual({ returning: true });
     });
 
-    it('1b: the configured default list applies while the tenant has saved none', async () => {
+    it('1b (final review WEB I-2): a configured default owner never turns booking on: a tenant that saved nothing gets no times', async () => {
       const h = await paceHarness(db, {}, { defaultSpecialists: [OWNER] });
       h.sf.state.users = [ownerRow()];
       await seedReleasedLead(db, h.base);
 
       expect((await h.run(NOW)).placed).toBe(1);
-      expect(target(h.cti.requests[0]!).slots!.length).toBeGreaterThan(0);
+      expect('slots' in target(h.cti.requests[0]!)).toBe(false);
     });
 
     it('2: no specialists (empty default, nothing saved): no slots key, context present, nothing read for the offer, nothing logged', async () => {
