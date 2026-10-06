@@ -24,6 +24,8 @@ function fieldWords(plan: EditableCallPlan, path: string): string {
   switch (head) {
     case 'opener':
       return 'the opener';
+    case 'reengagement':
+      return index === 'lastContact' ? 'Last time we spoke' : 'What we last talked about';
     case 'goals': {
       const goal = plan.goals[Number(index)];
       return `${goal ? GOAL_LABELS[goal.goal] : `goal ${n}`}, ${tail === 'known' ? 'what we know' : 'how to ask'}`;

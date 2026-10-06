@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { PLAN_TEXT_MAX, agentPlanTextIssues, type EditableCallPlan } from '@cti/contracts';
 import { validPlan } from '../test/call-plan-fixtures.js';
-import { renderPlanForAgent } from './plan-text.js';
+import { QUALIFICATION_TOPICS } from '@cti/contracts';
+import { planTextIssues, renderPlanForAgent, TOPIC_LABELS } from './plan-text.js';
 
 const { doNotContact: _dnc, ...editable } = validPlan;
 const plan: EditableCallPlan = editable;
@@ -26,6 +27,34 @@ function maxPlan(): EditableCallPlan {
     avoid: Array.from({ length: 8 }, () => fill('Avoid', 200)),
   };
 }
+
+const OLD_RENDERING = [
+  'Opener: Ask whether the family has decided what to do with the house on Oak Street.',
+  '',
+  'Goals:',
+  '- Still selling? (known: Open to selling in May) — Ask if that is still the plan',
+  '- Timeline (unknown) — Ask when they would want to be done',
+  '- Condition (known: Roof leaks) — Ask if the roof was fixed',
+  '- Their price in mind (unknown) — Ask if they have a number in mind; never give one',
+  '',
+  'Questions:',
+  '- Is everyone on the title on board with selling?',
+  '',
+  'Selling signals:',
+  '- Wanted a quick sale before winter',
+  '',
+  'Talking points:',
+  '- We buy as-is, so the roof does not need fixing first',
+  '',
+  'Avoid:',
+  '- Do not mention the probate attorney by name',
+].join('\n');
+
+const returning: EditableCallPlan = {
+  ...plan,
+  reengagement: { lastContact: 'back in February', lastTopic: 'the roof leak and the siblings' },
+  stillToLearn: ['timeline', 'price', 'competition'],
+};
 
 describe('renderPlanForAgent', () => {
   it('renders the opener, the four goals (known or unknown) and the questions, in that order', () => {
@@ -135,6 +164,43 @@ describe('renderPlanForAgent', () => {
     const r = renderPlanForAgent(change(plan));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.issues.map((i) => i.path)).toContain(path);
+  });
+
+  it('1D: an old plan (no re-engagement, nothing still to learn) renders exactly as before', () => {
+    expect(rendered(plan)).toBe(OLD_RENDERING);
+  });
+
+  it('1D: renders the last contact and what is still to learn right after the opener, in that order', () => {
+    const text = rendered(returning);
+    expect(text.startsWith(`Opener: ${plan.opener}\nLast time we spoke: back in February — the roof leak and the siblings\nStill to learn: timeline, their price in mind, other offers or agents\n\nGoals:`)).toBe(true);
+  });
+
+  it('1D: without a topic the line is the words alone; empty lines are left out', () => {
+    expect(rendered({ ...returning, reengagement: { lastContact: 'last week', lastTopic: null } })).toContain('\nLast time we spoke: last week\nStill to learn:');
+    const noTopics = rendered({ ...returning, stillToLearn: [] });
+    expect(noTopics).toContain('Last time we spoke: back in February');
+    expect(noTopics).not.toContain('Still to learn');
+    const noContact = rendered({ ...returning, reengagement: null });
+    expect(noContact).not.toContain('Last time we spoke');
+    expect(noContact).toContain(`Opener: ${plan.opener}\nStill to learn:`);
+  });
+
+  it('1D: every topic label passes the check, all nine together', () => {
+    expect(rendered({ ...plan, stillToLearn: [...QUALIFICATION_TOPICS] })).toContain(`Still to learn: ${QUALIFICATION_TOPICS.map((t) => TOPIC_LABELS[t]).join(', ')}`);
+    for (const t of QUALIFICATION_TOPICS) expect(agentPlanTextIssues(TOPIC_LABELS[t], { singleLine: true })).toEqual([]);
+  });
+
+  it('1D: the last topic is checked like every sent field', () => {
+    expect(planTextIssues({ ...returning, reengagement: { lastContact: 'back in February', lastTopic: 'they wanted 300k' } })).toContainEqual({ path: 'reengagement.lastTopic', issue: 'money' });
+    expect(planTextIssues({ ...returning, reengagement: { lastContact: 'in 2024', lastTopic: null } })).toContainEqual({ path: 'reengagement.lastContact', issue: 'money' });
+    expect(renderPlanForAgent({ ...returning, reengagement: { lastContact: 'back in February', lastTopic: 'they wanted 300k' } }).ok).toBe(false);
+  });
+
+  it('1D: the two lines survive the cut when every optional section is dropped to fit', () => {
+    const text = rendered({ ...maxPlan(), reengagement: returning.reengagement, stillToLearn: returning.stillToLearn });
+    expect(text.length).toBeLessThanOrEqual(PLAN_TEXT_MAX);
+    for (const dropped of ['Avoid:', 'Talking points:', 'Selling signals:']) expect(text).not.toContain(dropped);
+    expect(text).toContain('\nLast time we spoke: back in February — the roof leak and the siblings\nStill to learn: timeline, their price in mind, other offers or agents\n');
   });
 
   it('does not check text it never sends (the summary and the evidence)', () => {

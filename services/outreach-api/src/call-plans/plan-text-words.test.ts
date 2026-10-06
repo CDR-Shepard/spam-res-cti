@@ -24,6 +24,13 @@ describe('describePlanTextIssues', () => {
     ]);
   });
 
+  it('1D: names the re-engagement fields', () => {
+    expect(describePlanTextIssues(plan, [{ path: 'reengagement.lastContact', issue: 'money' }, { path: 'reengagement.lastTopic', issue: 'money' }])).toEqual([
+      'Last time we spoke: a price or an amount',
+      'What we last talked about: a price or an amount',
+    ]);
+  });
+
   it('groups the problems of one field and says so for the whole text', () => {
     expect(describePlanTextIssues(plan, [{ path: 'opener', issue: 'money' }, { path: 'opener', issue: 'offer' }])).toEqual(['the opener: a price or an amount, offer wording']);
     expect(describePlanTextIssues(plan, [{ path: '(rendered)', issue: 'url' }])).toEqual(['the whole plan: a web address']);

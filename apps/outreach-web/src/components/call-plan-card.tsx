@@ -5,7 +5,7 @@ import { ConfirmAction } from '@/components/confirm-action';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { CALL_STAGE_WORDS, CONSENT_WORDS, EVIDENCE_WORDS, GOAL_WORDS, STRENGTH_WORDS, WINDOW_WORDS, sourceLine } from '@/lib/call-words';
+import { CALL_STAGE_WORDS, CONSENT_WORDS, EVIDENCE_WORDS, GOAL_WORDS, STRENGTH_WORDS, TOPIC_WORDS, WINDOW_WORDS, sourceLine } from '@/lib/call-words';
 import { approveCallPlan, editCallPlan, rejectCallPlan, researchAgain } from '@/lib/outreach-api';
 import { errorText, formatDateTime } from '@/lib/outreach-words';
 import { CallPlanEditor } from './call-plan-editor';
@@ -97,6 +97,17 @@ function List({ title, items }: { title: string; items: readonly string[] }) {
   );
 }
 
+/** Plan 1D: a returning seller. Both lines are left out when empty (a plan stored before 1D shows neither). */
+function ReturningLines({ plan }: { plan: EditableCallPlan }) {
+  const r = plan.reengagement;
+  return (
+    <>
+      {r?.lastContact && <p className="text-muted-foreground">{`Last real contact: ${r.lastContact}${r.lastTopic ? `: ${r.lastTopic}` : ''}`}</p>}
+      {plan.stillToLearn.length > 0 && <p className="text-muted-foreground">{`Still to learn: ${plan.stillToLearn.map((t) => TOPIC_WORDS[t]).join(', ')}`}</p>}
+    </>
+  );
+}
+
 function PlanView({ plan }: { plan: EditableCallPlan }) {
   return (
     <div className="space-y-3">
@@ -113,7 +124,11 @@ function PlanView({ plan }: { plan: EditableCallPlan }) {
           </ul>
         </div>
       )}
-      <div><h4 className="font-medium">Opener</h4><p>{plan.opener}</p></div>
+      <div>
+        <h4 className="font-medium">Opener</h4>
+        <p>{plan.opener}</p>
+        <ReturningLines plan={plan} />
+      </div>
       <div>
         <h4 className="font-medium">Goals</h4>
         <ul className="space-y-1">

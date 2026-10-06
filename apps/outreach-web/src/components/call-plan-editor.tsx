@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { EditableCallPlan, PreferredWindow, type CallGoal } from '@cti/contracts';
+import { EditableCallPlan, PreferredWindow, QUALIFICATION_TOPICS, type CallGoal, type QualificationTopic } from '@cti/contracts';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { EVIDENCE_WORDS, GOAL_WORDS, STRENGTH_WORDS, WINDOW_WORDS } from '@/lib/call-words';
+import { EVIDENCE_WORDS, GOAL_WORDS, STRENGTH_WORDS, TOPIC_WORDS, WINDOW_WORDS } from '@/lib/call-words';
 
 /** One item per line; blank lines dropped. */
 const toLines = (text: string): string[] => text.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -19,6 +19,9 @@ interface Draft {
   avoid: string;
   window: PreferredWindow;
   windowReason: string;
+  /** Plan 1D: what the last contact was about; the contact's own words are computed and read-only. */
+  lastTopic: string;
+  stillToLearn: QualificationTopic[];
 }
 
 const draftOf = (p: EditableCallPlan): Draft => ({
@@ -30,9 +33,14 @@ const draftOf = (p: EditableCallPlan): Draft => ({
   avoid: fromLines(p.avoid),
   window: p.bestTimeToCall.window,
   windowReason: p.bestTimeToCall.reason,
+  lastTopic: p.reengagement?.lastTopic ?? '',
+  stillToLearn: p.stillToLearn,
 });
 
-/** The draft as a plan; selling signals are the model's reading of the evidence and are carried over untouched. */
+/**
+ * The draft as a plan; selling signals are the model's reading of the evidence and are carried over untouched.
+ * Re-engagement stays null when there was no contact; its computed words are the original's (the server keeps them too).
+ */
 const planOf = (d: Draft, original: EditableCallPlan): unknown => ({
   situationSummary: d.situationSummary,
   sellingSignals: original.sellingSignals,
@@ -42,12 +50,16 @@ const planOf = (d: Draft, original: EditableCallPlan): unknown => ({
   questions: toLines(d.questions),
   avoid: toLines(d.avoid),
   bestTimeToCall: { window: d.window, reason: d.windowReason },
+  reengagement: original.reengagement ? { lastContact: original.reengagement.lastContact, lastTopic: d.lastTopic.trim() === '' ? null : d.lastTopic } : null,
+  stillToLearn: QUALIFICATION_TOPICS.filter((t) => d.stillToLearn.includes(t)),
 });
 
 export function CallPlanEditor({ plan, onSave, onCancel, busy }: { plan: EditableCallPlan; onSave: (plan: EditableCallPlan) => void; onCancel: () => void; busy: boolean }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(plan));
   const [problem, setProblem] = useState<string | null>(null);
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }));
+  const toggleTopic = (t: QualificationTopic, on: boolean) =>
+    setDraft((d) => ({ ...d, stillToLearn: on ? [...d.stillToLearn.filter((x) => x !== t), t] : d.stillToLearn.filter((x) => x !== t) }));
   const setGoal = (i: number, patch: Partial<Draft['goals'][number]>) => setDraft((d) => ({ ...d, goals: d.goals.map((g, j) => (j === i ? { ...g, ...patch } : g)) }));
 
   function save() {
@@ -70,6 +82,19 @@ export function CallPlanEditor({ plan, onSave, onCancel, busy }: { plan: Editabl
         </ul>
       )}
       <Field label="Opener"><Input value={draft.opener} onChange={(e) => set('opener', e.target.value)} /></Field>
+      {plan.reengagement?.lastContact && <p className="text-sm text-muted-foreground">Last real contact: {plan.reengagement.lastContact}</p>}
+      {plan.reengagement && <Field label="What we last talked about"><Input maxLength={200} value={draft.lastTopic} onChange={(e) => set('lastTopic', e.target.value)} /></Field>}
+      <fieldset className="rounded-md border p-2">
+        <legend className="px-1 text-sm font-medium">Still to learn</legend>
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          {QUALIFICATION_TOPICS.map((t) => (
+            <label key={t} className="flex items-center gap-1 text-sm">
+              <input type="checkbox" checked={draft.stillToLearn.includes(t)} onChange={(e) => toggleTopic(t, e.target.checked)} />
+              {TOPIC_WORDS[t]}
+            </label>
+          ))}
+        </div>
+      </fieldset>
       {draft.goals.map((g, i) => (
         <fieldset key={g.goal} className="space-y-2 rounded-md border p-2">
           <legend className="px-1 text-sm font-medium">{GOAL_WORDS[g.goal]}</legend>

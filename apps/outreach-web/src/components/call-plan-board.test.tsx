@@ -160,6 +160,48 @@ describe('CallPlanBoard', () => {
     expect((put.body as { plan: object }).plan).not.toHaveProperty('doNotContact');
   });
 
+  it('1D: the card shows the last real contact and what is still to learn under the opener', async () => {
+    const plan: EditableCallPlan = { ...PLAN, reengagement: { lastContact: 'back in February', lastTopic: 'the roof leak' }, stillToLearn: ['timeline', 'price'] };
+    stubApi({ [`GET ${BOARD}`]: board([card(1, { plan: { ...card(1).plan!, plan } }), card(2)], { review: 2 }) });
+    render();
+    const c = within(await cardOf('Lead 1'));
+    expect(c.getByText('Last real contact: back in February: the roof leak')).toBeInTheDocument();
+    expect(c.getByText('Still to learn: timeline, their price in mind')).toBeInTheDocument();
+    const two = within(await cardOf('Lead 2'));
+    expect(two.queryByText(/Last real contact/)).toBeNull();
+    expect(two.queryByText(/Still to learn/)).toBeNull();
+  });
+
+  it('1D: the editor shows the contact read-only, edits the topic and submits the changed topics to learn', async () => {
+    const plan: EditableCallPlan = { ...PLAN, reengagement: { lastContact: 'back in February', lastTopic: 'the roof leak' }, stillToLearn: ['timeline', 'price'] };
+    const calls = stubApi({ [`GET ${BOARD}`]: board([card(1, { plan: { ...card(1).plan!, plan } })], { review: 1 }), [`PUT /api/call-plans/${ID(1)}`]: card(1) });
+    render();
+    await userEvent.click(within(await cardOf('Lead 1')).getByRole('button', { name: 'Edit' }));
+    expect(screen.getByText('Last real contact: back in February')).toBeInTheDocument();
+    const topic = screen.getByLabelText('What we last talked about');
+    expect(topic).toHaveAttribute('maxLength', '200');
+    await userEvent.clear(topic);
+    await userEvent.type(topic, 'the roof and the move');
+    expect(screen.getByRole('checkbox', { name: 'timeline' })).toBeChecked();
+    await userEvent.click(screen.getByRole('checkbox', { name: 'timeline' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'what they owe' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    const put = calls.find((c) => c.method === 'PUT')!;
+    expect((put.body as { plan: EditableCallPlan }).plan).toMatchObject({ reengagement: { lastContact: 'back in February', lastTopic: 'the roof and the move' }, stillToLearn: ['price', 'mortgage'] });
+  });
+
+  it('1D: an edit keeps reengagement null when there was no contact, and carries the topics untouched', async () => {
+    const plan: EditableCallPlan = { ...PLAN, stillToLearn: ['condition'] };
+    const calls = stubApi({ [`GET ${BOARD}`]: board([card(1, { plan: { ...card(1).plan!, plan } })], { review: 1 }), [`PUT /api/call-plans/${ID(1)}`]: card(1) });
+    render();
+    await userEvent.click(within(await cardOf('Lead 1')).getByRole('button', { name: 'Edit' }));
+    expect(screen.queryByLabelText('What we last talked about')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    expect((calls.find((c) => c.method === 'PUT')!.body as { plan: EditableCallPlan }).plan).toMatchObject({ reengagement: null, stillToLearn: ['condition'] });
+  });
+
   it('M-9: repeated text in the lists and the selling signals renders every line, with no duplicate-key warning', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const dup = { signal: 'Wants a quick sale', evidence: 'we need this done', source: 'task' as const, strength: 'strong' as const };
