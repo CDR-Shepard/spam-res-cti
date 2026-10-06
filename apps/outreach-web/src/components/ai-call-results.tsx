@@ -44,6 +44,8 @@ export function AiCallResults({ campaignId, focusCallId = null }: { campaignId: 
   useEffect(() => {
     if (focusCallId && !found && hasNextPage && !isFetchingNextPage && pages < FOCUS_MAX_PAGES) void fetchNextPage();
   }, [focusCallId, found, hasNextPage, isFetchingNextPage, pages, fetchNextPage]);
+  // P6 M-4: every page there is (or the cap) read and the linked call is not on them: said, never a silent nothing.
+  const notFound = focusCallId !== null && results.data !== undefined && !found && !isFetchingNextPage && (!hasNextPage || pages >= FOCUS_MAX_PAGES);
   const refetch = () => void qc.invalidateQueries({ queryKey: outreachKeys.aiCallResults(campaignId) });
   return (
     <Card>
@@ -54,6 +56,7 @@ export function AiCallResults({ campaignId, focusCallId = null }: { campaignId: 
       <CardContent className="space-y-3">
         {results.error && <p role="alert" className="text-sm text-destructive">{errorText(results.error)}</p>}
         {results.isPending && <p className="text-sm text-muted-foreground">Loading AI calls…</p>}
+        {notFound && <p role="status" className="text-sm text-muted-foreground">That call isn&apos;t in the latest results.</p>}
         {results.data && items.length === 0 && <p className="text-sm text-muted-foreground">No AI calls yet. Approved leads are queued with Call all approved.</p>}
         {items.length > 0 && <ResultsTable items={items} focusCallId={focusCallId} onRetried={refetch} />}
         {results.hasNextPage && (

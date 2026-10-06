@@ -218,6 +218,22 @@ describe('plan 1D: appointment and Salesforce columns', () => {
     expect(await rowOf('Lead 1')).toHaveAttribute('aria-current', 'true');
     expect(calls.map((c) => c.url)).toContain(`${RESULTS}?cursor=next1`);
   });
+
+  it('P6 M-4: a deep-linked call on none of the pages says so', async () => {
+    stubApi({ [`GET ${RESULTS}`]: page([row(2)]) });
+    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
+    expect(await screen.findByText("That call isn't in the latest results.")).toBeInTheDocument();
+    expect(await rowOf('Lead 2')).not.toHaveAttribute('aria-current');
+  });
+
+  it('P6 M-4: a deep-linked call not found within the page cap says so, and no more pages are read', async () => {
+    const routes: Record<string, AiCallResultsResponse> = { [`GET ${RESULTS}`]: page([row(100)], 'p1') };
+    for (let n = 1; n <= 12; n += 1) routes[`GET ${RESULTS}?cursor=p${n}`] = page([row(100 + n)], `p${n + 1}`);
+    const calls = stubApi(routes);
+    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
+    expect(await screen.findByText("That call isn't in the latest results.")).toBeInTheDocument();
+    expect(calls.filter((c) => c.url.startsWith(RESULTS))).toHaveLength(10);
+  });
 });
 
 describe('5: polling', () => {
