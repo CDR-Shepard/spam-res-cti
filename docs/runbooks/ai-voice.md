@@ -565,7 +565,7 @@ echo "SELECT t.created_at, t.sf_object, t.sf_record_id, t.status, t.error, c.mod
 
 **1E deploys only after 1D is live.** `feat/ai-call-1e` contains all of plan 1D. Before anything below:
 
-- **If 1D is already merged and deployed** (its [Deploy order](outreach-sf-campaigns.md#deploy-order) steps 1–6 done: campaigns paused while checking, Salesforce deployed from a local merge, booking, conversion and write-back off), 1E adds only the steps below.
+- **If 1D is already merged and deployed** (its [Deploy order](outreach-sf-campaigns.md#deploy-order) steps 1–6 done: campaigns paused while checking, Salesforce deployed from a local merge, booking, conversion and write-back off), 1E adds only the steps below. Pause every active AI call campaign before the 1E push too: it restarts `@cti/api`, and a live call drops with it. Resume after step 7.
 - **If 1E ships in the same push as 1D,** follow `outreach-sf-campaigns.md` [Deploy order](outreach-sf-campaigns.md#deploy-order) from step 1: pause every AI call campaign, deploy Salesforce from the **local** merge before pushing (Railway deploys on push), and leave every switch off. Do the steps below at its step 4, and run the 1E smoke test (step 7 below) at its step 6, with the practice calls.
 
 1. **Twilio: nothing to create.** Confirm the three `TWILIO_*` names on `@cti/api` (§3). No TwiML App, number or webhook is added: the browser token has no outgoing grant, and the AI leg uses the existing AI voice callbacks. Browser legs bill as Twilio Client minutes.
@@ -583,9 +583,10 @@ echo "SELECT t.created_at, t.sf_object, t.sf_record_id, t.status, t.error, c.mod
      eval "$(railway variables -s @cti/api --kv | grep -E '^TWILIO_(ACCOUNT_SID|AUTH_TOKEN)=' | sed 's/^/export /')"
      echo "SELECT to_e164 LIKE 'client:%' AS browser, call_sid, answered_by, outcome FROM ai_calls WHERE org_id = :'org' AND is_test ORDER BY created_at DESC LIMIT 2;" | psql "$PUB" -v org='<org uuid>'
      curl -s -u "$TWILIO_ACCOUNT_SID:$TWILIO_AUTH_TOKEN" "https://api.twilio.com/2010-04-01/Accounts/$TWILIO_ACCOUNT_SID/Calls/<browser call_sid>.json" | jq '{to, answered_by, status}'
+     unset TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN
      ```
 
-     The browser row reads `browser = t`, `answered_by` empty and an outcome other than `voicemail`; Twilio's answer reads `"to": "client:aitest_…"` and `"answered_by": null`. `@cti/api`'s logs show `ai-voice: browser test leg; no calls row` at the end (`railway logs -s @cti/api | grep 'browser test leg'`);
+     The browser row reads `browser = t`, `answered_by` empty and an outcome other than `voicemail`; Twilio's answer reads `"to": "client:aitest_…"` and `"answered_by": null`. `@cti/api`'s logs show `ai-voice: browser test leg; no calls row` at the end (`railway logs -s @cti/api --since 30m | grep 'browser test leg'`; without `--since` or `--lines` it streams and never ends);
    - the card shows "Would have booked …", the outcome, the summary and the transcript;
    - press **What would be written to Salesforce** once;
    - in Salesforce, confirm no Event, Task, field change, conversion or Chatter post appeared on either record.
