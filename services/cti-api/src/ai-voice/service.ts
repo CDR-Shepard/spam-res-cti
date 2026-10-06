@@ -11,8 +11,8 @@
  * double click cannot ring someone twice.
  */
 import type { SessionUser } from '@cti/auth';
+import type { AppointmentSlot } from '@cti/contracts';
 import { DAILY_CAP_WINDOW_MS, dailyDialCount, timezoneForNumber } from '@cti/firewall';
-import { toE164 } from '@cti/phone';
 import type { AppConfig } from '../config.js';
 import { blockedTargets } from '../dialer/consent-check.js';
 import { withinCallingHours, type Db } from '../dialer/pick-did.js';
@@ -21,6 +21,7 @@ import { gateAiCall, type AiGateBlock, type AiGateInput, type AiGateResult, type
 import { pickAiDid } from './number-pool.js';
 import type { AiCallObject, AiCallRecord } from './record.js';
 import { dropActiveCall, registerActiveCall, updateActiveCall } from './registry.js';
+import { gateTarget, handoffUser, loadTarget, rowTarget, targetKind, typedNumber, type StartTarget } from './service-target.js';
 import type { AiCallStore } from './store.js';
 import {
   AMD_PATH,
@@ -34,7 +35,7 @@ import {
 
 export { claimClose, dropActiveCall, getActiveCall, registerActiveCall, type ActiveAiCall } from './registry.js';
 
-export type StartTarget = { objectType: AiCallObject; recordId: string } | { testTo: string };
+export type { StartTarget } from './service-target.js';
 
 export type StartBlock = AiGateBlock | 'call_in_progress';
 
@@ -60,6 +61,10 @@ export interface StartInput {
   target: StartTarget;
   /** The approved call plan (plan 1C internal trigger); the prompt fences it as data. */
   plan?: string | null;
+  /** Plan 1D: appointment times the agent may offer (record and practice calls); stored as ai_calls.offered_slots. */
+  slots?: AppointmentSlot[];
+  /** Plan 1D: we have spoken with this seller before (the trigger's context). */
+  returning?: boolean;
   deps: StartDeps;
 }
 
@@ -91,29 +96,6 @@ export function localTimeFor(e164: string, now: Date): string {
   return new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'long', hour: 'numeric', minute: '2-digit' }).format(now);
 }
 
-async function loadTarget(
-  i: StartInput,
-): Promise<{ record: AiCallRecord | null; candidate: string | null } | { fail: 'record_not_found' | 'salesforce_error' }> {
-  if ('testTo' in i.target) return { record: null, candidate: toE164(i.target.testTo) };
-  try {
-    const record = await i.deps.loadRecord(i.session.userId, i.target.objectType, i.target.recordId);
-    return record ? { record, candidate: record.phones[0] ?? null } : { fail: 'record_not_found' };
-  } catch (e) {
-    i.deps.log.warn({ userId: i.session.userId, err: errText(e) }, 'ai-voice: record load failed');
-    return { fail: 'salesforce_error' };
-  }
-}
-
-async function handoffUser(i: StartInput, record: AiCallRecord | null): Promise<string> {
-  if (!record?.ownerSfUserId) return i.session.userId;
-  try {
-    return (await i.deps.store.handoffUserFor(i.session.orgId, record.ownerSfUserId)) ?? i.session.userId;
-  } catch (e) {
-    i.deps.log.warn({ err: errText(e) }, 'ai-voice: hand-off user lookup failed, using the starter');
-    return i.session.userId;
-  }
-}
-
 async function companyName(i: StartInput): Promise<string> {
   try {
     return (await i.deps.store.orgName(i.session.orgId)) ?? '';
@@ -123,10 +105,12 @@ async function companyName(i: StartInput): Promise<string> {
   }
 }
 
-function rowTarget(target: StartTarget) {
-  return 'testTo' in target
-    ? { sfObject: null, sfRecordId: null, isTest: true }
-    : { sfObject: target.objectType, sfRecordId: target.recordId, isTest: false };
+/** Plan 1D prompt fields, only when set, so a first call without slots has exactly the 1C prompt. */
+function bookingPrompt(i: StartInput, to: string): { returning?: true; slots?: AppointmentSlot[]; sellerTimeZone?: string | null } {
+  return {
+    ...(i.returning ? { returning: true as const } : {}),
+    ...(i.slots && i.slots.length > 0 ? { slots: i.slots, sellerTimeZone: timezoneForNumber(to)?.timezone ?? null } : {}),
+  };
 }
 
 async function blockedRow(i: StartInput, reason: StartBlock, to: string): Promise<StartResult> {
@@ -134,6 +118,7 @@ async function blockedRow(i: StartInput, reason: StartBlock, to: string): Promis
     orgId: i.session.orgId,
     startedBy: i.session.userId,
     ...rowTarget(i.target),
+    offeredSlots: i.slots ?? [],
     toE164: to,
     status: 'blocked',
     outcome: 'blocked',
@@ -149,7 +134,7 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
   const loaded = await loadTarget(i);
   if ('fail' in loaded) return { ok: false, reason: loaded.fail };
   const { record, candidate } = loaded;
-  const blockedTo = candidate ?? ('testTo' in i.target ? i.target.testTo.slice(0, 20) : '');
+  const blockedTo = candidate ?? (typedNumber(i.target) ?? '').slice(0, 20);
 
   const now = deps.now();
   if (candidate && (await deps.store.activeCallTo(session.orgId, candidate, new Date(now.getTime() - ACTIVE_CALL_WINDOW_MS)))) {
@@ -166,7 +151,7 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
         userId: session.userId,
         isAdmin: session.isAdmin,
         now,
-        target: record ? { kind: 'record', record } : { kind: 'test', toRaw: 'testTo' in i.target ? i.target.testTo : '' },
+        target: gateTarget(i.target, record),
       },
       aiGateDeps(deps.store),
     );
@@ -182,12 +167,16 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
     startedBy: session.userId,
     handoffUserId,
     ...rowTarget(i.target),
+    offeredSlots: i.slots ?? [],
     toE164: gate.toE164,
     fromE164: gate.fromE164,
     status: 'queued',
   });
   const aiCallId = row.id;
-  const isTest = record === null;
+  const kind = targetKind(i.target);
+  // The registry's isTest (no Salesforce Task, no results) holds for test AND practice calls; the prompt's isTest (the
+  // "this is a test call" line) only for a test call: a practice call lets the admin hear exactly what the seller would.
+  const isTest = kind !== 'record';
   registerActiveCall(
     {
       aiCallId,
@@ -205,9 +194,10 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
         firstName: record?.firstName ?? null,
         address: record?.address ?? null,
         notes: record?.notes ?? '',
-        isTest,
+        isTest: kind === 'test',
         callbackNumber: gate.fromE164,
         ...(i.plan ? { approvedPlan: i.plan } : {}),
+        ...bookingPrompt(i, gate.toE164),
       },
       bridge: null,
       transcript: null,

@@ -10,6 +10,10 @@
  * DNC, state caps, the per-customer ceiling, calling hours, the ai_pool caller ID). The record
  * is loaded through the tenant's integration connection, and the plan text must pass the
  * CF-9 check or the call is refused as `plan_rejected` before anything is reserved or dialed.
+ *
+ * Plan 1D: a record target may carry `slots` (appointment times, structured, never plan text) and
+ * `context.returning`; a `practice` target rings an admin's test number with a real record's plan and
+ * context (service-target.ts). Every switch on the target kind below is explicit (D-2).
  */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import {
@@ -69,9 +73,33 @@ function rebuilt(row: FoundCall): InternalAiCallResponse {
   return { result: 'placed', aiCallId: row.id };
 }
 
+/** How a crashed request's call is found again: by the record for a record call; by the number it rang otherwise. */
 function targetKeys(body: Body): { sfRecordId: string | null; toE164: string | null } {
   const t = body.target;
-  return t.kind === 'record' ? { sfRecordId: t.recordId, toE164: null } : { sfRecordId: null, toE164: toE164(t.to) ?? t.to.slice(0, 20) };
+  switch (t.kind) {
+    case 'record':
+      return { sfRecordId: t.recordId, toE164: null };
+    case 'test':
+    case 'practice':
+      // A practice call rings the admin's test number (its row also carries the record id, but so may a real call's).
+      return { sfRecordId: null, toE164: toE164(t.to) ?? t.to.slice(0, 20) };
+  }
+}
+
+/** The service's target, and the plan 1D extras (slots and the returning flag) for record and practice calls. */
+function startTarget(t: Body['target']): Pick<StartInput, 'target' | 'slots' | 'returning'> {
+  switch (t.kind) {
+    case 'record':
+      return { target: { objectType: t.objectType, recordId: t.recordId }, slots: t.slots, returning: t.context?.returning ?? false };
+    case 'practice':
+      return {
+        target: { practice: { objectType: t.objectType, recordId: t.recordId, to: t.to } },
+        slots: t.slots,
+        returning: t.context?.returning ?? false,
+      };
+    case 'test':
+      return { target: { testTo: t.to } };
+  }
 }
 
 /** Raw JSON for this scope only: the signature covers the exact bytes. */
@@ -179,7 +207,7 @@ async function startReserved(deps: InternalAiDeps, cfgOf: () => AppConfig, db: D
     db,
     cfg: cfgOf(),
     session,
-    target: t.kind === 'record' ? { objectType: t.objectType, recordId: t.recordId } : { testTo: t.to },
+    ...startTarget(t),
     plan: t.planText,
     deps: {
       ...deps.startDeps,

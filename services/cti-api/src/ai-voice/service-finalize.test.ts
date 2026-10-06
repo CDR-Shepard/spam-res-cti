@@ -232,6 +232,14 @@ describe('ctiCallValues', () => {
     expect(ctiCallValues(row as AiCallRow, 'completed')).toMatchObject({ salesforceWhoId: null, salesforceWhatId: null, disposition: 'Connected' });
   });
 
+  it('a practice call (plan 1D) carries the record ids on ai_calls but its calls row links to no record: it rang a test number', () => {
+    const row = {
+      ...rowOf({ id: ID, orgId: 'o1', startedBy: 'u1', toE164: '+16195550100' }),
+      isTest: true, practice: true, sfObject: 'Lead', sfRecordId: '00Q5e00000AbCdEFGH', callSid: 'CA1', outcome: 'appointment_set',
+    };
+    expect(ctiCallValues(row as AiCallRow, 'completed')).toMatchObject({ salesforceWhoId: null, salesforceWhatId: null, disposition: 'Connected' });
+  });
+
   it('an Opportunity is the What', () => {
     const row = { ...rowOf({ id: ID, orgId: 'o1', startedBy: 'u1', toE164: '+16195550100' }), sfObject: 'Opportunity', sfRecordId: '0065e00000AbCdEFGH', callSid: 'CA1' };
     expect(ctiCallValues(row as AiCallRow, 'completed')).toMatchObject({ salesforceWhoId: null, salesforceWhatId: '0065e00000AbCdEFGH' });
@@ -277,6 +285,17 @@ describe('afterAiCall', () => {
     expect(store.rows.get(ID)?.summary).toBe(`Wants an offer.\n${MISSED}\n\nOutcome: Transfer missed — callback promised\nAI call id: ${ID}`);
     // The late path owns the callback Task; afterAiCall makes only the call's Task.
     expect(subjects).toEqual(['AI call: Transfer missed — callback promised']);
+  });
+
+  it('a practice call (plan 1D) writes nothing to Salesforce, even a callback on the real record', async () => {
+    const sf = {
+      createCallTask: vi.fn(async () => ({ taskId: '00T1' })),
+      fetchOwnership: vi.fn(async () => ({ type: 'Lead' as const, ownerId: 'SF1' })),
+      sfUserIdFor: vi.fn(async () => 'SF1'),
+    };
+    await afterAiCall(record({ isTest: true, practice: true }), { store, log: silentLog, summary: { client: null, model: 'm', log: silentLog }, sf: { sf, store, log: silentLog, now: () => END } });
+    expect(sf.createCallTask).not.toHaveBeenCalled();
+    expect(store.rows.get(ID)?.sfTaskId ?? null).toBeNull();
   });
 
   it('without Salesforce (or for a test call) only the summary is written', async () => {

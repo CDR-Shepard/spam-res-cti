@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionUser } from '@cti/auth';
 import type { AppConfig } from '../config.js';
-import type { AiGateResult, GateDeps } from './gate.js';
+import type { AppointmentSlot } from '@cti/contracts';
+import { gateAiCall, type AiGateResult, type GateDeps } from './gate.js';
 import type { AiCallRecord } from './record.js';
 import { aiGateDeps, localTimeFor, startAiCall, type StartDeps } from './service.js';
 import { clearActiveCalls, getActiveCall } from './registry.js';
@@ -266,5 +267,110 @@ describe('startAiCall — the approved plan (plan 1C)', () => {
       clearActiveCalls();
       store.rows.clear();
     }
+  });
+});
+
+describe('startAiCall — appointment times and practice calls (plan 1D)', () => {
+  const TEST_NUMBER = '+15125550100';
+  const SLOTS: AppointmentSlot[] = [
+    {
+      id: 'p1', kind: 'phone', start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T18:15:00.000Z',
+      specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
+    },
+  ];
+  const admin: SessionUser = { ...session, isAdmin: true };
+  const practice = { practice: { objectType: 'Lead' as const, recordId: '00Q5e00000AbCdEFGH', to: TEST_NUMBER } };
+  const gateCfg = {
+    ...cfg,
+    OPENAI_API_KEY: 'sk-test',
+    AI_VOICE: 'on',
+    OUTREACH_KILL_SWITCH: 'off',
+    AI_VOICE_TEST_NUMBERS: `${TEST_NUMBER}, +12125550100`,
+  } as unknown as AppConfig;
+  const fakeGateDeps: GateDeps = {
+    blockedTargets: async () => new Map(),
+    dailyDialCount: async () => 0,
+    withinCallingHours: () => false, // outside calling hours: a test-number call is exempt, a seller's is not
+    pickAiDid: async () => ({ e164: FROM }),
+  };
+  /** The real gate, with no database behind it. */
+  const realGate = () => {
+    deps.gate = vi.fn((d, input) => gateAiCall(d, input, fakeGateDeps));
+  };
+  const run = (target: Parameters<typeof startAiCall>[0]['target'], s: SessionUser, extra: { slots?: AppointmentSlot[]; returning?: boolean } = {}) =>
+    startAiCall({ db, cfg: gateCfg, session: s, target, plan: 'Opener: hi', ...extra, deps });
+
+  it('1: a practice call by an admin to a listed number is placed, even with consent false on the record', async () => {
+    realGate();
+    deps.loadRecord.mockResolvedValue(record({ consentAiCall: false }));
+    const res = await run(practice, admin);
+    expect(res).toMatchObject({ ok: true, status: 'ringing' });
+    expect(deps.gate.mock.calls[0]![1]).toMatchObject({ isAdmin: true, target: { kind: 'test', toRaw: TEST_NUMBER } });
+    expect(twilio.placed[0]).toMatchObject({ to: TEST_NUMBER, from: FROM });
+  });
+
+  it('2: the practice row and prompt: is_test + practice, the record ids, offered slots, the seller version of the prompt, hand-off to the starter', async () => {
+    realGate();
+    store.handoff.set('005OWNER0000001', 'owner-user-id');
+    const res = await run(practice, admin, { slots: SLOTS, returning: true });
+    if (!res.ok) throw new Error(`not placed: ${res.reason}`);
+    expect(deps.loadRecord).toHaveBeenCalledWith(admin.userId, 'Lead', '00Q5e00000AbCdEFGH');
+    expect(store.rows.get(res.aiCallId)).toMatchObject({
+      isTest: true, practice: true, sfObject: 'Lead', sfRecordId: '00Q5e00000AbCdEFGH', offeredSlots: SLOTS,
+      toE164: TEST_NUMBER, handoffUserId: admin.userId,
+    });
+    const entry = getActiveCall(res.aiCallId)!;
+    expect(entry.isTest).toBe(true);
+    expect(entry.handoffUserId).toBe(admin.userId);
+    expect(entry.prompt).toMatchObject({
+      isTest: false, firstName: 'Jane', address: '12 Oak St, Austin, TX 78701', notes: 'Inherited the house.',
+      returning: true, slots: SLOTS, sellerTimeZone: 'America/Chicago', approvedPlan: 'Opener: hi',
+    });
+  });
+
+  it('3: a practice call by a non-admin is blocked not_admin_for_test, and the row says practice', async () => {
+    realGate();
+    const res = await run(practice, session);
+    expect(res).toMatchObject({ ok: false, reason: 'not_admin_for_test' });
+    expect(twilio.placed).toHaveLength(0);
+    if ('aiCallId' in res) expect(store.rows.get(res.aiCallId)).toMatchObject({ isTest: true, practice: true, status: 'blocked', offeredSlots: [] });
+  });
+
+  it('4: a practice call to a number not on the test list is blocked not_admin_for_test', async () => {
+    realGate();
+    const res = await run({ practice: { ...practice.practice, to: '+16195550123' } }, admin);
+    expect(res).toMatchObject({ ok: false, reason: 'not_admin_for_test' });
+    expect(twilio.placed).toHaveLength(0);
+  });
+
+  it('4b: a practice record that cannot be loaded fails like a record call, before any gate', async () => {
+    deps.loadRecord.mockResolvedValueOnce(null);
+    expect(await run(practice, admin)).toEqual({ ok: false, reason: 'record_not_found' });
+    deps.loadRecord.mockRejectedValueOnce(new Error('sf down'));
+    expect(await run(practice, admin)).toEqual({ ok: false, reason: 'salesforce_error' });
+    expect(deps.gate).not.toHaveBeenCalled();
+  });
+
+  it('5: a record call with slots stores them as offered and gives them to the prompt, in the seller zone', async () => {
+    const res = await run({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' }, session, { slots: SLOTS, returning: true });
+    if (!res.ok) throw new Error('unreachable');
+    expect(store.rows.get(res.aiCallId)).toMatchObject({ isTest: false, practice: false, offeredSlots: SLOTS });
+    expect(getActiveCall(res.aiCallId)!.prompt).toMatchObject({ isTest: false, returning: true, slots: SLOTS, sellerTimeZone: 'America/Los_Angeles' });
+  });
+
+  it('6: a record call without slots stores [] and its prompt is unchanged', async () => {
+    const res = await run({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' }, session);
+    if (!res.ok) throw new Error('unreachable');
+    expect(store.rows.get(res.aiCallId)).toMatchObject({ practice: false, offeredSlots: [] });
+    expect(getActiveCall(res.aiCallId)!.prompt).toEqual({
+      agentName: 'Alex', companyName: 'GG Homes', firstName: 'Jane', address: '12 Oak St, Austin, TX 78701',
+      notes: 'Inherited the house.', isTest: false, callbackNumber: FROM, approvedPlan: 'Opener: hi',
+    });
+  });
+
+  it('a test-number call stays a plain test call: no record, practice false', async () => {
+    const res = await run({ testTo: TEST_NUMBER }, admin);
+    if (!res.ok) throw new Error('unreachable');
+    expect(store.rows.get(res.aiCallId)).toMatchObject({ isTest: true, practice: false, sfRecordId: null, offeredSlots: [] });
   });
 });

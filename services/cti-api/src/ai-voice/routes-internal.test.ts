@@ -303,6 +303,84 @@ describe('POST /internal/ai-calls', () => {
     expect(startInput().plan).toBeNull();
   });
 
+  describe('plan 1D: appointment times, context and practice calls', () => {
+    const SLOT = {
+      id: 'p1', kind: 'phone', start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T18:15:00.000Z',
+      specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
+    };
+    const practiceBody = (target: Record<string, unknown> = {}) => ({
+      orgId: ORG,
+      userId: USER,
+      idempotencyKey: 'practice:55555555-2222-4333-8444-555555555555',
+      target: { kind: 'practice', objectType: 'Lead', recordId: LEAD, to: '+15125550100', planText: PLAN, ...target },
+    });
+
+    it('a record target with slots and context reaches the start with the slots and returning: true', async () => {
+      const res = await post(recordBody({}, { slots: [SLOT], context: { returning: true } }));
+      expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
+      const input = startInput();
+      expect(input.target).toEqual({ objectType: 'Lead', recordId: LEAD });
+      expect(input.slots).toEqual([SLOT]);
+      expect(input.returning).toBe(true);
+    });
+
+    it('a record target without context or slots is not returning and has no slots', async () => {
+      await post(recordBody());
+      expect(startInput().returning).toBe(false);
+      expect(startInput().slots).toBeUndefined();
+    });
+
+    it('a practice target starts a practice call on the real record, through the tenant integration', async () => {
+      const res = await post(practiceBody({ slots: [SLOT], context: { returning: true } }));
+      expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
+      const input = startInput();
+      expect(input.target).toEqual({ practice: { objectType: 'Lead', recordId: LEAD, to: '+15125550100' } });
+      expect(input.plan).toBe(PLAN);
+      expect(input.slots).toEqual([SLOT]);
+      expect(input.returning).toBe(true);
+      await input.deps.loadRecord('any-user', 'Lead', LEAD);
+      expect(deps.loadIntegrationRecord).toHaveBeenCalledWith(db, ORG, 'Lead', LEAD);
+    });
+
+    it('a slot with an id outside p1-p9 / w1-w9 answers 400 invalid_body and reserves nothing', async () => {
+      const res = await post(recordBody({}, { slots: [{ ...SLOT, id: 'x1' }] }));
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: 'invalid_body' });
+      expect(store.reserve).not.toHaveBeenCalled();
+      const practice = await post(practiceBody({ slots: [{ ...SLOT, id: 'x1' }] }));
+      expect(practice.statusCode).toBe(400);
+    });
+
+    it('a replayed practice key returns the stored answer and starts nothing', async () => {
+      await post(practiceBody());
+      const again = await post(practiceBody());
+      expect(again.json()).toEqual({ result: 'placed', aiCallId: CALL });
+      expect(deps.start).toHaveBeenCalledTimes(1);
+    });
+
+    it('a stale practice key looks for the call by the number it rang (as a test key does), not the record', async () => {
+      const body = practiceBody();
+      await store.reserve({ orgId: ORG, key: body.idempotencyKey, hash: (await import('./request-store.js')).requestHash(JSON.stringify(body)), userId: USER });
+      const [key, row] = [...store.rows.entries()][0]!;
+      const old = new Date(NOW.getTime() - 11 * 60_000);
+      store.rows.set(key, { ...row, createdAt: old, updatedAt: old });
+      store.calls.push({ id: CALL, status: 'ringing', blockReason: null, callSid: 'CA1' });
+      const res = await post(body);
+      expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
+      expect(deps.start).not.toHaveBeenCalled();
+      expect(store.findCallSince).toHaveBeenCalledWith({
+        orgId: ORG, userId: USER, sfRecordId: null, toE164: '+15125550100', since: new Date(NOW.getTime() - 11 * 60_000 - 5_000),
+      });
+    });
+
+    it('a practice plan that fails the CF-9 check is plan_rejected before anything is reserved', async () => {
+      const res = await post(practiceBody({ planText: 'Opener: Offer them $250k for the house.' }));
+      expect(res.json()).toEqual({ result: 'failed', reason: 'plan_rejected', aiCallId: null });
+      expect(store.reserve).not.toHaveBeenCalled();
+      expect(deps.start).not.toHaveBeenCalled();
+    });
+  });
+
   it('11: the signature covers the raw bytes (unusual spacing still verifies)', async () => {
     const raw = `{ "orgId" : "${ORG}",\n  "userId":"${USER}" , "idempotencyKey": "touch:abc:1", "target": {"kind":"record","objectType":"Lead","recordId":"${LEAD}","planText":"Opener: hi"} }`;
     const res = await post(null, { raw });

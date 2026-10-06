@@ -100,7 +100,9 @@ export function ctiCallStatus(callStatus: string): CtiCallStatus {
  * conversation is not the rep's talk time.
  */
 export function ctiCallValues(row: AiCallRow, callStatus: string): NewCtiCall {
-  const links = row.sfObject && row.sfRecordId ? taskLinks(row.sfObject, row.sfRecordId) : null;
+  // A test or practice call (plan 1D: is_test, with the record's ids) rang a test number: its calls row must never count
+  // as a dial to the record's person (contact history, rollover), so it links to no record.
+  const links = !row.isTest && row.sfObject && row.sfRecordId ? taskLinks(row.sfObject, row.sfRecordId) : null;
   return {
     orgId: row.orgId,
     userId: row.startedBy,
