@@ -208,6 +208,19 @@ describe('POST /internal/ai-calls — practice_browser (plan 1E Task 7)', () => 
     expect(deps.start).toHaveBeenCalledTimes(1);
   });
 
+  it('13 (1D m3): a stale key whose request linked its call adopts that call by id and starts nothing', async () => {
+    const body = browserBody();
+    await requests.reserve({ orgId: ORG, key: KEY, hash: requestHash(JSON.stringify(body)), userId: USER });
+    const old = new Date(NOW.getTime() - 11 * 60_000);
+    requests.rows.set(KEY, { ...requests.rows.get(KEY)!, aiCallId: CALL, createdAt: old, updatedAt: old });
+    vi.mocked(requests.findCall).mockResolvedValueOnce({ id: CALL, status: 'in_progress', blockReason: null, callSid: 'CA1' });
+    expect((await post(INTERNAL_AI_CALLS_PATH, body)).json()).toEqual({ result: 'placed', aiCallId: CALL });
+    expect(requests.findCall).toHaveBeenCalledWith(ORG, USER, CALL);
+    expect(requests.findCallSince).not.toHaveBeenCalled();
+    expect(deps.start).not.toHaveBeenCalled();
+    expect(requests.rows.get(KEY)!.response).toEqual({ result: 'placed', aiCallId: CALL });
+  });
+
   it('14: plan text with an amount ("300k") is failed / plan_rejected and nothing is reserved or started (G-5)', async () => {
     const res = await post(INTERNAL_AI_CALLS_PATH, browserBody({ planText: 'Opener: They said they would take 300k for it.' }));
     expect(res.json()).toEqual({ result: 'failed', reason: 'plan_rejected', aiCallId: null });
