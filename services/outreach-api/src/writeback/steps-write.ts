@@ -16,7 +16,7 @@ import type { Change, WritePlan } from './plan.js';
 import { changesFieldText, chatterMarker, chatterText, ptWords } from './render.js';
 import { isDone, ownerOf, ptToday, RecordGoneError, saveStep, throwIfNotARefusal, type RowRun } from './row-run.js';
 import { writeTarget } from './store.js';
-import { appointmentWords, createdLines, refusedWords, renderInputFor, sellerTimeZone, stripUrls, writtenChanges, type NotWritten } from './words.js';
+import { appointmentWords, createdLines, refusedWords, renderInputFor, sellerTimeZone, stripUrls, taskMade, writtenChanges, type NotWritten } from './words.js';
 
 const KIND = { phone: 'phone call', walkthrough: 'walkthrough' } as const;
 const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v : null);
@@ -246,7 +246,7 @@ export async function chatterStep(run: RowRun, plan: WritePlan, appt: Appointmen
   if (plan.result === 'other' && written.length === 0 && !createdAny) return saveStep(run, 'chatter', { status: 'skipped', detail: 'nothing to post' });
   const owner = await ownerOf(run);
   const booked = plan.appointment?.booked;
-  const words = booked ? appointmentWords({ booked, result: appt, owner, address: str(planData(run).address), sellerZone: sellerTimeZone(run.ctx.call.toE164) }) : null;
+  const words = booked ? appointmentWords({ booked, result: appt, owner, address: str(planData(run).address), sellerZone: sellerTimeZone(run.ctx.call.toE164), task: taskMade(run) }) : null;
   const body = chatterText(renderInputFor(run, plan, { written, notWritten, created: [] }, { appointmentWords: words, owner, summary: stripUrls(run.ctx.call.summary) }));
   const target = writeTarget(run.row);
   const found = await findOurPost(run, target.id);

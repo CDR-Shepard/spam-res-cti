@@ -43,8 +43,36 @@ function sellerPart(start: Date, zone: string | null): string {
 
 const ownerName = (owner: OwnerUser | null): string => owner?.name ?? 'the appointment owner';
 
-/** The Chatter post's "Booked:" words: what was booked (or held), with whom and when, or why it was not. */
-export function appointmentWords(i: { booked: BookedAppointment; result: AppointmentResult | null; owner: OwnerUser | null; address: string | null; sellerZone: string | null }): string | null {
+/** Whether the follow-up Task was made (with the refusal's code when not); null when no Task step ran. */
+export interface TaskMade {
+  made: boolean;
+  code?: string | null;
+}
+
+/** The task step's result for this row (the conflict, refused-Event and passed-time Task), or null when it made none. */
+export function taskMade(run: RowRun): TaskMade | null {
+  const t = run.row.steps.task;
+  if (t?.status === 'done' && typeof t.taskId === 'string') return { made: true };
+  if (t?.status === 'failed') return { made: false, code: t.detail ?? null };
+  return null;
+}
+
+/** " (Task to Grant Golden)" only when the Task exists; a refused one is said to be refused (final review I-1). */
+function taskPart(name: string, task: TaskMade | null): string {
+  if (task === null) return '';
+  if (task.made) return ` (Task to ${name})`;
+  return ` (the Task to ${name} was refused${task.code ? `, ${task.code}` : ''}: follow up by hand)`;
+}
+
+/** The Chatter post's "Booked:" words: what was booked (or held), with whom and when, or why it was not. Never claims a refused hold or Task. */
+export function appointmentWords(i: {
+  booked: BookedAppointment;
+  result: AppointmentResult | null;
+  owner: OwnerUser | null;
+  address: string | null;
+  sellerZone: string | null;
+  task: TaskMade | null;
+}): string | null {
   const { booked, result, owner } = i;
   const kind = KIND_WORDS[booked.kind];
   const start = new Date(booked.start);
@@ -57,13 +85,15 @@ export function appointmentWords(i: { booked: BookedAppointment; result: Appoint
       return `${kind} with ${owner?.firstName ?? name}${at}, ${when}${sellerPart(start, i.sellerZone)}`;
     }
     case 'conflict':
-      return `${kind} for ${when} not booked: the calendar was taken (Task to ${name})`;
+      return `${kind} for ${when} not booked: the calendar was taken${taskPart(name, i.task)}`;
     case 'refused':
-      return `${kind} for ${when} not booked: Salesforce refused the Event, ${result.code} (Task to ${name})`;
+      return `${kind} for ${when} not booked: Salesforce refused the Event, ${result.code}${taskPart(name, i.task)}`;
     case 'expired':
-      return `${kind} for ${when} not booked: the time passed before it could be saved (Task to ${name})`;
-    case 'lead_hold':
-      return `${kind} ${when} held on ${name}'s calendar; the Lead was not converted (Task to ${name})`;
+      return `${kind} for ${when} not booked: the time passed before it could be saved${taskPart(name, i.task)}`;
+    case 'lead_hold': {
+      const held = result.eventId !== null ? `${kind} ${when} held on ${name}'s calendar` : `${kind} for ${when} not held: Salesforce refused the hold`;
+      return `${held}; the Lead was not converted${taskPart(name, { made: result.taskId !== null, code: result.taskCode ?? null })}`;
+    }
     default:
       return null;
   }
@@ -106,7 +136,9 @@ export function renderInputFor(run: RowRun, plan: WritePlan, applied: Applied, e
   const data = convert?.data ?? {};
   const refused = convert === undefined || converted || convert.detail === 'CONVERTED_WITHOUT_OPPORTUNITY' ? null : (convert.detail ?? 'not converted');
   // The booked time passed (I-1): no hold and no "convert and book" Task were made, so the reason is said on its own.
-  const passed = (run.row.steps.appointment?.data?.result as { kind?: unknown } | undefined)?.kind === 'expired';
+  const result = run.row.steps.appointment?.data?.result as Partial<Extract<AppointmentResult, { kind: 'lead_hold' }>> | { kind?: unknown } | undefined;
+  const passed = result?.kind === 'expired';
+  const hold = result?.kind === 'lead_hold' ? (result as Extract<AppointmentResult, { kind: 'lead_hold' }>) : null;
   return {
     at: run.ctx.call.endedAt ?? run.deps.now,
     outcomeWords: OUTCOME_WORDS[run.ctx.call.outcome] ?? run.ctx.call.outcome,
@@ -125,6 +157,15 @@ export function renderInputFor(run: RowRun, plan: WritePlan, applied: Applied, e
         }
       : null,
     conversionRefused: passed ? null : refused,
+    fallback:
+      hold === null
+        ? null
+        : {
+            hold: hold.eventId !== null,
+            task: hold.taskId !== null,
+            ...(hold.holdCode === undefined ? {} : { holdCode: hold.holdCode }),
+            ...(hold.taskCode === undefined ? {} : { taskCode: hold.taskCode }),
+          },
     notConverted: passed ? refused : null,
     transferredTo: run.ctx.call.transferredTo,
   };

@@ -210,7 +210,13 @@ describe('holdForLead (fallback only)', () => {
 
     const f = org();
     f.onCreate = (c) => (c.sobject === 'Event' ? refused('INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY') : undefined);
-    expect(await hold(f)).toEqual({ kind: 'lead_hold', eventId: null, taskId: expect.stringMatching(/^00T/) });
+    expect(await hold(f)).toEqual({ kind: 'lead_hold', eventId: null, taskId: expect.stringMatching(/^00T/), holdCode: 'INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY' });
+  });
+
+  it('final review I-1: a refused Task keeps its code on the result (taskId null)', async () => {
+    const f = org();
+    f.onCreate = (c) => (c.sobject === 'Task' ? refused('FIELD_CUSTOM_VALIDATION_EXCEPTION') : undefined);
+    expect(await hold(f)).toEqual({ kind: 'lead_hold', eventId: expect.stringMatching(/^00U/), taskId: null, taskCode: 'FIELD_CUSTOM_VALIDATION_EXCEPTION' });
   });
 });
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AT, CALL_ID, LEAD, URL, base, booked, oppBooking } from '../test/render-fixtures.js';
 import { buildWritePlan, type Change, type WritePlan } from './plan.js';
-import { CHANGES_MAX, CHATTER_MAX, changesFieldText, chatterMarker, chatterText, ptWords } from './render.js';
+import { CHANGES_MAX, CHATTER_MAX, changesFieldText, chatterMarker, chatterText, ptWords, type RenderInput } from './render.js';
 
 describe('ptWords', () => {
   it('says the Pacific wall clock with PT, across both DST changes', () => {
@@ -84,7 +84,7 @@ describe('changesFieldText (spec §5.5)', () => {
       converted: null,
     });
     const created = ['Hold: AI-booked phone call – convert Jane Seller, Wed Oct 7, 11:00 AM PT, owner Grant Golden', 'Task: convert and book, owner Grant Golden', 'Chatter post'];
-    const text = changesFieldText(base(plan, plan.changes, { applied: { written: plan.changes, notWritten: [], created }, conversionRefused: 'FIELD_CUSTOM_VALIDATION_EXCEPTION: Hunt_Winner_Owner_Change' }));
+    const text = changesFieldText(base(plan, plan.changes, { applied: { written: plan.changes, notWritten: [], created }, conversionRefused: 'FIELD_CUSTOM_VALIDATION_EXCEPTION: Hunt_Winner_Owner_Change', fallback: { hold: true, task: true } }));
     expect(text).toBe(
       [
         'AI call on Tue Oct 6, 3:12 PM PT · Appointment set · AI call 6f0c2a9e…',
@@ -188,7 +188,7 @@ describe('chatterText (spec §5.6)', () => {
       now: AT,
       converted: null,
     });
-    expect(chatterText(base(plan, plan.changes, { summary: null, conversionRefused: 'INSUFFICIENT_ACCESS: no Convert Leads permission' }))).toBe(
+    expect(chatterText(base(plan, plan.changes, { summary: null, conversionRefused: 'INSUFFICIENT_ACCESS: no Convert Leads permission', fallback: { hold: true, task: true } }))).toBe(
       [
         'AI call 6f0c2a9e · Oct 6, 3:12 PM PT · Appointment set',
         'Not converted to an Opportunity (INSUFFICIENT_ACCESS: no Convert Leads permission): a hold and a "convert and book" Task were created.',
@@ -234,5 +234,58 @@ describe('chatterText (spec §5.6)', () => {
     const text = chatterText(base(plan, written, { summary: 'Hi\u0000 there\u001b[31m.\tOk' }));
     expect(text).toContain('Summary: Hi there[31m.Ok');
     expect(text).not.toMatch(/[\u0000-\u0009\u000B-\u001F\u007F]/);
+  });
+});
+
+describe('final review I-1: the fallback is said as it was made, never assumed', () => {
+  const leadPlan = () =>
+    buildWritePlan({
+      sfObject: 'Lead',
+      outcome: 'appointment_set',
+      mapped: null,
+      current: { Status: 'Long Term Follow-Up', Rating: null },
+      researchStatus: 'Long Term Follow-Up',
+      fields: LEAD,
+      appointment: booked('phone'),
+      callbackAt: null,
+      now: AT,
+      converted: null,
+    });
+  const REASON = 'INSUFFICIENT_ACCESS: no Convert Leads permission';
+  const changesLine = (fallback: RenderInput['fallback']) => {
+    const plan = leadPlan();
+    const text = changesFieldText(base(plan, plan.changes, { conversionRefused: REASON, ...(fallback === undefined ? {} : { fallback }) }));
+    return text.split('\n').find((l) => l.startsWith('- Lead not converted'));
+  };
+  const chatterLine = (fallback: RenderInput['fallback']) => {
+    const plan = leadPlan();
+    const text = chatterText(base(plan, plan.changes, { summary: null, conversionRefused: REASON, ...(fallback === undefined ? {} : { fallback }) }));
+    return text.split('\n').find((l) => l.startsWith('Not converted'));
+  };
+
+  it('a refused hold: the Task is named, the hold is said to be missing', () => {
+    const f = { hold: false, task: true, holdCode: 'INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY' };
+    expect(changesLine(f)).toBe(`- Lead not converted: ${REASON}; a "convert and book" Task was created, but no hold could be put on the calendar (INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY)`);
+    expect(chatterLine(f)).toBe(`Not converted to an Opportunity (${REASON}): a "convert and book" Task was created, but no hold could be put on the calendar (INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY).`);
+  });
+
+  it('a refused Task: the hold is named, the Task is said to be refused', () => {
+    const f = { hold: true, task: false, taskCode: 'FIELD_CUSTOM_VALIDATION_EXCEPTION' };
+    expect(changesLine(f)).toBe(`- Lead not converted: ${REASON}; a hold was put on the calendar, but Salesforce refused the "convert and book" Task (FIELD_CUSTOM_VALIDATION_EXCEPTION)`);
+    expect(chatterLine(f)).toContain('a hold was put on the calendar, but Salesforce refused the "convert and book" Task');
+  });
+
+  it('both refused (no ConvertLeads and no EditEvent): nothing is claimed, and the post says to book it by hand', () => {
+    const f = { hold: false, task: false };
+    expect(changesLine(f)).toBe(`- Lead not converted: ${REASON}; Salesforce refused both the hold and the "convert and book" Task: nothing is on the calendar, book it by hand`);
+    expect(chatterLine(f)).toBe(`Not converted to an Opportunity (${REASON}): Salesforce refused both the hold and the "convert and book" Task: nothing is on the calendar, book it by hand.`);
+    const plan = leadPlan();
+    const all = changesFieldText(base(plan, plan.changes, { conversionRefused: REASON, fallback: f })) + chatterText(base(plan, plan.changes, { conversionRefused: REASON, fallback: f }));
+    expect(all).not.toMatch(/were created|was created|was put on the calendar/);
+  });
+
+  it('unknown (no fallback result): only the reason, no claim about a hold or a Task', () => {
+    expect(changesLine(undefined)).toBe(`- Lead not converted: ${REASON}`);
+    expect(chatterLine(undefined)).toBe(`Not converted to an Opportunity (${REASON}).`);
   });
 });

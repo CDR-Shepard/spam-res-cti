@@ -37,6 +37,11 @@ export interface RenderInput {
   conversion: { leadName: string | null; ownerName: string; adopted: boolean; convertedBy?: string | null } | null;
   /** Set on the fallback path: why the Lead could not be converted. */
   conversionRefused: string | null;
+  /**
+   * What the fallback actually made (final review I-1): the hold and the "convert and book" Task, each only when
+   * Salesforce took it, with the refusal's code when not. Absent: unknown, so neither is claimed.
+   */
+  fallback?: { hold: boolean; task: boolean; holdCode?: string; taskCode?: string } | null;
   /** Why a Lead was not converted when no hold or "convert and book" Task was made either (the booked time passed, I-1). */
   notConverted?: string | null;
   /** Who a booked call was then transferred to (plan.bookingThen 'transferred'); null or absent reads "a rep". */
@@ -119,6 +124,17 @@ function dncRefusals(i: RenderInput): Array<{ label: string; reason: string }> {
 
 const KIND_WORDS: Readonly<Record<string, string>> = { phone: 'phone consultation', walkthrough: 'walkthrough' };
 
+const codePart = (code: string | undefined): string => (code === undefined || oneLine(code) === '' ? '' : ` (${capped(oneLine(code), 80)})`);
+
+/** What the fallback made, in words, or null when unknown: a hold and a Task are named only when Salesforce took them (I-1). */
+function fallbackWords(f: RenderInput['fallback']): string | null {
+  if (f === undefined || f === null) return null;
+  if (f.hold && f.task) return 'a hold and a "convert and book" Task were created';
+  if (f.task) return `a "convert and book" Task was created, but no hold could be put on the calendar${codePart(f.holdCode)}`;
+  if (f.hold) return `a hold was put on the calendar, but Salesforce refused the "convert and book" Task${codePart(f.taskCode)}`;
+  return 'Salesforce refused both the hold and the "convert and book" Task: nothing is on the calendar, book it by hand';
+}
+
 /** "; then transferred to Evren" / "; then the transfer failed" when the booked call went on to a transfer (M-9). */
 function thenWords(i: RenderInput): string {
   if (i.plan.bookingThen === 'transfer_failed') return '; then the transfer failed';
@@ -133,6 +149,13 @@ function bookedWords(plan: WritePlan): string | null {
   return b ? `${KIND_WORDS[b.kind] ?? b.kind} ${ptWords(new Date(b.start))}` : null;
 }
 
+/** "; <what the fallback made>", or nothing when that is unknown. */
+function withFallback(i: RenderInput): string {
+  const words = fallbackWords(i.fallback);
+  if (words === null) return '';
+  return i.fallback?.hold && i.fallback.task ? `; ${words} instead` : `; ${words}`;
+}
+
 /**
  * The AI Last Call Changes field (spec §5.5): header, a "Booked …; then transferred …" line (M-9), then Could not set
  * do-not-call flag (M-8), Changed, Not changed since the call, Created, Kept the rep's value, Not written, Not changed
@@ -142,7 +165,7 @@ export function changesFieldText(i: RenderInput): string {
   const header = `AI call on ${ptWords(i.at)} · ${oneLine(i.outcomeWords)} · AI call ${oneLine(i.aiCallId).slice(0, 8)}…`;
   const created = [...(i.conversion ? [conversionLine(i.conversion)] : []), ...i.applied.created.map(oneLine)];
   const refused = [
-    ...(i.conversionRefused === null ? [] : [`Lead not converted: ${oneLine(i.conversionRefused)}; a hold and a "convert and book" Task were created instead`]),
+    ...(i.conversionRefused === null ? [] : [`Lead not converted: ${oneLine(i.conversionRefused)}${withFallback(i)}`]),
     ...(i.notConverted === undefined || i.notConverted === null ? [] : [`Lead not converted: ${oneLine(i.notConverted)}`]),
   ];
   const booked = bookedWords(i.plan);
@@ -192,6 +215,9 @@ function changedLine(written: readonly Change[], short: boolean): string {
   return `Changed: ${[...first, ...more].join('; ')}`;
 }
 
+const notConvertedLine = (refused: string, made: string | null): string =>
+  made === null ? `Not converted to an Opportunity (${refused}).` : `Not converted to an Opportunity (${refused}): ${made}.`;
+
 /** Every line but the URL line, for one cut level. */
 function chatterHead(i: RenderInput, cut: ChatterCut): string[] {
   const summary = i.summary === null ? '' : oneLine(i.summary);
@@ -205,7 +231,7 @@ function chatterHead(i: RenderInput, cut: ChatterCut): string[] {
     `${chatterMarker(i.aiCallId)} ${ptShort(i.at)} · ${capped(oneLine(i.outcomeWords), 60)}`,
     ...(dnc.length > 0 ? [`${DNC_TITLE}: ${capped(dnc.join(', '), REFUSAL_MAX)} (see AI Last Call Changes)`] : []),
     ...(i.conversion ? [i.conversion.adopted ? `${repConverted(i.conversion)}.` : 'Converted from Lead by the AI after the seller booked.'] : []),
-    ...(refused === null ? [] : [`Not converted to an Opportunity (${refused}): a hold and a "convert and book" Task were created.`]),
+    ...(refused === null ? [] : [notConvertedLine(refused, fallbackWords(i.fallback))]),
     ...(booked === '' ? [] : [`Booked: ${booked}`]),
     ...(summary === '' || cut.summary === 'none' ? [] : [`Summary: ${summaryText(summary, cut.summary)}`]),
     ...(cut.sellerSaid && filled.length > 0 ? [`Seller said: ${filled.map((c) => `${oneLine(c.label)} ${shown(c.after)}`).join(' · ')}`] : []),

@@ -101,6 +101,17 @@ describe.skipIf(!pgLane)('runWritebacks on Opportunities (real Postgres)', () =>
     expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'done', sfTaskId: expect.stringMatching(/^00T/), sfEventId: null });
   });
 
+  it('final review I-1: the slot is taken and the conflict Task is refused: the post says the Task was refused, never that it was sent', async () => {
+    const s = await booked();
+    const f = fakeOrg({ ...oppState(s.recordId), busy: [{ StartDateTime: '2026-10-07T17:45:00.000+0000', EndDateTime: '2026-10-07T18:30:00.000+0000', IsAllDayEvent: false }] });
+    f.onCreate = (c) => (c.sobject === 'Task' ? refused('FIELD_CUSTOM_VALIDATION_EXCEPTION') : undefined);
+    await runWritebacks(depsFor(db, f));
+    const post = String(f.creates.find((c) => c.sobject === 'FeedItem')!.fields.Body);
+    expect(post).toContain('not booked: the calendar was taken (the Task to Grant Golden was refused, FIELD_CUSTOM_VALIDATION_EXCEPTION: follow up by hand)');
+    expect(changesText(f.updates[0]!.fields)).not.toContain('Task to Grant Golden: call the seller');
+    expect(await writebackById(db, s.writebackId)).toMatchObject({ sfTaskId: null });
+  });
+
   it('5: a 503 on the PATCH after the Event: back to pending with backoff; the next run starts at fields and makes no second Event', async () => {
     const s = await booked();
     const f = fakeOrg(oppState(s.recordId));

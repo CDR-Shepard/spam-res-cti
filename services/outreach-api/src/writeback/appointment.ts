@@ -25,7 +25,8 @@ export type AppointmentResult =
    */
   | { kind: 'expired'; holdId?: string }
   | { kind: 'refused'; code: string }
-  | { kind: 'lead_hold'; eventId: string | null; taskId: string | null };
+  /** A null id was refused; its code is kept so the changes text and the post can say so (final review I-1). */
+  | { kind: 'lead_hold'; eventId: string | null; taskId: string | null; holdCode?: string; taskCode?: string };
 
 /**
  * The booked time has come by `now` (its START, sweep D-25 N4: an appointment already under way is as good as missed): no
@@ -202,12 +203,12 @@ export async function createTaskOnce(client: SalesforceClient, fields: Record<st
   throw new WriteRefusedError(firstCode(created), `Salesforce refused the Task: ${firstCode(created)}`);
 }
 
-/** Null when Salesforce refused (the caller logs the code); anything else propagates for a retry. */
-async function refusedAsNull<T>(run: () => Promise<T>): Promise<T | null> {
+/** The id, or null with the refusal's code when Salesforce refused; anything else propagates for a retry. */
+async function refusedAsNull(run: () => Promise<string>): Promise<{ id: string | null; code?: string }> {
   try {
-    return await run();
+    return { id: await run() };
   } catch (err) {
-    if (err instanceof WriteRefusedError) return null;
+    if (err instanceof WriteRefusedError) return { id: null, code: err.code };
     throw err;
   }
 }
@@ -232,13 +233,14 @@ export async function holdForLead(
 ): Promise<AppointmentResult> {
   const lead = checkId(i.leadId, 'leadId');
   const owner = checkId(i.booked.specialistSfUserId, 'the appointment owner');
-  const eventId = await refusedAsNull(async () => {
+  const hold = await refusedAsNull(async () => {
     const found = await findLeadHold(client, i.booked);
     if (found !== null) return found;
     const created = await createOne(client, 'Event', leadHoldFields({ booked: i.booked, leadName: i.leadName, leadId: lead, aiCallId: i.aiCallId }));
     if (created.success && created.id) return created.id;
     throw new WriteRefusedError(firstCode(created), 'hold refused');
   });
+  const eventId = hold.id;
   const when = ptWords(new Date(i.booked.start));
   const subject = `AI booked a ${KIND_WORDS[i.booked.kind]} for ${when} but could not convert this Lead — convert it and book it`;
   const description = [
@@ -246,6 +248,12 @@ export async function holdForLead(
     `Reason: ${oneLine(i.reason)}`,
     eventId === null ? 'No hold could be put on the calendar: book the time now.' : 'A hold is on the calendar at that time: convert the Lead, book it on the Opportunity, then delete the hold.',
   ].join('\n');
-  const taskId = await refusedAsNull(() => createTaskOnce(client, taskFields({ whatId: null, whoId: lead, ownerId: owner, subject, description, today: i.today })));
-  return { kind: 'lead_hold', eventId, taskId };
+  const task = await refusedAsNull(() => createTaskOnce(client, taskFields({ whatId: null, whoId: lead, ownerId: owner, subject, description, today: i.today })));
+  return {
+    kind: 'lead_hold',
+    eventId,
+    taskId: task.id,
+    ...(hold.code === undefined ? {} : { holdCode: hold.code }),
+    ...(task.code === undefined ? {} : { taskCode: task.code }),
+  };
 }

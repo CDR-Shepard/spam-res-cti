@@ -148,6 +148,59 @@ describe.skipIf(!pgLane)('runWritebacks on Leads (real Postgres)', () => {
     expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'partial', lastError: 'FIELD_CUSTOM_VALIDATION_EXCEPTION', convertedOpportunityId: null });
   });
 
+  describe('final review I-1: the changes text and the post say only what the fallback made', () => {
+    const postOf = (f: ReturnType<typeof fakeOrg>) => String(f.creates.find((c) => c.sobject === 'FeedItem')!.fields.Body);
+    const refusing = (sobjects: string[], code: string) => (c: { sobject: string }) => (sobjects.includes(c.sobject) ? refused(code) : undefined);
+    const refusedConversion = (f: ReturnType<typeof fakeOrg>) => {
+      f.onSoap = () => convertRefused('INSUFFICIENT_ACCESS', 'no Convert Leads permission');
+    };
+
+    it('a refused hold: no hold is claimed; the Task is', async () => {
+      const s = await bookedLead();
+      const f = fakeOrg(leadState(s.recordId));
+      refusedConversion(f);
+      f.onCreate = refusing(['Event'], 'INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY');
+      await runWritebacks(depsFor(db, f));
+      const changes = changesOf(f.updates[0]!.fields);
+      expect(changes).toContain('a "convert and book" Task was created, but no hold could be put on the calendar (INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY)');
+      expect(changes).not.toContain('a hold and a "convert and book" Task were created');
+      expect(changes).not.toContain('Hold on');
+      const post = postOf(f);
+      expect(post).toContain('not held: Salesforce refused the hold');
+      expect(post).not.toContain("held on Grant Golden's calendar");
+      expect(post).not.toContain('a hold and a "convert and book" Task were created');
+    });
+
+    it('a refused Task: the hold is claimed; the Task is said to be refused', async () => {
+      const s = await bookedLead();
+      const f = fakeOrg(leadState(s.recordId));
+      refusedConversion(f);
+      f.onCreate = refusing(['Task'], 'FIELD_CUSTOM_VALIDATION_EXCEPTION');
+      await runWritebacks(depsFor(db, f));
+      const changes = changesOf(f.updates[0]!.fields);
+      expect(changes).toContain('a hold was put on the calendar, but Salesforce refused the "convert and book" Task (FIELD_CUSTOM_VALIDATION_EXCEPTION)');
+      expect(changes).not.toContain('Task to Grant Golden: convert the Lead');
+      const post = postOf(f);
+      expect(post).toContain('the Task to Grant Golden was refused, FIELD_CUSTOM_VALIDATION_EXCEPTION');
+      expect(post).not.toContain('(Task to Grant Golden)');
+    });
+
+    it('both refused (no ConvertLeads and no EditEvent): nothing is claimed made, and both texts say to book it by hand', async () => {
+      const s = await bookedLead();
+      const f = fakeOrg(leadState(s.recordId));
+      refusedConversion(f);
+      f.onCreate = refusing(['Event', 'Task'], 'INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY');
+      await runWritebacks(depsFor(db, f));
+      const changes = changesOf(f.updates[0]!.fields);
+      expect(changes).toContain('Salesforce refused both the hold and the "convert and book" Task: nothing is on the calendar, book it by hand');
+      expect(changes).not.toMatch(/were created|was created|was put on the calendar|\nCreated\n/);
+      const post = postOf(f);
+      expect(post).toContain('Salesforce refused both the hold and the "convert and book" Task');
+      expect(post).not.toMatch(/were created|held on|\(Task to/);
+      expect(await writebackById(db, s.writebackId)).toMatchObject({ sfEventId: null, sfTaskId: null });
+    });
+  });
+
   it('3d: conversion switched off: no SOAP at all, the fallback, and the row is done', async () => {
     const s = await bookedLead({ aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [GRANT], convertLeads: false } });
     const f = fakeOrg(leadState(s.recordId));
