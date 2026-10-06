@@ -240,6 +240,30 @@ describe('buildWritePlan: the appointment', () => {
     expect(p.patch).toEqual({});
     expect(p.kept).toEqual([{ field: 'Timeline__c', label: 'Timeline', current: '90 Days', proposed: '30 Days', evidence: 'within a month' }]);
   });
+  describe('final review: a Lead a rep converted gets the rep guard on its Opportunity', () => {
+    const repConverted = (current: Record<string, unknown>) =>
+      buildWritePlan(opp({ outcome: 'appointment_set', appointment: BOOKED, current, researchStatus: null, converted: { fromLeadId: '00Q8X00001AbCdEUAV', byRep: true }, mapped: null }));
+
+    it("a rep's Rating is kept (Hot fills only a blank); the open Stage still moves to Appointment Set", () => {
+      expect(repConverted({ StageName: 'New Opportunity', Rating__c: 'Warm' }).appointment?.onBooked).toEqual({ StageName: 'Appointment Set' });
+      expect(repConverted({ StageName: 'Pending Appointment', Rating__c: null }).appointment?.onBooked).toEqual({ StageName: 'Appointment Set', Rating__c: 'Hot' });
+    });
+
+    it('a Stage the rep closed or moved past the open stages is left alone, and Rating with it', () => {
+      const p = repConverted({ StageName: 'Closed Lost', Rating__c: null });
+      expect(p.appointment?.onBooked).toEqual({});
+      expect(p.skipped).toEqual([
+        { field: 'StageName', label: 'Stage', why: 'not_from_state' },
+        { field: 'Rating__c', label: 'Rating', why: 'not_from_state' },
+      ]);
+    });
+
+    it('our own conversion is unchanged: Hot is set', () => {
+      const ours = buildWritePlan(opp({ outcome: 'appointment_set', appointment: BOOKED, current: { StageName: 'New Opportunity', Rating__c: 'Warm' }, researchStatus: null, converted: { fromLeadId: '00Q8X00001AbCdEUAV' }, mapped: null }));
+      expect(ours.appointment?.onBooked).toEqual({ StageName: 'Appointment Set', Rating__c: 'Hot' });
+    });
+  });
+
   it('19: a Lead that books but was not converted takes the hold fallback: Working and Hot in the base patch', () => {
     const p = buildWritePlan(lead({ outcome: 'appointment_set', appointment: BOOKED }));
     expect(p.result).toBe('appointment');

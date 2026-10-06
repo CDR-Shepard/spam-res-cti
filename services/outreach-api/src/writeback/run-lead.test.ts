@@ -111,6 +111,28 @@ describe.skipIf(!pgLane)('runWritebacks on Leads (real Postgres)', () => {
     expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'done', convertedOpportunityId: NEW_OPP });
   });
 
+  it('final review: conversion switched off after our conversion was saved: the retry adopts it, never "Lead not converted"', async () => {
+    const s = await bookedLead();
+    const f = fakeOrg(leadState(s.recordId));
+    let failCarry = true;
+    f.onUpdate = (c) => {
+      if (c.sobject === 'Opportunity' && failCarry) {
+        failCarry = false;
+        return transportError();
+      }
+      return undefined;
+    };
+    expect((await runWritebacks(depsFor(db, f))).retried).toBe(1);
+    expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'pending', convertedOpportunityId: NEW_OPP });
+    await db.execute(sql`update organizations set settings = jsonb_set(settings, '{aiCallBooking,convertLeads}', 'false'::jsonb) where id = ${s.orgId}::uuid`);
+    expect((await runWritebacks(depsFor(db, f, { now: new Date(RUN_AT.getTime() + 2 * 60_000) }))).done).toBe(1);
+    expect(converts(f)).toHaveLength(1);
+    const main = f.updates.filter((u) => u.sobject === 'Opportunity' && 'AI_Last_Call_Changes__c' in u.fields).at(-1)!;
+    expect(changesOf(main.fields)).not.toContain('Lead not converted');
+    expect(changesOf(main.fields)).toContain('Converted Lead "Jane Seller" into this Opportunity');
+    expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'done', convertedOpportunityId: NEW_OPP });
+  });
+
   it('M11: adopting our own lost-answer conversion, a Lead Manager set since then is kept (fill-blank rule)', async () => {
     const s = await bookedLead();
     const state = leadState(s.recordId);

@@ -90,7 +90,10 @@ export async function convertStepRun(run: RowRun): Promise<{ run: RowRun; result
   if (saved === 'done' && run.row.convertedOpportunityId !== null) return { run, result: 'converted' };
   if (saved === 'failed' || saved === 'skipped') return { run, result: run.row.steps.convert?.detail === 'CONVERTED_WITHOUT_OPPORTUNITY' ? 'no_opportunity' : 'fallback' };
 
-  if (!bookingSettings({ settings: run.ctx.orgSettings }, run.deps.defaultSpecialists).convertLeads) {
+  // A conversion we already saved (its carry failed after the ids were stored) is adopted whatever the switch says now:
+  // the record is converted, so "conversion is off" would be untrue (final review).
+  const ours = run.row.convertedOpportunityId !== null;
+  if (!ours && !bookingSettings({ settings: run.ctx.orgSettings }, run.deps.defaultSpecialists).convertLeads) {
     return { run: await saveStep(run, 'convert', { status: 'skipped', detail: 'conversion is off' }), result: 'fallback' };
   }
   const booked = run.ctx.call.appointment!;
@@ -164,7 +167,7 @@ export async function planStep(run: RowRun): Promise<{ kind: 'plan'; run: RowRun
     appointment: run.ctx.call.appointment,
     callbackAt: run.ctx.call.callbackAt,
     now: run.deps.now,
-    converted: converted ? { fromLeadId: run.row.sfRecordId } : null,
+    converted: converted ? { fromLeadId: run.row.sfRecordId, byRep: run.row.steps.convert?.data?.repConverted === true } : null,
     practice: run.ctx.call.practice,
   });
   // The Status/Stage as the plan saw it: the PATCH re-checks the status guard against it (I-3).
