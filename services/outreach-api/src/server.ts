@@ -30,6 +30,7 @@ import { registerCampaignSelectionRoutes } from './routes/campaign-selection.js'
 import { registerCampaignRoutes } from './routes/campaigns.js';
 import { registerConnectionRoutes } from './routes/connections.js';
 import { registerPracticeCallRoutes } from './routes/practice-calls.js';
+import { registerRecordTestRoutes } from './routes/record-tests.js';
 import { registerReviewRoutes } from './routes/review.js';
 import { registerTeamRoutes } from './routes/team.js';
 import { shutdown } from './shutdown.js';
@@ -159,6 +160,8 @@ async function main(): Promise<void> {
       (scope) => registerAiCallRoutes(scope, { db, cti }),
       (scope) => registerPracticeCallRoutes(scope, { db, clients, cti, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS }),
       (scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, describes }),
+      // Plan 1E: Test a record (admins): preview how the AI would call any Lead or Opportunity, without a campaign.
+      (scope) => registerRecordTestRoutes(scope, { db, clients, cti, model: planModel, describes, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS }),
     ],
   });
   const close = () => shutdown(runner, app);

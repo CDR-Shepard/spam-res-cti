@@ -4,7 +4,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
-import { RecordTest, type CallPlan, type FieldMap } from '@cti/contracts';
+import { RecordTest, type CallPlan } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import type { SalesforceClient } from '@cti/salesforce';
 import { spentTodayMicros } from '../ai/budget.js';
@@ -17,9 +17,9 @@ import { DescribeCache } from '../research/describe.js';
 import { ResearchSnapshot } from '../research/snapshot.js';
 import { validPlan } from '../test/call-plan-fixtures.js';
 import { seedUser } from '../test/call-plan-seed.js';
-import { describeOf, fakeSalesforce } from '../test/fake-sf-client.js';
-import { seedConnection, seedOrg, TEST_FIELD_MAP } from '../test/outreach-fixtures.js';
+import { seedConnection, seedOrg } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
+import { FEBRUARY_CALL, recordTestOrg, RT_FIELD_MAP, RT_LEAD, RT_OPP } from '../test/record-test-org.js';
 import { GRANT, quiet } from '../test/writeback-harness.js';
 import { runPreview, type PreviewDeps } from './preview.js';
 import { insertRecordTest, loadRecordTest, toRecordTest } from './store.js';
@@ -27,62 +27,10 @@ import { insertRecordTest, loadRecordTest, toRecordTest } from './store.js';
 /** Tue Oct 6, 9:00 AM PT: the default phone hours leave free times today and tomorrow. */
 const NOW = new Date('2026-10-06T16:00:00.000Z');
 const MODEL = 'claude-sonnet-5-5';
-const CONSENT = 'AI_Call_Consent__c';
-const LEAD = '00Q8X00001AbCdEUAV';
-const OPP = '0068X00000AbCdEQAV';
-const FIELD_MAP: FieldMap = { Lead: { ...TEST_FIELD_MAP.Lead, consent: CONSENT }, Opportunity: { ...TEST_FIELD_MAP.Opportunity, consent: CONSENT } };
-type Row = Record<string, unknown>;
-
-/** A connected call in February, found by research's archived contact read. */
-const FEBRUARY_CALL = {
-  Id: '00T000000000999AAA', Subject: 'Outbound Call | Connected | Pat', CreatedDate: '2026-02-12T18:00:00.000Z',
-  CallDisposition: 'Connected', TaskSubtype: 'Call', CallType: 'Outbound',
-};
-
-/** Every method touched on the client (and each request's HTTP method), so a test can prove nothing was written. */
-function recording(client: SalesforceClient): { client: SalesforceClient; used: string[] } {
-  const used: string[] = [];
-  const proxy = new Proxy(client as unknown as Record<string | symbol, unknown>, {
-    get(target, prop) {
-      const value = Reflect.get(target, prop);
-      if (typeof prop === 'symbol' || prop === 'then') return value;
-      if (typeof value !== 'function') {
-        used.push(prop);
-        return value;
-      }
-      return (...args: unknown[]) => {
-        used.push(prop === 'request' ? `request ${(args[1] as { method?: string } | undefined)?.method ?? 'GET'}` : prop);
-        return (value as (...a: unknown[]) => unknown).apply(target, args);
-      };
-    },
-  });
-  return { client: proxy as unknown as SalesforceClient, used };
-}
-
-function salesforce(o: { lead?: Row | null; opp?: Row | null; archived?: Row[] } = {}) {
-  const lead = o.lead === null ? [] : [{ Id: LEAD, Name: 'Pat Seller', IsConverted: false, [CONSENT]: true, ...o.lead }];
-  const opp = o.opp === null ? [] : [{ Id: OPP, Name: 'Oak Street', [CONSENT]: false, ...o.opp }];
-  const sf = fakeSalesforce({
-    describes: {
-      Lead: describeOf('Lead', [['Id', 'id'], ['Name'], ['IsConverted', 'boolean'], [CONSENT, 'boolean']]),
-      Opportunity: describeOf('Opportunity', [['Id', 'id'], ['Name'], [CONSENT, 'boolean']]),
-    },
-    queries: [
-      [/FROM Lead WHERE Id = /, lead],
-      [/FROM Opportunity WHERE Id = /, opp],
-      [/FROM OpportunityContactRole/, []],
-      [/ FROM User /, [{ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles' }]],
-      [/FROM Task/, []],
-      [/FROM Event/, []],
-      [/FROM Note/, []],
-      [/FROM ContentDocumentLink/, []],
-      [/FROM EmailMessage/, []],
-      [/FROM FeedItem/, []],
-    ],
-    archived: [[/FROM Task/, o.archived ?? []]],
-  });
-  return recording(sf.client);
-}
+const LEAD = RT_LEAD;
+const OPP = RT_OPP;
+const FIELD_MAP = RT_FIELD_MAP;
+const salesforce = recordTestOrg;
 
 type FakeModel = CallPlanModel & { plan: ReturnType<typeof vi.fn> };
 const fakeModel = (plan: CallPlan = validPlan): FakeModel => ({
