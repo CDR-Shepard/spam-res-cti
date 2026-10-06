@@ -205,7 +205,7 @@ If an AI number had been assigned to a rep before you moved it, that rep's click
 5. **Answer and listen.** The first thing the agent says must be that it is an AI assistant calling for the company, on a recorded line. Fail the test if it does not say so.
 6. **Talk to it** for a minute as a seller. Say you might sell, the house needs work, and you want about a certain amount. It should ask follow-up questions and must not name a price or make an offer.
 7. **Test the transfer:** say "Can I talk to a real person?" Your phone should go quiet and the softphone you have open should ring as an incoming call; under the name and number the ring screen shows **"AI transfer — asked for a person"**. Answer it in the softphone and confirm audio both ways, then hang up. (The call goes to the person who started it, because a test call has no record owner.)
-8. **Test the do-not-call goodbye:** start a second test call, answer, and say "Stop calling me." The agent should apologise, say a short goodbye and hang up within a few seconds. The call is recorded `do_not_call`, but **your test number is not opted out** (plan 1D: a test or practice call rings an admin's own phone, so it never suppresses it). Start a **third** test call from the card: it must be placed and ring as usual. The opt-out write itself is proved on a real call (§6) and by the automated tests; a real call's "stop calling me" always writes the opt-out.
+8. **Test the do-not-call goodbye:** start a second test call, answer, and say "Stop calling me." The agent should apologise, say a short goodbye and hang up within a few seconds. The call is recorded `do_not_call`, but **your test number is not opted out** (plan 1D: a test or practice call rings an admin's own phone, so it never suppresses it). Start a **third** test call from the card: it must be placed and ring as usual. The opt-out write itself is proved on a real call (§6 step 9) and by the automated tests; a real call's "stop calling me" always writes the opt-out.
 9. **Only if your test number was opted out** (by a test call before plan 1D, by a real call to it, or by hand), delete that opt-out so it can be called again; otherwise skip this step. Get the public database URL first. `$PUB` is a live credential: never print or share it:
 
    ```bash
@@ -244,6 +244,13 @@ If an AI number had been assigned to a rep before you moved it, that rep's click
 6. Approve the plan (the record owner or an admin).
 7. **Activate** the campaign (the **Go live** button, then confirm).
 8. Press **Call all approved**.
+9. **Prove the opt-out on this real call** (only on the colleague's or your own second number from step 1, never a prospect). Answer the AI's call and say "Stop calling me." The agent should apologise, say a short goodbye and hang up. Then check the opt-out was written for that number (`$PUB` and your org id as in §5 step 9; replace `+15125550100` with the number the AI called):
+
+   ```bash
+   echo "SELECT id, e164, source, created_at FROM opt_outs WHERE org_id = :'org' AND e164 = :'num' AND source = 'ai_call';" | psql "$PUB" -v org='<org uuid>' -v num='+15125550100'
+   ```
+
+   Expected: exactly one row, `source` `ai_call`, created a moment ago. Zero rows means the opt-out was not written: stop and do not call prospects until it is fixed. If that number should stay callable (it is your own or a colleague's), clear the row with the delete in §5 step 9, using the same org id and number; the call itself stays recorded as `do_not_call`.
 
 If a call is refused, the reason shows on the campaign's results table as "Not called: …", in plain words. Some refusals are retried automatically (`calling_hours`, `daily_cap`, `customer_ceiling`, `no_caller_id`, `ai_voice_unavailable`, `call_in_progress`); the rest are final for that lead (`outreach-sf-campaigns.md` §AI call campaigns). The reason codes:
 
