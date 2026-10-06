@@ -86,7 +86,7 @@ describe.skipIf(!pgLane)('AI call touches (real Postgres)', () => {
   it('2-3: the first claim mints touch:<id>:1:<claim ms> and marks it dialing; a second claim gets nothing', async () => {
     const base = await seedAiCallCampaign(db, 'active');
     const lead = await seedReleasedLead(db, base);
-    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 1, triggerKey: keyOf(lead.touchId, 1) });
+    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 1, triggerKey: keyOf(lead.touchId, 1), keptKey: false });
     expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'dialing', claimedAt: NOW, attempts: 1 });
     expect(await claimAiTouch(db, lead.touchId, NOW)).toBeNull();
   });
@@ -96,23 +96,25 @@ describe.skipIf(!pgLane)('AI call touches (real Postgres)', () => {
     const lead = await seedReleasedLead(db, base);
     await claimAiTouch(db, lead.touchId, NOW);
     await settleTouch(db, lead.touchId, { kind: 'retry', at: NOW, reason: 'transport', keepKey: true, refundAttempt: false }, NOW);
-    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 2, triggerKey: keyOf(lead.touchId, 1) });
+    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 2, triggerKey: keyOf(lead.touchId, 1), keptKey: true });
     await settleTouch(db, lead.touchId, { kind: 'retry', at: NOW, reason: 'calling_hours', keepKey: false, refundAttempt: false }, NOW);
-    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 3, triggerKey: keyOf(lead.touchId, 3) });
+    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 3, triggerKey: keyOf(lead.touchId, 3), keptKey: false });
   });
 
   it('I-1: a retry that gives its attempt back counts nothing, and the next claim still mints a key never sent before', async () => {
     const base = await seedAiCallCampaign(db, 'active');
     const lead = await seedReleasedLead(db, base);
     const later = new Date(NOW.getTime() + 30 * MIN);
-    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 1, triggerKey: keyOf(lead.touchId, 1) });
+    expect(await claimAiTouch(db, lead.touchId, NOW)).toEqual({ attempts: 1, triggerKey: keyOf(lead.touchId, 1), keptKey: false });
     await settleTouch(db, lead.touchId, { kind: 'retry', at: later, reason: 'ai_voice_unavailable', keepKey: false, refundAttempt: true }, NOW);
     expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', attempts: 0, triggerKey: null, lastBlockReason: 'ai_voice_unavailable' });
     // cti-api stored the refusal under the first key: the same attempt number must come with a new key.
-    expect(await claimAiTouch(db, lead.touchId, later)).toEqual({ attempts: 1, triggerKey: keyOf(lead.touchId, 1, later) });
+    expect(await claimAiTouch(db, lead.touchId, later)).toEqual({ attempts: 1, triggerKey: keyOf(lead.touchId, 1, later), keptKey: false });
     // A transport failure gives the attempt back too, and keeps its key (CF-13).
     await settleTouch(db, lead.touchId, { kind: 'retry', at: later, reason: 'transport', keepKey: true, refundAttempt: true }, later);
     expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'planned', attempts: 0, triggerKey: keyOf(lead.touchId, 1, later) });
+    // Plan 1D (CF-13): claimed again at the very same instant, the kept key equals the key a mint would make; it is still kept.
+    expect(await claimAiTouch(db, lead.touchId, later)).toEqual({ attempts: 1, triggerKey: keyOf(lead.touchId, 1, later), keptKey: true });
   });
 
   it('5: an exited enrollment is not claimed and its touch is untouched', async () => {

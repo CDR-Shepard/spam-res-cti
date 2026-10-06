@@ -1,7 +1,7 @@
 /** Real Postgres: the `ai_call.place` tick with a fake CtiClient and a fake Salesforce. */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { EditableCallPlan } from '@cti/contracts';
+import { AppointmentSlots, EditableCallPlan, type InternalAiCallRequest } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { SalesforceAuthError } from '@cti/salesforce';
 import { enrollmentById, planById, seedAiCall, seedAiCallRequest, seedReleasedLead, touchById } from '../test/ai-call-seed.js';
@@ -12,6 +12,7 @@ import { nextAttemptAt } from './pacing-rules.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { renderPlanForAgent } from './plan-text.js';
+import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
 
 /** Monday 18:00 CDT: inside the plan fixture's `evening` window for a Texas number. */
 const NOW = new Date('2026-10-05T23:00:00.000Z');
@@ -52,7 +53,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
         orgId: h.base.orgId,
         userId: l.approver,
         idempotencyKey: keyOf(l.touchId, 1),
-        target: { kind: 'record', objectType: 'Lead', recordId: l.sfRecordId, planText: planText() },
+        target: { kind: 'record', objectType: 'Lead', recordId: l.sfRecordId, planText: planText(), context: { returning: false } },
       }))),
     );
     for (const l of [a, b]) {
@@ -454,7 +455,8 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       await tickUntil(h, lead.touchId, 11);
       expect(new Set(h.cti.requests.map((r) => r.idempotencyKey)).size).toBe(11);
       expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', attempts: 1 });
-    });
+      // D-3: eleven ticks against real Postgres; under a full parallel PG run this has exceeded the 5 s default.
+    }, 15_000);
 
     it.each(['call_in_progress', 'customer_ceiling'] as const)('a reason about the person (%s) still gives up at the limit', async (reason) => {
       const h = await paceHarness(db);
@@ -465,6 +467,132 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
 
       expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'failed', lastBlockReason: 'gave_up', attempts: 8 });
       expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'ai_call_gave_up' });
+    });
+  });
+
+  describe('plan 1D: every trigger carries the returning flag; a freshly minted key also carries free appointment times', () => {
+    const OWNER = '0058X00000Fsx39QAB';
+    const ownerRow = (over: Record<string, unknown> = {}) => ({ Id: OWNER, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles', ...over });
+    const bookingWith = (specialists: string[]) => ({ aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, specialists } });
+    type RecordTarget = Extract<InternalAiCallRequest['target'], { kind: 'record' }>;
+    const target = (r: InternalAiCallRequest): RecordTarget => {
+      if (r.target.kind !== 'record') throw new Error('expected a record target');
+      return r.target;
+    };
+    const RETURNING = { planOver: { reengagement: { lastContact: 'back in February', lastTopic: null } } };
+    const offerLog = (h: { base: { orgId: string } }, touchId: string, slots: string) => ({ level: 'info', obj: { orgId: h.base.orgId, touchId, slots }, msg: 'ai_call.place: no appointment times offered' });
+    const userQueries = (soql: string[]) => soql.filter((q) => / FROM User /.test(q));
+    const busyQueries = (soql: string[]) => soql.filter((q) => /ShowAs != 'Free'/.test(q));
+
+    it('1: booking on, the owner active, a free calendar: context.returning follows the plan, and 1–12 slots of the owner that parse', async () => {
+      const h = await paceHarness(db, bookingWith([OWNER]));
+      h.sf.state.users = [ownerRow()];
+      const returning = await seedReleasedLead(db, h.base, RETURNING);
+      const fresh = await seedReleasedLead(db, h.base);
+
+      expect((await h.run(NOW)).placed).toBe(2);
+
+      const byRecord = new Map(h.cti.requests.map((r) => [target(r).recordId, target(r)]));
+      expect(byRecord.get(returning.sfRecordId)!.context).toEqual({ returning: true });
+      expect(byRecord.get(fresh.sfRecordId)!.context).toEqual({ returning: false });
+      for (const t of byRecord.values()) {
+        expect(t.slots!.length).toBeGreaterThanOrEqual(1);
+        expect(t.slots!.length).toBeLessThanOrEqual(12);
+        expect(AppointmentSlots.safeParse(t.slots).success).toBe(true);
+        expect(t.slots!.every((s) => s.specialistSfUserId === OWNER && s.specialistFirstName === 'Grant')).toBe(true);
+        expect(t.slots![0]!.id).toBe('p1');
+      }
+      expect(busyQueries(h.sf.state.soql)[0]).toContain(`OwnerId = '${OWNER}'`);
+      expect(h.logs.some((l) => l.msg === 'ai_call.place: no appointment times offered')).toBe(false);
+    });
+
+    it('1b: the configured default list applies while the tenant has saved none', async () => {
+      const h = await paceHarness(db, {}, { defaultSpecialists: [OWNER] });
+      h.sf.state.users = [ownerRow()];
+      await seedReleasedLead(db, h.base);
+
+      expect((await h.run(NOW)).placed).toBe(1);
+      expect(target(h.cti.requests[0]!).slots!.length).toBeGreaterThan(0);
+    });
+
+    it('2: no specialists (empty default, nothing saved): no slots key, context present, nothing read for the offer, nothing logged', async () => {
+      const h = await paceHarness(db);
+      await seedReleasedLead(db, h.base);
+
+      expect((await h.run(NOW)).placed).toBe(1);
+      const t = target(h.cti.requests[0]!);
+      expect('slots' in t).toBe(false);
+      expect(t.context).toEqual({ returning: false });
+      expect(userQueries(h.sf.state.soql)).toEqual([]);
+      expect(h.logs.some((l) => l.msg === 'ai_call.place: no appointment times offered')).toBe(false);
+    });
+
+    it('2b: the owner inactive: no slots, no calendar read, and the log says no_owner', async () => {
+      const h = await paceHarness(db, bookingWith([OWNER]));
+      h.sf.state.users = [ownerRow({ IsActive: false })];
+      const lead = await seedReleasedLead(db, h.base);
+
+      expect((await h.run(NOW)).placed).toBe(1);
+      expect('slots' in target(h.cti.requests[0]!)).toBe(false);
+      expect(busyQueries(h.sf.state.soql)).toEqual([]);
+      expect(h.logs).toContainEqual(offerLog(h, lead.touchId, 'no_owner'));
+    });
+
+    it('2c: a fully busy calendar: no slots, and the log says no_free_time', async () => {
+      const h = await paceHarness(db, bookingWith([OWNER]));
+      h.sf.state.users = [ownerRow()];
+      h.sf.state.busy = [{ StartDateTime: '2026-10-01T00:00:00.000+0000', EndDateTime: '2026-11-01T00:00:00.000+0000', IsAllDayEvent: false }];
+      const lead = await seedReleasedLead(db, h.base);
+
+      expect((await h.run(NOW)).placed).toBe(1);
+      expect('slots' in target(h.cti.requests[0]!)).toBe(false);
+      expect(h.logs).toContainEqual(offerLog(h, lead.touchId, 'no_free_time'));
+    });
+
+    it('3 (CF-13): a touch with a kept trigger key re-sends without slots and reads no calendar', async () => {
+      const h = await paceHarness(db, bookingWith([OWNER]));
+      h.sf.state.users = [ownerRow()];
+      const kept = 'touch:kept:1:1759700000000';
+      const lead = await seedReleasedLead(db, h.base, { ...RETURNING, touch: { triggerKey: kept } });
+
+      expect((await h.run(NOW)).placed).toBe(1);
+      expect(h.cti.requests[0]).toMatchObject({ idempotencyKey: kept });
+      const t = target(h.cti.requests[0]!);
+      expect('slots' in t).toBe(false);
+      expect(t.context).toEqual({ returning: true });
+      expect(userQueries(h.sf.state.soql)).toEqual([]);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent' });
+    });
+
+    it('3b (CF-13): after a transport failure the retry keeps the key, the plan text and the context, and offers no slots', async () => {
+      const h = await paceHarness(db, bookingWith([OWNER]));
+      h.sf.state.users = [ownerRow()];
+      const lead = await seedReleasedLead(db, h.base);
+      h.cti.answers.push({ transport: 'timeout' });
+
+      await h.run(NOW);
+      const first = h.cti.requests[0]!;
+      expect(target(first).slots!.length).toBeGreaterThan(0);
+      const readsBefore = userQueries(h.sf.state.soql).length;
+
+      await h.run((await touchById(db, lead.touchId)).dueAt);
+      const retry = h.cti.requests[1]!;
+      expect(retry.idempotencyKey).toBe(first.idempotencyKey);
+      const { slots: _slots, ...firstWithoutSlots } = target(first);
+      expect(target(retry)).toEqual(firstWithoutSlots);
+      expect(userQueries(h.sf.state.soql)).toHaveLength(readsBefore);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', attempts: 1 });
+    });
+
+    it('4: the User query throws: the call is still triggered, without slots, and the log says salesforce_error', async () => {
+      const h = await paceHarness(db, bookingWith([OWNER]));
+      h.sf.state.userError = new Error('INVALID_SESSION_ID');
+      const lead = await seedReleasedLead(db, h.base);
+
+      expect((await h.run(NOW)).placed).toBe(1);
+      expect('slots' in target(h.cti.requests[0]!)).toBe(false);
+      expect(h.logs).toContainEqual(offerLog(h, lead.touchId, 'salesforce_error'));
+      expect(JSON.stringify(h.logs)).not.toContain('INVALID_SESSION_ID');
     });
   });
 });

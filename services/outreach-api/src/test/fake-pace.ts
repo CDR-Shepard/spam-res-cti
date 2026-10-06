@@ -1,4 +1,7 @@
-/** Stand-ins for the `ai_call.place` tick tests: a scripted CtiClient and a Salesforce client that answers the record, Task and Event reads. */
+/**
+ * Stand-ins for the `ai_call.place` tick tests: a scripted CtiClient and a Salesforce client that answers the record, Task and
+ * Event reads (`queryAll`), and the appointment offer's User and busy-calendar reads (`query`, plan 1D).
+ */
 import type { AiAvailability, InternalAiCallRequest, InternalAiCallResponse } from '@cti/contracts';
 import { eq } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
@@ -24,12 +27,28 @@ export interface FakeSfState {
   error: Error | null;
   /** Thrown by the Task and Event queries only when set. */
   activityError: Error | null;
+  /** Plan 1D: what the appointment owner list's User query answers. */
+  users: Row[];
+  /** Plan 1D: the owner's busy Events (the offer's calendar read, not the CF-1 activity check). */
+  busy: Row[];
+  /** Thrown by the User query only when set. */
+  userError: Error | null;
   soql: string[];
 }
 
 export function fakePaceSalesforce(): { client: SalesforceClient; state: FakeSfState } {
-  const state: FakeSfState = { records: new Map(), tasks: [], events: [], error: null, activityError: null, soql: [] };
+  const state: FakeSfState = { records: new Map(), tasks: [], events: [], error: null, activityError: null, users: [], busy: [], userError: null, soql: [] };
   const client = {
+    async query(q: string): Promise<Row[]> {
+      state.soql.push(q);
+      if (state.error) throw state.error;
+      if (/ FROM User /.test(q)) {
+        if (state.userError) throw state.userError;
+        return state.users;
+      }
+      if (/ FROM Event /.test(q)) return state.busy;
+      throw new Error(`fakePaceSalesforce: no query route for ${q}`);
+    },
     async queryAll(q: string): Promise<Row[]> {
       state.soql.push(q);
       if (state.error) throw state.error;
@@ -113,7 +132,7 @@ export interface LogEntry {
  * One tenant with an active ai_call campaign and a Salesforce connection, and `run(now)` for one tick. The tick sees every
  * tenant in the test database; any tenant but this one has no Salesforce here (CrmNotConnectedError), so it is skipped.
  */
-export async function paceHarness(db: Db, settings: Record<string, unknown> = {}) {
+export async function paceHarness(db: Db, settings: Record<string, unknown> = {}, opts: { defaultSpecialists?: readonly string[] } = {}) {
   const base = await seedAiCallCampaign(db, 'active');
   await db.update(schema.organizations).set({ settings }).where(eq(schema.organizations.id, base.orgId));
   await seedConnection(db, base.orgId, {
@@ -134,7 +153,7 @@ export async function paceHarness(db: Db, settings: Record<string, unknown> = {}
     if (clientError) throw clientError;
     return sf.client;
   };
-  const run = (now: Date) => placeDueAiCalls({ db, clients, cti: cti.cti, now, log, clock: () => 0 });
+  const run = (now: Date) => placeDueAiCalls({ db, clients, cti: cti.cti, now, log, clock: () => 0, defaultSpecialists: opts.defaultSpecialists });
   return {
     base,
     sf,

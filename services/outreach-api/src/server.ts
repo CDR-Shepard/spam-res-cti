@@ -91,7 +91,7 @@ async function main(): Promise<void> {
     ...(cfg.salesforceEnabled && cti
       ? {
           'ai_call.place': async () => {
-            await placeDueAiCalls({ db, clients, cti, now: new Date(), log: console });
+            await placeDueAiCalls({ db, clients, cti, now: new Date(), log: console, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS });
           },
         }
       : {}),

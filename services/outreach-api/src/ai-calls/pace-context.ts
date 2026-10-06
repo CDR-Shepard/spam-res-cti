@@ -3,16 +3,18 @@
  * it may start (concurrency and the rolling daily cap), the due touches, their plans, ONE fresh
  * Salesforce read per object (which also refreshes the integration token cti-api reads,
  * decision 3), and the CF-1 activity check. A tenant whose Salesforce is unusable is skipped
- * with nothing claimed.
+ * with nothing claimed. Plan 1D: the tick keeps the tenant's settings and Salesforce client, so a touch can be offered the
+ * appointment owner's free times (tickOffer).
  */
 import { eq, inArray } from 'drizzle-orm';
 import { EditableCallPlan, FieldMap } from '@cti/contracts';
 import { schema } from '@cti/db';
 import { QueryTooLargeError, SalesforceApiError, SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
+import { offerSlots, type Offer } from '../appointments/offer.js';
 import { fetchRecords, type SfRecordSnapshot } from '../campaigns/records.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
-import { outreachSettings } from '../settings.js';
+import { outreachSettings, type OutreachSettings } from '../settings.js';
 import { engineTaskIds, recordsWithNewActivity, type ActivityProbe } from './activity-check.js';
 import type { PaceDeps } from './pace.js';
 import { deferTouch, dueAiCallTouches, liveAiCallCount, placedInLastDay, PLACE_CANDIDATES_PER_ORG, type AiTouchCandidate } from './touches.js';
@@ -38,6 +40,10 @@ export interface OrgTick {
   fresh(sfRecordId: string): SfRecordSnapshot | undefined;
   /** Candidate record ids with a Task or Event newer than their plan's research (CF-1). */
   newActivity: Set<string>;
+  /** Plan 1D: the tenant's integration connection, for the appointment offer's reads. */
+  client: SalesforceClient;
+  /** Plan 1D: the tenant's settings as this tick read them (booking among them). */
+  settings: OutreachSettings;
 }
 
 const core = (id: string): string => id.slice(0, 15);
@@ -47,13 +53,13 @@ const errName = (err: unknown): string => (err instanceof Error ? err.name : typ
 const salesforceUnavailable = (err: unknown): boolean =>
   err instanceof CrmNotConnectedError || err instanceof SalesforceAuthError || err instanceof SalesforceApiError || err instanceof QueryTooLargeError;
 
-async function slotsFor(deps: PaceDeps, orgId: string): Promise<number> {
+async function slotsFor(deps: PaceDeps, orgId: string): Promise<{ slots: number; settings: OutreachSettings }> {
   const [org] = await deps.db.select({ settings: schema.organizations.settings }).from(schema.organizations).where(eq(schema.organizations.id, orgId));
-  const settings = outreachSettings({ settings: org?.settings ?? {} });
+  const settings = outreachSettings({ settings: org?.settings ?? {} }, { defaultSpecialists: deps.defaultSpecialists });
   const live = await liveAiCallCount(deps.db, orgId, deps.now);
   const remaining = settings.aiCallDailyCap - (await placedInLastDay(deps.db, orgId, deps.now));
   if (remaining <= 0) deps.log.info({ orgId, cap: settings.aiCallDailyCap }, 'ai_call.place: daily AI call cap reached');
-  return Math.min(settings.aiCallConcurrency - live, remaining);
+  return { slots: Math.min(settings.aiCallConcurrency - live, remaining), settings };
 }
 
 async function loadPlans(deps: PaceDeps, orgId: string, candidates: AiTouchCandidate[]): Promise<Map<string, PlanForCall>> {
@@ -89,7 +95,7 @@ async function freshRecords(client: SalesforceClient, fieldMap: FieldMap, candid
 }
 
 export async function loadOrgTick(deps: PaceDeps, orgId: string): Promise<OrgTick | null> {
-  const slots = await slotsFor(deps, orgId);
+  const { slots, settings } = await slotsFor(deps, orgId);
   if (slots <= 0) return null;
   const candidates = await dueAiCallTouches(deps.db, orgId, deps.now, PLACE_CANDIDATES_PER_ORG);
   if (candidates.length === 0) return null;
@@ -125,5 +131,16 @@ export async function loadOrgTick(deps: PaceDeps, orgId: string): Promise<OrgTic
     }
     return null;
   }
-  return { slots, candidates, plans, fresh: (id) => fresh.get(core(id)), newActivity };
+  return { slots, candidates, plans, fresh: (id) => fresh.get(core(id)), newActivity, client, settings };
+}
+
+/**
+ * Plan 1D: the appointment times this touch's trigger offers, read now (calendars change after approval). It only reads
+ * Salesforce and never throws; a missing offer never stops the call. Booking switched off is not worth a log line; any other
+ * empty offer is logged by its note only, never record content.
+ */
+export async function tickOffer(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Promise<Offer> {
+  const offer = await offerSlots(tick.client, { booking: tick.settings.aiCallBooking, now: deps.now });
+  if (offer.note && offer.note !== 'booking_off') deps.log.info({ orgId: c.orgId, touchId: c.touchId, slots: offer.note }, 'ai_call.place: no appointment times offered');
+  return offer;
 }

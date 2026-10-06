@@ -123,10 +123,20 @@ const claimable = sql`
  * (I-1) and the attempt number repeats: cti-api stores every answer under its key, so a repeated key would only replay the
  * old refusal. A touch is claimed again only once due again, always at a later tick, so the claim time never repeats.
  */
-export async function claimAiTouch(db: Db, touchId: string, now: Date): Promise<{ attempts: number; triggerKey: string } | null> {
+export interface AiTouchClaim {
+  attempts: number;
+  triggerKey: string;
+  /** Plan 1D (CF-13): the touch kept its key from an earlier send, which must be re-sent with the same body (so no slots). */
+  keptKey: boolean;
+}
+
+export async function claimAiTouch(db: Db, touchId: string, now: Date): Promise<AiTouchClaim | null> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`
       select 1 from campaign_enrollments where id = (select enrollment_id from touches where id = ${touchId}::uuid) for share`);
+    // The key before the claim, read under the row lock the update takes anyway (same lock order): kept or freshly minted.
+    const before = await tx.execute(sql`select trigger_key as "triggerKey" from touches where id = ${touchId}::uuid for update`);
+    const oldKey = rows<{ triggerKey: string | null }>(before)[0]?.triggerKey ?? null;
     const result = await tx.execute(sql`
       update touches t
       set status = 'dialing', claimed_at = ${iso(now)}, updated_at = ${iso(now)}, attempts = t.attempts + 1,
@@ -134,7 +144,8 @@ export async function claimAiTouch(db: Db, touchId: string, now: Date): Promise<
       from campaign_enrollments e, campaigns c, crm_records r, call_plans p, call_research cr
       where t.id = ${touchId}::uuid and ${claimable}
       returning t.attempts, t.trigger_key as "triggerKey"`);
-    return rows<{ attempts: number; triggerKey: string }>(result)[0] ?? null;
+    const claimed = rows<{ attempts: number; triggerKey: string }>(result)[0];
+    return claimed ? { ...claimed, keptKey: oldKey !== null && claimed.triggerKey === oldKey } : null;
   });
 }
 

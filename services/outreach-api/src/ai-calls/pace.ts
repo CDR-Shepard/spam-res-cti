@@ -11,6 +11,10 @@
  * the touch waits (nothing claimed); new Salesforce activity since the research sends the lead
  * back to research (CF-1); then the claim (CF-2, CF-10, CF-11), the trigger, and the answer.
  *
+ * Plan 1D: every trigger carries `context.returning` (the plan has a last real contact). A touch without a kept key is
+ * offered the appointment owner's free times just before the claim, and they go only with a freshly minted key: a kept key
+ * is re-sent with the body it had, so no slots (CF-13).
+ *
  * Round 2: a touch that kept its idempotency key may already have reached cti-api. Before anything else, and so before any
  * path could drop that key, cti-api's request store is read (key-resolution.ts): a call placed under the key is linked (the
  * touch is sent, nothing is triggered), and a request cti-api may still be handling waits, keeping its key. A 409 is resolved
@@ -23,7 +27,7 @@ import type { RunnerLogger } from '../jobs/boss.js';
 import type { CtiClient, TriggerOutcome } from './cti-client.js';
 import { resolveKey, settleKeptKey } from './key-resolution.js';
 import { decideTrigger, windowCheck, type TriggerDecision } from './pacing-rules.js';
-import { loadOrgTick, type OrgTick, type PlanForCall } from './pace-context.js';
+import { loadOrgTick, tickOffer, type OrgTick, type PlanForCall } from './pace-context.js';
 import { renderPlanForAgent } from './plan-text.js';
 import { backToResearch, parkPlan, planNoLongerApproved, skipNotClaimable, type SkipOutcome } from './stage.js';
 import {
@@ -52,6 +56,8 @@ export interface PaceDeps {
   log: RunnerLogger;
   /** Wall clock in ms for the tick deadline; tests inject one. Defaults to `Date.now`. */
   clock?: () => number;
+  /** Plan 1D: AI_CALL_DEFAULT_SPECIALISTS, the appointment owner list of a tenant that has saved none. */
+  defaultSpecialists?: readonly string[];
 }
 
 export interface PaceCounts {
@@ -191,13 +197,17 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
     await parkPlan(db, { touchId: c.touchId, enrollmentId: c.enrollmentId, planId: plan.id }, 'unknown_user', now);
     return 'parked';
   }
+  const context = { returning: plan.plan.reengagement?.lastContact != null };
+  const offer = c.triggerKey === null ? await tickOffer(deps, tick, c) : null;
   const claim = await claimAiTouch(db, c.touchId, now);
   if (!claim) return refused(deps, c);
+  // CF-13: only a freshly minted key carries slots (the claim, not the candidate row, says whether the key was kept).
+  const slots = offer && !claim.keptKey ? offer.slots : [];
   const answered = await deps.cti.trigger({
     orgId: c.orgId,
     userId: c.requestedBy,
     idempotencyKey: claim.triggerKey,
-    target: { kind: 'record', objectType: c.sfObject, recordId: c.sfRecordId, planText: rendered.text },
+    target: { kind: 'record', objectType: c.sfObject, recordId: c.sfRecordId, planText: rendered.text, context, ...(slots.length ? { slots } : {}) },
   });
   const conflict = answered.kind === 'conflict' ? await conflictOutcome(deps, c, claim.triggerKey) : null;
   const outcome = conflict?.outcome ?? answered;
