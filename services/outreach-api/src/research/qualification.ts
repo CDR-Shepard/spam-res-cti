@@ -84,13 +84,28 @@ export function isBlankish(value: string | null | undefined, kind: FieldKind): b
   }
 }
 
-/** The topics no field of the record answers, in QUALIFICATION_TOPICS order. */
-export function missingTopics(sfObject: SfObject, selfFields: ReadonlyArray<{ name: string; value: string }>): QualificationTopic[] {
+/**
+ * Every field of QUALIFICATION_FIELDS and EXTRA_FIELDS for the object, once, topics first. Research always selects
+ * these and never drops them for size (Fix 1, I-2), the way it treats the consent field.
+ */
+export function qualificationFieldNames(sfObject: SfObject): string[] {
+  const all = [...Object.values(QUALIFICATION_FIELDS[sfObject]), ...Object.values(EXTRA_FIELDS[sfObject])].flatMap((fields) => (fields ?? []).map((f) => f.field));
+  return [...new Set(all)];
+}
+
+/**
+ * The topics no field of the record answers, in QUALIFICATION_TOPICS order.
+ *
+ * `fieldsRead` (Fix 1, I-2) names the fields research actually selected. A field it never read is unknown, not blank:
+ * it is ignored, and a topic none of whose fields was read is never missing. Without the list (a snapshot from before
+ * Fix 1) every field counts as read.
+ */
+export function missingTopics(sfObject: SfObject, selfFields: ReadonlyArray<{ name: string; value: string }>, fieldsRead?: readonly string[]): QualificationTopic[] {
   const values = new Map(selfFields.map((f) => [f.name.toLowerCase(), f.value]));
+  const read = fieldsRead ? new Set(fieldsRead.map((f) => f.toLowerCase())) : null;
   const map = QUALIFICATION_FIELDS[sfObject];
   return QUALIFICATION_TOPICS.filter((topic) => {
-    const fields = map[topic];
-    if (!fields) return false;
-    return fields.every((f) => isBlankish(values.get(f.field.toLowerCase()), f.kind));
+    const fields = (map[topic] ?? []).filter((f) => read === null || read.has(f.field.toLowerCase()));
+    return fields.length > 0 && fields.every((f) => isBlankish(values.get(f.field.toLowerCase()), f.kind));
   });
 }

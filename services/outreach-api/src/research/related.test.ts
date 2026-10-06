@@ -157,6 +157,29 @@ describe('consent', () => {
   });
 });
 
+describe('Fix 1 (I-2): qualification fields behind a long field list', () => {
+  const many = Array.from({ length: 400 }, (_, i): [string] => [`A_Rather_Long_Custom_Field_Name_Number_${i}__c`]);
+  const wideLead = describeOf('Lead', [['Id', 'id'], ...many, ['Timeline__c', 'picklist'], ['AI_Call_Consent__c', 'boolean'], ['Seller_s_Asking_Price__c', 'currency'], ['Mold__c', 'boolean']]);
+
+  it('are always selected, after Id and the consent field, and the block says which were read', async () => {
+    const sf = fakeSalesforce({ describes: { ...describes, Lead: wideLead }, queries: [[/FROM Lead WHERE Id = /, [{ Id: LEAD, AI_Call_Consent__c: true, Timeline__c: '30 Days' }]]] });
+    const got = await readMainAndRelated(deps(sf), { sfObject: 'Lead', sfRecordId: LEAD, consentField: 'AI_Call_Consent__c' });
+    expect(sf.soql[0]).toMatch(/^SELECT Id, AI_Call_Consent__c, Timeline__c, Mold__c, Seller_s_Asking_Price__c, A_Rather_Long_Custom_Field_Name_Number_0__c, /);
+    expect(sf.soql[0]!.length).toBeLessThan(7_000);
+    expect(got?.main.fields).toContainEqual({ name: 'Timeline__c', label: 'Timeline__c label', value: '30 Days' });
+    // In QUALIFICATION_FIELDS order; a field the describe lacks was never read.
+    expect(got?.main.qualificationFieldsRead).toEqual(['Timeline__c', 'Mold__c', 'Seller_s_Asking_Price__c']);
+  });
+
+  it('an Opportunity pins its own names', async () => {
+    const opp = describeOf('Opportunity', [['Id', 'id'], ...many, ['AccountId', 'reference'], ['SellersAskingPrice__c', 'currency'], ['Reason_For_Selling__c', 'textarea']]);
+    const sf = fakeSalesforce({ describes: { ...describes, Opportunity: opp }, queries: [[/FROM Opportunity WHERE Id = /, [{ Id: OPP }]], [/FROM OpportunityContactRole/, []]] });
+    const got = await readMainAndRelated(deps(sf), { sfObject: 'Opportunity', sfRecordId: OPP, consentField: null });
+    expect(sf.soql[0]).toMatch(/^SELECT Id, Reason_For_Selling__c, SellersAskingPrice__c, A_Rather/);
+    expect(got?.main.qualificationFieldsRead).toEqual(['Reason_For_Selling__c', 'SellersAskingPrice__c']);
+  });
+});
+
 describe('field values', () => {
   it('leaves out false booleans and empty strings, and clips long values', async () => {
     const long = 'x'.repeat(1_500);

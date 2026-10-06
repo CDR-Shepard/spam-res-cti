@@ -22,7 +22,7 @@ export function planFacts(s: ResearchSnapshot, now: Date): PlanFacts {
   return {
     lastContactWords: contact ? contactWords(contact.at, now) : null,
     lastContactKind: contact?.kind ?? null,
-    missing: missingTopics(s.sfObject, self?.fields ?? []),
+    missing: missingTopics(s.sfObject, self?.fields ?? [], self?.qualificationFieldsRead),
   };
 }
 

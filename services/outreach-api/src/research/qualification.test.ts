@@ -8,6 +8,7 @@ import {
   QUALIFICATION_FIELDS,
   isBlankish,
   missingTopics,
+  qualificationFieldNames,
   type FieldKind,
 } from './qualification.js';
 
@@ -106,5 +107,38 @@ describe('QUALIFICATION_FIELDS', () => {
   });
   it('keeps Spanish speaker outside the topics, true-only', () => {
     for (const o of ['Lead', 'Opportunity'] as const) expect(EXTRA_FIELDS[o].language).toEqual([{ field: 'Spanish_Speaker__c', kind: 'boolean', trueOnly: true }]);
+  });
+});
+
+describe('Fix 1 (I-2): a field research never read is unknown, not missing', () => {
+  it('lists every qualification and extra field of each object once, topics first', () => {
+    expect(qualificationFieldNames('Lead')).toEqual([
+      'Motivation__c', 'SecondaryMotivation__c', 'Timeline__c', 'Condition__c', 'Major_Repairs_Needed__c', 'Roof_Issues__c', 'Foundation_Issues__c', 'Mold__c',
+      'Occupancy__c', 'Seller_s_Asking_Price__c', 'Competition__c', 'Amount_Owed__c', 'Spanish_Speaker__c',
+    ]);
+    expect(qualificationFieldNames('Opportunity')).toContain('Reason_For_Selling__c');
+    expect(qualificationFieldNames('Opportunity')).toContain('SellersAskingPrice__c');
+    expect(new Set(qualificationFieldNames('Opportunity')).size).toBe(qualificationFieldNames('Opportunity').length);
+  });
+
+  it('a topic none of whose fields was read is not missing', () => {
+    expect(missingTopics('Lead', [], ['Timeline__c', 'Condition__c'])).toEqual(['timeline', 'condition']);
+  });
+
+  it('matches the read names case-insensitively', () => {
+    expect(missingTopics('Lead', [], ['timeline__c'])).toEqual(['timeline']);
+  });
+
+  it('a topic is answered by any read field, and unread fields of it are ignored', () => {
+    expect(missingTopics('Lead', [{ name: 'Mold__c', value: 'true' }], ['Major_Repairs_Needed__c', 'Mold__c'])).not.toContain('repairs');
+    expect(missingTopics('Lead', [], ['Major_Repairs_Needed__c'])).toEqual(['repairs']);
+  });
+
+  it('nothing read at all: nothing is missing', () => {
+    expect(missingTopics('Opportunity', [], [])).toEqual([]);
+  });
+
+  it('without a read list (a snapshot from before Fix 1) every field counts as read', () => {
+    expect(missingTopics('Lead', [], undefined)).toEqual(QUALIFICATION_TOPICS.filter((t) => t !== 'decision_makers'));
   });
 });

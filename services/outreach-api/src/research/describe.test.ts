@@ -30,6 +30,14 @@ describe('readableFields', () => {
     expect(readableFields(wide, 2, 'AI_Call_Consent__c').map((f) => f.name)).toEqual(['Id', 'AI_Call_Consent__c']);
     expect(readableFields(wide, 100, 'Missing__c').map((f) => f.name)).toEqual(['Id', 'Name', 'Phone', 'AI_Call_Consent__c']);
   });
+  it('Fix 1 (I-2): pins a list of fields in its order after Id, each matched case-insensitively, skipping absent ones', () => {
+    const wide = describeOf('Lead', [['Id', 'id'], ['Name'], ['Timeline__c', 'picklist'], ['Phone'], ['AI_Call_Consent__c', 'boolean'], ['Condition__c', 'picklist']]);
+    expect(readableFields(wide, 100, ['ai_call_consent__c', 'condition__c', 'Missing__c', 'TIMELINE__C']).map((f) => f.name)).toEqual([
+      'Id', 'AI_Call_Consent__c', 'Condition__c', 'Timeline__c', 'Name', 'Phone',
+    ]);
+    expect(readableFields(wide, 3, ['Timeline__c', 'Condition__c']).map((f) => f.name)).toEqual(['Id', 'Timeline__c', 'Condition__c']);
+    expect(readableFields(wide, 100, [null, 'Timeline__c']).map((f) => f.name)).toEqual(['Id', 'Timeline__c', 'Name', 'Phone', 'AI_Call_Consent__c', 'Condition__c']);
+  });
   it('carries the label and caps at max', () => {
     expect(readableFields(d, 2)).toEqual([
       { name: 'Id', label: 'Id label' },

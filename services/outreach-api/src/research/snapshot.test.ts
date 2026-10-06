@@ -111,6 +111,22 @@ describe('assembleSnapshot: record blocks over half the budget', () => {
     expect(snapshotSize(snap)).toBeLessThanOrEqual(460);
   });
 
+  it('Fix 1 (I-2): keeps the qualification fields of self while shorter non-key fields are dropped first', () => {
+    const shorts: Array<[string, string]> = ['A', 'B', 'C', 'D', 'E', 'F'].map((k) => [`${k}__c`, 'xy']);
+    const self = { ...block('self', 'Lead', [['Name', 'Pat'], ['timeline__c', '30 Days'], ['Motivation__c', 'Inherited the house from a parent'], ...shorts]), qualificationFieldsRead: ['Timeline__c', 'Motivation__c'] };
+    const snap = assembleSnapshot(input({ records: [self] }), 500);
+    expect(snap.records[0]?.fields.map((f) => f.name)).toEqual(['Name', 'timeline__c', 'Motivation__c']);
+    expect(snap.records[0]?.qualificationFieldsRead).toEqual(['Timeline__c', 'Motivation__c']);
+    expect(snapshotSize(snap)).toBeLessThanOrEqual(500);
+  });
+
+  it('Fix 1 (I-2): an Opportunity keeps its own qualification names; a related block\'s are not protected', () => {
+    const self = block('self', 'Opportunity', [['Name', 'Pat'], ['SellersAskingPrice__c', '1'], ['A__c', 'x'.repeat(40)]]);
+    const related = block('converted_opportunity', 'Opportunity', [['Timeline__c', '30 Days']]);
+    const snap = assembleSnapshot(input({ sfObject: 'Opportunity', records: [self, related] }), 360);
+    expect(snap.records.map((b) => b.fields.map((f) => f.name))).toEqual([['Name', 'SellersAskingPrice__c'], []]);
+  });
+
   it('does not touch the blocks when they fit', () => {
     const snap = assembleSnapshot(input({ records: [self, contact] }), 10_000);
     expect(snap.records).toEqual([self, contact]);
@@ -137,7 +153,9 @@ describe('snapshotHash and the schema', () => {
     expect(snapshotHash(a)).not.toBe(snapshotHash(assembleSnapshot(input({ activity: [item(1)], consent: 'no' }))));
   });
   it('round-trips through the schema', () => {
-    const snap = assembleSnapshot(input({ activity: [item(1)], sources: ResearchSource.options.map((s) => okSource(s)) }));
+    const self = { ...block('self', 'Lead', [['Name', 'Pat Seller']]), qualificationFieldsRead: ['Timeline__c'] };
+    const snap = assembleSnapshot(input({ records: [self], activity: [item(1)], sources: ResearchSource.options.map((s) => okSource(s)) }));
+    expect(snap.records[0]?.qualificationFieldsRead).toEqual(['Timeline__c']);
     expect(ResearchSnapshot.parse(JSON.parse(JSON.stringify(snap)))).toEqual(snap);
   });
   it('rejects a stored snapshot of another version', () => {

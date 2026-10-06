@@ -6,6 +6,7 @@ import { canonicalJson } from '../triage/notes.js';
 import { readContentNotes, readEmails, readEvents, readNotes, readTasks, type ActivityItem } from './activity.js';
 import { readChatter } from './chatter.js';
 import { RESEARCH_LIMITS } from './limits.js';
+import { qualificationFieldNames } from './qualification.js';
 import { readMainAndRelated, type RecordBlock, type ResearchReadDeps } from './related.js';
 import { cutUtf16, wellFormed, wellFormedDeep } from './text.js';
 
@@ -16,6 +17,8 @@ const Block = z.object({
   id: z.string(),
   role: z.string().nullable(),
   fields: z.array(Field),
+  /** Fix 1 (I-2): the qualification fields research selected (self only); absent on snapshots stored before it. */
+  qualificationFieldsRead: z.array(z.string()).optional(),
 });
 const Activity = z.object({
   source: z.enum(['task', 'event', 'note', 'content_note', 'email', 'chatter', 'chatter_comment']),
@@ -56,14 +59,17 @@ const ELLIPSIS = '…';
 
 type Fit = { records: RecordBlock[]; cut: boolean };
 
-/** Drops the longest field values (related blocks first, then non-key fields of self) until the blocks fit `budget`. */
-function dropFields(records: RecordBlock[], budget: number, consentField: string | null): Fit {
-  const isConsent = (name: string): boolean => consentField !== null && name.toLowerCase() === consentField.toLowerCase();
+/**
+ * Drops the longest field values (related blocks first, then non-key fields of self) until the blocks fit `budget`.
+ * `kept` (lower-cased: the consent field and the qualification fields) are never dropped from self, like its name and
+ * phones (Fix 1, I-2: a cut qualification field would read as blank and be asked again).
+ */
+function dropFields(records: RecordBlock[], budget: number, kept: ReadonlySet<string>): Fit {
   let out = records.map((b) => ({ ...b, fields: [...b.fields] }));
   let cut = false;
   while (len(out) > budget) {
     const candidates = out.flatMap((b, bi) =>
-      b.fields.map((f, fi) => ({ bi, fi, size: f.value.length, rank: b.relation === 'self' ? (KEEP_ON_SELF.has(f.name.toLowerCase()) || isConsent(f.name) ? 2 : 1) : 0 })),
+      b.fields.map((f, fi) => ({ bi, fi, size: f.value.length, rank: b.relation === 'self' ? (KEEP_ON_SELF.has(f.name.toLowerCase()) || kept.has(f.name.toLowerCase()) ? 2 : 1) : 0 })),
     );
     const victim = candidates.filter((c) => c.rank < 2).sort((a, b) => a.rank - b.rank || b.size - a.size)[0];
     if (!victim) break;
@@ -93,8 +99,9 @@ function truncateProtected(records: RecordBlock[], budget: number, consentField:
   return { records: out, cut };
 }
 
-function fitRecords(records: RecordBlock[], budget: number, consentField: string | null): Fit {
-  const dropped = dropFields(records, budget, consentField);
+function fitRecords(records: RecordBlock[], budget: number, consentField: string | null, sfObject: 'Lead' | 'Opportunity'): Fit {
+  const kept = new Set([...(consentField === null ? [] : [consentField]), ...qualificationFieldNames(sfObject)].map((n) => n.toLowerCase()));
+  const dropped = dropFields(records, budget, kept);
   const truncated = truncateProtected(dropped.records, budget, consentField);
   return { records: truncated.records, cut: dropped.cut || truncated.cut };
 }
@@ -104,7 +111,7 @@ export function assembleSnapshot(raw: SnapshotInput, totalChars: number = RESEAR
   const input = { ...raw, sfRecordId: wellFormed(raw.sfRecordId), records: wellFormedDeep(raw.records), activity: wellFormedDeep(raw.activity), sources: wellFormedDeep(raw.sources) };
   const consentField = input.consentField ?? null;
   const envelope = { version: 1 as const, sfObject: input.sfObject, sfRecordId: input.sfRecordId, collectedAt: input.collectedAt.toISOString(), consent: input.consent, records: [] as RecordBlock[], activity: [] as ActivityItem[], sources: input.sources, truncated: true };
-  const { records, cut } = fitRecords(input.records, Math.min(Math.floor(totalChars / 2), totalChars - len(envelope)), consentField);
+  const { records, cut } = fitRecords(input.records, Math.min(Math.floor(totalChars / 2), totalChars - len(envelope)), consentField, input.sfObject);
   const base = { ...envelope, records, truncated: cut };
   let used = len(base);
   const activity: ActivityItem[] = [];

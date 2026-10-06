@@ -4,6 +4,7 @@ import { soqlEscape, type SalesforceClient } from '@cti/salesforce';
 import { SF_ID } from '../campaigns/records.js';
 import { describeObject, readableFields, type DescribeCache } from './describe.js';
 import { RESEARCH_LIMITS } from './limits.js';
+import { qualificationFieldNames } from './qualification.js';
 import { classifyReadError, type SourceRead } from './salesforce-errors.js';
 import { clip, fieldValueText, soqlIdList } from './text.js';
 
@@ -14,6 +15,11 @@ export interface RecordBlock {
   id: string;
   role: string | null;
   fields: Array<{ name: string; label: string; value: string }>;
+  /**
+   * Fix 1 (I-2), the self block only: the qualification fields (research/qualification.ts) the SELECT included, by
+   * describe name. A qualification field not listed was never read, so it is unknown rather than blank.
+   */
+  qualificationFieldsRead?: string[];
 }
 export interface LinkIds { whoIds: string[]; whatIds: string[]; parentIds: string[] }
 export interface ResearchReadDeps { client: SalesforceClient; describes: DescribeCache; orgId: string }
@@ -24,7 +30,7 @@ const idOf = (v: unknown): string | null => (typeof v === 'string' && SF_ID.test
 
 /**
  * The SOQL travels in a GET URL, so the select list is cut (from the end) to stay far below the URI limit.
- * The first `keep` fields (Id and the consent field) are never cut.
+ * The first `keep` fields (Id, the consent field and the qualification fields) are never cut.
  */
 function withinSelectBudget<F extends { name: string }>(fields: F[], keep: number): F[] {
   let used = 0;
@@ -39,19 +45,24 @@ export async function readRecordBlock(
   role: string | null,
   maxFields: number,
   consentField: string | null = null,
+  pinned: readonly string[] = [],
 ): Promise<{ block: RecordBlock; row: Row; fieldNames: Set<string> } | null> {
   const d = await describeObject(deps.client, deps.describes, deps.orgId, sobject);
-  const all = readableFields(d, maxFields, consentField);
-  // Id, then the consent field when it is readable: both are always selected, whatever else is cut.
-  const consentKey = consentField === null ? null : (all.find((f) => f.name !== 'Id' && f.name.toLowerCase() === consentField.toLowerCase())?.name ?? null);
-  const fields = withinSelectBudget(all, consentKey === null ? 1 : 2);
+  const all = readableFields(d, maxFields, [consentField, ...pinned]);
+  // Id, then the consent field and the pinned fields that are readable: always selected, whatever else is cut.
+  const wanted = new Set([consentField, ...pinned].flatMap((p) => (p === null ? [] : [p.toLowerCase()])));
+  const head = all.findIndex((f) => f.name !== 'Id' && !wanted.has(f.name.toLowerCase()));
+  const fields = withinSelectBudget(all, head === -1 ? all.length : head);
+  const pinnedRead = new Set(pinned.map((p) => p.toLowerCase()));
+  const qualificationFieldsRead = fields.filter((f) => pinnedRead.has(f.name.toLowerCase())).map((f) => f.name);
   const [row] = await deps.client.query<Row>(`SELECT ${fields.map((f) => f.name).join(', ')} FROM ${sobject} WHERE Id = '${soqlEscape(id)}' LIMIT 1`);
   if (!row) return null;
   const values = fields.flatMap((f) => {
     const v = fieldValueText(row[f.name]);
     return v === null || f.name === 'Id' ? [] : [{ name: f.name, label: f.label, value: clip(v, RESEARCH_LIMITS.fieldValueChars).text }];
   });
-  return { block: { relation, sfObject: sobject, id, role, fields: values }, row, fieldNames: new Set(d.fields.map((f) => f.name.toLowerCase())) };
+  const block: RecordBlock = { relation, sfObject: sobject, id, role, fields: values, ...(pinned.length > 0 ? { qualificationFieldsRead } : {}) };
+  return { block, row, fieldNames: new Set(d.fields.map((f) => f.name.toLowerCase())) };
 }
 
 /**
@@ -114,7 +125,7 @@ export async function readMainAndRelated(
   target: { sfObject: 'Lead' | 'Opportunity'; sfRecordId: string; consentField: string | null },
 ): Promise<MainAndRelated | null> {
   soqlIdList([target.sfRecordId]); // throws on a malformed id before any request
-  const main = await readRecordBlock(deps, target.sfObject, target.sfRecordId, 'self', null, RESEARCH_LIMITS.recordFields, target.consentField);
+  const main = await readRecordBlock(deps, target.sfObject, target.sfRecordId, 'self', null, RESEARCH_LIMITS.recordFields, target.consentField, qualificationFieldNames(target.sfObject));
   if (!main) return null;
   const blocks: RecordBlock[] = [];
   const { targets, failure } = await relatedTargets(deps, target.sfObject, target.sfRecordId, main.row);

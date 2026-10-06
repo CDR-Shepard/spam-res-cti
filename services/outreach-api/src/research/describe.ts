@@ -32,13 +32,15 @@ export async function describeObject(client: SalesforceClient, cache: DescribeCa
 }
 
 /**
- * Every readable, non-binary, non-compound field: `Id` first, then `pinned` (the consent field,
- * matched case-insensitively, when the describe has it), then describe order, capped.
+ * Every readable, non-binary, non-compound field: `Id` first, then `pinned` in its order (the consent field, and the
+ * qualification fields: each matched case-insensitively, when the describe has it), then describe order, capped.
  */
-export function readableFields(d: SObjectDescribe, max: number, pinned: string | null = null): Array<{ name: string; label: string }> {
+export function readableFields(d: SObjectDescribe, max: number, pinned: string | ReadonlyArray<string | null> | null = null): Array<{ name: string; label: string }> {
   const kept = d.fields.filter((f) => !SKIPPED_FIELD_TYPES.has(f.type) && FIELD_API_NAME.test(f.name));
-  const isPinned = (name: string): boolean => pinned !== null && name !== 'Id' && name.toLowerCase() === pinned.toLowerCase();
-  const head = [...kept.filter((f) => f.name === 'Id'), ...kept.filter((f) => isPinned(f.name))];
-  const rest = kept.filter((f) => f.name !== 'Id' && !isPinned(f.name));
+  const wanted = (typeof pinned === 'string' || pinned === null ? [pinned] : pinned).flatMap((p) => (p === null ? [] : [p.toLowerCase()]));
+  const pinnedFields = [...new Set(wanted)].flatMap((p) => kept.filter((f) => f.name !== 'Id' && f.name.toLowerCase() === p).slice(0, 1));
+  const isPinned = new Set(pinnedFields.map((f) => f.name));
+  const head = [...kept.filter((f) => f.name === 'Id'), ...pinnedFields];
+  const rest = kept.filter((f) => f.name !== 'Id' && !isPinned.has(f.name));
   return [...head, ...rest].slice(0, max).map((f) => ({ name: f.name, label: f.label }));
 }

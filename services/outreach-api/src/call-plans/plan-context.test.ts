@@ -43,6 +43,11 @@ describe('planFacts', () => {
     expect(planFacts(s, NOW)).toEqual({ lastContactWords: 'back in February', lastContactKind: 'call', missing: ['timeline', 'price'] });
   });
 
+  it('Fix 1 (I-2): a qualification field research never read is not reported missing', () => {
+    const self = { ...block('self', answeredButTimelineAndPrice), qualificationFieldsRead: ['Motivation__c', 'Condition__c', 'Major_Repairs_Needed__c', 'Occupancy__c', 'Competition__c', 'Amount_Owed__c', 'Seller_s_Asking_Price__c'] };
+    expect(planFacts(snap([self], [call]), NOW).missing).toEqual(['price']);
+  });
+
   it('with no contact and no self block, nothing was contact and every topic with a field is missing', () => {
     expect(planFacts(snap([]), NOW)).toEqual({ lastContactWords: null, lastContactKind: null, missing: QUALIFICATION_TOPICS.filter((t) => t !== 'decision_makers') });
   });
