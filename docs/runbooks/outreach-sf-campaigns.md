@@ -371,13 +371,13 @@ The results table's **Salesforce** column shows the write-back's status; click i
 | Writing | A tick is running it now |
 | Done | Every step ran and nothing was refused (a value a rep changed since the call is kept, and listed as such) |
 | Partial | It finished, but Salesforce refused something (a field, the Event, the conversion, the Task or the post); the write-back details ("Last error") name the first refusal. Not retried: fix by hand |
-| Failed | Six transient errors in a row. An admin can **Retry** it |
-| Skipped | Nothing to write: write-back is off for the tenant, a test or practice call, the record was deleted, or a hang-up with nothing learned. The details say why ("Why: write-back is off") |
+| Failed | Six transient errors in a row. An admin can **Retry** it. **Failed with an appointment: press Retry, or give the time to Grant by hand** (from the row's appointment column), because the seller was told the time is set |
+| Skipped | Nothing to write: write-back is off for the tenant (never for a call that booked a time that stands: that is written whatever the switch says), a test or practice call, the record was deleted, or a hang-up with nothing learned. The details say why ("Why: write-back is off") |
 
 - **AI Last Call Changes** (on the Lead or Opportunity) is rewritten after each AI call: a header line (time, outcome, call id), then **Changed** (old → new), **Not changed** (a Status or Stage move the plan left alone, with why: not editable, not in the org's picklist, changed since the AI's research, or not from a usual starting value), **Not changed — changed in Salesforce since the call** (someone, a rep or a flow, changed it after the call, so it is kept; a field shown "held: Stage was changed" was left because its Stage or Status moved), **Kept** (a rep's value kept over the seller's answer), **Not written** (with why) and **Created** (the conversion, the Event, the Task).
 - **The Chatter post** on the record written to (the new Opportunity after a conversion): `AI call <id> · <date> · <outcome>`, what was booked, the summary (links removed), what the seller said, what changed, and **Call details**: a link to the campaign page with `?call=<AI call id>`, which opens that call on the results with its transcript and write-back.
 - **Retry** (admins, failed rows only): the results row → **Failed** → **Retry**. Finished steps are kept, so nothing is done twice; a retry reads `IsConverted` first and never converts twice.
-- **Turning write-back off** for a tenant: untick "Write call results back to Salesforce" on the AI calls card (`aiCallWriteback: false`); the card unticks "Book appointments on AI calls" in the same save, because booking needs write-back. Calls counted from then on, and rows already queued or waiting to retry, are recorded `skipped` ("write-back is off") at their next tick without any Salesforce call.
+- **Turning write-back off** for a tenant: untick "Write call results back to Salesforce" on the AI calls card (`aiCallWriteback: false`); the card unticks "Book appointments on AI calls" in the same save, because booking needs write-back. Calls counted from then on, and rows already queued or waiting to retry, are recorded `skipped` ("write-back is off") at their next tick without any Salesforce call, **except a call that booked a time that stands** (Appointment set, or a transfer after a booking): that seller was told the time is set, so the row is still written (the convert, the Event or hold, the Task, the changes text and the Chatter post). Booked calls still reach Salesforce when write-back is off; the hard stop is pausing the campaigns and `AI_VOICE=off`.
 
 ### Troubleshooting
 
@@ -417,14 +417,14 @@ Booking, conversion and write-back start **off** for every tenant (above), so de
 **Stop now** (seconds, no deploy):
 
 1. **Pause** the AI call campaigns.
-2. On Settings → Connections → **AI calls**, untick "Write call results back to Salesforce" and save. The card unticks "Book appointments on AI calls" in the same save (booking needs write-back), so calls from then on offer no times. Rows already queued or waiting to retry are recorded `skipped` ("write-back is off") at their next tick, with no Salesforce call.
+2. On Settings → Connections → **AI calls**, untick "Write call results back to Salesforce" and save. The card unticks "Book appointments on AI calls" in the same save (booking needs write-back), so calls from then on offer no times. Rows already queued or waiting to retry are recorded `skipped` ("write-back is off") at their next tick, with no Salesforce call, **except rows for calls that booked a time**: those are still written, because the seller was told the time is set. Booked calls still reach Salesforce when write-back is off; unticking it does not stop them. The hard stop is pausing the campaigns (step 1) and `AI_VOICE=off` (step 4).
 3. Also untick "Convert a Lead that books an appointment" and save, so turning write-back on again later converts nothing until you decide it should.
 4. Last resort: `AI_VOICE=off` on `@cti/api` (`ai-voice.md` §9). No AI call is placed and no lead uses an attempt.
 
 **Code:**
 
 1. Leave migrations `0055`–`0057` in place: they only add columns (with defaults), tables and indexes, and the previous code runs on them.
-2. Redeploy the previous **outreach-api** first, or together with the previous **`@cti/api`** (Railway → the service → Deployments → the last good one → Redeploy). Never roll `@cti/api` back alone while the new outreach-api runs: an old `@cti/api` answers its triggers 400, and those calls only retry.
+2. **Before redeploying the previous version, wait until the results show no live or uncounted calls** (the pre-1D build retries an `appointment_set` call: it does not know the outcome, so the touch is re-queued and the AI calls the seller again once campaigns resume). Then redeploy the previous **outreach-api** first, or together with the previous **`@cti/api`** (Railway → the service → Deployments → the last good one → Redeploy). Never roll `@cti/api` back alone while the new outreach-api runs: an old `@cti/api` answers its triggers 400, and those calls only retry.
 3. Pending `ai_call_writebacks` rows are left; the previous outreach-api does not read them.
 
 **Salesforce** (by hand; the new fields and permission grants can stay):
