@@ -7,8 +7,10 @@
  * reads that table here instead of guessing. Dropping a key whose call was placed would let a later fresh key call the same
  * person a second time.
  *
- * This mirrors cti-api's routes-internal.ts handleTrigger for an existing key, read-only (cti-api code is never imported;
- * the tables are read through @cti/db):
+ * This reads what cti-api's routes-internal.ts handleTrigger would find for an existing key, read-only (cti-api code is never
+ * imported; the tables are read through @cti/db). It is not a line-for-line copy: handleTrigger now adopts the key's linked
+ * `ai_call_id` first, while this finds a stale reservation's call by searching on the record. For a record key the result is the
+ * same.
  *  - no row: cti-api never reserved the key, so it never dialed under it and holds no body for it (`none`, not stored);
  *  - a stored answer: that answer (`answered`);
  *  - no answer, reserved or taken over (updated_at) less than STALE_REQUEST_MS ago: still in flight (`pending`);
