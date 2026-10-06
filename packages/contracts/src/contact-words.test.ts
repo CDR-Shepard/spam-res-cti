@@ -60,6 +60,8 @@ describe('contactWords', () => {
       }
     }
     expect(agentPlanTextIssues(NO_CONTACT_IN_RECENT_ACTIVITY, { singleLine: true })).toEqual([]);
+    // The targeted read includes archived activity, so the words never claim only recent activity was searched.
+    expect(NO_CONTACT_IN_RECENT_ACTIVITY).toBe('none found');
   });
 });
 

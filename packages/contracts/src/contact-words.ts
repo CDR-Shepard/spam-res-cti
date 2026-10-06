@@ -12,8 +12,8 @@ export const ContactKind = z.enum(['call', 'meeting', 'email']);
 export type ContactKind = z.infer<typeof ContactKind>;
 
 export const DEFAULT_CONTACT_ZONE = 'America/Los_Angeles';
-/** M-8: no contact was found, but research read only the most recent activity. */
-export const NO_CONTACT_IN_RECENT_ACTIVITY = 'none found in recent activity';
+/** M-8: no contact was found, but research read only the most recent activity (the read includes archived activity, so the words are just "none found"). */
+export const NO_CONTACT_IN_RECENT_ACTIVITY = 'none found';
 
 /** The research sources a last contact is read from. */
 const CONTACT_SOURCES: ReadonlySet<string> = new Set(['tasks', 'events', 'emails']);

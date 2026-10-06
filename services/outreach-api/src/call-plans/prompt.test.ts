@@ -180,9 +180,9 @@ describe('buildCallPlanPrompt', () => {
     expect(p.user.indexOf('</facts>')).toBeLessThan(p.user.indexOf('<record '));
   });
 
-  it('Fix 1 (M-8): with no contact found in activity research cut short, the facts say only recent activity was read', () => {
+  it('Fix 1 (M-8): with no contact found in activity research cut short, the facts still say none found', () => {
     const p = buildCallPlanPrompt(snap(), { ...ctx, facts: { ...NO_FACTS, contactSearchLimited: true } });
-    expect(p.user).toContain('Last real contact: none found in recent activity\n');
+    expect(p.user).toContain('Last real contact: none found\n');
   });
 
   it('sweep D-13: topics Salesforce would not let research read get their own facts line; none → no line', () => {
