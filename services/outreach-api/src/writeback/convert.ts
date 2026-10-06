@@ -29,7 +29,8 @@ export const LEAD_MANAGER_FIELD = 'LeadManager__c';
 
 export type ConvertOutcome =
   | { kind: 'converted'; opportunityId: string; accountId: string; contactId: string; adopted: false }
-  | { kind: 'adopted'; opportunityId: string; accountId: string | null; contactId: string | null; adopted: true; ours: boolean }
+  // convertedByName: who made the Opportunity (CreatedBy.Name), for "Lead was already converted by …" (Fix 1, M1)
+  | { kind: 'adopted'; opportunityId: string; accountId: string | null; contactId: string | null; adopted: true; ours: boolean; convertedByName: string | null }
   | { kind: 'no_opportunity'; accountId: string | null } // converted (by someone) without an Opportunity → Task to the owner, row partial
   | { kind: 'refused'; code: string; message: string } // permanent → fallback path
   | { kind: 'not_converted' } // `adoptOnly` and the Lead stands unconverted: nothing was asked of SOAP
@@ -89,22 +90,36 @@ async function connectedUserIs(client: SalesforceClient, userId: string): Promis
   }
 }
 
-/** A converted Lead's outcome: its Opportunity adopted (ours when we made it after the call), or none to adopt. */
-async function adopt(client: SalesforceClient, lead: Row, callEndedAt: Date): Promise<ConvertOutcome> {
+/**
+ * A converted Lead's outcome: its Opportunity adopted (ours when we made it after the call), or none to adopt. `repConverted`:
+ * the caller already knows someone else converted it (convertLead was refused because it was converted, M3).
+ */
+async function adopt(client: SalesforceClient, lead: Row, callEndedAt: Date, repConverted = false): Promise<ConvertOutcome> {
   const oppId = sfId(lead.ConvertedOpportunityId);
   const accountId = sfId(lead.ConvertedAccountId);
   if (oppId === null) return { kind: 'no_opportunity', accountId };
-  const [opp] = await client.query<Row>(`SELECT Id, CreatedById, CreatedDate FROM Opportunity WHERE Id = '${soqlEscape(oppId)}' LIMIT 1`);
+  const [opp] = await client.query<Row>(`SELECT Id, CreatedById, CreatedBy.Name, CreatedDate FROM Opportunity WHERE Id = '${soqlEscape(oppId)}' LIMIT 1`);
   if (!opp) return { kind: 'no_opportunity', accountId };
   const created = new Date(String(opp.CreatedDate ?? '').replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
   const after = !Number.isNaN(created.getTime()) && created.getTime() > callEndedAt.getTime();
   const createdBy = sfId(opp.CreatedById);
   // Only a recent Opportunity can be ours, so the connected user is looked up only then.
-  const ours = after && createdBy !== null && (await connectedUserIs(client, createdBy));
-  return { kind: 'adopted', opportunityId: oppId, accountId, contactId: sfId(lead.ConvertedContactId), adopted: true, ours };
+  const ours = !repConverted && after && createdBy !== null && (await connectedUserIs(client, createdBy));
+  const by = opp.CreatedBy !== null && typeof opp.CreatedBy === 'object' ? str((opp.CreatedBy as Row).Name) : null;
+  return { kind: 'adopted', opportunityId: oppId, accountId, contactId: sfId(lead.ConvertedContactId), adopted: true, ours, convertedByName: by === null ? null : oneLine(by) };
 }
 
 const refused = (code: string, message: string): ConvertOutcome => ({ kind: 'refused', code, message: cutUtf16(oneLine(message), MESSAGE_MAX) });
+
+/**
+ * A refusal Salesforce will repeat. A rep may have converted the Lead between our read and convertLead (it then refuses,
+ * e.g. CANNOT_UPDATE_CONVERTED_LEAD): the Lead is read again and, when converted, the rep's conversion is adopted (M3).
+ */
+async function refusedOrAdopted(client: SalesforceClient, i: { leadId: string; callEndedAt: Date; select: readonly string[] }, code: string, message: string): Promise<ConvertOutcome> {
+  const again = await readLead(client, i.leadId, i.select);
+  if (again?.IsConverted === true) return adopt(client, again, i.callEndedAt, true);
+  return refused(code, message);
+}
 
 /** What a convertLead failure means: an outcome, or a throw for the tick to retry. */
 async function onConvertError(err: unknown, client: SalesforceClient, i: { leadId: string; callEndedAt: Date; select: readonly string[] }): Promise<ConvertOutcome> {
@@ -120,7 +135,7 @@ async function onConvertError(err: unknown, client: SalesforceClient, i: { leadI
     return refused(MALFORMED_RESPONSE, err.message);
   }
   // SOAP faults are classified by their code before any HTTP status (every fault is HTTP 500).
-  if (err instanceof SalesforceApiError && err.code !== undefined && isPermanentSoapFault(err.code)) return refused(err.code, err.message);
+  if (err instanceof SalesforceApiError && err.code !== undefined && isPermanentSoapFault(err.code)) return refusedOrAdopted(client, i, err.code, err.message);
   throw err;
 }
 
@@ -149,17 +164,19 @@ export async function convertStep(
     throw err;
   }
   const name = cutUtf16(oneLine(str(lead.Name) ?? ''), OPPORTUNITY_NAME_MAX) || 'Seller';
+  const again = { leadId: i.leadId, callEndedAt: i.callEndedAt, select };
+  let first: { statusCode: string; message: string };
   try {
     const result = await convertLead(client, { leadId: i.leadId, convertedStatus: status, ownerId: i.ownerId, opportunityName: name, sendNotificationEmail: false });
     if (result.success) {
       return { outcome: { kind: 'converted', opportunityId: result.opportunityId, accountId: result.accountId, contactId: result.contactId, adopted: false }, lead };
     }
-    const first = result.errors[0] ?? { statusCode: 'UNKNOWN_ERROR', message: '' };
+    first = result.errors[0] ?? { statusCode: 'UNKNOWN_ERROR', message: '' };
     if (TRANSIENT_RESULT_CODES.has(first.statusCode)) throw new SalesforceApiError(`convertLead: ${first.statusCode}`, 0, null, first.statusCode);
-    return { outcome: refused(first.statusCode, first.message), lead };
   } catch (err) {
-    return { outcome: await onConvertError(err, client, { leadId: i.leadId, callEndedAt: i.callEndedAt, select }), lead };
+    return { outcome: await onConvertError(err, client, again), lead };
   }
+  return { outcome: await refusedOrAdopted(client, again, first.statusCode, first.message), lead };
 }
 
 /** Blank for carrying: null, missing, an empty string, or an unticked checkbox. */
@@ -170,7 +187,14 @@ const isBlank = (v: unknown): boolean => v === null || v === undefined || v === 
  * created or upgraded: CF-5), plus the Lead Manager; only fields the connected user may update, in the org's spelling. It
  * deliberately bypasses the write-back allowlist (D-17): these are not answers from the call.
  */
-export function carryPatch(i: { lead: Record<string, unknown>; opp: Record<string, unknown>; updateable: ReadonlySet<string>; leadManager: string | null }): Record<string, unknown> {
+export function carryPatch(i: {
+  lead: Record<string, unknown>;
+  opp: Record<string, unknown>;
+  updateable: ReadonlySet<string>;
+  leadManager: string | null;
+  /** Adopting our own earlier conversion: the Lead Manager only fills a blank, a value set since then is kept (M11). */
+  leadManagerFillOnly?: boolean;
+}): Record<string, unknown> {
   const spelling = new Map([...i.updateable].map((n) => [n.toLowerCase(), n]));
   const valueOf = (row: Record<string, unknown>, name: string): unknown => {
     const key = Object.keys(row).find((k) => k.toLowerCase() === name.toLowerCase());
@@ -184,7 +208,8 @@ export function carryPatch(i: { lead: Record<string, unknown>; opp: Record<strin
     patch[name] = value;
   }
   const manager = spelling.get(LEAD_MANAGER_FIELD.toLowerCase());
-  if (i.leadManager !== null && manager !== undefined) patch[manager] = i.leadManager;
+  const managerKept = i.leadManagerFillOnly === true && !isBlank(valueOf(i.opp, LEAD_MANAGER_FIELD));
+  if (i.leadManager !== null && manager !== undefined && !managerKept) patch[manager] = i.leadManager;
   return patch;
 }
 

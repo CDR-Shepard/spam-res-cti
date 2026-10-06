@@ -27,7 +27,7 @@ const errName = (err: unknown): string => (err instanceof Error ? err.name : typ
 const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
 
 /** The PATCH carrying what the lead mapping drops, and the Lead Manager, onto the new Opportunity (before the Event). */
-async function carry(run: RowRun, oppId: string, lead: Row): Promise<{ carried: string[]; notCarried: Array<{ field: string; code: string }> }> {
+async function carry(run: RowRun, oppId: string, lead: Row, adopted: boolean): Promise<{ carried: string[]; notCarried: Array<{ field: string; code: string }> }> {
   const { client, deps } = run;
   const owner = run.ctx.call.appointment!.specialistSfUserId;
   const leadManager = await leadManagerFor(client, str(lead.OwnerId), owner);
@@ -37,7 +37,7 @@ async function carry(run: RowRun, oppId: string, lead: Row): Promise<{ carried: 
   const select = ['Id', ...present.map((f) => f.name)];
   const [opp] = await client.query<Row>(`SELECT ${select.join(', ')} FROM Opportunity WHERE Id = '${soqlEscape(oppId)}' LIMIT 1`);
   const updateable = new Set(present.filter((f) => f.updateable === true).map((f) => f.name));
-  const patch = carryPatch({ lead, opp: opp ?? {}, updateable, leadManager });
+  const patch = carryPatch({ lead, opp: opp ?? {}, updateable, leadManager, leadManagerFillOnly: adopted });
   const result = await patchDroppingRefused(client, 'Opportunity', oppId, (dropped) => without(patch, dropped));
   const refusedKeys = new Set(result.refusals.map((r) => r.field));
   const notCarried = [
@@ -72,12 +72,13 @@ async function onConverted(run: RowRun, outcome: Extract<ConvertOutcome, { oppor
   await saveProgress(run.deps.db, run.row.id, ids, run.deps.now);
   let next: RowRun = { ...run, row: { ...run.row, convertedOpportunityId: run.row.convertedOpportunityId ?? outcome.opportunityId } };
   const ours = outcome.kind === 'converted' || outcome.ours;
-  const carried = ours ? await carry(next, outcome.opportunityId, lead) : { carried: [], notCarried: [] };
+  const carried = ours ? await carry(next, outcome.opportunityId, lead, outcome.kind === 'adopted') : { carried: [], notCarried: [] };
+  const convertedByName = outcome.kind === 'adopted' && !ours ? outcome.convertedByName : null;
   const detail = outcome.kind === 'converted' ? 'converted' : ours ? 'adopted our earlier conversion' : 'already converted';
   next = await saveStep(next, 'convert', {
     status: 'done',
     detail,
-    data: { leadName: str(lead.Name), priorOwnerId: str(lead.OwnerId), repConverted: !ours, ...carried },
+    data: { leadName: str(lead.Name), priorOwnerId: str(lead.OwnerId), repConverted: !ours, convertedByName, ...carried },
   });
   return next;
 }

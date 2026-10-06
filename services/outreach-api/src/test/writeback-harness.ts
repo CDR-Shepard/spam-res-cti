@@ -97,8 +97,8 @@ export interface OrgState {
   /** The Lead's conversion fields (the converting read). */
   lead: Row | null;
   busy: Row[];
-  /** Who created the converted Opportunity, and when. */
-  convertedBy: { id: string; at: string };
+  /** Who created the converted Opportunity (and their name, when Salesforce returns it), and when. */
+  convertedBy: { id: string; at: string; name?: string };
 }
 
 /** A fake org: the describes of production plus the carry fields, and stateful reads over what the test has written. */
@@ -116,7 +116,7 @@ export function fakeOrg(state: OrgState): FakeSfWrites {
     [/^SELECT Id, IsActive FROM User/, (q) => [{ Id: idIn(q), IsActive: idIn(q) === SETTER }]],
     [/^SELECT MasterLabel, SortOrder FROM LeadStatus/, [{ MasterLabel: 'Qualified', SortOrder: 6 }]],
     [/^SELECT Id, Name, OwnerId, IsConverted, ConvertedOpportunityId/, () => (state.lead ? [{ ...state.lead }] : [])],
-    [/^SELECT Id, CreatedById, CreatedDate FROM Opportunity/, (q) => [{ Id: idIn(q), CreatedById: state.convertedBy.id, CreatedDate: state.convertedBy.at }]],
+    [/^SELECT Id, CreatedById, CreatedBy\.Name, CreatedDate FROM Opportunity/, (q) => [{ Id: idIn(q), CreatedById: state.convertedBy.id, CreatedBy: state.convertedBy.name ? { Name: state.convertedBy.name } : null, CreatedDate: state.convertedBy.at }]],
     [/^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate FROM Event/, () => state.busy],
     [/^SELECT Id FROM Event WHERE WhatId = '/, (q) => created('Event').filter((c) => q.includes(`'${String(c.fields.WhatId)}'`)).map((_c, i) => ({ Id: `00U8X0000000${i}0AAA` }))],
     [/^SELECT Id FROM Event WHERE WhatId = null/, () => created('Event').filter((c) => !('WhatId' in c.fields)).map(() => ({ Id: '00U8X00000Hold1QAA' }))],

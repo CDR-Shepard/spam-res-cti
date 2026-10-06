@@ -29,7 +29,7 @@ const LEAD_ROW = {
 };
 const STATUS = /^SELECT MasterLabel, SortOrder FROM LeadStatus WHERE IsConverted = true/;
 const READ_LEAD = /^SELECT Id, Name, OwnerId, IsConverted, .* FROM Lead WHERE Id = /;
-const READ_OPP = /^SELECT Id, CreatedById, CreatedDate FROM Opportunity WHERE Id = /;
+const READ_OPP = /^SELECT Id, CreatedById, CreatedBy\.Name, CreatedDate FROM Opportunity WHERE Id = /;
 
 function org(lead: Record<string, unknown> | null = LEAD_ROW, more: WriteQueryRoute[] = []) {
   return fakeSfWrites({ queries: [...more, [READ_LEAD, lead ? [lead] : []], [STATUS, [{ MasterLabel: 'Qualified', SortOrder: 6 }]]] });
@@ -69,17 +69,18 @@ describe('convertStep', () => {
   const converted = { ...LEAD_ROW, IsConverted: true, ConvertedOpportunityId: OPP, ConvertedAccountId: ACCOUNT, ConvertedContactId: CONTACT };
 
   it('2: already converted, the Opportunity made by us after the call (a lost answer): adopted, ours; never converted again', async () => {
-    const f = org(converted, [[READ_OPP, [{ Id: OPP, CreatedById: US, CreatedDate: '2026-10-06T22:15:00.000+0000' }]]]);
+    const f = org(converted, [[READ_OPP, [{ Id: OPP, CreatedById: US, CreatedBy: { Name: 'Integration User' }, CreatedDate: '2026-10-06T22:15:00.000+0000' }]]]);
     f.onSoap = (b) => (b.includes('getUserInfo') ? userInfoAnswer(US) : new Error('no convert'));
     const { outcome } = await step(f);
-    expect(outcome).toEqual({ kind: 'adopted', opportunityId: OPP, accountId: ACCOUNT, contactId: CONTACT, adopted: true, ours: true });
+    expect(outcome).toEqual({ kind: 'adopted', opportunityId: OPP, accountId: ACCOUNT, contactId: CONTACT, adopted: true, ours: true, convertedByName: 'Integration User' });
+    expect(f.soql[1]).toBe(`SELECT Id, CreatedById, CreatedBy.Name, CreatedDate FROM Opportunity WHERE Id = '${OPP}' LIMIT 1`);
     expect(converts(f)).toEqual([]);
   });
 
   it('3: already converted by a rep: adopted, not ours; never converted again', async () => {
-    const f = org(converted, [[READ_OPP, [{ Id: OPP, CreatedById: SETTER, CreatedDate: '2026-10-06T22:20:00.000+0000' }]]]);
+    const f = org(converted, [[READ_OPP, [{ Id: OPP, CreatedById: SETTER, CreatedBy: { Name: 'Sam Setter' }, CreatedDate: '2026-10-06T22:20:00.000+0000' }]]]);
     f.onSoap = (b) => (b.includes('getUserInfo') ? userInfoAnswer(US) : new Error('no convert'));
-    expect((await step(f)).outcome).toMatchObject({ kind: 'adopted', ours: false });
+    expect((await step(f)).outcome).toMatchObject({ kind: 'adopted', ours: false, convertedByName: 'Sam Setter' });
     // Made before the call ended: not ours, whoever made it (no SOAP needed to tell).
     const early = org(converted, [[READ_OPP, [{ Id: OPP, CreatedById: US, CreatedDate: '2026-10-06T21:00:00.000+0000' }]]]);
     expect((await step(early)).outcome).toMatchObject({ kind: 'adopted', ours: false });
@@ -112,6 +113,28 @@ describe('convertStep', () => {
     const f = org();
     f.onSoap = () => convertRefused('FIELD_CUSTOM_VALIDATION_EXCEPTION', 'Only the Hunt winner may convert');
     expect((await step(f)).outcome).toEqual({ kind: 'refused', code: 'FIELD_CUSTOM_VALIDATION_EXCEPTION', message: 'Only the Hunt winner may convert' });
+  });
+
+  it('M3: a rep converted it between our read and convertLead (refused, or a fault): re-read and adopted as the rep\'s, no fallback', async () => {
+    const answers = [convertRefused('CANNOT_UPDATE_CONVERTED_LEAD', 'converted lead'), soapFaultAnswer('CANNOT_UPDATE_CONVERTED_LEAD', 'converted lead')];
+    for (const answer of answers) {
+      let reads = 0;
+      const f = org(null, [
+        [READ_LEAD, () => [++reads === 1 ? LEAD_ROW : converted]],
+        [READ_OPP, [{ Id: OPP, CreatedById: SETTER, CreatedBy: { Name: 'Sam Setter' }, CreatedDate: '2026-10-06T22:20:00.000+0000' }]],
+      ]);
+      f.onSoap = () => answer;
+      expect((await step(f)).outcome).toEqual({ kind: 'adopted', opportunityId: OPP, accountId: ACCOUNT, contactId: CONTACT, adopted: true, ours: false, convertedByName: 'Sam Setter' });
+      expect(f.soapBodies.filter((b) => b.includes('getUserInfo'))).toEqual([]);
+    }
+  });
+
+  it('M3: a refusal whose re-read shows the Lead still unconverted stays refused', async () => {
+    let reads = 0;
+    const f = org(null, [[READ_LEAD, () => (++reads, [LEAD_ROW])]]);
+    f.onSoap = () => convertRefused('FIELD_CUSTOM_VALIDATION_EXCEPTION', 'Only the Hunt winner may convert');
+    expect((await step(f)).outcome).toMatchObject({ kind: 'refused', code: 'FIELD_CUSTOM_VALIDATION_EXCEPTION' });
+    expect(reads).toBe(2);
   });
 
   it('D-5: UNABLE_TO_LOCK_ROW or REQUEST_LIMIT_EXCEEDED in the result is transient: it throws (retried)', async () => {
@@ -212,6 +235,13 @@ describe('carryPatch', () => {
     const lead = { ...LEAD_ROW, Spanish_Speaker__c: true, Skip_on_Dialer__c: true };
     const some = new Set(['ai_call_consent__C', 'Skip_on_Dialer__c']);
     expect(carryPatch({ lead, opp: blankOpp, updateable: some, leadManager: SETTER })).toEqual({ ai_call_consent__C: true, Skip_on_Dialer__c: true });
+  });
+
+  it('M11: on an adopted conversion of ours the Lead Manager only fills a blank', () => {
+    const lead = { ...LEAD_ROW, AI_Call_Consent__c: false, AI_Call_Consent_Date__c: null, AI_Call_Consent_Source__c: null };
+    expect(carryPatch({ lead, opp: { ...blankOpp, LeadManager__c: GRANT }, updateable, leadManager: SETTER, leadManagerFillOnly: true })).toEqual({});
+    expect(carryPatch({ lead, opp: { ...blankOpp, LeadManager__c: null }, updateable, leadManager: SETTER, leadManagerFillOnly: true })).toEqual({ LeadManager__c: SETTER });
+    expect(carryPatch({ lead, opp: { ...blankOpp, LeadManager__c: GRANT }, updateable, leadManager: SETTER })).toEqual({ LeadManager__c: SETTER });
   });
 
   it('an empty patch is empty', () => {

@@ -111,6 +111,24 @@ describe.skipIf(!pgLane)('runWritebacks on Leads (real Postgres)', () => {
     expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'done', convertedOpportunityId: NEW_OPP });
   });
 
+  it('M11: adopting our own lost-answer conversion, a Lead Manager set since then is kept (fill-blank rule)', async () => {
+    const s = await bookedLead();
+    const state = leadState(s.recordId);
+    const f = fakeOrg(state);
+    const answer = f.onSoap!;
+    f.onSoap = (body) => {
+      const a = answer(body);
+      return body.includes('<urn:convertLead') ? transportError() : a;
+    };
+    expect((await runWritebacks(depsFor(db, f))).retried).toBe(1);
+    state.records.set(NEW_OPP, newOpp({ LeadManager__c: GRANT }));
+    expect((await runWritebacks(depsFor(db, f, { now: new Date(RUN_AT.getTime() + 2 * 60_000) }))).done).toBe(1);
+    const carry = f.updates[0]!;
+    expect(carry).toMatchObject({ sobject: 'Opportunity', id: NEW_OPP });
+    expect(carry.fields).not.toHaveProperty('LeadManager__c');
+    expect(carry.fields).toMatchObject({ AI_Call_Consent__c: true });
+  });
+
   it('3c: Salesforce refuses the conversion (the Hunt rule): hold + Task to Grant with the reason, Working and Hot, post on the Lead; partial', async () => {
     const s = await bookedLead();
     const f = fakeOrg(leadState(s.recordId));
@@ -142,7 +160,7 @@ describe.skipIf(!pgLane)('runWritebacks on Leads (real Postgres)', () => {
 
   it('3e: a rep converted the Lead first: no convertLead, no carry (owner and Lead Manager untouched), the Event on that Opportunity is Grant\'s', async () => {
     const s = await bookedLead();
-    const state = leadState(s.recordId, { convertedBy: { id: SETTER, at: '2026-10-06T22:15:00.000+0000' } });
+    const state = leadState(s.recordId, { convertedBy: { id: SETTER, at: '2026-10-06T22:15:00.000+0000', name: 'Sam Setter' } });
     state.lead = leadRow(s.recordId, { IsConverted: true, ConvertedOpportunityId: REP_OPP, ConvertedAccountId: ACCOUNT, ConvertedContactId: CONTACT });
     const g = fakeOrg(state);
     await runWritebacks(depsFor(db, g));
@@ -150,7 +168,10 @@ describe.skipIf(!pgLane)('runWritebacks on Leads (real Postgres)', () => {
     expect(g.updates.some((u) => 'LeadManager__c' in u.fields || 'OwnerId' in u.fields)).toBe(false);
     expect(g.updates).toHaveLength(1);
     expect(g.creates.find((c) => c.sobject === 'Event')!.fields).toMatchObject({ WhatId: REP_OPP, OwnerId: GRANT });
-    expect(changesOf(g.updates[0]!.fields)).toContain('The Lead was already converted; wrote to its Opportunity');
+    expect(changesOf(g.updates[0]!.fields)).toContain('- Lead was already converted by Sam Setter; wrote to its Opportunity');
+    const post = String(g.creates.find((c) => c.sobject === 'FeedItem')!.fields.Body);
+    expect(post).toContain('\nLead was already converted by Sam Setter.\n');
+    expect(post).not.toContain('by the AI');
     expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'done', convertedOpportunityId: REP_OPP });
   });
 

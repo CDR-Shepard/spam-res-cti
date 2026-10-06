@@ -120,10 +120,12 @@ describe('changesFieldText (spec §5.5)', () => {
       ].join('\n'),
     );
   });
-  it('an adopted conversion says so', () => {
+  it('a conversion a rep made first says who converted it, never that the AI did', () => {
     const { plan, written } = oppBooking('phone', true);
-    const text = changesFieldText(base(plan, written, { conversion: { leadName: null, ownerName: 'Grant Golden', adopted: true } }));
-    expect(text).toContain('Created\n- The Lead was already converted; wrote to its Opportunity\n- Chatter post');
+    const text = changesFieldText(base(plan, written, { conversion: { leadName: null, ownerName: 'Grant Golden', adopted: true, convertedBy: 'Sam Setter' } }));
+    expect(text).toContain('Created\n- Lead was already converted by Sam Setter; wrote to its Opportunity\n- Chatter post');
+    const unknown = changesFieldText(base(plan, written, { conversion: { leadName: null, ownerName: 'Grant Golden', adopted: true, convertedBy: null } }));
+    expect(unknown).toContain('- Lead was already converted by a rep; wrote to its Opportunity');
   });
   it('the fallback: a Lead that could not be converted, with the mapping unavailable', () => {
     const plan = buildWritePlan({
@@ -219,6 +221,14 @@ describe('chatterText (spec §5.6)', () => {
       'Booked: walkthrough at 12 Oak St, Fresno with Grant, Wed Oct 7, 11:00 AM PT',
     ]);
     expect(text.length).toBeLessThanOrEqual(CHATTER_MAX);
+  });
+  it('a conversion a rep made first: the post names who converted it, never "by the AI"', () => {
+    const { plan, written } = oppBooking('phone', true);
+    const text = chatterText(base(plan, written, { conversion: { leadName: 'Jane Seller', ownerName: 'Grant Golden', adopted: true, convertedBy: 'Sam Setter' } }));
+    expect(text.split('\n')[1]).toBe('Lead was already converted by Sam Setter.');
+    expect(text).not.toContain('by the AI');
+    const unknown = chatterText(base(plan, written, { conversion: { leadName: 'Jane Seller', ownerName: 'Grant Golden', adopted: true } }));
+    expect(unknown.split('\n')[1]).toBe('Lead was already converted by a rep.');
   });
   it('the fallback says the Lead was not converted, and why', () => {
     const plan = buildWritePlan({

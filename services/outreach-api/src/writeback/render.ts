@@ -30,8 +30,11 @@ export interface RenderInput {
   summary: string | null;
   appointmentWords: string | null;
   resultsUrl: string;
-  /** Set when the write-back converted the Lead (Task 24). */
-  conversion: { leadName: string | null; ownerName: string; adopted: boolean } | null;
+  /**
+   * Set when the write-back targets a converted Lead's Opportunity (Task 24). `adopted`: a rep converted it first, not this
+   * write-back; `convertedBy` names them when known (Fix 1, M1).
+   */
+  conversion: { leadName: string | null; ownerName: string; adopted: boolean; convertedBy?: string | null } | null;
   /** Set on the fallback path: why the Lead could not be converted. */
   conversionRefused: string | null;
   /** Why a Lead was not converted when no hold or "convert and book" Task was made either (the booked time passed, I-1). */
@@ -85,8 +88,14 @@ const SKIP_WORDS: Readonly<Record<Skipped['why'], string>> = {
   not_from_state: 'left at its current value (the AI only moves it from the usual starting values)',
 };
 
+/** "Lead was already converted by Sam Setter" (or "by a rep"): a rep's conversion is never claimed as the AI's (M1). */
+function repConverted(c: NonNullable<RenderInput['conversion']>): string {
+  const who = c.convertedBy === undefined || c.convertedBy === null || oneLine(c.convertedBy) === '' ? 'a rep' : capped(oneLine(c.convertedBy), 80);
+  return `Lead was already converted by ${who}`;
+}
+
 function conversionLine(c: NonNullable<RenderInput['conversion']>): string {
-  if (c.adopted) return 'The Lead was already converted; wrote to its Opportunity';
+  if (c.adopted) return `${repConverted(c)}; wrote to its Opportunity`;
   const name = c.leadName === null || oneLine(c.leadName) === '' ? 'the Lead' : `Lead "${oneLine(c.leadName)}"`;
   return `Converted ${name} into this Opportunity (owner ${oneLine(c.ownerName)}); new Account and Contact`;
 }
@@ -184,7 +193,7 @@ function chatterHead(i: RenderInput, cut: ChatterCut): string[] {
   return [
     `AI call · ${ptShort(i.at)} · ${capped(oneLine(i.outcomeWords), 60)}`,
     ...(dnc.length > 0 ? [`${DNC_TITLE}: ${capped(dnc.join(', '), REFUSAL_MAX)} (see AI Last Call Changes)`] : []),
-    ...(i.conversion ? ['Converted from Lead by the AI after the seller booked.'] : []),
+    ...(i.conversion ? [i.conversion.adopted ? `${repConverted(i.conversion)}.` : 'Converted from Lead by the AI after the seller booked.'] : []),
     ...(refused === null ? [] : [`Not converted to an Opportunity (${refused}): a hold and a "convert and book" Task were created.`]),
     ...(booked === '' ? [] : [`Booked: ${booked}`]),
     ...(summary === '' || cut.summary === 'none' ? [] : [`Summary: ${summaryText(summary, cut.summary)}`]),

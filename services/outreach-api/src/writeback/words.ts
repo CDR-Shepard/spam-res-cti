@@ -114,7 +114,14 @@ export function renderInputFor(run: RowRun, plan: WritePlan, applied: Applied, e
     summary: extra.summary,
     appointmentWords: extra.appointmentWords,
     resultsUrl: resultsUrl(run),
-    conversion: converted ? { leadName: typeof data.leadName === 'string' ? data.leadName : null, ownerName: ownerName(extra.owner), adopted: data.repConverted === true } : null,
+    conversion: converted
+      ? {
+          leadName: typeof data.leadName === 'string' ? data.leadName : null,
+          ownerName: ownerName(extra.owner),
+          adopted: data.repConverted === true,
+          convertedBy: typeof data.convertedByName === 'string' ? data.convertedByName : null,
+        }
+      : null,
     conversionRefused: passed ? null : refused,
     notConverted: passed ? refused : null,
     transferredTo: run.ctx.call.transferredTo,
