@@ -1,10 +1,13 @@
 /**
  * The "Power Dialer Time" Task — one per rep per Pacific day, holding the rep's
- * time on the power dialer as Call Duration so Salesforce reports can sum it. Written as the rep (the CTI user id → their own Salesforce
- * connection), so the rep owns it. A plain Task, never a Call: call counts and
- * call metrics must not include it. Belongs to no record (no WhoId/WhatId).
+ * time on the power dialer (dialing or talking; quiet stretches over 15 minutes
+ * left out) as Call Duration so Salesforce reports can sum it. Written as the
+ * rep (the CTI user id → their own Salesforce connection), so the rep owns it.
+ * A plain Task, never a Call: call counts and call metrics must not include it.
+ * Belongs to no record (no WhoId/WhatId).
  *
- * Design: docs/superpowers/specs/2026-10-02-dialer-time-tasks-design.md.
+ * Design: docs/superpowers/specs/2026-10-02-dialer-time-tasks-design.md and
+ * docs/superpowers/specs/2026-10-06-dialer-idle-cutoff-design.md.
  */
 import { sfFetch, soqlQuery } from './client.js';
 import { soqlEscape } from './soql.js';
