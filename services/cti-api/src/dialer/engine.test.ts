@@ -1171,6 +1171,20 @@ describe('stopSession', () => {
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'stopped' }) });
     expect(r).toEqual({ action: 'stopped' });
   });
+  // The idle cut (dialer/idle-runs.ts) stops through this same function; the
+  // reason rides the one status-flip write, so a run never reads `stopped` without it.
+  it('writes the stop reason with the status flip when the caller gives one (the idle cut)', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await stopSession('S1', deps, { reason: 'idle' });
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'stopped', stopReason: 'idle' }) });
+  });
+  it('writes a null stop reason for the rep\'s own Stop', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await stopSession('S1', deps);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'stopped', stopReason: null }) });
+  });
   it('does not hang up a connected (already-bridged) item, but still stops', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;

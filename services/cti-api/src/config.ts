@@ -190,6 +190,14 @@ const schema = z.object({
   DIALER_TIME_TASKS: z.enum(['on', 'off']).default('on'),
 
   /**
+   * Kill switch for hanging up idle power-dial lines (dialer/idle-runs.ts):
+   * a run whose open line had no dial, conversation, or rep action for 15
+   * minutes is stopped. `off` = the loop is never started. Default `on`;
+   * strict enum like NO_ANSWER_CHATTER.
+   */
+  DIALER_IDLE_STOP: z.enum(['on', 'off']).default('on'),
+
+  /**
    * AI voice calls (ai-voice/): OpenAI Realtime over a Twilio Media Stream.
    * Available only when OPENAI_API_KEY is set (see aiVoiceAvailable). Strict
    * enum like NO_ANSWER_CHATTER, so `false` / `0` fail the boot.

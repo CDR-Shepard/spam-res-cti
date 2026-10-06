@@ -31,6 +31,7 @@ import { maybeStartInboundTextLoop } from './sms/inbound-text-worker.js';
 import { startReputationWorker } from './reputation/worker.js';
 import { startDirectoryLoop } from './mobile/directory-build.js';
 import { startRepLegReconcileLoop } from './dialer/rep-leg-reconcile.js';
+import { maybeStartIdleRunLoop } from './dialer/idle-runs.js';
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
@@ -149,6 +150,8 @@ async function main(): Promise<void> {
   const directoryTimer = startDirectoryLoop(cfg.DIRECTORY_REBUILD_INTERVAL_MS);
   // Talk-time report: close rep legs whose end callback never came (Twilio's own record).
   const repLegTimer = startRepLegReconcileLoop();
+  // Power-dial runs whose open line sat 15 minutes with nothing happening → stopped. Null when DIALER_IDLE_STOP=off.
+  const idleRunTimer = maybeStartIdleRunLoop(cfg);
   // AI calls whose status callback never came → finalized from Twilio's record (unref'd; null when AI voice is off).
   const aiCallSweepTimer = startAiCallSweeper(cfg, app.log);
 
@@ -163,6 +166,7 @@ async function main(): Promise<void> {
     clearInterval(reputationTimer);
     clearInterval(directoryTimer);
     clearInterval(repLegTimer);
+    if (idleRunTimer) clearInterval(idleRunTimer);
     if (aiCallSweepTimer) clearInterval(aiCallSweepTimer);
     await app.close();
   };

@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
-import { getDb, schema } from '@cti/db';
+import { getDb, schema, type DialerStopReason } from '@cti/db';
 import { DAILY_CAP_WINDOW_MS } from '@cti/firewall';
 import type { DialerItem } from './session-store.js';
 import type { BridgedCall } from './connect-log.js';
@@ -631,7 +631,11 @@ export async function skipCurrent(sessionId: string, deps: EngineDeps): ReturnTy
  * returns `idle`. Same reasoning as `skipCurrent`'s stamp-then-hang-up, one
  * level up.
  */
-export async function stopSession(sessionId: string, deps: EngineDeps): Promise<{ action: 'stopped' }> {
+export async function stopSession(
+  sessionId: string,
+  deps: EngineDeps,
+  opts: { reason?: DialerStopReason } = {},
+): Promise<{ action: 'stopped' }> {
   const [session, items] = await Promise.all([
     deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) }),
     loadItems(deps, sessionId),
@@ -646,7 +650,12 @@ export async function stopSession(sessionId: string, deps: EngineDeps): Promise<
   if (session && (session.status === 'active' || session.status === 'paused')) {
     await releaseRepConference(deps, session);
   }
-  await setSession(deps, sessionId, 'stopped');
+  // The flip also records why, when the CTI (not the rep) is the one stopping:
+  // the idle cut passes { reason: 'idle' }; the rep's own Stop writes null.
+  await deps.db
+    .update(schema.dialerSessions)
+    .set({ status: 'stopped', stopReason: opts.reason ?? null, updatedAt: new Date() })
+    .where(eq(schema.dialerSessions.id, sessionId));
   if (item && item.status === 'dialing' && item.callId) {
     try {
       await deps.telephony.hangup(item.callId);

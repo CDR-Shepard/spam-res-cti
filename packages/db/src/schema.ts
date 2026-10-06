@@ -279,6 +279,10 @@ export const outboundNumbers = pgTable(
   }),
 );
 
+/** Every stop_reason a dialer_sessions row can hold (migration 0054's CHECK). */
+export const DIALER_STOP_REASONS = ['idle'] as const;
+export type DialerStopReason = (typeof DIALER_STOP_REASONS)[number];
+
 export const dialerSessions = pgTable(
   'dialer_sessions',
   {
@@ -318,6 +322,10 @@ export const dialerSessions = pgTable(
      *  settled rows (skip, unreachable, consent-blocked) ahead of the Nth
      *  pending one, and "record X of N" must not count those toward N. */
     runSize: integer('run_size'),
+    /** Why the run stopped when the CTI stopped it: 'idle' = 15 minutes with
+     *  nothing happening on an open line (dialer/idle-runs.ts). NULL: the rep's
+     *  Stop, or any other end (migration 0054). */
+    stopReason: text('stop_reason').$type<DialerStopReason>(),
     /** "No answer" Chatter sweep (salesforce/no-answer-chatter-worker.ts, migration
      *  0040). Set once the ended run's sweep is FINISHED — every qualifying record
      *  posted or terminally skipped — or given up on after MAX_ATTEMPTS. NULL on an

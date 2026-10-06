@@ -102,6 +102,25 @@ describe('DIALER_CONNECT_TASKS — the power-dial Call Task kill switch', () => 
   });
 });
 
+describe('DIALER_IDLE_STOP — the idle power-dial line kill switch', () => {
+  const saved = { ...process.env };
+  beforeEach(() => { delete process.env.DIALER_IDLE_STOP; });
+  afterEach(() => { process.env = { ...saved }; });
+
+  it('defaults to ON', async () => {
+    expect((await loadWith({ DIALER_IDLE_STOP: undefined })).DIALER_IDLE_STOP).toBe('on');
+  });
+  it('an empty value is treated as unset → on', async () => {
+    expect((await loadWith({ DIALER_IDLE_STOP: '' })).DIALER_IDLE_STOP).toBe('on');
+  });
+  it('off turns it off', async () => {
+    expect((await loadWith({ DIALER_IDLE_STOP: 'off' })).DIALER_IDLE_STOP).toBe('off');
+  });
+  it('anything else fails the boot loudly', async () => {
+    await expect(loadWith({ DIALER_IDLE_STOP: 'false' })).rejects.toThrow(/DIALER_IDLE_STOP/);
+  });
+});
+
 describe('AI voice config', () => {
   const saved = { ...process.env };
   const KEYS = [
