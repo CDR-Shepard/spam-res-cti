@@ -26,7 +26,7 @@ import { CALLS_PER_HOUR, PREVIEWS_PER_DAY, PREVIEWS_PER_HOUR, withPreviewLimit, 
 import { dryRunTestCall, type DryRunResult } from '../record-tests/dry-run.js';
 import { runPreview } from '../record-tests/preview.js';
 import { startRecordTestCall, type RunError } from '../record-tests/run.js';
-import { insertRecordTest, listRecordTests, loadRecordTest, loadRecordTestCalls, toRecordTest } from '../record-tests/store.js';
+import { insertRecordTest, listRecordTests, loadInstanceUrl, loadRecordTest, loadRecordTestCalls, toRecordTest } from '../record-tests/store.js';
 import { outreachSettings } from '../settings.js';
 import type { MappingModel } from '../writeback/mapping-model.js';
 import { requireAdmin, requireContext } from '../tenancy/scope.js';
@@ -53,12 +53,13 @@ export interface RecordTestRouteDeps {
   background?: (work: () => Promise<void>) => void;
 }
 
-const PT_TIME = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', hour12: true });
-/** "3:42 PM PT" (the page shows retryAt in the viewer's own zone). */
-function ptTime(at: Date): string {
-  const p: Record<string, string> = {};
-  for (const part of PT_TIME.formatToParts(at)) if (part.type !== 'literal') p[part.type] = part.value;
-  return `${p.hour}:${p.minute} ${p.dayPeriod} PT`;
+/** "3:42 PM PDT" in the tenant's own zone (the page shows retryAt in the viewer's). */
+function tenantTime(at: Date, timeZone: string): string {
+  try {
+    return at.toLocaleTimeString('en-US', { timeZone, hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  } catch {
+    return at.toLocaleTimeString('en-US', { timeZone: 'UTC', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  }
 }
 
 const RATE_WORDS: Readonly<Record<Extract<LimitRefusal, { code: 'RATE_LIMITED' }>['limit'], string>> = {
@@ -67,11 +68,11 @@ const RATE_WORDS: Readonly<Record<Extract<LimitRefusal, { code: 'RATE_LIMITED' }
   calls_per_hour: `You've run ${CALLS_PER_HOUR} test calls in the last hour.`,
 };
 
-/** A limit refusal in words: 429 RATE_LIMITED (with retryAt), or 409 with its code. */
-export function sendLimitRefusal(reply: FastifyReply, refusal: LimitRefusal): FastifyReply {
+/** A limit refusal in words: 429 RATE_LIMITED (with retryAt, worded in the tenant's zone), or 409 with its code. */
+export function sendLimitRefusal(reply: FastifyReply, refusal: LimitRefusal, timeZone: string): FastifyReply {
   switch (refusal.code) {
     case 'RATE_LIMITED':
-      return sendError(reply, 429, 'RATE_LIMITED', `${RATE_WORDS[refusal.limit]} Try again at ${ptTime(refusal.retryAt)}.`, {
+      return sendError(reply, 429, 'RATE_LIMITED', `${RATE_WORDS[refusal.limit]} Try again at ${tenantTime(refusal.retryAt, timeZone)}.`, {
         retryAt: refusal.retryAt.toISOString(),
       });
     case 'PREVIEW_RUNNING':
@@ -150,7 +151,7 @@ export async function registerRecordTestRoutes(app: FastifyInstance, deps: Recor
     const limited = await withPreviewLimit(db, { orgId: ctx.orgId, userId, now: now(), budgetMicros: budgetMicros(outreachSettings(ctx.tenant)) }, (tx) =>
       insertRecordTest(tx, { orgId: ctx.orgId, requestedBy: userId, sfObject: ref.sfObject, sfRecordId: ref.sfRecordId }),
     );
-    if (!limited.ok) return sendLimitRefusal(reply, limited.refusal);
+    if (!limited.ok) return sendLimitRefusal(reply, limited.refusal, ctx.tenant.timezone);
     const id = limited.value;
     req.log.info({ orgId: ctx.orgId, testId: id, sfObject: ref.sfObject }, 'record-test: preview started');
     background(() => runPreview({ db, clients, model, describes, now, log: req.log, defaultSpecialists }, id));
@@ -169,8 +170,8 @@ export async function registerRecordTestRoutes(app: FastifyInstance, deps: Recor
     const params = IdParams.safeParse(req.params);
     const row = params.success ? await loadRecordTest(db, ctx.orgId, params.data.id, now()) : null;
     if (!row) return sendError(reply, 404, 'NOT_FOUND', 'That test is not here. It may belong to another tenant.');
-    const [conn, calls] = await Promise.all([loadConnection(db, ctx.orgId), loadRecordTestCalls(db, ctx.orgId, row.id)]);
-    return toRecordTest(row, calls, conn?.instanceUrl ?? null);
+    const [instanceUrl, calls] = await Promise.all([loadInstanceUrl(db, ctx.orgId), loadRecordTestCalls(db, ctx.orgId, row.id)]);
+    return toRecordTest(row, calls, instanceUrl);
   });
 
   app.post('/record-tests/browser-token', { config: { rateLimit: TOKEN_RATE_LIMIT } }, async (req, reply) => {
@@ -193,7 +194,7 @@ export async function registerRecordTestRoutes(app: FastifyInstance, deps: Recor
     const cti = deps.cti;
     if (!cti) return sendError(reply, 503, 'AI_CALLS_NOT_CONFIGURED', NOT_CONFIGURED);
     const out = await startRecordTestCall({ db, clients, cti, now: now(), log: req.log, defaultSpecialists }, ctx, params.data.id, body.data);
-    if ('refusal' in out) return sendLimitRefusal(reply, out.refusal);
+    if ('refusal' in out) return sendLimitRefusal(reply, out.refusal, ctx.tenant.timezone);
     if (!out.ok) return sendRunError(reply, out.error, out.words);
     return { callId: out.callId, response: out.response };
   });
@@ -205,7 +206,7 @@ export async function registerRecordTestRoutes(app: FastifyInstance, deps: Recor
     if (!params.success) return sendError(reply, ...DRY_RUN_ERRORS.not_found);
     const dryDeps = { db, clients, model: deps.mappingModel ?? null, describes, now: now(), log: req.log, resultsBaseUrl: deps.appPublicUrl ?? '' };
     const out = await dryRunTestCall(dryDeps, ctx, params.data.callId);
-    if ('refusal' in out) return sendLimitRefusal(reply, out.refusal);
+    if ('refusal' in out) return sendLimitRefusal(reply, out.refusal, ctx.tenant.timezone);
     if (!out.ok) return sendError(reply, ...DRY_RUN_ERRORS[out.error]);
     return out.dryRun;
   });

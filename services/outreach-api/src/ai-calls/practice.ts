@@ -94,22 +94,22 @@ export type PracticeOfferDeps = Pick<PracticeDeps, 'db' | 'clients' | 'now' | 'l
  * admin hears what a seller would be offered. Never throws: any failure offers nothing (note salesforce_error) and the
  * call still goes.
  */
-export async function practiceOffer(deps: PracticeOfferDeps, orgId: string, settings: unknown): Promise<Offer> {
+export async function practiceOffer(deps: PracticeOfferDeps, orgId: string, settings: unknown, label = 'ai_call.practice'): Promise<Offer> {
   try {
     const booking = bookingSettings({ settings }, deps.defaultSpecialists);
     const cal = await readOfferCalendar(await deps.clients(orgId), { booking, now: deps.now });
     const offer = await offerWithAiBookings(deps.db, cal, { orgId, booking, now: deps.now });
-    if (offer.note && offer.note !== 'booking_off') deps.log.info({ orgId, slots: offer.note }, 'ai_call.practice: no appointment times offered');
+    if (offer.note && offer.note !== 'booking_off') deps.log.info({ orgId, slots: offer.note }, `${label}: no appointment times offered`);
     return offer;
   } catch (err) {
-    deps.log.warn({ orgId, errName: err instanceof Error ? err.name : typeof err }, 'ai_call.practice: no appointment times offered');
+    deps.log.warn({ orgId, errName: err instanceof Error ? err.name : typeof err }, `${label}: no appointment times offered`);
     return { slots: [], ownerSfUserId: null, note: 'salesforce_error' };
   }
 }
 
-/** The slots of practiceOffer: what a practice call offers. */
-export async function practiceSlots(deps: PracticeOfferDeps, orgId: string, settings: unknown): Promise<AppointmentSlot[]> {
-  return (await practiceOffer(deps, orgId, settings)).slots;
+/** The slots of practiceOffer: what a practice call offers. `label` prefixes its log lines (who asked: 1D practice, or a record test). */
+export async function practiceSlots(deps: PracticeOfferDeps, orgId: string, settings: unknown, label?: string): Promise<AppointmentSlot[]> {
+  return (await practiceOffer(deps, orgId, settings, label)).slots;
 }
 
 /** `to`, E.164-normalised, when it is one of cti-api's test numbers; null when it is not; 'unreachable' when cti-api did not answer. */

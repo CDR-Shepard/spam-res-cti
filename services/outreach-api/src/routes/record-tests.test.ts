@@ -165,7 +165,7 @@ describe('Test a record routes', () => {
     const limited = await post(RT_LEAD);
     expect(limited.statusCode).toBe(429);
     expect(limited.json()).toMatchObject({ code: 'RATE_LIMITED', details: { retryAt: retryAt.toISOString() } });
-    expect(limited.json().error).toBe("You've run 10 previews in the last hour. Try again at 3:42 PM PT.");
+    expect(limited.json().error).toBe("You've run 10 previews in the last hour. Try again at 3:42 PM PDT.");
     limits.withPreviewLimit.mockResolvedValueOnce({ ok: false, refusal: { code: 'PREVIEW_RUNNING' } });
     expect((await post(RT_LEAD)).json()).toMatchObject({ code: 'PREVIEW_RUNNING' });
     limits.withPreviewLimit.mockResolvedValueOnce({ ok: false, refusal: { code: 'AI_BUDGET_SPENT' } });
@@ -173,6 +173,13 @@ describe('Test a record routes', () => {
     expect(spent.statusCode).toBe(409);
     expect(spent.json().code).toBe('AI_BUDGET_SPENT');
     expect(pending).toHaveLength(0);
+  });
+
+  it("5b (E-1): the time to try again is in the tenant's own zone", async () => {
+    app = await build(fakeDb({ organizations: [{ ...ORG, timezone: 'America/New_York' }] }).db);
+    connected();
+    limits.withPreviewLimit.mockResolvedValueOnce({ ok: false, refusal: { code: 'RATE_LIMITED', retryAt: new Date('2026-10-06T22:42:00.000Z'), limit: 'previews_per_hour' } });
+    expect((await post(RT_LEAD)).json().error).toBe("You've run 10 previews in the last hour. Try again at 6:42 PM EDT.");
   });
 
   it('6: an admin starts a preview: 202 { id }, the limit got the record, and the preview runs in the background', async () => {
@@ -227,7 +234,10 @@ describe.skipIf(!pgLane)('Test a record routes (real Postgres)', () => {
     expect(running.statusCode).toBe(200);
     expect(running.json()).toMatchObject({ id, status: 'running', sfObject: 'Lead', sfRecordId: RT_LEAD, requestedByName: 'Ada Admin', calls: [] });
     await Promise.all(pending.map((w) => w()));
+    connections.loadConnection.mockClear();
     const ready = RecordTest.parse((await getOne(id)).json());
+    // E-1: each 2-s poll reads the instance URL alone, never the connection row with its tokens.
+    expect(connections.loadConnection).not.toHaveBeenCalled();
     expect(ready).toMatchObject({ status: 'ready', error: null, name: 'Pat Seller', consent: 'yes', planTextWords: [], recordUrl: `https://example.my.salesforce.com/${RT_LEAD}` });
     expect(ready.planText).toContain('Opener: Ask whether the family has decided');
     expect(ready.slots.length).toBeGreaterThan(0);

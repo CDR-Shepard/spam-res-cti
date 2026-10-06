@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
 import { RecordTest, type CallPlan } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
-import type { SalesforceClient } from '@cti/salesforce';
+import { SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
 import { spentTodayMicros } from '../ai/budget.js';
 import { CallPlanOutputError, type CallPlanModel } from '../ai/call-plan-model.js';
 import { costMicros } from '../ai/model.js';
@@ -164,6 +164,34 @@ describe.skipIf(!pgLane)('runPreview (real Postgres)', () => {
     const u = await tenant({ connected: false });
     await runPreview(deps(salesforce(), fakeModel()), u.testId);
     expect(await stored(u.testId)).toMatchObject({ status: 'failed', error: 'not_connected' });
+  });
+
+  it('8a (E-1): a connection that fails for another reason (a network fault on the token refresh) is salesforce_error; a revoked one is not_connected', async () => {
+    const t = await tenant();
+    await runPreview(deps(salesforce(), fakeModel(), { clients: async () => { throw new TypeError('fetch failed'); } }), t.testId);
+    expect(await stored(t.testId)).toMatchObject({ status: 'failed', error: 'salesforce_error' });
+    const u = await tenant();
+    await runPreview(deps(salesforce(), fakeModel(), { clients: async () => { throw new SalesforceAuthError(); } }), u.testId);
+    expect(await stored(u.testId)).toMatchObject({ status: 'failed', error: 'not_connected' });
+  });
+
+  it('8c (E-1): an unexpected crash (here, after the steps) is stored as internal_error, not plan_failed', async () => {
+    const t = await tenant();
+    let calls = 0;
+    const now = () => { calls += 1; if (calls === 2) throw new Error('the ready write failed'); return NOW; };
+    await runPreview(deps(salesforce(), fakeModel(), { now }), t.testId);
+    expect(await stored(t.testId)).toMatchObject({ status: 'failed', error: 'internal_error' });
+    expect(RecordTest.shape.error.parse('internal_error')).toBe('internal_error');
+  });
+
+  it('8d (E-1): the offer logs under the preview\'s own label', async () => {
+    const t = await tenant();
+    const sf = salesforce();
+    let n = 0;
+    const log = { ...quiet, warn: vi.fn(), info: vi.fn() };
+    await runPreview(deps(sf, fakeModel(), { log, clients: async () => { n += 1; if (n > 1) throw new Error('calendar down'); return sf.client; } }), t.testId);
+    expect((await stored(t.testId)).status).toBe('ready');
+    expect(log.warn).toHaveBeenCalledWith(expect.anything(), 'record-test.preview: no appointment times offered');
   });
 
   it('8b: research that throws ends salesforce_error', async () => {

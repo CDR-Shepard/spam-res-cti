@@ -74,7 +74,7 @@ async function loadJob(db: Db, testId: string): Promise<Job | null> {
   return row ?? null;
 }
 
-/** The tenant's integration client and field map; any failure is not_connected. */
+/** The tenant's integration client and field map: no connection (or a revoked one, or no field map) is not_connected; any other fault, salesforce_error. */
 async function connect(deps: PreviewDeps, orgId: string): Promise<{ client: SalesforceClient; fieldMap: FieldMap }> {
   try {
     const client = await deps.clients(orgId);
@@ -82,8 +82,9 @@ async function connect(deps: PreviewDeps, orgId: string): Promise<{ client: Sale
     if (!fieldMap.success) throw new CrmNotConnectedError();
     return { client, fieldMap: fieldMap.data };
   } catch (err) {
-    deps.log.warn({ orgId, errName: errName(err) }, 'record-test: no usable salesforce connection');
-    throw new PreviewStop({ error: 'not_connected' });
+    const error = notConnected(err) ? 'not_connected' : 'salesforce_error';
+    deps.log.warn({ orgId, errName: errName(err), code: error }, 'record-test: no usable salesforce connection');
+    throw new PreviewStop({ error });
   }
 }
 
@@ -154,7 +155,8 @@ async function steps(deps: PreviewDeps, job: Job, now: Date): Promise<PreviewRes
   const planned = await plan(deps, job, snapshot, now, signal);
   const editable = EditableCallPlan.parse(planned.plan);
   const rendered = renderPlanForAgent(editable, now);
-  const offer = await practiceOffer({ db: deps.db, clients: deps.clients, now, log: deps.log, defaultSpecialists: deps.defaultSpecialists }, job.orgId, job.settings);
+  const offerDeps = { db: deps.db, clients: deps.clients, now, log: deps.log, defaultSpecialists: deps.defaultSpecialists };
+  const offer = await practiceOffer(offerDeps, job.orgId, job.settings, 'record-test.preview');
   return {
     name: recordName(snapshot),
     research: snapshot,
@@ -185,7 +187,7 @@ export async function runPreview(deps: PreviewDeps, testId: string): Promise<voi
     await finishRecordTest(deps.db, testId, result, deps.now());
     deps.log.info({ testId, planText: result.planText !== null, slots: result.slots.length }, 'record-test: preview ready');
   } catch (err) {
-    const failure: PreviewFailure = err instanceof PreviewStop ? err.failure : { error: 'plan_failed' };
+    const failure: PreviewFailure = err instanceof PreviewStop ? err.failure : { error: 'internal_error' };
     if (!(err instanceof PreviewStop)) deps.log.error({ testId, errName: errName(err) }, 'record-test: preview crashed');
     try {
       await finishRecordTest(deps.db, testId, failure, deps.now());

@@ -4,9 +4,10 @@ import { eq } from 'drizzle-orm';
 import { RecordTest, RecordTestsResponse } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { seedUser } from '../test/call-plan-seed.js';
-import { seedOrg } from '../test/outreach-fixtures.js';
+import { seedConnection, seedOrg } from '../test/outreach-fixtures.js';
+import { RT_FIELD_MAP } from '../test/record-test-org.js';
 import { createTestDb, pgLane } from '../test/pg.js';
-import { finishRecordTest, insertRecordTest, listRecordTests, loadRecordTest, PREVIEW_STALE_MS, RECORD_TEST_LIST_LIMIT, toRecordTest } from './store.js';
+import { finishRecordTest, insertRecordTest, listRecordTests, loadInstanceUrl, loadRecordTest, PREVIEW_STALE_MS, RECORD_TEST_LIST_LIMIT, toRecordTest } from './store.js';
 
 const NOW = new Date('2026-10-06T16:00:00.000Z');
 const LEAD = '00Q8X00001AbCdEUAV';
@@ -61,6 +62,24 @@ describe.skipIf(!pgLane)('record test store (real Postgres)', () => {
     expect(failed).toMatchObject({ status: 'failed', error: 'not_found', completedAt: NOW });
     await finishRecordTest(db, id, { error: 'timeout', usage: { model: 'm', inputTokens: 1, outputTokens: 1, costMicros: 5 } }, new Date(NOW.getTime() + 1_000));
     expect(await stored(id)).toEqual(failed);
+  });
+
+  it('12b (E-1): a finish that comes after the row reads as interrupted changes nothing, so the overlap can never surface', async () => {
+    const t = await tenant();
+    const late = await insert(t, ago(PREVIEW_STALE_MS + 60_000));
+    await finishRecordTest(db, late, { error: 'not_found' }, NOW);
+    expect(await stored(late)).toMatchObject({ status: 'running', error: null, completedAt: null });
+    expect(await loadRecordTest(db, t.orgId, late, NOW)).toMatchObject({ status: 'failed', error: 'interrupted' });
+    const inTime = await insert(t, ago(PREVIEW_STALE_MS - 60_000));
+    await finishRecordTest(db, inTime, { error: 'not_found' }, NOW);
+    expect(await stored(inTime)).toMatchObject({ status: 'failed', error: 'not_found' });
+  });
+
+  it('12c (E-1): the instance URL is read alone, for the org', async () => {
+    const t = await tenant();
+    expect(await loadInstanceUrl(db, t.orgId)).toBeNull();
+    await seedConnection(db, t.orgId, RT_FIELD_MAP);
+    expect(await loadInstanceUrl(db, t.orgId)).toMatch(/^https:\/\//);
   });
 
   it('13: the list is this org only, newest first, at most 20, with who asked', async () => {

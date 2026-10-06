@@ -74,7 +74,7 @@ export async function startRecordTestCall(deps: RunDeps, ctx: RequestContext, te
   if (typeof dest === 'string') return { ok: false, error: dest };
 
   const context = { returning: plan.data.reengagement?.lastContact != null };
-  const slots = await practiceSlots(deps, ctx.orgId, await orgSettings(db, ctx.orgId));
+  const slots = await practiceSlots(deps, ctx.orgId, await orgSettings(db, ctx.orgId), 'record-test.call');
   const userId = ctx.session.userId;
   const idempotencyKey = `rtest:${randomUUID()}`;
   const inserted = await withCallLimit(db, { orgId: ctx.orgId, userId, now }, async (tx) => {

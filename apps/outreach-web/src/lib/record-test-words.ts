@@ -10,6 +10,7 @@ export const RECORD_TEST_ERROR_WORDS: Record<RecordTestError, string> = {
   plan_failed: "The AI couldn't write a usable plan. Try again.",
   timeout: 'The AI took too long to write the plan. Try again.',
   interrupted: 'The preview stopped part way (the server restarted). Try again.',
+  internal_error: 'Something went wrong on our side while writing the preview. Try again.',
 };
 
 export const RECORD_TEST_STATUS_WORDS: Record<RecordTestStatus, string> = { running: 'Running', ready: 'Ready', failed: 'Failed' };

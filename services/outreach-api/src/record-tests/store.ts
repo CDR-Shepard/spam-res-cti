@@ -5,7 +5,7 @@
  * row shows nulls and never throws (1D D-6). Plan 1E Part 2: the test calls run from a preview (ai_record_test_calls),
  * joined to the ai_calls rows cti-api wrote.
  */
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, gte, sql } from 'drizzle-orm';
 import {
   AiCallOutcome,
   AiCallStatus,
@@ -65,7 +65,11 @@ export async function insertRecordTest(db: Db, v: { orgId: string; requestedBy: 
   return row!.id;
 }
 
-/** Ends a preview once: only a row still `running` is written, so a late finish never overwrites an earlier one. */
+/**
+ * Ends a preview once: only a row still `running`, and not yet old enough to read as failed: interrupted, is written. So
+ * a late finish never overwrites an earlier one, and a slow run never turns an "interrupted" the admin saw (after which
+ * another preview may have started) into a ready one.
+ */
 export async function finishRecordTest(db: Db, id: string, v: PreviewResult | PreviewFailure, now: Date): Promise<void> {
   const t = schema.aiRecordTests;
   const set = isFailure(v)
@@ -91,13 +95,21 @@ export async function finishRecordTest(db: Db, id: string, v: PreviewResult | Pr
         costMicros: v.costMicros,
         completedAt: now,
       };
-  await db.update(t).set(set).where(and(eq(t.id, id), eq(t.status, 'running')));
+  const notStale = gte(t.createdAt, new Date(now.getTime() - PREVIEW_STALE_MS));
+  await db.update(t).set(set).where(and(eq(t.id, id), eq(t.status, 'running'), notStale));
 }
 
 /** A `running` row older than PREVIEW_STALE_MS reads as failed: interrupted. A new object; the stored row is untouched. */
 function asRead<T extends { status: string; error: string | null; createdAt: Date }>(row: T, now: Date): T {
   const stale = row.status === 'running' && now.getTime() - row.createdAt.getTime() > PREVIEW_STALE_MS;
   return stale ? { ...row, status: 'failed', error: 'interrupted' } : row;
+}
+
+/** The org's Salesforce instance URL alone (the page polls; the connection row also holds the tokens). */
+export async function loadInstanceUrl(db: Db, orgId: string): Promise<string | null> {
+  const c = schema.crmConnections;
+  const [row] = await db.select({ instanceUrl: c.instanceUrl }).from(c).where(eq(c.orgId, orgId)).limit(1);
+  return row?.instanceUrl ?? null;
 }
 
 const requestedByName = sql<string | null>`coalesce(${schema.users.displayName}, ${schema.users.email})`;

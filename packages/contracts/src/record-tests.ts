@@ -66,7 +66,8 @@ export function parseSalesforceRecordRef(
 export const RecordTestStatus = z.enum(['running', 'ready', 'failed']);
 export type RecordTestStatus = z.infer<typeof RecordTestStatus>;
 /** ai_record_tests.error. interrupted is never stored: a running row older than 6 minutes reads as it. */
-export const RecordTestError = z.enum(['not_found', 'salesforce_error', 'not_connected', 'plan_failed', 'timeout', 'interrupted']);
+/** Why a preview failed. `internal_error`: something on our side broke (not Salesforce, not the model). */
+export const RecordTestError = z.enum(['not_found', 'salesforce_error', 'not_connected', 'plan_failed', 'timeout', 'interrupted', 'internal_error']);
 export type RecordTestError = z.infer<typeof RecordTestError>;
 
 /** POST /api/record-tests (admin): an Id or a Salesforce link. */
