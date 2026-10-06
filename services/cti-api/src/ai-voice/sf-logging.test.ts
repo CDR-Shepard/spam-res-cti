@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AI_CONVERSATION_SUBJECT } from '@cti/contracts';
 import { SalesforceUnauthorizedError, type CallTaskInput } from '../salesforce/client.js';
 import type { OwnershipSnapshot } from '../salesforce/ownership.js';
 import {
@@ -12,6 +13,7 @@ import {
   type SfLogDeps,
 } from './sf-logging.js';
 import { defaultToolEffects } from './service-tools.js';
+import { OUTCOME_WORDS } from './outcomes.js';
 import type { AiCallRow } from './store.js';
 import { CALL_SID, fakeStore, rowOf, silentLog, type FakeStore } from './testing.js';
 
@@ -284,5 +286,17 @@ describe('withSalesforceEffects', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(created).toHaveLength(0);
     expect(store.rows.get(ID)?.summary).toContain('call them back');
+  });
+});
+
+/**
+ * Sweep D-13 drift guard: outreach-api's research counts an "AI call: …" Task as a real contact only when its subject
+ * names a conversation (@cti/contracts AI_CONVERSATION_SUBJECT). Every outcome is checked against what this file writes.
+ */
+describe('the AI call Task subject is read back by AI_CONVERSATION_SUBJECT', () => {
+  const conversation = new Set(['qualified_transferred', 'qualified_callback', 'not_interested', 'do_not_call', 'transfer_failed', 'appointment_set']);
+  it.each(Object.keys(OUTCOME_WORDS))('%s', (outcome) => {
+    const { subject } = aiCallTaskInput(row({ outcome: outcome as AiCallRow['outcome'] }), { whoId: LEAD }, SUMMARY);
+    expect(AI_CONVERSATION_SUBJECT.test(subject)).toBe(conversation.has(outcome));
   });
 });

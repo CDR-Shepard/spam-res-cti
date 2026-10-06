@@ -15,6 +15,7 @@
  * conversation (AI_CONVERSATION) and its CallDisposition says a person was reached: the open callback to-do Tasks it
  * also writes carry no disposition, and "Hung up" is a pick-up that ended within seconds.
  */
+import { AI_CALL_SUBJECT as AI_CALL, AI_CONVERSATION_SUBJECT as AI_CONVERSATION, ctiSubjectDisposition } from '@cti/contracts';
 import type { ResearchSnapshot } from './snapshot.js';
 
 export interface LastContact {
@@ -29,13 +30,8 @@ export const MIN_TALK_SECONDS = 60;
 /** Nobody was reached: never contact, whatever the duration. */
 export const NEVER_CONTACT =
   /no answer|voice ?mail|left (?:a )?(?:message|vm)|\bl?vm\b|busy|wrong number|bad number|disconnected|not in service|no contact|did not connect|unreachable|not dispositioned|\bfailed\b|blocked|missed|abandoned|hung up/i;
-/** An "AI call: <outcome words>" subject whose outcome was a conversation (cti-api ai-voice/outcomes.ts OUTCOME_WORDS). */
-const AI_CONVERSATION = /^ai call:\s*(?:transferred to rep|callback requested|not interested|do not call|transfer missed|appointment set)\b/i;
-const AI_CALL = /^ai call\b/i;
 /** Subjects only a call Task has, for a Task read without TaskSubtype or CallType. */
 const CALL_SUBJECT = /^(?:(?:inbound|outbound) call|callrail recording|voice ?mail drop|missed call|outgoing)\b/i;
-/** cti-api's buildCallSubject: "<Inbound|Outbound> Call | <disposition> | <who>"; an inbound call may have no disposition part. */
-const CTI_SUBJECT = /^(?:inbound|outbound) call \| /i;
 const MEETING = /consult|appointment|walk|meeting|visit/i;
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -69,7 +65,8 @@ function reachedSomeone(i: Item, title: string): boolean {
   const disposition = i.meta.disposition ?? null;
   if (AI_CALL.test(title)) return AI_CONVERSATION.test(title) && CONNECTED_DISPOSITIONS.has(lower(disposition));
   const parts = title.split('|').map((p) => p.trim());
-  const segment = CTI_SUBJECT.test(title) && parts.length >= 3 ? (parts[1] ?? null) : null;
+  // The subject readers live in @cti/contracts, where cti-api's tests run them over what it writes (sweep D-13).
+  const segment = ctiSubjectDisposition(title);
   // Only the head and the disposition part of a subject are read: the rest is a phone number and a record name.
   const said = [disposition, parts[0] ?? '', segment].filter((s): s is string => Boolean(s));
   if (said.some((s) => NEVER_CONTACT.test(s)) || parts.some((p) => lower(p) === 'anonymous')) return false;

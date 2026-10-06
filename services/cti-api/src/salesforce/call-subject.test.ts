@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ctiSubjectDisposition } from '@cti/contracts';
 import { buildCallSubject, formatNanp } from './call-subject.js';
 
 describe('formatNanp', () => {
@@ -37,5 +38,25 @@ describe('buildCallSubject', () => {
   it('whitespace-only names are treated as absent', () => {
     expect(buildCallSubject({ inbound: false, disposition: 'Voicemail', counterpartyE164: '+16195551234', recordName: '  ' }))
       .toBe('Outbound Call | Voicemail | (619) 555-1234');
+  });
+});
+
+/**
+ * Sweep D-13 drift guard: outreach-api's research reads these subjects back (research/last-contact.ts, through
+ * @cti/contracts ctiSubjectDisposition) to tell a call that reached a person from one that did not. A change to the
+ * subject format fails here, not silently in the plans.
+ */
+describe('buildCallSubject is read back by ctiSubjectDisposition', () => {
+  it.each<[boolean, string | null, string | null, string | null]>([
+    [false, 'Connected', 'Jane Doe', 'Connected'],
+    [false, 'Call back', null, 'Call back'],
+    [false, 'Do not call', 'Pat | Seller', 'Do not call'],
+    [false, 'No answer', 'Jane Doe', 'No answer'],
+    [false, null, 'Jane Doe', 'Not dispositioned'],
+    [true, 'Connected', 'Jane Doe', 'Connected'],
+    [true, null, 'Jane Doe', null],
+    [true, null, null, null],
+  ])('inbound %s, disposition %j, name %j → %j', (inbound, disposition, recordName, expected) => {
+    expect(ctiSubjectDisposition(buildCallSubject({ inbound, disposition, counterpartyE164: '+16195550142', recordName }))).toBe(expected);
   });
 });
