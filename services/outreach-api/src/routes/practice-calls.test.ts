@@ -102,6 +102,7 @@ describe('practice call routes', () => {
     ['no_plan', 409, 'NO_PLAN'],
     ['not_a_test_number', 400, 'NOT_A_TEST_NUMBER'],
     ['cti_unreachable', 502, 'CTI_UNREACHABLE'],
+    ['practice_in_progress', 409, 'PRACTICE_IN_PROGRESS'],
   ])('%s is %i %s', async (error, status, code) => {
     app = await build(cti);
     practice.startPractice.mockResolvedValueOnce({ ok: false, error });

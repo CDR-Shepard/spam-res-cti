@@ -152,11 +152,45 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
       status: 'in_progress', outcome: 'appointment_set', endedAt: null,
       appointment: { ...PHONE_BOOKING, slotId: taken.id, kind: taken.kind, start: taken.start, end: taken.end, specialistSfUserId: GRANT },
     });
+    // The first practice call has ended (one at a time per admin, final review).
+    await db.update(schema.aiCalls).set({ status: 'completed' }).where(eq(schema.aiCalls.startedBy, s.admin));
     await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
     const again = s.cti.requests[1]!.target;
     if (again.kind !== 'practice') throw new Error('not a practice target');
     expect(again.slots?.map((slot) => slot.start)).not.toContain(taken.start);
     expect(again.slots?.length).toBeGreaterThan(0);
+  });
+
+  describe('final review: one practice call at a time per admin (a double click never rings twice)', () => {
+    it('two starts at once: one rings, the other is practice_in_progress', async () => {
+      const s = await setup();
+      const both = await Promise.all([1, 2].map(() => startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER })));
+      expect(both.filter((r) => r.ok)).toHaveLength(1);
+      expect(both.filter((r) => !r.ok)).toEqual([{ ok: false, error: 'practice_in_progress' }]);
+      expect(s.cti.requests).toHaveLength(1);
+      expect(await practiceRows(s.lead.enrollmentId)).toHaveLength(1);
+    });
+
+    it('a practice call still live blocks the next; once it has ended the next one goes', async () => {
+      const s = await setup();
+      expect((await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER })).ok).toBe(true);
+      const later = { ...s.deps, now: new Date(NOW.getTime() + 5 * 60_000) };
+      expect(await startPractice(later, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER })).toEqual({ ok: false, error: 'practice_in_progress' });
+      await db.update(schema.aiCalls).set({ status: 'completed' }).where(eq(schema.aiCalls.startedBy, s.admin));
+      expect((await startPractice(later, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER })).ok).toBe(true);
+    });
+
+    it('a start whose answer never came blocks for two minutes, then not; another admin is never blocked', async () => {
+      const s = await setup();
+      s.cti.answers.push({ transport: 'timeout' });
+      expect(await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER })).toEqual({ ok: false, error: 'cti_unreachable' });
+      const soon = { ...s.deps, now: new Date(NOW.getTime() + 60_000) };
+      expect(await startPractice(soon, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER })).toEqual({ ok: false, error: 'practice_in_progress' });
+      const other = await seedUser(db, s.base.orgId);
+      expect((await startPractice(soon, ctxOf(s.base.orgId, other, true), s.lead.enrollmentId, { version: 1, to: TEST_NUMBER })).ok).toBe(true);
+      const after = { ...s.deps, now: new Date(NOW.getTime() + 3 * 60_000) };
+      expect((await startPractice(after, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER })).ok).toBe(true);
+    });
   });
 
   it('6b: booking off sends no slots; a Salesforce failure sends none and the call still goes', async () => {

@@ -33,8 +33,9 @@ import { bookingSettings } from '../settings.js';
 import type { RequestContext } from '../tenancy/scope.js';
 import type { CtiClient } from './cti-client.js';
 import { renderPlanForAgent } from './plan-text.js';
+import { lockAndCheckPractice } from './practice-guard.js';
 
-export type PracticeError = 'not_found' | 'not_ai_call_campaign' | 'no_plan' | 'plan_text_rejected' | 'not_a_test_number' | 'cti_unreachable';
+export type PracticeError = 'not_found' | 'not_ai_call_campaign' | 'no_plan' | 'plan_text_rejected' | 'not_a_test_number' | 'cti_unreachable' | 'practice_in_progress';
 export type PracticeResult = { ok: true; response: InternalAiCallResponse } | { ok: false; error: PracticeError; words?: string[] };
 
 export interface PracticeDeps {
@@ -128,19 +129,25 @@ export async function startPractice(deps: PracticeDeps, ctx: RequestContext, enr
   const context = { returning: plan.plan.reengagement?.lastContact != null };
   const slots = await practiceSlots(deps, ctx.orgId, lead.settings);
   const idempotencyKey = `practice:${randomUUID()}`;
-  const [row] = await db
-    .insert(schema.aiPracticeCalls)
-    .values({
-      orgId: ctx.orgId,
-      campaignId: lead.campaignId,
-      enrollmentId,
-      callPlanId: plan.id,
-      planVersion: body.version,
-      requestedBy: ctx.session.userId,
-      toE164: to,
-      idempotencyKey,
-    })
-    .returning({ id: schema.aiPracticeCalls.id });
+  const row = await db.transaction(async (tx) => {
+    if (await lockAndCheckPractice(tx, ctx.orgId, ctx.session.userId, deps.now)) return null;
+    const [inserted] = await tx
+      .insert(schema.aiPracticeCalls)
+      .values({
+        orgId: ctx.orgId,
+        campaignId: lead.campaignId,
+        enrollmentId,
+        callPlanId: plan.id,
+        planVersion: body.version,
+        requestedBy: ctx.session.userId,
+        toE164: to,
+        idempotencyKey,
+        createdAt: deps.now,
+      })
+      .returning({ id: schema.aiPracticeCalls.id });
+    return inserted ?? null;
+  });
+  if (row === null) return { ok: false, error: 'practice_in_progress' };
   const answer = await deps.cti.trigger({
     orgId: ctx.orgId,
     userId: ctx.session.userId,
@@ -149,14 +156,14 @@ export async function startPractice(deps: PracticeDeps, ctx: RequestContext, enr
   });
   // A practice key is never re-sent, so a 409 is as final as a transport failure: the row keeps a null result.
   if (answer.kind !== 'response') {
-    deps.log.warn({ orgId: ctx.orgId, practiceId: row!.id, transport: answer.kind === 'transport' ? answer.error : 'conflict' }, 'ai_call.practice: cti-api did not answer');
+    deps.log.warn({ orgId: ctx.orgId, practiceId: row.id, transport: answer.kind === 'transport' ? answer.error : 'conflict' }, 'ai_call.practice: cti-api did not answer');
     return { ok: false, error: 'cti_unreachable' };
   }
   await db
     .update(schema.aiPracticeCalls)
     .set({ result: answer.response, aiCallId: answer.response.aiCallId ?? null })
-    .where(eq(schema.aiPracticeCalls.id, row!.id));
-  deps.log.info({ orgId: ctx.orgId, practiceId: row!.id, result: answer.response.result }, 'ai_call.practice: trigger answered');
+    .where(eq(schema.aiPracticeCalls.id, row.id));
+  deps.log.info({ orgId: ctx.orgId, practiceId: row.id, result: answer.response.result }, 'ai_call.practice: trigger answered');
   return { ok: true, response: answer.response };
 }
 

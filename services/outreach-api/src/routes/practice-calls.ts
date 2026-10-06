@@ -31,6 +31,7 @@ const ERRORS: Readonly<Record<Exclude<PracticeError, 'plan_text_rejected'>, [num
   no_plan: [409, 'NO_PLAN', 'That plan version is not on the board any more.'],
   not_a_test_number: [400, 'NOT_A_TEST_NUMBER', 'That number is not one of the test numbers. Pick one from the list.'],
   cti_unreachable: [502, 'CTI_UNREACHABLE', 'The AI calling service did not answer. Try again in a minute.'],
+  practice_in_progress: [409, 'PRACTICE_IN_PROGRESS', 'Your practice call is already ringing or in progress. Wait for it to end, then try again.'],
 };
 
 function sendPracticeError(reply: FastifyReply, error: PracticeError, words: readonly string[] = []): FastifyReply {
