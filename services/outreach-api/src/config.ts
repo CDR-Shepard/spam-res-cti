@@ -1,5 +1,9 @@
 import { z } from 'zod';
 
+/** A Salesforce User id (key prefix 005), 15 or 18 characters: the same shape the booking settings contract accepts. */
+const SF_USER_ID = /^005[a-zA-Z0-9]{12}(?:[a-zA-Z0-9]{3})?$/;
+const SPECIALISTS_MESSAGE = 'AI_CALL_DEFAULT_SPECIALISTS must be comma-separated Salesforce User ids (15 or 18 characters starting 005)';
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   API_PORT: z.coerce.number().int().positive().default(4100),
@@ -40,6 +44,15 @@ const schema = z.object({
     .optional(),
   /** Shared with cti-api: HMAC key for the internal AI call trigger. */
   OUTREACH_INTERNAL_SECRET: z.string().min(32).optional(),
+  /**
+   * Plan 1D: the default appointment owner list, comma-separated Salesforce User ids (005…), in order. Used until a tenant
+   * saves its own list in the AI calls settings card. Production: Grant Golden. Empty (the default) = nobody to book with.
+   */
+  AI_CALL_DEFAULT_SPECIALISTS: z
+    .string()
+    .default('')
+    .transform((v) => [...new Set(v.split(',').map((id) => id.trim()).filter((id) => id !== ''))])
+    .pipe(z.array(z.string().regex(SF_USER_ID, SPECIALISTS_MESSAGE)).max(20, 'AI_CALL_DEFAULT_SPECIALISTS takes at most 20 ids')),
 });
 
 /** Only http and https are fetched; `ftp://`, `file://` and `javascript:` all parse as URLs. */

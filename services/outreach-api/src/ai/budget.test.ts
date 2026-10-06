@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Db } from '@cti/db';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { seedOrg } from '../test/outreach-fixtures.js';
+import { outreachSettings } from '../settings.js';
 import { addSpend, budgetMicros, spentTodayMicros, utcDay } from './budget.js';
 
 describe('budget (pure)', () => {
@@ -10,7 +11,7 @@ describe('budget (pure)', () => {
     expect(utcDay(new Date('2026-10-05T00:00:00Z'))).toBe('2026-10-05');
   });
   it('budgetMicros converts the daily USD budget to micro-dollars', () => {
-    const base = { liveChannels: ['rep_call' as const], consentFromWebForms: false, consentFromInboundCalls: false, aiCallConcurrency: 2, aiCallDailyCap: 50, aiCallMaxAttempts: 3 };
+    const base = outreachSettings({ settings: {} });
     expect(budgetMicros({ ...base, aiDailyBudgetUsd: 25 })).toBe(25_000_000);
     expect(budgetMicros({ ...base, aiDailyBudgetUsd: 0.5 })).toBe(500_000);
   });

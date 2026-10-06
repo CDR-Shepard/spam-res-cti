@@ -118,6 +118,29 @@ describe('parseConfig', () => {
     }
     expect(() => parseConfig({ ...base, CTI_INTERNAL_URL: 'ftp://ctiapi.railway.internal:4000' })).toThrow(/http: or https:/);
   });
+  describe('AI_CALL_DEFAULT_SPECIALISTS (plan 1D: the default appointment owner list)', () => {
+    it('defaults to an empty list (empty counts as unset)', () => {
+      expect(parseConfig(base).AI_CALL_DEFAULT_SPECIALISTS).toEqual([]);
+      expect(parseConfig({ ...base, AI_CALL_DEFAULT_SPECIALISTS: '' }).AI_CALL_DEFAULT_SPECIALISTS).toEqual([]);
+    });
+    it('parses one id', () => {
+      expect(parseConfig({ ...base, AI_CALL_DEFAULT_SPECIALISTS: '0058X00000Fsx39QAB' }).AI_CALL_DEFAULT_SPECIALISTS).toEqual(['0058X00000Fsx39QAB']);
+    });
+    it('parses an ordered list, trimming spaces, dropping empty entries and repeats', () => {
+      expect(parseConfig({ ...base, AI_CALL_DEFAULT_SPECIALISTS: ' 0058X00000Fsx39QAB, 005000000000002,,0058X00000Fsx39QAB ' }).AI_CALL_DEFAULT_SPECIALISTS).toEqual([
+        '0058X00000Fsx39QAB',
+        '005000000000002',
+      ]);
+    });
+    it.each(['abc', '00Q8X00000Fsx39QAB', '0058X00000Fsx39QAB,abc', "0058X00000Fsx39Q'B"])('fails startup with a clear message for %s', (bad) => {
+      expect(() => parseConfig({ ...base, AI_CALL_DEFAULT_SPECIALISTS: bad })).toThrow(/AI_CALL_DEFAULT_SPECIALISTS/);
+      expect(() => parseConfig({ ...base, AI_CALL_DEFAULT_SPECIALISTS: bad })).toThrow(/Salesforce User ids/);
+    });
+    it('fails startup for more than 20 ids', () => {
+      const ids = Array.from({ length: 21 }, (_, i) => `005000000000${String(i).padStart(3, '0')}`).join(',');
+      expect(() => parseConfig({ ...base, AI_CALL_DEFAULT_SPECIALISTS: ids })).toThrow(/AI_CALL_DEFAULT_SPECIALISTS/);
+    });
+  });
   it('rejects a bad encryption key with a clear message', () => {
     expect(() => parseConfig({ ...base, TOKEN_ENCRYPTION_KEY: 'short' })).toThrow(/TOKEN_ENCRYPTION_KEY/);
   });
