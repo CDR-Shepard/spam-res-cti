@@ -14,7 +14,7 @@ import {
   loadTalkTimeReport,
   talkRowsStatement,
 } from './talk-time-query.js';
-import { parseTalkRange, type TalkRange } from './talk-time.js';
+import { MAX_CONVERSATION_MS, parseTalkRange, type TalkRange } from './talk-time.js';
 
 const ORG = '11111111-1111-4111-8111-111111111111';
 const r = parseTalkRange({ from: '2026-09-30', to: '2026-10-01' });
@@ -96,13 +96,17 @@ describe('activity statements — dials and conversations whose 15-minute window
     expect(q.params).not.toContain(RANGE.start.toISOString());
   });
 
-  it('conversationActivityStatement: user_id + bridged_at + ended_at, org-scoped, bridged before the end, still open or ended after start − 15 min', () => {
+  it('conversationActivityStatement: user_id + bridged_at + ended_at, org-scoped, bridged before the end, ended after start − 15 min or open and bridged within the 4-hour call limit before that', () => {
     const q = conversationActivityStatement(db, ORG, RANGE.start, RANGE.end).toSQL();
     expect(q.sql).toMatch(/^select "user_id", "bridged_at", "ended_at" from "dialer_connects" where /);
     expect(q.sql).toContain('"dialer_connects"."org_id" = $');
     expect(q.sql).toContain('"dialer_connects"."bridged_at" < $');
-    expect(q.sql).toContain('("dialer_connects"."ended_at" is null or "dialer_connects"."ended_at" >= $');
+    // An orphan row (ended_at never recorded) is read only if it began within the
+    // 4-hour call limit of the lookback — not forever.
+    expect(q.sql).toContain('(("dialer_connects"."ended_at" is null and "dialer_connects"."bridged_at" >= $');
+    expect(q.sql).toContain(') or "dialer_connects"."ended_at" >= $');
     expect(q.params).toEqual(expect.arrayContaining([ORG, lookback, RANGE.end.toISOString()]));
+    expect(q.params).toContain(new Date(RANGE.start.getTime() - DIALER_IDLE_MS - MAX_CONVERSATION_MS).toISOString());
     expect(q.params).not.toContain(RANGE.start.toISOString());
   });
 
@@ -112,7 +116,11 @@ describe('activity statements — dials and conversations whose 15-minute window
     expect(dials.sql).not.toContain('org_id');
     expect(talks.sql).not.toContain('org_id');
     expect(dials.params).toEqual([lookback, RANGE.end.toISOString()]);
-    expect(talks.params).toEqual([RANGE.end.toISOString(), lookback]);
+    expect(talks.params).toEqual([
+      RANGE.end.toISOString(),
+      new Date(RANGE.start.getTime() - DIALER_IDLE_MS - MAX_CONVERSATION_MS).toISOString(),
+      lookback,
+    ]);
   });
 });
 

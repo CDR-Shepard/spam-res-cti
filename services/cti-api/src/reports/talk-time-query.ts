@@ -10,6 +10,7 @@ import { getDb, schema } from '@cti/db';
 import { DIALER_IDLE_MS } from '../dialer/idle.js';
 import { ORG_TIMEZONE } from '../dialer/org-day.js';
 import {
+  MAX_CONVERSATION_MS,
   assembleTalkTimeReport,
   dialerSecondsByUserDay,
   type ActivitySpan,
@@ -99,10 +100,20 @@ export function dialActivityStatement(db: Db, orgId: string | null, start: Date,
 export function conversationActivityStatement(db: Db, orgId: string | null, start: Date, end: Date) {
   const c = schema.dialerConnects;
   const lookback = new Date(start.getTime() - DIALER_IDLE_MS);
+  // A row whose end was never recorded counts for at most MAX_CONVERSATION_MS
+  // (talk-time.ts), so one bridged earlier than that before the lookback can no
+  // longer reach the range — a years-old orphan is not read forever.
+  const orphanFloor = new Date(lookback.getTime() - MAX_CONVERSATION_MS);
   return db
     .select({ userId: c.userId, bridgedAt: c.bridgedAt, endedAt: c.endedAt })
     .from(c)
-    .where(and(orgId ? eq(c.orgId, orgId) : undefined, lt(c.bridgedAt, end), or(isNull(c.endedAt), gte(c.endedAt, lookback))));
+    .where(
+      and(
+        orgId ? eq(c.orgId, orgId) : undefined,
+        lt(c.bridgedAt, end),
+        or(and(isNull(c.endedAt), gte(c.bridgedAt, orphanFloor)), gte(c.endedAt, lookback)),
+      ),
+    );
 }
 
 /** Dials and conversations whose 15-minute window can reach [start, end) —

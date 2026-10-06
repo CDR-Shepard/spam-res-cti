@@ -1,13 +1,18 @@
 /**
- * The talk-time report's arithmetic (talk-time spec): validate the range,
- * bound the org's Pacific days, turn each rep's legs on the power dialer into
- * seconds per day, and assemble one row per rep. PURE — the SQL is in
- * reports/talk-time-query.ts.
+ * The talk-time report's arithmetic (talk-time spec, idle-cutoff spec): validate
+ * the range, bound the org's Pacific days, turn each rep's legs on the power
+ * dialer into seconds per day — their open line (legs) intersected with their
+ * activity windows (a dial or a conversation, plus 15 minutes) — and assemble one
+ * row per rep. PURE — the SQL is in reports/talk-time-query.ts.
  */
 import { DIALER_IDLE_MS } from '../dialer/idle.js';
 import { ORG_TIMEZONE, orgMidnightUtc } from '../dialer/org-day.js';
 
 export const MAX_RANGE_DAYS = 92;
+/** Twilio ends any call at its default 4-hour time limit, so a conversation whose
+ *  `ended_at` was never recorded (a lost status callback) is counted as talking
+ *  for at most that long, never "until now" forever. */
+export const MAX_CONVERSATION_MS = 4 * 3_600_000;
 const DAY_MS = 86_400_000;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -97,6 +102,7 @@ export function intersectIntervals(a: readonly Span[], b: readonly Span[]): Span
   while (i < a.length && j < b.length) {
     const start = Math.max(a[i]!.start, b[j]!.start);
     const end = Math.min(a[i]!.end, b[j]!.end);
+    // Local result array, never the caller's: linear on tens of thousands of spans.
     if (end > start) out.push({ start, end });
     // Advance whichever span ends first; the other may still overlap the next.
     if (a[i]!.end < b[j]!.end) i++;
@@ -109,6 +115,7 @@ export function intersectIntervals(a: readonly Span[], b: readonly Span[]): Span
 function groupByUser<T extends { userId: string }>(items: readonly T[]): Map<string, T[]> {
   const byUser = new Map<string, T[]>();
   for (const item of items) {
+    // Local map and arrays, never the caller's: one linear pass over tens of thousands of spans.
     const mine = byUser.get(item.userId);
     if (mine) mine.push(item);
     else byUser.set(item.userId, [item]);
@@ -116,13 +123,22 @@ function groupByUser<T extends { userId: string }>(items: readonly T[]): Map<str
   return byUser;
 }
 
+/** When an activity span stops counting as talking, before the idle limit is
+ *  added: its recorded end, else (still talking, or the end was never recorded)
+ *  `now`, but never more than MAX_CONVERSATION_MS after it began. */
+function activityEndMs(a: ActivitySpan, now: Date): number {
+  if (a.end) return a.end.getTime();
+  return Math.min(now.getTime(), a.start.getTime() + MAX_CONVERSATION_MS);
+}
+
 /** PURE: a user's counted spans — the open line (legs; an open leg runs to
  *  `now`) intersected with the active windows (a dial counts the idle limit after
- *  it; a conversation from its start to `now`/its end, plus the idle limit). */
+ *  it; a conversation from its start to its end — `now`, capped at the 4-hour
+ *  call limit, when none was recorded — plus the idle limit). */
 function countedSpans(legs: readonly LegSpan[], activity: readonly ActivitySpan[], now: Date): Span[] {
   const open = mergeIntervals(legs.map((l) => ({ start: l.joinedAt.getTime(), end: (l.endedAt ?? now).getTime() })));
   const active = mergeIntervals(
-    activity.map((a) => ({ start: a.start.getTime(), end: (a.end ?? now).getTime() + DIALER_IDLE_MS })),
+    activity.map((a) => ({ start: a.start.getTime(), end: activityEndMs(a, now) + DIALER_IDLE_MS })),
   );
   return intersectIntervals(open, active);
 }

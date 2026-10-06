@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import * as orgDay from '../dialer/org-day.js';
 import {
+  MAX_CONVERSATION_MS,
   MAX_RANGE_DAYS,
   addDays,
   assembleTalkTimeReport,
@@ -71,7 +72,11 @@ describe('mergeIntervals — a rep\'s line is counted once', () => {
   // the result array on every step is quadratic and would stall the event loop.
   it('merges 50 000 spans in one linear pass', () => {
     const spans = Array.from({ length: 50_000 }, (_, i) => ({ start: i * 2, end: i * 2 + 1 }));
+    const t0 = performance.now();
     const merged = mergeIntervals(spans);
+    const elapsedMs = performance.now() - t0;
+    // The old reduce/spread version took about 5 s here; a linear pass takes milliseconds.
+    expect(elapsedMs).toBeLessThan(1000);
     expect(merged).toHaveLength(50_000);
     expect(merged[0]).toEqual({ start: 0, end: 1 });
     expect(merged[49_999]).toEqual({ start: 99_998, end: 99_999 });
@@ -177,6 +182,27 @@ describe('dialerSecondsByUserDay — only active time counts (idle-cutoff spec)'
       days, now,
     );
     expect(out).toEqual({ u1: { '2026-10-05': 25 * MIN } });
+  });
+
+  it('a conversation whose end was never recorded is capped at the 4-hour call limit, plus 15 minutes', () => {
+    const now = at('18:00:00'); // 6 h after the conversation began
+    const out = dialerSecondsByUserDay(
+      [{ userId: 'u1', joinedAt: at('12:00:00'), endedAt: null }],
+      [{ userId: 'u1', start: at('12:00:00'), end: null }],
+      days, now,
+    );
+    expect(MAX_CONVERSATION_MS).toBe(4 * 3_600_000);
+    // 12:00 → 16:00 (the cap) + 15 min = 255 min, not the 6 h the open leg ran.
+    expect(out).toEqual({ u1: { '2026-10-05': 255 * MIN } });
+  });
+
+  it('a recorded end is used as-is, even past the cap', () => {
+    const out = dialerSecondsByUserDay(
+      [{ userId: 'u1', joinedAt: at('06:00:00'), endedAt: at('20:00:00') }],
+      [{ userId: 'u1', start: at('06:00:00'), end: at('11:00:00') }],
+      days, NOW,
+    );
+    expect(out).toEqual({ u1: { '2026-10-05': (5 * 60 + 15) * MIN } });
   });
 
   it('an open line with no activity counts nothing, and activity on no open line counts nothing', () => {
