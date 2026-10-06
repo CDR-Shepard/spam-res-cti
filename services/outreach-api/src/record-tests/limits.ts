@@ -13,7 +13,11 @@ export { PREVIEW_STALE_MS };
 export const PREVIEWS_PER_HOUR = 10;
 export const PREVIEWS_PER_DAY = 40;
 export const CALLS_PER_HOUR = 6;
-/** A test call row with no ai_call_id yet (the trigger is in flight or its answer was lost) blocks the next one this long. */
+/**
+ * A test call with no answer yet (the trigger is in flight, or its answer was lost and cti-api stored none) blocks the next
+ * one this long. As the 1D practice guard (ai-calls/practice-guard.ts): a lost answer's call is found by its key in
+ * ai_call_requests (cti-api links it there when it inserts it) and blocks while live; an answer that placed nothing frees at once.
+ */
 export const UNANSWERED_CALL_MS = 2 * 60_000;
 const HOUR_MS = 60 * 60_000;
 /** A live AI call older than this no longer blocks: a stuck row must not lock an admin out. */
@@ -84,12 +88,14 @@ async function callRefusal(tx: Db, a: { orgId: string; userId: string; now: Date
     await tx.execute(sql`
       select count(*)::int as n
       from ai_record_test_calls c
-      left join ai_calls a on a.id = c.ai_call_id and a.org_id = c.org_id
+      left join ai_call_requests q on c.ai_call_id is null and q.org_id = c.org_id and q.idempotency_key = c.idempotency_key
+      left join ai_calls a on a.id = coalesce(c.ai_call_id, q.ai_call_id) and a.org_id = c.org_id
       where c.org_id = ${orgId}::uuid and c.requested_by = ${userId}::uuid
         and (
-          (c.ai_call_id is not null and a.status not in (${terminal})
+          (a.id is not null and a.status not in (${terminal})
             and a.created_at > ${iso(new Date(now.getTime() - LIVE_CALL_MAX_AGE_MS))}::timestamptz)
-          or (c.ai_call_id is null and c.created_at > ${iso(new Date(now.getTime() - UNANSWERED_CALL_MS))}::timestamptz)
+          or (a.id is null and c.result is null and q.response is null
+            and c.created_at > ${iso(new Date(now.getTime() - UNANSWERED_CALL_MS))}::timestamptz)
         )`),
   );
   if (live!.n > 0) return { code: 'CALL_IN_PROGRESS' };

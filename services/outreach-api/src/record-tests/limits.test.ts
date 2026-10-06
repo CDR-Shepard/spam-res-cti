@@ -2,9 +2,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
+import type { InternalAiCallResponse } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { addSpend } from '../ai/budget.js';
-import { seedAiCall } from '../test/ai-call-seed.js';
+import { seedAiCall, seedAiCallRequest } from '../test/ai-call-seed.js';
 import { seedUser } from '../test/call-plan-seed.js';
 import { seedOrg } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
@@ -47,10 +48,13 @@ describe.skipIf(!pgLane)('record test limits (real Postgres)', () => {
     await db.update(schema.aiRecordTests).set({ createdAt, status }).where(eq(schema.aiRecordTests.id, id));
     return id;
   }
-  async function testCall(orgId: string, userId: string, createdAt: Date, aiCallId: string | null = null): Promise<void> {
+  async function testCall(
+    orgId: string, userId: string, createdAt: Date, aiCallId: string | null = null, over: { key?: string; result?: InternalAiCallResponse } = {},
+  ): Promise<void> {
     const recordTestId = await preview(orgId, userId, ago(5 * 60 * MIN));
     await db.insert(schema.aiRecordTestCalls).values({
-      orgId, recordTestId, requestedBy: userId, mode: 'phone', toE164: '+15125550111', idempotencyKey: `rtest:${randomUUID()}`, aiCallId, createdAt,
+      orgId, recordTestId, requestedBy: userId, mode: 'phone', toE164: '+15125550111', idempotencyKey: over.key ?? `rtest:${randomUUID()}`, aiCallId, createdAt,
+      ...(over.result ? { result: over.result } : {}),
     });
   }
   /** Inserts as the route does, but at the test's clock (never the DB default `now()`, which is the wall clock). */
@@ -156,6 +160,29 @@ describe.skipIf(!pgLane)('record test limits (real Postgres)', () => {
     expect(await callLimit(t)).toEqual({ ok: false, refusal: { code: 'CALL_IN_PROGRESS' } });
     const u = await tenant();
     await testCall(u.orgId, u.admin, ago(3 * MIN));
+    expect((await callLimit(u)).ok).toBe(true);
+  });
+
+  it('8b (1D guard): a lost answer whose call cti-api linked to the key is CALL_IN_PROGRESS while that call is live, past the 2 minutes', async () => {
+    const t = await tenant();
+    const key = `rtest:${randomUUID()}`;
+    const aiCallId = await seedAiCall(db, t.orgId, t.admin, { status: 'in_progress', createdAt: ago(5 * MIN) });
+    await seedAiCallRequest(db, { orgId: t.orgId, key, userId: t.admin, createdAt: ago(5 * MIN) });
+    await db.update(schema.aiCallRequests).set({ aiCallId }).where(eq(schema.aiCallRequests.idempotencyKey, key));
+    await testCall(t.orgId, t.admin, ago(5 * MIN), null, { key });
+    expect(await callLimit(t)).toEqual({ ok: false, refusal: { code: 'CALL_IN_PROGRESS' } });
+    await db.update(schema.aiCalls).set({ status: 'completed' }).where(eq(schema.aiCalls.id, aiCallId));
+    expect((await callLimit(t)).ok).toBe(true);
+  });
+
+  it('8c (1D guard): an answer that placed nothing (a refusal) frees the admin at once; a lost one stored in ai_call_requests too', async () => {
+    const t = await tenant();
+    await testCall(t.orgId, t.admin, ago(30_000), null, { result: { result: 'failed', reason: 'plan_rejected', aiCallId: null } });
+    expect((await callLimit(t)).ok).toBe(true);
+    const u = await tenant();
+    const key = `rtest:${randomUUID()}`;
+    await seedAiCallRequest(db, { orgId: u.orgId, key, userId: u.admin, createdAt: ago(30_000), response: { result: 'failed', reason: 'plan_rejected', aiCallId: null } });
+    await testCall(u.orgId, u.admin, ago(30_000), null, { key });
     expect((await callLimit(u)).ok).toBe(true);
   });
 
