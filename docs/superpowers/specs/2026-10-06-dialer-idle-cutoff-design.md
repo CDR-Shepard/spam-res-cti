@@ -50,7 +50,7 @@ There are two kinds of active window, both per rep:
 | Activity | Source | Window |
 |---|---|---|
 | a dial placed | `dialer_dial_attempts.dialed_at` (one row per originate, append-only) | `[dialed_at, dialed_at + 15 min)` |
-| a conversation | `dialer_connects` (one row per bridged call) | `[bridged_at, (ended_at ?? now) + 15 min)` |
+| a conversation | `dialer_connects` (one row per bridged call) | `[bridged_at, (ended_at ?? min(now, bridged_at + 4 h)) + 15 min)` |
 
 Windows are merged per rep, then intersected with the merged legs.
 
@@ -118,15 +118,41 @@ What counts as the run's last change:
 A ringing dial or a live conversation is never cut, however long it runs. This
 matches `engine.ts` `isTalking` and the abandoned-run reaper.
 
-**What happens:** `stopSession(sessionId, deps, { reason: 'idle' })`. This is
-the existing Stop, in its existing order:
+**What happens:** `stopIdleSession(sessionId, deps)` (engine.ts). It runs in the
+REVERSE order of `stopSession`: it marks the run stopped first, then releases
+the line.
 
-1. Release the rep's conference: hang the leg up by sid, and its time ends
-   `run_end`.
-2. Flip to `stopped`, now also writing `stop_reason = 'idle'`.
-3. Hang up any dial still ringing. There is none, by definition.
+1. **Flip first, conditionally.** One UPDATE sets `status = 'stopped'` and
+   `stop_reason = 'idle'` where the run is still `active` or `paused`. If it
+   matches no row, the run ended or changed since the tick's snapshot: the
+   result is `skipped`, with no Twilio call at all. An ended run is never
+   rewritten to stopped/idle.
+2. **Release the rep's conference with the post-flip row** (status `stopped`):
+   hang the leg up by sid (its time ends `run_end`), then the by-name teardown.
+   The teardown is skipped whenever the rep already has another active run, so
+   a new run started in the window keeps its room.
+3. **Hang up a ringing dial last** (only if one started in the instant since
+   the check; normally there is none, by definition).
 
-It logs `[dialer] idle run stopped {sessionId, userId, idleMinutes}` (ids only).
+It logs `[dialer] idle run stopped {sessionId, userId, idleMinutes}` (ids only)
+only when the result is `stopped`; a `skipped` run is silent and not counted.
+
+**Why flip first (the reverse of `stopSession`).** `stopSession` releases first
+so a rep's own Stop cannot free the one-active-run slot before the rep-scoped
+room is torn down. For the idle cut the softphone is the thing to beat. When
+its leg drops it waits 1.5 s, reads the run's status, and REJOINS a run that
+reads `active` or `paused` (`recoverDroppedLeg`); if that fails it POSTs Stop
+itself. The release takes several Twilio REST calls and routinely outlasts 1.5
+s. Hung up first, the rep would be put back on hold music ("audio
+reconnected") and then see the run end, or the client's Stop would overwrite
+the reason with null ("lost its audio connection"). Flipped first, the rejoin
+reads a stopped run, stays down, and the panel reads "Stopped after 15 minutes
+with no dialing." The rejoin route's `CallStatus=completed` backstop pauses an
+ACTIVE run whose leg ended, so with the run already stopped it correctly does
+nothing.
+
+`stopSession` itself is unchanged and never writes `stop_reason`, so a later
+rep or softphone Stop on an idle-stopped run keeps `'idle'`.
 
 **Why stop and not pause:** the softphone's drop recovery (`apps/cti-web`
 `dialer-leg.ts recoverDroppedLeg`) rejoins a run that reads `active` or
@@ -154,7 +180,10 @@ ALTER TABLE dialer_sessions ADD COLUMN IF NOT EXISTS stop_reason text CONSTRAINT
   so a re-run is a no-op.
 - `lock_timeout` makes the migration fail fast on this hot table.
 - The column is nullable with no default, so adding it is instant.
-- `stopSession` writes the given reason, or null. A rep's own Stop writes null.
+- `stopIdleSession` writes `'idle'` in its one conditional flip. `stopSession`
+  (the rep's Stop, the softphone's Stop, the reaper) never writes the column, so
+  a run the rep or softphone then stops keeps `'idle'`; every other run stays
+  NULL.
 
 ### The softphone
 
@@ -208,7 +237,7 @@ under "Run stopped":
   - intersecting intervals;
   - a dial's window ends 15 minutes after it;
   - a long conversation counts in full, plus 15 minutes;
-  - an open conversation counts to now;
+  - an open conversation counts to now, capped at 4 hours after the bridge;
   - a leg with no activity counts 0;
   - a reconnected leg counts nothing new;
   - the Pacific-midnight split still holds;
@@ -221,12 +250,20 @@ under "Run stopped":
   - Description is sent on PATCH.
 - **Idle cut:**
   - the `isIdleRun` table;
-  - the tick stops exactly the idle ones with reason `idle` and skips live
-    ones;
+  - the tick stops exactly the idle ones through `stopIdleSession` and skips
+    live ones; a `skipped` result is not logged or counted;
   - one failing stop does not block the others;
   - the kill switch;
-  - the SQL is pinned;
-  - `stopSession` writes the reason (and null by default);
+  - the SQL is pinned, including the `session_id` / `user_id` aliases the row
+    mapper reads;
+  - `stopIdleSession` writes `stopped` + `'idle'` BEFORE any Twilio hangup
+    (one ordered log of the flip and every call), for an `active` and a
+    `paused` run;
+  - `stopIdleSession` on a run that already ended returns `skipped` and makes
+    no Twilio call; its flip is the conditional UPDATE;
+  - the release uses the post-flip row (the room is left alone when the rep has
+    a new active run), and a dial started since the check is hung up last;
+  - `stopSession` writes no `stop_reason` key at all;
   - the migration is pinned.
 - **Softphone:** the idle line shows for `stopReason: 'idle'` only.
 - **Before deploy:** a read-only dry run on prod data prints, per rep per day,

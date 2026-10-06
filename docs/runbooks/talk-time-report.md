@@ -21,7 +21,7 @@ Active time = the rep's legs ∩ their activity windows (`reports/talk-time.ts` 
 | Activity | Source | Window |
 |---|---|---|
 | a dial placed | `dialer_dial_attempts.dialed_at` | from the dial to 15 minutes after it |
-| a conversation | `dialer_connects`, `bridged_at` to `ended_at` | from the bridge until it ended, plus 15 minutes; one still open counts to now. An end that was never recorded is capped at 4 hours after the bridge |
+| a conversation | `dialer_connects`, `bridged_at` to `ended_at` | from the bridge until it ended, plus 15 minutes. An open conversation (no recorded end) counts to now, capped at 4 hours after it was bridged |
 
 Windows are merged per rep, then intersected with the rep's merged legs, then split at Pacific midnight. Not activity: the line opening, the softphone reconnecting, hold music, Pause. So a line that opens and never dials counts 0, and the few seconds between a leg opening and the run's first dial are not counted. Changed 2026-10-06 (spec `docs/superpowers/specs/2026-10-06-dialer-idle-cutoff-design.md`); the screen recomputes on every read, so every past day reads on the new rule. The Salesforce "Power Dialer Time" Tasks carry the same number: see `dialer-time-tasks.md`.
 

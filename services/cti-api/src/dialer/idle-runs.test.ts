@@ -1,10 +1,13 @@
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { stopIdleSession } from './engine.js';
 import { DIALER_IDLE_MS } from './idle.js';
+import { buildEngineDeps } from './live-deps.js';
 import {
   IDLE_CHECK_INTERVAL_MS,
   idleRunCandidatesStatement,
   isIdleRun,
+  liveIdleRunDeps,
   maybeStartIdleRunLoop,
   startIdleRunLoop,
   stopIdleRunsTick,
@@ -12,6 +15,11 @@ import {
   type IdleCandidate,
   type IdleRunDeps,
 } from './idle-runs.js';
+
+// engine.ts and live-deps.ts are OTHER modules, so mocking them is safe (unlike
+// the module under test). Factories keep both from loading Twilio / the db.
+vi.mock('./engine.js', () => ({ stopIdleSession: vi.fn() }));
+vi.mock('./live-deps.js', () => ({ buildEngineDeps: vi.fn() }));
 
 const NOW = new Date('2026-10-05T21:00:00Z');
 const ago = (ms: number) => new Date(NOW.getTime() - ms);
@@ -45,6 +53,9 @@ describe('isIdleRun', () => {
 describe('idleRunCandidatesStatement — the one query a tick runs', () => {
   const text = new PgDialect().sqlToQuery(idleRunCandidatesStatement()).sql.replace(/\s+/g, ' ').trim();
 
+  it('selects the run and rep under the aliases toCandidate reads: session_id and user_id', () => {
+    expect(text).toContain('select s.id as session_id, s.user_id,');
+  });
   it('looks only at runs with an open rep leg: a run parked for a callback has dropped its leg', () => {
     expect(text).toContain('join dialer_rep_legs l on l.session_id = s.id and l.ended_at is null');
   });
@@ -98,7 +109,7 @@ function deps(candidates: IdleCandidate[], stop: IdleRunDeps['stop'] = async () 
 
 describe('stopIdleRunsTick', () => {
   it('stops exactly the idle runs, by id, and skips live and recent ones', async () => {
-    const stop = vi.fn(async () => ({}));
+    const stop = vi.fn(async () => ({ action: 'stopped' as const }));
     vi.spyOn(console, 'info').mockImplementation(() => {});
     const n = await stopIdleRunsTick(
       deps(
@@ -127,7 +138,7 @@ describe('stopIdleRunsTick', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const stop = vi.fn(async (id: string) => {
       if (id === 'bad') throw new Error('twilio 500');
-      return {};
+      return { action: 'stopped' as const };
     });
     const n = await stopIdleRunsTick(deps([run('bad'), run('good')], stop));
     expect(stop).toHaveBeenCalledTimes(2);
@@ -137,8 +148,18 @@ describe('stopIdleRunsTick', () => {
     expect(info).toHaveBeenCalledWith('[dialer] idle run stopped', expect.objectContaining({ sessionId: 'good' }));
   });
 
+  it('a run that had already ended (skipped) is neither logged as stopped nor counted', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const stop = vi.fn(async (id: string) => ({ action: id === 'gone' ? ('skipped' as const) : ('stopped' as const) }));
+    const n = await stopIdleRunsTick(deps([run('gone'), run('real')], stop));
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(n).toBe(1);
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith('[dialer] idle run stopped', expect.objectContaining({ sessionId: 'real' }));
+  });
+
   it('stops nothing, and logs nothing, when no run is idle', async () => {
-    const stop = vi.fn(async () => ({}));
+    const stop = vi.fn(async () => ({ action: 'stopped' as const }));
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     expect(await stopIdleRunsTick(deps([run('r', { lastActivityAt: ago(MIN) })], stop))).toBe(0);
     expect(await stopIdleRunsTick(deps([], stop))).toBe(0);
@@ -147,11 +168,23 @@ describe('stopIdleRunsTick', () => {
   });
 });
 
+describe('liveIdleRunDeps — what the real loop calls', () => {
+  it('stops a run through stopIdleSession (flip first), with the engine deps built at call time, and returns its result', async () => {
+    const engineDeps = { marker: 'engine-deps' };
+    vi.mocked(buildEngineDeps).mockReturnValue(engineDeps as never);
+    vi.mocked(stopIdleSession).mockResolvedValue({ action: 'skipped' });
+    expect(buildEngineDeps).not.toHaveBeenCalled();
+    await expect(liveIdleRunDeps.stop('S9')).resolves.toEqual({ action: 'skipped' });
+    expect(stopIdleSession).toHaveBeenCalledTimes(1);
+    expect(stopIdleSession).toHaveBeenCalledWith('S9', engineDeps);
+  });
+});
+
 describe('startIdleRunLoop', () => {
   it('ticks on the interval and is single-flight: a slow tick is never overlapped', async () => {
     vi.useFakeTimers();
     const candidates = vi.fn(() => new Promise<IdleCandidate[]>(() => {}));
-    const timer = startIdleRunLoop(1000, { candidates, now: () => NOW, stop: async () => ({}) });
+    const timer = startIdleRunLoop(1000, { candidates, now: () => NOW, stop: async () => ({ action: 'stopped' }) });
     await vi.advanceTimersByTimeAsync(3500);
     clearInterval(timer);
     expect(candidates).toHaveBeenCalledTimes(1);
@@ -161,7 +194,7 @@ describe('startIdleRunLoop', () => {
     vi.useFakeTimers();
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const candidates = vi.fn(async () => { throw new Error('db down'); });
-    const timer = startIdleRunLoop(1000, { candidates, now: () => NOW, stop: async () => ({}) });
+    const timer = startIdleRunLoop(1000, { candidates, now: () => NOW, stop: async () => ({ action: 'stopped' }) });
     await vi.advanceTimersByTimeAsync(2500);
     clearInterval(timer);
     expect(candidates).toHaveBeenCalledTimes(2);

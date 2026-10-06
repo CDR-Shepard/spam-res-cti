@@ -3,14 +3,18 @@
  * docs/superpowers/specs/2026-10-06-dialer-idle-cutoff-design.md §2). A rep once
  * left a line open on hold music for 7.5 hours with zero dials. Every 30 s, find
  * runs that are `active` or `paused` AND still have an open rep leg, where
- * nothing has happened for DIALER_IDLE_MS, and STOP them through the same
- * `stopSession` the rep's Stop uses (leg hung up, run `stopped`), recording
- * stop_reason = 'idle' so the softphone can say why.
+ * nothing has happened for DIALER_IDLE_MS, and STOP them through engine.ts
+ * `stopIdleSession`: it marks the run `stopped` (stop_reason = 'idle', so the
+ * softphone can say why) BEFORE it hangs up the line, and only if the run is
+ * still active or paused when it gets there.
  *
- * STOP, never pause: the softphone's drop recovery (cti-web dialer-leg.ts
- * recoverDroppedLeg) rejoins a run that reads `active` or `paused`. Only a
- * stopped run keeps the line down; the rep starts a new one from the list,
- * which continues from the shared list position.
+ * STOP, never pause, and flip BEFORE releasing: the softphone's drop recovery
+ * (cti-web dialer-leg.ts recoverDroppedLeg) waits 1.5 s after its leg drops,
+ * then rejoins a run that reads `active` or `paused`, and the release outlasts
+ * 1.5 s. Only a run already stopped keeps the line down; the rep starts a new
+ * one from the list, which continues from the shared list position. (This is
+ * the reverse of `stopSession`'s order, which a rep-initiated Stop needs; see
+ * both docblocks.)
  *
  * Idle = no live dial AND the newest change is at least DIALER_IDLE_MS old. A
  * ringing dial or a live conversation is never cut, however long it runs — the
@@ -27,7 +31,7 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { getDb } from '@cti/db';
 import type { AppConfig } from '../config.js';
-import { stopSession } from './engine.js';
+import { stopIdleSession } from './engine.js';
 import { DIALER_IDLE_MS } from './idle.js';
 import { buildEngineDeps } from './live-deps.js';
 
@@ -90,11 +94,14 @@ export function toCandidate(raw: IdleRowRaw): IdleCandidate {
 export interface IdleRunDeps {
   candidates: () => Promise<IdleCandidate[]>;
   now: () => Date;
-  /** Stop one run (engine.ts stopSession, reason 'idle'). Injected so the tick is testable without Twilio. */
-  stop: (sessionId: string) => Promise<unknown>;
+  /** Stop one run (engine.ts stopIdleSession). `skipped` = it had already ended
+   *  since the candidate snapshot. Injected so the tick is testable without Twilio. */
+  stop: (sessionId: string) => Promise<{ action: 'stopped' | 'skipped' }>;
 }
 
-/** One pass. A failed stop is logged and the next idle run is still stopped. */
+/** One pass; returns how many runs it stopped. A run that had already ended
+ *  (`skipped`) is silent and not counted. A failed stop is logged and the next
+ *  idle run is still stopped. */
 export async function stopIdleRunsTick(deps: IdleRunDeps): Promise<number> {
   const candidates = await deps.candidates();
   const now = deps.now();
@@ -102,7 +109,8 @@ export async function stopIdleRunsTick(deps: IdleRunDeps): Promise<number> {
   for (const c of candidates) {
     if (!isIdleRun(c, now)) continue;
     try {
-      await deps.stop(c.sessionId);
+      const result = await deps.stop(c.sessionId);
+      if (result.action !== 'stopped') continue;
       stopped += 1;
       console.info('[dialer] idle run stopped', {
         sessionId: c.sessionId,
@@ -118,13 +126,13 @@ export async function stopIdleRunsTick(deps: IdleRunDeps): Promise<number> {
 
 /** Nothing is built at import: the db handle and the engine deps (which stamp
  *  their own clock) are made inside each call. */
-const liveIdleRunDeps: IdleRunDeps = {
+export const liveIdleRunDeps: IdleRunDeps = {
   candidates: async () => {
     const result = await getDb().execute(idleRunCandidatesStatement());
     return (result as unknown as { rows: IdleRowRaw[] }).rows.map(toCandidate);
   },
   now: () => new Date(),
-  stop: (sessionId) => stopSession(sessionId, buildEngineDeps(), { reason: 'idle' }),
+  stop: (sessionId) => stopIdleSession(sessionId, buildEngineDeps()),
 };
 
 /** Single-flight: a slow tick is never overlapped. `deps` is a test seam. */
