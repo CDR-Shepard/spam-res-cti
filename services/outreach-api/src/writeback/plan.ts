@@ -59,7 +59,10 @@ export interface WritePlan {
   contactDnc: boolean;
   /** False when the answer mapping was unavailable: no fill-blanks. */
   mapped: boolean;
+  /** An appointment whose call then went to a transfer (5a Fix 1, M-9): noted in the changes text and Chatter. */
+  bookingThen: BookingThen | null;
 }
+export type BookingThen = 'transferred' | 'transfer_failed';
 
 const ChangeSchema = z.object({
   field: z.string(),
@@ -89,6 +92,7 @@ export const StoredWritePlan: z.ZodType<WritePlan> = z.object({
     .nullable(),
   contactDnc: z.boolean(),
   mapped: z.boolean(),
+  bookingThen: z.enum(['transferred', 'transfer_failed']).nullable(),
 });
 
 export interface WritePlanInput {
@@ -103,10 +107,13 @@ export interface WritePlanInput {
   now: Date;
   /** Set when the Lead was converted: the plan targets the new Opportunity (sfObject 'Opportunity'). */
   converted: { fromLeadId: string } | null;
+  /** A practice call: never books (its stored booking is ignored). */
+  practice?: boolean;
 }
 
 const STATUS_FIELD: Readonly<Record<SfObject, string>> = { Lead: 'Status', Opportunity: 'StageName' };
-const DNC_FIELDS: ReadonlySet<string> = new Set(['DoNotCall', 'Removal_Status__c', 'Skip_on_Dialer__c']);
+/** The do-not-call class: always applied, whatever the status guard says (5a Fix 1, I-3). */
+export const DNC_FIELDS: ReadonlySet<string> = new Set(['DoNotCall', 'Removal_Status__c', 'Skip_on_Dialer__c']);
 const FOLLOW_UP_FIELDS: ReadonlySet<string> = new Set(['Next_Follow_Up_Date__c']);
 
 const whyFor = (field: string): Change['why'] => (DNC_FIELDS.has(field) ? 'dnc' : FOLLOW_UP_FIELDS.has(field) ? 'follow_up' : 'status');
@@ -121,8 +128,15 @@ class Builder {
   muted = false;
   constructor(private readonly i: WritePlanInput) {}
 
+  /** The field and its allowlist name, matched exactly, then ignoring case against the allowlist or org name (M-4). */
+  entry(name: string): [string, WritableField] | undefined {
+    const exact = this.i.fields.get(name);
+    if (exact) return [name, exact];
+    const lower = name.toLowerCase();
+    return [...this.i.fields].find(([key, f]) => key.toLowerCase() === lower || f.name.toLowerCase() === lower);
+  }
   field(name: string): WritableField | undefined {
-    return this.i.fields.get(name);
+    return this.entry(name)?.[1];
   }
   label(name: string): string {
     return this.field(name)?.label ?? name;
@@ -163,20 +177,33 @@ function statusBlock(b: Builder, i: WritePlanInput, row: Row, target: string): S
   return null;
 }
 
-/** The status move and the moves that go with it, as a list of moves to apply (reasons only with their status). */
+/** The from-state and research checks for a row with no status move. */
+function guardBlock(i: WritePlanInput, current: string | null): 'not_from_state' | 'moved_since_research' | null {
+  const from = i.sfObject === 'Lead' ? LEAD_FROM : OPP_FROM;
+  if (current === null || !from.has(current)) return 'not_from_state';
+  if (i.researchStatus !== null && current !== i.researchStatus) return 'moved_since_research';
+  return null;
+}
+
+/**
+ * The status move and the moves that go with it, as a list of moves to apply. A reason goes only with its status. When
+ * the record is outside the from-states or moved since research, Rating and Next Follow-Up stay too (a rep has the
+ * record; 5a Fix 1, I-3), unless it is already at the target. Do-not-call moves always apply.
+ */
 function rowMoves(b: Builder, i: WritePlanInput, row: Row): Move[] {
   const name = STATUS_FIELD[i.sfObject];
-  if (row.status === null) return [...row.also];
   const current = asText(currentOf(i.current, b.field(name)?.name ?? name));
-  const atTarget = sameText(current, row.status);
-  const block = atTarget ? null : statusBlock(b, i, row, row.status);
-  if (block !== null) b.skip(name, block);
-  const moves: Move[] = atTarget || block !== null ? [] : [{ field: name, value: row.status, mode: 'set' }];
+  const atTarget = row.status !== null && sameText(current, row.status);
+  const block = row.status === null ? guardBlock(i, current) : atTarget ? null : statusBlock(b, i, row, row.status);
+  if (row.status !== null && block !== null) b.skip(name, block);
+  const held = block === 'not_from_state' || block === 'moved_since_research' ? block : null;
+  const moves: Move[] = row.status === null || atTarget || block !== null ? [] : [{ field: name, value: row.status, mode: 'set' }];
   for (const m of row.also) {
-    if (!REASON_FIELDS.has(m.field)) moves.push(m);
-    else if (atTarget) moves.push({ ...m, mode: m.mode === 'set' ? 'fill' : m.mode });
-    else if (block === null) moves.push(m);
-    else b.skip(m.field, block);
+    if (DNC_FIELDS.has(m.field)) moves.push(m);
+    else if (REASON_FIELDS.has(m.field) && atTarget) moves.push({ ...m, mode: m.mode === 'set' ? 'fill' : m.mode });
+    else if (REASON_FIELDS.has(m.field) && block !== null) b.skip(m.field, block);
+    else if (held !== null) b.skip(m.field, held);
+    else moves.push(m);
   }
   return moves;
 }
@@ -227,12 +254,13 @@ function sameAnswer(f: WritableField, current: string, after: string): boolean {
 
 /** spec §5.1: fill only blank or "didn't ask" values; a declined value only over blank or never-write; a rep's value is kept. */
 function fillBlanks(b: Builder, i: WritePlanInput, mapped: MappedAnswers): void {
-  for (const [name, answer] of Object.entries(mapped.values)) {
-    const f = b.field(name);
-    if (!f || f.kind === 'status') {
-      b.skip(name, 'not_writable');
+  for (const [key, answer] of Object.entries(mapped.values)) {
+    const hit = b.entry(key);
+    if (!hit || hit[1].kind === 'status') {
+      b.skip(hit?.[0] ?? key, 'not_writable');
       continue;
     }
+    const [name, f] = hit;
     const value = fillValue(f, answer.value);
     if (value === null) {
       b.skip(name, 'invalid_value');
@@ -252,10 +280,14 @@ function fillBlanks(b: Builder, i: WritePlanInput, mapped: MappedAnswers): void 
   }
 }
 
+const bookingThen = (outcome: string): BookingThen | null =>
+  outcome === 'qualified_transferred' ? 'transferred' : outcome === 'transfer_failed' ? 'transfer_failed' : null;
+
 export function buildWritePlan(i: WritePlanInput): WritePlan {
   if (i.converted !== null && i.sfObject !== 'Opportunity') throw new Error('a converted Lead is written as its Opportunity');
   const disposition = i.mapped?.disposition ?? null;
-  const result = callResult(i.outcome, disposition, i.appointment !== null);
+  const facts = { dispositionQuoted: i.mapped?.dispositionEvidence !== undefined, practice: i.practice === true };
+  const result = callResult(i.outcome, disposition, i.appointment !== null, facts);
   const b = new Builder(i);
   let appointment: AppointmentAction | null = null;
 
@@ -284,5 +316,6 @@ export function buildWritePlan(i: WritePlanInput): WritePlan {
     appointment,
     contactDnc: i.sfObject === 'Opportunity' && result === 'do_not_call',
     mapped: i.mapped !== null,
+    bookingThen: result === 'appointment' ? bookingThen(i.outcome) : null,
   };
 }

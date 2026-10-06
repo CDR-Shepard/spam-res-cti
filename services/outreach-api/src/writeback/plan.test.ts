@@ -58,10 +58,13 @@ describe('buildWritePlan: status and stage (spec §5.2, §5.3)', () => {
     expect(p.contactDnc).toBe(false);
     expect(p.mapped).toBe(true);
   });
-  it('2: Status moved since research (Unqualified now, LTFU then) → skipped, Rating still applies', () => {
+  it('2: Status moved since research (Unqualified now, LTFU then) → skipped, and Rating with it (5a Fix 1, I-3)', () => {
     const p = buildWritePlan(lead({ current: { Status: 'Unqualified', Rating: null } }));
-    expect(p.patch).toEqual({ Rating: 'Hot' });
-    expect(p.skipped).toEqual([{ field: 'Status', label: 'Status', why: 'moved_since_research' }]);
+    expect(p.patch).toEqual({});
+    expect(p.skipped).toEqual([
+      { field: 'Status', label: 'Status', why: 'moved_since_research' },
+      { field: 'Rating', label: 'Rating', why: 'moved_since_research' },
+    ]);
   });
   it('3: a queue-owned Lead plans the same (the PATCH refusal is the run step\'s)', () => {
     const p = buildWritePlan(lead({ current: { Status: 'Long Term Follow-Up', Rating: null, OwnerId: '00G8X000000AbCdUAK' } }));
@@ -104,10 +107,13 @@ describe('buildWritePlan: status and stage (spec §5.2, §5.3)', () => {
       ],
     });
   });
-  it('7: Opportunity in Negotiation, transferred → stage skipped not_from_state; the follow-up still applies', () => {
+  it('7: Opportunity in Negotiation, transferred → stage and the follow-up skipped not_from_state (5a Fix 1, I-3)', () => {
     const p = buildWritePlan(opp({ current: { StageName: 'Negotiation' }, researchStatus: 'Negotiation' }));
-    expect(p.skipped).toEqual([{ field: 'StageName', label: 'Stage', why: 'not_from_state' }]);
-    expect(p.patch).toEqual({ Next_Follow_Up_Date__c: NOW.toISOString() });
+    expect(p.skipped).toEqual([
+      { field: 'StageName', label: 'Stage', why: 'not_from_state' },
+      { field: 'Next_Follow_Up_Date__c', label: 'Next Follow-Up Date', why: 'not_from_state' },
+    ]);
+    expect(p.patch).toEqual({});
   });
   it('8: Opportunity at Followup, not selling → Closed Lost, Loss Reason Other', () => {
     const p = buildWritePlan(opp({ outcome: 'not_interested', mapped: mapped('not_selling') }));
@@ -165,7 +171,10 @@ describe('buildWritePlan: status and stage (spec §5.2, §5.3)', () => {
     expect(same.changes).toEqual([]);
   });
   it('a Lead status outside the from list is not moved; a null research status skips the research check', () => {
-    expect(buildWritePlan(lead({ current: { Status: 'Duplicate' }, researchStatus: 'Duplicate' })).skipped).toEqual([{ field: 'Status', label: 'Status', why: 'not_from_state' }]);
+    expect(buildWritePlan(lead({ current: { Status: 'Duplicate' }, researchStatus: 'Duplicate' })).skipped).toEqual([
+      { field: 'Status', label: 'Status', why: 'not_from_state' },
+      { field: 'Rating', label: 'Rating', why: 'not_from_state' },
+    ]);
     expect(buildWritePlan(lead({ researchStatus: null })).patch).toEqual({ Status: 'Working', Rating: 'Hot' });
   });
   it('a table field the org lacks or does not let us edit is skipped as not_writable', () => {
@@ -276,16 +285,20 @@ describe('buildWritePlan: the appointment', () => {
     expect(p.patch).toEqual({ Status: 'Working', Rating: 'Hot' });
     expect(p.appointment).toEqual({ booked: BOOKED, kind: 'lead_hold', onBooked: {}, onConflict: {}, onBookedChanges: [], onConflictChanges: [] });
   });
-  it('an Opportunity stage the tables do not move from keeps its stage on booking; Rating still goes Hot', () => {
+  it('an Opportunity stage the tables do not move from keeps its stage and Rating on booking (5a Fix 1, I-3)', () => {
     const p = buildWritePlan(opp({ outcome: 'appointment_set', appointment: BOOKED, current: { StageName: 'Negotiation' }, researchStatus: 'Negotiation' }));
-    expect(p.appointment?.onBooked).toEqual({ Rating__c: 'Hot' });
-    expect(p.appointment?.onConflict).toEqual({ Next_Follow_Up_Date__c: NOW.toISOString() });
-    expect(p.skipped).toEqual([{ field: 'StageName', label: 'Stage', why: 'not_from_state' }]);
+    expect(p.appointment?.onBooked).toEqual({});
+    expect(p.appointment?.onConflict).toEqual({});
+    expect(p.skipped).toEqual([
+      { field: 'StageName', label: 'Stage', why: 'not_from_state' },
+      { field: 'Rating__c', label: 'Rating', why: 'not_from_state' },
+    ]);
   });
   it('an Opportunity already at Appointment Set books again: no stage move, and no skip from the conflict moves', () => {
-    const p = buildWritePlan(opp({ outcome: 'appointment_set', appointment: BOOKED, current: { StageName: 'Appointment Set', Rating__c: 'Hot' }, researchStatus: 'Appointment Set' }));
-    expect(p.appointment?.onBooked).toEqual({});
-    expect(p.appointment?.onConflict).toEqual({ Next_Follow_Up_Date__c: NOW.toISOString() });
+    const p = buildWritePlan(opp({ outcome: 'appointment_set', appointment: BOOKED, current: { StageName: 'Appointment Set', Rating__c: 'Warm' }, researchStatus: 'Appointment Set' }));
+    expect(p.appointment?.onBooked).toEqual({ Rating__c: 'Hot' });
+    // 5a Fix 1 (I-3): Appointment Set is outside the from-states, so a conflict leaves the follow-up to the conflict Task
+    expect(p.appointment?.onConflict).toEqual({});
     expect(p.skipped).toEqual([]);
   });
   it('appointment_set without a stored booking is a callback', () => {
@@ -311,5 +324,106 @@ describe('StoredWritePlan', () => {
     const plan = buildWritePlan(lead());
     expect(StoredWritePlan.safeParse({ ...plan, result: 'maybe' }).success).toBe(false);
     expect(StoredWritePlan.safeParse({ ...plan, changes: [{ field: 'Status' }] }).success).toBe(false);
+  });
+});
+
+describe('5a Fix 1 (M-3): hung up / other close a record only on the seller\'s quoted words', () => {
+  it('a sold disposition without a caller quote leaves a hung-up Lead alone; with one it is Unqualified', () => {
+    const bare = buildWritePlan(lead({ outcome: 'hung_up', mapped: mapped('sold_mls') }));
+    expect(bare.result).toBe('other');
+    expect(bare.patch).toEqual({});
+    const quoted = buildWritePlan(lead({ outcome: 'hung_up', mapped: { disposition: 'sold_mls', dispositionEvidence: 'we sold it on the MLS', values: {} } }));
+    expect(quoted.result).toBe('sold_mls');
+    expect(quoted.patch).toEqual({ Status: 'Unqualified', Unqualified_Reason__c: 'Already sold (MLS)' });
+  });
+});
+
+describe('5a Fix 1 (M-9): a booking that still stands after a transfer is the appointment', () => {
+  it('Opportunity, booked then transferred → the Event path, with the transfer noted', () => {
+    const p = buildWritePlan(opp({ outcome: 'qualified_transferred', appointment: BOOKED }));
+    expect(p.result).toBe('appointment');
+    expect(p.bookingThen).toBe('transferred');
+    expect(p.patch).toEqual({});
+    expect(p.appointment).toMatchObject({ kind: 'opportunity_event', onBooked: { StageName: 'Appointment Set', Rating__c: 'Hot' } });
+  });
+  it('Lead, booked then the transfer failed → the appointment row (hold fallback when not converted)', () => {
+    const p = buildWritePlan(lead({ outcome: 'transfer_failed', appointment: BOOKED }));
+    expect(p.result).toBe('appointment');
+    expect(p.bookingThen).toBe('transfer_failed');
+    expect(p.patch).toEqual({ Status: 'Working', Rating: 'Hot' });
+    expect(p.appointment?.kind).toBe('lead_hold');
+  });
+  it('a plain booking has nothing after it', () => {
+    expect(buildWritePlan(opp({ outcome: 'appointment_set', appointment: BOOKED })).bookingThen).toBeNull();
+    expect(buildWritePlan(opp({ outcome: 'qualified_transferred' })).bookingThen).toBeNull();
+  });
+  it('a practice call never books, whatever it stored', () => {
+    const p = buildWritePlan(opp({ outcome: 'qualified_transferred', appointment: BOOKED, practice: true }));
+    expect(p.result).toBe('transferred');
+    expect(p.appointment).toBeNull();
+    expect(p.bookingThen).toBeNull();
+    expect(buildWritePlan(lead({ outcome: 'appointment_set', appointment: BOOKED, practice: true })).appointment).toBeNull();
+  });
+  it('round-trips through StoredWritePlan', () => {
+    const plan = buildWritePlan(opp({ outcome: 'transfer_failed', appointment: BOOKED }));
+    expect(StoredWritePlan.parse(JSON.parse(JSON.stringify(plan)))).toEqual(plan);
+  });
+});
+
+describe('5a Fix 1 (I-3): Rating and Next Follow-Up move only with the status guard; do-not-call always applies', () => {
+  it('Opportunity at Negotiation, not now (no status move) → Rating Cold skipped not_from_state', () => {
+    const p = buildWritePlan(opp({ outcome: 'not_interested', mapped: mapped('not_now'), current: { StageName: 'Negotiation', Rating__c: 'Hot' }, researchStatus: 'Negotiation' }));
+    expect(p.patch).toEqual({});
+    expect(p.skipped).toEqual([{ field: 'Rating__c', label: 'Rating', why: 'not_from_state' }]);
+    expect(p.kept).toEqual([]);
+  });
+  it('Opportunity moved since research, not now → Rating Cold skipped moved_since_research', () => {
+    const p = buildWritePlan(opp({ outcome: 'not_interested', mapped: mapped('not_now'), current: { StageName: 'Pending Appointment', Rating__c: 'Hot' }, researchStatus: 'Followup' }));
+    expect(p.patch).toEqual({});
+    expect(p.skipped).toEqual([{ field: 'Rating__c', label: 'Rating', why: 'moved_since_research' }]);
+  });
+  it('a Lead outside the from-states, do not call → Status and reason skipped; Removal, Do Not Call and Skip on Dialer still set', () => {
+    const p = buildWritePlan(lead({ outcome: 'do_not_call', current: { Status: 'Duplicate', Removal_Status__c: null, DoNotCall: false, Skip_on_Dialer__c: false }, researchStatus: 'Duplicate' }));
+    expect(p.patch).toEqual({ Removal_Status__c: 'Remove me', DoNotCall: true, Skip_on_Dialer__c: true });
+    expect(p.skipped).toEqual([
+      { field: 'Status', label: 'Status', why: 'not_from_state' },
+      { field: 'Unqualified_Reason__c', label: 'Unqualified Reason', why: 'not_from_state' },
+    ]);
+  });
+  it('an Opportunity moved since research, do not call → Skip on Dialer still set, the contact flag still set', () => {
+    const p = buildWritePlan(opp({ outcome: 'do_not_call', current: { StageName: 'Pending Appointment', Skip_on_Dialer__c: false }, researchStatus: 'Followup' }));
+    expect(p.patch).toEqual({ Skip_on_Dialer__c: true });
+    expect(p.contactDnc).toBe(true);
+  });
+  it('a record already at the target status still takes its Rating', () => {
+    const p = buildWritePlan(lead({ current: { Status: 'Working', Rating: 'Warm' }, researchStatus: 'Long Term Follow-Up' }));
+    expect(p.patch).toEqual({ Rating: 'Hot' });
+    expect(p.skipped).toEqual([]);
+  });
+  it('a status the org will not take (not writable) does not hold back the Rating', () => {
+    const fields = writableFields(prodDescribe('Lead', ['Status']), 'Lead');
+    const p = buildWritePlan(lead({ fields }));
+    expect(p.patch).toEqual({ Rating: 'Hot' });
+    expect(p.skipped).toEqual([{ field: 'Status', label: 'Status', why: 'not_writable' }]);
+  });
+});
+
+describe("5a Fix 1 (M-6): do not call keeps a rep's Removal Status", () => {
+  it('a Lead marked "Spam" keeps it; Do Not Call and Skip on Dialer are still set', () => {
+    const p = buildWritePlan(lead({ outcome: 'do_not_call', current: { Status: 'Working', Removal_Status__c: 'Spam', DoNotCall: false, Skip_on_Dialer__c: false }, researchStatus: 'Working' }));
+    expect(p.patch).toEqual({ Status: 'Unqualified', Unqualified_Reason__c: 'Hostile/Remove from list', DoNotCall: true, Skip_on_Dialer__c: true });
+  });
+});
+
+describe('5a Fix 1 (M-4): a mapped answer reaches its field whatever the case of its key', () => {
+  it('an answer keyed by the org spelling of an allowlisted field is filled, not skipped', () => {
+    const describe = prodDescribe('Lead');
+    describe.fields.find((f) => f.name === 'Timeline__c')!.name = 'TIMELINE__c';
+    const fields = writableFields(describe, 'Lead');
+    expect(fields.get('Timeline__c')?.name).toBe('TIMELINE__c');
+    const p = buildWritePlan(lead({ fields, current: { Status: 'Long Term Follow-Up', TIMELINE__c: null }, mapped: mapped('interested', { TIMELINE__c: { value: '90 Days', evidence: 'x' } }) }));
+    expect(p.patch.TIMELINE__c).toBe('90 Days');
+    expect(p.skipped).toEqual([]);
+    expect(p.changes).toContainEqual({ field: 'Timeline__c', label: 'Timeline', before: null, after: '90 Days', why: 'filled' });
   });
 });

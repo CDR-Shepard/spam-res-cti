@@ -3,7 +3,10 @@ import type { Disposition } from './mapping-model.js';
 import { CALL_RESULTS, LEAD_FROM, LEAD_TABLE, OPP_FROM, OPP_OPEN, OPP_TABLE, REASON_FIELDS, callResult, type CallResult } from './outcome-tables.js';
 
 describe('callResult (spec §3.4, §5)', () => {
-  const rows: Array<[outcome: string, disposition: Disposition | null, booked: boolean, expected: CallResult]> = [
+  const Q = { dispositionQuoted: true };
+  const P = { practice: true };
+  type Facts = Parameters<typeof callResult>[3];
+  const rows: Array<[outcome: string, disposition: Disposition | null, booked: boolean, expected: CallResult, facts?: Facts]> = [
     ['appointment_set', null, true, 'appointment'],
     ['appointment_set', 'interested', true, 'appointment'],
     ['appointment_set', null, false, 'callback'],
@@ -22,18 +25,34 @@ describe('callResult (spec §3.4, §5)', () => {
     ['not_interested', 'interested', false, 'not_now'],
     ['not_interested', 'unknown', false, 'not_now'],
     ['not_interested', null, false, 'not_now'],
-    ['hung_up', 'sold_mls', false, 'sold_mls'],
-    ['hung_up', 'sold_ibuyer', false, 'sold_ibuyer'],
-    ['hung_up', 'listed_with_agent', false, 'listed'],
-    ['hung_up', 'not_selling', false, 'other'],
+    ['hung_up', 'sold_mls', false, 'sold_mls', Q],
+    ['hung_up', 'sold_ibuyer', false, 'sold_ibuyer', Q],
+    ['hung_up', 'listed_with_agent', false, 'listed', Q],
+    ['hung_up', 'not_selling', false, 'other', Q],
     ['hung_up', null, false, 'other'],
-    ['other', 'sold_investor', false, 'sold_investor'],
-    ['other', 'not_now', false, 'other'],
+    ['other', 'sold_investor', false, 'sold_investor', Q],
+    ['other', 'not_now', false, 'other', Q],
     ['other', null, false, 'other'],
-    ['voicemail', 'sold_mls', false, 'other'],
+    ['voicemail', 'sold_mls', false, 'other', Q],
+    // 5a Fix 1 (M-3): hung_up / other close only on the seller's quoted words
+    ['hung_up', 'sold_mls', false, 'other'],
+    ['hung_up', 'listed_with_agent', false, 'other', { dispositionQuoted: false }],
+    ['other', 'sold_investor', false, 'other'],
+    // 5a Fix 1 (M-9): a booking that still stands is the appointment result, whatever the transfer did
+    ['qualified_transferred', 'interested', true, 'appointment'],
+    ['transfer_failed', null, true, 'appointment'],
+    ['do_not_call', null, true, 'do_not_call'],
+    ['wrong_number', null, true, 'wrong_number'],
+    ['qualified_callback', null, true, 'callback'],
+    ['not_interested', 'not_now', true, 'not_now'],
+    ['hung_up', null, true, 'other'],
+    // a practice call never books
+    ['appointment_set', null, true, 'callback', P],
+    ['qualified_transferred', null, true, 'transferred', P],
+    ['transfer_failed', null, true, 'callback', P],
   ];
-  it.each(rows)('%s + %s (booked %s) → %s', (outcome, disposition, booked, expected) => {
-    expect(callResult(outcome, disposition, booked)).toBe(expected);
+  it.each(rows)('%s + %s (booked %s) → %s %j', (outcome, disposition, booked, expected, facts) => {
+    expect(callResult(outcome, disposition, booked, facts)).toBe(expected);
   });
 });
 
@@ -61,7 +80,7 @@ describe('the tables (spec §5.2, §5.3), row for row', () => {
         status: 'Unqualified',
         also: [
           { field: 'Unqualified_Reason__c', value: 'Hostile/Remove from list', mode: 'set' },
-          { field: 'Removal_Status__c', value: 'Remove me', mode: 'set' },
+          { field: 'Removal_Status__c', value: 'Remove me', mode: 'fill' },
           { field: 'DoNotCall', value: true, mode: 'set' },
           { field: 'Skip_on_Dialer__c', value: true, mode: 'set' },
         ],

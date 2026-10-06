@@ -151,6 +151,7 @@ describe('changesFieldText (spec §5.5)', () => {
         '- Lead not converted: FIELD_CUSTOM_VALIDATION_EXCEPTION: Hunt_Winner_Owner_Change; a hold and a "convert and book" Task were created instead',
         'Not filled',
         '- Status: changed in Salesforce since the AI\'s research, so left alone',
+        '- Rating: changed in Salesforce since the AI\'s research, so left alone',
         '- Fill-blanks skipped: the answer mapping was unavailable',
       ].join('\n'),
     );

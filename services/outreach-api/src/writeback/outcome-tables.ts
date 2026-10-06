@@ -3,6 +3,7 @@
  * with it. The tables are the spec's §5.2 (Lead) and §5.3 (Opportunity), approved by the user as written. The values
  * are defaults: the write plan validates each one against the live describe before use.
  */
+import { BOOKING_STANDS_OUTCOMES } from '@cti/contracts';
 import type { Disposition } from './mapping-model.js';
 
 export const CALL_RESULTS = [
@@ -17,15 +18,26 @@ const SOLD: Readonly<Partial<Record<Disposition, CallResult>>> = {
   listed_with_agent: 'listed',
 };
 
+export interface ResultFacts {
+  /** The mapping found the seller's own words for the disposition in a caller line (5a Fix 1, M-3). */
+  dispositionQuoted?: boolean;
+  /** A practice call never books (Task 28): its stored booking is ignored. */
+  practice?: boolean;
+}
+
 /**
- * The call's result for the tables (spec §3.4, §5). `appointment` needs a stored booking; an `appointment_set` without
- * one is a callback. `not_interested` is refined by the disposition; `hung_up` and `other` only by a sold or listed one.
+ * The call's result for the tables (spec §3.4, §5).
+ * - `appointment`: a real call with a stored booking that still stands (`BOOKING_STANDS_OUTCOMES`: appointment_set,
+ *   and a transfer or failed transfer after booking; 5a Fix 1, M-9). Without a booking, `appointment_set` is a callback.
+ * - `not_interested` is refined by the disposition; `hung_up` and `other` only by a sold or listed one the seller's own
+ *   words back (`dispositionQuoted`, M-3).
  */
-export function callResult(outcome: string, disposition: Disposition | null, hasAppointment: boolean): CallResult {
+export function callResult(outcome: string, disposition: Disposition | null, hasAppointment: boolean, facts: ResultFacts = {}): CallResult {
+  if (hasAppointment && facts.practice !== true && (BOOKING_STANDS_OUTCOMES as readonly string[]).includes(outcome)) return 'appointment';
   const sold = disposition === null ? undefined : SOLD[disposition];
   switch (outcome) {
     case 'appointment_set':
-      return hasAppointment ? 'appointment' : 'callback';
+      return 'callback';
     case 'qualified_transferred':
       return 'transferred';
     case 'qualified_callback':
@@ -39,7 +51,7 @@ export function callResult(outcome: string, disposition: Disposition | null, has
       return sold ?? (disposition === 'not_selling' ? 'not_selling' : 'not_now');
     case 'hung_up':
     case 'other':
-      return sold ?? 'other';
+      return facts.dispositionQuoted === true ? (sold ?? 'other') : 'other';
     default:
       return 'other';
   }
@@ -91,7 +103,8 @@ export const LEAD_TABLE: Readonly<Record<CallResult, Row>> = {
   sold_investor: unqualified('Already sold (Other Investor)'),
   sold_ibuyer: unqualified('Already sold (Other Investor)'),
   listed: unqualified('Went with Competition'),
-  do_not_call: unqualified('Hostile/Remove from list', set('Removal_Status__c', 'Remove me'), set('DoNotCall', true), set('Skip_on_Dialer__c', true)),
+  // Removal Status only fills a blank: a rep's "Spam" is kept (5a Fix 1, M-6).
+  do_not_call: unqualified('Hostile/Remove from list', { field: 'Removal_Status__c', value: 'Remove me', mode: 'fill' }, set('DoNotCall', true), set('Skip_on_Dialer__c', true)),
   wrong_number: NONE,
   other: NONE,
 };
