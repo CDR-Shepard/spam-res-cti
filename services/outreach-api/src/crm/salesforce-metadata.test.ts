@@ -27,6 +27,10 @@ function only(xml: string, tag: string): string {
 }
 const fieldFile = (object: string, field: string): string => `objects/${object}/fields/${field}.field-meta.xml`;
 
+/** Plan 1D: the write-back's record of what it changed after each AI call. */
+const LAST_CALL_CHANGES = 'AI_Last_Call_Changes__c';
+const LAST_CALL_CHANGES_OBJECTS = ['Lead', 'Opportunity'] as const;
+
 describe.each(CONSENT_OBJECTS)('%s consent fields', (object) => {
   it('every field file exists and names itself', () => {
     for (const field of Object.values(CONSENT_FIELDS)) {
@@ -63,6 +67,24 @@ describe.each(CONSENT_OBJECTS)('%s consent fields', (object) => {
   });
 });
 
+describe.each(LAST_CALL_CHANGES_OBJECTS)('%s AI_Last_Call_Changes__c (plan 1D write-back)', (object) => {
+  it('is a 32,768-character long text area labelled AI Last Call Changes', () => {
+    expect(existsSync(resolve(FORCE_APP, fieldFile(object, LAST_CALL_CHANGES)))).toBe(true);
+    const xml = read(fieldFile(object, LAST_CALL_CHANGES));
+    expect(xml.startsWith('<?xml version="1.0" encoding="UTF-8"?>\n<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">')).toBe(true);
+    expect(only(xml, 'fullName')).toBe(LAST_CALL_CHANGES);
+    expect(only(xml, 'type')).toBe('LongTextArea');
+    expect(only(xml, 'length')).toBe('32768');
+    expect(only(xml, 'visibleLines')).toBe('10');
+    expect(only(xml, 'label')).toBe('AI Last Call Changes');
+    expect(only(xml, 'externalId')).toBe('false');
+  });
+
+  it('is identical on Lead and Opportunity', () => {
+    expect(read(fieldFile(object, LAST_CALL_CHANGES))).toBe(read(fieldFile('Lead', LAST_CALL_CHANGES)));
+  });
+});
+
 describe('AI_Outreach permission set', () => {
   const xml = read('permissionsets/AI_Outreach.permissionset-meta.xml');
   const fieldPerms = new Map(
@@ -84,6 +106,17 @@ describe('AI_Outreach permission set', () => {
     }
   });
 
+  it('grants read + edit on AI Last Call Changes on Lead and Opportunity (plan 1D)', () => {
+    for (const object of LAST_CALL_CHANGES_OBJECTS) {
+      expect(fieldPerms.get(`${object}.${LAST_CALL_CHANGES}`), object).toEqual({ readable: 'true', editable: 'true' });
+    }
+  });
+
+  it('keeps the field blocks in alphabetical order', () => {
+    const fields = [...fieldPerms.keys()];
+    expect(fields).toEqual([...fields].sort());
+  });
+
   it('grants edit on the do-not-contact flags of Lead and Contact, and on the Task marker', () => {
     for (const f of ['Lead.DoNotCall', 'Lead.HasOptedOutOfEmail', 'Contact.DoNotCall', 'Contact.HasOptedOutOfEmail', 'Activity.CTI_Origin__c']) {
       expect(fieldPerms.get(f), f).toEqual({ readable: 'true', editable: 'true' });
@@ -94,6 +127,7 @@ describe('AI_Outreach permission set', () => {
     const editable = new Set([
       ...CONSENT_OBJECTS.flatMap((o) => Object.values(CONSENT_FIELDS).map((f) => `${o}.${f}`)),
       'Lead.DoNotCall', 'Lead.HasOptedOutOfEmail', 'Contact.DoNotCall', 'Contact.HasOptedOutOfEmail', 'Activity.CTI_Origin__c',
+      ...LAST_CALL_CHANGES_OBJECTS.map((o) => `${o}.${LAST_CALL_CHANGES}`),
     ]);
     for (const [field, perm] of fieldPerms) {
       expect(perm.readable, field).toBe('true');
@@ -104,21 +138,36 @@ describe('AI_Outreach permission set', () => {
     }
   });
 
-  it('Lead, Opportunity and Contact: read, edit and View All — never create, delete or Modify All', () => {
-    expect([...objectPerms.keys()].sort()).toEqual(['Contact', 'Lead', 'Opportunity']);
+  it('Account, Contact, Lead and Opportunity: read, edit and View All; create only on what a conversion creates; never delete or Modify All', () => {
+    expect([...objectPerms.keys()]).toEqual(['Account', 'Contact', 'Lead', 'Opportunity']);
+    const creates = new Set(['Account', 'Contact', 'Opportunity']);
     for (const [object, block] of objectPerms) {
       expect({
         allowCreate: only(block, 'allowCreate'), allowDelete: only(block, 'allowDelete'), allowEdit: only(block, 'allowEdit'),
         allowRead: only(block, 'allowRead'), modifyAllRecords: only(block, 'modifyAllRecords'), viewAllRecords: only(block, 'viewAllRecords'),
       }, object).toEqual({
-        allowCreate: 'false', allowDelete: 'false', allowEdit: 'true', allowRead: 'true', modifyAllRecords: 'false', viewAllRecords: 'true',
+        allowCreate: creates.has(object) ? 'true' : 'false', allowDelete: 'false', allowEdit: 'true', allowRead: 'true', modifyAllRecords: 'false', viewAllRecords: 'true',
       });
     }
+    expect(xml).not.toMatch(/<allowDelete>true<\/allowDelete>/);
+    expect(xml).not.toMatch(/<modifyAllRecords>true<\/modifyAllRecords>/);
   });
 
-  it('the only system permission is Edit Tasks', () => {
+  it('the system permissions are exactly Convert Leads, Edit Events and Edit Tasks', () => {
     const perms = tagValues(xml, 'userPermissions').map((b) => ({ name: only(b, 'name'), enabled: only(b, 'enabled') }));
-    expect(perms).toEqual([{ name: 'EditTask', enabled: 'true' }]);
+    expect(perms).toEqual([
+      { name: 'ConvertLeads', enabled: 'true' },
+      { name: 'EditEvent', enabled: 'true' },
+      { name: 'EditTask', enabled: 'true' },
+    ]);
+  });
+
+  it('the comment and description say what 1D grants, and no longer that it never creates or converts', () => {
+    expect(xml).not.toContain('never creates, converts or deletes');
+    expect(xml).toContain('creates Events, Tasks and Chatter posts, and converts a Lead that booked an appointment; never deletes');
+    expect(xml).toContain('AI_Outreach_Fields');
+    expect(only(xml, 'description')).not.toContain('Grants no create');
+    expect(only(xml, 'description').length).toBeLessThanOrEqual(255);
   });
 });
 

@@ -12,10 +12,26 @@
     primary contact role's Contact is updated instead);
   - read on the standard phone, email and description fields the campaign
     engine reads, and on Skip_on_Dialer__c;
-  - read + edit + View All on Lead, Opportunity and Contact - no create, no
-    delete, no Modify All: v1 never creates, converts or deletes records;
+  - read + edit + View All on Lead, Opportunity, Contact and Account; no
+    delete and no Modify All anywhere. AI Outreach
+    creates Events, Tasks and Chatter posts, and converts a Lead that booked an appointment; never deletes;
   - Edit Tasks, and edit on Activity.CTI_Origin__c, for the AI Outreach Task
-    marker (phase 2 writes Tasks; phase 1 writes none).
+    marker on the Events and Tasks it creates;
+  - read + edit on AI_Last_Call_Changes__c on Lead and Opportunity: the plan 1D
+    write-back records there what it changed after each AI call;
+  - Edit Events: the plan 1D write-back puts a booked appointment on the
+    appointment owner's calendar;
+  - Convert Leads, plus create on Account, Contact and Opportunity: the plan 1D
+    write-back converts a Lead that booked an appointment (decision 2), through
+    the SOAP API's convertLead (a conversion creates a Person Account, a
+    Contact and an Opportunity). A System Administrator already has these; a
+    dedicated connected user needs them from here. Lead itself gets no create.
+
+  The tenant's qualification fields get edit through the in-org
+  AI_Outreach_Fields permission set, not here. Record type access (Person
+  Account, Homeowner Opportunity) and edit on Opportunity.LeadManager__c are
+  tenant-specific too and are granted in-org (docs/runbooks/outreach-sf-campaigns.md),
+  so this file still deploys to any org.
 
   Tenant-specific custom fields (notes, extra phone fields, web form source,
   lead manager) are NOT here: they exist only in that tenant's org, and a
@@ -27,7 +43,7 @@
   refer to it by AI_Outreach.
 -->
 <PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
-    <description>For the AI Outreach integration user only. Reads campaign records and writes AI-call consent and do-not-contact flags. Grants no create, delete or Modify All. See the comment in this file.</description>
+    <description>For the AI Outreach integration user only. Reads campaign records, writes AI-call results, Events and Tasks, and converts booked Leads. Grants no delete or Modify All. See the comment in this file.</description>
     <fieldPermissions>
         <editable>true</editable>
         <field>Activity.CTI_Origin__c</field>
@@ -71,6 +87,11 @@
     <fieldPermissions>
         <editable>true</editable>
         <field>Lead.AI_Call_Consent__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Lead.AI_Last_Call_Changes__c</field>
         <readable>true</readable>
     </fieldPermissions>
     <fieldPermissions>
@@ -124,6 +145,11 @@
         <readable>true</readable>
     </fieldPermissions>
     <fieldPermissions>
+        <editable>true</editable>
+        <field>Opportunity.AI_Last_Call_Changes__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
         <editable>false</editable>
         <field>Opportunity.Description</field>
         <readable>true</readable>
@@ -136,7 +162,16 @@
     <hasActivationRequired>false</hasActivationRequired>
     <label>AI Outreach</label>
     <objectPermissions>
-        <allowCreate>false</allowCreate>
+        <allowCreate>true</allowCreate>
+        <allowDelete>false</allowDelete>
+        <allowEdit>true</allowEdit>
+        <allowRead>true</allowRead>
+        <modifyAllRecords>false</modifyAllRecords>
+        <object>Account</object>
+        <viewAllRecords>true</viewAllRecords>
+    </objectPermissions>
+    <objectPermissions>
+        <allowCreate>true</allowCreate>
         <allowDelete>false</allowDelete>
         <allowEdit>true</allowEdit>
         <allowRead>true</allowRead>
@@ -154,7 +189,7 @@
         <viewAllRecords>true</viewAllRecords>
     </objectPermissions>
     <objectPermissions>
-        <allowCreate>false</allowCreate>
+        <allowCreate>true</allowCreate>
         <allowDelete>false</allowDelete>
         <allowEdit>true</allowEdit>
         <allowRead>true</allowRead>
@@ -162,6 +197,14 @@
         <object>Opportunity</object>
         <viewAllRecords>true</viewAllRecords>
     </objectPermissions>
+    <userPermissions>
+        <enabled>true</enabled>
+        <name>ConvertLeads</name>
+    </userPermissions>
+    <userPermissions>
+        <enabled>true</enabled>
+        <name>EditEvent</name>
+    </userPermissions>
     <userPermissions>
         <enabled>true</enabled>
         <name>EditTask</name>
