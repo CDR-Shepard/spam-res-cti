@@ -29,15 +29,8 @@ export interface OutreachSettings {
   aiCallDailyCap: number;
   /** Unanswered-call attempts per lead (no answer, busy, voicemail, failed) before it completes (1–5). */
   aiCallMaxAttempts: number;
-  /** Plan 1D: appointment booking on AI calls (one appointment owner: the first active user on `specialists`). */
-  aiCallBooking: AiCallBookingSettings;
   /** Plan 1D: write call results back to Salesforce. On unless explicitly `false`. */
   aiCallWriteback: boolean;
-}
-
-export interface OutreachSettingsOptions {
-  /** AI_CALL_DEFAULT_SPECIALISTS: the owner list used until the tenant saves `aiCallBooking` (no tenant id in code). */
-  defaultSpecialists?: readonly string[];
 }
 
 export const DEFAULT_AI_DAILY_BUDGET_USD = 25;
@@ -49,7 +42,7 @@ export const DEFAULT_AI_CALL_MAX_ATTEMPTS = 3;
 /**
  * Booking defaults (user decisions): phone 15 min, Mon–Fri, starts every 30 min 10:00–17:30, earliest 2 h ahead, 2 business
  * days; walkthrough 60 min, starts on the hour 9:00–16:00, earliest 20 h ahead, 5 business days, 30 min buffer; up to 6 of
- * each kind offered. `specialists` is empty here: the configured default list fills it (outreachSettings).
+ * each kind offered. `specialists` is empty here: the configured default list fills it (bookingSettings).
  */
 export const DEFAULT_AI_CALL_BOOKING: Readonly<AiCallBookingSettings> = Object.freeze({
   enabled: true,
@@ -83,11 +76,15 @@ function liveChannelsFrom(value: unknown): LiveChannel[] {
 }
 
 /**
- * The saved booking settings when they parse as a whole, else the defaults as a whole (a malformed blob never half-applies).
- * The configured default list applies only to the defaults: a saved list, even an empty one, always wins.
+ * Plan 1D: the tenant's appointment booking settings (one appointment owner: the first active user on `specialists`). The
+ * saved blob when it parses as a whole, else the defaults as a whole (a malformed blob never half-applies). The configured
+ * default list (AI_CALL_DEFAULT_SPECIALISTS) applies only to the defaults: a saved list, even an empty one, always wins.
+ * Fix 1 (M-4): this is the only reader of `aiCallBooking`, and the default list is required, so no reader can see an empty
+ * list by forgetting it.
  */
-function bookingFrom(value: unknown, defaultSpecialists: readonly string[]): AiCallBookingSettings {
-  const saved = AiCallBookingSettings.safeParse(value);
+export function bookingSettings(org: { settings: unknown }, defaultSpecialists: readonly string[]): AiCallBookingSettings {
+  const s = isRecord(org.settings) ? org.settings : {};
+  const saved = AiCallBookingSettings.safeParse(s.aiCallBooking);
   if (saved.success) return saved.data;
   return { ...structuredClone(DEFAULT_AI_CALL_BOOKING), specialists: [...defaultSpecialists] };
 }
@@ -97,7 +94,7 @@ export function bookingActive(b: AiCallBookingSettings): boolean {
   return b.enabled && b.specialists.length > 0;
 }
 
-export function outreachSettings(org: { settings: unknown }, opts: OutreachSettingsOptions = {}): OutreachSettings {
+export function outreachSettings(org: { settings: unknown }): OutreachSettings {
   const s = isRecord(org.settings) ? org.settings : {};
   return {
     aiDailyBudgetUsd: budgetFrom(s.aiDailyBudgetUsd),
@@ -107,7 +104,6 @@ export function outreachSettings(org: { settings: unknown }, opts: OutreachSetti
     aiCallConcurrency: intIn(s.aiCallConcurrency, 1, 5, DEFAULT_AI_CALL_CONCURRENCY),
     aiCallDailyCap: intIn(s.aiCallDailyCap, 0, 500, DEFAULT_AI_CALL_DAILY_CAP),
     aiCallMaxAttempts: intIn(s.aiCallMaxAttempts, 1, 5, DEFAULT_AI_CALL_MAX_ATTEMPTS),
-    aiCallBooking: bookingFrom(s.aiCallBooking, opts.defaultSpecialists ?? []),
     aiCallWriteback: s.aiCallWriteback !== false,
   };
 }

@@ -13,7 +13,7 @@ import { SF_ID } from '../campaigns/records.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import { sendError } from '../http/errors.js';
 import { soqlIdList } from '../research/text.js';
-import { outreachSettings } from '../settings.js';
+import { bookingSettings, outreachSettings } from '../settings.js';
 import { requireAdmin, requireContext } from '../tenancy/scope.js';
 import { sendCrmError } from './crm-errors.js';
 
@@ -21,7 +21,7 @@ export interface AiCallSettingsRouteDeps {
   db: Db;
   clients: SalesforceClientFactory;
   /** AI_CALL_DEFAULT_SPECIALISTS: what GET shows for a tenant that has saved no list. */
-  defaultSpecialists?: readonly string[];
+  defaultSpecialists: readonly string[];
 }
 
 export const USER_SEARCH_LIMIT = 25;
@@ -64,8 +64,8 @@ const inAskedOrder = (options: SalesforceUserOption[], ids: readonly string[]): 
 export async function registerAiCallSettingsRoutes(app: FastifyInstance, deps: AiCallSettingsRouteDeps): Promise<void> {
   const { db, clients } = deps;
   const settingsOf = (blob: unknown): AiCallSettings => {
-    const s = outreachSettings({ settings: blob }, { defaultSpecialists: deps.defaultSpecialists });
-    return { booking: s.aiCallBooking, writeback: s.aiCallWriteback };
+    const org = { settings: blob };
+    return { booking: bookingSettings(org, deps.defaultSpecialists), writeback: outreachSettings(org).aiCallWriteback };
   };
 
   app.get('/settings/ai-calls', async (req, reply) => {

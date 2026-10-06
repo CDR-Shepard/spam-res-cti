@@ -1,0 +1,44 @@
+/**
+ * Times AI calls have already booked with the appointment owner that the owner's Salesforce calendar does not show yet
+ * (Fix 1, I-4). cti-api stores a booking on `ai_calls.appointment` the moment the agent books it; the write-back creates the
+ * Event later (and a fallback creates none). Until an Event exists, the calendar read cannot see the booking, so the next
+ * call's offer takes these out itself: concurrent and back-to-back calls are never promised the same time.
+ *
+ * Read-only (outreach-api never writes ai_calls). Test and practice calls never count: nothing is ever written for them, so
+ * their bookings are not real appointments. A booking whose write-back created the Event is the calendar's to show.
+ */
+import { and, desc, eq, gte, isNotNull, isNull } from 'drizzle-orm';
+import { BookedAppointment } from '@cti/contracts';
+import { schema, type Db } from '@cti/db';
+import { OFFER_CALENDAR_DAYS } from './offer.js';
+import type { Busy } from './slots.js';
+
+/** A call books one of the times its trigger offered, all within OFFER_CALENDAR_DAYS of the trigger: older calls cannot matter. */
+export const BOOKED_LOOKBACK_DAYS = OFFER_CALENDAR_DAYS + 1;
+/** Bounds the read; far above what one owner's calendar can hold in the look-back. */
+export const BOOKED_ROW_LIMIT = 500;
+const DAY_MS = 86_400_000;
+
+/** Salesforce compares ids on their case-sensitive 15-character core. */
+const core = (id: string): string => id.slice(0, 15);
+
+/** The owner's booked times overlapping [now, until) that no Event shows yet, as timed busy items. */
+export async function bookedNotOnCalendar(db: Db, a: { orgId: string; ownerSfUserId: string; now: Date; until: Date }): Promise<Busy[]> {
+  const c = schema.aiCalls;
+  const w = schema.aiCallWritebacks;
+  const since = new Date(a.now.getTime() - BOOKED_LOOKBACK_DAYS * DAY_MS);
+  const rows = await db
+    .select({ appointment: c.appointment })
+    .from(c)
+    .leftJoin(w, eq(w.aiCallId, c.id))
+    .where(and(eq(c.orgId, a.orgId), isNotNull(c.appointment), eq(c.isTest, false), gte(c.createdAt, since), isNull(w.sfEventId)))
+    .orderBy(desc(c.createdAt))
+    .limit(BOOKED_ROW_LIMIT);
+  return rows.flatMap(({ appointment }): Busy[] => {
+    const booked = BookedAppointment.safeParse(appointment);
+    if (!booked.success || core(booked.data.specialistSfUserId) !== core(a.ownerSfUserId)) return [];
+    const start = new Date(booked.data.start);
+    const end = new Date(booked.data.end);
+    return start.getTime() < a.until.getTime() && end.getTime() > a.now.getTime() ? [{ start, end, allDay: false }] : [];
+  });
+}

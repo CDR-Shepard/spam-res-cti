@@ -56,8 +56,8 @@ export interface PaceDeps {
   log: RunnerLogger;
   /** Wall clock in ms for the tick deadline; tests inject one. Defaults to `Date.now`. */
   clock?: () => number;
-  /** Plan 1D: AI_CALL_DEFAULT_SPECIALISTS, the appointment owner list of a tenant that has saved none. */
-  defaultSpecialists?: readonly string[];
+  /** Plan 1D: AI_CALL_DEFAULT_SPECIALISTS, the appointment owner list of a tenant that has saved none (required: Fix 1, M-4). */
+  defaultSpecialists: readonly string[];
 }
 
 export interface PaceCounts {

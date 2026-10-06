@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { AiCallBookingSettings } from '@cti/contracts';
 import {
   bookingActive,
+  bookingSettings,
   DEFAULT_AI_CALL_BOOKING,
   DEFAULT_AI_CALL_CONCURRENCY,
   DEFAULT_AI_CALL_DAILY_CAP,
@@ -9,6 +10,15 @@ import {
   outreachSettings,
   type OutreachSettings,
 } from './settings.js';
+
+const DEFAULT_BOOKING: AiCallBookingSettings = {
+    enabled: true,
+    specialists: [],
+    convertLeads: true,
+    days: [1, 2, 3, 4, 5],
+    phone: { enabled: true, durationMinutes: 15, startHour: 10, endHour: 18, stepMinutes: 30, minLeadMinutes: 120, horizonBusinessDays: 2, bufferMinutes: 0, maxOffered: 6 },
+    walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 },
+};
 
 const DEFAULTS: OutreachSettings = {
   aiDailyBudgetUsd: 25,
@@ -18,14 +28,6 @@ const DEFAULTS: OutreachSettings = {
   aiCallConcurrency: 2,
   aiCallDailyCap: 50,
   aiCallMaxAttempts: 3,
-  aiCallBooking: {
-    enabled: true,
-    specialists: [],
-    convertLeads: true,
-    days: [1, 2, 3, 4, 5],
-    phone: { enabled: true, durationMinutes: 15, startHour: 10, endHour: 18, stepMinutes: 30, minLeadMinutes: 120, horizonBusinessDays: 2, bufferMinutes: 0, maxOffered: 6 },
-    walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 },
-  },
   aiCallWriteback: true,
 };
 const GRANT = '0058X00000Fsx39QAB';
@@ -104,43 +106,50 @@ describe('outreachSettings', () => {
 
   describe('AI call booking and write-back settings (plan 1D)', () => {
     it('DEFAULT_AI_CALL_BOOKING is the plan\'s defaults and parses with the contract', () => {
-      expect(DEFAULT_AI_CALL_BOOKING).toEqual(DEFAULTS.aiCallBooking);
+      expect(DEFAULT_AI_CALL_BOOKING).toEqual(DEFAULT_BOOKING);
       expect(AiCallBookingSettings.safeParse(DEFAULT_AI_CALL_BOOKING).success).toBe(true);
     });
 
     it('an empty blob gives the defaults: booking on with nobody to book with, write-back on', () => {
-      const s = outreachSettings({ settings: {} });
-      expect(s.aiCallBooking).toEqual(DEFAULTS.aiCallBooking);
-      expect(s.aiCallWriteback).toBe(true);
+      expect(bookingSettings({ settings: {} }, [])).toEqual(DEFAULT_BOOKING);
+      expect(outreachSettings({ settings: {} }).aiCallWriteback).toBe(true);
+    });
+
+    it('Fix 1 (M-4): booking is read only through bookingSettings, whose default list is required', () => {
+      expect('aiCallBooking' in outreachSettings({ settings: { aiCallBooking: DEFAULT_BOOKING } })).toBe(false);
+      // Type-level: a reader cannot forget the configured default list (never called).
+      const forgot = () => {
+        // @ts-expect-error defaultSpecialists is required
+        bookingSettings({ settings: {} });
+      };
+      expect(forgot).toBeTypeOf('function');
     });
 
     it.each([
       ['a non-boolean switch', { enabled: 'yes' }],
       ['a partial blob', { enabled: false }],
-      ['a bad user id', { ...DEFAULTS.aiCallBooking, specialists: ['abc'] }],
-      ['an end hour before the start hour', { ...DEFAULTS.aiCallBooking, phone: { ...DEFAULTS.aiCallBooking.phone, startHour: 12, endHour: 11 } }],
-      ['an unknown key', { ...DEFAULTS.aiCallBooking, rotate: true }],
+      ['a bad user id', { ...DEFAULT_BOOKING, specialists: ['abc'] }],
+      ['an end hour before the start hour', { ...DEFAULT_BOOKING, phone: { ...DEFAULT_BOOKING.phone, startHour: 12, endHour: 11 } }],
+      ['an unknown key', { ...DEFAULT_BOOKING, rotate: true }],
       ['a string', 'on'],
       ['null', null],
     ])('%s falls back to the default as a whole (never half-applied)', (_label, aiCallBooking) => {
-      expect(outreachSettings({ settings: { aiCallBooking } }).aiCallBooking).toEqual(DEFAULTS.aiCallBooking);
+      expect(bookingSettings({ settings: { aiCallBooking } }, [])).toEqual(DEFAULT_BOOKING);
     });
 
     it('the malformed fallback still takes the configured default list', () => {
-      const s = outreachSettings({ settings: { aiCallBooking: { enabled: 'yes' } } }, { defaultSpecialists: [GRANT] });
-      expect(s.aiCallBooking.specialists).toEqual([GRANT]);
+      expect(bookingSettings({ settings: { aiCallBooking: { enabled: 'yes' } } }, [GRANT]).specialists).toEqual([GRANT]);
     });
 
     it('the configured default list is used when the tenant never saved one', () => {
-      const s = outreachSettings({ settings: {} }, { defaultSpecialists: [GRANT] });
-      expect(s.aiCallBooking).toEqual({ ...DEFAULTS.aiCallBooking, specialists: [GRANT] });
+      expect(bookingSettings({ settings: {} }, [GRANT])).toEqual({ ...DEFAULT_BOOKING, specialists: [GRANT] });
     });
 
     it('a saved list always wins over the configured default, even an empty one', () => {
-      const saved = { ...DEFAULTS.aiCallBooking, specialists: [] };
-      expect(outreachSettings({ settings: { aiCallBooking: saved } }, { defaultSpecialists: [GRANT] }).aiCallBooking.specialists).toEqual([]);
-      const other = { ...DEFAULTS.aiCallBooking, specialists: [OTHER, GRANT] };
-      expect(outreachSettings({ settings: { aiCallBooking: other } }, { defaultSpecialists: [GRANT] }).aiCallBooking.specialists).toEqual([OTHER, GRANT]);
+      const saved = { ...DEFAULT_BOOKING, specialists: [] };
+      expect(bookingSettings({ settings: { aiCallBooking: saved } }, [GRANT]).specialists).toEqual([]);
+      const other = { ...DEFAULT_BOOKING, specialists: [OTHER, GRANT] };
+      expect(bookingSettings({ settings: { aiCallBooking: other } }, [GRANT]).specialists).toEqual([OTHER, GRANT]);
     });
 
     it('a valid custom blob is kept', () => {
@@ -149,20 +158,20 @@ describe('outreachSettings', () => {
         specialists: [OTHER],
         convertLeads: false,
         days: [1, 3, 5, 6],
-        phone: { ...DEFAULTS.aiCallBooking.phone, durationMinutes: 20, stepMinutes: 15, maxOffered: 4 },
-        walkthrough: { ...DEFAULTS.aiCallBooking.walkthrough, enabled: false, startHour: 8, endHour: 12 },
+        phone: { ...DEFAULT_BOOKING.phone, durationMinutes: 20, stepMinutes: 15, maxOffered: 4 },
+        walkthrough: { ...DEFAULT_BOOKING.walkthrough, enabled: false, startHour: 8, endHour: 12 },
       };
-      expect(outreachSettings({ settings: { aiCallBooking: custom } }).aiCallBooking).toEqual(custom);
+      expect(bookingSettings({ settings: { aiCallBooking: custom } }, [GRANT])).toEqual(custom);
     });
 
     it('returns fresh objects: changing one result never changes the defaults or the next result', () => {
-      const a = outreachSettings({ settings: {} }, { defaultSpecialists: [GRANT] });
-      a.aiCallBooking.specialists.push(OTHER);
-      a.aiCallBooking.phone.durationMinutes = 99;
-      a.aiCallBooking.days.push(6);
-      const b = outreachSettings({ settings: {} }, { defaultSpecialists: [GRANT] });
-      expect(b.aiCallBooking).toEqual({ ...DEFAULTS.aiCallBooking, specialists: [GRANT] });
-      expect(DEFAULT_AI_CALL_BOOKING).toEqual(DEFAULTS.aiCallBooking);
+      const a = bookingSettings({ settings: {} }, [GRANT]);
+      a.specialists.push(OTHER);
+      a.phone.durationMinutes = 99;
+      a.days.push(6);
+      const b = bookingSettings({ settings: {} }, [GRANT]);
+      expect(b).toEqual({ ...DEFAULT_BOOKING, specialists: [GRANT] });
+      expect(DEFAULT_AI_CALL_BOOKING).toEqual(DEFAULT_BOOKING);
     });
 
     it.each([
@@ -180,7 +189,7 @@ describe('outreachSettings', () => {
       ['on with no specialists', { enabled: true, specialists: [] }, false],
       ['off with a specialist', { enabled: false, specialists: [GRANT] }, false],
     ])('bookingActive: %s', (_label, over, expected) => {
-      expect(bookingActive({ ...DEFAULTS.aiCallBooking, ...over })).toBe(expected);
+      expect(bookingActive({ ...DEFAULT_BOOKING, ...over })).toBe(expected);
     });
   });
 });

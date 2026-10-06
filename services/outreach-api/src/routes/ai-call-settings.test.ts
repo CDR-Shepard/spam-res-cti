@@ -35,7 +35,7 @@ async function build(opts: { settings?: unknown; queries?: QueryRoute[]; clients
   app = await buildApp({
     cfg: testConfig(),
     readiness: async () => ({ dbOk: true, jobsOk: true }),
-    apiRoutes: [(scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: opts.defaultSpecialists })],
+    apiRoutes: [(scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: opts.defaultSpecialists ?? [] })],
   });
   return sf;
 }

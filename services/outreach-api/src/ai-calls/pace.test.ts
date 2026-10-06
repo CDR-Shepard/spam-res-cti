@@ -364,7 +364,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       if (orgId === good.base.orgId) return good.sf.client;
       throw new CrmNotConnectedError();
     };
-    const counts = await placeDueAiCalls({ db, clients, cti: good.cti.cti, now: NOW, log: { info: () => {}, warn: () => {}, error: (obj: unknown, msg?: string) => good.logs.push({ level: 'error', obj, msg }) }, clock: () => 0 });
+    const counts = await placeDueAiCalls({ db, clients, cti: good.cti.cti, now: NOW, log: { info: () => {}, warn: () => {}, error: (obj: unknown, msg?: string) => good.logs.push({ level: 'error', obj, msg }) }, clock: () => 0, defaultSpecialists: [] });
 
     expect(counts.placed).toBeGreaterThanOrEqual(1);
     expect((await touchById(db, goodLead.touchId)).status).toBe('sent');

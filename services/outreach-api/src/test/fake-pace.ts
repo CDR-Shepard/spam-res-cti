@@ -153,7 +153,7 @@ export async function paceHarness(db: Db, settings: Record<string, unknown> = {}
     if (clientError) throw clientError;
     return sf.client;
   };
-  const run = (now: Date) => placeDueAiCalls({ db, clients, cti: cti.cti, now, log, clock: () => 0, defaultSpecialists: opts.defaultSpecialists });
+  const run = (now: Date) => placeDueAiCalls({ db, clients, cti: cti.cti, now, log, clock: () => 0, defaultSpecialists: opts.defaultSpecialists ?? [] });
   return {
     base,
     sf,

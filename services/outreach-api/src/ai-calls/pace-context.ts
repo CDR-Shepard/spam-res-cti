@@ -3,18 +3,21 @@
  * it may start (concurrency and the rolling daily cap), the due touches, their plans, ONE fresh
  * Salesforce read per object (which also refreshes the integration token cti-api reads,
  * decision 3), and the CF-1 activity check. A tenant whose Salesforce is unusable is skipped
- * with nothing claimed. Plan 1D: the tick keeps the tenant's settings and Salesforce client, so a touch can be offered the
- * appointment owner's free times (tickOffer).
+ * with nothing claimed. Plan 1D: the tick keeps the tenant's booking settings and Salesforce client, so a touch can be offered
+ * the appointment owner's free times (tickOffer). Fix 1: the owner's calendar is read at most once per tenant per tick (M-1);
+ * the times other AI calls booked that are not on it yet are read per touch (I-4).
  */
 import { eq, inArray } from 'drizzle-orm';
-import { EditableCallPlan, FieldMap } from '@cti/contracts';
+import { EditableCallPlan, FieldMap, type AiCallBookingSettings } from '@cti/contracts';
 import { schema } from '@cti/db';
 import { QueryTooLargeError, SalesforceApiError, SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
-import { offerSlots, type Offer } from '../appointments/offer.js';
+import { bookedNotOnCalendar } from '../appointments/booked.js';
+import type { OwnerUser } from '../appointments/calendar.js';
+import { offerFrom, readOfferCalendar, type Offer, type OfferCalendar } from '../appointments/offer.js';
 import { fetchRecords, type SfRecordSnapshot } from '../campaigns/records.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
-import { outreachSettings, type OutreachSettings } from '../settings.js';
+import { bookingSettings, outreachSettings } from '../settings.js';
 import { engineTaskIds, recordsWithNewActivity, type ActivityProbe } from './activity-check.js';
 import type { PaceDeps } from './pace.js';
 import { deferTouch, dueAiCallTouches, liveAiCallCount, placedInLastDay, PLACE_CANDIDATES_PER_ORG, type AiTouchCandidate } from './touches.js';
@@ -42,8 +45,10 @@ export interface OrgTick {
   newActivity: Set<string>;
   /** Plan 1D: the tenant's integration connection, for the appointment offer's reads. */
   client: SalesforceClient;
-  /** Plan 1D: the tenant's settings as this tick read them (booking among them). */
-  settings: OutreachSettings;
+  /** Plan 1D: the tenant's booking settings as this tick read them (the configured default list applied). */
+  booking: AiCallBookingSettings;
+  /** Fix 1 (M-1): the appointment owner and their calendar, read from Salesforce on first use and kept for the tick. */
+  calendar(): Promise<OfferCalendar>;
 }
 
 const core = (id: string): string => id.slice(0, 15);
@@ -53,13 +58,14 @@ const errName = (err: unknown): string => (err instanceof Error ? err.name : typ
 const salesforceUnavailable = (err: unknown): boolean =>
   err instanceof CrmNotConnectedError || err instanceof SalesforceAuthError || err instanceof SalesforceApiError || err instanceof QueryTooLargeError;
 
-async function slotsFor(deps: PaceDeps, orgId: string): Promise<{ slots: number; settings: OutreachSettings }> {
-  const [org] = await deps.db.select({ settings: schema.organizations.settings }).from(schema.organizations).where(eq(schema.organizations.id, orgId));
-  const settings = outreachSettings({ settings: org?.settings ?? {} }, { defaultSpecialists: deps.defaultSpecialists });
+async function slotsFor(deps: PaceDeps, orgId: string): Promise<{ slots: number; booking: AiCallBookingSettings }> {
+  const [row] = await deps.db.select({ settings: schema.organizations.settings }).from(schema.organizations).where(eq(schema.organizations.id, orgId));
+  const org = { settings: row?.settings ?? {} };
+  const settings = outreachSettings(org);
   const live = await liveAiCallCount(deps.db, orgId, deps.now);
   const remaining = settings.aiCallDailyCap - (await placedInLastDay(deps.db, orgId, deps.now));
   if (remaining <= 0) deps.log.info({ orgId, cap: settings.aiCallDailyCap }, 'ai_call.place: daily AI call cap reached');
-  return { slots: Math.min(settings.aiCallConcurrency - live, remaining), settings };
+  return { slots: Math.min(settings.aiCallConcurrency - live, remaining), booking: bookingSettings(org, deps.defaultSpecialists) };
 }
 
 async function loadPlans(deps: PaceDeps, orgId: string, candidates: AiTouchCandidate[]): Promise<Map<string, PlanForCall>> {
@@ -95,7 +101,7 @@ async function freshRecords(client: SalesforceClient, fieldMap: FieldMap, candid
 }
 
 export async function loadOrgTick(deps: PaceDeps, orgId: string): Promise<OrgTick | null> {
-  const { slots, settings } = await slotsFor(deps, orgId);
+  const { slots, booking } = await slotsFor(deps, orgId);
   if (slots <= 0) return null;
   const candidates = await dueAiCallTouches(deps.db, orgId, deps.now, PLACE_CANDIDATES_PER_ORG);
   if (candidates.length === 0) return null;
@@ -131,16 +137,35 @@ export async function loadOrgTick(deps: PaceDeps, orgId: string): Promise<OrgTic
     }
     return null;
   }
-  return { slots, candidates, plans, fresh: (id) => fresh.get(core(id)), newActivity, client, settings };
+  let calendar: Promise<OfferCalendar> | null = null;
+  const readCalendar = (): Promise<OfferCalendar> => (calendar ??= readOfferCalendar(client, { booking, now: deps.now }));
+  return { slots, candidates, plans, fresh: (id) => fresh.get(core(id)), newActivity, client, booking, calendar: readCalendar };
+}
+
+/** M-2: the owner zones already warned about (org, owner, zone), so a refused zone is logged once per process, not per tick. */
+const warnedZones = new Set<string>();
+const MAX_WARNED_ZONES = 1_000;
+
+function warnRefusedZone(deps: PaceDeps, orgId: string, owner: OwnerUser): void {
+  if (owner.zoneRefused === null) return;
+  const key = `${orgId}:${owner.sfUserId}:${owner.zoneRefused}`;
+  if (warnedZones.has(key) || warnedZones.size >= MAX_WARNED_ZONES) return;
+  warnedZones.add(key);
+  // A Salesforce time zone key (a picklist value), never record content.
+  deps.log.warn({ orgId, ownerSfUserId: owner.sfUserId, zone: owner.zoneRefused, usedZone: owner.timeZone }, 'ai_call.place: the appointment owner\'s Salesforce time zone is not usable; business hours use the default zone');
 }
 
 /**
- * Plan 1D: the appointment times this touch's trigger offers, read now (calendars change after approval). It only reads
- * Salesforce and never throws; a missing offer never stops the call. Booking switched off is not worth a log line; any other
+ * Plan 1D: the appointment times this touch's trigger offers, read now (calendars change after approval): the tick's one
+ * calendar read, less the times other AI calls have booked with the owner that are not on the calendar yet (I-4). The
+ * Salesforce part never throws; a missing offer never stops the call. Booking switched off is not worth a log line; any other
  * empty offer is logged by its note only, never record content.
  */
 export async function tickOffer(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Promise<Offer> {
-  const offer = await offerSlots(tick.client, { booking: tick.settings.aiCallBooking, now: deps.now });
+  const cal = await tick.calendar();
+  if (cal.kind === 'read') warnRefusedZone(deps, c.orgId, cal.owner);
+  const booked = cal.kind === 'read' ? await bookedNotOnCalendar(deps.db, { orgId: c.orgId, ownerSfUserId: cal.owner.sfUserId, now: deps.now, until: cal.until }) : [];
+  const offer = offerFrom(cal, { booking: tick.booking, now: deps.now, booked });
   if (offer.note && offer.note !== 'booking_off') deps.log.info({ orgId: c.orgId, touchId: c.touchId, slots: offer.note }, 'ai_call.place: no appointment times offered');
   return offer;
 }
