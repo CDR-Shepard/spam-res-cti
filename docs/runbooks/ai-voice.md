@@ -41,7 +41,8 @@ outreach-api then asks `@cti/api` (this service) to place each call, paced and w
 - **Opens by saying it is an AI assistant** calling for the company, on a recorded line (the text transcript is kept). If anyone asks, it says it is an AI. It never claims to be human.
 - **Qualifies** the seller: motivation, timeline, condition, price expectations, decision makers, occupancy. It **never makes an offer or names a price.**
 - **Transfers to a person** if the seller wants one or is qualified: the call rings the record owner's softphone (or the person who approved the plan if the owner is not mapped).
-- **Honours "stop calling me"** immediately: it writes the number to the shared opt-out list, says goodbye, and hangs up. The CTI dialer respects the same list.
+- **Honours "stop calling me"** immediately: it writes the number to the shared opt-out list, says goodbye, and hangs up. The CTI dialer respects the same list. On a **test or practice call** (your own phone, §5 and §16) it says goodbye, hangs up and records `do_not_call`, but never opts your test number out.
+- **Books an appointment** (plan 1D) when the trigger offers times: a phone call or a walkthrough with the appointment owner (§15).
 - **Leaves a voicemail** if a machine answers, and promises a callback if no person picks up the transfer within 25 seconds.
 - Stores the text transcript, a summary, the qualification answers and the outcome. **No call audio is stored.**
 
@@ -204,8 +205,8 @@ If an AI number had been assigned to a rep before you moved it, that rep's click
 5. **Answer and listen.** The first thing the agent says must be that it is an AI assistant calling for the company, on a recorded line. Fail the test if it does not say so.
 6. **Talk to it** for a minute as a seller. Say you might sell, the house needs work, and you want about a certain amount. It should ask follow-up questions and must not name a price or make an offer.
 7. **Test the transfer:** say "Can I talk to a real person?" Your phone should go quiet and the softphone you have open should ring as an incoming call; under the name and number the ring screen shows **"AI transfer — asked for a person"**. Answer it in the softphone and confirm audio both ways, then hang up. (The call goes to the person who started it, because a test call has no record owner.)
-8. **Test the opt-out:** start a second test call, answer, and say "Stop calling me." The agent should say a short goodbye and hang up within a few seconds. Start a **third** test call from the card: it must be refused with "Not called: they opted out of calls". That proves the opt-out is live.
-9. **Delete the test opt-out row** so your own number can be called again. Get the public database URL first. `$PUB` is a live credential: never print or share it:
+8. **Test the do-not-call goodbye:** start a second test call, answer, and say "Stop calling me." The agent should apologise, say a short goodbye and hang up within a few seconds. The call is recorded `do_not_call`, but **your test number is not opted out** (plan 1D: a test or practice call rings an admin's own phone, so it never suppresses it). Start a **third** test call from the card: it must be placed and ring as usual. The opt-out write itself is proved on a real call (§6) and by the automated tests; a real call's "stop calling me" always writes the opt-out.
+9. **Only if your test number was opted out** (by a test call before plan 1D, by a real call to it, or by hand), delete that opt-out so it can be called again; otherwise skip this step. Get the public database URL first. `$PUB` is a live credential: never print or share it:
 
    ```bash
    PUB=$(railway variables -s Postgres --kv | grep '^DATABASE_PUBLIC_URL=' | cut -d= -f2-)
@@ -223,7 +224,7 @@ If an AI number had been assigned to a rep before you moved it, that rep's click
    echo "DELETE FROM opt_outs WHERE org_id = :'org' AND e164 = :'num' AND source = 'ai_call' RETURNING id, org_id, e164, source, created_at;" | psql "$PUB" -v org='<org uuid>' -v num='+15125550100'
    ```
 
-   Expected: exactly one row returned. Zero rows means either the opt-out was not written (the AI "stop calling me" path is broken: stop and investigate), or your number already had an opt-out from another source, which the AI call does not overwrite. Never run the delete without the `org_id` and `source = 'ai_call'` guards, or you could remove a real opt-out.
+   Expected: one row returned when it was opted out by an AI call; zero rows when it never was (nothing to clear), or when its opt-out came from another source, which this delete leaves alone. Never run the delete without the `org_id` and `source = 'ai_call'` guards, or you could remove a real opt-out.
 
 10. Read the three calls in SQL (`$PUB` as above), because test calls have no campaign row in outreach-web:
 
@@ -231,7 +232,7 @@ If an AI number had been assigned to a rep before you moved it, that rep's click
     echo "SELECT status, outcome, summary FROM ai_calls WHERE is_test ORDER BY created_at DESC LIMIT 3;" | psql "$PUB"
     ```
 
-    Newest first: the third call is `blocked` and the second is `do_not_call`. Smoke test passes when: disclosure heard, no price named, transfer rang the softphone, opt-out written and honoured, and the row was deleted.
+    Newest first: the third call is placed (`completed` once you hang up) and the second is `do_not_call`. Smoke test passes when: disclosure heard, no price named, transfer rang the softphone, "stop calling me" ended the call as `do_not_call`, and the third call still rang your phone.
 
 ## 6. A real, consent-gated call (from a campaign)
 
@@ -352,6 +353,19 @@ Two more cases:
 - `result: retry:salesforce_error` repeatedly: the integration connection's token expired and outreach-api could not refresh it. Reconnect Salesforce in outreach-web Settings → Connections.
 - Results show "could not check Salesforce for new activity": the integration user cannot read Task or Event (see `outreach-sf-campaigns.md` §AI call campaigns). Nobody is called until it can.
 
+**The agent never offers appointment times** (plan 1D). The trigger carried no slots. outreach-api logs one line per call that was offered none, with the reason in its `slots` field (never record content):
+
+- `ai_call.place: no appointment times offered` for a campaign call, `ai_call.practice: no appointment times offered` for a practice call.
+
+| `slots` | Meaning and fix |
+|---|---|
+| `no_owner` | Nobody on the appointment owner list is an active Salesforce user. Settings → Connections → AI calls → "Appointments go to" (or `AI_CALL_DEFAULT_SPECIALISTS` on outreach-api when the tenant saved no list) |
+| `no_free_time` | The owner's calendar has no free time in the hours and days set on the card (or every time is taken by Events and other AI bookings) |
+| `salesforce_error` | Reading the owner's User or Events failed. The connected user must see the owner's calendar (`outreach-sf-campaigns.md` §Appointments and Salesforce write-back, step 5) |
+| `invalid_slots` | A bug: the computed times failed the contract. Report it |
+
+Booking switched off on the card logs nothing. Two more cases: a trigger re-sent with the same key after a lost answer goes out **without** slots by design (CF-13), so that one call offers none; and an old `@cti/api` refuses a trigger with slots (`HTTP 400 invalid_body` in the `ai_call.place` line) until it is deployed (§15).
+
 **The AI says nothing (or gibberish), then hangs up.** OpenAI never confirmed the voice session, so the call ends within about 5 seconds of connecting. Deploy logs show `ai-voice bridge: session not configured, ending the call` (field `why`: OpenAI's error message, or `timeout`), then `ai-voice: conversation ended` with reason `error` and detail `session not configured: …`. Usually a bad model or reasoning setting:
 
 - Check `AI_VOICE_MODEL` and `AI_VOICE_REASONING`. Try `AI_VOICE_MODEL=gpt-realtime` with `AI_VOICE_REASONING` unset, then place a test call. Reasoning is only sent for `gpt-realtime-2*` models, so it cannot break `gpt-realtime`.
@@ -387,5 +401,50 @@ So about **$0.12 per minute plus $0.0075 per call** ($0.10 + $0.014 + $0.0044 = 
 
 - **AI calls only to people with the consent checkbox ticked.** The checkbox is the record that the person agreed to calls from an AI assistant. Tick it only when they actually did (a reply, a web form, an inbound call, or a rep confirming on the phone) and record the source.
 - **Disclosure at the start of every call.** The agent says it is an AI assistant calling for the company on a recorded line. Do not change the prompt to remove it.
-- **Do-not-call is honoured everywhere.** An opt-out, blocked number, or federal DNC listing stops the AI call, and "stop calling me" on an AI call adds the number to the shared opt-out list the dialer also uses.
+- **Do-not-call is honoured everywhere.** An opt-out, blocked number, or federal DNC listing stops the AI call, and "stop calling me" on a real AI call adds the number to the shared opt-out list the dialer also uses (a test or practice call to an admin's own phone records it without opting that phone out).
 - **Consult counsel on state-specific rules.** Federal and state laws on AI and artificial-voice calls, call recording and two-party consent, and telemarketing hours differ by state and are changing. Have your attorney confirm the disclosure wording, the consent capture wording and which states you may AI-call before you scale up. This runbook is operations guidance, not legal advice.
+
+## 15. Appointments and `book_appointment` (plan 1D)
+
+- **When it is offered.** Only when the trigger carries appointment times (`target.slots`), which outreach-api computes at the moment of the call from the appointment owner's Salesforce calendar (the first active user on the AI calls card's "Appointments go to" list; production: Grant Golden). With no times, the agent has no `book_appointment` tool, no booking section and no `appointment_set` outcome: it behaves exactly as before 1D. Times are never part of the plan text; cti-api renders them in their own section, after the plan.
+- **What it offers.** Up to two times at a time from at most six per kind (two a day): a **phone call** (15 minutes, Mon–Fri, starts every 30 minutes 10:00–17:30 PT, at least 2 hours ahead, 2 business days) and an **in-person walkthrough** (60 minutes, starts on the hour 9:00–16:00 PT, at least 20 hours ahead, 5 business days, 30 minutes' travel buffer). The card's settings change these. Times are said in the seller's zone (the number dialed; on a practice call, the record's phone), with the specialist's own time added only when it differs.
+- **Holidays are not modelled.** Only an **all-day Event** on the owner's calendar blocks a day. Put company holidays on the owner's calendar as all-day Events.
+- **Walkthrough address rule.** Before booking a walkthrough the agent confirms the property address with the seller (`address_confirmed: true`). If it is a different property it does not book a walkthrough: it offers the phone call instead (or a callback when only walkthroughs are on offer).
+- **Booking.** `book_appointment` takes an offered `slot_id` (p1–p9, w1–w9). It is refused, and the agent offers the other time, when another AI call already holds that owner's time (overlap, a walkthrough's buffer included; test and practice bookings never block a real one). It stores `ai_calls.appointment` and sets the outcome **`appointment_set`** ("Appointment set") at once.
+- **What keeps it.** A booked call keeps `appointment_set` if the caller hangs up, the line goes quiet, or the call hits its time limit. A transfer after booking keeps the booking (`qualified_transferred` / `transfer_failed`; the rep can cancel). "Stop calling me", wrong number, or an `end_call` with another decision (not interested, a callback instead) replaces it and frees the time. `end_call(appointment_set)` with nothing stored is recorded as a callback with the line "The agent ended as booked, but no appointment was saved — call them back."
+- **Salesforce.** cti-api never writes the appointment to Salesforce. outreach-api's write-back creates the Event (and converts a Lead) after the call: `outreach-sf-campaigns.md` §Appointments and Salesforce write-back.
+- **Deploy order.** Migration `0054_ai_call_booking.sql` must be applied before the new `@cti/api` runs: every `ai_calls` insert writes `offered_slots` and `practice`. Deploy `@cti/api` before or together with outreach-api (one commit): its trigger contract is strict, and an old `@cti/api` answers `HTTP 400 invalid_body` to a trigger carrying `context` or slots with `blockStart`/`blockEnd`. That trigger is retried with the same key, so the window is safe.
+
+## 16. Practice calls (plan 1D)
+
+An admin can ring their own test number **as if it were a real seller**: outreach-web → the campaign → a card on the **Call plans** board (proposed or approved plan) → pick a **Test number** → **Practice call to my phone**. "You'll hear exactly what the seller would hear. Nothing is written to Salesforce."
+
+How it differs from a test call (§5):
+
+| | Test call | Practice call |
+|---|---|---|
+| Record | none | the real Salesforce record (name, address, notes), read by `@cti/api` with the integration connection |
+| Plan | none | the card's plan, rendered and checked exactly as for the real call (a plan the voice agent cannot be given is refused, in words) |
+| "This is a test call" line | spoken | **not** spoken: you hear the seller's version |
+| Appointment times | none | the owner's real free times, offered as on a real call |
+| "Their local time right now" | your number's zone | the record's phone's zone |
+| Transfer | rings you | rings **you** (the admin who started it), never the record owner |
+| Consent | not needed | not needed (it never rings the seller) |
+| Salesforce Task, results, write-back | none | none |
+
+A practice call **never books in Salesforce, never converts a Lead and never writes anything**: it claims no touch (so the results never count it and no write-back is queued), and the write-back refuses any `is_test` call before a single Salesforce request. A time it books lands only on `ai_calls.appointment` ("Would have booked …" in the campaign's **Practice calls** list). A practice call is refused a time a real call holds, and never blocks one. The only Salesforce traffic is read-only: the record load in `@cti/api`, and the owner's User and Event reads for the times. "Stop calling me" on a practice call ends it as `do_not_call` without opting your number out (§5).
+
+The campaign page lists the latest 20 practice calls above the results (admins only): time, lead, outcome, "Would have booked: Phone call Wed Oct 7, 11:00 AM" and the transcript. Refusals show in words ("Not placed: …"); cti-api is gated on its test branch (an admin, a number on `AI_VOICE_TEST_NUMBERS`).
+
+## 17. New `ai_calls` columns (plan 1D, migration 0054)
+
+| Column | What it holds |
+|---|---|
+| `offered_slots` | The times the trigger offered (jsonb array, `[]` when none) |
+| `appointment` | The booking the agent stored (slot id, kind, start/end, owner, address confirmed, note, booked at, and the block with a walkthrough's buffer), or null |
+| `practice` | True for a practice call (always together with `is_test`) |
+
+```bash
+echo "SELECT created_at, outcome, practice, jsonb_array_length(offered_slots) AS offered, appointment->>'start' AS booked FROM ai_calls WHERE org_id = :'org' ORDER BY created_at DESC LIMIT 10;" | psql "$PUB" -v org='<org uuid>'
+```
+
