@@ -411,3 +411,6 @@ export type SfWriteRow = typeof sfWrites.$inferSelect;
 export type CampaignSelectionRow = typeof campaignSelections.$inferSelect;
 export type CallResearchRow = typeof callResearch.$inferSelect;
 export type CallPlanRow = typeof callPlans.$inferSelect;
+
+// Plan 1D tables (migration 0055): the AI call write-back and practice calls.
+export * from './schema-outreach-ai-calls.js';
