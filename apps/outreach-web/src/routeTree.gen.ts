@@ -14,6 +14,7 @@ import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
 import { Route as AuthenticatedReviewRouteImport } from './routes/_authenticated/review'
 import { Route as AuthenticatedTeamRouteImport } from './routes/_authenticated/team'
+import { Route as AuthenticatedTestRecordRouteImport } from './routes/_authenticated/test-record'
 import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
 import { Route as AuthenticatedCampaignsIndexRouteImport } from './routes/_authenticated/campaigns.index'
 import { Route as AuthenticatedCampaignsCampaignIdRouteImport } from './routes/_authenticated/campaigns.$campaignId'
@@ -42,6 +43,11 @@ const AuthenticatedReviewRoute = AuthenticatedReviewRouteImport.update({
 const AuthenticatedTeamRoute = AuthenticatedTeamRouteImport.update({
   id: '/team',
   path: '/team',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedTestRecordRoute = AuthenticatedTestRecordRouteImport.update({
+  id: '/test-record',
+  path: '/test-record',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
 const AuthCallbackRoute = AuthCallbackRouteImport.update({
@@ -79,6 +85,7 @@ export interface FileRoutesByFullPath {
   '/sign-in': typeof SignInRoute
   '/review': typeof AuthenticatedReviewRoute
   '/team': typeof AuthenticatedTeamRoute
+  '/test-record': typeof AuthenticatedTestRecordRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/campaigns/$campaignId': typeof AuthenticatedCampaignsCampaignIdRoute
   '/campaigns/new': typeof AuthenticatedCampaignsNewRoute
@@ -89,6 +96,7 @@ export interface FileRoutesByTo {
   '/sign-in': typeof SignInRoute
   '/review': typeof AuthenticatedReviewRoute
   '/team': typeof AuthenticatedTeamRoute
+  '/test-record': typeof AuthenticatedTestRecordRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/': typeof AuthenticatedIndexRoute
   '/campaigns/$campaignId': typeof AuthenticatedCampaignsCampaignIdRoute
@@ -102,6 +110,7 @@ export interface FileRoutesById {
   '/sign-in': typeof SignInRoute
   '/_authenticated/review': typeof AuthenticatedReviewRoute
   '/_authenticated/team': typeof AuthenticatedTeamRoute
+  '/_authenticated/test-record': typeof AuthenticatedTestRecordRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/campaigns/$campaignId': typeof AuthenticatedCampaignsCampaignIdRoute
@@ -116,6 +125,7 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/review'
     | '/team'
+    | '/test-record'
     | '/auth/callback'
     | '/campaigns/$campaignId'
     | '/campaigns/new'
@@ -126,6 +136,7 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/review'
     | '/team'
+    | '/test-record'
     | '/auth/callback'
     | '/'
     | '/campaigns/$campaignId'
@@ -138,6 +149,7 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/_authenticated/review'
     | '/_authenticated/team'
+    | '/_authenticated/test-record'
     | '/auth/callback'
     | '/_authenticated/'
     | '/_authenticated/campaigns/$campaignId'
@@ -189,6 +201,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedTeamRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/test-record': {
+      id: '/_authenticated/test-record'
+      path: '/test-record'
+      fullPath: '/test-record'
+      preLoaderRoute: typeof AuthenticatedTestRecordRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/auth/callback': {
       id: '/auth/callback'
       path: '/auth/callback'
@@ -230,6 +249,7 @@ declare module '@tanstack/react-router' {
 interface AuthenticatedRouteChildren {
   AuthenticatedReviewRoute: typeof AuthenticatedReviewRoute
   AuthenticatedTeamRoute: typeof AuthenticatedTeamRoute
+  AuthenticatedTestRecordRoute: typeof AuthenticatedTestRecordRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedCampaignsCampaignIdRoute: typeof AuthenticatedCampaignsCampaignIdRoute
   AuthenticatedCampaignsNewRoute: typeof AuthenticatedCampaignsNewRoute
@@ -240,6 +260,7 @@ interface AuthenticatedRouteChildren {
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedReviewRoute: AuthenticatedReviewRoute,
   AuthenticatedTeamRoute: AuthenticatedTeamRoute,
+  AuthenticatedTestRecordRoute: AuthenticatedTestRecordRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedCampaignsCampaignIdRoute: AuthenticatedCampaignsCampaignIdRoute,
   AuthenticatedCampaignsNewRoute: AuthenticatedCampaignsNewRoute,

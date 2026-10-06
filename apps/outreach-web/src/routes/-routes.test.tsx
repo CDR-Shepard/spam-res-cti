@@ -172,6 +172,7 @@ describe('outreach pages', () => {
     ['/campaigns/11111111-1111-4111-8111-111111111111'],
     ['/settings/connections'],
     ['/review'],
+    ['/test-record'],
   ])('%s sits under the authenticated layout (signed-out visits go to sign-in)', async (path) => {
     const router = renderAppAt(path);
     await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in'));
@@ -183,8 +184,22 @@ describe('outreach pages', () => {
     await router.navigate({ to: '/campaigns' });
     expect(await screen.findByRole('heading', { name: 'Campaigns' })).toBeInTheDocument();
     const nav = screen.getByRole('navigation', { name: 'Main' });
-    expect(within(nav).getAllByRole('link').map((a) => a.textContent)).toEqual(['Dashboard', 'Campaigns', 'Needs review', 'Team', 'Settings']);
+    expect(within(nav).getAllByRole('link').map((a) => a.textContent)).toEqual(['Dashboard', 'Campaigns', 'Needs review', 'Team', 'Test a record', 'Settings']);
     expect(router.state.matches.map((m) => m.routeId)).toEqual(['__root__', '/_authenticated', '/_authenticated/campaigns/']);
+  });
+
+  it('/test-record keeps a uuid ?id= and drops anything else', async () => {
+    const router = await signedInAppAt({ '/api/record-tests': { items: [] } });
+    await router.navigate({ to: '/test-record', search: { id: 'not-a-uuid' } as never });
+    expect(await screen.findByRole('heading', { name: 'Test a record' })).toBeInTheDocument();
+    expect(await screen.findByText('No tests yet.')).toBeInTheDocument();
+    // The bad id never reaches the page: no test is read and none is shown.
+    expect(vi.mocked(fetch).mock.calls.map(([u]) => String(u)).filter((u) => u.includes('not-a-uuid'))).toEqual([]);
+    expect(screen.queryByText('Loading the test…')).not.toBeInTheDocument();
+    const id = '55555555-5555-4555-8555-555555555555';
+    await router.navigate({ to: '/test-record', search: { id } });
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.map(([u]) => String(u))).toContain(`/api/record-tests/${id}`));
+    expect(router.state.matches.map((m) => m.routeId)).toEqual(['__root__', '/_authenticated', '/_authenticated/test-record']);
   });
 
   it('turns the Salesforce callback query into a message on the connections page', async () => {

@@ -2,7 +2,8 @@ import { ApiError } from '@cti/contracts';
 import type { z } from 'zod';
 
 export class ApiRequestError extends Error {
-  constructor(public readonly status: number, public readonly code: string, message: string) {
+  /** `details` is the error envelope's own (e.g. a 429's `retryAt`), unparsed. */
+  constructor(public readonly status: number, public readonly code: string, message: string, public readonly details?: unknown) {
     super(message);
     this.name = 'ApiRequestError';
   }
@@ -50,7 +51,7 @@ async function request(path: string, init: RequestInit): Promise<Response> {
   if (!res.ok) {
     const body: unknown = await res.json().catch(() => null);
     const parsed = ApiError.safeParse(body);
-    throw new ApiRequestError(res.status, parsed.success ? parsed.data.code : 'UNKNOWN', parsed.success ? parsed.data.error : `HTTP ${res.status}`);
+    throw new ApiRequestError(res.status, parsed.success ? parsed.data.code : 'UNKNOWN', parsed.success ? parsed.data.error : `HTTP ${res.status}`, parsed.success ? parsed.data.details : undefined);
   }
   return res;
 }

@@ -23,6 +23,10 @@ describe('api', () => {
     stubFetch(403, { error: 'Admin access required', code: 'ADMIN_ONLY', requestId: 'r1' });
     await expect(api('/api/x', z.any())).rejects.toMatchObject({ name: 'ApiRequestError', status: 403, code: 'ADMIN_ONLY' });
   });
+  it("keeps the error envelope's details (a 429's retryAt)", async () => {
+    stubFetch(429, { error: 'Slow down', code: 'RATE_LIMITED', details: { retryAt: '2026-10-06T18:00:00.000Z' } });
+    await expect(api('/api/x', z.any())).rejects.toMatchObject({ status: 429, details: { retryAt: '2026-10-06T18:00:00.000Z' } });
+  });
   it('apiEmpty accepts 204', async () => {
     stubFetch(204, undefined);
     await expect(apiEmpty('/api/auth/logout', { method: 'POST' })).resolves.toBeUndefined();

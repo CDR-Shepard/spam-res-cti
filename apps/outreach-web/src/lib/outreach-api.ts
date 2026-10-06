@@ -6,6 +6,7 @@ import {
   AiCallResultsResponse,
   AiCallTranscript,
   AuthProviders,
+  BrowserTokenResponse,
   Campaign,
   CandidatePage,
   CampaignPlanResponse,
@@ -18,6 +19,8 @@ import {
   ListViewsResponse,
   NeedsReviewResponse,
   PracticeCallsResponse,
+  RecordTest,
+  RecordTestsResponse,
   SelectionResponse,
   StartConnectionResponse,
   TestCallResponse,
@@ -30,6 +33,7 @@ import {
   type FieldMap,
   type PracticeCallRequest,
   type PreviewRequest,
+  type RecordTestCallRequest,
   type ReviewDecision,
   type SelectionChange,
   type SfObject,
@@ -64,6 +68,8 @@ export const outreachKeys = {
   practiceCallLists: ['campaigns', 'practice-calls'] as const,
   practiceCalls: (campaignId: string) => ['campaigns', 'practice-calls', campaignId] as const,
   writebackReadiness: ['settings', 'ai-calls', 'readiness'] as const,
+  recordTests: ['record-tests'] as const,
+  recordTest: (id: string) => ['record-tests', id] as const,
 };
 
 const seg = (value: string): string => encodeURIComponent(value);
@@ -230,4 +236,34 @@ export function retryWriteback(aiCallId: string): Promise<void> {
 /** Admin only: can the connected Salesforce user write call results back and convert a Lead that books? */
 export function writebackReadiness(): Promise<WritebackReadiness> {
   return api('/api/settings/ai-calls/readiness', WritebackReadiness);
+}
+
+const RecordTestCreated = z.object({ id: z.string().uuid() });
+/** POST /api/record-tests/:id/calls: the row's id and cti-api's answer (placed, or why not). */
+export const RecordTestCallResponse = z.object({ callId: z.string().uuid(), response: TestCallResponse });
+export type RecordTestCallResponse = z.infer<typeof RecordTestCallResponse>;
+
+/** Admin only (plan 1E): preview how the AI would call this Lead or Opportunity (an Id or a link); answers 202 at once. */
+export function createRecordTest(record: string): Promise<{ id: string }> {
+  return api('/api/record-tests', RecordTestCreated, { method: 'POST', body: json({ record }) });
+}
+
+/** Admin only: the tenant's latest 20 record tests. */
+export function recordTests(): Promise<RecordTestsResponse> {
+  return api('/api/record-tests', RecordTestsResponse);
+}
+
+/** Admin only: one record test, its preview and its calls. */
+export function recordTest(id: string): Promise<RecordTest> {
+  return api(`/api/record-tests/${seg(id)}`, RecordTest);
+}
+
+/** Admin only: run a ready preview to a test number, or to the browser registered under `identity`. */
+export function recordTestCall(id: string, body: RecordTestCallRequest): Promise<RecordTestCallResponse> {
+  return api(`/api/record-tests/${seg(id)}/calls`, RecordTestCallResponse, { method: 'POST', body: json(body) });
+}
+
+/** Admin only: an incoming-only Voice token for one "Talk in browser" run. Never stored, logged or cached. */
+export function browserToken(): Promise<BrowserTokenResponse> {
+  return api('/api/record-tests/browser-token', BrowserTokenResponse, { method: 'POST' });
 }

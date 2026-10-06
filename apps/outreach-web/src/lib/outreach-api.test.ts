@@ -3,6 +3,7 @@ import { ApiRequestError } from './api';
 import * as outreach from './outreach-api';
 import { CAMPAIGN_ID, LIST_VIEW_ID, campaign, connection, fieldMap, preview } from '../test/outreach-fixtures';
 import { respond, StubResponse, stubApi } from '../test/stub-api';
+import { IDENTITY, LEAD_ID, TEST_ID, recordTest } from '../test/record-test-fixtures';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -33,6 +34,11 @@ const cases: Case[] = [
   { name: 'getAiCallResults (cursor)', call: () => outreach.getAiCallResults(CAMPAIGN_ID, 'c+1'), route: `GET /api/campaigns/${CAMPAIGN_ID}/ai-calls?cursor=c%2B1`, response: { items: [], nextCursor: null } },
   { name: 'getAiCallTranscript', call: () => outreach.getAiCallTranscript(AI_CALL_ID), route: `GET /api/ai-calls/${AI_CALL_ID}/transcript`, response: { aiCallId: AI_CALL_ID, lines: [] } },
   { name: 'getAiAvailability', call: () => outreach.getAiAvailability(), route: 'GET /api/ai-calls/availability', response: { available: true, testNumbers: ['+15125550111'] } },
+  { name: 'createRecordTest', call: () => outreach.createRecordTest(LEAD_ID), route: 'POST /api/record-tests', response: { id: TEST_ID }, body: { record: LEAD_ID } },
+  { name: 'recordTests', call: () => outreach.recordTests(), route: 'GET /api/record-tests', response: { items: [] } },
+  { name: 'recordTest', call: () => outreach.recordTest(TEST_ID), route: `GET /api/record-tests/${TEST_ID}`, response: recordTest() },
+  { name: 'recordTestCall', call: () => outreach.recordTestCall(TEST_ID, { mode: 'phone', to: '+15125550111' }), route: `POST /api/record-tests/${TEST_ID}/calls`, response: { callId: AI_CALL_ID, response: { result: 'placed', aiCallId: AI_CALL_ID } }, body: { mode: 'phone', to: '+15125550111' } },
+  { name: 'browserToken', call: () => outreach.browserToken(), route: 'POST /api/record-tests/browser-token', response: { token: 'jwt', identity: IDENTITY, expiresAt: '2026-10-06T18:00:00.000Z' } },
   { name: 'startTestCall', call: () => outreach.startTestCall('+15125550111'), route: 'POST /api/ai-calls/test', response: { result: 'placed', aiCallId: AI_CALL_ID }, body: { to: '+15125550111' } },
 ];
 
@@ -56,5 +62,10 @@ describe('outreach-api', () => {
     const err = await outreach.previewCampaign({ sfObject: 'Lead', source: { kind: 'soql', soql: 'SELECT Id FORM Lead' } }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiRequestError);
     expect(err).toMatchObject({ status: 422, code: 'INVALID_SOURCE', message: "unexpected token: 'FORM'" });
+  });
+
+  it('keys the record tests under one prefix, so a new test refreshes the list', () => {
+    expect(outreach.outreachKeys.recordTests).toEqual(['record-tests']);
+    expect(outreach.outreachKeys.recordTest(TEST_ID)).toEqual(['record-tests', TEST_ID]);
   });
 });
