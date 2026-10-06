@@ -120,6 +120,63 @@ describe.skipIf(!pgLane)('collectAiCallResults (real Postgres)', () => {
     expect(linked).toEqual([]);
   });
 
+  const writebacksOf = (aiCallId: string) => db.select().from(schema.aiCallWritebacks).where(eq(schema.aiCallWritebacks.aiCallId, aiCallId));
+
+  it('9: completed / appointment_set: handed off, and one pending write-back row in the same step', async () => {
+    const lead = await placed('completed', 'appointment_set');
+    await collectAiCallResults(db, NOW, quiet);
+    expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'handed_off' });
+    expect(await writebacksOf(lead.aiCallId)).toEqual([
+      expect.objectContaining({
+        orgId: lead.orgId,
+        touchId: lead.touchId,
+        enrollmentId: lead.enrollmentId,
+        sfObject: 'Lead',
+        sfRecordId: lead.sfRecordId,
+        outcome: 'appointment_set',
+        status: 'pending',
+        attempts: 0,
+        nextAttemptAt: NOW,
+        lastError: null,
+      }),
+    ]);
+  });
+
+  it('10: running the tick twice still leaves one row', async () => {
+    const lead = await placed('completed', 'not_interested');
+    await collectAiCallResults(db, NOW, quiet);
+    await db.update(schema.touches).set({ countedAt: null }).where(eq(schema.touches.id, lead.touchId));
+    await collectAiCallResults(db, new Date(NOW.getTime() + 60_000), quiet);
+    expect(await writebacksOf(lead.aiCallId)).toHaveLength(1);
+  });
+
+  it('11: voicemail enqueues nothing', async () => {
+    const lead = await placed('completed', 'voicemail');
+    await collectAiCallResults(db, NOW, quiet);
+    expect(await writebacksOf(lead.aiCallId)).toEqual([]);
+  });
+
+  it("12: the tenant's aiCallWriteback false: the row is born skipped with 'write-back is off'", async () => {
+    const lead = await placed('completed', 'qualified_callback', { settings: { aiCallWriteback: false } });
+    await collectAiCallResults(db, NOW, quiet);
+    expect(await writebacksOf(lead.aiCallId)).toEqual([expect.objectContaining({ status: 'skipped', lastError: 'write-back is off' })]);
+  });
+
+  it('13: an is_test call seeded with a touch: no row', async () => {
+    const lead = await placed('completed', 'appointment_set');
+    await db.update(schema.aiCalls).set({ isTest: true }).where(eq(schema.aiCalls.id, lead.aiCallId));
+    await collectAiCallResults(db, NOW, quiet);
+    expect(await writebacksOf(lead.aiCallId)).toEqual([]);
+  });
+
+  it('14: a practice call (is_test, practice, no touch) that booked: no row', async () => {
+    const base = await seedAiCallCampaign(db, 'active');
+    const admin = await seedUser(db, base.orgId);
+    const practice = await seedAiCall(db, base.orgId, admin, { isTest: true, practice: true, status: 'completed', outcome: 'appointment_set', endedAt: NOW });
+    await collectAiCallResults(db, NOW, quiet);
+    expect(await writebacksOf(practice)).toEqual([]);
+  });
+
   it('a retry is not planned while another touch of the lead is still open (CF-3: an old dialing touch of another plan does not count)', async () => {
     const lead = await placed('completed', 'voicemail');
     await db.insert(schema.touches).values({ orgId: lead.orgId, enrollmentId: lead.enrollmentId, seq: 5, channel: 'ai_call', status: 'planned', dueAt: NOW, callPlanId: lead.planId });

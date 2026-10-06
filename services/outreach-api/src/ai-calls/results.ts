@@ -12,7 +12,8 @@ import { inArray, sql } from 'drizzle-orm';
 import { AiCallOutcome } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import type { RunnerLogger } from '../jobs/boss.js';
-import { outreachSettings } from '../settings.js';
+import { outreachSettings, type OutreachSettings } from '../settings.js';
+import { enqueueWritebackSql } from '../writeback/store.js';
 import { nextStepFor, TERMINAL_AI_CALL_STATUSES, type NextStep } from './outcomes.js';
 import { nextAttemptAt } from './pacing-rules.js';
 import { finishAiEnrollment } from './touches.js';
@@ -28,6 +29,7 @@ export interface ResultCounts {
 
 interface Finished {
   touch_id: string;
+  ai_call_id: string;
   enrollment_id: string;
   call_plan_id: string | null;
   requested_by: string | null;
@@ -43,7 +45,7 @@ const errName = (err: unknown): string => (err instanceof Error ? err.name : typ
 
 async function finishedCalls(db: Db): Promise<Finished[]> {
   const result = await db.execute(sql`
-    select t.id as touch_id, t.enrollment_id, t.call_plan_id, t.requested_by, t.org_id, a.outcome, r.phones,
+    select t.id as touch_id, t.ai_call_id, t.enrollment_id, t.call_plan_id, t.requested_by, t.org_id, a.outcome, r.phones,
            (select count(*)::int from touches x where x.enrollment_id = t.enrollment_id and x.channel = 'ai_call' and x.status = 'sent') as answered
     from touches t
     join ai_calls a on a.id = t.ai_call_id and a.org_id = t.org_id and a.is_test = false
@@ -101,8 +103,11 @@ async function applyStep(tx: Db, f: Finished, step: NextStep, now: Date): Promis
   }
 }
 
-/** One finished call in one transaction: counted once, then the step. Returns what happened to the enrollment, if anything. */
-async function collectOne(db: Db, f: Finished, maxAttempts: number, now: Date): Promise<keyof ResultCounts | null> {
+/**
+ * One finished call in one transaction: counted once, its Salesforce write-back enqueued (plan 1D; one row per call, ever),
+ * then the step. Returns what happened to the enrollment, if anything.
+ */
+async function collectOne(db: Db, f: Finished, settings: OutreachSettings, now: Date): Promise<keyof ResultCounts | null> {
   const outcome = AiCallOutcome.safeParse(f.outcome);
   return db.transaction(async (tx) => {
     const counted = await tx.execute(sql`
@@ -111,24 +116,25 @@ async function collectOne(db: Db, f: Finished, maxAttempts: number, now: Date): 
     if (rows<unknown>(counted).length === 0) return null;
     await tx.execute(sql`
       update campaign_enrollments set touches_done = touches_done + 1, updated_at = ${iso(now)} where id = ${f.enrollment_id}::uuid`);
-    const step = nextStepFor(outcome.success ? outcome.data : null, f.answered, maxAttempts);
+    await tx.execute(enqueueWritebackSql({ touchId: f.touch_id, now, writebackOn: settings.aiCallWriteback }));
+    const step = nextStepFor(outcome.success ? outcome.data : null, f.answered, settings.aiCallMaxAttempts);
     return applyStep(tx as unknown as Db, f, step, now);
   });
 }
 
-async function maxAttemptsByOrg(db: Db, orgIds: string[]): Promise<Map<string, number>> {
+async function settingsByOrg(db: Db, orgIds: string[]): Promise<Map<string, OutreachSettings>> {
   if (orgIds.length === 0) return new Map();
   const orgs = await db.select({ id: schema.organizations.id, settings: schema.organizations.settings }).from(schema.organizations).where(inArray(schema.organizations.id, orgIds));
-  return new Map(orgs.map((o) => [o.id, outreachSettings({ settings: o.settings }).aiCallMaxAttempts]));
+  return new Map(orgs.map((o) => [o.id, outreachSettings({ settings: o.settings })]));
 }
 
 export async function collectAiCallResults(db: Db, now: Date, log: RunnerLogger): Promise<ResultCounts> {
   const counts: ResultCounts = { handedOff: 0, exited: 0, completed: 0, retried: 0 };
   const finished = await finishedCalls(db);
-  const maxAttempts = await maxAttemptsByOrg(db, [...new Set(finished.map((f) => f.org_id))]);
+  const settings = await settingsByOrg(db, [...new Set(finished.map((f) => f.org_id))]);
   for (const f of finished) {
     try {
-      const done = await collectOne(db, f, maxAttempts.get(f.org_id) ?? outreachSettings({ settings: {} }).aiCallMaxAttempts, now);
+      const done = await collectOne(db, f, settings.get(f.org_id) ?? outreachSettings({ settings: {} }), now);
       if (done) counts[done] += 1;
     } catch (err) {
       // This call stays uncounted and is tried again next tick; the rest of the batch goes on.
