@@ -4,52 +4,49 @@ Date 2026-10-06. Base: `origin/main` 6d508ba. Plans 1A, 1C and the AI voice engi
 
 ## Decisions for the user
 
-Each of these is a real product choice. The plan is written to the recommendation, and changing any one of them changes one task, not the design.
+### Made (the user's answers, 2026-10-06)
 
-1. **Who takes AI-booked appointments.** An appointment goes on a Salesforce user's calendar as an Event, so someone has to own it.
-   - Today about 56% of consultations are owned by the Opportunity's owner (the closer). The rest are owned by the lead manager or another closer.
-   - About 10% of stale Opportunities are owned by people who have left.
-   - **Recommendation:** for an Opportunity, use its owner when that user is active and on a "specialists" list you give. Otherwise, and always for a Lead, use the specialist on that list with the earliest free time.
-   - **Needed from you:** the names on that list.
-   - Booking stays off until the list has at least one name.
-2. **What happens when a Lead books.**
-   - Salesforce refuses an appointment on a Lead (validation rule `Appointment_on_Lead`: "please convert it to an Opportunity").
-   - Your conversion also hands the record to a closer, which the AI cannot do the way your team does.
-   - **Recommendation:** the AI does not convert. It does four things:
-     - puts a plain hold on the specialist's calendar, so the time is not double-booked;
-     - gives the Lead's owner an urgent Task: "Seller agreed to a phone call or walkthrough at <time> with <specialist>. Convert this Lead and book it";
-     - sets Status to Working and Rating to Hot;
-     - posts to Chatter.
-   - The hold is a "Hold: …" Event with no consultation subject, so none of your consultation flows fire and a rep can delete it.
-   - **The alternative** is that the AI converts the Lead itself. That needs a small Apex action plus your conversion rules, and is a later plan.
-3. **Booking hours.** These defaults come from the last 60 days of your Events.
-   - **Walkthrough:** 60 minutes, Monday to Friday, starting on the hour from 9 AM to 4 PM Pacific. The earliest is about 20 hours ahead, the latest 5 business days out, with 30 minutes kept free on each side for travel.
-   - **Phone consultation:** 15 minutes, Monday to Friday, every half hour from 10 AM to 5 PM Pacific. The earliest is 2 hours ahead, the latest 2 business days out.
-   - The AI offers two times at a time, at most 6 per kind and at most 2 per day.
-   - **Recommendation:** keep these defaults. They are editable on the AI calls settings card.
-4. **Status and stage moves** (the tables in §5). Two of them have side effects in your org:
-   - **"Not selling at all" on a Lead** sets Status = Unqualified with Unqualified Reason = Not Interested. Your flow `Reassign_Unqualified_Leas_to_Trash_Queue` then moves the Lead to the Trash queue.
-   - **"Stop calling me"** sets Unqualified with "Hostile/Remove from list" (the only removal reason in your picklist). It also sets Removal Status = Remove me, Do Not Call and Skip on Dialer.
-   - **Interest on a Closed Lost, Offer Rejected or Misqualified Opportunity** re-opens it to Followup, or to Appointment Set when a time was booked.
-   - **Recommendation:** approve the tables as written.
-5. **Who the edits show as.** Every write-back edit, Event, Task and Chatter post is made by the Salesforce user the integration connection signed in as (§9).
-   - The production org has a System Administrator named "Integration User" (`integration@gghomessd.com`) that other systems may also use.
-   - **Recommendation:** connect a dedicated user named "AI Outreach" so the record history reads "AI Outreach changed Timeline". Reconnect on Settings → Connections; the runbook has the steps.
-   - Using the shared user works, but its edits are indistinguishable from the other systems'.
+1. **Who takes AI-booked appointments: one person, Grant Golden** (Sales Manager, America/Los_Angeles, `0058X00000Fsx39QAB`). "He will distribute them as he sees fit." Every slot comes from his calendar and every Event is his. There is no owner-first rule and no rotation. The settings keep an editable, ordered list whose first active user is the owner; the default list is Grant (from outreach-api config, so no user id is hard-coded). Booking is on once the list resolves to an active user.
+2. **A Lead that books is converted by the AI**, the way the team converts: status Qualified, a new Person Account and Contact, an Opportunity named after the Lead and owned by Grant, then the Event on that Opportunity and stage Appointment Set (§5.7). It uses the standard SOAP API call `convertLead()`, so no Apex is deployed. The hold + "convert and book" Task path is kept **only as the fallback** when Salesforce refuses the conversion.
+3. **Booking hours:** the defaults are kept (§4).
+4. **Status and stage tables:** approved as written (§5.2, §5.3).
+5. **Who the edits show as: not decided.** The write-back acts as whatever Salesforce user the integration connection signed in as. Nothing depends on which user that is. A dedicated "AI Outreach" user would make record history readable, but it needs its own paid Salesforce license (§9).
+
+### Still open (new, from designing the conversion)
+
+1. **Lead Manager on an Opportunity the AI converts.** The org's appointment flow gives the "Confirm Appointment" Task to the Opportunity's Lead Manager, and the team's Lead Manager is the setter who converted it (90% of the last 60 days' conversions).
+   - **Recommendation:** the Lead's owner before conversion when that is an active user, otherwise Grant.
+   - **The alternative** is always Grant, so he gets every confirmation Task as well as every appointment.
+2. **When Salesforce refuses a conversion.** Some Leads cannot be converted by anyone but certain users: a Hunt-queue Lead (`Hunt_Winner_Owner_Change`), a Lead first owned by "spam" (`Spam_Status_Lock`), or a connected user without the Convert Leads permission.
+   - **Recommendation:** keep the fallback. A hold goes on Grant's calendar so the time is not double-booked, and Grant gets an urgent Task: "AI booked <time> but could not convert this Lead — convert it and book it", with the reason. The Lead goes to Working and Hot, and the Chatter post goes on the Lead.
+   - **The alternative** is a Task only, with no hold.
+3. **Carrying values the org's lead mapping drops.** The org's Lead → Opportunity field mapping does not carry the AI call consent fields (`AI_Call_Consent__c`, `_Date__c`, `_Source__c`), `Spanish_Speaker__c` or `Skip_on_Dialer__c`.
+   - **Recommendation, part one:** after converting, the AI copies them onto the new Opportunity, exactly and only into blanks. Consent is never created or upgraded.
+   - **Recommendation, part two:** an admin also adds them to Setup → Lead → Map Lead Fields, so the team's own conversions carry them too. That part is optional.
+4. **An Opportunity a closer owns.** Per decision 1, an appointment booked on a closer's Opportunity goes on Grant's calendar while the closer stays the owner.
+   - **Recommendation:** keep it that way, as you said. The Chatter post tells the closer.
+   - **The alternative** is the closer's own calendar when the closer is active. That would bring back the owner-first rule you turned down.
 
 ## 1. What changes, in one paragraph
 
 1C calls a stale lead with a plan written from the whole Salesforce record. 1D adds three things:
 - **The call treats the person as someone we already know.** It opens with "we spoke back in February about the house on Oak Street — are you still thinking about selling?" and asks only about what the record is missing.
-- **The seller can book an appointment during the call,** either a phone consultation with a specialist or an in-person walkthrough. The times come from the specialist's real Salesforce calendar.
+- **The seller can book an appointment during the call,** either a phone consultation or an in-person walkthrough. The times come from the appointment owner's real Salesforce calendar (Grant Golden, who distributes them).
 - **After the call, outreach-api writes the result to Salesforce once.**
   - It fills the empty or "didn't ask" qualification fields and never overwrites a rep's value.
   - It moves Status or Stage and the next follow-up.
+  - When a Lead books, it converts the Lead the way the team does, then works on the new Opportunity.
   - It creates the appointment Event exactly the way reps do, so the org's own appointment flows run.
   - It writes a new field, **AI Last Call Changes**, that lists every change as old → new.
   - It posts a short Chatter summary.
 
 An admin can also place a **practice call**: the real record's plan and the same appointment times, but the call rings the admin's own test number and nothing is written to Salesforce.
+
+**The 1C carry-forward rules (CF-1 to CF-14) all still bind.** The plan's Global Constraints map each one to the tasks that honour it. The ones 1D touches most:
+- **CF-1:** the activity check ignores the write-back's own Events and Tasks.
+- **CF-5:** consent is copied exactly onto a converted Opportunity and never created.
+- **CF-9 and CF-14:** slots are never plan text; the last-contact words have no digits.
+- **CF-13:** slots go only on a freshly minted trigger key.
 
 ## 2. Production Salesforce facts this design rests on
 
@@ -79,7 +76,21 @@ All of these were read from org `_t2` on 2026-10-06, read-only.
   - Opportunity `Loss_Reason__c` includes "Sold on MLS", "Sold to Other Investor", "Sold to iBuyer", "Lost to Competitor", "Hostile/Remove From List" and "Other".
   - **The "didn't ask" style values** are I Didn't Ask, Didn't Ask, Seller Didn't Say, Seller Wouldn't Say, Seller Wouldn't Disclose and Unsure.
   - **Values change, so they are read from a describe at run time.** The tables below are defaults, validated against that describe before use.
-- **Everyone who owns a consultation is in America/Los_Angeles** (`User.TimeZoneSidKey`).
+- **Everyone who owns a consultation is in America/Los_Angeles** (`User.TimeZoneSidKey`), Grant Golden included.
+- **How the team converts Leads** (1,187 conversions in the last 60 days):
+  - **Status and records.** The converted status is "Qualified", the only `IsConverted` status. Every conversion created a **new** Account and Contact: 1,185 of 1,185. The Lead's Company is always blank, so the Account is a Person Account. The org has no active duplicate rules.
+  - **Record types.** The Account is always "Person Account" and the Opportunity "Homeowner Opportunity".
+  - **Opportunity name.** The Lead's name (985 of 1,185; reps renamed the rest later).
+  - **Owner.** The converter picks a closer: the Opportunity owner differs from the Lead owner 73% of the time.
+  - **Lead Manager.** `LeadManager__c` is the converting setter, the Lead's owner, in 90%.
+  - **Stage.** The Opportunity starts at "New Opportunity" (284 of 285 sampled). A rep moves it to Appointment Set after booking the Event, a median of 8 minutes later. No flow does it.
+  - **What runs on insert:**
+    - the Opportunity flows `Opp_c_bs` (phones; address from the Person Account; Opportunity owner = the Account owner), `Opportunity_On_Create`, `Auto_Comp_on_Lead_Conversion` (a comp request, because `From_Lead__c` is mapped), `Lead_Conversion_Pull_Email_from_PA` and the drip assignment;
+    - the Lead triggers `leadConvertChatter` and `LeadConverted`, which come from a managed package and are not readable;
+    - `CallRail_Opp_Owner_Update` would re-own the Opportunity, but the Lead's CallRail field is not in the lead mapping, so it does not fire on a conversion.
+  - **Validation rules that can refuse a conversion:** `Hunt_Winner_Owner_Change` (a Hunt-queue Lead given to someone other than the Hunt winner) and `Spam_Status_Lock`. Changing the owner after conversion would run owner-change flows and Task re-owning, so the AI sets the owner at conversion and never changes it afterwards.
+  - **The lead field mapping** carries the qualification fields (Motivation, Timeline, Condition, repairs, Occupancy, asking price → `SellersAskingPrice__c`, Competition, Amount Owed and more). It does **not** carry the AI call consent fields, `Spanish_Speaker__c` or `Skip_on_Dialer__c`.
+- **The REST API has no lead-convert resource.** The standard actions list only `invocableApplyLeadAssignmentRules`. The SOAP API's `convertLead()` is the standard path, and it accepts an OAuth access token as its session id.
 - **The integration connection.** `AI_Outreach` is deployed but assigned to nobody. The org's `integration@gghomessd.com` is a System Administrator. Which user the outreach connection signed in as is not visible from Salesforce, so the runbook confirms it.
 
 ## 3. Flows
@@ -87,10 +98,11 @@ All of these were read from org `_t2` on 2026-10-06, read-only.
 ```
 plan time (call.prepare)                 trigger time (ai_call.place)                    call (cti-api)                          after (ai_call.results → ai_call.writeback)
 research snapshot                        fresh record read (1C)                           opener: "we spoke back in February…"     results tick counts the call once
-  + last real contact (words)            specialist + free slots (SF Events)              asks only what is missing                 → enqueues ONE write-back row (same tx)
+  + last real contact (words)            owner (Grant) + free slots (his Events)          asks only what is missing                 → enqueues ONE write-back row (same tx)
   + what Salesforce is missing  ──plan──► context.returning, slots[] ──signed request──►  live transfer, or book_appointment     ─► write-back tick: describe, fresh read,
-plan: reengagement, stillToLearn         (practice: same, to a test number)              → ai_calls.appointment                       Claude maps answers → picklists,
-                                                                                                                                       Event (or Lead hold + Task),
+plan: reengagement, stillToLearn         (practice: same, to a test number)              → ai_calls.appointment                       a booked Lead: convert (SOAP) → new Opp,
+                                                                                                                                       Claude maps answers → picklists,
+                                                                                                                                       Event on the Opp (fallback: hold + Task),
                                                                                                                                        fields + AI Last Call Changes,
                                                                                                                                        Chatter post
 ```
@@ -116,16 +128,16 @@ The goals and questions cover only those topics. The opener asks whether they ar
 
 ### 3.2 Appointment slots (trigger time)
 
-Right before the trigger, `ai_call.place` resolves a specialist (decision 1) and reads that specialist's Events and user record through the integration connection.
+Right before the trigger, `ai_call.place` takes the appointment owner, the first active user on the list (decision 1: Grant Golden). It reads his user record and Events through the integration connection. The offer is the same for every Lead and Opportunity.
 
 **Slot ids:**
 - `p1`… are phone consultations and `w1`… are walkthroughs, at most 6 of each.
-- Slots fall inside the business hours (decision 3), in the specialist's time zone.
+- Slots fall inside the business hours (decision 3), in the owner's time zone.
 - A slot never overlaps an Event that is not Free: all-day Events block the whole day, and the walkthrough travel buffer applies.
 
 **Where they go:** the slots travel in the signed trigger request, and cti-api stores them on `ai_calls.offered_slots`.
 
-**When slots are empty:** any failure (booking off, no specialist, no free time, Salesforce error) yields no slots. The call still goes ahead and offers a callback. A broken calendar never stops a call.
+**When slots are empty:** any failure (booking off, nobody active on the list, no free time, Salesforce error) yields no slots. The call still goes ahead and offers a callback. A broken calendar never stops a call.
 
 ### 3.3 The call (cti-api)
 
@@ -135,7 +147,7 @@ Right before the trigger, `ai_call.place` resolves a specialist (decision 1) and
 
 **The hand-off order:**
 1. Someone interested who wants to talk now is transferred live, as today.
-2. Someone who would rather pick a time is offered a choice of a phone call with the specialist (first name) or an in-person walkthrough, then two times of that kind in their own time zone.
+2. Someone who would rather pick a time is offered a choice of a phone call with a specialist ("a quick call with Grant") or an in-person walkthrough, then two times of that kind in their own time zone.
    - A walkthrough needs the property address confirmed first ("that's the house on Oak Street, right?").
    - The agent then calls `book_appointment(slot_id, address_confirmed, note)`.
 3. If no time works, a callback.
@@ -157,6 +169,14 @@ Right before the trigger, `ai_call.place` resolves a specialist (decision 1) and
 **The tick.** `ai_call.writeback` runs every minute. It claims due rows with a lease and runs the steps below.
 - Each step's result is saved before the next step starts, so a retry resumes and never redoes a step.
 
+0. **Convert** (a Lead whose call booked an appointment; §5.7).
+   - **The Lead is read first.**
+     - Already converted: its Opportunity is adopted, never converted again.
+     - Otherwise: `convertLead` with owner = Grant and status Qualified. The new ids are saved at once.
+   - **Then one PATCH on the new Opportunity carries** the values the lead mapping drops (consent, Spanish speaker, Skip on Dialer; blanks only) and the Lead Manager. This happens before the Event, because the confirmation Task goes to the Lead Manager.
+   - **Every later step writes to the new Opportunity,** exactly as for an Opportunity call.
+   - **When the conversion is refused for good,** the steps target the Lead and take the fallback (step 2).
+
 1. **Plan the write.** This runs once, and the result is frozen on the row.
    - **Read the current state:**
      - describe the record as the integration user, keeping only fields it can update that are not calculated and not on the rollup deny-list;
@@ -167,27 +187,27 @@ Right before the trigger, `ai_call.place` resolves a specialist (decision 1) and
      - a disposition: interested, not_now, not_selling, sold_mls, sold_investor, sold_ibuyer, listed_with_agent or unknown.
    - **Build the patch** with the pure builder, applying the fill-blank rule and the §5 tables.
 2. **Appointment** (when the call booked one):
-   - **For an Opportunity:**
-     - re-check the specialist's calendar for the slot;
+   - **For an Opportunity, including a Lead just converted:**
+     - re-check the owner's calendar for the slot;
      - if it is free, create the Event the way reps do (§5.4), first looking for one we already made (same owner, start, `WhatId` and `CTI_Origin__c = 'AI Outreach'`);
-     - if it is taken, the stage moves to Followup instead and a conflict Task goes to the specialist.
-   - **For a Lead:** the hold Event plus the convert-and-book Task (decision 2).
+     - if it is taken, the stage moves to Followup instead and a conflict Task goes to the owner.
+   - **For a Lead whose conversion was refused (the fallback):** a hold Event on Grant's calendar plus the "convert and book" Task to Grant.
 3. **Fields.** One PATCH carries the patch plus `AI_Last_Call_Changes__c`.
    - If Salesforce refuses particular fields (a validation rule, a restricted value, a queue-owned Lead's Status), those fields are dropped, recorded as "not written: <reason>", and the PATCH is tried again, at most 3 times.
    - For an Opportunity, do-not-call also sets `DoNotCall` on the primary contact role's Contact.
-4. **Task** (an appointment conflict, or a Lead booking), owned by the specialist or the Lead owner.
-5. **Chatter.** One FeedItem on the record (§5.6).
+4. **Task** (an appointment conflict or refusal, or the fallback), always owned by the appointment owner.
+5. **Chatter.** One FeedItem on the record written to: after a conversion, the new Opportunity (§5.6).
 
 **How a row ends:**
 
 | Status | When |
 |---|---|
 | `done` | Every step succeeded |
-| `partial` | A field or step was refused for good; the rest stands |
+| `partial` | A field or step was refused for good (including a refused conversion that took the fallback); the rest stands |
 | `skipped` | The record is gone, or there was nothing to write (hung_up or other with nothing learned) |
 | `failed` | Transient errors used up 6 attempts (backoff 1 m, 5 m, 30 m, 2 h, 6 h, 24 h). An admin can retry it from the results page |
 
-Results show the status and the change list. Write-back never writes for a test or practice call: there is no touch, and the worker also checks `is_test`.
+Results show the status, the change list and, after a conversion, a link to the new Opportunity. Write-back never converts, books or writes for a test or practice call: there is no touch, and the worker also checks `is_test` before any Salesforce request.
 
 ## 4. Data model
 
@@ -210,6 +230,7 @@ Every migration starts with `SET LOCAL lock_timeout = '5s';` and uses `IF NOT EX
 - **The frozen write plan:** `plan` jsonb.
 - **Per-step results:** `steps` jsonb.
 - **What it created:** `sf_event_id`, `sf_task_id` and `sf_feed_item_id`.
+- **The conversion:** `converted_opportunity_id`, `converted_account_id` and `converted_contact_id`. They are set once, never replaced, and every step after the conversion writes to `converted_opportunity_id`.
 - **Model use:** `model`, `input_tokens` and `output_tokens`.
 - **Bookkeeping:** `last_error`, `created_at`, `updated_at` and `completed_at`.
 - **Indexes:** the unique `ai_call_id`, and `(next_attempt_at) WHERE status IN ('pending','running')`.
@@ -224,8 +245,9 @@ Every migration starts with `SET LOCAL lock_timeout = '5s';` and uses `IF NOT EX
 
 **Settings** (`organizations.settings`, read tolerantly by `outreachSettings`):
 - `aiCallBooking`:
-  - `enabled` and `useRecordOwner`;
-  - `specialists`, a list of Salesforce user ids, at most 20;
+  - `enabled`;
+  - `specialists`, an ordered list of Salesforce user ids, at most 20. The first active one is the appointment owner. When the tenant has never saved a list, it comes from `AI_CALL_DEFAULT_SPECIALISTS` on outreach-api (production: Grant Golden);
+  - `convertLeads`, default true. When it is off, every Lead booking takes the fallback;
   - `walkthrough` and `phone`, each with `enabled`, `durationMinutes`, `startHour`, `endHour`, `stepMinutes`, `minLeadMinutes`, `horizonBusinessDays`, `bufferMinutes` and `maxOffered`;
   - `days` (ISO weekdays).
 - `aiCallWriteback`, a boolean, default true.
@@ -258,7 +280,8 @@ Every migration starts with `SET LOCAL lock_timeout = '5s';` and uses `IF NOT EX
 
 | Call result | Status | Also |
 |---|---|---|
-| appointment booked | Working | Rating Hot; hold Event + "convert and book" Task (decision 2) |
+| appointment booked | Qualified: **converted** (§5.7). Everything after that is written to the new Opportunity, under the "appointment booked" row of §5.3 | — |
+| appointment booked, conversion refused (fallback) | Working | Rating Hot; a hold on Grant's calendar plus a "convert and book" Task to Grant |
 | transferred live | Working | Rating Hot |
 | callback / transfer missed | Working | Rating Warm (when blank or Cold); the engine's callback Task already exists |
 | not interested, not now | Long Term Follow-Up | — |
@@ -274,7 +297,7 @@ Every migration starts with `SET LOCAL lock_timeout = '5s';` and uses `IF NOT EX
 | Call result | Stage | Also |
 |---|---|---|
 | appointment booked, Event created | Appointment Set | Rating Hot |
-| appointment booked, slot taken since | Followup | Next Follow-Up = now; conflict Task to the specialist |
+| appointment booked, slot taken since | Followup | Next Follow-Up = now; conflict Task to the appointment owner |
 | transferred live | Followup | Next Follow-Up = now |
 | callback / transfer missed | Followup | Next Follow-Up = the callback time, else next business day 10:00 Pacific |
 | not interested, not now | unchanged | Rating Cold |
@@ -285,7 +308,8 @@ Every migration starts with `SET LOCAL lock_timeout = '5s';` and uses `IF NOT EX
 | wrong number, hung up, other | unchanged | fill blanks only |
 
 - **On an already Closed Lost Opportunity,** `Loss_Reason__c` is filled only when blank.
-- **Never written:** owner fields, the rollup and formula fields in §2, `NextStep`, or anything outside these tables. The writable list is an explicit allowlist in code, and it is intersected with the describe.
+- **A freshly converted Opportunity** is at "New Opportunity" (in the "from" list). The research-time stage check does not apply, because it did not exist at research time.
+- **Never written:** owner fields (an owner is set only by `convertLead`), the rollup and formula fields in §2, `NextStep`, or anything outside these tables and the conversion carry (§5.7). The writable list is an explicit allowlist in code, and it is intersected with the describe.
 
 ### 5.4 The appointment Event (Opportunity)
 
@@ -293,7 +317,7 @@ Every migration starts with `SET LOCAL lock_timeout = '5s';` and uses `IF NOT EX
 |---|---|---|
 | Subject | Phone Consultation | Property Consultation |
 | WhatId / WhoId | the Opportunity / null | the Opportunity / null |
-| OwnerId | the specialist | the specialist |
+| OwnerId | the appointment owner (Grant Golden) | the appointment owner |
 | StartDateTime / EndDateTime | the slot | the slot |
 | Location | — | the property address from the record |
 | ShowAs | Busy | Busy |
@@ -301,7 +325,8 @@ Every migration starts with `SET LOCAL lock_timeout = '5s';` and uses `IF NOT EX
 | CTI_Origin__c | `AI Outreach` | `AI Outreach` |
 
 - `Consultation_Type__c` is left to `Event_Stamp_Consultation_Type`.
-- **The Lead hold** is Subject `Hold: AI-booked <phone call/walkthrough> – convert <Lead name>` (≤ 255 characters), with no WhoId and no WhatId, the same owner, start and end, ShowAs Busy, and `CTI_Origin__c = 'AI Outreach'`.
+- **The Event is always the appointment owner's,** even on an Opportunity a closer owns (still-open decision 4).
+- **The fallback hold** (only when a conversion was refused) is Subject `Hold: AI-booked <phone call/walkthrough> – convert <Lead name>` (≤ 255 characters), with no WhoId and no WhatId, the same owner, start and end, ShowAs Busy, and `CTI_Origin__c = 'AI Outreach'`. It has no consultation Subject, so none of the consultation flows fire, and a rep can delete it.
 
 ### 5.5 The new field: `AI_Last_Call_Changes__c` (Lead and Opportunity)
 
@@ -316,7 +341,8 @@ Changed
 - Timeline: I Didn't Ask → 90 Days
 - Motivation: (blank) → Relocating OOS
 Created
-- Event: Phone Consultation, Wed Oct 7 11:00 AM PT, owner Seth Boisvert
+- Converted Lead "Jane Seller" into this Opportunity (owner Grant Golden); new Account and Contact
+- Event: Phone Consultation, Wed Oct 7 11:00 AM PT, owner Grant Golden
 - Chatter post
 Kept the rep's value
 - Condition: kept "5 - Cosmetic Fixer" (seller said: "the roof needs replacing")
@@ -331,14 +357,64 @@ Not written
 
 ```
 AI call · Oct 6, 3:12 PM PT · Appointment set
-Booked: phone consultation with Seth, Wed Oct 7, 11:00 AM PT (seller: 2:00 PM ET)
+Converted from Lead by the AI after the seller booked.
+Booked: phone consultation with Grant, Wed Oct 7, 11:00 AM PT (seller: 2:00 PM ET)
 Summary: <the call summary's narrative>
 Seller said: Timeline 90 Days · Motivation Relocating OOS · Repairs Roof
 Changed: Status → Working; Timeline → 90 Days; +1 more (see AI Last Call Changes)
 Call details: https://<outreach>/campaigns/<id>?call=<aiCallId>
 ```
 
-No @mentions: plain FeedItems cannot carry them, so the Task is what notifies a person.
+No @mentions: plain FeedItems cannot carry them, so the Task is what notifies a person. After a conversion the post goes on the new Opportunity only. A converted Lead is read-only and its feed is no longer shown, so nothing is posted there.
+
+### 5.7 Lead conversion (decision 2)
+
+**When:** only in the write-back, for a real call (never a test or practice call), when the outcome is `appointment_set` with a stored booking, the record is a Lead, and `convertLeads` is on.
+
+**How:** the SOAP API's `convertLead()`, over the same OAuth connection (§9). The request matches the team's conversions (§2):
+
+| Field | Value | Why |
+|---|---|---|
+| `leadId` | the Lead | |
+| `convertedStatus` | the `IsConverted` LeadStatus, "Qualified" | the only converted status |
+| `ownerId` | the appointment owner, Grant | decision 1. It owns the new Account, Contact and Opportunity; `Opp_c_bs` also sets the Opportunity's owner from the Account's |
+| `opportunityName` | the Lead's Name (≤ 120) | what the team's conversions get |
+| `doNotCreateOpportunity` | false | the appointment needs an Opportunity |
+| `accountId`, `contactId` | not sent | the team always creates new ones; no duplicate rules are active |
+| `overwriteLeadSource` | false | keep the Lead's source |
+| `sendNotificationEmail` | false | the Event and the Chatter post tell Grant |
+
+**Right after the conversion, one PATCH on the new Opportunity carries:**
+- `AI_Call_Consent__c`, `AI_Call_Consent_Date__c`, `AI_Call_Consent_Source__c`, `Spanish_Speaker__c` and `Skip_on_Dialer__c`, copied from the Lead's values (read before converting) when the Opportunity's value is blank. Consent is copied exactly: never created, never upgraded, and `unknown` stays `unknown`;
+- `LeadManager__c`: the Lead's prior owner when that is an active user, otherwise Grant (still-open decision 1). It is written before the Event, because `Event_Appointment_Confirm_Task` gives the confirmation Task to the Lead Manager.
+
+**Then the normal write-back runs on the Opportunity:**
+1. the plan: fill-blanks against the carried values, and the "appointment booked" row;
+2. the Event, owned by Grant;
+3. the PATCH: Appointment Set, Rating Hot, the filled blanks and AI Last Call Changes;
+4. the Chatter post.
+
+**Record types** are Salesforce's defaults for the converting user. The readiness check shows them, and they should be Person Account and Homeowner Opportunity. They are not changed after insert, because that would skip the org's insert-time flows (`Opp_c_bs` and `Auto_Comp_on_Lead_Conversion` filter on record type).
+
+**Never twice:**
+- the Lead's `IsConverted` and `ConvertedOpportunityId` are read before every attempt;
+- the ids are saved the moment Salesforce answers;
+- if a response is lost, the retry finds the Lead converted and adopts its Opportunity. It is "ours" when the Opportunity was created by the connected user after the call ended, and the carry PATCH then still runs;
+- a Lead a rep converted in the meantime is adopted too, but its owner and Lead Manager are left alone.
+
+**The fallback.** Salesforce refuses a conversion for good when:
+- a validation rule fires, e.g. `Hunt_Winner_Owner_Change` or `Spam_Status_Lock`;
+- the connected user lacks Convert Leads or create access;
+- the user cannot use the SOAP API;
+- `convertLeads` is off.
+
+In each case the write-back targets the Lead instead:
+- a hold on Grant's calendar;
+- an urgent Task to Grant with the reason;
+- Status Working and Rating Hot;
+- a Chatter post on the Lead.
+
+The row ends `partial`, with the refusal code. When conversion is simply turned off, it ends `done`.
 
 ## 6. Practice call
 
@@ -358,7 +434,7 @@ No @mentions: plain FeedItems cannot carry them, so the Task is what notifies a 
 - builds the prompt exactly as the seller would hear it, without the "this is a test call" line;
 - stores the row with `is_test = true` and `practice = true`.
 
-**What it never does:** no Salesforce Task (`is_test`), no touch, no results counting and no write-back. A booking is stored on the call and shown as "would have booked".
+**What it never does:** no Salesforce Task (`is_test`), no touch, no results counting and no write-back, so it **never books in Salesforce, never converts a Lead and never writes a field.** A booking is stored on our own `ai_calls` row and shown as "would have booked". Its only Salesforce traffic is read-only: the record load, and Grant's user record and Events for the slots. A test pins it end to end: a practice call that ended `appointment_set`, followed by the results and write-back ticks, produces no POST, PATCH or SOAP request.
 
 **On the results page:** practice calls are listed in their own "Practice calls" section, with transcript, outcome and the would-be appointment.
 
@@ -368,6 +444,7 @@ No @mentions: plain FeedItems cannot carry them, so the Task is what notifies a 
 - **`book_appointment`:** it may be called again in the same call, and the last booking wins. It is only a database write.
 - **The write-back row:** created once per `ai_call_id`, through the unique index plus the counted compare-and-swap.
 - **The plan:** frozen on the row the first time, so a retry never re-runs the fill-blank decisions against values we wrote ourselves.
+- **The conversion:** the Lead is read first (`IsConverted`, `ConvertedOpportunityId`); the ids are saved the moment Salesforce answers, and a retry adopts instead of converting (§5.7).
 - **Each step's result** is saved before the next step starts. On a retry:
   - **The Event:** looked up in Salesforce first (same owner, start, WhatId and `CTI_Origin__c`), then created.
   - **The PATCH:** idempotent by nature.
@@ -384,7 +461,8 @@ No @mentions: plain FeedItems cannot carry them, so the Task is what notifies a 
   - Status, Stage and DNC moves come from the call's outcome and do not need the model, so they are still written.
   - Fill-blanks are skipped and noted in the changes field.
   - An exhausted budget waits until the next UTC day; it does not skip.
-- **The Event create is refused:** the stage falls back to Followup, a Task goes to the specialist ("AI booked <time> but Salesforce refused the Event: <code>"), and the step is recorded.
+- **The Event create is refused:** the stage falls back to Followup, a Task goes to the appointment owner ("AI booked <time> but Salesforce refused the Event: <code>"), and the step is recorded.
+- **A conversion is refused for good:** the fallback (§5.7), and the row ends `partial` with the code. A transient SOAP error retries, and the retry never converts twice.
 - **A slot read fails at trigger time:** the call goes ahead without slots.
 - **Nothing is silent:** every outcome shows on the results page (write-back status and changes), and errors are logged with ids and error codes, never record text or phone numbers.
 
@@ -394,11 +472,21 @@ No @mentions: plain FeedItems cannot carry them, so the Task is what notifies a 
   - **The work is unattended.** Write-back runs in a tick, minutes after the call. The approver may have no CTI Salesforce connection; 1C decision 3 already found this for research.
   - **The edits are the AI's.** They should read as the AI's in record history, not as a rep who never made them.
   - **One owner of the token.** outreach-api already owns this token and its refresh. cti-api only ever reads it.
-  - **The scope is enough.** `api refresh_token offline_access` covers writes. What the user may write comes from its profile and permission sets.
+  - **Which Salesforce user that is stays the user's choice (decision 5, open).**
+    - Today it is whatever user signed in on Settings → Connections, possibly the shared System Administrator `integration@gghomessd.com`. Nothing in the design depends on which user it is.
+    - A dedicated "AI Outreach" user would make history read "AI Outreach changed Timeline", but it needs its own **paid Salesforce user license**. It converts Leads and creates Accounts, Opportunities, Events and Chatter posts, which the free API-only integration license may not cover. Confirm with Salesforce before buying.
+    - A non-administrator user also needs the `AI_Outreach` permission set and the in-org grants: Person Account and Homeowner Opportunity record types as its defaults, plus edit on `LeadManager__c`.
+  - **The scope is enough.** `api refresh_token offline_access` covers REST and SOAP writes. What the user may write comes from its profile and permission sets. A SOAP call takes the same access token as its session id, and a 401 or `INVALID_SESSION_ID` refreshes it once.
 - **Least privilege:**
-  - `AI_Outreach` gains read and edit on `AI_Last_Call_Changes__c` (both objects) and the `EditEvent` user permission.
+  - `AI_Outreach` gains read and edit on `AI_Last_Call_Changes__c` (both objects), the `EditEvent` and `ConvertLeads` user permissions, and create on Account, Contact and Opportunity for conversion. It still grants no delete and no Modify All.
   - The tenant's own qualification fields get edit in the in-org `AI_Outreach_Fields` set (runbook).
   - A readiness check on the AI calls settings card lists what the connected user cannot update, read from the describe's `updateable` and `createable` flags. A field it cannot update is simply skipped and listed.
+  - **The readiness check also proves conversion will work.** All three checks are read-only:
+    - a SOAP `getUserInfo()`;
+    - the Convert Leads permission, through `PermissionSetAssignment`;
+    - Account, Contact and Opportunity are createable.
+
+    It also shows the default record types and the resolved appointment owner.
 - **No free-form write:**
   - **Fields** come only from the allowlist; values are describe-validated picklist values, booleans, or bounded numbers and short text.
   - **Model output** goes through a forced tool call, a zod schema built from the describe, and evidence quotes from caller lines.
@@ -411,12 +499,13 @@ No @mentions: plain FeedItems cannot carry them, so the Task is what notifies a 
 
 ## 10. Deploy notes (summary; full steps in the plan)
 
-1. **Salesforce first.** Deploy the two new field files and `AI_Outreach` with `--test-level RunSpecifiedTests --tests PowerDialRelayTest`, naming exact files.
+1. **Salesforce first.** Deploy the two new field files and `AI_Outreach` with `--test-level RunSpecifiedTests --tests PowerDialRelayTest`, naming exact files. No Apex is deployed.
    - Assign `AI_Outreach` to the connected user. It currently has no assignments.
-   - Grant edit on the qualification fields in `AI_Outreach_Fields`.
+   - Grant edit on the qualification fields, `LeadManager__c` and `Spanish_Speaker__c` in `AI_Outreach_Fields`.
    - Give reps read access to the new field through Setup.
    - Add the field to layouts in Setup, never from the repo.
+   - Optionally, map the consent, Spanish-speaker and Skip-on-Dialer fields in Setup → Lead → Map Lead Fields (still-open decision 3).
 2. **Migrations** 0054 and 0055 run in the pre-deploy migrate step.
-3. **Deploy `@cti/api` and outreach-api together.** A trigger that reaches an old cti-api with the new fields gets a 400. That is treated as a transport error and retried with the same key, so the deploy window is safe.
-4. **Booking is off** until an admin picks specialists. Write-back is on by default, and a per-tenant switch turns it off.
-5. **Before the first real campaign,** run a practice call on a real Opportunity.
+3. **Set `AI_CALL_DEFAULT_SPECIALISTS=0058X00000Fsx39QAB`** (Grant Golden) on outreach-api.
+4. **Deploy `@cti/api` and outreach-api together.** A trigger that reaches an old cti-api with the new fields gets a 400. That is treated as a transport error and retried with the same key, so the deploy window is safe.
+5. **Before the first real campaign,** check readiness ("Lead conversion: ready", "Appointments go to: Grant Golden"). Then run practice calls on a real Opportunity and a real Lead, which never write. Then run a one-Lead live campaign and check the conversion by hand.
