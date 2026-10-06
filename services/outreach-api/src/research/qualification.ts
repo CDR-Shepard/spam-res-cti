@@ -14,6 +14,11 @@ export interface TopicField {
   kind: FieldKind;
   /** booleans: only ever set false → true */
   trueOnly?: boolean;
+  /**
+   * currency: 0 is a real answer, not a blank (5a Fix 1, I-1). Amount owed 0 means "free and clear" (in _t2, 843
+   * Opportunities hold 0 and the field has no default). An asking price of 0 stays blank: it is the org's placeholder.
+   */
+  zeroIsValue?: true;
 }
 type SfObject = 'Lead' | 'Opportunity';
 type TopicMap = Readonly<Partial<Record<QualificationTopic, readonly TopicField[]>>>;
@@ -26,7 +31,7 @@ const SHARED = {
   condition: [pick('Condition__c')],
   occupancy: [pick('Occupancy__c')],
   competition: [{ field: 'Competition__c', kind: 'multipicklist' }],
-  mortgage: [{ field: 'Amount_Owed__c', kind: 'currency' }],
+  mortgage: [{ field: 'Amount_Owed__c', kind: 'currency', zeroIsValue: true }],
 } as const satisfies TopicMap;
 const MOTIVATION = [pick('Motivation__c'), pick('SecondaryMotivation__c')];
 const MAJOR_REPAIRS: TopicField = { field: 'Major_Repairs_Needed__c', kind: 'multipicklist' };
@@ -70,13 +75,25 @@ export const PLACEHOLDER_VALUES: ReadonlySet<string> = new Set([...NEVER_WRITE_V
 
 const isPlaceholder = (v: string): boolean => PLACEHOLDER_VALUES.has(v.trim().toLowerCase());
 
-export function isBlankish(value: string | null | undefined, kind: FieldKind): boolean {
+/** Lower-cased names of the currency fields whose 0 is a real answer (`zeroIsValue`). */
+const ZERO_IS_VALUE: ReadonlySet<string> = new Set(
+  Object.values(QUALIFICATION_FIELDS)
+    .flatMap((topics) => Object.values(topics).flatMap((fs) => fs ?? []))
+    .filter((f) => f.zeroIsValue === true)
+    .map((f) => f.field.toLowerCase()),
+);
+
+/**
+ * Whether a field's value counts as blank. `field` (the API name, any case) decides the currency zero rule
+ * (5a Fix 1, I-1): 0 is blank unless the field is `zeroIsValue` (amount owed). Without it, 0 is blank.
+ */
+export function isBlankish(value: string | null | undefined, kind: FieldKind, field?: string): boolean {
   if (value === null || value === undefined || value.trim() === '') return true;
   switch (kind) {
     case 'boolean':
       return value.trim().toLowerCase() === 'false';
     case 'currency':
-      return Number(value.trim()) === 0;
+      return Number(value.trim()) === 0 && !(field !== undefined && ZERO_IS_VALUE.has(field.toLowerCase()));
     case 'multipicklist':
       return value.split(';').every((v) => v.trim() === '' || isPlaceholder(v));
     default:
@@ -106,6 +123,6 @@ export function missingTopics(sfObject: SfObject, selfFields: ReadonlyArray<{ na
   const map = QUALIFICATION_FIELDS[sfObject];
   return QUALIFICATION_TOPICS.filter((topic) => {
     const fields = (map[topic] ?? []).filter((f) => read === null || read.has(f.field.toLowerCase()));
-    return fields.length > 0 && fields.every((f) => isBlankish(values.get(f.field.toLowerCase()), f.kind));
+    return fields.length > 0 && fields.every((f) => isBlankish(values.get(f.field.toLowerCase()), f.kind, f.field));
   });
 }

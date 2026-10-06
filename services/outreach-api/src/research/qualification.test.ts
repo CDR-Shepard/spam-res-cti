@@ -142,3 +142,18 @@ describe('Fix 1 (I-2): a field research never read is unknown, not missing', () 
     expect(missingTopics('Lead', [], undefined)).toEqual(QUALIFICATION_TOPICS.filter((t) => t !== 'decision_makers'));
   });
 });
+
+describe('5a Fix 1 (I-1): zero is blank per field', () => {
+  it('a zero amount owed is a real answer ("free and clear"); a zero asking price is a placeholder', () => {
+    expect(isBlankish('0', 'currency', 'Amount_Owed__c')).toBe(false);
+    expect(isBlankish('0.0', 'currency', 'amount_owed__C')).toBe(false);
+    expect(isBlankish('0', 'currency', 'Seller_s_Asking_Price__c')).toBe(true);
+    expect(isBlankish('0', 'currency', 'SellersAskingPrice__c')).toBe(true);
+    expect(isBlankish(null, 'currency', 'Amount_Owed__c')).toBe(true);
+    expect(isBlankish(' ', 'currency', 'Amount_Owed__c')).toBe(true);
+  });
+  it('missingTopics follows the same rule: amount owed 0 answers mortgage, asking price 0 does not answer price', () => {
+    expect(missingTopics('Lead', [f('Amount_Owed__c', '0')])).toEqual(allBut('mortgage'));
+    expect(missingTopics('Opportunity', [f('Amount_Owed__c', '0'), f('SellersAskingPrice__c', '0')])).toEqual(allBut('mortgage'));
+  });
+});

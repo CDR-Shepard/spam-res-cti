@@ -241,7 +241,7 @@ function fillBlanks(b: Builder, i: WritePlanInput, mapped: MappedAnswers): void 
     const after = String(value);
     const before = asText(currentOf(i.current, f.name));
     if (before !== null && sameAnswer(f, before, after)) continue;
-    const blank = isBlankish(before, blankKind(f));
+    const blank = isBlankish(before, blankKind(f), f.name);
     const declinedOk = !isDeclined(answer.value) || onlyNeverWrite(before);
     if (blank && declinedOk) {
       b.patch[f.name] = value;

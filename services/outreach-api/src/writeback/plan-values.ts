@@ -34,7 +34,7 @@ export function blankKind(f: WritableField): FieldKind {
   return f.type === 'picklist' ? 'picklist' : 'text';
 }
 
-export const isBlank = (f: WritableField, current: Record<string, unknown>): boolean => isBlankish(asText(currentOf(current, f.name)), blankKind(f));
+export const isBlank = (f: WritableField, current: Record<string, unknown>): boolean => isBlankish(asText(currentOf(current, f.name)), blankKind(f), f.name);
 
 /** The org's spelling of `value` in the field's active picklist, matched case-insensitively. */
 export function inPicklist(f: WritableField, value: string): string | null {

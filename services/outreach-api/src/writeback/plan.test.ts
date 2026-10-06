@@ -229,6 +229,12 @@ describe('buildWritePlan: fill blanks (spec §5.1)', () => {
     expect(p.patch.Seller_s_Asking_Price__c).toBe(350000);
     expect(p.kept).toEqual([{ field: 'Amount_Owed__c', label: 'Amount Owed', current: '120000', proposed: '150000', evidence: 'seller words' }]);
   });
+  it('5a Fix 1 (I-1): an amount owed of 0 is the rep\'s value ("free and clear"); an asking price of 0 is blank', () => {
+    const p = buildWritePlan(lead({ current: { Status: 'Long Term Follow-Up', Seller_s_Asking_Price__c: 0, Amount_Owed__c: 0 }, mapped: mapped('interested', { Seller_s_Asking_Price__c: ev(350000), Amount_Owed__c: ev(150000) }) }));
+    expect(p.patch.Seller_s_Asking_Price__c).toBe(350000);
+    expect(p.patch.Amount_Owed__c).toBeUndefined();
+    expect(p.kept).toEqual([{ field: 'Amount_Owed__c', label: 'Amount Owed', current: '0', proposed: '150000', evidence: 'seller words' }]);
+  });
   it('a declined value is written only over blank or a never-write value', () => {
     const decline = { Timeline__c: ev("Seller Wouldn't Disclose") };
     expect(buildWritePlan(lead({ current: { Status: 'Long Term Follow-Up', Timeline__c: null }, mapped: mapped('interested', decline) })).patch.Timeline__c).toBe("Seller Wouldn't Disclose");
