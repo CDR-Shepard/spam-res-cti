@@ -67,11 +67,11 @@ describe('RecordTestRun', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Your last test call is still going. Wait for it to end.');
   });
 
-  it('Talk in browser without a microphone says how to allow it', async () => {
+  it('Talk in browser on a page with no microphone access (jsdom: not a secure context) says why', async () => {
     stubApi({ [AVAILABILITY]: available(true) });
     renderWithProviders(<RecordTestRun test={recordTest()} />, { isAdmin: true });
     await userEvent.click(await screen.findByRole('button', { name: 'Talk in browser' }));
-    expect(await screen.findByText('Allow the microphone for this site, or use Ring my phone.')).toBeInTheDocument();
+    expect(await screen.findByText('The microphone only works on a secure (https) page. Open the app over https, or use Ring my phone.')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Talk in browser' })).toBeEnabled());
   });
 });

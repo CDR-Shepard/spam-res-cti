@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import { IDENTITY, TEST_ID } from '../test/record-test-fixtures';
-import { useBrowserCall, type BrowserCallDeps, type BrowserCallState } from './browser-call';
+import { defaultBrowserCallDeps, micErrorWords, useBrowserCall, type BrowserCallDeps, type BrowserCallState } from './browser-call';
 
 type Fn = (...a: unknown[]) => void;
 
@@ -53,6 +53,13 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (v: T) => void; r
   return { promise, resolve, reject };
 }
 
+const MIC = {
+  denied: 'The microphone is blocked for this site. Allow it in the browser\'s site settings, or use Ring my phone.',
+  missing: 'No microphone was found. Connect one (headphones with a mic work), or use Ring my phone.',
+  insecure: 'The microphone only works on a secure (https) page. Open the app over https, or use Ring my phone.',
+  other: "The microphone couldn't be opened (another app may be using it). Try again, or use Ring my phone.",
+};
+
 const flush = () => act(async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); });
 const tokenAnswer = { token: TOKEN, identity: IDENTITY, expiresAt: '2026-10-06T18:00:00.000Z' };
 
@@ -96,7 +103,8 @@ describe('useBrowserCall', () => {
     mic.resolve();
     await flush();
     expect(t.device().token).toBe(TOKEN);
-    expect(t.device().opts).toEqual({ logLevel: 1 });
+    // Never DEBUG: at that level the SDK logs the token it sends (G-4, spec §8.1).
+    expect(t.device().opts).toEqual({ logLevel: 'error' });
     act(() => t.device().emit('registered'));
     await flush();
     answer.resolve(placed);
@@ -111,11 +119,47 @@ describe('useBrowserCall', () => {
 
   it('a refused microphone ends refused, and no token is asked for', async () => {
     const sent = stubFetch({});
-    const t = setup({ getMic: async () => { throw new Error('NotAllowedError'); } });
+    const t = setup({ getMic: async () => { throw new DOMException('denied', 'NotAllowedError'); } });
     void t.hook.result.current.start();
     await flush();
-    expect(t.state()).toEqual({ phase: 'ended', reason: 'refused', words: 'Allow the microphone for this site, or use Ring my phone.' });
+    expect(t.state()).toEqual({ phase: 'ended', reason: 'refused', words: MIC.denied });
     expect(sent).toEqual([]);
+  });
+
+  it.each([
+    ['NotAllowedError', MIC.denied],
+    ['SecurityError', MIC.denied],
+    ['NotFoundError', MIC.missing],
+    ['OverconstrainedError', MIC.missing],
+    ['InsecureContextError', MIC.insecure],
+    ['NotReadableError', MIC.other],
+    ['TypeError', MIC.other],
+  ])('a microphone failure %s has its own words', (name, words) => {
+    expect(micErrorWords(new DOMException('x', name))).toBe(words);
+  });
+
+  it('the default microphone check on a page that is not https fails as an insecure context', async () => {
+    vi.stubGlobal('navigator', { ...navigator, mediaDevices: undefined });
+    const err = await defaultBrowserCallDeps.getMic().catch((e: unknown) => e);
+    expect(micErrorWords(err)).toBe(MIC.insecure);
+  });
+
+  it('a Device that throws while being built ends in an error with words; nothing is placed', async () => {
+    const sent = stubFetch({ [TOKEN_ROUTE]: tokenAnswer });
+    class ThrowingDevice { constructor() { throw new Error('bad token'); } }
+    const t = setup({ loadDevice: async () => ThrowingDevice as never });
+    await act(async () => { await t.hook.result.current.start(); });
+    expect(t.state()).toEqual({ phase: 'ended', reason: 'error', words: "This browser couldn't connect to the calling service. Try again or use Ring my phone." });
+    expect(sent.map((s) => s.route)).toEqual([TOKEN_ROUTE]);
+  });
+
+  it('a register() that throws at once ends in an error; the Device is destroyed', async () => {
+    stubFetch({ [TOKEN_ROUTE]: tokenAnswer });
+    class ThrowOnRegister extends FakeDevice { override register = vi.fn((): Promise<void> => { throw new Error('boom'); }); }
+    const t = setup({ loadDevice: async () => ThrowOnRegister });
+    await act(async () => { await t.hook.result.current.start(); });
+    expect(t.state()).toEqual({ phase: 'ended', reason: 'error', words: "This browser couldn't connect to the calling service. Try again or use Ring my phone." });
+    expect(t.device().destroy).toHaveBeenCalled();
   });
 
   it('registration that takes over 15 s ends in an error; the Device is destroyed and no call is placed', async () => {

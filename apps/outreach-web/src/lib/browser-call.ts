@@ -12,6 +12,9 @@ import { practiceAnswerWords } from './call-words';
 import { browserToken, recordTestCall } from './outreach-api';
 import { errorText } from './outreach-words';
 import { recordTestErrorText } from './record-test-words';
+import { CALL_ERROR_WORDS, INSECURE_CONTEXT, micErrorWords, NO_RING_WORDS, REGISTER_WORDS } from './browser-call-words';
+
+export { micErrorWords } from './browser-call-words';
 
 export type BrowserCallState =
   | { phase: 'idle' } | { phase: 'mic' } | { phase: 'registering' } | { phase: 'placing' }
@@ -33,16 +36,16 @@ export interface BrowserCallDeps {
 
 export const REGISTER_LIMIT_MS = 15_000;
 export const RING_WAIT_MS = 45_000;
-const MIC_WORDS = 'Allow the microphone for this site, or use Ring my phone.';
-const NO_RING_WORDS = "The AI didn't ring through. Try again or use Ring my phone.";
-const REGISTER_WORDS = "This browser couldn't connect to the calling service. Try again or use Ring my phone.";
-const CALL_ERROR_WORDS = 'The call dropped. Try again or use Ring my phone.';
+/** Never DEBUG (1): at that level the SDK logs every message it sends, the token included (G-4). 'error' is its default. */
+export const DEVICE_OPTIONS = { logLevel: 'error' } as const;
 
 const voiceSdk = () => import('@twilio/voice-sdk');
 
 export const defaultBrowserCallDeps: BrowserCallDeps = {
   loadDevice: () => voiceSdk().then((m) => m.Device as unknown as DeviceCtor),
   getMic: async () => {
+    // Browsers hide mediaDevices on a page that is not https (or localhost).
+    if (!navigator.mediaDevices?.getUserMedia) throw new DOMException('not a secure context', INSECURE_CONTEXT);
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     for (const track of stream.getTracks()) track.stop();
   },
@@ -109,8 +112,8 @@ export function useBrowserCall(testId: string, deps: BrowserCallDeps = defaultBr
     try { call.accept(); } catch { end(r, 'error', CALL_ERROR_WORDS); }
   };
 
-  /** Token → Device → registered (within 15 s). The identity on success; null once the run has ended. */
-  const register = async (r: Run): Promise<string | null> => {
+  /** Builds the Device under the run's token and listens for the AI's call; null (the run ended) when anything throws. */
+  const build = async (r: Run): Promise<{ device: DeviceLike; identity: string } | null> => {
     let token: string;
     let identity: string;
     let Device: DeviceCtor;
@@ -122,15 +125,32 @@ export function useBrowserCall(testId: string, deps: BrowserCallDeps = defaultBr
       return null;
     }
     if (r.ended) return null;
-    const device = new Device(token, { logLevel: 1 });
-    r.device = device;
-    device.on('incoming', (call: CallLike) => onIncoming(r, call));
+    try {
+      const device = new Device(token, DEVICE_OPTIONS);
+      r.device = device;
+      device.on('incoming', (call: CallLike) => onIncoming(r, call));
+      return { device, identity };
+    } catch {
+      end(r, 'error', REGISTER_WORDS);
+      return null;
+    }
+  };
+
+  /** Token → Device → registered (within 15 s). The identity on success; null once the run has ended. */
+  const register = async (r: Run): Promise<string | null> => {
+    const built = await build(r);
+    if (!built) return null;
+    const { device, identity } = built;
     const registered = await new Promise<boolean>((resolve) => {
       r.wake = () => resolve(false);
       r.timer = setTimeout(() => resolve(false), REGISTER_LIMIT_MS);
-      device.on('registered', () => resolve(true));
-      device.on('error', () => { if (!r.call) resolve(false); });
-      device.register().catch(() => resolve(false));
+      try {
+        device.on('registered', () => resolve(true));
+        device.on('error', () => { if (!r.call) resolve(false); });
+        device.register().catch(() => resolve(false));
+      } catch {
+        resolve(false);
+      }
     });
     r.wake = null;
     if (r.timer) clearTimeout(r.timer);
@@ -160,13 +180,18 @@ export function useBrowserCall(testId: string, deps: BrowserCallDeps = defaultBr
     const r: Run = { device: null, call: null, timer: null, wake: null, ended: false, muted: false };
     runRef.current = r;
     show(r, { phase: 'mic' });
-    try { await deps.getMic(); } catch { end(r, 'refused', MIC_WORDS); return; }
+    try { await deps.getMic(); } catch (err) { end(r, 'refused', micErrorWords(err)); return; }
     if (r.ended) return;
-    show(r, { phase: 'registering' });
-    const identity = await register(r);
-    if (!identity || r.ended) return;
-    show(r, { phase: 'placing' });
-    await place(r, identity);
+    try {
+      show(r, { phase: 'registering' });
+      const identity = await register(r);
+      if (!identity || r.ended) return;
+      show(r, { phase: 'placing' });
+      await place(r, identity);
+    } catch {
+      // A belt: nothing above should throw, but a run must never sit in a phase with no way out.
+      end(r, 'error', CALL_ERROR_WORDS);
+    }
   };
 
   const hangUp = useCallback((): void => {
