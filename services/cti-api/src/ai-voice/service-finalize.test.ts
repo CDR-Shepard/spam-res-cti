@@ -298,6 +298,27 @@ describe('afterAiCall', () => {
     expect(store.rows.get(ID)?.sfTaskId ?? null).toBeNull();
   });
 
+  it('sweep D-19(c): a booking freed by a later do-not-call leaves no "Appointment booked:" line in the summary or the rep\'s Task', async () => {
+    const descriptions: string[] = [];
+    const sf = {
+      createCallTask: vi.fn(async (_u: string, input: { description?: string }) => {
+        descriptions.push(input.description ?? '');
+        return { taskId: '00T1' };
+      }),
+      fetchOwnership: vi.fn(async () => ({ type: 'Lead' as const, ownerId: 'SF1' })),
+      sfUserIdFor: vi.fn(async () => 'SF1'),
+    };
+    const BOOKED = 'Appointment booked: phone call 2026-10-07T18:00:00.000Z';
+    const freed = record({ outcome: 'do_not_call', summary: `Asked us to stop calling.\n${BOOKED}`, appointment: { slotId: 'p1' } as never, endedAt: END });
+    await afterAiCall(freed, { store, log: silentLog, summary: { client: null, model: 'm', log: silentLog }, sf: { sf, store, log: silentLog, now: () => END } });
+    expect(store.rows.get(ID)?.summary).toBe(`Asked us to stop calling.\n\nOutcome: Do not call\nAI call id: ${ID}`);
+    expect(descriptions.join('\n')).not.toContain('Appointment booked:');
+
+    const kept = record({ outcome: 'appointment_set', summary: `Booked.\n${BOOKED}`, appointment: { slotId: 'p1' } as never, endedAt: END });
+    await afterAiCall(kept, { store, log: silentLog, summary: { client: null, model: 'm', log: silentLog }, sf: null });
+    expect(store.rows.get(ID)?.summary).toContain(BOOKED);
+  });
+
   it('without Salesforce (or for a test call) only the summary is written', async () => {
     await afterAiCall(record({ outcome: 'no_answer', summary: null }), { store, log: silentLog, summary: { client: null, model: 'm', log: silentLog }, sf: null });
     expect(store.rows.get(ID)?.summary).toBe(`AI call — No answer\n\nOutcome: No answer\nAI call id: ${ID}`);

@@ -128,7 +128,7 @@ export function fakeStore(): FakeStore {
         );
       });
       if (taken) return 'taken';
-      put(id, { appointment: a });
+      put(id, { appointment: a, outcome: r.outcome === 'do_not_call' ? r.outcome : 'appointment_set' });
       return 'booked';
     },
     async markFailed(id) {

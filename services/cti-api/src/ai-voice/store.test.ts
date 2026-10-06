@@ -123,10 +123,10 @@ describe('ai_calls SQL, rendered', () => {
     specialistSfUserId: '0058X00000Fsx39QAB', addressConfirmed: false, note: '', bookedAt: NOW.toISOString(),
   };
 
-  it('setAppointment writes the booking as jsonb on a live row only', () => {
+  it('setAppointment writes the booking and appointment_set in one statement, on a live row only (sweep D-19(b))', () => {
     const { sql, params } = setAppointmentQuery(db, ID, BOOKED).toSQL();
     expect(sql).toBe(
-      'update "ai_calls" set "updated_at" = now(), "appointment" = $1::jsonb where ("ai_calls"."id" = $2 and "ai_calls"."ended_at" is null) returning "id"',
+      'update "ai_calls" set "outcome" = case when "ai_calls"."outcome" = \'do_not_call\' then "ai_calls"."outcome" else \'appointment_set\' end, "updated_at" = now(), "appointment" = $1::jsonb where ("ai_calls"."id" = $2 and "ai_calls"."ended_at" is null) returning "id"',
     );
     expect(params).toEqual([JSON.stringify(BOOKED), ID]);
   });

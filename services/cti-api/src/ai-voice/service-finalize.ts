@@ -20,6 +20,7 @@
  *      promise is returned as `after` (tests, the sweeper) and never rejects.
  * Nothing after the CAS throws out of finalize.
  */
+import { bookingStands } from '@cti/contracts';
 import type { schema } from '@cti/db';
 import type { AppConfig } from '../config.js';
 import type { BridgeLog } from './bridge.js';
@@ -137,8 +138,9 @@ export interface AfterCallDeps {
 
 /** The summary (stored on the row), then the call's Task and, for a promised call back, the callback Task. */
 export async function afterAiCall(row: AiCallRow, deps: AfterCallDeps): Promise<void> {
+  const bookingFreed = row.appointment !== null && !bookingStands(row);
   const drafted = await summarizeAiCall(
-    { aiCallId: row.id, outcome: row.outcome, transcript: row.transcript, qualification: row.qualification, toolSummary: row.summary },
+    { aiCallId: row.id, outcome: row.outcome, transcript: row.transcript, qualification: row.qualification, toolSummary: row.summary, bookingFreed },
     deps.summary,
   );
   const { summary, outcome } = await withLateTransferFailure(row, drafted, deps);

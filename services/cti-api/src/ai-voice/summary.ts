@@ -56,6 +56,11 @@ export interface SummaryInput {
   qualification: unknown;
   /** What the agent's tools wrote (end_call / transfer summary, callback lines). */
   toolSummary: string | null;
+  /**
+   * The call booked, then ended in a way that frees the time (do-not-call, not interested…): the "Appointment booked:" line
+   * is dropped, so neither the summary nor the rep's Salesforce Task says a booking that no longer stands (sweep D-19(c)).
+   */
+  bookingFreed?: boolean;
 }
 
 const SYSTEM = [
@@ -180,7 +185,13 @@ async function claudeNarrative(i: SummaryInput, client: SummaryClient, deps: Sum
   }
 }
 
-export async function summarizeAiCall(i: SummaryInput, deps: SummaryDeps): Promise<string> {
+const BOOKED_LINE = /^\s*Appointment booked:/;
+
+export async function summarizeAiCall(input: SummaryInput, deps: SummaryDeps): Promise<string> {
+  const toolSummary = input.bookingFreed === true && input.toolSummary !== null
+    ? input.toolSummary.split('\n').filter((l) => !BOOKED_LINE.test(l)).join('\n')
+    : input.toolSummary;
+  const i: SummaryInput = { ...input, toolSummary };
   const callerSpoke = spokenLines(i.transcript).some((l) => l.role === 'caller');
   const fromModel = deps.client && callerSpoke ? await claudeNarrative(i, deps.client, deps) : null;
   const carried = carriedLines(i.toolSummary);

@@ -63,11 +63,19 @@ export const appointmentConflictQuery = (db: Conn, id: string, a: BookedAppointm
     )
     .limit(1);
 
-/** The booking, on a live row only (a later booking in the same call replaces it). */
+/**
+ * The booking, on a live row only (a later booking in the same call replaces it), and `appointment_set` in the same
+ * statement (sweep D-19(b)): a separate outcome write could fail on its own, and finalize would then derive an outcome
+ * that frees the booking. A do-not-call outcome is never replaced (store.setOutcome's rule).
+ */
 export const setAppointmentQuery = (db: Conn, id: string, a: BookedAppointment) =>
   db
     .update(t)
-    .set({ appointment: sql`${JSON.stringify(a)}::jsonb`, updatedAt: sql`now()` })
+    .set({
+      appointment: sql`${JSON.stringify(a)}::jsonb`,
+      outcome: sql`case when ${t.outcome} = 'do_not_call' then ${t.outcome} else 'appointment_set' end`,
+      updatedAt: sql`now()`,
+    })
     .where(and(eq(t.id, id), isNull(t.endedAt)))
     .returning({ id: t.id });
 

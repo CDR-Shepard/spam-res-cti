@@ -68,16 +68,16 @@ async function afterBooked(ctx: ToolCtx, what: string, fn: () => Promise<void>):
 }
 
 /**
- * The `bookAppointment` effect: store the booking (D-10: refused when another real call holds the time), then record
- * `appointment_set` at once (I-1), so a call that ends without end_call(appointment_set) — the caller hangs up, the time
- * limit — still ends booked. A later do-not-call, transfer or end_call decision replaces that outcome (store.setOutcome
- * never overrides do_not_call); see BOOKING_STANDS_OUTCOMES for which keep the booking.
+ * The `bookAppointment` effect: store the booking (D-10: refused when another real call holds the time). The same write
+ * records `appointment_set` (I-1; one statement since sweep D-19(b)), so a call that ends without
+ * end_call(appointment_set) — the caller hangs up, the time limit — still ends booked. A later do-not-call, transfer or
+ * end_call decision replaces that outcome (do_not_call is never overridden); see BOOKING_STANDS_OUTCOMES for which keep
+ * the booking.
  */
 export async function storeBooking(ctx: ToolCtx, booked: BookedAppointment): Promise<'booked' | 'taken'> {
   const result = await ctx.store.setAppointment(ctx.aiCallId, booked);
   if (result === 'not_live') throw new Error('the call is no longer live');
   if (result === 'taken') return 'taken';
-  await afterBooked(ctx, 'appointment_set', () => ctx.store.setOutcome(ctx.aiCallId, 'appointment_set', null));
   await afterBooked(ctx, 'booking_summary', () => noteBooking(ctx, booked));
   return 'booked';
 }

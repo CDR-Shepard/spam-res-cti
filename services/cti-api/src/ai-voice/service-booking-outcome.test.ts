@@ -134,14 +134,14 @@ describe('I-1: the outcome of a booked call', () => {
     expect((await bookP1(NEXT)).output).toMatch(/just taken/);
   });
 
-  it('a failed outcome write after the booking is logged; the agent still hears booked', async () => {
+  it('sweep D-19(b): appointment_set is written with the booking, never by a second write that could fail on its own', async () => {
     store.setOutcome = async () => {
       throw new Error('db blip');
     };
     const res = await bookP1();
     expect(res.output).toMatch(/^booked/);
-    expect(row().appointment).toMatchObject({ slotId: 'p1' });
-    expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ aiCallId: ID, err: 'db blip' }), expect.any(String));
+    expect(row()).toMatchObject({ outcome: 'appointment_set', appointment: { slotId: 'p1' } });
+    expect(log.warn).not.toHaveBeenCalled();
   });
 });
 

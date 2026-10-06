@@ -105,6 +105,17 @@ describe.skipIf(!server)('ai_calls appointment booking (real Postgres)', () => {
     expect(stored.filter((s) => s !== null)).toHaveLength(1);
   });
 
+  it('sweep D-19(b): the booking and appointment_set land together; a do-not-call outcome is never replaced', async () => {
+    const outcomeOf = async (id: string) => (await db.select({ o: schema.aiCalls.outcome }).from(schema.aiCalls).where(eq(schema.aiCalls.id, id)))[0]!.o;
+    const id = await call();
+    expect(await run(id, booked('2030-03-02T18:00:00.000Z', 15))).toBe('booked');
+    expect(await outcomeOf(id)).toBe('appointment_set');
+    const dnc = await call();
+    await db.update(schema.aiCalls).set({ outcome: 'do_not_call' }).where(eq(schema.aiCalls.id, dnc));
+    expect(await run(dnc, booked('2030-03-02T20:00:00.000Z', 15))).toBe('booked');
+    expect(await outcomeOf(dnc)).toBe('do_not_call');
+  });
+
   it('D-10: an overlapping walkthrough is taken; a time that only touches is free', async () => {
     const first = await call();
     expect(await run(first, booked('2030-01-08T17:00:00.000Z', 60))).toBe('booked');

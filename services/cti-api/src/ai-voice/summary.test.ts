@@ -132,6 +132,17 @@ describe('summarizeAiCall', () => {
     expect(out).toContain('Outcome: Appointment set');
   });
 
+  it('sweep D-19(c): bookingFreed drops the "Appointment booked:" line, with or without the model; other carried lines stay', async () => {
+    const BOOKED = 'Appointment booked: phone call 2026-10-07T18:00:00.000Z';
+    const toolSummary = `Not interested after all.\nCallback requested: never\n${BOOKED}`;
+    const { client } = fakeClient('Jane changed her mind.');
+    const withModel = await summarizeAiCall({ ...input, outcome: 'not_interested', toolSummary, bookingFreed: true }, { client, model: MODEL, log: silentLog });
+    expect(withModel).not.toContain('Appointment booked:');
+    expect(withModel).toContain('Callback requested: never');
+    const without = await summarizeAiCall({ ...input, outcome: 'not_interested', toolSummary, bookingFreed: true }, { client: null, model: MODEL, log: silentLog });
+    expect(without.startsWith('Not interested after all.\nCallback requested: never\n\n')).toBe(true);
+  });
+
   it('without a key: the tool summary, deterministic', async () => {
     const out = await summarizeAiCall(input, { client: null, model: MODEL, log: silentLog });
     expect(out.startsWith('Wants a call Thursday.\nCallback requested: Thursday after 5 PM — after work\n\nQualification:')).toBe(true);
