@@ -53,10 +53,15 @@ describe.skipIf(!pgLane)('record test limits (real Postgres)', () => {
       orgId, recordTestId, requestedBy: userId, mode: 'phone', toE164: '+15125550111', idempotencyKey: `rtest:${randomUUID()}`, aiCallId, createdAt,
     });
   }
+  /** Inserts as the route does, but at the test's clock (never the DB default `now()`, which is the wall clock). */
   const previewLimit = (t: { orgId: string; admin: string }, over: { now?: Date; budgetMicros?: number } = {}) =>
-    withPreviewLimit(db, { orgId: t.orgId, userId: t.admin, now: over.now ?? NOW, budgetMicros: over.budgetMicros ?? BUDGET }, (tx) =>
-      insertRecordTest(tx, { orgId: t.orgId, requestedBy: t.admin, sfObject: 'Lead', sfRecordId: LEAD }),
-    );
+    withPreviewLimit(db, { orgId: t.orgId, userId: t.admin, now: over.now ?? NOW, budgetMicros: over.budgetMicros ?? BUDGET }, async (tx) => {
+      const [row] = await tx
+        .insert(schema.aiRecordTests)
+        .values({ orgId: t.orgId, requestedBy: t.admin, sfObject: 'Lead', sfRecordId: LEAD, createdAt: over.now ?? NOW })
+        .returning({ id: schema.aiRecordTests.id });
+      return row!.id;
+    });
   const callLimit = (t: { orgId: string; admin: string }) => withCallLimit(db, { orgId: t.orgId, userId: t.admin, now: NOW }, async () => 'inserted');
 
   it('pins the numbers', () => {
