@@ -156,6 +156,8 @@ describe('booking settings', () => {
     expect(AiCallBookingSettings.safeParse({ ...booking, specialists: Array.from({ length: 21 }, () => GRANT) }).success).toBe(false);
     expect(AiCallBookingSettings.safeParse({ ...booking, days: [] }).success).toBe(false);
     expect(AiCallBookingSettings.safeParse({ ...booking, days: [0] }).success).toBe(false);
+    // sweep D-8: each weekday once.
+    expect(AiCallBookingSettings.safeParse({ ...booking, days: [1, 2, 2] }).success).toBe(false);
   });
 });
 

@@ -125,8 +125,9 @@ describe('migration 0055_ai_call_writebacks', () => {
     expect(config.foreignKeys).toHaveLength(0);
     const unique = config.indexes.find((i) => i.config.name === 'ai_call_writebacks_ai_call_unique');
     expect(unique?.config.unique).toBe(true);
+    // 0055's three, plus the foreign-key indexes 0056 adds (pinned in migration-0056.test.ts).
     expect(config.indexes.map((i) => i.config.name).sort()).toEqual(
-      ['ai_call_writebacks_ai_call_unique', 'ai_call_writebacks_due_idx', 'ai_call_writebacks_record_idx'].sort(),
+      ['ai_call_writebacks_ai_call_unique', 'ai_call_writebacks_due_idx', 'ai_call_writebacks_record_idx', 'ai_call_writebacks_touch_idx', 'ai_call_writebacks_enrollment_idx'].sort(),
     );
   });
 
@@ -137,6 +138,8 @@ describe('migration 0055_ai_call_writebacks', () => {
       PRACTICE_LINES.map((l) => ({ name: l.slice(1, l.indexOf('"', 1)), notNull: / NOT NULL| PRIMARY KEY/.test(l) })),
     );
     expect(config.foreignKeys).toHaveLength(0);
-    expect(config.indexes.map((i) => i.config.name)).toEqual(['ai_practice_calls_campaign_idx']);
+    // 0055's campaign index, plus the foreign-key indexes 0056 adds (pinned in migration-0056.test.ts).
+    expect(config.indexes.map((i) => i.config.name)[0]).toBe('ai_practice_calls_campaign_idx');
+    expect(config.indexes).toHaveLength(6);
   });
 });

@@ -61,6 +61,9 @@ export const aiCallWritebacks = pgTable(
     aiCallUnique: uniqueIndex('ai_call_writebacks_ai_call_unique').on(t.aiCallId),
     dueIdx: index('ai_call_writebacks_due_idx').on(t.nextAttemptAt).where(sql`status IN ('pending', 'running')`),
     recordIdx: index('ai_call_writebacks_record_idx').on(t.orgId, t.sfRecordId),
+    // 0056 (sweep D-8): the foreign-key columns no index led with.
+    touchIdx: index('ai_call_writebacks_touch_idx').on(t.touchId),
+    enrollmentIdx: index('ai_call_writebacks_enrollment_idx').on(t.enrollmentId),
   }),
 );
 
@@ -87,6 +90,12 @@ export const aiPracticeCalls = pgTable(
   },
   (t) => ({
     campaignIdx: index('ai_practice_calls_campaign_idx').on(t.campaignId, sql`${t.createdAt} desc`),
+    // 0056 (sweep D-8): the foreign-key columns no index led with.
+    orgIdx: index('ai_practice_calls_org_idx').on(t.orgId),
+    enrollmentIdx: index('ai_practice_calls_enrollment_idx').on(t.enrollmentId),
+    callPlanIdx: index('ai_practice_calls_call_plan_idx').on(t.callPlanId),
+    aiCallIdx: index('ai_practice_calls_ai_call_idx').on(t.aiCallId),
+    requestedByIdx: index('ai_practice_calls_requested_by_idx').on(t.requestedBy),
   }),
 );
 

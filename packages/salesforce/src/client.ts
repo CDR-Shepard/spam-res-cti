@@ -194,7 +194,9 @@ export class SalesforceClient {
 
   /**
    * POST a SOAP envelope to /services/Soap/u/{n} (n = apiVersion without the 'v'). `bodyXml` goes inside
-   * <env:Body>; the SessionHeader carries the current access token (the connection's `api` scope covers SOAP).
+   * <env:Body> as is, so it must be trusted XML built by this package with every value passed through xmlEscape
+   * (xml.ts); never pass text from a call, a record or a request (sweep D-8). The SessionHeader carries the current
+   * access token (the connection's `api` scope covers SOAP).
    * A fault `INVALID_SESSION_ID` (or HTTP 401) refreshes the token once and retries; a second one throws
    * SalesforceAuthError. Other faults are returned for the caller to read. 30 s timeout, like every request.
    */

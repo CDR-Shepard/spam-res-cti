@@ -116,7 +116,12 @@ export const AiCallBookingSettings = z
     specialists: z.array(z.string().regex(SF_USER_ID)).max(20),
     /** A Lead that books is converted (decision 2). Off → the hold + Task fallback for every Lead booking. */
     convertLeads: z.boolean(),
-    days: z.array(z.number().int().min(1).max(7)).min(1).max(7),
+    /** ISO weekdays (1 Monday … 7 Sunday), each once (sweep D-8). */
+    days: z
+      .array(z.number().int().min(1).max(7))
+      .min(1)
+      .max(7)
+      .refine((d) => new Set(d).size === d.length, { message: 'each day once' }),
     phone: KindSettings,
     walkthrough: KindSettings,
   })
