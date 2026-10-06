@@ -142,7 +142,7 @@ export async function loadOrgTick(deps: PaceDeps, orgId: string): Promise<OrgTic
     return null;
   }
   let calendar: Promise<OfferCalendar> | null = null;
-  const readCalendar = (): Promise<OfferCalendar> => (calendar ??= readOfferCalendar(client, { booking, now: deps.now }));
+  const readCalendar = (): Promise<OfferCalendar> => (calendar ??= readOfferCalendar(client, { booking, now: deps.now, log: deps.log }));
   return { slots, candidates, plans, fresh: (id) => fresh.get(core(id)), newActivity, client, booking, calendar: readCalendar };
 }
 
