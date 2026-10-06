@@ -87,6 +87,15 @@ describe('convertStep', () => {
     expect(converts(f)).toEqual([]);
   });
 
+  it('adopting while SOAP is closed to this connection (a permanent fault): not ours, since the AI converts only over SOAP', async () => {
+    const f = org(converted, [[READ_OPP, [{ Id: OPP, CreatedById: US, CreatedDate: '2026-10-06T22:15:00.000+0000' }]]]);
+    f.onSoap = () => soapFaultAnswer('API_DISABLED_FOR_ORG', 'API is not enabled');
+    expect((await step(f)).outcome).toMatchObject({ kind: 'adopted', ours: false });
+    const t = org(converted, [[READ_OPP, [{ Id: OPP, CreatedById: US, CreatedDate: '2026-10-06T22:15:00.000+0000' }]]]);
+    t.onSoap = () => soapFaultAnswer('UNKNOWN_EXCEPTION');
+    await expect(step(t)).rejects.toMatchObject({ code: 'UNKNOWN_EXCEPTION' });
+  });
+
   it('4: converted without an Opportunity: no_opportunity with the Account', async () => {
     const f = org({ ...converted, ConvertedOpportunityId: null });
     expect((await step(f)).outcome).toEqual({ kind: 'no_opportunity', accountId: ACCOUNT });

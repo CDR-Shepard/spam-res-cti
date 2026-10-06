@@ -75,6 +75,19 @@ async function readLead(client: SalesforceClient, leadId: string, select: readon
   return values;
 }
 
+/**
+ * Whether `userId` is the connected user (SOAP getUserInfo). When SOAP is closed to this connection for good, the AI cannot
+ * have converted anything (it converts only over SOAP), so the answer is no; a transient failure throws (retried).
+ */
+async function connectedUserIs(client: SalesforceClient, userId: string): Promise<boolean> {
+  try {
+    return core((await getUserInfo(client)).userId) === core(userId);
+  } catch (err) {
+    if (err instanceof SalesforceAuthError || (err instanceof SalesforceApiError && err.code !== undefined && isPermanentSoapFault(err.code))) return false;
+    throw err;
+  }
+}
+
 /** A converted Lead's outcome: its Opportunity adopted (ours when we made it after the call), or none to adopt. */
 async function adopt(client: SalesforceClient, lead: Row, callEndedAt: Date): Promise<ConvertOutcome> {
   const oppId = sfId(lead.ConvertedOpportunityId);
@@ -86,7 +99,7 @@ async function adopt(client: SalesforceClient, lead: Row, callEndedAt: Date): Pr
   const after = !Number.isNaN(created.getTime()) && created.getTime() > callEndedAt.getTime();
   const createdBy = sfId(opp.CreatedById);
   // Only a recent Opportunity can be ours, so the connected user is looked up only then.
-  const ours = after && createdBy !== null && core(createdBy) === core((await getUserInfo(client)).userId);
+  const ours = after && createdBy !== null && (await connectedUserIs(client, createdBy));
   return { kind: 'adopted', opportunityId: oppId, accountId, contactId: sfId(lead.ConvertedContactId), adopted: true, ours };
 }
 
