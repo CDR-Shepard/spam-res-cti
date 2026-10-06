@@ -14,3 +14,4 @@ export * from './appointments.js';
 export * from './agent-plan-text.js';
 export * from './call-subjects.js';
 export * from './contact-words.js';
+export * from './record-tests.js';

@@ -1,9 +1,12 @@
 import { z } from 'zod';
 import { AppointmentSlots, BookedAppointment, CallContext } from './appointments.js';
 import { SfObject } from './crm.js';
+import { AI_TEST_IDENTITY_RE } from './ai-test-identity.js';
 
 export const INTERNAL_AI_CALLS_PATH = '/internal/ai-calls';
 export const INTERNAL_AI_AVAILABILITY_PATH = '/internal/ai-calls/availability';
+/** Plan 1E: an incoming-only Twilio Voice token for a "Talk in browser" test. */
+export const INTERNAL_AI_BROWSER_TOKEN_PATH = '/internal/ai-calls/browser-token';
 /** The approved plan as the voice agent receives it (fenced as data in its instructions). */
 export const PLAN_TEXT_MAX = 4_000;
 
@@ -34,6 +37,8 @@ const SF_RECORD_ID = z.string().regex(/^[a-zA-Z0-9]{15,18}$/);
  * test     An admin's test number, optionally with a plan.
  * practice An admin's test number with a real record's plan and prompt (plan 1D decision 6): never books,
  *          converts or writes to Salesforce, and a transfer rings the admin who started it.
+ * practice_browser  Plan 1E: a practice call that rings the admin's browser (`client:<clientIdentity>`)
+ *          instead of a test number. The identity embeds the admin's user id; cti-api's gate checks it.
  */
 export const InternalAiCallTarget = z.discriminatedUnion('kind', [
   z
@@ -58,6 +63,17 @@ export const InternalAiCallTarget = z.discriminatedUnion('kind', [
       slots: AppointmentSlots.optional(),
     })
     .strict(),
+  z
+    .object({
+      kind: z.literal('practice_browser'),
+      objectType: z.enum(['Lead', 'Opportunity']),
+      recordId: SF_RECORD_ID,
+      clientIdentity: z.string().regex(AI_TEST_IDENTITY_RE),
+      planText: z.string().min(1).max(PLAN_TEXT_MAX),
+      context: CallContext.optional(),
+      slots: AppointmentSlots.optional(),
+    })
+    .strict(),
 ]);
 export type InternalAiCallTarget = z.infer<typeof InternalAiCallTarget>;
 
@@ -74,9 +90,23 @@ export const InternalAiCallResponse = z.discriminatedUnion('result', [
 ]);
 export type InternalAiCallResponse = z.infer<typeof InternalAiCallResponse>;
 
-/** GET /internal/ai-calls/availability (cti-api), HMAC-signed; relayed to admins by outreach-api. */
-export const AiAvailability = z.object({ available: z.boolean(), testNumbers: z.array(z.string()) });
+/**
+ * GET /internal/ai-calls/availability (cti-api), HMAC-signed; relayed to admins by outreach-api.
+ * `browserCalls` (plan 1E) is optional so an older cti-api, which never sends it, reads as "no browser tests".
+ */
+export const AiAvailability = z.object({ available: z.boolean(), testNumbers: z.array(z.string()), browserCalls: z.boolean().optional() });
 export type AiAvailability = z.infer<typeof AiAvailability>;
+
+/** POST /internal/ai-calls/browser-token (cti-api), HMAC-signed: `userId` is the admin who will take the call. */
+export const InternalBrowserTokenRequest = z.object({ orgId: z.string().uuid(), userId: z.string().uuid() }).strict();
+export type InternalBrowserTokenRequest = z.infer<typeof InternalBrowserTokenRequest>;
+/** An incoming-only Voice token (no outgoing grant) for a fresh aitest identity. Never logged. */
+export const InternalBrowserTokenResponse = z.object({
+  token: z.string().min(1),
+  identity: z.string().regex(AI_TEST_IDENTITY_RE),
+  expiresAt: z.string(),
+});
+export type InternalBrowserTokenResponse = z.infer<typeof InternalBrowserTokenResponse>;
 
 /** ai_calls.status / ai_calls.outcome (migration 0050). */
 export const AiCallStatus = z.enum(['queued', 'ringing', 'in_progress', 'transferring', 'transferred', 'completed', 'failed', 'blocked']);

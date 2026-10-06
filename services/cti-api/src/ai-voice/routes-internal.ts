@@ -83,6 +83,9 @@ function targetKeys(body: Body): Pick<CallLookup, 'sfRecordId' | 'toE164' | 'kin
     case 'practice':
       // A practice call rings the admin's test number (its row also carries the record id, but so may a real call's).
       return { sfRecordId: null, toE164: toE164(t.to) ?? t.to.slice(0, 20), kind: t.kind };
+    case 'practice_browser':
+      // Plan 1E: no caller sends this kind before Task 7 handles it; never answer for it here.
+      throw new Error('practice_browser is handled in Task 7');
   }
 }
 
@@ -99,6 +102,9 @@ function startTarget(t: Body['target']): Pick<StartInput, 'target' | 'slots' | '
       };
     case 'test':
       return { target: { testTo: t.to } };
+    case 'practice_browser':
+      // Plan 1E: no caller sends this kind before Task 7 handles it; never answer for it here.
+      throw new Error('practice_browser is handled in Task 7');
   }
 }
 

@@ -6,10 +6,13 @@ import {
   AiCallOutcome,
   AiCallResult,
   INTERNAL_AI_AVAILABILITY_PATH,
+  INTERNAL_AI_BROWSER_TOKEN_PATH,
   INTERNAL_AI_CALLS_PATH,
   IdempotencyKey,
   InternalAiCallRequest,
   InternalAiCallResponse,
+  InternalBrowserTokenRequest,
+  InternalBrowserTokenResponse,
   PLAN_TEXT_MAX,
   PracticeCall,
   PracticeCallRequest,
@@ -194,5 +197,46 @@ describe('plan 1D: context, slots, practice calls, appointment_set', () => {
       result: { result: 'failed', reason: 'in_flight', aiCallId: null }, createdAt: '2026-10-06T18:00:00.000Z',
     };
     expect(PracticeCall.parse(item)).toEqual(item);
+  });
+});
+
+const IDENTITY = 'aitest_22222222222242228222222222222222_a1b2c3d4e5f6';
+const browserTarget = { kind: 'practice_browser', objectType: 'Lead', recordId: '00Q8X00001AbCdEUAV', clientIdentity: IDENTITY, planText: 'x' };
+
+describe('plan 1E: the practice_browser target, the browser token, browserCalls', () => {
+  it('pins the token path', () => {
+    expect(INTERNAL_AI_BROWSER_TOKEN_PATH).toBe('/internal/ai-calls/browser-token');
+  });
+
+  it('14: a practice_browser target with an aitest identity parses, with or without slots and context', () => {
+    const body = { ...recordRequest, target: browserTarget };
+    expect(InternalAiCallRequest.parse(body)).toEqual(body);
+    const full = { ...recordRequest, target: { ...browserTarget, context: { returning: true }, slots: [SLOT] } };
+    expect(InternalAiCallRequest.parse(full)).toEqual(full);
+  });
+
+  it.each([
+    ['a to', { ...browserTarget, to: '+15125550100' }],
+    ['a rep softphone identity', { ...browserTarget, clientIdentity: 'rep_22222222222242228222222222222222' }],
+    ['a client: prefix', { ...browserTarget, clientIdentity: `client:${IDENTITY}` }],
+    ['missing clientIdentity', (() => { const { clientIdentity: _c, ...rest } = browserTarget; return rest; })()],
+    ['an empty planText', { ...browserTarget, planText: '' }],
+  ])('15: a practice_browser target with %s is rejected', (_label, target) => {
+    expect(InternalAiCallRequest.safeParse({ ...recordRequest, target }).success).toBe(false);
+  });
+
+  it('16: availability from an older cti-api (no browserCalls) still parses', () => {
+    const old = AiAvailability.parse({ available: true, testNumbers: [] });
+    expect(old.browserCalls).toBeUndefined();
+    expect(AiAvailability.parse({ available: true, testNumbers: [], browserCalls: true }).browserCalls).toBe(true);
+  });
+
+  it('17: the token request is strict; the answer carries an aitest identity', () => {
+    expect(InternalBrowserTokenRequest.safeParse({ orgId: ORG, userId: USER }).success).toBe(true);
+    expect(InternalBrowserTokenRequest.safeParse({ orgId: ORG, userId: USER, extra: 1 }).success).toBe(false);
+    expect(InternalBrowserTokenRequest.safeParse({ orgId: ORG }).success).toBe(false);
+    const ok = { token: 't', identity: IDENTITY, expiresAt: '2026-10-06T18:20:00.000Z' };
+    expect(InternalBrowserTokenResponse.parse(ok)).toEqual(ok);
+    expect(InternalBrowserTokenResponse.safeParse({ ...ok, token: '' }).success).toBe(false);
   });
 });
