@@ -2,7 +2,7 @@
  * The prompt for one lead's call plan. Every value from Salesforce is escaped into
  * <record>/<activity> tags and described as quoted data (same pattern as triage/notes.ts).
  */
-import { DoNotContactCategory } from '@cti/contracts';
+import { DoNotContactCategory, NO_CONTACT_IN_RECENT_ACTIVITY } from '@cti/contracts';
 import type { ResearchSnapshot } from '../research/snapshot.js';
 import { escapeAttr, escapeData } from '../research/text.js';
 import type { PlanFacts } from './plan-context.js';
@@ -75,7 +75,8 @@ function gapBlock(s: ResearchSnapshot): string[] {
 
 /** Computed by us (plan-context.ts): the words are already digit-free and the topics are enum keys. */
 function factsBlock(f: PlanFacts): string[] {
-  const contact = f.lastContactWords === null ? 'none found' : `${escapeData(f.lastContactWords)}${f.lastContactKind ? ` (${f.lastContactKind})` : ''}`;
+  const none = f.contactSearchLimited ? NO_CONTACT_IN_RECENT_ACTIVITY : 'none found';
+  const contact = f.lastContactWords === null ? none : `${escapeData(f.lastContactWords)}${f.lastContactKind ? ` (${f.lastContactKind})` : ''}`;
   return ['<facts>', `Last real contact: ${contact}`, `Missing in Salesforce: ${f.missing.length ? f.missing.join(', ') : 'nothing'}`, '</facts>'];
 }
 

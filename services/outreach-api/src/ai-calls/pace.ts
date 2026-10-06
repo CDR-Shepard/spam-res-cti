@@ -177,7 +177,7 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
   if (!plan || plan.status !== 'approved' || plan.enrollmentId !== c.enrollmentId || !plan.plan) {
     return skipResult(deps, c, await planNoLongerApproved(db, c, now));
   }
-  const rendered = renderPlanForAgent(plan.plan);
+  const rendered = renderPlanForAgent(plan.plan, now);
   if (!rendered.ok) {
     deps.log.warn({ orgId: c.orgId, touchId: c.touchId, issues: rendered.issues }, 'ai_call.place: the plan fails the voice agent text check');
     await parkPlan(db, { touchId: c.touchId, enrollmentId: c.enrollmentId, planId: plan.id }, 'plan_rejected', now);

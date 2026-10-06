@@ -31,6 +31,11 @@ describe('describePlanTextIssues', () => {
     ]);
   });
 
+  it('Fix 1 (M-5): names the last-contact line by its kind', () => {
+    const email = { ...plan, reengagement: { lastContact: 'last week', lastContactKind: 'email' as const, lastTopic: null } };
+    expect(describePlanTextIssues(email, [{ path: 'reengagement.lastContact', issue: 'money' }])).toEqual(['Last email from them: a price or an amount']);
+  });
+
   it('groups the problems of one field and says so for the whole text', () => {
     expect(describePlanTextIssues(plan, [{ path: 'opener', issue: 'money' }, { path: 'opener', issue: 'offer' }])).toEqual(['the opener: a price or an amount, offer wording']);
     expect(describePlanTextIssues(plan, [{ path: '(rendered)', issue: 'url' }])).toEqual(['the whole plan: a web address']);

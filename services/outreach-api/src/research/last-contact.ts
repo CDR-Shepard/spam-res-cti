@@ -38,7 +38,6 @@ const CALL_SUBJECT = /^(?:(?:inbound|outbound) call|callrail recording|voice ?ma
 const CTI_SUBJECT = /^(?:inbound|outbound) call \| /i;
 const MEETING = /consult|appointment|walk|meeting|visit/i;
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-const DAY_MS = 86_400_000;
 
 type Item = ResearchSnapshot['activity'][number];
 
@@ -110,20 +109,5 @@ export function lastRealContact(s: ResearchSnapshot, now: Date): LastContact | n
   return newest;
 }
 
-/** The calendar day of `d` in `timeZone`, as a UTC midnight timestamp, so two days subtract to whole days. */
-function dayNumber(d: Date, timeZone: string): number {
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: 'numeric', day: 'numeric' }).formatToParts(d);
-  const part = (type: string) => Number(parts.find((p) => p.type === type)?.value);
-  return Date.UTC(part('year'), part('month') - 1, part('day')) / DAY_MS;
-}
-
-/** Words with no digits: "earlier this week", "last week", "back in February", "about a year ago", "about two years ago", "a few years ago". */
-export function contactWords(at: Date, now: Date, timeZone = 'America/Los_Angeles'): string {
-  const days = dayNumber(now, timeZone) - dayNumber(at, timeZone);
-  if (days < 7) return 'earlier this week';
-  if (days < 14) return 'last week';
-  if (days < 330) return `back in ${new Intl.DateTimeFormat('en-US', { timeZone, month: 'long' }).format(at)}`;
-  if (days < 548) return 'about a year ago';
-  if (days < 913) return 'about two years ago';
-  return 'a few years ago';
-}
+/** Fix 1 (M-4): the words live in @cti/contracts, so the web's card and the agent's plan text say them the same way. */
+export { contactWords } from '@cti/contracts';

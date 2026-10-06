@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { EnrollmentStatus } from './campaigns.js';
+import { ContactKind } from './contact-words.js';
 import { SfObject } from './crm.js';
 import { DoNotContactCategory } from './review.js';
 
@@ -70,6 +71,12 @@ export const QUALIFICATION_TOPICS = QualificationTopic.options;
 export const Reengagement = z.object({
   /** Computed words ("back in February"), never digits; overwritten after parsing (Task 9). */
   lastContact: z.string().trim().min(1).max(80).nullable(),
+  /**
+   * Fix 1 (M-4): when the contact was and what kind it was, set by our system (never the model or a person). The words
+   * are worked out from the date when the plan is read (contact-words.ts); plans stored before Fix 1 have neither.
+   */
+  lastContactAt: z.string().datetime({ offset: true }).nullable().optional(),
+  lastContactKind: ContactKind.nullable().optional(),
   lastTopic: z.string().trim().min(1).max(200).nullable(),
 });
 export type Reengagement = z.infer<typeof Reengagement>;

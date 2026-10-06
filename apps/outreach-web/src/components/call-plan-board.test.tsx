@@ -165,11 +165,45 @@ describe('CallPlanBoard', () => {
     stubApi({ [`GET ${BOARD}`]: board([card(1, { plan: { ...card(1).plan!, plan } }), card(2)], { review: 2 }) });
     render();
     const c = within(await cardOf('Lead 1'));
-    expect(c.getByText('Last real contact: back in February: the roof leak')).toBeInTheDocument();
+    // A plan stored before Fix 1 has no date: its stored words are shown.
+    expect(c.getByText('Last time we spoke: back in February — the roof leak')).toBeInTheDocument();
     expect(c.getByText('Still to learn: timeline, their price in mind')).toBeInTheDocument();
     const two = within(await cardOf('Lead 2'));
-    expect(two.queryByText(/Last real contact/)).toBeNull();
+    expect(two.queryByText(/Last time we spoke|Last real contact|Last email/)).toBeNull();
     expect(two.queryByText(/Still to learn/)).toBeNull();
+  });
+
+  describe('Fix 1: the card words the last contact as of now, by its kind', () => {
+    afterEach(() => vi.useRealTimers());
+    const dated = (kind: 'call' | 'meeting' | 'email'): EditableCallPlan => ({
+      ...PLAN,
+      reengagement: { lastContact: 'earlier this week', lastContactAt: '2026-09-14T17:00:00.000Z', lastContactKind: kind, lastTopic: 'the roof leak' },
+      stillToLearn: ['timeline'],
+    });
+
+    it('M-4: from the stored date, relative to today, not the day the plan was made', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-10-20T19:00:00.000Z'));
+      stubApi({ [`GET ${BOARD}`]: board([card(1, { plan: { ...card(1).plan!, plan: dated('call') } })], { review: 1 }) });
+      render();
+      expect(within(await cardOf('Lead 1')).getByText('Last time we spoke: back in September — the roof leak')).toBeInTheDocument();
+    });
+
+    it('M-5: an email reads "Last email from them"', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-09-29T19:00:00.000Z'));
+      stubApi({ [`GET ${BOARD}`]: board([card(1, { plan: { ...card(1).plan!, plan: dated('email') } })], { review: 1 }) });
+      render();
+      expect(within(await cardOf('Lead 1')).getByText('Last email from them: earlier this month — the roof leak')).toBeInTheDocument();
+    });
+
+    it('M-8: no contact found while research read only recent activity says so; a full read says nothing', async () => {
+      const cut = { version: 1, collectedAt: '2026-10-05T10:00:00.000Z', sources: [{ source: 'tasks' as const, status: 'ok' as const, count: 25, truncated: true, note: null }] };
+      stubApi({ [`GET ${BOARD}`]: board([card(1, { research: cut }), card(2)], { review: 2 }) });
+      render();
+      expect(within(await cardOf('Lead 1')).getByText('Last real contact: none found in recent activity')).toBeInTheDocument();
+      expect(within(await cardOf('Lead 2')).queryByText(/Last real contact/)).toBeNull();
+    });
   });
 
   it('1D: the editor shows the contact read-only, edits the topic and submits the changed topics to learn', async () => {
@@ -177,7 +211,7 @@ describe('CallPlanBoard', () => {
     const calls = stubApi({ [`GET ${BOARD}`]: board([card(1, { plan: { ...card(1).plan!, plan } })], { review: 1 }), [`PUT /api/call-plans/${ID(1)}`]: card(1) });
     render();
     await userEvent.click(within(await cardOf('Lead 1')).getByRole('button', { name: 'Edit' }));
-    expect(screen.getByText('Last real contact: back in February')).toBeInTheDocument();
+    expect(screen.getByText('Last time we spoke: back in February')).toBeInTheDocument();
     const topic = screen.getByLabelText('What we last talked about');
     expect(topic).toHaveAttribute('maxLength', '200');
     await userEvent.clear(topic);
@@ -189,6 +223,17 @@ describe('CallPlanBoard', () => {
     await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
     const put = calls.find((c) => c.method === 'PUT')!;
     expect((put.body as { plan: EditableCallPlan }).plan).toMatchObject({ reengagement: { lastContact: 'back in February', lastTopic: 'the roof and the move' }, stillToLearn: ['price', 'mortgage'] });
+  });
+
+  it('Fix 1 (M-4): an edit carries the stored contact date and kind', async () => {
+    const reengagement = { lastContact: 'last week', lastContactAt: '2026-09-28T17:00:00.000Z', lastContactKind: 'email' as const, lastTopic: 'the move' };
+    const calls = stubApi({ [`GET ${BOARD}`]: board([card(1, { plan: { ...card(1).plan!, plan: { ...PLAN, reengagement, stillToLearn: ['price'] } } })], { review: 1 }), [`PUT /api/call-plans/${ID(1)}`]: card(1) });
+    render();
+    await userEvent.click(within(await cardOf('Lead 1')).getByRole('button', { name: 'Edit' }));
+    expect(screen.getByText(/^Last email from them: /)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    expect((calls.find((c) => c.method === 'PUT')!.body as { plan: EditableCallPlan }).plan.reengagement).toEqual(reengagement);
   });
 
   it('1D: an edit keeps reengagement null when there was no contact, and carries the topics untouched', async () => {

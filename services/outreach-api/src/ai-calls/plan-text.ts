@@ -15,7 +15,16 @@
  *    (avoid, then talking points, then selling signals), then whole questions (one always
  *    stays), so the cut is deterministic and never splits a character.
  */
-import { PLAN_TEXT_MAX, agentPlanTextIssues, type AgentPlanIssue, type CallGoalKey, type EditableCallPlan, type QualificationTopic } from '@cti/contracts';
+import {
+  PLAN_TEXT_MAX,
+  agentPlanTextIssues,
+  contactLabel,
+  lastContactWordsAt,
+  type AgentPlanIssue,
+  type CallGoalKey,
+  type EditableCallPlan,
+  type QualificationTopic,
+} from '@cti/contracts';
 
 export interface PlanTextIssue {
   /** The plan field, as a zod-style path (`goals.3.known`), or `(rendered)` for the whole text. */
@@ -53,12 +62,19 @@ const bullets = (items: readonly string[]): string => items.map((i) => `- ${i}`)
  */
 const knownText = (g: EditableCallPlan['goals'][number]): string | null => (g.goal === 'price_expectations' ? null : g.known);
 
+/**
+ * Fix 1 (M-4): the last contact in words as of `now` (the moment the plan is rendered for a call or checked), worked
+ * out from its stored date; a plan stored before Fix 1 keeps its stored words.
+ */
+const contactAt = (plan: EditableCallPlan, now: Date): string | null => lastContactWordsAt(plan.reengagement, now);
+
 /** Every plan field the agent may receive, with its path. */
-function sentFields(plan: EditableCallPlan): Array<[string, string]> {
+function sentFields(plan: EditableCallPlan, now: Date): Array<[string, string]> {
   const r = plan.reengagement;
+  const words = contactAt(plan, now);
   return [
     ['opener', plan.opener],
-    ...(r?.lastContact ? [['reengagement.lastContact', r.lastContact] as [string, string]] : []),
+    ...(words ? [['reengagement.lastContact', words] as [string, string]] : []),
     ...(r?.lastTopic ? [['reengagement.lastTopic', r.lastTopic] as [string, string]] : []),
     ...plan.goals.flatMap((g, i): Array<[string, string]> => {
       const known = knownText(g);
@@ -72,29 +88,31 @@ function sentFields(plan: EditableCallPlan): Array<[string, string]> {
 }
 
 /** CF-9 check of every field that would be sent; `[]` = the plan may go to the agent. */
-export function planTextIssues(plan: EditableCallPlan): PlanTextIssue[] {
-  return sentFields(plan).flatMap(([path, text]) => agentPlanTextIssues(text, { singleLine: true }).map((issue) => ({ path, issue })));
+export function planTextIssues(plan: EditableCallPlan, now: Date = new Date()): PlanTextIssue[] {
+  return sentFields(plan, now).flatMap(([path, text]) => agentPlanTextIssues(text, { singleLine: true }).map((issue) => ({ path, issue })));
 }
 
 /**
  * Plan 1D: right after the opener, and part of what is required, so the cut never drops them. A plan stored before 1D
- * (no re-engagement, nothing still to learn) renders exactly as it did.
+ * (no re-engagement, nothing still to learn) renders exactly as it did. Fix 1 (M-5): the label follows the kind of
+ * contact ("Last email from them" for an email).
  */
-function returningLines(plan: EditableCallPlan): string[] {
+function returningLines(plan: EditableCallPlan, now: Date): string[] {
   const r = plan.reengagement;
+  const words = contactAt(plan, now);
   return [
-    ...(r?.lastContact ? [`Last time we spoke: ${r.lastContact}${r.lastTopic ? ` — ${r.lastTopic}` : ''}`] : []),
+    ...(words ? [`${contactLabel(r?.lastContactKind)}: ${words}${r?.lastTopic ? ` — ${r.lastTopic}` : ''}`] : []),
     ...(plan.stillToLearn.length ? [`Still to learn: ${plan.stillToLearn.map((t) => TOPIC_LABELS[t]).join(', ')}`] : []),
   ];
 }
 
-function required(plan: EditableCallPlan, questions: number): string[] {
+function required(plan: EditableCallPlan, questions: number, now: Date): string[] {
   const state = (g: EditableCallPlan['goals'][number]): string => {
     if (!g.known) return 'unknown';
     return g.goal === 'price_expectations' ? 'known' : `known: ${g.known}`;
   };
   const goal = (g: EditableCallPlan['goals'][number]) => `- ${GOAL_LABELS[g.goal]} (${state(g)}) — ${g.approach}`;
-  return [[`Opener: ${plan.opener}`, ...returningLines(plan)].join('\n'), `Goals:\n${plan.goals.map(goal).join('\n')}`, `Questions:\n${bullets(plan.questions.slice(0, questions))}`];
+  return [[`Opener: ${plan.opener}`, ...returningLines(plan, now)].join('\n'), `Goals:\n${plan.goals.map(goal).join('\n')}`, `Questions:\n${bullets(plan.questions.slice(0, questions))}`];
 }
 
 function optional(plan: EditableCallPlan): string[] {
@@ -106,18 +124,18 @@ function optional(plan: EditableCallPlan): string[] {
 }
 
 /** The longest deterministic rendering within PLAN_TEXT_MAX. */
-function fitted(plan: EditableCallPlan): string {
+function fitted(plan: EditableCallPlan, now: Date): string {
   const extra = optional(plan);
   for (let keep = extra.length; keep >= 0; keep -= 1) {
-    const text = [...required(plan, plan.questions.length), ...extra.slice(0, keep)].join('\n\n');
+    const text = [...required(plan, plan.questions.length, now), ...extra.slice(0, keep)].join('\n\n');
     if (text.length <= PLAN_TEXT_MAX) return text;
   }
   for (let n = plan.questions.length - 1; n >= 1; n -= 1) {
-    const text = required(plan, n).join('\n\n');
+    const text = required(plan, n, now).join('\n\n');
     if (text.length <= PLAN_TEXT_MAX) return text;
   }
   // Beyond the contract's field caps only: keep whole lines (a too-long first line is cut at a space).
-  const lines = required(plan, 1).join('\n\n').split('\n');
+  const lines = required(plan, 1, now).join('\n\n').split('\n');
   let out = '';
   for (const line of lines) {
     const next = out ? `${out}\n${line}` : line;
@@ -134,10 +152,11 @@ function cutLine(line: string): string {
   return space > 0 ? head.slice(0, space) : head;
 }
 
-export function renderPlanForAgent(plan: EditableCallPlan): RenderedPlan {
-  const issues = planTextIssues(plan);
+/** `now`: when the call is triggered; the last contact's words are said as of then (Fix 1, M-4). */
+export function renderPlanForAgent(plan: EditableCallPlan, now: Date = new Date()): RenderedPlan {
+  const issues = planTextIssues(plan, now);
   if (issues.length > 0) return { ok: false, issues };
-  const text = fitted(plan);
+  const text = fitted(plan, now);
   // The labels and layout are ours, but the whole text is checked again exactly as cti-api will.
   const whole = agentPlanTextIssues(text, { singleLine: false });
   return whole.length > 0 ? { ok: false, issues: whole.map((issue) => ({ path: '(rendered)', issue })) } : { ok: true, text };

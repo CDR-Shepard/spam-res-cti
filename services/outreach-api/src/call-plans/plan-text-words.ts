@@ -2,7 +2,7 @@
  * The CF-9 plan-text check (the same one the voice agent's rendering runs) in the words a person reads on the board
  * and in the editor: which field, and what is wrong with it.
  */
-import type { AgentPlanIssue, EditableCallPlan } from '@cti/contracts';
+import { contactLabel, type AgentPlanIssue, type EditableCallPlan } from '@cti/contracts';
 import { GOAL_LABELS, planTextIssues, type PlanTextIssue } from '../ai-calls/plan-text.js';
 
 const ISSUE_WORDS: Readonly<Record<AgentPlanIssue, string>> = {
@@ -25,7 +25,7 @@ function fieldWords(plan: EditableCallPlan, path: string): string {
     case 'opener':
       return 'the opener';
     case 'reengagement':
-      return index === 'lastContact' ? 'Last time we spoke' : 'What we last talked about';
+      return index === 'lastContact' ? contactLabel(plan.reengagement?.lastContactKind) : 'What we last talked about';
     case 'goals': {
       const goal = plan.goals[Number(index)];
       return `${goal ? GOAL_LABELS[goal.goal] : `goal ${n}`}, ${tail === 'known' ? 'what we know' : 'how to ask'}`;

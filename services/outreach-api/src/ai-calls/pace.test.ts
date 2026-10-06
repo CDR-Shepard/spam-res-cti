@@ -506,6 +506,17 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect(h.logs.some((l) => l.msg === 'ai_call.place: no appointment times offered')).toBe(false);
     });
 
+    it('1c (Fix 1, M-4): the plan text says when we last spoke as of the trigger, not as of planning', async () => {
+      const h = await paceHarness(db);
+      // Stale stored words; the date is six days before the tick's NOW (and seven or more before any real clock since).
+      await seedReleasedLead(db, h.base, { planOver: { reengagement: { lastContact: 'back in February', lastContactAt: '2026-09-29T17:00:00.000Z', lastContactKind: 'call', lastTopic: null } } });
+
+      expect((await h.run(NOW)).placed).toBe(1);
+      const t = target(h.cti.requests[0]!);
+      expect(t.planText).toContain('\nLast time we spoke: earlier this week\n');
+      expect(t.context).toEqual({ returning: true });
+    });
+
     it('1b: the configured default list applies while the tenant has saved none', async () => {
       const h = await paceHarness(db, {}, { defaultSpecialists: [OWNER] });
       h.sf.state.users = [ownerRow()];

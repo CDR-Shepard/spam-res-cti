@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { EditableCallPlan, PreferredWindow, QUALIFICATION_TOPICS, type CallGoal, type QualificationTopic } from '@cti/contracts';
+import { contactLabel, EditableCallPlan, lastContactWordsAt, PreferredWindow, QUALIFICATION_TOPICS, type CallGoal, type QualificationTopic } from '@cti/contracts';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -50,7 +50,7 @@ const planOf = (d: Draft, original: EditableCallPlan): unknown => ({
   questions: toLines(d.questions),
   avoid: toLines(d.avoid),
   bestTimeToCall: { window: d.window, reason: d.windowReason },
-  reengagement: original.reengagement ? { lastContact: original.reengagement.lastContact, lastTopic: d.lastTopic.trim() === '' ? null : d.lastTopic } : null,
+  reengagement: original.reengagement ? { ...original.reengagement, lastTopic: d.lastTopic.trim() === '' ? null : d.lastTopic } : null,
   stillToLearn: QUALIFICATION_TOPICS.filter((t) => d.stillToLearn.includes(t)),
 });
 
@@ -60,6 +60,7 @@ export function CallPlanEditor({ plan, onSave, onCancel, busy }: { plan: Editabl
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }));
   const toggleTopic = (t: QualificationTopic, on: boolean) =>
     setDraft((d) => ({ ...d, stillToLearn: on ? [...d.stillToLearn.filter((x) => x !== t), t] : d.stillToLearn.filter((x) => x !== t) }));
+  const contactWords = lastContactWordsAt(plan.reengagement, new Date());
   const setGoal = (i: number, patch: Partial<Draft['goals'][number]>) => setDraft((d) => ({ ...d, goals: d.goals.map((g, j) => (j === i ? { ...g, ...patch } : g)) }));
 
   function save() {
@@ -82,7 +83,7 @@ export function CallPlanEditor({ plan, onSave, onCancel, busy }: { plan: Editabl
         </ul>
       )}
       <Field label="Opener"><Input value={draft.opener} onChange={(e) => set('opener', e.target.value)} /></Field>
-      {plan.reengagement?.lastContact && <p className="text-sm text-muted-foreground">Last real contact: {plan.reengagement.lastContact}</p>}
+      {contactWords && <p className="text-sm text-muted-foreground">{`${contactLabel(plan.reengagement?.lastContactKind)}: ${contactWords}`}</p>}
       {plan.reengagement && <Field label="What we last talked about"><Input maxLength={200} value={draft.lastTopic} onChange={(e) => set('lastTopic', e.target.value)} /></Field>}
       <fieldset className="rounded-md border p-2">
         <legend className="px-1 text-sm font-medium">Still to learn</legend>

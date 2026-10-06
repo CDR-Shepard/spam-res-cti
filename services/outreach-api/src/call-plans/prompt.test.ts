@@ -5,8 +5,8 @@ import type { PlanFacts } from './plan-context.js';
 import { buildCallPlanPrompt, CALL_PLAN_SYSTEM_PROMPT, PLAN_PROMPT_DATA_CAP } from './prompt.js';
 
 const TODAY = new Date('2026-10-05T15:00:00.000Z');
-const FACTS: PlanFacts = { lastContactWords: 'back in February', lastContactKind: 'call', missing: ['timeline', 'condition', 'price'] };
-const NO_FACTS: PlanFacts = { lastContactWords: null, lastContactKind: null, missing: [] };
+const FACTS: PlanFacts = { lastContactWords: 'back in February', lastContactAt: new Date('2026-02-12T18:00:00.000Z'), lastContactKind: 'call', contactSearchLimited: false, missing: ['timeline', 'condition', 'price'] };
+const NO_FACTS: PlanFacts = { lastContactWords: null, lastContactAt: null, lastContactKind: null, contactSearchLimited: false, missing: [] };
 const ctx = { companyName: 'GG Homes', today: TODAY, facts: FACTS };
 type Item = ResearchSnapshot['activity'][number];
 
@@ -180,9 +180,14 @@ describe('buildCallPlanPrompt', () => {
     expect(p.user.indexOf('</facts>')).toBeLessThan(p.user.indexOf('<record '));
   });
 
+  it('Fix 1 (M-8): with no contact found in activity research cut short, the facts say only recent activity was read', () => {
+    const p = buildCallPlanPrompt(snap(), { ...ctx, facts: { ...NO_FACTS, contactSearchLimited: true } });
+    expect(p.user).toContain('Last real contact: none found in recent activity\n');
+  });
+
   it('1D: with no contact and nothing missing, the facts say so', () => {
     const p = buildCallPlanPrompt(snap(), { ...ctx, facts: NO_FACTS });
-    expect(p.user).toContain('Last real contact: none found');
+    expect(p.user).toContain('Last real contact: none found\n');
     expect(p.user).toContain('Missing in Salesforce: nothing');
   });
 

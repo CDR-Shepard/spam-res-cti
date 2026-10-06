@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
-import type { CallPlanCard, EditableCallPlan } from '@cti/contracts';
+import { contactLabel, lastContactWordsAt, NO_CONTACT_IN_RECENT_ACTIVITY, type CallPlanCard, type EditableCallPlan } from '@cti/contracts';
 import { ConfirmAction } from '@/components/confirm-action';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -60,7 +60,7 @@ export function CallPlanCardView({ card, onChanged }: { card: CallPlanCard; onCh
         {card.plan?.dncFlagDismissed && <p role="status" className="rounded-md border p-2">{dismissalWords(card.plan)}</p>}
         {card.prepareError && <p role="alert" className="text-destructive">{card.prepareError}</p>}
         {card.callStage === 'research' && !card.prepareError && <p className="text-muted-foreground">Reading Salesforce and drafting a plan…</p>}
-        {p && !editing && <PlanView plan={p} />}
+        {p && !editing && <PlanView plan={p} contactSearchLimited={contactSearchLimited(card)} />}
         {p && editing && <CallPlanEditor plan={p} busy={act.isPending} onCancel={() => setEditing(false)} onSave={(plan) => act.mutate({ kind: 'edit', plan })} />}
         {card.research && <ul className="text-xs text-muted-foreground" aria-label="Research sources">{card.research.sources.map((s) => <li key={s.source}>{sourceLine(s)}</li>)}</ul>}
         {note && <p className="text-muted-foreground">{note}</p>}
@@ -97,18 +97,30 @@ function List({ title, items }: { title: string; items: readonly string[] }) {
   );
 }
 
-/** Plan 1D: a returning seller. Both lines are left out when empty (a plan stored before 1D shows neither). */
-function ReturningLines({ plan }: { plan: EditableCallPlan }) {
+const CONTACT_SOURCES: ReadonlySet<string> = new Set(['tasks', 'events', 'emails']);
+
+/** Fix 1 (M-8): research kept only the most recent Tasks, Events or emails, so finding no contact proves little. */
+const contactSearchLimited = (card: CallPlanCard): boolean =>
+  card.research?.sources.some((s) => CONTACT_SOURCES.has(s.source) && s.truncated) ?? false;
+
+/**
+ * Plan 1D: a returning seller. Both lines are left out when empty (a plan stored before 1D shows neither). Fix 1: the
+ * words are worked out from the contact's date as of today (M-4) and labelled by its kind (M-5); with no contact found
+ * in a cut-short read, the card says so (M-8).
+ */
+function ReturningLines({ plan, contactSearchLimited }: { plan: EditableCallPlan; contactSearchLimited: boolean }) {
   const r = plan.reengagement;
+  const words = lastContactWordsAt(r, new Date());
   return (
     <>
-      {r?.lastContact && <p className="text-muted-foreground">{`Last real contact: ${r.lastContact}${r.lastTopic ? `: ${r.lastTopic}` : ''}`}</p>}
+      {words && <p className="text-muted-foreground">{`${contactLabel(r?.lastContactKind)}: ${words}${r?.lastTopic ? ` — ${r.lastTopic}` : ''}`}</p>}
+      {!r && contactSearchLimited && <p className="text-muted-foreground">{`Last real contact: ${NO_CONTACT_IN_RECENT_ACTIVITY}`}</p>}
       {plan.stillToLearn.length > 0 && <p className="text-muted-foreground">{`Still to learn: ${plan.stillToLearn.map((t) => TOPIC_WORDS[t]).join(', ')}`}</p>}
     </>
   );
 }
 
-function PlanView({ plan }: { plan: EditableCallPlan }) {
+function PlanView({ plan, contactSearchLimited }: { plan: EditableCallPlan; contactSearchLimited: boolean }) {
   return (
     <div className="space-y-3">
       <p>{plan.situationSummary}</p>
@@ -127,7 +139,7 @@ function PlanView({ plan }: { plan: EditableCallPlan }) {
       <div>
         <h4 className="font-medium">Opener</h4>
         <p>{plan.opener}</p>
-        <ReturningLines plan={plan} />
+        <ReturningLines plan={plan} contactSearchLimited={contactSearchLimited} />
       </div>
       <div>
         <h4 className="font-medium">Goals</h4>

@@ -203,6 +203,30 @@ describe('renderPlanForAgent', () => {
     expect(text).toContain('\nLast time we spoke: back in February — the roof leak and the siblings\nStill to learn: timeline, their price in mind, other offers or agents\n');
   });
 
+  describe('Fix 1 (M-4, M-5): the words are worked out when the plan is rendered, and the label follows the kind', () => {
+    const SEPT = { lastContact: 'earlier this week', lastContactAt: '2026-09-14T17:00:00.000Z', lastContactKind: 'call' as const, lastTopic: 'the roof' };
+    const at = (iso: string) => {
+      const r = renderPlanForAgent({ ...returning, reengagement: SEPT }, new Date(iso));
+      if (!r.ok) throw new Error(JSON.stringify(r.issues));
+      return r.text;
+    };
+    it('relative to the time of rendering, not the time of planning', () => {
+      expect(at('2026-09-16T19:00:00.000Z')).toContain('\nLast time we spoke: earlier this week — the roof\n');
+      expect(at('2026-09-29T19:00:00.000Z')).toContain('\nLast time we spoke: earlier this month — the roof\n');
+      expect(at('2026-10-15T19:00:00.000Z')).toContain('\nLast time we spoke: back in September — the roof\n');
+    });
+    it('an email reads "Last email from them"; a meeting "Last time we spoke"', () => {
+      const email = renderPlanForAgent({ ...returning, reengagement: { ...SEPT, lastContactKind: 'email' } }, new Date('2026-10-15T19:00:00.000Z'));
+      expect(email.ok && email.text).toContain('\nLast email from them: back in September — the roof\n');
+      const meeting = renderPlanForAgent({ ...returning, reengagement: { ...SEPT, lastContactKind: 'meeting' } }, new Date('2026-10-15T19:00:00.000Z'));
+      expect(meeting.ok && meeting.text).toContain('\nLast time we spoke: back in September — the roof\n');
+    });
+    it('the rendered words are what is checked: they never carry a digit', () => {
+      expect(planTextIssues({ ...returning, reengagement: { ...SEPT, lastContact: 'in 2024' } }, new Date('2026-10-15T19:00:00.000Z'))).toEqual([]);
+      for (let d = 0; d < 1_200; d += 7) expect(renderPlanForAgent({ ...returning, reengagement: SEPT }, new Date(Date.parse(SEPT.lastContactAt) + d * 86_400_000)).ok).toBe(true);
+    });
+  });
+
   it('does not check text it never sends (the summary and the evidence)', () => {
     const p = { ...plan, situationSummary: 'They want $300k', sellingSignals: [{ ...plan.sellingSignals[0]!, evidence: 'offer of $200,000' }] };
     expect(renderPlanForAgent(p).ok).toBe(true);

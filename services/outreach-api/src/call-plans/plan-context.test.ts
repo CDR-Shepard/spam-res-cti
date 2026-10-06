@@ -40,7 +40,7 @@ const answeredButTimelineAndPrice: Array<[string, string]> = [
 describe('planFacts', () => {
   it('reads the last real contact in words and what the self block is missing', () => {
     const s = snap([block('self', answeredButTimelineAndPrice), block('converted_opportunity', [['Timeline__c', '30 Days']])], [call]);
-    expect(planFacts(s, NOW)).toEqual({ lastContactWords: 'back in February', lastContactKind: 'call', missing: ['timeline', 'price'] });
+    expect(planFacts(s, NOW)).toEqual({ lastContactWords: 'back in February', lastContactAt: new Date('2026-02-12T18:00:00.000Z'), lastContactKind: 'call', contactSearchLimited: false, missing: ['timeline', 'price'] });
   });
 
   it('Fix 1 (I-2): a qualification field research never read is not reported missing', () => {
@@ -49,27 +49,44 @@ describe('planFacts', () => {
   });
 
   it('with no contact and no self block, nothing was contact and every topic with a field is missing', () => {
-    expect(planFacts(snap([]), NOW)).toEqual({ lastContactWords: null, lastContactKind: null, missing: QUALIFICATION_TOPICS.filter((t) => t !== 'decision_makers') });
+    expect(planFacts(snap([]), NOW)).toEqual({ lastContactWords: null, lastContactAt: null, lastContactKind: null, contactSearchLimited: false, missing: QUALIFICATION_TOPICS.filter((t) => t !== 'decision_makers') });
+  });
+
+  it('Fix 1 (M-8): says the search was limited when research cut the tasks, events or emails short, or the snapshot', () => {
+    const cut = (source: string): ResearchSnapshot => ({ ...snap([]), sources: snap([]).sources.map((x) => (x.source === source ? { ...x, truncated: true } : x)) });
+    for (const source of ['tasks', 'events', 'emails']) expect(planFacts(cut(source), NOW).contactSearchLimited).toBe(true);
+    expect(planFacts(cut('chatter'), NOW).contactSearchLimited).toBe(false);
+    expect(planFacts({ ...snap([]), truncated: true }, NOW).contactSearchLimited).toBe(true);
   });
 });
 
-const facts = (over: Partial<PlanFacts> = {}): PlanFacts => ({ lastContactWords: 'back in February', lastContactKind: 'call', missing: ['timeline', 'price'], ...over });
+const FEB = '2026-02-12T18:00:00.000Z';
+const facts = (over: Partial<PlanFacts> = {}): PlanFacts => ({ lastContactWords: 'back in February', lastContactAt: new Date(FEB), lastContactKind: 'call', contactSearchLimited: false, missing: ['timeline', 'price'], ...over });
+/** Fix 1 (M-4): the stored re-engagement carries the contact's date and kind. */
+const feb = (lastTopic: string | null) => ({ lastContact: 'back in February', lastContactAt: FEB, lastContactKind: 'call' as const, lastTopic });
 const plan = (over: Partial<CallPlan> = {}): CallPlan => ({ ...validPlan, ...over });
 
 describe('withPlanFacts', () => {
   it.each<[string, CallPlan, PlanFacts, CallPlan['reengagement'], QualificationTopic[]]>([
-    ['keeps only the model topics that are missing', plan({ stillToLearn: ['price', 'condition'] }), facts(), { lastContact: 'back in February', lastTopic: null }, ['price']],
-    ['falls back to every missing topic when the model named none', plan({ stillToLearn: [] }), facts(), { lastContact: 'back in February', lastTopic: null }, ['timeline', 'price']],
-    ['falls back when none of the model topics is missing', plan({ stillToLearn: ['condition'] }), facts(), { lastContact: 'back in February', lastTopic: null }, ['timeline', 'price']],
+    ['keeps only the model topics that are missing', plan({ stillToLearn: ['price', 'condition'] }), facts(), feb(null), ['price']],
+    ['falls back to every missing topic when the model named none', plan({ stillToLearn: [] }), facts(), feb(null), ['timeline', 'price']],
+    ['falls back when none of the model topics is missing', plan({ stillToLearn: ['condition'] }), facts(), feb(null), ['timeline', 'price']],
     [
       'replaces the model words with the computed words, keeping its topic',
       plan({ reengagement: { lastContact: 'in 2024', lastTopic: 'the roof leak' } }),
       facts(),
-      { lastContact: 'back in February', lastTopic: 'the roof leak' },
+      feb('the roof leak'),
+      ['timeline', 'price'],
+    ],
+    [
+      'an email contact is stored with its kind',
+      plan({ reengagement: { lastContact: 'x', lastTopic: 'the move' } }),
+      facts({ lastContactKind: 'email' }),
+      { ...feb('the move'), lastContactKind: 'email' },
       ['timeline', 'price'],
     ],
     ['no contact: re-engagement is null even when the model wrote one', plan({ reengagement: { lastContact: 'last week', lastTopic: 'the roof' } }), facts({ lastContactWords: null, lastContactKind: null }), null, ['timeline', 'price']],
-    ['nothing missing: nothing still to learn', plan({ stillToLearn: ['price'] }), facts({ missing: [] }), { lastContact: 'back in February', lastTopic: null }, []],
+    ['nothing missing: nothing still to learn', plan({ stillToLearn: ['price'] }), facts({ missing: [] }), feb(null), []],
   ])('%s', (_label, input, f, reengagement, stillToLearn) => {
     const out = withPlanFacts(input, f);
     expect(out.reengagement).toEqual(reengagement);
@@ -88,12 +105,26 @@ describe('withPlanFacts', () => {
 
 describe('withStoredFacts (a person\'s edit)', () => {
   const { doNotContact: _d, ...editable } = validPlan;
-  const stored = { ...validPlan, reengagement: { lastContact: 'back in February', lastTopic: 'the roof leak' }, stillToLearn: ['timeline', 'price'] };
+  const stored = { ...validPlan, reengagement: feb('the roof leak'), stillToLearn: ['timeline', 'price'] };
   it.each<[string, Partial<typeof editable>, unknown, CallPlan['reengagement'], QualificationTopic[]]>([
-    ['an old body (defaults) keeps everything stored', { reengagement: null, stillToLearn: [] }, stored, { lastContact: 'back in February', lastTopic: 'the roof leak' }, ['timeline', 'price']],
-    ['a tampered lastContact is replaced; the edited topic stays', { reengagement: { lastContact: 'last week', lastTopic: 'the move' } }, stored, { lastContact: 'back in February', lastTopic: 'the move' }, ['timeline', 'price']],
-    ['clearing the topic is allowed', { reengagement: { lastContact: 'back in February', lastTopic: null } }, stored, { lastContact: 'back in February', lastTopic: null }, ['timeline', 'price']],
-    ['the person\'s topics are kept', { stillToLearn: ['condition', 'condition'] }, stored, { lastContact: 'back in February', lastTopic: 'the roof leak' }, ['condition']],
+    ['an old body (defaults) keeps everything stored', { reengagement: null, stillToLearn: [] }, stored, feb('the roof leak'), ['timeline', 'price']],
+    ['a tampered lastContact is replaced; the edited topic stays', { reengagement: { lastContact: 'last week', lastTopic: 'the move' } }, stored, feb('the move'), ['timeline', 'price']],
+    [
+      'Fix 1 (M-4): a tampered date or kind is replaced by the stored ones',
+      { reengagement: { lastContact: 'back in February', lastContactAt: '2026-10-04T18:00:00.000Z', lastContactKind: 'email', lastTopic: 'the move' } },
+      stored,
+      feb('the move'),
+      ['timeline', 'price'],
+    ],
+    [
+      'a plan stored before Fix 1 has no date or kind, and none is added',
+      { reengagement: { lastContact: 'back in February', lastContactAt: '2026-10-04T18:00:00.000Z', lastTopic: 'x' } },
+      { ...validPlan, reengagement: { lastContact: 'back in February', lastTopic: 'the roof' } },
+      { lastContact: 'back in February', lastContactAt: null, lastContactKind: null, lastTopic: 'x' },
+      [],
+    ],
+    ['clearing the topic is allowed', { reengagement: { lastContact: 'back in February', lastTopic: null } }, stored, feb(null), ['timeline', 'price']],
+    ['the person\'s topics are kept', { stillToLearn: ['condition', 'condition'] }, stored, feb('the roof leak'), ['condition']],
     ['no stored contact: none can be added', { reengagement: { lastContact: 'back in May', lastTopic: 'x' } }, validPlan, null, []],
     ['an unreadable stored plan reads as no contact and no topics', {}, { opener: 1 }, null, []],
   ])('%s', (_label, over, storedPlan, reengagement, stillToLearn) => {
