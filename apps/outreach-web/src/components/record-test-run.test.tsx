@@ -5,7 +5,7 @@ import { renderWithProviders } from '../test/render';
 import { AI_CALL_ID, CALL_ID, TEST_ID, recordTest, recordTestCall } from '../test/record-test-fixtures';
 import { respond, stubApi } from '../test/stub-api';
 import { RecordTestRun } from './record-test-run';
-import { recordTestPollInterval } from './record-test-preview';
+import { RecordTestPreview, recordTestPollInterval } from './record-test-preview';
 
 class FakeDevice {
   static isSupported = true;
@@ -50,7 +50,7 @@ describe('RecordTestRun', () => {
   });
 
   it('a live call disables both buttons and keeps the page polling', async () => {
-    const live = recordTest({ calls: [recordTestCall({ callStatus: 'in_progress', outcome: null })] });
+    const live = recordTest({ calls: [recordTestCall({ callStatus: 'in_progress', outcome: null, createdAt: new Date().toISOString() })] });
     stubApi({ [AVAILABILITY]: available(true) });
     renderWithProviders(<RecordTestRun test={live} />, { isAdmin: true });
     expect(await screen.findByRole('button', { name: 'Talk in browser' })).toBeDisabled();
@@ -73,5 +73,19 @@ describe('RecordTestRun', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Talk in browser' }));
     expect(await screen.findByText('The microphone only works on a secure (https) page. Open the app over https, or use Ring my phone.')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Talk in browser' })).toBeEnabled());
+  });
+
+  it('"Ringing your phone…" clears once that call has ended', async () => {
+    const GET = `GET /api/record-tests/${TEST_ID}`;
+    const at = new Date().toISOString();
+    const table: Record<string, unknown> = { [AVAILABILITY]: available(false), [GET]: recordTest(), [RUN]: { callId: CALL_ID, response: { result: 'placed', aiCallId: AI_CALL_ID } } };
+    stubApi(table);
+    renderWithProviders(<RecordTestPreview id={TEST_ID} onOpen={() => {}} />, { isAdmin: true });
+    table[GET] = recordTest({ calls: [recordTestCall({ createdAt: at, callStatus: 'ringing', outcome: null })] });
+    await userEvent.click(await screen.findByRole('button', { name: 'Ring my phone' }));
+    expect(await screen.findByText('Ringing your phone…')).toBeInTheDocument();
+    table[GET] = recordTest({ calls: [recordTestCall({ createdAt: at })] });
+    await waitFor(() => expect(screen.queryByText('Ringing your phone…')).not.toBeInTheDocument(), { timeout: 4000 });
+    expect(screen.getByText('Appointment set · 2:05')).toBeInTheDocument();
   });
 });

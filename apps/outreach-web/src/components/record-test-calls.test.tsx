@@ -52,11 +52,21 @@ describe('RecordTestCalls', () => {
     expect(screen.getByRole('button', { name: 'Hide transcript' })).toBeInTheDocument();
   });
 
-  it('shows the live status while a call is going', () => {
+  it('shows the live status and how long it has been going', () => {
+    vi.useFakeTimers({ now: NOW, toFake: ['Date'] });
     stubApi({});
     renderWithProviders(<RecordTestCalls calls={[recordTestCall({ callStatus: 'ringing', outcome: null, durationSeconds: null, summary: null })]} />, { isAdmin: true });
-    expect(screen.getByText('Ringing')).toBeInTheDocument();
+    expect(screen.getByText('Ringing · 1:00')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Transcript' })).not.toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it('a call stuck in progress past the longest call reads as status unknown', () => {
+    vi.useFakeTimers({ now: NOW + 31 * 60_000, toFake: ['Date'] });
+    stubApi({});
+    renderWithProviders(<RecordTestCalls calls={[recordTestCall({ callStatus: 'in_progress', outcome: null, durationSeconds: null, summary: null })]} />, { isAdmin: true });
+    expect(screen.getByText('Status unknown — check the transcript later')).toBeInTheDocument();
+    vi.useRealTimers();
   });
 });
 
@@ -64,6 +74,8 @@ describe('isLiveCall', () => {
   it.each([
     ['ringing', recordTestCall({ callStatus: 'ringing' }), true],
     ['completed', recordTestCall({ callStatus: 'completed' }), false],
+    ['in progress for 20 min', recordTestCall({ callStatus: 'in_progress', createdAt: '2026-10-06T16:46:00.000Z' }), true],
+    ['in progress for over 30 min (stuck: no more polling)', recordTestCall({ callStatus: 'in_progress', createdAt: '2026-10-06T16:35:00.000Z' }), false],
     ['placed, not joined yet', recordTestCall({ callStatus: null }), true],
     ['placed, not joined for over 30 min', recordTestCall({ callStatus: null, createdAt: '2026-10-06T16:00:00.000Z' }), false],
     ['no answer yet, under 2 min', recordTestCall({ id: CALL_ID, result: null, aiCallId: null, callStatus: null }), true],

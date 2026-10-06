@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
-import type { RecordTest } from '@cti/contracts';
+import type { RecordTest, RecordTestCall } from '@cti/contracts';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { useBrowserCall, type BrowserCallState } from '@/lib/browser-call';
@@ -39,17 +39,28 @@ function RunControls({ test, onBrowserLive }: { test: RecordTest; onBrowserLive?
     <section aria-label="Run the call" className="space-y-3 rounded-md border p-3 text-sm">
       <h3 className="font-medium">Try the call</h3>
       <p className="text-xs text-muted-foreground">{HINT}</p>
-      <PhoneRun testId={test.id} numbers={availability.data.testNumbers} disabled={liveCall !== null || browserBusy} onPlaced={refresh} />
+      <PhoneRun testId={test.id} calls={test.calls} numbers={availability.data.testNumbers} disabled={liveCall !== null || browserBusy} onPlaced={refresh} />
       {(availability.data.browserCalls === true || browserBusy) && <BrowserRun testId={test.id} disabled={liveCall !== null} onBusy={setBrowserBusy} onChange={refresh} />}
       {liveCall?.callStatus && <p role="status">{`Your test call: ${CALL_STATUS_WORDS[liveCall.callStatus]}`}</p>}
     </section>
   );
 }
 
-function PhoneRun({ testId, numbers, disabled, onPlaced }: { testId: string; numbers: readonly string[]; disabled: boolean; onPlaced: () => void }) {
+/** "Ringing your phone…" only while that call has not been answered or ended; a refusal's words stay. */
+function ringWords(answer: { callId: string; response: Parameters<typeof practiceAnswerWords>[0] } | undefined, calls: readonly RecordTestCall[]): string | null {
+  if (!answer) return null;
+  if (answer.response.result !== 'placed') return practiceAnswerWords(answer.response);
+  const call = calls.find((c) => c.id === answer.callId);
+  if (!call) return practiceAnswerWords(answer.response);
+  const ringing = call.callStatus === null || call.callStatus === 'queued' || call.callStatus === 'ringing';
+  return ringing && isLiveCall(call) ? practiceAnswerWords(answer.response) : null;
+}
+
+function PhoneRun({ testId, calls, numbers, disabled, onPlaced }: { testId: string; calls: readonly RecordTestCall[]; numbers: readonly string[]; disabled: boolean; onPlaced: () => void }) {
   const [picked, setPicked] = useState<string | null>(null);
   const ring = useMutation({ mutationFn: (to: string) => recordTestCall(testId, { mode: 'phone', to }), onSettled: onPlaced });
   const to = picked ?? numbers[0] ?? null;
+  const words = ringWords(ring.data, calls);
   if (!to) return <p className="text-muted-foreground">{NO_NUMBERS}</p>;
   return (
     <div className="space-y-1">
@@ -62,7 +73,7 @@ function PhoneRun({ testId, numbers, disabled, onPlaced }: { testId: string; num
         </Label>
         <Button size="sm" disabled={disabled || ring.isPending} onClick={() => ring.mutate(to)}>Ring my phone</Button>
       </div>
-      {ring.data && <p role="status">{practiceAnswerWords(ring.data.response)}</p>}
+      {words && <p role="status">{words}</p>}
       {ring.error && <p role="alert" className="text-destructive">{recordTestErrorText(ring.error)}</p>}
     </div>
   );
