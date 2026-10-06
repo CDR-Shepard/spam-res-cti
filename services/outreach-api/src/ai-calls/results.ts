@@ -46,7 +46,7 @@ async function finishedCalls(db: Db): Promise<Finished[]> {
     select t.id as touch_id, t.enrollment_id, t.call_plan_id, t.requested_by, t.org_id, a.outcome, r.phones,
            (select count(*)::int from touches x where x.enrollment_id = t.enrollment_id and x.channel = 'ai_call' and x.status = 'sent') as answered
     from touches t
-    join ai_calls a on a.id = t.ai_call_id and a.org_id = t.org_id
+    join ai_calls a on a.id = t.ai_call_id and a.org_id = t.org_id and a.is_test = false
     join campaign_enrollments e on e.id = t.enrollment_id and e.org_id = t.org_id
     join crm_records r on r.id = e.crm_record_id and r.org_id = e.org_id
     where t.channel = 'ai_call' and t.status = 'sent' and t.counted_at is null

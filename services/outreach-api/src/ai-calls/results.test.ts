@@ -103,6 +103,14 @@ describe.skipIf(!pgLane)('collectAiCallResults (real Postgres)', () => {
     expect(await touchesOf(lead.enrollmentId)).toHaveLength(1);
   });
 
+  it('Part 4 Fix 1 (I-2): a touch linked to a practice call is never counted as the real call', async () => {
+    const lead = await placed('completed', 'not_interested');
+    await db.update(schema.aiCalls).set({ isTest: true, practice: true }).where(eq(schema.aiCalls.id, lead.aiCallId));
+    await collectAiCallResults(db, NOW, quiet);
+    expect(await touchById(db, lead.touchId)).toMatchObject({ outcome: null, countedAt: null });
+    expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'active', touchesDone: 0 });
+  });
+
   it('8: a test call has no touch and is never picked up', async () => {
     const base = await seedAiCallCampaign(db, 'active');
     const admin = await seedUser(db, base.orgId);

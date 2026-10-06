@@ -100,6 +100,25 @@ describe.skipIf(!pgLane)('kept idempotency keys (real Postgres)', () => {
     });
   });
 
+  describe('Part 4 Fix 1 (I-2): practice calls', () => {
+    it('a crashed record request never takes a practice call on the same record by the same user for its own call', async () => {
+      const { h, lead, key } = await keptLead();
+      await seedAiCallRequest(db, { orgId: h.base.orgId, key, userId: lead.approver, createdAt: CLAIMED });
+      const real = await seedAiCall(db, h.base.orgId, lead.approver, { sfRecordId: lead.sfRecordId, createdAt: CLAIMED, callSid: 'CAi2real' });
+      await seedAiCall(db, h.base.orgId, lead.approver, {
+        sfRecordId: lead.sfRecordId, isTest: true, practice: true, toE164: '+15125550177', createdAt: at(CLAIMED, MIN), callSid: 'CAi2practice',
+      });
+      expect(await resolveKey(db, target(h, lead, key), NOW)).toEqual({ kind: 'answered', answer: placed(real) });
+    });
+
+    it('with only a practice call in the window: none (the real call was never placed)', async () => {
+      const { h, lead, key } = await keptLead();
+      await seedAiCallRequest(db, { orgId: h.base.orgId, key, userId: lead.approver, createdAt: CLAIMED });
+      await seedAiCall(db, h.base.orgId, lead.approver, { sfRecordId: lead.sfRecordId, isTest: true, practice: true, createdAt: CLAIMED, callSid: 'CAi2practiceonly' });
+      expect(await resolveKey(db, target(h, lead, key), NOW)).toEqual({ kind: 'none', stored: true });
+    });
+  });
+
   describe('settleKeptKey (a planned touch about to lose its key)', () => {
     it('a stored placed answer links the call: the touch is sent with that call, and its key is gone', async () => {
       const { h, lead, key } = await keptLead();

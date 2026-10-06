@@ -65,11 +65,12 @@ function rebuilt(row: FoundCall): InternalAiCallResponse {
 /**
  * cti-api's findCallSince for a record target. The reserving user is the row's `user_id`; it is null only when that user
  * was deleted (ai_calls.started_by keeps its users row, so no call of theirs can exist then): any user's call counts, which
- * can only make a call be found, never missed.
+ * can only make a call be found, never missed. Only a real call counts (Part 4 Fix 1, I-2): a practice call carries the
+ * real record id, but it never rang the seller.
  */
 async function findCallSince(db: Db, a: { orgId: string; userId: string | null; sfRecordId: string; since: Date }): Promise<FoundCall | null> {
   const c = schema.aiCalls;
-  const where: SQL[] = [eq(c.orgId, a.orgId), eq(c.sfRecordId, a.sfRecordId), gte(c.createdAt, a.since)];
+  const where: SQL[] = [eq(c.orgId, a.orgId), eq(c.sfRecordId, a.sfRecordId), eq(c.isTest, false), gte(c.createdAt, a.since)];
   if (a.userId !== null) where.push(eq(c.startedBy, a.userId));
   const [row] = await db
     .select({ id: c.id, status: c.status, blockReason: c.blockReason, callSid: c.callSid })
