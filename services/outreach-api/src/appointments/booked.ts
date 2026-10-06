@@ -16,7 +16,8 @@
 import { and, desc, eq, gte, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { BOOKING_STANDS_OUTCOMES, BookedAppointment } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
-import { OFFER_CALENDAR_DAYS } from './offer.js';
+import type { AiCallBookingSettings } from '@cti/contracts';
+import { OFFER_CALENDAR_DAYS, offerFrom, type Offer, type OfferCalendar } from './offer.js';
 import type { Busy } from './slots.js';
 
 /** A call books one of the times its trigger offered, all within OFFER_CALENDAR_DAYS of the trigger: older calls cannot matter. */
@@ -57,4 +58,14 @@ export async function bookedNotOnCalendar(db: Db, a: { orgId: string; ownerSfUse
     const end = new Date(booked.data.blockEnd ?? booked.data.end);
     return start.getTime() < a.until.getTime() && end.getTime() > a.now.getTime() ? [{ start, end, allDay: false }] : [];
   });
+}
+
+/**
+ * The offer from a calendar already read, less the times other AI calls booked with its owner that no Event shows yet
+ * (I-4). One composition for the pacer's trigger (pace-context.ts tickOffer) and a practice call (practice.ts), so the
+ * admin hears what a seller would be offered (P6 M-2).
+ */
+export async function offerWithAiBookings(db: Db, cal: OfferCalendar, i: { orgId: string; booking: AiCallBookingSettings; now: Date }): Promise<Offer> {
+  const booked = cal.kind === 'read' ? await bookedNotOnCalendar(db, { orgId: i.orgId, ownerSfUserId: cal.owner.sfUserId, now: i.now, until: cal.until }) : [];
+  return offerFrom(cal, { booking: i.booking, now: i.now, booked });
 }

@@ -24,8 +24,8 @@ import {
 } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { toE164 } from '@cti/phone';
-import { bookedNotOnCalendar } from '../appointments/booked.js';
-import { offerFrom, readOfferCalendar } from '../appointments/offer.js';
+import { offerWithAiBookings } from '../appointments/booked.js';
+import { readOfferCalendar } from '../appointments/offer.js';
 import { describePlanTextIssues } from '../call-plans/plan-text-words.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
@@ -94,8 +94,7 @@ async function practiceSlots(deps: PracticeDeps, orgId: string, settings: unknow
   try {
     const booking = bookingSettings({ settings }, deps.defaultSpecialists);
     const cal = await readOfferCalendar(await deps.clients(orgId), { booking, now: deps.now });
-    const booked = cal.kind === 'read' ? await bookedNotOnCalendar(deps.db, { orgId, ownerSfUserId: cal.owner.sfUserId, now: deps.now, until: cal.until }) : [];
-    const offer = offerFrom(cal, { booking, now: deps.now, booked });
+    const offer = await offerWithAiBookings(deps.db, cal, { orgId, booking, now: deps.now });
     if (offer.note && offer.note !== 'booking_off') deps.log.info({ orgId, slots: offer.note }, 'ai_call.practice: no appointment times offered');
     return offer.slots;
   } catch (err) {

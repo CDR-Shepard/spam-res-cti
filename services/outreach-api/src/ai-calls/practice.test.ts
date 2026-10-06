@@ -132,6 +132,23 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
     expect(s.sf.log.every((entry) => entry === 'query')).toBe(true);
   });
 
+  it('P6 M-1: a time another real AI call already booked with the owner is not offered (as the pacer does)', async () => {
+    const s = await setup();
+    await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
+    const first = s.cti.requests[0]!.target;
+    if (first.kind !== 'practice' || !first.slots?.length) throw new Error('no slots offered');
+    const taken = first.slots[0]!;
+    await seedAiCall(db, s.base.orgId, s.admin, {
+      status: 'in_progress', outcome: 'appointment_set', endedAt: null,
+      appointment: { ...PHONE_BOOKING, slotId: taken.id, kind: taken.kind, start: taken.start, end: taken.end, specialistSfUserId: GRANT },
+    });
+    await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
+    const again = s.cti.requests[1]!.target;
+    if (again.kind !== 'practice') throw new Error('not a practice target');
+    expect(again.slots?.map((slot) => slot.start)).not.toContain(taken.start);
+    expect(again.slots?.length).toBeGreaterThan(0);
+  });
+
   it('6b: booking off sends no slots; a Salesforce failure sends none and the call still goes', async () => {
     const s = await setup({ settings: { aiCallBooking: { enabled: false, specialists: [GRANT], convertLeads: true, days: [1, 2, 3, 4, 5], phone: { enabled: true, durationMinutes: 15, startHour: 10, endHour: 18, stepMinutes: 30, minLeadMinutes: 120, horizonBusinessDays: 2, bufferMinutes: 0, maxOffered: 6 }, walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 } } } });
     await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });

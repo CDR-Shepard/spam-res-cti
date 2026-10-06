@@ -11,9 +11,9 @@ import { eq, inArray } from 'drizzle-orm';
 import { EditableCallPlan, FieldMap, type AiCallBookingSettings } from '@cti/contracts';
 import { schema } from '@cti/db';
 import { QueryTooLargeError, SalesforceApiError, SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
-import { bookedNotOnCalendar } from '../appointments/booked.js';
+import { offerWithAiBookings } from '../appointments/booked.js';
 import type { OwnerUser } from '../appointments/calendar.js';
-import { offerFrom, readOfferCalendar, type Offer, type OfferCalendar } from '../appointments/offer.js';
+import { readOfferCalendar, type Offer, type OfferCalendar } from '../appointments/offer.js';
 import { fetchRecords, type SfRecordSnapshot } from '../campaigns/records.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
@@ -168,8 +168,7 @@ function warnRefusedZone(deps: PaceDeps, orgId: string, owner: OwnerUser): void 
 export async function tickOffer(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Promise<Offer> {
   const cal = await tick.calendar();
   if (cal.kind === 'read') warnRefusedZone(deps, c.orgId, cal.owner);
-  const booked = cal.kind === 'read' ? await bookedNotOnCalendar(deps.db, { orgId: c.orgId, ownerSfUserId: cal.owner.sfUserId, now: deps.now, until: cal.until }) : [];
-  const offer = offerFrom(cal, { booking: tick.booking, now: deps.now, booked });
+  const offer = await offerWithAiBookings(deps.db, cal, { orgId: c.orgId, booking: tick.booking, now: deps.now });
   if (offer.note && offer.note !== 'booking_off') deps.log.info({ orgId: c.orgId, touchId: c.touchId, slots: offer.note }, 'ai_call.place: no appointment times offered');
   return offer;
 }
