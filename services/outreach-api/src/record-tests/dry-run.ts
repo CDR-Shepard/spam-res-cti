@@ -205,7 +205,7 @@ export async function dryRunTestCall(deps: DryRunDeps, ctx: RequestContext, call
   try {
     dryRun = await compute(deps, row, outcome, claim.mapping);
   } catch (err) {
-    await releaseDryRun(deps.db, ctx.orgId, row.id).catch(() => {});
+    await releaseDryRun(deps.db, ctx.orgId, row.id, deps.now).catch(() => {});
     if (err instanceof SalesforceReadError) {
       deps.log.warn({ orgId: ctx.orgId, callId: row.id, errName: errName(err.cause) }, 'record-test: dry run could not read Salesforce');
       return { ok: false, error: 'salesforce_error' };

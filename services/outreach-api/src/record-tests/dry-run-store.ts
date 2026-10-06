@@ -64,11 +64,14 @@ export async function saveMapping(db: Db, orgId: string, callId: string, mapping
     where id = ${callId}::uuid and org_id = ${orgId}::uuid and ${isPending}`);
 }
 
-/** A press that failed lets go, so the next press can start at once (the stored mapping stays). */
-export async function releaseDryRun(db: Db, orgId: string, callId: string): Promise<void> {
+/**
+ * A press that failed lets go, so the next press can start at once (the stored mapping stays). Only its own claim: `claimedAt`
+ * is the time it claimed at, so a press that ran past CLAIM_STALE_MS never frees the claim of the press that took over.
+ */
+export async function releaseDryRun(db: Db, orgId: string, callId: string, claimedAt: Date): Promise<void> {
   await db.execute(sql`
     update ai_record_test_calls set dry_run = jsonb_set(dry_run, '{claimedAt}', 'null'::jsonb)
-    where id = ${callId}::uuid and org_id = ${orgId}::uuid and ${isPending}`);
+    where id = ${callId}::uuid and org_id = ${orgId}::uuid and ${isPending} and dry_run->>'claimedAt' = ${claimedAt.toISOString()}::text`);
 }
 
 /** Stores the answer once; a press that raced another gets the one stored first. */

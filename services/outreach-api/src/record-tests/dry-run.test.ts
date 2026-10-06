@@ -18,6 +18,7 @@ import { fakeModel, fakeOrg, GRANT, PHONE_BOOKING, quiet, SETTER, transportError
 import { DescribeCache } from '../research/describe.js';
 import type { MappingModel } from '../writeback/mapping-model.js';
 import { dryRunTestCall } from './dry-run.js';
+import { CLAIM_STALE_MS, claimDryRun, releaseDryRun } from './dry-run-store.js';
 import { insertRecordTest } from './store.js';
 
 const NOW = new Date('2026-10-06T22:20:00.000Z');
@@ -200,6 +201,18 @@ describe.skipIf(!pgLane)('dryRunTestCall (real Postgres)', () => {
     const s = await setup({ model: unpriced });
     expect(await dryRunTestCall(s.deps, s.ctx, s.callId)).toEqual({ ok: false, error: 'failed' });
     expect(await dryRunTestCall({ ...s.deps, model: fakeModel() }, s.ctx, s.callId)).toMatchObject({ ok: true, dryRun: { status: 'ready' } });
+  });
+
+  it('12: a press that fails late releases only its own claim, never the claim of the press that took over from it', async () => {
+    const s = await setup();
+    const later = (ms: number) => new Date(NOW.getTime() + ms);
+    const takeover = later(CLAIM_STALE_MS + 60_000);
+    expect(await claimDryRun(db, s.orgId, s.callId, NOW)).toMatchObject({ claimed: true });
+    expect(await claimDryRun(db, s.orgId, s.callId, takeover)).toMatchObject({ claimed: true });
+    await releaseDryRun(db, s.orgId, s.callId, NOW);
+    expect(await claimDryRun(db, s.orgId, s.callId, later(CLAIM_STALE_MS + 61_000))).toEqual({ claimed: false, done: null });
+    await releaseDryRun(db, s.orgId, s.callId, takeover);
+    expect(await claimDryRun(db, s.orgId, s.callId, later(CLAIM_STALE_MS + 62_000))).toMatchObject({ claimed: true });
   });
 
   it("7: another org's call is not_found (G-8)", async () => {
