@@ -63,13 +63,13 @@ describe('bookAppointment', () => {
       note: 'Prefers mornings.',
       bookedAt: NOW.toISOString(),
     });
-    expect(store.rows.get(ID)?.summary).toBe(`Appointment booked: phone call ${P1.start}`);
+    expect(store.rows.get(ID)?.summary).toBe('Appointment booked: phone call Wed Oct 7, 11:00 AM PT');
   });
 
   it('3b: a walkthrough with the address confirmed is stored as one', async () => {
     await book({ slot_id: 'w1', address_confirmed: true, note: 'x'.repeat(400) });
     expect(stored()).toMatchObject({ slotId: 'w1', kind: 'walkthrough', addressConfirmed: true, note: 'x'.repeat(300) });
-    expect(store.rows.get(ID)?.summary).toBe(`Appointment booked: walkthrough ${W1.start}`);
+    expect(store.rows.get(ID)?.summary).toBe('Appointment booked: walkthrough Thu Oct 8, 9:00 AM PT');
   });
 
   it('Fix 1 I-3: the time a slot blocks (a walkthrough\'s buffer) is stored with the booking; a slot without one stores none', async () => {
@@ -115,6 +115,16 @@ describe('bookAppointment', () => {
     const res = await book({ slot_id: 'p1', address_confirmed: false, note: '' });
     expect(res.output).toMatch(/^booking failed/);
     expect(stored()).toBeNull();
+  });
+
+  it('final review m2: a listed time whose start has passed (or is minutes away) is refused and nothing is stored', async () => {
+    const SOON: AppointmentSlot = { ...P1, id: 'p3', start: '2026-10-06T18:03:00.000Z', end: '2026-10-06T18:18:00.000Z' };
+    const PAST: AppointmentSlot = { ...P1, id: 'p4', start: '2026-10-06T17:00:00.000Z', end: '2026-10-06T17:15:00.000Z' };
+    ctx = { ...ctx, slots: [P1, SOON, PAST] };
+    expect((await book({ slot_id: 'p4', address_confirmed: false, note: '' })).output).toMatch(/already passed/);
+    expect((await book({ slot_id: 'p3', address_confirmed: false, note: '' })).output).toMatch(/already passed/);
+    expect(stored()).toBeNull();
+    expect((await book({ slot_id: 'p1', address_confirmed: false, note: '' })).output).toMatch(/^booked/);
   });
 
   it('8: junk arguments are refused as not on the list', async () => {

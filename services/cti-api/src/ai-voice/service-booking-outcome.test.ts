@@ -149,13 +149,13 @@ describe('M-3: the "Appointment booked" summary line', () => {
   it('an identical replay adds no second line', async () => {
     await bookP1();
     await bookP1();
-    expect(row().summary).toBe(`Appointment booked: phone call ${P1.start}`);
+    expect(row().summary).toBe('Appointment booked: phone call Wed Oct 7, 11:00 AM PT');
   });
 
   it('a rebook replaces the earlier line and keeps every other line', async () => {
     await tool('schedule_callback', { when: 'Thursday after 5 PM', note: '' });
     await bookP1();
     await tool('book_appointment', { slot_id: 'p2', address_confirmed: false, note: '' });
-    expect(row().summary).toBe(`Callback requested: Thursday after 5 PM\nAppointment booked: phone call ${P2.start}`);
+    expect(row().summary).toBe('Callback requested: Thursday after 5 PM\nAppointment booked: phone call Wed Oct 7, 2:00 PM PT');
   });
 });

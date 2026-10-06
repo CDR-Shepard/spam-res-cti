@@ -16,6 +16,11 @@ export const WALKTHROUGH_NEEDS_ADDRESS =
 export const SLOT_TAKEN =
   'That time was just taken by someone else — nothing was booked. Apologise briefly and offer them the other time you mentioned, or another time from the list.';
 const NOT_LISTED = 'That time is not on your list. Offer one of the listed times.';
+const PASSED = 'That time has already passed (or is only minutes away) — nothing was booked. Offer a later time from the list.';
+/** A slot starting sooner than this is refused as passed (final review m2): nobody can be ready for it. */
+const MIN_LEAD_MS = 5 * 60_000;
+const PT_ZONE = 'America/Los_Angeles';
+const PT_PARTS = new Intl.DateTimeFormat('en-US', { timeZone: PT_ZONE, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
 const BOOKED =
   'booked — confirm the day and time in one line with your goodbye, then end_call with outcome appointment_set';
 const FAILED = 'booking failed — offer to have the specialist call them back instead (schedule_callback)';
@@ -45,11 +50,21 @@ function bookingFor(slot: AppointmentSlot, args: unknown, now: Date): BookedAppo
 }
 
 /**
+ * "Wed Oct 7, 11:00 AM PT" (final review m1): the booking line reaches the rep's Salesforce Task, so it is said in the
+ * specialists' Pacific time, the same words outreach-api's write-back uses (`ptWords`), never a UTC instant.
+ */
+export function ptWords(at: Date): string {
+  const p: Record<string, string> = {};
+  for (const part of PT_PARTS.formatToParts(at)) if (part.type !== 'literal') p[part.type] = part.value;
+  return `${p.weekday} ${p.month} ${p.day}, ${p.hour}:${p.minute} ${p.dayPeriod} PT`;
+}
+
+/**
  * The summary's booking line (M-3): an identical replay adds nothing, and a rebook replaces the earlier line, so the
  * summary only ever names the time that is booked.
  */
 async function noteBooking(ctx: ToolCtx, booked: BookedAppointment): Promise<void> {
-  const line = `${BOOKED_LINE_PREFIX} ${booked.kind === 'phone' ? 'phone call' : 'walkthrough'} ${booked.start}`;
+  const line = `${BOOKED_LINE_PREFIX} ${booked.kind === 'phone' ? 'phone call' : 'walkthrough'} ${ptWords(new Date(booked.start))}`;
   const lines = (await ctx.store.get(ctx.aiCallId))?.summary?.split('\n') ?? [];
   if (lines.includes(line)) return;
   if (!lines.some((l) => l.startsWith(BOOKED_LINE_PREFIX))) return ctx.store.appendSummary(ctx.aiCallId, line);
@@ -87,6 +102,7 @@ export async function bookAppointment(args: unknown, env: ToolEnv): Promise<Tool
   const id = field(args, 'slot_id');
   const slot = ctx.slots.find((s) => s.id === id);
   if (!slot) return { output: NOT_LISTED };
+  if (Date.parse(slot.start) <= ctx.now().getTime() + MIN_LEAD_MS) return { output: PASSED };
   if (slot.kind === 'walkthrough' && field(args, 'address_confirmed') !== true) return { output: WALKTHROUGH_NEEDS_ADDRESS };
   try {
     const result = await effects.bookAppointment(ctx, bookingFor(slot, args, ctx.now()));
