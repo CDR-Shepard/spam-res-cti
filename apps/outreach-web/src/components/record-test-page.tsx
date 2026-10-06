@@ -9,6 +9,7 @@ import { useAuth } from '@/lib/auth';
 import { createRecordTest, outreachKeys, recordTests } from '@/lib/outreach-api';
 import { errorText, formatDateTime } from '@/lib/outreach-words';
 import { RECORD_TEST_STATUS_WORDS, recordTestErrorText } from '@/lib/record-test-words';
+import { LeaveGuard } from './record-test-leave-guard';
 import { BROWSER_LOCK_WORDS, RecordTestPreview } from './record-test-preview';
 
 const INPUT_LABEL = 'Salesforce Lead or Opportunity Id, or its link';
@@ -26,6 +27,7 @@ export function RecordTestPage({ id, onOpen }: { id: string | null; onOpen: (id:
   if (!isAdmin) return <p className="text-sm text-muted-foreground">Only admins can test records.</p>;
   return (
     <div className="space-y-6">
+      {locked && <LeaveGuard />}
       <div>
         <h1 className="text-xl font-semibold">Test a record</h1>
         <p className="text-sm text-muted-foreground">See how the AI would approach a call to any Lead or Opportunity, then try the call yourself. Nothing is written to Salesforce.</p>

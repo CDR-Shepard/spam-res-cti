@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { renderWithProviders } from '../test/render';
+import { renderWithProviders, renderWithRouter } from '../test/render';
 import { LEAD_ID, OTHER_TEST_ID, TEST_ID, recordTest, recordTestCall } from '../test/record-test-fixtures';
 import { respond, stubApi } from '../test/stub-api';
 import { RecordTestPage } from './record-test-page';
@@ -48,8 +48,8 @@ describe('a live call and the page around it', () => {
 
   it('while Talk in browser is active, Regenerate, the recent tests and a new preview are off; hanging up turns them back on', async () => {
     stubApi({ [LIST]: recent, [GET]: recordTest(), [AVAILABILITY]: { available: true, testNumbers: ['+15125550111'], browserCalls: true } });
-    renderWithProviders(<RecordTestPage id={TEST_ID} onOpen={() => {}} />, { isAdmin: true });
-    await userEvent.type(screen.getByLabelText(INPUT), LEAD_ID);
+    renderWithRouter(<RecordTestPage id={TEST_ID} onOpen={() => {}} />, { isAdmin: true });
+    await userEvent.type(await screen.findByLabelText(INPUT), LEAD_ID);
     const talk = await screen.findByRole('button', { name: 'Talk in browser' });
     await waitFor(() => expect(talk).toBeEnabled());
     await userEvent.click(talk);
@@ -62,5 +62,41 @@ describe('a live call and the page around it', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Regenerate' })).toBeEnabled());
     expect(screen.getByRole('button', { name: /Bob Owner/ })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Preview the call' })).toBeEnabled();
+  });
+
+  it('leaving while the browser call is up asks first: Cancel stays (the call too), OK leaves; a reload or closing the tab asks too', async () => {
+    stubApi({ [LIST]: recent, [GET]: recordTest(), [AVAILABILITY]: { available: true, testNumbers: ['+15125550111'], browserCalls: true } });
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    const { router } = renderWithRouter(<RecordTestPage id={TEST_ID} onOpen={() => {}} />, { isAdmin: true });
+    const talk = await screen.findByRole('button', { name: 'Talk in browser' });
+    await waitFor(() => expect(talk).toBeEnabled());
+    await userEvent.click(talk);
+    expect(await screen.findByRole('button', { name: 'Hang up' })).toBeInTheDocument();
+    const unload = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+    // A blocked navigation never settles: don't wait on it.
+    void router.navigate({ to: '/settings' as never });
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith('A test call is live — leave and hang up?'));
+    expect(router.state.location.pathname).toBe('/');
+    expect(screen.getByRole('button', { name: 'Hang up' })).toBeInTheDocument();
+    confirm.mockReturnValue(true);
+    await router.navigate({ to: '/settings' as never });
+    await waitFor(() => expect(router.state.location.pathname).toBe('/settings'));
+  });
+
+  it('with no call up, leaving asks nothing', async () => {
+    stubApi({ [LIST]: recent, [GET]: recordTest(), [AVAILABILITY]: { available: true, testNumbers: ['+15125550111'], browserCalls: true } });
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    const { router } = renderWithRouter(<RecordTestPage id={TEST_ID} onOpen={() => {}} />, { isAdmin: true });
+    expect(await screen.findByRole('button', { name: 'Talk in browser' })).toBeInTheDocument();
+    const unload = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(false);
+    await router.navigate({ to: '/settings' as never });
+    await waitFor(() => expect(router.state.location.pathname).toBe('/settings'));
+    expect(confirm).not.toHaveBeenCalled();
   });
 });
