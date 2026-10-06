@@ -35,6 +35,11 @@ const schema = z.object({
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
   /** Claude model for AI call plans (plan 1C). Must be priced in ai/model.ts PRICE_MICROS_PER_TOKEN. */
   CALL_PLAN_MODEL: z.string().min(1).default('claude-sonnet-5-5'),
+  /**
+   * Plan 1D: Claude model that maps a call's answers to the org's picklist values for the Salesforce write-back. An
+   * unpriced model (ai/model.ts PRICE_MICROS_PER_TOKEN) is refused: fill-blanks are then skipped and noted.
+   */
+  WRITEBACK_MODEL: z.string().min(1).default('claude-sonnet-5-5'),
   /** cti-api on Railway's private network, e.g. http://ctiapi.railway.internal:4000 (plan 1C). */
   CTI_INTERNAL_URL: z
     .string()

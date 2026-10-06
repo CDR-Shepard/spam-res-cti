@@ -86,6 +86,11 @@ describe('parseConfig', () => {
     expect(parseConfig({ ...base, CALL_PLAN_MODEL: '' }).CALL_PLAN_MODEL).toBe('claude-sonnet-5-5');
     expect(parseConfig({ ...base, CALL_PLAN_MODEL: 'claude-opus-5' }).CALL_PLAN_MODEL).toBe('claude-opus-5');
   });
+  it('defaults WRITEBACK_MODEL to claude-sonnet-5-5 (empty counts as unset) and takes a configured one', () => {
+    expect(parseConfig(base).WRITEBACK_MODEL).toBe('claude-sonnet-5-5');
+    expect(parseConfig({ ...base, WRITEBACK_MODEL: '' }).WRITEBACK_MODEL).toBe('claude-sonnet-5-5');
+    expect(parseConfig({ ...base, WRITEBACK_MODEL: 'claude-opus-5' }).WRITEBACK_MODEL).toBe('claude-opus-5');
+  });
   describe('the internal AI call trigger (plan 1C)', () => {
     const secret = 'k'.repeat(32);
     const url = 'http://ctiapi.railway.internal:4000';
