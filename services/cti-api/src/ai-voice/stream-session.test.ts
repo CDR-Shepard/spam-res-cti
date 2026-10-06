@@ -4,6 +4,7 @@ import type { BridgeHooks, BridgeOptions } from './bridge.js';
 import type { AppointmentSlot } from '@cti/contracts';
 import { AI_CALL_TOOLS, type RealtimeFunctionTool } from './prompt.js';
 import { claimClose, clearActiveCalls, getActiveCall, registerActiveCall } from './registry.js';
+import { finalizeAiCall } from './service-finalize.js';
 import { defaultToolEffects } from './service-tools.js';
 import { runStreamSession, type StreamSessionDeps } from './stream-session.js';
 import {
@@ -286,6 +287,17 @@ describe('runStreamSession — appointment times (plan 1D)', () => {
     const res = await captured!.hooks.onTool('book_appointment', { slot_id: 'p1', address_confirmed: false, note: '' });
     expect(res.then).toBe('continue');
     expect(store.rows.get(ID)?.appointment).toMatchObject({ slotId: 'p1', start: SLOTS[0]!.start });
+  });
+
+  it('Fix 1 I-1: booked, then the time limit ends the call: it finalizes as appointment_set', async () => {
+    withSlots();
+    await begin();
+    await captured!.hooks.onTool('book_appointment', { slot_id: 'p1', address_confirmed: false, note: '' });
+    captured!.hooks.onEnd('max_duration');
+    await settle();
+    expect(twilio.hangups).toEqual([CALL_SID]);
+    await finalizeAiCall({ store, log: silentLog }, ID, { callStatus: 'completed', durationSeconds: 600, endedAt: NOW, answeredBy: 'human' });
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'appointment_set' });
   });
 
   it('without slots the tools are unchanged, and book_appointment books nothing', async () => {

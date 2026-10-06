@@ -9,7 +9,7 @@
  */
 import { BookedAppointment, type AppointmentSlot } from '@cti/contracts';
 import type { ToolResult } from './bridge.js';
-import type { ToolEnv } from './service-tools.js';
+import type { ToolCtx, ToolEnv } from './service-tools.js';
 
 export const WALKTHROUGH_NEEDS_ADDRESS =
   'Confirm the property address with them first (is it the house we are calling about?), then call book_appointment again with address_confirmed true.';
@@ -20,6 +20,8 @@ const BOOKED =
   'booked — confirm the day and time in one line with your goodbye, then end_call with outcome appointment_set';
 const FAILED = 'booking failed — offer to have the specialist call them back instead (schedule_callback)';
 const NOTE_MAX = 300;
+/** The summary line a booking leaves (summary.ts carries it through rewrites). */
+export const BOOKED_LINE_PREFIX = 'Appointment booked:';
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const field = (args: unknown, key: string): unknown =>
@@ -37,6 +39,44 @@ function bookingFor(slot: AppointmentSlot, args: unknown, now: Date): BookedAppo
     note: typeof note === 'string' ? note.trim().slice(0, NOTE_MAX) : '',
     bookedAt: now.toISOString(),
   });
+}
+
+/**
+ * The summary's booking line (M-3): an identical replay adds nothing, and a rebook replaces the earlier line, so the
+ * summary only ever names the time that is booked.
+ */
+async function noteBooking(ctx: ToolCtx, booked: BookedAppointment): Promise<void> {
+  const line = `${BOOKED_LINE_PREFIX} ${booked.kind === 'phone' ? 'phone call' : 'walkthrough'} ${booked.start}`;
+  const lines = (await ctx.store.get(ctx.aiCallId))?.summary?.split('\n') ?? [];
+  if (lines.includes(line)) return;
+  if (!lines.some((l) => l.startsWith(BOOKED_LINE_PREFIX))) return ctx.store.appendSummary(ctx.aiCallId, line);
+  const kept = lines.filter((l) => !l.startsWith(BOOKED_LINE_PREFIX));
+  const at = lines.findIndex((l) => l.startsWith(BOOKED_LINE_PREFIX));
+  await ctx.store.update(ctx.aiCallId, { summary: [...kept.slice(0, at), line, ...kept.slice(at)].join('\n') });
+}
+
+/** Logged, never thrown: the booking itself is stored, so the agent must still hear that it is booked. */
+async function afterBooked(ctx: ToolCtx, what: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (e) {
+    ctx.log.warn({ aiCallId: ctx.aiCallId, what, err: errText(e) }, 'ai-voice: booking stored, but its bookkeeping failed');
+  }
+}
+
+/**
+ * The `bookAppointment` effect: store the booking (D-10: refused when another real call holds the time), then record
+ * `appointment_set` at once (I-1), so a call that ends without end_call(appointment_set) — the caller hangs up, the time
+ * limit — still ends booked. A later do-not-call, transfer or end_call decision replaces that outcome (store.setOutcome
+ * never overrides do_not_call); see BOOKING_STANDS_OUTCOMES for which keep the booking.
+ */
+export async function storeBooking(ctx: ToolCtx, booked: BookedAppointment): Promise<'booked' | 'taken'> {
+  const result = await ctx.store.setAppointment(ctx.aiCallId, booked);
+  if (result === 'not_live') throw new Error('the call is no longer live');
+  if (result === 'taken') return 'taken';
+  await afterBooked(ctx, 'appointment_set', () => ctx.store.setOutcome(ctx.aiCallId, 'appointment_set', null));
+  await afterBooked(ctx, 'booking_summary', () => noteBooking(ctx, booked));
+  return 'booked';
 }
 
 export async function bookAppointment(args: unknown, env: ToolEnv): Promise<ToolResult> {

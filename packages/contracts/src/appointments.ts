@@ -63,6 +63,20 @@ export const BookedAppointment = z
   .strict();
 export type BookedAppointment = z.infer<typeof BookedAppointment>;
 
+/**
+ * The call outcomes under which a booking on `ai_calls.appointment` stands (Part 4 Fix 1, I-1). Booking records
+ * `appointment_set` at once; a later do-not-call, wrong number or end_call decision (not interested, a callback instead…)
+ * replaces it and frees the time. A transfer keeps it: the seller booked, then also talked to a rep, and the rep can cancel
+ * (`qualified_transferred`, and `transfer_failed` when the transfer did not connect).
+ */
+export const BOOKING_STANDS_OUTCOMES = ['appointment_set', 'qualified_transferred', 'transfer_failed'] as const;
+
+/** Does a call's booking still hold the specialist's time? A live call with no outcome yet holds it too. */
+export function bookingStands(call: { outcome: string | null; endedAt: Date | string | null }): boolean {
+  if (call.outcome === null) return call.endedAt === null;
+  return (BOOKING_STANDS_OUTCOMES as readonly string[]).includes(call.outcome);
+}
+
 /** Structured facts about the call cti-api renders outside the plan fence. */
 export const CallContext = z.object({ returning: z.boolean() }).strict();
 export type CallContext = z.infer<typeof CallContext>;

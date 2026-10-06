@@ -151,4 +151,10 @@ describe('ai_calls SQL, rendered', () => {
     expect(sql).toContain('limit $');
     expect(params).toEqual(expect.arrayContaining([ID, '0058X00000Fsx39', BOOKED.start, BOOKED.end, 30]));
   });
+
+  it('Fix 1 I-1: only a standing booking holds the time (a live row with no outcome, or a keeping outcome)', () => {
+    const { sql, params } = appointmentConflictQuery(db, ID, BOOKED).toSQL();
+    expect(sql).toMatch(/\("ai_calls"\."outcome" in \(\$\d+, \$\d+, \$\d+\) or \("ai_calls"\."outcome" is null and "ai_calls"\."ended_at" is null\)\)/);
+    expect(params).toEqual(expect.arrayContaining(['appointment_set', 'qualified_transferred', 'transfer_failed']));
+  });
 });

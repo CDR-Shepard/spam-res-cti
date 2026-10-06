@@ -19,7 +19,7 @@ import type { AppointmentSlot, BookedAppointment } from '@cti/contracts';
 import { END_CALL_OUTCOMES, QUALIFICATION_FIELDS, TRANSFER_REASONS } from './prompt-tools.js';
 import type { BridgeLog, ToolResult } from './bridge.js';
 import type { ToolName } from './prompt.js';
-import { bookAppointment } from './service-booking.js';
+import { bookAppointment, storeBooking } from './service-booking.js';
 import type { AiCallOutcome, AiCallStore } from './store.js';
 import { reformatSummary } from './summary.js';
 import { TRANSFER_TIME_LIMIT_SECONDS, type AiVoiceTwilio } from './twilio.js';
@@ -137,14 +137,7 @@ export const defaultToolEffects: ToolEffects = {
     });
     await ctx.store.update(ctx.aiCallId, { summary });
   },
-  async bookAppointment(ctx, booked) {
-    const result = await ctx.store.setAppointment(ctx.aiCallId, booked);
-    if (result === 'not_live') throw new Error('the call is no longer live');
-    if (result === 'taken') return 'taken';
-    const kind = booked.kind === 'phone' ? 'phone call' : 'walkthrough';
-    await ctx.store.appendSummary(ctx.aiCallId, `Appointment booked: ${kind} ${booked.start}`);
-    return 'booked';
-  },
+  bookAppointment: storeBooking,
 };
 
 /** After the agent's last words have played, run `act`; never throws. */
@@ -189,12 +182,12 @@ async function recordOutcome(ctx: ToolCtx, outcome: AiCallOutcome, summary: stri
   if (summary) await ctx.store.appendSummary(ctx.aiCallId, summary);
 }
 
-/** Was a booking stored for this call? A failed read counts as no (the call is then recorded as a callback). */
+/** Was a booking stored for this call? A failed read counts as no. */
 async function hasAppointment(ctx: ToolCtx): Promise<boolean> {
   try {
     return ((await ctx.store.get(ctx.aiCallId))?.appointment ?? null) !== null;
   } catch (e) {
-    ctx.log.warn({ aiCallId: ctx.aiCallId, err: errText(e) }, 'ai-voice: appointment read failed, recording a callback');
+    ctx.log.warn({ aiCallId: ctx.aiCallId, err: errText(e) }, 'ai-voice: appointment read failed, taken as no appointment');
     return false;
   }
 }
@@ -225,6 +218,11 @@ async function endCall(args: unknown, env: ToolEnv): Promise<ToolResult> {
     if (outcome === 'appointment_set' && !(await hasAppointment(ctx))) {
       await recordOutcome(ctx, 'qualified_callback', summary);
       await ctx.store.appendSummary(ctx.aiCallId, NO_APPOINTMENT_LINE);
+      return;
+    }
+    // I-1: a booked call whose line went quiet ends booked, exactly as when the caller hangs up (finalize keeps it).
+    if (outcome === 'hung_up' && ctx.slots.length > 0 && (await hasAppointment(ctx))) {
+      await recordOutcome(ctx, 'appointment_set', summary);
       return;
     }
     await recordOutcome(ctx, outcome, summary);

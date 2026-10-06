@@ -89,7 +89,7 @@ describe('bookAppointment', () => {
 
   it('6 (D-10): a time another real AI call already booked with the same owner is refused, and the agent offers another', async () => {
     await store.insert({
-      id: OTHER, orgId: ORG, startedBy: 'u2', toE164: '+16195550199', status: 'completed',
+      id: OTHER, orgId: ORG, startedBy: 'u2', toE164: '+16195550199', status: 'completed', outcome: 'appointment_set', endedAt: NOW,
       appointment: { slotId: 'p3', kind: 'phone', start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T18:15:00.000Z', specialistSfUserId: OWNER, addressConfirmed: false, note: '', bookedAt: NOW.toISOString() },
     });
     const res = await book({ slot_id: 'p1', address_confirmed: false, note: '' });

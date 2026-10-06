@@ -10,9 +10,13 @@
  * Test and practice calls never block a real booking (nothing is ever written to Salesforce for them, and outreach-api's
  * offer ignores them too: appointments/booked.ts), but a practice call is refused a time a real call holds, as the real
  * call would be. Owner ids compare on their case-sensitive 15-character core, as Salesforce does.
+ *
+ * Only a booking that stands holds the time (Part 4 Fix 1, I-1; `bookingStands` in @cti/contracts): a live call's, or a
+ * finished call's whose outcome is one of BOOKING_STANDS_OUTCOMES. A call that booked and then ended do-not-call, not
+ * interested and so on frees it (the row keeps the appointment as a record of what was said).
  */
 import { and, eq, isNotNull, isNull, ne, sql, type SQL } from 'drizzle-orm';
-import { BookedAppointment } from '@cti/contracts';
+import { BOOKING_STANDS_OUTCOMES, BookedAppointment } from '@cti/contracts';
 import { getDb, schema } from '@cti/db';
 
 type Db = ReturnType<typeof getDb>;
@@ -31,7 +35,11 @@ const ownerCore = (sfUserId: string): string => sfUserId.slice(0, 15);
 export const appointmentLockQuery = (sfUserId: string): SQL =>
   sql`select pg_advisory_xact_lock(hashtextextended(${`ai_call_appointment:${ownerCore(sfUserId)}`}, 0))`;
 
-/** Another real call in this call's org holding a time with the same owner that overlaps [start, end). */
+/** SQL for `bookingStands`: a live row with no outcome yet, or an outcome that keeps the booking. */
+const standsSql = (): SQL =>
+  sql`(${t.outcome} in (${sql.join(BOOKING_STANDS_OUTCOMES.map((o) => sql`${o}`), sql`, `)}) or (${t.outcome} is null and ${t.endedAt} is null))`;
+
+/** Another real call in this call's org whose standing booking with the same owner overlaps [start, end). */
 export const appointmentConflictQuery = (db: Conn, id: string, a: BookedAppointment) =>
   db
     .select({ id: t.id })
@@ -42,6 +50,7 @@ export const appointmentConflictQuery = (db: Conn, id: string, a: BookedAppointm
         ne(t.id, id),
         sql`${t.isTest} = false`,
         isNotNull(t.appointment),
+        standsSql(),
         sql`${t.createdAt} >= now() - make_interval(days => ${BOOKING_LOOKBACK_DAYS})`,
         sql`left(${t.appointment}->>'specialistSfUserId', 15) = ${ownerCore(a.specialistSfUserId)}`,
         sql`(${t.appointment}->>'start')::timestamptz < ${a.end}::timestamptz`,

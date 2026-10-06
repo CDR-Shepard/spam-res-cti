@@ -4,7 +4,9 @@ import {
   AiCallSettings,
   AppointmentSlot,
   AppointmentSlots,
+  BOOKING_STANDS_OUTCOMES,
   BookedAppointment,
+  bookingStands,
   CallContext,
   IanaZone,
   SLOT_ID,
@@ -168,5 +170,30 @@ describe('WritebackReadiness', () => {
     };
     expect(WritebackReadiness.parse(r)).toEqual(r);
     expect(WritebackReadiness.safeParse({ ...r, items: [{ ...r.items[0], problem: 'nope' }] }).success).toBe(false);
+  });
+});
+
+describe('bookingStands (Part 4 Fix 1, I-1)', () => {
+  const ENDED = new Date('2026-10-06T18:00:00Z');
+  it.each([
+    [null, null, true],
+    [null, ENDED, false],
+    ['appointment_set', null, true],
+    ['appointment_set', ENDED, true],
+    ['qualified_transferred', ENDED, true],
+    ['transfer_failed', ENDED, true],
+    ['do_not_call', null, false],
+    ['do_not_call', ENDED, false],
+    ['wrong_number', ENDED, false],
+    ['not_interested', ENDED, false],
+    ['qualified_callback', ENDED, false],
+    ['hung_up', ENDED, false],
+    ['other', ENDED, false],
+  ] as const)('outcome %s, ended %s → %s', (outcome, endedAt, want) => {
+    expect(bookingStands({ outcome, endedAt })).toBe(want);
+  });
+
+  it('the standing outcomes are exactly these', () => {
+    expect([...BOOKING_STANDS_OUTCOMES]).toEqual(['appointment_set', 'qualified_transferred', 'transfer_failed']);
   });
 });

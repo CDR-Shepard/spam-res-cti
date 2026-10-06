@@ -144,6 +144,35 @@ describe.skipIf(!server)('ai_calls appointment booking (real Postgres)', () => {
     expect(await run(await call(), booked('2030-01-12T18:00:00.000Z', 15))).toBe('booked');
   });
 
+  it('Fix 1 I-1: a finished call holds its time only when its booking stands (appointment_set or a transfer)', async () => {
+    const t = '2030-01-14T18:00:00.000Z';
+    const finish = async (outcome: string | null) => {
+      const id = await call();
+      expect(await run(id, booked(t, 15))).toBe('booked');
+      await db
+        .update(schema.aiCalls)
+        .set({ outcome, status: 'completed', endedAt: new Date() })
+        .where(eq(schema.aiCalls.id, id));
+    };
+    for (const freed of ['do_not_call', 'wrong_number', 'not_interested', 'qualified_callback', 'hung_up', 'other', null]) {
+      await finish(freed);
+    }
+    // Every booking above was freed when its call finished, so each next call could book the same time.
+    const kept = await call();
+    expect(await run(kept, booked(t, 15))).toBe('booked');
+    // A live booked call (no outcome yet, or appointment_set) holds it.
+    expect(await run(await call(), booked(t, 15))).toBe('taken');
+    await db.update(schema.aiCalls).set({ outcome: 'appointment_set' }).where(eq(schema.aiCalls.id, kept));
+    expect(await run(await call(), booked(t, 15))).toBe('taken');
+    for (const outcome of ['appointment_set', 'qualified_transferred', 'transfer_failed']) {
+      await db.update(schema.aiCalls).set({ outcome, endedAt: new Date() }).where(eq(schema.aiCalls.id, kept));
+      expect(await run(await call(), booked(t, 15))).toBe('taken');
+    }
+    // A live call that said do-not-call after booking frees it at once.
+    await db.update(schema.aiCalls).set({ outcome: 'do_not_call', endedAt: null }).where(eq(schema.aiCalls.id, kept));
+    expect(await run(await call(), booked(t, 15))).toBe('booked');
+  });
+
   it('an ended call books nothing', async () => {
     const id = await call({ ended: true });
     expect(await run(id, booked('2030-01-13T18:00:00.000Z', 15))).toBe('not_live');

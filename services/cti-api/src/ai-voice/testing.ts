@@ -4,6 +4,7 @@
  * fake ws-like socket, and a registry entry factory. No network, no DB.
  * (Imported only by *.test.ts.)
  */
+import { bookingStands } from '@cti/contracts';
 import type { BridgeSocket } from './bridge.js';
 import type { ActiveAiCall } from './registry.js';
 import type { AiCallRow, AiCallStore, NewAiCall, NewCtiCall, TranscriptEntry } from './store.js';
@@ -122,7 +123,7 @@ export function fakeStore(): FakeStore {
       const taken = [...rows.values()].some((o) => {
         const b = o.appointment as { specialistSfUserId: string; start: string; end: string } | null;
         return (
-          o.id !== id && o.orgId === r.orgId && !o.isTest && b !== null && b.specialistSfUserId.slice(0, 15) === core &&
+          o.id !== id && o.orgId === r.orgId && !o.isTest && b !== null && bookingStands(o) && b.specialistSfUserId.slice(0, 15) === core &&
           Date.parse(b.start) < Date.parse(a.end) && Date.parse(b.end) > Date.parse(a.start)
         );
       });
