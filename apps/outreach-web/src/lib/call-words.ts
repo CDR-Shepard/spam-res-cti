@@ -181,3 +181,25 @@ export function aiExitWords(reason: string | null): string | null {
   if (reason.startsWith('ai_call_')) return notCalledWords(reason.slice('ai_call_'.length));
   return humanize(reason);
 }
+
+/**
+ * Plan 1D: a booked appointment as "Phone call Wed Oct 7, 11:00 AM" or "Walkthrough …", in `timeZone` (the viewer's own when
+ * left out). ICU's narrow no-break space before AM/PM becomes a plain one.
+ */
+export function appointmentWords(a: { kind: 'phone' | 'walkthrough'; start: string }, timeZone?: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).formatToParts(new Date(a.start));
+  const part = (type: Intl.DateTimeFormatPartTypes): string => parts.find((p) => p.type === type)?.value ?? '';
+  return `${a.kind === 'phone' ? 'Phone call' : 'Walkthrough'} ${part('weekday')} ${part('month')} ${part('day')}, ${part('hour')}:${part('minute')} ${part('dayPeriod')}`;
+}
+
+/** A practice call's answer: ringing, or why it was not placed (a gate refusal or a failure, in words). */
+export function practiceAnswerWords(r: { result: 'placed' | 'blocked' | 'failed'; reason?: string }): string {
+  return r.result === 'placed' ? 'Ringing your phone…' : `Not placed: ${reasonWords(r.reason ?? 'unknown')}`;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The campaign page's search: `?call=<AI call id>` (the Chatter post's "Call details" link) opens that call on the results. */
+export function callSearch(search: Record<string, unknown>): { call?: string } {
+  return typeof search.call === 'string' && UUID.test(search.call) ? { call: search.call } : {};
+}

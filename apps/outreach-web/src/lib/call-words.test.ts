@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { appointmentWords, callSearch } from './call-words';
 import { AiCallBlockReason, AiCallFailReason, AiCallOutcome, AiCallStatus, AiConsentStatus, CallGoalKey, CallStage, EvidenceSource, PreferredWindow, QualificationTopic, ResearchSource, ResearchSourceStatus } from '@cti/contracts';
 import {
   BLOCK_REASON_WORDS,
@@ -106,5 +107,21 @@ describe('AI call result words', () => {
     expect(notCalledWords('idempotency_conflict')).toBe('Not called: the call request clashed with an earlier one; trying again');
     expect(notCalledWords('brand_new')).toBe('Not called: brand new');
     expect(notCalledWords(null)).toBe('Not called');
+  });
+});
+
+describe('plan 1D words', () => {
+  const booked = { kind: 'phone' as const, start: '2026-10-07T18:00:00.000Z' };
+  it('appointmentWords says the kind and the time in the zone given (the viewer\'s by default)', () => {
+    expect(appointmentWords(booked, 'America/Los_Angeles')).toBe('Phone call Wed Oct 7, 11:00 AM');
+    expect(appointmentWords({ kind: 'walkthrough', start: '2026-10-09T17:00:00.000Z' }, 'America/New_York')).toBe('Walkthrough Fri Oct 9, 1:00 PM');
+    expect(appointmentWords(booked)).toMatch(/^Phone call \w{3} \w{3} \d{1,2}, \d{1,2}:\d{2} [AP]M$/);
+  });
+
+  it('callSearch keeps only a call id that is a uuid', () => {
+    expect(callSearch({ call: '99999999-9999-4999-8999-999999999999' })).toEqual({ call: '99999999-9999-4999-8999-999999999999' });
+    expect(callSearch({ call: 'javascript:alert(1)' })).toEqual({});
+    expect(callSearch({ call: 42 })).toEqual({});
+    expect(callSearch({})).toEqual({});
   });
 });

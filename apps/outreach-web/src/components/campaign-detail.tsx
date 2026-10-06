@@ -11,13 +11,15 @@ import { CampaignSettings } from './campaign-settings';
 import { CampaignStatusActions } from './campaign-status-actions';
 import { CampaignStatusBadge } from './campaign-status-badge';
 import { LeadPicker } from './lead-picker';
+import { PracticeCalls } from './practice-calls';
 
 const DRY_RUN_WORDS: Record<Campaign['mode'], string> = {
   sequence: 'Dry run: the plan below shows what would happen. Nothing is sent and no calls are queued.',
   ai_call: 'Dry run: picked leads are researched and call plans are written for review. No calls are placed.',
 };
 
-export function CampaignDetail({ campaignId }: { campaignId: string }) {
+/** `focusCallId`: the AI call the page was opened for (`?call=`, the Chatter post's "Call details" link). */
+export function CampaignDetail({ campaignId, focusCallId = null }: { campaignId: string; focusCallId?: string | null }) {
   const auth = useAuth();
   const isAdmin = Boolean(auth.user?.isAdmin || auth.user?.isSuperAdmin);
   const campaign = useQuery({ queryKey: outreachKeys.campaign(campaignId), queryFn: () => getCampaign(campaignId) });
@@ -29,17 +31,18 @@ export function CampaignDetail({ campaignId }: { campaignId: string }) {
       <CampaignHeader campaign={c} isAdmin={isAdmin} />
       <CampaignBanners campaign={c} />
       <CampaignSettings campaign={c} canEdit={isAdmin && c.status !== 'archived'} />
-      {c.mode === 'ai_call' ? <AiCallSections campaign={c} isAdmin={isAdmin} /> : <CampaignPlan campaignId={c.id} />}
+      {c.mode === 'ai_call' ? <AiCallSections campaign={c} isAdmin={isAdmin} focusCallId={focusCallId} /> : <CampaignPlan campaignId={c.id} />}
     </div>
   );
 }
 
-function AiCallSections({ campaign: c, isAdmin }: { campaign: Campaign; isAdmin: boolean }) {
+function AiCallSections({ campaign: c, isAdmin, focusCallId }: { campaign: Campaign; isAdmin: boolean; focusCallId: string | null }) {
   return (
     <>
       <LeadPicker campaignId={c.id} canEdit={isAdmin && c.status !== 'archived'} />
       <CallPlanBoard campaign={c} isAdmin={isAdmin} />
-      <AiCallResults campaignId={c.id} />
+      {isAdmin && <PracticeCalls campaignId={c.id} />}
+      <AiCallResults campaignId={c.id} focusCallId={focusCallId} />
     </>
   );
 }

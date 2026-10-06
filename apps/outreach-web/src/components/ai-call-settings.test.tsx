@@ -228,3 +228,57 @@ describe('AiCallSettingsCard', () => {
     expect(await screen.findByText('Salesforce is not connected. An admin can connect it in Settings.')).toBeInTheDocument();
   });
 });
+
+describe('Salesforce write-back readiness', () => {
+  const READINESS = 'GET /api/settings/ai-calls/readiness';
+  const base = { [`GET /api/settings/ai-calls`]: settings(), [idsUrl([GRANT])]: [grant] };
+  const ready = {
+    ready: true,
+    convertReady: true,
+    convertRecordTypes: { account: 'Person Account', opportunity: 'Homeowner Opportunity' },
+    appointmentOwner: { id: GRANT, name: 'Grant Golden', title: null, isActive: true },
+    items: [],
+  };
+
+  it('a ready org says Ready, who appointments go to, and what conversion creates', async () => {
+    stubApi({ ...base, [READINESS]: ready });
+    renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+    expect(await screen.findByRole('heading', { name: 'Salesforce write-back readiness' })).toBeInTheDocument();
+    expect(await screen.findByText('Ready')).toBeInTheDocument();
+    expect(screen.getByText('Appointments go to: Grant Golden')).toBeInTheDocument();
+    expect(screen.getByText('Lead conversion: ready. New records will be Person Account / Homeowner Opportunity')).toBeInTheDocument();
+  });
+
+  it('lists each problem in words; conversion not ready names why and the fallback; nobody active turns booking off', async () => {
+    stubApi({
+      ...base,
+      [READINESS]: {
+        ...ready,
+        ready: false,
+        convertReady: false,
+        appointmentOwner: null,
+        items: [
+          { object: 'Lead', field: 'AI_Last_Call_Changes__c', label: 'AI Last Call Changes', problem: 'not_updateable' },
+          { object: 'Opportunity', field: 'Loss_Reason__c', label: 'Loss_Reason__c', problem: 'missing' },
+          { object: 'Event', field: null, label: 'Event', problem: 'cannot_create' },
+          { object: 'Lead', field: null, label: 'Convert Leads permission', problem: 'cannot_convert' },
+        ],
+      },
+    });
+    renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+    const list = within(await screen.findByRole('list', { name: 'Write-back problems' }));
+    expect(list.getByText("Lead · AI Last Call Changes: the connected Salesforce user can't edit it")).toBeInTheDocument();
+    expect(list.getByText("Opportunity · Loss_Reason__c: not in this Salesforce org, or hidden from the connected user")).toBeInTheDocument();
+    expect(list.getByText("Event: can't be created by the connected user")).toBeInTheDocument();
+    expect(screen.getByText('Appointments go to: nobody active: booking is off')).toBeInTheDocument();
+    expect(
+      screen.getByText("Lead conversion: not ready (Convert Leads permission: the connected Salesforce user doesn't have it). A Lead that books gets a calendar hold and a Task instead"),
+    ).toBeInTheDocument();
+  });
+
+  it('a readiness check that cannot run says why', async () => {
+    stubApi({ ...base, [READINESS]: respond(409, { error: 'Salesforce is not connected.', code: 'CRM_NOT_CONNECTED' }) });
+    renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+    expect(await screen.findByText('Salesforce is not connected. An admin can connect it in Settings.')).toBeInTheDocument();
+  });
+});

@@ -17,15 +17,18 @@ import {
   CrmConnectionStatus,
   ListViewsResponse,
   NeedsReviewResponse,
+  PracticeCallsResponse,
   SelectionResponse,
   StartConnectionResponse,
   TestCallResponse,
+  WritebackReadiness,
   type CallStage,
   type CampaignStatusChange,
   type EditCallPlanRequest,
   type CreateCampaignInput,
   type EnrollmentStatus,
   type FieldMap,
+  type PracticeCallRequest,
   type PreviewRequest,
   type ReviewDecision,
   type SelectionChange,
@@ -58,6 +61,9 @@ export const outreachKeys = {
   aiAvailability: ['ai-calls', 'availability'] as const,
   aiCallSettings: ['settings', 'ai-calls'] as const,
   salesforceUsersById: (ids: readonly string[]) => ['salesforce', 'users', 'ids', ids.join(',')] as const,
+  practiceCallLists: ['campaigns', 'practice-calls'] as const,
+  practiceCalls: (campaignId: string) => ['campaigns', 'practice-calls', campaignId] as const,
+  writebackReadiness: ['settings', 'ai-calls', 'readiness'] as const,
 };
 
 const seg = (value: string): string => encodeURIComponent(value);
@@ -204,4 +210,24 @@ export function searchSalesforceUsers(search: string): Promise<SalesforceUserOpt
 /** Admin only: these Salesforce users (up to 20), inactive ones included, in the order asked. */
 export function salesforceUsersById(ids: readonly string[]): Promise<SalesforceUserOption[]> {
   return api(`/api/salesforce/users?${new URLSearchParams({ ids: ids.join(',') }).toString()}`, SalesforceUserOptions);
+}
+
+/** Admin only (plan 1D): ring a test number with this lead's real record and plan `version`; never writes to Salesforce. */
+export function practiceCall(enrollmentId: string, body: PracticeCallRequest): Promise<TestCallResponse> {
+  return api(`/api/call-plans/${seg(enrollmentId)}/practice`, TestCallResponse, { method: 'POST', body: json(body) });
+}
+
+/** Admin only: the campaign's latest practice calls, newest first. */
+export function practiceCalls(campaignId: string): Promise<PracticeCallsResponse> {
+  return api(`/api/campaigns/${seg(campaignId)}/practice-calls`, PracticeCallsResponse);
+}
+
+/** Admin only: send a failed Salesforce write-back round again (its finished steps are kept). */
+export function retryWriteback(aiCallId: string): Promise<void> {
+  return apiEmpty(`/api/ai-calls/${seg(aiCallId)}/writeback/retry`, { method: 'POST' });
+}
+
+/** Admin only: can the connected Salesforce user write call results back and convert a Lead that books? */
+export function writebackReadiness(): Promise<WritebackReadiness> {
+  return api('/api/settings/ai-calls/readiness', WritebackReadiness);
 }

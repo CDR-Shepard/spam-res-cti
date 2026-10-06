@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { useAuth } from '@/lib/auth';
 import { getAiCallSettings, outreachKeys, salesforceUsersById, saveAiCallSettings, searchSalesforceUsers } from '@/lib/outreach-api';
 import { errorText } from '@/lib/outreach-words';
+import { WritebackReadinessSection } from './writeback-readiness';
 
 type Booking = AiCallSettings['booking'];
 type Kind = 'phone' | 'walkthrough';
@@ -48,6 +49,7 @@ function AdminAiCallSettings() {
         {/* Not an alert: the Salesforce card's problems are the alerts on this page. */}
         {settings.error && <p className="text-sm text-destructive">{errorText(settings.error)}</p>}
         {settings.data && <SettingsForm saved={settings.data} />}
+        <WritebackReadinessSection />
       </CardContent>
     </Card>
   );

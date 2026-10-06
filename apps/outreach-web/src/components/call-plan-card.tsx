@@ -9,6 +9,7 @@ import { CALL_STAGE_WORDS, CONSENT_WORDS, EVIDENCE_WORDS, GOAL_WORDS, STRENGTH_W
 import { approveCallPlan, editCallPlan, rejectCallPlan, researchAgain } from '@/lib/outreach-api';
 import { errorText, formatDateTime } from '@/lib/outreach-words';
 import { CallPlanEditor } from './call-plan-editor';
+import { PracticeCall } from './practice-call';
 
 /** Server codes the plan routes send (call-plans/decisions.ts), for the cases the server's own words do not cover. */
 const DECISION_WORDS: Readonly<Record<string, string>> = {
@@ -75,6 +76,7 @@ export function CallPlanCardView({ card, onChanged }: { card: CallPlanCard; onCh
             )}
           </div>
         ) : <p className="text-muted-foreground">Only the record owner or an admin can decide.</p>}
+        {!editing && <PracticeCall card={card} />}
       </CardContent>
     </Card>
   );

@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { AiCallResult, AiCallResultsResponse } from '@cti/contracts';
+import type { AiCallResult, AiCallResultsResponse, BookedAppointment, WritebackSummary } from '@cti/contracts';
+import { appointmentWords } from '@/lib/call-words';
 import { formatDateTime } from '@/lib/outreach-words';
 import { renderWithProviders } from '../test/render';
 import { CAMPAIGN_ID } from '../test/outreach-fixtures';
-import { stubApi } from '../test/stub-api';
+import { respond, stubApi } from '../test/stub-api';
 import { AiCallResults, RESULTS_POLL_MS, resultsPollInterval } from './ai-call-results';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -142,6 +143,78 @@ describe('AiCallResults', () => {
     stubApi({ [`GET ${RESULTS}`]: page([]) });
     renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
     expect(await screen.findByText(/No AI calls yet/)).toBeInTheDocument();
+  });
+});
+
+describe('plan 1D: appointment and Salesforce columns', () => {
+  const BOOKED: BookedAppointment = {
+    slotId: 'p1', kind: 'phone', start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T18:15:00.000Z',
+    specialistSfUserId: '0058X00000Fsx39QAB', addressConfirmed: false, note: '', bookedAt: '2026-10-06T22:05:00.000Z',
+  };
+  const WB: WritebackSummary = {
+    status: 'done', error: null, mayRetry: false, convertedOpportunityId: null,
+    changes: [{ kind: 'changed', label: 'Stage', before: 'New Opportunity', after: 'Appointment Set' }],
+  };
+  const booked = (over: Partial<AiCallResult> = {}) =>
+    row(1, { aiCallId: CALL, callStatus: 'completed', outcome: 'appointment_set', appointment: BOOKED, writeback: WB, ...over });
+
+  it('a booked call shows the appointment in the viewer\'s zone and a Done badge that opens what was written', async () => {
+    stubApi({ [`GET ${RESULTS}`]: page([booked()]) });
+    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    const r = within(await rowOf('Lead 1'));
+    expect(r.getByText(appointmentWords(BOOKED))).toBeInTheDocument();
+    expect(screen.queryByText('Stage: New Opportunity → Appointment Set')).not.toBeInTheDocument();
+    await userEvent.click(r.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByText('Stage: New Opportunity → Appointment Set')).toBeInTheDocument();
+  });
+
+  it('Retry on a failed write-back POSTs and reads the results again', async () => {
+    const calls = stubApi({
+      [`GET ${RESULTS}`]: page([booked({ writeback: { ...WB, status: 'failed', mayRetry: true, error: 'SERVER_UNAVAILABLE' } })]),
+      [`POST /api/ai-calls/${CALL}/writeback/retry`]: respond(204),
+    });
+    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />, { isAdmin: true });
+    await userEvent.click(within(await rowOf('Lead 1')).getByRole('button', { name: 'Failed' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+    await vi.waitFor(() => expect(calls.filter((c) => c.url === RESULTS)).toHaveLength(2));
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+  });
+
+  it('a converted Lead shows "Converted to Opportunity", linking to the new record', async () => {
+    stubApi({ [`GET ${RESULTS}`]: page([booked({ writeback: { ...WB, convertedOpportunityId: '006000000000009AAA' } })]) });
+    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    const link = await screen.findByRole('link', { name: 'Converted to Opportunity' });
+    expect(link).toHaveAttribute('href', 'https://gghomes.my.salesforce.com/006000000000009AAA');
+  });
+
+  it('no write-back and no booking leave both cells empty', async () => {
+    stubApi({ [`GET ${RESULTS}`]: page([row(1, { aiCallId: CALL, callStatus: 'completed', outcome: 'not_interested' })]) });
+    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    const r = within(await rowOf('Lead 1'));
+    expect(r.queryByRole('button', { name: 'Done' })).not.toBeInTheDocument();
+    expect(r.queryByText(/Phone call|Walkthrough/)).not.toBeInTheDocument();
+  });
+
+  it('the ?call= deep link (the Chatter post\'s "Call details") marks that call and opens its transcript and write-back', async () => {
+    stubApi({
+      [`GET ${RESULTS}`]: page([row(2), booked({ mayReadTranscript: true })], 'next1'),
+      [`GET /api/ai-calls/${CALL}/transcript`]: { aiCallId: CALL, lines: [{ role: 'agent', text: 'Hello from the deep link.', at: null }] },
+    });
+    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
+    expect(await screen.findByText('Hello from the deep link.')).toBeInTheDocument();
+    expect(screen.getByText('Stage: New Opportunity → Appointment Set')).toBeInTheDocument();
+    expect(await rowOf('Lead 1')).toHaveAttribute('aria-current', 'true');
+    expect(await rowOf('Lead 2')).not.toHaveAttribute('aria-current');
+  });
+
+  it('a deep-linked call on a later page is read until it is found', async () => {
+    const calls = stubApi({
+      [`GET ${RESULTS}`]: page([row(2)], 'next1'),
+      [`GET ${RESULTS}?cursor=next1`]: page([booked()]),
+    });
+    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
+    expect(await rowOf('Lead 1')).toHaveAttribute('aria-current', 'true');
+    expect(calls.map((c) => c.url)).toContain(`${RESULTS}?cursor=next1`);
   });
 });
 
