@@ -48,8 +48,8 @@ describe.skipIf(!pgLane)('runPreview (real Postgres)', () => {
     await drop?.();
   });
 
-  async function tenant(o: { connected?: boolean; sfObject?: 'Lead' | 'Opportunity' } = {}) {
-    const orgId = await seedOrg(db);
+  async function tenant(o: { connected?: boolean; sfObject?: 'Lead' | 'Opportunity'; settings?: Record<string, unknown> } = {}) {
+    const orgId = await seedOrg(db, o.settings ?? {});
     await db.update(schema.organizations).set({ name: 'GG Homes' }).where(eq(schema.organizations.id, orgId));
     if (o.connected !== false) await seedConnection(db, orgId, FIELD_MAP);
     const admin = await seedUser(db, orgId, { displayName: 'Ada Admin' });
@@ -97,7 +97,7 @@ describe.skipIf(!pgLane)('runPreview (real Postgres)', () => {
     expect(ResearchSnapshot.parse(row.research).consent).toBe('no');
   });
 
-  it('3: booking on with free time: the times, their owner, and no note', async () => {
+  it('3: a specialist with free time (booking and write-back at their 1D defaults, off): the times, their owner, and no note', async () => {
     const t = await tenant();
     await runPreview(deps(salesforce(), fakeModel()), t.testId);
     const row = await stored(t.testId);
@@ -106,7 +106,20 @@ describe.skipIf(!pgLane)('runPreview (real Postgres)', () => {
     expect(row.offerNote).toBeNull();
   });
 
-  it('3b: booking off: no times and the note, still ready', async () => {
+  it('3a: Book appointments and write-back saved off, a specialist named: times are still offered, as a 1D practice call offers them', async () => {
+    const booking = {
+      enabled: false, specialists: [GRANT], convertLeads: false, days: [1, 2, 3, 4, 5],
+      phone: { enabled: true, durationMinutes: 15, startHour: 10, endHour: 18, stepMinutes: 30, minLeadMinutes: 120, horizonBusinessDays: 2, bufferMinutes: 0, maxOffered: 6 },
+      walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 },
+    };
+    const t = await tenant({ settings: { aiCallBooking: booking, aiCallWriteback: false } });
+    await runPreview(deps(salesforce(), fakeModel(), { defaultSpecialists: [] }), t.testId);
+    const row = await stored(t.testId);
+    expect((row.slots as unknown[]).length).toBeGreaterThan(0);
+    expect(row).toMatchObject({ ownerSfUserId: GRANT, offerNote: null });
+  });
+
+  it('3b: nobody on the appointment list: no times and the note, still ready', async () => {
     const t = await tenant();
     await runPreview(deps(salesforce(), fakeModel(), { defaultSpecialists: [] }), t.testId);
     expect(await stored(t.testId)).toMatchObject({ status: 'ready', slots: [], offerNote: 'booking_off', ownerSfUserId: null });

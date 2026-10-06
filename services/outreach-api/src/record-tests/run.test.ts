@@ -134,7 +134,7 @@ describe.skipIf(!pgLane)('running a record test call (real Postgres)', () => {
     expect(b.cti.requests).toHaveLength(0);
   });
 
-  it("8: with booking on the trigger carries the owner's free times, read only; booking off sends none", async () => {
+  it("8: with a specialist named the trigger carries the owner's free times, read only, whatever the switches; nobody named sends none", async () => {
     const s = await setup();
     await startRecordTestCall(s.deps, s.ctx, s.testId, { mode: 'browser', identity: identityOf(s.admin) });
     const target = s.cti.requests[0]!.target;
@@ -147,9 +147,16 @@ describe.skipIf(!pgLane)('running a record test call (real Postgres)', () => {
       phone: { enabled: true, durationMinutes: 15, startHour: 10, endHour: 18, stepMinutes: 30, minLeadMinutes: 120, horizonBusinessDays: 2, bufferMinutes: 0, maxOffered: 6 },
       walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 },
     };
-    const off = await setup({ settings: { aiCallBooking: booking } });
+    // 1D practiceBooking: Book appointments and write-back off still offer the named specialist's times on a test call.
+    const off = await setup({ settings: { aiCallBooking: booking, aiCallWriteback: false } });
     await startRecordTestCall(off.deps, off.ctx, off.testId, { mode: 'phone', to: TEST_NUMBER });
-    expect(off.cti.requests[0]!.target).not.toHaveProperty('slots');
+    const offTarget = off.cti.requests[0]!.target;
+    if (offTarget.kind !== 'practice') throw new Error('not a practice target');
+    expect(offTarget.slots?.length).toBeGreaterThan(0);
+    expect(offTarget.slots!.every((slot) => slot.specialistSfUserId === GRANT)).toBe(true);
+    const nobody = await setup({ settings: { aiCallBooking: { ...booking, enabled: true, specialists: [] } } });
+    await startRecordTestCall({ ...nobody.deps, defaultSpecialists: [] }, nobody.ctx, nobody.testId, { mode: 'phone', to: TEST_NUMBER });
+    expect(nobody.cti.requests[0]!.target).not.toHaveProperty('slots');
   });
 
   it('9: a transport failure (or a 409) is cti_unreachable and the row keeps a null result', async () => {
