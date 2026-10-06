@@ -57,7 +57,9 @@ describe.skipIf(!pgLane)('running a record test call (real Postgres)', () => {
     cti.available = { available: true, testNumbers: [TEST_NUMBER], browserCalls: true };
     const sf = readOnlyOrg();
     const deps = { db, clients: async () => sf.client, cti: cti.cti, now: NOW, log: quiet, defaultSpecialists: [GRANT] };
-    return { orgId, admin, testId, cti, sf, deps, ctx: ctxOf(orgId, admin, true) };
+    // As requireContext builds it: the tenant is the org row, settings included.
+    const [tenant] = await db.select().from(schema.organizations).where(eq(schema.organizations.id, orgId));
+    return { orgId, admin, testId, cti, sf, deps, ctx: { ...ctxOf(orgId, admin, true), tenant: tenant! } };
   }
   const callRows = (testId: string) => db.select().from(schema.aiRecordTestCalls).where(eq(schema.aiRecordTestCalls.recordTestId, testId));
   const count = async (table: string) => Number(((await db.execute(sql.raw(`select count(*)::int as n from ${table}`))) as unknown as { rows: Array<{ n: number }> }).rows[0]!.n);
@@ -170,10 +172,10 @@ describe.skipIf(!pgLane)('running a record test call (real Postgres)', () => {
   });
 
   it('10 (G-2, G-6): a test call that booked makes no touch or write-back, and Salesforce only ever sees the offer\'s reads', async () => {
-    for (const body of [{ mode: 'phone' as const, to: TEST_NUMBER }, { mode: 'browser' as const, identity: 'own' }]) {
+    for (const mode of ['phone', 'browser'] as const) {
       const s = await setup();
       const touchesBefore = await count('touches');
-      const res = await startRecordTestCall(s.deps, s.ctx, s.testId, body.mode === 'phone' ? body : { mode: 'browser', identity: identityOf(s.admin) });
+      const res = await startRecordTestCall(s.deps, s.ctx, s.testId, mode === 'phone' ? { mode, to: TEST_NUMBER } : { mode, identity: identityOf(s.admin) });
       if (!('ok' in res) || !res.ok || res.response.result !== 'placed') throw new Error('not placed');
       // What cti-api writes for a test call that booked: is_test + practice, the record, the stored appointment.
       await db.update(schema.aiCalls)
@@ -217,6 +219,9 @@ describe.skipIf(!pgLane)('running a record test call (real Postgres)', () => {
     const [lost, placed] = calls;
     expect(lost).toMatchObject({ mode: 'browser', toE164: null, callStatus: 'queued', result: { result: 'placed' } });
     expect(lost!.aiCallId).toBe((lost!.result as { aiCallId: string }).aiCallId);
+    // What cti-api would have written for the lost browser leg (E-3: the fake seeds it as cti-api does).
+    const [lostRow] = await db.select().from(schema.aiCalls).where(eq(schema.aiCalls.id, lost!.aiCallId!));
+    expect(lostRow).toMatchObject({ isTest: true, practice: true, sfObject: 'Lead', sfRecordId: RT_LEAD, toE164: expect.stringMatching(/^client:aitest_/) });
     expect(placed).toMatchObject({
       mode: 'phone', toE164: TEST_NUMBER, aiCallId: first.response.aiCallId, callStatus: 'completed', outcome: 'appointment_set',
       summary: 'Booked Grant.', durationSeconds: 95, appointment: PHONE_BOOKING, appointmentWith: 'Grant', qualification: { timeline: '30 days' }, dryRun: null,

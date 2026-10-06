@@ -127,8 +127,7 @@ export function fakeCti(db: Db): FakeCti {
         if ('transport' in a) return { kind: 'transport', error: a.transport };
         if ('conflict' in a) return { kind: 'conflict' };
         if ('lostPlaced' in a) {
-          const target = req.target.kind === 'record' ? { sfObject: req.target.objectType, sfRecordId: req.target.recordId } : {};
-          const aiCallId = await seedAiCall(db, req.orgId, req.userId, { status: 'queued', createdAt: a.createdAt, ...target });
+          const aiCallId = await seedAiCall(db, req.orgId, req.userId, { status: 'queued', createdAt: a.createdAt, ...seededTarget(req) });
           const response = { result: 'placed', aiCallId } as InternalAiCallResponse;
           await seedAiCallRequest(db, { orgId: req.orgId, key: req.idempotencyKey, userId: req.userId, response, createdAt: a.createdAt });
           return { kind: 'transport', error: 'timeout' };
