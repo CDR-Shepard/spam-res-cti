@@ -49,7 +49,7 @@ describe.skipIf(!pgLane)('kept idempotency keys (real Postgres)', () => {
   describe('resolveKey', () => {
     it('none: cti-api never reserved the key', async () => {
       const { h, lead, key } = await keptLead();
-      expect(await resolveKey(db, target(h, lead, key), NOW)).toEqual({ kind: 'none' });
+      expect(await resolveKey(db, target(h, lead, key), NOW)).toEqual({ kind: 'none', stored: false });
     });
 
     it('answered: the stored answer, placed or a refusal', async () => {
@@ -95,7 +95,8 @@ describe.skipIf(!pgLane)('kept idempotency keys (real Postgres)', () => {
       await seedAiCall(db, h.base.orgId, someoneElse, { sfRecordId: lead.sfRecordId, createdAt: CLAIMED });
       await seedAiCall(db, h.base.orgId, lead.approver, { sfRecordId: '00Q000000000999AAA', createdAt: CLAIMED });
       await seedAiCall(db, h.base.orgId, lead.approver, { sfRecordId: lead.sfRecordId, createdAt: at(CLAIMED, -FIND_SLACK_MS - 1000) });
-      expect(await resolveKey(db, target(h, lead, key), NOW)).toEqual({ kind: 'none' });
+      // Fix 1 (I-2): cti-api still holds the row, and with it the first body's hash.
+      expect(await resolveKey(db, target(h, lead, key), NOW)).toEqual({ kind: 'none', stored: true });
     });
   });
 
@@ -115,11 +116,22 @@ describe.skipIf(!pgLane)('kept idempotency keys (real Postgres)', () => {
       expect(await settleKeptKey(db, lead.touchId, NOW)).toEqual({ kind: 'pending', until: at(claimed, TRIGGER_TIMEOUT_MS) });
     });
 
-    it('no key, no reservation, or a refusal: free', async () => {
+    it('no key, or no reservation: free, and cti-api stored nothing (Fix 1, I-2: the re-send is fresh)', async () => {
       const { lead } = await keptLead();
-      expect(await settleKeptKey(db, lead.touchId, NOW)).toEqual({ kind: 'free' });
+      expect(await settleKeptKey(db, lead.touchId, NOW)).toEqual({ kind: 'free', stored: false });
       const plain = await seedReleasedLead(db, (await paceHarness(db)).base);
-      expect(await settleKeptKey(db, plain.touchId, NOW)).toEqual({ kind: 'free' });
+      expect(await settleKeptKey(db, plain.touchId, NOW)).toEqual({ kind: 'free', stored: false });
+    });
+
+    it('a stored refusal, or a stale reservation with no call: free, and cti-api stored the key (the re-send settles by 409)', async () => {
+      const refused = await keptLead();
+      const blockedId = await seedAiCall(db, refused.h.base.orgId, refused.lead.approver, { sfRecordId: refused.lead.sfRecordId, status: 'blocked', createdAt: CLAIMED });
+      const refusal = { result: 'blocked' as const, reason: 'calling_hours' as const, aiCallId: blockedId };
+      await seedAiCallRequest(db, { orgId: refused.h.base.orgId, key: refused.key, userId: refused.lead.approver, response: refusal, createdAt: CLAIMED });
+      expect(await settleKeptKey(db, refused.lead.touchId, NOW)).toEqual({ kind: 'free', stored: true });
+      const crashed = await keptLead();
+      await seedAiCallRequest(db, { orgId: crashed.h.base.orgId, key: crashed.key, userId: crashed.lead.approver, createdAt: CLAIMED });
+      expect(await settleKeptKey(db, crashed.lead.touchId, NOW)).toEqual({ kind: 'free', stored: true });
     });
   });
 

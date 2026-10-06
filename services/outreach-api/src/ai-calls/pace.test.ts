@@ -560,11 +560,14 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect(h.logs).toContainEqual(offerLog(h, lead.touchId, 'no_free_time'));
     });
 
-    it('3 (CF-13): a touch with a kept trigger key re-sends without slots and reads no calendar', async () => {
+    it('3 (CF-13, Fix 1 I-2): a kept key cti-api stored a request under re-sends without slots and reads no calendar', async () => {
       const h = await paceHarness(db, bookingWith([OWNER]));
       h.sf.state.users = [ownerRow()];
       const kept = 'touch:kept:1:1759700000000';
       const lead = await seedReleasedLead(db, h.base, { ...RETURNING, touch: { triggerKey: kept } });
+      const earlier = new Date(NOW.getTime() - 30 * MIN);
+      const blockedId = await seedAiCall(db, h.base.orgId, lead.approver, { sfRecordId: lead.sfRecordId, status: 'blocked', createdAt: earlier });
+      await seedAiCallRequest(db, { orgId: h.base.orgId, key: kept, userId: lead.approver, response: { result: 'blocked', reason: 'calling_hours', aiCallId: blockedId }, createdAt: earlier });
 
       expect((await h.run(NOW)).placed).toBe(1);
       expect(h.cti.requests[0]).toMatchObject({ idempotencyKey: kept });
@@ -575,7 +578,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent' });
     });
 
-    it('3b (CF-13): after a transport failure the retry keeps the key, the plan text and the context, and offers no slots', async () => {
+    it('3b (CF-13, Fix 1 I-2): after a transport failure cti-api never stored, the retry keeps the key, the plan text and the context, and carries times again', async () => {
       const h = await paceHarness(db, bookingWith([OWNER]));
       h.sf.state.users = [ownerRow()];
       const lead = await seedReleasedLead(db, h.base);
@@ -584,14 +587,15 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       await h.run(NOW);
       const first = h.cti.requests[0]!;
       expect(target(first).slots!.length).toBeGreaterThan(0);
-      const readsBefore = userQueries(h.sf.state.soql).length;
 
       await h.run((await touchById(db, lead.touchId)).dueAt);
       const retry = h.cti.requests[1]!;
       expect(retry.idempotencyKey).toBe(first.idempotencyKey);
-      const { slots: _slots, ...firstWithoutSlots } = target(first);
-      expect(target(retry)).toEqual(firstWithoutSlots);
-      expect(userQueries(h.sf.state.soql)).toHaveLength(readsBefore);
+      const { slots: _firstSlots, ...firstRest } = target(first);
+      const { slots: retrySlots, ...retryRest } = target(retry);
+      expect(retryRest).toEqual(firstRest);
+      expect(AppointmentSlots.safeParse(retrySlots).success).toBe(true);
+      expect(retrySlots!.length).toBeGreaterThan(0);
       expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', attempts: 1 });
     });
 

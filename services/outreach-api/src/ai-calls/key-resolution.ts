@@ -9,12 +9,13 @@
  *
  * This mirrors cti-api's routes-internal.ts handleTrigger for an existing key, read-only (cti-api code is never imported;
  * the tables are read through @cti/db):
- *  - no row: cti-api never reserved the key, so it never dialed under it (`none`);
+ *  - no row: cti-api never reserved the key, so it never dialed under it and holds no body for it (`none`, not stored);
  *  - a stored answer: that answer (`answered`);
  *  - no answer, reserved or taken over (updated_at) less than STALE_REQUEST_MS ago: still in flight (`pending`);
  *  - no answer and stale: the ai_calls row a crashed request left (cti-api's findCallSince: same org, the reserving user,
  *    the record, created since the reservation's created_at minus FIND_SLACK_MS), rebuilt as cti-api's `rebuilt` does;
- *    nothing found is `none`. outreach-api never writes the row: cti-api's takeover stays its only writer.
+ *    nothing found is `none` (stored: the row and its body hash remain). outreach-api never writes the row: cti-api's
+ *    takeover stays its only writer.
  */
 import { and, desc, eq, gte, sql, type SQL } from 'drizzle-orm';
 import { AiCallBlockReason, InternalAiCallResponse } from '@cti/contracts';
@@ -28,13 +29,18 @@ export const STALE_REQUEST_MS = IN_FLIGHT_RETRY_MS;
 export const FIND_SLACK_MS = 5_000;
 
 export type KeyResolution =
-  | { kind: 'none' }
+  /** `stored`: cti-api holds a row (and so a body hash) under the key, a stale reservation with no call (Fix 1, I-2). */
+  | { kind: 'none'; stored: boolean }
   | { kind: 'answered'; answer: InternalAiCallResponse }
   /** No answer yet: cti-api answers `in_flight` until `until` (updated_at + STALE_REQUEST_MS). */
   | { kind: 'pending'; createdAt: Date; until: Date };
 
-/** What a planned touch's kept key means for a path about to drop it. `placed`: the call was linked and the touch is sent. */
-export type KeptKey = { kind: 'free' } | { kind: 'placed'; aiCallId: string } | { kind: 'pending'; until: Date };
+/**
+ * What a planned touch's kept key means for a path about to drop it. `placed`: the call was linked and the touch is sent.
+ * `free.stored`: cti-api holds a request row under the key, so a re-send with another body is a 409 (Fix 1, I-2); false when
+ * there is no key or cti-api never stored it.
+ */
+export type KeptKey = { kind: 'free'; stored: boolean } | { kind: 'placed'; aiCallId: string } | { kind: 'pending'; until: Date };
 
 const BLOCK_REASONS: ReadonlySet<string> = new Set(AiCallBlockReason.options);
 const rows = <T>(r: unknown): T[] => (r as { rows: T[] }).rows;
@@ -88,7 +94,7 @@ export async function resolveKey(db: Db, k: { orgId: string; key: string; sfReco
     .from(r)
     .where(and(eq(r.orgId, k.orgId), eq(r.idempotencyKey, k.key)))
     .limit(1);
-  if (!row) return { kind: 'none' };
+  if (!row) return { kind: 'none', stored: false };
   if (row.response !== null) {
     const answer = InternalAiCallResponse.safeParse(row.response);
     // An answer this version cannot read falls through to the ai_calls lookup, which can only find a call, never invent "not placed".
@@ -98,7 +104,7 @@ export async function resolveKey(db: Db, k: { orgId: string; key: string; sfReco
   }
   const since = new Date(row.createdAt.getTime() - FIND_SLACK_MS);
   const found = await findCallSince(db, { orgId: k.orgId, userId: row.userId, sfRecordId: k.sfRecordId, since });
-  return found ? { kind: 'answered', answer: rebuilt(found) } : { kind: 'none' };
+  return found ? { kind: 'answered', answer: rebuilt(found) } : { kind: 'none', stored: true };
 }
 
 /**
@@ -140,19 +146,19 @@ export async function settleKeptKey(db: Db, touchId: string, now: Date): Promise
     join crm_records r on r.id = e.crm_record_id and r.org_id = e.org_id
     where t.id = ${touchId}::uuid and t.status = 'planned' and t.trigger_key is not null`);
   const touch = rows<{ orgId: string; key: string; claimedAt: Date | string | null; sfRecordId: string }>(result)[0];
-  if (!touch) return { kind: 'free' };
+  if (!touch) return { kind: 'free', stored: false };
   const resolved = await resolveKey(db, touch, now);
   if (resolved.kind === 'pending') return { kind: 'pending', until: resolved.until };
   if (resolved.kind === 'answered') {
-    if (resolved.answer.result !== 'placed') return { kind: 'free' };
+    if (resolved.answer.result !== 'placed') return { kind: 'free', stored: true };
     const aiCallId = resolved.answer.aiCallId;
-    return (await linkPlacedTouch(db, touchId, aiCallId, now)) ? { kind: 'placed', aiCallId } : { kind: 'free' };
+    return (await linkPlacedTouch(db, touchId, aiCallId, now)) ? { kind: 'placed', aiCallId } : { kind: 'free', stored: true };
   }
   const claimedAt = touch.claimedAt === null ? null : new Date(touch.claimedAt);
   if (claimedAt && now.getTime() - claimedAt.getTime() < TRIGGER_TIMEOUT_MS) {
     return { kind: 'pending', until: new Date(claimedAt.getTime() + TRIGGER_TIMEOUT_MS) };
   }
-  return { kind: 'free' };
+  return { kind: 'free', stored: resolved.stored };
 }
 
 /**

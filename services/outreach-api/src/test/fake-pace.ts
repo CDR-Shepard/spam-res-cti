@@ -2,8 +2,9 @@
  * Stand-ins for the `ai_call.place` tick tests: a scripted CtiClient and a Salesforce client that answers the record, Task and
  * Event reads (`queryAll`), and the appointment offer's User and busy-calendar reads (`query`, plan 1D).
  */
+import { createHash } from 'node:crypto';
 import type { AiAvailability, InternalAiCallRequest, InternalAiCallResponse } from '@cti/contracts';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import type { SalesforceClient } from '@cti/salesforce';
 import type { CtiClient } from '../ai-calls/cti-client.js';
@@ -81,7 +82,21 @@ export interface FakeCti {
     | { transport: string }
     | { conflict: true }
     | { lostPlaced: true; createdAt: Date }
+    /** `store` mode: cti-api reserved the key and stored this refusal, but the answer never arrived (a timeout). */
+    | { lostAnswer: { result: 'blocked'; reason: string } }
+    /** `store` mode: cti-api reserved the key and crashed before answering or dialing (a timeout; the row stays unanswered). */
+    | { reservedNoAnswer: true }
   >;
+  /**
+   * Fix 1 (I-2): model cti-api's request store (request-store.ts) in ai_call_requests. A key it holds answers by the body:
+   * a different body is a 409, the same body replays the stored answer (or `in_flight` while unanswered). A key it does not
+   * hold takes the next scripted answer: a transport failure reserves nothing; any answer is stored with the body's hash.
+   */
+  store: boolean;
+  /** The tick's clock (paceHarness sets it each run): when `store` mode reserves a key. */
+  now: Date;
+  /** The tick clock at each trigger, in order (beside `requests`). */
+  sentAt: Date[];
   /** What `availability()` answers (null: cti-api did not answer); on with no test numbers unless a test says otherwise. */
   available: AiAvailability | null;
   availabilityCalls: number;
@@ -94,10 +109,16 @@ export function fakeCti(db: Db): FakeCti {
     answers: [],
     available: { available: true, testNumbers: [] },
     availabilityCalls: 0,
+    store: false,
+    now: new Date(0),
+    sentAt: [],
     cti: {
       async trigger(req) {
         fake.requests.push(req);
+        fake.sentAt.push(fake.now);
+        if (fake.store) return storedTrigger(db, fake, req);
         const a = fake.answers.shift() ?? { result: 'placed' as const };
+        if ('lostAnswer' in a || 'reservedNoAnswer' in a) throw new Error('fakeCti: this answer needs store mode');
         if ('transport' in a) return { kind: 'transport', error: a.transport };
         if ('conflict' in a) return { kind: 'conflict' };
         if ('lostPlaced' in a) {
@@ -120,6 +141,36 @@ export function fakeCti(db: Db): FakeCti {
     },
   };
   return fake;
+}
+
+const bodyHash = (req: InternalAiCallRequest): string => createHash('sha256').update(JSON.stringify({ userId: req.userId, target: req.target })).digest('hex');
+
+/** `store` mode (see FakeCti.store). */
+async function storedTrigger(db: Db, fake: FakeCti, req: InternalAiCallRequest): Promise<Awaited<ReturnType<CtiClient['trigger']>>> {
+  const r = schema.aiCallRequests;
+  const hash = bodyHash(req);
+  const [held] = await db.select().from(r).where(and(eq(r.orgId, req.orgId), eq(r.idempotencyKey, req.idempotencyKey)));
+  if (held) {
+    if (held.requestHash !== hash) return { kind: 'conflict' };
+    const stored = held.response as InternalAiCallResponse | null;
+    return { kind: 'response', response: stored ?? { result: 'failed', reason: 'in_flight', aiCallId: null } };
+  }
+  const a = fake.answers.shift() ?? { result: 'placed' as const };
+  if ('transport' in a) return { kind: 'transport', error: a.transport };
+  if ('conflict' in a || 'lostPlaced' in a) throw new Error('fakeCti: store mode derives 409s and stored answers itself');
+  const target = req.target.kind === 'record' ? { sfObject: req.target.objectType, sfRecordId: req.target.recordId } : {};
+  const reserve = (response: InternalAiCallResponse | null) =>
+    seedAiCallRequest(db, { orgId: req.orgId, key: req.idempotencyKey, userId: req.userId, response, createdAt: fake.now, hash });
+  if ('reservedNoAnswer' in a) {
+    await reserve(null);
+    return { kind: 'transport', error: 'timeout' };
+  }
+  const answer = 'lostAnswer' in a ? a.lostAnswer : a;
+  const withCall = answer.result !== 'failed' || ('withCall' in answer && answer.withCall);
+  const aiCallId = withCall ? await seedAiCall(db, req.orgId, req.userId, { status: answer.result === 'placed' ? 'queued' : answer.result, createdAt: fake.now, ...target }) : null;
+  const response = (answer.result === 'placed' ? { result: 'placed', aiCallId } : { result: answer.result, reason: answer.reason, aiCallId }) as InternalAiCallResponse;
+  await reserve(response);
+  return 'lostAnswer' in a ? { kind: 'transport', error: 'timeout' } : { kind: 'response', response };
 }
 
 export interface LogEntry {
@@ -153,7 +204,10 @@ export async function paceHarness(db: Db, settings: Record<string, unknown> = {}
     if (clientError) throw clientError;
     return sf.client;
   };
-  const run = (now: Date) => placeDueAiCalls({ db, clients, cti: cti.cti, now, log, clock: () => 0, defaultSpecialists: opts.defaultSpecialists ?? [] });
+  const run = (now: Date) => {
+    cti.now = now;
+    return placeDueAiCalls({ db, clients, cti: cti.cti, now, log, clock: () => 0, defaultSpecialists: opts.defaultSpecialists ?? [] });
+  };
   return {
     base,
     sf,

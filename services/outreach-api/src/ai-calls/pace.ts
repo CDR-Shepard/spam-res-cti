@@ -11,9 +11,9 @@
  * the touch waits (nothing claimed); new Salesforce activity since the research sends the lead
  * back to research (CF-1); then the claim (CF-2, CF-10, CF-11), the trigger, and the answer.
  *
- * Plan 1D: every trigger carries `context.returning` (the plan has a last real contact). A touch without a kept key is
- * offered the appointment owner's free times just before the claim, and they go only with a freshly minted key: a kept key
- * is re-sent with the body it had, so no slots (CF-13).
+ * Plan 1D: every trigger carries `context.returning` (the plan has a last real contact), and is offered the appointment
+ * owner's free times just before the claim. CF-13 as corrected by Fix 1 (I-2): a kept key whose request cti-api stored is
+ * re-sent without slots and settles through the 409 → resolveKey path; a kept key cti-api never stored is sent as fresh.
  *
  * Round 2: a touch that kept its idempotency key may already have reached cti-api. Before anything else, and so before any
  * path could drop that key, cti-api's request store is read (key-resolution.ts): a call placed under the key is linked (the
@@ -137,17 +137,20 @@ async function skipResult(deps: PaceDeps, c: AiTouchCandidate, out: SkipOutcome)
   }
 }
 
+/** After a kept key is resolved: stop with this result, or go on knowing whether cti-api stored a request under the key. */
+type KeptKeyStep = { kind: 'done'; result: Result } | { kind: 'go'; stored: boolean };
+
 /**
  * Round 2: a kept key is resolved before any path below can drop it. Placed: linked (the touch is sent). Pending: the touch
- * waits, keeping its key, until cti-api would take the request over. Otherwise (never reached cti-api, or refused) null:
- * the touch goes on, and a claim re-sends the same key, so cti-api replays a stored refusal.
+ * waits, keeping its key, until cti-api would take the request over. Otherwise (never reached cti-api, or refused) the touch
+ * goes on and a claim re-sends the same key. Fix 1 (I-2): `stored` says whether cti-api holds that key's first body.
  */
-async function keptKeyFirst(deps: PaceDeps, c: AiTouchCandidate): Promise<Result | null> {
-  if (c.triggerKey === null) return null;
+async function keptKeyFirst(deps: PaceDeps, c: AiTouchCandidate): Promise<KeptKeyStep> {
+  if (c.triggerKey === null) return { kind: 'go', stored: false };
   const kept = await settleKeptKey(deps.db, c.touchId, deps.now);
-  if (kept.kind === 'free') return null;
+  if (kept.kind === 'free') return { kind: 'go', stored: kept.stored };
   deps.log.info({ orgId: c.orgId, touchId: c.touchId, keptKey: kept.kind }, 'ai_call.place: kept key resolved in cti-api\'s request store');
-  return skipResult(deps, c, kept.kind === 'placed' ? { kind: 'placed' } : kept);
+  return { kind: 'done', result: await skipResult(deps, c, kept.kind === 'placed' ? { kind: 'placed' } : kept) };
 }
 
 /**
@@ -165,7 +168,7 @@ async function conflictOutcome(deps: PaceDeps, c: AiTouchCandidate, key: string)
 async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Promise<Result> {
   const { db, now } = deps;
   const kept = await keptKeyFirst(deps, c);
-  if (kept) return kept;
+  if (kept.kind === 'done') return kept.result;
   if (await holdIfFlagged(db, { enrollmentId: c.enrollmentId, crmRecordId: c.crmRecordId, now })) return 'held';
   const fresh = tick.fresh(c.sfRecordId);
   if (!fresh) return finish(deps, c, 'record_not_found');
@@ -198,11 +201,14 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
     return 'parked';
   }
   const context = { returning: plan.plan.reengagement?.lastContact != null };
-  const offer = c.triggerKey === null ? await tickOffer(deps, tick, c) : null;
+  const offer = kept.stored ? null : await tickOffer(deps, tick, c);
   const claim = await claimAiTouch(db, c.touchId, now);
   if (!claim) return refused(deps, c);
-  // CF-13: only a freshly minted key carries slots (the claim, not the candidate row, says whether the key was kept).
-  const slots = offer && !claim.keptKey ? offer.slots : [];
+  // CF-13 (Fix 1, I-2): a kept key whose request cti-api stored is re-sent without slots and settles through the 409 →
+  // resolveKey path; a kept key cti-api never stored is sent as fresh. A key the claim kept that this tick never resolved
+  // (it appeared after the candidates were read) is treated as stored.
+  const sendAsFresh = !claim.keptKey || (claim.triggerKey === c.triggerKey && !kept.stored);
+  const slots = offer && sendAsFresh ? offer.slots : [];
   const answered = await deps.cti.trigger({
     orgId: c.orgId,
     userId: c.requestedBy,
