@@ -15,6 +15,17 @@ export const DEFAULT_CONTACT_ZONE = 'America/Los_Angeles';
 /** M-8: no contact was found, but research read only the most recent activity. */
 export const NO_CONTACT_IN_RECENT_ACTIVITY = 'none found in recent activity';
 
+/** The research sources a last contact is read from. */
+const CONTACT_SOURCES: ReadonlySet<string> = new Set(['tasks', 'events', 'emails']);
+
+/**
+ * Research kept only the most recent Tasks, Events or emails, so finding no contact proves little (1D Fix 1, M-8). One
+ * rule for outreach-api's plan facts and the web card (sweep D-13): only those three sources count.
+ */
+export function contactSearchLimited(sources: ReadonlyArray<{ source: string; truncated: boolean }>): boolean {
+  return sources.some((s) => CONTACT_SOURCES.has(s.source) && s.truncated);
+}
+
 const DAY_MS = 86_400_000;
 
 function dayParts(d: Date, timeZone: string): { year: number; month: number; day: number } {

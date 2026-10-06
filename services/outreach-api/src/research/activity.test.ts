@@ -30,6 +30,27 @@ describe('readTasks', () => {
     await readTasks(sf.client, { whoIds: [LEAD], whatIds: [], parentIds: [LEAD] });
     expect(sf.soql[0]).toContain(`WHERE (WhoId IN ('${LEAD}')) ORDER BY`);
   });
+  it('sweep D-13: a call field the integration user cannot read (INVALID_FIELD) → once more without the call fields, still ok', async () => {
+    const row = { Id: id(1), Subject: 'Call', Description: 'd', Status: 'Completed', ActivityDate: '2026-09-01', CreatedDate: day(1) };
+    const invalid = new SalesforceApiError('x', 400, [{ errorCode: 'INVALID_FIELD', message: "No such column 'CallDisposition' on entity 'Task'" }]);
+    const sf = fakeSalesforce({ queries: [[/FROM Task/, (q: string) => {
+      if (q.includes('CallDisposition')) throw invalid;
+      return [row];
+    }]] });
+    const out = await readTasks(sf.client, links);
+    expect(sf.soql).toHaveLength(2);
+    expect(sf.soql[1]).toBe(`SELECT Id, Subject, Description, Status, ActivityDate, CreatedDate FROM Task WHERE (WhoId IN ('${LEAD}') OR WhatId IN ('${OPP}')) ORDER BY CreatedDate DESC LIMIT 26`);
+    expect(out.summary).toMatchObject({ source: 'tasks', status: 'ok', count: 1 });
+    expect(out.items[0]).toMatchObject({ id: id(1), meta: { status: 'Completed', due: '2026-09-01' } });
+  });
+  it('sweep D-13: INVALID_TYPE (no Task object) is not retried; the narrow read failing too is recorded as before', async () => {
+    const sf = fakeSalesforce({ queries: [[/FROM Task/, new SalesforceApiError('x', 400, [{ errorCode: 'INVALID_TYPE', message: 'no Task' }])]] });
+    expect((await readTasks(sf.client, links)).summary).toMatchObject({ status: 'missing', note: 'INVALID_TYPE' });
+    expect(sf.soql).toHaveLength(1);
+    const both = fakeSalesforce({ queries: [[/FROM Task/, new SalesforceApiError('x', 400, [{ errorCode: 'INVALID_FIELD', message: 'Subject' }])]] });
+    expect((await readTasks(both.client, links)).summary).toMatchObject({ status: 'missing', note: 'INVALID_FIELD' });
+    expect(both.soql).toHaveLength(2);
+  });
   it('sends nothing when both lists are empty', async () => {
     const sf = fakeSalesforce({});
     expect((await readTasks(sf.client, { whoIds: [], whatIds: [], parentIds: [] })).summary.status).toBe('ok');

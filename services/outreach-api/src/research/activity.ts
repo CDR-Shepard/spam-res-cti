@@ -3,7 +3,7 @@ import { SalesforceApiError, type SalesforceClient } from '@cti/salesforce';
 import { SF_ID } from '../campaigns/records.js';
 import { RESEARCH_LIMITS as L } from './limits.js';
 import type { LinkIds } from './related.js';
-import { classifyReadError, readSource, type SourceRead } from './salesforce-errors.js';
+import { classifyReadError, readSource, salesforceErrorCode, type SourceRead } from './salesforce-errors.js';
 import { clip, plainText, soqlIdList } from './text.js';
 
 export type ActivitySource = 'task' | 'event' | 'note' | 'content_note' | 'email' | 'chatter' | 'chatter_comment';
@@ -40,13 +40,28 @@ function capped<T>(rows: T[], max: number): { rows: T[]; truncated: boolean } {
   return { rows: rows.slice(0, max), truncated: rows.length > max };
 }
 
+const TASK_FIELDS = 'Id, Subject, Description, Status, ActivityDate, CreatedDate';
+const CALL_FIELDS = 'CallDisposition, TaskSubtype, CallType, CallDurationInSeconds';
+
+/**
+ * The Tasks, with the call fields; when the integration user can't read one of them (INVALID_FIELD), once more without
+ * them (sweep D-13), so a hidden call field costs the contact evidence, never every Task.
+ */
+async function taskRows(client: SalesforceClient, where: string): Promise<Row[]> {
+  const soql = (fields: string) => `SELECT ${fields} FROM Task WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${L.tasks + 1}`;
+  try {
+    return await client.query<Row>(soql(`${TASK_FIELDS}, ${CALL_FIELDS}`));
+  } catch (err) {
+    if (!(err instanceof SalesforceApiError) || salesforceErrorCode(err) !== 'INVALID_FIELD') throw err;
+    return client.query<Row>(soql(TASK_FIELDS));
+  }
+}
+
 export function readTasks(client: SalesforceClient, links: LinkIds): Promise<SourceRead<ActivityItem>> {
   return readSource('tasks', async () => {
     const where = whoWhat(links);
     if (!where) return { items: [], truncated: false };
-    const { rows, truncated } = capped(await client.query<Row>(
-      `SELECT Id, Subject, Description, Status, ActivityDate, CreatedDate, CallDisposition, TaskSubtype, CallType, CallDurationInSeconds FROM Task WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${L.tasks + 1}`,
-    ), L.tasks);
+    const { rows, truncated } = capped(await taskRows(client, where), L.tasks);
     return {
       truncated,
       items: rows.map((r) => ({

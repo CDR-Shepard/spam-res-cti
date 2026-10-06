@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { agentPlanTextIssues } from './agent-plan-text.js';
 import { Reengagement } from './call-plans.js';
-import { contactLabel, contactWords, lastContactWordsAt, NO_CONTACT_IN_RECENT_ACTIVITY } from './contact-words.js';
+import { contactLabel, contactSearchLimited, contactWords, lastContactWordsAt, NO_CONTACT_IN_RECENT_ACTIVITY } from './contact-words.js';
 
 const NOW = new Date('2026-10-05T19:00:00.000Z'); // noon in Los Angeles
 const daysAgo = (d: number, now = NOW) => new Date(now.getTime() - d * 86_400_000);
@@ -104,5 +104,15 @@ describe('Reengagement carries the date and kind (Fix 1, M-4)', () => {
   it('refuses a date that is not an ISO timestamp and a kind it does not know', () => {
     expect(Reengagement.safeParse({ lastContact: 'last week', lastContactAt: 'last Tuesday', lastTopic: null }).success).toBe(false);
     expect(Reengagement.safeParse({ lastContact: 'last week', lastContactKind: 'text', lastTopic: null }).success).toBe(false);
+  });
+});
+
+describe('contactSearchLimited (sweep D-13: one rule for the plan facts and the card)', () => {
+  const src = (source: string, truncated: boolean) => ({ source, truncated });
+  it('is true only when research cut the tasks, events or emails short', () => {
+    expect(contactSearchLimited([src('tasks', true)])).toBe(true);
+    expect(contactSearchLimited([src('events', false), src('emails', true)])).toBe(true);
+    expect(contactSearchLimited([src('chatter', true), src('notes', true), src('tasks', false)])).toBe(false);
+    expect(contactSearchLimited([])).toBe(false);
   });
 });

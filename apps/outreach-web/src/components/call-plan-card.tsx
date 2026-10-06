@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
-import { contactLabel, lastContactWordsAt, NO_CONTACT_IN_RECENT_ACTIVITY, type CallPlanCard, type EditableCallPlan } from '@cti/contracts';
+import { contactLabel, contactSearchLimited as limitedSearch, lastContactWordsAt, NO_CONTACT_IN_RECENT_ACTIVITY, type CallPlanCard, type EditableCallPlan } from '@cti/contracts';
 import { ConfirmAction } from '@/components/confirm-action';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -99,11 +99,8 @@ function List({ title, items }: { title: string; items: readonly string[] }) {
   );
 }
 
-const CONTACT_SOURCES: ReadonlySet<string> = new Set(['tasks', 'events', 'emails']);
-
-/** Fix 1 (M-8): research kept only the most recent Tasks, Events or emails, so finding no contact proves little. */
-const contactSearchLimited = (card: CallPlanCard): boolean =>
-  card.research?.sources.some((s) => CONTACT_SOURCES.has(s.source) && s.truncated) ?? false;
+/** Fix 1 (M-8): research kept only the most recent Tasks, Events or emails (the plan facts' rule too, sweep D-13). */
+const contactSearchLimited = (card: CallPlanCard): boolean => limitedSearch(card.research?.sources ?? []);
 
 /**
  * Plan 1D: a returning seller. Both lines are left out when empty (a plan stored before 1D shows neither). Fix 1: the

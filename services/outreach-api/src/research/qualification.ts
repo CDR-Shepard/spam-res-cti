@@ -112,6 +112,20 @@ export function qualificationFieldNames(sfObject: SfObject): string[] {
 }
 
 /**
+ * The topics none of whose fields research could read (sweep D-13), in QUALIFICATION_TOPICS order: unknown, so never
+ * missing, and the plan model is told so. Without `fieldsRead` (a snapshot from before Fix 1) nothing is unreadable.
+ */
+export function unreadableTopics(sfObject: SfObject, fieldsRead?: readonly string[]): QualificationTopic[] {
+  if (!fieldsRead) return [];
+  const read = new Set(fieldsRead.map((f) => f.toLowerCase()));
+  const map = QUALIFICATION_FIELDS[sfObject];
+  return QUALIFICATION_TOPICS.filter((topic) => {
+    const fields = map[topic] ?? [];
+    return fields.length > 0 && !fields.some((f) => read.has(f.field.toLowerCase()));
+  });
+}
+
+/**
  * The topics no field of the record answers, in QUALIFICATION_TOPICS order.
  *
  * `fieldsRead` (Fix 1, I-2) names the fields research actually selected. A field it never read is unknown, not blank:

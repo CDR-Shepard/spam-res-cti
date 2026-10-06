@@ -77,7 +77,8 @@ function gapBlock(s: ResearchSnapshot): string[] {
 function factsBlock(f: PlanFacts): string[] {
   const none = f.contactSearchLimited ? NO_CONTACT_IN_RECENT_ACTIVITY : 'none found';
   const contact = f.lastContactWords === null ? none : `${escapeData(f.lastContactWords)}${f.lastContactKind ? ` (${f.lastContactKind})` : ''}`;
-  return ['<facts>', `Last real contact: ${contact}`, `Missing in Salesforce: ${f.missing.length ? f.missing.join(', ') : 'nothing'}`, '</facts>'];
+  const unreadable = f.unreadable.length > 0 ? [`Not readable in Salesforce: ${f.unreadable.join(', ')}`] : [];
+  return ['<facts>', `Last real contact: ${contact}`, `Missing in Salesforce: ${f.missing.length ? f.missing.join(', ') : 'nothing'}`, ...unreadable, '</facts>'];
 }
 
 export function buildCallPlanPrompt(s: ResearchSnapshot, ctx: { companyName: string; today: Date; facts: PlanFacts }): { system: string; user: string } {

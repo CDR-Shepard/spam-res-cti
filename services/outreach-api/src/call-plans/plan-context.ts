@@ -4,9 +4,9 @@
  * was about and picks among the missing topics; the words and the missing list are ours.
  */
 import { z } from 'zod';
-import { QualificationTopic, Reengagement, type CallPlan, type ContactKind, type EditableCallPlan } from '@cti/contracts';
+import { contactSearchLimited, QualificationTopic, Reengagement, type CallPlan, type ContactKind, type EditableCallPlan } from '@cti/contracts';
 import { contactWords, lastRealContact } from '../research/last-contact.js';
-import { missingTopics } from '../research/qualification.js';
+import { missingTopics, unreadableTopics } from '../research/qualification.js';
 import type { ResearchSnapshot } from '../research/snapshot.js';
 
 export interface PlanFacts {
@@ -17,9 +17,9 @@ export interface PlanFacts {
   /** Fix 1 (M-8): research kept only the most recent activity, so "no contact" means none in what was read. */
   contactSearchLimited: boolean;
   missing: QualificationTopic[];
+  /** Topics none of whose fields research could read (sweep D-13): unknown, never missing; the model is told. */
+  unreadable: QualificationTopic[];
 }
-
-const CONTACT_SOURCES: ReadonlySet<string> = new Set(['tasks', 'events', 'emails']);
 
 /** `missing` reads the record itself (the self block) only, never a related record. */
 export function planFacts(s: ResearchSnapshot, now: Date): PlanFacts {
@@ -29,8 +29,10 @@ export function planFacts(s: ResearchSnapshot, now: Date): PlanFacts {
     lastContactWords: contact ? contactWords(contact.at, now) : null,
     lastContactAt: contact?.at ?? null,
     lastContactKind: contact?.kind ?? null,
-    contactSearchLimited: s.truncated || s.sources.some((x) => CONTACT_SOURCES.has(x.source) && x.truncated),
+    // The card's rule (sweep D-13): only the Tasks, Events and emails read; the snapshot's own cut is not about contact.
+    contactSearchLimited: contactSearchLimited(s.sources),
     missing: missingTopics(s.sfObject, self?.fields ?? [], self?.qualificationFieldsRead),
+    unreadable: unreadableTopics(s.sfObject, self?.qualificationFieldsRead),
   };
 }
 

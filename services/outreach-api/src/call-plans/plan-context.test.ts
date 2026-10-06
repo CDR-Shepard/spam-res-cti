@@ -40,7 +40,7 @@ const answeredButTimelineAndPrice: Array<[string, string]> = [
 describe('planFacts', () => {
   it('reads the last real contact in words and what the self block is missing', () => {
     const s = snap([block('self', answeredButTimelineAndPrice), block('converted_opportunity', [['Timeline__c', '30 Days']])], [call]);
-    expect(planFacts(s, NOW)).toEqual({ lastContactWords: 'back in February', lastContactAt: new Date('2026-02-12T18:00:00.000Z'), lastContactKind: 'call', contactSearchLimited: false, missing: ['timeline', 'price'] });
+    expect(planFacts(s, NOW)).toEqual({ lastContactWords: 'back in February', lastContactAt: new Date('2026-02-12T18:00:00.000Z'), lastContactKind: 'call', contactSearchLimited: false, missing: ['timeline', 'price'], unreadable: [] });
   });
 
   it('Fix 1 (I-2): a qualification field research never read is not reported missing', () => {
@@ -48,20 +48,30 @@ describe('planFacts', () => {
     expect(planFacts(snap([self], [call]), NOW).missing).toEqual(['price']);
   });
 
-  it('with no contact and no self block, nothing was contact and every topic with a field is missing', () => {
-    expect(planFacts(snap([]), NOW)).toEqual({ lastContactWords: null, lastContactAt: null, lastContactKind: null, contactSearchLimited: false, missing: QUALIFICATION_TOPICS.filter((t) => t !== 'decision_makers') });
+  it('sweep D-13: a topic none of whose fields research could read is listed as unreadable (never missing)', () => {
+    const self = { ...block('self', answeredButTimelineAndPrice), qualificationFieldsRead: ['Motivation__c', 'Condition__c', 'Major_Repairs_Needed__c', 'Occupancy__c', 'Competition__c', 'Amount_Owed__c', 'Seller_s_Asking_Price__c'] };
+    const f = planFacts(snap([self], [call]), NOW);
+    expect(f.unreadable).toEqual(['timeline']);
+    expect(f.missing).not.toContain('timeline');
+    // A snapshot from before Fix 1 has no list: every field counts as read, nothing is unreadable.
+    expect(planFacts(snap([block('self', answeredButTimelineAndPrice)], [call]), NOW).unreadable).toEqual([]);
   });
 
-  it('Fix 1 (M-8): says the search was limited when research cut the tasks, events or emails short, or the snapshot', () => {
+  it('with no contact and no self block, nothing was contact and every topic with a field is missing', () => {
+    expect(planFacts(snap([]), NOW)).toEqual({ lastContactWords: null, lastContactAt: null, lastContactKind: null, contactSearchLimited: false, missing: QUALIFICATION_TOPICS.filter((t) => t !== 'decision_makers'), unreadable: [] });
+  });
+
+  it('Fix 1 (M-8): says the search was limited when research cut the tasks, events or emails short (the card\'s rule, D-13)', () => {
     const cut = (source: string): ResearchSnapshot => ({ ...snap([]), sources: snap([]).sources.map((x) => (x.source === source ? { ...x, truncated: true } : x)) });
     for (const source of ['tasks', 'events', 'emails']) expect(planFacts(cut(source), NOW).contactSearchLimited).toBe(true);
     expect(planFacts(cut('chatter'), NOW).contactSearchLimited).toBe(false);
-    expect(planFacts({ ...snap([]), truncated: true }, NOW).contactSearchLimited).toBe(true);
+    // A record cut or a Chatter cap (the snapshot's own flag) says nothing about the contact search: the card can't see it either.
+    expect(planFacts({ ...snap([]), truncated: true }, NOW).contactSearchLimited).toBe(false);
   });
 });
 
 const FEB = '2026-02-12T18:00:00.000Z';
-const facts = (over: Partial<PlanFacts> = {}): PlanFacts => ({ lastContactWords: 'back in February', lastContactAt: new Date(FEB), lastContactKind: 'call', contactSearchLimited: false, missing: ['timeline', 'price'], ...over });
+const facts = (over: Partial<PlanFacts> = {}): PlanFacts => ({ lastContactWords: 'back in February', lastContactAt: new Date(FEB), lastContactKind: 'call', contactSearchLimited: false, missing: ['timeline', 'price'], unreadable: [], ...over });
 /** Fix 1 (M-4): the stored re-engagement carries the contact's date and kind. */
 const feb = (lastTopic: string | null) => ({ lastContact: 'back in February', lastContactAt: FEB, lastContactKind: 'call' as const, lastTopic });
 const plan = (over: Partial<CallPlan> = {}): CallPlan => ({ ...validPlan, ...over });
