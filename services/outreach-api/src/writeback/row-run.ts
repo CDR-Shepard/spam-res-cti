@@ -45,8 +45,11 @@ export class RecordGoneError extends Error {
 }
 
 export const GONE_CODES: ReadonlySet<string> = new Set(['ENTITY_IS_DELETED', 'NOT_FOUND']);
-/** Result-level codes that a retry can fix (thrown as SalesforceApiError so the tick backs off). */
-export const TRANSIENT_CODES: ReadonlySet<string> = new Set(['UNABLE_TO_LOCK_ROW', 'REQUEST_LIMIT_EXCEEDED', 'SERVER_UNAVAILABLE']);
+/**
+ * Result-level codes that a retry can fix (thrown as SalesforceApiError so the tick backs off). UNKNOWN_EXCEPTION is
+ * Salesforce's own internal error, which a later attempt usually clears (final review): never a final "Not written".
+ */
+export const TRANSIENT_CODES: ReadonlySet<string> = new Set(['UNABLE_TO_LOCK_ROW', 'REQUEST_LIMIT_EXCEEDED', 'SERVER_UNAVAILABLE', 'UNKNOWN_EXCEPTION']);
 
 /** A result-level error code the run must not record as a refusal: gone → RecordGoneError, transient → SalesforceApiError. */
 export function throwIfNotARefusal(code: string): void {

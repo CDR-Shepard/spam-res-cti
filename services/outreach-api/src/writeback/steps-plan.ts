@@ -147,8 +147,12 @@ async function mapAnswers(run: RowRun, sfObject: 'Lead' | 'Opportunity', fields:
 }
 
 /** Step 1: the frozen plan, or a new one against the target's fresh describe and values. */
-export async function planStep(run: RowRun): Promise<{ kind: 'plan'; run: RowRun; plan: WritePlan } | { kind: 'gone' } | { kind: 'budget' }> {
-  if (run.row.plan !== null) return { kind: 'plan', run, plan: StoredWritePlan.parse(run.row.plan) };
+export async function planStep(run: RowRun): Promise<{ kind: 'plan'; run: RowRun; plan: WritePlan } | { kind: 'gone' } | { kind: 'budget' } | { kind: 'invalid' }> {
+  if (run.row.plan !== null) {
+    // A frozen plan that no longer parses (a shape change, a hand edit) never parses on a retry either: fail at once (final review).
+    const stored = StoredWritePlan.safeParse(run.row.plan);
+    return stored.success ? { kind: 'plan', run, plan: stored.data } : { kind: 'invalid' };
+  }
   const target = writeTarget(run.row);
   const describe = await describeObject(run.client, run.deps.describes, run.row.orgId, target.sobject);
   const fields = writableFields(describe, target.sobject);

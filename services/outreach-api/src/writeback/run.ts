@@ -44,7 +44,10 @@ const nothingToWrite = (plan: WritePlan): boolean =>
 
 const nextUtcMidnight = (now: Date): Date => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
 
-async function end(run: { deps: WritebackDeps; row: WritebackRow }, status: 'done' | 'partial' | 'skipped', error: string | null): Promise<Ended> {
+/** A stored plan that no longer parses: the row fails at once with this last_error (no retries, no Salesforce write). */
+export const STORED_PLAN_INVALID = 'STORED_PLAN_INVALID';
+
+async function end(run: { deps: WritebackDeps; row: WritebackRow }, status: 'done' | 'partial' | 'skipped' | 'failed', error: string | null): Promise<Ended> {
   await finishWriteback(run.deps.db, run.row.id, status, run.deps.now, error);
   return status;
 }
@@ -77,6 +80,10 @@ async function processRow(deps: WritebackDeps, row: WritebackRow, at: (step: str
   at('plan');
   const planned = await planStep(run);
   if (planned.kind === 'gone') return end(run, 'skipped', 'record gone or converted');
+  if (planned.kind === 'invalid') {
+    deps.log.error({ writebackId: row.id, aiCallId: row.aiCallId, step: 'plan' }, 'ai_call.writeback: the stored write plan no longer parses; failing the row');
+    return end(run, 'failed', STORED_PLAN_INVALID);
+  }
   if (planned.kind === 'budget') {
     await deferWriteback(deps.db, row.id, nextUtcMidnight(deps.now), deps.now, 'daily AI budget spent');
     return 'retried';

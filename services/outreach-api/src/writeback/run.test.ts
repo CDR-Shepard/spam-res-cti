@@ -112,6 +112,24 @@ describe.skipIf(!pgLane)('runWritebacks on Opportunities (real Postgres)', () =>
     expect(await writebackById(db, s.writebackId)).toMatchObject({ sfTaskId: null });
   });
 
+  it('final review: UNKNOWN_EXCEPTION on the PATCH is transient: back to pending, never a final "Not written"', async () => {
+    const s = await booked();
+    const f = fakeOrg(oppState(s.recordId));
+    f.onUpdate = () => refused('UNKNOWN_EXCEPTION', 'An unexpected error occurred');
+    expect((await runWritebacks(depsFor(db, f))).retried).toBe(1);
+    expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'pending', lastError: expect.stringContaining('UNKNOWN_EXCEPTION') });
+  });
+
+  it('final review: a stored plan that no longer parses fails the row at once, with no Salesforce write and no retries', async () => {
+    const s = await booked();
+    await db.update(schema.aiCallWritebacks).set({ plan: { sfObject: 'Opportunity', result: 'not-a-result' } }).where(eq(schema.aiCallWritebacks.id, s.writebackId));
+    const f = fakeOrg(oppState(s.recordId));
+    expect((await runWritebacks(depsFor(db, f))).failed).toBe(1);
+    expect(f.creates).toEqual([]);
+    expect(f.updates).toEqual([]);
+    expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'failed', lastError: 'STORED_PLAN_INVALID' });
+  });
+
   it('5: a 503 on the PATCH after the Event: back to pending with backoff; the next run starts at fields and makes no second Event', async () => {
     const s = await booked();
     const f = fakeOrg(oppState(s.recordId));
