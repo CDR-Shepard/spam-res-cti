@@ -1,7 +1,7 @@
 -- =============================================================================
 -- 0056_ai_call_writebacks.sql — Salesforce write-back after AI calls, and
 -- practice calls (plan 1D:
--- docs/superpowers/plans/2026-10-06-ai-call-context-booking-writeback-1d.md).
+-- docs/superpowers/plans/2026-10-06-ai-call-1d.md).
 --
 -- ai_call_writebacks   One row per real (non-test) finished AI call: the
 --                      multi-step job outreach-api runs to write the call's

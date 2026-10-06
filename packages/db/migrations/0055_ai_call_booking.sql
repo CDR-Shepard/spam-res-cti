@@ -1,6 +1,6 @@
 -- =============================================================================
 -- 0055_ai_call_booking.sql — AI call appointment booking (plan 1D:
--- docs/superpowers/plans/2026-10-06-ai-call-context-booking-writeback-1d.md).
+-- docs/superpowers/plans/2026-10-06-ai-call-1d.md).
 --
 -- ai_calls
 --   offered_slots   The AppointmentSlot[] the signed trigger sent (contracts
