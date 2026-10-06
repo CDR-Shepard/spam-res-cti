@@ -6,9 +6,13 @@
  *
  * Read-only (outreach-api never writes ai_calls). Test and practice calls never count: nothing is ever written for them, so
  * their bookings are not real appointments. A booking whose write-back created the Event is the calendar's to show.
+ *
+ * Only a booking that stands counts (Part 4 Fix 1, I-1; `bookingStands` in @cti/contracts, the same rule as cti-api's
+ * D-10 check): a live call's, or a finished call's whose outcome keeps it (appointment_set, or a transfer). A call that
+ * booked and then ended do-not-call, not interested and so on freed the time.
  */
-import { and, desc, eq, gte, isNotNull, isNull } from 'drizzle-orm';
-import { BookedAppointment } from '@cti/contracts';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, or } from 'drizzle-orm';
+import { BOOKING_STANDS_OUTCOMES, BookedAppointment } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { OFFER_CALENDAR_DAYS } from './offer.js';
 import type { Busy } from './slots.js';
@@ -31,7 +35,16 @@ export async function bookedNotOnCalendar(db: Db, a: { orgId: string; ownerSfUse
     .select({ appointment: c.appointment })
     .from(c)
     .leftJoin(w, eq(w.aiCallId, c.id))
-    .where(and(eq(c.orgId, a.orgId), isNotNull(c.appointment), eq(c.isTest, false), gte(c.createdAt, since), isNull(w.sfEventId)))
+    .where(
+      and(
+        eq(c.orgId, a.orgId),
+        isNotNull(c.appointment),
+        eq(c.isTest, false),
+        gte(c.createdAt, since),
+        isNull(w.sfEventId),
+        or(inArray(c.outcome, [...BOOKING_STANDS_OUTCOMES]), and(isNull(c.outcome), isNull(c.endedAt))),
+      ),
+    )
     .orderBy(desc(c.createdAt))
     .limit(BOOKED_ROW_LIMIT);
   return rows.flatMap(({ appointment }): Busy[] => {

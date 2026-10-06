@@ -30,7 +30,9 @@ describe.skipIf(!pgLane)('bookedNotOnCalendar (real Postgres)', () => {
     const orgId = await seedOrg(db);
     const userId = await seedUser(db, orgId);
     const call = (appointment: unknown, over: Partial<typeof schema.aiCalls.$inferInsert> = {}) =>
-      seedAiCall(db, orgId, userId, { status: 'completed', createdAt: new Date(NOW.getTime() - DAY), appointment, ...over });
+      seedAiCall(db, orgId, userId, {
+        status: 'completed', outcome: 'appointment_set', endedAt: NOW, createdAt: new Date(NOW.getTime() - DAY), appointment, ...over,
+      });
     const read = () => bookedNotOnCalendar(db, { orgId, ownerSfUserId: OWNER, now: NOW, until: UNTIL });
     return { orgId, call, read };
   }
@@ -71,5 +73,21 @@ describe.skipIf(!pgLane)('bookedNotOnCalendar (real Postgres)', () => {
       { ...row, aiCallId: noEvent, status: 'running' as const },
     ]);
     expect(await t.read()).toEqual([{ start: new Date('2026-10-07T18:00:00.000Z'), end: new Date('2026-10-07T18:15:00.000Z'), allDay: false }]);
+  });
+
+  it('Part 4 Fix 1 (I-1): only a booking that stands counts; a call that ended do-not-call, not interested… freed its time', async () => {
+    const t = await tenant();
+    const at = (h: number) => booked(`2026-10-07T${h}:00:00.000Z`, `2026-10-07T${h}:15:00.000Z`);
+    await t.call(at(10), { outcome: 'qualified_transferred', status: 'transferred' });
+    await t.call(at(11), { outcome: 'transfer_failed' });
+    await t.call(at(12), { status: 'in_progress', outcome: null, endedAt: null });
+    await t.call(at(13), { status: 'in_progress', outcome: 'appointment_set', endedAt: null });
+    for (const [h, outcome] of [[14, 'do_not_call'], [15, 'wrong_number'], [16, 'not_interested'], [17, 'qualified_callback'], [18, 'hung_up'], [19, 'other']] as const) {
+      await t.call(at(h), { outcome });
+    }
+    await t.call(at(20), { outcome: null });
+    await t.call(at(21), { status: 'in_progress', outcome: 'do_not_call', endedAt: null });
+    const hours = (await t.read()).map((b) => b.start.getUTCHours()).sort((a, b) => a - b);
+    expect(hours).toEqual([10, 11, 12, 13]);
   });
 });
