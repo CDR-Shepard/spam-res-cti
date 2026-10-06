@@ -12,7 +12,8 @@
 --                       restarted mid-preview) READS as failed: interrupted after
 --                       6 minutes; nothing rewrites it.
 --   error               A short code (not_found, salesforce_error, not_connected,
---                       plan_failed, timeout).
+--                       plan_failed, timeout, internal_error). interrupted is never
+--                       stored: it is how a stale running row reads.
 --   plan_text           The exact text the voice agent would get; null when the
 --                       plan text check refused it (plan_text_issues says why).
 -- ai_record_test_calls  One row per test call run from a preview. Never a touch.
