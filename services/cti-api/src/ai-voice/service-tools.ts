@@ -13,7 +13,9 @@
  *
  * Hard rule: any do-not-call request — `mark_do_not_call`, or `end_call`
  * with outcome `do_not_call` / `wrong_number` — upserts `opt_outs`
- * (shared with the CTI dialer).
+ * (shared with the CTI dialer). Plan 1D Part 6: except on a test or practice
+ * call, which rings the admin's own phone: the outcome is recorded and the
+ * call ends as usual, but that number is never opted out.
  */
 import type { AppointmentSlot, BookedAppointment } from '@cti/contracts';
 import { END_CALL_OUTCOMES, QUALIFICATION_FIELDS, TRANSFER_REASONS } from './prompt-tools.js';
@@ -34,6 +36,11 @@ export interface ToolCtx {
   now: () => Date;
   /** The appointment times this call may book (plan 1D); empty = book_appointment books nothing. */
   slots: readonly AppointmentSlot[];
+  /**
+   * A test or practice call (plan 1D Part 6): it rings an admin's own test number, so a do-not-call ends the call and is
+   * recorded but never opts that number out. Absent = a real call.
+   */
+  isTest?: boolean;
 }
 
 export interface ToolEffects {
@@ -102,8 +109,12 @@ async function bestEffort(ctx: ToolCtx, what: string, fn: () => Promise<unknown>
   }
 }
 
-/** Upsert `opt_outs` (idempotent), retrying once; throws if it still fails. */
+/** Upsert `opt_outs` (idempotent), retrying once; throws if it still fails. Never for a test or practice call (the admin's phone). */
 async function writeOptOut(ctx: ToolCtx, note: string): Promise<void> {
+  if (ctx.isTest) {
+    ctx.log.info({ aiCallId: ctx.aiCallId }, 'ai-voice: do-not-call on a test or practice call; the test number is not opted out');
+    return;
+  }
   try {
     await ctx.store.upsertOptOut(ctx.orgId, ctx.toE164, note);
   } catch (first) {

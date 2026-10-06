@@ -78,7 +78,7 @@ const refuse = (reply: FastifyReply, code: 400 | 403) => reply.code(code).type('
 
 function toolCtx(row: AiCallRow, deps: WebhookDeps): ToolCtx {
   // Webhooks never book an appointment (only the live conversation's tools do).
-  return { store: deps.store, aiCallId: row.id, orgId: row.orgId, toE164: row.toE164, log: deps.log, now: deps.now, slots: [] };
+  return { store: deps.store, aiCallId: row.id, orgId: row.orgId, toE164: row.toE164, log: deps.log, now: deps.now, slots: [], isTest: row.isTest };
 }
 
 async function hangUp(callSid: string, deps: WebhookDeps, aiCallId: string): Promise<void> {
@@ -99,9 +99,12 @@ export async function onAmd(row: AiCallRow, answeredBy: string, deps: WebhookDep
     await deps.store
       .setOutcome(row.id, 'wrong_number', null)
       .catch((e: unknown) => deps.log.error({ aiCallId: row.id, err: errText(e) }, 'ai-voice: fax outcome write failed'));
-    await deps.store
-      .upsertOptOut(row.orgId, row.toE164, 'fax')
-      .catch((e: unknown) => deps.log.error({ aiCallId: row.id, err: errText(e) }, 'ai-voice: fax opt-out write failed'));
+    // Plan 1D Part 6: a test or practice call rang the admin's own phone; never opt it out (AMD can mistake a phone for a fax).
+    if (!row.isTest) {
+      await deps.store
+        .upsertOptOut(row.orgId, row.toE164, 'fax')
+        .catch((e: unknown) => deps.log.error({ aiCallId: row.id, err: errText(e) }, 'ai-voice: fax opt-out write failed'));
+    }
     await hangUp(callSid, deps, row.id);
     return;
   }

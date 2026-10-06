@@ -30,6 +30,8 @@ export interface ActiveAiCall {
   toE164: string;
   fromE164: string;
   isTest: boolean;
+  /** Plan 1D Part 6 B: the number whose zone is "their local time right now" (a practice call: the record's phone). Absent = toE164. */
+  localTimeE164?: string;
   record: AiCallRecord | null;
   /** Everything the prompt needs except the local time, which is taken when the call is answered. */
   prompt: Omit<PromptInput, 'localTime'>;

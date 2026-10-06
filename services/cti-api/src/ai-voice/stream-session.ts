@@ -151,7 +151,8 @@ async function onStart(socket: BridgeSocket, start: Msg, deps: StreamSessionDeps
 
 function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: string }, streamSid: string, deps: StreamSessionDeps): void {
   const { cfg } = deps;
-  const instructions = buildInstructions({ ...entry.prompt, localTime: localTimeFor(entry.toE164, deps.now()) });
+  // Part 6 B: a practice call rings a test number but says the seller's local time (the record's phone; service.ts).
+  const instructions = buildInstructions({ ...entry.prompt, localTime: localTimeFor(entry.localTimeE164 ?? entry.toE164, deps.now()) });
   // The times the prompt lists are exactly the ones the agent can name and book (Fix 1, M-2).
   const slots = promptSlots(entry.prompt.slots);
   const openai = deps.openRealtime(realtimeUrl(cfg.AI_VOICE_MODEL), cfg.OPENAI_API_KEY ?? '');
@@ -168,6 +169,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
           log: deps.log,
           now: deps.now,
           slots,
+          isTest: entry.isTest,
         },
         effects: deps.effects,
         call: {

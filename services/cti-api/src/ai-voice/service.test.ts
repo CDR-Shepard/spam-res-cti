@@ -322,6 +322,8 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
     const entry = getActiveCall(res.aiCallId)!;
     expect(entry.isTest).toBe(true);
     expect(entry.handoffUserId).toBe(admin.userId);
+    // Part 6 B: "their local time right now" is the record's phone's zone too, not the test number's.
+    expect(entry.localTimeE164).toBe(TO);
     expect(entry.prompt).toMatchObject({
       isTest: false, firstName: 'Jane', address: '12 Oak St, Austin, TX 78701', notes: 'Inherited the house.',
       // Fix 1 M-5: slot times are said in the seller's zone (the record's 619 number), not the test number's (512, Chicago).
@@ -335,6 +337,7 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
     const res = await run(practice, admin, { slots: SLOTS });
     if (!res.ok) throw new Error(`not placed: ${res.reason}`);
     expect(getActiveCall(res.aiCallId)!.prompt).toMatchObject({ sellerTimeZone: 'America/Chicago' });
+    expect(getActiveCall(res.aiCallId)!.localTimeE164).toBe(TEST_NUMBER);
   });
 
   it('3: a practice call by a non-admin is blocked not_admin_for_test, and the row says practice', async () => {

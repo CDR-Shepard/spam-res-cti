@@ -112,6 +112,12 @@ describe('runStreamSession — the start frame', () => {
     expect(twilio.hangups).toEqual([]);
   });
 
+  it('Part 6 B: a practice call rings a Chicago test number but says the seller\'s (the record\'s San Diego) local time', async () => {
+    registerActiveCall(activeEntry({ aiCallId: ID, callSid: CALL_SID, toE164: '+15125550111', isTest: true, localTimeE164: '+16195550100' }));
+    expect(await begin()).toBe('started');
+    expect(captured?.opts.instructions).toContain('Their local time right now: Monday 11:00 AM.');
+  });
+
   it('a bad token closes the stream and hangs up, and touches no row', async () => {
     expect(await begin(startFrame({ token: 'f'.repeat(64) }))).toBe('bad_token');
     expect(twilioWs.closed).toBe(true);

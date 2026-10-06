@@ -115,13 +115,21 @@ function bookingPrompt(
   record: AiCallRecord | null,
   to: string,
 ): { returning?: true; slots?: AppointmentSlot[]; sellerTimeZone?: string | null } {
-  const sellerNumber = targetKind(i.target) === 'practice' ? (record?.phones[0] ?? to) : to;
   return {
     ...(i.returning ? { returning: true as const } : {}),
     ...(i.slots && i.slots.length > 0
-      ? { slots: i.slots, sellerTimeZone: (timezoneForNumber(sellerNumber) ?? timezoneForNumber(to))?.timezone ?? null }
+      ? { slots: i.slots, sellerTimeZone: timezoneForNumber(sellerNumber(i, record, to))?.timezone ?? null }
       : {}),
   };
+}
+
+/**
+ * The number whose zone is the seller's: the number dialed, except for a practice call, which takes the record's phone when
+ * its zone is known (Fix 1 M-5 for the slot words; Part 6 B for "their local time right now"), else the number it rings.
+ */
+function sellerNumber(i: StartInput, record: AiCallRecord | null, to: string): string {
+  const phone = targetKind(i.target) === 'practice' ? record?.phones[0] : undefined;
+  return phone && timezoneForNumber(phone) ? phone : to;
 }
 
 async function blockedRow(i: StartInput, reason: StartBlock, to: string): Promise<StartResult> {
@@ -198,6 +206,7 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
       toE164: gate.toE164,
       fromE164: gate.fromE164,
       isTest,
+      ...(kind === 'practice' ? { localTimeE164: sellerNumber(i, record, gate.toE164) } : {}),
       record,
       prompt: {
         agentName: cfg.AI_VOICE_AGENT_NAME,

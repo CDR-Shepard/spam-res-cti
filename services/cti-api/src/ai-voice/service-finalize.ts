@@ -196,7 +196,8 @@ export async function finalizeAiCall(deps: FinalizeDeps, aiCallId: string, input
   });
   if (!row) return { finalized: false };
 
-  if (row.outcome === 'do_not_call' || row.outcome === 'wrong_number') {
+  // Plan 1D Part 6: a test or practice call rang the admin's own phone; its number is never opted out.
+  if (!row.isTest && (row.outcome === 'do_not_call' || row.outcome === 'wrong_number')) {
     // The tool already wrote it; re-assert in case that write failed mid-call.
     try {
       await store.upsertOptOut(row.orgId, row.toE164, row.outcome === 'do_not_call' ? 'ai call: do not call' : 'ai call: wrong number');
