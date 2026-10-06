@@ -91,8 +91,8 @@ export function gateTarget(t: StartTarget, record: AiCallRecord | null): AiGateT
     case 'practice':
       return { kind: 'test', toRaw: typedNumber(t) ?? '' };
     case 'practice_browser':
-      if (!('practiceBrowser' in t)) throw new Error('unreachable');
-      return { kind: 'browser', identity: t.practiceBrowser.identity };
+      // targetKind said so; '' would fail the gate's identity check anyway (fail closed).
+      return { kind: 'browser', identity: 'practiceBrowser' in t ? t.practiceBrowser.identity : '' };
   }
 }
 

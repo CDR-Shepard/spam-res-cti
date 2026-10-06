@@ -7,17 +7,7 @@ import { claimClose, clearActiveCalls, getActiveCall, registerActiveCall } from 
 import { finalizeAiCall } from './service-finalize.js';
 import { defaultToolEffects } from './service-tools.js';
 import { runStreamSession, type StreamSessionDeps } from './stream-session.js';
-import {
-  activeEntry,
-  CALL_SID,
-  fakeSocket,
-  fakeStore,
-  fakeTwilio,
-  silentLog,
-  type FakeSocket,
-  type FakeStore,
-  type FakeTwilio,
-} from './testing.js';
+import { activeEntry, CALL_SID, fakeSocket, fakeStore, fakeTwilio, silentLog, type FakeSocket, type FakeStore, type FakeTwilio } from './testing.js';
 import { streamToken } from './twilio.js';
 
 const SECRET = 's'.repeat(40);
