@@ -36,6 +36,11 @@ describe.skipIf(!server)('ai_calls appointment booking (real Postgres)', () => {
     await admin.query(`CREATE DATABASE "${name}"`);
     await admin.end();
     pool = new pg.Pool({ connectionString: urlFor(name), max: 12 });
+    // afterAll terminates this database's backends (pg_terminate_backend) while the pool may still be closing an idle
+    // client: only that admin shutdown (57P01) is expected. Anything else is logged, never swallowed.
+    pool.on('error', (err: Error & { code?: string }) => {
+      if (err.code !== '57P01') console.error(`[${name}] pool error:`, err);
+    });
     const client = await pool.connect();
     try {
       await runMigrations(client, await loadMigrationFiles(), { info: () => {}, error: (m: string) => console.error(m) });
