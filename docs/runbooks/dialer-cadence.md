@@ -90,6 +90,28 @@ SELECT i.ordinal, i.record_id, i.status, i.outcome, i.retry_not_before, i.update
  ORDER BY i.ordinal, i.updated_at;
 ```
 
+## Idle lines
+
+Spec: `docs/superpowers/specs/2026-10-06-dialer-idle-cutoff-design.md`. A rep once left a power-dial line open on hold music for 7.5 hours with no dials. The CTI now hangs up an idle line, and the time it sat idle is not counted (`talk-time-report.md`, `dialer-time-tasks.md`).
+
+**The rule.** Every 30 s (`dialer/idle-runs.ts` `IDLE_CHECK_INTERVAL_MS`) the CTI looks at every run that is `active` or `paused` and still has an open rep leg (`dialer_rep_legs.ended_at is null`). It stops a run when nothing has happened on it for 15 minutes (`DIALER_IDLE_MS` in `dialer/idle.ts`, the same constant that limits "On dialer" time).
+
+- **Something happening** restarts the 15 minutes: the run's own change (Start, Pause, Resume, the rep's line joining the room) or any item's change (a dial claimed, its outcome, a connect, the prospect hanging up, Next, Skip, Redial). The softphone's 2-second poll is not a change.
+- **A live dial or conversation is never cut**, however long it runs: an item that is `dialing`, or `connected` with the prospect still on the line.
+- **A run parked for a callback** (Pause & answer) has already dropped its leg, so it is never cut.
+- The softphone reconnecting a leg restarts the 15 minutes before the cut, but it is not counted as time on the dialer.
+
+**What it does.** The same as the rep pressing Stop: it hangs up the rep's leg and flips the run to `stopped`, and also writes `dialer_sessions.stop_reason = 'idle'` (migration 0054; a rep's own Stop leaves it null). It stops the run, never pauses it, because the softphone rejoins a run that reads `active` or `paused` after a dropped line. It logs `[dialer] idle run stopped` with `{ sessionId, userId, idleMinutes }`, ids only. A failed stop logs `[dialer] idle run stop failed` and the next idle run is still stopped.
+
+**What the rep sees.** The softphone leaves the dialer and the run summary reads "Run stopped" with "Stopped after 15 minutes with no dialing." They start a new run from the list, and it continues from the shared list position. A rep who presses Next in the same instant as the cut sees the run stop (accepted: they had been idle for 15 minutes).
+
+**Kill switch:** the Railway `@cti/api` variable `DIALER_IDLE_STOP` (`on` default, `off`; changing it restarts the service). `off` means the loop never starts: idle lines stay open, but the time past 15 minutes still is not counted. A line that stays open long after its last dial: check this variable, then the logs for `idle run stop failed`.
+
+Today's idle stops (read-only SQL, `$PUB` pattern from the SQL section below):
+```sql
+select id, user_id, updated_at from dialer_sessions where stop_reason = 'idle' and updated_at >= now() - interval '1 day' order by updated_at;
+```
+
 ## Run settings (Ready to dial)
 
 Spec: `docs/superpowers/specs/2026-09-28-run-settings-design.md`. Three choices sit above **Start dialing**. They arrive with `POST /dialer/sessions/:id/start` and are applied in the one transaction that flips the run `ready → active` (`dialer/engine.ts` `claimReadySession`, `dialer/run-settings.ts`). A refused Start (another run holds the one-active-run slot) changes nothing.

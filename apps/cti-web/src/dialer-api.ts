@@ -62,6 +62,10 @@ export interface DialerSession {
    *  `currentItem.runPosition` counts against (spec 2026-09-28 review fix,
    *  minor 1). Null for an unlimited run. Absent: an older server. */
   runSize?: number | null;
+  /** Why the server stopped the run: 'idle' = 15 minutes with nothing
+   *  happening on the open line. Null: the rep stopped it (or it is not
+   *  stopped). Absent: an older server. */
+  stopReason?: 'idle' | null;
 }
 
 export interface DialerRollovers { moved: number; pushed: number; failed: number; pending: number }
