@@ -7,8 +7,11 @@
  * (global `fetch` by default, a fake in tests), and `queryAll` follows
  * `nextRecordsUrl` to the end instead of stopping at the first page.
  */
+import { toDescribe, type SObjectDescribe } from './describe-parse.js';
 import { QueryTooLargeError, SalesforceApiError, SalesforceAuthError } from './errors.js';
 import { parseListViews, type ListViewSummary } from './listviews.js';
+
+export type { PicklistValue, RecordTypeInfo, SObjectDescribe, SObjectField } from './describe-parse.js';
 
 export interface SalesforceToken {
   accessToken: string;
@@ -27,18 +30,6 @@ export interface SalesforceClientOptions {
   /** e.g. `v60.0`. */
   apiVersion: string;
   fetchImpl?: typeof fetch;
-}
-
-export interface SObjectField {
-  name: string;
-  type: string;
-  label: string;
-  length?: number;
-}
-
-export interface SObjectDescribe {
-  name: string;
-  fields: SObjectField[];
 }
 
 export interface CompositeResult {
@@ -129,9 +120,7 @@ export class SalesforceClient {
   async describe(sobject: string): Promise<SObjectDescribe> {
     const res = await this.request(`/sobjects/${encodeURIComponent(sobject)}/describe`);
     if (res.status >= 400) throw apiError(`Describe ${sobject} failed`, res);
-    const body = (res.json ?? {}) as { name?: unknown; fields?: unknown };
-    const fields = Array.isArray(body.fields) ? body.fields.flatMap(toField) : [];
-    return { name: typeof body.name === 'string' ? body.name : sobject, fields };
+    return toDescribe(res.json, sobject);
   }
 
   async listViews(sobject: 'Lead' | 'Opportunity'): Promise<ListViewSummary[]> {
@@ -269,19 +258,6 @@ function parseBody(text: string): unknown {
 
 function apiError(what: string, res: SalesforceResponse): SalesforceApiError {
   return new SalesforceApiError(`${what} (${res.status}): ${JSON.stringify(res.json)}`, res.status, res.json);
-}
-
-function toField(raw: unknown): SObjectField[] {
-  const f = (raw ?? {}) as { name?: unknown; type?: unknown; label?: unknown; length?: unknown };
-  if (typeof f.name !== 'string' || typeof f.type !== 'string') return [];
-  return [
-    {
-      name: f.name,
-      type: f.type,
-      label: typeof f.label === 'string' ? f.label : f.name,
-      ...(typeof f.length === 'number' ? { length: f.length } : {}),
-    },
-  ];
 }
 
 function toCompositeResult(raw: unknown): CompositeResult {

@@ -43,6 +43,80 @@ describe('SalesforceClient.describe', () => {
     const { sf } = client([{ status: 404, body: [{ errorCode: 'NOT_FOUND' }] }]);
     await expect(sf.describe('Nope__c')).rejects.toBeInstanceOf(SalesforceApiError);
   });
+
+  it('carries the write flags, picklist values and record types (plan 1D)', async () => {
+    const { sf } = client([
+      {
+        status: 200,
+        body: {
+          name: 'Lead',
+          createable: true,
+          updateable: true,
+          fields: [
+            {
+              name: 'Status',
+              type: 'picklist',
+              label: 'Lead Status',
+              length: 255,
+              updateable: true,
+              createable: true,
+              calculated: false,
+              nillable: false,
+              restrictedPicklist: true,
+              picklistValues: [
+                { value: 'Working', label: 'Working', active: true, defaultValue: false },
+                { value: 'Old', label: 'Old', active: false },
+                { label: 'No value', active: true },
+                { value: 'NoLabel', active: true },
+              ],
+            },
+            { name: 'Days_Open__c', type: 'double', label: 'Days Open', calculated: true, updateable: false, createable: false },
+            { name: 'Odd__c', type: 'string', label: 'Odd', updateable: 'yes', nillable: 1 },
+          ],
+          recordTypeInfos: [
+            { recordTypeId: '0128X000000AAAAQAA', name: 'Seller', developerName: 'Seller', available: true, defaultRecordTypeMapping: true, master: false },
+            { recordTypeId: '0128X000000BBBBQAA', name: 'Buyer', developerName: 'Buyer', available: false, defaultRecordTypeMapping: false },
+            { recordTypeId: '012000000000000AAA', name: 'Master', available: true, defaultRecordTypeMapping: false },
+          ],
+        },
+      },
+    ]);
+    const d = await sf.describe('Lead');
+    expect(d.createable).toBe(true);
+    expect(d.updateable).toBe(true);
+    expect(d.fields).toEqual([
+      {
+        name: 'Status',
+        type: 'picklist',
+        label: 'Lead Status',
+        length: 255,
+        updateable: true,
+        createable: true,
+        calculated: false,
+        nillable: false,
+        restrictedPicklist: true,
+        picklistValues: [
+          { value: 'Working', label: 'Working', active: true },
+          { value: 'Old', label: 'Old', active: false },
+          { value: 'NoLabel', label: 'NoLabel', active: true },
+        ],
+      },
+      { name: 'Days_Open__c', type: 'double', label: 'Days Open', calculated: true, updateable: false, createable: false },
+      { name: 'Odd__c', type: 'string', label: 'Odd' },
+    ]);
+    expect(d.fields[2]).not.toHaveProperty('updateable');
+    expect(d.fields[2]).not.toHaveProperty('nillable');
+    expect(d.recordTypeInfos).toEqual([
+      { recordTypeId: '0128X000000AAAAQAA', name: 'Seller', developerName: 'Seller', available: true, defaultRecordTypeMapping: true },
+      { recordTypeId: '0128X000000BBBBQAA', name: 'Buyer', developerName: 'Buyer', available: false, defaultRecordTypeMapping: false },
+    ]);
+  });
+
+  it('leaves the object flags and record types out when Salesforce does not send them', async () => {
+    const { sf } = client([{ status: 200, body: { name: 'Task', createable: 'true', fields: [] } }]);
+    const d = await sf.describe('Task');
+    expect(d).toEqual({ name: 'Task', fields: [] });
+  });
 });
 
 describe('SalesforceClient.listViews', () => {
