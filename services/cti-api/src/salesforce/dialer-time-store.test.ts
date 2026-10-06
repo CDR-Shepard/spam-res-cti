@@ -4,11 +4,19 @@
  * still work here, but the codebase rule is the bare form, and a PARTIAL index
  * would reject a targeted one with 42P10).
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import { schema } from '@cti/db';
-import { claimRowStatement, insertRowStatement, rowsForDaysStatement, windowLegsStatement } from './dialer-time-store.js';
+import { dialActivityStatement, loadActivity } from '../reports/talk-time-query.js';
+import { claimRowStatement, insertRowStatement, liveDialerTimeStore, rowsForDaysStatement, windowLegsStatement } from './dialer-time-store.js';
+
+// Only the wiring is under test here (the activity SQL is pinned in
+// reports/talk-time-query.test.ts): the real statements stay, the read is a spy.
+vi.mock('../reports/talk-time-query.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../reports/talk-time-query.js')>()),
+  loadActivity: vi.fn(async () => []),
+}));
 
 const db = drizzle(new Pool({ connectionString: 'postgres://unused:unused@127.0.0.1:1/unused' }), { schema });
 
@@ -22,6 +30,15 @@ describe('dialer-time-store SQL', () => {
       'select "org_id", "user_id", "joined_at", "ended_at" from "dialer_rep_legs" where ("dialer_rep_legs"."joined_at" > $1 and "dialer_rep_legs"."joined_at" < $2 and ("dialer_rep_legs"."ended_at" is null or "dialer_rep_legs"."ended_at" > $3))',
     );
     expect(q.params).toEqual([lowerBound.toISOString(), end.toISOString(), start.toISOString()]);
+  });
+
+  it('reads the activity of EVERY org over the same range as the legs (no org filter)', async () => {
+    const start = new Date('2026-09-19T07:00:00Z');
+    const end = new Date('2026-10-03T07:00:00Z');
+    await expect(liveDialerTimeStore(db).loadActivity(start, end)).resolves.toEqual([]);
+    expect(loadActivity).toHaveBeenCalledWith(db, null, start, end);
+    // A null org is what drops the predicate — the worker serves all orgs.
+    expect(dialActivityStatement(db, null, start, end).toSQL().sql).not.toContain('org_id');
   });
 
   it('loads the rows for exactly the window days', () => {

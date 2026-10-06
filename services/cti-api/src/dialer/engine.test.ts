@@ -202,6 +202,16 @@ function fakeDb(session: any, items: any[], opts: { claimReturnsRows?: boolean; 
                     if (!target || !params.includes(target.status)) return [];
                   }
                 }
+                // stopIdleSession's `WHERE id = $1 AND status IN ('active','paused')
+                // RETURNING *`: honor the guard against the fake's CURRENT session
+                // status (no row = the run already ended) and hand back the whole
+                // post-write row, as Postgres does.
+                if (_tbl === schema.dialerSessions && /"status" in \(/.test(text)) {
+                  const current = { ...session, ...sessionOverride };
+                  if (!params.includes(current.id) || !params.includes(current.status)) return [];
+                  apply();
+                  return [{ ...current, ...patch }];
+                }
                 apply();
                 return [{ id: 'updated' }];
               },
@@ -343,6 +353,7 @@ import {
   skipCurrent,
   startSession,
   stopSession,
+  stopIdleSession,
   repNext,
   redialCurrent,
   endCurrent,
@@ -1171,6 +1182,17 @@ describe('stopSession', () => {
     expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'stopped' }) });
     expect(r).toEqual({ action: 'stopped' });
   });
+  // The idle cut stops through stopIdleSession, not this function, and this one
+  // never writes stop_reason: a rep's (or the softphone's own) Stop landing on a
+  // run that was already idle-stopped must leave 'idle' in place.
+  it('never writes a stop reason, so a later Stop keeps an idle stop\'s reason', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await stopSession('S1', deps);
+    const flip = fdb._writes.find((w: any) => w.patch.status === 'stopped');
+    expect(flip).toBeDefined();
+    expect(Object.keys(flip.patch)).not.toContain('stopReason');
+  });
   it('does not hang up a connected (already-bridged) item, but still stops', async () => {
     const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' }];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
@@ -1289,6 +1311,157 @@ describe('stopSession', () => {
     expect(await stopSession('S1', deps)).toEqual({ action: 'stopped' });
     expect(deps.telephony.endConference).not.toHaveBeenCalled();
     expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'stopped' }) }]);
+  });
+});
+
+// The idle cut (dialer/idle-runs.ts). The reverse order of stopSession on
+// purpose: the softphone's drop recovery rejoins a run that still reads
+// active/paused, so the run must read `stopped` BEFORE the leg is hung up.
+describe('stopIdleSession', () => {
+  beforeEach(() => { _target = {}; });
+  const pending = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+
+  /** One ordered log of the status flip AND every Twilio call. Mocks only
+   *  RECORD: production wraps the hangups in try/catch, so an `expect` thrown
+   *  inside one would be swallowed. */
+  function ordered(deps: EngineDeps, fdb: any) {
+    const calls: string[] = [];
+    const update = fdb.update.bind(fdb);
+    fdb.update = (tbl: unknown) => {
+      const chain = update(tbl);
+      return {
+        set: (patch: any) => {
+          const set = chain.set(patch);
+          return {
+            where: (w: unknown) => {
+              const where = set.where(w);
+              return {
+                ...where,
+                returning: async () => {
+                  const rows = await where.returning();
+                  if (rows.length) calls.push(`flip:${patch.status}:${patch.stopReason}`);
+                  return rows;
+                },
+              };
+            },
+          };
+        },
+      };
+    };
+    deps.telephony.hangup = vi.fn(async (sid: string) => { calls.push(`hangup:${sid}`); });
+    deps.telephony.endConference = vi.fn(async (u: string) => { calls.push(`endConference:${u}`); });
+    return calls;
+  }
+
+  it('marks the run stopped (reason idle) BEFORE it hangs up the rep leg, so the softphone\'s drop recovery finds a stopped run', async () => {
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, repCallSid: REP_LEG }, pending); deps.db = fdb;
+    const calls = ordered(deps, fdb);
+    const r = await stopIdleSession('S1', deps);
+    expect(r).toEqual({ action: 'stopped' });
+    expect(calls).toEqual(['flip:stopped:idle', `hangup:${REP_LEG}`, 'endConference:U1']);
+  });
+
+  it('flips with ONE conditional UPDATE: only an active or paused run, by id', async () => {
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, repCallSid: REP_LEG }, pending); deps.db = fdb;
+    await stopIdleSession('S1', deps);
+    const flips = fdb._updateWheres.filter((u: any) => u.patch.status === 'stopped');
+    expect(flips).toHaveLength(1);
+    expect(flips[0].patch).toEqual({ status: 'stopped', stopReason: 'idle', updatedAt: expect.any(Date) });
+    const { sql: text, params } = new PgDialect().sqlToQuery(flips[0].where as SQL);
+    expect(text).toMatch(/"status" in \(/);
+    expect(params).toEqual(expect.arrayContaining(['S1', 'active', 'paused']));
+    expect(params).not.toContain('ready');
+  });
+
+  it('a run that already ended (stopped / done / ready) is skipped: nothing written, NO Twilio call at all', async () => {
+    for (const status of ['stopped', 'done', 'ready']) {
+      const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status, repCallSid: REP_LEG }, pending); deps.db = fdb;
+      const r = await stopIdleSession('S1', deps);
+      expect(r).toEqual({ action: 'skipped' });
+      expect(deps.telephony.hangup).not.toHaveBeenCalled();
+      expect(deps.telephony.endConference).not.toHaveBeenCalled();
+      expect(fdb._writes).toEqual([]);
+    }
+  });
+
+  it('a skipped run does not even touch a dial that is still on its items', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1 }];
+    const deps = makeDeps(); deps.db = fakeDb({ ...baseSession, status: 'stopped' }, items);
+    expect(await stopIdleSession('S1', deps)).toEqual({ action: 'skipped' });
+    expect(deps.telephony.hangup).not.toHaveBeenCalled();
+  });
+
+  it('a PAUSED run is stopped too', async () => {
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, status: 'paused', repCallSid: REP_LEG }, pending); deps.db = fdb;
+    const calls = ordered(deps, fdb);
+    expect(await stopIdleSession('S1', deps)).toEqual({ action: 'stopped' });
+    expect(calls).toEqual(['flip:stopped:idle', `hangup:${REP_LEG}`, 'endConference:U1']);
+  });
+
+  it('a dial that started since the check is hung up LAST, after the rep leg', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, repCallSid: REP_LEG }, items); deps.db = fdb;
+    const calls = ordered(deps, fdb);
+    await stopIdleSession('S1', deps);
+    expect(calls).toEqual(['flip:stopped:idle', `hangup:${REP_LEG}`, 'endConference:U1', 'hangup:CA1']);
+  });
+
+  it('does not hang up a connected item itself (releasing the conference ends it), but still stops', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, repCallSid: REP_LEG }, items); deps.db = fdb;
+    const calls = ordered(deps, fdb);
+    expect(await stopIdleSession('S1', deps)).toEqual({ action: 'stopped' });
+    expect(calls).toEqual(['flip:stopped:idle', `hangup:${REP_LEG}`, 'endConference:U1']);
+  });
+
+  it('a failed hangup of the dial is logged, never thrown: the run is already stopped', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1 }];
+    const deps = makeDeps(); deps.db = fakeDb({ ...baseSession, repCallSid: REP_LEG }, items);
+    deps.telephony.hangup = vi.fn(async (sid: string) => { if (sid === 'CA1') throw new Error('twilio 500'); });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await stopIdleSession('S1', deps)).toEqual({ action: 'stopped' });
+      expect(err).toHaveBeenCalledWith('[dialer] stop hangup failed', { itemId: 'i1', err: 'twilio 500' });
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  // Released with the row the flip RETURNED (status `stopped`): the by-name
+  // teardown is skipped whenever the rep has another ACTIVE run — a new run
+  // started in the window must keep its room.
+  it('releases with the post-flip status: the room is left alone when the rep already started a new active run', async () => {
+    const live = { session: { ...baseSession, id: 'S-LIVE', status: 'active' }, items: [] };
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, repCallSid: REP_LEG }, pending, { otherSessions: [live] }); deps.db = fdb;
+    const calls = ordered(deps, fdb);
+    expect(await stopIdleSession('S1', deps)).toEqual({ action: 'stopped' });
+    expect(calls).toEqual(['flip:stopped:idle', `hangup:${REP_LEG}`]);
+    expect(deps.telephony.endConference).not.toHaveBeenCalled();
+  });
+
+  it('records the end of the rep leg\'s time on the dialer', async () => {
+    const deps = makeDeps(); deps.db = fakeDb({ ...baseSession, repCallSid: REP_LEG }, pending);
+    await stopIdleSession('S1', deps);
+    expect(deps.onRepLegReleased).toHaveBeenCalledWith(REP_LEG);
+  });
+
+  it('a run with no stamped rep leg is still stopped, and its room torn down by name', async () => {
+    const deps = makeDeps(); const fdb = fakeDb({ ...baseSession, repCallSid: null }, pending); deps.db = fdb;
+    const calls = ordered(deps, fdb);
+    expect(await stopIdleSession('S1', deps)).toEqual({ action: 'stopped' });
+    expect(calls).toEqual(['flip:stopped:idle', 'endConference:U1']);
+  });
+
+  it('a Twilio failure while releasing never fails the cut', async () => {
+    const deps = makeDeps(); deps.db = fakeDb({ ...baseSession, repCallSid: REP_LEG }, pending);
+    deps.telephony.hangup = vi.fn(async () => { throw new Error('twilio 500'); });
+    deps.telephony.endConference = vi.fn(async () => { throw new Error('twilio 500'); });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await stopIdleSession('S1', deps)).toEqual({ action: 'stopped' });
+    } finally {
+      err.mockRestore();
+    }
   });
 });
 

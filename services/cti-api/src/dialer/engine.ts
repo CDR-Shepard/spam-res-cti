@@ -658,6 +658,64 @@ export async function stopSession(sessionId: string, deps: EngineDeps): Promise<
 }
 
 /**
+ * The idle cut (dialer/idle-runs.ts): stop a run whose open line has had
+ * nothing happen for DIALER_IDLE_MS, and record why (`stop_reason = 'idle'`, so
+ * the softphone can say "Stopped after 15 minutes with no dialing").
+ *
+ * ORDER — the REVERSE of `stopSession`: flip to `stopped` FIRST, release the
+ * line AFTER. `stopSession` releases first because a rep's own Stop must not
+ * free the one-active-run slot before the rep-scoped room is torn down. Here
+ * the softphone is the thing to beat. It reacts to its leg dropping by waiting
+ * 1.5 s, reading the run's status, and REJOINING a run that reads `active` or
+ * `paused` (cti-web dialer-leg.ts recoverDroppedLeg); only if that fails does it
+ * POST Stop itself. The release (a hangup by sid, then a by-name teardown: several
+ * Twilio REST calls) routinely outlasts 1.5 s, so hanging up first would put the
+ * rep back on hold music, then end the run under them, or let the client's own
+ * Stop win. Flipped first, the rejoin reads a stopped run and stays down, and the
+ * panel shows the run's reason.
+ *
+ * Why flipping first is safe here:
+ *  - The flip is CONDITIONAL, one UPDATE `where status in ('active','paused')`.
+ *    The idle tick works from a snapshot: a run that was stopped, finished or
+ *    otherwise ended since matches no row, and this returns `skipped` having
+ *    made no Twilio call at all — an ended run is never rewritten to
+ *    stopped/idle, and its (rep-scoped) room is never touched on its behalf.
+ *  - The release gets the row the flip RETURNED, whose status is `stopped`.
+ *    `releaseRepConference` then skips the by-name teardown whenever the rep
+ *    already has another ACTIVE run. That is the cross-run hazard `stopSession`'s
+ *    order guards against: a new run started in the window must keep its room.
+ *  - The softphone's own backstop, the rejoin route's `CallStatus=completed`
+ *    handling (it PAUSES an ACTIVE run whose leg ended), correctly does nothing
+ *    for a run that is already stopped.
+ *
+ * A dial that started in the instant since the idle check is hung up LAST,
+ * after the flip and the release, for `stopSession`'s reason: its terminal
+ * callback then finds a stopped run (the row settles as `no_connect`, nothing
+ * requeues, `advanceSession` returns `idle`).
+ *
+ * `stopSession` itself is unchanged and never writes `stop_reason`, so a later
+ * rep or softphone Stop on an idle-stopped run keeps `'idle'`.
+ */
+export async function stopIdleSession(sessionId: string, deps: EngineDeps): Promise<{ action: 'stopped' | 'skipped' }> {
+  const [flipped] = await deps.db
+    .update(schema.dialerSessions)
+    .set({ status: 'stopped', stopReason: 'idle', updatedAt: new Date() })
+    .where(and(eq(schema.dialerSessions.id, sessionId), inArray(schema.dialerSessions.status, ['active', 'paused'])))
+    .returning();
+  if (!flipped) return { action: 'skipped' };
+  await releaseRepConference(deps, flipped);
+  const item = inFlightItem(await loadItems(deps, sessionId));
+  if (item && item.status === 'dialing' && item.callId) {
+    try {
+      await deps.telephony.hangup(item.callId);
+    } catch (err) {
+      console.error('[dialer] stop hangup failed', { itemId: item.id, err: (err as Error).message });
+    }
+  }
+  return { action: 'stopped' };
+}
+
+/**
  * The rep clicking "Next" after finishing a talk: close out the connected
  * item, then advance.
  *

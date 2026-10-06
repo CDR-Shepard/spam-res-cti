@@ -3,8 +3,18 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { Pool } from 'pg';
 import { schema } from '@cti/db';
-import { legsStatement, loadRepNames, loadTalkRows, loadTalkTimeReport, talkRowsStatement } from './talk-time-query.js';
-import { parseTalkRange, type TalkRange } from './talk-time.js';
+import { DIALER_IDLE_MS } from '../dialer/idle.js';
+import {
+  conversationActivityStatement,
+  dialActivityStatement,
+  legsStatement,
+  loadActivity,
+  loadRepNames,
+  loadTalkRows,
+  loadTalkTimeReport,
+  talkRowsStatement,
+} from './talk-time-query.js';
+import { MAX_CONVERSATION_MS, parseTalkRange, type TalkRange } from './talk-time.js';
 
 const ORG = '11111111-1111-4111-8111-111111111111';
 const r = parseTalkRange({ from: '2026-09-30', to: '2026-10-01' });
@@ -71,6 +81,49 @@ describe('legsStatement — legs that overlap the range', () => {
   });
 });
 
+describe('activity statements — dials and conversations whose 15-minute window can reach the range', () => {
+  const db = drizzle(new Pool({ connectionString: 'postgres://unused:unused@127.0.0.1:1/unused' }), { schema });
+  const lookback = new Date(RANGE.start.getTime() - DIALER_IDLE_MS).toISOString();
+
+  it('dialActivityStatement: user_id + dialed_at, org-scoped, from start − 15 min to the range end', () => {
+    const q = dialActivityStatement(db, ORG, RANGE.start, RANGE.end).toSQL();
+    expect(q.sql).toMatch(/^select "user_id", "dialed_at" from "dialer_dial_attempts" where /);
+    expect(q.sql).toContain('"dialer_dial_attempts"."org_id" = $');
+    expect(q.sql).toContain('"dialer_dial_attempts"."dialed_at" >= $');
+    expect(q.sql).toContain('"dialer_dial_attempts"."dialed_at" < $');
+    // The lookback is a bound parameter, not SQL interval text.
+    expect(q.params).toEqual(expect.arrayContaining([ORG, lookback, RANGE.end.toISOString()]));
+    expect(q.params).not.toContain(RANGE.start.toISOString());
+  });
+
+  it('conversationActivityStatement: user_id + bridged_at + ended_at, org-scoped, bridged before the end, ended after start − 15 min or open and bridged within the 4-hour call limit before that', () => {
+    const q = conversationActivityStatement(db, ORG, RANGE.start, RANGE.end).toSQL();
+    expect(q.sql).toMatch(/^select "user_id", "bridged_at", "ended_at" from "dialer_connects" where /);
+    expect(q.sql).toContain('"dialer_connects"."org_id" = $');
+    expect(q.sql).toContain('"dialer_connects"."bridged_at" < $');
+    // An orphan row (ended_at never recorded) is read only if it began within the
+    // 4-hour call limit of the lookback — not forever.
+    expect(q.sql).toContain('(("dialer_connects"."ended_at" is null and "dialer_connects"."bridged_at" >= $');
+    expect(q.sql).toContain(') or "dialer_connects"."ended_at" >= $');
+    expect(q.params).toEqual(expect.arrayContaining([ORG, lookback, RANGE.end.toISOString()]));
+    expect(q.params).toContain(new Date(RANGE.start.getTime() - DIALER_IDLE_MS - MAX_CONVERSATION_MS).toISOString());
+    expect(q.params).not.toContain(RANGE.start.toISOString());
+  });
+
+  it('a null org (the Salesforce worker reads every org) drops the org predicate', () => {
+    const dials = dialActivityStatement(db, null, RANGE.start, RANGE.end).toSQL();
+    const talks = conversationActivityStatement(db, null, RANGE.start, RANGE.end).toSQL();
+    expect(dials.sql).not.toContain('org_id');
+    expect(talks.sql).not.toContain('org_id');
+    expect(dials.params).toEqual([lookback, RANGE.end.toISOString()]);
+    expect(talks.params).toEqual([
+      RANGE.end.toISOString(),
+      new Date(RANGE.start.getTime() - DIALER_IDLE_MS - MAX_CONVERSATION_MS).toISOString(),
+      lookback,
+    ]);
+  });
+});
+
 describe('loaders', () => {
   it('loadTalkRows maps the driver rows (numbers may arrive as strings)', async () => {
     const db = { execute: async () => ({ rows: [{ user_id: 'u1', day: '2026-10-01', source: 'outbound', calls: '3', seconds: '600' }] }) } as never;
@@ -90,21 +143,46 @@ describe('loaders', () => {
     expect(await loadRepNames(db, ORG, ['u1', 'u2'])).toEqual([{ id: 'u1', name: 'Garrett M' }, { id: 'u2', name: 'n@x.com' }]);
   });
 
-  it('loadTalkTimeReport joins the three reads into the report', async () => {
+  it('loadActivity: dials become point spans, conversations keep their end (null = still talking)', async () => {
+    const dialedAt = new Date('2026-10-01T16:05:00Z');
+    const bridgedAt = new Date('2026-10-01T16:10:00Z');
+    const endedAt = new Date('2026-10-01T16:30:00Z');
+    const db = {
+      select: () => ({
+        from: (table: unknown) => ({
+          where: async () =>
+            table === schema.dialerDialAttempts
+              ? [{ userId: 'u1', dialedAt }]
+              : [{ userId: 'u1', bridgedAt, endedAt }, { userId: 'u2', bridgedAt, endedAt: null }],
+        }),
+      }),
+    } as never;
+    expect(await loadActivity(db, ORG, RANGE.start, RANGE.end)).toEqual([
+      { userId: 'u1', start: dialedAt, end: dialedAt },
+      { userId: 'u1', start: bridgedAt, end: endedAt },
+      { userId: 'u2', start: bridgedAt, end: null },
+    ]);
+  });
+
+  it('loadTalkTimeReport joins the four reads into the report, counting only the active part of the open line', async () => {
+    const dialedAt = new Date('2026-10-01T16:00:00Z');
     const db = {
       execute: async () => ({ rows: [{ user_id: 'u1', day: '2026-10-01', source: 'powerDial', calls: 2, seconds: 900 }] }),
       select: () => ({
         from: (table: unknown) => ({
-          where: async () =>
-            table === schema.users
-              ? [{ id: 'u1', displayName: 'Garrett M', email: 'g@x.com' }]
-              : [{ userId: 'u1', joinedAt: new Date('2026-10-01T16:00:00Z'), endedAt: new Date('2026-10-01T17:00:00Z') }],
+          where: async () => {
+            if (table === schema.users) return [{ id: 'u1', displayName: 'Garrett M', email: 'g@x.com' }];
+            if (table === schema.dialerDialAttempts) return [{ userId: 'u1', dialedAt }];
+            if (table === schema.dialerConnects) return [];
+            // an hour-long line, but only the 15 minutes after the one dial count
+            return [{ userId: 'u1', joinedAt: dialedAt, endedAt: new Date('2026-10-01T17:00:00Z') }];
+          },
         }),
       }),
     } as never;
     const report = await loadTalkTimeReport(db, ORG, RANGE, new Date('2026-10-02T00:00:00Z'));
     expect(report.reps).toEqual([
-      expect.objectContaining({ userId: 'u1', name: 'Garrett M', talkSeconds: 900, connectedCalls: 2, dialerSeconds: 3600 }),
+      expect.objectContaining({ userId: 'u1', name: 'Garrett M', talkSeconds: 900, connectedCalls: 2, dialerSeconds: 900 }),
     ]);
   });
 });

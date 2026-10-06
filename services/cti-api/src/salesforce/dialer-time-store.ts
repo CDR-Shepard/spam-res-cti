@@ -1,10 +1,12 @@
 /**
- * dialer_time_tasks + dialer_rep_legs access for salesforce/dialer-time-worker.ts.
+ * dialer_time_tasks + dialer_rep_legs + activity access for salesforce/dialer-time-worker.ts.
  * The worker only sees the DialerTimeStore interface, so its tests run on an
  * in-memory store; this file's SQL is pinned in dialer-time-store.test.ts.
  */
 import { and, eq, gt, inArray, isNull, lt, lte, or } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
+import { loadActivity } from '../reports/talk-time-query.js';
+import type { ActivitySpan } from '../reports/talk-time.js';
 import type { SyncedRow, WindowLeg } from './dialer-time-plan.js';
 
 type Db = ReturnType<typeof getDb>;
@@ -13,6 +15,9 @@ const l = schema.dialerRepLegs;
 
 export interface DialerTimeStore {
   loadLegs(start: Date, end: Date): Promise<WindowLeg[]>;
+  /** The dials and conversations that make a rep's line "active" over the same
+   *  [start, end) as the legs — every org's, like the legs. */
+  loadActivity(start: Date, end: Date): Promise<ActivitySpan[]>;
   loadRows(days: readonly string[]): Promise<SyncedRow[]>;
   ensureRow(orgId: string, userId: string, day: string): Promise<SyncedRow>;
   /** THE CLAIM IS THE LEASE (final review I1, dialer-connect-worker.ts's
@@ -80,6 +85,7 @@ export function claimRowStatement(db: Db, id: string, now: Date, leaseMs: number
 export function liveDialerTimeStore(db: Db): DialerTimeStore {
   return {
     loadLegs: (start, end) => windowLegsStatement(db, start, end),
+    loadActivity: (start, end) => loadActivity(db, null, start, end),
     loadRows: (days) => (days.length === 0 ? Promise.resolve([]) : rowsForDaysStatement(db, days)),
     async ensureRow(orgId, userId, day) {
       await insertRowStatement(db, orgId, userId, day);

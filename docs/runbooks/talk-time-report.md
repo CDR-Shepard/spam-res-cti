@@ -10,15 +10,26 @@ Admin-only. Softphone → **More → Talk time**. Also `GET /admin/talk-time?fro
 | Talk time | Seconds on every connected call that started that Pacific day. Outbound click-to-dial: wrap-up disposition **Connected**. Power dial: every call bridged to the rep. Inbound: answered by the rep, not voicemail. |
 | Connected | How many such calls. |
 | Power-dial talk | The power-dial share of Talk time (bridge → hang-up; AMD screening excluded). |
-| On dialer | How long the rep's line sat on the power dialer: from the softphone joining the dialer to that leg ending. Dialing, hold music and talking all count. A rep with two legs at once (a tab replaced its leg) is counted once. A leg still open counts up to now. |
+| On dialer | The rep's power-dial time while dialing or talking; quiet stretches over 15 minutes are left out. It is the time the rep's line was open on the dialer AND inside an active window: a dial, or a conversation, plus 15 minutes after it. A line left open on hold music with nothing happening stops counting 15 minutes after the last dial or conversation. A rep with two legs at once (a tab replaced its leg) is counted once. A leg still open counts up to now. |
 
 Days are America/Los_Angeles. A call counts on the day it started. A dialer leg across midnight is split.
+
+### How "On dialer" is computed
+
+Active time = the rep's legs ∩ their activity windows (`reports/talk-time.ts` `dialerSecondsByUserDay`; the 15 minutes is `DIALER_IDLE_MS` in `dialer/idle.ts`, shared with the live idle cut-off):
+
+| Activity | Source | Window |
+|---|---|---|
+| a dial placed | `dialer_dial_attempts.dialed_at` | from the dial to 15 minutes after it |
+| a conversation | `dialer_connects`, `bridged_at` to `ended_at` | from the bridge until it ended, plus 15 minutes. An open conversation (no recorded end) counts to now, capped at 4 hours after it was bridged |
+
+Windows are merged per rep, then intersected with the rep's merged legs, then split at Pacific midnight. Not activity: the line opening, the softphone reconnecting, hold music, Pause. So a line that opens and never dials counts 0, and the few seconds between a leg opening and the run's first dial are not counted. Changed 2026-10-06 (spec `docs/superpowers/specs/2026-10-06-dialer-idle-cutoff-design.md`); the screen recomputes on every read, so every past day reads on the new rule. The Salesforce "Power Dialer Time" Tasks carry the same number: see `dialer-time-tasks.md`.
 
 ## Where the numbers come from
 
 - **Regular calls:** `calls.talk_seconds`, the true talk time (ring time excluded), from the deploy of 0048 on. Older calls fall back to `calls.duration_seconds`, which includes ringing. So ranges before the deploy read high.
 - **Power dial:** `dialer_connects.talk_seconds` (migration 0047).
-- **On dialer:** `dialer_rep_legs` (migration 0048). Whichever of these HEARS the leg end FIRST stamps it — not a precedence order, a race (e.g. `run_end` and `rep_left` can each win depending on timing):
+- **On dialer:** `dialer_rep_legs` (migration 0048) says when the line was open; the activity windows above cut that down. Whichever of these HEARS a leg's end FIRST stamps it — not a precedence order, a race (e.g. `run_end` and `rep_left` can each win depending on timing):
   - the leg's own Twilio status callback (`rep_left`);
   - the rejoin route (`rep_left` / `run_end`);
   - the run's end (`run_end`);

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ActivitySpan } from '../reports/talk-time.js';
 import { SalesforceUnauthorizedError } from './client.js';
 import type { DialerTimeStore } from './dialer-time-store.js';
 import type { SyncedRow, WindowLeg } from './dialer-time-plan.js';
@@ -9,23 +10,37 @@ const MIN = 60_000;
 // 09:00-09:30 PDT → 1800 s on 2026-10-02
 const LEG: WindowLeg = { orgId: 'org1', userId: 'g', joinedAt: new Date('2026-10-02T16:00:00Z'), endedAt: new Date('2026-10-02T16:30:00Z') };
 
-function memoryStore(init: { legs?: WindowLeg[]; rows?: SyncedRow[]; sfUserId?: string | null } = {}) {
+/** A conversation spanning each leg (an open leg's has no end): the whole leg
+ *  is active, so a leg counts as before the idle cutoff. */
+function talking(legs: readonly WindowLeg[]): ActivitySpan[] {
+  return legs.map((l) => ({ userId: l.userId, start: l.joinedAt, end: l.endedAt }));
+}
+
+function memoryStore(init: { legs?: WindowLeg[]; activity?: ActivitySpan[]; rows?: SyncedRow[]; sfUserId?: string | null } = {}) {
   const rows = new Map<string, SyncedRow>((init.rows ?? []).map((r) => [r.id, { ...r }]));
   const calls: string[] = [];
   const legWindows: Array<{ start: Date; end: Date }> = [];
+  const activityWindows: Array<{ start: Date; end: Date }> = [];
   const store: DialerTimeStore & {
     rows: Map<string, SyncedRow>;
     failures: Array<{ id: string; attempts: number; next: Date; err: string }>;
     authWaits: Array<{ id: string; next: Date; lastError: string }>;
     legWindows: Array<{ start: Date; end: Date }>;
+    activityWindows: Array<{ start: Date; end: Date }>;
   } = {
     rows,
     failures: [],
     authWaits: [],
     legWindows,
+    activityWindows,
     loadLegs: async (start, end) => {
       legWindows.push({ start, end });
       return init.legs ?? [LEG];
+    },
+    loadActivity: async (start, end) => {
+      activityWindows.push({ start, end });
+      // By default every leg is wholly active, so the numbers below stay the legs'.
+      return init.activity ?? talking(init.legs ?? [LEG]);
     },
     loadRows: async (days) => [...rows.values()].filter((r) => days.includes(r.day)),
     async ensureRow(orgId, userId, day) {
@@ -131,7 +146,7 @@ describe('runDialerTimeTick', () => {
     const d = deps(store, { findDialerTimeTask: vi.fn(async () => '00TOLD') });
     await runDialerTimeTick(d);
     expect(d.sf.createDialerTimeTask).not.toHaveBeenCalled();
-    expect(d.sf.updateDialerTimeTask).toHaveBeenCalledWith('g', '00TOLD', 1800);
+    expect(d.sf.updateDialerTimeTask).toHaveBeenCalledWith('g', '00TOLD', '2026-10-02', 1800);
     expect(store.rows.get('row-g-2026-10-02')).toMatchObject({ salesforceTaskId: '00TOLD', syncedSeconds: 1800 });
   });
 
@@ -142,7 +157,7 @@ describe('runDialerTimeTick', () => {
       updateDialerTimeTask: vi.fn(async () => 'missing' as const),
     });
     await runDialerTimeTick(d);
-    expect(d.sf.updateDialerTimeTask).toHaveBeenCalledWith('g', '00TOLD', 1800);
+    expect(d.sf.updateDialerTimeTask).toHaveBeenCalledWith('g', '00TOLD', '2026-10-02', 1800);
     expect(d.sf.createDialerTimeTask).toHaveBeenCalledWith('g', '2026-10-02', 1800);
     expect(store.rows.get('row-g-2026-10-02')).toMatchObject({ salesforceTaskId: '00TNEW', syncedSeconds: 1800 });
   });
@@ -152,7 +167,7 @@ describe('runDialerTimeTick', () => {
     const { store } = memoryStore({ rows: [r] });
     const d = deps(store);
     await runDialerTimeTick(d);
-    expect(d.sf.updateDialerTimeTask).toHaveBeenCalledWith('g', '00TX', 1800);
+    expect(d.sf.updateDialerTimeTask).toHaveBeenCalledWith('g', '00TX', '2026-10-02', 1800);
     expect(d.sf.findDialerTimeTask).not.toHaveBeenCalled();
     expect(store.rows.get('r1')?.syncedSeconds).toBe(1800);
     await expect(runDialerTimeTick(d)).resolves.toEqual({ planned: 0, written: 0 });
@@ -230,30 +245,93 @@ describe('runDialerTimeTick', () => {
     expect(d.sf.createDialerTimeTask).toHaveBeenCalledWith('j', '2026-10-02', 1800);
   });
 
-  it('loads legs for the 3 Pacific days ending today', async () => {
+  it('loads legs and activity over the same 14 Pacific days ending today', async () => {
     const { store } = memoryStore();
     const d = deps(store);
     await runDialerTimeTick(d);
-    expect(store.legWindows).toEqual([{ start: new Date('2026-09-30T07:00:00.000Z'), end: new Date('2026-10-03T07:00:00.000Z') }]);
+    const window = { start: new Date('2026-09-19T07:00:00.000Z'), end: new Date('2026-10-03T07:00:00.000Z') };
+    expect(store.legWindows).toEqual([window]);
+    expect(store.activityWindows).toEqual([window]);
   });
 
-  it('moves the leg window forward just after Pacific midnight', async () => {
+  it('moves the window forward just after Pacific midnight', async () => {
     const { store } = memoryStore();
     const afterMidnight = new Date('2026-10-03T07:30:00Z'); // 00:30 PDT Oct 3
     const d = deps(store, {}, () => afterMidnight);
     await runDialerTimeTick(d);
-    expect(store.legWindows).toEqual([{ start: new Date('2026-10-01T07:00:00.000Z'), end: new Date('2026-10-04T07:00:00.000Z') }]);
+    const window = { start: new Date('2026-09-20T07:00:00.000Z'), end: new Date('2026-10-04T07:00:00.000Z') };
+    expect(store.legWindows).toEqual([window]);
+    expect(store.activityWindows).toEqual([window]);
   });
 
   it('spans the window correctly across a 25-hour Pacific day (M7, DST fall-back)', async () => {
     const { store } = memoryStore();
-    // 2026-11-01 is the fall-back day: Oct 30 is still PDT, Nov 2 is already PST.
+    // 2026-11-01 is the fall-back day: Oct 19 is still PDT, Nov 2 is already PST.
     const fallBack = new Date('2026-11-01T20:00:00Z'); // 12:00 PST Nov 1
     const d = deps(store, {}, () => fallBack);
     await runDialerTimeTick(d);
-    expect(store.legWindows).toEqual([
-      { start: new Date('2026-10-30T07:00:00.000Z'), end: new Date('2026-11-02T08:00:00.000Z') },
-    ]);
+    const window = { start: new Date('2026-10-19T07:00:00.000Z'), end: new Date('2026-11-02T08:00:00.000Z') };
+    expect(store.legWindows).toEqual([window]);
+    expect(store.activityWindows).toEqual([window]);
+  });
+});
+
+describe('runDialerTimeTick — active time only', () => {
+  it('hands the loaded activity to the plan: one dial in a long leg writes 900 s', async () => {
+    const { store } = memoryStore({ activity: [{ userId: 'g', start: LEG.joinedAt, end: LEG.joinedAt }] });
+    const d = deps(store);
+    await expect(runDialerTimeTick(d)).resolves.toEqual({ planned: 1, written: 1 });
+    expect(d.sf.createDialerTimeTask).toHaveBeenCalledWith('g', '2026-10-02', 900);
+    expect(store.rows.get('row-g-2026-10-02')).toMatchObject({ salesforceTaskId: '00TNEW', syncedSeconds: 900 });
+  });
+
+  it('a leg with no activity creates nothing', async () => {
+    const { store, calls } = memoryStore({ activity: [] });
+    const d = deps(store);
+    await expect(runDialerTimeTick(d)).resolves.toEqual({ planned: 0, written: 0 });
+    expect(d.sf.findDialerTimeTask).not.toHaveBeenCalled();
+    expect(d.sf.createDialerTimeTask).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
+  });
+
+  it('corrects an already-synced Task to 0 when the day has no activity (the rewrite after the idle-cutoff deploy)', async () => {
+    const r: SyncedRow = { id: 'r1', orgId: 'org1', userId: 'g', day: '2026-10-02', salesforceTaskId: '00TX', syncedSeconds: 1800, attempts: 0, nextAttemptAt: new Date(0) };
+    const { store } = memoryStore({ activity: [], rows: [r] });
+    const d = deps(store);
+    await expect(runDialerTimeTick(d)).resolves.toEqual({ planned: 1, written: 1 });
+    expect(d.sf.updateDialerTimeTask).toHaveBeenCalledWith('g', '00TX', '2026-10-02', 0);
+    expect(store.rows.get('r1')).toMatchObject({ salesforceTaskId: '00TX', syncedSeconds: 0 });
+  });
+
+  it('never creates a 0-second Task: a planned zero-correction whose freshly claimed row lost its Task id makes no Salesforce call', async () => {
+    // The deploy overlap: the plan saw Task 00TX at 1800 s and the day now has no
+    // activity (a 0 correction), but between the plan and this claim ANOTHER instance
+    // got 'missing' from Salesforce and cleared the id. A create would write a 0-second
+    // Task (and a find would adopt one), so the claim's copy decides: nothing is sent.
+    const r: SyncedRow = { id: 'r1', orgId: 'org1', userId: 'g', day: '2026-10-02', salesforceTaskId: '00TX', syncedSeconds: 1800, attempts: 0, nextAttemptAt: new Date(0) };
+    const { store } = memoryStore({ activity: [], rows: [r] });
+    const claimRow = store.claimRow.bind(store);
+    store.claimRow = vi.fn(async (id, now, leaseMs) => {
+      const claimed = await claimRow(id, now, leaseMs);
+      return claimed ? { ...claimed, salesforceTaskId: null, syncedSeconds: null } : null;
+    });
+    const d = deps(store);
+    await expect(runDialerTimeTick(d)).resolves.toEqual({ planned: 1, written: 0 });
+    expect(store.claimRow).toHaveBeenCalledTimes(1);
+    expect(d.sf.createDialerTimeTask).not.toHaveBeenCalled();
+    expect(d.sf.findDialerTimeTask).not.toHaveBeenCalled();
+    expect(d.sf.updateDialerTimeTask).not.toHaveBeenCalled();
+    expect(store.failures).toEqual([]);
+  });
+
+  it('rewrites a Task from the first day of the 14-day window, not just the last three', async () => {
+    // A day 13 Pacific days back (2026-09-19) that was synced under the old line-open number.
+    const oldLeg: WindowLeg = { orgId: 'org1', userId: 'g', joinedAt: new Date('2026-09-19T16:00:00Z'), endedAt: new Date('2026-09-19T17:00:00Z') };
+    const r: SyncedRow = { id: 'r1', orgId: 'org1', userId: 'g', day: '2026-09-19', salesforceTaskId: '00TX', syncedSeconds: 3600, attempts: 0, nextAttemptAt: new Date(0) };
+    const { store } = memoryStore({ legs: [oldLeg], activity: [{ userId: 'g', start: oldLeg.joinedAt, end: oldLeg.joinedAt }], rows: [r] });
+    const d = deps(store);
+    await runDialerTimeTick(d);
+    expect(d.sf.updateDialerTimeTask).toHaveBeenCalledWith('g', '00TX', '2026-09-19', 900);
   });
 });
 

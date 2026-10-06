@@ -184,10 +184,18 @@ const schema = z.object({
    * Kill switch for the daily "Power Dialer Time" Tasks
    * (salesforce/dialer-time-worker.ts). `off` = the loop is never started: no
    * Task is created or updated. dialer_rep_legs is still written, so turning
-   * it back on catches up the last 3 days. Default `on`; strict enum like
+   * it back on catches up the last 14 days. Default `on`; strict enum like
    * NO_ANSWER_CHATTER.
    */
   DIALER_TIME_TASKS: z.enum(['on', 'off']).default('on'),
+
+  /**
+   * Kill switch for hanging up idle power-dial lines (dialer/idle-runs.ts):
+   * a run whose open line had no dial, conversation, or rep action for 15
+   * minutes is stopped. `off` = the loop is never started. Default `on`;
+   * strict enum like NO_ANSWER_CHATTER.
+   */
+  DIALER_IDLE_STOP: z.enum(['on', 'off']).default('on'),
 
   /**
    * AI voice calls (ai-voice/): OpenAI Realtime over a Twilio Media Stream.

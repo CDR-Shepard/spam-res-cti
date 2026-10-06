@@ -1,12 +1,15 @@
 /**
  * The "Power Dialer Time" Task — one per rep per Pacific day, holding the rep's
- * time on the power dialer (line open) as Call Duration so Salesforce reports
- * can sum it. Written as the rep (the CTI user id → their own Salesforce
- * connection), so the rep owns it. A plain Task, never a Call: call counts and
- * call metrics must not include it. Belongs to no record (no WhoId/WhatId).
+ * time on the power dialer (dialing or talking; quiet stretches over 15 minutes
+ * left out) as Call Duration so Salesforce reports can sum it. Written as the
+ * rep (the CTI user id → their own Salesforce connection), so the rep owns it.
+ * A plain Task, never a Call: call counts and call metrics must not include it.
+ * Belongs to no record (no WhoId/WhatId).
  *
- * Design: docs/superpowers/specs/2026-10-02-dialer-time-tasks-design.md.
+ * Design: docs/superpowers/specs/2026-10-02-dialer-time-tasks-design.md and
+ * docs/superpowers/specs/2026-10-06-dialer-idle-cutoff-design.md.
  */
+import { DIALER_IDLE_MS } from '../dialer/idle.js';
 import { sfFetch, soqlQuery } from './client.js';
 import { soqlEscape } from './soql.js';
 import { CTI_ORIGIN, CTI_ORIGIN_FIELD, isInvalidFieldError, withoutCtiOrigin } from './cti-origin.js';
@@ -17,6 +20,12 @@ export const DIALER_TIME_SUBJECT = 'Power Dialer Time';
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DELETED_CODES = new Set(['NOT_FOUND', 'ENTITY_IS_DELETED']);
 
+/** What the Task's Description says, create and patch alike — so a Task made
+ *  under the old line-open wording is reworded the first time it is rewritten. */
+export function dialerTimeDescription(day: string): string {
+  return `Time on the power dialer on ${day}, Pacific: counted while dialing or talking; quiet stretches over ${DIALER_IDLE_MS / 60_000} minutes are left out. Kept up to date by the CTI.`;
+}
+
 export function buildDialerTimeTaskFields(day: string, seconds: number): Record<string, unknown> {
   return {
     Subject: DIALER_TIME_SUBJECT,
@@ -25,7 +34,7 @@ export function buildDialerTimeTaskFields(day: string, seconds: number): Record<
     TaskSubtype: 'Task',
     ActivityDate: day,
     CallDurationInSeconds: seconds,
-    Description: `Time on the power dialer (line open) on ${day}, Pacific. Kept up to date by the CTI.`,
+    Description: dialerTimeDescription(day),
     [CTI_ORIGIN_FIELD]: CTI_ORIGIN.dialerTime,
   };
 }
@@ -51,10 +60,10 @@ export async function createDialerTimeTask(userId: string, day: string, seconds:
 }
 
 /** 'missing' = Salesforce says the Task is gone (deleted): the caller recreates it. */
-export async function updateDialerTimeTask(userId: string, taskId: string, seconds: number): Promise<'updated' | 'missing'> {
+export async function updateDialerTimeTask(userId: string, taskId: string, day: string, seconds: number): Promise<'updated' | 'missing'> {
   const res = await sfFetch(userId, `/sobjects/Task/${encodeURIComponent(taskId)}`, {
     method: 'PATCH',
-    body: { CallDurationInSeconds: seconds },
+    body: { CallDurationInSeconds: seconds, Description: dialerTimeDescription(day) },
   });
   if (res.status < 400) return 'updated';
   if (res.status === 404 || errorCodes(res.json).some((c) => DELETED_CODES.has(c))) return 'missing';

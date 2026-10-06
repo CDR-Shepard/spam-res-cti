@@ -1,10 +1,11 @@
 /**
  * Power-dialer time → Salesforce. Every 5 minutes (and once at start-up), for
- * the last 3 Pacific days: each rep's time on the power dialer (line open,
- * dialer_rep_legs, merged — the admin Talk time screen's "On dialer") is
- * written to ONE "Power Dialer Time" Task per (rep, day), as the rep, so
- * Salesforce reports can sum it. dialer_time_tasks remembers the Task id and
- * the seconds last written; a write happens only when they differ.
+ * the last 14 Pacific days: each rep's time on the power dialer (the line open,
+ * dialer_rep_legs, AND something happened in the last 15 minutes — a dial or a
+ * conversation; the admin Talk time screen's "On dialer") is written to ONE
+ * "Power Dialer Time" Task per (rep, day), as the rep, so Salesforce reports
+ * can sum it. dialer_time_tasks remembers the Task id and the seconds last
+ * written; a write happens only when they differ.
  *
  * No duplicates: a row is claimed (THE CLAIM IS THE LEASE, like
  * dialer-connect-worker.ts) before any Salesforce write, so two overlapping
@@ -69,7 +70,7 @@ async function createOrAdopt(w: PlannedWrite, deps: DialerTimeDeps): Promise<str
   }
   const existing = await withTimeout(deps.sf.findDialerTimeTask(w.userId, sfUserId, w.day), SF_TIMEOUT_MS, 'Salesforce Task lookup');
   if (existing) {
-    const r = await withTimeout(deps.sf.updateDialerTimeTask(w.userId, existing, w.seconds), SF_TIMEOUT_MS, 'Salesforce Task update');
+    const r = await withTimeout(deps.sf.updateDialerTimeTask(w.userId, existing, w.day, w.seconds), SF_TIMEOUT_MS, 'Salesforce Task update');
     if (r === 'updated') return existing;
   }
   const { taskId } = await withTimeout(deps.sf.createDialerTimeTask(w.userId, w.day, w.seconds), SF_TIMEOUT_MS, 'Salesforce Task create');
@@ -85,9 +86,15 @@ async function syncOne(w: PlannedWrite, deps: DialerTimeDeps): Promise<boolean> 
   // instance may have just created the Task between the plan and this claim.
   const row = await deps.store.claimRow(unclaimed.id, deps.now(), CLAIM_LEASE_MS);
   if (!row) return false; // another instance holds the lease, or it's no longer due
+  // A 0-second Task is never created, found or adopted. The plan can hold a zero
+  // correction only for a row that had a Task; if the claimed copy has none, another
+  // instance (the old container, mid-deploy) just got 'missing' and cleared the id.
+  // Nothing to correct: the next tick plans from the cleared row, and a day with no
+  // activity plans nothing at all.
+  if (!row.salesforceTaskId && w.seconds <= 0) return false;
   try {
     if (row.salesforceTaskId) {
-      const r = await withTimeout(deps.sf.updateDialerTimeTask(w.userId, row.salesforceTaskId, w.seconds), SF_TIMEOUT_MS, 'Salesforce Task update');
+      const r = await withTimeout(deps.sf.updateDialerTimeTask(w.userId, row.salesforceTaskId, w.day, w.seconds), SF_TIMEOUT_MS, 'Salesforce Task update');
       if (r === 'missing') {
         await deps.store.clearTaskId(row.id, deps.now());
         console.warn(`${LOG} Task was deleted in Salesforce — recreating next tick`, { userId: w.userId, day: w.day });
@@ -119,9 +126,11 @@ async function syncOne(w: PlannedWrite, deps: DialerTimeDeps): Promise<boolean> 
 export async function runDialerTimeTick(deps: DialerTimeDeps = liveDeps()): Promise<{ planned: number; written: number }> {
   const now = deps.now();
   const days = windowDays(now);
-  const legs = await deps.store.loadLegs(dayStartUtc(days[0]!), dayStartUtc(addDays(days[days.length - 1]!, 1)));
+  const start = dayStartUtc(days[0]!);
+  const end = dayStartUtc(addDays(days[days.length - 1]!, 1));
+  const [legs, activity] = await Promise.all([deps.store.loadLegs(start, end), deps.store.loadActivity(start, end)]);
   const rows = await deps.store.loadRows(days);
-  const planned = planDialerTimeWrites({ legs, days, now, rows });
+  const planned = planDialerTimeWrites({ legs, activity, days, now, rows });
   let written = 0;
   for (const w of planned) {
     try {

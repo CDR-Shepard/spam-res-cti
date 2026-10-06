@@ -35,6 +35,7 @@ import {
   DIALER_TIME_SUBJECT,
   buildDialerTimeTaskFields,
   createDialerTimeTask,
+  dialerTimeDescription,
   findDialerTimeTask,
   updateDialerTimeTask,
 } from './dialer-time-client.js';
@@ -52,6 +53,14 @@ beforeEach(() => {
   state.mockRequest.mockReset();
 });
 
+describe('dialerTimeDescription', () => {
+  it('says the time counts only while dialing or talking, for that Pacific day', () => {
+    expect(dialerTimeDescription('2026-10-05')).toBe(
+      'Time on the power dialer on 2026-10-05, Pacific: counted while dialing or talking; quiet stretches over 15 minutes are left out. Kept up to date by the CTI.',
+    );
+  });
+});
+
 describe('buildDialerTimeTaskFields', () => {
   it('is a completed, non-call Task dated the Pacific day with the seconds as Call Duration', () => {
     expect(buildDialerTimeTaskFields('2026-10-02', 3254)).toEqual({
@@ -61,7 +70,7 @@ describe('buildDialerTimeTaskFields', () => {
       TaskSubtype: 'Task',
       ActivityDate: '2026-10-02',
       CallDurationInSeconds: 3254,
-      Description: 'Time on the power dialer (line open) on 2026-10-02, Pacific. Kept up to date by the CTI.',
+      Description: dialerTimeDescription('2026-10-02'),
       [CTI_ORIGIN_FIELD]: CTI_ORIGIN.dialerTime,
     });
     expect(DIALER_TIME_SUBJECT).toBe('Power Dialer Time');
@@ -103,13 +112,13 @@ describe('createDialerTimeTask', () => {
 });
 
 describe('updateDialerTimeTask', () => {
-  it('PATCHes only the Call Duration', async () => {
+  it('PATCHes the Call Duration and the Description, nothing else', async () => {
     state.mockRequest.mockResolvedValueOnce(jsonResponse(204, undefined));
-    await expect(updateDialerTimeTask('u1', '00TX', 900)).resolves.toBe('updated');
+    await expect(updateDialerTimeTask('u1', '00TX', '2026-10-02', 900)).resolves.toBe('updated');
     const c = call(0);
     expect(c.method).toBe('PATCH');
     expect(c.url).toBe('https://example.my.salesforce.com/services/data/v60.0/sobjects/Task/00TX');
-    expect(c.body).toEqual({ CallDurationInSeconds: 900 });
+    expect(c.body).toEqual({ CallDurationInSeconds: 900, Description: dialerTimeDescription('2026-10-02') });
   });
 
   it.each([
@@ -118,12 +127,12 @@ describe('updateDialerTimeTask', () => {
     [400, [{ errorCode: 'ENTITY_IS_DELETED' }]],
   ])('reports a deleted Task as missing (%s)', async (status, body) => {
     state.mockRequest.mockResolvedValueOnce(jsonResponse(status, body));
-    await expect(updateDialerTimeTask('u1', '00TX', 900)).resolves.toBe('missing');
+    await expect(updateDialerTimeTask('u1', '00TX', '2026-10-02', 900)).resolves.toBe('missing');
   });
 
   it('throws on any other rejection', async () => {
     state.mockRequest.mockResolvedValueOnce(jsonResponse(500, [{ errorCode: 'UNKNOWN_EXCEPTION' }]));
-    await expect(updateDialerTimeTask('u1', '00TX', 900)).rejects.toThrow(/^Salesforce Power Dialer Time update failed \(500\): /);
+    await expect(updateDialerTimeTask('u1', '00TX', '2026-10-02', 900)).rejects.toThrow(/^Salesforce Power Dialer Time update failed \(500\): /);
   });
 });
 

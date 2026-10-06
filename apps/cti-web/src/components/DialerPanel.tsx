@@ -1313,6 +1313,9 @@ export function DialerPanel(props: DialerPanelProps): JSX.Element {
           <div className="dp-summary-title">
             Run {view.session.status === 'done' ? 'complete' : 'stopped'}
           </div>
+          {view.session.status === 'stopped' && view.session.stopReason === 'idle' && (
+            <div className="dp-summary-meta">Stopped after 15 minutes with no dialing.</div>
+          )}
           <div className="dp-summary-meta">{progressLabel(view.counts)}</div>
           {miss && <div className="dp-summary-meta">{miss}</div>}
           {view.rollovers && view.rollovers.pending > 0 ? (
