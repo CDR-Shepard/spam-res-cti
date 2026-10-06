@@ -115,7 +115,7 @@ const entry = (kind: WritebackChange['kind'], label: unknown, before: unknown, a
 });
 
 /** A plan entry the write-back did not write, in words (the web shows `after` as the reason of a not_written entry). */
-const SKIPPED_WORDS: Readonly<Record<Skipped['why'], string>> = {
+export const SKIPPED_WORDS: Readonly<Record<Skipped['why'], string>> = {
   not_writable: "the connected Salesforce user can't edit it",
   invalid_value: 'Salesforce has no such value for it',
   moved_since_research: 'changed in Salesforce since the research',
