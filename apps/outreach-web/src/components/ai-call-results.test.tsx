@@ -164,8 +164,23 @@ describe('plan 1D: appointment and Salesforce columns', () => {
     const r = within(await rowOf('Lead 1'));
     expect(r.getByText(appointmentWords(BOOKED))).toBeInTheDocument();
     expect(screen.queryByText('Stage: New Opportunity → Appointment Set')).not.toBeInTheDocument();
-    await userEvent.click(r.getByRole('button', { name: 'Done' }));
+    const status = r.getByRole('button', { name: 'Salesforce write-back: Done, show what was written' });
+    expect(status).toHaveAttribute('aria-expanded', 'false');
+    await userEvent.click(status);
     expect(await screen.findByText('Stage: New Opportunity → Appointment Set')).toBeInTheDocument();
+    expect(r.getByRole('button', { name: 'Salesforce write-back: Done, hide what was written' })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('final review m6: the Transcript toggle says whether it is open', async () => {
+    stubApi({
+      [`GET ${RESULTS}`]: page([booked({ mayReadTranscript: true })]),
+      [`GET /api/ai-calls/${CALL}/transcript`]: { aiCallId: CALL, lines: [] },
+    });
+    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    const button = within(await rowOf('Lead 1')).getByRole('button', { name: 'Transcript' });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    await userEvent.click(button);
+    expect(within(await rowOf('Lead 1')).getByRole('button', { name: 'Hide transcript' })).toHaveAttribute('aria-expanded', 'true');
   });
 
   it('Retry on a failed write-back POSTs and reads the results again', async () => {
@@ -174,7 +189,7 @@ describe('plan 1D: appointment and Salesforce columns', () => {
       [`POST /api/ai-calls/${CALL}/writeback/retry`]: respond(204),
     });
     renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />, { isAdmin: true });
-    await userEvent.click(within(await rowOf('Lead 1')).getByRole('button', { name: 'Failed' }));
+    await userEvent.click(within(await rowOf('Lead 1')).getByRole('button', { name: 'Salesforce write-back: Failed, show what was written' }));
     await userEvent.click(await screen.findByRole('button', { name: 'Retry' }));
     await vi.waitFor(() => expect(calls.filter((c) => c.url === RESULTS)).toHaveLength(2));
     expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
@@ -193,7 +208,7 @@ describe('plan 1D: appointment and Salesforce columns', () => {
     stubApi({ [`GET ${RESULTS}`]: page([row(1, { aiCallId: CALL, callStatus: 'completed', outcome: 'not_interested' })]) });
     renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
     const r = within(await rowOf('Lead 1'));
-    expect(r.queryByRole('button', { name: 'Done' })).not.toBeInTheDocument();
+    expect(r.queryByRole('button', { name: /Salesforce write-back/ })).not.toBeInTheDocument();
     expect(r.queryByText(/Phone call|Walkthrough/)).not.toBeInTheDocument();
   });
 
@@ -249,5 +264,16 @@ describe('5: polling', () => {
   ] as const)('%s → %s', (_label, items, want) => {
     expect(RESULTS_POLL_MS).toBe(15_000);
     expect(resultsPollInterval([page([...items])])).toBe(want);
+  });
+
+  it('final review m12: after a deep link read more than one page, only the linked call keeps the poll going', () => {
+    const live = row(1, { callStatus: 'ringing' });
+    const linked = (callStatus: AiCallResult['callStatus']) => row(2, { aiCallId: CALL, callStatus });
+    expect(resultsPollInterval([page([live], 'p1'), page([linked('completed')])], CALL)).toBe(false);
+    expect(resultsPollInterval([page([live], 'p1'), page([linked('in_progress')])], CALL)).toBe(RESULTS_POLL_MS);
+    // One page (the usual view, linked or not) polls as before.
+    expect(resultsPollInterval([page([live, linked('completed')])], CALL)).toBe(RESULTS_POLL_MS);
+    // Still paging toward the linked call: no poll on top of the paging.
+    expect(resultsPollInterval([page([live], 'p1'), page([row(3)], 'p2')], CALL)).toBe(false);
   });
 });

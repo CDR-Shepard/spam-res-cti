@@ -102,6 +102,9 @@ describe('AiCallSettingsCard', () => {
     await waitFor(() => expect(puts(calls)).toHaveLength(1));
     expect(puts(calls)[0]).toEqual(settings({ specialists: [GRANT, PAT] }));
     expect(await screen.findByRole('status')).toHaveTextContent('Saved.');
+    // final review m8: an edit after saving is not saved, and the page stops saying so.
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Pat Doe' }));
+    expect(screen.queryByText('Saved.')).not.toBeInTheDocument();
   });
 
   it('reorders and removes people; the order is what is saved', async () => {

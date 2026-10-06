@@ -114,7 +114,8 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
       {!valid && <p className="text-sm text-destructive">{INVALID_WORDS}</p>}
       <div className="flex items-center gap-3">
         <Button type="submit" size="sm" disabled={!valid || save.isPending}>Save AI call settings</Button>
-        {save.isSuccess && !save.isPending && <p role="status" className="text-sm">Saved.</p>}
+        {/* Only while the form still holds what was saved: every edit makes a new draft (final review m8). */}
+        {save.isSuccess && !save.isPending && save.variables === draft && <p role="status" className="text-sm">Saved.</p>}
       </div>
       {save.error && <p className="text-sm text-destructive">{errorText(save.error)}</p>}
     </form>
