@@ -120,6 +120,14 @@ railway variables --service @cti/api --kv | grep -E '^(AI_VOICE|OPENAI_API_KEY)'
 
 Expected: `OPENAI_API_KEY`, `AI_VOICE_TEST_NUMBERS` (plus any other `AI_VOICE*` you set). `OUTREACH_INTERNAL_SECRET` is not matched by that pattern; check it with `grep -E '^OUTREACH_INTERNAL_SECRET' | cut -d= -f1` on each service.
 
+**Talk in browser (§18) uses the softphone's Twilio variables.** `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID` and `TWILIO_API_KEY_SECRET` on `@cti/api` already exist for the cti-web softphone; the browser test mints its own Voice token from the same API key. No TwiML App is used (the token can only receive calls) and no new variable is added. Confirm the three names (this prints names only):
+
+```bash
+railway variables --service @cti/api --kv | grep -E '^TWILIO_(ACCOUNT_SID|API_KEY_SID|API_KEY_SECRET)=' | cut -d= -f1
+```
+
+Expected: all three names. With one missing, availability reports `browserCalls: false` and the page hides **Talk in browser**; **Ring my phone** still works.
+
 Then confirm the deploy is healthy: Railway dashboard → `@cti/api` → **Deployments** → the latest deployment shows **Success**. Open its **Deploy Logs** and search for `Invalid environment configuration`.
 
 Expected: no such line. If you see one, a value is outside the accepted set in the table; fix it and the service redeploys.
@@ -404,6 +412,8 @@ Per minute of conversation:
 
 So about **$0.12 per minute plus $0.0075 per call** ($0.10 + $0.014 + $0.0044 = $0.1184). The 10-minute cap makes the worst case about **$1.20** per call (10 × $0.1184 + $0.0075 ≈ $1.19), and a typical qualifying call of 3 minutes is about $0.36. A call that rings out costs about $0.01. Summaries with a Haiku-class model are a fraction of a cent. Check real spend on platform.openai.com → **Usage** after your first day, and set a monthly spend limit under **Settings → Limits**.
 
+**Test a record (§18).** A preview is one plan-model call (Claude), roughly 15–25k input and 1.5k output tokens: about **4–7¢**, counted against the tenant's daily AI budget. A test call costs what any AI call costs (above); **Talk in browser** bills its leg as Twilio Client minutes (cents) instead of a PSTN minute, and has no answering-machine detection charge. **What would be written** is one answer-mapping call, about 1–3¢, paid once per call (the answer is stored).
+
 ## 14. Legal notes
 
 - **AI calls only to people with the consent checkbox ticked.** The checkbox is the record that the person agreed to calls from an AI assistant. Tick it only when they actually did (a reply, a web form, an inbound call, or a rep confirming on the phone) and record the source.
@@ -455,3 +465,103 @@ The campaign page lists the latest 20 practice calls above the results (admins o
 echo "SELECT created_at, outcome, practice, jsonb_array_length(offered_slots) AS offered, appointment->>'start' AS booked FROM ai_calls WHERE org_id = :'org' ORDER BY created_at DESC LIMIT 10;" | psql "$PUB" -v org='<org uuid>'
 ```
 
+## 18. Test a record (plan 1E)
+
+**Where:** outreach-web → **Test a record** (in the top bar, admins only). Paste a Salesforce Lead or Opportunity Id (`00Q…` or `006…`, 15 or 18 characters) or its link (Lightning, a related list or Classic). The box says "Lead 00Q…" or "Opportunity 006…" as you type, or why it can't use what you pasted. **Preview the call** starts the preview; the page then opens it at `/test-record?id=<test id>`. **Recent tests** below lists the team's latest 20 (time, name, Lead or Opportunity, status, who ran it); click one to open it.
+
+No campaign is needed, nothing is enrolled, and nothing is written to Salesforce.
+
+### The preview: "How I'll approach this call"
+
+It takes about a minute ("Reading Salesforce and writing the plan…"). The page reads it again every 2 seconds until it is ready. It is the same research, plan writer and appointment offer a campaign call gets:
+
+| Section | What it means |
+|---|---|
+| Name, Lead/Opportunity | The record, with a link that opens it in Salesforce |
+| AI consent | "AI consent: yes / no / could not be read / field missing". Anything but yes adds, in red: "A campaign would not call this person. A test only rings you." It never blocks a test |
+| Do-not-contact flag | In red, when the plan model found one (the category and the quote): "A campaign would hold this lead in Needs Review." It never blocks a test |
+| Last real contact | "Last time we spoke: back in February — the roof" and "The agent will treat them as someone we know", or "No earlier conversation found: the agent will introduce us." |
+| Still to learn | The topics the records don't answer yet (price, what they owe, …) |
+| Opener | What the agent says after the AI disclosure |
+| Situation, Selling signals, Goals | The plan's summary, each signal with its quote, source and strength, and how each of the four goals will be approached |
+| The plan text the agent gets | The exact text the voice agent is given, in a box. If the plan text check refuses it, this is a red line instead: "The voice agent can't be given this plan: … Regenerate it." **That blocks running the call** |
+| Appointment times | The times it would offer now, in Pacific time (and your own zone when it differs), or why there are none ("Booking is off", "Nobody active is on the appointment list", "No free time in the next 15 days", "Couldn't read the calendar"). A test call reads the calendar again when it starts |
+| What it read | The research sources, as on the plan board (counts, "the integration user cannot read it", …) |
+| Cost | "This preview cost about $0.05." |
+
+**Regenerate** starts a new preview of the same record (a new test, counted against the limits). A failed preview says why ("That record isn't in your Salesforce.", "The AI couldn't write a usable plan. Try again.", …) and offers **Try again**.
+
+**Limits** (counted in Postgres, so two quick clicks can't both pass):
+
+| Limit | Value | What you see |
+|---|---|---|
+| Previews per admin | 10 an hour | "You've run 10 previews in the last hour. Try again at 3:42 PM." (your own time zone) |
+| Previews per tenant | 40 a UTC day | "Your team has run 40 previews today. Try again at …" |
+| Previews running per admin | 1 | "Your last preview is still running. Wait for it to finish." |
+| Daily AI budget | the tenant's daily AI budget (the same one call plans use) | "Today's AI budget is spent. …" |
+| Test calls per admin | 6 an hour, 1 live at a time | "You've run 6 test calls in the last hour. …" / "Your last test call is still going. Wait for it to end." |
+
+### Running the call: Ring my phone or Talk in browser
+
+Under a ready preview (only when the plan text passed): "Exactly the call the seller would get, with the real record, plan and times. Nothing is written to Salesforce; a booking is only shown here." Both buttons are off while one of your test calls is live.
+
+- **Ring my phone.** Pick a **Test number** (the shared `AI_VOICE_TEST_NUMBERS` list, §3) and press it. The AI rings that phone as if it were the seller: a 1D practice call (§16).
+- **Talk in browser.** Shown only when the calling service reports browser calls available and the browser can run Twilio's Voice SDK.
+  1. **Use headphones**, so the AI doesn't hear itself. You are the seller.
+  2. Press **Talk in browser**. The browser asks for the **microphone**: allow it.
+  3. The page connects this tab ("Connecting this browser…"), asks the AI to call ("Asking the AI to call…"), and **answers on its own** when it rings ("The AI is calling this browser…").
+  4. Live: "Connected · 1:23", **Mute** / **Unmute**, **Hang up**. Closing the tab also ends the call.
+
+After the call, the call's card (newest first) shows the outcome and length, the summary, **What it learned** (label: value), "Asked for a call back: …", **"Would have booked: Phone call Wed Oct 7, 11:00 AM PT"** and **Transcript**. The page reads it again every 2 seconds while a call is live.
+
+**What would be written to Salesforce** (a button on a finished call's card): the write-back a real call that ended this way would make, worked out from reads only. It shows "Nothing was sent to Salesforce.", what it would create (the Event, or a Lead's calendar hold and Task, and the Chatter post), the conversion line for a Lead that booked ("Would convert this Lead (owner …, Lead Manager …) … The field list below is the Lead-side approximation."), the field changes grouped as on the results (changed, kept the rep's value, not written), and the **AI Last Call Changes** and **Chatter post** texts as they would read. A call that ended as voicemail, no answer, busy, failed or blocked says "A real call that ended this way writes nothing to Salesforce." The first press costs one answer-mapping call (about 1–3¢); the answer is stored, so later presses are free.
+
+### How it differs from the §16 practice call
+
+| | Practice call (§16) | Test a record, Ring my phone | Test a record, Talk in browser |
+|---|---|---|---|
+| Needs a campaign and an enrolled lead | yes | **no** (any Lead or Opportunity Id) | **no** |
+| Plan | the card's plan | a fresh preview's plan | same |
+| Where it rings | a test number | a test number | **this browser tab** (`client:aitest_<your user id>_<nonce>`) |
+| Answering-machine detection | on | on | **off** (a browser is never a machine) |
+| `calls` row (caps, ceiling, contact history) | written, linked to no record | same | **none**: no phone number was dialed |
+| Caller ID | a claimed `ai_pool` number | same | the org's first usable `ai_pool` number, read only (nothing is claimed) |
+| Transfer | rings your own softphone if it is open | same | same: your CTI softphone if it is open, else the AI says the specialist stepped away |
+| Salesforce writes, booking, conversion, opt-out, touch, write-back | none | none | none |
+
+### The guarantees
+
+A preview only reads Salesforce (GET and SOQL through the tenant's integration connection) and creates no enrollment, touch, call plan, CRM record or hold (G-1). A test call is `is_test = practice = true` in both modes, so every 1D practice guard applies: no Salesforce write, booking, conversion, opt-out, touch or write-back (G-2). It only ever dials a number on `AI_VOICE_TEST_NUMBERS`, or the requesting admin's own `aitest_` identity; outreach-api checks both, and cti-api's gate decides (G-3). The browser token can only receive calls (no outgoing grant), its identity embeds the admin's user id, and it is never logged, cached or stored (G-4). The agent gets plan text only after the plan text check passes, at preview, at run (outreach-api) and at trigger (cti-api) (G-5). A test booking never blocks a real slot (G-6). "What would be written" sends no POST, PATCH or SOAP request (G-7). Everything is admin-only and tenant-scoped: another tenant's test or call is "not found" (G-8).
+
+### Troubleshooting
+
+- **"Talk in browser" is missing.** The calling service reports `browserCalls: false`: one of `TWILIO_ACCOUNT_SID` / `TWILIO_API_KEY_SID` / `TWILIO_API_KEY_SECRET` is not set on `@cti/api` (the §3 name check), AI voice is off (`OPENAI_API_KEY` unset or `AI_VOICE=off`), or `@cti/api` is older than outreach-api. Or the browser cannot run Twilio's Voice SDK (an old browser, or not HTTPS). **Ring my phone** still works.
+- **"The AI didn't ring through. Try again or use Ring my phone."** Nothing rang the tab within 45 seconds. The tab did not register its identity: a corporate firewall or VPN blocking Twilio's WebSockets and media (`*.twilio.com`, UDP), or the token route answering 503 ("Talk in browser is not set up on the calling service"). "This browser couldn't connect to the calling service" means registration took over 15 seconds. Try another network, or use Ring my phone.
+- **"Allow the microphone for this site, or use Ring my phone."** The browser refused the microphone: allow it in the site settings (the padlock in the address bar) and press **Talk in browser** again.
+- **"Can't run this test: the voice agent can't be given this plan's text …"** (`PLAN_TEXT_REJECTED`). Press **Regenerate**.
+- **"The preview stopped part way (the server restarted). Try again."** (`interrupted`). outreach-api restarted while the preview ran; a preview left running for 6 minutes reads this way. Run it again.
+- **"The AI calling service did not answer."** A `@cti/api` older than outreach-api answers a browser test with 400: deploy both from the same merge (below).
+
+### Data
+
+Migration `0058_ai_record_tests.sql`: `ai_record_tests` (one row per preview: the record, status and error, the research, plan and plan text, the offered times, the model's tokens and cost) and `ai_record_test_calls` (one row per test call: phone or browser, the `rtest:` key, the `ai_calls` id, cti-api's answer and the stored "what would be written"). The latest tests with their calls' outcomes (read-only; `$PUB` as in the first-call checklist):
+
+```bash
+echo "SELECT t.created_at, t.sf_object, t.sf_record_id, t.status, t.error, c.mode, a.status AS call_status, a.outcome, a.appointment->>'start' AS would_have_booked FROM ai_record_tests t LEFT JOIN ai_record_test_calls c ON c.record_test_id = t.id LEFT JOIN ai_calls a ON a.id = c.ai_call_id WHERE t.org_id = :'org' ORDER BY t.created_at DESC, c.created_at DESC LIMIT 20;" | psql "$PUB" -v org='<org uuid>'
+```
+
+### Deploy (plan 1E)
+
+1. **Twilio: nothing to create.** Confirm the three `TWILIO_*` names on `@cti/api` (§3). No TwiML App, number or webhook is added: the browser token has no outgoing grant, and the AI leg uses the existing AI voice callbacks. Browser legs bill as Twilio Client minutes.
+2. **No new variables.** `AI_VOICE_TEST_NUMBERS` must list each admin's phone for **Ring my phone**.
+3. **Migrations:** 1D's `0055`–`0057`, then `0058_ai_record_tests.sql`, in the pre-deploy migrate step of whichever service deploys first.
+4. **Deploy `@cti/api` and outreach-api from the same merge.** In the window, an old `@cti/api` answers a browser test with 400 (shown as "The AI calling service did not answer") and has no token route (the page hides **Talk in browser**). Phone tests work throughout.
+5. **Headers.** outreach-api sends no Content-Security-Policy or Permissions-Policy today, so the microphone and Twilio's WebSocket and media work as they do in cti-web. If one is ever added it must allow `microphone=(self)`, `connect-src` to `wss://*.twilio.com https://*.twilio.com`, and `media-src`/WebRTC as cti-web needs.
+6. **Request logging.** The browser token travels in a response body only. Both services' Fastify request loggers must keep request/response serializers that log no bodies (cti-api uses Fastify's defaults; outreach-api's `serializeRequest` logs method, URL, host and address only). Don't add body logging to either.
+7. **Smoke test** (about 10 minutes):
+   - preview a real Opportunity and a real Lead: check the opener, still to learn, the plan text and the times;
+   - **Ring my phone** on one;
+   - **Talk in browser** on the other, with headphones: allow the microphone, the call answers on its own, ask for a phone appointment, hang up. This is the first live check of a `client:` leg with answering-machine detection off: confirm the AI speaks within a couple of seconds of the tab answering (no AMD wait) and that `@cti/api`'s logs show `ai-voice: browser test leg; no calls row` at the end;
+   - the card shows "Would have booked …", the outcome, the summary and the transcript;
+   - press **What would be written to Salesforce** once;
+   - in Salesforce, confirm no Event, Task, field change, conversion or Chatter post appeared on either record.

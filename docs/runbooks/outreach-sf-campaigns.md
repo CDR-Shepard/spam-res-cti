@@ -149,6 +149,10 @@ A campaign mode where people pick the leads, the AI researches and plans each ca
 
    Expected: `401` (reachable, unsigned). `404` means `CTI_INTERNAL_URL` is not the `.railway.internal` host, or `OUTREACH_INTERNAL_SECRET` is unset on `@cti/api` (production hides the routes behind the same 404); `503` is the unset secret outside production; a connection error means private networking is not reaching it (`ai-voice.md` §11).
 
+### Before a campaign: test a record
+
+The fastest way to see how the AI will treat a specific Lead or Opportunity, with no campaign and no enrollment: outreach-web → **Test a record** (admins), paste its Id or Salesforce link, and read the preview (the opener, what it still needs to learn, the exact plan text the agent gets, and the times it would offer). Then ring your own phone or talk to the AI in the browser, and see what it would have booked and written. Nothing is written to Salesforce. Details, limits and troubleshooting: `ai-voice.md` §18.
+
 ### Step by step
 
 1. **New campaign.** Campaigns → New campaign. Under **What the campaign does** pick **AI calls to leads you pick**, then the Salesforce object (Leads or Opportunities).
