@@ -414,3 +414,6 @@ export type CallPlanRow = typeof callPlans.$inferSelect;
 
 // Plan 1D tables (migration 0056): the AI call write-back and practice calls.
 export * from './schema-outreach-ai-calls.js';
+
+// Plan 1E tables (migration 0058): Test a record previews and their test calls.
+export * from './schema-outreach-record-tests.js';
