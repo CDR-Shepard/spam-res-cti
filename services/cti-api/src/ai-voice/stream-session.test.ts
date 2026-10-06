@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../config.js';
 import type { BridgeHooks, BridgeOptions } from './bridge.js';
-import { AI_CALL_TOOLS } from './prompt.js';
+import type { AppointmentSlot } from '@cti/contracts';
+import { AI_CALL_TOOLS, type RealtimeFunctionTool } from './prompt.js';
 import { claimClose, clearActiveCalls, getActiveCall, registerActiveCall } from './registry.js';
 import { defaultToolEffects } from './service-tools.js';
 import { runStreamSession, type StreamSessionDeps } from './stream-session.js';
@@ -250,5 +251,48 @@ describe('runStreamSession — bridge hooks', () => {
     expect(twiml).toContain('<Identity>rep_u1</Identity>');
     expect(twiml).toContain(`action="https://api.test/telephony/twilio/ai-voice/transfer-result?aiCallId=${ID}"`);
     expect(twiml).toContain('<Parameter name="aiTransfer" value="interested"/>');
+  });
+});
+
+describe('runStreamSession — appointment times (plan 1D)', () => {
+  const SLOTS: AppointmentSlot[] = [
+    {
+      id: 'p1', kind: 'phone', start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T18:15:00.000Z',
+      specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
+    },
+    {
+      id: 'w1', kind: 'walkthrough', start: '2026-10-08T16:00:00.000Z', end: '2026-10-08T17:00:00.000Z',
+      specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
+    },
+  ];
+  const withSlots = () => {
+    const base = activeEntry({ aiCallId: ID, callSid: CALL_SID });
+    registerActiveCall({ ...base, prompt: { ...base.prompt, slots: SLOTS, sellerTimeZone: 'America/Los_Angeles' } });
+  };
+  const toolNamed = (name: string) => (captured!.opts.tools as RealtimeFunctionTool[]).find((t) => t.name === name);
+
+  it('with slots the tools add book_appointment, whose slot_id enum is the slot ids, and end_call allows appointment_set', async () => {
+    withSlots();
+    expect(await begin()).toBe('started');
+    const book = toolNamed('book_appointment');
+    expect((book?.parameters as { properties: { slot_id: { enum: string[] } } }).properties.slot_id.enum).toEqual(['p1', 'w1']);
+    expect((toolNamed('end_call')?.parameters as { properties: { outcome: { enum: string[] } } }).properties.outcome.enum).toContain('appointment_set');
+    expect(captured!.opts.instructions).toContain('# Booking an appointment');
+  });
+
+  it('book_appointment through the hook books from this call’s slots', async () => {
+    withSlots();
+    await begin();
+    const res = await captured!.hooks.onTool('book_appointment', { slot_id: 'p1', address_confirmed: false, note: '' });
+    expect(res.then).toBe('continue');
+    expect(store.rows.get(ID)?.appointment).toMatchObject({ slotId: 'p1', start: SLOTS[0]!.start });
+  });
+
+  it('without slots the tools are unchanged, and book_appointment books nothing', async () => {
+    await begin();
+    expect(captured!.opts.tools).toEqual(AI_CALL_TOOLS);
+    const res = await captured!.hooks.onTool('book_appointment', { slot_id: 'p1', address_confirmed: false, note: '' });
+    expect(res.output).toMatch(/not on your list/);
+    expect(store.rows.get(ID)?.appointment ?? null).toBeNull();
   });
 });

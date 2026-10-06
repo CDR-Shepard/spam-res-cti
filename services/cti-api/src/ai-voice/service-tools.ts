@@ -15,9 +15,11 @@
  * with outcome `do_not_call` / `wrong_number` — upserts `opt_outs`
  * (shared with the CTI dialer).
  */
+import type { AppointmentSlot, BookedAppointment } from '@cti/contracts';
 import { END_CALL_OUTCOMES, QUALIFICATION_FIELDS, TRANSFER_REASONS } from './prompt-tools.js';
 import type { BridgeLog, ToolResult } from './bridge.js';
 import type { ToolName } from './prompt.js';
+import { bookAppointment } from './service-booking.js';
 import type { AiCallOutcome, AiCallStore } from './store.js';
 import { reformatSummary } from './summary.js';
 import { TRANSFER_TIME_LIMIT_SECONDS, type AiVoiceTwilio } from './twilio.js';
@@ -30,6 +32,8 @@ export interface ToolCtx {
   toE164: string;
   log: BridgeLog;
   now: () => Date;
+  /** The appointment times this call may book (plan 1D); empty = book_appointment books nothing. */
+  slots: readonly AppointmentSlot[];
 }
 
 export interface ToolEffects {
@@ -43,6 +47,8 @@ export interface ToolEffects {
    * race), so finalize's callback Task has been and gone — this one must make it.
    */
   transferFailed(ctx: ToolCtx, info: { finalized: boolean }): Promise<void>;
+  /** Store the booking (plan 1D); 'taken' when another AI call already holds that owner's time (D-10). Throws if it cannot be written. */
+  bookAppointment(ctx: ToolCtx, booked: BookedAppointment): Promise<'booked' | 'taken'>;
 }
 
 /** How the tool handler acts on the live call (built by the stream session). */
@@ -70,6 +76,8 @@ const NOTE_MAX = 500;
 const WRONG_NUMBER = /wrong\s*number/i;
 /** The summary line a transfer that did not connect leaves (summary.ts carries it through rewrites). */
 export const TRANSFER_MISSED_LINE = 'Transfer to a specialist did not connect — call them back.';
+/** end_call said appointment_set but nothing was booked: recorded as a callback with this line (summary.ts carries it). */
+export const NO_APPOINTMENT_LINE = 'The agent ended as booked, but no appointment was saved — call them back.';
 const ISO_8601 = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -129,6 +137,14 @@ export const defaultToolEffects: ToolEffects = {
     });
     await ctx.store.update(ctx.aiCallId, { summary });
   },
+  async bookAppointment(ctx, booked) {
+    const result = await ctx.store.setAppointment(ctx.aiCallId, booked);
+    if (result === 'not_live') throw new Error('the call is no longer live');
+    if (result === 'taken') return 'taken';
+    const kind = booked.kind === 'phone' ? 'phone call' : 'walkthrough';
+    await ctx.store.appendSummary(ctx.aiCallId, `Appointment booked: ${kind} ${booked.start}`);
+    return 'booked';
+  },
 };
 
 /** After the agent's last words have played, run `act`; never throws. */
@@ -173,6 +189,16 @@ async function recordOutcome(ctx: ToolCtx, outcome: AiCallOutcome, summary: stri
   if (summary) await ctx.store.appendSummary(ctx.aiCallId, summary);
 }
 
+/** Was a booking stored for this call? A failed read counts as no (the call is then recorded as a callback). */
+async function hasAppointment(ctx: ToolCtx): Promise<boolean> {
+  try {
+    return ((await ctx.store.get(ctx.aiCallId))?.appointment ?? null) !== null;
+  } catch (e) {
+    ctx.log.warn({ aiCallId: ctx.aiCallId, err: errText(e) }, 'ai-voice: appointment read failed, recording a callback');
+    return false;
+  }
+}
+
 const ALREADY_ENDING: ToolResult = { output: 'already ending', then: 'hangup' };
 
 /**
@@ -196,6 +222,11 @@ async function endCall(args: unknown, env: ToolEnv): Promise<ToolResult> {
   if (optOut) await bestEffort(ctx, 'opt_out', () => env.effects.markDoNotCall(ctx, note));
   await bestEffort(ctx, 'outcome', async () => {
     if (outcome === 'wrong_number') await ctx.store.replaceOutcome(ctx.aiCallId, 'do_not_call', 'wrong_number');
+    if (outcome === 'appointment_set' && !(await hasAppointment(ctx))) {
+      await recordOutcome(ctx, 'qualified_callback', summary);
+      await ctx.store.appendSummary(ctx.aiCallId, NO_APPOINTMENT_LINE);
+      return;
+    }
     await recordOutcome(ctx, outcome, summary);
   });
   afterPlayback(env, 'hangup', () => hangUp(env));
@@ -256,6 +287,8 @@ export async function handleToolCall(name: ToolName, args: unknown, env: ToolEnv
         note: text(field(args, 'note'), NOTE_MAX),
       });
       return { output: 'scheduled', then: 'continue' };
+    case 'book_appointment':
+      return bookAppointment(args, env);
     default: {
       const never: never = name;
       return { output: `{"error":"unknown tool ${String(never)}"}` };

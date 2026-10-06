@@ -2,7 +2,11 @@
  * The function tools the AI phone agent may call, as Realtime `session.tools`
  * entries. Every schema is closed (`additionalProperties: false`); the call
  * service (Task 7) performs the side effects.
+ *
+ * Plan 1D: `book_appointment` (and the `appointment_set` end_call outcome) are
+ * offered only on a call that carries appointment times (`toolsFor`).
  */
+import type { AppointmentSlot } from '@cti/contracts';
 
 /** A Realtime API function tool (`session.update` → `session.tools[]`). */
 export interface RealtimeFunctionTool {
@@ -18,19 +22,16 @@ export const TOOL_NAMES = [
   'mark_do_not_call',
   'save_qualification',
   'schedule_callback',
+  'book_appointment',
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 export const TRANSFER_REASONS = ['interested', 'wants_offer', 'wants_human', 'legal_or_complex', 'question'] as const;
-export const END_CALL_OUTCOMES = [
-  'not_interested',
-  'do_not_call',
-  'wrong_number',
-  'qualified_callback',
-  'hung_up',
-  'other',
-] as const;
+/** The end_call outcomes on every call. */
+const BASE_END_CALL_OUTCOMES = ['not_interested', 'do_not_call', 'wrong_number', 'qualified_callback', 'hung_up', 'other'] as const;
+/** Every outcome end_call accepts; `appointment_set` is offered to the model only with slots. */
+export const END_CALL_OUTCOMES = [...BASE_END_CALL_OUTCOMES, 'appointment_set'] as const;
 export const QUALIFICATION_FIELDS = [
   'motivation',
   'timeline',
@@ -59,6 +60,27 @@ const QUALIFICATION_HINTS: Record<(typeof QUALIFICATION_FIELDS)[number], string>
   other: 'Anything else useful for the rep (e.g. language preference, best time to reach them).',
 };
 
+function endCallTool(outcomes: readonly string[]): RealtimeFunctionTool {
+  return {
+    type: 'function',
+    name: 'end_call',
+    description: 'Hang up. Say your goodbye first, then call this; say nothing after it.',
+    parameters: objectSchema(
+      {
+        outcome: {
+          type: 'string',
+          enum: [...outcomes],
+          description: `qualified_callback = a callback was scheduled; hung_up = they left or the line went dead.${
+            outcomes.includes('appointment_set') ? ' appointment_set = book_appointment booked a time.' : ''
+          }`,
+        },
+        summary: str('One or two sentences on how the call went.'),
+      },
+      ['outcome', 'summary'],
+    ),
+  };
+}
+
 export const AI_CALL_TOOLS: RealtimeFunctionTool[] = [
   {
     type: 'function',
@@ -73,22 +95,7 @@ export const AI_CALL_TOOLS: RealtimeFunctionTool[] = [
       ['reason', 'summary'],
     ),
   },
-  {
-    type: 'function',
-    name: 'end_call',
-    description: 'Hang up. Say your goodbye first, then call this; say nothing after it.',
-    parameters: objectSchema(
-      {
-        outcome: {
-          type: 'string',
-          enum: [...END_CALL_OUTCOMES],
-          description: 'qualified_callback = a callback was scheduled; hung_up = they left or the line went dead.',
-        },
-        summary: str('One or two sentences on how the call went.'),
-      },
-      ['outcome', 'summary'],
-    ),
-  },
+  endCallTool(BASE_END_CALL_OUTCOMES),
   {
     type: 'function',
     name: 'mark_do_not_call',
@@ -121,3 +128,30 @@ export const AI_CALL_TOOLS: RealtimeFunctionTool[] = [
     ),
   },
 ];
+
+/** Book one of the offered appointment times (plan 1D); `slotIds` are this call's slot ids. */
+export function bookAppointmentTool(slotIds: readonly string[]): RealtimeFunctionTool {
+  return {
+    type: 'function',
+    name: 'book_appointment',
+    description:
+      'Book one of the offered appointment times, once they have picked it. Call silently; then confirm the day and time in one line with your goodbye and end_call with outcome appointment_set. If it says the time was just taken, offer another time from the list.',
+    parameters: objectSchema(
+      {
+        slot_id: { type: 'string', enum: [...slotIds], description: 'The id of the time they chose, from the list in your instructions.' },
+        address_confirmed: { type: 'boolean', description: 'True only once they confirmed the property address (required for a walkthrough).' },
+        note: str('Anything the specialist should know for the appointment (may be empty).'),
+      },
+      ['slot_id', 'address_confirmed', 'note'],
+    ),
+  };
+}
+
+/** The tools for a call: AI_CALL_TOOLS alone without slots; with slots, end_call also allows appointment_set and book_appointment is added. */
+export function toolsFor(slots: readonly AppointmentSlot[]): RealtimeFunctionTool[] {
+  if (slots.length === 0) return AI_CALL_TOOLS;
+  return [
+    ...AI_CALL_TOOLS.map((tool) => (tool.name === 'end_call' ? endCallTool(END_CALL_OUTCOMES) : tool)),
+    bookAppointmentTool(slots.map((s) => s.id)),
+  ];
+}

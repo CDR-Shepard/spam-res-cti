@@ -32,6 +32,9 @@ export function rowOf(v: NewAiCall & { id: string }): AiCallRow {
     durationSeconds: null,
     startedAt: null,
     endedAt: null,
+    offeredSlots: [],
+    appointment: null,
+    practice: false,
     createdAt: new Date('2026-10-05T18:00:00Z'),
     updatedAt: new Date('2026-10-05T18:00:00Z'),
     ...v,
@@ -111,6 +114,21 @@ export function fakeStore(): FakeStore {
     async mergeQualification(id, fields) {
       const r = rows.get(id);
       if (r) put(id, { qualification: { ...(r.qualification as object), ...fields } });
+    },
+    async setAppointment(id, a) {
+      const r = rows.get(id);
+      if (!r || r.endedAt) return 'not_live';
+      const core = a.specialistSfUserId.slice(0, 15);
+      const taken = [...rows.values()].some((o) => {
+        const b = o.appointment as { specialistSfUserId: string; start: string; end: string } | null;
+        return (
+          o.id !== id && o.orgId === r.orgId && !o.isTest && b !== null && b.specialistSfUserId.slice(0, 15) === core &&
+          Date.parse(b.start) < Date.parse(a.end) && Date.parse(b.end) > Date.parse(a.start)
+        );
+      });
+      if (taken) return 'taken';
+      put(id, { appointment: a });
+      return 'booked';
     },
     async markFailed(id) {
       const r = rows.get(id);

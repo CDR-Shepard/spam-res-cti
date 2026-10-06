@@ -17,6 +17,7 @@ describe('OUTCOME_WORDS', () => {
       transfer_failed: 'Transfer missed — callback promised',
       blocked: 'Blocked',
       other: 'Other',
+      appointment_set: 'Appointment set',
     });
   });
 
@@ -35,6 +36,7 @@ describe('ctiDisposition', () => {
     ['hung_up', 'Connected'],
     ['transfer_failed', 'Connected'],
     ['other', 'Connected'],
+    ['appointment_set', 'Connected'],
     ['voicemail', 'Left voicemail'],
     ['no_answer', 'No answer'],
     ['busy', 'Busy'],

@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { drizzle } from 'drizzle-orm/node-postgres';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { Pool } from 'pg';
 import { schema } from '@cti/db';
 import {
   activeCallToQuery,
   appendSummaryQuery,
+  appointmentConflictQuery,
+  appointmentLockQuery,
+  setAppointmentQuery,
   appendTranscriptQuery,
   finalizeQuery,
   handoffUserQuery,
@@ -113,5 +117,38 @@ describe('ai_calls SQL, rendered', () => {
     expect(sql).toContain('count(*)::int');
     expect(sql).toContain('"ai_calls"."call_sid" is not null');
     expect(sql).toContain('"ai_calls"."cti_call_id" is null');
+  });
+  const BOOKED = {
+    slotId: 'p1', kind: 'phone' as const, start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T18:15:00.000Z',
+    specialistSfUserId: '0058X00000Fsx39QAB', addressConfirmed: false, note: '', bookedAt: NOW.toISOString(),
+  };
+
+  it('setAppointment writes the booking as jsonb on a live row only', () => {
+    const { sql, params } = setAppointmentQuery(db, ID, BOOKED).toSQL();
+    expect(sql).toBe(
+      'update "ai_calls" set "updated_at" = now(), "appointment" = $1::jsonb where ("ai_calls"."id" = $2 and "ai_calls"."ended_at" is null) returning "id"',
+    );
+    expect(params).toEqual([JSON.stringify(BOOKED), ID]);
+  });
+
+  it('the booking lock is a transaction advisory lock on the owner (15-character id core)', () => {
+    const { sql, params } = new PgDialect().sqlToQuery(appointmentLockQuery('0058X00000Fsx39QAB'));
+    expect(sql).toBe('select pg_advisory_xact_lock(hashtextextended($1, 0))');
+    expect(params).toEqual(['ai_call_appointment:0058X00000Fsx39']);
+  });
+
+  it('the conflict read: another real call in the org, same owner, overlapping times, recent', () => {
+    const { sql, params } = appointmentConflictQuery(db, ID, BOOKED).toSQL();
+    expect(sql).toContain('from "ai_calls"');
+    expect(sql).toContain('"ai_calls"."org_id" = (select "org_id" from "ai_calls" "self" where "self"."id" = $');
+    expect(sql).toMatch(/"ai_calls"\."id" <> \$\d+/);
+    expect(sql).toContain('"ai_calls"."is_test" = false');
+    expect(sql).toContain('"ai_calls"."appointment" is not null');
+    expect(sql).toMatch(/"ai_calls"\."created_at" >= now\(\) - make_interval\(days => \$\d+\)/);
+    expect(sql).toMatch(/left\("ai_calls"\."appointment"->>'specialistSfUserId', 15\) = \$\d+/);
+    expect(sql).toMatch(/\("ai_calls"\."appointment"->>'start'\)::timestamptz < \$\d+::timestamptz/);
+    expect(sql).toMatch(/\("ai_calls"\."appointment"->>'end'\)::timestamptz > \$\d+::timestamptz/);
+    expect(sql).toContain('limit $');
+    expect(params).toEqual(expect.arrayContaining([ID, '0058X00000Fsx39', BOOKED.start, BOOKED.end, 30]));
   });
 });

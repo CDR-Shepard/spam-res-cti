@@ -29,7 +29,7 @@ const OMITTED = '\n[… the middle of the call is omitted …]\n';
 const NARRATIVE_MAX = 1_500;
 const SDK_TIMEOUT_MS = 30_000;
 /** Lines the call's tools appended to the summary that must survive a rewrite. */
-const CARRIED_LINE = /^(Callback requested:|Transfer to a specialist did not connect)/;
+const CARRIED_LINE = /^(Callback requested:|Transfer to a specialist did not connect|Appointment booked:|The agent ended as booked, but no appointment was saved)/;
 
 export interface SummaryRequest {
   model: string;

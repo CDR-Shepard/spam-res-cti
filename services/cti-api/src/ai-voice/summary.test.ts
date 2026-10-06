@@ -120,6 +120,18 @@ describe('summarizeAiCall', () => {
     );
   });
 
+  it('carries the "Appointment booked:" and "no appointment was saved" lines through the model rewrite', async () => {
+    const BOOKED = 'Appointment booked: phone call 2026-10-07T18:00:00.000Z';
+    const NOT_SAVED = 'The agent ended as booked, but no appointment was saved — call them back.';
+    const { client } = fakeClient('Jane booked a call with our specialist.');
+    const out = await summarizeAiCall(
+      { ...input, outcome: 'appointment_set', toolSummary: `Booked.\n${BOOKED}\n${NOT_SAVED}` },
+      { client, model: MODEL, log: silentLog },
+    );
+    expect(out.split('\n').slice(0, 3)).toEqual(['Jane booked a call with our specialist.', BOOKED, NOT_SAVED]);
+    expect(out).toContain('Outcome: Appointment set');
+  });
+
   it('without a key: the tool summary, deterministic', async () => {
     const out = await summarizeAiCall(input, { client: null, model: MODEL, log: silentLog });
     expect(out.startsWith('Wants a call Thursday.\nCallback requested: Thursday after 5 PM — after work\n\nQualification:')).toBe(true);

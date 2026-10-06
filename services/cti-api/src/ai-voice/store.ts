@@ -9,7 +9,9 @@
  * compare-and-swap on `ended_at is null`.
  */
 import { and, desc, eq, inArray, isNotNull, isNull, gte, sql } from 'drizzle-orm';
+import type { BookedAppointment } from '@cti/contracts';
 import { getDb, schema } from '@cti/db';
+import { setAppointment, type SetAppointmentResult } from './store-booking.js';
 import {
   failTransfer,
   markTransferredQuery,
@@ -49,7 +51,9 @@ export type AiCallOutcome =
   | 'hung_up'
   | 'transfer_failed'
   | 'blocked'
-  | 'other';
+  | 'other'
+  /** Plan 1D: the agent booked an offered slot (ai_calls.appointment). */
+  | 'appointment_set';
 
 export interface TranscriptEntry {
   role: 'agent' | 'caller' | 'system';
@@ -94,6 +98,8 @@ export interface AiCallStore {
   appendSummary(id: string, line: string): Promise<void>;
   appendTranscript(id: string, entries: readonly TranscriptEntry[]): Promise<void>;
   mergeQualification(id: string, fields: Record<string, string>): Promise<void>;
+  /** Book an offered slot on a live row; 'taken' when another real call holds that owner's time (D-10). */
+  setAppointment(id: string, appointment: BookedAppointment): Promise<SetAppointmentResult>;
   /** A live row whose call went wrong: status failed, outcome failed unless one is set. */
   markFailed(id: string): Promise<void>;
   /** The CAS end of a call; null when it was already finalized. */
@@ -119,6 +125,7 @@ export interface AiCallStore {
 }
 
 export type { NewCtiCall, TransferFail } from './store-end.js';
+export { appointmentConflictQuery, appointmentLockQuery, setAppointmentQuery, type SetAppointmentResult } from './store-booking.js';
 
 const touched = { updatedAt: sql`now()` };
 
@@ -279,6 +286,7 @@ export function drizzleAiCallStore(db: Db): AiCallStore {
     async mergeQualification(id, fields) {
       if (Object.keys(fields).length > 0) await mergeQualificationQuery(db, id, fields);
     },
+    setAppointment: (id, appointment) => setAppointment(db, id, appointment),
     async markFailed(id) {
       await markFailedQuery(db, id);
     },

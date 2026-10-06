@@ -17,7 +17,7 @@ import { aiVoiceAvailable, type AppConfig } from '../config.js';
 import { UUID_RE, TWILIO_CALL_SID_RE } from '../telephony/webhooks.js';
 import { AiCallBridge, MIN_CALL_MS, type BridgeHooks, type BridgeLog, type BridgeOptions, type BridgeSocket, type EndReason } from './bridge.js';
 import { obj, parseFrame, str, type Msg } from './bridge-frames.js';
-import { AI_CALL_TOOLS, buildInstructions } from './prompt.js';
+import { buildInstructions, toolsFor } from './prompt.js';
 import { claimClose, getActiveCall, updateActiveCall, type ActiveAiCall, type ActiveBridge } from './registry.js';
 import { localTimeFor } from './service.js';
 import { handleToolCall, type ToolEffects } from './service-tools.js';
@@ -157,7 +157,15 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
   const hooks: BridgeHooks = {
     onTool: (name, args) =>
       handleToolCall(name, args, {
-        ctx: { store: deps.store, aiCallId: entry.aiCallId, orgId: entry.orgId, toE164: entry.toE164, log: deps.log, now: deps.now },
+        ctx: {
+          store: deps.store,
+          aiCallId: entry.aiCallId,
+          orgId: entry.orgId,
+          toE164: entry.toE164,
+          log: deps.log,
+          now: deps.now,
+          slots: entry.prompt.slots ?? [],
+        },
         effects: deps.effects,
         call: {
           callSid: entry.callSid,
@@ -178,7 +186,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
       openai,
       streamSid,
       instructions,
-      tools: AI_CALL_TOOLS,
+      tools: toolsFor(entry.prompt.slots ?? []),
       voice: cfg.AI_VOICE_VOICE,
       model: cfg.AI_VOICE_MODEL,
       reasoningEffort: cfg.AI_VOICE_REASONING,

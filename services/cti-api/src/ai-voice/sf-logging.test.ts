@@ -252,7 +252,7 @@ describe('withSalesforceEffects', () => {
     await store.update(ID, { endedAt: new Date(), outcome: 'transfer_failed' } as never);
     owners.set(LEAD, { type: 'Lead', ownerId: SF_OWNER });
     const effects = withSalesforceEffects(defaultToolEffects, deps);
-    const ctx = { store, aiCallId: ID, orgId: 'o1', toE164: '+16195550100', log: silentLog, now: () => new Date() };
+    const ctx = { store, aiCallId: ID, orgId: 'o1', toE164: '+16195550100', log: silentLog, now: () => new Date(), slots: [] };
     await effects.transferFailed(ctx, { finalized: true });
     await vi.waitFor(() => expect(created).toHaveLength(1));
     expect(created[0]!.input.subject).toBe('AI call: callback requested');
@@ -263,7 +263,7 @@ describe('withSalesforceEffects', () => {
     await store.update(ID, { endedAt: new Date(), outcome: 'transfer_failed', summary: stale } as never);
     owners.set(LEAD, { type: 'Lead', ownerId: SF_OWNER });
     const effects = withSalesforceEffects(defaultToolEffects, deps);
-    const ctx = { store, aiCallId: ID, orgId: 'o1', toE164: '+16195550100', log: silentLog, now: () => new Date() };
+    const ctx = { store, aiCallId: ID, orgId: 'o1', toE164: '+16195550100', log: silentLog, now: () => new Date(), slots: [] };
     await effects.transferFailed(ctx, { finalized: true });
     const want = [
       'Jane wants an offer.',
@@ -279,7 +279,7 @@ describe('withSalesforceEffects', () => {
 
   it('on a live call it leaves the callback Task to finalize', async () => {
     const effects = withSalesforceEffects(defaultToolEffects, deps);
-    const ctx = { store, aiCallId: ID, orgId: 'o1', toE164: '+16195550100', log: silentLog, now: () => new Date() };
+    const ctx = { store, aiCallId: ID, orgId: 'o1', toE164: '+16195550100', log: silentLog, now: () => new Date(), slots: [] };
     await effects.transferFailed(ctx, { finalized: false });
     await new Promise((r) => setTimeout(r, 0));
     expect(created).toHaveLength(0);

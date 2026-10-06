@@ -21,6 +21,7 @@ export const OUTCOME_WORDS: Readonly<Record<AiCallOutcome, string>> = {
   transfer_failed: 'Transfer missed — callback promised',
   blocked: 'Blocked',
   other: 'Other',
+  appointment_set: 'Appointment set',
 };
 
 const isOutcome = (o: string): o is AiCallOutcome => Object.prototype.hasOwnProperty.call(OUTCOME_WORDS, o);

@@ -21,7 +21,7 @@ beforeEach(async () => {
   store = fakeStore();
   twilio = fakeTwilio();
   await store.insert({ id: ID, orgId: ORG, startedBy: 'u1', toE164: TO, status: 'in_progress', callSid: CALL_SID });
-  ctx = { store, aiCallId: ID, orgId: ORG, toE164: TO, log: silentLog, now: () => NOW };
+  ctx = { store, aiCallId: ID, orgId: ORG, toE164: TO, log: silentLog, now: () => NOW, slots: [] };
   closing = false;
   call = {
     callSid: CALL_SID,
@@ -37,6 +37,32 @@ const run = (name: Parameters<typeof handleToolCall>[0], args: unknown) =>
   handleToolCall(name, args, { ctx, effects: defaultToolEffects, call });
 
 describe('end_call', () => {
+  const BOOKED = {
+    slotId: 'p1', kind: 'phone', start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T18:15:00.000Z',
+    specialistSfUserId: '0058X00000Fsx39QAB', addressConfirmed: false, note: '', bookedAt: NOW.toISOString(),
+  };
+  const NOT_SAVED = 'The agent ended as booked, but no appointment was saved — call them back.';
+
+  it('appointment_set with a stored appointment is recorded as appointment_set', async () => {
+    store.rows.set(ID, { ...store.rows.get(ID)!, appointment: BOOKED });
+    await run('end_call', { outcome: 'appointment_set', summary: 'Booked a call with Grant.' });
+    expect(store.rows.get(ID)).toMatchObject({ outcome: 'appointment_set', summary: 'Booked a call with Grant.' });
+  });
+
+  it('appointment_set with nothing stored becomes qualified_callback, with a line saying so', async () => {
+    const res = await run('end_call', { outcome: 'appointment_set', summary: 'Booked a call.' });
+    expect(res.then).toBe('hangup');
+    expect(store.rows.get(ID)).toMatchObject({ outcome: 'qualified_callback', summary: `Booked a call.\n${NOT_SAVED}` });
+  });
+
+  it('appointment_set when the row cannot be read also becomes qualified_callback', async () => {
+    store.get = async () => {
+      throw new Error('db blip');
+    };
+    await run('end_call', { outcome: 'appointment_set', summary: '' });
+    expect(store.rows.get(ID)).toMatchObject({ outcome: 'qualified_callback', summary: NOT_SAVED });
+  });
+
   it('records outcome and summary, then hangs up after the goodbye has played', async () => {
     const res = await run('end_call', { outcome: 'not_interested', summary: 'Not selling.' });
     expect(res.then).toBe('hangup');

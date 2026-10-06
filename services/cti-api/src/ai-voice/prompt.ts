@@ -21,9 +21,9 @@ import { bookingSection } from './prompt-booking.js';
 import { context, propertyPhrase, TEST_CALL_LINE, type Ctx } from './prompt-context.js';
 import { flowSection } from './prompt-flow.js';
 import { planSection, PLAN_PROMPT_MAX } from './prompt-plan.js';
-import { AI_CALL_TOOLS, TOOL_NAMES, type RealtimeFunctionTool, type ToolName } from './prompt-tools.js';
+import { AI_CALL_TOOLS, TOOL_NAMES, toolsFor, type RealtimeFunctionTool, type ToolName } from './prompt-tools.js';
 
-export { AI_CALL_TOOLS, PLAN_PROMPT_MAX, TOOL_NAMES, type RealtimeFunctionTool, type ToolName };
+export { AI_CALL_TOOLS, PLAN_PROMPT_MAX, TOOL_NAMES, toolsFor, type RealtimeFunctionTool, type ToolName };
 
 export interface PromptInput {
   agentName: string;

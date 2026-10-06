@@ -4,6 +4,7 @@ import {
   AI_CALL_TOOLS,
   TOOL_NAMES,
   buildInstructions,
+  toolsFor,
   voicemailText,
   type PromptInput,
   type RealtimeFunctionTool,
@@ -189,9 +190,11 @@ describe('buildInstructions', () => {
     expect(text).toMatch(/vary these, don't repeat them verbatim/i);
   });
 
-  it('names every tool so the model knows when to call it', () => {
-    const text = buildInstructions(input());
+  it('names every tool so the model knows when to call it (book_appointment only with slots)', () => {
+    const text = buildInstructions(input({ slots: SLOTS }));
     for (const name of TOOL_NAMES) expect(text).toContain(name);
+    const plain = buildInstructions(input());
+    for (const name of TOOL_NAMES.filter((n) => n !== 'book_appointment')) expect(plain).toContain(name);
   });
 
   it("states the recipient's local time", () => {
@@ -344,8 +347,28 @@ describe('buildInstructions — appointment times (plan 1D)', () => {
 });
 
 describe('AI_CALL_TOOLS', () => {
-  it('has exactly the TOOL_NAMES, in order', () => {
-    expect(AI_CALL_TOOLS.map((t) => t.name)).toEqual([...TOOL_NAMES]);
+  it('has the TOOL_NAMES in order, all but book_appointment (offered only with slots)', () => {
+    expect(AI_CALL_TOOLS.map((t) => t.name)).toEqual(TOOL_NAMES.filter((n) => n !== 'book_appointment'));
+    expect(toolsFor(SLOTS).map((t) => t.name)).toEqual([...TOOL_NAMES]);
+  });
+
+  it('toolsFor without slots is exactly AI_CALL_TOOLS', () => {
+    expect(toolsFor([])).toEqual(AI_CALL_TOOLS);
+  });
+
+  it('toolsFor with slots: book_appointment takes one listed slot id, address_confirmed and note, all required, closed', () => {
+    const tools = toolsFor(SLOTS);
+    const book = tools.find((t) => t.name === 'book_appointment')!;
+    expect(book.type).toBe('function');
+    expect(book.description.length).toBeGreaterThan(20);
+    expect(book.parameters).toMatchObject({
+      type: 'object',
+      required: ['slot_id', 'address_confirmed', 'note'],
+      additionalProperties: false,
+      properties: { slot_id: { type: 'string', enum: ['p1', 'w1'] }, address_confirmed: { type: 'boolean' }, note: { type: 'string' } },
+    });
+    const end = tools.find((t) => t.name === 'end_call')!.parameters as { properties: Record<string, { enum?: string[] }> };
+    expect(end.properties.outcome?.enum).toEqual(['not_interested', 'do_not_call', 'wrong_number', 'qualified_callback', 'hung_up', 'other', 'appointment_set']);
   });
 
   it('every tool is a strict function schema with a description', () => {

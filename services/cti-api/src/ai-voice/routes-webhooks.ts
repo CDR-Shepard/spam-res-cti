@@ -77,7 +77,8 @@ async function rowFor(req: FastifyRequest, store: AiCallStore): Promise<RowLooku
 const refuse = (reply: FastifyReply, code: 400 | 403) => reply.code(code).type('text/xml').send(REJECT_TWIML);
 
 function toolCtx(row: AiCallRow, deps: WebhookDeps): ToolCtx {
-  return { store: deps.store, aiCallId: row.id, orgId: row.orgId, toE164: row.toE164, log: deps.log, now: deps.now };
+  // Webhooks never book an appointment (only the live conversation's tools do).
+  return { store: deps.store, aiCallId: row.id, orgId: row.orgId, toE164: row.toE164, log: deps.log, now: deps.now, slots: [] };
 }
 
 async function hangUp(callSid: string, deps: WebhookDeps, aiCallId: string): Promise<void> {
