@@ -1,5 +1,8 @@
+import { z } from 'zod';
 import {
   AiAvailability,
+  AiCallSettings,
+  SalesforceUserOption,
   AiCallResultsResponse,
   AiCallTranscript,
   AuthProviders,
@@ -53,6 +56,8 @@ export const outreachKeys = {
   aiCallResults: (campaignId: string) => ['campaigns', 'ai-calls', campaignId] as const,
   aiCallTranscript: (aiCallId: string) => ['ai-calls', 'transcript', aiCallId] as const,
   aiAvailability: ['ai-calls', 'availability'] as const,
+  aiCallSettings: ['settings', 'ai-calls'] as const,
+  salesforceUsersById: (ids: readonly string[]) => ['salesforce', 'users', 'ids', ids.join(',')] as const,
 };
 
 const seg = (value: string): string => encodeURIComponent(value);
@@ -178,4 +183,25 @@ export function getAiAvailability(): Promise<AiAvailability> {
 export function startTestCall(to: string): Promise<TestCallResponse> {
   const body: TestCallRequest = { to };
   return api('/api/ai-calls/test', TestCallResponse, { method: 'POST', body: json(body) });
+}
+
+/** Admin only (plan 1D): appointment booking and Salesforce write-back settings. */
+export function getAiCallSettings(): Promise<AiCallSettings> {
+  return api('/api/settings/ai-calls', AiCallSettings);
+}
+
+export function saveAiCallSettings(settings: AiCallSettings): Promise<AiCallSettings> {
+  return api('/api/settings/ai-calls', AiCallSettings, { method: 'PUT', body: json(settings) });
+}
+
+const SalesforceUserOptions = z.array(SalesforceUserOption);
+
+/** Admin only: active standard Salesforce users whose name contains `search` (2–40 characters). */
+export function searchSalesforceUsers(search: string): Promise<SalesforceUserOption[]> {
+  return api(`/api/salesforce/users?${new URLSearchParams({ search }).toString()}`, SalesforceUserOptions);
+}
+
+/** Admin only: these Salesforce users (up to 20), inactive ones included, in the order asked. */
+export function salesforceUsersById(ids: readonly string[]): Promise<SalesforceUserOption[]> {
+  return api(`/api/salesforce/users?${new URLSearchParams({ ids: ids.join(',') }).toString()}`, SalesforceUserOptions);
 }

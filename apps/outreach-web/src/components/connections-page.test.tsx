@@ -173,3 +173,34 @@ describe('ConnectionsPage test call', () => {
     expect(calls.some((c) => c.url === '/api/ai-calls/availability')).toBe(false);
   });
 });
+
+describe('ConnectionsPage AI call settings (plan 1D)', () => {
+  it('shows an admin the AI calls card after the test call card', async () => {
+    stubApi({
+      'GET /api/connections/salesforce': connection(),
+      'GET /api/ai-calls/availability': { available: true, testNumbers: ['+15125550111'] },
+      'GET /api/settings/ai-calls': {
+        booking: {
+          enabled: true, specialists: [], convertLeads: true, days: [1, 2, 3, 4, 5],
+          phone: { enabled: true, durationMinutes: 15, startHour: 10, endHour: 18, stepMinutes: 30, minLeadMinutes: 120, horizonBusinessDays: 2, bufferMinutes: 0, maxOffered: 6 },
+          walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 },
+        },
+        writeback: true,
+      },
+    });
+    renderWithProviders(<ConnectionsPage />, { isAdmin: true });
+    expect(await screen.findByRole('button', { name: 'Save AI call settings' })).toBeInTheDocument();
+    await screen.findByRole('button', { name: 'Test call to my phone' });
+    const titles = [...document.querySelectorAll('[data-slot="card-title"]')].map((t) => t.textContent);
+    expect(titles.indexOf('AI calls')).toBe(titles.indexOf('Test call to my phone') + 1);
+  });
+
+  it('never shows it to a member, nor asks for the settings', async () => {
+    const calls = stubApi({ 'GET /api/connections/salesforce': connection() });
+    renderWithProviders(<ConnectionsPage />);
+    expect(await screen.findByText('https://gghomes.my.salesforce.com')).toBeInTheDocument();
+    expect(screen.queryByText('AI calls')).not.toBeInTheDocument();
+    expect(calls.some((c) => c.url === '/api/settings/ai-calls')).toBe(false);
+  });
+});
+

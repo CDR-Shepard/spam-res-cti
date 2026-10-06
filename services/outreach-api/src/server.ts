@@ -21,6 +21,7 @@ import { SCHEDULES } from './jobs/schedules.js';
 import { planTick } from './planner/run.js';
 import { DescribeCache } from './research/describe.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
+import { registerAiCallSettingsRoutes } from './routes/ai-call-settings.js';
 import { registerAiCallRoutes } from './routes/ai-calls.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerSalesforceAuthRoutes } from './routes/auth-salesforce.js';
@@ -131,6 +132,7 @@ async function main(): Promise<void> {
       (scope) => registerReviewRoutes(scope, { db }),
       (scope) => registerCallPlanRoutes(scope, { db }),
       (scope) => registerAiCallRoutes(scope, { db, cti }),
+      (scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS }),
     ],
   });
   const close = () => shutdown(runner, app);

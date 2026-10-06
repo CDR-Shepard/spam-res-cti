@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { useAuth } from '@/lib/auth';
 import { disconnect, getConnection, outreachKeys, startConnection } from '@/lib/outreach-api';
 import { errorText, formatDateTime, wordFor } from '@/lib/outreach-words';
+import { AiCallSettingsCard } from './ai-call-settings';
 import { AiTestCall } from './ai-test-call';
 import { ConfirmAction } from './confirm-action';
 import { FieldMapEditor } from './field-map-editor';
@@ -64,6 +65,7 @@ export function ConnectionsPage({ connected, error }: ConnectionsPageProps) {
         </CardContent>
       </Card>
       {isAdmin && <AiTestCall />}
+      {isAdmin && <AiCallSettingsCard />}
       {data?.fieldMap && (data.connected || data.status === 'broken') && (
         <FieldMapEditor key={data.connectedAt ?? 'field-map'} value={data.fieldMap} canEdit={isAdmin} />
       )}
