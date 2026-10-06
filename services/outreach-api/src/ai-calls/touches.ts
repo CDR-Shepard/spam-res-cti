@@ -126,7 +126,11 @@ const claimable = sql`
 export interface AiTouchClaim {
   attempts: number;
   triggerKey: string;
-  /** Plan 1D (CF-13): the touch kept its key from an earlier send, which must be re-sent with the same body (so no slots). */
+  /**
+   * Plan 1D (CF-13): the touch kept its key from an earlier send. When cti-api stored that request, the key is re-sent
+   * with the same body (so no slots) and settles through the 409 → resolveKey path; when cti-api never stored it, the
+   * send is a fresh one (with slots).
+   */
   keptKey: boolean;
 }
 

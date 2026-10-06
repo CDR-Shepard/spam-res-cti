@@ -145,7 +145,12 @@ export function fakeCti(db: Db): FakeCti {
 
 const bodyHash = (req: InternalAiCallRequest): string => createHash('sha256').update(JSON.stringify({ userId: req.userId, target: req.target })).digest('hex');
 
-/** `store` mode (see FakeCti.store). */
+/**
+ * `store` mode (see FakeCti.store). Not modelled (sweep D-14): cti-api's stale takeover, where a reservation still
+ * unanswered after STALE_REQUEST_MS (10 min, a crashed request) and re-sent with the same body is taken over and run
+ * again. Here a held key with no answer always reads `in_flight`; a test of the takeover belongs to cti-api
+ * (request-store), and the pacer only ever sees one of the answers modelled here.
+ */
 async function storedTrigger(db: Db, fake: FakeCti, req: InternalAiCallRequest): Promise<Awaited<ReturnType<CtiClient['trigger']>>> {
   const r = schema.aiCallRequests;
   const hash = bodyHash(req);
