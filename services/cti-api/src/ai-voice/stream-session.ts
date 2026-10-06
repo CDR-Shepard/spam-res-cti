@@ -18,6 +18,7 @@ import { UUID_RE, TWILIO_CALL_SID_RE } from '../telephony/webhooks.js';
 import { AiCallBridge, MIN_CALL_MS, type BridgeHooks, type BridgeLog, type BridgeOptions, type BridgeSocket, type EndReason } from './bridge.js';
 import { obj, parseFrame, str, type Msg } from './bridge-frames.js';
 import { buildInstructions, toolsFor } from './prompt.js';
+import { promptSlots } from './prompt-context.js';
 import { claimClose, getActiveCall, updateActiveCall, type ActiveAiCall, type ActiveBridge } from './registry.js';
 import { localTimeFor } from './service.js';
 import { handleToolCall, type ToolEffects } from './service-tools.js';
@@ -151,6 +152,8 @@ async function onStart(socket: BridgeSocket, start: Msg, deps: StreamSessionDeps
 function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: string }, streamSid: string, deps: StreamSessionDeps): void {
   const { cfg } = deps;
   const instructions = buildInstructions({ ...entry.prompt, localTime: localTimeFor(entry.toE164, deps.now()) });
+  // The times the prompt lists are exactly the ones the agent can name and book (Fix 1, M-2).
+  const slots = promptSlots(entry.prompt.slots);
   const openai = deps.openRealtime(realtimeUrl(cfg.AI_VOICE_MODEL), cfg.OPENAI_API_KEY ?? '');
   const transcript = new TranscriptBuffer((lines) => deps.store.appendTranscript(entry.aiCallId, lines), { log: deps.log });
   let bridge: ActiveBridge | null = null;
@@ -164,7 +167,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
           toE164: entry.toE164,
           log: deps.log,
           now: deps.now,
-          slots: entry.prompt.slots ?? [],
+          slots,
         },
         effects: deps.effects,
         call: {
@@ -186,7 +189,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
       openai,
       streamSid,
       instructions,
-      tools: toolsFor(entry.prompt.slots ?? []),
+      tools: toolsFor(slots),
       voice: cfg.AI_VOICE_VOICE,
       model: cfg.AI_VOICE_MODEL,
       reasoningEffort: cfg.AI_VOICE_REASONING,

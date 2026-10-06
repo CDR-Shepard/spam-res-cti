@@ -267,7 +267,7 @@ describe('buildInstructions — a returning seller (plan 1D)', () => {
     const text = buildInstructions(input({ returning: true, approvedPlan: PLAN }));
     expect(text).not.toContain(FIRST_PITCH);
     expect(text).toContain(
-      "- Only after they say yes: we've spoken before. Use the call plan's opener: remind them when we last talked (the plan says when) and ask whether they're still thinking about selling the property at 1234 Oak Street. Never introduce us as if they'd never heard of us, and don't re-ask anything the plan says we already know.",
+      "- Only after they say yes: we've spoken before. Use the call plan's opener: remind them when we last talked (if the plan says when; never guess a date) and ask whether they're still thinking about selling the property at 1234 Oak Street. Never introduce us as if they'd never heard of us, and don't re-ask anything the plan says we already know.",
     );
   });
 

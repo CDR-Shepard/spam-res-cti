@@ -300,6 +300,17 @@ describe('runStreamSession — appointment times (plan 1D)', () => {
     expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'appointment_set' });
   });
 
+  it('Fix 1 M-2: a slot the prompt drops (a zone this runtime cannot format) is neither in the tool enum nor bookable', async () => {
+    const base = activeEntry({ aiCallId: ID, callSid: CALL_SID });
+    const bad: AppointmentSlot = { ...SLOTS[1]!, timeZone: 'Mars/Olympus_Mons' };
+    registerActiveCall({ ...base, prompt: { ...base.prompt, slots: [SLOTS[0]!, bad], sellerTimeZone: 'America/Los_Angeles' } });
+    await begin();
+    expect((toolNamed('book_appointment')?.parameters as { properties: { slot_id: { enum: string[] } } }).properties.slot_id.enum).toEqual(['p1']);
+    expect(captured!.opts.instructions).not.toContain('- w1:');
+    const res = await captured!.hooks.onTool('book_appointment', { slot_id: 'w1', address_confirmed: true, note: '' });
+    expect(res.output).toMatch(/not on your list/);
+  });
+
   it('without slots the tools are unchanged, and book_appointment books nothing', async () => {
     await begin();
     expect(captured!.opts.tools).toEqual(AI_CALL_TOOLS);

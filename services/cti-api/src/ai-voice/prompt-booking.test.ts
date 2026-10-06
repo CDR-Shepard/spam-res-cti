@@ -3,6 +3,7 @@ import type { AppointmentSlot } from '@cti/contracts';
 import { context } from './prompt-context.js';
 import type { PromptInput } from './prompt.js';
 import { bookingSection, slotWords } from './prompt-booking.js';
+import { buildInstructions } from './prompt.js';
 
 const LA = 'America/Los_Angeles';
 const OWNER = '0058X00000Fsx39QAB';
@@ -98,8 +99,10 @@ describe('bookingSection', () => {
   });
 
   it('says "one of our specialists" when the slot has no first name', () => {
-    const text = bookingSection(context(input({ slots: [slot({ specialistFirstName: null })], sellerTimeZone: LA })))!;
+    const text = bookingSection(context(input({ slots: [slot({ specialistFirstName: null }), walk({ specialistFirstName: null })], sellerTimeZone: LA })))!;
     expect(text).toContain('- You can book a time with one of our specialists. Two kinds:');
+    const phoneOnly = bookingSection(context(input({ slots: [slot({ specialistFirstName: null })], sellerTimeZone: LA })))!;
+    expect(phoneOnly).toContain('- You can book a quick phone call (about fifteen minutes) with one of our specialists.');
   });
 
   it('sanitises a first name carrying markup', () => {
@@ -120,5 +123,42 @@ describe('bookingSection', () => {
   it('drops a slot whose id or times are malformed instead of rendering it', () => {
     const c = context(input({ slots: [slot({ id: 'x1' }), slot({ id: 'p2', start: 'soon' }), slot({ id: 'p3' })], sellerTimeZone: LA }));
     expect(c.slots.map((s) => s.id)).toEqual(['p3']);
+  });
+});
+
+describe('Fix 1 M-1: only the kinds on offer', () => {
+  it('phone calls only: the section offers a quick phone call, never a walkthrough, and does not ask which kind', () => {
+    const text = bookingSection(context(input({ slots: [slot(), slot({ id: 'p2', start: '2026-10-07T21:00:00.000Z', end: '2026-10-07T21:15:00.000Z' })], sellerTimeZone: LA })))!;
+    expect(text).toContain('- You can book a quick phone call (about fifteen minutes) with Grant, one of our specialists.');
+    expect(text).toContain('- Offer TWO times from the list below, in their time, and let them choose. If neither works, offer the next two.');
+    expect(text).not.toMatch(/walkthrough|Two kinds|which they'd prefer/);
+  });
+
+  it('walkthroughs only: the section offers a walkthrough, confirms the property, and never offers a phone call instead', () => {
+    const text = bookingSection(context(input({ slots: [walk()], sellerTimeZone: LA })))!;
+    expect(text).toContain('- You can book an in-person walkthrough of the house (about an hour) with Grant, one of our specialists.');
+    expect(text).toContain('"That\'s the property at 1234 Oak Street, right?" Only book it once they say yes (address_confirmed true).');
+    expect(text).toContain("If it's a different property, don't book it; offer to have the specialist call them back instead (schedule_callback).");
+    expect(text).not.toMatch(/phone call|Two kinds|which they'd prefer/);
+  });
+
+  it('both kinds: asks which they prefer, as before', () => {
+    const text = bookingSection(context(input({ slots: [slot(), walk()], sellerTimeZone: LA })))!;
+    expect(text).toContain("- Ask which they'd prefer. Then offer TWO times of that kind");
+    expect(text).toContain("If it's a different property, don't book a walkthrough; offer the phone call instead.");
+  });
+});
+
+describe('Fix 1 M-6: the role section names a booked appointment as a good ending when there are times to offer', () => {
+  it('with slots', () => {
+    expect(buildInstructions(input({ slots: [slot()], sellerTimeZone: LA }))).toContain(
+      '- A good call ends in a warm hand-off, a booked appointment, a scheduled callback, or a polite goodbye. Never an offer, never a hard sell.',
+    );
+  });
+
+  it('without slots it is unchanged', () => {
+    const text = buildInstructions(input());
+    expect(text).toContain('- A good call ends in a warm hand-off, a scheduled callback, or a polite goodbye. Never an offer, never a hard sell.');
+    expect(text).not.toContain('booked appointment');
   });
 });

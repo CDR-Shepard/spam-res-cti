@@ -105,11 +105,22 @@ async function companyName(i: StartInput): Promise<string> {
   }
 }
 
-/** Plan 1D prompt fields, only when set, so a first call without slots has exactly the 1C prompt. */
-function bookingPrompt(i: StartInput, to: string): { returning?: true; slots?: AppointmentSlot[]; sellerTimeZone?: string | null } {
+/**
+ * Plan 1D prompt fields, only when set, so a first call without slots has exactly the 1C prompt. Times are said in the
+ * seller's zone: the number dialed, except for a practice call, which rings a test number but must sound exactly as the
+ * seller would hear it, so it takes the record's phone (Fix 1, M-5), falling back to the dialed number.
+ */
+function bookingPrompt(
+  i: StartInput,
+  record: AiCallRecord | null,
+  to: string,
+): { returning?: true; slots?: AppointmentSlot[]; sellerTimeZone?: string | null } {
+  const sellerNumber = targetKind(i.target) === 'practice' ? (record?.phones[0] ?? to) : to;
   return {
     ...(i.returning ? { returning: true as const } : {}),
-    ...(i.slots && i.slots.length > 0 ? { slots: i.slots, sellerTimeZone: timezoneForNumber(to)?.timezone ?? null } : {}),
+    ...(i.slots && i.slots.length > 0
+      ? { slots: i.slots, sellerTimeZone: (timezoneForNumber(sellerNumber) ?? timezoneForNumber(to))?.timezone ?? null }
+      : {}),
   };
 }
 
@@ -197,7 +208,7 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
         isTest: kind === 'test',
         callbackNumber: gate.fromE164,
         ...(i.plan ? { approvedPlan: i.plan } : {}),
-        ...bookingPrompt(i, gate.toE164),
+        ...bookingPrompt(i, record, gate.toE164),
       },
       bridge: null,
       transcript: null,

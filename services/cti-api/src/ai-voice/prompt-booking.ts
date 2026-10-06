@@ -53,19 +53,42 @@ export function slotWords(slot: AppointmentSlot, sellerTz: string): string {
   return theirs === ours ? base : `${base} their time, ${ours} ${zoneWord(at, slot.timeZone)}`;
 }
 
+const PHONE_WORDS = 'a quick phone call (about fifteen minutes)';
+const WALK_WORDS = 'an in-person walkthrough of the house (about an hour)';
+
+/** What can be booked: both kinds (ask which), or only the one on offer (Fix 1, M-1: never mention a kind with no times). */
+function offerLines(c: Ctx, who: string): string {
+  const phone = c.slots.some((s) => s.kind === 'phone');
+  const walk = c.slots.some((s) => s.kind === 'walkthrough');
+  const choose = 'offer TWO times from the list below, in their time, and let them choose. If neither works, offer the next two.';
+  if (phone && walk) {
+    return `- You can book a time with ${who}. Two kinds:
+  - ${PHONE_WORDS}, or
+  - ${WALK_WORDS}.
+- Ask which they'd prefer. Then offer TWO times of that kind from the list below, in their time, and let them choose. If neither works, offer the next two.`;
+  }
+  return `- You can book ${phone ? PHONE_WORDS : WALK_WORDS} with ${who}.
+- ${choose.charAt(0).toUpperCase()}${choose.slice(1)}`;
+}
+
+/** The walkthrough's address check, only when a walkthrough is on offer. */
+function walkthroughLine(c: Ctx): string {
+  if (!c.slots.some((s) => s.kind === 'walkthrough')) return '';
+  const otherwise = c.slots.some((s) => s.kind === 'phone')
+    ? "don't book a walkthrough; offer the phone call instead."
+    : "don't book it; offer to have the specialist call them back instead (schedule_callback).";
+  return `- Before booking a walkthrough, confirm the property: "That's ${propertyPhrase(c, 'the')}, right?" Only book it once they say yes (address_confirmed true). If it's a different property, ${otherwise}\n`;
+}
+
 /** The Booking section, or null when there is nothing to offer. */
 export function bookingSection(c: Ctx): string | null {
   if (c.slots.length === 0) return null;
-  const who = c.slots.find((s) => s.specialistFirstName)?.specialistFirstName;
+  const first = c.slots.find((s) => s.specialistFirstName)?.specialistFirstName;
   const times = c.slots.map((s) => `- ${s.id}: ${KIND_WORDS[s.kind]}, ${slotWords(s, c.sellerTz)}`);
   return `# Booking an appointment
-- You can book a time with ${who ? `${who}, one of our specialists` : 'one of our specialists'}. Two kinds:
-  - a quick phone call (about fifteen minutes), or
-  - an in-person walkthrough of the house (about an hour).
-- Ask which they'd prefer. Then offer TWO times of that kind from the list below, in their time, and let them choose. If neither works, offer the next two.
+${offerLines(c, first ? `${first}, one of our specialists` : 'one of our specialists')}
 - Say a time the way people do — "Thursday at two in the afternoon", "Wednesday the seventh, eleven in the morning". Never read out digits or a date as numbers, and only mention another time zone if they ask.
-- Before booking a walkthrough, confirm the property: "That's ${propertyPhrase(c, 'the')}, right?" Only book it once they say yes (address_confirmed true). If it's a different property, don't book a walkthrough; offer the phone call instead.
-- Book only a time from this list, by its id. Never make up a time, and never promise a time you haven't booked.
+${walkthroughLine(c)}- Book only a time from this list, by its id. Never make up a time, and never promise a time you haven't booked.
 - Call book_appointment silently. Then confirm the day and time in ONE line with your goodbye, then end_call with outcome "appointment_set".
 - If book_appointment says that time was just taken, apologise briefly and offer another time from the list.
 - If no time works: schedule_callback instead.

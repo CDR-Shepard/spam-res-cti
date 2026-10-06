@@ -120,8 +120,11 @@ function isZone(tz: string | null | undefined): tz is string {
   }
 }
 
-/** Slots as the prompt renders them: a valid id and real times only, the first name flattened like any record value. */
-function promptSlots(slots: readonly AppointmentSlot[] | undefined): AppointmentSlot[] {
+/**
+ * Slots as the prompt renders them: a valid id and real times only, the first name flattened like any record value. The
+ * stream session builds the book_appointment enum and the bookable list from this same list (Fix 1, M-2).
+ */
+export function promptSlots(slots: readonly AppointmentSlot[] | undefined): AppointmentSlot[] {
   return (slots ?? [])
     .filter((s) => SLOT_ID.test(s.id) && Number.isFinite(Date.parse(s.start)) && Number.isFinite(Date.parse(s.end)) && isZone(s.timeZone))
     .map((s) => ({ ...s, specialistFirstName: oneLine(s.specialistFirstName, FIRST_NAME_MAX) }));

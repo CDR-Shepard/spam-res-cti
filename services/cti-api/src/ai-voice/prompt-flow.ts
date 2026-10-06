@@ -7,7 +7,7 @@ import { openingLine, propertyPhrase, type Ctx } from './prompt-context.js';
 /** §2's line after they agree to a minute: the first-call pitch, or (plan 1D) picking a known relationship back up. */
 function pitchLine(c: Ctx): string {
   if (!c.returning) return `- Only after they say yes: "We're a local company that buys houses directly — would you ever consider selling?"`;
-  return `- Only after they say yes: we've spoken before. Use the call plan's opener: remind them when we last talked (the plan says when) and ask whether they're still thinking about selling ${propertyPhrase(c, 'the')}. Never introduce us as if they'd never heard of us, and don't re-ask anything the plan says we already know.`;
+  return `- Only after they say yes: we've spoken before. Use the call plan's opener: remind them when we last talked (if the plan says when; never guess a date) and ask whether they're still thinking about selling ${propertyPhrase(c, 'the')}. Never introduce us as if they'd never heard of us, and don't re-ask anything the plan says we already know.`;
 }
 
 export function flowSection(c: Ctx): string {

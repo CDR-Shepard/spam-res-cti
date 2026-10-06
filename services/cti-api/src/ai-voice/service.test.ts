@@ -324,8 +324,17 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
     expect(entry.handoffUserId).toBe(admin.userId);
     expect(entry.prompt).toMatchObject({
       isTest: false, firstName: 'Jane', address: '12 Oak St, Austin, TX 78701', notes: 'Inherited the house.',
-      returning: true, slots: SLOTS, sellerTimeZone: 'America/Chicago', approvedPlan: 'Opener: hi',
+      // Fix 1 M-5: slot times are said in the seller's zone (the record's 619 number), not the test number's (512, Chicago).
+      returning: true, slots: SLOTS, sellerTimeZone: 'America/Los_Angeles', approvedPlan: 'Opener: hi',
     });
+  });
+
+  it('Fix 1 M-5: a practice record with no phone says the times in the zone of the number it rings', async () => {
+    realGate();
+    deps.loadRecord.mockResolvedValue(record({ phones: [] }));
+    const res = await run(practice, admin, { slots: SLOTS });
+    if (!res.ok) throw new Error(`not placed: ${res.reason}`);
+    expect(getActiveCall(res.aiCallId)!.prompt).toMatchObject({ sellerTimeZone: 'America/Chicago' });
   });
 
   it('3: a practice call by a non-admin is blocked not_admin_for_test, and the row says practice', async () => {
