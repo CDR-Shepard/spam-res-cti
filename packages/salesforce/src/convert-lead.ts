@@ -71,9 +71,51 @@ function throwIfFault(xml: string, status: number, what: string): void {
   if (fault) throw new SalesforceApiError(`${what} fault ${fault.code}: ${fault.message}`, status, fault, fault.code);
 }
 
+/** The code of an answer that cannot be read although Salesforce said OK (2xx): permanent, never retried (D-5). */
+export const MALFORMED_RESPONSE = 'MALFORMED_RESPONSE';
+
+/**
+ * A body we could not read. With a 2xx status it carries `MALFORMED_RESPONSE` (permanent: retrying gets the same answer);
+ * a 5xx or other status carries no code, so it is retried like any server error (an HTML 503 page, a proxy error).
+ */
 function unusable(what: string, status: number, xml: string): SalesforceApiError {
-  return new SalesforceApiError(`${what} returned a body we could not read`, status, { raw: xml.slice(0, 2_000) });
+  const code = status >= 200 && status < 300 ? MALFORMED_RESPONSE : undefined;
+  return new SalesforceApiError(`${what} returned a body we could not read`, status, { raw: xml.slice(0, 2_000) }, code);
 }
+
+/** SOAP fault and result codes that retrying cannot fix (D-5): the write-back takes its fallback path instead. */
+const PERMANENT_CODES: ReadonlySet<string> = new Set([
+  'API_DISABLED_FOR_ORG',
+  'API_CURRENTLY_DISABLED',
+  'FIELD_CUSTOM_VALIDATION_EXCEPTION',
+  'FIELD_INTEGRITY_EXCEPTION',
+  'CANNOT_UPDATE_CONVERTED_LEAD',
+  'CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY',
+  'INVALID_CROSS_REFERENCE_KEY',
+  'INVALID_ID_FIELD',
+  'INVALID_FIELD',
+  'INVALID_STATUS',
+  'INVALID_TYPE',
+  'REQUIRED_FIELD_MISSING',
+  'DUPLICATES_DETECTED',
+  'ENTITY_IS_DELETED',
+  'NOT_FOUND',
+  MALFORMED_RESPONSE,
+  // SOAP 1.1: the request itself is bad (a malformed envelope); sending it again gets the same fault.
+  'Client',
+]);
+
+/**
+ * Whether a SOAP fault code, or a `convertLead` result's `statusCode`, is permanent (D-5). Classify by this code BEFORE the
+ * HTTP status: every SOAP fault comes back as HTTP 500. `INSUFFICIENT_ACCESS*` is permanent; UNABLE_TO_LOCK_ROW,
+ * REQUEST_LIMIT_EXCEEDED, UNKNOWN_EXCEPTION, SERVER_UNAVAILABLE, a `Server` fault and anything unknown are not (retried).
+ */
+export function isPermanentSoapFault(code: string): boolean {
+  return code.startsWith('INSUFFICIENT_ACCESS') || PERMANENT_CODES.has(code);
+}
+
+/** Salesforce compares ids on their case-sensitive 15-character core. */
+const idCore = (id: string): string => id.slice(0, 15);
 
 /** Reads the one `<result>` of a convertLead response. Pure; a SOAP fault throws SalesforceApiError(code). */
 export function parseConvertLeadResponse(xml: string, status = 200): ConvertLeadResult {
@@ -98,11 +140,16 @@ export function parseConvertLeadResponse(xml: string, status = 200): ConvertLead
   return { success: false, errors };
 }
 
-/** Converts one Lead. A refusal (validation rule, already converted...) is `success: false`, never a throw. */
+/**
+ * Converts one Lead. A refusal (validation rule, already converted...) is `success: false`, never a throw. A success that
+ * names another Lead than the one asked is not trusted: SalesforceApiError `MALFORMED_RESPONSE` (D-5).
+ */
 export async function convertLead(client: SalesforceClient, r: ConvertLeadRequest): Promise<ConvertLeadResult> {
   const body = convertLeadEnvelope(r);
   const res = await client.soap(body);
-  return parseConvertLeadResponse(res.xml, res.status);
+  const result = parseConvertLeadResponse(res.xml, res.status);
+  if (result.success && idCore(result.leadId) !== idCore(r.leadId)) throw unusable('convertLead (another Lead id)', res.status, res.xml);
+  return result;
 }
 
 /** Read-only proof that the token works on the SOAP API (readiness, Task 27). */

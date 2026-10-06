@@ -6,16 +6,27 @@
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
 
-/** Escapes the five XML special characters, so any value is safe inside an element or attribute. */
+/**
+ * Characters XML 1.0 forbids (D-5): C0 controls other than tab, LF and CR, U+FFFE and U+FFFF, and a surrogate that is not
+ * half of a pair. Sent as-is they make Salesforce fault the whole envelope (`soapenv:Client`), so they are dropped.
+ */
+const XML_ILLEGAL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/** Escapes the five XML special characters and drops characters XML 1.0 forbids, so any value is safe inside an element or attribute. */
 export function xmlEscape(v: string): string {
-  return v.replace(/[&<>"']/g, (c) => ESCAPES[c]!);
+  return v.replace(XML_ILLEGAL, '').replace(/[&<>"']/g, (c) => ESCAPES[c]!);
 }
 
-/** Un-escapes the five named entities and numeric character references (`&amp;` last). */
+/** A numeric character reference's character; one that is out of range or a surrogate reads as U+FFFD, never a throw (D-5). */
+function codePoint(n: number): string {
+  return Number.isInteger(n) && n >= 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : '\uFFFD';
+}
+
+/** Un-escapes the five named entities and numeric character references (`&amp;` last). Never throws. */
 export function xmlUnescape(v: string): string {
   return v
-    .replace(/&#x([0-9a-fA-F]{1,6});/g, (_m, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#([0-9]{1,7});/g, (_m, dec: string) => String.fromCodePoint(parseInt(dec, 10)))
+    .replace(/&#x([0-9a-fA-F]{1,6});/g, (_m, hex: string) => codePoint(parseInt(hex, 16)))
+    .replace(/&#([0-9]{1,7});/g, (_m, dec: string) => codePoint(parseInt(dec, 10)))
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')

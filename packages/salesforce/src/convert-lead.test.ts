@@ -130,6 +130,17 @@ describe('parseConvertLeadResponse', () => {
     }
   });
 
+  it('D-5: an unreadable 2xx body is MALFORMED_RESPONSE (permanent); an unreadable 5xx body has no code (transient)', () => {
+    expect(() => parseConvertLeadResponse(envelope('<convertLeadResponse/>'), 200)).toThrow(expect.objectContaining({ code: 'MALFORMED_RESPONSE' }));
+    try {
+      parseConvertLeadResponse('<html>Service Unavailable</html>', 503);
+      expect.unreachable();
+    } catch (err) {
+      expect((err as SalesforceApiError).code).toBeUndefined();
+      expect((err as SalesforceApiError).status).toBe(503);
+    }
+  });
+
   it('a body with no result, or a success without ids, is unusable', () => {
     expect(() => parseConvertLeadResponse('<html>Service Unavailable</html>')).toThrow(SalesforceApiError);
     const noIds = envelope('<convertLeadResponse><result><success>true</success></result></convertLeadResponse>');
@@ -196,6 +207,17 @@ describe('SalesforceClient.soap and convertLead', () => {
       throw new TypeError('fetch failed');
     });
     await expect(sf.soap('<urn:getUserInfo xmlns:urn="urn:partner.soap.sforce.com"/>')).rejects.toMatchObject({ name: 'SalesforceApiError', status: 0 });
+  });
+
+  it('D-5: a success for another Lead than the one asked is unusable (MALFORMED_RESPONSE), never trusted', async () => {
+    const other = SUCCESS.replace(`<leadId>${LEAD}</leadId>`, '<leadId>00Q8X00000ZzZzZUAV</leadId>');
+    const { sf } = client([{ status: 200, text: other }]);
+    await expect(convertLead(sf, request)).rejects.toMatchObject({ name: 'SalesforceApiError', code: 'MALFORMED_RESPONSE' });
+  });
+
+  it('D-5: the 15-character core of the answered Lead id is enough', async () => {
+    const { sf } = client([{ status: 200, text: SUCCESS.replace(`<leadId>${LEAD}</leadId>`, `<leadId>${LEAD.slice(0, 15)}</leadId>`) }]);
+    expect((await convertLead(sf, request)).success).toBe(true);
   });
 
   it('9: a bad lead id never reaches Salesforce', async () => {
