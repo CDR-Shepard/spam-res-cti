@@ -1,7 +1,8 @@
 /**
  * Plan 1D write-back (spec §3.4 step 1): Claude maps what the seller said on the call to the org's own Salesforce
  * values. One forced tool call whose enums come from the live describe; every answer carries an evidence quote that must
- * be found in the seller's own lines or the agent's saved notes, or it is dropped. The call content reaches the model
+ * be found in the seller's own lines or the agent's saved notes, or it is dropped (a text value's or a price's or amount
+ * owed's only in the seller's own lines, final review I-2). The call content reaches the model
  * only as escaped data and is never followed as instructions.
  */
 import { z } from 'zod';
@@ -120,7 +121,7 @@ const SYSTEM = [
   'You record, for a Salesforce record, what a homeowner (the seller) said on one phone call with an AI assistant.',
   'Record only what the seller said on this call: the lines in <caller_said> and the agent\'s saved notes in <qualification>. Never record what the AI agent said, and never guess.',
   'Every answer needs an evidence quote copied word for word from one seller line or one saved note (never joined across lines). No quote, no answer.',
-  'A price or an amount owed is only ever the seller\'s own number, said by the seller, and its evidence must contain that number. Never record a number the agent said, an estimate, or a range you resolved yourself.',
+  'A price or an amount owed is only ever the seller\'s own number, said by the seller, and its evidence must come from a seller line in <caller_said> (never a saved note) and contain that number. Never record a number the agent said or noted, an estimate, or a range you resolved yourself.',
   'Reason For Selling is recorded as the seller\'s own words: its evidence must come from a seller line.',
   'Choose a "Seller Wouldn\'t Disclose" or "Seller Didn\'t Say" style value only when the seller explicitly declined to answer.',
   'Leave out every field the seller did not answer. An empty answers object is a correct answer.',
@@ -191,14 +192,18 @@ function checkedValue(f: WritableField, v: unknown): MappedValue | null {
   }
 }
 
+/** Text and money must be the seller's own words: their evidence comes from a caller line only, never the agent's notes. */
+const CALLER_ONLY: ReadonlySet<WritableField['kind']> = new Set(['text', 'currency']);
+
 /**
  * One answer → its value as written, or null when it is dropped. The evidence must sit inside one caller line or one
  * saved note (M-1); a text field's must be a caller line, and its value is the seller's quote itself (M-2); a money
- * value must follow from its quote (I-2).
+ * value's must be a caller line too (final review I-2: the owner's rule, never a price the seller didn't state) and the
+ * value must follow from it (I-2).
  */
 function checkedAnswer(f: WritableField, answer: { value?: unknown; evidence?: unknown }, lines: { caller: string[]; notes: string[] }): { value: MappedValue; evidence: string } | null {
   const value = checkedValue(f, answer.value);
-  const evidence = checkedEvidence(answer.evidence, f.kind === 'text' ? lines.caller : [...lines.caller, ...lines.notes]);
+  const evidence = checkedEvidence(answer.evidence, CALLER_ONLY.has(f.kind) ? lines.caller : [...lines.caller, ...lines.notes]);
   if (value === null || evidence === null) return null;
   if (f.kind === 'currency') return typeof value === 'number' && evidenceJustifies(unescape(evidence), value) ? { value, evidence } : null;
   if (f.kind === 'text') {

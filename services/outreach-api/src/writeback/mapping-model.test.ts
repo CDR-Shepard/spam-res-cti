@@ -281,3 +281,22 @@ describe('5a Fix 1 (M-4): answer keys are matched to the fields whatever their c
     expect(out.values).toEqual({ Timeline__c: { value: '90 Days', evidence: 'about 90 days' } });
   });
 });
+
+describe("final review I-2: a price or an amount owed needs the seller's own line, never the agent's notes", () => {
+  const i = input({
+    qualification: { price_expectation: 'asking 400,000', mortgage: 'owes 120,000' },
+    transcript: [{ role: 'caller', text: 'My neighbour sold for a lot. I owe about 120,000 on it.' }],
+  });
+  it('a price quoted only from a saved note is dropped', () => {
+    expect(parseMapping({ disposition: 'interested', answers: { Seller_s_Asking_Price__c: { value: 400_000, evidence: 'asking 400,000' } } }, i).values).toEqual({});
+  });
+  it('an amount owed quoted from a note is dropped, and kept when quoted from the seller line', () => {
+    expect(parseMapping({ disposition: 'interested', answers: { Amount_Owed__c: { value: 120_000, evidence: 'owes 120,000' } } }, i).values).toEqual({});
+    expect(parseMapping({ disposition: 'interested', answers: { Amount_Owed__c: { value: 120_000, evidence: 'I owe about 120,000 on it' } } }, i).values).toEqual({
+      Amount_Owed__c: { value: 120_000, evidence: 'I owe about 120,000 on it' },
+    });
+  });
+  it('the prompt says a price or amount owed is quoted from a seller line, never a note', () => {
+    expect(mappingPrompt(i).system).toMatch(/price or an amount owed[^\n]*evidence must come from a seller line/i);
+  });
+});
