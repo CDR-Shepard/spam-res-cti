@@ -8,7 +8,7 @@ import { readUsers, type OwnerUser } from '../appointments/calendar.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import type { DescribeCache } from '../research/describe.js';
-import type { WritebackContext } from './context.js';
+import type { WritebackCall, WritebackContext } from './context.js';
 import type { MappingModel } from './mapping-model.js';
 import { callResult } from './outcome-tables.js';
 import { saveProgress, type Progress, type StepName, type StepState, type Steps, type WritebackRow } from './store.js';
@@ -87,7 +87,15 @@ export async function saveStep(run: RowRun, step: StepName, state: StepState, ex
 
 /** The call booked an appointment that stands (D-20: keyed on the result, so a booking then a transfer counts). */
 export function isAppointmentCall(run: RowRun): boolean {
-  const c = run.ctx.call;
+  return callBookedAppointment(run.ctx.call);
+}
+
+/**
+ * The same test on the call alone. Fix 3: a row for such a call is written even when write-back is off, because the seller
+ * was told the time is set (booking is gated on write-back when the call is made, not when it is written). The enqueue
+ * (store.ts) applies the same rule in SQL.
+ */
+export function callBookedAppointment(c: WritebackCall): boolean {
   return callResult(c.outcome, null, c.appointment !== null, { practice: c.practice }) === 'appointment';
 }
 

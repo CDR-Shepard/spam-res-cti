@@ -4,6 +4,7 @@
  * step's result is saved before the next starts, so a retry never redoes a step).
  */
 import { sql, type SQL } from 'drizzle-orm';
+import { BOOKING_STANDS_OUTCOMES } from '@cti/contracts';
 import type { Db } from '@cti/db';
 
 export const WRITEBACK_OUTCOMES = ['qualified_transferred', 'qualified_callback', 'appointment_set', 'transfer_failed', 'not_interested', 'do_not_call', 'wrong_number', 'hung_up', 'other'] as const;
@@ -56,14 +57,20 @@ const iso = (d: Date) => sql`${d.toISOString()}::timestamptz`;
 const rows = <T>(r: unknown): T[] => (r as { rows: T[] }).rows;
 const core = (id: string): string => id.slice(0, 15);
 
-/** Inside the results transaction: one row per call, ever. Writeback off → the row is born 'skipped' with last_error 'write-back is off'. */
+/**
+ * Inside the results transaction: one row per call, ever. Writeback off → the row is born 'skipped' with last_error 'write-back is
+ * off', except a real call with a stored booking that stands (final fix 3): that seller was told the time is set, so the row is
+ * born pending and runs the appointment path. The row's run applies the same rule (run.ts), and drops a blob that does not parse.
+ */
 export function enqueueWritebackSql(i: { touchId: string; now: Date; writebackOn: boolean }): SQL {
   const outcomes = sql.join(WRITEBACK_OUTCOMES.map((o) => sql`${o}`), sql`, `);
+  const standing = sql.join(BOOKING_STANDS_OUTCOMES.map((o) => sql`${o}`), sql`, `);
+  const live = sql`(${i.writebackOn}::boolean or (a.appointment is not null and a.appointment <> 'null'::jsonb and a.practice = false and a.outcome in (${standing})))`;
   return sql`
     insert into ai_call_writebacks (org_id, ai_call_id, touch_id, enrollment_id, sf_object, sf_record_id, outcome, status, last_error, next_attempt_at)
     select t.org_id, a.id, t.id, t.enrollment_id, r.sf_object, r.sf_record_id, a.outcome,
-           case when ${i.writebackOn}::boolean then 'pending' else 'skipped' end,
-           case when ${i.writebackOn}::boolean then null else 'write-back is off' end, ${iso(i.now)}
+           case when ${live} then 'pending' else 'skipped' end,
+           case when ${live} then null else 'write-back is off' end, ${iso(i.now)}
     from touches t
     join ai_calls a on a.id = t.ai_call_id and a.org_id = t.org_id
     join campaign_enrollments e on e.id = t.enrollment_id
