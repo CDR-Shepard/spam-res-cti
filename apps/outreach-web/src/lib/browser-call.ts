@@ -165,12 +165,13 @@ export function useBrowserCall(testId: string, deps: BrowserCallDeps = defaultBr
     try {
       answer = await recordTestCall(testId, { mode: 'browser', identity });
     } catch (err) {
-      end(r, err instanceof ApiRequestError ? 'refused' : 'error', recordTestErrorText(err));
+      // cti-api can ring this tab before its answer travels back: once the AI's call is here, a lost or failed answer
+      // never hangs it up. The page's polling shows the call's status.
+      if (!r.call) end(r, err instanceof ApiRequestError ? 'refused' : 'error', recordTestErrorText(err));
       return;
     }
-    if (r.ended) return;
+    if (r.ended || r.call) return; // The AI rang before the answer came back: already live, whatever the answer says.
     if (answer.response.result !== 'placed') { end(r, 'refused', practiceAnswerWords(answer.response)); return; }
-    if (r.call) return; // The AI rang before the answer came back: already live.
     show(r, { phase: 'ringing' });
     r.timer = setTimeout(() => end(r, 'no_ring', NO_RING_WORDS), RING_WAIT_MS);
   };

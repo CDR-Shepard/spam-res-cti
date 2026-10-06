@@ -33,6 +33,9 @@ const TOKEN_ROUTE = 'POST /api/record-tests/browser-token';
 const CALL_ROUTE = `POST /api/record-tests/${TEST_ID}/calls`;
 const placed = { callId: '77777777-7777-4777-8777-777777777777', response: { result: 'placed', aiCallId: '88888888-8888-4888-8888-888888888888' } };
 
+/** An answer with an HTTP error status (`stubFetch` answers it with ok: false). */
+class Failure { constructor(readonly status: number, readonly body: unknown) {} }
+
 interface Sent { route: string; body: unknown }
 /** A fetch whose answers are plain promises (each route's answer may be held back with `hold`). */
 function stubFetch(answers: Record<string, unknown>): Sent[] {
@@ -41,12 +44,14 @@ function stubFetch(answers: Record<string, unknown>): Sent[] {
     const route = `${init?.method ?? 'GET'} ${input}`;
     sent.push({ route, body: init?.body ? JSON.parse(String(init.body)) : undefined });
     const body = await answers[route];
+    if (body instanceof Failure) return { ok: false, status: body.status, json: async () => body.body };
     return { ok: true, status: 200, json: async () => body };
   }));
   return sent;
 }
 
-function deferred<T = void>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
+type Deferred<T = unknown> = { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void };
+function deferred<T = void>(): Deferred<T> {
   let resolve!: (v: T) => void;
   let reject!: (e: unknown) => void;
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
@@ -195,6 +200,48 @@ describe('useBrowserCall', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
     expect(t.state()).toEqual({ phase: 'ended', reason: 'no_ring', words: "The AI didn't ring through. Try again or use Ring my phone." });
     expect(t.device().destroy).toHaveBeenCalled();
+  });
+
+  it('a second incoming call is rejected; the first stays live', async () => {
+    stubFetch({ [TOKEN_ROUTE]: tokenAnswer, [CALL_ROUTE]: placed });
+    const t = setup();
+    const first = await goLive(t);
+    const second = new FakeCall();
+    act(() => t.device().emit('incoming', second));
+    expect(second.reject).toHaveBeenCalled();
+    expect(second.accept).not.toHaveBeenCalled();
+    expect(first.disconnect).not.toHaveBeenCalled();
+    expect(t.state().phase).toBe('live');
+  });
+
+  it('the AI ringing before the run request answers is accepted at once, and the placed answer keeps it live', async () => {
+    const answer = deferred<unknown>();
+    stubFetch({ [TOKEN_ROUTE]: tokenAnswer, [CALL_ROUTE]: answer.promise });
+    const t = setup();
+    const call = await goLive(t);
+    expect(call.accept).toHaveBeenCalledTimes(1);
+    answer.resolve(placed);
+    await flush();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(t.state().phase).toBe('live');
+    expect(t.phases).not.toContain('ringing');
+    expect(t.device().destroy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['the network fails', (a: Deferred) => a.reject(new TypeError('Failed to fetch'))],
+    ['outreach-api answers 500', (a: Deferred) => a.resolve(new Failure(500, { error: 'boom', code: 'INTERNAL' }))],
+    ['outreach-api answers blocked', (a: Deferred) => a.resolve({ callId: placed.callId, response: { result: 'blocked', reason: 'no_caller_id', aiCallId: placed.response.aiCallId } })],
+  ])('a run request whose answer fails (%s) never hangs up the AI call this tab already accepted', async (_name, fail) => {
+    const answer = deferred<unknown>();
+    stubFetch({ [TOKEN_ROUTE]: tokenAnswer, [CALL_ROUTE]: answer.promise });
+    const t = setup();
+    const call = await goLive(t);
+    fail(answer);
+    await flush();
+    expect(t.state().phase).toBe('live');
+    expect(call.disconnect).not.toHaveBeenCalled();
+    expect(t.device().destroy).not.toHaveBeenCalled();
   });
 
   it('toggleMute mutes, then unmutes', async () => {
