@@ -85,6 +85,10 @@ export default defineRailway(() => {
       SALESFORCE_LOGIN_URL: preserve(),
       SALESFORCE_SIGNIN_REDIRECT_URI: preserve(),
       SALESFORCE_ALLOWED_ORG_ID: preserve(),
+      // Plan 1D, filled in the dashboard: the write-back's field-mapping model (unset = claude-sonnet-5-5) and the
+      // appointment owners that pre-fill an org's AI call settings (booking, conversion and write-back still start off).
+      WRITEBACK_MODEL: preserve(),
+      AI_CALL_DEFAULT_SPECIALISTS: preserve(),
       PGBOSS_SCHEMA: "pgboss",
     },
   });
