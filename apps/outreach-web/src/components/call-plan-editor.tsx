@@ -60,6 +60,9 @@ export function CallPlanEditor({ plan, onSave, onCancel, busy }: { plan: Editabl
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }));
   const toggleTopic = (t: QualificationTopic, on: boolean) =>
     setDraft((d) => ({ ...d, stillToLearn: on ? [...d.stillToLearn.filter((x) => x !== t), t] : d.stillToLearn.filter((x) => x !== t) }));
+  // Fix 1 (M-7): the server reads an empty list as "keep the stored topics", so the last checked box stays checked
+  // rather than silently reverting. A plan that had none may stay at none.
+  const keepOne = plan.stillToLearn.length > 0 && draft.stillToLearn.length === 1;
   const contactWords = lastContactWordsAt(plan.reengagement, new Date());
   const setGoal = (i: number, patch: Partial<Draft['goals'][number]>) => setDraft((d) => ({ ...d, goals: d.goals.map((g, j) => (j === i ? { ...g, ...patch } : g)) }));
 
@@ -90,11 +93,12 @@ export function CallPlanEditor({ plan, onSave, onCancel, busy }: { plan: Editabl
         <div className="flex flex-wrap gap-x-4 gap-y-1">
           {QUALIFICATION_TOPICS.map((t) => (
             <label key={t} className="flex items-center gap-1 text-sm">
-              <input type="checkbox" checked={draft.stillToLearn.includes(t)} onChange={(e) => toggleTopic(t, e.target.checked)} />
+              <input type="checkbox" checked={draft.stillToLearn.includes(t)} disabled={keepOne && draft.stillToLearn.includes(t)} onChange={(e) => toggleTopic(t, e.target.checked)} />
               {TOPIC_WORDS[t]}
             </label>
           ))}
         </div>
+        {keepOne && <p className="mt-1 text-xs text-muted-foreground">Keep at least one topic to learn.</p>}
       </fieldset>
       {draft.goals.map((g, i) => (
         <fieldset key={g.goal} className="space-y-2 rounded-md border p-2">

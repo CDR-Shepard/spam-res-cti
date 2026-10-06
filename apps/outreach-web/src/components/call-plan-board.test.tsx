@@ -236,6 +236,35 @@ describe('CallPlanBoard', () => {
     expect((calls.find((c) => c.method === 'PUT')!.body as { plan: EditableCallPlan }).plan.reengagement).toEqual(reengagement);
   });
 
+  describe('Fix 1 (M-7): unchecking every topic never silently reverts', () => {
+    const editWith = async (stillToLearn: EditableCallPlan['stillToLearn']) => {
+      stubApi({ [`GET ${BOARD}`]: board([card(1, { plan: { ...card(1).plan!, plan: { ...PLAN, stillToLearn } } })], { review: 1 }) });
+      render();
+      await userEvent.click(within(await cardOf('Lead 1')).getByRole('button', { name: 'Edit' }));
+    };
+
+    it('the last checked topic cannot be unchecked, and the editor says why', async () => {
+      await editWith(['timeline', 'price']);
+      expect(screen.queryByText('Keep at least one topic to learn.')).toBeNull();
+      await userEvent.click(screen.getByRole('checkbox', { name: 'timeline' }));
+      const price = screen.getByRole('checkbox', { name: 'their price in mind' });
+      expect(price).toBeChecked();
+      expect(price).toBeDisabled();
+      expect(screen.getByText('Keep at least one topic to learn.')).toBeInTheDocument();
+      await userEvent.click(price);
+      expect(price).toBeChecked();
+      expect(screen.getByRole('checkbox', { name: 'timeline' })).toBeEnabled();
+    });
+
+    it('a plan with nothing to learn may stay at none', async () => {
+      await editWith([]);
+      await userEvent.click(screen.getByRole('checkbox', { name: 'timeline' }));
+      await userEvent.click(screen.getByRole('checkbox', { name: 'timeline' }));
+      expect(screen.getByRole('checkbox', { name: 'timeline' })).not.toBeChecked();
+      expect(screen.queryByText('Keep at least one topic to learn.')).toBeNull();
+    });
+  });
+
   it('1D: an edit keeps reengagement null when there was no contact, and carries the topics untouched', async () => {
     const plan: EditableCallPlan = { ...PLAN, stillToLearn: ['condition'] };
     const calls = stubApi({ [`GET ${BOARD}`]: board([card(1, { plan: { ...card(1).plan!, plan } })], { review: 1 }), [`PUT /api/call-plans/${ID(1)}`]: card(1) });
