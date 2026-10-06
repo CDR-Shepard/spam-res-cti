@@ -5,6 +5,7 @@
  */
 import type { BookedAppointment } from '@cti/contracts';
 import { soqlEscape } from '@cti/salesforce';
+import { SF_ID } from '../campaigns/records.js';
 import { describeObject } from '../research/describe.js';
 import { bookingSettings } from '../settings.js';
 import { bookingPassed, bookOpportunity, createTaskOnce, holdForLead, PASSED_TASK_SUBJECT, taskFields, WriteRefusedError, type AppointmentResult } from './appointment.js';
@@ -113,20 +114,41 @@ export async function taskStep(run: RowRun, plan: WritePlan, appt: AppointmentRe
   }
 }
 
-/** spec §3.4 step 3: an Opportunity's do-not-call also sets DoNotCall on its primary contact. A failure is recorded, not thrown. */
-async function contactDnc(run: RowRun, oppId: string): Promise<NotWritten[]> {
-  const refused = (code: string): NotWritten[] => [{ label: 'Contact Do Not Call', reason: refusedWords(code), field: 'DoNotCall', code }];
-  const rows = await run.client.query<{ ContactId?: unknown }>(`SELECT ContactId FROM OpportunityContactRole WHERE OpportunityId = '${soqlEscape(oppId)}' AND IsPrimary = true LIMIT 1`);
-  const contactId = str(rows[0]?.ContactId);
-  if (contactId === null) return [];
+/** One do-not-call flag on a related record; a refusal is recorded (with its field, D-22), never thrown. */
+async function setDncFlag(run: RowRun, sobject: 'Contact' | 'Account', id: string, field: string, label: string): Promise<NotWritten[]> {
+  const refused = (code: string): NotWritten[] => [{ label, reason: refusedWords(code), field, code }];
   try {
-    const result = await patchDroppingRefused(run.client, 'Contact', contactId, (dropped) => without({ DoNotCall: true }, dropped), 0);
+    const result = await patchDroppingRefused(run.client, sobject, id, (dropped) => without({ [field]: true }, dropped), 0);
     const code = result.refusals[0]?.code ?? result.recordError?.code;
     return code === undefined ? [] : refused(code);
   } catch (err) {
     if (err instanceof RecordGoneError) return refused(err.code);
     throw err;
   }
+}
+
+/** The Opportunity's Account when it is a Person Account (the org has them and this one is); else null. */
+async function personAccountOf(run: RowRun, oppId: string): Promise<string | null> {
+  const account = await describeObject(run.client, run.deps.describes, run.row.orgId, 'Account');
+  const names = new Set(account.fields.map((f) => f.name));
+  if (!names.has('IsPersonAccount') || !names.has('PersonDoNotCall')) return null;
+  const [row] = await run.client.query<{ AccountId?: unknown; Account?: { IsPersonAccount?: unknown } | null }>(
+    `SELECT AccountId, Account.IsPersonAccount FROM Opportunity WHERE Id = '${soqlEscape(oppId)}' LIMIT 1`,
+  );
+  const accountId = str(row?.AccountId);
+  return accountId !== null && SF_ID.test(accountId) && row?.Account?.IsPersonAccount === true ? accountId : null;
+}
+
+/**
+ * spec §3.4 step 3: an Opportunity's do-not-call also marks the person. Converted records are Person Accounts (_t2), whose
+ * contact's DoNotCall cannot be written: their Account's PersonDoNotCall is set (M8). Otherwise the primary contact's DoNotCall.
+ */
+async function personDnc(run: RowRun, oppId: string): Promise<NotWritten[]> {
+  const personAccount = await personAccountOf(run, oppId);
+  if (personAccount !== null) return setDncFlag(run, 'Account', personAccount, 'PersonDoNotCall', 'Account Do Not Call');
+  const rows = await run.client.query<{ ContactId?: unknown }>(`SELECT ContactId FROM OpportunityContactRole WHERE OpportunityId = '${soqlEscape(oppId)}' AND IsPrimary = true LIMIT 1`);
+  const contactId = str(rows[0]?.ContactId);
+  return contactId === null ? [] : setDncFlag(run, 'Contact', contactId, 'DoNotCall', 'Contact Do Not Call');
 }
 
 /** The fields the conversion's carry PATCH could not write, as "Not written" entries. */
@@ -158,7 +180,7 @@ export async function fieldsStep(run: RowRun, plan: WritePlan, appt: Appointment
   const bookingPatch = a?.kind === 'opportunity_event' ? (booked ? a.onBooked : a.onConflict) : {};
   // The booking's stage and rating moves first, like the status moves of any other plan.
   const planned: Change[] = [...(a?.kind === 'opportunity_event' ? (booked ? a.onBookedChanges : a.onConflictChanges) : []), ...plan.changes];
-  const earlier = [...notCarried(run), ...(plan.contactDnc ? await contactDnc(run, target.id) : [])];
+  const earlier = [...notCarried(run), ...(plan.contactDnc ? await personDnc(run, target.id) : [])];
   const describe = await describeObject(run.client, run.deps.describes, run.row.orgId, target.sobject);
   const writable = writableFields(describe, target.sobject);
   const { base, changes, notChanged } = await unedited(run, writable, { ...plan.patch, ...bookingPatch }, planned);

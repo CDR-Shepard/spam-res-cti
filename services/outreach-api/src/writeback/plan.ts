@@ -112,8 +112,12 @@ export interface WritePlanInput {
 }
 
 const STATUS_FIELD: Readonly<Record<SfObject, string>> = { Lead: 'Status', Opportunity: 'StageName' };
-/** The do-not-call class: always applied, whatever the status guard says (5a Fix 1, I-3). */
-export const DNC_FIELDS: ReadonlySet<string> = new Set(['DoNotCall', 'Removal_Status__c', 'Skip_on_Dialer__c']);
+/**
+ * The do-not-call class: always applied, whatever the status guard says (5a Fix 1, I-3). PersonDoNotCall is never in a
+ * plan; it is the Person Account flag the run sets for an Opportunity (Fix 1, M8), listed here so a refusal gets the
+ * do-not-call section.
+ */
+export const DNC_FIELDS: ReadonlySet<string> = new Set(['DoNotCall', 'Removal_Status__c', 'Skip_on_Dialer__c', 'PersonDoNotCall']);
 const FOLLOW_UP_FIELDS: ReadonlySet<string> = new Set(['Next_Follow_Up_Date__c']);
 
 const whyFor = (field: string): Change['why'] => (DNC_FIELDS.has(field) ? 'dnc' : FOLLOW_UP_FIELDS.has(field) ? 'follow_up' : 'status');

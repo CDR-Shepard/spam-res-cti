@@ -8,7 +8,7 @@ import { seedAiCall } from '../test/ai-call-seed.js';
 import { seedAiCallCampaign, seedUser } from '../test/call-plan-seed.js';
 import { refused } from '../test/fake-sf-writes.js';
 import { createTestDb, pgLane } from '../test/pg.js';
-import { CONTACT, depsFor, fakeModel, fakeOrg, GRANT, PHONE_BOOKING, RUN_AT, seedWriteback, SETTER, transportError, writebackById, type OrgState } from '../test/writeback-harness.js';
+import { ACCOUNT, CONTACT, depsFor, fakeModel, fakeOrg, GRANT, PHONE_BOOKING, RUN_AT, seedWriteback, SETTER, transportError, writebackById, type OrgState } from '../test/writeback-harness.js';
 import { CHATTER_MAX } from './render.js';
 import { runWritebacks } from './run.js';
 
@@ -228,6 +228,27 @@ describe.skipIf(!pgLane)('runWritebacks on Opportunities (real Postgres)', () =>
     await runWritebacks(depsFor(db, f));
     expect(changesText(f.updates.find((u) => u.sobject === 'Opportunity')!.fields)).toContain('Could not set do-not-call flag\n- Contact Do Not Call: Salesforce refused (INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY)');
     expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'partial', lastError: 'INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY' });
+  });
+
+  it('M8: do not call on a Person Account\'s Opportunity: the Account\'s PersonDoNotCall, never the person contact\'s DoNotCall', async () => {
+    const s = await seedWriteback(db, { sfObject: 'Opportunity', outcome: 'do_not_call', researchStatus: 'Followup' });
+    const f = fakeOrg({ ...oppState(s.recordId, { StageName: 'Followup' }), personAccount: true });
+    expect((await runWritebacks(depsFor(db, f))).done).toBe(1);
+    expect(f.soql).toContain(`SELECT AccountId, Account.IsPersonAccount FROM Opportunity WHERE Id = '${s.recordId}' LIMIT 1`);
+    expect(f.updates.find((u) => u.sobject === 'Account')).toEqual({ sobject: 'Account', id: ACCOUNT, fields: { PersonDoNotCall: true } });
+    expect(f.updates.some((u) => u.sobject === 'Contact')).toBe(false);
+    expect(f.soql.some((q) => q.includes('OpportunityContactRole'))).toBe(false);
+  });
+
+  it('M8: a refused PersonDoNotCall is recorded in the do-not-call section with its field, and the row is partial', async () => {
+    const s = await seedWriteback(db, { sfObject: 'Opportunity', outcome: 'do_not_call', researchStatus: 'Followup' });
+    const f = fakeOrg({ ...oppState(s.recordId, { StageName: 'Followup' }), personAccount: true });
+    f.onUpdate = (u) => (u.sobject === 'Account' ? refused('INSUFFICIENT_ACCESS_OR_READONLY', 'no', ['PersonDoNotCall']) : undefined);
+    await runWritebacks(depsFor(db, f));
+    expect(changesText(f.updates.find((u) => u.sobject === 'Opportunity')!.fields)).toContain('Could not set do-not-call flag\n- Account Do Not Call: Salesforce refused (INSUFFICIENT_ACCESS_OR_READONLY)');
+    const row = await writebackById(db, s.writebackId);
+    expect(row).toMatchObject({ status: 'partial', lastError: 'INSUFFICIENT_ACCESS_OR_READONLY' });
+    expect((row.steps as { fields: { data: { notWritten: unknown[] } } }).fields.data.notWritten).toEqual([expect.objectContaining({ field: 'PersonDoNotCall', label: 'Account Do Not Call' })]);
   });
 
   it('a transient failure on the last attempt ends the row failed, never thrown out of the tick', async () => {

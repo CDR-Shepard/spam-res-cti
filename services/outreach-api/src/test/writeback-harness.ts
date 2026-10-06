@@ -97,6 +97,8 @@ export interface OrgState {
   /** The Lead's conversion fields (the converting read). */
   lead: Row | null;
   busy: Row[];
+  /** The Opportunity's Account is a Person Account (M8); default false. */
+  personAccount?: boolean;
   /** Who created the converted Opportunity (and their name, when Salesforce returns it), and when. */
   convertedBy: { id: string; at: string; name?: string };
 }
@@ -107,6 +109,14 @@ export function fakeOrg(state: OrgState): FakeSfWrites {
     describes: {
       Lead: withFields(prodDescribe('Lead'), CARRY_SPECS),
       Opportunity: withFields(prodDescribe('Opportunity'), [...CARRY_SPECS, ['Spanish_Speaker__c', 'boolean'], ['LeadManager__c', 'reference']]),
+      Account: {
+        name: 'Account',
+        fields: [
+          { name: 'Id', type: 'id', label: 'Account ID', updateable: false, calculated: false },
+          { name: 'IsPersonAccount', type: 'boolean', label: 'Is Person Account', updateable: false, calculated: false },
+          { name: 'PersonDoNotCall', type: 'boolean', label: 'Do Not Call', updateable: true, calculated: false },
+        ],
+      },
     },
   });
   const idIn = (q: string): string => /WHERE Id = '([^']+)'/.exec(q)?.[1] ?? '';
@@ -128,6 +138,7 @@ export function fakeOrg(state: OrgState): FakeSfWrites {
         .filter((c) => q.includes(`'${String(c.fields.ParentId)}'`))
         .map((c, i) => ({ Id: `0D58X00000000${i}0AAA`, Body: c.fields.Body }))
         .reverse()],
+    [/^SELECT AccountId, Account\.IsPersonAccount FROM Opportunity/, [{ AccountId: ACCOUNT, Account: { IsPersonAccount: state.personAccount === true } }]],
     [/ FROM (Lead|Opportunity) WHERE Id = /, (q) => {
       const rec = state.records.get(idIn(q));
       return rec ? [{ Id: idIn(q), ...rec }] : [];
