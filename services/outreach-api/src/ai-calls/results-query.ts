@@ -111,7 +111,10 @@ export function transcriptLines(raw: unknown): TranscriptLine[] {
   });
 }
 
-/** The owner of the record or an admin may read it; null when no outreach touch of this tenant carries the call. */
+/**
+ * The owner of the record or an admin may read it; null when no outreach touch of this tenant carries the call. Plan 1D: a
+ * practice call of this tenant (ai_practice_calls) is readable by its admins only.
+ */
 export async function loadTranscript(db: Db, ctx: RequestContext, aiCallId: string): Promise<AiCallTranscript | 'forbidden' | null> {
   const result = await db.execute(sql`
     select a.transcript, r.owner_sf_user_id
@@ -122,7 +125,20 @@ export async function loadTranscript(db: Db, ctx: RequestContext, aiCallId: stri
     where a.id = ${aiCallId}::uuid and a.org_id = ${ctx.orgId}::uuid
     limit 1`);
   const row = rows<{ transcript: unknown; owner_sf_user_id: string | null }>(result)[0];
-  if (!row) return null;
+  if (!row) return loadPracticeTranscript(db, ctx, aiCallId);
   if (!(await mayDecide(db, ctx, row.owner_sf_user_id))) return 'forbidden';
+  return { aiCallId, lines: transcriptLines(row.transcript) };
+}
+
+async function loadPracticeTranscript(db: Db, ctx: RequestContext, aiCallId: string): Promise<AiCallTranscript | 'forbidden' | null> {
+  const result = await db.execute(sql`
+    select a.transcript
+    from ai_calls a
+    join ai_practice_calls p on p.ai_call_id = a.id and p.org_id = a.org_id
+    where a.id = ${aiCallId}::uuid and a.org_id = ${ctx.orgId}::uuid
+    limit 1`);
+  const row = rows<{ transcript: unknown }>(result)[0];
+  if (!row) return null;
+  if (!(ctx.session.isAdmin || ctx.session.isSuperAdmin)) return 'forbidden';
   return { aiCallId, lines: transcriptLines(row.transcript) };
 }

@@ -29,6 +29,7 @@ import { registerCallPlanRoutes } from './routes/call-plans.js';
 import { registerCampaignSelectionRoutes } from './routes/campaign-selection.js';
 import { registerCampaignRoutes } from './routes/campaigns.js';
 import { registerConnectionRoutes } from './routes/connections.js';
+import { registerPracticeCallRoutes } from './routes/practice-calls.js';
 import { registerReviewRoutes } from './routes/review.js';
 import { registerTeamRoutes } from './routes/team.js';
 import { shutdown } from './shutdown.js';
@@ -156,6 +157,7 @@ async function main(): Promise<void> {
       (scope) => registerReviewRoutes(scope, { db }),
       (scope) => registerCallPlanRoutes(scope, { db }),
       (scope) => registerAiCallRoutes(scope, { db, cti }),
+      (scope) => registerPracticeCallRoutes(scope, { db, clients, cti, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS }),
       (scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, describes }),
     ],
   });
