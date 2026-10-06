@@ -150,16 +150,19 @@ describe.skipIf(!pgLane)('runWritebacks on Opportunities (real Postgres)', () =>
     expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'pending', attempts: 0, nextAttemptAt: new Date('2026-10-07T00:00:00.000Z'), plan: null });
   });
 
-  it('8b: a booked call never waits for the budget: the Event and the stage go in now, fill-blanks skipped and said', async () => {
+  it('8b: a booked call never waits for the budget and still maps the seller\'s answers: the spend is recorded past the cap', async () => {
     const s = await seedWriteback(db, { sfObject: 'Opportunity', outcome: 'appointment_set', researchStatus: 'Closed Lost', appointment: PHONE_BOOKING, settings: { aiDailyBudgetUsd: 1 } });
     await db.insert(schema.aiUsageDays).values({ orgId: s.orgId, day: utcDay(RUN_AT), costMicros: 1_000_000 });
     const model = fakeModel();
     const f = fakeOrg(oppState(s.recordId));
     expect((await runWritebacks(depsFor(db, f, { model }))).done).toBe(1);
-    expect(model.calls).toBe(0);
+    expect(model.calls).toBe(1);
     expect(f.creates.filter((c) => c.sobject === 'Event')).toHaveLength(1);
-    expect(f.updates[0]!.fields).toMatchObject({ StageName: 'Appointment Set' });
-    expect(changesText(f.updates[0]!.fields)).toContain('Fill-blanks skipped: the answer mapping was unavailable');
+    expect(f.updates[0]!.fields).toMatchObject({ StageName: 'Appointment Set', Timeline__c: '90 Days' });
+    expect(changesText(f.updates[0]!.fields)).not.toContain('Fill-blanks skipped');
+    const [spend] = await db.select().from(schema.aiUsageDays).where(eq(schema.aiUsageDays.orgId, s.orgId));
+    expect(spend!.costMicros).toBeGreaterThan(1_000_000);
+    expect(await writebackById(db, s.writebackId)).toMatchObject({ model: 'claude-sonnet-5-5', inputTokens: 1_000, outputTokens: 200 });
   });
 
   it('a hang-up with nothing learned writes nothing at all: skipped', async () => {

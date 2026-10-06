@@ -116,10 +116,10 @@ async function mapAnswers(run: RowRun, sfObject: 'Lead' | 'Opportunity', fields:
   const { deps, ctx } = run;
   if (ctx.call.outcome === 'wrong_number' || deps.model === null) return null;
   if ((await spentTodayMicros(deps.db, run.row.orgId, deps.now)) >= budgetMicros(ctx.settings)) {
-    // A booked appointment must reach the calendar now: it goes ahead without the mapping (said in the changes text).
-    // Anything else waits for the next UTC day (spec §8).
-    if (isAppointmentCall(run)) return null;
-    return 'budget';
+    // Anything but a booked call waits for the next UTC day (spec §8). A booked call must reach the calendar now and its
+    // answers are the most valuable: it is mapped anyway (one call over the cap, its spend recorded as usual).
+    if (!isAppointmentCall(run)) return 'budget';
+    deps.log.warn({ writebackId: run.row.id, aiCallId: run.row.aiCallId, step: 'plan' }, 'ai_call.writeback: daily AI budget spent; mapping a booked call anyway');
   }
   try {
     const out = await deps.model.map({ sfObject, outcome: ctx.call.outcome, qualification: ctx.call.qualification, transcript: ctx.call.transcript, summary: ctx.call.summary, fields: [...fields.values()] });
