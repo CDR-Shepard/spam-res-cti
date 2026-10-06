@@ -220,7 +220,7 @@ It is a fourth target kind beside record, test and practice. Every switch on the
 
 **Steps:**
 1. The admin clicks **Talk in browser**. The page asks for the microphone with `getUserMedia({ audio: true })` and releases the tracks; the SDK takes its own. A refusal shows: "Allow the microphone for this site, or use Ring my phone."
-2. `POST /api/record-tests/browser-token`, then `new Device(token, { logLevel: 1 })`, `register()` and wait for `registered`, with a 15 s limit.
+2. `POST /api/record-tests/browser-token`, then `new Device(token, { logLevel: 'error' })`, `register()` and wait for `registered`, with a 15 s limit. Never `logLevel: 1` (DEBUG): at that level the SDK logs every message it sends, the token included (G-4); `'error'` is its default.
 3. `POST /api/record-tests/:id/calls { mode: 'browser', identity }`. A `blocked` or `failed` answer destroys the Device and shows the words.
 4. While waiting (45 s limit), the first `incoming` call is accepted with `call.accept()`. The identity is unique to this run and only our Twilio account can ring it, so no other check is needed.
 5. Live: "Connected · 1:23", **Mute** (`call.mute`), **Hang up** (`call.disconnect`), and the server status from polling. The hint reads: "Use headphones so the AI doesn't hear itself. You are the seller."
