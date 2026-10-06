@@ -42,6 +42,13 @@ export interface AiCallRequestStore {
    * key must never take it for the real call).
    */
   findCallSince(a: CallLookup): Promise<FoundCall | null>;
+  /**
+   * Records the call a request just inserted on its still-unanswered reservation (final review m3), before it is dialed,
+   * so a crashed request's retry finds exactly that call by its key. Does not touch updated_at (the stale clock).
+   */
+  linkCall(orgId: string, key: string, aiCallId: string): Promise<void>;
+  /** The call a reservation was linked to, by id (the same org and starter). */
+  findCall(orgId: string, userId: string, aiCallId: string): Promise<FoundCall | null>;
 }
 
 export interface CallLookup {
@@ -83,6 +90,22 @@ export function takeOverQuery(db: Db, orgId: string, key: string) {
     .returning({ key: r.idempotencyKey });
 }
 
+export function linkCallQuery(db: Db, orgId: string, key: string, aiCallId: string) {
+  return db
+    .update(r)
+    .set({ aiCallId })
+    .where(and(byKey(orgId, key), isNull(r.response), isNull(r.aiCallId)));
+}
+
+export function findCallByIdQuery(db: Db, orgId: string, userId: string, aiCallId: string) {
+  const c = schema.aiCalls;
+  return db
+    .select({ id: c.id, status: c.status, blockReason: c.blockReason, callSid: c.callSid })
+    .from(c)
+    .where(and(eq(c.orgId, orgId), eq(c.startedBy, userId), eq(c.id, aiCallId)))
+    .limit(1);
+}
+
 export function findCallSinceQuery(db: Db, a: CallLookup) {
   const c = schema.aiCalls;
   const target =
@@ -118,6 +141,13 @@ export function drizzleAiCallRequestStore(dbOf: () => Db): AiCallRequestStore {
     },
     async findCallSince(a) {
       const [row] = await findCallSinceQuery(dbOf(), a);
+      return row ?? null;
+    },
+    async linkCall(orgId, key, aiCallId) {
+      await linkCallQuery(dbOf(), orgId, key, aiCallId);
+    },
+    async findCall(orgId, userId, aiCallId) {
+      const [row] = await findCallByIdQuery(dbOf(), orgId, userId, aiCallId);
       return row ?? null;
     },
   };

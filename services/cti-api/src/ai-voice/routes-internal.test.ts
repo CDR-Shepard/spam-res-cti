@@ -63,6 +63,11 @@ function memoryStore() {
       return true;
     }),
     findCallSince: vi.fn(async () => calls[0] ?? null),
+    linkCall: vi.fn(async (orgId, key, aiCallId) => {
+      const row = rows.get(k(orgId, key));
+      if (row && row.response === null && row.aiCallId === null) rows.set(k(orgId, key), { ...row, aiCallId });
+    }),
+    findCall: vi.fn(async (_orgId, _userId, aiCallId) => calls.find((c) => c.id === aiCallId) ?? null),
   };
   return store;
 }
@@ -130,7 +135,8 @@ describe('POST /internal/ai-calls', () => {
     expect(deps.session).toHaveBeenCalledWith(db, ORG, USER);
     await input.deps.loadRecord('any-user', 'Lead', LEAD);
     expect(deps.loadIntegrationRecord).toHaveBeenCalledWith(db, ORG, 'Lead', LEAD);
-    expect(input.deps.store).toBe(deps.startDeps.store);
+    // The call store itself, wrapped only to link each inserted call to the key (final review m3).
+    expect(Object.getPrototypeOf(input.deps.store)).toBe(deps.startDeps.store);
     expect([...store.rows.values()][0]).toMatchObject({ response: { result: 'placed', aiCallId: CALL }, aiCallId: CALL });
   });
 
@@ -358,19 +364,70 @@ describe('POST /internal/ai-calls', () => {
       expect(deps.start).toHaveBeenCalledTimes(1);
     });
 
-    it('a stale practice key looks for the call by the number it rang (as a test key does), not the record', async () => {
+    const stalePractice = async (aiCallId: string | null) => {
       const body = practiceBody();
       await store.reserve({ orgId: ORG, key: body.idempotencyKey, hash: (await import('./request-store.js')).requestHash(JSON.stringify(body)), userId: USER });
       const [key, row] = [...store.rows.entries()][0]!;
       const old = new Date(NOW.getTime() - 11 * 60_000);
-      store.rows.set(key, { ...row, createdAt: old, updatedAt: old });
-      store.calls.push({ id: CALL, status: 'ringing', blockReason: null, callSid: 'CA1' });
-      const res = await post(body);
+      store.rows.set(key, { ...row, aiCallId, createdAt: old, updatedAt: old });
+      return body;
+    };
+
+    it('final review m3: a stale practice key adopts the call its own request linked to the key, never a call found by number', async () => {
+      const NEWER = '44444444-2222-4333-8444-555555555555';
+      // A newer practice call the same admin placed to the same test number after the crash, and the crashed request's own call.
+      store.calls.push({ id: NEWER, status: 'ringing', blockReason: null, callSid: 'CA2' }, { id: CALL, status: 'completed', blockReason: null, callSid: 'CA1' });
+      const res = await post(await stalePractice(CALL));
       expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
       expect(deps.start).not.toHaveBeenCalled();
-      expect(store.findCallSince).toHaveBeenCalledWith({
-        orgId: ORG, userId: USER, sfRecordId: null, toE164: '+15125550100', kind: 'practice', since: new Date(NOW.getTime() - 11 * 60_000 - 5_000),
+      expect(store.findCall).toHaveBeenCalledWith(ORG, USER, CALL);
+      expect(store.findCallSince).not.toHaveBeenCalled();
+    });
+
+    it('final review m3: a stale practice key with no linked call is run again, never matched to a call by number', async () => {
+      store.calls.push({ id: CALL, status: 'ringing', blockReason: null, callSid: 'CA1' });
+      const res = await post(await stalePractice(null));
+      expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
+      expect(deps.start).toHaveBeenCalledTimes(1);
+      expect(store.findCallSince).not.toHaveBeenCalled();
+    });
+
+    it('final review m3: the call a request inserts is linked to its key before anything else happens', async () => {
+      const inserted: unknown[] = [];
+      deps.startDeps.store = { insert: vi.fn(async (v: unknown) => (inserted.push(v), { id: CALL })) } as never;
+      deps.start.mockImplementationOnce(async (i: StartInput) => {
+        await i.deps.store.insert({ orgId: ORG } as never);
+        return startResult;
       });
+      const body = practiceBody();
+      await post(body);
+      expect(inserted).toHaveLength(1);
+      expect(store.linkCall).toHaveBeenCalledWith(ORG, body.idempotencyKey, CALL);
+    });
+
+    it('final review m3: a link that fails is logged and never stops the call', async () => {
+      deps.startDeps.store = { insert: vi.fn(async () => ({ id: CALL })) } as never;
+      (store.linkCall as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('db down'));
+      deps.start.mockImplementationOnce(async (i: StartInput) => {
+        await i.deps.store.insert({ orgId: ORG } as never);
+        return startResult;
+      });
+      const res = await post(practiceBody());
+      expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
+      expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ aiCallId: CALL }), expect.stringMatching(/link/));
+    });
+
+    it('final review m3: a stale record key whose request linked its call adopts that call by id', async () => {
+      const body = recordBody();
+      await store.reserve({ orgId: ORG, key: body.idempotencyKey, hash: (await import('./request-store.js')).requestHash(JSON.stringify(body)), userId: USER });
+      const [key, row] = [...store.rows.entries()][0]!;
+      const old = new Date(NOW.getTime() - 11 * 60_000);
+      store.rows.set(key, { ...row, aiCallId: CALL, createdAt: old, updatedAt: old });
+      store.calls.push({ id: CALL, status: 'ringing', blockReason: null, callSid: 'CA1' });
+      expect((await post(body)).json()).toEqual({ result: 'placed', aiCallId: CALL });
+      expect(store.findCall).toHaveBeenCalledWith(ORG, USER, CALL);
+      expect(store.findCallSince).not.toHaveBeenCalled();
+      expect(deps.start).not.toHaveBeenCalled();
     });
 
     it('a practice plan that fails the CF-9 check is plan_rejected before anything is reserved', async () => {

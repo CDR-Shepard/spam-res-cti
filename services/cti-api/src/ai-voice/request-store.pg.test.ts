@@ -118,6 +118,31 @@ describe.skipIf(!server)('ai_call_requests store (real Postgres)', () => {
     expect((await row(key)).response).toEqual({ result: 'failed', reason: 'in_flight', aiCallId: null });
   });
 
+  it('final review m3: linkCall records the inserted call once, on an unanswered key, without moving the stale clock; findCall reads it back', async () => {
+    const key = 'practice:link-1';
+    await reserve(key);
+    await age(key, 20);
+    const before = await row(key);
+    const [call] = await db
+      .insert(schema.aiCalls)
+      .values({ orgId, startedBy: userId, toE164: '+15125550188', isTest: true, practice: true, status: 'ringing' })
+      .returning({ id: schema.aiCalls.id });
+    const [other] = await db
+      .insert(schema.aiCalls)
+      .values({ orgId, startedBy: userId, toE164: '+15125550188', isTest: true, practice: true, status: 'ringing' })
+      .returning({ id: schema.aiCalls.id });
+    await store().linkCall(orgId, key, call!.id);
+    await store().linkCall(orgId, key, other!.id);
+    const after = await row(key);
+    expect(after.aiCallId).toBe(call!.id);
+    expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+    expect(await store().findCall(orgId, userId, call!.id)).toMatchObject({ id: call!.id, status: 'ringing' });
+    await reserve('practice:link-3');
+    await store().complete(orgId, 'practice:link-3', { result: 'failed', reason: 'twilio_error', aiCallId: null });
+    await store().linkCall(orgId, 'practice:link-3', other!.id);
+    expect((await row('practice:link-3')).aiCallId).toBeNull();
+  });
+
   it('Fix 1 I-2: a crashed request finds its own kind of call, never a practice or test call on the same record or number', async () => {
     const LEAD = '00Q5e00000AbCdEFGH';
     const TEST_TO = '+15125550177';

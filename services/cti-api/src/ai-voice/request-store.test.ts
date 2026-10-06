@@ -6,8 +6,10 @@ import { schema } from '@cti/db';
 import {
   STALE_REQUEST_MS,
   completeQuery,
+  findCallByIdQuery,
   findCallSinceQuery,
   findRequestQuery,
+  linkCallQuery,
   requestHash,
   reserveQuery,
   takeOverQuery,
@@ -58,6 +60,22 @@ describe('ai_call_requests SQL, rendered', () => {
     );
     expect(sql).not.toContain('"created_at"');
     expect(params).toEqual([ORG, KEY, 600]);
+  });
+
+  it('final review m3: linkCall records the inserted call on an unanswered, unlinked reservation, by key, leaving the stale clock alone', () => {
+    const { sql, params } = linkCallQuery(db, ORG, KEY, CALL).toSQL();
+    expect(sql).toBe(
+      'update "ai_call_requests" set "ai_call_id" = $1 where (("ai_call_requests"."org_id" = $2 and "ai_call_requests"."idempotency_key" = $3) and "ai_call_requests"."response" is null and "ai_call_requests"."ai_call_id" is null)',
+    );
+    expect(params).toEqual([CALL, ORG, KEY]);
+  });
+
+  it('final review m3: findCall reads the linked call by id, org and starter', () => {
+    const { sql, params } = findCallByIdQuery(db, ORG, USER, CALL).toSQL();
+    expect(sql).toBe(
+      'select "id", "status", "block_reason", "call_sid" from "ai_calls" where ("ai_calls"."org_id" = $1 and "ai_calls"."started_by" = $2 and "ai_calls"."id" = $3) limit $4',
+    );
+    expect(params).toEqual([ORG, USER, CALL, 1]);
   });
 
   it('3: findCallSince looks for a REAL record call by org, starter, record and time, newest first (Fix 1 I-2: never a practice call)', () => {

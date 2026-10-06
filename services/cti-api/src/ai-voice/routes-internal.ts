@@ -33,7 +33,7 @@ import type { Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
 import { checkInternalRequest, checkInternalTransport, INTERNAL_RATE_MAX } from './internal-auth.js';
 import type { AiCallRecord } from './record.js';
-import { requestHash, STALE_REQUEST_MS, type AiCallRequestStore, type CallLookup, type FoundCall } from './request-store.js';
+import { requestHash, STALE_REQUEST_MS, type AiCallRequestRow, type AiCallRequestStore, type CallLookup, type FoundCall } from './request-store.js';
 import type { StartDeps, StartInput, StartResult } from './service.js';
 
 export interface InternalAiDeps {
@@ -181,9 +181,7 @@ async function handleTrigger(deps: InternalAiDeps, cfgOf: () => AppConfig, body:
     // searches from the original reservation and finds that call instead of dialing a second time. One atomic UPDATE
     // decides who retries; any other concurrent retry answers in_flight (S-3).
     if (!(await deps.requests.takeOver(body.orgId, body.idempotencyKey))) return failed('in_flight');
-    const found = await deps.requests.findCallSince({
-      orgId: body.orgId, userId: body.userId, since: new Date(row.createdAt.getTime() - FIND_SLACK_MS), ...targetKeys(body),
-    });
+    const found = await crashedCall(deps, body, row);
     if (found) {
       const answer = rebuilt(found);
       await deps.requests.complete(body.orgId, body.idempotencyKey, answer);
@@ -193,6 +191,33 @@ async function handleTrigger(deps: InternalAiDeps, cfgOf: () => AppConfig, body:
   const answer = await startReserved(deps, cfgOf, db, session, body);
   await deps.requests.complete(body.orgId, body.idempotencyKey, answer);
   return answer;
+}
+
+/**
+ * The call a crashed request left. Its own call, linked to the key the moment it was inserted (final review m3), is exact.
+ * A reservation with no link falls back to the lookup by record or number for record and test keys (a request reserved
+ * before links existed); a practice key never does, so a newer practice call to the same test number is never adopted.
+ */
+async function crashedCall(deps: InternalAiDeps, body: Body, row: AiCallRequestRow): Promise<FoundCall | null> {
+  if (row.aiCallId) return deps.requests.findCall(body.orgId, body.userId, row.aiCallId);
+  if (body.target.kind === 'practice') return null;
+  return deps.requests.findCallSince({
+    orgId: body.orgId, userId: body.userId, since: new Date(row.createdAt.getTime() - FIND_SLACK_MS), ...targetKeys(body),
+  });
+}
+
+/** The call store, with every inserted call linked to this request's key before anything is dialed (m3). Never throws on a failed link. */
+function linkingStore(deps: InternalAiDeps, body: Body): StartDeps['store'] {
+  const store = deps.startDeps.store;
+  const linked: StartDeps['store'] = Object.create(store);
+  linked.insert = async (values) => {
+    const row = await store.insert(values);
+    await deps.requests.linkCall(body.orgId, body.idempotencyKey, row.id).catch((e: unknown) =>
+      deps.log.warn({ aiCallId: row.id, err: e instanceof Error ? e.message : String(e) }, 'ai-voice internal: could not link the call to its key'),
+    );
+    return row;
+  };
+  return linked;
 }
 
 /**
@@ -211,6 +236,7 @@ async function startReserved(deps: InternalAiDeps, cfgOf: () => AppConfig, db: D
     plan: t.planText,
     deps: {
       ...deps.startDeps,
+      store: linkingStore(deps, body),
       // The tenant's integration connection, never the approver's own Salesforce token.
       loadRecord: (_userId, objectType, recordId) => deps.loadIntegrationRecord(db, body.orgId, objectType as 'Lead' | 'Opportunity', recordId),
     },
