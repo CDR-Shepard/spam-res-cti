@@ -8,6 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
+import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { TestCallRequest, type AiAvailability } from '@cti/contracts';
 import type { Db } from '@cti/db';
@@ -74,5 +75,24 @@ export async function registerAiCallRoutes(app: FastifyInstance, deps: { db: Db;
     });
     if (outcome.kind !== 'response') return sendError(reply, 502, 'CTI_UNREACHABLE', 'The AI calling service did not answer. Try again in a minute.');
     return outcome.response;
+  });
+
+  // Plan 1D: an admin sends a failed Salesforce write-back round again. Its step results are kept, so it resumes and never
+  // redoes a step (an Event, a conversion, a post).
+  app.post('/ai-calls/:aiCallId/writeback/retry', async (req, reply) => {
+    const ctx = await requireContext(db, req, reply);
+    if (!ctx || !requireAdmin(ctx, reply)) return reply;
+    const params = CallParams.safeParse(req.params);
+    if (!params.success) return sendError(reply, 404, 'NOT_FOUND', 'No such call.');
+    const now = new Date().toISOString();
+    const result = await db.execute(sql`
+      update ai_call_writebacks
+      set status = 'pending', attempts = 0, next_attempt_at = ${now}::timestamptz, locked_until = null, last_error = null, updated_at = ${now}::timestamptz
+      where ai_call_id = ${params.data.aiCallId}::uuid and org_id = ${ctx.orgId}::uuid and status = 'failed'
+      returning id`);
+    if ((result as unknown as { rows: unknown[] }).rows.length === 0) {
+      return sendError(reply, 409, 'NOT_RETRYABLE', 'Only a Salesforce write-back that failed can be sent again.');
+    }
+    return reply.code(204).send();
   });
 }

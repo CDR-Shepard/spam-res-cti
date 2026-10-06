@@ -3,11 +3,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { FastifyInstance } from 'fastify';
 import { eq } from 'drizzle-orm';
 import { schema } from '@cti/db';
+import { WritebackReadiness } from '@cti/contracts';
 import { SalesforceApiError } from '@cti/salesforce';
 import { buildApp } from '../app.js';
 import { CrmNotConnectedError, type SalesforceClientFactory } from '../crm/client-factory.js';
 import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
 import { fakeSalesforce, type QueryRoute } from '../test/fake-sf-client.js';
+import { fakeSfWrites, userInfoAnswer } from '../test/fake-sf-writes.js';
+import { prodDescribe } from '../test/writeback-describes.js';
 import { fakeDb, testConfig } from '../test/harness.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { seedOrg } from '../test/outreach-fixtures.js';
@@ -51,7 +54,7 @@ afterEach(async () => {
 describe('AI call settings routes', () => {
   it('401 without a session and 403 for a non-admin on every route', async () => {
     await build();
-    const routes = [['GET', '/api/settings/ai-calls'], ['PUT', '/api/settings/ai-calls'], ['GET', '/api/salesforce/users?search=Grant']] as const;
+    const routes = [['GET', '/api/settings/ai-calls'], ['PUT', '/api/settings/ai-calls'], ['GET', '/api/salesforce/users?search=Grant'], ['GET', '/api/settings/ai-calls/readiness']] as const;
     state.session = null;
     for (const [method, url] of routes) expect((await call(method, url, method === 'PUT' ? DEFAULTS : undefined)).statusCode, url).toBe(401);
     state.session = rep;
@@ -157,6 +160,27 @@ describe('AI call settings routes', () => {
       await app.close();
       await build({ queries: [[/FROM User/, new SalesforceApiError('boom', 500, null)]] });
       expect((await call('GET', '/api/salesforce/users?search=Grant')).statusCode).toBe(502);
+    });
+  });
+
+  describe('GET /settings/ai-calls/readiness', () => {
+    it('answers the write-back and conversion readiness for the tenant\'s owner list', async () => {
+      const f = fakeSfWrites({
+        describes: Object.fromEntries(['Lead', 'Opportunity', 'Event', 'Task', 'FeedItem', 'Account', 'Contact'].map((n) => [n, n === 'Lead' || n === 'Opportunity' ? prodDescribe(n) : { name: n, fields: [], createable: true }])),
+        queries: [[/FROM PermissionSetAssignment/, [{ Id: '0Pa8X00000Psa1QAA' }]], [/FROM User/, [{ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true }]]],
+      });
+      f.onSoap = () => userInfoAnswer('0058X0000Integ1QAA');
+      await build({ clients: async () => f.client, defaultSpecialists: [GRANT] });
+      const res = await call('GET', '/api/settings/ai-calls/readiness');
+      expect(res.statusCode).toBe(200);
+      expect(WritebackReadiness.parse(res.json())).toMatchObject({ ready: true, convertReady: true, appointmentOwner: { id: GRANT, name: 'Grant Golden' }, items: [] });
+    });
+
+    it('no Salesforce connection: 409 CRM_NOT_CONNECTED', async () => {
+      await build({ clients: async () => { throw new CrmNotConnectedError(); } });
+      const res = await call('GET', '/api/settings/ai-calls/readiness');
+      expect(res.statusCode).toBe(409);
+      expect(res.json().code).toBe('CRM_NOT_CONNECTED');
     });
   });
 });

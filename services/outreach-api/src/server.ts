@@ -156,7 +156,7 @@ async function main(): Promise<void> {
       (scope) => registerReviewRoutes(scope, { db }),
       (scope) => registerCallPlanRoutes(scope, { db }),
       (scope) => registerAiCallRoutes(scope, { db, cti }),
-      (scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS }),
+      (scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, describes }),
     ],
   });
   const close = () => shutdown(runner, app);

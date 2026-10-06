@@ -1,9 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { eq } from 'drizzle-orm';
 import type { InternalAiCallRequest } from '@cti/contracts';
+import { schema } from '@cti/db';
 import type { CtiClient, TriggerOutcome } from '../ai-calls/cti-client.js';
 import { buildApp } from '../app.js';
+import { seedAiCall } from '../test/ai-call-seed.js';
+import { seedAiCallCampaign, seedUser } from '../test/call-plan-seed.js';
 import { fakeDb, testConfig } from '../test/harness.js';
+import { createTestDb, pgLane } from '../test/pg.js';
 import { registerAiCallRoutes } from './ai-calls.js';
 
 const state = vi.hoisted(() => ({ session: null as Record<string, unknown> | null }));
@@ -65,6 +70,7 @@ describe('AI call routes', () => {
       ['GET', `/api/ai-calls/${AI_CALL_ID}/transcript`],
       ['GET', '/api/ai-calls/availability'],
       ['POST', '/api/ai-calls/test'],
+      ['POST', `/api/ai-calls/${AI_CALL_ID}/writeback/retry`],
     ] as const) {
       expect((await call(method, url, method === 'POST' ? { to: '+15125550111' } : undefined)).statusCode, url).toBe(401);
     }
@@ -162,5 +168,61 @@ describe('AI call routes', () => {
       expect(off.statusCode).toBe(503);
       expect(off.json().code).toBe('AI_CALLS_NOT_CONFIGURED');
     });
+  });
+
+  describe('write-back retry', () => {
+    it('a non-admin is 403; a call id that is not a uuid is 404', async () => {
+      app = await build(null);
+      state.session = rep;
+      expect((await call('POST', `/api/ai-calls/${AI_CALL_ID}/writeback/retry`)).statusCode).toBe(403);
+      state.session = admin;
+      expect((await call('POST', '/api/ai-calls/nope/writeback/retry')).statusCode).toBe(404);
+    });
+  });
+});
+
+describe.skipIf(!pgLane)('write-back retry (real Postgres)', () => {
+  let t: Awaited<ReturnType<typeof createTestDb>>;
+  let pgApp: FastifyInstance;
+  beforeAll(async () => {
+    t = await createTestDb();
+    pgApp = await buildApp({ cfg: testConfig(), readiness: async () => ({ dbOk: true, jobsOk: true }), apiRoutes: [(scope) => registerAiCallRoutes(scope, { db: t.db, cti: null })] });
+  }, 120_000);
+  afterAll(async () => {
+    await pgApp?.close();
+    await t?.drop();
+  });
+
+  async function seedRow(status: 'failed' | 'done') {
+    const { orgId } = await seedAiCallCampaign(t.db, 'active');
+    const userId = await seedUser(t.db, orgId);
+    const aiCallId = await seedAiCall(t.db, orgId, userId, { status: 'completed', outcome: 'appointment_set' });
+    const steps = { convert: { status: 'done', detail: 'converted' } };
+    await t.db.insert(schema.aiCallWritebacks).values({ orgId, aiCallId, sfObject: 'Lead', sfRecordId: '00Q8X00000AbCdEUAV', outcome: 'appointment_set', status, attempts: 6, lastError: 'SalesforceApiError', lockedUntil: new Date(), steps });
+    state.session = { ...admin, orgId, userId };
+    return { orgId, aiCallId };
+  }
+  const retry = (aiCallId: string) => pgApp.inject({ method: 'POST', url: `/api/ai-calls/${aiCallId}/writeback/retry`, headers: auth });
+  const rowOf = async (aiCallId: string) => (await t.db.select().from(schema.aiCallWritebacks).where(eq(schema.aiCallWritebacks.aiCallId, aiCallId)))[0]!;
+
+  it('a failed write-back goes back to pending with its attempts reset and its step results kept: 204', async () => {
+    const { aiCallId } = await seedRow('failed');
+    const before = Date.now();
+    const res = await retry(aiCallId);
+    expect(res.statusCode).toBe(204);
+    const row = await rowOf(aiCallId);
+    expect(row).toMatchObject({ status: 'pending', attempts: 0, lockedUntil: null, lastError: null, steps: { convert: { status: 'done', detail: 'converted' } } });
+    expect(row.nextAttemptAt.getTime()).toBeGreaterThanOrEqual(before - 1_000);
+  });
+
+  it('a done write-back, or another tenant\'s call, is 409 NOT_RETRYABLE', async () => {
+    const { aiCallId } = await seedRow('done');
+    const res = await retry(aiCallId);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('NOT_RETRYABLE');
+    const other = await seedRow('failed');
+    state.session = { ...admin, orgId: (await seedRow('done')).orgId };
+    expect((await retry(other.aiCallId)).statusCode).toBe(409);
+    expect((await rowOf(other.aiCallId)).status).toBe('failed');
   });
 });

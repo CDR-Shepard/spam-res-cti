@@ -12,9 +12,11 @@ import { soqlEscape } from '@cti/salesforce';
 import { SF_ID } from '../campaigns/records.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import { sendError } from '../http/errors.js';
+import { DescribeCache } from '../research/describe.js';
 import { soqlIdList } from '../research/text.js';
 import { bookingSettings, outreachSettings } from '../settings.js';
 import { requireAdmin, requireContext } from '../tenancy/scope.js';
+import { writebackReadiness } from '../writeback/readiness.js';
 import { sendCrmError } from './crm-errors.js';
 
 export interface AiCallSettingsRouteDeps {
@@ -22,6 +24,8 @@ export interface AiCallSettingsRouteDeps {
   clients: SalesforceClientFactory;
   /** AI_CALL_DEFAULT_SPECIALISTS: what GET shows for a tenant that has saved no list. */
   defaultSpecialists: readonly string[];
+  /** The service's shared describe cache (call.prepare's); a fresh one when absent. */
+  describes?: DescribeCache;
 }
 
 export const USER_SEARCH_LIMIT = 25;
@@ -63,6 +67,7 @@ const inAskedOrder = (options: SalesforceUserOption[], ids: readonly string[]): 
 
 export async function registerAiCallSettingsRoutes(app: FastifyInstance, deps: AiCallSettingsRouteDeps): Promise<void> {
   const { db, clients } = deps;
+  const describes = deps.describes ?? new DescribeCache();
   const settingsOf = (blob: unknown): AiCallSettings => {
     const org = { settings: blob };
     return { booking: bookingSettings(org, deps.defaultSpecialists), writeback: outreachSettings(org).aiCallWriteback };
@@ -88,6 +93,18 @@ export async function registerAiCallSettingsRoutes(app: FastifyInstance, deps: A
     const saved = (result as unknown as { rows: Array<{ settings: unknown }> }).rows[0];
     if (!saved) return sendError(reply, 404, 'NOT_FOUND', 'No such tenant.');
     return settingsOf(saved.settings);
+  });
+
+  // Plan 1D: can this tenant's connection write call results back and convert a Lead that booked? Read-only.
+  app.get('/settings/ai-calls/readiness', async (req, reply) => {
+    const ctx = await requireContext(db, req, reply);
+    if (!ctx || !requireAdmin(ctx, reply)) return reply;
+    try {
+      const client = await clients(ctx.orgId);
+      return await writebackReadiness(client, describes, ctx.orgId, bookingSettings({ settings: ctx.tenant.settings }, deps.defaultSpecialists));
+    } catch (err) {
+      return sendCrmError(reply, err);
+    }
   });
 
   app.get('/salesforce/users', async (req, reply) => {
