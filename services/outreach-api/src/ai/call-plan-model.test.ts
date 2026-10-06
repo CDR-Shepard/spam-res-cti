@@ -118,7 +118,7 @@ describe('CALL_PLAN_INPUT_SCHEMA', () => {
       type: 'object',
       additionalProperties: false,
       required: ['lastContact', 'lastTopic'],
-      properties: { lastContact: { type: ['string', 'null'], maxLength: 80 }, lastTopic: { type: ['string', 'null'], maxLength: 200 } },
+      properties: { lastContact: { type: ['string', 'null'], minLength: 1, maxLength: 80 }, lastTopic: { type: ['string', 'null'], minLength: 1, maxLength: 200 } },
     });
     expect(p('stillToLearn')).toMatchObject({ type: 'array', maxItems: 9, items: { type: 'string', enum: [...QUALIFICATION_TOPICS] } });
   });
@@ -130,6 +130,22 @@ describe('1D re-engagement output', () => {
     const out = await new AnthropicCallPlanModel({ client: client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input }]) }).plan({ system: 'S', user: 'U' });
     expect(out.plan.reengagement).toEqual({ lastContact: 'back in February', lastTopic: 'the roof leak' });
     expect(out.plan.stillToLearn).toEqual(['timeline', 'price']);
+  });
+  it.each<[string, unknown, unknown]>([
+    ['empty strings', '', ''],
+    ['blank strings', '   ', '\t'],
+    ['an empty topic beside real words', 'back in February', ''],
+  ])('Fix 1 (M-3): %s become null instead of refusing a paid plan', async (_label, lastContact, lastTopic) => {
+    const input = { ...validPlan, reengagement: { lastContact, lastTopic } };
+    const out = await new AnthropicCallPlanModel({ client: client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input }]) }).plan({ system: 'S', user: 'U' });
+    const blank = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? null : v);
+    expect(out.plan.reengagement).toEqual({ lastContact: blank(lastContact), lastTopic: blank(lastTopic) });
+  });
+  it('Fix 1 (M-3): leaves a malformed reengagement for the contract to refuse', async () => {
+    const input = { ...validPlan, reengagement: { lastContact: 7, lastTopic: '' } };
+    const err = await new AnthropicCallPlanModel({ client: client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input }]) }).plan({ system: 'S', user: 'U' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CallPlanOutputError);
+    expect((err as CallPlanOutputError).issues.map((i) => i.path)).toContain('reengagement.lastContact');
   });
   it('refuses a topic the contract does not know', async () => {
     const input = { ...validPlan, stillToLearn: ['budget'] };

@@ -78,7 +78,7 @@ export const CALL_PLAN_INPUT_SCHEMA: TriageTool['input_schema'] = {
           type: 'object',
           additionalProperties: false,
           required: ['lastContact', 'lastTopic'],
-          properties: { lastContact: { type: ['string', 'null'], maxLength: 80 }, lastTopic: { type: ['string', 'null'], maxLength: 200 } },
+          properties: { lastContact: { type: ['string', 'null'], minLength: 1, maxLength: 80 }, lastTopic: { type: ['string', 'null'], minLength: 1, maxLength: 200 } },
         },
       ],
       description: 'Null when the facts show no last real contact. Otherwise lastContact is the facts\' words exactly, and lastTopic what that contact was about, with no digits.',
@@ -138,6 +138,21 @@ export class CallPlanOutputError extends Error {
   }
 }
 
+const blankToNull = (v: unknown): unknown => (typeof v === 'string' && v.trim() === '' ? null : v);
+
+/**
+ * Fix 1 (M-3): an empty or blank lastContact / lastTopic reads as null. The contract refuses "" (min 1), and a paid plan
+ * must not be thrown away for it; lastContact is replaced by our computed words anyway. Returns a new input; anything
+ * that is not a plain re-engagement object is left for the contract to judge.
+ */
+export function normalizeModelInput(input: unknown): unknown {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return input;
+  const r = (input as { reengagement?: unknown }).reengagement;
+  if (r === null || typeof r !== 'object' || Array.isArray(r)) return input;
+  const { lastContact, lastTopic } = r as { lastContact?: unknown; lastTopic?: unknown };
+  return { ...input, reengagement: { ...r, lastContact: blankToNull(lastContact), lastTopic: blankToNull(lastTopic) } };
+}
+
 export class AnthropicCallPlanModel implements CallPlanModel {
   readonly modelId: string;
   constructor(private readonly deps: { client: MessagesClient; model?: string }) {
@@ -159,7 +174,7 @@ export class AnthropicCallPlanModel implements CallPlanModel {
     const usage: TriageUsage = { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens, model: this.modelId };
     const call = response.content.find((b) => b.type === 'tool_use' && b.name === CALL_PLAN_TOOL_NAME);
     if (!call) throw new CallPlanOutputError('the model did not call record_call_plan', usage);
-    const parsed = CallPlan.safeParse(call.input);
+    const parsed = CallPlan.safeParse(normalizeModelInput(call.input));
     if (!parsed.success) {
       const issues = parsed.error.issues.map((i) => ({ path: i.path.join('.') || '(root)', code: i.code }));
       const rawDoNotContact = (call.input as { doNotContact?: unknown } | null | undefined)?.doNotContact;
