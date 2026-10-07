@@ -1,33 +1,51 @@
-import { Link } from '@tanstack/react-router';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { Menu } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Separator } from '@/components/ui/separator';
-import { useAuth } from '@/lib/auth';
-import { TenantSwitcher } from './tenant-switcher';
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
+import { AccountPanel, MainNav, Wordmark } from './app-nav';
 
+const SIDEBAR_WIDTH = 'md:pl-[232px]';
+
+/**
+ * The signed-in frame. Desktop: a fixed 232px sidebar (wordmark, main nav, account at the bottom). Below 768px: a
+ * top bar whose menu button opens the same nav in a drawer (Escape or the close button shuts it; a link closes it).
+ */
 export function AppShell({ children }: { children: ReactNode }) {
-  const auth = useAuth();
-  const isAdmin = Boolean(auth.user?.isAdmin || auth.user?.isSuperAdmin);
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <header className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 sm:px-6">
-        <Link to="/" className="font-semibold">Outreach</Link>
-        <nav aria-label="Main" className="flex flex-wrap gap-x-3 gap-y-1 text-sm">
-          <Link to="/" activeOptions={{ exact: true }} activeProps={{ className: 'font-medium' }}>Dashboard</Link>
-          <Link to="/campaigns" activeProps={{ className: 'font-medium' }}>Campaigns</Link>
-          <Link to="/review" activeProps={{ className: 'font-medium' }}>Needs review</Link>
-          <Link to="/team" activeProps={{ className: 'font-medium' }}>Team</Link>
-          {isAdmin && <Link to="/test-record" activeProps={{ className: 'font-medium' }}>Test a record</Link>}
-          <Link to="/settings/connections" activeProps={{ className: 'font-medium' }}>Settings</Link>
-        </nav>
-        <div className="ml-auto flex items-center gap-3">
-          <TenantSwitcher />
-          <span className="text-sm text-muted-foreground">{auth.user?.email}</span>
-          <Button variant="ghost" size="sm" onClick={() => void auth.signOut().then(() => window.location.assign('/sign-in'))}>Sign out</Button>
-        </div>
-      </header>
-      <Separator />
-      <main className="mx-auto max-w-5xl p-4 sm:p-6">{children}</main>
+      <a href="#main" className="sr-only z-[60] rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground focus:not-sr-only focus:fixed focus:top-3 focus:left-3">
+        Skip to content
+      </a>
+      <div className="fixed inset-y-0 left-0 z-30 hidden w-[232px] flex-col border-r border-sidebar-border bg-sidebar md:flex">
+        <div className="flex h-16 shrink-0 items-center px-5"><Wordmark /></div>
+        <div className="flex-1 overflow-y-auto px-3 pt-2 pb-4"><MainNav /></div>
+        <AccountPanel />
+      </div>
+      <MobileBar />
+      <main id="main" tabIndex={-1} className={`min-w-0 outline-none ${SIDEBAR_WIDTH}`}>
+        <div className="mx-auto w-full max-w-[1120px] px-4 pt-6 pb-16 sm:px-6 md:px-10 md:pt-10">{children}</div>
+      </main>
     </div>
+  );
+}
+
+function MobileBar() {
+  const [open, setOpen] = useState(false);
+  const close = () => setOpen(false);
+  return (
+    <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b bg-background/85 px-4 backdrop-blur-md md:hidden">
+      <Wordmark />
+      <Sheet open={open} onOpenChange={setOpen}>
+        <SheetTrigger asChild>
+          <Button variant="ghost" size="icon" aria-label="Open menu"><Menu aria-hidden /></Button>
+        </SheetTrigger>
+        <SheetContent>
+          <SheetTitle>Menu</SheetTitle>
+          <div className="flex h-14 shrink-0 items-center px-5"><Wordmark onNavigate={close} /></div>
+          <div className="flex-1 overflow-y-auto px-3 pt-2 pb-4"><MainNav onNavigate={close} /></div>
+          <AccountPanel />
+        </SheetContent>
+      </Sheet>
+    </header>
   );
 }
