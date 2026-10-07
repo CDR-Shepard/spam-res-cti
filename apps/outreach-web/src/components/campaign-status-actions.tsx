@@ -57,7 +57,7 @@ export function CampaignStatusActions({ campaign }: { campaign: Campaign }) {
       <div role="group" aria-label="Change status" className="flex flex-wrap gap-2">
         {actions.map((a) =>
           a.confirm ? (
-            <ConfirmAction key={a.to} label={a.label} title={a.confirm.title} description={a.confirm.description} confirmLabel={a.label} disabled={change.isPending} onConfirm={() => change.mutate(a.to)} />
+            <ConfirmAction key={a.to} label={a.label} title={a.confirm.title} description={a.confirm.description} confirmLabel={a.label} triggerVariant={a.to === 'archived' ? 'outline' : 'default'} disabled={change.isPending} onConfirm={() => change.mutate(a.to)} />
           ) : (
             <Button key={a.to} size="sm" variant="outline" disabled={change.isPending} onClick={() => change.mutate(a.to)}>{a.label}</Button>
           ),
