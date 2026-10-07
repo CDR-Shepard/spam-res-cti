@@ -36,7 +36,8 @@ describe('RecordTestPreview', () => {
     expect(screen.queryByText(RED_CONSENT)).not.toBeInTheDocument();
     expect(screen.getByText('Last time we spoke: back in February — the roof')).toBeInTheDocument();
     expect(screen.getByText('The agent will treat them as someone we know.')).toBeInTheDocument();
-    expect(screen.getByText('their price in mind, what they owe')).toBeInTheDocument();
+    // "Still to learn" is a checklist: one item per topic, in the plan's order.
+    expect(within(screen.getByRole('list', { name: 'Still to learn' })).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['their price in mind', 'what they owe']);
     expect(screen.getByText('Ask how the move to Ohio is going.')).toBeInTheDocument();
     expect(screen.getByText('Inherited the house from her mother.')).toBeInTheDocument();
     expect(screen.getByText(/relocating to Ohio in spring/)).toHaveTextContent('(Note, strong)');
