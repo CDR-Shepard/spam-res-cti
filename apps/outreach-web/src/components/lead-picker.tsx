@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import type { CandidateRecord, SelectionChange } from '@cti/contracts';
 import { ConfirmAction } from '@/components/confirm-action';
-import { Badge } from '@/components/ui/badge';
+import { StatusBadge } from '@/components/layout/status-badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -67,7 +67,7 @@ export function LeadPicker({ campaignId, canEdit }: { campaignId: string; canEdi
         {p && (
           <>
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span>{formatCount(p.total)} records match · {formatCount(p.selectedCount)} selected</span>
+              <span className="mr-auto tabular-nums">{formatCount(p.total)} records match · {formatCount(p.selectedCount)} selected</span>
               <Button size="sm" variant="outline" disabled={busy || addable.length === 0} onClick={() => change.mutate({ add: addable })}>Select this page</Button>
               <Button size="sm" variant="outline" disabled={busy} onClick={() => change.mutate({ selectAll: true })}>Select all {formatCount(p.total)}</Button>
               <ConfirmAction
@@ -101,16 +101,16 @@ export function LeadPicker({ campaignId, canEdit }: { campaignId: string; canEdi
                       </TableCell>
                       <TableCell>{r.name ?? r.sfRecordId}</TableCell>
                       <TableCell>{r.ownerName ?? '—'}</TableCell>
-                      <TableCell>{r.consentAiCall ? <Badge variant="secondary">AI consent</Badge> : <Badge variant="outline">No AI consent</Badge>}</TableCell>
+                      <TableCell>{r.consentAiCall ? <StatusBadge tone="success">AI consent</StatusBadge> : <StatusBadge tone="neutral">No AI consent</StatusBadge>}</TableCell>
                       <TableCell className="text-sm text-muted-foreground">{view.note}</TableCell>
                     </TableRow>
                   );
                 })}
               </TableBody>
             </Table>
-            <div className="flex items-center gap-2 text-sm">
+            <div className="flex items-center justify-end gap-2 text-sm">
               <Button size="sm" variant="outline" disabled={p.page <= 1} onClick={() => setPage(p.page - 1)}>Previous</Button>
-              <span>Page {p.page} of {p.pages}</span>
+              <span className="px-1 text-muted-foreground tabular-nums">Page {p.page} of {p.pages}</span>
               <Button size="sm" variant="outline" disabled={p.page >= p.pages} onClick={() => setPage(p.page + 1)}>Next</Button>
             </div>
           </>

@@ -1,6 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
+import { CirclePause, Info, TriangleAlert } from 'lucide-react';
 import type { Campaign } from '@cti/contracts';
+import { PageHeader } from '@/components/layout/page-header';
+import { StatGrid, StatTile } from '@/components/layout/stat-tile';
 import { useAuth } from '@/lib/auth';
 import { getCampaign, outreachKeys } from '@/lib/outreach-api';
 import { errorText, formatCount, formatDateTime, pauseReasonWords, SF_OBJECT_WORDS } from '@/lib/outreach-words';
@@ -27,7 +30,7 @@ export function CampaignDetail({ campaignId, focusCallId = null }: { campaignId:
   if (campaign.error) return <p role="alert" className="text-sm text-destructive">{errorText(campaign.error)}</p>;
   const c = campaign.data;
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <CampaignHeader campaign={c} isAdmin={isAdmin} />
       <CampaignBanners campaign={c} />
       <CampaignSettings campaign={c} canEdit={isAdmin && c.status !== 'archived'} />
@@ -49,37 +52,43 @@ function AiCallSections({ campaign: c, isAdmin, focusCallId }: { campaign: Campa
 
 function CampaignHeader({ campaign: c, isAdmin }: { campaign: Campaign; isAdmin: boolean }) {
   return (
-    <div className="space-y-2">
-      <Link to="/campaigns" className="text-sm text-muted-foreground hover:underline">← Campaigns</Link>
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-semibold">{c.name}</h1>
-        <CampaignStatusBadge status={c.status} />
-      </div>
-      <p className="text-sm text-muted-foreground">
-        {SF_OBJECT_WORDS[c.sfObject]} from {c.source.kind === 'list_view' ? 'a Salesforce list view' : 'a SOQL query'} · {formatCount(c.memberCount)} members · last refreshed {c.lastRefreshedAt ? formatDateTime(c.lastRefreshedAt) : 'never'}
-      </p>
-      {c.source.kind === 'soql' && (
-        <details className="text-sm">
-          <summary className="cursor-pointer text-muted-foreground">Show query</summary>
-          <pre className="mt-2 overflow-x-auto rounded-md bg-muted p-3 text-xs">{c.source.soql}</pre>
-        </details>
-      )}
-      {isAdmin && <CampaignStatusActions campaign={c} />}
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow={<Link to="/campaigns" className="rounded-sm transition-colors duration-150 hover:text-foreground">← Campaigns</Link>}
+        title={c.name}
+        meta={<CampaignStatusBadge status={c.status} />}
+        description={<>{SF_OBJECT_WORDS[c.sfObject]} from {c.source.kind === 'list_view' ? 'a Salesforce list view' : 'a SOQL query'} · {formatCount(c.memberCount)} members · last refreshed {c.lastRefreshedAt ? formatDateTime(c.lastRefreshedAt) : 'never'}</>}
+        actions={isAdmin && <CampaignStatusActions campaign={c} />}
+      >
+        {c.source.kind === 'soql' && (
+          <details className="text-[13px]">
+            <summary className="text-muted-foreground">Show query</summary>
+            <pre className="mt-2 overflow-x-auto rounded-lg border bg-card p-3 font-mono text-xs leading-5">{c.source.soql}</pre>
+          </details>
+        )}
+      </PageHeader>
+      <StatGrid>
+        <StatTile label="Members" value={formatCount(c.memberCount)} />
+        <StatTile label="Records" value={SF_OBJECT_WORDS[c.sfObject]} size="md" />
+        <StatTile label="Last refreshed" value={c.lastRefreshedAt ? formatDateTime(c.lastRefreshedAt) : 'Never'} size="md" className="col-span-2 sm:col-span-1" />
+      </StatGrid>
     </div>
   );
 }
+
+const BANNER = 'flex items-start gap-3 rounded-xl border px-4 py-3 text-sm leading-6';
 
 function CampaignBanners({ campaign: c }: { campaign: Campaign }) {
   return (
     <>
       {c.status === 'paused' && (
-        <div role="status" className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">{pauseReasonWords(c.pauseReason)}</div>
+        <div role="status" className={`${BANNER} border-warning/25 bg-warning-soft`}><CirclePause aria-hidden className="mt-1 size-4 shrink-0 text-warning" />{pauseReasonWords(c.pauseReason)}</div>
       )}
       {c.status === 'dry_run' && (
-        <div role="status" className="rounded-md border p-3 text-sm">{DRY_RUN_WORDS[c.mode]}</div>
+        <div role="status" className={`${BANNER} bg-card`}><Info aria-hidden className="mt-1 size-4 shrink-0 text-muted-foreground" />{DRY_RUN_WORDS[c.mode]}</div>
       )}
       {c.lastRefreshError && (
-        <div role="alert" className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">The last Salesforce refresh failed: {c.lastRefreshError}</div>
+        <div role="alert" className={`${BANNER} border-destructive/30 bg-danger-soft text-destructive`}><TriangleAlert aria-hidden className="mt-1 size-4 shrink-0" />The last Salesforce refresh failed: {c.lastRefreshError}</div>
       )}
     </>
   );

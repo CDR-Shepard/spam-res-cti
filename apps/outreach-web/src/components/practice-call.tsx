@@ -3,6 +3,7 @@ import { useState } from 'react';
 import type { CallPlanCard, PracticeCallsResponse, TestCallResponse } from '@cti/contracts';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
+import { NativeSelect } from '@/components/ui/native-select';
 import { useAuth } from '@/lib/auth';
 import { practiceStatusWords } from '@/lib/call-words';
 import { getAiAvailability, outreachKeys, practiceCall, practiceCalls } from '@/lib/outreach-api';
@@ -57,16 +58,16 @@ function AdminPracticeCall({ enrollmentId, version, campaignId }: { enrollmentId
   const numbers = availability.data.testNumbers;
   const to = picked ?? numbers[0] ?? null;
   return (
-    <div className="space-y-2 rounded-md border p-3">
+    <div className="space-y-2 rounded-lg border p-3">
       {numbers.length === 0 || !to ? (
         <p className="text-muted-foreground">{NO_NUMBERS}</p>
       ) : (
         <div className="flex flex-wrap items-end gap-2">
-          <Label className="flex-col items-start">
+          <Label className="flex-col items-start gap-1.5">
             Test number
-            <select className="h-9 rounded-md border bg-transparent px-2 text-sm" value={to} onChange={(e) => setPicked(e.target.value)}>
+            <NativeSelect value={to} onChange={(e) => setPicked(e.target.value)}>
               {numbers.map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
+            </NativeSelect>
           </Label>
           <Button size="sm" variant="outline" disabled={call.isPending} onClick={() => call.mutate(to)}>Practice call to my phone</Button>
         </div>

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import type { NeedsReviewItem, NeedsReviewResponse, ReviewDecision } from '@cti/contracts';
+import { PageHeader } from '@/components/layout/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -35,7 +36,7 @@ export function ReviewPage() {
   const items = review.data?.items;
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Needs review</h1>
+      <PageHeader title="Needs review" />
       <Card>
         <CardHeader>
           <CardTitle>Flagged by the AI</CardTitle>
@@ -72,10 +73,10 @@ function ReviewRow({ item, busy, onDecide }: ReviewRowProps) {
     <TableRow>
       <TableCell>
         <div className="font-medium">{label}</div>
-        <div className="text-xs text-muted-foreground">Flagged {formatDateTime(item.flaggedAt)}</div>
+        <div className="text-xs text-muted-foreground tabular-nums">Flagged {formatDateTime(item.flaggedAt)}</div>
       </TableCell>
       <TableCell>{DNC_CATEGORY_WORDS[item.category]}</TableCell>
-      <TableCell className="max-w-xs whitespace-normal"><blockquote className="border-l-2 pl-2 italic">“{item.quote}”</blockquote></TableCell>
+      <TableCell className="max-w-xs whitespace-normal"><blockquote className="border-l-2 border-foreground/15 pl-3 leading-6 text-foreground/80">“{item.quote}”</blockquote></TableCell>
       <TableCell><Link to="/campaigns/$campaignId" params={{ campaignId: item.campaignId }} className="underline-offset-4 hover:underline">{item.campaignName}</Link></TableCell>
       <TableCell>{item.ownerName ?? '—'}</TableCell>
       <TableCell className="text-right">

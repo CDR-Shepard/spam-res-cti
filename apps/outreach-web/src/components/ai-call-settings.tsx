@@ -93,7 +93,7 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
         hint={draft.writeback ? undefined : NEEDS_WRITEBACK_WORDS}
       />
       <section className="space-y-2">
-        <h3 className="text-sm font-medium">Appointments go to</h3>
+        <h3 className="text-[13px] font-semibold">Appointments go to</h3>
         <OwnerList
           ids={draft.booking.specialists}
           known={known}
@@ -117,7 +117,7 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
         ))}
       </div>
       <section className="space-y-2">
-        <h3 className="text-sm font-medium">Salesforce write-back</h3>
+        <h3 className="text-[13px] font-semibold">Salesforce write-back</h3>
         <Check
           label="Write call results back to Salesforce"
           checked={draft.writeback}
@@ -125,10 +125,10 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
         />
       </section>
       {!valid && <p className="text-sm text-destructive">{INVALID_WORDS}</p>}
-      <div className="flex items-center gap-3">
-        <Button type="submit" size="sm" disabled={!valid || save.isPending}>Save AI call settings</Button>
+      <div className="flex items-center gap-3 border-t pt-5">
+        <Button type="submit" disabled={!valid || save.isPending}>Save AI call settings</Button>
         {/* Only while the form still holds what was saved: every edit makes a new draft (final review m8). */}
-        {save.isSuccess && !save.isPending && save.variables === draft && <p role="status" className="text-sm">Saved.</p>}
+        {save.isSuccess && !save.isPending && save.variables === draft && <p role="status" className="text-sm font-medium text-success">Saved.</p>}
       </div>
       {save.error && <p className="text-sm text-destructive">{errorText(save.error)}</p>}
     </form>
@@ -157,7 +157,7 @@ function Check({ label, checked, onChange, hint, disabled }: { label: string; ch
 
 function NumberField({ label, value, min, max, step = 1, onChange }: { label: string; value: number; min: number; max: number; step?: number; onChange: (v: number) => void }) {
   return (
-    <label className="flex flex-col gap-1 text-sm">
+    <label className="flex flex-col gap-1.5 text-[13px] font-medium">
       {label}
       <Input
         type="number"
@@ -174,8 +174,8 @@ function NumberField({ label, value, min, max, step = 1, onChange }: { label: st
 function KindFields({ kind, value, onChange }: { kind: Kind; value: KindRules; onChange: (patch: Partial<KindRules>) => void }) {
   const { offer, noun } = KIND_TITLES[kind];
   return (
-    <fieldset className="space-y-3 rounded-md border p-3">
-      <legend className="px-1 text-sm font-medium">{noun}s</legend>
+    <fieldset className="space-y-4 rounded-xl border bg-background/60 p-4">
+      <legend className="px-1.5 text-[13px] font-semibold">{noun}s</legend>
       <Check label={offer} checked={value.enabled} onChange={(enabled) => onChange({ enabled })} />
       <div className="grid grid-cols-2 gap-3">
         <NumberField label={`${noun} length (minutes)`} value={value.durationMinutes} min={10} max={180} onChange={(durationMinutes) => onChange({ durationMinutes })} />

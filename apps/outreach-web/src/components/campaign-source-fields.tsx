@@ -1,5 +1,6 @@
 import type { ListViewsResponse, SfObject } from '@cti/contracts';
 import { Label } from '@/components/ui/label';
+import { NativeSelect } from '@/components/ui/native-select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { errorText } from '@/lib/outreach-words';
@@ -27,15 +28,14 @@ export function CampaignSourceFields({ sfObject, kind, listViewId, soql, views, 
       </TabsList>
       <TabsContent value="list_view" className="grid gap-1 pt-2">
         <Label htmlFor="campaign-list-view">Salesforce list view</Label>
-        <select
+        <NativeSelect
           id="campaign-list-view"
-          className="h-9 rounded-md border bg-background px-2 text-sm"
           value={listViewId}
           onChange={(e) => onListView(e.target.value)}
         >
           <option value="">{views.isPending ? 'Loading list views…' : 'Choose a list view'}</option>
           {views.data?.listViews.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
-        </select>
+        </NativeSelect>
         {Boolean(views.error) && <p role="alert" className="text-sm text-destructive">{errorText(views.error)}</p>}
         <p className="text-xs text-muted-foreground">The list view is read again on every refresh, so edits in Salesforce carry over.</p>
       </TabsContent>

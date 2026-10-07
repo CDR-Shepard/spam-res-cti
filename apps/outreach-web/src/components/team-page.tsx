@@ -1,11 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Invite, InvitesResponse, TeamMember, TeamResponse, type RoleSlug } from '@cti/contracts';
+import { PageHeader } from '@/components/layout/page-header';
+import { StatusBadge } from '@/components/layout/status-badge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { NativeSelect } from '@/components/ui/native-select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { api, ApiRequestError, json } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -36,6 +39,7 @@ export function TeamPage() {
 
   return (
     <div className="space-y-6">
+      <PageHeader title="Team" />
       <Card>
         <CardHeader><CardTitle>Members</CardTitle></CardHeader>
         <CardContent>
@@ -48,10 +52,10 @@ export function TeamPage() {
               <TableBody>
                 {team.data.members.map((m) => (
                   <TableRow key={m.id}>
-                    <TableCell>{m.email}</TableCell>
+                    <TableCell className="font-medium">{m.email}</TableCell>
                     <TableCell>{m.displayName ?? '—'}</TableCell>
                     <TableCell>{m.isAdmin ? <Badge>Admin</Badge> : <Badge variant="secondary">Member</Badge>}</TableCell>
-                    <TableCell>{m.signedIn ? 'Signed in' : 'Not yet'}</TableCell>
+                    <TableCell>{m.signedIn ? <StatusBadge tone="success">Signed in</StatusBadge> : <StatusBadge tone="neutral">Not yet</StatusBadge>}</TableCell>
                     {isAdmin && (
                       <TableCell className="text-right">
                         <Button variant="outline" size="sm" disabled={m.id === auth.user?.userId || toggleAdmin.isPending} onClick={() => toggleAdmin.mutate(m)}>
@@ -71,16 +75,16 @@ export function TeamPage() {
           <CardHeader><CardTitle>Invites</CardTitle></CardHeader>
           <CardContent className="space-y-4">
             <form className="flex flex-wrap items-end gap-3" onSubmit={(e) => { e.preventDefault(); invite.mutate(); }}>
-              <div className="grid gap-1">
+              <div className="grid w-full gap-1.5 sm:w-72">
                 <Label htmlFor="invite-email">Email</Label>
                 <Input id="invite-email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="rep@company.com" />
               </div>
-              <div className="grid gap-1">
+              <div className="grid gap-1.5">
                 <Label htmlFor="invite-role">Role</Label>
-                <select id="invite-role" className="h-9 rounded-md border bg-background px-2 text-sm" value={role} onChange={(e) => setRole(e.target.value as RoleSlug)}>
+                <NativeSelect id="invite-role" value={role} onChange={(e) => setRole(e.target.value as RoleSlug)}>
                   <option value="member">Member</option>
                   <option value="admin">Admin</option>
-                </select>
+                </NativeSelect>
               </div>
               <Button type="submit" disabled={invite.isPending}>Send invite</Button>
             </form>
@@ -88,9 +92,9 @@ export function TeamPage() {
             {invites.error && <p role="alert" className="text-sm text-destructive">{errorText(invites.error)}</p>}
             {invites.data && invites.data.invites.filter((i) => i.state === 'pending').length === 0 && <p className="text-sm text-muted-foreground">No pending invites.</p>}
             {invites.data && invites.data.invites.filter((i) => i.state === 'pending').map((i) => (
-              <div key={i.id} className="flex items-center justify-between text-sm">
-                <span>{i.email}</span>
-                <span className="text-muted-foreground">{i.role ?? 'member'} · expires {new Date(i.expiresAt).toLocaleDateString()}</span>
+              <div key={i.id} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t pt-3 text-sm first-of-type:border-t-0 first-of-type:pt-0">
+                <span className="min-w-0 truncate font-medium">{i.email}</span>
+                <span className="text-muted-foreground tabular-nums">{i.role ?? 'member'} · expires {new Date(i.expiresAt).toLocaleDateString()}</span>
               </div>
             ))}
           </CardContent>

@@ -38,8 +38,8 @@ export function WritebackReadinessSection() {
   const r = readiness.data;
   const problems = r ? r.items.filter((i) => !isConvertItem(i)) : [];
   return (
-    <section className="space-y-2 text-sm">
-      <h3 className="font-medium">Salesforce write-back readiness</h3>
+    <section className="space-y-2 border-t pt-5 text-sm leading-6">
+      <h3 className="text-[13px] font-semibold">Salesforce write-back readiness</h3>
       {readiness.isPending && <p className="text-muted-foreground">Checking Salesforce…</p>}
       {readiness.error && <p className="text-destructive">{errorText(readiness.error)}</p>}
       {r && problems.length === 0 && <p>{r.ready ? 'Ready' : 'Not ready'}</p>}

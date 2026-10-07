@@ -60,7 +60,7 @@ function PracticeTable({ items }: { items: PracticeCall[] }) {
         {items.map((p) => (
           <Fragment key={p.id}>
             <TableRow>
-              <TableCell>{formatDateTime(p.createdAt)}</TableCell>
+              <TableCell className="text-muted-foreground">{formatDateTime(p.createdAt)}</TableCell>
               <TableCell>{p.name ?? p.sfRecordId}<span className="text-xs text-muted-foreground"> · plan v{p.planVersion}</span></TableCell>
               <TableCell className="whitespace-normal"><OutcomeCell p={p} /></TableCell>
               <TableCell className="whitespace-normal space-y-2">

@@ -42,7 +42,7 @@ export function OwnerList({ ids, known, notFound, onChange }: OwnerListProps) {
       {ids.map((id, i) => {
         const { name, text, flagged } = ownerLabel(id, known, notFound);
         return (
-          <li key={id} className="flex items-center gap-2 rounded-md border px-2 py-1 text-sm">
+          <li key={id} className="flex items-center gap-2 rounded-lg border px-2 py-1 text-sm">
             <span className="w-5 text-muted-foreground">{i + 1}.</span>
             <span className={flagged ? 'flex-1 text-destructive' : 'flex-1'}>{text}</span>
             <Button type="button" variant="ghost" size="sm" aria-label={`Move ${name} up`} disabled={i === 0} onClick={() => move(i, -1)}>↑</Button>

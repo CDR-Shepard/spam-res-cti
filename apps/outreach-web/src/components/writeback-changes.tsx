@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query';
 import type { WritebackChange, WritebackStatus, WritebackSummary } from '@cti/contracts';
-import { Badge } from '@/components/ui/badge';
+import { StatusBadge, type StatusTone } from '@/components/layout/status-badge';
 import { Button } from '@/components/ui/button';
 import { retryWriteback } from '@/lib/outreach-api';
 import { errorText } from '@/lib/outreach-words';
@@ -13,20 +13,20 @@ const STATUS_WORDS: Readonly<Record<WritebackStatus, string>> = {
   failed: 'Failed',
   skipped: 'Skipped',
 };
-const STATUS_VARIANT: Readonly<Record<WritebackStatus, 'secondary' | 'outline' | 'destructive'>> = {
-  pending: 'outline',
+const STATUS_TONE: Readonly<Record<WritebackStatus, StatusTone>> = {
+  pending: 'neutral',
   running: 'outline',
-  done: 'secondary',
-  partial: 'destructive',
-  failed: 'destructive',
-  skipped: 'outline',
+  done: 'success',
+  partial: 'warning',
+  failed: 'danger',
+  skipped: 'neutral',
 };
 
 /** The badge's words, for a control that names the status. */
 export const writebackStatusWords = (status: WritebackStatus): string => STATUS_WORDS[status];
 
 export function WritebackBadge({ status }: { status: WritebackStatus }) {
-  return <Badge variant={STATUS_VARIANT[status]}>{STATUS_WORDS[status]}</Badge>;
+  return <StatusBadge tone={STATUS_TONE[status]}>{STATUS_WORDS[status]}</StatusBadge>;
 }
 
 /** The groups in the order a rep reads them, with the heading each list is named by. */

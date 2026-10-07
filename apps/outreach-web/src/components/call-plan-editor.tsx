@@ -3,6 +3,7 @@ import { contactLabel, EditableCallPlan, lastContactWordsAt, PreferredWindow, QU
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { NativeSelect } from '@/components/ui/native-select';
 import { Textarea } from '@/components/ui/textarea';
 import { EVIDENCE_WORDS, GOAL_WORDS, STRENGTH_WORDS, TOPIC_WORDS, WINDOW_WORDS } from '@/lib/call-words';
 
@@ -78,7 +79,7 @@ export function CallPlanEditor({ plan, onSave, onCancel, busy }: { plan: Editabl
   }
 
   return (
-    <form className="space-y-3 rounded-md border p-3" onSubmit={(e) => { e.preventDefault(); save(); }}>
+    <form className="space-y-3 rounded-lg border p-3" onSubmit={(e) => { e.preventDefault(); save(); }}>
       <Field label="Situation summary"><Textarea value={draft.situationSummary} onChange={(e) => set('situationSummary', e.target.value)} /></Field>
       {plan.sellingSignals.length > 0 && (
         <ul className="space-y-1 text-xs text-muted-foreground" aria-label="Selling signals (read-only)">
@@ -88,7 +89,7 @@ export function CallPlanEditor({ plan, onSave, onCancel, busy }: { plan: Editabl
       <Field label="Opener"><Input value={draft.opener} onChange={(e) => set('opener', e.target.value)} /></Field>
       {contactWords && <p className="text-sm text-muted-foreground">{`${contactLabel(plan.reengagement?.lastContactKind)}: ${contactWords}`}</p>}
       {plan.reengagement && <Field label="What we last talked about"><Input maxLength={200} value={draft.lastTopic} onChange={(e) => set('lastTopic', e.target.value)} /></Field>}
-      <fieldset className="rounded-md border p-2">
+      <fieldset className="rounded-lg border p-2">
         <legend className="px-1 text-sm font-medium">Still to learn</legend>
         <div className="flex flex-wrap gap-x-4 gap-y-1">
           {QUALIFICATION_TOPICS.map((t) => (
@@ -101,7 +102,7 @@ export function CallPlanEditor({ plan, onSave, onCancel, busy }: { plan: Editabl
         {keepOne && <p className="mt-1 text-xs text-muted-foreground">Keep at least one topic to learn.</p>}
       </fieldset>
       {draft.goals.map((g, i) => (
-        <fieldset key={g.goal} className="space-y-2 rounded-md border p-2">
+        <fieldset key={g.goal} className="space-y-2 rounded-lg border p-2">
           <legend className="px-1 text-sm font-medium">{GOAL_WORDS[g.goal]}</legend>
           <Field label={`Known: ${GOAL_WORDS[g.goal]}`}><Input value={g.known} onChange={(e) => setGoal(i, { known: e.target.value })} /></Field>
           <Field label={`How to ask: ${GOAL_WORDS[g.goal]}`}><Input value={g.approach} onChange={(e) => setGoal(i, { approach: e.target.value })} /></Field>
@@ -112,9 +113,9 @@ export function CallPlanEditor({ plan, onSave, onCancel, busy }: { plan: Editabl
       <Field label="Avoid (one per line)"><Textarea value={draft.avoid} onChange={(e) => set('avoid', e.target.value)} /></Field>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Best time to call">
-          <select className="h-9 w-full rounded-md border bg-transparent px-2 text-sm" value={draft.window} onChange={(e) => set('window', PreferredWindow.parse(e.target.value))}>
+          <NativeSelect className="w-full" value={draft.window} onChange={(e) => set('window', PreferredWindow.parse(e.target.value))}>
             {PreferredWindow.options.map((w) => <option key={w} value={w}>{WINDOW_WORDS[w]}</option>)}
-          </select>
+          </NativeSelect>
         </Field>
         <Field label="Why that time"><Input value={draft.windowReason} onChange={(e) => set('windowReason', e.target.value)} /></Field>
       </div>

@@ -2,6 +2,8 @@ import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useId, useState } from 'react';
 import type { Campaign } from '@cti/contracts';
+import { Plus } from 'lucide-react';
+import { PageHeader } from '@/components/layout/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -19,15 +21,15 @@ export function CampaignsPage() {
   const rows = campaigns.data?.campaigns;
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Campaigns</h1>
-        {isAdmin && <Button asChild><Link to="/campaigns/new">New campaign</Link></Button>}
-      </div>
+      <PageHeader
+        title="Campaigns"
+        actions={isAdmin && <Button asChild><Link to="/campaigns/new"><Plus aria-hidden />New campaign</Link></Button>}
+      />
       <Card>
         <CardContent className="space-y-4">
-          <div className="flex items-center gap-2 text-sm">
+          <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
             <input id={archivedId} type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
-            <label htmlFor={archivedId}>Include archived</label>
+            <label htmlFor={archivedId} className="cursor-pointer select-none">Include archived</label>
           </div>
           {campaigns.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
           {campaigns.error && <p role="alert" className="text-sm text-destructive">{errorText(campaigns.error)}</p>}
@@ -52,14 +54,14 @@ function CampaignRow({ campaign: c }: { campaign: Campaign }) {
   return (
     <TableRow>
       <TableCell><Link to="/campaigns/$campaignId" params={{ campaignId: c.id }} className="font-medium underline-offset-4 hover:underline">{c.name}</Link></TableCell>
-      <TableCell>{SF_OBJECT_WORDS[c.sfObject]}</TableCell>
+      <TableCell className="text-muted-foreground">{SF_OBJECT_WORDS[c.sfObject]}</TableCell>
       <TableCell className="whitespace-normal">
         <CampaignStatusBadge status={c.status} />
         {c.status === 'paused' && <p className="mt-1 text-xs text-muted-foreground">{pauseReasonWords(c.pauseReason)}</p>}
         {c.lastRefreshError && <p className="mt-1 text-xs text-destructive">Last refresh failed</p>}
       </TableCell>
       <TableCell className="text-right">{formatCount(c.memberCount)}</TableCell>
-      <TableCell>{c.lastRefreshedAt ? formatDateTime(c.lastRefreshedAt) : 'Never'}</TableCell>
+      <TableCell className="text-muted-foreground">{c.lastRefreshedAt ? formatDateTime(c.lastRefreshedAt) : 'Never'}</TableCell>
     </TableRow>
   );
 }

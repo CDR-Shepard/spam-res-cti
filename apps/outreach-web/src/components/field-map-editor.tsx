@@ -50,9 +50,9 @@ export function FieldMapEditor({ value, canEdit }: { value: FieldMap; canEdit: b
           <ObjectFieldsEditor key={sfObject} sfObject={sfObject} value={draft[sfObject]} canEdit={canEdit} onChange={(next) => update(sfObject, next)} />
         ))}
         {canEdit && (
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 border-t pt-5">
             <Button onClick={() => save.mutate()} disabled={save.isPending}>Save fields</Button>
-            {save.isSuccess && <p role="status" className="text-sm text-muted-foreground">Saved.</p>}
+            {save.isSuccess && <p role="status" className="text-sm font-medium text-success">Saved.</p>}
           </div>
         )}
         {save.error && <p role="alert" className="text-sm text-destructive">{errorText(save.error)}</p>}
@@ -79,14 +79,14 @@ function ObjectFieldsEditor({ sfObject, value, canEdit, onChange }: ObjectFields
   const movePhone = (from: number, to: number) => onChange({ ...value, phones: swapped(value.phones, from, to) });
   return (
     <section aria-labelledby={headingId} className="space-y-3">
-      <h3 id={headingId} className="font-medium">{sfObject} fields</h3>
+      <h3 id={headingId} className="text-[15px] font-semibold tracking-[-0.01em]">{sfObject} fields</h3>
       <div className="space-y-2">
-        <p className="text-sm text-muted-foreground">Notes fields</p>
+        <p className="eyebrow">Notes fields</p>
         {value.notes.length === 0 && <p className="text-sm text-muted-foreground">None. Triage will only see Tasks.</p>}
         <ul aria-label={`${sfObject} notes fields`} className="flex flex-wrap gap-2">
           {value.notes.map((field) => (
             <li key={field}>
-              <Badge variant="secondary" className="gap-1">
+              <Badge variant="outline" className="gap-1 font-mono">
                 {field}
                 {canEdit && (
                   <button type="button" aria-label={`Remove ${field}`} onClick={() => onChange({ ...value, notes: value.notes.filter((f) => f !== field) })}>
@@ -98,10 +98,10 @@ function ObjectFieldsEditor({ sfObject, value, canEdit, onChange }: ObjectFields
           ))}
         </ul>
         {canEdit && (
-          <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); addNote(); }}>
-            <div className="grid gap-1">
+          <form className="flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); addNote(); }}>
+            <div className="grid min-w-0 flex-1 gap-1.5 sm:flex-none">
               <Label htmlFor={inputId}>Add a notes field</Label>
-              <Input id={inputId} value={newField} onChange={(e) => setNewField(e.target.value)} placeholder="Notes__c" className="w-56" />
+              <Input id={inputId} value={newField} onChange={(e) => setNewField(e.target.value)} placeholder="Notes__c" className="w-full font-mono sm:w-56" />
             </div>
             <Button type="submit" variant="outline" size="sm">Add</Button>
           </form>
@@ -109,11 +109,11 @@ function ObjectFieldsEditor({ sfObject, value, canEdit, onChange }: ObjectFields
         {problem && <p role="alert" className="text-sm text-destructive">{problem}</p>}
       </div>
       <div className="space-y-2">
-        <p className="text-sm text-muted-foreground">Phone fields, in calling order</p>
+        <p className="eyebrow">Phone fields, in calling order</p>
         <ol aria-label={`${sfObject} phone fields`} className="space-y-1">
           {value.phones.map((field, i) => (
             <li key={field} className="flex items-center gap-2 text-sm">
-              <span className="w-40">{i + 1}. {field}</span>
+              <span className="w-44 truncate font-mono text-[13px]"><span className="text-muted-foreground tabular-nums">{i + 1}.</span> {field}</span>
               {canEdit && (
                 <>
                   <Button variant="ghost" size="icon-xs" aria-label={`Move ${field} up`} disabled={i === 0} onClick={() => movePhone(i, i - 1)}><ArrowUpIcon /></Button>

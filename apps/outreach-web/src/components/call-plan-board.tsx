@@ -12,6 +12,8 @@ import { CallPlanCardView } from './call-plan-card';
 const BOARD_STAGES = CallStage.options.filter((s) => s !== 'done');
 const POLL_MS = 15_000;
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+/** A segmented-control look for the stage filter: the picked stage is a white pill on the gray track. */
+const segment = (on: boolean): string => (on ? 'h-7 bg-card font-semibold shadow-[0_0_0_1px_var(--border),0_1px_2px_rgb(15_15_14/0.06)] hover:bg-card' : 'h-7 text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground');
 
 export function CallPlanBoard({ campaign, isAdmin }: { campaign: Campaign; isAdmin: boolean }) {
   const qc = useQueryClient();
@@ -38,12 +40,12 @@ export function CallPlanBoard({ campaign, isAdmin }: { campaign: Campaign; isAdm
         <CardTitle>Call plans</CardTitle>
         <CardDescription>Each lead is researched in Salesforce and given a plan. Read it, edit it if you like, and approve it. Approving does not place a call.</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-3">
-        {counts && <p className="text-sm text-muted-foreground">{BOARD_STAGES.map((s) => `${counts[s] ?? 0} ${CALL_STAGE_WORDS[s]}`).join(' · ')}</p>}
-        <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant={stage === null ? 'default' : 'outline'} onClick={() => setStage(null)}>All</Button>
+      <CardContent className="space-y-4">
+        {counts && <p className="text-[13px] text-muted-foreground tabular-nums">{BOARD_STAGES.map((s) => `${counts[s] ?? 0} ${CALL_STAGE_WORDS[s]}`).join(' · ')}</p>}
+        <div className="flex max-w-full flex-wrap items-center gap-1 rounded-lg border bg-secondary p-1 sm:w-fit">
+          <Button size="sm" variant="ghost" className={segment(stage === null)} onClick={() => setStage(null)}>All</Button>
           {BOARD_STAGES.map((s) => (
-            <Button key={s} size="sm" variant={stage === s ? 'default' : 'outline'} onClick={() => setStage(s)}>{CALL_STAGE_WORDS[s]} ({counts?.[s] ?? 0})</Button>
+            <Button key={s} size="sm" variant="ghost" className={segment(stage === s)} onClick={() => setStage(s)}>{CALL_STAGE_WORDS[s]} <span className="tabular-nums">({counts?.[s] ?? 0})</span></Button>
           ))}
         </div>
         {isAdmin && campaign.status === 'active' && (

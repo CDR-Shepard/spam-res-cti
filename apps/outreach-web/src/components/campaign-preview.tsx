@@ -8,7 +8,7 @@ export function CampaignPreview({ preview }: { preview: CampaignPreviewData }) {
     .map((reason) => ({ reason, count: preview.skipped[reason] ?? 0 }))
     .filter((s) => s.count > 0);
   return (
-    <section aria-label="Preview" className="space-y-4 rounded-md border p-4">
+    <section aria-label="Preview" className="space-y-4 rounded-xl border bg-background/60 p-4 sm:p-5">
       <div className="space-y-1">
         <p className="text-sm text-muted-foreground">{formatCount(preview.total)} records match.</p>
         <p className="font-medium">Of the first {formatCount(preview.examined)} checked: {formatCount(preview.eligible)} eligible</p>

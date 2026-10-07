@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { CrmConnectionStatus } from '@cti/contracts';
-import { Badge } from '@/components/ui/badge';
+import { PageHeader } from '@/components/layout/page-header';
+import { StatusBadge } from '@/components/layout/status-badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useAuth } from '@/lib/auth';
@@ -40,9 +41,9 @@ export function ConnectionsPage({ connected, error }: ConnectionsPageProps) {
   const data = status.data;
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Connections</h1>
-      {connected && <p role="status" className="text-sm">Salesforce is connected.</p>}
-      {error && <p role="alert" className="text-sm text-destructive">{wordFor(CALLBACK_ERROR_WORDS, error, CALLBACK_ERROR_FALLBACK)}</p>}
+      <PageHeader eyebrow="Settings" title="Connections" />
+      {connected && <p role="status" className="rounded-xl border border-success/20 bg-success-soft px-4 py-3 text-sm text-success">Salesforce is connected.</p>}
+      {error && <p role="alert" className="rounded-xl border border-destructive/25 bg-danger-soft px-4 py-3 text-sm text-destructive">{wordFor(CALLBACK_ERROR_WORDS, error, CALLBACK_ERROR_FALLBACK)}</p>}
       <Card>
         <CardHeader>
           <CardTitle>Salesforce</CardTitle>
@@ -128,9 +129,9 @@ function ConnectionStatusBody({ status, isAdmin, busy, onConnect, onDisconnect }
 
 function ConnectionDetails({ status }: { status: CrmConnectionStatus }) {
   return (
-    <dl className="grid grid-cols-[10rem_1fr] gap-y-1 text-sm">
+    <dl className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-4 gap-y-2.5 text-sm sm:grid-cols-[10rem_minmax(0,1fr)] [&_dd]:break-words">
       <dt className="text-muted-foreground">Status</dt>
-      <dd>{status.status === 'broken' ? <Badge variant="destructive">Needs reconnecting</Badge> : <Badge>Connected</Badge>}</dd>
+      <dd>{status.status === 'broken' ? <StatusBadge tone="danger">Needs reconnecting</StatusBadge> : <StatusBadge tone="success">Connected</StatusBadge>}</dd>
       <dt className="text-muted-foreground">Salesforce org</dt>
       <dd>{status.instanceUrl ?? '—'}</dd>
       <dt className="text-muted-foreground">Signed in as</dt>

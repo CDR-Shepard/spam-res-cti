@@ -2,6 +2,7 @@ import { useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
 import { contactLabel, contactSearchLimited as limitedSearch, lastContactWordsAt, NO_CONTACT_IN_RECENT_ACTIVITY, type CallPlanCard, type EditableCallPlan } from '@cti/contracts';
 import { ConfirmAction } from '@/components/confirm-action';
+import { StatusBadge } from '@/components/layout/status-badge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -52,13 +53,13 @@ export function CallPlanCardView({ card, onChanged, campaignId = null }: { card:
         <CardTitle className="flex flex-wrap items-center gap-2">
           {card.recordUrl ? <a href={card.recordUrl} target="_blank" rel="noreferrer" className="hover:underline">{card.name ?? card.sfRecordId}</a> : (card.name ?? card.sfRecordId)}
           <Badge variant="outline">{CALL_STAGE_WORDS[card.callStage]}</Badge>
-          {card.consent && <Badge variant={card.consent === 'yes' ? 'secondary' : 'destructive'}>{CONSENT_WORDS[card.consent]}</Badge>}
+          {card.consent && <StatusBadge tone={card.consent === 'yes' ? 'success' : 'danger'}>{CONSENT_WORDS[card.consent]}</StatusBadge>}
         </CardTitle>
         <CardDescription>{card.ownerName ? `Owner: ${card.ownerName}` : 'No owner'}{card.plan ? ` · plan v${card.plan.version}${card.plan.source === 'edit' ? ' (edited)' : ''}` : ''}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         {card.warnings.map((w) => <p key={w.code} role={w.severity === 'block' ? 'alert' : undefined} className={w.severity === 'block' ? 'text-destructive' : 'text-muted-foreground'}>{w.words}</p>)}
-        {card.plan?.dncFlagDismissed && <p role="status" className="rounded-md border p-2">{dismissalWords(card.plan)}</p>}
+        {card.plan?.dncFlagDismissed && <p role="status" className="rounded-lg border p-2">{dismissalWords(card.plan)}</p>}
         {card.prepareError && <p role="alert" className="text-destructive">{card.prepareError}</p>}
         {card.callStage === 'research' && !card.prepareError && <p className="text-muted-foreground">Reading Salesforce and drafting a plan…</p>}
         {p && !editing && <PlanView plan={p} contactSearchLimited={contactSearchLimited(card)} />}

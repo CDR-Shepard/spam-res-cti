@@ -4,6 +4,7 @@ import type { TestCallResponse } from '@cti/contracts';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
+import { NativeSelect } from '@/components/ui/native-select';
 import { useAuth } from '@/lib/auth';
 import { notCalledWords } from '@/lib/call-words';
 import { getAiAvailability, outreachKeys, startTestCall } from '@/lib/outreach-api';
@@ -45,11 +46,11 @@ function AdminTestCall() {
         )}
         {numbers.length > 0 && to && (
           <div className="flex flex-wrap items-end gap-2">
-            <Label className="flex-col items-start">
+            <Label className="flex-col items-start gap-1.5">
               Test number
-              <select className="h-9 rounded-md border bg-transparent px-2 text-sm" value={to} onChange={(e) => setPicked(e.target.value)}>
+              <NativeSelect value={to} onChange={(e) => setPicked(e.target.value)}>
                 {numbers.map((n) => <option key={n} value={n}>{n}</option>)}
-              </select>
+              </NativeSelect>
             </Label>
             <Button size="sm" disabled={call.isPending} onClick={() => call.mutate(to)}>Test call to my phone</Button>
           </div>

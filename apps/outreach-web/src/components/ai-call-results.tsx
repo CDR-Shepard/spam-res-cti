@@ -110,8 +110,8 @@ function ResultsTable({ items, focusCallId, onRetried }: { items: AiCallResult[]
       <TableBody>
         {items.map((r) => (
           <Fragment key={r.touchId}>
-            <TableRow ref={r === focused ? focusRef : undefined} aria-current={r === focused ? 'true' : undefined} className={r === focused ? 'bg-muted' : undefined}>
-              <TableCell>{r.recordUrl ? <a href={r.recordUrl} target="_blank" rel="noreferrer" className="underline">{r.name ?? r.sfRecordId}</a> : (r.name ?? r.sfRecordId)}</TableCell>
+            <TableRow ref={r === focused ? focusRef : undefined} aria-current={r === focused ? 'true' : undefined} className={r === focused ? 'bg-brand/15 hover:bg-brand/20' : undefined}>
+              <TableCell>{r.recordUrl ? <a href={r.recordUrl} target="_blank" rel="noreferrer" className="font-medium underline decoration-foreground/20 underline-offset-4 hover:decoration-foreground">{r.name ?? r.sfRecordId}</a> : (r.name ?? r.sfRecordId)}</TableCell>
               <TableCell className="whitespace-normal"><StatusCell r={r} /></TableCell>
               <TableCell className="whitespace-normal"><OutcomeCell r={r} /></TableCell>
               <TableCell className="whitespace-normal">
@@ -119,7 +119,7 @@ function ResultsTable({ items, focusCallId, onRetried }: { items: AiCallResult[]
               </TableCell>
               <TableCell className="whitespace-normal">{r.appointment ? appointmentWords(r.appointment) : null}</TableCell>
               <TableCell className="whitespace-normal"><SalesforceCell r={r} open={isOpen(r, 'writeback')} onToggle={() => toggle(r, 'writeback')} /></TableCell>
-              <TableCell>{formatDateTime(r.startedAt ?? r.dueAt)}</TableCell>
+              <TableCell className="text-muted-foreground">{formatDateTime(r.startedAt ?? r.dueAt)}</TableCell>
             </TableRow>
             {isOpen(r, 'writeback') && r.writeback && r.aiCallId && (
               <TableRow>
@@ -178,7 +178,7 @@ function SalesforceCell({ r, open, onToggle }: { r: AiCallResult; open: boolean;
     <div className="space-y-1">
       <button
         type="button"
-        className="cursor-pointer"
+        className="cursor-pointer rounded-full transition-opacity duration-150 hover:opacity-80"
         aria-expanded={open}
         aria-label={`Salesforce write-back: ${writebackStatusWords(w.status)}, ${open ? 'hide' : 'show'} what was written`}
         onClick={onToggle}

@@ -37,23 +37,31 @@ export function SignInPage({ error, returnTo }: { error?: string; returnTo?: str
   const workos = providers.data?.workos ?? false;
   const nothingConfigured = providers.isSuccess && !salesforce && !workos;
   return (
-    <main className="min-h-screen grid place-items-center bg-background p-6">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle>Outreach</CardTitle>
-          <CardDescription>Sign in with your Salesforce account.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {error && <p role="alert" className="text-sm text-destructive">{messageFor(error)}</p>}
-          {nothingConfigured && error !== 'sign_in_disabled' && <p role="alert" className="text-sm text-destructive">{MESSAGES.sign_in_disabled}</p>}
-          {salesforce && <Button className="w-full" onClick={() => auth.startSignIn(returnTo, 'salesforce')}>Sign in with Salesforce</Button>}
-          {workos && (
-            <Button className="w-full" variant={salesforce ? 'secondary' : 'default'} onClick={() => auth.startSignIn(returnTo, 'workos')}>
-              Sign in with email
-            </Button>
-          )}
-        </CardContent>
-      </Card>
+    <main className="relative grid min-h-screen place-items-center overflow-hidden bg-background px-4 py-10">
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-72 bg-[radial-gradient(60%_100%_at_50%_0%,rgb(228_242_34/0.22),transparent_70%)]" />
+      <div className="relative w-full max-w-[380px] space-y-6">
+        <div aria-hidden className="flex justify-center">
+          <span className="grid size-10 place-items-center rounded-[11px] bg-brand shadow-[inset_0_0_0_1px_rgb(15_15_14/0.08)]">
+            <span className="h-4 w-1.5 -skew-x-12 rounded-[2px] bg-brand-foreground" />
+          </span>
+        </div>
+        <Card className="shadow-[0_1px_2px_rgb(15_15_14/0.04),0_12px_32px_-12px_rgb(15_15_14/0.12)]">
+          <CardHeader className="border-b-0 pt-7 pb-1 text-center">
+            <CardTitle className="text-[22px] tracking-[-0.02em]">Outreach</CardTitle>
+            <CardDescription className="mx-auto">Sign in with your Salesforce account.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 pt-5 pb-7">
+            {error && <p role="alert" className="rounded-lg bg-danger-soft px-3 py-2 text-sm text-destructive">{messageFor(error)}</p>}
+            {nothingConfigured && error !== 'sign_in_disabled' && <p role="alert" className="rounded-lg bg-danger-soft px-3 py-2 text-sm text-destructive">{MESSAGES.sign_in_disabled}</p>}
+            {salesforce && <Button className="h-10 w-full" onClick={() => auth.startSignIn(returnTo, 'salesforce')}>Sign in with Salesforce</Button>}
+            {workos && (
+              <Button className="h-10 w-full" variant={salesforce ? 'outline' : 'default'} onClick={() => auth.startSignIn(returnTo, 'workos')}>
+                Sign in with email
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </main>
   );
 }

@@ -2,6 +2,7 @@ import { useInfiniteQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { ChevronDownIcon, ChevronRightIcon } from 'lucide-react';
 import { EnrollmentStatus, type CampaignPlanResponse, type PlanRow } from '@cti/contracts';
+import { StatGrid, StatTile } from '@/components/layout/stat-tile';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -61,11 +62,11 @@ export function CampaignPlan({ campaignId }: { campaignId: string }) {
 
 function StatusCounts({ counts }: { counts: CampaignPlanResponse['counts'] }) {
   return (
-    <ul aria-label="People by status" className="flex flex-wrap gap-2">
+    <StatGrid as="ul" aria-label="People by status" className="sm:grid-cols-3 lg:grid-cols-6">
       {EnrollmentStatus.options.map((s) => (
-        <li key={s}><Badge variant="outline">{ENROLLMENT_STATUS_WORDS[s]} {formatCount(counts[s] ?? 0)}</Badge></li>
+        <StatTile as="li" key={s} label={ENROLLMENT_STATUS_WORDS[s]} value={formatCount(counts[s] ?? 0)} />
       ))}
-    </ul>
+    </StatGrid>
   );
 }
 
@@ -91,7 +92,7 @@ function PlanRowView({ row }: { row: PlanRow }) {
       </TableRow>
       {open && (
         <TableRow>
-          <TableCell colSpan={6} className="bg-muted/30 whitespace-normal"><PlanRowDetails row={row} label={label} /></TableCell>
+          <TableCell colSpan={6} className="bg-muted/50 whitespace-normal"><PlanRowDetails row={row} label={label} /></TableCell>
         </TableRow>
       )}
     </>
