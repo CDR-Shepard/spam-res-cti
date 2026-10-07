@@ -47,8 +47,8 @@ export function RecordTestCalls({ calls }: { calls: readonly RecordTestCall[] })
   if (calls.length === 0) return null;
   const newestFirst = [...calls].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
   return (
-    <section aria-label="Test calls" className="space-y-2">
-      <h3 className="font-medium">Test calls</h3>
+    <section aria-label="Test calls" className="space-y-3 border-t pt-5">
+      <h3 className="text-[15px] font-semibold tracking-[-0.01em]">Test calls</h3>
       {newestFirst.map((c) => <CallCard key={c.id} c={c} />)}
     </section>
   );
@@ -60,8 +60,8 @@ function CallCard({ c }: { c: RecordTestCall }) {
   const finished = c.aiCallId !== null && c.result?.result === 'placed' && !isLiveCall(c);
   const ended = finished && c.callStatus !== null && !LIVE_STATUS.has(c.callStatus);
   return (
-    <article className="space-y-2 rounded-md border p-3 text-sm">
-      <p className="text-muted-foreground">{`${c.mode === 'phone' ? `Your phone${c.toE164 ? ` (${c.toE164})` : ''}` : 'This browser'} · ${formatDateTime(c.createdAt)}`}</p>
+    <article className="space-y-2.5 rounded-xl border bg-card p-4 text-sm leading-6">
+      <p className="text-[13px] text-muted-foreground tabular-nums">{`${c.mode === 'phone' ? `Your phone${c.toE164 ? ` (${c.toE164})` : ''}` : 'This browser'} · ${formatDateTime(c.createdAt)}`}</p>
       <CallState c={c} />
       {c.summary && <p>{c.summary}</p>}
       <Learned qualification={c.qualification} />

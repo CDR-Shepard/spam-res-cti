@@ -1,8 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
+import { Headphones, Mic, MicOff, Phone, PhoneOff } from 'lucide-react';
 import type { RecordTest, RecordTestCall } from '@cti/contracts';
+import { StatusBadge } from '@/components/layout/status-badge';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
+import { NativeSelect } from '@/components/ui/native-select';
 import { useBrowserCall, type BrowserCallState } from '@/lib/browser-call';
 import { CALL_STATUS_WORDS, practiceAnswerWords } from '@/lib/call-words';
 import { getAiAvailability, outreachKeys, recordTestCall } from '@/lib/outreach-api';
@@ -36,9 +39,11 @@ function RunControls({ test, onBrowserLive }: { test: RecordTest; onBrowserLive?
   if (!availability.data) return <p role="alert" className="text-sm text-destructive">{errorText(availability.error)}</p>;
   if (!availability.data.available && !browserBusy) return <p className="text-sm text-muted-foreground">AI calling is off, so test calls can't run right now.</p>;
   return (
-    <section aria-label="Run the call" className="space-y-3 rounded-md border p-3 text-sm">
-      <h3 className="font-medium">Try the call</h3>
-      <p className="text-xs text-muted-foreground">{HINT}</p>
+    <section aria-label="Run the call" className="space-y-4 rounded-xl border bg-background/70 p-4 text-sm sm:p-5">
+      <div className="space-y-1">
+        <h3 className="text-[15px] font-semibold tracking-[-0.01em]">Try the call</h3>
+        <p className="text-[13px] leading-5 text-muted-foreground">{HINT}</p>
+      </div>
       <PhoneRun testId={test.id} calls={test.calls} numbers={availability.data.testNumbers} disabled={liveCall !== null || browserBusy} onPlaced={refresh} />
       {(availability.data.browserCalls === true || browserBusy) && <BrowserRun testId={test.id} disabled={liveCall !== null} onBusy={setBrowserBusy} onChange={refresh} />}
       {liveCall?.callStatus && <p role="status">{`Your test call: ${CALL_STATUS_WORDS[liveCall.callStatus]}`}</p>}
@@ -65,13 +70,13 @@ function PhoneRun({ testId, calls, numbers, disabled, onPlaced }: { testId: stri
   return (
     <div className="space-y-1">
       <div className="flex flex-wrap items-end gap-2">
-        <Label className="flex-col items-start">
+        <Label className="flex-col items-start gap-1.5">
           Test number
-          <select className="h-9 rounded-md border bg-transparent px-2 text-sm" value={to} onChange={(e) => setPicked(e.target.value)}>
+          <NativeSelect value={to} onChange={(e) => setPicked(e.target.value)}>
             {numbers.map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
+          </NativeSelect>
         </Label>
-        <Button size="sm" disabled={disabled || ring.isPending} onClick={() => ring.mutate(to)}>Ring my phone</Button>
+        <Button disabled={disabled || ring.isPending} onClick={() => ring.mutate(to)}><Phone aria-hidden />Ring my phone</Button>
       </div>
       {words && <p role="status">{words}</p>}
       {ring.error && <p role="alert" className="text-destructive">{recordTestErrorText(ring.error)}</p>}
@@ -100,17 +105,29 @@ function BrowserRun({ testId, disabled, onBusy, onChange }: { testId: string; di
   // Read the test again as the call is placed, answered and ended, so its card follows.
   useEffect(() => { if (phase === 'ringing' || phase === 'live' || phase === 'ended') changed.current(); }, [phase]);
   if (call.supported === false) return null;
+  const panel = active || phase === 'ended';
   return (
-    <div className="space-y-1">
-      <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="outline" disabled={disabled || active || call.supported !== true} onClick={() => void call.start()}>Talk in browser</Button>
-        {call.state.phase === 'live' && (
-          <Button size="sm" variant={call.state.muted ? 'secondary' : 'outline'} aria-pressed={call.state.muted} onClick={call.toggleMute}>Mute</Button>
-        )}
-        {active && <Button size="sm" variant="destructive" onClick={call.hangUp}>Hang up</Button>}
+    <div className="space-y-3 border-t pt-4">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <Button variant="outline" disabled={disabled || active || call.supported !== true} onClick={() => void call.start()}><Headphones aria-hidden />Talk in browser</Button>
+        <p className="text-xs text-muted-foreground">{HEADPHONES}</p>
       </div>
-      <p className="text-xs text-muted-foreground">{HEADPHONES}</p>
-      <BrowserPhase state={call.state} />
+      {panel && (
+        <div className="space-y-4 rounded-xl border bg-card p-4 shadow-[0_1px_2px_rgb(15_15_14/0.04),0_8px_24px_-12px_rgb(15_15_14/0.12)] sm:p-5">
+          {phase === 'live' && <StatusBadge tone="live">Live</StatusBadge>}
+          <BrowserPhase state={call.state} />
+          {active && (
+            <div className="flex flex-wrap gap-2">
+              {call.state.phase === 'live' && (
+                <Button variant={call.state.muted ? 'secondary' : 'outline'} aria-pressed={call.state.muted} onClick={call.toggleMute}>
+                  {call.state.muted ? <MicOff aria-hidden /> : <Mic aria-hidden />}Mute
+                </Button>
+              )}
+              <Button variant="destructive" onClick={call.hangUp}><PhoneOff aria-hidden />Hang up</Button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -122,7 +139,12 @@ function BrowserPhase({ state }: { state: BrowserCallState }) {
     const words = state.words ?? ENDED_WORDS[state.reason] ?? 'The call ended.';
     return <p role={state.reason === 'hung_up' || state.reason === 'remote' ? 'status' : 'alert'} className={state.words ? 'text-destructive' : undefined}>{words}</p>;
   }
-  return <p role="status">{PHASE_WORDS[state.phase]}</p>;
+  return (
+    <div className="flex items-center gap-3">
+      <span aria-hidden className="size-4 shrink-0 animate-spin rounded-full border-2 border-border border-t-foreground motion-reduce:animate-none" />
+      <p role="status">{PHASE_WORDS[state.phase]}</p>
+    </div>
+  );
 }
 
 function LiveTimer({ since, muted }: { since: number; muted: boolean }) {
@@ -133,11 +155,12 @@ function LiveTimer({ since, muted }: { since: number; muted: boolean }) {
   }, []);
   const s = Math.max(0, Math.floor((now - since) / 1_000));
   // Only the state is a live region: a screen reader hears "Connected" and "muted", never the clock every second.
+  // The clock reads after the state (and the " · " between them), but shows big above it.
   return (
-    <p>
-      <span role="status">{muted ? 'Connected · muted' : 'Connected'}</span>
-      {' · '}
-      <span aria-live="off">{`${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`}</span>
+    <p className="flex flex-col-reverse items-start gap-1">
+      <span role="status" className="text-[13px] font-medium text-muted-foreground">{muted ? 'Connected · muted' : 'Connected'}</span>
+      <span aria-hidden className="hidden">{' · '}</span>
+      <span aria-live="off" className="text-[40px] leading-none font-semibold tracking-[-0.03em] tabular-nums">{`${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`}</span>
     </p>
   );
 }

@@ -34,7 +34,7 @@ export function RecordTestDryRun({ call }: { call: RecordTestCall }) {
 
 function DryRunPanel({ d }: { d: DryRun }) {
   return (
-    <div className="space-y-2 rounded-md border bg-muted/30 p-3">
+    <div className="space-y-3 rounded-lg border bg-muted/50 p-4">
       <p className="font-medium">Nothing was sent to Salesforce.</p>
       {d.note && <p className="text-muted-foreground">{d.note}</p>}
       {d.conversion && <p>{d.conversion}</p>}
@@ -55,7 +55,7 @@ function Text({ title, text }: { title: string; text: string }) {
   return (
     <div>
       <h4 className="font-medium">{`${title}, as it would read`}</h4>
-      <pre aria-label={title} className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-background p-2 font-mono text-xs">{text}</pre>
+      <pre aria-label={title} className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border bg-card p-3 font-mono text-xs leading-5">{text}</pre>
     </div>
   );
 }

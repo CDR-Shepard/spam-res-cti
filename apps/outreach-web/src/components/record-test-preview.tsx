@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
+import { RefreshCw } from 'lucide-react';
 import type { RecordTest } from '@cti/contracts';
+import { StatusBadge } from '@/components/layout/status-badge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -54,18 +56,23 @@ export function RecordTestPreview({ id, onOpen, onBrowserLive }: { id: string; o
   return (
     <Card>
       <CardHeader>
-        <CardTitle role="heading" aria-level={2} className="flex flex-wrap items-center gap-2">
-          {t.recordUrl ? <a href={t.recordUrl} target="_blank" rel="noreferrer" className="hover:underline">{t.name ?? t.sfRecordId}</a> : (t.name ?? t.sfRecordId)}
+        <CardTitle role="heading" aria-level={2} className="flex flex-wrap items-center gap-2 text-lg tracking-[-0.015em]">
+          {t.recordUrl ? <a href={t.recordUrl} target="_blank" rel="noreferrer" className="underline decoration-foreground/20 underline-offset-4 transition-colors hover:decoration-foreground">{t.name ?? t.sfRecordId}</a> : (t.name ?? t.sfRecordId)}
           <Badge variant="outline">{t.sfObject}</Badge>
-          {t.status !== 'ready' && <Badge variant={t.status === 'failed' ? 'destructive' : 'secondary'}>{RECORD_TEST_STATUS_WORDS[t.status]}</Badge>}
+          {t.status !== 'ready' && <StatusBadge tone={t.status === 'failed' ? 'danger' : 'outline'}>{RECORD_TEST_STATUS_WORDS[t.status]}</StatusBadge>}
         </CardTitle>
-        <CardDescription>
+        <CardDescription className="tabular-nums">
           How I'll approach this call · {formatDateTime(t.createdAt)}{t.requestedByName ? ` · by ${t.requestedByName}` : ''}
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4 text-sm">
+      <CardContent className="space-y-6 text-sm">
         {test.error && <p role="alert" className="text-destructive">{`Couldn't refresh this test: ${errorText(test.error)}${recordTestPollInterval(t) ? ' Still trying.' : ''}`}</p>}
-        {t.status === 'running' && <p role="status" className="text-muted-foreground">Reading Salesforce and writing the plan… (about a minute)</p>}
+        {t.status === 'running' && (
+          <div className="flex items-center gap-3 text-muted-foreground">
+            <span aria-hidden className="size-4 shrink-0 animate-spin rounded-full border-2 border-border border-t-foreground motion-reduce:animate-none" />
+            <p role="status">Reading Salesforce and writing the plan… (about a minute)</p>
+          </div>
+        )}
         {t.status === 'failed' && (
           <div className="space-y-2">
             <p role="alert" className="text-destructive">{RECORD_TEST_ERROR_WORDS[t.error ?? 'plan_failed']}</p>
@@ -75,8 +82,8 @@ export function RecordTestPreview({ id, onOpen, onBrowserLive }: { id: string; o
         {t.status === 'ready' && (
           <>
             <RecordTestPlan test={t} />
-            <div className="flex flex-wrap items-center gap-2">
-              <Button size="sm" variant="outline" disabled={again.isPending || browserLive} onClick={rerun}>Regenerate</Button>
+            <div className="flex flex-wrap items-center gap-2 border-t pt-5">
+              <Button size="sm" variant="outline" disabled={again.isPending || browserLive} onClick={rerun}><RefreshCw aria-hidden />Regenerate</Button>
               {browserLive && <span className="text-xs text-muted-foreground">{BROWSER_LOCK_WORDS}</span>}
             </div>
             <RecordTestRun test={t} onBrowserLive={setBrowserLive} />
