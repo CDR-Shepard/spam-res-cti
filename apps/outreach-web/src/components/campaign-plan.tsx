@@ -62,7 +62,7 @@ export function CampaignPlan({ campaignId }: { campaignId: string }) {
 
 function StatusCounts({ counts }: { counts: CampaignPlanResponse['counts'] }) {
   return (
-    <StatGrid as="ul" aria-label="People by status" className="sm:grid-cols-3 lg:grid-cols-6">
+    <StatGrid as="ul" aria-label="People by status" className="sm:grid-cols-3 xl:grid-cols-6">
       {EnrollmentStatus.options.map((s) => (
         <StatTile as="li" key={s} label={ENROLLMENT_STATUS_WORDS[s]} value={formatCount(counts[s] ?? 0)} />
       ))}

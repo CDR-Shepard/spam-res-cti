@@ -190,30 +190,6 @@
     color: var(--muted-foreground);
   }
 
-  /* A table sitting straight in a card runs edge to edge; its outer cells keep the card's gutter. */
-  [data-slot="card-content"] > [data-slot="table-container"] {
-    margin-inline: -1.25rem;
-    width: calc(100% + 2.5rem);
-  }
-  [data-slot="card-content"] > [data-slot="table-container"] :is(th, td):first-child {
-    padding-left: 1.25rem;
-  }
-  [data-slot="card-content"] > [data-slot="table-container"] :is(th, td):last-child {
-    padding-right: 1.25rem;
-  }
-  @media (min-width: 640px) {
-    [data-slot="card-content"] > [data-slot="table-container"] {
-      margin-inline: -1.5rem;
-      width: calc(100% + 3rem);
-    }
-    [data-slot="card-content"] > [data-slot="table-container"] :is(th, td):first-child {
-      padding-left: 1.5rem;
-    }
-    [data-slot="card-content"] > [data-slot="table-container"] :is(th, td):last-child {
-      padding-right: 1.5rem;
-    }
-  }
-
   /* Native selects match the inputs: hairline, 36px, a chevron drawn inline (no external image). */
   [data-slot="native-select"] {
     appearance: none;
@@ -222,6 +198,33 @@
     background-position: right 0.625rem center;
     background-size: 1rem;
     padding-right: 2.25rem;
+  }
+}
+
+/*
+ * A table sitting straight in a card runs edge to edge; its outer cells keep the card's gutter. Unlayered so it
+ * outranks the container's w-full utility.
+ */
+[data-slot="card-content"] > [data-slot="table-container"] {
+  margin-inline: -1.25rem;
+  width: calc(100% + 2.5rem);
+}
+[data-slot="card-content"] > [data-slot="table-container"] :is(th, td):first-child {
+  padding-left: 1.25rem;
+}
+[data-slot="card-content"] > [data-slot="table-container"] :is(th, td):last-child {
+  padding-right: 1.25rem;
+}
+@media (min-width: 640px) {
+  [data-slot="card-content"] > [data-slot="table-container"] {
+    margin-inline: -1.5rem;
+    width: calc(100% + 3rem);
+  }
+  [data-slot="card-content"] > [data-slot="table-container"] :is(th, td):first-child {
+    padding-left: 1.5rem;
+  }
+  [data-slot="card-content"] > [data-slot="table-container"] :is(th, td):last-child {
+    padding-right: 1.5rem;
   }
 }
 

@@ -28,7 +28,7 @@ export function RecordTestPlan({ test }: { test: RecordTest }) {
             <Section title="Still to learn"><StillToLearn plan={plan} /></Section>
           </div>
           <Section title="Opener">
-            <blockquote className="border-l-[3px] border-brand pl-4 text-[15px] leading-7 text-foreground">{plan.opener}</blockquote>
+            <blockquote className="rounded-r-lg border-l-[3px] border-brand bg-brand/10 py-2.5 pr-4 pl-4 text-[15px] leading-7 text-foreground">{plan.opener}</blockquote>
           </Section>
           <PlanBody plan={plan} />
         </>

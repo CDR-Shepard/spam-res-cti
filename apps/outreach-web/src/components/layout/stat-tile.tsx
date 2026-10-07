@@ -20,7 +20,7 @@ export function StatTile({ label, value, hint, className, as = 'div', size = 'lg
   const Tag = as;
   return (
     <Tag className={cn('flex min-w-0 flex-col gap-1.5 bg-card px-4 py-3.5 sm:px-5 sm:py-4', className)}>
-      <span className="eyebrow truncate">{label}</span>{' '}
+      <span className="eyebrow">{label}</span>{' '}
       <span className={cn('truncate font-semibold tracking-[-0.02em] tabular-nums', size === 'lg' ? 'text-xl leading-7 sm:text-2xl' : 'text-[15px] leading-7 sm:text-base sm:leading-8')}>{value}</span>
       {hint && <span className="truncate text-xs text-muted-foreground">{hint}</span>}
     </Tag>

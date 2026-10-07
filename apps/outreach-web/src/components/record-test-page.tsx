@@ -105,15 +105,15 @@ function RecentRow({ t, current, disabled, onOpen }: { t: Recent; current: boole
         type="button"
         disabled={disabled}
         aria-current={current || undefined}
-        className="group flex min-h-12 w-full flex-wrap items-center gap-x-3 gap-y-1 px-5 py-2.5 text-left text-sm transition-colors duration-150 hover:bg-foreground/[0.025] focus-visible:-outline-offset-2 disabled:opacity-60 aria-[current]:bg-foreground/[0.035] sm:flex-nowrap sm:px-6"
+        className="group flex min-h-12 w-full flex-wrap items-center gap-x-3 gap-y-1 px-5 py-2.5 text-left text-sm transition-colors duration-150 hover:bg-foreground/[0.025] focus-visible:-outline-offset-2 disabled:opacity-60 aria-[current]:bg-foreground/[0.035] sm:grid sm:grid-cols-[minmax(0,1fr)_6.5rem_5.5rem_10.5rem_minmax(0,7rem)_1rem] sm:gap-x-4 sm:px-6"
         onClick={() => onOpen(t.id)}
       >
-        <span className="min-w-0 truncate font-medium sm:flex-1">{t.name ?? t.sfRecordId}</span>
-        <span className="text-muted-foreground sm:w-24">{t.sfObject}</span>
+        <span className="min-w-0 truncate font-medium">{t.name ?? t.sfRecordId}</span>
+        <span className="text-muted-foreground">{t.sfObject}</span>
         <StatusBadge tone={STATUS_TONE[t.status]}>{RECORD_TEST_STATUS_WORDS[t.status]}</StatusBadge>
-        <span className="text-muted-foreground tabular-nums sm:w-40 sm:text-right">{formatDateTime(t.createdAt)}</span>
-        {t.requestedByName && <span className="text-muted-foreground sm:w-28 sm:truncate">by {t.requestedByName}</span>}
-        <ChevronRight aria-hidden className="ml-auto hidden size-4 shrink-0 text-muted-foreground/60 transition-transform duration-150 group-hover:translate-x-0.5 sm:block" />
+        <span className="text-muted-foreground tabular-nums sm:text-right">{formatDateTime(t.createdAt)}</span>
+        <span className="text-muted-foreground empty:hidden sm:truncate sm:empty:block">{t.requestedByName ? `by ${t.requestedByName}` : ''}</span>
+        <ChevronRight aria-hidden className="ml-auto hidden size-4 shrink-0 justify-self-end text-muted-foreground/60 transition-transform duration-150 group-hover:translate-x-0.5 sm:block" />
       </button>
     </li>
   );
