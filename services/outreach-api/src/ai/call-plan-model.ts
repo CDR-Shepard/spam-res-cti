@@ -7,7 +7,8 @@ import { readToolInput, requestFor, type MessagesClient, type TriageTool, type T
 
 export const CALL_PLAN_MODEL_DEFAULT = 'claude-sonnet-5-5';
 export const CALL_PLAN_TOOL_NAME = 'record_call_plan';
-const MAX_OUTPUT_TOKENS = 3_000;
+// Claude 5 thinks before it answers; a plan alone is ~2,000 tokens, so 3,000 cut the JSON off.
+const MAX_OUTPUT_TOKENS = 8_000;
 
 const text = (maxLength: number, minLength = 1) => ({ type: 'string', minLength, maxLength });
 const list = (maxLength: number, maxItems: number, minItems = 0) => ({ type: 'array', minItems, maxItems, items: text(maxLength) });

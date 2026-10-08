@@ -28,6 +28,8 @@ describe('AnthropicCallPlanModel', () => {
       expect.objectContaining({
         model: 'claude-sonnet-5-5',
         output_config: { format: { type: 'json_schema', schema: expect.objectContaining({ type: 'object' }) } },
+        // Claude 5 thinks before it answers, and a plan alone is ~2,000 tokens: 3,000 truncated it mid-JSON.
+        max_tokens: 8_000,
         messages: [{ role: 'user', content: 'U' }],
         system: 'S',
       }),
