@@ -109,19 +109,43 @@ export const TRIAGE_TOOL: TriageTool = {
   input_schema: TRIAGE_INPUT_SCHEMA,
 };
 
-/** How a request asks for its one tool. */
-export type ToolChoice = { type: 'tool'; name: string } | { type: 'auto' };
-
-/** Claude 4 models accept a forced tool choice. Claude 5 models refuse "tool" and "any" (400), so they get "auto". */
+/** Claude 4 models accept a forced tool choice. Claude 5 models refuse "tool" and "any" (400), so they get structured output. */
 const FORCED_TOOL_CHOICE = /^claude-(?:haiku|sonnet|opus)-4/;
 
-export function toolChoiceFor(model: string, toolName: string): ToolChoice {
-  return FORCED_TOOL_CHOICE.test(model) ? { type: 'tool', name: toolName } : { type: 'auto' };
+/** Size and bound keywords structured output refuses ("For 'array' type, property 'maxItems' is not supported"); the zod contract still enforces them. */
+const SIZE_KEYWORDS = new Set(['minItems', 'maxItems', 'minLength', 'maxLength', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf']);
+
+function withoutSizeKeywords(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(withoutSizeKeywords);
+  if (v === null || typeof v !== 'object') return v;
+  return Object.fromEntries(Object.entries(v).filter(([k]) => !SIZE_KEYWORDS.has(k)).map(([k, x]) => [k, withoutSizeKeywords(x)]));
 }
 
-/** With an "auto" choice the system prompt asks for the tool; a reply without it still fails as an output error. */
-export function systemFor(system: string, toolName: string, choice: ToolChoice): string {
-  return choice.type === 'auto' ? `${system}\n\nAnswer only by calling the ${toolName} tool, exactly once.` : system;
+export type ToolRequest =
+  | { tools: TriageTool[]; tool_choice: { type: 'tool'; name: string } }
+  | { output_config: { format: { type: 'json_schema'; schema: Record<string, unknown> } } };
+
+/**
+ * How a request gets the model's answer in the tool's shape. A free ("auto") tool choice is not enough on Claude 5:
+ * with a deep schema it sometimes sends nested values as strings, so structured output constrains the answer instead.
+ */
+export function requestFor(model: string, tool: TriageTool): ToolRequest {
+  if (FORCED_TOOL_CHOICE.test(model)) return { tools: [tool], tool_choice: { type: 'tool', name: tool.name } };
+  return { output_config: { format: { type: 'json_schema', schema: withoutSizeKeywords(tool.input_schema) as Record<string, unknown> } } };
+}
+
+/** The answer: the tool call's input, else a structured-output JSON object, else undefined (an output error for the caller). */
+export function readToolInput(content: ReadonlyArray<{ type: string; name?: string; input?: unknown; text?: string }>, toolName: string): unknown {
+  const call = content.find((b) => b.type === 'tool_use' && b.name === toolName);
+  if (call) return call.input;
+  const text = content.find((b) => b.type === 'text' && typeof b.text === 'string')?.text;
+  if (text === undefined) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The slice of the Anthropic SDK client the adapter uses (an `Anthropic` instance satisfies it). */
@@ -132,10 +156,11 @@ export interface MessagesClient {
       max_tokens: number;
       system: string;
       messages: Array<{ role: 'user'; content: string }>;
-      tools: TriageTool[];
-      tool_choice: ToolChoice;
+      tools?: TriageTool[];
+      tool_choice?: { type: 'tool'; name: string };
+      output_config?: { format: { type: 'json_schema'; schema: Record<string, unknown> } };
     }, options?: { signal?: AbortSignal }): Promise<{
-      content: Array<{ type: string; name?: string; input?: unknown }>;
+      content: Array<{ type: string; name?: string; input?: unknown; text?: string }>;
       usage: { input_tokens: number; output_tokens: number };
     }>;
   };
@@ -150,23 +175,21 @@ export class AnthropicTriageModel implements TriageModel {
   }
 
   async triage(prompt: TriagePrompt): Promise<{ result: TriageResult; inputTokens: number; outputTokens: number; model: string }> {
-    const choice = toolChoiceFor(this.modelId, TRIAGE_TOOL_NAME);
     const response = await this.deps.client.messages.create({
       model: this.modelId,
       max_tokens: MAX_OUTPUT_TOKENS,
-      system: systemFor(prompt.system, TRIAGE_TOOL_NAME, choice),
+      system: prompt.system,
       messages: [{ role: 'user', content: prompt.user }],
-      tools: [TRIAGE_TOOL],
-      tool_choice: choice,
+      ...requestFor(this.modelId, TRIAGE_TOOL),
     });
     const usage: TriageUsage = {
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
       model: this.modelId,
     };
-    const call = response.content.find((b) => b.type === 'tool_use' && b.name === TRIAGE_TOOL_NAME);
-    if (!call) throw new TriageOutputError('the model did not call record_triage', usage);
-    const parsed = TriageResult.safeParse(call.input);
+    const input = readToolInput(response.content, TRIAGE_TOOL_NAME);
+    if (input === undefined) throw new TriageOutputError('the model did not call record_triage', usage);
+    const parsed = TriageResult.safeParse(input);
     if (!parsed.success) {
       const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
       throw new TriageOutputError(`invalid triage output: ${issues}`, usage);

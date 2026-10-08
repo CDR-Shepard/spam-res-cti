@@ -166,18 +166,18 @@ describe('mappingPrompt', () => {
 });
 
 describe('AnthropicMappingModel', () => {
-  type Block = { type: string; name?: string; input?: unknown };
+  type Block = { type: string; name?: string; input?: unknown; text?: string };
   const client = (content: Block[]) => ({ messages: { create: vi.fn(async () => ({ content, usage: { input_tokens: 3_000, output_tokens: 200 } })) } });
 
   it('10: forces record_seller_answers and returns the parsed answers with usage', async () => {
-    const c = client([{ type: 'tool_use', name: MAPPING_TOOL_NAME, input: { disposition: 'interested', answers: { Timeline__c: { value: '90 Days', evidence: 'about 90 days' } } } }]);
+    const c = client([{ type: 'text', text: JSON.stringify({ disposition: 'interested', answers: { Timeline__c: { value: '90 Days', evidence: 'about 90 days' } } }) }]);
     const m = new AnthropicMappingModel({ client: c, model: 'claude-sonnet-5-5' });
     const signal = new AbortController().signal;
     const out = await m.map(input(), { signal });
     expect(m.modelId).toBe('claude-sonnet-5-5');
     expect(out).toEqual({ disposition: 'interested', values: { Timeline__c: { value: '90 Days', evidence: 'about 90 days' } }, usage: { inputTokens: 3_000, outputTokens: 200, model: 'claude-sonnet-5-5' } });
     expect(c.messages.create).toHaveBeenCalledWith(
-      expect.objectContaining({ model: 'claude-sonnet-5-5', tool_choice: { type: 'auto' }, system: expect.stringContaining(MAPPING_TOOL_NAME), tools: [mappingTool(leadFields)] }),
+      expect.objectContaining({ model: 'claude-sonnet-5-5', output_config: { format: { type: 'json_schema', schema: expect.objectContaining({ type: 'object' }) } } }),
       { signal },
     );
   });

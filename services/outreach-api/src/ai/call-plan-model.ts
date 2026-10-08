@@ -3,7 +3,7 @@
  * whose input schema mirrors `CallPlan`, validated with zod before anything uses it.
  */
 import { CALL_GOAL_KEYS, CallPlan, DoNotContactCategory, EvidenceSource, PreferredWindow, QUALIFICATION_TOPICS } from '@cti/contracts';
-import { systemFor, toolChoiceFor, type MessagesClient, type TriageTool, type TriageUsage } from './model.js';
+import { readToolInput, requestFor, type MessagesClient, type TriageTool, type TriageUsage } from './model.js';
 
 export const CALL_PLAN_MODEL_DEFAULT = 'claude-sonnet-5-5';
 export const CALL_PLAN_TOOL_NAME = 'record_call_plan';
@@ -160,25 +160,23 @@ export class AnthropicCallPlanModel implements CallPlanModel {
   }
 
   async plan(prompt: { system: string; user: string }, opts: { signal?: AbortSignal } = {}): Promise<CallPlanResult> {
-    const choice = toolChoiceFor(this.modelId, CALL_PLAN_TOOL_NAME);
     const response = await this.deps.client.messages.create(
       {
         model: this.modelId,
         max_tokens: MAX_OUTPUT_TOKENS,
-        system: systemFor(prompt.system, CALL_PLAN_TOOL_NAME, choice),
+        system: prompt.system,
         messages: [{ role: 'user', content: prompt.user }],
-        tools: [CALL_PLAN_TOOL],
-        tool_choice: choice,
+        ...requestFor(this.modelId, CALL_PLAN_TOOL),
       },
       { signal: opts.signal },
     );
     const usage: TriageUsage = { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens, model: this.modelId };
-    const call = response.content.find((b) => b.type === 'tool_use' && b.name === CALL_PLAN_TOOL_NAME);
-    if (!call) throw new CallPlanOutputError('the model did not call record_call_plan', usage);
-    const parsed = CallPlan.safeParse(normalizeModelInput(call.input));
+    const input = readToolInput(response.content, CALL_PLAN_TOOL_NAME);
+    if (input === undefined) throw new CallPlanOutputError('the model did not call record_call_plan', usage);
+    const parsed = CallPlan.safeParse(normalizeModelInput(input));
     if (!parsed.success) {
       const issues = parsed.error.issues.map((i) => ({ path: i.path.join('.') || '(root)', code: i.code }));
-      const rawDoNotContact = (call.input as { doNotContact?: unknown } | null | undefined)?.doNotContact;
+      const rawDoNotContact = (input as { doNotContact?: unknown } | null | undefined)?.doNotContact;
       throw new CallPlanOutputError(`invalid call plan: ${issues.map((i) => `${i.path} (${i.code})`).join('; ')}`, usage, { issues, rawDoNotContact });
     }
     return { plan: parsed.data, ...usage };

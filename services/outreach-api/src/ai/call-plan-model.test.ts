@@ -11,7 +11,7 @@ import {
   CallPlanOutputError,
 } from './call-plan-model.js';
 
-type Block = { type: string; name?: string; input?: unknown };
+type Block = { type: string; name?: string; input?: unknown; text?: string };
 const client = (content: Block[]) => ({ messages: { create: vi.fn(async () => ({ content, usage: { input_tokens: 12_000, output_tokens: 1_500 } })) } });
 
 /** Walks a parsed JSON value by keys and indexes. */
@@ -20,20 +20,24 @@ function at(value: unknown, ...path: Array<string | number>): unknown {
 }
 
 describe('AnthropicCallPlanModel', () => {
-  it('asks a Claude 5 model for the record_call_plan tool (auto choice: a forced choice is refused) and returns the validated plan with usage', async () => {
-    const c = client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input: validPlan }]);
+  it('asks a Claude 5 model for structured output (a forced tool choice is refused) and returns the validated plan with usage', async () => {
+    const c = client([{ type: 'text', text: JSON.stringify(validPlan) }]);
     const out = await new AnthropicCallPlanModel({ client: c }).plan({ system: 'S', user: 'U' });
     expect(out).toMatchObject({ plan: validPlan, inputTokens: 12_000, outputTokens: 1_500, model: 'claude-sonnet-5-5' });
     expect(c.messages.create).toHaveBeenCalledWith(
       expect.objectContaining({
         model: 'claude-sonnet-5-5',
-        tool_choice: { type: 'auto' },
-        tools: [CALL_PLAN_TOOL],
+        output_config: { format: { type: 'json_schema', schema: expect.objectContaining({ type: 'object' }) } },
         messages: [{ role: 'user', content: 'U' }],
-        system: expect.stringMatching(/^S\n\n.*record_call_plan/s),
+        system: 'S',
       }),
       expect.anything(),
     );
+  });
+  it('forces the record_call_plan tool on a Claude 4 model', async () => {
+    const c = client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input: validPlan }]);
+    await new AnthropicCallPlanModel({ client: c, model: 'claude-haiku-4-5-20251001' }).plan({ system: 'S', user: 'U' });
+    expect(c.messages.create).toHaveBeenCalledWith(expect.objectContaining({ tools: [CALL_PLAN_TOOL], tool_choice: { type: 'tool', name: CALL_PLAN_TOOL_NAME } }), expect.anything());
   });
   it('uses a configured model id', async () => {
     const c = client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input: validPlan }]);

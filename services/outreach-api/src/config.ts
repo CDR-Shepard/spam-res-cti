@@ -39,7 +39,8 @@ const schema = z.object({
    * Plan 1D: Claude model that maps a call's answers to the org's picklist values for the Salesforce write-back. An
    * unpriced model (ai/model.ts PRICE_MICROS_PER_TOKEN) is refused: fill-blanks are then skipped and noted.
    */
-  WRITEBACK_MODEL: z.string().min(1).default('claude-sonnet-5-5'),
+  // Claude 4: the Lead mapping schema is "too complex" for a Claude 5 structured output, and Claude 5 refuses a forced tool.
+  WRITEBACK_MODEL: z.string().min(1).default('claude-haiku-4-5-20251001'),
   /** cti-api on Railway's private network, e.g. http://ctiapi.railway.internal:4000 (plan 1C). */
   CTI_INTERNAL_URL: z
     .string()

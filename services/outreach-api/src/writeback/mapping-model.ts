@@ -6,7 +6,7 @@
  * only as escaped data and is never followed as instructions.
  */
 import { z } from 'zod';
-import { systemFor, toolChoiceFor, type MessagesClient, type TriageTool, type TriageUsage } from '../ai/model.js';
+import { readToolInput, requestFor, type MessagesClient, type TriageTool, type TriageUsage } from '../ai/model.js';
 import { NEVER_WRITE_VALUES } from '../research/qualification.js';
 import { cutUtf16, escapeData } from '../research/text.js';
 import { CHANGES_FIELD, type WritableField } from './fields.js';
@@ -256,21 +256,19 @@ export class AnthropicMappingModel implements MappingModel {
 
   async map(i: MappingInput, opts: { signal?: AbortSignal } = {}): Promise<MappedAnswers & { usage: TriageUsage }> {
     const prompt = mappingPrompt(i);
-    const choice = toolChoiceFor(this.modelId, MAPPING_TOOL_NAME);
     const response = await this.deps.client.messages.create(
       {
         model: this.modelId,
         max_tokens: MAX_OUTPUT_TOKENS,
-        system: systemFor(prompt.system, MAPPING_TOOL_NAME, choice),
+        system: prompt.system,
         messages: [{ role: 'user', content: prompt.user }],
-        tools: [mappingTool(i.fields)],
-        tool_choice: choice,
+        ...requestFor(this.modelId, mappingTool(i.fields)),
       },
       { signal: opts.signal },
     );
     const usage: TriageUsage = { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens, model: this.modelId };
-    const call = response.content.find((b) => b.type === 'tool_use' && b.name === MAPPING_TOOL_NAME);
-    if (!call) throw new MappingOutputError(usage);
-    return { ...parseMapping(call.input, i), usage };
+    const input = readToolInput(response.content, MAPPING_TOOL_NAME);
+    if (input === undefined) throw new MappingOutputError(usage);
+    return { ...parseMapping(input, i), usage };
   }
 }

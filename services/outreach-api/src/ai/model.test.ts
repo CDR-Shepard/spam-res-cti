@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ContactChannel, DoNotContactCategory, TRIAGE_TAGS, TriageResult } from '@cti/contracts';
 import {
-  systemFor,
-  toolChoiceFor,
+  readToolInput,
+  requestFor,
   AnthropicTriageModel,
   costMicros,
   isPricedModel,
@@ -65,17 +65,29 @@ describe('TRIAGE_INPUT_SCHEMA', () => {
   });
 });
 
-describe('toolChoiceFor', () => {
-  it('forces the tool on a Claude 4 model and asks with an auto choice on a Claude 5 model, which refuses a forced choice', () => {
-    expect(toolChoiceFor('claude-haiku-4-5-20251001', 'x')).toEqual({ type: 'tool', name: 'x' });
-    expect(toolChoiceFor('claude-sonnet-4-5', 'x')).toEqual({ type: 'tool', name: 'x' });
-    expect(toolChoiceFor('claude-sonnet-5-5', 'x')).toEqual({ type: 'auto' });
-    expect(toolChoiceFor('claude-opus-5-5', 'x')).toEqual({ type: 'auto' });
-    expect(toolChoiceFor('claude-fable-5-1', 'x')).toEqual({ type: 'auto' });
+describe('requestFor / readToolInput', () => {
+  const TOOL = { name: 'x', description: 'd', input_schema: { type: 'object', properties: { a: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 9 } } }, required: ['a'] } } as never;
+  it('forces the tool on a Claude 4 model', () => {
+    expect(requestFor('claude-haiku-4-5-20251001', TOOL)).toEqual({ tools: [TOOL], tool_choice: { type: 'tool', name: 'x' } });
   });
-  it('adds the call-the-tool line to the system prompt only for an auto choice', () => {
-    expect(systemFor('S', 'x', { type: 'tool', name: 'x' })).toBe('S');
-    expect(systemFor('S', 'x', { type: 'auto' })).toBe('S\n\nAnswer only by calling the x tool, exactly once.');
+  it('asks a Claude 5 model for structured output (it refuses a forced tool choice), without the size keywords structured output rejects', () => {
+    for (const model of ['claude-sonnet-5-5', 'claude-opus-5-5']) {
+      expect(requestFor(model, TOOL)).toEqual({
+        output_config: { format: { type: 'json_schema', schema: { type: 'object', properties: { a: { type: 'array', items: { type: 'string' } } }, required: ['a'] } } },
+      });
+    }
+  });
+  it('also drops the number bounds structured output rejects', () => {
+    const tool = { name: 'n', description: 'd', input_schema: { type: 'object', properties: { n: { type: 'integer', minimum: 0, maximum: 9, exclusiveMinimum: 0, exclusiveMaximum: 10, multipleOf: 1 } } } } as never;
+    expect(requestFor('claude-sonnet-5-5', tool)).toEqual({ output_config: { format: { type: 'json_schema', schema: { type: 'object', properties: { n: { type: 'integer' } } } } } });
+  });
+  it('reads the tool call, else a JSON object answer, else nothing', () => {
+    expect(readToolInput([{ type: 'text', text: 'hi' }, { type: 'tool_use', name: 'x', input: { a: ['1'] } }], 'x')).toEqual({ a: ['1'] });
+    expect(readToolInput([{ type: 'text', text: '{"a":["1"]}' }], 'x')).toEqual({ a: ['1'] });
+    expect(readToolInput([{ type: 'text', text: 'not json' }], 'x')).toBeUndefined();
+    expect(readToolInput([{ type: 'text', text: '[1]' }], 'x')).toBeUndefined();
+    expect(readToolInput([{ type: 'text' }], 'x')).toBeUndefined();
+    expect(readToolInput([{ type: 'tool_use', name: 'other', input: {} }], 'x')).toBeUndefined();
   });
 });
 
