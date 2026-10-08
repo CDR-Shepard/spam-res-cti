@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ContactChannel, DoNotContactCategory, TRIAGE_TAGS, TriageResult } from '@cti/contracts';
 import {
+  systemFor,
+  toolChoiceFor,
   AnthropicTriageModel,
   costMicros,
   isPricedModel,
@@ -60,6 +62,20 @@ describe('TRIAGE_INPUT_SCHEMA', () => {
     expect(p('doNotContact', 'anyOf', 1, 'properties', 'category', 'enum')).toEqual(DoNotContactCategory.options);
     expect(p('channels', 'maxItems')).toBe(3);
     expect(p('tags', 'maxItems')).toBe(8);
+  });
+});
+
+describe('toolChoiceFor', () => {
+  it('forces the tool on a Claude 4 model and asks with an auto choice on a Claude 5 model, which refuses a forced choice', () => {
+    expect(toolChoiceFor('claude-haiku-4-5-20251001', 'x')).toEqual({ type: 'tool', name: 'x' });
+    expect(toolChoiceFor('claude-sonnet-4-5', 'x')).toEqual({ type: 'tool', name: 'x' });
+    expect(toolChoiceFor('claude-sonnet-5-5', 'x')).toEqual({ type: 'auto' });
+    expect(toolChoiceFor('claude-opus-5-5', 'x')).toEqual({ type: 'auto' });
+    expect(toolChoiceFor('claude-fable-5-1', 'x')).toEqual({ type: 'auto' });
+  });
+  it('adds the call-the-tool line to the system prompt only for an auto choice', () => {
+    expect(systemFor('S', 'x', { type: 'tool', name: 'x' })).toBe('S');
+    expect(systemFor('S', 'x', { type: 'auto' })).toBe('S\n\nAnswer only by calling the x tool, exactly once.');
   });
 });
 

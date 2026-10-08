@@ -109,6 +109,21 @@ export const TRIAGE_TOOL: TriageTool = {
   input_schema: TRIAGE_INPUT_SCHEMA,
 };
 
+/** How a request asks for its one tool. */
+export type ToolChoice = { type: 'tool'; name: string } | { type: 'auto' };
+
+/** Claude 4 models accept a forced tool choice. Claude 5 models refuse "tool" and "any" (400), so they get "auto". */
+const FORCED_TOOL_CHOICE = /^claude-(?:haiku|sonnet|opus)-4/;
+
+export function toolChoiceFor(model: string, toolName: string): ToolChoice {
+  return FORCED_TOOL_CHOICE.test(model) ? { type: 'tool', name: toolName } : { type: 'auto' };
+}
+
+/** With an "auto" choice the system prompt asks for the tool; a reply without it still fails as an output error. */
+export function systemFor(system: string, toolName: string, choice: ToolChoice): string {
+  return choice.type === 'auto' ? `${system}\n\nAnswer only by calling the ${toolName} tool, exactly once.` : system;
+}
+
 /** The slice of the Anthropic SDK client the adapter uses (an `Anthropic` instance satisfies it). */
 export interface MessagesClient {
   messages: {
@@ -118,7 +133,7 @@ export interface MessagesClient {
       system: string;
       messages: Array<{ role: 'user'; content: string }>;
       tools: TriageTool[];
-      tool_choice: { type: 'tool'; name: string };
+      tool_choice: ToolChoice;
     }, options?: { signal?: AbortSignal }): Promise<{
       content: Array<{ type: string; name?: string; input?: unknown }>;
       usage: { input_tokens: number; output_tokens: number };
@@ -135,13 +150,14 @@ export class AnthropicTriageModel implements TriageModel {
   }
 
   async triage(prompt: TriagePrompt): Promise<{ result: TriageResult; inputTokens: number; outputTokens: number; model: string }> {
+    const choice = toolChoiceFor(this.modelId, TRIAGE_TOOL_NAME);
     const response = await this.deps.client.messages.create({
       model: this.modelId,
       max_tokens: MAX_OUTPUT_TOKENS,
-      system: prompt.system,
+      system: systemFor(prompt.system, TRIAGE_TOOL_NAME, choice),
       messages: [{ role: 'user', content: prompt.user }],
       tools: [TRIAGE_TOOL],
-      tool_choice: { type: 'tool', name: TRIAGE_TOOL_NAME },
+      tool_choice: choice,
     });
     const usage: TriageUsage = {
       inputTokens: response.usage.input_tokens,

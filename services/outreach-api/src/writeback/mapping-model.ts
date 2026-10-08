@@ -6,7 +6,7 @@
  * only as escaped data and is never followed as instructions.
  */
 import { z } from 'zod';
-import type { MessagesClient, TriageTool, TriageUsage } from '../ai/model.js';
+import { systemFor, toolChoiceFor, type MessagesClient, type TriageTool, type TriageUsage } from '../ai/model.js';
 import { NEVER_WRITE_VALUES } from '../research/qualification.js';
 import { cutUtf16, escapeData } from '../research/text.js';
 import { CHANGES_FIELD, type WritableField } from './fields.js';
@@ -256,14 +256,15 @@ export class AnthropicMappingModel implements MappingModel {
 
   async map(i: MappingInput, opts: { signal?: AbortSignal } = {}): Promise<MappedAnswers & { usage: TriageUsage }> {
     const prompt = mappingPrompt(i);
+    const choice = toolChoiceFor(this.modelId, MAPPING_TOOL_NAME);
     const response = await this.deps.client.messages.create(
       {
         model: this.modelId,
         max_tokens: MAX_OUTPUT_TOKENS,
-        system: prompt.system,
+        system: systemFor(prompt.system, MAPPING_TOOL_NAME, choice),
         messages: [{ role: 'user', content: prompt.user }],
         tools: [mappingTool(i.fields)],
-        tool_choice: { type: 'tool', name: MAPPING_TOOL_NAME },
+        tool_choice: choice,
       },
       { signal: opts.signal },
     );

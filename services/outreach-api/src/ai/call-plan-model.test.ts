@@ -20,17 +20,17 @@ function at(value: unknown, ...path: Array<string | number>): unknown {
 }
 
 describe('AnthropicCallPlanModel', () => {
-  it('forces the record_call_plan tool and returns the validated plan with usage', async () => {
+  it('asks a Claude 5 model for the record_call_plan tool (auto choice: a forced choice is refused) and returns the validated plan with usage', async () => {
     const c = client([{ type: 'tool_use', name: CALL_PLAN_TOOL_NAME, input: validPlan }]);
     const out = await new AnthropicCallPlanModel({ client: c }).plan({ system: 'S', user: 'U' });
     expect(out).toMatchObject({ plan: validPlan, inputTokens: 12_000, outputTokens: 1_500, model: 'claude-sonnet-5-5' });
     expect(c.messages.create).toHaveBeenCalledWith(
       expect.objectContaining({
         model: 'claude-sonnet-5-5',
-        tool_choice: { type: 'tool', name: CALL_PLAN_TOOL_NAME },
+        tool_choice: { type: 'auto' },
         tools: [CALL_PLAN_TOOL],
         messages: [{ role: 'user', content: 'U' }],
-        system: 'S',
+        system: expect.stringMatching(/^S\n\n.*record_call_plan/s),
       }),
       expect.anything(),
     );

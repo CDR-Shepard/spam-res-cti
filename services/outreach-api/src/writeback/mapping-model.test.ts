@@ -177,7 +177,7 @@ describe('AnthropicMappingModel', () => {
     expect(m.modelId).toBe('claude-sonnet-5-5');
     expect(out).toEqual({ disposition: 'interested', values: { Timeline__c: { value: '90 Days', evidence: 'about 90 days' } }, usage: { inputTokens: 3_000, outputTokens: 200, model: 'claude-sonnet-5-5' } });
     expect(c.messages.create).toHaveBeenCalledWith(
-      expect.objectContaining({ model: 'claude-sonnet-5-5', tool_choice: { type: 'tool', name: MAPPING_TOOL_NAME }, tools: [mappingTool(leadFields)] }),
+      expect.objectContaining({ model: 'claude-sonnet-5-5', tool_choice: { type: 'auto' }, system: expect.stringContaining(MAPPING_TOOL_NAME), tools: [mappingTool(leadFields)] }),
       { signal },
     );
   });
