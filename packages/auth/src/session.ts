@@ -7,11 +7,14 @@
  * Issuing a session enforces the same tenant-active check up front, so a
  * suspended org's users can never mint a fresh session either.
  */
-import { and, eq, gt, isNull } from 'drizzle-orm';
+import { and, eq, gt, isNull, lt } from 'drizzle-orm';
 import { getDb, schema, type Db, type UserKind } from '@cti/db';
 import { randomToken, sha256 } from './crypto.js';
 
 const DEFAULT_TTL_DAYS = 30;
+const DAY_MS = 24 * 3600 * 1000;
+/** A session is renewed only once this much of its lifetime has been used, so an active session costs at most one write a day. */
+const RENEWAL_MIN_AGE_DAYS = 1;
 
 export interface SessionUser {
   userId: string;
@@ -65,7 +68,7 @@ export async function issueSession(userId: string, ttlDays = DEFAULT_TTL_DAYS): 
   if (!(await tenantIsActive(db, user.orgId))) throw new SuspendedTenantError(user.orgId);
   const token = randomToken(32);
   const tokenHash = sha256(token);
-  const expiresAt = new Date(Date.now() + ttlDays * 24 * 3600 * 1000);
+  const expiresAt = new Date(Date.now() + ttlDays * DAY_MS);
   await db.insert(schema.sessions).values({ userId, tokenHash, expiresAt });
   return { token, expiresAt };
 }
@@ -118,6 +121,33 @@ export async function resolveSessionDetail(bearer: string | undefined): Promise<
 export async function resolveSession(bearer: string | undefined): Promise<SessionUser | null> {
   const detail = await resolveSessionDetail(bearer);
   return detail ? detail.user : null;
+}
+
+/**
+ * Opt-in sliding renewal: pushes this live session's expiry out to now + `ttlDays`
+ * when less than `ttlDays - 1` days of it remain, so a session that keeps being
+ * used never lapses. A client that wants it calls this (outreach-api's
+ * GET /auth/me does); `issueSession`/`resolveSession` never renew, so the
+ * softphone's fixed 30 days are unchanged.
+ *
+ * One parameterized UPDATE, scoped to the caller's own token hash. The renewal
+ * condition lives in the WHERE, so a session still in its first day matches no
+ * row (no write at all), concurrent callers cannot double-write, and an expired
+ * or revoked session can never be revived.
+ */
+export async function extendSession(bearer: string | undefined, ttlDays = DEFAULT_TTL_DAYS): Promise<void> {
+  const token = bearerToken(bearer);
+  if (!token) return;
+  const now = Date.now();
+  await getDb()
+    .update(schema.sessions)
+    .set({ expiresAt: new Date(now + ttlDays * DAY_MS) })
+    .where(and(
+      eq(schema.sessions.tokenHash, sha256(token)),
+      isNull(schema.sessions.revokedAt),
+      gt(schema.sessions.expiresAt, new Date(now)),
+      lt(schema.sessions.expiresAt, new Date(now + (ttlDays - RENEWAL_MIN_AGE_DAYS) * DAY_MS)),
+    ));
 }
 
 /**

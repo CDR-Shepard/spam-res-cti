@@ -11,12 +11,19 @@ const state = vi.hoisted(() => ({
   session: null as Record<string, unknown> | null,
   issued: [] as string[],
   revoked: [] as string[],
+  extended: [] as Array<string | undefined>,
+  /** When set, extendSession rejects with it — a renewal that fails must not fail /me. */
+  extendError: null as Error | null,
 }));
 vi.mock('@cti/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@cti/auth')>()),
   issueSession: async (userId: string) => { state.issued.push(userId); return { token: `tok-${userId}`, expiresAt: new Date('2026-10-04T00:00:00Z') }; },
   resolveSession: async () => state.session,
   revokeSession: async (bearer: string) => { state.revoked.push(bearer); },
+  extendSession: async (bearer: string | undefined) => {
+    state.extended.push(bearer);
+    if (state.extendError) throw state.extendError;
+  },
 }));
 
 const cfg = testConfig();
@@ -27,7 +34,7 @@ let idp: FakeIdentityProvider;
 let captured: { where: unknown[] };
 
 beforeEach(async () => {
-  state.session = null; state.issued = []; state.revoked = [];
+  state.session = null; state.issued = []; state.revoked = []; state.extended = []; state.extendError = null;
   idp = new FakeIdentityProvider();
   idp.addUser({ externalId: 'wos_u1', email: 'ann@gg.co', firstName: 'Ann', lastName: 'Rep' }, [{ organizationId: 'org_gg', role: 'admin' }]);
   idp.setNextCode('code-1', 'wos_u1', 'org_gg');
@@ -181,6 +188,35 @@ describe('sign-in routes', () => {
     const out = await app.inject({ method: 'POST', url: '/api/auth/logout', headers: { authorization: 'Bearer tok-U1' } });
     expect(out.statusCode).toBe(204);
     expect(state.revoked).toEqual(['Bearer tok-U1']);
+  });
+  it('me slides the session: a successful call asks for the renewal of exactly the bearer it was sent', async () => {
+    state.session = humanSession;
+    const me = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { authorization: 'Bearer tok-U1' } });
+    expect(me.statusCode).toBe(200);
+    expect(state.extended).toEqual(['Bearer tok-U1']);
+  });
+  it('me renews nothing for a call that is not signed in (401) or whose tenant is unknown (403)', async () => {
+    await app.inject({ method: 'GET', url: '/api/auth/me' });
+    await app.inject({ method: 'GET', url: '/api/auth/me', headers: { authorization: 'Bearer stale' } });
+    expect(state.extended).toEqual([]);
+    await app.close();
+    app = await buildTestApp({ cfg, db: fakeDb({ organizations: [{ ...tenant, id: 'not-O1' }], users: [] }).db, idp });
+    state.session = humanSession;
+    const res = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { authorization: 'Bearer tok-U1' } });
+    expect(res.statusCode).toBe(403);
+    expect(state.extended).toEqual([]);
+  });
+  it('me still answers 200 when the renewal fails: staying signed in is best-effort, the session itself is fine', async () => {
+    state.session = humanSession;
+    state.extendError = new Error('db hiccup');
+    const me = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { authorization: 'Bearer tok-U1' } });
+    expect(me.statusCode).toBe(200);
+    expect(me.json()).toMatchObject({ user: { email: 'ann@gg.co' } });
+  });
+  it('only me slides the session: logout and the handoff exchange do not renew it', async () => {
+    state.session = humanSession;
+    await app.inject({ method: 'POST', url: '/api/auth/logout', headers: { authorization: 'Bearer tok-U1' } });
+    expect(state.extended).toEqual([]);
   });
   it('me is 403 TENANT_FORBIDDEN when the resolved org row does not match the session tenant', async () => {
     await app.close();

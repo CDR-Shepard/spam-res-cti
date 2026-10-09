@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { resolveSession, revokeSession, ServiceUserSessionError, SuspendedTenantError, type SessionUser } from '@cti/auth';
+import { extendSession, resolveSession, revokeSession, ServiceUserSessionError, SuspendedTenantError, type SessionUser } from '@cti/auth';
 import type { AuthProviders, SessionUser as SessionUserDto } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { HANDOFF_COOKIE, HANDOFF_PATH, issueHandoff, signInRedirect } from '../auth/handoff.js';
@@ -115,6 +115,14 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
     if (!session) return sendError(reply, 401, 'UNAUTHENTICATED', 'Sign in required');
     const { user, tenant } = await userAndTenant(db, session);
     if (!tenant) return sendError(reply, 403, 'TENANT_FORBIDDEN', 'Unknown tenant');
+    // The web app calls /me on every page load to stay signed in, so this is
+    // where an active session slides forward (at most one write a day; see
+    // extendSession). Best-effort: a failed renewal must not sign the user out.
+    try {
+      await extendSession(req.headers.authorization);
+    } catch (err) {
+      req.log.warn({ err: (err as Error).message }, 'session renewal failed');
+    }
     return { user, tenant };
   });
 

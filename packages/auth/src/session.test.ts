@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
   session: undefined as Record<string, unknown> | undefined,
@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
   lastUpdateTable: null as unknown,
   lastUpdateValues: null as Record<string, unknown> | null,
   lastUpdateWhere: null as unknown,
+  updateCount: 0,
 }));
 
 vi.mock('@cti/db', async (importOriginal) => {
@@ -24,6 +25,7 @@ vi.mock('@cti/db', async (importOriginal) => {
     update: (table: unknown) => ({
       set: (values: Record<string, unknown>) => ({
         where: async (predicate: unknown) => {
+          state.updateCount += 1;
           state.lastUpdateTable = table;
           state.lastUpdateValues = values;
           state.lastUpdateWhere = predicate;
@@ -37,6 +39,7 @@ vi.mock('@cti/db', async (importOriginal) => {
 import { schema } from '@cti/db';
 import { sha256 } from './crypto.js';
 import {
+  extendSession,
   isCtiResetDue,
   issueSession,
   resolveSession,
@@ -65,6 +68,17 @@ function renderPredicate(node: unknown): string {
   return '<?>';
 }
 
+/** The bound values of a drizzle predicate, in order — what the database is actually asked to compare against. */
+function paramValues(node: unknown): unknown[] {
+  if (node === null || typeof node !== 'object') return [];
+  if (Array.isArray(node)) return node.flatMap(paramValues);
+  const n = node as Record<string, unknown>;
+  if (Array.isArray(n.queryChunks)) return n.queryChunks.flatMap(paramValues);
+  if (Array.isArray(n.value)) return [];
+  return 'value' in n && 'encoder' in n ? [n.value] : [];
+}
+
+const DAY_MS = 24 * 3600 * 1000;
 const human = { id: 'U1', orgId: 'O1', email: 'rep@example.com', isAdmin: false, powerDialerEnabled: true, kind: 'human', isSuperAdmin: false };
 const service = { ...human, id: 'AI', email: 'ai-agent@gg-homes.internal', kind: 'service' };
 const ISSUED = new Date('2026-09-28T20:00:00.000Z');
@@ -78,6 +92,7 @@ beforeEach(() => {
   state.lastUpdateTable = null;
   state.lastUpdateValues = null;
   state.lastUpdateWhere = null;
+  state.updateCount = 0;
 });
 
 describe('resolveSession', () => {
@@ -210,5 +225,46 @@ describe('revokeAllSessionsForUser', () => {
     expect(predicate).toContain('revoked_at is null');
     expect(predicate).toContain(' and ');
     expect(predicate).not.toContain('token_hash');
+  });
+});
+
+describe('extendSession — sliding renewal as one conditional UPDATE', () => {
+  const NOW = new Date('2026-10-09T12:00:00.000Z');
+  afterEach(() => { vi.useRealTimers(); });
+  function freezeNow() { vi.useFakeTimers(); vi.setSystemTime(NOW); }
+
+  it('moves expires_at to now + 30 days with ONE update on sessions, touching nothing else', async () => {
+    freezeNow();
+    await extendSession('Bearer tok');
+    expect(state.updateCount).toBe(1);
+    expect(state.lastUpdateTable).toBe(schema.sessions);
+    expect(state.lastUpdateValues).toEqual({ expiresAt: new Date(NOW.getTime() + 30 * DAY_MS) });
+  });
+  it('scopes the update to this token, a live session, and one with less than 29 days left (at most one write per day)', async () => {
+    freezeNow();
+    await extendSession('Bearer tok');
+    const predicate = renderPredicate(state.lastUpdateWhere);
+    expect(predicate).toContain('token_hash = <param>');
+    expect(predicate).toContain('revoked_at is null');
+    expect(predicate).toContain('expires_at > <param>');
+    expect(predicate).toContain('expires_at < <param>');
+    expect(predicate).not.toContain('user_id');
+    expect(paramValues(state.lastUpdateWhere)).toEqual([sha256('tok'), NOW, new Date(NOW.getTime() + 29 * DAY_MS)]);
+  });
+  it('honours a custom ttl: renews to now + ttl once a day of it has passed', async () => {
+    freezeNow();
+    await extendSession('Bearer tok', 7);
+    expect(state.lastUpdateValues).toEqual({ expiresAt: new Date(NOW.getTime() + 7 * DAY_MS) });
+    expect(paramValues(state.lastUpdateWhere)[2]).toEqual(new Date(NOW.getTime() + 6 * DAY_MS));
+  });
+  it('accepts the bare token as well as a Bearer header, like the other session calls', async () => {
+    await extendSession('tok');
+    expect(paramValues(state.lastUpdateWhere)[0]).toBe(sha256('tok'));
+  });
+  it('does nothing without a bearer', async () => {
+    await extendSession(undefined);
+    await extendSession('');
+    await extendSession('Bearer ');
+    expect(state.updateCount).toBe(0);
   });
 });
