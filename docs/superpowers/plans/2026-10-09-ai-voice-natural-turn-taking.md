@@ -1330,6 +1330,40 @@ Rules (spec §4.1) — all only when `bargeIn === 'gate'` unless noted:
 12. `closeConversation()` → closing; close the gate; send `stopAutoResponses` **only in instant mode** (gate sessions never auto-respond).
 13. `silence()` and `finish()` also close the gate.
 
+- [ ] **Step 0: Two playback-tracker corrections (from Task 4's review)**
+
+In `services/cti-api/src/ai-voice/bridge-playback.ts`:
+1. `remainingMs()` must report `Infinity` whenever the response is still streaming — even if every forwarded mark has already echoed (a generation stall mid-response). Swap the guards:
+
+```ts
+  remainingMs(): number {
+    if (this.streaming) return Number.POSITIVE_INFINITY;
+    if (!this.playing) return 0;
+    const generatedMs = Math.floor(this.generatedBytes / PCMU_BYTES_PER_MS);
+    return Math.max(0, generatedMs - (this.latestMediaMs - this.itemStartMs));
+  }
+```
+
+2. Fix `currentItemId`'s doc comment to what it returns: `/** The agent item most recently forwarded (kept after it plays out, cleared on interrupt/reset), or null. */` — keep the getter returning `this.itemId` (the gate compares it with the opener's id while a response is still streaming).
+
+Add to `bridge-playback.test.ts`:
+
+```ts
+  it('reports Infinity while the response streams even when every mark has echoed', () => {
+    const p = new PlaybackTracker();
+    const m = p.onAudioDelta('item_1', Buffer.alloc(800).toString('base64'));
+    p.onMark(m);
+    expect(p.remainingMs()).toBe(Number.POSITIVE_INFINITY);
+  });
+```
+
+Run the playback tests → PASS. Commit separately:
+
+```bash
+git add services/cti-api/src/ai-voice/bridge-playback.ts services/cti-api/src/ai-voice/bridge-playback.test.ts
+git commit -m "fix(ai-voice): audio left is unbounded while the response still streams"
+```
+
 - [ ] **Step 1: Write the failing tests**
 
 Add after the existing `describe('agent audio and barge-in', …)`:
