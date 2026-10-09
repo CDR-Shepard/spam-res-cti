@@ -7,7 +7,7 @@ import type { Tenant } from '@cti/contracts';
 import { apiSession, SESSION_STORAGE_KEY } from './api';
 import { AuthProvider, useAuth } from './auth';
 
-afterEach(() => { vi.unstubAllGlobals(); apiSession.set(null); localStorage.clear(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); apiSession.set(null); localStorage.clear(); });
 
 const otherTenant: Tenant = { id: 'O2', name: 'Other Co', slug: 'other-co', timezone: 'UTC', status: 'active' };
 
@@ -211,5 +211,90 @@ describe('AuthProvider restore (stay signed in across a reload)', () => {
     await userEvent.click(screen.getByRole('button', { name: 'sign out' }));
     expect(await screen.findByText('user:none')).toBeInTheDocument();
     expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBeNull();
+  });
+
+  it('a 403 TENANT_FORBIDDEN from /me clears the stored token: that session will never work', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(403, { error: 'Unknown tenant', code: 'TENANT_FORBIDDEN' })));
+    renderProvider();
+    expect(await screen.findByText('restoring:false')).toBeInTheDocument();
+    expect(screen.getByText('authenticated:false')).toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBeNull();
+    expect(apiSession.get()).toBeNull();
+  });
+
+  it('any other 403 keeps the stored token', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(403, { error: 'Nope', code: 'FORBIDDEN' })));
+    renderProvider();
+    expect(await screen.findByText('restoring:false')).toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBe('stored-tok');
+  });
+
+  it('bounds the restore request at 10 s: a hung API times out, the token is kept and the user lands on the signed-out view', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    const clock = new AbortController();
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(clock.signal);
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderProvider();
+    expect(screen.getByText('restoring:true')).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(timeoutSpy).toHaveBeenCalledWith(10_000);
+
+    clock.abort(new DOMException('timed out', 'TimeoutError'));
+    expect(await screen.findByText('restoring:false')).toBeInTheDocument();
+    expect(screen.getByText('authenticated:false')).toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBe('stored-tok');
+  });
+});
+
+describe('AuthProvider cross-tab sign-in changes', () => {
+  const ME = {
+    user: { userId: 'U1', orgId: 'O1', email: 'a@b.co', displayName: null, isAdmin: true, isSuperAdmin: false, kind: 'human' },
+    tenant: { id: 'O1', name: 'GG Homes', slug: 'gg-homes', timezone: 'America/Los_Angeles', status: 'active' },
+  };
+  const fromOtherTab = (init: StorageEventInit) => window.dispatchEvent(new StorageEvent('storage', init));
+
+  async function signedInTab() {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(ME), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    const view = render(
+      <QueryClientProvider client={new QueryClient()}>
+        <AuthProvider><p>child</p></AuthProvider>
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(apiSession.get()).toEqual({ token: 'stored-tok' }));
+    return { reload, ...view };
+  }
+
+  it('reloads when another tab signs in as someone else, so this tab never keeps acting for a different identity under stale UI', async () => {
+    const { reload } = await signedInTab();
+    fromOtherTab({ key: SESSION_STORAGE_KEY, newValue: 'theirs', oldValue: 'stored-tok' });
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('reloads when another tab signs out', async () => {
+    const { reload } = await signedInTab();
+    fromOtherTab({ key: SESSION_STORAGE_KEY, newValue: null, oldValue: 'stored-tok' });
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reload for this tab's own token or for unrelated keys", async () => {
+    const { reload } = await signedInTab();
+    fromOtherTab({ key: SESSION_STORAGE_KEY, newValue: 'stored-tok' });
+    fromOtherTab({ key: 'theme', newValue: 'dark' });
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('stops listening when the provider unmounts', async () => {
+    const { reload, unmount } = await signedInTab();
+    unmount();
+    fromOtherTab({ key: SESSION_STORAGE_KEY, newValue: 'theirs' });
+    expect(reload).not.toHaveBeenCalled();
   });
 });

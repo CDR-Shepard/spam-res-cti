@@ -14,7 +14,7 @@ export interface ApiSession { token: string; orgId?: string }
 /** Where the bearer survives a reload and a browser restart (localStorage, not sessionStorage). */
 export const SESSION_STORAGE_KEY = 'outreach.session.v1';
 
-/** This tab's copy of the session: what carries it when storage is unavailable, and where the selected `orgId` lives. */
+/** This tab's own session: what its requests carry, and where the selected `orgId` lives. Storage only seeds it on a page load. */
 let memory: ApiSession | null = null;
 
 /** The stored bearer, or null when none is stored or storage is unavailable (private mode, blocked cookies). */
@@ -30,25 +30,51 @@ function writeStoredToken(token: string | null): void {
 }
 
 /**
- * The bearer plus the super admin's selected tenant. The bearer is kept in
- * localStorage so a reload (or a browser restart) leaves you signed in; the
+ * The bearer plus the super admin's selected tenant. The bearer is also kept
+ * in localStorage so a reload (or a browser restart) leaves you signed in; the
  * trade-off — a script on the page could read it — was accepted by the owner.
  * `orgId` is deliberately NOT stored: a reload returns to the home tenant,
  * which is what `AuthProvider`'s restore shows. Every storage call is
  * guarded and falls back to memory.
+ *
+ * A tab never re-reads storage on its own: if another tab signs in or out,
+ * this tab's UI (active tenant, cached queries) would be stale against a
+ * silently swapped token. `isSessionChangedElsewhere` flags that instead, and
+ * the tab reloads.
  */
 export const apiSession = {
-  get: (): ApiSession | null => {
-    const stored = readStoredToken();
-    if (!stored) return memory;
-    // The same token keeps this tab's selected org; a different one (another tab signed in, or a reload) starts clean.
-    return memory?.token === stored ? memory : { token: stored };
-  },
+  get: (): ApiSession | null => memory,
   set: (s: ApiSession | null): void => {
     memory = s;
     writeStoredToken(s?.token ?? null);
   },
+  /** On a page load: adopt the token a previous load left in storage (this tab's own, if it already has one). */
+  restore: (): ApiSession | null => {
+    if (!memory) {
+      const stored = readStoredToken();
+      if (stored) memory = { token: stored };
+    }
+    return memory;
+  },
+  /**
+   * Drops the session only if `token` is still it — for a 401 that may land
+   * after a newer sign-in replaced the token the request was sent with. This
+   * tab's copy and the stored copy are checked separately, so a token another
+   * tab stored meanwhile is never wiped. True when this tab's session was dropped.
+   */
+  clearIfToken: (token: string): boolean => {
+    const ownedByThisTab = memory?.token === token;
+    if (ownedByThisTab) memory = null;
+    if (readStoredToken() === token) writeStoredToken(null);
+    return ownedByThisTab;
+  },
 };
+
+/** A `storage` event from another tab that leaves this tab's token out of step with the stored one (sign-in as someone else, sign-out, or `clear()`). */
+export function isSessionChangedElsewhere(e: StorageEvent): boolean {
+  if (e.key !== null && e.key !== SESSION_STORAGE_KEY) return false;
+  return (e.newValue || null) !== (memory?.token ?? null);
+}
 
 type UnauthorizedHandler = () => void;
 let unauthorizedHandler: UnauthorizedHandler | null = null;
@@ -74,12 +100,13 @@ async function request(path: string, init: RequestInit): Promise<Response> {
   headers.set('Accept', 'application/json');
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   const session = apiSession.get();
-  if (session?.token) headers.set('Authorization', `Bearer ${session.token}`);
+  const sentToken = session?.token;
+  if (sentToken) headers.set('Authorization', `Bearer ${sentToken}`);
   if (session?.orgId) headers.set('X-Org-Id', session.orgId);
   const method = (init.method ?? 'GET').toUpperCase();
   const res = await fetch(path, { ...init, headers, credentials: 'same-origin' });
-  if (res.status === 401 && !isSessionBootstrap(path, method)) {
-    apiSession.set(null);
+  // Only the session this request was sent with is dropped: a 401 that arrives after a newer sign-in must not undo it.
+  if (res.status === 401 && !isSessionBootstrap(path, method) && sentToken && apiSession.clearIfToken(sentToken)) {
     unauthorizedHandler?.();
   }
   if (!res.ok) {

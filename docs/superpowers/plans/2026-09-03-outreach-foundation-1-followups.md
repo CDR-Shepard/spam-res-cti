@@ -146,7 +146,14 @@ plan `2026-09-04-outreach-foundation-2-product-skeleton.md`).
   day), so an active user is never forced to sign in again. Not changed:
   `cti-api` never calls it, so the softphone keeps its fixed 30 days. Still true:
   there is no absolute session cap, so a session that is used at least monthly
-  lives until it is revoked (sign-out) or its tenant is suspended.
+  lives until it is revoked (sign-out) or its tenant is suspended. A tab never
+  re-reads storage by itself; a `storage` event from another tab's sign-in or
+  sign-out reloads it, so stale UI never acts under a swapped token. Open for
+  whoever adds it: `outreach-api` has no member-removal or deactivation route,
+  so nothing revokes a removed member's sessions today (deleting the user row
+  cascades them away, a service-kind user or suspended tenant fails to resolve,
+  all pinned in `auth/removed-member.pg.test.ts`); a removal route must call
+  `revokeAllSessionsForUser` from `@cti/auth` in the same flow.
 - **Two `vitest` majors.** `apps/cti-web` and `apps/outreach-web` pin
   `vitest ^4`; every Node workspace (`services/*`, `packages/*`) pins `^2`.
   Align when the next Vite upgrade happens.
