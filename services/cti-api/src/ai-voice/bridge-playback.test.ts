@@ -142,3 +142,43 @@ describe('PlaybackTracker', () => {
     await expect(w).resolves.toBeUndefined();
   });
 });
+
+describe('drained listener, current item and audio left', () => {
+  const b64 = (ms: number) => Buffer.alloc(ms * 8).toString('base64');
+
+  it('calls onDrained once the last mark plays after audio done, not on interrupt', () => {
+    const onDrained = vi.fn();
+    const p = new PlaybackTracker({ onDrained });
+    const m1 = p.onAudioDelta('item_1', b64(100));
+    p.onAudioDone();
+    expect(onDrained).not.toHaveBeenCalled();
+    p.onMark(m1);
+    expect(onDrained).toHaveBeenCalledTimes(1);
+
+    p.onAudioDelta('item_2', b64(100));
+    p.interrupt();
+    expect(onDrained).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not call onDrained for a response with no audio', () => {
+    const onDrained = vi.fn();
+    const p = new PlaybackTracker({ onDrained });
+    p.onResponseDone();
+    expect(onDrained).not.toHaveBeenCalled();
+  });
+
+  it('reports the current item and the audio left to play', () => {
+    const p = new PlaybackTracker();
+    expect(p.currentItemId).toBeNull();
+    expect(p.remainingMs()).toBe(0);
+    p.onInboundMedia(1000);
+    p.onAudioDelta('item_1', b64(3000));
+    expect(p.currentItemId).toBe('item_1');
+    expect(p.remainingMs()).toBe(Number.POSITIVE_INFINITY); // still streaming
+    p.onAudioDone();
+    p.onInboundMedia(2500);
+    expect(p.remainingMs()).toBe(1500);
+    p.onInboundMedia(9000);
+    expect(p.remainingMs()).toBe(0);
+  });
+});
