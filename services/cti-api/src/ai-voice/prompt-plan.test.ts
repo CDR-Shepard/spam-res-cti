@@ -42,13 +42,13 @@ const between = (text: string) => text.slice(text.indexOf(PLAN_OPEN) + PLAN_OPEN
 describe('buildInstructions with an approved plan', () => {
   it('1: without a plan the instructions are byte-for-byte what they were before plans existed', () => {
     // Hashes of the no-plan prompt for these inputs, re-pinned when the base prompt text changes
-    // (last: natural turn-taking rules, 2026-10-09). A plan must never alter the no-plan prompt.
-    expect(sha(buildInstructions(input()))).toBe('73772de1fa23fcf3d3b3f23acc17e5643da75b05501b4a6bd667c5d18da1dbe6');
-    expect(sha(buildInstructions(input({ approvedPlan: null })))).toBe('73772de1fa23fcf3d3b3f23acc17e5643da75b05501b4a6bd667c5d18da1dbe6');
-    expect(sha(buildInstructions(input({ approvedPlan: '' })))).toBe('73772de1fa23fcf3d3b3f23acc17e5643da75b05501b4a6bd667c5d18da1dbe6');
-    expect(sha(buildInstructions(input({ isTest: true })))).toBe('70abfbf7cff16bf1ffceb2899325f7c98cfad9b3052d6c34236517dfbff85ce3');
+    // (last: disclosure to someone new + silence-note wording, 2026-10-09). A plan must never alter the no-plan prompt.
+    expect(sha(buildInstructions(input()))).toBe('3b49dd1a599fc3ee0d981e9373dfd36059d43d2aed52e609117cd677afbcc858');
+    expect(sha(buildInstructions(input({ approvedPlan: null })))).toBe('3b49dd1a599fc3ee0d981e9373dfd36059d43d2aed52e609117cd677afbcc858');
+    expect(sha(buildInstructions(input({ approvedPlan: '' })))).toBe('3b49dd1a599fc3ee0d981e9373dfd36059d43d2aed52e609117cd677afbcc858');
+    expect(sha(buildInstructions(input({ isTest: true })))).toBe('05fe8e5ad2743d77efe537fbff1e5a4c8d796a8d5a0c1198071084103b51a68b');
     const bare = input({ firstName: null, address: null, notes: '', callbackNumber: null });
-    expect(sha(buildInstructions(bare))).toBe('df7a3de0369315ed2524c68fba5abf5e2748ceacd89818c71b5e046c7da1c267');
+    expect(sha(buildInstructions(bare))).toBe('18c1f0ba835c8ea9b0a3b12cc7daee62d1e15063b5357000d5128a6c10de25aa');
     expect(buildInstructions(input())).not.toContain(PLAN_HEADING);
   });
 

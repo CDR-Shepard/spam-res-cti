@@ -355,6 +355,15 @@ describe('natural turn-taking rules (2026-10-09)', () => {
     expect(text).toContain('For simple confirmations, answer right away.');
   });
 
+  it('re-discloses the AI and the recorded line to someone new on the line', () => {
+    expect(text).toContain('If someone new comes on the line');
+    expect(text).toContain("you're an AI assistant calling for GG Homes on a recorded line");
+  });
+
+  it("only counts a second silence note when they haven't said anything yet", () => {
+    expect(text).toContain("If you get another note before they've said anything");
+  });
+
   it('replaces the long-silence rule with silence notes and wait_for_user', () => {
     expect(text).not.toContain("If there's a long silence after your question");
     expect(text).toContain('(No one has said anything for 8 seconds.)');
