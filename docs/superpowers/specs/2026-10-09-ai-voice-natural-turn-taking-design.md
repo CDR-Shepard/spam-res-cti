@@ -58,7 +58,7 @@ When an undecided overlap's turn ends (`committed`, then `…transcription.compl
 
 - **Late overlap = an early answer.** If the caller started talking when the agent's audio was fully generated and at most 1.5 s of it was left to play ("…got a quick minute?" / "yeah sure"), it is their answer: the agent answers once its audio finishes playing.
 
-**The opener is protected.** The first agent response (the disclosure line) is never cut by the gate; caller speech over it only counts as a late answer if it overlaps its last 1.5 s. Compliance: "AI assistant … recorded line" is always said in full.
+**The opener is protected.** The first agent response (the disclosure line) is never cut by the gate; caller speech over it is never answered mid-line: a real interruption over it ("Wait, who is this?", "Hello? Hello?") is answered once the opener has played, a listening sound over its last 1.5 s counts as a late answer, and anything else is ignored. Compliance: "AI assistant … recorded line" is always said in full.
 
 All responses go through one `requestResponse()`: if a response is active or a tool batch is running, it is deferred until that finishes, so the bridge never sends two `response.create`s at once.
 
