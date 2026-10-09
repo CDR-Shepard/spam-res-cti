@@ -81,6 +81,17 @@ function endCallTool(outcomes: readonly string[]): RealtimeFunctionTool {
   };
 }
 
+/** Answered by the bridge itself (no side effect): stay quiet and keep listening. Spec 2026-10-09 §4.2. */
+export const WAIT_FOR_USER = 'wait_for_user';
+
+export const WAIT_FOR_USER_TOOL: RealtimeFunctionTool = {
+  type: 'function',
+  name: WAIT_FOR_USER,
+  description:
+    "Say nothing and keep listening: what you heard wasn't meant for you (a TV, someone else in the room, noise), or they asked you to hold on.",
+  parameters: { type: 'object', properties: {}, additionalProperties: false },
+};
+
 export const AI_CALL_TOOLS: RealtimeFunctionTool[] = [
   {
     type: 'function',
@@ -127,6 +138,7 @@ export const AI_CALL_TOOLS: RealtimeFunctionTool[] = [
       ['when', 'note'],
     ),
   },
+  WAIT_FOR_USER_TOOL,
 ];
 
 /** Book one of the offered appointment times (plan 1D); `slotIds` are this call's slot ids. */

@@ -331,9 +331,9 @@ export class AiCallBridge {
     };
     this.toolChain = this.toolChain
       .then(async () => {
-        const carryOn = await runToolBatch(calls, deps);
+        const { carryOn, speak } = await runToolBatch(calls, deps);
         if (!carryOn) this.closeConversation();
-        if (!this.closing) this.sendOpenAi({ type: 'response.create' });
+        if (!this.closing && speak) this.sendOpenAi({ type: 'response.create' });
       })
       .catch((e: unknown) => this.hooks.log.error({ err: errText(e) }, 'ai-voice bridge: tool batch failed'));
   }

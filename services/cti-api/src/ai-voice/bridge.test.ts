@@ -471,6 +471,28 @@ describe('tool calls', () => {
     expect(hooks.onEnd).not.toHaveBeenCalled();
   });
 
+  it('answers wait_for_user itself and does not ask the agent to speak', async () => {
+    const { openai, bridge, hooks } = setup();
+    bridge.start();
+    openai.clearSent();
+    openai.msg(done(fnCall('wait_for_user', '{}', 'call_w')));
+    await flush();
+    expect(hooks.onTool).not.toHaveBeenCalled();
+    expect(openai.sent).toEqual([
+      { type: 'conversation.item.create', item: { type: 'function_call_output', call_id: 'call_w', output: '{"ok":true}' } },
+    ]);
+  });
+
+  it('a batch with wait_for_user and save_qualification runs both and stays quiet', async () => {
+    const { openai, bridge, hooks } = setup();
+    bridge.start();
+    openai.clearSent();
+    openai.msg(done(fnCall('save_qualification', '{"field":"timeline","value":"soon"}', 'c1'), fnCall('wait_for_user', '{}', 'c2')));
+    await flush();
+    expect(hooks.onTool).toHaveBeenCalledTimes(1);
+    expect(openai.types()).toEqual(['conversation.item.create', 'conversation.item.create']);
+  });
+
   it('answers bad JSON arguments with an error without calling the hook', async () => {
     const { openai, bridge, hooks } = setup();
     bridge.start();

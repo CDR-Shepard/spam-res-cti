@@ -347,9 +347,21 @@ describe('buildInstructions — appointment times (plan 1D)', () => {
 });
 
 describe('AI_CALL_TOOLS', () => {
-  it('has the TOOL_NAMES in order, all but book_appointment (offered only with slots)', () => {
-    expect(AI_CALL_TOOLS.map((t) => t.name)).toEqual(TOOL_NAMES.filter((n) => n !== 'book_appointment'));
-    expect(toolsFor(SLOTS).map((t) => t.name)).toEqual([...TOOL_NAMES]);
+  it('has the TOOL_NAMES in order, all but book_appointment (offered only with slots), then wait_for_user', () => {
+    const base = TOOL_NAMES.filter((n) => n !== 'book_appointment');
+    expect(AI_CALL_TOOLS.map((t) => t.name)).toEqual([...base, 'wait_for_user']);
+    expect(toolsFor(SLOTS).map((t) => t.name)).toEqual([...base, 'wait_for_user', 'book_appointment']);
+  });
+
+  it('offers wait_for_user on every call, with no parameters', () => {
+    const t = AI_CALL_TOOLS.find((x) => x.name === 'wait_for_user');
+    expect(t?.parameters).toEqual({ type: 'object', properties: {}, additionalProperties: false });
+    expect(toolsFor([]).some((x) => x.name === 'wait_for_user')).toBe(true);
+    expect(toolsFor(SLOTS).some((x) => x.name === 'wait_for_user')).toBe(true);
+  });
+
+  it('wait_for_user is answered by the bridge, so it is not a call-service tool name', () => {
+    expect((TOOL_NAMES as readonly string[]).includes('wait_for_user')).toBe(false);
   });
 
   it('toolsFor without slots is exactly AI_CALL_TOOLS', () => {
