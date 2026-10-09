@@ -18,7 +18,13 @@ export function parseFrame(raw: unknown): Msg | null {
   }
 }
 
-/** The loggable fields of an OpenAI `error` event (never any audio). */
+/** The loggable fields of an OpenAI `error` event (never any audio); `eventId` is the client event it rejects, if any. */
 export function openAiErrorFields(err: Msg): Record<string, string> {
-  return { errorType: str(err.type), code: str(err.code), message: str(err.message), param: str(err.param) };
+  return {
+    errorType: str(err.type),
+    code: str(err.code),
+    message: str(err.message),
+    param: str(err.param),
+    eventId: str(err.event_id),
+  };
 }

@@ -1,8 +1,9 @@
 /**
- * One caller "overlap" at a time: the caller started talking while the agent was talking. The gate
+ * Caller "overlaps": the caller started talking while the agent was talking. The gate
  * keeps the agent talking through listening sounds ("mm-hmm", "yeah") and cuts it on a real
  * interruption: a stop word, two real words, or 3 s of talk with no word transcribed
  * (NO_WORDS_INTERRUPT_MS: a transcriber hiccup, another language). The opener is uncuttable (disclosure).
+ * New speech pushes an undecided overlap aside; it is still judged by its words, and a cut settles all.
  * Spec: docs/superpowers/specs/2026-10-09-ai-voice-natural-turn-taking-design.md §4.1.
  */
 import { overlapVerdict } from './bridge-listening.js';
@@ -36,6 +37,8 @@ export interface OverlapGateDeps {
 
 export class OverlapGate {
   private current: Overlap | null = null;
+  /** Earlier overlaps pushed aside by new speech before their words were judged. */
+  private displaced: readonly Overlap[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly deps: OverlapGateDeps) {}
@@ -45,38 +48,42 @@ export class OverlapGate {
     return this.current?.itemId ?? null;
   }
 
+  /** Whether this caller item is being judged (the current overlap or one pushed aside). */
+  has(itemId: string): boolean {
+    return this.find(itemId) !== null;
+  }
+
   open(itemId: string, opts: { cuttable: boolean; late: boolean }): void {
-    this.close();
+    this.clearNoWordsTimer();
+    if (this.current !== null) this.displaced = [...this.displaced, this.current];
     this.current = { itemId, text: '', cuttable: opts.cuttable, late: opts.late };
-    if (opts.cuttable) this.timer = this.deps.setTimer(() => this.interrupt('no words'), NO_WORDS_INTERRUPT_MS);
+    if (opts.cuttable) this.timer = this.deps.setTimer(() => this.interrupt('no words', itemId), NO_WORDS_INTERRUPT_MS);
   }
 
   /** Words streamed for a caller item (`conversation.item.input_audio_transcription.delta`). */
   onDelta(itemId: string, delta: string): void {
-    const o = this.current;
-    if (o === null || o.itemId !== itemId || delta.length === 0) return;
+    const o = this.find(itemId);
+    if (o === null || delta.length === 0) return;
     const next: Overlap = { ...o, text: o.text + delta };
-    this.current = next;
+    const isCurrent = o === this.current;
+    this.replace(o, next);
     const verdict = overlapVerdict(next.text);
-    if (verdict !== 'empty') this.clearNoWordsTimer();
-    if (verdict === 'interrupt' && next.cuttable) this.interrupt('words');
+    if (verdict !== 'empty' && isCurrent) this.clearNoWordsTimer();
+    if (verdict === 'interrupt' && next.cuttable) this.interrupt('words', itemId);
   }
 
   /** The item's final transcript (or '' when transcription failed): settle the overlap. */
   finish(itemId: string, finalText: string): OverlapEnd {
-    const o = this.current;
-    if (o === null || o.itemId !== itemId) return 'ignore';
+    const o = this.find(itemId);
+    if (o === null) return 'ignore';
     const verdict = overlapVerdict(finalText.trim().length > 0 ? finalText : o.text);
-    // A wordless sound (a cough) is never an answer, late or not.
-    if (verdict === 'empty') {
-      this.close();
-      return 'ignore';
-    }
     if (verdict === 'interrupt' && o.cuttable) {
-      this.interrupt('words');
+      this.interrupt('words', itemId);
       return 'interrupted';
     }
-    this.close();
+    this.drop(o);
+    // A wordless sound (a cough) is never an answer, late or not.
+    if (verdict === 'empty') return 'ignore';
     if (verdict === 'interrupt') return 'answer';
     return o.late ? 'answer' : 'ignore';
   }
@@ -84,6 +91,7 @@ export class OverlapGate {
   close(): void {
     this.clearNoWordsTimer();
     this.current = null;
+    this.displaced = [];
   }
 
   /** The caller stopped talking: a sound shorter than the no-words timer is settled by its transcript. */
@@ -91,10 +99,29 @@ export class OverlapGate {
     if (this.current?.itemId === itemId) this.clearNoWordsTimer();
   }
 
-  private interrupt(why: InterruptWhy): void {
-    const itemId = this.current?.itemId ?? '';
+  /** A cut settles every overlap: the agent is no longer talking over anyone. */
+  private interrupt(why: InterruptWhy, itemId: string): void {
     this.close();
     this.deps.onInterrupt(why, itemId);
+  }
+
+  private find(itemId: string): Overlap | null {
+    if (this.current?.itemId === itemId) return this.current;
+    return this.displaced.find((o) => o.itemId === itemId) ?? null;
+  }
+
+  private replace(o: Overlap, next: Overlap): void {
+    if (o === this.current) this.current = next;
+    else this.displaced = this.displaced.map((d) => (d === o ? next : d));
+  }
+
+  private drop(o: Overlap): void {
+    if (o !== this.current) {
+      this.displaced = this.displaced.filter((d) => d !== o);
+      return;
+    }
+    this.clearNoWordsTimer();
+    this.current = null;
   }
 
   private clearNoWordsTimer(): void {

@@ -154,4 +154,39 @@ describe('OverlapGate', () => {
     expect(onInterrupt).not.toHaveBeenCalled();
     expect(g.finish('c2', 'Wait')).toBe('ignore');
   });
+
+  it('an overlap pushed aside by new speech is still judged by its words, and a cut settles both', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    g.onSpeechStopped('c1');
+    g.open('c2', { cuttable: true, late: false });
+    expect(g.has('c1')).toBe(true);
+    expect(g.has('c2')).toBe(true);
+    g.onDelta('c1', ' Wait');
+    expect(onInterrupt).toHaveBeenCalledWith('words', 'c1');
+    expect(g.has('c1')).toBe(false);
+    expect(g.itemId).toBeNull();
+  });
+
+  it('a pushed-aside overlap settles on its final text and leaves the current one alone', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: true, late: true });
+    g.open('c2', { cuttable: true, late: false });
+    expect(g.finish('c1', 'Yeah, sure.')).toBe('answer');
+    expect(g.has('c1')).toBe(false);
+    expect(g.itemId).toBe('c2');
+    g.open('c3', { cuttable: false, late: false });
+    expect(g.finish('c2', 'Who is this?')).toBe('interrupted');
+    expect(onInterrupt).toHaveBeenCalledWith('words', 'c2');
+    expect(g.has('c3')).toBe(false);
+  });
+
+  it('close() forgets pushed-aside overlaps too', () => {
+    const { g } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    g.open('c2', { cuttable: true, late: false });
+    g.close();
+    expect(g.has('c1')).toBe(false);
+    expect(g.finish('c1', 'Wait')).toBe('ignore');
+  });
 });
