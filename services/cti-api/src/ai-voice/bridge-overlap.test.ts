@@ -181,6 +181,22 @@ describe('OverlapGate', () => {
     expect(g.has('c3')).toBe(false);
   });
 
+  it('is idle only when no overlap is being judged, current or pushed aside', () => {
+    const { g } = gate();
+    expect(g.idle).toBe(true);
+    g.open('c1', { cuttable: true, late: false });
+    expect(g.idle).toBe(false);
+    g.open('c2', { cuttable: true, late: false }); // c1 pushed aside
+    expect(g.finish('c2', 'Mm-hmm.')).toBe('ignore');
+    expect(g.itemId).toBeNull();
+    expect(g.idle).toBe(false); // c1 is still being judged
+    expect(g.finish('c1', 'Mm-hmm.')).toBe('ignore');
+    expect(g.idle).toBe(true);
+    g.open('c3', { cuttable: true, late: false });
+    g.close();
+    expect(g.idle).toBe(true);
+  });
+
   it('close() forgets pushed-aside overlaps too', () => {
     const { g } = gate();
     g.open('c1', { cuttable: true, late: false });

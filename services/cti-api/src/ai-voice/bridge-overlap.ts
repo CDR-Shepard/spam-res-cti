@@ -48,6 +48,11 @@ export class OverlapGate {
     return this.current?.itemId ?? null;
   }
 
+  /** No overlap is being judged: neither a current one nor one pushed aside. */
+  get idle(): boolean {
+    return this.current === null && this.displaced.length === 0;
+  }
+
   /** Whether this caller item is being judged (the current overlap or one pushed aside). */
   has(itemId: string): boolean {
     return this.find(itemId) !== null;
