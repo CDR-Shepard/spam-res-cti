@@ -114,6 +114,15 @@ describe('OverlapGate', () => {
     expect(g.finish('c1', 'Yeah, sure.')).toBe('answer');
   });
 
+  it('a wordless late overlap (a cough near the end) is ignored, not answered', () => {
+    const { g } = gate();
+    g.open('c1', { cuttable: true, late: true });
+    g.onSpeechStopped('c1');
+    expect(g.finish('c1', '')).toBe('ignore');
+    g.open('c2', { cuttable: false, late: true });
+    expect(g.finish('c2', '  ')).toBe('ignore');
+  });
+
   it('settles on the final text when the words arrived late', () => {
     const { g, onInterrupt } = gate();
     g.open('c1', { cuttable: true, late: false });

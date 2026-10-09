@@ -8,6 +8,7 @@ describe('words', () => {
     expect(words('Mhm')).toEqual(['mmhmm']);
     expect(words('Uh-huh, uh huh')).toEqual(['uhhuh', 'uhhuh']);
     expect(words('Uh–huh')).toEqual(['uhhuh']);
+    expect(words('Uhhh-huh')).toEqual(['uhhuh']);
     expect(words('O.K.')).toEqual(['ok']);
     expect(words('I see. Got it! All right')).toEqual(['isee', 'gotit', 'alright']);
     expect(words("I've been thinking")).toEqual(['ive', 'been', 'thinking']);
@@ -52,6 +53,10 @@ describe('overlapVerdict', () => {
     ['Umm, uhh', 'listening'],
     ['Ohh, ahh', 'listening'],
     ['Erm', 'listening'],
+    ['Uhm, uhm', 'listening'],
+    ['Eh', 'listening'],
+    ['Uhhh-huh', 'listening'],
+    ['Uh-huhh', 'listening'],
     ['O.K.', 'listening'],
     ['Gotcha', 'listening'],
     ['Nope', 'interrupt'],

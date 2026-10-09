@@ -12,7 +12,7 @@ export const INTERRUPT_WORD_COUNT = 2;
 /** Multi-word listening sounds, folded into one token before splitting (order matters). */
 const PHRASES: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bo\.?\s*k\b\.?/g, 'ok'],
-  [/\buh[\s-]*huh\b/g, 'uhhuh'],
+  [/\bu+h+[\s-]*h+u+h+\b/g, 'uhhuh'],
   [/\bm+[\s-]*h+m+\b/g, 'mmhmm'],
   [/\bi see\b/g, 'isee'],
   [/\bgot it\b/g, 'gotit'],
@@ -28,8 +28,8 @@ const LISTENING: ReadonlySet<string> = new Set([
   'true', 'totally', 'exactly', 'really', 'interesting', 'makessense', 'forsure', 'hello',
 ]);
 
-/** Stretched or doubled fillers: mmm, hm, hmmm, umm, uhh, ohh, ahh, erm. */
-const FILLER = /^(?:m+|h+m+|u+h+|u+m+|a+h+|o+h+|e+r+m*)$/;
+/** Stretched or doubled fillers: mmm, hm, hmmm, umm, uhh, uhm, ohh, ahh, eh, ehh, erm. */
+const FILLER = /^(?:m+|h+m+|u+h+|u+h+m+|u+m+|a+h+|o+h+|e+h+|e+r+m*)$/;
 const isListening = (w: string): boolean => LISTENING.has(w) || FILLER.test(w);
 
 /** One of these is enough to stop the agent ("hold" on/up, "hang" on). */

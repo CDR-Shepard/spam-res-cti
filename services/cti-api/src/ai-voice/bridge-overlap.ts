@@ -67,6 +67,11 @@ export class OverlapGate {
     const o = this.current;
     if (o === null || o.itemId !== itemId) return 'ignore';
     const verdict = overlapVerdict(finalText.trim().length > 0 ? finalText : o.text);
+    // A wordless sound (a cough) is never an answer, late or not.
+    if (verdict === 'empty') {
+      this.close();
+      return 'ignore';
+    }
     if (verdict === 'interrupt' && o.cuttable) {
       this.interrupt('words');
       return 'interrupted';
