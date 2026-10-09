@@ -346,6 +346,23 @@ describe('buildInstructions — appointment times (plan 1D)', () => {
   });
 });
 
+describe('natural turn-taking rules (2026-10-09)', () => {
+  const text = buildInstructions(input());
+
+  it('tells the agent how to handle being cut off and listening sounds', () => {
+    expect(text).toContain("If you get cut off, don't repeat what you already said");
+    expect(text).toContain('as their whole reply means yes or okay to what you just asked');
+    expect(text).toContain('For simple confirmations, answer right away.');
+  });
+
+  it('replaces the long-silence rule with silence notes and wait_for_user', () => {
+    expect(text).not.toContain("If there's a long silence after your question");
+    expect(text).toContain('(No one has said anything for 8 seconds.)');
+    expect(text).toContain('Sure, take your time.');
+    expect(text).toContain('- wait_for_user —');
+  });
+});
+
 describe('AI_CALL_TOOLS', () => {
   it('has the TOOL_NAMES in order, all but book_appointment (offered only with slots), then wait_for_user', () => {
     const base = TOOL_NAMES.filter((n) => n !== 'book_appointment');

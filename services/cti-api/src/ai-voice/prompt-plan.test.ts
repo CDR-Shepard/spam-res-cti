@@ -41,13 +41,14 @@ const between = (text: string) => text.slice(text.indexOf(PLAN_OPEN) + PLAN_OPEN
 
 describe('buildInstructions with an approved plan', () => {
   it('1: without a plan the instructions are byte-for-byte what they were before plans existed', () => {
-    // Hashes taken from the pre-plan prompt.ts (97e5c70) for the same inputs.
-    expect(sha(buildInstructions(input()))).toBe('f58882b05b8e05f54cb91515029b2ef85b14885f977e885cfe70a0d1818c3277');
-    expect(sha(buildInstructions(input({ approvedPlan: null })))).toBe('f58882b05b8e05f54cb91515029b2ef85b14885f977e885cfe70a0d1818c3277');
-    expect(sha(buildInstructions(input({ approvedPlan: '' })))).toBe('f58882b05b8e05f54cb91515029b2ef85b14885f977e885cfe70a0d1818c3277');
-    expect(sha(buildInstructions(input({ isTest: true })))).toBe('e5d66d4dca0b1bd8d9b93d2bcbb402768c9fcb09a20b93aaffd9df91490eebb4');
+    // Hashes of the no-plan prompt for these inputs, re-pinned when the base prompt text changes
+    // (last: natural turn-taking rules, 2026-10-09). A plan must never alter the no-plan prompt.
+    expect(sha(buildInstructions(input()))).toBe('73772de1fa23fcf3d3b3f23acc17e5643da75b05501b4a6bd667c5d18da1dbe6');
+    expect(sha(buildInstructions(input({ approvedPlan: null })))).toBe('73772de1fa23fcf3d3b3f23acc17e5643da75b05501b4a6bd667c5d18da1dbe6');
+    expect(sha(buildInstructions(input({ approvedPlan: '' })))).toBe('73772de1fa23fcf3d3b3f23acc17e5643da75b05501b4a6bd667c5d18da1dbe6');
+    expect(sha(buildInstructions(input({ isTest: true })))).toBe('70abfbf7cff16bf1ffceb2899325f7c98cfad9b3052d6c34236517dfbff85ce3');
     const bare = input({ firstName: null, address: null, notes: '', callbackNumber: null });
-    expect(sha(buildInstructions(bare))).toBe('2a35d67f6de445f7b2990d398eac7992516dd4e31d42dd8b53653f068640cd0f');
+    expect(sha(buildInstructions(bare))).toBe('df7a3de0369315ed2524c68fba5abf5e2748ceacd89818c71b5e046c7da1c267');
     expect(buildInstructions(input())).not.toContain(PLAN_HEADING);
   });
 
