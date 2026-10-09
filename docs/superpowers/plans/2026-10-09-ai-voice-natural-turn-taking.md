@@ -20,7 +20,7 @@
 - Immutability: never mutate shared objects; reassign private state with spreads (existing bridge style: `this.truncated = new Set([...this.truncated, id])`).
 - Any whole-module `vi.mock` of a `@cti/*` package must spread `importOriginal`.
 - Never log audio payloads or secrets.
-- Constants, exactly: `INTERRUPT_WORD_COUNT = 2`, `NO_WORDS_INTERRUPT_MS = 2000`, `LATE_OVERLAP_MS = 1500`, `SILENCE_CHECK_MS = 8000`, `HOLD_CHECK_MS = 30000`, `MAX_SILENCE_CHECKS = 2`.
+- Constants, exactly: `INTERRUPT_WORD_COUNT = 2`, `NO_WORDS_INTERRUPT_MS = 3000` (Task 2b raises it from 2000), `LATE_OVERLAP_MS = 1500`, `SILENCE_CHECK_MS = 8000`, `HOLD_CHECK_MS = 30000`, `MAX_SILENCE_CHECKS = 2`.
 - Config defaults, exactly: `AI_VOICE_BARGE_IN` = `gate`, `AI_VOICE_TRANSCRIBE_MODEL` = `gpt-live-transcribe`. The **bridge's own** option defaults stay legacy (`bargeIn: 'instant'`, `transcribeModel: 'gpt-4o-mini-transcribe'`) so every existing `bridge.test.ts` case keeps passing unchanged; the service passes the config values.
 - Migration number: `0059` (origin/main ends at 0058). If another 0059 appears on main before merge, renumber.
 
@@ -411,6 +411,147 @@ Expected: PASS.
 ```bash
 git add services/cti-api/src/ai-voice/bridge-overlap.ts services/cti-api/src/ai-voice/bridge-overlap.test.ts
 git commit -m "feat(ai-voice): overlap gate decides when the caller is really interrupting"
+```
+
+---
+
+### Task 2b: Review follow-ups for the classifier and the gate
+
+**Files:**
+- Modify: `services/cti-api/src/ai-voice/bridge-listening.ts`, `bridge-listening.test.ts`
+- Modify: `services/cti-api/src/ai-voice/bridge-overlap.ts`, `bridge-overlap.test.ts`
+
+**Interfaces (changes):**
+- `NO_WORDS_INTERRUPT_MS` becomes `3000`.
+- `OverlapGateDeps.onInterrupt(why: InterruptWhy, itemId: string): void` — now also receives the interrupted caller item id.
+- New `OverlapGate.onSpeechStopped(itemId: string): void` — the caller stopped talking: disarm the no-words timer for that item (a wordless sound shorter than the timer — a cough — is then settled by the final transcript, which is empty → `'ignore'`).
+
+Why: review of Tasks 1–2. The live spike showed words land ~1.0–1.2 s after `speech_started` and semantic VAD's `speech_stopped` can lag 1.5–2.8 s, so a 2 s wall-clock timer could cut the agent for a cough. Typed transcripts may use Unicode dashes, and doubled/stretched fillers ("Mmm, mmm", "Umm, uhh") must stay listening sounds.
+
+- [ ] **Step 1: Failing tests — classifier** (add to the `it.each` table in `bridge-listening.test.ts`):
+
+```ts
+    ['Interested', 'listening'],
+    ['Thanks', 'listening'],
+    ['Uh–huh', 'listening'],
+    ['Uh‑huh', 'listening'],
+    ['Mm—hmm', 'listening'],
+    ['Mmm, mmm', 'listening'],
+    ['Hm hm', 'listening'],
+    ['Umm, uhh', 'listening'],
+    ['Ohh, ahh', 'listening'],
+    ['Erm', 'listening'],
+    ['O.K.', 'listening'],
+    ['Gotcha', 'listening'],
+    ['Nope', 'interrupt'],
+    ['Nah', 'interrupt'],
+    ['Who?', 'interrupt'],
+    ['Why?', 'interrupt'],
+    ['Stop', 'interrupt'],
+    ['Pardon?', 'interrupt'],
+    ['Excuse me', 'interrupt'],
+    ['I’m interested', 'interrupt'],
+```
+
+and to the `words` test: `expect(words('Uh–huh')).toEqual(['uhhuh']);` and `expect(words('O.K.')).toEqual(['ok']);`.
+
+- [ ] **Step 2: Implement — classifier**
+
+1. Normalise dashes before folding: in `words`, start from `text.toLowerCase().replace(/['’]/g, '').replace(/[‐-―−]/g, '-')`.
+2. Add the fold `[/\bo\.?\s*k\b\.?/g, 'ok']` as the **first** entry of `PHRASES` (so "O.K." → `ok`).
+3. Add `'nah'`, `'who'`, `'why'` to `STOP`.
+4. Treat elongated fillers as listening: add
+
+```ts
+/** Stretched or doubled fillers: mmm, hm, hmmm, umm, uhh, ohh, ahh, erm. */
+const FILLER = /^(?:m+|h+m+|u+h+|u+m+|a+h+|o+h+|e+r+m*)$/;
+const isListening = (w: string): boolean => LISTENING.has(w) || FILLER.test(w);
+```
+
+and use `isListening` instead of `LISTENING.has` in `overlapVerdict`. (`huh` must stay a stop word: `FILLER` does not match it because it starts with `h` then `u`.)
+
+Run the classifier tests → PASS (old and new cases).
+
+- [ ] **Step 3: Failing tests — gate** (add to `bridge-overlap.test.ts`; update the `gate()` helper's `onInterrupt` expectations to the new two-argument call, e.g. `toHaveBeenCalledWith('words', 'c1')`):
+
+```ts
+  it('passes the interrupted item id', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c7', { cuttable: true, late: false });
+    g.onDelta('c7', ' Wait');
+    expect(onInterrupt).toHaveBeenCalledWith('words', 'c7');
+  });
+
+  it('a wordless sound that stops before the timer is settled by the final text, not cut', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    vi.advanceTimersByTime(800);
+    g.onSpeechStopped('c1');
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS * 2);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.finish('c1', '')).toBe('ignore');
+  });
+
+  it('onSpeechStopped for another item leaves the timer armed', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    g.onSpeechStopped('c2');
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS);
+    expect(onInterrupt).toHaveBeenCalledWith('no words', 'c1');
+  });
+
+  it('an uncuttable overlap never arms the no-words timer', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: false, late: false });
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS * 3);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.itemId).toBe('c1');
+  });
+
+  it('a blank final transcript falls back to the streamed words', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    g.onDelta('c1', " I'm");
+    expect(g.finish('c1', '')).toBe('ignore');
+    g.open('c2', { cuttable: true, late: true });
+    g.onDelta('c2', ' Yeah');
+    expect(g.finish('c2', '   ')).toBe('answer');
+    expect(onInterrupt).not.toHaveBeenCalled();
+  });
+```
+
+and change the existing "interrupts after 2 s" test's name to "interrupts after 3 s of talk with no word at all" (it already uses the constant).
+
+- [ ] **Step 4: Implement — gate**
+
+1. `export const NO_WORDS_INTERRUPT_MS = 3000;` and update the header comment ("3 s of talk with no word").
+2. `onInterrupt(why: InterruptWhy, itemId: string): void;` in `OverlapGateDeps`.
+3. `interrupt(why)` must capture the id before closing:
+
+```ts
+  private interrupt(why: InterruptWhy): void {
+    const itemId = this.current?.itemId ?? '';
+    this.close();
+    this.deps.onInterrupt(why, itemId);
+  }
+```
+
+4. Add:
+
+```ts
+  /** The caller stopped talking: a sound shorter than the no-words timer is settled by its transcript. */
+  onSpeechStopped(itemId: string): void {
+    if (this.current?.itemId === itemId) this.clearNoWordsTimer();
+  }
+```
+
+- [ ] **Step 5: Run** both test files and `npm run typecheck -w services/cti-api` → PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add services/cti-api/src/ai-voice/bridge-listening.ts services/cti-api/src/ai-voice/bridge-listening.test.ts services/cti-api/src/ai-voice/bridge-overlap.ts services/cti-api/src/ai-voice/bridge-overlap.test.ts
+git commit -m "fix(ai-voice): stretched fillers and dashes stay listening sounds; a cough never cuts the agent"
 ```
 
 ---
@@ -1178,15 +1319,16 @@ Rules (spec §4.1) — all only when `bargeIn === 'gate'` unless noted:
 1. `speech_started` (item_id): set `callerSpoke`, `callerTalking`, clear `holding`, cancel the opener timer. **Instant:** today's cut (clear + truncate), nothing else. **Gate:** if closing → nothing; if `agentSpeaking()` → `gate.open(itemId, { cuttable: playback.currentItemId !== openerItemId, late: playback.remainingMs() <= LATE_OVERLAP_MS })`; else if a response is active with no audio yet → `response.cancel`.
 2. Transcription delta → `gate.onDelta`.
 3. Gate interrupt → `response.cancel` (if a response is active), Twilio `clear`, truncate at what was heard, system transcript note `[stopped — they interrupted]`, info log with `why`.
-4. `speech_stopped`: clear `callerTalking`.
-5. `committed` (item_id): gate mode, not closing, not the open overlap's item → `requestResponse()`.
-6. `…transcription.completed` / `…transcription.failed` for the open overlap's item → `gate.finish`: `'interrupted'` → `requestResponse()`; `'answer'` → if `agentSpeaking()` set `answerAfterPlayback`, else `requestResponse()`; `'ignore'` → nothing.
-7. `requestResponse()` (both modes): no-op when closing/ended; deferred (`wantResponse`) while a response is pending/active or tools run; otherwise `response.create`. Every `response.create` the bridge sends goes through it (opener, after tools, answers). An OpenAI `error` event after the session is ready clears `responsePending` (a rejected `response.create` never gets `response.created`) and honours `wantResponse`, so the agent can never get stuck silent.
-8. `response.created` → `responsePending = false`, `responseActive = true`, `responseHasAudio = false`. First forwarded audio delta of a response → `responseHasAudio = true`, `agentSpoke = true`, `openerItemId ??= itemId`.
-9. `response.done` without tool calls → if `wantResponse`, `requestResponse()`. With tool calls → `toolsRunning` while the batch runs; then `carryOn` false → `closeConversation()`; `speak` → `requestResponse()`; else set `holding` and (Task 8) arm the silence check; finally honour `wantResponse`.
-10. Playback drained (`onDrained`) → if `answerAfterPlayback`, clear it and `requestResponse()` (Task 8 adds the silence check here).
-11. `closeConversation()` → closing; close the gate; send `stopAutoResponses` **only in instant mode** (gate sessions never auto-respond).
-12. `silence()` and `finish()` also close the gate.
+4. `speech_stopped` (item_id): clear `callerTalking`; `gate.onSpeechStopped(itemId)`.
+5. `committed` (item_id): gate mode, not closing → if it is the open overlap's item, remember it (`overlapCommitted = itemId`) and wait; otherwise `requestResponse()`.
+6. Gate interrupt (rule 3) for an item that was already committed (words can stream in after the commit) → also `requestResponse()` — that turn is over and must be answered. Clear `overlapCommitted`.
+7. `…transcription.completed` / `…transcription.failed` for the open overlap's item → `gate.finish`: `'interrupted'` → nothing more (rule 6 already asked for the answer); `'answer'` → if `agentSpeaking()` set `answerAfterPlayback`, else `requestResponse()`; `'ignore'` → nothing. Clear `overlapCommitted`.
+8. `requestResponse()` (both modes): no-op when closing/ended; deferred (`wantResponse`) while a response is pending/active or tools run; otherwise `response.create`. Every `response.create` the bridge sends goes through it (opener, after tools, answers). An OpenAI `error` event after the session is ready clears `responsePending` (a rejected `response.create` never gets `response.created`) and honours `wantResponse`, so the agent can never get stuck silent.
+9. `response.created` → `responsePending = false`, `responseActive = true`, `responseHasAudio = false`. First forwarded audio delta of a response → `responseHasAudio = true`, `agentSpoke = true`, `openerItemId ??= itemId`.
+10. `response.done` without tool calls → if `wantResponse`, `requestResponse()`. With tool calls → `toolsRunning` while the batch runs; then `carryOn` false → `closeConversation()`; `speak` → `requestResponse()`; else set `holding` and (Task 8) arm the silence check; finally honour `wantResponse`.
+11. Playback drained (`onDrained`) → if `answerAfterPlayback`, clear it and `requestResponse()` (Task 8 adds the silence check here).
+12. `closeConversation()` → closing; close the gate; send `stopAutoResponses` **only in instant mode** (gate sessions never auto-respond).
+13. `silence()` and `finish()` also close the gate.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1270,13 +1412,38 @@ describe('barge-in gate', () => {
     expect(twilio.sent).toEqual([{ event: 'clear', streamSid: SID }]);
   });
 
-  it('stops after 2 s of talk with no words', async () => {
+  it('stops after 3 s of talk with no words', async () => {
     const { twilio, openai } = talking();
     started(openai);
-    await vi.advanceTimersByTimeAsync(1999);
+    await vi.advanceTimersByTimeAsync(2999);
     expect(twilio.sent).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     expect(twilio.sent).toEqual([{ event: 'clear', streamSid: SID }]);
+  });
+
+  it('a cough (no words, stops quickly) never cuts the agent', async () => {
+    const { twilio, openai } = talking();
+    started(openai);
+    await vi.advanceTimersByTimeAsync(600);
+    stopped(openai);
+    committed(openai);
+    await vi.advanceTimersByTimeAsync(5000);
+    completed(openai, '');
+    expect(twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+    expect(openai.sent).toEqual([]);
+  });
+
+  it('a stop word that streams in after the commit cuts the agent and gets one answer', () => {
+    const { twilio, openai } = talking();
+    started(openai);
+    stopped(openai);
+    committed(openai); // still being judged: no answer yet
+    expect(openai.sent).toEqual([]);
+    delta(openai, ' Wait');
+    expect(twilio.sent).toEqual([{ event: 'clear', streamSid: SID }]);
+    openai.msg({ type: 'response.done', response: { status: 'cancelled', output: [] } });
+    completed(openai, 'Wait.');
+    expect(openai.sent.filter((m) => m.type === 'response.create')).toEqual([{ type: 'response.create' }]);
   });
 
   it('a late "yeah sure" is answered once the agent has finished', () => {
@@ -1425,6 +1592,8 @@ New fields (next to the existing ones):
   private agentSpoke = false;
   /** The first agent item that played: the opener, never cut by the gate. */
   private openerItemId: string | null = null;
+  /** The overlap being judged was already committed: if it turns out to be an interruption, answer it. */
+  private overlapCommitted: string | null = null;
   /** Caller audio handed to OpenAI so far, in ms (for endpoint timing). */
   private sentAudioMs = 0;
 ```
@@ -1440,7 +1609,7 @@ Constructor (replace the `this.playback = …` line and add the gate):
     this.gate = new OverlapGate({
       setTimer: this.setTimer,
       clearTimer: this.clearTimer,
-      onInterrupt: (why) => this.interruptAgent(why),
+      onInterrupt: (why, itemId) => this.interruptAgent(why, itemId),
     });
 ```
 
@@ -1459,7 +1628,7 @@ OpenAI switch — replace/add these cases:
       case 'input_audio_buffer.speech_started':
         return this.onCallerSpeech(str(msg.item_id));
       case 'input_audio_buffer.speech_stopped':
-        return this.onCallerStopped();
+        return this.onCallerStopped(str(msg.item_id));
       case 'input_audio_buffer.committed':
         return this.onCallerTurn(str(msg.item_id));
       case 'conversation.item.input_audio_transcription.delta':
@@ -1488,6 +1657,7 @@ Replace `onCallerSpeech` and add the turn methods:
     if (this.closing) return;
     if (this.agentSpeaking()) {
       const cuttable = this.playback.currentItemId !== this.openerItemId;
+      this.overlapCommitted = null;
       this.gate.open(itemId, { cuttable, late: this.playback.remainingMs() <= LATE_OVERLAP_MS });
       return;
     }
@@ -1495,13 +1665,18 @@ Replace `onCallerSpeech` and add the turn methods:
     if (this.responseActive && !this.responseHasAudio) this.sendOpenAi({ type: 'response.cancel' });
   }
 
-  private onCallerStopped(): void {
+  private onCallerStopped(itemId: string): void {
     this.callerTalking = false;
+    this.gate.onSpeechStopped(itemId);
   }
 
-  /** Gate mode: a committed caller turn gets an answer unless it is an overlap still being judged. */
+  /** Gate mode: a committed caller turn gets an answer — an overlap still being judged waits for its verdict. */
   private onCallerTurn(itemId: string): void {
-    if (this.bargeIn !== 'gate' || this.closing || this.gate.itemId === itemId) return;
+    if (this.bargeIn !== 'gate' || this.closing) return;
+    if (this.gate.itemId === itemId) {
+      this.overlapCommitted = itemId;
+      return;
+    }
     this.requestResponse();
   }
 
@@ -1509,8 +1684,8 @@ Replace `onCallerSpeech` and add the turn methods:
   private onCallerFinal(itemId: string, text: string): void {
     if (this.bargeIn !== 'gate' || this.gate.itemId !== itemId) return;
     const end = this.gate.finish(itemId, text);
-    if (end === 'interrupted') return this.requestResponse();
-    if (end !== 'answer') return;
+    this.overlapCommitted = null;
+    if (end !== 'answer') return; // 'interrupted' was answered by interruptAgent
     if (this.agentSpeaking()) this.answerAfterPlayback = true;
     else this.requestResponse();
   }
@@ -1529,11 +1704,14 @@ Replace `onCallerSpeech` and add the turn methods:
   }
 
   /** The gate decided the caller is really talking. */
-  private interruptAgent(why: InterruptWhy): void {
+  private interruptAgent(why: InterruptWhy, itemId: string): void {
     if (this.responseActive) this.sendOpenAi({ type: 'response.cancel' });
     this.cutAgent();
     this.hooks.log.info({ why }, 'ai-voice bridge: caller interrupted the agent');
     this.note('[stopped — they interrupted]');
+    if (this.overlapCommitted !== itemId) return; // their turn is still going: answered when it commits
+    this.overlapCommitted = null;
+    this.requestResponse();
   }
 
   /** Ask the agent to speak — one response at a time. */
@@ -1798,6 +1976,7 @@ Wire-ups:
 ```ts
   private onCallerStopped(itemId: string, audioEndMs: number): void {
     this.callerTalking = false;
+    this.gate.onSpeechStopped(itemId);
     if (this.gate.itemId === itemId || !Number.isFinite(audioEndMs)) return; // an overlap is not a turn (yet)
     this.stats.callerStopped(this.sentAudioMs - audioEndMs, this.now());
   }
@@ -1806,14 +1985,12 @@ Wire-ups:
 - `response.created` case: add `this.silenceCheck.cancel();`.
 - `requestResponse`: before `this.responsePending = true;` add `this.silenceCheck.cancel();`.
 - `onAgentAudio`, inside the `if (!this.responseHasAudio)` block: add `this.stats.agentAudio(this.now());`.
-- `interruptAgent`: add `this.stats.interruption();`.
-- `onCallerFinal`: replace the final `if (end !== 'answer') return;` with:
+- `interruptAgent`: add `this.stats.interruption();` after `this.cutAgent();`.
+- `onCallerFinal`: replace `if (end !== 'answer') return; // 'interrupted' was answered by interruptAgent` with:
 
 ```ts
-    if (end !== 'answer') {
-      this.stats.listeningSound();
-      return;
-    }
+    if (end === 'ignore') this.stats.listeningSound();
+    if (end !== 'answer') return; // 'interrupted' was answered by interruptAgent
 ```
 
 - `onAgentFinished`:

@@ -47,14 +47,14 @@ When the caller starts talking (`speech_started`, which carries the input `item_
 
 An overlap is decided by the words streamed so far (`conversation.item.input_audio_transcription.delta` for that item), normalised and split:
 
-- **Stop now** if any word is a stop cue: `wait`, `hold` (on/up), `hang` (on), `stop`, `no`, `nope`, `sorry`, `excuse`, `what`, `pardon`, `actually`, `but`.
+- **Stop now** if any word is a stop cue: `wait`, `hold` (on/up), `hang` (on), `stop`, `no`, `nope`, `nah`, `sorry`, `excuse`, `what`, `huh`, `who`, `why`, `pardon`, `actually`, `but`.
 - **Stop now** if 2 or more words are not listening sounds.
-- **Listening sounds** (never stop the agent alone): mm-hmm / mhm / hmm / uh-huh, yeah / yep / yup / yes, ok / okay, right, sure, alright, got it / gotcha, I see, oh / ah / wow, cool, nice, great, true, totally, exactly, really, interesting, and fillers um / uh.
-- **Stop anyway** if the caller has been talking for 2.0 s and no word has arrived (transcriber hiccup, another language).
+- **Listening sounds** (never stop the agent alone): mm-hmm / mhm / hmm / uh-huh, yeah / yep / yup / yes, ok / okay / O.K., right, sure, alright, got it / gotcha, I see, oh / ah / wow, cool, nice, great, true, totally, exactly, really, interesting, a single "hello", and fillers um / uh — including stretched or doubled ones (mmm, hm, umm, uhh, ohh, erm). Unicode dashes count as hyphens.
+- **Stop anyway** if the caller has been talking for 3.0 s and no word has arrived (transcriber hiccup, another language). The timer is disarmed when the caller stops talking, so a short wordless sound (a cough) is settled by its empty transcript and ignored. (Raised from 2.0 s after the spike: first words land ~1.0–1.2 s in, and semantic VAD's stop can lag 1.5–2.8 s.)
 
 "Stop" = Twilio `clear`, `response.cancel`, truncate the item at what was heard (existing `PlaybackTracker.interrupt()`), transcript note `[stopped — they interrupted]`. When their turn ends, the agent answers.
 
-When an undecided overlap's turn ends (`committed`, then `…transcription.completed` gives the final text), re-check the final text. Still listening sounds (or empty) → the agent never answers it, except:
+When an undecided overlap's turn ends (`committed`, then `…transcription.completed` gives the final text), re-check the final text. Words can still stream in after the commit: if they turn it into an interruption, the agent is cut and that already-finished turn is answered. Still listening sounds (or empty) → the agent never answers it, except:
 
 - **Late overlap = an early answer.** If the caller started talking when the agent's audio was fully generated and at most 1.5 s of it was left to play ("…got a quick minute?" / "yeah sure"), it is their answer: the agent answers once its audio finishes playing.
 
