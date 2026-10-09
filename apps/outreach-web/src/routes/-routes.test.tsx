@@ -246,6 +246,63 @@ describe('staying signed in across a reload', () => {
     expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBe('stored-tok');
   });
 
+  it('/sign-in with a stored token renders nothing until /me answers, then goes straight to returnTo — the sign-in page never shows', async () => {
+    let release!: (r: Response) => void;
+    const meAnswer = new Promise<Response>((resolve) => { release = resolve; });
+    const fetchMock = reloadWith(() => meAnswer);
+
+    const router = renderAppAt('/sign-in?returnTo=/team');
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/auth/me', expect.anything()));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(document.body.textContent).toBe('');
+
+    release(respond(200, ME));
+    expect(await screen.findByRole('heading', { name: 'Team' })).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/team');
+    expect(screen.queryByRole('button', { name: 'Sign in with Salesforce' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the query string and hash of returnTo when it redirects a signed-in visit', async () => {
+    reloadWith(async () => respond(200, ME));
+    const router = renderAppAt(`/sign-in?returnTo=${encodeURIComponent('/team?tab=2#top')}`);
+    expect(await screen.findByRole('heading', { name: 'Team' })).toBeInTheDocument();
+    expect(router.history.location.pathname).toBe('/team');
+    expect(router.history.location.search).toContain('tab=2');
+    expect(router.history.location.hash).toBe('#top');
+  });
+
+  // The second column is the raw query value, as a link would carry it: the router decodes `%5C` to a backslash.
+  it.each([
+    ['an absolute URL', 'https%3A%2F%2Fevil.example'],
+    ['a protocol-relative URL', '%2F%2Fevil.example'],
+    ['a backslash host trick', '/%5Cevil.example'],
+    ['an API-owned path', '%2Fapi%2Fauth%2Flogout'],
+  ])('/sign-in?returnTo=%s with a stored token lands on the app home, never off-site', async (_label, rawValue) => {
+    reloadWith(async () => respond(200, ME));
+    const { assign, replace } = stubLocationMethods();
+    const router = renderAppAt(`/sign-in?returnTo=${rawValue}`);
+    await waitFor(() => expect(router.state.location.pathname).toBe('/'));
+    expect(await screen.findByRole('navigation', { name: 'Main' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign in with Salesforce' })).not.toBeInTheDocument();
+    expect(assign).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it('/sign-in with a stored token and no returnTo goes to the app home', async () => {
+    reloadWith(async () => respond(200, ME));
+    const router = renderAppAt('/sign-in');
+    await waitFor(() => expect(router.state.location.pathname).toBe('/'));
+    expect(await screen.findByRole('navigation', { name: 'Main' })).toBeInTheDocument();
+  });
+
+  it('signed out (nothing stored), /sign-in still renders the sign-in page and stays there', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => respond(404, { error: 'nf', code: 'NOT_FOUND' })));
+    const router = renderAppAt('/sign-in?returnTo=/team');
+    expect(await screen.findByRole('button', { name: 'Sign in with Salesforce' })).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/sign-in');
+    expect(router.state.location.search).toMatchObject({ returnTo: '/team' });
+  });
+
   it('an expired stored token (/me 401) sends the visit to /sign-in with the return path and clears the token', async () => {
     reloadWith(async () => respond(401, { error: 'Sign in required', code: 'UNAUTHENTICATED' }));
     const router = renderAppAt('/team');
