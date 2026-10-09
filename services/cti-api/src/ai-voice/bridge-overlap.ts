@@ -1,15 +1,15 @@
 /**
  * One caller "overlap" at a time: the caller started talking while the agent was talking. The gate
  * keeps the agent talking through listening sounds ("mm-hmm", "yeah") and cuts it on a real
- * interruption: a stop word, two real words, or NO_WORDS_INTERRUPT_MS of talk with no word
- * transcribed (a transcriber hiccup, another language). The opener is uncuttable (disclosure).
+ * interruption: a stop word, two real words, or 3 s of talk with no word transcribed
+ * (NO_WORDS_INTERRUPT_MS: a transcriber hiccup, another language). The opener is uncuttable (disclosure).
  * Spec: docs/superpowers/specs/2026-10-09-ai-voice-natural-turn-taking-design.md §4.1.
  */
 import { overlapVerdict } from './bridge-listening.js';
 import type { ClearTimer, SetTimer } from './bridge-playback.js';
 
 /** Caller talking this long over the agent with no word transcribed: treat it as an interruption. */
-export const NO_WORDS_INTERRUPT_MS = 2000;
+export const NO_WORDS_INTERRUPT_MS = 3000;
 /** Caller started with at most this much (fully generated) agent audio left: an early answer. */
 export const LATE_OVERLAP_MS = 1500;
 
@@ -30,8 +30,8 @@ interface Overlap {
 export interface OverlapGateDeps {
   setTimer: SetTimer;
   clearTimer: ClearTimer;
-  /** Cut the agent now. */
-  onInterrupt(why: InterruptWhy): void;
+  /** Cut the agent now; `itemId` is the interrupted caller item. */
+  onInterrupt(why: InterruptWhy, itemId: string): void;
 }
 
 export class OverlapGate {
@@ -81,9 +81,15 @@ export class OverlapGate {
     this.current = null;
   }
 
+  /** The caller stopped talking: a sound shorter than the no-words timer is settled by its transcript. */
+  onSpeechStopped(itemId: string): void {
+    if (this.current?.itemId === itemId) this.clearNoWordsTimer();
+  }
+
   private interrupt(why: InterruptWhy): void {
+    const itemId = this.current?.itemId ?? '';
     this.close();
-    this.deps.onInterrupt(why);
+    this.deps.onInterrupt(why, itemId);
   }
 
   private clearNoWordsTimer(): void {

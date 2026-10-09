@@ -30,7 +30,7 @@ describe('OverlapGate', () => {
     const { g, onInterrupt } = gate();
     g.open('c1', { cuttable: true, late: false });
     g.onDelta('c1', ' Wait');
-    expect(onInterrupt).toHaveBeenCalledWith('words');
+    expect(onInterrupt).toHaveBeenCalledWith('words', 'c1');
     expect(g.itemId).toBeNull();
     g.onDelta('c1', ' hold on');
     expect(onInterrupt).toHaveBeenCalledTimes(1);
@@ -42,17 +42,61 @@ describe('OverlapGate', () => {
     g.onDelta('c1', " I'm");
     expect(onInterrupt).not.toHaveBeenCalled();
     g.onDelta('c1', ' interested');
-    expect(onInterrupt).toHaveBeenCalledWith('words');
+    expect(onInterrupt).toHaveBeenCalledWith('words', 'c1');
   });
 
-  it('interrupts after 2 s of talk with no word at all', () => {
+  it('interrupts after 3 s of talk with no word at all', () => {
     const { g, onInterrupt } = gate();
     g.open('c1', { cuttable: true, late: false });
     vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS - 1);
     expect(onInterrupt).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
-    expect(onInterrupt).toHaveBeenCalledWith('no words');
+    expect(onInterrupt).toHaveBeenCalledWith('no words', 'c1');
     expect(g.itemId).toBeNull();
+  });
+
+  it('passes the interrupted item id', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c7', { cuttable: true, late: false });
+    g.onDelta('c7', ' Wait');
+    expect(onInterrupt).toHaveBeenCalledWith('words', 'c7');
+  });
+
+  it('a wordless sound that stops before the timer is settled by the final text, not cut', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    vi.advanceTimersByTime(800);
+    g.onSpeechStopped('c1');
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS * 2);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.finish('c1', '')).toBe('ignore');
+  });
+
+  it('onSpeechStopped for another item leaves the timer armed', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    g.onSpeechStopped('c2');
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS);
+    expect(onInterrupt).toHaveBeenCalledWith('no words', 'c1');
+  });
+
+  it('an uncuttable overlap never arms the no-words timer', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: false, late: false });
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS * 3);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.itemId).toBe('c1');
+  });
+
+  it('a blank final transcript falls back to the streamed words', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    g.onDelta('c1', " I'm");
+    expect(g.finish('c1', '')).toBe('ignore');
+    g.open('c2', { cuttable: true, late: true });
+    g.onDelta('c2', ' Yeah');
+    expect(g.finish('c2', '   ')).toBe('answer');
+    expect(onInterrupt).not.toHaveBeenCalled();
   });
 
   it('ignores deltas for other items', () => {
@@ -74,7 +118,7 @@ describe('OverlapGate', () => {
     const { g, onInterrupt } = gate();
     g.open('c1', { cuttable: true, late: false });
     expect(g.finish('c1', 'Who is this?')).toBe('interrupted');
-    expect(onInterrupt).toHaveBeenCalledWith('words');
+    expect(onInterrupt).toHaveBeenCalledWith('words', 'c1');
   });
 
   it('never cuts an uncuttable overlap (the opener) — a real interruption becomes an answer', () => {

@@ -11,6 +11,7 @@ export const INTERRUPT_WORD_COUNT = 2;
 
 /** Multi-word listening sounds, folded into one token before splitting (order matters). */
 const PHRASES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bo\.?\s*k\b\.?/g, 'ok'],
   [/\buh[\s-]*huh\b/g, 'uhhuh'],
   [/\bm+[\s-]*h+m+\b/g, 'mmhmm'],
   [/\bi see\b/g, 'isee'],
@@ -27,14 +28,21 @@ const LISTENING: ReadonlySet<string> = new Set([
   'true', 'totally', 'exactly', 'really', 'interesting', 'makessense', 'forsure', 'hello',
 ]);
 
+/** Stretched or doubled fillers: mmm, hm, hmmm, umm, uhh, ohh, ahh, erm. */
+const FILLER = /^(?:m+|h+m+|u+h+|u+m+|a+h+|o+h+|e+r+m*)$/;
+const isListening = (w: string): boolean => LISTENING.has(w) || FILLER.test(w);
+
 /** One of these is enough to stop the agent ("hold" on/up, "hang" on). */
 const STOP: ReadonlySet<string> = new Set([
-  'wait', 'hold', 'hang', 'stop', 'no', 'nope', 'sorry', 'excuse', 'what', 'huh', 'pardon', 'actually', 'but',
+  'wait', 'hold', 'hang', 'stop', 'no', 'nope', 'nah', 'who', 'why', 'sorry', 'excuse', 'what', 'huh', 'pardon', 'actually', 'but',
 ]);
 
 /** Lower-case word tokens, with listening phrases folded into one token each. */
 export function words(text: string): string[] {
-  const folded = PHRASES.reduce((t, [re, token]) => t.replace(re, token), text.toLowerCase().replace(/['’]/g, ''));
+  const folded = PHRASES.reduce(
+    (t, [re, token]) => t.replace(re, token),
+    text.toLowerCase().replace(/['’]/g, '').replace(/[‐-―−]/g, '-'),
+  );
   return folded.split(/[^a-z0-9]+/).filter((w) => w.length > 0);
 }
 
@@ -46,7 +54,7 @@ export function overlapVerdict(text: string): OverlapVerdict {
   const ws = words(text);
   if (ws.length === 0) return 'empty';
   if (ws.some((w) => STOP.has(w))) return 'interrupt';
-  const talking = ws.filter((w) => !LISTENING.has(w)).length;
+  const talking = ws.filter((w) => !isListening(w)).length;
   const hellos = ws.filter((w) => w === 'hello').length;
   return talking >= INTERRUPT_WORD_COUNT || hellos >= 2 ? 'interrupt' : 'listening';
 }
