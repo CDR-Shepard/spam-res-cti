@@ -914,6 +914,41 @@ describe('barge-in gate', () => {
     openai.msg(doneEmpty);
     expect(creates(openai)).toEqual([CREATE]);
   });
+
+  it('a late answer judged after the audio played out but before response.done is still answered', () => {
+    const { twilio, openai } = talking();
+    openai.msg({ type: 'response.output_audio.done' });
+    playAll(twilio); // item_1 played out; its response.done has not arrived yet
+    started(openai); // still "speaking" (active response with audio): a late overlap
+    delta(openai, ' Yeah sure');
+    stopped(openai);
+    committed(openai);
+    completed(openai, 'Yeah, sure.');
+    expect(creates(openai)).toEqual([]);
+    openai.msg(doneEmpty);
+    expect(creates(openai)).toEqual([CREATE]);
+  });
+
+  it('an error with no event_id about something else (a truncate) does not release our pending create', () => {
+    const { openai } = talking();
+    started(openai);
+    delta(openai, ' Wait'); // cut: response.cancel + truncate sent
+    stopped(openai);
+    committed(openai);
+    openai.msg({ type: 'response.done', response: { status: 'cancelled', output: [] } }); // create #1 in flight
+    committed(openai, 'c2'); // waits behind it
+    openai.msg({
+      type: 'error',
+      error: { type: 'invalid_request_error', code: 'invalid_value', message: 'audio_end_ms is longer than the audio', param: 'audio_end_ms' },
+    });
+    expect(creates(openai)).toEqual([{ type: 'response.create', event_id: 'ai-create-1' }]);
+    openai.msg({ type: 'response.created' });
+    openai.msg(doneEmpty);
+    expect(creates(openai)).toEqual([
+      { type: 'response.create', event_id: 'ai-create-1' },
+      { type: 'response.create', event_id: 'ai-create-2' },
+    ]);
+  });
 });
 
 describe('instant mode keeps its pre-gate frames', () => {

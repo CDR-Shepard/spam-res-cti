@@ -313,11 +313,11 @@ export class AiCallBridge {
     if (this.wantResponse) this.requestResponse();
   }
 
-  /** An error releases our pending create only if it names it; without an event_id, anything but a stale cancel. */
+  /** An error releases our pending create (gate mode only) if it names it; without an event_id, only a "busy" rejection. */
   private rejectsPendingCreate(fields: Record<string, string>): boolean {
     if (!this.responsePending) return false;
     if (fields.eventId) return fields.eventId === this.pendingCreateId;
-    return fields.code !== 'response_cancel_not_active';
+    return fields.code === 'conversation_already_has_active_response';
   }
 
   /** Start the `session.updated` clock once the session is sent and the socket is open. */
@@ -392,7 +392,8 @@ export class AiCallBridge {
     this.judgedTurns = new Set([...this.judgedTurns].filter((id) => id !== itemId));
     if (end === 'interrupted') return; // answered by interruptAgent
     if (end === 'ignore') return this.afterResponse(); // a listening sound: release an answer it held back
-    if (this.agentSpeaking()) this.answerAfterPlayback = true;
+    // Audio still queued: answer when it drains. Otherwise requestResponse waits for any active response's done.
+    if (this.playback.playing) this.answerAfterPlayback = true;
     else this.requestResponse();
   }
 
