@@ -16,9 +16,16 @@
  * `hooks.onTool`. OpenAI messages queue (bounded) until started and open, so
  * `session.update` always goes first. Audio payloads are never logged.
  *
+ * In `instant` barge-in mode (the default) OpenAI's VAD answers each caller turn
+ * and any caller sound cuts the agent. In `gate` mode the bridge owns the turns:
+ * it answers each committed caller turn with one `response.create` at a time,
+ * keeps talking through listening sounds and cuts the agent (never the opener)
+ * only on a real interruption (bridge-overlap.ts; spec
+ * docs/superpowers/specs/2026-10-09-ai-voice-natural-turn-taking-design.md §4.1).
+ *
  * Once the call is closing (a hangup/transfer tool result, or `silence()`) the
- * agent is never asked to speak again; a hangup/transfer result also turns off
- * VAD auto-responses (`create_response: false`). If the call ends from the OpenAI side
+ * agent is never asked to speak again; in instant mode a hangup/transfer result
+ * also turns off VAD auto-responses (`create_response: false`). If the call ends from the OpenAI side
  * or hits its time limit, the bridge silences the agent, reports `onEnd`, and
  * closes both sockets after END_GRACE_MS unless the service calls `stop()`
  * first — closing the stream lets Twilio continue past </Connect> and end the
@@ -26,7 +33,8 @@
  */
 import { obj, openAiErrorFields, parseFrame, str, type Msg } from './bridge-frames.js';
 import { Outbox } from './bridge-outbox.js';
-import { PlaybackTracker, type ClearTimer, type SetTimer, type Truncation } from './bridge-playback.js';
+import { LATE_OVERLAP_MS, OverlapGate, type InterruptWhy } from './bridge-overlap.js';
+import { PCMU_BYTES_PER_MS, PlaybackTracker, base64Bytes, type ClearTimer, type SetTimer, type Truncation } from './bridge-playback.js';
 import { openerItem, sessionUpdate, stopAutoResponses, truncate, type ReasoningEffort, type VadEagerness } from './bridge-session.js';
 import type { BargeInMode } from './bridge-turn-stats.js';
 import { errText, functionCalls, runToolBatch, type BridgeLog, type ToolResult } from './bridge-tools.js';
@@ -95,6 +103,7 @@ export class AiCallBridge {
   private readonly setTimer: SetTimer;
   private readonly clearTimer: ClearTimer;
   private readonly playback: PlaybackTracker;
+  private readonly gate: OverlapGate;
   private readonly bargeIn: BargeInMode;
   private readonly outbox: Outbox;
   private started = false;
@@ -102,6 +111,29 @@ export class AiCallBridge {
   private callerSpoke = false;
   private openerSent = false;
   private responseActive = false;
+  /** Our response.create is in flight (response.created not seen yet). */
+  private responsePending = false;
+  /** The active response has forwarded audio to Twilio. */
+  private responseHasAudio = false;
+  /** We cancelled the active response (the gate cut it, or it was dropped unheard): not the agent speaking, never cancelled twice. */
+  private responseCut = false;
+  /** Gate mode: the caller started talking while our response.create was in flight; cancel it once created. */
+  private cancelWhenCreated = false;
+  private toolsRunning = false;
+  /** A turn wants an answer while a response or a tool batch is still going. */
+  private wantResponse = false;
+  /** A late overlap ("yeah sure" over the end of a question): answer once the agent's audio has played. */
+  private answerAfterPlayback = false;
+  private callerTalking = false;
+  /** The agent called wait_for_user and nobody has spoken since. */
+  private holding = false;
+  private agentSpoke = false;
+  /** The first agent item that played: the opener, never cut by the gate. */
+  private openerItemId: string | null = null;
+  /** The overlap being judged was already committed: if it turns out to be an interruption, answer it. */
+  private overlapCommitted: string | null = null;
+  /** Caller audio handed to OpenAI so far, in ms (for endpoint timing). */
+  private sentAudioMs = 0;
   private silenced = false;
   /** No further `response.create` once a tool ended the conversation or the agent was silenced. */
   private closing = false;
@@ -127,7 +159,16 @@ export class AiCallBridge {
     this.setTimer = opts.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
     this.clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h));
     this.bargeIn = opts.bargeIn ?? 'instant';
-    this.playback = new PlaybackTracker({ setTimer: this.setTimer, clearTimer: this.clearTimer });
+    this.playback = new PlaybackTracker({
+      setTimer: this.setTimer,
+      clearTimer: this.clearTimer,
+      onDrained: () => this.onAgentFinished(),
+    });
+    this.gate = new OverlapGate({
+      setTimer: this.setTimer,
+      clearTimer: this.clearTimer,
+      onInterrupt: (why, itemId) => this.interruptAgent(why, itemId),
+    });
     this.outbox = new Outbox(() =>
       hooks.log.warn({ queued: 'full' }, 'ai-voice bridge: openai outbox full, dropping oldest caller audio'),
     );
@@ -164,8 +205,10 @@ export class AiCallBridge {
     this.silenced = true;
     this.closing = true;
     this.cancelOpener();
+    this.gate.close();
+    this.cancelWhenCreated = false;
     this.sendTwilio({ event: 'clear', streamSid: this.opts.streamSid });
-    if (this.responseActive) this.sendOpenAi({ type: 'response.cancel' });
+    this.cancelResponse();
     const cut = this.playback.interrupt();
     if (cut) this.truncateOnce(cut);
   }
@@ -191,7 +234,10 @@ export class AiCallBridge {
         const media = obj(msg.media);
         this.playback.onInboundMedia(Number(media.timestamp));
         const payload = str(media.payload);
-        if (payload) this.sendOpenAi({ type: 'input_audio_buffer.append', audio: payload }, true);
+        if (payload) {
+          this.sentAudioMs += base64Bytes(payload) / PCMU_BYTES_PER_MS;
+          this.sendOpenAi({ type: 'input_audio_buffer.append', audio: payload }, true);
+        }
         return;
       }
       case 'mark':
@@ -214,10 +260,15 @@ export class AiCallBridge {
       case 'session.updated':
         return this.onSessionUpdated();
       case 'input_audio_buffer.speech_started':
-        return this.onCallerSpeech();
+        return this.onCallerSpeech(str(msg.item_id));
+      case 'input_audio_buffer.speech_stopped':
+        return this.onCallerStopped(str(msg.item_id));
+      case 'input_audio_buffer.committed':
+        return this.onCallerTurn(str(msg.item_id));
+      case 'conversation.item.input_audio_transcription.delta':
+        return this.gate.onDelta(str(msg.item_id), str(msg.delta));
       case 'response.created':
-        this.responseActive = true;
-        return;
+        return this.onResponseCreated();
       case 'response.output_audio.delta':
         return this.onAgentAudio(str(msg.item_id), str(msg.delta));
       case 'response.output_audio.done':
@@ -226,7 +277,10 @@ export class AiCallBridge {
       case 'response.output_audio_transcript.done':
         return this.transcript('agent', msg.transcript);
       case 'conversation.item.input_audio_transcription.completed':
-        return this.transcript('caller', msg.transcript);
+        this.transcript('caller', msg.transcript);
+        return this.onCallerFinal(str(msg.item_id), str(msg.transcript));
+      case 'conversation.item.input_audio_transcription.failed':
+        return this.onCallerFinal(str(msg.item_id), '');
       case 'response.done':
         return this.onResponseDone(obj(msg.response));
       case 'error':
@@ -247,7 +301,12 @@ export class AiCallBridge {
   /** Before `session.updated` an error means the session was never configured: end the call. */
   private onOpenAiError(fields: Record<string, string>): void {
     this.hooks.log.warn(fields, 'ai-voice bridge: openai error event');
-    if (!this.sessionReady) this.notConfigured(fields.message || fields.code || 'error');
+    if (!this.sessionReady) return this.notConfigured(fields.message || fields.code || 'error');
+    // A rejected response.create never gets response.created: don't stay "pending" forever.
+    if (!this.responsePending) return;
+    this.responsePending = false;
+    this.cancelWhenCreated = false; // it was meant for the rejected create
+    if (this.wantResponse) this.requestResponse();
   }
 
   /** Start the `session.updated` clock once the session is sent and the socket is open. */
@@ -277,16 +336,118 @@ export class AiCallBridge {
     if (this.callerSpoke || this.openerSent || this.ended || this.closing) return;
     this.openerSent = true;
     this.sendOpenAi(openerItem());
-    this.sendOpenAi({ type: 'response.create' });
+    this.requestResponse();
   }
 
-  private onCallerSpeech(): void {
+  private onCallerSpeech(itemId: string): void {
     this.callerSpoke = true;
+    this.callerTalking = true;
+    this.holding = false;
     this.cancelOpener();
+    if (this.bargeIn === 'instant') return this.cutAgent();
+    if (this.closing) return;
+    if (this.agentSpeaking()) {
+      const cuttable = this.playback.currentItemId !== this.openerItemId;
+      this.overlapCommitted = null;
+      this.gate.open(itemId, { cuttable, late: this.playback.remainingMs() <= LATE_OVERLAP_MS });
+      return;
+    }
+    // A response that has not played a sound yet: drop it unheard; their turn gets a fresh one.
+    if (this.responseActive && !this.responseHasAudio) this.cancelResponse();
+    else if (this.responsePending && !this.responseActive) this.cancelWhenCreated = true;
+  }
+
+  private onCallerStopped(itemId: string): void {
+    this.callerTalking = false;
+    this.gate.onSpeechStopped(itemId);
+  }
+
+  /** Gate mode: a committed caller turn gets an answer — an overlap still being judged waits for its verdict. */
+  private onCallerTurn(itemId: string): void {
+    if (this.bargeIn !== 'gate' || this.closing) return;
+    if (this.gate.itemId === itemId) {
+      this.overlapCommitted = itemId;
+      return;
+    }
+    this.requestResponse();
+  }
+
+  /** The final transcript (or a failed one) of the overlap being judged. */
+  private onCallerFinal(itemId: string, text: string): void {
+    if (this.bargeIn !== 'gate' || this.gate.itemId !== itemId) return;
+    const end = this.gate.finish(itemId, text);
+    this.overlapCommitted = null;
+    if (end !== 'answer') return; // 'interrupted' was answered by interruptAgent
+    if (this.agentSpeaking()) this.answerAfterPlayback = true;
+    else this.requestResponse();
+  }
+
+  /** The agent is audible or about to be: audio queued in Twilio, or a response that already produced audio. */
+  private agentSpeaking(): boolean {
+    return this.playback.playing || (this.responseActive && this.responseHasAudio && !this.responseCut);
+  }
+
+  /** Stop the agent where the caller stopped hearing it. */
+  private cutAgent(): void {
     const cut = this.playback.interrupt();
     if (!cut) return;
     this.sendTwilio({ event: 'clear', streamSid: this.opts.streamSid });
     this.truncateOnce(cut);
+  }
+
+  /** The gate decided the caller is really talking. */
+  private interruptAgent(why: InterruptWhy, itemId: string): void {
+    this.cancelResponse();
+    this.answerAfterPlayback = false; // the turn that cut the agent gets its own answer
+    this.cutAgent();
+    this.hooks.log.info({ why }, 'ai-voice bridge: caller interrupted the agent');
+    this.note('[stopped — they interrupted]');
+    if (this.overlapCommitted !== itemId) return; // their turn is still going: answered when it commits
+    this.overlapCommitted = null;
+    this.requestResponse();
+  }
+
+  /** Ask the agent to speak — one response at a time. */
+  private requestResponse(): void {
+    if (this.closing || this.ended) return;
+    if (this.responsePending || this.responseActive || this.toolsRunning) {
+      this.wantResponse = true;
+      return;
+    }
+    this.wantResponse = false;
+    this.responsePending = true;
+    this.sendOpenAi({ type: 'response.create' });
+  }
+
+  private onResponseCreated(): void {
+    this.responsePending = false;
+    this.responseActive = true;
+    this.responseHasAudio = false;
+    this.responseCut = false;
+    if (!this.cancelWhenCreated) return;
+    // The caller kept talking: drop this answer unheard; their committed turn is answered after its response.done.
+    this.cancelWhenCreated = false;
+    this.cancelResponse();
+  }
+
+  /** Cancel the active response once. */
+  private cancelResponse(): void {
+    if (!this.responseActive || this.responseCut) return;
+    this.responseCut = true;
+    this.sendOpenAi({ type: 'response.cancel' });
+  }
+
+  /** The agent's queued audio finished playing. */
+  private onAgentFinished(): void {
+    if (this.ended || this.closing) return;
+    if (!this.answerAfterPlayback) return;
+    this.answerAfterPlayback = false;
+    this.requestResponse();
+  }
+
+  /** A system line in the transcript (not spoken). */
+  private note(text: string): void {
+    this.guard('onTranscript', () => this.hooks.onTranscript({ role: 'system', text, at: new Date(this.now()) }));
   }
 
   /** Truncate an item at most once, and drop any of its audio that arrives afterwards. */
@@ -298,6 +459,11 @@ export class AiCallBridge {
 
   private onAgentAudio(itemId: string, delta: string): void {
     if (!this.sessionReady || this.silenced || !delta || this.truncated.has(itemId)) return;
+    if (!this.responseHasAudio) {
+      this.responseHasAudio = true;
+      this.agentSpoke = true;
+      this.openerItemId ??= itemId;
+    }
     this.sendTwilio({
       event: 'media',
       streamSid: this.opts.streamSid,
@@ -335,27 +501,46 @@ export class AiCallBridge {
 
   private onResponseDone(response: Msg): void {
     this.responseActive = false;
+    this.responsePending = false;
+    this.responseCut = false;
+    this.cancelWhenCreated = false;
     this.playback.onResponseDone();
     const calls = functionCalls(response);
-    if (calls.length === 0) return;
+    if (calls.length === 0) return this.afterResponse();
     const deps = {
       onTool: this.hooks.onTool.bind(this.hooks),
       log: this.hooks.log,
       send: (m: object) => this.sendOpenAi(m),
     };
+    this.toolsRunning = true;
     this.toolChain = this.toolChain
       .then(async () => {
         const { carryOn, speak } = await runToolBatch(calls, deps);
+        this.toolsRunning = false;
         if (!carryOn) this.closeConversation();
-        if (!this.closing && speak) this.sendOpenAi({ type: 'response.create' });
+        if (speak) return this.requestResponse();
+        this.holding = !this.wantResponse; // a turn that came in during the batch is answered, not held
+        this.afterResponse();
       })
-      .catch((e: unknown) => this.hooks.log.error({ err: errText(e) }, 'ai-voice bridge: tool batch failed'));
+      .catch((e: unknown) => {
+        this.toolsRunning = false;
+        this.hooks.log.error({ err: errText(e) }, 'ai-voice bridge: tool batch failed');
+        this.afterResponse();
+      });
+  }
+
+  /** A response (or a quiet tool batch) finished without asking for another. */
+  private afterResponse(): void {
+    if (this.wantResponse) this.requestResponse();
   }
 
   /** A hangup/transfer result: latch closing and stop VAD from starting a response during the drain. */
   private closeConversation(): void {
     this.closing = true;
-    if (this.autoResponsesOff) return;
+    this.gate.close();
+    this.cancelWhenCreated = false;
+    // Gate sessions never auto-respond; instant sessions stop VAD responses during the drain.
+    if (this.bargeIn === 'gate' || this.autoResponsesOff) return;
     this.autoResponsesOff = true;
     this.sendOpenAi(stopAutoResponses(this.opts));
   }
@@ -401,6 +586,7 @@ export class AiCallBridge {
     if (this.ended) return;
     this.ended = true;
     this.cancelOpener();
+    this.gate.close();
     this.clearReadyTimer();
     if (this.maxTimer !== null) this.clearTimer(this.maxTimer);
     this.maxTimer = null;

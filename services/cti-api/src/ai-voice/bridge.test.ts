@@ -16,6 +16,8 @@ type Ev = 'message' | 'close' | 'error' | 'open';
 class FakeSocket implements BridgeSocket {
   readyState = 1;
   readonly sent: Array<Record<string, unknown>> = [];
+  /** Every message ever sent; clearSent() leaves it alone (Twilio still echoes marks for audio sent before). */
+  readonly history: Array<Record<string, unknown>> = [];
   closeCalls = 0;
   private readonly handlers: Record<Ev, Array<(a: unknown) => void>> = {
     message: [],
@@ -25,7 +27,9 @@ class FakeSocket implements BridgeSocket {
   };
 
   send(data: string): void {
-    this.sent.push(JSON.parse(data) as Record<string, unknown>);
+    const m = JSON.parse(data) as Record<string, unknown>;
+    this.sent.push(m);
+    this.history.push(m);
   }
   close(): void {
     this.closeCalls += 1;
@@ -388,6 +392,325 @@ describe('agent audio and barge-in', () => {
     });
     expect(twilio.sent).toEqual([]);
     expect(openai.sent).toEqual([]);
+  });
+});
+
+describe('barge-in gate', () => {
+  const marks = (twilio: FakeSocket) =>
+    twilio.history.filter((m) => m.event === 'mark').map((m) => (m.mark as { name: string }).name);
+  const playAll = (twilio: FakeSocket) => {
+    for (const name of marks(twilio)) twilio.msg({ event: 'mark', streamSid: SID, mark: { name } });
+  };
+  const doneEmpty = { type: 'response.done', response: { status: 'completed', output: [] } };
+  const talk = (openai: FakeSocket, itemId: string, ms: number) => {
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'response.output_audio.delta', item_id: itemId, delta: audio(ms) });
+  };
+
+  /** Gate mode; the opener (item_0) played out; the agent is now 500 ms into a 3 s answer (item_1), still streaming. */
+  function talking() {
+    const s = setup({ bargeIn: 'gate', transcribeModel: 'gpt-live-transcribe' });
+    s.bridge.start();
+    s.openai.msg(READY);
+    talk(s.openai, 'item_0', 100);
+    s.openai.msg({ type: 'response.output_audio.done' });
+    s.openai.msg(doneEmpty);
+    playAll(s.twilio);
+    s.twilio.msg(media(1000));
+    talk(s.openai, 'item_1', 3000);
+    s.twilio.msg(media(1500));
+    s.twilio.clearSent();
+    s.openai.clearSent();
+    return s;
+  }
+  const started = (openai: FakeSocket, id = 'c1') => openai.msg({ type: 'input_audio_buffer.speech_started', item_id: id, audio_start_ms: 1500 });
+  const delta = (openai: FakeSocket, text: string, id = 'c1') =>
+    openai.msg({ type: 'conversation.item.input_audio_transcription.delta', item_id: id, content_index: 0, delta: text });
+  const stopped = (openai: FakeSocket, id = 'c1') => openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: id, audio_end_ms: 2200 });
+  const committed = (openai: FakeSocket, id = 'c1') => openai.msg({ type: 'input_audio_buffer.committed', item_id: id });
+  const completed = (openai: FakeSocket, text: string, id = 'c1') =>
+    openai.msg({ type: 'conversation.item.input_audio_transcription.completed', item_id: id, content_index: 0, transcript: text });
+
+  it('keeps talking through "mm-hmm" and never answers it', () => {
+    const { twilio, openai } = talking();
+    started(openai);
+    delta(openai, ' Mm');
+    delta(openai, '-hmm');
+    stopped(openai);
+    committed(openai);
+    completed(openai, 'Mm-hmm.');
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(200) });
+    expect(twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+    expect(twilio.sent.some((m) => m.event === 'media')).toBe(true);
+    expect(openai.sent).toEqual([]);
+  });
+
+  it('stops on "wait" — cancel, clear, truncate at what was heard — and answers when their turn ends', () => {
+    const { twilio, openai, hooks } = talking();
+    started(openai);
+    delta(openai, ' Wait');
+    expect(twilio.sent).toEqual([{ event: 'clear', streamSid: SID }]);
+    expect(openai.sent).toEqual([
+      { type: 'response.cancel' },
+      { type: 'conversation.item.truncate', item_id: 'item_1', content_index: 0, audio_end_ms: 500 },
+    ]);
+    expect(hooks.onTranscript).toHaveBeenCalledWith(expect.objectContaining({ role: 'system', text: '[stopped — they interrupted]' }));
+    openai.clearSent();
+    stopped(openai);
+    committed(openai); // the cancelled response has not reported done yet: wait for it
+    expect(openai.sent).toEqual([]);
+    openai.msg({ type: 'response.done', response: { status: 'cancelled', output: [] } });
+    expect(openai.sent).toEqual([{ type: 'response.create' }]);
+  });
+
+  it('stops on the second real word', () => {
+    const { twilio, openai } = talking();
+    started(openai);
+    delta(openai, " I'm");
+    expect(twilio.sent).toEqual([]);
+    delta(openai, ' interested');
+    expect(twilio.sent).toEqual([{ event: 'clear', streamSid: SID }]);
+  });
+
+  it('stops after 3 s of talk with no words', async () => {
+    const { twilio, openai } = talking();
+    started(openai);
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(twilio.sent).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(twilio.sent).toEqual([{ event: 'clear', streamSid: SID }]);
+  });
+
+  it('a cough (no words, stops quickly) never cuts the agent', async () => {
+    const { twilio, openai } = talking();
+    started(openai);
+    await vi.advanceTimersByTimeAsync(600);
+    stopped(openai);
+    committed(openai);
+    await vi.advanceTimersByTimeAsync(5000);
+    completed(openai, '');
+    expect(twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+    expect(openai.sent).toEqual([]);
+  });
+
+  it('a stop word that streams in after the commit cuts the agent and gets one answer', () => {
+    const { twilio, openai } = talking();
+    started(openai);
+    stopped(openai);
+    committed(openai); // still being judged: no answer yet
+    expect(openai.sent).toEqual([]);
+    delta(openai, ' Wait');
+    expect(twilio.sent).toEqual([{ event: 'clear', streamSid: SID }]);
+    openai.msg({ type: 'response.done', response: { status: 'cancelled', output: [] } });
+    completed(openai, 'Wait.');
+    expect(openai.sent.filter((m) => m.type === 'response.create')).toEqual([{ type: 'response.create' }]);
+  });
+
+  it('a late "yeah sure" is answered once the agent has finished', () => {
+    const { twilio, openai } = talking();
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg(doneEmpty);
+    twilio.msg(media(3000)); // 1 s of item_1 left to play
+    openai.clearSent();
+    started(openai);
+    delta(openai, ' Yeah sure');
+    stopped(openai);
+    committed(openai);
+    completed(openai, 'Yeah, sure.');
+    expect(openai.sent).toEqual([]);
+    playAll(twilio);
+    expect(openai.sent).toEqual([{ type: 'response.create' }]);
+  });
+
+  it('never cuts the opener; a question over it is answered after it plays', async () => {
+    const { twilio, openai, bridge } = setup({ bargeIn: 'gate' });
+    bridge.start();
+    openai.msg(READY);
+    twilio.msg(media(100));
+    talk(openai, 'item_0', 4000);
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg(doneEmpty);
+    twilio.clearSent();
+    openai.clearSent();
+    started(openai);
+    delta(openai, ' Wait who is this');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+    stopped(openai);
+    committed(openai);
+    completed(openai, 'Wait, who is this?');
+    expect(openai.sent).toEqual([]);
+    playAll(twilio);
+    expect(openai.sent).toEqual([{ type: 'response.create' }]);
+  });
+
+  it('cancels a response that has not played a sound when the caller keeps talking', () => {
+    const { twilio, openai, bridge } = setup({ bargeIn: 'gate' });
+    bridge.start();
+    openai.msg(READY);
+    openai.msg({ type: 'response.created' });
+    twilio.clearSent();
+    openai.clearSent();
+    started(openai);
+    expect(openai.sent).toEqual([{ type: 'response.cancel' }]);
+    expect(twilio.sent).toEqual([]);
+  });
+
+  it('answers a normal turn when it is committed', () => {
+    const { openai, bridge } = setup({ bargeIn: 'gate' });
+    bridge.start();
+    openai.msg(READY);
+    openai.clearSent();
+    started(openai);
+    stopped(openai);
+    committed(openai);
+    expect(openai.sent).toEqual([{ type: 'response.create' }]);
+    committed(openai, 'c2'); // a second turn before response.created: one response at a time
+    expect(openai.sent).toEqual([{ type: 'response.create' }]);
+    openai.msg({ type: 'response.created' });
+    openai.msg(doneEmpty);
+    expect(openai.sent).toEqual([{ type: 'response.create' }, { type: 'response.create' }]);
+  });
+
+  it('a caller turn during a slow tool waits for the batch, then one response', async () => {
+    let release: () => void = () => undefined;
+    const onTool = vi.fn(() => new Promise<{ output: string }>((r) => { release = () => r({ output: '{"ok":true}' }); }));
+    const { openai, bridge } = setup({ bargeIn: 'gate' }, { onTool });
+    bridge.start();
+    openai.msg(READY);
+    openai.clearSent();
+    openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('save_qualification', '{"field":"timeline","value":"soon"}', 'c1')] } });
+    await flush();
+    committed(openai, 'c9');
+    expect(openai.types()).toEqual([]);
+    release();
+    await flush();
+    expect(openai.types()).toEqual(['conversation.item.create', 'response.create']);
+  });
+
+  it('a rejected response.create does not leave the agent stuck silent', () => {
+    const { openai, bridge } = setup({ bargeIn: 'gate' });
+    bridge.start();
+    openai.msg(READY);
+    openai.clearSent();
+    committed(openai, 'c1');
+    committed(openai, 'c2'); // deferred behind the first
+    expect(openai.sent).toEqual([{ type: 'response.create' }]);
+    openai.msg({ type: 'error', error: { type: 'invalid_request_error', code: 'conversation_already_has_active_response', message: 'busy' } });
+    expect(openai.sent).toEqual([{ type: 'response.create' }, { type: 'response.create' }]);
+  });
+
+  it('ignores caller speech over the goodbye once a tool ended the call', async () => {
+    const { twilio, openai, bridge } = setup({ bargeIn: 'gate' }, { onTool: vi.fn(async () => ({ output: 'bye', then: 'hangup' as const })) });
+    bridge.start();
+    openai.msg(READY);
+    talk(openai, 'item_0', 100);
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg(doneEmpty);
+    playAll(twilio);
+    talk(openai, 'item_1', 2000);
+    openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('end_call', '{"outcome":"not_interested"}', 'e1')] } });
+    await flush();
+    twilio.clearSent();
+    openai.clearSent();
+    started(openai);
+    delta(openai, ' Wait wait');
+    committed(openai);
+    expect(twilio.sent).toEqual([]);
+    expect(openai.sent).toEqual([]);
+  });
+
+  it('a late answer still owed is dropped when a later interruption cuts the agent', () => {
+    const { twilio, openai } = talking();
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg(doneEmpty);
+    twilio.msg(media(3000)); // 1 s of item_1 left to play
+    openai.clearSent();
+    started(openai);
+    delta(openai, ' Yeah sure');
+    stopped(openai);
+    committed(openai);
+    completed(openai, 'Yeah, sure.'); // owed an answer once item_1 plays out
+    started(openai, 'c2');
+    delta(openai, ' Wait', 'c2'); // cuts item_1: its own turn is answered instead
+    stopped(openai, 'c2');
+    committed(openai, 'c2');
+    expect(openai.types()).toEqual(['conversation.item.truncate', 'response.create']);
+    talk(openai, 'item_2', 500);
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg(doneEmpty);
+    playAll(twilio);
+    expect(openai.sent.filter((m) => m.type === 'response.create')).toEqual([{ type: 'response.create' }]);
+  });
+
+  it('speech before the cut response reports done is not judged against a silent agent', () => {
+    const { openai, hooks } = talking();
+    started(openai);
+    delta(openai, ' Wait');
+    stopped(openai);
+    committed(openai); // answered once the cancelled response reports done
+    openai.clearSent();
+    started(openai, 'c2'); // nothing is playing any more
+    delta(openai, ' Wait', 'c2');
+    expect(openai.sent).toEqual([]);
+    const notes = hooks.onTranscript.mock.calls.filter(([e]) => (e as { text: string }).text === '[stopped — they interrupted]');
+    expect(notes).toHaveLength(1);
+    openai.msg({ type: 'response.done', response: { status: 'cancelled', output: [] } });
+    expect(openai.sent).toEqual([{ type: 'response.create' }]);
+  });
+
+  it('a tool batch that throws still answers a turn committed meanwhile', async () => {
+    let release: () => void = () => undefined;
+    // A hook that resolves to nothing makes the batch itself throw.
+    const onTool = vi.fn(() => new Promise<{ output: string }>((r) => { release = () => r(undefined as unknown as { output: string }); }));
+    const { openai, bridge, hooks } = setup({ bargeIn: 'gate' }, { onTool });
+    bridge.start();
+    openai.msg(READY);
+    openai.clearSent();
+    openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('save_qualification', '{"field":"timeline","value":"soon"}', 'c1')] } });
+    await flush();
+    committed(openai, 'c9');
+    release();
+    await flush();
+    expect(hooks.log.error).toHaveBeenCalledWith(expect.anything(), 'ai-voice bridge: tool batch failed');
+    expect(openai.types()).toEqual(['response.create']);
+  });
+
+  it('drops our answer unheard when the caller starts talking before it is created', () => {
+    const { twilio, openai, bridge, hooks } = setup({ bargeIn: 'gate' });
+    bridge.start();
+    openai.msg(READY);
+    twilio.clearSent();
+    openai.clearSent();
+    committed(openai, 'c1');
+    expect(openai.sent).toEqual([{ type: 'response.create' }]);
+    started(openai, 'c2'); // they kept talking: our create is still in flight
+    expect(openai.sent).toEqual([{ type: 'response.create' }]);
+    openai.msg({ type: 'response.created' });
+    expect(openai.sent).toEqual([{ type: 'response.create' }, { type: 'response.cancel' }]);
+    stopped(openai, 'c2');
+    committed(openai, 'c2'); // waits for the cancelled response to finish
+    expect(openai.sent).toHaveLength(2);
+    openai.msg({ type: 'response.done', response: { status: 'cancelled', output: [] } });
+    expect(openai.sent).toEqual([{ type: 'response.create' }, { type: 'response.cancel' }, { type: 'response.create' }]);
+    openai.msg({ type: 'response.created' }); // the answer to their whole turn is not cancelled
+    expect(openai.sent).toHaveLength(3);
+    expect(twilio.sent).toEqual([]);
+    expect(hooks.onTranscript).not.toHaveBeenCalled();
+  });
+
+  it('a rejected create forgets the pending cancel, so the next answer is not dropped', () => {
+    const { openai, bridge } = setup({ bargeIn: 'gate' });
+    bridge.start();
+    openai.msg(READY);
+    openai.clearSent();
+    committed(openai, 'c1');
+    started(openai, 'c2');
+    openai.msg({ type: 'error', error: { type: 'invalid_request_error', code: 'conversation_already_has_active_response', message: 'busy' } });
+    stopped(openai, 'c2');
+    committed(openai, 'c2');
+    openai.msg({ type: 'response.created' });
+    expect(openai.types()).toEqual(['response.create', 'response.create']);
   });
 });
 
