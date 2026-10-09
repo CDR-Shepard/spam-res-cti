@@ -32,7 +32,7 @@ const cases: Case[] = [
   { name: 'decideReview', call: () => outreach.decideReview(ENROLLMENT_ID, 'confirm'), route: `POST /api/review/${ENROLLMENT_ID}`, response: respond(204), body: { decision: 'confirm' } },
   { name: 'getAiCallResults', call: () => outreach.getAiCallResults(CAMPAIGN_ID), route: `GET /api/campaigns/${CAMPAIGN_ID}/ai-calls`, response: { items: [], nextCursor: null } },
   { name: 'getAiCallResults (cursor)', call: () => outreach.getAiCallResults(CAMPAIGN_ID, 'c+1'), route: `GET /api/campaigns/${CAMPAIGN_ID}/ai-calls?cursor=c%2B1`, response: { items: [], nextCursor: null } },
-  { name: 'getAiCallTranscript', call: () => outreach.getAiCallTranscript(AI_CALL_ID), route: `GET /api/ai-calls/${AI_CALL_ID}/transcript`, response: { aiCallId: AI_CALL_ID, lines: [] } },
+  { name: 'getAiCallTranscript', call: () => outreach.getAiCallTranscript(AI_CALL_ID), route: `GET /api/ai-calls/${AI_CALL_ID}/transcript`, response: { aiCallId: AI_CALL_ID, lines: [], turnStats: null } },
   { name: 'getAiAvailability', call: () => outreach.getAiAvailability(), route: 'GET /api/ai-calls/availability', response: { available: true, testNumbers: ['+15125550111'] } },
   { name: 'createRecordTest', call: () => outreach.createRecordTest(LEAD_ID), route: 'POST /api/record-tests', response: { id: TEST_ID }, body: { record: LEAD_ID } },
   { name: 'recordTests', call: () => outreach.recordTests(), route: 'GET /api/record-tests', response: { items: [] } },

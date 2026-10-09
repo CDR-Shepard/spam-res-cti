@@ -224,7 +224,7 @@ export async function loadTranscript(db: Db, ctx: RequestContext, aiCallId: stri
   const row = rows<{ transcript: unknown; owner_sf_user_id: string | null }>(result)[0];
   if (!row) return loadPracticeTranscript(db, ctx, aiCallId);
   if (!(await mayDecide(db, ctx, row.owner_sf_user_id))) return 'forbidden';
-  return { aiCallId, lines: transcriptLines(row.transcript) };
+  return { aiCallId, lines: transcriptLines(row.transcript), turnStats: null }; // Task 11 reads the column
 }
 
 /** A practice call (plan 1D) or a Test a record call (plan 1E): admins of its tenant only. */
@@ -245,5 +245,5 @@ async function loadPracticeTranscript(db: Db, ctx: RequestContext, aiCallId: str
   const row = rows<{ transcript: unknown }>(result)[0];
   if (!row) return null;
   if (!(ctx.session.isAdmin || ctx.session.isSuperAdmin)) return 'forbidden';
-  return { aiCallId, lines: transcriptLines(row.transcript) };
+  return { aiCallId, lines: transcriptLines(row.transcript), turnStats: null }; // Task 11 reads the column
 }

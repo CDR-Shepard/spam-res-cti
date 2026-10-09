@@ -5,6 +5,8 @@ import {
   AiCallFailReason,
   AiCallOutcome,
   AiCallResult,
+  AiCallTranscript,
+  AiCallTurnStats,
   INTERNAL_AI_AVAILABILITY_PATH,
   INTERNAL_AI_BROWSER_TOKEN_PATH,
   INTERNAL_AI_CALLS_PATH,
@@ -238,5 +240,28 @@ describe('plan 1E: the practice_browser target, the browser token, browserCalls'
     const ok = { token: 't', identity: IDENTITY, expiresAt: '2026-10-06T18:20:00.000Z' };
     expect(InternalBrowserTokenResponse.parse(ok)).toEqual(ok);
     expect(InternalBrowserTokenResponse.safeParse({ ...ok, token: '' }).success).toBe(false);
+  });
+});
+
+describe('AiCallTurnStats', () => {
+  const stats = {
+    v: 1, bargeIn: 'gate', turns: 3,
+    totalMs: { p50: 1900, p90: 2600, max: 3100 }, endpointMs: { p50: 1100 }, answerMs: { p50: 800 },
+    interruptions: 1, listening: 4, silenceChecks: 0,
+  };
+
+  it('parses a stats object and a transcript that carries it', () => {
+    expect(AiCallTurnStats.parse(stats)).toEqual(stats);
+    const id = '00000000-0000-4000-8000-000000000001';
+    expect(AiCallTranscript.parse({ aiCallId: id, lines: [], turnStats: stats }).turnStats).toEqual(stats);
+    expect(AiCallTranscript.parse({ aiCallId: id, lines: [], turnStats: null }).turnStats).toBeNull();
+  });
+
+  it('accepts a call with no answered turns', () => {
+    expect(AiCallTurnStats.parse({ ...stats, turns: 0, totalMs: null, endpointMs: null, answerMs: null }).turns).toBe(0);
+  });
+
+  it('rejects another version', () => {
+    expect(AiCallTurnStats.safeParse({ ...stats, v: 2 }).success).toBe(false);
   });
 });

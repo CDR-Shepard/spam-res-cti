@@ -51,7 +51,7 @@ describe('RecordTestCalls', () => {
   });
 
   it('the Transcript button opens the transcript', async () => {
-    stubApi({ [`GET /api/ai-calls/${AI_CALL_ID}/transcript`]: { aiCallId: AI_CALL_ID, lines: [{ role: 'agent', text: 'Hi, this is the AI assistant.', at: null }] } });
+    stubApi({ [`GET /api/ai-calls/${AI_CALL_ID}/transcript`]: { aiCallId: AI_CALL_ID, lines: [{ role: 'agent', text: 'Hi, this is the AI assistant.', at: null }], turnStats: null } });
     renderWithProviders(<RecordTestCalls calls={[booked]} />, { isAdmin: true });
     await userEvent.click(screen.getByRole('button', { name: 'Transcript' }));
     expect(await screen.findByText('Hi, this is the AI assistant.')).toBeInTheDocument();

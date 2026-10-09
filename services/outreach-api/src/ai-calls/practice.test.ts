@@ -296,7 +296,7 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
     const aiCallId = res.response.aiCallId;
     await db.update(schema.aiCalls).set({ isTest: true, practice: true, transcript: [{ role: 'agent', text: 'Hi Pat', at: null }] }).where(eq(schema.aiCalls.id, aiCallId));
     const rep = await seedUser(db, s.base.orgId);
-    expect(await loadTranscript(db, s.ctx, aiCallId)).toEqual({ aiCallId, lines: [{ role: 'agent', text: 'Hi Pat', at: null }] });
+    expect(await loadTranscript(db, s.ctx, aiCallId)).toEqual({ aiCallId, lines: [{ role: 'agent', text: 'Hi Pat', at: null }], turnStats: null });
     expect(await loadTranscript(db, ctxOf(s.base.orgId, rep, false), aiCallId)).toBe('forbidden');
     const other = await setup();
     expect(await loadTranscript(db, other.ctx, aiCallId)).toBeNull();
@@ -314,7 +314,7 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
 
     const [item] = (await listPracticeCalls(db, s.base.orgId, s.base.campaignId)).items;
     expect(item).toMatchObject({ aiCallId, callStatus: 'queued', result: { result: 'placed', aiCallId } });
-    expect(await loadTranscript(db, s.ctx, aiCallId)).toEqual({ aiCallId, lines: [{ role: 'agent', text: 'Hi Pat', at: null }] });
+    expect(await loadTranscript(db, s.ctx, aiCallId)).toEqual({ aiCallId, lines: [{ role: 'agent', text: 'Hi Pat', at: null }], turnStats: null });
     const other = await setup();
     expect(await loadTranscript(db, other.ctx, aiCallId)).toBeNull();
   });

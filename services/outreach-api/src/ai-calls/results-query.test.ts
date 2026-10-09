@@ -134,7 +134,7 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
     const aiCallId = await seedAiCall(db, s.base.orgId, s.admin, { status: 'completed', transcript: [{ role: 'agent', text: 'Hello', at: '2026-10-05T23:00:01.000Z' }, { bad: true }] });
     await touchSet(lead.touchId, { status: 'sent', aiCallId });
 
-    const want = { aiCallId, lines: [{ role: 'agent', text: 'Hello', at: '2026-10-05T23:00:01.000Z' }] };
+    const want = { aiCallId, lines: [{ role: 'agent', text: 'Hello', at: '2026-10-05T23:00:01.000Z' }], turnStats: null };
     expect(await loadTranscript(db, ctxOf(s.base.orgId, s.owner, false), aiCallId)).toEqual(want);
     expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), aiCallId)).toEqual(want);
     expect(await loadTranscript(db, ctxOf(s.base.orgId, s.rep, false), aiCallId)).toBe('forbidden');
@@ -268,7 +268,7 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
     it('20: an admin of its tenant opens it, by the call it stored or (a lost answer) by its key', async () => {
       for (const lost of [false, true]) {
         const { s, aiCallId } = await testCall({ lost });
-        expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), aiCallId)).toEqual({ aiCallId, lines });
+        expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), aiCallId)).toEqual({ aiCallId, lines, turnStats: null });
       }
     });
 
