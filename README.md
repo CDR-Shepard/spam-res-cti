@@ -453,7 +453,7 @@ the obvious extension points.
 │   │   │   ├── main.tsx, routeTree.gen.ts, index.css
 │   │   │   ├── routes/                 # __root, sign-in, auth.callback, _authenticated/{index,team}
 │   │   │   ├── components/             # app-shell, sign-in-page, team-page, tenant-switcher, ui/ (shadcn)
-│   │   │   └── lib/{api.ts,auth.tsx,guard.ts}   # @cti/contracts client, in-memory bearer, route guard
+│   │   │   └── lib/{api.ts,auth.tsx,guard.ts}   # @cti/contracts client, localStorage-backed bearer, route guard
 │   │   └── vite.config.ts              # :5175; proxies /api to outreach-api on :4100
 │   └── cti-desktop/
 │       ├── src/

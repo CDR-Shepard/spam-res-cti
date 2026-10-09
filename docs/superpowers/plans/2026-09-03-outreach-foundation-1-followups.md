@@ -130,10 +130,23 @@ plan `2026-09-04-outreach-foundation-2-product-skeleton.md`).
   `build.watchPatterns`, as the pulled `@cti/web` and `@cti/desktop` blocks
   show — they just are not set on the two API blocks. Add them when the
   `@cti/api` block is translated.)
-- **`outreach-web` keeps the bearer in memory only** (spec §4.3), so a page
-  reload re-runs the AuthKit redirect. Revisit if it annoys admins — a
-  `sessionStorage` copy behind `apiSession` in `apps/outreach-web/src/lib/api.ts`
-  is the smallest change.
+- *resolved 2026-10-09* — **`outreach-web` kept the bearer in memory only**
+  (spec §4.3), so a page reload re-ran the sign-in redirect. The owner accepted
+  keeping the token in browser storage, so: `apiSession`
+  (`apps/outreach-web/src/lib/api.ts`) now persists the bearer — the token only,
+  never the super admin's selected org — in `localStorage` (so it survives a
+  browser restart), guarded for private mode with an in-memory fallback.
+  `AuthProvider` restores the user and tenant from `GET /api/auth/me` on load
+  and exposes `restoring`; `AppRouter` (`lib/app-router.tsx`) renders nothing
+  until that finishes, so the `_authenticated` guard never bounces a signed-in
+  user through `/sign-in`. A 401 clears the stored token; a network or 5xx
+  failure keeps it for the next load. Server side, `/api/auth/me` calls
+  `extendSession` (`packages/auth`), a single conditional UPDATE that moves
+  `expires_at` to now + 30 days once less than 29 remain (at most one write a
+  day), so an active user is never forced to sign in again. Not changed:
+  `cti-api` never calls it, so the softphone keeps its fixed 30 days. Still true:
+  there is no absolute session cap, so a session that is used at least monthly
+  lives until it is revoked (sign-out) or its tenant is suspended.
 - **Two `vitest` majors.** `apps/cti-web` and `apps/outreach-web` pin
   `vitest ^4`; every Node workspace (`services/*`, `packages/*`) pins `^2`.
   Align when the next Vite upgrade happens.
@@ -174,7 +187,7 @@ listed so the disposition table reconciles.
 - *partly closed* — `SESSION_SECRET` keyed both `@fastify/cookie` and the OAuth state HMAC with the same wire shape (~25 % of state tokens were also valid signed cookies). `auth/state.ts` now signs with `HMAC(SESSION_SECRET, 'outreach:oauth-state:v1')`. Still open: give the cookie signer its own subkey the same way, and derive plan 3's `x-outreach-signature` webhook key (`'webhook-v1'`) rather than using the raw secret.
 - **`organizations_workos_org_id_unique` has no Drizzle representation** (`0036_tenancy.sql:26` vs `schema.ts`) — already recorded above; the review re-confirmed it is load-bearing for `pickTenant`, so keep open until mirrored.
 - **Super-admin inviter under `X-Org-Id`**: `routes/team.ts` looks the inviter up by session `userId` regardless of the acting `orgId`, so a super admin inviting into tenant B sends an `inviterUserId` that is not a member of B's WorkOS org (WorkOS may reject → now a clean 500 `INTERNAL_ERROR`, previously a raw upstream body). Omit `inviterExternalId` when `ctx.orgId !== ctx.session.orgId`.
-- **Reload needs a click** (bearer in memory only) — already recorded above; keep.
+- *resolved 2026-10-09* — **Reload needs a click** (bearer in memory only): see the entry above.
 - **`@cti/web`'s Railway start is `npm run dev`** — already recorded above; keep.
 - **`outreach-api` sets no `PORT`/`API_PORT` in `.railway/railway.ts`** (the `_ctiapi` block preserves both). Works via `config.ts`'s `PORT` fallback → 4100 and the Dockerfile's `EXPOSE 4100`, but a domain/target-port mismatch surfaces only as a 120 s healthcheck timeout. Add `API_PORT: "4100"` to the env block or one sentence in runbook §2.1.
 - **Production sourcemaps**: `apps/outreach-web/vite.config.ts` ships `sourcemap: true` (~1.8 MB of `.map`), and `routes/spa.ts`'s immutable-cache regex does not match `.map`, so they are served uncached. Same as `apps/cti-web` — house style, noted for completeness; decide once for both apps.

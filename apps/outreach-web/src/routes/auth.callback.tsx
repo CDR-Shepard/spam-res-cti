@@ -33,10 +33,9 @@ function Callback() {
     // `auth.completeHandoff` (not `auth`) so this effect only re-runs if the
     // handoff function itself changes, not on every AuthProvider re-render.
   }, [auth.completeHandoff, navigate, returnTo]);
-  // The bearer lives in memory only (lib/api.ts), so leave with an in-app navigation — a full page
-  // load would drop it and the guard would send the user straight back to sign-in. Wait until the
-  // signed-in state has reached the router context, or the `_authenticated` guard would still see
-  // the old signed-out value.
+  // Leave with an in-app navigation, not a full page load: a reload would only repeat the /me
+  // round trip the handoff just made. Wait until the signed-in state has reached the router
+  // context, or the `_authenticated` guard would still see the old signed-out value.
   useEffect(() => {
     if (exchanged && auth.isAuthenticated) router.history.replace(returnTo ?? '/');
   }, [exchanged, auth.isAuthenticated, router, returnTo]);

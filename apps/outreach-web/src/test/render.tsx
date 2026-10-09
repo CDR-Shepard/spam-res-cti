@@ -14,6 +14,7 @@ function testProviders(opts: RenderOpts): { qc: QueryClient; auth: AuthContextVa
     tenant,
     activeTenant: tenant,
     isAuthenticated: true,
+    restoring: false,
     startSignIn: () => {},
     completeHandoff: async () => true,
     signOut: async () => {},

@@ -1,16 +1,18 @@
-import { StrictMode, useEffect } from 'react';
+import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, createRouter, type AnyRouter, RouterProvider } from '@tanstack/react-router';
 import { routeTree } from '../routeTree.gen';
-import { AuthProvider, useAuth } from '../lib/auth';
+import { apiSession, SESSION_STORAGE_KEY } from '../lib/api';
+import { AppRouter } from '../lib/app-router';
+import { AuthProvider } from '../lib/auth';
 
 // Sweep D-12: these tests time out at the 5 s default under the full parallel root run (they pass alone); no logic change.
 vi.setConfig({ testTimeout: 15_000 });
 
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); apiSession.set(null); localStorage.clear(); });
 
 /**
  * jsdom's `window.location.assign`/`.replace` are non-configurable own
@@ -28,7 +30,7 @@ function stubLocationMethods(): { assign: ReturnType<typeof vi.fn>; replace: Ret
   return { assign, replace };
 }
 
-/** Renders the real route tree at `initialUrl` under a real `AuthProvider`, using an in-memory history so nothing touches the jsdom URL bar. Returns the router instance so tests can inspect `router.state.location`. */
+/** Renders the real route tree at `initialUrl` under a real `AuthProvider` and `AppRouter` (the same wrapper main.tsx mounts), using an in-memory history so nothing touches the jsdom URL bar. Returns the router instance so tests can inspect `router.state.location`. */
 function renderAppAt(initialUrl: string): AnyRouter {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createRouter({
@@ -36,20 +38,10 @@ function renderAppAt(initialUrl: string): AnyRouter {
     context: { auth: undefined!, queryClient },
     history: createMemoryHistory({ initialEntries: [initialUrl] }),
   });
-  function Inner() {
-    const auth = useAuth();
-    // Mirrors main.tsx's App(): re-run the current route's `beforeLoad`
-    // whenever `isAuthenticated` changes, so a mid-session 401 (or signOut())
-    // redirects immediately instead of only on the next navigation.
-    useEffect(() => {
-      void router.invalidate();
-    }, [auth.isAuthenticated]);
-    return <RouterProvider router={router} context={{ auth }} />;
-  }
   render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
-        <AuthProvider><Inner /></AuthProvider>
+        <AuthProvider><AppRouter router={router} /></AuthProvider>
       </QueryClientProvider>
     </StrictMode>,
   );
@@ -136,7 +128,7 @@ describe('auth callback', () => {
 
     const router = renderAppAt('/auth/callback?returnTo=/team');
 
-    // The bearer lives in memory only, so a full reload (location.replace) would drop it and bounce back to sign-in.
+    // The handoff already holds the session, so leaving must be an in-app navigation: a full reload (location.replace) would only repeat the /me round trip.
     await waitFor(() => expect(router.state.location.pathname).toBe('/team'));
     expect(replaceSpy).not.toHaveBeenCalled();
     expect(assignSpy).not.toHaveBeenCalled();
@@ -209,5 +201,65 @@ describe('outreach pages', () => {
     expect(await screen.findByText('Salesforce is connected.')).toBeInTheDocument();
     router.history.push('/settings/connections?error=access_denied');
     expect(await screen.findByText('Salesforce sign-in was cancelled.')).toBeInTheDocument();
+  });
+});
+
+describe('staying signed in across a reload', () => {
+  const ME = {
+    user: { userId: 'U1', orgId: 'O1', email: 'a@b.co', displayName: null, isAdmin: false, isSuperAdmin: false, kind: 'human' },
+    tenant: { id: 'O1', name: 'GG Homes', slug: 'gg-homes', timezone: 'America/Los_Angeles', status: 'active' },
+  };
+  const TEAM = { members: [{ id: 'U1', email: 'a@b.co', displayName: 'Ann', isAdmin: false, powerDialerEnabled: false, signedIn: true }] };
+  const respond = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+  /** A fresh page load: a bearer already in storage, `/api/auth/me` answered by `meAnswer`, everything else by path. */
+  function reloadWith(meAnswer: () => Promise<Response>): ReturnType<typeof vi.fn> {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input).replace(/^https?:\/\/[^/]+/, '');
+      if (url === '/api/auth/me') return meAnswer();
+      if (url === '/api/team') return respond(200, TEAM);
+      return respond(404, { error: 'nf', code: 'NOT_FOUND' });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    stubLocationMethods();
+    return fetchMock;
+  }
+
+  it('a fresh router at /team with a stored token renders nothing, and does not redirect, until /me answers — then stays on /team signed in', async () => {
+    let release!: (r: Response) => void;
+    const meAnswer = new Promise<Response>((resolve) => { release = resolve; });
+    const fetchMock = reloadWith(() => meAnswer);
+
+    const router = renderAppAt('/team');
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/auth/me', expect.anything()));
+    // Held: the guard has nothing to go on yet, so neither the app nor the sign-in page may show.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(router.state.location.pathname).toBe('/team');
+    expect(document.body.textContent).toBe('');
+
+    release(respond(200, ME));
+    expect(await screen.findByRole('heading', { name: 'Team' })).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/team');
+    expect(router.state.matches.map((m) => m.routeId)).toEqual(['__root__', '/_authenticated', '/_authenticated/team']);
+    expect(screen.queryByRole('button', { name: 'Sign in with Salesforce' })).not.toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBe('stored-tok');
+  });
+
+  it('an expired stored token (/me 401) sends the visit to /sign-in with the return path and clears the token', async () => {
+    reloadWith(async () => respond(401, { error: 'Sign in required', code: 'UNAUTHENTICATED' }));
+    const router = renderAppAt('/team');
+    await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in'));
+    expect(router.state.location.search).toMatchObject({ returnTo: '/team' });
+    expect(await screen.findByRole('button', { name: 'Sign in with Salesforce' })).toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBeNull();
+  });
+
+  it('an unreachable API (/me fails) shows sign-in but keeps the stored token for the next load', async () => {
+    reloadWith(async () => { throw new TypeError('Failed to fetch'); });
+    const router = renderAppAt('/team');
+    await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in'));
+    expect(router.state.location.search).toMatchObject({ returnTo: '/team' });
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBe('stored-tok');
   });
 });

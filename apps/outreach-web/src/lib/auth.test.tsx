@@ -1,9 +1,13 @@
+import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Tenant } from '@cti/contracts';
+import { apiSession, SESSION_STORAGE_KEY } from './api';
 import { AuthProvider, useAuth } from './auth';
+
+afterEach(() => { vi.unstubAllGlobals(); apiSession.set(null); localStorage.clear(); });
 
 const otherTenant: Tenant = { id: 'O2', name: 'Other Co', slug: 'other-co', timezone: 'UTC', status: 'active' };
 
@@ -54,5 +58,158 @@ describe('AuthProvider startSignIn', () => {
     await userEvent.click(screen.getByRole('button', { name: 'workos' }));
     expect(assign).toHaveBeenNthCalledWith(1, '/api/auth/salesforce/start?returnTo=%2Fcampaigns%3Fx%3D1');
     expect(assign).toHaveBeenNthCalledWith(2, '/api/auth/workos/start?returnTo=%2Fcampaigns%3Fx%3D1');
+  });
+});
+
+describe('AuthProvider restore (stay signed in across a reload)', () => {
+  const ME = {
+    user: { userId: 'U1', orgId: 'O1', email: 'a@b.co', displayName: null, isAdmin: true, isSuperAdmin: false, kind: 'human' },
+    tenant: { id: 'O1', name: 'GG Homes', slug: 'gg-homes', timezone: 'America/Los_Angeles', status: 'active' },
+  };
+  const jsonResponse = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const pathOf = (input: RequestInfo | URL) => String(input).replace(/^https?:\/\/[^/]+/, '');
+
+  function Probe() {
+    const a = useAuth();
+    return (
+      <>
+        <p>restoring:{String(a.restoring)}</p>
+        <p>authenticated:{String(a.isAuthenticated)}</p>
+        <p>user:{a.user?.email ?? 'none'}</p>
+        <p>tenant:{a.tenant?.name ?? 'none'}</p>
+        <p>active:{a.activeTenant?.name ?? 'none'}</p>
+        <button onClick={() => void a.signOut()}>sign out</button>
+        <button onClick={() => void a.completeHandoff()}>hand off</button>
+      </>
+    );
+  }
+  function renderProvider(strict = false) {
+    const tree = (
+      <QueryClientProvider client={new QueryClient()}>
+        <AuthProvider><Probe /></AuthProvider>
+      </QueryClientProvider>
+    );
+    return render(strict ? <StrictMode>{tree}</StrictMode> : tree);
+  }
+  /** A fetch whose `/api/auth/me` answer the test releases by hand. */
+  function holdMe() {
+    let release!: (r: Response) => void;
+    const pending = new Promise<Response>((resolve) => { release = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => (pathOf(input) === '/api/auth/me' ? pending : jsonResponse(404, { error: 'nf', code: 'NOT_FOUND' })));
+    vi.stubGlobal('fetch', fetchMock);
+    return { fetchMock, release };
+  }
+  const meCalls = (f: ReturnType<typeof vi.fn>) => f.mock.calls.filter(([u]) => pathOf(u as string) === '/api/auth/me');
+
+  it('with no stored token, restoring is false on the first render and /me is never called', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    renderProvider();
+    expect(screen.getByText('restoring:false')).toBeInTheDocument();
+    expect(screen.getByText('authenticated:false')).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('with a stored token, restoring holds until /me answers, then user, tenant and activeTenant are filled', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    const { fetchMock, release } = holdMe();
+    renderProvider();
+    expect(screen.getByText('restoring:true')).toBeInTheDocument();
+    expect(screen.getByText('authenticated:false')).toBeInTheDocument();
+    await waitFor(() => expect(meCalls(fetchMock)).toHaveLength(1));
+    const init = meCalls(fetchMock)[0]![1] as RequestInit;
+    expect(new Headers(init.headers).get('authorization')).toBe('Bearer stored-tok');
+
+    release(jsonResponse(200, ME));
+    expect(await screen.findByText('restoring:false')).toBeInTheDocument();
+    expect(screen.getByText('authenticated:true')).toBeInTheDocument();
+    expect(screen.getByText('user:a@b.co')).toBeInTheDocument();
+    expect(screen.getByText('tenant:GG Homes')).toBeInTheDocument();
+    expect(screen.getByText('active:GG Homes')).toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBe('stored-tok');
+  });
+
+  it('asks /me exactly once even under StrictMode', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    const fetchMock = vi.fn(async () => jsonResponse(200, ME));
+    vi.stubGlobal('fetch', fetchMock);
+    renderProvider(true);
+    expect(await screen.findByText('user:a@b.co')).toBeInTheDocument();
+    expect(meCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('a 401 clears the stored token and leaves the user signed out', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'expired-tok');
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(401, { error: 'Sign in required', code: 'UNAUTHENTICATED' })));
+    renderProvider();
+    expect(await screen.findByText('restoring:false')).toBeInTheDocument();
+    expect(screen.getByText('authenticated:false')).toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBeNull();
+    expect(apiSession.get()).toBeNull();
+  });
+
+  it('a network error keeps the stored token (the user is only signed out of this view; the next load retries)', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+    renderProvider();
+    expect(await screen.findByText('restoring:false')).toBeInTheDocument();
+    expect(screen.getByText('authenticated:false')).toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBe('stored-tok');
+  });
+
+  it('a 503 (the API mid-deploy) keeps the stored token too', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>Bad gateway</html>', { status: 503 })));
+    renderProvider();
+    expect(await screen.findByText('restoring:false')).toBeInTheDocument();
+    expect(screen.getByText('authenticated:false')).toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBe('stored-tok');
+  });
+
+  it('a /me body that is not the expected shape does not sign anyone in or drop the token', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(200, { unexpected: true })));
+    renderProvider();
+    expect(await screen.findByText('restoring:false')).toBeInTheDocument();
+    expect(screen.getByText('authenticated:false')).toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBe('stored-tok');
+  });
+
+  it('completing the sign-in handoff stores the token so the next load restores it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(200, { ...ME, token: 'fresh-tok', expiresAt: '2026-11-08T00:00:00.000Z' })));
+    renderProvider();
+    await userEvent.click(screen.getByRole('button', { name: 'hand off' }));
+    expect(await screen.findByText('user:a@b.co')).toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBe('fresh-tok');
+  });
+
+  it('sign out revokes the session on the server and clears the stored token', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => (pathOf(input) === '/api/auth/me' ? jsonResponse(200, ME) : new Response(null, { status: 204 })));
+    vi.stubGlobal('fetch', fetchMock);
+    renderProvider();
+    expect(await screen.findByText('user:a@b.co')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'sign out' }));
+
+    expect(await screen.findByText('user:none')).toBeInTheDocument();
+    const logout = fetchMock.mock.calls.find(([u]) => pathOf(u) === '/api/auth/logout')!;
+    expect((logout[1] as RequestInit).method).toBe('POST');
+    expect(new Headers((logout[1] as RequestInit).headers).get('authorization')).toBe('Bearer stored-tok');
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBeNull();
+    expect(apiSession.get()).toBeNull();
+  });
+
+  it('sign out clears the stored token even when the server cannot be reached', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, 'stored-tok');
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (pathOf(input) === '/api/auth/me') return jsonResponse(200, ME);
+      throw new TypeError('Failed to fetch');
+    }));
+    renderProvider();
+    expect(await screen.findByText('user:a@b.co')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'sign out' }));
+    expect(await screen.findByText('user:none')).toBeInTheDocument();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBeNull();
   });
 });

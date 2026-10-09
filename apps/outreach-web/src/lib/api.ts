@@ -10,11 +10,44 @@ export class ApiRequestError extends Error {
 }
 
 export interface ApiSession { token: string; orgId?: string }
-let current: ApiSession | null = null;
-/** In-memory bearer + the super admin's selected tenant. Cleared on reload by design (see spec §4.3). */
+
+/** Where the bearer survives a reload and a browser restart (localStorage, not sessionStorage). */
+export const SESSION_STORAGE_KEY = 'outreach.session.v1';
+
+/** This tab's copy of the session: what carries it when storage is unavailable, and where the selected `orgId` lives. */
+let memory: ApiSession | null = null;
+
+/** The stored bearer, or null when none is stored or storage is unavailable (private mode, blocked cookies). */
+function readStoredToken(): string | null {
+  try { return localStorage.getItem(SESSION_STORAGE_KEY) || null; } catch { return null; }
+}
+
+function writeStoredToken(token: string | null): void {
+  try {
+    if (token) localStorage.setItem(SESSION_STORAGE_KEY, token);
+    else localStorage.removeItem(SESSION_STORAGE_KEY);
+  } catch { /* storage refused: the in-memory copy still carries this tab, it just won't survive a reload */ }
+}
+
+/**
+ * The bearer plus the super admin's selected tenant. The bearer is kept in
+ * localStorage so a reload (or a browser restart) leaves you signed in; the
+ * trade-off — a script on the page could read it — was accepted by the owner.
+ * `orgId` is deliberately NOT stored: a reload returns to the home tenant,
+ * which is what `AuthProvider`'s restore shows. Every storage call is
+ * guarded and falls back to memory.
+ */
 export const apiSession = {
-  get: (): ApiSession | null => current,
-  set: (s: ApiSession | null): void => { current = s; },
+  get: (): ApiSession | null => {
+    const stored = readStoredToken();
+    if (!stored) return memory;
+    // The same token keeps this tab's selected org; a different one (another tab signed in, or a reload) starts clean.
+    return memory?.token === stored ? memory : { token: stored };
+  },
+  set: (s: ApiSession | null): void => {
+    memory = s;
+    writeStoredToken(s?.token ?? null);
+  },
 };
 
 type UnauthorizedHandler = () => void;
@@ -40,8 +73,9 @@ async function request(path: string, init: RequestInit): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set('Accept', 'application/json');
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-  if (current?.token) headers.set('Authorization', `Bearer ${current.token}`);
-  if (current?.orgId) headers.set('X-Org-Id', current.orgId);
+  const session = apiSession.get();
+  if (session?.token) headers.set('Authorization', `Bearer ${session.token}`);
+  if (session?.orgId) headers.set('X-Org-Id', session.orgId);
   const method = (init.method ?? 'GET').toUpperCase();
   const res = await fetch(path, { ...init, headers, credentials: 'same-origin' });
   if (res.status === 401 && !isSessionBootstrap(path, method)) {

@@ -1,6 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { SessionResponse, type SessionUser, type Tenant } from '@cti/contracts';
+import { MeResponse, SessionResponse, type SessionUser, type Tenant } from '@cti/contracts';
 import { api, apiEmpty, apiSession, setUnauthorizedHandler } from './api';
 
 /** Which sign-in the browser starts: the API's `/api/auth/<provider>/start`. Salesforce is the default. */
@@ -13,6 +13,12 @@ export interface AuthContextValue {
   /** The tenant requests act on (differs from `tenant` only for super admins who switched). */
   activeTenant: Tenant | null;
   isAuthenticated: boolean;
+  /**
+   * True until the attempt to restore a stored session has finished; false from
+   * the first render when none is stored. While true, `isAuthenticated` is not
+   * yet the answer, so nothing that redirects on it (the route guard) may run.
+   */
+  restoring: boolean;
   startSignIn: (returnTo?: string, provider?: SignInProvider) => void;
   completeHandoff: () => Promise<boolean>;
   signOut: () => Promise<void>;
@@ -26,6 +32,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<SessionUser | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [activeTenant, setActiveTenant] = useState<Tenant | null>(null);
+  // A stored bearer means the first answer to "who is signed in?" is still a request away.
+  const [restoring, setRestoring] = useState(() => apiSession.get() !== null);
+
+  /** A signed-in session starts on its own tenant: `activeTenant` only differs after `switchTenant`. */
+  const adopt = useCallback((u: SessionUser, t: Tenant) => {
+    setUser(u);
+    setTenant(t);
+    setActiveTenant(t);
+  }, []);
 
   const startSignIn = useCallback((returnTo?: string, provider: SignInProvider = 'salesforce') => {
     const q = returnTo ? `?returnTo=${encodeURIComponent(returnTo)}` : '';
@@ -36,14 +51,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const s = await api('/api/auth/session', SessionResponse);
       apiSession.set({ token: s.token });
-      setUser(s.user);
-      setTenant(s.tenant);
-      setActiveTenant(s.tenant);
+      adopt(s.user, s.tenant);
       return true;
     } catch {
       return false;
     }
-  }, []);
+  }, [adopt]);
 
   const signOut = useCallback(async () => {
     try { await apiEmpty('/api/auth/logout', { method: 'POST' }); } catch { /* already signed out */ }
@@ -78,7 +91,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => setUnauthorizedHandler(null);
   }, []);
 
-  const value = useMemo<AuthContextValue>(() => ({ user, tenant, activeTenant, isAuthenticated: user != null, startSignIn, completeHandoff, signOut, switchTenant }), [user, tenant, activeTenant, startSignIn, completeHandoff, signOut, switchTenant]);
+  // A reload (or a browser restart) loses React state but not the stored
+  // bearer: ask the API who it belongs to and sign that user back in. A 401
+  // already dropped the stored token (api.ts); any other failure (offline, the
+  // API mid-deploy) leaves it for the next load to retry. Either way the user
+  // lands signed out for now rather than stuck. The ref keeps StrictMode's
+  // double-invoked effect to one request.
+  const restoreStarted = useRef(false);
+  useEffect(() => {
+    if (restoreStarted.current || !restoring) return;
+    restoreStarted.current = true;
+    api('/api/auth/me', MeResponse)
+      .then((me) => adopt(me.user, me.tenant))
+      .catch(() => { /* stays signed out; see above */ })
+      .finally(() => setRestoring(false));
+  }, [restoring, adopt]);
+
+  const value = useMemo<AuthContextValue>(() => ({ user, tenant, activeTenant, isAuthenticated: user != null, restoring, startSignIn, completeHandoff, signOut, switchTenant }), [user, tenant, activeTenant, restoring, startSignIn, completeHandoff, signOut, switchTenant]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
