@@ -181,4 +181,11 @@ describe('drained listener, current item and audio left', () => {
     p.onInboundMedia(9000);
     expect(p.remainingMs()).toBe(0);
   });
+
+  it('reports Infinity while the response streams even when every mark has echoed', () => {
+    const p = new PlaybackTracker();
+    const m = p.onAudioDelta('item_1', Buffer.alloc(800).toString('base64'));
+    p.onMark(m);
+    expect(p.remainingMs()).toBe(Number.POSITIVE_INFINITY);
+  });
 });

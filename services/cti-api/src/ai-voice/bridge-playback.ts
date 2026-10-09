@@ -61,15 +61,15 @@ export class PlaybackTracker {
     return this.marks.length > 0 && this.itemId !== null;
   }
 
-  /** The agent item now queued or playing, or null. */
+  /** The agent item most recently forwarded (kept after it plays out, cleared on interrupt/reset), or null. */
   get currentItemId(): string | null {
     return this.itemId;
   }
 
-  /** Agent audio left to play: 0 when nothing is queued, Infinity while the response still streams. */
+  /** Agent audio left to play: Infinity while the response still streams, 0 when nothing is queued. */
   remainingMs(): number {
-    if (!this.playing) return 0;
     if (this.streaming) return Number.POSITIVE_INFINITY;
+    if (!this.playing) return 0;
     const generatedMs = Math.floor(this.generatedBytes / PCMU_BYTES_PER_MS);
     return Math.max(0, generatedMs - (this.latestMediaMs - this.itemStartMs));
   }
