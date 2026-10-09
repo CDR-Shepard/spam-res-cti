@@ -3,6 +3,8 @@
  * configuration or fixed text, kept apart from the socket plumbing.
  */
 
+import type { BargeInMode } from './bridge-turn-stats.js';
+
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 export type VadEagerness = 'low' | 'medium' | 'high' | 'auto';
 
@@ -13,18 +15,24 @@ export interface SessionSettings {
   tools: readonly unknown[];
   reasoningEffort: ReasoningEffort;
   vadEagerness: VadEagerness;
+  bargeIn: BargeInMode;
+  transcribeModel: string;
 }
 
 /** Only the gpt-realtime-2 family accepts `session.reasoning`. */
 const REASONING_MODEL_PREFIX = 'gpt-realtime-2';
 const AUDIO_FORMAT = { type: 'audio/pcmu' } as const;
-const TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
 
 export const OPENER_PROMPT = '(The person picked up but has not spoken yet. Open the call now.)';
 
 /** Semantic VAD; `createResponse: false` stops the server starting a response when the caller stops talking. */
 function turnDetection(eagerness: VadEagerness, createResponse: boolean): object {
   return { type: 'semantic_vad', eagerness, create_response: createResponse, interrupt_response: true };
+}
+
+/** Gate mode: the bridge decides when the agent answers and when it is interrupted (spec 2026-10-09 §4.1). */
+function gateTurnDetection(eagerness: VadEagerness): object {
+  return { type: 'semantic_vad', eagerness, create_response: false, interrupt_response: false };
 }
 
 export function sessionUpdate(s: SessionSettings): object {
@@ -41,8 +49,8 @@ export function sessionUpdate(s: SessionSettings): object {
         input: {
           format: AUDIO_FORMAT,
           noise_reduction: { type: 'near_field' },
-          transcription: { model: TRANSCRIPTION_MODEL, language: 'en' },
-          turn_detection: turnDetection(s.vadEagerness, true),
+          transcription: { model: s.transcribeModel, language: 'en' },
+          turn_detection: s.bargeIn === 'gate' ? gateTurnDetection(s.vadEagerness) : turnDetection(s.vadEagerness, true),
         },
         output: { format: AUDIO_FORMAT, voice: s.voice },
       },

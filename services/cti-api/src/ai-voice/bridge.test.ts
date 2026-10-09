@@ -148,6 +148,19 @@ describe('session.update', () => {
     });
   });
 
+  it('gate mode turns off server responses and barge-in and uses the given transcriber', () => {
+    const { openai, bridge } = setup({ bargeIn: 'gate', transcribeModel: 'gpt-live-transcribe' });
+    bridge.start();
+    const session = (openai.sent[0] as { session: { audio: { input: Record<string, unknown> } } }).session;
+    expect(session.audio.input.transcription).toEqual({ model: 'gpt-live-transcribe', language: 'en' });
+    expect(session.audio.input.turn_detection).toEqual({
+      type: 'semantic_vad',
+      eagerness: 'auto',
+      create_response: false,
+      interrupt_response: false,
+    });
+  });
+
   it('sends reasoning only for gpt-realtime-2* models', () => {
     const session = (model: string) => {
       const { openai, bridge } = setup({

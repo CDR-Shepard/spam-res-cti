@@ -196,6 +196,8 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
       model: cfg.AI_VOICE_MODEL,
       reasoningEffort: cfg.AI_VOICE_REASONING,
       vadEagerness: cfg.AI_VOICE_VAD_EAGERNESS,
+      bargeIn: cfg.AI_VOICE_BARGE_IN,
+      transcribeModel: cfg.AI_VOICE_TRANSCRIBE_MODEL,
       maxCallMs: Math.max(MIN_CALL_MS, cfg.AI_VOICE_MAX_CALL_SECONDS * 1000),
     },
     hooks,

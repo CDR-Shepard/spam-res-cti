@@ -23,6 +23,8 @@ const cfg = {
   AI_VOICE_VOICE: 'marin',
   AI_VOICE_REASONING: 'low',
   AI_VOICE_VAD_EAGERNESS: 'auto',
+  AI_VOICE_BARGE_IN: 'gate',
+  AI_VOICE_TRANSCRIBE_MODEL: 'gpt-live-transcribe',
   AI_VOICE_MAX_CALL_SECONDS: 600,
 } as AppConfig;
 
@@ -92,6 +94,8 @@ describe('runStreamSession — the start frame', () => {
       model: 'gpt-realtime-2.1',
       reasoningEffort: 'low',
       vadEagerness: 'auto',
+      bargeIn: 'gate',
+      transcribeModel: 'gpt-live-transcribe',
       maxCallMs: 600_000,
     });
     expect(captured?.opts.instructions).toContain('an AI assistant calling for GG Homes on a recorded line');

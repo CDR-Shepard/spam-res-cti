@@ -28,10 +28,14 @@ import { obj, openAiErrorFields, parseFrame, str, type Msg } from './bridge-fram
 import { Outbox } from './bridge-outbox.js';
 import { PlaybackTracker, type ClearTimer, type SetTimer, type Truncation } from './bridge-playback.js';
 import { openerItem, sessionUpdate, stopAutoResponses, truncate, type ReasoningEffort, type VadEagerness } from './bridge-session.js';
+import type { BargeInMode } from './bridge-turn-stats.js';
 import { errText, functionCalls, runToolBatch, type BridgeLog, type ToolResult } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
 
-export type { BridgeLog, ReasoningEffort, ToolResult, VadEagerness };
+export type { BargeInMode, BridgeLog, ReasoningEffort, ToolResult, VadEagerness };
+
+/** The transcriber before 2026-10-09; the bridge's default so a bare BridgeOptions behaves as before. */
+export const LEGACY_TRANSCRIBE_MODEL = 'gpt-4o-mini-transcribe';
 
 /** How long after `session.updated` the agent waits for the caller before opening. */
 export const OPENER_DELAY_MS = 3000;
@@ -76,6 +80,10 @@ export interface BridgeOptions {
   model: string;
   reasoningEffort: ReasoningEffort;
   vadEagerness: VadEagerness;
+  /** 'gate' (spec 2026-10-09) or 'instant' (default here; the service passes AI_VOICE_BARGE_IN). */
+  bargeIn?: BargeInMode;
+  /** Session transcriber (default LEGACY_TRANSCRIBE_MODEL; the service passes AI_VOICE_TRANSCRIBE_MODEL). */
+  transcribeModel?: string;
   maxCallMs: number;
   now?: () => number;
   setTimer?: SetTimer;
@@ -87,6 +95,7 @@ export class AiCallBridge {
   private readonly setTimer: SetTimer;
   private readonly clearTimer: ClearTimer;
   private readonly playback: PlaybackTracker;
+  private readonly bargeIn: BargeInMode;
   private readonly outbox: Outbox;
   private started = false;
   private sessionReady = false;
@@ -117,6 +126,7 @@ export class AiCallBridge {
     this.now = opts.now ?? (() => Date.now());
     this.setTimer = opts.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
     this.clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h));
+    this.bargeIn = opts.bargeIn ?? 'instant';
     this.playback = new PlaybackTracker({ setTimer: this.setTimer, clearTimer: this.clearTimer });
     this.outbox = new Outbox(() =>
       hooks.log.warn({ queued: 'full' }, 'ai-voice bridge: openai outbox full, dropping oldest caller audio'),
@@ -138,7 +148,11 @@ export class AiCallBridge {
   start(): void {
     if (this.started || this.stopped) return;
     this.started = true;
-    this.outbox.prepend(JSON.stringify(sessionUpdate(this.opts)));
+    this.outbox.prepend(
+      JSON.stringify(
+        sessionUpdate({ ...this.opts, bargeIn: this.bargeIn, transcribeModel: this.opts.transcribeModel ?? LEGACY_TRANSCRIBE_MODEL }),
+      ),
+    );
     this.maxTimer = this.setTimer(() => this.endWithBackstop('max_duration'), this.opts.maxCallMs);
     this.armReadyTimer();
     this.flush();

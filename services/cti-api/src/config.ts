@@ -210,6 +210,14 @@ const schema = z.object({
   AI_VOICE_REASONING: z.enum(['minimal', 'low', 'medium', 'high']).default('low'),
   AI_VOICE_VAD_EAGERNESS: z.enum(['low', 'medium', 'high', 'auto']).default('auto'),
   AI_VOICE_VOICE: z.string().default('marin'),
+  /**
+   * Barge-in (spec 2026-10-09): `gate` = the bridge keeps the agent talking through "mm-hmm"
+   * and stops it on a real interruption, from the caller's streamed words; `instant` = the
+   * pre-2026-10-09 behaviour (OpenAI stops the agent on any caller sound). Rollback switch.
+   */
+  AI_VOICE_BARGE_IN: z.enum(['gate', 'instant']).default('gate'),
+  /** The Realtime session transcriber; the gate needs one that streams words while the caller talks. */
+  AI_VOICE_TRANSCRIBE_MODEL: z.string().default('gpt-live-transcribe'),
   AI_VOICE_AGENT_NAME: z.string().default('Alex'),
   /**
    * Comma-separated numbers an admin may AI-call without Salesforce consent and

@@ -126,6 +126,7 @@ describe('AI voice config', () => {
   const KEYS = [
     'OPENAI_API_KEY', 'AI_VOICE', 'AI_VOICE_MODEL', 'AI_VOICE_REASONING',
     'AI_VOICE_VAD_EAGERNESS', 'AI_VOICE_VOICE', 'AI_VOICE_AGENT_NAME',
+    'AI_VOICE_BARGE_IN', 'AI_VOICE_TRANSCRIBE_MODEL',
     'AI_VOICE_TEST_NUMBERS', 'AI_VOICE_MAX_CALL_SECONDS', 'ANTHROPIC_API_KEY',
     'AI_SUMMARY_MODEL', 'OUTREACH_KILL_SWITCH',
   ];
@@ -141,6 +142,8 @@ describe('AI voice config', () => {
     expect(cfg.AI_VOICE_VAD_EAGERNESS).toBe('auto');
     expect(cfg.AI_VOICE_VOICE).toBe('marin');
     expect(cfg.AI_VOICE_AGENT_NAME).toBe('Alex');
+    expect(cfg.AI_VOICE_BARGE_IN).toBe('gate');
+    expect(cfg.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-live-transcribe');
     expect(cfg.AI_VOICE_TEST_NUMBERS).toBeUndefined();
     expect(cfg.AI_VOICE_MAX_CALL_SECONDS).toBe(600);
     expect(cfg.ANTHROPIC_API_KEY).toBeUndefined();
@@ -159,11 +162,14 @@ describe('AI voice config', () => {
   it('accepts overrides', async () => {
     const cfg = await loadWith({
       AI_VOICE: 'off', AI_VOICE_REASONING: 'high', AI_VOICE_VAD_EAGERNESS: 'low',
+      AI_VOICE_BARGE_IN: 'instant', AI_VOICE_TRANSCRIBE_MODEL: 'gpt-4o-mini-transcribe',
       AI_VOICE_MAX_CALL_SECONDS: '120', OUTREACH_KILL_SWITCH: 'on',
     });
     expect(cfg.AI_VOICE).toBe('off');
     expect(cfg.AI_VOICE_REASONING).toBe('high');
     expect(cfg.AI_VOICE_VAD_EAGERNESS).toBe('low');
+    expect(cfg.AI_VOICE_BARGE_IN).toBe('instant');
+    expect(cfg.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-4o-mini-transcribe');
     expect(cfg.AI_VOICE_MAX_CALL_SECONDS).toBe(120);
     expect(cfg.OUTREACH_KILL_SWITCH).toBe('on');
   });
@@ -172,6 +178,7 @@ describe('AI voice config', () => {
     await expect(loadWith({ AI_VOICE: 'false' })).rejects.toThrow(/AI_VOICE/);
     await expect(loadWith({ OUTREACH_KILL_SWITCH: '1' })).rejects.toThrow(/OUTREACH_KILL_SWITCH/);
     await expect(loadWith({ AI_VOICE_REASONING: 'extreme' })).rejects.toThrow(/AI_VOICE_REASONING/);
+    await expect(loadWith({ AI_VOICE_BARGE_IN: 'sometimes' })).rejects.toThrow(/AI_VOICE_BARGE_IN/);
   });
 
   it('rejects a non-positive max call length', async () => {
