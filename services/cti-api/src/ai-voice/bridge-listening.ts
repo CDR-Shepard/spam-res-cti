@@ -19,6 +19,14 @@ const PHRASES: ReadonlyArray<readonly [RegExp, string]> = [
   [/\ball right\b/g, 'alright'],
   [/\bmakes sense\b/g, 'makessense'],
   [/\bfor sure\b/g, 'forsure'],
+  [/\bof course\b(?! not\b)/g, 'ofcourse'], // "of course not" stays two real words
+  [/\bsounds good\b/g, 'soundsgood'],
+  [/\bgo ahead\b/g, 'goahead'],
+  [/\bgo on\b/g, 'goon'],
+  [/\bi know\b/g, 'iknow'],
+  [/\bfair enough\b/g, 'fairenough'],
+  // Folded before the stop-cue check, so "no problem" is not the stop cue "no".
+  [/\bno problem\b/g, 'noproblem'],
 ];
 
 /** "I'm listening", not "my turn" — never stop the agent on these alone. */
@@ -26,6 +34,7 @@ const LISTENING: ReadonlySet<string> = new Set([
   'mmhmm', 'uhhuh', 'hmm', 'mm', 'um', 'uh', 'yeah', 'yea', 'ya', 'yep', 'yup', 'yes', 'ok', 'okay',
   'right', 'sure', 'alright', 'gotit', 'gotcha', 'isee', 'oh', 'ah', 'wow', 'cool', 'nice', 'great',
   'true', 'totally', 'exactly', 'really', 'interesting', 'makessense', 'forsure', 'hello',
+  'ofcourse', 'soundsgood', 'goahead', 'goon', 'iknow', 'fairenough', 'noproblem',
 ]);
 
 /** Stretched or doubled fillers: mmm, hm, hmmm, umm, uhh, uhm, ohh, ahh, eh, ehh, erm. */

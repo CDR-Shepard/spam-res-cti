@@ -71,3 +71,35 @@ describe('overlapVerdict', () => {
     expect(overlapVerdict(text)).toBe(verdict);
   });
 });
+
+describe('backchannel phrases (final review F6)', () => {
+  it('folds them into one token each; "go on" only as whole words', () => {
+    expect(words('Of course. Sounds good, go ahead — go on, I know, fair enough, no problem')).toEqual([
+      'ofcourse', 'soundsgood', 'goahead', 'goon', 'iknow', 'fairenough', 'noproblem',
+    ]);
+    expect(words('go onto')).toEqual(['go', 'onto']);
+  });
+
+  it.each([
+    ['Of course', 'listening'],
+    ['Sounds good', 'listening'],
+    ['Go ahead', 'listening'],
+    ['Go on', 'listening'],
+    ['I know', 'listening'],
+    ['Fair enough', 'listening'],
+    ['No problem', 'listening'],
+    ['Yeah, of course.', 'listening'],
+    ['Okay, sounds good.', 'listening'],
+    ['No problem, go ahead.', 'listening'],
+    // "no problem" never trips the stop cue "no"; the stop cues and real words around them still interrupt.
+    ['No', 'interrupt'],
+    ['No wait', 'interrupt'],
+    ['No, no problem', 'interrupt'],
+    ['No problems', 'interrupt'],
+    ['Go away', 'interrupt'],
+    ['I know what you mean', 'interrupt'],
+    ['Of course not', 'interrupt'],
+  ] as const)('%j → %s', (text, verdict) => {
+    expect(overlapVerdict(text)).toBe(verdict);
+  });
+});
