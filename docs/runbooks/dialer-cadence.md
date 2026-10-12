@@ -41,6 +41,7 @@ Counsel to confirm whether FL §501.059's limit is per person; if so, the firewa
 | `daily_cap` | daily limit (state law) | 3 dials in 24 h in a capped state |
 | `daily_cap_unverified` | daily limit (state law) | The history read failed in a capped state, so it fails closed |
 | `in_progress_elsewhere` | in progress in another run | Another active or paused run is dialing or talking to this person |
+| `undialable` | Skipped | Twilio refused the number at dial time (21211/21214/21215/21216/21217): invalid, unreachable, or a country our geo permissions don't cover (Mexico is off). The phone never rang, so it is not a dial for anything. Before 2026-10-12 this killed the run, and every Start after it, because the row went back to `pending` at the head of the list. Refusals about OUR caller ID (21210/21212) still stop the run, because they would refuse everyone. So does a 5th refused +1 number in one advance (US off, or a format bug); refused non-+1 numbers never count toward that. |
 | `canceled` | not counted — the person is counted once, on the requeued copy | The rep took a callback (Pause & answer) while this record was ringing. The call was hung up and the person requeued at the same ordinal with a 5-min floor. Not a dial for the follow-up rollover. The phone rang, so it still counts for the per-customer ceiling, the 3 h courtesy, and the state-law cap. |
 
 ## Callbacks during a run
