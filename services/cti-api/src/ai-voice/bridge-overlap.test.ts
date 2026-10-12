@@ -10,8 +10,9 @@ afterEach(() => {
 
 function gate() {
   const onInterrupt = vi.fn();
-  const g = new OverlapGate({ setTimer: (cb, ms) => setTimeout(cb, ms), clearTimer: (h) => clearTimeout(h), onInterrupt });
-  return { g, onInterrupt };
+  const onListening = vi.fn();
+  const g = new OverlapGate({ setTimer: (cb, ms) => setTimeout(cb, ms), clearTimer: (h) => clearTimeout(h), onInterrupt, onListening });
+  return { g, onInterrupt, onListening };
 }
 
 describe('OverlapGate', () => {
@@ -204,5 +205,84 @@ describe('OverlapGate', () => {
     g.close();
     expect(g.has('c1')).toBe(false);
     expect(g.finish('c1', 'Wait')).toBe('ignore');
+  });
+});
+
+describe('OverlapGate — the caller is still talking when the agent finishes (final review F5)', () => {
+  it('a listening sound still going when the agent finishes is their answer', () => {
+    const { g } = gate();
+    g.open('c1', { cuttable: true, late: false }); // began 2.5 s before the end
+    g.onDelta('c1', ' Yeah');
+    g.onAgentFinished();
+    g.onSpeechStopped('c1');
+    expect(g.finish('c1', 'Yeah.')).toBe('answer');
+  });
+
+  it('a listening sound that stopped before the agent finished stays ignored, even if judged after', () => {
+    const { g } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    g.onSpeechStopped('c1');
+    g.onAgentFinished();
+    expect(g.finish('c1', 'Mm-hmm.')).toBe('ignore');
+  });
+
+  it('a cough still going when the agent finishes is still ignored', () => {
+    const { g } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    g.onAgentFinished();
+    g.onSpeechStopped('c1');
+    expect(g.finish('c1', '')).toBe('ignore');
+  });
+
+  it('an interruption still going when the agent finishes is judged as before', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    g.onAgentFinished();
+    expect(g.finish('c1', 'Who is this?')).toBe('interrupted');
+    expect(onInterrupt).toHaveBeenCalledWith('words', 'c1');
+  });
+
+  it('over the opener: a listening sound still going when it finishes is the answer; a real one is answered as before', () => {
+    const { g, onInterrupt } = gate();
+    g.open('c1', { cuttable: false, late: false });
+    g.onAgentFinished();
+    expect(g.finish('c1', 'Hello?')).toBe('answer');
+    g.open('c2', { cuttable: false, late: false });
+    g.onAgentFinished();
+    expect(g.finish('c2', 'Wait, who is this?')).toBe('answer');
+    expect(onInterrupt).not.toHaveBeenCalled();
+  });
+
+  it('does nothing with no overlap open', () => {
+    const { g } = gate();
+    g.onAgentFinished();
+    expect(g.idle).toBe(true);
+  });
+});
+
+describe('OverlapGate — listening sounds are reported only with words (final review F7)', () => {
+  it('reports an ignored overlap as a listening sound only when it had a word', () => {
+    const { g, onListening } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    expect(g.finish('c1', 'Mm-hmm.')).toBe('ignore');
+    expect(onListening).toHaveBeenCalledTimes(1);
+    expect(onListening).toHaveBeenCalledWith('c1');
+    g.open('c2', { cuttable: true, late: false });
+    expect(g.finish('c2', '')).toBe('ignore'); // a cough or a failed transcription
+    g.open('c3', { cuttable: true, late: true });
+    expect(g.finish('c3', '')).toBe('ignore'); // a cough near the end
+    g.open('c4', { cuttable: true, late: true });
+    expect(g.finish('c4', 'Yeah, sure.')).toBe('answer');
+    g.open('c5', { cuttable: true, late: false });
+    expect(g.finish('c5', 'Who is this?')).toBe('interrupted');
+    expect(onListening).toHaveBeenCalledTimes(1);
+  });
+
+  it('a blank final transcript after streamed words still counts the words', () => {
+    const { g, onListening } = gate();
+    g.open('c1', { cuttable: true, late: false });
+    g.onDelta('c1', ' Okay');
+    expect(g.finish('c1', '  ')).toBe('ignore');
+    expect(onListening).toHaveBeenCalledWith('c1');
   });
 });

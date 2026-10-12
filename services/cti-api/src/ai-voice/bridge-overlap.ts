@@ -3,6 +3,7 @@
  * keeps the agent talking through listening sounds ("mm-hmm", "yeah") and cuts it on a real
  * interruption: a stop word, two real words, or 3 s of talk with no word transcribed
  * (NO_WORDS_INTERRUPT_MS: a transcriber hiccup, another language). The opener is uncuttable (disclosure).
+ * A listening sound near the end of the agent's turn, or still going when the agent finishes, is the answer.
  * New speech pushes an undecided overlap aside; it is still judged by its words, and a cut settles all.
  * Spec: docs/superpowers/specs/2026-10-09-ai-voice-natural-turn-taking-design.md §4.1.
  */
@@ -24,8 +25,10 @@ interface Overlap {
   readonly text: string;
   /** May the gate cut the agent? False over the opener (the disclosure line). */
   readonly cuttable: boolean;
-  /** Began near the end of the agent's turn ("…got a quick minute?" / "yeah sure"). */
+  /** Began near the end of the agent's turn ("…got a quick minute?" / "yeah sure"), or outlasted it. */
   readonly late: boolean;
+  /** The caller stopped talking (`speech_stopped`). */
+  readonly stopped: boolean;
 }
 
 export interface OverlapGateDeps {
@@ -33,6 +36,8 @@ export interface OverlapGateDeps {
   clearTimer: ClearTimer;
   /** Cut the agent now; `itemId` is the interrupted caller item. */
   onInterrupt(why: InterruptWhy, itemId: string): void;
+  /** An overlap was settled as a listening sound with words ("mm-hmm"); a wordless one (a cough) is not. */
+  onListening(itemId: string): void;
 }
 
 export class OverlapGate {
@@ -61,7 +66,7 @@ export class OverlapGate {
   open(itemId: string, opts: { cuttable: boolean; late: boolean }): void {
     this.clearNoWordsTimer();
     if (this.current !== null) this.displaced = [...this.displaced, this.current];
-    this.current = { itemId, text: '', cuttable: opts.cuttable, late: opts.late };
+    this.current = { itemId, text: '', cuttable: opts.cuttable, late: opts.late, stopped: false };
     if (opts.cuttable) this.timer = this.deps.setTimer(() => this.interrupt('no words', itemId), NO_WORDS_INTERRUPT_MS);
   }
 
@@ -87,10 +92,11 @@ export class OverlapGate {
       return 'interrupted';
     }
     this.drop(o);
-    // A wordless sound (a cough) is never an answer, late or not.
+    // A wordless sound (a cough) is never an answer, late or not — nor a listening sound.
     if (verdict === 'empty') return 'ignore';
-    if (verdict === 'interrupt') return 'answer';
-    return o.late ? 'answer' : 'ignore';
+    if (verdict === 'interrupt' || o.late) return 'answer';
+    this.deps.onListening(itemId);
+    return 'ignore';
   }
 
   close(): void {
@@ -101,7 +107,16 @@ export class OverlapGate {
 
   /** The caller stopped talking: a sound shorter than the no-words timer is settled by its transcript. */
   onSpeechStopped(itemId: string): void {
-    if (this.current?.itemId === itemId) this.clearNoWordsTimer();
+    const o = this.find(itemId);
+    if (o === null) return;
+    if (o === this.current) this.clearNoWordsTimer();
+    this.replace(o, { ...o, stopped: true });
+  }
+
+  /** The agent's audio finished playing: a caller still talking over its end is answering it — a late overlap. */
+  onAgentFinished(): void {
+    if (this.current === null || this.current.stopped) return;
+    this.current = { ...this.current, late: true };
   }
 
   /** A cut settles every overlap: the agent is no longer talking over anyone. */

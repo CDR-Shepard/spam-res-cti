@@ -949,6 +949,160 @@ describe('barge-in gate', () => {
       { type: 'response.create', event_id: 'ai-create-2' },
     ]);
   });
+
+  // ── final review F2: a failed caller transcription is logged (code and type only) ──
+
+  it('F2: a failed transcription of an overlap is logged once with its code and type, no text, and settled as ignored', () => {
+    const { twilio, openai, hooks } = talking();
+    started(openai);
+    stopped(openai);
+    committed(openai);
+    openai.msg({
+      type: 'conversation.item.input_audio_transcription.failed',
+      item_id: 'c1',
+      content_index: 0,
+      error: { type: 'transcription_error', code: 'audio_unintelligible', message: 'Could not transcribe "SECRET WORDS"', param: null },
+    });
+    expect(hooks.log.warn).toHaveBeenCalledTimes(1);
+    expect(hooks.log.warn).toHaveBeenCalledWith(
+      { code: 'audio_unintelligible', errorType: 'transcription_error' },
+      'ai-voice bridge: caller transcription failed',
+    );
+    const logged = JSON.stringify([hooks.log.info.mock.calls, hooks.log.warn.mock.calls, hooks.log.error.mock.calls]);
+    expect(logged).not.toContain('SECRET');
+    expect(hooks.onTranscript).not.toHaveBeenCalled();
+    expect(twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+    expect(openai.sent).toEqual([]);
+  });
+
+  // ── final review F4: a follow-up response queued behind the first ──
+
+  /** item_1 (3 s from 1000 ms) + save_qualification; the follow-up item_2 (2 s) is forwarded at 1500 while item_1 plays. */
+  async function followUpQueued() {
+    const s = talking();
+    s.openai.msg({ type: 'response.output_audio.done' });
+    s.openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('save_qualification', '{"field":"timeline","value":"soon"}', 'f1')] } });
+    await flush(); // the batch asks for the follow-up while item_1 still plays
+    expect(creates(s.openai)).toEqual([CREATE]);
+    talk(s.openai, 'item_2', 2000); // plays after item_1: 4000–6000
+    s.openai.msg({ type: 'response.output_audio.done' });
+    s.openai.msg(doneEmpty);
+    s.openai.clearSent();
+    return s;
+  }
+
+  it('F4 (probe P1): a "mm-hmm" with 3 s of queued audio left (1 s of the first + the follow-up) is not answered', async () => {
+    const { twilio, openai } = await followUpQueued();
+    twilio.msg(media(3000));
+    started(openai);
+    delta(openai, ' Mm-hmm');
+    stopped(openai);
+    committed(openai);
+    completed(openai, 'Mm-hmm.');
+    playAll(twilio);
+    expect(creates(openai)).toEqual([]);
+  });
+
+  it('F4: a "yeah sure" in the follow-up\'s last 1.5 s is still late: answered once it has played', async () => {
+    const { twilio, openai } = await followUpQueued();
+    twilio.msg(media(4800)); // 1.2 s of item_2 left
+    started(openai);
+    delta(openai, ' Yeah sure');
+    stopped(openai);
+    committed(openai);
+    completed(openai, 'Yeah, sure.');
+    expect(creates(openai)).toEqual([]);
+    playAll(twilio);
+    expect(creates(openai)).toEqual([CREATE]);
+  });
+
+  // ── final review F5: a caller still talking when the agent finishes is answering it ──
+
+  it('F5a: a "yeah" that starts 2.5 s before the end and is still going when the agent finishes is answered once', async () => {
+    const { twilio, openai } = talking(); // 2.5 s of item_1 left once it has all streamed
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg(doneEmpty);
+    started(openai);
+    delta(openai, ' Yeah');
+    playAll(twilio); // the agent finishes while they are still talking
+    expect(creates(openai)).toEqual([]);
+    stopped(openai);
+    committed(openai);
+    delta(openai, ', sure');
+    completed(openai, 'Yeah, sure.');
+    expect(creates(openai)).toEqual([CREATE]);
+    openai.msg({ type: 'response.created' });
+    openai.msg(doneEmpty);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(creates(openai)).toEqual([CREATE]);
+  });
+
+  it('F5b: a "mm-hmm" that stopped mid-sentence is ignored, even when its verdict lands after the agent finished', async () => {
+    const { twilio, openai } = talking();
+    started(openai);
+    delta(openai, ' Mm-hmm');
+    stopped(openai);
+    committed(openai);
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg(doneEmpty);
+    playAll(twilio);
+    completed(openai, 'Mm-hmm.');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(openai.sent).toEqual([]);
+  });
+
+  it('F5c: a cough still going when the agent finishes is ignored', async () => {
+    const { twilio, openai } = talking();
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg(doneEmpty);
+    started(openai);
+    playAll(twilio);
+    await vi.advanceTimersByTimeAsync(600);
+    stopped(openai);
+    committed(openai);
+    completed(openai, '');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(openai.sent).toEqual([]);
+    expect(twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+  });
+
+  it('F5d: a late "yeah sure" (last 1.5 s) still going when the agent finishes gets one answer', async () => {
+    const { twilio, openai } = talking();
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg(doneEmpty);
+    twilio.msg(media(3000)); // 1 s of item_1 left: late by the 1.5 s rule too
+    started(openai);
+    delta(openai, ' Yeah sure');
+    playAll(twilio);
+    stopped(openai);
+    committed(openai);
+    completed(openai, 'Yeah, sure.');
+    expect(creates(openai)).toEqual([CREATE]);
+    openai.msg({ type: 'response.created' });
+    openai.msg(doneEmpty);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(creates(openai)).toEqual([CREATE]);
+  });
+
+  it('F5e: a "hello?" still going when the opener finishes is the answer; the opener is never cut', () => {
+    const { twilio, openai, bridge } = setup({ bargeIn: 'gate' });
+    bridge.start();
+    openai.msg(READY);
+    twilio.msg(media(100));
+    talk(openai, 'item_0', 4000);
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg(doneEmpty);
+    twilio.clearSent();
+    openai.clearSent();
+    started(openai);
+    delta(openai, ' Hello?');
+    playAll(twilio);
+    expect(twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+    stopped(openai);
+    committed(openai);
+    completed(openai, 'Hello?');
+    expect(openai.sent).toEqual([CREATE]);
+  });
 });
 
 describe('instant mode keeps its pre-gate frames', () => {
@@ -1259,6 +1413,27 @@ describe('turn stats', () => {
     s.openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('save_qualification', '{"field":"timeline","value":"soon"}', 'f1')] } });
     await flush();
     agentSays(s.openai, 'item_2'); // the agent carries on after its tool
+    s.bridge.stop();
+    expect(statsOf(s.onStats)).toMatchObject({ turns: 0, listening: 1, interruptions: 0 });
+  });
+
+  it('a cough or a failed transcription over the agent is not counted as a listening sound (F7)', async () => {
+    const s = withStats();
+    await openerPlayed(s);
+    s.twilio.msg(media(1000));
+    agentSays(s.openai, 'item_1', 5000);
+    startedAt(s.openai, 'c1', 900);
+    stoppedAt(s.openai, 'c1', 1300);
+    s.openai.msg({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'c1', content_index: 0, transcript: '' });
+    startedAt(s.openai, 'c2', 1500);
+    stoppedAt(s.openai, 'c2', 1800);
+    s.openai.msg({
+      type: 'conversation.item.input_audio_transcription.failed', item_id: 'c2', content_index: 0,
+      error: { type: 'transcription_error', code: 'audio_unintelligible', message: 'could not transcribe' },
+    });
+    startedAt(s.openai, 'c3', 2000);
+    stoppedAt(s.openai, 'c3', 2300);
+    said(s.openai, 'c3', 'Mm-hmm.');
     s.bridge.stop();
     expect(statsOf(s.onStats)).toMatchObject({ turns: 0, listening: 1, interruptions: 0 });
   });

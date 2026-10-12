@@ -9,6 +9,11 @@
  *   once the audio before it has played, which shrinks the queue;
  * - on barge-in, played = clock − start, clamped to [0, audio generated].
  *
+ * The audio left to play (for "late" overlaps) uses a separate estimate of when
+ * the item starts playing: an item forwarded while an earlier one is still queued
+ * starts once that one ends, not when it was forwarded. The truncate offset keeps
+ * the forwarding time.
+ *
  * It also lets the service wait for the agent's last words to finish before
  * hanging up or redirecting the call.
  */
@@ -39,6 +44,8 @@ interface DrainWaiter {
 export class PlaybackTracker {
   private latestMediaMs = 0;
   private itemStartMs = 0;
+  /** When the current item is estimated to start playing: after any item still queued ahead of it. */
+  private playStartMs = 0;
   private itemId: string | null = null;
   private generatedBytes = 0;
   private marks: string[] = [];
@@ -70,8 +77,7 @@ export class PlaybackTracker {
   remainingMs(): number {
     if (this.streaming) return Number.POSITIVE_INFINITY;
     if (!this.playing) return 0;
-    const generatedMs = Math.floor(this.generatedBytes / PCMU_BYTES_PER_MS);
-    return Math.max(0, generatedMs - (this.latestMediaMs - this.itemStartMs));
+    return Math.max(0, this.generatedMs() - (this.latestMediaMs - this.playStartMs));
   }
 
   /** An inbound Twilio media frame's `timestamp` (ms since stream start). */
@@ -82,8 +88,11 @@ export class PlaybackTracker {
   /** An agent audio chunk is being forwarded; returns the mark name to send right after it. */
   onAudioDelta(itemId: string, payload: string): string {
     if (itemId !== this.itemId) {
+      // Still queued ahead of it: the previous item, from its own estimated start.
+      const queuedEndMs = this.playing ? this.playStartMs + this.generatedMs() : 0;
       this.itemId = itemId;
       this.itemStartMs = this.latestMediaMs;
+      this.playStartMs = Math.max(this.latestMediaMs, queuedEndMs);
       this.generatedBytes = 0;
     }
     this.generatedBytes += base64Bytes(payload);
@@ -120,10 +129,7 @@ export class PlaybackTracker {
       this.playing && this.itemId !== null
         ? {
             itemId: this.itemId,
-            audioEndMs: Math.max(
-              0,
-              Math.min(this.latestMediaMs - this.itemStartMs, Math.floor(this.generatedBytes / PCMU_BYTES_PER_MS)),
-            ),
+            audioEndMs: Math.max(0, Math.min(this.latestMediaMs - this.itemStartMs, this.generatedMs())),
           }
         : null;
     this.reset();
@@ -135,6 +141,7 @@ export class PlaybackTracker {
     this.marks = [];
     this.itemId = null;
     this.itemStartMs = 0;
+    this.playStartMs = 0;
     this.generatedBytes = 0;
     this.streaming = false;
     this.settle(false);
@@ -155,6 +162,11 @@ export class PlaybackTracker {
   /** Resolve every pending waiter now (the bridge is shutting down). */
   releaseAll(): void {
     for (const w of this.waiters) this.release(w);
+  }
+
+  /** Audio generated for the current item so far, in ms. */
+  private generatedMs(): number {
+    return Math.floor(this.generatedBytes / PCMU_BYTES_PER_MS);
   }
 
   private drained(): boolean {

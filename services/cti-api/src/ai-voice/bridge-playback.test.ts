@@ -189,3 +189,61 @@ describe('drained listener, current item and audio left', () => {
     expect(p.remainingMs()).toBe(Number.POSITIVE_INFINITY);
   });
 });
+
+describe('audio left when a second item queues behind the first (final review F4)', () => {
+  const b64 = (ms: number) => Buffer.alloc(ms * 8).toString('base64');
+
+  it('counts the first item still playing: the next one starts when the first ends, not when it was forwarded', () => {
+    const p = new PlaybackTracker();
+    p.onInboundMedia(1000);
+    p.onAudioDelta('item_a', b64(3000)); // plays 1000–4000
+    p.onAudioDone();
+    p.onInboundMedia(1200);
+    p.onAudioDelta('item_b', b64(2000)); // forwarded at 1200, plays 4000–6000
+    p.onAudioDone();
+    p.onInboundMedia(3000);
+    expect(p.remainingMs()).toBe(3000);
+    p.onInboundMedia(4800);
+    expect(p.remainingMs()).toBe(1200);
+    p.onInboundMedia(7000);
+    expect(p.remainingMs()).toBe(0);
+  });
+
+  it('chains a third queued item, and starts fresh once everything has played', () => {
+    const p = new PlaybackTracker();
+    p.onInboundMedia(1000);
+    p.onAudioDelta('item_a', b64(1000)); // 1000–2000
+    p.onAudioDelta('item_b', b64(1000)); // 2000–3000
+    const m = p.onAudioDelta('item_c', b64(1000)); // 3000–4000
+    p.onAudioDone();
+    p.onInboundMedia(1500);
+    expect(p.remainingMs()).toBe(2500);
+    p.onMark(m); // all played (early echo)
+    p.onInboundMedia(5000);
+    p.onAudioDelta('item_d', b64(1000)); // nothing queued: plays from now
+    p.onAudioDone();
+    p.onInboundMedia(5400);
+    expect(p.remainingMs()).toBe(600);
+  });
+
+  it('a queued item never starts before it was forwarded', () => {
+    const p = new PlaybackTracker();
+    p.onInboundMedia(1000);
+    p.onAudioDelta('item_a', b64(200)); // 1000–1200, its marks not echoed yet
+    p.onInboundMedia(2000);
+    p.onAudioDelta('item_b', b64(1000)); // forwarded at 2000: plays 2000–3000
+    p.onAudioDone();
+    p.onInboundMedia(2500);
+    expect(p.remainingMs()).toBe(500);
+  });
+
+  it('leaves the truncate offset as before: from when the item was forwarded', () => {
+    const p = new PlaybackTracker();
+    p.onInboundMedia(1000);
+    p.onAudioDelta('item_a', b64(3000));
+    p.onInboundMedia(1200);
+    p.onAudioDelta('item_b', b64(2000));
+    p.onInboundMedia(2000);
+    expect(p.interrupt()).toEqual({ itemId: 'item_b', audioEndMs: 800 });
+  });
+});

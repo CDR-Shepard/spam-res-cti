@@ -16,7 +16,7 @@
  * `hooks.onTool`. OpenAI messages queue (bounded) until started and open, so
  * `session.update` always goes first. Audio payloads are never logged.
  *
- * In `instant` barge-in mode (the default) OpenAI's VAD answers each caller turn
+ * In `instant` barge-in mode (the BridgeOptions default; the service default is `gate`) OpenAI's VAD answers each caller turn
  * and any caller sound cuts the agent. In `gate` mode the bridge owns the turns:
  * it answers each committed caller turn with one `response.create` at a time (never
  * over a caller mid-utterance), keeps talking through listening sounds and cuts the agent (never the opener)
@@ -183,6 +183,7 @@ export class AiCallBridge {
       setTimer: this.setTimer,
       clearTimer: this.clearTimer,
       onInterrupt: (why) => this.interruptAgent(why),
+      onListening: () => this.stats.listeningSound(), // only with words: a cough is not a "mm-hmm"
     });
     this.silenceCheck = new SilenceCheck({
       setTimer: this.setTimer,
@@ -303,7 +304,7 @@ export class AiCallBridge {
         this.transcript('caller', msg.transcript);
         return this.onCallerFinal(str(msg.item_id), str(msg.transcript));
       case 'conversation.item.input_audio_transcription.failed':
-        return this.onCallerFinal(str(msg.item_id), '');
+        return this.onTranscriptionFailed(str(msg.item_id), obj(msg.error));
       case 'response.done':
         return this.onResponseDone(obj(msg.response));
       case 'error':
@@ -413,6 +414,13 @@ export class AiCallBridge {
     this.requestResponse();
   }
 
+  /** The gate depends on transcription: log a failure (its code only — never text or audio); the overlap has no words. */
+  private onTranscriptionFailed(itemId: string, error: Msg): void {
+    const { code, errorType } = openAiErrorFields(error);
+    this.hooks.log.warn({ code, errorType }, 'ai-voice bridge: caller transcription failed');
+    this.onCallerFinal(itemId, '');
+  }
+
   /** The final transcript (or a failed one) of an overlap being judged. */
   private onCallerFinal(itemId: string, text: string): void {
     if (this.bargeIn !== 'gate' || !this.gate.has(itemId)) return;
@@ -421,7 +429,6 @@ export class AiCallBridge {
     if (end === 'interrupted') return; // answered by interruptAgent
     if (end === 'ignore') {
       this.stats.overlapIgnored(itemId);
-      this.stats.listeningSound();
       return this.afterResponse(); // release an answer it held back
     }
     // Audio still queued: answer when it drains. Otherwise requestResponse waits for any active response's done.
@@ -509,6 +516,7 @@ export class AiCallBridge {
   private onAgentFinished(): void {
     this.stats.agentFinished(this.now());
     if (this.ended || this.closing) return;
+    this.gate.onAgentFinished(); // a caller still talking over the end is answering it (spec §4.1)
     if (!this.answerAfterPlayback) return this.onAgentWaiting();
     this.answerAfterPlayback = false;
     this.requestResponse();
