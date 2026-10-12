@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import type { TranscriptLine } from '@cti/contracts';
+import { turnStatsWords } from '@/lib/call-words';
 import { getAiCallTranscript, outreachKeys } from '@/lib/outreach-api';
 import { errorText } from '@/lib/outreach-words';
 
@@ -11,7 +12,8 @@ export function AiCallTranscriptPanel({ aiCallId }: { aiCallId: string }) {
   if (transcript.isPending) return <p className="text-sm text-muted-foreground">Loading the transcript…</p>;
   if (transcript.error) return <p role="alert" className="text-sm text-destructive">{errorText(transcript.error)}</p>;
   if (transcript.data.lines.length === 0) return <p className="text-sm text-muted-foreground">No transcript was recorded for this call.</p>;
-  return (
+  const statsLine = turnStatsWords(transcript.data.turnStats);
+  const lines = (
     <ol className="space-y-1.5 rounded-lg bg-muted/60 p-3 text-sm leading-6">
       {transcript.data.lines.map((line, i) => (
         // Lines can repeat word for word ("Yes."), so the index is the key.
@@ -21,5 +23,12 @@ export function AiCallTranscriptPanel({ aiCallId }: { aiCallId: string }) {
         </li>
       ))}
     </ol>
+  );
+  if (statsLine === null) return lines;
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-muted-foreground">{statsLine}</p>
+      {lines}
+    </div>
   );
 }

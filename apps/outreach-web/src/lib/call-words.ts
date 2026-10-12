@@ -1,5 +1,5 @@
 import { humanize, wordFor } from './outreach-words';
-import type { AiCallBlockReason, AiCallFailReason, AiCallOutcome, AiCallStatus, AiConsentStatus, CallGoalKey, CallStage, EvidenceSource, PreferredWindow, QualificationTopic, ResearchSource, ResearchSourceStatus, ResearchSourceSummary, SellingSignal } from '@cti/contracts';
+import type { AiCallBlockReason, AiCallFailReason, AiCallOutcome, AiCallStatus, AiCallTurnStats, AiConsentStatus, CallGoalKey, CallStage, EvidenceSource, PreferredWindow, QualificationTopic, ResearchSource, ResearchSourceStatus, ResearchSourceSummary, SellingSignal } from '@cti/contracts';
 
 export const CALL_STAGE_WORDS: Record<CallStage, string> = {
   research: 'researching',
@@ -219,4 +219,21 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** The campaign page's search: `?call=<AI call id>` (the Chatter post's "Call details" link) opens that call on the results. */
 export function callSearch(search: Record<string, unknown>): { call?: string } {
   return typeof search.call === 'string' && UUID.test(search.call) ? { call: search.call } : {};
+}
+
+const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
+const count = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+
+/** One line above a call transcript: how fast the AI answered and how it handled overlaps (spec 2026-10-09 §4.3). */
+export function turnStatsWords(stats: AiCallTurnStats | null): string | null {
+  if (stats === null) return null;
+  const parts = [
+    stats.totalMs ? `response time: usually ${seconds(stats.totalMs.p50)} (slowest ${seconds(stats.totalMs.max)})` : null,
+    stats.listening > 0 ? `kept talking through ${count(stats.listening, '"mm-hmm"', '"mm-hmm"s')}` : null,
+    stats.interruptions > 0 ? `stopped for ${count(stats.interruptions, 'interruption', 'interruptions')}` : null,
+    stats.silenceChecks > 0 ? `checked in after silence ${stats.silenceChecks === 1 ? 'once' : `${stats.silenceChecks} times`}` : null,
+  ].filter((p): p is string => p !== null);
+  if (parts.length === 0) return null;
+  const line = parts.join(' · ');
+  return line.charAt(0).toUpperCase() + line.slice(1);
 }

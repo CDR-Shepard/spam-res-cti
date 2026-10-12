@@ -18,6 +18,7 @@ import {
   aiExitWords,
   notCalledWords,
   sourceLine,
+  turnStatsWords,
 } from './call-words';
 
 describe('sourceLine', () => {
@@ -123,5 +124,24 @@ describe('plan 1D words', () => {
     expect(callSearch({ call: 'javascript:alert(1)' })).toEqual({});
     expect(callSearch({ call: 42 })).toEqual({});
     expect(callSearch({})).toEqual({});
+  });
+});
+
+describe('turnStatsWords', () => {
+  const base = { v: 1, bargeIn: 'gate', turns: 4, totalMs: { p50: 1900, p90: 2600, max: 3100 }, endpointMs: { p50: 1100 }, answerMs: { p50: 800 }, interruptions: 1, listening: 4, silenceChecks: 0 } as const;
+
+  it('summarises response time and what the agent did', () => {
+    expect(turnStatsWords(base)).toBe('Response time: usually 1.9 s (slowest 3.1 s) · kept talking through 4 "mm-hmm"s · stopped for 1 interruption');
+  });
+
+  it('handles singulars, silence check-ins and no answered turns', () => {
+    expect(turnStatsWords({ ...base, totalMs: null, endpointMs: null, answerMs: null, turns: 0, listening: 1, interruptions: 2, silenceChecks: 1 }))
+      .toBe('Kept talking through 1 "mm-hmm" · stopped for 2 interruptions · checked in after silence once');
+    expect(turnStatsWords({ ...base, silenceChecks: 2, listening: 0, interruptions: 0 })).toBe('Response time: usually 1.9 s (slowest 3.1 s) · checked in after silence 2 times');
+  });
+
+  it('says nothing for old calls or empty stats', () => {
+    expect(turnStatsWords(null)).toBeNull();
+    expect(turnStatsWords({ ...base, turns: 0, totalMs: null, endpointMs: null, answerMs: null, interruptions: 0, listening: 0 })).toBeNull();
   });
 });
