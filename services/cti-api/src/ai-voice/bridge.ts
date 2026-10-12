@@ -138,6 +138,8 @@ export class AiCallBridge {
   /** A late overlap ("yeah sure" over the end of a question): answer once the agent's audio has played. */
   private answerAfterPlayback = false;
   private callerTalking = false;
+  /** The caller stopped and OpenAI has not committed that item yet: a turn is about to be answered. */
+  private awaitingCommit: string | null = null;
   /** The agent called wait_for_user and nobody has spoken since. */
   private holding = false;
   private agentSpoke = false;
@@ -225,6 +227,7 @@ export class AiCallBridge {
     this.closing = true;
     this.cancelOpener();
     this.gate.close();
+    this.stats.clearOverlaps();
     this.silenceCheck.cancel();
     this.cancelWhenCreated = false;
     this.sendTwilio({ event: 'clear', streamSid: this.opts.streamSid });
@@ -326,7 +329,7 @@ export class AiCallBridge {
     if (!this.rejectsPendingCreate(fields)) return;
     this.responsePending = false;
     this.cancelWhenCreated = false; // it was meant for the rejected create
-    if (this.wantResponse) this.requestResponse();
+    this.afterResponse(); // an answer still owed goes out; otherwise the silence is timed again
   }
 
   /** An error releases our pending create (gate mode only) if it names it; without an event_id, only a "busy" rejection. */
@@ -390,18 +393,23 @@ export class AiCallBridge {
   /** The caller stopped: a turn is timed from here (`audioEndMs` on OpenAI's input audio clock). */
   private onCallerStopped(itemId: string, audioEndMs: number): void {
     this.callerTalking = false;
+    if (itemId) this.awaitingCommit = itemId;
     this.gate.onSpeechStopped(itemId);
-    if (this.gate.has(itemId) || !Number.isFinite(audioEndMs)) return; // an overlap is not a turn (yet)
-    this.stats.callerStopped(this.sentAudioMs - audioEndMs, this.now());
+    if (!Number.isFinite(audioEndMs)) return;
+    // An overlap is not a turn until it is answered (its verdict, or a cut that answers it).
+    if (this.gate.has(itemId)) this.stats.overlapStopped(itemId, this.sentAudioMs - audioEndMs, this.now());
+    else this.stats.callerStopped(this.sentAudioMs - audioEndMs, this.now());
   }
 
   /** Gate mode: a committed caller turn gets an answer — an overlap still being judged waits for its verdict. */
   private onCallerTurn(itemId: string): void {
+    if (this.awaitingCommit === itemId) this.awaitingCommit = null;
     if (this.bargeIn !== 'gate' || this.closing) return;
     if (this.gate.has(itemId)) {
       this.judgedTurns = new Set([...this.judgedTurns, itemId]);
       return;
     }
+    this.stats.overlapsAnswered([itemId]); // an overlap the gate settled before this commit
     this.requestResponse();
   }
 
@@ -412,10 +420,12 @@ export class AiCallBridge {
     this.judgedTurns = new Set([...this.judgedTurns].filter((id) => id !== itemId));
     if (end === 'interrupted') return; // answered by interruptAgent
     if (end === 'ignore') {
+      this.stats.overlapIgnored(itemId);
       this.stats.listeningSound();
       return this.afterResponse(); // release an answer it held back
     }
     // Audio still queued: answer when it drains. Otherwise requestResponse waits for any active response's done.
+    this.stats.overlapsAnswered([itemId], this.playback.playing);
     if (this.playback.playing) this.answerAfterPlayback = true;
     else this.requestResponse();
   }
@@ -446,9 +456,11 @@ export class AiCallBridge {
       this.note('[stopped — they interrupted]');
     }
     // A committed turn among them is over: answer it. Otherwise the speaker's commit will.
-    const owed = this.judgedTurns.size > 0;
+    const owed = [...this.judgedTurns];
     this.judgedTurns = new Set();
-    if (owed) this.requestResponse();
+    if (owed.length === 0) return;
+    this.stats.overlapsAnswered(owed);
+    this.requestResponse();
   }
 
   private get toolsRunning(): boolean {
@@ -495,30 +507,31 @@ export class AiCallBridge {
 
   /** The agent's queued audio finished playing. */
   private onAgentFinished(): void {
+    this.stats.agentFinished(this.now());
     if (this.ended || this.closing) return;
-    if (!this.answerAfterPlayback) return this.armSilenceCheck();
+    if (!this.answerAfterPlayback) return this.onAgentWaiting();
     this.answerAfterPlayback = false;
     this.requestResponse();
   }
 
-  /** Gate mode: nothing is playing, coming, running or being judged — the agent is waiting for the caller. */
+  /** Gate mode: no caller turn, response, tool, playback or verdict is under way — the agent is waiting for the caller. */
   private waiting(): boolean {
-    if (this.bargeIn !== 'gate' || this.ended || this.closing || !this.agentSpoke || this.callerTalking) return false;
+    if (this.bargeIn !== 'gate' || this.ended || this.closing || !this.agentSpoke) return false;
+    if (this.callerTalking || this.awaitingCommit !== null || this.judgedTurns.size > 0 || !this.gate.idle) return false;
     if (this.responsePending || this.responseActive || this.toolsRunning || this.wantResponse || this.answerAfterPlayback) return false;
-    return !this.playback.playing && this.gate.idle && this.judgedTurns.size === 0;
+    return !this.playback.playing;
   }
 
-  /** The agent went quiet: a turn it did not answer aloud is no longer timed; the silence is (longer after wait_for_user). */
-  private armSilenceCheck(): void {
+  /** If the agent is now waiting: a turn it did not answer aloud is no longer timed, and the silence is (longer on hold). */
+  private onAgentWaiting(): void {
     if (!this.waiting()) return;
     this.stats.dropPending();
     this.silenceCheck.arm(this.holding ? HOLD_CHECK_MS : SILENCE_CHECK_MS);
   }
 
-  /** Nobody spoke: a hidden note, and the agent checks in (the prompt says how). */
+  /** Nobody spoke: a hidden note, and the agent checks in (the prompt says how). No turn can be pending: one needs speech. */
   private onSilence(seconds: number): void {
     if (!this.waiting()) return;
-    this.stats.dropPending();
     this.stats.silenceCheck();
     this.note(`[no answer for ${seconds} s]`);
     this.sendOpenAi(silenceNoteItem(seconds));
@@ -618,13 +631,14 @@ export class AiCallBridge {
   /** A response (or a quiet tool batch) finished without asking for another. */
   private afterResponse(): void {
     if (this.wantResponse) return this.requestResponse();
-    this.armSilenceCheck();
+    this.onAgentWaiting();
   }
 
   /** A hangup/transfer result: latch closing and stop VAD from starting a response during the drain. */
   private closeConversation(): void {
     this.closing = true;
     this.gate.close();
+    this.stats.clearOverlaps();
     this.silenceCheck.cancel();
     this.cancelWhenCreated = false;
     // Gate sessions never auto-respond; instant sessions stop VAD responses during the drain.
@@ -675,6 +689,7 @@ export class AiCallBridge {
     this.ended = true;
     this.cancelOpener();
     this.gate.close();
+    this.stats.clearOverlaps();
     this.silenceCheck.cancel();
     this.clearReadyTimer();
     if (this.maxTimer !== null) this.clearTimer(this.maxTimer);

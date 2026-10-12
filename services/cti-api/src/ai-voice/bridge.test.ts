@@ -1028,6 +1028,7 @@ describe('silence check-ins (gate mode)', () => {
 
   it('waits 30 s after wait_for_user', async () => {
     const { openai } = await quietAfterAgent();
+    openai.msg({ type: 'response.created' });
     openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('wait_for_user', '{}', 'w1')] } });
     await flush();
     openai.clearSent();
@@ -1035,6 +1036,31 @@ describe('silence check-ins (gate mode)', () => {
     expect(openai.sent).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     expect(openai.sent).toEqual([note(30), GATE_CREATE]);
+  });
+
+  it('keeps waiting 30 s for the second check-in while they are still on hold', async () => {
+    const { openai } = await quietAfterAgent();
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('wait_for_user', '{}', 'w1')] } });
+    await flush();
+    await vi.advanceTimersByTimeAsync(30_000);
+    openai.msg({ type: 'response.created' }); // "Still there? Take your time."
+    openai.msg(DONE_EMPTY);
+    openai.clearSent();
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(openai.sent).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(openai.sent).toEqual([note(30), GATE_CREATE]);
+  });
+
+  it('a check-in whose create is rejected is followed by the next one', async () => {
+    const { openai } = await quietAfterAgent();
+    await vi.advanceTimersByTimeAsync(8000);
+    const eventId = (openai.sent.find((m) => m.type === 'response.create') as { event_id: string }).event_id;
+    openai.msg({ type: 'error', error: { type: 'server_error', code: 'server_error', message: 'internal', event_id: eventId } });
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(notes(openai)).toEqual([note(8), note(8)]);
+    expect(openai.sent.filter((m) => m.type === 'response.create')).toEqual([GATE_CREATE, GATE_CREATE]);
   });
 
   it('never checks in in instant mode', async () => {
@@ -1119,10 +1145,21 @@ describe('turn stats', () => {
     s.openai.msg(READY);
     return { ...s, onStats };
   }
-  /** Caller audio sent to OpenAI up to `toMs`, in 20 ms frames. */
-  const callerAudio = (twilio: FakeSocket, toMs: number) => {
-    for (let ts = 20; ts <= toMs; ts += 20) twilio.msg(media(ts, audio(20)));
+  /** Caller audio sent to OpenAI from `fromMs` up to `toMs`, in 20 ms frames (it also moves Twilio's clock). */
+  const callerAudio = (twilio: FakeSocket, toMs: number, fromMs = 0) => {
+    for (let ts = fromMs + 20; ts <= toMs; ts += 20) twilio.msg(media(ts, audio(20)));
   };
+  const said = (openai: FakeSocket, id: string, text: string) => {
+    openai.msg({ type: 'conversation.item.input_audio_transcription.delta', item_id: id, content_index: 0, delta: ` ${text}` });
+    openai.msg({ type: 'conversation.item.input_audio_transcription.completed', item_id: id, content_index: 0, transcript: text });
+  };
+  const stoppedAt = (openai: FakeSocket, id: string, endMs: number) => {
+    openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: id, audio_end_ms: endMs });
+    openai.msg({ type: 'input_audio_buffer.committed', item_id: id });
+  };
+  const startedAt = (openai: FakeSocket, id: string, startMs = 0) =>
+    openai.msg({ type: 'input_audio_buffer.speech_started', item_id: id, audio_start_ms: startMs });
+  const cancelledDone = { type: 'response.done', response: { status: 'cancelled', output: [] } };
   const callerTurn = (openai: FakeSocket, id: string, endMs: number) => {
     openai.msg({ type: 'input_audio_buffer.speech_started', item_id: id, audio_start_ms: 0 });
     openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: id, audio_end_ms: endMs });
@@ -1215,11 +1252,9 @@ describe('turn stats', () => {
     await openerPlayed(s);
     s.twilio.msg(media(1000));
     agentSays(s.openai, 'item_1', 3000);
-    s.openai.msg({ type: 'input_audio_buffer.speech_started', item_id: 'c1', audio_start_ms: 900 });
-    s.openai.msg({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'c1', content_index: 0, delta: ' Mm-hmm' });
-    s.openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: 'c1', audio_end_ms: 0 });
-    s.openai.msg({ type: 'input_audio_buffer.committed', item_id: 'c1' });
-    s.openai.msg({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'c1', content_index: 0, transcript: 'Mm-hmm.' });
+    startedAt(s.openai, 'c1', 900);
+    stoppedAt(s.openai, 'c1', 0);
+    said(s.openai, 'c1', 'Mm-hmm.'); // transcripts arrive after the commit
     s.openai.msg({ type: 'response.output_audio.done' });
     s.openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('save_qualification', '{"field":"timeline","value":"soon"}', 'f1')] } });
     await flush();
@@ -1231,16 +1266,98 @@ describe('turn stats', () => {
   it('counts an interruption that stopped the agent, and times the turn that did it', async () => {
     const s = withStats();
     await openerPlayed(s);
-    s.twilio.msg(media(1000));
+    callerAudio(s.twilio, 1000);
     agentSays(s.openai, 'item_1', 3000);
-    s.openai.msg({ type: 'input_audio_buffer.speech_started', item_id: 'c1', audio_start_ms: 900 });
-    s.openai.msg({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'c1', content_index: 0, delta: ' Wait' });
-    s.openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: 'c1', audio_end_ms: 0 });
-    s.openai.msg({ type: 'input_audio_buffer.committed', item_id: 'c1' });
-    s.openai.msg({ type: 'response.done', response: { status: 'cancelled', output: [] } });
+    startedAt(s.openai, 'c1', 300);
+    stoppedAt(s.openai, 'c1', 600); // endpoint 400; still being judged
+    await vi.advanceTimersByTimeAsync(200);
+    said(s.openai, 'c1', 'Wait, who is this?'); // its words come after the commit: the cut
+    s.openai.msg(cancelledDone);
+    await vi.advanceTimersByTimeAsync(300);
     agentSays(s.openai, 'item_2');
     s.bridge.stop();
-    expect(statsOf(s.onStats)).toMatchObject({ turns: 1, interruptions: 1, listening: 0 });
+    expect(statsOf(s.onStats)).toMatchObject({ turns: 1, interruptions: 1, listening: 0, endpointMs: { p50: 400 }, answerMs: { p50: 500 } });
+  });
+
+  it('times a late answer from when the agent finished its own line, not from the caller stop', async () => {
+    const s = withStats();
+    await openerPlayed(s);
+    callerAudio(s.twilio, 1000);
+    agentSays(s.openai, 'item_1', 3000);
+    s.openai.msg({ type: 'response.output_audio.done' });
+    s.openai.msg(DONE_EMPTY);
+    callerAudio(s.twilio, 3000, 1000); // 2 s of item_1 heard, 1 s left
+    startedAt(s.openai, 'c1', 2500); // "…got a quick minute?" / "yeah sure"
+    stoppedAt(s.openai, 'c1', 2900); // endpoint 100
+    await vi.advanceTimersByTimeAsync(200);
+    said(s.openai, 'c1', 'Yeah, sure.'); // answered once item_1 has played
+    await vi.advanceTimersByTimeAsync(600);
+    playAllMarks(s.twilio); // item_1 finishes 800 ms after they stopped: the answer clock starts here
+    await vi.advanceTimersByTimeAsync(300);
+    agentSays(s.openai, 'item_2');
+    s.bridge.stop();
+    expect(statsOf(s.onStats)).toMatchObject({ turns: 1, listening: 0, endpointMs: { p50: 100 }, answerMs: { p50: 300 } });
+  });
+
+  it('two overlaps answered by one cut are one turn, timed from the later', async () => {
+    const s = withStats();
+    await openerPlayed(s);
+    callerAudio(s.twilio, 1000);
+    agentSays(s.openai, 'item_1', 5000);
+    startedAt(s.openai, 'c1');
+    stoppedAt(s.openai, 'c1', 500); // endpoint 500, no words yet
+    await vi.advanceTimersByTimeAsync(100);
+    startedAt(s.openai, 'c2');
+    stoppedAt(s.openai, 'c2', 800); // endpoint 200
+    await vi.advanceTimersByTimeAsync(100);
+    said(s.openai, 'c2', 'Wait, who is this?'); // cuts the agent: both are answered
+    s.openai.msg({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'c1', content_index: 0, transcript: '' });
+    s.openai.msg(cancelledDone);
+    await vi.advanceTimersByTimeAsync(400);
+    agentSays(s.openai, 'item_2');
+    s.bridge.stop();
+    expect(statsOf(s.onStats)).toMatchObject({ turns: 1, interruptions: 1, endpointMs: { p50: 200 }, answerMs: { p50: 500 } });
+  });
+
+  it('an overlap cut before its commit is timed once the commit answers it', async () => {
+    const s = withStats();
+    await openerPlayed(s);
+    callerAudio(s.twilio, 1000);
+    agentSays(s.openai, 'item_1', 3000);
+    startedAt(s.openai, 'c1', 300);
+    s.openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: 'c1', audio_end_ms: 600 }); // endpoint 400
+    await vi.advanceTimersByTimeAsync(200);
+    s.openai.msg({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'c1', content_index: 0, delta: ' Wait' });
+    s.openai.msg({ type: 'input_audio_buffer.committed', item_id: 'c1' }); // after the cut: answered as a normal turn
+    s.openai.msg(cancelledDone);
+    await vi.advanceTimersByTimeAsync(300);
+    agentSays(s.openai, 'item_2');
+    s.bridge.stop();
+    expect(statsOf(s.onStats)).toMatchObject({ turns: 1, interruptions: 1, endpointMs: { p50: 400 }, answerMs: { p50: 500 } });
+  });
+
+  it('a turn is not dropped when the cut response reports done between its stop and its commit', async () => {
+    const s = withStats();
+    await openerPlayed(s);
+    callerAudio(s.twilio, 1000);
+    agentSays(s.openai, 'item_1', 5000);
+    startedAt(s.openai, 'c1');
+    await vi.advanceTimersByTimeAsync(3000); // talk with no words: the gate cuts the agent
+    s.openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: 'c1', audio_end_ms: 700 }); // endpoint 300
+    s.openai.msg(cancelledDone); // lands before the commit
+    s.openai.msg({ type: 'input_audio_buffer.committed', item_id: 'c1' });
+    await vi.advanceTimersByTimeAsync(400);
+    agentSays(s.openai, 'item_2');
+    s.bridge.stop();
+    expect(statsOf(s.onStats)).toMatchObject({ turns: 1, interruptions: 1, endpointMs: { p50: 300 }, answerMs: { p50: 400 } });
+  });
+
+  it('onStats also fires before onEnd when the OpenAI socket closes', () => {
+    const s = withStats();
+    s.openai.close();
+    expect(s.onStats).toHaveBeenCalledTimes(1);
+    expect(s.hooks.onEnd).toHaveBeenCalledWith('openai_closed', undefined);
+    expect(s.onStats.mock.invocationCallOrder[0]).toBeLessThan(s.hooks.onEnd.mock.invocationCallOrder[0] as number);
   });
 
   it('instant mode records turns too, and counts a barge-in that cut the agent as an interruption', async () => {
