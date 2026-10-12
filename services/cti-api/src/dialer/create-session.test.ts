@@ -862,6 +862,39 @@ describe('createDialerSession — one number per pass (preferred number)', () =>
     expect(preferredNumbers).toHaveBeenCalledWith('o1', [['+16195550100', '+12135550199']]);
   });
 
+  // Review of 7a7b281 (Important 1): a person who once answered on a non-US
+  // number (India and Canada were on in Twilio) must not be locked onto it —
+  // the preference is ignored and the US rule dials their US number instead.
+  it('a remembered non-US number is ignored: the person is dialed on their US number', async () => {
+    const db = fakeDb();
+    const CA = '+14162340000';
+    const US = '+16192340000';
+    await createDialerSession(
+      {
+        ...noResolveDeps, db: db as never,
+        resolveDialNumber: pairResolver(CA, US) as never,
+        preferredNumbers: vi.fn(async () => new Map([[pairKey(CA, US), CA]])) as never,
+      },
+      args,
+    );
+    expect(db._itemRows[0]).toMatchObject({ status: 'pending', toNumber: US, primaryNumber: US, secondaryNumber: null });
+  });
+
+  it('a remembered US number still wins over a non-US one', async () => {
+    const db = fakeDb();
+    const IN = '+917780700000';
+    const US = '+16192340000';
+    await createDialerSession(
+      {
+        ...noResolveDeps, db: db as never,
+        resolveDialNumber: pairResolver(IN, US) as never,
+        preferredNumbers: vi.fn(async () => new Map([[pairKey(IN, US), US]])) as never,
+      },
+      args,
+    );
+    expect(db._itemRows[0]).toMatchObject({ status: 'pending', toNumber: US, primaryNumber: US, secondaryNumber: null });
+  });
+
   it('attempt-1 rows never carry a fallback: the second number lives only on secondaryNumber', async () => {
     const db = fakeDb();
     await createDialerSession(

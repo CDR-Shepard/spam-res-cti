@@ -2,7 +2,7 @@ import { getDb, schema } from '@cti/db';
 import type { ConsentBlock } from './consent-check.js';
 import { pairKey } from './contact-history.js';
 import { listStartIndex, rotateAfter, type ListRunStart } from './list-position.js';
-import { NON_US_OUTCOME, usOnlyPair } from './us-only.js';
+import { isNonUsNumber, NON_US_OUTCOME, usOnlyPair } from './us-only.js';
 import { fetchContactNames, resolveDialNumber } from '../salesforce/record-phone.js';
 import { fetchTasks, resolveTaskTarget } from '../salesforce/task-targets.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
@@ -335,8 +335,10 @@ async function withPreferredNumbers(deps: CreateSessionDeps, orgId: string, rows
   return rows.map((r) => {
     if (!r.toNumber || !r.fallbackNumber) return r; // nothing to prefer between
     const pref = preferred.get(pairKey(r.toNumber, r.fallbackNumber));
-    // Ignore anything that isn't one of THIS row's own two numbers.
-    if (pref === undefined || (pref !== r.toNumber && pref !== r.fallbackNumber)) return r;
+    // Ignore anything that isn't one of THIS row's own two numbers — and a
+    // non-US one: keeping it would drop the person's US number, and the US
+    // rule (buildQueueRows) would then skip someone it could have dialed.
+    if (pref === undefined || isNonUsNumber(pref) || (pref !== r.toNumber && pref !== r.fallbackNumber)) return r;
     // No fallback to carry: the number nobody answered on is simply gone,
     // whether the preference was the primary or the secondary.
     return { ...r, toNumber: pref, fallbackNumber: null };
