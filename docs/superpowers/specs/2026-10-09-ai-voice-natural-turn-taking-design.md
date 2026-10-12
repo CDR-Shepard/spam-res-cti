@@ -34,7 +34,7 @@ Response time is not measured anywhere.
 
 ### 4.1 Barge-in gate (new default; `AI_VOICE_BARGE_IN=gate|instant`)
 
-The bridge owns turn-taking. Session: `semantic_vad`, `create_response: false`, `interrupt_response: false`, transcription `AI_VOICE_TRANSCRIBE_MODEL` (default `gpt-live-transcribe`). `instant` keeps today's exact behaviour (both flags true, old `onCallerSpeech`), as the one-switch rollback.
+The bridge owns turn-taking. Session: `semantic_vad`, `create_response: false`, `interrupt_response: false`, transcription `AI_VOICE_TRANSCRIBE_MODEL` (unset: `gpt-live-transcribe` in gate mode). `instant` keeps today's exact behaviour (both flags true, old `onCallerSpeech`, and — unless the variable is set — today's `gpt-4o-mini-transcribe`), as the one-switch rollback.
 
 When the caller starts talking (`speech_started`, which carries the input `item_id`):
 
@@ -49,16 +49,16 @@ An overlap is decided by the words streamed so far (`conversation.item.input_aud
 
 - **Stop now** if any word is a stop cue: `wait`, `hold` (on/up), `hang` (on), `stop`, `no`, `nope`, `nah`, `sorry`, `excuse`, `what`, `huh`, `who`, `why`, `pardon`, `actually`, `but`.
 - **Stop now** if 2 or more words are not listening sounds.
-- **Listening sounds** (never stop the agent alone): mm-hmm / mhm / hmm / uh-huh, yeah / yep / yup / yes, ok / okay / O.K., right, sure, alright, got it / gotcha, I see, oh / ah / wow, cool, nice, great, true, totally, exactly, really, interesting, a single "hello", and fillers um / uh — including stretched or doubled ones (mmm, hm, umm, uhh, ohh, erm). Unicode dashes count as hyphens.
+- **Listening sounds** (never stop the agent alone): mm-hmm / mhm / hmm / uh-huh, yeah / yep / yup / yes, ok / okay / O.K., right, sure, alright, got it / gotcha, I see, oh / ah / wow, cool, nice, great, true, totally, exactly, really, interesting, a single "hello", the phrases of course / sounds good / go ahead / go on / I know / fair enough / no problem (folded before the stop-cue check, so "no problem" is not "no"; "of course not" is not folded), and fillers um / uh — including stretched or doubled ones (mmm, hm, umm, uhh, ohh, erm). Unicode dashes count as hyphens.
 - **Stop anyway** if the caller has been talking for 3.0 s and no word has arrived (transcriber hiccup, another language). The timer is disarmed when the caller stops talking, so a short wordless sound (a cough) is settled by its empty transcript and ignored. (Raised from 2.0 s after the spike: first words land ~1.0–1.2 s in, and semantic VAD's stop can lag 1.5–2.8 s.)
 
 "Stop" = Twilio `clear`, `response.cancel`, truncate the item at what was heard (existing `PlaybackTracker.interrupt()`), transcript note `[stopped — they interrupted]`. When their turn ends, the agent answers.
 
 When an undecided overlap's turn ends (`committed`, then `…transcription.completed` gives the final text), re-check the final text. Words can still stream in after the commit: if they turn it into an interruption, the agent is cut and that already-finished turn is answered. Still listening sounds (or empty) → the agent never answers it, except:
 
-- **Late overlap = an early answer.** If the caller started talking when the agent's audio was fully generated and at most 1.5 s of it was left to play ("…got a quick minute?" / "yeah sure"), it is their answer: the agent answers once its audio finishes playing.
+- **Late overlap = an early answer.** If the caller started talking when the agent's audio was fully generated and at most 1.5 s of it was left to play ("…got a quick minute?" / "yeah sure"), or is still talking when the agent finishes (its audio drained before their `speech_stopped`), it is their answer: the agent answers once its audio finishes playing. A mid-sentence "mm-hmm" has long stopped before the drain, so it stays ignored; a wordless sound is never an answer. Audio still queued ahead of an item (a tool follow-up forwarded while the first response plays) counts toward what is left to play.
 
-**The opener is protected.** The first agent response (the disclosure line) is never cut by the gate; caller speech over it is never answered mid-line: a real interruption over it ("Wait, who is this?", "Hello? Hello?") is answered once the opener has played, a listening sound over its last 1.5 s counts as a late answer, and anything else is ignored. Compliance: "AI assistant … recorded line" is always said in full.
+**The opener is protected.** The first agent response (the disclosure line) is never cut by the gate; caller speech over it is never answered mid-line: a real interruption over it ("Wait, who is this?", "Hello? Hello?") is answered once the opener has played, a listening sound over its last 1.5 s, or still going when it finishes, counts as a late answer, and anything else is ignored. Compliance: "AI assistant … recorded line" is always said in full.
 
 All responses go through one `requestResponse()`: if a response is active or a tool batch is running, it is deferred until that finishes, so the bridge never sends two `response.create`s at once.
 
@@ -85,7 +85,7 @@ Per call, saved in new column `ai_calls.turn_stats jsonb` (migration 0059) when 
   "interruptions": 1, "listening": 4, "silenceChecks": 0 }
 ```
 
-outreach-web shows one line above every call transcript, e.g. "Response time: usually 1.9 s (slowest 3.1 s) · kept talking through 4 "mm-hmm"s · stopped for 1 interruption". `null` stats (calls before this ships) show nothing. Also logged per call (`ai-voice: turn stats`).
+outreach-web shows one line above every call transcript, e.g. "Response time: usually 1.9 s (slowest 3.1 s) · kept talking through 4 "mm-hmm"s · stopped for 1 interruption". `null` stats (calls before this ships) show nothing. `listening` counts overlaps ignored as listening sounds that had at least one word; a cough, noise or failed transcription is not counted. Also logged per call (`ai-voice: turn stats`).
 
 ### 4.4 Prompt changes
 
@@ -98,14 +98,14 @@ outreach-web shows one line above every call transcript, e.g. "Response time: us
 | Var (cti-api) | Default | Notes |
 |---|---|---|
 | `AI_VOICE_BARGE_IN` | `gate` | `instant` = today's behaviour |
-| `AI_VOICE_TRANSCRIBE_MODEL` | `gpt-live-transcribe` | `gpt-4o-mini-transcribe` = today's; the gate degrades to "stop after 2 s" without streaming words |
+| `AI_VOICE_TRANSCRIBE_MODEL` | gate: `gpt-live-transcribe`; instant: `gpt-4o-mini-transcribe` | Unset follows `AI_VOICE_BARGE_IN`, so `instant` alone also restores today's transcriber; a value set explicitly wins in either mode. Without streaming words the gate degrades to "stop after 3 s" (a short wordless sound is still ignored once the caller stops) |
 
 `AI_VOICE_VAD_EAGERNESS` (exists, `auto`) stays the knob for the ~1.6 s end-of-turn wait; tune it from the new numbers, not in this spec.
 
 ## 6. Testing
 
 - Pure units: word classifier (table-driven), overlap gate (fake clock), silence timer, stats (percentiles).
-- `bridge.test.ts` (fake sockets, existing harness): mm-hmm keeps audio flowing and never answers; "wait hold on" clears + cancels + truncates and answers after commit; 3 words interrupt; no-words fallback at 2 s; late overlap answered after drain; opener never cut; in-flight response with no audio cancelled; `requestResponse` never double-creates (tool batch + caller turn); `instant` mode byte-for-byte today's frames; silence notes (8 s, 30 s after `wait_for_user`, max 2); stats end up in `onEnd`.
+- `bridge.test.ts` (fake sockets, existing harness): mm-hmm keeps audio flowing and never answers; "wait hold on" clears + cancels + truncates and answers after commit; 3 words interrupt; no-words fallback at 3 s (a short wordless sound is ignored once the caller stops); late overlap answered after drain; opener never cut; in-flight response with no audio cancelled; `requestResponse` never double-creates (tool batch + caller turn); `instant` mode byte-for-byte today's frames; silence notes (8 s, 30 s after `wait_for_user`, max 2); stats end up in `onEnd`.
 - Prompt snapshot updated; migration test; outreach-api transcript query returns stats; web summary line.
 - Owner check after deploy: Test a record → Talk in browser; say "mm-hmm" mid-sentence (keeps going), "wait, hold on" (stops), go quiet (checks in once, then goodbye); read the response-time line.
 
