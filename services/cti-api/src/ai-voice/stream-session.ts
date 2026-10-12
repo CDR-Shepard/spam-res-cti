@@ -10,9 +10,11 @@
  * while the start is being checked are dropped (a few ms of "hello").
  *
  * Bridge hooks: tools → service-tools.ts; transcript → batched writes;
+ * turn stats → one log line + ai_calls.turn_stats (best effort);
  * a bridge-side end (OpenAI closed/error, time limit) → hang up, unless
  * another closer (end_call / transfer / voicemail) already owns the call.
  */
+import type { AiCallTurnStats } from '@cti/contracts';
 import { aiVoiceAvailable, type AppConfig } from '../config.js';
 import { UUID_RE, TWILIO_CALL_SID_RE } from '../telephony/webhooks.js';
 import { AiCallBridge, MIN_CALL_MS, type BridgeHooks, type BridgeLog, type BridgeOptions, type BridgeSocket, type EndReason } from './bridge.js';
@@ -182,6 +184,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
         },
       }),
     onTranscript: (line) => transcript.push(line),
+    onStats: (stats) => saveTurnStats(entry.aiCallId, stats, deps),
     onEnd: (reason, detail) => onBridgeEnd(entry, reason, detail, () => bridge, transcript, deps),
     log: deps.log,
   };
@@ -204,6 +207,14 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
   );
   updateActiveCall(entry.aiCallId, { bridge, transcript, callSid: entry.callSid });
   bridge.start();
+}
+
+/** The call's turn-taking numbers: one log line and the `turn_stats` column (best effort). */
+function saveTurnStats(aiCallId: string, stats: AiCallTurnStats, deps: StreamSessionDeps): void {
+  deps.log.info({ aiCallId, turnStats: stats }, 'ai-voice: turn stats');
+  void deps.store
+    .update(aiCallId, { turnStats: stats })
+    .catch((e: unknown) => deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: turn stats not saved'));
 }
 
 /** The rep sees the prospect's number, name and record, and that this is an AI hand-off. */

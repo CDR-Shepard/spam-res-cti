@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../config.js';
 import type { BridgeHooks, BridgeOptions } from './bridge.js';
-import type { AppointmentSlot } from '@cti/contracts';
+import type { AiCallTurnStats, AppointmentSlot } from '@cti/contracts';
 import { AI_CALL_TOOLS, type RealtimeFunctionTool } from './prompt.js';
 import { claimClose, clearActiveCalls, getActiveCall, registerActiveCall } from './registry.js';
 import { finalizeAiCall } from './service-finalize.js';
@@ -232,6 +232,40 @@ describe('runStreamSession — bridge hooks', () => {
     await settle();
     expect(twilio.hangups).toEqual([]);
     expect(store.rows.get(ID)?.transcript).toEqual([{ role: 'caller', text: 'Hello?', at: NOW.toISOString() }]);
+  });
+
+  it('logs the call’s turn stats and saves them on the call', async () => {
+    const info = vi.fn();
+    deps = { ...deps, log: { ...silentLog, info } };
+    await begin();
+    const stats: AiCallTurnStats = {
+      v: 1,
+      bargeIn: 'gate',
+      turns: 2,
+      totalMs: { p50: 1500, p90: 2000, max: 2000 },
+      endpointMs: { p50: 900 },
+      answerMs: { p50: 600 },
+      interruptions: 0,
+      listening: 1,
+      silenceChecks: 0,
+    };
+    captured!.hooks.onStats?.(stats);
+    await settle();
+    expect(info).toHaveBeenCalledWith({ aiCallId: ID, turnStats: stats }, 'ai-voice: turn stats');
+    expect(store.rows.get(ID)?.turnStats).toEqual(stats);
+  });
+
+  it('a failed turn-stats write is logged, never thrown into the bridge', async () => {
+    const error = vi.fn();
+    deps = { ...deps, log: { ...silentLog, error } };
+    await begin();
+    store.update = vi.fn(async () => {
+      throw new Error('db down');
+    });
+    const stats: AiCallTurnStats = { v: 1, bargeIn: 'instant', turns: 0, totalMs: null, endpointMs: null, answerMs: null, interruptions: 0, listening: 0, silenceChecks: 0 };
+    expect(() => captured!.hooks.onStats?.(stats)).not.toThrow();
+    await settle();
+    expect(error).toHaveBeenCalledWith({ aiCallId: ID, err: 'db down' }, 'ai-voice: turn stats not saved');
   });
 
   it('end_call through the hook hangs this call up after playback', async () => {

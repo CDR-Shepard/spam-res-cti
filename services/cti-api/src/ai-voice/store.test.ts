@@ -18,6 +18,7 @@ import {
   setOutcomeQuery,
   uncountedPlacedQuery,
   updateWhereStatusQuery,
+  updateQuery,
   upsertOptOutQuery,
 } from './store.js';
 
@@ -56,6 +57,14 @@ describe('ai_calls SQL, rendered', () => {
     expect(sql).toContain('insert into "opt_outs"');
     expect(sql).toContain('on conflict do nothing');
     expect(params).toEqual(expect.arrayContaining([ORG, '+16195550100', 'ai_call', 'stop calling']));
+  });
+
+  it('update writes turnStats to the turn_stats column as one jsonb value (and null clears it)', () => {
+    const stats = { v: 1, bargeIn: 'gate', turns: 0, totalMs: null, endpointMs: null, answerMs: null, interruptions: 0, listening: 0, silenceChecks: 0 } as const;
+    const { sql, params } = updateQuery(db, ID, { turnStats: stats }).toSQL();
+    expect(sql).toMatch(/set "turn_stats" = \$1, "updated_at" = now\(\) where "ai_calls"\."id" = \$2/);
+    expect(params).toEqual([JSON.stringify(stats), ID]);
+    expect(updateQuery(db, ID, { turnStats: null }).toSQL().params).toEqual([null, ID]);
   });
 
   it('updateWhereStatus only moves a row that is in one of the given states', () => {

@@ -9,7 +9,7 @@
  * compare-and-swap on `ended_at is null`.
  */
 import { and, desc, eq, inArray, isNotNull, isNull, gte, sql } from 'drizzle-orm';
-import type { BookedAppointment } from '@cti/contracts';
+import type { AiCallTurnStats, BookedAppointment } from '@cti/contracts';
 import { getDb, schema } from '@cti/db';
 import { setAppointment, type SetAppointmentResult } from './store-booking.js';
 import {
@@ -68,7 +68,7 @@ export type AiCallPatch = Partial<
     NewAiCall,
     'status' | 'outcome' | 'callSid' | 'fromE164' | 'answeredBy' | 'summary' | 'callbackAt' | 'startedAt' | 'endedAt' | 'sfTaskId'
   >
->;
+> & { turnStats?: AiCallTurnStats | null };
 
 export interface FinalizeWrite {
   /** Used only when no tool/webhook set an outcome first. */
