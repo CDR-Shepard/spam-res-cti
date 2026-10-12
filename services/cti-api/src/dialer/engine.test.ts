@@ -737,7 +737,7 @@ describe('advanceSession', () => {
   it('a customer_ceiling skip marks the item skipped and moves on without pausing', async () => {
     const items = [
       { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+1', secondaryNumber: null, followupEligible: true },
-      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+2', secondaryNumber: null, followupEligible: true },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550102', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+16195550102', secondaryNumber: null, followupEligible: true },
     ];
     const pickDid = vi.fn().mockResolvedValueOnce({ skip: 'customer_ceiling' }).mockResolvedValueOnce({ e164: '+16190000000' });
     const deps = makeDeps({ pickDid } as any); const fdb = fakeDb(baseSession, items); deps.db = fdb;
@@ -754,7 +754,7 @@ describe('advanceSession', () => {
     // second concurrent call for the same rep.
     const items = [
       { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null },
-      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550102', recordId: '00Q2', objectType: 'Lead', callId: null },
     ];
     const pickDid = vi.fn(async () => {
       items[0]!.status = 'dialing'; // the other advance won the claim mid-pick
@@ -895,7 +895,7 @@ describe('handleDialOutcome', () => {
     // pair forward unchanged and dials the secondary, with no fallback left.
     const items = [
       { id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550199', sessionId: 'S1', followupEligible: true },
-      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+2', secondaryNumber: null, sessionId: 'S1' },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550102', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+16195550102', secondaryNumber: null, sessionId: 'S1' },
     ];
     const deps = makeDeps({ contactHistory: oneOwnDialToday() }); const fdb = fakeDb(baseSession, items); deps.db = fdb;
     await handleDialOutcome('CA1', 'busy', deps);
@@ -1521,7 +1521,7 @@ describe('handleDialOutcome — the prospect hangs up on a connected call', () =
   it('stamps prospect_ended_at, does NOT advance, does NOT redial', async () => {
     const items = [
       { id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' },
-      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550102', recordId: '00Q2', objectType: 'Lead', callId: null },
     ];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
     await handleDialOutcome('CA1', 'hangup', deps);
@@ -1683,7 +1683,7 @@ describe('endCurrent', () => {
     // stopSession's "flip first, hang up last" rule.
     const items = [
       { id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' },
-      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550102', recordId: '00Q2', objectType: 'Lead', callId: null },
     ];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
     const seen: Array<{ paused: boolean; done: boolean }> = [];
@@ -2863,12 +2863,15 @@ describe('handleDialOutcome connected — the bridged-call log and its recording
 // "Bad Request", the web stopped the run, and the next Start hit the same row
 // first again: four Starts, four dead runs. A destination Twilio refuses is
 // THAT person's problem, not the run's: skip them and dial the next one.
+// (Non-US numbers like that one are now skipped before Twilio is ever asked —
+// see the non-US describe below — so these tests use US numbers Twilio refuses:
+// an invalid or unreachable number, or geo permissions turned off for the US.)
 describe('advanceSession — a number Twilio refuses outright', () => {
   beforeEach(() => { _target = {}; });
   const twilioError = (code: number, status = 400) =>
     Object.assign(new Error(`Twilio refused (${code})`), { status, code });
   const twoItems = () => [
-    { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+526634584629', recordId: '00Q1', objectType: 'Lead', callId: null as string | null, attempt: 1 },
+    { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550111', recordId: '00Q1', objectType: 'Lead', callId: null as string | null, attempt: 1 },
     { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550100', recordId: '00Q2', objectType: 'Lead', callId: null as string | null, attempt: 1 },
   ];
   // The claim transaction commits 'dialing' onto the row before originate is
@@ -3059,16 +3062,50 @@ describe('advanceSession — a number Twilio refuses outright', () => {
     expect(items.find((i) => i.id === 'r4')!.status).toBe('dialing'); // the fake's update doesn't touch `items`
     expect(fdb._updateWheres.at(-1)).toEqual(expect.objectContaining({ patch: expect.objectContaining({ status: 'pending' }) }));
   });
-  // Re-review (92ed4b6, Important 1): refusals of a country our geo permissions
-  // leave off are expected. They write no attempt row, so the next run's list
-  // start puts the same block at its head again; counting them toward the stop
-  // would kill every Start on a list with five or more in a row.
-  it('a block of refused +52 numbers never trips the stop: all skipped, the next person dialed', async () => {
+  // Re-review (92ed4b6, Important 1): a block of foreign numbers must never
+  // trip the stop — they write no attempt row, so the next run's list start
+  // would put the same block at its head again and kill every Start. They now
+  // never reach Twilio at all: skipped as non-US, so the refusal count stays 0.
+  it('a block of +52 numbers never reaches Twilio or the stop: all skipped non_us, the next person dialed', async () => {
     const items = refusedThenGood(8, '+52663458');
     const deps = makeDeps({ telephony: telephonyRefusingAllBut(items) });
     const fdb = fakeDb(baseSession, items); deps.db = fdb;
     expect(await advanceSession('S1', deps)).toEqual({ action: 'dialing', itemId: 'ok' });
-    expect(fdb._writes.filter((w: any) => w.patch.outcome === 'undialable')).toHaveLength(8);
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(1);
+    expect(fdb._writes.filter((w: any) => w.patch.outcome === 'non_us')).toHaveLength(8);
     expect(fdb._writes.some((w: any) => w.patch.status === 'pending')).toBe(false);
+  });
+});
+
+// User ruling 2026-10-12: the power dialer skips non-US numbers. Queue build
+// already does (create-session.ts); this is the dial-time backstop for rows
+// built before that shipped, and for any row whose number came from elsewhere.
+describe('advanceSession — a non-US number is never dialed', () => {
+  beforeEach(() => { _target = {}; });
+
+  it('skips the non-US row as non_us (guarded on pending) without asking for a DID, and dials the next person', async () => {
+    const items = [
+      { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+526634580000', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550100', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1 },
+    ];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    expect(await advanceSession('S1', deps)).toEqual({ action: 'dialing', itemId: 'i2' });
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(1);
+    expect(deps.telephony.originate).toHaveBeenCalledWith(expect.objectContaining({ itemId: 'i2' }));
+    expect(deps.pickDid).toHaveBeenCalledTimes(1);
+    expect(deps.contactHistory).toHaveBeenCalledTimes(1);
+    const skip = fdb._updateWheres.find((w: any) => w.patch.outcome === 'non_us');
+    expect(skip.patch).toEqual(expect.objectContaining({ status: 'skipped', outcome: 'non_us' }));
+    const q = new PgDialect().sqlToQuery(skip.where);
+    expect(q.sql).toBe('("dialer_queue_items"."id" = $1 and "dialer_queue_items"."status" = $2)');
+    expect(q.params).toEqual(['i1', 'pending']);
+  });
+
+  it('a Canadian number is non-US too', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+14162340000', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    expect(await advanceSession('S1', deps)).toEqual({ action: 'done' });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped', outcome: 'non_us' }) });
   });
 });

@@ -47,9 +47,9 @@ describe('buildQueueRows', () => {
   // passing even if a literal silently disappeared from the source, since the
   // loop would just run fewer times. This asserts the FULL set independently,
   // so dropping any one of the five (e.g. 'already_worked') fails here.
-  it('BUILD_SKIP_OUTCOMES is exactly these five literals — run-settings.ts settledAtBuild depends on every one being present', () => {
+  it('BUILD_SKIP_OUTCOMES is exactly these six literals — run-settings.ts settledAtBuild depends on every one being present', () => {
     expect([...BUILD_SKIP_OUTCOMES].sort()).toEqual(
-      ['already_worked', 'blocked', 'dnc_blocked', 'opted_out', 'skip_on_dialer'].sort(),
+      ['already_worked', 'blocked', 'dnc_blocked', 'non_us', 'opted_out', 'skip_on_dialer'].sort(),
     );
   });
 
@@ -155,6 +155,60 @@ describe('buildQueueRows', () => {
         fallbackNumber: null, secondaryNumber: null,
       });
     });
+  });
+});
+
+// User ruling 2026-10-12: the power dialer skips non-US numbers (Mexico is
+// off in our Twilio geo permissions on purpose). A person with a US number
+// too is dialed on it; one with none is skipped before the run starts.
+describe('buildQueueRows — US numbers only', () => {
+  const US1 = '+16192340000';
+  const US2 = '+18582340000';
+  const MX = '+526634580000';
+  const IN = '+917780700000';
+  const CA = '+14162340000';
+
+  it('no US number: skipped as non_us, the number kept so the row shows it, nothing left to retry', () => {
+    const rows = buildQueueRows('S1', [
+      { recordId: '00Q1', objectType: 'Lead', toNumber: MX },
+      { recordId: '00Q2', objectType: 'Lead', toNumber: MX, fallbackNumber: IN },
+    ]);
+    for (const r of rows) {
+      expect(r).toMatchObject({ status: 'skipped', outcome: 'non_us', toNumber: MX, primaryNumber: MX, secondaryNumber: null, fallbackNumber: null });
+    }
+  });
+
+  it('a non-US Mobile with a US Phone dials the Phone, with no second number for the retry', () => {
+    const rows = buildQueueRows('S1', [{ recordId: '00Q1', objectType: 'Lead', toNumber: MX, fallbackNumber: US2 }]);
+    expect(rows[0]).toMatchObject({ status: 'pending', outcome: null, toNumber: US2, primaryNumber: US2, secondaryNumber: null, fallbackNumber: null });
+  });
+
+  it('a non-US second number is dropped, so the end-of-run retry never dials it', () => {
+    const rows = buildQueueRows('S1', [{ recordId: '00Q1', objectType: 'Lead', toNumber: US1, fallbackNumber: CA }]);
+    expect(rows[0]).toMatchObject({ status: 'pending', toNumber: US1, primaryNumber: US1, secondaryNumber: null });
+  });
+
+  it('a consent-blocked non-US Mobile is skipped on consent, never rerouted to the Phone', () => {
+    const rows = buildQueueRows('S1', [{ recordId: '00Q1', objectType: 'Lead', toNumber: MX, fallbackNumber: US2, consentBlock: 'opted_out' }]);
+    expect(rows[0]).toMatchObject({ status: 'skipped', outcome: 'opted_out', toNumber: MX });
+  });
+
+  it('a non-US Mobile whose US Phone is consent-blocked has no US number left: non_us', () => {
+    const rows = buildQueueRows('S1', [{ recordId: '00Q1', objectType: 'Lead', toNumber: MX, fallbackNumber: US2, fallbackConsentBlock: 'dnc' }]);
+    expect(rows[0]).toMatchObject({ status: 'skipped', outcome: 'non_us', toNumber: MX, secondaryNumber: null });
+  });
+
+  it('precedence: consent > skip_on_dialer > non_us > already_worked', () => {
+    const rows = buildQueueRows('S1', [
+      { recordId: '00Q1', objectType: 'Lead', toNumber: MX, skipOnDialer: true },
+      { recordId: '00Q2', objectType: 'Lead', toNumber: MX, alreadyWorked: true },
+    ]);
+    expect(rows.map((r) => r.outcome)).toEqual(['skip_on_dialer', 'non_us']);
+  });
+
+  it('a US pair is untouched', () => {
+    const rows = buildQueueRows('S1', [{ recordId: '00Q1', objectType: 'Lead', toNumber: US1, fallbackNumber: US2 }]);
+    expect(rows[0]).toMatchObject({ status: 'pending', toNumber: US1, primaryNumber: US1, secondaryNumber: US2 });
   });
 });
 
