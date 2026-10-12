@@ -516,7 +516,8 @@ export class AiCallBridge {
   private onAgentFinished(): void {
     this.stats.agentFinished(this.now());
     if (this.ended || this.closing) return;
-    this.gate.onAgentFinished(); // a caller still talking over the end is answering it (spec §4.1)
+    // A caller still talking over the end is answering it (spec §4.1) — unless a next response (a tool follow-up) is coming.
+    if (!this.responsePending && !(this.responseActive && !this.responseHasAudio)) this.gate.onAgentFinished();
     if (!this.answerAfterPlayback) return this.onAgentWaiting();
     this.answerAfterPlayback = false;
     this.requestResponse();

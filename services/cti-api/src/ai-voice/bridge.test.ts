@@ -1092,6 +1092,30 @@ describe('barge-in gate', () => {
     expect(creates(openai)).toEqual([CREATE]);
   });
 
+  for (const createdBeforeDrain of [false, true]) {
+    it(`P4: a "mm-hmm" still going when the first response ends is not late while its follow-up is ${createdBeforeDrain ? 'created but silent' : 'requested'}: no second answer`, async () => {
+      const { twilio, openai } = talking(); // item_1: 3 s from 1000 ms, now at 1500 ms
+      openai.msg({ type: 'response.output_audio.done' });
+      openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('save_qualification', '{"field":"timeline","value":"soon"}', 'f1')] } });
+      await flush(); // the tool returns: follow-up B is requested before the caller speaks
+      expect(creates(openai)).toEqual([CREATE]);
+      started(openai); // 2.5 s of item_1 left: not late by the 1.5 s rule
+      delta(openai, ' Mm-hmm');
+      if (createdBeforeDrain) openai.msg({ type: 'response.created' });
+      playAll(twilio); // item_1 finishes before B's first audio; their speech_stopped has not come yet
+      if (!createdBeforeDrain) openai.msg({ type: 'response.created' });
+      openai.msg({ type: 'response.output_audio.delta', item_id: 'item_2', delta: audio(2000) });
+      stopped(openai);
+      committed(openai);
+      completed(openai, 'Mm-hmm.');
+      openai.msg({ type: 'response.output_audio.done' });
+      openai.msg(doneEmpty);
+      playAll(twilio);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(creates(openai)).toEqual([CREATE]);
+    });
+  }
+
   it('F5e: a "hello?" still going when the opener finishes is the answer; the opener is never cut', () => {
     const { twilio, openai, bridge } = setup({ bargeIn: 'gate' });
     bridge.start();
