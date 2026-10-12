@@ -112,6 +112,48 @@ async function setItemIfPending(deps: EngineDeps, id: string, patch: Partial<Dia
 }
 
 /**
+ * Same write, but ONLY while the row is still exactly the 'dialing' row this
+ * advance claimed — a take-callback, Skip or Stop that settled it while
+ * `originate` was in flight must not be overwritten.
+ */
+async function setItemIfDialing(deps: EngineDeps, id: string, patch: Partial<DialerItem>): Promise<number> {
+  const rows = await deps.db
+    .update(schema.dialerQueueItems)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(and(eq(schema.dialerQueueItems.id, id), eq(schema.dialerQueueItems.status, 'dialing')))
+    .returning({ id: schema.dialerQueueItems.id });
+  return rows.length;
+}
+
+/** The skip outcome for a number Twilio refuses to call. */
+const REFUSED_DESTINATION_OUTCOME = 'undialable';
+
+/**
+ * Twilio codes that refuse the DESTINATION, never our side: 21211 invalid To,
+ * 21214 To can't be reached, 21215 our geo permissions don't cover it (e.g.
+ * Mexico), 21216 blocked/premium number, 21217 To doesn't look valid.
+ * From-side refusals (21210, 21212) are deliberately absent: they would refuse
+ * every person alike, and skipping would burn silently through the list.
+ */
+const REFUSED_DESTINATION_CODES: ReadonlySet<number> = new Set([21211, 21214, 21215, 21216, 21217]);
+
+/**
+ * The refused US/Canada number in one advance that stops skipping. A refusal
+ * that is really OUR problem (US calling turned off in geo permissions, a
+ * number-format bug) refuses every +1 number; past four such skips the advance
+ * fails loud as it always did, instead of skipping silently through the list.
+ */
+const MAX_REFUSALS_PER_ADVANCE = 5;
+
+/** A Twilio 4xx RestException refusing the number dialed (see the codes above). */
+function isRefusedDestination(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const { status, code } = err as { status?: unknown; code?: unknown };
+  return typeof status === 'number' && status >= 400 && status < 500
+    && typeof code === 'number' && REFUSED_DESTINATION_CODES.has(code);
+}
+
+/**
  * A guarded skip matched 0 rows: another advance claimed the row while we were
  * deciding. Re-read the queue instead of trusting our stale copy, and return
  * null to back off entirely if that advance is now dialing — carrying on would
@@ -343,6 +385,7 @@ export async function advanceSession(
   if (!session || session.status !== 'active') return { action: 'idle' };
   let items = await loadItems(deps, sessionId);
   if (inFlightItem(items)) return { action: 'waiting' };
+  let refusals = 0;
 
   // Skip any unreachable pendings (defensive; creation already marks them).
   for (;;) {
@@ -480,17 +523,46 @@ export async function advanceSession(
         sessionId, itemId: next.id, fromE164: did.e164, toE164, userId: session.userId,
       }));
     } catch (err) {
+      const refused = isRefusedDestination(err);
+      // Only a refused US/Canada number counts toward the stop: that is the one
+      // that means OUR side is broken. Refusals of countries our geo
+      // permissions leave off are expected and never stop a run, however many
+      // sit in a row (they write no attempt row, so the next run's list start
+      // would put the same block at its head again).
+      if (refused && toE164.startsWith('+1')) refusals += 1;
+      if (refused && refusals < MAX_REFUSALS_PER_ADVANCE) {
+        // Twilio refused THIS number outright, so the phone never rang (no
+        // attempt row). Rolling it back to pending put it first in line again:
+        // every Start failed on it (2026-10-12, a +52 number with Mexico off).
+        // Skip just this person, on the same row-only guard as the rollback
+        // below, and dial the next one.
+        console.warn('[dialer] Twilio refused the number; skipping', { sessionId, itemId: next.id, code: (err as { code: number }).code });
+        const settled = await setItemIfDialing(deps, next.id, { status: 'skipped', outcome: REFUSED_DESTINATION_OUTCOME });
+        // The originate was this loop's longest wait: a Stop or Pause that
+        // landed during it ends this advance here, whether or not it also
+        // settled the row. Carrying on against the stale `session` could flip a
+        // stopped run back to paused ("no numbers") or end it as done.
+        const current = await deps.db.query.dialerSessions.findFirst({ where: eq(schema.dialerSessions.id, sessionId) });
+        if (current?.status !== 'active') return { action: 'idle' };
+        if (settled) {
+          items = items.map((i) => (i.id === next.id ? { ...i, status: 'skipped', outcome: REFUSED_DESTINATION_OUTCOME } : i));
+          continue;
+        }
+        const fresh = await reloadAfterLostSkip(deps, sessionId);
+        if (!fresh) return { action: 'waiting' };
+        items = fresh;
+        continue;
+      }
+      if (refused) {
+        console.error('[dialer] Twilio refused several US numbers in a row; treating it as our-side, not skipping', { sessionId, itemId: next.id, refusals });
+      }
       // Roll the item back so a transient originate failure doesn't strand it
       // 'dialing' — but ONLY if it is still exactly that: a take-callback that
       // settled the row (skipped/canceled + requeued) while this originate call
       // was in flight must not be revived, or the person gets dialed twice —
       // once for whatever originate actually did, once more when the run
       // advances onto a resurrected 'pending' row.
-      await deps.db
-        .update(schema.dialerQueueItems)
-        .set({ status: 'pending', updatedAt: new Date() })
-        .where(and(eq(schema.dialerQueueItems.id, next.id), eq(schema.dialerQueueItems.status, 'dialing')))
-        .returning({ id: schema.dialerQueueItems.id });
+      await setItemIfDialing(deps, next.id, { status: 'pending' });
       throw err;
     }
     // Stamp the dial AND record the attempt in ONE transaction. The attempt row
