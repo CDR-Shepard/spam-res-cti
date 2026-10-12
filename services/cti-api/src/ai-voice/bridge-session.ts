@@ -7,14 +7,26 @@ import type { BargeInMode } from './bridge-turn-stats.js';
 
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 export type VadEagerness = 'low' | 'medium' | 'high' | 'auto';
+/** What ends the caller's turn: `server_vad` = a silence of `silenceMs`; `semantic_vad` = OpenAI's "complete thought" model. */
+export type TurnDetection = 'server_vad' | 'semantic_vad';
 
-export interface SessionSettings {
+/** What a bare BridgeOptions uses, so a bridge that is not told behaves as it did before these settings existed. */
+export const DEFAULT_TURN_DETECTION: TurnDetection = 'semantic_vad';
+export const DEFAULT_SILENCE_MS = 500;
+
+/** The settings that shape `turn_detection` (`vadEagerness` applies to semantic_vad only, `silenceMs` to server_vad only). */
+export interface TurnDetectionSettings {
+  vadEagerness: VadEagerness;
+  turnDetection: TurnDetection;
+  silenceMs: number;
+}
+
+export interface SessionSettings extends TurnDetectionSettings {
   model: string;
   voice: string;
   instructions: string;
   tools: readonly unknown[];
   reasoningEffort: ReasoningEffort;
-  vadEagerness: VadEagerness;
   bargeIn: BargeInMode;
   transcribeModel: string;
 }
@@ -25,14 +37,22 @@ const AUDIO_FORMAT = { type: 'audio/pcmu' } as const;
 
 export const OPENER_PROMPT = '(The person picked up but has not spoken yet. Open the call now.)';
 
-/** Semantic VAD; `createResponse: false` stops the server starting a response when the caller stops talking. */
-function turnDetection(eagerness: VadEagerness, createResponse: boolean): object {
-  return { type: 'semantic_vad', eagerness, create_response: createResponse, interrupt_response: true };
-}
-
-/** Gate mode: the bridge decides when the agent answers and when it is interrupted (spec 2026-10-09 §4.1). */
-function gateTurnDetection(eagerness: VadEagerness): object {
-  return { type: 'semantic_vad', eagerness, create_response: false, interrupt_response: false };
+/**
+ * The session's turn detection. `createResponse: false` stops the server starting a response when the caller stops
+ * talking; `interruptResponse: false` leaves cutting the agent to the bridge's gate (spec 2026-10-09 §4.1).
+ */
+function turnDetection(s: TurnDetectionSettings, createResponse: boolean, interruptResponse: boolean): object {
+  if (s.turnDetection === 'server_vad') {
+    return {
+      type: 'server_vad',
+      threshold: 0.5,
+      prefix_padding_ms: 300,
+      silence_duration_ms: s.silenceMs,
+      create_response: createResponse,
+      interrupt_response: interruptResponse,
+    };
+  }
+  return { type: 'semantic_vad', eagerness: s.vadEagerness, create_response: createResponse, interrupt_response: interruptResponse };
 }
 
 export function sessionUpdate(s: SessionSettings): object {
@@ -50,7 +70,7 @@ export function sessionUpdate(s: SessionSettings): object {
           format: AUDIO_FORMAT,
           noise_reduction: { type: 'near_field' },
           transcription: { model: s.transcribeModel, language: 'en' },
-          turn_detection: s.bargeIn === 'gate' ? gateTurnDetection(s.vadEagerness) : turnDetection(s.vadEagerness, true),
+          turn_detection: s.bargeIn === 'gate' ? turnDetection(s, false, false) : turnDetection(s, true, true),
         },
         output: { format: AUDIO_FORMAT, voice: s.voice },
       },
@@ -65,10 +85,10 @@ export function sessionUpdate(s: SessionSettings): object {
  * with `create_response: false`, so the caller talking during the final
  * playback drain cannot start a new agent response.
  */
-export function stopAutoResponses(s: Pick<SessionSettings, 'vadEagerness'>): object {
+export function stopAutoResponses(s: TurnDetectionSettings): object {
   return {
     type: 'session.update',
-    session: { type: 'realtime', audio: { input: { turn_detection: turnDetection(s.vadEagerness, false) } } },
+    session: { type: 'realtime', audio: { input: { turn_detection: turnDetection(s, false, true) } } },
   };
 }
 

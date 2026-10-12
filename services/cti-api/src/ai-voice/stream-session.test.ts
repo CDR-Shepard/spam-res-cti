@@ -106,6 +106,18 @@ describe('runStreamSession — the start frame', () => {
     expect(twilio.hangups).toEqual([]);
   });
 
+  it('passes the configured turn detection and silence wait to the bridge', async () => {
+    deps.cfg = { ...cfg, AI_VOICE_TURN_DETECTION: 'server_vad', AI_VOICE_SILENCE_MS: 650 } as AppConfig;
+    expect(await begin()).toBe('started');
+    expect(captured?.opts).toMatchObject({ turnDetection: 'server_vad', silenceMs: 650 });
+  });
+
+  it('passes semantic_vad through too (the rollback or instant mode)', async () => {
+    deps.cfg = { ...cfg, AI_VOICE_BARGE_IN: 'instant', AI_VOICE_TURN_DETECTION: 'semantic_vad', AI_VOICE_SILENCE_MS: 500 } as AppConfig;
+    expect(await begin()).toBe('started');
+    expect(captured?.opts).toMatchObject({ bargeIn: 'instant', turnDetection: 'semantic_vad', silenceMs: 500 });
+  });
+
   it('Part 6 B: a practice call rings a Chicago test number but says the seller\'s (the record\'s San Diego) local time', async () => {
     registerActiveCall(activeEntry({ aiCallId: ID, callSid: CALL_SID, toE164: '+15125550111', isTest: true, localTimeE164: '+16195550100' }));
     expect(await begin()).toBe('started');

@@ -227,6 +227,112 @@ describe('session.update', () => {
   });
 });
 
+describe('turn detection in the session (AI_VOICE_TURN_DETECTION / AI_VOICE_SILENCE_MS)', () => {
+  const turnDetectionOf = (over: Partial<BridgeOptions>): unknown => {
+    const { openai, bridge } = setup({ vadEagerness: 'high', ...over });
+    bridge.start();
+    return (openai.sent[0] as { session: { audio: { input: { turn_detection: unknown } } } }).session.audio.input.turn_detection;
+  };
+
+  it('gate + server_vad: the silence decides; the bridge answers and cuts (no eagerness, no auto response)', () => {
+    expect(turnDetectionOf({ bargeIn: 'gate', turnDetection: 'server_vad', silenceMs: 650 })).toStrictEqual({
+      type: 'server_vad',
+      threshold: 0.5,
+      prefix_padding_ms: 300,
+      silence_duration_ms: 650,
+      create_response: false,
+      interrupt_response: false,
+    });
+  });
+
+  it('gate + semantic_vad: exactly today\'s gate turn detection (eagerness applies)', () => {
+    expect(turnDetectionOf({ bargeIn: 'gate', turnDetection: 'semantic_vad', silenceMs: 650 })).toStrictEqual({
+      type: 'semantic_vad',
+      eagerness: 'high',
+      create_response: false,
+      interrupt_response: false,
+    });
+  });
+
+  it('instant + semantic_vad: exactly today\'s instant turn detection', () => {
+    expect(turnDetectionOf({ bargeIn: 'instant', turnDetection: 'semantic_vad', silenceMs: 650 })).toStrictEqual({
+      type: 'semantic_vad',
+      eagerness: 'high',
+      create_response: true,
+      interrupt_response: true,
+    });
+  });
+
+  it('instant + server_vad (explicit only): the silence decides; OpenAI answers and cuts', () => {
+    expect(turnDetectionOf({ bargeIn: 'instant', turnDetection: 'server_vad', silenceMs: 400 })).toStrictEqual({
+      type: 'server_vad',
+      threshold: 0.5,
+      prefix_padding_ms: 300,
+      silence_duration_ms: 400,
+      create_response: true,
+      interrupt_response: true,
+    });
+  });
+
+  it('a bare BridgeOptions defaults to semantic_vad and 500 ms: unchanged for both modes', () => {
+    const bare = (bargeIn: 'gate' | 'instant') => JSON.stringify(turnDetectionOf({ bargeIn }));
+    const explicit = (bargeIn: 'gate' | 'instant') => JSON.stringify(turnDetectionOf({ bargeIn, turnDetection: 'semantic_vad', silenceMs: 500 }));
+    expect(bare('gate')).toBe(explicit('gate'));
+    expect(bare('instant')).toBe(explicit('instant'));
+  });
+
+  it('instant mode with the new settings unset sends byte-identical session.update bytes to today', () => {
+    const today = setup();
+    today.bridge.start();
+    const withDefaults = setup({ bargeIn: 'instant', transcribeModel: 'gpt-4o-mini-transcribe', turnDetection: 'semantic_vad', silenceMs: 500 });
+    withDefaults.bridge.start();
+    expect(JSON.stringify(withDefaults.openai.sent[0])).toBe(JSON.stringify(today.openai.sent[0]));
+  });
+
+  it('instant + server_vad: a hangup turns off auto responses keeping the same turn detection shape', async () => {
+    const onTool = vi.fn(async () => ({ output: 'ok', then: 'hangup' as const }));
+    const { openai, bridge } = setup({ bargeIn: 'instant', turnDetection: 'server_vad', silenceMs: 400 }, { onTool });
+    bridge.start();
+    openai.clearSent();
+    openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('end_call', '{}', 'c1')] } });
+    await flush();
+    expect(openai.sent[1]).toStrictEqual({
+      type: 'session.update',
+      session: {
+        type: 'realtime',
+        audio: {
+          input: {
+            turn_detection: {
+              type: 'server_vad',
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 400,
+              create_response: false,
+              interrupt_response: true,
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it('instant + semantic_vad: the hangup update is exactly today\'s', async () => {
+    const onTool = vi.fn(async () => ({ output: 'ok', then: 'hangup' as const }));
+    const { openai, bridge } = setup({ bargeIn: 'instant', turnDetection: 'semantic_vad', vadEagerness: 'high' }, { onTool });
+    bridge.start();
+    openai.clearSent();
+    openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('end_call', '{}', 'c1')] } });
+    await flush();
+    expect(openai.sent[1]).toStrictEqual({
+      type: 'session.update',
+      session: {
+        type: 'realtime',
+        audio: { input: { turn_detection: { type: 'semantic_vad', eagerness: 'high', create_response: false, interrupt_response: true } } },
+      },
+    });
+  });
+});
+
 describe('caller audio', () => {
   it('forwards Twilio media payloads untouched and ignores connected/start/dtmf', () => {
     const { twilio, openai, bridge } = setup();
@@ -712,6 +818,44 @@ describe('barge-in gate', () => {
     expect(twilio.sent).toEqual([]);
     expect(hooks.onTranscript).not.toHaveBeenCalled();
   });
+
+  // server_vad ends the turn after a pause, so a caller who pauses mid-thought is answered too early; the gate hides it.
+  for (const resumes of ['while our create is in flight', 'after the response was created, before any agent audio'] as const) {
+    it(`server_vad: a caller who pauses past the silence and resumes ${resumes} gets ONE answer to both parts, none heard early`, () => {
+      const { twilio, openai, bridge, hooks } = setup({ bargeIn: 'gate', turnDetection: 'server_vad', silenceMs: 500 });
+      bridge.start();
+      openai.msg(READY);
+      twilio.clearSent();
+      openai.clearSent();
+      started(openai, 'c1');
+      delta(openai, ' I think the roof', 'c1');
+      stopped(openai, 'c1'); // 500 ms of silence: server_vad declares the turn over
+      committed(openai, 'c1');
+      expect(openai.sent).toEqual([CREATE]); // the early answer, not heard yet
+      if (resumes === 'after the response was created, before any agent audio') {
+        openai.msg({ type: 'response.created' });
+        started(openai, 'c2'); // "...is about fifteen years old"
+        expect(openai.sent).toEqual([CREATE, { type: 'response.cancel' }]);
+      } else {
+        started(openai, 'c2');
+        openai.msg({ type: 'response.created' });
+        expect(openai.sent).toEqual([CREATE, { type: 'response.cancel' }]);
+      }
+      openai.msg({ type: 'response.output_audio.delta', item_id: 'item_0', delta: audio(100) }); // already in flight: dropped
+      expect(twilio.sent).toEqual([]);
+      delta(openai, ' is about fifteen years old', 'c2');
+      stopped(openai, 'c2');
+      committed(openai, 'c2');
+      expect(creates(openai)).toHaveLength(1); // waits for the cancelled response to finish
+      openai.msg({ type: 'response.done', response: { status: 'cancelled', output: [] } });
+      expect(openai.sent).toEqual([CREATE, { type: 'response.cancel' }, CREATE]); // one answer, to both parts
+      openai.msg({ type: 'response.created' });
+      openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(100) });
+      expect(openai.sent).toHaveLength(3); // the answer to their whole turn is not cancelled
+      expect(twilio.sent.some((m) => m.event === 'media')).toBe(true);
+      expect(hooks.onTranscript).not.toHaveBeenCalledWith(expect.objectContaining({ role: 'system' })); // nothing was cut or dropped aloud
+    });
+  }
 
   it('a rejected create forgets the pending cancel, so the next answer is not dropped', () => {
     const { openai, bridge } = setup({ bargeIn: 'gate' });
@@ -1409,6 +1553,64 @@ describe('turn stats', () => {
       endpointMs: { p50: 1200 }, answerMs: { p50: 700 },
     });
     expect(onStats.mock.invocationCallOrder[0]).toBeLessThan(hooks.onEnd.mock.invocationCallOrder[0] as number);
+  });
+
+  describe('with server_vad the endpoint includes the silence wait (audio_end_ms already contains it)', () => {
+    it('3000 ms sent, audio_end_ms 2700, silence 500 -> endpoint 800', async () => {
+      const s = withStats({ bargeIn: 'gate', turnDetection: 'server_vad', silenceMs: 500 });
+      callerAudio(s.twilio, 3000);
+      callerTurn(s.openai, 'c1', 2700);
+      await vi.advanceTimersByTimeAsync(700);
+      agentSays(s.openai, 'item_0');
+      s.bridge.stop();
+      expect(statsOf(s.onStats)).toMatchObject({ turns: 1, totalMs: { p50: 1500 }, endpointMs: { p50: 800 }, answerMs: { p50: 700 } });
+    });
+
+    it('uses the configured silence, not a fixed 500', async () => {
+      const s = withStats({ bargeIn: 'gate', turnDetection: 'server_vad', silenceMs: 800 });
+      callerAudio(s.twilio, 3000);
+      callerTurn(s.openai, 'c1', 2700);
+      await vi.advanceTimersByTimeAsync(700);
+      agentSays(s.openai, 'item_0');
+      s.bridge.stop();
+      expect(statsOf(s.onStats)).toMatchObject({ turns: 1, endpointMs: { p50: 1100 }, answerMs: { p50: 700 } });
+    });
+
+    it('an interruption that cut the agent is timed the same way', async () => {
+      const s = withStats({ bargeIn: 'gate', turnDetection: 'server_vad', silenceMs: 500 });
+      await openerPlayed(s);
+      callerAudio(s.twilio, 1000);
+      agentSays(s.openai, 'item_1', 3000);
+      startedAt(s.openai, 'c1', 300);
+      stoppedAt(s.openai, 'c1', 600); // 400 + the 500 ms of silence = 900; still being judged
+      await vi.advanceTimersByTimeAsync(200);
+      said(s.openai, 'c1', 'Wait, who is this?');
+      s.openai.msg(cancelledDone);
+      await vi.advanceTimersByTimeAsync(300);
+      agentSays(s.openai, 'item_2');
+      s.bridge.stop();
+      expect(statsOf(s.onStats)).toMatchObject({ turns: 1, interruptions: 1, endpointMs: { p50: 900 }, answerMs: { p50: 500 } });
+    });
+
+    it('semantic_vad keeps the old formula (the true wait is not knowable from the event), whatever silenceMs is', async () => {
+      const s = withStats({ bargeIn: 'gate', turnDetection: 'semantic_vad', silenceMs: 500 });
+      callerAudio(s.twilio, 3000);
+      callerTurn(s.openai, 'c1', 2700);
+      await vi.advanceTimersByTimeAsync(700);
+      agentSays(s.openai, 'item_0');
+      s.bridge.stop();
+      expect(statsOf(s.onStats)).toMatchObject({ turns: 1, totalMs: { p50: 1000 }, endpointMs: { p50: 300 }, answerMs: { p50: 700 } });
+    });
+
+    it('instant mode with an explicit server_vad adds the silence too', async () => {
+      const s = withStats({ bargeIn: 'instant', turnDetection: 'server_vad', silenceMs: 500 });
+      callerAudio(s.twilio, 3000);
+      callerTurn(s.openai, 'c1', 2700);
+      await vi.advanceTimersByTimeAsync(700);
+      agentSays(s.openai, 'item_0');
+      s.bridge.stop();
+      expect(statsOf(s.onStats)).toMatchObject({ bargeIn: 'instant', turns: 1, endpointMs: { p50: 800 }, answerMs: { p50: 700 } });
+    });
   });
 
   it('a turn answered only by wait_for_user is not paired with the check-in 30 s later', async () => {

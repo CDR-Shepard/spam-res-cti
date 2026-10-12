@@ -39,13 +39,24 @@ import { obj, openAiErrorFields, parseFrame, str, type Msg } from './bridge-fram
 import { Outbox } from './bridge-outbox.js';
 import { LATE_OVERLAP_MS, OverlapGate, type InterruptWhy } from './bridge-overlap.js';
 import { PCMU_BYTES_PER_MS, PlaybackTracker, base64Bytes, type ClearTimer, type SetTimer, type Truncation } from './bridge-playback.js';
-import { openerItem, sessionUpdate, stopAutoResponses, truncate, type ReasoningEffort, type VadEagerness } from './bridge-session.js';
+import {
+  DEFAULT_SILENCE_MS,
+  DEFAULT_TURN_DETECTION,
+  openerItem,
+  sessionUpdate,
+  stopAutoResponses,
+  truncate,
+  type ReasoningEffort,
+  type TurnDetection,
+  type TurnDetectionSettings,
+  type VadEagerness,
+} from './bridge-session.js';
 import { HOLD_CHECK_MS, SILENCE_CHECK_MS, SilenceCheck, silenceNoteItem } from './bridge-silence.js';
 import { TurnStatsCollector, type BargeInMode } from './bridge-turn-stats.js';
 import { errText, functionCalls, runToolBatch, type BridgeLog, type FunctionCall, type ToolResult } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
 
-export type { BargeInMode, BridgeLog, ReasoningEffort, ToolResult, VadEagerness };
+export type { BargeInMode, BridgeLog, ReasoningEffort, ToolResult, TurnDetection, VadEagerness };
 
 /** The transcriber before 2026-10-09; the bridge's default so a bare BridgeOptions behaves as before. */
 export const LEGACY_TRANSCRIBE_MODEL = 'gpt-4o-mini-transcribe';
@@ -99,6 +110,10 @@ export interface BridgeOptions {
   bargeIn?: BargeInMode;
   /** Session transcriber (default LEGACY_TRANSCRIBE_MODEL; the service passes AI_VOICE_TRANSCRIBE_MODEL). */
   transcribeModel?: string;
+  /** What ends the caller's turn (default `semantic_vad`, as before; the service passes AI_VOICE_TURN_DETECTION). */
+  turnDetection?: TurnDetection;
+  /** `server_vad` only: the silence that ends the caller's turn, in ms (default 500; the service passes AI_VOICE_SILENCE_MS). */
+  silenceMs?: number;
   maxCallMs: number;
   now?: () => number;
   setTimer?: SetTimer;
@@ -114,6 +129,8 @@ export class AiCallBridge {
   private readonly silenceCheck: SilenceCheck;
   private readonly stats: TurnStatsCollector;
   private readonly bargeIn: BargeInMode;
+  /** The turn-detection settings with their defaults applied (sent in the session and again when the call closes). */
+  private readonly vad: TurnDetectionSettings;
   private readonly outbox: Outbox;
   private started = false;
   private sessionReady = false;
@@ -174,6 +191,11 @@ export class AiCallBridge {
     this.setTimer = opts.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
     this.clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h));
     this.bargeIn = opts.bargeIn ?? 'instant';
+    this.vad = {
+      vadEagerness: opts.vadEagerness,
+      turnDetection: opts.turnDetection ?? DEFAULT_TURN_DETECTION,
+      silenceMs: Number.isFinite(opts.silenceMs) ? (opts.silenceMs as number) : DEFAULT_SILENCE_MS,
+    };
     this.playback = new PlaybackTracker({
       setTimer: this.setTimer,
       clearTimer: this.clearTimer,
@@ -213,7 +235,12 @@ export class AiCallBridge {
     this.started = true;
     this.outbox.prepend(
       JSON.stringify(
-        sessionUpdate({ ...this.opts, bargeIn: this.bargeIn, transcribeModel: this.opts.transcribeModel ?? LEGACY_TRANSCRIBE_MODEL }),
+        sessionUpdate({
+          ...this.opts,
+          ...this.vad,
+          bargeIn: this.bargeIn,
+          transcribeModel: this.opts.transcribeModel ?? LEGACY_TRANSCRIBE_MODEL,
+        }),
       ),
     );
     this.maxTimer = this.setTimer(() => this.endWithBackstop('max_duration'), this.opts.maxCallMs);
@@ -397,9 +424,11 @@ export class AiCallBridge {
     if (itemId) this.awaitingCommit = itemId;
     this.gate.onSpeechStopped(itemId);
     if (!Number.isFinite(audioEndMs)) return;
+    // server_vad's audio_end_ms already includes its silence wait, so add it back; semantic_vad's true wait is not in the event.
+    const endpointMs = this.sentAudioMs - audioEndMs + (this.vad.turnDetection === 'server_vad' ? this.vad.silenceMs : 0);
     // An overlap is not a turn until it is answered (its verdict, or a cut that answers it).
-    if (this.gate.has(itemId)) this.stats.overlapStopped(itemId, this.sentAudioMs - audioEndMs, this.now());
-    else this.stats.callerStopped(this.sentAudioMs - audioEndMs, this.now());
+    if (this.gate.has(itemId)) this.stats.overlapStopped(itemId, endpointMs, this.now());
+    else this.stats.callerStopped(endpointMs, this.now());
   }
 
   /** Gate mode: a committed caller turn gets an answer — an overlap still being judged waits for its verdict. */
@@ -653,7 +682,7 @@ export class AiCallBridge {
     // Gate sessions never auto-respond; instant sessions stop VAD responses during the drain.
     if (this.bargeIn === 'gate' || this.autoResponsesOff) return;
     this.autoResponsesOff = true;
-    this.sendOpenAi(stopAutoResponses(this.opts));
+    this.sendOpenAi(stopAutoResponses(this.vad));
   }
 
   // ── sockets & lifecycle ────────────────────────────────────────────────────
