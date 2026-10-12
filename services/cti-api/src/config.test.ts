@@ -181,6 +181,23 @@ describe('AI voice config', () => {
     await expect(loadWith({ AI_VOICE_BARGE_IN: 'sometimes' })).rejects.toThrow(/AI_VOICE_BARGE_IN/);
   });
 
+  it('the transcriber follows the barge-in mode when unset, so instant alone is the whole rollback', async () => {
+    expect((await loadWith({})).AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-live-transcribe');
+    expect((await loadWith({ AI_VOICE_BARGE_IN: 'gate' })).AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-live-transcribe');
+    expect((await loadWith({ AI_VOICE_BARGE_IN: 'instant' })).AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-4o-mini-transcribe');
+    const emptyInstant = await loadWith({ AI_VOICE_BARGE_IN: 'instant', AI_VOICE_TRANSCRIBE_MODEL: '' });
+    expect(emptyInstant.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-4o-mini-transcribe');
+    const emptyGate = await loadWith({ AI_VOICE_BARGE_IN: '', AI_VOICE_TRANSCRIBE_MODEL: '' });
+    expect(emptyGate.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-live-transcribe');
+  });
+
+  it('an explicit transcriber wins in either mode', async () => {
+    const gate = await loadWith({ AI_VOICE_BARGE_IN: 'gate', AI_VOICE_TRANSCRIBE_MODEL: 'gpt-4o-mini-transcribe' });
+    expect(gate.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-4o-mini-transcribe');
+    const instant = await loadWith({ AI_VOICE_BARGE_IN: 'instant', AI_VOICE_TRANSCRIBE_MODEL: 'gpt-live-transcribe' });
+    expect(instant.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-live-transcribe');
+  });
+
   it('rejects a non-positive max call length', async () => {
     await expect(loadWith({ AI_VOICE_MAX_CALL_SECONDS: '0' })).rejects.toThrow(/AI_VOICE_MAX_CALL_SECONDS/);
   });

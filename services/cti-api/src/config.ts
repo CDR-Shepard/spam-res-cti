@@ -1,6 +1,13 @@
 import { toE164 } from '@cti/phone';
 import { z } from 'zod';
 
+/**
+ * The AI voice session transcriber when AI_VOICE_TRANSCRIBE_MODEL is unset follows AI_VOICE_BARGE_IN: the gate
+ * needs one that streams words while the caller talks; `instant` keeps the pre-2026-10-09 one, so
+ * AI_VOICE_BARGE_IN=instant alone is the whole rollback.
+ */
+const DEFAULT_TRANSCRIBE_MODEL = { gate: 'gpt-live-transcribe', instant: 'gpt-4o-mini-transcribe' } as const;
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   API_PORT: z.coerce.number().int().positive().default(4000),
@@ -216,8 +223,8 @@ const schema = z.object({
    * pre-2026-10-09 behaviour (OpenAI stops the agent on any caller sound). Rollback switch.
    */
   AI_VOICE_BARGE_IN: z.enum(['gate', 'instant']).default('gate'),
-  /** The Realtime session transcriber; the gate needs one that streams words while the caller talks. */
-  AI_VOICE_TRANSCRIBE_MODEL: z.string().default('gpt-live-transcribe'),
+  /** The Realtime session transcriber. Unset = follows AI_VOICE_BARGE_IN (DEFAULT_TRANSCRIBE_MODEL); a value wins in either mode. */
+  AI_VOICE_TRANSCRIBE_MODEL: z.string().optional(),
   AI_VOICE_AGENT_NAME: z.string().default('Alex'),
   /**
    * Comma-separated numbers an admin may AI-call without Salesforce consent and
@@ -239,7 +246,10 @@ const schema = z.object({
    * production they answer 404, exactly like a route that does not exist; outside production, 503 `internal_disabled`.
    */
   OUTREACH_INTERNAL_SECRET: z.string().min(32).optional(),
-});
+}).transform((c) => ({
+  ...c,
+  AI_VOICE_TRANSCRIBE_MODEL: c.AI_VOICE_TRANSCRIBE_MODEL ?? DEFAULT_TRANSCRIBE_MODEL[c.AI_VOICE_BARGE_IN],
+}));
 
 export type AppConfig = z.infer<typeof schema>;
 

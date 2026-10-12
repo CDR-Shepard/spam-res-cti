@@ -165,6 +165,14 @@ describe('session.update', () => {
     });
   });
 
+  it('instant mode with the config default transcriber (AI_VOICE_TRANSCRIBE_MODEL unset) sends exactly today\'s session.update (F3)', () => {
+    const today = setup();
+    today.bridge.start();
+    const service = setup({ bargeIn: 'instant', transcribeModel: 'gpt-4o-mini-transcribe' });
+    service.bridge.start();
+    expect(JSON.stringify(service.openai.sent[0])).toBe(JSON.stringify(today.openai.sent[0]));
+  });
+
   it('sends reasoning only for gpt-realtime-2* models', () => {
     const session = (model: string) => {
       const { openai, bridge } = setup({
