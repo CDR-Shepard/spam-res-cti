@@ -42,13 +42,13 @@ const between = (text: string) => text.slice(text.indexOf(PLAN_OPEN) + PLAN_OPEN
 describe('buildInstructions with an approved plan', () => {
   it('1: without a plan the instructions are byte-for-byte what they were before plans existed', () => {
     // Hashes of the no-plan prompt for these inputs, re-pinned when the base prompt text changes
-    // (last: disclosure to someone new + silence-note wording, 2026-10-09). A plan must never alter the no-plan prompt.
-    expect(sha(buildInstructions(input()))).toBe('3b49dd1a599fc3ee0d981e9373dfd36059d43d2aed52e609117cd677afbcc858');
-    expect(sha(buildInstructions(input({ approvedPlan: null })))).toBe('3b49dd1a599fc3ee0d981e9373dfd36059d43d2aed52e609117cd677afbcc858');
-    expect(sha(buildInstructions(input({ approvedPlan: '' })))).toBe('3b49dd1a599fc3ee0d981e9373dfd36059d43d2aed52e609117cd677afbcc858');
-    expect(sha(buildInstructions(input({ isTest: true })))).toBe('05fe8e5ad2743d77efe537fbff1e5a4c8d796a8d5a0c1198071084103b51a68b');
+    // (last: screener waits via wait_for_user, 2026-10-12). A plan must never alter the no-plan prompt.
+    expect(sha(buildInstructions(input()))).toBe('748cc975883df5f79629b6e410baa70bdc72d603f88caa0176bab8d5463faf49');
+    expect(sha(buildInstructions(input({ approvedPlan: null })))).toBe('748cc975883df5f79629b6e410baa70bdc72d603f88caa0176bab8d5463faf49');
+    expect(sha(buildInstructions(input({ approvedPlan: '' })))).toBe('748cc975883df5f79629b6e410baa70bdc72d603f88caa0176bab8d5463faf49');
+    expect(sha(buildInstructions(input({ isTest: true })))).toBe('564b903da43f2d48db830f05d43cc6c448d661bb42dab52018e6dad3d158d1ac');
     const bare = input({ firstName: null, address: null, notes: '', callbackNumber: null });
-    expect(sha(buildInstructions(bare))).toBe('18c1f0ba835c8ea9b0a3b12cc7daee62d1e15063b5357000d5128a6c10de25aa');
+    expect(sha(buildInstructions(bare))).toBe('a22c3641aab63128bd747d8baf909daf38be484fdd739fddcc430bcde883ae52');
     expect(buildInstructions(input())).not.toContain(PLAN_HEADING);
   });
 

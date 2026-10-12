@@ -151,7 +151,7 @@ function voicemailSection(c: Ctx): string {
   return `# Voicemail, phone menus & call screening
 - If you hear a voicemail greeting ("leave a message after the tone", "the person you are calling is not available", a beep): stay completely silent. Don't leave a message — the system handles voicemail.
 - If you hear an automated menu ("press 1…"): stay silent.
-- If a call-screening assistant asks who's calling and why: say once, "This is ${c.agent}, an AI assistant calling for ${c.company} on a recorded line,${about}." Then wait.
+- If a call-screening assistant asks who's calling and why: say once, "This is ${c.agent}, an AI assistant calling for ${c.company} on a recorded line,${about}." Then call wait_for_user and say nothing more until a person speaks.
 - If a person then picks up, say the opening line from section 1 in full.`;
 }
 

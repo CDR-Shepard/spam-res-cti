@@ -1192,6 +1192,30 @@ describe('silence check-ins (gate mode)', () => {
     expect(openai.sent).toEqual([note(30), GATE_CREATE]);
   });
 
+  it('a call screener: after the screener line and a quiet wait_for_user, the first check-in comes at 30 s, not 8 s (F1)', async () => {
+    const { twilio, openai, bridge } = setup({ bargeIn: 'gate' });
+    bridge.start();
+    openai.msg(READY);
+    openai.msg({ type: 'input_audio_buffer.speech_started', item_id: 'c1', audio_start_ms: 0 }); // the screener asks
+    openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: 'c1', audio_end_ms: 3000 });
+    openai.msg({ type: 'input_audio_buffer.committed', item_id: 'c1' });
+    openai.msg({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'c1', content_index: 0, transcript: 'Please say your name and why you are calling.' });
+    expect(openai.sent.filter((m) => m.type === 'response.create')).toEqual([GATE_CREATE]);
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'item_0', delta: audio(4000) }); // "This is Ava, an AI assistant…"
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('wait_for_user', '{}', 'w1')] } });
+    await flush();
+    playAllMarks(twilio);
+    openai.clearSent();
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(openai.sent).toEqual([]);
+    await vi.advanceTimersByTimeAsync(21_999);
+    expect(openai.sent).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(openai.sent).toEqual([note(30), GATE_CREATE]);
+  });
+
   it('keeps waiting 30 s for the second check-in while they are still on hold', async () => {
     const { openai } = await quietAfterAgent();
     openai.msg({ type: 'response.created' });

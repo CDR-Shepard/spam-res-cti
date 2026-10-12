@@ -370,6 +370,13 @@ describe('natural turn-taking rules (2026-10-09)', () => {
     expect(text).toContain('Sure, take your time.');
     expect(text).toContain('- wait_for_user —');
   });
+
+  it('a call screener gets the disclosure once, then wait_for_user (no silence check-in while it works)', () => {
+    expect(text).toContain(
+      'say once, "This is Ava, an AI assistant calling for GG Homes on a recorded line, about the property at 1234 Oak Street." Then call wait_for_user and say nothing more until a person speaks.',
+    );
+    expect(text).not.toContain('Then wait.');
+  });
 });
 
 describe('AI_CALL_TOOLS', () => {
