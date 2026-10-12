@@ -72,7 +72,7 @@ All responses go through one `requestResponse()`: if a response is active or a t
 ### 4.3 Response-time numbers
 
 Per caller turn the agent answers:
-- `endpointMs` — how long after the caller actually stopped the turn was declared over: (caller audio sent to OpenAI so far, in ms, when `speech_stopped` arrives) − `audio_end_ms`. Assumes no early caller audio was dropped by the outbox (it already logs a warning when it does).
+- `endpointMs` — how long after the caller actually stopped the turn was declared over: (caller audio sent to OpenAI so far, in ms, when `speech_stopped` arrives) − `audio_end_ms`. Assumes no early caller audio was dropped by the outbox (it already logs a warning when it does). **Amended 2026-10-12:** OpenAI's `audio_end_ms` already includes the VAD's wait (for `server_vad`, the `silence_duration_ms`), so that formula alone understates what the caller waited (prod showed an endpoint p50 of 90 ms while callers waited seconds). With `server_vad`, `endpointMs` = sent − `audio_end_ms` + `AI_VOICE_SILENCE_MS`. With `semantic_vad` the true wait is not knowable from the event, so the formula is unchanged and still understates it.
 - `answerMs` — wall clock from `speech_stopped` to the first agent audio forwarded to Twilio.
 - `totalMs = endpointMs + answerMs`. Twilio playout and network (~0.1–0.2 s) are not included.
 
@@ -99,8 +99,22 @@ outreach-web shows one line above every call transcript, e.g. "Response time: us
 |---|---|---|
 | `AI_VOICE_BARGE_IN` | `gate` | `instant` = today's behaviour |
 | `AI_VOICE_TRANSCRIBE_MODEL` | gate: `gpt-live-transcribe`; instant: `gpt-4o-mini-transcribe` | Unset follows `AI_VOICE_BARGE_IN`, so `instant` alone also restores today's transcriber; a value set explicitly wins in either mode. Without streaming words the gate degrades to "stop after 3 s" (a short wordless sound is still ignored once the caller stops) |
+| `AI_VOICE_TURN_DETECTION` | gate: `server_vad`; instant: `semantic_vad` | Added 2026-10-12. Unset follows `AI_VOICE_BARGE_IN` (instant keeps today's frames byte for byte); a value set explicitly wins in either mode, so `semantic_vad` alone rolls back just the VAD. `server_vad` is sent as `{ type: 'server_vad', threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms, create_response, interrupt_response }` (gate: both `false`; instant: both `true`) |
+| `AI_VOICE_SILENCE_MS` | `500` | Added 2026-10-12. Integer 200–2000; `server_vad` only. Lower = faster, but the agent more often starts answering into a pause |
 
-`AI_VOICE_VAD_EAGERNESS` (exists, `auto`) stays the knob for the ~1.6 s end-of-turn wait; tune it from the new numbers, not in this spec.
+`AI_VOICE_VAD_EAGERNESS` (exists, `auto`) applies to `semantic_vad` only (2026-10-12; it was the knob for the ~1.6 s end-of-turn wait, which proved to be up to ~4.8 s).
+
+### 2026-10-12 latency finding
+
+Live callers waited seconds for the agent to answer. Measured against the live OpenAI API (scratchpad spike, the real prompt, `gpt-realtime-2.1`, 6 turns per configuration, all times from the caller's last voiced audio):
+
+| Turn detection | Detects end of turn (p50) | Model's first audio (p50) |
+|---|---|---|
+| `semantic_vad`, eagerness `auto` (prod until now) | 4774 ms, bimodal: about 1.0 s or the ~4.8 s cap; short replies such as "Yeah, this is Jane." hit the cap most | 843 ms |
+| `semantic_vad`, eagerness `high` | 2403 ms (about 1.4 s or about 2.9 s) | about 813 ms |
+| `server_vad`, `silence_duration_ms` 500 | 912 ms (all 6 turns 874–1012 ms) | about 882 ms |
+
+The transcriber (`gpt-live-transcribe`, `gpt-4o-mini-transcribe`, none, whisper) and the reasoning effort (`low`, `minimal`) made no material difference. So the gate now defaults to `server_vad` at 500 ms. A caller who pauses longer than that mid-thought gets a response created early; if they resume before the agent's first audio (about 0.9 s later) the gate cancels it unheard (§4.1) and one response answers both parts after their second commit, so the early start costs nothing the caller can hear. Instant mode is unchanged.
 
 ## 6. Testing
 
