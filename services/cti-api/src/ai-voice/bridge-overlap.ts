@@ -63,6 +63,11 @@ export class OverlapGate {
     return this.find(itemId) !== null;
   }
 
+  /** Whether this overlap is late: it began near the end of the agent's turn, or outlasted it. False for any other item. */
+  isLate(itemId: string): boolean {
+    return this.find(itemId)?.late ?? false;
+  }
+
   open(itemId: string, opts: { cuttable: boolean; late: boolean }): void {
     this.clearNoWordsTimer();
     if (this.current !== null) this.displaced = [...this.displaced, this.current];

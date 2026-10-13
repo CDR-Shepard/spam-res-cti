@@ -24,7 +24,7 @@
  * docs/superpowers/specs/2026-10-09-ai-voice-natural-turn-taking-design.md §4.1).
  * Gate mode also checks in after silence (bridge-silence.ts, §4.2). In both modes the bridge
  * times each answered caller turn and reports the call's numbers once via `onStats`, just
- * before `onEnd` (bridge-turn-stats.ts, §4.3).
+ * before `onEnd` (bridge-turn-stats.ts, §4.3), and logs where each one's time went (bridge-turn-timing.ts).
  *
  * Once the call is closing (a hangup/transfer tool result, or `silence()`) the
  * agent is never asked to speak again; in instant mode a hangup/transfer result
@@ -53,6 +53,7 @@ import {
 } from './bridge-session.js';
 import { HOLD_CHECK_MS, SILENCE_CHECK_MS, SilenceCheck, silenceNoteItem } from './bridge-silence.js';
 import { TurnStatsCollector, type BargeInMode } from './bridge-turn-stats.js';
+import { TurnTiming, heldBy } from './bridge-turn-timing.js';
 import { errText, functionCalls, runToolBatch, type BridgeLog, type FunctionCall, type ToolResult } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
 
@@ -128,6 +129,7 @@ export class AiCallBridge {
   private readonly gate: OverlapGate;
   private readonly silenceCheck: SilenceCheck;
   private readonly stats: TurnStatsCollector;
+  private readonly timing: TurnTiming;
   private readonly bargeIn: BargeInMode;
   /** The turn-detection settings with their defaults applied (sent in the session and again when the call closes). */
   private readonly vad: TurnDetectionSettings;
@@ -213,6 +215,7 @@ export class AiCallBridge {
       onSilence: (seconds) => this.onSilence(seconds),
     });
     this.stats = new TurnStatsCollector(this.bargeIn);
+    this.timing = new TurnTiming(this.bargeIn, this.vad.turnDetection, (line) => hooks.log.info(line, 'ai-voice: turn timing'));
     this.outbox = new Outbox(() =>
       hooks.log.warn({ queued: 'full' }, 'ai-voice bridge: openai outbox full, dropping oldest caller audio'),
     );
@@ -256,6 +259,7 @@ export class AiCallBridge {
     this.cancelOpener();
     this.gate.close();
     this.stats.clearOverlaps();
+    this.timing.end(); // Twilio echoes every mark once cleared: that is not playing
     this.silenceCheck.cancel();
     this.cancelWhenCreated = false;
     this.sendTwilio({ event: 'clear', streamSid: this.opts.streamSid });
@@ -291,9 +295,12 @@ export class AiCallBridge {
         }
         return;
       }
-      case 'mark':
-        this.playback.onMark(str(obj(msg.mark).name));
+      case 'mark': {
+        const name = str(obj(msg.mark).name);
+        this.playback.onMark(name);
+        this.timing.played(name, this.now());
         return;
+      }
       case 'stop':
         this.endAndTearDown('twilio_closed');
         return;
@@ -398,6 +405,7 @@ export class AiCallBridge {
   }
 
   private onCallerSpeech(itemId: string): void {
+    this.timing.speechStarted();
     this.callerSpoke = true;
     this.callerTalking = true;
     this.holding = false;
@@ -427,19 +435,25 @@ export class AiCallBridge {
     // server_vad's audio_end_ms already includes its silence wait, so add it back; semantic_vad's true wait is not in the event.
     const endpointMs = this.sentAudioMs - audioEndMs + (this.vad.turnDetection === 'server_vad' ? this.vad.silenceMs : 0);
     // An overlap is not a turn until it is answered (its verdict, or a cut that answers it).
-    if (this.gate.has(itemId)) this.stats.overlapStopped(itemId, endpointMs, this.now());
-    else this.stats.callerStopped(endpointMs, this.now());
+    const at = this.now();
+    const overlap = this.gate.has(itemId);
+    if (overlap) this.stats.overlapStopped(itemId, endpointMs, at);
+    else this.stats.callerStopped(endpointMs, at);
+    this.timing.stopped(itemId, at, overlap, this.gate.isLate(itemId));
   }
 
   /** Gate mode: a committed caller turn gets an answer — an overlap still being judged waits for its verdict. */
   private onCallerTurn(itemId: string): void {
     if (this.awaitingCommit === itemId) this.awaitingCommit = null;
+    this.timing.committed(itemId, this.now());
     if (this.bargeIn !== 'gate' || this.closing) return;
     if (this.gate.has(itemId)) {
       this.judgedTurns = new Set([...this.judgedTurns, itemId]);
+      this.timing.deferred('overlap_verdict', itemId);
       return;
     }
     this.stats.overlapsAnswered([itemId]); // an overlap the gate settled before this commit
+    this.timing.overlapsAnswered([itemId]);
     this.requestResponse();
   }
 
@@ -458,10 +472,12 @@ export class AiCallBridge {
     if (end === 'interrupted') return; // answered by interruptAgent
     if (end === 'ignore') {
       this.stats.overlapIgnored(itemId);
+      this.timing.ignored(itemId);
       return this.afterResponse(); // release an answer it held back
     }
     // Audio still queued: answer when it drains. Otherwise requestResponse waits for any active response's done.
     this.stats.overlapsAnswered([itemId], this.playback.playing);
+    this.timing.overlapsAnswered([itemId], this.playback.playing);
     if (this.playback.playing) this.answerAfterPlayback = true;
     else this.requestResponse();
   }
@@ -496,6 +512,7 @@ export class AiCallBridge {
     this.judgedTurns = new Set();
     if (owed.length === 0) return;
     this.stats.overlapsAnswered(owed);
+    this.timing.overlapsAnswered(owed);
     this.requestResponse();
   }
 
@@ -507,10 +524,15 @@ export class AiCallBridge {
   private requestResponse(): void {
     if (this.closing || this.ended) return;
     // Instant mode: VAD answers turns; the opener and after-tool creates go out at once, as before the gate.
-    if (this.bargeIn === 'instant') return this.sendOpenAi({ type: 'response.create' });
+    if (this.bargeIn === 'instant') {
+      this.timing.requested(this.now());
+      return this.sendOpenAi({ type: 'response.create' });
+    }
     // Never over a caller mid-utterance: their commit (or the overlap's verdict) releases it, answering both.
-    if (this.callerTalking || this.responsePending || this.responseActive || this.toolsRunning) {
+    const held = heldBy(this.callerTalking, this.responsePending || this.responseActive, this.toolsRunning);
+    if (held !== null) {
       this.wantResponse = true;
+      this.timing.deferred(held);
       return;
     }
     this.wantResponse = false;
@@ -519,9 +541,11 @@ export class AiCallBridge {
     this.createSeq += 1;
     this.pendingCreateId = `ai-create-${this.createSeq}`;
     this.sendOpenAi({ type: 'response.create', event_id: this.pendingCreateId });
+    this.timing.requested(this.now());
   }
 
   private onResponseCreated(): void {
+    this.timing.created(this.now());
     this.silenceCheck.cancel();
     this.responsePending = false;
     this.responseActive = true;
@@ -564,6 +588,7 @@ export class AiCallBridge {
   private onAgentWaiting(): void {
     if (!this.waiting()) return;
     this.stats.dropPending();
+    this.timing.dropPending();
     this.silenceCheck.arm(this.holding ? HOLD_CHECK_MS : SILENCE_CHECK_MS);
   }
 
@@ -590,10 +615,13 @@ export class AiCallBridge {
 
   /** Forward agent audio — never before the session is ready, after silence(), or of a response the bridge cancelled. */
   private onAgentAudio(itemId: string, delta: string): void {
+    const at = this.now();
+    this.timing.delta(at);
     if (!this.sessionReady || this.silenced || !delta || this.truncated.has(itemId) || this.responseCut) return;
-    if (!this.responseHasAudio) {
+    const first = !this.responseHasAudio;
+    if (first) {
       this.responseHasAudio = true;
-      this.stats.agentAudio(this.now());
+      this.stats.agentAudio(at);
       this.agentSpoke = true;
       this.openerItemId ??= itemId;
     }
@@ -603,6 +631,7 @@ export class AiCallBridge {
       media: { payload: delta },
     });
     const mark = this.playback.onAudioDelta(itemId, delta);
+    if (first) this.timing.forwarded(at, mark);
     this.sendTwilio({
       event: 'mark',
       streamSid: this.opts.streamSid,
@@ -651,6 +680,7 @@ export class AiCallBridge {
       send: (m: object) => this.sendOpenAi(m),
     };
     this.toolBatches += 1;
+    this.timing.toolBatch();
     this.toolChain = this.toolChain
       .then(async () => {
         // Counted down exactly once, before acting on the result (and even if the batch throws).
@@ -733,6 +763,7 @@ export class AiCallBridge {
     if (this.maxTimer !== null) this.clearTimer(this.maxTimer);
     this.maxTimer = null;
     this.playback.releaseAll();
+    this.timing.end();
     this.guard('onStats', () => this.hooks.onStats?.(this.stats.summary()));
     this.guard('onEnd', () => this.hooks.onEnd(reason, detail));
   }
