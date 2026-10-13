@@ -110,18 +110,23 @@ export function progressLabel(counts: DialerSessionCounts): string {
  * labels).
  */
 export function queueParts(firstPassTotal: number, unreachable: number, breakdown?: Record<string, number>): {
-  total: number; skipOnDialer: number; consent: number; unreachable: number;
+  total: number; skipOnDialer: number; consent: number; unreachable: number; nonUs: number;
   cooldown: number; dailyCap: number; inProgressElsewhere: number; dialing: number;
 } {
   const skipOnDialer = breakdown?.skip_on_dialer ?? 0;
+  // A person with no US number (user ruling 2026-10-12): creation-stamped.
+  const nonUs = breakdown?.non_us ?? 0;
   // Consent skips are creation-stamped too (opted out / blocked list / DNC).
   const consent = (breakdown?.opted_out ?? 0) + (breakdown?.blocked ?? 0) + (breakdown?.dnc_blocked ?? 0);
   const cooldown = (breakdown?.already_worked ?? 0) + (breakdown?.cooldown ?? 0);
   const dailyCap = (breakdown?.daily_cap ?? 0) + (breakdown?.daily_cap_unverified ?? 0);
   const inProgressElsewhere = breakdown?.in_progress_elsewhere ?? 0;
-  const dialing = firstPassTotal - skipOnDialer - consent - unreachable - cooldown - dailyCap - inProgressElsewhere;
-  return { total: firstPassTotal, skipOnDialer, consent, unreachable, cooldown, dailyCap, inProgressElsewhere, dialing };
+  const dialing = firstPassTotal - skipOnDialer - consent - unreachable - nonUs - cooldown - dailyCap - inProgressElsewhere;
+  return { total: firstPassTotal, skipOnDialer, consent, unreachable, nonUs, cooldown, dailyCap, inProgressElsewhere, dialing };
 }
+
+/** "1 non-US number" / "3 non-US numbers": the people skipped for having no US number. */
+const nonUsPart = (n: number): string => `${n} non-US number${n === 1 ? '' : 's'}`;
 
 /** Pure — the run line, e.g. "50 records · 18 called in the last 3 h · dialing 32". Zero parts omitted. */
 export function queueLine(firstPassTotal: number, unreachable: number, breakdown?: Record<string, number>): string {
@@ -129,6 +134,7 @@ export function queueLine(firstPassTotal: number, unreachable: number, breakdown
   const parts = [`${q.total} records`];
   if (q.cooldown > 0) parts.push(`${q.cooldown} called in the last 3 h`);
   if (q.skipOnDialer > 0) parts.push(`${q.skipOnDialer} skipped by flag`);
+  if (q.nonUs > 0) parts.push(nonUsPart(q.nonUs));
   if (q.consent > 0) parts.push(`${q.consent} blocked by consent`);
   if (q.dailyCap > 0) parts.push(`${q.dailyCap} daily limit (state law)`);
   if (q.inProgressElsewhere > 0) parts.push(`${q.inProgressElsewhere} in progress in another run`);
@@ -145,6 +151,7 @@ function leftOutParts(q: ReturnType<typeof queueParts>): string[] {
   if (q.cooldown > 0) parts.push(`${q.cooldown} called in the last 3 h`);
   if (q.skipOnDialer > 0) parts.push(`${q.skipOnDialer} skipped by flag`);
   if (q.unreachable > 0) parts.push(`${q.unreachable} no number`);
+  if (q.nonUs > 0) parts.push(nonUsPart(q.nonUs));
   if (q.consent > 0) parts.push(`${q.consent} blocked`);
   if (q.dailyCap > 0) parts.push(`${q.dailyCap} daily limit (state law)`);
   if (q.inProgressElsewhere > 0) parts.push(`${q.inProgressElsewhere} in progress in another run`);

@@ -2,6 +2,7 @@ import { getDb, schema } from '@cti/db';
 import type { ConsentBlock } from './consent-check.js';
 import { pairKey } from './contact-history.js';
 import { listStartIndex, rotateAfter, type ListRunStart } from './list-position.js';
+import { isNonUsNumber, NON_US_OUTCOME, usOnlyPair } from './us-only.js';
 import { fetchContactNames, resolveDialNumber } from '../salesforce/record-phone.js';
 import { fetchTasks, resolveTaskTarget } from '../salesforce/task-targets.js';
 import { salesforceUserId } from '../salesforce/current-user.js';
@@ -81,6 +82,7 @@ const CONSENT_OUTCOME: Record<ConsentBlock, string> = {
 export const BUILD_SKIP_OUTCOMES: ReadonlySet<string> = new Set([
   SKIP_ON_DIALER_OUTCOME,
   ALREADY_WORKED_OUTCOME,
+  NON_US_OUTCOME,
   ...Object.values(CONSENT_OUTCOME),
 ]);
 
@@ -106,8 +108,16 @@ export function buildQueueRows(
     // is still lawful to call, and refusing it would punish a record nobody
     // asked us to refuse.
     const fallback = r.fallbackConsentBlock ? null : r.fallbackNumber ?? null;
+    // US numbers only (user ruling 2026-10-12), decided AFTER consent: a
+    // consent-blocked first number is skipped on consent and never rerouted to
+    // the second, so it keeps its numbers as resolved. Otherwise a non-US
+    // first number gives way to a US second one, and a non-US second number
+    // is dropped (the end-of-run retry would dial it).
+    const us = r.consentBlock
+      ? { toNumber: r.toNumber, secondNumber: fallback, nonUs: false }
+      : usOnlyPair(r.toNumber, fallback);
     return {
-      sessionId, ordinal: i, objectType: r.objectType, recordId: r.recordId, toNumber: r.toNumber,
+      sessionId, ordinal: i, objectType: r.objectType, recordId: r.recordId, toNumber: us.toNumber,
       // Attempt-1 rows never carry a fallback: the immediate Mobile→Phone
       // retry this field once fed was removed — the engine now settles every
       // miss as one attempt and requeues the OTHER number, if any, in a fresh
@@ -116,7 +126,7 @@ export function buildQueueRows(
       fallbackNumber: null,
       // Immutable copy of the resolved pair: `secondaryNumber` is what the
       // attempt-2 row (built in engine.ts) restores from.
-      attempt: 1, primaryNumber: r.toNumber, secondaryNumber: fallback,
+      attempt: 1, primaryNumber: us.toNumber, secondaryNumber: us.secondNumber,
       taskId: r.taskId ?? null, followupEligible: r.followupEligible ?? true,
       // Written on EVERY status: a skipped or unreachable row says WHO was
       // passed over, not just which number.
@@ -125,18 +135,21 @@ export function buildQueueRows(
       // rotated) queue ordinal above — see list-position.ts. Null on a run
       // with no list view.
       listPosition: r.listPosition ?? null,
-      // PRECEDENCE: consent > skip_on_dialer > already_worked > unreachable.
+      // PRECEDENCE: consent > skip_on_dialer > non_us > already_worked > unreachable.
       // A consent block (opt-out / block list / federal DNC) is the strongest
       // signal there is — it is why the call is unlawful, not merely unwanted —
-      // so it outranks the rep's own checkbox, which in turn outranks "the team
-      // got there first", which in turn outranks "no number" (a flagged record
-      // reads as deliberately skipped, never as unreachable). Either way the row
+      // so it outranks the rep's own checkbox, which in turn outranks "no US
+      // number" (a fact about the person, true on every shift), which outranks
+      // "the team got there first", which in turn outranks "no number" (a
+      // flagged record reads as deliberately skipped, never as unreachable). Either way the row
       // exists and keeps its numbers — the run reports what it passed over
       // instead of dropping it, and the engine only ever picks a 'pending' row.
-      status: r.consentBlock || r.skipOnDialer || r.alreadyWorked ? 'skipped' : r.toNumber ? 'pending' : 'unreachable',
+      status: r.consentBlock || r.skipOnDialer || us.nonUs || r.alreadyWorked ? 'skipped' : us.toNumber ? 'pending' : 'unreachable',
       outcome: r.consentBlock
         ? CONSENT_OUTCOME[r.consentBlock]
-        : r.skipOnDialer ? SKIP_ON_DIALER_OUTCOME : r.alreadyWorked ? ALREADY_WORKED_OUTCOME : null,
+        : r.skipOnDialer ? SKIP_ON_DIALER_OUTCOME
+        : us.nonUs ? NON_US_OUTCOME
+        : r.alreadyWorked ? ALREADY_WORKED_OUTCOME : null,
     };
   });
 }
@@ -322,8 +335,10 @@ async function withPreferredNumbers(deps: CreateSessionDeps, orgId: string, rows
   return rows.map((r) => {
     if (!r.toNumber || !r.fallbackNumber) return r; // nothing to prefer between
     const pref = preferred.get(pairKey(r.toNumber, r.fallbackNumber));
-    // Ignore anything that isn't one of THIS row's own two numbers.
-    if (pref === undefined || (pref !== r.toNumber && pref !== r.fallbackNumber)) return r;
+    // Ignore anything that isn't one of THIS row's own two numbers — and a
+    // non-US one: keeping it would drop the person's US number, and the US
+    // rule (buildQueueRows) would then skip someone it could have dialed.
+    if (pref === undefined || isNonUsNumber(pref) || (pref !== r.toNumber && pref !== r.fallbackNumber)) return r;
     // No fallback to carry: the number nobody answered on is simply gone,
     // whether the preference was the primary or the secondary.
     return { ...r, toNumber: pref, fallbackNumber: null };
