@@ -101,7 +101,7 @@ describe('AI call routes', () => {
   describe('transcript', () => {
     it('relays the transcript; 403 for a rep who may not read it; 404 for an unknown call or a bad id', async () => {
       app = await build(null);
-      const transcript = { aiCallId: AI_CALL_ID, lines: [{ role: 'agent', text: 'Hi', at: null }] };
+      const transcript = { aiCallId: AI_CALL_ID, lines: [{ role: 'agent', text: 'Hi', at: null }], turnStats: null };
       query.loadTranscript.mockResolvedValueOnce(transcript);
       expect((await call('GET', `/api/ai-calls/${AI_CALL_ID}/transcript`)).json()).toEqual(transcript);
       query.loadTranscript.mockResolvedValueOnce('forbidden');

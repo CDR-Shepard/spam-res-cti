@@ -1,6 +1,18 @@
 import { toE164 } from '@cti/phone';
 import { z } from 'zod';
 
+/**
+ * Two AI voice settings, when unset, follow AI_VOICE_BARGE_IN, so AI_VOICE_BARGE_IN=instant alone is the whole rollback:
+ * - The session transcriber (AI_VOICE_TRANSCRIBE_MODEL): the gate needs one that streams words while the caller
+ *   talks; `instant` keeps the pre-2026-10-09 one.
+ * - The turn detector (AI_VOICE_TURN_DETECTION): the gate uses silence-based `server_vad` (the caller's turn ends
+ *   after AI_VOICE_SILENCE_MS of silence, ~0.9 s measured 2026-10-12; `semantic_vad` measured up to ~4.8 s on
+ *   short replies); `instant` keeps `semantic_vad`, today's frames.
+ * An explicit value of either wins in both modes (AI_VOICE_TURN_DETECTION=semantic_vad rolls back just the VAD).
+ */
+const DEFAULT_TRANSCRIBE_MODEL = { gate: 'gpt-live-transcribe', instant: 'gpt-4o-mini-transcribe' } as const;
+const DEFAULT_TURN_DETECTION = { gate: 'server_vad', instant: 'semantic_vad' } as const;
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   API_PORT: z.coerce.number().int().positive().default(4000),
@@ -210,6 +222,18 @@ const schema = z.object({
   AI_VOICE_REASONING: z.enum(['minimal', 'low', 'medium', 'high']).default('low'),
   AI_VOICE_VAD_EAGERNESS: z.enum(['low', 'medium', 'high', 'auto']).default('auto'),
   AI_VOICE_VOICE: z.string().default('marin'),
+  /**
+   * Barge-in (spec 2026-10-09): `gate` = the bridge keeps the agent talking through "mm-hmm"
+   * and stops it on a real interruption, from the caller's streamed words; `instant` = the
+   * pre-2026-10-09 behaviour (OpenAI stops the agent on any caller sound). Rollback switch.
+   */
+  AI_VOICE_BARGE_IN: z.enum(['gate', 'instant']).default('gate'),
+  /** The Realtime session transcriber. Unset = follows AI_VOICE_BARGE_IN (DEFAULT_TRANSCRIBE_MODEL); a value wins in either mode. */
+  AI_VOICE_TRANSCRIBE_MODEL: z.string().optional(),
+  /** What ends the caller's turn. Unset = follows AI_VOICE_BARGE_IN (DEFAULT_TURN_DETECTION); a value wins in either mode. */
+  AI_VOICE_TURN_DETECTION: z.enum(['server_vad', 'semantic_vad']).optional(),
+  /** server_vad only: how long the caller must be silent before their turn is over, in ms. Lower = faster, but answers into pauses more often. */
+  AI_VOICE_SILENCE_MS: z.coerce.number().int().min(200).max(2000).default(500),
   AI_VOICE_AGENT_NAME: z.string().default('Alex'),
   /**
    * Comma-separated numbers an admin may AI-call without Salesforce consent and
@@ -231,7 +255,11 @@ const schema = z.object({
    * production they answer 404, exactly like a route that does not exist; outside production, 503 `internal_disabled`.
    */
   OUTREACH_INTERNAL_SECRET: z.string().min(32).optional(),
-});
+}).transform((c) => ({
+  ...c,
+  AI_VOICE_TRANSCRIBE_MODEL: c.AI_VOICE_TRANSCRIBE_MODEL ?? DEFAULT_TRANSCRIBE_MODEL[c.AI_VOICE_BARGE_IN],
+  AI_VOICE_TURN_DETECTION: c.AI_VOICE_TURN_DETECTION ?? DEFAULT_TURN_DETECTION[c.AI_VOICE_BARGE_IN],
+}));
 
 export type AppConfig = z.infer<typeof schema>;
 

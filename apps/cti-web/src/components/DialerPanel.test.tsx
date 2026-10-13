@@ -83,6 +83,14 @@ describe('queueLine', () => {
     expect(queueLine(50, 0)).toBe('50 records · dialing 50');
   });
 
+  // User ruling 2026-10-12: non-US numbers are skipped at queue build.
+  it('non-US skips come out of the dialing figure and are itemized', () => {
+    expect(queueLine(50, 0, { non_us: 2 })).toBe('50 records · 2 non-US numbers · dialing 48');
+    expect(queueLine(50, 0, { already_worked: 15, skip_on_dialer: 3, non_us: 1, opted_out: 2 }))
+      .toBe('50 records · 15 called in the last 3 h · 3 skipped by flag · 1 non-US number · 2 blocked by consent · dialing 29');
+    expect(queueParts(50, 0, { non_us: 2 })).toMatchObject({ nonUs: 2, dialing: 48 });
+  });
+
   it('takes phone-less records out of the dialing figure', () => {
     // 50 in the run, 18 inherited, 2 with no number → 30 will actually ring.
     expect(queueLine(50, 2, { already_worked: 18 })).toBe('50 records · 18 called in the last 3 h · dialing 30');
@@ -147,21 +155,21 @@ describe('queueLine', () => {
 describe('queueParts — the cadence skip reasons (spec §5)', () => {
   it('folds daily_cap_unverified into dailyCap and subtracts all three cadence reasons from dialing', () => {
     expect(queueParts(10, 0, { cooldown: 2, daily_cap: 1, daily_cap_unverified: 1, in_progress_elsewhere: 1 })).toEqual({
-      total: 10, skipOnDialer: 0, consent: 0, unreachable: 0,
+      total: 10, skipOnDialer: 0, consent: 0, unreachable: 0, nonUs: 0,
       cooldown: 2, dailyCap: 2, inProgressElsewhere: 1, dialing: 5,
     });
   });
 
   it('with no cadence keys, the new fields are zero and dialing is unaffected', () => {
     expect(queueParts(50, 0, { already_worked: 18 })).toEqual({
-      total: 50, skipOnDialer: 0, consent: 0, unreachable: 0,
+      total: 50, skipOnDialer: 0, consent: 0, unreachable: 0, nonUs: 0,
       cooldown: 18, dailyCap: 0, inProgressElsewhere: 0, dialing: 32,
     });
   });
 
   it('already_worked (queue-build estimate) and cooldown (dial-time gate) are the same 3-hour rule — one folded count', () => {
     expect(queueParts(10, 0, { already_worked: 2, cooldown: 1 })).toEqual({
-      total: 10, skipOnDialer: 0, consent: 0, unreachable: 0,
+      total: 10, skipOnDialer: 0, consent: 0, unreachable: 0, nonUs: 0,
       cooldown: 3, dailyCap: 0, inProgressElsewhere: 0, dialing: 7,
     });
   });
@@ -1064,5 +1072,15 @@ describe('runSizeForCurrentRecord — the runSize prop for "record X of N" (spec
     expect(runSizeForCurrentRecord({ maxRecords: 100 }, 202)).toBe(202);
     expect(runSizeForCurrentRecord({ maxRecords: null }, 202)).toBeNull();
     expect(runSizeForCurrentRecord({}, 202)).toBeNull();
+  });
+});
+
+describe('confirmLine / wholeListLine — non-US numbers', () => {
+  it('the confirm line leaves non-US numbers out of "will be dialed" and says so', () => {
+    expect(confirmLine(50, 4, { non_us: 2, opted_out: 2 })).toBe('42 will be dialed · 4 no number · 2 non-US numbers · 2 blocked');
+  });
+
+  it('the whole-list line itemizes them too', () => {
+    expect(wholeListLine(50, 0, { non_us: 1 }, 10)).toBe('Whole list: 49 dialable · 1 non-US number');
   });
 });

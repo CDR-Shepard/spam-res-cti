@@ -26,6 +26,7 @@ export function rowOf(v: NewAiCall & { id: string }): AiCallRow {
     answeredBy: null,
     qualification: {},
     transcript: [],
+    turnStats: null,
     summary: null,
     callbackAt: null,
     sfTaskId: null,

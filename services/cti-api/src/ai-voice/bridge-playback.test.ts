@@ -142,3 +142,108 @@ describe('PlaybackTracker', () => {
     await expect(w).resolves.toBeUndefined();
   });
 });
+
+describe('drained listener, current item and audio left', () => {
+  const b64 = (ms: number) => Buffer.alloc(ms * 8).toString('base64');
+
+  it('calls onDrained once the last mark plays after audio done, not on interrupt', () => {
+    const onDrained = vi.fn();
+    const p = new PlaybackTracker({ onDrained });
+    const m1 = p.onAudioDelta('item_1', b64(100));
+    p.onAudioDone();
+    expect(onDrained).not.toHaveBeenCalled();
+    p.onMark(m1);
+    expect(onDrained).toHaveBeenCalledTimes(1);
+
+    p.onAudioDelta('item_2', b64(100));
+    p.interrupt();
+    expect(onDrained).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not call onDrained for a response with no audio', () => {
+    const onDrained = vi.fn();
+    const p = new PlaybackTracker({ onDrained });
+    p.onResponseDone();
+    expect(onDrained).not.toHaveBeenCalled();
+  });
+
+  it('reports the current item and the audio left to play', () => {
+    const p = new PlaybackTracker();
+    expect(p.currentItemId).toBeNull();
+    expect(p.remainingMs()).toBe(0);
+    p.onInboundMedia(1000);
+    p.onAudioDelta('item_1', b64(3000));
+    expect(p.currentItemId).toBe('item_1');
+    expect(p.remainingMs()).toBe(Number.POSITIVE_INFINITY); // still streaming
+    p.onAudioDone();
+    p.onInboundMedia(2500);
+    expect(p.remainingMs()).toBe(1500);
+    p.onInboundMedia(9000);
+    expect(p.remainingMs()).toBe(0);
+  });
+
+  it('reports Infinity while the response streams even when every mark has echoed', () => {
+    const p = new PlaybackTracker();
+    const m = p.onAudioDelta('item_1', Buffer.alloc(800).toString('base64'));
+    p.onMark(m);
+    expect(p.remainingMs()).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe('audio left when a second item queues behind the first (final review F4)', () => {
+  const b64 = (ms: number) => Buffer.alloc(ms * 8).toString('base64');
+
+  it('counts the first item still playing: the next one starts when the first ends, not when it was forwarded', () => {
+    const p = new PlaybackTracker();
+    p.onInboundMedia(1000);
+    p.onAudioDelta('item_a', b64(3000)); // plays 1000–4000
+    p.onAudioDone();
+    p.onInboundMedia(1200);
+    p.onAudioDelta('item_b', b64(2000)); // forwarded at 1200, plays 4000–6000
+    p.onAudioDone();
+    p.onInboundMedia(3000);
+    expect(p.remainingMs()).toBe(3000);
+    p.onInboundMedia(4800);
+    expect(p.remainingMs()).toBe(1200);
+    p.onInboundMedia(7000);
+    expect(p.remainingMs()).toBe(0);
+  });
+
+  it('chains a third queued item, and starts fresh once everything has played', () => {
+    const p = new PlaybackTracker();
+    p.onInboundMedia(1000);
+    p.onAudioDelta('item_a', b64(1000)); // 1000–2000
+    p.onAudioDelta('item_b', b64(1000)); // 2000–3000
+    const m = p.onAudioDelta('item_c', b64(1000)); // 3000–4000
+    p.onAudioDone();
+    p.onInboundMedia(1500);
+    expect(p.remainingMs()).toBe(2500);
+    p.onMark(m); // all played (early echo)
+    p.onInboundMedia(5000);
+    p.onAudioDelta('item_d', b64(1000)); // nothing queued: plays from now
+    p.onAudioDone();
+    p.onInboundMedia(5400);
+    expect(p.remainingMs()).toBe(600);
+  });
+
+  it('a queued item never starts before it was forwarded', () => {
+    const p = new PlaybackTracker();
+    p.onInboundMedia(1000);
+    p.onAudioDelta('item_a', b64(200)); // 1000–1200, its marks not echoed yet
+    p.onInboundMedia(2000);
+    p.onAudioDelta('item_b', b64(1000)); // forwarded at 2000: plays 2000–3000
+    p.onAudioDone();
+    p.onInboundMedia(2500);
+    expect(p.remainingMs()).toBe(500);
+  });
+
+  it('leaves the truncate offset as before: from when the item was forwarded', () => {
+    const p = new PlaybackTracker();
+    p.onInboundMedia(1000);
+    p.onAudioDelta('item_a', b64(3000));
+    p.onInboundMedia(1200);
+    p.onAudioDelta('item_b', b64(2000));
+    p.onInboundMedia(2000);
+    expect(p.interrupt()).toEqual({ itemId: 'item_b', audioEndMs: 800 });
+  });
+});

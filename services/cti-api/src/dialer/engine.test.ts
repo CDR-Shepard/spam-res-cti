@@ -737,7 +737,7 @@ describe('advanceSession', () => {
   it('a customer_ceiling skip marks the item skipped and moves on without pausing', async () => {
     const items = [
       { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+1', secondaryNumber: null, followupEligible: true },
-      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+2', secondaryNumber: null, followupEligible: true },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550102', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+16195550102', secondaryNumber: null, followupEligible: true },
     ];
     const pickDid = vi.fn().mockResolvedValueOnce({ skip: 'customer_ceiling' }).mockResolvedValueOnce({ e164: '+16190000000' });
     const deps = makeDeps({ pickDid } as any); const fdb = fakeDb(baseSession, items); deps.db = fdb;
@@ -754,7 +754,7 @@ describe('advanceSession', () => {
     // second concurrent call for the same rep.
     const items = [
       { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: null },
-      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550102', recordId: '00Q2', objectType: 'Lead', callId: null },
     ];
     const pickDid = vi.fn(async () => {
       items[0]!.status = 'dialing'; // the other advance won the claim mid-pick
@@ -895,7 +895,7 @@ describe('handleDialOutcome', () => {
     // pair forward unchanged and dials the secondary, with no fallback left.
     const items = [
       { id: 'i1', ordinal: 0, status: 'dialing', toNumber: '+16195550100', fallbackNumber: null, recordId: '00Q1', objectType: 'Lead', callId: 'CA1', attempt: 1, primaryNumber: '+16195550100', secondaryNumber: '+16195550199', sessionId: 'S1', followupEligible: true },
-      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+2', secondaryNumber: null, sessionId: 'S1' },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550102', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1, primaryNumber: '+16195550102', secondaryNumber: null, sessionId: 'S1' },
     ];
     const deps = makeDeps({ contactHistory: oneOwnDialToday() }); const fdb = fakeDb(baseSession, items); deps.db = fdb;
     await handleDialOutcome('CA1', 'busy', deps);
@@ -1521,7 +1521,7 @@ describe('handleDialOutcome — the prospect hangs up on a connected call', () =
   it('stamps prospect_ended_at, does NOT advance, does NOT redial', async () => {
     const items = [
       { id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' },
-      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550102', recordId: '00Q2', objectType: 'Lead', callId: null },
     ];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
     await handleDialOutcome('CA1', 'hangup', deps);
@@ -1683,7 +1683,7 @@ describe('endCurrent', () => {
     // stopSession's "flip first, hang up last" rule.
     const items = [
       { id: 'i1', ordinal: 0, status: 'connected', toNumber: '+1', recordId: '00Q1', objectType: 'Lead', callId: 'CA1' },
-      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+2', recordId: '00Q2', objectType: 'Lead', callId: null },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550102', recordId: '00Q2', objectType: 'Lead', callId: null },
     ];
     const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
     const seen: Array<{ paused: boolean; done: boolean }> = [];
@@ -2854,5 +2854,258 @@ describe('handleDialOutcome connected — the bridged-call log and its recording
     deps.db = fakeDb(baseSession, connectedItems());
     await expect(handleDialOutcome('CA1', 'connected', deps)).rejects.toThrow('twilio 500');
     expect(deps.onBridged).not.toHaveBeenCalled();
+  });
+});
+
+// 2026-10-12, Jordyn: a Lead's Mexican number (+52) sat first in her list.
+// Mexico is off in our Twilio geo permissions, so `calls.create` refused it
+// (21215). The engine rolled the row back to pending and threw, Start answered
+// "Bad Request", the web stopped the run, and the next Start hit the same row
+// first again: four Starts, four dead runs. A destination Twilio refuses is
+// THAT person's problem, not the run's: skip them and dial the next one.
+// (Non-US numbers like that one are now skipped before Twilio is ever asked —
+// see the non-US describe below — so these tests use US numbers Twilio refuses:
+// an invalid or unreachable number, or geo permissions turned off for the US.)
+describe('advanceSession — a number Twilio refuses outright', () => {
+  beforeEach(() => { _target = {}; });
+  const twilioError = (code: number, status = 400) =>
+    Object.assign(new Error(`Twilio refused (${code})`), { status, code });
+  const twoItems = () => [
+    { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+16195550111', recordId: '00Q1', objectType: 'Lead', callId: null as string | null, attempt: 1 },
+    { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550100', recordId: '00Q2', objectType: 'Lead', callId: null as string | null, attempt: 1 },
+  ];
+  // The claim transaction commits 'dialing' onto the row before originate is
+  // called; the fake's bookkeeping does not touch `items`, so reflect it here
+  // (as the rollback test above does) so the guarded settle sees the row it
+  // really would. i1 is refused with `err`; every other row places a call.
+  const telephonyRefusing = (items: Array<{ id: string; status: string }>, err: unknown) => ({
+    originate: vi.fn(async (a: { itemId: string }) => {
+      items.find((i) => i.id === a.itemId)!.status = 'dialing';
+      if (a.itemId === 'i1') throw err;
+      return { callId: 'CA2' };
+    }),
+    bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}), endConference: vi.fn(async () => {}),
+  });
+
+  it.each([21211, 21214, 21215, 21216, 21217])('Twilio %i: skips just that person and dials the next', async (code) => {
+    const items = twoItems();
+    const deps = makeDeps({ telephony: telephonyRefusing(items, twilioError(code)) });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    const r = await advanceSession('S1', deps);
+    expect(r).toEqual({ action: 'dialing', itemId: 'i2' });
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(2);
+    expect(deps.telephony.originate).toHaveBeenLastCalledWith(expect.objectContaining({ itemId: 'i2', toE164: '+16195550100' }));
+    // The settle is guarded on the row still being exactly the one this
+    // advance claimed — same row-only guard as the transient rollback.
+    const settle = fdb._updateWheres.find((w: any) => w.patch.outcome === 'undialable');
+    expect(settle.patch).toEqual(expect.objectContaining({ status: 'skipped', outcome: 'undialable' }));
+    const q = new PgDialect().sqlToQuery(settle.where);
+    expect(q.sql).toBe('("dialer_queue_items"."id" = $1 and "dialer_queue_items"."status" = $2)');
+    expect(q.params).toEqual(['i1', 'dialing']);
+    // Never back to pending: that is what put the row first in line again.
+    expect(fdb._writes.some((w: any) => w.patch.status === 'pending')).toBe(false);
+    // The phone never rang: no dial-attempt row for the refused number.
+    expect(fdb._txInserts.map((x: any) => x.values.itemId)).toEqual(['i2']);
+  });
+
+  it('Start with the refused number first in line still starts the run (the reported case)', async () => {
+    const items = twoItems();
+    const deps = makeDeps({ telephony: telephonyRefusing(items, twilioError(21215)) });
+    const fdb = fakeDb({ ...baseSession, status: 'ready' }, items); deps.db = fdb;
+    expect(await startSession('S1', deps)).toEqual({ action: 'dialing', itemId: 'i2' });
+  });
+
+  it('a refused number as the LAST person ends the run as done instead of throwing', async () => {
+    const items = twoItems().slice(0, 1);
+    const deps = makeDeps({ telephony: telephonyRefusing(items, twilioError(21215)) });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    expect(await advanceSession('S1', deps)).toEqual({ action: 'done' });
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'done' }) });
+  });
+
+  // A refusal about OUR side (the From number) would hit every person the
+  // same way: skipping would silently burn through the whole list.
+  it.each([21210, 21212])('Twilio %i (our caller ID) still rolls the row back and throws — never skips through the list', async (code) => {
+    const items = twoItems();
+    const deps = makeDeps({ telephony: telephonyRefusing(items, twilioError(code)) });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await expect(advanceSession('S1', deps)).rejects.toThrow(`Twilio refused (${code})`);
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(1);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'pending' }) });
+    expect(fdb._writes.some((w: any) => w.patch.status === 'skipped')).toBe(false);
+  });
+
+  it.each([
+    ['a Twilio 5xx carrying a destination code', twilioError(21215, 500)],
+    ['a network error (string code)', Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })],
+    ['a plain error', new Error('twilio 500')],
+  ])('%s is transient: rolled back and rethrown, nobody skipped', async (_label, err) => {
+    const items = twoItems();
+    const deps = makeDeps({ telephony: telephonyRefusing(items, err) });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await expect(advanceSession('S1', deps)).rejects.toBe(err);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'pending' }) });
+    expect(fdb._writes.some((w: any) => w.patch.status === 'skipped')).toBe(false);
+  });
+
+  it('a row settled under us while originate was out (take-callback) is not overwritten', async () => {
+    const items = twoItems();
+    const deps = makeDeps({
+      telephony: {
+        originate: vi.fn(async (a: { itemId: string }) => {
+          // take-callback's own transaction settled i1 while this call was in flight.
+          if (a.itemId === 'i1') { items[0]!.status = 'skipped'; throw twilioError(21215); }
+          items[1]!.status = 'dialing';
+          return { callId: 'CA2' };
+        }),
+        bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}), endConference: vi.fn(async () => {}),
+      },
+    });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await advanceSession('S1', deps);
+    expect(fdb._writes.some((w: any) => w.patch.outcome === 'undialable')).toBe(false);
+    expect(fdb._writes.some((w: any) => w.patch.status === 'pending')).toBe(false);
+  });
+  // Review (c391227, Minor 1): with Postgres snapshot reads, a lost guard must
+  // re-read the queue, see the next person already `dialing` under a Skip's own
+  // advance, and back off — never place a second concurrent call for the rep.
+  it('a Skip settled the refused row and its own advance already claimed the next person: back off, never a second originate', async () => {
+    const items = twoItems();
+    const deps = makeDeps({
+      telephony: {
+        originate: vi.fn(async (a: { itemId: string }) => {
+          if (a.itemId === 'i1') { items[0]!.status = 'skipped'; items[1]!.status = 'dialing'; throw twilioError(21215); }
+          return { callId: 'CA2' };
+        }),
+        bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}), endConference: vi.fn(async () => {}),
+      },
+    });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    fdb.query.dialerQueueItems.findMany = async () => items.map((i) => ({ ...i })); // snapshot reads, like Postgres
+    expect(await advanceSession('S1', deps)).toEqual({ action: 'waiting' });
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(1);
+  });
+
+  // Review (c391227, Minor 2): the originate is the loop's longest wait. A Stop
+  // (or Pause) that landed during it must end this advance after the skip — not
+  // carry on against the stale in-memory session, where "no numbers" would flip
+  // a stopped run back to paused and "nothing left" would end it as done.
+  it.each(['stopped', 'paused'])('the run went %s while Twilio was refusing: skip the row, then stop advancing', async (status) => {
+    const items = twoItems();
+    const session = { ...baseSession };
+    const deps = makeDeps({
+      telephony: {
+        originate: vi.fn(async (a: { itemId: string }) => {
+          items.find((i) => i.id === a.itemId)!.status = 'dialing';
+          session.status = status;
+          throw twilioError(21215);
+        }),
+        bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}), endConference: vi.fn(async () => {}),
+      },
+    });
+    const fdb = fakeDb(session, items); deps.db = fdb;
+    expect(await advanceSession('S1', deps)).toEqual({ action: 'idle' });
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(1);
+    expect(deps.pickDid).toHaveBeenCalledTimes(1);
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped', outcome: 'undialable' }) });
+    expect(fdb._writes.some((w: any) => w.patch.status === 'paused' || w.patch.status === 'done')).toBe(false);
+  });
+
+  it('the row was settled under us AND the run stopped while Twilio was refusing: no reload, no further advance', async () => {
+    const items = twoItems();
+    const session = { ...baseSession };
+    const deps = makeDeps({
+      telephony: {
+        originate: vi.fn(async () => { items[0]!.status = 'skipped'; session.status = 'stopped'; throw twilioError(21215); }),
+        bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}), endConference: vi.fn(async () => {}),
+      },
+    });
+    const fdb = fakeDb(session, items); deps.db = fdb;
+    expect(await advanceSession('S1', deps)).toEqual({ action: 'idle' });
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(1);
+    expect(deps.pickDid).toHaveBeenCalledTimes(1);
+    // Only the claim's own flip: the refused settle lost, nothing else was written.
+    expect(fdb._writes).toEqual([{ patch: expect.objectContaining({ status: 'dialing' }) }]);
+  });
+
+  // Review (c391227, Minor 4): a refusal that is really OUR problem (US turned
+  // off in geo permissions, a number-format bug) refuses every +1 number. Five
+  // refused +1 numbers in one advance stop skipping and fail loud, as before.
+  const refusedThenGood = (refused: number, prefix = '+1619555') => [
+    ...Array.from({ length: refused }, (_, n) => ({ id: `r${n}`, ordinal: n, status: 'pending', toNumber: `${prefix}${String(1000 + n)}`, recordId: `00QR${n}`, objectType: 'Lead', callId: null as string | null, attempt: 1 })),
+    { id: 'ok', ordinal: refused, status: 'pending', toNumber: '+16195550100', recordId: '00QOK', objectType: 'Lead', callId: null as string | null, attempt: 1 },
+  ];
+  const telephonyRefusingAllBut = (items: Array<{ id: string; status: string }>) => ({
+    originate: vi.fn(async (a: { itemId: string }) => {
+      items.find((i) => i.id === a.itemId)!.status = 'dialing';
+      if (a.itemId !== 'ok') throw twilioError(21215);
+      return { callId: 'CA9' };
+    }),
+    bridgeToRep: vi.fn(async () => {}), hangup: vi.fn(async () => {}), endConference: vi.fn(async () => {}),
+  });
+
+  it('four refused +1 numbers in a row are skipped and the fifth person is dialed', async () => {
+    const items = refusedThenGood(4);
+    const deps = makeDeps({ telephony: telephonyRefusingAllBut(items) });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    expect(await advanceSession('S1', deps)).toEqual({ action: 'dialing', itemId: 'ok' });
+    expect(fdb._writes.filter((w: any) => w.patch.outcome === 'undialable')).toHaveLength(4);
+  });
+
+  it('the fifth refused +1 number rolls that row back and throws instead of skipping through the list', async () => {
+    const items = refusedThenGood(5);
+    const deps = makeDeps({ telephony: telephonyRefusingAllBut(items) });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    await expect(advanceSession('S1', deps)).rejects.toThrow('Twilio refused (21215)');
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(5);
+    expect(fdb._writes.filter((w: any) => w.patch.outcome === 'undialable')).toHaveLength(4);
+    expect(items.find((i) => i.id === 'r4')!.status).toBe('dialing'); // the fake's update doesn't touch `items`
+    expect(fdb._updateWheres.at(-1)).toEqual(expect.objectContaining({ patch: expect.objectContaining({ status: 'pending' }) }));
+  });
+  // Re-review (92ed4b6, Important 1): a block of foreign numbers must never
+  // trip the stop — they write no attempt row, so the next run's list start
+  // would put the same block at its head again and kill every Start. They now
+  // never reach Twilio at all: skipped as non-US, so the refusal count stays 0.
+  it('a block of +52 numbers never reaches Twilio or the stop: all skipped non_us, the next person dialed', async () => {
+    const items = refusedThenGood(8, '+52663458');
+    const deps = makeDeps({ telephony: telephonyRefusingAllBut(items) });
+    const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    expect(await advanceSession('S1', deps)).toEqual({ action: 'dialing', itemId: 'ok' });
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(1);
+    expect(fdb._writes.filter((w: any) => w.patch.outcome === 'non_us')).toHaveLength(8);
+    expect(fdb._writes.some((w: any) => w.patch.status === 'pending')).toBe(false);
+  });
+});
+
+// User ruling 2026-10-12: the power dialer skips non-US numbers. Queue build
+// already does (create-session.ts); this is the dial-time backstop for rows
+// built before that shipped, and for any row whose number came from elsewhere.
+describe('advanceSession — a non-US number is never dialed', () => {
+  beforeEach(() => { _target = {}; });
+
+  it('skips the non-US row as non_us (guarded on pending) without asking for a DID, and dials the next person', async () => {
+    const items = [
+      { id: 'i1', ordinal: 0, status: 'pending', toNumber: '+526634580000', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 },
+      { id: 'i2', ordinal: 1, status: 'pending', toNumber: '+16195550100', recordId: '00Q2', objectType: 'Lead', callId: null, attempt: 1 },
+    ];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    expect(await advanceSession('S1', deps)).toEqual({ action: 'dialing', itemId: 'i2' });
+    expect(deps.telephony.originate).toHaveBeenCalledTimes(1);
+    expect(deps.telephony.originate).toHaveBeenCalledWith(expect.objectContaining({ itemId: 'i2' }));
+    expect(deps.pickDid).toHaveBeenCalledTimes(1);
+    expect(deps.contactHistory).toHaveBeenCalledTimes(1);
+    const skip = fdb._updateWheres.find((w: any) => w.patch.outcome === 'non_us');
+    expect(skip.patch).toEqual(expect.objectContaining({ status: 'skipped', outcome: 'non_us' }));
+    const q = new PgDialect().sqlToQuery(skip.where);
+    expect(q.sql).toBe('("dialer_queue_items"."id" = $1 and "dialer_queue_items"."status" = $2)');
+    expect(q.params).toEqual(['i1', 'pending']);
+  });
+
+  it('a Canadian number is non-US too', async () => {
+    const items = [{ id: 'i1', ordinal: 0, status: 'pending', toNumber: '+14162340000', recordId: '00Q1', objectType: 'Lead', callId: null, attempt: 1 }];
+    const deps = makeDeps(); const fdb = fakeDb(baseSession, items); deps.db = fdb;
+    expect(await advanceSession('S1', deps)).toEqual({ action: 'done' });
+    expect(deps.telephony.originate).not.toHaveBeenCalled();
+    expect(fdb._writes).toContainEqual({ patch: expect.objectContaining({ status: 'skipped', outcome: 'non_us' }) });
   });
 });

@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
-import { AiCallResultsResponse } from '@cti/contracts';
+import { AiCallResultsResponse, type AiCallTurnStats } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { seedAiCall, seedAiCallRequest, seedReleasedLead } from '../test/ai-call-seed.js';
 import { ctxOf, seedAiCallCampaign, seedUser } from '../test/call-plan-seed.js';
@@ -10,9 +10,21 @@ import { seedConnection } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { NEW_OPP, PHONE_BOOKING, seedWriteback } from '../test/writeback-harness.js';
 import { insertRecordTest } from '../record-tests/store.js';
-import { listAiCallResults, loadTranscript, RESULTS_PAGE_SIZE, transcriptLines } from './results-query.js';
+import { listAiCallResults, loadTranscript, parseTurnStats, RESULTS_PAGE_SIZE, transcriptLines } from './results-query.js';
 
 const OWNER = '005000000000001AAA';
+
+const STATS: AiCallTurnStats = {
+  v: 1,
+  bargeIn: 'gate',
+  turns: 4,
+  totalMs: { p50: 1900, p90: 2600, max: 3100 },
+  endpointMs: { p50: 1100 },
+  answerMs: { p50: 800 },
+  interruptions: 1,
+  listening: 4,
+  silenceChecks: 0,
+};
 
 describe('transcriptLines', () => {
   it('keeps well-formed lines in order and drops the rest', () => {
@@ -32,6 +44,21 @@ describe('transcriptLines', () => {
       { role: 'system', text: 'Call ended', at: '2026-10-05T23:02:00.000Z' },
     ]);
     expect(transcriptLines({ not: 'an array' })).toEqual([]);
+  });
+});
+
+describe('parseTurnStats', () => {
+  it('returns a stats object this version understands, unchanged', () => {
+    expect(parseTurnStats(STATS)).toEqual(STATS);
+    expect(parseTurnStats({ ...STATS, totalMs: null, endpointMs: null, answerMs: null, turns: 0 })).toEqual({ ...STATS, totalMs: null, endpointMs: null, answerMs: null, turns: 0 });
+  });
+  it('reads null, another version, or garbage as null (calls made before turn stats existed, or by a newer cti-api)', () => {
+    expect(parseTurnStats(null)).toBeNull();
+    expect(parseTurnStats(undefined)).toBeNull();
+    expect(parseTurnStats({ v: 9 })).toBeNull();
+    expect(parseTurnStats({ ...STATS, turns: -1 })).toBeNull();
+    expect(parseTurnStats('garbage')).toBeNull();
+    expect(parseTurnStats([STATS])).toBeNull();
   });
 });
 
@@ -134,7 +161,7 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
     const aiCallId = await seedAiCall(db, s.base.orgId, s.admin, { status: 'completed', transcript: [{ role: 'agent', text: 'Hello', at: '2026-10-05T23:00:01.000Z' }, { bad: true }] });
     await touchSet(lead.touchId, { status: 'sent', aiCallId });
 
-    const want = { aiCallId, lines: [{ role: 'agent', text: 'Hello', at: '2026-10-05T23:00:01.000Z' }] };
+    const want = { aiCallId, lines: [{ role: 'agent', text: 'Hello', at: '2026-10-05T23:00:01.000Z' }], turnStats: null };
     expect(await loadTranscript(db, ctxOf(s.base.orgId, s.owner, false), aiCallId)).toEqual(want);
     expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), aiCallId)).toEqual(want);
     expect(await loadTranscript(db, ctxOf(s.base.orgId, s.rep, false), aiCallId)).toBe('forbidden');
@@ -143,6 +170,23 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
     expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), '99999999-9999-4999-8999-999999999999')).toBeNull();
     const testCall = await seedAiCall(db, s.base.orgId, s.admin, { isTest: true, status: 'completed' });
     expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), testCall)).toBeNull();
+  });
+
+  it('the transcript carries the call\'s turn stats; a call with none, or stats this version does not know, reads null', async () => {
+    const s = await setup();
+    const ctx = ctxOf(s.base.orgId, s.admin, true);
+    const lines = [{ role: 'agent', text: 'Hello', at: null }];
+    const cases: Array<[string, unknown, AiCallTurnStats | null]> = [
+      ['valid', STATS, STATS],
+      ['null', null, null],
+      ['another version', { v: 9 }, null],
+    ];
+    for (const [, turnStats, want] of cases) {
+      const lead = await seedReleasedLead(db, s.base, { approver: s.admin });
+      const aiCallId = await seedAiCall(db, s.base.orgId, s.admin, { status: 'completed', transcript: lines, turnStats });
+      await touchSet(lead.touchId, { status: 'sent', aiCallId });
+      expect(await loadTranscript(db, ctx, aiCallId)).toEqual({ aiCallId, lines, turnStats: want });
+    }
   });
 
   it('mayReadTranscript follows the owner rule for a rep', async () => {
@@ -268,7 +312,17 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
     it('20: an admin of its tenant opens it, by the call it stored or (a lost answer) by its key', async () => {
       for (const lost of [false, true]) {
         const { s, aiCallId } = await testCall({ lost });
-        expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), aiCallId)).toEqual({ aiCallId, lines });
+        expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), aiCallId)).toEqual({ aiCallId, lines, turnStats: null });
+      }
+    });
+
+    it('a test call\'s transcript carries its turn stats too; none reads null', async () => {
+      const s = await setup();
+      for (const [turnStats, want] of [[STATS, STATS], [{ v: 9 }, null]] as const) {
+        const aiCallId = await seedAiCall(db, s.base.orgId, s.admin, { isTest: true, practice: true, status: 'completed', transcript: lines, toE164: 'client:aitest_x', turnStats });
+        const testId = await insertRecordTest(db, { orgId: s.base.orgId, requestedBy: s.admin, sfObject: 'Lead', sfRecordId: '00Q8X00001AbCdEUAV' });
+        await db.insert(schema.aiRecordTestCalls).values({ orgId: s.base.orgId, recordTestId: testId, requestedBy: s.admin, mode: 'browser', clientIdentity: 'aitest_x', idempotencyKey: `rtest:${randomUUID()}`, aiCallId });
+        expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), aiCallId)).toEqual({ aiCallId, lines, turnStats: want });
       }
     });
 

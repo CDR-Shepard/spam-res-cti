@@ -176,7 +176,30 @@ export type AiCallResultsResponse = z.infer<typeof AiCallResultsResponse>;
 
 export const TranscriptLine = z.object({ role: z.enum(['agent', 'caller', 'system']), text: z.string(), at: z.string().nullable() });
 export type TranscriptLine = z.infer<typeof TranscriptLine>;
-export const AiCallTranscript = z.object({ aiCallId: z.string().uuid(), lines: z.array(TranscriptLine) });
+/**
+ * One AI call's turn-taking numbers (cti-api bridge, spec 2026-10-09 §4.3), stored in
+ * `ai_calls.turn_stats`. totalMs = endpointMs (how long after the caller stopped the turn was
+ * declared over) + answerMs (turn over → first agent audio). Null blocks: no answered turn.
+ */
+export const AiCallTurnStats = z.object({
+  v: z.literal(1),
+  bargeIn: z.enum(['gate', 'instant']),
+  turns: z.number().int().nonnegative(),
+  totalMs: z.object({ p50: z.number(), p90: z.number(), max: z.number() }).nullable(),
+  endpointMs: z.object({ p50: z.number() }).nullable(),
+  answerMs: z.object({ p50: z.number() }).nullable(),
+  interruptions: z.number().int().nonnegative(),
+  listening: z.number().int().nonnegative(),
+  silenceChecks: z.number().int().nonnegative(),
+});
+export type AiCallTurnStats = z.infer<typeof AiCallTurnStats>;
+
+export const AiCallTranscript = z.object({
+  aiCallId: z.string().uuid(),
+  lines: z.array(TranscriptLine),
+  /** Null for calls made before turn stats existed. */
+  turnStats: AiCallTurnStats.nullable(),
+});
 export type AiCallTranscript = z.infer<typeof AiCallTranscript>;
 
 /** POST /api/ai-calls/test (admin): "Test call to my phone". */

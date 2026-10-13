@@ -45,7 +45,7 @@ describe('PracticeCalls', () => {
   it('lists each call: the time, the lead, the outcome and "would have booked …", and opens the transcript', async () => {
     stubApi({
       [LIST]: { items: [practice(1, { aiCallId: CALL, callStatus: 'completed', outcome: 'appointment_set', summary: 'Booked a call.', appointment: BOOKED, result: { result: 'placed', aiCallId: CALL } })] },
-      [`GET /api/ai-calls/${CALL}/transcript`]: { aiCallId: CALL, lines: [{ role: 'agent', text: 'Hi, this is an AI assistant.', at: null }] },
+      [`GET /api/ai-calls/${CALL}/transcript`]: { aiCallId: CALL, lines: [{ role: 'agent', text: 'Hi, this is an AI assistant.', at: null }], turnStats: null },
     });
     renderWithProviders(<PracticeCalls campaignId={CAMPAIGN_ID} />, { isAdmin: true });
     expect(await screen.findByRole('heading', { name: 'Practice calls' })).toBeInTheDocument();

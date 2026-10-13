@@ -126,6 +126,7 @@ describe('AI voice config', () => {
   const KEYS = [
     'OPENAI_API_KEY', 'AI_VOICE', 'AI_VOICE_MODEL', 'AI_VOICE_REASONING',
     'AI_VOICE_VAD_EAGERNESS', 'AI_VOICE_VOICE', 'AI_VOICE_AGENT_NAME',
+    'AI_VOICE_BARGE_IN', 'AI_VOICE_TRANSCRIBE_MODEL', 'AI_VOICE_TURN_DETECTION', 'AI_VOICE_SILENCE_MS',
     'AI_VOICE_TEST_NUMBERS', 'AI_VOICE_MAX_CALL_SECONDS', 'ANTHROPIC_API_KEY',
     'AI_SUMMARY_MODEL', 'OUTREACH_KILL_SWITCH',
   ];
@@ -141,6 +142,10 @@ describe('AI voice config', () => {
     expect(cfg.AI_VOICE_VAD_EAGERNESS).toBe('auto');
     expect(cfg.AI_VOICE_VOICE).toBe('marin');
     expect(cfg.AI_VOICE_AGENT_NAME).toBe('Alex');
+    expect(cfg.AI_VOICE_BARGE_IN).toBe('gate');
+    expect(cfg.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-live-transcribe');
+    expect(cfg.AI_VOICE_TURN_DETECTION).toBe('server_vad');
+    expect(cfg.AI_VOICE_SILENCE_MS).toBe(500);
     expect(cfg.AI_VOICE_TEST_NUMBERS).toBeUndefined();
     expect(cfg.AI_VOICE_MAX_CALL_SECONDS).toBe(600);
     expect(cfg.ANTHROPIC_API_KEY).toBeUndefined();
@@ -159,11 +164,14 @@ describe('AI voice config', () => {
   it('accepts overrides', async () => {
     const cfg = await loadWith({
       AI_VOICE: 'off', AI_VOICE_REASONING: 'high', AI_VOICE_VAD_EAGERNESS: 'low',
+      AI_VOICE_BARGE_IN: 'instant', AI_VOICE_TRANSCRIBE_MODEL: 'gpt-4o-mini-transcribe',
       AI_VOICE_MAX_CALL_SECONDS: '120', OUTREACH_KILL_SWITCH: 'on',
     });
     expect(cfg.AI_VOICE).toBe('off');
     expect(cfg.AI_VOICE_REASONING).toBe('high');
     expect(cfg.AI_VOICE_VAD_EAGERNESS).toBe('low');
+    expect(cfg.AI_VOICE_BARGE_IN).toBe('instant');
+    expect(cfg.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-4o-mini-transcribe');
     expect(cfg.AI_VOICE_MAX_CALL_SECONDS).toBe(120);
     expect(cfg.OUTREACH_KILL_SWITCH).toBe('on');
   });
@@ -172,6 +180,56 @@ describe('AI voice config', () => {
     await expect(loadWith({ AI_VOICE: 'false' })).rejects.toThrow(/AI_VOICE/);
     await expect(loadWith({ OUTREACH_KILL_SWITCH: '1' })).rejects.toThrow(/OUTREACH_KILL_SWITCH/);
     await expect(loadWith({ AI_VOICE_REASONING: 'extreme' })).rejects.toThrow(/AI_VOICE_REASONING/);
+    await expect(loadWith({ AI_VOICE_BARGE_IN: 'sometimes' })).rejects.toThrow(/AI_VOICE_BARGE_IN/);
+  });
+
+  it('the transcriber follows the barge-in mode when unset, so instant alone is the whole rollback', async () => {
+    expect((await loadWith({})).AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-live-transcribe');
+    expect((await loadWith({ AI_VOICE_BARGE_IN: 'gate' })).AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-live-transcribe');
+    expect((await loadWith({ AI_VOICE_BARGE_IN: 'instant' })).AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-4o-mini-transcribe');
+    const emptyInstant = await loadWith({ AI_VOICE_BARGE_IN: 'instant', AI_VOICE_TRANSCRIBE_MODEL: '' });
+    expect(emptyInstant.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-4o-mini-transcribe');
+    const emptyGate = await loadWith({ AI_VOICE_BARGE_IN: '', AI_VOICE_TRANSCRIBE_MODEL: '' });
+    expect(emptyGate.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-live-transcribe');
+  });
+
+  it('an explicit transcriber wins in either mode', async () => {
+    const gate = await loadWith({ AI_VOICE_BARGE_IN: 'gate', AI_VOICE_TRANSCRIBE_MODEL: 'gpt-4o-mini-transcribe' });
+    expect(gate.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-4o-mini-transcribe');
+    const instant = await loadWith({ AI_VOICE_BARGE_IN: 'instant', AI_VOICE_TRANSCRIBE_MODEL: 'gpt-live-transcribe' });
+    expect(instant.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-live-transcribe');
+  });
+
+  it('turn detection follows the barge-in mode when unset: gate = server_vad, instant keeps semantic_vad', async () => {
+    expect((await loadWith({})).AI_VOICE_TURN_DETECTION).toBe('server_vad');
+    expect((await loadWith({ AI_VOICE_BARGE_IN: 'gate' })).AI_VOICE_TURN_DETECTION).toBe('server_vad');
+    expect((await loadWith({ AI_VOICE_BARGE_IN: 'instant' })).AI_VOICE_TURN_DETECTION).toBe('semantic_vad');
+    const emptyInstant = await loadWith({ AI_VOICE_BARGE_IN: 'instant', AI_VOICE_TURN_DETECTION: '' });
+    expect(emptyInstant.AI_VOICE_TURN_DETECTION).toBe('semantic_vad');
+    const emptyGate = await loadWith({ AI_VOICE_BARGE_IN: '', AI_VOICE_TURN_DETECTION: '' });
+    expect(emptyGate.AI_VOICE_TURN_DETECTION).toBe('server_vad');
+  });
+
+  it('an explicit turn detection wins in either mode, so semantic_vad alone rolls back just the VAD', async () => {
+    const gate = await loadWith({ AI_VOICE_BARGE_IN: 'gate', AI_VOICE_TURN_DETECTION: 'semantic_vad' });
+    expect(gate.AI_VOICE_TURN_DETECTION).toBe('semantic_vad');
+    const instant = await loadWith({ AI_VOICE_BARGE_IN: 'instant', AI_VOICE_TURN_DETECTION: 'server_vad' });
+    expect(instant.AI_VOICE_TURN_DETECTION).toBe('server_vad');
+  });
+
+  it('an unknown turn detection fails the boot loudly', async () => {
+    await expect(loadWith({ AI_VOICE_TURN_DETECTION: 'fast' })).rejects.toThrow(/AI_VOICE_TURN_DETECTION/);
+  });
+
+  it('the silence wait is an integer of 200 to 2000 ms, default 500 (empty = unset)', async () => {
+    expect((await loadWith({})).AI_VOICE_SILENCE_MS).toBe(500);
+    expect((await loadWith({ AI_VOICE_SILENCE_MS: '' })).AI_VOICE_SILENCE_MS).toBe(500);
+    expect((await loadWith({ AI_VOICE_SILENCE_MS: '200' })).AI_VOICE_SILENCE_MS).toBe(200);
+    expect((await loadWith({ AI_VOICE_SILENCE_MS: '800' })).AI_VOICE_SILENCE_MS).toBe(800);
+    expect((await loadWith({ AI_VOICE_SILENCE_MS: '2000' })).AI_VOICE_SILENCE_MS).toBe(2000);
+    for (const bad of ['199', '2001', '0', '-500', '500.5', 'soon']) {
+      await expect(loadWith({ AI_VOICE_SILENCE_MS: bad })).rejects.toThrow(/AI_VOICE_SILENCE_MS/);
+    }
   });
 
   it('rejects a non-positive max call length', async () => {

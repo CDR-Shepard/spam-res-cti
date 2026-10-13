@@ -1,5 +1,6 @@
 import { createFileRoute, Outlet, redirect } from '@tanstack/react-router';
 import { AppShell } from '@/components/app-shell';
+import { VersionTag } from '@/components/version-tag';
 import { authGuard } from '@/lib/guard';
 
 export const Route = createFileRoute('/_authenticated')({
@@ -7,5 +8,5 @@ export const Route = createFileRoute('/_authenticated')({
     const target = authGuard(context.auth.isAuthenticated, location.href);
     if (target) throw redirect(target);
   },
-  component: () => <AppShell><Outlet /></AppShell>,
+  component: () => <AppShell sidebarFooter={<VersionTag />}><Outlet /></AppShell>,
 });

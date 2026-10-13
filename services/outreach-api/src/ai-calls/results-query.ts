@@ -7,6 +7,7 @@ import { sql } from 'drizzle-orm';
 import {
   AiCallOutcome,
   AiCallStatus,
+  AiCallTurnStats,
   BookedAppointment,
   TranscriptLine,
   WritebackStatus,
@@ -208,29 +209,35 @@ export function transcriptLines(raw: unknown): TranscriptLine[] {
   });
 }
 
+/** `ai_calls.turn_stats`, if it is a stats object this version understands. */
+export function parseTurnStats(raw: unknown): AiCallTurnStats | null {
+  const parsed = AiCallTurnStats.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
 /**
  * The owner of the record or an admin may read it; null when no outreach touch of this tenant carries the call. Plan 1D: a
  * practice call of this tenant (ai_practice_calls) is readable by its admins only.
  */
 export async function loadTranscript(db: Db, ctx: RequestContext, aiCallId: string): Promise<AiCallTranscript | 'forbidden' | null> {
   const result = await db.execute(sql`
-    select a.transcript, r.owner_sf_user_id
+    select a.transcript, a.turn_stats, r.owner_sf_user_id
     from ai_calls a
     join touches t on t.ai_call_id = a.id and t.org_id = a.org_id and t.channel = 'ai_call'
     join campaign_enrollments e on e.id = t.enrollment_id and e.org_id = t.org_id
     join crm_records r on r.id = e.crm_record_id and r.org_id = e.org_id
     where a.id = ${aiCallId}::uuid and a.org_id = ${ctx.orgId}::uuid
     limit 1`);
-  const row = rows<{ transcript: unknown; owner_sf_user_id: string | null }>(result)[0];
+  const row = rows<{ transcript: unknown; turn_stats: unknown; owner_sf_user_id: string | null }>(result)[0];
   if (!row) return loadPracticeTranscript(db, ctx, aiCallId);
   if (!(await mayDecide(db, ctx, row.owner_sf_user_id))) return 'forbidden';
-  return { aiCallId, lines: transcriptLines(row.transcript) };
+  return { aiCallId, lines: transcriptLines(row.transcript), turnStats: parseTurnStats(row.turn_stats) };
 }
 
 /** A practice call (plan 1D) or a Test a record call (plan 1E): admins of its tenant only. */
 async function loadPracticeTranscript(db: Db, ctx: RequestContext, aiCallId: string): Promise<AiCallTranscript | 'forbidden' | null> {
   const result = await db.execute(sql`
-    select a.transcript
+    select a.transcript, a.turn_stats
     from ai_calls a
     where a.id = ${aiCallId}::uuid and a.org_id = ${ctx.orgId}::uuid
       and (exists (select 1 from ai_practice_calls p where p.ai_call_id = a.id and p.org_id = a.org_id)
@@ -242,8 +249,8 @@ async function loadPracticeTranscript(db: Db, ctx: RequestContext, aiCallId: str
         or exists (select 1 from ai_record_test_calls c join ai_call_requests q on q.org_id = c.org_id and q.idempotency_key = c.idempotency_key
                    where c.ai_call_id is null and c.org_id = a.org_id and q.ai_call_id = a.id))
     limit 1`);
-  const row = rows<{ transcript: unknown }>(result)[0];
+  const row = rows<{ transcript: unknown; turn_stats: unknown }>(result)[0];
   if (!row) return null;
   if (!(ctx.session.isAdmin || ctx.session.isSuperAdmin)) return 'forbidden';
-  return { aiCallId, lines: transcriptLines(row.transcript) };
+  return { aiCallId, lines: transcriptLines(row.transcript), turnStats: parseTurnStats(row.turn_stats) };
 }

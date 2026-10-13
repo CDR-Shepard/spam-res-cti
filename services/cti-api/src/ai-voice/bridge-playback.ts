@@ -9,12 +9,17 @@
  *   once the audio before it has played, which shrinks the queue;
  * - on barge-in, played = clock − start, clamped to [0, audio generated].
  *
+ * The audio left to play (for "late" overlaps) uses a separate estimate of when
+ * the item starts playing: an item forwarded while an earlier one is still queued
+ * starts once that one ends, not when it was forwarded. The truncate offset keeps
+ * the forwarding time.
+ *
  * It also lets the service wait for the agent's last words to finish before
  * hanging up or redirecting the call.
  */
 
 /** μ-law 8 kHz mono: 8 bytes per millisecond. */
-const PCMU_BYTES_PER_MS = 8;
+export const PCMU_BYTES_PER_MS = 8;
 
 export type SetTimer = (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
 export type ClearTimer = (handle: ReturnType<typeof setTimeout>) => void;
@@ -39,23 +44,40 @@ interface DrainWaiter {
 export class PlaybackTracker {
   private latestMediaMs = 0;
   private itemStartMs = 0;
+  /** When the current item is estimated to start playing: after any item still queued ahead of it. */
+  private playStartMs = 0;
   private itemId: string | null = null;
   private generatedBytes = 0;
   private marks: string[] = [];
   private markSeq = 0;
   private streaming = false;
+  private busy = false;
   private waiters: DrainWaiter[] = [];
   private readonly setTimer: SetTimer;
   private readonly clearTimer: ClearTimer;
+  private readonly onDrained: () => void;
 
-  constructor(timers: { setTimer?: SetTimer; clearTimer?: ClearTimer } = {}) {
+  constructor(timers: { setTimer?: SetTimer; clearTimer?: ClearTimer; onDrained?: () => void } = {}) {
     this.setTimer = timers.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
     this.clearTimer = timers.clearTimer ?? ((h) => clearTimeout(h));
+    this.onDrained = timers.onDrained ?? (() => undefined);
   }
 
   /** True while some forwarded agent audio has not been confirmed played. */
   get playing(): boolean {
     return this.marks.length > 0 && this.itemId !== null;
+  }
+
+  /** The agent item most recently forwarded (kept after it plays out, cleared on interrupt/reset), or null. */
+  get currentItemId(): string | null {
+    return this.itemId;
+  }
+
+  /** Agent audio left to play: Infinity while the response still streams, 0 when nothing is queued. */
+  remainingMs(): number {
+    if (this.streaming) return Number.POSITIVE_INFINITY;
+    if (!this.playing) return 0;
+    return Math.max(0, this.generatedMs() - (this.latestMediaMs - this.playStartMs));
   }
 
   /** An inbound Twilio media frame's `timestamp` (ms since stream start). */
@@ -66,12 +88,16 @@ export class PlaybackTracker {
   /** An agent audio chunk is being forwarded; returns the mark name to send right after it. */
   onAudioDelta(itemId: string, payload: string): string {
     if (itemId !== this.itemId) {
+      // Still queued ahead of it: the previous item, from its own estimated start.
+      const queuedEndMs = this.playing ? this.playStartMs + this.generatedMs() : 0;
       this.itemId = itemId;
       this.itemStartMs = this.latestMediaMs;
+      this.playStartMs = Math.max(this.latestMediaMs, queuedEndMs);
       this.generatedBytes = 0;
     }
     this.generatedBytes += base64Bytes(payload);
     this.streaming = true;
+    this.busy = true;
     this.markSeq += 1;
     const name = `agent-${this.markSeq}`;
     this.marks = [...this.marks, name];
@@ -103,10 +129,7 @@ export class PlaybackTracker {
       this.playing && this.itemId !== null
         ? {
             itemId: this.itemId,
-            audioEndMs: Math.max(
-              0,
-              Math.min(this.latestMediaMs - this.itemStartMs, Math.floor(this.generatedBytes / PCMU_BYTES_PER_MS)),
-            ),
+            audioEndMs: Math.max(0, Math.min(this.latestMediaMs - this.itemStartMs, this.generatedMs())),
           }
         : null;
     this.reset();
@@ -118,9 +141,10 @@ export class PlaybackTracker {
     this.marks = [];
     this.itemId = null;
     this.itemStartMs = 0;
+    this.playStartMs = 0;
     this.generatedBytes = 0;
     this.streaming = false;
-    this.settle();
+    this.settle(false);
   }
 
   /** Resolves when no audio is streaming and every mark has played, or after `maxMs`. */
@@ -140,12 +164,22 @@ export class PlaybackTracker {
     for (const w of this.waiters) this.release(w);
   }
 
+  /** Audio generated for the current item so far, in ms. */
+  private generatedMs(): number {
+    return Math.floor(this.generatedBytes / PCMU_BYTES_PER_MS);
+  }
+
   private drained(): boolean {
     return this.marks.length === 0 && !this.streaming;
   }
 
-  private settle(): void {
-    if (this.drained()) this.releaseAll();
+  /** Release drain waiters once drained; `notify` = the audio played out (not cut). */
+  private settle(notify = true): void {
+    if (!this.drained()) return;
+    this.releaseAll();
+    if (!this.busy) return;
+    this.busy = false;
+    if (notify) this.onDrained();
   }
 
   private release(waiter: DrainWaiter): void {

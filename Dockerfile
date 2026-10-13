@@ -32,11 +32,14 @@ RUN npm ci --include=dev
 # Build the API workspace directly (not `npm run build:api`, which re-runs
 # build:packages itself) so the shared packages compile exactly once.
 COPY . .
+# The outreach version tag: Railway passes its deploy's commit sha as a build arg when it is declared here. It reaches
+# only the outreach-web build, as VITE_APP_COMMIT, which Vite bakes into the bundle; absent or empty, the bundle says "dev".
+ARG RAILWAY_GIT_COMMIT_SHA
 # The same image also runs the outreach-api service (its own startCommand):
 # Railway applies this repo's root railway.json, and so this Dockerfile, to every
 # service built from the repo, so the outreach web bundle and API are built here too.
 RUN npm run build:packages && npm run build:web && npm -w services/cti-api run build \
- && npm --workspace apps/outreach-web run build && npm --workspace services/outreach-api run build
+ && VITE_APP_COMMIT="$RAILWAY_GIT_COMMIT_SHA" npm --workspace apps/outreach-web run build && npm --workspace services/outreach-api run build
 
 # Hosts inject the listen port via PORT (config honors it); 4000 is the default.
 EXPOSE 4000

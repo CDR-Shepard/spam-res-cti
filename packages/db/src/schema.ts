@@ -1257,6 +1257,8 @@ export const aiCalls = pgTable(
     qualification: jsonb('qualification').default(sql`'{}'::jsonb`).notNull(),
     /** Array of { role: 'agent' | 'caller' | 'system', text, at }. */
     transcript: jsonb('transcript').default(sql`'[]'::jsonb`).notNull(),
+    /** The bridge's turn-taking numbers (contracts AiCallTurnStats); NULL for calls before 0059. */
+    turnStats: jsonb('turn_stats'),
     summary: text('summary'),
     callbackAt: timestamp('callback_at', { withTimezone: true }),
     sfTaskId: text('sf_task_id'),

@@ -113,6 +113,7 @@ describe('AiCallResults', () => {
           { role: 'agent', text: 'Hi, this is an AI assistant on a recorded line.', at: null },
           { role: 'caller', text: 'Oh, hello.', at: null },
         ],
+        turnStats: null,
       },
     });
     renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
@@ -174,7 +175,7 @@ describe('plan 1D: appointment and Salesforce columns', () => {
   it('final review m6: the Transcript toggle says whether it is open', async () => {
     stubApi({
       [`GET ${RESULTS}`]: page([booked({ mayReadTranscript: true })]),
-      [`GET /api/ai-calls/${CALL}/transcript`]: { aiCallId: CALL, lines: [] },
+      [`GET /api/ai-calls/${CALL}/transcript`]: { aiCallId: CALL, lines: [], turnStats: null },
     });
     renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
     const button = within(await rowOf('Lead 1')).getByRole('button', { name: 'Transcript' });
@@ -215,7 +216,7 @@ describe('plan 1D: appointment and Salesforce columns', () => {
   it('the ?call= deep link (the Chatter post\'s "Call details") marks that call and opens its transcript and write-back', async () => {
     stubApi({
       [`GET ${RESULTS}`]: page([row(2), booked({ mayReadTranscript: true })], 'next1'),
-      [`GET /api/ai-calls/${CALL}/transcript`]: { aiCallId: CALL, lines: [{ role: 'agent', text: 'Hello from the deep link.', at: null }] },
+      [`GET /api/ai-calls/${CALL}/transcript`]: { aiCallId: CALL, lines: [{ role: 'agent', text: 'Hello from the deep link.', at: null }], turnStats: null },
     });
     renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
     expect(await screen.findByText('Hello from the deep link.')).toBeInTheDocument();

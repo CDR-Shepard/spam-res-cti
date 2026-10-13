@@ -2,15 +2,23 @@
  * Running the function calls a Realtime `response.done` carries: in order,
  * one output per call. The batch reports whether the conversation continues —
  * not when any call ends it (`hangup` / `transfer`), because the service will
- * wait for the agent's last words and then act on the call itself. The bridge
+ * wait for the agent's last words and then act on the call itself — and whether
+ * the agent should speak (not when it chose `wait_for_user`). The bridge
  * decides whether to send the one `response.create`.
  */
 import { functionCallOutput } from './bridge-session.js';
-import { TOOL_NAMES, type ToolName } from './prompt.js';
+import { TOOL_NAMES, WAIT_FOR_USER, type ToolName } from './prompt.js';
 
 export interface ToolResult {
   output: string;
-  then?: 'hangup' | 'transfer' | 'continue';
+  then?: 'hangup' | 'transfer' | 'continue' | 'wait';
+}
+
+export interface BatchResult {
+  /** False when any call ended the conversation (hangup / transfer). */
+  carryOn: boolean;
+  /** False when the agent chose to stay quiet (wait_for_user): no response.create. */
+  speak: boolean;
 }
 
 export interface BridgeLog {
@@ -35,6 +43,7 @@ const BAD_ARGUMENTS = '{"error":"bad arguments"}';
 const UNKNOWN_TOOL = '{"error":"unknown tool"}';
 const TOOL_FAILED = '{"error":"tool failed"}';
 const LOGGED_NAME_MAX = 64;
+const WAITING: ToolResult = { output: '{"ok":true}', then: 'wait' };
 
 export const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const isToolName = (n: string): n is ToolName => (TOOL_NAMES as readonly string[]).includes(n);
@@ -50,18 +59,21 @@ export function functionCalls(response: Record<string, unknown>): FunctionCall[]
   return Array.isArray(response.output) ? response.output.filter(isFunctionCall) : [];
 }
 
-/** Run calls in order and send every output; resolves true when every result continues the conversation. */
-export async function runToolBatch(calls: readonly FunctionCall[], deps: ToolDeps): Promise<boolean> {
+/** Run calls in order and send every output. */
+export async function runToolBatch(calls: readonly FunctionCall[], deps: ToolDeps): Promise<BatchResult> {
   let carryOn = true;
+  let speak = true;
   for (const call of calls) {
     const result = await runTool(call, deps);
     deps.send(functionCallOutput(call.call_id, result.output));
     if (result.then === 'hangup' || result.then === 'transfer') carryOn = false;
+    if (result.then === 'wait') speak = false;
   }
-  return carryOn;
+  return { carryOn, speak };
 }
 
 async function runTool(call: FunctionCall, deps: ToolDeps): Promise<ToolResult> {
+  if (call.name === WAIT_FOR_USER) return WAITING;
   if (!isToolName(call.name)) {
     deps.log.warn({ tool: call.name.slice(0, LOGGED_NAME_MAX) }, 'ai-voice bridge: unknown tool');
     return { output: UNKNOWN_TOOL };
