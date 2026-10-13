@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   AiAvailability,
+  AppVersion,
   AiCallSettings,
   SalesforceUserOption,
   AiCallResultsResponse,
@@ -64,6 +65,7 @@ export const outreachKeys = {
   aiCallResults: (campaignId: string) => ['campaigns', 'ai-calls', campaignId] as const,
   aiCallTranscript: (aiCallId: string) => ['ai-calls', 'transcript', aiCallId] as const,
   aiAvailability: ['ai-calls', 'availability'] as const,
+  appVersion: ['app', 'version'] as const,
   aiCallSettings: ['settings', 'ai-calls'] as const,
   salesforceUsersById: (ids: readonly string[]) => ['salesforce', 'users', 'ids', ids.join(',')] as const,
   practiceCallLists: ['campaigns', 'practice-calls'] as const,
@@ -190,6 +192,11 @@ export function getAiCallTranscript(aiCallId: string): Promise<AiCallTranscript>
 
 export function getAiAvailability(): Promise<AiAvailability> {
   return api('/api/ai-calls/availability', AiAvailability);
+}
+
+/** The commit the live app and the AI voice server run, and when the app last started (the sidebar's version tag). */
+export function getAppVersion(): Promise<AppVersion> {
+  return api('/api/version', AppVersion);
 }
 
 /** Admin only: the AI agent calls one of the CTI's test numbers. The answer is cti-api's (placed, or why not). */

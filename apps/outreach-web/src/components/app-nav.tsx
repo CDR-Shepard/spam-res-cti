@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
 import { FlaskConical, Flag, LayoutDashboard, LogOut, Megaphone, Settings, Users, type LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -53,8 +54,8 @@ export function Wordmark({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-/** Bottom of the sidebar: which workspace, who is signed in, and Sign out. */
-export function AccountPanel() {
+/** Bottom of the sidebar: which workspace, who is signed in, and Sign out, then `footer` (the version tag) when given. */
+export function AccountPanel({ footer }: { footer?: ReactNode }) {
   const auth = useAuth();
   const email = auth.user?.email ?? '';
   const signOut = () => void auth.signOut().then(() => window.location.assign('/sign-in'));
@@ -71,6 +72,7 @@ export function AccountPanel() {
         <LogOut aria-hidden />
         Sign out
       </Button>
+      {footer}
     </div>
   );
 }

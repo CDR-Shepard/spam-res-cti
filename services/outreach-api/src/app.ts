@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
+import type { BuildInfo } from './build-info.js';
 import type { AppConfig } from './config.js';
 import { rateLimitError, registerErrorHandler } from './http/errors.js';
 import { serializeRequest } from './http/log-serializers.js';
@@ -11,6 +12,8 @@ import { registerSpa } from './routes/spa.js';
 export interface AppDeps {
   cfg: AppConfig;
   readiness: () => Promise<Readiness>;
+  /** The commit this process runs and when it started, shown by /healthz; defaults to this process's own (RAILWAY_GIT_COMMIT_SHA). */
+  build?: BuildInfo;
   /** Absolute path of the built SPA; omit in tests. */
   spaDist?: string;
   /** Route plugins registered under /api (added by later tasks). */
@@ -56,7 +59,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   // cookie to this server's secret (see routes/auth.ts): a tampered cookie value
   // fails `unsignCookie`/`reply.setCookie({ signed: true })` before it's ever read.
   await app.register(cookie, { secret: cfg.SESSION_SECRET });
-  await registerHealthRoutes(app, deps.readiness);
+  await registerHealthRoutes(app, deps.readiness, deps.build);
   for (const plugin of deps.apiRoutes ?? []) {
     await app.register(async (scope) => plugin(scope), { prefix: '/api' });
   }

@@ -1,11 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 import { loadConfig } from '../config.js';
 import { getPool } from '@cti/db';
+import { currentBuild, type BuildInfo } from '../build-info.js';
 
-export async function registerHealthRoutes(app: FastifyInstance): Promise<void> {
+export async function registerHealthRoutes(app: FastifyInstance, build: BuildInfo = currentBuild()): Promise<void> {
   // Liveness: cheap and never touches the DB, so a transient DB blip doesn't
-  // make the platform kill and restart an otherwise-healthy container.
-  app.get('/healthz', async () => ({ ok: true, ts: new Date().toISOString() }));
+  // make the platform kill and restart an otherwise-healthy container. It also says
+  // which commit this process runs and when it started (outreach-web's version tag reads both).
+  app.get('/healthz', async () => ({ ok: true, ts: new Date().toISOString(), commit: build.commit, startedAt: build.startedAt }));
 
   // Readiness: probes the DB and surfaces launch-critical config so an operator
   // can confirm at a glance (curl /readyz) that the deploy is actually ready to

@@ -6,6 +6,7 @@ import { getDb, getPool } from '@cti/db';
 import { AnthropicCallPlanModel } from './ai/call-plan-model.js';
 import { AnthropicTriageModel, isPricedModel } from './ai/model.js';
 import { buildApp } from './app.js';
+import { currentBuild } from './build-info.js';
 import { httpCtiClient } from './ai-calls/cti-client.js';
 import { placeDueAiCalls } from './ai-calls/pace.js';
 import { collectAiCallResults } from './ai-calls/results.js';
@@ -33,8 +34,10 @@ import { registerPracticeCallRoutes } from './routes/practice-calls.js';
 import { registerRecordTestRoutes } from './routes/record-tests.js';
 import { registerReviewRoutes } from './routes/review.js';
 import { registerTeamRoutes } from './routes/team.js';
+import { registerVersionRoutes } from './routes/version.js';
 import { shutdown } from './shutdown.js';
 import { triageDueRecords } from './triage/run.js';
+import { ctiCommitReader } from './version/cti-version.js';
 import { AnthropicMappingModel } from './writeback/mapping-model.js';
 import { runWritebacks } from './writeback/run.js';
 
@@ -143,8 +146,12 @@ async function main(): Promise<void> {
   const salesforceSignIn = cfg.salesforceSignInEnabled
     ? { clientId: cfg.SALESFORCE_CLIENT_ID!, redirectUri: cfg.SALESFORCE_SIGNIN_REDIRECT_URI!, loginUrl: cfg.SALESFORCE_LOGIN_URL, allowedOrgId: cfg.SALESFORCE_ALLOWED_ORG_ID ?? null }
     : null;
+  // The sidebar's version tag: this process's commit and start time, and cti-api's commit read from its /healthz.
+  const build = currentBuild();
+  const ctiCommit = ctiCommitReader({ baseUrl: cfg.CTI_INTERNAL_URL });
   const app = await buildApp({
     cfg,
+    build,
     spaDist: SPA_DIST,
     readiness: async () => ({ dbOk: await dbOk(), jobsOk: runner.isHealthy() }),
     apiRoutes: [
@@ -160,6 +167,7 @@ async function main(): Promise<void> {
       (scope) => registerAiCallRoutes(scope, { db, cti }),
       (scope) => registerPracticeCallRoutes(scope, { db, clients, cti, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS }),
       (scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, describes }),
+      (scope) => registerVersionRoutes(scope, { db, build, calls: ctiCommit }),
       // Plan 1E: Test a record (admins): preview how the AI would call any Lead or Opportunity, without a campaign.
       (scope) =>
         registerRecordTestRoutes(scope, {
