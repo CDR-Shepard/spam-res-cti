@@ -226,8 +226,10 @@ const schema = z.object({
   AI_VOICE_VOICE: z.string().default('marin'),
   /**
    * Barge-in (spec 2026-10-09): `gate` = the bridge keeps the agent talking through "mm-hmm"
-   * and stops it on a real interruption, from the caller's streamed words; `instant` = the
-   * pre-2026-10-09 behaviour (OpenAI stops the agent on any caller sound). Rollback switch.
+   * and stops it on a real interruption, judged from how long the caller keeps talking (the sound
+   * judge, the default; spec §4.5) with the caller's streamed words as the second path, or from the
+   * words alone (AI_VOICE_OVERLAP_JUDGE=words); `instant` = the pre-2026-10-09 behaviour (OpenAI
+   * stops the agent on any caller sound). Rollback switch.
    */
   AI_VOICE_BARGE_IN: z.enum(['gate', 'instant']).default('gate'),
   /** The Realtime session transcriber. Unset = follows AI_VOICE_BARGE_IN (DEFAULT_TRANSCRIBE_MODEL); a value wins in either mode. */

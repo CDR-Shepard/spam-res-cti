@@ -180,7 +180,7 @@ describe('CallerSoundMeter', () => {
     expect(meter.push('AAAA!AAAA')).toBe(200);
     expect(meter.push(undefined as unknown as string)).toBe(200);
     expect(meter.push(null as unknown as string)).toBe(200);
-    // 20 garbage payloads must not have consumed 400 ms of "gap"
+    // 6 garbage payloads (2 empty, 2 invalid strings, undefined, null) must not have counted as 20 ms of "gap" each
     pushMany(meter, QUIET, 4);
     expect(meter.runMs).toBe(200);
   });
