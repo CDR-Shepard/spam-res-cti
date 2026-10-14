@@ -217,7 +217,7 @@ describe('mark_do_not_call', () => {
 describe('save_qualification and schedule_callback', () => {
   it('merges only known, non-empty, capped fields', async () => {
     const res = await run('save_qualification', { motivation: 'relocating', timeline: '', bogus: 'x', condition: 'y'.repeat(900) });
-    expect(res).toEqual({ output: 'saved', then: 'continue' });
+    expect(res).toEqual({ output: "saved — carry on from where you were; don't thank them again or repeat yourself", then: 'continue' });
     const q = store.rows.get(ID)?.qualification as Record<string, string>;
     expect(Object.keys(q).sort()).toEqual(['condition', 'motivation']);
     expect(q.condition).toHaveLength(500);

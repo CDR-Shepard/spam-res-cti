@@ -42,13 +42,13 @@ const between = (text: string) => text.slice(text.indexOf(PLAN_OPEN) + PLAN_OPEN
 describe('buildInstructions with an approved plan', () => {
   it('1: without a plan the instructions are byte-for-byte what they were before plans existed', () => {
     // Hashes of the no-plan prompt for these inputs, re-pinned when the base prompt text changes
-    // (last: screener waits via wait_for_user, 2026-10-12). A plan must never alter the no-plan prompt.
-    expect(sha(buildInstructions(input()))).toBe('748cc975883df5f79629b6e410baa70bdc72d603f88caa0176bab8d5463faf49');
-    expect(sha(buildInstructions(input({ approvedPlan: null })))).toBe('748cc975883df5f79629b6e410baa70bdc72d603f88caa0176bab8d5463faf49');
-    expect(sha(buildInstructions(input({ approvedPlan: '' })))).toBe('748cc975883df5f79629b6e410baa70bdc72d603f88caa0176bab8d5463faf49');
-    expect(sha(buildInstructions(input({ isTest: true })))).toBe('564b903da43f2d48db830f05d43cc6c448d661bb42dab52018e6dad3d158d1ac');
+    // (last: no narrated tool use, 2026-10-13). A plan must never alter the no-plan prompt.
+    expect(sha(buildInstructions(input()))).toBe('66d2cfc5a84e0e2f561dc63f54b464aba8fb9574f16d49349bf31e93a4a663db');
+    expect(sha(buildInstructions(input({ approvedPlan: null })))).toBe('66d2cfc5a84e0e2f561dc63f54b464aba8fb9574f16d49349bf31e93a4a663db');
+    expect(sha(buildInstructions(input({ approvedPlan: '' })))).toBe('66d2cfc5a84e0e2f561dc63f54b464aba8fb9574f16d49349bf31e93a4a663db');
+    expect(sha(buildInstructions(input({ isTest: true })))).toBe('d978ab815f805b843907cd81aafba606c1cf9042055f058f7e8b04eb86d80914');
     const bare = input({ firstName: null, address: null, notes: '', callbackNumber: null });
-    expect(sha(buildInstructions(bare))).toBe('a22c3641aab63128bd747d8baf909daf38be484fdd739fddcc430bcde883ae52');
+    expect(sha(buildInstructions(bare))).toBe('c6a5713615b7cc5400b54f2681f7d6c8285163b99ed5ed07293aa04e55c9c747');
     expect(buildInstructions(input())).not.toContain(PLAN_HEADING);
   });
 

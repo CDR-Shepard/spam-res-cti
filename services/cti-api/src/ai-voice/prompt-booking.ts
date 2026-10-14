@@ -87,6 +87,7 @@ export function bookingSection(c: Ctx): string | null {
   const times = c.slots.map((s) => `- ${s.id}: ${KIND_WORDS[s.kind]}, ${slotWords(s, c.sellerTz)}`);
   return `# Booking an appointment
 ${offerLines(c, first ? `${first}, one of our specialists` : 'one of our specialists')}
+- The times are listed right here: offer them straight away. Never say you're checking or thinking about the times.
 - Say a time the way people do — "Thursday at two in the afternoon", "Wednesday the seventh, eleven in the morning". Never read out digits or a date as numbers, and only mention another time zone if they ask.
 ${walkthroughLine(c)}- Book only a time from this list, by its id. Never make up a time, and never promise a time you haven't booked.
 - Call book_appointment silently. Then confirm the day and time in ONE line with your goodbye, then end_call with outcome "appointment_set".

@@ -92,6 +92,11 @@ describe('bookingSection', () => {
     expect(text).toContain('- If no time works: schedule_callback instead.');
   });
 
+  it('says the times are listed right here: offer them straight away, never say you are checking or thinking about them', () => {
+    const text = bookingSection(context(input({ slots: [slot()], sellerTimeZone: LA })))!;
+    expect(text).toContain('- The times are listed right here: offer them straight away. Never say you\'re checking or thinking about the times.');
+  });
+
   it('tells the agent to say times the way people do, never digits', () => {
     const text = bookingSection(context(input({ slots: [slot()], sellerTimeZone: LA })))!;
     expect(text).toMatch(/"Thursday at two in the afternoon"/);

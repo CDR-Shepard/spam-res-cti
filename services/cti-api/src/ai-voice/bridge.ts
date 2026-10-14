@@ -56,7 +56,7 @@ import { CallerSoundMeter } from './bridge-sound.js';
 import { BridgeSockets, type BridgeSocket } from './bridge-sockets.js';
 import { TurnStatsCollector, type BargeInMode } from './bridge-turn-stats.js';
 import { TurnTiming, heldBy } from './bridge-turn-timing.js';
-import { errText, functionCalls, runToolBatch, type BridgeLog, type FunctionCall, type ToolResult } from './bridge-tools.js';
+import { errText, followUpAfterTools, functionCalls, runToolBatch, type BridgeLog, type FunctionCall, type Spoke, type ToolResult } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
 
 export type { BargeInMode, BridgeLog, BridgeSocket, OverlapJudge, ReasoningEffort, ToolResult, TurnDetection, VadEagerness };
@@ -142,6 +142,9 @@ export class AiCallBridge {
   private responseHasAudio = false;
   /** We cancelled the active response (the gate cut it, or it was dropped unheard): not the agent speaking, never cancelled twice. */
   private responseCut = false;
+  /** The item of the active response's last forwarded audio, and the last agent line it said (both reset on response.created). */
+  private responseItemId = '';
+  private lastAgentLine = '';
   /** Gate mode: the caller started talking while our response.create was in flight; cancel it once created. */
   private cancelWhenCreated = false;
   /** Tool batches queued or running (instant mode can queue two). */
@@ -554,6 +557,8 @@ export class AiCallBridge {
     this.responseActive = true;
     this.responseHasAudio = false;
     this.responseCut = false;
+    this.responseItemId = '';
+    this.lastAgentLine = '';
     if (!this.cancelWhenCreated) return;
     // The caller kept talking: drop this answer unheard; their committed turn is answered after its response.done.
     this.cancelWhenCreated = false;
@@ -630,6 +635,7 @@ export class AiCallBridge {
     const at = this.now();
     this.timing.delta(at);
     if (!this.sessionReady || this.silenced || !delta || this.truncated.has(itemId) || this.responseCut) return;
+    this.responseItemId = itemId;
     const first = !this.responseHasAudio;
     if (first) {
       this.responseHasAudio = true;
@@ -655,6 +661,7 @@ export class AiCallBridge {
   private transcript(role: 'agent' | 'caller', value: unknown): void {
     const text = str(value).trim();
     if (!text) return;
+    if (role === 'agent') this.lastAgentLine = text;
     const unplayed = role === 'agent' && (this.silenced || (this.responseCut && !this.responseHasAudio));
     const entry = unplayed
       ? { role: 'system' as const, text: `[not played] ${text}`, at: new Date(this.now()) }
@@ -674,18 +681,23 @@ export class AiCallBridge {
   // ── tools ──────────────────────────────────────────────────────────────────
 
   private onResponseDone(response: Msg): void {
+    // What the caller heard, taken before the resets below: audio that played and was not cut (a kept late cut only truncated its item).
+    const spoke = {
+      audio: this.responseHasAudio && !this.responseCut && !this.truncated.has(this.responseItemId),
+      question: this.lastAgentLine.endsWith('?'),
+    };
     this.responseActive = false;
     this.responsePending = false;
     this.responseCut = false;
     this.cancelWhenCreated = false;
     const calls = functionCalls(response);
-    if (calls.length > 0) this.runTools(calls);
+    if (calls.length > 0) this.runTools(calls, spoke);
     this.playback.onResponseDone(); // after the tool bookkeeping: a drain notified here sees the batch
     if (calls.length === 0) this.afterResponse();
   }
 
-  /** Run a response's tool calls after any earlier batch, then speak, hold, or end the conversation. */
-  private runTools(calls: readonly FunctionCall[]): void {
+  /** Run a response's tool calls after any earlier batch, then speak, hold, let the caller answer, or end the conversation. */
+  private runTools(calls: readonly FunctionCall[], spoke: Spoke): void {
     const deps = {
       onTool: this.hooks.onTool.bind(this.hooks),
       log: this.hooks.log,
@@ -696,10 +708,11 @@ export class AiCallBridge {
     this.toolChain = this.toolChain
       .then(async () => {
         // Counted down exactly once, before acting on the result (and even if the batch throws).
-        const { carryOn, speak } = await runToolBatch(calls, deps).finally(() => (this.toolBatches -= 1));
-        if (!carryOn) this.closeConversation();
-        if (speak) return this.requestResponse();
-        this.holding = !this.wantResponse; // a turn that came in during the batch is answered, not held
+        const batch = await runToolBatch(calls, deps).finally(() => (this.toolBatches -= 1));
+        if (!batch.carryOn) this.closeConversation();
+        if (followUpAfterTools(calls, batch, spoke)) return this.requestResponse();
+        // Only wait_for_user holds; a note save after a question leaves the floor to the caller (an answer already in is sent).
+        if (!batch.speak) this.holding = !this.wantResponse; // a turn that came in during the batch is answered, not held
         this.afterResponse();
       })
       .catch((e: unknown) => {

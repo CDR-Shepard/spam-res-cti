@@ -1465,6 +1465,21 @@ describe('barge-in gate', () => {
       expect(control(openai).some((m) => m.type === 'response.cancel')).toBe(false);
     });
 
+    it('a late cut that keeps a question reply with a note save: their turn still gets exactly one answer', async () => {
+      const { twilio, openai } = soundTalking();
+      openai.msg({ type: 'response.output_audio_transcript.done', item_id: 'item_1', transcript: 'Is it vacant right now?' });
+      openai.msg({ type: 'response.output_audio.done' });
+      twilio.msg(media(3000, QUIET)); // 1 s of item_1 left
+      openai.clearSent();
+      started(openai); // "yeah, it's vacant" over its end: item_1 is truncated, the reply is kept
+      expect(control(openai)).toEqual([{ type: 'conversation.item.truncate', item_id: 'item_1', content_index: 0, audio_end_ms: 2000 }]);
+      stopped(openai);
+      committed(openai); // held behind the active response
+      openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('save_qualification', '{"field":"occupancy","value":"vacant"}', 'n1')] } });
+      await flush();
+      expect(creates(openai)).toEqual([CREATE]);
+    });
+
     // A late cut while the reply's own audio is still streaming is unreachable: remainingMs() is Infinity until output_audio.done.
     // What is reachable is a follow-up reply that has no audio yet while the first one plays out: that one is still cancelled.
     it('a late cut still cancels a follow-up reply that has not played a sound yet', async () => {
@@ -1774,6 +1789,201 @@ describe('silence check-ins (gate mode)', () => {
       { type: 'conversation.item.create', item: { type: 'function_call_output', call_id: 'e1', output: 'bye' } },
     ]);
     expect(silenced.openai.sent).toEqual([]);
+  });
+});
+
+describe('a note save after a question gets no second agent turn (smart stop v2, 2026-10-13)', () => {
+  const done = (...output: object[]) => ({ type: 'response.done', response: { status: 'completed', output } });
+  const SAVE = fnCall('save_qualification', '{"field":"occupancy","value":"vacant"}', 'n1');
+  const SCHEDULE = fnCall('schedule_callback', '{"when":"Wednesday at ten"}', 'n2');
+  const OUTPUT = { type: 'conversation.item.create', item: { type: 'function_call_output', call_id: 'n1', output: '{"ok":true}' } };
+  const CREATE = { type: 'response.create' };
+  const QUESTION = 'Is it vacant right now?';
+  const note = (seconds: number) => ({
+    type: 'conversation.item.create',
+    item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `(No one has said anything for ${seconds} seconds.)` }] },
+  });
+
+  /** One agent reply: its audio (`item_1`, 2 s) when `spoken`, a transcript line per `lines`, then a response.done carrying `calls`. */
+  async function reply(s: { openai: FakeSocket }, opts: { lines?: readonly string[]; spoken?: boolean }, calls: readonly object[]) {
+    const { lines = [], spoken = true } = opts;
+    s.openai.msg({ type: 'response.created' });
+    if (spoken) s.openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(2000) });
+    for (const line of lines) s.openai.msg({ type: 'response.output_audio_transcript.done', item_id: 'item_1', transcript: line });
+    if (spoken) s.openai.msg({ type: 'response.output_audio.done' });
+    s.openai.clearSent();
+    s.openai.msg(done(...calls));
+    await flush();
+  }
+
+  /** Instant mode (VAD answers the caller), session ready. */
+  function instant(onTool?: BridgeHooks['onTool']) {
+    const s = setup({}, { onTool });
+    s.bridge.start();
+    s.openai.msg(READY);
+    return s;
+  }
+
+  /** Gate mode: the opener (item_0) was said and has played out. */
+  async function gateOpened(onTool?: BridgeHooks['onTool']) {
+    const s = setup({ bargeIn: 'gate' }, { onTool });
+    s.bridge.start();
+    s.openai.msg(READY);
+    await vi.advanceTimersByTimeAsync(OPENER_DELAY_MS);
+    s.openai.msg({ type: 'response.created' });
+    s.openai.msg({ type: 'response.output_audio.delta', item_id: 'item_0', delta: audio(100) });
+    s.openai.msg({ type: 'response.output_audio.done' });
+    s.openai.msg(DONE_EMPTY);
+    playAllMarks(s.twilio);
+    return s;
+  }
+
+  const callerTurn = (openai: FakeSocket, id: string): void => {
+    openai.msg({ type: 'input_audio_buffer.speech_started', item_id: id, audio_start_ms: 0 });
+    openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: id, audio_end_ms: 500 });
+    openai.msg({ type: 'input_audio_buffer.committed', item_id: id });
+  };
+
+  describe('instant mode', () => {
+    it('a reply that played audio and ended with a question, plus a note save: the output goes back, no response.create', async () => {
+      const s = instant();
+      await reply(s, { lines: [QUESTION] }, [SAVE]);
+      expect(s.hooks.onTool).toHaveBeenCalledWith('save_qualification', { field: 'occupancy', value: 'vacant' });
+      expect(s.openai.sent).toEqual([OUTPUT]);
+    });
+
+    it('trims the line: a question followed by spaces still counts', async () => {
+      const s = instant();
+      await reply(s, { lines: [`${QUESTION}  `] }, [SAVE]);
+      expect(s.openai.sent).toEqual([OUTPUT]);
+    });
+
+    it('a statement ("Got it.") plus a note save still gets the follow-up, as before', async () => {
+      const s = instant();
+      await reply(s, { lines: ['Got it.'] }, [SAVE]);
+      expect(s.openai.sent).toEqual([OUTPUT, CREATE]);
+    });
+
+    it('a note save with no audio (tool first) still gets the follow-up, as before', async () => {
+      const s = instant();
+      await reply(s, { spoken: false }, [SAVE]);
+      expect(s.openai.sent).toEqual([OUTPUT, CREATE]);
+    });
+
+    it('a question line whose audio never played (dropped unheard) does not count as spoken', async () => {
+      const s = instant();
+      await reply(s, { lines: [QUESTION], spoken: false }, [SAVE]);
+      expect(s.openai.sent).toEqual([OUTPUT, CREATE]);
+    });
+
+    it('a question plus a note save and another tool still gets the follow-up', async () => {
+      const s = instant();
+      await reply(s, { lines: ['Okay — would Wednesday at ten work?'] }, [SAVE, SCHEDULE]);
+      expect(s.openai.types()).toEqual(['conversation.item.create', 'conversation.item.create', 'response.create']);
+    });
+
+    it('a question plus a tool that is not a note save still gets the follow-up', async () => {
+      const s = instant();
+      await reply(s, { lines: [QUESTION] }, [SCHEDULE]);
+      expect(s.openai.types()).toEqual(['conversation.item.create', 'response.create']);
+    });
+
+    it('a question plus wait_for_user stays quiet, as before', async () => {
+      const s = instant();
+      await reply(s, { lines: [QUESTION] }, [SAVE, fnCall('wait_for_user', '{}', 'w1')]);
+      expect(s.openai.types()).toEqual(['conversation.item.create', 'conversation.item.create']);
+    });
+
+    it('the last transcript line of the response decides', async () => {
+      const ends = instant();
+      await reply(ends, { lines: ['Got it.', QUESTION] }, [SAVE]);
+      expect(ends.openai.sent).toEqual([OUTPUT]);
+      const starts = instant();
+      await reply(starts, { lines: [QUESTION, 'Got it.'] }, [SAVE]);
+      expect(starts.openai.sent).toEqual([OUTPUT, CREATE]);
+    });
+
+    it('the line belongs to its response: an earlier question never carries over to a reply with no transcript', async () => {
+      const s = instant();
+      await reply(s, { lines: [QUESTION] }, []);
+      await reply(s, { lines: [] }, [SAVE]);
+      expect(s.openai.sent).toEqual([OUTPUT, CREATE]);
+    });
+
+    it('a question the caller cut off (its item was truncated) is followed up as before', async () => {
+      const s = instant();
+      s.openai.msg({ type: 'response.created' });
+      s.openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(2000) });
+      s.openai.msg({ type: 'response.output_audio_transcript.done', item_id: 'item_1', transcript: QUESTION });
+      s.openai.msg({ type: 'response.output_audio.done' });
+      s.openai.msg({ type: 'input_audio_buffer.speech_started', item_id: 'c1', audio_start_ms: 0 }); // barge-in: truncates item_1
+      expect(s.openai.types()).toContain('conversation.item.truncate');
+      s.openai.clearSent();
+      s.openai.msg(done(SAVE));
+      await flush();
+      expect(s.openai.sent).toEqual([OUTPUT, CREATE]);
+    });
+
+    it('a note save after a question changes nothing for the next batch: after a statement it still speaks', async () => {
+      const s = instant();
+      await reply(s, { lines: [QUESTION] }, [SAVE]);
+      await reply(s, { lines: ['Thanks.'] }, [SAVE]);
+      expect(s.openai.sent).toEqual([OUTPUT, CREATE]);
+    });
+  });
+
+  describe('gate mode', () => {
+    it('no response.create after the note; the caller\'s next turn is answered normally', async () => {
+      const s = await gateOpened();
+      await reply(s, { lines: [QUESTION] }, [SAVE]);
+      expect(s.openai.sent).toEqual([OUTPUT]);
+      playAllMarks(s.twilio);
+      s.openai.clearSent();
+      callerTurn(s.openai, 'c2');
+      expect(s.openai.sent).toEqual([GATE_CREATE]);
+    });
+
+    it('the silence check-in is timed at 8 s, not the 30 s of a wait_for_user hold', async () => {
+      const s = await gateOpened();
+      await reply(s, { lines: [QUESTION] }, [SAVE]);
+      playAllMarks(s.twilio);
+      s.openai.clearSent();
+      await vi.advanceTimersByTimeAsync(7999);
+      expect(s.openai.sent).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(s.openai.sent).toEqual([note(8), GATE_CREATE]);
+    });
+
+    it('a statement plus a note save still gets the follow-up, as before', async () => {
+      const s = await gateOpened();
+      await reply(s, { lines: ['Got it.'] }, [SAVE]);
+      expect(s.openai.sent).toEqual([OUTPUT, GATE_CREATE]);
+    });
+
+    it('a note save with no audio still gets the follow-up, as before', async () => {
+      const s = await gateOpened();
+      await reply(s, { spoken: false }, [SAVE]);
+      expect(s.openai.sent).toEqual([OUTPUT, GATE_CREATE]);
+    });
+
+    it('a question plus a note save and another tool still gets the follow-up', async () => {
+      const s = await gateOpened();
+      await reply(s, { lines: ['Okay — would Wednesday work?'] }, [SAVE, SCHEDULE]);
+      expect(s.openai.types()).toEqual(['conversation.item.create', 'conversation.item.create', 'response.create']);
+    });
+
+    it('an answer that comes in during a slow note save is answered once, after the batch', async () => {
+      let release: () => void = () => undefined;
+      const onTool = vi.fn(() => new Promise<{ output: string }>((r) => { release = () => r({ output: '{"ok":true}' }); }));
+      const s = await gateOpened(onTool as BridgeHooks['onTool']);
+      await reply(s, { lines: [QUESTION] }, [SAVE]);
+      playAllMarks(s.twilio);
+      callerTurn(s.openai, 'c2');
+      expect(s.openai.sent).toEqual([]);
+      release();
+      await flush();
+      expect(s.openai.sent).toEqual([OUTPUT, GATE_CREATE]);
+    });
   });
 });
 

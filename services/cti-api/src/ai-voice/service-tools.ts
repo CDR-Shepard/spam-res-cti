@@ -85,6 +85,8 @@ const WRONG_NUMBER = /wrong\s*number/i;
 export const TRANSFER_MISSED_LINE = 'Transfer to a specialist did not connect — call them back.';
 /** end_call said appointment_set but nothing was booked: recorded as a callback with this line (summary.ts carries it). */
 export const NO_APPOINTMENT_LINE = 'The agent ended as booked, but no appointment was saved — call them back.';
+/** What save_qualification says back: the agent carries on (it already spoke), without thanking or repeating itself. */
+const SAVED_OUTPUT = "saved — carry on from where you were; don't thank them again or repeat yourself";
 const ISO_8601 = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -289,7 +291,7 @@ export async function handleToolCall(name: ToolName, args: unknown, env: ToolEnv
       return { output: 'done — say a brief goodbye and end the call', then: 'continue' };
     case 'save_qualification':
       await effects.saveQualification(ctx, qualificationFields(args));
-      return { output: 'saved', then: 'continue' };
+      return { output: SAVED_OUTPUT, then: 'continue' };
     case 'schedule_callback':
       await effects.scheduleCallback(ctx, {
         when: text(field(args, 'when'), WHEN_MAX),

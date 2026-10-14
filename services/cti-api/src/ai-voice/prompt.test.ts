@@ -469,6 +469,40 @@ describe('AI_CALL_TOOLS', () => {
   });
 });
 
+describe('no narrated tool use (smart stop v2, 2026-10-13)', () => {
+  const text = buildInstructions(input());
+  const tools = text.slice(text.indexOf('# Tools'), text.indexOf('# Voicemail'));
+  const saveLine = tools.split('\n').find((l) => l.startsWith('- save_qualification')) ?? '';
+
+  it('save_qualification goes in the same reply as the next sentence or question, and is never announced', () => {
+    expect(saveLine).toContain('Call it in the same reply as your next sentence or question');
+    expect(saveLine).toContain('never announce it');
+    expect(saveLine).not.toContain('no preamble');
+    expect(saveLine).toContain("Afterwards just continue the conversation; don't repeat what you already said.");
+  });
+
+  it('has a general rule: never narrate what you are doing, with the phrases to avoid', () => {
+    expect(tools).toContain("- Never narrate what you're doing");
+    for (const phrase of ['let me note that', 'let me write that down', 'let me think about the times', 'one moment while I check']) {
+      expect(tools).toContain(`"${phrase}"`);
+    }
+  });
+
+  it('names the only spoken lead-ins, and says to carry on after a tool result without thanking or repeating', () => {
+    expect(tools).toContain('transfer_to_rep, mark_do_not_call, holding on, and your goodbye');
+    expect(tools).toContain('After a tool result, carry on without thanking them again or repeating yourself.');
+  });
+
+  it('keeps the written lead-ins (transfer, do-not-call, hold on, goodbye) and the AI disclosure', () => {
+    expect(tools).toContain('Preamble (say it BEFORE calling): "Perfect — let me grab one of our specialists for you, one moment."');
+    expect(tools).toContain('preamble: "I\'ll take you off our list right now."');
+    expect(tools).toContain('preamble "Sure, take your time."');
+    expect(tools).toContain('Preamble: your goodbye line.');
+    expect(text).toContain('"Hi, this is Ava, an AI assistant calling for GG Homes on a recorded line — is this Jane?"');
+    expect(text).toContain('Never claim to be human.');
+  });
+});
+
 describe('voicemailText', () => {
   const wordCount = (s: string) => s.split(/\s+/).filter(Boolean).length;
 
