@@ -62,7 +62,7 @@ When an undecided overlap's turn ends (`committed`, then `…transcription.compl
 
 All responses go through one `requestResponse()`: if a response is active or a tool batch is running, it is deferred until that finishes, so the bridge never sends two `response.create`s at once.
 
-**Known limit:** words arrive ~1 s after the caller starts, so a real interruption stops the agent ~1.0–1.3 s in (today: ~0.3 s, but also on every "mm-hmm"). Humans take ~0.5–1 s to yield. If this feels long in testing, the follow-up is **ducking** (lower the agent's volume during an undecided overlap by re-sending the unplayed audio quieter) — not in this spec.
+**Known limit:** words arrive ~1 s after the caller starts, so a real interruption stops the agent ~1.0–1.3 s in (today: ~0.3 s, but also on every "mm-hmm"). Humans take ~0.5–1 s to yield. If this feels long in testing, the follow-up is **ducking** (lower the agent's volume during an undecided overlap by re-sending the unplayed audio quieter) — not in this spec. **2026-10-13:** it did feel long; §4.5 (the sound judge, now the default) stops on how long the caller keeps talking instead. The word rules in this section are `AI_VOICE_OVERLAP_JUDGE=words`, and stay as a second path under the sound judge.
 
 ### 4.2 Silence
 
@@ -93,6 +93,29 @@ outreach-web shows one line above every call transcript, e.g. "Response time: us
 - `# Unclear audio`: replace the unreachable long-silence rule with the note-based rule (§4.2).
 - `# Personality & Tone`: "If you get cut off, don't repeat what you already said — respond to what they said; pick your point back up only if it still matters." "A short 'mm-hmm' or 'yeah' as their whole reply means yes/okay to what you just asked." "For simple confirmations, answer right away."
 
+### 4.5 Sound judge (v2, 2026-10-13)
+
+**Problem.** On a live gate call, turns where the caller spoke over the agent took p90 4.9 s / max 7.0 s to answer (normal turns were fine), because (1) a real interruption was recognised only once its words arrived, ~1 s or more after the caller started, and (2) a late overlap (an answer over the agent's last ~1.5 s) and a caller still talking when the agent's audio ended were answered only after the agent's audio drained **and** the final transcript arrived. The owner: "keeps talking over me and then later registers it". Prod was switched to `instant` (fast, but it stops on every "mm-hmm").
+
+**Rules** (gate mode, `AI_VOICE_OVERLAP_JUDGE=sound`, the default):
+
+- **A. Sound stop.** While the agent is speaking (not the opener), the caller's current sound reaching `AI_VOICE_STOP_MS` (default 600 ms) cuts the agent at once (§4.1's "stop"). Shorter sounds ("mm-hmm", "yeah", "okay": about 200–560 ms) do not. The word rules of §4.1 stay as a second path — a stop word, two real words, 3 s with no words — so a short "wait" still stops it, about a second later.
+- **B. Late overlap.** Caller speech that starts with at most 1.5 s (`LATE_OVERLAP_MS`) of agent audio left cuts the agent at once, no words needed; that turn is answered at its commit (~0.9 s after they stop) like any turn.
+- **C. Still talking when the agent's audio finishes.** No longer an overlap: it is the caller's turn, answered at its commit (or at once if it was already committed) — never waiting for the transcript.
+- The opener (the AI disclosure) is still never cut: sound and late rules do not apply to it, and a late overlap over it is judged as in §4.1.
+
+**How the sound is measured** (`bridge-sound.ts`, `CallerSoundMeter`). Every inbound Twilio frame (20 ms of μ-law) is decoded after it is forwarded to OpenAI. A frame is loud at RMS ≥ 300 (16-bit scale) and ≥ 4× the line's noise floor (which follows quiet frames quickly and loud ones slowly, so a steady hum raises the bar but speech does not). A sound runs from its first loud frame to its last; quiet gaps under 300 ms (between words, "mm … hmm") do not end it. Its clock is the caller's audio, so it needs no timers. The gate (`bridge-overlap.ts`) checks the run on every frame while an overlap is open and not yet stopped (`speech_stopped`).
+
+**Calibration** (scratchpad spike, 2026-10-13: TTS clips, 4 voices, as 8 kHz μ-law; "run" = first loud frame → last loud frame, quiet gaps under 300 ms bridged; loud = frame RMS ≥ 300):
+
+| Caller audio | Sound run |
+|---|---|
+| Listening sounds: mm-hmm, yeah, uh-huh, okay, right, sure, yep, got it, oh okay, yeah yeah | mostly 200–560 ms |
+| Real replies: "no not really", "it's vacant", "I'm not interested", "how much would you pay?" | mostly 600–1700 ms |
+| Rule "run ≥ 600 ms" | 2 of 40 listening sounds would stop the agent; 20 of 28 real replies stop it by sound (the rest by words, later) |
+
+**Trade-off.** About 5% of listening sounds may stop the agent (a long "yeah, yeah"); short real replies stop it by their words about a second later, as before. `AI_VOICE_STOP_MS` moves the line: lower stops sooner but more "mm-hmm"s stop it; higher means fewer false stops but slower ones. To tune from real calls, the bridge logs `ai-voice bridge: caller interrupted the agent` `{ why: sound | late | words | no words, runMs }` and `ai-voice bridge: caller listening sound` `{ maxRunMs }` (numbers and enums only). `AI_VOICE_OVERLAP_JUDGE=words` is the rollback to §4.1's word judge exactly; `instant` mode never measures sound (its frames are unchanged).
+
 ## 5. Config
 
 | Var (cti-api) | Default | Notes |
@@ -101,6 +124,8 @@ outreach-web shows one line above every call transcript, e.g. "Response time: us
 | `AI_VOICE_TRANSCRIBE_MODEL` | gate: `gpt-live-transcribe`; instant: `gpt-4o-mini-transcribe` | Unset follows `AI_VOICE_BARGE_IN`, so `instant` alone also restores today's transcriber; a value set explicitly wins in either mode. Without streaming words the gate degrades to "stop after 3 s" (a short wordless sound is still ignored once the caller stops) |
 | `AI_VOICE_TURN_DETECTION` | gate: `server_vad`; instant: `semantic_vad` | Added 2026-10-12. Unset follows `AI_VOICE_BARGE_IN` (instant keeps today's frames byte for byte); a value set explicitly wins in either mode, so `semantic_vad` alone rolls back just the VAD. `server_vad` is sent as `{ type: 'server_vad', threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms, create_response, interrupt_response }` (gate: both `false`; instant: both `true`) |
 | `AI_VOICE_SILENCE_MS` | `500` | Added 2026-10-12. Integer 200–2000; `server_vad` only. Lower = faster, but the agent more often starts answering into a pause |
+| `AI_VOICE_OVERLAP_JUDGE` | `sound` | Added 2026-10-13 (§4.5). Gate mode only. `sound` = the caller's sound lasting `AI_VOICE_STOP_MS` stops the agent at once, late overlaps stop it at once, a caller still talking at the end is answered at their commit; the word rules still apply. `words` = the 2026-10-09 word judge (§4.1) exactly — the rollback |
+| `AI_VOICE_STOP_MS` | `600` | Added 2026-10-13. Integer 300–2000; sound judge only. Lower = stops sooner, but more "mm-hmm"s stop it; higher = fewer false stops, but slower |
 
 `AI_VOICE_VAD_EAGERNESS` (exists, `auto`) applies to `semantic_vad` only (2026-10-12; it was the knob for the ~1.6 s end-of-turn wait, which proved to be up to ~4.8 s).
 
