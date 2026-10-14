@@ -14,14 +14,15 @@
  * model waits for the caller's "Hello?" and opens the call itself after
  * OPENER_DELAY_MS of silence. Tool calls arrive on `response.done` and run via
  * `hooks.onTool`. OpenAI messages queue (bounded) until started and open, so
- * `session.update` always goes first. Audio payloads are never logged.
+ * `session.update` always goes first (bridge-sockets.ts). Audio payloads are never logged.
  *
  * In `instant` barge-in mode (the BridgeOptions default; the service default is `gate`) OpenAI's VAD answers each caller turn
  * and any caller sound cuts the agent. In `gate` mode the bridge owns the turns:
  * it answers each committed caller turn with one `response.create` at a time (never
  * over a caller mid-utterance), keeps talking through listening sounds and cuts the agent (never the opener)
  * only on a real interruption (bridge-overlap.ts; spec
- * docs/superpowers/specs/2026-10-09-ai-voice-natural-turn-taking-design.md §4.1).
+ * docs/superpowers/specs/2026-10-09-ai-voice-natural-turn-taking-design.md §4.1). Its default `sound` judge
+ * (§4.5) measures how long the caller keeps talking from their audio (bridge-sound.ts), not from transcribed words.
  * Gate mode also checks in after silence (bridge-silence.ts, §4.2). In both modes the bridge
  * times each answered caller turn and reports the call's numbers once via `onStats`, just
  * before `onEnd` (bridge-turn-stats.ts, §4.3), and logs where each one's time went (bridge-turn-timing.ts).
@@ -35,9 +36,8 @@
  * call even if the service never hangs up.
  */
 import type { AiCallTurnStats } from '@cti/contracts';
-import { obj, openAiErrorFields, parseFrame, str, type Msg } from './bridge-frames.js';
-import { Outbox } from './bridge-outbox.js';
-import { LATE_OVERLAP_MS, OverlapGate, type InterruptWhy } from './bridge-overlap.js';
+import { obj, openAiErrorFields, str, type Msg } from './bridge-frames.js';
+import { DEFAULT_STOP_MS, LATE_OVERLAP_MS, OverlapGate, type InterruptWhy, type OverlapJudge } from './bridge-overlap.js';
 import { PCMU_BYTES_PER_MS, PlaybackTracker, base64Bytes, type ClearTimer, type SetTimer, type Truncation } from './bridge-playback.js';
 import {
   DEFAULT_SILENCE_MS,
@@ -52,12 +52,14 @@ import {
   type VadEagerness,
 } from './bridge-session.js';
 import { HOLD_CHECK_MS, SILENCE_CHECK_MS, SilenceCheck, silenceNoteItem } from './bridge-silence.js';
+import { CallerSoundMeter } from './bridge-sound.js';
+import { BridgeSockets, type BridgeSocket } from './bridge-sockets.js';
 import { TurnStatsCollector, type BargeInMode } from './bridge-turn-stats.js';
 import { TurnTiming, heldBy } from './bridge-turn-timing.js';
 import { errText, functionCalls, runToolBatch, type BridgeLog, type FunctionCall, type ToolResult } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
 
-export type { BargeInMode, BridgeLog, ReasoningEffort, ToolResult, TurnDetection, VadEagerness };
+export type { BargeInMode, BridgeLog, BridgeSocket, OverlapJudge, ReasoningEffort, ToolResult, TurnDetection, VadEagerness };
 
 /** The transcriber before 2026-10-09; the bridge's default so a bare BridgeOptions behaves as before. */
 export const LEGACY_TRANSCRIBE_MODEL = 'gpt-4o-mini-transcribe';
@@ -72,19 +74,6 @@ export const END_GRACE_MS = 10_000;
 export const SESSION_READY_TIMEOUT_MS = 5000;
 /** Shortest accepted `maxCallMs`. */
 export const MIN_CALL_MS = 10_000;
-
-const WS_OPEN = 1;
-
-export interface BridgeSocket {
-  send(data: string): void;
-  close(code?: number, reason?: string): void;
-  on(ev: 'message', cb: (d: string) => void): void;
-  on(ev: 'close', cb: () => void): void;
-  on(ev: 'error', cb: (e: Error) => void): void;
-  on(ev: 'open', cb: () => void): void;
-  /** ws semantics: 0 CONNECTING, 1 OPEN, 2 CLOSING, 3 CLOSED. */
-  readonly readyState: number;
-}
 
 export type EndReason = 'twilio_closed' | 'openai_closed' | 'max_duration' | 'error';
 
@@ -115,6 +104,10 @@ export interface BridgeOptions {
   turnDetection?: TurnDetection;
   /** `server_vad` only: the silence that ends the caller's turn, in ms (default 500; the service passes AI_VOICE_SILENCE_MS). */
   silenceMs?: number;
+  /** Gate mode only: 'sound' (spec §4.5) or 'words' (default here, the 2026-10-09 gate; the service passes AI_VOICE_OVERLAP_JUDGE). */
+  overlapJudge?: OverlapJudge;
+  /** Sound judge only: the caller's sound this long over the agent stops it, in ms (default DEFAULT_STOP_MS; the service passes AI_VOICE_STOP_MS). */
+  stopMs?: number;
   maxCallMs: number;
   now?: () => number;
   setTimer?: SetTimer;
@@ -127,14 +120,15 @@ export class AiCallBridge {
   private readonly clearTimer: ClearTimer;
   private readonly playback: PlaybackTracker;
   private readonly gate: OverlapGate;
+  /** Gate mode with the sound judge only: how long the caller's current sound has run, from every inbound frame. */
+  private readonly meter: CallerSoundMeter | null;
   private readonly silenceCheck: SilenceCheck;
   private readonly stats: TurnStatsCollector;
   private readonly timing: TurnTiming;
   private readonly bargeIn: BargeInMode;
   /** The turn-detection settings with their defaults applied (sent in the session and again when the call closes). */
   private readonly vad: TurnDetectionSettings;
-  private readonly outbox: Outbox;
-  private started = false;
+  private readonly sockets: BridgeSockets;
   private sessionReady = false;
   private callerSpoke = false;
   private openerSent = false;
@@ -175,7 +169,6 @@ export class AiCallBridge {
   private autoResponsesOff = false;
   private truncated = new Set<string>();
   private ended = false;
-  private stopped = false;
   private openerTimer: ReturnType<typeof setTimeout> | null = null;
   private maxTimer: ReturnType<typeof setTimeout> | null = null;
   private backstopTimer: ReturnType<typeof setTimeout> | null = null;
@@ -203,11 +196,15 @@ export class AiCallBridge {
       clearTimer: this.clearTimer,
       onDrained: () => this.onAgentFinished(),
     });
+    const judge = opts.overlapJudge ?? 'words';
+    this.meter = this.bargeIn === 'gate' && judge === 'sound' ? new CallerSoundMeter() : null;
     this.gate = new OverlapGate({
       setTimer: this.setTimer,
       clearTimer: this.clearTimer,
+      judge,
+      stopMs: Number.isFinite(opts.stopMs) ? (opts.stopMs as number) : DEFAULT_STOP_MS,
       onInterrupt: (why) => this.interruptAgent(why),
-      onListening: () => this.stats.listeningSound(), // only with words: a cough is not a "mm-hmm"
+      onListening: (_itemId, maxRunMs) => this.onListening(maxRunMs), // only with words: a cough is not a "mm-hmm"
     });
     this.silenceCheck = new SilenceCheck({
       setTimer: this.setTimer,
@@ -216,9 +213,7 @@ export class AiCallBridge {
     });
     this.stats = new TurnStatsCollector(this.bargeIn);
     this.timing = new TurnTiming(this.bargeIn, this.vad.turnDetection, (line) => hooks.log.info(line, 'ai-voice: turn timing'));
-    this.outbox = new Outbox(() =>
-      hooks.log.warn({ queued: 'full' }, 'ai-voice bridge: openai outbox full, dropping oldest caller audio'),
-    );
+    this.sockets = new BridgeSockets(opts.twilio, opts.openai, hooks.log);
 
     opts.twilio.on('message', (d) => this.onTwilioFrame(d));
     opts.twilio.on('close', () => this.endAndTearDown('twilio_closed'));
@@ -226,7 +221,7 @@ export class AiCallBridge {
     opts.openai.on('message', (d) => this.onOpenAiFrame(d));
     opts.openai.on('open', () => {
       this.armReadyTimer();
-      this.flush();
+      this.sockets.flush();
     });
     opts.openai.on('close', () => this.endWithBackstop('openai_closed'));
     opts.openai.on('error', (e) => this.endWithBackstop('error', `openai: ${e.message}`));
@@ -234,21 +229,18 @@ export class AiCallBridge {
 
   /** Configure the session (sent first, once OpenAI is open) and arm the max-duration timer. */
   start(): void {
-    if (this.started || this.stopped) return;
-    this.started = true;
-    this.outbox.prepend(
-      JSON.stringify(
-        sessionUpdate({
-          ...this.opts,
-          ...this.vad,
-          bargeIn: this.bargeIn,
-          transcribeModel: this.opts.transcribeModel ?? LEGACY_TRANSCRIBE_MODEL,
-        }),
-      ),
+    if (this.sockets.started || this.sockets.stopped) return;
+    this.sockets.start(
+      sessionUpdate({
+        ...this.opts,
+        ...this.vad,
+        bargeIn: this.bargeIn,
+        transcribeModel: this.opts.transcribeModel ?? LEGACY_TRANSCRIBE_MODEL,
+      }),
     );
     this.maxTimer = this.setTimer(() => this.endWithBackstop('max_duration'), this.opts.maxCallMs);
     this.armReadyTimer();
-    this.flush();
+    this.sockets.flush();
   }
 
   /** Stop the agent talking right now (before a voicemail/transfer redirect). Idempotent. */
@@ -262,7 +254,7 @@ export class AiCallBridge {
     this.timing.end(); // Twilio echoes every mark once cleared: that is not playing
     this.silenceCheck.cancel();
     this.cancelWhenCreated = false;
-    this.sendTwilio({ event: 'clear', streamSid: this.opts.streamSid });
+    this.sockets.sendTwilio({ event: 'clear', streamSid: this.opts.streamSid });
     this.cancelResponse();
     const cut = this.playback.interrupt();
     if (cut) this.truncateOnce(cut);
@@ -282,7 +274,7 @@ export class AiCallBridge {
   // ── Twilio → bridge ────────────────────────────────────────────────────────
 
   private onTwilioFrame(raw: unknown): void {
-    const msg = this.parse(raw, 'twilio');
+    const msg = this.sockets.parse(raw, 'twilio');
     if (!msg) return;
     switch (msg.event) {
       case 'media': {
@@ -291,7 +283,9 @@ export class AiCallBridge {
         const payload = str(media.payload);
         if (payload) {
           this.sentAudioMs += base64Bytes(payload) / PCMU_BYTES_PER_MS;
-          this.sendOpenAi({ type: 'input_audio_buffer.append', audio: payload }, true);
+          this.sockets.sendOpenAi({ type: 'input_audio_buffer.append', audio: payload }, true);
+          const runMs = this.meter?.push(payload); // after forwarding: every frame, in order
+          if (runMs !== undefined && !this.gate.idle) this.gate.onSound(runMs);
         }
         return;
       }
@@ -312,7 +306,7 @@ export class AiCallBridge {
   // ── OpenAI → bridge ────────────────────────────────────────────────────────
 
   private onOpenAiFrame(raw: unknown): void {
-    const msg = this.parse(raw, 'openai');
+    const msg = this.sockets.parse(raw, 'openai');
     if (!msg) return;
     switch (msg.type) {
       case 'session.updated':
@@ -376,8 +370,8 @@ export class AiCallBridge {
 
   /** Start the `session.updated` clock once the session is sent and the socket is open. */
   private armReadyTimer(): void {
-    if (!this.started || this.sessionReady || this.ended || this.readyTimer !== null) return;
-    if (this.opts.openai.readyState !== WS_OPEN) return;
+    if (!this.sockets.started || this.sessionReady || this.ended || this.readyTimer !== null) return;
+    if (!this.sockets.openAiOpen) return;
     this.readyTimer = this.setTimer(() => {
       this.readyTimer = null;
       this.notConfigured('timeout');
@@ -400,7 +394,7 @@ export class AiCallBridge {
     this.openerTimer = null;
     if (this.callerSpoke || this.openerSent || this.ended || this.closing) return;
     this.openerSent = true;
-    this.sendOpenAi(openerItem());
+    this.sockets.sendOpenAi(openerItem());
     this.requestResponse();
   }
 
@@ -418,7 +412,7 @@ export class AiCallBridge {
     if (this.closing) return;
     if (this.agentSpeaking()) {
       const cuttable = this.playback.currentItemId !== this.openerItemId;
-      this.gate.open(itemId, { cuttable, late: this.playback.remainingMs() <= LATE_OVERLAP_MS });
+      this.gate.open(itemId, { cuttable, late: this.playback.remainingMs() <= LATE_OVERLAP_MS, runMs: this.meter?.runMs ?? 0 });
       return;
     }
     // A response that has not played a sound yet: drop it unheard; their turn gets a fresh one.
@@ -491,7 +485,7 @@ export class AiCallBridge {
   private cutAgent(): boolean {
     const cut = this.playback.interrupt();
     if (!cut) return false;
-    this.sendTwilio({ event: 'clear', streamSid: this.opts.streamSid });
+    this.sockets.sendTwilio({ event: 'clear', streamSid: this.opts.streamSid });
     this.truncateOnce(cut);
     return true;
   }
@@ -504,7 +498,8 @@ export class AiCallBridge {
     this.answerAfterPlayback = false; // the turn that cut the agent gets its own answer
     if (this.cutAgent() || cancelled) {
       this.stats.interruption();
-      this.hooks.log.info({ why }, 'ai-voice bridge: caller interrupted the agent');
+      const sound = this.meter === null ? {} : { runMs: Math.round(this.meter.runMs) };
+      this.hooks.log.info({ why, ...sound }, 'ai-voice bridge: caller interrupted the agent');
       this.note('[stopped — they interrupted]');
     }
     // A committed turn among them is over: answer it. Otherwise the speaker's commit will.
@@ -514,6 +509,12 @@ export class AiCallBridge {
     this.stats.overlapsAnswered(owed);
     this.timing.overlapsAnswered(owed);
     this.requestResponse();
+  }
+
+  /** An overlap was only a listening sound; with the sound judge its length is logged, to tune AI_VOICE_STOP_MS from real calls. */
+  private onListening(maxRunMs: number): void {
+    this.stats.listeningSound();
+    if (this.meter !== null) this.hooks.log.info({ maxRunMs: Math.round(maxRunMs) }, 'ai-voice bridge: caller listening sound');
   }
 
   private get toolsRunning(): boolean {
@@ -526,7 +527,7 @@ export class AiCallBridge {
     // Instant mode: VAD answers turns; the opener and after-tool creates go out at once, as before the gate.
     if (this.bargeIn === 'instant') {
       this.timing.requested(this.now());
-      return this.sendOpenAi({ type: 'response.create' });
+      return this.sockets.sendOpenAi({ type: 'response.create' });
     }
     // Never over a caller mid-utterance: their commit (or the overlap's verdict) releases it, answering both.
     const held = heldBy(this.callerTalking, this.responsePending || this.responseActive, this.toolsRunning);
@@ -540,7 +541,7 @@ export class AiCallBridge {
     this.responsePending = true;
     this.createSeq += 1;
     this.pendingCreateId = `ai-create-${this.createSeq}`;
-    this.sendOpenAi({ type: 'response.create', event_id: this.pendingCreateId });
+    this.sockets.sendOpenAi({ type: 'response.create', event_id: this.pendingCreateId });
     this.timing.requested(this.now());
   }
 
@@ -561,7 +562,7 @@ export class AiCallBridge {
   private cancelResponse(): boolean {
     if (!this.responseActive || this.responseCut) return false;
     this.responseCut = true;
-    this.sendOpenAi({ type: 'response.cancel' });
+    this.sockets.sendOpenAi({ type: 'response.cancel' });
     return true;
   }
 
@@ -570,7 +571,16 @@ export class AiCallBridge {
     this.stats.agentFinished(this.now());
     if (this.ended || this.closing) return;
     // A caller still talking over the end is answering it (spec §4.1) — unless a next response (a tool follow-up) is coming.
-    if (!this.responsePending && !(this.responseActive && !this.responseHasAudio)) this.gate.onAgentFinished();
+    if (!this.responsePending && !(this.responseActive && !this.responseHasAudio)) {
+      // Sound judge: it is their turn now — answered at its commit, or with the answer below if already committed.
+      const released = this.gate.onAgentFinished();
+      if (released !== null && this.judgedTurns.has(released)) {
+        this.judgedTurns = new Set([...this.judgedTurns].filter((id) => id !== released));
+        this.stats.overlapsAnswered([released]);
+        this.timing.overlapsAnswered([released]);
+        this.answerAfterPlayback = true; // one answer, for it and any late answer already owed
+      }
+    }
     if (!this.answerAfterPlayback) return this.onAgentWaiting();
     this.answerAfterPlayback = false;
     this.requestResponse();
@@ -597,7 +607,7 @@ export class AiCallBridge {
     if (!this.waiting()) return;
     this.stats.silenceCheck();
     this.note(`[no answer for ${seconds} s]`);
-    this.sendOpenAi(silenceNoteItem(seconds));
+    this.sockets.sendOpenAi(silenceNoteItem(seconds));
     this.requestResponse();
   }
 
@@ -610,7 +620,7 @@ export class AiCallBridge {
   private truncateOnce(cut: Truncation): void {
     if (this.truncated.has(cut.itemId)) return;
     this.truncated = new Set([...this.truncated, cut.itemId]);
-    this.sendOpenAi(truncate(cut.itemId, cut.audioEndMs));
+    this.sockets.sendOpenAi(truncate(cut.itemId, cut.audioEndMs));
   }
 
   /** Forward agent audio — never before the session is ready, after silence(), or of a response the bridge cancelled. */
@@ -625,14 +635,14 @@ export class AiCallBridge {
       this.agentSpoke = true;
       this.openerItemId ??= itemId;
     }
-    this.sendTwilio({
+    this.sockets.sendTwilio({
       event: 'media',
       streamSid: this.opts.streamSid,
       media: { payload: delta },
     });
     const mark = this.playback.onAudioDelta(itemId, delta);
     if (first) this.timing.forwarded(at, mark);
-    this.sendTwilio({
+    this.sockets.sendTwilio({
       event: 'mark',
       streamSid: this.opts.streamSid,
       mark: { name: mark },
@@ -677,7 +687,7 @@ export class AiCallBridge {
     const deps = {
       onTool: this.hooks.onTool.bind(this.hooks),
       log: this.hooks.log,
-      send: (m: object) => this.sendOpenAi(m),
+      send: (m: object) => this.sockets.sendOpenAi(m),
     };
     this.toolBatches += 1;
     this.timing.toolBatch();
@@ -712,38 +722,10 @@ export class AiCallBridge {
     // Gate sessions never auto-respond; instant sessions stop VAD responses during the drain.
     if (this.bargeIn === 'gate' || this.autoResponsesOff) return;
     this.autoResponsesOff = true;
-    this.sendOpenAi(stopAutoResponses(this.vad));
+    this.sockets.sendOpenAi(stopAutoResponses(this.vad));
   }
 
-  // ── sockets & lifecycle ────────────────────────────────────────────────────
-
-  private parse(raw: unknown, source: 'twilio' | 'openai'): Msg | null {
-    const msg = parseFrame(raw);
-    if (!msg) this.hooks.log.warn({ source }, 'ai-voice bridge: unparseable frame');
-    return msg;
-  }
-
-  private sendTwilio(m: object): void {
-    if (this.stopped || this.opts.twilio.readyState !== WS_OPEN) return;
-    this.opts.twilio.send(JSON.stringify(m));
-  }
-
-  /** Queue until started and open; drop once the OpenAI socket is closing/closed. */
-  private sendOpenAi(m: object, droppable = false): void {
-    if (this.stopped || this.opts.openai.readyState > WS_OPEN) return;
-    const data = JSON.stringify(m);
-    if (!this.started || this.opts.openai.readyState !== WS_OPEN) {
-      this.outbox.push(data, droppable);
-      return;
-    }
-    this.flush();
-    this.opts.openai.send(data);
-  }
-
-  private flush(): void {
-    if (!this.started || this.stopped || this.opts.openai.readyState !== WS_OPEN) return;
-    for (const m of this.outbox.drain()) this.opts.openai.send(m);
-  }
+  // ── lifecycle ──────────────────────────────────────────────────────────────
 
   private cancelOpener(): void {
     if (this.openerTimer === null) return;
@@ -773,23 +755,15 @@ export class AiCallBridge {
     if (this.ended) return;
     this.silence();
     this.finish(reason, detail);
-    if (this.stopped) return;
+    if (this.sockets.stopped) return;
     this.backstopTimer = this.setTimer(() => this.endAndTearDown(reason, detail), END_GRACE_MS);
   }
 
   private endAndTearDown(reason: EndReason, detail?: string): void {
     this.finish(reason, detail);
-    if (this.stopped) return;
-    this.stopped = true;
+    if (this.sockets.stopped) return;
     if (this.backstopTimer !== null) this.clearTimer(this.backstopTimer);
     this.backstopTimer = null;
-    this.outbox.clear();
-    for (const s of [this.opts.twilio, this.opts.openai]) {
-      try {
-        s.close();
-      } catch (e) {
-        this.hooks.log.warn({ err: errText(e) }, 'ai-voice bridge: socket close failed');
-      }
-    }
+    this.sockets.close();
   }
 }

@@ -118,6 +118,18 @@ describe('runStreamSession — the start frame', () => {
     expect(captured?.opts).toMatchObject({ bargeIn: 'instant', turnDetection: 'semantic_vad', silenceMs: 500 });
   });
 
+  it('passes the overlap judge and stop length to the bridge', async () => {
+    deps.cfg = { ...cfg, AI_VOICE_OVERLAP_JUDGE: 'sound', AI_VOICE_STOP_MS: 750 } as AppConfig;
+    expect(await begin()).toBe('started');
+    expect(captured?.opts).toMatchObject({ overlapJudge: 'sound', stopMs: 750 });
+  });
+
+  it('passes the words judge through too (the rollback)', async () => {
+    deps.cfg = { ...cfg, AI_VOICE_OVERLAP_JUDGE: 'words', AI_VOICE_STOP_MS: 600 } as AppConfig;
+    expect(await begin()).toBe('started');
+    expect(captured?.opts).toMatchObject({ overlapJudge: 'words', stopMs: 600 });
+  });
+
   it('Part 6 B: a practice call rings a Chicago test number but says the seller\'s (the record\'s San Diego) local time', async () => {
     registerActiveCall(activeEntry({ aiCallId: ID, callSid: CALL_SID, toE164: '+15125550111', isTest: true, localTimeE164: '+16195550100' }));
     expect(await begin()).toBe('started');

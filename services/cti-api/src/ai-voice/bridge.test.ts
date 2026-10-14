@@ -1279,6 +1279,212 @@ describe('barge-in gate', () => {
     completed(openai, 'Hello?');
     expect(openai.sent).toEqual([CREATE]);
   });
+
+  // ── smart stop v2: the sound judge (AI_VOICE_OVERLAP_JUDGE=sound) ──
+
+  describe('the sound judge', () => {
+    /** 20 ms of μ-law: a loud caller frame, and a silent one. */
+    const LOUD = Buffer.alloc(160, 0x00).toString('base64');
+    const QUIET = Buffer.alloc(160, 0xff).toString('base64');
+    const CLEAR = { event: 'clear', streamSid: SID };
+    const INTERRUPTED = 'ai-voice bridge: caller interrupted the agent';
+    const LISTENING = 'ai-voice bridge: caller listening sound';
+    /** What the bridge sent OpenAI besides the caller's audio. */
+    const control = (openai: FakeSocket) => openai.sent.filter((m) => m.type !== 'input_audio_buffer.append');
+    const cleared = (twilio: FakeSocket) => twilio.sent.some((m) => m.event === 'clear');
+
+    /** Like talking(), judged by sound, with real 20 ms caller frames: item_1 (3 s from 1000 ms) is 500 ms in, still streaming. */
+    function soundTalking(over: Partial<BridgeOptions> = {}) {
+      const s = setup({ bargeIn: 'gate', transcribeModel: 'gpt-live-transcribe', overlapJudge: 'sound', ...over });
+      s.bridge.start();
+      s.openai.msg(READY);
+      talk(s.openai, 'item_0', 100);
+      s.openai.msg({ type: 'response.output_audio.done' });
+      s.openai.msg(doneEmpty);
+      playAll(s.twilio);
+      s.twilio.msg(media(1000, QUIET));
+      talk(s.openai, 'item_1', 3000);
+      s.twilio.msg(media(1500, QUIET));
+      s.twilio.clearSent();
+      s.openai.clearSent();
+      let at = 1500;
+      /** `n` caller frames of `payload`, on from Twilio's clock. */
+      const frames = (n: number, payload: string): void => {
+        for (let i = 0; i < n; i += 1) {
+          at += 20;
+          s.twilio.msg(media(at, payload));
+        }
+      };
+      return { ...s, frames };
+    }
+
+    it('a caller who keeps talking for 600 ms stops the agent at once, before any words, and gets one answer', async () => {
+      const { twilio, openai, hooks, frames } = soundTalking();
+      started(openai);
+      frames(29, LOUD);
+      expect(cleared(twilio)).toBe(false);
+      frames(1, LOUD); // 600 ms
+      expect(twilio.sent).toEqual([CLEAR]);
+      expect(control(openai)).toEqual([
+        { type: 'response.cancel' },
+        { type: 'conversation.item.truncate', item_id: 'item_1', content_index: 0, audio_end_ms: 1100 },
+      ]);
+      expect(openai.sent.filter((m) => m.type === 'input_audio_buffer.append')).toHaveLength(30); // every frame still reaches OpenAI
+      expect(hooks.log.info).toHaveBeenCalledWith({ why: 'sound', runMs: 600 }, INTERRUPTED);
+      expect(hooks.onTranscript).toHaveBeenCalledWith(expect.objectContaining({ role: 'system', text: '[stopped — they interrupted]' }));
+      frames(20, LOUD);
+      stopped(openai);
+      committed(openai);
+      expect(creates(openai)).toEqual([]); // the cancelled response has not reported done yet
+      openai.msg({ type: 'response.done', response: { status: 'cancelled', output: [] } });
+      expect(creates(openai)).toEqual([CREATE]);
+      completed(openai, 'No, not really, I already sold it.');
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(creates(openai)).toEqual([CREATE]);
+      expect(twilio.sent).toEqual([CLEAR]);
+    });
+
+    it('a short sound (a 300 ms "mm-hmm") does not stop the agent; its words settle it as listening, logged with its length', () => {
+      const { twilio, openai, hooks, frames } = soundTalking();
+      started(openai);
+      frames(15, LOUD);
+      frames(20, QUIET);
+      expect(cleared(twilio)).toBe(false);
+      stopped(openai);
+      committed(openai);
+      completed(openai, 'Mm-hmm.');
+      openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(200) });
+      expect(cleared(twilio)).toBe(false);
+      expect(twilio.sent.some((m) => m.event === 'media')).toBe(true); // still talking
+      expect(control(openai)).toEqual([]);
+      expect(hooks.log.info).toHaveBeenCalledWith({ maxRunMs: 300 }, LISTENING);
+      expect(hooks.log.info).not.toHaveBeenCalledWith(expect.anything(), INTERRUPTED);
+    });
+
+    it('a short "wait" still stops it by its words', () => {
+      const { twilio, openai, hooks, frames } = soundTalking();
+      started(openai);
+      frames(10, LOUD);
+      delta(openai, ' Wait');
+      expect(twilio.sent).toEqual([CLEAR]);
+      expect(hooks.log.info).toHaveBeenCalledWith({ why: 'words', runMs: 200 }, INTERRUPTED);
+    });
+
+    it('speech in the agent\'s last 1.5 s stops it at once and is answered at its commit, not waiting for words', () => {
+      const { twilio, openai, hooks } = soundTalking();
+      openai.msg({ type: 'response.output_audio.done' });
+      openai.msg(doneEmpty);
+      twilio.msg(media(3000, QUIET)); // 1 s of item_1 left
+      openai.clearSent();
+      started(openai);
+      expect(twilio.sent).toEqual([CLEAR]);
+      expect(control(openai)).toEqual([{ type: 'conversation.item.truncate', item_id: 'item_1', content_index: 0, audio_end_ms: 2000 }]);
+      expect(hooks.log.info).toHaveBeenCalledWith({ why: 'late', runMs: 0 }, INTERRUPTED);
+      stopped(openai);
+      expect(creates(openai)).toEqual([]);
+      committed(openai);
+      expect(creates(openai)).toEqual([CREATE]); // no transcript yet
+      completed(openai, 'Yeah, sure.');
+      expect(creates(openai)).toEqual([CREATE]);
+    });
+
+    it('a caller still talking when the agent finishes has the turn: answered at its commit, without a transcript', async () => {
+      const { twilio, openai, frames } = soundTalking();
+      openai.msg({ type: 'response.output_audio.done' });
+      openai.msg(doneEmpty); // 2.5 s of item_1 left: not late
+      started(openai);
+      frames(10, LOUD);
+      frames(20, QUIET);
+      frames(10, LOUD); // two short sounds: never 600 ms
+      playAll(twilio); // the agent finishes while they are still talking
+      frames(10, LOUD);
+      expect(cleared(twilio)).toBe(false);
+      expect(creates(openai)).toEqual([]);
+      stopped(openai);
+      committed(openai);
+      expect(creates(openai)).toEqual([CREATE]);
+      openai.msg({ type: 'response.created' });
+      await vi.advanceTimersByTimeAsync(3000); // its no-words timer is gone: the answer is not cut
+      expect(control(openai)).toEqual([CREATE]);
+      completed(openai, 'Yeah, that works for me.');
+      openai.msg(doneEmpty);
+      expect(creates(openai)).toEqual([CREATE]);
+    });
+
+    it('a caller still talking when the agent finishes whose turn OpenAI already committed is answered at the drain', () => {
+      const { twilio, openai } = soundTalking();
+      openai.msg({ type: 'response.output_audio.done' });
+      openai.msg(doneEmpty);
+      started(openai);
+      openai.msg({ type: 'input_audio_buffer.speech_stopped', audio_end_ms: 2200 }); // no item id: the gate still has c1 open
+      committed(openai); // deferred as overlap_verdict
+      expect(creates(openai)).toEqual([]);
+      playAll(twilio);
+      expect(creates(openai)).toEqual([CREATE]);
+      completed(openai, 'Yeah, sure.');
+      expect(creates(openai)).toEqual([CREATE]);
+      expect(cleared(twilio)).toBe(false);
+    });
+
+    for (const when of ['long', 'late'] as const) {
+      it(`never stops the opener, however ${when === 'long' ? 'long' : 'late'} the caller talks over it`, async () => {
+        const { twilio, openai, bridge } = setup({ bargeIn: 'gate', overlapJudge: 'sound' });
+        bridge.start();
+        openai.msg(READY);
+        twilio.msg(media(100, QUIET));
+        talk(openai, 'item_0', 4000);
+        openai.msg({ type: 'response.output_audio.done' });
+        openai.msg(doneEmpty);
+        let at = when === 'long' ? 100 : 3000; // late: 1.1 s of the opener left
+        twilio.msg(media(at, QUIET));
+        twilio.clearSent();
+        openai.clearSent();
+        started(openai);
+        for (let i = 0; i < 50; i += 1) twilio.msg(media((at += 20), LOUD)); // 1 s of loud talk
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(cleared(twilio)).toBe(false);
+        expect(control(openai)).toEqual([]);
+      });
+    }
+
+    it('instant mode: caller frames reach OpenAI exactly as before (no meter), whatever the judge setting', () => {
+      const run = (over: Partial<BridgeOptions>) => {
+        const s = setup(over);
+        s.bridge.start();
+        s.openai.msg(READY);
+        s.twilio.msg(media(1000, QUIET));
+        talk(s.openai, 'item_1', 3000);
+        for (let i = 1; i <= 40; i += 1) s.twilio.msg(media(1000 + 20 * i, i % 7 === 0 ? QUIET : LOUD));
+        return { openai: JSON.stringify(s.openai.sent), twilio: JSON.stringify(s.twilio.sent), appends: s.openai.sent.filter((m) => m.type === 'input_audio_buffer.append') };
+      };
+      const before = run({});
+      const now = run({ bargeIn: 'instant', overlapJudge: 'sound', stopMs: 300 });
+      expect(now.openai).toBe(before.openai);
+      expect(now.twilio).toBe(before.twilio);
+      expect(now.appends).toHaveLength(41); // every frame, untouched
+      expect(now.twilio).not.toContain('"clear"');
+    });
+
+    it('the words judge (rollback) does not stop on sound alone, only on words, and logs no length', () => {
+      const { twilio, openai, hooks, frames } = soundTalking({ overlapJudge: 'words' });
+      started(openai);
+      frames(50, LOUD); // 1 s
+      expect(cleared(twilio)).toBe(false);
+      delta(openai, ' Wait');
+      expect(twilio.sent).toEqual([CLEAR]);
+      expect(hooks.log.info).toHaveBeenCalledWith({ why: 'words' }, INTERRUPTED);
+    });
+
+    it('the words judge logs no listening length', () => {
+      const { openai, hooks, frames } = soundTalking({ overlapJudge: 'words' });
+      started(openai);
+      frames(15, LOUD);
+      stopped(openai);
+      committed(openai);
+      completed(openai, 'Mm-hmm.');
+      expect(hooks.log.info).not.toHaveBeenCalledWith(expect.anything(), LISTENING);
+    });
+  });
 });
 
 describe('instant mode keeps its pre-gate frames', () => {

@@ -127,6 +127,7 @@ describe('AI voice config', () => {
     'OPENAI_API_KEY', 'AI_VOICE', 'AI_VOICE_MODEL', 'AI_VOICE_REASONING',
     'AI_VOICE_VAD_EAGERNESS', 'AI_VOICE_VOICE', 'AI_VOICE_AGENT_NAME',
     'AI_VOICE_BARGE_IN', 'AI_VOICE_TRANSCRIBE_MODEL', 'AI_VOICE_TURN_DETECTION', 'AI_VOICE_SILENCE_MS',
+    'AI_VOICE_OVERLAP_JUDGE', 'AI_VOICE_STOP_MS',
     'AI_VOICE_TEST_NUMBERS', 'AI_VOICE_MAX_CALL_SECONDS', 'ANTHROPIC_API_KEY',
     'AI_SUMMARY_MODEL', 'OUTREACH_KILL_SWITCH',
   ];
@@ -146,6 +147,8 @@ describe('AI voice config', () => {
     expect(cfg.AI_VOICE_TRANSCRIBE_MODEL).toBe('gpt-live-transcribe');
     expect(cfg.AI_VOICE_TURN_DETECTION).toBe('server_vad');
     expect(cfg.AI_VOICE_SILENCE_MS).toBe(500);
+    expect(cfg.AI_VOICE_OVERLAP_JUDGE).toBe('sound');
+    expect(cfg.AI_VOICE_STOP_MS).toBe(600);
     expect(cfg.AI_VOICE_TEST_NUMBERS).toBeUndefined();
     expect(cfg.AI_VOICE_MAX_CALL_SECONDS).toBe(600);
     expect(cfg.ANTHROPIC_API_KEY).toBeUndefined();
@@ -229,6 +232,25 @@ describe('AI voice config', () => {
     expect((await loadWith({ AI_VOICE_SILENCE_MS: '2000' })).AI_VOICE_SILENCE_MS).toBe(2000);
     for (const bad of ['199', '2001', '0', '-500', '500.5', 'soon']) {
       await expect(loadWith({ AI_VOICE_SILENCE_MS: bad })).rejects.toThrow(/AI_VOICE_SILENCE_MS/);
+    }
+  });
+
+  it('the overlap judge is sound or words, default sound (empty = unset); anything else fails the boot', async () => {
+    expect((await loadWith({ AI_VOICE_OVERLAP_JUDGE: '' })).AI_VOICE_OVERLAP_JUDGE).toBe('sound');
+    expect((await loadWith({ AI_VOICE_OVERLAP_JUDGE: 'sound' })).AI_VOICE_OVERLAP_JUDGE).toBe('sound');
+    expect((await loadWith({ AI_VOICE_OVERLAP_JUDGE: 'words' })).AI_VOICE_OVERLAP_JUDGE).toBe('words');
+    for (const bad of ['Sound', 'both', 'off']) {
+      await expect(loadWith({ AI_VOICE_OVERLAP_JUDGE: bad })).rejects.toThrow(/AI_VOICE_OVERLAP_JUDGE/);
+    }
+  });
+
+  it('the stop length is an integer of 300 to 2000 ms, default 600 (empty = unset)', async () => {
+    expect((await loadWith({ AI_VOICE_STOP_MS: '' })).AI_VOICE_STOP_MS).toBe(600);
+    expect((await loadWith({ AI_VOICE_STOP_MS: '300' })).AI_VOICE_STOP_MS).toBe(300);
+    expect((await loadWith({ AI_VOICE_STOP_MS: '750' })).AI_VOICE_STOP_MS).toBe(750);
+    expect((await loadWith({ AI_VOICE_STOP_MS: '2000' })).AI_VOICE_STOP_MS).toBe(2000);
+    for (const bad of ['299', '2001', '0', '-600', '600.5', 'soon']) {
+      await expect(loadWith({ AI_VOICE_STOP_MS: bad })).rejects.toThrow(/AI_VOICE_STOP_MS/);
     }
   });
 

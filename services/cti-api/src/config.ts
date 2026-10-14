@@ -9,6 +9,8 @@ import { z } from 'zod';
  *   after AI_VOICE_SILENCE_MS of silence, ~0.9 s measured 2026-10-12; `semantic_vad` measured up to ~4.8 s on
  *   short replies); `instant` keeps `semantic_vad`, today's frames.
  * An explicit value of either wins in both modes (AI_VOICE_TURN_DETECTION=semantic_vad rolls back just the VAD).
+ * AI_VOICE_OVERLAP_JUDGE and AI_VOICE_STOP_MS apply to gate mode only (instant ignores them);
+ * AI_VOICE_OVERLAP_JUDGE=words rolls back just the sound judge (smart stop v2) to the 2026-10-09 word gate.
  */
 const DEFAULT_TRANSCRIBE_MODEL = { gate: 'gpt-live-transcribe', instant: 'gpt-4o-mini-transcribe' } as const;
 const DEFAULT_TURN_DETECTION = { gate: 'server_vad', instant: 'semantic_vad' } as const;
@@ -234,6 +236,13 @@ const schema = z.object({
   AI_VOICE_TURN_DETECTION: z.enum(['server_vad', 'semantic_vad']).optional(),
   /** server_vad only: how long the caller must be silent before their turn is over, in ms. Lower = faster, but answers into pauses more often. */
   AI_VOICE_SILENCE_MS: z.coerce.number().int().min(200).max(2000).default(500),
+  /**
+   * Gate mode only: how the gate tells a real interruption from "mm-hmm" (spec 2026-10-09 §4.5). `sound` = the caller's
+   * sound lasting AI_VOICE_STOP_MS stops the agent at once, words still stop it too; `words` = the 2026-10-09 gate (rollback).
+   */
+  AI_VOICE_OVERLAP_JUDGE: z.enum(['sound', 'words']).default('sound'),
+  /** Sound judge only: how long the caller must keep talking over the agent to stop it, in ms. Lower = stops sooner, but more "mm-hmm"s stop it. */
+  AI_VOICE_STOP_MS: z.coerce.number().int().min(300).max(2000).default(600),
   AI_VOICE_AGENT_NAME: z.string().default('Alex'),
   /**
    * Comma-separated numbers an admin may AI-call without Salesforce consent and

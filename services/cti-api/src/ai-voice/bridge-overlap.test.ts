@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { NO_WORDS_INTERRUPT_MS, OverlapGate } from './bridge-overlap.js';
+import { DEFAULT_STOP_MS, NO_WORDS_INTERRUPT_MS, OverlapGate, type OverlapJudge } from './bridge-overlap.js';
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -8,10 +8,18 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function gate() {
+/** The words judge unless told otherwise: every test written before the sound judge runs against it unchanged. */
+function gate(judge: OverlapJudge = 'words', stopMs = DEFAULT_STOP_MS) {
   const onInterrupt = vi.fn();
   const onListening = vi.fn();
-  const g = new OverlapGate({ setTimer: (cb, ms) => setTimeout(cb, ms), clearTimer: (h) => clearTimeout(h), onInterrupt, onListening });
+  const g = new OverlapGate({
+    setTimer: (cb, ms) => setTimeout(cb, ms),
+    clearTimer: (h) => clearTimeout(h),
+    judge,
+    stopMs,
+    onInterrupt,
+    onListening,
+  });
   return { g, onInterrupt, onListening };
 }
 
@@ -266,7 +274,7 @@ describe('OverlapGate — listening sounds are reported only with words (final r
     g.open('c1', { cuttable: true, late: false });
     expect(g.finish('c1', 'Mm-hmm.')).toBe('ignore');
     expect(onListening).toHaveBeenCalledTimes(1);
-    expect(onListening).toHaveBeenCalledWith('c1');
+    expect(onListening).toHaveBeenCalledWith('c1', 0);
     g.open('c2', { cuttable: true, late: false });
     expect(g.finish('c2', '')).toBe('ignore'); // a cough or a failed transcription
     g.open('c3', { cuttable: true, late: true });
@@ -283,6 +291,218 @@ describe('OverlapGate — listening sounds are reported only with words (final r
     g.open('c1', { cuttable: true, late: false });
     g.onDelta('c1', ' Okay');
     expect(g.finish('c1', '  ')).toBe('ignore');
-    expect(onListening).toHaveBeenCalledWith('c1');
+    expect(onListening).toHaveBeenCalledWith('c1', 0);
+  });
+});
+
+describe('OverlapGate — the sound judge (smart stop v2)', () => {
+  it('defaults to a 600 ms stop', () => {
+    expect(DEFAULT_STOP_MS).toBe(600);
+  });
+
+  it('a sound already long enough when the overlap opens cuts the agent at once', () => {
+    const { g, onInterrupt } = gate('sound');
+    g.open('c1', { cuttable: true, late: false, runMs: DEFAULT_STOP_MS });
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+    expect(onInterrupt).toHaveBeenCalledWith('sound', 'c1');
+    expect(g.idle).toBe(true);
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS * 2);
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('a shorter sound at open keeps the overlap open', () => {
+    const { g, onInterrupt } = gate('sound');
+    g.open('c1', { cuttable: true, late: false, runMs: DEFAULT_STOP_MS - 20 });
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.itemId).toBe('c1');
+  });
+
+  it('cuts exactly once, when the caller\'s sound reaches the stop length', () => {
+    const { g, onInterrupt } = gate('sound');
+    g.open('c1', { cuttable: true, late: false, runMs: 0 });
+    g.onSound(200);
+    g.onSound(580);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    g.onSound(600);
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+    expect(onInterrupt).toHaveBeenCalledWith('sound', 'c1');
+    expect(g.idle).toBe(true);
+    g.onSound(620);
+    g.onSound(2000);
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS * 2);
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('honours the configured stop length', () => {
+    const { g, onInterrupt } = gate('sound', 900);
+    g.open('c1', { cuttable: true, late: false, runMs: 600 });
+    g.onSound(880);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    g.onSound(900);
+    expect(onInterrupt).toHaveBeenCalledWith('sound', 'c1');
+  });
+
+  it('never cuts the opener by sound, at open or later', () => {
+    const { g, onInterrupt } = gate('sound');
+    g.open('c1', { cuttable: false, late: false, runMs: 5000 });
+    g.onSound(5000);
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS * 2);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.itemId).toBe('c1');
+  });
+
+  it('a late overlap over the opener opens as today: never cut, a listening sound is the answer', () => {
+    const { g, onInterrupt } = gate('sound');
+    g.open('c1', { cuttable: false, late: true, runMs: 0 });
+    g.onSound(5000);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.isLate('c1')).toBe(true);
+    expect(g.finish('c1', 'Yeah, sure.')).toBe('answer');
+  });
+
+  it('speech starting in the agent\'s last moments (late) cuts it at open and settles every overlap', () => {
+    const { g, onInterrupt } = gate('sound');
+    g.open('c1', { cuttable: true, late: false, runMs: 0 });
+    g.onSpeechStopped('c1');
+    g.open('c2', { cuttable: true, late: true, runMs: 0 });
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+    expect(onInterrupt).toHaveBeenCalledWith('late', 'c2');
+    expect(g.has('c1')).toBe(false);
+    expect(g.has('c2')).toBe(false);
+    expect(g.idle).toBe(true);
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS * 2);
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('no cut by sound once the caller has stopped (speech_stopped)', () => {
+    const { g, onInterrupt } = gate('sound');
+    g.open('c1', { cuttable: true, late: false, runMs: 0 });
+    g.onSpeechStopped('c1');
+    g.onSound(5000);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.has('c1')).toBe(true);
+  });
+
+  it('onSound with no overlap open, or only a pushed-aside one, does nothing', () => {
+    const { g, onInterrupt } = gate('sound');
+    g.onSound(5000);
+    g.open('c1', { cuttable: true, late: false, runMs: 0 });
+    g.onSpeechStopped('c1');
+    g.open('c2', { cuttable: true, late: false, runMs: 0 });
+    expect(g.finish('c2', 'Mm-hmm.')).toBe('ignore');
+    g.onSound(5000);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.has('c1')).toBe(true);
+  });
+
+  it('the word rules still cut under the sound judge: a stop word, two real words, 3 s with no words', () => {
+    const stopWord = gate('sound');
+    stopWord.g.open('c1', { cuttable: true, late: false, runMs: 100 });
+    stopWord.g.onDelta('c1', ' Wait');
+    expect(stopWord.onInterrupt).toHaveBeenCalledWith('words', 'c1');
+    const twoWords = gate('sound');
+    twoWords.g.open('c1', { cuttable: true, late: false, runMs: 100 });
+    twoWords.g.onDelta('c1', " I'm interested");
+    expect(twoWords.onInterrupt).toHaveBeenCalledWith('words', 'c1');
+    const noWords = gate('sound');
+    noWords.g.open('c1', { cuttable: true, late: false, runMs: 100 });
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS);
+    expect(noWords.onInterrupt).toHaveBeenCalledWith('no words', 'c1');
+  });
+
+  it('onAgentFinished hands back an unstopped overlap: their turn, no longer judged or timed', () => {
+    const { g, onInterrupt } = gate('sound');
+    g.open('c1', { cuttable: true, late: false, runMs: 200 });
+    expect(g.onAgentFinished()).toBe('c1');
+    expect(g.has('c1')).toBe(false);
+    expect(g.idle).toBe(true);
+    vi.advanceTimersByTime(NO_WORDS_INTERRUPT_MS * 2);
+    g.onDelta('c1', ' Wait');
+    g.onSound(5000);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.finish('c1', 'Wait.')).toBe('ignore');
+  });
+
+  it('onAgentFinished hands back an unstopped overlap over the opener too', () => {
+    const { g } = gate('sound');
+    g.open('c1', { cuttable: false, late: false, runMs: 0 });
+    expect(g.onAgentFinished()).toBe('c1');
+    expect(g.idle).toBe(true);
+  });
+
+  it('onAgentFinished returns null with no overlap or a stopped one, which waits for its words', () => {
+    const { g, onInterrupt } = gate('sound');
+    expect(g.onAgentFinished()).toBeNull();
+    g.open('c1', { cuttable: true, late: false, runMs: 0 });
+    g.onSpeechStopped('c1');
+    expect(g.onAgentFinished()).toBeNull();
+    expect(g.has('c1')).toBe(true);
+    expect(g.isLate('c1')).toBe(false);
+    expect(g.finish('c1', 'Mm-hmm.')).toBe('ignore');
+    expect(onInterrupt).not.toHaveBeenCalled();
+  });
+
+  it('a pushed-aside overlap keeps waiting for its words when the current one is handed back', () => {
+    const { g } = gate('sound');
+    g.open('c1', { cuttable: true, late: false, runMs: 0 });
+    g.onSpeechStopped('c1');
+    g.open('c2', { cuttable: true, late: false, runMs: 0 });
+    expect(g.onAgentFinished()).toBe('c2');
+    expect(g.has('c1')).toBe(true);
+    expect(g.idle).toBe(false);
+  });
+
+  it('reports a listening sound with the longest the caller\'s sound ran while they talked', () => {
+    const { g, onListening } = gate('sound');
+    g.open('c1', { cuttable: true, late: false, runMs: 120 });
+    g.onSound(340);
+    g.onSound(0);
+    g.onSound(200);
+    g.onSpeechStopped('c1');
+    g.onSound(560); // after speech_stopped: not this overlap's sound
+    expect(g.finish('c1', 'Mm-hmm.')).toBe('ignore');
+    expect(onListening).toHaveBeenCalledWith('c1', 340);
+  });
+
+  it('a listening sound over the opener is reported with its length too', () => {
+    const { g, onListening } = gate('sound');
+    g.open('c1', { cuttable: false, late: false, runMs: 900 });
+    g.onSound(1200);
+    expect(g.finish('c1', 'Okay.')).toBe('ignore');
+    expect(onListening).toHaveBeenCalledWith('c1', 1200);
+  });
+});
+
+describe('OverlapGate — the words judge ignores sound (AI_VOICE_OVERLAP_JUDGE=words)', () => {
+  it('never cuts by sound, at open or later', () => {
+    const { g, onInterrupt } = gate('words');
+    g.open('c1', { cuttable: true, late: false, runMs: 5000 });
+    g.onSound(5000);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.itemId).toBe('c1');
+  });
+
+  it('a late overlap opens as today and is judged by its words', () => {
+    const { g, onInterrupt } = gate('words');
+    g.open('c1', { cuttable: true, late: true, runMs: 0 });
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(g.isLate('c1')).toBe(true);
+    expect(g.finish('c1', 'Yeah, sure.')).toBe('answer');
+  });
+
+  it('onAgentFinished returns null and marks the unstopped overlap late', () => {
+    const { g } = gate('words');
+    g.open('c1', { cuttable: true, late: false, runMs: 0 });
+    expect(g.onAgentFinished()).toBeNull();
+    expect(g.has('c1')).toBe(true);
+    expect(g.isLate('c1')).toBe(true);
+  });
+
+  it('reports listening sounds with a length of 0', () => {
+    const { g, onListening } = gate('words');
+    g.open('c1', { cuttable: true, late: false, runMs: 300 });
+    g.onSound(450);
+    expect(g.finish('c1', 'Mm-hmm.')).toBe('ignore');
+    expect(onListening).toHaveBeenCalledWith('c1', 0);
   });
 });
