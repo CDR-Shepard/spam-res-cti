@@ -247,3 +247,21 @@ describe('audio left when a second item queues behind the first (final review F4
     expect(p.interrupt()).toEqual({ itemId: 'item_b', audioEndMs: 800 });
   });
 });
+
+describe('audioStreaming (smart stop: a late cut keeps a reply whose audio is all here)', () => {
+  it('is true from the first forwarded chunk until audio-done, response.done or a cut', () => {
+    const p = new PlaybackTracker();
+    expect(p.audioStreaming).toBe(false);
+    p.onAudioDelta('item_1', audio(100));
+    expect(p.audioStreaming).toBe(true);
+    p.onAudioDone();
+    expect(p.audioStreaming).toBe(false);
+    expect(p.playing).toBe(true); // still queued in Twilio
+    p.onAudioDelta('item_2', audio(100));
+    p.onResponseDone();
+    expect(p.audioStreaming).toBe(false);
+    p.onAudioDelta('item_3', audio(100));
+    p.interrupt();
+    expect(p.audioStreaming).toBe(false);
+  });
+});

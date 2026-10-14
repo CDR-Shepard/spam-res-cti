@@ -492,7 +492,9 @@ export class AiCallBridge {
 
   /** The gate decided the caller is really talking (and settled every overlap). */
   private interruptAgent(why: InterruptWhy): void {
-    const cancelled = this.cancelResponse();
+    // A late cut keeps a reply whose audio is all here: its tool calls (end_call, transfer) still run once it is done.
+    const keep = why === 'late' && this.responseHasAudio && !this.playback.audioStreaming;
+    const cancelled = !keep && this.cancelResponse();
     // Our next create is still in flight: drop that response once it exists, or it plays over them.
     if (this.responsePending && !this.responseActive) this.cancelWhenCreated = true;
     this.answerAfterPlayback = false; // the turn that cut the agent gets its own answer

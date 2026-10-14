@@ -1294,8 +1294,8 @@ describe('barge-in gate', () => {
     const cleared = (twilio: FakeSocket) => twilio.sent.some((m) => m.event === 'clear');
 
     /** Like talking(), judged by sound, with real 20 ms caller frames: item_1 (3 s from 1000 ms) is 500 ms in, still streaming. */
-    function soundTalking(over: Partial<BridgeOptions> = {}) {
-      const s = setup({ bargeIn: 'gate', transcribeModel: 'gpt-live-transcribe', overlapJudge: 'sound', ...over });
+    function soundTalking(over: Partial<BridgeOptions> = {}, hookOver: { onTool?: BridgeHooks['onTool'] } = {}) {
+      const s = setup({ bargeIn: 'gate', transcribeModel: 'gpt-live-transcribe', overlapJudge: 'sound', ...over }, hookOver);
       s.bridge.start();
       s.openai.msg(READY);
       talk(s.openai, 'item_0', 100);
@@ -1411,7 +1411,9 @@ describe('barge-in gate', () => {
       expect(creates(openai)).toEqual([CREATE]);
     });
 
-    it('a caller still talking when the agent finishes whose turn OpenAI already committed is answered at the drain', () => {
+    // Defensive path: OpenAI sends speech_stopped (with the item id) before committed, so a committed overlap has normally stopped
+    // and is not released at the drain. Reaching "committed but still open" needs a speech_stopped without an item id.
+    it('defensive: an overlap committed before the drain while the gate still has it open is answered at the drain', () => {
       const { twilio, openai } = soundTalking();
       openai.msg({ type: 'response.output_audio.done' });
       openai.msg(doneEmpty);
@@ -1424,6 +1426,86 @@ describe('barge-in gate', () => {
       completed(openai, 'Yeah, sure.');
       expect(creates(openai)).toEqual([CREATE]);
       expect(cleared(twilio)).toBe(false);
+    });
+
+    it('a late cut keeps a reply whose audio is all here: no response.cancel, so its end_call still runs and nothing more is said', async () => {
+      const onTool = vi.fn(async () => ({ output: '{"ok":true}', then: 'hangup' as const }));
+      const { twilio, openai, hooks } = soundTalking({}, { onTool });
+      openai.msg({ type: 'response.output_audio.done' }); // "…Bye!" is all here; end_call's args are still streaming
+      twilio.msg(media(3000, QUIET)); // 1 s of item_1 left
+      openai.clearSent();
+      started(openai); // "bye" over its end
+      expect(twilio.sent).toEqual([CLEAR]);
+      expect(control(openai)).toEqual([{ type: 'conversation.item.truncate', item_id: 'item_1', content_index: 0, audio_end_ms: 2000 }]);
+      expect(hooks.log.info).toHaveBeenCalledWith({ why: 'late', runMs: 0 }, INTERRUPTED);
+      stopped(openai);
+      committed(openai); // held behind the active response
+      expect(creates(openai)).toEqual([]);
+      openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('end_call', '{"outcome":"not_interested"}', 'e1')] } });
+      await flush();
+      expect(onTool).toHaveBeenCalledWith('end_call', { outcome: 'not_interested' });
+      completed(openai, 'Bye.');
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(creates(openai)).toEqual([]); // the call is closing: no answer to "bye"
+      expect(control(openai).some((m) => m.type === 'response.cancel')).toBe(false);
+    });
+
+    it('a late cut with no tool call: the kept reply finishes, then their turn gets one answer', () => {
+      const { twilio, openai } = soundTalking();
+      openai.msg({ type: 'response.output_audio.done' });
+      twilio.msg(media(3000, QUIET));
+      openai.clearSent();
+      started(openai);
+      expect(twilio.sent).toEqual([CLEAR]);
+      stopped(openai);
+      committed(openai);
+      expect(creates(openai)).toEqual([]);
+      openai.msg(doneEmpty);
+      expect(creates(openai)).toEqual([CREATE]);
+      expect(control(openai).some((m) => m.type === 'response.cancel')).toBe(false);
+    });
+
+    // A late cut while the reply's own audio is still streaming is unreachable: remainingMs() is Infinity until output_audio.done.
+    // What is reachable is a follow-up reply that has no audio yet while the first one plays out: that one is still cancelled.
+    it('a late cut still cancels a follow-up reply that has not played a sound yet', async () => {
+      const { twilio, openai } = soundTalking();
+      openai.msg({ type: 'response.output_audio.done' });
+      openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('save_qualification', '{"field":"timeline","value":"soon"}', 'f1')] } });
+      await flush(); // the follow-up is requested while item_1 still plays
+      expect(creates(openai)).toEqual([CREATE]);
+      openai.msg({ type: 'response.created' }); // created, silent so far
+      twilio.msg(media(3000, QUIET)); // 1 s of item_1 left
+      openai.clearSent();
+      started(openai);
+      expect(twilio.sent).toEqual([CLEAR]);
+      expect(control(openai)).toEqual([
+        { type: 'response.cancel' },
+        { type: 'conversation.item.truncate', item_id: 'item_1', content_index: 0, audio_end_ms: 2000 },
+      ]);
+    });
+
+    it('P4 guard: with a tool follow-up pending at the drain, an overlap still going is not handed back but judged as before', async () => {
+      const { twilio, openai, hooks, frames } = soundTalking();
+      openai.msg({ type: 'response.output_audio.done' });
+      openai.msg({ type: 'response.done', response: { status: 'completed', output: [fnCall('save_qualification', '{"field":"timeline","value":"soon"}', 'f1')] } });
+      await flush(); // follow-up B is requested before the caller speaks
+      expect(creates(openai)).toEqual([CREATE]);
+      started(openai); // 2.5 s of item_1 left: not late
+      frames(15, LOUD);
+      playAll(twilio); // item_1 finishes while they are still talking and B is pending: no release
+      openai.msg({ type: 'response.created' });
+      openai.msg({ type: 'response.output_audio.delta', item_id: 'item_2', delta: audio(2000) });
+      frames(20, QUIET);
+      stopped(openai);
+      committed(openai); // still an overlap: waits for its words
+      completed(openai, 'Mm-hmm.');
+      openai.msg({ type: 'response.output_audio.done' });
+      openai.msg(doneEmpty);
+      playAll(twilio);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(creates(openai)).toEqual([CREATE]); // only B: the "mm-hmm" was not answered
+      expect(cleared(twilio)).toBe(false);
+      expect(hooks.log.info).toHaveBeenCalledWith({ maxRunMs: 300 }, LISTENING);
     });
 
     for (const when of ['long', 'late'] as const) {

@@ -68,6 +68,11 @@ export class PlaybackTracker {
     return this.marks.length > 0 && this.itemId !== null;
   }
 
+  /** Agent audio is still arriving: forwarded, and no `output_audio.done` / `response.done` for it yet. */
+  get audioStreaming(): boolean {
+    return this.streaming;
+  }
+
   /** The agent item most recently forwarded (kept after it plays out, cleared on interrupt/reset), or null. */
   get currentItemId(): string | null {
     return this.itemId;
