@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AppointmentSlot } from '@cti/contracts';
 import { context, promptSlots } from './prompt-context.js';
 import type { PromptInput } from './prompt.js';
-import { bookingSection, slotWords } from './prompt-booking.js';
+import { slotWords } from './prompt-booking.js';
 import { buildInstructions } from './prompt.js';
 
 const LA = 'America/Los_Angeles';
@@ -39,6 +39,13 @@ function input(over: Partial<PromptInput> = {}): PromptInput {
   };
 }
 
+/** The Booking section of the full instructions, or null when there is none. */
+function bookingSection(p: PromptInput): string | null {
+  const text = buildInstructions(p);
+  const at = text.indexOf('# Booking an appointment');
+  return at < 0 ? null : text.slice(at, text.indexOf('\n\n# Do-not-call', at));
+}
+
 describe('slotWords', () => {
   it('says the day, date and hour in the seller zone when it is the specialist zone', () => {
     expect(slotWords(slot(), LA)).toBe('Wednesday, October 7 at 11 AM');
@@ -65,12 +72,12 @@ describe('slotWords', () => {
 
 describe('bookingSection', () => {
   it('is null without slots', () => {
-    expect(bookingSection(context(input()))).toBeNull();
-    expect(bookingSection(context(input({ slots: [] })))).toBeNull();
+    expect(bookingSection(input())).toBeNull();
+    expect(bookingSection(input({ slots: [] }))).toBeNull();
   });
 
   it('lists the offered times by id, in order, in the seller time', () => {
-    const text = bookingSection(context(input({ slots: [slot(), slot({ id: 'p2', start: '2026-10-07T21:00:00.000Z', end: '2026-10-07T21:15:00.000Z' }), walk()], sellerTimeZone: LA })))!;
+    const text = bookingSection(input({ slots: [slot(), slot({ id: 'p2', start: '2026-10-07T21:00:00.000Z', end: '2026-10-07T21:15:00.000Z' }), walk()], sellerTimeZone: LA }))!;
     expect(text.startsWith('# Booking an appointment')).toBe(true);
     const list = text.slice(text.indexOf('Times you can offer (their local time):'));
     expect(list.split('\n').slice(1)).toEqual([
@@ -81,7 +88,7 @@ describe('bookingSection', () => {
   });
 
   it('names the specialist, the two kinds, the walkthrough address rule and the booking rules', () => {
-    const text = bookingSection(context(input({ slots: [slot(), walk()], sellerTimeZone: LA })))!;
+    const text = bookingSection(input({ slots: [slot(), walk()], sellerTimeZone: LA }))!;
     expect(text).toContain('- You can book a time with Grant, one of our specialists. Two kinds:');
     expect(text).toContain('  - a quick phone call (about fifteen minutes), or');
     expect(text).toContain('  - an in-person walkthrough of the house (about an hour).');
@@ -93,25 +100,25 @@ describe('bookingSection', () => {
   });
 
   it('says the times are listed right here: offer them straight away, never say you are checking or thinking about them', () => {
-    const text = bookingSection(context(input({ slots: [slot()], sellerTimeZone: LA })))!;
+    const text = bookingSection(input({ slots: [slot()], sellerTimeZone: LA }))!;
     expect(text).toContain('- The times are listed right here: offer them straight away. Never say you\'re checking or thinking about the times.');
   });
 
   it('tells the agent to say times the way people do, never digits', () => {
-    const text = bookingSection(context(input({ slots: [slot()], sellerTimeZone: LA })))!;
+    const text = bookingSection(input({ slots: [slot()], sellerTimeZone: LA }))!;
     expect(text).toMatch(/"Thursday at two in the afternoon"/);
     expect(text).toMatch(/never read out digits/i);
   });
 
   it('says "one of our specialists" when the slot has no first name', () => {
-    const text = bookingSection(context(input({ slots: [slot({ specialistFirstName: null }), walk({ specialistFirstName: null })], sellerTimeZone: LA })))!;
+    const text = bookingSection(input({ slots: [slot({ specialistFirstName: null }), walk({ specialistFirstName: null })], sellerTimeZone: LA }))!;
     expect(text).toContain('- You can book a time with one of our specialists. Two kinds:');
-    const phoneOnly = bookingSection(context(input({ slots: [slot({ specialistFirstName: null })], sellerTimeZone: LA })))!;
+    const phoneOnly = bookingSection(input({ slots: [slot({ specialistFirstName: null })], sellerTimeZone: LA }))!;
     expect(phoneOnly).toContain('- You can book a quick phone call (about fifteen minutes) with one of our specialists.');
   });
 
   it('sanitises a first name carrying markup', () => {
-    const text = bookingSection(context(input({ slots: [slot({ specialistFirstName: 'Gr#a"n<t>' })], sellerTimeZone: LA })))!;
+    const text = bookingSection(input({ slots: [slot({ specialistFirstName: 'Gr#a"n<t>' })], sellerTimeZone: LA }))!;
     expect(text).toContain('with Grant, one of our specialists');
     expect(text).not.toContain('Gr#a');
     expect(text).not.toContain('<t>');
@@ -133,14 +140,14 @@ describe('bookingSection', () => {
 
 describe('Fix 1 M-1: only the kinds on offer', () => {
   it('phone calls only: the section offers a quick phone call, never a walkthrough, and does not ask which kind', () => {
-    const text = bookingSection(context(input({ slots: [slot(), slot({ id: 'p2', start: '2026-10-07T21:00:00.000Z', end: '2026-10-07T21:15:00.000Z' })], sellerTimeZone: LA })))!;
+    const text = bookingSection(input({ slots: [slot(), slot({ id: 'p2', start: '2026-10-07T21:00:00.000Z', end: '2026-10-07T21:15:00.000Z' })], sellerTimeZone: LA }))!;
     expect(text).toContain('- You can book a quick phone call (about fifteen minutes) with Grant, one of our specialists.');
     expect(text).toContain('- Offer TWO times from the list below, in their time, and let them choose. If neither works, offer the next two.');
     expect(text).not.toMatch(/walkthrough|Two kinds|which they'd prefer/);
   });
 
   it('walkthroughs only: the section offers a walkthrough, confirms the property, and never offers a phone call instead', () => {
-    const text = bookingSection(context(input({ slots: [walk()], sellerTimeZone: LA })))!;
+    const text = bookingSection(input({ slots: [walk()], sellerTimeZone: LA }))!;
     expect(text).toContain('- You can book an in-person walkthrough of the house (about an hour) with Grant, one of our specialists.');
     expect(text).toContain('"That\'s the property at 1234 Oak Street, right?" Only book it once they say yes (address_confirmed true).');
     expect(text).toContain("If it's a different property, don't book it; offer to have the specialist call them back instead (schedule_callback).");
@@ -148,7 +155,7 @@ describe('Fix 1 M-1: only the kinds on offer', () => {
   });
 
   it('both kinds: asks which they prefer, as before', () => {
-    const text = bookingSection(context(input({ slots: [slot(), walk()], sellerTimeZone: LA })))!;
+    const text = bookingSection(input({ slots: [slot(), walk()], sellerTimeZone: LA }))!;
     expect(text).toContain("- Ask which they'd prefer. Then offer TWO times of that kind");
     expect(text).toContain("If it's a different property, don't book a walkthrough; offer the phone call instead.");
   });
@@ -170,9 +177,9 @@ describe('Fix 1 M-6: the role section names a booked appointment as a good endin
 
 describe('final review I-1: a walkthrough needs a street address to confirm', () => {
   it('drops walkthrough slots (list and offer words) when the record has no address; phone slots stay', () => {
-    const c = context(input({ address: null, slots: [slot(), walk()], sellerTimeZone: LA }));
-    expect(c.slots.map((s) => s.id)).toEqual(['p1']);
-    const text = bookingSection(c)!;
+    const p = input({ address: null, slots: [slot(), walk()], sellerTimeZone: LA });
+    expect(context(p).slots.map((s) => s.id)).toEqual(['p1']);
+    const text = bookingSection(p)!;
     expect(text).not.toMatch(/walkthrough|w1/);
     expect(text).not.toContain("That's the property, right?");
   });
@@ -183,7 +190,7 @@ describe('final review I-1: a walkthrough needs a street address to confirm', ()
   });
 
   it('walkthroughs only and no street: nothing to offer, so no booking section', () => {
-    expect(bookingSection(context(input({ address: null, slots: [walk()], sellerTimeZone: LA })))).toBeNull();
+    expect(bookingSection(input({ address: null, slots: [walk()], sellerTimeZone: LA }))).toBeNull();
   });
 
   it('keeps walkthrough slots when the address has a street', () => {

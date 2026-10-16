@@ -1,8 +1,8 @@
 /**
  * The per-call facts the agent's instructions are built from (`Ctx`), and the
  * helpers that make record values safe to speak: one-line flattening with
- * markup stripped, the spoken street, the property phrase, the callback
- * number in words, and the fixed opening line that carries the disclosure.
+ * markup stripped, the spoken street, the property phrase and the callback
+ * number in words. prompt-view.ts turns them into template values.
  */
 import { SLOT_ID, type AppointmentSlot } from '@cti/contracts';
 import { approvedPlanText, neutraliseFences } from './prompt-plan.js';
@@ -17,7 +17,6 @@ const NOTES_PROMPT_MAX = 3_000;
 const E164 = /^\+[1-9]\d{7,14}$/;
 const NANP = /^\+1(\d{3})(\d{3})(\d{4})$/;
 const DIGIT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'] as const;
-export const TEST_CALL_LINE = 'Just so you know, this is a test call.';
 
 /**
  * Strip markup characters (`#`, quotes, angle brackets, backticks; an
@@ -157,16 +156,4 @@ export function context(p: PromptInput): Ctx {
     slots,
     sellerTz: [p.sellerTimeZone, slots[0]?.timeZone].find(isZone) ?? DEFAULT_SLOT_ZONE,
   };
-}
-
-/** The first thing the agent says: disclosure first, then who it is trying to reach. */
-export function openingLine(c: Ctx): string {
-  const disclosure = `Hi, this is ${c.agent}, an AI assistant calling for ${c.company} on a recorded line`;
-  const who = c.first
-    ? `is this ${c.first}?`
-    : c.street
-      ? `am I speaking with the owner of ${c.street}?`
-      : "is this the homeowner I'm trying to reach?";
-  if (!c.isTest) return `${disclosure} — ${who}`;
-  return `${disclosure}. ${TEST_CALL_LINE} ${who.charAt(0).toUpperCase()}${who.slice(1)}`;
 }
