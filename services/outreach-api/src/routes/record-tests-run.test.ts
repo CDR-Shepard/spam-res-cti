@@ -52,6 +52,7 @@ const cti = {
   trigger: vi.fn(),
   availability: vi.fn(),
   browserToken: vi.fn(async () => tokenAnswer),
+  checkPrompt: vi.fn(),
 } satisfies CtiClient;
 
 async function build(over: { cti?: CtiClient | null } = {}) {

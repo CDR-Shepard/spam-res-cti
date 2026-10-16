@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { INTERNAL_SIGNATURE_HEADER, INTERNAL_TIMESTAMP_HEADER, verifyInternalRequest } from '@cti/auth';
-import type { InternalAiCallRequest } from '@cti/contracts';
-import { TRIGGER_TIMEOUT_MS, httpCtiClient } from './cti-client.js';
+import { INTERNAL_AI_PROMPT_CHECK_PATH, type AgentPromptCheck, type InternalAiCallRequest } from '@cti/contracts';
+import { PROMPT_CHECK_TIMEOUT_MS, TRIGGER_TIMEOUT_MS, httpCtiClient } from './cti-client.js';
 
 const SECRET = 'm'.repeat(40);
 const BASE = 'http://ctiapi.railway.internal:4000';
@@ -175,5 +175,79 @@ describe('httpCtiClient.browserToken (plan 1E)', () => {
       { timestamp: init.headers[INTERNAL_TIMESTAMP_HEADER], signature: init.headers[INTERNAL_SIGNATURE_HEADER] },
     );
     expect(verdict).toEqual({ ok: true });
+  });
+});
+
+describe('httpCtiClient.checkPrompt (editable agent prompts)', () => {
+  const CHECK_REQ = { kind: 'voicemail', template: 'Hi {{sellerFirstName}}, call us back.' } as const;
+  const CHECKED: AgentPromptCheck = {
+    defaultTemplate: 'Hi {{sellerFirstName}}.',
+    placeholders: [{ name: 'sellerFirstName', kind: 'text', description: 'The seller first name' }],
+    rendered: 'Hi Sam, call us back.',
+    problems: [],
+  };
+
+  it('a 200 is the check; the request is a signed POST of the exact body to the prompt-check path', async () => {
+    const f = fetchReturning(200, CHECKED);
+    expect(await client(f).checkPrompt(CHECK_REQ)).toEqual({ kind: 'check', check: CHECKED });
+    expect(f).toHaveBeenCalledTimes(1);
+    const [url, init] = f.mock.calls[0]!;
+    expect(INTERNAL_AI_PROMPT_CHECK_PATH).toBe('/internal/ai-calls/prompt-check');
+    expect(url).toBe(`${BASE}${INTERNAL_AI_PROMPT_CHECK_PATH}`);
+    expect(init.method).toBe('POST');
+    expect(init.headers['content-type']).toBe('application/json');
+    expect(init.body).toBe(JSON.stringify(CHECK_REQ));
+    const verdict = verifyInternalRequest(
+      SECRET,
+      { method: 'POST', path: INTERNAL_AI_PROMPT_CHECK_PATH, body: JSON.stringify(CHECK_REQ) },
+      { timestamp: init.headers[INTERNAL_TIMESTAMP_HEADER], signature: init.headers[INTERNAL_SIGNATURE_HEADER] },
+    );
+    expect(verdict).toEqual({ ok: true });
+  });
+
+  it('a check that found problems (rendered null) is still a check, not a transport error', async () => {
+    const refused = { ...CHECKED, rendered: null, problems: ['{{nope}} is not a placeholder.'] };
+    expect(await client(fetchReturning(200, refused)).checkPrompt(CHECK_REQ)).toEqual({ kind: 'check', check: refused });
+  });
+
+  it('a null template (the built-in default) is sent as null', async () => {
+    const f = fetchReturning(200, { ...CHECKED, problems: [] });
+    await client(f).checkPrompt({ kind: 'instructions', template: null });
+    expect(f.mock.calls[0]![1].body).toBe(JSON.stringify({ kind: 'instructions', template: null }));
+  });
+
+  it.each([
+    ['a body that is not a check', fetchReturning(200, { rendered: 'x' })],
+    ['problems that are not strings', fetchReturning(200, { ...CHECKED, problems: [1] })],
+    ['not JSON', fetchReturning(200, '<html>oops</html>')],
+  ])('a 200 with %s is a transport error bad_response', async (_label, f) => {
+    expect(await client(f).checkPrompt(CHECK_REQ)).toEqual({ kind: 'transport', error: 'bad_response' });
+  });
+
+  it.each([
+    [401, { error: 'bad_signature' }, 'HTTP 401 bad_signature'],
+    [503, { error: 'internal_disabled' }, 'HTTP 503 internal_disabled'],
+    [500, 'not json', 'HTTP 500'],
+  ])('HTTP %i is a transport error naming the status and the body error', async (status, body, error) => {
+    expect(await client(fetchReturning(status, body)).checkPrompt(CHECK_REQ)).toEqual({ kind: 'transport', error });
+  });
+
+  it('never throws and never puts the template in the error: network failure is "network", a timeout is "timeout"', async () => {
+    const network = vi.fn(async () => {
+      throw new TypeError(`fetch failed for ${CHECK_REQ.template}`);
+    });
+    expect(await client(network).checkPrompt(CHECK_REQ)).toEqual({ kind: 'transport', error: 'network' });
+    const timeout = vi.fn(async () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    });
+    expect(await client(timeout).checkPrompt(CHECK_REQ)).toEqual({ kind: 'transport', error: 'timeout' });
+  });
+
+  it('gives up after 5 seconds, not the 20 the call trigger waits', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    await client(fetchReturning(200, CHECKED)).checkPrompt(CHECK_REQ);
+    expect(timeout).toHaveBeenCalledWith(PROMPT_CHECK_TIMEOUT_MS);
+    expect(PROMPT_CHECK_TIMEOUT_MS).toBe(5_000);
+    timeout.mockRestore();
   });
 });

@@ -27,6 +27,7 @@ const cti: CtiClient = {
   trigger: async () => ({ kind: 'transport', error: 'unused' }),
   availability: async () => null,
   browserToken: async () => ({ kind: 'transport', error: 'unused' }),
+  checkPrompt: async () => ({ kind: 'transport', error: 'unused' }),
 };
 
 let app: FastifyInstance;

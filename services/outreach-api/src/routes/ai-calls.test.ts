@@ -44,6 +44,9 @@ function fakeCti(outcome: TriggerOutcome = { kind: 'response', response: { resul
     async browserToken() {
       return { kind: 'transport', error: 'unused' };
     },
+    async checkPrompt() {
+      return { kind: 'transport', error: 'unused' };
+    },
   };
   return { cti, requests };
 }

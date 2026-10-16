@@ -22,6 +22,7 @@ import { SCHEDULES } from './jobs/schedules.js';
 import { planTick } from './planner/run.js';
 import { DescribeCache } from './research/describe.js';
 import { registerAdminTenantRoutes } from './routes/admin-tenants.js';
+import { registerAgentPromptRoutes } from './routes/agent-prompts.js';
 import { registerAiCallSettingsRoutes } from './routes/ai-call-settings.js';
 import { registerAiCallRoutes } from './routes/ai-calls.js';
 import { registerAuthRoutes } from './routes/auth.js';
@@ -167,6 +168,8 @@ async function main(): Promise<void> {
       (scope) => registerAiCallRoutes(scope, { db, cti }),
       (scope) => registerPracticeCallRoutes(scope, { db, clients, cti, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS }),
       (scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, describes }),
+      // Editable agent prompts (admins): the AI agent's instructions and voicemail template, checked and rendered by cti-api.
+      (scope) => registerAgentPromptRoutes(scope, { db, cti }),
       (scope) => registerVersionRoutes(scope, { db, build, calls: ctiCommit }),
       // Plan 1E: Test a record (admins): preview how the AI would call any Lead or Opportunity, without a campaign.
       (scope) =>

@@ -7,20 +7,28 @@
  *
  * Plan 1E: `browserToken` relays an admin's incoming-only Voice token for "Talk in browser". It never throws and never
  * logs: the token is only ever handed back to the caller.
+ *
+ * Editable agent prompts: `checkPrompt` asks cti-api (which owns the placeholders and the defaults) to check and render a
+ * template. Signed, 5 s, never throws, and the template text is only ever in the request body, never in an outcome.
  */
 import { internalRequestHeaders } from '@cti/auth';
 import {
+  AgentPromptCheck,
   AiAvailability,
   INTERNAL_AI_AVAILABILITY_PATH,
   INTERNAL_AI_BROWSER_TOKEN_PATH,
   INTERNAL_AI_CALLS_PATH,
+  INTERNAL_AI_PROMPT_CHECK_PATH,
   InternalAiCallResponse,
   InternalBrowserTokenResponse,
+  type InternalAgentPromptCheckRequest,
   type InternalAiCallRequest,
   type InternalBrowserTokenRequest,
 } from '@cti/contracts';
 
 export const TRIGGER_TIMEOUT_MS = 20_000;
+/** A prompt check is a pure render, so it is short: the admin is waiting on the page. */
+export const PROMPT_CHECK_TIMEOUT_MS = 5_000;
 
 export type TriggerOutcome =
   | { kind: 'response'; response: InternalAiCallResponse }
@@ -37,11 +45,15 @@ export type BrowserTokenOutcome =
   | { kind: 'refused'; code: TokenRefusal }
   | { kind: 'transport'; error: string };
 
+export type PromptCheckOutcome = { kind: 'check'; check: AgentPromptCheck } | { kind: 'transport'; error: string };
+
 export interface CtiClient {
   trigger(req: InternalAiCallRequest): Promise<TriggerOutcome>;
   availability(): Promise<AiAvailability | null>;
   /** Never throws; never logs the token. */
   browserToken(req: InternalBrowserTokenRequest): Promise<BrowserTokenOutcome>;
+  /** Never throws; never logs the template. A template the checker refused is still a `check` (its `problems`). */
+  checkPrompt(req: InternalAgentPromptCheckRequest): Promise<PromptCheckOutcome>;
 }
 
 const errorName = (err: unknown): string => (err instanceof Error || err instanceof DOMException ? err.name : '');
@@ -59,7 +71,7 @@ function bodyError(json: unknown): string {
 
 export function httpCtiClient(cfg: { CTI_INTERNAL_URL: string; OUTREACH_INTERNAL_SECRET: string }, fetchImpl: typeof fetch = fetch): CtiClient {
   const base = cfg.CTI_INTERNAL_URL.replace(/\/+$/, '');
-  const send = (method: 'GET' | 'POST', path: string, body: string): Promise<Response> =>
+  const send = (method: 'GET' | 'POST', path: string, body: string, timeoutMs = TRIGGER_TIMEOUT_MS): Promise<Response> =>
     fetchImpl(`${base}${path}`, {
       method,
       headers: {
@@ -67,7 +79,7 @@ export function httpCtiClient(cfg: { CTI_INTERNAL_URL: string; OUTREACH_INTERNAL
         ...internalRequestHeaders(cfg.OUTREACH_INTERNAL_SECRET, { method, path, body }),
       },
       ...(method === 'POST' ? { body } : {}),
-      signal: AbortSignal.timeout(TRIGGER_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
   return {
@@ -107,6 +119,18 @@ export function httpCtiClient(cfg: { CTI_INTERNAL_URL: string; OUTREACH_INTERNAL
       if (res.status !== 200) return { kind: 'transport', error: `HTTP ${res.status}${bodyError(json)}` };
       const parsed = InternalBrowserTokenResponse.safeParse(json);
       return parsed.success ? { kind: 'token', ...parsed.data } : { kind: 'transport', error: 'bad_response' };
+    },
+    async checkPrompt(req) {
+      let res: Response;
+      try {
+        res = await send('POST', INTERNAL_AI_PROMPT_CHECK_PATH, JSON.stringify(req), PROMPT_CHECK_TIMEOUT_MS);
+      } catch (err) {
+        return { kind: 'transport', error: transportError(err) };
+      }
+      const json: unknown = await res.json().catch(() => null);
+      if (res.status !== 200) return { kind: 'transport', error: `HTTP ${res.status}${bodyError(json)}` };
+      const parsed = AgentPromptCheck.safeParse(json);
+      return parsed.success ? { kind: 'check', check: parsed.data } : { kind: 'transport', error: 'bad_response' };
     },
   };
 }

@@ -146,6 +146,9 @@ export function fakeCti(db: Db): FakeCti {
         fake.tokenRequests.push(req);
         return fake.token ?? { kind: 'token', token: 'fake.jwt.token', identity: `aitest_${req.userId.replace(/-/g, '')}_000000000000`, expiresAt: '2030-01-01T00:00:00.000Z' };
       },
+      async checkPrompt() {
+        return { kind: 'transport', error: 'unused' };
+      },
     },
   };
   return fake;
