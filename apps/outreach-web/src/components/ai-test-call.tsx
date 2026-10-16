@@ -16,7 +16,7 @@ const answerWords = (r: TestCallResponse): string => (r.result === 'placed' ? PL
 
 /**
  * "Test call to my phone" (admins): the AI agent calls one of the CTI's test numbers. cti-api's gate still decides it
- * (an admin, a number in AI_VOICE_TEST_NUMBERS); the list of numbers comes from cti-api's environment.
+ * (an admin, a phone on the Test phones list or in AI_VOICE_TEST_NUMBERS); the numbers shown come from cti-api.
  */
 export function AiTestCall() {
   const auth = useAuth();
@@ -42,7 +42,7 @@ function AdminTestCall() {
         {/* Not an alert: this card sits beside the Salesforce one, whose problems are the alerts on this page. */}
         {availability.error && <p className="text-sm text-destructive">{errorText(availability.error)}</p>}
         {availability.data && numbers.length === 0 && (
-          <p className="text-sm text-muted-foreground">No test numbers are set. Add yours to AI_VOICE_TEST_NUMBERS on the CTI API service.</p>
+          <p className="text-sm text-muted-foreground">No test phones are set. Add yours to Test phones on the Testing page.</p>
         )}
         {numbers.length > 0 && to && (
           <div className="flex flex-wrap items-end gap-2">

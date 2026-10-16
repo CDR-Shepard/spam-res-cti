@@ -6,8 +6,9 @@ export const SAVED_AT = '2026-10-16T19:42:00.000Z';
 
 export const DEFAULT_INSTRUCTIONS = 'You are {{agent_name}}, calling for {{company_name}}.';
 export const DEFAULT_VOICEMAIL = 'Hi, this is {{agent_name}} calling for {{company_name}}.';
+export const DEFAULT_INBOUND = 'You are {{agent_name}}, answering a call to {{company_name}}.';
 
-const DEFAULTS: Readonly<Record<AgentPromptKind, string>> = { instructions: DEFAULT_INSTRUCTIONS, voicemail: DEFAULT_VOICEMAIL };
+const DEFAULTS: Readonly<Record<AgentPromptKind, string>> = { instructions: DEFAULT_INSTRUCTIONS, voicemail: DEFAULT_VOICEMAIL, inbound: DEFAULT_INBOUND };
 
 export function version(over: Partial<AgentPromptVersionSummary> = {}): AgentPromptVersionSummary {
   return { id: VERSION_A, createdAt: SAVED_AT, createdByEmail: 'grant@gghomes.com', isDefault: false, chars: 120, ...over };
@@ -32,5 +33,5 @@ export function promptState(kind: AgentPromptKind, over: Partial<AgentPromptStat
 }
 
 export function promptsResponse(over: Partial<AgentPromptsResponse> = {}): AgentPromptsResponse {
-  return { instructions: promptState('instructions'), voicemail: promptState('voicemail'), ...over };
+  return { instructions: promptState('instructions'), voicemail: promptState('voicemail'), inbound: promptState('inbound'), ...over };
 }

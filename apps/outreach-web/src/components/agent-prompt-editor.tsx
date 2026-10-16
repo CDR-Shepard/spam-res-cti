@@ -10,7 +10,7 @@ import { StatusBadge } from './layout/status-badge';
 import { PlaceholderList, VersionList } from './agent-prompt-panels';
 import { ConfirmAction } from './confirm-action';
 
-export const KIND_LABELS: Readonly<Record<AgentPromptKind, string>> = { instructions: 'Call instructions', voicemail: 'Voicemail message' };
+export const KIND_LABELS: Readonly<Record<AgentPromptKind, string>> = { instructions: 'Call instructions', voicemail: 'Voicemail message', inbound: 'Inbound calls' };
 const SAVED_WORDS = 'Saved — the next call uses it.';
 const RESET_WORDS = 'Back to the default — the next call uses it.';
 const REPLACE_WORDS = 'Replace your unsaved changes with this version?';

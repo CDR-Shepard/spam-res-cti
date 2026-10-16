@@ -15,7 +15,7 @@ import { isLiveCall } from './record-test-calls';
 
 const HINT = 'Exactly the call the seller would get, with the real record, plan and times. Nothing is written to Salesforce; a booking is only shown here.';
 const HEADPHONES = "Use headphones so the AI doesn't hear itself. You are the seller.";
-const NO_NUMBERS = 'No test numbers are set. Add yours to AI_VOICE_TEST_NUMBERS on the CTI API service.';
+const NO_NUMBERS = 'No test phones are set. Add yours to Test phones on the Testing page.';
 
 /**
  * Run a ready preview (plan 1E, spec §4.3): Ring my phone (a test number) or Talk in browser (the AI calls this tab).

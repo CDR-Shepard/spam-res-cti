@@ -5,6 +5,7 @@ import { AGENT_PROMPT_MAX_CHARS } from '@cti/contracts';
 import { renderWithRouter } from '../test/render';
 import { respond, stubApi, type StubCall } from '../test/stub-api';
 import {
+  DEFAULT_INBOUND,
   DEFAULT_INSTRUCTIONS,
   DEFAULT_VOICEMAIL,
   SAVED_AT,
@@ -20,6 +21,7 @@ import { AgentPromptPage } from './agent-prompt-page';
 const LIST = 'GET /api/settings/agent-prompts';
 const PUT_INSTRUCTIONS = 'PUT /api/settings/agent-prompts/instructions';
 const PUT_VOICEMAIL = 'PUT /api/settings/agent-prompts/voicemail';
+const PUT_INBOUND = 'PUT /api/settings/agent-prompts/inbound';
 const PREVIEW_INSTRUCTIONS = 'POST /api/settings/agent-prompts/instructions/preview';
 const SAVED_WORDS = 'Saved — the next call uses it.';
 const REPLACES_WORDS = "A saved version replaces the built-in prompt — later improvements to it won't reach your calls until you reset or copy them in.";
@@ -344,6 +346,36 @@ describe('AgentPromptPage', () => {
     expect(await screen.findByText(SAVED_WORDS)).toBeInTheDocument();
     expect(sent(calls, PUT_VOICEMAIL).map((c) => c.body)).toEqual([{ template: typed }]);
     expect(sent(calls, PUT_INSTRUCTIONS)).toEqual([]);
+  });
+
+  it('has three tabs, in order: the call instructions, the voicemail message and the inbound calls', async () => {
+    await render();
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Call instructions', 'Voicemail message', 'Inbound calls']);
+    expect(screen.getByRole('tab', { name: 'Inbound calls' })).toHaveAttribute('aria-selected', 'false');
+  });
+
+  it('the Inbound calls tab edits and saves the inbound kind', async () => {
+    const user = userEvent.setup();
+    const typed = `${DEFAULT_INBOUND} Be brief.`;
+    const { calls } = await render({ [PUT_INBOUND]: promptState('inbound', { active: typed, updatedAt: SAVED_AT, updatedByEmail: 'admin@gg.co' }) });
+    await user.click(screen.getByRole('tab', { name: 'Inbound calls' }));
+    const box = await screen.findByRole('textbox', { name: 'Inbound calls' });
+    expect(box).toHaveValue(DEFAULT_INBOUND);
+    expect(screen.queryByRole('textbox', { name: 'Call instructions' })).not.toBeInTheDocument();
+    await user.type(box, ' Be brief.');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(SAVED_WORDS)).toBeInTheDocument();
+    expect(sent(calls, PUT_INBOUND).map((c) => c.body)).toEqual([{ template: typed }]);
+    expect(sent(calls, PUT_INSTRUCTIONS)).toEqual([]);
+    expect(sent(calls, PUT_VOICEMAIL)).toEqual([]);
+  });
+
+  it('opens on the tab it is asked to, and on the call instructions otherwise', async () => {
+    stubApi({ [LIST]: promptsResponse() });
+    renderWithRouter(<AgentPromptPage initialKind="inbound" />, { isAdmin: true });
+    expect(await screen.findByRole('textbox', { name: 'Inbound calls' })).toHaveValue(DEFAULT_INBOUND);
+    expect(screen.getByRole('tab', { name: 'Inbound calls' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByRole('textbox', { name: 'Call instructions' })).not.toBeInTheDocument();
   });
 
   it('lists the placeholders the server allows, with their kind and meaning', async () => {

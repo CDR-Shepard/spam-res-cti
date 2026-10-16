@@ -8,7 +8,7 @@ import { routeTree } from '../routeTree.gen';
 import { apiSession, SESSION_STORAGE_KEY } from '../lib/api';
 import { AppRouter } from '../lib/app-router';
 import { AuthProvider } from '../lib/auth';
-import { DEFAULT_INSTRUCTIONS, promptsResponse } from '../test/agent-prompt-fixtures';
+import { DEFAULT_INBOUND, DEFAULT_INSTRUCTIONS, promptsResponse } from '../test/agent-prompt-fixtures';
 
 // Sweep D-12: these tests time out at the 5 s default under the full parallel root run (they pass alone); no logic change.
 vi.setConfig({ testTimeout: 15_000 });
@@ -167,6 +167,7 @@ describe('outreach pages', () => {
     ['/review'],
     ['/test-record'],
     ['/settings/agent-prompt'],
+    ['/testing'],
   ])('%s sits under the authenticated layout (signed-out visits go to sign-in)', async (path) => {
     const router = renderAppAt(path);
     await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in'));
@@ -178,7 +179,7 @@ describe('outreach pages', () => {
     await router.navigate({ to: '/campaigns' });
     expect(await screen.findByRole('heading', { name: 'Campaigns' })).toBeInTheDocument();
     const nav = screen.getByRole('navigation', { name: 'Main' });
-    expect(within(nav).getAllByRole('link').map((a) => a.textContent)).toEqual(['Dashboard', 'Campaigns', 'Needs review', 'Team', 'Test a record', 'Agent prompt', 'Settings']);
+    expect(within(nav).getAllByRole('link').map((a) => a.textContent)).toEqual(['Dashboard', 'Campaigns', 'Needs review', 'Team', 'Test a record', 'Testing', 'Agent prompt', 'Settings']);
     expect(router.state.matches.map((m) => m.routeId)).toEqual(['__root__', '/_authenticated', '/_authenticated/campaigns/']);
   });
 
@@ -186,6 +187,28 @@ describe('outreach pages', () => {
     const router = await signedInAppAt({ '/api/settings/agent-prompts': promptsResponse() });
     await router.navigate({ to: '/settings/agent-prompt' });
     expect(await screen.findByRole('heading', { name: 'Agent prompt' })).toBeInTheDocument();
+    expect(await screen.findByRole('textbox', { name: 'Call instructions' })).toHaveValue(DEFAULT_INSTRUCTIONS);
+    expect(router.state.matches.map((m) => m.routeId)).toEqual(['__root__', '/_authenticated', '/_authenticated/settings/agent-prompt']);
+  });
+
+  it('renders /testing for an admin inside the app shell', async () => {
+    const router = await signedInAppAt({ '/api/testing/phones': { phones: [] }, '/api/testing/inbound-calls': { aiNumbers: [], calls: [] } });
+    await router.navigate({ to: '/testing' });
+    expect(await screen.findByRole('heading', { level: 1, name: 'Testing' })).toBeInTheDocument();
+    expect(await screen.findByText('No test phones yet.')).toBeInTheDocument();
+    expect(router.state.matches.map((m) => m.routeId)).toEqual(['__root__', '/_authenticated', '/_authenticated/testing']);
+  });
+
+  it('/settings/agent-prompt?tab=inbound opens on the Inbound calls tab', async () => {
+    const router = await signedInAppAt({ '/api/settings/agent-prompts': promptsResponse() });
+    await router.navigate({ to: '/settings/agent-prompt', search: { tab: 'inbound' } });
+    expect(await screen.findByRole('textbox', { name: 'Inbound calls' })).toHaveValue(DEFAULT_INBOUND);
+    expect(screen.getByRole('tab', { name: 'Inbound calls' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('/settings/agent-prompt ignores a ?tab= it does not know', async () => {
+    const router = await signedInAppAt({ '/api/settings/agent-prompts': promptsResponse() });
+    await router.navigate({ to: '/settings/agent-prompt', search: { tab: 'nope' } as never });
     expect(await screen.findByRole('textbox', { name: 'Call instructions' })).toHaveValue(DEFAULT_INSTRUCTIONS);
     expect(router.state.matches.map((m) => m.routeId)).toEqual(['__root__', '/_authenticated', '/_authenticated/settings/agent-prompt']);
   });

@@ -21,6 +21,7 @@ import {
   CampaignsResponse,
   ReleaseCallsResponse,
   CrmConnectionStatus,
+  InboundTestCallsResponse,
   ListViewsResponse,
   NeedsReviewResponse,
   PracticeCallsResponse,
@@ -29,10 +30,15 @@ import {
   RecordTestsResponse,
   SelectionResponse,
   StartConnectionResponse,
+  TESTING_INBOUND_CALLS_PATH,
+  TESTING_PHONES_PATH,
   TestCallResponse,
+  TestPhone,
+  TestPhonesResponse,
   WritebackReadiness,
   type AgentPromptKind,
   type AgentPromptPreviewRequest,
+  type AddTestPhoneRequest,
   type AgentPromptSaveRequest,
   type CallStage,
   type CampaignStatusChange,
@@ -81,6 +87,8 @@ export const outreachKeys = {
   recordTests: ['record-tests'] as const,
   recordTest: (id: string) => ['record-tests', id] as const,
   agentPrompts: ['settings', 'agent-prompts'] as const,
+  testPhones: ['testing', 'phones'] as const,
+  inboundTestCalls: ['testing', 'inbound-calls'] as const,
 };
 
 const seg = (value: string): string => encodeURIComponent(value);
@@ -309,4 +317,25 @@ export function saveAgentPrompt(kind: AgentPromptKind, template: string | null):
 /** Admin only: one saved version's text (`body` null = a reset to the default), to load an older version into the editor. */
 export function getAgentPromptVersion(kind: AgentPromptKind, id: string): Promise<AgentPromptVersionBody> {
   return api(`/api/settings/agent-prompts/${seg(kind)}/versions/${seg(id)}`, AgentPromptVersionBody);
+}
+
+/** Admin only: the org's test phones (they can get test calls from the agent, and get the agent when they call one of its numbers), oldest first. */
+export function getTestPhones(): Promise<TestPhonesResponse> {
+  return api(TESTING_PHONES_PATH, TestPhonesResponse);
+}
+
+/** Admin only: add a phone as typed (the server makes it E.164). A refusal answers 400 or 409 with the sentence to show. */
+export function addTestPhone(phone: string, label: string): Promise<TestPhone> {
+  const body: z.input<typeof AddTestPhoneRequest> = { phone, label };
+  return api(TESTING_PHONES_PATH, TestPhone, { method: 'POST', body: json(body) });
+}
+
+/** Admin only: take a phone off the list (a call it already has going carries on). */
+export function removeTestPhone(id: string): Promise<void> {
+  return apiEmpty(`${TESTING_PHONES_PATH}/${seg(id)}`, { method: 'DELETE' });
+}
+
+/** Admin only: the agent's numbers to dial, and the newest inbound test calls. */
+export function getInboundTestCalls(): Promise<InboundTestCallsResponse> {
+  return api(TESTING_INBOUND_CALLS_PATH, InboundTestCallsResponse);
 }

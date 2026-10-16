@@ -14,20 +14,20 @@ export const LEAVE_UNSAVED_WORDS = 'You have unsaved changes to this prompt. Lea
 const SWITCH_UNSAVED_WORDS = 'You have unsaved changes to this prompt. Switch without saving?';
 
 /**
- * Agent prompt (admins): edit, preview, save and reset the AI phone agent's call instructions and its voicemail message.
- * A saved change applies from the next call. Leaving the page, a reload, or switching tabs with unsaved edits asks first.
+ * Agent prompt (admins): edit, preview, save and reset the AI phone agent's call instructions, its voicemail message and the
+ * instructions it follows when a test phone calls it. `initialKind` is the tab it opens on. A saved change applies from the next call. Leaving the page, a reload, or switching tabs with unsaved edits asks first.
  */
-export function AgentPromptPage() {
+export function AgentPromptPage({ initialKind }: { initialKind?: AgentPromptKind }) {
   const auth = useAuth();
   const isAdmin = Boolean(auth.user?.isAdmin || auth.user?.isSuperAdmin);
   if (!isAdmin) return <p className="text-sm text-muted-foreground">Only admins can edit the agent prompt.</p>;
-  return <AdminAgentPromptPage />;
+  return <AdminAgentPromptPage initialKind={initialKind ?? 'instructions'} />;
 }
 
-function AdminAgentPromptPage() {
+function AdminAgentPromptPage({ initialKind }: { initialKind: AgentPromptKind }) {
   // Not refetched on focus or reconnect: the editors' text starts from this, and a silent change under an edit would read as unsaved edits.
   const prompts = useQuery({ queryKey: outreachKeys.agentPrompts, queryFn: getAgentPrompts, refetchOnWindowFocus: false, refetchOnReconnect: false });
-  const [kind, setKind] = useState<AgentPromptKind>('instructions');
+  const [kind, setKind] = useState<AgentPromptKind>(initialKind);
   const [dirty, setDirty] = useState(false);
 
   const pick = (value: string): void => {
@@ -43,7 +43,7 @@ function AdminAgentPromptPage() {
       {dirty && <LeaveGuard words={LEAVE_UNSAVED_WORDS} />}
       <PageHeader
         title="Agent prompt"
-        description="The instructions the AI phone agent follows on every call, and the voicemail it leaves. A saved change applies from the next call."
+        description="The instructions the AI phone agent follows on every call, the voicemail it leaves, and what it follows when a test phone calls it. A saved change applies from the next call."
       />
       {prompts.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
       {prompts.error && <p role="alert" className="text-sm text-destructive">{agentPromptErrorText(prompts.error)}</p>}

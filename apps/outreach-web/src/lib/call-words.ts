@@ -123,7 +123,7 @@ export const BLOCK_REASON_WORDS: Record<AiCallBlockReason, string> = {
   customer_ceiling: 'the call limit for this person was reached',
   calling_hours: "outside calling hours where they live",
   no_caller_id: 'no AI caller ID number is free',
-  not_admin_for_test: 'test calls are for admins, to a number in AI_VOICE_TEST_NUMBERS',
+  not_admin_for_test: 'test calls are for admins, to a phone in Test phones on the Testing page',
   invalid_number: 'the phone number is not valid',
   call_in_progress: 'another call to them is in progress',
 };

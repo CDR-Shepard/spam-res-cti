@@ -5,6 +5,7 @@ import { CAMPAIGN_ID, LIST_VIEW_ID, campaign, connection, fieldMap, preview } fr
 import { respond, StubResponse, stubApi } from '../test/stub-api';
 import { IDENTITY, LEAD_ID, TEST_ID, recordTest } from '../test/record-test-fixtures';
 import { VERSION_A, promptState, promptsResponse } from '../test/agent-prompt-fixtures';
+import { PHONE_A, inboundCall, inboundResponse, phonesResponse, testPhone } from '../test/testing-fixtures';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -46,6 +47,10 @@ const cases: Case[] = [
   { name: 'saveAgentPrompt', call: () => outreach.saveAgentPrompt('instructions', 'Be kind.'), route: 'PUT /api/settings/agent-prompts/instructions', response: promptState('instructions', { active: 'Be kind.' }), body: { template: 'Be kind.' } },
   { name: 'saveAgentPrompt (reset)', call: () => outreach.saveAgentPrompt('voicemail', null), route: 'PUT /api/settings/agent-prompts/voicemail', response: promptState('voicemail'), body: { template: null } },
   { name: 'getAgentPromptVersion', call: () => outreach.getAgentPromptVersion('instructions', VERSION_A), route: `GET /api/settings/agent-prompts/instructions/versions/${VERSION_A}`, response: { id: VERSION_A, body: 'Be kind.' } },
+  { name: 'getTestPhones', call: () => outreach.getTestPhones(), route: 'GET /api/testing/phones', response: phonesResponse(testPhone()) },
+  { name: 'addTestPhone', call: () => outreach.addTestPhone('(619) 555-0123', 'Grant cell'), route: 'POST /api/testing/phones', response: respond(201, testPhone()), body: { phone: '(619) 555-0123', label: 'Grant cell' } },
+  { name: 'removeTestPhone', call: () => outreach.removeTestPhone(PHONE_A), route: `DELETE /api/testing/phones/${PHONE_A}`, response: respond(204) },
+  { name: 'getInboundTestCalls', call: () => outreach.getInboundTestCalls(), route: 'GET /api/testing/inbound-calls', response: inboundResponse({ calls: [inboundCall()] }) },
   { name: 'startTestCall', call: () => outreach.startTestCall('+15125550111'), route: 'POST /api/ai-calls/test', response: { result: 'placed', aiCallId: AI_CALL_ID }, body: { to: '+15125550111' } },
 ];
 
@@ -80,6 +85,18 @@ describe('outreach-api', () => {
     const err = await outreach.saveAgentPrompt('instructions', '{{nope}}').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiRequestError);
     expect(err).toMatchObject({ status: 400, body: { error: 'invalid_prompt', problems: ['Unknown placeholder: nope'] } });
+  });
+
+  it('keys the testing page under one prefix, so adding or removing a phone refreshes the list', () => {
+    expect(outreach.outreachKeys.testPhones).toEqual(['testing', 'phones']);
+    expect(outreach.outreachKeys.inboundTestCalls).toEqual(['testing', 'inbound-calls']);
+  });
+
+  it('keeps the sentence the server words a refused add with, so the form can show it', async () => {
+    stubApi({ 'POST /api/testing/phones': respond(409, { error: 'That phone is already on the list', code: 'PHONE_ALREADY_LISTED' }) });
+    const err = await outreach.addTestPhone('(619) 555-0123', '').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiRequestError);
+    expect(err).toMatchObject({ status: 409, code: 'PHONE_ALREADY_LISTED', message: 'That phone is already on the list' });
   });
 
   it('keys the record tests under one prefix, so a new test refreshes the list', () => {

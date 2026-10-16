@@ -12,7 +12,7 @@ import { errorText } from '@/lib/outreach-words';
 const HINT = "You'll hear exactly what the seller would hear. Nothing is written to Salesforce.";
 const FOLLOW_MS = 5_000;
 const LIVE: ReadonlySet<string> = new Set(['queued', 'ringing', 'in_progress', 'transferring']);
-const NO_NUMBERS = 'No test numbers are set. Add yours to AI_VOICE_TEST_NUMBERS on the CTI API service.';
+const NO_NUMBERS = 'No test phones are set. Add yours to Test phones on the Testing page.';
 
 /**
  * "Practice call to my phone" (admins, plan 1D): the AI agent rings one of the CTI's test numbers as if it were this seller,

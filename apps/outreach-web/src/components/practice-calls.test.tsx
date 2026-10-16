@@ -60,6 +60,6 @@ describe('PracticeCalls', () => {
   it('a call that was not placed says why', async () => {
     stubApi({ [LIST]: { items: [practice(2, { result: { result: 'blocked', reason: 'not_admin_for_test', aiCallId: CALL }, aiCallId: CALL, callStatus: 'blocked' })] } });
     renderWithProviders(<PracticeCalls campaignId={CAMPAIGN_ID} />, { isAdmin: true });
-    expect(await screen.findByText('Not placed: test calls are for admins, to a number in AI_VOICE_TEST_NUMBERS')).toBeInTheDocument();
+    expect(await screen.findByText('Not placed: test calls are for admins, to a phone in Test phones on the Testing page')).toBeInTheDocument();
   });
 });

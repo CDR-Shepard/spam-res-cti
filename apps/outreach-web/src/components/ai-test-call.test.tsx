@@ -44,7 +44,7 @@ describe('AiTestCall', () => {
     stubApi({ [AVAILABILITY]: available, [TEST]: { result: 'blocked', reason: 'not_admin_for_test', aiCallId: CALL } });
     renderWithProviders(<AiTestCall />, { isAdmin: true });
     await userEvent.click(await screen.findByRole('button', { name: 'Test call to my phone' }));
-    expect(await screen.findByRole('status')).toHaveTextContent('Not called: test calls are for admins, to a number in AI_VOICE_TEST_NUMBERS');
+    expect(await screen.findByRole('status')).toHaveTextContent('Not called: test calls are for admins, to a phone in Test phones on the Testing page');
   });
 
   it('a 502 shows the error text', async () => {
@@ -57,7 +57,7 @@ describe('AiTestCall', () => {
   it('with no test numbers it says how to add one, and offers no button', async () => {
     stubApi({ [AVAILABILITY]: { available: true, testNumbers: [] } });
     renderWithProviders(<AiTestCall />, { isAdmin: true });
-    expect(await screen.findByText('No test numbers are set. Add yours to AI_VOICE_TEST_NUMBERS on the CTI API service.')).toBeInTheDocument();
+    expect(await screen.findByText('No test phones are set. Add yours to Test phones on the Testing page.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Test call to my phone' })).not.toBeInTheDocument();
   });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiRequestError } from './api';
-import { agentPromptErrorText, characterCountWords, CHECK_UNAVAILABLE_WORDS, promptProblems, promptStatusWords, versionLoadErrorText, VERSION_GONE_WORDS } from './agent-prompt-words';
+import { agentPromptErrorText, agentPromptSearch, characterCountWords, CHECK_UNAVAILABLE_WORDS, promptProblems, promptStatusWords, versionLoadErrorText, VERSION_GONE_WORDS } from './agent-prompt-words';
 import { formatDateTime } from './outreach-words';
 
 const err = (status: number, code: string, message: string, details?: unknown, body?: unknown) => new ApiRequestError(status, code, message, details, body);
@@ -87,5 +87,15 @@ describe('characterCountWords', () => {
   it('puts thousands separators on the count and the limit', () => {
     expect(characterCountWords(1499, 1500)).toBe('1,499 / 1,500 characters');
     expect(characterCountWords(0, 60_000)).toBe('0 / 60,000 characters');
+  });
+});
+
+describe('agentPromptSearch', () => {
+  it('keeps a tab the page has and drops anything else', () => {
+    expect(agentPromptSearch({ tab: 'inbound' })).toEqual({ tab: 'inbound' });
+    expect(agentPromptSearch({ tab: 'voicemail' })).toEqual({ tab: 'voicemail' });
+    expect(agentPromptSearch({ tab: 'nope' })).toEqual({});
+    expect(agentPromptSearch({ tab: 3 })).toEqual({});
+    expect(agentPromptSearch({})).toEqual({});
   });
 });

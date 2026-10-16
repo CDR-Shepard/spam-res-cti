@@ -117,7 +117,7 @@ describe('PracticeCall', () => {
     stubApi({ [AVAILABILITY]: numbers, [PRACTICE]: { result: 'blocked', reason: 'not_admin_for_test', aiCallId: CALL } });
     renderWithProviders(<PracticeCall card={card()} />, { isAdmin: true });
     await userEvent.click(await screen.findByRole('button', { name: 'Practice call to my phone' }));
-    expect(await screen.findByText('Not placed: test calls are for admins, to a number in AI_VOICE_TEST_NUMBERS')).toBeInTheDocument();
+    expect(await screen.findByText('Not placed: test calls are for admins, to a phone in Test phones on the Testing page')).toBeInTheDocument();
   });
 
   it('cti-api refusing the plan text says so', async () => {
@@ -130,7 +130,7 @@ describe('PracticeCall', () => {
   it('with no test numbers it says where to add one, and offers no button', async () => {
     stubApi({ [AVAILABILITY]: { available: true, testNumbers: [] } });
     renderWithProviders(<PracticeCall card={card()} />, { isAdmin: true });
-    expect(await screen.findByText(/No test numbers are set/)).toBeInTheDocument();
+    expect(await screen.findByText(/No test phones are set/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Practice call to my phone' })).not.toBeInTheDocument();
   });
 });

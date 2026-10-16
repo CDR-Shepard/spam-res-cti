@@ -1,5 +1,5 @@
 import { ApiRequestError } from './api';
-import type { AgentPromptState } from '@cti/contracts';
+import { AgentPromptKind, type AgentPromptState } from '@cti/contracts';
 import { errorText, formatDateTime } from './outreach-words';
 
 /** What a save or preview says when cti-api (which checks the template) cannot be reached. */
@@ -7,6 +7,12 @@ export const CHECK_UNAVAILABLE_WORDS = "Can't check the prompt right now — try
 export const VERSION_GONE_WORDS = "That version isn't there any more.";
 
 const CHECK_UNAVAILABLE_CODE = 'prompt_check_unavailable';
+
+/** The Agent prompt page's search: `?tab=inbound` opens that tab (the Testing page links to it); anything else is dropped. */
+export function agentPromptSearch(search: Record<string, unknown>): { tab?: AgentPromptKind } {
+  const tab = AgentPromptKind.safeParse(search.tab);
+  return tab.success ? { tab: tab.data } : {};
+}
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
