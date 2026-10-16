@@ -44,28 +44,36 @@ export interface PromptInput {
   templates?: { instructions: string | null; voicemail: string | null };
 }
 
+/** Called with the kind whose saved template failed to render (the default was used instead). */
+export type TemplateErrorHandler = (kind: AgentPromptKind) => void;
+
 /**
  * The call's saved template for `kind` rendered over its data, else the built-in default. A prompt never
- * breaks a call: a saved template that fails to render falls back to the default.
+ * breaks a call: a saved template that fails to render falls back to the default, and `onTemplateError`
+ * (the caller's logger; never given the template or the call's data) is told which kind failed.
  */
-function promptText(kind: AgentPromptKind, p: PromptInput): string {
+function promptText(kind: AgentPromptKind, p: PromptInput, onTemplateError?: TemplateErrorHandler): string {
   const saved = p.templates?.[kind];
   if (typeof saved === 'string') {
     try {
       return renderPrompt(kind, saved, p);
     } catch {
-      // Deliberately silent for now: the default below keeps the call going.
+      try {
+        onTemplateError?.(kind);
+      } catch {
+        // A failing logger must not take the call down with it: the default below keeps it going.
+      }
     }
   }
   return renderPrompt(kind, DEFAULT_TEMPLATES[kind], p);
 }
 
 /** The Realtime session instructions for one AI call. */
-export function buildInstructions(p: PromptInput): string {
-  return promptText('instructions', p);
+export function buildInstructions(p: PromptInput, onTemplateError?: TemplateErrorHandler): string {
+  return promptText('instructions', p, onTemplateError);
 }
 
 /** The voicemail `<Say>` text (≈ 20 s; the default names no price and no ZIP code). */
-export function voicemailText(p: PromptInput): string {
-  return promptText('voicemail', p);
+export function voicemailText(p: PromptInput, onTemplateError?: TemplateErrorHandler): string {
+  return promptText('voicemail', p, onTemplateError);
 }

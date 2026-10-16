@@ -19,6 +19,7 @@ import { withinCallingHours, type Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
 import { gateAiCall, type AiGateBlock, type AiGateInput, type AiGateResult, type GateDeps } from './gate.js';
 import { peekAiCallerId, pickAiDid } from './number-pool.js';
+import { loadAgentPrompts } from './prompt-saved.js';
 import type { AiCallObject, AiCallRecord } from './record.js';
 import { dropActiveCall, registerActiveCall, updateActiveCall } from './registry.js';
 import { gateTarget, handoffUser, loadTarget, rowTarget, targetKind, typedNumber, type StartTarget } from './service-target.js';
@@ -186,7 +187,12 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
   }
   if (!gate.ok) return blockedRow(i, gate.reason, blockedTo);
 
-  const [handoffUserId, company] = await Promise.all([handoffUser(i, record), companyName(i)]);
+  // The org's saved prompts are read here, per call and never cached, so a saved version applies to the next call.
+  const [handoffUserId, company, templates] = await Promise.all([
+    handoffUser(i, record),
+    companyName(i),
+    loadAgentPrompts(deps.store, session.orgId, deps.log),
+  ]);
   const row = await deps.store.insert({
     orgId: session.orgId,
     startedBy: session.userId,
@@ -222,6 +228,7 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
         notes: record?.notes ?? '',
         isTest: kind === 'test',
         callbackNumber: gate.fromE164,
+        templates,
         ...(i.plan ? { approvedPlan: i.plan } : {}),
         ...bookingPrompt(i, record, gate.toE164),
       },

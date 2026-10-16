@@ -21,6 +21,7 @@ import { AiCallBridge, MIN_CALL_MS, type BridgeHooks, type BridgeLog, type Bridg
 import { obj, parseFrame, str, type Msg } from './bridge-frames.js';
 import { buildInstructions, toolsFor } from './prompt.js';
 import { promptSlots } from './prompt-context.js';
+import { logTemplateError } from './prompt-saved.js';
 import { claimClose, getActiveCall, updateActiveCall, type ActiveAiCall, type ActiveBridge } from './registry.js';
 import { localTimeFor } from './service.js';
 import { handleToolCall, type ToolEffects } from './service-tools.js';
@@ -154,7 +155,10 @@ async function onStart(socket: BridgeSocket, start: Msg, deps: StreamSessionDeps
 function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: string }, streamSid: string, deps: StreamSessionDeps): void {
   const { cfg } = deps;
   // Part 6 B: a practice call rings a test number but says the seller's local time (the record's phone; service.ts).
-  const instructions = buildInstructions({ ...entry.prompt, localTime: localTimeFor(entry.localTimeE164 ?? entry.toE164, deps.now()) });
+  const instructions = buildInstructions(
+    { ...entry.prompt, localTime: localTimeFor(entry.localTimeE164 ?? entry.toE164, deps.now()) },
+    logTemplateError(deps.log),
+  );
   // The times the prompt lists are exactly the ones the agent can name and book (Fix 1, M-2).
   const slots = promptSlots(entry.prompt.slots, entry.prompt.address);
   const openai = deps.openRealtime(realtimeUrl(cfg.AI_VOICE_MODEL), cfg.OPENAI_API_KEY ?? '');

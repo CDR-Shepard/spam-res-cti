@@ -22,6 +22,7 @@ import { getProvider } from '../telephony/index.js';
 import { signedCallbackUrl, UUID_RE } from '../telephony/webhooks.js';
 import type { BridgeLog } from './bridge.js';
 import { voicemailText } from './prompt.js';
+import { logTemplateError } from './prompt-saved.js';
 import { claimClose, getActiveCall } from './registry.js';
 import { localTimeFor } from './service.js';
 import { finalizeAiCall, isTerminalCallStatus, mapCallStatus, type AfterCall } from './service-finalize.js';
@@ -113,7 +114,7 @@ export async function onAmd(row: AiCallRow, answeredBy: string, deps: WebhookDep
   const entry = getActiveCall(row.id);
   if (!entry || !claimClose(row.id)) return; // a tool (or a failure) already owns the end of the call
   entry.bridge?.silence();
-  const text = voicemailText({ ...entry.prompt, localTime: localTimeFor(entry.toE164, deps.now()) });
+  const text = voicemailText({ ...entry.prompt, localTime: localTimeFor(entry.toE164, deps.now()) }, logTemplateError(deps.log));
   try {
     await deps.twilio.redirect(callSid, voicemailTwiml(text));
     await deps.store.setOutcome(row.id, 'voicemail', null);

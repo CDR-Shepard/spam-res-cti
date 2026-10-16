@@ -4,6 +4,7 @@ import type { AppConfig } from '../config.js';
 import type { AppointmentSlot } from '@cti/contracts';
 import { gateAiCall, type AiGateResult, type GateDeps } from './gate.js';
 import type { AiCallRecord } from './record.js';
+import { buildInstructions, voicemailText } from './prompt.js';
 import { aiGateDeps, localTimeFor, startAiCall, type StartDeps } from './service.js';
 import { clearActiveCalls, getActiveCall } from './registry.js';
 import { CALL_SID, fakeStore, fakeTwilio, silentLog, type FakeStore, type FakeTwilio } from './testing.js';
@@ -114,6 +115,7 @@ describe('startAiCall — a record', () => {
       notes: 'Inherited the house.',
       isTest: false,
       callbackNumber: FROM,
+      templates: { instructions: null, voicemail: null },
     });
   });
 
@@ -379,6 +381,7 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
     expect(getActiveCall(res.aiCallId)!.prompt).toEqual({
       agentName: 'Alex', companyName: 'GG Homes', firstName: 'Jane', address: '12 Oak St, Austin, TX 78701',
       notes: 'Inherited the house.', isTest: false, callbackNumber: FROM, approvedPlan: 'Opener: hi',
+      templates: { instructions: null, voicemail: null },
     });
   });
 
@@ -386,5 +389,73 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
     const res = await run({ testTo: TEST_NUMBER }, admin);
     if (!res.ok) throw new Error('unreachable');
     expect(store.rows.get(res.aiCallId)).toMatchObject({ isTest: true, practice: false, sfRecordId: null, offeredSlots: [] });
+  });
+});
+
+describe('startAiCall — the org\'s saved agent prompts', () => {
+  const OTHER_ORG = 'oooooooo-0000-4000-8000-000000000002';
+  const saved = (orgId: string, kind: 'instructions' | 'voicemail', body: string | null, at: string) =>
+    store.agentPrompts.push({ orgId, kind, body, createdAt: new Date(at) });
+  const place = async () => {
+    const res = await start({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' });
+    if (!res.ok) throw new Error('unreachable');
+    return getActiveCall(res.aiCallId)!;
+  };
+  let warn: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    warn = vi.fn();
+    deps.log = { info: vi.fn(), warn, error: vi.fn() };
+  });
+
+  it('registers the stored custom templates in prompt.templates', async () => {
+    saved(session.orgId, 'instructions', 'Hello {{first_name}}, this is {{agent_name}}.', '2026-10-01T00:00:00Z');
+    saved(session.orgId, 'voicemail', 'Call {{callback_number}}.', '2026-10-01T00:00:00Z');
+    const entry = await place();
+    expect(entry.prompt.templates).toEqual({ instructions: 'Hello {{first_name}}, this is {{agent_name}}.', voicemail: 'Call {{callback_number}}.' });
+    expect(buildInstructions({ ...entry.prompt, localTime: 'Monday 11:00 AM' })).toBe('Hello Jane, this is Alex.');
+    expect(voicemailText({ ...entry.prompt, localTime: 'Monday 11:00 AM' })).toBe('Call 619-555-0000.');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('with no saved version the templates are null (the built-in defaults)', async () => {
+    expect((await place()).prompt.templates).toEqual({ instructions: null, voicemail: null });
+  });
+
+  it('a newer reset (NULL body) means the default again', async () => {
+    saved(session.orgId, 'instructions', 'Old {{first_name}}', '2026-10-01T00:00:00Z');
+    saved(session.orgId, 'instructions', null, '2026-10-02T00:00:00Z');
+    expect((await place()).prompt.templates).toEqual({ instructions: null, voicemail: null });
+  });
+
+  it('only this org\'s versions are used', async () => {
+    saved(OTHER_ORG, 'instructions', 'Another org says {{first_name}}', '2026-10-01T00:00:00Z');
+    saved(OTHER_ORG, 'voicemail', 'Another org voicemail', '2026-10-01T00:00:00Z');
+    expect((await place()).prompt.templates).toEqual({ instructions: null, voicemail: null });
+  });
+
+  it('is read at every placement: a version saved between two calls is used by the second', async () => {
+    saved(session.orgId, 'instructions', 'First {{first_name}}', '2026-10-01T00:00:00Z');
+    expect((await place()).prompt.templates?.instructions).toBe('First {{first_name}}');
+    clearActiveCalls();
+    store.rows.clear();
+    saved(session.orgId, 'instructions', 'Second {{first_name}}', '2026-10-02T00:00:00Z');
+    expect((await place()).prompt.templates?.instructions).toBe('Second {{first_name}}');
+  });
+
+  it('a database error still places the call with the defaults, and warns once without the error text', async () => {
+    vi.spyOn(store, 'activeAgentPrompts').mockRejectedValueOnce(new Error('connection refused to db.internal'));
+    const res = await start({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' });
+    expect(res).toMatchObject({ ok: true, status: 'ringing' });
+    if (!res.ok) throw new Error('unreachable');
+    expect(twilio.placed).toHaveLength(1);
+    const entry = getActiveCall(res.aiCallId)!;
+    expect(entry.prompt.templates).toEqual({ instructions: null, voicemail: null });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith({ reason: 'db_error' }, 'ai-voice: agent prompts unavailable, using defaults');
+    // The instructions the call will use are the built-in default.
+    const withNone = buildInstructions({ ...entry.prompt, localTime: 'Monday 11:00 AM' });
+    expect(withNone).toBe(buildInstructions({ ...entry.prompt, templates: undefined, localTime: 'Monday 11:00 AM' }));
+    expect(withNone).toContain('an AI assistant calling for GG Homes on a recorded line');
   });
 });

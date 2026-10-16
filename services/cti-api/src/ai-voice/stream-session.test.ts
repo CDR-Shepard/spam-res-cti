@@ -401,3 +401,47 @@ describe('runStreamSession — appointment times (plan 1D)', () => {
     expect(store.rows.get(ID)?.appointment ?? null).toBeNull();
   });
 });
+
+describe('runStreamSession — the org\'s saved instructions', () => {
+  const MARKER = 'SECRET-TEMPLATE-MARKER';
+  let warn: ReturnType<typeof vi.fn>;
+  let logged: ReturnType<typeof vi.fn>[];
+
+  beforeEach(() => {
+    warn = vi.fn();
+    const info = vi.fn();
+    const error = vi.fn();
+    logged = [info, warn, error];
+    deps.log = { info, warn, error };
+  });
+
+  const withTemplate = (instructions: string | null) => {
+    const base = activeEntry({ aiCallId: ID, callSid: CALL_SID });
+    registerActiveCall({ ...base, prompt: { ...base.prompt, templates: { instructions, voicemail: null } } });
+  };
+  const everythingLogged = () => JSON.stringify(logged.flatMap((f) => f.mock.calls));
+
+  it('the session instructions are the saved template rendered for this call', async () => {
+    withTemplate('Hello {{first_name}}, this is {{agent_name}} from {{company_name}}. It is {{local_time}}.');
+    expect(await begin()).toBe('started');
+    expect(captured?.opts.instructions).toBe('Hello Jane, this is Alex from GG Homes. It is Monday 11:00 AM.');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('a saved template that fails to render falls back to the default, with one warn that carries no template text', async () => {
+    withTemplate(`${MARKER} {{nope}}`);
+    expect(await begin()).toBe('started');
+    expect(captured?.opts.instructions).toContain('an AI assistant calling for GG Homes on a recorded line');
+    expect(captured?.opts.instructions).not.toContain(MARKER);
+    expect(warn).toHaveBeenCalledWith({ kind: 'instructions', reason: 'render_error' }, 'ai-voice: custom prompt failed, using default');
+    expect(warn.mock.calls.filter((c) => (c[1] as string).startsWith('ai-voice: custom prompt failed'))).toHaveLength(1);
+    expect(everythingLogged()).not.toContain(MARKER);
+    expect(bridge.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('with no saved template there is nothing to warn about', async () => {
+    withTemplate(null);
+    expect(await begin()).toBe('started');
+    expect(warn).not.toHaveBeenCalled();
+  });
+});

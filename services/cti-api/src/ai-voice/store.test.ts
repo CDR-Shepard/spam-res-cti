@@ -4,6 +4,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import { Pool } from 'pg';
 import { schema } from '@cti/db';
 import {
+  activeAgentPromptsQuery,
   activeCallToQuery,
   appendSummaryQuery,
   appointmentConflictQuery,
@@ -16,6 +17,7 @@ import {
   markFailedQuery,
   mergeQualificationQuery,
   setOutcomeQuery,
+  templatesOfRows,
   uncountedPlacedQuery,
   updateWhereStatusQuery,
   updateQuery,
@@ -173,5 +175,23 @@ describe('ai_calls SQL, rendered', () => {
     const { sql, params } = appointmentConflictQuery(db, ID, BOOKED).toSQL();
     expect(sql).toMatch(/\("ai_calls"\."outcome" in \(\$\d+, \$\d+, \$\d+\) or \("ai_calls"\."outcome" is null and "ai_calls"\."ended_at" is null\)\)/);
     expect(params).toEqual(expect.arrayContaining(['appointment_set', 'qualified_transferred', 'transfer_failed']));
+  });
+});
+
+describe('ai_agent_prompts SQL, rendered', () => {
+  it('reads one row per kind: the newest, for the calling org only', () => {
+    const { sql, params } = activeAgentPromptsQuery(db, ORG).toSQL();
+    expect(sql).toMatch(/^select distinct on \("ai_agent_prompts"\."kind"\) "kind", "body" from "ai_agent_prompts" /);
+    expect(sql).toContain('where "ai_agent_prompts"."org_id" = $1');
+    expect(sql).toContain('order by "ai_agent_prompts"."kind", "ai_agent_prompts"."created_at" desc');
+    expect(params).toEqual([ORG]);
+  });
+});
+
+describe('templatesOfRows', () => {
+  it('maps each kind to its body, null for a kind with no row or a NULL body (a reset)', () => {
+    expect(templatesOfRows([])).toEqual({ instructions: null, voicemail: null });
+    expect(templatesOfRows([{ kind: 'instructions', body: 'Hi {{first_name}}' }])).toEqual({ instructions: 'Hi {{first_name}}', voicemail: null });
+    expect(templatesOfRows([{ kind: 'voicemail', body: null }, { kind: 'instructions', body: 'x' }])).toEqual({ instructions: 'x', voicemail: null });
   });
 });

@@ -339,6 +339,31 @@ describe('buildInstructions / voicemailText with saved templates', () => {
   });
 });
 
+describe('buildInstructions / voicemailText: onTemplateError', () => {
+  it('is told the kind when a saved template fails, and the default is still used', () => {
+    const calls: string[] = [];
+    const templates = { instructions: '{{frist_name}}', voicemail: '{{#call_plan}}never closed' };
+    expect(buildInstructions({ ...JANE, templates }, (kind) => calls.push(kind))).toBe(buildInstructions(JANE));
+    expect(voicemailText({ ...JANE, templates }, (kind) => calls.push(kind))).toBe(voicemailText(JANE));
+    expect(calls).toEqual(['instructions', 'voicemail']);
+  });
+
+  it('is not called for a template that renders, a null template, or no templates at all', () => {
+    const onError = vi.fn();
+    buildInstructions({ ...JANE, templates: { instructions: 'Hi {{first_name}}', voicemail: null } }, onError);
+    buildInstructions({ ...JANE, templates: { instructions: null, voicemail: null } }, onError);
+    voicemailText(JANE, onError);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('a callback that throws never breaks the prompt', () => {
+    const boom = () => {
+      throw new Error('logger down');
+    };
+    expect(buildInstructions({ ...JANE, templates: { instructions: '{{nope}}', voicemail: null } }, boom)).toBe(buildInstructions(JANE));
+  });
+});
+
 describe('PLACEHOLDERS', () => {
   it.each(KINDS)('%s: every placeholder the default uses is listed, and every listed one is used by the default', (kind) => {
     const used = namesIn(DEFAULTS[kind]);

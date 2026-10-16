@@ -1,15 +1,16 @@
 /**
- * Every read and write of `ai_calls` (plus the AI call's `opt_outs` upsert and
- * hand-off-user lookup), behind one `AiCallStore` interface so the service and
- * routes are tested with an in-memory fake. The query builders are exported
- * so their SQL is pinned by rendering it (store.test.ts) — no database needed.
+ * Every read and write of `ai_calls` (plus the AI call's `opt_outs` upsert,
+ * hand-off-user lookup and the org's saved agent prompts), behind one
+ * `AiCallStore` interface so the service and routes are tested with an
+ * in-memory fake. The query builders are exported so their SQL is pinned by
+ * rendering it (store.test.ts) — no database needed.
  *
  * Writes that race a live call are conditional: status moves only out of the
  * states named, `do_not_call` is never overwritten, and finalize is a
  * compare-and-swap on `ended_at is null`.
  */
 import { and, desc, eq, inArray, isNotNull, isNull, gte, sql } from 'drizzle-orm';
-import type { AiCallTurnStats, BookedAppointment } from '@cti/contracts';
+import type { AgentPromptKind, AiCallTurnStats, BookedAppointment } from '@cti/contracts';
 import { getDb, schema } from '@cti/db';
 import { setAppointment, type SetAppointmentResult } from './store-booking.js';
 import {
@@ -80,6 +81,12 @@ export interface FinalizeWrite {
   callSid: string | null;
 }
 
+/** The org's saved agent prompts: a template per kind, `null` = the built-in default for that kind. */
+export interface AgentPromptTemplates {
+  instructions: string | null;
+  voicemail: string | null;
+}
+
 /** Statuses of a call that is still on (or about to be on) the line. */
 export const LIVE_STATUSES: readonly AiCallStatus[] = ['queued', 'ringing', 'in_progress', 'transferring'];
 
@@ -108,6 +115,8 @@ export interface AiCallStore {
   /** users.id of the human in `orgId` whose Salesforce user is `sfUserId`. */
   handoffUserFor(orgId: string, sfUserId: string): Promise<string | null>;
   orgName(orgId: string): Promise<string | null>;
+  /** The org's active agent prompts: the newest saved version per kind; null when there is none or it is a reset (NULL body). */
+  activeAgentPrompts(orgId: string): Promise<AgentPromptTemplates>;
   /** Is an AI call to `e164` still live in this org (created since `since`)? */
   activeCallTo(orgId: string, e164: string, since: Date): Promise<boolean>;
   /** Placed AI calls to `e164` since `since` that have no `calls` row yet (so the daily cap counts them). */
@@ -212,6 +221,20 @@ export const handoffUserQuery = (db: Db, orgId: string, sfUserId: string) =>
     )
     .limit(1);
 
+/** One row per kind: the newest saved version of the org's prompt (the body is NULL when that version is a reset). */
+export const activeAgentPromptsQuery = (db: Db, orgId: string) =>
+  db
+    .selectDistinctOn([schema.aiAgentPrompts.kind], { kind: schema.aiAgentPrompts.kind, body: schema.aiAgentPrompts.body })
+    .from(schema.aiAgentPrompts)
+    .where(eq(schema.aiAgentPrompts.orgId, orgId))
+    .orderBy(schema.aiAgentPrompts.kind, desc(schema.aiAgentPrompts.createdAt));
+
+/** The newest rows (activeAgentPromptsQuery) as one template per kind; a kind with no row is null. */
+export function templatesOfRows(rows: ReadonlyArray<{ kind: AgentPromptKind; body: string | null }>): AgentPromptTemplates {
+  const body = (kind: AgentPromptKind): string | null => rows.find((r) => r.kind === kind)?.body ?? null;
+  return { instructions: body('instructions'), voicemail: body('voicemail') };
+}
+
 export const listQuery = (db: Db, orgId: string, opts: { startedBy?: string; limit: number }) =>
   db
     .select()
@@ -308,6 +331,9 @@ export function drizzleAiCallStore(db: Db): AiCallStore {
         .where(eq(schema.organizations.id, orgId))
         .limit(1);
       return row?.name ?? null;
+    },
+    async activeAgentPrompts(orgId) {
+      return templatesOfRows(await activeAgentPromptsQuery(db, orgId));
     },
     async activeCallTo(orgId, e164, since) {
       return (await activeCallToQuery(db, orgId, e164, since)).length > 0;

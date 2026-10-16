@@ -7,7 +7,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { internalRequestHeaders, type SessionUser } from '@cti/auth';
-import { AiCallBlockReason, INTERNAL_AI_AVAILABILITY_PATH, INTERNAL_AI_CALLS_PATH, type InternalAiCallResponse } from '@cti/contracts';
+import {
+  AiCallBlockReason,
+  AgentPromptCheck,
+  AGENT_PROMPT_MAX_CHARS,
+  INTERNAL_AI_AVAILABILITY_PATH,
+  INTERNAL_AI_CALLS_PATH,
+  INTERNAL_AI_PROMPT_CHECK_PATH,
+  type InternalAiCallResponse,
+} from '@cti/contracts';
 import type { AppConfig } from '../config.js';
 import type { Db } from '../dialer/pick-did.js';
 import type { AiGateBlock } from './gate.js';
@@ -533,6 +541,106 @@ describe('GET /internal/ai-calls/availability', () => {
 
   it('10: unsigned -> 401', async () => {
     expect((await get({})).statusCode).toBe(401);
+  });
+});
+
+describe('POST /internal/ai-calls/prompt-check', () => {
+  const MARKER = 'SECRET-TEMPLATE-MARKER';
+  const check = (body: unknown, opts: { raw?: string; headers?: Record<string, string | undefined>; sign?: boolean } = {}) => {
+    const payload = opts.raw ?? JSON.stringify(body);
+    const signed = opts.sign === false ? {} : internalRequestHeaders(SECRET, { method: 'POST', path: INTERNAL_AI_PROMPT_CHECK_PATH, body: payload }, NOW);
+    const headers = Object.fromEntries(
+      Object.entries({ host: HOST, 'content-type': 'application/json', ...signed, ...opts.headers }).filter(([, v]) => v !== undefined),
+    ) as Record<string, string>;
+    return app.inject({ method: 'POST', url: INTERNAL_AI_PROMPT_CHECK_PATH, headers, payload });
+  };
+
+  it('is the path the contract names, under /internal/ai-calls', () => {
+    expect(INTERNAL_AI_PROMPT_CHECK_PATH).toBe('/internal/ai-calls/prompt-check');
+  });
+
+  it('an unsigned request -> 401', async () => {
+    const res = await check({ kind: 'instructions', template: null }, { sign: false });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: 'bad_signature' });
+  });
+
+  it('a signature over a different body -> 401', async () => {
+    const signed = internalRequestHeaders(SECRET, { method: 'POST', path: INTERNAL_AI_PROMPT_CHECK_PATH, body: JSON.stringify({ kind: 'voicemail', template: null }) }, NOW);
+    const res = await check({ kind: 'instructions', template: null }, { sign: false, headers: signed });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('shares the other routes\' locks: a public host in production -> 404, any Origin -> 403', async () => {
+    expect((await check({ kind: 'instructions', template: null }, { headers: { host: 'cti.example.com' } })).statusCode).toBe(404);
+    expect((await check({ kind: 'instructions', template: null }, { headers: { origin: 'https://cti.example.com' } })).statusCode).toBe(403);
+  });
+
+  it('template null checks the built-in default: no problems, the default and the placeholders back, and a sample render', async () => {
+    const res = await check({ kind: 'instructions', template: null });
+    expect(res.statusCode).toBe(200);
+    const body = AgentPromptCheck.parse(res.json());
+    expect(body.problems).toEqual([]);
+    expect(body.defaultTemplate.length).toBeGreaterThan(0);
+    expect(body.placeholders.map((p) => p.name)).toContain('first_name');
+    expect(body.rendered).toContain('an AI assistant calling for GG Homes');
+  });
+
+  it('checks the voicemail kind too', async () => {
+    const body = AgentPromptCheck.parse((await check({ kind: 'voicemail', template: 'Hi {{first_name}}, call {{callback_number}}' })).json());
+    expect(body.problems).toEqual([]);
+    expect(body.rendered).toBe('Hi Jane, call 512-555-0100');
+  });
+
+  it('an unknown placeholder is a plain-words problem and nothing is rendered', async () => {
+    const res = await check({ kind: 'instructions', template: '{{nope}}' });
+    expect(res.statusCode).toBe(200);
+    const body = AgentPromptCheck.parse(res.json());
+    expect(body.problems).toContain('Unknown placeholder: nope');
+    expect(body.rendered).toBeNull();
+  });
+
+  it('a template at the longest an admin may save (60,000 characters) is accepted, not turned away as too big', async () => {
+    // Newlines JSON-escape to two bytes each, so the request is far larger than the transport's usual 32 KiB.
+    const head = 'Hi {{first_name}}\n';
+    const template = head + 'x\n'.repeat((AGENT_PROMPT_MAX_CHARS.instructions - head.length) / 2);
+    expect(template.length).toBe(AGENT_PROMPT_MAX_CHARS.instructions);
+    const res = await check({ kind: 'instructions', template });
+    expect(res.statusCode).toBe(200);
+    expect(AgentPromptCheck.parse(res.json()).problems).toEqual([]);
+  });
+
+  it.each([
+    ['an unknown kind', { kind: 'greeting', template: null }],
+    ['a missing template', { kind: 'instructions' }],
+    ['a template that is not text or null', { kind: 'instructions', template: 5 }],
+    ['an extra key', { kind: 'instructions', template: null, orgId: ORG }],
+    ['an array', []],
+  ])('%s -> 400 invalid_body', async (_label, body) => {
+    const res = await check(body);
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: 'invalid_body' });
+  });
+
+  it('a body that is not JSON -> 400 invalid_body', async () => {
+    const res = await check(null, { raw: '{not json' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: 'invalid_body' });
+  });
+
+  it('never logs the template, whatever the answer', async () => {
+    await check({ kind: 'instructions', template: `${MARKER} {{nope}}` });
+    await check({ kind: 'voicemail', template: `${MARKER} {{first_name}}` });
+    await check({ kind: 'voicemail', template: MARKER }, { sign: false });
+    await check({ kind: 'bad', template: MARKER });
+    const logged = JSON.stringify([log.info.mock.calls, log.warn.mock.calls, log.error.mock.calls]);
+    expect(logged).not.toContain(MARKER);
+  });
+
+  it('does not touch the call trigger: no call is started and no idempotency key is reserved', async () => {
+    await check({ kind: 'instructions', template: null });
+    expect(deps.start).not.toHaveBeenCalled();
+    expect(store.reserve).not.toHaveBeenCalled();
   });
 });
 

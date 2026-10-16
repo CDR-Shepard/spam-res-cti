@@ -43,8 +43,18 @@ export function rowOf(v: NewAiCall & { id: string }): AiCallRow {
   } as AiCallRow;
 }
 
+/** One saved `ai_agent_prompts` version (body null = the built-in default). */
+export interface FakePrompt {
+  orgId: string;
+  kind: 'instructions' | 'voicemail';
+  body: string | null;
+  createdAt: Date;
+}
+
 export interface FakeStore extends AiCallStore {
   rows: Map<string, AiCallRow>;
+  /** Saved agent prompt versions of every org; the newest per (org, kind) is the active one. */
+  agentPrompts: FakePrompt[];
   /** `calls` rows written by recordCtiCall, keyed by their id. */
   ctiCalls: Map<string, NewCtiCall & { id: string }>;
   optOuts: Array<{ orgId: string; e164: string; note: string }>;
@@ -66,6 +76,7 @@ export function fakeStore(): FakeStore {
     rows,
     ctiCalls,
     optOuts,
+    agentPrompts: [],
     handoff: new Map(),
     orgNames: new Map(),
     uncounted: 0,
@@ -161,6 +172,13 @@ export function fakeStore(): FakeStore {
     },
     async orgName(orgId) {
       return store.orgNames.get(orgId) ?? null;
+    },
+    async activeAgentPrompts(orgId) {
+      const body = (kind: FakePrompt['kind']): string | null =>
+        store.agentPrompts
+          .filter((p) => p.orgId === orgId && p.kind === kind)
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]?.body ?? null;
+      return { instructions: body('instructions'), voicemail: body('voicemail') };
     },
     async activeCallTo(orgId, e164) {
       return [...rows.values()].some(

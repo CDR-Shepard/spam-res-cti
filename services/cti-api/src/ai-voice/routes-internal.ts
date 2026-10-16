@@ -5,6 +5,7 @@
  *   POST /internal/ai-calls               place (or refuse) one AI call
  *   GET  /internal/ai-calls/availability  is AI calling on; the admin test numbers; can a browser test get a token
  *   POST /internal/ai-calls/browser-token an admin's incoming-only Voice token for "Talk in browser" (browser-token.ts)
+ *   POST /internal/ai-calls/prompt-check  check an agent prompt template (the admin's draft, or null = the default) and preview it
  *
  * Everything the engine checks for a rep's call it checks here too: gateAiCall runs inside
  * startAiCall, unchanged (consent read fresh from Salesforce, opt-outs, block list, federal
@@ -22,6 +23,8 @@ import {
   AiCallBlockReason,
   INTERNAL_AI_AVAILABILITY_PATH,
   INTERNAL_AI_CALLS_PATH,
+  INTERNAL_AI_PROMPT_CHECK_PATH,
+  InternalAgentPromptCheckRequest,
   InternalAiCallRequest,
   InternalAiCallResponse,
   agentPlanTextIssues,
@@ -35,6 +38,7 @@ import type { Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
 import { browserCallsAvailable, registerBrowserTokenRoute } from './browser-token.js';
 import { checkInternalRequest, checkInternalTransport, INTERNAL_RATE_MAX } from './internal-auth.js';
+import { checkTemplate } from './prompt-template.js';
 import type { AiCallRecord } from './record.js';
 import { requestHash, STALE_REQUEST_MS, type AiCallRequestRow, type AiCallRequestStore, type CallLookup, type FoundCall } from './request-store.js';
 import type { StartDeps, StartInput, StartResult } from './service.js';
@@ -56,6 +60,8 @@ type Body = InternalAiCallRequest;
 
 const BLOCK_REASONS: ReadonlySet<string> = new Set(AiCallBlockReason.options);
 const BODY_LIMIT = 32 * 1024;
+/** A template is up to AGENT_PROMPT_MAX_CHARS (60,000) characters, which JSON-escaped can run to several times that in bytes. */
+const PROMPT_CHECK_BODY_LIMIT = 512 * 1024;
 /** A crashed request's ai_calls row may predate its reservation by a little clock skew. */
 const FIND_SLACK_MS = 5_000;
 
@@ -160,6 +166,13 @@ export async function registerInternalAiCallRoutes(app: FastifyInstance, deps: I
     });
 
     registerBrowserTokenRoute(scope, deps, cfgOf, rateLimit);
+
+    // Pure: no database and no call. The template is never logged (not even on a bad body or a refused signature).
+    scope.post(INTERNAL_AI_PROMPT_CHECK_PATH, { bodyLimit: PROMPT_CHECK_BODY_LIMIT, config: { rateLimit } }, async (req, reply) => {
+      const parsed = InternalAgentPromptCheckRequest.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: 'invalid_body' });
+      return checkTemplate(parsed.data.kind, parsed.data.template);
+    });
 
     scope.post(INTERNAL_AI_CALLS_PATH, { config: { rateLimit } }, async (req, reply) => {
       const parsed = InternalAiCallRequest.safeParse(req.body);

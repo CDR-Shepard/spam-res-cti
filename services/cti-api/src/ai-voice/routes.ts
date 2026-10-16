@@ -3,6 +3,7 @@
  *
  *   POST /internal/ai-calls              start an AI call for an outreach campaign (signed, private network)
  *   GET  /internal/ai-calls/availability is AI calling on; test numbers (signed)
+ *   POST /internal/ai-calls/prompt-check check an agent prompt template and preview it (signed)
  *   POST /telephony/twilio/ai-voice/{amd,status,transfer-result}   (routes-webhooks.ts)
  *   GET  /telephony/twilio/ai-voice/stream  (WebSocket, routes-stream.ts)
  *
