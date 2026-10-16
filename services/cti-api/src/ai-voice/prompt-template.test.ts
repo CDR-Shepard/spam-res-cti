@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import Mustache from 'mustache';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AgentPromptCheck, type AgentPromptKind } from '@cti/contracts';
 import { DEFAULT_INSTRUCTIONS_TEMPLATE } from './prompt-default-instructions.js';
 import { DEFAULT_VOICEMAIL_TEMPLATE } from './prompt-default-voicemail.js';
@@ -233,6 +233,72 @@ describe('checkTemplate', () => {
     const good = checkTemplate('voicemail', 'Hi {{first_name}}, call {{callback_number}}. {{! a note to self }}');
     expect(good).toMatchObject({ problems: [], rendered: 'Hi Jane, call 512-555-0100. ' });
     expect(checkTemplate('voicemail', 'Hi {{frist_name}}').rendered).toBeNull();
+  });
+});
+
+describe('checkTemplate — fix round 1', () => {
+  it('points an unclosed section or tag at the line it opens on, not the end of the prompt', () => {
+    expect(checkTemplate('instructions', 'a\n{{#call_plan}}x\nb\nc\nd\ne').problems).toEqual([
+      'Section "call_plan" is never closed — add {{/call_plan}} (line 2)',
+    ]);
+    expect(checkTemplate('instructions', 'a\n{{^ returning }}x\nb\nc').problems).toEqual([
+      'Section "returning" is never closed — add {{/returning}} (line 2)',
+    ]);
+    // The inner section closes; the outer one, on line 1, never does.
+    expect(checkTemplate('instructions', '{{#returning}}\n{{#returning}}\n{{/returning}}\nz').problems).toEqual([
+      'Section "returning" is never closed — add {{/returning}} (line 1)',
+    ]);
+    expect(checkTemplate('instructions', '{{#is_test}}\n{{#returning}}\nx\n{{/returning}}\ny\nz').problems).toEqual([
+      'Section "is_test" is never closed — add {{/is_test}} (line 1)',
+    ]);
+    expect(checkTemplate('instructions', 'a\n{{first_name\nb\nc').problems).toEqual(['A tag is missing its closing }} (line 2)']);
+    expect(checkTemplate('instructions', '{{first_name}}\nb {{street\nc\nd').problems).toEqual(['A tag is missing its closing }} (line 2)']);
+  });
+
+  it('refuses a yes/no or list placeholder used as a value, in every value form', () => {
+    const message = 'appointment_times is a section — use {{#appointment_times}}…{{/appointment_times}}';
+    for (const t of ['x {{appointment_times}}', 'x {{{appointment_times}}}', 'x {{& appointment_times}}']) {
+      expect(checkTemplate('instructions', t)).toMatchObject({ problems: [message], rendered: null });
+    }
+    expect(checkTemplate('instructions', '{{can_book}}').problems).toEqual(['can_book is a section — use {{#can_book}}…{{/can_book}}']);
+    expect(checkTemplate('instructions', '{{#call_plan}}{{call_plan}}{{/call_plan}}').problems).toEqual([]);
+    expect(() => renderPrompt('instructions', '{{can_book}}', SAMPLE_INPUT)).toThrow();
+  });
+
+  it('flags exactly the placeholders whose value is yes/no or a list', () => {
+    const view = promptView(SAMPLE_INPUT);
+    for (const p of PLACEHOLDERS.instructions) {
+      const value = view[p.name];
+      const blockOnly = typeof value === 'boolean' || Array.isArray(value);
+      expect(checkTemplate('instructions', `{{${p.name}}}`).problems.length > 0, p.name).toBe(blockOnly);
+    }
+  });
+
+  it('never throws for any placeholder used as a value, at the top or inside any section', () => {
+    for (const kind of KINDS) {
+      const sections = PLACEHOLDERS[kind].filter((p) => p.kind === 'section').map((p) => p.name);
+      for (const p of PLACEHOLDERS[kind]) {
+        const values = [`{{${p.name}}}`, `{{{${p.name}}}}`, `{{& ${p.name}}}`];
+        for (const t of values.flatMap((v) => [v, ...sections.map((s) => `{{#${s}}}${v}{{/${s}}}`)])) {
+          const check = checkTemplate(kind, t);
+          if (check.rendered !== null) expect(check.rendered, t).not.toMatch(/undefined|null|\[object Object\]/);
+        }
+      }
+    }
+  });
+
+  it('a sample render that throws becomes a problem, never an exception', () => {
+    const spy = vi.spyOn(Mustache.Writer.prototype, 'render').mockImplementation(() => {
+      throw new Error('boom');
+    });
+    try {
+      expect(checkTemplate('voicemail', 'Hi {{first_name}}')).toMatchObject({
+        rendered: null,
+        problems: ["The prompt couldn't be rendered for the sample call"],
+      });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
