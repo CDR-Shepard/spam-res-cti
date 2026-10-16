@@ -82,14 +82,17 @@ describe('migration 0061_inbound_agent_testing', () => {
     expect(lines.find((l) => l.startsWith('"added_by"'))).toBe('"added_by" uuid NOT NULL REFERENCES "users"("id")');
   });
 
-  it('has exactly these statements, in order', () => {
+  it('has exactly these statements, in order: the hot ai_calls table is changed LAST (final review M-4)', () => {
+    // The file runs in one transaction and every lock is held until commit: taking ai_calls' ACCESS EXCLUSIVE lock last
+    // keeps live calls' writes from waiting behind the organizations/users FK locks the CREATE TABLE may wait for.
     expect(statements).toEqual([
       `SET LOCAL lock_timeout = '5s'`,
-      DIRECTION_ALTER,
+      expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "ai_test_phones"/),
       KIND_DROP,
       KIND_ADD,
-      expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "ai_test_phones"/),
+      DIRECTION_ALTER,
     ]);
+    expect(statements.findIndex((s) => s.includes('"ai_calls"'))).toBe(statements.length - 1);
   });
 
   it('never rewrites or deletes data: no UPDATE, DELETE, TRUNCATE or DROP TABLE/COLUMN', () => {

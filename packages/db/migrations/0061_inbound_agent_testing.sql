@@ -27,12 +27,10 @@
 -- SET LOCAL scopes to this file).
 SET LOCAL lock_timeout = '5s';
 
-ALTER TABLE "ai_calls"
-  ADD COLUMN IF NOT EXISTS "direction" text NOT NULL DEFAULT 'outbound' CONSTRAINT "ai_calls_direction_check" CHECK ("direction" IN ('outbound', 'inbound'));
-
-ALTER TABLE "ai_agent_prompts" DROP CONSTRAINT IF EXISTS "ai_agent_prompts_kind_check";
-ALTER TABLE "ai_agent_prompts" ADD CONSTRAINT "ai_agent_prompts_kind_check" CHECK ("kind" IN ('instructions', 'voicemail', 'inbound'));
-
+-- Order matters: every lock is held until the file commits, so the ai_calls
+-- change comes LAST. Taken first, its ACCESS EXCLUSIVE lock would stall live
+-- calls' writes while the CREATE TABLE waits (up to the timeout) for its
+-- organizations and users FK locks.
 CREATE TABLE IF NOT EXISTS "ai_test_phones" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   "org_id" uuid NOT NULL REFERENCES "organizations"("id") ON DELETE CASCADE,
@@ -42,3 +40,9 @@ CREATE TABLE IF NOT EXISTS "ai_test_phones" (
   "created_at" timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT "ai_test_phones_org_e164_unique" UNIQUE ("org_id", "e164")
 );
+
+ALTER TABLE "ai_agent_prompts" DROP CONSTRAINT IF EXISTS "ai_agent_prompts_kind_check";
+ALTER TABLE "ai_agent_prompts" ADD CONSTRAINT "ai_agent_prompts_kind_check" CHECK ("kind" IN ('instructions', 'voicemail', 'inbound'));
+
+ALTER TABLE "ai_calls"
+  ADD COLUMN IF NOT EXISTS "direction" text NOT NULL DEFAULT 'outbound' CONSTRAINT "ai_calls_direction_check" CHECK ("direction" IN ('outbound', 'inbound'));
