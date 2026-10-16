@@ -420,3 +420,6 @@ export * from './schema-outreach-record-tests.js';
 
 // Admin-editable agent prompts (migration 0060): per-org versions of the agent's instructions and voicemail.
 export * from './schema-outreach-ai-prompts.js';
+
+// Test phones (migration 0061): the per-org list of phones that get the AI agent on an inbound call.
+export * from './schema-outreach-ai-test-phones.js';

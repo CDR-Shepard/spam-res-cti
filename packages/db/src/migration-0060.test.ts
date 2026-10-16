@@ -7,7 +7,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTableConfig } from 'drizzle-orm/pg-core';
-import { AI_AGENT_PROMPT_KINDS, aiAgentPrompts } from './schema-outreach-ai-prompts.js';
+import { aiAgentPrompts } from './schema-outreach-ai-prompts.js';
 import * as schema from './schema.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -19,7 +19,6 @@ const statements = raw
   .split(';')
   .map((s) => s.replace(/\s+/g, ' ').trim())
   .filter((s) => s.length > 0);
-const quoted = (values: readonly string[]) => values.map((v) => `'${v}'`).join(', ');
 const create = statements.find((s) => s.startsWith('CREATE TABLE IF NOT EXISTS "ai_agent_prompts"'));
 /** The column / constraint lines of the CREATE TABLE, in order. */
 const lines = (create ?? '')
@@ -51,9 +50,8 @@ describe('migration 0060_ai_agent_prompts', () => {
     expect(lines).toEqual(LINES);
   });
 
-  it('the CHECK matches the schema value list', () => {
-    expect(create).toContain(`CHECK ("kind" IN (${quoted(AI_AGENT_PROMPT_KINDS)}))`);
-    expect(AI_AGENT_PROMPT_KINDS).toEqual(['instructions', 'voicemail']);
+  it('creates the original two-kind CHECK (0061 widens it; the kinds constant is pinned in migration-0061.test.ts)', () => {
+    expect(create).toContain(`CHECK ("kind" IN ('instructions', 'voicemail'))`);
   });
 
   it('body is nullable (NULL means the built-in default) and nothing else is', () => {

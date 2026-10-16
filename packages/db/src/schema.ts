@@ -1231,6 +1231,10 @@ export type DialerHandoff = typeof dialerHandoffs.$inferSelect;
 // AI voice calls (migration 0050; services/cti-api/src/ai-voice)
 // =============================================================================
 
+/** ai_calls.direction (CHECK, 0061): outbound = the app dialed out; inbound = a test phone called an AI number. */
+export const AI_CALL_DIRECTIONS = ['outbound', 'inbound'] as const;
+export type AiCallDirection = (typeof AI_CALL_DIRECTIONS)[number];
+
 export const aiCalls = pgTable(
   'ai_calls',
   {
@@ -1246,6 +1250,8 @@ export const aiCalls = pgTable(
     toE164: text('to_e164').notNull(),
     fromE164: text('from_e164'),
     isTest: boolean('is_test').default(false).notNull(),
+    /** outbound | inbound (CHECK in SQL, 0061). An inbound row is a test call (is_test) with no calls row, Salesforce Task or opt-out. */
+    direction: text('direction').$type<AiCallDirection>().default('outbound').notNull(),
     /** queued | ringing | in_progress | transferring | transferred | completed | failed | blocked (CHECK in SQL). */
     status: text('status').default('queued').notNull(),
     /** qualified_transferred | qualified_callback | not_interested | do_not_call | voicemail | no_answer | busy | failed | wrong_number | hung_up | transfer_failed | blocked. */

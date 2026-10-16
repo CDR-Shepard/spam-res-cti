@@ -1,18 +1,18 @@
 /**
- * Admin-editable agent prompts added by migration 0060_ai_agent_prompts.sql.
+ * Admin-editable agent prompts added by migration 0060_ai_agent_prompts.sql (the 'inbound' kind: 0061).
  *
  * Re-exported from schema-outreach.ts (which schema.ts re-exports), so
  * `schema.aiAgentPrompts` reaches every service through `@cti/db`.
  *
  * Same rule as schema-outreach.ts: this file imports NOTHING from schema.ts, so
  * foreign keys and the CHECK constraint live in the SQL migration only; the
- * `*_KINDS` constant is the CHECK's exact value list, pinned by migration-0060.test.ts.
+ * `*_KINDS` constant is the CHECK's exact value list, pinned by migration-0061.test.ts.
  */
 import { index, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
-/** ai_agent_prompts.kind (CHECK); the same two values as @cti/contracts AgentPromptKind. */
-export const AI_AGENT_PROMPT_KINDS = ['instructions', 'voicemail'] as const;
+/** ai_agent_prompts.kind (CHECK, widened by 0061); the same three values as @cti/contracts AgentPromptKind. */
+export const AI_AGENT_PROMPT_KINDS = ['instructions', 'voicemail', 'inbound'] as const;
 
 /**
  * One saved version of an org's AI phone agent instructions or voicemail message.
