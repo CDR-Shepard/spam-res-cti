@@ -46,13 +46,25 @@ describe('SignInPage', () => {
   });
   it.each([
     ['no_account', 'Your Salesforce user is not set up in the CTI yet. Sign in to the CTI softphone once, or ask an admin to add you.'],
-    ['org_not_allowed', 'This Salesforce org is not allowed to use Outreach.'],
+    ['org_not_allowed', 'This Salesforce org is not allowed to use Lead Specialist.'],
     ['salesforce_unavailable', 'Salesforce did not answer. Try again in a minute.'],
-    ['no_tenant', 'This Salesforce org is not set up for Outreach. Contact your administrator.'],
+    ['no_tenant', 'This Salesforce org is not set up for Lead Specialist. Contact your administrator.'],
   ])('words the reason %s as the Salesforce sign-in needs it', (error, message) => {
     stubApi({ [PROVIDERS]: { salesforce: true, workos: false } });
     renderWithProviders(<SignInPage error={error} />);
     expect(screen.getByRole('alert')).toHaveTextContent(message);
+  });
+  it('names the app Lead Specialist, with a headset mark, and never says Outreach', () => {
+    stubApi({ [PROVIDERS]: { salesforce: true, workos: false } });
+    const { container } = renderWithProviders(<SignInPage />);
+    expect(screen.getByText('Lead Specialist')).toBeInTheDocument();
+    expect(container.querySelector('svg.lucide-headset')).toBeInTheDocument();
+    expect(container).not.toHaveTextContent(/outreach/i);
+  });
+  it.each([['no_tenant'], ['org_not_allowed']])('the %s message does not say Outreach', (error) => {
+    stubApi({ [PROVIDERS]: { salesforce: true, workos: false } });
+    renderWithProviders(<SignInPage error={error} />);
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/outreach/i);
   });
   it('renders the generic fallback for an unknown reason', () => {
     stubApi({ [PROVIDERS]: { salesforce: true, workos: false } });

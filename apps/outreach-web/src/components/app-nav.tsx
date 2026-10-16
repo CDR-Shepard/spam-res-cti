@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
-import { FlaskConical, Flag, LayoutDashboard, LogOut, Megaphone, Settings, Users, type LucideIcon } from 'lucide-react';
+import { FlaskConical, Flag, Headset, LayoutDashboard, LogOut, Megaphone, Settings, Users, type LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 import { cn } from '@/lib/utils';
@@ -42,14 +42,14 @@ export function MainNav({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-/** The product's name as text, with a small lime mark drawn in CSS. */
+/** The product's name as text, with a small lime headset mark. */
 export function Wordmark({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <Link to="/" onClick={onNavigate} className="inline-flex items-center gap-2 rounded-md text-[17px] font-semibold tracking-[-0.025em] text-foreground">
       <span aria-hidden className="grid size-[22px] place-items-center rounded-[6px] bg-brand shadow-[inset_0_0_0_1px_rgb(15_15_14/0.08)]">
-        <span className="h-2.5 w-1 -skew-x-12 rounded-[1px] bg-brand-foreground" />
+        <Headset className="size-[14px] text-brand-foreground" strokeWidth={2.2} />
       </span>
-      Outreach
+      Lead Specialist
     </Link>
   );
 }

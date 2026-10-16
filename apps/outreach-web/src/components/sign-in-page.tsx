@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { Headset } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useAuth } from '@/lib/auth';
@@ -6,9 +7,9 @@ import { getAuthProviders, outreachKeys } from '@/lib/outreach-api';
 
 /** Keyed by the `error` reason outreach-api's sign-in callbacks redirect with (routes/auth.ts, routes/auth-salesforce.ts) plus the web's own `handoff_failed`. */
 const MESSAGES: Record<string, string> = {
-  no_tenant: 'This Salesforce org is not set up for Outreach. Contact your administrator.',
+  no_tenant: 'This Salesforce org is not set up for Lead Specialist. Contact your administrator.',
   no_account: 'Your Salesforce user is not set up in the CTI yet. Sign in to the CTI softphone once, or ask an admin to add you.',
-  org_not_allowed: 'This Salesforce org is not allowed to use Outreach.',
+  org_not_allowed: 'This Salesforce org is not allowed to use Lead Specialist.',
   salesforce_unavailable: 'Salesforce did not answer. Try again in a minute.',
   tenant_suspended: 'This workspace is suspended. Contact support.',
   invalid_code: 'That sign-in link expired. Try again.',
@@ -42,12 +43,12 @@ export function SignInPage({ error, returnTo }: { error?: string; returnTo?: str
       <div className="relative w-full max-w-[380px] space-y-6">
         <div aria-hidden className="flex justify-center">
           <span className="grid size-10 place-items-center rounded-[11px] bg-brand shadow-[inset_0_0_0_1px_rgb(15_15_14/0.08)]">
-            <span className="h-4 w-1.5 -skew-x-12 rounded-[2px] bg-brand-foreground" />
+            <Headset className="size-6 text-brand-foreground" strokeWidth={2.2} />
           </span>
         </div>
         <Card className="shadow-[0_1px_2px_rgb(15_15_14/0.04),0_12px_32px_-12px_rgb(15_15_14/0.12)]">
           <CardHeader className="border-b-0 pt-7 pb-1 text-center">
-            <CardTitle className="text-[22px] tracking-[-0.02em]">Outreach</CardTitle>
+            <CardTitle className="text-[22px] tracking-[-0.02em]">Lead Specialist</CardTitle>
             <CardDescription className="mx-auto">Sign in with your Salesforce account.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 pt-5 pb-7">
