@@ -439,6 +439,16 @@ describe('runStreamSession — the org\'s saved instructions', () => {
     expect(bridge.start).toHaveBeenCalledTimes(1);
   });
 
+  it('a saved template that renders to nothing for this call falls back to the default, and the warn says empty_render without any text', async () => {
+    withTemplate(`{{^first_name}}${MARKER}{{/first_name}}`); // the call knows Jane's name, so the block hides
+    expect(await begin()).toBe('started');
+    expect(captured?.opts.instructions).toContain('an AI assistant calling for GG Homes on a recorded line');
+    expect(captured?.opts.instructions).not.toContain(MARKER);
+    expect(warn).toHaveBeenCalledWith({ kind: 'instructions', reason: 'empty_render' }, 'ai-voice: custom prompt failed, using default');
+    expect(everythingLogged()).not.toContain(MARKER);
+    expect(bridge.start).toHaveBeenCalledTimes(1);
+  });
+
   it('with no saved template there is nothing to warn about', async () => {
     withTemplate(null);
     expect(await begin()).toBe('started');

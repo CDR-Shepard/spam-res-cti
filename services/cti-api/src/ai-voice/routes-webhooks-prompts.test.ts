@@ -60,4 +60,14 @@ describe('onAmd — the voicemail text', () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain(MARKER);
     expect(store.rows.get(ID)?.outcome).toBe('voicemail');
   });
+
+  it('a saved voicemail that renders to nothing for this call is never a silent <Say>: the default is read and the warn says empty_render', async () => {
+    // This call has a callback number, so the inverted block hides and the whole text is empty.
+    const twiml = await leaveVoicemail(`{{^callback_number}}${MARKER}{{/callback_number}}`);
+    expect(twiml).toContain('Hi Jane, this is Alex, an AI assistant calling for GG Homes');
+    expect(twiml).not.toContain(MARKER);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith({ kind: 'voicemail', reason: 'empty_render' }, 'ai-voice: custom prompt failed, using default');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(MARKER);
+  });
 });

@@ -270,7 +270,13 @@ describe('checkTemplate — fix round 1', () => {
     for (const p of PLACEHOLDERS.instructions) {
       const value = view[p.name];
       const blockOnly = typeof value === 'boolean' || Array.isArray(value);
-      expect(checkTemplate('instructions', `{{${p.name}}}`).problems.length > 0, p.name).toBe(blockOnly);
+      const problems = checkTemplate('instructions', `{{${p.name}}}`).problems;
+      // Used as a value, the three fields of an appointment time (time_id, time_kind, time_text) are empty outside
+      // {{#appointment_times}}, so a prompt made of only one of them is now refused for coming out empty (final review C1).
+      const emptyAtTop = value === undefined && !blockOnly;
+      expect(problems.some((m) => m.endsWith('is a section — use ' + `{{#${p.name}}}…{{/${p.name}}}`)), p.name).toBe(blockOnly);
+      expect(problems.includes('The prompt comes out empty for the sample call'), p.name).toBe(emptyAtTop);
+      expect(problems.length > 0, p.name).toBe(blockOnly || emptyAtTop);
     }
   });
 
@@ -361,6 +367,150 @@ describe('buildInstructions / voicemailText: onTemplateError', () => {
       throw new Error('logger down');
     };
     expect(buildInstructions({ ...JANE, templates: { instructions: '{{nope}}', voicemail: null } }, boom)).toBe(buildInstructions(JANE));
+  });
+});
+
+/** `name` opened inside itself `depth` times around "x". */
+const nested = (depth: number, name = 'appointment_times'): string => `{{#${name}}}`.repeat(depth) + 'x' + `{{/${name}}}`.repeat(depth);
+
+describe('a template that renders empty (final review C1)', () => {
+  const EMPTY_WORDS = 'The prompt comes out empty for the sample call';
+
+  it('the check refuses a template whose sample render is empty or only whitespace', () => {
+    for (const t of ['{{^appointment_times}}none{{/appointment_times}}', '{{^call_plan}}x{{/call_plan}}\n', '{{! only a note }}', '{{time_id}}']) {
+      expect(checkTemplate('instructions', t), t).toMatchObject({ problems: [EMPTY_WORDS], rendered: null });
+    }
+    expect(checkTemplate('voicemail', '{{^callback_number}}Call us.{{/callback_number}}')).toMatchObject({ problems: [EMPTY_WORDS], rendered: null });
+  });
+
+  it('a template that shows something for the sample call is still accepted', () => {
+    expect(checkTemplate('instructions', '{{#call_plan}}{{call_plan}}{{/call_plan}}').problems).toEqual([]);
+    expect(checkTemplate('voicemail', '{{#callback_number}}Call {{callback_number}}.{{/callback_number}}').problems).toEqual([]);
+  });
+
+  it('a call whose data hides every block of the instructions uses the default, and the hook is told', () => {
+    const onError = vi.fn();
+    const templates = { instructions: '{{#call_plan}}Follow {{call_plan}}{{/call_plan}}', voicemail: null };
+    expect(buildInstructions({ ...JANE, templates }, onError)).toBe(buildInstructions(JANE));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith('instructions', 'empty_render');
+    // The same template is fine on a call that has a plan, and then nothing is reported.
+    onError.mockClear();
+    expect(buildInstructions({ ...JANE, approvedPlan: PLAN, templates }, onError)).toBe(`Follow ${PLAN}`);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('a voicemail that renders to nothing (no callback number) is the default voicemail, never a silent <Say>', () => {
+    const onError = vi.fn();
+    const noCallback = { ...JANE, callbackNumber: null, templates: { instructions: null, voicemail: '{{#callback_number}}Call {{callback_number}}{{/callback_number}}' } };
+    expect(voicemailText(noCallback, onError)).toBe(voicemailText({ ...JANE, callbackNumber: null }));
+    expect(voicemailText(noCallback, onError).trim()).not.toBe('');
+    expect(onError).toHaveBeenCalledWith('voicemail', 'empty_render');
+  });
+
+  it('whitespace-only output counts as empty', () => {
+    const onError = vi.fn();
+    const templates = { instructions: ' {{#call_plan}}x{{/call_plan}}\n\t', voicemail: null };
+    expect(buildInstructions({ ...JANE, templates }, onError)).toBe(buildInstructions(JANE));
+    expect(onError).toHaveBeenCalledWith('instructions', 'empty_render');
+  });
+
+  it('a throwing hook never breaks the fallback to the default', () => {
+    const boom = () => {
+      throw new Error('logger down');
+    };
+    const templates = { instructions: null, voicemail: '{{#callback_number}}x{{/callback_number}}' };
+    expect(voicemailText({ ...JANE, callbackNumber: null, templates }, boom)).toBe(voicemailText({ ...JANE, callbackNumber: null }));
+  });
+
+  it('a render of a render error still reports render_error', () => {
+    const onError = vi.fn();
+    buildInstructions({ ...JANE, templates: { instructions: '{{nope}}', voicemail: null } }, onError);
+    expect(onError).toHaveBeenCalledWith('instructions', 'render_error');
+  });
+});
+
+describe('a template that grows without bound (final review C2)', () => {
+  it('refuses a list section opened inside itself, in every block form, however far apart', () => {
+    const message = "appointment_times can't be nested inside itself";
+    for (const t of [
+      nested(2),
+      '{{#appointment_times}}{{^appointment_times}}x{{/appointment_times}}{{/appointment_times}}',
+      '{{^appointment_times}}{{#appointment_times}}x{{/appointment_times}}{{/appointment_times}}',
+      '{{#appointment_times}}{{#can_book}}{{#appointment_times}}{{time_id}}{{/appointment_times}}{{/can_book}}{{/appointment_times}}',
+    ]) {
+      expect(checkTemplate('instructions', t), t).toMatchObject({ problems: [message], rendered: null });
+    }
+  });
+
+  it('a list section used twice side by side, or inside other sections, is fine', () => {
+    expect(checkTemplate('instructions', '{{#appointment_times}}{{time_id}} {{/appointment_times}}{{#appointment_times}}{{time_text}}{{/appointment_times}}').problems).toEqual([]);
+    expect(checkTemplate('instructions', '{{#can_book}}{{#returning}}{{#appointment_times}}{{time_id}}{{/appointment_times}}{{/returning}}{{/can_book}}').problems).toEqual([]);
+    // A yes/no section may repeat itself: it never multiplies the text.
+    expect(checkTemplate('instructions', nested(2, 'returning')).problems).toEqual([]);
+  });
+
+  it('refuses sections nested more than 8 levels deep, and accepts exactly 8', () => {
+    expect(checkTemplate('instructions', nested(8, 'returning')).problems).toEqual([]);
+    expect(checkTemplate('instructions', nested(9, 'returning'))).toMatchObject({
+      problems: ['Sections are nested too deeply (more than 8 levels)'],
+      rendered: null,
+    });
+  });
+
+  it('a very deep template is refused without recursing to a stack overflow', () => {
+    const check = checkTemplate('instructions', nested(2_400, 'is_test'));
+    expect(check.rendered).toBeNull();
+    expect(check.problems).toEqual(['Sections are nested too deeply (more than 8 levels)']);
+    expect(() => renderPrompt('instructions', nested(2_400, 'is_test'), JANE)).toThrow(/refused/);
+  });
+
+  it('a depth-30 self-nested list is refused quickly, and nothing is rendered', () => {
+    const spy = vi.spyOn(Mustache.Writer.prototype, 'render');
+    try {
+      const template = nested(30);
+      const started = performance.now();
+      const check = checkTemplate('instructions', template);
+      expect(() => renderPrompt('instructions', template, SAMPLE_INPUT)).toThrow(/refused/);
+      expect(performance.now() - started).toBeLessThan(250);
+      expect(check.rendered).toBeNull();
+      expect(check.problems).toEqual(
+        expect.arrayContaining(["appointment_times can't be nested inside itself", 'Sections are nested too deeply (more than 8 levels)']),
+      );
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a call whose saved template nests a list inside itself uses the default, renders only the default, and the hook is told', () => {
+    const spy = vi.spyOn(Mustache.Writer.prototype, 'render');
+    try {
+      const onError = vi.fn();
+      const started = performance.now();
+      const out = buildInstructions({ ...JANE, slots: SAMPLE_INPUT.slots, templates: { instructions: nested(30), voicemail: null } }, onError);
+      expect(performance.now() - started).toBeLessThan(250);
+      expect(out).toBe(buildInstructions({ ...JANE, slots: SAMPLE_INPUT.slots }));
+      expect(onError).toHaveBeenCalledWith('instructions', 'render_error');
+      expect(spy).toHaveBeenCalledTimes(2); // the default render above, and the default render after the refusal
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('refuses a sample render longer than twice the kind\'s limit', () => {
+    // 4,600 x {{crm_notes}} (13 chars = 59,800, inside the size limit) renders far past 120,000 characters over the sample notes.
+    const check = checkTemplate('instructions', '{{crm_notes}}'.repeat(4_600));
+    expect(check.rendered).toBeNull();
+    expect(check.problems).toEqual(['The prompt comes out too long for the sample call (over 120,000 characters)']);
+  });
+
+  it('a call whose saved template renders past twice the limit uses the default, and the hook is told', () => {
+    const onError = vi.fn();
+    const notes = 'n'.repeat(3_000);
+    const templates = { instructions: '{{crm_notes}}'.repeat(60), voicemail: null }; // passes the size limit; 60 x 3,000 = 180,000 for this call
+    expect(buildInstructions({ ...JANE, notes, templates }, onError)).toBe(buildInstructions({ ...JANE, notes }));
+    expect(onError).toHaveBeenCalledWith('instructions', 'too_long');
   });
 });
 

@@ -16,7 +16,7 @@
  */
 import type { AgentPromptKind, AppointmentSlot } from '@cti/contracts';
 import { PLAN_PROMPT_MAX } from './prompt-plan.js';
-import { DEFAULT_TEMPLATES, renderPrompt } from './prompt-template.js';
+import { DEFAULT_TEMPLATES, renderMaxChars, renderPrompt } from './prompt-template.js';
 import { AI_CALL_TOOLS, TOOL_NAMES, WAIT_FOR_USER, toolsFor, type RealtimeFunctionTool, type ToolName } from './prompt-tools.js';
 
 export { AI_CALL_TOOLS, PLAN_PROMPT_MAX, TOOL_NAMES, WAIT_FOR_USER, toolsFor, type RealtimeFunctionTool, type ToolName };
@@ -44,25 +44,40 @@ export interface PromptInput {
   templates?: { instructions: string | null; voicemail: string | null };
 }
 
-/** Called with the kind whose saved template failed to render (the default was used instead). */
-export type TemplateErrorHandler = (kind: AgentPromptKind) => void;
+/** Why a saved template was not used: it threw, rendered nothing for this call, or rendered past twice its size limit. */
+export type TemplateErrorReason = 'render_error' | 'empty_render' | 'too_long';
+
+/** Called with the kind whose saved template was not used (the default was used instead) and why. */
+export type TemplateErrorHandler = (kind: AgentPromptKind, reason: TemplateErrorReason) => void;
+
+/** Why `out` (a saved template's render) must not reach the call, or null when it can. */
+function unusableReason(kind: AgentPromptKind, out: string): TemplateErrorReason | null {
+  if (out.trim() === '') return 'empty_render';
+  return out.length > renderMaxChars(kind) ? 'too_long' : null;
+}
 
 /**
  * The call's saved template for `kind` rendered over its data, else the built-in default. A prompt never
- * breaks a call: a saved template that fails to render falls back to the default, and `onTemplateError`
- * (the caller's logger; never given the template or the call's data) is told which kind failed.
+ * breaks a call: a saved template that fails to render, or renders to nothing (a block whose data this call
+ * lacks) or to a runaway length, falls back to the default, and `onTemplateError` (the caller's logger; never
+ * given the template or the call's data) is told which kind and why.
  */
 function promptText(kind: AgentPromptKind, p: PromptInput, onTemplateError?: TemplateErrorHandler): string {
   const saved = p.templates?.[kind];
   if (typeof saved === 'string') {
+    let reason: TemplateErrorReason;
     try {
-      return renderPrompt(kind, saved, p);
+      const out = renderPrompt(kind, saved, p);
+      const unusable = unusableReason(kind, out);
+      if (unusable === null) return out;
+      reason = unusable;
     } catch {
-      try {
-        onTemplateError?.(kind);
-      } catch {
-        // A failing logger must not take the call down with it: the default below keeps it going.
-      }
+      reason = 'render_error';
+    }
+    try {
+      onTemplateError?.(kind, reason);
+    } catch {
+      // A failing logger must not take the call down with it: the default below keeps it going.
     }
   }
   return renderPrompt(kind, DEFAULT_TEMPLATES[kind], p);

@@ -20,7 +20,7 @@ export async function loadAgentPrompts(store: AiCallStore, orgId: string, log: B
   }
 }
 
-/** What buildInstructions / voicemailText tell when a saved template fails to render. */
+/** What buildInstructions / voicemailText tell when a saved template is not used: the kind and the reason (codes only). */
 export function logTemplateError(log: BridgeLog): TemplateErrorHandler {
-  return (kind) => log.warn({ kind, reason: 'render_error' }, 'ai-voice: custom prompt failed, using default');
+  return (kind, reason) => log.warn({ kind, reason }, 'ai-voice: custom prompt failed, using default');
 }

@@ -110,7 +110,14 @@ const VALUE_TAGS = new Set(['name', '&']);
 const SECTION_TAGS = new Set(['#', '^']);
 /** Placeholders whose value is yes/no or a list: printed as a value they'd read "true" or garble the prompt. */
 const BLOCK_ONLY: ReadonlySet<string> = new Set(['is_test', 'returning', 'can_book', 'offers_phone_call', 'offers_walkthrough', 'appointment_times']);
+/** Sections that repeat their block once per item: opened inside themselves they multiply the text (2^depth), so that is refused. */
+const LIST_SECTIONS: ReadonlySet<string> = new Set(['appointment_times']);
+/** How deep sections may nest; past it the check stops reading (no recursion into a template built to overflow the stack). */
+const MAX_SECTION_DEPTH = 8;
 const NO_ESCAPE = { escape: (value: string) => value };
+
+/** The longest text a template may render to: twice its size limit (the instructions' notes and plan make a render longer than its template). */
+export const renderMaxChars = (kind: AgentPromptKind): number => 2 * AGENT_PROMPT_MAX_CHARS[kind];
 
 /** A Mustache token: [type, value, start, end, sub-tokens (sections), ...]. */
 type Token = readonly [string, string, number, number, ...unknown[]];
@@ -169,12 +176,22 @@ function tagProblem(type: string, name: string, known: ReadonlySet<string>): str
   return VALUE_TAGS.has(type) && BLOCK_ONLY.has(name) ? `${name} is a section — use {{#${name}}}…{{/${name}}}` : null;
 }
 
-/** Every tag problem, walking into sections, in template order. */
-function tagProblems(tokens: readonly Token[], known: ReadonlySet<string>): string[] {
+/** What is wrong with opening section `name` inside the sections already `open` (outermost first), if anything. */
+function nestingProblem(name: string, open: readonly string[]): string | null {
+  if (open.length >= MAX_SECTION_DEPTH) return `Sections are nested too deeply (more than ${MAX_SECTION_DEPTH} levels)`;
+  return LIST_SECTIONS.has(name) && open.includes(name) ? `${name} can't be nested inside itself` : null;
+}
+
+/** Every tag problem, walking into sections (never deeper than MAX_SECTION_DEPTH), in template order. */
+function tagProblems(tokens: readonly Token[], known: ReadonlySet<string>, open: readonly string[] = []): string[] {
   return tokens.flatMap((t) => {
     const own = tagProblem(t[0], t[1], known);
-    const inner = Array.isArray(t[4]) ? tagProblems(t[4] as Token[], known) : [];
-    return own === null ? inner : [own, ...inner];
+    const isSection = SECTION_TAGS.has(t[0]) && Array.isArray(t[4]);
+    const nesting = isSection ? nestingProblem(t[1], open) : null;
+    // Past the depth cap nothing inside is read: the section is refused as a whole.
+    const tooDeep = isSection && open.length >= MAX_SECTION_DEPTH;
+    const inner = isSection && !tooDeep ? tagProblems(t[4] as Token[], known, [...open, t[1]]) : [];
+    return [...(own === null ? [] : [own]), ...(nesting === null ? [] : [nesting]), ...inner];
   });
 }
 
@@ -205,12 +222,18 @@ export function renderPrompt(kind: AgentPromptKind, template: string, input: Pro
 }
 
 /** The sample render for a checked template, or the problem that stopped it (a check never throws). */
-function sampleRender(writer: Mustache.Writer, template: string): { rendered: string | null; problems: string[] } {
+function sampleRender(kind: AgentPromptKind, writer: Mustache.Writer, template: string): { rendered: string | null; problems: string[] } {
+  let rendered: string;
   try {
-    return { rendered: writer.render(template, promptView(SAMPLE_INPUT), undefined, NO_ESCAPE), problems: [] };
+    rendered = writer.render(template, promptView(SAMPLE_INPUT), undefined, NO_ESCAPE);
   } catch {
     return { rendered: null, problems: ["The prompt couldn't be rendered for the sample call"] };
   }
+  // A prompt that comes out empty would leave a call with no script (or a silent voicemail): refused here, replaced by the default on a call.
+  if (rendered.trim() === '') return { rendered: null, problems: ['The prompt comes out empty for the sample call'] };
+  const max = renderMaxChars(kind);
+  if (rendered.length > max) return { rendered: null, problems: [`The prompt comes out too long for the sample call (over ${NUMBER.format(max)} characters)`] };
+  return { rendered, problems: [] };
 }
 
 /**
@@ -223,6 +246,6 @@ export function checkTemplate(kind: AgentPromptKind, template: string | null): A
   const body = template ?? defaultTemplate;
   const writer = new Mustache.Writer();
   const problems = templateProblems(kind, body, writer);
-  const result = problems.length > 0 ? { rendered: null, problems } : sampleRender(writer, body);
+  const result = problems.length > 0 ? { rendered: null, problems } : sampleRender(kind, writer, body);
   return { defaultTemplate, placeholders: PLACEHOLDERS[kind].map((p) => ({ ...p })), ...result };
 }
