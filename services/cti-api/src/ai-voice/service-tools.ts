@@ -22,7 +22,7 @@
  * `end_call`, an outbound call everything else. Any other name is refused as
  * an unknown tool, whatever the model sends.
  */
-import { INBOUND_DETAIL_FIELDS, INBOUND_STATUSES, type AppointmentSlot, type BookedAppointment } from '@cti/contracts';
+import { INBOUND_DETAIL_FIELDS, INBOUND_STATUSES, INBOUND_URGENCY_LEVELS, type AppointmentSlot, type BookedAppointment } from '@cti/contracts';
 import { END_CALL_OUTCOMES, INBOUND_TOOLS, OUTBOUND_TOOL_NAMES, QUALIFICATION_FIELDS, TRANSFER_REASONS } from './prompt-tools.js';
 import type { BridgeLog, ToolResult } from './bridge.js';
 import { UNKNOWN_TOOL } from './bridge-tools.js';
@@ -297,14 +297,17 @@ function qualificationFields(args: unknown): Record<string, string> {
   );
 }
 
-/** The inbound agent's save: the known detail fields (trimmed, capped) and a valid status; anything else is dropped. */
+/** The fields the agent picks from a fixed list: a value outside it is dropped. */
+const CALLER_CHOICES: Readonly<Record<string, readonly string[]>> = { status: INBOUND_STATUSES, urgency_level: INBOUND_URGENCY_LEVELS };
+
+/** The inbound agent's save: the known detail fields (trimmed, capped) and valid choices; anything else is dropped. */
 function callerDetails(args: unknown): Record<string, string> {
   const details = INBOUND_DETAIL_FIELDS.flatMap((k) => {
     const v = text(field(args, k), k === 'notes' ? CALLER_NOTES_MAX : QUALIFICATION_MAX);
-    return v ? [[k, v] as const] : [];
+    return v && (CALLER_CHOICES[k]?.includes(v) ?? true) ? [[k, v] as const] : [];
   });
   const status = text(field(args, 'status'), QUALIFICATION_MAX);
-  const valid = (INBOUND_STATUSES as readonly string[]).includes(status) ? [['status', status] as const] : [];
+  const valid = CALLER_CHOICES.status!.includes(status) ? [['status', status] as const] : [];
   return Object.fromEntries([...details, ...valid]);
 }
 

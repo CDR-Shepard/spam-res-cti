@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { INBOUND_DETAIL_FIELDS, INBOUND_STATUSES } from '@cti/contracts';
 import { followUpAfterTools, runToolBatch, type FunctionCall } from './bridge-tools.js';
-import { AI_CALL_TOOLS, INBOUND_TOOLS, OUTBOUND_TOOL_NAMES, TOOL_NAMES, toolsFor } from './prompt-tools.js';
+import { AI_CALL_TOOLS, INBOUND_TOOLS, OUTBOUND_TOOL_NAMES, SAVE_CALLER_DETAILS_TOOL, TOOL_NAMES, toolsFor } from './prompt-tools.js';
 import { defaultToolEffects, handleToolCall, type CallControl, type ToolCtx } from './service-tools.js';
 import { CALL_SID, fakeStore, fakeTwilio, silentLog, type FakeStore, type FakeTwilio } from './testing.js';
 
@@ -85,6 +85,34 @@ describe('save_caller_details', () => {
     expect(qualification()).toEqual({ status: 'qualified' });
     await run(inbound, 'save_caller_details', { status: 'hot lead', urgency: 'high' });
     expect(qualification()).toEqual({ status: 'qualified', urgency: 'high' });
+  });
+
+  it('saves the seller, contact and follow-up fields too', async () => {
+    const more = {
+      seller_name: 'Dana',
+      phone_number: '619-555-0142',
+      property_address: '1240 Elm St',
+      occupancy: 'tenants',
+      motivation: 'inherited it',
+      seller_sentiment: 'relaxed',
+      recommended_next_action: 'call back today',
+    };
+    await run(inbound, 'save_caller_details', more);
+    expect(qualification()).toEqual(more);
+  });
+
+  it('keeps a valid urgency_level and drops an invalid one', async () => {
+    await run(inbound, 'save_caller_details', { urgency_level: 'high' });
+    expect(qualification()).toEqual({ urgency_level: 'high' });
+    await run(inbound, 'save_caller_details', { urgency_level: 'very', urgency: 'auction in 2 weeks' });
+    expect(qualification()).toEqual({ urgency_level: 'high', urgency: 'auction in 2 weeks' });
+  });
+
+  it('offers urgency_level and status as fixed choices in the tool', () => {
+    const props = (SAVE_CALLER_DETAILS_TOOL.parameters as { properties: Record<string, { enum?: string[] }> }).properties;
+    expect(props.urgency_level?.enum).toEqual(['high', 'medium', 'low', 'unknown']);
+    expect(props.status?.enum).toEqual(['qualified', 'callback', 'disqualified', 'incomplete']);
+    expect(Object.keys(props)).toHaveLength(17);
   });
 
   it('merges later saves into earlier ones', async () => {

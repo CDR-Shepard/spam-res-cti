@@ -84,19 +84,33 @@ describe('inboundDetailRows', () => {
       { label: 'Best callback time', value: 'Evenings' },
       { label: 'Notes', value: 'Wants a quick close' },
     ]);
+    expect(inboundDetailRows({ notes: 'n', seller_name: 'Dana', urgency_level: 'high', recommended_next_action: 'call today' })).toEqual([
+      { label: 'Name', value: 'Dana' },
+      { label: 'Urgency level', value: 'high' },
+      { label: 'Next step', value: 'call today' },
+      { label: 'Notes', value: 'n' },
+    ]);
     expect(inboundDetailRows({})).toEqual([]);
     expect(inboundDetailRows({ status: 'qualified' })).toEqual([]);
   });
 
   it('names every field the inbound prompt saves', () => {
     expect(INBOUND_DETAIL_LABELS).toEqual({
+      seller_name: 'Name',
+      phone_number: 'Best number',
+      property_address: 'Property address',
       location: 'Location',
       timeline: 'Timeline',
       price_expectation: 'Price expectation',
       condition: 'Condition',
+      occupancy: 'Who lives there',
       decision_maker: 'Decision maker',
+      motivation: 'Why they’re selling',
       urgency: 'Urgency',
+      urgency_level: 'Urgency level',
+      seller_sentiment: 'How they came across',
       best_callback_time: 'Best callback time',
+      recommended_next_action: 'Next step',
       notes: 'Notes',
     });
   });

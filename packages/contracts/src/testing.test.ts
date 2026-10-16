@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AddTestPhoneRequest,
   INBOUND_DETAIL_FIELDS,
+  INBOUND_URGENCY_LEVELS,
   INBOUND_STATUSES,
   INBOUND_TEST_CALLS_SHOWN,
   InboundCallDetails,
@@ -87,18 +88,30 @@ describe('AddTestPhoneRequest', () => {
 });
 
 describe('INBOUND_STATUSES and INBOUND_DETAIL_FIELDS', () => {
-  it('are the four statuses and the eight detail fields the inbound prompt asks the agent to save', () => {
+  it('are the four statuses and the sixteen detail fields the inbound prompt asks the agent to save', () => {
     expect(INBOUND_STATUSES).toEqual(['qualified', 'callback', 'disqualified', 'incomplete']);
     expect(INBOUND_DETAIL_FIELDS).toEqual([
+      'seller_name',
+      'phone_number',
+      'property_address',
       'location',
       'timeline',
       'price_expectation',
       'condition',
+      'occupancy',
       'decision_maker',
+      'motivation',
       'urgency',
+      'urgency_level',
+      'seller_sentiment',
       'best_callback_time',
+      'recommended_next_action',
       'notes',
     ]);
+  });
+
+  it('has four urgency levels', () => {
+    expect(INBOUND_URGENCY_LEVELS).toEqual(['high', 'medium', 'low', 'unknown']);
   });
 });
 
@@ -115,6 +128,14 @@ describe('InboundCallDetails', () => {
       urgency: 'f',
       best_callback_time: 'g',
       notes: 'h',
+      seller_name: 'i',
+      phone_number: 'j',
+      property_address: 'k',
+      occupancy: 'l',
+      motivation: 'm',
+      urgency_level: 'high',
+      seller_sentiment: 'n',
+      recommended_next_action: 'o',
     };
     expect(InboundCallDetails.parse(full)).toEqual(full);
     expect(InboundCallDetails.parse({ notes: 'Wants cash.' })).toEqual({ notes: 'Wants cash.' });

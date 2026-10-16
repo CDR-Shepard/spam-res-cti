@@ -45,17 +45,29 @@ export type AddTestPhoneRequest = z.infer<typeof AddTestPhoneRequest>;
 export const INBOUND_STATUSES = ['qualified', 'callback', 'disqualified', 'incomplete'] as const;
 export type InboundStatus = (typeof INBOUND_STATUSES)[number];
 
-/** What the inbound prompt asks the agent to save about the caller's property (all free text). */
+/** What the inbound prompt asks the agent to save about the caller and the property, in the order the page shows them (free text except urgency_level). */
 export const INBOUND_DETAIL_FIELDS = [
+  'seller_name',
+  'phone_number',
+  'property_address',
   'location',
   'timeline',
   'price_expectation',
   'condition',
+  'occupancy',
   'decision_maker',
+  'motivation',
   'urgency',
+  'urgency_level',
+  'seller_sentiment',
   'best_callback_time',
+  'recommended_next_action',
   'notes',
 ] as const;
+
+/** How motivated the caller is to sell soon: the agent picks one (anything else is dropped when it saves). */
+export const INBOUND_URGENCY_LEVELS = ['high', 'medium', 'low', 'unknown'] as const;
+export type InboundUrgencyLevel = (typeof INBOUND_URGENCY_LEVELS)[number];
 export type InboundDetailField = (typeof INBOUND_DETAIL_FIELDS)[number];
 
 /** The saved details of one inbound call. Not strict: a row may hold older keys, which a read drops. */
@@ -69,6 +81,14 @@ export const InboundCallDetails = z.object({
   urgency: z.string().optional(),
   best_callback_time: z.string().optional(),
   notes: z.string().optional(),
+  seller_name: z.string().optional(),
+  phone_number: z.string().optional(),
+  property_address: z.string().optional(),
+  occupancy: z.string().optional(),
+  motivation: z.string().optional(),
+  urgency_level: z.string().optional(),
+  seller_sentiment: z.string().optional(),
+  recommended_next_action: z.string().optional(),
 });
 export type InboundCallDetails = z.infer<typeof InboundCallDetails>;
 

@@ -11,7 +11,7 @@
  * an outbound call never gets `save_caller_details` (service-tools.ts refuses
  * any tool a call's direction was not offered).
  */
-import { INBOUND_DETAIL_FIELDS, INBOUND_STATUSES, type AppointmentSlot, type InboundDetailField } from '@cti/contracts';
+import { INBOUND_DETAIL_FIELDS, INBOUND_STATUSES, INBOUND_URGENCY_LEVELS, type AppointmentSlot, type InboundDetailField } from '@cti/contracts';
 
 /** A Realtime API function tool (`session.update` → `session.tools[]`). */
 export interface RealtimeFunctionTool {
@@ -178,7 +178,15 @@ export function toolsFor(slots: readonly AppointmentSlot[]): RealtimeFunctionToo
 }
 
 const CALLER_DETAIL_HINTS: Record<InboundDetailField, string> = {
-  location: 'Where the property is: the city or area, or the address if they gave it.',
+  seller_name: "The caller's name, as they said it.",
+  phone_number: "The best number to reach them: the one they're calling from unless they gave another.",
+  property_address: "The property's street address, if they gave it.",
+  location: 'Where the property is: the city or area.',
+  occupancy: 'Who lives there now: them, tenants, family, or nobody.',
+  motivation: 'Why they want to sell, in their words.',
+  urgency_level: 'How motivated they are to sell soon: high, medium, low, or unknown.',
+  seller_sentiment: 'How they came across: relaxed, stressed, guarded, upset, and so on.',
+  recommended_next_action: 'One short line for the team about what to do next.',
   timeline: 'How soon they want to sell.',
   price_expectation: 'The price they hope to get, as they said it.',
   condition: 'The condition of the house and any repairs it needs.',
@@ -201,6 +209,7 @@ export const SAVE_CALLER_DETAILS_TOOL: RealtimeFunctionTool = {
         description: 'How the call ended: qualified, callback (they want a call back), disqualified, or incomplete.',
       },
       ...Object.fromEntries(INBOUND_DETAIL_FIELDS.map((f) => [f, str(CALLER_DETAIL_HINTS[f])])),
+      urgency_level: { type: 'string', enum: [...INBOUND_URGENCY_LEVELS], description: CALLER_DETAIL_HINTS.urgency_level },
     },
     [],
   ),

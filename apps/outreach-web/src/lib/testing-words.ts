@@ -51,13 +51,21 @@ export function inboundBadge(call: Pick<InboundTestCall, 'status' | 'outcome'>):
 }
 
 export const INBOUND_DETAIL_LABELS: Readonly<Record<InboundDetailField, string>> = {
+  seller_name: 'Name',
+  phone_number: 'Best number',
+  property_address: 'Property address',
   location: 'Location',
   timeline: 'Timeline',
   price_expectation: 'Price expectation',
   condition: 'Condition',
+  occupancy: 'Who lives there',
   decision_maker: 'Decision maker',
+  motivation: 'Why they’re selling',
   urgency: 'Urgency',
+  urgency_level: 'Urgency level',
+  seller_sentiment: 'How they came across',
   best_callback_time: 'Best callback time',
+  recommended_next_action: 'Next step',
   notes: 'Notes',
 };
 
