@@ -99,6 +99,29 @@ describe('save_caller_details', () => {
   });
 });
 
+describe('save_caller_details landing after the call was finalized (final review M-2)', () => {
+  const finalize = () => store.finalizeInbound(ID, { durationSeconds: 40, endedAt: new Date('2026-10-16T18:05:00Z'), failed: false });
+
+  it('a status saved after finalize becomes the outcome: the call never reads Incomplete with a status saved', async () => {
+    await finalize();
+    expect(store.rows.get(ID)?.outcome).toBe('incomplete');
+    await run(inbound, 'save_caller_details', { status: 'callback', location: 'Vista' });
+    expect(store.rows.get(ID)).toMatchObject({ outcome: 'callback', status: 'completed', qualification: { status: 'callback', location: 'Vista' } });
+  });
+
+  it('a late save with no valid status leaves the outcome alone', async () => {
+    await run(inbound, 'save_caller_details', { status: 'qualified' });
+    await finalize();
+    await run(inbound, 'save_caller_details', { location: 'Vista', status: 'hot lead' });
+    expect(store.rows.get(ID)).toMatchObject({ outcome: 'qualified', qualification: { status: 'qualified', location: 'Vista' } });
+  });
+
+  it('a save while the call is live never sets the outcome (finalize does)', async () => {
+    await run(inbound, 'save_caller_details', { status: 'disqualified' });
+    expect(store.rows.get(ID)?.outcome).toBeNull();
+  });
+});
+
 describe('an inbound call is offered only its own tools', () => {
   it.each(['transfer_to_rep', 'mark_do_not_call', 'save_qualification', 'schedule_callback', 'book_appointment'] as const)(
     '%s is refused as an unknown tool, with no side effect',

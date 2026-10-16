@@ -129,6 +129,12 @@ export function fakeStore(): FakeStore {
       const r = rows.get(id);
       if (r) put(id, { qualification: { ...(r.qualification as object), ...fields } });
     },
+    async mergeCallerDetails(id, fields) {
+      const r = rows.get(id);
+      if (!r || r.direction !== 'inbound') return;
+      const status = (INBOUND_STATUSES as readonly string[]).includes(fields.status ?? '') ? fields.status : null;
+      put(id, { qualification: { ...(r.qualification as object), ...fields }, ...(status && r.endedAt ? { outcome: status } : {}) });
+    },
     async setAppointment(id, a) {
       const r = rows.get(id);
       if (!r || r.endedAt) return 'not_live';
@@ -173,6 +179,9 @@ export function fakeStore(): FakeStore {
       const status = w.failed || r.status === 'failed' ? 'failed' : 'completed';
       put(id, { outcome, status, durationSeconds: w.durationSeconds, endedAt: w.endedAt });
       return rows.get(id) ?? null;
+    },
+    async openInboundByCallSid(orgId, callSid) {
+      return [...rows.values()].find((r) => r.orgId === orgId && r.callSid === callSid && r.direction === 'inbound' && !r.endedAt) ?? null;
     },
     async upsertOptOut(orgId, e164, note) {
       if (!optOuts.some((o) => o.orgId === orgId && o.e164 === e164)) optOuts.push({ orgId, e164, note });

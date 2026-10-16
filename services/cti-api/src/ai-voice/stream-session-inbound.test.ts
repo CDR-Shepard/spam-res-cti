@@ -22,6 +22,8 @@ const ID = '11111111-2222-4333-8444-555555555555';
 const CALLER = '+16195550142';
 const AI_NUMBER = '+16197244374';
 const STARTED = new Date('2026-10-16T18:00:00Z');
+/** The fixed line rules, then the number the caller is calling from. */
+const RULES = `${INBOUND_LINE_RULES}\n- The caller is calling from 619-555-0142.`;
 const cfg = {
   API_PUBLIC_URL: 'https://api.test',
   SESSION_SECRET: SECRET,
@@ -105,15 +107,15 @@ describe('an inbound call starts with the inbound agent', () => {
     expect(store.rows.get(ID)).toMatchObject({ status: 'in_progress', startedAt: STARTED });
   });
 
-  it("the instructions are the inbound prompt, ending with the line rules; the caller's local time is the caller's", async () => {
+  it("the instructions are the inbound prompt, ending with the line rules and the caller's number; the caller's local time is the caller's", async () => {
     await begin();
-    expect(captured?.opts.instructions).toBe(`${DEFAULT_INBOUND_TEMPLATE}\n\n${INBOUND_LINE_RULES}`);
+    expect(captured?.opts.instructions).toBe(`${DEFAULT_INBOUND_TEMPLATE}\n\n${RULES}`);
   });
 
   it('a saved inbound template is used, still ending with the line rules', async () => {
     registerActiveCall({ ...inboundEntry(), prompt: { ...inboundEntry().prompt, templates: { instructions: null, voicemail: null, inbound: 'Hi, {{agent_name}} here. It is {{local_time}}.' } } });
     await begin();
-    expect(captured?.opts.instructions).toBe(`Hi, Sam here. It is Friday 11:00 AM.\n\n${INBOUND_LINE_RULES}`);
+    expect(captured?.opts.instructions).toBe(`Hi, Sam here. It is Friday 11:00 AM.\n\n${RULES}`);
   });
 
   it('the tools are exactly INBOUND_TOOLS and the opener is the quick inbound one', async () => {

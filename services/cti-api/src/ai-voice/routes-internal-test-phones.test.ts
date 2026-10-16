@@ -76,6 +76,14 @@ describe('GET /internal/ai-calls/availability — test numbers', () => {
     expect(log.warn).toHaveBeenCalledWith({ reason: 'db_error' }, 'ai-voice internal: test phones unavailable, using the env list');
   });
 
+  it("accepts the request exactly as outreach-api's client sends it (final review I-1): ?orgId=<encoded org>, signed over path and query", async () => {
+    const url = `${INTERNAL_AI_AVAILABILITY_PATH}?orgId=${encodeURIComponent(ORG)}`;
+    const res = await app.inject({ method: 'GET', url, headers: { host: HOST, ...internalRequestHeaders(SECRET, { method: 'GET', path: url, body: '' }, NOW) } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().testNumbers).toContain('+16195550142');
+    expect(testPhones).toHaveBeenCalledWith(db, ORG);
+  });
+
   it('the orgId is part of what is signed: a signature over the bare path does not cover it', async () => {
     const signedBare = internalRequestHeaders(SECRET, { method: 'GET', path: INTERNAL_AI_AVAILABILITY_PATH, body: '' }, NOW);
     const res = await app.inject({ method: 'GET', url: `${INTERNAL_AI_AVAILABILITY_PATH}?orgId=${ORG}`, headers: { host: HOST, ...signedBare } });

@@ -49,11 +49,16 @@ vi.mock('../ai-voice/test-phones.js', async (importOriginal) => ({
 }));
 vi.mock('@cti/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@cti/db')>();
-  /** A select chain that resolves to no rows (the org's saved prompts, its name). */
+  /** A select chain: the inbound rows written so far for ai_calls (a replay's lookup), else no rows (saved prompts, org name). */
   const none = () => {
+    let rows: unknown[] = [];
     const chain: Record<string, unknown> = {};
-    for (const m of ['from', 'where', 'orderBy', 'limit']) chain[m] = () => chain;
-    chain.then = (resolve: (v: unknown[]) => unknown) => Promise.resolve([]).then(resolve);
+    for (const m of ['where', 'orderBy', 'limit']) chain[m] = () => chain;
+    chain.from = (table: unknown) => {
+      if (table === actual.schema.aiCalls) rows = state.aiCallValues.map((v) => ({ id: AI_CALL_ID, endedAt: null, ...v }));
+      return chain;
+    };
+    chain.then = (resolve: (v: unknown[]) => unknown) => Promise.resolve(rows).then(resolve);
     return chain;
   };
   return {
@@ -70,6 +75,10 @@ vi.mock('@cti/db', async (importOriginal) => {
       insert(table: unknown) {
         return {
           values(v: Record<string, unknown>) {
+            // ai_calls_call_sid_unique, as Postgres enforces it.
+            if (table === actual.schema.aiCalls && state.aiCallValues.some((r) => r.callSid === v.callSid)) {
+              return { returning: async () => Promise.reject(new Error('duplicate key value violates unique constraint "ai_calls_call_sid_unique"')) };
+            }
             if (table === actual.schema.calls) state.callValues.push(v);
             if (table === actual.schema.aiCalls) state.aiCallValues.push(v);
             const id = table === actual.schema.aiCalls ? AI_CALL_ID : 'call-db-1';
@@ -170,6 +179,24 @@ describe('POST /telephony/twilio/inbound — a test phone calling an AI number',
   });
 });
 
+describe('POST /telephony/twilio/inbound — a replayed webhook for a test call (final review M-3)', () => {
+  it('the same CallSid again gets the same stream for the same row: no calls row, no Salesforce work, no second row', async () => {
+    listed();
+    const first = await ring();
+    expect(first.body).toContain('<Connect><Stream');
+    const again = await ring();
+    expect(again.statusCode).toBe(200);
+    expect(again.body).toBe(first.body);
+    expect(state.aiCallValues).toHaveLength(1);
+    expect(getActiveCall(AI_CALL_ID)?.direction).toBe('inbound');
+    expect(state.callValues).toEqual([]);
+    expect(state.findByPhone).not.toHaveBeenCalled();
+    expect(state.enqueueSyncForCall).not.toHaveBeenCalled();
+    expect(state.aiCallbackRep).not.toHaveBeenCalled();
+    expect(notStarted()).toEqual([]);
+  });
+});
+
 describe("POST /telephony/twilio/inbound — everyone else keeps today's routing, byte for byte", () => {
   it('a caller not on the list: the hand-off rep rings, with a calls row', async () => {
     state.aiRep = 'rep-owner';
@@ -192,10 +219,11 @@ describe("POST /telephony/twilio/inbound — everyone else keeps today's routing
     expect(res.body).toBe(VOICEMAIL_TWIML);
     expect(state.findTestPhone).not.toHaveBeenCalled();
     expect(state.callValues).toHaveLength(1);
-    expect(notStarted()).toEqual([expect.objectContaining({ reason: 'bad_caller' })]);
+    // It can never be on the list: nothing to warn about.
+    expect(notStarted()).toEqual([]);
   });
 
-  it('AI_VOICE_INBOUND=off: a listed phone rings the rep as today, no list lookup', async () => {
+  it('AI_VOICE_INBOUND=off: a listed phone rings the rep as today, no list lookup and no warning', async () => {
     listed();
     state.cfg = { ...BASE_CFG, AI_VOICE_INBOUND: 'off' };
     state.aiRep = 'rep-owner';
@@ -203,15 +231,24 @@ describe("POST /telephony/twilio/inbound — everyone else keeps today's routing
     expect(res.body).toBe(REP_RING_TWIML);
     expect(state.findTestPhone).not.toHaveBeenCalled();
     expect(state.aiCallValues).toEqual([]);
+    expect(notStarted()).toEqual([]);
   });
 
-  it('AI voice unavailable: a listed phone gets voicemail as today', async () => {
+  it('AI voice unavailable: a listed phone gets voicemail as today, with a warning', async () => {
     listed();
     state.cfg = { ...BASE_CFG, OPENAI_API_KEY: undefined };
     const res = await ring();
     expect(res.body).toBe(VOICEMAIL_TWIML);
     expect(state.aiCallValues).toEqual([]);
     expect(notStarted()).toEqual([expect.objectContaining({ reason: 'ai_unavailable' })]);
+  });
+
+  it('AI voice unavailable: a caller not on the list gets voicemail as today, with no warning', async () => {
+    state.cfg = { ...BASE_CFG, AI_VOICE: 'off' };
+    const res = await ring();
+    expect(res.body).toBe(VOICEMAIL_TWIML);
+    expect(state.callValues).toHaveLength(1);
+    expect(notStarted()).toEqual([]);
   });
 
   it('the list lookup throwing: today\'s routing and a warning with a code only', async () => {

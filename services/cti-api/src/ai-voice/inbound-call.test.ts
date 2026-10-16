@@ -62,25 +62,37 @@ describe('tryInboundAiCall — who gets the agent', () => {
     expect(log.warn).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['the switch is off', { cfg: { ...cfg, AI_VOICE_INBOUND: 'off' } }, 'switched_off'],
-    ['AI voice is off', { cfg: { ...cfg, AI_VOICE: 'off' } }, 'ai_unavailable'],
-    ['there is no OpenAI key', { cfg: { ...cfg, OPENAI_API_KEY: undefined } }, 'ai_unavailable'],
-    ['the outreach kill switch is on', { cfg: { ...cfg, OUTREACH_KILL_SWITCH: 'on' } }, 'ai_unavailable'],
-  ] as const)('%s → null, no lookup, a warning with the reason code', async (_name, over, reason) => {
-    expect(await tryInboundAiCall({ ...deps, cfg: over.cfg as AppConfig }, call())).toBeNull();
+  it('the switch is off → null, no lookup and no warning (the operator chose it: every caller routes as today)', async () => {
+    expect(await tryInboundAiCall({ ...deps, cfg: { ...cfg, AI_VOICE_INBOUND: 'off' } as AppConfig }, call())).toBeNull();
     expect(findTestPhone).not.toHaveBeenCalled();
     expect(store.rows.size).toBe(0);
-    expect(log.warn).toHaveBeenCalledWith({ reason }, INBOUND_NOT_STARTED);
+    expect(log.warn).not.toHaveBeenCalled();
   });
 
-  it.each(['anonymous', '', 'Restricted', '+1', '12'])('an anonymous or unparsable caller (%j) → null, no lookup', async (from) => {
+  it.each([
+    ['AI voice is off', { cfg: { ...cfg, AI_VOICE: 'off' } }],
+    ['there is no OpenAI key', { cfg: { ...cfg, OPENAI_API_KEY: undefined } }],
+    ['the outreach kill switch is on', { cfg: { ...cfg, OUTREACH_KILL_SWITCH: 'on' } }],
+  ] as const)('%s: a listed phone → null and a warning ai_unavailable (the one caller it is news for)', async (_name, over) => {
+    expect(await tryInboundAiCall({ ...deps, cfg: over.cfg as AppConfig }, call())).toBeNull();
+    expect(findTestPhone).toHaveBeenCalledWith(deps.db, ORG, CALLER);
+    expect(store.rows.size).toBe(0);
+    expect(log.warn).toHaveBeenCalledWith({ reason: 'ai_unavailable' }, INBOUND_NOT_STARTED);
+  });
+
+  it('AI voice is off: a caller not on the list → null and no warning (every real callback during an incident)', async () => {
+    findTestPhone.mockResolvedValueOnce(null);
+    expect(await tryInboundAiCall({ ...deps, cfg: { ...cfg, AI_VOICE: 'off' } as AppConfig }, call())).toBeNull();
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it.each(['anonymous', '', 'Restricted', '+1', '12'])('an anonymous or unparsable caller (%j) → null, no lookup, no warning (it can never be listed)', async (from) => {
     expect(await tryInboundAiCall(deps, call({ callerE164: from }))).toBeNull();
     expect(findTestPhone).not.toHaveBeenCalled();
-    expect(log.warn).toHaveBeenCalledWith({ reason: 'bad_caller' }, INBOUND_NOT_STARTED);
+    expect(log.warn).not.toHaveBeenCalled();
   });
 
-  it('a call with no usable CallSid → null (the stream could never be matched to it)', async () => {
+  it('a listed phone on a call with no usable CallSid → null and a warning (the stream could never be matched to it)', async () => {
     expect(await tryInboundAiCall(deps, call({ callSid: '' }))).toBeNull();
     expect(store.rows.size).toBe(0);
     expect(log.warn).toHaveBeenCalledWith({ reason: 'bad_call_sid' }, INBOUND_NOT_STARTED);
@@ -93,6 +105,12 @@ describe('tryInboundAiCall — who gets the agent', () => {
     expect(log.warn).not.toHaveBeenCalled();
   });
 
+  it('a phone not on the list with no usable CallSid → null and no warning', async () => {
+    findTestPhone.mockResolvedValueOnce(null);
+    expect(await tryInboundAiCall(deps, call({ callSid: '' }))).toBeNull();
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
   it('the lookup throwing → null and a warning with a code only (never the error text or the number)', async () => {
     findTestPhone.mockRejectedValueOnce(new Error(`connection refused for ${CALLER}`));
     expect(await tryInboundAiCall(deps, call())).toBeNull();
@@ -100,9 +118,9 @@ describe('tryInboundAiCall — who gets the agent', () => {
     expect(JSON.stringify(log.warn.mock.calls)).not.toContain(CALLER);
   });
 
-  it('the row insert throwing (e.g. a replayed CallSid) → null and a warning', async () => {
+  it('the row insert throwing with no open inbound row for the CallSid (e.g. the database is down) → null and a warning', async () => {
     store.insert = vi.fn(async () => {
-      throw new Error('duplicate key value violates unique constraint "ai_calls_call_sid_unique"');
+      throw new Error('connection terminated');
     });
     expect(await tryInboundAiCall(deps, call())).toBeNull();
     expect(log.warn).toHaveBeenCalledWith({ reason: 'start_failed' }, INBOUND_NOT_STARTED);
@@ -182,5 +200,60 @@ describe('startInboundAiCall — the row and the registry entry', () => {
     expect(await tryInboundAiCall(deps, call({ callSid: `CA${'e'.repeat(32)}` }))).toBeNull();
     expect(getActiveCall(live)?.direction).toBe('inbound');
     expect(store.rows.size).toBe(1);
+  });
+});
+
+describe('tryInboundAiCall — a replayed webhook for the same CallSid (final review M-3)', () => {
+  /** ai_calls_call_sid_unique, as Postgres enforces it: a second row with the same CallSid is refused. */
+  function uniqueCallSids(): void {
+    const insert = store.insert.bind(store);
+    store.insert = vi.fn(async (values) => {
+      if (values.callSid && [...store.rows.values()].some((r) => r.callSid === values.callSid)) {
+        throw new Error('duplicate key value violates unique constraint "ai_calls_call_sid_unique"');
+      }
+      return insert(values);
+    });
+  }
+
+  it('the call still live: the same stream TwiML for the same row, one row, one live call, no warning', async () => {
+    uniqueCallSids();
+    const first = await tryInboundAiCall(deps, call());
+    const id = onlyRow().id;
+    const entry = getActiveCall(id);
+    const again = await tryInboundAiCall(deps, call());
+    expect(again).toBe(first);
+    expect(onlyRow().id).toBe(id);
+    // The live entry is left as it is (a stream may already be attaching to it).
+    expect(getActiveCall(id)).toBe(entry);
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('after a restart (the row open, no live entry): the call is registered again and streams to that row', async () => {
+    uniqueCallSids();
+    const first = await tryInboundAiCall(deps, call());
+    const id = onlyRow().id;
+    clearActiveCalls();
+    expect(await tryInboundAiCall(deps, call())).toBe(first);
+    expect(onlyRow().id).toBe(id);
+    expect(getActiveCall(id)).toMatchObject({ direction: 'inbound', callSid: CALL_SID, toE164: CALLER, startedBy: ADMIN });
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('a CallSid whose inbound row already ended is not reopened: null and a warning', async () => {
+    uniqueCallSids();
+    await tryInboundAiCall(deps, call());
+    const id = onlyRow().id;
+    await store.finalizeInbound(id, { durationSeconds: 30, endedAt: NOW, failed: false });
+    clearActiveCalls();
+    expect(await tryInboundAiCall(deps, call())).toBeNull();
+    expect(getActiveCall(id)).toBeNull();
+    expect(log.warn).toHaveBeenCalledWith({ reason: 'start_failed' }, INBOUND_NOT_STARTED);
+  });
+
+  it("another org's row with that CallSid is never used", async () => {
+    uniqueCallSids();
+    await store.insert({ orgId: 'o2', startedBy: ADMIN, direction: 'inbound', isTest: true, toE164: CALLER, fromE164: AI_NUMBER, status: 'queued', callSid: CALL_SID });
+    expect(await tryInboundAiCall(deps, call())).toBeNull();
+    expect(log.warn).toHaveBeenCalledWith({ reason: 'start_failed' }, INBOUND_NOT_STARTED);
   });
 });

@@ -24,6 +24,7 @@ import {
   type NewCtiCall,
   type TransferFail,
 } from './store-end.js';
+import { mergeCallerDetailsQuery, openInboundByCallSidQuery } from './store-inbound.js';
 
 type Db = ReturnType<typeof getDb>;
 const t = schema.aiCalls;
@@ -109,6 +110,8 @@ export interface AiCallStore {
   appendSummary(id: string, line: string): Promise<void>;
   appendTranscript(id: string, entries: readonly TranscriptEntry[]): Promise<void>;
   mergeQualification(id: string, fields: Record<string, string>): Promise<void>;
+  /** An inbound call's save_caller_details: merged like mergeQualification, and a valid status also sets the outcome once the row has ended. */
+  mergeCallerDetails(id: string, fields: Record<string, string>): Promise<void>;
   /** Book an offered slot on a live row; 'taken' when another real call holds that owner's time (D-10). */
   setAppointment(id: string, appointment: BookedAppointment): Promise<SetAppointmentResult>;
   /** A live row whose call went wrong: status failed, outcome failed unless one is set. */
@@ -117,6 +120,8 @@ export interface AiCallStore {
   finalize(id: string, w: FinalizeWrite): Promise<AiCallRow | null>;
   /** The CAS end of an INBOUND row: outcome = its saved status, else incomplete; null when already finalized (or not inbound). */
   finalizeInbound(id: string, w: InboundFinalizeWrite): Promise<AiCallRow | null>;
+  /** The org's open (not ended) inbound row for this CallSid, if any: a replayed inbound webhook reuses it. */
+  openInboundByCallSid(orgId: string, callSid: string): Promise<AiCallRow | null>;
   upsertOptOut(orgId: string, e164: string, note: string): Promise<void>;
   /** users.id of the human in `orgId` whose Salesforce user is `sfUserId`. */
   handoffUserFor(orgId: string, sfUserId: string): Promise<string | null>;
@@ -317,6 +322,9 @@ export function drizzleAiCallStore(db: Db): AiCallStore {
     async mergeQualification(id, fields) {
       if (Object.keys(fields).length > 0) await mergeQualificationQuery(db, id, fields);
     },
+    async mergeCallerDetails(id, fields) {
+      if (Object.keys(fields).length > 0) await mergeCallerDetailsQuery(db, id, fields);
+    },
     setAppointment: (id, appointment) => setAppointment(db, id, appointment),
     async markFailed(id) {
       await markFailedQuery(db, id);
@@ -327,6 +335,10 @@ export function drizzleAiCallStore(db: Db): AiCallStore {
     },
     async finalizeInbound(id, w) {
       const [row] = await finalizeInboundQuery(db, id, w);
+      return row ?? null;
+    },
+    async openInboundByCallSid(orgId, callSid) {
+      const [row] = await openInboundByCallSidQuery(db, orgId, callSid);
       return row ?? null;
     },
     async upsertOptOut(orgId, e164, note) {

@@ -9,14 +9,14 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import Mustache from 'mustache';
 import { describe, expect, it, vi } from 'vitest';
-import { AgentPromptCheck, type AgentPromptKind } from '@cti/contracts';
+import { AGENT_PROMPT_MAX_CHARS, AgentPromptCheck, type AgentPromptKind } from '@cti/contracts';
 import { DEFAULT_INBOUND_TEMPLATE } from './prompt-default-inbound.js';
 import { DEFAULT_INSTRUCTIONS_TEMPLATE } from './prompt-default-instructions.js';
 import { DEFAULT_VOICEMAIL_TEMPLATE } from './prompt-default-voicemail.js';
 import { neutraliseFences } from './prompt-plan.js';
 import { PLACEHOLDERS, SAMPLE_INPUT, checkTemplate, renderPrompt } from './prompt-template.js';
 import { promptView } from './prompt-view.js';
-import { buildInstructions, voicemailText, type PromptInput } from './prompt.js';
+import { buildInboundInstructions, buildInstructions, voicemailText, type PromptInput, type TemplateErrorHandler } from './prompt.js';
 
 interface GoldenEntry {
   name: string;
@@ -32,7 +32,8 @@ const DEFAULTS: Readonly<Record<AgentPromptKind, string>> = {
   voicemail: DEFAULT_VOICEMAIL_TEMPLATE,
   inbound: DEFAULT_INBOUND_TEMPLATE,
 };
-const KINDS: readonly AgentPromptKind[] = ['instructions', 'voicemail'];
+/** Every kind: the general checks below run for each (the inbound kind too; final review M-8). */
+const KINDS: readonly AgentPromptKind[] = ['instructions', 'voicemail', 'inbound'];
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
@@ -517,11 +518,15 @@ describe('a template that grows without bound (final review C2)', () => {
 });
 
 describe('PLACEHOLDERS', () => {
-  it.each(KINDS)('%s: every placeholder the default uses is listed, and every listed one is used by the default', (kind) => {
-    const used = namesIn(DEFAULTS[kind]);
+  it.each(KINDS)('%s: every placeholder the default uses is listed', (kind) => {
     const listed = new Set(PLACEHOLDERS[kind].map((p) => p.name));
-    expect([...used].filter((n) => !listed.has(n))).toEqual([]);
-    expect([...listed].filter((n) => !used.has(n))).toEqual([]);
+    expect([...namesIn(DEFAULTS[kind])].filter((n) => !listed.has(n))).toEqual([]);
+  });
+
+  // The inbound default is the owner's prompt verbatim and uses none of its placeholders; they are offered for edits.
+  it.each(['instructions', 'voicemail'] as const)('%s: every listed placeholder is used by the default', (kind) => {
+    const used = namesIn(DEFAULTS[kind]);
+    expect(PLACEHOLDERS[kind].map((p) => p.name).filter((n) => !used.has(n))).toEqual([]);
   });
 
   it.each(KINDS)('%s: snake_case names, each once, with a one-line description', (kind) => {
@@ -533,5 +538,78 @@ describe('PLACEHOLDERS', () => {
       expect(p.description.trim().length).toBeGreaterThan(10);
       expect(p.description).not.toMatch(/\n/);
     }
+  });
+});
+
+/** The same safety checks for every kind (final review M-8): each with a text placeholder it offers, and how a call builds it. */
+const SAFETY: Readonly<Record<AgentPromptKind, { value: string; build: (p: PromptInput, onError?: TemplateErrorHandler) => string }>> = {
+  instructions: { value: 'first_name', build: buildInstructions },
+  voicemail: { value: 'first_name', build: voicemailText },
+  inbound: { value: 'caller_number', build: buildInboundInstructions },
+};
+const CALL: PromptInput = { ...JANE, callerNumber: '+16195550142' };
+const saved = (kind: AgentPromptKind, template: string, over: Partial<PromptInput> = {}): PromptInput => ({
+  ...CALL,
+  ...over,
+  templates: { instructions: null, voicemail: null, inbound: null, [kind]: template },
+});
+
+describe.each(KINDS)('%s: the general template-safety checks (final review M-8)', (kind) => {
+  const { value, build } = SAFETY[kind];
+  const max = AGENT_PROMPT_MAX_CHARS[kind];
+
+  it('refuses an empty prompt, and one whose sample render is empty', () => {
+    expect(checkTemplate(kind, '  \n\t').problems).toEqual(['Prompt is empty']);
+    for (const t of ['{{! only a note }}', `{{^${value}}}shown only without it{{/${value}}}\n`]) {
+      expect(checkTemplate(kind, t), t).toMatchObject({ problems: ['The prompt comes out empty for the sample call'], rendered: null });
+    }
+  });
+
+  it("refuses a prompt over the kind's size limit, and accepts exactly the limit", () => {
+    expect(checkTemplate(kind, 'x'.repeat(max + 1)).problems).toEqual([`Prompt is longer than ${max.toLocaleString('en-US')} characters`]);
+    expect(checkTemplate(kind, 'x'.repeat(max)).problems).toEqual([]);
+  });
+
+  it('refuses an unknown placeholder, a partial, and an inherited object name', () => {
+    expect(checkTemplate(kind, 'Hi {{frist_name}}')).toMatchObject({ problems: ['Unknown placeholder: frist_name'], rendered: null });
+    expect(checkTemplate(kind, '{{> partial}}').problems).toEqual([expect.stringMatching(/^Unknown placeholder: /)]);
+    expect(checkTemplate(kind, '{{constructor}} {{#hasOwnProperty}}x{{/hasOwnProperty}}').problems).toEqual([
+      'Unknown placeholder: constructor',
+      'Unknown placeholder: hasOwnProperty',
+    ]);
+  });
+
+  it('refuses sections nested more than 8 deep (8 are fine), and a very deep one without a stack overflow', () => {
+    expect(checkTemplate(kind, nested(8, value)).problems).toEqual([]);
+    expect(checkTemplate(kind, nested(9, value))).toMatchObject({ problems: ['Sections are nested too deeply (more than 8 levels)'], rendered: null });
+    // (Past the size limit as well, for every kind: both are reported, and the walk still stops at the cap.)
+    expect(checkTemplate(kind, nested(2_400, value)).problems).toContain('Sections are nested too deeply (more than 8 levels)');
+    expect(() => renderPrompt(kind, nested(2_400, value), CALL)).toThrow(/refused/);
+  });
+
+  it('refuses a list section opened inside itself quickly, and renders nothing', () => {
+    const spy = vi.spyOn(Mustache.Writer.prototype, 'render');
+    try {
+      const started = performance.now();
+      const check = checkTemplate(kind, nested(30));
+      expect(() => renderPrompt(kind, nested(30), SAMPLE_INPUT)).toThrow(/refused/);
+      expect(performance.now() - started).toBeLessThan(250);
+      expect(check.rendered).toBeNull();
+      expect(check.problems).toContain('Sections are nested too deeply (more than 8 levels)');
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it.each([
+    ['renders to nothing for this call', `{{^${value}}}x{{/${value}}}`, {}, 'empty_render'],
+    ['renders past twice the size limit for this call', '{{company_name}}'.repeat(Math.floor(max / 16)), { companyName: 'C'.repeat(60) }, 'too_long'],
+    ['cannot render (an unknown placeholder)', 'Hi {{frist_name}}', {}, 'render_error'],
+    ['nests a list inside itself', nested(30), {}, 'render_error'],
+  ] as const)('a saved template that %s: the call gets the default, and the hook is told why', (_label, template, over, reason) => {
+    const onError = vi.fn();
+    expect(build(saved(kind, template, over), onError)).toBe(build({ ...CALL, ...over }));
+    expect(onError).toHaveBeenCalledWith(kind, reason);
   });
 });

@@ -55,7 +55,7 @@ export interface ToolEffects {
   /** Opt the number out (idempotent) and record the outcome. Throws if the opt-out cannot be written. */
   markDoNotCall(ctx: ToolCtx, note: string): Promise<void>;
   saveQualification(ctx: ToolCtx, fields: Record<string, string>): Promise<void>;
-  /** The inbound agent's details (and status), merged into ai_calls.qualification. */
+  /** The inbound agent's details (and status), merged into ai_calls.qualification (a status landing after finalize also sets the outcome). */
   saveCallerDetails(ctx: ToolCtx, fields: Record<string, string>): Promise<void>;
   scheduleCallback(ctx: ToolCtx, req: { when: string; note: string }): Promise<void>;
   /**
@@ -150,7 +150,7 @@ export const defaultToolEffects: ToolEffects = {
     await ctx.store.mergeQualification(ctx.aiCallId, fields);
   },
   async saveCallerDetails(ctx, fields) {
-    await ctx.store.mergeQualification(ctx.aiCallId, fields);
+    await ctx.store.mergeCallerDetails(ctx.aiCallId, fields);
   },
   async scheduleCallback(ctx, req) {
     await ctx.store.update(ctx.aiCallId, { callbackAt: parseCallbackAt(req.when) });

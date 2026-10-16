@@ -17,9 +17,10 @@
  * Inbound agent testing (plan 2026-10-16): when a test phone calls one of the AI's numbers, the agent follows the
  * `inbound` template (the owner's prompt by default, prompt-default-inbound.ts), always followed by the fixed
  * INBOUND_LINE_RULES, which no saved template can remove: they turn the prompt's spoken-JSON ending into silent
- * save_caller_details calls.
+ * save_caller_details calls. When the caller's number is known, one more fixed line tells the agent what it is.
  */
 import type { AgentPromptKind, AppointmentSlot } from '@cti/contracts';
+import { phoneForms } from './prompt-context.js';
 import { PLAN_PROMPT_MAX } from './prompt-plan.js';
 import { DEFAULT_TEMPLATES, renderMaxChars, renderPrompt } from './prompt-template.js';
 import { AI_CALL_TOOLS, INBOUND_TOOLS, TOOL_NAMES, WAIT_FOR_USER, toolsFor, type RealtimeFunctionTool, type ToolName } from './prompt-tools.js';
@@ -108,7 +109,17 @@ export const INBOUND_LINE_RULES = [
   '- If the caller wants to go, or once you have said goodbye, call end_call.',
 ].join('\n');
 
+/**
+ * The line rules for this call: INBOUND_LINE_RULES, then — when the caller's number is known — the number they are calling
+ * from, written as {{caller_number}} writes it (the owner's prompt asks the agent to confirm a callback number that is not
+ * that one, which it could not do without being told it).
+ */
+function inboundLineRules(callerNumber: string | null | undefined): string {
+  const written = phoneForms(callerNumber ?? null)?.written;
+  return written ? `${INBOUND_LINE_RULES}\n- The caller is calling from ${written}.` : INBOUND_LINE_RULES;
+}
+
 /** The Realtime session instructions for an inbound call: the inbound template (saved, else the default), then the line rules. */
 export function buildInboundInstructions(p: PromptInput, onTemplateError?: TemplateErrorHandler): string {
-  return `${promptText('inbound', p, onTemplateError)}\n\n${INBOUND_LINE_RULES}`;
+  return `${promptText('inbound', p, onTemplateError)}\n\n${inboundLineRules(p.callerNumber)}`;
 }
