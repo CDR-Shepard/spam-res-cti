@@ -3,7 +3,15 @@ import { useEffect, useId, useState } from 'react';
 import { AGENT_PROMPT_MAX_CHARS, type AgentPromptKind, type AgentPromptsResponse, type AgentPromptState } from '@cti/contracts';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { SAVED_REPLACES_WORDS, agentPromptErrorText, characterCountWords, promptProblems, promptStatusWords, versionLoadErrorText } from '@/lib/agent-prompt-words';
+import {
+  INBOUND_FIXED_RULES_WORDS,
+  SAVED_REPLACES_WORDS,
+  agentPromptErrorText,
+  characterCountWords,
+  promptProblems,
+  promptStatusWords,
+  versionLoadErrorText,
+} from '@/lib/agent-prompt-words';
 import { getAgentPromptVersion, outreachKeys, previewAgentPrompt, saveAgentPrompt } from '@/lib/outreach-api';
 import { cn } from '@/lib/utils';
 import { StatusBadge } from './layout/status-badge';
@@ -113,6 +121,7 @@ export function PromptEditor({ kind, state, onDirtyChange }: PromptEditorProps) 
           {dirty && <StatusBadge tone="warning">Unsaved changes</StatusBadge>}
         </div>
         {customActive && <p className="text-sm text-muted-foreground">{SAVED_REPLACES_WORDS}</p>}
+        {kind === 'inbound' && <p className="text-sm text-muted-foreground">{INBOUND_FIXED_RULES_WORDS}</p>}
       </div>
       <div className="space-y-1.5">
         <Textarea

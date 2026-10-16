@@ -22,7 +22,8 @@ export function TestPhoneRow({ phone }: { phone: TestPhone }) {
   const call = useMutation({ mutationFn: () => startTestCall(phone.e164) });
   const remove = useMutation({
     mutationFn: () => removeTestPhone(phone.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: outreachKeys.testPhones }),
+    // The other test-call cards (Test call to my phone, Practice, Test a record) list the same phones.
+    onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: outreachKeys.testPhones }), qc.invalidateQueries({ queryKey: outreachKeys.aiAvailability })]),
   });
   const who = phoneWho(phone);
   return (

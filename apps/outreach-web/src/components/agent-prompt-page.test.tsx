@@ -370,6 +370,20 @@ describe('AgentPromptPage', () => {
     expect(sent(calls, PUT_VOICEMAIL)).toEqual([]);
   });
 
+  it('the Inbound calls tab, and only it, says the fixed phone-line rules are added after the prompt (final review M-7)', async () => {
+    const user = userEvent.setup();
+    const words =
+      "After this prompt, the system adds a few fixed phone-line rules: save what the caller says quietly (never read it out), end the call when they're done, and the number they're calling from.";
+    await render();
+    expect(screen.queryByText(words)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: 'Voicemail message' }));
+    await screen.findByRole('textbox', { name: 'Voicemail message' });
+    expect(screen.queryByText(words)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: 'Inbound calls' }));
+    await screen.findByRole('textbox', { name: 'Inbound calls' });
+    expect(screen.getByText(words)).toBeInTheDocument();
+  });
+
   it('opens on the tab it is asked to, and on the call instructions otherwise', async () => {
     stubApi({ [LIST]: promptsResponse() });
     renderWithRouter(<AgentPromptPage initialKind="inbound" />, { isAdmin: true });

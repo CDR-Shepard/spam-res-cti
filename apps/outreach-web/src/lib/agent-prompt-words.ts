@@ -65,6 +65,13 @@ export function promptStatusWords(state: Pick<AgentPromptState, 'active' | 'upda
   return `Edited${when}${by}`;
 }
 
+/**
+ * Under the Inbound calls tab only: the call service always adds fixed line rules after the inbound prompt (cti-api's
+ * INBOUND_LINE_RULES and the caller's number), which the editor and its preview never show.
+ */
+export const INBOUND_FIXED_RULES_WORDS =
+  "After this prompt, the system adds a few fixed phone-line rules: save what the caller says quietly (never read it out), end the call when they're done, and the number they're calling from.";
+
 const COUNT = new Intl.NumberFormat('en-US');
 
 /** "1,499 / 1,500 characters". */

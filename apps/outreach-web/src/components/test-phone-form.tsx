@@ -18,7 +18,8 @@ export function TestPhoneForm() {
     onSuccess: async () => {
       setPhone('');
       setLabel('');
-      await qc.invalidateQueries({ queryKey: outreachKeys.testPhones });
+      // The other test-call cards (Test call to my phone, Practice, Test a record) list the same phones.
+      await Promise.all([qc.invalidateQueries({ queryKey: outreachKeys.testPhones }), qc.invalidateQueries({ queryKey: outreachKeys.aiAvailability })]);
     },
   });
   return (

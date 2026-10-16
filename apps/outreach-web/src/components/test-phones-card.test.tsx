@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useQuery } from '@tanstack/react-query';
+import { getAiAvailability, outreachKeys } from '../lib/outreach-api';
 import { renderWithProviders } from '../test/render';
 import { respond, stubApi, type StubCall } from '../test/stub-api';
 import { ADDED_AT, PHONE_A, PHONE_B, phonesResponse, testPhone } from '../test/testing-fixtures';
@@ -189,5 +191,47 @@ describe('TestPhonesCard: Call this phone', () => {
     const status = await screen.findByRole('status');
     expect(within(rowOf(/Grant cell/)).getByRole('status')).toBe(status);
     expect(within(rowOf('(619) 555-0102')).queryByRole('status')).not.toBeInTheDocument();
+  });
+});
+
+/** Stands in for the other test-call cards (Test call to my phone, Practice, Test a record): they read the same query. */
+function AvailabilityProbe() {
+  const availability = useQuery({ queryKey: outreachKeys.aiAvailability, queryFn: getAiAvailability });
+  return <p>{`Test numbers: ${availability.data?.testNumbers.length ?? '…'}`}</p>;
+}
+
+describe("TestPhonesCard: the other test-call cards' phone lists follow the list (final review I-1)", () => {
+  const AVAILABILITY = 'GET /api/ai-calls/availability';
+
+  /** `routes` is the live stub table: a test changes answers after the page is up. */
+  async function renderWithProbe(routes: Record<string, unknown>) {
+    if (!(AVAILABILITY in routes)) routes[AVAILABILITY] = { available: true, testNumbers: [] };
+    const calls = stubApi(routes);
+    renderWithProviders(<><TestPhonesCard /><AvailabilityProbe /></>, { isAdmin: true });
+    await screen.findByText('Test numbers: 0');
+    return calls;
+  }
+
+  it('adding a phone refreshes the test numbers the other cards offer', async () => {
+    const user = userEvent.setup();
+    const routes: Record<string, unknown> = { [LIST]: phonesResponse(), [ADD]: respond(201, GRANT) };
+    const calls = await renderWithProbe(routes);
+    await screen.findByText('No test phones yet.');
+    routes[AVAILABILITY] = { available: true, testNumbers: ['+16195550123'] };
+    routes[LIST] = phonesResponse(GRANT);
+    await user.type(screen.getByLabelText('Phone'), '(619) 555-0123');
+    await user.click(screen.getByRole('button', { name: 'Add phone' }));
+    expect(await screen.findByText('Test numbers: 1')).toBeInTheDocument();
+    expect(sent(calls, AVAILABILITY)).toHaveLength(2);
+  });
+
+  it('removing a phone refreshes them too', async () => {
+    const user = userEvent.setup();
+    const routes: Record<string, unknown> = { [LIST]: phonesResponse(GRANT, SAM), [REMOVE_A]: respond(204) };
+    const calls = await renderWithProbe(routes);
+    await user.click(await screen.findByRole('button', { name: 'Remove Grant cell (619) 555-0123' }));
+    routes[LIST] = phonesResponse(SAM);
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(sent(calls, AVAILABILITY)).toHaveLength(2));
   });
 });
