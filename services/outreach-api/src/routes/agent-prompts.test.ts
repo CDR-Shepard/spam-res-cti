@@ -32,7 +32,7 @@ vi.mock('@cti/auth', async (importOriginal) => ({
 }));
 
 const auth = { authorization: 'Bearer t' };
-const KINDS = ['instructions', 'voicemail'] as const;
+const KINDS = ['instructions', 'voicemail', 'inbound'] as const;
 const PLACEHOLDERS: AgentPromptCheck['placeholders'] = [
   { name: 'sellerFirstName', kind: 'text', description: 'The seller first name' },
   { name: 'hasAppointmentOffer', kind: 'section', description: 'Shown when a time can be offered' },
@@ -80,7 +80,8 @@ describe('agent prompt routes, who may call them (no database needed)', () => {
     ['POST', '/api/settings/agent-prompts/instructions/preview', { template: 'x' }],
     ['PUT', '/api/settings/agent-prompts/instructions', { template: 'x' }],
     ['PUT', '/api/settings/agent-prompts/voicemail', { template: null }],
-    ['GET', `/api/settings/agent-prompts/instructions/versions/${ID}`, undefined],
+    ['PUT', '/api/settings/agent-prompts/inbound', { template: 'x' }],
+    ['GET', `/api/settings/agent-prompts/inbound/versions/${ID}`, undefined],
   ] as const;
 
   it('401 without a session; 403 ADMIN_ONLY for a non-admin on every route, and cti-api is never asked', async () => {
@@ -140,7 +141,7 @@ describe.skipIf(!pgLane)('agent prompt routes (real Postgres)', () => {
   const getAll = async () => AgentPromptsResponse.parse((await send('GET', '/api/settings/agent-prompts')).json());
 
   describe('GET /settings/agent-prompts', () => {
-    it('a fresh org: nothing saved, the default and the placeholders from cti-api, no versions, for both kinds', async () => {
+    it('a fresh org: nothing saved, the default and the placeholders from cti-api, no versions, for all three kinds', async () => {
       const { cti } = await signedInAdmin();
       const res = await send('GET', '/api/settings/agent-prompts');
       expect(res.statusCode).toBe(200);
@@ -150,6 +151,7 @@ describe.skipIf(!pgLane)('agent prompt routes (real Postgres)', () => {
       }
       expect(cti.checkPrompt).toHaveBeenCalledWith({ kind: 'instructions', template: null });
       expect(cti.checkPrompt).toHaveBeenCalledWith({ kind: 'voicemail', template: null });
+      expect(cti.checkPrompt).toHaveBeenCalledWith({ kind: 'inbound', template: null });
     });
 
     it('cti-api unreachable: 503 prompt_check_unavailable with the plain words', async () => {
@@ -209,7 +211,8 @@ describe.skipIf(!pgLane)('agent prompt routes (real Postgres)', () => {
       expect(after.active).toBe(text);
       expect(after.versions).toHaveLength(1);
       expect(after.versions[0]).toMatchObject({ id: rows[0]!.id, createdByEmail: 'grant@gg.co', chars: text.length });
-      expect((await getAll())[kind === 'voicemail' ? 'instructions' : 'voicemail'].active).toBeNull();
+      const others = KINDS.filter((k) => k !== kind);
+      for (const other of others) expect((await getAll())[other].active, other).toBeNull();
     });
 
     it('every save adds a version and the newest is the active one (append-only: nothing is overwritten)', async () => {
@@ -294,7 +297,7 @@ describe.skipIf(!pgLane)('agent prompt routes (real Postgres)', () => {
       expect(await rowsOf(orgId, 'voicemail')).toEqual([]);
     });
 
-    it('a kind that is not one of the two is 400 on every route and nothing happens', async () => {
+    it('a kind that is not one of the three is 400 on every route and nothing happens', async () => {
       const { orgId, cti } = await signedInAdmin();
       const id = randomUUID();
       for (const [method, url, body] of [
@@ -384,6 +387,36 @@ describe.skipIf(!pgLane)('agent prompt routes (real Postgres)', () => {
       const res = await send('GET', '/api/settings/agent-prompts/instructions/versions/not-an-id');
       expect(res.statusCode).toBe(400);
       expect(res.json().code).toBe('INVALID_ID');
+    });
+  });
+
+  describe('the inbound kind (what the agent follows when a test phone calls it)', () => {
+    it('is saved and reset under its own kind and leaves the other two alone', async () => {
+      const { orgId } = await signedInAdmin('grant@gg.co');
+      expect((await send('PUT', '/api/settings/agent-prompts/inbound', { template: 'Thanks for calling.' })).statusCode).toBe(200);
+      expect((await rowsOf(orgId, 'inbound')).map((r) => r.body)).toEqual(['Thanks for calling.']);
+      expect(await rowsOf(orgId, 'instructions')).toEqual([]);
+      expect(await rowsOf(orgId, 'voicemail')).toEqual([]);
+      const all = await getAll();
+      expect(all.inbound).toMatchObject({ kind: 'inbound', active: 'Thanks for calling.', updatedByEmail: 'grant@gg.co' });
+      expect(all.instructions).toMatchObject({ active: null, versions: [] });
+      expect((await send('PUT', '/api/settings/agent-prompts/inbound', { template: null })).statusCode).toBe(200);
+      expect((await rowsOf(orgId, 'inbound')).map((r) => r.body)).toEqual(['Thanks for calling.', null]);
+    });
+
+    it('a template over its limit is refused with the inbound words, and cti-api is not asked', async () => {
+      const { cti } = await signedInAdmin();
+      const res = await send('PUT', '/api/settings/agent-prompts/inbound', { template: 'x'.repeat(AGENT_PROMPT_MAX_CHARS.inbound + 1) });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: 'invalid_prompt', problems: [expect.stringMatching(/^The inbound call instructions can be at most 60,000 characters/)] });
+      expect(cti.checkPrompt).not.toHaveBeenCalled();
+    });
+
+    it("is previewed against cti-api's inbound check", async () => {
+      const { cti } = await signedInAdmin();
+      const res = await send('POST', '/api/settings/agent-prompts/inbound/preview', { template: 'Hi {{sellerFirstName}}' });
+      expect(res.statusCode).toBe(200);
+      expect(cti.checkPrompt).toHaveBeenCalledWith({ kind: 'inbound', template: 'Hi {{sellerFirstName}}' });
     });
   });
 

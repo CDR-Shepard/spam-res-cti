@@ -337,4 +337,38 @@ describe.skipIf(!pgLane)('AI call results queries (real Postgres)', () => {
       expect(await loadTranscript(db, ctxOf(other.base.orgId, other.admin, true), aiCallId)).toBeNull();
     });
   });
+
+  describe("an inbound test call's transcript (a test phone called an AI number)", () => {
+    const lines = [{ role: 'agent', text: 'Thanks for calling', at: null }, { role: 'caller', text: 'I want to sell my house', at: null }];
+    const inbound = (s: Awaited<ReturnType<typeof setup>>, over: Partial<typeof schema.aiCalls.$inferInsert> = {}) =>
+      seedAiCall(db, s.base.orgId, s.admin, { direction: 'inbound', isTest: true, status: 'completed', transcript: lines, toE164: '+16195550101', fromE164: '+16195550900', ...over });
+
+    it('an admin of its tenant opens it, with its turn stats (none reads null)', async () => {
+      const s = await setup();
+      for (const [turnStats, want] of [[STATS, STATS], [null, null]] as const) {
+        const aiCallId = await inbound(s, { turnStats });
+        expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), aiCallId)).toEqual({ aiCallId, lines, turnStats: want });
+      }
+    });
+
+    it('a rep is forbidden, even the one who owns nothing here', async () => {
+      const s = await setup();
+      const aiCallId = await inbound(s);
+      expect(await loadTranscript(db, ctxOf(s.base.orgId, s.rep, false), aiCallId)).toBe('forbidden');
+    });
+
+    it("another tenant's admin gets nothing, and an unknown id is null", async () => {
+      const s = await setup();
+      const aiCallId = await inbound(s);
+      const other = await setup();
+      expect(await loadTranscript(db, ctxOf(other.base.orgId, other.admin, true), aiCallId)).toBeNull();
+      expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), '99999999-9999-4999-8999-999999999999')).toBeNull();
+    });
+
+    it('an outbound test call that no practice or record test links stays hidden (only the inbound direction opens it)', async () => {
+      const s = await setup();
+      const aiCallId = await seedAiCall(db, s.base.orgId, s.admin, { isTest: true, status: 'completed', transcript: lines });
+      expect(await loadTranscript(db, ctxOf(s.base.orgId, s.admin, true), aiCallId)).toBeNull();
+    });
+  });
 });

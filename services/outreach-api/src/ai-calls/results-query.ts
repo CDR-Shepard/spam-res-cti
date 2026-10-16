@@ -217,7 +217,7 @@ export function parseTurnStats(raw: unknown): AiCallTurnStats | null {
 
 /**
  * The owner of the record or an admin may read it; null when no outreach touch of this tenant carries the call. Plan 1D: a
- * practice call of this tenant (ai_practice_calls) is readable by its admins only.
+ * practice call of this tenant (ai_practice_calls) is readable by its admins only; so is an inbound test call of this tenant.
  */
 export async function loadTranscript(db: Db, ctx: RequestContext, aiCallId: string): Promise<AiCallTranscript | 'forbidden' | null> {
   const result = await db.execute(sql`
@@ -229,18 +229,22 @@ export async function loadTranscript(db: Db, ctx: RequestContext, aiCallId: stri
     where a.id = ${aiCallId}::uuid and a.org_id = ${ctx.orgId}::uuid
     limit 1`);
   const row = rows<{ transcript: unknown; turn_stats: unknown; owner_sf_user_id: string | null }>(result)[0];
-  if (!row) return loadPracticeTranscript(db, ctx, aiCallId);
+  if (!row) return loadTestCallTranscript(db, ctx, aiCallId);
   if (!(await mayDecide(db, ctx, row.owner_sf_user_id))) return 'forbidden';
   return { aiCallId, lines: transcriptLines(row.transcript), turnStats: parseTurnStats(row.turn_stats) };
 }
 
-/** A practice call (plan 1D) or a Test a record call (plan 1E): admins of its tenant only. */
-async function loadPracticeTranscript(db: Db, ctx: RequestContext, aiCallId: string): Promise<AiCallTranscript | 'forbidden' | null> {
+/**
+ * A practice call (plan 1D), a Test a record call (plan 1E) or an inbound test call (a test phone called an AI number, plan
+ * 2026-10-16-inbound-agent-testing.md; direction 'inbound'): admins of its tenant only.
+ */
+async function loadTestCallTranscript(db: Db, ctx: RequestContext, aiCallId: string): Promise<AiCallTranscript | 'forbidden' | null> {
   const result = await db.execute(sql`
     select a.transcript, a.turn_stats
     from ai_calls a
     where a.id = ${aiCallId}::uuid and a.org_id = ${ctx.orgId}::uuid
-      and (exists (select 1 from ai_practice_calls p where p.ai_call_id = a.id and p.org_id = a.org_id)
+      and (a.direction = 'inbound'
+        or exists (select 1 from ai_practice_calls p where p.ai_call_id = a.id and p.org_id = a.org_id)
         -- P6 M-10: a practice row whose answer was lost is linked by its key (cti-api stored the call under it).
         or exists (select 1 from ai_practice_calls p join ai_call_requests q on q.org_id = p.org_id and q.idempotency_key = p.idempotency_key
                    where p.ai_call_id is null and p.org_id = a.org_id and q.ai_call_id = a.id)

@@ -1,6 +1,6 @@
 /**
- * Editable agent prompts, admins only: read, check, preview, save and reset the text of the AI phone agent's instructions
- * and its voicemail message. Versions are append-only rows in `ai_agent_prompts` (the active one is the newest per org and
+ * Editable agent prompts, admins only: read, check, preview, save and reset the text of the AI phone agent's instructions,
+ * its voicemail message and its inbound-call instructions (what it follows when a test phone calls it). Versions are append-only rows in `ai_agent_prompts` (the active one is the newest per org and
  * kind; a NULL body is the built-in default). cti-api owns the placeholders, the defaults and the rendering, so every check
  * goes through `cti.checkPrompt`; this file stores versions and refuses what cti-api refuses. The template text is a
  * seller-facing script: it is never logged, and never put in an error.
@@ -33,7 +33,11 @@ export interface AgentPromptRouteDeps {
 export const CHECK_UNAVAILABLE_WORDS = "Can't check the prompt right now — try again in a minute";
 
 const KINDS = AgentPromptKind.options;
-const KIND_WORDS: Readonly<Record<AgentPromptKind, string>> = { instructions: "The agent's instructions", voicemail: 'The voicemail message' };
+const KIND_WORDS: Readonly<Record<AgentPromptKind, string>> = {
+  instructions: "The agent's instructions",
+  voicemail: 'The voicemail message',
+  inbound: 'The inbound call instructions',
+};
 const KindParams = z.object({ kind: AgentPromptKind });
 const VersionParams = KindParams.extend({ id: z.string().uuid() });
 const prompts = schema.aiAgentPrompts;
@@ -48,7 +52,7 @@ const sendCheckUnavailable = (reply: FastifyReply): FastifyReply =>
 const tooLongProblem = (kind: AgentPromptKind, chars: number): string =>
   `${KIND_WORDS[kind]} can be at most ${AGENT_PROMPT_MAX_CHARS[kind].toLocaleString('en-US')} characters; this one is ${chars.toLocaleString('en-US')}.`;
 
-/** The `:kind` of the path, or the 400 that says it is not one of the two texts. */
+/** The `:kind` of the path, or the 400 that says it is not one of the three texts. */
 function kindOf(req: FastifyRequest, reply: FastifyReply): AgentPromptKind | null {
   const params = KindParams.safeParse(req.params);
   if (params.success) return params.data.kind;
@@ -116,8 +120,8 @@ export async function registerAgentPromptRoutes(app: FastifyInstance, deps: Agen
     if (!ctx || !requireAdmin(ctx, reply)) return reply;
     const checks = await Promise.all(KINDS.map((kind) => check(req, kind, null)));
     if (checks.some((c) => c === null)) return sendCheckUnavailable(reply);
-    const [instructions, voicemail] = await Promise.all(KINDS.map((kind, i) => stateOf(db, ctx.orgId, kind, checks[i]!)));
-    return { instructions: instructions!, voicemail: voicemail! } satisfies AgentPromptsResponse;
+    const [instructions, voicemail, inbound] = await Promise.all(KINDS.map((kind, i) => stateOf(db, ctx.orgId, kind, checks[i]!)));
+    return { instructions: instructions!, voicemail: voicemail!, inbound: inbound! } satisfies AgentPromptsResponse;
   });
 
   app.post('/settings/agent-prompts/:kind/preview', async (req, reply) => {
