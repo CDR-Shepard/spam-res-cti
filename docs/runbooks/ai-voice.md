@@ -50,7 +50,7 @@ outreach-api then asks `@cti/api` (this service) to place each call, paced and w
 
 **Hard rules the code enforces on every call:**
 
-- No AI call without the **AI Call Consent** checkbox ticked on the Salesforce record. The one exception is an admin calling a number listed in `AI_VOICE_TEST_NUMBERS` (your own phones).
+- No AI call without the **AI Call Consent** checkbox ticked on the Salesforce record. The one exception is an admin calling a phone on the **Test phones** list (§21) or listed in `AI_VOICE_TEST_NUMBERS` (your own phones).
 - Every call, test or not, also passes: `AI_VOICE=on`, `OUTREACH_KILL_SWITCH` not `on`, not opted out, not blocked, not on the federal DNC list, the FL/OK/WA/MD daily cap, the per-customer call ceiling, and the recipient's local calling hours 08:00 to 21:00. Test numbers skip the calling-hours check only.
 
 ## 2. Prerequisites
@@ -78,7 +78,7 @@ Pick project `endearing-comfort`. Setting a variable on a linked service redeplo
 |---|---|---|
 | `OPENAI_API_KEY` | the key from §2.1 (secret) | **AI voice is switched off** (`available: false`, no AI call is placed or answered) |
 | `AI_VOICE` | `on` or `off` | `on`. `off` is the kill switch (§9). Only `on` / `off` are accepted; `true`, `1`, `false` stop the service booting |
-| `AI_VOICE_TEST_NUMBERS` | your mobile(s), E.164, comma-separated: `+15125550100,+15125550101` | no test numbers; the **Test call to my phone** card in outreach-web says "No test numbers are set" |
+| `AI_VOICE_TEST_NUMBERS` | your mobile(s), E.164, comma-separated: `+15125550100,+15125550101` | no test numbers; the **Test call to my phone** card in outreach-web says "No test phones are set"; phones added under **Testing → Test phones** (§21) work too |
 | `AI_VOICE_VOICE` | `marin` | `marin` |
 | `AI_VOICE_MODEL` | `gpt-realtime-2.1` | `gpt-realtime-2.1` |
 | `AI_VOICE_REASONING` | `minimal`, `low`, `medium` or `high` | `low`. Only sent for `gpt-realtime-2*` models |
@@ -166,7 +166,7 @@ The consent source picklist (`Text Reply`, `Email Reply`, `Web Form`, `Inbound C
 
 ## 5. Morning smoke test (about 15 minutes)
 
-Do this on your own mobile before any real prospect. A test call needs no Salesforce record and no consent tick. Only an admin can place one, from outreach-web, and only to a number in `AI_VOICE_TEST_NUMBERS`.
+Do this on your own mobile before any real prospect. A test call needs no Salesforce record and no consent tick. Only an admin can place one, from outreach-web, and only to a phone on the Test phones list (§21) or a number in `AI_VOICE_TEST_NUMBERS`.
 
 **Test calls count like real dials.** A placed test call counts toward the per-customer ceiling (when the number belongs to a campaign) and, for a Florida, Oklahoma, Washington or Maryland area code, the 3-calls-per-24-hours state cap. Repeating the smoke test to one number on the same day can therefore be refused with `customer_ceiling` or `daily_cap`. Use a second test number (add it to `AI_VOICE_TEST_NUMBERS`) or wait a day.
 
@@ -208,7 +208,7 @@ If an AI number had been assigned to a rep before you moved it, that rep's click
 3. Open outreach-web as an **admin** → **Settings → Connections**. The **Test call to my phone** card has a **Test number** list (one entry per number in `AI_VOICE_TEST_NUMBERS`, shown as E.164, for example `+15125550100`) and a **Test call to my phone** button.
    - No card at all: you are not an admin, or AI calling is off (recheck `OPENAI_API_KEY`, `AI_VOICE=on` and that `OUTREACH_KILL_SWITCH` is not `on`), or outreach-api has no `CTI_INTERNAL_URL` / `OUTREACH_INTERNAL_SECRET`. The card also stays hidden while it loads.
    - A red line "The AI calling service did not answer. Try again in a minute.": outreach-api cannot reach `@cti/api` (§11).
-   - "No test numbers are set. Add yours to AI_VOICE_TEST_NUMBERS on the CTI API service.": set `AI_VOICE_TEST_NUMBERS` (§3).
+   - "No test phones are set. Add yours to Test phones on the Testing page.": add your phone under **Testing → Test phones** (§21), or set `AI_VOICE_TEST_NUMBERS` (§3).
 4. Pick your number and press **Test call to my phone**. Expect the line "Calling now. Pick up to hear the agent." No row appears anywhere in outreach-web (a test call has no campaign); read it in SQL in step 10. Your phone should ring within a few seconds; the caller ID is the AI's own number (an **AI calls** number, for example `+1 (619) 724-4374`), never a rep's. A refusal shows "Not called: " and the reason in plain words, for example "Not called: they opted out of calls".
 5. **Answer and listen.** The first thing the agent says must be that it is an AI assistant calling for the company, on a recorded line. Fail the test if it does not say so.
 6. **Talk to it** for a minute as a seller. Say you might sell, the house needs work, and you want about a certain amount. It should ask follow-up questions and must not name a price or make an offer.
@@ -641,3 +641,36 @@ Plan: `docs/superpowers/plans/2026-10-16-editable-agent-prompts.md`. An admin ed
   ```
 
   Use `'voicemail'` for the voicemail.
+
+## 21. Inbound testing and test phones (2026-10-16)
+
+Plan: `docs/superpowers/plans/2026-10-16-inbound-agent-testing.md`. An admin keeps a list of **test phones** in outreach-web. A phone on the list can get test calls from the agent, and when it calls one of the agent's numbers, the agent answers (with its own **inbound** prompt) instead of a rep.
+
+- **What the list does.** Two things, for the phones on it and nobody else. (1) **Outbound test calls:** the agent may call a listed phone from **Call this phone** on the Testing page, and from the other test-call buttons (**Test call to my phone**, **Practice call**, **Test a record → Ring my phone**); the list is added to `AI_VOICE_TEST_NUMBERS` (§3), which keeps working, so a phone is allowed if it is in either. (2) **Inbound:** a listed phone that calls one of the agent's numbers gets the agent.
+- **Where.** outreach-web (Lead Specialist) → sidebar **Testing** (admins only; `/testing`). **Test phones** lists each phone (number, label, who added it) with **Call this phone** and **Remove** (it asks first). **Inbound calls** says which number to dial and lists the newest 20 inbound test calls, refreshed every 10 seconds while the page is open.
+- **Adding a phone.** Type the number the way you write it, "(619) 555-0123", and an optional label (whose phone it is, up to 60 characters), then **Add phone**. The server turns it into E.164 (US numbers need no `+1`). It answers "That doesn't look like a phone number", "That phone is already on the list" (the same phone typed another way counts), or "The list is full (25 phones) — remove one first". Each organization has its own list, at most 25 phones. **Only add phones whose owners agreed to get test calls from the agent.**
+- **How to call in.** From a listed phone, call one of the agent's numbers: the **Inbound calls** section names them ("Call (619) 555-0900 from a phone on the list and the agent answers with the inbound prompt."). Those are the organization's `ai_pool` numbers that have inbound turned on (the AI number set up in the first-call checklist, step 5; it is imported with inbound on). With none, the section says "No agent number takes calls yet." The agent answers with its greeting a moment after pickup.
+- **Everyone else is unchanged.** A caller who is not on the list, an anonymous caller or one whose number cannot be read gets exactly what they got before: a rep rings (or the voicemail records, with a `calls` row and the Salesforce sync). Only a listed phone calling an AI number takes the new path. If anything in the new path fails (switch off, AI voice unavailable, a database error, any error), the call falls back to the old routing, and @cti/api logs a warning `ai-voice: inbound test call not started` with a `reason`.
+- **Switch.** `AI_VOICE_INBOUND` on `@cti/api` (`on` by default). `off` sends every phone, listed or not, to the old routing, and test calls out are unaffected:
+
+  ```bash
+  railway variables --set "AI_VOICE_INBOUND=off" --service @cti/api
+  ```
+
+  `AI_VOICE=off` (§9) also stops it, because AI voice is then unavailable. Both take effect on the next call after the redeploy; a call in progress keeps going until it ends or the service restarts.
+- **The inbound prompt.** **Agent prompt** (§20) has a third tab, **Inbound calls**, for what the agent follows when a listed phone calls it (the page's **Edit the inbound prompt** link on Testing opens it). It works like the other two: **Preview**, **Save**, **Reset to default**, **Previous versions**, saves apply from the next call, and a saved version replaces the built-in one. The built-in inbound prompt is the owner's own wording. Its placeholders are listed under **Placeholders you can use** on that tab (the agent's name, the company, the caller's number, and the caller's local time). Fixed rules are always added after the prompt, a saved one included: everything is spoken aloud (never say JSON, field names or tags), the agent saves what it learns as it goes, and it ends the call when the caller wants to go. Any instruction in the prompt to print JSON or a summary at the end is replaced by that. An inbound prompt that is empty when rendered, or cannot be read, falls back to the built-in one, the same as §20.
+- **What the agent saves.** While the caller talks, the agent saves what it learns with its save tool and once more with a status before saying goodbye. It keeps only these fields, each as short text: location, timeline, price expectation, condition, decision maker, urgency, best callback time and notes, plus the status: **qualified**, **callback**, **disqualified** or **incomplete**. They appear on each inbound call in the **Inbound calls** list (empty ones are hidden), under the badge showing the status. A call that is still going shows **In progress**. If the caller hangs up before the agent saved a status, the call ends and reads **Incomplete**, with whatever details were saved so far. `ai_calls.qualification` holds them and `ai_calls.outcome` holds the status (or `incomplete`).
+- **Not recorded, and nothing written elsewhere.** As for every AI call, no audio is stored: you get the **Transcript** button on each call (admins only). An inbound call is a test call: it never writes Salesforce, never creates a `calls` row or a Salesforce Task, never records an opt-out, and does not count toward any number's warm-up or velocity caps, callback routing or sticky caller-ID (those look only at outbound calls).
+- **Removing a phone.** **Remove** takes effect for the next call: a call that phone already has going carries on, and its next call to an AI number is routed as for anyone else. Its earlier calls stay in the list, by number instead of by label. Removing the phone does not touch `AI_VOICE_TEST_NUMBERS`.
+- **Troubleshooting.**
+  - *A listed phone rang a rep or went to voicemail.* Check, in order: the phone is on the list with the number it calls from (a different mobile, or a call with caller ID hidden, is not that phone); the number it dialed is one of those named under **Inbound calls**; `AI_VOICE_INBOUND` is not `off` and `AI_VOICE` is on (§9); the @cti/api logs around the call for `ai-voice: inbound test call not started` and its `reason`.
+  - *The Testing page shows no agent number.* No `ai_pool` number has inbound turned on for this organization. A number imported from Twilio has it on (§5), so an AI number that was never imported, or one whose inbound was turned off, is the cause: import it, or turn it on with the admin route `PATCH /admin/outbound-numbers/<id>` on `@cti/api` (body `{"inboundEnabled": true}`).
+  - *Call this phone says "Not called: …".* The same reasons as any test call (calling hours, a call already in progress, AI voice off, and so on).
+- **Data and deploy.** Migration `0061_inbound_agent_testing.sql` runs as the pre-deploy step on both `@cti/api` and outreach-api: it adds `ai_calls.direction` (`outbound` for every existing row, `inbound` for these calls), allows the `inbound` prompt kind in `ai_agent_prompts`, and creates `ai_test_phones` (per organization, strict E.164, unique). No new variables are needed; `AI_VOICE_INBOUND` is optional. To look at the list without printing anything else (`$PUB` is a live credential, see the checklist step 4):
+
+  ```bash
+  echo "SELECT org_id, e164, label, created_at FROM ai_test_phones ORDER BY created_at;" | psql "$PUB"
+  ```
+
+  **Roll back:** set `AI_VOICE_INBOUND=off` (the list and the Testing page stay; only the inbound answering stops). The migration is additive: leave it in place, the previous build ignores the new column and table.
+- **Owner check after deploy.** (1) Testing → add your own mobile with a label. (2) From that phone, call the AI number the page names: the agent answers with its inbound greeting. (3) Tell it a property address and a timeline, then hang up before it says goodbye: the call appears under **Inbound calls** as **Incomplete** with those details, and its **Transcript** opens. (4) Call again and let it finish: the badge reads its status. (5) From a phone that is **not** on the list, call the same number: it rings a rep as before. (6) Remove your phone, call again: it rings a rep as before.
