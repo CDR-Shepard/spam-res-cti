@@ -21,6 +21,12 @@
  *      the webhook replies without waiting on Claude or Salesforce. The
  *      promise is returned as `after` (tests, the sweeper) and never rejects.
  * Nothing after the CAS throws out of finalize.
+ *
+ * An INBOUND row (a test phone called the AI, plan 2026-10-16) has its own CAS
+ * (store.finalizeInbound): outcome = the status the agent saved, else
+ * `incomplete`; and none of 1–3: no opt-out, no `calls` row, no summary or
+ * Salesforce. It is finalized from the end of its conversation
+ * (stream-session.ts) or by the sweeper, never by a status callback.
  */
 import { bookingStands } from '@cti/contracts';
 import type { schema } from '@cti/db';
@@ -190,6 +196,7 @@ export async function finalizeAiCall(deps: FinalizeDeps, aiCallId: string, input
 
   const current = await store.get(aiCallId);
   if (!current || current.endedAt) return { finalized: false };
+  if (current.direction === 'inbound') return finalizeInbound(deps, current, input);
   const answeredBy = current.answeredBy ?? input.answeredBy ?? null;
   const row = await store.finalize(aiCallId, {
     derivedOutcome: derivedOutcome(input.callStatus, answeredBy),
@@ -212,6 +219,24 @@ export async function finalizeAiCall(deps: FinalizeDeps, aiCallId: string, input
   const final = await withCtiCall(row, input.callStatus, deps);
   log.info({ aiCallId, status: final.status, outcome: final.outcome, ctiCallId: final.ctiCallId }, 'ai-voice: call finalized');
   return { finalized: true, row: final, after: runAfterCall(final, deps) };
+}
+
+/** Twilio CallStatus values that mean the call itself failed. */
+const FAILED_CALL_STATUSES: readonly string[] = ['failed', 'canceled'];
+
+const secondsBetween = (from: Date | null, to: Date): number | null =>
+  from ? Math.max(0, Math.round((to.getTime() - from.getTime()) / 1000)) : null;
+
+/** An inbound row's end (see the header): its own CAS, and nothing after it. The duration runs from the stream's start. */
+async function finalizeInbound(deps: FinalizeDeps, current: AiCallRow, input: FinalizeInput): Promise<FinalizeResult> {
+  const row = await deps.store.finalizeInbound(current.id, {
+    durationSeconds: input.durationSeconds ?? secondsBetween(current.startedAt, input.endedAt),
+    endedAt: input.endedAt,
+    failed: FAILED_CALL_STATUSES.includes(input.callStatus),
+  });
+  if (!row) return { finalized: false };
+  deps.log.info({ aiCallId: row.id, direction: 'inbound', status: row.status, outcome: row.outcome }, 'ai-voice: call finalized');
+  return { finalized: true, row, after: Promise.resolve() };
 }
 
 /** Production wiring: Claude for the summary (when keyed), the rep-token Salesforce client. */

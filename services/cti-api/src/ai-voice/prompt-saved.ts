@@ -8,9 +8,9 @@ import type { BridgeLog } from './bridge.js';
 import type { TemplateErrorHandler } from './prompt.js';
 import type { AgentPromptTemplates, AiCallStore } from './store.js';
 
-const DEFAULT_TEMPLATES_IN_USE: AgentPromptTemplates = { instructions: null, voicemail: null };
+const DEFAULT_TEMPLATES_IN_USE: AgentPromptTemplates = { instructions: null, voicemail: null, inbound: null };
 
-/** The org's active templates, or `null` for both (the defaults) when they cannot be read. */
+/** The org's active templates, or `null` for every kind (the defaults) when they cannot be read. */
 export async function loadAgentPrompts(store: AiCallStore, orgId: string, log: BridgeLog): Promise<AgentPromptTemplates> {
   try {
     return await store.activeAgentPrompts(orgId);

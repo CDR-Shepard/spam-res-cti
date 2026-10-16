@@ -9,7 +9,7 @@
  * finds nothing. Mustache inserts these values literally: a `{{` inside the notes is never re-parsed.
  */
 import { KIND_WORDS, slotWords } from './prompt-booking.js';
-import { context, propertyPhrase } from './prompt-context.js';
+import { context, phoneForms, propertyPhrase } from './prompt-context.js';
 import type { PromptInput } from './prompt.js';
 
 export type PromptViewValue = string | boolean | ReadonlyArray<Record<string, string>>;
@@ -36,6 +36,7 @@ export function promptView(input: PromptInput): Record<string, PromptViewValue> 
     crm_notes: c.notes,
     callback_number: c.phone?.written ?? '',
     callback_number_spoken: c.phone?.spoken ?? '',
+    caller_number: phoneForms(input.callerNumber ?? null)?.written ?? '',
     call_plan: c.plan ?? '',
     is_test: c.isTest,
     returning: c.returning,

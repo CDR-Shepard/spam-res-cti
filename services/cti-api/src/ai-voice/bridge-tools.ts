@@ -48,11 +48,13 @@ export interface ToolDeps {
 }
 
 const BAD_ARGUMENTS = '{"error":"bad arguments"}';
-const UNKNOWN_TOOL = '{"error":"unknown tool"}';
+/** What the model hears for a tool it may not call (an unknown name, or one its call was not offered: service-tools.ts). */
+export const UNKNOWN_TOOL = '{"error":"unknown tool"}';
 const TOOL_FAILED = '{"error":"tool failed"}';
 const LOGGED_NAME_MAX = 64;
 const WAITING: ToolResult = { output: '{"ok":true}', then: 'wait' };
-const SAVE_QUALIFICATION: ToolName = 'save_qualification';
+/** Silent note saves: the outbound agent's qualification, the inbound agent's caller details. */
+const NOTE_TOOLS: ReadonlySet<string> = new Set<ToolName>(['save_qualification', 'save_caller_details']);
 
 export const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const isToolName = (n: string): n is ToolName => (TOOL_NAMES as readonly string[]).includes(n);
@@ -76,7 +78,7 @@ export function functionCalls(response: Record<string, unknown>): FunctionCall[]
  */
 export function followUpAfterTools(calls: readonly FunctionCall[], batch: BatchResult, spoke: Spoke): boolean {
   if (!batch.speak) return false;
-  const onlyNotes = calls.length > 0 && calls.every((call) => call.name === SAVE_QUALIFICATION);
+  const onlyNotes = calls.length > 0 && calls.every((call) => NOTE_TOOLS.has(call.name));
   return !(onlyNotes && spoke.audio && spoke.question);
 }
 

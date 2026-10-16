@@ -112,7 +112,13 @@ export function findCallSinceQuery(db: Db, a: CallLookup) {
   const target =
     a.kind === 'record'
       ? and(eq(c.sfRecordId, a.sfRecordId ?? ''), eq(c.isTest, false))
-      : and(eq(c.toE164, a.toE164 ?? ''), eq(c.isTest, true), eq(c.practice, a.kind === 'practice' || a.kind === 'practice_browser'));
+      : and(
+          eq(c.toE164, a.toE164 ?? ''),
+          eq(c.isTest, true),
+          eq(c.practice, a.kind === 'practice' || a.kind === 'practice_browser'),
+          // An inbound test call from that phone (plan 2026-10-16) is also is_test: never take it for the call placed here.
+          eq(c.direction, 'outbound'),
+        );
   return db
     .select({ id: c.id, status: c.status, blockReason: c.blockReason, callSid: c.callSid })
     .from(c)

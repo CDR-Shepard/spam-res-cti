@@ -69,11 +69,11 @@ describe.skipIf(!server)('ai_agent_prompts active versions (real Postgres)', () 
       .returning({ id: schema.organizations.id });
     return org!.id;
   };
-  const save = (orgId: string, kind: 'instructions' | 'voicemail', body: string | null, at: string) =>
+  const save = (orgId: string, kind: 'instructions' | 'voicemail' | 'inbound', body: string | null, at: string) =>
     db.insert(schema.aiAgentPrompts).values({ orgId, kind, body, createdBy: userId, createdAt: new Date(at) });
 
-  it('an org with no saved version gets null for both kinds', async () => {
-    expect(await store.activeAgentPrompts(await newOrg())).toEqual({ instructions: null, voicemail: null });
+  it('an org with no saved version gets null for every kind', async () => {
+    expect(await store.activeAgentPrompts(await newOrg())).toEqual({ instructions: null, voicemail: null, inbound: null });
   });
 
   it('returns the newest version of each kind, whatever order the rows were inserted in', async () => {
@@ -82,7 +82,7 @@ describe.skipIf(!server)('ai_agent_prompts active versions (real Postgres)', () 
     await save(org, 'instructions', 'oldest', '2026-10-01T00:00:00Z');
     await save(org, 'instructions', 'middle', '2026-10-02T00:00:00Z');
     await save(org, 'voicemail', 'voicemail v1', '2026-10-01T00:00:00Z');
-    expect(await store.activeAgentPrompts(org)).toEqual({ instructions: 'newest', voicemail: 'voicemail v1' });
+    expect(await store.activeAgentPrompts(org)).toEqual({ instructions: 'newest', voicemail: 'voicemail v1', inbound: null });
   });
 
   it('a newest version with a NULL body is a reset: null, not the older text', async () => {
@@ -90,10 +90,16 @@ describe.skipIf(!server)('ai_agent_prompts active versions (real Postgres)', () 
     await save(org, 'instructions', 'custom', '2026-10-01T00:00:00Z');
     await save(org, 'instructions', null, '2026-10-02T00:00:00Z');
     await save(org, 'voicemail', 'kept', '2026-10-01T00:00:00Z');
-    expect(await store.activeAgentPrompts(org)).toEqual({ instructions: null, voicemail: 'kept' });
+    expect(await store.activeAgentPrompts(org)).toEqual({ instructions: null, voicemail: 'kept', inbound: null });
     // ...and a version saved after the reset is active again.
     await save(org, 'instructions', 'custom again', '2026-10-03T00:00:00Z');
     expect((await store.activeAgentPrompts(org)).instructions).toBe('custom again');
+  });
+
+  it('reads the inbound kind (migration 0061) like the others', async () => {
+    const org = await newOrg();
+    await save(org, 'inbound', 'You are {{agent_name}}.', '2026-10-16T00:00:00Z');
+    expect(await store.activeAgentPrompts(org)).toEqual({ instructions: null, voicemail: null, inbound: 'You are {{agent_name}}.' });
   });
 
   it('never returns another org\'s rows', async () => {
@@ -102,7 +108,7 @@ describe.skipIf(!server)('ai_agent_prompts active versions (real Postgres)', () 
     await save(theirs, 'instructions', 'their instructions', '2026-10-05T00:00:00Z');
     await save(theirs, 'voicemail', 'their voicemail', '2026-10-05T00:00:00Z');
     await save(mine, 'instructions', 'my instructions', '2026-10-01T00:00:00Z');
-    expect(await store.activeAgentPrompts(mine)).toEqual({ instructions: 'my instructions', voicemail: null });
-    expect(await store.activeAgentPrompts(theirs)).toEqual({ instructions: 'their instructions', voicemail: 'their voicemail' });
+    expect(await store.activeAgentPrompts(mine)).toEqual({ instructions: 'my instructions', voicemail: null, inbound: null });
+    expect(await store.activeAgentPrompts(theirs)).toEqual({ instructions: 'their instructions', voicemail: 'their voicemail', inbound: null });
   });
 });

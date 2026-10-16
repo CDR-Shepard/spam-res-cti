@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import Mustache from 'mustache';
 import { describe, expect, it, vi } from 'vitest';
 import { AgentPromptCheck, type AgentPromptKind } from '@cti/contracts';
+import { DEFAULT_INBOUND_TEMPLATE } from './prompt-default-inbound.js';
 import { DEFAULT_INSTRUCTIONS_TEMPLATE } from './prompt-default-instructions.js';
 import { DEFAULT_VOICEMAIL_TEMPLATE } from './prompt-default-voicemail.js';
 import { neutraliseFences } from './prompt-plan.js';
@@ -29,6 +30,7 @@ const ALL_NULL = GOLDEN.find((e) => e.name.startsWith('extreme all-null'))!.inpu
 const DEFAULTS: Readonly<Record<AgentPromptKind, string>> = {
   instructions: DEFAULT_INSTRUCTIONS_TEMPLATE,
   voicemail: DEFAULT_VOICEMAIL_TEMPLATE,
+  inbound: DEFAULT_INBOUND_TEMPLATE,
 };
 const KINDS: readonly AgentPromptKind[] = ['instructions', 'voicemail'];
 

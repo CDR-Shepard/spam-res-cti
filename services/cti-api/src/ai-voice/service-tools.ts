@@ -16,10 +16,16 @@
  * (shared with the CTI dialer). Plan 1D Part 6: except on a test or practice
  * call, which rings the admin's own phone: the outcome is recorded and the
  * call ends as usual, but that number is never opted out.
+ *
+ * A call runs only the tools its direction was offered (plan 2026-10-16
+ * inbound agent testing): an inbound call `save_caller_details` and
+ * `end_call`, an outbound call everything else. Any other name is refused as
+ * an unknown tool, whatever the model sends.
  */
-import type { AppointmentSlot, BookedAppointment } from '@cti/contracts';
-import { END_CALL_OUTCOMES, QUALIFICATION_FIELDS, TRANSFER_REASONS } from './prompt-tools.js';
+import { INBOUND_DETAIL_FIELDS, INBOUND_STATUSES, type AppointmentSlot, type BookedAppointment } from '@cti/contracts';
+import { END_CALL_OUTCOMES, INBOUND_TOOLS, OUTBOUND_TOOL_NAMES, QUALIFICATION_FIELDS, TRANSFER_REASONS } from './prompt-tools.js';
 import type { BridgeLog, ToolResult } from './bridge.js';
+import { UNKNOWN_TOOL } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
 import { bookAppointment, storeBooking } from './service-booking.js';
 import type { AiCallOutcome, AiCallStore } from './store.js';
@@ -41,12 +47,16 @@ export interface ToolCtx {
    * recorded but never opts that number out. Absent = a real call.
    */
   isTest?: boolean;
+  /** inbound = a test phone called the AI (only INBOUND_TOOLS run). Absent = outbound. */
+  direction?: 'outbound' | 'inbound';
 }
 
 export interface ToolEffects {
   /** Opt the number out (idempotent) and record the outcome. Throws if the opt-out cannot be written. */
   markDoNotCall(ctx: ToolCtx, note: string): Promise<void>;
   saveQualification(ctx: ToolCtx, fields: Record<string, string>): Promise<void>;
+  /** The inbound agent's details (and status), merged into ai_calls.qualification. */
+  saveCallerDetails(ctx: ToolCtx, fields: Record<string, string>): Promise<void>;
   scheduleCallback(ctx: ToolCtx, req: { when: string; note: string }): Promise<void>;
   /**
    * A transfer rang out or could not be placed: make sure someone calls them
@@ -78,6 +88,7 @@ export interface ToolEnv {
 
 const SUMMARY_MAX = 2000;
 const QUALIFICATION_MAX = 500;
+const CALLER_NOTES_MAX = 1000;
 const WHEN_MAX = 200;
 const NOTE_MAX = 500;
 const WRONG_NUMBER = /wrong\s*number/i;
@@ -87,6 +98,11 @@ export const TRANSFER_MISSED_LINE = 'Transfer to a specialist did not connect �
 export const NO_APPOINTMENT_LINE = 'The agent ended as booked, but no appointment was saved — call them back.';
 /** What save_qualification says back: the agent carries on (it already spoke), without thanking or repeating itself. */
 const SAVED_OUTPUT = "saved — carry on from where you were; don't thank them again or repeat yourself";
+/** The tools each direction is offered (prompt-tools.ts); handleToolCall refuses the rest. */
+const OFFERED: Readonly<Record<'outbound' | 'inbound', ReadonlySet<string>>> = {
+  outbound: new Set(OUTBOUND_TOOL_NAMES),
+  inbound: new Set(INBOUND_TOOLS.map((tool) => tool.name)),
+};
 const ISO_8601 = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -131,6 +147,9 @@ export const defaultToolEffects: ToolEffects = {
     await ctx.store.setOutcome(ctx.aiCallId, WRONG_NUMBER.test(note) ? 'wrong_number' : 'do_not_call', null);
   },
   async saveQualification(ctx, fields) {
+    await ctx.store.mergeQualification(ctx.aiCallId, fields);
+  },
+  async saveCallerDetails(ctx, fields) {
     await ctx.store.mergeQualification(ctx.aiCallId, fields);
   },
   async scheduleCallback(ctx, req) {
@@ -278,9 +297,25 @@ function qualificationFields(args: unknown): Record<string, string> {
   );
 }
 
+/** The inbound agent's save: the known detail fields (trimmed, capped) and a valid status; anything else is dropped. */
+function callerDetails(args: unknown): Record<string, string> {
+  const details = INBOUND_DETAIL_FIELDS.flatMap((k) => {
+    const v = text(field(args, k), k === 'notes' ? CALLER_NOTES_MAX : QUALIFICATION_MAX);
+    return v ? [[k, v] as const] : [];
+  });
+  const status = text(field(args, 'status'), QUALIFICATION_MAX);
+  const valid = (INBOUND_STATUSES as readonly string[]).includes(status) ? [['status', status] as const] : [];
+  return Object.fromEntries([...details, ...valid]);
+}
+
 /** The bridge's `hooks.onTool`. A throw here becomes `{"error":"tool failed"}` for the model. */
 export async function handleToolCall(name: ToolName, args: unknown, env: ToolEnv): Promise<ToolResult> {
   const { ctx, effects } = env;
+  const direction = ctx.direction ?? 'outbound';
+  if (!OFFERED[direction].has(name)) {
+    ctx.log.warn({ aiCallId: ctx.aiCallId, tool: name, direction }, 'ai-voice: tool not offered on this call');
+    return { output: UNKNOWN_TOOL };
+  }
   switch (name) {
     case 'end_call':
       return endCall(args, env);
@@ -300,6 +335,9 @@ export async function handleToolCall(name: ToolName, args: unknown, env: ToolEnv
       return { output: 'scheduled', then: 'continue' };
     case 'book_appointment':
       return bookAppointment(args, env);
+    case 'save_caller_details':
+      await effects.saveCallerDetails(ctx, callerDetails(args));
+      return { output: SAVED_OUTPUT, then: 'continue' };
     default: {
       const never: never = name;
       return { output: `{"error":"unknown tool ${String(never)}"}` };

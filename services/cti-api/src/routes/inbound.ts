@@ -26,7 +26,9 @@ import { findByPhone, findPrimaryOpenOpportunityId } from '../salesforce/client.
 import { enqueueSyncForCall } from '../salesforce/sync.js';
 import { normalize } from '@cti/phone';
 import { lastDialerForCaller, stickyAgentForCaller } from '../dialer/sticky.js';
+import { tryInboundAiCall } from '../ai-voice/inbound-call.js';
 import { aiCallbackRep } from '../ai-voice/number-pool.js';
+import { drizzleAiCallStore } from '../ai-voice/store.js';
 import { dialClientWithCallerParams } from './inbound-caller-params.js';
 import { INBOUND_POP_LOOKUP_MS, popRecordFor } from '../salesforce/inbound-pop.js';
 import {
@@ -216,6 +218,19 @@ export async function registerInboundRoutes(app: FastifyInstance): Promise<void>
       t.say({ voice: 'Polly.Joanna' as never }, 'Sorry, this line cannot accept inbound calls right now. Goodbye.');
       t.hangup();
       return reply.type('text/xml').send(t.toString());
+    }
+
+    // Inbound agent testing (plan 2026-10-16): a phone on the org's test-phones
+    // list calling one of the AI's numbers gets the AI agent — before any calls
+    // row, Salesforce lookup or rep routing. Anyone else (and everyone when the
+    // switch is off, AI voice is unavailable or anything fails) gets null and
+    // carries on below exactly as before.
+    if (owned.kind === 'ai_pool') {
+      const aiTwiml = await tryInboundAiCall(
+        { cfg, db, store: drizzleAiCallStore(db), log: req.log, now: () => new Date() },
+        { orgId: owned.orgId, callerE164: normFrom, aiNumber: owned.e164, callSid },
+      );
+      if (aiTwiml) return reply.type('text/xml').send(aiTwiml);
     }
 
     // Dialer-pool DIDs are shared (not owned by one rep), so they don't route

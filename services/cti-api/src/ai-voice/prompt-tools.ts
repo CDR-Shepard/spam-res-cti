@@ -5,8 +5,13 @@
  *
  * Plan 1D: `book_appointment` (and the `appointment_set` end_call outcome) are
  * offered only on a call that carries appointment times (`toolsFor`).
+ *
+ * Inbound agent testing (plan 2026-10-16): an inbound call (a test phone called
+ * the AI) is offered `INBOUND_TOOLS` only — `save_caller_details` and `end_call`;
+ * an outbound call never gets `save_caller_details` (service-tools.ts refuses
+ * any tool a call's direction was not offered).
  */
-import type { AppointmentSlot } from '@cti/contracts';
+import { INBOUND_DETAIL_FIELDS, INBOUND_STATUSES, type AppointmentSlot, type InboundDetailField } from '@cti/contracts';
 
 /** A Realtime API function tool (`session.update` → `session.tools[]`). */
 export interface RealtimeFunctionTool {
@@ -16,7 +21,8 @@ export interface RealtimeFunctionTool {
   parameters: Record<string, unknown>;
 }
 
-export const TOOL_NAMES = [
+/** The call-service tools an outbound call may be offered (book_appointment only with slots). */
+export const OUTBOUND_TOOL_NAMES = [
   'transfer_to_rep',
   'end_call',
   'mark_do_not_call',
@@ -24,6 +30,9 @@ export const TOOL_NAMES = [
   'schedule_callback',
   'book_appointment',
 ] as const;
+
+/** Every tool the call service runs: the outbound ones, then the inbound agent's details save. */
+export const TOOL_NAMES = [...OUTBOUND_TOOL_NAMES, 'save_caller_details'] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -167,3 +176,38 @@ export function toolsFor(slots: readonly AppointmentSlot[]): RealtimeFunctionToo
     bookAppointmentTool(slots.map((s) => s.id)),
   ];
 }
+
+const CALLER_DETAIL_HINTS: Record<InboundDetailField, string> = {
+  location: 'Where the property is: the city or area, or the address if they gave it.',
+  timeline: 'How soon they want to sell.',
+  price_expectation: 'The price they hope to get, as they said it.',
+  condition: 'The condition of the house and any repairs it needs.',
+  decision_maker: 'Who decides on the sale: them, a spouse, other owners.',
+  urgency: 'How urgent selling is for them, and why.',
+  best_callback_time: 'When our team should call them back.',
+  notes: 'Anything else the team should know: their reasons, their situation, other details about the property.',
+};
+
+/** The inbound agent's silent save: the caller's details and, before goodbye, how the call ended (`status`). */
+export const SAVE_CALLER_DETAILS_TOOL: RealtimeFunctionTool = {
+  type: 'function',
+  name: 'save_caller_details',
+  description: 'Save what the caller told you — only the fields you learned; call again as you learn more. Silent: never announce it.',
+  parameters: objectSchema(
+    {
+      status: {
+        type: 'string',
+        enum: [...INBOUND_STATUSES],
+        description: 'How the call ended: qualified, callback (they want a call back), disqualified, or incomplete.',
+      },
+      ...Object.fromEntries(INBOUND_DETAIL_FIELDS.map((f) => [f, str(CALLER_DETAIL_HINTS[f])])),
+    },
+    [],
+  ),
+};
+
+/** The inbound agent's tools (a test phone called one of the AI's numbers): save the details, hang up. */
+export const INBOUND_TOOLS: RealtimeFunctionTool[] = [
+  SAVE_CALLER_DETAILS_TOOL,
+  AI_CALL_TOOLS.find((tool) => tool.name === 'end_call') ?? endCallTool(BASE_END_CALL_OUTCOMES),
+];

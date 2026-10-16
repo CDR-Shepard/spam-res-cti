@@ -9,6 +9,7 @@ import {
   type PromptInput,
   type RealtimeFunctionTool,
 } from './prompt.js';
+import { OUTBOUND_TOOL_NAMES } from './prompt-tools.js';
 
 const FENCE_OPEN = '<crm_notes>';
 const FENCE_CLOSE = '</crm_notes>';
@@ -192,9 +193,9 @@ describe('buildInstructions', () => {
 
   it('names every tool so the model knows when to call it (book_appointment only with slots)', () => {
     const text = buildInstructions(input({ slots: SLOTS }));
-    for (const name of TOOL_NAMES) expect(text).toContain(name);
+    for (const name of OUTBOUND_TOOL_NAMES) expect(text).toContain(name);
     const plain = buildInstructions(input());
-    for (const name of TOOL_NAMES.filter((n) => n !== 'book_appointment')) expect(plain).toContain(name);
+    for (const name of OUTBOUND_TOOL_NAMES.filter((n) => n !== 'book_appointment')) expect(plain).toContain(name);
   });
 
   it("states the recipient's local time", () => {
@@ -380,8 +381,8 @@ describe('natural turn-taking rules (2026-10-09)', () => {
 });
 
 describe('AI_CALL_TOOLS', () => {
-  it('has the TOOL_NAMES in order, all but book_appointment (offered only with slots), then wait_for_user', () => {
-    const base = TOOL_NAMES.filter((n) => n !== 'book_appointment');
+  it('has the outbound TOOL_NAMES in order, all but book_appointment (offered only with slots), then wait_for_user', () => {
+    const base = OUTBOUND_TOOL_NAMES.filter((n) => n !== 'book_appointment');
     expect(AI_CALL_TOOLS.map((t) => t.name)).toEqual([...base, 'wait_for_user']);
     expect(toolsFor(SLOTS).map((t) => t.name)).toEqual([...base, 'wait_for_user', 'book_appointment']);
   });

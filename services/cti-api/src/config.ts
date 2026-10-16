@@ -251,6 +251,12 @@ const schema = z.object({
    * outside calling hours (own test phones only). Parse with parseTestNumbers.
    */
   AI_VOICE_TEST_NUMBERS: z.string().optional(),
+  /**
+   * Inbound agent testing (plan 2026-10-16): `on` = a phone on the org's test-phones list (ai_test_phones) that calls
+   * one of the AI's numbers gets the AI agent with its `inbound` prompt; `off` = test phones route like any caller
+   * (rep ring / voicemail), as before. Real callers are never affected either way.
+   */
+  AI_VOICE_INBOUND: z.enum(['on', 'off']).default('on'),
   /** Hard cap on one AI call's length, in seconds. */
   AI_VOICE_MAX_CALL_SECONDS: z.coerce.number().int().positive().default(600),
   /** Post-call transcript summaries (Anthropic). Optional. */

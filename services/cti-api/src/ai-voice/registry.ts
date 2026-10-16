@@ -30,6 +30,12 @@ export interface ActiveAiCall {
   toE164: string;
   fromE164: string;
   isTest: boolean;
+  /**
+   * outbound = the app placed the call; inbound = a test phone called one of the AI's numbers (plan 2026-10-16): then
+   * toE164 is the caller, fromE164 the AI number they dialed, and the call gets the inbound prompt and tools and is
+   * finalized when its conversation ends (Twilio sends it no status callback).
+   */
+  direction: 'outbound' | 'inbound';
   /** Plan 1D Part 6 B: the number whose zone is "their local time right now" (a practice call: the record's phone). Absent = toE164. */
   localTimeE164?: string;
   record: AiCallRecord | null;

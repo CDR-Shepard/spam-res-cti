@@ -1,10 +1,12 @@
 /**
  * The SQL of an AI call's end (Task 7): the transfer-result's status writes,
  * the `calls` row that makes the dialer's caps count the call, the Salesforce
- * Task id, and the stale-row sweep. Builders only — `drizzleAiCallStore`
- * (store.ts) runs them; store-end.test.ts pins the rendered SQL.
+ * Task id, the stale-row sweep, and the end of an inbound test call. Builders
+ * only — `drizzleAiCallStore` (store.ts) runs them; store-end.test.ts pins the
+ * rendered SQL.
  */
 import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
+import { INBOUND_STATUSES } from '@cti/contracts';
 import { getDb, schema } from '@cti/db';
 
 type Db = ReturnType<typeof getDb>;
@@ -79,6 +81,38 @@ export const staleOpenQuery = (db: Conn, placedBefore: Date, unplacedBefore: Dat
     )
     .orderBy(asc(t.createdAt))
     .limit(limit);
+
+/** The end of an inbound row (a test phone called the AI; plan 2026-10-16 inbound agent testing). */
+export interface InboundFinalizeWrite {
+  durationSeconds: number | null;
+  endedAt: Date;
+  /** The call itself failed (Twilio says failed/canceled, or has no such call): status `failed`. */
+  failed: boolean;
+}
+
+/**
+ * The compare-and-swap end of an INBOUND row: the outcome is the `status` the agent saved with save_caller_details
+ * (read in the same statement, so a save that lands first is never lost), else `incomplete`, whatever end_call wrote;
+ * the status is `completed` unless the call failed or the bridge already marked the row failed.
+ */
+export const finalizeInboundQuery = (db: Conn, id: string, w: InboundFinalizeWrite) => {
+  const saved = sql`${t.qualification}->>'status'`;
+  const statuses = sql.join(
+    INBOUND_STATUSES.map((s) => sql`${s}`),
+    sql`, `,
+  );
+  return db
+    .update(t)
+    .set({
+      outcome: sql`case when ${saved} in (${statuses}) then ${saved} else 'incomplete' end`,
+      status: w.failed ? 'failed' : sql`case when ${t.status} = 'failed' then 'failed' else 'completed' end`,
+      durationSeconds: w.durationSeconds,
+      endedAt: w.endedAt,
+      ...touched,
+    })
+    .where(and(eq(t.id, id), isNull(t.endedAt), eq(t.direction, 'inbound')))
+    .returning();
+};
 
 /** Insert (or find) the `calls` row and link it to the AI call in ONE transaction, so the cap never counts it twice. */
 export async function recordCtiCall(db: Db, aiCallId: string, values: NewCtiCall): Promise<string> {

@@ -3,8 +3,9 @@
  * caller ID?
  *
  * Consent is the hard rule — a call goes out only when the Salesforce record's
- * `AI_Call_Consent__c` is true, or when an ADMIN calls a number on the
- * `AI_VOICE_TEST_NUMBERS` list. Every call, test or not, then passes the same
+ * `AI_Call_Consent__c` is true, or when an ADMIN calls a test number: one on the
+ * `AI_VOICE_TEST_NUMBERS` list or on the org's test-phones list (`ai_test_phones`,
+ * the Testing page; plan 2026-10-16). Every call, test or not, then passes the same
  * compliance checks the power dialer applies, using the dialer's own functions
  * so the two paths cannot drift:
  *   opt-out / block list / federal DNC  (`blockedTargets`)
@@ -39,6 +40,7 @@ import { blockedTargets as realBlockedTargets } from '../dialer/consent-check.js
 import { parseCallingHoursExempt, withinCallingHours as realWithinCallingHours, type Db } from '../dialer/pick-did.js';
 import { peekAiCallerId as realPeekAiCallerId, pickAiDid as realPickAiDid } from './number-pool.js';
 import type { AiCallRecord } from './record.js';
+import { testPhoneNumbers as realTestPhoneNumbers } from './test-phones.js';
 
 export type AiGateBlock =
   | 'ai_voice_unavailable'
@@ -78,6 +80,8 @@ export interface GateDeps {
   pickAiDid: typeof realPickAiDid;
   /** Plan 1E: the browser branch's caller ID, read without claiming a dial. */
   peekAiCallerId: typeof realPeekAiCallerId;
+  /** The org's test-phones list (read only for a number not in AI_VOICE_TEST_NUMBERS). Absent = the env list alone. */
+  testPhoneNumbers?: typeof realTestPhoneNumbers;
 }
 
 const defaultDeps: GateDeps = {
@@ -86,12 +90,23 @@ const defaultDeps: GateDeps = {
   withinCallingHours: realWithinCallingHours,
   pickAiDid: realPickAiDid,
   peekAiCallerId: realPeekAiCallerId,
+  testPhoneNumbers: realTestPhoneNumbers,
 };
 
 const blocked = (reason: AiGateBlock): AiGateResult => ({ ok: false, reason });
 
+/** Is `to` a test number: on the AI_VOICE_TEST_NUMBERS env list, or on the org's test-phones list? */
+async function isTestNumber(db: Db, input: AiGateInput, to: string, deps: GateDeps): Promise<boolean> {
+  if (parseTestNumbers(input.cfg.AI_VOICE_TEST_NUMBERS).has(to)) return true;
+  return (await deps.testPhoneNumbers?.(db, input.orgId))?.has(to) ?? false;
+}
+
 /** Consent + number: the record's first phone, or a listed test number for an admin. */
-function resolveTarget(input: AiGateInput & { target: Exclude<AiGateTarget, { kind: 'browser' }> }): { toE164: string } | { reason: AiGateBlock } {
+async function resolveTarget(
+  db: Db,
+  input: AiGateInput & { target: Exclude<AiGateTarget, { kind: 'browser' }> },
+  deps: GateDeps,
+): Promise<{ toE164: string } | { reason: AiGateBlock }> {
   const { target } = input;
   if (target.kind === 'record') {
     if (target.record.consentFieldMissing) return { reason: 'consent_field_missing' };
@@ -102,7 +117,7 @@ function resolveTarget(input: AiGateInput & { target: Exclude<AiGateTarget, { ki
   if (!input.isAdmin) return { reason: 'not_admin_for_test' };
   const to = toE164(target.toRaw);
   if (!to) return { reason: 'invalid_number' };
-  if (!parseTestNumbers(input.cfg.AI_VOICE_TEST_NUMBERS).has(to)) return { reason: 'not_admin_for_test' };
+  if (!(await isTestNumber(db, input, to, deps))) return { reason: 'not_admin_for_test' };
   return { toE164: to };
 }
 
@@ -117,7 +132,7 @@ export async function gateAiCall(db: Db, input: AiGateInput, deps: GateDeps = de
   const { target } = input;
   if (target.kind === 'browser') return gateBrowser(db, { ...input, target }, deps);
 
-  const resolved = resolveTarget({ ...input, target });
+  const resolved = await resolveTarget(db, { ...input, target }, deps);
   if ('reason' in resolved) return blocked(resolved.reason);
   const to = resolved.toE164;
 

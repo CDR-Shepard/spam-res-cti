@@ -3,7 +3,8 @@
  * HMAC-signed by outreach-api, idempotent per key (internal-auth.ts, request-store.ts).
  *
  *   POST /internal/ai-calls               place (or refuse) one AI call
- *   GET  /internal/ai-calls/availability  is AI calling on; the admin test numbers; can a browser test get a token
+ *   GET  /internal/ai-calls/availability  is AI calling on; the admin test numbers (with a signed `?orgId=`, the env list
+ *                                         plus that org's test-phones list); can a browser test get a token
  *   POST /internal/ai-calls/browser-token an admin's incoming-only Voice token for "Talk in browser" (browser-token.ts)
  *   POST /internal/ai-calls/prompt-check  check an agent prompt template (the admin's draft, or null = the default) and preview it
  *
@@ -35,6 +36,7 @@ import type { SessionUser } from '@cti/auth';
 import { toE164 } from '@cti/phone';
 import { aiVoiceAvailable, loadConfig, parseTestNumbers, type AppConfig } from '../config.js';
 import type { Db } from '../dialer/pick-did.js';
+import { UUID_RE } from '../telephony/webhooks.js';
 import type { BridgeLog } from './bridge.js';
 import { browserCallsAvailable, registerBrowserTokenRoute } from './browser-token.js';
 import { checkInternalRequest, checkInternalTransport, INTERNAL_RATE_MAX } from './internal-auth.js';
@@ -42,6 +44,7 @@ import { checkTemplate } from './prompt-template.js';
 import type { AiCallRecord } from './record.js';
 import { requestHash, STALE_REQUEST_MS, type AiCallRequestRow, type AiCallRequestStore, type CallLookup, type FoundCall } from './request-store.js';
 import type { StartDeps, StartInput, StartResult } from './service.js';
+import { testPhoneNumbers } from './test-phones.js';
 
 export interface InternalAiDeps {
   db: () => Db;
@@ -52,6 +55,8 @@ export interface InternalAiDeps {
   loadIntegrationRecord: (db: Db, orgId: string, objectType: 'Lead' | 'Opportunity', recordId: string) => Promise<AiCallRecord | null>;
   start: (i: StartInput) => Promise<StartResult>;
   startDeps: Omit<StartDeps, 'loadRecord'>;
+  /** The org's test-phones list (default: test-phones.ts); a test seam. */
+  testPhones?: (db: Db, orgId: string) => Promise<ReadonlySet<string>>;
   log: BridgeLog;
 }
 
@@ -156,11 +161,11 @@ export async function registerInternalAiCallRoutes(app: FastifyInstance, deps: I
     });
     const rateLimit = { max: INTERNAL_RATE_MAX, timeWindow: '1 minute', keyGenerator: () => 'internal-outreach' };
 
-    scope.get(INTERNAL_AI_AVAILABILITY_PATH, { config: { rateLimit } }, async (): Promise<AiAvailability> => {
+    scope.get(INTERNAL_AI_AVAILABILITY_PATH, { config: { rateLimit } }, async (req): Promise<AiAvailability> => {
       const cfg = cfgOf();
       return {
         available: aiVoiceAvailable(cfg),
-        testNumbers: [...parseTestNumbers(cfg.AI_VOICE_TEST_NUMBERS)],
+        testNumbers: await availableTestNumbers(deps, cfg, (req.query as { orgId?: unknown } | undefined)?.orgId),
         browserCalls: browserCallsAvailable(cfg),
       };
     });
@@ -181,6 +186,22 @@ export async function registerInternalAiCallRoutes(app: FastifyInstance, deps: I
       return 'conflict' in answer ? reply.code(409).send({ error: 'idempotency_conflict' }) : answer;
     });
   });
+}
+
+/**
+ * The admin test numbers: AI_VOICE_TEST_NUMBERS, then (with a valid `orgId`) the org's test-phones list, each once. An
+ * unreadable list leaves the env list (logged): the gate still decides every call on its own read.
+ */
+async function availableTestNumbers(deps: InternalAiDeps, cfg: AppConfig, orgId: unknown): Promise<string[]> {
+  const env = parseTestNumbers(cfg.AI_VOICE_TEST_NUMBERS);
+  if (typeof orgId !== 'string' || !UUID_RE.test(orgId)) return [...env];
+  try {
+    const listed = await (deps.testPhones ?? testPhoneNumbers)(deps.db(), orgId);
+    return [...new Set([...env, ...listed])];
+  } catch {
+    deps.log.warn({ reason: 'db_error' }, 'ai-voice internal: test phones unavailable, using the env list');
+    return [...env];
+  }
 }
 
 type Outcome = InternalAiCallResponse | { conflict: true };

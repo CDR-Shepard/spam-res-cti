@@ -1,5 +1,6 @@
 /**
- * The agent's instructions and voicemail as Mustache templates (plan 2026-10-16 editable agent prompts):
+ * The agent's instructions, voicemail and inbound prompt as Mustache templates (plan 2026-10-16 editable agent prompts;
+ * the inbound kind, plan 2026-10-16 inbound agent testing):
  * the placeholders each kind may use, rendering over one call's data, and the check an admin's draft must
  * pass before it is saved.
  *
@@ -10,6 +11,7 @@
  */
 import Mustache from 'mustache';
 import { AGENT_PROMPT_MAX_CHARS, type AgentPromptCheck, type AgentPromptKind, type AgentPromptPlaceholder } from '@cti/contracts';
+import { DEFAULT_INBOUND_TEMPLATE } from './prompt-default-inbound.js';
 import { DEFAULT_INSTRUCTIONS_TEMPLATE } from './prompt-default-instructions.js';
 import { DEFAULT_VOICEMAIL_TEMPLATE } from './prompt-default-voicemail.js';
 import { promptView } from './prompt-view.js';
@@ -18,6 +20,7 @@ import type { PromptInput } from './prompt.js';
 export const DEFAULT_TEMPLATES: Readonly<Record<AgentPromptKind, string>> = {
   instructions: DEFAULT_INSTRUCTIONS_TEMPLATE,
   voicemail: DEFAULT_VOICEMAIL_TEMPLATE,
+  inbound: DEFAULT_INBOUND_TEMPLATE,
 };
 
 const text = (name: string, description: string): AgentPromptPlaceholder => ({ name, kind: 'text', description });
@@ -33,6 +36,8 @@ const YOUR_PROPERTY = text(
   'your_property',
   '"your property at 1234 Oak Street" — or "your property in Tampa" when only the city is known, or just "your property"',
 );
+const LOCAL_TIME = text('local_time', 'the person\'s local day and time when the call starts, e.g. "Tuesday 4:12 PM"');
+const CALLER_NUMBER = text('caller_number', 'the number the caller is calling from, written like 619-555-0100');
 const CALLBACK_NUMBER = shownWhen(
   'callback_number',
   'the number people can call us back on, written like "512-555-0100" (empty when there is none)',
@@ -59,7 +64,7 @@ export const PLACEHOLDERS: Readonly<Record<AgentPromptKind, readonly AgentPrompt
     text('the_property', '"the property at 1234 Oak Street" — or "the property in Tampa" when only the city is known, or just "the property"'),
     text('their_property', '"their property at 1234 Oak Street" — or "their property in Tampa" when only the city is known, or just "their property"'),
     YOUR_PROPERTY,
-    text('local_time', 'the person\'s local day and time when the call starts, e.g. "Tuesday 4:12 PM"'),
+    LOCAL_TIME,
     text('crm_notes', 'the person\'s Salesforce notes and recent activity, cleaned up and cut to the newest 3,000 characters ("(no notes on file)" when there are none)'),
     CALLBACK_NUMBER,
     text('callback_number_spoken', 'the callback number in words, e.g. "five one two, five five five, zero one zero zero" (empty when there is none)'),
@@ -76,11 +81,15 @@ export const PLACEHOLDERS: Readonly<Record<AgentPromptKind, readonly AgentPrompt
     text('time_text', 'inside appointment_times: the day and time in the person\'s time zone, e.g. "Wednesday, October 7 at 2 PM their time, 11 AM Pacific"'),
   ],
   voicemail: [FIRST_NAME, AGENT_NAME, COMPANY_NAME, YOUR_PROPERTY, CALLBACK_NUMBER],
+  inbound: [AGENT_NAME, COMPANY_NAME, CALLER_NUMBER, LOCAL_TIME],
 };
 
 const OWNER = '0058X00000Fsx39QAB';
 
-/** The preview's sample call: Jane at 1234 Oak St in Tampa, spoken with before, with a plan, two times with Grant and a callback number. */
+/**
+ * The preview's sample call: Jane at 1234 Oak St in Tampa, spoken with before, with a plan, two times with Grant and a callback
+ * number; for the inbound prompt, a caller calling from 619-555-0100.
+ */
 export const SAMPLE_INPUT: PromptInput = {
   agentName: 'Alex',
   companyName: 'GG Homes',
@@ -103,6 +112,7 @@ export const SAMPLE_INPUT: PromptInput = {
     },
   ],
   sellerTimeZone: 'America/New_York',
+  callerNumber: '+16195550100',
 };
 
 const NUMBER = new Intl.NumberFormat('en-US');

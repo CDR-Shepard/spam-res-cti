@@ -13,6 +13,12 @@
  * finalizeAiCall is the same compare-and-swap the webhook uses, so a late
  * callback and the sweeper can never both finalize a row.
  *
+ * An INBOUND row (a test phone called the AI) has its CallSid from the start
+ * and no status callback. While its conversation runs it is in the registry,
+ * so it is skipped however long it lasts; it is swept only once that entry is
+ * gone (the stream never started, or the process restarted), and finalizeAiCall
+ * closes it the inbound way (no `calls` row, no Salesforce, no opt-out).
+ *
  * Started from server.ts; null when AI voice is unavailable.
  */
 import { getDb } from '@cti/db';

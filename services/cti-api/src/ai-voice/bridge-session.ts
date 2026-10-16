@@ -38,6 +38,21 @@ const AUDIO_FORMAT = { type: 'audio/pcmu' } as const;
 export const OPENER_PROMPT = '(The person picked up but has not spoken yet. Open the call now.)';
 
 /**
+ * How the agent opens a call nobody has spoken on yet: after `delayMs` of silence from `session.updated` it is sent
+ * `prompt` and answers. Absent (BridgeOptions.opener) = an outbound call: OPENER_DELAY_MS (bridge.ts) and OPENER_PROMPT.
+ */
+export interface OpenerOption {
+  delayMs: number;
+  prompt: string;
+}
+
+/** An inbound call (a test phone called the AI, plan 2026-10-16): the caller is waiting, so answer almost at once. */
+export const INBOUND_OPENER: OpenerOption = {
+  delayMs: 300,
+  prompt: '(Someone just called in and the line is open. Answer now with your greeting.)',
+};
+
+/**
  * The session's turn detection. `createResponse: false` stops the server starting a response when the caller stops
  * talking; `interruptResponse: false` leaves cutting the agent to the bridge's gate (spec 2026-10-09 §4.1).
  */
@@ -92,13 +107,13 @@ export function stopAutoResponses(s: TurnDetectionSettings): object {
   };
 }
 
-export function openerItem(): object {
+export function openerItem(prompt: string = OPENER_PROMPT): object {
   return {
     type: 'conversation.item.create',
     item: {
       type: 'message',
       role: 'user',
-      content: [{ type: 'input_text', text: OPENER_PROMPT }],
+      content: [{ type: 'input_text', text: prompt }],
     },
   };
 }

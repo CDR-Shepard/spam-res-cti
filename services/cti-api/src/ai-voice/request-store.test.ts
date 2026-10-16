@@ -91,6 +91,9 @@ describe('ai_call_requests SQL, rendered', () => {
     expect(sql).toContain('"ai_calls"."to_e164" = $3 and "ai_calls"."is_test" = $4 and "ai_calls"."practice" = $5');
     expect(sql).not.toContain('sf_record_id');
     expect(params.slice(2, 5)).toEqual(['+15125550100', true, false]);
+    // An inbound test call from that phone (also is_test, not practice) is never taken for the call this request placed.
+    expect(sql).toContain('"ai_calls"."direction" = $6');
+    expect(params[5]).toBe('outbound');
   });
 
   it('3: a practice call is found by its number, among practice calls only', () => {

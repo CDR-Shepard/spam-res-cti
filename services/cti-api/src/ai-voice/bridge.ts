@@ -46,6 +46,7 @@ import {
   sessionUpdate,
   stopAutoResponses,
   truncate,
+  type OpenerOption,
   type ReasoningEffort,
   type TurnDetection,
   type TurnDetectionSettings,
@@ -109,6 +110,8 @@ export interface BridgeOptions {
   /** Sound judge only: the caller's sound this long over the agent stops it, in ms (default DEFAULT_STOP_MS; the service passes AI_VOICE_STOP_MS). */
   stopMs?: number;
   maxCallMs: number;
+  /** How the agent opens the call (default OPENER_DELAY_MS and OPENER_PROMPT; an inbound call passes INBOUND_OPENER). */
+  opener?: OpenerOption;
   now?: () => number;
   setTimer?: SetTimer;
   clearTimer?: ClearTimer;
@@ -350,7 +353,7 @@ export class AiCallBridge {
     this.sessionReady = true;
     this.clearReadyTimer();
     if (this.callerSpoke || this.openerSent || this.closing) return;
-    this.openerTimer = this.setTimer(() => this.openCall(), OPENER_DELAY_MS);
+    this.openerTimer = this.setTimer(() => this.openCall(), this.opts.opener?.delayMs ?? OPENER_DELAY_MS);
   }
 
   /** Before `session.updated` an error means the session was never configured: end the call. */
@@ -397,7 +400,7 @@ export class AiCallBridge {
     this.openerTimer = null;
     if (this.callerSpoke || this.openerSent || this.ended || this.closing) return;
     this.openerSent = true;
-    this.sockets.sendOpenAi(openerItem());
+    this.sockets.sendOpenAi(openerItem(this.opts.opener?.prompt));
     this.requestResponse();
   }
 

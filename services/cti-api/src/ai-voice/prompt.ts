@@ -13,13 +13,18 @@
  * TCPA (47 CFR 64.1200(b)(2)): an artificial-voice message must state a telephone number, so when
  * `callbackNumber` is given the default voicemail ends with it and the live agent gives it before every
  * non-transfer goodbye.
+ *
+ * Inbound agent testing (plan 2026-10-16): when a test phone calls one of the AI's numbers, the agent follows the
+ * `inbound` template (the owner's prompt by default, prompt-default-inbound.ts), always followed by the fixed
+ * INBOUND_LINE_RULES, which no saved template can remove: they turn the prompt's spoken-JSON ending into silent
+ * save_caller_details calls.
  */
 import type { AgentPromptKind, AppointmentSlot } from '@cti/contracts';
 import { PLAN_PROMPT_MAX } from './prompt-plan.js';
 import { DEFAULT_TEMPLATES, renderMaxChars, renderPrompt } from './prompt-template.js';
-import { AI_CALL_TOOLS, TOOL_NAMES, WAIT_FOR_USER, toolsFor, type RealtimeFunctionTool, type ToolName } from './prompt-tools.js';
+import { AI_CALL_TOOLS, INBOUND_TOOLS, TOOL_NAMES, WAIT_FOR_USER, toolsFor, type RealtimeFunctionTool, type ToolName } from './prompt-tools.js';
 
-export { AI_CALL_TOOLS, PLAN_PROMPT_MAX, TOOL_NAMES, WAIT_FOR_USER, toolsFor, type RealtimeFunctionTool, type ToolName };
+export { AI_CALL_TOOLS, INBOUND_TOOLS, PLAN_PROMPT_MAX, TOOL_NAMES, WAIT_FOR_USER, toolsFor, type RealtimeFunctionTool, type ToolName };
 
 export interface PromptInput {
   agentName: string;
@@ -40,8 +45,10 @@ export interface PromptInput {
   slots?: readonly AppointmentSlot[];
   /** Plan 1D: the zone of the number dialed (`timezoneForNumber(to)`); slot times are said in it. */
   sellerTimeZone?: string | null;
+  /** Inbound only (a test phone called the AI): the caller's E.164 number; absent/null = none. */
+  callerNumber?: string | null;
   /** The org's saved templates; null (or absent) = the built-in default for that kind. */
-  templates?: { instructions: string | null; voicemail: string | null };
+  templates?: { instructions: string | null; voicemail: string | null; inbound?: string | null };
 }
 
 /** Why a saved template was not used: it threw, rendered nothing for this call, or rendered past twice its size limit. */
@@ -91,4 +98,17 @@ export function buildInstructions(p: PromptInput, onTemplateError?: TemplateErro
 /** The voicemail `<Say>` text (≈ 20 s; the default names no price and no ZIP code). */
 export function voicemailText(p: PromptInput, onTemplateError?: TemplateErrorHandler): string {
   return promptText('voicemail', p, onTemplateError);
+}
+
+/** Appended after the inbound prompt on every inbound call, saved template or default: not editable. */
+export const INBOUND_LINE_RULES = [
+  '# How this phone line works (always applies)',
+  '- This is a live phone call: everything you say is spoken aloud. Never say JSON, field names, brackets or tags.',
+  '- Save what the caller tells you with the save_caller_details tool, silently, as you learn it — call it in the same reply as your next sentence or question, never announce it, and call it once more with "status" before you say goodbye. This replaces any instruction above to output JSON or a summary at the end of the call.',
+  '- If the caller wants to go, or once you have said goodbye, call end_call.',
+].join('\n');
+
+/** The Realtime session instructions for an inbound call: the inbound template (saved, else the default), then the line rules. */
+export function buildInboundInstructions(p: PromptInput, onTemplateError?: TemplateErrorHandler): string {
+  return `${promptText('inbound', p, onTemplateError)}\n\n${INBOUND_LINE_RULES}`;
 }

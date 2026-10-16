@@ -55,12 +55,12 @@ describe('pickAiDid — the AI dials only from its own pool', () => {
 });
 
 describe('the AI pool SQL, rendered', () => {
-  it('lastAiFrom: the newest AI call to this person in this org that had a caller ID', () => {
+  it('lastAiFrom: the newest OUTBOUND AI call to this person in this org that had a caller ID (an inbound test call is no sticky)', () => {
     const { sql, params } = lastAiFromQuery(db, 'O1', '+16195559999').toSQL();
     expect(sql).toBe(
-      'select "from_e164" from "ai_calls" where ("ai_calls"."org_id" = $1 and "ai_calls"."to_e164" = $2 and "ai_calls"."from_e164" is not null) order by "ai_calls"."created_at" desc limit $3',
+      'select "from_e164" from "ai_calls" where ("ai_calls"."org_id" = $1 and "ai_calls"."to_e164" = $2 and "ai_calls"."from_e164" is not null and "ai_calls"."direction" = $3) order by "ai_calls"."created_at" desc limit $4',
     );
-    expect(params).toEqual(['O1', '+16195559999', 1]);
+    expect(params).toEqual(['O1', '+16195559999', 'outbound', 1]);
   });
 
   it('aiCallbackRep: hand-off user (else starter) of the newest placed AI call to the caller, same AI number first, 14 days, human users only', () => {
@@ -71,6 +71,9 @@ describe('the AI pool SQL, rendered', () => {
     expect(sql).toContain('"ai_calls"."call_sid" is not null');
     expect(sql).toContain('"ai_calls"."created_at" >= $');
     expect(sql).toContain(`"users"."kind" = $`);
+    // An inbound test call (the test phone called the AI) never decides who a real callback rings.
+    expect(sql).toContain('"ai_calls"."direction" = $');
+    expect(params).toContain('outbound');
     expect(sql).toMatch(/order by "ai_calls"\."from_e164" = \$\d+ desc, "ai_calls"\."created_at" desc limit \$\d+$/);
     expect(params).toContain('O1');
     expect(params).toContain('+16195559999');

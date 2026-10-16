@@ -5,6 +5,7 @@ import { schema } from '@cti/db';
 import {
   existingCtiCallQuery,
   failTransferQuery,
+  finalizeInboundQuery,
   insertCtiCallQuery,
   linkCtiCallQuery,
   markTransferredQuery,
@@ -94,5 +95,20 @@ describe('the end of an AI call, SQL rendered', () => {
     expect(sql).toMatch(/\("ai_calls"\."call_sid" is not null and "ai_calls"\."created_at" < \$\d+\) or \("ai_calls"\."call_sid" is null and "ai_calls"\."created_at" < \$\d+\)/);
     expect(sql).toContain('order by "ai_calls"."created_at" asc');
     expect(params).toEqual(expect.arrayContaining([placed.toISOString(), unplaced.toISOString(), 50]));
+  });
+
+  it('finalizeInbound: the outcome is the saved status (else incomplete) in the same statement, on an open inbound row only', () => {
+    const { sql, params } = finalizeInboundQuery(db, ID, { durationSeconds: 95, endedAt: NOW, failed: false }).toSQL();
+    expect(sql).toMatch(
+      /"outcome" = case when "ai_calls"\."qualification"->>'status' in \(\$1, \$2, \$3, \$4\) then "ai_calls"\."qualification"->>'status' else 'incomplete' end/,
+    );
+    expect(params.slice(0, 4)).toEqual(['qualified', 'callback', 'disqualified', 'incomplete']);
+    expect(sql).toContain(`"status" = case when "ai_calls"."status" = 'failed' then 'failed' else 'completed' end`);
+    expect(sql).toMatch(/where \("ai_calls"\."id" = \$\d+ and "ai_calls"\."ended_at" is null and "ai_calls"\."direction" = \$\d+\) returning/);
+    expect(params).toContain('inbound');
+    expect(sql.split(' where ')[0]).not.toMatch(/cti_call_id|call_sid|answered_by/);
+    const failed = finalizeInboundQuery(db, ID, { durationSeconds: null, endedAt: NOW, failed: true }).toSQL();
+    expect(failed.sql).toMatch(/"status" = \$\d+/);
+    expect(failed.params).toContain('failed');
   });
 });

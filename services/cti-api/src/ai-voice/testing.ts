@@ -4,7 +4,7 @@
  * fake ws-like socket, and a registry entry factory. No network, no DB.
  * (Imported only by *.test.ts.)
  */
-import { bookingStands } from '@cti/contracts';
+import { INBOUND_STATUSES, bookingStands } from '@cti/contracts';
 import type { BridgeSocket } from './bridge.js';
 import type { ActiveAiCall } from './registry.js';
 import type { AiCallRow, AiCallStore, NewAiCall, NewCtiCall, TranscriptEntry } from './store.js';
@@ -19,6 +19,7 @@ export function rowOf(v: NewAiCall & { id: string }): AiCallRow {
     sfRecordId: null,
     fromE164: null,
     isTest: false,
+    direction: 'outbound',
     status: 'queued',
     outcome: null,
     blockReason: null,
@@ -46,7 +47,7 @@ export function rowOf(v: NewAiCall & { id: string }): AiCallRow {
 /** One saved `ai_agent_prompts` version (body null = the built-in default). */
 export interface FakePrompt {
   orgId: string;
-  kind: 'instructions' | 'voicemail';
+  kind: 'instructions' | 'voicemail' | 'inbound';
   body: string | null;
   createdAt: Date;
 }
@@ -164,6 +165,15 @@ export function fakeStore(): FakeStore {
       });
       return rows.get(id) ?? null;
     },
+    async finalizeInbound(id, w) {
+      const r = rows.get(id);
+      if (!r || r.endedAt || r.direction !== 'inbound') return null;
+      const saved = (r.qualification as Record<string, unknown>).status;
+      const outcome = typeof saved === 'string' && (INBOUND_STATUSES as readonly string[]).includes(saved) ? saved : 'incomplete';
+      const status = w.failed || r.status === 'failed' ? 'failed' : 'completed';
+      put(id, { outcome, status, durationSeconds: w.durationSeconds, endedAt: w.endedAt });
+      return rows.get(id) ?? null;
+    },
     async upsertOptOut(orgId, e164, note) {
       if (!optOuts.some((o) => o.orgId === orgId && o.e164 === e164)) optOuts.push({ orgId, e164, note });
     },
@@ -178,7 +188,7 @@ export function fakeStore(): FakeStore {
         store.agentPrompts
           .filter((p) => p.orgId === orgId && p.kind === kind)
           .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]?.body ?? null;
-      return { instructions: body('instructions'), voicemail: body('voicemail') };
+      return { instructions: body('instructions'), voicemail: body('voicemail'), inbound: body('inbound') };
     },
     async activeCallTo(orgId, e164) {
       return [...rows.values()].some(
@@ -311,6 +321,7 @@ export function activeEntry(over: Partial<ActiveAiCall> = {}): ActiveAiCall {
     toE164: '+16195550100',
     fromE164: '+16195550000',
     isTest: false,
+    direction: 'outbound',
     record: null,
     prompt: {
       agentName: 'Alex',

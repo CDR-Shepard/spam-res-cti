@@ -118,16 +118,21 @@ describe('ai_calls SQL, rendered', () => {
 
   it('activeCallTo finds a live AI call to the same number in the org', () => {
     const { sql } = activeCallToQuery(db, ORG, '+16195550100', NOW).toSQL();
+    // Either direction: a test phone already talking to the agent (inbound) is not rung again.
+    expect(sql).not.toContain('"direction"');
     expect(sql).toContain('"ai_calls"."ended_at" is null');
     expect(sql).toMatch(/"ai_calls"\."status" in \(\$\d+, \$\d+, \$\d+, \$\d+\)/);
     expect(sql).toContain('"ai_calls"."created_at" >= $');
   });
 
   it('uncountedPlaced counts placed AI calls not yet mirrored into calls', () => {
-    const { sql } = uncountedPlacedQuery(db, ORG, '+16195550100', NOW).toSQL();
+    const { sql, params } = uncountedPlacedQuery(db, ORG, '+16195550100', NOW).toSQL();
     expect(sql).toContain('count(*)::int');
     expect(sql).toContain('"ai_calls"."call_sid" is not null');
     expect(sql).toContain('"ai_calls"."cti_call_id" is null');
+    // An inbound test call has a CallSid and never a calls row: it must not count toward the outbound daily cap.
+    expect(sql).toContain('"ai_calls"."direction" = $');
+    expect(params).toContain('outbound');
   });
   const BOOKED = {
     slotId: 'p1', kind: 'phone' as const, start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T18:15:00.000Z',
@@ -190,8 +195,9 @@ describe('ai_agent_prompts SQL, rendered', () => {
 
 describe('templatesOfRows', () => {
   it('maps each kind to its body, null for a kind with no row or a NULL body (a reset)', () => {
-    expect(templatesOfRows([])).toEqual({ instructions: null, voicemail: null });
-    expect(templatesOfRows([{ kind: 'instructions', body: 'Hi {{first_name}}' }])).toEqual({ instructions: 'Hi {{first_name}}', voicemail: null });
-    expect(templatesOfRows([{ kind: 'voicemail', body: null }, { kind: 'instructions', body: 'x' }])).toEqual({ instructions: 'x', voicemail: null });
+    expect(templatesOfRows([])).toEqual({ instructions: null, voicemail: null, inbound: null });
+    expect(templatesOfRows([{ kind: 'instructions', body: 'Hi {{first_name}}' }])).toEqual({ instructions: 'Hi {{first_name}}', voicemail: null, inbound: null });
+    expect(templatesOfRows([{ kind: 'voicemail', body: null }, { kind: 'instructions', body: 'x' }])).toEqual({ instructions: 'x', voicemail: null, inbound: null });
+    expect(templatesOfRows([{ kind: 'inbound', body: 'You are {{agent_name}}' }])).toEqual({ instructions: null, voicemail: null, inbound: 'You are {{agent_name}}' });
   });
 });

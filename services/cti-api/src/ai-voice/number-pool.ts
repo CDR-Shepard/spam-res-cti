@@ -19,6 +19,10 @@
  *
  * Also here: who a callback to an AI number rings (routes/inbound.ts and the
  * inbound-text router), from the same `ai_calls` rows.
+ *
+ * Both read OUTBOUND rows only: an inbound test call (a test phone called the
+ * AI, plan 2026-10-16) is no sticky caller ID and never decides who a real
+ * callback rings.
  */
 import { and, desc, eq, gte, isNotNull, notInArray, sql } from 'drizzle-orm';
 import { getDb, schema } from '@cti/db';
@@ -53,11 +57,11 @@ export const lastAiFromQuery = (db: Db, orgId: string, toE164: string) =>
   db
     .select({ fromE164: t.fromE164 })
     .from(t)
-    .where(and(eq(t.orgId, orgId), eq(t.toE164, toE164), isNotNull(t.fromE164)))
+    .where(and(eq(t.orgId, orgId), eq(t.toE164, toE164), isNotNull(t.fromE164), eq(t.direction, 'outbound')))
     .orderBy(desc(t.createdAt))
     .limit(1);
 
-/** The number the AI last called this person from, if any. Re-read as `ai_pool` before use. */
+/** The number the AI last called this person from (an outbound call), if any. Re-read as `ai_pool` before use. */
 export async function lastAiFrom(db: Db, orgId: string, toE164: string): Promise<string | undefined> {
   const [row] = await lastAiFromQuery(db, orgId, toE164);
   return row?.fromE164 ?? undefined;
@@ -110,6 +114,7 @@ export const aiCallbackRepQuery = (db: Db, orgId: string, callerE164: string, di
         eq(t.orgId, orgId),
         eq(t.toE164, callerE164),
         isNotNull(t.callSid),
+        eq(t.direction, 'outbound'),
         gte(t.createdAt, new Date(now.getTime() - AI_CALLBACK_WINDOW_MS)),
         sql`exists (select 1 from "users" where "users"."id" = coalesce(${t.handoffUserId}, ${t.startedBy}) and "users"."kind" = ${'human'})`,
       ),

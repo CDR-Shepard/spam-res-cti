@@ -20,6 +20,7 @@ import type { BridgeLog } from './bridge.js';
 import { gateAiCall, type AiGateBlock, type AiGateInput, type AiGateResult, type GateDeps } from './gate.js';
 import { peekAiCallerId, pickAiDid } from './number-pool.js';
 import { loadAgentPrompts } from './prompt-saved.js';
+import { testPhoneNumbers } from './test-phones.js';
 import type { AiCallObject, AiCallRecord } from './record.js';
 import { dropActiveCall, registerActiveCall, updateActiveCall } from './registry.js';
 import { gateTarget, handoffUser, loadTarget, rowTarget, targetKind, typedNumber, type StartTarget } from './service-target.js';
@@ -71,13 +72,13 @@ export interface StartInput {
 
 /** A live AI call older than this no longer blocks a new one (a crashed call must not block forever). */
 const ACTIVE_CALL_WINDOW_MS = 60 * 60 * 1000;
-/** Registry entries expire after the longest a call can last, plus margin. */
-const REGISTRY_MARGIN_SECONDS = 30 + 60 + 300;
+/** Registry entries expire after the longest a call can last, plus margin (inbound calls too: inbound-call.ts). */
+export const REGISTRY_MARGIN_SECONDS = 30 + 60 + 300;
 const FALLBACK_TIME_ZONE = 'America/Chicago';
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-const realGateDeps: GateDeps = { blockedTargets, dailyDialCount, withinCallingHours, pickAiDid, peekAiCallerId };
+const realGateDeps: GateDeps = { blockedTargets, dailyDialCount, withinCallingHours, pickAiDid, peekAiCallerId, testPhoneNumbers };
 
 /** Both practice kinds (plan 1D phone, plan 1E browser) must sound exactly as the seller would hear the call. */
 const isPractice = (i: StartInput): boolean => {
@@ -218,6 +219,7 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
       toE164: gate.toE164,
       fromE164: gate.fromE164,
       isTest,
+      direction: 'outbound',
       ...(isPractice(i) ? { localTimeE164: sellerNumber(i, record, gate.toE164) } : {}),
       record,
       prompt: {

@@ -15,10 +15,12 @@ import { getDb, schema } from '@cti/db';
 import { setAppointment, type SetAppointmentResult } from './store-booking.js';
 import {
   failTransfer,
+  finalizeInboundQuery,
   markTransferredQuery,
   recordCtiCall,
   setSfTaskId,
   staleOpenQuery,
+  type InboundFinalizeWrite,
   type NewCtiCall,
   type TransferFail,
 } from './store-end.js';
@@ -85,6 +87,8 @@ export interface FinalizeWrite {
 export interface AgentPromptTemplates {
   instructions: string | null;
   voicemail: string | null;
+  /** What the agent follows when a test phone calls one of its numbers (plan 2026-10-16 inbound agent testing). */
+  inbound: string | null;
 }
 
 /** Statuses of a call that is still on (or about to be on) the line. */
@@ -111,15 +115,17 @@ export interface AiCallStore {
   markFailed(id: string): Promise<void>;
   /** The CAS end of a call; null when it was already finalized. */
   finalize(id: string, w: FinalizeWrite): Promise<AiCallRow | null>;
+  /** The CAS end of an INBOUND row: outcome = its saved status, else incomplete; null when already finalized (or not inbound). */
+  finalizeInbound(id: string, w: InboundFinalizeWrite): Promise<AiCallRow | null>;
   upsertOptOut(orgId: string, e164: string, note: string): Promise<void>;
   /** users.id of the human in `orgId` whose Salesforce user is `sfUserId`. */
   handoffUserFor(orgId: string, sfUserId: string): Promise<string | null>;
   orgName(orgId: string): Promise<string | null>;
   /** The org's active agent prompts: the newest saved version per kind; null when there is none or it is a reset (NULL body). */
   activeAgentPrompts(orgId: string): Promise<AgentPromptTemplates>;
-  /** Is an AI call to `e164` still live in this org (created since `since`)? */
+  /** Is an AI call to `e164` still live in this org (created since `since`)? Either direction: a phone on an inbound test call is busy too. */
   activeCallTo(orgId: string, e164: string, since: Date): Promise<boolean>;
-  /** Placed AI calls to `e164` since `since` that have no `calls` row yet (so the daily cap counts them). */
+  /** Placed OUTBOUND AI calls to `e164` since `since` that have no `calls` row yet (so the daily cap counts them). */
   uncountedPlaced(orgId: string, e164: string, since: Date): Promise<number>;
   /** The rep answered the transfer: status `transferred` (a live transferring row, or a just-completed one). */
   markTransferred(id: string): Promise<boolean>;
@@ -133,7 +139,7 @@ export interface AiCallStore {
   staleOpen(placedBefore: Date, unplacedBefore: Date, limit: number): Promise<AiCallRow[]>;
 }
 
-export type { NewCtiCall, TransferFail } from './store-end.js';
+export type { InboundFinalizeWrite, NewCtiCall, TransferFail } from './store-end.js';
 export { appointmentConflictQuery, appointmentLockQuery, setAppointmentQuery, type SetAppointmentResult } from './store-booking.js';
 
 const touched = { updatedAt: sql`now()` };
@@ -232,7 +238,7 @@ export const activeAgentPromptsQuery = (db: Db, orgId: string) =>
 /** The newest rows (activeAgentPromptsQuery) as one template per kind; a kind with no row is null. */
 export function templatesOfRows(rows: ReadonlyArray<{ kind: AgentPromptKind; body: string | null }>): AgentPromptTemplates {
   const body = (kind: AgentPromptKind): string | null => rows.find((r) => r.kind === kind)?.body ?? null;
-  return { instructions: body('instructions'), voicemail: body('voicemail') };
+  return { instructions: body('instructions'), voicemail: body('voicemail'), inbound: body('inbound') };
 }
 
 export const listQuery = (db: Db, orgId: string, opts: { startedBy?: string; limit: number }) =>
@@ -269,6 +275,8 @@ export const uncountedPlacedQuery = (db: Db, orgId: string, e164: string, since:
         isNotNull(t.callSid),
         isNull(t.ctiCallId),
         gte(t.createdAt, since),
+        // An inbound test call has a CallSid and never gets a calls row: it is no dial to this number.
+        eq(t.direction, 'outbound'),
       ),
     );
 
@@ -315,6 +323,10 @@ export function drizzleAiCallStore(db: Db): AiCallStore {
     },
     async finalize(id, w) {
       const [row] = await finalizeQuery(db, id, w);
+      return row ?? null;
+    },
+    async finalizeInbound(id, w) {
+      const [row] = await finalizeInboundQuery(db, id, w);
       return row ?? null;
     },
     async upsertOptOut(orgId, e164, note) {

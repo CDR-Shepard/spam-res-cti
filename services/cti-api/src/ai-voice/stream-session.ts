@@ -13,17 +13,24 @@
  * turn stats → one log line + ai_calls.turn_stats (best effort);
  * a bridge-side end (OpenAI closed/error, time limit) → hang up, unless
  * another closer (end_call / transfer / voicemail) already owns the call.
+ *
+ * An INBOUND call (a test phone called the AI; inbound-call.ts) runs the same
+ * way with the inbound prompt + line rules, INBOUND_TOOLS and INBOUND_OPENER.
+ * Twilio sends it no status callback, so it is finalized here when its
+ * conversation ends, however it ends (service-finalize.ts).
  */
-import type { AiCallTurnStats } from '@cti/contracts';
+import type { AiCallTurnStats, AppointmentSlot } from '@cti/contracts';
 import { aiVoiceAvailable, type AppConfig } from '../config.js';
 import { UUID_RE, TWILIO_CALL_SID_RE } from '../telephony/webhooks.js';
 import { AiCallBridge, MIN_CALL_MS, type BridgeHooks, type BridgeLog, type BridgeOptions, type BridgeSocket, type EndReason } from './bridge.js';
 import { obj, parseFrame, str, type Msg } from './bridge-frames.js';
-import { buildInstructions, toolsFor } from './prompt.js';
+import { INBOUND_OPENER } from './bridge-session.js';
+import { INBOUND_TOOLS, buildInboundInstructions, buildInstructions, toolsFor, type PromptInput } from './prompt.js';
 import { promptSlots } from './prompt-context.js';
 import { logTemplateError } from './prompt-saved.js';
 import { claimClose, getActiveCall, updateActiveCall, type ActiveAiCall, type ActiveBridge } from './registry.js';
 import { localTimeFor } from './service.js';
+import { finalizeAiCall } from './service-finalize.js';
 import { handleToolCall, type ToolEffects } from './service-tools.js';
 import type { AiCallStatus, AiCallStore } from './store.js';
 import { TranscriptBuffer } from './transcript.js';
@@ -152,13 +159,25 @@ async function onStart(socket: BridgeSocket, start: Msg, deps: StreamSessionDeps
   return 'started';
 }
 
+/**
+ * What the agent is told and may do. An inbound call (a test phone called the AI) gets the inbound prompt + line
+ * rules, INBOUND_TOOLS and the quick INBOUND_OPENER; an outbound call exactly what it always got (no opener option).
+ */
+function conversationFor(
+  entry: ActiveAiCall,
+  slots: AppointmentSlot[],
+  deps: StreamSessionDeps,
+): Pick<BridgeOptions, 'instructions' | 'tools' | 'opener'> {
+  // Part 6 B: a practice call rings a test number but says the seller's local time (the record's phone; service.ts).
+  const prompt: PromptInput = { ...entry.prompt, localTime: localTimeFor(entry.localTimeE164 ?? entry.toE164, deps.now()) };
+  if (entry.direction === 'inbound') {
+    return { instructions: buildInboundInstructions(prompt, logTemplateError(deps.log)), tools: INBOUND_TOOLS, opener: INBOUND_OPENER };
+  }
+  return { instructions: buildInstructions(prompt, logTemplateError(deps.log)), tools: toolsFor(slots) };
+}
+
 function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: string }, streamSid: string, deps: StreamSessionDeps): void {
   const { cfg } = deps;
-  // Part 6 B: a practice call rings a test number but says the seller's local time (the record's phone; service.ts).
-  const instructions = buildInstructions(
-    { ...entry.prompt, localTime: localTimeFor(entry.localTimeE164 ?? entry.toE164, deps.now()) },
-    logTemplateError(deps.log),
-  );
   // The times the prompt lists are exactly the ones the agent can name and book (Fix 1, M-2).
   const slots = promptSlots(entry.prompt.slots, entry.prompt.address);
   const openai = deps.openRealtime(realtimeUrl(cfg.AI_VOICE_MODEL), cfg.OPENAI_API_KEY ?? '');
@@ -176,6 +195,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
           now: deps.now,
           slots,
           isTest: entry.isTest,
+          ...(entry.direction === 'inbound' ? { direction: 'inbound' as const } : {}),
         },
         effects: deps.effects,
         call: {
@@ -197,8 +217,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
       twilio: socket,
       openai,
       streamSid,
-      instructions,
-      tools: toolsFor(slots),
+      ...conversationFor(entry, slots, deps),
       voice: cfg.AI_VOICE_VOICE,
       model: cfg.AI_VOICE_MODEL,
       reasoningEffort: cfg.AI_VOICE_REASONING,
@@ -250,6 +269,7 @@ function onBridgeEnd(
   const { aiCallId } = entry;
   deps.log.info({ aiCallId, reason, detail }, 'ai-voice: conversation ended');
   void transcript.flush();
+  if (entry.direction === 'inbound') return void endInboundCall(entry, reason, bridge, deps);
   if (reason === 'twilio_closed') return; // hung up, redirected, or stopped — finalize does the rest
   if (!claimClose(aiCallId)) return; // end_call / transfer / voicemail already owns the call
   void (async () => {
@@ -261,4 +281,30 @@ function onBridgeEnd(
       .catch((e: unknown) => deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: hangup failed, closing the stream'));
     bridge()?.stop();
   })();
+}
+
+/**
+ * The end of an inbound call. A bridge-side end (OpenAI closed/error, time limit) hangs up first, as for an outbound
+ * call, unless end_call already owns the call. Then, however it ended, the row is finalized here: Twilio sends an
+ * inbound call no status callback (finalize also tears down the live entry and writes the last transcript lines).
+ */
+async function endInboundCall(
+  entry: ActiveAiCall & { callSid: string },
+  reason: EndReason,
+  bridge: () => ActiveBridge | null,
+  deps: StreamSessionDeps,
+): Promise<void> {
+  const { aiCallId } = entry;
+  if (reason !== 'twilio_closed' && claimClose(aiCallId)) {
+    if (reason !== 'max_duration') {
+      await deps.store.markFailed(aiCallId).catch((e: unknown) => deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: mark failed'));
+    }
+    await deps.twilio
+      .hangup(entry.callSid)
+      .catch((e: unknown) => deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: hangup failed, closing the stream'));
+    bridge()?.stop();
+  }
+  await finalizeAiCall({ store: deps.store, log: deps.log }, aiCallId, { callStatus: 'completed', durationSeconds: null, endedAt: deps.now() }).catch(
+    (e: unknown) => deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: inbound call not finalized — the sweeper will close it'),
+  );
 }

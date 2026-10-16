@@ -4,6 +4,9 @@ import type { ConsentBlock } from '../dialer/consent-check.js';
 import type { PickDidResult } from '../dialer/pick-agent-did.js';
 import { gateAiCall, type AiGateBlock, type AiGateResult, type GateDeps } from './gate.js';
 import type { AiCallRecord } from './record.js';
+import { aiGateDeps } from './service.js';
+import { testPhoneNumbers } from './test-phones.js';
+import { fakeStore } from './testing.js';
 
 const db = {} as Parameters<typeof gateAiCall>[0];
 const NOW = new Date('2026-10-05T18:00:00Z');
@@ -215,5 +218,54 @@ describe('gateAiCall — practice_browser (plan 1E): the browser branch', () => 
   it('no usable ai_pool number -> no_caller_id; nothing falls back to the default caller ID', async () => {
     const { got } = gate({ peek: null, cfg: { TWILIO_DEFAULT_CALLER_ID: '+16195550002' } as Partial<AppConfig> });
     expect(await got).toEqual(blockedBy('no_caller_id'));
+  });
+});
+
+describe('gateAiCall — test numbers: AI_VOICE_TEST_NUMBERS together with the org\'s test-phones list (plan 2026-10-16)', () => {
+  const LISTED = '+15125550142'; // on the org's ai_test_phones only
+  const gateTest = (to: string, phones: ReadonlySet<string> | Error, isAdmin = true) => {
+    const d = {
+      ...deps({ name: '', isAdmin, target: test(to), want: { ok: true, toE164: to, fromE164: FROM } }),
+      testPhoneNumbers: vi.fn(async () => {
+        if (phones instanceof Error) throw phones;
+        return phones;
+      }),
+    };
+    const got = gateAiCall(db, { cfg: baseCfg, orgId: 'O1', userId: 'U1', isAdmin, now: NOW, target: test(to) }, d);
+    return { got, d };
+  };
+
+  it("an admin may test-call a phone on the org's list that is not in the env list", async () => {
+    const { got, d } = gateTest('(512) 555-0142', new Set([LISTED]));
+    expect(await got).toEqual({ ok: true, toE164: LISTED, fromE164: FROM });
+    expect(d.testPhoneNumbers).toHaveBeenCalledWith(db, 'O1');
+  });
+
+  it('the env list still works on its own (no list read needed)', async () => {
+    const { got, d } = gateTest(TEST, new Set());
+    expect(await got).toEqual({ ok: true, toE164: TEST, fromE164: FROM });
+    expect(d.testPhoneNumbers).not.toHaveBeenCalled();
+  });
+
+  it('a number on neither list is refused; a non-admin is refused before the list is read', async () => {
+    expect(await gateTest('+16195550123', new Set([LISTED])).got).toEqual(blockedBy('not_admin_for_test'));
+    const notAdmin = gateTest(LISTED, new Set([LISTED]), false);
+    expect(await notAdmin.got).toEqual(blockedBy('not_admin_for_test'));
+    expect(notAdmin.d.testPhoneNumbers).not.toHaveBeenCalled();
+  });
+
+  it('a failed list read fails closed (throws), like every other gate read', async () => {
+    const { got, d } = gateTest(LISTED, new Error('pg down'));
+    await expect(got).rejects.toThrow('pg down');
+    expect(d.pickAiDid).not.toHaveBeenCalled();
+  });
+
+  it("a listed phone still passes every compliance check (opt-out here)", async () => {
+    const d = { ...deps({ name: '', isAdmin: true, target: test(LISTED), blocked: 'opted_out', want: blockedBy('opted_out') }), testPhoneNumbers: async () => new Set([LISTED]) };
+    expect(await gateAiCall(db, { cfg: baseCfg, orgId: 'O1', userId: 'U1', isAdmin: true, now: NOW, target: test(LISTED) }, d)).toEqual(blockedBy('opted_out'));
+  });
+
+  it("the live gate deps read the org's list", () => {
+    expect(aiGateDeps(fakeStore()).testPhoneNumbers).toBe(testPhoneNumbers);
   });
 });

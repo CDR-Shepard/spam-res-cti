@@ -115,7 +115,7 @@ describe('startAiCall — a record', () => {
       notes: 'Inherited the house.',
       isTest: false,
       callbackNumber: FROM,
-      templates: { instructions: null, voicemail: null },
+      templates: { instructions: null, voicemail: null, inbound: null },
     });
   });
 
@@ -381,7 +381,7 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
     expect(getActiveCall(res.aiCallId)!.prompt).toEqual({
       agentName: 'Alex', companyName: 'GG Homes', firstName: 'Jane', address: '12 Oak St, Austin, TX 78701',
       notes: 'Inherited the house.', isTest: false, callbackNumber: FROM, approvedPlan: 'Opener: hi',
-      templates: { instructions: null, voicemail: null },
+      templates: { instructions: null, voicemail: null, inbound: null },
     });
   });
 
@@ -412,26 +412,26 @@ describe('startAiCall — the org\'s saved agent prompts', () => {
     saved(session.orgId, 'instructions', 'Hello {{first_name}}, this is {{agent_name}}.', '2026-10-01T00:00:00Z');
     saved(session.orgId, 'voicemail', 'Call {{callback_number}}.', '2026-10-01T00:00:00Z');
     const entry = await place();
-    expect(entry.prompt.templates).toEqual({ instructions: 'Hello {{first_name}}, this is {{agent_name}}.', voicemail: 'Call {{callback_number}}.' });
+    expect(entry.prompt.templates).toEqual({ instructions: 'Hello {{first_name}}, this is {{agent_name}}.', voicemail: 'Call {{callback_number}}.', inbound: null });
     expect(buildInstructions({ ...entry.prompt, localTime: 'Monday 11:00 AM' })).toBe('Hello Jane, this is Alex.');
     expect(voicemailText({ ...entry.prompt, localTime: 'Monday 11:00 AM' })).toBe('Call 619-555-0000.');
     expect(warn).not.toHaveBeenCalled();
   });
 
   it('with no saved version the templates are null (the built-in defaults)', async () => {
-    expect((await place()).prompt.templates).toEqual({ instructions: null, voicemail: null });
+    expect((await place()).prompt.templates).toEqual({ instructions: null, voicemail: null, inbound: null });
   });
 
   it('a newer reset (NULL body) means the default again', async () => {
     saved(session.orgId, 'instructions', 'Old {{first_name}}', '2026-10-01T00:00:00Z');
     saved(session.orgId, 'instructions', null, '2026-10-02T00:00:00Z');
-    expect((await place()).prompt.templates).toEqual({ instructions: null, voicemail: null });
+    expect((await place()).prompt.templates).toEqual({ instructions: null, voicemail: null, inbound: null });
   });
 
   it('only this org\'s versions are used', async () => {
     saved(OTHER_ORG, 'instructions', 'Another org says {{first_name}}', '2026-10-01T00:00:00Z');
     saved(OTHER_ORG, 'voicemail', 'Another org voicemail', '2026-10-01T00:00:00Z');
-    expect((await place()).prompt.templates).toEqual({ instructions: null, voicemail: null });
+    expect((await place()).prompt.templates).toEqual({ instructions: null, voicemail: null, inbound: null });
   });
 
   it('is read at every placement: a version saved between two calls is used by the second', async () => {
@@ -450,7 +450,7 @@ describe('startAiCall — the org\'s saved agent prompts', () => {
     if (!res.ok) throw new Error('unreachable');
     expect(twilio.placed).toHaveLength(1);
     const entry = getActiveCall(res.aiCallId)!;
-    expect(entry.prompt.templates).toEqual({ instructions: null, voicemail: null });
+    expect(entry.prompt.templates).toEqual({ instructions: null, voicemail: null, inbound: null });
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith({ reason: 'db_error' }, 'ai-voice: agent prompts unavailable, using defaults');
     // The instructions the call will use are the built-in default.
