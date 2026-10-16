@@ -1,18 +1,19 @@
 /**
  * Admin-editable agent prompts (plan docs/superpowers/plans/2026-10-16-editable-agent-prompts.md):
- * the AI phone agent's instructions and its voicemail message are templates an admin edits, previews,
+ * the AI phone agent's instructions, its voicemail message and its inbound prompt (what it follows when a
+ * test phone calls it, plan 2026-10-16-inbound-agent-testing.md) are templates an admin edits, previews,
  * saves and resets. Versions are append-only rows in ai_agent_prompts (migration 0060); a NULL body is
  * "the built-in default". cti-api renders and checks templates (it owns the placeholders and the
  * defaults); outreach-api stores versions and serves the admin page.
  */
 import { z } from 'zod';
 
-/** Which of the agent's two texts a template is for. */
-export const AgentPromptKind = z.enum(['instructions', 'voicemail']);
+/** Which of the agent's three texts a template is for. */
+export const AgentPromptKind = z.enum(['instructions', 'voicemail', 'inbound']);
 export type AgentPromptKind = z.infer<typeof AgentPromptKind>;
 
 /** The longest template a save accepts, per kind (the voicemail is read aloud once, so it is short). */
-export const AGENT_PROMPT_MAX_CHARS = { instructions: 60_000, voicemail: 1_500 } as const;
+export const AGENT_PROMPT_MAX_CHARS = { instructions: 60_000, voicemail: 1_500, inbound: 60_000 } as const;
 
 /** How many versions a state lists (the newest). */
 export const AGENT_PROMPT_VERSIONS_SHOWN = 20;
@@ -67,7 +68,11 @@ export const AgentPromptState = z.object({
 });
 export type AgentPromptState = z.infer<typeof AgentPromptState>;
 
-export const AgentPromptsResponse = z.object({ instructions: AgentPromptState, voicemail: AgentPromptState });
+export const AgentPromptsResponse = z.object({
+  instructions: AgentPromptState,
+  voicemail: AgentPromptState,
+  inbound: AgentPromptState,
+});
 export type AgentPromptsResponse = z.infer<typeof AgentPromptsResponse>;
 
 /** Save a new version; template null resets the kind to the built-in default. */

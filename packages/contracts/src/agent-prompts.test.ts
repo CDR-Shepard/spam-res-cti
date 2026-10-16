@@ -20,7 +20,7 @@ const ID = '0f1e2d3c-4b5a-4968-8776-655443322110';
 const AT = '2026-10-16T12:00:00.000Z';
 const placeholder = { name: 'agent_name', kind: 'text', description: 'The name the agent gives on the call.' };
 const summary = { id: ID, createdAt: AT, createdByEmail: 'admin@example.com', isDefault: false, chars: 1_234 };
-const state = (kind: 'instructions' | 'voicemail') => ({
+const state = (kind: 'instructions' | 'voicemail' | 'inbound') => ({
   kind,
   active: 'You are {{agent_name}}.',
   defaultTemplate: 'You are {{agent_name}}, built in.',
@@ -31,10 +31,11 @@ const state = (kind: 'instructions' | 'voicemail') => ({
 });
 
 describe('AgentPromptKind', () => {
-  it('accepts the two kinds', () => {
+  it('accepts the three kinds', () => {
     expect(AgentPromptKind.parse('instructions')).toBe('instructions');
     expect(AgentPromptKind.parse('voicemail')).toBe('voicemail');
-    expect(AgentPromptKind.options).toEqual(['instructions', 'voicemail']);
+    expect(AgentPromptKind.parse('inbound')).toBe('inbound');
+    expect(AgentPromptKind.options).toEqual(['instructions', 'voicemail', 'inbound']);
   });
 
   it.each([['system'], [''], [null], [1]])('rejects %j', (value) => {
@@ -43,8 +44,8 @@ describe('AgentPromptKind', () => {
 });
 
 describe('AGENT_PROMPT_MAX_CHARS', () => {
-  it('is 60,000 for instructions and 1,500 for the voicemail', () => {
-    expect(AGENT_PROMPT_MAX_CHARS).toEqual({ instructions: 60_000, voicemail: 1_500 });
+  it('is 60,000 for instructions and the inbound prompt, and 1,500 for the voicemail', () => {
+    expect(AGENT_PROMPT_MAX_CHARS).toEqual({ instructions: 60_000, voicemail: 1_500, inbound: 60_000 });
   });
 });
 
@@ -84,6 +85,7 @@ describe('InternalAgentPromptCheckRequest and its path', () => {
   it('accepts a template or null (the built-in default)', () => {
     expect(InternalAgentPromptCheckRequest.parse({ kind: 'voicemail', template: 'Hi' })).toEqual({ kind: 'voicemail', template: 'Hi' });
     expect(InternalAgentPromptCheckRequest.parse({ kind: 'instructions', template: null })).toEqual({ kind: 'instructions', template: null });
+    expect(InternalAgentPromptCheckRequest.parse({ kind: 'inbound', template: null })).toEqual({ kind: 'inbound', template: null });
   });
 
   it('rejects an unknown kind and an undefined template', () => {
@@ -126,10 +128,14 @@ describe('AgentPromptState and AgentPromptsResponse', () => {
     expect(AgentPromptState.safeParse({ ...state('instructions'), kind: 'system' }).success).toBe(false);
   });
 
-  it('the response carries both kinds', () => {
-    const response = { instructions: state('instructions'), voicemail: state('voicemail') };
+  it('the response carries all three kinds', () => {
+    const response = { instructions: state('instructions'), voicemail: state('voicemail'), inbound: state('inbound') };
     expect(AgentPromptsResponse.parse(response)).toEqual(response);
     expect(AgentPromptsResponse.safeParse({ instructions: state('instructions') }).success).toBe(false);
+  });
+
+  it('the response requires inbound', () => {
+    expect(AgentPromptsResponse.safeParse({ instructions: state('instructions'), voicemail: state('voicemail') }).success).toBe(false);
   });
 });
 
