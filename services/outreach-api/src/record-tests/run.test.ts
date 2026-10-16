@@ -111,6 +111,16 @@ describe.skipIf(!pgLane)('running a record test call (real Postgres)', () => {
     expect(await callRows(s.testId)).toHaveLength(0);
   });
 
+  it("4b (final review I-1): a phone only on the org's own Test phones list can be rung, asked for this org", async () => {
+    const s = await setup();
+    const listed = '+16195550142';
+    s.cti.orgTestPhones.set(s.orgId, [listed]);
+    const res = await startRecordTestCall(s.deps, s.ctx, s.testId, { mode: 'phone', to: '(619) 555-0142' });
+    expect('ok' in res && res.ok).toBe(true);
+    expect(s.cti.availabilityOrgs).toEqual([s.orgId]);
+    expect(s.cti.requests[0]!.target).toMatchObject({ kind: 'practice', to: listed });
+  });
+
   it("5 (G-3): another admin's browser identity is not_your_browser; nothing is triggered", async () => {
     const s = await setup();
     const other = await seedUser(db, s.orgId);

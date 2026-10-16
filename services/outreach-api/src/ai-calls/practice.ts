@@ -114,9 +114,12 @@ export async function practiceSlots(deps: PracticeOfferDeps, orgId: string, sett
   return (await practiceOffer(deps, orgId, settings, label)).slots;
 }
 
-/** `to`, E.164-normalised, when it is one of cti-api's test numbers; null when it is not; 'unreachable' when cti-api did not answer. */
-export async function testNumber(cti: CtiClient, to: string): Promise<string | null | 'unreachable'> {
-  const availability = await cti.availability();
+/**
+ * `to`, E.164-normalised, when it is one of cti-api's test numbers for this org (AI_VOICE_TEST_NUMBERS and the org's Test
+ * phones list); null when it is not; 'unreachable' when cti-api did not answer.
+ */
+export async function testNumber(cti: CtiClient, orgId: string, to: string): Promise<string | null | 'unreachable'> {
+  const availability = await cti.availability(orgId);
   if (!availability) return 'unreachable';
   const wanted = toE164(to);
   if (!wanted) return null;
@@ -132,7 +135,7 @@ export async function startPractice(deps: PracticeDeps, ctx: RequestContext, enr
   if (!plan) return { ok: false, error: 'no_plan' };
   const rendered = renderPlanForAgent(plan.plan, deps.now);
   if (!rendered.ok) return { ok: false, error: 'plan_text_rejected', words: describePlanTextIssues(plan.plan, rendered.issues) };
-  const to = await testNumber(deps.cti, body.to);
+  const to = await testNumber(deps.cti, ctx.orgId, body.to);
   if (to === 'unreachable') return { ok: false, error: 'cti_unreachable' };
   if (to === null) return { ok: false, error: 'not_a_test_number' };
 

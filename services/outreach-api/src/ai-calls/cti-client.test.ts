@@ -123,6 +123,35 @@ describe('httpCtiClient.availability', () => {
   });
 });
 
+describe('httpCtiClient.availability with the org (final review I-1)', () => {
+  const ORG = REQ.orgId;
+  it("sends ?orgId=<org> and signs path and query together, as cti-api verifies them over req.url, so the org's test phones come back", async () => {
+    const f = fetchReturning(200, { available: true, testNumbers: ['+15125550100', '+16195550142'] });
+    expect(await client(f).availability(ORG)).toEqual({ available: true, testNumbers: ['+15125550100', '+16195550142'] });
+    const [url, init] = f.mock.calls[0]!;
+    const path = `/internal/ai-calls/availability?orgId=${ORG}`;
+    expect(url).toBe(`${BASE}${path}`);
+    expect(init.method).toBe('GET');
+    expect(init.body).toBeUndefined();
+    const signed = { timestamp: init.headers[INTERNAL_TIMESTAMP_HEADER], signature: init.headers[INTERNAL_SIGNATURE_HEADER] };
+    expect(verifyInternalRequest(SECRET, { method: 'GET', path, body: '' }, signed)).toEqual({ ok: true });
+    // A signature over the bare path would not cover the org (cti-api refuses it).
+    expect(verifyInternalRequest(SECRET, { method: 'GET', path: '/internal/ai-calls/availability', body: '' }, signed)).toEqual({ ok: false, reason: 'mismatch' });
+  });
+
+  it('encodes the org into the query', async () => {
+    const f = fetchReturning(200, { available: true, testNumbers: [] });
+    await client(f).availability('a b&c');
+    expect(f.mock.calls[0]![0]).toBe(`${BASE}/internal/ai-calls/availability?orgId=a%20b%26c`);
+  });
+
+  it('without an org: the bare path, exactly as before', async () => {
+    const f = fetchReturning(200, { available: true, testNumbers: [] });
+    await client(f).availability();
+    expect(f.mock.calls[0]![0]).toBe(`${BASE}/internal/ai-calls/availability`);
+  });
+});
+
 describe('httpCtiClient.availability, plan 1E', () => {
   it('passes browserCalls through (absent from an older cti-api)', async () => {
     expect(await client(fetchReturning(200, { available: true, testNumbers: [], browserCalls: true })).availability()).toEqual({ available: true, testNumbers: [], browserCalls: true });

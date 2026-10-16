@@ -8,6 +8,9 @@
  * Plan 1E: `browserToken` relays an admin's incoming-only Voice token for "Talk in browser". It never throws and never
  * logs: the token is only ever handed back to the caller.
  *
+ * Inbound agent testing (final review I-1): `availability(orgId)` sends a signed `?orgId=` so the org's own Test phones
+ * come back with the env test numbers (an older cti-api ignores the query and still verifies the signature).
+ *
  * Editable agent prompts: `checkPrompt` asks cti-api (which owns the placeholders and the defaults) to check and render a
  * template. Signed, 5 s, never throws, and the template text is only ever in the request body, never in an outcome.
  */
@@ -49,7 +52,11 @@ export type PromptCheckOutcome = { kind: 'check'; check: AgentPromptCheck } | { 
 
 export interface CtiClient {
   trigger(req: InternalAiCallRequest): Promise<TriggerOutcome>;
-  availability(): Promise<AiAvailability | null>;
+  /**
+   * Whether AI calling is on, and the admin test numbers. With `orgId` they include that org's Test phones list (cti-api
+   * reads it for a signed `?orgId=`); without, only AI_VOICE_TEST_NUMBERS. Null when cti-api did not answer.
+   */
+  availability(orgId?: string): Promise<AiAvailability | null>;
   /** Never throws; never logs the token. */
   browserToken(req: InternalBrowserTokenRequest): Promise<BrowserTokenOutcome>;
   /** Never throws; never logs the template. A template the checker refused is still a `check` (its `problems`). */
@@ -96,9 +103,11 @@ export function httpCtiClient(cfg: { CTI_INTERNAL_URL: string; OUTREACH_INTERNAL
       const parsed = InternalAiCallResponse.safeParse(json);
       return parsed.success ? { kind: 'response', response: parsed.data } : { kind: 'transport', error: 'bad_response' };
     },
-    async availability() {
+    async availability(orgId) {
+      // `send` signs the path it requests, so the signature covers the query: cti-api verifies over req.url.
+      const path = orgId === undefined ? INTERNAL_AI_AVAILABILITY_PATH : `${INTERNAL_AI_AVAILABILITY_PATH}?orgId=${encodeURIComponent(orgId)}`;
       try {
-        const res = await send('GET', INTERNAL_AI_AVAILABILITY_PATH, '');
+        const res = await send('GET', path, '');
         if (res.status !== 200) return null;
         const parsed = AiAvailability.safeParse(await res.json());
         return parsed.success ? parsed.data : null;

@@ -55,7 +55,8 @@ export async function registerAiCallRoutes(app: FastifyInstance, deps: { db: Db;
     const ctx = await requireContext(db, req, reply);
     if (!ctx) return reply;
     if (!cti) return { available: false, testNumbers: [] } satisfies AiAvailability;
-    const availability = await cti.availability();
+    // With the org: its own Test phones come back too, for the test-call, Practice and Test a record selects.
+    const availability = await cti.availability(ctx.orgId);
     if (!availability) return sendError(reply, 503, 'CTI_UNREACHABLE', 'The AI calling service did not answer. Try again in a minute.');
     // The test numbers are an admin tool; nobody else sees them.
     return { available: availability.available, testNumbers: isAdmin(ctx) ? availability.testNumbers : [] } satisfies AiAvailability;

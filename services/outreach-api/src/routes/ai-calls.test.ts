@@ -32,13 +32,15 @@ const auth = { authorization: 'Bearer t' };
 
 function fakeCti(outcome: TriggerOutcome = { kind: 'response', response: { result: 'placed', aiCallId: AI_CALL_ID } }) {
   const requests: InternalAiCallRequest[] = [];
-  const cti: CtiClient & { availabilityAnswer: { available: boolean; testNumbers: string[] } | null } = {
+  const cti: CtiClient & { availabilityAnswer: { available: boolean; testNumbers: string[] } | null; availabilityOrgs: Array<string | undefined> } = {
     availabilityAnswer: { available: true, testNumbers: ['+15125550111'] },
+    availabilityOrgs: [],
     async trigger(req) {
       requests.push(req);
       return outcome;
     },
-    async availability() {
+    async availability(orgId) {
+      cti.availabilityOrgs.push(orgId);
       return cti.availabilityAnswer;
     },
     async browserToken() {
@@ -119,6 +121,12 @@ describe('AI call routes', () => {
     it('an admin sees the test numbers', async () => {
       app = await build(fakeCti().cti);
       expect((await call('GET', '/api/ai-calls/availability')).json()).toEqual({ available: true, testNumbers: ['+15125550111'] });
+    });
+    it("asks cti-api for the caller's org, so its own test phones are listed (final review I-1)", async () => {
+      const { cti } = fakeCti();
+      app = await build(cti);
+      await call('GET', '/api/ai-calls/availability');
+      expect(cti.availabilityOrgs).toEqual([ORG_UUID]);
     });
     it('a non-admin never does, even when cti-api lists some', async () => {
       app = await build(fakeCti().cti);

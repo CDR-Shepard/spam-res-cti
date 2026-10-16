@@ -105,6 +105,16 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
     expect(s.cti.requests).toHaveLength(0);
   });
 
+  it("5a (final review I-1): a phone only on the org's own Test phones list is a test number, asked for this org", async () => {
+    const s = await setup();
+    const listed = '+16195550142';
+    s.cti.orgTestPhones.set(s.base.orgId, [listed]);
+    const res = await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: '(619) 555-0142' });
+    expect(res.ok).toBe(true);
+    expect(s.cti.availabilityOrgs).toEqual([s.base.orgId]);
+    expect(s.cti.requests[0]!.target).toMatchObject({ kind: 'practice', to: listed });
+  });
+
   it('5b: another tenant\'s enrollment is not_found; a sequence campaign\'s is not_ai_call_campaign', async () => {
     const s = await setup();
     const other = await setup();

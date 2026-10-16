@@ -100,6 +100,10 @@ export interface FakeCti {
   /** What `availability()` answers (null: cti-api did not answer); on with no test numbers unless a test says otherwise. */
   available: AiAvailability | null;
   availabilityCalls: number;
+  /** The org each `availability` call asked for (undefined: none), in order. */
+  availabilityOrgs: Array<string | undefined>;
+  /** Each org's own test-phones list: cti-api adds it to the test numbers only when asked for that org (final review I-1). */
+  orgTestPhones: Map<string, string[]>;
   /** Plan 1E: what `browserToken()` answers (a token for the asking user unless a test says otherwise), and each request. */
   token: BrowserTokenOutcome | null;
   tokenRequests: Array<{ orgId: string; userId: string }>;
@@ -112,6 +116,8 @@ export function fakeCti(db: Db): FakeCti {
     answers: [],
     available: { available: true, testNumbers: [] },
     availabilityCalls: 0,
+    availabilityOrgs: [],
+    orgTestPhones: new Map(),
     token: null,
     tokenRequests: [],
     store: false,
@@ -138,9 +144,12 @@ export function fakeCti(db: Db): FakeCti {
         const response = a.result === 'placed' ? { result: 'placed', aiCallId } : { ...a, aiCallId };
         return { kind: 'response', response: response as InternalAiCallResponse };
       },
-      async availability() {
+      async availability(orgId) {
         fake.availabilityCalls += 1;
-        return fake.available;
+        fake.availabilityOrgs.push(orgId);
+        const listed = orgId === undefined ? [] : (fake.orgTestPhones.get(orgId) ?? []);
+        if (!fake.available || listed.length === 0) return fake.available;
+        return { ...fake.available, testNumbers: [...new Set([...fake.available.testNumbers, ...listed])] };
       },
       async browserToken(req) {
         fake.tokenRequests.push(req);

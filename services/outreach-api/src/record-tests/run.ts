@@ -52,7 +52,7 @@ async function destination(deps: RunDeps, ctx: RequestContext, body: RecordTestC
     const owner = aiTestIdentityUser(body.identity);
     return owner !== null && owner === ctx.session.userId.toLowerCase() ? { mode: 'browser', identity: body.identity } : 'not_your_browser';
   }
-  const to = await testNumber(deps.cti, body.to);
+  const to = await testNumber(deps.cti, ctx.orgId, body.to);
   if (to === 'unreachable') return 'cti_unreachable';
   return to === null ? 'not_a_test_number' : { mode: 'phone', to };
 }
