@@ -33,6 +33,15 @@ describe('api', () => {
     stubFetch(429, { error: 'Slow down', code: 'RATE_LIMITED', details: { retryAt: '2026-10-06T18:00:00.000Z' } });
     await expect(api('/api/x', z.any())).rejects.toMatchObject({ status: 429, details: { retryAt: '2026-10-06T18:00:00.000Z' } });
   });
+  it('keeps the whole error body, for routes that answer in their own shape', async () => {
+    stubFetch(400, { error: 'invalid_prompt', problems: ['Prompt is empty'] });
+    await expect(api('/api/x', z.any())).rejects.toMatchObject({ status: 400, code: 'UNKNOWN', body: { error: 'invalid_prompt', problems: ['Prompt is empty'] } });
+  });
+  it('keeps no body when the error has none that reads as JSON', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>bad gateway</html>', { status: 502 })));
+    const err = await api('/api/x', z.any()).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 502, code: 'UNKNOWN', message: 'HTTP 502', body: null });
+  });
   it('apiEmpty accepts 204', async () => {
     stubFetch(204, undefined);
     await expect(apiEmpty('/api/auth/logout', { method: 'POST' })).resolves.toBeUndefined();

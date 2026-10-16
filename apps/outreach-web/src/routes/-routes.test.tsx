@@ -8,6 +8,7 @@ import { routeTree } from '../routeTree.gen';
 import { apiSession, SESSION_STORAGE_KEY } from '../lib/api';
 import { AppRouter } from '../lib/app-router';
 import { AuthProvider } from '../lib/auth';
+import { DEFAULT_INSTRUCTIONS, promptsResponse } from '../test/agent-prompt-fixtures';
 
 // Sweep D-12: these tests time out at the 5 s default under the full parallel root run (they pass alone); no logic change.
 vi.setConfig({ testTimeout: 15_000 });
@@ -165,6 +166,7 @@ describe('outreach pages', () => {
     ['/settings/connections'],
     ['/review'],
     ['/test-record'],
+    ['/settings/agent-prompt'],
   ])('%s sits under the authenticated layout (signed-out visits go to sign-in)', async (path) => {
     const router = renderAppAt(path);
     await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in'));
@@ -176,8 +178,16 @@ describe('outreach pages', () => {
     await router.navigate({ to: '/campaigns' });
     expect(await screen.findByRole('heading', { name: 'Campaigns' })).toBeInTheDocument();
     const nav = screen.getByRole('navigation', { name: 'Main' });
-    expect(within(nav).getAllByRole('link').map((a) => a.textContent)).toEqual(['Dashboard', 'Campaigns', 'Needs review', 'Team', 'Test a record', 'Settings']);
+    expect(within(nav).getAllByRole('link').map((a) => a.textContent)).toEqual(['Dashboard', 'Campaigns', 'Needs review', 'Team', 'Test a record', 'Agent prompt', 'Settings']);
     expect(router.state.matches.map((m) => m.routeId)).toEqual(['__root__', '/_authenticated', '/_authenticated/campaigns/']);
+  });
+
+  it('renders /settings/agent-prompt for an admin inside the app shell', async () => {
+    const router = await signedInAppAt({ '/api/settings/agent-prompts': promptsResponse() });
+    await router.navigate({ to: '/settings/agent-prompt' });
+    expect(await screen.findByRole('heading', { name: 'Agent prompt' })).toBeInTheDocument();
+    expect(await screen.findByRole('textbox', { name: 'Call instructions' })).toHaveValue(DEFAULT_INSTRUCTIONS);
+    expect(router.state.matches.map((m) => m.routeId)).toEqual(['__root__', '/_authenticated', '/_authenticated/settings/agent-prompt']);
   });
 
   it('/test-record keeps a uuid ?id= and drops anything else', async () => {

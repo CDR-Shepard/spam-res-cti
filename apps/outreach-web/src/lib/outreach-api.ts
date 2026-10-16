@@ -1,5 +1,9 @@
 import { z } from 'zod';
 import {
+  AgentPromptCheck,
+  AgentPromptState,
+  AgentPromptsResponse,
+  AgentPromptVersionBody,
   AiAvailability,
   AppVersion,
   AiCallSettings,
@@ -27,6 +31,9 @@ import {
   StartConnectionResponse,
   TestCallResponse,
   WritebackReadiness,
+  type AgentPromptKind,
+  type AgentPromptPreviewRequest,
+  type AgentPromptSaveRequest,
   type CallStage,
   type CampaignStatusChange,
   type EditCallPlanRequest,
@@ -73,6 +80,7 @@ export const outreachKeys = {
   writebackReadiness: ['settings', 'ai-calls', 'readiness'] as const,
   recordTests: ['record-tests'] as const,
   recordTest: (id: string) => ['record-tests', id] as const,
+  agentPrompts: ['settings', 'agent-prompts'] as const,
 };
 
 const seg = (value: string): string => encodeURIComponent(value);
@@ -279,4 +287,26 @@ export function browserToken(): Promise<BrowserTokenResponse> {
 /** Admin only (plan 1E): what a real call that ended like this test call would write to Salesforce. Nothing is sent. */
 export function recordTestDryRun(callId: string): Promise<RecordTestDryRun> {
   return api(`/api/record-tests/calls/${seg(callId)}/dry-run`, RecordTestDryRun, { method: 'POST' });
+}
+
+/** Admin only: the AI agent's call instructions and voicemail message, each with its saved text, the built-in default, the placeholders and the newest versions. */
+export function getAgentPrompts(): Promise<AgentPromptsResponse> {
+  return api('/api/settings/agent-prompts', AgentPromptsResponse);
+}
+
+/** Admin only: check `template` and render it against a sample lead without saving it. Problems come back in the 200 body. */
+export function previewAgentPrompt(kind: AgentPromptKind, template: string): Promise<AgentPromptCheck> {
+  const body: AgentPromptPreviewRequest = { template };
+  return api(`/api/settings/agent-prompts/${seg(kind)}/preview`, AgentPromptCheck, { method: 'POST', body: json(body) });
+}
+
+/** Admin only: save a new version (the next call uses it); `null` goes back to the built-in default. A refused template answers 400 with its `problems`. */
+export function saveAgentPrompt(kind: AgentPromptKind, template: string | null): Promise<AgentPromptState> {
+  const body: AgentPromptSaveRequest = { template };
+  return api(`/api/settings/agent-prompts/${seg(kind)}`, AgentPromptState, { method: 'PUT', body: json(body) });
+}
+
+/** Admin only: one saved version's text (`body` null = a reset to the default), to load an older version into the editor. */
+export function getAgentPromptVersion(kind: AgentPromptKind, id: string): Promise<AgentPromptVersionBody> {
+  return api(`/api/settings/agent-prompts/${seg(kind)}/versions/${seg(id)}`, AgentPromptVersionBody);
 }

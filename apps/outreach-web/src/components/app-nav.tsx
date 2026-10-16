@@ -1,20 +1,21 @@
 import type { ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
-import { FlaskConical, Flag, Headset, LayoutDashboard, LogOut, Megaphone, Settings, Users, type LucideIcon } from 'lucide-react';
+import { FlaskConical, Flag, Headset, LayoutDashboard, LogOut, Megaphone, ScrollText, Settings, Users, type LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 import { cn } from '@/lib/utils';
 import { TenantSwitcher } from './tenant-switcher';
 
-interface NavItem { to: '/' | '/campaigns' | '/review' | '/team' | '/test-record' | '/settings/connections'; label: string; icon: LucideIcon; exact?: boolean; adminOnly?: boolean }
+interface NavItem { to: '/' | '/campaigns' | '/review' | '/team' | '/test-record' | '/settings/agent-prompt' | '/settings/connections'; label: string; icon: LucideIcon; exact?: boolean; adminOnly?: boolean }
 
-/** The main nav, in the order the app has always had it. "Test a record" is for admins. */
+/** The main nav, in the order the app has always had it. "Test a record" and "Agent prompt" are for admins. */
 const NAV_ITEMS: readonly NavItem[] = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, exact: true },
   { to: '/campaigns', label: 'Campaigns', icon: Megaphone },
   { to: '/review', label: 'Needs review', icon: Flag },
   { to: '/team', label: 'Team', icon: Users },
   { to: '/test-record', label: 'Test a record', icon: FlaskConical, adminOnly: true },
+  { to: '/settings/agent-prompt', label: 'Agent prompt', icon: ScrollText, adminOnly: true },
   { to: '/settings/connections', label: 'Settings', icon: Settings },
 ];
 

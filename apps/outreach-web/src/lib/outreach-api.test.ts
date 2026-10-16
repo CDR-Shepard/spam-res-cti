@@ -4,6 +4,7 @@ import * as outreach from './outreach-api';
 import { CAMPAIGN_ID, LIST_VIEW_ID, campaign, connection, fieldMap, preview } from '../test/outreach-fixtures';
 import { respond, StubResponse, stubApi } from '../test/stub-api';
 import { IDENTITY, LEAD_ID, TEST_ID, recordTest } from '../test/record-test-fixtures';
+import { VERSION_A, promptState, promptsResponse } from '../test/agent-prompt-fixtures';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -40,6 +41,11 @@ const cases: Case[] = [
   { name: 'recordTestCall', call: () => outreach.recordTestCall(TEST_ID, { mode: 'phone', to: '+15125550111' }), route: `POST /api/record-tests/${TEST_ID}/calls`, response: { callId: AI_CALL_ID, response: { result: 'placed', aiCallId: AI_CALL_ID } }, body: { mode: 'phone', to: '+15125550111' } },
   { name: 'browserToken', call: () => outreach.browserToken(), route: 'POST /api/record-tests/browser-token', response: { token: 'jwt', identity: IDENTITY, expiresAt: '2026-10-06T18:00:00.000Z' } },
   { name: 'recordTestDryRun', call: () => outreach.recordTestDryRun(AI_CALL_ID), route: `POST /api/record-tests/calls/${AI_CALL_ID}/dry-run`, response: { status: 'nothing', changes: [], changesText: null, chatterText: null, wouldCreate: [], conversion: null, note: 'A real call that ended this way writes nothing to Salesforce.' } },
+  { name: 'getAgentPrompts', call: () => outreach.getAgentPrompts(), route: 'GET /api/settings/agent-prompts', response: promptsResponse() },
+  { name: 'previewAgentPrompt', call: () => outreach.previewAgentPrompt('voicemail', 'Hi {{first_name}}'), route: 'POST /api/settings/agent-prompts/voicemail/preview', response: { defaultTemplate: 'Hi', placeholders: [], rendered: 'Hi Jane', problems: [] }, body: { template: 'Hi {{first_name}}' } },
+  { name: 'saveAgentPrompt', call: () => outreach.saveAgentPrompt('instructions', 'Be kind.'), route: 'PUT /api/settings/agent-prompts/instructions', response: promptState('instructions', { active: 'Be kind.' }), body: { template: 'Be kind.' } },
+  { name: 'saveAgentPrompt (reset)', call: () => outreach.saveAgentPrompt('voicemail', null), route: 'PUT /api/settings/agent-prompts/voicemail', response: promptState('voicemail'), body: { template: null } },
+  { name: 'getAgentPromptVersion', call: () => outreach.getAgentPromptVersion('instructions', VERSION_A), route: `GET /api/settings/agent-prompts/instructions/versions/${VERSION_A}`, response: { id: VERSION_A, body: 'Be kind.' } },
   { name: 'startTestCall', call: () => outreach.startTestCall('+15125550111'), route: 'POST /api/ai-calls/test', response: { result: 'placed', aiCallId: AI_CALL_ID }, body: { to: '+15125550111' } },
 ];
 
@@ -63,6 +69,17 @@ describe('outreach-api', () => {
     const err = await outreach.previewCampaign({ sfObject: 'Lead', source: { kind: 'soql', soql: 'SELECT Id FORM Lead' } }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiRequestError);
     expect(err).toMatchObject({ status: 422, code: 'INVALID_SOURCE', message: "unexpected token: 'FORM'" });
+  });
+
+  it('keys the agent prompts under the settings prefix', () => {
+    expect(outreach.outreachKeys.agentPrompts).toEqual(['settings', 'agent-prompts']);
+  });
+
+  it('keeps the problems a refused prompt save answers with, whichever way the server words them', async () => {
+    stubApi({ 'PUT /api/settings/agent-prompts/instructions': respond(400, { error: 'invalid_prompt', problems: ['Unknown placeholder: nope'] }) });
+    const err = await outreach.saveAgentPrompt('instructions', '{{nope}}').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiRequestError);
+    expect(err).toMatchObject({ status: 400, body: { error: 'invalid_prompt', problems: ['Unknown placeholder: nope'] } });
   });
 
   it('keys the record tests under one prefix, so a new test refreshes the list', () => {

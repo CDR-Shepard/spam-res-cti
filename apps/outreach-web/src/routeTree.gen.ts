@@ -19,6 +19,7 @@ import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
 import { Route as AuthenticatedCampaignsIndexRouteImport } from './routes/_authenticated/campaigns.index'
 import { Route as AuthenticatedCampaignsCampaignIdRouteImport } from './routes/_authenticated/campaigns.$campaignId'
 import { Route as AuthenticatedCampaignsNewRouteImport } from './routes/_authenticated/campaigns.new'
+import { Route as AuthenticatedSettingsAgentPromptRouteImport } from './routes/_authenticated/settings.agent-prompt'
 import { Route as AuthenticatedSettingsConnectionsRouteImport } from './routes/_authenticated/settings.connections'
 
 const AuthenticatedRoute = AuthenticatedRouteImport.update({
@@ -73,6 +74,12 @@ const AuthenticatedCampaignsNewRoute =
     path: '/campaigns/new',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
+const AuthenticatedSettingsAgentPromptRoute =
+  AuthenticatedSettingsAgentPromptRouteImport.update({
+    id: '/settings/agent-prompt',
+    path: '/settings/agent-prompt',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 const AuthenticatedSettingsConnectionsRoute =
   AuthenticatedSettingsConnectionsRouteImport.update({
     id: '/settings/connections',
@@ -89,6 +96,7 @@ export interface FileRoutesByFullPath {
   '/auth/callback': typeof AuthCallbackRoute
   '/campaigns/$campaignId': typeof AuthenticatedCampaignsCampaignIdRoute
   '/campaigns/new': typeof AuthenticatedCampaignsNewRoute
+  '/settings/agent-prompt': typeof AuthenticatedSettingsAgentPromptRoute
   '/settings/connections': typeof AuthenticatedSettingsConnectionsRoute
   '/campaigns/': typeof AuthenticatedCampaignsIndexRoute
 }
@@ -101,6 +109,7 @@ export interface FileRoutesByTo {
   '/': typeof AuthenticatedIndexRoute
   '/campaigns/$campaignId': typeof AuthenticatedCampaignsCampaignIdRoute
   '/campaigns/new': typeof AuthenticatedCampaignsNewRoute
+  '/settings/agent-prompt': typeof AuthenticatedSettingsAgentPromptRoute
   '/settings/connections': typeof AuthenticatedSettingsConnectionsRoute
   '/campaigns': typeof AuthenticatedCampaignsIndexRoute
 }
@@ -115,6 +124,7 @@ export interface FileRoutesById {
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/campaigns/$campaignId': typeof AuthenticatedCampaignsCampaignIdRoute
   '/_authenticated/campaigns/new': typeof AuthenticatedCampaignsNewRoute
+  '/_authenticated/settings/agent-prompt': typeof AuthenticatedSettingsAgentPromptRoute
   '/_authenticated/settings/connections': typeof AuthenticatedSettingsConnectionsRoute
   '/_authenticated/campaigns/': typeof AuthenticatedCampaignsIndexRoute
 }
@@ -129,6 +139,7 @@ export interface FileRouteTypes {
     | '/auth/callback'
     | '/campaigns/$campaignId'
     | '/campaigns/new'
+    | '/settings/agent-prompt'
     | '/settings/connections'
     | '/campaigns/'
   fileRoutesByTo: FileRoutesByTo
@@ -141,6 +152,7 @@ export interface FileRouteTypes {
     | '/'
     | '/campaigns/$campaignId'
     | '/campaigns/new'
+    | '/settings/agent-prompt'
     | '/settings/connections'
     | '/campaigns'
   id:
@@ -154,6 +166,7 @@ export interface FileRouteTypes {
     | '/_authenticated/'
     | '/_authenticated/campaigns/$campaignId'
     | '/_authenticated/campaigns/new'
+    | '/_authenticated/settings/agent-prompt'
     | '/_authenticated/settings/connections'
     | '/_authenticated/campaigns/'
   fileRoutesById: FileRoutesById
@@ -236,6 +249,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedCampaignsNewRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/settings/agent-prompt': {
+      id: '/_authenticated/settings/agent-prompt'
+      path: '/settings/agent-prompt'
+      fullPath: '/settings/agent-prompt'
+      preLoaderRoute: typeof AuthenticatedSettingsAgentPromptRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/settings/connections': {
       id: '/_authenticated/settings/connections'
       path: '/settings/connections'
@@ -253,6 +273,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedCampaignsCampaignIdRoute: typeof AuthenticatedCampaignsCampaignIdRoute
   AuthenticatedCampaignsNewRoute: typeof AuthenticatedCampaignsNewRoute
+  AuthenticatedSettingsAgentPromptRoute: typeof AuthenticatedSettingsAgentPromptRoute
   AuthenticatedSettingsConnectionsRoute: typeof AuthenticatedSettingsConnectionsRoute
   AuthenticatedCampaignsIndexRoute: typeof AuthenticatedCampaignsIndexRoute
 }
@@ -264,6 +285,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedCampaignsCampaignIdRoute: AuthenticatedCampaignsCampaignIdRoute,
   AuthenticatedCampaignsNewRoute: AuthenticatedCampaignsNewRoute,
+  AuthenticatedSettingsAgentPromptRoute: AuthenticatedSettingsAgentPromptRoute,
   AuthenticatedSettingsConnectionsRoute: AuthenticatedSettingsConnectionsRoute,
   AuthenticatedCampaignsIndexRoute: AuthenticatedCampaignsIndexRoute,
 }
