@@ -45,6 +45,12 @@ export function versionLoadErrorText(error: unknown): string {
   return error instanceof ApiRequestError && error.status === 404 ? VERSION_GONE_WORDS : agentPromptErrorText(error);
 }
 
+/**
+ * Shown by the status line while a saved version is active, and by Save: a saved text is used as written, so the built-in prompt
+ * (and the tools it goes with) can improve later without that reaching the org's calls.
+ */
+export const SAVED_REPLACES_WORDS = "A saved version replaces the built-in prompt — later improvements to it won't reach your calls until you reset or copy them in.";
+
 /** The line under the tabs: whether the built-in default is in use, or who saved the text and when. */
 export function promptStatusWords(state: Pick<AgentPromptState, 'active' | 'updatedAt' | 'updatedByEmail'>): string {
   if (state.active === null) return 'Using the default';

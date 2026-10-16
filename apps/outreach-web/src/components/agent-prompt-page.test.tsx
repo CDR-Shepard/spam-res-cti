@@ -22,6 +22,7 @@ const PUT_INSTRUCTIONS = 'PUT /api/settings/agent-prompts/instructions';
 const PUT_VOICEMAIL = 'PUT /api/settings/agent-prompts/voicemail';
 const PREVIEW_INSTRUCTIONS = 'POST /api/settings/agent-prompts/instructions/preview';
 const SAVED_WORDS = 'Saved — the next call uses it.';
+const REPLACES_WORDS = "A saved version replaces the built-in prompt — later improvements to it won't reach your calls until you reset or copy them in.";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -55,6 +56,48 @@ describe('AgentPromptPage', () => {
     expect(box).toHaveClass('font-mono');
     expect(screen.getByText('Using the default')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+
+  it('says a saved version replaces the built-in prompt: by the status line once a version is saved, and by Save always', async () => {
+    const { box } = await render();
+    // Default in use: the warning belongs to Save (the first save is what freezes the prompt), once.
+    expect(screen.getAllByText(REPLACES_WORDS)).toHaveLength(1);
+    expect(box).toBeInTheDocument();
+  });
+
+  it('with a saved version active, says it by the status line as well as by Save, on both tabs', async () => {
+    const user = userEvent.setup();
+    await render({
+      [LIST]: promptsResponse({
+        instructions: promptState('instructions', { active: 'My prompt for {{agent_name}}.', updatedAt: SAVED_AT, updatedByEmail: 'grant@gghomes.com' }),
+        voicemail: promptState('voicemail', { active: 'Hi {{first_name}}.', updatedAt: SAVED_AT, updatedByEmail: 'grant@gghomes.com' }),
+      }),
+    });
+    const status = screen.getByText(`Edited ${formatDateTime(SAVED_AT)} by grant@gghomes.com`);
+    const notes = screen.getAllByText(REPLACES_WORDS);
+    expect(notes).toHaveLength(2);
+    // The first is under the status line, above the editor; the second is below the editor, by the buttons.
+    const textbox = screen.getByRole('textbox', { name: 'Call instructions' });
+    const follows = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(status, notes[0] as HTMLElement)).toBe(true);
+    expect(follows(notes[0] as HTMLElement, textbox)).toBe(true);
+    expect(follows(textbox, notes[1] as HTMLElement)).toBe(true);
+    expect(follows(notes[1] as HTMLElement, screen.getByRole('button', { name: 'Save' }))).toBe(false);
+    await user.click(screen.getByRole('tab', { name: 'Voicemail message' }));
+    expect(await screen.findAllByText(REPLACES_WORDS)).toHaveLength(2);
+  });
+
+  it('a reset to the default takes the status-line note away again, keeping the one by Save', async () => {
+    const user = userEvent.setup();
+    await render({
+      [LIST]: promptsResponse({ instructions: promptState('instructions', { active: 'My own prompt.', updatedAt: SAVED_AT, updatedByEmail: 'grant@gghomes.com', versions: [version()] }) }),
+      [PUT_INSTRUCTIONS]: promptState('instructions', { active: null, updatedAt: SAVED_AT, versions: [version({ id: VERSION_B, isDefault: true, chars: 0 }), version()] }),
+    });
+    expect(screen.getAllByText(REPLACES_WORDS)).toHaveLength(2);
+    await user.click(screen.getByRole('button', { name: 'Reset to default' }));
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Reset to default' }));
+    expect(await screen.findByText('Using the default')).toBeInTheDocument();
+    expect(screen.getAllByText(REPLACES_WORDS)).toHaveLength(1);
   });
 
   it('shows the saved prompt, and who edited it and when', async () => {
@@ -214,7 +257,8 @@ describe('AgentPromptPage', () => {
     await user.click(screen.getByRole('button', { name: 'Reset to default' }));
     const dialog = await screen.findByRole('alertdialog');
     expect(dialog).toHaveTextContent('Go back to the built-in prompt?');
-    expect(dialog).toHaveTextContent('Your edits stay in Previous versions.');
+    expect(dialog).toHaveTextContent('Your saved versions stay in Previous versions; unsaved edits will be lost.');
+    expect(dialog).not.toHaveTextContent('Your edits stay in Previous versions');
     expect(sent(calls, PUT_INSTRUCTIONS)).toEqual([]);
     await user.click(within(dialog).getByRole('button', { name: 'Reset to default' }));
     await waitFor(() => expect(sent(calls, PUT_INSTRUCTIONS).map((c) => c.body)).toEqual([{ template: null }]));
@@ -229,6 +273,54 @@ describe('AgentPromptPage', () => {
     expect(screen.getByRole('button', { name: 'Reset to default' })).toBeDisabled();
     await user.type(box, ' x');
     expect(screen.getByRole('button', { name: 'Reset to default' })).toBeEnabled();
+  });
+
+  it('Reset to default with unsaved edits while the default is already in use only restores the editor: no save, no new version', async () => {
+    const user = userEvent.setup();
+    const { calls, box } = await render();
+    await user.type(box, ' my draft');
+    expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Reset to default' }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('Go back to the built-in prompt?');
+    // Nothing was saved, so it does not claim the edits stay in Previous versions: it says they are discarded.
+    expect(dialog).not.toHaveTextContent('stay in Previous versions');
+    expect(dialog).toHaveTextContent('unsaved edits');
+    await user.click(within(dialog).getByRole('button', { name: 'Reset to default' }));
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Call instructions' })).toHaveValue(DEFAULT_INSTRUCTIONS));
+    expect(sent(calls, PUT_INSTRUCTIONS)).toEqual([]);
+    expect(calls.filter((c) => c.method !== 'GET')).toEqual([]);
+    expect(screen.getByText('Using the default')).toBeInTheDocument();
+    expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect(screen.queryByText('Back to the default — the next call uses it.')).not.toBeInTheDocument();
+  });
+
+  it('cancelling a reset of an unsaved draft keeps the draft', async () => {
+    const user = userEvent.setup();
+    const { calls, box } = await render();
+    await user.type(box, ' my draft');
+    await user.click(screen.getByRole('button', { name: 'Reset to default' }));
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('textbox', { name: 'Call instructions' })).toHaveValue(`${DEFAULT_INSTRUCTIONS} my draft`);
+    expect(calls.filter((c) => c.method !== 'GET')).toEqual([]);
+  });
+
+  it('Reset to default with unsaved edits on top of a saved version still saves the reset, and the dialog says the edits will be lost', async () => {
+    const user = userEvent.setup();
+    const saved = 'My own prompt for {{agent_name}}.';
+    const { calls, box } = await render({
+      [LIST]: promptsResponse({ instructions: promptState('instructions', { active: saved, updatedAt: SAVED_AT, updatedByEmail: 'grant@gghomes.com', versions: [version()] }) }),
+      [PUT_INSTRUCTIONS]: promptState('instructions', { active: null, updatedAt: SAVED_AT, updatedByEmail: 'admin@gg.co', versions: [version({ id: VERSION_B, isDefault: true, chars: 0 }), version()] }),
+    });
+    await user.type(box, ' plus a draft');
+    await user.click(screen.getByRole('button', { name: 'Reset to default' }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('unsaved edits will be lost');
+    await user.click(within(dialog).getByRole('button', { name: 'Reset to default' }));
+    await waitFor(() => expect(sent(calls, PUT_INSTRUCTIONS).map((c) => c.body)).toEqual([{ template: null }]));
+    expect(await screen.findByText('Using the default')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Call instructions' })).toHaveValue(DEFAULT_INSTRUCTIONS);
   });
 
   it('cancelling the reset saves nothing', async () => {
