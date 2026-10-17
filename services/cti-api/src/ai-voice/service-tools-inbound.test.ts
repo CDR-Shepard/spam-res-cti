@@ -96,6 +96,9 @@ describe('save_caller_details', () => {
       motivation: 'inherited it',
       seller_sentiment: 'relaxed',
       recommended_next_action: 'call back today',
+      email: 'dana@example.com',
+      walkthrough_time: 'Thursday morning',
+      mortgage: 'about 200k',
     };
     await run(inbound, 'save_caller_details', more);
     expect(qualification()).toEqual(more);
@@ -112,7 +115,7 @@ describe('save_caller_details', () => {
     const props = (SAVE_CALLER_DETAILS_TOOL.parameters as { properties: Record<string, { enum?: string[] }> }).properties;
     expect(props.urgency_level?.enum).toEqual(['high', 'medium', 'low', 'unknown']);
     expect(props.status?.enum).toEqual(['qualified', 'callback', 'disqualified', 'incomplete']);
-    expect(Object.keys(props)).toHaveLength(17);
+    expect(Object.keys(props)).toHaveLength(20);
   });
 
   it('merges later saves into earlier ones', async () => {

@@ -84,8 +84,9 @@ describe('inboundDetailRows', () => {
       { label: 'Best callback time', value: 'Evenings' },
       { label: 'Notes', value: 'Wants a quick close' },
     ]);
-    expect(inboundDetailRows({ notes: 'n', seller_name: 'Dana', urgency_level: 'high', recommended_next_action: 'call today' })).toEqual([
+    expect(inboundDetailRows({ notes: 'n', seller_name: 'Dana', urgency_level: 'high', recommended_next_action: 'call today', walkthrough_time: 'Thursday morning' })).toEqual([
       { label: 'Name', value: 'Dana' },
+      { label: 'Walkthrough', value: 'Thursday morning' },
       { label: 'Urgency level', value: 'high' },
       { label: 'Next step', value: 'call today' },
       { label: 'Notes', value: 'n' },
@@ -98,12 +99,15 @@ describe('inboundDetailRows', () => {
     expect(INBOUND_DETAIL_LABELS).toEqual({
       seller_name: 'Name',
       phone_number: 'Best number',
+      email: 'Email',
       property_address: 'Property address',
       location: 'Location',
+      walkthrough_time: 'Walkthrough',
       timeline: 'Timeline',
       price_expectation: 'Price expectation',
       condition: 'Condition',
       occupancy: 'Who lives there',
+      mortgage: 'Owed on it',
       decision_maker: 'Decision maker',
       motivation: 'Why they’re selling',
       urgency: 'Urgency',

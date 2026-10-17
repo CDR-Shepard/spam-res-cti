@@ -88,17 +88,20 @@ describe('AddTestPhoneRequest', () => {
 });
 
 describe('INBOUND_STATUSES and INBOUND_DETAIL_FIELDS', () => {
-  it('are the four statuses and the sixteen detail fields the inbound prompt asks the agent to save', () => {
+  it('are the four statuses and the nineteen detail fields the inbound prompt asks the agent to save', () => {
     expect(INBOUND_STATUSES).toEqual(['qualified', 'callback', 'disqualified', 'incomplete']);
     expect(INBOUND_DETAIL_FIELDS).toEqual([
       'seller_name',
       'phone_number',
+      'email',
       'property_address',
       'location',
+      'walkthrough_time',
       'timeline',
       'price_expectation',
       'condition',
       'occupancy',
+      'mortgage',
       'decision_maker',
       'motivation',
       'urgency',
@@ -136,6 +139,9 @@ describe('InboundCallDetails', () => {
       urgency_level: 'high',
       seller_sentiment: 'n',
       recommended_next_action: 'o',
+      email: 'p',
+      walkthrough_time: 'q',
+      mortgage: 'r',
     };
     expect(InboundCallDetails.parse(full)).toEqual(full);
     expect(InboundCallDetails.parse({ notes: 'Wants cash.' })).toEqual({ notes: 'Wants cash.' });

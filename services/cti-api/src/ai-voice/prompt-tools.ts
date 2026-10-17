@@ -180,7 +180,10 @@ export function toolsFor(slots: readonly AppointmentSlot[]): RealtimeFunctionToo
 const CALLER_DETAIL_HINTS: Record<InboundDetailField, string> = {
   seller_name: "The caller's name, as they said it.",
   phone_number: "The best number to reach them: the one they're calling from unless they gave another.",
+  email: 'Their email address, as they spelled it.',
   property_address: "The property's street address, if they gave it.",
+  walkthrough_time: 'The day and time window they picked for someone to come see the house, like "Thursday morning".',
+  mortgage: "What's still owed on the house, or that it's paid off.",
   location: 'Where the property is: the city or area.',
   occupancy: 'Who lives there now: them, tenants, family, or nobody.',
   motivation: 'Why they want to sell, in their words.',

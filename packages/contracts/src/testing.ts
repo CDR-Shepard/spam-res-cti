@@ -49,12 +49,15 @@ export type InboundStatus = (typeof INBOUND_STATUSES)[number];
 export const INBOUND_DETAIL_FIELDS = [
   'seller_name',
   'phone_number',
+  'email',
   'property_address',
   'location',
+  'walkthrough_time',
   'timeline',
   'price_expectation',
   'condition',
   'occupancy',
+  'mortgage',
   'decision_maker',
   'motivation',
   'urgency',
@@ -89,6 +92,9 @@ export const InboundCallDetails = z.object({
   urgency_level: z.string().optional(),
   seller_sentiment: z.string().optional(),
   recommended_next_action: z.string().optional(),
+  email: z.string().optional(),
+  walkthrough_time: z.string().optional(),
+  mortgage: z.string().optional(),
 });
 export type InboundCallDetails = z.infer<typeof InboundCallDetails>;
 
