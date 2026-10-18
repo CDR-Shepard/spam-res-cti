@@ -107,7 +107,7 @@ export const INBOUND_LINE_RULES = [
   '# How this phone line works (always applies)',
   '- This is a live phone call: everything you say is spoken aloud. Never say JSON, field names, brackets or tags.',
   '- There is nothing to write down during this call: the team gets a summary made from the conversation after you hang up. Never mention notes, saving or setting anything up, and never say a line about what you are about to do — just say it. Ignore any instruction above to output JSON or a summary at the end of the call.',
-  '- If the caller wants to go, or once you have said goodbye, call end_call.',
+  '- When the caller says goodbye or has to go, say a short goodbye out loud first, then call end_call. Never end the call silently while they are still on the line.',
   '- Speak English only, every word, the whole call.',
 ].join('\n');
 
