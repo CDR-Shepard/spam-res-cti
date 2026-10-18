@@ -53,6 +53,8 @@ export const UNKNOWN_TOOL = '{"error":"unknown tool"}';
 const TOOL_FAILED = '{"error":"tool failed"}';
 const LOGGED_NAME_MAX = 64;
 const WAITING: ToolResult = { output: '{"ok":true}', then: 'wait' };
+/** The inbound agent's silent save: it speaks first and saves last, so a save never earns a second reply. */
+const CALLER_DETAILS_TOOL: ToolName = 'save_caller_details';
 /** Silent note saves: the outbound agent's qualification, the inbound agent's caller details. */
 const NOTE_TOOLS: ReadonlySet<string> = new Set<ToolName>(['save_qualification', 'save_caller_details']);
 
@@ -72,12 +74,16 @@ export function functionCalls(response: Record<string, unknown>): FunctionCall[]
 
 /**
  * Whether the agent speaks again after a tool batch. Not when it chose to stay quiet. Not when the
- * response only saved notes after saying something that ended with a question: the caller has the
- * floor, and a follow-up would talk over their answer. Otherwise yes: a tool-first response, any
- * other tool (or an unknown one), or a statement that ends without a question.
+ * response only saved caller details after saying something: the inbound agent says its whole reply
+ * first and saves last, so a follow-up would be a second, back-to-back reply — whatever the audio
+ * ended with. Not when the response only saved notes after saying something that ended with a
+ * question: the caller has the floor, and a follow-up would talk over their answer. Otherwise yes: a
+ * tool-first response (no audio), any other tool (or an unknown one), or a note save whose statement
+ * ended without a question.
  */
 export function followUpAfterTools(calls: readonly FunctionCall[], batch: BatchResult, spoke: Spoke): boolean {
   if (!batch.speak) return false;
+  if (calls.length > 0 && calls.every((call) => call.name === CALLER_DETAILS_TOOL) && spoke.audio) return false;
   const onlyNotes = calls.length > 0 && calls.every((call) => NOTE_TOOLS.has(call.name));
   return !(onlyNotes && spoke.audio && spoke.question);
 }

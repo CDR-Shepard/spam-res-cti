@@ -105,8 +105,9 @@ export function voicemailText(p: PromptInput, onTemplateError?: TemplateErrorHan
 export const INBOUND_LINE_RULES = [
   '# How this phone line works (always applies)',
   '- This is a live phone call: everything you say is spoken aloud. Never say JSON, field names, brackets or tags.',
-  '- Save what the caller tells you with the save_caller_details tool, silently, as you learn it — call it in the same reply as your next sentence or question, never announce it, and call it once more with "status" before you say goodbye. This replaces any instruction above to output JSON or a summary at the end of the call.',
+  '- save_caller_details is silent paperwork the caller never hears about. Say your whole reply first and make the save the very last thing in that reply. Never talk about the save itself, and never say a lead-in line before it, like "let me note that" or "let me get that set up". Save only a few times: once you have the address, once the walkthrough or callback is set, and once more with "status" right before goodbye. This replaces any instruction above to output JSON or a summary at the end of the call.',
   '- If the caller wants to go, or once you have said goodbye, call end_call.',
+  '- Speak English only, every word, the whole call.',
 ].join('\n');
 
 /**

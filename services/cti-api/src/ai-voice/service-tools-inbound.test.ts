@@ -184,17 +184,17 @@ describe('an inbound call is offered only its own tools', () => {
   });
 });
 
-describe('followUpAfterTools treats save_caller_details like save_qualification', () => {
+describe('followUpAfterTools: a save_caller_details save never triggers a second reply', () => {
   const fc = (name: string, id = 'c1'): FunctionCall => ({ name, call_id: id, arguments: '{}' });
   const SPEAK = { carryOn: true, speak: true };
 
-  it('no follow-up after a details save riding on a spoken question', () => {
+  it('no follow-up after a details save riding on spoken audio, whatever it ended with', () => {
     expect(followUpAfterTools([fc('save_caller_details')], SPEAK, { audio: true, question: true })).toBe(false);
+    expect(followUpAfterTools([fc('save_caller_details')], SPEAK, { audio: true, question: false })).toBe(false);
     expect(followUpAfterTools([fc('save_caller_details'), fc('save_qualification', 'c2')], SPEAK, { audio: true, question: true })).toBe(false);
   });
 
-  it('a follow-up after a statement, a tool-first save, or a save mixed with end_call', () => {
-    expect(followUpAfterTools([fc('save_caller_details')], SPEAK, { audio: true, question: false })).toBe(true);
+  it('a follow-up after a tool-first save (no audio) or a save mixed with end_call', () => {
     expect(followUpAfterTools([fc('save_caller_details')], SPEAK, { audio: false, question: false })).toBe(true);
     expect(followUpAfterTools([fc('save_caller_details'), fc('end_call', 'c2')], SPEAK, { audio: true, question: true })).toBe(true);
   });
