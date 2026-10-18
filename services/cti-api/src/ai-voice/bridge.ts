@@ -112,6 +112,11 @@ export interface BridgeOptions {
   maxCallMs: number;
   /** How the agent opens the call (default OPENER_DELAY_MS and OPENER_PROMPT; an inbound call passes INBOUND_OPENER). */
   opener?: OpenerOption;
+  /**
+   * Inbound calls: an end_call that comes with no audio after the caller spoke is sent back once, asking for a spoken
+   * goodbye first, so the caller is never hung up on without a word (simulated inbound calls, 2026-10-18).
+   */
+  goodbyeBeforeEnd?: boolean;
   now?: () => number;
   setTimer?: SetTimer;
   clearTimer?: ClearTimer;
@@ -162,6 +167,10 @@ export class AiCallBridge {
   /** The agent called wait_for_user and nobody has spoken since. */
   private holding = false;
   private agentSpoke = false;
+  /** goodbyeBeforeEnd: a caller turn (any commit, overlaps included) since the first audio of the agent's latest spoken response. */
+  private callerSpokeSinceAgent = false;
+  /** goodbyeBeforeEnd sends back at most one end_call a call. */
+  private silentEndRefused = false;
   /** The first agent item that played: the opener, never cut by the gate. */
   private openerItemId: string | null = null;
   /** Committed caller turns the gate is still judging: when it cuts the agent, they are answered at once. */
@@ -444,6 +453,7 @@ export class AiCallBridge {
 
   /** Gate mode: a committed caller turn gets an answer — an overlap still being judged waits for its verdict. */
   private onCallerTurn(itemId: string): void {
+    this.callerSpokeSinceAgent = true;
     if (this.awaitingCommit === itemId) this.awaitingCommit = null;
     this.timing.committed(itemId, this.now());
     if (this.bargeIn !== 'gate' || this.closing) return;
@@ -644,6 +654,7 @@ export class AiCallBridge {
       this.responseHasAudio = true;
       this.stats.agentAudio(at);
       this.agentSpoke = true;
+      this.callerSpokeSinceAgent = false;
       this.openerItemId ??= itemId;
     }
     this.sockets.sendTwilio({
@@ -689,29 +700,36 @@ export class AiCallBridge {
       audio: this.responseHasAudio && !this.responseCut && !this.truncated.has(this.responseItemId),
       question: this.lastAgentLine.endsWith('?'),
     };
+    // Any of it played, cut or not: a late-cut goodbye was still said (the guard below must not send its end_call back).
+    const played = this.responseHasAudio;
     this.responseActive = false;
     this.responsePending = false;
     this.responseCut = false;
     this.cancelWhenCreated = false;
     const calls = functionCalls(response);
-    if (calls.length > 0) this.runTools(calls, spoke);
+    if (calls.length > 0) this.runTools(calls, spoke, played);
     this.playback.onResponseDone(); // after the tool bookkeeping: a drain notified here sees the batch
     if (calls.length === 0) this.afterResponse();
   }
 
   /** Run a response's tool calls after any earlier batch, then speak, hold, let the caller answer, or end the conversation. */
-  private runTools(calls: readonly FunctionCall[], spoke: Spoke): void {
+  private runTools(calls: readonly FunctionCall[], spoke: Spoke, played: boolean): void {
     const deps = {
       onTool: this.hooks.onTool.bind(this.hooks),
       log: this.hooks.log,
       send: (m: object) => this.sockets.sendOpenAi(m),
     };
+    const refuseSilentEnd = this.latchSilentEndRefusal(calls, played);
     this.toolBatches += 1;
     this.timing.toolBatch();
     this.toolChain = this.toolChain
       .then(async () => {
         // Counted down exactly once, before acting on the result (and even if the batch throws).
-        const batch = await runToolBatch(calls, deps).finally(() => (this.toolBatches -= 1));
+        const batch = await runToolBatch(calls, deps, { refuseSilentEnd }).finally(() => (this.toolBatches -= 1));
+        if (batch.refusedSilentEnd) {
+          this.hooks.log.info({}, 'ai-voice bridge: end_call with no goodbye after the caller spoke — asked for one');
+          this.note('[end_call sent back — asked for a goodbye]');
+        }
         if (!batch.carryOn) this.closeConversation();
         if (followUpAfterTools(calls, batch, spoke)) return this.requestResponse();
         // Only wait_for_user holds; a note save after a question leaves the floor to the caller (an answer already in is sent).
@@ -722,6 +740,22 @@ export class AiCallBridge {
         this.hooks.log.error({ err: errText(e) }, 'ai-voice bridge: tool batch failed');
         this.afterResponse();
       });
+  }
+
+  /**
+   * goodbyeBeforeEnd, decided and latched at response.done: an end_call in a response that played nothing, after a
+   * caller turn the agent has not answered aloud, is sent back once a call (the agent says a goodbye, then ends).
+   */
+  private latchSilentEndRefusal(calls: readonly FunctionCall[], played: boolean): boolean {
+    const refuse =
+      this.opts.goodbyeBeforeEnd === true &&
+      !played &&
+      !this.closing &&
+      !this.silentEndRefused &&
+      this.callerSpokeSinceAgent &&
+      calls.some((call) => call.name === 'end_call');
+    if (refuse) this.silentEndRefused = true;
+    return refuse;
   }
 
   /** A response (or a quiet tool batch) finished without asking for another. */

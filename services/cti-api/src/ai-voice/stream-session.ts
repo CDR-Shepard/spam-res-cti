@@ -166,17 +166,23 @@ async function onStart(socket: BridgeSocket, start: Msg, deps: StreamSessionDeps
 
 /**
  * What the agent is told and may do. An inbound call (a test phone called the AI) gets the inbound prompt + line
- * rules, INBOUND_TOOLS and the quick INBOUND_OPENER; an outbound call exactly what it always got (no opener option).
+ * rules, INBOUND_TOOLS, the quick INBOUND_OPENER and the goodbye guard (a silent end_call after the caller spoke is
+ * sent back once); an outbound call exactly what it always got (no opener option, no guard).
  */
 function conversationFor(
   entry: ActiveAiCall,
   slots: AppointmentSlot[],
   deps: StreamSessionDeps,
-): Pick<BridgeOptions, 'instructions' | 'tools' | 'opener'> {
+): Pick<BridgeOptions, 'instructions' | 'tools' | 'opener' | 'goodbyeBeforeEnd'> {
   // Part 6 B: a practice call rings a test number but says the seller's local time (the record's phone; service.ts).
   const prompt: PromptInput = { ...entry.prompt, localTime: localTimeFor(entry.localTimeE164 ?? entry.toE164, deps.now()) };
   if (entry.direction === 'inbound') {
-    return { instructions: buildInboundInstructions(prompt, logTemplateError(deps.log)), tools: INBOUND_TOOLS, opener: INBOUND_OPENER };
+    return {
+      instructions: buildInboundInstructions(prompt, logTemplateError(deps.log)),
+      tools: INBOUND_TOOLS,
+      opener: INBOUND_OPENER,
+      goodbyeBeforeEnd: true,
+    };
   }
   return { instructions: buildInstructions(prompt, logTemplateError(deps.log)), tools: toolsFor(slots) };
 }

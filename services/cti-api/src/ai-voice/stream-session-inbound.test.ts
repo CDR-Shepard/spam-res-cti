@@ -140,11 +140,17 @@ describe('an inbound call starts with the inbound agent', () => {
     expect(INBOUND_OPENER).toEqual({ delayMs: 300, prompt: '(Someone just called in and the line is open. Answer now with your greeting.)' });
   });
 
+  it('turns on the goodbye guard: a silent end_call after the caller spoke is sent back once', async () => {
+    await begin();
+    expect(captured?.opts.goodbyeBeforeEnd).toBe(true);
+  });
+
   it('an outbound entry is unchanged: its tools, no opener option, no line rules', async () => {
     registerActiveCall(activeEntry({ aiCallId: ID, callSid: CALL_SID }));
     await begin();
     expect(captured?.opts.tools).toBe(AI_CALL_TOOLS);
     expect(captured?.opts).not.toHaveProperty('opener');
+    expect(captured?.opts).not.toHaveProperty('goodbyeBeforeEnd');
     expect(captured?.opts.instructions).not.toContain(INBOUND_LINE_RULES);
   });
 

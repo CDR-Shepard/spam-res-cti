@@ -19,6 +19,13 @@ export interface BatchResult {
   carryOn: boolean;
   /** False when the agent chose to stay quiet (wait_for_user): no response.create. */
   speak: boolean;
+  /** An end_call was sent back unrun (BatchOptions.refuseSilentEnd): the agent is to say its goodbye first. */
+  refusedSilentEnd?: boolean;
+}
+
+export interface BatchOptions {
+  /** Send end_call back unrun with SAY_GOODBYE_FIRST; the bridge's inbound goodbye guard decides when. */
+  refuseSilentEnd?: boolean;
 }
 
 /** What the response that carried the calls did, as the caller heard it. */
@@ -48,6 +55,10 @@ export interface ToolDeps {
 }
 
 const BAD_ARGUMENTS = '{"error":"bad arguments"}';
+/** What the agent hears when the bridge sends back an end_call that came with no spoken goodbye. */
+export const SAY_GOODBYE_FIRST = JSON.stringify({
+  error: 'the caller spoke and heard nothing back — say a short goodbye out loud first, then call end_call again',
+});
 /** What the model hears for a tool it may not call (an unknown name, or one its call was not offered: service-tools.ts). */
 export const UNKNOWN_TOOL = '{"error":"unknown tool"}';
 const TOOL_FAILED = '{"error":"tool failed"}';
@@ -82,17 +93,23 @@ export function followUpAfterTools(calls: readonly FunctionCall[], batch: BatchR
   return !(onlyNotes && spoke.audio && spoke.question);
 }
 
-/** Run calls in order and send every output. */
-export async function runToolBatch(calls: readonly FunctionCall[], deps: ToolDeps): Promise<BatchResult> {
+/** Run calls in order and send every output (an end_call refused by `opts` is answered, not run). */
+export async function runToolBatch(calls: readonly FunctionCall[], deps: ToolDeps, opts: BatchOptions = {}): Promise<BatchResult> {
   let carryOn = true;
   let speak = true;
+  let refusedSilentEnd = false;
   for (const call of calls) {
+    if (opts.refuseSilentEnd && call.name === 'end_call') {
+      refusedSilentEnd = true;
+      deps.send(functionCallOutput(call.call_id, SAY_GOODBYE_FIRST));
+      continue;
+    }
     const result = await runTool(call, deps);
     deps.send(functionCallOutput(call.call_id, result.output));
     if (result.then === 'hangup' || result.then === 'transfer') carryOn = false;
     if (result.then === 'wait') speak = false;
   }
-  return { carryOn, speak };
+  return { carryOn, speak, refusedSilentEnd };
 }
 
 async function runTool(call: FunctionCall, deps: ToolDeps): Promise<ToolResult> {
