@@ -1,6 +1,6 @@
 /**
- * Real Postgres: the SQL only an inbound test call runs (store-inbound.ts; final review M-2, M-3). A save_caller_details
- * write landing after finalize still sets the outcome from a valid status, and a replayed webhook finds the org's open
+ * Real Postgres: the SQL only an inbound test call runs (store-inbound.ts; final review M-2, M-3). A details write
+ * landing after finalize still sets the outcome from a valid status, and a replayed webhook finds the org's open
  * inbound row for its CallSid. Runs when TEST_DATABASE_URL points at a server you can CREATE DATABASE on (as
  * store-prompts.pg.test.ts), skipped otherwise.
  */

@@ -13,9 +13,10 @@
  * edit it on the Agent prompt page (kind `inbound`).
  *
  * Its "After the call" block asks for a JSON object. On a live call that would be spoken, so
- * buildInboundInstructions appends fixed line rules after the rendered text (not editable) that turn it
- * into silent save_caller_details calls instead; that tool's fields (INBOUND_DETAIL_FIELDS) match the
- * JSON keys below, apart from recording_url and transcript_url, which the system owns.
+ * buildInboundInstructions appends fixed line rules after the rendered text (not editable) that tell the
+ * agent to ignore it: the call saves nothing, and the details are filled in from the transcript after it
+ * ends (caller-details.ts). Those fields (INBOUND_DETAIL_FIELDS) match the JSON keys below, apart from
+ * recording_url and transcript_url, which the system owns.
  */
 export const DEFAULT_INBOUND_TEMPLATE = `## Who you are
 

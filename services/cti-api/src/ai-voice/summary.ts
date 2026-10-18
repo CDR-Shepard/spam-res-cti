@@ -36,11 +36,16 @@ export interface SummaryRequest {
   max_tokens: number;
   system: string;
   messages: Array<{ role: 'user'; content: string }>;
+  /** Absent = the model's default (the summary); 0 for an extraction that should come out the same each time. */
+  temperature?: number;
+  /** Tool use, for a structured answer (caller-details.ts): one tool, forced with `tool_choice`. */
+  tools?: Array<{ name: string; description: string; input_schema: { type: 'object'; [key: string]: unknown } }>;
+  tool_choice?: { type: 'tool'; name: string };
 }
 
 /** The slice of the Anthropic SDK this module uses (a fake in tests). */
 export interface SummaryClient {
-  create(req: SummaryRequest): Promise<{ content: ReadonlyArray<{ type: string; text?: string }> }>;
+  create(req: SummaryRequest): Promise<{ content: ReadonlyArray<{ type: string; text?: string; name?: string; input?: unknown }> }>;
 }
 
 export interface SummaryDeps {
@@ -76,7 +81,8 @@ const neutralise = (s: string): string => s.replace(/</g, '‹').replace(/>/g, '
 
 type Line = { role: 'agent' | 'caller'; text: string };
 
-function spokenLines(transcript: unknown): Line[] {
+/** The lines that were actually spoken (a caller or the agent, played, not blank); anything else in a transcript is dropped. */
+export function spokenLines(transcript: unknown): Line[] {
   if (!Array.isArray(transcript)) return [];
   return transcript.flatMap((e): Line[] => {
     if (e === null || typeof e !== 'object') return [];

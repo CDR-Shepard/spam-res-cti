@@ -15,6 +15,7 @@ import { getDb } from '@cti/db';
 import { loadConfig } from '../config.js';
 import type { Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
+import type { CallerDetailsDeps } from './caller-details.js';
 import { gateAiCall } from './gate.js';
 import { internalSession } from './internal-auth.js';
 import { loadIntegrationRecord } from './integration-record.js';
@@ -44,6 +45,8 @@ export interface AiVoiceDeps {
   now: () => Date;
   /** Summary + Salesforce Tasks once a call is finalized (detached from the webhook). */
   afterCall: AfterCall;
+  /** The model (the summary's) that fills an inbound call's details from its transcript when it ends; absent = none. */
+  details?: CallerDetailsDeps;
   /** Idempotency store of the internal trigger; tests override it (default: ai_call_requests). */
   requests?: AiCallRequestStore;
 }
@@ -53,7 +56,7 @@ function defaultDeps(overrides: Partial<AiVoiceDeps>, log: BridgeLog): AiVoiceDe
   const cfg = loadConfig();
   const store = overrides.store ?? drizzleAiCallStore(getDb());
   const now = overrides.now ?? (() => new Date());
-  const { afterCall, sf } = liveAfterCall(cfg, store, log, now);
+  const { afterCall, sf, summary } = liveAfterCall(cfg, store, log, now);
   return {
     store,
     twilio: createAiVoiceTwilio(cfg),
@@ -64,6 +67,7 @@ function defaultDeps(overrides: Partial<AiVoiceDeps>, log: BridgeLog): AiVoiceDe
     db: () => getDb(),
     now,
     afterCall,
+    details: summary,
   };
 }
 
@@ -80,6 +84,7 @@ export async function registerAiVoiceRoutes(app: FastifyInstance, overrides: Par
     effects: deps.effects,
     openRealtime: deps.openRealtime,
     ...(deps.createBridge ? { createBridge: deps.createBridge } : {}),
+    ...(deps.details ? { details: deps.details } : {}),
     now: deps.now,
     log: req.log,
   }));

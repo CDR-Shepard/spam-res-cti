@@ -7,9 +7,11 @@
  * offered only on a call that carries appointment times (`toolsFor`).
  *
  * Inbound agent testing (plan 2026-10-16): an inbound call (a test phone called
- * the AI) is offered `INBOUND_TOOLS` only — `save_caller_details` and `end_call`;
- * an outbound call never gets `save_caller_details` (service-tools.ts refuses
- * any tool a call's direction was not offered).
+ * the AI) is offered `INBOUND_TOOLS` only — `end_call`. It saves nothing during
+ * the call: its caller details and status are filled in from the transcript
+ * after it ends (caller-details.ts), with `CALLER_DETAILS_SCHEMA` below as the
+ * one description of those fields (service-tools.ts refuses any tool a call's
+ * direction was not offered).
  */
 import { INBOUND_DETAIL_FIELDS, INBOUND_STATUSES, INBOUND_URGENCY_LEVELS, type AppointmentSlot, type InboundDetailField } from '@cti/contracts';
 
@@ -31,8 +33,8 @@ export const OUTBOUND_TOOL_NAMES = [
   'book_appointment',
 ] as const;
 
-/** Every tool the call service runs: the outbound ones, then the inbound agent's details save. */
-export const TOOL_NAMES = [...OUTBOUND_TOOL_NAMES, 'save_caller_details'] as const;
+/** Every tool the call service runs (the inbound agent's `end_call` is one of them). */
+export const TOOL_NAMES = OUTBOUND_TOOL_NAMES;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -177,7 +179,8 @@ export function toolsFor(slots: readonly AppointmentSlot[]): RealtimeFunctionToo
   ];
 }
 
-const CALLER_DETAIL_HINTS: Record<InboundDetailField, string> = {
+/** What each caller-detail field means: in the schema below and in the after-call extraction's system prompt. */
+export const CALLER_DETAIL_HINTS: Record<InboundDetailField, string> = {
   seller_name: "The caller's name, as they said it.",
   phone_number: "The best number to reach them: the one they're calling from unless they gave another.",
   email: 'Their email address, as they spelled it.',
@@ -199,27 +202,22 @@ const CALLER_DETAIL_HINTS: Record<InboundDetailField, string> = {
   notes: 'Anything else the team should know: their reasons, their situation, other details about the property.',
 };
 
-/** The inbound agent's silent save: the caller's details and, before goodbye, how the call ended (`status`). */
-export const SAVE_CALLER_DETAILS_TOOL: RealtimeFunctionTool = {
-  type: 'function',
-  name: 'save_caller_details',
-  description: 'Save what the caller told you — only the fields you learned; call again as you learn more. Silent: never announce it.',
-  parameters: objectSchema(
-    {
-      status: {
-        type: 'string',
-        enum: [...INBOUND_STATUSES],
-        description: 'How the call ended: qualified, callback (they want a call back), disqualified, or incomplete.',
-      },
-      ...Object.fromEntries(INBOUND_DETAIL_FIELDS.map((f) => [f, str(CALLER_DETAIL_HINTS[f])])),
-      urgency_level: { type: 'string', enum: [...INBOUND_URGENCY_LEVELS], description: CALLER_DETAIL_HINTS.urgency_level },
+/**
+ * The caller's details and, as `status`, how the call ended: a closed schema, every field optional. The one list of the
+ * fields; the after-call extraction (caller-details.ts) hands it to Claude as the input schema of its forced tool.
+ */
+export const CALLER_DETAILS_SCHEMA: Record<string, unknown> = objectSchema(
+  {
+    status: {
+      type: 'string',
+      enum: [...INBOUND_STATUSES],
+      description: 'How the call ended: qualified, callback (they want a call back), disqualified, or incomplete.',
     },
-    [],
-  ),
-};
+    ...Object.fromEntries(INBOUND_DETAIL_FIELDS.map((f) => [f, str(CALLER_DETAIL_HINTS[f])])),
+    urgency_level: { type: 'string', enum: [...INBOUND_URGENCY_LEVELS], description: CALLER_DETAIL_HINTS.urgency_level },
+  },
+  [],
+);
 
-/** The inbound agent's tools (a test phone called one of the AI's numbers): save the details, hang up. */
-export const INBOUND_TOOLS: RealtimeFunctionTool[] = [
-  SAVE_CALLER_DETAILS_TOOL,
-  AI_CALL_TOOLS.find((tool) => tool.name === 'end_call') ?? endCallTool(BASE_END_CALL_OUTCOMES),
-];
+/** The inbound agent's tools (a test phone called one of the AI's numbers): hang up, nothing else. It saves nothing mid-call. */
+export const INBOUND_TOOLS: RealtimeFunctionTool[] = [AI_CALL_TOOLS.find((tool) => tool.name === 'end_call') ?? endCallTool(BASE_END_CALL_OUTCOMES)];

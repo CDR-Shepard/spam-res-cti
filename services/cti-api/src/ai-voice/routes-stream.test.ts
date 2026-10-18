@@ -32,9 +32,10 @@ vi.mock('@cti/db', async (importOriginal) => ({
 import { registerAiVoiceRoutes } from './routes.js';
 import { validStreamSignature } from './routes-stream.js';
 import { clearActiveCalls, getActiveCall, registerActiveCall } from './registry.js';
-import { activeEntry, CALL_SID, fakeSocket, fakeStore, fakeTwilio, type FakeStore, type FakeTwilio } from './testing.js';
+import { activeEntry, CALL_SID, fakeSocket, fakeStore, fakeTwilio, silentLog, type FakeStore, type FakeTwilio } from './testing.js';
 import { streamToken } from './twilio.js';
-import type { BridgeOptions } from './bridge.js';
+import type { BridgeHooks, BridgeOptions } from './bridge.js';
+import { DETAILS_TOOL_NAME } from './caller-details.js';
 
 const SECRET = 's'.repeat(40);
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -43,6 +44,8 @@ let app: FastifyInstance;
 let store: FakeStore;
 let tw: FakeTwilio;
 let bridgeOpts: BridgeOptions | null;
+let bridgeHooks: BridgeHooks | null;
+let detailsCreate: ReturnType<typeof vi.fn>;
 let bridgeStarted: Promise<void>;
 let markStarted: () => void;
 let base: string;
@@ -75,16 +78,20 @@ beforeEach(async () => {
   store = fakeStore();
   tw = fakeTwilio();
   bridgeOpts = null;
+  bridgeHooks = null;
+  detailsCreate = vi.fn(async () => ({ content: [] }));
   bridgeStarted = new Promise((r) => (markStarted = r));
   app = Fastify();
   await registerAiVoiceRoutes(app, {
     store,
     twilio: tw,
     openRealtime: () => fakeSocket(0),
-    createBridge: (opts) => {
+    createBridge: (opts, hooks) => {
       bridgeOpts = opts;
+      bridgeHooks = hooks;
       return { start: () => markStarted(), silence: vi.fn(), waitForPlayback: vi.fn(async () => {}), stop: vi.fn() };
     },
+    details: { client: { create: detailsCreate }, model: 'claude-haiku-4-5-20251001', log: silentLog },
   });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
@@ -133,6 +140,29 @@ describe('GET /telephony/twilio/ai-voice/stream (WebSocket)', () => {
     expect(bridgeOpts).toMatchObject({ streamSid: 'MZ9', model: 'gpt-realtime-2.1', voice: 'marin' });
     expect(bridgeOpts?.instructions).toContain('AI assistant calling for GG Homes');
     expect(getActiveCall(ID)?.bridge).not.toBeNull();
+    ws.terminate();
+  });
+
+  it('an inbound call that ends is finalized with the details the after-call model filled in (the routes hand it to the stream session)', async () => {
+    detailsCreate.mockResolvedValueOnce({
+      content: [{ type: 'tool_use', id: 'tu_1', name: DETAILS_TOOL_NAME, input: { status: 'callback', location: 'Vista' } }],
+    });
+    await store.insert({ id: ID, orgId: 'o1', startedBy: 'u1', toE164: '+16195550142', status: 'queued', callSid: CALL_SID, isTest: true, direction: 'inbound' });
+    registerActiveCall(activeEntry({ aiCallId: ID, callSid: CALL_SID, direction: 'inbound', isTest: true }));
+    const ws = await connect(sign());
+    ws.send(
+      JSON.stringify({
+        event: 'start',
+        streamSid: 'MZ9',
+        start: { streamSid: 'MZ9', callSid: CALL_SID, customParameters: { aiCallId: ID, token: streamToken(ID, SECRET) } },
+      }),
+    );
+    await bridgeStarted;
+    bridgeHooks!.onTranscript({ role: 'caller', text: 'I own a house in Vista. Call me back tomorrow.', at: new Date() });
+    bridgeHooks!.onEnd('twilio_closed');
+    await vi.waitFor(() => expect(store.rows.get(ID)?.endedAt).not.toBeNull());
+    expect(detailsCreate).toHaveBeenCalledTimes(1);
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'callback', qualification: { status: 'callback', location: 'Vista' } });
     ws.terminate();
   });
 

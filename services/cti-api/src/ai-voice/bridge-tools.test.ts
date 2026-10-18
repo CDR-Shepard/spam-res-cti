@@ -53,40 +53,4 @@ describe('followUpAfterTools', () => {
   it('follows up for an empty batch (nothing to judge)', () => {
     expect(followUpAfterTools([], SPEAK, QUESTION)).toBe(true);
   });
-
-  describe('save_caller_details (the inbound agent: a save never triggers a second reply)', () => {
-    const DETAILS = [call('save_caller_details')];
-
-    it('no follow-up after audio that ended with a statement', () => {
-      expect(followUpAfterTools(DETAILS, SPEAK, STATEMENT)).toBe(false);
-    });
-
-    it('no follow-up after audio that ended with a question', () => {
-      expect(followUpAfterTools(DETAILS, SPEAK, QUESTION)).toBe(false);
-    });
-
-    it('no follow-up when several details saves ride on one spoken reply', () => {
-      expect(followUpAfterTools([call('save_caller_details', 'c1'), call('save_caller_details', 'c2')], SPEAK, STATEMENT)).toBe(false);
-    });
-
-    it('follows up after a tool-first save (no audio), even if a stale question flag is set', () => {
-      expect(followUpAfterTools(DETAILS, SPEAK, SILENT)).toBe(true);
-      expect(followUpAfterTools(DETAILS, SPEAK, { audio: false, question: true })).toBe(true);
-    });
-
-    it('end_call in the same batch is as before: it follows up (the service hangs up after the last words)', () => {
-      expect(followUpAfterTools([call('save_caller_details', 'c1'), call('end_call', 'c2')], SPEAK, STATEMENT)).toBe(true);
-      expect(followUpAfterTools([call('save_caller_details', 'c1'), call('end_call', 'c2')], SPEAK, QUESTION)).toBe(true);
-    });
-
-    it('a mix with save_qualification keeps the note rule: only a question skips the follow-up', () => {
-      const mixed = [call('save_caller_details', 'c1'), call('save_qualification', 'c2')];
-      expect(followUpAfterTools(mixed, SPEAK, QUESTION)).toBe(false);
-      expect(followUpAfterTools(mixed, SPEAK, STATEMENT)).toBe(true);
-    });
-
-    it('still never follows up when the batch chose to stay quiet', () => {
-      expect(followUpAfterTools(DETAILS, QUIET, SILENT)).toBe(false);
-    });
-  });
 });

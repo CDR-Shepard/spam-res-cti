@@ -110,7 +110,7 @@ export interface AiCallStore {
   appendSummary(id: string, line: string): Promise<void>;
   appendTranscript(id: string, entries: readonly TranscriptEntry[]): Promise<void>;
   mergeQualification(id: string, fields: Record<string, string>): Promise<void>;
-  /** An inbound call's save_caller_details: merged like mergeQualification, and a valid status also sets the outcome once the row has ended. */
+  /** An inbound call's details (filled in from its transcript after it ends): merged like mergeQualification, and a valid status also sets the outcome once the row has ended. */
   mergeCallerDetails(id: string, fields: Record<string, string>): Promise<void>;
   /** Book an offered slot on a live row; 'taken' when another real call holds that owner's time (D-10). */
   setAppointment(id: string, appointment: BookedAppointment): Promise<SetAppointmentResult>;

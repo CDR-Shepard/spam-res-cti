@@ -15,15 +15,18 @@
  * another closer (end_call / transfer / voicemail) already owns the call.
  *
  * An INBOUND call (a test phone called the AI; inbound-call.ts) runs the same
- * way with the inbound prompt + line rules, INBOUND_TOOLS and INBOUND_OPENER.
- * Twilio sends it no status callback, so it is finalized here when its
- * conversation ends, however it ends (service-finalize.ts).
+ * way with the inbound prompt + line rules, INBOUND_TOOLS (end_call only: it
+ * saves nothing mid-call) and INBOUND_OPENER. Twilio sends it no status
+ * callback, so it is finalized here when its conversation ends, however it
+ * ends; finalize first fills its details and status in from the transcript
+ * (service-finalize.ts, caller-details.ts).
  */
 import type { AiCallTurnStats, AppointmentSlot } from '@cti/contracts';
 import { aiVoiceAvailable, type AppConfig } from '../config.js';
 import { UUID_RE, TWILIO_CALL_SID_RE } from '../telephony/webhooks.js';
 import { AiCallBridge, MIN_CALL_MS, type BridgeHooks, type BridgeLog, type BridgeOptions, type BridgeSocket, type EndReason } from './bridge.js';
 import { obj, parseFrame, str, type Msg } from './bridge-frames.js';
+import type { CallerDetailsDeps } from './caller-details.js';
 import { INBOUND_OPENER } from './bridge-session.js';
 import { INBOUND_TOOLS, buildInboundInstructions, buildInstructions, toolsFor, type PromptInput } from './prompt.js';
 import { promptSlots } from './prompt-context.js';
@@ -53,6 +56,8 @@ export interface StreamSessionDeps {
   now: () => Date;
   log: BridgeLog;
   startTimeoutMs?: number;
+  /** The model that fills an inbound call's details from its transcript when it ends; absent = none (the call closes `incomplete`). */
+  details?: CallerDetailsDeps;
 }
 
 export type StreamOutcome =
@@ -304,7 +309,8 @@ async function endInboundCall(
       .catch((e: unknown) => deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: hangup failed, closing the stream'));
     bridge()?.stop();
   }
-  await finalizeAiCall({ store: deps.store, log: deps.log }, aiCallId, { callStatus: 'completed', durationSeconds: null, endedAt: deps.now() }).catch(
-    (e: unknown) => deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: inbound call not finalized — the sweeper will close it'),
+  const finalizing = { store: deps.store, log: deps.log, ...(deps.details ? { details: deps.details } : {}) };
+  await finalizeAiCall(finalizing, aiCallId, { callStatus: 'completed', durationSeconds: null, endedAt: deps.now() }).catch((e: unknown) =>
+    deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: inbound call not finalized — the sweeper will close it'),
   );
 }

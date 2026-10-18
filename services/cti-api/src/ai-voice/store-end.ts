@@ -91,8 +91,8 @@ export interface InboundFinalizeWrite {
 }
 
 /**
- * The compare-and-swap end of an INBOUND row: the outcome is the `status` the agent saved with save_caller_details
- * (read in the same statement, so a save that lands first is never lost), else `incomplete`, whatever end_call wrote;
+ * The compare-and-swap end of an INBOUND row: the outcome is the `status` in its stored details (filled in from the
+ * transcript just before, caller-details.ts; read in the same statement), else `incomplete`, whatever end_call wrote;
  * the status is `completed` unless the call failed or the bridge already marked the row failed.
  */
 export const finalizeInboundQuery = (db: Conn, id: string, w: InboundFinalizeWrite) => {

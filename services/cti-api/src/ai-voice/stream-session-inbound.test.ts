@@ -2,7 +2,8 @@
  * The stream session for an INBOUND call (plan 2026-10-16 inbound agent testing): the same start checks as an
  * outbound call, then the inbound instructions (+ the fixed line rules), the inbound tools and the quick inbound
  * opener. Twilio sends no status callback for an inbound call, so its row is finalized when the conversation ends:
- * completed, outcome = the saved status (else incomplete), and never a calls row, a Salesforce Task or an opt-out.
+ * the details and status are first filled in from the transcript (caller-details.ts), then the row is completed with
+ * that status as the outcome (else incomplete), and never a calls row, a Salesforce Task or an opt-out.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../config.js';
@@ -16,6 +17,7 @@ import { defaultToolEffects } from './service-tools.js';
 import { runStreamSession, type StreamSessionDeps } from './stream-session.js';
 import { activeEntry, CALL_SID, fakeSocket, fakeStore, fakeTwilio, silentLog, type FakeSocket, type FakeStore, type FakeTwilio } from './testing.js';
 import { streamToken } from './twilio.js';
+import { DETAILS_TOOL_NAME } from './caller-details.js';
 
 const SECRET = 's'.repeat(40);
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -101,6 +103,18 @@ const later = (seconds: number) => {
   now = new Date(STARTED.getTime() + seconds * 1000);
 };
 
+/** Wire the after-call model: a fake Anthropic client that answers with this tool input. */
+const withDetails = (input: unknown) => {
+  const create = vi.fn(async () => ({ content: [{ type: 'tool_use', id: 'tu_1', name: DETAILS_TOOL_NAME, input }] }));
+  deps = { ...deps, details: { client: { create }, model: 'claude-haiku-4-5-20251001', log: silentLog } };
+  return create;
+};
+/** What the caller and the agent said, as the bridge hands it to the transcript buffer. */
+const say = () => {
+  captured!.hooks.onTranscript({ role: 'agent', text: 'Thanks for calling. How can I help?', at: now });
+  captured!.hooks.onTranscript({ role: 'caller', text: 'I want to sell my place in Escondido. Call me Monday.', at: now });
+};
+
 describe('an inbound call starts with the inbound agent', () => {
   it('a queued inbound row is accepted and moves to in_progress', async () => {
     expect(await begin()).toBe('started');
@@ -118,9 +132,10 @@ describe('an inbound call starts with the inbound agent', () => {
     expect(captured?.opts.instructions).toBe(`Hi, Sam here. It is Friday 11:00 AM.\n\n${RULES}`);
   });
 
-  it('the tools are exactly INBOUND_TOOLS and the opener is the quick inbound one', async () => {
+  it('the tools are exactly INBOUND_TOOLS (end_call only: the agent saves nothing during the call) and the opener is the quick inbound one', async () => {
     await begin();
     expect(captured?.opts.tools).toBe(INBOUND_TOOLS);
+    expect((captured?.opts.tools as Array<{ name: string }>).map((t) => t.name)).toEqual(['end_call']);
     expect(captured?.opts.opener).toBe(INBOUND_OPENER);
     expect(INBOUND_OPENER).toEqual({ delayMs: 300, prompt: '(Someone just called in and the line is open. Answer now with your greeting.)' });
   });
@@ -133,23 +148,30 @@ describe('an inbound call starts with the inbound agent', () => {
     expect(captured?.opts.instructions).not.toContain(INBOUND_LINE_RULES);
   });
 
-  it('the tool hook knows the call is inbound: transfer_to_rep is refused, save_caller_details saves', async () => {
+  it('the tool hook knows the call is inbound: transfer_to_rep is refused', async () => {
     await begin();
     expect(await captured!.hooks.onTool('transfer_to_rep', { reason: 'interested', summary: 'x' })).toEqual({ output: '{"error":"unknown tool"}' });
     expect(twilio.redirects).toEqual([]);
-    await captured!.hooks.onTool('save_caller_details', { status: 'qualified', location: 'Escondido' });
-    expect(store.rows.get(ID)?.qualification).toEqual({ status: 'qualified', location: 'Escondido' });
   });
 });
 
 describe('an inbound call is finalized when the conversation ends', () => {
-  it('the caller hangs up mid-sentence: completed, outcome = the saved status, the duration, no calls row', async () => {
+  it('the caller hangs up mid-sentence: the details come from the transcript, completed with that status as the outcome, the duration, no calls row', async () => {
+    const create = withDetails({ status: 'callback', best_callback_time: 'Monday', location: 'Escondido' });
     await begin();
-    await captured!.hooks.onTool('save_caller_details', { status: 'callback', best_callback_time: 'Monday' });
+    say();
     later(95);
     captured!.hooks.onEnd('twilio_closed');
     await settle();
-    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'callback', durationSeconds: 95, endedAt: now });
+    await settle();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(store.rows.get(ID)).toMatchObject({
+      status: 'completed',
+      outcome: 'callback',
+      durationSeconds: 95,
+      endedAt: now,
+      qualification: { status: 'callback', best_callback_time: 'Monday', location: 'Escondido' },
+    });
     expect(store.ctiCalls.size).toBe(0);
     expect(store.optOuts).toEqual([]);
     expect(getActiveCall(ID)).toBeNull();
@@ -157,21 +179,33 @@ describe('an inbound call is finalized when the conversation ends', () => {
     expect(twilio.hangups).toEqual([]);
   });
 
-  it('no status saved (or an invalid one): outcome incomplete', async () => {
+  it('an invalid status from the model: outcome incomplete, the other details kept', async () => {
+    withDetails({ status: 'maybe', location: 'Vista' });
     await begin();
-    await store.mergeQualification(ID, { status: 'maybe', location: 'Vista' });
+    say();
     captured!.hooks.onEnd('twilio_closed');
     await settle();
-    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'incomplete' });
+    await settle();
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'incomplete', qualification: { location: 'Vista' } });
   });
 
-  it('end_call then the hang-up: the status wins over the end_call outcome, and the test phone is not opted out', async () => {
+  it('no after-call model wired: the call still closes, incomplete, with no details', async () => {
     await begin();
-    await captured!.hooks.onTool('save_caller_details', { status: 'disqualified' });
+    say();
+    captured!.hooks.onEnd('twilio_closed');
+    await settle();
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'incomplete', qualification: {} });
+  });
+
+  it('end_call then the hang-up: the status from the transcript wins over the end_call outcome, and the test phone is not opted out', async () => {
+    withDetails({ status: 'disqualified' });
+    await begin();
+    say();
     await captured!.hooks.onTool('end_call', { outcome: 'do_not_call', summary: 'Asked us not to call.' });
     await settle();
     expect(twilio.hangups).toEqual([CALL_SID]);
     captured!.hooks.onEnd('twilio_closed');
+    await settle();
     await settle();
     expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'disqualified' });
     expect(store.optOuts).toEqual([]);

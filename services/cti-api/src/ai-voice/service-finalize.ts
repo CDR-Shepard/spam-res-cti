@@ -23,15 +23,19 @@
  * Nothing after the CAS throws out of finalize.
  *
  * An INBOUND row (a test phone called the AI, plan 2026-10-16) has its own CAS
- * (store.finalizeInbound): outcome = the status the agent saved, else
+ * (store.finalizeInbound): outcome = the status in its stored details, else
  * `incomplete`; and none of 1–3: no opt-out, no `calls` row, no summary or
- * Salesforce. It is finalized from the end of its conversation
- * (stream-session.ts) or by the sweeper, never by a status callback.
+ * Salesforce. The live agent saves nothing, so first (while the row is still
+ * open: the list reads In progress) its details and status are filled in from
+ * the transcript by Claude (caller-details.ts), before the CAS reads them.
+ * It is finalized from the end of its conversation (stream-session.ts) or by
+ * the sweeper, never by a status callback.
  */
 import { bookingStands } from '@cti/contracts';
 import type { schema } from '@cti/db';
 import type { AppConfig } from '../config.js';
 import type { BridgeLog } from './bridge.js';
+import { fillCallerDetails, type CallerDetailsDeps } from './caller-details.js';
 import { ctiDisposition } from './outcomes.js';
 import { closeActiveCall } from './registry.js';
 import { liveAiCallSf, logAiCallTask, logCallbackTask, type SfLogDeps } from './sf-logging.js';
@@ -79,6 +83,8 @@ export interface FinalizeDeps {
   store: AiCallStore;
   log: BridgeLog;
   afterCall?: AfterCall;
+  /** The model that fills an inbound call's details from its transcript; absent = none (the call closes `incomplete`). */
+  details?: CallerDetailsDeps;
 }
 
 export type FinalizeResult = { finalized: true; row: AiCallRow; after: Promise<void> } | { finalized: false };
@@ -227,8 +233,13 @@ const FAILED_CALL_STATUSES: readonly string[] = ['failed', 'canceled'];
 const secondsBetween = (from: Date | null, to: Date): number | null =>
   from ? Math.max(0, Math.round((to.getTime() - from.getTime()) / 1000)) : null;
 
-/** An inbound row's end (see the header): its own CAS, and nothing after it. The duration runs from the stream's start. */
+/**
+ * An inbound row's end (see the header): the details are filled in from the transcript first, then its own CAS (which
+ * reads them), and nothing after it. The duration runs from the stream's start. `current` was read after the live
+ * side was torn down, so its transcript is whole. Filling never throws; a failure leaves the call `incomplete`.
+ */
 async function finalizeInbound(deps: FinalizeDeps, current: AiCallRow, input: FinalizeInput): Promise<FinalizeResult> {
+  await fillCallerDetails(current, deps.store, deps.details);
   const row = await deps.store.finalizeInbound(current.id, {
     durationSeconds: input.durationSeconds ?? secondsBetween(current.startedAt, input.endedAt),
     endedAt: input.endedAt,
@@ -239,16 +250,19 @@ async function finalizeInbound(deps: FinalizeDeps, current: AiCallRow, input: Fi
   return { finalized: true, row, after: Promise.resolve() };
 }
 
-/** Production wiring: Claude for the summary (when keyed), the rep-token Salesforce client. */
+/**
+ * Production wiring: Claude for the summary (when keyed; `summary` is that client, which an inbound call's details also
+ * use), the rep-token Salesforce client.
+ */
 export function liveAfterCall(
   cfg: Pick<AppConfig, 'ANTHROPIC_API_KEY' | 'AI_SUMMARY_MODEL'>,
   store: AiCallStore,
   log: BridgeLog,
   now: () => Date = () => new Date(),
-): { afterCall: AfterCall; sf: SfLogDeps } {
+): { afterCall: AfterCall; sf: SfLogDeps; summary: SummaryDeps } {
   const sf: SfLogDeps = { sf: liveAiCallSf(), store, log, now };
   const summary: SummaryDeps = { client: summaryClientFor(cfg), model: cfg.AI_SUMMARY_MODEL, log };
-  return { sf, afterCall: (row) => afterAiCall(row, { store, log, summary, sf }) };
+  return { sf, summary, afterCall: (row) => afterAiCall(row, { store, log, summary, sf }) };
 }
 
 /** Plan 1E: a practice_browser leg rang the admin's browser (`client:<identity>`), not a phone number. */

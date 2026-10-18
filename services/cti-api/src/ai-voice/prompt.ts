@@ -16,8 +16,9 @@
  *
  * Inbound agent testing (plan 2026-10-16): when a test phone calls one of the AI's numbers, the agent follows the
  * `inbound` template (the owner's prompt by default, prompt-default-inbound.ts), always followed by the fixed
- * INBOUND_LINE_RULES, which no saved template can remove: they turn the prompt's spoken-JSON ending into silent
- * save_caller_details calls. When the caller's number is known, one more fixed line tells the agent what it is.
+ * INBOUND_LINE_RULES, which no saved template can remove: they tell the agent there is nothing to write down on the
+ * call (the details are filled in from the transcript afterwards) and to ignore the prompt's spoken-JSON ending. When
+ * the caller's number is known, one more fixed line tells the agent what it is.
  */
 import type { AgentPromptKind, AppointmentSlot } from '@cti/contracts';
 import { phoneForms } from './prompt-context.js';
@@ -105,7 +106,7 @@ export function voicemailText(p: PromptInput, onTemplateError?: TemplateErrorHan
 export const INBOUND_LINE_RULES = [
   '# How this phone line works (always applies)',
   '- This is a live phone call: everything you say is spoken aloud. Never say JSON, field names, brackets or tags.',
-  '- save_caller_details is silent paperwork the caller never hears about. Say your whole reply first and make the save the very last thing in that reply. Never talk about the save itself, and never say a lead-in line before it, like "let me note that" or "let me get that set up". Save only a few times: once you have the address, once the walkthrough or callback is set, and once more with "status" right before goodbye. This replaces any instruction above to output JSON or a summary at the end of the call.',
+  '- There is nothing to write down during this call: the team gets a summary made from the conversation after you hang up. Never mention notes, saving or setting anything up, and never say a line about what you are about to do — just say it. Ignore any instruction above to output JSON or a summary at the end of the call.',
   '- If the caller wants to go, or once you have said goodbye, call end_call.',
   '- Speak English only, every word, the whole call.',
 ].join('\n');

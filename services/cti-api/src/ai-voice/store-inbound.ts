@@ -10,15 +10,15 @@ import { getDb, schema } from '@cti/db';
 type Db = ReturnType<typeof getDb>;
 const t = schema.aiCalls;
 
-/** The status among the saved fields when it is one of the four (save_caller_details drops any other), else null. */
+/** The status among the stored fields when it is one of the four (callerDetails drops any other), else null. */
 const savedStatus = (fields: Record<string, string>): string | null =>
   (INBOUND_STATUSES as readonly string[]).includes(fields.status ?? '') ? (fields.status as string) : null;
 
 /**
- * save_caller_details' write: the fields merged into `qualification`, exactly as `mergeQualification` merges an outbound
+ * The inbound details' write: the fields merged into `qualification`, exactly as `mergeQualification` merges an outbound
  * call's. With a valid status it also sets the OUTCOME — but only on a row that has already ended: finalize computes the
- * outcome from the saved status, so a save that lands after finalize (the caller hung up while it was in flight) must
- * not leave a call that saved a status reading "Incomplete" (final review M-2). A live row's outcome is finalize's.
+ * outcome from the stored status, so a write that lands after finalize (a second finalize that lost the race) must not
+ * leave a call that stored a status reading "Incomplete" (final review M-2). A live row's outcome is finalize's.
  */
 export const mergeCallerDetailsQuery = (db: Db, id: string, fields: Record<string, string>) => {
   const status = savedStatus(fields);

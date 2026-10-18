@@ -18,9 +18,10 @@
  * call ends as usual, but that number is never opted out.
  *
  * A call runs only the tools its direction was offered (plan 2026-10-16
- * inbound agent testing): an inbound call `save_caller_details` and
- * `end_call`, an outbound call everything else. Any other name is refused as
- * an unknown tool, whatever the model sends.
+ * inbound agent testing): an inbound call `end_call` only (its caller details
+ * are filled in from the transcript after the call, caller-details.ts), an
+ * outbound call everything else. Any other name is refused as an unknown
+ * tool, whatever the model sends.
  */
 import { INBOUND_DETAIL_FIELDS, INBOUND_STATUSES, INBOUND_URGENCY_LEVELS, type AppointmentSlot, type BookedAppointment } from '@cti/contracts';
 import { END_CALL_OUTCOMES, INBOUND_TOOLS, OUTBOUND_TOOL_NAMES, QUALIFICATION_FIELDS, TRANSFER_REASONS } from './prompt-tools.js';
@@ -55,8 +56,6 @@ export interface ToolEffects {
   /** Opt the number out (idempotent) and record the outcome. Throws if the opt-out cannot be written. */
   markDoNotCall(ctx: ToolCtx, note: string): Promise<void>;
   saveQualification(ctx: ToolCtx, fields: Record<string, string>): Promise<void>;
-  /** The inbound agent's details (and status), merged into ai_calls.qualification (a status landing after finalize also sets the outcome). */
-  saveCallerDetails(ctx: ToolCtx, fields: Record<string, string>): Promise<void>;
   scheduleCallback(ctx: ToolCtx, req: { when: string; note: string }): Promise<void>;
   /**
    * A transfer rang out or could not be placed: make sure someone calls them
@@ -148,9 +147,6 @@ export const defaultToolEffects: ToolEffects = {
   },
   async saveQualification(ctx, fields) {
     await ctx.store.mergeQualification(ctx.aiCallId, fields);
-  },
-  async saveCallerDetails(ctx, fields) {
-    await ctx.store.mergeCallerDetails(ctx.aiCallId, fields);
   },
   async scheduleCallback(ctx, req) {
     await ctx.store.update(ctx.aiCallId, { callbackAt: parseCallbackAt(req.when) });
@@ -300,8 +296,11 @@ function qualificationFields(args: unknown): Record<string, string> {
 /** The fields the agent picks from a fixed list: a value outside it is dropped. */
 const CALLER_CHOICES: Readonly<Record<string, readonly string[]>> = { status: INBOUND_STATUSES, urgency_level: INBOUND_URGENCY_LEVELS };
 
-/** The inbound agent's save: the known detail fields (trimmed, capped) and valid choices; anything else is dropped. */
-function callerDetails(args: unknown): Record<string, string> {
+/**
+ * A caller-details answer made safe to store: the known detail fields (trimmed, capped) and valid choices; anything
+ * else is dropped. The after-call extraction (caller-details.ts) runs the model's tool input through it.
+ */
+export function callerDetails(args: unknown): Record<string, string> {
   const details = INBOUND_DETAIL_FIELDS.flatMap((k) => {
     const v = text(field(args, k), k === 'notes' ? CALLER_NOTES_MAX : QUALIFICATION_MAX);
     return v && (CALLER_CHOICES[k]?.includes(v) ?? true) ? [[k, v] as const] : [];
@@ -338,9 +337,6 @@ export async function handleToolCall(name: ToolName, args: unknown, env: ToolEnv
       return { output: 'scheduled', then: 'continue' };
     case 'book_appointment':
       return bookAppointment(args, env);
-    case 'save_caller_details':
-      await effects.saveCallerDetails(ctx, callerDetails(args));
-      return { output: SAVED_OUTPUT, then: 'continue' };
     default: {
       const never: never = name;
       return { output: `{"error":"unknown tool ${String(never)}"}` };

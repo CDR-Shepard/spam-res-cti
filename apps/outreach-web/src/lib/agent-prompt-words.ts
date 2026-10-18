@@ -70,7 +70,7 @@ export function promptStatusWords(state: Pick<AgentPromptState, 'active' | 'upda
  * INBOUND_LINE_RULES and the caller's number), which the editor and its preview never show.
  */
 export const INBOUND_FIXED_RULES_WORDS =
-  "After this prompt, the system adds a few fixed phone-line rules: save what the caller says quietly (never read it out), end the call when they're done, and the number they're calling from.";
+  "After this prompt, the system adds a few fixed phone-line rules: speak English, never read out JSON or notes, end the call when they're done, and the number they're calling from. The call details are filled in from the transcript after the call.";
 
 const COUNT = new Intl.NumberFormat('en-US');
 

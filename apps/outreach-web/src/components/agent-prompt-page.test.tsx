@@ -373,7 +373,7 @@ describe('AgentPromptPage', () => {
   it('the Inbound calls tab, and only it, says the fixed phone-line rules are added after the prompt (final review M-7)', async () => {
     const user = userEvent.setup();
     const words =
-      "After this prompt, the system adds a few fixed phone-line rules: save what the caller says quietly (never read it out), end the call when they're done, and the number they're calling from.";
+      "After this prompt, the system adds a few fixed phone-line rules: speak English, never read out JSON or notes, end the call when they're done, and the number they're calling from. The call details are filled in from the transcript after the call.";
     await render();
     expect(screen.queryByText(words)).not.toBeInTheDocument();
     await user.click(screen.getByRole('tab', { name: 'Voicemail message' }));

@@ -25,6 +25,7 @@ import { getDb } from '@cti/db';
 import { aiVoiceAvailable, type AppConfig } from '../config.js';
 import type { BridgeLog } from './bridge.js';
 import { getActiveCall } from './registry.js';
+import type { CallerDetailsDeps } from './caller-details.js';
 import { finalizeAiCall, isTerminalCallStatus, liveAfterCall, type AfterCall, type FinalizeInput } from './service-finalize.js';
 import { drizzleAiCallStore, type AiCallRow, type AiCallStore } from './store.js';
 import { createAiVoiceTwilio, type AiVoiceTwilio } from './twilio.js';
@@ -42,6 +43,8 @@ export interface SweeperDeps {
   /** Is this call live in this process (its own callbacks will end it)? */
   isActive: (aiCallId: string) => boolean;
   afterCall?: AfterCall;
+  /** The model that fills an inbound call's details from its transcript (service-finalize.ts); absent = none. */
+  details?: CallerDetailsDeps;
   now: () => Date;
   log: BridgeLog;
 }
@@ -81,7 +84,16 @@ export async function sweepStaleAiCalls(deps: SweeperDeps): Promise<{ checked: n
     try {
       const end = await endFor(row, deps);
       if (!end) continue;
-      const res = await finalizeAiCall({ store: deps.store, log: deps.log, ...(deps.afterCall ? { afterCall: deps.afterCall } : {}) }, row.id, end);
+      const res = await finalizeAiCall(
+        {
+          store: deps.store,
+          log: deps.log,
+          ...(deps.afterCall ? { afterCall: deps.afterCall } : {}),
+          ...(deps.details ? { details: deps.details } : {}),
+        },
+        row.id,
+        end,
+      );
       if (res.finalized) {
         finalized += 1;
         deps.log.warn({ aiCallId: row.id, callStatus: end.callStatus }, 'ai-voice sweeper: finalized a call whose status callback never came');
@@ -95,11 +107,13 @@ export async function sweepStaleAiCalls(deps: SweeperDeps): Promise<{ checked: n
 
 function liveSweeperDeps(cfg: AppConfig, log: BridgeLog): SweeperDeps {
   const store = drizzleAiCallStore(getDb());
+  const { afterCall, summary } = liveAfterCall(cfg, store, log);
   return {
     store,
     twilio: createAiVoiceTwilio(cfg),
     isActive: (id) => getActiveCall(id) !== null,
-    afterCall: liveAfterCall(cfg, store, log).afterCall,
+    afterCall,
+    details: summary,
     now: () => new Date(),
     log,
   };

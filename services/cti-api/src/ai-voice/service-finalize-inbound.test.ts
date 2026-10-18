@@ -1,10 +1,12 @@
 /**
  * Finalizing an INBOUND row (plan 2026-10-16 inbound agent testing), from the end of its conversation or from the
- * stale-call sweeper: completed (failed only when the call itself failed), outcome = the status the agent saved with
- * save_caller_details, else `incomplete`, and never a `calls` row, the after-call work (summary, Salesforce) or an
- * opt-out. The sweeper closes an inbound row only once its live entry is gone; a live call of any length is left alone.
+ * stale-call sweeper: completed (failed only when the call itself failed), outcome = the status in the call's stored
+ * details (filled in from the transcript just before, caller-details.test.ts), else `incomplete`, and never a `calls`
+ * row, the after-call work (summary, Salesforce) or an opt-out. The sweeper closes an inbound row only once its live
+ * entry is gone; a live call of any length is left alone.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DETAILS_TOOL_NAME } from './caller-details.js';
 import { finalizeAiCall } from './service-finalize.js';
 import { clearActiveCalls, getActiveCall, registerActiveCall } from './registry.js';
 import { PLACED_STALE_MS, sweepStaleAiCalls, type SweeperDeps } from './sweeper.js';
@@ -32,14 +34,14 @@ const finalize = (over: Partial<Parameters<typeof finalizeAiCall>[2]> = {}) =>
   finalizeAiCall({ store, log: silentLog, afterCall }, ID, { callStatus: 'completed', durationSeconds: null, endedAt: END, ...over });
 
 describe('finalizeAiCall — an inbound row', () => {
-  it.each(['qualified', 'callback', 'disqualified', 'incomplete'] as const)('status %s saved → completed with that outcome', async (status) => {
+  it.each(['qualified', 'callback', 'disqualified', 'incomplete'] as const)('status %s stored → completed with that outcome', async (status) => {
     await store.mergeQualification(ID, { status, location: 'Oceanside' });
     const res = await finalize();
     expect(res.finalized).toBe(true);
     expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: status, endedAt: END, durationSeconds: 250 });
   });
 
-  it('no status, or one the agent made up → incomplete', async () => {
+  it('no status, or one that is not one of the four → incomplete', async () => {
     await finalize();
     expect(store.rows.get(ID)?.outcome).toBe('incomplete');
     await store.insert({ id: 'x2', orgId: 'o1', startedBy: 'a', toE164: CALLER, direction: 'inbound', isTest: true, status: 'in_progress', qualification: { status: 'hot' } });
@@ -47,7 +49,7 @@ describe('finalizeAiCall — an inbound row', () => {
     expect(store.rows.get('x2')).toMatchObject({ outcome: 'incomplete', durationSeconds: 12 });
   });
 
-  it('the saved status replaces an outcome end_call wrote', async () => {
+  it('the stored status replaces an outcome end_call wrote', async () => {
     await store.setOutcome(ID, 'do_not_call', null);
     await store.mergeQualification(ID, { status: 'qualified' });
     await finalize();
@@ -118,6 +120,16 @@ describe('the sweeper and inbound rows', () => {
     expect(await sweepStaleAiCalls(deps)).toEqual({ checked: 1, finalized: 1 });
     expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'callback', durationSeconds: 140, endedAt: minsAfterStart(2.5) });
     expect(store.ctiCalls.size).toBe(0);
+    expect(afterCall).not.toHaveBeenCalled();
+  });
+
+  it('fills in the details from the transcript before closing, when it is given the after-call model', async () => {
+    store.rows.set(ID, { ...store.rows.get(ID)!, transcript: [{ role: 'caller', text: 'Please call me back on Monday.', at: STARTED.toISOString() }] });
+    const create = vi.fn(async () => ({ content: [{ type: 'tool_use', id: 'tu_1', name: DETAILS_TOOL_NAME, input: { status: 'callback', best_callback_time: 'Monday' } }] }));
+    tw.fetched.set(CALL_SID, { status: 'completed', durationSeconds: 140, answeredBy: null, endTime: minsAfterStart(2.5) });
+    expect(await sweepStaleAiCalls({ ...deps, details: { client: { create }, model: 'm', log: silentLog } })).toEqual({ checked: 1, finalized: 1 });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'callback', qualification: { status: 'callback', best_callback_time: 'Monday' } });
     expect(afterCall).not.toHaveBeenCalled();
   });
 
