@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { followUpAfterTools, runToolBatch, SAY_GOODBYE_FIRST, type BatchResult, type FunctionCall, type ToolDeps } from './bridge-tools.js';
+import { endCallArgs, followUpAfterTools, runToolBatch, SAY_GOODBYE_FIRST, type BatchResult, type FunctionCall, type ToolDeps } from './bridge-tools.js';
 
 const call = (name: string, id = 'c1'): FunctionCall => ({ name, call_id: id, arguments: '{}' });
 const SPEAK: BatchResult = { carryOn: true, speak: true };
@@ -89,7 +89,21 @@ describe('runToolBatch: a silent end_call (inbound goodbye guard)', () => {
     expect(batch).toEqual({ carryOn: false, speak: true, refusedSilentEnd: false });
   });
 
-  it('asks for a spoken goodbye, then end_call again', () => {
-    expect(JSON.parse(SAY_GOODBYE_FIRST)).toEqual({ error: expect.stringMatching(/goodbye out loud.*then call end_call/) });
+  it('asks only for the goodbye, with nothing to narrate (no silence, no end_call: the bridge ends the call after it)', () => {
+    const refusal = JSON.parse(SAY_GOODBYE_FIRST) as Record<string, string>;
+    expect(refusal).toEqual({ ended: false, next: expect.stringMatching(/only a short goodbye.*Bye now\./) });
+    expect(SAY_GOODBYE_FIRST).not.toMatch(/silence|heard nothing|end_call/);
+  });
+});
+
+describe('endCallArgs', () => {
+  it("takes the first end_call's parsed arguments", () => {
+    const end = { name: 'end_call', call_id: 'e1', arguments: '{"outcome":"other","summary":"bye"}' };
+    expect(endCallArgs([call('save_qualification'), end])).toEqual({ outcome: 'other', summary: 'bye' });
+  });
+
+  it('is {} when there is no end_call or its arguments do not parse', () => {
+    expect(endCallArgs([call('save_qualification')])).toEqual({});
+    expect(endCallArgs([{ name: 'end_call', call_id: 'e1', arguments: '{"outcome":' }])).toEqual({});
   });
 });

@@ -57,7 +57,7 @@ import { CallerSoundMeter } from './bridge-sound.js';
 import { BridgeSockets, type BridgeSocket } from './bridge-sockets.js';
 import { TurnStatsCollector, type BargeInMode } from './bridge-turn-stats.js';
 import { TurnTiming, heldBy } from './bridge-turn-timing.js';
-import { errText, followUpAfterTools, functionCalls, runToolBatch, type BridgeLog, type FunctionCall, type Spoke, type ToolResult } from './bridge-tools.js';
+import { endCallArgs, errText, followUpAfterTools, functionCalls, runToolBatch, type BridgeLog, type FunctionCall, type Spoke, type ToolResult } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
 
 export type { BargeInMode, BridgeLog, BridgeSocket, OverlapJudge, ReasoningEffort, ToolResult, TurnDetection, VadEagerness };
@@ -114,7 +114,9 @@ export interface BridgeOptions {
   opener?: OpenerOption;
   /**
    * Inbound calls: an end_call that comes with no audio after the caller spoke is sent back once, asking for a spoken
-   * goodbye first, so the caller is never hung up on without a word (simulated inbound calls, 2026-10-18).
+   * goodbye first, so the caller is never hung up on without a word (simulated inbound calls, 2026-10-18). The goodbye
+   * is a speech-only response (no tool calls: a second silent end_call came back instead, 2026-10-19), and once it is
+   * done the bridge runs the sent-back end_call itself — unless the caller spoke again first.
    */
   goodbyeBeforeEnd?: boolean;
   now?: () => number;
@@ -171,6 +173,10 @@ export class AiCallBridge {
   private callerSpokeSinceAgent = false;
   /** goodbyeBeforeEnd sends back at most one end_call a call. */
   private silentEndRefused = false;
+  /** goodbyeBeforeEnd: the sent-back end_call, run once its speech-only goodbye is done (null: none owed, or the caller spoke again). */
+  private owedEnd: { args: unknown } | null = null;
+  /** goodbyeBeforeEnd: a goodbye that was partly heard got cut; the guard re-arms only once the agent speaks again. */
+  private rearmOnSpeech = false;
   /** The first agent item that played: the opener, never cut by the gate. */
   private openerItemId: string | null = null;
   /** Committed caller turns the gate is still judging: when it cuts the agent, they are answered at once. */
@@ -373,6 +379,7 @@ export class AiCallBridge {
     if (!this.rejectsPendingCreate(fields)) return;
     this.responsePending = false;
     this.cancelWhenCreated = false; // it was meant for the rejected create
+    this.dropOwedEnd(); // a rejected goodbye create: never end the call after some later reply
     this.afterResponse(); // an answer still owed goes out; otherwise the silence is timed again
   }
 
@@ -454,6 +461,9 @@ export class AiCallBridge {
   /** Gate mode: a committed caller turn gets an answer — an overlap still being judged waits for its verdict. */
   private onCallerTurn(itemId: string): void {
     this.callerSpokeSinceAgent = true;
+    // They spoke again after their bye: answer them normally, and don't end the call. An overlap the gate is still
+    // judging (an "okay" over the goodbye) leaves it: a real interruption cuts the goodbye, which drops it then.
+    if (!this.gate.has(itemId)) this.dropOwedEnd();
     if (this.awaitingCommit === itemId) this.awaitingCommit = null;
     this.timing.committed(itemId, this.now());
     if (this.bargeIn !== 'gate' || this.closing) return;
@@ -539,13 +549,14 @@ export class AiCallBridge {
     return this.toolBatches > 0;
   }
 
-  /** Ask the agent to speak — in gate mode one response at a time. */
+  /** Ask the agent to speak — in gate mode one response at a time; the goodbye owed after a sent-back end_call is speech only. */
   private requestResponse(): void {
     if (this.closing || this.ended) return;
+    const speechOnly = this.owedEnd === null ? {} : { response: { tool_choice: 'none' } };
     // Instant mode: VAD answers turns; the opener and after-tool creates go out at once, as before the gate.
     if (this.bargeIn === 'instant') {
       this.timing.requested(this.now());
-      return this.sockets.sendOpenAi({ type: 'response.create' });
+      return this.sockets.sendOpenAi({ type: 'response.create', ...speechOnly });
     }
     // Never over a caller mid-utterance: their commit (or the overlap's verdict) releases it, answering both.
     const held = heldBy(this.callerTalking, this.responsePending || this.responseActive, this.toolsRunning);
@@ -559,7 +570,7 @@ export class AiCallBridge {
     this.responsePending = true;
     this.createSeq += 1;
     this.pendingCreateId = `ai-create-${this.createSeq}`;
-    this.sockets.sendOpenAi({ type: 'response.create', event_id: this.pendingCreateId });
+    this.sockets.sendOpenAi({ type: 'response.create', event_id: this.pendingCreateId, ...speechOnly });
     this.timing.requested(this.now());
   }
 
@@ -655,6 +666,8 @@ export class AiCallBridge {
       this.stats.agentAudio(at);
       this.agentSpoke = true;
       this.callerSpokeSinceAgent = false;
+      if (this.rearmOnSpeech) this.silentEndRefused = false;
+      this.rearmOnSpeech = false;
       this.openerItemId ??= itemId;
     }
     this.sockets.sendTwilio({
@@ -702,14 +715,19 @@ export class AiCallBridge {
     };
     // Any of it played, cut or not: a late-cut goodbye was still said (the guard below must not send its end_call back).
     const played = this.responseHasAudio;
+    // Cut by us (the gate), by OpenAI (instant mode's interrupt_response), or truncated where the caller stopped hearing it.
+    const cut = this.responseCut || this.truncated.has(this.responseItemId) || str(response.status) === 'cancelled';
     this.responseActive = false;
     this.responsePending = false;
     this.responseCut = false;
     this.cancelWhenCreated = false;
     const calls = functionCalls(response);
+    // The speech-only goodbye a sent-back end_call asked for: run that end_call now, unless the goodbye was cut.
+    const owed = calls.length === 0 ? this.takeOwedEnd(cut, played) : null;
     if (calls.length > 0) this.runTools(calls, spoke, played);
+    if (owed !== null) this.endAfterGoodbye(owed.args);
     this.playback.onResponseDone(); // after the tool bookkeeping: a drain notified here sees the batch
-    if (calls.length === 0) this.afterResponse();
+    if (calls.length === 0 && owed === null) this.afterResponse();
   }
 
   /** Run a response's tool calls after any earlier batch, then speak, hold, let the caller answer, or end the conversation. */
@@ -720,6 +738,9 @@ export class AiCallBridge {
       send: (m: object) => this.sockets.sendOpenAi(m),
     };
     const refuseSilentEnd = this.latchSilentEndRefusal(calls, played);
+    // A refused end_call is owed after its goodbye; any end_call that runs settles one owed earlier.
+    if (refuseSilentEnd) this.owedEnd = { args: endCallArgs(calls) };
+    else if (calls.some((call) => call.name === 'end_call')) this.owedEnd = null;
     this.toolBatches += 1;
     this.timing.toolBatch();
     this.toolChain = this.toolChain
@@ -756,6 +777,60 @@ export class AiCallBridge {
       calls.some((call) => call.name === 'end_call');
     if (refuse) this.silentEndRefused = true;
     return refuse;
+  }
+
+  /**
+   * The goodbye response is done: the owed end_call to run now, or null (none owed, or the goodbye was cut). A cut
+   * goodbye that was partly heard ("bye!" over it) re-arms the guard only once the agent speaks again, so their reply's
+   * silent end_call runs instead of a second goodbye; one cut before a sound of it played re-arms at once.
+   */
+  private takeOwedEnd(cut: boolean, played: boolean): { args: unknown } | null {
+    const owed = this.owedEnd;
+    if (owed === null) return null;
+    if (cut && played) {
+      this.owedEnd = null;
+      this.rearmOnSpeech = true;
+      return null;
+    }
+    if (cut) {
+      this.dropOwedEnd();
+      return null;
+    }
+    this.owedEnd = null;
+    return owed;
+  }
+
+  /**
+   * The owed goodbye was never said (cut, a new caller turn, a rejected create): forget the end, and re-arm the guard so
+   * a later silent end_call is sent back again. No loop: each refusal needs a new caller turn, and the goodbye is speech only.
+   */
+  private dropOwedEnd(): void {
+    if (this.owedEnd === null) return;
+    this.owedEnd = null;
+    this.silentEndRefused = false;
+  }
+
+  /** goodbyeBeforeEnd: the goodbye a sent-back end_call asked for is done — run that end_call (its arguments), after any earlier batch. */
+  private endAfterGoodbye(args: unknown): void {
+    this.hooks.log.info({}, 'ai-voice bridge: goodbye said after a sent-back end_call — ending the call');
+    this.toolBatches += 1;
+    this.toolChain = this.toolChain
+      .then(async () => {
+        let result: ToolResult;
+        try {
+          result = await this.hooks.onTool('end_call', args);
+        } finally {
+          this.toolBatches -= 1; // also when onTool throws before returning a promise
+        }
+        if (result.then !== 'hangup' && result.then !== 'transfer') throw new Error('end_call did not end the call');
+        this.closeConversation();
+      })
+      .catch(async (e: unknown) => {
+        // The caller said bye: end the call from here once the goodbye has played, rather than leave the line open.
+        this.hooks.log.error({ err: errText(e) }, 'ai-voice bridge: ending the call after the goodbye failed');
+        await this.waitForPlayback();
+        this.endWithBackstop('error', 'ending the call after the goodbye failed');
+      });
   }
 
   /** A response (or a quiet tool batch) finished without asking for another. */

@@ -24,7 +24,7 @@ export interface BatchResult {
 }
 
 export interface BatchOptions {
-  /** Send end_call back unrun with SAY_GOODBYE_FIRST; the bridge's inbound goodbye guard decides when. */
+  /** Send end_call back unrun with SAY_GOODBYE_FIRST; the bridge's inbound goodbye guard decides when, and ends the call after the goodbye. */
   refuseSilentEnd?: boolean;
 }
 
@@ -55,10 +55,25 @@ export interface ToolDeps {
 }
 
 const BAD_ARGUMENTS = '{"error":"bad arguments"}';
-/** What the agent hears when the bridge sends back an end_call that came with no spoken goodbye. */
+/**
+ * What the agent hears when the bridge sends back an end_call that came with no spoken goodbye. It asks for the goodbye
+ * only: the bridge ends the call once it is said. A line about silence or end_call was read out loud ("Oh, sorry about
+ * that silence. Let me say a quick goodbye...": simulated inbound calls, 2026-10-19).
+ */
 export const SAY_GOODBYE_FIRST = JSON.stringify({
-  error: 'the caller spoke and heard nothing back — say a short goodbye out loud first, then call end_call again',
+  ended: false,
+  next: 'say only a short goodbye to the caller, with their name if you know it, like: Okay, take care. Bye now.',
 });
+
+/** The arguments of a batch's first end_call (`{}` when they don't parse: end_call then records outcome `other`). */
+export function endCallArgs(calls: readonly FunctionCall[]): unknown {
+  const call = calls.find((c) => c.name === 'end_call');
+  try {
+    return call ? (JSON.parse(call.arguments) as unknown) : {};
+  } catch {
+    return {};
+  }
+}
 /** What the model hears for a tool it may not call (an unknown name, or one its call was not offered: service-tools.ts). */
 export const UNKNOWN_TOOL = '{"error":"unknown tool"}';
 const TOOL_FAILED = '{"error":"tool failed"}';

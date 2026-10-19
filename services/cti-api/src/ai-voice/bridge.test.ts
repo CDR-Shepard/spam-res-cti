@@ -3,10 +3,12 @@ import {
   AiCallBridge,
   END_GRACE_MS,
   OPENER_DELAY_MS,
+  PLAYBACK_DRAIN_MAX_MS,
   SESSION_READY_TIMEOUT_MS,
   type BridgeHooks,
   type BridgeOptions,
   type BridgeSocket,
+  type ToolResult,
 } from './bridge.js';
 import { SAY_GOODBYE_FIRST } from './bridge-tools.js';
 import { AI_CALL_TOOLS } from './prompt.js';
@@ -2580,6 +2582,8 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     openai.msg(done(endCall(id)));
   };
   const callerTurn = (openai: FakeSocket, id: string) => openai.msg({ type: 'input_audio_buffer.committed', item_id: id });
+  const speechStarted = (openai: FakeSocket, id: string) => openai.msg({ type: 'input_audio_buffer.speech_started', item_id: id, audio_start_ms: 0 });
+  const cancelled = { type: 'response.done', response: { status: 'cancelled', output: [] } };
 
   beforeEach(() => end.mockClear());
 
@@ -2613,6 +2617,250 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     await flush();
     expect(end).toHaveBeenCalledTimes(1);
     expect(end).toHaveBeenCalledWith('end_call', { outcome: 'other', summary: 'bye' });
+  });
+
+  it('asks for the goodbye with a speech-only response (no tool calls)', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    await flush();
+    openai.clearSent();
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(openai.sent.filter((m) => m.type === 'response.create')).toEqual([{ type: 'response.create', response: { tool_choice: 'none' } }]);
+  });
+
+  it('gate mode: the goodbye create is speech-only too', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate' }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1');
+    callerTurn(openai, 'c1');
+    await flush();
+    openai.clearSent();
+    silentEnd(openai, 'e1');
+    await flush();
+    const goodbyeCreates = openai.sent.filter((m) => m.type === 'response.create');
+    expect(goodbyeCreates).toHaveLength(1);
+    expect(goodbyeCreates[0]).toMatchObject({ response: { tool_choice: 'none' } });
+  });
+
+  it('once that goodbye has been said, the bridge runs the sent-back end_call itself, with its arguments', async () => {
+    const { openai, bridge, hooks } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+    spokenResponse(openai, 'a2'); // "Okay, take care, Gerald. Bye now." (speech only: no tools)
+    await flush();
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(end).toHaveBeenCalledWith('end_call', { outcome: 'other', summary: 'bye' });
+    expect(hooks.log.info).toHaveBeenCalledWith(expect.anything(), 'ai-voice bridge: goodbye said after a sent-back end_call — ending the call');
+  });
+
+  it('an end_call that runs after the refusal settles it: a later response does not end the call again', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    silentEnd(openai, 'e1');
+    await flush();
+    silentEnd(openai, 'e2'); // the second one runs (refused once a call)
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg(done());
+    await flush();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('ends the call after the goodbye response even if it played nothing (the caller already said bye)', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    silentEnd(openai, 'e1');
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg(done());
+    await flush();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('a new caller turn before the goodbye cancels it: the follow-up is a normal answer and the call stays up', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    openai.clearSent();
+    silentEnd(openai, 'e1');
+    callerTurn(openai, 'c2'); // "Oh wait, one more thing..." lands while the refusal is being sent
+    await flush();
+    expect(openai.sent.filter((m) => m.type === 'response.create')).toEqual([{ type: 'response.create' }]);
+    spokenResponse(openai, 'a2'); // the answer to their question
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+  });
+
+  it('gate mode: a new caller turn before the goodbye makes the follow-up a normal create', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate' }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    await flush();
+    openai.clearSent();
+    silentEnd(openai, 'e1');
+    callerTurn(openai, 'c2');
+    await flush();
+    const followUps = openai.sent.filter((m) => m.type === 'response.create');
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0]).not.toHaveProperty('response');
+  });
+
+  it('instant mode: a caller who speaks before the goodbye plays (OpenAI cancels it) is not hung up on', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    silentEnd(openai, 'e1');
+    await flush();
+    openai.msg({ type: 'response.created' }); // the goodbye starts
+    speechStarted(openai, 'c2'); // "Hello?" — interrupt_response cancels it before any audio
+    openai.msg(cancelled);
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+  });
+
+  it('instant mode: "wait, one more thing" over the goodbye keeps the call up', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    silentEnd(openai, 'e1');
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'a2', delta: audio(400) });
+    speechStarted(openai, 'c2'); // the bridge truncates a2
+    openai.msg(cancelled);
+    callerTurn(openai, 'c2');
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+  });
+
+  it('instant mode: a "bye" over a goodbye already heard gets no second goodbye: their silent end_call runs', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    silentEnd(openai, 'e1');
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'a2', delta: audio(800) }); // "Okay, take c-"
+    speechStarted(openai, 'c2'); // "bye!"
+    openai.msg(cancelled);
+    callerTurn(openai, 'c2');
+    openai.clearSent();
+    silentEnd(openai, 'e2'); // the reply to their "bye!"
+    await flush();
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(openai.sent.filter((m) => m.type === 'response.create')).toEqual([]);
+  });
+
+  it('instant mode: after a goodbye cut by "wait, one more thing", the agent answering aloud re-arms the guard', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    silentEnd(openai, 'e1');
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'a2', delta: audio(800) });
+    speechStarted(openai, 'c2'); // "wait, one more thing..."
+    openai.msg(cancelled);
+    callerTurn(openai, 'c2');
+    spokenResponse(openai, 'a3'); // the agent answers it aloud
+    callerTurn(openai, 'c3'); // "okay, thanks, bye"
+    await flush();
+    silentEnd(openai, 'e3');
+    await flush();
+    expect(end).not.toHaveBeenCalled(); // sent back again: the agent will say a goodbye first
+  });
+
+  it('gate mode: a goodbye cut by the caller re-arms the guard: their next silent end_call is sent back again', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate' }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    silentEnd(openai, 'e1');
+    await flush();
+    openai.msg({ type: 'response.created' });
+    speechStarted(openai, 'c2'); // "Hello?"
+    openai.msg(cancelled);
+    openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: 'c2', audio_end_ms: 100 });
+    callerTurn(openai, 'c2');
+    await flush();
+    openai.clearSent();
+    silentEnd(openai, 'e2');
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+    expect(openai.sent.filter((m) => m.type === 'response.create')).toEqual([expect.objectContaining({ response: { tool_choice: 'none' } })]);
+  });
+
+  it('gate mode: a listening sound committed over the goodbye does not cancel the end', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate', overlapJudge: 'words' }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    silentEnd(openai, 'e1');
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'a2', delta: audio(1500) });
+    speechStarted(openai, 'c2'); // "bye!" over the goodbye: the gate judges it
+    openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: 'c2', audio_end_ms: 300 });
+    callerTurn(openai, 'c2');
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'a2', delta: audio(500) });
+    openai.msg({ type: 'response.output_audio.done' });
+    openai.msg(done());
+    await flush();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['throws', (): Promise<ToolResult> => { throw new Error('boom'); }],
+    ['does not hang up', async (): Promise<ToolResult> => ({ output: '{"error":"tool failed"}' })],
+  ])('if the end after the goodbye %s, the bridge ends the call itself once the goodbye has played', async (_, onTool) => {
+    const { openai, bridge, hooks } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate' }, { onTool: vi.fn(onTool) });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    silentEnd(openai, 'e1');
+    await flush();
+    spokenResponse(openai, 'a2');
+    await flush();
+    expect(hooks.log.error).toHaveBeenCalledWith(expect.anything(), 'ai-voice bridge: ending the call after the goodbye failed');
+    expect(hooks.onEnd).not.toHaveBeenCalled(); // the goodbye is still playing: not clipped
+    await vi.advanceTimersByTimeAsync(PLAYBACK_DRAIN_MAX_MS);
+    expect(hooks.onEnd).toHaveBeenCalledWith('error', 'ending the call after the goodbye failed');
+  });
+
+  it('gate mode: a rejected goodbye create leaves nothing owed: a later reply does not end the call', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate' }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1');
+    await flush();
+    openai.clearSent();
+    silentEnd(openai, 'e1');
+    await flush();
+    const goodbyeCreate = openai.sent.find((m) => m.type === 'response.create');
+    openai.msg({ type: 'error', error: { code: 'invalid_value', message: 'rejected', event_id: goodbyeCreate?.event_id } });
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg(done());
+    await flush();
+    expect(end).not.toHaveBeenCalled();
   });
 
   it('refuses only once a call: a second silent end_call runs', async () => {
