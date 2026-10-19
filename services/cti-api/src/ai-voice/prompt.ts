@@ -35,7 +35,7 @@ export interface PromptInput {
   address: string | null;
   notes: string;
   isTest: boolean;
-  /** e.g. "Tuesday 4:12 PM" in the recipient's zone. */
+  /** e.g. "Tuesday, October 6, 2026, 4:12 PM" in the recipient's zone (local-time.ts). */
   localTime: string;
   /** E.164 number people can call back on (the call's caller-ID DID); null omits every mention. */
   callbackNumber: string | null;

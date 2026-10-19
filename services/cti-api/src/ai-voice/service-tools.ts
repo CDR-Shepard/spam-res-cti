@@ -51,6 +51,8 @@ export interface ToolCtx {
   isTest?: boolean;
   /** inbound = a test phone called the AI (only INBOUND_TOOLS run). Absent = outbound. */
   direction?: 'outbound' | 'inbound';
+  /** The number whose zone the agent's clock used (a practice call: the record's phone, not the test phone). Absent = toE164. */
+  zoneE164?: string;
 }
 
 export interface ToolEffects {
@@ -106,7 +108,10 @@ const OFFERED: Readonly<Record<'outbound' | 'inbound', ReadonlySet<string>>> = {
   outbound: new Set(OUTBOUND_TOOL_NAMES),
   inbound: new Set(INBOUND_TOOLS.map((tool) => tool.name)),
 };
-const ISO_8601 = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+/** A date, or a date and time WITH a zone: a time without one is never read in the server's zone (UTC). */
+const ISO_8601 = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2}))?$/;
+/** A date and time with no zone, as an agent writes the time it agreed: it is the person's local time. */
+const LOCAL_WHEN = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(:\d{2}(\.\d{1,3})?)?$/;
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const field = (args: unknown, key: string): unknown =>
@@ -115,11 +120,26 @@ const text = (v: unknown, max: number): string => (typeof v === 'string' ? v.tri
 const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
   typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
 
-/** An exact ISO 8601 time, else null (free text such as "Thursday after 5" stays text). */
+/** An exact ISO 8601 date, or time with a zone, else null (free text such as "Thursday after 5" stays text). */
 export function parseCallbackAt(when: string): Date | null {
   if (!ISO_8601.test(when)) return null;
   const ms = Date.parse(when);
   return Number.isFinite(ms) ? new Date(ms) : null;
+}
+
+/**
+ * The callback's instant, in the zone the agent's clock used: the agreed local `at`, else an exact `when` (one with
+ * no zone is their local time), else null. An unusable `at` is logged and the words are kept.
+ */
+function callbackAtOf(ctx: ToolCtx, req: { when: string; at?: string }): Date | null {
+  const timeZone = recipientTimeZone(ctx.zoneE164 ?? ctx.toE164);
+  if (req.at) {
+    const agreed = callbackAtFromLocal(req.at, timeZone, ctx.now());
+    if (agreed) return agreed;
+    ctx.log.warn({ aiCallId: ctx.aiCallId, at: req.at }, 'ai-voice: callback time not usable; kept as words');
+  }
+  const local = LOCAL_WHEN.exec(req.when);
+  return local ? callbackAtFromLocal(local[1]!, timeZone, ctx.now()) : parseCallbackAt(req.when);
 }
 
 async function bestEffort(ctx: ToolCtx, what: string, fn: () => Promise<unknown>): Promise<void> {
@@ -153,9 +173,7 @@ export const defaultToolEffects: ToolEffects = {
     await ctx.store.mergeQualification(ctx.aiCallId, fields);
   },
   async scheduleCallback(ctx, req) {
-    const agreed = req.at ? callbackAtFromLocal(req.at, recipientTimeZone(ctx.toE164), ctx.now()) : null;
-    if (req.at && !agreed) ctx.log.warn({ aiCallId: ctx.aiCallId, at: req.at }, 'ai-voice: callback time not usable; kept as words');
-    await ctx.store.update(ctx.aiCallId, { callbackAt: agreed ?? parseCallbackAt(req.when) });
+    await ctx.store.update(ctx.aiCallId, { callbackAt: callbackAtOf(ctx, req) });
     await ctx.store.appendSummary(ctx.aiCallId, `Callback requested: ${req.when}${req.note ? ` — ${req.note}` : ''}`);
   },
   async transferFailed(ctx, info) {
@@ -335,13 +353,11 @@ export async function handleToolCall(name: ToolName, args: unknown, env: ToolEnv
     case 'save_qualification':
       await effects.saveQualification(ctx, qualificationFields(args));
       return { output: SAVED_OUTPUT, then: 'continue' };
-    case 'schedule_callback':
-      await effects.scheduleCallback(ctx, {
-        when: text(field(args, 'when'), WHEN_MAX),
-        note: text(field(args, 'note'), NOTE_MAX),
-        ...(text(field(args, 'at'), AT_MAX) ? { at: text(field(args, 'at'), AT_MAX) } : {}),
-      });
+    case 'schedule_callback': {
+      const at = text(field(args, 'at'), AT_MAX);
+      await effects.scheduleCallback(ctx, { when: text(field(args, 'when'), WHEN_MAX), note: text(field(args, 'note'), NOTE_MAX), ...(at ? { at } : {}) });
       return { output: 'scheduled', then: 'continue' };
+    }
     case 'book_appointment':
       return bookAppointment(args, env);
     default: {

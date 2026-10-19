@@ -38,7 +38,8 @@ export const SF_CALL_TIMEOUT_MS = 30_000;
 export const SF_CREATE_TIMEOUT_MS = 60_000;
 const SUBJECT_MAX = 255;
 const CALLBACK_OUTCOMES = new Set(['qualified_callback', 'transfer_failed']);
-const WHEN_LINE = /^Callback requested: (.+?)(?: — .*)?$/m;
+/** Every callback line the tool wrote; the last one is the callback (callbackAt is the last call's too). */
+const WHEN_LINES = /^Callback requested: (.+?)(?: — .*)?$/gm;
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 const PROMISED = 'The caller was promised a call back.';
 
@@ -98,12 +99,12 @@ function whenWords(row: AiCallRow, when: string): string {
   const at = DATE_ONLY.test(when) ? null : (row.callbackAt ?? parseCallbackAt(when));
   if (!at) return when;
   const timeZone = recipientTimeZone(row.toE164);
-  return new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(at);
+  return new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }).format(at);
 }
 
 export function callbackTaskInput(row: AiCallRow, links: TaskLinks, summary: string, now: Date): CallTaskInput {
   const missedTransfer = row.outcome === 'transfer_failed';
-  const when = missedTransfer ? null : (WHEN_LINE.exec(row.summary ?? '')?.[1]?.trim() ?? null);
+  const when = missedTransfer ? null : ([...(row.summary ?? '').matchAll(WHEN_LINES)].at(-1)?.[1]?.trim() ?? null);
   return {
     subject: `AI call: callback ${when ? whenWords(row, when) : 'requested'}`.slice(0, SUBJECT_MAX),
     callType: 'Outbound',

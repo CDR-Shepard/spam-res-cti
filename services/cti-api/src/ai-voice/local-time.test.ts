@@ -38,6 +38,10 @@ describe('wallTimeToDate', () => {
     expect(wallTimeToDate('2026-11-02T17:00', 'America/Los_Angeles')?.toISOString()).toBe('2026-11-03T01:00:00.000Z');
   });
 
+  it('a time the clocks repeat (fall back) is the first, daylight one', () => {
+    expect(wallTimeToDate('2026-11-01T01:30', 'America/Los_Angeles')?.toISOString()).toBe('2026-11-01T08:30:00.000Z');
+  });
+
   it('is null for a time the clocks skip, a day that does not exist, or anything not YYYY-MM-DDTHH:MM', () => {
     expect(wallTimeToDate('2027-03-14T02:30', 'America/Los_Angeles')).toBeNull();
     expect(wallTimeToDate('2026-02-30T10:00', 'America/Los_Angeles')).toBeNull();
@@ -56,6 +60,12 @@ describe('callbackAtFromLocal', () => {
     expect(callbackAtFromLocal('2026-10-05T10:30', 'America/Los_Angeles', NOW)?.toISOString()).toBe('2026-10-05T17:30:00.000Z');
     expect(callbackAtFromLocal('2026-10-04T17:00', 'America/Los_Angeles', NOW)).toBeNull();
     expect(callbackAtFromLocal('2025-10-08T17:00', 'America/Los_Angeles', NOW)).toBeNull();
+  });
+
+  it("their today, not the UTC one: late evening in LA is already tomorrow in UTC", () => {
+    const late = new Date('2026-10-06T06:30:00Z'); // 11:30 PM on Oct 5 in LA, 2:30 AM on Oct 6 in New York
+    expect(callbackAtFromLocal('2026-10-05T20:30', 'America/Los_Angeles', late)?.toISOString()).toBe('2026-10-06T03:30:00.000Z');
+    expect(callbackAtFromLocal('2026-10-05T20:30', 'America/New_York', late)).toBeNull(); // already yesterday in New York
   });
 
   it('allows next year, but nothing further out than CALLBACK_MAX_AHEAD_MS', () => {

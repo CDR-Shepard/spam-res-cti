@@ -254,6 +254,19 @@ describe('save_qualification and schedule_callback', () => {
     await run('schedule_callback', { when: '2026-10-07T17:00:00-05:00', at: 'soon', note: '' });
     expect(store.rows.get(ID)?.callbackAt?.toISOString()).toBe('2026-10-07T22:00:00.000Z');
   });
+
+  it('an exact time in `when` with no zone is their local time, never the server\'s', async () => {
+    for (const when of ['2026-10-08T17:00', '2026-10-08T17:00:00']) {
+      await run('schedule_callback', { when, note: '' });
+      expect(store.rows.get(ID)?.callbackAt?.toISOString()).toBe('2026-10-09T00:00:00.000Z');
+    }
+  });
+
+  it("a practice call reads the time in the zone the agent's clock used (the record's phone), not the test phone's", async () => {
+    ctx = { ...ctx, toE164: '+15125550111', zoneE164: '+16195550100', isTest: true }; // Austin test phone, San Diego seller
+    await run('schedule_callback', { when: 'Thursday at 5', at: '2026-10-08T17:00', note: '' });
+    expect(store.rows.get(ID)?.callbackAt?.toISOString()).toBe('2026-10-09T00:00:00.000Z');
+  });
 });
 
 describe('the summary keeps what the tools recorded', () => {
@@ -272,5 +285,8 @@ describe('parseCallbackAt', () => {
     expect(parseCallbackAt('2026-10-07')).toEqual(new Date('2026-10-07T00:00:00Z'));
     expect(parseCallbackAt('2026-10-07T17:00Z')).toEqual(new Date('2026-10-07T17:00:00Z'));
     expect(parseCallbackAt('2026-13-45T99:00Z')).toBeNull();
+    // A time with no zone is never read in the server's zone (UTC on Railway).
+    expect(parseCallbackAt('2026-10-07T17:00')).toBeNull();
+    expect(parseCallbackAt('2026-10-07T17:00:00')).toBeNull();
   });
 });

@@ -214,6 +214,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
           slots,
           isTest: entry.isTest,
           ...(entry.direction === 'inbound' ? { direction: 'inbound' as const } : {}),
+          ...(entry.localTimeE164 ? { zoneE164: entry.localTimeE164 } : {}),
         },
         effects: deps.effects,
         call: {
