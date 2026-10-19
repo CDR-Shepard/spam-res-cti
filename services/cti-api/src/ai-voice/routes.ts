@@ -16,6 +16,7 @@ import { loadConfig } from '../config.js';
 import type { Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
 import type { CallerDetailsDeps } from './caller-details.js';
+import { externalVoiceFor } from './elevenlabs-tts.js';
 import { gateAiCall } from './gate.js';
 import { internalSession } from './internal-auth.js';
 import { loadIntegrationRecord } from './integration-record.js';
@@ -77,17 +78,22 @@ export async function registerAiVoiceRoutes(app: FastifyInstance, overrides: Par
 
   registerAiVoiceWebhooks(app, { store: deps.store, twilio: deps.twilio, effects: deps.effects, now: deps.now, log, afterCall: deps.afterCall });
 
-  await registerAiVoiceStreamRoute(app, (req) => ({
-    cfg: loadConfig(),
-    store: deps.store,
-    twilio: deps.twilio,
-    effects: deps.effects,
-    openRealtime: deps.openRealtime,
-    ...(deps.createBridge ? { createBridge: deps.createBridge } : {}),
-    ...(deps.details ? { details: deps.details } : {}),
-    now: deps.now,
-    log: req.log,
-  }));
+  await registerAiVoiceStreamRoute(app, (req) => {
+    const cfg = loadConfig();
+    const openTts = externalVoiceFor(cfg, req.log);
+    return {
+      cfg,
+      store: deps.store,
+      twilio: deps.twilio,
+      effects: deps.effects,
+      openRealtime: deps.openRealtime,
+      ...(deps.createBridge ? { createBridge: deps.createBridge } : {}),
+      ...(deps.details ? { details: deps.details } : {}),
+      ...(openTts ? { openTts } : {}),
+      now: deps.now,
+      log: req.log,
+    };
+  });
 
   await registerInternalAiCallRoutes(app, {
     db: deps.db,

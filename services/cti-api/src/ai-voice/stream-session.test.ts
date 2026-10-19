@@ -123,6 +123,17 @@ describe('runStreamSession — the start frame', () => {
     expect(twilio.hangups).toEqual([]);
   });
 
+  it('with an external voice (AI_VOICE_TTS=elevenlabs), the bridge reaches OpenAI through it, so OpenAI is asked for text', async () => {
+    const voice: string[] = [];
+    deps.openTts = () => ({ speak: () => {}, finish: () => {}, cancel: () => {}, close: () => voice.push('close') });
+    expect(await begin()).toBe('started');
+    expect(captured?.opts.openai).not.toBe(openaiWs);
+    captured?.opts.openai.send(JSON.stringify({ type: 'session.update', session: { type: 'realtime', output_modalities: ['audio'] } }));
+    expect(JSON.parse(openaiWs.sent.at(-1) ?? '{}')).toMatchObject({ session: { output_modalities: ['text'] } });
+    captured?.opts.openai.close();
+    expect(voice).toEqual(['close']);
+  });
+
   it('passes the configured turn detection and silence wait to the bridge', async () => {
     deps.cfg = { ...cfg, AI_VOICE_TURN_DETECTION: 'server_vad', AI_VOICE_SILENCE_MS: 650 } as AppConfig;
     expect(await begin()).toBe('started');

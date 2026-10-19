@@ -27,6 +27,7 @@ import { UUID_RE, TWILIO_CALL_SID_RE } from '../telephony/webhooks.js';
 import { AiCallBridge, MIN_CALL_MS, type BridgeHooks, type BridgeLog, type BridgeOptions, type BridgeSocket, type EndReason } from './bridge.js';
 import { obj, parseFrame, str, type Msg } from './bridge-frames.js';
 import type { CallerDetailsDeps } from './caller-details.js';
+import { withExternalVoice, type OpenTts } from './external-voice.js';
 import { INBOUND_OPENER } from './bridge-session.js';
 import { sayGoodbyeWithNumber } from './bridge-tools.js';
 import { INBOUND_TOOLS, buildInboundInstructions, buildInstructions, toolsFor, type PromptInput } from './prompt.js';
@@ -59,6 +60,8 @@ export interface StreamSessionDeps {
   startTimeoutMs?: number;
   /** The model that fills an inbound call's details from its transcript when it ends; absent = none (the call closes `incomplete`). */
   details?: CallerDetailsDeps;
+  /** Another voice speaks the agent's lines (AI_VOICE_TTS=elevenlabs; external-voice.ts); absent = the OpenAI voice. */
+  openTts?: OpenTts;
 }
 
 export type StreamOutcome =
@@ -198,7 +201,8 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
   const { cfg } = deps;
   // The times the prompt lists are exactly the ones the agent can name and book (Fix 1, M-2).
   const slots = promptSlots(entry.prompt.slots, entry.prompt.address);
-  const openai = deps.openRealtime(realtimeUrl(cfg.AI_VOICE_MODEL), cfg.OPENAI_API_KEY ?? '');
+  const realtime = deps.openRealtime(realtimeUrl(cfg.AI_VOICE_MODEL), cfg.OPENAI_API_KEY ?? '');
+  const openai = deps.openTts ? withExternalVoice(realtime, deps.openTts, deps.log) : realtime;
   const transcript = new TranscriptBuffer((lines) => deps.store.appendTranscript(entry.aiCallId, lines), { log: deps.log });
   let bridge: ActiveBridge | null = null;
   const hooks: BridgeHooks = {

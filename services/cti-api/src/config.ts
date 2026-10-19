@@ -225,6 +225,16 @@ const schema = z.object({
   AI_VOICE_VAD_EAGERNESS: z.enum(['low', 'medium', 'high', 'auto']).default('auto'),
   AI_VOICE_VOICE: z.string().default('marin'),
   /**
+   * Who speaks the agent's lines (spec 2026-10-19-ai-voice-elevenlabs-design.md): `openai` = the Realtime voice
+   * (AI_VOICE_VOICE), as before; `elevenlabs` = OpenAI writes the lines and ElevenLabs speaks them
+   * (AI_VOICE_ELEVENLABS_VOICE). Without ELEVENLABS_API_KEY, `elevenlabs` uses the OpenAI voice and logs a warning.
+   */
+  AI_VOICE_TTS: z.enum(['openai', 'elevenlabs']).default('openai'),
+  ELEVENLABS_API_KEY: z.string().optional(),
+  /** Default: "Siren", the voice the owner chose by ear on 2026-10-19. */
+  AI_VOICE_ELEVENLABS_VOICE: z.string().default('eXpIbVcVbLo8ZJQDlDnl'),
+  AI_VOICE_ELEVENLABS_MODEL: z.string().default('eleven_v4_turbo'),
+  /**
    * Barge-in (spec 2026-10-09): `gate` = the bridge keeps the agent talking through "mm-hmm"
    * and stops it on a real interruption, judged from how long the caller keeps talking (the sound
    * judge, the default; spec §4.5) with the caller's streamed words as the second path, or from the
