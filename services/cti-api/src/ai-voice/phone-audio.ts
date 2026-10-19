@@ -1,0 +1,78 @@
+/**
+ * ElevenLabs' 16 kHz PCM made into Twilio's 8 kHz μ-law here, rather than by ElevenLabs (owner's first call
+ * 2026-10-19: crackle on Sam's s/t/k sounds). ElevenLabs' own ulaw_8000 kept more of the harsh top end (energy above
+ * 3 kHz 0.91 % vs 0.56 % this way; OpenAI's voice 0.46 %). A 63-tap windowed-sinc low-pass at 3.4 kHz (the phone band),
+ * every second sample kept, then G.711 μ-law. Causal, so the audio is ~2 ms late; chunks may split anywhere.
+ */
+const SOURCE_RATE = 16_000;
+export const PHONE_CUTOFF_HZ = 3400;
+const TAPS = 63;
+
+/** Hamming-windowed sinc, normalised to unity gain at 0 Hz. */
+const FILTER: readonly number[] = (() => {
+  const fc = PHONE_CUTOFF_HZ / SOURCE_RATE;
+  const raw = Array.from({ length: TAPS }, (_, n) => {
+    const m = n - (TAPS - 1) / 2;
+    const sinc = m === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * m) / (Math.PI * m);
+    return sinc * (0.54 - 0.46 * Math.cos((2 * Math.PI * n) / (TAPS - 1)));
+  });
+  const sum = raw.reduce((a, b) => a + b, 0);
+  return raw.map((h) => h / sum);
+})();
+
+const MU_BIAS = 0x84;
+const MU_CLIP = 32_635;
+
+/** G.711 μ-law encoding of one 16-bit sample. */
+export function muLaw(sample: number): number {
+  let s = Math.max(-32_768, Math.min(32_767, Math.round(sample)));
+  const sign = s < 0 ? 0x80 : 0;
+  if (sign) s = -s;
+  s = Math.min(s, MU_CLIP) + MU_BIAS;
+  let exponent = 7;
+  for (let mask = 0x4000; (s & mask) === 0 && exponent > 0; exponent -= 1, mask >>= 1);
+  const mantissa = (s >> (exponent + 3)) & 0x0f;
+  return ~(sign | (exponent << 4) | mantissa) & 0xff;
+}
+
+/** G.711 μ-law decoding of one byte. */
+export function fromMuLaw(byte: number): number {
+  const u = ~byte & 0xff;
+  const exponent = (u >> 4) & 0x07;
+  const magnitude = ((((u & 0x0f) << 3) + MU_BIAS) << exponent) - MU_BIAS;
+  return u & 0x80 ? -magnitude : magnitude;
+}
+
+export interface PhoneDownsampler {
+  /** 16-bit little-endian PCM at 16 kHz in, 8 kHz μ-law out (what is complete so far). */
+  push(pcm16le: Buffer): Buffer;
+}
+
+/** One per stretch of audio (a line): it keeps the filter's last samples and any half sample between chunks. */
+export function phoneDownsampler(): PhoneDownsampler {
+  let history: number[] = new Array<number>(TAPS - 1).fill(0);
+  let halfSample: Buffer = Buffer.alloc(0);
+  /** Samples seen so far: every even one makes an output sample. */
+  let seen = 0;
+
+  return {
+    push(chunk) {
+      const bytes = halfSample.length ? Buffer.concat([halfSample, chunk]) : chunk;
+      const whole = bytes.length - (bytes.length % 2);
+      halfSample = Buffer.from(bytes.subarray(whole));
+      const fresh = Array.from({ length: whole / 2 }, (_, i) => bytes.readInt16LE(i * 2));
+      const x = [...history, ...fresh];
+      const out: number[] = [];
+      fresh.forEach((_, i) => {
+        if ((seen + i) % 2 !== 0) return;
+        const at = TAPS - 1 + i;
+        let y = 0;
+        for (let k = 0; k < TAPS; k += 1) y += (FILTER[k] ?? 0) * (x[at - k] ?? 0);
+        out.push(muLaw(y));
+      });
+      seen += fresh.length;
+      history = x.slice(x.length - (TAPS - 1));
+      return Buffer.from(out);
+    },
+  };
+}

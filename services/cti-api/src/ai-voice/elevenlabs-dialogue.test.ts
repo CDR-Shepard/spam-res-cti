@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DIALOGUE_KEEP_ALIVE_MS, elevenLabsDialogue, elevenLabsDialogueUrl } from './elevenlabs-dialogue.js';
+import { DIALOGUE_KEEP_ALIVE_MS, DIALOGUE_START_HOLD_MS, elevenLabsDialogue, elevenLabsDialogueUrl } from './elevenlabs-dialogue.js';
 import { ELEVENLABS_FINAL_TIMEOUT_MS, type TtsSocket } from './elevenlabs-socket.js';
 import type { TtsStream } from './external-voice.js';
 import { silentLog } from './testing.js';
@@ -48,6 +48,9 @@ let tts: TtsStream;
 const sock = () => sockets.at(-1) as FakeTtsSocket;
 const fromServer = (m: object) => sock().emit('message', JSON.stringify(m));
 const sentence = (text: string, newTurn = false) => ({ inputs: [{ text, voice_id: VOICE, new_turn: newTurn }], flush: true });
+/** `ms` of 16 kHz PCM from the server (silence), base64 as it arrives; on the phone it is ms × 8 bytes of μ-law. */
+const pcm = (ms: number) => Buffer.alloc(ms * 32).toString('base64');
+const HOLD = DIALOGUE_START_HOLD_MS;
 
 beforeEach(() => {
   sockets = [];
@@ -59,7 +62,7 @@ beforeEach(() => {
     sockets.push(s);
     return s;
   })({
-    audio: (id, b64) => calls.push(`audio ${id} ${b64}`),
+    audio: (id, b64) => calls.push(`audio ${id} ${Buffer.from(b64, 'base64').length / 8}ms`),
     done: (id) => calls.push(`done ${id}`),
     failed: (err) => calls.push(`failed ${err.message}`),
   });
@@ -70,9 +73,9 @@ afterEach(() => {
 });
 
 describe('elevenLabsDialogueUrl', () => {
-  it('is the text-to-dialogue stream (the socket ElevenLabs serves v3/v4 on), in phone audio', () => {
+  it('is the text-to-dialogue stream (the socket ElevenLabs serves v3/v4 on), in 16 kHz PCM (made phone audio here)', () => {
     expect(elevenLabsDialogueUrl('eleven_v4_turbo')).toBe(
-      'wss://api.elevenlabs.io/v1/text-to-dialogue/stream-input?model_id=eleven_v4_turbo&output_format=ulaw_8000',
+      'wss://api.elevenlabs.io/v1/text-to-dialogue/stream-input?model_id=eleven_v4_turbo&output_format=pcm_16000',
     );
   });
 });
@@ -100,23 +103,23 @@ describe('elevenLabsDialogue — speaking lines', () => {
     tts.finish('i1');
     tts.speak('i2', 'Do you have a minute? ');
     tts.finish('i2');
-    fromServer({ audio: 'A1' });
+    fromServer({ audio: pcm(400) });
     fromServer({ is_final_audio_for_turn: true });
-    fromServer({ audio: 'A2' });
+    fromServer({ audio: pcm(300) });
     fromServer({ is_final_audio_for_turn: true });
-    fromServer({ audio: 'B1' });
+    fromServer({ audio: pcm(500) });
     fromServer({ is_final_audio_for_turn: true });
-    expect(calls).toEqual(['audio i1 A1', 'audio i1 A2', 'done i1', 'audio i2 B1', 'done i2']);
+    expect(calls).toEqual(['audio i1 400ms', 'audio i1 300ms', 'done i1', 'audio i2 500ms', 'done i2']);
   });
 
   it('a line is not done before it is finished, even if all its sentences so far are spoken', () => {
     sock().emit('open');
     tts.speak('i1', 'Hi Jane. ');
-    fromServer({ audio: 'A1' });
+    fromServer({ audio: pcm(600) });
     fromServer({ is_final_audio_for_turn: true });
-    expect(calls).toEqual(['audio i1 A1']);
+    expect(calls).toEqual(['audio i1 600ms']);
     tts.finish('i1');
-    expect(calls).toEqual(['audio i1 A1', 'done i1']);
+    expect(calls).toEqual(['audio i1 600ms', 'done i1']);
   });
 
   it("a cut line's audio is dropped and the rest of its text never sent; the next line's audio still lines up", () => {
@@ -128,11 +131,11 @@ describe('elevenLabsDialogue — speaking lines', () => {
     tts.speak('i2', 'Sorry, go ahead. ');
     tts.finish('i2');
     expect(sock().sent.slice(1)).toEqual([sentence('Hi Jane. ', true), sentence('Sorry, go ahead. ', true)]);
-    fromServer({ audio: 'A1' });
+    fromServer({ audio: pcm(400) });
     fromServer({ is_final_audio_for_turn: true });
-    fromServer({ audio: 'B1' });
+    fromServer({ audio: pcm(400) });
     fromServer({ is_final_audio_for_turn: true });
-    expect(calls).toEqual(['audio i2 B1', 'done i2']);
+    expect(calls).toEqual(['audio i2 400ms', 'done i2']);
   });
 
   it('keeps the socket alive while the call is quiet (it closes after 20 s without a message)', () => {
@@ -152,15 +155,48 @@ describe('elevenLabsDialogue — speaking lines', () => {
   });
 });
 
+describe('elevenLabsDialogue — how a line starts', () => {
+  it("holds the first quarter second of a line, then streams, so a slow second chunk can't stutter the start", () => {
+    sock().emit('open');
+    tts.speak('i1', 'Hi Jane, this is Sam with GG Homes. ');
+    fromServer({ audio: pcm(100) });
+    expect(calls).toEqual([]);
+    fromServer({ audio: pcm(HOLD) });
+    expect(calls).toEqual([`audio i1 ${100 + HOLD}ms`]);
+    fromServer({ audio: pcm(50) });
+    expect(calls).toEqual([`audio i1 ${100 + HOLD}ms`, 'audio i1 50ms']);
+  });
+
+  it('a sentence shorter than the hold plays at its end marker, before the line is done', () => {
+    sock().emit('open');
+    tts.speak('i1', 'Okay. ');
+    tts.finish('i1');
+    fromServer({ audio: pcm(150) });
+    fromServer({ is_final_audio_for_turn: true });
+    expect(calls).toEqual(['audio i1 150ms', 'done i1']);
+  });
+
+  it('the first words go out at the first comma (two words or more); the rest goes by sentences', () => {
+    sock().emit('open');
+    tts.speak('i1', 'Got it, so what has you thinking about selling, is it the taxes? ');
+    tts.speak('i2', 'Okay, so what is going on? ');
+    expect(sock().sent.slice(1)).toEqual([
+      sentence('Got it, ', true),
+      sentence('so what has you thinking about selling, is it the taxes? '),
+      sentence('Okay, so what is going on? ', true),
+    ]);
+  });
+});
+
 describe('elevenLabsDialogue — text with nothing to say', () => {
   it('an emoji or punctuation left at the end of a line is never sent; the line is done with its last real sentence', () => {
     sock().emit('open');
     tts.speak('i1', 'Sounds good. 🙂');
     tts.finish('i1');
     expect(sock().sent.slice(1)).toEqual([sentence('Sounds good. ', true)]);
-    fromServer({ audio: 'A1' });
+    fromServer({ audio: pcm(400) });
     fromServer({ is_final_audio_for_turn: true });
-    expect(calls).toEqual(['audio i1 A1', 'done i1']);
+    expect(calls).toEqual(['audio i1 400ms', 'done i1']);
   });
 });
 

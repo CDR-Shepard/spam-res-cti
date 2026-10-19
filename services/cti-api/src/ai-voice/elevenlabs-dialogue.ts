@@ -6,12 +6,16 @@
  * sentence of it has its end marker; a cut line's audio is dropped as it arrives (the socket has no way to stop it,
  * and generation is several times faster than speech). Each line starts a new turn. A keep-alive every 10 s holds the
  * socket open through quiet stretches (it closes after 20 s without a message).
+ *
+ * After the owner's first call (crackle on words, bursts at line starts): the audio comes as 16 kHz PCM and is made
+ * phone audio here (phone-audio.ts); a line's first quarter second is held and sent as one piece, so a late second
+ * chunk can't stutter its start (it arrives ~5 ms after the first, so this costs next to nothing); and a line's first
+ * words go out at its first comma, so the voice starts before the first sentence is fully written.
  */
 import type { BridgeLog } from './bridge-tools.js';
 import {
   ELEVENLABS_FINAL_TIMEOUT_MS,
   ELEVENLABS_WS,
-  OUTPUT_FORMAT,
   connectWs,
   openTtsConnection,
   speakable,
@@ -20,15 +24,21 @@ import {
   type ElevenLabsSettings,
 } from './elevenlabs-socket.js';
 import type { OpenTts, TtsEvents, TtsStream } from './external-voice.js';
+import { phoneDownsampler, type PhoneDownsampler } from './phone-audio.js';
 
 /** The models ElevenLabs serves only on this socket. */
 export const DIALOGUE_MODEL = /^eleven_v[34]/;
 export const DIALOGUE_KEEP_ALIVE_MS = 10_000;
+/** What ElevenLabs sends: 16 kHz PCM, made 8 kHz μ-law here. */
+const SOURCE_FORMAT = 'pcm_16000';
+/** A line's first audio is held until there is this much, or its sentence ends. */
+export const DIALOGUE_START_HOLD_MS = 250;
+const PHONE_BYTES_PER_MS = 8;
 /** As in the owner's ear test (this socket takes stability only). */
 const VOICE_SETTINGS = { stability: 0.5 };
 
 export function elevenLabsDialogueUrl(modelId: string): string {
-  const query = new URLSearchParams({ model_id: modelId, output_format: OUTPUT_FORMAT });
+  const query = new URLSearchParams({ model_id: modelId, output_format: SOURCE_FORMAT });
   return `${ELEVENLABS_WS}/text-to-dialogue/stream-input?${query.toString()}`;
 }
 
@@ -43,7 +53,15 @@ interface Line {
   /** The caller cut in: its audio is dropped. */
   cut: boolean;
   timer: ReturnType<typeof setTimeout> | null;
+  /** This line's 16 kHz → phone audio converter. */
+  phone: PhoneDownsampler;
+  /** Phone audio held before the line starts playing. */
+  held: Buffer;
+  playing: boolean;
 }
+
+const EMPTY = Buffer.alloc(0);
+const newLine = (): Line => ({ buffer: '', sent: 0, spoken: 0, finished: false, cut: false, timer: null, phone: phoneDownsampler(), held: EMPTY, playing: false });
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
@@ -75,16 +93,32 @@ export function elevenLabsDialogue(s: ElevenLabsSettings, log: BridgeLog, connec
       events.done(id);
     };
 
+    const emit = (id: string, ulaw: Buffer): void => {
+      if (ulaw.length) events.audio(id, ulaw.toString('base64'));
+    };
+
+    /** Converted, then held until the line has a quarter second (or its sentence ends), then streamed. */
+    const play = (id: string, line: Line, pcm: Buffer): void => {
+      const ulaw = line.phone.push(pcm);
+      if (line.playing) return emit(id, ulaw);
+      const held = Buffer.concat([line.held, ulaw]);
+      if (held.length < DIALOGUE_START_HOLD_MS * PHONE_BYTES_PER_MS) return setLine(id, { ...line, held });
+      setLine(id, { ...line, held: EMPTY, playing: true });
+      emit(id, held);
+    };
+
     const onMessage = (m: Record<string, unknown>): void => {
       if (str(m.error)) return conn.fail(`ElevenLabs error ${str(m.error)}${str(m.message) ? `: ${str(m.message)}` : ''}`);
       const head = order[0];
       if (head === undefined) return;
       const line = lines.get(head);
-      if (str(m.audio) && line && !line.cut) events.audio(head, str(m.audio));
+      if (str(m.audio) && line && !line.cut) play(head, line, Buffer.from(str(m.audio), 'base64'));
       if (m.is_final_audio_for_turn !== true) return;
       order = order.slice(1);
-      if (!line) return;
-      setLine(head, { ...line, spoken: line.spoken + 1 });
+      const now = lines.get(head);
+      if (!now) return;
+      if (!now.cut && now.held.length) emit(head, now.held);
+      setLine(head, { ...now, held: EMPTY, playing: now.playing || now.held.length > 0, spoken: now.spoken + 1 });
       settle(head);
     };
 
@@ -115,8 +149,8 @@ export function elevenLabsDialogue(s: ElevenLabsSettings, log: BridgeLog, connec
       speak(id, text) {
         const known = lines.get(id);
         if (ended || known?.cut || known?.finished) return;
-        const start: Line = known ?? { buffer: '', sent: 0, spoken: 0, finished: false, cut: false, timer: null };
-        const { phrases, rest } = splitPhrases(start.buffer + text);
+        const start: Line = known ?? newLine();
+        const { phrases, rest } = splitPhrases(start.buffer + text, { firstClause: start.sent === 0 });
         const line = phrases.reduce((l, phrase) => sendSentence(id, l, phrase), { ...start, buffer: rest });
         setLine(id, line);
       },
@@ -133,7 +167,7 @@ export function elevenLabsDialogue(s: ElevenLabsSettings, log: BridgeLog, connec
         const line = lines.get(id);
         if (ended || !line) return;
         if (line.timer) clearTimeout(line.timer);
-        setLine(id, { ...line, buffer: '', cut: true, timer: null });
+        setLine(id, { ...line, buffer: '', cut: true, timer: null, held: EMPTY });
         settle(id);
       },
       close() {

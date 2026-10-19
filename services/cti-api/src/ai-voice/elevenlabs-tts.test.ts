@@ -90,6 +90,14 @@ describe('splitPhrases — whole sentences go to the voice as soon as they are w
     expect(splitPhrases('Hi Jane.')).toEqual({ phrases: [], rest: 'Hi Jane.' });
   });
 
+  it('with firstClause, the first phrase may end at a comma, dash or colon once it has two words; later ones end at sentences', () => {
+    expect(splitPhrases('Got it, so the', { firstClause: true })).toEqual({ phrases: ['Got it,'], rest: 'so the' });
+    expect(splitPhrases('Hi Jane, this is Sam, with GG Homes. ', { firstClause: true })).toEqual({ phrases: ['Hi Jane,', 'this is Sam, with GG Homes.'], rest: '' });
+    expect(splitPhrases('Okay, so the', { firstClause: true })).toEqual({ phrases: [], rest: 'Okay, so the' });
+    expect(splitPhrases('It sold for $250,000 last', { firstClause: true })).toEqual({ phrases: [], rest: 'It sold for $250,000 last' });
+    expect(splitPhrases('Got it, so the')).toEqual({ phrases: [], rest: 'Got it, so the' });
+  });
+
   it('never makes a sentence of punctuation or an emoji alone (it has nothing to say): it goes with the next one', () => {
     expect(splitPhrases('Okay! ! So')).toEqual({ phrases: ['Okay!'], rest: '! So' });
     expect(splitPhrases('Sounds good. 🙂 ')).toEqual({ phrases: ['Sounds good.'], rest: '🙂 ' });

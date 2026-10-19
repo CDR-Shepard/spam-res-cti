@@ -15,21 +15,31 @@ export const ELEVENLABS_WS = 'wss://api.elevenlabs.io/v1';
 export const OUTPUT_FORMAT = 'ulaw_8000';
 const WS_OPEN = 1;
 
-/** A sentence end: . ! or ? (with closing quotes or brackets) and then a space. */
-const SENTENCE_END = /[.!?]["'”’)]*\s+/g;
-/** Not the end of a sentence: a title or street abbreviation, or a spoken pause ("six one nine... five five five"). */
-const NOT_A_SENTENCE_END = /(?:(?<![\p{L}])(?:mr|mrs|ms|dr|st|ave|blvd|rd|jr|sr|vs)\.|\.\.\.|…)$/iu;
-
 /** Text with something to say: a letter or a digit (an emoji or punctuation alone may never come back as audio). */
 export const speakable = (text: string): boolean => /[\p{L}\p{N}]/u.test(text);
 
-/** Whole sentences ready to speak, and the text still being written; a sentence with nothing to say goes with the next. */
-export function splitPhrases(buffer: string): { phrases: string[]; rest: string } {
+/** A break: a sentence end (. ! ?) or a clause end (, ; : and dashes), with closing quotes or brackets, then a space. */
+const BREAK = /([.!?]|[,;:—–])["'”’)]*\s+/g;
+/** The first words may go out at a clause end once there are this many (a lone "Okay," waits for more). */
+const FIRST_CLAUSE_MIN_WORDS = 2;
+const words = (text: string): number => text.split(/\s+/).filter(speakable).length;
+/** Not the end of a sentence: a title or street abbreviation, or a spoken pause ("six one nine... five five five"). */
+const NOT_A_SENTENCE_END = /(?:(?<![\p{L}])(?:mr|mrs|ms|dr|st|ave|blvd|rd|jr|sr|vs)\.|\.\.\.|…)$/iu;
+
+/**
+ * Whole sentences ready to speak, and the text still being written; a sentence with nothing to say goes with the next.
+ * With `firstClause` (nothing of the line sent yet), the first phrase may end at a clause end, so the voice starts
+ * on the first words ("Got it,") while the rest of the sentence is still being written.
+ */
+export function splitPhrases(buffer: string, opts: { firstClause?: boolean } = {}): { phrases: string[]; rest: string } {
   const phrases: string[] = [];
   let start = 0;
-  for (const m of buffer.matchAll(SENTENCE_END)) {
+  for (const m of buffer.matchAll(BREAK)) {
     const end = m.index + m[0].trimEnd().length;
     const phrase = buffer.slice(start, end);
+    const sentenceEnd = /[.!?]/.test(m[1] ?? '');
+    const firstClause = opts.firstClause === true && phrases.length === 0 && words(phrase) >= FIRST_CLAUSE_MIN_WORDS;
+    if (!sentenceEnd && !firstClause) continue;
     if (NOT_A_SENTENCE_END.test(phrase) || !speakable(phrase)) continue;
     phrases.push(phrase.trim());
     start = m.index + m[0].length;
