@@ -174,17 +174,35 @@ describe('withExternalVoice — the voice fails before the caller heard the line
   it('the line is deleted and OpenAI is asked again with the same request, in its own voice; the bridge never sees the unheard done', () => {
     voice.send(JSON.stringify({ type: 'response.create', event_id: 'ai-create-1', response: { tool_choice: 'none' } }));
     textResponse();
-    const output = [{ id: 'i1', type: 'message' }, { id: 'f1', type: 'function_call' }];
-    fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'completed', output } });
+    fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'completed', output: [{ id: 'i1', type: 'message' }] } });
     tts.events.failed(new Error('quota_exceeded'));
     expect(sentToOpenAi().slice(1)).toEqual([
       AUDIO,
       { type: 'conversation.item.delete', item_id: 'i1' },
-      { type: 'conversation.item.delete', item_id: 'f1' },
       { type: 'response.create', response: { tool_choice: 'none' } },
     ]);
     expect(types()).not.toContain('response.done');
     expect(types()).not.toContain('response.output_audio_transcript.done');
+  });
+
+  it('a response with a tool call is not asked for again: its unheard line is deleted and its done goes on, so the tool runs once', () => {
+    textResponse();
+    const output = [{ id: 'i1', type: 'message' }, { id: 'f1', type: 'function_call', name: 'mark_do_not_call' }];
+    fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'completed', output } });
+    tts.events.failed(new Error('x'));
+    expect(sentToOpenAi()).toEqual([AUDIO, { type: 'conversation.item.delete', item_id: 'i1' }]);
+    expect(types().at(-1)).toBe('response.done');
+    expect(got.at(-1)).toMatchObject({ response: { output } });
+    expect(types()).not.toContain('response.output_audio_transcript.done');
+  });
+
+  it('the caller cuts in before OpenAI has ended the unheard response: it is not asked for again, its done goes on as it is', () => {
+    textResponse();
+    tts.events.failed(new Error('x'));
+    voice.send(JSON.stringify({ type: 'response.cancel' }));
+    fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'completed', output: [{ id: 'i1', type: 'message' }] } });
+    expect(sentToOpenAi()).toEqual([AUDIO, { type: 'response.cancel' }]);
+    expect(types().at(-1)).toBe('response.done');
   });
 
   it('still being written: OpenAI is asked again once it has ended that response', () => {

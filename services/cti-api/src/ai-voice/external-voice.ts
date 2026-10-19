@@ -130,16 +130,22 @@ export function withExternalVoice(openai: BridgeSocket, openTts: OpenTts, log: B
     }
   };
 
-  /** After a failure: an unheard line is deleted and OpenAI is asked again, now in its own voice; a cut one just ends. */
+  /**
+   * After a failure, a response the caller heard none of: its lines are deleted and OpenAI is asked again (the same
+   * request), now in its own voice. A response with a tool call goes on as it is, without its lines, so the tool runs
+   * exactly once (the bridge speaks after it, and the goodbye guard asks for a goodbye before an end_call); a cut one
+   * goes on as it is.
+   */
   const replay = (responseId: string, response: Msg, raw: string): void => {
     replays = new Set([...replays].filter((id) => id !== responseId));
     const request = requests.get(responseId) ?? { type: 'response.create' };
     requests = without(requests, responseId);
     if (str(response.status) !== 'completed') return deliver(raw);
-    for (const out of arr(response.output)) {
-      const itemId = str(obj(out).id);
-      if (itemId) tellOpenAi({ type: 'conversation.item.delete', item_id: itemId });
+    const output = arr(response.output).map(obj);
+    for (const line of output.filter((o) => str(o.type) === 'message' && str(o.id))) {
+      tellOpenAi({ type: 'conversation.item.delete', item_id: str(line.id) });
     }
+    if (output.some((o) => str(o.type) === 'function_call')) return deliver(raw);
     tellOpenAi(request);
     log.info({ responseId }, 'ai-voice: the external voice never spoke that line; OpenAI says it again in its own voice');
   };
@@ -251,8 +257,13 @@ export function withExternalVoice(openai: BridgeSocket, openTts: OpenTts, log: B
 
   /** Bridge → OpenAI. */
   const send = (raw: string): void => {
-    const m = failed ? null : parse(raw);
+    const m = parse(raw);
     if (!m) return openai.send(raw);
+    if (failed) {
+      // The caller cut in: an unheard response waiting to be asked for again goes on as it is (the bridge cut it).
+      if (m.type === 'response.cancel') replays = new Set();
+      return openai.send(raw);
+    }
     switch (m.type) {
       case 'response.create': {
         const { event_id: _eventId, ...request } = m;
