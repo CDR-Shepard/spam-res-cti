@@ -1,12 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  ELEVENLABS_FINAL_TIMEOUT_MS,
-  elevenLabsTts,
-  elevenLabsUrl,
-  externalVoiceFor,
-  splitPhrases,
-  type TtsSocket,
-} from './elevenlabs-tts.js';
+import { elevenLabsDialogueUrl } from './elevenlabs-dialogue.js';
+import { ELEVENLABS_FINAL_TIMEOUT_MS, splitPhrases, type TtsSocket } from './elevenlabs-socket.js';
+import { elevenLabsTts, elevenLabsUrl, externalVoiceFor } from './elevenlabs-tts.js';
 import type { TtsEvents, TtsStream } from './external-voice.js';
 import { silentLog } from './testing.js';
 
@@ -246,8 +241,16 @@ describe('externalVoiceFor — the AI_VOICE_TTS switch', () => {
     expect(externalVoiceFor({ ...cfg, AI_VOICE_TTS: 'openai' }, silentLog)).toBeNull();
   });
 
-  it('is the ElevenLabs voice when chosen with a key', () => {
-    expect(externalVoiceFor(cfg, silentLog)).toBeTypeOf('function');
+  it('is the ElevenLabs voice when chosen with a key: v3/v4 models on the dialogue socket, the others on the multi-context one', () => {
+    const urls: string[] = [];
+    const connect = (url: string) => {
+      urls.push(url);
+      return fakeTtsSocket();
+    };
+    const events = { audio: () => {}, done: () => {}, failed: () => {} };
+    externalVoiceFor({ ...cfg, AI_VOICE_ELEVENLABS_MODEL: 'eleven_v4_turbo' }, silentLog, connect)?.(events);
+    externalVoiceFor({ ...cfg, AI_VOICE_ELEVENLABS_MODEL: 'eleven_flash_v2_5' }, silentLog, connect)?.(events);
+    expect(urls).toEqual([elevenLabsDialogueUrl('eleven_v4_turbo'), elevenLabsUrl('v', 'eleven_flash_v2_5')]);
   });
 
   it('falls back to the OpenAI voice, with a warning, when ElevenLabs is chosen without a key', () => {

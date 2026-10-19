@@ -33,7 +33,19 @@ Behind a switch, `AI_VOICE_TTS=elevenlabs` (default `openai` = today, byte for b
 - Known gap: two spoken lines in one response may overlap (rare; logged as a warning).
 - Applies to outbound and inbound calls (same bridge). The voicemail message is unchanged (it is a Twilio `<Say>`).
 
-## How the voice is fed (`elevenlabs-tts.ts`)
+## Which ElevenLabs socket (measured live 2026-10-19)
+ElevenLabs serves its v3/v4 models (eleven_v4_turbo, the ear test's) only on the **text-to-dialogue** socket
+(`elevenlabs-dialogue.ts`), and the v2 models (eleven_flash_v2_5, eleven_turbo_v2_5) only on the **multi-context
+text-to-speech** socket (`elevenlabs-tts.ts`); `externalVoiceFor` picks by model. Both take `ulaw_8000`; first audio
+after a flushed sentence ~0.24 s (v4 turbo, dialogue) and ~0.25–0.30 s (flash v2.5, multi-context). Shared socket
+handling and sentence cutting live in `elevenlabs-socket.ts`.
+
+The dialogue socket has no contexts and no way to stop a line: audio comes back in the order sentences were sent, each
+followed by `is_final_audio_for_turn`, so a line is done when it is finished and each of its sentences is back; a cut
+line's remaining audio is dropped as it arrives (the next line waits for it to drain: ~0.25 s measured). It names the
+voice in its first message, and closes after 20 s without a message, so a keep-alive goes every 10 s.
+
+## How the voice is fed (multi-context socket, `elevenlabs-tts.ts`)
 - One socket per call, opened when the call starts so the opener has no connect delay; one context per agent line
   (the OpenAI item id), first message carrying the voice settings from the ear test (stability 0.5, similarity 0.75).
 - Each sentence goes out as soon as it is written, with `flush` (ElevenLabs' advice for agents), so the first sentence
@@ -49,7 +61,7 @@ Behind a switch, `AI_VOICE_TTS=elevenlabs` (default `openai` = today, byte for b
 - `AI_VOICE_TTS` = `openai` | `elevenlabs` (default `openai`). `elevenlabs` without `ELEVENLABS_API_KEY` falls back to
   `openai` with a warning (a typo must not take calls down).
 - `ELEVENLABS_API_KEY` (secret), `AI_VOICE_ELEVENLABS_VOICE` (default Siren), `AI_VOICE_ELEVENLABS_MODEL` (default
-  `eleven_v4_turbo`, the model of the ear test; the latency spike confirms it on the socket, else `eleven_flash_v2_5`).
+  `eleven_v4_turbo`, the model of the ear test; `eleven_flash_v2_5` is the tested alternative).
 
 ## Not in this change
 - Swapping the brain to Claude (what the owner heard in the browser test): a later step.
