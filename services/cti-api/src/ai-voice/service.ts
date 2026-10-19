@@ -74,7 +74,6 @@ export interface StartInput {
 const ACTIVE_CALL_WINDOW_MS = 60 * 60 * 1000;
 /** Registry entries expire after the longest a call can last, plus margin (inbound calls too: inbound-call.ts). */
 export const REGISTRY_MARGIN_SECONDS = 30 + 60 + 300;
-const FALLBACK_TIME_ZONE = 'America/Chicago';
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -98,11 +97,6 @@ export function aiGateDeps(store: AiCallStore, base: GateDeps = realGateDeps): G
   };
 }
 
-/** "Monday 4:12 PM" in the recipient's zone (from the area code, as the dialer's calling hours derive it). */
-export function localTimeFor(e164: string, now: Date): string {
-  const timeZone = timezoneForNumber(e164)?.timezone ?? FALLBACK_TIME_ZONE;
-  return new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'long', hour: 'numeric', minute: '2-digit' }).format(now);
-}
 
 async function companyName(i: StartInput): Promise<string> {
   try {

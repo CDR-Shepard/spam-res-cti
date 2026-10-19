@@ -116,7 +116,7 @@ describe('runStreamSession — the start frame', () => {
       maxCallMs: 600_000,
     });
     expect(captured?.opts.instructions).toContain('an AI assistant calling for GG Homes on a recorded line');
-    expect(captured?.opts.instructions).toContain('Monday 11:00 AM');
+    expect(captured?.opts.instructions).toContain('Monday, October 5, 2026, 11:00 AM');
     expect(bridge.start).toHaveBeenCalledTimes(1);
     expect(store.rows.get(ID)).toMatchObject({ status: 'in_progress', startedAt: NOW });
     expect(getActiveCall(ID)?.bridge).toBe(bridge);
@@ -150,7 +150,7 @@ describe('runStreamSession — the start frame', () => {
   it('Part 6 B: a practice call rings a Chicago test number but says the seller\'s (the record\'s San Diego) local time', async () => {
     registerActiveCall(activeEntry({ aiCallId: ID, callSid: CALL_SID, toE164: '+15125550111', isTest: true, localTimeE164: '+16195550100' }));
     expect(await begin()).toBe('started');
-    expect(captured?.opts.instructions).toContain('Their local time right now: Monday 11:00 AM.');
+    expect(captured?.opts.instructions).toContain('Their local time right now: Monday, October 5, 2026, 11:00 AM.');
   });
 
   it('a bad token closes the stream and hangs up, and touches no row', async () => {
@@ -471,7 +471,7 @@ describe('runStreamSession — the org\'s saved instructions', () => {
   it('the session instructions are the saved template rendered for this call', async () => {
     withTemplate('Hello {{first_name}}, this is {{agent_name}} from {{company_name}}. It is {{local_time}}.');
     expect(await begin()).toBe('started');
-    expect(captured?.opts.instructions).toBe('Hello Jane, this is Alex from GG Homes. It is Monday 11:00 AM.');
+    expect(captured?.opts.instructions).toBe('Hello Jane, this is Alex from GG Homes. It is Monday, October 5, 2026, 11:00 AM.');
     expect(warn).not.toHaveBeenCalled();
   });
 

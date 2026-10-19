@@ -33,7 +33,7 @@ import { INBOUND_TOOLS, buildInboundInstructions, buildInstructions, toolsFor, t
 import { phoneForms, promptSlots } from './prompt-context.js';
 import { logTemplateError } from './prompt-saved.js';
 import { claimClose, getActiveCall, updateActiveCall, type ActiveAiCall, type ActiveBridge } from './registry.js';
-import { localTimeFor } from './service.js';
+import { localTimeFor } from './local-time.js';
 import { finalizeAiCall } from './service-finalize.js';
 import { handleToolCall, type ToolEffects } from './service-tools.js';
 import type { AiCallStatus, AiCallStore } from './store.js';

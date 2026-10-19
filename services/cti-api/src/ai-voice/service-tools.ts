@@ -28,6 +28,7 @@ import { END_CALL_OUTCOMES, INBOUND_TOOLS, OUTBOUND_TOOL_NAMES, QUALIFICATION_FI
 import type { BridgeLog, ToolResult } from './bridge.js';
 import { UNKNOWN_TOOL } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
+import { callbackAtFromLocal, recipientTimeZone } from './local-time.js';
 import { bookAppointment, storeBooking } from './service-booking.js';
 import type { AiCallOutcome, AiCallStore } from './store.js';
 import { reformatSummary } from './summary.js';
@@ -56,7 +57,8 @@ export interface ToolEffects {
   /** Opt the number out (idempotent) and record the outcome. Throws if the opt-out cannot be written. */
   markDoNotCall(ctx: ToolCtx, note: string): Promise<void>;
   saveQualification(ctx: ToolCtx, fields: Record<string, string>): Promise<void>;
-  scheduleCallback(ctx: ToolCtx, req: { when: string; note: string }): Promise<void>;
+  /** `when` = their words; `at` = the agreed local "YYYY-MM-DDTHH:MM" when a day was agreed. */
+  scheduleCallback(ctx: ToolCtx, req: { when: string; note: string; at?: string }): Promise<void>;
   /**
    * A transfer rang out or could not be placed: make sure someone calls them
    * back. `finalized`: the row was already closed (the status callback won the
@@ -89,6 +91,8 @@ const SUMMARY_MAX = 2000;
 const QUALIFICATION_MAX = 500;
 const CALLER_NOTES_MAX = 1000;
 const WHEN_MAX = 200;
+/** "YYYY-MM-DDTHH:MM" plus slack for a model that adds seconds or a zone (refused, but logged whole). */
+const AT_MAX = 40;
 const NOTE_MAX = 500;
 const WRONG_NUMBER = /wrong\s*number/i;
 /** The summary line a transfer that did not connect leaves (summary.ts carries it through rewrites). */
@@ -149,7 +153,9 @@ export const defaultToolEffects: ToolEffects = {
     await ctx.store.mergeQualification(ctx.aiCallId, fields);
   },
   async scheduleCallback(ctx, req) {
-    await ctx.store.update(ctx.aiCallId, { callbackAt: parseCallbackAt(req.when) });
+    const agreed = req.at ? callbackAtFromLocal(req.at, recipientTimeZone(ctx.toE164), ctx.now()) : null;
+    if (req.at && !agreed) ctx.log.warn({ aiCallId: ctx.aiCallId, at: req.at }, 'ai-voice: callback time not usable; kept as words');
+    await ctx.store.update(ctx.aiCallId, { callbackAt: agreed ?? parseCallbackAt(req.when) });
     await ctx.store.appendSummary(ctx.aiCallId, `Callback requested: ${req.when}${req.note ? ` — ${req.note}` : ''}`);
   },
   async transferFailed(ctx, info) {
@@ -333,6 +339,7 @@ export async function handleToolCall(name: ToolName, args: unknown, env: ToolEnv
       await effects.scheduleCallback(ctx, {
         when: text(field(args, 'when'), WHEN_MAX),
         note: text(field(args, 'note'), NOTE_MAX),
+        ...(text(field(args, 'at'), AT_MAX) ? { at: text(field(args, 'at'), AT_MAX) } : {}),
       });
       return { output: 'scheduled', then: 'continue' };
     case 'book_appointment':

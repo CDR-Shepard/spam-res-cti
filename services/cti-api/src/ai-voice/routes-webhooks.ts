@@ -24,7 +24,7 @@ import type { BridgeLog } from './bridge.js';
 import { voicemailText } from './prompt.js';
 import { logTemplateError } from './prompt-saved.js';
 import { claimClose, getActiveCall } from './registry.js';
-import { localTimeFor } from './service.js';
+import { localTimeFor } from './local-time.js';
 import { finalizeAiCall, isTerminalCallStatus, mapCallStatus, type AfterCall } from './service-finalize.js';
 import type { ToolCtx, ToolEffects } from './service-tools.js';
 import type { AiCallRow, AiCallStore } from './store.js';

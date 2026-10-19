@@ -450,6 +450,14 @@ describe('AI_CALL_TOOLS', () => {
     expect((tool('schedule_callback').parameters as { required: string[] }).required).toEqual(['when', 'note']);
   });
 
+  it('schedule_callback takes an optional agreed local time, YYYY-MM-DDTHH:MM, worked out from their local date', () => {
+    const p = tool('schedule_callback').parameters as { properties: Record<string, { type: string; description: string }> };
+    expect(Object.keys(p.properties)).toEqual(['when', 'at', 'note']);
+    expect(p.properties.at?.type).toBe('string');
+    expect(p.properties.at?.description).toMatch(/YYYY-MM-DDTHH:MM/);
+    expect(p.properties.at?.description).toMatch(/local date and time/);
+  });
+
   it('save_qualification has eight optional string fields', () => {
     const p = tool('save_qualification').parameters as {
       required?: string[];

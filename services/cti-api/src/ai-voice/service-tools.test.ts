@@ -235,6 +235,25 @@ describe('save_qualification and schedule_callback', () => {
     expect(store.rows.get(ID)?.callbackAt).toBeNull();
     expect(store.rows.get(ID)?.summary).toBe('Callback requested: Thursday after 5 PM');
   });
+
+  it('the agreed local time (`at`) is read in the zone of the number dialed; the words stay in the summary', async () => {
+    await run('schedule_callback', { when: 'Thursday after 5 PM', at: '2026-10-08T17:00', note: 'after work' });
+    expect(store.rows.get(ID)?.callbackAt?.toISOString()).toBe('2026-10-09T00:00:00.000Z'); // TO is San Diego, PDT
+    expect(store.rows.get(ID)?.summary).toBe('Callback requested: Thursday after 5 PM — after work');
+  });
+
+  it('an unusable `at` (a past day, a guessed year, not a local time) falls back to the words, with a warning', async () => {
+    const warn = vi.fn();
+    ctx = { ...ctx, log: { ...silentLog, warn } };
+    for (const at of ['2025-10-08T17:00', 'Thursday', '2026-10-08T17:00Z']) {
+      await run('schedule_callback', { when: 'Thursday after 5 PM', at, note: '' });
+      expect(store.rows.get(ID)?.callbackAt).toBeNull();
+    }
+    expect(warn).toHaveBeenCalledTimes(3);
+    expect(warn).toHaveBeenCalledWith({ aiCallId: ID, at: '2025-10-08T17:00' }, 'ai-voice: callback time not usable; kept as words');
+    await run('schedule_callback', { when: '2026-10-07T17:00:00-05:00', at: 'soon', note: '' });
+    expect(store.rows.get(ID)?.callbackAt?.toISOString()).toBe('2026-10-07T22:00:00.000Z');
+  });
 });
 
 describe('the summary keeps what the tools recorded', () => {

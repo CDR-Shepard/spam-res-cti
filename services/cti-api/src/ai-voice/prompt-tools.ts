@@ -141,8 +141,11 @@ export const AI_CALL_TOOLS: RealtimeFunctionTool[] = [
     description: 'Ask the team to call this person back at the time they asked for.',
     parameters: objectSchema(
       {
-        when: str(
-          'When to call back: an ISO 8601 time if exact, else their words relative to their local time (e.g. "Thursday after 5 PM").',
+        when: str('When to call back, in their words (e.g. "Thursday after 5 PM").'),
+        at: str(
+          'The day and time you agreed, in their local time, as YYYY-MM-DDTHH:MM (e.g. 2026-10-08T17:00 for Thursday the 8th at 5 PM). ' +
+            'Work the date out from their local date and time in your instructions. For a part of the day, use its start: ' +
+            'morning 09:00, afternoon 13:00, evening 17:00. Leave it out only if no day was agreed.',
         ),
         note: str('Anything the rep should know for the callback.'),
       },

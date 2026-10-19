@@ -98,13 +98,20 @@ describe('aiCallTaskInput', () => {
 });
 
 describe('callbackTaskInput', () => {
-  it('a scheduled callback: dated the callback day, open, says when', () => {
-    const r = row({ outcome: 'qualified_callback', callbackAt: new Date('2026-10-08T00:00:00Z'), summary: 'x\nCallback requested: Tuesday 5 PM — after work' });
+  it('a scheduled callback with an agreed time: dated the callback day, open, the exact time in the prospect’s zone', () => {
+    const r = row({ outcome: 'qualified_callback', callbackAt: new Date('2026-10-08T00:00:00Z'), summary: 'x\nCallback requested: Wednesday 5 PM — after work' });
     const input = callbackTaskInput(r, { whoId: LEAD }, SUMMARY, new Date('2026-10-06T03:00:00Z'));
-    expect(input.subject).toBe('AI call: callback Tuesday 5 PM');
+    expect(input.subject).toBe('AI call: callback Wed, Oct 7, 5:00 PM');
     expect(input.activityDate).toBe('2026-10-07');
     expect(input.customFields).toMatchObject({ Status: CALLBACK_TASK_STATUS });
     expect(input.description).toBe(`${SUMMARY}\nTranscript in CTI: AI call ${ID}`);
+  });
+
+  it('a callback in words only: says the words, dated today', () => {
+    const r = row({ outcome: 'qualified_callback', callbackAt: null, summary: 'Callback requested: sometime next spring — after tax season' });
+    const input = callbackTaskInput(r, { whoId: LEAD }, SUMMARY, new Date('2026-10-06T03:00:00Z'));
+    expect(input.subject).toBe('AI call: callback sometime next spring');
+    expect(input.activityDate).toBe('2026-10-05');
   });
 
   it('an exact ISO time reads as words in the prospect’s zone', () => {

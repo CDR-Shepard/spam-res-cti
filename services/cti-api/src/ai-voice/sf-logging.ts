@@ -20,15 +20,15 @@
  * reps' talk-time reports sum that field.
  */
 import { eq } from 'drizzle-orm';
-import { timezoneForNumber } from '@cti/firewall';
 import { getDb, schema } from '@cti/db';
-import { ORG_TIMEZONE, orgTodayIso } from '../dialer/org-day.js';
+import { orgTodayIso } from '../dialer/org-day.js';
 import { createCallTask, type CallTaskInput } from '../salesforce/client.js';
 import { buildConnectTaskInput, taskLinks, type TaskLinks } from '../salesforce/dialer-connect-task.js';
 import { isSalesforceAuthError, withTimeout } from '../salesforce/followup-worker.js';
 import { fetchOwnership, mayCreateTaskOn, type OwnershipSnapshot } from '../salesforce/ownership.js';
 import type { BridgeLog } from './bridge.js';
 import { ctiDisposition, outcomeWords } from './outcomes.js';
+import { recipientTimeZone } from './local-time.js';
 import { parseCallbackAt, type ToolEffects } from './service-tools.js';
 import type { AiCallRow, AiCallStore } from './store.js';
 
@@ -87,18 +87,17 @@ export function aiCallTaskInput(row: AiCallRow, links: TaskLinks, summary: strin
   };
 }
 
-/** The callback's calendar day: a date-only request as given, else the time in the prospect's zone. */
+/** The callback's calendar day: a date-only request as given, else the time in the prospect's zone (the zone the agent's local time used). */
 function callbackDay(row: AiCallRow, when: string | null, now: Date): string {
   if (when && DATE_ONLY.test(when)) return when;
-  const tz = timezoneForNumber(row.toE164)?.timezone;
-  return row.callbackAt ? orgTodayIso(row.callbackAt, tz ?? undefined) : orgTodayIso(now);
+  return row.callbackAt ? orgTodayIso(row.callbackAt, recipientTimeZone(row.toE164)) : orgTodayIso(now);
 }
 
-/** An exact ISO time as "Wed, Oct 7, 5:00 PM" in the prospect's zone; anything else as the agent wrote it. */
+/** An exact time (the agreed one, or an ISO `when`) as "Wed, Oct 7, 5:00 PM" in the prospect's zone; else the agent's words. */
 function whenWords(row: AiCallRow, when: string): string {
-  const at = DATE_ONLY.test(when) ? null : parseCallbackAt(when);
+  const at = DATE_ONLY.test(when) ? null : (row.callbackAt ?? parseCallbackAt(when));
   if (!at) return when;
-  const timeZone = timezoneForNumber(row.toE164)?.timezone ?? ORG_TIMEZONE;
+  const timeZone = recipientTimeZone(row.toE164);
   return new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(at);
 }
 

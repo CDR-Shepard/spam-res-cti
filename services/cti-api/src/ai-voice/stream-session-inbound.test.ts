@@ -129,7 +129,7 @@ describe('an inbound call starts with the inbound agent', () => {
   it('a saved inbound template is used, still ending with the line rules', async () => {
     registerActiveCall({ ...inboundEntry(), prompt: { ...inboundEntry().prompt, templates: { instructions: null, voicemail: null, inbound: 'Hi, {{agent_name}} here. It is {{local_time}}.' } } });
     await begin();
-    expect(captured?.opts.instructions).toBe(`Hi, Sam here. It is Friday 11:00 AM.\n\n${RULES}`);
+    expect(captured?.opts.instructions).toBe(`Hi, Sam here. It is Friday, October 16, 2026, 11:00 AM.\n\n${RULES}`);
   });
 
   it('the tools are exactly INBOUND_TOOLS (end_call only: the agent saves nothing during the call) and the opener is the quick inbound one', async () => {

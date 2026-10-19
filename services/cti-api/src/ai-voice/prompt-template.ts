@@ -36,7 +36,7 @@ const YOUR_PROPERTY = text(
   'your_property',
   '"your property at 1234 Oak Street" — or "your property in Tampa" when only the city is known, or just "your property"',
 );
-const LOCAL_TIME = text('local_time', 'the person\'s local day and time when the call starts, e.g. "Tuesday 4:12 PM"');
+const LOCAL_TIME = text('local_time', 'the person\'s local date and time when the call starts, e.g. "Tuesday, October 6, 2026, 4:12 PM"');
 const CALLER_NUMBER = text('caller_number', 'the number the caller is calling from, written like 619-555-0100');
 const CALLBACK_NUMBER = shownWhen(
   'callback_number',
@@ -97,7 +97,7 @@ export const SAMPLE_INPUT: PromptInput = {
   address: '1234 Oak St, Tampa, FL 33601',
   notes: 'Notes: Inherited the house from her mother; roof leaks.\nTask 2026-09-01 — Call: said maybe in spring',
   isTest: false,
-  localTime: 'Tuesday 4:12 PM',
+  localTime: 'Tuesday, October 6, 2026, 4:12 PM',
   callbackNumber: '+15125550100',
   approvedPlan: 'Opener: Remind them we last spoke in the spring about the roof.\n\nQuestions:\n- Is the roof still leaking?',
   returning: true,

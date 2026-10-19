@@ -5,7 +5,7 @@ import type { AppointmentSlot } from '@cti/contracts';
 import { gateAiCall, type AiGateResult, type GateDeps } from './gate.js';
 import type { AiCallRecord } from './record.js';
 import { buildInstructions, voicemailText } from './prompt.js';
-import { aiGateDeps, localTimeFor, startAiCall, type StartDeps } from './service.js';
+import { aiGateDeps, startAiCall, type StartDeps } from './service.js';
 import { clearActiveCalls, getActiveCall } from './registry.js';
 import { CALL_SID, fakeStore, fakeTwilio, silentLog, type FakeStore, type FakeTwilio } from './testing.js';
 import { verifyStreamToken } from './twilio.js';
@@ -214,17 +214,6 @@ describe('aiGateDeps', () => {
     const wrapped = aiGateDeps(store, base);
     expect(await wrapped.dailyDialCount(db, 'o1', TO, NOW)).toBe(3);
     expect(wrapped.blockedTargets).toBe(base.blockedTargets);
-  });
-});
-
-describe('localTimeFor', () => {
-  it('formats the recipient-local weekday and time from the area code', () => {
-    expect(localTimeFor('+16195550100', NOW)).toBe('Monday 11:00 AM'); // San Diego, PDT
-    expect(localTimeFor('+12125550100', NOW)).toBe('Monday 2:00 PM'); // New York, EDT
-  });
-
-  it('falls back to Central time for an unmapped number', () => {
-    expect(localTimeFor('+442071234567', NOW)).toBe('Monday 1:00 PM');
   });
 });
 
