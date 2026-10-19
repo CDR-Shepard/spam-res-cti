@@ -29,6 +29,22 @@ describe('spokenFirstName', () => {
     }
   });
 
+  it('a note that the person died means no name at all: the agent must never ask for them', () => {
+    for (const gone of ['John (deceased)', 'Mary - Deceased', 'Late John Smith', "John (dec'd)", 'Robert Estate', 'John (passed)', 'Mary probate']) {
+      expect(spokenFirstName(gone)).toBeNull();
+    }
+  });
+
+  it('a placeholder, a company or a flag is not a name', () => {
+    for (const junk of ['Homeowner', 'Current Residents', 'Occupants', 'Tenant', 'Seller', 'None', 'NA', 'N/A', 'TBD', 'Test', 'Wrong Number', 'Do Not Call', 'DNC', 'Sir/Madam', 'Smith Properties', 'Acme Investments', 'Bay Realty', 'Oak Holdings', 'First National Bank']) {
+      expect(spokenFirstName(junk)).toBeNull();
+    }
+  });
+
+  it('a comma makes the order unclear ("Smith, John"): no name rather than a guess', () => {
+    expect(spokenFirstName('Smith, John')).toBeNull();
+  });
+
   it('an initial alone is not a name; empty is null', () => {
     for (const none of ['J', 'J.', 'j', '', '   ', null, undefined]) expect(spokenFirstName(none)).toBeNull();
   });

@@ -5,10 +5,16 @@
  * asking for the owner of the street, which is what the prompt does without a name.
  */
 
+/**
+ * Anywhere in the field, even in brackets: the person died, or the field is a flag. No name, so the agent never asks
+ * a widow for her late husband. A comma makes the order unclear ("Smith, John"): no name rather than a guess.
+ */
+const NO_NAME_AT_ALL = /,|\b(?:deceased|dec'?d|late|passed|probate|estates?|do not call|dnc|wrong number|n\/a)\b/i;
 /** Where a second person or a note starts: keep what comes before it. */
-const CUT_AT = /\s*(?:\(|\/|,|&|\band\b)/i;
-/** Never part of a person's first name. */
-const NOT_A_NAME = /[\d#@]|\b(?:trust|trustees?|estate|llc|inc|corp|family|owner|unknown|resident|occupant|heirs?|of)\b/i;
+const CUT_AT = /\s*(?:\(|\/|&|\band\b)/i;
+/** Never part of a person's first name: digits, a trust, a placeholder, a company. */
+const NOT_A_NAME =
+  /[\d#@]|\b(?:trusts?|trustees?|llc|inc|corp(?:oration)?|co|company|family|(?:home)?owners?|unknown|residents?|occupants?|tenants?|sellers?|buyers?|heirs?|of|none|na|tbd|test(?:ing)?|wrong|number|propert(?:y|ies)|investments?|investors?|realty|realtors?|holdings?|group|partners?|capital|bank|management|mgmt|homes|sir|madam|customer|client|lead|contact)\b/i;
 /** One or two words of letters, inner apostrophes, hyphens and periods. */
 const NAME = /^\p{L}[\p{L}'’.-]*(?: \p{L}[\p{L}'’.-]*)?$/u;
 /** "M" or "M." beside a name: a middle or leading initial, never said. */
@@ -25,7 +31,8 @@ function nameCase(s: string): string {
 }
 
 export function spokenFirstName(raw: string | null | undefined): string | null {
-  const head = (raw ?? '').split(CUT_AT)[0]?.trim() ?? '';
+  if (!raw || NO_NAME_AT_ALL.test(raw)) return null;
+  const head = raw.split(CUT_AT)[0]?.trim() ?? '';
   if (!head || NOT_A_NAME.test(head)) return null;
   const all = head.split(/\s+/);
   const words = all.length > 1 && all.some((w) => !INITIAL.test(w)) ? all.filter((w) => !INITIAL.test(w)) : all;
