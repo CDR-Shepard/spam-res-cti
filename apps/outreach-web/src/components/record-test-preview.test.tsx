@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { focusManager } from '@tanstack/react-query';
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from '../test/render';
 import { LEAD_ID, OTHER_TEST_ID, PLAN_TEXT, TEST_ID, recordPlan, recordTest } from '../test/record-test-fixtures';
@@ -50,6 +50,25 @@ describe('RecordTestPreview', () => {
     expect(screen.getByText(/with Grant/)).toBeInTheDocument();
     expect(screen.getByText('Tasks: 4')).toBeInTheDocument();
     expect(screen.getByText('This preview cost about $0.05.')).toBeInTheDocument();
+  });
+
+  it('the plan for a text: the message and its length, beside the call plan', async () => {
+    const sms = 'Hi Jane, GG Homes here. We spoke in February about the house on Oak St. Still thinking about selling?';
+    show({ [GET]: recordTest({ plan: recordPlan({ textMessage: sms }) }) });
+    const section = await screen.findByRole('region', { name: 'Text message' }, { timeout: 4000 });
+    expect(within(section).getByText(sms)).toBeInTheDocument();
+    expect(within(section).getByText(`${sms.length} / 140 characters`)).toBeInTheDocument();
+    expect(within(section).queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('a text that fails the plan-text check is flagged, and none drafted says so', async () => {
+    show({ [GET]: recordTest({ plan: recordPlan({ textMessage: 'We can pay 250k cash this week.' }) }) });
+    const section = await screen.findByRole('region', { name: 'Text message' }, { timeout: 4000 });
+    expect(within(section).getByRole('alert')).toHaveTextContent('Check before sending: a price or an amount');
+    cleanup();
+    show({ [GET]: recordTest({ plan: recordPlan({ textMessage: null }) }) });
+    const none = await screen.findByRole('region', { name: 'Text message' }, { timeout: 4000 });
+    expect(within(none).getByText('No text: the plan says not to text this person.')).toBeInTheDocument();
   });
 
   it('no earlier contact: the agent will introduce us', async () => {

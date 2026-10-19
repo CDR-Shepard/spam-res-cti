@@ -167,3 +167,10 @@ describe('pricing', () => {
     expect(costMicros('claude-sonnet-5-5', 1_000, 100)).toBe(1_000 * 2 + 100 * 10);
   });
 });
+
+describe('CALL_PLAN_INPUT_SCHEMA textMessage', () => {
+  it('asks for a text message of at most 140 characters, or null', () => {
+    expect(CALL_PLAN_INPUT_SCHEMA.required).toContain('textMessage');
+    expect((CALL_PLAN_INPUT_SCHEMA.properties as Record<string, unknown>).textMessage).toMatchObject({ type: ['string', 'null'], minLength: 1, maxLength: 140 });
+  });
+});

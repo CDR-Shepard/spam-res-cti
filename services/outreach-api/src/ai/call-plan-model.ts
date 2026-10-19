@@ -2,7 +2,7 @@
  * The call plan port and its Anthropic adapter: one forced tool call (`record_call_plan`)
  * whose input schema mirrors `CallPlan`, validated with zod before anything uses it.
  */
-import { CALL_GOAL_KEYS, CallPlan, DoNotContactCategory, EvidenceSource, PreferredWindow, QUALIFICATION_TOPICS } from '@cti/contracts';
+import { CALL_GOAL_KEYS, CallPlan, DoNotContactCategory, EvidenceSource, PreferredWindow, QUALIFICATION_TOPICS, TEXT_MESSAGE_MAX } from '@cti/contracts';
 import { readToolInput, requestFor, type MessagesClient, type TriageTool, type TriageUsage } from './model.js';
 
 export const CALL_PLAN_MODEL_DEFAULT = 'claude-sonnet-5-5';
@@ -16,7 +16,7 @@ const list = (maxLength: number, maxItems: number, minItems = 0) => ({ type: 'ar
 export const CALL_PLAN_INPUT_SCHEMA: TriageTool['input_schema'] = {
   type: 'object',
   additionalProperties: false,
-  required: ['situationSummary', 'sellingSignals', 'opener', 'goals', 'talkingPoints', 'questions', 'avoid', 'bestTimeToCall', 'doNotContact', 'reengagement', 'stillToLearn'],
+  required: ['situationSummary', 'sellingSignals', 'opener', 'goals', 'talkingPoints', 'questions', 'avoid', 'bestTimeToCall', 'doNotContact', 'reengagement', 'stillToLearn', 'textMessage'],
   properties: {
     situationSummary: { ...text(800), description: 'Three to five plain sentences: who they are, the property, what happened so far, where things stand.' },
     sellingSignals: {
@@ -89,6 +89,12 @@ export const CALL_PLAN_INPUT_SCHEMA: TriageTool['input_schema'] = {
       maxItems: 9,
       items: { type: 'string', enum: [...QUALIFICATION_TOPICS] },
       description: "Only topics from the facts' missing list that this call should learn.",
+    },
+    textMessage: {
+      type: ['string', 'null'],
+      minLength: 1,
+      maxLength: TEXT_MESSAGE_MAX,
+      description: `A first text to this person, at most ${TEXT_MESSAGE_MAX} characters, or null when no text should go to them.`,
     },
   },
 };

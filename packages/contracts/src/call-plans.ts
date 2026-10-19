@@ -81,6 +81,9 @@ export const Reengagement = z.object({
 });
 export type Reengagement = z.infer<typeof Reengagement>;
 
+/** The longest first text a plan may draft (owner, 2026-10-19: "a plan for a SMS (< 140 char)"). */
+export const TEXT_MESSAGE_MAX = 140;
+
 const lines = (maxChars: number, maxItems: number, minItems = 0) => z.array(z.string().trim().min(1).max(maxChars)).min(minItems).max(maxItems);
 
 /** The plan model's output (zod-validated before use) and what a person approves. */
@@ -102,6 +105,11 @@ export const CallPlan = z.object({
   /** Plan 1D. The defaults let plans stored before 1D (call_plans.plan) still parse. */
   reengagement: Reengagement.nullable().default(null),
   stillToLearn: z.array(QualificationTopic).max(9).default([]),
+  /**
+   * A first text message to the person, drafted with the call plan (null: no text should go to them). Optional, so
+   * plans stored before it parse unchanged. A draft for a person to read: nothing sends it.
+   */
+  textMessage: z.string().trim().min(1).max(TEXT_MESSAGE_MAX).nullable().optional(),
 });
 export type CallPlan = z.infer<typeof CallPlan>;
 

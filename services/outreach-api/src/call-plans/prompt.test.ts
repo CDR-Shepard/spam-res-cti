@@ -202,3 +202,14 @@ describe('buildCallPlanPrompt', () => {
     expect(p.user).toContain('Company: GG &lt;Homes&gt; &amp; Co. Today: 2026-10-05.');
   });
 });
+
+describe('CALL_PLAN_SYSTEM_PROMPT textMessage', () => {
+  it('asks for a first text of at most 140 characters, like a personal text (no opt-out line), null when no text should go', () => {
+    const s = CALL_PLAN_SYSTEM_PROMPT;
+    expect(s).toContain('- textMessage:');
+    expect(s).toContain('at most 140 characters');
+    expect(s).toContain('no sign-off or opt-out line');
+    expect(s).not.toContain('Reply STOP');
+    expect(s).toMatch(/textMessage[^\n]*null when/);
+  });
+});

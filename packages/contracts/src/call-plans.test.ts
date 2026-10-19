@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AiConsentStatus, CallPlan, CallPlanVersion, EditableCallPlan, GateWarning, QUALIFICATION_TOPICS, QualificationTopic, Reengagement, ResearchSourceSummary } from './call-plans.js';
+import { AiConsentStatus, CallPlan, CallPlanVersion, EditableCallPlan, GateWarning, QUALIFICATION_TOPICS, QualificationTopic, Reengagement, ResearchSourceSummary, TEXT_MESSAGE_MAX } from './call-plans.js';
 
 export const validPlan = {
   situationSummary: 'Inherited the house in 2024; told a rep in May the roof leaks and the siblings disagree about selling.',
@@ -106,5 +106,23 @@ describe('plan 1D re-engagement fields', () => {
       'motivation', 'timeline', 'condition', 'repairs', 'occupancy', 'price', 'competition', 'mortgage', 'decision_makers',
     ]);
     expect(QUALIFICATION_TOPICS).toBe(QualificationTopic.options);
+  });
+});
+
+describe('textMessage (a first text to the person, shown beside the call plan)', () => {
+  it('is optional: a plan without one parses without it', () => {
+    expect(CallPlan.parse(validPlan)).not.toHaveProperty('textMessage');
+  });
+
+  it('takes up to TEXT_MESSAGE_MAX (140) characters, or null (no text should be sent)', () => {
+    expect(TEXT_MESSAGE_MAX).toBe(140);
+    expect(CallPlan.parse({ ...validPlan, textMessage: 'x'.repeat(140) }).textMessage).toHaveLength(140);
+    expect(CallPlan.parse({ ...validPlan, textMessage: null }).textMessage).toBeNull();
+    expect(CallPlan.safeParse({ ...validPlan, textMessage: 'x'.repeat(141) }).success).toBe(false);
+    expect(CallPlan.safeParse({ ...validPlan, textMessage: '  ' }).success).toBe(false);
+  });
+
+  it('a person may edit it', () => {
+    expect(EditableCallPlan.parse({ ...validPlan, textMessage: 'Hi Jane' }).textMessage).toBe('Hi Jane');
   });
 });

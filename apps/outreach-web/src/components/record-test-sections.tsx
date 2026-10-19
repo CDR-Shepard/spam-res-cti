@@ -1,10 +1,10 @@
-import { contactLabel, lastContactWordsAt, type AppointmentSlot, type CallPlan, type RecordTest } from '@cti/contracts';
+import { agentPlanTextIssues, contactLabel, lastContactWordsAt, TEXT_MESSAGE_MAX, type AppointmentSlot, type CallPlan, type RecordTest } from '@cti/contracts';
 import type { ReactNode } from 'react';
 import { CalendarClock, Circle, TriangleAlert } from 'lucide-react';
 import { StatusBadge } from '@/components/layout/status-badge';
 import { appointmentWords, EVIDENCE_WORDS, GOAL_WORDS, sourceLine, STRENGTH_WORDS, TOPIC_WORDS } from '@/lib/call-words';
 import { DNC_CATEGORY_WORDS } from '@/lib/outreach-words';
-import { costWords, offerNoteWords, RECORD_TEST_CONSENT_WORDS } from '@/lib/record-test-words';
+import { costWords, offerNoteWords, RECORD_TEST_CONSENT_WORDS, TEXT_ISSUE_WORDS } from '@/lib/record-test-words';
 
 const PT = 'America/Los_Angeles';
 const PLAN_TEXT_LABEL = 'The plan text the agent gets';
@@ -30,6 +30,7 @@ export function RecordTestPlan({ test }: { test: RecordTest }) {
           <Section title="Opener">
             <blockquote className="rounded-r-lg border-l-[3px] border-brand bg-brand/10 py-2.5 pr-4 pl-4 text-[15px] leading-7 text-foreground">{plan.opener}</blockquote>
           </Section>
+          <TextMessage plan={plan} />
           <PlanBody plan={plan} />
         </>
       )}
@@ -50,6 +51,32 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
     <section className="space-y-2">
       <h3 className="eyebrow">{title}</h3>
       <div className="leading-6">{children}</div>
+    </section>
+  );
+}
+
+/**
+ * The plan's first text (owner, 2026-10-19), with its length and the same check the agent's plan text passes: a draft
+ * for a person to read, never sent from here. Plans written before it have none and show nothing.
+ */
+function TextMessage({ plan }: { plan: CallPlan }) {
+  if (plan.textMessage === undefined) return null;
+  const text = plan.textMessage;
+  const issues = text === null ? [] : agentPlanTextIssues(text, { singleLine: true });
+  return (
+    <section aria-label="Text message" className="space-y-2">
+      <h3 className="eyebrow">Text message</h3>
+      {text === null ? (
+        <p className="text-sm text-muted-foreground">No text: the plan says not to text this person.</p>
+      ) : (
+        <div className="space-y-1.5">
+          <blockquote className="rounded-r-lg border-l-[3px] border-brand bg-brand/10 py-2.5 pr-4 pl-4 text-[15px] leading-7 text-foreground">{text}</blockquote>
+          <p className="text-xs text-muted-foreground tabular-nums">{`${text.length} / ${TEXT_MESSAGE_MAX} characters`}</p>
+          {issues.length > 0 && (
+            <p role="alert" className="text-sm font-medium text-destructive">{`Check before sending: ${issues.map((i) => TEXT_ISSUE_WORDS[i]).join(', ')}`}</p>
+          )}
+        </div>
+      )}
     </section>
   );
 }

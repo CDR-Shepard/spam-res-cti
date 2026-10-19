@@ -1,4 +1,4 @@
-import type { AiConsentStatus, RecordTestError, RecordTestStatus } from '@cti/contracts';
+import type { AgentPlanIssue, AiConsentStatus, RecordTestError, RecordTestStatus } from '@cti/contracts';
 import { ApiRequestError } from './api';
 import { CONSENT_WORDS } from './call-words';
 import { errorText, wordFor } from './outreach-words';
@@ -72,3 +72,16 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function recordTestSearch(search: Record<string, unknown>): { id?: string } {
   return typeof search.id === 'string' && UUID.test(search.id) ? { id: search.id } : {};
 }
+
+/** Why a plan's draft text failed the plan-text check, in a reader's words. */
+export const TEXT_ISSUE_WORDS: Readonly<Record<AgentPlanIssue, string>> = {
+  money: 'a price or an amount',
+  offer: 'offer wording',
+  human_claim: 'a claim to be human',
+  disclosure_skip: 'skipping the AI disclosure',
+  url: 'a web address',
+  angle_bracket: 'a < or > sign',
+  control_char: 'a hidden or control character',
+  disallowed_char: 'an emoji, a symbol or a look-alike letter',
+  line_break: 'a line break',
+};
