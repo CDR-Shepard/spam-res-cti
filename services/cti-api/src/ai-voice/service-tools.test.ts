@@ -255,6 +255,11 @@ describe('save_qualification and schedule_callback', () => {
     expect(store.rows.get(ID)?.callbackAt?.toISOString()).toBe('2026-10-07T22:00:00.000Z');
   });
 
+  it('a date with no time is 9 AM their time that day, not midnight UTC (the evening before in the US)', async () => {
+    await run('schedule_callback', { when: '2026-10-08', note: '' });
+    expect(store.rows.get(ID)?.callbackAt?.toISOString()).toBe('2026-10-08T16:00:00.000Z');
+  });
+
   it('an exact time in `when` with no zone is their local time, never the server\'s', async () => {
     for (const when of ['2026-10-08T17:00', '2026-10-08T17:00:00']) {
       await run('schedule_callback', { when, note: '' });

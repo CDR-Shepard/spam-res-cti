@@ -112,6 +112,9 @@ const OFFERED: Readonly<Record<'outbound' | 'inbound', ReadonlySet<string>>> = {
 const ISO_8601 = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2}))?$/;
 /** A date and time with no zone, as an agent writes the time it agreed: it is the person's local time. */
 const LOCAL_WHEN = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(:\d{2}(\.\d{1,3})?)?$/;
+/** A day with no time: the callback is that morning, their time, never midnight UTC (the evening before in the US). */
+const DATE_ONLY_WHEN = /^\d{4}-\d{2}-\d{2}$/;
+const DATE_ONLY_LOCAL_TIME = '09:00';
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const field = (args: unknown, key: string): unknown =>
@@ -128,8 +131,8 @@ export function parseCallbackAt(when: string): Date | null {
 }
 
 /**
- * The callback's instant, in the zone the agent's clock used: the agreed local `at`, else an exact `when` (one with
- * no zone is their local time), else null. An unusable `at` is logged and the words are kept.
+ * The callback's instant, in the zone the agent's clock used: the agreed local `at`, else an exact `when` (a time with
+ * no zone is their local time, a bare date is 9 AM that day), else null. An unusable `at` is logged and the words are kept.
  */
 function callbackAtOf(ctx: ToolCtx, req: { when: string; at?: string }): Date | null {
   const timeZone = recipientTimeZone(ctx.zoneE164 ?? ctx.toE164);
@@ -138,6 +141,7 @@ function callbackAtOf(ctx: ToolCtx, req: { when: string; at?: string }): Date | 
     if (agreed) return agreed;
     ctx.log.warn({ aiCallId: ctx.aiCallId, at: req.at }, 'ai-voice: callback time not usable; kept as words');
   }
+  if (DATE_ONLY_WHEN.test(req.when)) return callbackAtFromLocal(`${req.when}T${DATE_ONLY_LOCAL_TIME}`, timeZone, ctx.now());
   const local = LOCAL_WHEN.exec(req.when);
   return local ? callbackAtFromLocal(local[1]!, timeZone, ctx.now()) : parseCallbackAt(req.when);
 }

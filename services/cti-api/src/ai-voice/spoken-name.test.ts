@@ -41,6 +41,10 @@ describe('spokenFirstName', () => {
     }
   });
 
+  it('a stop word inside a real name (after an apostrophe or hyphen) does not count', () => {
+    for (const name of ["Na'Kia", "Na'Tasha", 'Na-Young', "Le'Na", 'Jo-Na', "Co'Rey", 'Kim Na', "Late'sha"]) expect(spokenFirstName(name)).toBe(name);
+  });
+
   it('a comma makes the order unclear ("Smith, John"): no name rather than a guess', () => {
     expect(spokenFirstName('Smith, John')).toBeNull();
   });

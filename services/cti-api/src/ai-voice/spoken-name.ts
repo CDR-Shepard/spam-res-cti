@@ -5,16 +5,23 @@
  * asking for the owner of the street, which is what the prompt does without a name.
  */
 
+/*
+ * Word edges in these patterns are letter-aware: an apostrophe or hyphen is part of a name ("Na'Kia", "Jo-Na"), unlike
+ * with \b.
+ */
+
 /**
  * Anywhere in the field, even in brackets: the person died, or the field is a flag. No name, so the agent never asks
  * a widow for her late husband. A comma makes the order unclear ("Smith, John"): no name rather than a guess.
  */
-const NO_NAME_AT_ALL = /,|\b(?:deceased|dec'?d|late|passed|probate|estates?|do not call|dnc|wrong number|n\/a)\b/i;
+const NO_NAME_AT_ALL = /,|(?<![\p{L}'’-])(?:deceased|dec'?d|late|passed|probate|estates?|do not call|dnc|wrong number|n\/a)(?![\p{L}'’-])/iu;
 /** Where a second person or a note starts: keep what comes before it. */
 const CUT_AT = /\s*(?:\(|\/|&|\band\b)/i;
+/** "NA" as the whole field is a placeholder; as one word of a name ("Kim Na") it is not. */
+const WHOLE_FIELD_PLACEHOLDER = /^n\.?a\.?$/i;
 /** Never part of a person's first name: digits, a trust, a placeholder, a company. */
 const NOT_A_NAME =
-  /[\d#@]|\b(?:trusts?|trustees?|llc|inc|corp(?:oration)?|co|company|family|(?:home)?owners?|unknown|residents?|occupants?|tenants?|sellers?|buyers?|heirs?|of|none|na|tbd|test(?:ing)?|wrong|number|propert(?:y|ies)|investments?|investors?|realty|realtors?|holdings?|group|partners?|capital|bank|management|mgmt|homes|sir|madam|customer|client|lead|contact)\b/i;
+  /[\d#@]|(?<![\p{L}'’-])(?:trusts?|trustees?|llc|inc|corp(?:oration)?|co|company|family|(?:home)?owners?|unknown|residents?|occupants?|tenants?|sellers?|buyers?|heirs?|of|none|tbd|test(?:ing)?|wrong|number|propert(?:y|ies)|investments?|investors?|realty|realtors?|holdings?|group|partners?|capital|bank|management|mgmt|homes|sir|madam|customer|client|lead|contact)(?![\p{L}'’-])/iu;
 /** One or two words of letters, inner apostrophes, hyphens and periods. */
 const NAME = /^\p{L}[\p{L}'’.-]*(?: \p{L}[\p{L}'’.-]*)?$/u;
 /** "M" or "M." beside a name: a middle or leading initial, never said. */
@@ -31,7 +38,7 @@ function nameCase(s: string): string {
 }
 
 export function spokenFirstName(raw: string | null | undefined): string | null {
-  if (!raw || NO_NAME_AT_ALL.test(raw)) return null;
+  if (!raw || NO_NAME_AT_ALL.test(raw) || WHOLE_FIELD_PLACEHOLDER.test(raw.trim())) return null;
   const head = raw.split(CUT_AT)[0]?.trim() ?? '';
   if (!head || NOT_A_NAME.test(head)) return null;
   const all = head.split(/\s+/);
