@@ -90,6 +90,11 @@ describe('splitPhrases — whole sentences go to the voice as soon as they are w
     expect(splitPhrases('Hi Jane.')).toEqual({ phrases: [], rest: 'Hi Jane.' });
   });
 
+  it('never makes a sentence of punctuation or an emoji alone (it has nothing to say): it goes with the next one', () => {
+    expect(splitPhrases('Okay! ! So')).toEqual({ phrases: ['Okay!'], rest: '! So' });
+    expect(splitPhrases('Sounds good. 🙂 ')).toEqual({ phrases: ['Sounds good.'], rest: '🙂 ' });
+  });
+
   it('does not split after a title or street abbreviation, or inside a pause ("…")', () => {
     expect(splitPhrases('Is this Mr. Smith on Oak St. here? Yes')).toEqual({ phrases: ['Is this Mr. Smith on Oak St. here?'], rest: 'Yes' });
     expect(splitPhrases('six one nine... five five five... one two')).toEqual({ phrases: [], rest: 'six one nine... five five five... one two' });

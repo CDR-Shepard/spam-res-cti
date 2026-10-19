@@ -15,6 +15,7 @@ import {
   OUTPUT_FORMAT,
   connectWs,
   openTtsConnection,
+  speakable,
   splitPhrases,
   type ConnectTts,
   type ElevenLabsSettings,
@@ -101,7 +102,7 @@ export function elevenLabsTts(s: ElevenLabsSettings, log: BridgeLog, connect: Co
         const line = lines.get(id);
         if (ended || !line || line.finished) return;
         const last = line.buffer.trim();
-        if (last) conn.send({ text: `${last} `, context_id: id, flush: true });
+        if (speakable(last)) conn.send({ text: `${last} `, context_id: id, flush: true });
         conn.send({ context_id: id, close_context: true });
         const timer = setTimeout(() => conn.fail(`ElevenLabs gave no final audio for a line in ${ELEVENLABS_FINAL_TIMEOUT_MS} ms`), ELEVENLABS_FINAL_TIMEOUT_MS);
         setLine(id, { buffer: '', finished: true, timer });

@@ -152,6 +152,43 @@ describe('elevenLabsDialogue — speaking lines', () => {
   });
 });
 
+describe('elevenLabsDialogue — text with nothing to say', () => {
+  it('an emoji or punctuation left at the end of a line is never sent; the line is done with its last real sentence', () => {
+    sock().emit('open');
+    tts.speak('i1', 'Sounds good. 🙂');
+    tts.finish('i1');
+    expect(sock().sent.slice(1)).toEqual([sentence('Sounds good. ', true)]);
+    fromServer({ audio: 'A1' });
+    fromServer({ is_final_audio_for_turn: true });
+    expect(calls).toEqual(['audio i1 A1', 'done i1']);
+  });
+});
+
+describe('elevenLabsDialogue — the server closes the socket while a line is going out', () => {
+  it('mid-line (sentences still owed): the voice fails at once, nothing goes to a second socket', () => {
+    sock().emit('open');
+    tts.speak('i1', 'One. Two. ');
+    tts.cancel('i1');
+    sock().readyState = 2; // the server's close frame is in; the close event is not yet
+    tts.speak('i2', 'Next line here. ');
+    expect(calls).toEqual(['failed ElevenLabs socket closing']);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it('between lines: a fresh socket opens (naming the voice first), and the old one is no longer kept alive', () => {
+    vi.useFakeTimers();
+    sock().emit('open');
+    const old = sock();
+    old.readyState = 2;
+    tts.speak('i1', 'Still there? ');
+    expect(sockets).toHaveLength(2);
+    vi.advanceTimersByTime(DIALOGUE_KEEP_ALIVE_MS * 2);
+    expect(old.sent.filter((m) => m.keep_alive)).toEqual([]);
+    sock().emit('open');
+    expect(sock().sent).toEqual([HELLO, sentence('Still there? ', true)]);
+  });
+});
+
 describe('elevenLabsDialogue — when the voice goes wrong', () => {
   it('fails on an error message from the server', () => {
     sock().emit('open');

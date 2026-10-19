@@ -20,15 +20,18 @@ const SENTENCE_END = /[.!?]["'”’)]*\s+/g;
 /** Not the end of a sentence: a title or street abbreviation, or a spoken pause ("six one nine... five five five"). */
 const NOT_A_SENTENCE_END = /(?:(?<![\p{L}])(?:mr|mrs|ms|dr|st|ave|blvd|rd|jr|sr|vs)\.|\.\.\.|…)$/iu;
 
-/** Whole sentences ready to speak, and the text still being written. */
+/** Text with something to say: a letter or a digit (an emoji or punctuation alone may never come back as audio). */
+export const speakable = (text: string): boolean => /[\p{L}\p{N}]/u.test(text);
+
+/** Whole sentences ready to speak, and the text still being written; a sentence with nothing to say goes with the next. */
 export function splitPhrases(buffer: string): { phrases: string[]; rest: string } {
   const phrases: string[] = [];
   let start = 0;
   for (const m of buffer.matchAll(SENTENCE_END)) {
     const end = m.index + m[0].trimEnd().length;
-    if (NOT_A_SENTENCE_END.test(buffer.slice(start, end))) continue;
-    const phrase = buffer.slice(start, end).trim();
-    if (phrase) phrases.push(phrase);
+    const phrase = buffer.slice(start, end);
+    if (NOT_A_SENTENCE_END.test(phrase) || !speakable(phrase)) continue;
+    phrases.push(phrase.trim());
     start = m.index + m[0].length;
   }
   return { phrases, rest: buffer.slice(start) };
@@ -141,6 +144,7 @@ export function openTtsConnection(o: TtsConnectionOptions): TtsConnection {
   };
 
   const open = (): TtsSocket => {
+    stopKeepAlive();
     const sock = o.connect(o.url, { 'xi-api-key': o.apiKey });
     const startedAt = Date.now();
     let opened = false;
@@ -179,6 +183,8 @@ export function openTtsConnection(o: TtsConnectionOptions): TtsConnection {
     send(m) {
       if (ended) return;
       const raw = JSON.stringify(m);
+      // Closing before its close event: what is still owed on it is lost (a failure); idle, a fresh socket takes over.
+      if (socket && socket.readyState > WS_OPEN && o.busy()) return fail('ElevenLabs socket closing');
       const sock = socket && socket.readyState <= WS_OPEN ? socket : open();
       if (sock.readyState === WS_OPEN) sendNow(sock, raw);
       else queue = [...queue, raw];
