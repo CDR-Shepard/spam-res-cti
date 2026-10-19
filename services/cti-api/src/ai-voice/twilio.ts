@@ -31,6 +31,8 @@ const TIME_LIMIT_SLACK_SECONDS = 60;
 const RING_TIMEOUT_SECONDS = 30;
 const SAY_VOICE = 'Polly.Joanna-Neural';
 export const NO_REP_TEXT = "Sorry, our specialist just stepped away — they'll call you right back. Thanks!";
+/** What a test call's caller hears in place of a transfer while AI_VOICE_TEST_TRANSFER=off. */
+export const TEST_TRANSFER_OFF_TEXT = 'Test call: the transfer would ring a rep here. Goodbye.';
 
 /** Domain separator so a stream token can never double as any other SESSION_SECRET HMAC. */
 const TOKEN_CONTEXT = 'ai-voice-stream:';
@@ -109,6 +111,14 @@ export function transferTwiml(i: TransferTwimlInput): string {
 export function noRepTwiml(): string {
   const res = new twilio.twiml.VoiceResponse();
   res.say(sayVoice, NO_REP_TEXT);
+  res.hangup();
+  return res.toString();
+}
+
+/** A test call's transfer while AI_VOICE_TEST_TRANSFER=off: rings no one, says so, then hangs up. */
+export function testTransferOffTwiml(): string {
+  const res = new twilio.twiml.VoiceResponse();
+  res.say(sayVoice, TEST_TRANSFER_OFF_TEXT);
   res.hangup();
   return res.toString();
 }

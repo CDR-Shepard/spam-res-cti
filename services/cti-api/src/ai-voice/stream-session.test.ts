@@ -7,6 +7,7 @@ import { claimClose, clearActiveCalls, getActiveCall, registerActiveCall } from 
 import { finalizeAiCall } from './service-finalize.js';
 import { defaultToolEffects } from './service-tools.js';
 import { runStreamSession, type StreamSessionDeps } from './stream-session.js';
+import { TEST_TRANSFER_OFF_TEXT } from './twilio.js';
 import { activeEntry, CALL_SID, fakeSocket, fakeStore, fakeTwilio, silentLog, type FakeSocket, type FakeStore, type FakeTwilio } from './testing.js';
 import { streamToken } from './twilio.js';
 
@@ -322,6 +323,36 @@ describe('runStreamSession — bridge hooks', () => {
     expect(twiml).toContain('callerId="+16195550000"');
     expect(twiml).not.toContain('client:aitest');
     expect(twiml).toContain('<Identity>rep_u1</Identity>');
+  });
+
+  it('AI_VOICE_TEST_TRANSFER=off: a test call\'s transfer rings no one and hangs up after a short note', async () => {
+    deps.cfg = { ...cfg, AI_VOICE_TEST_TRANSFER: 'off' } as AppConfig;
+    registerActiveCall(activeEntry({ aiCallId: ID, callSid: CALL_SID, isTest: true }));
+    await begin();
+    await captured!.hooks.onTool('transfer_to_rep', { reason: 'interested', summary: 'hot' });
+    await settle();
+    const twiml = twilio.redirects[0]?.twiml ?? '';
+    expect(twiml).toContain(TEST_TRANSFER_OFF_TEXT);
+    expect(twiml).toContain('<Hangup/>');
+    expect(twiml).not.toContain('<Dial');
+  });
+
+  it('AI_VOICE_TEST_TRANSFER=off leaves a real call\'s transfer ringing the rep', async () => {
+    deps.cfg = { ...cfg, AI_VOICE_TEST_TRANSFER: 'off' } as AppConfig;
+    registerActiveCall(activeEntry({ aiCallId: ID, callSid: CALL_SID, isTest: false }));
+    await begin();
+    await captured!.hooks.onTool('transfer_to_rep', { reason: 'interested', summary: 'hot' });
+    await settle();
+    expect(twilio.redirects[0]?.twiml ?? '').toContain('<Identity>rep_u1</Identity>');
+  });
+
+  it('AI_VOICE_TEST_TRANSFER=ring (the default) still rings the starter on a test call', async () => {
+    deps.cfg = { ...cfg, AI_VOICE_TEST_TRANSFER: 'ring' } as AppConfig;
+    registerActiveCall(activeEntry({ aiCallId: ID, callSid: CALL_SID, isTest: true }));
+    await begin();
+    await captured!.hooks.onTool('transfer_to_rep', { reason: 'interested', summary: 'hot' });
+    await settle();
+    expect(twilio.redirects[0]?.twiml ?? '').toContain('<Identity>rep_u1</Identity>');
   });
 });
 

@@ -243,6 +243,11 @@ const schema = z.object({
    * sound lasting AI_VOICE_STOP_MS stops the agent at once, words still stop it too; `words` = the 2026-10-09 gate (rollback).
    */
   AI_VOICE_OVERLAP_JUDGE: z.enum(['sound', 'words']).default('sound'),
+  /**
+   * Who a test or practice call's transfer rings. `ring` = the starter's softphone (the default); `off` = no one: the caller
+   * hears TEST_TRANSFER_OFF_TEXT and the call hangs up. For unattended test runs; real calls always ring the rep.
+   */
+  AI_VOICE_TEST_TRANSFER: z.enum(['ring', 'off']).default('ring'),
   /** Sound judge only: how long the caller must keep talking over the agent to stop it, in ms. Lower = stops sooner, but more "mm-hmm"s stop it. */
   AI_VOICE_STOP_MS: z.coerce.number().int().min(300).max(2000).default(600),
   AI_VOICE_AGENT_NAME: z.string().default('Alex'),

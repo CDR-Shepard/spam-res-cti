@@ -127,7 +127,7 @@ describe('AI voice config', () => {
     'OPENAI_API_KEY', 'AI_VOICE', 'AI_VOICE_MODEL', 'AI_VOICE_REASONING',
     'AI_VOICE_VAD_EAGERNESS', 'AI_VOICE_VOICE', 'AI_VOICE_AGENT_NAME',
     'AI_VOICE_BARGE_IN', 'AI_VOICE_TRANSCRIBE_MODEL', 'AI_VOICE_TURN_DETECTION', 'AI_VOICE_SILENCE_MS',
-    'AI_VOICE_OVERLAP_JUDGE', 'AI_VOICE_STOP_MS', 'AI_VOICE_INBOUND',
+    'AI_VOICE_OVERLAP_JUDGE', 'AI_VOICE_STOP_MS', 'AI_VOICE_INBOUND', 'AI_VOICE_TEST_TRANSFER',
     'AI_VOICE_TEST_NUMBERS', 'AI_VOICE_MAX_CALL_SECONDS', 'ANTHROPIC_API_KEY',
     'AI_SUMMARY_MODEL', 'OUTREACH_KILL_SWITCH',
   ];
@@ -149,11 +149,16 @@ describe('AI voice config', () => {
     expect(cfg.AI_VOICE_SILENCE_MS).toBe(500);
     expect(cfg.AI_VOICE_OVERLAP_JUDGE).toBe('sound');
     expect(cfg.AI_VOICE_STOP_MS).toBe(600);
+    expect(cfg.AI_VOICE_TEST_TRANSFER).toBe('ring');
     expect(cfg.AI_VOICE_TEST_NUMBERS).toBeUndefined();
     expect(cfg.AI_VOICE_MAX_CALL_SECONDS).toBe(600);
     expect(cfg.ANTHROPIC_API_KEY).toBeUndefined();
     expect(cfg.AI_SUMMARY_MODEL).toBe('claude-haiku-4-5-20251001');
     expect(cfg.OUTREACH_KILL_SWITCH).toBe('off');
+  });
+
+  it('AI_VOICE_TEST_TRANSFER=off parses', async () => {
+    expect((await loadWith({ AI_VOICE_TEST_TRANSFER: 'off' })).AI_VOICE_TEST_TRANSFER).toBe('off');
   });
 
   it('empty values are treated as unset', async () => {
@@ -191,6 +196,7 @@ describe('AI voice config', () => {
     await expect(loadWith({ OUTREACH_KILL_SWITCH: '1' })).rejects.toThrow(/OUTREACH_KILL_SWITCH/);
     await expect(loadWith({ AI_VOICE_REASONING: 'extreme' })).rejects.toThrow(/AI_VOICE_REASONING/);
     await expect(loadWith({ AI_VOICE_BARGE_IN: 'sometimes' })).rejects.toThrow(/AI_VOICE_BARGE_IN/);
+    await expect(loadWith({ AI_VOICE_TEST_TRANSFER: 'false' })).rejects.toThrow(/AI_VOICE_TEST_TRANSFER/);
   });
 
   it('the transcriber follows the barge-in mode when unset, so instant alone is the whole rollback', async () => {

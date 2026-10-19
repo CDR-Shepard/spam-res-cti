@@ -37,7 +37,7 @@ import { finalizeAiCall } from './service-finalize.js';
 import { handleToolCall, type ToolEffects } from './service-tools.js';
 import type { AiCallStatus, AiCallStore } from './store.js';
 import { TranscriptBuffer } from './transcript.js';
-import { TRANSFER_RESULT_PATH, callbackUrl, transferTwiml, verifyStreamToken, type AiVoiceTwilio } from './twilio.js';
+import { TRANSFER_RESULT_PATH, callbackUrl, testTransferOffTwiml, transferTwiml, verifyStreamToken, type AiVoiceTwilio } from './twilio.js';
 import { realtimeUrl } from './ws-adapter.js';
 
 /** How long Twilio has to send `start` after the socket opens. */
@@ -255,8 +255,9 @@ function saveTurnStats(aiCallId: string, stats: AiCallTurnStats, deps: StreamSes
     .catch((e: unknown) => deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: turn stats not saved'));
 }
 
-/** The rep sees the prospect's number, name and record, and that this is an AI hand-off. */
+/** The rep sees the prospect's number, name and record, and that this is an AI hand-off. A test call with AI_VOICE_TEST_TRANSFER=off rings no one. */
 function transferFor(entry: ActiveAiCall, cfg: AppConfig, reason: string): string {
+  if (entry.isTest && cfg.AI_VOICE_TEST_TRANSFER === 'off') return testTransferOffTwiml();
   const r = entry.record;
   const name = r ? (r.objectType === 'Opportunity' ? r.firstName : r.name) : 'AI test call';
   return transferTwiml({

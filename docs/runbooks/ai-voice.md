@@ -453,6 +453,8 @@ How it differs from a test call (§5):
 | Consent | not needed | not needed (it never rings the seller) |
 | Salesforce Task, results, write-back | none | none |
 
+**Unattended test runs: `AI_VOICE_TEST_TRANSFER=off`** (@cti/api; default `ring`). A test or practice call's transfer then rings no one: the caller hears "Test call: the transfer would ring a rep here. Goodbye." and the call hangs up, still recorded `qualified_transferred`. Real calls always ring the rep. Only `ring` or `off` is accepted: any other value (`OFF`, `false`, `no`) stops `@cti/api` booting, which also takes down the reps' softphones. Set it while a script or a harness drives test calls (so nobody's softphone rings at night), and delete it afterwards.
+
 A practice call **never books in Salesforce, never converts a Lead and never writes anything**: it claims no touch (so the results never count it and no write-back is queued), and the write-back refuses any `is_test` call before a single Salesforce request. A time it books lands only on `ai_calls.appointment` ("Would have booked …" in the campaign's **Practice calls** list). A practice call is refused a time a real call holds, and never blocks one. The only Salesforce traffic is read-only: the record load in `@cti/api`, and the owner's User and Event reads for the times. "Stop calling me" on a practice call ends it as `do_not_call` without opting your number out (§5).
 
 The campaign page lists the latest 20 practice calls above the results (admins only): time, lead, outcome, "Would have booked: Phone call Wed Oct 7, 11:00 AM" and the transcript. Refusals show in words ("Not placed: …"); cti-api is gated on its test branch (an admin, a number on `AI_VOICE_TEST_NUMBERS`).
@@ -532,7 +534,7 @@ While a call is live its card shows the status and how long it has run ("In prog
 | Answering-machine detection | on | on | **off** (a browser is never a machine) |
 | `calls` row (caps, ceiling, contact history) | written, linked to no record | same | **none**: no phone number was dialed |
 | Caller ID | a claimed `ai_pool` number | same | the org's first usable `ai_pool` number, read only (nothing is claimed) |
-| Transfer | rings your own softphone if it is open | same | same: your CTI softphone if it is open, else the AI says the specialist stepped away |
+| Transfer | rings your own softphone if it is open (no one with `AI_VOICE_TEST_TRANSFER=off`, §16) | same | same: your CTI softphone if it is open, else the AI says the specialist stepped away |
 | Salesforce writes, booking, conversion, opt-out, touch, write-back | none | none | none |
 
 ### The guarantees

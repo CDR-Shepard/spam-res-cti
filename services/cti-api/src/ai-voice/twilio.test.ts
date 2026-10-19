@@ -8,10 +8,12 @@ import {
   streamToken,
   streamTwiml,
   streamWssUrl,
+  testTransferOffTwiml,
   transferTwiml,
   verifyStreamToken,
   voicemailTwiml,
   NO_REP_TEXT,
+  TEST_TRANSFER_OFF_TEXT,
   TRANSFER_TIME_LIMIT_SECONDS,
   type AiVoiceTwilioClient,
 } from './twilio.js';
@@ -88,6 +90,13 @@ describe('transferTwiml', () => {
 });
 
 describe('fixed TwiML', () => {
+  it('testTransferOffTwiml rings no one: a short note, then hang up', () => {
+    expect(testTransferOffTwiml()).toBe(
+      `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna-Neural">${TEST_TRANSFER_OFF_TEXT}</Say><Hangup/></Response>`,
+    );
+    expect(TEST_TRANSFER_OFF_TEXT).toBe('Test call: the transfer would ring a rep here. Goodbye.');
+  });
+
   it('noRepTwiml says the callback promise then hangs up', () => {
     expect(noRepTwiml()).toBe(
       `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna-Neural">${NO_REP_TEXT}</Say><Hangup/></Response>`,
