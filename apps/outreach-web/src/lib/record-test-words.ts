@@ -32,11 +32,6 @@ export function offerNoteWords(note: string | null): string {
   return note ? wordFor(OFFER_NOTE_WORDS, note, 'No times would be offered.') : 'No times would be offered.';
 }
 
-/** "This preview cost about $0.05." */
-export function costWords(micros: number): string {
-  return `This preview cost about $${(micros / 1_000_000).toFixed(2)}.`;
-}
-
 /** A time in the viewer's own zone, e.g. "3:42 PM". */
 export function localTime(iso: string): string {
   return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });

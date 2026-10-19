@@ -4,7 +4,7 @@ import { CalendarClock, Circle, TriangleAlert } from 'lucide-react';
 import { StatusBadge } from '@/components/layout/status-badge';
 import { appointmentWords, EVIDENCE_WORDS, GOAL_WORDS, sourceLine, STRENGTH_WORDS, TOPIC_WORDS } from '@/lib/call-words';
 import { DNC_CATEGORY_WORDS } from '@/lib/outreach-words';
-import { costWords, offerNoteWords, RECORD_TEST_CONSENT_WORDS, TEXT_ISSUE_WORDS } from '@/lib/record-test-words';
+import { offerNoteWords, RECORD_TEST_CONSENT_WORDS, TEXT_ISSUE_WORDS } from '@/lib/record-test-words';
 
 const PT = 'America/Los_Angeles';
 const PLAN_TEXT_LABEL = 'The plan text the agent gets';
@@ -41,7 +41,6 @@ export function RecordTestPlan({ test }: { test: RecordTest }) {
           <ul className="space-y-1 text-xs leading-5 text-muted-foreground" aria-label="Research sources">{test.sources.map((s) => <li key={s.source}>{sourceLine(s)}</li>)}</ul>
         </Section>
       )}
-      <p className="border-t pt-4 text-xs text-muted-foreground tabular-nums">{costWords(test.costMicros)}</p>
     </div>
   );
 }

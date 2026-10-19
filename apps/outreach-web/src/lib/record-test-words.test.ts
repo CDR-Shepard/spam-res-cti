@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiRequestError } from './api';
-import { costWords, offerNoteWords, recordTestErrorText, recordTestSearch } from './record-test-words';
+import { offerNoteWords, recordTestErrorText, recordTestSearch } from './record-test-words';
 
 describe('record test words', () => {
   it('keeps only a uuid ?id=', () => {
@@ -15,10 +15,6 @@ describe('record test words', () => {
     expect(offerNoteWords('booking_off')).toBe('Nobody is on the appointment list, so no times would be offered.');
     expect(offerNoteWords('constructor')).toBe('No times would be offered.');
     expect(offerNoteWords(null)).toBe('No times would be offered.');
-  });
-
-  it('rounds the cost to cents', () => {
-    expect(costWords(41_600)).toBe('This preview cost about $0.04.');
   });
 
   it('a 429 without a readable retryAt keeps the server words; other errors use the common words', () => {
