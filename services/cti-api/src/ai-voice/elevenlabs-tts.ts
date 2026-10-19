@@ -4,7 +4,7 @@
  * context per agent line. Each sentence goes out as soon as it is written (with `flush`), so the first is spoken while
  * the rest is still being written; a line ends with `flush` + `close_context` and is done at ElevenLabs' `isFinal`.
  * The v3/v4 models are served on the text-to-dialogue socket instead (elevenlabs-dialogue.ts); `externalVoiceFor`
- * picks the client from the model.
+ * picks the client from the model. The bridge gets whole 20 ms frames only (phone-audio.ts `wholeFrames`).
  */
 import type { AppConfig } from '../config.js';
 import type { BridgeLog } from './bridge-tools.js';
@@ -21,6 +21,7 @@ import {
   type ElevenLabsSettings,
 } from './elevenlabs-socket.js';
 import type { OpenTts, TtsEvents, TtsStream } from './external-voice.js';
+import { lastFrame, wholeFrames } from './phone-audio.js';
 
 /** The longest ElevenLabs allows (seconds); an idle socket closes after it and the next line reopens it. */
 const INACTIVITY_TIMEOUT_S = 180;
@@ -38,7 +39,11 @@ interface Line {
   /** flush + close_context sent; waiting for `isFinal`. */
   finished: boolean;
   timer: ReturnType<typeof setTimeout> | null;
+  /** Audio short of a whole frame, sent with the next piece (or filled out with silence at the line's end). */
+  carry: Buffer;
 }
+
+const EMPTY = Buffer.alloc(0);
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
@@ -54,6 +59,10 @@ export function elevenLabsTts(s: ElevenLabsSettings, log: BridgeLog, connect: Co
       for (const line of lines.values()) if (line.timer) clearTimeout(line.timer);
     };
 
+    const setLine = (id: string, line: Line): void => {
+      lines = new Map([...lines, [id, line]]);
+    };
+
     const onMessage = (m: Record<string, unknown>): void => {
       if (str(m.error)) return conn.fail(`ElevenLabs error ${str(m.error)}${str(m.message) ? `: ${str(m.message)}` : ''}`);
       const id = str(m.contextId) || str(m.context_id);
@@ -63,10 +72,15 @@ export function elevenLabsTts(s: ElevenLabsSettings, log: BridgeLog, connect: Co
         if (final) cancelled = new Set([...cancelled].filter((c) => c !== id));
         return;
       }
-      if (str(m.audio)) events.audio(id, str(m.audio));
+      const { frames, carry } = wholeFrames(line.carry, Buffer.from(str(m.audio), 'base64'));
+      if (final) {
+        if (line.timer) clearTimeout(line.timer);
+        lines = new Map([...lines].filter(([k]) => k !== id));
+      } else setLine(id, { ...line, carry });
+      if (frames.length) events.audio(id, frames.toString('base64'));
       if (!final) return;
-      if (line.timer) clearTimeout(line.timer);
-      lines = new Map([...lines].filter(([k]) => k !== id));
+      const last = lastFrame(carry);
+      if (last.length) events.audio(id, last.toString('base64'));
       events.done(id);
     };
 
@@ -84,10 +98,6 @@ export function elevenLabsTts(s: ElevenLabsSettings, log: BridgeLog, connect: Co
       },
     });
 
-    const setLine = (id: string, line: Line): void => {
-      lines = new Map([...lines, [id, line]]);
-    };
-
     return {
       speak(id, text) {
         if (ended || cancelled.has(id)) return;
@@ -95,7 +105,7 @@ export function elevenLabsTts(s: ElevenLabsSettings, log: BridgeLog, connect: Co
         if (line?.finished) return;
         if (!line) conn.send({ text: ' ', context_id: id, voice_settings: VOICE_SETTINGS });
         const { phrases, rest } = splitPhrases((line?.buffer ?? '') + text);
-        setLine(id, { buffer: rest, finished: false, timer: null });
+        setLine(id, { buffer: rest, finished: false, timer: null, carry: line?.carry ?? EMPTY });
         for (const phrase of phrases) conn.send({ text: `${phrase} `, context_id: id, flush: true });
       },
       finish(id) {
@@ -105,7 +115,7 @@ export function elevenLabsTts(s: ElevenLabsSettings, log: BridgeLog, connect: Co
         if (speakable(last)) conn.send({ text: `${last} `, context_id: id, flush: true });
         conn.send({ context_id: id, close_context: true });
         const timer = setTimeout(() => conn.fail(`ElevenLabs gave no final audio for a line in ${ELEVENLABS_FINAL_TIMEOUT_MS} ms`), ELEVENLABS_FINAL_TIMEOUT_MS);
-        setLine(id, { buffer: '', finished: true, timer });
+        setLine(id, { ...line, buffer: '', finished: true, timer });
       },
       cancel(id) {
         const line = lines.get(id);

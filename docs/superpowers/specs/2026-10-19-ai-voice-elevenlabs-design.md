@@ -36,9 +36,10 @@ Behind a switch, `AI_VOICE_TTS=elevenlabs` (default `openai` = today, byte for b
 ## Which ElevenLabs socket (measured live 2026-10-19)
 ElevenLabs serves its v3/v4 models (eleven_v4_turbo, the ear test's) only on the **text-to-dialogue** socket
 (`elevenlabs-dialogue.ts`), and the v2 models (eleven_flash_v2_5, eleven_turbo_v2_5) only on the **multi-context
-text-to-speech** socket (`elevenlabs-tts.ts`); `externalVoiceFor` picks by model. Both take `ulaw_8000`; first audio
-after a flushed sentence ~0.24 s (v4 turbo, dialogue) and ~0.25–0.30 s (flash v2.5, multi-context). Shared socket
-handling and sentence cutting live in `elevenlabs-socket.ts`.
+text-to-speech** socket (`elevenlabs-tts.ts`); `externalVoiceFor` picks by model. The multi-context socket sends
+`ulaw_8000`; the dialogue socket sends `pcm_16000`, made phone audio here (below). First audio after a flushed sentence
+~0.24 s (v4 turbo, dialogue) and ~0.25–0.30 s (flash v2.5, multi-context). Shared socket handling and sentence cutting
+live in `elevenlabs-socket.ts`.
 
 The dialogue socket has no contexts and no way to stop a line: audio comes back in the order sentences were sent, each
 followed by `is_final_audio_for_turn`, so a line is done when it is finished and each of its sentences is back; a cut
@@ -56,6 +57,16 @@ voice in its first message, and closes after 20 s without a message, so a keep-a
 - The socket idles out after 180 s (ElevenLabs' maximum); an idle close is not a failure, the next line reconnects. A
   close before it opened (bad key, no credit), while a line is in progress, or an error message fails the voice.
 - The key goes in the `xi-api-key` header, never the URL.
+
+## What the phone gets (after the owner's test calls, 2026-10-19)
+- First call: crackle on Sam's s/t/k sounds and stutters at line starts. The dialogue socket now sends 16 kHz PCM,
+  low-passed at 3.4 kHz and made 8 kHz μ-law here (`phone-audio.ts`); a line's first 250 ms is held and sent as one
+  piece; a line's first words go out at its first comma.
+- Second call: Sam cut in and out on the phone, though the same audio played clean as a file. The OpenAI voice arrives
+  in 400 ms pieces (whole 20 ms phone frames) and plays fine at the same overall burst rate; ElevenLabs' pieces are any
+  size (13 ms to ~1 s). Both clients now hand the bridge whole 20 ms frames only (`wholeFrames`): a piece's part frame
+  waits for the next piece, and a line's last one is filled out with silence (at most 20 ms). If Sam still cuts out,
+  the next step is pacing the frames to Twilio in real time (the fix one OpenAI forum report gives for skipped words).
 
 ## Settings (Railway, @cti/api)
 - `AI_VOICE_TTS` = `openai` | `elevenlabs` (default `openai`). `elevenlabs` without `ELEVENLABS_API_KEY` falls back to

@@ -3,6 +3,7 @@ import { elevenLabsDialogueUrl } from './elevenlabs-dialogue.js';
 import { ELEVENLABS_FINAL_TIMEOUT_MS, splitPhrases, type TtsSocket } from './elevenlabs-socket.js';
 import { elevenLabsTts, elevenLabsUrl, externalVoiceFor } from './elevenlabs-tts.js';
 import type { TtsEvents, TtsStream } from './external-voice.js';
+import { PHONE_FRAME_BYTES, lastFrame } from './phone-audio.js';
 import { silentLog } from './testing.js';
 
 interface FakeTtsSocket extends TtsSocket {
@@ -151,7 +152,50 @@ describe('elevenLabsTts — speaking a line', () => {
     tts.finish('i1');
     fromServer({ audio: 'AAAA', contextId: 'i1', alignment: null });
     fromServer({ audio: null, isFinal: true, contextId: 'i1' });
-    expect(calls).toEqual(['audio i1 AAAA', 'done i1']);
+    expect(calls).toEqual([`audio i1 ${lastFrame(Buffer.from('AAAA', 'base64')).toString('base64')}`, 'done i1']);
+  });
+
+  it('hands on whole 20 ms frames only: a part frame waits for the next piece, the last one is filled out with silence', () => {
+    sock().emit('open');
+    tts.speak('i1', 'Hi. ');
+    tts.finish('i1');
+    const voice = Buffer.from(Array.from({ length: 379 }, (_, i) => i % 255));
+    fromServer({ audio: voice.toString('base64'), contextId: 'i1' });
+    fromServer({ isFinal: true, contextId: 'i1' });
+    expect(calls).toEqual([
+      `audio i1 ${voice.subarray(0, 2 * PHONE_FRAME_BYTES).toString('base64')}`,
+      `audio i1 ${lastFrame(voice.subarray(2 * PHONE_FRAME_BYTES)).toString('base64')}`,
+      'done i1',
+    ]);
+  });
+
+  it('keeps the part frame across pieces, and takes audio that comes with the final message', () => {
+    sock().emit('open');
+    tts.speak('i1', 'Hi. ');
+    tts.finish('i1');
+    const voice = Buffer.from(Array.from({ length: 630 }, (_, i) => i % 255));
+    const piece = (from: number, to: number) => voice.subarray(from, to).toString('base64');
+    fromServer({ audio: piece(0, 100), contextId: 'i1' }); // nothing whole yet
+    fromServer({ audio: piece(100, 200), contextId: 'i1' }); // one frame, 40 kept
+    fromServer({ audio: piece(200, 330), contextId: 'i1' }); // one frame, 10 kept
+    fromServer({ audio: piece(330, 630), isFinal: true, contextId: 'i1' }); // one frame, then the last 150 filled out
+    const b64 = (b: Buffer) => b.toString('base64');
+    expect(calls).toEqual([
+      `audio i1 ${b64(voice.subarray(0, 160))}`,
+      `audio i1 ${b64(voice.subarray(160, 320))}`,
+      `audio i1 ${b64(voice.subarray(320, 480))}`,
+      `audio i1 ${b64(lastFrame(voice.subarray(480)))}`,
+      'done i1',
+    ]);
+  });
+
+  it("a cut line's part frame is dropped, not played", () => {
+    sock().emit('open');
+    tts.speak('i1', 'Hi Jane. This is');
+    fromServer({ audio: Buffer.alloc(100, 7).toString('base64'), contextId: 'i1' });
+    tts.cancel('i1');
+    fromServer({ isFinal: true, contextId: 'i1' });
+    expect(calls).toEqual([]);
   });
 
   it('cancel closes the line at once and drops anything still coming for it', () => {

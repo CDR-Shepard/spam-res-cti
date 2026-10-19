@@ -11,6 +11,9 @@
  * phone audio here (phone-audio.ts); a line's first quarter second is held and sent as one piece, so a late second
  * chunk can't stutter its start (it arrives ~5 ms after the first, so this costs next to nothing); and a line's first
  * words go out at its first comma, so the voice starts before the first sentence is fully written.
+ *
+ * After the owner's second call (Sam cut in and out on the phone; the same audio was clean as a file): the bridge gets
+ * whole 20 ms frames only, as from the OpenAI voice (phone-audio.ts `wholeFrames`).
  */
 import type { BridgeLog } from './bridge-tools.js';
 import {
@@ -24,7 +27,7 @@ import {
   type ElevenLabsSettings,
 } from './elevenlabs-socket.js';
 import type { OpenTts, TtsEvents, TtsStream } from './external-voice.js';
-import { phoneDownsampler, type PhoneDownsampler } from './phone-audio.js';
+import { lastFrame, phoneDownsampler, wholeFrames, type PhoneDownsampler } from './phone-audio.js';
 
 /** The models ElevenLabs serves only on this socket. */
 export const DIALOGUE_MODEL = /^eleven_v[34]/;
@@ -58,10 +61,23 @@ interface Line {
   /** Phone audio held before the line starts playing. */
   held: Buffer;
   playing: boolean;
+  /** Phone audio short of a whole frame, sent with the next piece (or filled out with silence at the line's end). */
+  carry: Buffer;
 }
 
 const EMPTY = Buffer.alloc(0);
-const newLine = (): Line => ({ buffer: '', sent: 0, spoken: 0, finished: false, cut: false, timer: null, phone: phoneDownsampler(), held: EMPTY, playing: false });
+const newLine = (): Line => ({
+  buffer: '',
+  sent: 0,
+  spoken: 0,
+  finished: false,
+  cut: false,
+  timer: null,
+  phone: phoneDownsampler(),
+  held: EMPTY,
+  playing: false,
+  carry: EMPTY,
+});
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
@@ -83,28 +99,35 @@ export function elevenLabsDialogue(s: ElevenLabsSettings, log: BridgeLog, connec
       lines = new Map([...lines].filter(([k]) => k !== id));
     };
 
-    /** Done when finished and fully spoken; a cut line is just forgotten once its last sentence is back. */
+    const emit = (id: string, ulaw: Buffer): void => {
+      if (ulaw.length) events.audio(id, ulaw.toString('base64'));
+    };
+
+    /** Done when finished and fully spoken (its last part frame filled out); a cut line is just forgotten once its last sentence is back. */
     const settle = (id: string): void => {
       const line = lines.get(id);
       if (!line || line.spoken < line.sent) return;
       if (line.cut) return forget(id, line);
       if (!line.finished) return;
       forget(id, line);
+      emit(id, lastFrame(line.carry));
       events.done(id);
     };
 
-    const emit = (id: string, ulaw: Buffer): void => {
-      if (ulaw.length) events.audio(id, ulaw.toString('base64'));
+    /** The line is kept with its new part frame, then the whole frames of its old one and `ulaw` go out. */
+    const stream = (id: string, line: Line, ulaw: Buffer): void => {
+      const { frames, carry } = wholeFrames(line.carry, ulaw);
+      setLine(id, { ...line, carry });
+      emit(id, frames);
     };
 
     /** Converted, then held until the line has a quarter second (or its sentence ends), then streamed. */
     const play = (id: string, line: Line, pcm: Buffer): void => {
       const ulaw = line.phone.push(pcm);
-      if (line.playing) return emit(id, ulaw);
+      if (line.playing) return stream(id, line, ulaw);
       const held = Buffer.concat([line.held, ulaw]);
       if (held.length < DIALOGUE_START_HOLD_MS * PHONE_BYTES_PER_MS) return setLine(id, { ...line, held });
-      setLine(id, { ...line, held: EMPTY, playing: true });
-      emit(id, held);
+      stream(id, { ...line, held: EMPTY, playing: true }, held);
     };
 
     const onMessage = (m: Record<string, unknown>): void => {
@@ -117,8 +140,9 @@ export function elevenLabsDialogue(s: ElevenLabsSettings, log: BridgeLog, connec
       order = order.slice(1);
       const now = lines.get(head);
       if (!now) return;
-      if (!now.cut && now.held.length) emit(head, now.held);
-      setLine(head, { ...now, held: EMPTY, playing: now.playing || now.held.length > 0, spoken: now.spoken + 1 });
+      const next = { ...now, held: EMPTY, playing: now.playing || now.held.length > 0, spoken: now.spoken + 1 };
+      if (!now.cut && now.held.length) stream(head, next, now.held);
+      else setLine(head, next);
       settle(head);
     };
 
@@ -167,7 +191,7 @@ export function elevenLabsDialogue(s: ElevenLabsSettings, log: BridgeLog, connec
         const line = lines.get(id);
         if (ended || !line) return;
         if (line.timer) clearTimeout(line.timer);
-        setLine(id, { ...line, buffer: '', cut: true, timer: null, held: EMPTY });
+        setLine(id, { ...line, buffer: '', cut: true, timer: null, held: EMPTY, carry: EMPTY });
         settle(id);
       },
       close() {

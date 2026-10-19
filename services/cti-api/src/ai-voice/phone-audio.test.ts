@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fromMuLaw, muLaw, phoneDownsampler } from './phone-audio.js';
+import { PHONE_FRAME_BYTES, fromMuLaw, lastFrame, muLaw, phoneDownsampler, wholeFrames } from './phone-audio.js';
 
 /** 16-bit little-endian PCM at 16 kHz. */
 function pcm16(samples: readonly number[]): Buffer {
@@ -53,5 +53,51 @@ describe('phoneDownsampler — ElevenLabs 16 kHz PCM to the phone line (8 kHz μ
       return part;
     });
     expect(Buffer.concat(parts)).toEqual(whole);
+  });
+});
+
+describe('wholeFrames / lastFrame — Twilio gets whole 20 ms frames only', () => {
+  const bytes = (n: number, from = 0): Buffer => Buffer.from(Array.from({ length: n }, (_, i) => (from + i) % 256));
+
+  it('a 20 ms frame is 160 bytes of phone audio', () => {
+    expect(PHONE_FRAME_BYTES).toBe(160);
+  });
+
+  it('sends the whole frames and keeps the part frame for the next piece', () => {
+    const first = wholeFrames(Buffer.alloc(0), bytes(379));
+    expect(first.frames).toEqual(bytes(320));
+    expect(first.carry).toEqual(bytes(59, 320));
+    const second = wholeFrames(first.carry, bytes(150, 379));
+    expect(second.frames).toEqual(bytes(160, 320));
+    expect(second.carry).toEqual(bytes(49, 480));
+  });
+
+  it('a piece smaller than a frame is all kept', () => {
+    const r = wholeFrames(Buffer.alloc(0), bytes(107));
+    expect(r.frames.length).toBe(0);
+    expect(r.carry).toEqual(bytes(107));
+  });
+
+  it('pieces split anywhere come out as the same audio, in whole frames', () => {
+    const all = bytes(5000);
+    let carry: Buffer = Buffer.alloc(0);
+    const out: Buffer[] = [];
+    let from = 0;
+    for (const to of [1, 107, 379, 2274, 2275, 4000, 5000]) {
+      const r = wholeFrames(carry, all.subarray(from, to));
+      expect(r.frames.length % PHONE_FRAME_BYTES).toBe(0);
+      out.push(r.frames);
+      carry = r.carry;
+      from = to;
+    }
+    expect(Buffer.concat([...out, carry])).toEqual(all);
+  });
+
+  it("a line's last part frame is filled out with silence; nothing left is nothing", () => {
+    const last = lastFrame(bytes(59));
+    expect(last.length).toBe(PHONE_FRAME_BYTES);
+    expect(last.subarray(0, 59)).toEqual(bytes(59));
+    expect(new Set(last.subarray(59))).toEqual(new Set([muLaw(0)]));
+    expect(lastFrame(Buffer.alloc(0)).length).toBe(0);
   });
 });

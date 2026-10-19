@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DIALOGUE_KEEP_ALIVE_MS, DIALOGUE_START_HOLD_MS, elevenLabsDialogue, elevenLabsDialogueUrl } from './elevenlabs-dialogue.js';
 import { ELEVENLABS_FINAL_TIMEOUT_MS, type TtsSocket } from './elevenlabs-socket.js';
 import type { TtsStream } from './external-voice.js';
+import { PHONE_FRAME_BYTES, muLaw } from './phone-audio.js';
 import { silentLog } from './testing.js';
 
 interface FakeTtsSocket extends TtsSocket {
@@ -43,6 +44,8 @@ const HELLO = { voices: [VOICE], voice_settings: { stability: 0.5 } };
 let sockets: FakeTtsSocket[];
 let connects: Array<{ url: string; headers: Record<string, string> }>;
 let calls: string[];
+/** Every piece of phone audio handed on, as bytes. */
+let pieces: Buffer[];
 let tts: TtsStream;
 
 const sock = () => sockets.at(-1) as FakeTtsSocket;
@@ -50,19 +53,25 @@ const fromServer = (m: object) => sock().emit('message', JSON.stringify(m));
 const sentence = (text: string, newTurn = false) => ({ inputs: [{ text, voice_id: VOICE, new_turn: newTurn }], flush: true });
 /** `ms` of 16 kHz PCM from the server (silence), base64 as it arrives; on the phone it is ms × 8 bytes of μ-law. */
 const pcm = (ms: number) => Buffer.alloc(ms * 32).toString('base64');
+/** `ms` of a steady (not silent) 16 kHz PCM level: on the phone, bytes that are not μ-law silence. */
+const loud = (ms: number) => Buffer.alloc(ms * 32, Buffer.from([0x10, 0x27])).toString('base64'); // 10000 LE
 const HOLD = DIALOGUE_START_HOLD_MS;
 
 beforeEach(() => {
   sockets = [];
   connects = [];
   calls = [];
+  pieces = [];
   tts = elevenLabsDialogue({ apiKey: 'xi-test-key', voiceId: VOICE, modelId: 'eleven_v4_turbo' }, silentLog, (url, headers) => {
     connects.push({ url, headers });
     const s = fakeTtsSocket();
     sockets.push(s);
     return s;
   })({
-    audio: (id, b64) => calls.push(`audio ${id} ${Buffer.from(b64, 'base64').length / 8}ms`),
+    audio: (id, b64) => {
+      pieces.push(Buffer.from(b64, 'base64'));
+      calls.push(`audio ${id} ${Buffer.from(b64, 'base64').length / 8}ms`);
+    },
     done: (id) => calls.push(`done ${id}`),
     failed: (err) => calls.push(`failed ${err.message}`),
   });
@@ -162,9 +171,9 @@ describe('elevenLabsDialogue — how a line starts', () => {
     fromServer({ audio: pcm(100) });
     expect(calls).toEqual([]);
     fromServer({ audio: pcm(HOLD) });
-    expect(calls).toEqual([`audio i1 ${100 + HOLD}ms`]);
+    expect(calls).toEqual(['audio i1 340ms']); // 350 ms held: 17 whole frames, 10 ms kept for the next piece
     fromServer({ audio: pcm(50) });
-    expect(calls).toEqual([`audio i1 ${100 + HOLD}ms`, 'audio i1 50ms']);
+    expect(calls).toEqual(['audio i1 340ms', 'audio i1 60ms']);
   });
 
   it('a sentence shorter than the hold plays at its end marker, before the line is done', () => {
@@ -173,7 +182,7 @@ describe('elevenLabsDialogue — how a line starts', () => {
     tts.finish('i1');
     fromServer({ audio: pcm(150) });
     fromServer({ is_final_audio_for_turn: true });
-    expect(calls).toEqual(['audio i1 150ms', 'done i1']);
+    expect(calls).toEqual(['audio i1 140ms', 'audio i1 20ms', 'done i1']); // the last 10 ms filled out to a frame
   });
 
   it('the first words go out at the first comma (two words or more); the rest goes by sentences', () => {
@@ -185,6 +194,78 @@ describe('elevenLabsDialogue — how a line starts', () => {
       sentence('so what has you thinking about selling, is it the taxes? '),
       sentence('Okay, so what is going on? ', true),
     ]);
+  });
+});
+
+describe('elevenLabsDialogue — whole 20 ms frames to the phone (owner call 2026-10-19: Sam cut in and out)', () => {
+  it('hands on whole frames only: a part frame waits for the next piece, the last one is filled out with silence', () => {
+    sock().emit('open');
+    tts.speak('i1', 'This is Sam with GG Homes. ');
+    tts.finish('i1');
+    fromServer({ audio: loud(HOLD) }); // 250 ms: 240 ms out, 10 ms kept
+    fromServer({ audio: loud(13) }); // 23 ms: 20 ms out, 3 ms kept
+    fromServer({ audio: loud(3) }); // 6 ms: kept
+    fromServer({ is_final_audio_for_turn: true });
+    expect(calls).toEqual(['audio i1 240ms', 'audio i1 20ms', 'audio i1 20ms', 'done i1']);
+    expect(pieces.every((p) => p.length % PHONE_FRAME_BYTES === 0)).toBe(true);
+    const last = pieces.at(-1) as Buffer;
+    expect([...last.subarray(0, 48)].every((b) => b !== muLaw(0))).toBe(true); // the 6 ms of voice
+    expect(new Set(last.subarray(48))).toEqual(new Set([muLaw(0)])); // then silence
+  });
+
+  it('a line whose audio ends on a whole frame gets no extra frame', () => {
+    sock().emit('open');
+    tts.speak('i1', 'Okay. ');
+    tts.finish('i1');
+    fromServer({ audio: pcm(400) });
+    fromServer({ is_final_audio_for_turn: true });
+    expect(calls).toEqual(['audio i1 400ms', 'done i1']);
+  });
+
+  it("a line whose last end marker comes before it is finished gets its last part frame at finish", () => {
+    sock().emit('open');
+    tts.speak('i1', 'This is Sam. ');
+    fromServer({ audio: loud(HOLD + 3) }); // 240 ms out, 13 ms kept
+    fromServer({ is_final_audio_for_turn: true });
+    expect(calls).toEqual(['audio i1 240ms']);
+    tts.finish('i1');
+    expect(calls).toEqual(['audio i1 240ms', 'audio i1 20ms', 'done i1']);
+  });
+
+  it("a part frame at a sentence's end goes out with the next sentence's audio", () => {
+    sock().emit('open');
+    tts.speak('i1', 'This is Sam. Do you have a minute? ');
+    tts.finish('i1');
+    fromServer({ audio: loud(HOLD + 3) }); // 240 ms out, 13 ms kept
+    fromServer({ is_final_audio_for_turn: true });
+    fromServer({ audio: loud(27) }); // 13 + 27 = 40 ms: two whole frames, nothing left
+    fromServer({ is_final_audio_for_turn: true });
+    expect(calls).toEqual(['audio i1 240ms', 'audio i1 40ms', 'done i1']);
+  });
+
+  it('two lines keep their own part frames', () => {
+    sock().emit('open');
+    tts.speak('i1', 'Hi Jane. ');
+    tts.finish('i1');
+    tts.speak('i2', 'Do you have a minute? ');
+    tts.finish('i2');
+    fromServer({ audio: loud(HOLD + 3) });
+    fromServer({ is_final_audio_for_turn: true });
+    fromServer({ audio: loud(HOLD + 5) });
+    fromServer({ is_final_audio_for_turn: true });
+    expect(calls).toEqual(['audio i1 240ms', 'audio i1 20ms', 'done i1', 'audio i2 240ms', 'audio i2 20ms', 'done i2']);
+    const voiced = (frame: Buffer) => frame.findIndex((b) => b === muLaw(0));
+    expect(voiced(pieces[1] as Buffer)).toBe(13 * 8); // i1's 13 ms, then silence
+    expect(voiced(pieces[3] as Buffer)).toBe(15 * 8); // i2's own 15 ms
+  });
+
+  it("a cut line's part frame is dropped, not played", () => {
+    sock().emit('open');
+    tts.speak('i1', 'This is Sam with GG Homes. ');
+    fromServer({ audio: pcm(HOLD + 13) }); // 260 ms out, 3 ms kept
+    tts.cancel('i1');
+    fromServer({ is_final_audio_for_turn: true });
+    expect(calls).toEqual(['audio i1 260ms']);
   });
 });
 

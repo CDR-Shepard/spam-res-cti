@@ -76,3 +76,26 @@ export function phoneDownsampler(): PhoneDownsampler {
     },
   };
 }
+
+/**
+ * Twilio plays the phone line in 20 ms frames. The OpenAI voice arrives in whole frames (400 ms pieces); ElevenLabs'
+ * pieces are any size (13 ms to ~1 s), and on the owner's call (2026-10-19) Sam cut in and out on the phone though
+ * the same audio played clean as a file. So the voice hands the bridge whole frames only: a piece's part frame waits
+ * for the next piece, and a line's last one is filled out with silence (at most 20 ms).
+ */
+export const PHONE_FRAME_BYTES = 160;
+const MU_LAW_SILENCE = muLaw(0);
+const EMPTY = Buffer.alloc(0);
+
+/** `carry` (a part frame kept from before) and `audio`, as the whole frames to send now and the part frame to keep. */
+export function wholeFrames(carry: Buffer, audio: Buffer): { frames: Buffer; carry: Buffer } {
+  const all = carry.length ? Buffer.concat([carry, audio]) : audio;
+  const whole = all.length - (all.length % PHONE_FRAME_BYTES);
+  return { frames: all.subarray(0, whole), carry: whole === all.length ? EMPTY : Buffer.from(all.subarray(whole)) };
+}
+
+/** A line's last part frame, filled out with silence (nothing if there is none). */
+export function lastFrame(carry: Buffer): Buffer {
+  if (!carry.length) return EMPTY;
+  return Buffer.concat([carry, Buffer.alloc(PHONE_FRAME_BYTES - carry.length, MU_LAW_SILENCE)]);
+}
