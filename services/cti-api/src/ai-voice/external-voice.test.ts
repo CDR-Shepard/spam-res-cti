@@ -105,6 +105,19 @@ describe('withExternalVoice — the caller cuts in', () => {
     expect(types().at(-1)).toBe('response.done'); // the held done is released by the cut
   });
 
+  it('a cut while OpenAI is still writing: the rest of that line is never spoken, and the done goes once OpenAI ends it', () => {
+    fromOpenAi({ type: 'response.created', response: { id: 'r1' } });
+    fromOpenAi({ type: 'response.output_text.delta', response_id: 'r1', item_id: 'i1', delta: 'Hi Jane. ' });
+    voice.send(JSON.stringify({ type: 'conversation.item.truncate', item_id: 'i1', content_index: 0, audio_end_ms: 200 }));
+    voice.send(JSON.stringify({ type: 'response.cancel' }));
+    fromOpenAi({ type: 'response.output_text.delta', response_id: 'r1', item_id: 'i1', delta: 'This is Sam.' });
+    fromOpenAi({ type: 'response.output_text.done', response_id: 'r1', item_id: 'i1', text: 'Hi Jane. This is Sam.' });
+    expect(tts.calls).toEqual(['speak i1 Hi Jane. ', 'cancel i1']);
+    expect(types()).not.toContain('response.done');
+    fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'cancelled', output: [] } });
+    expect(types().slice(-3)).toEqual(['response.output_audio.done', 'response.output_audio_transcript.done', 'response.done']);
+  });
+
   it('response.cancel while OpenAI is still writing: sent on, and the voice stops; the cancelled done is not held', () => {
     fromOpenAi({ type: 'response.created', response: { id: 'r1' } });
     fromOpenAi({ type: 'response.output_text.delta', response_id: 'r1', item_id: 'i1', delta: 'Hi Jane' });
@@ -128,6 +141,7 @@ describe('withExternalVoice — the caller cuts in', () => {
 describe('withExternalVoice — the voice fails', () => {
   it('switches the session back to OpenAI audio, releases what it held, and from then on passes everything through', () => {
     textResponse();
+    tts.events.audio('i1', 'AAAA'); // the caller heard some of it
     fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'completed', output: [] } });
     tts.events.failed(new Error('socket closed 1008'));
     expect(sentToOpenAi()).toEqual([{ type: 'session.update', session: { type: 'realtime', output_modalities: ['audio'] } }]);
@@ -137,6 +151,101 @@ describe('withExternalVoice — the voice fails', () => {
     expect(sentToOpenAi().at(-1)).toEqual({ type: 'session.update', session: { type: 'realtime', output_modalities: ['audio'] } });
     fromOpenAi({ type: 'response.output_audio.delta', response_id: 'r2', item_id: 'i2', delta: 'CCCC' });
     expect(got.at(-1)).toMatchObject({ type: 'response.output_audio.delta', delta: 'CCCC' });
+  });
+});
+
+describe('withExternalVoice — the voice fails mid-line', () => {
+  it('a line partly heard, before OpenAI ends the response: it is closed out at once, and the done passes straight through later', () => {
+    fromOpenAi({ type: 'response.created', response: { id: 'r1' } });
+    fromOpenAi({ type: 'response.output_text.delta', response_id: 'r1', item_id: 'i1', delta: 'Hi Jane' });
+    tts.events.audio('i1', 'AAAA');
+    tts.events.failed(new Error('x'));
+    expect(types().slice(-2)).toEqual(['response.output_audio.done', 'response.output_audio_transcript.done']);
+    expect(got.at(-1)).toMatchObject({ transcript: 'Hi Jane' });
+    fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'completed', output: [] } });
+    expect(types().at(-1)).toBe('response.done');
+    expect(types().filter((t) => t === 'response.output_audio.done')).toHaveLength(1);
+  });
+});
+
+describe('withExternalVoice — the voice fails before the caller heard the line', () => {
+  const AUDIO = { type: 'session.update', session: { type: 'realtime', output_modalities: ['audio'] } };
+
+  it('the line is deleted and OpenAI is asked again with the same request, in its own voice; the bridge never sees the unheard done', () => {
+    voice.send(JSON.stringify({ type: 'response.create', event_id: 'ai-create-1', response: { tool_choice: 'none' } }));
+    textResponse();
+    const output = [{ id: 'i1', type: 'message' }, { id: 'f1', type: 'function_call' }];
+    fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'completed', output } });
+    tts.events.failed(new Error('quota_exceeded'));
+    expect(sentToOpenAi().slice(1)).toEqual([
+      AUDIO,
+      { type: 'conversation.item.delete', item_id: 'i1' },
+      { type: 'conversation.item.delete', item_id: 'f1' },
+      { type: 'response.create', response: { tool_choice: 'none' } },
+    ]);
+    expect(types()).not.toContain('response.done');
+    expect(types()).not.toContain('response.output_audio_transcript.done');
+  });
+
+  it('still being written: OpenAI is asked again once it has ended that response', () => {
+    textResponse();
+    tts.events.failed(new Error('x'));
+    expect(sentToOpenAi()).toEqual([AUDIO]);
+    fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'completed', output: [{ id: 'i1', type: 'message' }] } });
+    expect(sentToOpenAi().slice(1)).toEqual([{ type: 'conversation.item.delete', item_id: 'i1' }, { type: 'response.create' }]);
+    expect(types()).not.toContain('response.done');
+  });
+
+  it('a response the caller cut off is not asked for again: its done goes on', () => {
+    textResponse();
+    tts.events.failed(new Error('x'));
+    fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'cancelled', output: [{ id: 'i1', type: 'message' }] } });
+    expect(sentToOpenAi()).toEqual([AUDIO]);
+    expect(types().at(-1)).toBe('response.done');
+  });
+
+  it('before the OpenAI socket is open: nothing is sent and nothing throws (the bridge asks for audio itself once it opens)', () => {
+    openai.readyState = 0;
+    expect(() => tts.events.failed(new Error('x'))).not.toThrow();
+    expect(openai.sent).toEqual([]);
+    openai.readyState = 1;
+    voice.send(JSON.stringify(AUDIO));
+    expect(sentToOpenAi()).toEqual([AUDIO]);
+  });
+});
+
+describe('withExternalVoice — a response OpenAI ends unusually', () => {
+  it('a cancel before any text arrived: what OpenAI still writes for it is never spoken, and its done goes on', () => {
+    fromOpenAi({ type: 'response.created', response: { id: 'r1' } });
+    voice.send(JSON.stringify({ type: 'response.cancel' }));
+    fromOpenAi({ type: 'response.output_text.delta', response_id: 'r1', item_id: 'i1', delta: 'Hi' });
+    fromOpenAi({ type: 'response.output_text.done', response_id: 'r1', item_id: 'i1', text: 'Hi' });
+    fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'cancelled', output: [] } });
+    expect(tts.calls).toEqual([]);
+    expect(types().at(-1)).toBe('response.done');
+  });
+
+  it('no text done: a completed line is spoken to its end, a failed one is stopped; either way the done goes', () => {
+    fromOpenAi({ type: 'response.created', response: { id: 'r1' } });
+    fromOpenAi({ type: 'response.output_text.delta', response_id: 'r1', item_id: 'i1', delta: 'Hi Jane.' });
+    fromOpenAi({ type: 'response.done', response: { id: 'r1', status: 'completed', output: [] } });
+    expect(tts.calls.at(-1)).toBe('finish i1');
+    expect(types()).not.toContain('response.done');
+    tts.events.done('i1');
+    expect(types().at(-1)).toBe('response.done');
+
+    fromOpenAi({ type: 'response.created', response: { id: 'r2' } });
+    fromOpenAi({ type: 'response.output_text.delta', response_id: 'r2', item_id: 'i2', delta: 'So the' });
+    fromOpenAi({ type: 'response.done', response: { id: 'r2', status: 'failed', output: [] } });
+    expect(tts.calls.at(-1)).toBe('cancel i2');
+    expect(types().filter((t) => t === 'response.done')).toHaveLength(2);
+  });
+
+  it('warns when one response has a second spoken line (the two may overlap)', () => {
+    fromOpenAi({ type: 'response.created', response: { id: 'r1' } });
+    fromOpenAi({ type: 'response.output_text.delta', response_id: 'r1', item_id: 'i1', delta: 'One.' });
+    fromOpenAi({ type: 'response.output_text.delta', response_id: 'r1', item_id: 'i2', delta: 'Two.' });
+    expect(warn).toHaveBeenCalledWith({ responseId: 'r1' }, 'ai-voice: a second spoken line in one response — the two may overlap');
   });
 });
 

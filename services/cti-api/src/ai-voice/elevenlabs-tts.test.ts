@@ -234,7 +234,13 @@ describe('elevenLabsTts — when the voice goes wrong', () => {
 });
 
 describe('externalVoiceFor — the AI_VOICE_TTS switch', () => {
-  const cfg = { AI_VOICE_TTS: 'elevenlabs' as const, ELEVENLABS_API_KEY: 'k', AI_VOICE_ELEVENLABS_VOICE: 'v', AI_VOICE_ELEVENLABS_MODEL: 'm' };
+  const cfg = {
+    AI_VOICE_TTS: 'elevenlabs' as const,
+    AI_VOICE_BARGE_IN: 'gate' as const,
+    ELEVENLABS_API_KEY: 'k',
+    AI_VOICE_ELEVENLABS_VOICE: 'v',
+    AI_VOICE_ELEVENLABS_MODEL: 'm',
+  };
 
   it('is none for the OpenAI voice (the default)', () => {
     expect(externalVoiceFor({ ...cfg, AI_VOICE_TTS: 'openai' }, silentLog)).toBeNull();
@@ -248,5 +254,11 @@ describe('externalVoiceFor — the AI_VOICE_TTS switch', () => {
     const w = vi.fn();
     expect(externalVoiceFor({ ...cfg, ELEVENLABS_API_KEY: undefined }, { ...silentLog, warn: w })).toBeNull();
     expect(w).toHaveBeenCalledWith({}, 'ai-voice: AI_VOICE_TTS=elevenlabs but ELEVENLABS_API_KEY is not set — using the OpenAI voice');
+  });
+
+  it('uses the OpenAI voice, with a warning, with instant barge-in (OpenAI starts and cuts responses on its own there)', () => {
+    const w = vi.fn();
+    expect(externalVoiceFor({ ...cfg, AI_VOICE_BARGE_IN: 'instant' }, { ...silentLog, warn: w })).toBeNull();
+    expect(w).toHaveBeenCalledWith({}, 'ai-voice: AI_VOICE_TTS=elevenlabs needs AI_VOICE_BARGE_IN=gate — using the OpenAI voice');
   });
 });

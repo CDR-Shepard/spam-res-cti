@@ -20,7 +20,15 @@ Behind a switch, `AI_VOICE_TTS=elevenlabs` (default `openai` = today, byte for b
   context instead (no more audio) and drops the truncate. The model may believe it said the whole line (accepted for
   v1; v2 can rewrite the item to what was heard, using ElevenLabs' character timings).
 - If ElevenLabs fails mid-call, the layer switches the session back to OpenAI audio (`output_modalities: ['audio']`)
-  and the call carries on in the OpenAI voice; it never leaves the caller in silence.
+  and the call carries on in the OpenAI voice; it never leaves the caller in silence. A line the caller heard none of
+  (e.g. the opener, with its AI disclosure, when credit runs out) is deleted from the conversation, with any tool call
+  in the same response, and OpenAI is asked again with the same request, now in its own voice; the bridge only ever
+  sees the spoken one. A line partly heard ends there, like a barge-in.
+- A response OpenAI ends without finishing a line: a completed one is spoken to its end, any other is stopped. Text
+  OpenAI still writes for a response the bridge cancelled is never spoken.
+- Gate barge-in only: with `AI_VOICE_BARGE_IN=instant` (OpenAI starts and cuts responses itself) the call uses the
+  OpenAI voice and logs a warning.
+- Known gap: two spoken lines in one response may overlap (rare; logged as a warning).
 - Applies to outbound and inbound calls (same bridge). The voicemail message is unchanged (it is a Twilio `<Say>`).
 
 ## How the voice is fed (`elevenlabs-tts.ts`)

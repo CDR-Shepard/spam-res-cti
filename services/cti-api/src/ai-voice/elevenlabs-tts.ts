@@ -232,13 +232,20 @@ export function elevenLabsTts(s: ElevenLabsSettings, log: BridgeLog, connect: Co
   };
 }
 
-type VoiceConfig = Pick<AppConfig, 'AI_VOICE_TTS' | 'ELEVENLABS_API_KEY' | 'AI_VOICE_ELEVENLABS_VOICE' | 'AI_VOICE_ELEVENLABS_MODEL'>;
+type VoiceConfig = Pick<AppConfig, 'AI_VOICE_TTS' | 'AI_VOICE_BARGE_IN' | 'ELEVENLABS_API_KEY' | 'AI_VOICE_ELEVENLABS_VOICE' | 'AI_VOICE_ELEVENLABS_MODEL'>;
 
-/** The external voice the config asks for, or null for the OpenAI voice (also when ElevenLabs is chosen without a key). */
+/**
+ * The external voice the config asks for, or null for the OpenAI voice: also when ElevenLabs is chosen without a key,
+ * or with instant barge-in (OpenAI starts and cuts responses itself there, which the voice layer can't follow).
+ */
 export function externalVoiceFor(cfg: VoiceConfig, log: BridgeLog, connect: ConnectTts = connectWs): OpenTts | null {
   if (cfg.AI_VOICE_TTS !== 'elevenlabs') return null;
   if (!cfg.ELEVENLABS_API_KEY) {
     log.warn({}, 'ai-voice: AI_VOICE_TTS=elevenlabs but ELEVENLABS_API_KEY is not set — using the OpenAI voice');
+    return null;
+  }
+  if (cfg.AI_VOICE_BARGE_IN !== 'gate') {
+    log.warn({}, 'ai-voice: AI_VOICE_TTS=elevenlabs needs AI_VOICE_BARGE_IN=gate — using the OpenAI voice');
     return null;
   }
   return elevenLabsTts({ apiKey: cfg.ELEVENLABS_API_KEY, voiceId: cfg.AI_VOICE_ELEVENLABS_VOICE, modelId: cfg.AI_VOICE_ELEVENLABS_MODEL }, log, connect);
