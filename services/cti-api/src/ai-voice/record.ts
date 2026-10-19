@@ -8,11 +8,16 @@
  * read from `AI_Call_Consent__c`; an org (or object) without that field yields
  * `consentFieldMissing: true`, which the gate treats as a block — absence of
  * the field is never read as consent.
+ *
+ * An Opportunity has no FirstName: its first name is its linked Contact's
+ * (`ContactId`), else its primary contact role's Contact's. Every first name
+ * goes through `spokenFirstName`, so the agent never says a trust or an address.
  */
 import { sfFetch as realSfFetch, soqlQuery as realSoqlQuery } from '../salesforce/client.js';
 import { soqlEscape } from '../salesforce/soql.js';
 import { resolveDialNumber as realResolveDialNumber } from '../salesforce/record-phone.js';
 import { addressFieldNames, formatAddress, pickAddressFields, type AddressFields } from './record-address.js';
+import { spokenFirstName } from './spoken-name.js';
 
 export type AiCallObject = 'Lead' | 'Opportunity' | 'Contact';
 
@@ -65,7 +70,7 @@ const NOTE_FIELDS = [
   'Analyst_Notes__c',
 ] as const;
 /** The only fields ever selected — the describe narrows this to what exists. */
-const WANTED_FIELDS = [CONSENT_FIELD, ...NOTE_FIELDS, 'FirstName', 'Name', 'OwnerId'] as const;
+const WANTED_FIELDS = [CONSENT_FIELD, ...NOTE_FIELDS, 'FirstName', 'ContactId', 'Name', 'OwnerId'] as const;
 
 /** What the describe tells us: WANTED_FIELDS present (API name → label) and the address fields. */
 interface Described {
@@ -139,6 +144,26 @@ async function recentTasks(userId: string, objectType: AiCallObject, rid: string
   }
 }
 
+/** The Opportunity's linked Contact, then its primary contact role's Contact: the first usable first name. */
+async function opportunityFirstName(userId: string, rid: string, contactId: string | null, deps: RecordDeps): Promise<string | null> {
+  try {
+    if (contactId && RECORD_ID.test(contactId)) {
+      const [contact] = await deps.soqlQuery(userId, `SELECT FirstName FROM Contact WHERE Id = '${soqlEscape(contactId)}' LIMIT 1`);
+      const name = spokenFirstName(text(contact?.FirstName));
+      if (name) return name;
+    }
+    const [role] = await deps.soqlQuery(
+      userId,
+      `SELECT Contact.FirstName FROM OpportunityContactRole WHERE OpportunityId = '${rid}' AND IsPrimary = true LIMIT 1`,
+    );
+    return spokenFirstName(text((role?.Contact as Record<string, unknown> | null | undefined)?.FirstName));
+  } catch (err) {
+    // A name is a courtesy, not a safety input: without one the agent asks for the owner of the street.
+    console.warn('[ai-voice] first name read failed:', (err as Error).message);
+    return null;
+  }
+}
+
 async function phonesOf(userId: string, objectType: AiCallObject, recordId: string, deps: RecordDeps): Promise<string[]> {
   const dial = await deps.resolveDialNumber(userId, objectType, recordId);
   if (!dial || dial.skipOnDialer) return [];
@@ -168,9 +193,10 @@ export async function loadAiCallRecord(
   const row = rows[0];
   if (!row) return null;
 
-  const [tasks, phones] = await Promise.all([
+  const [tasks, phones, firstName] = await Promise.all([
     recentTasks(userId, objectType, rid, deps),
     phonesOf(userId, objectType, recordId, deps),
+    objectType === 'Opportunity' ? opportunityFirstName(userId, rid, text(row.ContactId), deps) : spokenFirstName(text(row.FirstName)),
   ]);
 
   const noteLines = NOTE_FIELDS.flatMap((f) => {
@@ -183,7 +209,7 @@ export async function loadAiCallRecord(
     objectType,
     recordId,
     name: text(row.Name),
-    firstName: text(row.FirstName),
+    firstName,
     phones,
     consentAiCall: !consentFieldMissing && row[CONSENT_FIELD] === true,
     consentFieldMissing,

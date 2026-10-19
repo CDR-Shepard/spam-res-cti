@@ -35,7 +35,14 @@ interface FakeOpts {
   tasks?: Array<Record<string, unknown>>;
   tasksFail?: boolean;
   dial?: DialTarget | null;
+  /** The Opportunity's linked Contact (`SELECT FirstName FROM Contact`), and its primary contact role. */
+  contact?: Record<string, unknown> | null;
+  role?: Record<string, unknown> | null;
+  namesFail?: boolean;
 }
+
+const CONTACT_NAME_QUERY = 'SELECT FirstName FROM Contact WHERE';
+const ROLE_NAME_QUERY = 'FROM OpportunityContactRole';
 
 function fakeDeps(o: FakeOpts = {}) {
   const soql: string[] = [];
@@ -49,6 +56,11 @@ function fakeDeps(o: FakeOpts = {}) {
       if (q.includes('FROM Task')) {
         if (o.tasksFail) throw new Error('SOQL failed (400)');
         return o.tasks ?? [];
+      }
+      if (q.startsWith(CONTACT_NAME_QUERY) || q.includes(ROLE_NAME_QUERY)) {
+        if (o.namesFail) throw new Error('SOQL failed (400)');
+        const row = q.startsWith(CONTACT_NAME_QUERY) ? o.contact : o.role;
+        return row ? [row] : [];
       }
       return o.record === null ? [] : [o.record ?? { Id: LEAD_ID }];
     }),
@@ -245,7 +257,7 @@ describe('loadAiCallRecord', () => {
     });
     const rec = await loadAiCallRecord('U1', 'Opportunity', OPP_ID, deps);
     expect(rec?.address).toBe('123 Main St, Austin');
-    const recordQueries = soql.filter((q) => q.includes('FROM Opportunity'));
+    const recordQueries = soql.filter((q) => q.includes('FROM Opportunity WHERE'));
     expect(recordQueries).toHaveLength(1);
     expect(recordQueries[0]).toContain('property_address__c');
     expect(recordQueries[0]).toContain('City__c');
@@ -273,6 +285,52 @@ describe('loadAiCallRecord', () => {
     expect(soql.find((q) => q.includes('FROM Opportunity'))).toBe(
       `SELECT Id, AI_Call_Consent__c, Name FROM Opportunity WHERE Id = '${OPP_ID}' LIMIT 1`,
     );
+  });
+});
+
+describe('loadAiCallRecord — the first name', () => {
+  const CONTACT_ID = '0035e00000AbCdEFGH';
+  const OPP_WITH_CONTACT: Field[] = [...OPP_BASE, { name: 'ContactId', label: 'Contact ID', type: 'reference' }];
+
+  it("an Opportunity has no FirstName: it is its linked Contact's, said as a name", async () => {
+    const { deps, soql } = fakeDeps({ fields: OPP_WITH_CONTACT, record: { Id: OPP_ID, ContactId: CONTACT_ID }, contact: { FirstName: ' JAMES ' } });
+    expect((await loadAiCallRecord('U1', 'Opportunity', OPP_ID, deps))?.firstName).toBe('James');
+    expect(soql.find((q) => q.includes('FROM Opportunity WHERE'))).toContain('ContactId');
+    expect(soql).toContain(`SELECT FirstName FROM Contact WHERE Id = '${CONTACT_ID}' LIMIT 1`);
+    expect(soql.some((q) => q.includes(ROLE_NAME_QUERY))).toBe(false);
+  });
+
+  it("no linked Contact, or no usable name on it: the primary contact role's Contact", async () => {
+    const role = { Contact: { FirstName: 'Cheryl' } };
+    const none = fakeDeps({ fields: OPP_WITH_CONTACT, record: { Id: OPP_ID, ContactId: null }, role });
+    expect((await loadAiCallRecord('U1', 'Opportunity', OPP_ID, none.deps))?.firstName).toBe('Cheryl');
+    expect(none.soql).toContain(`SELECT Contact.FirstName FROM OpportunityContactRole WHERE OpportunityId = '${OPP_ID}' AND IsPrimary = true LIMIT 1`);
+    expect(none.soql.some((q) => q.startsWith(CONTACT_NAME_QUERY))).toBe(false);
+    clearDescribeCache();
+    const junk = fakeDeps({ fields: OPP_WITH_CONTACT, record: { Id: OPP_ID, ContactId: CONTACT_ID }, contact: { FirstName: 'Smith Family Trust' }, role });
+    expect((await loadAiCallRecord('U1', 'Opportunity', OPP_ID, junk.deps))?.firstName).toBe('Cheryl');
+  });
+
+  it('no name anywhere is null; a malformed ContactId is never put in a query', async () => {
+    const { deps, soql } = fakeDeps({ fields: OPP_WITH_CONTACT, record: { Id: OPP_ID, ContactId: "003' OR Id != '" }, role: null });
+    expect((await loadAiCallRecord('U1', 'Opportunity', OPP_ID, deps))?.firstName).toBeNull();
+    expect(soql.some((q) => q.startsWith(CONTACT_NAME_QUERY))).toBe(false);
+  });
+
+  it('a failed name read degrades to no first name; the rest of the call context still loads', async () => {
+    const { deps } = fakeDeps({ fields: OPP_WITH_CONTACT, record: { Id: OPP_ID, ContactId: CONTACT_ID }, namesFail: true });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const rec = await loadAiCallRecord('U1', 'Opportunity', OPP_ID, deps);
+    expect(rec?.firstName).toBeNull();
+    expect(rec?.phones).toEqual(['+16195550100', '+16195550101']);
+    expect(warn).toHaveBeenCalledWith('[ai-voice] first name read failed:', 'SOQL failed (400)');
+    warn.mockRestore();
+  });
+
+  it("a Lead's own FirstName is cleaned the same way, with no extra query", async () => {
+    const { deps, soql } = fakeDeps({ record: { Id: LEAD_ID, FirstName: 'John & Mary' } });
+    expect((await loadAiCallRecord('U1', 'Lead', LEAD_ID, deps))?.firstName).toBe('John');
+    expect(soql.some((q) => q.startsWith(CONTACT_NAME_QUERY) || q.includes(ROLE_NAME_QUERY))).toBe(false);
   });
 });
 
