@@ -24,8 +24,10 @@ export interface BatchResult {
 }
 
 export interface BatchOptions {
-  /** Send end_call back unrun with SAY_GOODBYE_FIRST; the bridge's inbound goodbye guard decides when, and ends the call after the goodbye. */
+  /** Send end_call back unrun with the goodbye note; the bridge's goodbye guard decides when, and ends the call after the goodbye. */
   refuseSilentEnd?: boolean;
+  /** The output a refused end_call gets (default SAY_GOODBYE_FIRST; outbound calls pass sayGoodbyeWithNumber). */
+  goodbyeNote?: string;
 }
 
 /** What the response that carried the calls did, as the caller heard it. */
@@ -65,6 +67,21 @@ export const SAY_GOODBYE_FIRST = JSON.stringify({
   next: 'say only a short goodbye to the caller, with their name if you know it, like: Okay, take care. Bye now.',
 });
 
+/**
+ * The outbound guard's note: the same goodbye-only ask, with our callback number spoken in it, because the goodbye
+ * after a sent-back end_call kept dropping the number the outbound prompt asks for (simulated outbound calls,
+ * 2026-10-19). Without a number it is SAY_GOODBYE_FIRST.
+ */
+export function sayGoodbyeWithNumber(spokenNumber: string | null): string {
+  if (spokenNumber === null) return SAY_GOODBYE_FIRST;
+  return JSON.stringify({
+    ended: false,
+    next:
+      'say only a short goodbye to them, with their name if you know it. Unless they asked not to be called, or you already gave it, ' +
+      `give our number in it, like: Okay, take care — if anything comes up, you can reach us at ${spokenNumber}. Bye now.`,
+  });
+}
+
 /** The arguments of a batch's first end_call (`{}` when they don't parse: end_call then records outcome `other`). */
 export function endCallArgs(calls: readonly FunctionCall[]): unknown {
   const call = calls.find((c) => c.name === 'end_call');
@@ -73,6 +90,12 @@ export function endCallArgs(calls: readonly FunctionCall[]): unknown {
   } catch {
     return {};
   }
+}
+/** The outcome a batch's first end_call asks for ('' when it has none). */
+export function endCallOutcome(calls: readonly FunctionCall[]): string {
+  const args = endCallArgs(calls);
+  const outcome = args !== null && typeof args === 'object' ? (args as Record<string, unknown>).outcome : undefined;
+  return typeof outcome === 'string' ? outcome : '';
 }
 /** What the model hears for a tool it may not call (an unknown name, or one its call was not offered: service-tools.ts). */
 export const UNKNOWN_TOOL = '{"error":"unknown tool"}';
@@ -116,7 +139,7 @@ export async function runToolBatch(calls: readonly FunctionCall[], deps: ToolDep
   for (const call of calls) {
     if (opts.refuseSilentEnd && call.name === 'end_call') {
       refusedSilentEnd = true;
-      deps.send(functionCallOutput(call.call_id, SAY_GOODBYE_FIRST));
+      deps.send(functionCallOutput(call.call_id, opts.goodbyeNote ?? SAY_GOODBYE_FIRST));
       continue;
     }
     const result = await runTool(call, deps);

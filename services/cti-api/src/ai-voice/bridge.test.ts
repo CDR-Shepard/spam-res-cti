@@ -10,7 +10,8 @@ import {
   type BridgeSocket,
   type ToolResult,
 } from './bridge.js';
-import { SAY_GOODBYE_FIRST } from './bridge-tools.js';
+import { SAY_GOODBYE_FIRST, sayGoodbyeWithNumber } from './bridge-tools.js';
+import { DRAIN_MARGIN_MS } from './bridge-playback.js';
 import { AI_CALL_TOOLS } from './prompt.js';
 
 type Ev = 'message' | 'close' | 'error' | 'open';
@@ -2566,7 +2567,7 @@ describe('tool calls', () => {
   });
 });
 
-describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)', () => {
+describe('a silent end_call after the caller spoke (goodbyeBeforeEnd)', () => {
   const done = (...output: object[]) => ({ type: 'response.done', response: { status: 'completed', output } });
   const endCall = (id: string) => fnCall('end_call', '{"outcome":"other","summary":"bye"}', id);
   const end = vi.fn(async () => ({ output: 'ending', then: 'hangup' as const }));
@@ -2606,10 +2607,28 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     expect(hooks.log.info).toHaveBeenCalledWith(expect.anything(), 'ai-voice bridge: end_call with no goodbye after the caller spoke — asked for one');
   });
 
+  it('sends back the goodbye note it was given (outbound: with our callback number)', async () => {
+    const note = sayGoodbyeWithNumber('six one nine, five five five, zero zero zero zero');
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, goodbyeNote: note }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1');
+    callerTurn(openai, 'c1');
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+    expect(openai.sent).toContainEqual({
+      type: 'conversation.item.create',
+      item: { type: 'function_call_output', call_id: 'e1', output: note },
+    });
+  });
+
   it('then runs the end_call that comes with the spoken goodbye', async () => {
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2623,6 +2642,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     await flush();
     openai.clearSent();
@@ -2650,6 +2670,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge, hooks } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2665,6 +2686,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2680,6 +2702,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2693,6 +2716,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     openai.clearSent();
     silentEnd(openai, 'e1');
@@ -2708,6 +2732,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate' }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     await flush();
     openai.clearSent();
@@ -2723,6 +2748,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2737,6 +2763,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2753,6 +2780,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2772,6 +2800,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2792,6 +2821,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate' }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2812,6 +2842,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate', overlapJudge: 'words' }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2834,6 +2865,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge, hooks } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate' }, { onTool: vi.fn(onTool) });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2849,6 +2881,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate' }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     await flush();
     openai.clearSent();
@@ -2867,6 +2900,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
@@ -2879,6 +2913,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     spokenResponse(openai, 'a1'); // "Okay, take care. Bye now." with no tool
     await flush();
@@ -2891,6 +2926,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     silentEnd(openai, 'e1');
     await flush();
     expect(end).toHaveBeenCalledTimes(1);
@@ -2918,13 +2954,14 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     const { openai, bridge, hooks } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
     bridge.start();
     openai.msg(READY);
+    spokenResponse(openai, 'a0'); // the agent's opener: the guard needs the agent to have spoken
     callerTurn(openai, 'c1');
     silentEnd(openai, 'e1');
     await flush();
     expect(hooks.onTranscript).toHaveBeenCalledWith(expect.objectContaining({ role: 'system', text: '[end_call sent back — asked for a goodbye]' }));
   });
 
-  it('is off by default (outbound calls): a silent end_call after the caller spoke runs', async () => {
+  it('is off by default in BridgeOptions: a silent end_call after the caller spoke runs', async () => {
     const { openai, bridge } = setup({}, { onTool: end });
     bridge.start();
     openai.msg(READY);
@@ -2932,6 +2969,166 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd, inbound)',
     silentEnd(openai, 'e1');
     await flush();
     expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  // Review of the outbound guard (2026-10-19): a sent-back end_call runs only after its goodbye, so one that records an
+  // opt-out (or a hang-up) would be lost if the caller hung up during that goodbye. Those run at once.
+  it.each(['do_not_call', 'wrong_number', 'hung_up'])('never sends back an end_call with outcome %s: it runs at once', async (outcome) => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1');
+    callerTurn(openai, 'c1');
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg(done(fnCall('end_call', JSON.stringify({ outcome, summary: 'x' }), 'e1')));
+    await flush();
+    expect(end).toHaveBeenCalledWith('end_call', { outcome, summary: 'x' });
+  });
+
+  // A voicemail greeting or a phone menu commits as a caller turn before the agent says anything (it stays silent there).
+  it('does not send back an end_call before the agent has said anything', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    callerTurn(openai, 'c1'); // "Hi, you've reached… leave a message after the tone"
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs a sent-back end_call when the call ends before its goodbye is done (the caller hung up)', async () => {
+    const { openai, bridge, hooks } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1');
+    callerTurn(openai, 'c1');
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'a2', delta: audio(400) }); // the goodbye starts…
+    bridge.stop(); // …and they hang up
+    await flush();
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(end).toHaveBeenCalledWith('end_call', { outcome: 'other', summary: 'bye' });
+    expect(hooks.log.info).toHaveBeenCalledWith(expect.anything(), 'ai-voice bridge: the call ended before the sent-back end_call ran — running it now');
+  });
+
+  it('runs a sent-back end_call only once: not again at the end after the goodbye ran it', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1');
+    callerTurn(openai, 'c1');
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    spokenResponse(openai, 'a2'); // the goodbye, then the bridge runs the owed end_call
+    await flush();
+    bridge.stop();
+    await flush();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  // Re-review (2026-10-19): a sent-back end_call the conversation moved past must never be recorded at the end — it
+  // would overwrite a booking made since (setOutcome) and free the specialist's time.
+  it('forgets a sent-back end_call once the caller speaks again before the goodbye: a booking, then a hang-up, records no end_call', async () => {
+    const onTool = vi.fn(async (name: string) => (name === 'end_call' ? { output: 'ending', then: 'hangup' as const } : { output: '{"ok":true}', then: 'continue' as const }));
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1');
+    callerTurn(openai, 'c1'); // "Not really interested."
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    callerTurn(openai, 'c2'); // "Well… what would you pay?"
+    await flush();
+    spokenResponse(openai, 'a2', fnCall('book_appointment', '{"slot_id":"s1","address_confirmed":true}', 'b1'));
+    await flush();
+    callerTurn(openai, 'c3'); // "Great, bye." — and they hang up
+    bridge.stop();
+    await flush();
+    expect(onTool.mock.calls.map((c) => c[0])).toEqual(['book_appointment']);
+  });
+
+  it.each([['book_appointment', '{"slot_id":"s1","address_confirmed":true}'], ['schedule_callback', '{"when":"Thursday 6 PM"}'], ['mark_do_not_call', '{"note":"stop"}']])(
+    'forgets a sent-back end_call once %s runs',
+    async (tool, args) => {
+      const onTool = vi.fn(async (name: string) => (name === 'end_call' ? { output: 'ending', then: 'hangup' as const } : { output: '{"ok":true}', then: 'continue' as const }));
+      const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool });
+      bridge.start();
+      openai.msg(READY);
+      spokenResponse(openai, 'a1');
+      callerTurn(openai, 'c1');
+      await flush();
+      silentEnd(openai, 'e1');
+      await flush();
+      openai.msg({ type: 'response.created' });
+      openai.msg(done(fnCall(tool, args, 't1'))); // the "goodbye" turn ran a tool instead of speaking
+      await flush();
+      bridge.stop();
+      await flush();
+      expect(onTool.mock.calls.map((c) => c[0])).toEqual([tool]);
+    },
+  );
+
+  it('keeps a sent-back end_call whose own batch scheduled the callback: a hang-up during the goodbye still records it', async () => {
+    const onTool = vi.fn(async (name: string) => (name === 'end_call' ? { output: 'ending', then: 'hangup' as const } : { output: 'scheduled', then: 'continue' as const }));
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1');
+    callerTurn(openai, 'c1'); // "Call me Thursday after 5."
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg(done(fnCall('schedule_callback', '{"when":"Thursday after 5 PM","note":"x"}', 's1'), fnCall('end_call', '{"outcome":"qualified_callback","summary":"cb"}', 'e1')));
+    await flush();
+    bridge.stop(); // they hang up during the goodbye
+    await flush();
+    expect(onTool.mock.calls).toEqual([
+      ['schedule_callback', { when: 'Thursday after 5 PM', note: 'x' }],
+      ['end_call', { outcome: 'qualified_callback', summary: 'cb' }],
+    ]);
+  });
+
+  it('an OpenAI drop during the goodbye still records the sent-back end_call, which then owns the end', async () => {
+    const { openai, bridge, hooks } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1');
+    callerTurn(openai, 'c1');
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'a2', delta: audio(400) });
+    openai.close();
+    await flush();
+    expect(end).toHaveBeenCalledWith('end_call', { outcome: 'other', summary: 'bye' });
+    expect(end.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(hooks.onEnd).mock.invocationCallOrder[0]!);
+    expect(hooks.onEnd).toHaveBeenCalledWith('openai_closed', undefined);
+  });
+
+  it('drops a sent-back end_call once a later end_call or transfer ran', async () => {
+    const onTool = vi.fn(async (name: string) => (name === 'transfer_to_rep' ? { output: 'ok', then: 'transfer' as const } : { output: 'ending', then: 'hangup' as const }));
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1');
+    callerTurn(openai, 'c1');
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    callerTurn(openai, 'c2'); // "wait — actually, can I talk to someone?"
+    await flush();
+    spokenResponse(openai, 'a2', fnCall('transfer_to_rep', '{"reason":"wants_human","summary":"x"}', 't1'));
+    await flush();
+    bridge.stop();
+    await flush();
+    expect(onTool.mock.calls.map((c) => c[0])).toEqual(['transfer_to_rep']);
   });
 });
 
@@ -3394,6 +3591,23 @@ describe('waitForPlayback()', () => {
     await vi.advanceTimersByTimeAsync(7999);
     expect(resolved).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
+    expect(resolved).toBe(true);
+  });
+
+  // Simulated outbound calls (2026-10-19): a goodbye with the callback number plays 10–14 s but arrives in ~3 s.
+  it('waits out a long goodbye whose marks never come back: the audio left plus a margin, not the 8 s default', async () => {
+    const { openai, bridge } = setup();
+    bridge.start();
+    openai.msg(READY);
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'item_1', delta: audio(12_000) });
+    openai.msg({ type: 'response.output_audio.done', item_id: 'item_1' });
+    let resolved = false;
+    void bridge.waitForPlayback().then(() => {
+      resolved = true;
+    });
+    await vi.advanceTimersByTimeAsync(PLAYBACK_DRAIN_MAX_MS);
+    expect(resolved).toBe(false); // the old cap: the goodbye was cut here
+    await vi.advanceTimersByTimeAsync(12_000 + DRAIN_MARGIN_MS - PLAYBACK_DRAIN_MAX_MS);
     expect(resolved).toBe(true);
   });
 

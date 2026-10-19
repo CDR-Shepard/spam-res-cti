@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { endCallArgs, followUpAfterTools, runToolBatch, SAY_GOODBYE_FIRST, type BatchResult, type FunctionCall, type ToolDeps } from './bridge-tools.js';
+import { endCallArgs, followUpAfterTools, runToolBatch, SAY_GOODBYE_FIRST, sayGoodbyeWithNumber, type BatchResult, type FunctionCall, type ToolDeps } from './bridge-tools.js';
 
 const call = (name: string, id = 'c1'): FunctionCall => ({ name, call_id: id, arguments: '{}' });
 const SPEAK: BatchResult = { carryOn: true, speak: true };
@@ -93,6 +93,29 @@ describe('runToolBatch: a silent end_call (inbound goodbye guard)', () => {
     const refusal = JSON.parse(SAY_GOODBYE_FIRST) as Record<string, string>;
     expect(refusal).toEqual({ ended: false, next: expect.stringMatching(/only a short goodbye.*Bye now\./) });
     expect(SAY_GOODBYE_FIRST).not.toMatch(/silence|heard nothing|end_call/);
+  });
+
+  it('sends the goodbye note it is given instead of the default (outbound: the one with our number)', async () => {
+    const d = deps();
+    const note = sayGoodbyeWithNumber('six one nine, five five five, zero zero zero zero');
+    await runToolBatch([endCall()], d, { refuseSilentEnd: true, goodbyeNote: note });
+    expect(d.send).toHaveBeenCalledWith({
+      type: 'conversation.item.create',
+      item: { type: 'function_call_output', call_id: 'e1', output: note },
+    });
+  });
+});
+
+describe('sayGoodbyeWithNumber (the outbound goodbye guard)', () => {
+  it('asks only for a goodbye that gives our callback number, spoken, with nothing to narrate', () => {
+    const note = sayGoodbyeWithNumber('six one nine, five five five, zero zero zero zero');
+    const refusal = JSON.parse(note) as Record<string, string>;
+    expect(refusal).toEqual({ ended: false, next: expect.stringMatching(/only a short goodbye.*six one nine, five five five, zero zero zero zero.*Bye now\./) });
+    expect(note).not.toMatch(/silence|heard nothing|end_call/);
+  });
+
+  it('is the plain goodbye note without a callback number', () => {
+    expect(sayGoodbyeWithNumber(null)).toBe(SAY_GOODBYE_FIRST);
   });
 });
 

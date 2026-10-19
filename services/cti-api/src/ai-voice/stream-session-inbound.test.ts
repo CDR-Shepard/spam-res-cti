@@ -145,13 +145,17 @@ describe('an inbound call starts with the inbound agent', () => {
     expect(captured?.opts.goodbyeBeforeEnd).toBe(true);
   });
 
-  it('an outbound entry is unchanged: its tools, no opener option, no line rules', async () => {
+  it('an outbound entry keeps its tools, no opener option, no line rules', async () => {
     registerActiveCall(activeEntry({ aiCallId: ID, callSid: CALL_SID }));
     await begin();
     expect(captured?.opts.tools).toBe(AI_CALL_TOOLS);
     expect(captured?.opts).not.toHaveProperty('opener');
-    expect(captured?.opts).not.toHaveProperty('goodbyeBeforeEnd');
     expect(captured?.opts.instructions).not.toContain(INBOUND_LINE_RULES);
+  });
+
+  it('an inbound entry keeps the plain goodbye note (no callback number)', async () => {
+    await begin();
+    expect(captured?.opts).not.toHaveProperty('goodbyeNote');
   });
 
   it('the tool hook knows the call is inbound: transfer_to_rep is refused', async () => {

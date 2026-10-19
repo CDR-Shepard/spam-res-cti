@@ -3,6 +3,7 @@ import type { AppConfig } from '../config.js';
 import type { BridgeHooks, BridgeOptions } from './bridge.js';
 import type { AiCallTurnStats, AppointmentSlot } from '@cti/contracts';
 import { AI_CALL_TOOLS, type RealtimeFunctionTool } from './prompt.js';
+import { SAY_GOODBYE_FIRST, sayGoodbyeWithNumber } from './bridge-tools.js';
 import { claimClose, clearActiveCalls, getActiveCall, registerActiveCall } from './registry.js';
 import { finalizeAiCall } from './service-finalize.js';
 import { defaultToolEffects } from './service-tools.js';
@@ -83,6 +84,21 @@ async function begin(frame = startFrame()) {
 }
 
 describe('runStreamSession — the start frame', () => {
+  // Simulated outbound calls (2026-10-19): about half the agent's endings were a silent end_call after the seller spoke.
+  it('turns on the goodbye guard, whose goodbye gives our callback number', async () => {
+    await begin();
+    expect(captured?.opts.goodbyeBeforeEnd).toBe(true);
+    expect(captured?.opts.goodbyeNote).toBe(sayGoodbyeWithNumber('six one nine, five five five, zero zero zero zero'));
+  });
+
+  it('with no callback number, the guard asks for the plain goodbye', async () => {
+    clearActiveCalls();
+    const entry = activeEntry({ aiCallId: ID, callSid: CALL_SID });
+    registerActiveCall({ ...entry, prompt: { ...entry.prompt, callbackNumber: null } });
+    await begin();
+    expect(captured?.opts.goodbyeNote).toBe(SAY_GOODBYE_FIRST);
+  });
+
   it('a good start opens OpenAI and starts the bridge with this call’s instructions and options', async () => {
     expect(await begin()).toBe('started');
     expect(deps.openRealtime).toHaveBeenCalledWith('wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1', 'sk-test');

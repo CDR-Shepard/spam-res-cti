@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PlaybackTracker, base64Bytes } from './bridge-playback.js';
+import { DRAIN_MARGIN_MS, PLAYBACK_DRAIN_CEILING_MS, PlaybackTracker, base64Bytes } from './bridge-playback.js';
 
 /** Base64 μ-law audio lasting `ms` milliseconds (8 bytes per ms at 8 kHz). */
 const audio = (ms: number): string => Buffer.alloc(ms * 8).toString('base64');
@@ -112,6 +112,80 @@ describe('PlaybackTracker', () => {
       done = true;
     });
     await vi.advanceTimersByTimeAsync(7999);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBe(true);
+  });
+
+  // A goodbye with the callback number runs 10–14 s but is generated in ~3 s: a cap counted from the end of generation
+  // cut it mid-number (simulated outbound calls, 2026-10-19). The cap stretches to the audio still to play.
+  it('waitForDrain waits out a long goodbye still queued: the cap is the audio left plus a margin', async () => {
+    const p = new PlaybackTracker();
+    p.onAudioDelta('item_1', audio(12_000));
+    p.onAudioDone();
+    let done = false;
+    void p.waitForDrain(8000).then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(12_000 + DRAIN_MARGIN_MS - 1);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBe(true);
+  });
+
+  it('waitForDrain stretches only by the audio still to play, never below maxMs', async () => {
+    const p = new PlaybackTracker();
+    p.onAudioDelta('item_1', audio(12_000));
+    p.onAudioDone();
+    p.onInboundMedia(10_000); // 10 s of it has played: 2 s left
+    let done = false;
+    void p.waitForDrain(8000).then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(7999);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBe(true);
+  });
+
+  it('waitForDrain never waits longer than PLAYBACK_DRAIN_CEILING_MS', async () => {
+    const p = new PlaybackTracker();
+    p.onAudioDelta('item_1', audio(60_000));
+    p.onAudioDone();
+    let done = false;
+    void p.waitForDrain(8000).then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(PLAYBACK_DRAIN_CEILING_MS - 1);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBe(true);
+    expect(PLAYBACK_DRAIN_CEILING_MS).toBe(30_000);
+  });
+
+  it('waitForDrain keeps maxMs while the response is still streaming (its length is unknown)', async () => {
+    const p = new PlaybackTracker();
+    p.onAudioDelta('item_1', audio(12_000));
+    let done = false;
+    void p.waitForDrain(8000).then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(7999);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBe(true);
+  });
+
+  it('waitForDrain counts an item queued behind another: the cap covers both', async () => {
+    const p = new PlaybackTracker();
+    p.onAudioDelta('item_1', audio(10_000));
+    p.onAudioDelta('item_2', audio(5000)); // starts once item_1 has played
+    p.onAudioDone();
+    let done = false;
+    void p.waitForDrain(8000).then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(15_000 + DRAIN_MARGIN_MS - 1);
     expect(done).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(done).toBe(true);

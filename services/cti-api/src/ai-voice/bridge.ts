@@ -57,7 +57,7 @@ import { CallerSoundMeter } from './bridge-sound.js';
 import { BridgeSockets, type BridgeSocket } from './bridge-sockets.js';
 import { TurnStatsCollector, type BargeInMode } from './bridge-turn-stats.js';
 import { TurnTiming, heldBy } from './bridge-turn-timing.js';
-import { endCallArgs, errText, followUpAfterTools, functionCalls, runToolBatch, type BridgeLog, type FunctionCall, type Spoke, type ToolResult } from './bridge-tools.js';
+import { endCallArgs, endCallOutcome, errText, followUpAfterTools, functionCalls, runToolBatch, type BridgeLog, type FunctionCall, type Spoke, type ToolResult } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
 
 export type { BargeInMode, BridgeLog, BridgeSocket, OverlapJudge, ReasoningEffort, ToolResult, TurnDetection, VadEagerness };
@@ -67,7 +67,12 @@ export const LEGACY_TRANSCRIBE_MODEL = 'gpt-4o-mini-transcribe';
 
 /** How long after `session.updated` the agent waits for the caller before opening. */
 export const OPENER_DELAY_MS = 3000;
-/** Default cap on waiting for the agent's last words before a hangup/transfer. */
+/** End_call outcomes the goodbye guard never sends back: an opt-out must be written at once, and a hang-up has no one to say goodbye to. */
+const NEVER_SENT_BACK: ReadonlySet<string> = new Set(['do_not_call', 'wrong_number', 'hung_up']);
+/** Tools after which a sent-back end_call is stale: the call went somewhere else (end_call itself is handled apart). */
+const MOVES_PAST_AN_END: ReadonlySet<string> = new Set<ToolName>(['book_appointment', 'schedule_callback', 'mark_do_not_call', 'transfer_to_rep']);
+
+/** Default cap on waiting for the agent's last words before a hangup/transfer (stretched to the audio still queued: bridge-playback.ts). */
 export const PLAYBACK_DRAIN_MAX_MS = 8000;
 /** After a bridge-side end, how long the service has to hang up/redirect before the bridge closes the stream. */
 export const END_GRACE_MS = 10_000;
@@ -113,12 +118,14 @@ export interface BridgeOptions {
   /** How the agent opens the call (default OPENER_DELAY_MS and OPENER_PROMPT; an inbound call passes INBOUND_OPENER). */
   opener?: OpenerOption;
   /**
-   * Inbound calls: an end_call that comes with no audio after the caller spoke is sent back once, asking for a spoken
-   * goodbye first, so the caller is never hung up on without a word (simulated inbound calls, 2026-10-18). The goodbye
-   * is a speech-only response (no tool calls: a second silent end_call came back instead, 2026-10-19), and once it is
-   * done the bridge runs the sent-back end_call itself — unless the caller spoke again first.
+   * An end_call that comes with no audio after the caller spoke is sent back once, asking for a spoken goodbye first,
+   * so the caller is never hung up on without a word (simulated inbound calls, 2026-10-18; outbound too since
+   * 2026-10-19). The goodbye is a speech-only response (no tool calls: a second silent end_call came back instead,
+   * 2026-10-19), and once it is done the bridge runs the sent-back end_call itself — unless the caller spoke again first.
    */
   goodbyeBeforeEnd?: boolean;
+  /** What a sent-back end_call is answered with (default SAY_GOODBYE_FIRST; outbound: sayGoodbyeWithNumber). */
+  goodbyeNote?: string;
   now?: () => number;
   setTimer?: SetTimer;
   clearTimer?: ClearTimer;
@@ -177,6 +184,14 @@ export class AiCallBridge {
   private owedEnd: { args: unknown } | null = null;
   /** goodbyeBeforeEnd: a goodbye that was partly heard got cut; the guard re-arms only once the agent speaks again. */
   private rearmOnSpeech = false;
+  /**
+   * goodbyeBeforeEnd: a sent-back end_call the conversation has not moved past. If the call ends first (the caller hung
+   * up during the goodbye), finish runs it, so its outcome and summary are still recorded. Forgotten once the caller
+   * speaks again before the goodbye, the agent speaks again after a cut one, or an end_call or a booking, callback,
+   * do-not-call or transfer runs (MOVES_PAST_AN_END): an outcome withdrawn since must never be recorded (re-review
+   * 2026-10-19: it overwrote the booking made since).
+   */
+  private unrunEnd: { args: unknown } | null = null;
   /** The first agent item that played: the opener, never cut by the gate. */
   private openerItemId: string | null = null;
   /** Committed caller turns the gate is still judging: when it cuts the agent, they are answered at once. */
@@ -666,7 +681,10 @@ export class AiCallBridge {
       this.stats.agentAudio(at);
       this.agentSpoke = true;
       this.callerSpokeSinceAgent = false;
-      if (this.rearmOnSpeech) this.silentEndRefused = false;
+      if (this.rearmOnSpeech) {
+        this.silentEndRefused = false;
+        this.unrunEnd = null; // speaking again after a cut goodbye: the call goes on
+      }
       this.rearmOnSpeech = false;
       this.openerItemId ??= itemId;
     }
@@ -738,15 +756,22 @@ export class AiCallBridge {
       send: (m: object) => this.sockets.sendOpenAi(m),
     };
     const refuseSilentEnd = this.latchSilentEndRefusal(calls, played);
-    // A refused end_call is owed after its goodbye; any end_call that runs settles one owed earlier.
-    if (refuseSilentEnd) this.owedEnd = { args: endCallArgs(calls) };
-    else if (calls.some((call) => call.name === 'end_call')) this.owedEnd = null;
+    // A refused end_call is owed after its goodbye; any end_call that runs settles one owed earlier (a transfer, an unrun one).
+    if (refuseSilentEnd) {
+      this.owedEnd = { args: endCallArgs(calls) };
+      this.unrunEnd = this.owedEnd;
+    } else if (calls.some((call) => call.name === 'end_call')) {
+      this.owedEnd = null;
+      this.unrunEnd = null;
+    }
+    // A later batch's tool moves past an end; one in the refused batch itself came before that end (it stays owed).
+    if (!refuseSilentEnd && calls.some((call) => MOVES_PAST_AN_END.has(call.name))) this.unrunEnd = null;
     this.toolBatches += 1;
     this.timing.toolBatch();
     this.toolChain = this.toolChain
       .then(async () => {
         // Counted down exactly once, before acting on the result (and even if the batch throws).
-        const batch = await runToolBatch(calls, deps, { refuseSilentEnd }).finally(() => (this.toolBatches -= 1));
+        const batch = await runToolBatch(calls, deps, { refuseSilentEnd, goodbyeNote: this.opts.goodbyeNote }).finally(() => (this.toolBatches -= 1));
         if (batch.refusedSilentEnd) {
           this.hooks.log.info({}, 'ai-voice bridge: end_call with no goodbye after the caller spoke — asked for one');
           this.note('[end_call sent back — asked for a goodbye]');
@@ -765,7 +790,9 @@ export class AiCallBridge {
 
   /**
    * goodbyeBeforeEnd, decided and latched at response.done: an end_call in a response that played nothing, after a
-   * caller turn the agent has not answered aloud, is sent back once a call (the agent says a goodbye, then ends).
+   * caller turn the agent has not answered aloud, is sent back once a call (the agent says a goodbye, then ends). Not
+   * before the agent has said anything (a voicemail greeting or a phone menu: it stays silent there), and never one whose
+   * outcome must be recorded at once (an opt-out, or a caller already gone: NEVER_SENT_BACK).
    */
   private latchSilentEndRefusal(calls: readonly FunctionCall[], played: boolean): boolean {
     const refuse =
@@ -773,8 +800,10 @@ export class AiCallBridge {
       !played &&
       !this.closing &&
       !this.silentEndRefused &&
+      this.agentSpoke &&
       this.callerSpokeSinceAgent &&
-      calls.some((call) => call.name === 'end_call');
+      calls.some((call) => call.name === 'end_call') &&
+      !NEVER_SENT_BACK.has(endCallOutcome(calls));
     if (refuse) this.silentEndRefused = true;
     return refuse;
   }
@@ -807,11 +836,35 @@ export class AiCallBridge {
   private dropOwedEnd(): void {
     if (this.owedEnd === null) return;
     this.owedEnd = null;
+    this.unrunEnd = null;
     this.silentEndRefused = false;
+  }
+
+  /**
+   * goodbyeBeforeEnd: the call ended (finish) with a sent-back end_call never run — the caller hung up during the goodbye,
+   * say. Run it now for its outcome and summary; the hang-up it asks for finds the call already over.
+   */
+  private runUnrunEnd(): void {
+    const unrun = this.unrunEnd;
+    if (unrun === null) return;
+    this.unrunEnd = null;
+    this.owedEnd = null;
+    this.hooks.log.info({}, 'ai-voice bridge: the call ended before the sent-back end_call ran — running it now');
+    try {
+      void this.hooks
+        .onTool('end_call', unrun.args)
+        .then((result) => this.hooks.log.info({ output: result.output }, 'ai-voice bridge: the sent-back end_call ran at the end'))
+        .catch((e: unknown) => {
+          this.hooks.log.error({ err: errText(e) }, 'ai-voice bridge: running the sent-back end_call at the end failed');
+        });
+    } catch (e) {
+      this.hooks.log.error({ err: errText(e) }, 'ai-voice bridge: running the sent-back end_call at the end failed');
+    }
   }
 
   /** goodbyeBeforeEnd: the goodbye a sent-back end_call asked for is done — run that end_call (its arguments), after any earlier batch. */
   private endAfterGoodbye(args: unknown): void {
+    this.unrunEnd = null;
     this.hooks.log.info({}, 'ai-voice bridge: goodbye said after a sent-back end_call — ending the call');
     this.toolBatches += 1;
     this.toolChain = this.toolChain
@@ -873,6 +926,7 @@ export class AiCallBridge {
     this.maxTimer = null;
     this.playback.releaseAll();
     this.timing.end();
+    this.runUnrunEnd(); // before onEnd: its end_call, not the session's end handling, records how the call went
     this.guard('onStats', () => this.hooks.onStats?.(this.stats.summary()));
     this.guard('onEnd', () => this.hooks.onEnd(reason, detail));
   }

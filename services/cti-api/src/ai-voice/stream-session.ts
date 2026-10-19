@@ -28,8 +28,9 @@ import { AiCallBridge, MIN_CALL_MS, type BridgeHooks, type BridgeLog, type Bridg
 import { obj, parseFrame, str, type Msg } from './bridge-frames.js';
 import type { CallerDetailsDeps } from './caller-details.js';
 import { INBOUND_OPENER } from './bridge-session.js';
+import { sayGoodbyeWithNumber } from './bridge-tools.js';
 import { INBOUND_TOOLS, buildInboundInstructions, buildInstructions, toolsFor, type PromptInput } from './prompt.js';
-import { promptSlots } from './prompt-context.js';
+import { phoneForms, promptSlots } from './prompt-context.js';
 import { logTemplateError } from './prompt-saved.js';
 import { claimClose, getActiveCall, updateActiveCall, type ActiveAiCall, type ActiveBridge } from './registry.js';
 import { localTimeFor } from './service.js';
@@ -165,15 +166,16 @@ async function onStart(socket: BridgeSocket, start: Msg, deps: StreamSessionDeps
 }
 
 /**
- * What the agent is told and may do. An inbound call (a test phone called the AI) gets the inbound prompt + line
- * rules, INBOUND_TOOLS, the quick INBOUND_OPENER and the goodbye guard (a silent end_call after the caller spoke is
- * sent back once); an outbound call exactly what it always got (no opener option, no guard).
+ * What the agent is told and may do. Both directions get the goodbye guard (a silent end_call after the caller spoke
+ * is sent back once). An inbound call (a test phone called the AI) gets the inbound prompt + line rules,
+ * INBOUND_TOOLS and the quick INBOUND_OPENER; an outbound call its prompt and tools (no opener option), and a guard
+ * goodbye that gives our callback number.
  */
 function conversationFor(
   entry: ActiveAiCall,
   slots: AppointmentSlot[],
   deps: StreamSessionDeps,
-): Pick<BridgeOptions, 'instructions' | 'tools' | 'opener' | 'goodbyeBeforeEnd'> {
+): Pick<BridgeOptions, 'instructions' | 'tools' | 'opener' | 'goodbyeBeforeEnd' | 'goodbyeNote'> {
   // Part 6 B: a practice call rings a test number but says the seller's local time (the record's phone; service.ts).
   const prompt: PromptInput = { ...entry.prompt, localTime: localTimeFor(entry.localTimeE164 ?? entry.toE164, deps.now()) };
   if (entry.direction === 'inbound') {
@@ -184,7 +186,12 @@ function conversationFor(
       goodbyeBeforeEnd: true,
     };
   }
-  return { instructions: buildInstructions(prompt, logTemplateError(deps.log)), tools: toolsFor(slots) };
+  return {
+    instructions: buildInstructions(prompt, logTemplateError(deps.log)),
+    tools: toolsFor(slots),
+    goodbyeBeforeEnd: true,
+    goodbyeNote: sayGoodbyeWithNumber(phoneForms(prompt.callbackNumber)?.spoken ?? null),
+  };
 }
 
 function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: string }, streamSid: string, deps: StreamSessionDeps): void {
