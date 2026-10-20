@@ -47,15 +47,19 @@ export type EmailBlock = z.infer<typeof EmailBlock>;
 export const EMAIL_SUBJECT_MAX = 150;
 export const EMAIL_BODY_MAX = 3000;
 
-/** One call on the timeline (an ai_calls row; calls are merged in at read time, never copied). */
+/**
+ * One call on the timeline (an ai_calls row; calls are merged in at read time, never copied). outcome,
+ * summary and durationSeconds are null until the call has them (ai_calls.outcome / summary / duration_seconds
+ * are nullable, as AiCallResult models them).
+ */
 const TimelineCall = z.object({
   type: z.literal('call'),
   /** ai_calls.id */
   id: z.string().uuid(),
   at: z.string(),
   outcome: AiCallOutcome.nullable(),
-  summary: z.string(),
-  durationSeconds: z.number().int(),
+  summary: z.string().nullable(),
+  durationSeconds: z.number().int().nullable(),
   transcriptAvailable: z.boolean(),
 });
 

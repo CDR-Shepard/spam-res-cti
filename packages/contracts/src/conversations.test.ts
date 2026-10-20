@@ -161,6 +161,13 @@ describe('TimelineItem', () => {
     expect(TimelineItem.parse({ ...noteItem, byName: null }).type).toBe('note');
   });
 
+  it('a call still ringing or in progress has no summary and no duration yet (ai_calls.summary / duration_seconds are nullable)', () => {
+    const early = { ...callItem, outcome: null, summary: null, durationSeconds: null, transcriptAvailable: false };
+    expect(TimelineItem.parse(early)).toEqual(early);
+    expect(TimelineItem.safeParse({ ...callItem, summary: undefined }).success).toBe(false);
+    expect(TimelineItem.safeParse({ ...callItem, durationSeconds: 1.5 }).success).toBe(false);
+  });
+
   it('a call outcome is an AiCallOutcome', () => {
     expect(TimelineItem.safeParse({ ...callItem, outcome: 'appointment_set' }).success).toBe(true);
     expect(TimelineItem.safeParse({ ...callItem, outcome: 'made_up' }).success).toBe(false);
