@@ -10,6 +10,8 @@ import type { FastifyInstance } from 'fastify';
 import type { Db } from '@cti/db';
 import { buildApp } from '../app.js';
 import { testConfig } from '../test/harness.js';
+import type { AlertEvent } from '../alerts.js';
+import type { StopInput } from '../conversations/store.js';
 import { registerEmailUnsubscribeRoutes } from './email-unsubscribe.js';
 
 const store = vi.hoisted(() => ({
@@ -26,15 +28,17 @@ const FAKE_DB = { fake: 'db' } as unknown as Db;
 
 let app: FastifyInstance;
 let logLines: string[];
+let alerts: AlertEvent[];
 
 async function build(companyName = 'GG Homes') {
   logLines = [];
+  alerts = [];
   app = await buildApp({
     // development logs at debug level, so the request log lines exist to be read.
     cfg: testConfig({ NODE_ENV: 'development' }),
     readiness: async () => ({ dbOk: true, jobsOk: true }),
     logStream: { write: (line) => logLines.push(line) },
-    apiRoutes: [(scope) => registerEmailUnsubscribeRoutes(scope, { db: FAKE_DB, companyName, now: () => NOW })],
+    apiRoutes: [(scope) => registerEmailUnsubscribeRoutes(scope, { db: FAKE_DB, companyName, now: () => NOW, alert: async (event) => void alerts.push(event) })],
   });
 }
 
@@ -127,7 +131,37 @@ describe('POST /api/email/unsubscribe/:token', () => {
     expect(textOf(res.body)).toContain(UNSUBSCRIBED);
     expect(res.body).not.toMatch(/<form/);
     expect(store.stopSeller).toHaveBeenCalledTimes(1);
-    expect(store.stopSeller).toHaveBeenCalledWith(FAKE_DB, { conversationId: CONVERSATION_ID, reason: 'opted_out', now: NOW });
+    expect(store.stopSeller).toHaveBeenCalledWith(FAKE_DB, { conversationId: CONVERSATION_ID, reason: 'opted_out', now: NOW, onSharedAddress: expect.any(Function) });
+    expect(alerts).toEqual([]);
+  });
+
+  it('a stop held back by an address many records share raises one seller_needs_person once the stop has committed (ids and a count)', async () => {
+    let committed = false;
+    store.stopSeller.mockImplementation(async (_db: unknown, i: StopInput) => {
+      i.onSharedAddress?.({ orgId: 'org-1', conversationId: CONVERSATION_ID, sharedRecordCount: 9 });
+      // The alert must not go out from inside the stop's transaction.
+      expect(alerts).toEqual([]);
+      committed = true;
+      return true;
+    });
+    await build();
+    const res = await post(URL_PATH, { 'content-type': 'application/x-www-form-urlencoded' }, 'List-Unsubscribe=One-Click');
+    expect(res.statusCode).toBe(200);
+    expect(committed).toBe(true);
+    expect(alerts).toEqual([
+      expect.objectContaining({ kind: 'seller_needs_person', orgId: 'org-1', context: { conversationId: CONVERSATION_ID, sharedRecordCount: 9 } }),
+    ]);
+  });
+
+  it('a failed stop raises no shared-address alert, even if the stop heard of one before it failed', async () => {
+    store.stopSeller.mockImplementation(async (_db: unknown, i: StopInput) => {
+      i.onSharedAddress?.({ orgId: 'org-1', conversationId: CONVERSATION_ID, sharedRecordCount: 9 });
+      throw Object.assign(new Error('boom'), { code: '23505' });
+    });
+    await build();
+    const res = await post(URL_PATH, { 'content-type': 'application/x-www-form-urlencoded' }, 'List-Unsubscribe=One-Click');
+    expect(res.statusCode).toBe(500);
+    expect(alerts).toEqual([]);
   });
 
   it.each([

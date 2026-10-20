@@ -414,6 +414,21 @@ describe.skipIf(!pgLane)('replies: receive, decide, answer (real Postgres)', () 
       expect(await inboundRows(s.conv.id)).toHaveLength(1);
     });
 
+    it('an opt-out at an address 7 records share stops only this seller and raises one seller_needs_person (ids and a count)', async () => {
+      const s = await seedSeller();
+      for (let i = 0; i < 6; i += 1) await seedRecord(db, s.orgId, snapshot({ sfRecordId: leadId(700_000 + (seq += 1)), email: ADDRESS }));
+      const email = reply(s, { to: [unsubscribeMailto(s.conv.token, CFG.EMAIL_REPLY_DOMAIN)], subject: 'unsubscribe', text: '' });
+      const { d, alert, log } = deps({ emails: [email] });
+      expect(await handleReceived(d, received(email), NOW)).toBe('done');
+      expect(await conversationRow(s.conv.id)).toMatchObject({ status: 'stopped', stopReason: 'opted_out' });
+      const stopped = await t.pool.query(`select count(*)::int as n from seller_conversations where org_id = $1 and status = 'stopped'`, [s.orgId]);
+      expect(stopped.rows[0].n).toBe(1);
+      expect(alert).toHaveBeenCalledTimes(1);
+      expect(alert.mock.calls[0]![0]).toMatchObject({ kind: 'seller_needs_person', orgId: s.orgId, context: { conversationId: s.conv.id, sharedRecordCount: 7 } });
+      expect(alert.mock.calls[0]![0].context).toEqual({ conversationId: s.conv.id, sharedRecordCount: 7 });
+      assertNoPii(alert, log);
+    });
+
     it.each([
       ['Cc', (s: Seller) => ({ cc: [unsubscribeMailto(s.conv.token, CFG.EMAIL_REPLY_DOMAIN)] })],
       ["Resend's received-for list", (s: Seller) => ({ receivedFor: [unsubscribeMailto(s.conv.token, CFG.EMAIL_REPLY_DOMAIN)] })],

@@ -22,6 +22,8 @@
  */
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Db } from '@cti/db';
+import { dispatchAlert, type AlertEvent } from '../alerts.js';
+import { raiseSharedAddressAlert, sharedAddressCollector } from '../conversations/shared-address.js';
 import { findConversationByToken, stopSeller } from '../conversations/store.js';
 import { describeError } from '../email/errors.js';
 import { escapeHtml, possessive } from '../email/render.js';
@@ -37,6 +39,8 @@ export interface EmailUnsubscribeDeps {
   /** The tenant's name as the emails say it ("GG Homes"). */
   companyName: string;
   now?: () => Date;
+  /** Where the seller_needs_person alert goes (a stop at an address many records share); the shared dispatcher when absent. */
+  alert?: (event: AlertEvent) => Promise<void>;
 }
 
 /** Sent with every page; nothing here may be loosened without thinking about the token in the URL. */
@@ -130,13 +134,17 @@ export async function registerEmailUnsubscribeRoutes(app: FastifyInstance, deps:
   app.post<{ Params: { token: string } }>('/email/unsubscribe/:token', async (req, reply) => {
     const conversation = await conversationFor(req.params.token);
     if (!conversation) return sendPage(reply, 404, notValidPage());
+    const shared = sharedAddressCollector();
     try {
-      await stopSeller(deps.db, { conversationId: conversation.id, reason: 'opted_out', now: deps.now?.() ?? new Date() });
+      await stopSeller(deps.db, { conversationId: conversation.id, reason: 'opted_out', now: deps.now?.() ?? new Date(), onSharedAddress: shared.onSharedAddress });
     } catch (err) {
       req.log.error({ conversationId: conversation.id, requestId: req.id, ...describeError(err) }, 'unsubscribe failed');
       return sendPage(reply, 500, failedPage());
     }
     req.log.info({ conversationId: conversation.id, requestId: req.id }, 'seller unsubscribed');
+    // stopSeller ran its own transaction, so the stop has committed: a stop held back by a shared address may page now.
+    const alert = deps.alert ?? ((event: AlertEvent) => dispatchAlert(req.log, event));
+    for (const notice of shared.notices()) await raiseSharedAddressAlert({ alert, log: req.log }, notice);
     return sendPage(reply, 200, donePage(deps.companyName));
   });
 }

@@ -5,6 +5,7 @@ import { schema, type Db } from '@cti/db';
 import { enrollmentById, seedAiCall, seedReleasedLead, touchById } from '../test/ai-call-seed.js';
 import { seedAiCallCampaign, seedUser } from '../test/call-plan-seed.js';
 import { createTestDb, pgLane } from '../test/pg.js';
+import type { AlertEvent } from '../alerts.js';
 import { nextAttemptAt } from './pacing-rules.js';
 import { collectAiCallResults } from './results.js';
 
@@ -279,6 +280,19 @@ describe.skipIf(!pgLane)('collectAiCallResults (real Postgres)', () => {
       await db.update(schema.aiCalls).set({ isTest: true, practice: true }).where(eq(schema.aiCalls.id, lead.aiCallId));
       await collectAiCallResults(db, NOW, quiet);
       expect(await conversationsOf(lead.orgId, lead.crmRecordId)).toEqual([]);
+    });
+
+    it('a do_not_call at an address 7 records share stops only this seller and raises one seller_needs_person after commit (I3)', async () => {
+      const lead = await placed('completed', 'do_not_call');
+      await db.update(schema.crmRecords).set({ email: 'shared@example.com' }).where(eq(schema.crmRecords.id, lead.crmRecordId));
+      const others = [];
+      for (let i = 0; i < 6; i += 1) others.push(await seedReleasedLead(db, { orgId: lead.orgId, campaignId: lead.campaignId }, { recordOver: { email: 'Shared@Example.com' } }));
+      const alerts: AlertEvent[] = [];
+      await collectAiCallResults(db, NOW, quiet, async (event) => void alerts.push(event));
+      const [own] = await conversationsOf(lead.orgId, lead.crmRecordId);
+      expect(own).toMatchObject({ status: 'stopped', stopReason: 'asked_to_stop' });
+      for (const other of others) expect(await enrollmentById(db, other.enrollmentId)).toMatchObject({ status: 'active' });
+      expect(alerts).toEqual([expect.objectContaining({ kind: 'seller_needs_person', orgId: lead.orgId, context: { conversationId: own!.id, sharedRecordCount: 7 } })]);
     });
 
     it('a conversation failure leaves the call uncounted, to be tried again next tick', async () => {

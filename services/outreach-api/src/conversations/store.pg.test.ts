@@ -16,6 +16,7 @@ import {
   suppressAddress,
   suppressionFor,
 } from './store.js';
+import { SHARED_ADDRESS_LIMIT, type SharedAddressNotice } from './shared-address.js';
 
 const NOW = new Date('2026-10-19T17:00:00.000Z');
 const TOKEN_RE = /^[a-z2-7]{26}$/;
@@ -393,17 +394,105 @@ describe.skipIf(!pgLane)('conversation store (real Postgres)', () => {
       expect(await suppressionRows(orgId)).toMatchObject([{ reason: 'opted_out' }]);
     });
 
-    it('not_interested never suppresses the address, but still stops the seller across records', async () => {
+    it('not_interested stops only its own record: it suppresses nothing and leaves a same-address record untouched (I3)', async () => {
       const { orgId, campaignId, lead, conv } = await seedEnrolledSeller('seller@example.com');
       const duplicate = await seedDuplicate(orgId, campaignId);
       expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'not_interested', now: NOW })).toBe(true);
       expect(await suppressionRows(orgId)).toEqual([]);
       expect(await enrollmentById(t.db, lead.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'not_interested' });
-      expect(await conversationsOfRecord(orgId, duplicate.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'not_interested' }]);
-      expect(await enrollmentById(t.db, duplicate.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'not_interested' });
+      expect(await conversationsOfRecord(orgId, duplicate.crmRecordId)).toEqual([]);
+      expect(await enrollmentById(t.db, duplicate.enrollmentId)).toMatchObject({ status: 'active', exitReason: null });
+      expect(await touchById(t.db, duplicate.touchId)).toMatchObject({ status: 'planned' });
       // Already stopped as not_interested: a second one is no news, and still no suppression.
       expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'not_interested', now: NOW })).toBe(false);
       expect(await suppressionRows(orgId)).toEqual([]);
+      expect(await conversationsOfRecord(orgId, duplicate.crmRecordId)).toEqual([]);
+    });
+
+    describe('an address shared by many records (SHARED_ADDRESS_LIMIT, I3)', () => {
+      /** The seller plus `others` more records with the same address (any case), each with an active enrollment. */
+      async function seedSharedAddress(others: number) {
+        const seller = await seedEnrolledSeller('shared@example.com');
+        const siblings = [];
+        for (let i = 0; i < others; i += 1) siblings.push(await seedDuplicate(seller.orgId, seller.campaignId, i % 2 === 0 ? 'Shared@Example.com' : ' shared@example.COM '));
+        return { ...seller, siblings };
+      }
+
+      it('the limit is 5 records', () => {
+        expect(SHARED_ADDRESS_LIMIT).toBe(5);
+      });
+
+      it('opted_out with the address on 3 records stops both siblings, and nobody is told', async () => {
+        const { orgId, conv, siblings } = await seedSharedAddress(2);
+        const notices: SharedAddressNotice[] = [];
+        await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW, onSharedAddress: (n) => notices.push(n) });
+        for (const sibling of siblings) {
+          expect(await conversationsOfRecord(orgId, sibling.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'opted_out' }]);
+          expect(await enrollmentById(t.db, sibling.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'opted_out' });
+        }
+        expect(notices).toEqual([]);
+      });
+
+      it('with the address on exactly 5 records the stop still spreads', async () => {
+        const { orgId, conv, siblings } = await seedSharedAddress(4);
+        const notices: SharedAddressNotice[] = [];
+        await stopSeller(t.db, { conversationId: conv.id, reason: 'asked_to_stop', now: NOW, onSharedAddress: (n) => notices.push(n) });
+        for (const sibling of siblings) expect(await enrollmentById(t.db, sibling.enrollmentId)).toMatchObject({ status: 'exited' });
+        expect(notices).toEqual([]);
+      });
+
+      it.each(['opted_out', 'complained', 'asked_to_stop'] as const)(
+        '%s with the address on 7 records stops only its own record, still suppresses the address, and tells the caller once (ids and a count)',
+        async (reason) => {
+          const { orgId, lead, conv, siblings } = await seedSharedAddress(6);
+          const notices: SharedAddressNotice[] = [];
+          expect(await stopSeller(t.db, { conversationId: conv.id, reason, now: NOW, onSharedAddress: (n) => notices.push(n) })).toBe(true);
+          expect(await conversationRow(conv.id)).toMatchObject({ status: 'stopped', stopReason: reason });
+          expect(await enrollmentById(t.db, lead.enrollmentId)).toMatchObject({ status: 'exited', exitReason: reason });
+          for (const sibling of siblings) {
+            expect(await conversationsOfRecord(orgId, sibling.crmRecordId)).toEqual([]);
+            expect(await enrollmentById(t.db, sibling.enrollmentId)).toMatchObject({ status: 'active', exitReason: null });
+          }
+          expect(await suppressionRows(orgId)).toMatchObject([{ address: 'shared@example.com', reason: reason === 'complained' ? 'complained' : 'opted_out' }]);
+          expect(notices).toEqual([{ orgId, conversationId: conv.id, sharedRecordCount: 7 }]);
+          expect(JSON.stringify(notices)).not.toMatch(/@/);
+        },
+      );
+
+      it('an already stopped conversation that meets the shared address tells the caller again and still spreads nothing', async () => {
+        const { orgId, conv, siblings } = await seedSharedAddress(6);
+        await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW });
+        const notices: SharedAddressNotice[] = [];
+        expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW, onSharedAddress: (n) => notices.push(n) })).toBe(false);
+        expect(notices).toEqual([{ orgId, conversationId: conv.id, sharedRecordCount: 7 }]);
+        for (const sibling of siblings) expect(await enrollmentById(t.db, sibling.enrollmentId)).toMatchObject({ status: 'active' });
+      });
+
+      it('spreads through an emailed address shared by few records while holding back at one shared by many', async () => {
+        const { orgId, campaignId, conv, siblings } = await seedSharedAddress(6);
+        const eventId = await appendEvent(t.db, { orgId, conversationId: conv.id, kind: 'email', direction: 'out', actor: 'sam', occurredAt: NOW, subject: 's', body: 'b', sfLog: false });
+        await t.db.insert(schema.emailMessages).values({ orgId, conversationId: conv.id, eventId, direction: 'out', status: 'sent', purpose: 'first', toAddress: 'old@example.com', fromAddress: 'sam@example.com' });
+        const oldHolder = await seedDuplicate(orgId, campaignId, 'old@example.com');
+        const notices: SharedAddressNotice[] = [];
+        await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW, onSharedAddress: (n) => notices.push(n) });
+        expect(await enrollmentById(t.db, oldHolder.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'opted_out' });
+        for (const sibling of siblings) expect(await enrollmentById(t.db, sibling.enrollmentId)).toMatchObject({ status: 'active' });
+        expect((await suppressionRows(orgId)).map((r) => r.address).sort()).toEqual(['old@example.com', 'shared@example.com']);
+        expect(notices).toEqual([{ orgId, conversationId: conv.id, sharedRecordCount: 7 }]);
+      });
+
+      it('a rolled-back stop tells the caller inside the transaction only (the caller alerts after commit)', async () => {
+        const { conv } = await seedSharedAddress(6);
+        const notices: SharedAddressNotice[] = [];
+        await expect(
+          t.db.transaction(async (tx) => {
+            await stopSeller(tx as unknown as typeof t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW, onSharedAddress: (n) => notices.push(n) });
+            throw new Error('rollback');
+          }),
+        ).rejects.toThrow('rollback');
+        expect(notices).toHaveLength(1);
+        expect(await conversationRow(conv.id)).toMatchObject({ status: 'open' });
+      });
     });
 
     describe('the address that was emailed', () => {
@@ -694,13 +783,26 @@ describe.skipIf(!pgLane)('conversation store (real Postgres)', () => {
       expect(await eventsOf(sibling!.id)).toMatchObject([{ detail: 'asked_to_stop', sfLogStatus: 'pending' }]);
     });
 
-    it('not_interested sweeps the duplicate record but suppresses nothing and leaves its own enrollment', async () => {
+    it('not_interested is about one property: it suppresses nothing, leaves the duplicate record alone and its own enrollment to the results tick (I3)', async () => {
       const { orgId, lead, duplicate } = await seedCalledSeller();
       await call(orgId, lead.crmRecordId, 'not_interested');
       expect(await enrollmentById(t.db, lead.enrollmentId)).toMatchObject({ status: 'active' });
       expect(await suppressionRows(orgId)).toEqual([]);
-      expect(await conversationsOfRecord(orgId, duplicate.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'not_interested' }]);
-      expect(await enrollmentById(t.db, duplicate.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'not_interested' });
+      expect(await conversationsOfRecord(orgId, duplicate.crmRecordId)).toEqual([]);
+      expect(await enrollmentById(t.db, duplicate.enrollmentId)).toMatchObject({ status: 'active', exitReason: null });
+    });
+
+    it('do_not_call at an address on 7 records stops only its own conversation and tells the caller once', async () => {
+      const { orgId, campaignId, lead, duplicate } = await seedCalledSeller();
+      const more = [];
+      for (let i = 0; i < 5; i += 1) more.push(await seedReleasedLead(t.db, { orgId, campaignId }, { recordOver: { email: 'seller@example.com' } }));
+      const notices: SharedAddressNotice[] = [];
+      await setStatusFromCall(t.db, { orgId, crmRecordId: lead.crmRecordId, outcome: 'do_not_call', now: NOW, onSharedAddress: (n) => notices.push(n) });
+      const [own] = await conversationsOfRecord(orgId, lead.crmRecordId);
+      expect(own).toMatchObject({ status: 'stopped', stopReason: 'asked_to_stop' });
+      for (const sibling of [duplicate, ...more]) expect(await enrollmentById(t.db, sibling.enrollmentId)).toMatchObject({ status: 'active' });
+      expect(await suppressionRows(orgId)).toMatchObject([{ address: 'seller@example.com', reason: 'opted_out' }]);
+      expect(notices).toEqual([{ orgId, conversationId: own!.id, sharedRecordCount: 7 }]);
     });
 
     it('an appointment does not sweep: the duplicate record and its enrollment are left alone', async () => {

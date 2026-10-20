@@ -20,6 +20,7 @@ import { and, eq, isNull, sql } from 'drizzle-orm';
 import type { AiCallOutcome, ConversationHandler, FlagReason, StopReason } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { finishAiEnrollment } from '../ai-calls/touches.js';
+import { SHARED_ADDRESS_LIMIT, type OnSharedAddress } from './shared-address.js';
 
 export type SellerConversationRow = typeof schema.sellerConversations.$inferSelect;
 type EventKind = (typeof schema.CONVERSATION_EVENT_KINDS)[number];
@@ -206,6 +207,17 @@ interface StoppedSeller {
   now: Date;
   /** The caller exits the record's own enrollments itself (the results tick does, in its own flow). */
   exitOwnEnrollments: boolean;
+  onSharedAddress?: OnSharedAddress;
+}
+
+/** How many of the tenant's records carry each of these addresses (trimmed, any case). Reads only: no lock is taken. */
+async function recordCountsByAddress(db: Db, orgId: string, addresses: readonly string[]): Promise<Map<string, number>> {
+  if (addresses.length === 0) return new Map();
+  const result = await db.execute(sql`
+    select lower(btrim(email)) as address, count(*)::int as n from crm_records
+    where org_id = ${orgId}::uuid and lower(btrim(email)) in (${sqlList(addresses, '')})
+    group by 1`);
+  return new Map(rows<{ address: string; n: number }>(result).map((r) => [r.address, r.n]));
 }
 
 /** The other records of the tenant that carry any of these addresses (trimmed, any case), oldest id first so locks are taken in one order. */
@@ -248,38 +260,55 @@ async function stopSiblingConversation(db: Db, s: StoppedSeller, siblingRecordId
 }
 
 /**
- * Everything a stop of a REAL conversation reaches beyond its own row, whether or not the row was already
- * stopped (every step is idempotent, so a later opt-out, complaint or new duplicate record still lands):
- *  - the record's address, and every address Sam emailed in this conversation, go on the suppression list
- *    (for the reasons in SUPPRESSING_REASONS). The record's email can change in Salesforce after Sam wrote,
- *    and the person who opted out must stay suppressed at the address that actually received the email.
- *    They are inserted in sorted order: two concurrent sweeps over the same addresses then take their index
- *    locks in the same order and cannot deadlock (40P01);
- *  - every other record of the tenant with one of those addresses (any case; the record's current one always,
- *    the emailed ones only for a suppressing reason) gets a real conversation that is `stopped`, whether or
- *    not it had one, and every active ai_call enrollment of those records is exited (keys freed, planned
- *    touches skipped, call stage closed);
- *  - the record's own active ai_call enrollments are exited too, unless the caller does that itself.
- * A seller who opts out of one of their records is opting out of all of them.
+ * The other records a suppressing stop reaches: those that carry an address of the stop shared by at most
+ * SHARED_ADDRESS_LIMIT of the tenant's records (stopped, ids in order). An address on more of them is not one seller's,
+ * so its records are left alone and the caller is told once (ids and a count, never the address).
  */
-async function sweepSeller(db: Db, s: StoppedSeller): Promise<void> {
+async function stopSiblings(db: Db, s: StoppedSeller, addresses: readonly string[]): Promise<string[]> {
+  const counts = await recordCountsByAddress(db, s.orgId, addresses);
+  const crowded = addresses.filter((a) => (counts.get(a) ?? 0) > SHARED_ADDRESS_LIMIT);
+  const spread = addresses.filter((a) => !crowded.includes(a));
+  const siblings = await recordsWithAddresses(db, s.orgId, s.crmRecordId, spread);
+  for (const siblingRecordId of siblings) await stopSiblingConversation(db, s, siblingRecordId);
+  if (crowded.length > 0) {
+    // A record has one email, so the crowded addresses' records never overlap and their counts add up.
+    const sharedRecordCount = crowded.reduce((sum, a) => sum + (counts.get(a) ?? 0), 0);
+    s.onSharedAddress?.({ orgId: s.orgId, conversationId: s.conversationId, sharedRecordCount });
+  }
+  return siblings;
+}
+
+/** A suppressing stop: the record's current address and every emailed one are suppressed, in one sorted order (the lock order), then the siblings. */
+async function suppressAndStopSiblings(db: Db, s: StoppedSeller, reason: SuppressionReason): Promise<string[]> {
   const [record] = rows<{ email: string | null }>(
     await db.execute(sql`select lower(btrim(email)) as email from crm_records where id = ${s.crmRecordId}::uuid and org_id = ${s.orgId}::uuid`),
   );
   const email = record?.email || null;
-  const recordIds = s.exitOwnEnrollments ? [s.crmRecordId] : [];
+  const suppressed = [...new Set([...(email ? [email] : []), ...(await emailedAddresses(db, s.conversationId))])].sort();
+  for (const address of suppressed) await suppressAddress(db, { orgId: s.orgId, address, reason, conversationId: s.conversationId });
+  return stopSiblings(db, s, suppressed);
+}
+
+/**
+ * Everything a stop of a REAL conversation reaches beyond its own row, whether or not the row was already
+ * stopped (every step is idempotent, so a later opt-out, complaint or new duplicate record still lands):
+ *  - for a suppressing reason (opted_out, complained, asked_to_stop) the record's address, and every address Sam
+ *    emailed in this conversation, go on the suppression list. The record's email can change in Salesforce after
+ *    Sam wrote, and the person who opted out must stay suppressed at the address that actually received the email.
+ *    They are inserted in sorted order: two concurrent sweeps over the same addresses then take their index locks
+ *    in the same order and cannot deadlock (40P01);
+ *  - for a suppressing reason, every other record of the tenant with one of those addresses (any case) gets a real
+ *    conversation that is `stopped`, whether or not it had one, and every active ai_call enrollment of those
+ *    records is exited (keys freed, planned touches skipped, call stage closed). A seller who opts out of one of
+ *    their records is opting out of all of them; but an address on more than SHARED_ADDRESS_LIMIT records is not
+ *    one seller's (an agent's inbox), so those records are left to a person (stopSiblings);
+ *  - `not_interested` is about one property: it reaches no other record and suppresses nothing;
+ *  - the record's own active ai_call enrollments are exited too, unless the caller does that itself.
+ */
+async function sweepSeller(db: Db, s: StoppedSeller): Promise<void> {
   const suppression = suppressionReasonFor(s.reason);
-  // What this stop suppresses: the record's current address and every emailed one, but only for a suppressing reason.
-  const suppressed = suppression ? [...new Set([...(email ? [email] : []), ...(await emailedAddresses(db, s.conversationId))])].sort() : [];
-  if (suppression) {
-    for (const address of suppressed) await suppressAddress(db, { orgId: s.orgId, address, reason: suppression, conversationId: s.conversationId });
-  }
-  // A stop of any reason reaches the other records with the record's current address; a suppressing one also those with an emailed address.
-  const swept = [...new Set([...(email ? [email] : []), ...suppressed])].sort();
-  for (const siblingRecordId of await recordsWithAddresses(db, s.orgId, s.crmRecordId, swept)) {
-    await stopSiblingConversation(db, s, siblingRecordId);
-    recordIds.push(siblingRecordId);
-  }
+  const siblings = suppression ? await suppressAndStopSiblings(db, s, suppression) : [];
+  const recordIds = [...(s.exitOwnEnrollments ? [s.crmRecordId] : []), ...siblings];
   if (recordIds.length === 0) return;
   const enrollments = await db.execute(sql`
     select e.id from campaign_enrollments e
@@ -297,6 +326,18 @@ interface StoppedConversation {
   practiceUserId: string | null;
 }
 
+export interface StopInput {
+  conversationId: string;
+  reason: StopReason;
+  now: Date;
+  /**
+   * Told, inside the stop's transaction, when the stop did not spread to other records because an address of it is
+   * on more than SHARED_ADDRESS_LIMIT of them. The caller raises the seller_needs_person alert after its own
+   * transaction commits (raiseSharedAddressAlert), so a stop that rolls back never pages anyone.
+   */
+  onSharedAddress?: OnSharedAddress;
+}
+
 /**
  * A stop that finds the REAL conversation already stopped (a call said not_interested, a duplicate record
  * was synced after the first stop): the sweep still runs, so the address is suppressed and every record of
@@ -304,7 +345,7 @@ interface StoppedConversation {
  * stop reason is upgraded and a `status` event (logged to Salesforce) records it. Returns whether the row
  * changed. A practice conversation, or none, is false and nothing is touched.
  */
-async function stopAlreadyStopped(db: Db, i: { conversationId: string; reason: StopReason; now: Date }): Promise<boolean> {
+async function stopAlreadyStopped(db: Db, i: StopInput): Promise<boolean> {
   const [current] = rows<StoppedConversation & { status: string }>(
     await db.execute(sql`
       select id, org_id as "orgId", crm_record_id as "crmRecordId", practice_user_id as "practiceUserId", status
@@ -319,7 +360,15 @@ async function stopAlreadyStopped(db: Db, i: { conversationId: string; reason: S
       returning id`);
     upgraded = rows<{ id: string }>(result).length > 0;
   }
-  await sweepSeller(db, { orgId: current.orgId, conversationId: current.id, crmRecordId: current.crmRecordId, reason: i.reason, now: i.now, exitOwnEnrollments: true });
+  await sweepSeller(db, {
+    orgId: current.orgId,
+    conversationId: current.id,
+    crmRecordId: current.crmRecordId,
+    reason: i.reason,
+    now: i.now,
+    exitOwnEnrollments: true,
+    onSharedAddress: i.onSharedAddress,
+  });
   if (upgraded) {
     await appendEvent(db, { orgId: current.orgId, conversationId: current.id, kind: 'status', direction: 'none', actor: 'system', occurredAt: i.now, detail: i.reason, sfLog: true });
   }
@@ -333,7 +382,7 @@ async function stopAlreadyStopped(db: Db, i: { conversationId: string; reason: S
  * seller's other records, enrollments). Already stopped: see stopAlreadyStopped. Returns whether this
  * conversation's row changed (status or stop reason).
  */
-export async function stopSeller(db: Db, i: { conversationId: string; reason: StopReason; now: Date }): Promise<boolean> {
+export async function stopSeller(db: Db, i: StopInput): Promise<boolean> {
   return db.transaction(async (tx) => {
     const t = asDb(tx);
     const result = await t.execute(sql`
@@ -344,7 +393,15 @@ export async function stopSeller(db: Db, i: { conversationId: string; reason: St
     if (!stopped) return stopAlreadyStopped(t, i);
     const practice = stopped.practiceUserId !== null;
     if (!practice) {
-      await sweepSeller(t, { orgId: stopped.orgId, conversationId: stopped.id, crmRecordId: stopped.crmRecordId, reason: i.reason, now: i.now, exitOwnEnrollments: true });
+      await sweepSeller(t, {
+        orgId: stopped.orgId,
+        conversationId: stopped.id,
+        crmRecordId: stopped.crmRecordId,
+        reason: i.reason,
+        now: i.now,
+        exitOwnEnrollments: true,
+        onSharedAddress: i.onSharedAddress,
+      });
     }
     await appendEvent(t, {
       orgId: stopped.orgId,
@@ -376,14 +433,14 @@ const CALL_STATUS_CHANGES: Partial<Record<AiCallOutcome, CallStatusChange>> = {
 /**
  * What a finished AI call says about the seller's conversation: an appointment books it (only while open), a
  * do-not-call or not-interested stops it. The conversation is created when missing. Its own `status` event
- * is not logged to Salesforce (the call already has its Task). A stop also runs the sweep, so the seller's
- * other records are stopped and their enrollments exited (a do-not-call also suppresses the address, a
- * not-interested does not) even when this conversation was already stopped. The call's OWN record's
- * enrollments are left to the results tick that calls this: it exits them in its own flow.
+ * is not logged to Salesforce (the call already has its Task). A stop also runs the sweep, even when this
+ * conversation was already stopped: a do-not-call suppresses the address and stops the seller's other records
+ * (within SHARED_ADDRESS_LIMIT; `onSharedAddress` as in stopSeller); a not-interested stays on this record. The
+ * call's OWN record's enrollments are left to the results tick that calls this: it exits them in its own flow.
  */
 export async function setStatusFromCall(
   db: Db,
-  i: { orgId: string; crmRecordId: string; outcome: AiCallOutcome | null; now: Date },
+  i: { orgId: string; crmRecordId: string; outcome: AiCallOutcome | null; now: Date; onSharedAddress?: OnSharedAddress },
 ): Promise<void> {
   const change = i.outcome ? CALL_STATUS_CHANGES[i.outcome] : undefined;
   if (!change) return;
@@ -407,7 +464,15 @@ export async function setStatusFromCall(
       });
     }
     if (change.stopReason) {
-      await sweepSeller(t, { orgId: i.orgId, conversationId: conversation.id, crmRecordId: i.crmRecordId, reason: change.stopReason, now: i.now, exitOwnEnrollments: false });
+      await sweepSeller(t, {
+        orgId: i.orgId,
+        conversationId: conversation.id,
+        crmRecordId: i.crmRecordId,
+        reason: change.stopReason,
+        now: i.now,
+        exitOwnEnrollments: false,
+        onSharedAddress: i.onSharedAddress,
+      });
     }
   });
 }

@@ -31,6 +31,7 @@ import { EMAIL_SUBJECT_MAX, type ConversationHandler, type ConversationStatus, t
 import type { Db } from '@cti/db';
 import { sellerPageUrl, type AlertEvent } from '../alerts.js';
 import type { AppConfig } from '../config.js';
+import { raiseSharedAddressAlert, sharedAddressCollector, type OnSharedAddress } from '../conversations/shared-address.js';
 import { appendEvent, findConversationByToken, flagConversation, stopSeller } from '../conversations/store.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { samEmailSettings } from '../settings.js';
@@ -430,7 +431,7 @@ async function queueAnswer(t: Db, deps: InboundDeps, ctx: ReplyContext, r: ReadR
  * Sam reads the reply and decides. Whatever she cannot do (no budget, no usable answer, a draft that fails the check)
  * goes to a person. The spend is charged on `deps.db`, outside the handling transaction.
  */
-async function askSam(t: Db, deps: InboundDeps, writer: EmailWriter, ctx: ReplyContext, r: ReadReply, now: Date): Promise<Handled> {
+async function askSam(t: Db, deps: InboundDeps, writer: EmailWriter, ctx: ReplyContext, r: ReadReply, now: Date, onSharedAddress: OnSharedAddress): Promise<Handled> {
   const context = await loadWriterContext(t, { orgId: ctx.orgId, crmRecordId: ctx.crmRecordId, conversationId: ctx.conversationId, now, companyName: deps.cfg.EMAIL_COMPANY_NAME });
   const result = await writeEmail(
     { db: deps.db, writer, orgId: ctx.orgId, settings: ctx.settings, now, signal: AbortSignal.timeout(REPLY_WRITER_TIMEOUT_MS), log: deps.log },
@@ -452,26 +453,27 @@ async function askSam(t: Db, deps: InboundDeps, writer: EmailWriter, ctx: ReplyC
     }
     case 'opt_out':
     case 'not_interested':
-      await stopSeller(t, { conversationId: ctx.conversationId, reason: d.action === 'opt_out' ? 'opted_out' : 'not_interested', now });
+      await stopSeller(t, { conversationId: ctx.conversationId, reason: d.action === 'opt_out' ? 'opted_out' : 'not_interested', now, onSharedAddress });
       return { ...said, flagged: null };
     case 'no_reply':
       return { ...said, flagged: null };
   }
 }
 
-async function act(t: Db, deps: InboundDeps, ctx: ReplyContext, r: ReadReply, decision: InboundDecision, now: Date): Promise<Handled> {
+/** `onSharedAddress` hears of a stop that did not spread (an address on many records): alerted after the transaction commits. */
+async function act(t: Db, deps: InboundDeps, ctx: ReplyContext, r: ReadReply, decision: InboundDecision, now: Date, onSharedAddress: OnSharedAddress): Promise<Handled> {
   switch (decision.kind) {
     case 'record_only':
       return { decision: decision.kind, flagged: null };
     case 'opt_out':
-      await stopSeller(t, { conversationId: ctx.conversationId, reason: 'opted_out', now });
+      await stopSeller(t, { conversationId: ctx.conversationId, reason: 'opted_out', now, onSharedAddress });
       return { decision: decision.kind, flagged: null };
     case 'flag':
       return { decision: decision.kind, flagged: await flag(t, ctx, decision.reason, now) };
     case 'ask_sam':
       // The decision already sent a reply with no writer to a person; this only keeps the types honest.
       if (deps.writer === null) return { decision: decision.kind, flagged: await flag(t, ctx, 'unsure', now) };
-      return askSam(t, deps, deps.writer, ctx, r, now);
+      return askSam(t, deps, deps.writer, ctx, r, now, onSharedAddress);
   }
 }
 
@@ -521,12 +523,13 @@ export async function handleReceived(deps: InboundDeps, ev: { data: unknown; rec
     const t = asDb(tx);
     const ctx = await lockUnhandled(t, stored.id);
     if (!ctx) return null;
-    const outcome = await act(t, deps, ctx, reply, await decide(t, deps, ctx, reply, thread.unsubscribe, now), now);
+    const shared = sharedAddressCollector();
+    const outcome = await act(t, deps, ctx, reply, await decide(t, deps, ctx, reply, thread.unsubscribe, now), now, shared.onSharedAddress);
     await t.execute(sql`update email_messages set handled_at = ${iso(now)}, updated_at = ${iso(now)} where id = ${ctx.emailId}::uuid`);
-    return { ctx, outcome };
+    return { ctx, outcome, shared: shared.notices() };
   });
   if (!handled) return notLockedOutcome(deps.db, stored.id);
-  const { ctx, outcome } = handled;
+  const { ctx, outcome, shared } = handled;
   deps.log.info(
     {
       resendId,
@@ -540,5 +543,6 @@ export async function handleReceived(deps: InboundDeps, ev: { data: unknown; rec
     'email.received: reply handled',
   );
   if (outcome.flagged) await raiseNeedsPerson(deps, ctx, outcome.flagged);
+  for (const notice of shared) await raiseSharedAddressAlert(deps, notice);
   return 'done';
 }

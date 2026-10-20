@@ -38,6 +38,7 @@ import { sql } from 'drizzle-orm';
 import type { Db } from '@cti/db';
 import { dispatchAlert, sellerPageUrl, type AlertEvent } from '../alerts.js';
 import type { AppConfig } from '../config.js';
+import { raiseSharedAddressAlert, sharedAddressCollector, type OnSharedAddress } from '../conversations/shared-address.js';
 import { appendEvent, stopSeller, suppressAddress } from '../conversations/store.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { describeError } from './errors.js';
@@ -334,13 +335,14 @@ async function applyBounce(db: Db, email: OutboundEmail, now: Date): Promise<voi
  * row), the address that actually complained is suppressed too (the record may have changed since Sam wrote),
  * and the tenant's email is paused AND switched off, so the admin's toggle reads off until they turn it back
  * on (which clears the pause). True when this event did it; a repeat finds the email already complained and
- * does nothing.
+ * does nothing. `onSharedAddress` hears of a stop that did not spread (an address on many records); the caller
+ * alerts after this transaction commits.
  */
-async function applyComplaint(db: Db, email: OutboundEmail, now: Date): Promise<boolean> {
+async function applyComplaint(db: Db, email: OutboundEmail, now: Date, onSharedAddress: OnSharedAddress): Promise<boolean> {
   return db.transaction(async (tx) => {
     const t = asDb(tx);
     if (!(await moveStatus(t, email.id, 'complained', ['sending', 'sent', 'delivered', 'bounced', 'failed'], now))) return false;
-    await stopSeller(t, { conversationId: email.conversationId, reason: 'complained', now });
+    await stopSeller(t, { conversationId: email.conversationId, reason: 'complained', now, onSharedAddress });
     if (email.practiceUserId === null) {
       await suppressAddress(t, { orgId: email.orgId, address: email.toAddress, reason: 'complained', conversationId: email.conversationId });
     }
@@ -392,9 +394,12 @@ export async function handleDeliveryEvent(db: Db, ev: DeliveryEvent, now: Date, 
     case 'email.bounced':
       await applyBounce(db, email, now);
       break;
-    case 'email.complained':
-      if (await applyComplaint(db, email, now)) await raiseComplaintAlert(notify, email);
+    case 'email.complained': {
+      const shared = sharedAddressCollector();
+      if (await applyComplaint(db, email, now, shared.onSharedAddress)) await raiseComplaintAlert(notify, email);
+      for (const notice of shared.notices()) await raiseSharedAddressAlert(notify, notice);
       break;
+    }
     case 'email.failed':
     case 'email.suppressed':
       // Resend will not deliver it. The reason is the event type: a short fixed code, never text from the email.

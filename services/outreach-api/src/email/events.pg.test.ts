@@ -330,6 +330,20 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
       expect(alert.mock.calls[0]![0].context?.sellerUrl).toBe(`${APP_URL}/sellers/${s.sfRecordId}`);
     });
 
+    it('a complaint at an address 7 records share stops only this seller and raises one seller_needs_person after commit (ids and a count)', async () => {
+      const s = await seedSeller('complained@resend.dev');
+      for (let i = 0; i < 6; i += 1) await seedRecord(db, s.orgId, snapshot({ sfRecordId: leadId(700_000 + (seq += 1)), email: 'complained@resend.dev' }));
+      const { resendId } = await sentEmail(s);
+      const { alert, log } = deps();
+      await handleDeliveryEvent(db, complaint(resendId), NOW, notifyWith(alert, log));
+      expect(await conversationRow(s.conv.id)).toMatchObject({ status: 'stopped', stopReason: 'complained' });
+      const stopped = await t.pool.query(`select count(*)::int as n from seller_conversations where org_id = $1 and status = 'stopped'`, [s.orgId]);
+      expect(stopped.rows[0].n).toBe(1);
+      const shared = alert.mock.calls.map((c) => c[0]).filter((e) => e.kind === 'seller_needs_person');
+      expect(shared).toEqual([expect.objectContaining({ orgId: s.orgId, context: { conversationId: s.conv.id, sharedRecordCount: 7 } })]);
+      expect(JSON.stringify(shared)).not.toContain('complained@resend.dev');
+    });
+
     it('suppresses the address that complained, not only the one on the record now', async () => {
       const s = await seedSeller('record-owner@example.com');
       const { resendId } = await sentEmail(s, { to: 'complained@resend.dev' });

@@ -14,8 +14,10 @@
 import { inArray, sql } from 'drizzle-orm';
 import { AiCallOutcome } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
+import { dispatchAlert, type AlertEvent } from '../alerts.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { outreachSettings, type OutreachSettings } from '../settings.js';
+import { raiseSharedAddressAlert, sharedAddressCollector, type SharedAddressNotice } from '../conversations/shared-address.js';
 import { setStatusFromCall } from '../conversations/store.js';
 import { enqueueWritebackSql } from '../writeback/store.js';
 import { nextStepFor, TERMINAL_AI_CALL_STATUSES, type NextStep } from './outcomes.js';
@@ -110,24 +112,32 @@ async function applyStep(tx: Db, f: Finished, step: NextStep, now: Date): Promis
 
 /**
  * One finished call in one transaction: counted once, its Salesforce write-back enqueued (plan 1D; one row per call, ever),
- * the seller's conversation updated from the outcome, then the step. Returns what happened to the enrollment, if anything.
+ * the seller's conversation updated from the outcome, then the step. Returns what happened to the enrollment, if anything,
+ * and the shared-address notices the conversation's stop raised (alerted once this transaction has committed).
  * `finishedCalls` returns real calls only (`is_test = false`), so a test or practice call never reaches the conversation.
- * The conversation's stop leaves this call's own enrollment to the step (it exits it itself) and sweeps the seller's others.
+ * The conversation's stop leaves this call's own enrollment to the step (it exits it itself); a do-not-call also sweeps the
+ * seller's other records (within SHARED_ADDRESS_LIMIT), a not-interested stays on this record.
  */
-async function collectOne(db: Db, f: Finished, settings: OutreachSettings, now: Date): Promise<keyof ResultCounts | null> {
+async function collectOne(
+  db: Db,
+  f: Finished,
+  settings: OutreachSettings,
+  now: Date,
+): Promise<{ done: keyof ResultCounts | null; shared: readonly SharedAddressNotice[] }> {
   const outcome = AiCallOutcome.safeParse(f.outcome);
   return db.transaction(async (tx) => {
+    const shared = sharedAddressCollector();
     const counted = await tx.execute(sql`
       update touches set outcome = ${f.outcome}, counted_at = ${iso(now)}, updated_at = ${iso(now)}
       where id = ${f.touch_id}::uuid and counted_at is null returning id`);
-    if (rows<unknown>(counted).length === 0) return null;
+    if (rows<unknown>(counted).length === 0) return { done: null, shared: [] };
     await tx.execute(sql`
       update campaign_enrollments set touches_done = touches_done + 1, updated_at = ${iso(now)} where id = ${f.enrollment_id}::uuid`);
     await tx.execute(enqueueWritebackSql({ touchId: f.touch_id, now, writebackOn: settings.aiCallWriteback }));
     const callOutcome = outcome.success ? outcome.data : null;
-    await setStatusFromCall(tx as unknown as Db, { orgId: f.org_id, crmRecordId: f.crm_record_id, outcome: callOutcome, now });
+    await setStatusFromCall(tx as unknown as Db, { orgId: f.org_id, crmRecordId: f.crm_record_id, outcome: callOutcome, now, onSharedAddress: shared.onSharedAddress });
     const step = nextStepFor(callOutcome, f.answered, settings.aiCallMaxAttempts);
-    return applyStep(tx as unknown as Db, f, step, now);
+    return { done: await applyStep(tx as unknown as Db, f, step, now), shared: shared.notices() };
   });
 }
 
@@ -137,14 +147,21 @@ async function settingsByOrg(db: Db, orgIds: string[]): Promise<Map<string, Outr
   return new Map(orgs.map((o) => [o.id, outreachSettings({ settings: o.settings })]));
 }
 
-export async function collectAiCallResults(db: Db, now: Date, log: RunnerLogger): Promise<ResultCounts> {
+/** `alert` defaults to the shared dispatcher on `log`; it carries a seller_needs_person for a stop that did not spread. */
+export async function collectAiCallResults(
+  db: Db,
+  now: Date,
+  log: RunnerLogger,
+  alert: (event: AlertEvent) => Promise<void> = (event) => dispatchAlert(log, event),
+): Promise<ResultCounts> {
   const counts: ResultCounts = { handedOff: 0, exited: 0, completed: 0, retried: 0 };
   const finished = await finishedCalls(db);
   const settings = await settingsByOrg(db, [...new Set(finished.map((f) => f.org_id))]);
   for (const f of finished) {
     try {
-      const done = await collectOne(db, f, settings.get(f.org_id) ?? outreachSettings({ settings: {} }), now);
+      const { done, shared } = await collectOne(db, f, settings.get(f.org_id) ?? outreachSettings({ settings: {} }), now);
       if (done) counts[done] += 1;
+      for (const notice of shared) await raiseSharedAddressAlert({ alert, log }, notice);
     } catch (err) {
       // This call stays uncounted and is tried again next tick; the rest of the batch goes on.
       log.error({ touchId: f.touch_id, errName: errName(err) }, 'ai_call.results: applying a call result failed');
