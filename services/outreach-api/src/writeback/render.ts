@@ -3,6 +3,7 @@
  * deterministic. Every value is shown as given, on one line, with control characters stripped; the changes text stays
  * within the field's length and the post within the org's Lead FeedItem limit (980 characters, both objects).
  */
+import type { BookedAppointment } from '@cti/contracts';
 import { cutUtf16, wellFormed } from '../research/text.js';
 import { DNC_FIELDS, TABLE_FIELDS, type Change, type Skipped, type WritePlan } from './plan.js';
 
@@ -122,7 +123,11 @@ function dncRefusals(i: RenderInput): Array<{ label: string; reason: string }> {
   ];
 }
 
-const KIND_WORDS: Readonly<Record<string, string>> = { phone: 'phone consultation', walkthrough: 'walkthrough' };
+/** A booking as the Task and Chatter words name it (Task 8): phone, property, or high-priority property consultation. */
+export function consultationWords(b: Pick<BookedAppointment, 'kind' | 'priority'>): string {
+  if (b.priority === true) return 'high-priority property consultation';
+  return b.kind === 'phone' ? 'phone consultation' : 'property consultation';
+}
 
 const codePart = (code: string | undefined): string => (code === undefined || oneLine(code) === '' ? '' : ` (${capped(oneLine(code), 80)})`);
 
@@ -146,7 +151,7 @@ function thenWords(i: RenderInput): string {
 /** "Booked phone consultation Wed Oct 7, 11:00 AM PT", from the plan's booking. */
 function bookedWords(plan: WritePlan): string | null {
   const b = plan.appointment?.booked;
-  return b ? `${KIND_WORDS[b.kind] ?? b.kind} ${ptWords(new Date(b.start))}` : null;
+  return b ? `${consultationWords(b)} ${ptWords(new Date(b.start))}` : null;
 }
 
 /** "; <what the fallback made>", or nothing when that is unknown. */

@@ -150,6 +150,7 @@ async function main(): Promise<void> {
               now: new Date(),
               log: console,
               defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS,
+              maps,
             });
           },
         }

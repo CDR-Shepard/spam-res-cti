@@ -2,8 +2,11 @@
 import { describe, expect, it } from 'vitest';
 import type { BookedAppointment } from '@cti/contracts';
 import { SalesforceApiError } from '@cti/salesforce';
+import { MapsUnavailableError, type MapsClient } from '../appointments/maps.js';
 import { fakeSfWrites, ok, refused, type WriteQueryRoute } from '../test/fake-sf-writes.js';
-import { bookingPassed, bookOpportunity, createTaskOnce, holdForLead, leadHoldFields, opportunityEventFields, taskFields } from './appointment.js';
+import {
+  bookingPassed, bookOpportunity, createTaskOnce, holdForLead, leadHoldFields, opportunityEventFields, PRIORITY_SUBJECT, previousConsultationLine, taskFields,
+} from './appointment.js';
 
 const OWNER = '0058X00000Fsx39QAB';
 const OPP = '0068X00000Oppt1QAA';
@@ -21,6 +24,8 @@ const PHONE: BookedAppointment = {
 };
 const WALK: BookedAppointment = { ...PHONE, slotId: 'w1', kind: 'walkthrough', start: '2026-10-08T17:00:00.000Z', end: '2026-10-08T18:00:00.000Z', addressConfirmed: true, note: 'Gate code is on the side door' };
 const ADDRESS = '12 Oak St, Fresno, CA 93701';
+const OFFICE = '18872 MacArthur Blvd #220, Irvine, CA 92612';
+const quiet = { warn: () => {} };
 
 const EXISTING_EVENT = /^SELECT Id FROM Event WHERE WhatId = /;
 const HOLD_LOOKUP = /^SELECT Id FROM Event WHERE WhatId = null /;
@@ -31,7 +36,7 @@ function org(routes: WriteQueryRoute[] = []) {
   return fakeSfWrites({ queries: [...routes, [EXISTING_EVENT, []], [HOLD_LOOKUP, []], [BUSY, []], [TASK_LOOKUP, []]] });
 }
 const book = (f: ReturnType<typeof org>, booked = PHONE, bufferMinutes = 30) =>
-  bookOpportunity(f.client, { oppId: OPP, booked, location: ADDRESS, aiCallId: AI_CALL, sellerTimeZone: 'America/Chicago', bufferMinutes });
+  bookOpportunity(f.client, { oppId: OPP, booked, location: ADDRESS, aiCallId: AI_CALL, sellerTimeZone: 'America/Chicago', bufferMinutes, maps: null, officeAddress: OFFICE, log: quiet });
 
 describe('bookingPassed (sweep D-25 N4: passed once its START has come)', () => {
   it.each<[string, boolean]>([
@@ -44,7 +49,7 @@ describe('bookingPassed (sweep D-25 N4: passed once its START has come)', () => 
   });
   it('a call already under way is not put on the calendar', async () => {
     const f = org();
-    expect(await bookOpportunity(f.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, now: new Date('2026-10-07T18:05:00.000Z') })).toEqual({ kind: 'expired' });
+    expect(await bookOpportunity(f.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, officeAddress: OFFICE, log: quiet, now: new Date('2026-10-07T18:05:00.000Z') })).toEqual({ kind: 'expired' });
     expect(f.creates).toEqual([]);
   });
 });
@@ -53,9 +58,9 @@ describe('bookOpportunity', () => {
   it('I-1: the booked time has passed: an Event an earlier attempt made is still found; otherwise expired, no calendar read, no create', async () => {
     const late = new Date('2026-10-07T19:00:00.000Z');
     const f = org([[EXISTING_EVENT, [{ Id: '00U8X00000Evnt1QAA' }]]]);
-    expect(await bookOpportunity(f.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, now: late })).toEqual({ kind: 'existing', eventId: '00U8X00000Evnt1QAA' });
+    expect(await bookOpportunity(f.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, officeAddress: OFFICE, log: quiet, now: late })).toEqual({ kind: 'existing', eventId: '00U8X00000Evnt1QAA' });
     const g = org();
-    expect(await bookOpportunity(g.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, now: late })).toEqual({ kind: 'expired' });
+    expect(await bookOpportunity(g.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, officeAddress: OFFICE, log: quiet, now: late })).toEqual({ kind: 'expired' });
     expect(g.soql.some((q) => BUSY.test(q))).toBe(false);
     expect(g.creates).toEqual([]);
   });
@@ -161,8 +166,166 @@ describe('bookOpportunity', () => {
 
   it('refuses a malformed id before any Salesforce call', async () => {
     const f = org();
-    await expect(bookOpportunity(f.client, { oppId: "006'; x", booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0 })).rejects.toThrow(RangeError);
+    await expect(bookOpportunity(f.client, { oppId: "006'; x", booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, officeAddress: OFFICE, log: quiet })).rejects.toThrow(RangeError);
     expect(f.log).toEqual([]);
+  });
+});
+
+const GRANT = OWNER;
+const BLAKE = '0058X00000FA8tLQAT';
+const WHAT_CHANGED = "seller says it didn't work out last time, now they really want to sell";
+const PREVIOUS = { start: '2026-03-12T17:00:00.000Z', kind: 'in_person', ownerName: 'Blake Kossuth' } as const;
+/** Sam's high-priority booking: Grant, in person, at the time the seller asked for. */
+const PRIORITY: BookedAppointment = { ...WALK, slotId: 'h1', priority: true, note: '', whatChanged: WHAT_CHANGED, previousConsultation: PREVIOUS };
+const eventFields = (booked: BookedAppointment) => opportunityEventFields({ oppId: OPP, booked, location: ADDRESS, aiCallId: AI_CALL, sellerTimeZone: null });
+
+describe('opportunityEventFields: high priority and the earlier consultation', () => {
+  it('a priority booking is a High Priority Property Consultation, Grant\'s, at the address', () => {
+    expect(PRIORITY_SUBJECT).toBe('High Priority Property Consultation');
+    expect(eventFields(PRIORITY)).toMatchObject({ Subject: 'High Priority Property Consultation', OwnerId: GRANT, Location: ADDRESS, WhatId: OPP });
+  });
+
+  it('the Description opens with the earlier consultation and what changed, then today\'s sentences unchanged', () => {
+    expect(eventFields(PRIORITY).Description).toBe(
+      `Previous consultation: Mar 12 with Blake Kossuth. What changed: seller says it didn't work out last time, now they really want to sell. Booked by the AI assistant on a call (AI call ${AI_CALL}). Address confirmed with the seller.`,
+    );
+  });
+
+  it('the year is shown when it differs from the booking\'s, and the date is read in PT', () => {
+    expect(previousConsultationLine({ ...PRIORITY, previousConsultation: { ...PREVIOUS, start: '2025-03-12T17:00:00.000Z' } })).toBe(
+      `Previous consultation: Mar 12, 2025 with Blake Kossuth. What changed: ${WHAT_CHANGED}.`,
+    );
+    // 02:00 UTC on Mar 13 is still Mar 12 in Pacific time.
+    expect(previousConsultationLine({ ...PRIORITY, previousConsultation: { ...PREVIOUS, start: '2026-03-13T02:00:00.000Z' } })).toMatch(/^Previous consultation: Mar 12 with /);
+    // Dec 31 PT of the year before a January booking.
+    const january = { ...PRIORITY, start: '2027-01-05T17:00:00.000Z', end: '2027-01-05T18:00:00.000Z' };
+    expect(previousConsultationLine({ ...january, previousConsultation: { ...PREVIOUS, start: '2027-01-01T03:00:00.000Z' } })).toMatch(/^Previous consultation: Dec 31, 2026 with /);
+  });
+
+  it('an empty or missing whatChanged: "the seller didn\'t say"; a null owner name leaves out "with"', () => {
+    expect(previousConsultationLine({ ...PRIORITY, whatChanged: '' })).toBe("Previous consultation: Mar 12 with Blake Kossuth. What changed: the seller didn't say.");
+    expect(previousConsultationLine({ ...PRIORITY, whatChanged: '   ' })).toBe("Previous consultation: Mar 12 with Blake Kossuth. What changed: the seller didn't say.");
+    const { whatChanged: _w, ...noWhat } = PRIORITY;
+    expect(previousConsultationLine(noWhat)).toBe("Previous consultation: Mar 12 with Blake Kossuth. What changed: the seller didn't say.");
+    expect(previousConsultationLine({ ...PRIORITY, previousConsultation: { ...PREVIOUS, ownerName: null } })).toBe(`Previous consultation: Mar 12. What changed: ${WHAT_CHANGED}.`);
+    expect(previousConsultationLine({ ...PRIORITY, whatChanged: 'They lowered their price.' })).toBe('Previous consultation: Mar 12 with Blake Kossuth. What changed: They lowered their price.');
+  });
+
+  it('no earlier consultation: no line, even with whatChanged; Subject as today', () => {
+    const { previousConsultation: _p, ...noPrevious } = PRIORITY;
+    expect(previousConsultationLine(noPrevious)).toBeNull();
+    expect(eventFields(noPrevious).Description).toBe(`Booked by the AI assistant on a call (AI call ${AI_CALL}). Address confirmed with the seller.`);
+    expect(eventFields(WALK).Subject).toBe('Property Consultation');
+    expect(eventFields(PHONE).Subject).toBe('Phone Consultation');
+  });
+});
+
+/** A made-up house a rep was at before the booking. */
+const EARLIER_PLACE = '200 Fake Elm St, Tustin, CA 92780';
+/** A routed walkthrough with Blake, Wed Oct 21 09:00–10:00 PT. */
+const ROUTED: BookedAppointment = { ...WALK, start: '2026-10-21T16:00:00.000Z', end: '2026-10-21T17:00:00.000Z', specialistSfUserId: BLAKE, region: 'LA' };
+/** An earlier Event 08:00–08:45 PT at an address: inside the old 30-minute walkthrough buffer, clear of the slot itself. */
+const EARLIER = { StartDateTime: '2026-10-21T15:00:00.000+0000', EndDateTime: '2026-10-21T15:45:00.000+0000', IsAllDayEvent: false, Location: EARLIER_PLACE, Subject: 'Property Consultation' };
+
+/** Google answering every route with `minutes`; or failing (routes and geocodes) with `fail`. */
+function fakeMaps(o: { minutes?: number; fail?: Error } = {}) {
+  const calls: string[] = [];
+  const maps: MapsClient = {
+    async geocode() {
+      calls.push('geocode');
+      if (o.fail) throw o.fail;
+      return null;
+    },
+    async routeMinutes(origins, destinations) {
+      calls.push('route');
+      if (o.fail) throw o.fail;
+      return { minutes: origins.map(() => destinations.map(() => o.minutes ?? 15)), requestedElements: origins.length * destinations.length };
+    },
+  };
+  return { maps, calls };
+}
+const recorder = () => {
+  const warns: Array<[Record<string, unknown>, string]> = [];
+  return { warns, log: { warn: (o: Record<string, unknown>, m: string) => void warns.push([o, m]) } };
+};
+const bookRouted = (f: ReturnType<typeof org>, booked: BookedAppointment, maps: MapsClient | null, log: { warn(o: Record<string, unknown>, m: string): void } = quiet) =>
+  bookOpportunity(f.client, { oppId: OPP, booked, location: ADDRESS, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 30, maps, officeAddress: OFFICE, log });
+const busyReads = (f: ReturnType<typeof org>) => f.soql.filter((q) => BUSY.test(q));
+
+describe('bookOpportunity: high priority', () => {
+  it('books over a busy calendar: no busy read at all, owned by Grant', async () => {
+    const f = org([[BUSY, [{ StartDateTime: '2026-10-08T16:30:00.000+0000', EndDateTime: '2026-10-08T18:30:00.000+0000', IsAllDayEvent: false }]]]);
+    const g = fakeMaps({ minutes: 500 });
+    expect(await bookRouted(f, { ...PRIORITY, region: 'LA' }, g.maps)).toEqual({ kind: 'created', eventId: expect.stringMatching(/^00U/) });
+    expect(busyReads(f)).toEqual([]);
+    expect(g.calls).toEqual([]);
+    expect(f.creates[0]!.fields).toMatchObject({ Subject: PRIORITY_SUBJECT, OwnerId: GRANT });
+  });
+});
+
+describe('bookOpportunity: a routed booking (overlap with no buffer, then the drive)', () => {
+  it('reads that PT day (00:00–24:00) once, for the booked rep', async () => {
+    const f = org([[BUSY, [EARLIER]]]);
+    await bookRouted(f, ROUTED, fakeMaps({ minutes: 25 }).maps);
+    expect(busyReads(f)).toHaveLength(1);
+    expect(busyReads(f)[0]).toContain(`OwnerId = '${BLAKE}'`);
+    expect(busyReads(f)[0]).toContain('StartDateTime < 2026-10-22T07:00:00Z AND EndDateTime > 2026-10-21T07:00:00Z');
+  });
+
+  it('a 40-minute drive from the earlier Event no longer fits: conflict for the drive, nothing created', async () => {
+    const f = org([[BUSY, [EARLIER]]]);
+    expect(await bookRouted(f, ROUTED, fakeMaps({ minutes: 40 }).maps)).toEqual({ kind: 'conflict', reason: 'drive' });
+    expect(f.creates).toEqual([]);
+  });
+
+  it('a 25-minute drive fits (15 minutes of slack): created', async () => {
+    const f = org([[BUSY, [EARLIER]]]);
+    expect(await bookRouted(f, ROUTED, fakeMaps({ minutes: 25 }).maps)).toEqual({ kind: 'created', eventId: expect.stringMatching(/^00U/) });
+    expect(f.creates[0]!.fields).toMatchObject({ Subject: 'Property Consultation', OwnerId: BLAKE, Location: ADDRESS });
+  });
+
+  it('maps null: the overlap check only (no 30-minute buffer): created', async () => {
+    const f = org([[BUSY, [EARLIER]]]);
+    expect(await bookRouted(f, ROUTED, null)).toEqual({ kind: 'created', eventId: expect.stringMatching(/^00U/) });
+  });
+
+  it('no Location (a phone call, or no address): no drive check', async () => {
+    const g = fakeMaps({ minutes: 500 });
+    const phone = { ...ROUTED, kind: 'phone' as const, slotId: 'p1' };
+    expect((await bookRouted(org([[BUSY, [EARLIER]]]), phone, g.maps)).kind).toBe('created');
+    const f = org([[BUSY, [EARLIER]]]);
+    expect((await bookOpportunity(f.client, { oppId: OPP, booked: ROUTED, location: '  ', aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 30, maps: g.maps, officeAddress: OFFICE, log: quiet })).kind).toBe('created');
+    expect(g.calls).toEqual([]);
+  });
+
+  it('an overlap: conflict with no reason, and no drive asked', async () => {
+    const g = fakeMaps({ minutes: 5 });
+    const f = org([[BUSY, [{ ...EARLIER, EndDateTime: '2026-10-21T16:15:00.000+0000' }]]]);
+    expect(await bookRouted(f, ROUTED, g.maps)).toEqual({ kind: 'conflict' });
+    expect(g.calls).toEqual([]);
+    expect(f.creates).toEqual([]);
+  });
+
+  it.each<[string, Error]>([
+    ['Google down (MapsUnavailableError)', new MapsUnavailableError('timeout')],
+    ['any other error', new TypeError('boom')],
+  ])('the drive check fails (%s) and nothing overlaps: created, a warn with codes and ids only', async (_name, fail) => {
+    const f = org([[BUSY, [EARLIER]]]);
+    const r = recorder();
+    expect(await bookRouted(f, ROUTED, fakeMaps({ fail }).maps, r.log)).toEqual({ kind: 'created', eventId: expect.stringMatching(/^00U/) });
+    const said = JSON.stringify(r.warns);
+    expect(said).toContain(AI_CALL);
+    expect(said).not.toContain('Oak St');
+    expect(said).not.toContain('Fake Elm');
+    expect(said).not.toContain('MacArthur');
+    expect(r.warns.some(([o]) => o.oppId === OPP && (o.code === 'timeout' || o.errName === 'TypeError'))).toBe(true);
+  });
+
+  it('a booking with no region keeps today\'s check, its walkthrough buffer included', async () => {
+    const { region: _r, ...legacy } = ROUTED;
+    const f = org([[BUSY, [EARLIER]]]);
+    expect(await bookRouted(f, legacy, fakeMaps({ minutes: 5 }).maps)).toEqual({ kind: 'conflict' });
+    expect(busyReads(f)[0]).toContain('StartDateTime < 2026-10-21T17:30:00Z AND EndDateTime > 2026-10-21T15:30:00Z');
   });
 });
 
@@ -196,7 +359,7 @@ describe('holdForLead (fallback only)', () => {
       Priority: 'High',
       ActivityDate: '2026-10-06',
       CTI_Origin__c: 'AI Outreach',
-      Subject: 'AI booked a phone call for Wed Oct 7, 11:00 AM PT but could not convert this Lead — convert it and book it',
+      Subject: 'AI booked a phone consultation for Wed Oct 7, 11:00 AM PT but could not convert this Lead — convert it and book it',
     });
     expect(task.fields).not.toHaveProperty('WhatId');
     expect(String(task.fields.Description)).toContain('FIELD_CUSTOM_VALIDATION_EXCEPTION: Hunt Lead');

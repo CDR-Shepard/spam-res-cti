@@ -4,6 +4,7 @@ import { eq, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { SalesforceApiError } from '@cti/salesforce';
 import { utcDay } from '../ai/budget.js';
+import type { MapsClient } from '../appointments/maps.js';
 import { seedAiCall } from '../test/ai-call-seed.js';
 import { seedAiCallCampaign, seedUser } from '../test/call-plan-seed.js';
 import { refused } from '../test/fake-sf-writes.js';
@@ -99,6 +100,43 @@ describe.skipIf(!pgLane)('runWritebacks on Opportunities (real Postgres)', () =>
     expect(task.fields).toMatchObject({ OwnerId: GRANT, WhatId: s.recordId, Priority: 'High', Status: 'Open' });
     expect(String(task.fields.Subject)).toContain('the calendar was taken');
     expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'done', sfTaskId: expect.stringMatching(/^00T/), sfEventId: null });
+  });
+
+  /** The fake org with the Opportunity's address fields (as _t2 has them), so the plan reads the property's address. */
+  const withAddress = (f: ReturnType<typeof fakeOrg>): ReturnType<typeof fakeOrg> => {
+    const opp = f.describes.Opportunity!;
+    const read = (name: string) => ({ name, type: 'string', label: name, updateable: false, calculated: false });
+    f.describes.Opportunity = { ...opp, fields: [...opp.fields, ...['Street__c', 'City__c', 'State__c', 'Zipcode__c'].map(read)] };
+    return f;
+  };
+
+  it('Task 8: a routed visit the rep can no longer drive to: no Event, Followup, and a Task that says why', async () => {
+    // Wed Oct 7, 9:00 AM PT, routed; the rep's earlier visit (a made-up house) ends 8:45 and Google says 40 minutes from there.
+    const routed = { ...PHONE_BOOKING, slotId: 'w1', kind: 'walkthrough' as const, start: '2026-10-07T16:00:00.000Z', end: '2026-10-07T17:00:00.000Z', addressConfirmed: true, region: 'LA' };
+    const s = await seedWriteback(db, { sfObject: 'Opportunity', outcome: 'appointment_set', researchStatus: 'Closed Lost', appointment: routed });
+    const earlier = { StartDateTime: '2026-10-07T15:00:00.000+0000', EndDateTime: '2026-10-07T15:45:00.000+0000', IsAllDayEvent: false, Location: '200 Fake Elm St, Tustin, CA 92780', Subject: 'Property Consultation' };
+    const f = withAddress(fakeOrg({ ...oppState(s.recordId), busy: [earlier] }));
+    const asked: string[] = [];
+    const maps: MapsClient = {
+      geocode: async () => null,
+      routeMinutes: async (origins, destinations) => {
+        asked.push('route');
+        return { minutes: origins.map(() => destinations.map(() => 40)), requestedElements: origins.length * destinations.length };
+      },
+    };
+    await runWritebacks(depsFor(db, f, { maps }));
+    expect(asked).toEqual(['route']);
+    expect(f.creates.filter((c) => c.sobject === 'Event')).toEqual([]);
+    expect(f.updates[0]!.fields).toMatchObject({ StageName: 'Followup' });
+    const task = f.creates.find((c) => c.sobject === 'Task')!;
+    expect(String(task.fields.Subject)).toBe("AI booked a property consultation for Wed Oct 7, 9:00 AM PT but the rep's calendar no longer leaves time to drive there: call the seller to set a time");
+    expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'done', sfTaskId: expect.stringMatching(/^00T/), sfEventId: null });
+
+    // The same booking with Google at 25 minutes (15 minutes of slack): the Event is made.
+    const t = await seedWriteback(db, { sfObject: 'Opportunity', outcome: 'appointment_set', researchStatus: 'Closed Lost', appointment: routed });
+    const g = withAddress(fakeOrg({ ...oppState(t.recordId), busy: [earlier] }));
+    await runWritebacks(depsFor(db, g, { maps: { ...maps, routeMinutes: async (o, d) => ({ minutes: o.map(() => d.map(() => 25)), requestedElements: o.length * d.length }) } }));
+    expect(g.creates.find((c) => c.sobject === 'Event')!.fields).toMatchObject({ Subject: 'Property Consultation', Location: '12 Oak St, Fresno, CA 93701' });
   });
 
   it('final review I-1: the slot is taken and the conflict Task is refused: the post says the Task was refused, never that it was sent', async () => {

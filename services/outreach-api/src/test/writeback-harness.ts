@@ -188,6 +188,7 @@ export function depsFor(db: Db, f: FakeSfWrites, over: Partial<WritebackDeps> = 
     now: RUN_AT,
     log: quiet,
     defaultSpecialists: [GRANT],
+    maps: null,
     ...over,
   };
 }

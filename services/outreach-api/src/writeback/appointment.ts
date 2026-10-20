@@ -1,24 +1,25 @@
 /**
- * Plan 1D write-back, the appointment at write time (spec §5.4). An Event on the Opportunity, owned by the appointment owner
- * (Grant Golden, whoever owns the Opportunity), made the way reps make them so the org's consultation flows run. Before it
- * is made: one we already made is looked for (a retry never doubles it), and the owner's calendar is re-checked with the same
- * conflict rule the offer used (D-11).
+ * Plan 1D write-back, the appointment at write time (spec §5.4). An Event on the Opportunity, owned by the booked rep (the
+ * region's rep, or Grant Golden for high priority; whoever owns the Opportunity), made the way reps make them so the org's
+ * consultation flows run.
+ * Before it is made: one we already made is looked for (a retry never doubles it), and the rep's calendar is re-checked
+ * (appointment-recheck.ts: none for high priority, overlap then drive for a routed booking, else the offer's rule, D-11).
  *
  * The fallback (a booked Lead Salesforce would not convert, or conversion is off) is a plain hold on the owner's calendar,
  * which no consultation flow fires on, plus an urgent "convert it and book it" Task to the owner.
  */
 import type { BookedAppointment } from '@cti/contracts';
 import { SalesforceApiError, soqlEscape, type CompositeResult, type SalesforceClient } from '@cti/salesforce';
-import { DEFAULT_OWNER_TIME_ZONE, readBusy } from '../appointments/calendar.js';
-import { conflicts } from '../appointments/slots.js';
+import type { MapsClient } from '../appointments/maps.js';
 import { SF_ID } from '../campaigns/records.js';
 import { cutUtf16 } from '../research/text.js';
+import { recheckCalendar, type CalendarConflict, type RecheckLog } from './appointment-recheck.js';
 import { AI_OUTREACH_ORIGIN } from './fields.js';
-import { ptWords } from './render.js';
+import { consultationWords, ptWords } from './render.js';
 
 export type AppointmentResult =
   | { kind: 'created' | 'existing'; eventId: string }
-  | { kind: 'conflict' }
+  | CalendarConflict
   /**
    * The booked time had passed when the row ran (Fix 1, I-1): nothing is put on the calendar; handled like a conflict.
    * `holdId`: a Lead hold an earlier attempt made at that time, still on the calendar (sweep D-25 N1).
@@ -47,9 +48,14 @@ export class WriteRefusedError extends Error {
 
 export const ORIGIN_FIELD = 'CTI_Origin__c';
 const SUBJECT_MAX = 255;
-const MIN_MS = 60_000;
+const LOCATION_MAX = 255;
+const PT_ZONE = 'America/Los_Angeles';
+export const PRIORITY_SUBJECT = 'High Priority Property Consultation';
 const SUBJECTS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'Phone Consultation', walkthrough: 'Property Consultation' };
-const KIND_WORDS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'phone call', walkthrough: 'walkthrough' };
+/** The fallback hold's Subject words (an Event, not a consultation). */
+const HOLD_WORDS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'phone call', walkthrough: 'walkthrough' };
+const PT_MONTH_DAY = new Intl.DateTimeFormat('en-US', { timeZone: PT_ZONE, month: 'short', day: 'numeric' });
+const PT_YEAR = new Intl.DateTimeFormat('en-US', { timeZone: PT_ZONE, year: 'numeric' });
 
 /** SOQL dateTime literal: UTC, whole seconds (Salesforce stores Event times to the second). */
 const soqlDateTime = (iso: string): string => new Date(iso).toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -66,27 +72,53 @@ function sentence(s: string): string {
   return /[.!?]$/.test(s) ? s : `${s}.`;
 }
 
-/** spec §5.4: the Event a rep would make, owned by the appointment owner. */
+/** The Event's Subject, as reps name consultations (so the org's consultation flows run). */
+export const eventSubject = (b: BookedAppointment): string => (b.priority === true ? PRIORITY_SUBJECT : SUBJECTS[b.kind]);
+
+/** The Event's Location: a walkthrough's address on one line, or null (a phone call, or no address). */
+function eventLocation(booked: BookedAppointment, location: string | null): string | null {
+  const text = location === null ? '' : oneLine(location);
+  return booked.kind === 'walkthrough' && text !== '' ? capped(text, LOCATION_MAX) : null;
+}
+
+/**
+ * The Description's first line when the seller had a consultation before: "Previous consultation: Mar 12 with Blake Kossuth.
+ * What changed: …." The date is Pacific, with its year when that differs from the booking's; null when there was none.
+ */
+export function previousConsultationLine(b: BookedAppointment): string | null {
+  const previous = b.previousConsultation;
+  if (previous === undefined) return null;
+  const at = new Date(previous.start);
+  const year = PT_YEAR.format(at);
+  const date = year === PT_YEAR.format(new Date(b.start)) ? PT_MONTH_DAY.format(at) : `${PT_MONTH_DAY.format(at)}, ${year}`;
+  const owner = previous.ownerName === null ? '' : ` with ${oneLine(previous.ownerName)}`;
+  const changed = oneLine(b.whatChanged ?? '');
+  return `Previous consultation: ${date}${owner}. ${sentence(`What changed: ${changed === '' ? "the seller didn't say" : changed}`)}`;
+}
+
+/** spec §5.4: the Event a rep would make, owned by the booked rep. */
 export function opportunityEventFields(i: { oppId: string; booked: BookedAppointment; location: string | null; aiCallId: string; sellerTimeZone: string | null }): Record<string, unknown> {
   const { booked } = i;
   const note = oneLine(booked.note);
-  const location = i.location === null ? '' : oneLine(i.location);
+  const location = eventLocation(booked, i.location);
   const walkthrough = booked.kind === 'walkthrough';
+  const previous = previousConsultationLine(booked);
   const description = [
+    ...(previous === null ? [] : [previous]),
     `Booked by the AI assistant on a call (AI call ${i.aiCallId}).`,
     ...(note === '' ? [] : [sentence(`Seller's note: ${note}`)]),
     ...(i.sellerTimeZone === null ? [] : [`Seller's time zone: ${i.sellerTimeZone}.`]),
     ...(walkthrough && booked.addressConfirmed ? ['Address confirmed with the seller.'] : []),
   ].join(' ');
   return {
-    Subject: SUBJECTS[booked.kind],
+    Subject: eventSubject(booked),
     WhatId: i.oppId,
     OwnerId: booked.specialistSfUserId,
     StartDateTime: booked.start,
     EndDateTime: booked.end,
     IsAllDayEvent: false,
     ShowAs: 'Busy',
-    ...(walkthrough && location !== '' ? { Location: capped(location, 255) } : {}),
+    ...(location === null ? {} : { Location: location }),
     Description: description,
     [ORIGIN_FIELD]: AI_OUTREACH_ORIGIN,
   };
@@ -96,7 +128,7 @@ export function opportunityEventFields(i: { oppId: string; booked: BookedAppoint
 export function leadHoldFields(i: { booked: BookedAppointment; leadName: string | null; leadId: string; aiCallId: string }): Record<string, unknown> {
   const name = i.leadName === null || oneLine(i.leadName) === '' ? 'the Lead' : oneLine(i.leadName);
   return {
-    Subject: capped(`Hold: AI-booked ${KIND_WORDS[i.booked.kind]} – convert ${name}`, SUBJECT_MAX),
+    Subject: capped(`Hold: AI-booked ${HOLD_WORDS[i.booked.kind]} – convert ${name}`, SUBJECT_MAX),
     OwnerId: i.booked.specialistSfUserId,
     StartDateTime: i.booked.start,
     EndDateTime: i.booked.end,
@@ -167,10 +199,14 @@ const firstCode = (r: CompositeResult): string => r.errors[0]?.statusCode ?? 'UN
 /**
  * The Event on the Opportunity: an existing one of ours, else (the time still ahead, the calendar still free) a new one. A
  * passed time, a conflict or a refusal creates nothing; the caller moves the stage to Followup and gives the owner a Task.
+ * `maps` (null: no key) and `officeAddress` time the drive re-check of a routed booking; `log` gets ids and codes only.
  */
 export async function bookOpportunity(
   client: SalesforceClient,
-  i: { oppId: string; booked: BookedAppointment; location: string | null; aiCallId: string; sellerTimeZone: string | null; bufferMinutes: number; ownerTimeZone?: string; now?: Date },
+  i: {
+    oppId: string; booked: BookedAppointment; location: string | null; aiCallId: string; sellerTimeZone: string | null; bufferMinutes: number;
+    ownerTimeZone?: string; now?: Date; maps: MapsClient | null; officeAddress: string; log: RecheckLog;
+  },
 ): Promise<AppointmentResult> {
   const opp = checkId(i.oppId, 'oppId');
   const owner = checkId(i.booked.specialistSfUserId, 'the appointment owner');
@@ -182,11 +218,11 @@ export async function bookOpportunity(
   // The time has passed (a late retry): an Event an earlier attempt made was found above; none is made now (I-1).
   if (i.now !== undefined && bookingPassed(i.booked, i.now)) return { kind: 'expired' };
 
-  const window = { start: new Date(i.booked.start), end: new Date(i.booked.end) };
-  const bufferMs = i.booked.kind === 'walkthrough' ? i.bufferMinutes * MIN_MS : 0;
-  const zone = i.ownerTimeZone ?? DEFAULT_OWNER_TIME_ZONE;
-  const busy = await readBusy(client, owner, new Date(window.start.getTime() - bufferMs), new Date(window.end.getTime() + bufferMs), zone);
-  if (conflicts(window, busy, zone, bufferMs)) return { kind: 'conflict' };
+  const conflict = await recheckCalendar(client, {
+    oppId: opp, aiCallId: i.aiCallId, owner, booked: i.booked, location: eventLocation(i.booked, i.location), bufferMinutes: i.bufferMinutes,
+    ...(i.ownerTimeZone === undefined ? {} : { ownerTimeZone: i.ownerTimeZone }), maps: i.maps, officeAddress: i.officeAddress, log: i.log,
+  });
+  if (conflict !== null) return conflict;
 
   const created = await createOne(client, 'Event', opportunityEventFields({ ...i, oppId: opp }));
   return created.success && created.id ? { kind: 'created', eventId: created.id } : { kind: 'refused', code: firstCode(created) };
@@ -302,9 +338,10 @@ export async function holdForLead(
   });
   const eventId = hold.id;
   const when = ptWords(new Date(i.booked.start));
-  const subject = `AI booked a ${KIND_WORDS[i.booked.kind]} for ${when} but could not convert this Lead — convert it and book it`;
+  const kind = consultationWords(i.booked);
+  const subject = `AI booked a ${kind} for ${when} but could not convert this Lead — convert it and book it`;
   const description = [
-    `The AI assistant booked a ${KIND_WORDS[i.booked.kind]} for ${when} with ${oneLine(i.ownerName)} on a call (AI call ${i.aiCallId}), but Salesforce did not convert this Lead.`,
+    `The AI assistant booked a ${kind} for ${when} with ${oneLine(i.ownerName)} on a call (AI call ${i.aiCallId}), but Salesforce did not convert this Lead.`,
     `Reason: ${oneLine(i.reason)}`,
     eventId === null ? 'No hold could be put on the calendar: book the time now.' : 'A hold is on the calendar at that time: convert the Lead, book it on the Opportunity, then delete the hold.',
   ].join('\n');

@@ -5,6 +5,7 @@
 import type { Db } from '@cti/db';
 import { SalesforceApiError, type SalesforceClient } from '@cti/salesforce';
 import { DEFAULT_OWNER_TIME_ZONE, readUsers, type OwnerUser } from '../appointments/calendar.js';
+import type { MapsClient } from '../appointments/maps.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import type { DescribeCache } from '../research/describe.js';
@@ -24,6 +25,8 @@ export interface WritebackDeps {
   clock?: () => number;
   /** AI_CALL_DEFAULT_SPECIALISTS: bookingSettings needs it (Part 3 fix: the only reader of aiCallBooking). */
   defaultSpecialists: readonly string[];
+  /** Google Maps, for the drive re-check of a routed booking (Task 8); null when no key is set (the overlap check only). */
+  maps: MapsClient | null;
 }
 
 /** One row in flight: replaced (never edited) as each step's result is saved. */

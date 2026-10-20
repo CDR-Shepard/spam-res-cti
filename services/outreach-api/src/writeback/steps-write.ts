@@ -7,18 +7,17 @@ import type { BookedAppointment } from '@cti/contracts';
 import { soqlEscape } from '@cti/salesforce';
 import { SF_ID } from '../campaigns/records.js';
 import { describeObject } from '../research/describe.js';
-import { bookingSettings } from '../settings.js';
+import { bookingRouting, bookingSettings } from '../settings.js';
 import { bookingPassed, bookOpportunity, createTaskOnce, findLeadHold, holdForLead, PASSED_TASK_SUBJECT, taskFields, WriteRefusedError, type AppointmentResult } from './appointment.js';
 import { CHANGES_FIELD, writableFields, type WritableField } from './fields.js';
 import { keepUnedited, readFresh, type NotChanged } from './fresh.js';
 import { patchDroppingRefused, without, type FieldRefusal } from './patch.js';
 import type { Change, WritePlan } from './plan.js';
-import { changesFieldText, chatterMarker, chatterText, ptWords } from './render.js';
+import { changesFieldText, chatterMarker, chatterText, consultationWords, ptWords } from './render.js';
 import { isDone, ownerOf, ptToday, RecordGoneError, saveStep, throwIfNotARefusal, type RowRun } from './row-run.js';
 import { writeTarget } from './store.js';
 import { appointmentWords, createdLines, refusedWords, renderInputFor, sellerTimeZone, stripUrls, taskMade, writtenChanges, type NotWritten } from './words.js';
 
-const KIND = { phone: 'phone call', walkthrough: 'walkthrough' } as const;
 const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v : null);
 const planData = (run: RowRun): Record<string, unknown> => run.row.steps.plan?.data ?? {};
 
@@ -54,6 +53,9 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
       bufferMinutes: booking.walkthrough.bufferMinutes,
       ...(owner ? { ownerTimeZone: owner.timeZone } : {}),
       now: run.deps.now,
+      maps: run.deps.maps,
+      officeAddress: bookingRouting(booking).officeAddress,
+      log: run.deps.log,
     });
     const eventId = result.kind === 'created' || result.kind === 'existing' ? result.eventId : undefined;
     const status = result.kind === 'refused' ? 'failed' : 'done';
@@ -82,20 +84,27 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
   return { run: next, result };
 }
 
+/** Why the booking was not made, as the Task says it. */
+function whyNotBooked(appt: Extract<AppointmentResult, { kind: 'conflict' | 'refused' }>): string {
+  if (appt.kind === 'refused') return `Salesforce refused the Event (${appt.code})`;
+  return appt.reason === 'drive' ? "the rep's calendar no longer leaves time to drive there" : 'the calendar was taken';
+}
+
 /** The Task's words: the slot was taken or refused (an Opportunity), or the booked time passed (either object, I-1). */
-function taskWords(run: RowRun, booked: BookedAppointment, appt: AppointmentResult): { subject: string; description: string } | null {
+export function taskWords(aiCallId: string, booked: BookedAppointment, appt: AppointmentResult): { subject: string; description: string } | null {
   const when = ptWords(new Date(booked.start));
-  const call = `on an AI call (AI call ${run.row.aiCallId})`;
+  const kind = consultationWords(booked);
+  const call = `on an AI call (AI call ${aiCallId})`;
   if (appt.kind === 'expired') {
     const calendar = appt.holdId === undefined ? ', so nothing was put on the calendar.' : '. A hold an earlier attempt put on the calendar at that time is still there: delete it.';
-    const description = `The seller agreed to a ${KIND[booked.kind]} at ${when} ${call}, but that time passed before the write-back could save it${calendar} Call the seller to re-book.`;
+    const description = `The seller agreed to a ${kind} at ${when} ${call}, but that time passed before the write-back could save it${calendar} Call the seller to re-book.`;
     return { subject: PASSED_TASK_SUBJECT, description };
   }
   if (appt.kind !== 'conflict' && appt.kind !== 'refused') return null;
-  const why = appt.kind === 'conflict' ? 'the calendar was taken' : `Salesforce refused the Event (${appt.code})`;
+  const why = whyNotBooked(appt);
   return {
-    subject: `AI booked a ${KIND[booked.kind]} for ${when} but ${why}: call the seller to set a time`,
-    description: `The seller agreed to a ${KIND[booked.kind]} at ${when} ${call}, but ${why}. Call the seller to set a time.`,
+    subject: `AI booked a ${kind} for ${when} but ${why}: call the seller to set a time`,
+    description: `The seller agreed to a ${kind} at ${when} ${call}, but ${why}. Call the seller to set a time.`,
   };
 }
 
@@ -107,7 +116,7 @@ export async function taskStep(run: RowRun, plan: WritePlan, appt: AppointmentRe
   if (isDone(run, 'task')) return run;
   const a = plan.appointment;
   const onOpportunity = a?.kind === 'opportunity_event';
-  const words = a && appt && (onOpportunity || appt.kind === 'expired') ? taskWords(run, a.booked, appt) : null;
+  const words = a && appt && (onOpportunity || appt.kind === 'expired') ? taskWords(run.row.aiCallId, a.booked, appt) : null;
   if (!a || words === null) return saveStep(run, 'task', { status: 'skipped' });
   const target = writeTarget(run.row);
   const record = target.sobject === 'Lead' ? { whatId: null, whoId: target.id } : { whatId: target.id, whoId: null };

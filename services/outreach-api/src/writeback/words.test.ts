@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { OwnerUser } from '../appointments/calendar.js';
-import { booked } from '../test/render-fixtures.js';
-import { appointmentWords } from './words.js';
+import { booked, oppBooking } from '../test/render-fixtures.js';
+import { appointmentWords, createdLines } from './words.js';
 
 const owner: OwnerUser = { sfUserId: '0058X00000Fsx39QAB', name: 'Grant Golden', firstName: 'Grant', timeZone: 'America/Los_Angeles', isActive: true, zoneRefused: null };
 const words = (result: Parameters<typeof appointmentWords>[0]['result'], task: Parameters<typeof appointmentWords>[0]['task'] = null) =>
@@ -42,5 +42,25 @@ describe('appointmentWords (final review I-1: only what was made)', () => {
   it('a refused Event and a passed time say the same about their Task', () => {
     expect(words({ kind: 'refused', code: 'X' }, { made: false })).toContain('(the Task to Grant Golden was refused: follow up by hand)');
     expect(words({ kind: 'expired' }, { made: true })).toContain('(Task to Grant Golden)');
+  });
+});
+
+describe('Task 8: the consultation kinds in the Chatter words, and the Event by its Subject', () => {
+  const walk = booked('walkthrough');
+  const priority = { ...walk, slotId: 'h1', priority: true as const };
+  const say = (b: typeof walk, result: Parameters<typeof appointmentWords>[0]['result']) => appointmentWords({ booked: b, result, owner, address: null, sellerZone: null, task: null });
+
+  it('a walkthrough is a property consultation; a high-priority one is a high-priority property consultation', () => {
+    expect(say(walk, { kind: 'created', eventId: '00U8X00000Evnt1QAA' })).toBe('property consultation with Grant, Wed Oct 7, 11:00 AM PT');
+    expect(say(priority, { kind: 'created', eventId: '00U8X00000Evnt1QAA' })).toBe('high-priority property consultation with Grant, Wed Oct 7, 11:00 AM PT');
+    expect(say(walk, { kind: 'conflict', reason: 'drive' })).toBe('property consultation for Wed Oct 7, 11:00 AM PT not booked: the calendar was taken');
+  });
+
+  it("the changes text's Created line names a high-priority Event by its Subject", () => {
+    const { plan } = oppBooking('walkthrough', false);
+    const withPriority = { ...plan, appointment: { ...plan.appointment!, booked: priority } };
+    const created = { kind: 'created' as const, eventId: '00U8X00000Evnt1QAA' };
+    expect(createdLines({ plan: withPriority, result: created, owner, taskId: null })).toEqual(['Event: High Priority Property Consultation, Wed Oct 7, 11:00 AM PT, owner Grant Golden']);
+    expect(createdLines({ plan, result: created, owner, taskId: null })).toEqual(['Event: Property Consultation, Wed Oct 7, 11:00 AM PT, owner Grant Golden']);
   });
 });

@@ -74,8 +74,15 @@ describe('5a Fix 1 (M-9): a booking followed by a transfer is noted', () => {
   it('transfer failed, with no appointment words from the run step', () => {
     const plan = transferPlan('transfer_failed', 'walkthrough');
     const input = base(plan, [], { outcomeWords: 'Transfer failed', appointmentWords: null });
-    expect(changesFieldText(input).split('\n')[1]).toBe('Booked walkthrough Wed Oct 7, 11:00 AM PT; then the transfer failed');
-    expect(chatterText(input)).toContain('Booked: walkthrough Wed Oct 7, 11:00 AM PT; then the transfer failed');
+    expect(changesFieldText(input).split('\n')[1]).toBe('Booked property consultation Wed Oct 7, 11:00 AM PT; then the transfer failed');
+    expect(chatterText(input)).toContain('Booked: property consultation Wed Oct 7, 11:00 AM PT; then the transfer failed');
+  });
+  it('Task 8: a high-priority booking is named so', () => {
+    const plan = buildWritePlan({
+      sfObject: 'Opportunity', outcome: 'transfer_failed', mapped: null, current: { StageName: 'Followup' }, researchStatus: 'Followup',
+      fields: OPP, appointment: { ...booked('walkthrough'), slotId: 'h1', priority: true }, callbackAt: null, now: AT, converted: null,
+    });
+    expect(changesFieldText(base(plan, [], { appointmentWords: null })).split('\n')[1]).toBe('Booked high-priority property consultation Wed Oct 7, 11:00 AM PT; then the transfer failed');
   });
   it('a transfer to an unnamed person still reads', () => {
     const plan = transferPlan('qualified_transferred', 'phone');

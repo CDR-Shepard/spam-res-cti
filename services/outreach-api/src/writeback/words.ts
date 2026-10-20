@@ -5,15 +5,13 @@
 import type { BookedAppointment } from '@cti/contracts';
 import { timezoneForNumber } from '@cti/firewall';
 import type { OwnerUser } from '../appointments/calendar.js';
-import type { AppointmentResult } from './appointment.js';
+import { eventSubject, type AppointmentResult } from './appointment.js';
 import { OUTCOME_WORDS } from './context.js';
 import type { Change, WritePlan } from './plan.js';
-import { ptWords, type Applied, type RenderInput } from './render.js';
+import { consultationWords, ptWords, type Applied, type RenderInput } from './render.js';
 import type { RowRun } from './row-run.js';
 
 const PT_ZONE = 'America/Los_Angeles';
-const KIND_WORDS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'phone consultation', walkthrough: 'walkthrough' };
-const EVENT_SUBJECTS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'Phone Consultation', walkthrough: 'Property Consultation' };
 
 /** One entry of "Not written", with the code behind it (last_error). */
 export interface NotWritten {
@@ -74,7 +72,7 @@ export function appointmentWords(i: {
   task: TaskMade | null;
 }): string | null {
   const { booked, result, owner } = i;
-  const kind = KIND_WORDS[booked.kind];
+  const kind = consultationWords(booked);
   const start = new Date(booked.start);
   const when = ptWords(start);
   const name = ownerName(owner);
@@ -106,7 +104,7 @@ export function createdLines(i: { plan: WritePlan; result: AppointmentResult | n
   const when = ptWords(new Date(booked.start));
   const name = ownerName(i.owner);
   const r = i.result;
-  if (r?.kind === 'created' || r?.kind === 'existing') return [`Event: ${EVENT_SUBJECTS[booked.kind]}, ${when}, owner ${name}`];
+  if (r?.kind === 'created' || r?.kind === 'existing') return [`Event: ${eventSubject(booked)}, ${when}, owner ${name}`];
   if (r?.kind === 'lead_hold') {
     return [...(r.eventId ? [`Hold on ${name}'s calendar: ${when}`] : []), ...(r.taskId ? [`Task to ${name}: convert the Lead and book it`] : [])];
   }
