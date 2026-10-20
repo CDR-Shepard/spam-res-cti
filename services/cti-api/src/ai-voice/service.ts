@@ -72,6 +72,8 @@ export interface StartInput {
   slots?: AppointmentSlot[];
   /** Plan 1D: we have spoken with this seller before (the trigger's context). */
   returning?: boolean;
+  /** Task 14: what already happened with this seller (record calls only); the prompt fences it as data after the instructions. */
+  history?: string;
   deps: StartDeps;
 }
 
@@ -231,6 +233,7 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
     callbackNumber: gate.fromE164,
     templates,
     ...(i.plan ? { approvedPlan: i.plan } : {}),
+    ...(i.history ? { history: i.history } : {}),
     ...bookingPrompt(i, record, gate.toE164),
   };
   registerActiveCall(

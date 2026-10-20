@@ -344,6 +344,40 @@ describe('POST /internal/ai-calls', () => {
       expect(startInput().slots).toBeUndefined();
     });
 
+    it('a record target with history reaches the start with the history, unchanged', async () => {
+      const history = '2026-10-02 Email from Sam — "Your house": Hello there.\n2026-10-04 Email from the seller — "Re: Your house": Call me after five.';
+      const res = await post(recordBody({}, { history }));
+      expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
+      expect(startInput().history).toBe(history);
+      expect(startInput().target).toEqual({ objectType: 'Lead', recordId: LEAD });
+    });
+
+    it('a record target without history starts with none', async () => {
+      await post(recordBody());
+      expect(startInput().history).toBeUndefined();
+    });
+
+    it('history is logged nowhere: a placed call writes no log line with its text', async () => {
+      await post(recordBody({}, { history: 'PRIVATE seller reply text' }));
+      expect(JSON.stringify([log.info.mock.calls, log.warn.mock.calls, log.error.mock.calls])).not.toContain('PRIVATE seller reply text');
+    });
+
+    it('history over 3,000 characters, or empty, answers 400 invalid_body and reserves nothing', async () => {
+      for (const history of ['x'.repeat(3001), '']) {
+        const res = await post(recordBody({}, { history }));
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: 'invalid_body' });
+      }
+      expect(store.reserve).not.toHaveBeenCalled();
+      expect(deps.start).not.toHaveBeenCalled();
+    });
+
+    it('only a record target takes history: a practice target with history is refused', async () => {
+      const res = await post(practiceBody({ history: 'x' }));
+      expect(res.statusCode).toBe(400);
+      expect(deps.start).not.toHaveBeenCalled();
+    });
+
     it('a practice target starts a practice call on the real record, through the tenant integration', async () => {
       const res = await post(practiceBody({ slots: [SLOT], context: { returning: true } }));
       expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });

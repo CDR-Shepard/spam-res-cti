@@ -9,6 +9,11 @@ export const INTERNAL_AI_AVAILABILITY_PATH = '/internal/ai-calls/availability';
 export const INTERNAL_AI_BROWSER_TOKEN_PATH = '/internal/ai-calls/browser-token';
 /** The approved plan as the voice agent receives it (fenced as data in its instructions). */
 export const PLAN_TEXT_MAX = 4_000;
+/**
+ * The seller's conversation history as the voice agent receives it (fenced as data in its instructions): the digest
+ * of the seller's timeline (emails, replies, earlier calls), newest lines kept whole. Sam's email writer reads the same size.
+ */
+export const HISTORY_TEXT_MAX = 3_000;
 
 export const IdempotencyKey = z.string().regex(/^[A-Za-z0-9:_-]{8,120}$/);
 
@@ -33,7 +38,8 @@ const SF_RECORD_ID = z.string().regex(/^[a-zA-Z0-9]{15,18}$/);
 
 /**
  * record   A real call to the record's phone, with its approved plan. `context` and `slots` (plan 1D) are
- *          structured data cti-api renders outside the plan fence; slots are never plan text.
+ *          structured data cti-api renders outside the plan fence; slots are never plan text. `history` is what
+ *          already happened with the seller (seller-written text included), fenced as data after the instructions.
  * test     An admin's test number, optionally with a plan.
  * practice An admin's test number with a real record's plan and prompt (plan 1D decision 6): never books,
  *          converts or writes to Salesforce, and a transfer rings the admin who started it.
@@ -49,6 +55,7 @@ export const InternalAiCallTarget = z.discriminatedUnion('kind', [
       planText: z.string().min(1).max(PLAN_TEXT_MAX),
       context: CallContext.optional(),
       slots: AppointmentSlots.optional(),
+      history: z.string().min(1).max(HISTORY_TEXT_MAX).optional(),
     })
     .strict(),
   z.object({ kind: z.literal('test'), to: z.string().min(7).max(20), planText: z.string().max(PLAN_TEXT_MAX).nullable() }).strict(),

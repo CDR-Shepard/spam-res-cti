@@ -13,9 +13,12 @@ import { agentPlanTextIssues } from '@cti/contracts';
 /** The most plan text the instructions carry (the contract's PLAN_TEXT_MAX). */
 export const PLAN_PROMPT_MAX = 4_000;
 
-/** Any opening or closing data-fence tag (notes or plan) becomes inert text inside either fence. */
+/**
+ * Any opening or closing data-fence tag (notes, plan or the seller's conversation history) becomes inert text inside any of
+ * the fences. Same length in, same length out for a tag without inner spaces, so a cap applied after it still holds.
+ */
 export function neutraliseFences(text: string): string {
-  return text.replace(/<\s*(\/?)\s*(crm_notes|call_plan)\s*>/gi, '[$1$2]');
+  return text.replace(/<\s*(\/?)\s*(crm_notes|call_plan|conversation_history)\s*>/gi, '[$1$2]');
 }
 
 /** The plan as the instructions fence it, or null for none (no plan, blank, or failing CF-9). */

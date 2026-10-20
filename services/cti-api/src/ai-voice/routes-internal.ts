@@ -102,11 +102,14 @@ function targetKeys(body: Body): Pick<CallLookup, 'sfRecordId' | 'toE164' | 'kin
   }
 }
 
-/** The service's target, and the plan 1D extras (slots and the returning flag) for record and practice calls. */
-function startTarget(t: Body['target']): Pick<StartInput, 'target' | 'slots' | 'returning'> {
+/**
+ * The service's target, and the plan 1D extras (slots and the returning flag) for record and practice calls. Task 14: only a
+ * record call carries the seller's conversation history (a practice call must not read a seller's emails aloud to an admin's phone).
+ */
+function startTarget(t: Body['target']): Pick<StartInput, 'target' | 'slots' | 'returning' | 'history'> {
   switch (t.kind) {
     case 'record':
-      return { target: { objectType: t.objectType, recordId: t.recordId }, slots: t.slots, returning: t.context?.returning ?? false };
+      return { target: { objectType: t.objectType, recordId: t.recordId }, slots: t.slots, returning: t.context?.returning ?? false, history: t.history };
     case 'practice':
       return {
         target: { practice: { objectType: t.objectType, recordId: t.recordId, to: t.to } },

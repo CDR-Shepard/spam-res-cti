@@ -10,6 +10,7 @@ import {
   INTERNAL_AI_AVAILABILITY_PATH,
   INTERNAL_AI_BROWSER_TOKEN_PATH,
   INTERNAL_AI_CALLS_PATH,
+  HISTORY_TEXT_MAX,
   IdempotencyKey,
   InternalAiCallRequest,
   InternalAiCallResponse,
@@ -143,6 +144,21 @@ describe('plan 1D: context, slots, practice calls, appointment_set', () => {
   it('a record target rejects a bad slot or a bad context (still .strict())', () => {
     expect(InternalAiCallRequest.safeParse(withTarget({ slots: [{ ...SLOT, id: 'w1' }] })).success).toBe(false);
     expect(InternalAiCallRequest.safeParse(withTarget({ context: { returning: 'yes' } })).success).toBe(false);
+  });
+
+  it('a record target carries the seller\'s conversation history: up to HISTORY_TEXT_MAX characters, never empty', () => {
+    expect(HISTORY_TEXT_MAX).toBe(3000);
+    const withHistory = withTarget({ history: '2026-10-01 Email from Sam — "Hello": Hi there' });
+    expect(InternalAiCallRequest.parse(withHistory)).toEqual(withHistory);
+    expect(InternalAiCallRequest.safeParse(withTarget({ history: 'x'.repeat(3000) })).success).toBe(true);
+    expect(InternalAiCallRequest.safeParse(withTarget({ history: 'x'.repeat(3001) })).success).toBe(false);
+    expect(InternalAiCallRequest.safeParse(withTarget({ history: '' })).success).toBe(false);
+    expect(InternalAiCallRequest.safeParse(withTarget({ history: null })).success).toBe(false);
+  });
+
+  it('only a record target takes history: a practice target stays strict', () => {
+    const body = { ...recordRequest, target: { ...practiceTarget, history: 'x' } };
+    expect(InternalAiCallRequest.safeParse(body).success).toBe(false);
   });
 
   it('a practice target parses, with or without slots and context', () => {

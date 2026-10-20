@@ -291,7 +291,7 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
   const realGate = () => {
     deps.gate = vi.fn((d, input) => gateAiCall(d, input, fakeGateDeps));
   };
-  const run = (target: Parameters<typeof startAiCall>[0]['target'], s: SessionUser, extra: { slots?: AppointmentSlot[]; returning?: boolean } = {}) =>
+  const run = (target: Parameters<typeof startAiCall>[0]['target'], s: SessionUser, extra: { slots?: AppointmentSlot[]; returning?: boolean; history?: string } = {}) =>
     startAiCall({ db, cfg: gateCfg, session: s, target, plan: 'Opener: hi', ...extra, deps });
 
   it('1: a practice call by an admin to a listed number is placed, even with consent false on the record', async () => {
@@ -362,6 +362,17 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
     if (!res.ok) throw new Error('unreachable');
     expect(store.rows.get(res.aiCallId)).toMatchObject({ isTest: false, practice: false, offeredSlots: SLOTS });
     expect(getActiveCall(res.aiCallId)!.prompt).toMatchObject({ isTest: false, returning: true, slots: SLOTS, sellerTimeZone: 'America/Los_Angeles' });
+  });
+
+  it('5b: a record call with history gives it to the prompt, and the instructions end with it fenced as data', async () => {
+    const history = '2026-10-02 Email from Sam — "Your house": Hello there.';
+    const res = await run({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' }, session, { history });
+    if (!res.ok) throw new Error('unreachable');
+    const prompt = getActiveCall(res.aiCallId)!.prompt;
+    expect(prompt).toMatchObject({ isTest: false, history });
+    expect(buildInstructions({ ...prompt, localTime: 'Monday 11:00 AM' })).toMatch(/<conversation_history>\n2026-10-02 Email from Sam — "Your house": Hello there\.\n<\/conversation_history>\nUse this so you never repeat/);
+    // The voicemail never carries it.
+    expect(voicemailText({ ...prompt, localTime: 'Monday 11:00 AM' })).not.toContain('Hello there');
   });
 
   it('6: a record call without slots stores [] and its prompt is unchanged', async () => {

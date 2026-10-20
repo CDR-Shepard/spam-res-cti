@@ -14,6 +14,7 @@
  * Plan 1D: every trigger carries `context.returning` (the plan has a last real contact), and is offered the appointment
  * owner's free times just before the claim. CF-13 as corrected by Fix 1 (I-2): a kept key whose request cti-api stored is
  * re-sent without slots and settles through the 409 → resolveKey path; a kept key cti-api never stored is sent as fresh.
+ * Task 14: a fresh trigger also carries the seller's conversation history (call-history.ts), under the same rule.
  *
  * Round 2: a touch that kept its idempotency key may already have reached cti-api. Before anything else, and so before any
  * path could drop that key, cti-api's request store is read (key-resolution.ts): a call placed under the key is linked (the
@@ -24,6 +25,7 @@ import type { Db } from '@cti/db';
 import { holdIfFlagged } from '../campaigns/dnc-hold.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
+import { callHistory } from './call-history.js';
 import type { CtiClient, TriggerOutcome } from './cti-client.js';
 import { resolveKey, settleKeptKey } from './key-resolution.js';
 import { decideTrigger, windowCheck, type TriggerDecision } from './pacing-rules.js';
@@ -209,11 +211,22 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
   // (it appeared after the candidates were read) is treated as stored.
   const sendAsFresh = !claim.keptKey || (claim.triggerKey === c.triggerKey && !kept.stored);
   const slots = offer && sendAsFresh ? offer.slots : [];
+  // Task 14: what already happened with the seller rides on every fresh send, with or without an offer, and never on a re-send
+  // of a key cti-api stored (the same body shape as its first request). A read that fails sends the call without it.
+  const history = sendAsFresh ? await callHistory(deps, { orgId: c.orgId, touchId: c.touchId, crmRecordId: c.crmRecordId }) : null;
   const answered = await deps.cti.trigger({
     orgId: c.orgId,
     userId: c.requestedBy,
     idempotencyKey: claim.triggerKey,
-    target: { kind: 'record', objectType: c.sfObject, recordId: c.sfRecordId, planText: rendered.text, context, ...(slots.length ? { slots } : {}) },
+    target: {
+      kind: 'record',
+      objectType: c.sfObject,
+      recordId: c.sfRecordId,
+      planText: rendered.text,
+      context,
+      ...(slots.length ? { slots } : {}),
+      ...(history ? { history } : {}),
+    },
   });
   const conflict = answered.kind === 'conflict' ? await conflictOutcome(deps, c, claim.triggerKey) : null;
   const outcome = conflict?.outcome ?? answered;
