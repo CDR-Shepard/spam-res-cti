@@ -78,7 +78,8 @@ class TtlCache<V> {
 }
 
 const normalizeAddress = (address: string): string => address.trim().replace(/\s+/g, ' ').toLowerCase();
-const placeKey = (place: Place): string => ('address' in place ? `a:${normalizeAddress(place.address)}` : `p:${place.point.lat.toFixed(6)},${place.point.lng.toFixed(6)}`);
+/** A place's identity for the route cache; the router dedupes on it too, since every origin x destination asked is billed. */
+export const placeKey = (place: Place): string => ('address' in place ? `a:${normalizeAddress(place.address)}` : `p:${place.point.lat.toFixed(6)},${place.point.lng.toFixed(6)}`);
 const hourStart = (t: Date): string => new Date(Math.floor(t.getTime() / HOUR_MS) * HOUR_MS).toISOString();
 
 function waypoint(place: Place): { waypoint: object } {

@@ -33,7 +33,7 @@ const MAX_DAYS_SCANNED = 80;
 const dayKey = (d: LocalDay): string => `${d.year}-${d.month}-${d.day}`;
 
 /** The first `count` local days, from today, whose ISO weekday is in `days`. */
-function horizonDays(count: number, days: readonly number[], now: Date, timeZone: string): LocalDay[] {
+export function horizonDays(count: number, days: readonly number[], now: Date, timeZone: string): LocalDay[] {
   const out: LocalDay[] = [];
   for (let i = 0; i < MAX_DAYS_SCANNED && out.length < count; i += 1) {
     const d = addLocalDays(now, i, timeZone);
