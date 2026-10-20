@@ -1,0 +1,116 @@
+/**
+ * The outgoing email: a plain-text part and an HTML part that say the same thing, plus the headers
+ * that make an unsubscribe one click.
+ *
+ * Every message ends with the same footer (who Sam is, who she works for, a postal address, and a
+ * working unsubscribe link). It is what keeps the channel honest and what CAN-SPAM and the mailbox
+ * providers expect, so it is built here, once, and never by the draft. The footer's fixed lines are
+ * exported so reply parsing (inbound-text.ts) strips exactly what this file writes: a quoted copy of
+ * our own "unsubscribe here" line must never read as the seller asking to stop. The HTML has no
+ * images, no tracking pixel and one link, so there is nothing to block or to scrub.
+ *
+ * Pure: no I/O, no clock, no logging.
+ */
+import { unsubscribeMailto, unsubscribeUrl } from './addresses.js';
+
+export const FOOTER_RULE = '—';
+export const FOOTER_SIGNATURE = 'Sam';
+/**
+ * How the unsubscribe sentence opens, in both parts: the text footer continues "unsubscribe here: <url>",
+ * the HTML footer "<a>unsubscribe here</a>" (so flattened to text it has no colon and no URL). A quoted
+ * copy of either is recognised by this lead, which is why reply parsing matches on it and not on the
+ * text part's longer prefix.
+ */
+export const FOOTER_UNSUBSCRIBE_LEAD = 'To stop hearing from Sam,';
+const FOOTER_UNSUBSCRIBE_PREFIX = `${FOOTER_UNSUBSCRIBE_LEAD} unsubscribe here:`;
+
+export function assistantFooterLine(company: string): string {
+  return `${company}'s AI assistant`;
+}
+
+export const COMPANY_LINE_SEPARATOR = ' · ';
+
+export function companyFooterLine(company: string, postal: string): string {
+  return `${company}${COMPANY_LINE_SEPARATOR}${postal}`;
+}
+
+export function unsubscribeFooterLine(url: string): string {
+  return `${FOOTER_UNSUBSCRIBE_PREFIX} ${url}`;
+}
+
+export interface RenderEmailInput {
+  body: string;
+  token: string;
+  apiPublicUrl: string;
+  replyDomain: string;
+  postalAddress: string;
+  companyName: string;
+  /** Message-ID of the message being answered, for threading; null on a first email. */
+  inReplyTo: string | null;
+  references: string | null;
+}
+
+export interface RenderedEmail {
+  text: string;
+  html: string;
+  headers: Record<string, string>;
+}
+
+const HTML_ESCAPES: Readonly<Record<string, string>> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+};
+
+export function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]!);
+}
+
+/** Blank-line separated paragraphs; a single newline inside one becomes <br>. All of it escaped. */
+function bodyToHtml(body: string): string {
+  return body
+    .split(/\n[ \t]*\n/)
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph.length > 0)
+    .map((paragraph) => `<p>${escapeHtml(paragraph).replace(/\n/g, '<br>')}</p>`)
+    .join('\n');
+}
+
+/** A header value is one line: a stored Message-ID that carried a line break must not start a new header. */
+function oneLine(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ').trim();
+}
+
+export function renderEmail(i: RenderEmailInput): RenderedEmail {
+  const url = unsubscribeUrl(i.apiPublicUrl, i.token);
+  const body = i.body.replace(/\r\n?/g, '\n').trimEnd();
+
+  const text = [
+    body,
+    '',
+    FOOTER_RULE,
+    FOOTER_SIGNATURE,
+    assistantFooterLine(i.companyName),
+    '',
+    companyFooterLine(i.companyName, i.postalAddress),
+    unsubscribeFooterLine(url),
+  ].join('\n');
+
+  const html = [
+    bodyToHtml(body),
+    `<p>${FOOTER_RULE}<br>${FOOTER_SIGNATURE}<br>${escapeHtml(assistantFooterLine(i.companyName))}</p>`,
+    `<p>${escapeHtml(companyFooterLine(i.companyName, i.postalAddress))}<br>` +
+      `${FOOTER_UNSUBSCRIBE_LEAD} <a href="${escapeHtml(url)}">unsubscribe here</a></p>`,
+  ].join('\n');
+
+  const headers: Record<string, string> = {
+    'List-Unsubscribe': `<${url}>, <mailto:${unsubscribeMailto(i.token, i.replyDomain)}>`,
+    'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+  };
+  if (i.inReplyTo) headers['In-Reply-To'] = oneLine(i.inReplyTo);
+  if (i.references) headers['References'] = oneLine(i.references);
+
+  return { text, html, headers };
+}
