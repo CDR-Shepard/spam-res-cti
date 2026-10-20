@@ -1,14 +1,17 @@
 /**
- * Real Postgres: what pauses Sam's AI calls to a seller without ending them. A person who took the seller over, or a
- * flag waiting for a person (a holding email promised one), pauses the calls until the seller is given back to Sam
- * (I1). A paused touch is never a candidate of the `ai_call.place` tick, so it is never refused, burns no attempt and
- * starts no refusal run; given back, it is called at the next tick.
+ * Real Postgres: what keeps Sam's AI calls from a seller without a stop on the seller's own record. A person who took
+ * the seller over, or a flag waiting for a person (a holding email promised one), pauses the calls until the seller is
+ * given back to Sam (I1). A duplicate record synced AFTER the seller opted out carries an address on the suppression
+ * list: it is not called either, unless that address is on more than SHARED_ADDRESS_LIMIT records (I2a). A held touch
+ * is never a candidate of the `ai_call.place` tick, so it is never refused, burns no attempt and starts no refusal run.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
-import { ensureConversation, flagConversation, setHandler } from '../conversations/store.js';
+import { SHARED_ADDRESS_LIMIT } from '../conversations/shared-address.js';
+import { ensureConversation, flagConversation, setHandler, stopSeller, suppressAddress } from '../conversations/store.js';
 import { seedUser } from '../test/call-plan-seed.js';
+import { leadId, seedRecord, snapshot } from '../test/outreach-fixtures.js';
 import { seedReleasedLead, touchById } from '../test/ai-call-seed.js';
 import { paceHarness } from '../test/fake-pace.js';
 import { createTestDb, pgLane } from '../test/pg.js';
@@ -108,6 +111,65 @@ describe.skipIf(!pgLane)('ai_call.place: a seller a person handles or who waits 
       const h = await paceHarness(db);
       const lead = await seedReleasedLead(db, h.base);
       await ensureConversation(db, { orgId: h.base.orgId, crmRecordId: lead.crmRecordId });
+      expect((await h.run(NOW)).placed).toBe(1);
+    });
+  });
+
+  describe('I2a: a duplicate record synced after the seller opted out', () => {
+    let seq = 0;
+    const ADDRESS = 'seller@example.com';
+
+    /** Seller A (an enrolled lead) is stopped for `reason`; nothing else carries the address yet. */
+    async function stoppedSeller(h: Harness, reason: 'opted_out' | 'complained' | 'asked_to_stop') {
+      const a = await seedReleasedLead(db, h.base, { recordOver: { email: ADDRESS }, dueAt: LATER });
+      const conv = await ensureConversation(db, { orgId: h.base.orgId, crmRecordId: a.crmRecordId });
+      await stopSeller(db, { conversationId: conv.id, reason, now: NOW });
+      return a;
+    }
+    /** `n` more records with the address (any case), no enrollment. */
+    async function moreRecords(orgId: string, n: number): Promise<void> {
+      for (let i = 0; i < n; i += 1) await seedRecord(db, orgId, snapshot({ sfRecordId: leadId(600_000 + (seq += 1)), email: i % 2 === 0 ? ' Seller@Example.com' : 'SELLER@example.com ' }));
+    }
+
+    it.each(['opted_out', 'complained', 'asked_to_stop'] as const)('after A %s, record B with the same address is not claimed and burns no attempt', async (reason) => {
+      const h = await paceHarness(db);
+      await stoppedSeller(h, reason);
+      const b = await seedReleasedLead(db, h.base, { recordOver: { email: 'Seller@Example.COM' } });
+      await paused(h, b);
+    });
+
+    it(`with the address on ${SHARED_ADDRESS_LIMIT + 1} records it says nothing about who B is: B is claimed`, async () => {
+      const h = await paceHarness(db);
+      await stoppedSeller(h, 'opted_out');
+      // A, these, and B: one more than the limit.
+      await moreRecords(h.base.orgId, SHARED_ADDRESS_LIMIT - 1);
+      const b = await seedReleasedLead(db, h.base, { recordOver: { email: ADDRESS } });
+      expect((await h.run(NOW)).placed).toBe(1);
+      expect(await touchById(db, b.touchId)).toMatchObject({ status: 'sent', attempts: 1 });
+    });
+
+    it(`with the address on exactly ${SHARED_ADDRESS_LIMIT} records B is still held`, async () => {
+      const h = await paceHarness(db);
+      await stoppedSeller(h, 'opted_out');
+      // A, these, and B: the limit itself.
+      await moreRecords(h.base.orgId, SHARED_ADDRESS_LIMIT - 2);
+      const b = await seedReleasedLead(db, h.base, { recordOver: { email: ADDRESS } });
+      await paused(h, b);
+    });
+
+    it('a bounced address (not an opt-out) does not hold a call', async () => {
+      const h = await paceHarness(db);
+      const b = await seedReleasedLead(db, h.base, { recordOver: { email: ADDRESS } });
+      await suppressAddress(db, { orgId: h.base.orgId, address: ADDRESS, reason: 'bounced', conversationId: null });
+      expect((await h.run(NOW)).placed).toBe(1);
+      expect((await touchById(db, b.touchId)).status).toBe('sent');
+    });
+
+    it("another tenant's suppression of the same address holds nothing here", async () => {
+      const other = await paceHarness(db);
+      await suppressAddress(db, { orgId: other.base.orgId, address: ADDRESS, reason: 'opted_out', conversationId: null });
+      const h = await paceHarness(db);
+      await seedReleasedLead(db, h.base, { recordOver: { email: ADDRESS } });
       expect((await h.run(NOW)).placed).toBe(1);
     });
   });

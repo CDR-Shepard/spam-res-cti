@@ -10,14 +10,15 @@
  * The enrollment row is locked FOR SHARE first, in its own statement, so the claim's snapshot is taken after
  * any writer holding it (an approval, a hold, an exit) has committed.
  *
- * A paused seller is left out of the due scope too, not only refused by the claim: a touch that only waits for a
- * person is never a candidate, so it is never refused, burns no attempt and starts no refusal run (pace.ts gives up
+ * A paused seller is left out of the due scope too, not only refused by the claim: a touch that only waits (for a
+ * person, or behind an opted-out address) is never a candidate, so it is never refused, burns no attempt and starts no refusal run (pace.ts gives up
  * on a touch refused too long). Given back to Sam, it is called at the next tick.
  */
 import { and, eq, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { exitEnrollment } from '../campaigns/enroll.js';
 import { DNC_PENDING_SQL } from '../call-plans/dnc-sql.js';
+import { SHARED_ADDRESS_LIMIT } from '../conversations/shared-address.js';
 import { IN_FLIGHT_RETRY_MS } from './pacing-rules.js';
 
 /** A `dialing` touch with no call after this long lost its tick (a crash mid-trigger). */
@@ -57,14 +58,31 @@ const rows = <T>(r: unknown): T[] => (r as { rows: T[] }).rows;
 const iso = (d: Date) => sql`${d.toISOString()}::timestamptz`;
 
 /**
- * The seller of enrollment `e` must not be called now, by its REAL conversation (an admin's practice copy never
- * counts): `stopped` (an opt-out, a complaint, a do-not-call or a "not interested"), taken over by a person, or
- * flagged for one (a holding email promised the seller a person; giving the seller back to Sam clears the flag).
+ * Suppression reasons that are a seller's stop (an unsubscribe, a spam complaint, a do-not-call: the store keeps
+ * asked_to_stop as opted_out). A bounce is about the mailbox, not the person, and holds no call.
  */
-const SELLER_PAUSED = sql`exists (
+const STOP_SUPPRESSIONS = ['opted_out', 'complained'] as const;
+
+/**
+ * The seller of enrollment `e` must not be called now:
+ *  - by its REAL conversation (an admin's practice copy never counts): `stopped` (an opt-out, a complaint, a
+ *    do-not-call or a "not interested"), taken over by a person, or flagged for one (a holding email promised the
+ *    seller a person; giving the seller back to Sam clears the flag);
+ *  - or by its address: the record's email (trimmed, any case) is suppressed in this tenant for a stop, so a
+ *    duplicate record synced after the seller opted out is not called. Only while that address is on at most
+ *    SHARED_ADDRESS_LIMIT of the tenant's records: an address on more of them says nothing about who this record is
+ *    (the same limit the store's stop sweep keeps). The count uses crm_records' (org_id, lower(btrim(email))) index.
+ */
+const SELLER_PAUSED = sql`(exists (
     select 1 from seller_conversations sc
     where sc.org_id = e.org_id and sc.crm_record_id = e.crm_record_id and sc.practice_user_id is null
-      and (sc.status = 'stopped' or sc.handler = 'person' or sc.flag_reason is not null))`;
+      and (sc.status = 'stopped' or sc.handler = 'person' or sc.flag_reason is not null))
+  or exists (
+    select 1 from crm_records sr
+    join email_suppressions es on es.org_id = sr.org_id and es.address = lower(btrim(sr.email))
+    where sr.id = e.crm_record_id and sr.org_id = e.org_id
+      and es.reason in (${sql.join(STOP_SUPPRESSIONS.map((r) => sql`${r}`), sql`, `)})
+      and (select count(*) from crm_records sx where sx.org_id = sr.org_id and lower(btrim(sx.email)) = es.address) <= ${SHARED_ADDRESS_LIMIT}))`;
 
 /** The due scope (dueAiCallTouches' test case 1), with touches `t`, enrollments `e`, campaigns `c`. */
 const dueScope = (now: Date) => sql`
