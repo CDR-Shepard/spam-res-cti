@@ -1,14 +1,14 @@
 /**
  * A tiny SOQL WHERE evaluator for fakes that should answer like Salesforce does: a query's rows are the table's rows its
- * WHERE clause keeps. It understands AND, OR, parentheses and `Field op literal` with op one of = != < <= > >=, and literals
- * that are 'quoted strings', true/false, numbers or dateTime values (2026-10-06T00:00:00Z). A condition on a field the row
- * does not carry is true (tests give rows only the fields that matter). Anything else throws, so a test never passes on a
- * query this fake did not understand.
+ * WHERE clause keeps. It understands AND, OR, parentheses, `Field op literal` with op one of = != < <= > >=, and
+ * `Field IN (literal, …)`, with literals that are 'quoted strings', true/false, numbers or dateTime values
+ * (2026-10-06T00:00:00Z). A condition on a field the row does not carry is true (tests give rows only the fields that
+ * matter). Anything else throws, so a test never passes on a query this fake did not understand.
  */
 type Row = Record<string, unknown>;
 type Literal = string | number | boolean | Date;
 
-const TOKEN = /\s*(\(|\)|!=|<=|>=|=|<|>|'(?:\\.|[^'\\])*'|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z|-?\d+(?:\.\d+)?|[A-Za-z_][A-Za-z0-9_.]*)/y;
+const TOKEN = /\s*(\(|\)|,|!=|<=|>=|=|<|>|'(?:\\.|[^'\\])*'|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z|-?\d+(?:\.\d+)?|[A-Za-z_][A-Za-z0-9_.]*)/y;
 
 function tokenize(where: string): string[] {
   const out: string[] = [];
@@ -51,10 +51,28 @@ function compare(value: unknown, op: string, lit: Literal): boolean {
   }
 }
 
-/** Recursive descent over the tokens: or := and (OR and)*; and := atom (AND atom)*; atom := ( or ) | Field op literal. */
+/** The literals of an IN list from its opening parenthesis at `start`, and the index just past its closing one. */
+function inList(tokens: string[], start: number): { values: Literal[]; next: number } {
+  if (tokens[start] !== '(') throw new Error('fake SOQL: IN needs a parenthesised list');
+  const values: Literal[] = [];
+  for (let i = start + 1; i < tokens.length; i += 2) {
+    values.push(literal(tokens[i]!));
+    if (tokens[i + 1] === ')') return { values, next: i + 2 };
+    if (tokens[i + 1] !== ',') throw new Error('fake SOQL: bad IN list');
+  }
+  throw new Error('fake SOQL: unclosed IN list');
+}
+
+/** Recursive descent over the tokens: or := and (OR and)*; and := atom (AND atom)*; atom := ( or ) | Field IN (…) | Field op literal. */
 function evaluate(tokens: string[], row: Row): boolean {
   let i = 0;
   const atom = (): boolean => {
+    if (tokens[i + 1] === 'IN') {
+      const field = tokens[i]!;
+      const { values, next } = inList(tokens, i + 2);
+      i = next;
+      return field in row ? values.some((v) => compare(row[field], '=', v)) : true;
+    }
     if (tokens[i] === '(') {
       i += 1;
       const v = or();

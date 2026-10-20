@@ -1,8 +1,8 @@
 /**
- * Times AI calls have already booked with the appointment owner that the owner's Salesforce calendar does not show yet
- * (Fix 1, I-4). cti-api stores a booking on `ai_calls.appointment` the moment the agent books it; the write-back creates the
- * Event later (and a fallback creates none). Until an Event exists, the calendar read cannot see the booking, so the next
- * call's offer takes these out itself: concurrent and back-to-back calls are never promised the same time.
+ * Times AI calls have already booked with the region reps that their Salesforce calendars do not show yet (Fix 1, I-4).
+ * cti-api stores a booking on `ai_calls.appointment` the moment the agent books it; the write-back creates the Event later
+ * (and a fallback creates none). Until an Event exists, the calendar read cannot see the booking, so the next call's offer
+ * takes these out itself: concurrent and back-to-back calls are never promised the same time.
  *
  * Read-only (outreach-api never writes ai_calls). Test and practice calls never count: nothing is ever written for them, so
  * their bookings are not real appointments. A booking whose write-back created the Event is the calendar's to show, unless
@@ -16,31 +16,35 @@
 import { and, desc, eq, gte, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { BOOKING_STANDS_OUTCOMES, BookedAppointment } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
-import type { AiCallBookingSettings } from '@cti/contracts';
-import { OFFER_CALENDAR_DAYS, offerFrom, type Offer, type OfferCalendar } from './offer.js';
+import { OFFER_CALENDAR_DAYS } from './calendar.js';
 import type { Busy } from './slots.js';
 
 /** A call books one of the times its trigger offered, all within OFFER_CALENDAR_DAYS of the trigger: older calls cannot matter. */
 export const BOOKED_LOOKBACK_DAYS = OFFER_CALENDAR_DAYS + 1;
-/** Bounds the read; far above what one owner's calendar can hold in the look-back. */
+/** Bounds the read; far above what the reps' calendars can hold in the look-back. */
 export const BOOKED_ROW_LIMIT = 500;
 const DAY_MS = 86_400_000;
 
 /** Salesforce compares ids on their case-sensitive 15-character core. */
 const core = (id: string): string => id.slice(0, 15);
 
-/** The owner's booked times overlapping [now, until) that no Event shows yet, as timed busy items. */
-export async function bookedNotOnCalendar(db: Db, a: { orgId: string; ownerSfUserId: string; now: Date; until: Date }): Promise<Busy[]> {
+interface Window {
+  now: Date;
+  until: Date;
+}
+
+/** The tenant's stored bookings that may still hold time (newest first): see the module comment for which count. */
+async function standingAppointments(db: Db, orgId: string, now: Date): Promise<unknown[]> {
   const c = schema.aiCalls;
   const w = schema.aiCallWritebacks;
-  const since = new Date(a.now.getTime() - BOOKED_LOOKBACK_DAYS * DAY_MS);
+  const since = new Date(now.getTime() - BOOKED_LOOKBACK_DAYS * DAY_MS);
   const rows = await db
     .select({ appointment: c.appointment })
     .from(c)
     .leftJoin(w, eq(w.aiCallId, c.id))
     .where(
       and(
-        eq(c.orgId, a.orgId),
+        eq(c.orgId, orgId),
         isNotNull(c.appointment),
         eq(c.isTest, false),
         gte(c.createdAt, since),
@@ -50,22 +54,30 @@ export async function bookedNotOnCalendar(db: Db, a: { orgId: string; ownerSfUse
     )
     .orderBy(desc(c.createdAt))
     .limit(BOOKED_ROW_LIMIT);
-  return rows.flatMap(({ appointment }): Busy[] => {
-    const booked = BookedAppointment.safeParse(appointment);
-    if (!booked.success || core(booked.data.specialistSfUserId) !== core(a.ownerSfUserId)) return [];
-    // The time it blocks (Part 4 Fix 1, I-3): a walkthrough's buffer included, as cti-api's booking check compares it.
-    const start = new Date(booked.data.blockStart ?? booked.data.start);
-    const end = new Date(booked.data.blockEnd ?? booked.data.end);
-    return start.getTime() < a.until.getTime() && end.getTime() > a.now.getTime() ? [{ start, end, allDay: false }] : [];
-  });
+  return rows.map((r) => r.appointment);
 }
 
 /**
- * The offer from a calendar already read, less the times other AI calls booked with its owner that no Event shows yet
- * (I-4). One composition for the pacer's trigger (pace-context.ts tickOffer) and a practice call (practice.ts), so the
- * admin hears what a seller would be offered (P6 M-2).
+ * A stored booking as its rep's busy item over the time it blocks (Part 4 Fix 1, I-3: a walkthrough's buffer included, as
+ * cti-api's booking check compares it), or null when it does not parse or misses [now, until). It is a consultation with no
+ * place: the routing engine counts it in the rep's load and takes the rep to be at the office around it.
  */
-export async function offerWithAiBookings(db: Db, cal: OfferCalendar, i: { orgId: string; booking: AiCallBookingSettings; now: Date }): Promise<Offer> {
-  const booked = cal.kind === 'read' ? await bookedNotOnCalendar(db, { orgId: i.orgId, ownerSfUserId: cal.owner.sfUserId, now: i.now, until: cal.until }) : [];
-  return offerFrom(cal, { booking: i.booking, now: i.now, booked });
+function bookedItem(appointment: unknown, w: Window): { rep: string; busy: Busy } | null {
+  const booked = BookedAppointment.safeParse(appointment);
+  if (!booked.success) return null;
+  const start = new Date(booked.data.blockStart ?? booked.data.start);
+  const end = new Date(booked.data.blockEnd ?? booked.data.end);
+  if (start.getTime() >= w.until.getTime() || end.getTime() <= w.now.getTime()) return null;
+  return { rep: core(booked.data.specialistSfUserId), busy: { start, end, allDay: false, consultation: true, location: null } };
+}
+
+/**
+ * Each rep's booked times overlapping [now, until) that no Event shows yet, keyed by the rep's 15-character id core. Every
+ * rep asked is in the map, with [] when it has none; no rep asked, no query.
+ */
+export async function bookedNotOnCalendar(db: Db, a: { orgId: string; repSfUserIds: readonly string[]; now: Date; until: Date }): Promise<Map<string, Busy[]>> {
+  const reps = [...new Set(a.repSfUserIds.map(core))];
+  if (reps.length === 0) return new Map();
+  const items = (await standingAppointments(db, a.orgId, a.now)).flatMap((appointment) => bookedItem(appointment, a) ?? []);
+  return new Map(reps.map((rep) => [rep, items.filter((i) => i.rep === rep).map((i) => i.busy)]));
 }

@@ -1,8 +1,9 @@
-/** Real Postgres: the times AI calls booked with the owner that no Salesforce Event shows yet (Fix 1, I-4). */
+/** The times AI calls booked with the region reps that no Salesforce Event shows yet (Fix 1, I-4), sorted by rep. */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { schema, type Db } from '@cti/db';
 import { seedAiCall } from '../test/ai-call-seed.js';
 import { seedUser } from '../test/call-plan-seed.js';
+import { aiBooking, fakeBookedDb } from '../test/fake-offer.js';
 import { seedOrg } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { BOOKED_LOOKBACK_DAYS, bookedNotOnCalendar } from './booked.js';
@@ -12,8 +13,46 @@ const UNTIL = new Date('2026-10-21T15:00:00.000Z');
 const DAY = 86_400_000;
 const OWNER = '0058X00000Fsx39QAB';
 const OTHER = '0058X00000Abcd1QAB';
-const booked = (start: string, end: string, owner = OWNER) => ({
-  slotId: 'p1', kind: 'phone', start, end, specialistSfUserId: owner, addressConfirmed: true, note: '', bookedAt: NOW.toISOString(),
+const THIRD = '0055f000005qXVfAAM';
+const core = (id: string): string => id.slice(0, 15);
+const booked = (start: string, end: string, owner = OWNER) => aiBooking(owner, start, end, { slotId: 'p1', kind: 'phone', bookedAt: NOW.toISOString() });
+/** A busy item as the routing engine takes an AI booking: a consultation, with no place (the rep is taken to be at the office). */
+const item = (start: string, end: string) => ({ start: new Date(start), end: new Date(end), allDay: false, consultation: true, location: null });
+
+describe('bookedNotOnCalendar: sorting by rep', () => {
+  it('two reps\' bookings land under each rep\'s 15-character core; another rep\'s, junk and times outside [now, until) do not', async () => {
+    const { db } = fakeBookedDb([
+      booked('2026-10-07T17:00:00.000Z', '2026-10-07T17:15:00.000Z'),
+      booked('2026-10-08T16:00:00.000Z', '2026-10-08T17:00:00.000Z', core(OTHER)),
+      booked('2026-10-09T16:00:00.000Z', '2026-10-09T17:00:00.000Z', THIRD),
+      booked('2026-10-06T14:00:00.000Z', '2026-10-06T15:00:00.000Z'),
+      booked('2026-10-21T15:00:00.000Z', '2026-10-21T16:00:00.000Z', OTHER),
+      { slotId: 'p1', start: 'soon' },
+      null,
+    ]);
+    const got = await bookedNotOnCalendar(db, { orgId: 'org', repSfUserIds: [OWNER, core(OTHER), '0055f000005qYO6AAM'], now: NOW, until: UNTIL });
+    expect(got).toEqual(
+      new Map([
+        [core(OWNER), [item('2026-10-07T17:00:00.000Z', '2026-10-07T17:15:00.000Z')]],
+        [core(OTHER), [item('2026-10-08T16:00:00.000Z', '2026-10-08T17:00:00.000Z')]],
+        ['0055f000005qYO6', []],
+      ]),
+    );
+  });
+
+  it('a walkthrough is busy for the time it blocks, its buffer included', async () => {
+    const { db } = fakeBookedDb([
+      aiBooking(OWNER, '2026-10-07T16:00:00.000Z', '2026-10-07T17:00:00.000Z', { blockStart: '2026-10-07T15:30:00.000Z', blockEnd: '2026-10-07T17:30:00.000Z' }),
+    ]);
+    const got = await bookedNotOnCalendar(db, { orgId: 'org', repSfUserIds: [OWNER], now: NOW, until: UNTIL });
+    expect(got.get(core(OWNER))).toEqual([item('2026-10-07T15:30:00.000Z', '2026-10-07T17:30:00.000Z')]);
+  });
+
+  it('no reps asked: an empty map and no query', async () => {
+    const { db, reads } = fakeBookedDb([booked('2026-10-07T17:00:00.000Z', '2026-10-07T17:15:00.000Z')]);
+    expect(await bookedNotOnCalendar(db, { orgId: 'org', repSfUserIds: [], now: NOW, until: UNTIL })).toEqual(new Map());
+    expect(reads()).toBe(0);
+  });
 });
 
 describe.skipIf(!pgLane)('bookedNotOnCalendar (real Postgres)', () => {
@@ -33,23 +72,27 @@ describe.skipIf(!pgLane)('bookedNotOnCalendar (real Postgres)', () => {
       seedAiCall(db, orgId, userId, {
         status: 'completed', outcome: 'appointment_set', endedAt: NOW, createdAt: new Date(NOW.getTime() - DAY), appointment, ...over,
       });
-    const read = () => bookedNotOnCalendar(db, { orgId, ownerSfUserId: OWNER, now: NOW, until: UNTIL });
-    return { orgId, call, read };
+    const readAll = (repSfUserIds: readonly string[]) => bookedNotOnCalendar(db, { orgId, repSfUserIds, now: NOW, until: UNTIL });
+    const read = async () => (await readAll([OWNER])).get(core(OWNER));
+    return { orgId, call, read, readAll };
   }
 
-  it('the owner\'s booked times in [now, until) come back as timed busy items (15- and 18-character ids alike)', async () => {
+  it('sorts two reps\' booked times in [now, until) into the map by rep core (15- and 18-character ids alike)', async () => {
     const t = await tenant();
     await t.call(booked('2026-10-07T17:00:00.000Z', '2026-10-07T17:15:00.000Z'));
     await t.call(booked('2026-10-08T16:00:00.000Z', '2026-10-08T17:00:00.000Z', OWNER.slice(0, 15)));
-    const got = await t.read();
-    expect(got).toHaveLength(2);
-    expect(got).toEqual(expect.arrayContaining([
-      { start: new Date('2026-10-07T17:00:00.000Z'), end: new Date('2026-10-07T17:15:00.000Z'), allDay: false },
-      { start: new Date('2026-10-08T16:00:00.000Z'), end: new Date('2026-10-08T17:00:00.000Z'), allDay: false },
+    await t.call(booked('2026-10-09T16:00:00.000Z', '2026-10-09T17:00:00.000Z', OTHER));
+    const got = await t.readAll([OWNER, OTHER]);
+    expect([...got.keys()]).toEqual([core(OWNER), core(OTHER)]);
+    expect(got.get(core(OWNER))).toHaveLength(2);
+    expect(got.get(core(OWNER))).toEqual(expect.arrayContaining([
+      item('2026-10-07T17:00:00.000Z', '2026-10-07T17:15:00.000Z'),
+      item('2026-10-08T16:00:00.000Z', '2026-10-08T17:00:00.000Z'),
     ]));
+    expect(got.get(core(OTHER))).toEqual([item('2026-10-09T16:00:00.000Z', '2026-10-09T17:00:00.000Z')]);
   });
 
-  it('leaves out: another owner, a test call, a time already over or past until, junk, a call older than the look-back, another tenant', async () => {
+  it('leaves out: a rep not asked, a test call, a time already over or past until, junk, a call older than the look-back, another tenant', async () => {
     const t = await tenant();
     await t.call(booked('2026-10-07T17:00:00.000Z', '2026-10-07T17:15:00.000Z', OTHER));
     await t.call(booked('2026-10-07T18:00:00.000Z', '2026-10-07T18:15:00.000Z'), { isTest: true });
@@ -72,7 +115,7 @@ describe.skipIf(!pgLane)('bookedNotOnCalendar (real Postgres)', () => {
       { ...row, aiCallId: withEvent, status: 'done' as const, sfEventId: '00U8X00000AbCdEUAZ' },
       { ...row, aiCallId: noEvent, status: 'running' as const },
     ]);
-    expect(await t.read()).toEqual([{ start: new Date('2026-10-07T18:00:00.000Z'), end: new Date('2026-10-07T18:15:00.000Z'), allDay: false }]);
+    expect(await t.read()).toEqual([item('2026-10-07T18:00:00.000Z', '2026-10-07T18:15:00.000Z')]);
   });
 
   it('Part 4 Fix 1 (I-1): only a booking that stands counts; a call that ended do-not-call, not interested… freed its time', async () => {
@@ -87,7 +130,7 @@ describe.skipIf(!pgLane)('bookedNotOnCalendar (real Postgres)', () => {
     }
     await t.call(at(20), { outcome: null });
     await t.call(at(21), { status: 'in_progress', outcome: 'do_not_call', endedAt: null });
-    const hours = (await t.read()).map((b) => b.start.getUTCHours()).sort((a, b) => a - b);
+    const hours = ((await t.read()) ?? []).map((b) => b.start.getUTCHours()).sort((a, b) => a - b);
     expect(hours).toEqual([10, 11, 12, 13]);
   });
 
@@ -97,7 +140,7 @@ describe.skipIf(!pgLane)('bookedNotOnCalendar (real Postgres)', () => {
       ...booked('2026-10-07T16:00:00.000Z', '2026-10-07T17:00:00.000Z'), slotId: 'w1', kind: 'walkthrough',
       blockStart: '2026-10-07T15:30:00.000Z', blockEnd: '2026-10-07T17:30:00.000Z',
     });
-    expect(await t.read()).toEqual([{ start: new Date('2026-10-07T15:30:00.000Z'), end: new Date('2026-10-07T17:30:00.000Z'), allDay: false }]);
+    expect(await t.read()).toEqual([item('2026-10-07T15:30:00.000Z', '2026-10-07T17:30:00.000Z')]);
   });
 
   it('sweep D-19(a): a walkthrough whose Event exists still blocks its buffer, as cti-api\'s booking check does', async () => {
@@ -112,6 +155,6 @@ describe.skipIf(!pgLane)('bookedNotOnCalendar (real Postgres)', () => {
       { ...row, aiCallId: walk, sfEventId: '00U8X00000AbCdEUA1' },
       { ...row, aiCallId: phone, sfEventId: '00U8X00000AbCdEUA2' },
     ]);
-    expect(await t.read()).toEqual([{ start: new Date('2026-10-07T15:30:00.000Z'), end: new Date('2026-10-07T17:30:00.000Z'), allDay: false }]);
+    expect(await t.read()).toEqual([item('2026-10-07T15:30:00.000Z', '2026-10-07T17:30:00.000Z')]);
   });
 });

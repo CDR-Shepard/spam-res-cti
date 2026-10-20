@@ -11,9 +11,9 @@ import { eq, inArray } from 'drizzle-orm';
 import { EditableCallPlan, FieldMap, type AiCallBookingSettings } from '@cti/contracts';
 import { schema } from '@cti/db';
 import { QueryTooLargeError, SalesforceApiError, SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
-import { offerWithAiBookings } from '../appointments/booked.js';
 import type { OwnerUser } from '../appointments/calendar.js';
-import { readOfferCalendar, type Offer, type OfferCalendar } from '../appointments/offer.js';
+// LEGACY single-owner offer until Task 7 moves this to the routed offer (appointments/offer-for-record.ts).
+import { offerWithAiBookings, readOfferCalendar, type LegacyOffer as Offer, type LegacyOfferCalendar as OfferCalendar } from '../appointments/offer-legacy.js';
 import { fetchRecords, type SfRecordSnapshot } from '../campaigns/records.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';

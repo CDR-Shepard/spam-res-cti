@@ -1,174 +1,281 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AppointmentSlots, type AiCallBookingSettings } from '@cti/contracts';
+import { AppointmentSlots, type AiCallBookingSettings, type AppointmentSlot, type Consultations } from '@cti/contracts';
 import { SalesforceApiError } from '@cti/salesforce';
-import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
-import { fakeSalesforce, type QueryRoute } from '../test/fake-sf-client.js';
-import { rowsWhere } from '../test/fake-soql-where.js';
+import { DEFAULT_AI_CALL_BOOKING, DEFAULT_BOOKING_ROUTING } from '../settings.js';
+import {
+  aiBooking, ANAHEIM, BLAKE, CHANCE, eventRow, fakeBookedDb, fakeMaps, GRANT, IMPERIAL_PROPERTY, OC_PROPERTY, offerSalesforce, PLACES,
+  SD_CITY_ONLY, SD_PROPERTY, SETH, THOMAS, usersWithInactive,
+} from '../test/fake-offer.js';
+import { fakeSalesforce } from '../test/fake-sf-client.js';
 import { BUSY_ROW_LIMIT } from './calendar.js';
-import { offerFrom, offerSlots, readOfferCalendar } from './offer.js';
-import { zonedParts } from './zoned.js';
+import { MapsUnavailableError, type MapsClient } from './maps.js';
+import { OFFER_CALENDAR_DAYS, priorityDefaultStart, readOfferCalendars, routedOffer } from './offer.js';
 
-const GRANT = '0058X00000Fsx39QAB';
-const X = '0058X00000Abcd1QAB';
-/** Tuesday 2026-10-06 08:00 PDT. */
-const NOW = new Date('2026-10-06T15:00:00.000Z');
-const booking = (over: Partial<AiCallBookingSettings> = {}): AiCallBookingSettings => ({ ...structuredClone(DEFAULT_AI_CALL_BOOKING), enabled: true, specialists: [GRANT], ...over });
-const grantRow = (over: Record<string, unknown> = {}) => ({ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles', ...over });
-const sfWith = (users: QueryRoute[1], events: QueryRoute[1] = []) => fakeSalesforce({ queries: [[/FROM User/, users], [/FROM Event/, events]] });
+type Row = Record<string, unknown>;
 
-describe('offerSlots', () => {
-  it('booking off gives booking_off and reads nothing', async () => {
-    const sf = sfWith([grantRow()]);
-    expect(await offerSlots(sf.client, { booking: booking({ enabled: false }), now: NOW })).toEqual({ slots: [], ownerSfUserId: null, note: 'booking_off' });
-    expect(sf.soql).toEqual([]);
-  });
+const ORG = '00000000-0000-4000-8000-0000000000a1';
+/** Mon 2026-10-19 09:00 PDT. */
+const NOW = new Date('2026-10-19T16:00:00Z');
+const TUE_9 = '2026-10-20T16:00:00.000Z';
+const core = (id: string): string => id.slice(0, 15);
+const booking = (over: Partial<AiCallBookingSettings> = {}): AiCallBookingSettings => ({
+  ...structuredClone(DEFAULT_AI_CALL_BOOKING), enabled: true, specialists: [GRANT], routing: structuredClone(DEFAULT_BOOKING_ROUTING), ...over,
+});
+const upcoming: Consultations = { last: null, next: { start: '2026-10-22T17:00:00.000Z', kind: 'in_person', ownerName: 'Seth Person' } };
 
-  it('R2: booking is on while a region has a rep, so an empty specialists list now gives no_owner (the legacy single owner), still reading nothing', async () => {
-    const sf = sfWith([grantRow()]);
-    expect(await offerSlots(sf.client, { booking: booking({ specialists: [] }), now: NOW })).toEqual({ slots: [], ownerSfUserId: null, note: 'no_owner' });
-    expect(sf.soql).toEqual([]);
-  });
+interface OfferCase {
+  users?: Row[];
+  events?: Row[];
+  booked?: unknown[];
+  maps?: MapsClient | null;
+  consultations?: Consultations | null;
+  booking?: AiCallBookingSettings;
+}
 
-  it('the owner inactive gives no_owner and no Event query', async () => {
-    const sf = sfWith([grantRow({ IsActive: false })]);
-    expect(await offerSlots(sf.client, { booking: booking(), now: NOW })).toEqual({ slots: [], ownerSfUserId: null, note: 'no_owner' });
-    expect(sf.soql).toHaveLength(1);
-    expect(sf.soql[0]).toMatch(/FROM User/);
-  });
+/** Reads the calendars from fake Salesforce, then routes `address` through a fake Google and a fake AI-bookings read. */
+async function offerFor(address: string | null, o: OfferCase = {}) {
+  const sf = offerSalesforce({ users: o.users, events: o.events });
+  const b = o.booking ?? booking();
+  const cal = await readOfferCalendars(sf.client, { booking: b, now: NOW });
+  const log = { info: vi.fn(), warn: vi.fn() };
+  const google = fakeMaps();
+  const maps = o.maps === undefined ? google.maps : o.maps;
+  const booked = fakeBookedDb(o.booked ?? []);
+  const offer = await routedOffer({ db: booked.db, maps, log }, cal, { orgId: ORG, booking: b, now: NOW, address, consultations: o.consultations ?? null });
+  return { offer, log, sf, cal, geocoded: google.geocoded, bookedReads: booked.reads };
+}
 
-  it('a list of ids Salesforce does not return gives no_owner', async () => {
-    const sf = sfWith([]);
-    expect((await offerSlots(sf.client, { booking: booking({ specialists: [X] }), now: NOW })).note).toBe('no_owner');
-  });
+const inPerson = (slots: readonly AppointmentSlot[]) => slots.filter((s) => s.kind === 'walkthrough');
+const phone = (slots: readonly AppointmentSlot[]) => slots.filter((s) => s.kind === 'phone');
+const repAt = (slots: readonly AppointmentSlot[], start: string) => inPerson(slots).find((s) => s.start === start)?.specialistSfUserId;
+/** Every log argument, to check no seller data reaches a log line. */
+const logged = (log: { info: { mock: { calls: unknown[] } }; warn: { mock: { calls: unknown[] } } }) => JSON.stringify([log.info.mock.calls, log.warn.mock.calls]);
+const none = (note: string, region: string | null = null) => ({ slots: [], priority: null, region, ownerSfUserId: null, note });
 
-  it('phone slots then walkthrough slots, every slot the owner\'s, the whole result parses', async () => {
-    const sf = sfWith([grantRow()]);
-    const offer = await offerSlots(sf.client, { booking: booking(), now: NOW });
+describe('routedOffer', () => {
+  it('San Diego property → SD reps: in-person times first, then phone, every one routed through SD', async () => {
+    // Seth is in a meeting Tuesday 9–10, so Thomas takes Tuesday 9:00.
+    const events = [eventRow(SETH, '2026-10-20T16:00:00.000Z', '2026-10-20T17:00:00.000Z')];
+    const { offer } = await offerFor(SD_PROPERTY, { events });
     expect(offer.note).toBeNull();
-    expect(offer.ownerSfUserId).toBe(GRANT);
-    expect(offer.slots.map((s) => s.id)).toEqual(['p1', 'p2', 'p3', 'p4', 'w1', 'w2', 'w3', 'w4', 'w5', 'w6']);
-    expect(offer.slots.every((s) => s.specialistSfUserId === GRANT && s.specialistFirstName === 'Grant' && s.timeZone === 'America/Los_Angeles')).toBe(true);
+    expect(offer.region).toBe('SD');
+    expect(offer.slots.map((s) => s.id)).toEqual(['w1', 'w2', 'w3', 'w4', 'w5', 'w6', 'p1', 'p2', 'p3', 'p4']);
+    expect(offer.slots.every((s) => s.region === 'SD' && [SETH, THOMAS].includes(s.specialistSfUserId))).toBe(true);
+    expect(repAt(offer.slots, TUE_9)).toBe(THOMAS);
     expect(AppointmentSlots.safeParse(offer.slots).success).toBe(true);
-    expect(offer.slots[0]).toMatchObject({ kind: 'phone', start: '2026-10-06T17:00:00.000Z', end: '2026-10-06T17:15:00.000Z' });
-    expect(offer.slots[4]).toMatchObject({ kind: 'walkthrough', start: '2026-10-07T16:00:00.000Z', end: '2026-10-07T17:00:00.000Z' });
-    // Part 4 Fix 1 (I-3): a walkthrough carries its 30-minute travel buffer as the time it blocks; a phone call has none.
-    expect(offer.slots[4]).toMatchObject({ blockStart: '2026-10-07T15:30:00.000Z', blockEnd: '2026-10-07T17:30:00.000Z' });
-    expect(offer.slots[0]).not.toHaveProperty('blockStart');
-    // The busy read covers now to now + 15 days.
-    expect(sf.soql[1]).toContain('StartDateTime < 2026-10-21T15:00:00Z');
-    expect(sf.soql[1]).toContain(`OwnerId = '${GRANT}'`);
+    expect(offer.ownerSfUserId).toBe(offer.slots[0]!.specialistSfUserId);
   });
 
-  it('the second person on the list owns the slots when the first is inactive; the owner\'s zone is used', async () => {
-    const sf = sfWith([grantRow({ IsActive: false }), grantRow({ Id: X, FirstName: 'Xavier', TimeZoneSidKey: 'America/New_York' })]);
-    const offer = await offerSlots(sf.client, { booking: booking({ specialists: [GRANT, X] }), now: NOW });
-    expect(offer.ownerSfUserId).toBe(X);
-    expect(offer.slots.every((s) => s.specialistSfUserId === X && s.specialistFirstName === 'Xavier' && s.timeZone === 'America/New_York')).toBe(true);
-    // Wednesday 9:00 New York (it would be 16:00Z in Los Angeles).
-    expect(offer.slots.find((s) => s.id === 'w1')!.start).toBe('2026-10-07T13:00:00.000Z');
+  it('Orange County → LA reps', async () => {
+    const { offer } = await offerFor(OC_PROPERTY);
+    expect(offer.region).toBe('LA');
+    expect(inPerson(offer.slots).length).toBeGreaterThan(0);
+    expect(phone(offer.slots).length).toBeGreaterThan(0);
+    expect(offer.slots.every((s) => s.region === 'LA' && [CHANCE, BLAKE].includes(s.specialistSfUserId))).toBe(true);
+    // LA starts at 9, 11, 13…: Tuesday's in-person morning is 9:00 and afternoon 13:00.
+    expect(inPerson(offer.slots).slice(0, 2).map((s) => s.start)).toEqual([TUE_9, '2026-10-20T20:00:00.000Z']);
   });
 
-  it('busy time is taken out', async () => {
-    const events = [{ StartDateTime: '2026-10-07T16:00:00.000+0000', EndDateTime: '2026-10-07T17:00:00.000+0000', IsAllDayEvent: false, ActivityDate: '2026-10-07' }];
-    const offer = await offerSlots(sfWith([grantRow()], events).client, { booking: booking(), now: NOW });
-    // Wednesday 9:00 PDT is busy, so Wednesday's walkthrough morning is 11:00 (10:00's buffer still meets the Event).
-    expect(offer.slots.find((s) => s.id === 'w1')?.start).toBe('2026-10-07T18:00:00.000Z');
+  it('Imperial County → outside_regions, no slots, no priority', async () => {
+    const { offer } = await offerFor(IMPERIAL_PROPERTY);
+    expect(offer).toEqual(none('outside_regions'));
   });
 
-  it('a fully busy horizon gives no_free_time', async () => {
-    const events = [{ StartDateTime: '2026-10-01T00:00:00.000+0000', EndDateTime: '2026-11-01T00:00:00.000+0000', IsAllDayEvent: false }];
-    expect(await offerSlots(sfWith([grantRow()], events).client, { booking: booking(), now: NOW })).toEqual({ slots: [], ownerSfUserId: GRANT, note: 'no_free_time' });
+  it('an upcoming consultation → already_booked, no slots, no priority (and Google is not asked)', async () => {
+    const { offer, geocoded, bookedReads } = await offerFor(SD_PROPERTY, { consultations: upcoming });
+    expect(offer).toEqual(none('already_booked'));
+    expect(geocoded).toEqual([]);
+    expect(bookedReads()).toBe(0);
   });
 
-  it('both kinds off gives no_free_time; one kind off offers only the other', async () => {
-    const off = booking({ phone: { ...DEFAULT_AI_CALL_BOOKING.phone, enabled: false }, walkthrough: { ...DEFAULT_AI_CALL_BOOKING.walkthrough, enabled: false } });
-    expect((await offerSlots(sfWith([grantRow()]).client, { booking: off, now: NOW })).note).toBe('no_free_time');
-    const walkOnly = booking({ phone: { ...DEFAULT_AI_CALL_BOOKING.phone, enabled: false } });
-    expect((await offerSlots(sfWith([grantRow()]).client, { booking: walkOnly, now: NOW })).slots.map((s) => s.id)).toEqual(['w1', 'w2', 'w3', 'w4', 'w5', 'w6']);
-  });
-
-  it('never offers time whose calendar it did not read (past now + 15 days)', async () => {
-    const mondays = booking({ days: [1], walkthrough: { ...DEFAULT_AI_CALL_BOOKING.walkthrough, horizonBusinessDays: 10 }, phone: { ...DEFAULT_AI_CALL_BOOKING.phone, enabled: false } });
-    const offer = await offerSlots(sfWith([grantRow()]).client, { booking: mondays, now: NOW });
+  it('a past consultation alone changes nothing', async () => {
+    const { offer } = await offerFor(SD_PROPERTY, { consultations: { last: upcoming.next, next: null } });
+    expect(offer.note).toBeNull();
     expect(offer.slots.length).toBeGreaterThan(0);
-    expect(offer.slots.every((s) => Date.parse(s.end) <= NOW.getTime() + 15 * 86_400_000)).toBe(true);
   });
 
-  it('maxOffered caps each kind', async () => {
-    const b = booking({ phone: { ...DEFAULT_AI_CALL_BOOKING.phone, maxOffered: 1 }, walkthrough: { ...DEFAULT_AI_CALL_BOOKING.walkthrough, maxOffered: 3 } });
-    expect((await offerSlots(sfWith([grantRow()]).client, { booking: b, now: NOW })).slots.map((s) => s.id)).toEqual(['p1', 'w1', 'w2', 'w3']);
+  it('city only, no street → phone slots, no in-person, no priority', async () => {
+    const { offer } = await offerFor(SD_CITY_ONLY);
+    expect(offer.region).toBe('SD');
+    expect(offer.slots.length).toBeGreaterThan(0);
+    expect(offer.slots.every((s) => s.kind === 'phone')).toBe(true);
+    expect(offer.priority).toBeNull();
+    expect(offer.note).toBeNull();
   });
 
-  it('a query throwing gives salesforce_error with no slots (never throws)', async () => {
-    for (const sf of [sfWith(new SalesforceApiError('boom', 500, null)), sfWith([grantRow()], new Error('socket hang up'))]) {
-      expect(await offerSlots(sf.client, { booking: booking(), now: NOW })).toEqual({ slots: [], ownerSfUserId: null, note: 'salesforce_error' });
-    }
+  it('no address → no_address', async () => {
+    expect((await offerFor(null)).offer).toEqual(none('no_address'));
+    expect((await offerFor('   ')).offer).toEqual(none('no_address'));
   });
 
-  describe('Fix 1 (I-1a): today\'s all-day Event blocks today late in the local day (lead 0 h, until 22:00)', () => {
-    const late = (zone: string) =>
-      booking({
-        phone: { ...DEFAULT_AI_CALL_BOOKING.phone, minLeadMinutes: 0, endHour: 22 },
-        walkthrough: { ...DEFAULT_AI_CALL_BOOKING.walkthrough, enabled: false },
-      });
-    const table = [{ StartDateTime: '2026-10-06T00:00:00.000+0000', EndDateTime: '2026-10-06T00:00:00.000+0000', IsAllDayEvent: true, ActivityDate: '2026-10-06' }];
-    it.each([
-      ['Pacific/Honolulu', '2026-10-07T00:30:00.000Z'], // Tue 10/6 14:30 HST
-      ['America/Los_Angeles', '2026-10-07T00:30:00.000Z'], // Tue 10/6 17:30 PDT
-    ])('%s at %s: nothing today, the first time is tomorrow morning', async (zone, at) => {
-      const now = new Date(at);
-      const users: QueryRoute[1] = [grantRow({ TimeZoneSidKey: zone })];
-      const sf = sfWith(users, (q: string) => rowsWhere(q, table));
-      const offer = await offerSlots(sf.client, { booking: late(zone), now });
-      // Without the all-day Event, today still has times (so the test can fail).
-      const free = await offerSlots(sfWith(users, []).client, { booking: late(zone), now });
-      expect(free.slots.some((s) => zonedParts(new Date(s.start), zone).day === 6)).toBe(true);
-      expect(offer.slots.length).toBeGreaterThan(0);
-      expect(offer.slots.every((s) => zonedParts(new Date(s.start), zone).day === 7)).toBe(true);
-      expect(zonedParts(new Date(offer.slots[0]!.start), zone)).toMatchObject({ day: 7, hour: 10, minute: 0 });
-    });
+  it('maps null → maps_unavailable', async () => {
+    expect((await offerFor(SD_PROPERTY, { maps: null })).offer).toEqual(none('maps_unavailable'));
   });
 
-  describe('Fix 1 (I-4, M-1): the calendar is read once, and booked times are taken out per touch', () => {
-    it('readOfferCalendar reads Salesforce; offerFrom is pure and takes out booked times like busy ones', async () => {
-      const sf = sfWith([grantRow()]);
-      const cal = await readOfferCalendar(sf.client, { booking: booking(), now: NOW });
-      expect(sf.soql).toHaveLength(2);
-      const first = offerFrom(cal, { booking: booking(), now: NOW, booked: [] });
-      const p1 = first.slots[0]!;
-      const booked = [{ start: new Date(p1.start), end: new Date(p1.end), allDay: false }];
-      const second = offerFrom(cal, { booking: booking(), now: NOW, booked });
-      expect(second.slots.map((s) => s.start)).not.toContain(p1.start);
-      expect(second.slots[0]!.start).toBe('2026-10-06T17:30:00.000Z');
-      expect(sf.soql).toHaveLength(2);
-      // The same calendar again, with nothing booked, gives the first offer again (the read is not changed).
-      expect(offerFrom(cal, { booking: booking(), now: NOW, booked: [] })).toEqual(first);
-    });
+  it('geocode throws → maps_unavailable, logged by its code only', async () => {
+    const { maps } = fakeMaps({ [SD_PROPERTY]: new MapsUnavailableError('REQUEST_DENIED') });
+    const { offer, log } = await offerFor(SD_PROPERTY, { maps });
+    expect(offer).toEqual(none('maps_unavailable'));
+    expect(log.warn).toHaveBeenCalledWith({ orgId: ORG, code: 'REQUEST_DENIED' }, expect.any(String));
+    expect(logged(log)).not.toContain('Palm');
+  });
 
-    it('a booked walkthrough keeps its buffer', async () => {
-      const cal = await readOfferCalendar(sfWith([grantRow()]).client, { booking: booking(), now: NOW });
-      // Booked Wed 9:00–10:00 PDT: 10:00 is inside the 30 min buffer, so Wednesday's morning walkthrough is 11:00.
-      const booked = [{ start: new Date('2026-10-07T16:00:00.000Z'), end: new Date('2026-10-07T17:00:00.000Z'), allDay: false }];
-      const offer = offerFrom(cal, { booking: booking(), now: NOW, booked });
-      expect(offer.slots.find((s) => s.id === 'w1')?.start).toBe('2026-10-07T18:00:00.000Z');
-    });
+  it('Google finds nothing → not_found', async () => {
+    const { maps } = fakeMaps({});
+    expect((await offerFor(SD_PROPERTY, { maps })).offer).toEqual(none('not_found'));
+  });
 
-    it('final review: a busy read that hits its row cap is logged (owner id and cap only); a smaller one is not', async () => {
-      const row = { StartDateTime: '2026-10-20T16:00:00.000+0000', EndDateTime: '2026-10-20T17:00:00.000+0000', IsAllDayEvent: false };
-      const warn = vi.fn();
-      await readOfferCalendar(sfWith([grantRow()], Array.from({ length: BUSY_ROW_LIMIT }, () => row)).client, { booking: booking(), now: NOW, log: { warn } });
-      expect(warn).toHaveBeenCalledWith({ ownerSfUserId: GRANT, rows: BUSY_ROW_LIMIT }, 'appointments: the busy read hit its row cap; later busy time may be missing');
-      const quiet = vi.fn();
-      await readOfferCalendar(sfWith([grantRow()], [row]).client, { booking: booking(), now: NOW, log: { warn: quiet } });
-      expect(quiet).not.toHaveBeenCalled();
-    });
+  it('Routes down → in-person times from straight lines', async () => {
+    // Chance's 7:00 consultation in Anaheim needs a drive in for Tuesday 9:00, so a route matrix is asked (and fails).
+    const events = [eventRow(CHANCE, '2026-10-20T14:00:00.000Z', '2026-10-20T15:00:00.000Z', { Location: ANAHEIM, Subject: 'Property Consultation' })];
+    const { maps } = fakeMaps(PLACES, { routes: new MapsUnavailableError('timeout') });
+    const { offer, log } = await offerFor(OC_PROPERTY, { events, maps });
+    expect(offer.note).toBeNull();
+    expect(inPerson(offer.slots).length).toBeGreaterThan(0);
+    expect(inPerson(offer.slots)[0]!.start).toBe(TUE_9);
+    expect(log.warn).toHaveBeenCalledWith({ code: 'timeout' }, 'Google Routes unavailable: using straight-line drive times');
+    expect(log.info).toHaveBeenCalledWith(expect.objectContaining({ routeElements: 0 }), expect.any(String));
+    expect(logged(log)).not.toContain('Main St');
+  });
 
-    it('a calendar that could not be read carries its note through', async () => {
-      const off = await readOfferCalendar(sfWith([grantRow()]).client, { booking: booking({ enabled: false }), now: NOW });
-      expect(offerFrom(off, { booking: booking({ enabled: false }), now: NOW, booked: [] })).toEqual({ slots: [], ownerSfUserId: null, note: 'booking_off' });
-      const broken = await readOfferCalendar(sfWith(new Error('socket hang up')).client, { booking: booking(), now: NOW });
-      expect(offerFrom(broken, { booking: booking(), now: NOW, booked: [] })).toEqual({ slots: [], ownerSfUserId: null, note: 'salesforce_error' });
-    });
+  it('drive times unavailable (Routes down and the office cannot be placed) → phone times only', async () => {
+    const events = [eventRow(CHANCE, '2026-10-20T14:00:00.000Z', '2026-10-20T15:00:00.000Z', { Location: ANAHEIM })];
+    const { maps } = fakeMaps({ [OC_PROPERTY]: PLACES[OC_PROPERTY]! }, { routes: new MapsUnavailableError('timeout') });
+    const { offer, log } = await offerFor(OC_PROPERTY, { events, maps });
+    expect(offer.note).toBeNull();
+    expect(offer.slots.length).toBeGreaterThan(0);
+    expect(offer.slots.every((s) => s.kind === 'phone')).toBe(true);
+    expect(log.warn).toHaveBeenCalledWith({ orgId: ORG, code: 'ZERO_RESULTS' }, expect.any(String));
+  });
+
+  it('priority with Grant', async () => {
+    const { offer } = await offerFor(OC_PROPERTY, { booking: booking({ specialists: [GRANT] }) });
+    expect(offer.priority).toEqual({ specialistSfUserId: GRANT, specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-20T16:00:00.000Z' });
+    // The first slot's rep owns the offer, not Grant.
+    expect([CHANCE, BLAKE]).toContain(offer.ownerSfUserId);
+  });
+
+  it('no priority when Grant is inactive or not on the list', async () => {
+    expect((await offerFor(OC_PROPERTY, { users: usersWithInactive(GRANT) })).offer.priority).toBeNull();
+    expect((await offerFor(OC_PROPERTY, { booking: booking({ specialists: [] }) })).offer.priority).toBeNull();
+  });
+
+  it('the reps fully booked: Grant\'s priority alone is offered and owns it; without Grant, no_free_time', async () => {
+    const allTaken = (owner: string) => eventRow(owner, '2026-10-19T00:00:00.000Z', '2026-11-10T00:00:00.000Z');
+    const events = [allTaken(CHANCE), allTaken(BLAKE)];
+    const withGrant = (await offerFor(OC_PROPERTY, { events })).offer;
+    expect(withGrant).toMatchObject({ slots: [], region: 'LA', ownerSfUserId: GRANT, note: null });
+    expect(withGrant.priority?.specialistSfUserId).toBe(GRANT);
+    expect((await offerFor(OC_PROPERTY, { events, users: usersWithInactive(GRANT) })).offer).toEqual(none('no_free_time', 'LA'));
+  });
+
+  it('an AI booking not on the calendar blocks that rep', async () => {
+    // Chance had a consultation Monday morning (before now, still this week), so Blake has the lighter week and takes Tuesday 9:00.
+    const events = [eventRow(CHANCE, '2026-10-19T14:00:00.000Z', '2026-10-19T15:00:00.000Z', { Subject: 'Property Consultation' })];
+    expect(repAt((await offerFor(OC_PROPERTY, { events })).offer.slots, TUE_9)).toBe(BLAKE);
+    // Blake has an AI booking Tuesday 9:00–10:00 that no Event shows yet, so Tuesday 9:00 goes to Chance.
+    const booked = [aiBooking(BLAKE, TUE_9, '2026-10-20T17:00:00.000Z')];
+    expect(repAt((await offerFor(OC_PROPERTY, { events, booked })).offer.slots, TUE_9)).toBe(CHANCE);
+  });
+
+  it('a calendar that could not be read carries its note through', async () => {
+    const { offer, geocoded } = await offerFor(SD_PROPERTY, { booking: booking({ enabled: false }) });
+    expect(offer).toEqual(none('booking_off'));
+    expect(geocoded).toEqual([]);
+  });
+
+  it('logs one info line: ids and counts only, never the address', async () => {
+    const { offer, log } = await offerFor(SD_PROPERTY);
+    expect(log.info).toHaveBeenCalledTimes(1);
+    expect(log.info).toHaveBeenCalledWith({ orgId: ORG, region: 'SD', slots: offer.slots.length, priority: true, routeElements: 0 }, 'appointments: routed offer');
+    expect(logged(log)).not.toContain('Palm');
+  });
+
+  it('never throws: the AI-bookings read failing offers nothing', async () => {
+    const sf = offerSalesforce();
+    const cal = await readOfferCalendars(sf.client, { booking: booking(), now: NOW });
+    const db = { select: () => { throw new Error('connection terminated'); } } as never;
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const offer = await routedOffer({ db, maps: fakeMaps().maps, log }, cal, { orgId: ORG, booking: booking(), now: NOW, address: SD_PROPERTY, consultations: null });
+    expect(offer).toEqual(none('salesforce_error'));
+    expect(log.warn).toHaveBeenCalledWith({ orgId: ORG, errName: 'Error' }, expect.any(String));
   });
 });
 
+describe('readOfferCalendars', () => {
+  it('reads every region rep and the specialists in one User query, and every active rep\'s calendar in one Event query', async () => {
+    const sf = offerSalesforce();
+    const cal = await readOfferCalendars(sf.client, { booking: booking(), now: NOW });
+    expect(sf.soql).toHaveLength(2);
+    expect(sf.soql[0]).toMatch(/FROM User WHERE Id IN \(/);
+    for (const id of [CHANCE, BLAKE, SETH, THOMAS, GRANT]) expect(sf.soql[0]).toContain(id);
+    expect(sf.soql[1]).toMatch(/OwnerId IN \(/);
+    if (cal.kind !== 'read') throw new Error('expected a calendar read');
+    expect([...cal.reps.keys()]).toEqual([CHANCE, BLAKE, SETH, THOMAS].map(core));
+    expect(cal.priority?.sfUserId).toBe(GRANT);
+    expect(cal.routing).toEqual(DEFAULT_BOOKING_ROUTING);
+  });
+
+  it('reads from 00:00 Monday of this week (Pacific) to now + 15 days', async () => {
+    const sf = offerSalesforce();
+    const cal = await readOfferCalendars(sf.client, { booking: booking(), now: new Date('2026-10-22T19:00:00Z') });
+    if (cal.kind !== 'read') throw new Error('expected a calendar read');
+    expect(cal.from.toISOString()).toBe('2026-10-19T07:00:00.000Z');
+    expect(cal.until.toISOString()).toBe(new Date(Date.parse('2026-10-22T19:00:00Z') + OFFER_CALENDAR_DAYS * 86_400_000).toISOString());
+    expect(sf.soql[1]).toContain('EndDateTime > 2026-10-19T07:00:00Z');
+    expect(sf.soql[1]).toContain('StartDateTime < 2026-11-06T19:00:00Z');
+  });
+
+  it('never throws: a rejecting client.query gives salesforce_error', async () => {
+    const failing = fakeSalesforce({ queries: [[/./, new SalesforceApiError('boom', 500, null)]] });
+    const warn = vi.fn();
+    expect(await readOfferCalendars(failing.client, { booking: booking(), now: NOW, log: { warn } })).toEqual({ kind: 'none', note: 'salesforce_error' });
+    expect(warn).toHaveBeenCalledWith({ errName: 'SalesforceApiError' }, expect.any(String));
+  });
+
+  it('booking off reads nothing', async () => {
+    const sf = offerSalesforce();
+    expect(await readOfferCalendars(sf.client, { booking: booking({ enabled: false }), now: NOW })).toEqual({ kind: 'none', note: 'booking_off' });
+    expect(sf.soql).toEqual([]);
+  });
+
+  it('an inactive rep is dropped, and its calendar is not read', async () => {
+    const sf = offerSalesforce({ users: usersWithInactive(BLAKE) });
+    const cal = await readOfferCalendars(sf.client, { booking: booking(), now: NOW });
+    if (cal.kind !== 'read') throw new Error('expected a calendar read');
+    expect([...cal.reps.keys()]).toEqual([CHANCE, SETH, THOMAS].map(core));
+    expect(sf.soql[1]).not.toContain(BLAKE);
+  });
+
+  it('a region whose reps are all inactive gives no slots and the note no_reps; the other region still offers', async () => {
+    const users = usersWithInactive(SETH, THOMAS);
+    expect((await offerFor(SD_PROPERTY, { users })).offer).toEqual(none('no_reps', 'SD'));
+    expect((await offerFor(OC_PROPERTY, { users })).offer.slots.length).toBeGreaterThan(0);
+  });
+
+  it('no active rep anywhere: no_reps, and no Event query', async () => {
+    const sf = offerSalesforce({ users: usersWithInactive(CHANCE, BLAKE, SETH, THOMAS) });
+    expect(await readOfferCalendars(sf.client, { booking: booking(), now: NOW })).toEqual({ kind: 'none', note: 'no_reps' });
+    expect(sf.soql).toHaveLength(1);
+  });
+
+  it('a busy read that hits its row cap is logged (counts only)', async () => {
+    const row = eventRow(CHANCE, '2026-10-20T16:00:00.000Z', '2026-10-20T17:00:00.000Z');
+    const sf = offerSalesforce({ events: Array.from({ length: BUSY_ROW_LIMIT }, () => row) });
+    const warn = vi.fn();
+    await readOfferCalendars(sf.client, { booking: booking(), now: NOW, log: { warn } });
+    expect(warn).toHaveBeenCalledWith({ reps: 4, rows: BUSY_ROW_LIMIT }, expect.any(String));
+  });
+});
+
+describe('priorityDefaultStart: the next booking day after today, 9:00 Pacific', () => {
+  const weekdays = [1, 2, 3, 4, 5];
+  it.each([
+    ['Mon 16:00 PDT → Tue 9:00 PDT', '2026-10-19T23:00:00Z', weekdays, '2026-10-20T16:00:00.000Z'],
+    ['Fri 9:00 PDT → Mon 9:00 PDT', '2026-10-23T16:00:00Z', weekdays, '2026-10-26T16:00:00.000Z'],
+    ['Fri before daylight saving ends → Mon 9:00 PST', '2026-10-30T16:00:00Z', weekdays, '2026-11-02T17:00:00.000Z'],
+    ['every day booked: Fri → Sat', '2026-10-23T16:00:00Z', [1, 2, 3, 4, 5, 6, 7], '2026-10-24T16:00:00.000Z'],
+  ])('%s', (_label, now, days, expected) => {
+    expect(priorityDefaultStart(days, new Date(now)).toISOString()).toBe(expected);
+  });
+});

@@ -24,8 +24,8 @@ import {
 } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { toE164 } from '@cti/phone';
-import { offerWithAiBookings } from '../appointments/booked.js';
-import { readOfferCalendar, type Offer } from '../appointments/offer.js';
+// LEGACY single-owner offer until Task 7 moves this to the routed offer (appointments/offer-for-record.ts).
+import { offerWithAiBookings, readOfferCalendar, type LegacyOffer as Offer } from '../appointments/offer-legacy.js';
 import { describePlanTextIssues } from '../call-plans/plan-text-words.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';

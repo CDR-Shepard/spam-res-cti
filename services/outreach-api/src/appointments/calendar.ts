@@ -35,6 +35,11 @@ export const DEFAULT_OWNER_TIME_ZONE = 'America/Los_Angeles';
 const UTC_ZONE = 'Etc/UTC';
 const UTC_ALIASES: ReadonlySet<string> = new Set(['GMT', 'UTC', 'UCT', 'Zulu', 'Universal', 'Greenwich', 'Etc/GMT', 'Etc/UTC', 'Etc/UCT', 'Etc/Zulu', 'Etc/Universal', 'Etc/Greenwich', 'Etc/GMT0', 'Etc/GMT+0', 'Etc/GMT-0', 'GMT0']);
 export const BUSY_ROW_LIMIT = 2000;
+/**
+ * How far ahead an offer reads calendars: nothing later is ever offered. Here, not in offer.ts, so booked.ts (which offer.ts
+ * imports) can size its look-back without an import cycle; offer.ts re-exports it.
+ */
+export const OFFER_CALENDAR_DAYS = 15;
 const DAY_MS = 86_400_000;
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
