@@ -75,6 +75,9 @@ export const sellerConversations = pgTable(
     practiceUnique: uniqueIndex('seller_conversations_practice_unique')
       .on(t.orgId, t.crmRecordId, t.practiceUserId)
       .where(sql`practice_user_id IS NOT NULL`),
+    // The users FKs: removing a user finds its rows by these (partial: most rows have none).
+    practiceUserIdx: index('seller_conversations_practice_user_idx').on(t.practiceUserId).where(sql`practice_user_id IS NOT NULL`),
+    handlerUserIdx: index('seller_conversations_handler_user_idx').on(t.handlerUserId).where(sql`handler_user_id IS NOT NULL`),
   }),
 );
 
@@ -112,6 +115,8 @@ export const conversationEvents = pgTable(
     sfLogDueIdx: index('conversation_events_sf_log_due_idx').on(t.sfLogNextAt).where(sql`sf_log_status = 'pending'`),
     // One Salesforce Task, one event (partial: most events have no Task).
     sfTaskUnique: uniqueIndex('conversation_events_sf_task_unique').on(t.orgId, t.sfTaskId).where(sql`sf_task_id IS NOT NULL`),
+    // The users FK (partial: Sam's and the seller's events have no user).
+    userIdx: index('conversation_events_user_idx').on(t.userId).where(sql`user_id IS NOT NULL`),
   }),
 );
 
@@ -158,6 +163,8 @@ export const emailMessages = pgTable(
     messageIdIdx: index('email_messages_message_id_idx').on(t.messageId).where(sql`message_id IS NOT NULL`),
     dueIdx: index('email_messages_due_idx').on(t.sendAfter).where(sql`status = 'queued'`),
     conversationIdx: index('email_messages_conversation_idx').on(t.conversationId, t.createdAt),
+    // The users FK (partial: only an email a person sent has one).
+    requestedByIdx: index('email_messages_requested_by_idx').on(t.requestedBy).where(sql`requested_by IS NOT NULL`),
   }),
 );
 

@@ -362,6 +362,7 @@ describe('migration 0051_outreach_campaigns', () => {
     const byName = new Map(all.map((i) => [i.config.name, i.config]));
     // Indexes later migrations add to 0051's tables (pinned by their own tests).
     for (const later of ['campaign_enrollments_call_stage_idx', 'touches_ai_call_idx']) byName.delete(later); // 0052
+    byName.delete('crm_records_org_email_idx'); // 0062
     expect([...byName.keys()].sort()).toEqual(INDEXES.map((s) => /INDEX IF NOT EXISTS "([a-z_]+)"/.exec(s)![1]).sort());
     for (const stmt of INDEXES) {
       const name = /INDEX IF NOT EXISTS "([a-z_]+)"/.exec(stmt)![1]!;

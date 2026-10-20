@@ -78,7 +78,11 @@ const TimelineEmail = z.object({
   notSentReason: EmailBlock.nullable(),
 });
 
-/** A hand-over, a status change or a flag, in words; byName is the person who did it (null = Sam or the system). */
+/**
+ * A hand-over, a status change or a flag. `detail` is a code, not words: the hand-over (`taken_over` /
+ * `given_back`), the status or stop reason (`booked`, `opted_out`, ...), or the flag reason (`legal`, `unsure`, ...);
+ * the web says it in words. byName is the person who did it (null = Sam or the system).
+ */
 const TimelineNote = z.object({
   type: z.literal('note'),
   id: z.string().uuid(),
@@ -147,8 +151,9 @@ export const HandlerChangeRequest = z.object({ handler: ConversationHandler });
 export type HandlerChangeRequest = z.infer<typeof HandlerChangeRequest>;
 
 /**
- * The tenant's email switch. configured = Resend is set up on the server; pausedAt / pausedReason say Sam's
- * email was paused (a spam complaint) until an admin turns it back on.
+ * The tenant's email switch. configured = the server can email: Resend is set up AND Sam's writer is (an Anthropic
+ * key and a priced EMAIL_MODEL). pausedAt / pausedReason say Sam's email was paused (a spam complaint) until an
+ * admin turns it back on.
  */
 export const SamEmailSettings = z.object({
   enabled: z.boolean(),

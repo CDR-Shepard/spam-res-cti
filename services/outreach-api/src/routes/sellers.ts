@@ -39,7 +39,7 @@ import { ensureConversation, setHandler } from '../conversations/store.js';
 import { draftIssues } from '../email/draft-guard.js';
 import { emailSendAt, queueEmailOnce } from '../email/outbox.js';
 import { loadWriterContext } from '../email/writer-context.js';
-import { writeEmail, type EmailWriter } from '../email/writer.js';
+import { samEmailConfigured, writeEmail, type EmailWriter } from '../email/writer.js';
 import { sendError } from '../http/errors.js';
 import { isAdmin, mayDecide } from '../tenancy/record-owner.js';
 import { requireAdmin, requireContext, type RequestContext } from '../tenancy/scope.js';
@@ -88,7 +88,7 @@ type Target = { block: EmailBlock } | { to: string; writer: EmailWriter };
 export async function registerSellerRoutes(app: FastifyInstance, deps: SellerRouteDeps): Promise<void> {
   const { db, writer, cfg } = deps;
   const now = deps.now ?? (() => new Date());
-  const setupOf = (ctx: RequestContext): EmailSetup => ({ configured: cfg.emailEnabled && writer !== null, settings: ctx.tenant.settings });
+  const setupOf = (ctx: RequestContext): EmailSetup => ({ configured: samEmailConfigured(cfg, writer), settings: ctx.tenant.settings });
 
   /**
    * The session, the record and the caller's right to it, each refused with its own error (sent here; null = done).

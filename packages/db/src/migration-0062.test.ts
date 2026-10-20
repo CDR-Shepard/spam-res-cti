@@ -26,6 +26,7 @@ import {
   resendWebhookEvents,
   sellerConversations,
 } from './schema-outreach-conversations.js';
+import { crmRecords } from './schema-outreach.js';
 import * as schema from './schema.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -175,6 +176,20 @@ const INDEXES = [
   `CREATE INDEX IF NOT EXISTS "resend_webhook_events_due_idx" ON "resend_webhook_events" ("next_attempt_at") WHERE "status" = 'pending'`,
 ];
 
+/**
+ * One index per FK column that references users, so removing a user never scans these tables (the FK's ON DELETE
+ * looks the rows up by that column). Partial: most rows have none (Sam's own events, Sam's emails).
+ */
+const USER_FK_INDEXES = {
+  practiceUser: 'CREATE INDEX IF NOT EXISTS "seller_conversations_practice_user_idx" ON "seller_conversations" ("practice_user_id") WHERE "practice_user_id" IS NOT NULL',
+  handlerUser: 'CREATE INDEX IF NOT EXISTS "seller_conversations_handler_user_idx" ON "seller_conversations" ("handler_user_id") WHERE "handler_user_id" IS NOT NULL',
+  eventUser: 'CREATE INDEX IF NOT EXISTS "conversation_events_user_idx" ON "conversation_events" ("user_id") WHERE "user_id" IS NOT NULL',
+  requestedBy: 'CREATE INDEX IF NOT EXISTS "email_messages_requested_by_idx" ON "email_messages" ("requested_by") WHERE "requested_by" IS NOT NULL',
+};
+
+/** The tenant's records by address (trimmed, any case): the same-address sweep, the pace check and the opt-out read. */
+const RECORD_EMAIL_INDEX = 'CREATE INDEX IF NOT EXISTS "crm_records_org_email_idx" ON "crm_records" ("org_id", lower(btrim("email")))';
+
 describe('migration 0062_seller_conversations', () => {
   it('starts with the lock_timeout guard (the FKs lock organizations, users, crm_records and touches)', () => {
     expect(statements[0]).toBe("SET LOCAL lock_timeout = '5s'");
@@ -240,25 +255,44 @@ describe('migration 0062_seller_conversations', () => {
     for (const index of INDEXES) expect(statements).toContain(index);
   });
 
+  it('indexes every column that references users (partial on NOT NULL), so removing a user never scans a table', () => {
+    for (const index of Object.values(USER_FK_INDEXES)) expect(statements).toContain(index);
+    const userColumns = statements
+      .filter((st) => st.startsWith('CREATE TABLE'))
+      .flatMap((st) => linesOf(st).map((l) => ({ table: /^CREATE TABLE IF NOT EXISTS "([a-z_]+)"/.exec(st)![1]!, line: l })))
+      .filter(({ line }) => line.includes('REFERENCES "users"'))
+      .map(({ table, line }) => `${table}.${line.slice(1, line.indexOf('"', 1))}`);
+    expect(userColumns).toEqual(['seller_conversations.practice_user_id', 'seller_conversations.handler_user_id', 'conversation_events.user_id', 'email_messages.requested_by']);
+  });
+
+  it('indexes crm_records by (org_id, lower(btrim(email))), the form every same-address read compares, IF NOT EXISTS', () => {
+    expect(statements).toContain(RECORD_EMAIL_INDEX);
+  });
+
   it('has exactly these statements, in FK order: each table before the indexes that follow it', () => {
     expect(statements).toEqual([
       `SET LOCAL lock_timeout = '5s'`,
       expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "seller_conversations"/),
       INDEXES[0],
       INDEXES[1],
+      USER_FK_INDEXES.practiceUser,
+      USER_FK_INDEXES.handlerUser,
       expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "conversation_events"/),
       INDEXES[2],
       INDEXES[3],
       INDEXES[4],
+      USER_FK_INDEXES.eventUser,
       expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "email_messages"/),
       INDEXES[5],
       INDEXES[6],
       INDEXES[7],
       INDEXES[8],
       INDEXES[9],
+      USER_FK_INDEXES.requestedBy,
       expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "email_suppressions"/),
       expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "resend_webhook_events"/),
       INDEXES[10],
+      RECORD_EMAIL_INDEX,
     ]);
   });
 
@@ -284,6 +318,8 @@ describe('migration 0062_seller_conversations', () => {
         columns: ['org_id', 'crm_record_id', 'practice_user_id'],
         where: 'practice_user_id IS NOT NULL',
       },
+      { name: 'seller_conversations_practice_user_idx', unique: false, columns: ['practice_user_id'], where: 'practice_user_id IS NOT NULL' },
+      { name: 'seller_conversations_handler_user_idx', unique: false, columns: ['handler_user_id'], where: 'handler_user_id IS NOT NULL' },
     ]);
   });
 
@@ -299,6 +335,7 @@ describe('migration 0062_seller_conversations', () => {
       { name: 'conversation_events_conversation_idx', unique: false, columns: ['conversation_id', 'occurred_at'], where: null },
       { name: 'conversation_events_sf_log_due_idx', unique: false, columns: ['sf_log_next_at'], where: "sf_log_status = 'pending'" },
       { name: 'conversation_events_sf_task_unique', unique: true, columns: ['org_id', 'sf_task_id'], where: 'sf_task_id IS NOT NULL' },
+      { name: 'conversation_events_user_idx', unique: false, columns: ['user_id'], where: 'user_id IS NOT NULL' },
     ]);
   });
 
@@ -314,6 +351,7 @@ describe('migration 0062_seller_conversations', () => {
       { name: 'email_messages_message_id_idx', unique: false, columns: ['message_id'], where: 'message_id IS NOT NULL' },
       { name: 'email_messages_due_idx', unique: false, columns: ['send_after'], where: "status = 'queued'" },
       { name: 'email_messages_conversation_idx', unique: false, columns: ['conversation_id', 'created_at'], where: null },
+      { name: 'email_messages_requested_by_idx', unique: false, columns: ['requested_by'], where: 'requested_by IS NOT NULL' },
     ]);
   });
 
@@ -338,6 +376,15 @@ describe('migration 0062_seller_conversations', () => {
     expect(indexesOf(resendWebhookEvents)).toEqual([
       { name: 'resend_webhook_events_due_idx', unique: false, columns: ['next_attempt_at'], where: "status = 'pending'" },
     ]);
+  });
+
+  it('matches the Drizzle crmRecords index on (org_id, lower(btrim(email)))', () => {
+    const config = getTableConfig(crmRecords).indexes.find((i) => i.config.name === 'crm_records_org_email_idx')?.config;
+    expect(config).toBeDefined();
+    expect(config!.unique).toBe(false);
+    expect(config!.where).toBeUndefined();
+    const columns = config!.columns.map((c) => ('name' in c ? c.name : dialect.sqlToQuery(c as never).sql.replace(/"/g, '')));
+    expect(columns).toEqual(['org_id', 'lower(btrim(email))']);
   });
 
   it('is reachable through schema (@cti/db) like the other outreach tables', () => {

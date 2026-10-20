@@ -60,6 +60,8 @@
 --   touch_id             The touch that queued the email (the automatic follow-up
 --                        rhythm, a later step); SET NULL if the touch goes.
 --   requested_by         The person who pressed Send; SET NULL if removed.
+--   Every column that references users has its own partial index (WHERE NOT
+--   NULL), so removing a user never scans these tables.
 -- email_suppressions     Addresses Sam must never email again, per tenant (stored
 --                        lowercased). Kept when the conversation goes
 --                        (conversation_id SET NULL): an opt-out outlives the row.
@@ -67,12 +69,18 @@
 --                        svix-id (the primary key, so a redelivery is a no-op) and
 --                        processed by a second tick: pending → done | failed |
 --                        ignored, with attempts / next_attempt_at / last_error.
+-- crm_records_org_email_idx  The tenant's records by address, in the form every
+--                        same-address read compares (org_id, lower(btrim(email))):
+--                        the stop sweep, the AI-call pace check and the Salesforce
+--                        opt-out read.
 -- =============================================================================
 
 -- The FKs lock organizations, users, crm_records and touches: fail fast rather
 -- than queue behind a conflicting lock (0045's rule; migrate-runner wraps each
 -- file in one transaction, so SET LOCAL scopes to this file). Every statement
--- below only creates, so no existing table is locked for long.
+-- below only creates. The one that touches an existing table is the last: the
+-- crm_records index, whose build holds off writes to crm_records (the Salesforce
+-- sync) while it runs; it cannot be CONCURRENTLY inside the runner's transaction.
 SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE IF NOT EXISTS "seller_conversations" (
@@ -98,6 +106,10 @@ CREATE TABLE IF NOT EXISTS "seller_conversations" (
 -- One real conversation per record, and one practice conversation per admin per record.
 CREATE UNIQUE INDEX IF NOT EXISTS "seller_conversations_record_unique" ON "seller_conversations" ("org_id", "crm_record_id") WHERE "practice_user_id" IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS "seller_conversations_practice_unique" ON "seller_conversations" ("org_id", "crm_record_id", "practice_user_id") WHERE "practice_user_id" IS NOT NULL;
+
+-- The users FKs: removing a user finds its conversations by these (the unique above leads with org_id, so it cannot).
+CREATE INDEX IF NOT EXISTS "seller_conversations_practice_user_idx" ON "seller_conversations" ("practice_user_id") WHERE "practice_user_id" IS NOT NULL;
+CREATE INDEX IF NOT EXISTS "seller_conversations_handler_user_idx" ON "seller_conversations" ("handler_user_id") WHERE "handler_user_id" IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS "conversation_events" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -132,6 +144,9 @@ CREATE INDEX IF NOT EXISTS "conversation_events_sf_log_due_idx" ON "conversation
 
 -- One Salesforce Task belongs to one timeline event: two events can never end up pointing at the same Task.
 CREATE UNIQUE INDEX IF NOT EXISTS "conversation_events_sf_task_unique" ON "conversation_events" ("org_id", "sf_task_id") WHERE "sf_task_id" IS NOT NULL;
+
+-- The users FK (Sam's and the seller's events have no user).
+CREATE INDEX IF NOT EXISTS "conversation_events_user_idx" ON "conversation_events" ("user_id") WHERE "user_id" IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS "email_messages" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -178,6 +193,9 @@ CREATE INDEX IF NOT EXISTS "email_messages_due_idx" ON "email_messages" ("send_a
 -- One conversation's emails (the per-seller daily cap, the timeline join).
 CREATE INDEX IF NOT EXISTS "email_messages_conversation_idx" ON "email_messages" ("conversation_id", "created_at");
 
+-- The users FK (only an email a person sent has one).
+CREATE INDEX IF NOT EXISTS "email_messages_requested_by_idx" ON "email_messages" ("requested_by") WHERE "requested_by" IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS "email_suppressions" (
   "org_id" uuid NOT NULL REFERENCES "organizations"("id") ON DELETE CASCADE,
   "address" text NOT NULL,
@@ -203,3 +221,7 @@ CREATE TABLE IF NOT EXISTS "resend_webhook_events" (
 
 -- The webhook tick's scan: stored events still to process.
 CREATE INDEX IF NOT EXISTS "resend_webhook_events_due_idx" ON "resend_webhook_events" ("next_attempt_at") WHERE "status" = 'pending';
+
+-- The tenant's records by address, trimmed and any case: the same-address stop sweep, the AI-call pace check and
+-- the Salesforce opt-out read compare lower(btrim(email)), which no plain index on email serves.
+CREATE INDEX IF NOT EXISTS "crm_records_org_email_idx" ON "crm_records" ("org_id", lower(btrim("email")));

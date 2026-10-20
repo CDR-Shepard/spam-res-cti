@@ -11,6 +11,7 @@ import {
   EMAIL_TOOL_NAME,
   EmailDecision,
   EmailOutputError,
+  samEmailConfigured,
   writeEmail,
   type EmailWriter,
 } from './writer.js';
@@ -72,6 +73,16 @@ const written = (over: Partial<Awaited<ReturnType<EmailWriter['write']>>> = {}) 
 const fakeWriter = (result = written(), modelId?: string): EmailWriter & { write: ReturnType<typeof vi.fn> } => ({
   ...(modelId === undefined ? {} : { modelId }),
   write: vi.fn(async () => result),
+});
+
+describe('samEmailConfigured', () => {
+  const writer = { write: vi.fn() } as unknown as EmailWriter;
+  it('is true only when Resend is set up AND Sam has a writer', () => {
+    expect(samEmailConfigured({ emailEnabled: true }, writer)).toBe(true);
+    expect(samEmailConfigured({ emailEnabled: true }, null)).toBe(false);
+    expect(samEmailConfigured({ emailEnabled: false }, writer)).toBe(false);
+    expect(samEmailConfigured({ emailEnabled: false }, null)).toBe(false);
+  });
 });
 
 describe('EmailDecision', () => {

@@ -80,6 +80,14 @@ export interface EmailWriter {
 }
 
 /**
+ * Sam's email can work on this server: Resend is set up (`emailEnabled`) AND Sam has a writer (an Anthropic key and
+ * a priced EMAIL_MODEL). The one test behind the settings page's `configured` and the seller page's not_configured.
+ */
+export function samEmailConfigured(cfg: { emailEnabled: boolean }, writer: EmailWriter | null): boolean {
+  return cfg.emailEnabled && writer !== null;
+}
+
+/**
  * The model answered, but not with a valid `EmailDecision`. `usage` is what the call cost. The message says only
  * that the answer was unusable (and which fields failed), never what the model wrote.
  */

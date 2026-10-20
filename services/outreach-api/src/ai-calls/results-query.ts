@@ -20,7 +20,7 @@ import {
 import type { Db } from '@cti/db';
 import { decodeCardCursor, encodeCardCursor } from '../call-plans/cards.js';
 import { loadConnection } from '../crm/connection-store.js';
-import { mayDecide, mayDecideWith, ownSfUserId } from '../tenancy/record-owner.js';
+import { isAdmin, mayDecide, mayDecideWith, ownSfUserId } from '../tenancy/record-owner.js';
 import type { RequestContext } from '../tenancy/scope.js';
 import { StoredWritePlan, type Skipped } from '../writeback/plan.js';
 
@@ -100,7 +100,6 @@ function toResult(r: ResultRow, ctx: RequestContext, mine: string | null, instan
   };
 }
 
-const isAdmin = (ctx: RequestContext): boolean => ctx.session.isAdmin || ctx.session.isSuperAdmin;
 const parsed = <T>(s: { safeParse(v: unknown): { success: true; data: T } | { success: false } }, v: unknown): T | null => {
   const out = s.safeParse(v);
   return out.success ? out.data : null;
@@ -255,6 +254,6 @@ async function loadTestCallTranscript(db: Db, ctx: RequestContext, aiCallId: str
     limit 1`);
   const row = rows<{ transcript: unknown; turn_stats: unknown }>(result)[0];
   if (!row) return null;
-  if (!(ctx.session.isAdmin || ctx.session.isSuperAdmin)) return 'forbidden';
+  if (!isAdmin(ctx)) return 'forbidden';
   return { aiCallId, lines: transcriptLines(row.transcript), turnStats: parseTurnStats(row.turn_stats) };
 }

@@ -178,6 +178,8 @@ export const crmRecords = pgTable(
     // FULL: refresh upserts ON CONFLICT (org_id, sf_record_id).
     orgRecordUnique: uniqueIndex('crm_records_org_record_unique').on(t.orgId, t.sfRecordId),
     triageNeededIdx: index('crm_records_triage_needed_idx').on(t.orgId, t.syncedAt).where(sql`triage_needed`),
+    // 0062: the tenant's records by address, trimmed and any case (the same-address sweep and opt-out reads).
+    orgEmailIdx: index('crm_records_org_email_idx').on(t.orgId, sql`lower(btrim(email))`),
   }),
 );
 

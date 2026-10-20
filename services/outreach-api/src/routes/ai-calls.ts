@@ -16,13 +16,12 @@ import type { CtiClient } from '../ai-calls/cti-client.js';
 import { listAiCallResults, loadTranscript } from '../ai-calls/results-query.js';
 import { DECISION_WORDS } from '../call-plans/decisions.js';
 import { sendError } from '../http/errors.js';
-import { requireAdmin, requireContext, type RequestContext } from '../tenancy/scope.js';
+import { isAdmin } from '../tenancy/record-owner.js';
+import { requireAdmin, requireContext } from '../tenancy/scope.js';
 import { campaignId, campaignOr404 } from './campaigns.js';
 
 const ResultsQuery = z.object({ cursor: z.string().max(200).optional() });
 const CallParams = z.object({ aiCallId: z.string().uuid() });
-
-const isAdmin = (ctx: RequestContext): boolean => ctx.session.isAdmin || ctx.session.isSuperAdmin;
 
 export async function registerAiCallRoutes(app: FastifyInstance, deps: { db: Db; cti: CtiClient | null }): Promise<void> {
   const { db, cti } = deps;

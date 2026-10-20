@@ -14,7 +14,7 @@ import { SamEmailSettingsSave, type SamEmailSettings } from '@cti/contracts';
 import type { Db } from '@cti/db';
 import type { AppConfig } from '../config.js';
 import { setSamEmailEnabled } from '../email/pause.js';
-import type { EmailWriter } from '../email/writer.js';
+import { samEmailConfigured, type EmailWriter } from '../email/writer.js';
 import { sendError } from '../http/errors.js';
 import { samEmailSettings } from '../settings.js';
 import { requireAdmin, requireContext } from '../tenancy/scope.js';
@@ -31,7 +31,7 @@ export const EMAIL_NOT_CONFIGURED_WORDS =
 
 export async function registerSamEmailSettingsRoutes(app: FastifyInstance, deps: SamEmailSettingsRouteDeps): Promise<void> {
   const { db, cfg } = deps;
-  const configured = cfg.emailEnabled && deps.writer !== null;
+  const configured = samEmailConfigured(cfg, deps.writer);
   const settingsOf = (blob: unknown): SamEmailSettings => ({ ...samEmailSettings({ settings: blob }), configured });
 
   app.get('/settings/sam-email', async (req, reply) => {
