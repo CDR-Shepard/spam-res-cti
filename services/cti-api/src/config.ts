@@ -235,6 +235,13 @@ const schema = z.object({
   AI_VOICE_ELEVENLABS_VOICE: z.string().default('eXpIbVcVbLo8ZJQDlDnl'),
   AI_VOICE_ELEVENLABS_MODEL: z.string().default('eleven_v4_turbo'),
   /**
+   * Who reads the voicemail a call leaves at the beep (plan 2026-10-19 voicemail in Sam's voice): `elevenlabs` = the
+   * message rendered in AI_VOICE_ELEVENLABS_VOICE while the phone rings, `<Say>` (Polly) whenever it isn't ready;
+   * `say` = Polly always, as before. Independent of AI_VOICE_TTS. Without ELEVENLABS_API_KEY, `elevenlabs` uses
+   * Polly and logs a warning.
+   */
+  AI_VOICE_VOICEMAIL_TTS: z.enum(['elevenlabs', 'say']).default('elevenlabs'),
+  /**
    * Barge-in (spec 2026-10-09): `gate` = the bridge keeps the agent talking through "mm-hmm"
    * and stops it on a real interruption, judged from how long the caller keeps talking (the sound
    * judge, the default; spec §4.5) with the caller's streamed words as the second path, or from the

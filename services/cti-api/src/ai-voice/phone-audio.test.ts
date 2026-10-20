@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PHONE_FRAME_BYTES, fromMuLaw, lastFrame, muLaw, phoneDownsampler, wholeFrames } from './phone-audio.js';
+import { PHONE_FRAME_BYTES, fromMuLaw, lastFrame, muLaw, muLawWav, phoneAudio, phoneDownsampler, wholeFrames } from './phone-audio.js';
 
 /** 16-bit little-endian PCM at 16 kHz. */
 function pcm16(samples: readonly number[]): Buffer {
@@ -99,5 +99,65 @@ describe('wholeFrames / lastFrame — Twilio gets whole 20 ms frames only', () =
     expect(last.subarray(0, 59)).toEqual(bytes(59));
     expect(new Set(last.subarray(59))).toEqual(new Set([muLaw(0)]));
     expect(lastFrame(Buffer.alloc(0)).length).toBe(0);
+  });
+});
+
+describe('muLawWav — a voicemail clip as a file Twilio <Play>s', () => {
+  it('wraps μ-law in a WAV: format 7, mono, 8 kHz, 8-bit, then fact and data chunks', () => {
+    const wav = muLawWav(Buffer.from([1, 2, 3, 4]));
+    expect(wav.toString('ascii', 0, 4)).toBe('RIFF');
+    expect(wav.readUInt32LE(4)).toBe(wav.length - 8);
+    expect(wav.toString('ascii', 8, 16)).toBe('WAVEfmt ');
+    expect([
+      wav.readUInt32LE(16),
+      wav.readUInt16LE(20),
+      wav.readUInt16LE(22),
+      wav.readUInt32LE(24),
+      wav.readUInt32LE(28),
+      wav.readUInt16LE(32),
+      wav.readUInt16LE(34),
+      wav.readUInt16LE(36),
+    ]).toEqual([18, 7, 1, 8000, 8000, 1, 8, 0]);
+    expect(wav.toString('ascii', 38, 42)).toBe('fact');
+    expect([wav.readUInt32LE(42), wav.readUInt32LE(46)]).toEqual([4, 4]);
+    expect(wav.toString('ascii', 50, 54)).toBe('data');
+    expect(wav.readUInt32LE(54)).toBe(4);
+    expect([...wav.subarray(58)]).toEqual([1, 2, 3, 4]);
+  });
+
+  it('pads an odd data chunk to an even length: counted in the RIFF size, not in the data size', () => {
+    const wav = muLawWav(Buffer.from([9, 9, 9]));
+    expect(wav.readUInt32LE(54)).toBe(3);
+    expect(wav.readUInt32LE(46)).toBe(3);
+    expect(wav.length).toBe(58 + 4);
+    expect(wav.readUInt32LE(4)).toBe(wav.length - 8);
+    expect(wav[61]).toBe(0);
+  });
+});
+
+describe('phoneAudio — a whole 16 kHz clip made phone audio', () => {
+  it('gives half as many μ-law bytes; silence stays phone silence', async () => {
+    const out = await phoneAudio(Buffer.alloc(32_000)); // 1 s of 16 kHz silence
+    expect(out.length).toBe(8_000);
+    expect(new Set(out)).toEqual(new Set([0xff]));
+  });
+
+  it('is filtered like the live voice: a 6 kHz tone is nearly gone, a 1 kHz tone is kept', async () => {
+    const inRms = 10_000 / Math.SQRT2;
+    expect(rms(await phoneAudio(pcm16(tone(1000, 0.5))))).toBeGreaterThan(inRms * 0.9);
+    expect(rms(await phoneAudio(pcm16(tone(6000, 0.5))))).toBeLessThan(inRms * 0.05);
+  });
+
+  it('comes out exactly as the live converter makes it in one piece, across its slices', async () => {
+    const clip = pcm16(tone(440, 1.3).map((x, n) => x + 3000 * Math.sin(n / 7)));
+    expect(await phoneAudio(clip)).toEqual(phoneDownsampler().push(clip));
+  });
+
+  it('yields to other work between slices, so a long clip never stalls the live calls', async () => {
+    const order: string[] = [];
+    const done = phoneAudio(Buffer.alloc(32_000 * 3)).then(() => order.push('audio'));
+    setImmediate(() => order.push('other'));
+    await done;
+    expect(order).toEqual(['other', 'audio']);
   });
 });

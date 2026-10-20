@@ -99,3 +99,54 @@ export function lastFrame(carry: Buffer): Buffer {
   if (!carry.length) return EMPTY;
   return Buffer.concat([carry, Buffer.alloc(PHONE_FRAME_BYTES - carry.length, MU_LAW_SILENCE)]);
 }
+
+/** Half a second of 16 kHz PCM: the most phoneAudio converts before letting other work run (~0.7 ms of filtering). */
+const PHONE_AUDIO_SLICE_BYTES = 16_000;
+const nextTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * A whole 16 kHz clip (a voicemail) as phone audio: the same filter and μ-law as the live voice. Converted half a
+ * second at a time with a yield between, because in one go a 15 s voicemail holds the event loop ~20 ms, as long as
+ * a live call's audio frame.
+ */
+export async function phoneAudio(pcm16le: Buffer): Promise<Buffer> {
+  const phone = phoneDownsampler();
+  const out: Buffer[] = [];
+  for (let at = 0; at < pcm16le.length; at += PHONE_AUDIO_SLICE_BYTES) {
+    if (at > 0) await nextTurn();
+    out.push(phone.push(pcm16le.subarray(at, at + PHONE_AUDIO_SLICE_BYTES)));
+  }
+  return Buffer.concat(out);
+}
+
+const PHONE_RATE = 8_000;
+/** WAVE_FORMAT_MULAW. */
+const WAV_MU_LAW = 7;
+/** RIFF + WAVE, an 18-byte fmt chunk, a fact chunk and the data chunk's header. */
+const WAV_HEADER_BYTES = 58;
+
+/**
+ * 8 kHz μ-law in a WAV file, the form Twilio's `<Play>` takes without converting it again (its docs prefer lossless
+ * 8 kHz audio). A non-PCM WAV carries cbSize and a fact chunk (the sample count); an odd data chunk gets a pad byte.
+ */
+export function muLawWav(ulaw: Buffer): Buffer {
+  const pad = ulaw.length % 2;
+  const head = Buffer.alloc(WAV_HEADER_BYTES);
+  head.write('RIFF', 0, 'ascii');
+  head.writeUInt32LE(WAV_HEADER_BYTES - 8 + ulaw.length + pad, 4);
+  head.write('WAVEfmt ', 8, 'ascii');
+  head.writeUInt32LE(18, 16);
+  head.writeUInt16LE(WAV_MU_LAW, 20);
+  head.writeUInt16LE(1, 22);
+  head.writeUInt32LE(PHONE_RATE, 24);
+  head.writeUInt32LE(PHONE_RATE, 28);
+  head.writeUInt16LE(1, 32);
+  head.writeUInt16LE(8, 34);
+  head.writeUInt16LE(0, 36);
+  head.write('fact', 38, 'ascii');
+  head.writeUInt32LE(4, 42);
+  head.writeUInt32LE(ulaw.length, 46);
+  head.write('data', 50, 'ascii');
+  head.writeUInt32LE(ulaw.length, 54);
+  return Buffer.concat([head, ulaw, Buffer.alloc(pad)]);
+}
