@@ -22,7 +22,8 @@ export function straightLineMinutes(a: GeoPoint, b: GeoPoint): number {
 
 export interface DriveTimer {
   /**
-   * Minutes per origin x destination (null = no route). Falls back to straight lines when Google Routes is unavailable.
+   * Minutes per origin x destination (null = no route). Falls back to straight lines when Google Routes is unavailable,
+   * and after the first such failure stays on straight lines for the rest of this timer's life.
    * Rejects with MapsUnavailableError only when that fallback cannot place an address either (Geocoding is down too).
    */
   matrix(origins: readonly Place[], destinations: readonly Place[], departure: Date): Promise<(number | null)[][]>;
@@ -32,7 +33,8 @@ export interface DriveTimer {
 
 export function driveTimer(maps: MapsClient, office: Place, log: { warn(o: Record<string, unknown>, m: string): void }): DriveTimer {
   let spentElements = 0;
-  let warned = false;
+  // Once Google has failed, this timer stops asking: a hung Routes would cost its full timeout on every later matrix.
+  let routesDown = false;
 
   async function straightLines(origins: readonly Place[], destinations: readonly Place[]): Promise<number[][]> {
     // An address Google can't find is treated as the office; the office, if it is an address, is looked up only then.
@@ -61,16 +63,15 @@ export function driveTimer(maps: MapsClient, office: Place, log: { warn(o: Recor
 
   return {
     async matrix(origins, destinations, departure) {
+      if (routesDown) return straightLines(origins, destinations);
       try {
         const result = await maps.routeMinutes(origins, destinations, departure);
         spentElements += result.requestedElements;
         return result.minutes;
       } catch (err) {
         if (!(err instanceof MapsUnavailableError)) throw err;
-        if (!warned) {
-          warned = true;
-          log.warn({ code: err.code }, 'Google Routes unavailable: using straight-line drive times');
-        }
+        routesDown = true;
+        log.warn({ code: err.code }, 'Google Routes unavailable: using straight-line drive times');
         return straightLines(origins, destinations);
       }
     },

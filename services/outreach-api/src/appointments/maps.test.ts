@@ -253,6 +253,18 @@ describe('googleMaps.routeMinutes', () => {
     expect(bodyOf(f.calls()[0]!).departureTime).toBe('2026-10-19T12:01:00.000Z');
   });
 
+  it.each([
+    ['now', 0, '2026-10-19T12:01:00.000Z'],
+    ['30 seconds from now', 30 * SECOND, '2026-10-19T12:01:00.000Z'],
+    ['59.999 seconds from now', 59_999, '2026-10-19T12:01:00.000Z'],
+    ['exactly 60 seconds from now', 60 * SECOND, '2026-10-19T12:01:00.000Z'],
+    ['61 seconds from now', 61 * SECOND, '2026-10-19T12:01:01.000Z'],
+  ])('sends max(departure, now + 60 s) for a departure %s', async (_label, offsetMs, sent) => {
+    const f = fakeFetch(json([]));
+    await googleMaps(KEY, { fetch: f.fetch, now: () => NOW }).routeMinutes([A], [B], new Date(NOW.getTime() + offsetMs));
+    expect(bodyOf(f.calls()[0]!).departureTime).toBe(sent);
+  });
+
   it('places elements by originIndex and destinationIndex, whatever order they arrive in', async () => {
     const f = fakeFetch(json([element(1, 1, 3_000), element(0, 1, 1_530), element(1, 0, 120), element(0, 0, 60)]));
     const result = await googleMaps(KEY, { fetch: f.fetch, now: () => NOW }).routeMinutes([A, B], [C, D], departure);
@@ -363,6 +375,36 @@ describe('googleMaps.routeMinutes', () => {
     await maps.routeMinutes([A], [B], departure);
     expect((await maps.routeMinutes([A], [B], departure)).minutes).toEqual([[null]]);
     expect(f.fn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([4, 8, 13, 14])('does not cache a transient element status (code %i): it is null now and asked for again next time', async (code) => {
+    const f = fakeFetch(json([{ originIndex: 0, destinationIndex: 0, status: { code, message: 'try later' } }]), json([element(0, 0, 600)]));
+    const maps = googleMaps(KEY, { fetch: f.fetch, now: () => NOW });
+    const first = await maps.routeMinutes([A], [B], departure);
+    expect(first).toEqual({ minutes: [[null]], requestedElements: 1 });
+    const again = await maps.routeMinutes([A], [B], departure);
+    expect(again).toEqual({ minutes: [[10]], requestedElements: 1 });
+    expect(f.fn).toHaveBeenCalledTimes(2);
+  });
+
+  it('does cache the definitive nulls: status code 5 (NOT_FOUND) and ROUTE_NOT_FOUND', async () => {
+    const f = fakeFetch(
+      json([
+        { originIndex: 0, destinationIndex: 0, status: { code: 5, message: 'not found' } },
+        { originIndex: 0, destinationIndex: 1, condition: 'ROUTE_NOT_FOUND' },
+      ]),
+    );
+    const maps = googleMaps(KEY, { fetch: f.fetch, now: () => NOW });
+    await maps.routeMinutes([A], [B, C], departure);
+    expect(await maps.routeMinutes([A], [B, C], departure)).toEqual({ minutes: [[null, null]], requestedElements: 0 });
+    expect(f.fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache an element it could not read (no usable duration)', async () => {
+    const f = fakeFetch(json([{ originIndex: 0, destinationIndex: 0, condition: 'ROUTE_EXISTS' }]), json([element(0, 0, 600)]));
+    const maps = googleMaps(KEY, { fetch: f.fetch, now: () => NOW });
+    expect((await maps.routeMinutes([A], [B], departure)).minutes).toEqual([[null]]);
+    expect((await maps.routeMinutes([A], [B], departure)).minutes).toEqual([[10]]);
   });
 
   it('makes no request for an empty matrix', async () => {

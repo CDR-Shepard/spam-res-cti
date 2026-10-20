@@ -124,12 +124,19 @@ function parseGeocode(body: unknown): Geocoded | null {
   return { point: first.geometry.location, county: county ?? null, state: component('administrative_area_level_1')?.short_name ?? null };
 }
 
-/** "1530s" -> 26. Whole minutes, rounded up: a drive time is never understated. */
-function parseElement(el: z.infer<typeof RouteElements>[number]): number | null {
-  if ((el.status?.code ?? 0) !== 0) return null;
-  if (el.condition !== undefined && el.condition !== 'ROUTE_EXISTS') return null;
+/** NOT_FOUND in google.rpc.Code: Google could not place one of the addresses. A definitive answer, unlike 4, 8, 13 or 14. */
+const NOT_FOUND = 5;
+
+/**
+ * "1530s" -> 26. Whole minutes, rounded up: a drive time is never understated. `definitive` says Google answered
+ * (a duration, no route, or an address it can't place); anything else is null for now but is not worth remembering.
+ */
+function parseElement(el: z.infer<typeof RouteElements>[number]): { minutes: number | null; definitive: boolean } {
+  const code = el.status?.code ?? 0;
+  if (code !== 0) return { minutes: null, definitive: code === NOT_FOUND };
+  if (el.condition !== undefined && el.condition !== 'ROUTE_EXISTS') return { minutes: null, definitive: el.condition === 'ROUTE_NOT_FOUND' };
   const seconds = /^(\d+(?:\.\d+)?)s$/.exec(el.duration ?? '')?.[1];
-  return seconds === undefined ? null : Math.ceil(Number(seconds) / 60);
+  return seconds === undefined ? { minutes: null, definitive: false } : { minutes: Math.ceil(Number(seconds) / 60), definitive: true };
 }
 
 export function googleMaps(apiKey: string, opts: { fetch?: typeof fetch; now?: () => Date } = {}): MapsClient {
@@ -157,8 +164,11 @@ export function googleMaps(apiKey: string, opts: { fetch?: typeof fetch; now?: (
     }
   }
 
-  /** Never earlier than a minute from now: Google refuses a traffic-aware departure that has already passed. */
-  const effectiveDeparture = (departure: Date): Date => (departure.getTime() < now().getTime() ? new Date(now().getTime() + MIN_LEAD_MS) : departure);
+  /** Never less than a minute from now: Google refuses a traffic-aware departure that has passed by the time it is processed. */
+  const effectiveDeparture = (departure: Date): Date => {
+    const earliest = now().getTime() + MIN_LEAD_MS;
+    return departure.getTime() < earliest ? new Date(earliest) : departure;
+  };
 
   return {
     async geocode(address) {
@@ -217,9 +227,9 @@ export function googleMaps(apiKey: string, opts: { fetch?: typeof fetch; now?: (
           const o = askOrigins[el.originIndex];
           const d = askDestinations[el.destinationIndex];
           if (o === undefined || d === undefined) throw new MapsUnavailableError('bad_response');
-          const minutes = parseElement(el);
+          const { minutes, definitive } = parseElement(el);
           known.set(keyOf(o, d), minutes);
-          routes.set(keyOf(o, d), minutes);
+          if (definitive) routes.set(keyOf(o, d), minutes);
         }
       }
 

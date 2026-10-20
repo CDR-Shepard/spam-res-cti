@@ -84,6 +84,27 @@ describe('driveTimer when Google Routes is unavailable', () => {
     expect(timer.spent()).toBe(0);
   });
 
+  it('stops asking Google once it has failed: later matrices go straight to straight lines', async () => {
+    const f = fakeMaps({ known: { [FAKE_HOME]: SAN_DIEGO } });
+    const { log, warn } = logger();
+    const timer = driveTimer(f.maps, OFFICE, log);
+    await timer.matrix([{ address: FAKE_HOME }], [{ point: LA }], DEPARTURE);
+    expect(f.routeMinutes).toHaveBeenCalledTimes(1);
+    const second = await timer.matrix([{ address: FAKE_HOME }, { point: IRVINE }], [{ point: LA }], DEPARTURE);
+    await timer.matrix([{ point: SAN_DIEGO }], [{ point: LA }], DEPARTURE);
+    expect(f.routeMinutes).toHaveBeenCalledTimes(1);
+    expect(second).toEqual([[straightLineMinutes(SAN_DIEGO, LA)], [straightLineMinutes(IRVINE, LA)]]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(timer.spent()).toBe(0);
+  });
+
+  it('still asks Google on a fresh timer after another timer\'s failure', async () => {
+    const f = fakeMaps();
+    await driveTimer(f.maps, OFFICE, logger().log).matrix([{ point: LA }], [{ point: IRVINE }], DEPARTURE);
+    await driveTimer(f.maps, OFFICE, logger().log).matrix([{ point: LA }], [{ point: IRVINE }], DEPARTURE);
+    expect(f.routeMinutes).toHaveBeenCalledTimes(2);
+  });
+
   it('asks for each distinct address once per matrix', async () => {
     const f = fakeMaps({ known: { [FAKE_HOME]: SAN_DIEGO } });
     const timer = driveTimer(f.maps, OFFICE, logger().log);
