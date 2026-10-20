@@ -210,16 +210,20 @@ describe.skipIf(!pgLane)('seller conversation routes (real Postgres)', () => {
       expect(await blocked({ recordOver: { sfEmailOptOut: true } })).toBe('sf_opt_out');
     });
 
-    it('with only the switch off the page says disabled; a seller block behind it, which stops the draft too, is the one shown', async () => {
-      const blocked = async (o: Parameters<typeof seedSeller>[0]) => {
+    it('draftBlock: behind the switch, the seller block that also stops a draft (null when a preview can be written); otherwise the email block', async () => {
+      const blocks = async (o: Parameters<typeof seedSeller>[0]) => {
         const s = await seedSeller(o);
         sessionFor(s.orgId, s.admin.id, true);
-        return (await get(s.sfRecordId)).json().emailBlock;
+        const view = (await get(s.sfRecordId)).json();
+        return [view.emailBlock, view.draftBlock];
       };
-      expect(await blocked({ settings: {} })).toBe('disabled');
-      expect(await blocked({ settings: {}, planStatus: 'proposed' })).toBe('not_approved');
-      expect(await blocked({ settings: {}, recordOver: { email: null } })).toBe('no_address');
-      expect(await blocked({ settings: { samEmail: { enabled: true, pausedAt: NOW.toISOString(), pausedReason: 'complaint' } }, recordOver: { sfEmailOptOut: true } })).toBe('sf_opt_out');
+      const PAUSED = { samEmail: { enabled: true, pausedAt: NOW.toISOString(), pausedReason: 'complaint' } };
+      expect(await blocks({ settings: {} })).toEqual(['disabled', null]);
+      expect(await blocks({ settings: {}, planStatus: 'proposed' })).toEqual(['disabled', 'not_approved']);
+      expect(await blocks({ settings: {}, recordOver: { email: null } })).toEqual(['disabled', 'no_address']);
+      expect(await blocks({ settings: PAUSED, recordOver: { sfEmailOptOut: true } })).toEqual(['paused', 'sf_opt_out']);
+      expect(await blocks({})).toEqual([null, null]);
+      expect(await blocks({ planStatus: 'proposed' })).toEqual(['not_approved', 'not_approved']);
     });
 
     it('Salesforce Email Opt Out on ANOTHER record with the same address (any case) blocks the email too: sf_opt_out (I2b)', async () => {

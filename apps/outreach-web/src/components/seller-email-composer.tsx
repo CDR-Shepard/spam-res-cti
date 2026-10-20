@@ -27,10 +27,11 @@ const isSendable = (d: Draft): boolean =>
  *
  * `emailBlock` is the page's current reason Sam may not email (null = she may), and it can change while the composer is
  * open (a hand-over, the daily cap). The real Write draft and Send follow it; the practice copy goes only to the admin, so
- * only the server setup and the tenant's switch stop it (`practiceAllowed`). The switch alone leaves Write draft on as a
- * preview whose Send stays off (`isSwitchBlock`). A draft already written stays on screen.
+ * only the server setup and the tenant's switch stop it (`practiceAllowed`). The switch alone (`draftBlock` null) leaves
+ * Write draft on as a preview whose Send stays off (`isSwitchBlock`); a seller block behind the switch keeps it off. A
+ * draft already written stays on screen.
  */
-export function SellerEmailComposer({ sfRecordId, emailBlock, onClose }: { sfRecordId: string; emailBlock: EmailBlock | null; onClose: () => void }) {
+export function SellerEmailComposer({ sfRecordId, emailBlock, draftBlock = null, onClose }: { sfRecordId: string; emailBlock: EmailBlock | null; draftBlock?: EmailBlock | null; onClose: () => void }) {
   const qc = useQueryClient();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [queued, setQueued] = useState<Queued | null>(null);
@@ -73,7 +74,7 @@ export function SellerEmailComposer({ sfRecordId, emailBlock, onClose }: { sfRec
             onDiscard={discard}
           />
         ) : (
-          <StartPanel writing={write.isPending} error={write.error} emailBlock={emailBlock} onWrite={startDraft} />
+          <StartPanel writing={write.isPending} error={write.error} emailBlock={emailBlock} draftBlock={draftBlock} onWrite={startDraft} />
         )}
       </div>
     </Section>
@@ -88,11 +89,14 @@ function blockWords(block: EmailBlock | null, practice: boolean): string | null 
 
 const queuedWords = (q: Queued): string => `${q.practice ? 'Practice copy queued' : 'Queued'} for ${q.to}. It goes out ${sendAfterWords(q.sendAfter)}.`;
 
-function StartPanel({ writing, error, emailBlock, onWrite }: { writing: boolean; error: unknown; emailBlock: EmailBlock | null; onWrite: (practice: boolean) => void }) {
+interface StartPanelProps { writing: boolean; error: unknown; emailBlock: EmailBlock | null; draftBlock: EmailBlock | null; onWrite: (practice: boolean) => void }
+
+function StartPanel({ writing, error, emailBlock, draftBlock, onWrite }: StartPanelProps) {
   const hintId = useId();
   const realWords = blockWords(emailBlock, false);
   const practiceWords = blockWords(emailBlock, true);
-  const preview = isSwitchBlock(emailBlock);
+  const behindSwitch = isSwitchBlock(emailBlock) ? draftBlock : null;
+  const preview = isSwitchBlock(emailBlock) && behindSwitch === null;
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">Sam writes a first draft. You can edit it before anything is sent.</p>
@@ -103,6 +107,7 @@ function StartPanel({ writing, error, emailBlock, onWrite }: { writing: boolean;
       {/* One reason is shown: the real draft's, which is also the practice copy's whenever the practice copy is off too. */}
       {realWords && <p id={hintId} className="text-sm text-muted-foreground">{realWords}</p>}
       {preview && <p className="text-sm text-muted-foreground">{PREVIEW_WORDS}</p>}
+      {behindSwitch && <p className="text-sm text-muted-foreground">{EMAIL_BLOCK_WORDS[behindSwitch]}</p>}
       {writing && <p role="status" className="text-sm text-muted-foreground">Sam is writing a draft…</p>}
       {error !== null && <ErrorBlock error={error} />}
     </div>

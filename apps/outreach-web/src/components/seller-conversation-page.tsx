@@ -37,6 +37,9 @@ export function SellerConversationPage({ sfRecordId, focusEventId = null }: { sf
   const view = conversation.data;
   const status = sellerStatus(view);
   const block = view.emailBlock;
+  // Behind the switch, the seller's own block (which stops the draft too) is said as well; null: a preview can be written.
+  const behindSwitch = isSwitchBlock(block) ? (view.draftBlock ?? null) : null;
+  const mayPreview = isSwitchBlock(block) && behindSwitch === null;
   return (
     <div className="space-y-6">
       <PageHeader
@@ -48,7 +51,7 @@ export function SellerConversationPage({ sfRecordId, focusEventId = null }: { sf
             {view.mayChangeHandler && <HandoverButton view={view} busy={handover.isPending} onChange={(handler) => handover.mutate(handler)} />}
             {isAdmin && (
               // With only the switch in the way, the button opens the composer to read Sam's draft; its Send stays off.
-              <Button size="sm" disabled={!view.mayEmail && !isSwitchBlock(block)} aria-describedby={block ? blockId : undefined} onClick={() => setComposing(true)}>
+              <Button size="sm" disabled={!view.mayEmail && !mayPreview} aria-describedby={block ? blockId : undefined} onClick={() => setComposing(true)}>
                 {isSwitchBlock(block) ? "Preview Sam's email" : 'Email from Sam'}
               </Button>
             )}
@@ -59,11 +62,15 @@ export function SellerConversationPage({ sfRecordId, focusEventId = null }: { sf
           </>
         }
       >
-        {isAdmin && block && <p id={blockId} className="text-[13px] text-muted-foreground">{EMAIL_BLOCK_WORDS[block]}</p>}
+        {isAdmin && block && (
+          <p id={blockId} className="text-[13px] text-muted-foreground">
+            {behindSwitch ? `${EMAIL_BLOCK_WORDS[block]}. ${EMAIL_BLOCK_WORDS[behindSwitch]}` : EMAIL_BLOCK_WORDS[block]}
+          </p>
+        )}
       </PageHeader>
       {conversation.error && <p role="alert" className="text-sm text-destructive">Could not refresh this page. {errorText(conversation.error)}</p>}
       {handover.error && <p role="alert" className="text-sm text-destructive">{errorText(handover.error)}</p>}
-      {isAdmin && composing && <SellerEmailComposer sfRecordId={sfRecordId} emailBlock={block} onClose={() => setComposing(false)} />}
+      {isAdmin && composing && <SellerEmailComposer sfRecordId={sfRecordId} emailBlock={block} draftBlock={view.draftBlock ?? null} onClose={() => setComposing(false)} />}
       <Section title="Conversation" description="Calls, emails and hand-overs, oldest first.">
         <SellerTimeline items={view.items} focusEventId={focusEventId} />
       </Section>

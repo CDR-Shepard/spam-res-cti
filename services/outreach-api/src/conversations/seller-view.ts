@@ -144,13 +144,17 @@ export async function ownAddress(db: Db, userId: string): Promise<string | null>
 }
 
 /**
- * The block the page shows: the send block, except that behind the tenant's switch a seller block (which stops the
- * draft too) is the one shown, so the page offers a preview only when the draft would be written.
+ * The page's two blocks: why Sam may not send, and why her draft may not be written. They differ only behind the
+ * tenant's switch, which a draft skips (BlockUse): there the draft block is the seller's own, or null for a preview.
  */
-async function pageEmailBlock(db: Db, setup: EmailSetup, i: { orgId: string; record: SellerRecord; conversation: ConversationState | null }): Promise<EmailBlock | null> {
-  const block = await sellerEmailBlock(db, setup, i);
-  if (block !== 'disabled' && block !== 'paused') return block;
-  return (await sellerEmailBlock(db, setup, i, 'draft')) ?? block;
+async function pageEmailBlocks(
+  db: Db,
+  setup: EmailSetup,
+  i: { orgId: string; record: SellerRecord; conversation: ConversationState | null },
+): Promise<{ emailBlock: EmailBlock | null; draftBlock: EmailBlock | null }> {
+  const emailBlock = await sellerEmailBlock(db, setup, i);
+  if (emailBlock !== 'disabled' && emailBlock !== 'paused') return { emailBlock, draftBlock: emailBlock };
+  return { emailBlock, draftBlock: await sellerEmailBlock(db, setup, i, 'draft') };
 }
 
 /**
@@ -164,8 +168,8 @@ export async function conversationView(
 ): Promise<ConversationView> {
   const { record } = i;
   const conversation = await realConversation(db, i.orgId, record.id);
-  const [emailBlock, items, connection] = await Promise.all([
-    pageEmailBlock(db, setup, { orgId: i.orgId, record, conversation }),
+  const [{ emailBlock, draftBlock }, items, connection] = await Promise.all([
+    pageEmailBlocks(db, setup, { orgId: i.orgId, record, conversation }),
     readTimeline(db, { orgId: i.orgId, crmRecordId: record.id, conversationId: conversation?.id ?? null }),
     loadConnection(db, i.orgId),
   ]);
@@ -184,6 +188,7 @@ export async function conversationView(
     flagReason: FlagReason.safeParse(conversation?.flagReason).data ?? null,
     emailAddress: record.address,
     emailBlock,
+    draftBlock,
     mayEmail: i.isAdmin && emailBlock === null,
     mayChangeHandler: i.mayChangeHandler,
     items: forPage(items),

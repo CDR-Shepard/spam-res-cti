@@ -19,8 +19,8 @@ const sent = (to: string, sendAfter: string) => ({ emailId: '00000000-0000-4000-
 /** Far enough ahead that it is never "now" and never today. */
 const LATER = new Date(Date.now() + 3 * 24 * 3600 * 1000);
 
-const open = (emailBlock: EmailBlock | null = null) =>
-  renderWithProviders(<SellerEmailComposer sfRecordId={SELLER_ID} emailBlock={emailBlock} onClose={() => {}} />, { isAdmin: true });
+const open = (emailBlock: EmailBlock | null = null, draftBlock: EmailBlock | null = null) =>
+  renderWithProviders(<SellerEmailComposer sfRecordId={SELLER_ID} emailBlock={emailBlock} draftBlock={draftBlock} onClose={() => {}} />, { isAdmin: true });
 
 /** The composer with a button that turns the seller's block on while it is open (a Take over, the daily cap). */
 function Flippable({ then }: { then: EmailBlock }) {
@@ -255,6 +255,14 @@ describe('SellerEmailComposer: when Sam may not email', () => {
     await userEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Send practice copy' }));
     await waitFor(() => expect(calls.find((c) => c.url.endsWith('/send'))?.body).toMatchObject({ practice: true }));
     expect(await screen.findByRole('status')).toHaveTextContent('Practice copy queued for admin@gg.co.');
+  });
+
+  it('the switch with a seller block behind it: no preview either, with the seller block in words', () => {
+    open('disabled', 'not_approved');
+    expect(screen.getByRole('button', { name: 'Write draft' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: PRACTICE })).toBeDisabled();
+    expect(screen.getByText('No approved call plan yet')).toBeInTheDocument();
+    expect(screen.queryByText(PREVIEW_WORDS)).not.toBeInTheDocument();
   });
 
   it('not_configured (the server setup) turns off both, with the words shown once', () => {

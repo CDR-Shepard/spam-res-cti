@@ -38,6 +38,7 @@ export function sellerView(over: Partial<ConversationView> = {}): ConversationVi
     flagReason: null,
     emailAddress: 'jane@example.com',
     emailBlock: null,
+    draftBlock: null,
     mayEmail: true,
     mayChangeHandler: true,
     items: [callItem(), emailItem({ direction: 'in', actor: 'seller', status: 'received' }), noteItem()],

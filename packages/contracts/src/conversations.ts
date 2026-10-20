@@ -97,8 +97,10 @@ export type TimelineItem = z.infer<typeof TimelineItem>;
 
 /**
  * GET /sellers/:sfRecordId/conversation: everything a seller's page needs. conversationId is null until the
- * seller has a conversation row. emailBlock is why Sam may not email (null when mayEmail); mayChangeHandler is
- * whether the viewer may take over or give back (the record's owner or an admin).
+ * seller has a conversation row. emailBlock is why Sam may not email (null when mayEmail); draftBlock is why her
+ * draft may not be written, which skips the tenant's switch (a draft is only shown to the admin), so behind the switch
+ * it is the seller's own block or null (a preview can be written); mayChangeHandler is whether the viewer may take
+ * over or give back (the record's owner or an admin).
  */
 export const ConversationView = z.object({
   sfRecordId: z.string(),
@@ -113,6 +115,8 @@ export const ConversationView = z.object({
   flagReason: FlagReason.nullable(),
   emailAddress: z.string().nullable(),
   emailBlock: EmailBlock.nullable(),
+  /** Optional only so the page still parses an outreach-api older than the preview; absent reads as null. */
+  draftBlock: EmailBlock.nullable().optional(),
   mayEmail: z.boolean(),
   mayChangeHandler: z.boolean(),
   items: z.array(TimelineItem),
