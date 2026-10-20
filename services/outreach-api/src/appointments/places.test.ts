@@ -16,6 +16,21 @@ describe('usableAddress', () => {
     expect(usableAddress('77B Palm Ave, Oceanside')).toBe('77B Palm Ave, Oceanside');
   });
 
+  // Final review C1: a directional before the street name, or a numbered street, is still a street address.
+  it.each([
+    ['a one-letter directional', '1234 N Main St, Santa Ana, CA 92701'],
+    ['a directional on a city street', '4500 W Pico Blvd, Los Angeles, CA 90019'],
+    ['a numbered street', '456 3rd Ave, Chula Vista, CA 91910'],
+    ['a directional with a dot', '100 N. Tustin Ave, Orange, CA 92867'],
+    ['a directional and a numbered street', '1200 E 7th St, Long Beach'],
+    ['a spelled-out directional', '210 South Fake Elm Dr, Tustin, CA 92780'],
+    ['a lower-case directional and numbered street', '88 w 21st st, Upland, CA 91786'],
+    ['a hyphenated house number', '12-4 Fake Oak Ln, Irvine, CA 92612'],
+    ['a street name that starts with "Zoom"', '3300 Calle Zoomar, San Clemente, CA 92673'],
+  ])('is drivable: %s', (_label, location) => {
+    expect(usableAddress(location)).toBe(location);
+  });
+
   it.each([
     ['null', null],
     ['undefined', undefined],
@@ -28,6 +43,9 @@ describe('usableAddress', () => {
     ['a phone number', '555-123-4567'],
     ['a phone number with spaces', '555 123 4567'],
     ['a Zoom link', 'https://zoom.us/j/123'],
+    ['a Zoom link with no scheme and a street-like tail', 'us02web.zoom.us/j/123 Main'],
+    ['a Zoom meeting that names a street', 'Zoom with seller, 1234 Main St'],
+    ['a phone number with a directional-like letter', '555 N 123 4567'],
     ['a www link that has a street-like tail', 'www.example.com/123 Main'],
     ['a Teams link', 'Join: 123 meetings at teams.microsoft.com'],
     ['a Google Meet link', 'meet.google.com 123 abc'],

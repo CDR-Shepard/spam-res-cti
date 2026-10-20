@@ -140,6 +140,16 @@ describe('inPersonSlots', () => {
     expect(repAt(slots, TUE_9)).toBe(CHANCE.sfUserId);
   });
 
+  it('final review C1: an earlier Event on a directional street is driven from there, not from the office', async () => {
+    const pico = '4500 W Pico Blvd, Los Angeles';
+    const { drive, calls } = fakeDrive({ [`${pico}>property`]: 50 });
+    const chance = cal(CHANCE, [item(pt(20, 7), pt(20, 8, 30), { location: pico })]);
+    // 08:30 + 50 minutes misses 09:00, so Blake (from the office, 15 minutes) takes it.
+    const slots = await inPerson([chance, cal(BLAKE)], drive);
+    expect(calls[0]?.origins).toEqual([{ address: pico }, OFFICE]);
+    expect(repAt(slots, TUE_9)).toBe(BLAKE.sfUserId);
+  });
+
   it('each place is asked once', async () => {
     const { drive, calls } = fakeDrive();
     const at = (location: string): Busy[] => [item(pt(20, 7), pt(20, 8), { location })];

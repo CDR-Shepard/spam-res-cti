@@ -289,6 +289,23 @@ describe('bookOpportunity: a routed booking (overlap with no buffer, then the dr
     expect(f.creates[0]!.fields).toMatchObject({ Subject: 'Property Consultation', OwnerId: BLAKE, Location: ADDRESS });
   });
 
+  it('final review C1: an earlier Event on a directional street is driven from there, not from the office', async () => {
+    const pico = '4500 W Pico Blvd, Los Angeles, CA 90019';
+    const origins: string[] = [];
+    // 40 minutes from the earlier Event's street, 10 from the office: only the street's drive misses the start.
+    const maps: MapsClient = {
+      geocode: async () => null,
+      async routeMinutes(from, to) {
+        from.forEach((o) => origins.push('address' in o ? o.address : 'point'));
+        return { minutes: from.map((o) => to.map(() => ('address' in o && o.address === pico ? 40 : 10))), requestedElements: from.length * to.length };
+      },
+    };
+    const f = org([[BUSY, [{ ...EARLIER, Location: pico }]]]);
+    expect(await bookRouted(f, ROUTED, maps)).toEqual({ kind: 'conflict', reason: 'drive' });
+    expect(origins).toContain(pico);
+    expect(f.creates).toEqual([]);
+  });
+
   it('maps null: the overlap check only (no 30-minute buffer): created', async () => {
     const f = org([[BUSY, [EARLIER]]]);
     expect(await bookRouted(f, ROUTED, null)).toEqual({ kind: 'created', eventId: expect.stringMatching(/^00U/) });

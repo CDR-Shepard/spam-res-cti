@@ -7,10 +7,13 @@ import type { Geocoded } from './maps.js';
 
 const MIN_ADDRESS_CHARS = 8;
 const MAX_ADDRESS_CHARS = 200;
-/** A house number then a street word: "1234 Oak", "77B Palm". A phone number or a bare "Zoom" has neither. */
-const STREET_ADDRESS = /\b\d{1,6}[A-Za-z]?\s+[A-Za-z]{2,}/;
-/** A link or a meeting room, even one that carries a street-like number ("www.example.com/123 Main"). */
-const NOT_A_PLACE = /(https?:|www\.|zoom|teams\.|meet\.google|webex)/i;
+/**
+ * A house number, an optional directional, then a street word or a numbered street: "1234 Oak", "77B Palm", "1234 N Main",
+ * "100 N. Tustin", "456 3rd", "1200 E 7th". A phone number ("555 123 4567") or a bare "Zoom" has none of these.
+ */
+const STREET_ADDRESS = /\b\d{1,6}[A-Za-z]?(?:-\d+)?\s+(?:(?:[NSEW]|North|South|East|West)\.?\s+)?(?:\d{1,4}(?:st|nd|rd|th)\b|[A-Za-z]{2,})/i;
+/** A link or a meeting room, even one that carries a street-like number ("www.example.com/123 Main"); "Calle Zoomar" is a street. */
+const NOT_A_PLACE = /(https?:|www\.|\bzoom\b|zoom\.us|teams\.|meet\.google|webex)/i;
 /** Booking regions are California counties. */
 const ROUTING_STATE = 'CA';
 

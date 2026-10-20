@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AppointmentSlot, ConsultationFact, PriorityOffer } from '@cti/contracts';
-import { context, promptSlots } from './prompt-context.js';
+import { context, promptPriority, promptSlots } from './prompt-context.js';
 import type { PromptInput } from './prompt.js';
 import { slotWords } from './prompt-booking.js';
 import { promptView } from './prompt-view.js';
@@ -215,6 +215,19 @@ describe('final review I-1: a walkthrough needs a street address to confirm', ()
   it('promptSlots applies the same rule, so the tool enum and the bookable list agree with the prompt', () => {
     expect(promptSlots([slot(), walk()], null).map((s) => s.id)).toEqual(['p1']);
     expect(promptSlots([slot(), walk()], '1234 Oak St, Tampa, FL 33601').map((s) => s.id)).toEqual(['p1', 'w1']);
+  });
+
+  // Final review C1: outreach-api now sends walkthrough slots and the priority offer for these, so they must survive here.
+  it.each([
+    '1234 N Main St, Santa Ana, CA 92701',
+    '4500 W Pico Blvd, Los Angeles, CA 90019',
+    '456 3rd Ave, Chula Vista, CA 91910',
+    '100 N. Tustin Ave, Orange, CA 92867',
+    '1200 E 7th St, Long Beach',
+    '3300 Calle Zoomar, San Clemente, CA 92673',
+  ])('a directional or numbered street keeps walkthrough slots and the priority offer: %s', (address) => {
+    expect(promptSlots([slot(), walk()], address).map((s) => s.id)).toEqual(['p1', 'w1']);
+    expect(promptPriority(GRANT, address)).not.toBeNull();
   });
 });
 
