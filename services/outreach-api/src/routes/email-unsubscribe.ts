@@ -28,7 +28,7 @@ import { dispatchAlert, type AlertEvent } from '../alerts.js';
 import { raiseSharedAddressAlert, sharedAddressCollector, type SharedAddressNotice } from '../conversations/shared-address.js';
 import { findConversationByToken, stopSeller } from '../conversations/store.js';
 import { describeError } from '../email/errors.js';
-import { escapeHtml, possessive } from '../email/render.js';
+import { escapeHtml } from '../email/render.js';
 
 /** Mail clients post a few bytes; this bounds what an unauthenticated caller can make us read. */
 export const UNSUBSCRIBE_BODY_LIMIT_BYTES = 8 * 1024;
@@ -90,9 +90,9 @@ function sendPage(reply: FastifyReply, status: number, html: string): FastifyRep
   return reply.code(status).headers(PAGE_HEADERS).type('text/html; charset=utf-8').send(html);
 }
 
-/** The assistant's introduction as the pages say it: "Sam, GG Homes' AI assistant". */
+/** Who the pages say is reaching out: "Sam at GG Homes" (owner, 2026-10-20: no "AI assistant" in what sellers read). */
 function introduction(companyName: string): string {
-  return `Sam, ${escapeHtml(possessive(companyName))} AI assistant`;
+  return `Sam at ${escapeHtml(companyName)}`;
 }
 
 function confirmPage(companyName: string): string {
@@ -106,7 +106,7 @@ function confirmPage(companyName: string): string {
 }
 
 function donePage(companyName: string): string {
-  return page('Unsubscribed', `<p>You're unsubscribed. ${introduction(companyName)}, won't call, text or email you again.</p>`);
+  return page('Unsubscribed', `<p>You're unsubscribed. ${introduction(companyName)} won't call, text or email you again.</p>`);
 }
 
 const notValidPage = (): string => page('Link not valid', '<p>This link is not valid.</p>');

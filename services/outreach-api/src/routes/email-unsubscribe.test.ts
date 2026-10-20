@@ -83,7 +83,7 @@ describe('GET /api/email/unsubscribe/:token', () => {
     expect(res.body).toMatch(/<title>Unsubscribe<\/title>/);
     expect(res.body).toMatch(/<form method="post">/);
     expect(res.body).toMatch(/<button type="submit">Unsubscribe<\/button>/);
-    expect(textOf(res.body)).toContain("Click the button to stop all calls, texts and emails from Sam, GG Homes' AI assistant.");
+    expect(textOf(res.body)).toContain("Click the button to stop all calls, texts and emails from Sam at GG Homes.");
     expect(store.findConversationByToken).toHaveBeenCalledWith(FAKE_DB, TOKEN);
     expect(store.stopSeller).not.toHaveBeenCalled();
   });
@@ -111,17 +111,19 @@ describe('GET /api/email/unsubscribe/:token', () => {
     await build('<b onclick="x()">Acme & "Sons"</b>');
     const { body } = await app.inject({ method: 'GET', url: URL_PATH });
     expect(body).not.toContain('<b onclick');
-    expect(body).toContain('&lt;b onclick=&quot;x()&quot;&gt;Acme &amp; &quot;Sons&quot;&lt;/b&gt;&#39;s AI assistant');
+    expect(body).toContain('Sam at &lt;b onclick=&quot;x()&quot;&gt;Acme &amp; &quot;Sons&quot;&lt;/b&gt;');
   });
 
-  it('uses the possessive of the company name: Acme becomes Acme\'s, GG Homes becomes GG Homes\'', async () => {
+  it('names Sam and the company, never "AI assistant" (owner, 2026-10-20)', async () => {
     await build('Acme');
-    expect(textOf((await app.inject({ method: 'GET', url: URL_PATH })).body)).toContain("from Sam, Acme's AI assistant.");
+    const text = textOf((await app.inject({ method: 'GET', url: URL_PATH })).body);
+    expect(text).toContain('from Sam at Acme.');
+    expect(text).not.toContain('AI assistant');
   });
 });
 
 describe('POST /api/email/unsubscribe/:token', () => {
-  const UNSUBSCRIBED = "You're unsubscribed. Sam, GG Homes' AI assistant, won't call, text or email you again.";
+  const UNSUBSCRIBED = "You're unsubscribed. Sam at GG Homes won't call, text or email you again.";
 
   it('List-Unsubscribe=One-Click as urlencoded stops the seller as opted_out and shows the confirmation', async () => {
     await build();

@@ -19,6 +19,8 @@ const ours = renderEmail({
   references: null,
 });
 const ourText = ours.text;
+/** An email as Sam sent it before 2026-10-20, with "GG Homes' AI assistant" under her name. */
+const olderText = ourText.replace('—\nSam\n', "—\nSam\nGG Homes' AI assistant\n");
 
 describe('stripQuoted', () => {
   it('keeps a reply with no quote as it is (trimmed)', () => {
@@ -119,16 +121,23 @@ describe('stripQuoted', () => {
         inReplyTo: null,
         references: null,
       }).text;
-      expect(other).toContain("Acme Realty & Co's AI assistant");
       expect(stripQuoted(`Ok\n\n${other}`)).toBe('Ok\n\nHi Jo, any interest?');
       expect(stripQuoted(`Ok\n\n${other}`, { companyName: 'Acme Realty & Co' })).toBe('Ok\n\nHi Jo, any interest?');
     });
 
-    it('also drops the earlier "GG Homes\'s AI assistant" wording, with or without the name', () => {
-      const old = ourText.replace("GG Homes' AI assistant", "GG Homes's AI assistant");
-      expect(old).toContain("GG Homes's AI assistant");
-      expect(stripQuoted(`Ok\n\n${old}`)).toBe('Ok\n\nHi Jo, any interest?');
-      expect(stripQuoted(`Ok\n\n${old}`, OPTS)).toBe('Ok\n\nHi Jo, any interest?');
+    it('drops the footer of an older email that still had the "AI assistant" line, in both wordings, with or without the name', () => {
+      expect(olderText).toContain("\nSam\nGG Homes' AI assistant\n");
+      for (const old of [olderText, olderText.replace("GG Homes' AI assistant", "GG Homes's AI assistant")]) {
+        expect(stripQuoted(`Ok\n\n${old}`)).toBe('Ok\n\nHi Jo, any interest?');
+        expect(stripQuoted(`Ok\n\n${old}`, OPTS)).toBe('Ok\n\nHi Jo, any interest?');
+      }
+    });
+
+    it('drops the "—" and "Sam" lines over the company line, but keeps a "Sam" the seller signed with', () => {
+      expect(ourText).toContain('—\nSam\n\nGG Homes · ');
+      expect(stripQuoted(`Thanks\nSam\n\n${ourText}`, OPTS)).toBe('Thanks\nSam\n\nHi Jo, any interest?');
+      expect(stripQuoted(`Thanks\nSam\n\n${ourText}`)).toBe('Thanks\nSam\n\nHi Jo, any interest?');
+      expect(stripQuoted('Sam\nGG Homes · 1 Main St', OPTS)).toBe('');
     });
 
     it('keeps a seller\'s own words that merely start like our unsubscribe sentence', () => {

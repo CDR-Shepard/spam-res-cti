@@ -2,8 +2,8 @@
  * The outgoing email: a plain-text part and an HTML part that say the same thing, plus the headers
  * that make an unsubscribe one click.
  *
- * Every message ends with the same footer (who Sam is, who she works for, a postal address, and a
- * working unsubscribe link). It is what keeps the channel honest and what CAN-SPAM and the mailbox
+ * Every message ends with the same footer (Sam's name, who she works for, a postal address, and a
+ * working unsubscribe link; owner, 2026-10-20: no "AI assistant" line). It is what keeps the channel honest and what CAN-SPAM and the mailbox
  * providers expect, so it is built here, once, and never by the draft. The footer's fixed lines are
  * exported so reply parsing (inbound-text.ts) strips exactly what this file writes: a quoted copy of
  * our own "unsubscribe here" line must never read as the seller asking to stop. The HTML has no
@@ -32,6 +32,7 @@ export function possessive(name: string): string {
   return /s$/i.test(name) ? `${name}'` : `${name}'s`;
 }
 
+/** The footer line earlier emails carried under "Sam"; kept so reply parsing still strips it from a quoted older email. */
 export function assistantFooterLine(company: string): string {
   return `${possessive(company)} AI assistant`;
 }
@@ -100,7 +101,6 @@ export function renderEmail(i: RenderEmailInput): RenderedEmail {
     '',
     FOOTER_RULE,
     FOOTER_SIGNATURE,
-    assistantFooterLine(i.companyName),
     '',
     companyFooterLine(i.companyName, i.postalAddress),
     unsubscribeFooterLine(url),
@@ -108,7 +108,7 @@ export function renderEmail(i: RenderEmailInput): RenderedEmail {
 
   const html = [
     bodyToHtml(body),
-    `<p>${FOOTER_RULE}<br>${FOOTER_SIGNATURE}<br>${escapeHtml(assistantFooterLine(i.companyName))}</p>`,
+    `<p>${FOOTER_RULE}<br>${FOOTER_SIGNATURE}</p>`,
     `<p>${escapeHtml(companyFooterLine(i.companyName, i.postalAddress))}<br>` +
       `${FOOTER_UNSUBSCRIBE_LEAD} <a href="${escapeHtml(url)}">${FOOTER_UNSUBSCRIBE_LINK_TEXT}</a></p>`,
   ].join('\n');

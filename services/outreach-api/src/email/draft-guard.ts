@@ -4,7 +4,7 @@
  * Sam drafts, an admin edits, and replies go out on their own, so this is the last line. It catches
  * what none of them should let through: a link (the footer holds the only one), a leftover
  * placeholder, a price or offer (a person quotes those, not an assistant), a claim to be a human (Sam
- * says she is an AI assistant, in the footer and in person), and anything that reads as an opt-out
+ * never says she is a person, and says she is an AI assistant when asked), and anything that reads as an opt-out
  * ("stop", "unsubscribe", "take me off"). That last rule matters twice: the footer owns unsubscribing,
  * and a seller who quotes Sam's words back must never be read as asking to stop. Reply parsing scans
  * the whole reply for opt-outs (inbound-text.ts optOutScanText), so the guarantee that Sam's own

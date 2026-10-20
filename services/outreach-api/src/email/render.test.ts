@@ -17,7 +17,6 @@ const base = {
 const FOOTER = [
   '—',
   'Sam',
-  "GG Homes' AI assistant",
   '',
   'GG Homes · 18872 MacArthur Blvd #220, Irvine, CA 92612',
   `To stop hearing from Sam, unsubscribe here: ${URL}`,
@@ -64,7 +63,7 @@ describe('renderEmail', () => {
 
   it('carries the footer lines in the HTML too', () => {
     const { html } = renderEmail(base);
-    expect(html).toContain('Sam<br>GG Homes&#39; AI assistant');
+    expect(html).toContain('<p>—<br>Sam</p>');
     expect(html).toContain('GG Homes · 18872 MacArthur Blvd #220, Irvine, CA 92612');
     expect(html).toContain('To stop hearing from Sam, <a href=');
   });
@@ -101,11 +100,11 @@ describe('possessive', () => {
     expect(possessive('Rethink RE')).toBe("Rethink RE's");
   });
 
-  it('is what the footer\'s assistant line uses, in both parts', () => {
+  it('the footer never calls Sam an AI assistant, in either part (owner, 2026-10-20)', () => {
     const { text, html } = renderEmail({ ...base, companyName: 'Acme' });
-    expect(text).toContain("\nAcme's AI assistant\n");
-    expect(html).toContain('Acme&#39;s AI assistant');
-    expect(renderEmail(base).text).toContain("\nGG Homes' AI assistant\n");
+    expect(text).not.toMatch(/AI assistant/);
+    expect(html).not.toMatch(/AI assistant/);
+    expect(text).toContain('Acme · 18872 MacArthur Blvd #220');
   });
 });
 

@@ -7,8 +7,8 @@
  * stop. The footer lines are built in render.ts and matched here from the same builders, so the two
  * files cannot drift apart; they are matched by shape (and exactly when the caller passes the
  * company name) because this module does not otherwise know the company. A lone "Sam" or "—" the
- * seller wrote is kept: the signature lines only go when they sit directly on top of our assistant
- * line.
+ * seller wrote is kept: the signature lines only go when they sit directly on top of our company line
+ * (with or without the blank line between), or of the assistant line older emails carried.
  *
  * Two readers of a reply, for two jobs:
  *  - `stripQuoted` is the seller's new words, for the timeline and for Sam: it cuts at the first
@@ -90,18 +90,31 @@ function footerLineIndexes(lines: readonly string[], companyName: string | undef
       drop.add(i);
       if (isCompanyLine(lines[i - 1])) drop.add(i - 1);
     }
-    if (companyPrefix !== null && line.startsWith(companyPrefix)) drop.add(i);
+    const isOurCompanyLine = companyPrefix !== null ? line.startsWith(companyPrefix) : isCompanyLine(line) && isUnsubscribeLine(lines[i + 1]);
+    if (isOurCompanyLine) {
+      drop.add(i);
+      dropSignatureAbove(lines, lines[i - 1] === '' ? i - 1 : i, drop);
+    }
     const isAssistantLine =
       assistantExact !== null ? assistantExact.has(line) : ASSISTANT_SHAPE.test(line) && lines[i - 1] === FOOTER_SIGNATURE;
     if (isAssistantLine) {
       drop.add(i);
-      if (lines[i - 1] === FOOTER_SIGNATURE) {
-        drop.add(i - 1);
-        if (lines[i - 2] === FOOTER_RULE) drop.add(i - 2);
-      }
+      dropSignatureAbove(lines, i, drop);
     }
   });
   return drop;
+}
+
+/** A line that starts with our unsubscribe sentence. */
+function isUnsubscribeLine(line: string | undefined): boolean {
+  return line !== undefined && line.startsWith(FOOTER_UNSUBSCRIBE_SENTENCE);
+}
+
+/** Our "—" / "Sam" signature directly above line `at`: added to `drop`. */
+function dropSignatureAbove(lines: readonly string[], at: number, drop: Set<number>): void {
+  if (lines[at - 1] !== FOOTER_SIGNATURE) return;
+  drop.add(at - 1);
+  if (lines[at - 2] === FOOTER_RULE) drop.add(at - 2);
 }
 
 /** The seller's own words: the text above the quoted thread, minus any copy of our footer. */

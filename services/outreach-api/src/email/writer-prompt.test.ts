@@ -25,11 +25,12 @@ describe('buildWriterPrompt: the system prompt', () => {
     expect(system.startsWith("You are Sam, GG Homes' AI assistant. You write emails to a homeowner who is already in touch with GG Homes about selling their home.\n")).toBe(true);
   });
 
-  it('has rule 1 with the company name: disclose as an AI assistant in the first two sentences, never claim to be a person', () => {
+  it('has rule 1 with the company name: no AI introduction of her own (owner, 2026-10-20), never a person, an AI when asked', () => {
     const { system } = buildWriterPrompt(base);
     expect(system).toContain(
-      `1. You are an AI assistant. In a first email, say so in the first two sentences ("I'm Sam, GG Homes' AI assistant"). Never claim or imply you are a person. If asked, say you are GG Homes' AI assistant.`,
+      `1. Write as Sam from GG Homes. Do not bring up being an AI on your own, and never claim or imply you are a person. If they ask whether you are a real person, a bot or an AI, say plainly that you are GG Homes' AI assistant.`,
     );
+    expect(system).not.toContain('first two sentences');
   });
 
   it('writes the whole rule list exactly, with the footer sentence ending rule 6', () => {
@@ -49,7 +50,7 @@ describe('buildWriterPrompt: the system prompt', () => {
   it("uses the name's own possessive for a company that does not end in s", () => {
     const { system } = buildWriterPrompt({ ...base, companyName: 'Acme' });
     expect(system).toContain("You are Sam, Acme's AI assistant.");
-    expect(system).toContain(`("I'm Sam, Acme's AI assistant")`);
+    expect(system).toContain("say plainly that you are Acme's AI assistant.");
     expect(system).toContain('someone from the Acme team will follow up');
   });
 
