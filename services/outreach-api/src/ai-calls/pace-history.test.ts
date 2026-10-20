@@ -1,7 +1,8 @@
 /**
  * Real Postgres, Task 14: the seller's conversation rides on a call's trigger exactly when the trigger is sent as fresh (the
  * same condition that adds appointment times, CF-13), with or without a booking offer; a kept key whose request cti-api stored
- * is re-sent with the same body shape (no history, no slots) so it settles through the 409. Reading the history never blocks a call.
+ * is re-sent with the same body shape (no history, no slots, no priority offer) so it settles through the 409. Reading the
+ * history never blocks a call.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { InternalAiCallRequest } from '@cti/contracts';
@@ -9,6 +10,7 @@ import { schema, type Db } from '@cti/db';
 import { appendEvent, ensureConversation } from '../conversations/store.js';
 import { readTimeline } from '../conversations/timeline.js';
 import { seedAiCall, seedReleasedLead, touchById, type ReleasedLead } from '../test/ai-call-seed.js';
+import { fakeMaps, GRANT, SD_LEAD_ADDRESS, USERS } from '../test/fake-offer.js';
 import { paceHarness } from '../test/fake-pace.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
@@ -19,13 +21,11 @@ vi.mock('../conversations/timeline.js', async (importOriginal) => {
   return { ...actual, readTimeline: vi.fn(actual.readTimeline) };
 });
 
-/** Monday 18:00 CDT (16:00 PDT): the plan fixture's evening window for a Texas number; the owner's phone times start Tuesday. */
+/** Monday 18:00 CDT (16:00 PDT): the plan fixture's evening window for a Texas number; the region's times start Tuesday. */
 const NOW = new Date('2026-10-05T23:00:00.000Z');
 const EMAIL_AT = new Date('2026-10-02T15:00:00.000Z');
 const CALL_AT = new Date('2026-10-03T16:00:00.000Z');
-const OWNER = '0058X00000Fsx39QAB';
-const ownerRow = { Id: OWNER, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles' };
-const booking = { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [OWNER] }, aiCallWriteback: true };
+const booking = { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [GRANT] }, aiCallWriteback: true };
 /** What the digest writes for the seeded email (digest.ts: date, who, the quoted subject, the body). */
 const EMAIL_LINE = '2026-10-02 Email from Sam — "Your house": Hello there.';
 const REPLY_TEXT = 'PRIVATE-REPLY-TEXT call me after five';
@@ -52,10 +52,12 @@ describe.skipIf(!pgLane)('ai_call.place: the seller\'s conversation rides on the
   /** The default harness: no booking offer, so a call carries no slots. */
   const plainHarness = (): Promise<Harness> => paceHarness(db);
 
-  async function ownerHarness(): Promise<Harness> {
-    const h = await paceHarness(db, { ...booking, aiCallConcurrency: 5 });
+  /** Booking on, the region's reps and Grant active, a made-up San Diego property on the record, and Google answering. */
+  async function routedHarness(): Promise<Harness> {
+    const h = await paceHarness(db, { ...booking, aiCallConcurrency: 5 }, { maps: fakeMaps().maps });
     h.cti.store = true;
-    h.sf.state.users = [ownerRow];
+    h.sf.state.users = [...USERS];
+    h.sf.state.recordFields = { ...SD_LEAD_ADDRESS };
     return h;
   }
 
@@ -119,7 +121,7 @@ describe.skipIf(!pgLane)('ai_call.place: the seller\'s conversation rides on the
   });
 
   it('a fresh send with an offer carries both the times and the history; the history is what the timeline says, oldest first', async () => {
-    const h = await ownerHarness();
+    const h = await routedHarness();
     const lead = await seedReleasedLead(db, h.base);
     await addEmail(lead);
     await addEarlierCall(lead, 'Left a voicemail about the house.');
@@ -178,7 +180,7 @@ describe.skipIf(!pgLane)('ai_call.place: the seller\'s conversation rides on the
 
   describe('CF-13: a kept key cti-api stored is re-sent with the same body shape', () => {
     it('a kept, stored re-send has neither times nor history; the 409 settles it and the next key carries both again', async () => {
-      const h = await ownerHarness();
+      const h = await routedHarness();
       const lead = await seedReleasedLead(db, h.base);
       await addEmail(lead);
       h.cti.answers.push({ lostAnswer: { result: 'blocked', reason: 'calling_hours' } });
@@ -187,6 +189,7 @@ describe.skipIf(!pgLane)('ai_call.place: the seller\'s conversation rides on the
       const first = target(h.cti.requests[0]!);
       expect(first.history).toBe(EMAIL_LINE);
       expect(hasSlots(h.cti.requests[0]!)).toBe(true);
+      expect(first.priority).toBeDefined();
       const kept = await touchById(db, lead.touchId);
       expect(kept).toMatchObject({ status: 'planned', lastBlockReason: 'transport', triggerKey: h.cti.requests[0]!.idempotencyKey });
 
@@ -194,6 +197,7 @@ describe.skipIf(!pgLane)('ai_call.place: the seller\'s conversation rides on the
       const resent = target(h.cti.requests[1]!);
       expect(h.cti.requests[1]!.idempotencyKey).toBe(h.cti.requests[0]!.idempotencyKey);
       expect('slots' in resent).toBe(false);
+      expect('priority' in resent).toBe(false);
       expect('history' in resent).toBe(false);
 
       await runUntilSent(h, lead.touchId);
