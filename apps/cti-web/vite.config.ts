@@ -11,6 +11,10 @@ export default defineConfig({
     outDir: '../dist',
     emptyOutDir: true,
     sourcemap: true,
+    // One bundle on purpose (~545 kB): the Twilio SDK ships inside it, never
+    // as a lazy chunk a deploy could delete out from under an open tab
+    // (2026-10-20, "Inbound calls unavailable"). Don't split it to quiet this.
+    chunkSizeWarningLimit: 650,
   },
   server: {
     port: 5174,

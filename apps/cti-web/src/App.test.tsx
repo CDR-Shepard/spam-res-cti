@@ -17,10 +17,10 @@
  * dropping the screen-pop call — would leave both of those green while the
  * real ring screen showed a bare number or popped the wrong record.
  *
- * App.tsx builds its Twilio Device lazily inside ensureDevice() (dynamic
- * `import('@twilio/voice-sdk')`), not at module scope, so the real component
- * can be mounted here — only the SDK module and the network (`fetch`) are
- * faked. The softphone leader-election coordinator (softphone-coordinator.ts)
+ * App.tsx imports the Twilio SDK with the page but only constructs a Device
+ * inside ensureDevice(), never at module scope, so the real component can be
+ * mounted here — only the SDK module (a getter mock, below) and the network
+ * (`fetch`) are faked. The softphone leader-election coordinator (softphone-coordinator.ts)
  * is used for real: with no peer tabs present it elects this instance leader
  * synchronously (see leader-election.ts's shouldBeLeader — a lone instance
  * always wins), which is exactly what drives ensureDevice() to run on mount.

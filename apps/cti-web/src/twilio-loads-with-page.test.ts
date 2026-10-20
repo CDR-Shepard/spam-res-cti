@@ -14,9 +14,12 @@ describe('the Twilio library loads with the page', () => {
     expect(Object.keys(sources)).toContain('./App.tsx');
   });
 
-  it('no source file imports @twilio/voice-sdk lazily', () => {
+  // ANY lazy import is banned, not just the SDK's: a wrapper module that
+  // re-exports Device, loaded lazily, splits the SDK back into its own chunk
+  // with the same post-deploy 404 — and so would any other lazy chunk.
+  it('no source file imports anything lazily', () => {
     const lazy = Object.entries(sources)
-      .filter(([, text]) => /import\(\s*['"]@twilio\/voice-sdk['"]\s*\)/.test(text))
+      .filter(([, text]) => /\bimport\s*\(/.test(text))
       .map(([path]) => path);
     expect(lazy).toEqual([]);
   });
