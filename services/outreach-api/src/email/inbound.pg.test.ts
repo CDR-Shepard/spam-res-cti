@@ -17,7 +17,7 @@ import { ensureConversation, suppressionFor, type SellerConversationRow } from '
 import type { AlertEvent } from '../alerts.js';
 import { queueEmail } from './outbox.js';
 import { replyAddress, unsubscribeMailto } from './addresses.js';
-import { handleReceived, INBOUND_BODY_MAX, INBOUND_SUBJECT_MAX, INBOUND_TEXT_MAX, type InboundDeps } from './inbound.js';
+import { handleReceived, INBOUND_BODY_MAX, INBOUND_SUBJECT_MAX, INBOUND_TEXT_MAX, UNREADABLE_RETRY_WINDOW_MS, type InboundDeps } from './inbound.js';
 import { ResendError, type ReceivedEmail, type ResendClient } from './resend-client.js';
 import type { EmailDecision, EmailWriter } from './writer.js';
 
@@ -191,6 +191,18 @@ describe.skipIf(!pgLane)('replies: receive, decide, answer (real Postgres)', () 
     } finally {
       await t.pool.query(`drop trigger ${name} on ${table}`);
     }
+  }
+
+  /** Resolves once some session of this test database is waiting on another transaction's lock (5 s at most). */
+  async function waitForLockWait(): Promise<void> {
+    for (let i = 0; i < 250; i += 1) {
+      const { rows: [row] } = await t.pool.query<{ n: number }>(
+        `select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'transactionid'`,
+      );
+      if (row!.n > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error('no session ever waited on the held insert');
   }
 
   describe('a reply to the conversation\'s own mailbox', () => {
@@ -400,6 +412,29 @@ describe.skipIf(!pgLane)('replies: receive, decide, answer (real Postgres)', () 
       expect(await queued(s.conv.id)).toHaveLength(0);
       expect(alert).not.toHaveBeenCalled();
       expect(await inboundRows(s.conv.id)).toHaveLength(1);
+    });
+
+    it.each([
+      ['Cc', (s: Seller) => ({ cc: [unsubscribeMailto(s.conv.token, CFG.EMAIL_REPLY_DOMAIN)] })],
+      ["Resend's received-for list", (s: Seller) => ({ receivedFor: [unsubscribeMailto(s.conv.token, CFG.EMAIL_REPLY_DOMAIN)] })],
+    ])('mail to sam+<token> that also goes to unsubscribe+<the same token> (in %s) opts out', async (_where, also) => {
+      const s = await seedSeller();
+      const email = reply(s, also(s));
+      const { d, writer } = deps({ emails: [email] });
+      expect(await handleReceived(d, received(email), NOW)).toBe('done');
+      expect(await conversationRow(s.conv.id)).toMatchObject({ status: 'stopped', stopReason: 'opted_out' });
+      expect(writer!.write).not.toHaveBeenCalled();
+    });
+
+    it("unsubscribe+<another conversation's token> beside sam+<token> is not this seller's opt-out", async () => {
+      const s = await seedSeller();
+      const other = await seedSeller();
+      const email = reply(s, { cc: [unsubscribeMailto(other.conv.token, CFG.EMAIL_REPLY_DOMAIN)] });
+      const { d, writer } = deps({ emails: [email] });
+      await handleReceived(d, received(email), NOW);
+      expect((await conversationRow(s.conv.id)).status).toBe('open');
+      expect((await conversationRow(other.conv.id)).status).toBe('open');
+      expect(writer!.write).toHaveBeenCalledTimes(1);
     });
 
     it('an unsubscribe mailto sent by an auto-responder still opts out', async () => {
@@ -688,6 +723,29 @@ describe.skipIf(!pgLane)('replies: receive, decide, answer (real Postgres)', () 
       expect(await inboundRows(s.conv.id)).toHaveLength(0);
     });
 
+    describe('a 404 or 410 soon after the event arrived: Resend\'s stored copy can lag its webhook', () => {
+      const failingWith = (status: number) => deps({ resend: { send: vi.fn(), getReceived: vi.fn(async () => Promise.reject(new ResendError(status))) } });
+      const arrived = (ago: number) => ({ data: { email_id: 're_in_lagging' }, receivedAt: new Date(NOW.getTime() - ago) });
+
+      it.each([404, 410])('HTTP %i under 10 minutes after the event arrived: retry; from 10 minutes on: ignored', async (status) => {
+        expect(UNREADABLE_RETRY_WINDOW_MS).toBe(10 * MINUTE);
+        expect(await handleReceived(failingWith(status).d, arrived(0), NOW)).toBe('retry');
+        expect(await handleReceived(failingWith(status).d, arrived(10 * MINUTE - 1000), NOW)).toBe('retry');
+        expect(await handleReceived(failingWith(status).d, arrived(10 * MINUTE), NOW)).toBe('ignored');
+        expect(await handleReceived(failingWith(status).d, arrived(11 * MINUTE), NOW)).toBe('ignored');
+      });
+
+      it.each([400, 422])('HTTP %i is never waited for: ignored at once', async (status) => {
+        expect(await handleReceived(failingWith(status).d, arrived(0), NOW)).toBe('ignored');
+      });
+
+      it('the retry is logged by id and status only', async () => {
+        const { d, log } = failingWith(404);
+        await handleReceived(d, arrived(MINUTE), NOW);
+        expect(log.info).toHaveBeenCalledWith({ resendId: 're_in_lagging', status: 404 }, expect.any(String));
+      });
+    });
+
     it.each([
       ['no answer (status 0)', new ResendError(0, 'timeout')],
       ['401', new ResendError(401)],
@@ -726,6 +784,45 @@ describe.skipIf(!pgLane)('replies: receive, decide, answer (real Postgres)', () 
       expect(writer.write).toHaveBeenCalledTimes(1);
       expect(await queued(s.conv.id)).toHaveLength(1);
       expect(await inboundRows(s.conv.id)).toHaveLength(1);
+      expect((await eventsOf(s.conv.id)).filter((e) => e.direction === 'in')).toHaveLength(1);
+    });
+
+    it('the loser of the store race (its insert hits the row another tick has not committed yet) rolls its event back and uses that row', async () => {
+      const s = await seedSeller();
+      const email = reply(s);
+      const { d, writer } = deps({ emails: [email] });
+      // Another tick has stored AND handled this reply, but has not committed: the loser's pre-check cannot see it.
+      const holder = await t.pool.connect();
+      let open = true;
+      try {
+        await holder.query('begin');
+        const held = await holder.query<{ id: string }>(
+          `insert into conversation_events (org_id, conversation_id, kind, direction, actor, subject, body) values ($1, $2, 'email', 'in', 'seller', 'held', 'held') returning id`,
+          [s.orgId, s.conv.id],
+        );
+        await holder.query(
+          `insert into email_messages (org_id, conversation_id, event_id, direction, status, purpose, to_address, from_address, resend_id, handled_at)
+           values ($1, $2, $3, 'in', 'received', 'inbound', 'to', 'from', $4, $5)`,
+          [s.orgId, s.conv.id, held.rows[0]!.id, email.id, NOW],
+        );
+        const loser = handleReceived(d, received(email), NOW);
+        // The loser is inside its store transaction, its event written, waiting on the unique index for the holder.
+        await waitForLockWait();
+        await holder.query('commit');
+        open = false;
+        expect(await loser).toBe('done');
+      } finally {
+        if (open) await holder.query('rollback');
+        holder.release();
+      }
+      const inbound = await inboundRows(s.conv.id);
+      expect(inbound).toHaveLength(1);
+      const events = (await eventsOf(s.conv.id)).filter((e) => e.direction === 'in');
+      expect(events).toHaveLength(1);
+      expect(events[0]!.id).toBe(inbound[0]!.eventId);
+      expect(events[0]!.body).toBe('held');
+      expect(writer!.write).not.toHaveBeenCalled();
+      expect(await queued(s.conv.id)).toHaveLength(0);
     });
 
     it('a second handler that finds the reply locked by the first answers retry, and never calls the writer', async () => {

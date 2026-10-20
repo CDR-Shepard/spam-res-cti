@@ -5,7 +5,9 @@
  * A stored event moves pending → done | ignored | failed:
  *  - CLAIM: one statement takes the oldest due `pending` rows (`for update skip locked`, so two ticks never get
  *    the same row) and pushes their `next_attempt_at` 10 minutes out. That is the lease: a tick that dies
- *    mid-way leaves the row pending, and it comes back after the lease, not at once.
+ *    mid-way leaves the row pending, and it comes back after the lease, not at once. A tick takes up to 50
+ *    delivery events but only 3 replies: a reply may wait up to 3 minutes on Sam's writer, and all of a
+ *    tick's work must end inside the lease.
  *  - SETTLE: `done`, `ignored` or back to `pending` (see below), conditional on the row still being `pending`.
  *  - A THROW or a `retry` answer counts an attempt and waits 2^attempts minutes (1, 2, 4 ...); the 8th failed
  *    attempt makes the row `failed` for good. `last_error` is the error NAME only: an error message can carry
@@ -47,6 +49,11 @@ import type { EmailWriter } from './writer.js';
 export const EVENT_BATCH = 50;
 /** A claimed event is invisible to other ticks this long. */
 export const EVENT_LEASE_MS = 10 * 60_000;
+/**
+ * Seller replies claimed per tick, on top of the delivery events' batch. Each may hold a writer call of up to 3 minutes
+ * (inbound.ts REPLY_WRITER_TIMEOUT_MS), so 3 of them end inside the 10-minute lease and no second tick takes one over.
+ */
+export const RECEIVED_BATCH = 3;
 /** The attempt that fails an event for good. */
 export const MAX_EVENT_ATTEMPTS = 8;
 export const RECEIVED_EVENT_TYPE = 'email.received';
@@ -112,14 +119,15 @@ interface ClaimedEvent {
 }
 
 /**
- * The oldest due `pending` events, leased for 10 minutes. The final SELECT orders them: the order of an
+ * The oldest due `pending` events, leased for 10 minutes: up to `limit` delivery events and up to RECEIVED_BATCH
+ * replies (fewer when `limit` is smaller), each kind oldest first. The final SELECT orders them: the order of an
  * UPDATE's RETURNING is not guaranteed, and oldest first is what the caller works in.
  */
 async function claimDue(db: Db, now: Date, limit: number): Promise<ClaimedEvent[]> {
   const result = await db.execute(sql`
-    with due as (
+    with due_delivery as (
       select svix_id from resend_webhook_events
-      where status = 'pending' and next_attempt_at <= ${iso(now)}
+      where status = 'pending' and next_attempt_at <= ${iso(now)} and type <> ${RECEIVED_EVENT_TYPE}
       order by received_at, svix_id
       limit ${limit}
       -- The row lock is what stops two ticks claiming one row: with none, a second UPDATE that waits for the
@@ -127,10 +135,16 @@ async function claimDue(db: Db, now: Date, limit: number): Promise<ClaimedEvent[
       -- ticks claim it. SKIP LOCKED then keeps a tick from waiting on rows another tick holds: it takes the
       -- next ones instead (a slow tick must not stall every tick queued behind it).
       for update skip locked
+    ), due_received as (
+      select svix_id from resend_webhook_events
+      where status = 'pending' and next_attempt_at <= ${iso(now)} and type = ${RECEIVED_EVENT_TYPE}
+      order by received_at, svix_id
+      limit ${Math.min(RECEIVED_BATCH, limit)}
+      for update skip locked
     ), claimed as (
       update resend_webhook_events w
       set next_attempt_at = ${iso(new Date(now.getTime() + EVENT_LEASE_MS))}
-      from due
+      from (select svix_id from due_delivery union all select svix_id from due_received) due
       where w.svix_id = due.svix_id
       returning w.svix_id, w.type, w.payload, w.attempts, w.received_at
     )
@@ -201,8 +215,9 @@ async function alertDeadLetter(deps: EventDeps, alert: (event: AlertEvent) => Pr
 
 async function dispatch(deps: EventDeps, row: ClaimedEvent, notify: DeliveryNotify): Promise<ReceivedOutcome> {
   const data = isRecord(row.payload) ? row.payload.data : undefined;
-  if (row.type === RECEIVED_EVENT_TYPE) return handleReceived({ ...deps, alert: notify.alert }, { data }, deps.now);
-  return handleDeliveryEvent(deps.db, { type: row.type, data, receivedAt: new Date(Number(row.receivedAtMs)) }, deps.now, notify);
+  const receivedAt = new Date(Number(row.receivedAtMs));
+  if (row.type === RECEIVED_EVENT_TYPE) return handleReceived({ ...deps, alert: notify.alert }, { data, receivedAt }, deps.now);
+  return handleDeliveryEvent(deps.db, { type: row.type, data, receivedAt }, deps.now, notify);
 }
 
 export async function processEmailEvents(deps: EventDeps): Promise<EventCounts> {

@@ -51,8 +51,17 @@ export const INBOUND_TEXT_MAX = 4_000;
 export const INBOUND_SUBJECT_MAX = 300;
 /** The longest body stored on the timeline. */
 export const INBOUND_BODY_MAX = 10_000;
-/** Bounds the writer call, and with it the transaction and row lock around it, well inside the tick's 10-minute lease. */
+/**
+ * Bounds one writer call, and with it the transaction and row lock around it. The events tick claims at most 3 replies
+ * (events.ts RECEIVED_BATCH) under one 10-minute lease, so their writer calls (9 minutes at most) end inside it.
+ */
 export const REPLY_WRITER_TIMEOUT_MS = 3 * 60_000;
+/**
+ * Resend's stored copy of an inbound email can lag the webhook that announced it: a 404 or 410 this soon after the
+ * event was stored means "not yet" and is retried. Later it means the email is gone. An ignored unsubscribe mail would
+ * be an opt-out lost.
+ */
+export const UNREADABLE_RETRY_WINDOW_MS = 10 * 60_000;
 /** A header line's limit (RFC 5322): a Message-ID longer than this is not one. */
 const HEADER_MAX = 998;
 /** How much of a long header (In-Reply-To, References, the recipient list) the inbound row keeps. */
@@ -64,6 +73,8 @@ const ANGLED_ID = /<([^<>\s]{1,998})>/g;
 const THREAD_IDS_MAX = 20;
 /** Resend answers that mean the email will never be readable. Anything else (no answer, 401, 429, 5xx) may pass. */
 const GONE_STATUSES: ReadonlySet<number> = new Set([400, 404, 410, 422]);
+/** Of those, the ones that only mean "not yet" while the event is young (UNREADABLE_RETRY_WINDOW_MS). */
+const NOT_YET_STATUSES: ReadonlySet<number> = new Set([404, 410]);
 
 export interface InboundDeps {
   db: Db;
@@ -169,12 +180,20 @@ function emailIdOf(data: unknown): string | null {
 
 type Fetched = { kind: 'ok'; email: ReceivedEmail } | { kind: 'ignored' } | { kind: 'retry' };
 
-/** The email from Resend. A 400/404/410/422 will never be readable (ignored); anything else is tried again. */
-async function fetchReceived(deps: InboundDeps, resendId: string): Promise<Fetched> {
+/**
+ * The email from Resend. A 400/404/410/422 will never be readable (ignored), except a 404 or 410 under 10 minutes after
+ * the event was stored (`receivedAt`; none = never waited for), which is retried. Anything else is tried again.
+ */
+async function fetchReceived(deps: InboundDeps, resendId: string, receivedAt: Date | undefined, now: Date): Promise<Fetched> {
   try {
     return { kind: 'ok', email: await deps.resend.getReceived(resendId) };
   } catch (err) {
     if (err instanceof ResendError && GONE_STATUSES.has(err.status)) {
+      const young = receivedAt !== undefined && now.getTime() - receivedAt.getTime() < UNREADABLE_RETRY_WINDOW_MS;
+      if (young && NOT_YET_STATUSES.has(err.status)) {
+        deps.log.info({ resendId, status: err.status }, 'email.received: Resend cannot return this email yet; will retry');
+        return { kind: 'retry' };
+      }
       deps.log.warn({ resendId, status: err.status }, 'email.received: Resend has no readable email with this id; ignored');
       return { kind: 'ignored' };
     }
@@ -191,9 +210,24 @@ interface Thread {
   unsubscribe: boolean;
 }
 
+/**
+ * The token the reply is addressed to (the first recipient that carries one), and whether ANY recipient is the
+ * unsubscribe mailbox of that same token: a client may send to both sam+<token> and unsubscribe+<token>, and
+ * tokenFromRecipients alone stops at the first.
+ */
+function addressedToken(recipients: readonly string[], domain: string): { token: string; unsubscribe: boolean } | null {
+  const first = tokenFromRecipients(recipients, domain);
+  if (!first) return null;
+  const unsubscribe = recipients.some((raw) => {
+    const one = tokenFromRecipients([raw], domain);
+    return one !== null && one.unsubscribe && one.token === first.token;
+  });
+  return { token: first.token, unsubscribe };
+}
+
 /** The conversation by recipient token, else by a thread id that is the Message-ID of one of Sam's emails (either bracket form). */
 async function findThread(db: Db, email: ReceivedEmail, r: ReadReply, domain: string): Promise<Thread | null> {
-  const addressed = tokenFromRecipients([...email.to, ...email.cc, ...email.receivedFor], domain);
+  const addressed = addressedToken([...email.to, ...email.cc, ...email.receivedFor], domain);
   if (addressed) {
     const conversation = await findConversationByToken(db, addressed.token);
     if (conversation) return { orgId: conversation.orgId, conversationId: conversation.id, unsubscribe: addressed.unsubscribe };
@@ -466,14 +500,15 @@ async function notLockedOutcome(db: Db, emailId: string): Promise<ReceivedOutcom
 }
 
 /**
- * One `email.received` event. `done`: stored and handled (now or before). `ignored`: no email id, Resend will never
- * return it, or it is not a reply to any conversation of ours. `retry`: Resend could not answer now, or another tick
- * is handling this reply. Throws on a database error, with nothing of the handling committed (the tick retries).
+ * One `email.received` event; `receivedAt` is when the route stored it (absent: a 404 is never waited for). `done`:
+ * stored and handled (now or before). `ignored`: no email id, Resend will never return it, or it is not a reply to any
+ * conversation of ours. `retry`: Resend could not answer now (or not yet), or another tick is handling this reply.
+ * Throws on a database error, with nothing of the handling committed (the tick retries).
  */
-export async function handleReceived(deps: InboundDeps, ev: { data: unknown }, now: Date): Promise<ReceivedOutcome> {
+export async function handleReceived(deps: InboundDeps, ev: { data: unknown; receivedAt?: Date }, now: Date): Promise<ReceivedOutcome> {
   const resendId = emailIdOf(ev.data);
   if (resendId === null) return 'ignored';
-  const fetched = await fetchReceived(deps, resendId);
+  const fetched = await fetchReceived(deps, resendId, ev.receivedAt, now);
   if (fetched.kind !== 'ok') return fetched.kind;
   const reply = readReply(fetched.email, deps.cfg.EMAIL_COMPANY_NAME);
   const thread = await findThread(deps.db, fetched.email, reply, deps.cfg.EMAIL_REPLY_DOMAIN);

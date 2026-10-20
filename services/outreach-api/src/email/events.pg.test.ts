@@ -15,7 +15,8 @@ import { ensureConversation, suppressionFor, type SellerConversationRow } from '
 import { samEmailSettings } from '../settings.js';
 import type { AlertEvent } from '../alerts.js';
 import { queueEmail } from './outbox.js';
-import { handleDeliveryEvent, processEmailEvents, type EventDeps } from './events.js';
+import { EVENT_LEASE_MS, handleDeliveryEvent, processEmailEvents, RECEIVED_BATCH, type EventDeps } from './events.js';
+import { REPLY_WRITER_TIMEOUT_MS } from './inbound.js';
 import { replyAddress } from './addresses.js';
 import { ResendError, type ReceivedEmail, type ResendClient } from './resend-client.js';
 
@@ -561,7 +562,8 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
     });
 
     it('a second tick that starts while the first is still working on an event does not take it', async () => {
-      const svixId = await receive('email.received', { email_id: 're_in' });
+      // Stored long enough ago that Resend's 404 means the email is gone (not merely not readable yet).
+      const svixId = await receive('email.received', { email_id: 're_in' }, { receivedAt: new Date(NOW.getTime() - STALE) });
       let release!: () => void;
       let working!: () => void;
       const gate = new Promise<void>((resolve) => (release = resolve));
@@ -586,8 +588,9 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
       it('is always claimed and handed to the reply handler, and its answer settles the row', async () => {
         const s = await seedSeller();
         const reply = autoReply(s.conv.token, 're_1');
-        const doneId = await receive('email.received', { email_id: 're_1' }, { receivedAt: new Date(NOW.getTime() - 3 * MINUTE) });
-        const ignoredId = await receive('email.received', { email_id: 're_2' }, { receivedAt: new Date(NOW.getTime() - 2 * MINUTE) });
+        const doneId = await receive('email.received', { email_id: 're_1' }, { receivedAt: new Date(NOW.getTime() - STALE - 2 * MINUTE) });
+        // A 404 for an event stored over 10 minutes ago: the email will never be readable.
+        const ignoredId = await receive('email.received', { email_id: 're_2' }, { receivedAt: new Date(NOW.getTime() - STALE - MINUTE) });
         const retryId = await receive('email.received', { email_id: 're_3' }, { receivedAt: new Date(NOW.getTime() - MINUTE) });
         const resend = inbox(async (id) => {
           if (id === 're_1') return reply;
@@ -603,6 +606,31 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
         expect(await webhookRow(retryId)).toMatchObject({ status: 'pending', attempts: 1, nextAttemptAt: new Date(NOW.getTime() + MINUTE), lastError: 'retry' });
         // The reply itself landed on the seller's timeline.
         expect((await eventsOf(s.conv.id)).filter((e) => e.kind === 'email' && e.direction === 'in')).toHaveLength(1);
+      });
+
+      it('the reply handler gets the time the route stored the event: a 404 that soon is retried, not ignored', async () => {
+        const svixId = await receive('email.received', { email_id: 're_lagging' }, { receivedAt: new Date(NOW.getTime() - 2 * MINUTE) });
+        const resend = inbox(async () => Promise.reject(new ResendError(404)));
+        expect(await processEmailEvents(deps({ resend }).deps)).toEqual({ done: 0, ignored: 0, failed: 0 });
+        expect(await webhookRow(svixId)).toMatchObject({ status: 'pending', attempts: 1, lastError: 'retry' });
+      });
+
+      it('at most 3 replies are claimed per tick (3 writer calls of up to 3 minutes fit in the 10-minute lease); delivery events keep their batch', async () => {
+        expect(RECEIVED_BATCH).toBe(3);
+        expect(RECEIVED_BATCH * REPLY_WRITER_TIMEOUT_MS).toBeLessThan(EVENT_LEASE_MS);
+        const at = (minutesAgo: number) => new Date(NOW.getTime() - STALE - minutesAgo * MINUTE);
+        const replies: string[] = [];
+        for (let i = 0; i < 5; i += 1) replies.push(await receive('email.received', { email_id: `re_gone_${i}` }, { receivedAt: at(10 - i) }));
+        const deliveries = [await receive('email.delivered', { email_id: 're_x' }, { receivedAt: at(1) }), await receive('email.delivered', { email_id: 're_y' }, { receivedAt: at(0) })];
+        const resend = inbox(async () => Promise.reject(new ResendError(404)));
+
+        expect(await processEmailEvents(deps({ resend }).deps)).toEqual({ done: 0, ignored: 5, failed: 0 });
+        expect(resend.getReceived).toHaveBeenCalledTimes(3);
+        for (const id of [...replies.slice(0, 3), ...deliveries]) expect((await webhookRow(id)).status).toBe('ignored');
+        // The two newest replies were not claimed: still pending, no attempt counted, no lease taken.
+        for (const id of replies.slice(3)) expect(await webhookRow(id)).toMatchObject({ status: 'pending', attempts: 0, nextAttemptAt: new Date(NOW.getTime() - MINUTE) });
+
+        expect(await processEmailEvents(deps({ resend }).deps)).toEqual({ done: 0, ignored: 2, failed: 0 });
       });
 
       it('delivery events are still handled by the tick itself: Resend is never asked for them', async () => {
