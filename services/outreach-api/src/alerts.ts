@@ -30,6 +30,11 @@ export interface AlertEvent {
   context?: Record<string, unknown>;
 }
 
+/** The seller's page in the web app: the one link an alert about a seller carries (a trailing slash on the origin is tolerated). */
+export function sellerPageUrl(appPublicUrl: string, sfRecordId: string): string {
+  return `${appPublicUrl.replace(/\/+$/, '')}/sellers/${encodeURIComponent(sfRecordId)}`;
+}
+
 interface AlertLogger {
   warn: (obj: unknown, msg?: string) => void;
   info: (obj: unknown, msg?: string) => void;

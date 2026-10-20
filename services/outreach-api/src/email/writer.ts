@@ -28,9 +28,10 @@ export const EMAIL_ACTIONS = ['send', 'flag', 'opt_out', 'not_interested', 'no_r
 export const EMAIL_FLAG_REASONS = ['offer_or_price', 'angry_or_threat', 'legal', 'not_owner', 'wants_appointment', 'unsure'] as const;
 
 /**
- * What Sam decided about the seller's email (or about writing to a seller). A `send` is a draft with a subject and a body;
- * a `flag` names why a person is needed (and its body is the thank-you that says someone will follow up); the other
- * actions need no draft.
+ * What Sam decided about the seller's email (or about writing to a seller). A `send` is a draft with a body; its subject
+ * is required for a first email only (`writeEmail` checks that), because a reply keeps the seller's own subject line. A
+ * `flag` names why a person is needed (and its body is the thank-you that says someone will follow up); a flag that
+ * names no reason reads as `unsure` rather than throwing a paid answer away. The other actions need no draft.
  */
 export const EmailDecision = z
   .object({
@@ -40,10 +41,9 @@ export const EmailDecision = z
     body: z.string(),
   })
   .superRefine((d, ctx) => {
-    if (d.action === 'flag' && d.flagReason === null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['flagReason'], message: 'a flag names its reason' });
-    if (d.action === 'send' && d.subject.trim() === '') ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['subject'], message: 'a send has a subject' });
     if (d.action === 'send' && d.body.trim() === '') ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['body'], message: 'a send has a body' });
-  });
+  })
+  .transform((d) => (d.action === 'flag' && d.flagReason === null ? { ...d, flagReason: 'unsure' as const } : d));
 export type EmailDecision = z.infer<typeof EmailDecision>;
 
 export const EMAIL_INPUT_SCHEMA: TriageTool['input_schema'] = {
@@ -186,8 +186,9 @@ async function attempt(deps: WriteEmailDeps, input: WriterInput): Promise<WriteE
     return failed(deps.signal?.aborted ? 'aborted' : 'model_error');
   }
   if ((await charge(deps, { inputTokens: answer.inputTokens, outputTokens: answer.outputTokens, model: answer.model })) === 'unpriced') return failed('unpriced_model');
-  // A first email has nobody to answer, so anything but a send is not an answer to use.
-  if (input.mode === 'first' && answer.decision.action !== 'send') return failed('invalid_output');
+  // A first email has nobody to answer, so anything but a send is not an answer to use, and it needs its own subject
+  // (a reply's subject line is the seller's, set by the caller).
+  if (input.mode === 'first' && (answer.decision.action !== 'send' || answer.decision.subject.trim() === '')) return failed('invalid_output');
   return { kind: 'ok', decision: answer.decision };
 }
 

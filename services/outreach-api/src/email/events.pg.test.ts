@@ -15,8 +15,9 @@ import { ensureConversation, suppressionFor, type SellerConversationRow } from '
 import { samEmailSettings } from '../settings.js';
 import type { AlertEvent } from '../alerts.js';
 import { queueEmail } from './outbox.js';
-import { handleDeliveryEvent, processEmailEvents, type EventDeps, type ReceivedOutcome, type StoredEvent } from './events.js';
-import type { ResendClient } from './resend-client.js';
+import { handleDeliveryEvent, processEmailEvents, type EventDeps } from './events.js';
+import { replyAddress } from './addresses.js';
+import { ResendError, type ReceivedEmail, type ResendClient } from './resend-client.js';
 
 const NOW = new Date('2026-10-20T17:00:00.000Z');
 const MINUTE = 60_000;
@@ -26,6 +27,7 @@ const APP_URL = 'https://app.example.com';
 const SUBJECT = 'Re: the house on Oak Street';
 const BODY = 'Thanks for getting back to me. Would Thursday afternoon work for a quick call?';
 const CFG: EventDeps['cfg'] = {
+  emailEnabled: true,
   EMAIL_FROM: 'Sam at GG Homes <sam@rethinkre.team>',
   EMAIL_REPLY_DOMAIN: 'reply.rethinkre.team',
   EMAIL_POSTAL_ADDRESS: '18872 MacArthur Blvd #220, Irvine, CA 92612',
@@ -43,6 +45,35 @@ const NO_RESEND: ResendClient = {
 };
 
 const fakeLog = () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+
+/**
+ * A Resend that serves inbound emails for the reply handler (email/inbound.ts): `answer(id)` is what
+ * getReceived returns for an id (a thrown error is Resend failing).
+ */
+function inbox(answer: (id: string) => Promise<ReceivedEmail>): ResendClient & { getReceived: ReturnType<typeof vi.fn> } {
+  return {
+    async send() {
+      throw new Error('send is not used by the events tick');
+    },
+    getReceived: vi.fn(answer),
+  };
+}
+
+/** An auto-reply (recorded, never answered: no writer needed) to the conversation with this token. */
+function autoReply(token: string, id = `re_in_${randomUUID()}`): ReceivedEmail {
+  return {
+    id,
+    from: 'Pat Seller <delivered@resend.dev>',
+    to: [replyAddress(token, 'reply.rethinkre.team')],
+    cc: [],
+    receivedFor: [],
+    subject: 'Out of the office',
+    text: 'I am away until Monday.',
+    html: null,
+    headers: { 'auto-submitted': 'auto-replied' },
+    messageId: '<ooo-1@mail.example.com>',
+  };
+}
 
 class BoomError extends Error {
   override name = 'BoomError';
@@ -521,11 +552,11 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
     it('takes a 10-minute lease on a claimed event, so a tick that dies mid-way hands it back later and not at once', async () => {
       const svixId = await receive('email.received', { email_id: 're_in' });
       let seen: Date | null = null;
-      const onReceived = vi.fn(async () => {
+      const resend = inbox(async () => {
         seen = (await webhookRow(svixId)).nextAttemptAt;
-        return 'done' as const;
+        throw new ResendError(404);
       });
-      await processEmailEvents(deps({ onReceived }).deps);
+      await processEmailEvents(deps({ resend }).deps);
       expect(seen).toEqual(new Date(NOW.getTime() + 10 * MINUTE));
     });
 
@@ -535,92 +566,94 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
       let working!: () => void;
       const gate = new Promise<void>((resolve) => (release = resolve));
       const started = new Promise<void>((resolve) => (working = resolve));
-      const firstHandler = vi.fn(async () => {
+      const firstResend = inbox(async () => {
         working();
         await gate;
-        return 'done' as const;
+        throw new ResendError(404);
       });
-      const secondHandler = vi.fn(async () => 'done' as const);
+      const secondResend = inbox(async () => Promise.reject(new ResendError(404)));
 
-      const first = processEmailEvents(deps({ onReceived: firstHandler }).deps);
-      await started; // the first tick holds the event and is inside its handler
-      expect(await processEmailEvents(deps({ onReceived: secondHandler, now: new Date(NOW.getTime() + MINUTE) }).deps)).toEqual({ done: 0, ignored: 0, failed: 0 });
-      expect(secondHandler).not.toHaveBeenCalled();
+      const first = processEmailEvents(deps({ resend: firstResend }).deps);
+      await started; // the first tick holds the event and is inside the reply handler
+      expect(await processEmailEvents(deps({ resend: secondResend, now: new Date(NOW.getTime() + MINUTE) }).deps)).toEqual({ done: 0, ignored: 0, failed: 0 });
+      expect(secondResend.getReceived).not.toHaveBeenCalled();
       release();
-      expect(await first).toEqual({ done: 1, ignored: 0, failed: 0 });
-      expect((await webhookRow(svixId)).status).toBe('done');
+      expect(await first).toEqual({ done: 0, ignored: 1, failed: 0 });
+      expect((await webhookRow(svixId)).status).toBe('ignored');
     });
 
-    describe('email.received (Task 9 owns the handler)', () => {
-      it('is NOT claimed while no handler is wired: the row stays pending and untouched', async () => {
-        const svixId = await receive('email.received', { email_id: 're_in' });
-        const before = await webhookRow(svixId);
-        expect(await processEmailEvents(deps().deps)).toEqual({ done: 0, ignored: 0, failed: 0 });
-        expect(await webhookRow(svixId)).toEqual(before);
-      });
-
-      it('is handed to the handler once one is wired, and its answer settles the row', async () => {
+    describe('email.received goes to the reply handler (email/inbound.ts)', () => {
+      it('is always claimed and handed to the reply handler, and its answer settles the row', async () => {
+        const s = await seedSeller();
+        const reply = autoReply(s.conv.token, 're_1');
         const doneId = await receive('email.received', { email_id: 're_1' }, { receivedAt: new Date(NOW.getTime() - 3 * MINUTE) });
         const ignoredId = await receive('email.received', { email_id: 're_2' }, { receivedAt: new Date(NOW.getTime() - 2 * MINUTE) });
         const retryId = await receive('email.received', { email_id: 're_3' }, { receivedAt: new Date(NOW.getTime() - MINUTE) });
-        const answers: Record<string, ReceivedOutcome> = { re_1: 'done', re_2: 'ignored', re_3: 'retry' };
-        const onReceived = vi.fn(async (ev: StoredEvent, _now: Date) => answers[(ev.data as { email_id: string }).email_id]!);
+        const resend = inbox(async (id) => {
+          if (id === 're_1') return reply;
+          throw new ResendError(id === 're_2' ? 404 : 503);
+        });
 
-        expect(await processEmailEvents(deps({ onReceived }).deps)).toEqual({ done: 1, ignored: 1, failed: 0 });
+        expect(await processEmailEvents(deps({ resend }).deps)).toEqual({ done: 1, ignored: 1, failed: 0 });
 
-        expect(onReceived).toHaveBeenCalledTimes(3);
-        expect(onReceived.mock.calls[0]![0]).toEqual({ type: 'email.received', data: { email_id: 're_1' } });
-        expect(onReceived.mock.calls[0]![1]).toEqual(NOW);
+        expect(resend.getReceived.mock.calls.map((c) => c[0])).toEqual(['re_1', 're_2', 're_3']);
         expect(await webhookRow(doneId)).toMatchObject({ status: 'done' });
         expect(await webhookRow(ignoredId)).toMatchObject({ status: 'ignored' });
         // 'retry' is a try again later that is not an error: the backoff applies and the attempt is counted.
         expect(await webhookRow(retryId)).toMatchObject({ status: 'pending', attempts: 1, nextAttemptAt: new Date(NOW.getTime() + MINUTE), lastError: 'retry' });
+        // The reply itself landed on the seller's timeline.
+        expect((await eventsOf(s.conv.id)).filter((e) => e.kind === 'email' && e.direction === 'in')).toHaveLength(1);
       });
 
-      it('delivery events are still handled by the tick itself when a handler is wired', async () => {
+      it('delivery events are still handled by the tick itself: Resend is never asked for them', async () => {
         const s = await seedSeller();
         const { emailId, resendId } = await sentEmail(s);
         await receive('email.delivered', { email_id: resendId });
-        const onReceived = vi.fn(async () => 'done' as const);
-        expect(await processEmailEvents(deps({ onReceived }).deps)).toEqual({ done: 1, ignored: 0, failed: 0 });
-        expect(onReceived).not.toHaveBeenCalled();
+        const resend = inbox(async () => Promise.reject(new ResendError(404)));
+        expect(await processEmailEvents(deps({ resend }).deps)).toEqual({ done: 1, ignored: 0, failed: 0 });
+        expect(resend.getReceived).not.toHaveBeenCalled();
         expect((await emailRow(emailId)).status).toBe('delivered');
       });
     });
 
     describe('when handling throws', () => {
-      const failing = () => vi.fn(async (): Promise<'done'> => {
-        throw new BoomError('boom for delivered@resend.dev');
-      });
+      /** A reply the handler can read but not store: the database refuses the inbound row (a pg error, name `error`, code P0001). */
+      async function unstorableReply(attempts = 0, receivedAt?: Date) {
+        const s = await seedSeller();
+        const reply = autoReply(s.conv.token);
+        const svixId = await receive('email.received', { email_id: reply.id }, { attempts, receivedAt });
+        return { svixId, resend: inbox(async () => reply) };
+      }
 
       it('counts the attempt, backs off by 2^attempts minutes and keeps only the error NAME', async () => {
         for (const [attempts, minutes] of [[0, 1], [1, 2], [2, 4], [6, 64]] as const) {
-          const svixId = await receive('email.received', { email_id: 're_in' }, { attempts });
-          const { deps: d, log } = deps({ onReceived: failing() });
-          expect(await processEmailEvents(d)).toEqual({ done: 0, ignored: 0, failed: 1 });
+          const { svixId, resend } = await unstorableReply(attempts);
+          const { deps: d, log } = deps({ resend });
+          expect(await failingWrites('email_messages', 'insert', () => processEmailEvents(d))).toEqual({ done: 0, ignored: 0, failed: 1 });
           expect(await webhookRow(svixId)).toMatchObject({
             status: 'pending',
             attempts: attempts + 1,
-            lastError: 'BoomError',
+            lastError: 'error',
             nextAttemptAt: new Date(NOW.getTime() + minutes * MINUTE),
           });
-          expect(JSON.stringify([log.info.mock.calls, log.warn.mock.calls, log.error.mock.calls])).not.toContain('delivered@resend.dev');
+          expect(log.error).toHaveBeenCalledWith(expect.objectContaining({ svixId, errorName: 'error', errorCode: 'P0001' }), 'email event failed');
+          expect(JSON.stringify([log.info.mock.calls, log.warn.mock.calls, log.error.mock.calls])).not.toMatch(/delivered@resend\.dev|blocked for the test|away until/);
           await t.pool.query('delete from resend_webhook_events');
         }
       });
 
       it('the 8th failed attempt makes the event failed for good', async () => {
-        const svixId = await receive('email.received', { email_id: 're_in' }, { attempts: 7 });
-        expect(await processEmailEvents(deps({ onReceived: failing() }).deps)).toEqual({ done: 0, ignored: 0, failed: 1 });
-        expect(await webhookRow(svixId)).toMatchObject({ status: 'failed', attempts: 8, lastError: 'BoomError', processedAt: NOW });
+        const { svixId, resend } = await unstorableReply(7);
+        expect(await failingWrites('email_messages', 'insert', () => processEmailEvents(deps({ resend }).deps))).toEqual({ done: 0, ignored: 0, failed: 1 });
+        expect(await webhookRow(svixId)).toMatchObject({ status: 'failed', attempts: 8, lastError: 'error', processedAt: NOW });
         // …and a failed event is never claimed again.
-        expect(await processEmailEvents(deps({ onReceived: failing() }).deps)).toEqual({ done: 0, ignored: 0, failed: 0 });
+        expect(await processEmailEvents(deps({ resend }).deps)).toEqual({ done: 0, ignored: 0, failed: 0 });
       });
 
       it('one event that throws does not stop the others in the batch', async () => {
-        const bad = await receive('email.received', { email_id: 're_bad' }, { receivedAt: new Date(NOW.getTime() - 2 * MINUTE) });
+        const { svixId: bad, resend } = await unstorableReply(0, new Date(NOW.getTime() - STALE - MINUTE));
         const good = await receive('email.delivered', { email_id: `re_${randomUUID()}` }, { receivedAt: new Date(NOW.getTime() - STALE) });
-        expect(await processEmailEvents(deps({ onReceived: failing() }).deps)).toEqual({ done: 0, ignored: 1, failed: 1 });
+        expect(await failingWrites('email_messages', 'insert', () => processEmailEvents(deps({ resend }).deps))).toEqual({ done: 0, ignored: 1, failed: 1 });
         expect((await webhookRow(bad)).status).toBe('pending');
         expect((await webhookRow(good)).status).toBe('ignored');
       });
@@ -689,15 +722,42 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
 
       it('an event that names no email of ours is logged by id and raises no alert (there is no tenant to raise it for)', async () => {
         const svixId = await receive('email.received', { email_id: 're_in' }, lastAttempt);
-        const onReceived = vi.fn(async (): Promise<'done'> => {
-          throw new BoomError('boom for delivered@resend.dev');
-        });
-        const { deps: d, alert, log } = deps({ onReceived });
-        expect(await processEmailEvents(d)).toEqual({ done: 0, ignored: 0, failed: 1 });
-        expect(await webhookRow(svixId)).toMatchObject({ status: 'failed' });
+        // Resend never gave the reply back, so nothing of it was stored: no tenant is known.
+        const resend = inbox(async () => Promise.reject(new ResendError(503)));
+        const { deps: d, alert, log } = deps({ resend });
+        expect(await processEmailEvents(d)).toEqual({ done: 0, ignored: 0, failed: 0 });
+        expect(await webhookRow(svixId)).toMatchObject({ status: 'failed', lastError: 'retry' });
         expect(alert).not.toHaveBeenCalled();
         expect(log.error).toHaveBeenCalledWith({ svixId, type: 'email.received' }, expect.stringContaining('no alert'));
         expect(JSON.stringify(log.error.mock.calls)).not.toContain('resend.dev');
+      });
+
+      it("a seller's reply that was stored but failed its 8th attempt: one critical alert for the reply's tenant, event id and type only", async () => {
+        const s = await seedSeller();
+        const reply = autoReply(s.conv.token);
+        const svixId = await receive('email.received', { email_id: reply.id }, lastAttempt);
+        const { deps: d, alert, log } = deps({ resend: inbox(async () => reply) });
+        // The reply is stored, then its handling cannot finish (handled_at cannot be written): it is retried until it is out of attempts.
+        expect(await failingWrites('email_messages', 'update', () => processEmailEvents(d))).toEqual({ done: 0, ignored: 0, failed: 1 });
+
+        expect(await webhookRow(svixId)).toMatchObject({ status: 'failed', attempts: 8 });
+        expect(alert).toHaveBeenCalledTimes(1);
+        const event = alert.mock.calls[0]![0];
+        expect(event).toMatchObject({ kind: 'job_dead_lettered', severity: 'critical', orgId: s.orgId });
+        expect(event.context).toEqual({ svixId, type: 'email.received' });
+        const everything = JSON.stringify([event, log.info.mock.calls, log.warn.mock.calls, log.error.mock.calls]);
+        for (const secret of ['delivered@resend.dev', 'Out of the office', 'away until', 'Pat Seller']) expect(everything).not.toContain(secret);
+      });
+
+      it("an outbound email's Resend id never stands in for a reply's: the dead-letter lookup is by direction", async () => {
+        const s = await seedSeller();
+        const { resendId } = await sentEmail(s);
+        const svixId = await receive('email.received', { email_id: resendId }, lastAttempt);
+        const { deps: d, alert, log } = deps({ resend: inbox(async () => Promise.reject(new ResendError(503))) });
+        await processEmailEvents(d);
+        expect(await webhookRow(svixId)).toMatchObject({ status: 'failed' });
+        expect(alert).not.toHaveBeenCalled();
+        expect(log.error).toHaveBeenCalledWith({ svixId, type: 'email.received' }, expect.stringContaining('no alert'));
       });
 
       it('an alert that throws never fails the tick: the event is failed and the error is logged by name', async () => {

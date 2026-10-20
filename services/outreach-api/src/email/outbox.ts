@@ -144,11 +144,16 @@ function conversationBlock(f: SendFacts): EmailBlock | null {
   return null;
 }
 
-/** The conversation's OTHER outbound emails that are out or on their way, in the 24 hours before `now`: the row being checked (itself `sending` by now) never counts against itself. */
-async function othersInLastDay(db: Db, f: SendFacts, emailId: string, now: Date): Promise<number> {
+/**
+ * The conversation's outbound emails that are out or on their way (sending, sent, delivered) in the 24 hours before
+ * `now`. `exceptEmailId` leaves one row out: the send tick's own row, `sending` by the time it is checked, never counts
+ * against itself. The daily cap here and the reply loop guard (email/inbound.ts) count the same way.
+ */
+export async function emailsOutInLastDay(db: Db, i: { orgId: string; conversationId: string; exceptEmailId?: string }, now: Date): Promise<number> {
   const result = await db.execute(sql`
     select count(*)::int as n from email_messages
-    where conversation_id = ${f.conversationId}::uuid and org_id = ${f.orgId}::uuid and direction = 'out' and id <> ${emailId}::uuid
+    where conversation_id = ${i.conversationId}::uuid and org_id = ${i.orgId}::uuid and direction = 'out'
+      ${i.exceptEmailId === undefined ? sql`` : sql`and id <> ${i.exceptEmailId}::uuid`}
       and status in ('sending', 'sent', 'delivered')
       and coalesce(sent_at, claimed_at, created_at) > ${iso(new Date(now.getTime() - DAY_MS))}`);
   return rows<{ n: number }>(result)[0]?.n ?? 0;
@@ -164,7 +169,7 @@ async function firstBlock(db: Db, f: SendFacts, emailId: string, now: Date): Pro
     if ((await suppressionFor(db, f.orgId, f.toAddress)) !== null) return 'suppressed';
     if (f.sfEmailOptOut) return 'sf_opt_out';
   }
-  if ((await othersInLastDay(db, f, emailId, now)) >= EMAIL_DAILY_CAP) return 'daily_cap';
+  if ((await emailsOutInLastDay(db, { orgId: f.orgId, conversationId: f.conversationId, exceptEmailId: emailId }, now)) >= EMAIL_DAILY_CAP) return 'daily_cap';
   return emailSendAt(f.phones, now).getTime() > now.getTime() ? 'outside_window' : null;
 }
 

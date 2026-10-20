@@ -25,19 +25,21 @@
  * the send tick is still writing). Such an unmatched delivery event is RETRIED, with the usual backoff, while
  * it is under 5 minutes old, and ignored after that, so a status update is not lost to that race.
  *
- * `email.received` belongs to the reply handler (email/inbound.ts): until it is wired as `onReceived` the
- * tick does not claim those rows at all, so they wait untouched instead of being ignored.
+ * `email.received` (a seller's reply) is handed to the reply handler (email/inbound.ts `handleReceived`), which
+ * answers done, ignored or retry like the delivery events do. A reply that runs out of attempts after it was
+ * stored is a seller's message nobody will answer: that dead letter is raised as critical.
  *
  * Logs, alerts and `last_error` carry ids and the seller-page link only: never an address, a subject or any
  * field of the payload.
  */
 import { sql } from 'drizzle-orm';
 import type { Db } from '@cti/db';
-import { dispatchAlert, type AlertEvent } from '../alerts.js';
+import { dispatchAlert, sellerPageUrl, type AlertEvent } from '../alerts.js';
 import type { AppConfig } from '../config.js';
 import { appendEvent, stopSeller, suppressAddress } from '../conversations/store.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { describeError } from './errors.js';
+import { handleReceived } from './inbound.js';
 import { pauseSamEmail, setSamEmailEnabled } from './pause.js';
 import type { ResendClient } from './resend-client.js';
 import type { EmailWriter } from './writer.js';
@@ -69,9 +71,9 @@ export interface EventDeps {
   db: Db;
   /** For the reply handler (email/inbound.ts): reading an inbound email back. */
   resend: ResendClient;
-  /** For the reply handler: null when Sam's writer is not configured. */
+  /** For the reply handler: null when Sam's writer is not configured (a reply that needs an answer goes to a person). */
   writer: EmailWriter | null;
-  cfg: Pick<AppConfig, 'EMAIL_FROM' | 'EMAIL_REPLY_DOMAIN' | 'EMAIL_POSTAL_ADDRESS' | 'EMAIL_COMPANY_NAME' | 'API_PUBLIC_URL'>;
+  cfg: Pick<AppConfig, 'emailEnabled' | 'EMAIL_FROM' | 'EMAIL_REPLY_DOMAIN' | 'EMAIL_POSTAL_ADDRESS' | 'EMAIL_COMPANY_NAME' | 'API_PUBLIC_URL'>;
   /** Origin of the web app: alert links point at `${appPublicUrl}/sellers/<Salesforce record id>`. */
   appPublicUrl: string;
   now: Date;
@@ -79,8 +81,6 @@ export interface EventDeps {
   /** Where alerts go; the shared dispatcher (log + ALERT_WEBHOOK_URL) when absent. It must not throw. */
   alert?: (event: AlertEvent) => Promise<void>;
   batch?: number;
-  /** The `email.received` handler. Absent = those events are not claimed (they stay pending). */
-  onReceived?: (event: StoredEvent, now: Date) => Promise<ReceivedOutcome>;
 }
 
 export interface EventCounts {
@@ -115,12 +115,11 @@ interface ClaimedEvent {
  * The oldest due `pending` events, leased for 10 minutes. The final SELECT orders them: the order of an
  * UPDATE's RETURNING is not guaranteed, and oldest first is what the caller works in.
  */
-async function claimDue(db: Db, now: Date, limit: number, includeReceived: boolean): Promise<ClaimedEvent[]> {
+async function claimDue(db: Db, now: Date, limit: number): Promise<ClaimedEvent[]> {
   const result = await db.execute(sql`
     with due as (
       select svix_id from resend_webhook_events
       where status = 'pending' and next_attempt_at <= ${iso(now)}
-        ${includeReceived ? sql`` : sql`and type <> ${RECEIVED_EVENT_TYPE}`}
       order by received_at, svix_id
       limit ${limit}
       -- The row lock is what stops two ticks claiming one row: with none, a second UPDATE that waits for the
@@ -164,25 +163,34 @@ async function reschedule(db: Db, svixId: string, reason: string, now: Date): Pr
   return rows<{ status: string }>(result)[0]?.status === 'failed';
 }
 
+/** The tenant of the inbound email (a seller's reply) we stored under this Resend id, if we stored it. */
+async function inboundOrgId(db: Db, resendId: string): Promise<string | null> {
+  const result = await db.execute(sql`select org_id as "orgId" from email_messages where direction = 'in' and resend_id = ${resendId}`);
+  return rows<{ orgId: string }>(result)[0]?.orgId ?? null;
+}
+
 /**
- * An event is out of attempts: tell someone, because nothing else will (a failed complaint is the worst: the
- * seller is still emailable and the tenant is not paused). The tenant comes from the outbound email the event
- * names; an event that names none (an inbound reply, a malformed one) has no tenant to alert for, so it is
- * logged by id. The alert carries the event id and type only. Never throws: it runs inside the tick.
+ * An event is out of attempts: tell someone, because nothing else will. The worst are critical: a failed
+ * complaint (the seller is still emailable and the tenant is not paused) and a failed reply (a seller's message
+ * nobody will answer). The tenant comes from our email row the event names: the outbound email for a delivery
+ * event, the stored inbound one for a reply. An event that names none (a reply Resend never gave back, a malformed
+ * event) has no tenant to alert for, so it is logged by id. The alert carries the event id and type only. Never
+ * throws: it runs inside the tick.
  */
 async function alertDeadLetter(deps: EventDeps, alert: (event: AlertEvent) => Promise<void>, row: ClaimedEvent): Promise<void> {
   const { db, log } = deps;
   try {
     const resendId = isRecord(row.payload) ? resendEmailId(row.payload.data) : null;
-    const email = resendId === null ? null : await findOutbound(db, resendId);
-    if (!email) {
+    const received = row.type === RECEIVED_EVENT_TYPE;
+    const orgId = resendId === null ? null : received ? await inboundOrgId(db, resendId) : (await findOutbound(db, resendId))?.orgId ?? null;
+    if (orgId === null) {
       log.error({ svixId: row.svixId, type: row.type }, 'email event failed for good and names no email of ours: no alert');
       return;
     }
     await alert({
       kind: 'job_dead_lettered',
-      severity: row.type === 'email.complained' ? 'critical' : 'warning',
-      orgId: email.orgId,
+      severity: received || row.type === 'email.complained' ? 'critical' : 'warning',
+      orgId,
       message: `Email event ${row.type} (${row.svixId}) failed ${MAX_EVENT_ATTEMPTS} times and will not be retried.`,
       context: { svixId: row.svixId, type: row.type },
     });
@@ -193,7 +201,7 @@ async function alertDeadLetter(deps: EventDeps, alert: (event: AlertEvent) => Pr
 
 async function dispatch(deps: EventDeps, row: ClaimedEvent, notify: DeliveryNotify): Promise<ReceivedOutcome> {
   const data = isRecord(row.payload) ? row.payload.data : undefined;
-  if (row.type === RECEIVED_EVENT_TYPE) return deps.onReceived ? deps.onReceived({ type: row.type, data }, deps.now) : 'retry';
+  if (row.type === RECEIVED_EVENT_TYPE) return handleReceived({ ...deps, alert: notify.alert }, { data }, deps.now);
   return handleDeliveryEvent(deps.db, { type: row.type, data, receivedAt: new Date(Number(row.receivedAtMs)) }, deps.now, notify);
 }
 
@@ -201,7 +209,7 @@ export async function processEmailEvents(deps: EventDeps): Promise<EventCounts> 
   const { db, now, log } = deps;
   const alert = deps.alert ?? ((event: AlertEvent) => dispatchAlert(log, event));
   const notify: DeliveryNotify = { alert, appPublicUrl: deps.appPublicUrl, log };
-  const claimed = await claimDue(db, now, Math.max(1, Math.trunc(deps.batch ?? EVENT_BATCH)), deps.onReceived !== undefined);
+  const claimed = await claimDue(db, now, Math.max(1, Math.trunc(deps.batch ?? EVENT_BATCH)));
   const counts: EventCounts = { done: 0, ignored: 0, failed: 0 };
   let retried = 0;
   for (const row of claimed) {
@@ -327,13 +335,9 @@ async function applyComplaint(db: Db, email: OutboundEmail, now: Date): Promise<
   });
 }
 
-function sellerUrl(appPublicUrl: string, sfRecordId: string): string {
-  return `${appPublicUrl.replace(/\/+$/, '')}/sellers/${encodeURIComponent(sfRecordId)}`;
-}
-
 /** Sent after the complaint's transaction has committed; a failing alert is logged by name and never fails the event. */
 async function raiseComplaintAlert(notify: DeliveryNotify, email: OutboundEmail): Promise<void> {
-  const url = sellerUrl(notify.appPublicUrl, email.sfRecordId);
+  const url = sellerPageUrl(notify.appPublicUrl, email.sfRecordId);
   try {
     await notify.alert({
       kind: 'email_complaint',

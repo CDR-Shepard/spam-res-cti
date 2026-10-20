@@ -92,13 +92,27 @@ describe('EmailDecision', () => {
     expect(EmailDecision.safeParse(noBody).success).toBe(false);
   });
 
-  it('a flag names its reason, and a send has a subject and a body', () => {
-    expect(EmailDecision.safeParse({ action: 'flag', flagReason: null, subject: 's', body: 'b' }).success).toBe(false);
+  it('a send has a body; the actions that send nothing (or only a thank-you) need no subject or body', () => {
     expect(EmailDecision.safeParse({ ...sendDecision, body: '  \n' }).success).toBe(false);
-    expect(EmailDecision.safeParse({ ...sendDecision, subject: '' }).success).toBe(false);
-    // The actions that send nothing (or only a thank-you) need no subject or body.
     expect(EmailDecision.safeParse({ action: 'opt_out', flagReason: null, subject: '', body: '' }).success).toBe(true);
     expect(EmailDecision.safeParse({ action: 'no_reply', flagReason: null, subject: '', body: '' }).success).toBe(true);
+  });
+
+  it('a send with a blank subject is a valid answer: a reply keeps the seller\'s subject (writeEmail refuses it for a first email)', () => {
+    expect(EmailDecision.safeParse({ ...sendDecision, subject: '' }).success).toBe(true);
+    expect(EmailDecision.safeParse({ ...sendDecision, subject: ' ' }).success).toBe(true);
+  });
+
+  it('a flag with no reason reads as unsure, rather than throwing the answer away', () => {
+    expect(EmailDecision.parse({ action: 'flag', flagReason: null, subject: '', body: 'Thanks, someone will follow up.' })).toEqual({
+      action: 'flag',
+      flagReason: 'unsure',
+      subject: '',
+      body: 'Thanks, someone will follow up.',
+    });
+    // A reason it did give is kept, and the other actions keep their null.
+    expect(EmailDecision.parse({ action: 'flag', flagReason: 'legal', subject: '', body: 'b' }).flagReason).toBe('legal');
+    expect(EmailDecision.parse({ action: 'no_reply', flagReason: null, subject: '', body: '' }).flagReason).toBeNull();
   });
 });
 
@@ -139,7 +153,7 @@ describe('AnthropicEmailWriter', () => {
       [{ type: 'text' }],
       [],
       [{ type: 'tool_use', name: EMAIL_TOOL_NAME, input: { ...sendDecision, action: SECRET } }],
-      [{ type: 'tool_use', name: EMAIL_TOOL_NAME, input: { action: 'flag', flagReason: null, subject: SECRET, body: SECRET } }],
+      [{ type: 'tool_use', name: EMAIL_TOOL_NAME, input: { action: 'send', flagReason: null, subject: SECRET, body: ' ' } }],
     ];
     for (const content of bad) {
       const err = await new AnthropicEmailWriter({ client: client(content), model: 'claude-sonnet-5-5' }).write({ system: 'S', user: 'U' }).catch((e: unknown) => e);
@@ -240,6 +254,24 @@ describe('writeEmail (fake db)', () => {
     expect(added).toHaveLength(1);
     // The same decision is fine for a reply.
     expect(await writeEmail({ db, writer, orgId: ORG, settings: {}, now: NOW }, input)).toMatchObject({ kind: 'ok' });
+  });
+
+  it('a send with a blank subject is ok for a reply (the caller sets "Re: ...") and invalid_output for a first email, charged either way', async () => {
+    const { db, added } = fakeDb();
+    const blank = { ...sendDecision, subject: '  ' };
+    const writer = new AnthropicEmailWriter({ client: client([{ type: 'tool_use', name: EMAIL_TOOL_NAME, input: blank }]), model: 'claude-haiku-4-5-20251001' });
+    expect(await writeEmail({ db, writer, orgId: ORG, settings: {}, now: NOW }, input)).toEqual({ kind: 'ok', decision: blank });
+    expect(await writeEmail({ db, writer, orgId: ORG, settings: {}, now: NOW }, first)).toEqual({ kind: 'failed', reason: 'invalid_output' });
+    expect(added).toHaveLength(2);
+  });
+
+  it('a flag with no reason through the real adapter is ok, as unsure', async () => {
+    const { db } = fakeDb();
+    const writer = new AnthropicEmailWriter({
+      client: client([{ type: 'tool_use', name: EMAIL_TOOL_NAME, input: { action: 'flag', flagReason: null, subject: '', body: 'Thanks!' } }]),
+      model: 'claude-haiku-4-5-20251001',
+    });
+    expect(await writeEmail({ db, writer, orgId: ORG, settings: {}, now: NOW }, input)).toEqual({ kind: 'ok', decision: { action: 'flag', flagReason: 'unsure', subject: '', body: 'Thanks!' } });
   });
 
   it('a budget that cannot be read is failed (budget_unavailable), and the model is not called', async () => {
