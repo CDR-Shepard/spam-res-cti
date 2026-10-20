@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AiCallBookingSettings } from '@cti/contracts';
 import { SalesforceApiError } from '@cti/salesforce';
 import { DEFAULT_AI_CALL_BOOKING, DEFAULT_BOOKING_ROUTING } from '../settings.js';
-import { fakeBookedDb, fakeMaps, GRANT, offerSalesforce } from '../test/fake-offer.js';
+import { fakeBookedDb, fakeMaps, GRANT, offerSalesforce, SETH, THOMAS, usersWithInactive } from '../test/fake-offer.js';
 import { describeOf, type QueryRoute } from '../test/fake-sf-client.js';
 import { readOfferCalendars, type OfferCalendars } from './offer.js';
 import { offerForRecord, type RecordOfferInput } from './offer-for-record.js';
@@ -33,11 +33,13 @@ interface Case {
   consultations?: Row[] | Error;
   records?: QueryRoute[];
   booking?: AiCallBookingSettings;
+  users?: Row[];
 }
 
 function run(c: Case = {}) {
   const sf = offerSalesforce({
     consultations: c.consultations ?? [pastConsultation],
+    users: c.users,
     extra: c.records ?? [[/FROM Lead /, [leadRow]], [/FROM Opportunity /, [oppRow]]],
   });
   const b = c.booking ?? booking();
@@ -68,14 +70,27 @@ describe('offerForRecord', () => {
     expect(offer.slots.length).toBeGreaterThan(0);
   });
 
-  it('a consultations read error gives consultations: null, logged by its error name, and the offer still comes back', async () => {
+  it('a consultations read error with booking on: no times and no priority (a booked one cannot be ruled out), note salesforce_error', async () => {
     const { log, result } = run({ consultations: new SalesforceApiError('INVALID_FIELD: Owner.Name', 400, null) });
     const { offer, consultations } = await result;
     expect(consultations).toBeNull();
-    expect(offer.note).toBeNull();
-    expect(offer.slots.length).toBeGreaterThan(0);
+    expect(offer).toEqual({ slots: [], priority: null, region: 'SD', ownerSfUserId: null, note: 'salesforce_error' });
     expect(log.warn).toHaveBeenCalledWith({ orgId: ORG, errName: 'SalesforceApiError' }, expect.any(String));
     expect(JSON.stringify(log.warn.mock.calls)).not.toContain('INVALID_FIELD');
+  });
+
+  it('a consultations read error drops a priority-only offer too', async () => {
+    const users = usersWithInactive(SETH, THOMAS);
+    const { result } = run({ users, consultations: new SalesforceApiError('boom', 500, null) });
+    expect((await result).offer).toEqual({ slots: [], priority: null, region: 'SD', ownerSfUserId: null, note: 'salesforce_error' });
+    // Without the error, the same record gets Grant's priority offer, so the test can fail.
+    expect((await run({ users }).result).offer.priority?.specialistSfUserId).toBe(GRANT);
+  });
+
+  it('a consultations read error keeps a note that has nothing to drop (booking off, no address)', async () => {
+    const failed = new SalesforceApiError('boom', 500, null);
+    expect((await run({ consultations: failed, booking: booking({ enabled: false }) }).result).offer.note).toBe('booking_off');
+    expect((await run({ consultations: failed, records: [[/FROM Lead /, [{ ...leadRow, IsConverted: true }]]] }).result).offer.note).toBe('no_address');
   });
 
   it('a Lead target makes no Opportunity describe call', async () => {

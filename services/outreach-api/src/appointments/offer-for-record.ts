@@ -29,6 +29,16 @@ export type RecordOfferDeps = OfferDeps & {
 
 const errName = (err: unknown): string => (err instanceof Error ? err.name : typeof err);
 
+/**
+ * The consultations could not be read, so an upcoming one cannot be ruled out and Sam must not book a second: an offer with
+ * times or a priority offer loses them (salesforce_error). One with nothing to drop keeps its note.
+ */
+function withoutTimes(offer: Offer): Offer {
+  if (offer.slots.length === 0 && offer.priority === null) return offer;
+  return { ...offer, slots: [], priority: null, ownerSfUserId: null, note: 'salesforce_error' };
+}
+
+/** The seller's consultations, or null when they could not be read (readConsultations itself never gives null). */
 async function consultationsOf(deps: RecordOfferDeps, i: RecordOfferInput): Promise<Consultations | null> {
   try {
     return await readConsultations(deps.client, consultationLinks(i.record, i.around), i.now);
@@ -53,18 +63,27 @@ async function addressOf(deps: RecordOfferDeps, record: RecordOfferInput['record
   return (await readCurrent(deps.client, record.sfObject, record.sfRecordId, [], describe))?.address ?? null;
 }
 
-/** The property address (readCurrent), the consultations (a read error → null, logged by errName) and routedOffer. Never throws. */
-export async function offerForRecord(deps: RecordOfferDeps, i: RecordOfferInput): Promise<{ offer: Offer; consultations: Consultations | null }> {
-  const [consultations, cal] = await Promise.all([consultationsOf(deps, i), calendarsOf(deps, i.orgId)]);
+/** The routed offer for the record: its address is read only when routedOffer will need it. */
+async function recordOffer(deps: RecordOfferDeps, i: RecordOfferInput, cal: OfferCalendars, consultations: Consultations | null): Promise<Offer> {
   const input = { orgId: i.orgId, booking: i.booking, now: i.now, consultations };
   // routedOffer settles these before it needs an address, so the record is not read for them.
-  if (cal.kind === 'none' || consultations?.next) return { offer: await routedOffer(deps, cal, { ...input, address: null }), consultations };
+  if (cal.kind === 'none' || consultations?.next) return routedOffer(deps, cal, { ...input, address: null });
   let address: string | null;
   try {
     address = await addressOf(deps, i.record);
   } catch (err) {
     deps.log.warn({ orgId: i.orgId, errName: errName(err) }, 'appointments: could not read the property address; no times offered');
-    return { offer: noOffer('salesforce_error'), consultations };
+    return noOffer('salesforce_error');
   }
-  return { offer: await routedOffer(deps, cal, { ...input, address }), consultations };
+  return routedOffer(deps, cal, { ...input, address });
+}
+
+/**
+ * The property address (readCurrent), the consultations (a read error → null, logged by errName, and then no times: see
+ * withoutTimes) and routedOffer. Never throws.
+ */
+export async function offerForRecord(deps: RecordOfferDeps, i: RecordOfferInput): Promise<{ offer: Offer; consultations: Consultations | null }> {
+  const [consultations, cal] = await Promise.all([consultationsOf(deps, i), calendarsOf(deps, i.orgId)]);
+  const offer = await recordOffer(deps, i, cal, consultations);
+  return { offer: consultations === null ? withoutTimes(offer) : offer, consultations };
 }

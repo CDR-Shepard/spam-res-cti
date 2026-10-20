@@ -40,7 +40,10 @@ export interface Offer {
   note: OfferNote | null;
 }
 
-/** The Salesforce half: the active reps' calendars keyed by 15-character id core, and the high-priority rep; or why there are none. */
+/**
+ * The Salesforce half: the active reps' calendars keyed by 15-character id core (empty when only the high-priority rep is
+ * active), and the high-priority rep; or why there is neither.
+ */
 export type OfferCalendars =
   | { kind: 'read'; routing: BookingRouting; reps: ReadonlyMap<string, RepCalendar>; priority: OwnerUser | null; from: Date; until: Date }
   | { kind: 'none'; note: 'booking_off' | 'no_reps' | 'salesforce_error' };
@@ -100,13 +103,15 @@ export async function readOfferCalendars(client: SalesforceClient, i: { booking:
     // One User query: every region rep, and the specialists list that names the high-priority rep.
     const users = await readUsers(client, [...routing.regions.flatMap((region) => region.reps), ...booking.specialists]);
     const reps = activeReps(routing, users);
-    if (reps.length === 0) return { kind: 'none', note: 'no_reps' };
+    const priority = appointmentOwner(booking, users);
+    // With no active rep, Grant can still take a high-priority booking; with neither, there is nothing to offer.
+    if (reps.length === 0 && priority === null) return { kind: 'none', note: 'no_reps' };
     const from = weekStart(now);
     const until = new Date(now.getTime() + OFFER_CALENDAR_DAYS * DAY_MS);
     const capped = (rows: number) => i.log?.warn({ reps: reps.length, rows }, 'appointments: the reps\' busy read hit its row cap; later busy time may be missing');
     const busy = await readRepCalendars(client, reps.map((rep) => rep.sfUserId), from, until, ROUTING_ZONE, capped);
     const calendars = new Map(reps.map((rep) => [core(rep.sfUserId), { rep, busy: busy.get(core(rep.sfUserId)) ?? [] }]));
-    return { kind: 'read', routing, reps: calendars, priority: appointmentOwner(booking, users), from, until };
+    return { kind: 'read', routing, reps: calendars, priority, from, until };
   } catch (err) {
     i.log?.warn({ errName: errName(err) }, 'appointments: could not read the reps\' calendars; no times offered');
     return { kind: 'none', note: 'salesforce_error' };
@@ -150,8 +155,9 @@ async function inPersonOrNone(input: Parameters<typeof inPersonSlots>[0], orgId:
   }
 }
 
+/** In ROUTING_ZONE, whatever the rep's Salesforce zone: PRIORITY_RULES and the default start are defined there. */
 function priorityOffer(rep: OwnerUser, i: OfferInput): PriorityOffer {
-  return { specialistSfUserId: rep.sfUserId, specialistFirstName: rep.firstName, timeZone: rep.timeZone, defaultStart: priorityDefaultStart(i.booking.days, i.now).toISOString() };
+  return { specialistSfUserId: rep.sfUserId, specialistFirstName: rep.firstName, timeZone: ROUTING_ZONE, defaultStart: priorityDefaultStart(i.booking.days, i.now).toISOString() };
 }
 
 /**
@@ -166,17 +172,21 @@ function settle(slots: AppointmentSlot[], priority: PriorityOffer | null, region
   return { slots: offered, priority, region, ownerSfUserId, note: valid ? null : 'invalid_slots' };
 }
 
-/** Within the region: its reps, in-person times (a street address only) then phone times, and the high-priority offer (a street address only). */
+/**
+ * Within the region: its reps, in-person times (a street address only) then phone times, and the high-priority offer (a
+ * street address only), which also goes when the region has no active rep.
+ */
 async function regionOffer(deps: OfferDeps & { maps: MapsClient }, cal: ReadCalendars, i: OfferInput, p: { region: BookingRegion; geo: Geocoded; address: string }): Promise<Offer> {
-  const reps = await regionReps(deps.db, cal, p.region, i);
-  if (reps.length === 0) return noOffer('no_reps', p.region.key);
-  const routing: RoutingInput = { region: p.region, reps, booking: i.booking, now: i.now };
   const street = usableAddress(p.address) !== null;
+  const priority = street && cal.priority ? priorityOffer(cal.priority, i) : null;
+  const reps = await regionReps(deps.db, cal, p.region, i);
+  // No active rep in the region: no regular times, but Grant's high-priority offer still goes.
+  if (reps.length === 0) return { ...noOffer('no_reps', p.region.key), priority, ownerSfUserId: priority?.specialistSfUserId ?? null };
+  const routing: RoutingInput = { region: p.region, reps, booking: i.booking, now: i.now };
   const office: Place = { address: cal.routing.officeAddress };
   // One timer per offer: it counts this offer's route elements and stays on straight lines once Routes has failed.
   const drive = street ? driveTimer(deps.maps, office, deps.log) : null;
   const inPerson = drive ? await inPersonOrNone({ ...routing, property: { point: p.geo.point }, office, drive }, i.orgId, deps.log) : [];
-  const priority = street && cal.priority ? priorityOffer(cal.priority, i) : null;
   const offer = settle([...inPerson, ...phoneSlots(routing)], priority, p.region.key);
   deps.log.info({ orgId: i.orgId, region: p.region.key, slots: offer.slots.length, priority: offer.priority !== null, routeElements: drive?.spent() ?? 0 }, 'appointments: routed offer');
   return offer;

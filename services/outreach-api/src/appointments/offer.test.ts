@@ -4,7 +4,7 @@ import { SalesforceApiError } from '@cti/salesforce';
 import { DEFAULT_AI_CALL_BOOKING, DEFAULT_BOOKING_ROUTING } from '../settings.js';
 import {
   aiBooking, ANAHEIM, BLAKE, CHANCE, eventRow, fakeBookedDb, fakeMaps, GRANT, IMPERIAL_PROPERTY, OC_PROPERTY, offerSalesforce, PLACES,
-  SD_CITY_ONLY, SD_PROPERTY, SETH, THOMAS, usersWithInactive,
+  SD_CITY_ONLY, SD_PROPERTY, SETH, THOMAS, USERS, usersWithInactive,
 } from '../test/fake-offer.js';
 import { fakeSalesforce } from '../test/fake-sf-client.js';
 import { BUSY_ROW_LIMIT } from './calendar.js';
@@ -138,6 +138,15 @@ describe('routedOffer', () => {
     expect(logged(log)).not.toContain('Main St');
   });
 
+  it('a drive lookup that Routes answers is counted on the info line', async () => {
+    // Chance's 7:00 consultation in Anaheim needs a drive in for Tuesday 9:00: Routes is asked, and answers.
+    const events = [eventRow(CHANCE, '2026-10-20T14:00:00.000Z', '2026-10-20T15:00:00.000Z', { Location: ANAHEIM, Subject: 'Property Consultation' })];
+    const { offer, log } = await offerFor(OC_PROPERTY, { events });
+    expect(inPerson(offer.slots)[0]!.start).toBe(TUE_9);
+    const [line] = log.info.mock.calls[0] as [{ routeElements: number }, string];
+    expect(line.routeElements).toBeGreaterThan(0);
+  });
+
   it('drive times unavailable (Routes down and the office cannot be placed) → phone times only', async () => {
     const events = [eventRow(CHANCE, '2026-10-20T14:00:00.000Z', '2026-10-20T15:00:00.000Z', { Location: ANAHEIM })];
     const { maps } = fakeMaps({ [OC_PROPERTY]: PLACES[OC_PROPERTY]! }, { routes: new MapsUnavailableError('timeout') });
@@ -148,8 +157,9 @@ describe('routedOffer', () => {
     expect(log.warn).toHaveBeenCalledWith({ orgId: ORG, code: 'ZERO_RESULTS' }, expect.any(String));
   });
 
-  it('priority with Grant', async () => {
-    const { offer } = await offerFor(OC_PROPERTY, { booking: booking({ specialists: [GRANT] }) });
+  it('priority with Grant, in Pacific time whatever his Salesforce zone', async () => {
+    const users = USERS.map((u) => (u.Id === GRANT ? { ...u, TimeZoneSidKey: 'America/New_York' } : u));
+    const { offer } = await offerFor(OC_PROPERTY, { users, booking: booking({ specialists: [GRANT] }) });
     expect(offer.priority).toEqual({ specialistSfUserId: GRANT, specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-20T16:00:00.000Z' });
     // The first slot's rep owns the offer, not Grant.
     expect([CHANCE, BLAKE]).toContain(offer.ownerSfUserId);
@@ -247,14 +257,36 @@ describe('readOfferCalendars', () => {
     expect(sf.soql[1]).not.toContain(BLAKE);
   });
 
-  it('a region whose reps are all inactive gives no slots and the note no_reps; the other region still offers', async () => {
+  it('a region whose reps are all inactive: no_reps and no regular times, but Grant\'s priority (street address) owns it; the other region still offers', async () => {
     const users = usersWithInactive(SETH, THOMAS);
-    expect((await offerFor(SD_PROPERTY, { users })).offer).toEqual(none('no_reps', 'SD'));
+    const sd = (await offerFor(SD_PROPERTY, { users })).offer;
+    expect(sd).toMatchObject({ slots: [], region: 'SD', ownerSfUserId: GRANT, note: 'no_reps' });
+    expect(sd.priority?.specialistSfUserId).toBe(GRANT);
     expect((await offerFor(OC_PROPERTY, { users })).offer.slots.length).toBeGreaterThan(0);
   });
 
-  it('no active rep anywhere: no_reps, and no Event query', async () => {
+  it('a region whose reps are all inactive, no street address: no_reps and no priority', async () => {
+    expect((await offerFor(SD_CITY_ONLY, { users: usersWithInactive(SETH, THOMAS) })).offer).toEqual(none('no_reps', 'SD'));
+  });
+
+  it('a region whose reps are all inactive, Grant inactive too: no_reps and nothing offered', async () => {
+    expect((await offerFor(SD_PROPERTY, { users: usersWithInactive(SETH, THOMAS, GRANT) })).offer).toEqual(none('no_reps', 'SD'));
+  });
+
+  it('no active rep anywhere but Grant: a read with no reps and the priority rep, and no Event query', async () => {
     const sf = offerSalesforce({ users: usersWithInactive(CHANCE, BLAKE, SETH, THOMAS) });
+    const cal = await readOfferCalendars(sf.client, { booking: booking(), now: NOW });
+    if (cal.kind !== 'read') throw new Error('expected a calendar read');
+    expect(cal.reps.size).toBe(0);
+    expect(cal.priority?.sfUserId).toBe(GRANT);
+    expect(sf.soql).toHaveLength(1);
+    const offer = (await offerFor(OC_PROPERTY, { users: usersWithInactive(CHANCE, BLAKE, SETH, THOMAS) })).offer;
+    expect(offer).toMatchObject({ slots: [], region: 'LA', ownerSfUserId: GRANT, note: 'no_reps' });
+    expect(offer.priority?.timeZone).toBe('America/Los_Angeles');
+  });
+
+  it('no active rep anywhere and Grant inactive: none/no_reps, and no Event query', async () => {
+    const sf = offerSalesforce({ users: usersWithInactive(CHANCE, BLAKE, SETH, THOMAS, GRANT) });
     expect(await readOfferCalendars(sf.client, { booking: booking(), now: NOW })).toEqual({ kind: 'none', note: 'no_reps' });
     expect(sf.soql).toHaveLength(1);
   });
