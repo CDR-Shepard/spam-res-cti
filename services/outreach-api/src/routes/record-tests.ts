@@ -9,6 +9,9 @@
  *
  * Task 11: "What would be written to Salesforce" for one finished test call (record-tests/dry-run.ts): reads and one
  * mapping-model call, nothing sent, stored on the call row.
+ *
+ * "Preview Sam's email" (owner, 2026-10-20): the first email Sam would write to a ready test's record
+ * (record-tests/email-preview.ts): one writer call on the AI budget; nothing sent, queued or stored.
  */
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
@@ -22,15 +25,19 @@ import type { MapsClient } from '../appointments/maps.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
 import { sendError } from '../http/errors.js';
+import type { EmailWriter } from '../email/writer.js';
 import type { DescribeCache } from '../research/describe.js';
 import { CALLS_PER_HOUR, PREVIEWS_PER_DAY, PREVIEWS_PER_HOUR, withPreviewLimit, type LimitRefusal } from '../record-tests/limits.js';
 import { dryRunTestCall, type DryRunResult } from '../record-tests/dry-run.js';
+import { previewTestEmail, type EmailPreviewError } from '../record-tests/email-preview.js';
 import { runPreview } from '../record-tests/preview.js';
 import { startRecordTestCall, type RunError } from '../record-tests/run.js';
 import { insertRecordTest, listRecordTests, loadInstanceUrl, loadRecordTest, loadRecordTestCalls, toRecordTest } from '../record-tests/store.js';
 import { outreachSettings } from '../settings.js';
 import type { MappingModel } from '../writeback/mapping-model.js';
 import { requireAdmin, requireContext } from '../tenancy/scope.js';
+// The admin waits for Sam's draft as long as the seller page's draft does.
+import { DRAFT_WRITER_TIMEOUT_MS } from './sellers.js';
 
 const IdParams = z.object({ id: z.string().uuid() });
 const CallParams = z.object({ callId: z.string().uuid() });
@@ -51,6 +58,11 @@ export interface RecordTestRouteDeps {
   defaultSpecialists: readonly string[];
   /** The server's Google Maps client for the routed offer; null without GOOGLE_MAPS_API_KEY. */
   maps: MapsClient | null;
+  /**
+   * "Preview Sam's email": Sam's writer (null without an Anthropic key or a priced EMAIL_MODEL), EMAIL_COMPANY_NAME and
+   * EMAIL_POSTAL_ADDRESS. Absent or a null writer answers 503 EMAIL_NOT_CONFIGURED.
+   */
+  email?: { writer: EmailWriter | null; companyName: string; postalAddress: string };
   now?: () => Date;
   /** Runs the preview after the reply; tests pass one that collects the work to await it. */
   background?: (work: () => Promise<void>) => void;
@@ -93,6 +105,16 @@ const CTI_UNREACHABLE = 'The AI calling service did not answer. Try again in a m
 const NOT_CONFIGURED = 'AI calls are not set up on this server yet.';
 /** The browser token route's own limiter, per address (spec §8.2). */
 const TOKEN_RATE_LIMIT = { max: 10, timeWindow: '1 minute' };
+/** Each press is a paid writer call: a few a minute is plenty for reading drafts. */
+const EMAIL_PREVIEW_RATE_LIMIT = { max: 6, timeWindow: '1 minute' };
+
+const EMAIL_PREVIEW_ERRORS: Readonly<Record<EmailPreviewError, [number, string, string]>> = {
+  not_found: [404, 'NOT_FOUND', 'That test is not here. It may belong to another tenant.'],
+  not_ready: [409, 'NOT_READY', 'That preview is not ready. Wait for it to finish, or run a new one.'],
+  over_budget: [409, 'AI_BUDGET_SPENT', "Today's AI budget is spent. Raise it in Settings or try again tomorrow."],
+  declined: [422, 'DRAFT_REFUSED', 'Sam chose not to write to this person. Press again for another try.'],
+  failed: [502, 'MODEL_ERROR', "Sam's draft did not come back. Try again in a minute."],
+};
 
 const RUN_ERRORS: Readonly<Record<Exclude<RunError, 'plan_text_rejected'>, [number, string, string]>> = {
   not_found: [404, 'NOT_FOUND', 'That test is not here. It may belong to another tenant.'],
@@ -204,6 +226,22 @@ export async function registerRecordTestRoutes(app: FastifyInstance, deps: Recor
     if ('refusal' in out) return sendLimitRefusal(reply, out.refusal, ctx.tenant.timezone);
     if (!out.ok) return sendRunError(reply, out.error, out.words);
     return { callId: out.callId, response: out.response };
+  });
+
+  app.post('/record-tests/:id/email-preview', { config: { rateLimit: EMAIL_PREVIEW_RATE_LIMIT } }, async (req, reply) => {
+    const ctx = await requireContext(db, req, reply);
+    if (!ctx || !requireAdmin(ctx, reply)) return reply;
+    const params = IdParams.safeParse(req.params);
+    if (!params.success) return sendError(reply, ...EMAIL_PREVIEW_ERRORS.not_found);
+    const email = deps.email;
+    if (!email?.writer) return sendError(reply, 503, 'EMAIL_NOT_CONFIGURED', "Sam's email writer is not set up on this server.");
+    const previewDeps = {
+      db, writer: email.writer, companyName: email.companyName, postalAddress: email.postalAddress, now: now(), log: req.log,
+      signal: AbortSignal.timeout(DRAFT_WRITER_TIMEOUT_MS),
+    };
+    const out = await previewTestEmail(previewDeps, ctx, params.data.id);
+    if (!out.ok) return sendError(reply, ...EMAIL_PREVIEW_ERRORS[out.error]);
+    return out.preview;
   });
 
   app.post('/record-tests/calls/:callId/dry-run', async (req, reply) => {

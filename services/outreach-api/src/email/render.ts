@@ -47,6 +47,24 @@ export function unsubscribeFooterLine(url: string): string {
   return `${FOOTER_UNSUBSCRIBE_SENTENCE}: ${url}`;
 }
 
+/** The body as it is sent: CRLF and CR become LF, trailing whitespace is dropped. */
+export function cleanBody(body: string): string {
+  return body.replace(/\r\n?/g, '\n').trimEnd();
+}
+
+/** The footer's lines down to the company line: what both the sent email and a preview of it show. */
+function footerHead(company: string, postal: string): string[] {
+  return [FOOTER_RULE, FOOTER_SIGNATURE, '', companyFooterLine(company, postal)];
+}
+
+/**
+ * The footer as a preview shows it (Test a record's "Preview Sam's email"): the same lines `renderEmail` writes, ending
+ * with the unsubscribe sentence as the HTML part reads it. A preview has no unsubscribe token, so there is no address.
+ */
+export function previewFooter(company: string, postal: string): string {
+  return [...footerHead(company, postal), FOOTER_UNSUBSCRIBE_SENTENCE].join('\n');
+}
+
 export interface RenderEmailInput {
   body: string;
   token: string;
@@ -94,17 +112,9 @@ function oneLine(value: string): string {
 
 export function renderEmail(i: RenderEmailInput): RenderedEmail {
   const url = unsubscribeUrl(i.apiPublicUrl, i.token);
-  const body = i.body.replace(/\r\n?/g, '\n').trimEnd();
+  const body = cleanBody(i.body);
 
-  const text = [
-    body,
-    '',
-    FOOTER_RULE,
-    FOOTER_SIGNATURE,
-    '',
-    companyFooterLine(i.companyName, i.postalAddress),
-    unsubscribeFooterLine(url),
-  ].join('\n');
+  const text = [body, '', ...footerHead(i.companyName, i.postalAddress), unsubscribeFooterLine(url)].join('\n');
 
   const html = [
     bodyToHtml(body),

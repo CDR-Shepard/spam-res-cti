@@ -10,6 +10,7 @@ import { createRecordTest, outreachKeys, recordTest } from '@/lib/outreach-api';
 import { errorText, formatDateTime } from '@/lib/outreach-words';
 import { RECORD_TEST_ERROR_WORDS, RECORD_TEST_STATUS_WORDS, recordTestErrorText } from '@/lib/record-test-words';
 import { isLiveCall, RecordTestCalls } from './record-test-calls';
+import { RecordTestEmail } from './record-test-email';
 import { RecordTestRun } from './record-test-run';
 import { RecordTestPlan } from './record-test-sections';
 
@@ -87,6 +88,7 @@ export function RecordTestPreview({ id, onOpen, onBrowserLive }: { id: string; o
               {browserLive && <span className="text-xs text-muted-foreground">{BROWSER_LOCK_WORDS}</span>}
             </div>
             <RecordTestRun test={t} onBrowserLive={setBrowserLive} />
+            <RecordTestEmail testId={t.id} />
           </>
         )}
         {again.error && <p role="alert" className="text-destructive">{recordTestErrorText(again.error)}</p>}

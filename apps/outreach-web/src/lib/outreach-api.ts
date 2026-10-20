@@ -30,6 +30,7 @@ import {
   PracticeCallsResponse,
   RecordTest,
   RecordTestDryRun,
+  RecordTestEmailPreview,
   RecordTestsResponse,
   SamEmailSettings,
   SelectionResponse,
@@ -306,6 +307,11 @@ export function browserToken(): Promise<BrowserTokenResponse> {
 /** Admin only (plan 1E): what a real call that ended like this test call would write to Salesforce. Nothing is sent. */
 export function recordTestDryRun(callId: string): Promise<RecordTestDryRun> {
   return api(`/api/record-tests/calls/${seg(callId)}/dry-run`, RecordTestDryRun, { method: 'POST' });
+}
+
+/** Admin only: the first email Sam would write to a ready test's record. Nothing is sent or stored; each call is a paid draft. */
+export function recordTestEmailPreview(testId: string): Promise<RecordTestEmailPreview> {
+  return api(`/api/record-tests/${seg(testId)}/email-preview`, RecordTestEmailPreview, { method: 'POST' });
 }
 
 /** Admin only: the AI agent's call instructions and voicemail message, each with its saved text, the built-in default, the placeholders and the newest versions. */

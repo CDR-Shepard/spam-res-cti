@@ -226,6 +226,7 @@ async function main(): Promise<void> {
       (scope) =>
         registerRecordTestRoutes(scope, {
           db, clients, cti, model: planModel, describes, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, maps, mappingModel, appPublicUrl: cfg.APP_PUBLIC_URL,
+          email: { writer: emailWriter, companyName: cfg.EMAIL_COMPANY_NAME, postalAddress: cfg.EMAIL_POSTAL_ADDRESS },
         }),
     ],
   });

@@ -95,6 +95,15 @@ export const RecordTestDryRun = z.object({
 });
 export type RecordTestDryRun = z.infer<typeof RecordTestDryRun>;
 
+/**
+ * POST /api/record-tests/:id/email-preview (admin): the first email Sam would write to this record, from the ready
+ * preview's research and plan (owner, 2026-10-20: read what Sam would send before email is turned on). Nothing is sent,
+ * queued or stored. `footer` is what every email ends with, worded as the HTML part reads (the unsubscribe link's words,
+ * not its address). `issues`: why Send would refuse this draft as written (the seller page's draft check), in words.
+ */
+export const RecordTestEmailPreview = z.object({ subject: z.string().min(1), body: z.string(), footer: z.string(), issues: z.array(z.string()) });
+export type RecordTestEmailPreview = z.infer<typeof RecordTestEmailPreview>;
+
 /** One test call on a preview, joined to its ai_calls row. */
 export const RecordTestCall = z.object({
   id: z.string().uuid(),

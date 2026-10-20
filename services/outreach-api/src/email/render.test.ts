@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { escapeHtml, possessive, renderEmail, unsubscribeFooterLine } from './render.js';
+import { escapeHtml, possessive, previewFooter, renderEmail, unsubscribeFooterLine } from './render.js';
 
 const TOKEN = 'abcdefghijklmnopqrstuvwxyz';
 const URL = `https://api.example.com/api/email/unsubscribe/${TOKEN}`;
@@ -21,6 +21,14 @@ const FOOTER = [
   'GG Homes · 18872 MacArthur Blvd #220, Irvine, CA 92612',
   `To stop hearing from Sam, unsubscribe here: ${URL}`,
 ].join('\n');
+
+describe('previewFooter', () => {
+  it('is the footer renderEmail writes, with the unsubscribe line as the HTML part reads (no address: a preview has no token)', () => {
+    const footer = previewFooter(base.companyName, base.postalAddress);
+    expect(footer).toBe(['—', 'Sam', '', 'GG Homes · 18872 MacArthur Blvd #220, Irvine, CA 92612', 'To stop hearing from Sam, unsubscribe here'].join('\n'));
+    expect(FOOTER.startsWith(footer)).toBe(true);
+  });
+});
 
 describe('renderEmail', () => {
   it('ends the text with the exact footer, one blank line after the body', () => {

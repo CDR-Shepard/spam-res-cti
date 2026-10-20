@@ -29,6 +29,7 @@ describe('RecordTestPreview', () => {
   it('shows progress while running, then every section of the plan once ready', async () => {
     const { table } = show({ [GET]: recordTest({ status: 'running', plan: null, planText: null, slots: [], sources: [], costMicros: 0 }) });
     expect(await screen.findByText('Reading Salesforce and writing the plan… (about a minute)')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: "Preview Sam's email" })).not.toBeInTheDocument();
     table[GET] = recordTest();
     expect(await screen.findByText('AI consent: yes', {}, { timeout: 4000 })).toBeInTheDocument();
     expect(screen.queryByText(/Reading Salesforce/)).not.toBeInTheDocument();
@@ -50,6 +51,8 @@ describe('RecordTestPreview', () => {
     expect(screen.getByText(/with Grant/)).toBeInTheDocument();
     expect(screen.getByText('Tasks: 4')).toBeInTheDocument();
     expect(screen.queryByText(/cost/i)).not.toBeInTheDocument();
+    // A ready test offers Sam's first email (owner, 2026-10-20); nothing is asked until it is pressed.
+    expect(within(screen.getByRole('region', { name: "Sam's first email" })).getByRole('button', { name: "Preview Sam's email" })).toBeEnabled();
   });
 
   it('the plan for a text: the message and its length, beside the call plan', async () => {
@@ -118,6 +121,7 @@ describe('RecordTestPreview', () => {
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith(OTHER_TEST_ID));
     expect(calls.find((c) => c.method === 'POST')?.body).toEqual({ record: LEAD_ID });
     expect(within(document.body).queryByLabelText('The plan text the agent gets')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: "Preview Sam's email" })).not.toBeInTheDocument();
   });
 
   it('consent that could not be read points to Regenerate, the button on this page', async () => {

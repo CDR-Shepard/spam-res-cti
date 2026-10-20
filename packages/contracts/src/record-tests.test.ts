@@ -6,6 +6,7 @@ import {
   RECORD_REF_ERROR_WORDS,
   RecordTest,
   RecordTestCallRequest,
+  RecordTestEmailPreview,
   RecordTestsResponse,
   aiTestIdentity,
   aiTestIdentityUser,
@@ -142,6 +143,13 @@ describe('Test a record API types', () => {
     expect(RecordTest.safeParse({ ...test, error: 'nope' }).success).toBe(false);
     const item = { id: USER, sfObject: 'Lead', sfRecordId: LEAD_18, name: null, status: 'running', createdAt: test.createdAt, requestedByName: null };
     expect(RecordTestsResponse.parse({ items: [item] })).toEqual({ items: [item] });
+  });
+
+  it("Sam's email preview is a subject, a body and the footer every email ends with", () => {
+    const preview = { subject: 'Your home on Oak Street', body: 'Hi Pat,\n\nIs the house still for sale?', footer: '—\nSam', issues: [] };
+    expect(RecordTestEmailPreview.parse(preview)).toEqual(preview);
+    expect(RecordTestEmailPreview.safeParse({ ...preview, subject: '' }).success).toBe(false);
+    expect(RecordTestEmailPreview.safeParse({ subject: 'x', body: 'y', footer: 'z' }).success).toBe(false);
   });
 
   it('the browser token answer carries an aitest identity', () => {
