@@ -1,6 +1,6 @@
 /** Real Postgres: what Sam's writer is told about one seller (first name, the approved call plan, the history, the local time). */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { seedAiCallCampaign } from '../test/call-plan-seed.js';
 import { seedAiCall, seedReleasedLead, type ReleasedLead } from '../test/ai-call-seed.js';
@@ -97,6 +97,36 @@ describe.skipIf(!pgLane)('loadWriterContext (real Postgres)', () => {
     expect(await named('')).toBeNull();
     expect(await named('   ')).toBeNull();
     expect(await named(null)).toBeNull();
+  });
+
+  /** An Opportunity named for the deal, whose plan's research holds these contacts (primary first, as research reads them). */
+  async function opportunityWith(contactFirstNames: Array<string | null>) {
+    const lead = await seedSeller({ recordOver: { sfObject: 'Opportunity', name: '123 Oak Street' } });
+    const contacts = contactFirstNames.map((first, n) => ({
+      relation: 'contact', sfObject: 'Contact', id: `00300000000000${n}AAA`, role: n === 0 ? 'Primary' : 'Other',
+      fields: first === null ? [] : [{ name: 'FirstName', label: 'First Name', value: first }],
+    }));
+    await db.execute(sql`update call_research set snapshot = jsonb_set(snapshot, '{records}', (snapshot->'records') || ${JSON.stringify(contacts)}::jsonb) where id = ${lead.researchId}::uuid`);
+    return lead;
+  }
+
+  it("an Opportunity's name is the deal's, never a person's: its first name is the primary contact's FirstName in the plan's research, or null", async () => {
+    expect((await contextOf(await opportunityWith(['Jo Ann']))).firstName).toBe('Jo');
+    expect((await contextOf(await opportunityWith([null]))).firstName).toBeNull();
+    expect((await contextOf(await opportunityWith([]))).firstName).toBeNull();
+    // A secondary contact is never greeted in place of a primary without a first name.
+    expect((await contextOf(await opportunityWith([null, 'Sam']))).firstName).toBeNull();
+  });
+
+  it("the first name comes from the research the approved plan was written from, not a newer one", async () => {
+    const lead = await opportunityWith(['Jo Ann']);
+    await db.execute(sql`
+      insert into call_research (org_id, enrollment_id, crm_record_id, version, snapshot, sources, size_chars, content_hash)
+      select org_id, enrollment_id, crm_record_id, version + 1,
+             jsonb_set(snapshot, '{records}', ${JSON.stringify([{ relation: 'contact', sfObject: 'Contact', id: '003000000000009AAA', role: 'Primary', fields: [{ name: 'FirstName', label: 'First Name', value: 'Newer' }] }])}::jsonb),
+             sources, size_chars, content_hash || '-newer'
+      from call_research where id = ${lead.researchId}::uuid`);
+    expect((await contextOf(lead)).firstName).toBe('Jo');
   });
 
   it('has no plan text when the plan is only proposed, or the record has no AI call enrollment', async () => {
