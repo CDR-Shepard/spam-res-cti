@@ -193,6 +193,50 @@ describe('POST /api/webhooks/resend', () => {
     },
   );
 
+  describe('a NUL (U+0000) in the body: signed as sent, stored without it', () => {
+    // Postgres jsonb refuses U+0000 in any string or key, so an inbound email whose subject carries one
+    // would otherwise be a 500 that Svix retries for days. The raw JSON text carries it as the six-character escape backslash-u-0000.
+    const NUL_BODY = '{"type":"email.rec\\u0000eived","data":{"email_id":"re_in","subject":"Hi\\u0000 there","nested":{"k\\u0000ey":["a\\u0000",{"b":"\\u0000\\u0000"}]}}}';
+
+    it('answers 200 and stores a copy with every NUL removed, keys and the type included', async () => {
+      const { db, rows } = fakeEventsDb();
+      await build(db);
+      expect(NUL_BODY).toContain('\\u0000');
+      const res = await post(signedHeaders(NUL_BODY), NUL_BODY);
+      expect(res.statusCode).toBe(200);
+      expect([...rows.values()]).toEqual([
+        { svixId: SVIX_ID, type: 'email.received', payload: { type: 'email.received', data: { email_id: 're_in', subject: 'Hi there', nested: { key: ['a', { b: '' }] } } } },
+      ]);
+      expect(JSON.stringify([...rows.values()])).not.toContain('\\u0000');
+    });
+
+    it('the signature is checked over the body as received: one signed over the cleaned text does not pass', async () => {
+      const { db, rows } = fakeEventsDb();
+      await build(db);
+      const cleaned = NUL_BODY.replaceAll('\\u0000', '');
+      expect((await post(signedHeaders(cleaned), NUL_BODY)).statusCode).toBe(401);
+      expect(rows.size).toBe(0);
+    });
+
+    it('a body that is only a NUL type is still refused: nothing is left to process', async () => {
+      const { db, rows } = fakeEventsDb();
+      await build(db);
+      const body = '{"type":"\\u0000","data":{}}';
+      expect((await post(signedHeaders(body), body)).statusCode).toBe(400);
+      expect(rows.size).toBe(0);
+    });
+
+    it('a key named __proto__ is stored as data, never as the prototype of the copy', async () => {
+      const { db, rows } = fakeEventsDb();
+      await build(db);
+      const body = '{"type":"email.delivered","data":{"__proto__":{"polluted":"yes"}}}';
+      expect((await post(signedHeaders(body), body)).statusCode).toBe(200);
+      const stored = [...rows.values()][0]!.payload as { data: object };
+      expect(Object.keys(stored.data)).toEqual(['__proto__']);
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    });
+  });
+
   it('a body over 256 KB is 413 before anything is verified or stored', async () => {
     const { db, rows } = fakeEventsDb();
     await build(db);
@@ -276,5 +320,15 @@ describe.skipIf(!pgLane)('POST /api/webhooks/resend (real Postgres)', () => {
     expect((await post(headers, BODY)).statusCode).toBe(200);
     const after = await t.pool.query('select status from resend_webhook_events where svix_id = $1', [id]);
     expect(after.rows).toEqual([{ status: 'done' }]); // a replay did not reset the processed row to pending
+  });
+
+  it('a signed body with a NUL escape in a nested subject is stored (jsonb refuses U+0000) without it', async () => {
+    await build(t.db);
+    const id = 'msg_pg_nul';
+    const body = '{"type":"email.received","data":{"email_id":"re_in","subject":"Hi\\u0000 there","nested":{"k\\u0000ey":"v\\u0000"}}}';
+    const headers = { ...signedHeaders(), 'svix-id': id, 'svix-signature': sign(id, TS, body) };
+    expect((await post(headers, body)).statusCode).toBe(200);
+    const stored = await t.pool.query('select type, payload from resend_webhook_events where svix_id = $1', [id]);
+    expect(stored.rows).toEqual([{ type: 'email.received', payload: { type: 'email.received', data: { email_id: 're_in', subject: 'Hi there', nested: { key: 'v' } } } }]);
   });
 });

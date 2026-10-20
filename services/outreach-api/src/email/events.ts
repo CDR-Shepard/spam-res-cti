@@ -21,6 +21,10 @@
  * the whole tenant with a pause (Resend closes an account past a 0.08% complaint rate); only after it commits
  * is the alert sent, so a failed alert never undoes the stop and a thrown error never leaves half of it.
  *
+ * An event can reach us before the send tick has committed the `resend_id` it names (Resend answers while
+ * the send tick is still writing). Such an unmatched delivery event is RETRIED, with the usual backoff, while
+ * it is under 5 minutes old, and ignored after that, so a status update is not lost to that race.
+ *
  * `email.received` belongs to the reply handler (email/inbound.ts): until it is wired as `onReceived` the
  * tick does not claim those rows at all, so they wait untouched instead of being ignored.
  *
@@ -33,6 +37,7 @@ import { dispatchAlert, type AlertEvent } from '../alerts.js';
 import type { AppConfig } from '../config.js';
 import { appendEvent, stopSeller, suppressAddress } from '../conversations/store.js';
 import type { RunnerLogger } from '../jobs/boss.js';
+import { describeError } from './errors.js';
 import { pauseSamEmail, setSamEmailEnabled } from './pause.js';
 import type { ResendClient } from './resend-client.js';
 import type { EmailWriter } from './writer.js';
@@ -43,11 +48,18 @@ export const EVENT_LEASE_MS = 10 * 60_000;
 /** The attempt that fails an event for good. */
 export const MAX_EVENT_ATTEMPTS = 8;
 export const RECEIVED_EVENT_TYPE = 'email.received';
+/** A delivery event whose email row is not there yet is retried until it is this old, then ignored. */
+export const UNMATCHED_RETRY_WINDOW_MS = 5 * 60_000;
 
 /** What a stored event is handed on as: its type and the payload's `data`. */
 export interface StoredEvent {
   type: string;
   data: unknown;
+}
+
+/** A delivery event with the time the route stored it. Without `receivedAt` an unmatched event is never waited for. */
+export interface DeliveryEvent extends StoredEvent {
+  receivedAt?: Date;
 }
 
 /** `retry` is "not yet" (e.g. Resend has not made the inbound email readable): the same backoff as an error, but not one. */
@@ -78,7 +90,7 @@ export interface EventCounts {
   failed: number;
 }
 
-/** What `handleDeliveryEvent` needs to raise the complaint alert. */
+/** What `handleDeliveryEvent` needs to raise the complaint alert (the tick passes its own; a test passes a stub). */
 export interface DeliveryNotify {
   alert: (event: AlertEvent) => Promise<void>;
   appPublicUrl: string;
@@ -90,16 +102,13 @@ const iso = (d: Date) => sql`${d.toISOString()}::timestamptz`;
 const asDb = (tx: unknown) => tx as Db;
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-function describeError(err: unknown): { errorName: string; errorCode?: string } {
-  const code = (err as { code?: unknown } | null)?.code;
-  return { errorName: err instanceof Error ? err.name : typeof err, ...(typeof code === 'string' ? { errorCode: code } : {}) };
-}
-
 interface ClaimedEvent {
   svixId: string;
   type: string;
   payload: unknown;
   attempts: number;
+  /** When the route stored it, in epoch milliseconds (a raw timestamptz would come back as a string). */
+  receivedAtMs: number | string;
 }
 
 /**
@@ -114,6 +123,10 @@ async function claimDue(db: Db, now: Date, limit: number, includeReceived: boole
         ${includeReceived ? sql`` : sql`and type <> ${RECEIVED_EVENT_TYPE}`}
       order by received_at, svix_id
       limit ${limit}
+      -- The row lock is what stops two ticks claiming one row: with none, a second UPDATE that waits for the
+      -- first re-checks only its own join condition (not this subquery's status and next_attempt_at), so both
+      -- ticks claim it. SKIP LOCKED then keeps a tick from waiting on rows another tick holds: it takes the
+      -- next ones instead (a slow tick must not stall every tick queued behind it).
       for update skip locked
     ), claimed as (
       update resend_webhook_events w
@@ -122,7 +135,8 @@ async function claimDue(db: Db, now: Date, limit: number, includeReceived: boole
       where w.svix_id = due.svix_id
       returning w.svix_id, w.type, w.payload, w.attempts, w.received_at
     )
-    select svix_id as "svixId", type, payload, attempts from claimed order by received_at, svix_id`);
+    select svix_id as "svixId", type, payload, attempts, (extract(epoch from received_at) * 1000)::float8 as "receivedAtMs"
+    from claimed order by received_at, svix_id`);
   return rows<ClaimedEvent>(result);
 }
 
@@ -133,22 +147,54 @@ async function settle(db: Db, svixId: string, status: 'done' | 'ignored', now: D
     where svix_id = ${svixId} and status = 'pending'`);
 }
 
-/** One more attempt used: back to pending after 2^attempts minutes (counted from before this attempt), or failed on the last one. */
-async function reschedule(db: Db, svixId: string, reason: string, now: Date): Promise<void> {
-  await db.execute(sql`
+/**
+ * One more attempt used: back to pending after 2^attempts minutes (counted from before this attempt), or
+ * failed on the last one. True when this call made the event `failed` for good.
+ */
+async function reschedule(db: Db, svixId: string, reason: string, now: Date): Promise<boolean> {
+  const result = await db.execute(sql`
     update resend_webhook_events
     set attempts = attempts + 1,
         last_error = ${reason},
         status = case when attempts + 1 >= ${MAX_EVENT_ATTEMPTS} then 'failed' else 'pending' end,
         processed_at = case when attempts + 1 >= ${MAX_EVENT_ATTEMPTS} then ${iso(now)} end,
         next_attempt_at = ${iso(now)} + (power(2, attempts) * interval '1 minute')
-    where svix_id = ${svixId} and status = 'pending'`);
+    where svix_id = ${svixId} and status = 'pending'
+    returning status`);
+  return rows<{ status: string }>(result)[0]?.status === 'failed';
+}
+
+/**
+ * An event is out of attempts: tell someone, because nothing else will (a failed complaint is the worst: the
+ * seller is still emailable and the tenant is not paused). The tenant comes from the outbound email the event
+ * names; an event that names none (an inbound reply, a malformed one) has no tenant to alert for, so it is
+ * logged by id. The alert carries the event id and type only. Never throws: it runs inside the tick.
+ */
+async function alertDeadLetter(deps: EventDeps, alert: (event: AlertEvent) => Promise<void>, row: ClaimedEvent): Promise<void> {
+  const { db, log } = deps;
+  try {
+    const resendId = isRecord(row.payload) ? resendEmailId(row.payload.data) : null;
+    const email = resendId === null ? null : await findOutbound(db, resendId);
+    if (!email) {
+      log.error({ svixId: row.svixId, type: row.type }, 'email event failed for good and names no email of ours: no alert');
+      return;
+    }
+    await alert({
+      kind: 'job_dead_lettered',
+      severity: row.type === 'email.complained' ? 'critical' : 'warning',
+      orgId: email.orgId,
+      message: `Email event ${row.type} (${row.svixId}) failed ${MAX_EVENT_ATTEMPTS} times and will not be retried.`,
+      context: { svixId: row.svixId, type: row.type },
+    });
+  } catch (err) {
+    log.error({ svixId: row.svixId, type: row.type, ...describeError(err) }, 'dead-letter alert failed');
+  }
 }
 
 async function dispatch(deps: EventDeps, row: ClaimedEvent, notify: DeliveryNotify): Promise<ReceivedOutcome> {
-  const event: StoredEvent = { type: row.type, data: isRecord(row.payload) ? row.payload.data : undefined };
-  if (row.type === RECEIVED_EVENT_TYPE) return deps.onReceived ? deps.onReceived(event, deps.now) : 'retry';
-  return handleDeliveryEvent(deps.db, event, deps.now, notify);
+  const data = isRecord(row.payload) ? row.payload.data : undefined;
+  if (row.type === RECEIVED_EVENT_TYPE) return deps.onReceived ? deps.onReceived({ type: row.type, data }, deps.now) : 'retry';
+  return handleDeliveryEvent(deps.db, { type: row.type, data, receivedAt: new Date(Number(row.receivedAtMs)) }, deps.now, notify);
 }
 
 export async function processEmailEvents(deps: EventDeps): Promise<EventCounts> {
@@ -165,13 +211,13 @@ export async function processEmailEvents(deps: EventDeps): Promise<EventCounts> 
     } catch (err) {
       const { errorName, errorCode } = describeError(err);
       log.error({ svixId: row.svixId, type: row.type, attempt: row.attempts + 1, errorName, ...(errorCode ? { errorCode } : {}) }, 'email event failed');
-      await reschedule(db, row.svixId, errorName.slice(0, 100), now);
+      if (await reschedule(db, row.svixId, errorName.slice(0, 100), now)) await alertDeadLetter(deps, alert, row);
       counts.failed += 1;
       continue;
     }
     if (outcome === 'retry') {
       log.info({ svixId: row.svixId, type: row.type, attempt: row.attempts + 1 }, 'email event will be retried');
-      await reschedule(db, row.svixId, 'retry', now);
+      if (await reschedule(db, row.svixId, 'retry', now)) await alertDeadLetter(deps, alert, row);
       retried += 1;
     } else {
       await settle(db, row.svixId, outcome, now);
@@ -261,15 +307,20 @@ async function applyBounce(db: Db, email: OutboundEmail, now: Date): Promise<voi
 
 /**
  * A spam complaint, all or nothing: the email is marked, the seller is stopped (the store suppresses the
- * address and stops their other records; for a practice conversation it touches only that row) and the tenant's
- * email is paused AND switched off, so the admin's toggle reads off until they turn it back on (which clears
- * the pause). True when this event did it; a repeat finds the email already complained and does nothing.
+ * record's CURRENT address and stops their other records; for a practice conversation it touches only that
+ * row), the address that actually complained is suppressed too (the record may have changed since Sam wrote),
+ * and the tenant's email is paused AND switched off, so the admin's toggle reads off until they turn it back
+ * on (which clears the pause). True when this event did it; a repeat finds the email already complained and
+ * does nothing.
  */
 async function applyComplaint(db: Db, email: OutboundEmail, now: Date): Promise<boolean> {
   return db.transaction(async (tx) => {
     const t = asDb(tx);
     if (!(await moveStatus(t, email.id, 'complained', ['sending', 'sent', 'delivered', 'bounced', 'failed'], now))) return false;
     await stopSeller(t, { conversationId: email.conversationId, reason: 'complained', now });
+    if (email.practiceUserId === null) {
+      await suppressAddress(t, { orgId: email.orgId, address: email.toAddress, reason: 'complained', conversationId: email.conversationId });
+    }
     await pauseSamEmail(t, { orgId: email.orgId, reason: 'complaint', now });
     await setSamEmailEnabled(t, { orgId: email.orgId, enabled: false });
     return true;
@@ -297,17 +348,21 @@ async function raiseComplaintAlert(notify: DeliveryNotify, email: OutboundEmail)
 }
 
 /**
- * One delivery event applied to our outbound email (matched by `direction = 'out'` and Resend's id; no match
- * is `ignored`, as is every type that is not a delivery event). `done` means the event was understood and
- * handled, including one that changed nothing because the email had already moved past it. Throws on a
- * database error, with nothing committed from this event (the tick retries it).
+ * One delivery event applied to our outbound email (matched by `direction = 'out'` and Resend's id).
+ *  - `done`: understood and handled, including one that changed nothing because the email had already moved
+ *    past it.
+ *  - `ignored`: an unhandled type, no email id, or no email of ours with that id once the event is 5 minutes
+ *    old (or has no `receivedAt`).
+ *  - `retry`: a delivery event naming an email we have not recorded yet and under 5 minutes old: Resend can
+ *    answer before the send tick has committed the `resend_id`, so it is tried again, not dropped.
+ * Throws on a database error, with nothing committed from this event (the tick retries it).
  */
-export async function handleDeliveryEvent(db: Db, ev: StoredEvent, now: Date, notify?: DeliveryNotify): Promise<'done' | 'ignored'> {
+export async function handleDeliveryEvent(db: Db, ev: DeliveryEvent, now: Date, notify: DeliveryNotify): Promise<ReceivedOutcome> {
   if (!DELIVERY_TYPES.has(ev.type)) return 'ignored';
   const resendId = resendEmailId(ev.data);
   if (resendId === null) return 'ignored';
   const email = await findOutbound(db, resendId);
-  if (!email) return 'ignored';
+  if (!email) return ev.receivedAt !== undefined && now.getTime() - ev.receivedAt.getTime() < UNMATCHED_RETRY_WINDOW_MS ? 'retry' : 'ignored';
   switch (ev.type) {
     case 'email.sent':
       await recordMessageId(db, email, ev.data, now);
@@ -319,7 +374,7 @@ export async function handleDeliveryEvent(db: Db, ev: StoredEvent, now: Date, no
       await applyBounce(db, email, now);
       break;
     case 'email.complained':
-      if ((await applyComplaint(db, email, now)) && notify) await raiseComplaintAlert(notify, email);
+      if (await applyComplaint(db, email, now)) await raiseComplaintAlert(notify, email);
       break;
     case 'email.failed':
     case 'email.suppressed':

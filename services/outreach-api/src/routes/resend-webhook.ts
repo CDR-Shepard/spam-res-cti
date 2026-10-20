@@ -9,6 +9,9 @@
  *    nothing is parsed before it is verified. Any other content type is Fastify's 415.
  *  - Dedupe is the table's primary key: a redelivery, or an in-window replay of a captured request, hits
  *    `on conflict (svix_id) do nothing` and answers 200 without storing or resetting anything.
+ *  - Only the STORED copy is cleaned of U+0000 (in every string and key): Postgres jsonb refuses it, and an
+ *    inbound email whose subject carried one would otherwise be a 500 that Svix retries for days. The
+ *    signature was already checked over the raw body, so the cleaning cannot change what was verified.
  *  - Each svix header must be exactly one string; Fastify types a header as `string | string[]`, and an
  *    array is refused rather than guessed at. A 401 never says which part was wrong.
  *
@@ -34,6 +37,20 @@ function single(value: string | string[] | undefined): string | null {
   return typeof value === 'string' && value !== '' ? value : null;
 }
 
+/**
+ * A copy of parsed JSON with every U+0000 removed from every string, object keys included. Built with
+ * `Object.fromEntries`, which defines own properties, so a `__proto__` key stays data and never becomes the
+ * copy's prototype.
+ */
+function withoutNul(value: unknown): unknown {
+  if (typeof value === 'string') return value.replaceAll('\u0000', '');
+  if (Array.isArray(value)) return value.map(withoutNul);
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key.replaceAll('\u0000', ''), withoutNul(inner)]));
+  }
+  return value;
+}
+
 /** The stored shape of an event: an object with a type. Anything else is not something the tick could process. */
 function parseEvent(body: string): { type: string; payload: Record<string, unknown> } | null {
   let parsed: unknown;
@@ -43,7 +60,7 @@ function parseEvent(body: string): { type: string; payload: Record<string, unkno
     return null;
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
-  const payload = parsed as Record<string, unknown>;
+  const payload = withoutNul(parsed) as Record<string, unknown>;
   return typeof payload.type === 'string' && payload.type.trim() !== '' ? { type: payload.type, payload } : null;
 }
 

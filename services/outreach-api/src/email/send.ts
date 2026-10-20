@@ -29,6 +29,7 @@ import type { Db } from '@cti/db';
 import type { AppConfig } from '../config.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { replyAddress } from './addresses.js';
+import { describeError } from './errors.js';
 import { emailSendAt, evaluateSend } from './outbox.js';
 import { renderEmail } from './render.js';
 import type { ResendClient, ResendSendResult } from './resend-client.js';
@@ -249,11 +250,6 @@ async function work(deps: SendDeps, c: Claim): Promise<Outcome> {
     return (await settle(db, c, now, sql`status = 'canceled', last_error = ${block}`)) ? 'canceled' : 'lost';
   }
   return deliver(deps, c);
-}
-
-function describeError(err: unknown): { errorName: string; errorCode?: string } {
-  const code = (err as { code?: unknown } | null)?.code;
-  return { errorName: err instanceof Error ? err.name : typeof err, ...(typeof code === 'string' ? { errorCode: code } : {}) };
 }
 
 export async function sendDueEmails(deps: SendDeps): Promise<SendCounts> {

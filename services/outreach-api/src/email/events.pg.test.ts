@@ -20,6 +20,8 @@ import type { ResendClient } from './resend-client.js';
 
 const NOW = new Date('2026-10-20T17:00:00.000Z');
 const MINUTE = 60_000;
+/** Older than the 5 minutes an unmatched event may still wait for its email row. */
+const STALE = 10 * MINUTE;
 const APP_URL = 'https://app.example.com';
 const SUBJECT = 'Re: the house on Oak Street';
 const BODY = 'Thanks for getting back to me. Would Thursday afternoon work for a quick call?';
@@ -81,11 +83,11 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
   }
 
   /** One email Sam sent to the seller: the row is `sent` with the Resend id the webhook will name. */
-  async function sentEmail(s: Seller, over: { conversationId?: string; status?: string; resendId?: string } = {}): Promise<{ emailId: string; resendId: string }> {
+  async function sentEmail(s: Seller, over: { conversationId?: string; status?: string; resendId?: string; to?: string } = {}): Promise<{ emailId: string; resendId: string }> {
     const { emailId } = await queueEmail(db, {
       orgId: s.orgId,
       conversationId: over.conversationId ?? s.conv.id,
-      to: s.address,
+      to: over.to ?? s.address,
       from: CFG.EMAIL_FROM,
       subject: SUBJECT,
       body: BODY,
@@ -137,6 +139,21 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
   /** What a direct `handleDeliveryEvent` call needs to raise the complaint alert. */
   const notifyWith = (alert: (e: AlertEvent) => Promise<void>, log: ReturnType<typeof fakeLog> = fakeLog()) => ({ alert, appPublicUrl: APP_URL, log });
 
+  /** Makes every `kind` write on `table` fail while `run` works: a dependency that is down in the middle of an event. */
+  async function failingWrites<T>(table: string, kind: 'insert' | 'update', run: () => Promise<T>): Promise<T> {
+    const name = `test_block_${table}_${kind}`;
+    await t.pool.query(`create or replace function ${name}() returns trigger language plpgsql as $$ begin raise exception 'blocked for the test'; end $$`);
+    await t.pool.query(`create trigger ${name} before ${kind} on ${table} for each row execute function ${name}()`);
+    try {
+      return await run();
+    } finally {
+      await t.pool.query(`drop trigger ${name} on ${table}`);
+    }
+  }
+
+  /** A notify stub for the tests that do not look at alerts (the parameter is required). */
+  const quiet = () => notifyWith(vi.fn(async () => {}));
+
   function deps(over: Partial<EventDeps> = {}) {
     const alert = vi.fn(async (_event: AlertEvent) => {});
     const log = fakeLog();
@@ -150,16 +167,16 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
     it('sent then delivered ends delivered with the message id', async () => {
       const s = await seedSeller();
       const { emailId, resendId } = await sentEmail(s);
-      expect(await handleDeliveryEvent(db, SENT(resendId), NOW)).toBe('done');
-      expect(await handleDeliveryEvent(db, DELIVERED(resendId), NOW)).toBe('done');
+      expect(await handleDeliveryEvent(db, SENT(resendId), NOW, quiet())).toBe('done');
+      expect(await handleDeliveryEvent(db, DELIVERED(resendId), NOW, quiet())).toBe('done');
       expect(await emailRow(emailId)).toMatchObject({ status: 'delivered', messageId: '<abc123@resend.example>' });
     });
 
     it('delivered then sent still ends delivered, and the late sent still records the message id', async () => {
       const s = await seedSeller();
       const { emailId, resendId } = await sentEmail(s);
-      expect(await handleDeliveryEvent(db, DELIVERED(resendId), NOW)).toBe('done');
-      expect(await handleDeliveryEvent(db, SENT(resendId), NOW)).toBe('done');
+      expect(await handleDeliveryEvent(db, DELIVERED(resendId), NOW, quiet())).toBe('done');
+      expect(await handleDeliveryEvent(db, SENT(resendId), NOW, quiet())).toBe('done');
       expect(await emailRow(emailId)).toMatchObject({ status: 'delivered', messageId: '<abc123@resend.example>' });
     });
 
@@ -178,10 +195,10 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
       const s = await seedSeller();
       const { emailId, resendId } = await sentEmail(s);
       await t.pool.query(`update email_messages set message_id = '<ours@example.com>' where id = $1`, [emailId]);
-      await handleDeliveryEvent(db, SENT(resendId, '<other@resend.example>'), NOW);
+      await handleDeliveryEvent(db, SENT(resendId, '<other@resend.example>'), NOW, quiet());
       expect((await emailRow(emailId)).messageId).toBe('<ours@example.com>');
-      await handleDeliveryEvent(db, { type: 'email.sent', data: { email_id: resendId } }, NOW);
-      await handleDeliveryEvent(db, { type: 'email.sent', data: { email_id: resendId, message_id: 42 } }, NOW);
+      await handleDeliveryEvent(db, { type: 'email.sent', data: { email_id: resendId } }, NOW, quiet());
+      await handleDeliveryEvent(db, { type: 'email.sent', data: { email_id: resendId, message_id: 42 } }, NOW, quiet());
       expect((await emailRow(emailId)).messageId).toBe('<ours@example.com>');
     });
 
@@ -189,11 +206,11 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
       const s = await seedSeller();
       for (const status of ['bounced', 'complained', 'failed']) {
         const { emailId, resendId } = await sentEmail(s, { status });
-        expect(await handleDeliveryEvent(db, DELIVERED(resendId), NOW)).toBe('done');
+        expect(await handleDeliveryEvent(db, DELIVERED(resendId), NOW, quiet())).toBe('done');
         expect((await emailRow(emailId)).status).toBe(status);
       }
       const { emailId, resendId } = await sentEmail(s, { status: 'sending' });
-      await handleDeliveryEvent(db, DELIVERED(resendId), NOW);
+      await handleDeliveryEvent(db, DELIVERED(resendId), NOW, quiet());
       expect((await emailRow(emailId)).status).toBe('delivered');
     });
   });
@@ -202,7 +219,7 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
     it('marks the email bounced, suppresses the address, notes it on the timeline and leaves the conversation open', async () => {
       const s = await seedSeller('bounced@resend.dev');
       const { emailId, resendId } = await sentEmail(s);
-      expect(await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: resendId } }, NOW)).toBe('done');
+      expect(await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: resendId } }, NOW, quiet())).toBe('done');
       expect((await emailRow(emailId)).status).toBe('bounced');
       expect(await suppressionFor(db, s.orgId, 'BOUNCED@resend.dev')).toBe('bounced');
       expect((await conversationRow(s.conv.id)).status).toBe('open');
@@ -215,8 +232,8 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
     it('a bounce arriving after a delivered (or failed) event still lands, once', async () => {
       const s = await seedSeller('bounced@resend.dev');
       const { emailId, resendId } = await sentEmail(s, { status: 'delivered' });
-      await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: resendId } }, NOW);
-      await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: resendId } }, NOW);
+      await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: resendId } }, NOW, quiet());
+      await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: resendId } }, NOW, quiet());
       expect((await emailRow(emailId)).status).toBe('bounced');
       expect((await eventsOf(s.conv.id)).filter((e) => e.kind === 'note')).toHaveLength(1);
     });
@@ -224,7 +241,7 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
     it('a bounce on an email already marked complained keeps complained', async () => {
       const s = await seedSeller();
       const { emailId, resendId } = await sentEmail(s, { status: 'complained' });
-      await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: resendId } }, NOW);
+      await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: resendId } }, NOW, quiet());
       expect((await emailRow(emailId)).status).toBe('complained');
     });
 
@@ -233,7 +250,7 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
       const adminId = await seedUser(db, s.orgId);
       const practice = await ensureConversation(db, { orgId: s.orgId, crmRecordId: s.crmRecordId, practiceUserId: adminId });
       const { emailId, resendId } = await sentEmail(s, { conversationId: practice.id });
-      await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: resendId } }, NOW);
+      await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: resendId } }, NOW, quiet());
       expect((await emailRow(emailId)).status).toBe('bounced');
       expect(await suppressionFor(db, s.orgId, 'bounced@resend.dev')).toBeNull();
     });
@@ -279,6 +296,14 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
       const { alert } = deps();
       await handleDeliveryEvent(db, complaint(resendId), NOW, { ...notifyWith(alert), appPublicUrl: `${APP_URL}//` });
       expect(alert.mock.calls[0]![0].context?.sellerUrl).toBe(`${APP_URL}/sellers/${s.sfRecordId}`);
+    });
+
+    it('suppresses the address that complained, not only the one on the record now', async () => {
+      const s = await seedSeller('record-owner@example.com');
+      const { resendId } = await sentEmail(s, { to: 'complained@resend.dev' });
+      await handleDeliveryEvent(db, complaint(resendId), NOW, quiet());
+      expect(await suppressionFor(db, s.orgId, 'complained@resend.dev')).toBe('complained');
+      expect(await suppressionFor(db, s.orgId, 'record-owner@example.com')).toBe('complained');
     });
 
     it('a second complaint event for the same email changes nothing and does not alert again', async () => {
@@ -327,12 +352,13 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
       const s = await seedSeller('complained@resend.dev');
       const adminId = await seedUser(db, s.orgId);
       const practice = await ensureConversation(db, { orgId: s.orgId, crmRecordId: s.crmRecordId, practiceUserId: adminId });
-      const { resendId } = await sentEmail(s, { conversationId: practice.id });
+      const { resendId } = await sentEmail(s, { conversationId: practice.id, to: 'admin-practice@example.com' });
       const { alert } = deps();
       await handleDeliveryEvent(db, complaint(resendId), NOW, notifyWith(alert));
       expect((await conversationRow(practice.id)).status).toBe('stopped');
       expect((await conversationRow(s.conv.id)).status).toBe('open');
       expect(await suppressionFor(db, s.orgId, s.address)).toBeNull();
+      expect(await suppressionFor(db, s.orgId, 'admin-practice@example.com')).toBeNull();
       expect(samEmailSettings({ settings: await settingsOf(s.orgId) }).pausedAt).toBe(NOW.toISOString());
       expect(alert).toHaveBeenCalledTimes(1);
     });
@@ -352,28 +378,28 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
     it.each(['email.failed', 'email.suppressed'])('%s fails a sent email and records the event type as the reason', async (type) => {
       const s = await seedSeller();
       const { emailId, resendId } = await sentEmail(s);
-      expect(await handleDeliveryEvent(db, { type, data: { email_id: resendId } }, NOW)).toBe('done');
+      expect(await handleDeliveryEvent(db, { type, data: { email_id: resendId } }, NOW, quiet())).toBe('done');
       expect(await emailRow(emailId)).toMatchObject({ status: 'failed', lastError: type });
     });
 
     it('does not overwrite a delivered email', async () => {
       const s = await seedSeller();
       const { emailId, resendId } = await sentEmail(s, { status: 'delivered' });
-      await handleDeliveryEvent(db, { type: 'email.failed', data: { email_id: resendId } }, NOW);
+      await handleDeliveryEvent(db, { type: 'email.failed', data: { email_id: resendId } }, NOW, quiet());
       expect(await emailRow(emailId)).toMatchObject({ status: 'delivered', lastError: null });
     });
   });
 
   describe('what is ignored', () => {
     it('an event for an email id that is not ours is ignored', async () => {
-      expect(await handleDeliveryEvent(db, { type: 'email.delivered', data: { email_id: `re_${randomUUID()}` } }, NOW)).toBe('ignored');
+      expect(await handleDeliveryEvent(db, { type: 'email.delivered', data: { email_id: `re_${randomUUID()}` } }, NOW, quiet())).toBe('ignored');
     });
 
     it('only OUR outbound email matches: an inbound row with that Resend id does not', async () => {
       const s = await seedSeller();
       const { emailId } = await sentEmail(s);
       await t.pool.query(`update email_messages set direction = 'in', status = 'received', resend_id = 're_inbound' where id = $1`, [emailId]);
-      expect(await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: 're_inbound' } }, NOW)).toBe('ignored');
+      expect(await handleDeliveryEvent(db, { type: 'email.bounced', data: { email_id: 're_inbound' } }, NOW, quiet())).toBe('ignored');
       expect(await suppressionFor(db, s.orgId, s.address)).toBeNull();
     });
 
@@ -384,30 +410,77 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
       ['a blank email_id', { email_id: '' }],
       ['data that is not an object', 'nope'],
     ])('an event with %s is ignored', async (_name, data) => {
-      expect(await handleDeliveryEvent(db, { type: 'email.delivered', data }, NOW)).toBe('ignored');
+      expect(await handleDeliveryEvent(db, { type: 'email.delivered', data }, NOW, quiet())).toBe('ignored');
     });
 
     it.each(['email.opened', 'email.clicked', 'email.delivery_delayed', 'contact.created', 'domain.updated', ''])('the type %j is ignored', async (type) => {
       const s = await seedSeller();
       const { emailId, resendId } = await sentEmail(s);
-      expect(await handleDeliveryEvent(db, { type, data: { email_id: resendId } }, NOW)).toBe('ignored');
+      expect(await handleDeliveryEvent(db, { type, data: { email_id: resendId } }, NOW, quiet())).toBe('ignored');
       expect((await emailRow(emailId)).status).toBe('sent');
     });
 
-    it('the tick marks an unmatched event ignored and counts it', async () => {
-      const svixId = await receive('email.delivered', { email_id: `re_${randomUUID()}` });
+    it('the tick marks an unmatched event ignored and counts it, once it is too old to be waiting for its email row', async () => {
+      const svixId = await receive('email.delivered', { email_id: `re_${randomUUID()}` }, { receivedAt: new Date(NOW.getTime() - STALE) });
       expect(await processEmailEvents(deps().deps)).toEqual({ done: 0, ignored: 1, failed: 0 });
       expect(await webhookRow(svixId)).toMatchObject({ status: 'ignored', processedAt: NOW });
     });
   });
 
+  describe('an event that names an email we have not recorded yet (Resend can answer before the send tick commits resend_id)', () => {
+    const delivered = (ageMs: number) => ({ type: 'email.delivered', data: { email_id: 're_not_yet' }, receivedAt: new Date(NOW.getTime() - ageMs) });
+
+    it('is retried while it is under 5 minutes old, and ignored from 5 minutes on', async () => {
+      expect(await handleDeliveryEvent(db, delivered(0), NOW, quiet())).toBe('retry');
+      expect(await handleDeliveryEvent(db, delivered(5 * MINUTE - 1000), NOW, quiet())).toBe('retry');
+      expect(await handleDeliveryEvent(db, delivered(5 * MINUTE), NOW, quiet())).toBe('ignored');
+      expect(await handleDeliveryEvent(db, delivered(6 * MINUTE), NOW, quiet())).toBe('ignored');
+    });
+
+    it('is never retried when there is nothing to wait for: an unhandled type, or no email id', async () => {
+      const young = new Date(NOW.getTime() - MINUTE);
+      expect(await handleDeliveryEvent(db, { type: 'email.opened', data: { email_id: 're_not_yet' }, receivedAt: young }, NOW, quiet())).toBe('ignored');
+      expect(await handleDeliveryEvent(db, { type: 'email.delivered', data: {}, receivedAt: young }, NOW, quiet())).toBe('ignored');
+    });
+
+    it('an email.sent stored a minute ago with no row yet is retried; once the row commits its resend_id the next due tick sets the message id', async () => {
+      const s = await seedSeller();
+      const { emailId } = await sentEmail(s, { status: 'sending' });
+      const resendId = `re_${randomUUID()}`;
+      await t.pool.query('update email_messages set resend_id = null, sent_at = null where id = $1', [emailId]);
+      const svixId = await receive('email.sent', { email_id: resendId, message_id: '<abc123@resend.example>' });
+
+      expect(await processEmailEvents(deps().deps)).toEqual({ done: 0, ignored: 0, failed: 0 });
+      expect(await webhookRow(svixId)).toMatchObject({ status: 'pending', attempts: 1, lastError: 'retry', nextAttemptAt: new Date(NOW.getTime() + MINUTE) });
+      expect((await emailRow(emailId)).messageId).toBeNull();
+
+      await t.pool.query(`update email_messages set status = 'sent', resend_id = $2 where id = $1`, [emailId, resendId]); // the send tick's markSent lands
+      expect(await processEmailEvents(deps({ now: new Date(NOW.getTime() + 30_000) }).deps)).toEqual({ done: 0, ignored: 0, failed: 0 }); // not due yet
+      expect(await processEmailEvents(deps({ now: new Date(NOW.getTime() + MINUTE) }).deps)).toEqual({ done: 1, ignored: 0, failed: 0 });
+      expect(await emailRow(emailId)).toMatchObject({ status: 'sent', messageId: '<abc123@resend.example>' });
+      expect(await webhookRow(svixId)).toMatchObject({ status: 'done', lastError: null });
+    });
+
+    it('one that never matches backs off 1, 2 and 4 minutes, then is ignored (it is over 5 minutes old by then)', async () => {
+      const svixId = await receive('email.delivered', { email_id: 're_never' });
+      const tickAt = (minutes: number) => processEmailEvents(deps({ now: new Date(NOW.getTime() + minutes * MINUTE) }).deps);
+      for (const [minutes, attempts] of [[0, 1], [1, 2], [3, 3]] as const) {
+        expect(await tickAt(minutes)).toEqual({ done: 0, ignored: 0, failed: 0 });
+        expect(await webhookRow(svixId)).toMatchObject({ status: 'pending', attempts, lastError: 'retry' });
+      }
+      expect(await tickAt(7)).toEqual({ done: 0, ignored: 1, failed: 0 });
+      expect(await webhookRow(svixId)).toMatchObject({ status: 'ignored', attempts: 3 });
+    });
+  });
+
   describe('the tick', () => {
     it('claims only pending events that are due, oldest first, up to the batch size', async () => {
-      const old = await receive('email.delivered', { email_id: 're_a' }, { receivedAt: new Date(NOW.getTime() - 3 * MINUTE) });
-      const mid = await receive('email.delivered', { email_id: 're_b' }, { receivedAt: new Date(NOW.getTime() - 2 * MINUTE) });
-      const later = await receive('email.delivered', { email_id: 're_c' }, { receivedAt: new Date(NOW.getTime() - MINUTE) });
-      const notDue = await receive('email.delivered', { email_id: 're_d' }, { nextAttemptAt: new Date(NOW.getTime() + MINUTE), receivedAt: new Date(NOW.getTime() - 4 * MINUTE) });
-      const done = await receive('email.delivered', { email_id: 're_e' }, { receivedAt: new Date(NOW.getTime() - 5 * MINUTE) });
+      const at = (minutesBeforeStale: number) => new Date(NOW.getTime() - STALE - minutesBeforeStale * MINUTE);
+      const old = await receive('email.delivered', { email_id: 're_a' }, { receivedAt: at(3) });
+      const mid = await receive('email.delivered', { email_id: 're_b' }, { receivedAt: at(2) });
+      const later = await receive('email.delivered', { email_id: 're_c' }, { receivedAt: at(1) });
+      const notDue = await receive('email.delivered', { email_id: 're_d' }, { nextAttemptAt: new Date(NOW.getTime() + MINUTE), receivedAt: at(4) });
+      const done = await receive('email.delivered', { email_id: 're_e' }, { receivedAt: at(5) });
       await t.pool.query(`update resend_webhook_events set status = 'done' where svix_id = $1`, [done]);
 
       expect(await processEmailEvents(deps({ batch: 2 }).deps)).toEqual({ done: 0, ignored: 2, failed: 0 });
@@ -423,8 +496,26 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
     });
 
     it('with no batch size given it still works through a normal backlog', async () => {
-      for (let i = 0; i < 25; i += 1) await receive('email.delivered', { email_id: `re_${i}` });
+      for (let i = 0; i < 25; i += 1) await receive('email.delivered', { email_id: `re_${i}` }, { receivedAt: new Date(NOW.getTime() - STALE) });
       expect(await processEmailEvents(deps().deps)).toEqual({ done: 0, ignored: 25, failed: 0 });
+    });
+
+    it('skips an event another tick holds instead of waiting for it, and takes the next one', async () => {
+      const held = await receive('email.delivered', { email_id: 're_held' }, { receivedAt: new Date(NOW.getTime() - STALE - 2 * MINUTE) });
+      const free = await receive('email.delivered', { email_id: 're_free' }, { receivedAt: new Date(NOW.getTime() - STALE - MINUTE) });
+      const holder = await t.pool.connect();
+      try {
+        await holder.query('begin');
+        await holder.query('select 1 from resend_webhook_events where svix_id = $1 for update', [held]);
+        // Without `skip locked` this tick would wait for the holder, and so would a tick queued behind a slow one.
+        const outcome = await Promise.race([processEmailEvents(deps().deps), new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 1500))]);
+        expect(outcome).toEqual({ done: 0, ignored: 1, failed: 0 });
+      } finally {
+        await holder.query('rollback');
+        holder.release();
+      }
+      expect((await webhookRow(held)).status).toBe('pending');
+      expect((await webhookRow(free)).status).toBe('ignored');
     });
 
     it('takes a 10-minute lease on a claimed event, so a tick that dies mid-way hands it back later and not at once', async () => {
@@ -528,7 +619,7 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
 
       it('one event that throws does not stop the others in the batch', async () => {
         const bad = await receive('email.received', { email_id: 're_bad' }, { receivedAt: new Date(NOW.getTime() - 2 * MINUTE) });
-        const good = await receive('email.delivered', { email_id: `re_${randomUUID()}` }, { receivedAt: new Date(NOW.getTime() - MINUTE) });
+        const good = await receive('email.delivered', { email_id: `re_${randomUUID()}` }, { receivedAt: new Date(NOW.getTime() - STALE) });
         expect(await processEmailEvents(deps({ onReceived: failing() }).deps)).toEqual({ done: 0, ignored: 1, failed: 1 });
         expect((await webhookRow(bad)).status).toBe('pending');
         expect((await webhookRow(good)).status).toBe('ignored');
@@ -539,14 +630,8 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
         const { emailId, resendId } = await sentEmail(s);
         const svixId = await receive('email.complained', { email_id: resendId });
         // The last database step of a complaint (the tenant pause) fails: the stop and the status change before it must not stay.
-        await t.pool.query(`create or replace function test_block_org_update() returns trigger language plpgsql as $$ begin raise exception 'blocked for the test'; end $$`);
-        await t.pool.query(`create trigger test_block_org_update before update on organizations for each row execute function test_block_org_update()`);
         const first = deps();
-        try {
-          expect(await processEmailEvents(first.deps)).toEqual({ done: 0, ignored: 0, failed: 1 });
-        } finally {
-          await t.pool.query('drop trigger test_block_org_update on organizations');
-        }
+        expect(await failingWrites('organizations', 'update', () => processEmailEvents(first.deps))).toEqual({ done: 0, ignored: 0, failed: 1 });
         expect(first.alert).not.toHaveBeenCalled();
         expect((await emailRow(emailId)).status).toBe('sent');
         expect(await conversationRow(s.conv.id)).toMatchObject({ status: 'open', stopReason: null });
@@ -559,6 +644,75 @@ describe.skipIf(!pgLane)('webhook events (real Postgres)', () => {
         expect((await conversationRow(s.conv.id)).status).toBe('stopped');
         expect(samEmailSettings({ settings: await settingsOf(s.orgId) }).pausedAt).not.toBeNull();
         expect(retry.alert).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('an event that fails for good raises a job_dead_lettered alert', () => {
+      const lastAttempt = { attempts: 7 };
+
+      it('a complaint failing its 8th attempt: one critical alert carrying the event id and type only', async () => {
+        const s = await seedSeller('complained@resend.dev');
+        const { resendId } = await sentEmail(s);
+        const svixId = await receive('email.complained', { email_id: resendId }, lastAttempt);
+        const { deps: d, alert, log } = deps();
+
+        expect(await failingWrites('organizations', 'update', () => processEmailEvents(d))).toEqual({ done: 0, ignored: 0, failed: 1 });
+
+        expect(await webhookRow(svixId)).toMatchObject({ status: 'failed', attempts: 8 });
+        expect(alert).toHaveBeenCalledTimes(1);
+        const event = alert.mock.calls[0]![0];
+        expect(event).toMatchObject({ kind: 'job_dead_lettered', severity: 'critical', orgId: s.orgId });
+        expect(event.context).toEqual({ svixId, type: 'email.complained' });
+        const everything = JSON.stringify([event, log.info.mock.calls, log.warn.mock.calls, log.error.mock.calls]);
+        for (const secret of ['complained@resend.dev', SUBJECT, BODY, 'Pat Seller']) expect(everything).not.toContain(secret);
+      });
+
+      it('any other type is a warning', async () => {
+        const s = await seedSeller('bounced@resend.dev');
+        const { resendId } = await sentEmail(s);
+        await receive('email.bounced', { email_id: resendId }, lastAttempt);
+        const { deps: d, alert } = deps();
+        expect(await failingWrites('conversation_events', 'insert', () => processEmailEvents(d))).toEqual({ done: 0, ignored: 0, failed: 1 });
+        expect(alert).toHaveBeenCalledTimes(1);
+        expect(alert.mock.calls[0]![0]).toMatchObject({ kind: 'job_dead_lettered', severity: 'warning', orgId: s.orgId });
+      });
+
+      it('is not raised while the event still has attempts left', async () => {
+        const s = await seedSeller('complained@resend.dev');
+        const { resendId } = await sentEmail(s);
+        const svixId = await receive('email.complained', { email_id: resendId }, { attempts: 6 });
+        const { deps: d, alert } = deps();
+        await failingWrites('organizations', 'update', () => processEmailEvents(d));
+        expect(await webhookRow(svixId)).toMatchObject({ status: 'pending', attempts: 7 });
+        expect(alert).not.toHaveBeenCalled();
+      });
+
+      it('an event that names no email of ours is logged by id and raises no alert (there is no tenant to raise it for)', async () => {
+        const svixId = await receive('email.received', { email_id: 're_in' }, lastAttempt);
+        const onReceived = vi.fn(async (): Promise<'done'> => {
+          throw new BoomError('boom for delivered@resend.dev');
+        });
+        const { deps: d, alert, log } = deps({ onReceived });
+        expect(await processEmailEvents(d)).toEqual({ done: 0, ignored: 0, failed: 1 });
+        expect(await webhookRow(svixId)).toMatchObject({ status: 'failed' });
+        expect(alert).not.toHaveBeenCalled();
+        expect(log.error).toHaveBeenCalledWith({ svixId, type: 'email.received' }, expect.stringContaining('no alert'));
+        expect(JSON.stringify(log.error.mock.calls)).not.toContain('resend.dev');
+      });
+
+      it('an alert that throws never fails the tick: the event is failed and the error is logged by name', async () => {
+        const s = await seedSeller('complained@resend.dev');
+        const { resendId } = await sentEmail(s);
+        const svixId = await receive('email.complained', { email_id: resendId }, lastAttempt);
+        const alert = vi.fn(async () => {
+          throw new BoomError('webhook host unreachable');
+        });
+        const { deps: d, log } = deps({ alert });
+        expect(await failingWrites('organizations', 'update', () => processEmailEvents(d))).toEqual({ done: 0, ignored: 0, failed: 1 });
+        expect(alert).toHaveBeenCalledTimes(1);
+        expect(await webhookRow(svixId)).toMatchObject({ status: 'failed' });
+        expect(JSON.stringify(log.error.mock.calls)).not.toContain('unreachable');
+        expect(JSON.stringify(log.error.mock.calls)).toContain('BoomError');
       });
     });
   });
