@@ -3,8 +3,8 @@ import { AppointmentSlots, type AiCallBookingSettings, type AppointmentSlot, typ
 import { SalesforceApiError } from '@cti/salesforce';
 import { DEFAULT_AI_CALL_BOOKING, DEFAULT_BOOKING_ROUTING } from '../settings.js';
 import {
-  aiBooking, ANAHEIM, BLAKE, CHANCE, eventRow, fakeBookedDb, fakeMaps, GRANT, IMPERIAL_PROPERTY, OC_PROPERTY, offerSalesforce, PLACES,
-  SD_CITY_ONLY, SD_PROPERTY, SETH, THOMAS, USERS, usersWithInactive,
+  aiBooking, ANAHEIM, BLAKE, CHANCE, eventRow, fakeBookedDb, fakeMaps, GRANT, IMPERIAL_PROPERTY, OC_PROPERTY, OFFICE_ADDRESS, offerSalesforce,
+  PLACES, SD_CITY_ONLY, SD_PROPERTY, SD_START_ADDRESS, SETH, THOMAS, USERS, usersWithInactive,
 } from '../test/fake-offer.js';
 import { fakeSalesforce } from '../test/fake-sf-client.js';
 import { BUSY_ROW_LIMIT } from './calendar.js';
@@ -42,7 +42,7 @@ async function offerFor(address: string | null, o: OfferCase = {}) {
   const maps = o.maps === undefined ? google.maps : o.maps;
   const booked = fakeBookedDb(o.booked ?? []);
   const offer = await routedOffer({ db: booked.db, maps, log }, cal, { orgId: ORG, booking: b, now: NOW, address, consultations: o.consultations ?? null });
-  return { offer, log, sf, cal, geocoded: google.geocoded, bookedReads: booked.reads };
+  return { offer, log, sf, cal, geocoded: google.geocoded, origins: google.origins, bookedReads: booked.reads };
 }
 
 const inPerson = (slots: readonly AppointmentSlot[]) => slots.filter((s) => s.kind === 'walkthrough');
@@ -64,6 +64,17 @@ describe('routedOffer', () => {
     expect(repAt(offer.slots, TUE_9)).toBe(THOMAS);
     expect(AppointmentSlots.safeParse(offer.slots).success).toBe(true);
     expect(offer.ownerSfUserId).toBe(offer.slots[0]!.specialistSfUserId);
+  });
+
+  it("each region's reps drive from where they start the day: SD from San Diego, LA from the Irvine office", async () => {
+    const sd = await offerFor(SD_PROPERTY);
+    expect(inPerson(sd.offer.slots).length).toBeGreaterThan(0);
+    expect(sd.origins).toContainEqual({ address: SD_START_ADDRESS });
+    expect(sd.origins).not.toContainEqual({ address: OFFICE_ADDRESS });
+    const la = await offerFor(OC_PROPERTY);
+    expect(inPerson(la.offer.slots).length).toBeGreaterThan(0);
+    expect(la.origins).toContainEqual({ address: OFFICE_ADDRESS });
+    expect(la.origins).not.toContainEqual({ address: SD_START_ADDRESS });
   });
 
   it('Orange County → LA reps', async () => {

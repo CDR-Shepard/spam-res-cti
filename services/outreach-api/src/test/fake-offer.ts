@@ -4,7 +4,7 @@
  * places, and a database that answers the AI-bookings read with stored appointments.
  */
 import type { Db } from '@cti/db';
-import type { Geocoded, MapsClient } from '../appointments/maps.js';
+import type { Geocoded, MapsClient, Place } from '../appointments/maps.js';
 import { fakeSalesforce, type FakeSf, type QueryRoute } from './fake-sf-client.js';
 import { rowsWhere } from './fake-soql-where.js';
 
@@ -32,6 +32,8 @@ export const eventRow = (OwnerId: string, start: string, end: string, over: Row 
 
 // Made-up places.
 export const OFFICE_ADDRESS = '18872 MacArthur Blvd #220, Irvine, CA 92612';
+/** Where the SD reps start their day (DEFAULT_BOOKING_ROUTING). */
+export const SD_START_ADDRESS = '7480 Miramar Rd, San Diego, CA';
 export const SD_PROPERTY = '123 Palm Ave, San Diego, CA 92101';
 export const OC_PROPERTY = '456 Fake Oak Ave, Irvine, CA 92614';
 export const IMPERIAL_PROPERTY = '789 Desert Rd, El Centro, CA 92243';
@@ -43,6 +45,7 @@ export const ANAHEIM = '100 Main St, Anaheim, CA 92805';
 const at = (lat: number, lng: number, county: string): Geocoded => ({ point: { lat, lng }, county, state: 'CA' });
 export const PLACES: Readonly<Record<string, Geocoded>> = {
   [OFFICE_ADDRESS]: at(33.6595, -117.8608, 'Orange'),
+  [SD_START_ADDRESS]: at(32.8826, -117.1564, 'San Diego'),
   [SD_PROPERTY]: at(32.7157, -117.1611, 'San Diego'),
   [OC_PROPERTY]: at(33.6846, -117.8265, 'Orange'),
   [IMPERIAL_PROPERTY]: at(32.792, -115.563, 'Imperial'),
@@ -65,9 +68,13 @@ export function offerSalesforce(o: { users?: readonly Row[]; events?: readonly R
   });
 }
 
-/** Google Maps answering geocodes from `places` (an Error is thrown) and every route as 15 minutes, unless `routes` is an Error to throw. */
+/**
+ * Google Maps answering geocodes from `places` (an Error is thrown) and every route as 15 minutes, unless `routes` is an Error to
+ * throw. `origins` collects every origin a route matrix was asked from.
+ */
 export function fakeMaps(places: Readonly<Record<string, Geocoded | Error>> = PLACES, o: { routes?: Error } = {}) {
   const geocoded: string[] = [];
+  const origins: Place[] = [];
   const maps: MapsClient = {
     async geocode(address) {
       geocoded.push(address);
@@ -75,12 +82,13 @@ export function fakeMaps(places: Readonly<Record<string, Geocoded | Error>> = PL
       if (found instanceof Error) throw found;
       return found ?? null;
     },
-    async routeMinutes(origins, destinations) {
+    async routeMinutes(from, destinations) {
+      origins.push(...from);
       if (o.routes) throw o.routes;
-      return { minutes: origins.map(() => destinations.map(() => 15)), requestedElements: origins.length * destinations.length };
+      return { minutes: from.map(() => destinations.map(() => 15)), requestedElements: from.length * destinations.length };
     },
   };
-  return { maps, geocoded };
+  return { maps, geocoded, origins };
 }
 
 /** A database whose one select (the AI-bookings read) answers these stored `ai_calls.appointment` values. */

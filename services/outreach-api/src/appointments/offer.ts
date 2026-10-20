@@ -183,7 +183,7 @@ async function regionOffer(deps: OfferDeps & { maps: MapsClient }, cal: ReadCale
   // No active rep in the region: no regular times, but Grant's high-priority offer still goes.
   if (reps.length === 0) return { ...noOffer('no_reps', p.region.key), priority, ownerSfUserId: priority?.specialistSfUserId ?? null };
   const routing: RoutingInput = { region: p.region, reps, booking: i.booking, now: i.now };
-  const office: Place = { address: cal.routing.officeAddress };
+  const office: Place = { address: p.region.startAddress ?? cal.routing.officeAddress };
   // One timer per offer: it counts this offer's route elements and stays on straight lines once Routes has failed.
   const drive = street ? driveTimer(deps.maps, office, deps.log) : null;
   const inPerson = drive ? await inPersonOrNone({ ...routing, property: { point: p.geo.point }, office, drive }, i.orgId, deps.log) : [];

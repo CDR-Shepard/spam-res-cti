@@ -18,12 +18,13 @@ const blake = { id: '0058X00000FA8tLQAT', name: 'Blake Kossuth', title: null, is
 const seth = { id: '0055f000005qXVfAAM', name: 'Seth Boisvert', title: null, isActive: true };
 const thomas = { id: '0055f000005qYO6AAM', name: 'Thomas Wilkinson', title: null, isActive: true };
 const OFFICE = '18872 MacArthur Blvd #220, Irvine, CA 92612';
+const SD_START = '7480 Miramar Rd, San Diego, CA';
 const ROUTING: RoutingReadiness = {
   officeAddress: OFFICE,
   mapsConfigured: true,
   regions: [
-    { key: 'LA', counties: ['Los Angeles', 'Orange', 'Riverside', 'San Bernardino'], startTimes: ['09:00', '11:00', '13:00', '15:00', '17:00', '19:00'], reps: [chance, blake] },
-    { key: 'SD', counties: ['San Diego'], startTimes: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'], reps: [seth, thomas] },
+    { key: 'LA', counties: ['Los Angeles', 'Orange', 'Riverside', 'San Bernardino'], startTimes: ['09:00', '11:00', '13:00', '15:00', '17:00', '19:00'], startAddress: OFFICE, reps: [chance, blake] },
+    { key: 'SD', counties: ['San Diego'], startTimes: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'], startAddress: SD_START, reps: [seth, thomas] },
   ],
 };
 
@@ -138,7 +139,8 @@ describe('AiCallSettingsCard', () => {
       expect(sd.getByText('Seth Boisvert')).toBeInTheDocument();
       expect(sd.getByText('Thomas Wilkinson')).toBeInTheDocument();
       expect(sd.getByText('9 AM, 10 AM, 11 AM, 12 PM, 1 PM, 2 PM, 3 PM, 4 PM')).toBeInTheDocument();
-      expect(screen.getByText(`Reps start from the office: ${OFFICE}.`)).toBeInTheDocument();
+      expect(screen.getByText(`LA reps start from ${OFFICE}.`)).toBeInTheDocument();
+      expect(screen.getByText(`SD reps start from ${SD_START}.`)).toBeInTheDocument();
       expect(screen.queryByText(MAPS_MISSING)).not.toBeInTheDocument();
     });
 
@@ -158,7 +160,7 @@ describe('AiCallSettingsCard', () => {
         regions: [
           ROUTING.regions[0]!,
           { ...ROUTING.regions[1]!, reps: [{ ...seth, isActive: false }, { ...thomas, isActive: false }] },
-          { key: 'IE', counties: ['Invented'], startTimes: ['10:00'], reps: [] },
+          { key: 'IE', counties: ['Invented'], startTimes: ['10:00'], startAddress: OFFICE, reps: [] },
         ],
       };
       stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant], [READINESS]: { ...READY, routing } });

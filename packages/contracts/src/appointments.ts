@@ -205,9 +205,12 @@ function countiesInOneRegion(regions: readonly { counties: readonly string[] }[]
   return true;
 }
 
+const StartAddress = z.string().trim().min(10).max(200);
+
 /**
  * One booking region: the counties it covers, the reps who take its consultations, and the start times offered each day (in
  * ROUTING_ZONE). `reps` may be empty while an admin is still setting a region up; routing then offers nothing for it.
+ * `startAddress` is where the region's reps start their day; without one they start from the routing's `officeAddress`.
  */
 export const BookingRegion = z
   .object({
@@ -215,20 +218,26 @@ export const BookingRegion = z
     counties: z.array(z.string().trim().min(2).max(40)).min(1).max(12),
     reps: z.array(z.string().regex(SF_USER_ID)).max(6),
     startTimes: z.array(StartTime).min(1).max(24).refine(strictlyAscending, { message: 'start times strictly ascending' }),
+    startAddress: StartAddress.optional(),
   })
   .strict();
 export type BookingRegion = z.infer<typeof BookingRegion>;
 
-/** Rep-per-region booking: every rep drives from `officeAddress`; a seller's county picks the region. */
+/** Rep-per-region booking: a rep drives from their region's `startAddress`, else `officeAddress`; a seller's county picks the region. */
 export const BookingRouting = z
   .object({
-    officeAddress: z.string().trim().min(10).max(200),
+    officeAddress: StartAddress,
     regions: z.array(BookingRegion).min(1).max(6),
   })
   .strict()
   .refine((r) => new Set(r.regions.map((g) => g.key)).size === r.regions.length, { message: 'region keys unique' })
   .refine((r) => countiesInOneRegion(r.regions), { message: 'a county belongs to one region' });
 export type BookingRouting = z.infer<typeof BookingRouting>;
+
+/** Where the reps of region `key` start their day: the region's own start address, else the office (also for an unknown key). */
+export function regionStartAddress(routing: BookingRouting, key: string | undefined): string {
+  return routing.regions.find((r) => r.key === key)?.startAddress ?? routing.officeAddress;
+}
 
 export const AiCallBookingSettings = z
   .object({
@@ -260,12 +269,21 @@ export type AiCallSettings = z.infer<typeof AiCallSettings>;
 export const SalesforceUserOption = z.object({ id: z.string(), name: z.string(), title: z.string().nullable(), isActive: z.boolean() });
 export type SalesforceUserOption = z.infer<typeof SalesforceUserOption>;
 
-/** What the settings card shows about rep routing: the office, whether Google Maps is configured, and each region's reps by name. */
+/**
+ * What the settings card shows about rep routing: the office, whether Google Maps is configured, and each region's reps by name
+ * and where they start their day (`regionStartAddress`).
+ */
 export const RoutingReadiness = z.object({
   officeAddress: z.string(),
   mapsConfigured: z.boolean(),
   regions: z.array(
-    z.object({ key: RegionKey, counties: z.array(z.string()), startTimes: z.array(z.string()), reps: z.array(SalesforceUserOption) }),
+    z.object({
+      key: RegionKey,
+      counties: z.array(z.string()),
+      startTimes: z.array(z.string()),
+      startAddress: z.string(),
+      reps: z.array(SalesforceUserOption),
+    }),
   ),
 });
 export type RoutingReadiness = z.infer<typeof RoutingReadiness>;

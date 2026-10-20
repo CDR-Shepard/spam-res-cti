@@ -139,6 +139,23 @@ describe.skipIf(!pgLane)('runWritebacks on Opportunities (real Postgres)', () =>
     expect(g.creates.find((c) => c.sobject === 'Event')!.fields).toMatchObject({ Subject: 'Property Consultation', Location: '12 Oak St, Fresno, CA 93701' });
   });
 
+  it("a routed SD visit with nothing earlier that day: the drive in is timed from the SD reps' start, not the Irvine office", async () => {
+    const routed = { ...PHONE_BOOKING, slotId: 'w1', kind: 'walkthrough' as const, start: '2026-10-07T16:00:00.000Z', end: '2026-10-07T17:00:00.000Z', addressConfirmed: true, region: 'SD' };
+    const s = await seedWriteback(db, { sfObject: 'Opportunity', outcome: 'appointment_set', researchStatus: 'Closed Lost', appointment: routed });
+    const f = withAddress(fakeOrg(oppState(s.recordId)));
+    const origins: unknown[] = [];
+    const maps: MapsClient = {
+      geocode: async () => null,
+      routeMinutes: async (from, destinations) => {
+        origins.push(...from);
+        return { minutes: from.map(() => destinations.map(() => 20)), requestedElements: from.length * destinations.length };
+      },
+    };
+    await runWritebacks(depsFor(db, f, { maps }));
+    expect(origins).toEqual([{ address: '7480 Miramar Rd, San Diego, CA' }]);
+    expect(f.creates.find((c) => c.sobject === 'Event')).toBeDefined();
+  });
+
   it('final review I-1: the slot is taken and the conflict Task is refused: the post says the Task was refused, never that it was sent', async () => {
     const s = await booked();
     const f = fakeOrg({ ...oppState(s.recordId), busy: [{ StartDateTime: '2026-10-07T17:45:00.000+0000', EndDateTime: '2026-10-07T18:30:00.000+0000', IsAllDayEvent: false }] });

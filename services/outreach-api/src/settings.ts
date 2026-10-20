@@ -69,7 +69,7 @@ function deepFreeze<T>(value: T): T {
 }
 
 /**
- * Rep routing defaults (the spec's): every rep starts from the office; a seller's county picks the region; each region has its
+ * Rep routing defaults (the spec's): LA reps start from the office, SD reps from San Diego (owner, 2026-10-20); a seller's county picks the region; each region has its
  * reps in tie-break order and the start times offered each day (Pacific). Counties are matched by name with " County" removed.
  * Frozen all the way down: a caller that needs to change one copies it (`bookingSettings` hands out copies).
  */
@@ -87,6 +87,7 @@ export const DEFAULT_BOOKING_ROUTING: Readonly<BookingRouting> = deepFreeze({
       counties: ['San Diego'],
       reps: ['0055f000005qXVfAAM', '0055f000005qYO6AAM'],
       startTimes: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'],
+      startAddress: '7480 Miramar Rd, San Diego, CA',
     },
   ],
 } satisfies BookingRouting);

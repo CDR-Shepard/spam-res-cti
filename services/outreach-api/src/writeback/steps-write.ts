@@ -3,7 +3,7 @@
  * conflict/refusal Task, the one PATCH (plan + booking moves + AI Last Call Changes), and the Chatter post. Each saves its
  * result before the next runs.
  */
-import type { BookedAppointment } from '@cti/contracts';
+import { regionStartAddress, type BookedAppointment } from '@cti/contracts';
 import { soqlEscape } from '@cti/salesforce';
 import type { OwnerUser } from '../appointments/calendar.js';
 import { SF_ID } from '../campaigns/records.js';
@@ -58,7 +58,7 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
       ...(owner ? { ownerTimeZone: owner.timeZone } : {}),
       now: run.deps.now,
       maps: run.deps.maps,
-      officeAddress: bookingRouting(booking).officeAddress,
+      officeAddress: regionStartAddress(bookingRouting(booking), a.booked.region),
       log: run.deps.log,
     });
     const eventId = result.kind === 'created' || result.kind === 'existing' ? result.eventId : undefined;

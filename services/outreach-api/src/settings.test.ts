@@ -284,7 +284,7 @@ describe('outreachSettings', () => {
     });
 
     describe('routing defaults', () => {
-      it('DEFAULT_BOOKING_ROUTING parses with the contract and is the spec\'s regions, reps, start times and office', () => {
+      it('DEFAULT_BOOKING_ROUTING parses with the contract and is the spec\'s regions, reps, start times and start places', () => {
         expect(BookingRouting.safeParse(DEFAULT_BOOKING_ROUTING).success).toBe(true);
         expect(DEFAULT_BOOKING_ROUTING).toEqual({
           officeAddress: '18872 MacArthur Blvd #220, Irvine, CA 92612',
@@ -300,6 +300,8 @@ describe('outreachSettings', () => {
               counties: ['San Diego'],
               reps: [SETH, THOMAS],
               startTimes: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'],
+              // Owner, 2026-10-20: Seth and Thomas start from San Diego, not the Irvine office.
+              startAddress: '7480 Miramar Rd, San Diego, CA',
             },
           ],
         });

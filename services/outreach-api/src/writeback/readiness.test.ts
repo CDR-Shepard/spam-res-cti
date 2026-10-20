@@ -24,6 +24,7 @@ const rep = (id: string, name: string, isActive = true) => ({ id, name, title: n
 const LA = { key: 'LA', counties: ['Los Angeles', 'Orange', 'Riverside', 'San Bernardino'], startTimes: ['09:00', '11:00', '13:00', '15:00', '17:00', '19:00'] };
 const SD = { key: 'SD', counties: ['San Diego'], startTimes: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'] };
 const OFFICE = '18872 MacArthur Blvd #220, Irvine, CA 92612';
+const SD_START = '7480 Miramar Rd, San Diego, CA';
 
 const object = (name: string, over: Partial<SObjectDescribe> = {}): SObjectDescribe => ({ name, fields: [], createable: true, ...over });
 const recordTypes = (name: string) => [
@@ -67,8 +68,8 @@ describe('writebackReadiness', () => {
         officeAddress: OFFICE,
         mapsConfigured: true,
         regions: [
-          { ...LA, reps: [rep(CHANCE, 'Chance Lanier'), rep(BLAKE, 'Blake Kossuth')] },
-          { ...SD, reps: [rep(SETH, 'Seth Boisvert'), rep(THOMAS, 'Thomas Wilkinson')] },
+          { ...LA, startAddress: OFFICE, reps: [rep(CHANCE, 'Chance Lanier'), rep(BLAKE, 'Blake Kossuth')] },
+          { ...SD, startAddress: SD_START, reps: [rep(SETH, 'Seth Boisvert'), rep(THOMAS, 'Thomas Wilkinson')] },
         ],
       },
     });
@@ -146,16 +147,22 @@ describe('writebackReadiness', () => {
       ]);
     });
 
-    it('reads the routing a booking blob carries, in its region and rep order', async () => {
+    it('reads the routing a booking blob carries, in its region and rep order; a region without a start address starts at the office', async () => {
       const routing = {
         officeAddress: '1 Invented Way, Testville, CA 90000',
-        regions: [{ key: 'SD', counties: ['San Diego'], reps: [THOMAS, SETH], startTimes: ['10:30'] }],
+        regions: [
+          { key: 'SD', counties: ['San Diego'], reps: [THOMAS, SETH], startTimes: ['10:30'] },
+          { key: 'NC', counties: ['Kern'], reps: [CHANCE], startTimes: ['09:00'], startAddress: '3 Invented Way, Testville, CA 90000' },
+        ],
       };
       const r = await check(org(), { ...BOOKING, routing }, false);
       expect(r.routing).toEqual({
         officeAddress: '1 Invented Way, Testville, CA 90000',
         mapsConfigured: false,
-        regions: [{ key: 'SD', counties: ['San Diego'], startTimes: ['10:30'], reps: [rep(THOMAS, 'Thomas Wilkinson'), rep(SETH, 'Seth Boisvert')] }],
+        regions: [
+          { key: 'SD', counties: ['San Diego'], startTimes: ['10:30'], startAddress: '1 Invented Way, Testville, CA 90000', reps: [rep(THOMAS, 'Thomas Wilkinson'), rep(SETH, 'Seth Boisvert')] },
+          { key: 'NC', counties: ['Kern'], startTimes: ['09:00'], startAddress: '3 Invented Way, Testville, CA 90000', reps: [rep(CHANCE, 'Chance Lanier')] },
+        ],
       });
     });
   });

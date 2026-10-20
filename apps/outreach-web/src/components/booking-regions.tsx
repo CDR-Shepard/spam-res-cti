@@ -1,7 +1,7 @@
 /**
  * The booking regions on the "AI calls" settings card, read-only (the table is defined in code in this step): each region's
- * counties, reps and start times, a warning for a region with no active rep, the office every rep starts from, and a warning
- * when outreach-api has no Google Maps key.
+ * counties, reps and start times, a warning for a region with no active rep, where each region's reps start their day, and a
+ * warning when outreach-api has no Google Maps key.
  */
 import type { RoutingReadiness } from '@cti/contracts';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -56,7 +56,7 @@ export function RegionsSection({ routing }: { routing: RoutingReadiness }) {
         </Table>
       </div>
       {unstaffed.map((r) => <p key={r.key} className="text-sm font-medium text-destructive">{noActiveRepWords(r.key)}</p>)}
-      <p className="text-xs text-muted-foreground">{`Reps start from the office: ${routing.officeAddress}.`}</p>
+      {routing.regions.map((r) => <p key={r.key} className="text-xs text-muted-foreground">{`${r.key} reps start from ${r.startAddress}.`}</p>)}
       {!routing.mapsConfigured && <p className="text-sm font-medium text-destructive">{MAPS_MISSING}</p>}
     </section>
   );

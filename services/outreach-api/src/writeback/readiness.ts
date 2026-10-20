@@ -4,8 +4,10 @@
  * Convert Leads permission, Account/Contact/Opportunity createable)? Also who takes high-priority bookings, and the booking
  * regions with their reps by name, the office and whether Google Maps is configured. Shown on the AI call settings card.
  */
-import type {
-  AiCallBookingSettings, BookingRouting, RoutingReadiness, SalesforceUserOption, WritebackReadiness, WritebackReadinessProblem,
+import {
+  regionStartAddress,
+  type AiCallBookingSettings, type BookingRouting, type RoutingReadiness, type SalesforceUserOption, type WritebackReadiness,
+  type WritebackReadinessProblem,
 } from '@cti/contracts';
 import { getUserInfo, SalesforceApiError, SalesforceAuthError, soqlEscape, type SalesforceClient, type SObjectDescribe } from '@cti/salesforce';
 import { readUsers, type OwnerUser } from '../appointments/calendar.js';
@@ -83,7 +85,13 @@ function routingReadiness(routing: BookingRouting, users: ReadonlyMap<string, Ow
   return {
     officeAddress: routing.officeAddress,
     mapsConfigured,
-    regions: routing.regions.map((r) => ({ key: r.key, counties: [...r.counties], startTimes: [...r.startTimes], reps: r.reps.map(repOption) })),
+    regions: routing.regions.map((r) => ({
+      key: r.key,
+      counties: [...r.counties],
+      startTimes: [...r.startTimes],
+      startAddress: regionStartAddress(routing, r.key),
+      reps: r.reps.map(repOption),
+    })),
   };
 }
 

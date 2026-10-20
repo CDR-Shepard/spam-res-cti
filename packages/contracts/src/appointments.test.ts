@@ -21,6 +21,7 @@ import {
   RoutingReadiness,
   SLOT_ID,
   WritebackReadiness,
+  regionStartAddress,
 } from './appointments.js';
 
 const GRANT = '0058X00000Fsx39QAB';
@@ -297,6 +298,8 @@ describe('booking regions and routing', () => {
     ['a one-letter key', withLa({ key: 'L' })],
     ['an office address of x', { ...routing, officeAddress: 'x' }],
     ['a 201-character office address', { ...routing, officeAddress: 'x'.repeat(201) }],
+    ['a region start address of x', withLa({ startAddress: 'x' })],
+    ['a 201-character region start address', withLa({ startAddress: 'x'.repeat(201) })],
     ['the same key twice', { ...routing, regions: [LA, { ...SD, key: 'LA' }] }],
     ['no regions', { ...routing, regions: [] }],
     ['seven regions', { ...routing, regions: Array.from({ length: 7 }, (_, i) => ({ ...LA, key: `R${'ABCDEFG'[i]}`, counties: [`County ${i}`] })) }],
@@ -311,6 +314,19 @@ describe('booking regions and routing', () => {
     ['an extra key on routing', { ...routing, extra: 1 }],
   ])('the routing schema rejects %s', (_label, body) => {
     expect(BookingRouting.safeParse(body).success).toBe(false);
+  });
+
+  it('a region may have its own start address; the routing keeps it', () => {
+    const sd = { ...SD, startAddress: '7480 Miramar Rd, San Diego, CA' };
+    expect(BookingRouting.parse({ ...routing, regions: [LA, sd] }).regions[1]).toEqual(sd);
+  });
+
+  it("regionStartAddress: the region's own start address, else the office (also for no or an unknown key)", () => {
+    const withSd = BookingRouting.parse({ ...routing, regions: [LA, { ...SD, startAddress: '7480 Miramar Rd, San Diego, CA' }] });
+    expect(regionStartAddress(withSd, 'SD')).toBe('7480 Miramar Rd, San Diego, CA');
+    expect(regionStartAddress(withSd, 'LA')).toBe(OFFICE);
+    expect(regionStartAddress(withSd, undefined)).toBe(OFFICE);
+    expect(regionStartAddress(withSd, 'NC')).toBe(OFFICE);
   });
 
   it('a region may have no reps yet', () => {
@@ -419,7 +435,7 @@ describe('routing readiness', () => {
   const readiness = {
     officeAddress: OFFICE,
     mapsConfigured: true,
-    regions: [{ key: 'LA', counties: LA.counties, startTimes: LA.startTimes, reps: [{ id: CHANCE, name: 'Chance Lanier', title: null, isActive: true }] }],
+    regions: [{ key: 'LA', counties: LA.counties, startTimes: LA.startTimes, startAddress: OFFICE, reps: [{ id: CHANCE, name: 'Chance Lanier', title: null, isActive: true }] }],
   };
 
   it('parses, and WritebackReadiness carries it as optional and nullable', () => {
