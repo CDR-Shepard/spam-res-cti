@@ -72,23 +72,37 @@ export const PLACEHOLDERS: Readonly<Record<AgentPromptKind, readonly AgentPrompt
     section('is_test', 'on for a test call placed from the app: {{#is_test}}…{{/is_test}} shows a block only then, {{^is_test}}…{{/is_test}} only on real calls'),
     section('returning', 'on when we have spoken with this person before and the call plan says so: {{#returning}}…{{/returning}} shows a block only then'),
     section('can_book', 'on when this call has appointment times the agent may book: {{#can_book}}…{{/can_book}} shows a block only then'),
-    section('offers_phone_call', 'on when the appointment times include phone calls'),
-    section('offers_walkthrough', 'on when the appointment times include in-person walkthroughs (only offered when the address has a street)'),
-    shownWhen('specialist_name', 'the first name of the specialist the appointment times are with, e.g. "Grant" (empty when unknown)', "it's known"),
+    section('can_book_any', 'on when the agent may book anything on this call — appointment times or a high-priority visit: {{#can_book_any}}…{{/can_book_any}} shows a block only then'),
+    section('offers_phone_call', 'on when the appointment times include phone consultations'),
+    section('offers_walkthrough', 'on when the appointment times include in-person consultations at the house (only offered when the address has a street)'),
+    shownWhen('specialist_name', 'the first name of the specialist on the first appointment time that names one, e.g. "Blake" (empty when unknown)', "it's known"),
     section('appointment_times', 'the times the agent may book: {{#appointment_times}}…{{/appointment_times}} repeats its block once for each time'),
     text('time_id', 'inside appointment_times: the code the agent books the time by, e.g. "p1"'),
-    text('time_kind', 'inside appointment_times: "phone call" or "walkthrough"'),
+    text('time_kind', 'inside appointment_times: "phone consultation" or "in-person consultation"'),
+    shownWhen('time_with', 'inside appointment_times: the first name of the specialist that time is with, e.g. "Blake" (empty when unknown)', "it's known"),
     text('time_text', 'inside appointment_times: the day and time in the person\'s time zone, e.g. "Wednesday, October 7 at 2 PM their time, 11 AM Pacific"'),
+    section('can_book_priority', 'on when the agent may book a high-priority in-person visit (only offered when the address has a street): {{#can_book_priority}}…{{/can_book_priority}} shows a block only then'),
+    text('priority_specialist_name', 'the first name of the specialist who takes high-priority visits, e.g. "Grant" ("our specialist" when unknown; empty without a high-priority visit to offer)'),
+    text('priority_default_text', 'the high-priority visit time to offer when the person names none, in their time zone, e.g. "Tuesday, October 20 at 9 AM" (empty without a high-priority visit to offer)'),
+    section('had_consultation', 'on when we have met with this person before (an earlier consultation is on file): {{#had_consultation}}…{{/had_consultation}} shows a block only then'),
+    text('last_consultation_when', 'the day of their earlier consultation in their time zone, e.g. "March 12", with the year when it was another year, e.g. "March 12, 2025" (empty when there was none)'),
+    shownWhen('last_consultation_with', 'the first name of who their earlier consultation was with, e.g. "Blake" (empty when unknown)', "it's known"),
+    section('last_consultation_in_person', 'on when their earlier consultation was in person: {{^last_consultation_in_person}}…{{/last_consultation_in_person}} shows a block when it was by phone (or there was none)'),
+    section('has_booked_consultation', 'on when they already have a consultation booked: {{#has_booked_consultation}}…{{/has_booked_consultation}} shows a block only then'),
+    text('booked_consultation_text', 'their booked consultation in their time zone, e.g. "Wednesday, October 21 at 11 AM with Seth, in person" or "…, by phone" (empty when there is none)'),
   ],
   voicemail: [FIRST_NAME, AGENT_NAME, COMPANY_NAME, YOUR_PROPERTY, CALLBACK_NUMBER],
   inbound: [AGENT_NAME, COMPANY_NAME, CALLER_NUMBER, LOCAL_TIME],
 };
 
-const OWNER = '0058X00000Fsx39QAB';
+const GRANT = '0058X00000Fsx39QAB';
+const BLAKE = '0058X00000FA8tLQAT';
+const SETH = '0055f000005qXVfAAM';
 
 /**
- * The preview's sample call: Jane at 1234 Oak St in Tampa, spoken with before, with a plan, two times with Grant and a callback
- * number; for the inbound prompt, a caller calling from 619-555-0100.
+ * The preview's sample call: Jane at 1234 Oak St in Tampa, spoken with before, met in person by Blake in March, with a plan,
+ * a phone time with Seth and an in-person time with Blake, a high-priority visit with Grant, and a callback number; for the
+ * inbound prompt, a caller calling from 619-555-0100.
  */
 export const SAMPLE_INPUT: PromptInput = {
   agentName: 'Alex',
@@ -103,15 +117,17 @@ export const SAMPLE_INPUT: PromptInput = {
   returning: true,
   slots: [
     {
-      id: 'p1', kind: 'phone', start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T18:15:00.000Z',
-      specialistSfUserId: OWNER, specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
+      id: 'p1', kind: 'phone', start: '2026-10-07T18:00:00.000Z', end: '2026-10-07T19:00:00.000Z',
+      specialistSfUserId: SETH, specialistFirstName: 'Seth', timeZone: 'America/Los_Angeles', region: 'SD',
     },
     {
       id: 'w1', kind: 'walkthrough', start: '2026-10-08T16:00:00.000Z', end: '2026-10-08T17:00:00.000Z',
-      specialistSfUserId: OWNER, specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
+      specialistSfUserId: BLAKE, specialistFirstName: 'Blake', timeZone: 'America/Los_Angeles', region: 'LA',
     },
   ],
   sellerTimeZone: 'America/New_York',
+  consultations: { last: { start: '2026-03-12T17:00:00.000Z', kind: 'in_person', ownerName: 'Blake Kossuth' }, next: null },
+  priority: { specialistSfUserId: GRANT, specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-07T16:00:00.000Z' },
   callerNumber: '+16195550100',
 };
 
@@ -119,7 +135,19 @@ const NUMBER = new Intl.NumberFormat('en-US');
 const VALUE_TAGS = new Set(['name', '&']);
 const SECTION_TAGS = new Set(['#', '^']);
 /** Placeholders whose value is yes/no or a list: printed as a value they'd read "true" or garble the prompt. */
-const BLOCK_ONLY: ReadonlySet<string> = new Set(['is_test', 'returning', 'can_book', 'offers_phone_call', 'offers_walkthrough', 'appointment_times']);
+const BLOCK_ONLY: ReadonlySet<string> = new Set([
+  'is_test',
+  'returning',
+  'can_book',
+  'can_book_any',
+  'offers_phone_call',
+  'offers_walkthrough',
+  'appointment_times',
+  'can_book_priority',
+  'had_consultation',
+  'last_consultation_in_person',
+  'has_booked_consultation',
+]);
 /** Sections that repeat their block once per item: opened inside themselves they multiply the text (2^depth), so that is refused. */
 const LIST_SECTIONS: ReadonlySet<string> = new Set(['appointment_times']);
 /** How deep sections may nest; past it the check stops reading (no recursion into a template built to overflow the stack). */

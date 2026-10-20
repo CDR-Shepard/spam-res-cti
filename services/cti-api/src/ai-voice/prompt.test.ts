@@ -196,13 +196,12 @@ describe('buildInstructions', () => {
     expect(text).toMatch(/vary these, don't repeat them verbatim/i);
   });
 
-  // book_priority_appointment is not named yet: the instructions learn about high priority in routing step 1 Task 11.
-  it('names every tool so the model knows when to call it (book_appointment only with slots)', () => {
-    const named = OUTBOUND_TOOL_NAMES.filter((n) => n !== 'book_priority_appointment');
-    const text = buildInstructions(input({ slots: SLOTS }));
-    for (const name of named) expect(text).toContain(name);
+  it('names every tool so the model knows when to call it (book_appointment only with slots, book_priority_appointment only with a priority offer)', () => {
+    const text = buildInstructions(input({ slots: SLOTS, priority: GRANT }));
+    for (const name of OUTBOUND_TOOL_NAMES) expect(text).toContain(name);
     const plain = buildInstructions(input());
-    for (const name of named.filter((n) => n !== 'book_appointment')) expect(plain).toContain(name);
+    for (const name of OUTBOUND_TOOL_NAMES.filter((n) => n !== 'book_appointment' && n !== 'book_priority_appointment')) expect(plain).toContain(name);
+    for (const without of [plain, buildInstructions(input({ slots: SLOTS }))]) expect(without).not.toContain('book_priority_appointment');
   });
 
   it("states the recipient's local time", () => {
@@ -308,7 +307,7 @@ describe('buildInstructions — appointment times (plan 1D)', () => {
     expect(flow).toBeGreaterThanOrEqual(0);
     expect(booking).toBeGreaterThan(flow);
     expect(text.indexOf('# Do-not-call')).toBeGreaterThan(booking);
-    expect(text).toContain('- p1: phone call, Wednesday, October 7 at 2 PM their time, 11 AM Pacific');
+    expect(text).toContain('- p1: phone consultation with Grant, Wednesday, October 7 at 2 PM their time, 11 AM Pacific');
   });
 
   it('has no booking section, book_appointment or appointment_set without slots', () => {

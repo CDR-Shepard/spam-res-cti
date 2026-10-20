@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import Mustache from 'mustache';
 import { describe, expect, it, vi } from 'vitest';
-import { AGENT_PROMPT_MAX_CHARS, AgentPromptCheck, type AgentPromptKind } from '@cti/contracts';
+import { AGENT_PROMPT_MAX_CHARS, AgentPromptCheck, AppointmentSlots, Consultations, PriorityOffer, type AgentPromptKind } from '@cti/contracts';
 import { DEFAULT_INBOUND_TEMPLATE } from './prompt-default-inbound.js';
 import { DEFAULT_INSTRUCTIONS_TEMPLATE } from './prompt-default-instructions.js';
 import { DEFAULT_VOICEMAIL_TEMPLATE } from './prompt-default-voicemail.js';
@@ -166,7 +166,7 @@ describe('promptView', () => {
 
   it('carries every listed placeholder that is not a list field', () => {
     const view = promptView(SAMPLE_INPUT);
-    const listFields = new Set(['time_id', 'time_kind', 'time_text']);
+    const listFields = new Set(['time_id', 'time_kind', 'time_with', 'time_text']);
     for (const p of PLACEHOLDERS.instructions.filter((x) => !listFields.has(x.name))) expect(view).toHaveProperty(p.name);
     const times = view.appointment_times as ReadonlyArray<Record<string, string>>;
     expect(times.map((t) => Object.keys(t).sort())).toEqual([[...listFields].sort(), [...listFields].sort()]);
@@ -274,9 +274,10 @@ describe('checkTemplate — fix round 1', () => {
       const value = view[p.name];
       const blockOnly = typeof value === 'boolean' || Array.isArray(value);
       const problems = checkTemplate('instructions', `{{${p.name}}}`).problems;
-      // Used as a value, the three fields of an appointment time (time_id, time_kind, time_text) are empty outside
+      // Used as a value, the fields of an appointment time (time_id, time_kind, time_with, time_text) are empty outside
       // {{#appointment_times}}, so a prompt made of only one of them is now refused for coming out empty (final review C1).
-      const emptyAtTop = value === undefined && !blockOnly;
+      // So is a text value the sample call leaves empty (booked_consultation_text: the sample has no booked consultation).
+      const emptyAtTop = (value === undefined || value === '') && !blockOnly;
       expect(problems.some((m) => m.endsWith('is a section — use ' + `{{#${p.name}}}…{{/${p.name}}}`)), p.name).toBe(blockOnly);
       expect(problems.includes('The prompt comes out empty for the sample call'), p.name).toBe(emptyAtTop);
       expect(problems.length > 0, p.name).toBe(blockOnly || emptyAtTop);
@@ -312,19 +313,64 @@ describe('checkTemplate — fix round 1', () => {
 });
 
 describe('SAMPLE_INPUT (the preview call)', () => {
-  it('is Jane at 1234 Oak St in Tampa, returning, with a plan, two times with Grant and a callback number, not a test call', () => {
+  it('is Jane at 1234 Oak St in Tampa, returning, with a plan, met by Blake in March, times with Seth and Blake, Grant for high priority, and a callback number, not a test call', () => {
     expect(SAMPLE_INPUT).toMatchObject({ firstName: 'Jane', isTest: false, returning: true });
     expect(SAMPLE_INPUT.address).toContain('1234 Oak St');
     expect(SAMPLE_INPUT.address).toContain('Tampa');
     expect(SAMPLE_INPUT.callbackNumber).toMatch(/^\+1\d{10}$/);
-    expect(SAMPLE_INPUT.slots?.map((s) => s.specialistFirstName)).toEqual(['Grant', 'Grant']);
+    expect(AppointmentSlots.parse(SAMPLE_INPUT.slots).map((s) => [s.id, s.specialistFirstName, s.region])).toEqual([
+      ['p1', 'Seth', 'SD'],
+      ['w1', 'Blake', 'LA'],
+    ]);
+    expect(Consultations.parse(SAMPLE_INPUT.consultations)).toEqual({
+      last: { start: '2026-03-12T17:00:00.000Z', kind: 'in_person', ownerName: 'Blake Kossuth' },
+      next: null,
+    });
+    expect(PriorityOffer.parse(SAMPLE_INPUT.priority).specialistFirstName).toBe('Grant');
     const text = buildInstructions(SAMPLE_INPUT);
     expect(text).toContain('<call_plan>');
     expect(text).toContain("we've spoken before");
+    expect(text).toContain("- We've met with them before: an in-person consultation on March 12 with Blake.");
     expect(text).toContain('# Booking an appointment');
-    expect(text).toContain('Grant, one of our specialists');
+    expect(text).toContain('- p1: phone consultation with Seth, ');
+    expect(text).toContain('- w1: in-person consultation with Blake, ');
+    expect(text).toContain('# High priority');
+    expect(text).toContain('offer an in-person consultation with Grant at the time they ask for');
     expect(text).not.toContain('this is a test call');
   });
+});
+
+describe('routing step 1 placeholders (Task 11)', () => {
+  it('a template using every new placeholder is accepted, and renders the sample call', () => {
+    const template = [
+      '{{#can_book_any}}Can book.{{/can_book_any}}',
+      '{{#had_consultation}}Met {{#last_consultation_in_person}}in person{{/last_consultation_in_person}}{{^last_consultation_in_person}}by phone{{/last_consultation_in_person}} on {{last_consultation_when}}{{#last_consultation_with}} with {{last_consultation_with}}{{/last_consultation_with}}.{{/had_consultation}}',
+      '{{#has_booked_consultation}}Booked: {{booked_consultation_text}}.{{/has_booked_consultation}}',
+      '{{#appointment_times}}- {{time_id}}: {{time_kind}}{{#time_with}} with {{time_with}}{{/time_with}}, {{time_text}}',
+      '{{/appointment_times}}',
+      '{{#can_book_priority}}High priority with {{priority_specialist_name}}, else {{priority_default_text}}.{{/can_book_priority}}',
+    ].join('\n');
+    const check = checkTemplate('instructions', template);
+    expect(check.problems).toEqual([]);
+    expect(check.rendered).toBe(
+      [
+        'Can book.',
+        'Met in person on March 12 with Blake.',
+        '',
+        '- p1: phone consultation with Seth, Wednesday, October 7 at 2 PM their time, 11 AM Pacific',
+        '- w1: in-person consultation with Blake, Thursday, October 8 at 12 PM their time, 9 AM Pacific',
+        'High priority with Grant, else Wednesday, October 7 at 12 PM their time, 9 AM Pacific.',
+      ].join('\n'),
+    );
+  });
+
+  it.each(['can_book_priority', 'can_book_any', 'had_consultation', 'last_consultation_in_person', 'has_booked_consultation'])(
+    'refuses %s used as a value: it is a section (BLOCK_ONLY)',
+    (name) => {
+      expect(checkTemplate('instructions', `Hi {{${name}}}`)).toMatchObject({ problems: [`${name} is a section — use {{#${name}}}…{{/${name}}}`], rendered: null });
+      expect(() => renderPrompt('instructions', `{{${name}}}`, SAMPLE_INPUT)).toThrow(/refused/);
+    },
+  );
 });
 
 describe('buildInstructions / voicemailText with saved templates', () => {
@@ -524,9 +570,12 @@ describe('PLACEHOLDERS', () => {
   });
 
   // The inbound default is the owner's prompt verbatim and uses none of its placeholders; they are offered for edits.
+  // specialist_name: since routing step 1 each time names its own specialist (time_with), so the default no longer uses it,
+  // but a saved template may: it stays offered, or that template would be refused and the call would fall back.
+  const KEPT_FOR_SAVED: ReadonlySet<string> = new Set(['specialist_name']);
   it.each(['instructions', 'voicemail'] as const)('%s: every listed placeholder is used by the default', (kind) => {
     const used = namesIn(DEFAULTS[kind]);
-    expect(PLACEHOLDERS[kind].map((p) => p.name).filter((n) => !used.has(n))).toEqual([]);
+    expect(PLACEHOLDERS[kind].map((p) => p.name).filter((n) => !used.has(n) && !KEPT_FOR_SAVED.has(n))).toEqual([]);
   });
 
   it.each(KINDS)('%s: snake_case names, each once, with a one-line description', (kind) => {
