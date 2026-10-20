@@ -54,7 +54,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
         orgId: h.base.orgId,
         userId: l.approver,
         idempotencyKey: keyOf(l.touchId, 1),
-        target: { kind: 'record', objectType: 'Lead', recordId: l.sfRecordId, planText: planText(), context: { returning: false, consultations: { last: null, next: null } } },
+        target: { kind: 'record', objectType: 'Lead', recordId: l.sfRecordId, planText: planText(), context: { returning: false } },
       }))),
     );
     for (const l of [a, b]) {
@@ -471,7 +471,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
     });
   });
 
-  describe('plan 1D: every trigger carries the returning flag and the consultations read; a freshly minted key also carries the routed offer', () => {
+  describe('plan 1D: every trigger carries the returning flag and any consultation found; a freshly minted key also carries the routed offer', () => {
     const bookingOn = (over: Record<string, unknown> = {}) => ({ aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [GRANT] }, aiCallWriteback: true, ...over });
     type RecordTarget = Extract<InternalAiCallRequest['target'], { kind: 'record' }>;
     const target = (r: InternalAiCallRequest): RecordTarget => {
@@ -479,7 +479,6 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       return r.target;
     };
     const RETURNING = { planOver: { reengagement: { lastContact: 'back in February', lastTopic: null } } };
-    const NO_CONSULTATIONS = { last: null, next: null };
     const NOTE = 'ai_call.place: appointment offer note';
     const noteLog = (h: { base: { orgId: string } }, touchId: string, note: string, priority = false) =>
       ({ level: 'info', obj: { orgId: h.base.orgId, touchId, note, slots: 0, priority }, msg: NOTE });
@@ -501,8 +500,9 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect((await h.run(NOW)).placed).toBe(2);
 
       const byRecord = new Map(h.cti.requests.map((r) => [target(r).recordId, target(r)]));
-      expect(byRecord.get(returning.sfRecordId)!.context).toEqual({ returning: true, consultations: NO_CONSULTATIONS });
-      expect(byRecord.get(fresh.sfRecordId)!.context).toEqual({ returning: false, consultations: NO_CONSULTATIONS });
+      // The consultations were read and none found: the context carries none (an older cti-api refuses the key).
+      expect(byRecord.get(returning.sfRecordId)!.context).toEqual({ returning: true });
+      expect(byRecord.get(fresh.sfRecordId)!.context).toEqual({ returning: false });
       for (const t of byRecord.values()) {
         expect(t.slots!.length).toBeGreaterThanOrEqual(1);
         expect(t.slots!.length).toBeLessThanOrEqual(12);
@@ -523,7 +523,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect((await h.run(NOW)).placed).toBe(1);
       const t = target(h.cti.requests[0]!);
       expect(t.planText).toContain('\nLast time we spoke: earlier this week\n');
-      expect(t.context).toEqual({ returning: true, consultations: NO_CONSULTATIONS });
+      expect(t.context).toEqual({ returning: true });
     });
 
     it('1b (final review WEB I-2): a configured default owner never turns booking on: a tenant that saved nothing gets no times', async () => {
@@ -546,7 +546,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect(h.logs.some((l) => l.msg === NOTE)).toBe(false);
     });
 
-    it('2: nothing saved, no default list: no slots or priority key, context with the consultations read, no calendar read, nothing logged', async () => {
+    it('2: nothing saved, no default list: no slots or priority key, the returning flag alone, no calendar read, nothing logged', async () => {
       const h = await paceHarness(db);
       await seedReleasedLead(db, h.base);
 
@@ -554,7 +554,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       const t = target(h.cti.requests[0]!);
       expect('slots' in t).toBe(false);
       expect('priority' in t).toBe(false);
-      expect(t.context).toEqual({ returning: false, consultations: NO_CONSULTATIONS });
+      expect(t.context).toEqual({ returning: false });
       expect(userQueries(h.sf.state.soql)).toEqual([]);
       expect(h.logs.some((l) => l.msg === NOTE)).toBe(false);
     });

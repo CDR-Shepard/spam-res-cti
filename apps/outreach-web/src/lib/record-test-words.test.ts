@@ -24,6 +24,7 @@ describe('record test words', () => {
     expect(offerNoteWords('maps_unavailable')).toBe("Couldn't look up the property on the map (Google Maps key missing or Google unavailable), so no times would be offered.");
     expect(offerNoteWords('not_found')).toBe("Google couldn't find the property address, so no times would be offered.");
     expect(offerNoteWords('already_booked')).toBe('The seller already has a consultation booked, so no new times would be offered.');
+    expect(offerNoteWords('salesforce_error')).toBe("Couldn't read Salesforce (the calendar, the consultations or the property), so no times would be offered.");
   });
 
   it("an older preview's single-owner no_owner note reads as the plain words", () => {

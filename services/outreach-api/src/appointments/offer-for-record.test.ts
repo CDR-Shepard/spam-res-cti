@@ -194,6 +194,17 @@ describe('offerTargetFields', () => {
     expect('slots' in fields).toBe(false);
   });
 
+  it('consultations read but none found (last and next null): no consultations key, so an older cti-api still takes the trigger', () => {
+    const fields = offerTargetFields(true, { offer: offer(), consultations: { last: null, next: null } });
+    expect(fields).toEqual({ context: { returning: true }, slots: [slot], priority });
+    expect('consultations' in fields.context).toBe(false);
+  });
+
+  it('only an upcoming consultation (last null) still goes', () => {
+    const next = { start: '2026-10-22T17:00:00.000Z', kind: 'phone' as const, ownerName: null };
+    expect(offerTargetFields(false, { offer: noOffer('already_booked'), consultations: { last: null, next } })).toEqual({ context: { returning: false, consultations: { last: null, next } } });
+  });
+
   it('consultations that could not be read, no slots and no priority: the returning flag alone', () => {
     expect(offerTargetFields(false, { offer: noOffer('salesforce_error'), consultations: null })).toEqual({ context: { returning: false } });
   });

@@ -31,7 +31,7 @@ const OFFER_NOTE_WORDS: Readonly<Record<string, string>> = {
   outside_regions: 'The property is outside the LA and San Diego regions, so no times would be offered.',
   already_booked: 'The seller already has a consultation booked, so no new times would be offered.',
   no_free_time: 'No free time in the next 15 days, so no times would be offered.',
-  salesforce_error: "Couldn't read the calendar, so no times would be offered.",
+  salesforce_error: "Couldn't read Salesforce (the calendar, the consultations or the property), so no times would be offered.",
   invalid_slots: "Couldn't read the calendar, so no times would be offered.",
 };
 

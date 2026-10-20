@@ -368,18 +368,27 @@ Two more cases:
 - `result: retry:salesforce_error` repeatedly: the integration connection's token expired and outreach-api could not refresh it. Reconnect Salesforce in outreach-web Settings → Connections.
 - Results show "could not check Salesforce for new activity": the integration user cannot read Task or Event (see `outreach-sf-campaigns.md` §AI call campaigns). Nobody is called until it can.
 
-**The agent never offers appointment times** (plan 1D). The trigger carried no slots. outreach-api logs one line per call that was offered none, with the reason in its `slots` field (never record content):
+**The agent never offers appointment times** (plan 1D, routed by region). The trigger carried no slots. Times are routed: the property's county picks the region, and that region's active reps take the times. A trigger can carry no slots and still carry the high-priority offer with Grant (`priority`). outreach-api logs one line per call whose offer has a note, by its code only (never record content):
 
-- `ai_call.place: no appointment times offered` for a campaign call, `ai_call.practice: no appointment times offered` for a practice call.
+- `ai_call.place: appointment offer note` for a campaign call, `ai_call.practice: appointment offer note` for a practice call (`record-test.preview` / `record-test.call` for Test a record). Fields: `note` (below), `slots` (how many times went out), `priority` (whether the high-priority offer went), plus `orgId` and, on a campaign call, `touchId`.
+- Beside it, a warning names a read that failed, by its error name or Google's `code` only: `appointments: could not look the property up`, `could not read the property address`, `could not read the seller's consultations`, `could not read the reps' calendars`, `the offer failed`. A property placed in a region with an active rep also logs `appointments: routed offer` (`region`, `slots`, `priority`, `routeElements`).
 
-| `slots` | Meaning and fix |
+The regions and their reps are fixed in this step: `DEFAULT_BOOKING_ROUTING` in `services/outreach-api/src/settings.ts` (LA: Los Angeles, Orange, Riverside and San Bernardino counties; SD: San Diego), each with its reps' Salesforce user ids and start times. The high-priority rep is the first active user on the tenant's specialists list (`AI_CALL_DEFAULT_SPECIALISTS` when the tenant saved none): Grant Golden. Test a record shows the same codes as the preview's note.
+
+| `note` | Meaning and fix |
 |---|---|
-| `no_owner` | Nobody on the appointment owner list is an active Salesforce user. Settings → Connections → AI calls → "Appointments go to" (or `AI_CALL_DEFAULT_SPECIALISTS` on outreach-api when the tenant saved no list) |
-| `no_free_time` | The owner's calendar has no free time in the hours and days set on the card (or every time is taken by Events and other AI bookings) |
-| `salesforce_error` | Reading the owner's User or Events failed. The connected user must see the owner's calendar (`outreach-sf-campaigns.md` §Appointments and Salesforce write-back, step 5) |
-| `invalid_slots` | A bug: the computed times failed the contract. Report it |
+| `booking_off` | Never logged. Booking is off on the card (or write-back is off), or no region has a rep. A practice call or Test a record ignores the switches, so there it means no region has a rep |
+| `no_reps` | Every rep of the property's region is inactive in Salesforce (or no rep is active anywhere and there is no high-priority rep). No regular times; Grant's high-priority offer can still go with this note (`priority: true`). Reactivate the user, or change the region's reps in the code default |
+| `no_address` | The record has no property address: a Lead's Street, City, State and PostalCode, or an Opportunity's `Street__c` / `City__c` / `State__c` / `Zipcode__c`. A converted Lead reads as none. Fill it in Salesforce |
+| `maps_unavailable` | Google could not place the property. With no `GOOGLE_MAPS_API_KEY` on outreach-api there is no warning, only this note. Otherwise the warning's `code` says why: `REQUEST_DENIED` (the key is refused, or the Geocoding API is not enabled for it), `OVER_QUERY_LIMIT`, `http_5xx` or `timeout` (Google down). Set the key with the Geocoding and Routes APIs enabled. When only Routes fails, times are still offered on straight-line estimates (`Google Routes unavailable: using straight-line drive times`) |
+| `not_found` | Google found no place for the address. Sam offers a call back. Correct the address in Salesforce |
+| `outside_regions` | The property's county is in no region, so there is no high-priority offer either. By design: Sam offers a call back |
+| `already_booked` | The seller already has an upcoming consultation (a consultation Event on the record or on a record its research found). By design: no new times; the trigger carries it in `context.consultations` |
+| `no_free_time` | The region's active reps have no free start in the horizon that they can reach in time (Events, other AI bookings, drive times), and there is no high-priority offer (Grant inactive, or the record has a city but no street) |
+| `salesforce_error` | A Salesforce read failed: the reps' User or Event read, the property address, or the seller's consultations. A failed consultations read drops every time and the high-priority offer on purpose: a booked consultation cannot be ruled out. The warning says which read (`the offer failed`: outreach-api's own read of other AI calls' bookings, or a bug). The connected user must see the reps' calendars (`outreach-sf-campaigns.md` §Appointments and Salesforce write-back, step 5) |
+| `invalid_slots` | A bug: the computed times failed the contract. Report it. The high-priority offer still goes |
 
-Booking switched off on the card logs nothing. Two more cases: a trigger re-sent with the same key after a lost answer goes out **without** slots by design (CF-13), so that one call offers none; and an old `@cti/api` refuses a trigger with slots (`HTTP 400 invalid_body` in the `ai_call.place` line) until it is deployed (§15).
+Booking switched off on the card (or write-back off) logs nothing, and nor does a practice call when no region has a rep. Two more cases: a trigger re-sent with the same key after a lost answer goes out **without** slots, the high-priority offer or the consultations by design (CF-13), so that one call offers none; and an old `@cti/api` refuses a trigger that carries `priority`, `context.consultations` or slots with a `region` (`HTTP 400 invalid_body` in the `ai_call.place` line) until it is deployed, so deploy cti-api first or together (§15).
 
 **The AI says nothing (or gibberish), then hangs up.** OpenAI never confirmed the voice session, so the call ends within about 5 seconds of connecting. Deploy logs show `ai-voice bridge: session not configured, ending the call` (field `why`: OpenAI's error message, or `timeout`), then `ai-voice: conversation ended` with reason `error` and detail `session not configured: …`. Usually a bad model or reasoning setting:
 

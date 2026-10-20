@@ -117,12 +117,15 @@ export async function offerForRecord(deps: RecordOfferDeps, i: RecordOfferInput)
 }
 
 /**
- * A trigger target's context and offer: the consultations when they were read, the slots when there are any, and the
- * high-priority offer whenever it is set. An offer with a note can still carry it (no_reps), so the note never decides.
- * `offered` null (nothing read, or a kept key re-sent, CF-13) carries the returning flag alone.
+ * A trigger target's context and offer: the consultations when one was found (a past or an upcoming one), the slots when there
+ * are any, and the high-priority offer whenever it is set. An offer with a note can still carry it (no_reps), so the note
+ * never decides. None found sends no consultations key: CallContext is strict, so an older cti-api would refuse every trigger
+ * that carried one, and "checked, none" means nothing to cti-api. `offered` null (nothing read, or a kept key re-sent, CF-13)
+ * carries the returning flag alone.
  */
 export function offerTargetFields(returning: boolean, offered: RecordOffer | null): OfferTargetFields {
-  const consultations = offered?.consultations ?? null;
+  const read = offered?.consultations ?? null;
+  const consultations = read && (read.last || read.next) ? read : null;
   const slots = offered?.offer.slots ?? [];
   const priority = offered?.offer.priority ?? null;
   return {
