@@ -10,8 +10,9 @@
  * page explains a block in; the first rule that applies wins. A PRACTICE email (an admin's own copy,
  * to their own address) skips the rules that protect the seller (2 to 7) but still obeys the tenant's
  * switch, the daily cap and the hours. "Practice" has ONE meaning everywhere: the conversation is a
- * practice conversation (practice_user_id set). `queueEmail` enforces that the purpose `practice` and a
- * practice conversation go together, so the purpose can never disagree with the conversation.
+ * practice conversation (practice_user_id set), whatever the email's purpose: Sam answers an admin's
+ * replies on a practice thread (`reply`, `holding`) exactly as on a real one, and those emails are exempt
+ * and never logged to Salesforce too. `queueEmail` keeps the purposes honest (see there).
  *
  * Logs: none here. The tick logs ids and counts; no address, subject or text reaches a log line.
  */
@@ -56,8 +57,8 @@ export interface QueueEmailInput {
  * The email and its timeline event, together. The event is Sam's, outbound, and not yet logged to
  * Salesforce (the send turns that on once Resend has accepted it, so a canceled or failed email never
  * leaves a Task). A conversation of another tenant (or none) throws and writes nothing, and so does a
- * purpose that does not fit the conversation: `practice` only on a practice conversation, every other
- * purpose only on a real one.
+ * purpose that does not fit the conversation: `practice` (an admin's test of Sam's first email) never goes
+ * on a real conversation, and `first` never on a practice one. `reply` and `holding` go on either.
  */
 export async function queueEmail(db: Db, i: QueueEmailInput): Promise<{ emailId: string; eventId: string }> {
   return db.transaction(async (tx) => {
@@ -67,7 +68,7 @@ export async function queueEmail(db: Db, i: QueueEmailInput): Promise<{ emailId:
         where id = ${i.conversationId}::uuid and org_id = ${i.orgId}::uuid`),
     )[0];
     if (!conversation) throw new Error(`conversation ${i.conversationId} not found`);
-    if ((i.purpose === 'practice') !== (conversation.practiceUserId !== null)) {
+    if (conversation.practiceUserId !== null ? i.purpose === 'first' : i.purpose === 'practice') {
       throw new Error(`purpose ${i.purpose} does not fit conversation ${i.conversationId}`);
     }
     const eventId = await appendEvent(tx as unknown as Db, {
@@ -181,7 +182,7 @@ export async function evaluateSend(db: Db, emailId: string, now: Date): Promise<
  *  6. the address is suppressed;  7. Salesforce says Email Opt Out;
  *  8. the conversation already had 3 other emails out in the last 24 hours (`daily_cap`);
  *  9. it is outside the seller's 08:00 to 18:00 (`outside_window`: wait, do not cancel).
- * Rules 2 to 7 do not apply to a practice email. Throws for an email that does not exist.
+ * Rules 2 to 7 do not apply to an email on a practice conversation (whatever its purpose). Throws for an email that does not exist.
  */
 export async function sendBlock(db: Db, emailId: string, now: Date): Promise<SendBlock | null> {
   return (await evaluateSend(db, emailId, now)).block;

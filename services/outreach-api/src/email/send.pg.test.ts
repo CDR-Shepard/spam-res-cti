@@ -201,15 +201,28 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
       expect(rows).toHaveLength(1);
     });
 
-    it('a purpose and a conversation that do not fit are refused, writing nothing: practice only on a practice conversation', async () => {
+    it('refuses a purpose that does not fit the conversation, writing nothing: no `practice` on a real conversation, no `first` on a practice one', async () => {
       const real = await seedSeller();
       const practice = await seedPracticeSeller();
       await expect(queue(real, { purpose: 'practice' })).rejects.toThrow('does not fit');
-      for (const purpose of ['first', 'reply', 'holding'] as const) {
-        await expect(queue(practice, { purpose }), purpose).rejects.toThrow('does not fit');
+      await expect(queue(practice, { purpose: 'first' })).rejects.toThrow('does not fit');
+      for (const s of [real, practice]) {
+        expect(await db.select().from(schema.emailMessages).where(eq(schema.emailMessages.orgId, s.orgId))).toHaveLength(0);
+        expect(await db.select().from(schema.conversationEvents).where(eq(schema.conversationEvents.orgId, s.orgId))).toHaveLength(0);
       }
-      expect(await db.select().from(schema.emailMessages).where(eq(schema.emailMessages.orgId, real.orgId))).toHaveLength(0);
-      expect(await db.select().from(schema.conversationEvents).where(eq(schema.conversationEvents.orgId, real.orgId))).toHaveLength(0);
+    });
+
+    it('Sam may answer on a practice conversation: `practice`, `reply` and `holding` queue there, `reply` and `holding` on a real one too', async () => {
+      const practice = await seedPracticeSeller();
+      for (const purpose of ['practice', 'reply', 'holding'] as const) {
+        const { emailId, eventId } = await queue(practice, { purpose, requestedBy: purpose === 'practice' ? practice.adminId : null });
+        expect(await rowOf(emailId), purpose).toMatchObject({ purpose, status: 'queued', conversationId: practice.conv.id });
+        expect((await eventOf(eventId)).sfLogStatus, purpose).toBe('skipped');
+      }
+      const real = await seedSeller();
+      for (const purpose of ['first', 'reply', 'holding'] as const) {
+        expect((await rowOf((await queue(real, { purpose })).emailId)).purpose).toBe(purpose);
+      }
     });
 
     it('a conversation of another tenant queues nothing: no event, no row', async () => {
@@ -701,6 +714,35 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
         expect(await rowOf(emailId)).toMatchObject({ status: 'sent' });
         expect(await eventOf(eventId)).toMatchObject({ sfLogStatus: 'skipped', occurredAt: NOW });
         expect(resend.calls[0]!.req.replyTo).toBe(`sam+${p.conv.token}@reply.rethinkre.team`);
+      });
+
+      it.each(['reply', 'holding'] as const)(
+        'a %s on a practice conversation is exempt like any practice email: sent despite every seller rule, its event never logged to Salesforce',
+        async (purpose) => {
+          const p = await seedPracticeSeller();
+          await setConversation(p.conv.id, { status: 'booked', handler: 'person', flagReason: 'wants_appointment', flaggedAt: NOW });
+          await suppressAddress(db, { orgId: p.orgId, address: ADDRESS, reason: 'opted_out', conversationId: null });
+          await db.update(schema.crmRecords).set({ sfEmailOptOut: true }).where(eq(schema.crmRecords.id, p.crmRecordId));
+          const { emailId, eventId } = await queue(p, { purpose, inReplyTo: '<admin-1@mail.example.com>', references: '<admin-1@mail.example.com>' });
+          expect(await sendBlock(db, emailId, NOW)).toBeNull();
+          const resend = fakeResend();
+          expect(await tick(resend.client)).toEqual({ sent: 1, retried: 0, canceled: 0, failed: 0 });
+          expect(await rowOf(emailId)).toMatchObject({ status: 'sent', purpose });
+          expect(await eventOf(eventId)).toMatchObject({ sfLogStatus: 'skipped', occurredAt: NOW });
+          expect(resend.calls[0]!.req.headers['In-Reply-To']).toBe('<admin-1@mail.example.com>');
+        },
+      );
+
+      it('a reply on a practice conversation still obeys the tenant switch, the daily cap and the hours', async () => {
+        const p = await seedPracticeSeller();
+        const { emailId } = await queue(p, { purpose: 'reply' });
+        expect(await sendBlock(db, emailId, EVENING)).toBe('outside_window');
+        await seedSent(p, HOUR);
+        await seedSent(p, 2 * HOUR);
+        await seedSent(p, 3 * HOUR);
+        expect(await sendBlock(db, emailId, NOW)).toBe('daily_cap');
+        await db.update(schema.organizations).set({ settings: { samEmail: { enabled: false } } }).where(eq(schema.organizations.id, p.orgId));
+        expect(await sendBlock(db, emailId, NOW)).toBe('disabled');
       });
 
       it('skips the seller rules but not the tenant switch, the cap or the hours', async () => {
