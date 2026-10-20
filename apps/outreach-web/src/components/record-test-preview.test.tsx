@@ -46,7 +46,7 @@ describe('RecordTestPreview', () => {
     const pre = screen.getByLabelText('The plan text the agent gets');
     expect(pre.tagName).toBe('PRE');
     expect(pre.textContent).toBe(PLAN_TEXT);
-    expect(screen.getByText(/Phone call Wed Oct 7, 11:00 AM PT/)).toBeInTheDocument();
+    expect(screen.getByText(/Phone consultation Wed Oct 7, 11:00 AM PT/)).toBeInTheDocument();
     expect(screen.getByText(/with Grant/)).toBeInTheDocument();
     expect(screen.getByText('Tasks: 4')).toBeInTheDocument();
     expect(screen.queryByText(/cost/i)).not.toBeInTheDocument();

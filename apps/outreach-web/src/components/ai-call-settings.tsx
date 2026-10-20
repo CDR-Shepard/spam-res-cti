@@ -5,9 +5,10 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/lib/auth';
-import { getAiCallSettings, outreachKeys, salesforceUsersById, saveAiCallSettings } from '@/lib/outreach-api';
+import { getAiCallSettings, outreachKeys, salesforceUsersById, saveAiCallSettings, writebackReadiness } from '@/lib/outreach-api';
 import { errorText } from '@/lib/outreach-words';
 import { core, NobodyActive, OwnerList, UserSearch } from './appointment-owners';
+import { RegionsSection } from './booking-regions';
 import { WritebackReadinessSection } from './writeback-readiness';
 
 type Booking = AiCallSettings['booking'];
@@ -15,21 +16,23 @@ type Kind = 'phone' | 'walkthrough';
 type KindRules = Booking['phone'];
 
 const KIND_TITLES: Readonly<Record<Kind, { offer: string; noun: string }>> = {
-  phone: { offer: 'Offer phone calls', noun: 'Phone call' },
-  walkthrough: { offer: 'Offer walkthroughs', noun: 'Walkthrough' },
+  phone: { offer: 'Offer phone consultations', noun: 'Phone consultation' },
+  walkthrough: { offer: 'Offer in-person consultations', noun: 'In-person consultation' },
 };
-const OWNER_LINE = 'Every AI-booked appointment goes to the first active person on this list. They distribute them.';
+const OWNER_LINE =
+  "Sellers who need to sell fast, or face a foreclosure or auction, are booked with the first active person on this list at the time they ask for, whatever their calendar says. Every other appointment goes to the region's reps below.";
 /** Final review WEB I-2: the switches below default off, and are tenant-wide. */
 const START_OFF_WORDS =
   'Booking, Lead conversion and Salesforce write-back start off for every tenant, and these switches apply to every AI call campaign. Turn them on only after the readiness check below says Ready, a practice call sounds right, and a one-Lead live check was written back correctly.';
 /** Fix 2: a time the agent offers must reach Salesforce, so booking needs write-back. */
 const NEEDS_WRITEBACK_WORDS = 'Turn on Salesforce write-back first';
-const INVALID_WORDS = 'Check the numbers: each kind needs an end hour after its start hour, and every value in range.';
+const INVALID_WORDS = 'Check the numbers: every value must be in range.';
 const MAX_OWNERS = 20;
 
 /**
- * "AI calls" (admins): who AI-booked appointments go to, the hours each kind may be booked in, Lead conversion, and the
- * Salesforce write-back switch. The server keeps everything else in the tenant's settings as it was.
+ * "AI calls" (admins): who high-priority appointments go to, the booking regions (read-only), how far ahead each kind may be
+ * booked, Lead conversion, and the Salesforce write-back switch. The server keeps everything else in the tenant's settings as
+ * it was, and the form sends back what it does not edit (a kind's length and hours, the routing) exactly as it was saved.
  */
 export function AiCallSettingsCard() {
   const auth = useAuth();
@@ -66,6 +69,8 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
   const [added, setAdded] = useState<SalesforceUserOption[]>([]);
   const resolved = useQuery({ queryKey: outreachKeys.salesforceUsersById(savedIds), queryFn: () => salesforceUsersById(savedIds), enabled: savedIds.length > 0 });
   const save = useMutation({ mutationFn: saveAiCallSettings, onSuccess: (data) => qc.setQueryData(outreachKeys.aiCallSettings, data) });
+  // The same query as the readiness section below (one request): the regions come with the reps' names.
+  const routing = useQuery({ queryKey: outreachKeys.writebackReadiness, queryFn: writebackReadiness }).data?.routing;
   const known = new Map([...(resolved.data ?? []), ...added].map((u) => [core(u.id), u]));
   // M-3: saved ids the lookup answered without: not (or no longer) Salesforce users. Unknown until the lookup succeeds.
   const notFound = new Set(resolved.isSuccess ? savedIds.map(core).filter((id) => !known.has(id)) : []);
@@ -93,7 +98,7 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
         hint={draft.writeback ? undefined : NEEDS_WRITEBACK_WORDS}
       />
       <section className="space-y-2">
-        <h3 className="text-[13px] font-semibold">Appointments go to</h3>
+        <h3 className="text-[13px] font-semibold">High-priority appointments go to</h3>
         <OwnerList
           ids={draft.booking.specialists}
           known={known}
@@ -105,6 +110,7 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
         <p className="text-xs text-muted-foreground">{OWNER_LINE}</p>
         <UserSearch exclude={new Set(draft.booking.specialists.map(core))} full={draft.booking.specialists.length >= MAX_OWNERS} onAdd={add} />
       </section>
+      {routing && <RegionsSection routing={routing} />}
       <Check
         label="Convert a Lead that books an appointment"
         checked={draft.booking.convertLeads}
@@ -171,6 +177,7 @@ function NumberField({ label, value, min, max, step = 1, onChange }: { label: st
   );
 }
 
+/** Only the offer switch, the lead time and the horizon: the region table sets the length and the start times. */
 function KindFields({ kind, value, onChange }: { kind: Kind; value: KindRules; onChange: (patch: Partial<KindRules>) => void }) {
   const { offer, noun } = KIND_TITLES[kind];
   return (
@@ -178,10 +185,6 @@ function KindFields({ kind, value, onChange }: { kind: Kind; value: KindRules; o
       <legend className="px-1.5 text-[13px] font-semibold">{noun}s</legend>
       <Check label={offer} checked={value.enabled} onChange={(enabled) => onChange({ enabled })} />
       <div className="grid grid-cols-2 gap-3">
-        <NumberField label={`${noun} length (minutes)`} value={value.durationMinutes} min={10} max={180} onChange={(durationMinutes) => onChange({ durationMinutes })} />
-        <span />
-        <NumberField label={`${noun} from (hour, 24h)`} value={value.startHour} min={6} max={20} onChange={(startHour) => onChange({ startHour })} />
-        <NumberField label={`${noun} until (hour, 24h)`} value={value.endHour} min={7} max={22} onChange={(endHour) => onChange({ endHour })} />
         <NumberField
           label={`${noun} earliest (hours ahead)`}
           value={value.minLeadMinutes / 60}

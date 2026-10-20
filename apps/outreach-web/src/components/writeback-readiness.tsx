@@ -31,7 +31,7 @@ function conversionWords(r: WritebackReadiness): string {
 
 /**
  * "Salesforce write-back readiness" (plan 1D, admins): can the connected Salesforce user write call results back and convert a
- * Lead that books, who appointments go to, and what a conversion creates. Read-only; reading it again re-checks.
+ * Lead that books, who high-priority appointments go to, and what a conversion creates. Read-only; reading it again re-checks.
  */
 export function WritebackReadinessSection() {
   const readiness = useQuery({ queryKey: outreachKeys.writebackReadiness, queryFn: writebackReadiness });
@@ -51,7 +51,7 @@ export function WritebackReadinessSection() {
           </ul>
         </>
       )}
-      {r && <p>{`Appointments go to: ${r.appointmentOwner?.name ?? 'nobody active: booking is off'}`}</p>}
+      {r && <p>{`High-priority appointments go to: ${r.appointmentOwner?.name ?? 'nobody active'}`}</p>}
       {r && <p>{conversionWords(r)}</p>}
     </section>
   );

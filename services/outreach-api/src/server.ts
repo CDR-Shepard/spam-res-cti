@@ -208,7 +208,7 @@ async function main(): Promise<void> {
       (scope) => registerCallPlanRoutes(scope, { db }),
       (scope) => registerAiCallRoutes(scope, { db, cti }),
       (scope) => registerPracticeCallRoutes(scope, { db, clients, cti, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, maps }),
-      (scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, describes }),
+      (scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, describes, maps }),
       // Editable agent prompts (admins): the AI agent's instructions and voicemail template, checked and rendered by cti-api.
       (scope) => registerAgentPromptRoutes(scope, { db, cti }),
       // Testing (admins): the test phones list and the inbound test calls (a listed phone calling an AI number gets the agent).

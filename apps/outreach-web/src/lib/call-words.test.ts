@@ -116,9 +116,17 @@ describe('AI call result words', () => {
 describe('plan 1D words', () => {
   const booked = { kind: 'phone' as const, start: '2026-10-07T18:00:00.000Z' };
   it('appointmentWords says the kind and the time in the zone given (the viewer\'s by default)', () => {
-    expect(appointmentWords(booked, 'America/Los_Angeles')).toBe('Phone call Wed Oct 7, 11:00 AM');
-    expect(appointmentWords({ kind: 'walkthrough', start: '2026-10-09T17:00:00.000Z' }, 'America/New_York')).toBe('Walkthrough Fri Oct 9, 1:00 PM');
-    expect(appointmentWords(booked)).toMatch(/^Phone call \w{3} \w{3} \d{1,2}, \d{1,2}:\d{2} [AP]M$/);
+    expect(appointmentWords(booked, 'America/Los_Angeles')).toBe('Phone consultation Wed Oct 7, 11:00 AM');
+    expect(appointmentWords({ kind: 'walkthrough', start: '2026-10-09T17:00:00.000Z' }, 'America/New_York')).toBe('In-person consultation Fri Oct 9, 1:00 PM');
+    expect(appointmentWords(booked)).toMatch(/^Phone consultation \w{3} \w{3} \d{1,2}, \d{1,2}:\d{2} [AP]M$/);
+    expect(appointmentWords(booked, 'America/Los_Angeles', 'Seth')).toBe('Phone consultation with Seth, Wed Oct 7, 11:00 AM');
+  });
+
+  it('appointmentWords names a high-priority booking as such, whatever its kind', () => {
+    const start = '2026-10-09T17:00:00.000Z';
+    expect(appointmentWords({ kind: 'walkthrough', start, priority: true }, 'America/Los_Angeles')).toBe('High-priority consultation Fri Oct 9, 10:00 AM');
+    expect(appointmentWords({ kind: 'walkthrough', start, priority: true })).toMatch(/^High-priority consultation /);
+    expect(appointmentWords({ kind: 'walkthrough', start, priority: true }, 'America/Los_Angeles', 'Grant')).toBe('High-priority consultation with Grant, Fri Oct 9, 10:00 AM');
   });
 
   it('callSearch keeps only a call id that is a uuid', () => {

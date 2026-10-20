@@ -184,14 +184,18 @@ export function aiExitWords(reason: string | null): string | null {
   return humanize(reason);
 }
 
+const APPOINTMENT_NOUNS: Readonly<Record<'phone' | 'walkthrough', string>> = { phone: 'Phone consultation', walkthrough: 'In-person consultation' };
+
 /**
- * Plan 1D: a booked appointment as "Phone call Wed Oct 7, 11:00 AM" or "Walkthrough …", in `timeZone` (the viewer's own when
- * left out). ICU's narrow no-break space before AM/PM becomes a plain one.
+ * Plan 1D: a booked appointment as "Phone consultation Wed Oct 7, 11:00 AM", "In-person consultation …" or, for a high-priority
+ * booking, "High-priority consultation …", in `timeZone` (the viewer's own when left out). ICU's narrow no-break space before
+ * AM/PM becomes a plain one.
  */
-export function appointmentWords(a: { kind: 'phone' | 'walkthrough'; start: string }, timeZone?: string, withName?: string | null): string {
+export function appointmentWords(a: { kind: 'phone' | 'walkthrough'; start: string; priority?: boolean }, timeZone?: string, withName?: string | null): string {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).formatToParts(new Date(a.start));
   const part = (type: Intl.DateTimeFormatPartTypes): string => parts.find((p) => p.type === type)?.value ?? '';
-  const what = `${a.kind === 'phone' ? 'Phone call' : 'Walkthrough'}${withName ? ` with ${withName},` : ''}`;
+  const noun = a.priority ? 'High-priority consultation' : APPOINTMENT_NOUNS[a.kind];
+  const what = `${noun}${withName ? ` with ${withName},` : ''}`;
   return `${what} ${part('weekday')} ${part('month')} ${part('day')}, ${part('hour')}:${part('minute')} ${part('dayPeriod')}`;
 }
 

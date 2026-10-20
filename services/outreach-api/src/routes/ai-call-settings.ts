@@ -1,7 +1,8 @@
 /**
- * AI call settings (plan 1D), admins only: appointment booking (the ordered appointment owner list, hours per kind, Lead
- * conversion) and the Salesforce write-back switch, stored in `organizations.settings` beside the other keys. The user
- * picker searches and resolves Salesforce Users through the tenant's integration connection.
+ * AI call settings (plan 1D), admins only: appointment booking (the ordered high-priority list, lead time and horizon per kind,
+ * Lead conversion) and the Salesforce write-back switch, stored in `organizations.settings` beside the other keys. The user
+ * picker searches and resolves Salesforce Users through the tenant's integration connection. The readiness check also shows
+ * the booking regions (read-only) and whether Google Maps is configured.
  */
 import type { FastifyInstance } from 'fastify';
 import { sql } from 'drizzle-orm';
@@ -9,6 +10,7 @@ import { z } from 'zod';
 import { AiCallSettings, type SalesforceUserOption } from '@cti/contracts';
 import type { Db } from '@cti/db';
 import { soqlEscape } from '@cti/salesforce';
+import type { MapsClient } from '../appointments/maps.js';
 import { SF_ID } from '../campaigns/records.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import { sendError } from '../http/errors.js';
@@ -26,6 +28,8 @@ export interface AiCallSettingsRouteDeps {
   defaultSpecialists: readonly string[];
   /** The service's shared describe cache (call.prepare's); a fresh one when absent. */
   describes?: DescribeCache;
+  /** The service's Google Maps client, or null without GOOGLE_MAPS_API_KEY (the card then says no times are offered). */
+  maps: MapsClient | null;
 }
 
 export const BOOKING_NEEDS_WRITEBACK_WORDS = 'Booking appointments needs Salesforce write-back. Turn on Salesforce write-back first, then booking.';
@@ -105,7 +109,8 @@ export async function registerAiCallSettingsRoutes(app: FastifyInstance, deps: A
     if (!ctx || !requireAdmin(ctx, reply)) return reply;
     try {
       const client = await clients(ctx.orgId);
-      return await writebackReadiness(client, describes, ctx.orgId, bookingSettings({ settings: ctx.tenant.settings }, deps.defaultSpecialists));
+      const booking = bookingSettings({ settings: ctx.tenant.settings }, deps.defaultSpecialists);
+      return await writebackReadiness(client, describes, ctx.orgId, booking, { mapsConfigured: deps.maps !== null });
     } catch (err) {
       return sendCrmError(reply, err);
     }

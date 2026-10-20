@@ -1,15 +1,19 @@
 /**
  * Plan 1D write-back readiness (Task 27), all read-only: can the tenant's integration connection write call results back
  * (the fields it needs, Events, Tasks and Chatter posts) and convert a Lead that booked (SOAP reachable with the token, the
- * Convert Leads permission, Account/Contact/Opportunity createable)? Shown on the AI call settings card.
+ * Convert Leads permission, Account/Contact/Opportunity createable)? Also who takes high-priority bookings, and the booking
+ * regions with their reps by name, the office and whether Google Maps is configured. Shown on the AI call settings card.
  */
-import type { AiCallBookingSettings, SalesforceUserOption, WritebackReadiness, WritebackReadinessProblem } from '@cti/contracts';
+import type {
+  AiCallBookingSettings, BookingRouting, RoutingReadiness, SalesforceUserOption, WritebackReadiness, WritebackReadinessProblem,
+} from '@cti/contracts';
 import { getUserInfo, SalesforceApiError, SalesforceAuthError, soqlEscape, type SalesforceClient, type SObjectDescribe } from '@cti/salesforce';
-import { readUsers } from '../appointments/calendar.js';
+import { readUsers, type OwnerUser } from '../appointments/calendar.js';
 import { appointmentOwner } from '../appointments/owner.js';
 import { SF_ID } from '../campaigns/records.js';
 import { describeObject, type DescribeCache } from '../research/describe.js';
 import { QUALIFICATION_FIELDS } from '../research/qualification.js';
+import { bookingRouting } from '../settings.js';
 import { CHANGES_FIELD, STATUS_FIELDS } from './fields.js';
 
 type Item = WritebackReadiness['items'][number];
@@ -59,13 +63,49 @@ async function canConvert(client: SalesforceClient, userId: string): Promise<boo
   return rows.length > 0;
 }
 
-async function owner(client: SalesforceClient, booking: AiCallBookingSettings): Promise<SalesforceUserOption | null> {
-  if (booking.specialists.length === 0) return null;
-  const u = appointmentOwner(booking, await readUsers(client, booking.specialists));
-  return u ? { id: u.sfUserId, name: u.name, title: null, isActive: u.isActive } : null;
+export interface ReadinessOptions {
+  /** The service has a Google Maps client (GOOGLE_MAPS_API_KEY): without one no appointment times are offered. */
+  mapsConfigured: boolean;
 }
 
-export async function writebackReadiness(client: SalesforceClient, describes: DescribeCache, orgId: string, booking: AiCallBookingSettings): Promise<WritebackReadiness> {
+/** Salesforce compares ids on their case-sensitive 15-character core. */
+const core = (id: string): string => id.slice(0, 15);
+const userOption = (u: OwnerUser): SalesforceUserOption => ({ id: u.sfUserId, name: u.name, title: null, isActive: u.isActive });
+/** A rep Salesforce did not return: shown by its id, and never active. */
+const missingRep = (id: string): SalesforceUserOption => ({ id, name: id, title: null, isActive: false });
+
+function routingReadiness(routing: BookingRouting, users: ReadonlyMap<string, OwnerUser>, mapsConfigured: boolean): RoutingReadiness {
+  const byCore = new Map([...users.values()].map((u) => [core(u.sfUserId), u]));
+  const repOption = (id: string): SalesforceUserOption => {
+    const u = byCore.get(core(id));
+    return u ? userOption(u) : missingRep(id);
+  };
+  return {
+    officeAddress: routing.officeAddress,
+    mapsConfigured,
+    regions: routing.regions.map((r) => ({ key: r.key, counties: [...r.counties], startTimes: [...r.startTimes], reps: r.reps.map(repOption) })),
+  };
+}
+
+/** The high-priority person (the first active on `specialists`) and the regions' reps, from one User read. */
+async function people(
+  client: SalesforceClient,
+  booking: AiCallBookingSettings,
+  mapsConfigured: boolean,
+): Promise<{ appointmentOwner: SalesforceUserOption | null; routing: RoutingReadiness }> {
+  const routing = bookingRouting(booking);
+  const users = await readUsers(client, [...new Set([...booking.specialists, ...routing.regions.flatMap((r) => r.reps)])]);
+  const owner = appointmentOwner(booking, users);
+  return { appointmentOwner: owner ? userOption(owner) : null, routing: routingReadiness(routing, users, mapsConfigured) };
+}
+
+export async function writebackReadiness(
+  client: SalesforceClient,
+  describes: DescribeCache,
+  orgId: string,
+  booking: AiCallBookingSettings,
+  opts: ReadinessOptions,
+): Promise<WritebackReadiness> {
   const describe = (name: string) => describeObject(client, describes, orgId, name);
   const [lead, opp, event, task, feed, account, contact] = await Promise.all(['Lead', 'Opportunity', 'Event', 'Task', 'FeedItem', 'Account', 'Contact'].map(describe));
   const leadFields = fieldItems(lead!, 'Lead');
@@ -79,11 +119,13 @@ export async function writebackReadiness(client: SalesforceClient, describes: De
   else if (!(await canConvert(client, userId))) convertItems.push(item('Lead', null, 'Convert Leads permission', 'cannot_convert'));
   convertItems.push(...createItems([account!, contact!, opp!]));
 
+  const { appointmentOwner: owner, routing } = await people(client, booking, opts.mapsConfigured);
   return {
     ready,
     convertReady: convertItems.length === 0,
     convertRecordTypes: { account: defaultRecordType(account!), opportunity: defaultRecordType(opp!) },
-    appointmentOwner: await owner(client, booking),
+    appointmentOwner: owner,
     items: [...writeItems, ...convertItems],
+    routing,
   };
 }

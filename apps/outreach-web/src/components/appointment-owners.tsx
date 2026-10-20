@@ -1,6 +1,6 @@
 /**
- * The appointment-owner list of the "AI calls" settings card (split out of ai-call-settings.tsx, P6 M-11): the ordered
- * owners with their state, the "booking is off" line when nobody on it is active, and the Salesforce user search.
+ * The high-priority list of the "AI calls" settings card (split out of ai-call-settings.tsx, P6 M-11): the ordered people
+ * with their state, the "no high-priority bookings" line when nobody on it is active, and the Salesforce user search.
  */
 import { useMutation } from '@tanstack/react-query';
 import { useState, type FormEvent } from 'react';
@@ -10,7 +10,8 @@ import { Input } from '@/components/ui/input';
 import { searchSalesforceUsers } from '@/lib/outreach-api';
 import { errorText } from '@/lib/outreach-words';
 
-const BOOKING_OFF = 'Booking is off: nobody active on the list';
+/** Nobody active takes high-priority bookings; the regions' reps still take every other one. */
+const BOOKING_OFF = 'No high-priority bookings: nobody active on the list';
 
 /** Salesforce compares ids on their case-sensitive 15-character core. */
 export const core = (id: string): string => id.slice(0, 15);
@@ -56,8 +57,9 @@ export function OwnerList({ ids, known, notFound, onChange }: OwnerListProps) {
 }
 
 /**
- * Shown once the list is known to name nobody active: booking is then off whatever the switch says. An id the lookup did not
- * return counts as inactive (M-3); one not looked up yet (or whose lookup failed) is unknown, so the line waits.
+ * Shown once the list is known to name nobody active: no high-priority booking is then offered whatever the switch says. An
+ * id the lookup did not return counts as inactive (M-3); one not looked up yet (or whose lookup failed) is unknown, so the
+ * line waits.
  */
 export function NobodyActive({ ids, known, notFound }: { ids: string[]; known: ReadonlyMap<string, SalesforceUserOption>; notFound: ReadonlySet<string> }) {
   const statusOf = (id: string): 'active' | 'inactive' | 'unknown' => {

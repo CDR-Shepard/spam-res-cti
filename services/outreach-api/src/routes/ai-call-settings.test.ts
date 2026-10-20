@@ -8,6 +8,8 @@ import { SalesforceApiError } from '@cti/salesforce';
 import { buildApp } from '../app.js';
 import { CrmNotConnectedError, type SalesforceClientFactory } from '../crm/client-factory.js';
 import { DEFAULT_AI_CALL_BOOKING, DEFAULT_BOOKING_ROUTING } from '../settings.js';
+import type { MapsClient } from '../appointments/maps.js';
+import { fakeMaps } from '../test/fake-offer.js';
 import { fakeSalesforce, type QueryRoute } from '../test/fake-sf-client.js';
 import { fakeSfWrites, userInfoAnswer } from '../test/fake-sf-writes.js';
 import { prodDescribe } from '../test/writeback-describes.js';
@@ -33,14 +35,14 @@ const auth = { authorization: 'Bearer t' };
 const DEFAULTS = { booking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [] as string[], routing: DEFAULT_BOOKING_ROUTING }, writeback: false };
 
 let app: FastifyInstance;
-async function build(opts: { settings?: unknown; queries?: QueryRoute[]; clients?: SalesforceClientFactory; defaultSpecialists?: string[] } = {}) {
+async function build(opts: { settings?: unknown; queries?: QueryRoute[]; clients?: SalesforceClientFactory; defaultSpecialists?: string[]; maps?: MapsClient | null } = {}) {
   const { db } = fakeDb({ organizations: [{ ...ORG, settings: opts.settings ?? {} }] });
   const sf = fakeSalesforce({ queries: opts.queries ?? [] });
   const clients = opts.clients ?? (async () => sf.client);
   app = await buildApp({
     cfg: testConfig(),
     readiness: async () => ({ dbOk: true, jobsOk: true }),
-    apiRoutes: [(scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: opts.defaultSpecialists ?? [] })],
+    apiRoutes: [(scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: opts.defaultSpecialists ?? [], maps: opts.maps ?? null })],
   });
   return sf;
 }
@@ -189,16 +191,36 @@ describe('AI call settings routes', () => {
   });
 
   describe('GET /settings/ai-calls/readiness', () => {
-    it('answers the write-back and conversion readiness for the tenant\'s owner list', async () => {
+    const readyOrg = () => {
       const f = fakeSfWrites({
         describes: Object.fromEntries(['Lead', 'Opportunity', 'Event', 'Task', 'FeedItem', 'Account', 'Contact'].map((n) => [n, n === 'Lead' || n === 'Opportunity' ? prodDescribe(n) : { name: n, fields: [], createable: true }])),
         queries: [[/FROM PermissionSetAssignment/, [{ Id: '0Pa8X00000Psa1QAA' }]], [/FROM User/, [{ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true }]]],
       });
       f.onSoap = () => userInfoAnswer('0058X0000Integ1QAA');
+      return f;
+    };
+
+    it('answers the write-back and conversion readiness for the tenant\'s owner list', async () => {
+      const f = readyOrg();
       await build({ clients: async () => f.client, defaultSpecialists: [GRANT] });
       const res = await call('GET', '/api/settings/ai-calls/readiness');
       expect(res.statusCode).toBe(200);
       expect(WritebackReadiness.parse(res.json())).toMatchObject({ ready: true, convertReady: true, appointmentOwner: { id: GRANT, name: 'Grant Golden' }, items: [] });
+    });
+
+    it('carries the routing defaults (the regions and the office), and mapsConfigured false with no Google Maps client', async () => {
+      const f = readyOrg();
+      await build({ clients: async () => f.client, defaultSpecialists: [GRANT] });
+      const routing = WritebackReadiness.parse((await call('GET', '/api/settings/ai-calls/readiness')).json()).routing;
+      expect(routing).toMatchObject({ officeAddress: DEFAULT_BOOKING_ROUTING.officeAddress, mapsConfigured: false });
+      expect(routing?.regions.map((r) => r.key)).toEqual(['LA', 'SD']);
+    });
+
+    it('mapsConfigured is true when the service has a Google Maps client', async () => {
+      const f = readyOrg();
+      await build({ clients: async () => f.client, defaultSpecialists: [GRANT], maps: fakeMaps().maps });
+      const res = await call('GET', '/api/settings/ai-calls/readiness');
+      expect(WritebackReadiness.parse(res.json()).routing?.mapsConfigured).toBe(true);
     });
 
     it('no Salesforce connection: 409 CRM_NOT_CONNECTED', async () => {
@@ -218,7 +240,7 @@ describe.skipIf(!pgLane)('AI call settings routes (real Postgres)', () => {
     pgApp = await buildApp({
       cfg: testConfig(),
       readiness: async () => ({ dbOk: true, jobsOk: true }),
-      apiRoutes: [(scope) => registerAiCallSettingsRoutes(scope, { db: t.db, clients: async () => { throw new CrmNotConnectedError(); }, defaultSpecialists: [GRANT] })],
+      apiRoutes: [(scope) => registerAiCallSettingsRoutes(scope, { db: t.db, clients: async () => { throw new CrmNotConnectedError(); }, defaultSpecialists: [GRANT], maps: null })],
     });
   }, 120_000);
   afterAll(async () => {

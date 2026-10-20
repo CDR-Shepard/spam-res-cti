@@ -29,13 +29,13 @@ describe('RecordTestCalls', () => {
     expect(learned).toHaveTextContent('Motivation: Moving to Ohio');
     expect(learned).toHaveTextContent('Asking price: About 300k');
     expect(screen.getByText(/^Asked for a call back: /)).toBeInTheDocument();
-    expect(screen.getByText('Would have booked: Phone call Wed Oct 7, 11:00 AM PT')).toBeInTheDocument();
+    expect(screen.getByText('Would have booked: Phone consultation Wed Oct 7, 11:00 AM PT')).toBeInTheDocument();
   });
 
   it('names who the booking is with when the call knows (spec §4.4)', () => {
     stubApi({});
     renderWithProviders(<RecordTestCalls calls={[{ ...booked, appointmentWith: 'Grant' }]} />, { isAdmin: true });
-    expect(screen.getByText('Would have booked: Phone call with Grant, Wed Oct 7, 11:00 AM PT')).toBeInTheDocument();
+    expect(screen.getByText('Would have booked: Phone consultation with Grant, Wed Oct 7, 11:00 AM PT')).toBeInTheDocument();
   });
 
   it('newest first; a refusal and a lost answer say so', () => {

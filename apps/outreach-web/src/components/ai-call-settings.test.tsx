@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { AiCallSettings } from '@cti/contracts';
+import type { AiCallSettings, RoutingReadiness } from '@cti/contracts';
 import { renderWithProviders } from '../test/render';
 import { respond, stubApi, type StubCall } from '../test/stub-api';
 import { AiCallSettingsCard } from './ai-call-settings';
@@ -12,6 +12,20 @@ const SAM = '0058X00000Zzzz9QAB';
 const grant = { id: GRANT, name: 'Grant Golden', title: 'Acquisitions', isActive: true };
 const pat = { id: PAT, name: 'Pat Doe', title: null, isActive: true };
 const sam = { id: SAM, name: 'Sam Gone', title: null, isActive: false };
+// Staff (the spec's region reps): their names are fine to show.
+const chance = { id: '0055f000005qXn8AAE', name: 'Chance Lanier', title: null, isActive: true };
+const blake = { id: '0058X00000FA8tLQAT', name: 'Blake Kossuth', title: null, isActive: true };
+const seth = { id: '0055f000005qXVfAAM', name: 'Seth Boisvert', title: null, isActive: true };
+const thomas = { id: '0055f000005qYO6AAM', name: 'Thomas Wilkinson', title: null, isActive: true };
+const OFFICE = '18872 MacArthur Blvd #220, Irvine, CA 92612';
+const ROUTING: RoutingReadiness = {
+  officeAddress: OFFICE,
+  mapsConfigured: true,
+  regions: [
+    { key: 'LA', counties: ['Los Angeles', 'Orange', 'Riverside', 'San Bernardino'], startTimes: ['09:00', '11:00', '13:00', '15:00', '17:00', '19:00'], reps: [chance, blake] },
+    { key: 'SD', counties: ['San Diego'], startTimes: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'], reps: [seth, thomas] },
+  ],
+};
 
 /** A tenant that turned booking, conversion and write-back on, with the configured default owner list (Grant Golden). */
 function settings(over: Partial<AiCallSettings['booking']> = {}, writeback = true): AiCallSettings {
@@ -31,7 +45,18 @@ function settings(over: Partial<AiCallSettings['booking']> = {}, writeback = tru
 const idsUrl = (ids: string[]) => `GET /api/salesforce/users?${new URLSearchParams({ ids: ids.join(',') }).toString()}`;
 const puts = (calls: StubCall[]) => calls.filter((c) => c.method === 'PUT' && c.url === '/api/settings/ai-calls').map((c) => c.body as AiCallSettings);
 const owners = () => within(screen.getByRole('list', { name: 'Appointment owners' })).getAllByRole('listitem');
-const BOOKING_OFF = 'Booking is off: nobody active on the list';
+const BOOKING_OFF = 'No high-priority bookings: nobody active on the list';
+const OWNER_LINE =
+  'Sellers who need to sell fast, or face a foreclosure or auction, are booked with the first active person on this list at the time they ask for, whatever their calendar says. Every other appointment goes to the region\'s reps below.';
+const MAPS_MISSING = 'Google Maps key missing: no appointment times are offered until GOOGLE_MAPS_API_KEY is set on outreach-api.';
+const READINESS = 'GET /api/settings/ai-calls/readiness';
+const READY = {
+  ready: true,
+  convertReady: true,
+  convertRecordTypes: { account: 'Person Account', opportunity: 'Homeowner Opportunity' },
+  appointmentOwner: { id: GRANT, name: 'Grant Golden', title: null, isActive: true },
+  items: [],
+};
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -49,17 +74,97 @@ describe('AiCallSettingsCard', () => {
     expect(await screen.findByRole('checkbox', { name: 'Book appointments on AI calls' })).toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'Convert a Lead that books an appointment' })).toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'Write call results back to Salesforce' })).toBeChecked();
-    expect(screen.getByRole('checkbox', { name: 'Offer phone calls' })).toBeChecked();
-    expect(screen.getByRole('checkbox', { name: 'Offer walkthroughs' })).toBeChecked();
-    expect(screen.getByLabelText('Phone call length (minutes)')).toHaveValue(15);
-    expect(screen.getByLabelText('Phone call from (hour, 24h)')).toHaveValue(10);
-    expect(screen.getByLabelText('Phone call until (hour, 24h)')).toHaveValue(18);
-    expect(screen.getByLabelText('Phone call earliest (hours ahead)')).toHaveValue(2);
-    expect(screen.getByLabelText('Phone call latest (business days ahead)')).toHaveValue(2);
-    expect(screen.getByLabelText('Walkthrough length (minutes)')).toHaveValue(60);
-    expect(screen.getByLabelText('Walkthrough earliest (hours ahead)')).toHaveValue(20);
-    expect(screen.getByLabelText('Walkthrough latest (business days ahead)')).toHaveValue(5);
-    expect(screen.getByText('Every AI-booked appointment goes to the first active person on this list. They distribute them.')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'High-priority appointments go to' })).toBeInTheDocument();
+    expect(screen.getByText(OWNER_LINE)).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Phone consultations' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'In-person consultations' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Offer phone consultations' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Offer in-person consultations' })).toBeChecked();
+    expect(screen.getByLabelText('Phone consultation earliest (hours ahead)')).toHaveValue(2);
+    expect(screen.getByLabelText('Phone consultation latest (business days ahead)')).toHaveValue(2);
+    expect(screen.getByLabelText('In-person consultation earliest (hours ahead)')).toHaveValue(20);
+    expect(screen.getByLabelText('In-person consultation latest (business days ahead)')).toHaveValue(5);
+    // The region table sets the length and the start times: the card no longer edits them.
+    expect(screen.queryByLabelText(/length \(minutes\)/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/from \(hour, 24h\)/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/until \(hour, 24h\)/)).not.toBeInTheDocument();
+  });
+
+  it('ruling: a save sends the saved length, from and until (and the routing) unchanged', async () => {
+    const base = settings();
+    const saved = settings({
+      phone: { ...base.booking.phone, durationMinutes: 25, startHour: 8, endHour: 12 },
+      walkthrough: { ...base.booking.walkthrough, durationMinutes: 90, startHour: 7, endHour: 21 },
+      routing: { officeAddress: '1 Invented Way, Testville, CA 90000', regions: [{ key: 'SD', counties: ['San Diego'], reps: [seth.id], startTimes: ['10:30'] }] },
+    });
+    const calls = stubApi({ 'GET /api/settings/ai-calls': saved, [idsUrl([GRANT])]: [grant], 'PUT /api/settings/ai-calls': saved });
+    renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Convert a Lead that books an appointment' }));
+    const earliest = screen.getByLabelText('Phone consultation earliest (hours ahead)');
+    await userEvent.clear(earliest);
+    await userEvent.type(earliest, '3');
+    await userEvent.click(screen.getByRole('button', { name: 'Save AI call settings' }));
+    await waitFor(() => expect(puts(calls)).toHaveLength(1));
+    const sent = puts(calls)[0]!;
+    expect(sent).toEqual({ ...saved, booking: { ...saved.booking, convertLeads: false, phone: { ...saved.booking.phone, minLeadMinutes: 180 } } });
+    expect(sent.booking.phone).toMatchObject({ durationMinutes: 25, startHour: 8, endHour: 12 });
+    expect(sent.booking.walkthrough).toMatchObject({ durationMinutes: 90, startHour: 7, endHour: 21 });
+  });
+
+  describe('the regions (read-only, from the readiness check)', () => {
+    const regions = () => screen.findByRole('table', { name: 'Booking regions' });
+    /** The body row whose Region cell is `key`. */
+    const rowOf = async (key: string): Promise<HTMLElement> => {
+      const rows = within(await regions()).getAllByRole('row').filter((tr) => tr.querySelector('td')?.textContent === key);
+      expect(rows).toHaveLength(1);
+      return rows[0]!;
+    };
+
+    it('shows each region under the owner list: counties, reps, start times in Pacific, and the office', async () => {
+      stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant], [READINESS]: { ...READY, routing: ROUTING } });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      const table = await regions();
+      expect(within(table).getAllByRole('columnheader').map((th) => th.textContent)).toEqual(['Region', 'Counties', 'Reps', 'Starts (Pacific)']);
+      const owners = screen.getByRole('heading', { name: 'High-priority appointments go to' });
+      expect(owners.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      const la = within(await rowOf('LA'));
+      expect(la.getByText('LA')).toBeInTheDocument();
+      expect(la.getByText('Los Angeles, Orange, Riverside, San Bernardino')).toBeInTheDocument();
+      expect(la.getByText('Chance Lanier')).toBeInTheDocument();
+      expect(la.getByText('Blake Kossuth')).toBeInTheDocument();
+      expect(la.getByText('9 AM, 11 AM, 1 PM, 3 PM, 5 PM, 7 PM')).toBeInTheDocument();
+      const sd = within(await rowOf('SD'));
+      expect(sd.getByText('San Diego')).toBeInTheDocument();
+      expect(sd.getByText('Seth Boisvert')).toBeInTheDocument();
+      expect(sd.getByText('Thomas Wilkinson')).toBeInTheDocument();
+      expect(sd.getByText('9 AM, 10 AM, 11 AM, 12 PM, 1 PM, 2 PM, 3 PM, 4 PM')).toBeInTheDocument();
+      expect(screen.getByText(`Reps start from the office: ${OFFICE}.`)).toBeInTheDocument();
+      expect(screen.queryByText(MAPS_MISSING)).not.toBeInTheDocument();
+    });
+
+    it('marks an inactive rep "inactive", and says a time off the hour with its minutes', async () => {
+      const routing = { ...ROUTING, regions: [{ ...ROUTING.regions[0]!, startTimes: ['00:00', '09:30', '12:15'], reps: [chance, { ...blake, isActive: false }] }] };
+      stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant], [READINESS]: { ...READY, routing } });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      const la = within(await rowOf('LA'));
+      expect(la.getByText('Blake Kossuth (inactive)')).toHaveClass('text-destructive');
+      expect(la.getByText('Chance Lanier')).not.toHaveClass('text-destructive');
+      expect(la.getByText('12 AM, 9:30 AM, 12:15 PM')).toBeInTheDocument();
+    });
+
+    it('without a Google Maps key says so in red', async () => {
+      stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant], [READINESS]: { ...READY, routing: { ...ROUTING, mapsConfigured: false } } });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      expect(await screen.findByText(MAPS_MISSING)).toHaveClass('text-destructive');
+      expect(screen.getByRole('table', { name: 'Booking regions' })).toBeInTheDocument();
+    });
+
+    it('an answer without routing (an older outreach-api) shows no table', async () => {
+      stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant], [READINESS]: READY });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      expect(await screen.findByText('High-priority appointments go to: Grant Golden')).toBeInTheDocument();
+      expect(screen.queryByRole('table', { name: 'Booking regions' })).not.toBeInTheDocument();
+    });
   });
 
   it('final review WEB I-2: a tenant that never turned them on sees booking, conversion and write-back off, and when to turn them on', async () => {
@@ -73,7 +178,7 @@ describe('AiCallSettingsCard', () => {
     );
   });
 
-  it('the default list from the server shows Grant Golden first, and booking is on', async () => {
+  it('the default list from the server shows Grant Golden first, and high-priority bookings are on', async () => {
     stubApi({ 'GET /api/settings/ai-calls': settings({ specialists: [GRANT, SAM] }), [idsUrl([GRANT, SAM])]: [grant, sam] });
     renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
     await screen.findByText('Grant Golden');
@@ -123,14 +228,14 @@ describe('AiCallSettingsCard', () => {
     expect(puts(calls)[0]!.booking.specialists).toEqual([PAT, GRANT]);
   });
 
-  it('an empty list shows the booking-is-off line', async () => {
+  it('an empty list shows the no-high-priority line', async () => {
     const calls = stubApi({ 'GET /api/settings/ai-calls': settings({ specialists: [] }) });
     renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
     expect(await screen.findByText(BOOKING_OFF)).toBeInTheDocument();
     expect(calls.some((c) => c.url.startsWith('/api/salesforce/users'))).toBe(false);
   });
 
-  it('a list whose only user is inactive shows the booking-is-off line; removing the last active person shows it too', async () => {
+  it('a list whose only user is inactive shows the no-high-priority line', async () => {
     stubApi({ 'GET /api/settings/ai-calls': settings({ specialists: [SAM] }), [idsUrl([SAM])]: [sam] });
     renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
     expect(await screen.findByText(BOOKING_OFF)).toBeInTheDocument();
@@ -154,7 +259,7 @@ describe('AiCallSettingsCard', () => {
       expect(screen.getByText(BOOKING_OFF)).toBeInTheDocument();
     });
 
-    it('beside an inactive user still turns booking off; beside an active one it does not', async () => {
+    it('beside an inactive user still means nobody active', async () => {
       stubApi({ 'GET /api/settings/ai-calls': settings({ specialists: [PAT, SAM] }), [idsUrl([PAT, SAM])]: [sam] });
       renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
       expect(await screen.findByText(`${PAT} (not found)`)).toBeInTheDocument();
@@ -162,14 +267,14 @@ describe('AiCallSettingsCard', () => {
       expect(screen.getByText(BOOKING_OFF)).toBeInTheDocument();
     });
 
-    it('a found active user keeps booking on', async () => {
+    it('a found active user keeps high-priority bookings on', async () => {
       stubApi({ 'GET /api/settings/ai-calls': settings({ specialists: [PAT, GRANT] }), [idsUrl([PAT, GRANT])]: [grant] });
       renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
       expect(await screen.findByText(`${PAT} (not found)`)).toBeInTheDocument();
       expect(screen.queryByText(BOOKING_OFF)).not.toBeInTheDocument();
     });
 
-    it('when the lookup fails, an unknown id is neither "not found" nor booking off (nobody knows yet)', async () => {
+    it('when the lookup fails, an unknown id is neither "not found" nor nobody active (nobody knows yet)', async () => {
       stubApi({ 'GET /api/settings/ai-calls': settings({ specialists: [PAT] }), [idsUrl([PAT])]: respond(502, { error: 'Salesforce did not answer', code: 'CRM_ERROR' }) });
       renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
       expect(await screen.findByText(PAT)).toBeInTheDocument();
@@ -253,28 +358,28 @@ describe('AiCallSettingsCard', () => {
     });
   });
 
-  it('edits a kind\'s hours and lead time; an end hour not after the start hour cannot be saved', async () => {
+  it('edits a kind\'s earliest and latest; a value out of range cannot be saved', async () => {
     const calls = stubApi({
       'GET /api/settings/ai-calls': settings(),
       [idsUrl([GRANT])]: [grant],
       'PUT /api/settings/ai-calls': settings(),
     });
     renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
-    const until = await screen.findByLabelText('Walkthrough until (hour, 24h)');
-    await userEvent.clear(until);
-    await userEvent.type(until, '9');
+    const latest = await screen.findByLabelText('In-person consultation latest (business days ahead)');
+    await userEvent.clear(latest);
+    await userEvent.type(latest, '11');
     expect(screen.getByRole('button', { name: 'Save AI call settings' })).toBeDisabled();
-    expect(screen.getByText(/each kind needs an end hour after its start hour/)).toBeInTheDocument();
-    await userEvent.clear(until);
-    await userEvent.type(until, '16');
-    const earliest = screen.getByLabelText('Walkthrough earliest (hours ahead)');
+    expect(screen.getByText('Check the numbers: every value must be in range.')).toBeInTheDocument();
+    await userEvent.clear(latest);
+    await userEvent.type(latest, '7');
+    const earliest = screen.getByLabelText('In-person consultation earliest (hours ahead)');
     await userEvent.clear(earliest);
     await userEvent.type(earliest, '24');
-    await userEvent.click(screen.getByRole('checkbox', { name: 'Offer phone calls' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Offer phone consultations' }));
     await userEvent.click(screen.getByRole('button', { name: 'Save AI call settings' }));
     await waitFor(() => expect(puts(calls)).toHaveLength(1));
     const sent = puts(calls)[0]!.booking;
-    expect(sent.walkthrough).toMatchObject({ endHour: 16, minLeadMinutes: 1440 });
+    expect(sent.walkthrough).toMatchObject({ horizonBusinessDays: 7, minLeadMinutes: 1440 });
     expect(sent.phone.enabled).toBe(false);
   });
 
@@ -304,26 +409,19 @@ describe('AiCallSettingsCard', () => {
 });
 
 describe('Salesforce write-back readiness', () => {
-  const READINESS = 'GET /api/settings/ai-calls/readiness';
   const base = { [`GET /api/settings/ai-calls`]: settings(), [idsUrl([GRANT])]: [grant] };
-  const ready = {
-    ready: true,
-    convertReady: true,
-    convertRecordTypes: { account: 'Person Account', opportunity: 'Homeowner Opportunity' },
-    appointmentOwner: { id: GRANT, name: 'Grant Golden', title: null, isActive: true },
-    items: [],
-  };
+  const ready = READY;
 
-  it('a ready org says Ready, who appointments go to, and what conversion creates', async () => {
+  it('a ready org says Ready, who high-priority appointments go to, and what conversion creates', async () => {
     stubApi({ ...base, [READINESS]: ready });
     renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
     expect(await screen.findByRole('heading', { name: 'Salesforce write-back readiness' })).toBeInTheDocument();
     expect(await screen.findByText('Ready')).toBeInTheDocument();
-    expect(screen.getByText('Appointments go to: Grant Golden')).toBeInTheDocument();
+    expect(screen.getByText('High-priority appointments go to: Grant Golden')).toBeInTheDocument();
     expect(screen.getByText('Lead conversion: ready. New records will be Person Account / Homeowner Opportunity')).toBeInTheDocument();
   });
 
-  it('lists each problem in words; conversion not ready names why and the fallback; nobody active turns booking off', async () => {
+  it('lists each problem in words; conversion not ready names why and the fallback; nobody active for high priority', async () => {
     stubApi({
       ...base,
       [READINESS]: {
@@ -344,7 +442,7 @@ describe('Salesforce write-back readiness', () => {
     expect(list.getByText("Lead · AI Last Call Changes: the connected Salesforce user can't edit it")).toBeInTheDocument();
     expect(list.getByText("Opportunity · Loss_Reason__c: not in this Salesforce org, or hidden from the connected user")).toBeInTheDocument();
     expect(list.getByText("Event: can't be created by the connected user")).toBeInTheDocument();
-    expect(screen.getByText('Appointments go to: nobody active: booking is off')).toBeInTheDocument();
+    expect(screen.getByText('High-priority appointments go to: nobody active')).toBeInTheDocument();
     expect(
       screen.getByText("Lead conversion: not ready (Convert Leads permission: the connected Salesforce user doesn't have it). A Lead that books gets a calendar hold and a Task instead"),
     ).toBeInTheDocument();
