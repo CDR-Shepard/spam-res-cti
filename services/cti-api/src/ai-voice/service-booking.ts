@@ -24,6 +24,7 @@ import {
 } from '@cti/contracts';
 import type { ToolResult } from './bridge.js';
 import { wallTimeToDate } from './local-time.js';
+import { KIND_WORDS } from './prompt-booking.js';
 import type { ToolCtx, ToolEnv } from './service-tools.js';
 
 export const WALKTHROUGH_NEEDS_ADDRESS =
@@ -59,7 +60,6 @@ const DAY_MS = 24 * 60 * MINUTE_MS;
 const SENTENCE_END = /[.!?…]["'”’]?$/;
 /** The summary line a booking leaves (summary.ts carries it through rewrites). */
 export const BOOKED_LINE_PREFIX = 'Appointment booked:';
-const KIND_WORDS = { phone: 'phone consultation', walkthrough: 'in-person consultation' } as const;
 const PRIORITY_WORDS = 'high-priority in-person consultation';
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));

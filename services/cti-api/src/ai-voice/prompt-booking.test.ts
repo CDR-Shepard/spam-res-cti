@@ -351,14 +351,22 @@ describe('buildInstructions: consultations and high priority (routing step 1)', 
       [
         '# High priority',
         '- Someone is high priority when they want to sell as soon as possible or something is urgent — a foreclosure, an auction date. You judge it from what they tell you.',
-        "- For them, offer an in-person consultation with Grant at the time they ask for: any day in the next two weeks, starting between 8 in the morning and 7 at night, at least two hours from now. If they don't name a time, offer Tuesday, October 20 at 9 AM.",
+        "- For them, offer an in-person consultation with Grant at the time they ask for: any day in the next two weeks, starting between 8 in the morning and 7 at night Pacific time, at least two hours from now. If they don't name a time, offer Tuesday, October 20 at 9 AM.",
         '- Confirm the property first ("That\'s the property at 1234 Oak Street, right?"), then call book_priority_appointment silently with the agreed time in Pacific time, why it\'s urgent in their words, and anything Grant should know.',
         "- Then confirm the day and time in ONE line with your goodbye, and end_call with outcome \"appointment_set\". If it says the time doesn't work, offer one that does.",
       ].join('\n'),
     );
     expect(toolsOf(text)).toContain(
-      "- book_priority_appointment — for a high-priority seller (see High priority): start is the agreed time as YYYY-MM-DDTHH:MM in Pacific time; address_confirmed true once they confirmed the property; reason is why it's urgent; what_changed as for book_appointment; note is anything Grant should know. Call it silently.",
+      "- book_priority_appointment — for a high-priority seller (see High priority): start is the agreed time as YYYY-MM-DDTHH:MM in Pacific time; address_confirmed true once they confirmed the property; reason is why it's urgent; what_changed is what's changed since their earlier consultation, in their words (empty if there was none); note is anything Grant should know. Call it silently.",
     );
+  });
+
+  it('fix round 1: a priority-only call never mentions book_appointment, which it is not offered', () => {
+    const text = build({ priority: GRANT, ...consulted(LAST) });
+    const line = toolsOf(text).split('\n').find((l) => l.startsWith('- book_priority_appointment')) ?? '';
+    expect(line).toContain("what_changed is what's changed since their earlier consultation, in their words (empty if there was none)");
+    expect(line).not.toContain('book_appointment');
+    expect(text).not.toContain('book_appointment');
   });
 
   it('slots and a priority offer: High priority comes after Booking and before Do-not-call', () => {
@@ -396,6 +404,27 @@ describe('buildInstructions: consultations and high priority (routing step 1)', 
       ].join('\n'),
     );
     expect(text.indexOf('# Their earlier consultation')).toBeLessThan(text.indexOf('# Booking an appointment'));
+  });
+
+  it('fix round 1: an earlier and an upcoming consultation with nothing to book (what outreach sends): only listen, never offer a new one', () => {
+    const text = build(consulted(LAST, NEXT));
+    expect(sectionOf(text, '# Their earlier consultation')).toBe(
+      [
+        '# Their earlier consultation',
+        "- We've met with them before: an in-person consultation on March 12 with Blake.",
+        '- Bring it up yourself, early and warmly — e.g. "I see we came out back on March 12 — what\'s changed since then?"',
+        '- Listen to what changed.',
+      ].join('\n'),
+    );
+    expect(text).toContain('- Listen to what changed.');
+    expect(text).not.toContain('still offer a new consultation');
+    expect(text).toContain("Don't book another one");
+  });
+
+  it('fix round 1: with only a priority offer to book, an earlier consultation still leads to a new one', () => {
+    const text = build({ priority: GRANT, ...consulted(LAST) });
+    expect(text).toContain('- Listen to what changed, then still offer a new consultation. When you book, pass what changed, in their words, as what_changed.');
+    expect(text).not.toContain('- Listen to what changed.\n');
   });
 
   it('an earlier phone consultation with no owner named', () => {

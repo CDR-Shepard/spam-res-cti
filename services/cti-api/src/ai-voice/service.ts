@@ -122,7 +122,8 @@ async function companyName(i: StartInput): Promise<string> {
  * Plan 1D prompt fields, only when set, so a first call without slots has exactly the 1C prompt. Times are said in the
  * seller's zone: the number dialed, except for a practice call, which rings a test number but must sound exactly as the
  * seller would hear it, so it takes the record's phone (Fix 1, M-5), falling back to the dialed number. Routing step 1: a
- * priority offer brings the seller's zone too, even with no slots; consultations come only when one is known.
+ * priority offer brings the seller's zone too, even with no slots; consultations come only when one is known, and bring the
+ * zone as well, so an earlier or booked consultation is said in the seller's time.
  */
 function bookingPrompt(
   i: StartInput,
@@ -136,7 +137,7 @@ function bookingPrompt(
     ...(i.returning ? { returning: true } : {}),
     ...(slots ? { slots } : {}),
     ...(priority ? { priority } : {}),
-    ...(slots || priority ? { sellerTimeZone: timezoneForNumber(sellerNumber(i, record, to))?.timezone ?? null } : {}),
+    ...(slots || priority || consultations ? { sellerTimeZone: timezoneForNumber(sellerNumber(i, record, to))?.timezone ?? null } : {}),
     ...(consultations ? { consultations } : {}),
   };
 }

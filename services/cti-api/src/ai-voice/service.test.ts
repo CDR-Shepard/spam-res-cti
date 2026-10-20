@@ -411,6 +411,20 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
       expect(getActiveCall(res.aiCallId)!.prompt).toMatchObject({ consultations });
     });
 
+    it('fix round 1: an already-booked call for a seller in New York brings their zone, and the booked time is said in it', async () => {
+      gateResult = { ok: true, toE164: '+12125550199', fromE164: FROM };
+      const next = { start: '2026-10-21T18:00:00.000Z', kind: 'phone', ownerName: 'Seth Boisvert' } as const;
+      const res = await run(LEAD, session, { consultations: { last: null, next } });
+      if (!res.ok) throw new Error('unreachable');
+      const prompt = getActiveCall(res.aiCallId)!.prompt;
+      expect(prompt).toMatchObject({ sellerTimeZone: 'America/New_York', consultations: { last: null, next } });
+      expect(prompt).not.toHaveProperty('slots');
+      expect(prompt).not.toHaveProperty('priority');
+      // The stream session adds the local time when the call connects (stream-session.ts).
+      const text = buildInstructions({ ...prompt, localTime: 'Monday, October 5, 2026, 2:00 PM' });
+      expect(text).toContain('- They already have a consultation booked: Wednesday, October 21 at 2 PM with Seth, by phone.');
+    });
+
     it.each([
       ['no last or next consultation', { last: null, next: null }],
       ['null consultations', null],

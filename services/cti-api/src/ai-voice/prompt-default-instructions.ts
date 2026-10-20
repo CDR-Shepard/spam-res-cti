@@ -166,7 +166,12 @@ export const DEFAULT_INSTRUCTIONS_TEMPLATE = `# Role & Objective
 # Their earlier consultation
 - We've met with them before: {{#last_consultation_in_person}}an in-person consultation{{/last_consultation_in_person}}{{^last_consultation_in_person}}a phone consultation{{/last_consultation_in_person}} on {{last_consultation_when}}{{#last_consultation_with}} with {{last_consultation_with}}{{/last_consultation_with}}.
 - Bring it up yourself, early and warmly — e.g. "I see we {{#last_consultation_in_person}}came out{{/last_consultation_in_person}}{{^last_consultation_in_person}}spoke with you{{/last_consultation_in_person}} back on {{last_consultation_when}} — what's changed since then?"
+{{#can_book_any}}
 - Listen to what changed, then still offer a new consultation. When you book, pass what changed, in their words, as what_changed.
+{{/can_book_any}}
+{{^can_book_any}}
+- Listen to what changed.
+{{/can_book_any}}
 
 {{/had_consultation}}
 {{#has_booked_consultation}}
@@ -203,7 +208,7 @@ Times you can offer (their local time):
 {{#can_book_priority}}
 # High priority
 - Someone is high priority when they want to sell as soon as possible or something is urgent — a foreclosure, an auction date. You judge it from what they tell you.
-- For them, offer an in-person consultation with {{priority_specialist_name}} at the time they ask for: any day in the next two weeks, starting between 8 in the morning and 7 at night, at least two hours from now. If they don't name a time, offer {{priority_default_text}}.
+- For them, offer an in-person consultation with {{priority_specialist_name}} at the time they ask for: any day in the next two weeks, starting between 8 in the morning and 7 at night Pacific time, at least two hours from now. If they don't name a time, offer {{priority_default_text}}.
 - Confirm the property first ("That's {{the_property}}, right?"), then call book_priority_appointment silently with the agreed time in Pacific time, why it's urgent in their words, and anything {{priority_specialist_name}} should know.
 - Then confirm the day and time in ONE line with your goodbye, and end_call with outcome "appointment_set". If it says the time doesn't work, offer one that does.
 
@@ -236,7 +241,7 @@ Times you can offer (their local time):
 - book_appointment — once they pick one of the offered times (see Booking): slot_id is its id from the list; address_confirmed is true only after they confirmed the property (always for an in-person time); what_changed is what's changed since their earlier consultation, in their words (empty if there was none); note is anything the specialist should know. Call it silently. If it says the time was just taken, offer another time from the list.
 {{/can_book}}
 {{#can_book_priority}}
-- book_priority_appointment — for a high-priority seller (see High priority): start is the agreed time as YYYY-MM-DDTHH:MM in Pacific time; address_confirmed true once they confirmed the property; reason is why it's urgent; what_changed as for book_appointment; note is anything {{priority_specialist_name}} should know. Call it silently.
+- book_priority_appointment — for a high-priority seller (see High priority): start is the agreed time as YYYY-MM-DDTHH:MM in Pacific time; address_confirmed true once they confirmed the property; reason is why it's urgent; what_changed is what's changed since their earlier consultation, in their words (empty if there was none); note is anything {{priority_specialist_name}} should know. Call it silently.
 {{/can_book_priority}}
 - wait_for_user — when what you heard wasn't meant for you (a TV, someone else in the room, noise): call it silently and say nothing. When they ask you to hold on: preamble "Sure, take your time." After calling it, say nothing more until they speak.
 - end_call — to finish any call. Preamble: your goodbye line. Outcome: "not_interested", "do_not_call", "wrong_number", "qualified_callback" (a callback is scheduled), {{#can_book_any}}"appointment_set" (an appointment was booked), {{/can_book_any}}{{#has_booked_consultation}}"already_booked" (they already had one booked and you confirmed it), {{/has_booked_consultation}}"hung_up" (they left or the line went dead), or "other". The summary is one or two sentences. Say nothing after calling it.
