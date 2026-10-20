@@ -211,7 +211,7 @@ export async function registerRecordTestRoutes(app: FastifyInstance, deps: Recor
     if (!ctx || !requireAdmin(ctx, reply)) return reply;
     const params = CallParams.safeParse(req.params);
     if (!params.success) return sendError(reply, ...DRY_RUN_ERRORS.not_found);
-    const dryDeps = { db, clients, model: deps.mappingModel ?? null, describes, now: now(), log: req.log, resultsBaseUrl: deps.appPublicUrl ?? '' };
+    const dryDeps = { db, clients, model: deps.mappingModel ?? null, describes, now: now(), log: req.log, resultsBaseUrl: deps.appPublicUrl ?? '', defaultSpecialists };
     const out = await dryRunTestCall(dryDeps, ctx, params.data.callId);
     if ('refusal' in out) return sendLimitRefusal(reply, out.refusal, ctx.tenant.timezone);
     if (!out.ok) return sendError(reply, ...DRY_RUN_ERRORS[out.error]);

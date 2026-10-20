@@ -39,8 +39,11 @@ export function changeList(plan: WritePlan): WritebackChange[] {
 
 export interface Booking {
   booked: BookedAppointment;
+  /** The booked rep: the Event's (or the Lead hold's) owner. */
   ownerName: string;
   ownerFirstName: string | null;
+  /** Whoever the conversion would make the owner, who also gets the "convert and book" Task (final review I3). */
+  convertOwnerName: string;
   /** A Lead that booked, with conversion on: the Lead Manager the conversion would set. */
   convertsWithLeadManager: string | null;
 }
@@ -50,14 +53,14 @@ export function createdRecords(sfObject: 'Lead' | 'Opportunity', b: Booking | nu
   if (b === null) return [];
   const when = ptWords(new Date(b.booked.start));
   if (sfObject === 'Lead' && b.convertsWithLeadManager === null) {
-    return [`Hold on ${b.ownerName}'s calendar: ${when}`, `Task to ${b.ownerName}: convert the Lead and book it`];
+    return [`Hold on ${b.ownerName}'s calendar: ${when}`, `Task to ${b.convertOwnerName}: convert the Lead and book it`];
   }
   return [`Event: ${eventSubject(b.booked)}, ${when}, owner ${b.ownerName}`];
 }
 
 export function conversionWords(b: Booking | null): string | null {
   if (b === null || b.convertsWithLeadManager === null) return null;
-  return `Would convert this Lead (owner ${b.ownerName}, Lead Manager ${b.convertsWithLeadManager}) and write the rest to the new Opportunity. The field list below is the Lead-side approximation.`;
+  return `Would convert this Lead (owner ${b.convertOwnerName}, Lead Manager ${b.convertsWithLeadManager}) and write the rest to the new Opportunity. The field list below is the Lead-side approximation.`;
 }
 
 /** The Chatter post's "Booked:" words, as a made Event reads ("phone consultation with Grant, Wed Oct 7, 11:00 AM PT"). */

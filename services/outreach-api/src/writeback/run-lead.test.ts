@@ -3,9 +3,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import type { Db } from '@cti/db';
 import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
-import { convertRefused, refused } from '../test/fake-sf-writes.js';
+import { convertRefused, refused, type WriteQueryRoute } from '../test/fake-sf-writes.js';
 import { createTestDb, pgLane } from '../test/pg.js';
-import { ACCOUNT, CONTACT, depsFor, fakeOrg, GRANT, NEW_OPP, PHONE_BOOKING, RUN_AT, seedWriteback, SETTER, transportError, writebackById, type OrgState } from '../test/writeback-harness.js';
+import { ACCOUNT, CONTACT, depsFor, fakeOrg, GRANT, NEW_OPP, PHONE_BOOKING, quiet, RUN_AT, seedWriteback, SETTER, transportError, writebackById, type OrgState } from '../test/writeback-harness.js';
 import { runWritebacks } from './run.js';
 
 const REP_OPP = '0068X00000RepOpQAA';
@@ -300,5 +300,101 @@ describe.skipIf(!pgLane)('runWritebacks on Leads (real Postgres)', () => {
     expect((await runWritebacks(depsFor(db, f))).skipped).toBe(1);
     expect(f.updates).toEqual([]);
     expect(f.soapBodies).toEqual([]);
+  });
+
+  describe("final review I3: records a conversion creates keep today's owner (the appointment owner), the Event stays the booked rep's", () => {
+    const CHANCE = '0055f000005qXn8AAE';
+    /** A Lead owner who has left (inactive): the Lead Manager falls back to the conversion owner. */
+    const GONE = '0058X00000Gone1QAA';
+    const chanceBooking = { ...PHONE_BOOKING, specialistSfUserId: CHANCE, region: 'LA' };
+    const staff = [
+      { Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', TimeZoneSidKey: 'America/Los_Angeles' },
+      { Id: CHANCE, FirstName: 'Chance', Name: 'Chance Lanier', TimeZoneSidKey: 'America/Los_Angeles' },
+    ];
+    /** The User reads answer per id; Grant's IsActive as given, or the read of the specialists list (it names Grant) fails. */
+    const usersRoute = (grant: boolean | Error): WriteQueryRoute => [
+      /^SELECT Id, FirstName, Name, IsActive, TimeZoneSidKey FROM User/,
+      (q) => {
+        if (grant instanceof Error && q.includes(`'${GRANT}'`)) return grant;
+        return staff.filter((u) => q.includes(`'${u.Id}'`)).map((u) => ({ ...u, IsActive: u.Id === GRANT ? grant === true : true }));
+      },
+    ];
+    const routedLead = () => seedWriteback(db, { sfObject: 'Lead', outcome: 'appointment_set', researchStatus: 'Long Term Follow-Up', appointment: chanceBooking });
+    function routedOrg(leadId: string, grant: boolean | Error, over: Partial<OrgState> = {}) {
+      const state = leadState(leadId, over);
+      state.lead = leadRow(leadId, { OwnerId: GONE });
+      const f = fakeOrg(state);
+      f.queries.unshift(usersRoute(grant));
+      return f;
+    }
+    const eventOf = (f: ReturnType<typeof fakeOrg>) => f.creates.find((c) => c.sobject === 'Event')!.fields;
+
+    it('a booking routed to Chance on a Lead converts with owner Grant (Lead Manager fallback too); the Event is Chance\'s', async () => {
+      const s = await routedLead();
+      const f = routedOrg(s.recordId, true);
+      expect((await runWritebacks(depsFor(db, f))).done).toBe(1);
+      expect(converts(f)).toHaveLength(1);
+      expect(converts(f)[0]).toContain(`<urn:ownerId>${GRANT}</urn:ownerId>`);
+      expect(f.updates[0]).toMatchObject({ sobject: 'Opportunity', id: NEW_OPP, fields: { LeadManager__c: GRANT } });
+      expect(eventOf(f)).toMatchObject({ WhatId: NEW_OPP, OwnerId: CHANCE, Subject: 'Phone Consultation' });
+      const main = f.updates.find((u) => 'AI_Last_Call_Changes__c' in u.fields)!;
+      expect(changesOf(main.fields)).toContain('Converted Lead "Jane Seller" into this Opportunity (owner Grant Golden)');
+      expect(changesOf(main.fields)).toContain('Event: Phone Consultation, Wed Oct 7, 11:00 AM PT, owner Chance Lanier');
+    });
+
+    it('no active appointment owner: it converts with owner Chance, the booked rep', async () => {
+      const s = await routedLead();
+      const f = routedOrg(s.recordId, false);
+      expect((await runWritebacks(depsFor(db, f))).done).toBe(1);
+      expect(converts(f)[0]).toContain(`<urn:ownerId>${CHANCE}</urn:ownerId>`);
+      expect(f.updates[0]!.fields).toMatchObject({ LeadManager__c: CHANCE });
+      expect(eventOf(f)).toMatchObject({ OwnerId: CHANCE });
+      const main = f.updates.find((u) => 'AI_Last_Call_Changes__c' in u.fields)!;
+      expect(changesOf(main.fields)).toContain('Converted Lead "Jane Seller" into this Opportunity (owner Chance Lanier)');
+    });
+
+    it('the appointment owner read fails: owner Chance, the step proceeds, and the warn carries ids and errName only', async () => {
+      const s = await routedLead();
+      const f = routedOrg(s.recordId, transportError());
+      const warns: Array<[unknown, string | undefined]> = [];
+      const log = { ...quiet, warn: (o: unknown, m?: string) => void warns.push([o, m]) };
+      expect((await runWritebacks(depsFor(db, f, { log }))).done).toBe(1);
+      expect(converts(f)[0]).toContain(`<urn:ownerId>${CHANCE}</urn:ownerId>`);
+      expect(await writebackById(db, s.writebackId)).toMatchObject({ status: 'done', convertedOpportunityId: NEW_OPP });
+      const ownerWarns = warns.filter(([, m]) => m?.includes('appointment owner'));
+      expect(ownerWarns).toEqual([[{ writebackId: s.writebackId, aiCallId: s.aiCallId, errName: 'SalesforceApiError' }, expect.any(String)]]);
+      const said = JSON.stringify(warns);
+      expect(said).not.toContain('Jane');
+      expect(said).not.toContain('Chance Lanier');
+      expect(said).not.toContain('fetch failed');
+    });
+
+    it('converted without an Opportunity: the "no Opportunity" Task goes to Grant', async () => {
+      const s = await routedLead();
+      const state = leadState(s.recordId);
+      state.lead = leadRow(s.recordId, { IsConverted: true, ConvertedAccountId: ACCOUNT, ConvertedContactId: CONTACT });
+      const f = fakeOrg(state);
+      f.queries.unshift(usersRoute(true));
+      expect((await runWritebacks(depsFor(db, f))).partial).toBe(1);
+      expect(f.creates.map((c) => c.sobject)).toEqual(['Task']);
+      expect(f.creates[0]!.fields).toMatchObject({ WhatId: ACCOUNT, OwnerId: GRANT });
+    });
+
+    it('the conversion is refused: the hold stays on Chance\'s calendar, the "convert it and book it" Task goes to Grant', async () => {
+      const s = await routedLead();
+      const f = routedOrg(s.recordId, true);
+      f.onSoap = () => convertRefused('FIELD_CUSTOM_VALIDATION_EXCEPTION', 'Hunt Leads are converted by the Hunt winner');
+      expect((await runWritebacks(depsFor(db, f))).partial).toBe(1);
+      expect(eventOf(f)).toMatchObject({ OwnerId: CHANCE });
+      expect(String(eventOf(f).Subject)).toMatch(/^Hold: AI-booked/);
+      const task = f.creates.find((c) => c.sobject === 'Task')!;
+      expect(task.fields).toMatchObject({ OwnerId: GRANT, WhoId: s.recordId });
+      expect(String(task.fields.Description)).toContain('with Chance Lanier');
+      const text = changesOf(f.updates[0]!.fields);
+      expect(text).toContain("Hold on Chance Lanier's calendar: Wed Oct 7, 11:00 AM PT");
+      expect(text).toContain('Task to Grant Golden: convert the Lead and book it');
+      const post = String(f.creates.find((c) => c.sobject === 'FeedItem')!.fields.Body);
+      expect(post).toContain("held on Chance Lanier's calendar; the Lead was not converted (Task to Grant Golden)");
+    });
   });
 });

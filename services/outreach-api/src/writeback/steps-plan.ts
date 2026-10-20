@@ -17,7 +17,7 @@ import { patchDroppingRefused, without } from './patch.js';
 import { buildWritePlan, StoredWritePlan, type WritePlan } from './plan.js';
 import { asText, currentOf } from './plan-values.js';
 import { ptWords } from './render.js';
-import { isAppointmentCall, ptToday, saveStep, type RowRun } from './row-run.js';
+import { conversionOwnerOf, isAppointmentCall, ptToday, saveStep, type RowRun } from './row-run.js';
 import { saveProgress, writeTarget } from './store.js';
 
 type Row = Record<string, unknown>;
@@ -28,11 +28,14 @@ export type ConvertStepResult = 'converted' | 'fallback' | 'no_opportunity' | 'g
 const errName = (err: unknown): string => (err instanceof Error ? err.name : typeof err);
 const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
 
-/** The PATCH carrying what the lead mapping drops, and the Lead Manager, onto the new Opportunity (before the Event). */
+/**
+ * The PATCH carrying what the lead mapping drops, and the Lead Manager, onto the new Opportunity (before the Event). The Lead
+ * Manager falls back to the conversion owner (the appointment owner, final review I3).
+ */
 async function carry(run: RowRun, oppId: string, lead: Row, adopted: boolean): Promise<{ carried: string[]; notCarried: Array<{ field: string; code: string }> }> {
   const { client, deps } = run;
-  const owner = run.ctx.call.appointment!.specialistSfUserId;
-  const leadManager = await leadManagerFor(client, str(lead.OwnerId), owner);
+  const owner = await conversionOwnerOf(run, run.ctx.call.appointment!);
+  const leadManager = await leadManagerFor(client, str(lead.OwnerId), owner.sfUserId);
   const d = await describeObject(client, deps.describes, run.row.orgId, 'Opportunity');
   const wanted = new Set([...CARRY_FIELDS, LEAD_MANAGER_FIELD].map((f) => f.toLowerCase()));
   const present = d.fields.filter((f) => wanted.has(f.name.toLowerCase()));
@@ -58,13 +61,14 @@ export function noOpportunityTaskWords(aiCallId: string, leadId: string, booked:
   };
 }
 
-/** "Converted without an Opportunity": a Task to the appointment owner on the Account; the row then ends partial. */
+/** "Converted without an Opportunity": a Task to the appointment owner (I3) on the Account; the row then ends partial. */
 async function noOpportunityTask(run: RowRun, accountId: string | null): Promise<RowRun> {
   const booked = run.ctx.call.appointment!;
   const { subject, description } = noOpportunityTaskWords(run.row.aiCallId, run.row.sfRecordId, booked);
+  const owner = await conversionOwnerOf(run, booked);
   let taskId: string | null = null;
   try {
-    taskId = await createTaskOnce(run.client, taskFields({ whatId: accountId, whoId: null, ownerId: booked.specialistSfUserId, subject, description, today: ptToday(run.deps.now) }), run.ctx.call.endedAt);
+    taskId = await createTaskOnce(run.client, taskFields({ whatId: accountId, whoId: null, ownerId: owner.sfUserId, subject, description, today: ptToday(run.deps.now) }), run.ctx.call.endedAt);
   } catch (err) {
     if (!(err instanceof WriteRefusedError)) throw err;
   }
@@ -110,7 +114,9 @@ export async function convertStepRun(run: RowRun): Promise<{ run: RowRun; result
   // Conversion is for an appointment that stands: once the time has passed, a Lead is only adopted, never converted (I-1).
   // Without an end time, "ours" is judged from the call's start, never from now (a retry's now is after our conversion: M10).
   const adoptOnly = bookingPassed(booked, run.deps.now);
-  const { outcome, lead } = await convertStep(run.client, { leadId: run.row.sfRecordId, ownerId: booked.specialistSfUserId, callEndedAt: run.ctx.call.endedAt ?? run.ctx.call.startedAt, leadDescribe, adoptOnly });
+  // The new records are the appointment owner's, who distributes appointments, not the booked rep's (final review I3).
+  const owner = await conversionOwnerOf(run, booked);
+  const { outcome, lead } = await convertStep(run.client, { leadId: run.row.sfRecordId, ownerId: owner.sfUserId, callEndedAt: run.ctx.call.endedAt ?? run.ctx.call.startedAt, leadDescribe, adoptOnly });
   switch (outcome.kind) {
     case 'gone':
       return { run, result: 'gone' };

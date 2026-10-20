@@ -76,7 +76,7 @@ describe.skipIf(!pgLane)('dryRunTestCall (real Postgres)', () => {
       .returning({ id: schema.aiRecordTestCalls.id });
     const f = fakeOrg(orgState(sfObject));
     const model = o.model === undefined ? fakeModel() : o.model;
-    const deps = { db, clients: async () => f.client, model, describes: new DescribeCache(), now: NOW, log: quiet, resultsBaseUrl: 'https://outreach.example' };
+    const deps = { db, clients: async () => f.client, model, describes: new DescribeCache(), now: NOW, log: quiet, resultsBaseUrl: 'https://outreach.example', defaultSpecialists: [GRANT] };
     return { orgId, admin, testId, callId: call!.id, f, model, deps, ctx: ctxOf(orgId, admin, true) };
   }
   const sent = (f: ReturnType<typeof fakeOrg>) => f.log.filter((l) => l !== 'query' && l !== 'describe');
@@ -119,6 +119,38 @@ describe.skipIf(!pgLane)('dryRunTestCall (real Postgres)', () => {
     ]);
     expect(out.dryRun.note).toBeNull();
     expect(sent(s.f)).toEqual([]);
+  });
+
+  describe('final review I3: a booking routed to Chance on a Lead', () => {
+    const CHANCE = '0055f000005qXn8AAE';
+    const chanceBooking = { ...PHONE_BOOKING, specialistSfUserId: CHANCE, region: 'LA' };
+    const staff = [
+      { Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles' },
+      { Id: CHANCE, FirstName: 'Chance', Name: 'Chance Lanier', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles' },
+    ];
+    const withStaff = (f: ReturnType<typeof fakeOrg>) =>
+      f.queries.unshift([/^SELECT Id, FirstName, Name, IsActive, TimeZoneSidKey FROM User/, (q) => staff.filter((u) => q.includes(`'${u.Id}'`))]);
+
+    it('conversion on: it would convert with Grant (the appointment owner); the Event is Chance\'s', async () => {
+      const s = await setup({ sfObject: 'Lead', appointment: chanceBooking });
+      withStaff(s.f);
+      const out = await dryRunTestCall(s.deps, s.ctx, s.callId);
+      if (!('ok' in out) || !out.ok) throw new Error(`refused: ${JSON.stringify(out)}`);
+      expect(out.dryRun.conversion).toMatch(/^Would convert this Lead \(owner Grant Golden, Lead Manager .+\)/);
+      expect(out.dryRun.wouldCreate).toContain('Event: Phone Consultation, Wed Oct 7, 11:00 AM PT, owner Chance Lanier');
+      expect(out.dryRun.changesText).toContain('(owner Grant Golden)');
+      expect(sent(s.f)).toEqual([]);
+    });
+
+    it("conversion off: the hold on Chance's calendar, the convert-and-book Task to Grant", async () => {
+      const s = await setup({ sfObject: 'Lead', appointment: chanceBooking, settings: { aiCallWriteback: true, aiCallBooking: { ...BOOKING_ON, convertLeads: false } } });
+      withStaff(s.f);
+      const out = await dryRunTestCall(s.deps, s.ctx, s.callId);
+      if (!('ok' in out) || !out.ok) throw new Error(`refused: ${JSON.stringify(out)}`);
+      expect(out.dryRun.wouldCreate).toEqual([
+        "Hold on Chance Lanier's calendar: Wed Oct 7, 11:00 AM PT", 'Task to Grant Golden: convert the Lead and book it', 'Chatter post',
+      ]);
+    });
   });
 
   it('11: write-back off (the 1D default): the same changes, with the note that a real call would write none of them', async () => {

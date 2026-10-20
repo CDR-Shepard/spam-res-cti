@@ -5,8 +5,9 @@
  * Before it is made: one we already made is looked for (a retry never doubles it), and the rep's calendar is re-checked
  * (appointment-recheck.ts: none for high priority, overlap then drive for a routed booking, else the offer's rule, D-11).
  *
- * The fallback (a booked Lead Salesforce would not convert, or conversion is off) is a plain hold on the owner's calendar,
- * which no consultation flow fires on, plus an urgent "convert it and book it" Task to the owner.
+ * The fallback (a booked Lead Salesforce would not convert, or conversion is off) is a plain hold on the booked rep's
+ * calendar, which no consultation flow fires on, plus an urgent "convert it and book it" Task to the appointment owner (the
+ * conversion's owner, final review I3).
  */
 import { ROUTING_ZONE, type BookedAppointment } from '@cti/contracts';
 import { SalesforceApiError, soqlEscape, type CompositeResult, type SalesforceClient } from '@cti/salesforce';
@@ -317,15 +318,20 @@ export async function findLeadHold(client: SalesforceClient, booked: BookedAppoi
 }
 
 /**
- * FALLBACK ONLY: used when a booked Lead could not be converted (Task 24). The hold keeps the time on the owner's calendar;
- * the Task (always to the appointment owner, who distributes appointments; never the Lead's owner) says why and what to do.
+ * FALLBACK ONLY: used when a booked Lead could not be converted (Task 24). The hold keeps the time on the booked rep's
+ * calendar (`ownerName` names them); the Task goes to `taskOwnerId`, whoever the conversion would have made the owner: the
+ * appointment owner, who distributes appointments, else the booked rep (final review I3); never the Lead's owner. It says
+ * why and what to do.
  */
 export async function holdForLead(
   client: SalesforceClient,
-  i: { leadId: string; leadName: string | null; booked: BookedAppointment; aiCallId: string; ownerName: string; reason: string; today: string; since: Date | null },
+  i: {
+    leadId: string; leadName: string | null; booked: BookedAppointment; aiCallId: string; ownerName: string; taskOwnerId: string; reason: string; today: string;
+    since: Date | null;
+  },
 ): Promise<AppointmentResult> {
   const lead = checkId(i.leadId, 'leadId');
-  const owner = checkId(i.booked.specialistSfUserId, 'the appointment owner');
+  const taskOwner = checkId(i.taskOwnerId, 'the conversion owner');
   const hold = await refusedAsNull(async () => {
     const found = await findLeadHold(client, i.booked);
     if (found !== null) return found;
@@ -342,7 +348,7 @@ export async function holdForLead(
     `Reason: ${oneLine(i.reason)}`,
     eventId === null ? 'No hold could be put on the calendar: book the time now.' : 'A hold is on the calendar at that time: convert the Lead, book it on the Opportunity, then delete the hold.',
   ].join('\n');
-  const task = await refusedAsNull(() => createTaskOnce(client, taskFields({ whatId: null, whoId: lead, ownerId: owner, subject, description, today: i.today }), i.since));
+  const task = await refusedAsNull(() => createTaskOnce(client, taskFields({ whatId: null, whoId: lead, ownerId: taskOwner, subject, description, today: i.today }), i.since));
   return {
     kind: 'lead_hold',
     eventId,

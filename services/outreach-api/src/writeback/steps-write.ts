@@ -5,6 +5,7 @@
  */
 import type { BookedAppointment } from '@cti/contracts';
 import { soqlEscape } from '@cti/salesforce';
+import type { OwnerUser } from '../appointments/calendar.js';
 import { SF_ID } from '../campaigns/records.js';
 import { describeObject } from '../research/describe.js';
 import { bookingRouting, bookingSettings } from '../settings.js';
@@ -15,9 +16,11 @@ import { patchDroppingRefused, without, type FieldRefusal } from './patch.js';
 import type { Change, WritePlan } from './plan.js';
 import { conflictReason, consultationWords } from './booking-words.js';
 import { changesFieldText, chatterMarker, chatterText, ptWords } from './render.js';
-import { isDone, ownerOf, ptToday, RecordGoneError, saveStep, throwIfNotARefusal, type RowRun } from './row-run.js';
+import { conversionOwnerOf, isDone, ownerOf, ptToday, RecordGoneError, saveStep, throwIfNotARefusal, type RowRun } from './row-run.js';
 import { writeTarget } from './store.js';
-import { appointmentWords, createdLines, refusedWords, renderInputFor, sellerTimeZone, stripUrls, taskMade, writtenChanges, type NotWritten } from './words.js';
+import {
+  appointmentWords, conversionOwnerName, createdLines, refusedWords, renderInputFor, repName, sellerTimeZone, stripUrls, taskMade, writtenChanges, type NotWritten,
+} from './words.js';
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v : null);
 const planData = (run: RowRun): Record<string, unknown> => run.row.steps.plan?.data ?? {};
@@ -64,12 +67,15 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
     return { run: next, result };
   }
   const convert = run.row.steps.convert;
+  // The hold is the booked rep's; the "convert it and book it" Task goes to whoever the conversion would make the owner (I3).
+  const taskOwner = await conversionOwnerOf(run, a.booked);
   const result = await holdForLead(run.client, {
     leadId: target.id,
     leadName: str(planData(run).name),
     booked: a.booked,
     aiCallId: run.row.aiCallId,
-    ownerName: owner?.name ?? 'the appointment owner',
+    ownerName: owner?.name ?? 'the booked rep',
+    taskOwnerId: taskOwner.sfUserId,
     reason: convert?.detail ?? 'the Lead was not converted',
     today: ptToday(run.deps.now),
     since: run.ctx.call.endedAt,
@@ -83,6 +89,16 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
     { ...(ids.eventId ? { sfEventId: ids.eventId } : {}), ...(ids.taskId ? { sfTaskId: ids.taskId } : {}) },
   );
   return { run: next, result };
+}
+
+/**
+ * Who the conversion made (or would have made) the owner, by name (I3): asked only of a booked Lead, the only row that converts
+ * or holds; on any other row the texts never use it.
+ */
+async function convertOwnerName(run: RowRun, owner: OwnerUser | null): Promise<string> {
+  const booked = run.ctx.call.appointment;
+  if (run.row.sfObject !== 'Lead' || booked === null) return repName(owner);
+  return conversionOwnerName(await conversionOwnerOf(run, booked), owner);
 }
 
 /** Why the booking was not made, as the Task says it. */
@@ -109,8 +125,8 @@ export function taskWords(aiCallId: string, booked: BookedAppointment, appt: App
 }
 
 /**
- * Step 4 (run before the PATCH, so the changes text lists it): a Task to the appointment owner when an Opportunity's slot
- * was taken or refused, or when the booked time passed (on the Opportunity, or on the Lead that was not converted).
+ * Step 4 (run before the PATCH, so the changes text lists it): a Task to the booked rep when an Opportunity's slot was taken
+ * (overlap or drive) or refused, or when the booked time passed (on the Opportunity, or on the Lead that was not converted).
  */
 export async function taskStep(run: RowRun, plan: WritePlan, appt: AppointmentResult | null): Promise<RowRun> {
   if (isDone(run, 'task')) return run;
@@ -207,9 +223,10 @@ export async function fieldsStep(run: RowRun, plan: WritePlan, appt: Appointment
   const toNotWritten = (r: FieldRefusal): NotWritten => ({ ...label(r.field), reason: refusedWords(r.code), code: r.code });
   const changesName = writable.get(CHANGES_FIELD)?.name ?? null;
   const owner = await ownerOf(run);
-  const created = createdLines({ plan, result: appt, owner, taskId: run.row.steps.task?.taskId ?? null });
+  const convertOwner = await convertOwnerName(run, owner);
+  const created = createdLines({ plan, result: appt, owner, convertOwner, taskId: run.row.steps.task?.taskId ?? null });
   const text = (written: Change[], notWritten: NotWritten[]) =>
-    changesFieldText(renderInputFor(run, plan, { written, notWritten, created, notChanged }, { appointmentWords: null, owner, summary: null }));
+    changesFieldText(renderInputFor(run, plan, { written, notWritten, created, notChanged }, { appointmentWords: null, convertOwner, summary: null }));
 
   const result = await patchDroppingRefused(run.client, target.sobject, target.id, (dropped, refusals) => {
     const written = writtenChanges(changes, dropped);
@@ -255,9 +272,12 @@ export async function chatterStep(run: RowRun, plan: WritePlan, appt: Appointmen
   const createdAny = run.row.sfEventId !== null || run.row.sfTaskId !== null || run.row.convertedOpportunityId !== null;
   if (plan.result === 'other' && written.length === 0 && !createdAny) return saveStep(run, 'chatter', { status: 'skipped', detail: 'nothing to post' });
   const owner = await ownerOf(run);
+  const convertOwner = await convertOwnerName(run, owner);
   const booked = plan.appointment?.booked;
-  const words = booked ? appointmentWords({ booked, result: appt, owner, address: str(planData(run).address), sellerZone: sellerTimeZone(run.ctx.call.toE164), task: taskMade(run) }) : null;
-  const body = chatterText(renderInputFor(run, plan, { written, notWritten, created: [] }, { appointmentWords: words, owner, summary: stripUrls(run.ctx.call.summary) }));
+  const words = booked
+    ? appointmentWords({ booked, result: appt, owner, convertOwner, address: str(planData(run).address), sellerZone: sellerTimeZone(run.ctx.call.toE164), task: taskMade(run) })
+    : null;
+  const body = chatterText(renderInputFor(run, plan, { written, notWritten, created: [] }, { appointmentWords: words, convertOwner, summary: stripUrls(run.ctx.call.summary) }));
   const target = writeTarget(run.row);
   const found = await findOurPost(run, target.id);
   if (found !== null) return saveStep(run, 'chatter', { status: 'done', detail: 'found the post an earlier attempt made' }, { sfFeedItemId: found });

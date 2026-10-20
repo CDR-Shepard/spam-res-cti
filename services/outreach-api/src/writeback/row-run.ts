@@ -2,6 +2,7 @@
  * Plan 1D write-back: the state of one row while the tick runs it, and the helpers every step shares. Each step's result is
  * saved (saveProgress) right after its Salesforce call, so a retry resumes where this run stopped and never redoes a step.
  */
+import type { BookedAppointment } from '@cti/contracts';
 import type { Db } from '@cti/db';
 import { SalesforceApiError, type SalesforceClient } from '@cti/salesforce';
 import { DEFAULT_OWNER_TIME_ZONE, readUsers, type OwnerUser } from '../appointments/calendar.js';
@@ -9,7 +10,9 @@ import type { MapsClient } from '../appointments/maps.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import type { DescribeCache } from '../research/describe.js';
+import { bookingSettings } from '../settings.js';
 import type { WritebackCall, WritebackContext } from './context.js';
+import { conversionOwner, type ConversionOwner } from './conversion-owner.js';
 import type { MappingModel } from './mapping-model.js';
 import { callResult } from './outcome-tables.js';
 import { saveProgress, type Progress, type StepName, type StepState, type Steps, type WritebackRow } from './store.js';
@@ -35,8 +38,10 @@ export interface RowRun {
   client: SalesforceClient;
   ctx: WritebackContext;
   row: WritebackRow;
-  /** The appointment owner's Salesforce user, read once per run when a step needs it. */
+  /** The booked rep's Salesforce user (the booking's specialist), read once per run when a step needs it. */
   owner?: Promise<OwnerUser | null>;
+  /** Who owns what a conversion creates (conversion-owner.ts), resolved once per run when a step needs it. */
+  conversionOwner?: Promise<ConversionOwner>;
 }
 
 /** The record is deleted or merged (ENTITY_IS_DELETED / NOT_FOUND): the row ends skipped. */
@@ -102,12 +107,26 @@ export function callBookedAppointment(c: WritebackCall): boolean {
   return callResult(c.outcome, null, c.appointment !== null, { practice: c.practice }) === 'appointment';
 }
 
-/** The appointment owner (the booking's specialist), read once per run; null when Salesforce does not return them. */
+/** The booked rep (the booking's specialist), read once per run; null when Salesforce does not return them. */
 export function ownerOf(run: RowRun): Promise<OwnerUser | null> {
   const id = run.ctx.call.appointment?.specialistSfUserId;
   if (!id) return Promise.resolve(null);
   run.owner ??= readUsers(run.client, [id]).then((users) => [...users.values()][0] ?? null);
   return run.owner;
+}
+
+/**
+ * Who owns what converting `booked`'s Lead creates: the appointment owner, else the booked rep (conversion-owner.ts). Resolved
+ * once per run; never rejects.
+ */
+export function conversionOwnerOf(run: RowRun, booked: BookedAppointment): Promise<ConversionOwner> {
+  run.conversionOwner ??= conversionOwner(run.client, {
+    booking: bookingSettings({ settings: run.ctx.orgSettings }, run.deps.defaultSpecialists),
+    booked,
+    log: run.deps.log,
+    ids: { writebackId: run.row.id, aiCallId: run.row.aiCallId },
+  });
+  return run.conversionOwner;
 }
 
 /** The calendar date of `now` (a Task's ActivityDate) in `timeZone`: the org's Pacific by default. The zone must be a valid IANA name. */

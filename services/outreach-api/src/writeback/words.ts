@@ -8,6 +8,7 @@ import type { OwnerUser } from '../appointments/calendar.js';
 import type { AppointmentResult } from './appointment.js';
 import { conflictReason, consultationWords, eventSubject } from './booking-words.js';
 import { OUTCOME_WORDS } from './context.js';
+import type { ConversionOwner } from './conversion-owner.js';
 import type { Change, WritePlan } from './plan.js';
 import { ptWords, type Applied, type RenderInput } from './render.js';
 import type { RowRun } from './row-run.js';
@@ -40,7 +41,16 @@ function sellerPart(start: Date, zone: string | null): string {
   }
 }
 
-const ownerName = (owner: OwnerUser | null): string => owner?.name ?? 'the appointment owner';
+/** The booked rep (the Event's owner) as the texts name them. */
+export const repName = (owner: OwnerUser | null): string => owner?.name ?? 'the booked rep';
+
+/**
+ * Whoever a conversion makes the owner (final review I3), as the texts name them: the appointment owner, or the booked rep
+ * when the rep was taken instead.
+ */
+export function conversionOwnerName(conv: ConversionOwner, rep: OwnerUser | null): string {
+  return conv.bookedRep ? repName(rep) : (conv.name ?? 'the appointment owner');
+}
 
 /** Whether the follow-up Task was made (with the refusal's code when not); null when no Task step ran. */
 export interface TaskMade {
@@ -63,11 +73,15 @@ function taskPart(name: string, task: TaskMade | null): string {
   return ` (the Task to ${name} was refused${task.code ? `, ${task.code}` : ''}: follow up by hand)`;
 }
 
-/** The Chatter post's "Booked:" words: what was booked (or held), with whom and when, or why it was not. Never claims a refused hold or Task. */
+/**
+ * The Chatter post's "Booked:" words: what was booked (or held), with whom and when, or why it was not. Never claims a refused
+ * hold or Task. `owner` is the booked rep; `convertOwner` names who gets the "convert and book" Task (I3).
+ */
 export function appointmentWords(i: {
   booked: BookedAppointment;
   result: AppointmentResult | null;
   owner: OwnerUser | null;
+  convertOwner: string;
   address: string | null;
   sellerZone: string | null;
   task: TaskMade | null;
@@ -76,7 +90,7 @@ export function appointmentWords(i: {
   const kind = consultationWords(booked);
   const start = new Date(booked.start);
   const when = ptWords(start);
-  const name = ownerName(owner);
+  const name = repName(owner);
   switch (result?.kind) {
     case 'created':
     case 'existing': {
@@ -91,23 +105,26 @@ export function appointmentWords(i: {
       return `${kind} for ${when} not booked: the time passed before it could be saved${taskPart(name, i.task)}`;
     case 'lead_hold': {
       const held = result.eventId !== null ? `${kind} ${when} held on ${name}'s calendar` : `${kind} for ${when} not held: Salesforce refused the hold`;
-      return `${held}; the Lead was not converted${taskPart(name, { made: result.taskId !== null, code: result.taskCode ?? null })}`;
+      return `${held}; the Lead was not converted${taskPart(i.convertOwner, { made: result.taskId !== null, code: result.taskCode ?? null })}`;
     }
     default:
       return null;
   }
 }
 
-/** The "Created" lines of the changes text: what this write-back made (the Chatter post comes later and is not claimed). */
-export function createdLines(i: { plan: WritePlan; result: AppointmentResult | null; owner: OwnerUser | null; taskId: string | null }): string[] {
+/**
+ * The "Created" lines of the changes text: what this write-back made (the Chatter post comes later and is not claimed). `owner`
+ * is the booked rep; `convertOwner` names who got the "convert and book" Task (I3).
+ */
+export function createdLines(i: { plan: WritePlan; result: AppointmentResult | null; owner: OwnerUser | null; convertOwner: string; taskId: string | null }): string[] {
   const booked = i.plan.appointment?.booked;
   if (!booked) return [];
   const when = ptWords(new Date(booked.start));
-  const name = ownerName(i.owner);
+  const name = repName(i.owner);
   const r = i.result;
   if (r?.kind === 'created' || r?.kind === 'existing') return [`Event: ${eventSubject(booked)}, ${when}, owner ${name}`];
   if (r?.kind === 'lead_hold') {
-    return [...(r.eventId ? [`Hold on ${name}'s calendar: ${when}`] : []), ...(r.taskId ? [`Task to ${name}: convert the Lead and book it`] : [])];
+    return [...(r.eventId ? [`Hold on ${name}'s calendar: ${when}`] : []), ...(r.taskId ? [`Task to ${i.convertOwner}: convert the Lead and book it`] : [])];
   }
   // A hold an earlier attempt made before the time passed is still there (D-25 N1): named, so it gets deleted.
   const hold = r?.kind === 'expired' && r.holdId !== undefined ? [`Hold on ${name}'s calendar: ${when} (the time passed: delete it)`] : [];
@@ -128,8 +145,8 @@ export function stripUrls(s: string | null): string | null {
 export const resultsUrl = (run: RowRun): string =>
   run.ctx.campaignId === null ? `${run.deps.appPublicUrl}/campaigns` : `${run.deps.appPublicUrl}/campaigns/${run.ctx.campaignId}?call=${run.row.aiCallId}`;
 
-/** The renderers' input for this row. */
-export function renderInputFor(run: RowRun, plan: WritePlan, applied: Applied, extra: { appointmentWords: string | null; owner: OwnerUser | null; summary: string | null }): RenderInput {
+/** The renderers' input for this row. `convertOwner` names whoever the conversion made the owner (I3). */
+export function renderInputFor(run: RowRun, plan: WritePlan, applied: Applied, extra: { appointmentWords: string | null; convertOwner: string; summary: string | null }): RenderInput {
   const convert = run.row.steps.convert;
   const converted = convert?.status === 'done' && run.row.convertedOpportunityId !== null;
   const data = convert?.data ?? {};
@@ -150,7 +167,7 @@ export function renderInputFor(run: RowRun, plan: WritePlan, applied: Applied, e
     conversion: converted
       ? {
           leadName: typeof data.leadName === 'string' ? data.leadName : null,
-          ownerName: ownerName(extra.owner),
+          ownerName: extra.convertOwner,
           adopted: data.repConverted === true,
           convertedBy: typeof data.convertedByName === 'string' ? data.convertedByName : null,
         }

@@ -375,10 +375,18 @@ describe('bookOpportunity: a routed booking (overlap with no buffer, then the dr
 });
 
 describe('holdForLead (fallback only)', () => {
-  const hold = (f: ReturnType<typeof org>) =>
-    holdForLead(f.client, { leadId: LEAD, leadName: 'Jane Seller', booked: PHONE, aiCallId: AI_CALL, ownerName: 'Grant Golden', reason: 'FIELD_CUSTOM_VALIDATION_EXCEPTION: Hunt Lead', today: '2026-10-06', since: CALL_ENDED });
+  const hold = (f: ReturnType<typeof org>, booked = PHONE, taskOwnerId = OWNER) =>
+    holdForLead(f.client, { leadId: LEAD, leadName: 'Jane Seller', booked, aiCallId: AI_CALL, ownerName: 'Grant Golden', taskOwnerId, reason: 'FIELD_CUSTOM_VALIDATION_EXCEPTION: Hunt Lead', today: '2026-10-06', since: CALL_ENDED });
 
-  it('7: the hold Event is the appointment owner\'s, with no WhoId or WhatId', async () => {
+  it('final review I3: a routed booking: the hold is on the booked rep\'s calendar, the Task goes to the conversion owner', async () => {
+    const f = org();
+    await hold(f, { ...PHONE, specialistSfUserId: BLAKE, region: 'LA' }, GRANT);
+    expect(f.creates.find((c) => c.sobject === 'Event')!.fields).toMatchObject({ OwnerId: BLAKE });
+    expect(f.creates.find((c) => c.sobject === 'Task')!.fields).toMatchObject({ OwnerId: GRANT, WhoId: LEAD });
+    expect(f.soql.find((q) => q.startsWith('SELECT Id FROM Task '))).toContain(`OwnerId = '${GRANT}'`);
+  });
+
+  it('7: the hold Event is the booked rep\'s, with no WhoId or WhatId', async () => {
     const f = org();
     const r = await hold(f);
     expect(r).toEqual({ kind: 'lead_hold', eventId: expect.stringMatching(/^00U/), taskId: expect.stringMatching(/^00T/) });
@@ -393,7 +401,7 @@ describe('holdForLead (fallback only)', () => {
     expect(event.fields).not.toHaveProperty('WhatId');
   });
 
-  it('8: the Task goes to the appointment owner (never the Lead owner), on the Lead, urgent, due today, with the reason', async () => {
+  it('8: the Task goes to the conversion owner (never the Lead owner), on the Lead, urgent, due today, with the reason', async () => {
     const f = org();
     await hold(f);
     const task = f.creates.find((c) => c.sobject === 'Task')!;

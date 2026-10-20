@@ -22,13 +22,14 @@ import { describeObject, type DescribeCache } from '../research/describe.js';
 import { bookingSettings, outreachSettings } from '../settings.js';
 import type { RequestContext } from '../tenancy/scope.js';
 import { OUTCOME_WORDS, researchStatusOf } from '../writeback/context.js';
+import { conversionOwner } from '../writeback/conversion-owner.js';
 import { leadManagerFor } from '../writeback/convert.js';
 import { readCurrent, writableFields, type WritableField } from '../writeback/fields.js';
 import { MappingOutputError, type MappingModel } from '../writeback/mapping-model.js';
 import { buildWritePlan } from '../writeback/plan.js';
 import { changesFieldText, chatterText, type RenderInput } from '../writeback/render.js';
 import { WRITEBACK_OUTCOMES } from '../writeback/store.js';
-import { stripUrls } from '../writeback/words.js';
+import { conversionOwnerName, repName, stripUrls } from '../writeback/words.js';
 import {
   bookedWords, changeList, conversionWords, createdRecords, emptyDryRun, GONE_NOTE, notesOf, NOTHING_NOTE, UNMAPPED_NOTE, WRITEBACK_OFF_NOTE, writtenChanges, type Booking,
 } from './dry-run-words.js';
@@ -44,6 +45,8 @@ export interface DryRunDeps {
   log: RunnerLogger;
   /** APP_PUBLIC_URL: the Chatter post's "Call details" link opens the test page. */
   resultsBaseUrl: string;
+  /** AI_CALL_DEFAULT_SPECIALISTS: bookingSettings needs it to name the conversion owner as the write-back would. */
+  defaultSpecialists: readonly string[];
 }
 export type DryRunResult =
   | { ok: true; dryRun: RecordTestDryRun }
@@ -139,14 +142,26 @@ async function mapAnswers(deps: DryRunDeps, row: CallRow, outcome: string, field
   return kept;
 }
 
-/** The appointment owner and, for a Lead with conversion on, the Lead Manager the conversion would set (reads only). */
-async function bookingOf(row: CallRow, client: Awaited<ReturnType<SalesforceClientFactory>>, booked: BookedAppointment, priorOwner: string | null): Promise<Booking> {
-  const converts = row.sf_object === 'Lead' && bookingSettings({ settings: row.org_settings }, []).convertLeads;
-  const manager = converts ? await leadManagerFor(client, priorOwner, booked.specialistSfUserId) : null;
+/**
+ * The booked rep, whoever a conversion would make the owner (the appointment owner, else the booked rep: final review I3) and,
+ * for a Lead with conversion on, the Lead Manager the conversion would set (reads only).
+ */
+async function bookingOf(
+  deps: DryRunDeps, row: CallRow, client: Awaited<ReturnType<SalesforceClientFactory>>, booked: BookedAppointment, priorOwner: string | null,
+): Promise<Booking> {
+  const settings = bookingSettings({ settings: row.org_settings }, deps.defaultSpecialists);
+  const lead = row.sf_object === 'Lead';
+  const convert = lead ? await conversionOwner(client, { booking: settings, booked, log: deps.log, ids: { callId: row.id } }) : null;
+  const manager = lead && settings.convertLeads ? await leadManagerFor(client, priorOwner, convert!.sfUserId) : null;
   const users = await readUsers(client, [...new Set([booked.specialistSfUserId, ...(manager ? [manager] : [])])]);
-  const owner = users.get(booked.specialistSfUserId);
-  const ownerName = owner?.name ?? 'the appointment owner';
-  return { booked, ownerName, ownerFirstName: owner?.firstName ?? null, convertsWithLeadManager: manager === null ? null : (users.get(manager)?.name ?? "the Lead's owner") };
+  const owner = users.get(booked.specialistSfUserId) ?? null;
+  return {
+    booked,
+    ownerName: repName(owner),
+    ownerFirstName: owner?.firstName ?? null,
+    convertOwnerName: convert ? conversionOwnerName(convert, owner) : repName(owner),
+    convertsWithLeadManager: manager === null ? null : (users.get(manager)?.name ?? "the Lead's owner"),
+  };
 }
 
 async function compute(deps: DryRunDeps, row: CallRow, outcome: string, stored: StoredMapping | null): Promise<RecordTestDryRun> {
@@ -162,14 +177,14 @@ async function compute(deps: DryRunDeps, row: CallRow, outcome: string, stored: 
     appointment: appointment.success ? appointment.data : null, callbackAt: dateOf(row.callback_at), now: deps.now, converted: null, practice: false,
   });
   const booked = plan.result === 'appointment' ? (plan.appointment?.booked ?? null) : null;
-  const booking = booked ? await sf(() => bookingOf(row, client, booked, current.ownerId)) : null;
+  const booking = booked ? await sf(() => bookingOf(deps, row, client, booked, current.ownerId)) : null;
   const created = createdRecords(row.sf_object, booking);
   const conversion = conversionWords(booking);
   const written = writtenChanges(plan);
   const base: Omit<RenderInput, 'applied' | 'summary' | 'appointmentWords'> = {
     at: dateOf(row.ended_at) ?? deps.now, outcomeWords: OUTCOME_WORDS[outcome] ?? outcome, aiCallId: row.ai_call_id!, plan,
     resultsUrl: `${deps.resultsBaseUrl.replace(/\/$/, '')}/test-record?id=${row.test_id}`,
-    conversion: conversion && booking ? { leadName: current.name, ownerName: booking.ownerName, adopted: false } : null, conversionRefused: null,
+    conversion: conversion && booking ? { leadName: current.name, ownerName: booking.convertOwnerName, adopted: false } : null, conversionRefused: null,
   };
   // A real call posts nothing when it changed and created nothing and ended "other" (steps-write.ts chatter step).
   const posts = !(plan.result === 'other' && written.length === 0 && created.length === 0);
