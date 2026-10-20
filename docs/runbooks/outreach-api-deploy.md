@@ -34,6 +34,7 @@ The first deploy fails at boot with "Invalid environment configuration" until th
    - `TOKEN_ENCRYPTION_KEY` and `SESSION_SECRET` = **exactly** the values on the CTI API service (copy them from `@cti/api → Variables`; sessions are shared)
    - Sign-in with Salesforce and the other variables (`SALESFORCE_*`, `ANTHROPIC_API_KEY`, `CTI_INTERNAL_URL`, `OUTREACH_INTERNAL_SECRET`): see `outreach-sf-campaigns.md` (Signing in to Outreach; AI call campaigns)
    - Optional, only for the email sign-in button: `WORKOS_API_KEY`, `WORKOS_CLIENT_ID` from WorkOS; `WORKOS_REDIRECT_URI` = `https://<name>.up.railway.app/api/auth/workos/callback`
+   - Optional, Sam's email: `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET` and the `EMAIL_*` variables; see §6
 3. If you use WorkOS, add that redirect URI there (step 0.5). Redeploy outreach-api — dashboard: **outreach-api → Deployments tab → ⋯ on the latest deployment → Redeploy** (this always rebuilds, so the new variables take effect). Expect the pre-deploy migrate to print `3 new of 53 total` from whichever service's pre-deploy runs first (`@cti/api` or outreach-api), and `0 new of 53 total` from the other; then `/healthz` → 200, `/readyz` → `{ ok: true, dbOk: true, jobsOk: true }`.
    - Migration `0052` adds foreign keys that briefly lock `ai_calls`, `users` and `organizations` (at most 5 seconds, its `lock_timeout`). Deploy outside reps' peak hours. If the lock is not granted in time the migration fails and the deploy fails safely, with nothing applied: redeploy.
    - Watch `@cti/api`'s `/healthz` too after this deploy: it now listens on `::`, so a 200 there confirms it came back up.
@@ -125,6 +126,31 @@ Confirm in the dashboard that **@cti/api → Settings** no longer shows a config
 ```bash
 railway config plan   # expect 0 to change, 0 to destroy — .railway/railway.ts is now the only source of truth for @cti/api
 ```
+
+## 6. Sam's email (Resend)
+
+Sam emails approved sellers from `sam@rethinkre.team` through Resend and reads their replies at `reply.rethinkre.team`. Unset, Sam sends nothing: the send and reply ticks do not run, the webhook answers 503, and the seller page says email is not set up. The unsubscribe pages always run, so links in emails already sent keep working.
+
+**Variables** (outreach-api → Variables):
+- `RESEND_API_KEY`: the Resend API key; sends Sam's emails and reads replies back. Set it and the next one together, or neither.
+- `RESEND_WEBHOOK_SECRET`: the signing secret of the webhook below (`whsec_…`); every webhook request is checked against it.
+- `EMAIL_FROM`: the From header (default `Sam at GG Homes <sam@rethinkre.team>`); the address must be on the verified Resend domain.
+- `EMAIL_REPLY_DOMAIN`: where replies land, `sam+<token>@` this host (default `reply.rethinkre.team`).
+- `EMAIL_POSTAL_ADDRESS`: the postal address in every email footer (default `18872 MacArthur Blvd #220, Irvine, CA 92612`).
+- `EMAIL_COMPANY_NAME`: the company named in the footer and on the unsubscribe page (default `GG Homes`).
+- `EMAIL_MODEL`: the Claude model that drafts Sam's emails (default `claude-sonnet-5-5`). It must have a price in `services/outreach-api/src/ai/model.ts`; with an unpriced model (or no `ANTHROPIC_API_KEY`) Sam drafts nothing and every reply goes to a person.
+
+**DNS.** `rethinkre.team` mail is Google Workspace: **never add, change or remove the root domain's MX records.**
+1. Resend → **Domains**: add `rethinkre.team` for sending and add exactly the records Resend lists (DKIM and the bounce/SPF records sit on subdomains such as `resend._domainkey` and `send`). Wait for it to verify.
+2. Resend → **Domains**: turn on **receiving** for `reply.rethinkre.team`. Resend shows one MX record for `reply.rethinkre.team`; add that record (on the `reply` host only) at the DNS provider.
+3. On the domain's settings, turn **open tracking and click tracking off** (click tracking would rewrite the unsubscribe link; open tracking adds a pixel).
+
+**Webhook.** Resend → **Webhooks → Add endpoint**:
+- URL: `<outreach-api public URL>/api/webhooks/resend` (e.g. `https://<name>.up.railway.app/api/webhooks/resend`).
+- Events: `email.sent`, `email.delivered`, `email.bounced`, `email.complained`, `email.failed`, `email.suppressed`, `email.received`.
+- Copy its signing secret into `RESEND_WEBHOOK_SECRET`, set `RESEND_API_KEY`, then redeploy outreach-api.
+
+**Turn it on.** Email is off for every tenant until an admin turns it on (Settings → Sam's email, or `PUT /api/settings/sam-email` with `{ "enabled": true }`). A spam complaint pauses it for the whole tenant (Resend closes accounts past 0.08 % complaints); turning it back on clears the pause. Before the first real email, send a **practice** email from a seller's page: it goes to your own sign-in address, and replying to it gets Sam's real answer.
 
 ## Rollback
 

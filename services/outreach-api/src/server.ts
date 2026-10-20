@@ -10,6 +10,11 @@ import { currentBuild } from './build-info.js';
 import { httpCtiClient } from './ai-calls/cti-client.js';
 import { placeDueAiCalls } from './ai-calls/pace.js';
 import { collectAiCallResults } from './ai-calls/results.js';
+import { logEventsToSalesforce } from './conversations/sf-log.js';
+import { processEmailEvents } from './email/events.js';
+import { httpResendClient } from './email/resend-client.js';
+import { sendDueEmails } from './email/send.js';
+import { AnthropicEmailWriter } from './email/writer.js';
 import { prepareDueCalls } from './call-plans/prepare.js';
 import { WorkosIdentityProvider } from './auth/workos-provider.js';
 import { loadConfig } from './config.js';
@@ -32,9 +37,13 @@ import { registerCallPlanRoutes } from './routes/call-plans.js';
 import { registerCampaignSelectionRoutes } from './routes/campaign-selection.js';
 import { registerCampaignRoutes } from './routes/campaigns.js';
 import { registerConnectionRoutes } from './routes/connections.js';
+import { registerEmailUnsubscribeRoutes } from './routes/email-unsubscribe.js';
 import { registerPracticeCallRoutes } from './routes/practice-calls.js';
 import { registerRecordTestRoutes } from './routes/record-tests.js';
+import { registerResendWebhookRoutes } from './routes/resend-webhook.js';
 import { registerReviewRoutes } from './routes/review.js';
+import { registerSamEmailSettingsRoutes } from './routes/sam-email-settings.js';
+import { registerSellerRoutes } from './routes/sellers.js';
 import { registerTeamRoutes } from './routes/team.js';
 import { registerVersionRoutes } from './routes/version.js';
 import { shutdown } from './shutdown.js';
@@ -81,6 +90,13 @@ async function main(): Promise<void> {
       : null;
   // The signed internal AI call trigger (plan 1C); null until CTI_INTERNAL_URL and OUTREACH_INTERNAL_SECRET are set.
   const cti = cfg.aiCallsEnabled ? httpCtiClient({ CTI_INTERNAL_URL: cfg.CTI_INTERNAL_URL!, OUTREACH_INTERNAL_SECRET: cfg.OUTREACH_INTERNAL_SECRET! }) : null;
+  // Sam's email (plan 2026-10-19): her writer only on a priced model (spend is never silently zero; null = the seller
+  // page says not_configured and replies go to a person), and Resend only when both its key and webhook secret are set.
+  const emailWriter =
+    cfg.aiEnabled && cfg.ANTHROPIC_API_KEY && isPricedModel(cfg.EMAIL_MODEL)
+      ? new AnthropicEmailWriter({ client: new Anthropic({ apiKey: cfg.ANTHROPIC_API_KEY, timeout: 60_000, maxRetries: 2 }), model: cfg.EMAIL_MODEL })
+      : null;
+  const resend = cfg.emailEnabled && cfg.RESEND_API_KEY ? httpResendClient({ apiKey: cfg.RESEND_API_KEY }) : null;
   const handlers: Record<string, JobHandler> = {
     ...(cfg.salesforceEnabled
       ? {
@@ -135,6 +151,26 @@ async function main(): Promise<void> {
           },
         }
       : {}),
+    // Sam's email: drain the outbox through Resend, then process the stored webhook events (deliveries, replies).
+    // The send tick must not run inside a transaction: each row's compare-and-swap commits on its own (email/send.ts).
+    ...(resend
+      ? {
+          'email.send': async () => {
+            await sendDueEmails({ db, resend, cfg, now: new Date(), log: console });
+          },
+          'email.events': async () => {
+            await processEmailEvents({ db, resend, writer: emailWriter, cfg, appPublicUrl: cfg.APP_PUBLIC_URL, now: new Date(), log: console });
+          },
+        }
+      : {}),
+    // Timeline events (emails, replies, opt-outs, flags) logged to Salesforce as Tasks on the seller's record.
+    ...(cfg.salesforceEnabled
+      ? {
+          'conversation.sflog': async () => {
+            await logEventsToSalesforce({ db, clients, appPublicUrl: cfg.APP_PUBLIC_URL, now: new Date(), log: console });
+          },
+        }
+      : {}),
     // Plan due enrollments, then queue due rep calls of ACTIVE campaigns (src/planner/run.ts).
     'touch.plan': async () => {
       await planTick({ db, now: new Date(), log: console, waitForTriage: cfg.salesforceEnabled && cfg.aiEnabled });
@@ -174,6 +210,14 @@ async function main(): Promise<void> {
       // Testing (admins): the test phones list and the inbound test calls (a listed phone calling an AI number gets the agent).
       (scope) => registerTestingRoutes(scope, { db }),
       (scope) => registerVersionRoutes(scope, { db, build, calls: ctiCommit }),
+      // Sam's email. The webhook and the unsubscribe pages each replace Fastify's body parsers, so each is its own
+      // entry: buildApp registers every entry in its own plugin scope, which keeps those parsers out of the JSON routes.
+      // Both are public (signed webhook; the token is the capability). Unsubscribe is registered even without Resend, so
+      // the links in emails already sent keep working.
+      (scope) => registerResendWebhookRoutes(scope, { db, secret: cfg.RESEND_WEBHOOK_SECRET ?? null }),
+      (scope) => registerEmailUnsubscribeRoutes(scope, { db, companyName: cfg.EMAIL_COMPANY_NAME }),
+      (scope) => registerSellerRoutes(scope, { db, writer: emailWriter, cfg }),
+      (scope) => registerSamEmailSettingsRoutes(scope, { db, cfg }),
       // Plan 1E: Test a record (admins): preview how the AI would call any Lead or Opportunity, without a campaign.
       (scope) =>
         registerRecordTestRoutes(scope, {

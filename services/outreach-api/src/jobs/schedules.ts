@@ -15,4 +15,8 @@ export const SCHEDULES: readonly ScheduleDefinition[] = [
   { queue: 'ai_call.place', cron: '* * * * *' },
   { queue: 'ai_call.results', cron: '* * * * *' },
   { queue: 'ai_call.writeback', cron: '* * * * *' },
+  // The events tick answers at most 3 replies a run, so every minute (180 an hour).
+  { queue: 'email.send', cron: '* * * * *' },
+  { queue: 'email.events', cron: '* * * * *' },
+  { queue: 'conversation.sflog', cron: '* * * * *' },
 ];

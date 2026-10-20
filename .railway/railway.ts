@@ -89,6 +89,17 @@ export default defineRailway(() => {
       // appointment owners that pre-fill an org's AI call settings (booking, conversion and write-back still start off).
       WRITEBACK_MODEL: preserve(),
       AI_CALL_DEFAULT_SPECIALISTS: preserve(),
+      // Sam's email (Resend), filled in the dashboard; see docs/runbooks/outreach-api-deploy.md "Sam's email (Resend)".
+      // RESEND_API_KEY: sends Sam's emails and reads replies. RESEND_WEBHOOK_SECRET: the webhook's signing secret
+      // (both or neither). EMAIL_FROM: the From header. EMAIL_REPLY_DOMAIN: where replies land (reply.rethinkre.team).
+      // EMAIL_POSTAL_ADDRESS and EMAIL_COMPANY_NAME: the footer. EMAIL_MODEL: the Claude model that drafts (priced).
+      RESEND_API_KEY: preserve(),
+      RESEND_WEBHOOK_SECRET: preserve(),
+      EMAIL_FROM: preserve(),
+      EMAIL_REPLY_DOMAIN: preserve(),
+      EMAIL_POSTAL_ADDRESS: preserve(),
+      EMAIL_COMPANY_NAME: preserve(),
+      EMAIL_MODEL: preserve(),
       PGBOSS_SCHEMA: "pgboss",
     },
   });

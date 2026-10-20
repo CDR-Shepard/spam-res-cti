@@ -95,6 +95,27 @@ export async function queueEmail(db: Db, i: QueueEmailInput): Promise<{ emailId:
 }
 
 /**
+ * `queueEmail`, unless the conversation already has an outbound email `queued` or `sending` (`already_queued`). The
+ * conversation row is locked first (FOR UPDATE, in this transaction), so two requests at once are taken one after
+ * the other and the second sees the first's email: a double click on Send never queues two. Once the email is out
+ * (sent or later), another may be queued.
+ */
+export async function queueEmailOnce(db: Db, i: QueueEmailInput): Promise<{ emailId: string; eventId: string } | 'already_queued'> {
+  return db.transaction(async (tx) => {
+    const t = tx as unknown as Db;
+    const locked = await t.execute(sql`
+      select id from seller_conversations where id = ${i.conversationId}::uuid and org_id = ${i.orgId}::uuid for update`);
+    if (rows<{ id: string }>(locked).length === 0) throw new Error(`conversation ${i.conversationId} not found`);
+    const pending = await t.execute(sql`
+      select id from email_messages
+      where conversation_id = ${i.conversationId}::uuid and org_id = ${i.orgId}::uuid and direction = 'out' and status in ('queued', 'sending')
+      limit 1`);
+    if (rows<{ id: string }>(pending).length > 0) return 'already_queued';
+    return queueEmail(t, i);
+  });
+}
+
+/**
  * When a seller may first be emailed: now when it is already 08:00 to 18:00 where they are (their first
  * phone's zone and state rules), else the next opening. With no phone at all, Central time, the dialer's
  * own fallback. Also the tick's answer when a due email turns out to be outside the hours.
@@ -135,12 +156,35 @@ async function loadFacts(db: Db, emailId: string): Promise<SendFacts> {
   return { ...facts, phones };
 }
 
-/** Rules 2 to 5: what the conversation itself says. */
-function conversationBlock(f: SendFacts): EmailBlock | null {
+/** Rule 1, pure: the tenant's switch (`organizations.settings` as stored). */
+export function switchBlock(settings: unknown): 'disabled' | 'paused' | null {
+  const s = samEmailSettings({ settings });
+  if (!s.enabled) return 'disabled';
+  return s.pausedAt !== null ? 'paused' : null;
+}
+
+/** What rules 2 to 7 read: the conversation (open / Sam / no flag when there is none yet), the address and the record. */
+export interface SellerFacts {
+  purpose: string;
+  conversationStatus: string;
+  handler: string;
+  flagReason: string | null;
+  /** The address is on the tenant's suppression list (`suppressionFor`). */
+  suppressed: boolean;
+  sfEmailOptOut: boolean;
+}
+
+/**
+ * Rules 2 to 7, pure: what protects the seller. The send tick applies it to a due email; the seller page applies
+ * it, as purpose `first`, to an email nobody has written yet, so the page's reason and the tick's never disagree.
+ */
+export function sellerBlock(f: SellerFacts): EmailBlock | null {
   if (f.conversationStatus === 'stopped') return 'stopped';
   if (f.conversationStatus === 'booked' && f.purpose !== 'holding') return 'booked';
   if (f.handler === 'person') return 'taken_over';
   if (f.flagReason !== null && (f.purpose === 'first' || f.purpose === 'reply')) return 'flagged';
+  if (f.suppressed) return 'suppressed';
+  if (f.sfEmailOptOut) return 'sf_opt_out';
   return null;
 }
 
@@ -160,14 +204,11 @@ export async function emailsOutInLastDay(db: Db, i: { orgId: string; conversatio
 }
 
 async function firstBlock(db: Db, f: SendFacts, emailId: string, now: Date): Promise<SendBlock | null> {
-  const switchSettings = samEmailSettings({ settings: f.settings });
-  if (!switchSettings.enabled) return 'disabled';
-  if (switchSettings.pausedAt !== null) return 'paused';
+  const off = switchBlock(f.settings);
+  if (off) return off;
   if (f.practiceUserId === null) {
-    const held = conversationBlock(f);
+    const held = sellerBlock({ ...f, suppressed: (await suppressionFor(db, f.orgId, f.toAddress)) !== null });
     if (held) return held;
-    if ((await suppressionFor(db, f.orgId, f.toAddress)) !== null) return 'suppressed';
-    if (f.sfEmailOptOut) return 'sf_opt_out';
   }
   if ((await emailsOutInLastDay(db, { orgId: f.orgId, conversationId: f.conversationId, exceptEmailId: emailId }, now)) >= EMAIL_DAILY_CAP) return 'daily_cap';
   return emailSendAt(f.phones, now).getTime() > now.getTime() ? 'outside_window' : null;

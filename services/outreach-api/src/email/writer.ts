@@ -186,9 +186,11 @@ async function attempt(deps: WriteEmailDeps, input: WriterInput): Promise<WriteE
     return failed(deps.signal?.aborted ? 'aborted' : 'model_error');
   }
   if ((await charge(deps, { inputTokens: answer.inputTokens, outputTokens: answer.outputTokens, model: answer.model })) === 'unpriced') return failed('unpriced_model');
-  // A first email has nobody to answer, so anything but a send is not an answer to use, and it needs its own subject
-  // (a reply's subject line is the seller's, set by the caller).
-  if (input.mode === 'first' && (answer.decision.action !== 'send' || answer.decision.subject.trim() === '')) return failed('invalid_output');
+  // A first email has nobody to answer, so anything but a send is Sam declining to write (`declined`: the seller page
+  // says so, it is not a broken answer), and it needs its own subject (a reply's subject line is the seller's, set by
+  // the caller).
+  if (input.mode === 'first' && answer.decision.action !== 'send') return failed('declined');
+  if (input.mode === 'first' && answer.decision.subject.trim() === '') return failed('invalid_output');
   return { kind: 'ok', decision: answer.decision };
 }
 

@@ -247,10 +247,10 @@ describe('writeEmail (fake db)', () => {
     expect(writer.write).toHaveBeenCalledWith(expect.anything(), { signal: controller.signal });
   });
 
-  it('a first email whose action is not send is failed (invalid_output), and still charged', async () => {
+  it('a first email whose action is not send is failed (declined: Sam chose not to write, the seller page says so), and still charged', async () => {
     const { db, added } = fakeDb();
     const writer = fakeWriter(written({ decision: { action: 'no_reply', flagReason: null, subject: '', body: '' } }));
-    expect(await writeEmail({ db, writer, orgId: ORG, settings: {}, now: NOW }, first)).toEqual({ kind: 'failed', reason: 'invalid_output' });
+    expect(await writeEmail({ db, writer, orgId: ORG, settings: {}, now: NOW }, first)).toEqual({ kind: 'failed', reason: 'declined' });
     expect(added).toHaveLength(1);
     // The same decision is fine for a reply.
     expect(await writeEmail({ db, writer, orgId: ORG, settings: {}, now: NOW }, input)).toMatchObject({ kind: 'ok' });
