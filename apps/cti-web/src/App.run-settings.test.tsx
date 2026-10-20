@@ -65,7 +65,9 @@ class FakeDevice {
     return connection;
   }
 }
-vi.mock('@twilio/voice-sdk', () => ({ Device: FakeDevice }));
+// A getter: App imports Device with the page now, so this factory runs before
+// FakeDevice below is initialized; the getter reads it when App constructs one.
+vi.mock('@twilio/voice-sdk', () => ({ get Device() { return FakeDevice; } }));
 
 const state = {
   status: 'ready' as 'ready' | 'active' | 'stopped',

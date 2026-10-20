@@ -1,4 +1,9 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+// Loaded WITH the page, never lazily: a lazy chunk (twilio-<hash>.js) is
+// replaced by every deploy, so a tab opened before one could no longer fetch
+// it and showed "Inbound calls unavailable" (Tyler, 2026-10-20). Every
+// signed-in softphone needs it straight away anyway.
+import { Device } from '@twilio/voice-sdk';
 import type { DialerRunDefaults, DialerRunSettings, HoldMusicSetting } from '@cti/contracts';
 import { api, ApiError, clearSession, readSession, SESSION_KEY, writeSession } from './api';
 import { holdMusicFromMe } from './hold-music-from-me';
@@ -878,7 +883,6 @@ export function App(): JSX.Element {
     const own: { device: { destroy?: () => void } | null } = { device: null };
     const init = (async () => {
     const tok = await api<{ token: string }>('/telephony/token', { method: 'POST' });
-    const { Device } = await import('@twilio/voice-sdk');
     // Torn down while the token was in flight (a reset, a leadership loss):
     // build nothing (C1(b)).
     if (superseded()) throw new DeviceRefusedError('superseded');
