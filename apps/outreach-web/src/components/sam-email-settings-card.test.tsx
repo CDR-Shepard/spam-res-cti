@@ -51,6 +51,20 @@ describe('SamEmailSettingsCard', () => {
     expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
   });
 
+  it('can still be turned off when the server is not set up; only turning it on needs the setup', async () => {
+    const calls = stubApi({ [GET]: samEmailSettings({ configured: false, enabled: true }), [PUT]: samEmailSettings({ configured: false, enabled: false }) });
+    admin();
+    const toggle = await emailSwitch();
+    expect(toggle).toBeChecked();
+    expect(toggle).toBeEnabled();
+    await userEvent.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(calls.find((c) => c.method === 'PUT')).toEqual({ url: '/api/settings/sam-email', method: 'PUT', body: { enabled: false } });
+    // Off again, the setup is what is missing: it cannot be turned back on.
+    expect(toggle).toBeDisabled();
+    expect(screen.getByText('Resend is not set up yet')).toBeInTheDocument();
+  });
+
   it('says when a spam complaint paused it, and shows the switch off until it is turned back on', async () => {
     const calls = stubApi({
       [GET]: samEmailSettings({ enabled: true, pausedAt: '2026-10-05T18:30:00.000Z', pausedReason: 'complaint' }),

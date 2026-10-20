@@ -169,6 +169,55 @@ describe('SellerConversationPage: Email from Sam', () => {
     expect(screen.queryByRole('button', { name: 'Write draft' })).not.toBeInTheDocument();
   });
 
+  it('a seller block leaves the practice copy: the real button stays off with its words, and the practice copy drafts and sends with practice on', async () => {
+    const calls = stubApi({
+      [`GET ${CONV}`]: sellerView({ mayEmail: false, emailBlock: 'suppressed' }),
+      [`POST ${CONV.replace('conversation', 'email/draft')}`]: { subject: 'About your house', body: 'Hi Jane', to: 'admin@gg.co' },
+      [`POST ${CONV.replace('conversation', 'email/send')}`]: { emailId: rowId(5), sendAfter: new Date().toISOString(), to: 'admin@gg.co' },
+    });
+    page(null, { isAdmin: true });
+    expect(await screen.findByRole('button', { name: 'Email from Sam' })).toBeDisabled();
+    expect(screen.getByText('This address is on the do-not-email list')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Send a practice copy to me' }));
+    // The composer now offers it (the page's own button gives way), and the real draft stays off.
+    expect(screen.getByRole('button', { name: 'Write draft' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Send a practice copy to me' }));
+    await screen.findByLabelText('Body');
+    await userEvent.click(screen.getByRole('button', { name: 'Send practice copy' }));
+    await userEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Send practice copy' }));
+    await waitFor(() => expect(calls.filter((c) => c.url.endsWith('/send'))).toHaveLength(1));
+    expect(calls.filter((c) => c.method === 'POST').map((c) => c.body)).toEqual([
+      { practice: true },
+      { subject: 'About your house', body: 'Hi Jane', practice: true },
+    ]);
+  });
+
+  it.each(['paused', 'disabled', 'not_configured'] as const)('%s (the switch or the server setup) offers no practice copy either', async (emailBlock) => {
+    stubApi({ [`GET ${CONV}`]: sellerView({ mayEmail: false, emailBlock }) });
+    page(null, { isAdmin: true });
+    expect(await screen.findByRole('button', { name: 'Email from Sam' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Send a practice copy to me' })).not.toBeInTheDocument();
+  });
+
+  it('while the composer is open, a hand-over turns the real Send off with the block in words (the draft stays)', async () => {
+    stubApi({
+      [`GET ${CONV}`]: sellerView(),
+      [`POST ${CONV.replace('conversation', 'email/draft')}`]: { subject: 'About your house', body: 'Hi Jane', to: 'jane@example.com' },
+      [`PUT ${HANDLER}`]: sellerView({ handler: 'person', handlerName: 'Admin', mayEmail: false, emailBlock: 'taken_over' }),
+    });
+    page(null, { isAdmin: true });
+    await userEvent.click(await screen.findByRole('button', { name: 'Email from Sam' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Write draft' }));
+    await screen.findByLabelText('Body');
+    const send = screen.getByRole('button', { name: 'Send' });
+    expect(send).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Take over' }));
+    await waitFor(() => expect(send).toBeDisabled());
+    expect(send).toHaveAccessibleDescription('A person has taken over this seller');
+    expect(screen.getByLabelText('Body')).toHaveValue('Hi Jane');
+    expect(screen.getByRole('button', { name: 'Email from Sam' })).toBeDisabled();
+  });
+
   it('a send refetches the conversation, so the queued email shows on the timeline', async () => {
     const queued = emailItem({ id: rowId(5), status: 'queued', at: '2026-10-20T16:00:00.000Z' });
     let reads = 0;

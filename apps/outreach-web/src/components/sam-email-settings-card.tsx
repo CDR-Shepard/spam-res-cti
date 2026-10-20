@@ -20,8 +20,9 @@ function pausedWords(pausedAt: string): string {
 
 /**
  * "Email from Sam" (admins): the tenant's switch for whether Sam may email sellers. It is off until the server has
- * Resend and Sam's writer set up (the switch says so, and cannot be turned on), and a spam complaint pauses it for
- * the whole tenant: it reads as off then, and turning it on again is the admin saying they have looked into it.
+ * Resend and Sam's writer set up (the switch says so, and cannot be turned on; an admin can always turn it off), and a
+ * spam complaint pauses it for the whole tenant: it reads as off then, and turning it on again is the admin saying they
+ * have looked into it.
  */
 export function SamEmailSettingsCard() {
   const auth = useAuth();
@@ -59,7 +60,7 @@ function EmailSwitch({ saved }: { saved: SamEmailSettings }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-3">
-        <Switch id={switchId} checked={on} disabled={!saved.configured || save.isPending} aria-describedby={hints.length > 0 ? hintId : undefined} onCheckedChange={(enabled) => save.mutate(enabled)} />
+        <Switch id={switchId} checked={on} disabled={(!saved.configured && !on) || save.isPending} aria-describedby={hints.length > 0 ? hintId : undefined} onCheckedChange={(enabled) => save.mutate(enabled)} />
         <Label htmlFor={switchId}>Email from Sam</Label>
       </div>
       {hints.length > 0 && (

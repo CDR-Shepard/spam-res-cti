@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 import { getSellerConversation, outreachKeys, setSellerHandler } from '@/lib/outreach-api';
 import { errorText } from '@/lib/outreach-words';
-import { EMAIL_BLOCK_WORDS, sellerStatus } from '@/lib/seller-words';
+import { EMAIL_BLOCK_WORDS, practiceAllowed, sellerStatus } from '@/lib/seller-words';
 import { SellerEmailComposer } from './seller-email-composer';
 import { SellerTimeline } from './seller-timeline';
 
@@ -49,6 +49,10 @@ export function SellerConversationPage({ sfRecordId, focusEventId = null }: { sf
             {isAdmin && (
               <Button size="sm" disabled={!view.mayEmail} aria-describedby={block ? blockId : undefined} onClick={() => setComposing(true)}>Email from Sam</Button>
             )}
+            {/* A seller block keeps the real email off but not the practice copy (it goes only to the admin); the composer has it too once open. */}
+            {isAdmin && block !== null && practiceAllowed(block) && !composing && (
+              <Button size="sm" variant="outline" onClick={() => setComposing(true)}>Send a practice copy to me</Button>
+            )}
           </>
         }
       >
@@ -56,7 +60,7 @@ export function SellerConversationPage({ sfRecordId, focusEventId = null }: { sf
       </PageHeader>
       {conversation.error && <p role="alert" className="text-sm text-destructive">Could not refresh this page. {errorText(conversation.error)}</p>}
       {handover.error && <p role="alert" className="text-sm text-destructive">{errorText(handover.error)}</p>}
-      {isAdmin && composing && <SellerEmailComposer sfRecordId={sfRecordId} onClose={() => setComposing(false)} />}
+      {isAdmin && composing && <SellerEmailComposer sfRecordId={sfRecordId} emailBlock={block} onClose={() => setComposing(false)} />}
       <Section title="Conversation" description="Calls, emails and hand-overs, oldest first.">
         <SellerTimeline items={view.items} focusEventId={focusEventId} />
       </Section>

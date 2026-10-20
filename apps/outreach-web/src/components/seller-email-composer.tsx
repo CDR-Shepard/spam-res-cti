@@ -1,13 +1,13 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useId, useState } from 'react';
-import { EMAIL_BODY_MAX, EMAIL_SUBJECT_MAX } from '@cti/contracts';
+import { EMAIL_BODY_MAX, EMAIL_SUBJECT_MAX, type EmailBlock } from '@cti/contracts';
 import { Section } from '@/components/layout/section';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { draftSellerEmail, outreachKeys, sendSellerEmail } from '@/lib/outreach-api';
-import { emailErrorWords, sendAfterWords } from '@/lib/seller-words';
+import { EMAIL_BLOCK_WORDS, emailErrorWords, practiceAllowed, sendAfterWords } from '@/lib/seller-words';
 import { cn } from '@/lib/utils';
 import { ConfirmAction } from './confirm-action';
 
@@ -24,8 +24,12 @@ const isSendable = (d: Draft): boolean =>
  * copy to me" runs the same flow with the draft and the send addressed to the admin's own address (it goes out right away).
  * The Send button is off while a send is in flight, so a double click cannot queue two; a successful or refused send
  * refetches the seller's conversation, since either may have changed the timeline.
+ *
+ * `emailBlock` is the page's current reason Sam may not email (null = she may), and it can change while the composer is
+ * open (a hand-over, the daily cap). The real Write draft and Send follow it; the practice copy goes only to the admin, so
+ * only the server setup and the tenant's switch stop it (`practiceAllowed`). A draft already written stays on screen.
  */
-export function SellerEmailComposer({ sfRecordId, onClose }: { sfRecordId: string; onClose: () => void }) {
+export function SellerEmailComposer({ sfRecordId, emailBlock, onClose }: { sfRecordId: string; emailBlock: EmailBlock | null; onClose: () => void }) {
   const qc = useQueryClient();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [queued, setQueued] = useState<Queued | null>(null);
@@ -57,6 +61,7 @@ export function SellerEmailComposer({ sfRecordId, onClose }: { sfRecordId: strin
         {draft ? (
           <DraftForm
             draft={draft}
+            blockWords={blockWords(emailBlock, draft.practice)}
             sending={send.isPending}
             error={send.error}
             onEdit={(next) => {
@@ -67,33 +72,45 @@ export function SellerEmailComposer({ sfRecordId, onClose }: { sfRecordId: strin
             onDiscard={discard}
           />
         ) : (
-          <StartPanel writing={write.isPending} error={write.error} onWrite={startDraft} />
+          <StartPanel writing={write.isPending} error={write.error} emailBlock={emailBlock} onWrite={startDraft} />
         )}
       </div>
     </Section>
   );
 }
 
+/** Why this kind of email (a practice copy or the real one) may not be sent under `block`, in words; null when it may. */
+function blockWords(block: EmailBlock | null, practice: boolean): string | null {
+  if (block === null || (practice && practiceAllowed(block))) return null;
+  return EMAIL_BLOCK_WORDS[block];
+}
+
 const queuedWords = (q: Queued): string => `${q.practice ? 'Practice copy queued' : 'Queued'} for ${q.to}. It goes out ${sendAfterWords(q.sendAfter)}.`;
 
-function StartPanel({ writing, error, onWrite }: { writing: boolean; error: unknown; onWrite: (practice: boolean) => void }) {
+function StartPanel({ writing, error, emailBlock, onWrite }: { writing: boolean; error: unknown; emailBlock: EmailBlock | null; onWrite: (practice: boolean) => void }) {
+  const hintId = useId();
+  const realWords = blockWords(emailBlock, false);
+  const practiceWords = blockWords(emailBlock, true);
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">Sam writes a first draft. You can edit it before anything is sent.</p>
       <div className="flex flex-wrap items-center gap-2">
-        <Button disabled={writing} onClick={() => onWrite(false)}>Write draft</Button>
-        <Button variant="outline" disabled={writing} onClick={() => onWrite(true)}>Send a practice copy to me</Button>
+        <Button disabled={writing || realWords !== null} aria-describedby={realWords ? hintId : undefined} onClick={() => onWrite(false)}>Write draft</Button>
+        <Button variant="outline" disabled={writing || practiceWords !== null} aria-describedby={practiceWords ? hintId : undefined} onClick={() => onWrite(true)}>Send a practice copy to me</Button>
       </div>
+      {/* One reason is shown: the real draft's, which is also the practice copy's whenever the practice copy is off too. */}
+      {realWords && <p id={hintId} className="text-sm text-muted-foreground">{realWords}</p>}
       {writing && <p role="status" className="text-sm text-muted-foreground">Sam is writing a draft…</p>}
       {error !== null && <ErrorBlock error={error} />}
     </div>
   );
 }
 
-interface DraftFormProps { draft: Draft; sending: boolean; error: unknown; onEdit: (next: Draft) => void; onSend: () => void; onDiscard: () => void }
+interface DraftFormProps { draft: Draft; blockWords: string | null; sending: boolean; error: unknown; onEdit: (next: Draft) => void; onSend: () => void; onDiscard: () => void }
 
-function DraftForm({ draft, sending, error, onEdit, onSend, onDiscard }: DraftFormProps) {
+function DraftForm({ draft, blockWords: blocked, sending, error, onEdit, onSend, onDiscard }: DraftFormProps) {
   const subjectId = useId();
+  const blockId = useId();
   const bodyId = useId();
   const { practice, to } = draft;
   return (
@@ -119,6 +136,7 @@ function DraftForm({ draft, sending, error, onEdit, onSend, onDiscard }: DraftFo
         <p className="text-xs text-muted-foreground">The footer with the unsubscribe link is added automatically.</p>
       </div>
       {error !== null && <ErrorBlock error={error} />}
+      {blocked && <p id={blockId} className="text-sm text-muted-foreground">{blocked}</p>}
       <div className="flex flex-wrap items-center gap-2">
         <ConfirmAction
           label={practice ? 'Send practice copy' : 'Send'}
@@ -127,7 +145,8 @@ function DraftForm({ draft, sending, error, onEdit, onSend, onDiscard }: DraftFo
             ? 'It goes out right away, to you only. Nothing reaches the seller.'
             : "It is queued and goes out in the seller's sending hours; this page says when once it is queued. The footer with the unsubscribe link is added automatically."}
           confirmLabel={practice ? 'Send practice copy' : 'Send'}
-          disabled={!isSendable(draft) || sending}
+          disabled={!isSendable(draft) || sending || blocked !== null}
+          triggerDescribedBy={blocked ? blockId : undefined}
           onConfirm={onSend}
         />
         <Button size="sm" variant="ghost" disabled={sending} onClick={onDiscard}>Discard draft</Button>

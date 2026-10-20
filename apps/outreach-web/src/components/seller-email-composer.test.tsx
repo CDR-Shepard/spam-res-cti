@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { EmailBlock } from '@cti/contracts';
 import { renderWithProviders } from '../test/render';
 import { SELLER_ID } from '../test/seller-fixtures';
 import { respond, stubApi } from '../test/stub-api';
@@ -16,7 +18,19 @@ const sent = (to: string, sendAfter: string) => ({ emailId: '00000000-0000-4000-
 /** Far enough ahead that it is never "now" and never today. */
 const LATER = new Date(Date.now() + 3 * 24 * 3600 * 1000);
 
-const open = () => renderWithProviders(<SellerEmailComposer sfRecordId={SELLER_ID} onClose={() => {}} />, { isAdmin: true });
+const open = (emailBlock: EmailBlock | null = null) =>
+  renderWithProviders(<SellerEmailComposer sfRecordId={SELLER_ID} emailBlock={emailBlock} onClose={() => {}} />, { isAdmin: true });
+
+/** The composer with a button that turns the seller's block on while it is open (a Take over, the daily cap). */
+function Flippable({ then }: { then: EmailBlock }) {
+  const [block, setBlock] = useState<EmailBlock | null>(null);
+  return (
+    <>
+      <button type="button" onClick={() => setBlock(then)}>flip</button>
+      <SellerEmailComposer sfRecordId={SELLER_ID} emailBlock={block} onClose={() => {}} />
+    </>
+  );
+}
 
 describe('SellerEmailComposer: a real email', () => {
   it('Write draft asks Sam (practice off) and shows editable Subject and Body, the To address and the footer note', async () => {
@@ -220,5 +234,66 @@ describe('SellerEmailComposer: sending only once, and what goes wrong', () => {
     expect(screen.getByRole('button', { name: 'Send a practice copy to me' })).toBeDisabled();
     gate.release?.();
     expect(await screen.findByLabelText('Body')).toBeInTheDocument();
+  });
+});
+
+describe('SellerEmailComposer: when Sam may not email', () => {
+  const PRACTICE = 'Send a practice copy to me';
+
+  it('a seller block (suppressed) turns the real draft off with its words, and leaves the practice copy: drafted and sent with practice on', async () => {
+    const calls = stubApi({ [DRAFT]: { ...draftBody, to: 'admin@gg.co' }, [SEND]: sent('admin@gg.co', new Date().toISOString()) });
+    open('suppressed');
+    expect(screen.getByRole('button', { name: 'Write draft' })).toBeDisabled();
+    expect(screen.getByText('This address is on the do-not-email list')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: PRACTICE })).toBeEnabled();
+
+    await userEvent.click(screen.getByRole('button', { name: PRACTICE }));
+    expect(await screen.findByLabelText('Subject')).toHaveValue('About your house');
+    expect(calls[0]).toEqual({ url: `${BASE}/email/draft`, method: 'POST', body: { practice: true } });
+    await userEvent.click(screen.getByRole('button', { name: 'Send practice copy' }));
+    await userEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Send practice copy' }));
+    await waitFor(() => expect(calls.find((c) => c.url.endsWith('/send'))?.body).toMatchObject({ practice: true }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Practice copy queued for admin@gg.co.');
+  });
+
+  it.each(['paused', 'disabled', 'not_configured'] as const)('%s (the switch or the server setup) turns off both, with the words shown once', (block) => {
+    open(block);
+    expect(screen.getByRole('button', { name: 'Write draft' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: PRACTICE })).toBeDisabled();
+    expect(screen.getAllByText(/^(Email from Sam is paused after a spam complaint|Email from Sam is turned off|Email is not set up on this server yet)$/)).toHaveLength(1);
+  });
+
+  it('a block that turns up while a real draft is open turns its Send off with the words; Discard then leaves only the practice copy', async () => {
+    stubApi({ [DRAFT]: draftBody });
+    renderWithProviders(<Flippable then="taken_over" />, { isAdmin: true });
+    await userEvent.click(screen.getByRole('button', { name: 'Write draft' }));
+    await screen.findByLabelText('Body');
+    const send = screen.getByRole('button', { name: 'Send' });
+    expect(send).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: 'flip' }));
+    expect(send).toBeDisabled();
+    expect(send).toHaveAccessibleDescription('A person has taken over this seller');
+    // The edited text is kept: nothing is lost while the seller is blocked.
+    expect(screen.getByLabelText('Body')).toHaveValue('Hi Jane,\nI am Sam, an AI assistant.');
+    await userEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+    expect(screen.getByRole('button', { name: 'Write draft' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: PRACTICE })).toBeEnabled();
+  });
+
+  it('an open practice draft keeps its Send through a seller block, and loses it to a setup block', async () => {
+    stubApi({ [DRAFT]: { ...draftBody, to: 'admin@gg.co' } });
+    const { unmount } = renderWithProviders(<Flippable then="daily_cap" />, { isAdmin: true });
+    await userEvent.click(screen.getByRole('button', { name: PRACTICE }));
+    await screen.findByLabelText('Body');
+    await userEvent.click(screen.getByRole('button', { name: 'flip' }));
+    expect(screen.getByRole('button', { name: 'Send practice copy' })).toBeEnabled();
+    unmount();
+
+    renderWithProviders(<Flippable then="paused" />, { isAdmin: true });
+    await userEvent.click(screen.getByRole('button', { name: PRACTICE }));
+    await screen.findByLabelText('Body');
+    await userEvent.click(screen.getByRole('button', { name: 'flip' }));
+    expect(screen.getByRole('button', { name: 'Send practice copy' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Send practice copy' })).toHaveAccessibleDescription('Email from Sam is paused after a spam complaint');
   });
 });

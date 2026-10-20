@@ -16,14 +16,15 @@ const NEWEST_PREFIX = 'newest:';
 type Of<T extends TimelineItem['type']> = Extract<TimelineItem, { type: T }>;
 
 /**
- * One seller's conversation, oldest at the top. It opens at the newest row, or, when the page was opened from a
- * Salesforce Task (`#event-<id>`) and that row exists, at that row, marked for a moment. Every row carries
+ * One seller's conversation, oldest at the top. It opens at the newest row (the list scrolls; the window never does), or,
+ * when the page was opened from a Salesforce Task (`#event-<id>`) and that row exists, at that row, marked for a moment. Every row carries
  * `id="event-<item id>"` for those links. Seller text (subjects, bodies, summaries) is only ever rendered as text.
  *
  * What the view was last scrolled to is remembered, so a refetch that returns the same rows does not move it, a
  * new newest row scrolls into view, and a linked row that arrives with a later read is still found.
  */
 export function SellerTimeline({ items, focusEventId }: { items: readonly TimelineItem[]; focusEventId: string | null }) {
+  const list = useRef<HTMLOListElement | null>(null);
   const rows = useRef(new Map<string, HTMLElement>());
   const scrolledTo = useRef<string | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
@@ -34,11 +35,15 @@ export function SellerTimeline({ items, focusEventId }: { items: readonly Timeli
   useEffect(() => {
     if (goal === null || scrolledTo.current === goal) return;
     scrolledTo.current = goal;
-    const id = target ?? newest;
-    // jsdom (and very old browsers) have no scrollIntoView.
-    if (id !== null) rows.current.get(id)?.scrollIntoView?.({ block: target ? 'center' : 'nearest' });
-    if (target) setHighlightId(target);
-  }, [goal, target, newest]);
+    if (target) {
+      // A Salesforce Task's link: bring that row into view (jsdom has no scrollIntoView).
+      rows.current.get(target)?.scrollIntoView?.({ block: 'center' });
+      setHighlightId(target);
+    } else if (list.current) {
+      // The newest row: move only the list. scrollIntoView would also scroll the window, off the page's header.
+      list.current.scrollTop = list.current.scrollHeight;
+    }
+  }, [goal, target]);
 
   // Its own effect: under StrictMode the scroll effect above runs once, and this timer must survive that.
   useEffect(() => {
@@ -49,7 +54,7 @@ export function SellerTimeline({ items, focusEventId }: { items: readonly Timeli
 
   if (items.length === 0) return <p className="text-sm text-muted-foreground">Nothing has happened with this seller yet.</p>;
   return (
-    <ol className="max-h-[65vh] space-y-3 overflow-y-auto p-1">
+    <ol ref={list} className="max-h-[65vh] space-y-3 overflow-y-auto p-1">
       {items.map((item) => {
         const marked = item.id === highlightId;
         return (

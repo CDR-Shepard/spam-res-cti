@@ -16,6 +16,8 @@ export interface ConfirmActionProps {
   label: string;
   /** Accessible name for the opening button when several identical buttons share a page (e.g. one per table row). */
   triggerAriaLabel?: string;
+  /** Id of text that says why the opening button is off (a disabled button should still say why). */
+  triggerDescribedBy?: string;
   title: string;
   description: string;
   confirmLabel: string;
@@ -27,11 +29,11 @@ export interface ConfirmActionProps {
 }
 
 /** A button that asks before doing something that is hard to take back (go live, archive, confirm do-not-contact, disconnect). */
-export function ConfirmAction({ label, triggerAriaLabel, title, description, confirmLabel, onConfirm, disabled, destructive, triggerVariant = 'default' }: ConfirmActionProps) {
+export function ConfirmAction({ label, triggerAriaLabel, triggerDescribedBy, title, description, confirmLabel, onConfirm, disabled, destructive, triggerVariant = 'default' }: ConfirmActionProps) {
   return (
     <AlertDialog>
       <AlertDialogTrigger asChild>
-        <Button size="sm" variant={destructive ? 'destructive' : triggerVariant} disabled={disabled} aria-label={triggerAriaLabel}>{label}</Button>
+        <Button size="sm" variant={destructive ? 'destructive' : triggerVariant} disabled={disabled} aria-label={triggerAriaLabel} aria-describedby={triggerDescribedBy}>{label}</Button>
       </AlertDialogTrigger>
       <AlertDialogContent>
         <AlertDialogHeader>

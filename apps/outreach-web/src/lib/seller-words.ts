@@ -47,6 +47,16 @@ export const EMAIL_BLOCK_WORDS: Record<EmailBlock, string> = {
   daily_cap: 'Sam already sent 3 emails today',
 };
 
+/** The blocks that stop a practice copy too: the server has no email setup, or the tenant's switch is off or paused. */
+const PRACTICE_BLOCKS: ReadonlySet<EmailBlock> = new Set<EmailBlock>(['not_configured', 'disabled', 'paused']);
+
+/**
+ * Whether the admin's own practice copy may be drafted and sent under this block (null = no block). A practice copy
+ * goes only to the admin, so every block about the seller (suppressed, not approved, daily cap, a hand-over...) is
+ * ignored by the server for it; only the setup and the switch apply.
+ */
+export const practiceAllowed = (block: EmailBlock | null): boolean => block === null || !PRACTICE_BLOCKS.has(block);
+
 export const EMAIL_STATUS_WORDS: Record<EmailStatus, string> = {
   queued: 'Waiting to send',
   sending: 'Sending',

@@ -10,6 +10,7 @@ import {
   durationWords,
   emailErrorWords,
   noteWords,
+  practiceAllowed,
   sellerStatus,
   sendAfterWords,
 } from './seller-words';
@@ -36,6 +37,19 @@ describe('the word tables cover every value the contract can send', () => {
     expect(EMAIL_BLOCK_WORDS.not_approved).toBe('No approved call plan yet');
     expect(EMAIL_BLOCK_WORDS.daily_cap).toBe('Sam already sent 3 emails today');
   });
+});
+
+describe('practiceAllowed', () => {
+  it('a practice copy goes only to the admin, so only the server setup and the tenant switch can stop it', () => {
+    const stopped = EmailBlock.options.filter((block) => !practiceAllowed(block));
+    expect(stopped.sort()).toEqual(['disabled', 'not_configured', 'paused']);
+    expect(practiceAllowed(null)).toBe(true);
+  });
+
+  it.each(['suppressed', 'sf_opt_out', 'stopped', 'booked', 'closed', 'taken_over', 'flagged', 'not_approved', 'daily_cap', 'no_address'] as const)(
+    'a seller block (%s) leaves the practice copy available',
+    (block) => expect(practiceAllowed(block)).toBe(true),
+  );
 });
 
 describe('sellerStatus', () => {

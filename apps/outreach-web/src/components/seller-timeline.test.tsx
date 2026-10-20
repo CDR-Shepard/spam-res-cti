@@ -11,11 +11,24 @@ import { stubApi } from '../test/stub-api';
 import { HIGHLIGHT_MS, SellerTimeline } from './seller-timeline';
 
 const scrollSpy = vi.fn();
+const LIST_HEIGHT = 480;
+const tops = new WeakMap<Element, number>();
+const originals = {
+  scrollHeight: Object.getOwnPropertyDescriptor(Element.prototype, 'scrollHeight'),
+  scrollTop: Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop'),
+};
 
 beforeEach(() => {
   scrollSpy.mockClear();
-  // jsdom has no scrollIntoView; the timeline calls it when it exists.
+  // jsdom has no scrollIntoView; the timeline calls it only for a #event- link.
   Element.prototype.scrollIntoView = scrollSpy;
+  // jsdom lays nothing out: give the list a height and a scrollTop that remembers what it was set to.
+  Object.defineProperty(Element.prototype, 'scrollHeight', { configurable: true, get: () => LIST_HEIGHT });
+  Object.defineProperty(Element.prototype, 'scrollTop', {
+    configurable: true,
+    get(this: Element) { return tops.get(this) ?? 0; },
+    set(this: Element, value: number) { tops.set(this, value); },
+  });
 });
 
 afterEach(() => {
@@ -23,6 +36,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
   // @ts-expect-error jsdom does not define it: put it back the way it was.
   delete Element.prototype.scrollIntoView;
+  for (const [name, original] of Object.entries(originals)) {
+    if (original) Object.defineProperty(Element.prototype, name, original);
+    else delete (Element.prototype as unknown as Record<string, unknown>)[name];
+  }
 });
 
 const rowEl = (item: TimelineItem): HTMLElement => document.getElementById(`event-${item.id}`) as HTMLElement;
@@ -50,6 +67,7 @@ describe('SellerTimeline rows', () => {
     expect(row.getByText(durationWords(192))).toBeInTheDocument();
     expect(row.getByText('Wants a call back Thursday evening.')).toBeInTheDocument();
     expect(row.getByText(formatDateTime(CALL.at))).toBeInTheDocument();
+    expect(rowEl(CALL).querySelectorAll('p')).toHaveLength(1); // the summary, and nothing else
   });
 
   it('a call with no outcome, summary or length renders none of them (no "null", no "0:00")', () => {
@@ -58,7 +76,8 @@ describe('SellerTimeline rows', () => {
     const row = rowEl(bare);
     expect(within(row).getByText('AI call')).toBeInTheDocument();
     expect(row).not.toHaveTextContent(/null|0:00|undefined/);
-    expect(row.querySelector('p.whitespace-pre-wrap')).toBeNull();
+    // No summary paragraph at all, and no empty one either (the call's only text is its head).
+    expect(row.querySelectorAll('p')).toHaveLength(0);
   });
 
   it('offers the transcript only when there is one, and opens the existing panel', async () => {
@@ -141,24 +160,30 @@ describe('SellerTimeline rows', () => {
 });
 
 describe('SellerTimeline scrolling', () => {
-  it('opens at the newest row', () => {
+  const list = (): HTMLElement => screen.getByRole('list');
+
+  it('opens at the newest row by moving the list itself, never the window (no scrollIntoView)', () => {
     render(<SellerTimeline items={[CALL, EMAIL_IN, NOTE]} focusEventId={null} />);
-    expect(scrolledTo()).toEqual([`event-${NOTE.id}`]);
+    expect(list().scrollTop).toBe(LIST_HEIGHT);
+    expect(scrollSpy).not.toHaveBeenCalled();
   });
 
-  it('scrolls again when a newer row arrives, but not when the same rows are read again', () => {
+  it('scrolls the list again when a newer row arrives, but not when the same rows are read again', () => {
     const { rerender } = render(<SellerTimeline items={[CALL, EMAIL_IN]} focusEventId={null} />);
-    expect(scrolledTo()).toEqual([`event-${EMAIL_IN.id}`]);
+    expect(list().scrollTop).toBe(LIST_HEIGHT);
+    list().scrollTop = 0; // the reader scrolled up
     rerender(<SellerTimeline items={[CALL, EMAIL_IN]} focusEventId={null} />);
-    expect(scrollSpy).toHaveBeenCalledTimes(1);
+    expect(list().scrollTop).toBe(0);
     rerender(<SellerTimeline items={[CALL, EMAIL_IN, NOTE]} focusEventId={null} />);
-    expect(scrolledTo()).toEqual([`event-${EMAIL_IN.id}`, `event-${NOTE.id}`]);
+    expect(list().scrollTop).toBe(LIST_HEIGHT);
+    expect(scrollSpy).not.toHaveBeenCalled();
   });
 
   it('a #event-<id> link scrolls that row into view instead of the newest, and highlights it for a moment', () => {
     vi.useFakeTimers();
     render(<SellerTimeline items={[CALL, EMAIL_IN, NOTE]} focusEventId={EMAIL_IN.id} />);
     expect(scrolledTo()).toEqual([`event-${EMAIL_IN.id}`]);
+    expect(list().scrollTop).toBe(0);
     expect(rowEl(EMAIL_IN)).toHaveAttribute('data-highlighted', 'true');
     expect(rowEl(CALL)).not.toHaveAttribute('data-highlighted');
     expect(rowEl(NOTE)).not.toHaveAttribute('data-highlighted');
@@ -179,15 +204,17 @@ describe('SellerTimeline scrolling', () => {
 
   it('a link to a row that is not there opens at the newest, with nothing highlighted', () => {
     render(<SellerTimeline items={[CALL, EMAIL_IN, NOTE]} focusEventId={rowId(99)} />);
-    expect(scrolledTo()).toEqual([`event-${NOTE.id}`]);
+    expect(list().scrollTop).toBe(LIST_HEIGHT);
+    expect(scrollSpy).not.toHaveBeenCalled();
     for (const item of [CALL, EMAIL_IN, NOTE]) expect(rowEl(item)).not.toHaveAttribute('data-highlighted');
   });
 
   it('finds a linked row that only arrives with the refetch', () => {
     const { rerender } = render(<SellerTimeline items={[CALL, EMAIL_IN]} focusEventId={NOTE.id} />);
-    expect(scrolledTo()).toEqual([`event-${EMAIL_IN.id}`]);
+    expect(list().scrollTop).toBe(LIST_HEIGHT);
+    expect(scrollSpy).not.toHaveBeenCalled();
     rerender(<SellerTimeline items={[CALL, EMAIL_IN, NOTE]} focusEventId={NOTE.id} />);
-    expect(scrolledTo()).toEqual([`event-${EMAIL_IN.id}`, `event-${NOTE.id}`]);
+    expect(scrolledTo()).toEqual([`event-${NOTE.id}`]);
     expect(rowEl(NOTE)).toHaveAttribute('data-highlighted', 'true');
   });
 });
