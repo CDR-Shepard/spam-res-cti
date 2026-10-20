@@ -19,6 +19,30 @@ const IsoInstant = z.string().datetime({ offset: true });
 export const IanaZone = z.string().max(64).regex(/^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+){1,2}$/);
 export type IanaZone = z.infer<typeof IanaZone>;
 
+/** Region start times, high-priority hours and Sam's "9 AM" are all read in this zone, on both sides of daylight saving. */
+export const ROUTING_ZONE = 'America/Los_Angeles';
+/** Every consultation, in person or by phone, is booked for this long. */
+export const CONSULTATION_MINUTES = 60;
+/** The one id a high-priority booking has; offers are p1..p9 / w1..w9. */
+export const PRIORITY_SLOT_ID = 'h1';
+/**
+ * When a high-priority booking may start, in ROUTING_ZONE: at least `minLeadMinutes` from now, on a `stepMinutes` boundary,
+ * from `firstStartHour` and ending by `endByHour`. `defaultStartHour` is the time offered when the seller names none.
+ */
+export const PRIORITY_RULES = { minLeadMinutes: 120, firstStartHour: 8, endByHour: 20, defaultStartHour: 9, stepMinutes: 15 } as const;
+
+/** A booking region's short code ("LA", "SD"). */
+export const RegionKey = z.string().regex(/^[A-Z]{2,6}$/);
+export type RegionKey = z.infer<typeof RegionKey>;
+
+/** Spoken by the agent ("a quick call with Seth"); cti-api still passes it through oneLine. */
+const SpecialistFirstName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(40)
+  .regex(/^[A-Za-z][A-Za-z .'-]*$/);
+
 export const AppointmentSlot = z
   .object({
     id: z.string().regex(SLOT_ID),
@@ -26,16 +50,11 @@ export const AppointmentSlot = z
     start: IsoInstant,
     end: IsoInstant,
     specialistSfUserId: z.string().regex(SF_USER_ID),
-    /** Spoken by the agent ("a quick call with Seth"); cti-api still passes it through oneLine. */
-    specialistFirstName: z
-      .string()
-      .trim()
-      .min(1)
-      .max(40)
-      .regex(/^[A-Za-z][A-Za-z .'-]*$/)
-      .nullable(),
+    specialistFirstName: SpecialistFirstName.nullable(),
     /** The specialist's zone: business hours are in it. */
     timeZone: IanaZone,
+    /** The region the slot was routed through (booking.routing). Absent on a slot from the old specialist-calendar path. */
+    region: RegionKey.optional(),
     /**
      * Part 4 Fix 1 (I-3): the time the slot blocks on the specialist's calendar, its kind's buffer included (a walkthrough's
      * travel time; a phone call has none, and then these are absent). Optional, so a slot from an older outreach-api still
@@ -57,10 +76,50 @@ export const AppointmentSlots = z
   .refine((a) => new Set(a.map((s) => s.id)).size === a.length, { message: 'slot ids unique' });
 export type AppointmentSlots = z.infer<typeof AppointmentSlots>;
 
-/** What the agent's book_appointment tool stored on ai_calls.appointment (0055). */
+/**
+ * Sam may book a "high priority" consultation outside the offered slots (a seller who wants someone today or tomorrow): the
+ * first active specialist takes it, at any start PRIORITY_RULES allows. This carries who that is and the default start Sam
+ * suggests when the seller names no time, so cti-api can tell Sam without computing anything.
+ */
+export const PriorityOffer = z
+  .object({
+    specialistSfUserId: z.string().regex(SF_USER_ID),
+    specialistFirstName: SpecialistFirstName.nullable(),
+    timeZone: IanaZone,
+    defaultStart: IsoInstant,
+  })
+  .strict();
+export type PriorityOffer = z.infer<typeof PriorityOffer>;
+
+/**
+ * One consultation the seller already has (or had), as Sam may say it. `ownerName` is spoken and goes into the prompt, so it
+ * is held to name characters only: no digits, '#', or newlines.
+ */
+export const ConsultationFact = z
+  .object({
+    start: IsoInstant,
+    kind: z.enum(['in_person', 'phone']),
+    ownerName: z
+      .string()
+      .min(1)
+      .max(80)
+      .regex(/^[A-Za-z][A-Za-z .'-]*$/)
+      .nullable(),
+  })
+  .strict();
+export type ConsultationFact = z.infer<typeof ConsultationFact>;
+
+/** The seller's most recent past consultation and next upcoming one, either of which may not exist. */
+export const Consultations = z.object({ last: ConsultationFact.nullable(), next: ConsultationFact.nullable() }).strict();
+export type Consultations = z.infer<typeof Consultations>;
+
+/**
+ * What the agent's book_appointment tool stored on ai_calls.appointment (0055). A high-priority booking has slotId 'h1' and
+ * `priority: true`; cti-api enforces that pairing (no `.refine` here: this is used as a plain object schema elsewhere).
+ */
 export const BookedAppointment = z
   .object({
-    slotId: z.string().regex(SLOT_ID),
+    slotId: z.string().regex(/^(?:[pw][1-9]|h1)$/),
     kind: AppointmentKind,
     start: IsoInstant,
     end: IsoInstant,
@@ -71,6 +130,14 @@ export const BookedAppointment = z
     /** Part 4 Fix 1 (I-3): copied from the slot. Absent on older bookings, and then [start, end) is what it blocks. */
     blockStart: IsoInstant.optional(),
     blockEnd: IsoInstant.optional(),
+    /** The region the slot was routed through, copied from the slot. */
+    region: RegionKey.optional(),
+    /** High-priority booking (slotId 'h1'): only ever true. */
+    priority: z.literal(true).optional(),
+    /** High-priority booking: what changed since the seller's earlier consultation, in Sam's words. */
+    whatChanged: z.string().max(300).optional(),
+    /** High-priority booking: the consultation this one follows up on, when the seller had one. */
+    previousConsultation: ConsultationFact.optional(),
   })
   .strict();
 export type BookedAppointment = z.infer<typeof BookedAppointment>;
@@ -90,7 +157,7 @@ export function bookingStands(call: { outcome: string | null; endedAt: Date | st
 }
 
 /** Structured facts about the call cti-api renders outside the plan fence. */
-export const CallContext = z.object({ returning: z.boolean() }).strict();
+export const CallContext = z.object({ returning: z.boolean(), consultations: Consultations.optional() }).strict();
 export type CallContext = z.infer<typeof CallContext>;
 
 export const KindSettings = z
@@ -109,6 +176,51 @@ export const KindSettings = z
   .refine((k) => k.endHour > k.startHour, { message: 'endHour after startHour' });
 export type KindSettings = z.infer<typeof KindSettings>;
 
+const StartTime = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
+
+/** "HH:MM" strings are zero-padded, so string order is time order. */
+function strictlyAscending(times: readonly string[]): boolean {
+  return times.every((t, i) => i === 0 || (times[i - 1] as string) < t);
+}
+
+const normalCounty = (county: string): string => county.trim().toLowerCase();
+
+/** No county in two regions: a seller's county must pick exactly one. (Repeating a county inside one region is harmless.) */
+function countiesInOneRegion(regions: readonly { counties: readonly string[] }[]): boolean {
+  const seen = new Set<string>();
+  for (const region of regions) {
+    const mine = new Set(region.counties.map(normalCounty));
+    if ([...mine].some((c) => seen.has(c))) return false;
+    for (const c of mine) seen.add(c);
+  }
+  return true;
+}
+
+/**
+ * One booking region: the counties it covers, the reps who take its consultations, and the start times offered each day (in
+ * ROUTING_ZONE). `reps` may be empty while an admin is still setting a region up; routing then offers nothing for it.
+ */
+export const BookingRegion = z
+  .object({
+    key: RegionKey,
+    counties: z.array(z.string().trim().min(2).max(40)).min(1).max(12),
+    reps: z.array(z.string().regex(SF_USER_ID)).max(6),
+    startTimes: z.array(StartTime).min(1).max(24).refine(strictlyAscending, { message: 'start times strictly ascending' }),
+  })
+  .strict();
+export type BookingRegion = z.infer<typeof BookingRegion>;
+
+/** Rep-per-region booking: every rep drives from `officeAddress`; a seller's county picks the region. */
+export const BookingRouting = z
+  .object({
+    officeAddress: z.string().trim().min(10).max(200),
+    regions: z.array(BookingRegion).min(1).max(6),
+  })
+  .strict()
+  .refine((r) => new Set(r.regions.map((g) => g.key)).size === r.regions.length, { message: 'region keys unique' })
+  .refine((r) => countiesInOneRegion(r.regions), { message: 'a county belongs to one region' });
+export type BookingRouting = z.infer<typeof BookingRouting>;
+
 export const AiCallBookingSettings = z
   .object({
     enabled: z.boolean(),
@@ -124,6 +236,8 @@ export const AiCallBookingSettings = z
       .refine((d) => new Set(d).size === d.length, { message: 'each day once' }),
     phone: KindSettings,
     walkthrough: KindSettings,
+    /** Optional so a blob saved before routing existed still parses (a failed parse falls back to the defaults, booking OFF). */
+    routing: BookingRouting.optional(),
   })
   .strict();
 export type AiCallBookingSettings = z.infer<typeof AiCallBookingSettings>;
@@ -133,6 +247,16 @@ export type AiCallSettings = z.infer<typeof AiCallSettings>;
 
 export const SalesforceUserOption = z.object({ id: z.string(), name: z.string(), title: z.string().nullable(), isActive: z.boolean() });
 export type SalesforceUserOption = z.infer<typeof SalesforceUserOption>;
+
+/** What the settings card shows about rep routing: the office, whether Google Maps is configured, and each region's reps by name. */
+export const RoutingReadiness = z.object({
+  officeAddress: z.string(),
+  mapsConfigured: z.boolean(),
+  regions: z.array(
+    z.object({ key: RegionKey, counties: z.array(z.string()), startTimes: z.array(z.string()), reps: z.array(SalesforceUserOption) }),
+  ),
+});
+export type RoutingReadiness = z.infer<typeof RoutingReadiness>;
 
 export const WritebackReadinessProblem = z.enum(['not_updateable', 'missing', 'cannot_create', 'cannot_convert', 'soap_unavailable']);
 export type WritebackReadinessProblem = z.infer<typeof WritebackReadinessProblem>;
@@ -148,5 +272,7 @@ export const WritebackReadiness = z.object({
   items: z.array(
     z.object({ object: z.string(), field: z.string().nullable(), label: z.string(), problem: WritebackReadinessProblem }),
   ),
+  /** Null or absent when routing is not set up (and from an older outreach-api). */
+  routing: RoutingReadiness.nullable().optional(),
 });
 export type WritebackReadiness = z.infer<typeof WritebackReadiness>;

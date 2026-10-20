@@ -133,6 +133,48 @@ const BOOKED = {
 };
 const practiceTarget = { kind: 'practice', objectType: 'Opportunity', recordId: '0068X00000AbCdEQAZ', to: '+15125550100', planText: 'x' };
 
+describe('high-priority offers on call targets', () => {
+  const priority = { specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-20T16:00:00.000Z' };
+  const consultations = { last: { start: '2026-03-12T17:00:00.000Z', kind: 'in_person', ownerName: 'Blake Kossuth' }, next: null };
+  const browserTarget = { kind: 'practice_browser', objectType: 'Lead', recordId: '00Q000000000001AAA', clientIdentity: 'aitest_00000000000000000000000000000001_0123456789ab', planText: 'x' };
+
+  it('a record target with priority parses', () => {
+    const body = withTarget({ priority });
+    expect(InternalAiCallRequest.parse(body)).toEqual(body);
+  });
+
+  it('a record target with priority and consultation facts together parses', () => {
+    const body = withTarget({ priority, context: { returning: true, consultations } });
+    expect(InternalAiCallRequest.parse(body)).toEqual(body);
+  });
+
+  it('a practice and a browser practice target take priority too', () => {
+    const practice = { ...recordRequest, target: { ...practiceTarget, priority } };
+    expect(InternalAiCallRequest.parse(practice)).toEqual(practice);
+    const browser = { ...recordRequest, target: { ...browserTarget, priority } };
+    expect(InternalAiCallRequest.safeParse({ ...recordRequest, target: browserTarget }).success).toBe(true);
+    expect(InternalAiCallRequest.parse(browser)).toEqual(browser);
+  });
+
+  it('a target with priority defaultStart: tomorrow fails', () => {
+    expect(InternalAiCallRequest.safeParse(withTarget({ priority: { ...priority, defaultStart: 'tomorrow' } })).success).toBe(false);
+  });
+
+  it('a test target does not take priority', () => {
+    const body = { ...recordRequest, target: { kind: 'test', to: '+15125550100', planText: null, priority } };
+    expect(InternalAiCallRequest.safeParse(body).success).toBe(false);
+  });
+
+  it('a slot carrying a region rides on a record target', () => {
+    const slot = {
+      id: 'w1', kind: 'walkthrough', start: '2026-10-07T17:00:00.000Z', end: '2026-10-07T18:00:00.000Z',
+      specialistSfUserId: '0055f000005qXn8AAE', specialistFirstName: 'Chance', timeZone: 'America/Los_Angeles', region: 'LA',
+    };
+    const body = withTarget({ slots: [slot] });
+    expect(InternalAiCallRequest.parse(body)).toEqual(body);
+  });
+});
+
 describe('plan 1D: context, slots, practice calls, appointment_set', () => {
   it('a record target parses with and without slots and context', () => {
     expect(InternalAiCallRequest.safeParse(recordRequest).success).toBe(true);

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppointmentSlots, BookedAppointment, CallContext } from './appointments.js';
+import { AppointmentSlots, BookedAppointment, CallContext, PriorityOffer } from './appointments.js';
 import { SfObject } from './crm.js';
 import { AI_TEST_IDENTITY_RE } from './ai-test-identity.js';
 
@@ -37,7 +37,7 @@ export type AiCallFailReason = z.infer<typeof AiCallFailReason>;
 const SF_RECORD_ID = z.string().regex(/^[a-zA-Z0-9]{15,18}$/);
 
 /**
- * record   A real call to the record's phone, with its approved plan. `context` and `slots` (plan 1D) are
+ * record   A real call to the record's phone, with its approved plan. `context`, `slots` (plan 1D) and `priority` are
  *          structured data cti-api renders outside the plan fence; slots are never plan text. `history` is what
  *          already happened with the seller (seller-written text included), fenced as data after the instructions.
  * test     An admin's test number, optionally with a plan.
@@ -56,6 +56,7 @@ export const InternalAiCallTarget = z.discriminatedUnion('kind', [
       context: CallContext.optional(),
       slots: AppointmentSlots.optional(),
       history: z.string().min(1).max(HISTORY_TEXT_MAX).optional(),
+      priority: PriorityOffer.optional(),
     })
     .strict(),
   z.object({ kind: z.literal('test'), to: z.string().min(7).max(20), planText: z.string().max(PLAN_TEXT_MAX).nullable() }).strict(),
@@ -68,6 +69,7 @@ export const InternalAiCallTarget = z.discriminatedUnion('kind', [
       planText: z.string().min(1).max(PLAN_TEXT_MAX),
       context: CallContext.optional(),
       slots: AppointmentSlots.optional(),
+      priority: PriorityOffer.optional(),
     })
     .strict(),
   z
@@ -79,6 +81,7 @@ export const InternalAiCallTarget = z.discriminatedUnion('kind', [
       planText: z.string().min(1).max(PLAN_TEXT_MAX),
       context: CallContext.optional(),
       slots: AppointmentSlots.optional(),
+      priority: PriorityOffer.optional(),
     })
     .strict(),
 ]);

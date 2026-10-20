@@ -6,9 +6,19 @@ import {
   AppointmentSlots,
   BOOKING_STANDS_OUTCOMES,
   BookedAppointment,
+  BookingRouting,
   bookingStands,
   CallContext,
+  CONSULTATION_MINUTES,
+  ConsultationFact,
+  Consultations,
   IanaZone,
+  PRIORITY_RULES,
+  PRIORITY_SLOT_ID,
+  PriorityOffer,
+  RegionKey,
+  ROUTING_ZONE,
+  RoutingReadiness,
   SLOT_ID,
   WritebackReadiness,
 } from './appointments.js';
@@ -45,6 +55,26 @@ const booking = {
   phone: kind,
   walkthrough: { ...kind, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30 },
 };
+
+const CHANCE = '0055f000005qXn8AAE';
+const BLAKE = '0058X00000FA8tLQAT';
+const SETH = '0055f000005qXVfAAM';
+const THOMAS = '0055f000005qYO6AAM';
+const OFFICE = '18872 MacArthur Blvd #220, Irvine, CA 92612';
+const LA = {
+  key: 'LA',
+  counties: ['Los Angeles', 'Orange', 'Riverside', 'San Bernardino'],
+  reps: [CHANCE, BLAKE],
+  startTimes: ['09:00', '11:00', '13:00', '15:00', '17:00', '19:00'],
+};
+const SD = {
+  key: 'SD',
+  counties: ['San Diego'],
+  reps: [SETH, THOMAS],
+  startTimes: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'],
+};
+const routing = { officeAddress: OFFICE, regions: [LA, SD] };
+const fact = { start: '2026-03-12T17:00:00.000Z', kind: 'in_person', ownerName: 'Blake Kossuth' } as const;
 
 describe('AppointmentSlot', () => {
   it('1: a valid phone slot p1 parses', () => {
@@ -226,5 +256,184 @@ describe('the blocked time (Part 4 Fix 1, I-3: the walkthrough travel buffer)', 
     expect(BookedAppointment.parse(withBlock)).toEqual(withBlock);
     expect(BookedAppointment.parse(booked)).toEqual(booked);
     expect(BookedAppointment.safeParse({ ...booked, blockEnd: 'later' }).success).toBe(false);
+  });
+});
+
+describe('routing constants', () => {
+  it('pin the spec values', () => {
+    expect(ROUTING_ZONE).toBe('America/Los_Angeles');
+    expect(CONSULTATION_MINUTES).toBe(60);
+    expect(PRIORITY_SLOT_ID).toBe('h1');
+    expect(PRIORITY_RULES).toEqual({ minLeadMinutes: 120, firstStartHour: 8, endByHour: 20, defaultStartHour: 9, stepMinutes: 15 });
+  });
+});
+
+describe('booking regions and routing', () => {
+  it('a booking blob saved before routing still parses', () => {
+    const saved = { ...booking, enabled: true, specialists: ['0058X00000Fsx39QAB'] };
+    expect('routing' in saved).toBe(false);
+    const parsed = AiCallBookingSettings.safeParse(saved);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.routing).toBeUndefined();
+  });
+
+  it('routing: LA and SD parse', () => {
+    expect(BookingRouting.parse(routing)).toEqual(routing);
+    expect(AiCallBookingSettings.parse({ ...booking, routing }).routing).toEqual(routing);
+    expect(AiCallSettings.parse({ booking: { ...booking, routing }, writeback: true }).booking.routing).toEqual(routing);
+  });
+
+  const withLa = (patch: Record<string, unknown>) => ({ ...routing, regions: [{ ...LA, ...patch }, SD] });
+
+  it.each([
+    ['Orange in both regions', { ...routing, regions: [LA, { ...SD, counties: ['San Diego', 'Orange'] }] }],
+    ['a county repeated across regions in another case', { ...routing, regions: [LA, { ...SD, counties: [' orange '] }] }],
+    ['startTimes out of order', withLa({ startTimes: ['11:00', '09:00'] })],
+    ['startTimes repeated', withLa({ startTimes: ['09:00', '09:00'] })],
+    ['a start time 9:00 without its zero', withLa({ startTimes: ['9:00', '11:00'] })],
+    ['a start time of 24:00', withLa({ startTimes: ['09:00', '24:00'] })],
+    ['a lowercase key', withLa({ key: 'la' })],
+    ['a 7-letter key', withLa({ key: 'ABCDEFG' })],
+    ['a one-letter key', withLa({ key: 'L' })],
+    ['an office address of x', { ...routing, officeAddress: 'x' }],
+    ['a 201-character office address', { ...routing, officeAddress: 'x'.repeat(201) }],
+    ['the same key twice', { ...routing, regions: [LA, { ...SD, key: 'LA' }] }],
+    ['no regions', { ...routing, regions: [] }],
+    ['seven regions', { ...routing, regions: Array.from({ length: 7 }, (_, i) => ({ ...LA, key: `R${'ABCDEFG'[i]}`, counties: [`County ${i}`] })) }],
+    ['no counties', withLa({ counties: [] })],
+    ['a 1-character county', withLa({ counties: ['L'] })],
+    ['thirteen counties', withLa({ counties: Array.from({ length: 13 }, (_, i) => `County ${i}`) })],
+    ['seven reps', withLa({ reps: Array.from({ length: 7 }, () => CHANCE) })],
+    ['a rep that is not a User id', withLa({ reps: ['00Q8X00000Fsx39QAB'] })],
+    ['no start times', withLa({ startTimes: [] })],
+    ['25 start times', withLa({ startTimes: Array.from({ length: 25 }, (_, i) => `${String(Math.floor(i / 2)).padStart(2, '0')}:${i % 2 ? '30' : '00'}`) })],
+    ['an extra key on a region', withLa({ extra: 1 })],
+    ['an extra key on routing', { ...routing, extra: 1 }],
+  ])('the routing schema rejects %s', (_label, body) => {
+    expect(BookingRouting.safeParse(body).success).toBe(false);
+  });
+
+  it('a region may have no reps yet', () => {
+    expect(BookingRouting.safeParse(withLa({ reps: [] })).success).toBe(true);
+  });
+
+  it('region keys are 2 to 6 capital letters', () => {
+    expect(RegionKey.safeParse('LA').success).toBe(true);
+    expect(RegionKey.safeParse('INLAND').success).toBe(true);
+    expect(RegionKey.safeParse('la').success).toBe(false);
+    expect(RegionKey.safeParse('L1').success).toBe(false);
+  });
+});
+
+describe('consultation facts', () => {
+  it('context with consultations parses', () => {
+    const ctx = { returning: false, consultations: { last: fact, next: null } };
+    expect(CallContext.parse(ctx)).toEqual(ctx);
+    expect(CallContext.parse({ returning: true })).toEqual({ returning: true });
+  });
+
+  it('a name with a # (Team #2) does not parse', () => {
+    expect(CallContext.safeParse({ returning: false, consultations: { last: { ...fact, ownerName: 'Team #2' }, next: null } }).success).toBe(false);
+  });
+
+  it('an unnamed owner, a phone kind and both facts parse', () => {
+    expect(ConsultationFact.safeParse({ ...fact, ownerName: null, kind: 'phone' }).success).toBe(true);
+    expect(Consultations.safeParse({ last: fact, next: { ...fact, start: '2026-11-04T18:00:00.000Z' } }).success).toBe(true);
+  });
+
+  it.each([
+    ['a start that is not a time', { ...fact, start: 'tomorrow' }],
+    ['a kind of walkthrough', { ...fact, kind: 'walkthrough' }],
+    ['an empty owner name', { ...fact, ownerName: '' }],
+    ['an 81-character owner name', { ...fact, ownerName: 'A'.repeat(81) }],
+    ['an owner name that starts with a digit', { ...fact, ownerName: '2 Teams' }],
+    ['an extra key', { ...fact, extra: 1 }],
+  ])('a consultation fact with %s is rejected', (_label, body) => {
+    expect(ConsultationFact.safeParse(body).success).toBe(false);
+  });
+
+  it('consultations need both last and next, and nothing else', () => {
+    expect(Consultations.safeParse({ last: fact }).success).toBe(false);
+    expect(Consultations.safeParse({ last: null, next: null, extra: 1 }).success).toBe(false);
+  });
+});
+
+describe('high-priority booking', () => {
+  const offer = { specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-20T16:00:00.000Z' };
+
+  it('a priority offer parses; a first name may be null', () => {
+    expect(PriorityOffer.parse(offer)).toEqual(offer);
+    expect(PriorityOffer.safeParse({ ...offer, specialistFirstName: null }).success).toBe(true);
+  });
+
+  it.each([
+    ['defaultStart: tomorrow', { ...offer, defaultStart: 'tomorrow' }],
+    ['a first name with a digit', { ...offer, specialistFirstName: 'Grant2' }],
+    ['a rep that is not a User id', { ...offer, specialistSfUserId: '00Q8X00000Fsx39QAB' }],
+    ['a zone of UTC', { ...offer, timeZone: 'UTC' }],
+    ['an extra key', { ...offer, extra: 1 }],
+  ])('a priority offer with %s is rejected', (_label, body) => {
+    expect(PriorityOffer.safeParse(body).success).toBe(false);
+  });
+
+  const priorityBooked = {
+    slotId: 'h1', kind: 'walkthrough', start: '2026-10-20T16:00:00.000Z', end: '2026-10-20T17:00:00.000Z',
+    specialistSfUserId: '0058X00000Fsx39QAB', addressConfirmed: true, note: '', bookedAt: '2026-10-20T14:00:00.000Z',
+    priority: true, whatChanged: 'now they really want to sell', previousConsultation: fact,
+  };
+
+  it('a priority booking parses', () => {
+    expect(BookedAppointment.parse(priorityBooked)).toEqual(priorityBooked);
+  });
+
+  it('slot ids are p1-p9, w1-w9 or h1, and nothing else', () => {
+    for (const slotId of ['h2', 'h0', 'x1', 'p10', 'h']) {
+      expect(BookedAppointment.safeParse({ ...priorityBooked, slotId }).success).toBe(false);
+    }
+    for (const slotId of ['p1', 'w9', 'h1']) {
+      expect(BookedAppointment.safeParse({ ...priorityBooked, slotId }).success).toBe(true);
+    }
+  });
+
+  it('priority is only ever true; whatChanged is at most 300 characters; the previous consultation must be a fact', () => {
+    expect(BookedAppointment.safeParse({ ...priorityBooked, priority: false }).success).toBe(false);
+    expect(BookedAppointment.safeParse({ ...priorityBooked, whatChanged: 'x'.repeat(301) }).success).toBe(false);
+    expect(BookedAppointment.safeParse({ ...priorityBooked, previousConsultation: { ...fact, ownerName: 'Team #2' } }).success).toBe(false);
+  });
+
+  it('a booking with a region parses, and an older one without any of the new keys still does', () => {
+    const plain = { slotId: 'w1', kind: 'walkthrough', start: '2026-10-08T16:00:00.000Z', end: '2026-10-08T17:00:00.000Z', specialistSfUserId: GRANT, addressConfirmed: false, note: '', bookedAt: '2026-10-06T18:00:00.000Z' };
+    expect(BookedAppointment.parse(plain)).toEqual(plain);
+    expect(BookedAppointment.parse({ ...plain, region: 'SD' }).region).toBe('SD');
+    expect(BookedAppointment.safeParse({ ...plain, region: 'sd' }).success).toBe(false);
+  });
+
+  it('a slot with region LA parses; la fails', () => {
+    expect(AppointmentSlot.parse(slot({ region: 'LA' })).region).toBe('LA');
+    expect(AppointmentSlot.safeParse(slot({ region: 'la' })).success).toBe(false);
+    expect(AppointmentSlot.parse(phoneSlot).region).toBeUndefined();
+  });
+});
+
+describe('routing readiness', () => {
+  const readiness = {
+    officeAddress: OFFICE,
+    mapsConfigured: true,
+    regions: [{ key: 'LA', counties: LA.counties, startTimes: LA.startTimes, reps: [{ id: CHANCE, name: 'Chance Lanier', title: null, isActive: true }] }],
+  };
+
+  it('parses, and WritebackReadiness carries it as optional and nullable', () => {
+    expect(RoutingReadiness.parse(readiness)).toEqual(readiness);
+    const base = {
+      ready: true,
+      convertReady: true,
+      convertRecordTypes: { account: null, opportunity: null },
+      appointmentOwner: null,
+      items: [],
+    };
+    expect(WritebackReadiness.safeParse(base).success).toBe(true);
+    expect(WritebackReadiness.safeParse({ ...base, routing: null }).success).toBe(true);
+    expect(WritebackReadiness.parse({ ...base, routing: readiness }).routing).toEqual(readiness);
+    expect(WritebackReadiness.safeParse({ ...base, routing: { ...readiness, mapsConfigured: 'yes' } }).success).toBe(false);
   });
 });
