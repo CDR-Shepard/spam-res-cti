@@ -101,5 +101,40 @@ describe('verifyWebhookSignature', () => {
     it.each(['', 'whsec_', 'no-prefix', 'whsec_!!not base64!!'])('fails closed on the unusable secret %j without throwing', (secret) => {
       expect(verify({ secret })).toBe(false);
     });
+
+    // A key under 16 bytes is a typo or a truncated paste, not a Svix secret: HMAC would still "work" with it, so refuse it.
+    const withKey = (key: Buffer) => `whsec_${key.toString('base64')}`;
+    const verifyWithKey = (key: Buffer): boolean => verify({ secret: withKey(key), signature: `v1,${sign(ID, String(NOW_SECONDS), BODY, key)}` });
+    it('refuses a secret whose decoded key is shorter than 16 bytes, even when the signature was made with that very key', () => {
+      expect(verifyWithKey(Buffer.alloc(15, 7))).toBe(false);
+      expect(verifyWithKey(Buffer.alloc(1, 7))).toBe(false);
+    });
+    it('accepts a key of exactly 16 bytes', () => {
+      expect(verifyWithKey(Buffer.alloc(16, 7))).toBe(true);
+    });
+  });
+
+  describe('fails closed on what the types promise but the runtime does not', () => {
+    const nothing = undefined as unknown as string;
+    const ts = String(NOW_SECONDS);
+
+    it('refuses an invalid `now`: a window that cannot be measured is not open', () => {
+      expect(verify({ now: new Date(Number.NaN) })).toBe(false);
+      expect(verify({ now: new Date('not a date') })).toBe(false);
+      expect(verify({ now: undefined as unknown as Date })).toBe(false);
+    });
+    it.each([
+      ['secret', { secret: nothing }],
+      ['signature', { signature: nothing }],
+      ['timestamp', { timestamp: nothing }],
+      ['body', { body: nothing }],
+      ['id', { id: nothing, signature: `v1,${sign('undefined', ts, BODY)}` }],
+      ['id as a number', { id: 7 as unknown as string, signature: `v1,${sign('7', ts, BODY)}` }],
+      ['timestamp as a number', { timestamp: NOW_SECONDS as unknown as string }],
+      ['signature as an array', { signature: [`v1,${sign(ID, ts, BODY)}`] as unknown as string }],
+    ])('refuses an undefined or non-string %s without throwing', (_name, over) => {
+      expect(() => verify(over)).not.toThrow();
+      expect(verify(over)).toBe(false);
+    });
   });
 });

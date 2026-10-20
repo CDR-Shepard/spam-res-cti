@@ -10,7 +10,9 @@
  * The body must be the exact bytes Resend sent: a parsed-then-reserialised body can differ by one
  * space and fail. Pure and total: no I/O, no logging, and a malformed header, timestamp or secret
  * is `false`, never a throw (the route answers 401 either way, and says nothing about which part
- * was wrong).
+ * was wrong). Total includes what the types promise but the runtime does not keep: every input is
+ * checked to be what it claims (a header Fastify hands over as an array, an `undefined` that
+ * stringifies into a plausible id), and a window that cannot be measured is closed, not open.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
@@ -18,6 +20,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 export const WEBHOOK_TOLERANCE_SECONDS = 300;
 
 const SECRET_PREFIX = 'whsec_';
+/** Svix's own secrets decode to 24 bytes or more; under 16 is a typo or a truncated paste, and HMAC would accept it all the same. */
+const MIN_KEY_BYTES = 16;
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 /** Unix seconds as Svix sends them: digits only, so `1e9`, ` 17…`, `17.5` and `-17` are not timestamps. */
 const TIMESTAMP = /^\d{1,12}$/;
@@ -40,12 +44,16 @@ export interface WebhookSignatureInput {
 function signingKey(secret: string): Buffer | null {
   if (!secret.startsWith(SECRET_PREFIX)) return null;
   const encoded = secret.slice(SECRET_PREFIX.length);
-  return BASE64.test(encoded) ? Buffer.from(encoded, 'base64') : null;
+  if (!BASE64.test(encoded)) return null;
+  const key = Buffer.from(encoded, 'base64');
+  return key.length >= MIN_KEY_BYTES ? key : null;
 }
 
 export function verifyWebhookSignature(i: WebhookSignatureInput): boolean {
-  if (!TIMESTAMP.test(i.timestamp)) return false;
-  if (Math.abs(i.now.getTime() / 1000 - Number(i.timestamp)) > WEBHOOK_TOLERANCE_SECONDS) return false;
+  if (![i.secret, i.id, i.timestamp, i.signature, i.body].every((v) => typeof v === 'string')) return false;
+  if (!(i.now instanceof Date) || !TIMESTAMP.test(i.timestamp)) return false;
+  // Written as "not within" so an unmeasurable window is refused: with an invalid `now` (NaN) both `> 300` and `<= 300` are false, so only this form fails closed.
+  if (!(Math.abs(i.now.getTime() / 1000 - Number(i.timestamp)) <= WEBHOOK_TOLERANCE_SECONDS)) return false;
   const key = signingKey(i.secret);
   if (!key) return false;
 

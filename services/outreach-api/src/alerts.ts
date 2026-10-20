@@ -15,7 +15,13 @@ export interface AlertEvent {
   kind:
     | 'provisioning_failed'
     | 'job_dead_lettered'
-    | 'auth_failure_spike';
+    | 'auth_failure_spike'
+    /** A seller marked one of Sam's emails as spam: the tenant's email is paused (email/events.ts). */
+    | 'email_complaint'
+    /** Sam could not handle a seller's reply and a person has to (email/inbound.ts). */
+    | 'seller_needs_person'
+    /** A conversation event could not be logged to Salesforce after its retries. */
+    | 'sf_log_failed';
   severity: AlertSeverity;
   orgId: string;
   /** Human-readable summary line. */
